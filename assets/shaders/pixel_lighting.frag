@@ -178,13 +178,25 @@ void main() {
         if (dist > range || dist < 0.0001) continue;
 
         vec3 L = frag_to_light / dist;
+        // pl.attenuation.x -- formerly an unused classical "constant attenuation" term -- is
+        // repurposed as a per-light falloff sharpness exponent: ~1 gives a gradual, realistic
+        // fade to the light's range; ~4-8 gives a crisper, more cel-shaded-style cutoff (4
+        // reproduces this engine's original hardcoded curve exactly). Defaults to
+        // PointLightComponent::attenuation_constant's own default (1.0, smooth) if a scene
+        // doesn't set it.
+        float sharpness = max(pl.attenuation.x, 0.1);
         float factor = clamp(dist / range, 0.0, 1.0);
-        float falloff = clamp(1.0 - factor * factor * factor * factor, 0.0, 1.0);
+        float falloff = clamp(1.0 - pow(factor, sharpness), 0.0, 1.0);
         falloff *= falloff;
         float attenuation = (1.0 / (4.0 * PI * (dist * dist + 1.0))) * falloff;
         vec3 radiance = pl.color_intensity.rgb * (pl.color_intensity.w * 0.08) * attenuation;
 
-        float shadow = (i == 0u && pl.attenuation.w > 0.5) ? calc_point_shadow(frag_to_light, range) : 0.0;
+        // Small fixed world-space normal offset for the shadow test only (direct
+        // lighting above stays unbiased) -- point lights have no analog of
+        // dir_shadow_params.w to derive this from, unlike calc_dir_shadow's caller.
+        vec3 shadow_bias_pos = world_pos + N * 0.02;
+        float shadow = (i == 0u && pl.attenuation.w > 0.5)
+            ? calc_point_shadow(pl.position_range.xyz - shadow_bias_pos, range) : 0.0;
 
         Lo += shade_light(N, V, L, radiance, albedo, metallic, roughness, F0, shadow);
     }

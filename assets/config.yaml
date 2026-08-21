@@ -1,0 +1,44 @@
+window:
+  title: "toyengine"
+  width: 1920
+  height: 1080
+  vsync: true
+
+scene:
+  default_scene: "assets/scenes/pixel_demo/scene.yaml"
+
+render:
+  resolution_mode: fixed     # fixed | divisor
+  render_width: 720
+  render_height: 480
+  scale_divisor: 4
+  upscale_mode: integer      # integer | stretch
+  exposure: 1.0
+  light_bands: 4
+  spec_threshold: 0.55
+  rim_strength: 0.0
+  shadows_enabled: true
+  shadow_map_resolution: 2048
+  cube_shadow_resolution: 512
+  shadow_bias: 0.005
+  shadow_max_extent: 0.0
+
+pixel:
+  outline_enabled: false
+  outline_thickness: 1.0
+  outline_color: [0.05, 0.04, 0.08, 1.0]
+  depth_threshold: 0.02
+  normal_threshold: 0.75
+
+  palette: "assets/palettes/duel-1x.png"
+  palette_enabled: false
+
+  dither_strength: 0.08
+  dither_enabled: false
+
+  camera_pixel_snap: true
+
+output:
+  save_on_exit: true
+  filepath: "./output/frame.png"
+  save_low_res: true

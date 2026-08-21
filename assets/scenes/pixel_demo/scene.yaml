@@ -1,0 +1,82 @@
+format: blender
+scene:
+  scene_name: PixelDemo
+  root_objects:
+    - name: plane.000
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: -0.5 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 4.0, y: 4.0, z: 4.0 }
+        - type: MeshRenderer
+          mesh_path: plane.000
+          material:
+            albedo: { r: 0.35, g: 0.4, b: 0.3 }
+            metallic: 0.0
+            roughness: 0.8
+            ao: 1.0
+      children: []
+
+    - name: cube.000
+      active: true
+      components:
+        - type: Transform
+          position: { x: -0.5, y: -0.5, z: -0.5 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: cube.000
+          material:
+            albedo: { r: 0.8, g: 0.35, b: 0.25 }
+            metallic: 0.0
+            roughness: 0.6
+            ao: 1.0
+      children: []
+
+    - name: camera
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -10.0, z: 6.0 }
+          rotation: { x: 68.3269, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Camera
+          projection: Perspective
+          fov: 22.8952
+          near_clip_plane: 0.1
+          far_clip_plane: 1000.0
+        - type: CameraController
+          mode: orbit
+          target: { x: 0.0, y: 0.0, z: 0.5 }
+          auto_rotate_deg_per_sec: 15.0
+      children: []
+
+    - name: sun
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: DirectionalLight
+          direction: { x: -0.35, y: -0.45, z: -0.82 }
+          color: { r: 1.0, g: 0.97, b: 0.9 }
+          intensity: 1.0
+          ambient: { r: 0.08, g: 0.08, b: 0.1 }
+          cast_shadows: true
+      children: []
+
+    - name: point
+      active: true
+      components:
+        - type: Transform
+          position: { x: 1.5, y: -2.0, z: 1.5 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: PointLight
+          color: { r: 0.5, g: 0.7, b: 1.0 }
+          intensity: 40.0
+          range: 15.0
+          cast_shadows: true
+      children: []

@@ -150,6 +150,64 @@ void test_headless_render_matches_palette() {
     std::filesystem::remove(out_path);
 }
 
+/**
+ * @brief Headless render with every independently-toggleable feature turned off
+ * (outline, palette, dither, soft_shadows, ssao, ssr), mirroring
+ * test_headless_render_matches_palette() but exercising the opposite branch of
+ * every toggle at once: SsaoPass::invalidate_history() instead of execute(),
+ * no HiZPass/SceneColorMipPass/SsrPass construction at all, the manual
+ * gbuffer-depth transition instead of HiZPass's, and pixel_post_pass_ reading
+ * offscreen_target_ directly instead of ssr_pass_'s composite output. Ticks a
+ * few frames and asserts the saved buffer has the configured dimensions and
+ * contains at least one non-black pixel -- catching the kind of bug an
+ * all-zero G-buffer read, a missing descriptor bind, or a null pass pointer
+ * dereference in one of those "off" branches would produce.
+ */
+void test_headless_render_with_all_toggles_off() {
+    toy::core::AppConfig config;
+    config.window.title  = "toyengine_tests";
+    config.window.width  = 640;
+    config.window.height = 360;
+    config.window.vsync  = false;
+    config.scene.default_scene = "assets/scenes/pixel_demo/scene.yaml";
+    config.render.render_width  = 160;
+    config.render.render_height = 90;
+    config.render.outline_enabled = false;
+    config.render.palette_enabled = false;
+    config.render.dither_enabled  = false;
+    config.render.soft_shadows    = false;
+    config.render.ssao_enabled    = false;
+    config.render.ssr_enabled     = false;
+    config.output.save_on_exit = false;
+
+    std::string out_path = std::string(ROOT_DIR) + "/output/test_frame_toggles_off.png";
+
+    {
+        toy::core::Engine engine(std::move(config));
+        for (int i = 0; i < 5; ++i) engine.tick();
+        engine.save_screenshot(out_path, /*low_res=*/true);
+    }
+
+    int w = 0, h = 0, channels = 0;
+    uint8_t* pixels = stbi_load(out_path.c_str(), &w, &h, &channels, 4);
+    expect(pixels != nullptr, "all-toggles-off headless render: screenshot round-trips through stb_image");
+    if (!pixels) return;
+
+    expect(w == 160 && h == 90, "all-toggles-off headless render: low-res buffer has the configured dimensions");
+
+    bool any_nonblack = false;
+    for (int i = 0; i < w * h; ++i) {
+        if (pixels[i * 4 + 0] != 0 || pixels[i * 4 + 1] != 0 || pixels[i * 4 + 2] != 0) {
+            any_nonblack = true;
+            break;
+        }
+    }
+    expect(any_nonblack, "all-toggles-off headless render: output is not entirely black");
+
+    stbi_image_free(pixels);
+    std::filesystem::remove(out_path);
+}
+
 } // namespace
 
 int main() {
@@ -161,6 +219,7 @@ int main() {
     test_pixel_density_orthographic();
     test_pixel_density_perspective_disabled();
     test_headless_render_matches_palette();
+    test_headless_render_with_all_toggles_off();
 
     if (g_failures > 0) {
         std::cerr << "\n" << g_failures << " test(s) failed.\n";

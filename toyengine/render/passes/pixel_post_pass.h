@@ -1,11 +1,12 @@
 /**
  * @file pixel_post_pass.h
- * @brief Outline + exposure + ordered dither + palette quantization, all in
- *        one fullscreen fragment shader (see assets/shaders/pixel_post.frag).
+ * @brief Exposure + ACES tonemap + outline + ordered dither + palette
+ *        quantization, all in one fullscreen fragment shader (see
+ *        assets/shaders/pixel_post.frag).
  *
- * Reads the lit scene color plus the G-buffer's depth and normal (for the
- * outline edge detector), and a palette LUT. Writes into its own low-res LDR
- * target -- pipeline::RenderPass's hardcoded LOAD_OP_CLEAR
+ * Reads the lit (HDR) scene color plus the G-buffer's depth and normal (for
+ * the outline edge detector), and a palette LUT. Writes into its own low-res
+ * LDR target -- pipeline::RenderPass's hardcoded LOAD_OP_CLEAR
  * (gfxcoopa/pipeline/render_pass.h) means the lighting target it reads from
  * can't be reopened and composited onto in place.
  */
@@ -44,8 +45,12 @@ public:
         float     normal_threshold   = 0.75f;
         float     dither_strength    = 0.0f;
         float     palette_count      = 0.0f;
+        float     camera_near           = 0.1f;
+        float     camera_far            = 1000.0f;
+        float     camera_is_perspective = 1.0f;  /**< >= 0.5 => perspective, else orthographic. */
+        float     _pad0                 = 0.0f;  /**< Keeps the block a multiple of 16 bytes. */
     };
-    static_assert(sizeof(PushConstants) == 48, "PushConstants must match pixel_post.frag's PostParams byte-for-byte");
+    static_assert(sizeof(PushConstants) == 64, "PushConstants must match pixel_post.frag's PostParams byte-for-byte");
 
     PixelPostPass(coopa::gfx::core::Device& device,
                  coopa::gfx::pipeline::RenderPass& target_pass,
@@ -95,9 +100,13 @@ public:
     void set_source_images(VkImageView scene_color, VkImageView scene_depth, VkImageView scene_normal,
                            VkImageView palette_lut, const coopa::gfx::engine::util::Sampler& linear_sampler,
                            const coopa::gfx::engine::util::Sampler& nearest_sampler) {
+        // scene_depth/scene_normal use the nearest sampler, not linear: the outline edge
+        // detector's taps need exact texel values (linear filtering would blend across the
+        // very discontinuities it's looking for), and linear filtering of a D32_SFLOAT depth
+        // image is an optional Vulkan format feature that isn't queried anywhere in this engine.
         desc_set_->bind_image(0, scene_color, linear_sampler.handle());
-        desc_set_->bind_image(1, scene_depth, linear_sampler.handle());
-        desc_set_->bind_image(2, scene_normal, linear_sampler.handle());
+        desc_set_->bind_image(1, scene_depth, nearest_sampler.handle());
+        desc_set_->bind_image(2, scene_normal, nearest_sampler.handle());
         desc_set_->bind_image(3, palette_lut, nearest_sampler.handle());
     }
 

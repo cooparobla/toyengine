@@ -1,6 +1,6 @@
 /**
  * @file pixel_lighting_pass.h
- * @brief Banded-PBR deferred lighting pass for the pixel-art pipeline.
+ * @brief Deferred lighting pass for the pixel-art pipeline.
  *
  * A stripped fork of gfxcoopa's DeferredLightingPass
  * (gfxcoopa/engine/passes/deferred_lighting_pass.h), not a reuse of it, for
@@ -9,8 +9,17 @@
  * gi_layout != VK_NULL_HANDLE, but draw() unconditionally binds the
  * G-buffer set at index 4 regardless -- with no GI the G-buffer set actually
  * lives at index 3, so that bind is wrong), and toyengine has neither GI nor
- * SSAO to plumb through in the first place. Set layout here is fixed at
- * 0=camera, 1=light, 2=shadow (dir + one point cube map), 3=gbuffer.
+ * reflection probes to plumb through in the first place. Set layout here is
+ * fixed at 0=camera, 1=light, 2=shadow (dir + one point cube map), 3=gbuffer
+ * (albedo/ao, normal/metallic, position/roughness, SSAO).
+ *
+ * The SSAO binding is always present, whether or not `ssao_enabled` is set
+ * in config -- PixelRenderPipeline binds SsaoPass::output_view() or its
+ * permanent neutral (fully-unoccluded) texture depending on the toggle, so
+ * this pass and pixel_lighting.frag never need to know which. See
+ * pixel_lighting.frag's file doc for how the other toggles (soft_shadows,
+ * and ssr_enabled via the sky-based indirect term it now always computes)
+ * fit into one shader without a separate "track".
  */
 
 #ifndef TOYENGINE_RENDER_PASSES_PIXEL_LIGHTING_PASS_H
@@ -35,12 +44,14 @@ namespace passes {
 
 class PixelLightingPass {
 public:
-    /** @brief Matches pixel_lighting.frag's PixelParams push constant block (16 bytes). */
+    /** @brief Matches pixel_lighting.frag's PixelParams push constant block (24 bytes). */
     struct PushConstants {
-        float light_bands    = 4.0f;
-        float spec_threshold = 0.55f;
-        float rim_strength   = 0.0f;
-        float _pad           = 0.0f;
+        float light_bands       = 4.0f;
+        float spec_threshold    = 0.55f;
+        float rim_strength      = 0.0f;
+        float soft_shadows      = 1.0f;
+        float ambient_intensity = 1.0f;
+        float sky_intensity     = 1.0f;
     };
 
     PixelLightingPass(coopa::gfx::core::Device& device,
@@ -56,7 +67,7 @@ public:
         frag_shader_ = std::make_unique<coopa::gfx::pipeline::Shader>(device, frag_spv, VK_SHADER_STAGE_FRAGMENT_BIT);
 
         std::vector<VkDescriptorSetLayoutBinding> gbuffer_bindings;
-        for (uint32_t i = 0; i < 3; ++i) {
+        for (uint32_t i = 0; i < 4; ++i) {
             VkDescriptorSetLayoutBinding b{};
             b.binding         = i;
             b.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -66,7 +77,7 @@ public:
         }
         gbuffer_desc_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(device, gbuffer_bindings);
         gbuffer_desc_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
-            device, 1, std::vector<VkDescriptorPoolSize>{{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3}});
+            device, 1, std::vector<VkDescriptorPoolSize>{{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4}});
         gbuffer_desc_set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *gbuffer_desc_pool_, *gbuffer_desc_layout_);
 
         coopa::gfx::pipeline::PipelineConfig cfg{};
@@ -97,6 +108,20 @@ public:
         gbuffer_desc_set_->bind_image(0, g0_view, linear_sampler.handle());
         gbuffer_desc_set_->bind_image(1, g1_view, linear_sampler.handle());
         gbuffer_desc_set_->bind_image(2, g2_view, linear_sampler.handle());
+    }
+
+    /**
+     * @brief Binds the SSAO input. Called once at pipeline construction with either
+     *        SsaoPass::output_view() (ssao_enabled) or SsaoPass::neutral_view()
+     *        (disabled) -- mirrors gfxcoopa's DeferredLightingPass::set_ssao_image(), except
+     *        this pipeline decides the view once rather than every frame (config doesn't
+     *        support runtime toggling, and DescriptorSet::bind_image() updates immediately,
+     *        which is unsafe to redo from inside the per-frame render loop -- see
+     *        pixel_render_pipeline.h's device_.wait_idle() call site for the one place that
+     *        rule gets bent, and why).
+     */
+    void set_ssao_image(VkImageView ssao_view, VkSampler ssao_sampler) {
+        gbuffer_desc_set_->bind_image(3, ssao_view, ssao_sampler);
     }
 
     void draw(coopa::gfx::command::CommandBuffer& cmd,

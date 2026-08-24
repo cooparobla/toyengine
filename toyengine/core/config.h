@@ -94,41 +94,78 @@ struct AppConfig {
 
             if (root.contains("render")) {
                 const auto& r = root.at("render");
-                if (r.contains("resolution_mode"))       config.render.resolution_mode       = r.at("resolution_mode").get_value<std::string>();
-                if (r.contains("render_width"))           config.render.render_width           = r.at("render_width").get_value<uint32_t>();
-                if (r.contains("render_height"))          config.render.render_height          = r.at("render_height").get_value<uint32_t>();
-                if (r.contains("scale_divisor"))          config.render.scale_divisor          = r.at("scale_divisor").get_value<uint32_t>();
-                if (r.contains("upscale_mode"))           config.render.upscale_mode           = r.at("upscale_mode").get_value<std::string>();
-                if (r.contains("exposure"))               config.render.exposure               = r.at("exposure").get_value<float>();
-                if (r.contains("light_bands"))            config.render.light_bands            = r.at("light_bands").get_value<float>();
-                if (r.contains("spec_threshold"))         config.render.spec_threshold         = r.at("spec_threshold").get_value<float>();
-                if (r.contains("rim_strength"))           config.render.rim_strength           = r.at("rim_strength").get_value<float>();
+
+                // --- Feature toggles ---
+                if (r.contains("outline_enabled"))   config.render.outline_enabled   = r.at("outline_enabled").get_value<bool>();
+                if (r.contains("palette_enabled"))   config.render.palette_enabled   = r.at("palette_enabled").get_value<bool>();
+                if (r.contains("dither_enabled"))    config.render.dither_enabled    = r.at("dither_enabled").get_value<bool>();
+                if (r.contains("camera_pixel_snap")) config.render.camera_pixel_snap = r.at("camera_pixel_snap").get_value<bool>();
+                if (r.contains("soft_shadows"))      config.render.soft_shadows      = r.at("soft_shadows").get_value<bool>();
+                if (r.contains("ssao_enabled"))      config.render.ssao_enabled      = r.at("ssao_enabled").get_value<bool>();
+                if (r.contains("ssr_enabled"))       config.render.ssr_enabled       = r.at("ssr_enabled").get_value<bool>();
+
+                // --- Internal resolution ---
+                if (r.contains("resolution_mode"))        config.render.resolution_mode = r.at("resolution_mode").get_value<std::string>();
+                if (r.contains("render_width"))            config.render.render_width    = r.at("render_width").get_value<uint32_t>();
+                if (r.contains("render_height"))           config.render.render_height   = r.at("render_height").get_value<uint32_t>();
+                if (r.contains("scale_divisor"))           config.render.scale_divisor   = r.at("scale_divisor").get_value<uint32_t>();
+                if (r.contains("upscale_mode"))            config.render.upscale_mode    = r.at("upscale_mode").get_value<std::string>();
+
+                // --- Lighting ---
+                if (r.contains("exposure"))          config.render.exposure          = r.at("exposure").get_value<float>();
+                if (r.contains("light_bands"))       config.render.light_bands       = r.at("light_bands").get_value<float>();
+                if (r.contains("spec_threshold"))    config.render.spec_threshold    = r.at("spec_threshold").get_value<float>();
+                if (r.contains("rim_strength"))      config.render.rim_strength      = r.at("rim_strength").get_value<float>();
+                if (r.contains("ambient_intensity")) config.render.ambient_intensity = r.at("ambient_intensity").get_value<float>();
+                if (r.contains("sky_intensity"))     config.render.sky_intensity     = r.at("sky_intensity").get_value<float>();
+
+                // --- Shadows ---
                 if (r.contains("shadows_enabled"))        config.render.shadows_enabled        = r.at("shadows_enabled").get_value<bool>();
                 if (r.contains("shadow_map_resolution"))  config.render.shadow_map_resolution  = r.at("shadow_map_resolution").get_value<uint32_t>();
                 if (r.contains("cube_shadow_resolution")) config.render.cube_shadow_resolution = r.at("cube_shadow_resolution").get_value<uint32_t>();
                 if (r.contains("shadow_bias"))            config.render.shadow_bias            = r.at("shadow_bias").get_value<float>();
                 if (r.contains("shadow_max_extent"))      config.render.shadow_max_extent      = r.at("shadow_max_extent").get_value<float>();
-            }
 
-            if (root.contains("pixel")) {
-                const auto& p = root.at("pixel");
-                if (p.contains("outline_enabled"))   config.render.outline_enabled   = p.at("outline_enabled").get_value<bool>();
-                if (p.contains("outline_thickness")) config.render.outline_thickness = p.at("outline_thickness").get_value<float>();
-                if (p.contains("outline_color")) {
-                    const auto& c = p.at("outline_color");
+                // --- Outline ---
+                if (r.contains("outline_thickness")) config.render.outline_thickness = r.at("outline_thickness").get_value<float>();
+                if (r.contains("outline_color")) {
+                    const auto& c = r.at("outline_color");
                     if (c.size() >= 4) {
                         config.render.outline_color = glm::vec4(
                             c.at(0).get_value<float>(), c.at(1).get_value<float>(),
                             c.at(2).get_value<float>(), c.at(3).get_value<float>());
                     }
                 }
-                if (p.contains("depth_threshold"))   config.render.depth_threshold   = p.at("depth_threshold").get_value<float>();
-                if (p.contains("normal_threshold"))  config.render.normal_threshold  = p.at("normal_threshold").get_value<float>();
-                if (p.contains("palette"))           config.render.palette_path      = p.at("palette").get_value<std::string>();
-                if (p.contains("palette_enabled"))   config.render.palette_enabled   = p.at("palette_enabled").get_value<bool>();
-                if (p.contains("dither_strength"))   config.render.dither_strength   = p.at("dither_strength").get_value<float>();
-                if (p.contains("dither_enabled"))    config.render.dither_enabled    = p.at("dither_enabled").get_value<bool>();
-                if (p.contains("camera_pixel_snap")) config.render.camera_pixel_snap = p.at("camera_pixel_snap").get_value<bool>();
+                if (r.contains("depth_threshold"))   config.render.depth_threshold   = r.at("depth_threshold").get_value<float>();
+                if (r.contains("normal_threshold"))  config.render.normal_threshold  = r.at("normal_threshold").get_value<float>();
+
+                // --- Palette ---
+                if (r.contains("palette")) config.render.palette_path = r.at("palette").get_value<std::string>();
+
+                // --- Dither ---
+                if (r.contains("dither_strength")) config.render.dither_strength = r.at("dither_strength").get_value<float>();
+
+                // --- SSAO ---
+                if (r.contains("ssao_radius"))           config.render.ssao_radius           = r.at("ssao_radius").get_value<float>();
+                if (r.contains("ssao_bias"))             config.render.ssao_bias             = r.at("ssao_bias").get_value<float>();
+                if (r.contains("ssao_power"))            config.render.ssao_power            = r.at("ssao_power").get_value<float>();
+                if (r.contains("ssao_kernel_size"))      config.render.ssao_kernel_size      = r.at("ssao_kernel_size").get_value<int>();
+                if (r.contains("ssao_temporal_enabled")) config.render.ssao_temporal_enabled = r.at("ssao_temporal_enabled").get_value<bool>();
+                if (r.contains("ssao_temporal_blend"))   config.render.ssao_temporal_blend   = r.at("ssao_temporal_blend").get_value<float>();
+
+                // --- SSR + SSGI ---
+                if (r.contains("ssr_max_distance"))     config.render.ssr_max_distance     = r.at("ssr_max_distance").get_value<float>();
+                if (r.contains("ssr_max_iterations"))   config.render.ssr_max_iterations   = r.at("ssr_max_iterations").get_value<int>();
+                if (r.contains("ssr_thickness"))        config.render.ssr_thickness        = r.at("ssr_thickness").get_value<float>();
+                if (r.contains("ssr_thickness_scale"))  config.render.ssr_thickness_scale  = r.at("ssr_thickness_scale").get_value<float>();
+                if (r.contains("ssr_bias_texels"))      config.render.ssr_bias_texels      = r.at("ssr_bias_texels").get_value<float>();
+                if (r.contains("ssr_roughness_cutoff")) config.render.ssr_roughness_cutoff = r.at("ssr_roughness_cutoff").get_value<float>();
+                if (r.contains("ssr_start_mip"))        config.render.ssr_start_mip        = r.at("ssr_start_mip").get_value<int>();
+                if (r.contains("ssr_min_mip0_steps"))   config.render.ssr_min_mip0_steps   = r.at("ssr_min_mip0_steps").get_value<int>();
+                if (r.contains("ssr_temporal_enabled")) config.render.ssr_temporal_enabled = r.at("ssr_temporal_enabled").get_value<bool>();
+                if (r.contains("ssr_temporal_blend"))   config.render.ssr_temporal_blend   = r.at("ssr_temporal_blend").get_value<float>();
+                if (r.contains("ssgi_intensity"))       config.render.ssgi_intensity       = r.at("ssgi_intensity").get_value<float>();
+                if (r.contains("ssgi_distance"))        config.render.ssgi_distance        = r.at("ssgi_distance").get_value<float>();
             }
 
             if (root.contains("output")) {

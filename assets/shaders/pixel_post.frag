@@ -1,14 +1,19 @@
 #version 450
 
-// Pixel-art post-process: outline (depth/normal discontinuity) -> exposure ->
-// ordered (Bayer) dither -> palette quantization, in that order, all at the
-// low internal resolution so every effect upscales as crisp blocks instead
-// of shimmering. Runs as its own render pass writing into a fresh LDR
-// target (post_target_) that UpscalePass then samples -- see
-// PixelRenderPipeline for why this couldn't just be folded into
-// pixel_lighting.frag's render pass (a second target is simpler than
-// re-opening one, which pipeline::RenderPass's hardcoded LOAD_OP_CLEAR
-// forbids anyway).
+// Pixel-art post-process: exposure -> ACES tonemap -> outline (depth/normal
+// discontinuity, alpha-blended over the tonemapped color) -> ordered (Bayer)
+// dither -> palette quantization, in that order, all at the low internal
+// resolution so every effect upscales as crisp blocks instead of shimmering.
+// Runs as its own render pass writing into a fresh LDR target (post_target_)
+// that UpscalePass then samples -- see PixelRenderPipeline for why this
+// couldn't just be folded into pixel_lighting.frag's render pass (a second
+// target is simpler than re-opening one, which pipeline::RenderPass's
+// hardcoded LOAD_OP_CLEAR forbids anyway). scene_color is HDR
+// (offscreen_target_/ssr_pass_'s output are both R16G16B16A16_SFLOAT); the
+// tonemap is what brings it back to LDR before outline/dither/palette
+// quantize it -- outline runs after tonemap (not before, as it used to) so
+// outline_color.a blends in the same LDR space as the rest of the image
+// instead of hard-replacing it.
 
 layout(location = 0) in vec2 in_uv;
 
@@ -26,6 +31,10 @@ layout(push_constant) uniform PostParams {
     float normal_threshold;
     float dither_strength;
     float palette_count;      // 0.0 disables palette quantization
+    float camera_near;
+    float camera_far;
+    float camera_is_perspective; // >= 0.5 => perspective, else orthographic
+    float _pad0;
 } params;
 
 layout(location = 0) out vec4 out_color;
@@ -42,43 +51,80 @@ const float BAYER8[64] = float[64](
     63,31,55,23,61,29,53,21
 );
 
-float linearize_depth(float d) {
-    // Depth here is whatever the G-buffer's D32_SFLOAT wrote -- already in
-    // [0,1] post-projection, not a true view-space distance. Good enough for
-    // a discontinuity edge detector, which only cares about relative jumps.
-    return d;
+// True view-space distance from the camera, from raw Vulkan [0,1]
+// post-projection depth. Perspective depth is hyperbolic (glm::perspective ->
+// perspectiveRH_ZO); orthographic depth is already linear in the raw value
+// (glm::ortho -> orthoRH_ZO), hence the branch.
+float linear_depth(float d) {
+    if (params.camera_is_perspective < 0.5) {
+        return mix(params.camera_near, params.camera_far, d);
+    }
+    return params.camera_near * params.camera_far /
+           (params.camera_far - d * (params.camera_far - params.camera_near));
 }
 
-bool is_outline(vec2 uv) {
-    vec2 texel = params.outline_thickness * params.inv_render_size;
+bool is_background(vec3 n) { return dot(n, n) < 0.001; }
 
-    float d0 = linearize_depth(texture(scene_depth, uv).r);
-    float dx = linearize_depth(texture(scene_depth, uv + vec2(texel.x, 0.0)).r);
-    float dy = linearize_depth(texture(scene_depth, uv + vec2(0.0, texel.y)).r);
-    float dxn = linearize_depth(texture(scene_depth, uv - vec2(texel.x, 0.0)).r);
-    float dyn = linearize_depth(texture(scene_depth, uv - vec2(0.0, texel.y)).r);
+// True if uv sits on the near side of a depth or normal discontinuity, at
+// n0 = the (already-normalized) normal sampled at uv.
+bool is_outline_at(vec2 uv, vec3 n0, vec2 texel) {
+    vec2 dx = vec2(texel.x, 0.0);
+    vec2 dy = vec2(0.0, texel.y);
 
-    // Scale the threshold by the fragment's own depth so distant geometry
-    // (whose depth buffer values compress non-linearly) doesn't outline
-    // every triangle -- a fixed absolute threshold is too tight up close and
-    // too loose far away.
-    float scaled_threshold = params.depth_threshold * max(d0, 0.05);
-    float max_delta = max(max(abs(dx - d0), abs(dy - d0)), max(abs(dxn - d0), abs(dyn - d0)));
-    if (max_delta > scaled_threshold) return true;
+    vec3 nx  = texture(scene_normal, uv + dx).rgb;
+    vec3 ny  = texture(scene_normal, uv + dy).rgb;
+    vec3 nxn = texture(scene_normal, uv - dx).rgb;
+    vec3 nyn = texture(scene_normal, uv - dy).rgb;
 
-    vec3 n0  = normalize(texture(scene_normal, uv).rgb);
-    vec3 nx  = texture(scene_normal, uv + vec2(texel.x, 0.0)).rgb;
-    vec3 ny  = texture(scene_normal, uv + vec2(0.0, texel.y)).rgb;
-    vec3 nxn = texture(scene_normal, uv - vec2(texel.x, 0.0)).rgb;
-    vec3 nyn = texture(scene_normal, uv - vec2(0.0, texel.y)).rgb;
+    // A background neighbour is an unconditional silhouette edge: there is no
+    // depth or normal on that side to compare against (the sky writes no
+    // G-buffer data at all -- see skybox.frag), so if it were reachable by
+    // the depth test at all, the sky sits at the far plane where hyperbolic
+    // depth precision is at its worst.
+    if (is_background(nx) || is_background(ny) || is_background(nxn) || is_background(nyn)) {
+        return true;
+    }
 
-    float min_dot = 1.0;
-    if (dot(nx, nx) > 0.001)  min_dot = min(min_dot, dot(n0, normalize(nx)));
-    if (dot(ny, ny) > 0.001)  min_dot = min(min_dot, dot(n0, normalize(ny)));
-    if (dot(nxn, nxn) > 0.001) min_dot = min(min_dot, dot(n0, normalize(nxn)));
-    if (dot(nyn, nyn) > 0.001) min_dot = min(min_dot, dot(n0, normalize(nyn)));
+    float z0  = linear_depth(texture(scene_depth, uv).r);
+    float zx  = linear_depth(texture(scene_depth, uv + dx).r);
+    float zy  = linear_depth(texture(scene_depth, uv + dy).r);
+    float zxn = linear_depth(texture(scene_depth, uv - dx).r);
+    float zyn = linear_depth(texture(scene_depth, uv - dy).r);
 
+    // 1/z is affine in screen space over any plane, however steeply it
+    // recedes -- so on a plane the centre sits exactly halfway between its
+    // two opposite neighbours in inverse depth, and this is identically
+    // zero. Only a genuine step in Z (not just a grazing viewing angle)
+    // makes it non-zero. The *z0 turns the raw 1/z gap (~Delta z / z^2) into
+    // a relative step (~Delta z / z), so one depth_threshold works at any
+    // distance. The signed (not abs) form keeps the line one-sided: it
+    // fires on the texel that pops toward the camera, not on the surface
+    // behind it.
+    float rel_x = (1.0 / z0 - 0.5 * (1.0 / zx + 1.0 / zxn)) * z0;
+    float rel_y = (1.0 / z0 - 0.5 * (1.0 / zy + 1.0 / zyn)) * z0;
+    if (max(rel_x, rel_y) > params.depth_threshold) return true;
+
+    float min_dot = min(min(dot(n0, normalize(nx)), dot(n0, normalize(ny))),
+                         min(dot(n0, normalize(nxn)), dot(n0, normalize(nyn))));
     return min_dot < params.normal_threshold;
+}
+
+bool is_outline(vec2 uv, vec3 n0) {
+    int steps = max(int(round(params.outline_thickness)), 0);
+    for (int i = 1; i <= steps; ++i) {
+        vec2 texel = float(i) * params.inv_render_size;
+        if (is_outline_at(uv, n0, texel)) return true;
+    }
+    return false;
+}
+
+// ACES fitted curve (Narkowicz), ported from blendy/assets/shaders/tonemapping.frag.
+// Always applied -- pixel_lighting.frag's sky-based indirect lighting can exceed 1.0
+// regardless of which toggles are set, so this pass always brings HDR scene_color back
+// into range before dither/palette quantize it.
+vec3 aces_film(vec3 x) {
+    float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
 }
 
 vec3 quantize_to_palette(vec3 color) {
@@ -101,13 +147,13 @@ vec3 quantize_to_palette(vec3 color) {
 }
 
 void main() {
-    vec3 color = texture(scene_color, in_uv).rgb;
+    vec3 color = texture(scene_color, in_uv).rgb * params.exposure;
+    color = aces_film(color);
 
-    bool has_geometry = dot(texture(scene_normal, in_uv).rgb, texture(scene_normal, in_uv).rgb) > 0.001;
-    if (has_geometry && is_outline(in_uv)) {
-        color = params.outline_color.rgb;
-    } else {
-        color *= params.exposure;
+    vec3 n0 = texture(scene_normal, in_uv).rgb;
+    if (params.outline_thickness > 0.0 && !is_background(n0) &&
+        is_outline(in_uv, normalize(n0))) {
+        color = mix(color, params.outline_color.rgb, params.outline_color.a);
     }
 
     if (params.dither_strength > 0.0) {

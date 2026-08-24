@@ -8,35 +8,70 @@ scene:
   default_scene: "assets/scenes/pixel_demo/scene.yaml"
 
 render:
+  # --- Feature toggles ---
+  outline_enabled: false
+  palette_enabled: false
+  dither_enabled: false
+  camera_pixel_snap: true
+  soft_shadows: true         # rotated-Poisson PCF instead of a single hard compare
+  ssao_enabled: true
+  ssr_enabled: true          # also gates the SSGI diffuse-bounce term (ssgi_intensity)
+
+  # --- Internal resolution ---
   resolution_mode: fixed     # fixed | divisor
   render_width: 720
   render_height: 480
   scale_divisor: 4
   upscale_mode: integer      # integer | stretch
+
+  # --- Lighting ---
   exposure: 1.0
   light_bands: 4
   spec_threshold: 0.55
   rim_strength: 0.0
+  ambient_intensity: 1.0     # scales sky_gradient(N) indirect diffuse
+  sky_intensity: 1.0         # scales the sky-gradient indirect specular base
+
+  # --- Shadows ---
   shadows_enabled: true
   shadow_map_resolution: 2048
   cube_shadow_resolution: 512
   shadow_bias: 0.005
   shadow_max_extent: 0.0
 
-pixel:
-  outline_enabled: false
-  outline_thickness: 1.0
+  # --- Outline ---
+  outline_thickness: 0.6
   outline_color: [0.05, 0.04, 0.08, 1.0]
-  depth_threshold: 0.02
+  depth_threshold: 0.02      # relative depth step (fraction of the fragment's own distance); scale-invariant
   normal_threshold: 0.75
 
+  # --- Palette ---
   palette: "assets/palettes/duel-1x.png"
-  palette_enabled: false
 
+  # --- Dither ---
   dither_strength: 0.08
-  dither_enabled: false
 
-  camera_pixel_snap: true
+  # --- SSAO ---
+  ssao_radius: 0.5
+  ssao_bias: 0.025
+  ssao_power: 1.5
+  ssao_kernel_size: 24
+  ssao_temporal_enabled: true
+  ssao_temporal_blend: 0.85
+
+  # --- SSR + SSGI ---
+  ssr_max_distance: 15.0
+  ssr_max_iterations: 64
+  ssr_thickness: 0.05
+  ssr_thickness_scale: 0.01
+  ssr_bias_texels: 3.5
+  ssr_roughness_cutoff: 1.0   # 1.0 so rough surfaces still trace and feed the bounce
+  ssr_start_mip: 0
+  ssr_min_mip0_steps: 1
+  ssr_temporal_enabled: true
+  ssr_temporal_blend: 0.85
+  ssgi_intensity: 0.6         # diffuse colour-bleed strength; 0 = specular-only SSR
+  ssgi_distance: 0.5          # world-space offset along N for the bounce lookup
 
 output:
   save_on_exit: true

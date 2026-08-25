@@ -13,9 +13,11 @@ render:
   palette_enabled: false
   dither_enabled: false
   camera_pixel_snap: true
-  soft_shadows: true         # rotated-Poisson PCF instead of a single hard compare
+  soft_lighting: true        # true = smooth Cook-Torrance direct lighting; false = banded/ramped cel-shaded look (this engine's default)
   ssao_enabled: true
   ssr_enabled: true          # also gates the SSGI diffuse-bounce term (ssgi_intensity)
+  transparency_enabled: true # forward BLEND-material pass; off by default (no demo scene uses it yet)
+  ssr_reflect_transparent: true # opaque surfaces also reflect transparent geometry (roughly doubles SSR cost; requires ssr_enabled + transparency_enabled)
 
   # --- Internal resolution ---
   resolution_mode: fixed     # fixed | divisor
@@ -60,7 +62,7 @@ render:
   ssao_temporal_blend: 0.85
 
   # --- SSR + SSGI ---
-  ssr_max_distance: 15.0
+  ssr_max_distance: 30.0
   ssr_max_iterations: 64
   ssr_thickness: 0.05
   ssr_thickness_scale: 0.01

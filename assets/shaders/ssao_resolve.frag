@@ -1,6 +1,6 @@
 #version 450
 
-#include "ssr_common.glsl"
+#include <gfx/ssr_common.glsl>
 
 // Temporal resolve for the raw SSAO hemisphere-sample output (scalar clone of ssr_resolve.frag --
 // see that file for the reasoning behind reprojecting via world position rather than motion

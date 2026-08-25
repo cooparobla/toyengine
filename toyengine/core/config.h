@@ -100,9 +100,11 @@ struct AppConfig {
                 if (r.contains("palette_enabled"))   config.render.palette_enabled   = r.at("palette_enabled").get_value<bool>();
                 if (r.contains("dither_enabled"))    config.render.dither_enabled    = r.at("dither_enabled").get_value<bool>();
                 if (r.contains("camera_pixel_snap")) config.render.camera_pixel_snap = r.at("camera_pixel_snap").get_value<bool>();
-                if (r.contains("soft_shadows"))      config.render.soft_shadows      = r.at("soft_shadows").get_value<bool>();
+                if (r.contains("soft_lighting"))     config.render.soft_lighting     = r.at("soft_lighting").get_value<bool>();
                 if (r.contains("ssao_enabled"))      config.render.ssao_enabled      = r.at("ssao_enabled").get_value<bool>();
                 if (r.contains("ssr_enabled"))       config.render.ssr_enabled       = r.at("ssr_enabled").get_value<bool>();
+                if (r.contains("transparency_enabled")) config.render.transparency_enabled = r.at("transparency_enabled").get_value<bool>();
+                if (r.contains("ssr_reflect_transparent")) config.render.ssr_reflect_transparent = r.at("ssr_reflect_transparent").get_value<bool>();
 
                 // --- Internal resolution ---
                 if (r.contains("resolution_mode"))        config.render.resolution_mode = r.at("resolution_mode").get_value<std::string>();
@@ -116,8 +118,8 @@ struct AppConfig {
                 if (r.contains("light_bands"))       config.render.light_bands       = r.at("light_bands").get_value<float>();
                 if (r.contains("spec_threshold"))    config.render.spec_threshold    = r.at("spec_threshold").get_value<float>();
                 if (r.contains("rim_strength"))      config.render.rim_strength      = r.at("rim_strength").get_value<float>();
-                if (r.contains("ambient_intensity")) config.render.ambient_intensity = r.at("ambient_intensity").get_value<float>();
-                if (r.contains("sky_intensity"))     config.render.sky_intensity     = r.at("sky_intensity").get_value<float>();
+                if (r.contains("ambient_intensity")) config.render.indirect.ambient_intensity = r.at("ambient_intensity").get_value<float>();
+                if (r.contains("sky_intensity"))     config.render.indirect.sky_intensity     = r.at("sky_intensity").get_value<float>();
 
                 // --- Shadows ---
                 if (r.contains("shadows_enabled"))        config.render.shadows_enabled        = r.at("shadows_enabled").get_value<bool>();
@@ -164,8 +166,8 @@ struct AppConfig {
                 if (r.contains("ssr_min_mip0_steps"))   config.render.ssr_min_mip0_steps   = r.at("ssr_min_mip0_steps").get_value<int>();
                 if (r.contains("ssr_temporal_enabled")) config.render.ssr_temporal_enabled = r.at("ssr_temporal_enabled").get_value<bool>();
                 if (r.contains("ssr_temporal_blend"))   config.render.ssr_temporal_blend   = r.at("ssr_temporal_blend").get_value<float>();
-                if (r.contains("ssgi_intensity"))       config.render.ssgi_intensity       = r.at("ssgi_intensity").get_value<float>();
-                if (r.contains("ssgi_distance"))        config.render.ssgi_distance        = r.at("ssgi_distance").get_value<float>();
+                if (r.contains("ssgi_intensity"))       config.render.indirect.ssgi_intensity = r.at("ssgi_intensity").get_value<float>();
+                if (r.contains("ssgi_distance"))        config.render.indirect.ssgi_distance  = r.at("ssgi_distance").get_value<float>();
             }
 
             if (root.contains("output")) {

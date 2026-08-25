@@ -1,6 +1,6 @@
 #version 450
 
-#include "ssr_common.glsl"
+#include <gfx/ssr_common.glsl>
 
 layout(location = 0) in vec2 in_uv;
 layout(location = 0) out float out_ao;

@@ -100,7 +100,7 @@ void test_pixel_density_perspective_disabled() {
  * frames, and asserts the saved low-res buffer is exactly the configured
  * dimensions and every pixel is a member of the palette. This one assertion
  * validates the render path, the outline/dither/quantize post pass, and the
- * UNORM/gamma choice all at once -- see pixel_post_pass.h's file doc.
+ * UNORM/gamma choice all at once -- see gfxcoopa's pixel_stylize_pass.h file doc.
  */
 void test_headless_render_matches_palette() {
     toy::core::AppConfig config;
@@ -152,11 +152,11 @@ void test_headless_render_matches_palette() {
 
 /**
  * @brief Headless render with every independently-toggleable feature turned off
- * (outline, palette, dither, soft_shadows, ssao, ssr), mirroring
+ * (outline, palette, dither, ssao, ssr), mirroring
  * test_headless_render_matches_palette() but exercising the opposite branch of
  * every toggle at once: SsaoPass::invalidate_history() instead of execute(),
  * no HiZPass/SceneColorMipPass/SsrPass construction at all, the manual
- * gbuffer-depth transition instead of HiZPass's, and pixel_post_pass_ reading
+ * gbuffer-depth transition instead of HiZPass's, and pixel_stylize_pass_ reading
  * offscreen_target_ directly instead of ssr_pass_'s composite output. Ticks a
  * few frames and asserts the saved buffer has the configured dimensions and
  * contains at least one non-black pixel -- catching the kind of bug an
@@ -175,7 +175,6 @@ void test_headless_render_with_all_toggles_off() {
     config.render.outline_enabled = false;
     config.render.palette_enabled = false;
     config.render.dither_enabled  = false;
-    config.render.soft_shadows    = false;
     config.render.ssao_enabled    = false;
     config.render.ssr_enabled     = false;
     config.output.save_on_exit = false;

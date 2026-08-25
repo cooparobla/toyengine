@@ -11,15 +11,18 @@
 
 #include <glm/glm.hpp>
 
+#include <gfxcoopa/pipeline/shader_library.h>
+#include <gfxcoopa/engine/render_features.h>
+
 namespace toy {
 namespace render {
 
 /**
  * @struct PixelRenderConfig
  * @brief Configuration for PixelRenderPipeline: internal resolution, upscaling,
- *        banded lighting, shadows, and the pixel-art post-process stack
+ *        banded lighting, hard shadows, and the pixel-art post-process stack
  *        (outline, palette quantization, ordered dithering), plus the
- *        independently-toggleable soft shadows / SSAO / SSR add-ons.
+ *        independently-toggleable SSAO / SSR add-ons.
  */
 struct PixelRenderConfig {
     // --- Feature toggles ---
@@ -27,9 +30,20 @@ struct PixelRenderConfig {
     bool palette_enabled   = true;  /**< Independent of palette_path, so toggling off keeps the configured path. */
     bool dither_enabled    = true;  /**< Independent of dither_strength, so toggling off keeps the configured strength. */
     bool camera_pixel_snap = true;  /**< Orthographic cameras only. */
-    bool soft_shadows      = true;  /**< Rotated-Poisson PCF instead of a single hard compare. */
+    bool soft_lighting     = false; /**< true = smooth Cook-Torrance direct lighting; false = this engine's default banded/ramped cel-shaded look. */
     bool ssao_enabled      = true;
     bool ssr_enabled       = true;  /**< Also gates the SSGI diffuse-bounce term (ssgi_intensity). */
+    bool transparency_enabled = false;  /**< Forward BLEND-material pass, drawn after SSR compositing. */
+    /**
+     * Opaque surfaces (e.g. the floor) also reflect transparent geometry, via a second forward
+     * capture of BLEND objects (depth/normal/position/shaded-color) and a second Hi-Z pyramid
+     * ssr.frag's raymarch tries alongside its primary opaque source -- see
+     * PixelRenderPipeline::record_transparent_capture_(). Meaningless without ssr_enabled AND
+     * transparency_enabled also true. Opt-in (default false), not implied by those two: this
+     * roughly doubles the opaque raymarch's per-pixel cost and adds an extra forward draw +
+     * Hi-Z build + scene-colour-mip build every frame it's on.
+     */
+    bool ssr_reflect_transparent = false;
 
     // --- Internal resolution ---
     std::string resolution_mode = "fixed";   /**< "fixed" or "divisor". */
@@ -43,8 +57,8 @@ struct PixelRenderConfig {
     float light_bands       = 4.0f;   /**< Discrete shading steps per light; <= 1 disables banding. */
     float spec_threshold    = 0.55f;  /**< Hard specular highlight cutoff. */
     float rim_strength      = 0.0f;   /**< 0 disables the rim term. */
-    float ambient_intensity = 1.0f;   /**< Scales sky_gradient(N) indirect diffuse. */
-    float sky_intensity     = 1.0f;   /**< Scales the sky-gradient indirect specular base. */
+    // ambient_intensity/sky_intensity/ssgi_intensity/ssgi_distance live in `indirect` below
+    // (shared with SsrPass::Params so the two can never disagree -- see render_features.h).
 
     // --- Shadows ---
     bool     shadows_enabled        = true;
@@ -84,10 +98,19 @@ struct PixelRenderConfig {
     int   ssr_min_mip0_steps   = 1;
     bool  ssr_temporal_enabled = true;
     float ssr_temporal_blend   = 0.85f;
-    float ssgi_intensity       = 0.6f;  /**< Diffuse colour-bleed strength; 0 disables the bounce term. */
-    float ssgi_distance        = 0.5f;  /**< World-space offset along N for the bounce sample point. */
+
+    // Indirect-lighting terms shared with SsrPass::Params (gfxcoopa/engine/render_features.h) --
+    // fed to both the lighting pass and the SSR composite from this single instance so the two
+    // can never disagree. ssgi_intensity defaults to 0.6 here (nonzero -- SSGI on by default),
+    // overriding IndirectParams' own 0.0 "no consumer has this concept" default.
+    coopa::gfx::engine::IndirectParams indirect{1.0f, 1.0f, 0.6f, 0.5f};
 
     std::string shader_dir;                   /**< Absolute path to assets/shaders. */
+    // Ordered search path resolving a logical shader name (e.g. "gbuffer.vert") to a compiled
+    // .spv path -- this app's own directory first, then gfxcoopa's shared base library. Set
+    // alongside shader_dir (see engine.h's make_render_config_); shader_dir is kept for
+    // logging/debugging, `shaders` is what every pass construction actually resolves through.
+    coopa::gfx::pipeline::ShaderLibrary shaders;
 };
 
 } // namespace render

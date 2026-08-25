@@ -10,10 +10,22 @@ filtering and a centred integer-scale letterbox, for a crisp pixelated look.
 
 - **Low-resolution deferred renderer** — G-buffer + banded-PBR lighting at a
   fixed internal resolution (480×270 by default), independent of window size.
-- **Cel-shaded lighting** — directional + point lights, N·L quantized into
-  discrete bands, hard-thresholded specular highlights.
-- **Hard-edged shadows** — directional (AABB-fit orthographic, texel-snapped)
-  and one point-light cubemap, both single-sample (no PCF) for crisp edges.
+  Built on gfxcoopa's shared `DeferredLightingPass`/`SsrPass`/`TransparentPass`
+  (see [gfxcoopa](../gfxcoopa)'s shared shader library and `ExtraSets`
+  decoupling), not a private fork of them.
+- **Cel-shaded or soft direct lighting** (`soft_lighting`) — default is
+  banded/ramped: N·L quantized into discrete bands (`light_bands`), specular
+  a hard-thresholded highlight (`spec_threshold`). `soft_lighting` switches
+  both to a smooth, continuous Cook-Torrance falloff instead.
+- **Screen-space reflections + SSGI** (`ssr_enabled`) — Hi-Z raymarched
+  specular reflections, plus an optional diffuse colour-bleed bounce term
+  (`ssgi_intensity`) reusing the same trace.
+- **SSAO** (`ssao_enabled`) — hemisphere-sampled ambient occlusion with
+  temporal accumulation.
+- **Hard shadows** — directional (AABB-fit orthographic, texel-snapped) and
+  one point-light cubemap, both a single hardware depth compare.
+- **Forward transparency** (`transparency_enabled`) — BLEND-material meshes,
+  depth-tested against the opaque G-buffer, drawn after SSR compositing.
 - **Pixel-art post stack** — depth/normal outline, exposure, 8×8 Bayer ordered
   dithering, and palette quantization to an arbitrary Nx1 palette PNG.
 - **Integer-scale upscale** — every low-res texel becomes an exact N×N block
@@ -21,9 +33,11 @@ filtering and a centred integer-scale letterbox, for a crisp pixelated look.
 - **Orbit/fly camera controller**, YAML scene format (shared with blendy),
   nearest-filtered texture loading, headless `ONESHOT`/`MAX_FRAMES` capture.
 
-Explicitly **not** included: SSR, reflection probes, GI probes, MSAA, and any
+Explicitly **not** included: GI probes, reflection probes, MSAA, and any
 temporal AA (FXAA/SMAA/TAA) — temporal jitter would destroy the pixel-grid
-stability this engine exists to produce.
+stability this engine exists to produce. Those live in [blendy](../blendy),
+which shares this same gfxcoopa backbone with every feature (including this
+engine's own pixel-art stack) exposed as an option.
 
 ## Build & run
 
@@ -55,7 +69,7 @@ toyengine/
 ├── input/      InputMap (named actions over GLFW keys)
 ├── loaders/    PixelTextureLoader (NEAREST-filtered texture asset loader)
 ├── scene/      CameraController (orbit/fly) + its SceneLoader registration
-├── render/     PixelRenderPipeline, PixelRenderConfig, pixel_math, PaletteLut,
+├── render/     PixelRenderPipeline, PixelRenderConfig, pixel_math,
 │               InstanceStream, and every pass in render/passes/
 └── util/       screenshot.h (Vulkan image -> PNG)
 ```

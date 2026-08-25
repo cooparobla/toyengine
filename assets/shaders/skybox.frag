@@ -17,7 +17,7 @@ layout(push_constant) uniform SkyboxPushConstants {
     mat4 inv_view_proj;
 } u_skybox;
 
-#include "sky.glsl"
+#include <gfx/sky.glsl>
 
 void main() {
     vec3 N = texture(g_normal_metallic, in_uv).rgb;

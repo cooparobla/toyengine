@@ -12,9 +12,8 @@ that rule gets bent, and why), and a `draw(cmd, ...)`/`execute(cmd, ...)`.
 
 | File | Reads | Writes | Notes |
 |---|---|---|---|
-| [`pixel_lighting_pass.h`](pixel_lighting_pass.h) | camera, light, shadow, G-buffer, SSAO | `offscreen_target_` | A fork, not a reuse, of gfxcoopa's `DeferredLightingPass` — that class has a latent descriptor-set-index bug when built without GI (see its file doc). Banded/masked-specular direct lighting is fixed (see `pixel_lighting.frag`'s file doc); `soft_shadows`, the SSAO binding, and the sky-based indirect term are all always present, toggle or not. |
+| [`pixel_lighting_pass.h`](pixel_lighting_pass.h) | camera, light, shadow, G-buffer, SSAO | `offscreen_target_` | A fork, not a reuse, of gfxcoopa's `DeferredLightingPass` — that class has a latent descriptor-set-index bug when built without GI (see its file doc). Banded/masked-specular direct lighting is fixed (see `pixel_lighting.frag`'s file doc); the SSAO binding and the sky-based indirect term are always present, toggle or not; shadows are always a single hard depth compare. |
 | [`ssr_pass.h`](ssr_pass.h) | camera, G-buffer, Hi-Z, scene-colour mips, SSAO | own composite target | Hi-Z raymarch → temporal resolve → composite (specular swap + SSGI diffuse bounce). A structural port of gfxcoopa's `SsrPass` with the reflection-probe/GI descriptor set and `half_res` removed — see its file doc. Only constructed when `ssr_enabled` is set. |
-| [`pixel_post_pass.h`](pixel_post_pass.h) | scene color (HDR), G-buffer depth/normal, palette LUT | `post_target_` | Exposure → ACES tonemap → outline (alpha-blended over the tonemapped color, not a hard replace) → Bayer dither → palette quantize, one fullscreen shader, always run the same way regardless of which toggles are set (each stage no-ops on its own when its config disables it). |
 | [`upscale_pass.h`](upscale_pass.h) | `post_target_` (NEAREST) | swapchain | Adds the x/y letterbox offset gfxcoopa's `PresentPass` doesn't support. |
 | [`gbuffer_visualize_pass.h`](gbuffer_visualize_pass.h) | G-buffer albedo | — | Unused diagnostic, kept from the Phase 3 milestone (unlit G-buffer visualization) for debugging. |
 
@@ -23,4 +22,11 @@ Reused directly from gfxcoopa (not forked): `GBufferPipeline`, `ShadowPipeline`,
 `execute()` is gated on `ssao_enabled`); `HiZPass`, `SceneColorMipPass`
 (only constructed when `ssr_enabled` is set — see `../README.md` for the
 synchronization caveat that comes with reusing these two under this
-pipeline's frame-overlap model).
+pipeline's frame-overlap model); `PixelStylizePass` and `PaletteLut`
+(`gfxcoopa/engine/passes/pixel_stylize_pass.h` / `gfxcoopa/engine/data/palette_lut.h`,
+shared with blendy) — exposure → ACES tonemap (gated on `PushConstants::exposure`,
+since blendy already tonemapped by the time it reaches this pass but toyengine
+hasn't) → outline (alpha-blended over the tonemapped color, not a hard replace)
+→ Bayer dither → palette quantize, one fullscreen shader, always run the same
+way regardless of which toggles are set (each stage no-ops on its own when its
+config disables it).

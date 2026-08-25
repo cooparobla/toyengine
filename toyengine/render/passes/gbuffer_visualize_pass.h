@@ -3,9 +3,10 @@
  * @brief Temporary Phase-3 milestone pass: draws the G-buffer's albedo
  *        attachment directly into the low-res LDR target with no lighting.
  *
- * Superseded by PixelLightingPass in Phase 4 -- kept afterward as a
- * standalone G-buffer diagnostic (same shape as PixelLightingPass's set-3
- * G-buffer binding, minus the camera/light/shadow sets).
+ * Superseded by the deferred lighting pass (gfxcoopa's DeferredLightingPass,
+ * as of the gfxcoopa backbone refactor) in Phase 4 -- kept afterward as a
+ * standalone G-buffer diagnostic (same shape as that pass's set-3 G-buffer
+ * binding, minus the camera/light/shadow sets).
  */
 
 #ifndef TOYENGINE_RENDER_PASSES_GBUFFER_VISUALIZE_PASS_H

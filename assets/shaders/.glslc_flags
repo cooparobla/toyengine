@@ -1,0 +1,9 @@
+# Extra glslc flags for this repo's shaders. Read by cbuild --vulkan
+# (/home/coopa/.sww/packages/cbuild/cbuild) and by cmake/GfxShaders.cmake.
+# One token per line. ${SIBLINGS} expands to the parent directory of this
+# repo checkout (the same thing CMake's ROOT_DIR_PARENT means).
+#
+# Lets toyengine's shaders #include <gfx/...> headers from gfxcoopa's shared
+# base shader library instead of keeping local copies.
+-I
+${SIBLINGS}/gfxcoopa/assets/shaders

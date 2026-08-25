@@ -250,6 +250,10 @@ private:
     static render::PixelRenderConfig make_render_config_(const AppConfig& config) {
         render::PixelRenderConfig rc = config.render;
         rc.shader_dir = std::string(ROOT_DIR) + "/assets/shaders";
+        // App directory first, gfxcoopa's shared base library second -- the runtime mirror of
+        // the glslc -I search order (see assets/shaders/.glslc_flags).
+        rc.shaders = coopa::gfx::pipeline::ShaderLibrary::app_over_base(
+            rc.shader_dir, std::string(PROJ_DIR) + "/gfxcoopa/assets/shaders");
         if (!rc.palette_path.empty()) rc.palette_path = resolve_path_(rc.palette_path);
         return rc;
     }

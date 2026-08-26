@@ -191,8 +191,8 @@ public:
           // 1.0 regardless of whether SSR/SSAO are toggled, and pixel_stylize.frag's tonemap
           // step (gated on PushConstants::exposure) always applies before dither/palette to
           // bring it back down.
-          offscreen_target_(device, allocator, render_extent_.width, render_extent_.height, VK_FORMAT_R16G16B16A16_SFLOAT),
-          post_target_(device, allocator, render_extent_.width, render_extent_.height, VK_FORMAT_R8G8B8A8_UNORM),
+          offscreen_target_(device, allocator, render_extent_.width, render_extent_.height, coopa::gfx::Format::RGBA16_Sfloat),
+          post_target_(device, allocator, render_extent_.width, render_extent_.height, coopa::gfx::Format::RGBA8_Unorm),
           transparent_capture_target_(device, allocator, render_extent_.width, render_extent_.height),
           nearest_sampler_(coopa::gfx::engine::util::Sampler::nearest(device)),
           linear_sampler_(coopa::gfx::engine::util::Sampler::linear(device)),
@@ -207,30 +207,32 @@ public:
           instance_stream_(device, allocator)
     {
         camera_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
-            device, std::vector<VkDescriptorSetLayoutBinding>{make_ubo_binding_(
-                0, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT)});
+            coopa::gfx::pipeline::DescriptorLayoutBuilder()
+                .uniform_buffer(0, coopa::gfx::ShaderStage::Vertex | coopa::gfx::ShaderStage::Fragment)
+                .build(device));
 
         camera_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
-            device, 1,
-            std::vector<VkDescriptorPoolSize>{{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1}});
+            coopa::gfx::pipeline::DescriptorPoolBuilder().add_sets(*camera_layout_, 1).build(device));
 
         camera_set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *camera_pool_, *camera_layout_);
         camera_set_->bind_buffer(0, camera_ubo_.buffer());
 
         light_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
-            device, std::vector<VkDescriptorSetLayoutBinding>{make_ubo_binding_(0, VK_SHADER_STAGE_FRAGMENT_BIT)});
+            coopa::gfx::pipeline::DescriptorLayoutBuilder()
+                .uniform_buffer(0, coopa::gfx::ShaderStage::Fragment)
+                .build(device));
         light_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
-            device, 1, std::vector<VkDescriptorPoolSize>{{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1}});
+            coopa::gfx::pipeline::DescriptorPoolBuilder().add_sets(*light_layout_, 1).build(device));
         light_set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *light_pool_, *light_layout_);
         light_set_->bind_buffer(0, light_data_.buffer());
 
-        std::vector<VkDescriptorSetLayoutBinding> shadow_bindings{
-            make_sampler_binding_(0, VK_SHADER_STAGE_FRAGMENT_BIT),
-            make_sampler_binding_(1, VK_SHADER_STAGE_FRAGMENT_BIT)
-        };
-        shadow_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(device, shadow_bindings);
+        shadow_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
+            coopa::gfx::pipeline::DescriptorLayoutBuilder()
+                .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
+                .combined_sampler(1, coopa::gfx::ShaderStage::Fragment)
+                .build(device));
         shadow_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
-            device, 1, std::vector<VkDescriptorPoolSize>{{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2}});
+            coopa::gfx::pipeline::DescriptorPoolBuilder().add_sets(*shadow_layout_, 1).build(device));
         shadow_set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *shadow_pool_, *shadow_layout_);
         shadow_set_->bind_image(0, shadow_target_.dir_shadow_view(), shadow_sampler_.handle());
         shadow_set_->bind_image(1, shadow_target_.cube_shadow_view(), shadow_sampler_.handle());
@@ -254,16 +256,16 @@ public:
         gbuffer_visualize_pass_->set_albedo_image(gbuffer_target_.g0_view_typed(), linear_sampler_);
 
         skybox_pass_ = std::make_unique<coopa::gfx::engine::passes::SkyboxPass>(
-            device, offscreen_target_.render_pass_object(), camera_layout_->handle(),
+            device, offscreen_target_.render_pass_object(), *camera_layout_,
             config_.shaders("fullscreen.vert"),
             config_.shaders("skybox.frag"));
-        skybox_pass_->set_gbuffer_normal_image(gbuffer_target_.g1_view(), linear_sampler_);
+        skybox_pass_->set_gbuffer_normal_image(gbuffer_target_.g1_view_typed(), linear_sampler_);
 
         // SsaoPass is always constructed: pixel_lighting.frag (and the SSR composite, when
         // that's built below) always has a g_ssao binding to fill, toggle or not -- cheap
         // either way, since SsaoPass's ctor already builds a permanent 1x1 neutral texture.
         ssao_pass_ = std::make_unique<coopa::gfx::engine::passes::SsaoPass>(
-            device, allocator, cmd_pool, camera_layout_->handle(),
+            device, allocator, cmd_pool, *camera_layout_,
             config_.shaders("fullscreen.vert"),
             config_.shaders("ssao.frag"),
             config_.shaders("ssao_resolve.frag"),
@@ -276,7 +278,7 @@ public:
         // no per-frame wait in the common case (see the class doc), so calling this from
         // inside render()'s per-frame lambda would intermittently hit exactly that validation
         // error under sustained multi-frame rendering.
-        ssao_pass_->update_descriptors(gbuffer_target_.g1_view(), gbuffer_target_.g2_view(), linear_sampler_);
+        ssao_pass_->update_descriptors(gbuffer_target_.g1_view_typed(), gbuffer_target_.g2_view_typed(), linear_sampler_);
 
         // ssao_enabled is a load-time config value (no live reload), so which image to bind is
         // decided once here rather than every frame -- see the update_descriptors comment above
@@ -287,20 +289,16 @@ public:
         // this collapses to the same {camera=0, light=1, shadow=2, gbuffer=3} layout the old
         // fork hardcoded -- gbuffer_set_index_ is derived, not hardcoded, so this is correct
         // whether or not extras are ever added later (see the fix in deferred_lighting_pass.h).
-        VkPushConstantRange lighting_pc_range{};
-        lighting_pc_range.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        lighting_pc_range.offset     = 0;
-        lighting_pc_range.size       = sizeof(PixelLightingPushConstants);
-
         pixel_lighting_pass_ = std::make_unique<coopa::gfx::engine::passes::DeferredLightingPass>(
-            device, offscreen_target_.render_pass_object(), camera_layout_->handle(), light_layout_->handle(),
-            shadow_layout_->handle(), linear_sampler_,
+            device, offscreen_target_.render_pass_object(), *camera_layout_, *light_layout_,
+            *shadow_layout_, linear_sampler_,
             config_.shaders("fullscreen.vert"),
             config_.shaders("pixel_lighting.frag"),
             coopa::gfx::engine::passes::ExtraSets{},
-            std::vector<VkPushConstantRange>{lighting_pc_range});
+            std::vector<coopa::gfx::pipeline::PushConstantRange>{
+                {coopa::gfx::ShaderStage::Fragment, 0, sizeof(PixelLightingPushConstants)}});
         pixel_lighting_pass_->set_gbuffer_images(
-            gbuffer_target_.g0_view(), gbuffer_target_.g1_view(), gbuffer_target_.g2_view(), linear_sampler_);
+            gbuffer_target_.g0_view_typed(), gbuffer_target_.g1_view_typed(), gbuffer_target_.g2_view_typed(), linear_sampler_);
         pixel_lighting_pass_->set_ssao_image(ssao_view, ssao_pass_->sampler().handle());
 
         // ssr_enabled is a RUNTIME flag (see render_features.h's policy doc): hiz_pass_/
@@ -334,7 +332,7 @@ public:
         // pipeline's low internal resolution, so there is no separate "trace at half of
         // that" tier worth the bilateral-upsample cost.
         ssr_pass_ = std::make_unique<coopa::gfx::engine::passes::SsrPass>(
-            device, allocator, camera_layout_->handle(),
+            device, allocator, *camera_layout_,
             render_extent_.width, render_extent_.height,
             config_.shaders("fullscreen.vert"),
             config_.shaders("ssr.frag"),
@@ -351,9 +349,9 @@ public:
             config_.shaders("fullscreen.vert"),
             config_.shaders("ssr_blur.frag"));
         ssr_pass_->update_descriptors(
-            gbuffer_target_, hiz_pass_->full_hiz_view(), hiz_pass_->sampler().handle(),
-            scene_color_mip_pass_->full_view(), scene_color_mip_pass_->sampler().handle(),
-            offscreen_target_.color_view(), linear_sampler_);
+            gbuffer_target_, hiz_pass_->full_hiz_view_typed(), hiz_pass_->sampler(),
+            scene_color_mip_pass_->full_view_typed(), scene_color_mip_pass_->sampler(),
+            offscreen_target_.color_view_typed(), linear_sampler_);
         ssr_pass_->set_ssao_image(ssao_view, ssao_pass_->sampler().handle());
 
         // --- ssr_reflect_transparent: opaque surfaces also reflect transparent geometry ---
@@ -414,20 +412,19 @@ public:
         // VkPushConstantRange isn't legal here).
         coopa::gfx::engine::passes::ExtraSets transparent_extra;
         transparent_extra.layouts = {
-            ssr_pass_->trace_gbuffer_layout(), ssr_pass_->hiz_layout(), ssr_pass_->scene_color_layout()
+            &ssr_pass_->trace_gbuffer_layout(), &ssr_pass_->hiz_layout(), &ssr_pass_->scene_color_layout()
         };
-        transparent_extra.bind = [this](coopa::gfx::command::CommandBuffer& cmd,
-                                        VkPipelineLayout layout, uint32_t first_set) {
-            cmd.bind_descriptor_set(layout, ssr_pass_->trace_gbuffer_set(), first_set);
-            cmd.bind_descriptor_set(layout, ssr_pass_->hiz_set(), first_set + 1);
-            cmd.bind_descriptor_set(layout, ssr_pass_->scene_color_set(), first_set + 2);
+        transparent_extra.bind = [this](coopa::gfx::command::CommandBuffer& cmd, uint32_t first_set) {
+            cmd.bind_descriptor_set(ssr_pass_->trace_gbuffer_set(), first_set);
+            cmd.bind_descriptor_set(ssr_pass_->hiz_set(), first_set + 1);
+            cmd.bind_descriptor_set(ssr_pass_->scene_color_set(), first_set + 2);
         };
 
         // transparent.frag reuses pbr.vert (byte-identical to gbuffer.vert -- see gfx/), the
         // same convention blendy uses for its own TransparentPass.
         transparent_pass_ = std::make_unique<coopa::gfx::engine::passes::TransparentPass>(
-            device, VK_FORMAT_R16G16B16A16_SFLOAT, camera_layout_->handle(), light_layout_->handle(),
-            shadow_layout_->handle(),
+            device, VK_FORMAT_R16G16B16A16_SFLOAT, *camera_layout_, *light_layout_,
+            *shadow_layout_,
             config_.shaders("pbr.vert"),
             config_.shaders("transparent.frag"),
             transparent_extra,
@@ -448,9 +445,9 @@ public:
         // construction -- but flip this toggle from a future live debug UI and post-process
         // will keep reading whichever source was current at startup.
         pixel_stylize_pass_->set_source_images(
-            config_.ssr_enabled ? ssr_pass_->output_view() : offscreen_target_.color_view(),
-            gbuffer_target_.depth_view(), gbuffer_target_.g1_view(),
-            palette_lut_.view(), linear_sampler_, nearest_sampler_);
+            config_.ssr_enabled ? ssr_pass_->output_view_typed() : offscreen_target_.color_view_typed(),
+            gbuffer_target_.depth_view_typed(), gbuffer_target_.g1_view_typed(),
+            palette_lut_.view_typed(), linear_sampler_, nearest_sampler_);
 
         upscale_pass_ = std::make_unique<passes::UpscalePass>(
             device, swapchain_pass,
@@ -582,7 +579,7 @@ public:
                 record_gbuffer_(cmd, renderers, instance_idx);
 
                 if (need_ssr_trace_inputs) {
-                    hiz_pass_->execute(cmd, gbuffer_target_.depth_image_handle(), gbuffer_target_.depth_view());
+                    hiz_pass_->execute(cmd, gbuffer_target_.depth_image_handle(), gbuffer_target_.depth_view_typed());
                 } else {
                     // GBufferTarget's render pass leaves the depth attachment in
                     // DEPTH_STENCIL_ATTACHMENT_OPTIMAL (only G0/G1/G2 color end in
@@ -606,9 +603,14 @@ public:
                 // and it must finish before ssr_pass_->execute() later in this frame.
                 if (config_.ssr_reflect_transparent) {
                     record_transparent_capture_(cmd, renderers, instance_idx);
+                    // TransparentCaptureTarget is out of scope for the Vulkan-sealing refactor
+                    // (MRT, no sealed equivalent -- see gfxcoopa's plan), so its raw VkImageView
+                    // accessors are wrapped here via detail::wrap() rather than gaining
+                    // TextureView-returning siblings themselves.
                     transparent_hiz_pass_->execute(cmd, transparent_capture_target_.depth_image_handle(),
-                                                   transparent_capture_target_.depth_view());
-                    transparent_scene_color_mip_pass_->execute(cmd, transparent_capture_target_.shaded_color_view());
+                                                   coopa::gfx::detail::wrap(transparent_capture_target_.depth_view()));
+                    transparent_scene_color_mip_pass_->execute(
+                        cmd, coopa::gfx::detail::wrap(transparent_capture_target_.shaded_color_view()));
 
                     // Rebind ssr_pass_'s secondary source (sets 4-6) to these NOW-populated,
                     // correctly-laid-out images -- deliberately NOT done once at construction
@@ -619,10 +621,10 @@ public:
                     // protection hiz_pass_->execute()/scene_color_mip_pass_->execute()'s own
                     // internal per-frame descriptor rebinds already rely on.
                     ssr_pass_->set_secondary_source(
-                        transparent_capture_target_.normal_metallic_view(),
-                        transparent_capture_target_.position_roughness_view(),
-                        transparent_hiz_pass_->full_hiz_view(), transparent_hiz_pass_->sampler().handle(),
-                        transparent_scene_color_mip_pass_->full_view(), transparent_scene_color_mip_pass_->sampler().handle());
+                        coopa::gfx::detail::wrap(transparent_capture_target_.normal_metallic_view()),
+                        coopa::gfx::detail::wrap(transparent_capture_target_.position_roughness_view()),
+                        transparent_hiz_pass_->full_hiz_view_typed(), transparent_hiz_pass_->sampler(),
+                        transparent_scene_color_mip_pass_->full_view_typed(), transparent_scene_color_mip_pass_->sampler());
                 }
 
                 if (config_.ssao_enabled) {
@@ -662,11 +664,9 @@ public:
                 lighting_pc.ambient_intensity = config_.indirect.ambient_intensity;
                 lighting_pc.sky_intensity     = config_.indirect.sky_intensity;
                 lighting_pc.soft_lighting     = config_.soft_lighting ? 1.0f : 0.0f;
-                // gfxcoopa's DeferredLightingPass::draw() doesn't push constants itself (its
-                // block is app-defined, via the pc_ranges ctor param) -- push explicitly first.
-                cmd.push_constants(pixel_lighting_pass_->layout(), VK_SHADER_STAGE_FRAGMENT_BIT,
-                                   0, sizeof(PixelLightingPushConstants), &lighting_pc);
-                pixel_lighting_pass_->draw(cmd, *camera_set_, *light_set_, *shadow_set_,
+                // gfxcoopa's DeferredLightingPass::draw() pushes this internally now (the
+                // templated overload), after its own bind_pipeline() -- no separate push needed.
+                pixel_lighting_pass_->draw(cmd, *camera_set_, *light_set_, *shadow_set_, lighting_pc,
                                           render_extent_.width, render_extent_.height);
 
                 skybox_pass_->draw(cmd, *camera_set_, view, proj, render_extent_.width, render_extent_.height);
@@ -677,7 +677,7 @@ public:
                     // Prefiltered scene-colour mip chain: also feeds transparent.frag's
                     // gfx_ssr_trace() cone-LOD taps and SSGI bounce lookup, not just ssr.frag's
                     // own -- see need_ssr_trace_inputs' own doc.
-                    scene_color_mip_pass_->execute(cmd, offscreen_target_.color_view());
+                    scene_color_mip_pass_->execute(cmd, offscreen_target_.color_view_typed());
                 }
 
                 if (config_.ssr_enabled) {
@@ -775,23 +775,6 @@ public:
     }
 
 private:
-    static VkDescriptorSetLayoutBinding make_ubo_binding_(uint32_t binding, VkShaderStageFlags stages) {
-        VkDescriptorSetLayoutBinding b{};
-        b.binding         = binding;
-        b.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        b.descriptorCount = 1;
-        b.stageFlags      = stages;
-        return b;
-    }
-
-    static VkDescriptorSetLayoutBinding make_sampler_binding_(uint32_t binding, VkShaderStageFlags stages) {
-        VkDescriptorSetLayoutBinding b{};
-        b.binding         = binding;
-        b.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        b.descriptorCount = 1;
-        b.stageFlags      = stages;
-        return b;
-    }
 
     /**
      * @brief Populates LightUBO color/intensity/count fields (not the shadow

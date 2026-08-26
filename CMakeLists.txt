@@ -50,14 +50,17 @@ add_test(NAME toyengine_render COMMAND toyengine_tests)
 
 # --- Vulkan/GLFW leak gate ---
 # OFF by default here (unlike uicoopa/pixengine, which are clean): as of this
-# writing, render/pixel_render_pipeline.h still names ~46 raw Vulkan symbols,
-# all forced by gfxcoopa's own un-redesigned engine/passes/*/engine/targets/*
-# internal APIs (raw VkImageView/VkPipelineLayout/VkDescriptorSetLayout params,
-# Mesh::Vertex::binding_description(), etc.) -- eliminating them needs a
-# redesign of those ~25 gfxcoopa headers, explicitly out of scope for the
-# Vulkan-sealing refactor. Run `${GFXCOOPA_DIR}/tools/check_no_vulkan.sh
+# writing, render/pixel_render_pipeline.h still names 28 raw Vulkan symbols
+# (down from 46 after gfxcoopa's mechanical engine/passes/* reseal -- see the
+# refactor plan's Phase 4), all forced by the remaining "hard tier" gfxcoopa
+# internals still out of scope: GBufferPipeline/TransparentCapturePass's own
+# MRT/raw-render-pass construction, Renderer::begin_frame()'s raw
+# VkClearColorValue, and SsaoPass's raw view accessors (no Framebuffer
+# wrapper / MRT RenderPass / per-subresource layout tracking exist yet -- see
+# gfxcoopa/README.md's layering rule and the plan's "explicitly out of
+# scope" list). Run `${GFXCOOPA_DIR}/tools/check_no_vulkan.sh
 # ${CMAKE_SOURCE_DIR}` manually to see the current count. Flip ON once that
-# redesign lands.
+# remaining redesign lands.
 option(GFX_LEAK_CHECK "Fail the build if consumer source names raw Vulkan/GLFW symbols" OFF)
 if(GFX_LEAK_CHECK)
     add_custom_target(toyengine_leak_check ALL

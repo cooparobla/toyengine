@@ -98,6 +98,7 @@ struct PixelRenderConfig {
     int   ssr_min_mip0_steps   = 1;
     bool  ssr_temporal_enabled = true;
     float ssr_temporal_blend   = 0.85f;
+    float ssr_blur_radius      = 0.5f;  /**< World-space sigma for the spatial SSR denoise (ssr_blur.frag). */
 
     // Indirect-lighting terms shared with SsrPass::Params (gfxcoopa/engine/render_features.h) --
     // fed to both the lighting pass and the SSR composite from this single instance so the two

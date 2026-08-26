@@ -341,7 +341,15 @@ public:
             config_.shaders("fullscreen.vert"),
             config_.shaders("ssr_composite.frag"),
             config_.shaders("fullscreen.vert"),
-            config_.shaders("ssr_resolve.frag"));
+            config_.shaders("ssr_resolve.frag"),
+            /*half_res=*/false,
+            coopa::gfx::engine::passes::ExtraSets{},
+            // Spatial denoise for the SSR buffer (bilateral blur, same technique as
+            // SsaoPass's own ssao_blur.frag) -- addresses hit/miss noise at reflection
+            // boundaries that temporal accumulation alone doesn't fully resolve, especially
+            // under continuous camera motion (this scene's auto-rotating orbit camera).
+            config_.shaders("fullscreen.vert"),
+            config_.shaders("ssr_blur.frag"));
         ssr_pass_->update_descriptors(
             gbuffer_target_, hiz_pass_->full_hiz_view(), hiz_pass_->sampler().handle(),
             scene_color_mip_pass_->full_view(), scene_color_mip_pass_->sampler().handle(),
@@ -687,6 +695,7 @@ public:
                     ssr_params.max_color_mip     = static_cast<int>(scene_color_mip_pass_->max_mip_level());
                     ssr_params.temporal_enabled  = config_.ssr_temporal_enabled;
                     ssr_params.temporal_blend    = config_.ssr_temporal_blend;
+                    ssr_params.ssr_blur_radius   = config_.ssr_blur_radius;
                     // Fed from the SAME config_.indirect instance as lighting_pc above -- see
                     // IndirectParams' doc (render_features.h) for why this must stay one source.
                     ssr_params.sky_intensity     = config_.indirect.sky_intensity;

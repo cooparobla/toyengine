@@ -24,8 +24,6 @@
 #ifndef TOYENGINE_RENDER_INSTANCE_STREAM_H
 #define TOYENGINE_RENDER_INSTANCE_STREAM_H
 
-#include <volk/volk.h>
-#include <vma/vk_mem_alloc.h>
 #include <glm/glm.hpp>
 
 #include <cstdint>
@@ -35,6 +33,8 @@
 #include <gfxcoopa/core/device.h>
 #include <gfxcoopa/memory/allocator.h>
 #include <gfxcoopa/memory/buffer.h>
+#include <gfxcoopa/presentation/renderer.h>
+#include <gfxcoopa/types/enums.h>
 
 namespace toy {
 namespace render {
@@ -46,8 +46,9 @@ namespace render {
  */
 class InstanceStream {
 public:
-    /** @brief Must match coopa::gfx::presentation::Renderer::MAX_FRAMES_IN_FLIGHT. */
-    static constexpr uint32_t kFrames = 2;
+    /// @brief References gfxcoopa's own constant directly, rather than a
+    /// hardcoded duplicate that could silently drift out of sync with it.
+    static constexpr uint32_t kFrames = coopa::gfx::presentation::MAX_FRAMES_IN_FLIGHT;
 
     InstanceStream(coopa::gfx::core::Device& device, coopa::gfx::memory::Allocator& allocator,
                    uint32_t capacity = 256)
@@ -57,9 +58,7 @@ public:
         for (uint32_t i = 0; i < kFrames; ++i) {
             buffers_.push_back(coopa::gfx::memory::Buffer(
                 device, allocator, sizeof(glm::mat4) * capacity_,
-                VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                VMA_MEMORY_USAGE_AUTO,
-                VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT));
+                coopa::gfx::BufferUsage::Vertex, coopa::gfx::MemoryResidency::CpuToGpu));
         }
     }
 

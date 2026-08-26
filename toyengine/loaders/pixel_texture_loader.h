@@ -3,11 +3,10 @@
  * @brief coopa::asset loader for gfx::data::Texture, forcing NEAREST filtering.
  *
  * A near-verbatim fork of gfxcoopa's TextureLoader
- * (gfxcoopa/engine/loaders/texture_loader.h), which hardcodes
- * `Texture::upload(..., VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_REPEAT)`
- * -- that blurs every pixel-art texture, which is exactly what this engine
- * exists to avoid. The only change from the original is the upload() call's
- * filter/address-mode arguments.
+ * (gfxcoopa/engine/loaders/texture_loader.h), which defaults to bilinear
+ * filtering -- that blurs every pixel-art texture, which is exactly what
+ * this engine exists to avoid. The only change from the original is the
+ * upload() call's sampler (SamplerDesc::pixel_art() instead of the default).
  */
 
 #ifndef TOYENGINE_LOADERS_PIXEL_TEXTURE_LOADER_H
@@ -20,6 +19,8 @@
 #include <gfxcoopa/memory/allocator.h>
 #include <gfxcoopa/command/command_pool.h>
 #include <gfxcoopa/engine/data/texture.h>
+#include <gfxcoopa/types/format.h>
+#include <gfxcoopa/types/sampler_desc.h>
 
 #include <stb/stb_image.h>
 
@@ -81,7 +82,7 @@ public:
         return std::make_shared<coopa::gfx::engine::data::Texture>(
             coopa::gfx::engine::data::Texture::upload(
                 device_, allocator_, cmd_pool_, decoded->pixels.data(), decoded->width, decoded->height,
-                /*srgb=*/false, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE));
+                coopa::gfx::Format::RGBA8_Unorm, coopa::gfx::SamplerDesc::pixel_art()));
     }
 
     const char* type_name() const override { return "Texture"; }

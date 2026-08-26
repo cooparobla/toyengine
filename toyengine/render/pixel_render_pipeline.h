@@ -251,7 +251,7 @@ public:
             device, offscreen_target_.render_pass_object(),
             config_.shaders("fullscreen.vert"),
             config_.shaders("gbuffer_visualize.frag"));
-        gbuffer_visualize_pass_->set_albedo_image(gbuffer_target_.g0_view(), linear_sampler_);
+        gbuffer_visualize_pass_->set_albedo_image(gbuffer_target_.g0_view_typed(), linear_sampler_);
 
         skybox_pass_ = std::make_unique<coopa::gfx::engine::passes::SkyboxPass>(
             device, offscreen_target_.render_pass_object(), camera_layout_->handle(),
@@ -456,7 +456,7 @@ public:
             device, swapchain_pass,
             config_.shaders("fullscreen.vert"),
             config_.shaders("upscale.frag"));
-        upscale_pass_->set_source_image(post_target_.color_view(), nearest_sampler_);
+        upscale_pass_->set_source_image(post_target_.color_image_object()->view_typed(), nearest_sampler_);
     }
 
     PixelRenderPipeline(const PixelRenderPipeline&) = delete;
@@ -467,7 +467,7 @@ public:
     /** @brief Low-resolution render height in pixels. */
     uint32_t render_height() const { return render_extent_.height; }
     /** @brief The final low-resolution LDR color image, for pixel-accurate screenshots. */
-    VkImage low_res_color_image() const { return post_target_.color_image_object()->handle(); }
+    coopa::gfx::memory::Image& low_res_color_image() const { return *post_target_.color_image_object(); }
 
     /**
      * @brief Renders one frame of the given scene.

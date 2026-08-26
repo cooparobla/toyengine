@@ -3,18 +3,17 @@
  * @brief Owns the engine lifetime: window, Vulkan objects, assets, scene, and
  *        the render loop.
  *
- * Replaces blendy's 378-line main() (see blendy/test.cpp) with a reusable
- * class. Construction performs initialization in the order Window -> Instance
- * -> Surface -> Device -> Allocator -> Swapchain -> CommandPool -> RenderPass
- * -> Renderer -> PixelRenderPipeline -> AssetManager -> SceneManager, matching
- * blendy/pixengine's init sequence.
+ * Composes a gfx::app::Context (which owns the Window -> Instance -> Surface
+ * -> Device -> Allocator -> Swapchain -> CommandPool -> RenderPass ->
+ * Renderer bring-up chain, plus frame timing and resize handling) as its
+ * first member, then layers PixelRenderPipeline, AssetManager, and
+ * SceneManager on top. Engine no longer orders or constructs any Vulkan/
+ * windowing object itself -- see gfxcoopa/app/context.h.
  */
 
 #ifndef TOYENGINE_CORE_ENGINE_H
 #define TOYENGINE_CORE_ENGINE_H
 
-#include <volk/volk.h>
-#include <vma/vk_mem_alloc.h>
 #include <glm/glm.hpp>
 
 #include <filesystem>
@@ -22,17 +21,10 @@
 #include <memory>
 #include <string>
 
-#include <gfxcoopa/util/volk_init.h>
-#include <gfxcoopa/util/debug_messenger.h>
-#include <gfxcoopa/core/instance.h>
-#include <gfxcoopa/core/surface.h>
-#include <gfxcoopa/core/device.h>
-#include <gfxcoopa/core/swapchain.h>
-#include <gfxcoopa/memory/allocator.h>
-#include <gfxcoopa/pipeline/render_pass.h>
-#include <gfxcoopa/command/command_pool.h>
-#include <gfxcoopa/presentation/window.h>
-#include <gfxcoopa/presentation/renderer.h>
+#include <gfxcoopa/app/context.h>
+#include <gfxcoopa/presentation/input_adapter.h>
+#include <gfxcoopa/input/input_map.h>
+#include <gfxcoopa/util/image_readback.h>
 #include <gfxcoopa/engine/loaders/mesh_loader.h>
 #include <gfxcoopa/engine/components/register.h>
 #include <gfxcoopa/engine/components/camera_component.h>
@@ -42,14 +34,11 @@
 #include <coopa/scene/scene_manager.h>
 
 #include <toyengine/core/config.h>
-#include <toyengine/core/time.h>
-#include <toyengine/input/input_map.h>
 #include <toyengine/loaders/pixel_texture_loader.h>
 #include <toyengine/render/pixel_render_config.h>
 #include <toyengine/render/pixel_render_pipeline.h>
 #include <toyengine/scene/camera_controller.h>
 #include <toyengine/scene/register.h>
-#include <toyengine/util/screenshot.h>
 
 #include <root_directory.h>
 
@@ -72,38 +61,31 @@ public:
      */
     explicit Engine(AppConfig config)
         : config_(std::move(config)),
-          window_(config_.window.title, config_.window.width, config_.window.height, /*resizable=*/true),
-          instance_("toyengine", kEnableValidation),
-          surface_(instance_, window_.handle()),
-          device_(instance_, surface_),
-          allocator_(instance_, device_),
-          swapchain_(device_, surface_, config_.window.width, config_.window.height, config_.window.vsync),
-          cmd_pool_(device_, device_.graphics_family()),
-          swapchain_pass_(device_, swapchain_.image_format(), VK_FORMAT_UNDEFINED),
-          renderer_(device_, swapchain_, swapchain_pass_, cmd_pool_),
-          pipeline_(device_, allocator_, swapchain_, swapchain_pass_, cmd_pool_, make_render_config_(config_))
+          ctx_(make_context_config_(config_)),
+          pipeline_(ctx_.device(), ctx_.allocator(), ctx_.swapchain(), ctx_.render_pass(),
+                   ctx_.command_pool(), make_render_config_(config_))
     {
         bind_default_input_();
 
         assets_.add_search_root(std::string(ROOT_DIR) + "/assets");
         assets_.register_loader<coopa::gfx::engine::data::Mesh>(
-            std::make_unique<coopa::gfx::engine::loaders::MeshLoader>(device_, allocator_, cmd_pool_));
+            std::make_unique<coopa::gfx::engine::loaders::MeshLoader>(ctx_.device(), ctx_.allocator(), ctx_.command_pool()));
         assets_.register_loader<coopa::gfx::engine::data::Texture>(
-            std::make_unique<loaders::PixelTextureLoader>(device_, allocator_, cmd_pool_));
-        coopa::gfx::engine::components::register_render_components(device_, allocator_, cmd_pool_, assets_);
+            std::make_unique<loaders::PixelTextureLoader>(ctx_.device(), ctx_.allocator(), ctx_.command_pool()));
+        coopa::gfx::engine::components::register_render_components(ctx_.device(), ctx_.allocator(), ctx_.command_pool(), assets_);
         scene::register_scene_components();
 
         scene_mgr_.load_scene(resolve_path_(config_.scene.default_scene));
     }
 
     ~Engine() {
-        device_.wait_idle();
-        // register_render_components()'s parser lambdas capture device_/allocator_/cmd_pool_
-        // by reference in SceneLoader's function-local static registry, which would
-        // otherwise only be destroyed at program exit -- after those members go out of
+        ctx_.wait_idle();
+        // register_render_components()'s parser lambdas capture ctx_'s device/allocator/
+        // cmd_pool by reference in SceneLoader's function-local static registry, which
+        // would otherwise only be destroyed at program exit -- after ctx_ goes out of
         // scope. Clear it now, while they're still alive. Then shut down the asset
-        // manager (which holds every loaded Mesh/Texture's GPU allocation) before
-        // device_/allocator_ destruct.
+        // manager (which holds every loaded Mesh/Texture's GPU allocation) before ctx_
+        // (and the device/allocator it owns) destructs.
         coopa::scene::SceneLoader::clear_component_parsers();
         assets_.shutdown();
     }
@@ -120,17 +102,13 @@ public:
      * waiting for the window to close.
      */
     void run() {
-        uint64_t max_frames = 0;
-        if (const char* mf = std::getenv("MAX_FRAMES")) max_frames = static_cast<uint64_t>(std::atoll(mf));
-        if (std::getenv("ONESHOT")) max_frames = 1;
-
-        while (!window_.should_close()) {
+        while (!ctx_.should_close()) {
             if (!tick()) break;
-            if (max_frames > 0 && time_.frame_count() >= max_frames) break;
+            if (ctx_.max_frames() > 0 && ctx_.frame_index() >= ctx_.max_frames()) break;
         }
 
         if (config_.output.save_on_exit) {
-            device_.wait_idle();
+            ctx_.wait_idle();
             save_screenshot(config_.output.filepath, /*low_res=*/true);
         }
     }
@@ -146,11 +124,10 @@ public:
         if (!low_res) {
             std::cerr << "[toyengine] Native-resolution screenshot not yet implemented; saving low-res instead.\n";
         }
-        util::save_image_png(device_, allocator_, cmd_pool_,
-                             pipeline_.low_res_color_image(),
-                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                             pipeline_.render_width(), pipeline_.render_height(),
-                             path);
+        coopa::gfx::util::save_image_png(ctx_.device(), ctx_.allocator(), ctx_.command_pool(),
+                                         pipeline_.low_res_color_image(), path);
+        std::cout << "[toyengine] Saved " << path << " (" << pipeline_.render_width()
+                  << "x" << pipeline_.render_height() << ")\n";
     }
 
     /**
@@ -158,58 +135,71 @@ public:
      * @return False when the loop should stop (window close requested).
      */
     bool tick() {
-        window_.poll_events();
-        if (input_.is_action_down("quit", [&](int k) { return window_.is_key_pressed(k); })) {
-            window_.set_should_close(true);
+        ctx_.poll(); // window_.new_frame() + poll_events() + frame timer update.
+
+        auto is_pressed = coopa::gfx::presentation::key_state_of(ctx_.window());
+        if (input_.is_down("quit", is_pressed)) {
+            ctx_.window().set_should_close(true);
         }
 
-        time_.update();
-        assets_.update(time_.delta_time());
+        assets_.update(ctx_.delta_time());
 
         if (scene_mgr_.has_scene()) {
             drive_camera_controller_(scene_mgr_.get_active_scene());
         }
-        scene_mgr_.update(time_.delta_time());
+        scene_mgr_.update(ctx_.delta_time());
 
         if (scene_mgr_.has_scene()) {
-            pipeline_.render(renderer_, scene_mgr_.get_active_scene());
+            pipeline_.render(ctx_.renderer(), scene_mgr_.get_active_scene());
         }
 
-        window_.new_frame();
-        return !window_.should_close();
+        return !ctx_.should_close();
     }
 
-    coopa::gfx::presentation::Window& window() { return window_; }
-    coopa::gfx::core::Device&         device() { return device_; }
-    input::InputMap&                  input()  { return input_; }
-    Time&                             time()   { return time_; }
+    coopa::gfx::presentation::Window& window() { return ctx_.window(); }
+    coopa::gfx::core::Device&         device() { return ctx_.device(); }
+    coopa::gfx::input::InputMap&      input()  { return input_; }
+    float    delta_time() const  { return ctx_.delta_time(); }
+    float    elapsed() const     { return static_cast<float>(ctx_.elapsed()); }
+    uint64_t frame_count() const { return ctx_.frame_index(); }
 
 private:
+    /** @brief Applies validation-layer-on-in-debug-builds to a base ContextConfig, plus ONESHOT/MAX_FRAMES. */
+    static coopa::gfx::app::ContextConfig make_context_config_(const AppConfig& config) {
+        coopa::gfx::app::ContextConfig cc;
+        cc.title      = config.window.title;
+        cc.width      = config.window.width;
+        cc.height     = config.window.height;
+        cc.resizable  = true;
+        cc.vsync      = config.window.vsync;
 #ifdef NDEBUG
-    static constexpr bool kEnableValidation = false;
+        cc.validation = false;
 #else
-    static constexpr bool kEnableValidation = true;
+        cc.validation = true;
 #endif
+        return coopa::gfx::app::ContextConfig::from_env(cc);
+    }
 
     /** @brief Binds the default action set: quit, orbit yaw/zoom, and fly move/look. */
     void bind_default_input_() {
-        input_.bind_key("quit", GLFW_KEY_ESCAPE);
+        using coopa::gfx::input::Key;
+        input_.bind("quit", Key::Escape);
 
-        input_.bind_key("orbit_yaw_left",  GLFW_KEY_A);
-        input_.bind_key("orbit_yaw_right", GLFW_KEY_D);
-        input_.bind_key("orbit_zoom_in",   GLFW_KEY_W);
-        input_.bind_key("orbit_zoom_out",  GLFW_KEY_S);
+        input_.bind("orbit_yaw_left",  Key::A);
+        input_.bind("orbit_yaw_right", Key::D);
+        input_.bind("orbit_zoom_in",   Key::W);
+        input_.bind("orbit_zoom_out",  Key::S);
 
-        input_.bind_key("fly_forward", GLFW_KEY_W);
-        input_.bind_key("fly_back",    GLFW_KEY_S);
-        input_.bind_key("fly_left",    GLFW_KEY_A);
-        input_.bind_key("fly_right",   GLFW_KEY_D);
-        input_.bind_key("fly_up",      GLFW_KEY_E);
-        input_.bind_key("fly_down",    GLFW_KEY_Q);
-        input_.bind_key("look_yaw_left",   GLFW_KEY_LEFT);
-        input_.bind_key("look_yaw_right",  GLFW_KEY_RIGHT);
-        input_.bind_key("look_pitch_up",   GLFW_KEY_UP);
-        input_.bind_key("look_pitch_down", GLFW_KEY_DOWN);
+        input_.bind("fly_forward", Key::W);
+        input_.bind("fly_back",    Key::S);
+        input_.bind("fly_left",    Key::A);
+        input_.bind("fly_right",   Key::D);
+        input_.bind("fly_up",      Key::E);
+        input_.bind("fly_down",    Key::Q);
+        input_.bind("look_yaw_left",   Key::Left);
+        input_.bind("look_yaw_right",  Key::Right);
+        input_.bind("look_pitch_up",   Key::Up);
+        input_.bind("look_pitch_down", Key::Down);
     }
 
     /**
@@ -224,8 +214,9 @@ private:
         auto* cc = scene.find_first_component<scene::CameraController>();
         if (!cc) return;
 
+        auto is_pressed = coopa::gfx::presentation::key_state_of(ctx_.window());
         auto pressed = [&](const char* action) {
-            return input_.is_action_down(action, [&](int k) { return window_.is_key_pressed(k); });
+            return input_.is_down(action, is_pressed);
         };
 
         cc->yaw_input  = (pressed("orbit_yaw_right") ? 1.0f : 0.0f) - (pressed("orbit_yaw_left") ? 1.0f : 0.0f);
@@ -260,22 +251,15 @@ private:
 
     AppConfig config_;
 
-    coopa::gfx::presentation::Window   window_;
-    coopa::gfx::core::Instance         instance_;
-    coopa::gfx::core::Surface          surface_;
-    coopa::gfx::core::Device           device_;
-    coopa::gfx::memory::Allocator      allocator_;
-    coopa::gfx::core::Swapchain        swapchain_;
-    coopa::gfx::command::CommandPool   cmd_pool_;
-    coopa::gfx::pipeline::RenderPass   swapchain_pass_;
-    coopa::gfx::presentation::Renderer renderer_;
-    render::PixelRenderPipeline        pipeline_;
+    // ctx_ is declared before pipeline_ (and constructed first, destroyed
+    // last) since pipeline_ holds references into ctx_'s owned objects.
+    coopa::gfx::app::Context    ctx_;
+    render::PixelRenderPipeline pipeline_;
 
     coopa::asset::AssetManager assets_;
     coopa::scene::SceneManager scene_mgr_;
 
-    input::InputMap input_;
-    Time            time_;
+    coopa::gfx::input::InputMap input_;
 };
 
 } // namespace core

@@ -6,29 +6,8 @@
 // Build:   cbuild --vulkan     (compiles shaders and cmake builds)
 // Run:     cplay               (runs ./build/toyengine)
 
-// volk and VMA implementations are compiled once here, in this single
-// translation unit -- see CMakeLists.txt's add_definitions() comment.
-#include <volk/volk.h>
-
-#define VMA_STATIC_VULKAN_FUNCTIONS  0
-#define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
-#include <vma/vk_mem_alloc.h>
-
 #include <iostream>
 #include <string>
-
-// stb single-header libraries guard their declarations but not their
-// implementation block against multiple #includes in one translation unit
-// (see CMakeLists.txt's comment) -- more than one toyengine header pulls in
-// stb_image.h/stb_image_write.h, so each implementation is triggered exactly
-// once here, before anything else in this TU includes them undefined.
-#define STB_IMAGE_IMPLEMENTATION
-#include <stb/stb_image.h>
-#undef STB_IMAGE_IMPLEMENTATION
-
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#include <stb_image_write.h>
-#undef STB_IMAGE_WRITE_IMPLEMENTATION
 
 #include <toyengine/core/config.h>
 #include <toyengine/core/engine.h>
@@ -51,8 +30,8 @@ int main() {
     engine.run();
 
     std::cout << "\n[toyengine] Exiting cleanly after "
-              << engine.time().frame_count() << " frames ("
-              << static_cast<int>(engine.time().elapsed()) << "s).\n";
+              << engine.frame_count() << " frames ("
+              << static_cast<int>(engine.elapsed()) << "s).\n";
 
     return 0;
 }

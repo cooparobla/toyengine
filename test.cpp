@@ -1,23 +1,9 @@
 // toyengine test suite -- registered with ctest via CMakeLists.txt's
-// enable_testing()/add_test(). Volk/VMA implementations are compiled once in
-// this translation unit, mirroring main.cpp (both are single-TU executables;
-// see CMakeLists.txt's add_definitions() comment).
-#include <volk/volk.h>
-
-#define VMA_STATIC_VULKAN_FUNCTIONS  0
-#define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
-#include <vma/vk_mem_alloc.h>
-
-// See main.cpp's identical comment: each translation unit that needs
-// stb_image.h/stb_image_write.h's implementation must trigger it exactly
-// once, before anything else in this TU includes them undefined.
-#define STB_IMAGE_IMPLEMENTATION
+// enable_testing()/add_test().
+//
+// Declarations only for stb_image (used below to verify save_screenshot()'s
+// output) -- the implementation is compiled once in gfxcoopa's src/gfx_impl.cpp.
 #include <stb/stb_image.h>
-#undef STB_IMAGE_IMPLEMENTATION
-
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#include <stb_image_write.h>
-#undef STB_IMAGE_WRITE_IMPLEMENTATION
 
 #include <cassert>
 #include <cmath>

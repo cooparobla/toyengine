@@ -111,6 +111,10 @@ struct PixelRenderConfig {
     bool  ssr_temporal_enabled = true;
     float ssr_temporal_blend   = 0.85f;
     float ssr_blur_radius      = 0.5f;  /**< World-space sigma for the spatial SSR denoise (ssr_blur.frag). */
+    float ssr_jitter           = 0.0f;  /**< Stochastic ray jitter strength, as a fraction of the
+                                              GGX lobe cone; 0 reproduces the old single-ray trace. */
+    float ssr_temporal_gamma   = 1.0f;  /**< Variance-clipping width for the SSR temporal resolve,
+                                              in std deviations of the 3x3 neighbourhood. */
 
     // --- Fog (see gfxcoopa's FogPass / gfx/fog.glsl) ---
     int       fog_mode           = 2;      /**< 0 Linear, 1 Exponential, 2 Exp2 (Unity's default). */

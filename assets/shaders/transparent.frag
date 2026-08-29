@@ -262,6 +262,11 @@ void main() {
         sp.start_mip        = material.ssr_start_mip;
         sp.min_mip0_steps   = material.ssr_min_mip0_steps;
         sp.max_color_mip    = material.ssr_max_color_mip;
+        // Jitter is opaque-surface-only: these are near-mirror (roughness ~0.05) surfaces
+        // where a lobe sample is the wrong answer, and this forward pass has no temporal
+        // resolve to integrate stochastic noise with -- see GfxSsrParams' own doc.
+        sp.jitter_strength  = 0.0;
+        sp.frame_index      = 0;
 
         // Same two early-outs ssr.frag applies before ever calling gfx_ssr_trace() --
         // roughness_cutoff (rough surfaces fall back to the flat sky term above) and a

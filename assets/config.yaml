@@ -79,6 +79,32 @@ render:
   ssr_blur_radius: 0.5        # world-space sigma for the spatial SSR denoise -- smooths raw
                                # hit/miss noise at reflection boundaries that temporal
                                # accumulation alone doesn't fully resolve
+  ssr_jitter: 0.25             # stochastic ray jitter, as a fraction of the GGX lobe cone --
+                               # turns the hard hit/miss silhouette boundary that causes rotation
+                               # shimmer into per-pixel noise the temporal/blur stages below can
+                               # integrate into a soft edge. Re-measured on this scene (pixel_demo,
+                               # roughness-0.8 floor, fog off) with a fixed-timestep frame-sequence
+                               # sweep across 0.15-0.4: the aggregate frame-to-frame flicker metric
+                               # over the FLOOR's own primary reflection is statistically identical
+                               # at every nonzero value tested, including vs 0.0 -- at this
+                               # roughness the cone-LOD colour sample is already saturated at the
+                               # mip clamp (see gfx_ssr_trace's own doc), so perturbing the ray
+                               # barely changes what gets sampled. It's kept ON, at a middling
+                               # value, because it has a real, separately-verified benefit: at this
+                               # camera framing the small glass sphere's SECONDARY reflection trace
+                               # only ever registers a hit with a jittered ray -- the deterministic
+                               # mirror ray misses the sphere's silhouette entirely from every floor
+                               # pixel tested. 0 would make that reflection permanently invisible
+                               # rather than merely faint. No visible downside found (denoised
+                               # output is visually identical to the jitter-off render).
+  ssr_temporal_gamma: 2.0     # variance-clipping width (std deviations) for the SSR temporal
+                               # resolve's history rejection, widened from 1.0 to pair with
+                               # ssr_jitter > 0 above -- at gamma 1.0 the resolve's neighbourhood
+                               # sigma is small on an otherwise-uniform floor patch, so gamma*sigma
+                               # is a much tighter band than the jitter's own induced noise,
+                               # meaning history gets clipped almost every frame instead of
+                               # integrating the noise into a stable average. 2.0 was verified (not
+                               # just assumed) via the same frame-sequence sweep as ssr_jitter.
   ssgi_intensity: 0.6         # diffuse colour-bleed strength; 0 = specular-only SSR
   ssgi_distance: 0.5          # world-space offset along N for the bounce lookup
 

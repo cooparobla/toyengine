@@ -710,7 +710,7 @@ public:
                     ssao_params.kernel_size          = config_.ssao_kernel_size;
                     ssao_params.noise_scale_x        = static_cast<float>(render_extent_.width)  / 4.0f;
                     ssao_params.noise_scale_y        = static_cast<float>(render_extent_.height) / 4.0f;
-                    ssao_params.noise_rotation        = static_cast<int>(ssao_frame_index_ & 0x7u);
+                    ssao_params.noise_rotation        = static_cast<int>(frame_index_ & 0x7u);
                     ssao_params.temporal_enabled     = config_.ssao_temporal_enabled;
                     ssao_params.temporal_blend       = config_.ssao_temporal_blend;
                     ssao_params.prev_view_proj       = prev_view_proj_;
@@ -770,7 +770,12 @@ public:
                     ssr_params.max_color_mip     = static_cast<int>(scene_color_mip_pass_->max_mip_level());
                     ssr_params.temporal_enabled  = config_.ssr_temporal_enabled;
                     ssr_params.temporal_blend    = config_.ssr_temporal_blend;
+                    ssr_params.temporal_gamma    = config_.ssr_temporal_gamma;
                     ssr_params.ssr_blur_radius   = config_.ssr_blur_radius;
+                    ssr_params.jitter_strength   = config_.ssr_jitter;
+                    // Longer period than SSAO's noise_rotation (& 0x7) -- matches ssr_ign2()'s
+                    // own `frame & 0xFF` mask in gfx/ssr_common.glsl.
+                    ssr_params.frame_index       = static_cast<int>(frame_index_ & 0xFFu);
                     // Fed from the SAME config_.indirect instance as lighting_pc above -- see
                     // IndirectParams' doc (render_features.h) for why this must stay one source.
                     ssr_params.sky_intensity     = config_.indirect.sky_intensity;
@@ -860,7 +865,7 @@ public:
         // re-enabled without a resize/reconstruct in between.
         prev_view_proj_       = proj * view;
         prev_view_proj_valid_ = true;
-        ++ssao_frame_index_;
+        ++frame_index_;
 
         return frame_presented;
     }
@@ -1357,7 +1362,11 @@ private:
     // SsrPass::Params::prev_view_proj / SsaoPass::Params::prev_view_proj.
     glm::mat4 prev_view_proj_       = glm::mat4(1.0f);
     bool      prev_view_proj_valid_ = false;
-    uint32_t  ssao_frame_index_     = 0;
+    // Monotonic per-rendered-frame counter, incremented once at the end of render(). Shared
+    // by SSAO's noise-tile rotation and SSR's stochastic ray jitter (see each pass's own
+    // Params::*frame_index* doc) -- both are per-pixel noise sources that need decorrelating
+    // frame to frame, and there is no reason for the two to disagree about which frame it is.
+    uint32_t  frame_index_          = 0;
 
     InstanceStream instance_stream_;
     bool           warned_perspective_snap_ = false;

@@ -16,6 +16,8 @@
 
 #include <glm/glm.hpp>
 
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <memory>
@@ -65,6 +67,13 @@ public:
           pipeline_(ctx_.device(), ctx_.allocator(), ctx_.swapchain(), ctx_.render_pass(),
                    ctx_.command_pool(), make_render_config_(config_))
     {
+        // Read once here rather than in the initializer list -- these are declared after
+        // assets_/scene_mgr_/input_, and initializing them there regardless of list order
+        // (member init always follows DECLARATION order) would trip -Wreorder for no benefit,
+        // since neither env read depends on any other member.
+        fixed_dt_       = fixed_dt_from_env_();
+        capture_frames_ = capture_frames_from_env_();
+
         bind_default_input_();
 
         assets_.add_search_root(std::string(ROOT_DIR) + "/assets");
@@ -100,10 +109,31 @@ public:
      * ONESHOT/MAX_FRAMES convention): ONESHOT=1 renders exactly one frame,
      * MAX_FRAMES=N renders N frames, both then exit cleanly instead of
      * waiting for the window to close.
+     *
+     * Two further env vars make multi-frame captures reproducible, which plain ONESHOT/
+     * MAX_FRAMES cannot: MAX_FRAMES alone still advances the scene on wall-clock dt (so a
+     * wall-clock-driven orbit camera lands at a different angle every run), and ONESHOT's
+     * single frame has no SSR temporal history yet -- exactly the one frame that cannot show
+     * a temporal artifact like reflection flicker.
+     *   FIXED_DT=<seconds>   overrides the per-tick delta time fed to assets/scene updates
+     *                        (see frame_dt_()), so e.g. an auto-rotating orbit camera advances
+     *                        by an exact, repeatable angle every frame instead of whatever the
+     *                        wall clock produced.
+     *   CAPTURE_FRAMES=<N>   dumps one PNG per tick to output/seq/frame_%04d.png (via
+     *                        capture_sequence_frame_()) for N frames, then stops the loop --
+     *                        independent of MAX_FRAMES, which still applies if also set.
      */
     void run() {
+        uint32_t captured = 0;
         while (!ctx_.should_close()) {
             if (!tick()) break;
+
+            if (capture_frames_ > 0) {
+                capture_sequence_frame_(captured);
+                ++captured;
+                if (captured >= capture_frames_) break;
+            }
+
             if (ctx_.max_frames() > 0 && ctx_.frame_index() >= ctx_.max_frames()) break;
         }
 
@@ -131,6 +161,20 @@ public:
     }
 
     /**
+     * @brief Writes the just-rendered frame to output/seq/frame_%04d.png, for CAPTURE_FRAMES.
+     * @param index 0-based sequence index; formatted into the filename.
+     */
+    void capture_sequence_frame_(uint32_t index) {
+        ctx_.wait_idle();
+        // Relative, like config_.output.filepath -- resolves against the process CWD, not
+        // ROOT_DIR (see save_screenshot()'s own doc / AppConfig::output.filepath's default).
+        std::filesystem::create_directories("output/seq");
+        char path[64];
+        std::snprintf(path, sizeof(path), "output/seq/frame_%04u.png", index);
+        save_screenshot(path, /*low_res=*/true);
+    }
+
+    /**
      * @brief Advances and renders exactly one frame.
      * @return False when the loop should stop (window close requested).
      */
@@ -142,18 +186,27 @@ public:
             ctx_.window().set_should_close(true);
         }
 
-        assets_.update(ctx_.delta_time());
+        const float dt = frame_dt_();
+        assets_.update(dt);
 
         if (scene_mgr_.has_scene()) {
             drive_camera_controller_(scene_mgr_.get_active_scene());
         }
-        scene_mgr_.update(ctx_.delta_time());
+        scene_mgr_.update(dt);
 
         if (scene_mgr_.has_scene()) {
             pipeline_.render(ctx_.renderer(), scene_mgr_.get_active_scene());
         }
 
         return !ctx_.should_close();
+    }
+
+    /**
+     * @brief Delta time for this tick's asset/scene updates: FIXED_DT override if set, else
+     *        the real wall-clock ctx_.delta_time(). See run()'s own doc for why this exists.
+     */
+    float frame_dt_() const {
+        return fixed_dt_ >= 0.0f ? fixed_dt_ : ctx_.delta_time();
     }
 
     coopa::gfx::presentation::Window& window() { return ctx_.window(); }
@@ -237,6 +290,18 @@ private:
         return std::string(ROOT_DIR) + "/" + path;
     }
 
+    /** @brief FIXED_DT env override for frame_dt_() -- unset (or unparsable) means -1, i.e. off. */
+    static float fixed_dt_from_env_() {
+        if (const char* v = std::getenv("FIXED_DT")) return std::strtof(v, nullptr);
+        return -1.0f;
+    }
+
+    /** @brief CAPTURE_FRAMES env override for run()'s sequence capture -- 0 means off. */
+    static uint32_t capture_frames_from_env_() {
+        if (const char* v = std::getenv("CAPTURE_FRAMES")) return static_cast<uint32_t>(std::atoll(v));
+        return 0;
+    }
+
     /** @brief Copies AppConfig's render section into a PixelRenderConfig with shader_dir/palette_path resolved. */
     static render::PixelRenderConfig make_render_config_(const AppConfig& config) {
         render::PixelRenderConfig rc = config.render;
@@ -260,6 +325,11 @@ private:
     coopa::scene::SceneManager scene_mgr_;
 
     coopa::gfx::input::InputMap input_;
+
+    // Deterministic sequence-capture support -- see run()'s own doc. Read once at construction
+    // (env vars don't change mid-run); -1.0f / 0 are their respective "off" values.
+    float    fixed_dt_       = -1.0f;
+    uint32_t capture_frames_ = 0;
 };
 
 } // namespace core

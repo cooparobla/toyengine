@@ -79,6 +79,24 @@ scene:
             ao: 1.0
       children: []
 
+    # Local fog volume test: a soft-edged pocket of mist between the two spheres, for
+    # exercising gfxcoopa's FogPass (global fog + local FogVolume) in toyengine too -- see
+    # blendy's assets/scenes/cube/scene.yaml FogPocket for the sibling test in that engine.
+    - name: FogPocket
+      active: true
+      components:
+        - type: Transform
+          position: { x: 1.7, y: -0.5, z: 0.2 }
+          rotation: { x: 0.0, y: 0.0, z: 0.3 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: FogVolume
+          shape: box
+          extent: { x: 1.0, y: 1.0, z: 0.8 }
+          color: { r: 0.75, g: 0.8, b: 0.85 }
+          density: 0.5
+          falloff: 0.25
+      children: []
+
     - name: camera
       active: true
       components:

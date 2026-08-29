@@ -105,6 +105,7 @@ struct AppConfig {
                 if (r.contains("ssr_enabled"))       config.render.ssr_enabled       = r.at("ssr_enabled").get_value<bool>();
                 if (r.contains("transparency_enabled")) config.render.transparency_enabled = r.at("transparency_enabled").get_value<bool>();
                 if (r.contains("ssr_reflect_transparent")) config.render.ssr_reflect_transparent = r.at("ssr_reflect_transparent").get_value<bool>();
+                if (r.contains("fog_enabled"))       config.render.fog_enabled       = r.at("fog_enabled").get_value<bool>();
 
                 // --- Internal resolution ---
                 if (r.contains("resolution_mode"))        config.render.resolution_mode = r.at("resolution_mode").get_value<std::string>();
@@ -169,6 +170,26 @@ struct AppConfig {
                 if (r.contains("ssr_blur_radius"))      config.render.ssr_blur_radius      = r.at("ssr_blur_radius").get_value<float>();
                 if (r.contains("ssgi_intensity"))       config.render.indirect.ssgi_intensity = r.at("ssgi_intensity").get_value<float>();
                 if (r.contains("ssgi_distance"))        config.render.indirect.ssgi_distance  = r.at("ssgi_distance").get_value<float>();
+
+                // --- Fog ---
+                if (r.contains("fog_mode"))           config.render.fog_mode           = r.at("fog_mode").get_value<int>();
+                if (r.contains("fog_density"))        config.render.fog_density        = r.at("fog_density").get_value<float>();
+                if (r.contains("fog_linear_start"))   config.render.fog_linear_start   = r.at("fog_linear_start").get_value<float>();
+                if (r.contains("fog_linear_end"))     config.render.fog_linear_end     = r.at("fog_linear_end").get_value<float>();
+                if (r.contains("fog_color")) {
+                    const auto& c = r.at("fog_color");
+                    if (c.size() >= 3) {
+                        config.render.fog_color = glm::vec3(
+                            c.at(0).get_value<float>(), c.at(1).get_value<float>(), c.at(2).get_value<float>());
+                    }
+                }
+                if (r.contains("fog_height_base"))    config.render.fog_height_base    = r.at("fog_height_base").get_value<float>();
+                if (r.contains("fog_height_falloff")) config.render.fog_height_falloff = r.at("fog_height_falloff").get_value<float>();
+                if (r.contains("fog_sky_blend"))      config.render.fog_sky_blend      = r.at("fog_sky_blend").get_value<float>();
+                if (r.contains("fog_sun_amount"))     config.render.fog_sun_amount     = r.at("fog_sun_amount").get_value<float>();
+                if (r.contains("fog_sun_anisotropy")) config.render.fog_sun_anisotropy = r.at("fog_sun_anisotropy").get_value<float>();
+                if (r.contains("fog_max_opacity"))    config.render.fog_max_opacity    = r.at("fog_max_opacity").get_value<float>();
+                if (r.contains("fog_max_distance"))   config.render.fog_max_distance   = r.at("fog_max_distance").get_value<float>();
             }
 
             if (root.contains("output")) {

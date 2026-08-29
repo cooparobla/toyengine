@@ -75,6 +75,9 @@
 #include <gfxcoopa/engine/passes/transparent_pass.h>
 #include <gfxcoopa/engine/targets/transparent_capture_target.h>
 #include <gfxcoopa/engine/passes/transparent_capture_pass.h>
+#include <gfxcoopa/engine/passes/fog_pass.h>
+#include <gfxcoopa/engine/data/fog_data.h>
+#include <gfxcoopa/engine/components/fog_volume.h>
 
 #include <coopa/scene/scene.h>
 #include <coopa/scene/components/transform_component.h>
@@ -194,6 +197,12 @@ public:
           offscreen_target_(device, allocator, render_extent_.width, render_extent_.height, coopa::gfx::Format::RGBA16_Sfloat),
           post_target_(device, allocator, render_extent_.width, render_extent_.height, coopa::gfx::Format::RGBA8_Unorm),
           transparent_capture_target_(device, allocator, render_extent_.width, render_extent_.height),
+          // Fog composite target -- HDR, same reasoning as offscreen_target_ above: fog belongs
+          // in linear HDR (Unity applies it there too), ahead of pixel_stylize_pass_'s tonemap
+          // step. A separate target is mandatory, not a style choice: pipeline::RenderPass
+          // hardcodes LOAD_OP_CLEAR, so FogPass can't reopen and composite in place onto the
+          // image it reads from.
+          fog_target_(device, allocator, render_extent_.width, render_extent_.height, coopa::gfx::Format::RGBA16_Sfloat),
           nearest_sampler_(coopa::gfx::engine::util::Sampler::nearest(device)),
           linear_sampler_(coopa::gfx::engine::util::Sampler::linear(device)),
           // Hardware compareEnable, not a plain linear sampler -- see gfx/shadow_sampling.glsl's
@@ -202,6 +211,7 @@ public:
           shadow_sampler_(coopa::gfx::engine::util::Sampler::shadow(device)),
           camera_ubo_(device, allocator),
           light_data_(device, allocator),
+          fog_data_(device, allocator),
           shadow_target_(device, allocator, config_.shadow_map_resolution, config_.cube_shadow_resolution),
           palette_lut_(coopa::gfx::engine::data::PaletteLut::load(device, allocator, cmd_pool, config_.palette_path)),
           instance_stream_(device, allocator)
@@ -430,10 +440,6 @@ public:
             transparent_extra,
             static_cast<uint32_t>(sizeof(TransparentLightingPushConstants)));
 
-        pixel_stylize_pass_ = std::make_unique<coopa::gfx::engine::passes::PixelStylizePass>(
-            device, post_target_.render_pass_object(),
-            config_.shaders("fullscreen.vert"),
-            config_.shaders("pixel_stylize.frag"));
         // Without SSR, post reads the deferred-lit+sky target directly; with it, post reads
         // ssr_pass_'s composite output (specular swap + SSGI bounce already applied). Chosen
         // once here from config_.ssr_enabled's STARTUP value, not re-selected per frame: unlike
@@ -443,9 +449,32 @@ public:
         // shader-side selector between two permanently-bound views, neither of which exists
         // yet. Harmless today -- nothing currently mutates config_.ssr_enabled after
         // construction -- but flip this toggle from a future live debug UI and post-process
-        // will keep reading whichever source was current at startup.
+        // will keep reading whichever source was current at startup. fog_pass_ shares this
+        // exact same fixed source (see fog_pass_'s own construction just below).
+        pre_fog_view_typed_ =
+            config_.ssr_enabled ? ssr_pass_->output_view_typed() : offscreen_target_.color_view_typed();
+
+        // Fog composite -- always constructed (mirrors SSR/transparency's always-on-but-
+        // runtime-gated policy elsewhere in this pipeline); render() checks config_.fog_enabled
+        // per frame to decide whether to execute it. Reads pre_fog_view_typed_ (fixed at
+        // startup, same reasoning as pixel_stylize_pass_'s own binding above), so transparent
+        // geometry -- drawn in place into that same underlying image -- is fogged too, matching
+        // Unity and blendy's own FogPass integration.
+        fog_pass_ = std::make_unique<coopa::gfx::engine::passes::FogPass>(
+            device, fog_target_.render_pass_object(), fog_data_.buffer(),
+            config_.shaders("fullscreen.vert"),
+            config_.shaders("fog.frag"));
+        fog_pass_->set_source_images(pre_fog_view_typed_, gbuffer_target_.g1_view_typed(),
+                                     gbuffer_target_.g2_view_typed(), linear_sampler_);
+
+        pixel_stylize_pass_ = std::make_unique<coopa::gfx::engine::passes::PixelStylizePass>(
+            device, post_target_.render_pass_object(),
+            config_.shaders("fullscreen.vert"),
+            config_.shaders("pixel_stylize.frag"));
+        // Same startup-only-binding policy as pre_fog_view_typed_ above: whichever of fog's
+        // output or the pre-fog view was current on config_.fog_enabled at construction time.
         pixel_stylize_pass_->set_source_images(
-            config_.ssr_enabled ? ssr_pass_->output_view_typed() : offscreen_target_.color_view_typed(),
+            config_.fog_enabled ? fog_target_.color_view_typed() : pre_fog_view_typed_,
             gbuffer_target_.depth_view_typed(), gbuffer_target_.g1_view_typed(),
             palette_lut_.view_typed(), linear_sampler_, nearest_sampler_);
 
@@ -531,6 +560,52 @@ public:
             gpu0.attenuation.w = 1.0f;
         }
         light_data_.upload();
+
+        // Fog UBO. Gated on fog_enabled -- when fog is off, record() skips fog_pass_'s draw
+        // entirely (see that call site), so this upload would otherwise be wasted work.
+        // Mirrors blendy's PbrRenderPipeline::update_scene_data_() fog fill (see
+        // blendy/src/blendy/render/pbr_render_pipeline.h) -- gather via
+        // scene.get_components<FogVolumeComponent>() instead of a cached traversal, matching
+        // how this pipeline already gathers PointLightComponent/MeshRenderer above.
+        if (config_.fog_enabled) {
+            using coopa::gfx::engine::components::FogVolumeComponent;
+            using coopa::gfx::engine::components::FogVolumeShape;
+
+            auto& fog = fog_data_.data();
+            fog.inv_view_proj = glm::inverse(proj * view);
+            fog.camera_pos    = glm::vec4(cam_pos, 1.0f);
+            fog.fog_color     = glm::vec4(config_.fog_color, 1.0f);
+            if (dir_light) {
+                fog.sun_direction = glm::vec4(glm::normalize(dir_light->direction), 0.0f);
+                fog.sun_color     = glm::vec4(dir_light->color * dir_light->intensity, 1.0f);
+            } else {
+                fog.sun_direction = glm::vec4(0.0f, 0.0f, -1.0f, 0.0f);
+                fog.sun_color     = glm::vec4(0.0f);
+            }
+            fog.mode_density  = glm::vec4(static_cast<float>(config_.fog_mode), config_.fog_density,
+                                          config_.fog_linear_start, config_.fog_linear_end);
+            fog.height_params = glm::vec4(config_.fog_height_base, config_.fog_height_falloff,
+                                          config_.fog_sky_blend, config_.fog_sun_amount);
+
+            auto fog_volumes = scene.get_components<FogVolumeComponent>();
+            uint32_t volume_count = static_cast<uint32_t>(
+                std::min<size_t>(fog_volumes.size(), coopa::gfx::engine::data::MAX_FOG_VOLUMES));
+            fog.misc_params = glm::vec4(config_.fog_sun_anisotropy, config_.fog_max_opacity,
+                                        static_cast<float>(volume_count), config_.fog_max_distance);
+
+            for (uint32_t i = 0; i < volume_count; ++i) {
+                auto* fv = fog_volumes[i];
+                auto& gpu = fog.volumes[i];
+                glm::mat4 world = (fv->owner && fv->owner->get_transform())
+                    ? fv->owner->get_transform()->get_world_matrix() : glm::mat4(1.0f);
+                gpu.inv_world     = glm::inverse(world);
+                gpu.extent_shape  = glm::vec4(fv->extent, fv->shape == FogVolumeShape::Sphere ? 1.0f : 0.0f);
+                gpu.color_density = glm::vec4(fv->color, fv->density);
+                gpu.falloff       = glm::vec4(fv->falloff, 0.0f, 0.0f, 0.0f);
+            }
+
+            fog_data_.upload();
+        }
 
         LetterboxRect letterbox = compute_letterbox(
             swapchain_.extent().width, swapchain_.extent().height,
@@ -742,6 +817,22 @@ public:
                     if (transparent_ran) {
                         transition_gbuffer_depth_to_shader_read_(cmd, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
                     }
+                }
+
+                // Fog composite. After the transparent pass (so BLEND geometry is fogged too --
+                // it was drawn in place into the same underlying image pre_fog_view_typed_
+                // names, above) and before pixel_stylize_pass_ (so fog sits in linear HDR,
+                // ahead of tonemap/outline/dither/palette). fog_pass_ always reads from the
+                // fixed pre_fog_view_typed_ chosen at construction (see that call site's
+                // comment); pixel_stylize_pass_'s own source was likewise fixed at construction
+                // to fog_target_ whenever config_.fog_enabled was true then, so this draw is
+                // gated the same way -- flipping the config flag without a pipeline rebuild
+                // would leave post-process reading a stale target, exactly like the ssr_enabled
+                // caveat those same comments already document.
+                if (config_.fog_enabled) {
+                    fog_target_.begin(cmd);
+                    fog_pass_->draw(cmd, render_extent_.width, render_extent_.height);
+                    fog_target_.end(cmd);
                 }
 
                 post_target_.begin(cmd);
@@ -1203,6 +1294,7 @@ private:
     // constructed (mirrors gbuffer_target_'s own always-on policy); render() checks
     // config_.ssr_reflect_transparent per frame to decide whether to draw into/read from it.
     coopa::gfx::engine::targets::TransparentCaptureTarget transparent_capture_target_;
+    coopa::gfx::engine::targets::OffscreenTarget fog_target_; // fog composite, pre-post, HDR
     coopa::gfx::engine::util::Sampler            nearest_sampler_;
     coopa::gfx::engine::util::Sampler            linear_sampler_;
     coopa::gfx::engine::util::Sampler            shadow_sampler_;
@@ -1216,6 +1308,14 @@ private:
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> light_layout_;
     std::unique_ptr<coopa::gfx::pipeline::DescriptorPool>      light_pool_;
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>       light_set_;
+
+    coopa::gfx::engine::data::FogData fog_data_;
+    std::unique_ptr<coopa::gfx::engine::passes::FogPass> fog_pass_;
+    // Fixed source view fog_pass_ reads from -- chosen once from config_.ssr_enabled's startup
+    // value, same policy as pixel_stylize_pass_'s own binding (see that construction-time
+    // comment). Kept as a member (not a local) so pixel_stylize_pass_'s own construction, later
+    // in the ctor body, can fall back to it when fog is disabled.
+    coopa::gfx::TextureView pre_fog_view_typed_;
 
     coopa::gfx::engine::targets::ShadowMapTarget shadow_target_;
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout>   shadow_layout_;

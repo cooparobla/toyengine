@@ -45,6 +45,18 @@ struct PixelRenderConfig {
      */
     bool ssr_reflect_transparent = false;
 
+    /**
+     * Unity-style global fog (Linear/Exponential/Exp2) plus up to 8 local box/sphere
+     * FogVolume components, drawn after the transparent pass (so BLEND geometry is fogged
+     * too) and before pixel_stylize_pass_ (so fog sits in linear HDR, ahead of tonemap/
+     * outline/dither/palette -- see gfxcoopa's FogPass and PixelRenderPipeline's
+     * pre_fog_view_typed_). Always constructed; render() checks this per frame. The pass's
+     * SOURCE image is chosen once at construction from config_.ssr_enabled's startup value,
+     * matching pixel_stylize_pass_'s own binding -- see that call site's comment for why a
+     * per-frame rebind isn't safe under this pipeline's frame-overlap model.
+     */
+    bool fog_enabled = false;
+
     // --- Internal resolution ---
     std::string resolution_mode = "fixed";   /**< "fixed" or "divisor". */
     uint32_t    render_width    = 480;       /**< Used when resolution_mode == "fixed". */
@@ -99,6 +111,22 @@ struct PixelRenderConfig {
     bool  ssr_temporal_enabled = true;
     float ssr_temporal_blend   = 0.85f;
     float ssr_blur_radius      = 0.5f;  /**< World-space sigma for the spatial SSR denoise (ssr_blur.frag). */
+
+    // --- Fog (see gfxcoopa's FogPass / gfx/fog.glsl) ---
+    int       fog_mode           = 2;      /**< 0 Linear, 1 Exponential, 2 Exp2 (Unity's default). */
+    float     fog_density        = 0.02f;
+    float     fog_linear_start   = 5.0f;
+    float     fog_linear_end     = 60.0f;
+    glm::vec3 fog_color          = glm::vec3(0.55f, 0.62f, 0.72f);
+    float     fog_height_base    = 0.0f;   /**< World Z (engine is Z-up); fog_height_falloff <= 0 disables height fog. */
+    float     fog_height_falloff = 0.0f;
+    float     fog_sky_blend      = 0.0f;   /**< 0 = flat fog_color, 1 = fully blended toward the sky gradient. */
+    float     fog_sun_amount     = 0.0f;   /**< Additive Henyey-Greenstein sun in-scatter tint strength; 0 disables. */
+    float     fog_sun_anisotropy = 0.7f;   /**< HG g; 0 isotropic, close to 1 = tight forward scatter toward the sun. */
+    float     fog_max_opacity    = 1.0f;   /**< Ceiling on how much fog can occlude the scene (1 = fully opaque at max density). */
+    float     fog_max_distance   = 150.0f; /**< Distance the global fog term saturates at, and the distance sky pixels are
+                                            evaluated at -- prevents a hard seam where a grazing near-horizon ray's apparent
+                                            distance blows up against an otherwise-unfogged sky. */
 
     // Indirect-lighting terms shared with SsrPass::Params (gfxcoopa/engine/render_features.h) --
     // fed to both the lighting pass and the SSR composite from this single instance so the two

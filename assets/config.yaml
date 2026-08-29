@@ -18,6 +18,7 @@ render:
   ssr_enabled: true          # also gates the SSGI diffuse-bounce term (ssgi_intensity)
   transparency_enabled: true # forward BLEND-material pass; off by default (no demo scene uses it yet)
   ssr_reflect_transparent: true # opaque surfaces also reflect transparent geometry (roughly doubles SSR cost; requires ssr_enabled + transparency_enabled)
+  fog_enabled: true          # Unity-style global fog + local FogVolume components (see gfxcoopa's FogPass)
 
   # --- Internal resolution ---
   resolution_mode: fixed     # fixed | divisor
@@ -80,6 +81,22 @@ render:
                                # accumulation alone doesn't fully resolve
   ssgi_intensity: 0.6         # diffuse colour-bleed strength; 0 = specular-only SSR
   ssgi_distance: 0.5          # world-space offset along N for the bounce lookup
+
+  # --- Fog ---
+  fog_mode: 2                 # 0 Linear, 1 Exponential, 2 Exp2 (Unity's default)
+  fog_density: 0.03           # extinction per world unit at the height falloff base (Exponential/Exp2 modes)
+  fog_linear_start: 3.0       # world-space distance fog starts ramping in (Linear mode)
+  fog_linear_end: 25.0        # world-space distance fog reaches max_opacity (Linear mode)
+  fog_color: [0.6, 0.66, 0.75] # base fog colour
+  fog_height_base: -0.5       # world Z fog is at full density below (engine is Z-up; plane.000 sits at z=-0.5)
+  fog_height_falloff: 2.0     # exponential height falloff distance in world units; <= 0 disables height fog
+  fog_sky_blend: 0.5          # 0 = flat fog_color, 1 = fully blended toward the sky gradient at the horizon
+  fog_sun_amount: 0.3         # additive Henyey-Greenstein sun in-scatter tint strength; 0 disables
+  fog_sun_anisotropy: 0.7     # HG g; 0 isotropic, close to 1 = tight forward scatter toward the sun
+  fog_max_opacity: 1.0        # ceiling on how much fog can occlude the scene (1 = fully opaque at max density)
+  fog_max_distance: 60.0      # distance the global fog term saturates at, and the distance sky pixels are evaluated
+                               # at -- prevents a hard seam where a grazing near-horizon ray's apparent distance
+                               # blows up against an otherwise-unfogged sky
 
 output:
   save_on_exit: true

@@ -74,6 +74,7 @@ layout(set = 3, binding = 0) uniform sampler2D g_albedo_ao;          // RGB = Al
 layout(set = 3, binding = 1) uniform sampler2D g_normal_metallic;    // RGB = World Normal, A = Metallic
 layout(set = 3, binding = 2) uniform sampler2D g_position_roughness; // RGB = World Pos, A = Roughness
 layout(set = 3, binding = 3) uniform sampler2D g_ssao;                // R = SsaoPass output (or its neutral 1.0 texture)
+layout(set = 3, binding = 4) uniform sampler2D g_emissive;            // RGB = emissive radiance (HDR)
 
 layout(push_constant) uniform PixelParams {
     float light_bands;       // discrete N.L shading steps, e.g. 4.0; used when soft_lighting is off
@@ -163,6 +164,7 @@ void main() {
     // 1.0 (fully unoccluded) whenever SSAO is disabled -- PixelRenderPipeline binds
     // SsaoPass::neutral_view() in that case, so this read needs no separate flag.
     float ssao = texture(g_ssao, in_uv).r;
+    vec3 emissive = texture(g_emissive, in_uv).rgb;
 
     vec3 N = g1.rgb;
     if (dot(N, N) < 0.001) {
@@ -257,5 +259,7 @@ void main() {
     vec3 kD_ind = (vec3(1.0) - ind.F) * (1.0 - metallic);
     vec3 ambient = (kD_ind * albedo * ind_diff + ind.value) * ao * ssao;
 
-    out_color = vec4(ambient + Lo, 1.0);
+    // emissive is added last, after ambient's * ao * ssao -- an emissive surface glows
+    // even in a fully occluded/dark crevice, unlike the lit terms above it.
+    out_color = vec4(ambient + Lo + emissive, 1.0);
 }

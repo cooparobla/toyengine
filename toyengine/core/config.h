@@ -106,6 +106,7 @@ struct AppConfig {
                 if (r.contains("transparency_enabled")) config.render.transparency_enabled = r.at("transparency_enabled").get_value<bool>();
                 if (r.contains("ssr_reflect_transparent")) config.render.ssr_reflect_transparent = r.at("ssr_reflect_transparent").get_value<bool>();
                 if (r.contains("fog_enabled"))       config.render.fog_enabled       = r.at("fog_enabled").get_value<bool>();
+                if (r.contains("bloom_enabled"))     config.render.bloom_enabled     = r.at("bloom_enabled").get_value<bool>();
 
                 // --- Internal resolution ---
                 if (r.contains("resolution_mode"))        config.render.resolution_mode = r.at("resolution_mode").get_value<std::string>();
@@ -192,6 +193,13 @@ struct AppConfig {
                 if (r.contains("fog_sun_anisotropy")) config.render.fog_sun_anisotropy = r.at("fog_sun_anisotropy").get_value<float>();
                 if (r.contains("fog_max_opacity"))    config.render.fog_max_opacity    = r.at("fog_max_opacity").get_value<float>();
                 if (r.contains("fog_max_distance"))   config.render.fog_max_distance   = r.at("fog_max_distance").get_value<float>();
+
+                if (r.contains("bloom_threshold")) config.render.bloom_threshold = r.at("bloom_threshold").get_value<float>();
+                if (r.contains("bloom_soft_knee")) config.render.bloom_soft_knee = r.at("bloom_soft_knee").get_value<float>();
+                if (r.contains("bloom_intensity")) config.render.bloom_intensity = r.at("bloom_intensity").get_value<float>();
+                if (r.contains("bloom_scatter"))   config.render.bloom_scatter   = r.at("bloom_scatter").get_value<float>();
+                if (r.contains("bloom_radius"))    config.render.bloom_radius    = r.at("bloom_radius").get_value<float>();
+                if (r.contains("bloom_clamp"))     config.render.bloom_clamp     = r.at("bloom_clamp").get_value<float>();
             }
 
             if (root.contains("output")) {

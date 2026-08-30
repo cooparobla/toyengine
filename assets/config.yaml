@@ -19,6 +19,14 @@ render:
   transparency_enabled: true # forward BLEND-material pass; off by default (no demo scene uses it yet)
   ssr_reflect_transparent: true # opaque surfaces also reflect transparent geometry (roughly doubles SSR cost; requires ssr_enabled + transparency_enabled)
   fog_enabled: true          # Unity-style global fog + local FogVolume components (see gfxcoopa's FogPass)
+  bloom_enabled: true         # additive glow from bright HDR regions; independent BloomPass pyramid (no longer reuses SSR's mip chain)
+  
+  bloom_threshold: 1.0        # brightness (max of R,G,B) below which nothing glows; 1.0 = "brighter than white"
+  bloom_soft_knee: 0.5        # 0..1 fraction of the threshold the quadratic knee spans; 0 = hard cutoff (pops under camera motion)
+  bloom_intensity: 5.0        # final multiplier on the composited glow; <= 0 disables
+  bloom_scatter: 0.7          # per-level blend toward the coarser tent (Unity URP's "Scatter"); higher = wider, softer halo
+  bloom_radius: 1.0           # tent-filter width multiplier on the upsample
+  bloom_clamp: 20.0           # per-tap HDR ceiling before thresholding; firefly guard
 
   # --- Internal resolution ---
   resolution_mode: fixed     # fixed | divisor

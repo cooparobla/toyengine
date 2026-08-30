@@ -74,9 +74,47 @@ scene:
           mesh_path: sphere.000
           material:
             albedo: { r: 0.6, g: 0.8, b: 0.9 }
-            metallic: 0.0
+            # metallic: 0.9, not the original 0.0 -- a dielectric's F0 is a flat 0.04, so any
+            # reflection (SSR or otherwise) is a sub-5% tint, effectively invisible against a
+            # directly-lit diffuse response of similar magnitude. Full metallic makes F0 =
+            # albedo, the mirror-sphere-reflects-its-neighbour effect SSR is actually built to
+            # show (see emissive_sphere.000's placement comment below).
+            metallic: 0.5
             roughness: 0.05
             ao: 1.0
+      children: []
+
+    # Emissive test: a small glowing orb resting beside opaque_sphere.000, at the same height --
+    # NOT above it. SSR can only reflect a surface whose CAMERA-FACING side is visible in the
+    # G-buffer; an object directly above a sphere, viewed from this scene's overhead camera,
+    # would need to reflect off the sphere's top and hit the orb's UNDERSIDE, a backface that
+    # was never rendered and that SSR's screen-space ray march therefore cannot find (nor would
+    # the hit survive its depth/thickness test, sized for near-camera-depth surfaces). Placed
+    # beside the sphere instead, the orb's own camera-facing side is exactly what the reflection
+    # ray needs, which is the ordinary "mirror ball reflects its neighbour" case SSR is built
+    # for. Albedo is near-black deliberately -- direct and indirect lighting then contribute
+    # almost nothing, so what's on screen is the emissive term alone. Note the engine has no
+    # emissive-as-a-light-source concept: this orb does NOT illuminate the sphere directly, it
+    # only bleeds onto it via the screen-space SSR/SSGI terms (and, separately, via the bloom
+    # composite in pixel_stylize.frag, which is a screen-space glow, not a lighting effect
+    # either) -- and, being OPAQUE, it still casts a normal directional shadow (the shadow pass
+    # never reads material).
+    - name: emissive_sphere.000
+      active: true
+      components:
+        - type: Transform
+          position: { x: 3.35, y: -0.5, z: -0.2 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 0.3, y: 0.3, z: 0.3 }
+        - type: MeshRenderer
+          mesh_path: sphere.000
+          material:
+            albedo: { r: 0.05, g: 0.03, b: 0.02 }
+            metallic: 0.0
+            roughness: 0.9
+            ao: 1.0
+            emissive: { r: 1.0, g: 0.45, b: 0.12 }
+            emissive_strength: 1.6
       children: []
 
     # Local fog volume test: a soft-edged pocket of mist between the two spheres, for

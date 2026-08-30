@@ -116,6 +116,34 @@ struct PixelRenderConfig {
     float ssr_temporal_gamma   = 1.0f;  /**< Variance-clipping width for the SSR temporal resolve,
                                               in std deviations of the 3x3 neighbourhood. */
 
+    /**
+     * Additive glow from a dedicated BloomPass pyramid (bright-pass threshold -> multi-tap
+     * downsample -> tent-filter upsample+combine -- see gfxcoopa's bloom_pass.h), sourced
+     * from the FINAL pre-tonemap HDR image (fog output when fog is on, else
+     * pre_fog_view_typed_) -- the same image pixel_stylize_pass_ itself reads, so SSR
+     * reflections, transparent geometry and fog all bloom too.
+     *
+     * Independent of ssr_enabled/scene_color_mip_pass_: an earlier version of this feature
+     * reused SSR's own mip chain as a shortcut, which both tied bloom's availability to SSR
+     * being on and produced a visibly unstable glow (a hard 2x2 texelFetch box downsample has
+     * no sub-texel interpolation, so which texels land in a box -- and thus the sampled
+     * brightness -- pops discretely as the camera moves). BloomPass fixes both: it's a
+     * separate pyramid with its own construction-fixed descriptors (no per-frame rebind, so
+     * unlike scene_color_mip_pass_ it needs no device_.wait_idle() either), and every kernel
+     * in it is a smooth multi-tap `texture()` read, not `texelFetch()`.
+     *
+     * bloom_enabled is a startup-fixed toggle (the descriptor binding it controls is decided
+     * once at construction, same policy as ssr_enabled/fog_enabled's own source bindings).
+     * bloom_intensity <= 0 is a genuine per-frame no-op in the shader either way.
+     */
+    bool  bloom_enabled   = false;
+    float bloom_threshold = 1.0f;   /**< Brightness (max3 of RGB) below which nothing glows. 1.0 = "brighter than white". */
+    float bloom_soft_knee = 0.5f;   /**< 0..1 fraction of bloom_threshold the quadratic knee spans; 0 = hard cutoff (pops). */
+    float bloom_intensity = 1.0f;   /**< Final multiplier on the composited glow; <= 0 disables. */
+    float bloom_scatter   = 0.7f;   /**< Per-level blend toward the coarser tent; Unity URP's Bloom "Scatter". Higher = wider, softer halo. */
+    float bloom_radius    = 1.0f;   /**< Tent-filter width multiplier on the upsample; > 1 widens further at a small cost in sharpness. */
+    float bloom_clamp     = 20.0f;  /**< Per-tap HDR ceiling applied before thresholding; suppresses single-texel fireflies. */
+
     // --- Fog (see gfxcoopa's FogPass / gfx/fog.glsl) ---
     int       fog_mode           = 2;      /**< 0 Linear, 1 Exponential, 2 Exp2 (Unity's default). */
     float     fog_density        = 0.02f;

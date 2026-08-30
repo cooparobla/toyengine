@@ -5,7 +5,7 @@ layout(location = 1) in vec3 frag_world_normal;
 layout(location = 2) in vec2 frag_uv;
 layout(location = 3) in mat3 frag_TBN;
 
-// Push constants: Material only (32 bytes) -- model/normal_matrix moved to
+// Push constants: Material only (48 bytes) -- model/normal_matrix moved to
 // the per-instance vertex stream (see gbuffer.vert), and this block is now
 // shared once per instanced draw batch rather than pushed per object.
 layout(push_constant) uniform PushConstants {
@@ -14,12 +14,14 @@ layout(push_constant) uniform PushConstants {
     float roughness;
     float ao;
     float alpha_cutoff; // 0.0 disables the alpha test below
+    vec4  emissive;     // xyz = pre-multiplied emissive radiance, w reserved
 } material;
 
 // G-Buffer Render Targets
 layout(location = 0) out vec4 out_albedo_ao;          // RGB = Albedo, A = AO
 layout(location = 1) out vec4 out_normal_metallic;    // RGB = World Normal, A = Metallic
 layout(location = 2) out vec4 out_position_roughness; // RGB = World Pos, A = Roughness
+layout(location = 3) out vec4 out_emissive;           // RGB = emissive radiance (HDR), A = unused
 
 void main() {
     // MASK materials: alpha_cutoff > 0 arms the test; albedo.a carries the alpha. A constant
@@ -37,4 +39,5 @@ void main() {
     out_albedo_ao          = vec4(albedo, ao);
     out_normal_metallic    = vec4(N, metallic);
     out_position_roughness = vec4(frag_world_pos, roughness);
+    out_emissive            = vec4(material.emissive.rgb, 0.0);
 }

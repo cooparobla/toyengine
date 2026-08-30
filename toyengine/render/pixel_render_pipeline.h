@@ -26,7 +26,10 @@
  * exactly one cube map, not one per light -- see shadow_map_target.h);
  * every other point light still lights the scene, just without occlusion.
  * GBufferVisualizePass is retained as an unused standalone diagnostic (see
- * its own file doc).
+ * its own file doc). `bloom_pass_` (gfxcoopa's BloomPass) is likewise always
+ * constructed, gated per-frame by `bloom_enabled` -- but unlike
+ * scene_color_mip_pass_/hiz_pass_ below, every descriptor it owns is bound
+ * once at construction and never rebinds, so it needs no per-frame wait.
  *
  * No per-frame vkQueueWaitIdle in general -- unlike blendy's
  * PbrRenderPipeline::record_offscreen_() -- *except* when `ssr_enabled` is
@@ -90,6 +93,7 @@
 #include <gfxcoopa/engine/passes/ssr_pass.h>
 #include <toyengine/render/passes/gbuffer_visualize_pass.h>
 #include <gfxcoopa/engine/passes/pixel_stylize_pass.h>
+#include <gfxcoopa/engine/passes/bloom_pass.h>
 #include <toyengine/render/passes/upscale_pass.h>
 
 namespace toy {
@@ -308,7 +312,8 @@ public:
             std::vector<coopa::gfx::pipeline::PushConstantRange>{
                 {coopa::gfx::ShaderStage::Fragment, 0, sizeof(PixelLightingPushConstants)}});
         pixel_lighting_pass_->set_gbuffer_images(
-            gbuffer_target_.g0_view_typed(), gbuffer_target_.g1_view_typed(), gbuffer_target_.g2_view_typed(), linear_sampler_);
+            gbuffer_target_.g0_view_typed(), gbuffer_target_.g1_view_typed(), gbuffer_target_.g2_view_typed(),
+            gbuffer_target_.g3_view_typed(), linear_sampler_);
         pixel_lighting_pass_->set_ssao_image(ssao_view, ssao_pass_->sampler().handle());
 
         // ssr_enabled is a RUNTIME flag (see render_features.h's policy doc): hiz_pass_/
@@ -467,16 +472,50 @@ public:
         fog_pass_->set_source_images(pre_fog_view_typed_, gbuffer_target_.g1_view_typed(),
                                      gbuffer_target_.g2_view_typed(), linear_sampler_);
 
+        // The image BOTH pixel_stylize_pass_ and bloom_pass_ read: the final pre-tonemap HDR
+        // frame. One local, not two independent expressions, so the two can never drift apart
+        // (same single-source-of-truth reasoning as config_.indirect). Fixed at construction,
+        // same startup-only-binding policy as pre_fog_view_typed_ above.
+        //
+        // This is a deliberate CORRECTNESS change from bloom's previous implementation, not
+        // just a stability one: that version sourced offscreen_target_ (pre-SSR, pre-
+        // transparent, pre-fog) purely as a side effect of reusing scene_color_mip_pass_'s
+        // chain, so SSR reflections, BLEND geometry and fog never contributed to the glow.
+        // They do now.
+        coopa::gfx::TextureView post_source_view =
+            config_.fog_enabled ? fog_target_.color_view_typed() : pre_fog_view_typed_;
+
+        // Independent bloom pyramid (bright-pass threshold -> multi-tap downsample ->
+        // tent-filter upsample+combine -- see gfxcoopa's bloom_pass.h). Always constructed
+        // (mirrors this pipeline's always-on-but-runtime-gated policy elsewhere), but its
+        // result is only BOUND into pixel_stylize_pass_ below when config_.bloom_enabled was
+        // true at construction -- an unbound-but-never-executed target would leave that
+        // binding pointing at an image still in VK_IMAGE_LAYOUT_UNDEFINED, the same class of
+        // hazard ssr_pass_'s own secondary-source binding already hit and documented fixing
+        // once. Unlike scene_color_mip_pass_, every descriptor here is bound once at
+        // construction and never rebinds, so it needs no per-frame device_.wait_idle().
+        bloom_pass_ = std::make_unique<coopa::gfx::engine::passes::BloomPass>(
+            device, allocator, render_extent_.width, render_extent_.height,
+            post_source_view, linear_sampler_,
+            config_.shaders("fullscreen.vert"),
+            config_.shaders("bloom_prefilter.frag"),
+            config_.shaders("bloom_downsample.frag"),
+            config_.shaders("bloom_upsample.frag"));
+
         pixel_stylize_pass_ = std::make_unique<coopa::gfx::engine::passes::PixelStylizePass>(
             device, post_target_.render_pass_object(),
             config_.shaders("fullscreen.vert"),
             config_.shaders("pixel_stylize.frag"));
-        // Same startup-only-binding policy as pre_fog_view_typed_ above: whichever of fog's
-        // output or the pre-fog view was current on config_.fog_enabled at construction time.
+        // bloom_result is bound only when config_.bloom_enabled was true at construction. The
+        // nullptr sampler falls back to a harmless self-bind of scene_color (see
+        // PixelStylizePass::set_source_images), and bloom_intensity is forced to 0 on those
+        // runs anyway (see the per-frame push-constant fill below).
         pixel_stylize_pass_->set_source_images(
-            config_.fog_enabled ? fog_target_.color_view_typed() : pre_fog_view_typed_,
+            post_source_view,
             gbuffer_target_.depth_view_typed(), gbuffer_target_.g1_view_typed(),
-            palette_lut_.view_typed(), linear_sampler_, nearest_sampler_);
+            palette_lut_.view_typed(), linear_sampler_, nearest_sampler_,
+            config_.bloom_enabled ? bloom_pass_->result_view_typed() : coopa::gfx::TextureView{},
+            config_.bloom_enabled ? &linear_sampler_ : nullptr);
 
         upscale_pass_ = std::make_unique<passes::UpscalePass>(
             device, swapchain_pass,
@@ -621,7 +660,10 @@ public:
         // (meaningless without the other two already true, but defensive): its own
         // transparent_hiz_pass_/transparent_scene_color_mip_pass_ rebind their descriptors
         // every execute() call exactly like hiz_pass_/scene_color_mip_pass_ do, needing the
-        // same per-frame wait_idle() protection below.
+        // same per-frame wait_idle() protection below. bloom_enabled is deliberately NOT
+        // folded in here: bloom_pass_ is an independent pyramid with its own
+        // construction-fixed descriptors (see its own doc), so it needs neither
+        // scene_color_mip_pass_'s chain nor the wait_idle() this flag exists to pay for.
         bool need_ssr_trace_inputs = config_.ssr_enabled || config_.transparency_enabled
                                     || config_.ssr_reflect_transparent;
 
@@ -840,6 +882,20 @@ public:
                     fog_target_.end(cmd);
                 }
 
+                // Bloom pyramid. After the fog branch (so fog and everything before it
+                // bloom too) and before post_target_, whose pixel_stylize_pass_ draw below
+                // composites bloom_pass_'s finished result. Gated on the same startup-fixed
+                // flag its descriptor binding was decided from at construction.
+                if (config_.bloom_enabled) {
+                    coopa::gfx::engine::passes::BloomPass::Params bloom_params{};
+                    bloom_params.threshold = config_.bloom_threshold;
+                    bloom_params.soft_knee = config_.bloom_soft_knee;
+                    bloom_params.clamp_max = config_.bloom_clamp;
+                    bloom_params.radius    = config_.bloom_radius;
+                    bloom_params.scatter   = config_.bloom_scatter;
+                    bloom_pass_->execute(cmd, bloom_params);
+                }
+
                 post_target_.begin(cmd);
                 coopa::gfx::engine::passes::PixelStylizePass::PushConstants post_pc;
                 post_pc.outline_color    = config_.outline_color;
@@ -855,6 +911,7 @@ public:
                 // This pipeline has no separate tonemap pass, unlike blendy -- exposure > 0
                 // keeps pixel_stylize.frag's tonemap step live (see PushConstants::exposure's doc).
                 post_pc.exposure         = config_.exposure;
+                post_pc.bloom_intensity  = config_.bloom_enabled ? config_.bloom_intensity : 0.0f;
                 pixel_stylize_pass_->draw(cmd, post_pc, render_extent_.width, render_extent_.height);
                 post_target_.end(cmd);
             }
@@ -1123,6 +1180,7 @@ private:
             pc.roughness    = mr->material.roughness;
             pc.ao           = mr->material.ao;
             pc.alpha_cutoff = mr->material.gpu_alpha_cutoff();
+            pc.emissive     = mr->material.gpu_emissive();
             gbuffer_pipeline_->push(cmd, pc);
 
             mr->get_mesh()->bind(cmd);
@@ -1336,6 +1394,11 @@ private:
     std::unique_ptr<coopa::gfx::engine::passes::DeferredLightingPass> pixel_lighting_pass_;
     std::unique_ptr<coopa::gfx::engine::passes::SkyboxPass>      skybox_pass_;
     std::unique_ptr<coopa::gfx::engine::passes::PixelStylizePass> pixel_stylize_pass_;
+    // Independent bloom pyramid -- see its construction-site comment. Unlike
+    // scene_color_mip_pass_/hiz_pass_, it binds every descriptor once at construction and
+    // never rebinds, so it does NOT require the per-frame device_.wait_idle()
+    // need_ssr_trace_inputs pays for.
+    std::unique_ptr<coopa::gfx::engine::passes::BloomPass> bloom_pass_;
     std::unique_ptr<passes::UpscalePass>                         upscale_pass_;
 
     // Always constructed (mirrors ssr_pass_'s policy -- see render_features.h); render()

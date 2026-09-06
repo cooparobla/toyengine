@@ -18,15 +18,28 @@ render:
   ssr_enabled: true          # also gates the SSGI diffuse-bounce term (ssgi_intensity)
   transparency_enabled: true # forward BLEND-material pass; off by default (no demo scene uses it yet)
   ssr_reflect_transparent: true # opaque surfaces also reflect transparent geometry (roughly doubles SSR cost; requires ssr_enabled + transparency_enabled)
-  fog_enabled: true          # Unity-style global fog + local FogVolume components (see gfxcoopa's FogPass)
+  fog_enabled: false          # Unity-style global fog + local FogVolume components (see gfxcoopa's FogPass)
   bloom_enabled: true         # additive glow from bright HDR regions; independent BloomPass pyramid (no longer reuses SSR's mip chain)
-  
+  tilt_shift_enabled: true    # Link's Awakening (Switch) style diorama blur; runs at DISPLAY
+                              # resolution after the upscale (a lens effect, not a pixel-grid
+                              # effect) -- startup-fixed, like bloom/fog (see gfxcoopa's TiltShiftPass)
+
   bloom_threshold: 1.0        # brightness (max of R,G,B) below which nothing glows; 1.0 = "brighter than white"
   bloom_soft_knee: 0.5        # 0..1 fraction of the threshold the quadratic knee spans; 0 = hard cutoff (pops under camera motion)
   bloom_intensity: 5.0        # final multiplier on the composited glow; <= 0 disables
   bloom_scatter: 0.7          # per-level blend toward the coarser tent (Unity URP's "Scatter"); higher = wider, softer halo
   bloom_radius: 1.0           # tent-filter width multiplier on the upsample
   bloom_clamp: 20.0           # per-tap HDR ceiling before thresholding; firefly guard
+
+  # --- Tilt shift ---
+  tilt_shift_focus_center: 0.55  # 0..1 screen position of the sharp band's centre (0 = top);
+                                  # slightly below middle, as in the reference
+  tilt_shift_focus_width:  0.18  # 0..1 half-height of the fully-sharp band
+  tilt_shift_ramp_width:   0.22  # 0..1 distance the blur ramps in over; smoothstepped
+  tilt_shift_blur_top:     1.0   # strength above the band (the "far" half -- strongest)
+  tilt_shift_blur_bottom:  0.7   # strength below the band (the "near" half)
+  tilt_shift_max_radius:   6.0   # max blur radius in DISPLAY pixels
+  tilt_shift_angle:        0.0   # degrees; rotates the focus band off horizontal
 
   # --- Internal resolution ---
   resolution_mode: fixed     # fixed | divisor
@@ -135,4 +148,6 @@ render:
 output:
   save_on_exit: true
   filepath: "./output/frame.png"
-  save_low_res: true
+  save_low_res: false  # false captures the final DISPLAY-resolution frame (after tilt
+                        # shift); true captures the pixel-perfect low-res buffer instead,
+                        # which is BEFORE tilt shift and so won't show that effect

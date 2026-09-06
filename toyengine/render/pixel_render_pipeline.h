@@ -94,6 +94,7 @@
 #include <toyengine/render/passes/gbuffer_visualize_pass.h>
 #include <gfxcoopa/engine/passes/pixel_stylize_pass.h>
 #include <gfxcoopa/engine/passes/bloom_pass.h>
+#include <gfxcoopa/engine/passes/tilt_shift_pass.h>
 #include <toyengine/render/passes/upscale_pass.h>
 
 namespace toy {
@@ -193,6 +194,8 @@ public:
                         PixelRenderConfig config)
         : device_(device), allocator_(allocator), swapchain_(swapchain), config_(std::move(config)),
           render_extent_(compute_render_extent(config_, swapchain.extent().width, swapchain.extent().height)),
+          upscaled_extent_(compute_letterbox(swapchain.extent().width, swapchain.extent().height,
+                                             render_extent_.width, render_extent_.height)),
           gbuffer_target_(device, allocator, render_extent_.width, render_extent_.height),
           // HDR always -- the sky-based indirect lighting (see pixel_lighting.frag) can exceed
           // 1.0 regardless of whether SSR/SSAO are toggled, and pixel_stylize.frag's tonemap
@@ -517,11 +520,31 @@ public:
             config_.bloom_enabled ? bloom_pass_->result_view_typed() : coopa::gfx::TextureView{},
             config_.bloom_enabled ? &linear_sampler_ : nullptr);
 
+        // Diorama tilt-shift blur -- always constructed (mirrors bloom_pass_/fog_pass_'s
+        // always-on-but-gated policy), sized to the DISPLAY (letterboxed) rect, not
+        // render_extent_ -- see gfxcoopa's TiltShiftPass file doc for why it must run
+        // after the upscale rather than before it. Reads post_target_ directly: it folds
+        // the nearest-neighbour upscale into its own horizontal stage (bit-identical to
+        // upscale_pass_'s own output wherever the blur strength is ~0), so when enabled
+        // (see the source selection below) upscale_pass_ becomes a 1:1 letterbox blit of
+        // this pass's already-full-resolution result instead of doing the upscale itself.
+        tilt_shift_pass_ = std::make_unique<coopa::gfx::engine::passes::TiltShiftPass>(
+            device, allocator, upscaled_extent_.w, upscaled_extent_.h,
+            post_target_.color_image_object()->view_typed(), nearest_sampler_,
+            config_.shaders("fullscreen.vert"),
+            config_.shaders("tilt_shift.frag"));
+
         upscale_pass_ = std::make_unique<passes::UpscalePass>(
             device, swapchain_pass,
             config_.shaders("fullscreen.vert"),
             config_.shaders("upscale.frag"));
-        upscale_pass_->set_source_image(post_target_.color_image_object()->view_typed(), nearest_sampler_);
+        // Startup-fixed source selection, same caveat as post_source_view/
+        // pre_fog_view_typed_ above: flipping config_.tilt_shift_enabled without a
+        // pipeline rebuild would leave upscale_pass_ reading a stale source.
+        upscale_pass_->set_source_image(
+            config_.tilt_shift_enabled ? tilt_shift_pass_->result_view_typed()
+                                       : post_target_.color_image_object()->view_typed(),
+            nearest_sampler_);
     }
 
     PixelRenderPipeline(const PixelRenderPipeline&) = delete;
@@ -533,6 +556,15 @@ public:
     uint32_t render_height() const { return render_extent_.height; }
     /** @brief The final low-resolution LDR color image, for pixel-accurate screenshots. */
     coopa::gfx::memory::Image& low_res_color_image() const { return *post_target_.color_image_object(); }
+    /**
+     * @brief The final DISPLAY-resolution image actually shown in the window: tilt_shift_pass_'s
+     *        result when config_.tilt_shift_enabled (the same startup-fixed selection
+     *        upscale_pass_'s own source binding uses), else low_res_color_image() -- there is
+     *        no separate full-resolution buffer to fall back to when tilt shift is off.
+     */
+    coopa::gfx::memory::Image& final_color_image() const {
+        return config_.tilt_shift_enabled ? tilt_shift_pass_->result_image() : low_res_color_image();
+    }
 
     /**
      * @brief Renders one frame of the given scene.
@@ -914,6 +946,22 @@ public:
                 post_pc.bloom_intensity  = config_.bloom_enabled ? config_.bloom_intensity : 0.0f;
                 pixel_stylize_pass_->draw(cmd, post_pc, render_extent_.width, render_extent_.height);
                 post_target_.end(cmd);
+
+                // Diorama tilt-shift blur, after every other post effect and at DISPLAY
+                // resolution -- see gfxcoopa's TiltShiftPass file doc for why it belongs
+                // here rather than inside post_target_. Gated on the same startup-fixed
+                // flag upscale_pass_'s source binding was decided from at construction.
+                if (config_.tilt_shift_enabled) {
+                    coopa::gfx::engine::passes::TiltShiftPass::Params ts_params{};
+                    ts_params.focus_center  = config_.tilt_shift_focus_center;
+                    ts_params.focus_width   = config_.tilt_shift_focus_width;
+                    ts_params.ramp_width    = config_.tilt_shift_ramp_width;
+                    ts_params.max_radius    = config_.tilt_shift_max_radius;
+                    ts_params.blur_top      = config_.tilt_shift_blur_top;
+                    ts_params.blur_bottom   = config_.tilt_shift_blur_bottom;
+                    ts_params.angle_degrees = config_.tilt_shift_angle;
+                    tilt_shift_pass_->execute(cmd, ts_params);
+                }
             }
         );
 
@@ -1348,6 +1396,13 @@ private:
     coopa::gfx::core::Swapchain&   swapchain_;
     PixelRenderConfig              config_;
     RenderExtent                   render_extent_;
+    // DISPLAY (letterboxed) size tilt_shift_pass_ is sized to -- computed once from the
+    // STARTUP swapchain extent, same no-resize-support caveat as render_extent_ itself
+    // (see this class's file doc / the comment at hiz_pass_'s construction site). A window
+    // resize after construction would leave this pass's fixed-size targets mismatched with
+    // the swapchain's new letterbox rect, exactly like every other fixed-at-construction
+    // target in this pipeline.
+    LetterboxRect                  upscaled_extent_;
 
     coopa::gfx::engine::targets::GBufferTarget   gbuffer_target_;
     coopa::gfx::engine::targets::OffscreenTarget offscreen_target_; // lit + sky, pre-post, HDR
@@ -1399,6 +1454,12 @@ private:
     // never rebinds, so it does NOT require the per-frame device_.wait_idle()
     // need_ssr_trace_inputs pays for.
     std::unique_ptr<coopa::gfx::engine::passes::BloomPass> bloom_pass_;
+    // Diorama tilt-shift blur -- see its construction-site comment and gfxcoopa's
+    // TiltShiftPass file doc. Runs at DISPLAY resolution, after upscale_pass_ would
+    // otherwise be the last step; upscale_pass_'s own source binding is chosen once at
+    // construction from config_.tilt_shift_enabled's startup value, same policy as
+    // bloom_pass_/fog_pass_'s bindings above.
+    std::unique_ptr<coopa::gfx::engine::passes::TiltShiftPass> tilt_shift_pass_;
     std::unique_ptr<passes::UpscalePass>                         upscale_pass_;
 
     // Always constructed (mirrors ssr_pass_'s policy -- see render_features.h); render()

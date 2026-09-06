@@ -160,6 +160,30 @@ struct PixelRenderConfig {
                                             evaluated at -- prevents a hard seam where a grazing near-horizon ray's apparent
                                             distance blows up against an otherwise-unfogged sky. */
 
+    /**
+     * Diorama-style tilt-shift blur (Zelda: Link's Awakening [Switch] reference) -- see
+     * gfxcoopa's TiltShiftPass. Unlike every other post effect here, it runs at DISPLAY
+     * resolution, after the pixel-art upscale: it's a lens effect layered on the final
+     * image, not a pixel-grid effect, so running it at the low internal resolution would
+     * quantize the blur kernel and the focus ramp to a handful of steps (see
+     * TiltShiftPass's own file doc). The circle of confusion is a function of screen
+     * position only (no depth sampling), so it stays exact under a separable
+     * horizontal-then-vertical Gaussian with no silhouette bleeding.
+     *
+     * tilt_shift_enabled is a startup-fixed toggle (same policy as bloom_enabled/
+     * fog_enabled): its descriptor binding -- whether upscale_pass_ reads
+     * tilt_shift_pass_'s result or post_target_ directly -- is decided once at
+     * construction from this flag's startup value.
+     */
+    bool  tilt_shift_enabled      = false;
+    float tilt_shift_focus_center = 0.55f; /**< 0..1 screen position of the sharp band's centre (0 = top, at angle 0). */
+    float tilt_shift_focus_width  = 0.18f; /**< 0..1 half-height of the fully-sharp band. */
+    float tilt_shift_ramp_width   = 0.22f; /**< 0..1 distance the blur ramps in over, smoothstepped. */
+    float tilt_shift_blur_top     = 1.0f;  /**< Strength multiplier on the "far" side of the band. */
+    float tilt_shift_blur_bottom  = 0.7f;  /**< Strength multiplier on the "near" side of the band. */
+    float tilt_shift_max_radius   = 6.0f;  /**< Blur radius in DISPLAY pixels at full strength. */
+    float tilt_shift_angle        = 0.0f;  /**< Degrees; rotates the focus band off horizontal. */
+
     // Indirect-lighting terms shared with SsrPass::Params (gfxcoopa/engine/render_features.h) --
     // fed to both the lighting pass and the SSR composite from this single instance so the two
     // can never disagree. ssgi_intensity defaults to 0.6 here (nonzero -- SSGI on by default),

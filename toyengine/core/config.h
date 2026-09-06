@@ -48,6 +48,11 @@ struct WindowConfig {
 struct OutputConfig {
     bool        save_on_exit  = true;
     std::string filepath      = "./output/frame.png";
+    /**
+     * True saves the internal low-resolution buffer 1:1 (pixel-perfect, but BEFORE any
+     * display-resolution-only effect such as tilt shift). False saves the final image
+     * actually shown in the window, at display resolution. See Engine::save_screenshot().
+     */
     bool        save_low_res  = true;
 };
 
@@ -107,6 +112,7 @@ struct AppConfig {
                 if (r.contains("ssr_reflect_transparent")) config.render.ssr_reflect_transparent = r.at("ssr_reflect_transparent").get_value<bool>();
                 if (r.contains("fog_enabled"))       config.render.fog_enabled       = r.at("fog_enabled").get_value<bool>();
                 if (r.contains("bloom_enabled"))     config.render.bloom_enabled     = r.at("bloom_enabled").get_value<bool>();
+                if (r.contains("tilt_shift_enabled")) config.render.tilt_shift_enabled = r.at("tilt_shift_enabled").get_value<bool>();
 
                 // --- Internal resolution ---
                 if (r.contains("resolution_mode"))        config.render.resolution_mode = r.at("resolution_mode").get_value<std::string>();
@@ -200,6 +206,15 @@ struct AppConfig {
                 if (r.contains("bloom_scatter"))   config.render.bloom_scatter   = r.at("bloom_scatter").get_value<float>();
                 if (r.contains("bloom_radius"))    config.render.bloom_radius    = r.at("bloom_radius").get_value<float>();
                 if (r.contains("bloom_clamp"))     config.render.bloom_clamp     = r.at("bloom_clamp").get_value<float>();
+
+                // --- Tilt shift ---
+                if (r.contains("tilt_shift_focus_center")) config.render.tilt_shift_focus_center = r.at("tilt_shift_focus_center").get_value<float>();
+                if (r.contains("tilt_shift_focus_width"))  config.render.tilt_shift_focus_width  = r.at("tilt_shift_focus_width").get_value<float>();
+                if (r.contains("tilt_shift_ramp_width"))   config.render.tilt_shift_ramp_width   = r.at("tilt_shift_ramp_width").get_value<float>();
+                if (r.contains("tilt_shift_blur_top"))     config.render.tilt_shift_blur_top     = r.at("tilt_shift_blur_top").get_value<float>();
+                if (r.contains("tilt_shift_blur_bottom"))  config.render.tilt_shift_blur_bottom  = r.at("tilt_shift_blur_bottom").get_value<float>();
+                if (r.contains("tilt_shift_max_radius"))   config.render.tilt_shift_max_radius   = r.at("tilt_shift_max_radius").get_value<float>();
+                if (r.contains("tilt_shift_angle"))        config.render.tilt_shift_angle        = r.at("tilt_shift_angle").get_value<float>();
             }
 
             if (root.contains("output")) {

@@ -53,7 +53,7 @@ scene:
             metallic: 0.0
             roughness: 0.05
             ao: 1.0
-            alpha: 1.0
+            alpha: 0.5
             alpha_mode: BLEND
       children: []
 

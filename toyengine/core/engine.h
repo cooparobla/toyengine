@@ -139,25 +139,29 @@ public:
 
         if (config_.output.save_on_exit) {
             ctx_.wait_idle();
-            save_screenshot(config_.output.filepath, /*low_res=*/true);
+            save_screenshot(config_.output.filepath, config_.output.save_low_res);
         }
     }
 
     /**
-     * @brief Writes the current low-resolution offscreen buffer to a PNG.
+     * @brief Writes the current offscreen buffer to a PNG.
      * @param path    Destination file path.
-     * @param low_res True writes the internal low-resolution buffer 1:1.
-     *                Native-resolution (upscaled swapchain) capture is not
-     *                yet wired -- requesting it falls back to low_res.
+     * @param low_res True writes the internal low-resolution buffer 1:1 (pixel-perfect,
+     *                but BEFORE any display-resolution effect such as tilt shift -- see
+     *                PixelRenderPipeline::low_res_color_image()). False writes the final
+     *                image actually shown in the window (PixelRenderPipeline::
+     *                final_color_image()), at DISPLAY resolution.
      */
     void save_screenshot(const std::string& path, bool low_res = true) {
-        if (!low_res) {
-            std::cerr << "[toyengine] Native-resolution screenshot not yet implemented; saving low-res instead.\n";
+        coopa::gfx::memory::Image& src = low_res ? pipeline_.low_res_color_image()
+                                                 : pipeline_.final_color_image();
+        coopa::gfx::util::save_image_png(ctx_.device(), ctx_.allocator(), ctx_.command_pool(), src, path);
+        if (low_res) {
+            std::cout << "[toyengine] Saved " << path << " (" << pipeline_.render_width()
+                      << "x" << pipeline_.render_height() << ")\n";
+        } else {
+            std::cout << "[toyengine] Saved " << path << " (display resolution)\n";
         }
-        coopa::gfx::util::save_image_png(ctx_.device(), ctx_.allocator(), ctx_.command_pool(),
-                                         pipeline_.low_res_color_image(), path);
-        std::cout << "[toyengine] Saved " << path << " (" << pipeline_.render_width()
-                  << "x" << pipeline_.render_height() << ")\n";
     }
 
     /**
@@ -171,7 +175,7 @@ public:
         std::filesystem::create_directories("output/seq");
         char path[64];
         std::snprintf(path, sizeof(path), "output/seq/frame_%04u.png", index);
-        save_screenshot(path, /*low_res=*/true);
+        save_screenshot(path, config_.output.save_low_res);
     }
 
     /**

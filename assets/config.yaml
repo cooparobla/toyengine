@@ -19,6 +19,8 @@ render:
   transparency_enabled: true # forward BLEND-material pass; off by default (no demo scene uses it yet)
   ssr_reflect_transparent: true # opaque surfaces also reflect transparent geometry (roughly doubles SSR cost; requires ssr_enabled + transparency_enabled)
   fog_enabled: false          # Unity-style global fog + local FogVolume components (see gfxcoopa's FogPass)
+  sdf_enabled: true           # signed-distance-field raymarching (SdfRenderer/SdfShape); see toyengine's sdf_*.frag
+  sdf_shadows_enabled: true   # independent of sdf_enabled -- SDFs can be visible without casting shadows
   bloom_enabled: true         # additive glow from bright HDR regions; independent BloomPass pyramid (no longer reuses SSR's mip chain)
   tilt_shift_enabled: true    # Link's Awakening (Switch) style diorama blur; runs at DISPLAY
                               # resolution after the upscale (a lens effect, not a pixel-grid
@@ -77,7 +79,7 @@ render:
 
   # --- SSAO ---
   ssao_radius: 0.5
-  ssao_bias: 0.025
+  ssao_bias: 2.0
   ssao_power: 1.5
   ssao_kernel_size: 24
   ssao_temporal_enabled: true
@@ -144,6 +146,12 @@ render:
   fog_max_distance: 60.0      # distance the global fog term saturates at, and the distance sky pixels are evaluated
                                # at -- prevents a hard seam where a grazing near-horizon ray's apparent distance
                                # blows up against an otherwise-unfogged sky
+
+  # --- SDF ---
+  sdf_max_steps: 64            # global ceiling on SdfRenderer::max_steps
+  sdf_shadow_max_steps: 32     # cheaper budget for the depth-only shadow march
+  sdf_max_renderers: 64        # SdfData renderer SSBO capacity (startup-fixed)
+  sdf_max_shapes: 512          # SdfData shape SSBO capacity (startup-fixed)
 
 output:
   save_on_exit: true

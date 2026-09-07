@@ -85,6 +85,7 @@ public:
         scene::register_scene_components();
 
         scene_mgr_.load_scene(resolve_path_(config_.scene.default_scene));
+        apply_cursor_capture_();
     }
 
     ~Engine() {
@@ -237,15 +238,15 @@ private:
         return coopa::gfx::app::ContextConfig::from_env(cc);
     }
 
-    /** @brief Binds the default action set: quit, orbit yaw/zoom, and fly move/look. */
+    /**
+     * @brief Binds the default action set: quit and fly move/look.
+     *
+     * Orbit no longer has keyboard bindings -- the mouse (yaw/pitch) and
+     * scroll wheel (zoom) drive it directly, read in drive_camera_controller_().
+     */
     void bind_default_input_() {
         using coopa::gfx::input::Key;
         input_.bind("quit", Key::Escape);
-
-        input_.bind("orbit_yaw_left",  Key::A);
-        input_.bind("orbit_yaw_right", Key::D);
-        input_.bind("orbit_zoom_in",   Key::W);
-        input_.bind("orbit_zoom_out",  Key::S);
 
         input_.bind("fly_forward", Key::W);
         input_.bind("fly_back",    Key::S);
@@ -260,24 +261,35 @@ private:
     }
 
     /**
-     * @brief Pushes this frame's keyboard state into the active scene's
-     *        CameraController (if any) before Scene::update() consumes it.
+     * @brief Pushes this frame's mouse/scroll/keyboard state into the active
+     *        scene's CameraController (if any) before Scene::update() consumes it.
      *
-     * WASD drives orbit yaw/zoom OR fly movement depending on the
-     * controller's configured mode -- both are bound to the same keys since
-     * only one mode is ever active on a given camera.
+     * Mouse motion and scroll drive Orbit mode; WASD/E/Q + arrow keys drive
+     * Fly mode -- both read unconditionally since only one mode is ever
+     * active on a given controller and the unused fields are simply ignored.
      */
     void drive_camera_controller_(coopa::scene::Scene& scene) {
         auto* cc = scene.find_first_component<scene::CameraController>();
         if (!cc) return;
 
+        // GLFW's virtual cursor position jumps arbitrarily on the frame CursorMode::Disabled
+        // is first applied -- report zero delta that one frame so orbit doesn't snap.
+        auto [cursor_x, cursor_y] = ctx_.window().cursor_position();
+        glm::vec2 cursor(static_cast<float>(cursor_x), static_cast<float>(cursor_y));
+        if (cursor_valid_) {
+            cc->mouse_delta = cursor - prev_cursor_;
+        } else {
+            cc->mouse_delta = glm::vec2(0.0f);
+            cursor_valid_ = true;
+        }
+        prev_cursor_ = cursor;
+
+        cc->scroll_input = static_cast<float>(ctx_.window().scroll_delta().second);
+
         auto is_pressed = coopa::gfx::presentation::key_state_of(ctx_.window());
         auto pressed = [&](const char* action) {
             return input_.is_down(action, is_pressed);
         };
-
-        cc->yaw_input  = (pressed("orbit_yaw_right") ? 1.0f : 0.0f) - (pressed("orbit_yaw_left") ? 1.0f : 0.0f);
-        cc->zoom_input = (pressed("orbit_zoom_in") ? 1.0f : 0.0f) - (pressed("orbit_zoom_out") ? 1.0f : 0.0f);
 
         cc->move_input = glm::vec3(
             (pressed("fly_right") ? 1.0f : 0.0f) - (pressed("fly_left") ? 1.0f : 0.0f),
@@ -286,6 +298,23 @@ private:
         cc->look_input = glm::vec2(
             (pressed("look_yaw_right") ? 1.0f : 0.0f) - (pressed("look_yaw_left") ? 1.0f : 0.0f),
             (pressed("look_pitch_up") ? 1.0f : 0.0f) - (pressed("look_pitch_down") ? 1.0f : 0.0f));
+    }
+
+    /**
+     * @brief Puts the OS cursor into disabled (hidden + unbounded) mode if the
+     *        active scene's CameraController wants it -- called once after
+     *        the initial scene load.
+     *
+     * There is no in-app control to release the cursor once captured; quitting
+     * (Escape, still bound) is the only way out. A scene author can opt out
+     * entirely via `capture_cursor: false` on the CameraController.
+     */
+    void apply_cursor_capture_() {
+        if (!scene_mgr_.has_scene()) return;
+        auto* cc = scene_mgr_.get_active_scene().find_first_component<scene::CameraController>();
+        if (cc && cc->capture_cursor) {
+            ctx_.window().set_cursor_mode(coopa::gfx::presentation::CursorMode::Disabled);
+        }
     }
 
     /** @brief Resolves a config-relative asset path against ROOT_DIR, unless already absolute. */
@@ -334,6 +363,11 @@ private:
     // (env vars don't change mid-run); -1.0f / 0 are their respective "off" values.
     float    fixed_dt_       = -1.0f;
     uint32_t capture_frames_ = 0;
+
+    // Mouse-delta tracking for drive_camera_controller_() -- cursor_valid_ suppresses the
+    // spurious first-frame delta GLFW reports right after CursorMode::Disabled is applied.
+    glm::vec2 prev_cursor_   = glm::vec2(0.0f);
+    bool      cursor_valid_  = false;
 };
 
 } // namespace core

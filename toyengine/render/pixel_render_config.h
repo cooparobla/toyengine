@@ -57,6 +57,27 @@ struct PixelRenderConfig {
      */
     bool fog_enabled = false;
 
+    /**
+     * Signed-distance-field raymarching system (see gfxcoopa's SdfRenderer/SdfShape
+     * components and toyengine's sdf_gbuffer.frag/sdf_forward.frag/sdf_shadow*.frag/
+     * sdf_capture.frag). sdf_enabled is the single per-frame gate: when false, the SDF
+     * gather in PixelRenderPipeline::render() produces an empty draw list and every
+     * downstream recording site (G-buffer/shadow/capture/forward) is naturally a no-op --
+     * the five SDF passes themselves are always constructed (same always-on-but-gated
+     * policy as SSR/fog/bloom above).
+     */
+    bool sdf_enabled = true;
+    /** Independent of sdf_enabled/shadows_enabled -- an SDF object can be visible but never
+     *  cast a shadow (cheaper), same as shadows_enabled gates mesh shadow casting globally. */
+    bool sdf_shadows_enabled = true;
+    /** Global ceiling on SdfRenderer::max_steps; a per-renderer value above this is clamped down. */
+    uint32_t sdf_max_steps = 64;
+    /** Cheaper step budget for the depth-only shadow march (see SdfShadowPass). */
+    uint32_t sdf_shadow_max_steps = 32;
+    /** SdfData's renderer/shape SSBO capacities -- startup-fixed (SSBO sizing), not a runtime toggle. */
+    uint32_t sdf_max_renderers = 64;
+    uint32_t sdf_max_shapes    = 512;
+
     // --- Internal resolution ---
     std::string resolution_mode = "fixed";   /**< "fixed" or "divisor". */
     uint32_t    render_width    = 480;       /**< Used when resolution_mode == "fixed". */

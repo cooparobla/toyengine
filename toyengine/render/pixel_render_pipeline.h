@@ -81,6 +81,13 @@
 #include <gfxcoopa/engine/passes/fog_pass.h>
 #include <gfxcoopa/engine/data/fog_data.h>
 #include <gfxcoopa/engine/components/fog_volume.h>
+#include <gfxcoopa/engine/components/sdf_renderer.h>
+#include <gfxcoopa/engine/components/sdf_shape.h>
+#include <gfxcoopa/engine/data/sdf_data.h>
+#include <gfxcoopa/engine/passes/sdf_gbuffer_pass.h>
+#include <gfxcoopa/engine/passes/sdf_forward_pass.h>
+#include <gfxcoopa/engine/passes/sdf_shadow_pass.h>
+#include <gfxcoopa/engine/passes/sdf_capture_pass.h>
 
 #include <coopa/scene/scene.h>
 #include <coopa/scene/components/transform_component.h>
@@ -180,6 +187,28 @@ struct TransparentCaptureLightingPushConstants {
 };
 
 /**
+ * @struct SdfDrawItem
+ * @brief One SdfRenderer gathered this frame: its GPU buffer index (see
+ *        gfxcoopa's SdfData), draw-list membership, and the world/screen
+ *        bounds every recording site below needs.
+ *
+ * Built once per frame in render()'s SDF gather block and threaded through
+ * record_gbuffer_()/record_directional_shadow_()/record_point_shadow_()/
+ * record_transparent_capture_()/record_transparent_() -- the same shape
+ * `renderers`/`world_matrices`/`instance_idx` already play for MeshRenderer.
+ */
+struct SdfDrawItem {
+    coopa::gfx::engine::components::SdfRenderer* comp = nullptr;
+    uint32_t  gpu_index    = 0;     /**< Index into this frame's SdfData renderer SSBO. */
+    bool      is_blend     = false; /**< True -> forward/capture path; false -> G-buffer path. */
+    bool      cast_shadows = true;  /**< Already folds in PixelRenderConfig::sdf_shadows_enabled. */
+    glm::vec3 world_min{0.0f};
+    glm::vec3 world_max{0.0f};
+    glm::vec3 world_center{0.0f};   /**< For the shadow AABB fit and the back-to-front sort. */
+    PixelRect px_rect{};            /**< Scissor rect in low-res render-target pixel space. */
+};
+
+/**
  * @class PixelRenderPipeline
  * @brief Renders a scene through the low-resolution deferred pixel-art
  *        frame graph and upscales it into the swapchain.
@@ -221,7 +250,8 @@ public:
           fog_data_(device, allocator),
           shadow_target_(device, allocator, config_.shadow_map_resolution, config_.cube_shadow_resolution),
           palette_lut_(coopa::gfx::engine::data::PaletteLut::load(device, allocator, cmd_pool, config_.palette_path)),
-          instance_stream_(device, allocator)
+          instance_stream_(device, allocator),
+          sdf_data_(device, allocator, config_.sdf_max_renderers, config_.sdf_max_shapes)
     {
         camera_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
             coopa::gfx::pipeline::DescriptorLayoutBuilder()
@@ -265,6 +295,31 @@ public:
             device, gbuffer_target_.render_pass(), camera_layout_->handle(), VK_NULL_HANDLE,
             config_.shaders("gbuffer.vert"),
             config_.shaders("gbuffer.frag"));
+
+        // --- SDF raymarching system ---
+        // Three of the four SDF passes need nothing this pipeline hasn't already built by this
+        // point (camera_layout_/shadow_target_/transparent_capture_target_/sdf_data_); the
+        // fourth (sdf_forward_pass_) needs transparent_pass_'s render pass and ssr_pass_'s trace
+        // sets, both constructed later, so it's built further down alongside transparent_pass_
+        // itself (see that call site).
+        sdf_gbuffer_pass_ = std::make_unique<coopa::gfx::engine::passes::SdfGBufferPass>(
+            device, gbuffer_target_.render_pass(), *camera_layout_, sdf_data_.layout(),
+            config_.shaders("sdf_quad.vert"),
+            config_.shaders("sdf_gbuffer.frag"));
+
+        sdf_shadow_pass_ = std::make_unique<coopa::gfx::engine::passes::SdfShadowPass>(
+            device, shadow_target_.dir_render_pass(), shadow_target_.cube_render_pass(),
+            sdf_data_.layout(),
+            config_.shaders("sdf_shadow.vert"),
+            config_.shaders("sdf_shadow.frag"),
+            config_.shaders("sdf_shadow_cube.vert"),
+            config_.shaders("sdf_shadow_cube.frag"));
+
+        sdf_capture_pass_ = std::make_unique<coopa::gfx::engine::passes::SdfCapturePass>(
+            device, transparent_capture_target_.render_pass(),
+            *camera_layout_, *light_layout_, *shadow_layout_, sdf_data_.layout(),
+            config_.shaders("sdf_quad.vert"),
+            config_.shaders("sdf_capture.frag"));
 
         gbuffer_visualize_pass_ = std::make_unique<passes::GBufferVisualizePass>(
             device, offscreen_target_.render_pass_object(),
@@ -448,6 +503,30 @@ public:
             transparent_extra,
             static_cast<uint32_t>(sizeof(TransparentLightingPushConstants)));
 
+        // SdfForwardPass shares transparent_pass_'s OWN render pass (see that accessor's doc) --
+        // render passes only need to be attachment-compatible to back a second Pipeline, and
+        // sharing lets record_transparent_() draw BLEND meshes and BLEND SdfRenderers inside the
+        // SAME begin()/end() bracket, switching pipelines per item in one back-to-front sorted
+        // list, so the two composite in correct depth order instead of one kind always landing
+        // on top of the other. Same ExtraSets as transparent_pass_ (SSR's trace inputs), just
+        // appended one set index later (4/5/6, not 3/4/5) since this pass's own SdfData set
+        // occupies 3.
+        coopa::gfx::engine::passes::ExtraSets sdf_forward_extra;
+        sdf_forward_extra.layouts = {
+            &ssr_pass_->trace_gbuffer_layout(), &ssr_pass_->hiz_layout(), &ssr_pass_->scene_color_layout()
+        };
+        sdf_forward_extra.bind = [this](coopa::gfx::command::CommandBuffer& cmd, uint32_t first_set) {
+            cmd.bind_descriptor_set(ssr_pass_->trace_gbuffer_set(), first_set);
+            cmd.bind_descriptor_set(ssr_pass_->hiz_set(), first_set + 1);
+            cmd.bind_descriptor_set(ssr_pass_->scene_color_set(), first_set + 2);
+        };
+        sdf_forward_pass_ = std::make_unique<coopa::gfx::engine::passes::SdfForwardPass>(
+            device, VK_FORMAT_R16G16B16A16_SFLOAT, transparent_pass_->render_pass(),
+            *camera_layout_, *light_layout_, *shadow_layout_, sdf_data_.layout(),
+            config_.shaders("sdf_quad.vert"),
+            config_.shaders("sdf_forward.frag"),
+            sdf_forward_extra);
+
         // Without SSR, post reads the deferred-lit+sky target directly; with it, post reads
         // ssr_pass_'s composite output (specular swap + SSGI bounce already applied). Chosen
         // once here from config_.ssr_enabled's STARTUP value, not re-selected per frame: unlike
@@ -579,7 +658,9 @@ public:
 
         update_lights_(scene);
 
-        auto* cam = scene.find_first_component<CameraComponent>();
+        // The main camera, not merely "the first one found" -- CameraComponent::main()
+        // guarantees a stable choice across multi-camera scenes (see camera_component.h).
+        auto* cam = CameraComponent::main();
         float aspect = static_cast<float>(render_extent_.width) / static_cast<float>(render_extent_.height);
 
         glm::mat4 view = cam ? cam->get_view_matrix() : glm::mat4(1.0f);
@@ -615,10 +696,134 @@ public:
         }
         instance_stream_.upload();
 
+        // --- SDF gather ---
+        // Mirrors the MeshRenderer gather above: one pass over every SdfRenderer in the scene,
+        // producing the SdfDrawItem list every record_*() site below shares (same role
+        // renderers/world_matrices/instance_idx play for meshes). Gated on sdf_enabled alone --
+        // when it's off, sdf_draws stays empty and every downstream site (all of which check
+        // sdf_draws.empty() or iterate it) is naturally a no-op, so this is the ONE place that
+        // needs to know about the toggle.
+        std::vector<SdfDrawItem> sdf_draws;
+        sdf_data_.begin(renderer.current_frame());
+        if (config_.sdf_enabled) {
+            using coopa::gfx::engine::components::SdfRenderer;
+            using coopa::gfx::engine::data::SdfShapeGPU;
+            using coopa::gfx::engine::data::SdfRendererGPU;
+
+            glm::mat4 view_proj = proj * view;
+            auto sdf_renderer_comps = scene.get_components<SdfRenderer>();
+
+            for (auto* sr : sdf_renderer_comps) {
+                if (!sr->owner) continue;
+                auto* tc = sr->owner->get_transform();
+                if (!tc) continue;
+                glm::mat4 world = tc->get_world_matrix();
+
+                // World AABB from the renderer's local bounds box.
+                glm::vec3 bmin_local = sr->bounds_center - sr->bounds_extent;
+                glm::vec3 bmax_local = sr->bounds_center + sr->bounds_extent;
+                glm::vec3 wmin(std::numeric_limits<float>::max());
+                glm::vec3 wmax(std::numeric_limits<float>::lowest());
+                for (int c = 0; c < 8; ++c) {
+                    glm::vec3 corner((c & 1) ? bmax_local.x : bmin_local.x,
+                                     (c & 2) ? bmax_local.y : bmin_local.y,
+                                     (c & 4) ? bmax_local.z : bmin_local.z);
+                    glm::vec3 wc = glm::vec3(world * glm::vec4(corner, 1.0f));
+                    wmin = glm::min(wmin, wc);
+                    wmax = glm::max(wmax, wc);
+                }
+
+                // Screen-space (pre-upscale) rectangle -- the whole performance story: only
+                // pixels inside it ever raymarch (see record_gbuffer_()/record_transparent_()'s
+                // cmd.set_scissor() calls). An empty/off-screen rect means free frustum culling.
+                SdfClipRect clip_rect = compute_sdf_clip_rect(view_proj, wmin, wmax);
+                if (!clip_rect.visible) continue;
+
+                // Fold every SdfShape this object's hierarchy carries into the shape SSBO,
+                // contiguously, so `range` below describes one run.
+                auto shapes = sr->collect_shapes();
+                uint32_t first_shape = 0;
+                uint32_t shape_count = 0;
+                for (auto* shape : shapes) {
+                    if (!shape->owner) continue;
+                    auto* shape_tc = shape->owner->get_transform();
+                    if (!shape_tc) continue;
+                    glm::mat4 shape_world = shape_tc->get_world_matrix();
+
+                    // Approximate uniform scale (geometric mean of the 3 basis lengths) -- true
+                    // SDFs don't support non-uniform scale exactly; this rescales the local-space
+                    // distance back to world units well enough for the common case. See
+                    // SdfShapeGPU::type_op_blend's doc.
+                    float sx = glm::length(glm::vec3(shape_world[0]));
+                    float sy = glm::length(glm::vec3(shape_world[1]));
+                    float sz = glm::length(glm::vec3(shape_world[2]));
+                    float uniform_scale = std::cbrt(std::max(sx * sy * sz, 1e-6f));
+
+                    SdfShapeGPU gpu;
+                    gpu.inv_world    = glm::inverse(shape_world);
+                    gpu.params_round = glm::vec4(shape->params, shape->rounding);
+                    float blend = shape->blend > 0.0f ? shape->blend : sr->smoothing;
+                    gpu.type_op_blend = glm::vec4(static_cast<float>(static_cast<int>(shape->type)),
+                                                  static_cast<float>(static_cast<int>(shape->op)),
+                                                  blend, uniform_scale);
+                    uint32_t idx = sdf_data_.add_shape(gpu);
+                    if (shape_count == 0) first_shape = idx;
+                    ++shape_count;
+                }
+                if (shape_count == 0) continue; // no shapes collected -- nothing to draw
+
+                SdfRendererGPU rec;
+                rec.clip_rect    = glm::vec4(clip_rect.ndc_min, clip_rect.ndc_max);
+                rec.bounds_min   = glm::vec4(wmin, 0.0f);
+                rec.bounds_max   = glm::vec4(wmax, 0.0f);
+                rec.albedo_alpha = glm::vec4(sr->material.albedo, sr->material.alpha);
+                rec.mr_ao_cutoff = glm::vec4(sr->material.metallic, sr->material.roughness,
+                                             sr->material.ao, sr->material.gpu_alpha_cutoff());
+                rec.emissive     = sr->material.gpu_emissive();
+                uint32_t clamped_steps = static_cast<uint32_t>(
+                    std::clamp(sr->max_steps, 1, static_cast<int>(config_.sdf_max_steps)));
+                rec.range = glm::uvec4(first_shape, shape_count, clamped_steps, 0);
+                rec.march = glm::vec4(sr->surface_epsilon, sr->normal_epsilon, 0.0f, 0.0f);
+
+                SdfDrawItem item;
+                item.comp         = sr;
+                item.gpu_index    = sdf_data_.add_renderer(rec);
+                item.is_blend     = sr->material.is_blended();
+                item.cast_shadows = sr->cast_shadows && config_.sdf_shadows_enabled;
+                item.world_min    = wmin;
+                item.world_max    = wmax;
+                item.world_center = 0.5f * (wmin + wmax);
+                item.px_rect      = sdf_clip_rect_to_pixels(clip_rect.ndc_min, clip_rect.ndc_max,
+                                                            render_extent_.width, render_extent_.height);
+                sdf_draws.push_back(item);
+            }
+
+            // Per-frame globals: camera ray reconstruction + the forward pass's lighting/
+            // indirect/SSR tuning, sourced from the SAME config_ fields
+            // TransparentLightingPushConstants reads (see sdf_forward.frag's doc for the exact
+            // field-order mapping).
+            auto& g = sdf_data_.globals();
+            g.inv_view_proj = glm::inverse(view_proj);
+            g.camera_pos    = glm::vec4(cam_pos, 1.0f);
+            g.lighting0 = glm::vec4(config_.light_bands, config_.spec_threshold,
+                                    config_.soft_lighting ? 1.0f : 0.0f, config_.rim_strength);
+            g.lighting1 = glm::vec4(config_.indirect.ambient_intensity, config_.indirect.sky_intensity,
+                                    config_.ssr_enabled ? 1.0f : 0.0f, config_.indirect.ssgi_intensity);
+            g.ssr0 = glm::vec4(config_.indirect.ssgi_distance, config_.ssr_max_distance,
+                              config_.ssr_bias_texels, config_.ssr_thickness);
+            g.ssr1 = glm::vec4(config_.ssr_thickness_scale, config_.ssr_roughness_cutoff, 0.0f, 0.0f);
+            g.ssr_steps = glm::ivec4(config_.ssr_max_iterations,
+                                     static_cast<int>(hiz_pass_->max_mip_level()),
+                                     config_.ssr_start_mip, config_.ssr_min_mip0_steps);
+            g.ssr_mip = glm::ivec4(static_cast<int>(scene_color_mip_pass_->max_mip_level()), 0, 0, 0);
+
+            sdf_data_.upload();
+        }
+
         auto* dir_light = scene.find_first_component<DirectionalLightComponent>();
         bool cast_dir_shadow = config_.shadows_enabled && dir_light && dir_light->cast_shadows;
         if (dir_light) {
-            update_dir_shadow_matrix_(dir_light->direction, renderers, world_matrices, cam, cast_dir_shadow);
+            update_dir_shadow_matrix_(dir_light->direction, renderers, world_matrices, sdf_draws, cam, cast_dir_shadow);
         }
 
         // Only the scene's first shadow-casting point light gets a real cube map
@@ -723,9 +928,9 @@ public:
             VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}},
             nullptr,
             [&](coopa::gfx::command::CommandBuffer& cmd) {
-                record_directional_shadow_(cmd, renderers, instance_idx, cast_dir_shadow);
-                record_point_shadow_(cmd, renderers, instance_idx, shadow_point, cast_point_shadow);
-                record_gbuffer_(cmd, renderers, instance_idx);
+                record_directional_shadow_(cmd, renderers, instance_idx, sdf_draws, cast_dir_shadow);
+                record_point_shadow_(cmd, renderers, instance_idx, sdf_draws, shadow_point, cast_point_shadow);
+                record_gbuffer_(cmd, renderers, instance_idx, sdf_draws);
 
                 if (need_ssr_trace_inputs) {
                     hiz_pass_->execute(cmd, gbuffer_target_.depth_image_handle(), gbuffer_target_.depth_view_typed());
@@ -751,7 +956,7 @@ public:
                 // above) and the light UBO, nothing from the opaque G-buffer or lighting pass,
                 // and it must finish before ssr_pass_->execute() later in this frame.
                 if (config_.ssr_reflect_transparent) {
-                    record_transparent_capture_(cmd, renderers, instance_idx);
+                    record_transparent_capture_(cmd, renderers, instance_idx, sdf_draws);
                     // TransparentCaptureTarget is out of scope for the Vulkan-sealing refactor
                     // (MRT, no sealed equivalent -- see gfxcoopa's plan), so its raw VkImageView
                     // accessors are wrapped here via detail::wrap() rather than gaining
@@ -878,7 +1083,7 @@ public:
                     VkImageView hdr_source_view = config_.ssr_enabled
                         ? ssr_pass_->output_view() : offscreen_target_.color_view();
                     bool transparent_ran = record_transparent_(cmd, renderers, world_matrices, instance_idx,
-                                        hdr_source_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                        sdf_draws, hdr_source_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                         cam_pos);
                     // TransparentPass::begin()/end() bracket its own render pass, whose depth
                     // attachment declares DEPTH_STENCIL_READ_ONLY_OPTIMAL as BOTH initial and
@@ -1024,6 +1229,7 @@ private:
     void update_dir_shadow_matrix_(const glm::vec3& direction,
                                    const std::vector<coopa::gfx::engine::components::MeshRenderer*>& renderers,
                                    const std::vector<glm::mat4>& world_matrices,
+                                   const std::vector<SdfDrawItem>& sdf_draws,
                                    const coopa::gfx::engine::components::CameraComponent* cam,
                                    bool cast_dir_shadow) {
         glm::vec3 light_dir = glm::normalize(direction);
@@ -1045,6 +1251,23 @@ private:
             for (int c = 0; c < 8; ++c) {
                 glm::vec3 corner((c & 1) ? bmax.x : bmin.x, (c & 2) ? bmax.y : bmin.y, (c & 4) ? bmax.z : bmin.z);
                 glm::vec3 ls = glm::vec3(light_rot * (world_matrices[i] * glm::vec4(corner, 1.0f)));
+                aabb_min = glm::min(aabb_min, ls);
+                aabb_max = glm::max(aabb_max, ls);
+            }
+        }
+
+        // Fold in every shadow-casting SdfRenderer's world AABB too, same BLEND-at-full-opacity
+        // rule record_directional_shadow_()/record_point_shadow_() apply to their own draws --
+        // an SDF that won't actually cast a shadow this frame shouldn't influence the fitted box.
+        for (const auto& d : sdf_draws) {
+            if (!d.cast_shadows) continue;
+            if (d.is_blend && d.comp->material.alpha < 1.0f) continue;
+            any_caster = true;
+            for (int c = 0; c < 8; ++c) {
+                glm::vec3 corner((c & 1) ? d.world_max.x : d.world_min.x,
+                                 (c & 2) ? d.world_max.y : d.world_min.y,
+                                 (c & 4) ? d.world_max.z : d.world_min.z);
+                glm::vec3 ls = glm::vec3(light_rot * glm::vec4(corner, 1.0f));
                 aabb_min = glm::min(aabb_min, ls);
                 aabb_max = glm::max(aabb_max, ls);
             }
@@ -1101,6 +1324,7 @@ private:
     void record_directional_shadow_(coopa::gfx::command::CommandBuffer& cmd,
                                     const std::vector<coopa::gfx::engine::components::MeshRenderer*>& renderers,
                                     const std::vector<uint32_t>& instance_idx,
+                                    const std::vector<SdfDrawItem>& sdf_draws,
                                     bool cast_dir_shadow) {
         shadow_target_.begin_directional_pass(cmd);
         if (cast_dir_shadow) {
@@ -1121,6 +1345,23 @@ private:
                 renderers[i]->get_mesh()->bind(cmd);
                 renderers[i]->get_mesh()->draw(cmd, 1, instance_idx[i]);
             }
+
+            if (!sdf_draws.empty()) {
+                sdf_shadow_pass_->bind_directional(cmd);
+                cmd.bind_descriptor_set(sdf_data_.current_set(), 0);
+
+                coopa::gfx::engine::passes::SdfDirectionalShadowPushConstants sdf_pc{};
+                sdf_pc.light_space_matrix = light_data_.data().dir_light_space_matrix;
+                sdf_pc.shadow_max_steps   = config_.sdf_shadow_max_steps;
+                for (const auto& d : sdf_draws) {
+                    if (!d.cast_shadows) continue;
+                    // Same binary BLEND-at-full-opacity rule as the mesh loop above.
+                    if (d.is_blend && d.comp->material.alpha < 1.0f) continue;
+                    sdf_pc.renderer_index = d.gpu_index;
+                    sdf_shadow_pass_->push_directional(cmd, sdf_pc);
+                    cmd.draw(6);
+                }
+            }
         }
         shadow_target_.end_directional_pass(cmd);
         shadow_target_.transition_dir_to_shader_read(cmd);
@@ -1129,6 +1370,7 @@ private:
     void record_point_shadow_(coopa::gfx::command::CommandBuffer& cmd,
                               const std::vector<coopa::gfx::engine::components::MeshRenderer*>& renderers,
                               const std::vector<uint32_t>& instance_idx,
+                              const std::vector<SdfDrawItem>& sdf_draws,
                               coopa::gfx::engine::components::PointLightComponent* shadow_point,
                               bool cast_point_shadow) {
         if (!cast_point_shadow) {
@@ -1156,6 +1398,23 @@ private:
                 shadow_pipeline_->push_cube(cmd, pc);
                 renderers[i]->get_mesh()->bind(cmd);
                 renderers[i]->get_mesh()->draw(cmd, 1, instance_idx[i]);
+            }
+
+            if (!sdf_draws.empty()) {
+                sdf_shadow_pass_->bind_cube(cmd);
+                cmd.bind_descriptor_set(sdf_data_.current_set(), 0);
+
+                coopa::gfx::engine::passes::SdfCubeShadowPushConstants sdf_pc{};
+                sdf_pc.light_space_matrix = pc.light_space_matrix;
+                sdf_pc.light_pos_range    = pc.light_pos_range;
+                sdf_pc.shadow_max_steps   = config_.sdf_shadow_max_steps;
+                for (const auto& d : sdf_draws) {
+                    if (!d.cast_shadows) continue;
+                    if (d.is_blend && d.comp->material.alpha < 1.0f) continue;
+                    sdf_pc.renderer_index = d.gpu_index;
+                    sdf_shadow_pass_->push_cube(cmd, sdf_pc);
+                    cmd.draw(6);
+                }
             }
             shadow_target_.end_cube_face_pass(cmd);
         }
@@ -1209,7 +1468,8 @@ private:
 
     void record_gbuffer_(coopa::gfx::command::CommandBuffer& cmd,
                          const std::vector<coopa::gfx::engine::components::MeshRenderer*>& renderers,
-                         const std::vector<uint32_t>& instance_idx) {
+                         const std::vector<uint32_t>& instance_idx,
+                         const std::vector<SdfDrawItem>& sdf_draws) {
         gbuffer_target_.begin(cmd);
         gbuffer_pipeline_->bind(cmd);
         cmd.bind_descriptor_set(gbuffer_pipeline_->layout(), *camera_set_, 0);
@@ -1235,6 +1495,27 @@ private:
             mr->get_mesh()->draw(cmd, 1, instance_idx[i]);
         }
 
+        // Opaque/Mask SdfRenderers -- BLEND ones go through record_transparent_() instead, same
+        // split as meshes above. Each draw is scissored to its own screen-space rectangle (see
+        // the SDF gather block in render()); the scissor is restored to the full target
+        // afterward since nothing else in this bracket expects it narrowed.
+        bool any_opaque_sdf = false;
+        for (const auto& d : sdf_draws) {
+            if (d.is_blend || d.px_rect.w == 0 || d.px_rect.h == 0) continue;
+            if (!any_opaque_sdf) {
+                sdf_gbuffer_pass_->bind(cmd);
+                cmd.bind_descriptor_set(*camera_set_, 0);
+                cmd.bind_descriptor_set(sdf_data_.current_set(), 1);
+                any_opaque_sdf = true;
+            }
+            cmd.set_scissor(d.px_rect.x, d.px_rect.y, d.px_rect.w, d.px_rect.h);
+            sdf_gbuffer_pass_->push(cmd, d.gpu_index);
+            cmd.draw(6);
+        }
+        if (any_opaque_sdf) {
+            cmd.set_scissor(0, 0, render_extent_.width, render_extent_.height);
+        }
+
         gbuffer_target_.end(cmd);
     }
 
@@ -1255,7 +1536,8 @@ private:
     /// owns the depth image it tests against).
     void record_transparent_capture_(coopa::gfx::command::CommandBuffer& cmd,
                                      const std::vector<coopa::gfx::engine::components::MeshRenderer*>& renderers,
-                                     const std::vector<uint32_t>& instance_idx) {
+                                     const std::vector<uint32_t>& instance_idx,
+                                     const std::vector<SdfDrawItem>& sdf_draws) {
         transparent_capture_target_.begin(cmd);
         transparent_capture_pass_->bind(cmd);
         cmd.bind_descriptor_set(transparent_capture_pass_->layout(), *camera_set_, 0);
@@ -1293,58 +1575,92 @@ private:
             mr->get_mesh()->draw(cmd, 1, instance_idx[i]);
         }
 
+        // BLEND SdfRenderers -- feeds the exact same secondary reflection source, via
+        // SdfCapturePass (see that class's doc). Scissored per-object like every other
+        // main-camera SDF draw.
+        bool any_blend_sdf = false;
+        for (const auto& d : sdf_draws) {
+            if (!d.is_blend || d.px_rect.w == 0 || d.px_rect.h == 0) continue;
+            if (!any_blend_sdf) {
+                sdf_capture_pass_->bind(cmd);
+                cmd.bind_descriptor_set(*camera_set_, 0);
+                cmd.bind_descriptor_set(*light_set_,  1);
+                cmd.bind_descriptor_set(*shadow_set_, 2);
+                cmd.bind_descriptor_set(sdf_data_.current_set(), 3);
+                any_blend_sdf = true;
+            }
+            cmd.set_scissor(d.px_rect.x, d.px_rect.y, d.px_rect.w, d.px_rect.h);
+            sdf_capture_pass_->push(cmd, d.gpu_index);
+            cmd.draw(6);
+        }
+        if (any_blend_sdf) {
+            cmd.set_scissor(0, 0, render_extent_.width, render_extent_.height);
+        }
+
         transparent_capture_target_.end(cmd);
     }
 
-    /// Draws every BLEND-material renderer, back-to-front by squared distance from the
-    /// camera, into hdr_target_view (the deferred-lit target or, when SSR is on, its
-    /// composite output -- same choice pixel_stylize_pass_ reads from). Must run after SSR
-    /// compositing: ssr_composite.frag derives reflections from the G-buffer, which
-    /// describes opaque geometry only -- compositing it on top of already-blended glass
-    /// would add the OCCLUDED surface's reflection to the glass (same reasoning as
-    /// blendy's PbrRenderPipeline).
-    /// @return true if the pass actually ran (at least one BLEND-material renderer this frame)
-    ///         and therefore left the G-buffer depth image in DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    /// Draws every BLEND-material renderer AND every BLEND SdfRenderer, back-to-front by
+    /// squared distance from the camera, into hdr_target_view (the deferred-lit target or,
+    /// when SSR is on, its composite output -- same choice pixel_stylize_pass_ reads from).
+    /// Must run after SSR compositing: ssr_composite.frag derives reflections from the
+    /// G-buffer, which describes opaque geometry only -- compositing it on top of
+    /// already-blended glass would add the OCCLUDED surface's reflection to the glass (same
+    /// reasoning as blendy's PbrRenderPipeline).
+    ///
+    /// Meshes and SDFs are merged into ONE sorted list, switching between transparent_pass_'s
+    /// and sdf_forward_pass_'s pipelines as the list's item kind changes -- both draw into the
+    /// SAME render pass instance (see SdfForwardPass's file doc for why sharing
+    /// transparent_pass_->render_pass() is what makes this possible), so a glass mesh and a
+    /// glass SDF blob composite in correct depth order instead of one kind always landing on
+    /// top of the other.
+    ///
+    /// @return true if the pass actually ran (at least one BLEND item this frame) and
+    ///         therefore left the G-buffer depth image in DEPTH_STENCIL_READ_ONLY_OPTIMAL;
     ///         false if it early-returned with depth untouched -- see the call site's comment.
     bool record_transparent_(coopa::gfx::command::CommandBuffer& cmd,
                              const std::vector<coopa::gfx::engine::components::MeshRenderer*>& renderers,
                              const std::vector<glm::mat4>& world_matrices,
                              const std::vector<uint32_t>& instance_idx,
+                             const std::vector<SdfDrawItem>& sdf_draws,
                              VkImageView hdr_target_view,
                              VkImageLayout depth_layout,
                              const glm::vec3& camera_pos) {
-        std::vector<size_t> order;
+        struct Item {
+            bool      is_sdf;
+            size_t    index; // into `renderers`/`world_matrices` if !is_sdf, else into `sdf_draws`
+            glm::vec3 pos;
+        };
+        std::vector<Item> order;
         for (size_t i = 0; i < renderers.size(); ++i) {
             if (instance_idx[i] == UINT32_MAX) continue;
             if (!renderers[i]->material.is_blended()) continue;
-            order.push_back(i);
+            order.push_back({false, i, glm::vec3(world_matrices[i][3])});
+        }
+        for (size_t i = 0; i < sdf_draws.size(); ++i) {
+            if (!sdf_draws[i].is_blend) continue;
+            if (sdf_draws[i].px_rect.w == 0 || sdf_draws[i].px_rect.h == 0) continue;
+            order.push_back({true, i, sdf_draws[i].world_center});
         }
         if (order.empty()) return false;
 
-        std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
-            glm::vec3 da = glm::vec3(world_matrices[a][3]) - camera_pos;
-            glm::vec3 db = glm::vec3(world_matrices[b][3]) - camera_pos;
+        std::stable_sort(order.begin(), order.end(), [&](const Item& a, const Item& b) {
+            glm::vec3 da = a.pos - camera_pos;
+            glm::vec3 db = b.pos - camera_pos;
             return glm::dot(da, da) > glm::dot(db, db); // back-to-front (farthest first)
         });
 
         transparent_pass_->set_targets(hdr_target_view, gbuffer_target_.depth_view(),
                                        render_extent_.width, render_extent_.height);
         transparent_pass_->begin(cmd, gbuffer_target_.depth_image_handle(), depth_layout);
-        transparent_pass_->bind(cmd);
-        cmd.bind_descriptor_set(transparent_pass_->layout(), *camera_set_, 0);
-        cmd.bind_descriptor_set(transparent_pass_->layout(), *light_set_,  1);
-        cmd.bind_descriptor_set(transparent_pass_->layout(), *shadow_set_, 2);
-        // Sets 3/4/5 -- ssr_pass_'s own trace-input sets, bound via the ExtraSets callback
-        // configured at construction (see that ctor call's comment).
-        transparent_pass_->bind_extra(cmd);
-        cmd.bind_vertex_buffer(instance_stream_.buffer(), 0, 1);
 
-        // Frame-level, not per-object -- pushed once into transparent.frag's PushConstants'
-        // [32, 108) region (see the ctor's extra_pc_bytes comment) and left standing for
-        // every per-object push() below, which only ever touches [0, 32). Sourced from the
-        // SAME config_ members record()'s lighting_pc/ssr_params locals use, in particular
-        // config_.indirect (shared with SsrPass::Params so opaque and transparent indirect
-        // terms can never disagree -- see IndirectParams' own doc).
+        // Frame-level, not per-object -- pushed once whenever the mesh pipeline becomes bound
+        // below (push-constant contents don't survive a bind to a pipeline with an incompatible
+        // layout, and sdf_forward_pass_'s layout is NOT compatible with transparent_pass_'s --
+        // see the per-item loop below). Sourced from the SAME config_ members record()'s
+        // lighting_pc/ssr_params locals use, in particular config_.indirect (shared with
+        // SsrPass::Params so opaque and transparent indirect terms can never disagree -- see
+        // IndirectParams' own doc).
         TransparentLightingPushConstants lighting_pc;
         lighting_pc.light_bands       = config_.light_bands;
         lighting_pc.spec_threshold    = config_.spec_threshold;
@@ -1370,22 +1686,68 @@ private:
         lighting_pc.ssr_start_mip        = config_.ssr_start_mip;
         lighting_pc.ssr_min_mip0_steps   = config_.ssr_min_mip0_steps;
         lighting_pc.ssr_max_color_mip    = static_cast<int32_t>(scene_color_mip_pass_->max_mip_level());
-        cmd.push_constants(transparent_pass_->layout(), VK_SHADER_STAGE_FRAGMENT_BIT,
-                           sizeof(coopa::gfx::engine::passes::TransparentPass::PushConstants),
-                           sizeof(TransparentLightingPushConstants), &lighting_pc);
 
-        for (size_t i : order) {
-            auto* mr = renderers[i];
-            coopa::gfx::engine::passes::TransparentPass::PushConstants pc;
-            pc.albedo    = glm::vec4(mr->material.albedo, mr->material.alpha);
-            pc.metallic  = mr->material.metallic;
-            pc.roughness = mr->material.roughness;
-            pc.ao        = mr->material.ao;
-            transparent_pass_->push(cmd, pc);
+        // -1 = neither yet bound, 0 = mesh, 1 = sdf -- tracks which pipeline+sets are current so
+        // a run of same-kind items in `order` only rebinds once, at the transition.
+        int last_kind = -1;
 
-            mr->get_mesh()->bind(cmd);
-            mr->get_mesh()->draw(cmd, 1, instance_idx[i]);
+        for (const auto& item : order) {
+            if (!item.is_sdf) {
+                if (last_kind != 0) {
+                    transparent_pass_->bind(cmd);
+                    // An earlier SDF item in this back-to-front list narrows the scissor to
+                    // its own px_rect (see the sdf branch below) and nothing widens it again
+                    // until the loop ends -- reset here or this mesh draw inherits that SDF's
+                    // bounding box and gets clipped to it.
+                    cmd.set_scissor(0, 0, render_extent_.width, render_extent_.height);
+                    cmd.bind_descriptor_set(*camera_set_, 0);
+                    cmd.bind_descriptor_set(*light_set_,  1);
+                    cmd.bind_descriptor_set(*shadow_set_, 2);
+                    // Sets 3/4/5 -- ssr_pass_'s own trace-input sets, bound via the ExtraSets
+                    // callback configured at construction (see that ctor call's comment).
+                    transparent_pass_->bind_extra(cmd);
+                    cmd.bind_vertex_buffer(instance_stream_.buffer(), 0, 1);
+                    // Pushed into transparent.frag's PushConstants' [32, 108) region (see the
+                    // ctor's extra_pc_bytes comment), left standing for every per-object push()
+                    // below until the next rebind, which only ever touches [0, 32).
+                    cmd.push_constants(transparent_pass_->layout(), VK_SHADER_STAGE_FRAGMENT_BIT,
+                                       sizeof(coopa::gfx::engine::passes::TransparentPass::PushConstants),
+                                       sizeof(TransparentLightingPushConstants), &lighting_pc);
+                    last_kind = 0;
+                }
+
+                auto* mr = renderers[item.index];
+                coopa::gfx::engine::passes::TransparentPass::PushConstants pc;
+                pc.albedo    = glm::vec4(mr->material.albedo, mr->material.alpha);
+                pc.metallic  = mr->material.metallic;
+                pc.roughness = mr->material.roughness;
+                pc.ao        = mr->material.ao;
+                transparent_pass_->push(cmd, pc);
+
+                mr->get_mesh()->bind(cmd);
+                mr->get_mesh()->draw(cmd, 1, instance_idx[item.index]);
+            } else {
+                if (last_kind != 1) {
+                    sdf_forward_pass_->bind(cmd);
+                    cmd.bind_descriptor_set(*camera_set_, 0);
+                    cmd.bind_descriptor_set(*light_set_,  1);
+                    cmd.bind_descriptor_set(*shadow_set_, 2);
+                    cmd.bind_descriptor_set(sdf_data_.current_set(), 3);
+                    // Sets 4/5/6 -- see sdf_forward_pass_'s own ExtraSets ctor argument.
+                    sdf_forward_pass_->bind_extra(cmd);
+                    last_kind = 1;
+                }
+
+                const auto& d = sdf_draws[item.index];
+                cmd.set_scissor(d.px_rect.x, d.px_rect.y, d.px_rect.w, d.px_rect.h);
+                sdf_forward_pass_->push(cmd, d.gpu_index);
+                cmd.draw(6);
+            }
         }
+
+        // Restore the full scissor -- an SDF item above may have narrowed it, and
+        // pixel_stylize_pass_'s later outline/dither pass expects the whole render area.
+        cmd.set_scissor(0, 0, render_extent_.width, render_extent_.height);
 
         transparent_pass_->end(cmd);
         return true;
@@ -1494,6 +1856,15 @@ private:
 
     InstanceStream instance_stream_;
     bool           warned_perspective_snap_ = false;
+
+    // --- SDF raymarching system ---
+    // sdf_data_ must be constructed before the four passes below (they bind its layout at
+    // construction) -- declaration order here matches initializer-list order in the ctor.
+    coopa::gfx::engine::data::SdfData sdf_data_;
+    std::unique_ptr<coopa::gfx::engine::passes::SdfGBufferPass> sdf_gbuffer_pass_;
+    std::unique_ptr<coopa::gfx::engine::passes::SdfForwardPass> sdf_forward_pass_;
+    std::unique_ptr<coopa::gfx::engine::passes::SdfShadowPass>  sdf_shadow_pass_;
+    std::unique_ptr<coopa::gfx::engine::passes::SdfCapturePass> sdf_capture_pass_;
 };
 
 } // namespace render

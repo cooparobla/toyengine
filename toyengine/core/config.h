@@ -111,6 +111,8 @@ struct AppConfig {
                 if (r.contains("transparency_enabled")) config.render.transparency_enabled = r.at("transparency_enabled").get_value<bool>();
                 if (r.contains("ssr_reflect_transparent")) config.render.ssr_reflect_transparent = r.at("ssr_reflect_transparent").get_value<bool>();
                 if (r.contains("fog_enabled"))       config.render.fog_enabled       = r.at("fog_enabled").get_value<bool>();
+                if (r.contains("sdf_enabled"))         config.render.sdf_enabled         = r.at("sdf_enabled").get_value<bool>();
+                if (r.contains("sdf_shadows_enabled")) config.render.sdf_shadows_enabled = r.at("sdf_shadows_enabled").get_value<bool>();
                 if (r.contains("bloom_enabled"))     config.render.bloom_enabled     = r.at("bloom_enabled").get_value<bool>();
                 if (r.contains("tilt_shift_enabled")) config.render.tilt_shift_enabled = r.at("tilt_shift_enabled").get_value<bool>();
 
@@ -215,6 +217,12 @@ struct AppConfig {
                 if (r.contains("tilt_shift_blur_bottom"))  config.render.tilt_shift_blur_bottom  = r.at("tilt_shift_blur_bottom").get_value<float>();
                 if (r.contains("tilt_shift_max_radius"))   config.render.tilt_shift_max_radius   = r.at("tilt_shift_max_radius").get_value<float>();
                 if (r.contains("tilt_shift_angle"))        config.render.tilt_shift_angle        = r.at("tilt_shift_angle").get_value<float>();
+
+                // --- SDF ---
+                if (r.contains("sdf_max_steps"))        config.render.sdf_max_steps        = r.at("sdf_max_steps").get_value<uint32_t>();
+                if (r.contains("sdf_shadow_max_steps")) config.render.sdf_shadow_max_steps = r.at("sdf_shadow_max_steps").get_value<uint32_t>();
+                if (r.contains("sdf_max_renderers"))    config.render.sdf_max_renderers    = r.at("sdf_max_renderers").get_value<uint32_t>();
+                if (r.contains("sdf_max_shapes"))       config.render.sdf_max_shapes       = r.at("sdf_max_shapes").get_value<uint32_t>();
             }
 
             if (root.contains("output")) {

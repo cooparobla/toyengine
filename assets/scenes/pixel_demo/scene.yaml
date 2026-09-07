@@ -34,6 +34,57 @@ scene:
             ao: 1.0
       children: []
 
+    # SDF raymarching test: an opaque smooth-union CSG blob (a sphere unioned with a
+    # rounded box, via the two SdfShape children below) raymarched into the G-buffer --
+    # it therefore gets SSAO, the outline, deferred lighting, SSR and fog exactly like an
+    # opaque mesh does (see SdfGBufferPass). smoothing on the SdfRenderer blends the two
+    # child shapes' seam (child SdfShape.blend, when left at 0, falls back to this). Each
+    # SdfShape's OWN TransformComponent places it relative to sdf_blob's transform, via the
+    # engine's ordinary parent-child transform composition -- the same mechanism a nested
+    # mesh child would use, just not otherwise exercised by this demo scene.
+    - name: sdf_blob
+      active: true
+      components:
+        - type: Transform
+          position: { x: -2.2, y: -0.5, z: 0.3 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: SdfRenderer
+          bounds_center: { x: 0.05, y: 0.0, z: 0.0 }
+          bounds_extent: { x: 1.1, y: 0.9, z: 0.9 }
+          smoothing: 0.25
+          material:
+            albedo: { r: 0.75, g: 0.55, b: 0.2 }
+            metallic: 0.6
+            roughness: 0.3
+            ao: 1.0
+      children:
+        - name: sdf_blob_sphere
+          active: true
+          components:
+            - type: Transform
+              position: { x: -0.25, y: 0.0, z: 0.0 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 1.0, y: 1.0, z: 1.0 }
+            - type: SdfShape
+              shape: Sphere
+              params: { x: 0.5, y: 0.5, z: 0.5 }
+              op: Union
+          children: []
+        - name: sdf_blob_box
+          active: true
+          components:
+            - type: Transform
+              position: { x: 0.35, y: 0.0, z: 0.0 }
+              rotation: { x: 0.0, y: 20.0, z: 0.0 }
+              scale: { x: 1.0, y: 1.0, z: 1.0 }
+            - type: SdfShape
+              shape: Box
+              params: { x: 0.4, y: 0.35, z: 0.35 }
+              rounding: 0.08
+              op: Union
+          children: []
+
     # Transparency test: a static BLEND glass sphere, resting on the plane beside
     # cube.000. alpha < 1 means it does NOT cast a shadow (see PixelRenderPipeline's
     # record_directional_shadow_/record_point_shadow_: a BLEND material only casts a
@@ -56,6 +107,46 @@ scene:
             alpha: 0.5
             alpha_mode: BLEND
       children: []
+
+    # SDF forward-blend test: a BLEND SdfRenderer placed apart from glass_sphere.000 in
+    # world space, but close enough that the orbiting camera repeatedly crosses the two in
+    # screen space over a revolution. Proves PixelRenderPipeline::record_transparent_()'s
+    # merged back-to-front draw list: at each crossing, whichever of the mesh sphere or
+    # this SDF sphere is actually farther from the camera should composite BEHIND the
+    # other, with no popping -- if the two kinds were drawn in two separate passes instead
+    # of one sorted list, one would always render on top of the other regardless of true
+    # depth. Also exercises the SDF forward pass's own SSR trace: this sphere should
+    # reflect the floor the same way glass_sphere.000 does.
+    - name: sdf_glass
+      active: true
+      components:
+        - type: Transform
+          position: { x: 1.35, y: -1.5, z: -0.1 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: SdfRenderer
+          bounds_center: { x: 0.0, y: 0.0, z: 0.0 }
+          bounds_extent: { x: 0.5, y: 0.5, z: 0.5 }
+          material:
+            albedo: { r: 0.7, g: 0.85, b: 0.95 }
+            metallic: 0.0
+            roughness: 0.05
+            ao: 1.0
+            alpha: 0.5
+            alpha_mode: BLEND
+      children:
+        - name: sdf_glass_sphere
+          active: true
+          components:
+            - type: Transform
+              position: { x: 0.0, y: 0.0, z: 0.0 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 1.0, y: 1.0, z: 1.0 }
+            - type: SdfShape
+              shape: Sphere
+              params: { x: 0.4, y: 0.4, z: 0.4 }
+              op: Union
+          children: []
 
     # Opaque control sphere, for comparing against glass_sphere.000's shading -- offset far
     # enough in x that it's clear of glass_sphere.000's own directional-shadow cylinder given
@@ -143,6 +234,7 @@ scene:
           rotation: { x: 68.3269, y: 0.0, z: 0.0 }
           scale: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Camera
+          main: true
           projection: Perspective
           fov: 50.0
           near_clip_plane: 0.1
@@ -150,7 +242,33 @@ scene:
         - type: CameraController
           mode: orbit
           target: { x: 0.0, y: 0.0, z: 0.5 }
-          auto_rotate_deg_per_sec: 15.0
+          follow_smoothing: 10.0
+          movement_smoothing: 0.8
+          mouse_sensitivity: 0.15
+          zoom_speed: 1.0
+          min_distance: 2.0
+          max_distance: 30.0
+          min_pitch_deg: 0.0
+          max_pitch_deg: 85.0
+      children: []
+
+    # Second, non-main camera -- proves CameraComponent::main() picks the
+    # `main: true` camera above rather than "whichever camera is found
+    # first in root_objects". A static overhead view like this is exactly
+    # the kind of second camera a real scene would carry (minimap, cutscene),
+    # never intended to render by default.
+    - name: overview_camera
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 12.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Camera
+          projection: Orthographic
+          orthographic_size: 6.0
+          near_clip_plane: 0.1
+          far_clip_plane: 100.0
       children: []
 
     - name: sun

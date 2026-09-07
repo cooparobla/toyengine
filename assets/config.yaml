@@ -36,7 +36,7 @@ render:
   # --- Tilt shift ---
   tilt_shift_focus_center: 0.55  # 0..1 screen position of the sharp band's centre (0 = top);
                                   # slightly below middle, as in the reference
-  tilt_shift_focus_width:  0.18  # 0..1 half-height of the fully-sharp band
+  tilt_shift_focus_width:  0.15  # 0..1 half-height of the fully-sharp band
   tilt_shift_ramp_width:   0.22  # 0..1 distance the blur ramps in over; smoothstepped
   tilt_shift_blur_top:     1.0   # strength above the band (the "far" half -- strongest)
   tilt_shift_blur_bottom:  0.7   # strength below the band (the "near" half)

@@ -9,4 +9,5 @@ parsers alongside gfxcoopa's (`register_render_components()`).
 | [`register.h`](register.h) | `register_scene_components()` — registers `"CameraController"` with `SceneLoader`. Call once at startup. |
 
 No camera controller exists anywhere else in the workspace — blendy's camera
-only ever moves via an orbit `AnimationComponent` on a *different* object.
+only ever moves via an orbit `coopa::anim::Animator` (a procedural `orbit`
+track, `assets/animations/sphere_orbit.yaml`) on a *different* object.

@@ -244,7 +244,7 @@ scene:
           target: { x: 0.0, y: 0.0, z: 0.5 }
           follow_smoothing: 10.0
           movement_smoothing: 0.8
-          mouse_sensitivity: 0.15
+          mouse_sensitivity: 0.08
           zoom_speed: 1.0
           min_distance: 2.0
           max_distance: 30.0

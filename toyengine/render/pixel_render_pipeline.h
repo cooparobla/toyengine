@@ -36,6 +36,17 @@
  * set: HiZPass/SceneColorMipPass (reused unmodified from gfxcoopa) rebind
  * their own descriptors on every execute() call, which is only safe under a
  * per-frame wait. See render()'s device_.wait_idle() call site.
+ *
+ * The camera UBO and its descriptor set are per-frame-in-flight
+ * (camera_ubos_/camera_sets_), the same policy instance_stream_/sdf_data_
+ * already follow, for the same reason: gfxcoopa's CameraUBO owns exactly one
+ * buffer, so a single shared instance updated in place would let frame N's
+ * write race frame N-1's still-executing command buffer. That used to put
+ * mesh rasterization (reading the shared CameraUBO) one frame out of step
+ * with the SDF raymarch (reading its own per-slot SdfGlobals.inv_view_proj)
+ * -- and with the SDF pass's own depth write in sdf_gbuffer.frag, which also
+ * reads CameraUBO -- visible as SDF surfaces sliding against mesh geometry
+ * under fast camera motion.
  */
 
 #ifndef TOYENGINE_RENDER_PIXEL_RENDER_PIPELINE_H
@@ -49,6 +60,7 @@
 #include <cstdint>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -245,7 +257,6 @@ public:
           // *Shadow-family doc (pixel_lighting.frag/transparent.frag's dir_shadow_map and
           // point_shadow_map are sampler2DShadow/samplerCubeShadow to match).
           shadow_sampler_(coopa::gfx::engine::util::Sampler::shadow(device)),
-          camera_ubo_(device, allocator),
           light_data_(device, allocator),
           fog_data_(device, allocator),
           shadow_target_(device, allocator, config_.shadow_map_resolution, config_.cube_shadow_resolution),
@@ -258,11 +269,25 @@ public:
                 .uniform_buffer(0, coopa::gfx::ShaderStage::Vertex | coopa::gfx::ShaderStage::Fragment)
                 .build(device));
 
+        // One CameraUBO + one descriptor set per frame-in-flight slot, mirroring sdf_data_'s
+        // own per-slot policy (see sdf_data.h's file doc) -- camera_layout_ above stays a
+        // single shared layout, since every set allocated from it is interchangeable at any
+        // pipeline built from that layout (see the ~10 construction sites below). Every
+        // bind_buffer() below still happens once at construction, not per frame, so this adds
+        // no per-frame vkUpdateDescriptorSets and doesn't trip the VUID this file's doc warns
+        // about elsewhere. std::unique_ptr is load-bearing, not stylistic: CameraUBO's deleted
+        // copy ctor suppresses its implicit move ctor too, so it isn't MoveInsertable and
+        // std::vector<CameraUBO> won't compile.
         camera_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
-            coopa::gfx::pipeline::DescriptorPoolBuilder().add_sets(*camera_layout_, 1).build(device));
+            coopa::gfx::pipeline::DescriptorPoolBuilder().add_sets(*camera_layout_, kCameraFrames).build(device));
 
-        camera_set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *camera_pool_, *camera_layout_);
-        camera_set_->bind_buffer(0, camera_ubo_.buffer());
+        camera_ubos_.reserve(kCameraFrames);
+        camera_sets_.reserve(kCameraFrames);
+        for (uint32_t i = 0; i < kCameraFrames; ++i) {
+            camera_ubos_.push_back(std::make_unique<coopa::gfx::engine::data::CameraUBO>(device, allocator));
+            camera_sets_.push_back(std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *camera_pool_, *camera_layout_));
+            camera_sets_[i]->bind_buffer(0, camera_ubos_[i]->buffer());
+        }
 
         light_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
             coopa::gfx::pipeline::DescriptorLayoutBuilder()
@@ -678,14 +703,32 @@ public:
                 warned_perspective_snap_ = true;
             }
         }
-        camera_ubo_.update(view, proj, cam_pos, pixel_density);
+        // One frame-slot source of truth for every per-frame-in-flight upload this function
+        // does (camera, instances, SDF data) -- collapsing what used to be independent
+        // renderer.current_frame() calls onto this single local makes it structurally
+        // impossible for the camera's slot to disagree with the SDF data's slot (see the
+        // class file doc's paragraph on camera_ubos_/camera_sets_). current_frame_ only
+        // advances at the end of Renderer::draw_frame, after record_fn runs, so frame_slot is
+        // stable for the whole of render() including the pre_pass_fn lambda below.
+        const uint32_t frame_slot = renderer.current_frame();
+        // draw_frame() below will wait on this same slot's fence as its own first statement --
+        // doing it here too, before any of the per-slot writes that follow, closes a narrower
+        // race than that later wait alone would: without this, camera_ubos_[frame_slot]->update()
+        // (and instance_stream_/sdf_data_'s own uploads just below) would race frame_slot's PRIOR
+        // occupant, frame N-2, rather than N-1 -- provably safe today only because
+        // need_ssr_trace_inputs's device_.wait_idle() further down already drains through N-2
+        // whenever SSR/transparency is on (see that call site), but not when both are off. Cheap:
+        // Renderer::wait_for_current_frame() waits on an already-signaled fence in that case.
+        renderer.wait_for_current_frame();
+        camera_frame_ = frame_slot;
+        camera_ubos_[frame_slot]->update(view, proj, cam_pos, pixel_density);
 
         // Gather renderables once; the instance upload, the shadow AABB fit, and
         // the draw loops below all need the same list (and world matrices) in
         // the same order.
         auto renderers = scene.get_components<MeshRenderer>();
         std::vector<glm::mat4> world_matrices(renderers.size(), glm::mat4(1.0f));
-        instance_stream_.begin(renderer.current_frame());
+        instance_stream_.begin(frame_slot);
         std::vector<uint32_t> instance_idx(renderers.size(), UINT32_MAX);
         for (size_t i = 0; i < renderers.size(); ++i) {
             if (!renderers[i]->is_ready() || !renderers[i]->owner) continue;
@@ -704,7 +747,7 @@ public:
         // sdf_draws.empty() or iterate it) is naturally a no-op, so this is the ONE place that
         // needs to know about the toggle.
         std::vector<SdfDrawItem> sdf_draws;
-        sdf_data_.begin(renderer.current_frame());
+        sdf_data_.begin(frame_slot);
         if (config_.sdf_enabled) {
             using coopa::gfx::engine::components::SdfRenderer;
             using coopa::gfx::engine::data::SdfShapeGPU;
@@ -848,6 +891,13 @@ public:
             using coopa::gfx::engine::components::FogVolumeShape;
 
             auto& fog = fog_data_.data();
+            // CAVEAT: fog_data_ is single-buffered (FogData owns exactly one UBO, unlike
+            // camera_ubos_/sdf_data_ above), so this inv_view_proj is the same hazard class that
+            // motivated per-slot camera_ubos_ -- a stale one-frame-old camera matrix under fast
+            // motion. Currently unexercised: assets/config.yaml ships fog_enabled: false.
+            // Documented rather than fixed here because FogPass owns its own descriptor set
+            // (bound once at construction in gfxcoopa's fog_pass.h), so making it per-slot needs
+            // an additive gfxcoopa API change for a feature no shipped scene turns on.
             fog.inv_view_proj = glm::inverse(proj * view);
             fog.camera_pos    = glm::vec4(cam_pos, 1.0f);
             fog.fog_color     = glm::vec4(config_.fog_color, 1.0f);
@@ -994,7 +1044,7 @@ public:
                     ssao_params.temporal_blend       = config_.ssao_temporal_blend;
                     ssao_params.prev_view_proj       = prev_view_proj_;
                     ssao_params.prev_view_proj_valid = prev_view_proj_valid_;
-                    ssao_pass_->execute(cmd, *camera_set_, ssao_params);
+                    ssao_pass_->execute(cmd, current_camera_set(), ssao_params);
                 } else {
                     ssao_pass_->invalidate_history();
                 }
@@ -1020,10 +1070,10 @@ public:
                 lighting_pc.soft_lighting     = config_.soft_lighting ? 1.0f : 0.0f;
                 // gfxcoopa's DeferredLightingPass::draw() pushes this internally now (the
                 // templated overload), after its own bind_pipeline() -- no separate push needed.
-                pixel_lighting_pass_->draw(cmd, *camera_set_, *light_set_, *shadow_set_, lighting_pc,
+                pixel_lighting_pass_->draw(cmd, current_camera_set(), *light_set_, *shadow_set_, lighting_pc,
                                           render_extent_.width, render_extent_.height);
 
-                skybox_pass_->draw(cmd, *camera_set_, view, proj, render_extent_.width, render_extent_.height);
+                skybox_pass_->draw(cmd, current_camera_set(), view, proj, render_extent_.width, render_extent_.height);
 
                 offscreen_target_.end(cmd);
 
@@ -1071,7 +1121,7 @@ public:
                     ssr_params.max_hiz_mip_b   = static_cast<int>(transparent_hiz_pass_->max_mip_level());
                     ssr_params.max_color_mip_b = static_cast<int>(transparent_scene_color_mip_pass_->max_mip_level());
 
-                    ssr_pass_->execute(cmd, *camera_set_, ssr_params);
+                    ssr_pass_->execute(cmd, current_camera_set(), ssr_params);
                 }
 
                 if (config_.transparency_enabled) {
@@ -1181,6 +1231,12 @@ public:
     }
 
 private:
+
+    /** @brief Camera descriptor set for the slot render() most recently selected -- bound once
+     *  at construction, never rewritten. Mirrors sdf_data_.current_set(). */
+    const coopa::gfx::pipeline::DescriptorSet& current_camera_set() const {
+        return *camera_sets_[camera_frame_];
+    }
 
     /**
      * @brief Populates LightUBO color/intensity/count fields (not the shadow
@@ -1472,7 +1528,7 @@ private:
                          const std::vector<SdfDrawItem>& sdf_draws) {
         gbuffer_target_.begin(cmd);
         gbuffer_pipeline_->bind(cmd);
-        cmd.bind_descriptor_set(gbuffer_pipeline_->layout(), *camera_set_, 0);
+        cmd.bind_descriptor_set(gbuffer_pipeline_->layout(), current_camera_set(), 0);
         cmd.bind_vertex_buffer(instance_stream_.buffer(), 0, 1);
 
         for (size_t i = 0; i < renderers.size(); ++i) {
@@ -1504,7 +1560,7 @@ private:
             if (d.is_blend || d.px_rect.w == 0 || d.px_rect.h == 0) continue;
             if (!any_opaque_sdf) {
                 sdf_gbuffer_pass_->bind(cmd);
-                cmd.bind_descriptor_set(*camera_set_, 0);
+                cmd.bind_descriptor_set(current_camera_set(), 0);
                 cmd.bind_descriptor_set(sdf_data_.current_set(), 1);
                 any_opaque_sdf = true;
             }
@@ -1540,7 +1596,7 @@ private:
                                      const std::vector<SdfDrawItem>& sdf_draws) {
         transparent_capture_target_.begin(cmd);
         transparent_capture_pass_->bind(cmd);
-        cmd.bind_descriptor_set(transparent_capture_pass_->layout(), *camera_set_, 0);
+        cmd.bind_descriptor_set(transparent_capture_pass_->layout(), current_camera_set(), 0);
         cmd.bind_descriptor_set(transparent_capture_pass_->layout(), *light_set_,  1);
         cmd.bind_descriptor_set(transparent_capture_pass_->layout(), *shadow_set_, 2);
         cmd.bind_vertex_buffer(instance_stream_.buffer(), 0, 1);
@@ -1583,7 +1639,7 @@ private:
             if (!d.is_blend || d.px_rect.w == 0 || d.px_rect.h == 0) continue;
             if (!any_blend_sdf) {
                 sdf_capture_pass_->bind(cmd);
-                cmd.bind_descriptor_set(*camera_set_, 0);
+                cmd.bind_descriptor_set(current_camera_set(), 0);
                 cmd.bind_descriptor_set(*light_set_,  1);
                 cmd.bind_descriptor_set(*shadow_set_, 2);
                 cmd.bind_descriptor_set(sdf_data_.current_set(), 3);
@@ -1700,7 +1756,7 @@ private:
                     // until the loop ends -- reset here or this mesh draw inherits that SDF's
                     // bounding box and gets clipped to it.
                     cmd.set_scissor(0, 0, render_extent_.width, render_extent_.height);
-                    cmd.bind_descriptor_set(*camera_set_, 0);
+                    cmd.bind_descriptor_set(current_camera_set(), 0);
                     cmd.bind_descriptor_set(*light_set_,  1);
                     cmd.bind_descriptor_set(*shadow_set_, 2);
                     // Sets 3/4/5 -- ssr_pass_'s own trace-input sets, bound via the ExtraSets
@@ -1729,7 +1785,7 @@ private:
             } else {
                 if (last_kind != 1) {
                     sdf_forward_pass_->bind(cmd);
-                    cmd.bind_descriptor_set(*camera_set_, 0);
+                    cmd.bind_descriptor_set(current_camera_set(), 0);
                     cmd.bind_descriptor_set(*light_set_,  1);
                     cmd.bind_descriptor_set(*shadow_set_, 2);
                     cmd.bind_descriptor_set(sdf_data_.current_set(), 3);
@@ -1779,10 +1835,16 @@ private:
     coopa::gfx::engine::util::Sampler            linear_sampler_;
     coopa::gfx::engine::util::Sampler            shadow_sampler_;
 
-    coopa::gfx::engine::data::CameraUBO camera_ubo_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> camera_layout_;
+    // Per-frame-in-flight: see the class file doc and the construction-site comment above
+    // camera_pool_'s build. camera_frame_ tracks the slot render() most recently selected;
+    // current_camera_set() (below, in the private section) is what every draw/pass call site
+    // actually binds.
+    static constexpr uint32_t kCameraFrames = coopa::gfx::presentation::MAX_FRAMES_IN_FLIGHT;
+    std::vector<std::unique_ptr<coopa::gfx::engine::data::CameraUBO>> camera_ubos_;
+    std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> camera_layout_; // one shared layout
     std::unique_ptr<coopa::gfx::pipeline::DescriptorPool>      camera_pool_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>       camera_set_;
+    std::vector<std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>> camera_sets_;
+    uint32_t camera_frame_ = 0;
 
     coopa::gfx::engine::data::LightData light_data_;
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> light_layout_;

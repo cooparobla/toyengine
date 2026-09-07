@@ -37,12 +37,28 @@ output always stays pixelated.
    regardless of which toggles are set)
 7. If `ssr_enabled`: `SceneColorMipPass` (prefiltered scene-colour mip chain) → `SsrPass`
    (Hi-Z raymarch → temporal resolve → specular swap + SSGI diffuse bounce composite)
+7a. If `transparency_enabled` and `refraction_enabled` and
+    `refraction_include_reflections`: `SceneColorMipPass` re-run against the SSR composite
+    output (or the plain lit image if SSR is off), so the forward transparent pass below
+    refracts a background that includes SSR reflections, not the pre-SSR image the chain
+    otherwise still holds.
+7b. If `transparency_enabled`: `TransparentPass` (+ `SdfForwardPass` for BLEND SDFs) —
+    forward-shaded alpha-blended geometry, back-to-front sorted, drawn in place into the
+    SSR composite (or `offscreen_target_` if SSR is off). BLEND *mesh* objects additionally
+    apply screen-space refraction (bend/blur/tint/chromatic-aberration/Fresnel — see
+    `assets/shaders/refraction.glsl`) when `refraction_enabled` and the object's own
+    material opt in; BLEND SDF objects never refract (see the refraction plan).
 8. Exposure + ACES tonemap + outline + dither + palette → `post_target_`
 9. Integer-scale letterboxed upscale → swapchain
 
 Steps 1–8 record into `Renderer::begin_frame()`'s `pre_pass_fn`; step 9 is the
 `record_fn`. See each pass's own file doc for descriptor set layout and
 which blendy/gfxcoopa shader (if any) it was derived from.
+
+**This list is not exhaustive** — it predates fog, bloom, tilt-shift, and the SDF
+raymarching system, all of which also have their own frame-graph steps. See
+`pixel_render_pipeline.h`'s own file doc (top of that file) and its `render()` method
+for the accurate, up-to-date ordering.
 
 **`ssr_enabled` synchronization exception:** `HiZPass`/`SceneColorMipPass`
 (reused unmodified from gfxcoopa, only constructed when `ssr_enabled` is set)

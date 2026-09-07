@@ -38,9 +38,9 @@ struct GfxForwardMaterial {
 };
 
 /// Per-frame lighting/indirect/SSR tuning -- byte-for-byte the same fields
-/// TransparentLightingPushConstants carries (pixel_render_pipeline.h),
-/// wherever the includer sources them from (a push constant there, an SdfData
-/// UBO for the SDF forward pass).
+/// ForwardGlobals carries (toyengine's forward_globals.h), wherever the
+/// includer sources them from (a ForwardGlobals UBO for the mesh forward
+/// pass, an SdfData UBO for the SDF forward pass).
 struct GfxForwardLightingParams {
     float light_bands;
     float spec_threshold;

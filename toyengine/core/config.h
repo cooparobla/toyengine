@@ -110,6 +110,7 @@ struct AppConfig {
                 if (r.contains("ssr_enabled"))       config.render.ssr_enabled       = r.at("ssr_enabled").get_value<bool>();
                 if (r.contains("transparency_enabled")) config.render.transparency_enabled = r.at("transparency_enabled").get_value<bool>();
                 if (r.contains("ssr_reflect_transparent")) config.render.ssr_reflect_transparent = r.at("ssr_reflect_transparent").get_value<bool>();
+                if (r.contains("refraction_enabled")) config.render.refraction_enabled = r.at("refraction_enabled").get_value<bool>();
                 if (r.contains("fog_enabled"))       config.render.fog_enabled       = r.at("fog_enabled").get_value<bool>();
                 if (r.contains("sdf_enabled"))         config.render.sdf_enabled         = r.at("sdf_enabled").get_value<bool>();
                 if (r.contains("sdf_shadows_enabled")) config.render.sdf_shadows_enabled = r.at("sdf_shadows_enabled").get_value<bool>();
@@ -181,6 +182,24 @@ struct AppConfig {
                 if (r.contains("ssr_temporal_gamma"))   config.render.ssr_temporal_gamma   = r.at("ssr_temporal_gamma").get_value<float>();
                 if (r.contains("ssgi_intensity"))       config.render.indirect.ssgi_intensity = r.at("ssgi_intensity").get_value<float>();
                 if (r.contains("ssgi_distance"))        config.render.indirect.ssgi_distance  = r.at("ssgi_distance").get_value<float>();
+
+                // --- Refraction (transparent/BLEND MESH objects only) ---
+                if (r.contains("refraction_ior"))              config.render.refraction_ior           = r.at("refraction_ior").get_value<float>();
+                if (r.contains("refraction_thickness"))        config.render.refraction_thickness     = r.at("refraction_thickness").get_value<float>();
+                if (r.contains("refraction_strength"))         config.render.refraction_strength      = r.at("refraction_strength").get_value<float>();
+                if (r.contains("refraction_max_offset"))       config.render.refraction_max_offset    = r.at("refraction_max_offset").get_value<float>();
+                if (r.contains("refraction_chromatic"))        config.render.refraction_chromatic     = r.at("refraction_chromatic").get_value<float>();
+                if (r.contains("refraction_blur"))             config.render.refraction_blur          = r.at("refraction_blur").get_value<float>();
+                if (r.contains("refraction_density"))          config.render.refraction_density       = r.at("refraction_density").get_value<float>();
+                if (r.contains("refraction_fresnel"))          config.render.refraction_fresnel       = r.at("refraction_fresnel").get_value<bool>();
+                if (r.contains("refraction_tint")) {
+                    const auto& c = r.at("refraction_tint");
+                    if (c.size() >= 3) {
+                        config.render.refraction_tint = glm::vec3(
+                            c.at(0).get_value<float>(), c.at(1).get_value<float>(), c.at(2).get_value<float>());
+                    }
+                }
+                if (r.contains("refraction_include_reflections")) config.render.refraction_include_reflections = r.at("refraction_include_reflections").get_value<bool>();
 
                 // --- Fog ---
                 if (r.contains("fog_mode"))           config.render.fog_mode           = r.at("fog_mode").get_value<int>();

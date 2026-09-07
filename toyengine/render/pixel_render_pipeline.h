@@ -107,6 +107,7 @@
 #include <toyengine/render/pixel_render_config.h>
 #include <toyengine/render/pixel_math.h>
 #include <toyengine/render/instance_stream.h>
+#include <toyengine/render/forward_globals.h>
 #include <gfxcoopa/engine/data/palette_lut.h>
 #include <gfxcoopa/engine/passes/deferred_lighting_pass.h>
 #include <gfxcoopa/engine/passes/ssr_pass.h>
@@ -140,54 +141,32 @@ struct PixelLightingPushConstants {
 };
 
 /**
- * @struct TransparentLightingPushConstants
- * @brief Matches transparent.frag's PushConstants block's trailing [32, 108) region --
+ * @struct TransparentRefractionPushConstants
+ * @brief Matches transparent.frag's PushConstants block's trailing [32, 64) region --
  *        appended after TransparentPass::PushConstants' own 32-byte material block (see
- *        that pass's extra_pc_bytes ctor param). Pushed once per frame in
- *        record_transparent_(), not per object -- unlike the material block, this is
- *        frame-level config.
+ *        that pass's extra_pc_bytes ctor param). Pushed once per MESH object in
+ *        record_transparent_() (not per SDF item -- SDF glass doesn't refract, see the
+ *        refraction plan), immediately after TransparentPass::push()'s own [0,32) push.
  *
- *        Covers three groups: the same banded/cel-shading fields
- *        PixelLightingPushConstants carries (light_bands/spec_threshold/soft_lighting,
- *        rim_strength, ambient_intensity, sky_intensity -- kept as separate fields here
- *        rather than embedding that struct, since transparent.frag's block must stay one
- *        flat, tightly-packed sequence of scalars); ssr_enabled plus the IndirectParams
- *        SSGI fields (ssgi_intensity/ssgi_distance); and every gfx/ssr_trace_body.glsl
- *        GfxSsrParams field, so transparent.frag can call gfx_ssr_trace() with the exact
- *        same tuning ssr.frag's own SsrPushConstants carries. All scalar float/int in
- *        strict declaration order, matching transparent.frag's `pc` block field-for-field
- *        -- see that file for why a pushed inv_proj mat4 was deliberately avoided (would
- *        push this block past the 128-byte guaranteed minimum).
+ *        The frame-level lighting/indirect/SSR block that used to occupy this region
+ *        (TransparentLightingPushConstants) moved to a UBO -- see ForwardGlobals
+ *        (forward_globals.h) -- because adding these two per-object refraction vec4s
+ *        alongside it would have put the combined push-constant block over the 128-byte
+ *        guaranteed Vulkan minimum. gfxcoopa's SdfGlobals (sdf_data.h) hit the identical
+ *        wall on the SDF forward path and was resolved the same way.
  */
-struct TransparentLightingPushConstants {
-    float light_bands       = 4.0f;
-    float spec_threshold    = 0.55f;
-    float soft_lighting     = 0.0f;
-    float rim_strength      = 0.0f;
-    float ambient_intensity = 1.0f;
-    float sky_intensity     = 1.0f;
-    float ssr_enabled       = 0.0f;
-    float ssgi_intensity    = 0.0f;
-    float ssgi_distance     = 0.5f;
-    float ssr_max_distance     = 15.0f;
-    float ssr_bias_texels      = 3.5f;
-    float ssr_thickness_min    = 0.05f;
-    float ssr_thickness_scale  = 0.01f;
-    float ssr_roughness_cutoff = 1.0f;
-    int32_t ssr_max_iterations  = 64;
-    int32_t ssr_max_hiz_mip     = 0;
-    int32_t ssr_start_mip       = 0;
-    int32_t ssr_min_mip0_steps  = 1;
-    int32_t ssr_max_color_mip   = 0;
+struct TransparentRefractionPushConstants {
+    glm::vec4 tint_thickness = {1.0f, 1.0f, 1.0f, 0.25f};  // rgb = refraction_tint, w = thickness
+    glm::vec4 ior_flags      = {1.45f, 0.0f, 0.0f, 0.0f};  // x = ior, y = refraction on/off, zw reserved
 };
 
 /**
  * @struct TransparentCaptureLightingPushConstants
  * @brief Matches transparent_capture.frag's PushConstants block's trailing [32, 56) region --
  *        appended after TransparentCapturePass::PushConstants' own 32-byte material block.
- *        Deliberately smaller than TransparentLightingPushConstants: this capture never
- *        traces its own SSR (see transparent_capture.frag's file doc), so none of that
- *        struct's ssr_enabled/ssgi/GfxSsrParams fields apply here.
+ *        Deliberately smaller than ForwardGlobals: this capture never traces its own SSR
+ *        (see transparent_capture.frag's file doc), so none of that struct's
+ *        ssr_enabled/ssgi/GfxSsrParams/refraction fields apply here.
  */
 struct TransparentCaptureLightingPushConstants {
     float light_bands       = 4.0f;
@@ -262,6 +241,7 @@ public:
           shadow_target_(device, allocator, config_.shadow_map_resolution, config_.cube_shadow_resolution),
           palette_lut_(coopa::gfx::engine::data::PaletteLut::load(device, allocator, cmd_pool, config_.palette_path)),
           instance_stream_(device, allocator),
+          forward_globals_(device, allocator),
           sdf_data_(device, allocator, config_.sdf_max_renderers, config_.sdf_max_shapes)
     {
         camera_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
@@ -480,6 +460,31 @@ public:
             config_.shaders("scene_color_downsample.frag"));
         transparent_scene_color_mip_pass_->recreate(render_extent_.width, render_extent_.height);
 
+        // Refraction's own post-SSR scene-colour chain (see refraction_scene_color_mip_pass_'s
+        // own doc for why this must be a separate instance/set, not a second execute() on
+        // scene_color_mip_pass_ itself). Always constructed, matching this pipeline's usual
+        // policy elsewhere -- render() gates execute() per frame on config_.refraction_enabled
+        // && config_.transparency_enabled; its image simply never gets sampled if
+        // config_.refraction_enabled was false at construction (see the transparent_extra
+        // bind lambda just below, which is the only thing that ever reads this set, and only
+        // does so when that same condition held at startup).
+        refraction_scene_color_mip_pass_ = std::make_unique<coopa::gfx::engine::passes::SceneColorMipPass>(
+            device, allocator,
+            config_.shaders("fullscreen.vert"),
+            config_.shaders("scene_color_downsample.frag"));
+        refraction_scene_color_mip_pass_->recreate(render_extent_.width, render_extent_.height);
+
+        refraction_scene_color_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
+            coopa::gfx::pipeline::DescriptorLayoutBuilder()
+                .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
+                .build(device));
+        refraction_scene_color_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
+            coopa::gfx::pipeline::DescriptorPoolBuilder().add_sets(*refraction_scene_color_layout_, 1).build(device));
+        refraction_scene_color_set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(
+            device, *refraction_scene_color_pool_, *refraction_scene_color_layout_);
+        refraction_scene_color_set_->bind_image(0, refraction_scene_color_mip_pass_->full_view(),
+                                                refraction_scene_color_mip_pass_->sampler().handle());
+
         // ssr_pass_->set_secondary_source() is NOT called here, unlike update_descriptors()
         // above -- deliberately. transparent_hiz_pass_/transparent_scene_color_mip_pass_'s
         // images are freshly recreate()'d (VK_IMAGE_LAYOUT_UNDEFINED) at this point and stay
@@ -501,32 +506,55 @@ public:
         // from ssr_composite_body.glsl, instead of the flat analytic sky fallback alone. Must
         // be constructed after ssr_pass_ (whose layouts/sets this borrows) and after
         // ssr_pass_->update_descriptors() above (so the sets are already populated -- they are
-        // bound once for the run, never per-frame; see that call's own comment). extra_pc_bytes
-        // reserves [32, 108) in transparent.frag's push-constant block for
-        // TransparentLightingPushConstants -- soft_lighting/light_bands/spec_threshold plus the
-        // rim/indirect/SSR tuning pixel_lighting.frag and ssr_pass_'s Params also carry --
-        // pushed once per frame in record_transparent_() (folded into ONE fragment-stage range;
-        // see TransparentPass's extra_pc_bytes ctor param doc for why a second same-stage
-        // VkPushConstantRange isn't legal here).
+        // bound once for the run, never per-frame; see that call's own comment).
+        //
+        // Set 6 -- forward_globals_'s per-frame lighting/indirect/SSR/refraction UBO (see
+        // forward_globals.h). Appended after ssr_pass_'s own three trace-input sets, mesh-only:
+        // sdf_forward_extra below does NOT get this set, since SDF glass keeps reading its own
+        // SdfGlobals UBO unchanged (see the refraction plan for why). This is where
+        // soft_lighting/light_bands/spec_threshold plus the rim/indirect/SSR tuning
+        // pixel_lighting.frag and ssr_pass_'s Params also carry now lives -- it used to be a
+        // per-frame push constant here (TransparentLightingPushConstants) until per-object
+        // refraction fields needed room in the same push-constant block that left none (see
+        // TransparentRefractionPushConstants' own doc, and extra_pc_bytes below, for why).
+        // u_scene_color (the third of these four sets) comes from refraction_scene_color_
+        // mip_pass_ instead of ssr_pass_'s own scene_color_set() when refraction was enabled
+        // at startup -- decided ONCE here, matching pre_fog_view_typed_'s own "startup value,
+        // not re-selected per frame" policy (config_.refraction_enabled never changes at
+        // runtime, so this is safe). When refraction_enabled is false, this is BYTE-IDENTICAL
+        // to the pre-refraction binding, which is what keeps that config the regression guard
+        // for this feature. See refraction_scene_color_mip_pass_'s own doc for why this can't
+        // just be a second execute() on scene_color_mip_pass_ itself.
+        const bool refraction_scene_color_active = config_.transparency_enabled && config_.refraction_enabled;
         coopa::gfx::engine::passes::ExtraSets transparent_extra;
         transparent_extra.layouts = {
-            &ssr_pass_->trace_gbuffer_layout(), &ssr_pass_->hiz_layout(), &ssr_pass_->scene_color_layout()
+            &ssr_pass_->trace_gbuffer_layout(), &ssr_pass_->hiz_layout(),
+            refraction_scene_color_active ? refraction_scene_color_layout_.get() : &ssr_pass_->scene_color_layout(),
+            &forward_globals_.layout()
         };
-        transparent_extra.bind = [this](coopa::gfx::command::CommandBuffer& cmd, uint32_t first_set) {
+        transparent_extra.bind = [this, refraction_scene_color_active](coopa::gfx::command::CommandBuffer& cmd, uint32_t first_set) {
             cmd.bind_descriptor_set(ssr_pass_->trace_gbuffer_set(), first_set);
             cmd.bind_descriptor_set(ssr_pass_->hiz_set(), first_set + 1);
-            cmd.bind_descriptor_set(ssr_pass_->scene_color_set(), first_set + 2);
+            if (refraction_scene_color_active) {
+                cmd.bind_descriptor_set(*refraction_scene_color_set_, first_set + 2);
+            } else {
+                cmd.bind_descriptor_set(ssr_pass_->scene_color_set(), first_set + 2);
+            }
+            cmd.bind_descriptor_set(forward_globals_.current_set(), first_set + 3);
         };
 
         // transparent.frag reuses pbr.vert (byte-identical to gbuffer.vert -- see gfx/), the
-        // same convention blendy uses for its own TransparentPass.
+        // same convention blendy uses for its own TransparentPass. extra_pc_bytes is now just
+        // TransparentRefractionPushConstants -- the frame-level lighting/SSR block that used
+        // to occupy this region moved to forward_globals_'s UBO (set 6 above); see that
+        // struct's own doc for why.
         transparent_pass_ = std::make_unique<coopa::gfx::engine::passes::TransparentPass>(
             device, VK_FORMAT_R16G16B16A16_SFLOAT, *camera_layout_, *light_layout_,
             *shadow_layout_,
             config_.shaders("pbr.vert"),
             config_.shaders("transparent.frag"),
             transparent_extra,
-            static_cast<uint32_t>(sizeof(TransparentLightingPushConstants)));
+            static_cast<uint32_t>(sizeof(TransparentRefractionPushConstants)));
 
         // SdfForwardPass shares transparent_pass_'s OWN render pass (see that accessor's doc) --
         // render passes only need to be attachment-compatible to back a second Pipeline, and
@@ -842,9 +870,9 @@ public:
             }
 
             // Per-frame globals: camera ray reconstruction + the forward pass's lighting/
-            // indirect/SSR tuning, sourced from the SAME config_ fields
-            // TransparentLightingPushConstants reads (see sdf_forward.frag's doc for the exact
-            // field-order mapping).
+            // indirect/SSR tuning, sourced from the SAME config_ fields fill_forward_globals_()
+            // reads for the mesh path's own ForwardGlobals UBO (see sdf_forward.frag's doc for
+            // the exact field-order mapping).
             auto& g = sdf_data_.globals();
             g.inv_view_proj = glm::inverse(view_proj);
             g.camera_pos    = glm::vec4(cam_pos, 1.0f);
@@ -1124,7 +1152,36 @@ public:
                     ssr_pass_->execute(cmd, current_camera_set(), ssr_params);
                 }
 
+                if (config_.transparency_enabled && config_.refraction_enabled) {
+                    // Builds refraction_scene_color_mip_pass_'s chain -- the dedicated,
+                    // independent instance transparent.frag's u_scene_color reads instead of
+                    // ssr_pass_'s own scene_color_set() whenever refraction is active (see that
+                    // member's own doc, and the transparent_extra bind lambda above, for why a
+                    // SEPARATE instance is required rather than a second execute() on
+                    // scene_color_mip_pass_ itself: that pass rebinds its own internal per-mip
+                    // descriptor sets on every execute(), and doing so twice in one frame's
+                    // not-yet-submitted command buffer corrupts it). MESH-only: BLEND
+                    // SdfRenderers keep reading the original scene_color_mip_pass_ chain
+                    // (pre-SSR) via ssr_pass_->scene_color_set(), unchanged (see the refraction
+                    // plan for why SDF glass is excluded from refraction entirely).
+                    coopa::gfx::TextureView refraction_source =
+                        (config_.refraction_include_reflections && config_.ssr_enabled)
+                            ? ssr_pass_->output_view_typed() : offscreen_target_.color_view_typed();
+                    refraction_scene_color_mip_pass_->execute(cmd, refraction_source);
+                }
+
                 if (config_.transparency_enabled) {
+                    // Per-frame globals for the forward MESH pass's lighting/indirect/SSR/
+                    // refraction tuning -- sourced from the SAME config_ fields sdf_data_'s own
+                    // globals() fill above uses, in particular config_.indirect (shared with
+                    // SsrPass::Params so opaque and transparent indirect terms can never
+                    // disagree -- see IndirectParams' own doc). Uploaded to frame_slot's UBO
+                    // slot, then bound once per mesh-kind transition in record_transparent_() --
+                    // see transparent.frag's set 6.
+                    forward_globals_.begin(frame_slot);
+                    fill_forward_globals_(forward_globals_.globals());
+                    forward_globals_.upload();
+
                     // Depth is always SHADER_READ_ONLY_OPTIMAL by this point -- both branches
                     // above (HiZPass::execute() when need_ssr_trace_inputs, transition_gbuffer_
                     // depth_to_shader_read_() otherwise) leave it there; see that if/else's own
@@ -1656,6 +1713,28 @@ private:
         transparent_capture_target_.end(cmd);
     }
 
+    /// Fills the forward MESH pass's per-frame globals (lighting/indirect/SSR/refraction)
+    /// from config_ -- the exact same fields sdf_data_'s own globals() fill (in render()'s
+    /// SDF gather block) sources, kept in sync by hand since the two are independent UBOs
+    /// (see ForwardGlobals's own doc for why the duplication is accepted, not removed).
+    void fill_forward_globals_(ForwardGlobals& g) const {
+        g.lighting0 = glm::vec4(config_.light_bands, config_.spec_threshold,
+                                config_.soft_lighting ? 1.0f : 0.0f, config_.rim_strength);
+        g.lighting1 = glm::vec4(config_.indirect.ambient_intensity, config_.indirect.sky_intensity,
+                                config_.ssr_enabled ? 1.0f : 0.0f, config_.indirect.ssgi_intensity);
+        g.ssr0 = glm::vec4(config_.indirect.ssgi_distance, config_.ssr_max_distance,
+                          config_.ssr_bias_texels, config_.ssr_thickness);
+        g.ssr1 = glm::vec4(config_.ssr_thickness_scale, config_.ssr_roughness_cutoff, 0.0f, 0.0f);
+        g.ssr_steps = glm::ivec4(config_.ssr_max_iterations,
+                                 static_cast<int>(hiz_pass_->max_mip_level()),
+                                 config_.ssr_start_mip, config_.ssr_min_mip0_steps);
+        g.ssr_mip = glm::ivec4(static_cast<int>(scene_color_mip_pass_->max_mip_level()), 0, 0, 0);
+        g.refract0 = glm::vec4(config_.refraction_enabled ? 1.0f : 0.0f, config_.refraction_strength,
+                               config_.refraction_max_offset, config_.refraction_chromatic);
+        g.refract1 = glm::vec4(config_.refraction_blur, config_.refraction_density,
+                               config_.refraction_fresnel ? 1.0f : 0.0f, 0.0f);
+    }
+
     /// Draws every BLEND-material renderer AND every BLEND SdfRenderer, back-to-front by
     /// squared distance from the camera, into hdr_target_view (the deferred-lit target or,
     /// when SSR is on, its composite output -- same choice pixel_stylize_pass_ reads from).
@@ -1710,38 +1789,12 @@ private:
                                        render_extent_.width, render_extent_.height);
         transparent_pass_->begin(cmd, gbuffer_target_.depth_image_handle(), depth_layout);
 
-        // Frame-level, not per-object -- pushed once whenever the mesh pipeline becomes bound
-        // below (push-constant contents don't survive a bind to a pipeline with an incompatible
-        // layout, and sdf_forward_pass_'s layout is NOT compatible with transparent_pass_'s --
-        // see the per-item loop below). Sourced from the SAME config_ members record()'s
-        // lighting_pc/ssr_params locals use, in particular config_.indirect (shared with
-        // SsrPass::Params so opaque and transparent indirect terms can never disagree -- see
-        // IndirectParams' own doc).
-        TransparentLightingPushConstants lighting_pc;
-        lighting_pc.light_bands       = config_.light_bands;
-        lighting_pc.spec_threshold    = config_.spec_threshold;
-        lighting_pc.soft_lighting     = config_.soft_lighting ? 1.0f : 0.0f;
-        lighting_pc.rim_strength      = config_.rim_strength;
-        lighting_pc.ambient_intensity = config_.indirect.ambient_intensity;
-        lighting_pc.sky_intensity     = config_.indirect.sky_intensity;
-        // Gates the trace at runtime: when SSR is disabled, hiz_pass_->execute() never runs
-        // this frame (see render()'s if/else on config_.ssr_enabled), so the Hi-Z pyramid
-        // this pass would otherwise trace against holds stale/uninitialized data -- the
-        // shader must skip gfx_ssr_trace() entirely in that case, not merely get a
-        // zero-confidence result from it.
-        lighting_pc.ssr_enabled       = config_.ssr_enabled ? 1.0f : 0.0f;
-        lighting_pc.ssgi_intensity    = config_.indirect.ssgi_intensity;
-        lighting_pc.ssgi_distance     = config_.indirect.ssgi_distance;
-        lighting_pc.ssr_max_distance     = config_.ssr_max_distance;
-        lighting_pc.ssr_bias_texels      = config_.ssr_bias_texels;
-        lighting_pc.ssr_thickness_min    = config_.ssr_thickness;
-        lighting_pc.ssr_thickness_scale  = config_.ssr_thickness_scale;
-        lighting_pc.ssr_roughness_cutoff = config_.ssr_roughness_cutoff;
-        lighting_pc.ssr_max_iterations   = config_.ssr_max_iterations;
-        lighting_pc.ssr_max_hiz_mip      = static_cast<int32_t>(hiz_pass_->max_mip_level());
-        lighting_pc.ssr_start_mip        = config_.ssr_start_mip;
-        lighting_pc.ssr_min_mip0_steps   = config_.ssr_min_mip0_steps;
-        lighting_pc.ssr_max_color_mip    = static_cast<int32_t>(scene_color_mip_pass_->max_mip_level());
+        // Frame-level lighting/indirect/SSR/refraction tuning now lives in forward_globals_'s
+        // UBO (set 6, bound below via bind_extra()) instead of a push constant -- filled and
+        // uploaded once per frame in render() (fill_forward_globals_()), not here, since it
+        // no longer needs to be re-issued at every mesh-kind transition the way a push
+        // constant did (a descriptor set, unlike push-constant contents, survives a bind to a
+        // pipeline with an incompatible layout).
 
         // -1 = neither yet bound, 0 = mesh, 1 = sdf -- tracks which pipeline+sets are current so
         // a run of same-kind items in `order` only rebinds once, at the transition.
@@ -1759,16 +1812,11 @@ private:
                     cmd.bind_descriptor_set(current_camera_set(), 0);
                     cmd.bind_descriptor_set(*light_set_,  1);
                     cmd.bind_descriptor_set(*shadow_set_, 2);
-                    // Sets 3/4/5 -- ssr_pass_'s own trace-input sets, bound via the ExtraSets
-                    // callback configured at construction (see that ctor call's comment).
+                    // Sets 3/4/5 -- ssr_pass_'s own trace-input sets; set 6 -- forward_globals_'s
+                    // UBO (see the ExtraSets bind lambda in the ctor). All bound via the
+                    // ExtraSets callback configured at construction.
                     transparent_pass_->bind_extra(cmd);
                     cmd.bind_vertex_buffer(instance_stream_.buffer(), 0, 1);
-                    // Pushed into transparent.frag's PushConstants' [32, 108) region (see the
-                    // ctor's extra_pc_bytes comment), left standing for every per-object push()
-                    // below until the next rebind, which only ever touches [0, 32).
-                    cmd.push_constants(transparent_pass_->layout(), VK_SHADER_STAGE_FRAGMENT_BIT,
-                                       sizeof(coopa::gfx::engine::passes::TransparentPass::PushConstants),
-                                       sizeof(TransparentLightingPushConstants), &lighting_pc);
                     last_kind = 0;
                 }
 
@@ -1779,6 +1827,23 @@ private:
                 pc.roughness = mr->material.roughness;
                 pc.ao        = mr->material.ao;
                 transparent_pass_->push(cmd, pc);
+
+                // Pushed into transparent.frag's PushConstants' [32, 64) region (see the ctor's
+                // extra_pc_bytes comment) -- per-object, unlike forward_globals_'s per-frame UBO.
+                // Each field falls back to its PixelRenderConfig engine-wide default when the
+                // material left it at PBRMaterial's negative sentinel (see that struct's own
+                // doc for why -1 rather than baking the default straight into PBRMaterial).
+                TransparentRefractionPushConstants refract_pc;
+                float refract_ior       = mr->material.ior >= 0.0f ? mr->material.ior : config_.refraction_ior;
+                float refract_thickness = mr->material.refraction_thickness >= 0.0f
+                                              ? mr->material.refraction_thickness : config_.refraction_thickness;
+                glm::vec3 refract_tint  = mr->material.refraction_tint.r >= 0.0f
+                                              ? mr->material.refraction_tint : config_.refraction_tint;
+                refract_pc.tint_thickness = glm::vec4(refract_tint, refract_thickness);
+                refract_pc.ior_flags      = glm::vec4(refract_ior, mr->material.has_refraction() ? 1.0f : 0.0f, 0.0f, 0.0f);
+                cmd.push_constants(transparent_pass_->layout(), VK_SHADER_STAGE_FRAGMENT_BIT,
+                                   sizeof(coopa::gfx::engine::passes::TransparentPass::PushConstants),
+                                   sizeof(TransparentRefractionPushConstants), &refract_pc);
 
                 mr->get_mesh()->bind(cmd);
                 mr->get_mesh()->draw(cmd, 1, instance_idx[item.index]);
@@ -1886,6 +1951,11 @@ private:
     std::unique_ptr<coopa::gfx::engine::passes::TiltShiftPass> tilt_shift_pass_;
     std::unique_ptr<passes::UpscalePass>                         upscale_pass_;
 
+    // Mesh-only forward-pass globals UBO (see forward_globals.h's file doc for why this
+    // isn't a push constant) -- constructed before transparent_pass_ since that pass's
+    // ExtraSets ctor argument binds its layout/set at construction.
+    ForwardGlobalsData forward_globals_;
+
     // Always constructed (mirrors ssr_pass_'s policy -- see render_features.h); render()
     // checks config_.transparency_enabled per frame and skips the whole pass when off.
     std::unique_ptr<coopa::gfx::engine::passes::TransparentPass> transparent_pass_;
@@ -1904,6 +1974,24 @@ private:
     std::unique_ptr<coopa::gfx::engine::passes::TransparentCapturePass>  transparent_capture_pass_;
     std::unique_ptr<coopa::gfx::engine::passes::HiZPass>                 transparent_hiz_pass_;
     std::unique_ptr<coopa::gfx::engine::passes::SceneColorMipPass>       transparent_scene_color_mip_pass_;
+
+    // --- Refraction: independent post-SSR scene-colour chain for the MESH forward pass's
+    // u_scene_color (set 5 in transparent_extra above), so a refracting glass object's
+    // background sample -- and its own gfx_ssr_trace()/SSGI lookup -- see SSR reflections,
+    // not the pre-SSR image scene_color_mip_pass_ still holds at that point. A THIRD,
+    // independent SceneColorMipPass instance, not a second execute() on scene_color_mip_pass_
+    // itself: that pass rebinds its own internal per-mip descriptor sets on every execute()
+    // call, and doing that twice in one frame's not-yet-submitted command buffer invalidates
+    // it (Vulkan poisons a command buffer the moment a descriptor set it already bound gets
+    // updated again before submission) -- this was caught by validation layers during
+    // testing (VUID-vkCmdBindPipeline-commandBuffer-recording, "descriptor set was destroyed
+    // or updated"). Own dedicated descriptor set for the same reason: reusing
+    // ssr_pass_->scene_color_set() here would require rebinding IT per frame too, which
+    // that set's own doc says never happens ("bound once for the run, never per-frame").
+    std::unique_ptr<coopa::gfx::engine::passes::SceneColorMipPass> refraction_scene_color_mip_pass_;
+    std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout>     refraction_scene_color_layout_;
+    std::unique_ptr<coopa::gfx::pipeline::DescriptorPool>          refraction_scene_color_pool_;
+    std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>           refraction_scene_color_set_;
 
     // Previous frame's proj * view, for SSAO's and SSR's temporal resolve passes. Not
     // camera-jittered (this engine has no TAA), just last frame's camera -- see

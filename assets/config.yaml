@@ -18,6 +18,7 @@ render:
   ssr_enabled: true          # also gates the SSGI diffuse-bounce term (ssgi_intensity)
   transparency_enabled: true # forward BLEND-material pass; off by default (no demo scene uses it yet)
   ssr_reflect_transparent: true # opaque surfaces also reflect transparent geometry (roughly doubles SSR cost; requires ssr_enabled + transparency_enabled)
+  refraction_enabled: true   # screen-space refraction for BLEND MESH objects only (not SdfRenderer glass); requires transparency_enabled
   fog_enabled: false          # Unity-style global fog + local FogVolume components (see gfxcoopa's FogPass)
   sdf_enabled: true           # signed-distance-field raymarching (SdfRenderer/SdfShape); see toyengine's sdf_*.frag
   sdf_shadows_enabled: true   # independent of sdf_enabled -- SDFs can be visible without casting shadows
@@ -130,6 +131,19 @@ render:
                                # just assumed) via the same frame-sequence sweep as ssr_jitter.
   ssgi_intensity: 0.6         # diffuse colour-bleed strength; 0 = specular-only SSR
   ssgi_distance: 0.5          # world-space offset along N for the bounce lookup
+
+  # --- Refraction (transparent/BLEND MESH objects only; SdfRenderer glass is unaffected) ---
+  refraction_ior: 1.45              # engine-wide default IOR for materials that don't set their own (glass ~1.45, water ~1.33)
+  refraction_thickness: 0.25        # engine-wide default world-space distance the ray travels through the object
+  refraction_strength: 1.0          # global multiplier on the screen-space UV offset
+  refraction_max_offset: 0.08       # clamp in UV units; stops smearing at grazing angles
+  refraction_chromatic: 0.0         # RGB IOR split (chromatic aberration); 0 = single tap
+  refraction_blur: 1.0              # roughness -> scene-colour mip scale; frosted glass
+  refraction_density: 1.0           # Beer-Lambert absorption strength through refraction_tint
+  refraction_fresnel: true          # dim transmission at grazing angles (energy already in the SSR/sky term)
+  refraction_tint: [1.0, 1.0, 1.0]  # engine-wide default transmission tint
+  refraction_include_reflections: true  # source refraction's own scene-colour chain from the SSR composite
+                                         # (vs. the plain pre-SSR image) so refraction sees SSR reflections too
 
   # --- Fog ---
   fog_mode: 2                 # 0 Linear, 1 Exponential, 2 Exp2 (Unity's default)

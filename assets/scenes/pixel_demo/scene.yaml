@@ -106,6 +106,10 @@ scene:
             ao: 1.0
             alpha: 0.5
             alpha_mode: BLEND
+            refraction: true
+            ior: 1.45
+            refraction_thickness: 0.35
+            refraction_tint: { r: 0.85, g: 0.95, b: 1.0 }
       children: []
 
     # SDF forward-blend test: a BLEND SdfRenderer placed apart from glass_sphere.000 in

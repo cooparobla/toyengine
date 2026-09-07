@@ -46,6 +46,39 @@ struct PixelRenderConfig {
     bool ssr_reflect_transparent = false;
 
     /**
+     * Screen-space refraction for BLEND MESH objects only (MeshRenderer, not SdfRenderer --
+     * see toyengine's refraction plan for why SDF glass is excluded). Bends the background
+     * sample by the surface's IOR/thickness, applies Beer-Lambert tint absorption and
+     * roughness-driven blur, and optionally chromatic aberration and a Fresnel falloff --
+     * see assets/shaders/refraction.glsl. Requires transparency_enabled; meaningless
+     * without it. Per-object ior/refraction_thickness/refraction_tint/refraction override
+     * these defaults via PBRMaterial (see mesh_renderer.h).
+     */
+    bool      refraction_enabled       = true;
+    float     refraction_ior           = 1.45f; /**< Default IOR; glass ~1.45, water ~1.33. */
+    float     refraction_thickness     = 0.25f; /**< Default world-space distance the ray travels through the object. */
+    float     refraction_strength      = 1.0f;  /**< Global multiplier on the screen-space UV offset. */
+    float     refraction_max_offset    = 0.08f; /**< Clamp in UV units; stops smearing at grazing angles. */
+    float     refraction_chromatic     = 0.0f;  /**< RGB IOR split (chromatic aberration); 0 = single tap. */
+    float     refraction_blur          = 1.0f;  /**< Roughness -> scene-colour mip scale; frosted glass. */
+    float     refraction_density       = 1.0f;  /**< Beer-Lambert absorption strength through refraction_tint. */
+    bool      refraction_fresnel       = true;  /**< Dim transmission at grazing angles (energy already in the SSR/sky term). */
+    glm::vec3 refraction_tint          = glm::vec3(1.0f, 1.0f, 1.0f); /**< Default transmission tint. */
+    /**
+     * When true (and refraction_enabled), refraction_scene_color_mip_pass_ -- the dedicated
+     * scene-colour chain the MESH forward pass's u_scene_color reads whenever refraction is
+     * active (see that member's own doc in pixel_render_pipeline.h) -- is built from the SSR
+     * composite output each frame, so refraction sees a background that includes SSR
+     * reflections. When false, it's built from the same pre-SSR image ssr_pass_'s own trace
+     * uses instead. Either way this is a SEPARATE, independent SceneColorMipPass instance
+     * from scene_color_mip_pass_ -- not a second execute() on that shared one, which would
+     * corrupt its own internal per-mip descriptor sets (see that member's doc for the
+     * validation-layer error this was caught by). MESH-only: BLEND SdfRenderers are unaffected
+     * either way, since SDF glass is excluded from refraction entirely.
+     */
+    bool      refraction_include_reflections = true;
+
+    /**
      * Unity-style global fog (Linear/Exponential/Exp2) plus up to 8 local box/sphere
      * FogVolume components, drawn after the transparent pass (so BLEND geometry is fogged
      * too) and before pixel_stylize_pass_ (so fog sits in linear HDR, ahead of tonemap/

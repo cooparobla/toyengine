@@ -65,21 +65,39 @@ layout(set = 3, binding = 2) uniform sampler2D g_position_roughness;
 layout(set = 4, binding = 0) uniform sampler2D u_hiz_map;
 layout(set = 5, binding = 0) uniform sampler2D u_scene_color;
 
+// Set 6: forward_globals_'s per-frame lighting/indirect/SSR/refraction UBO (see
+// forward_globals.h). Mesh-only -- sdf_forward.frag keeps reading its own SdfGlobals UBO
+// instead (see the refraction plan for why SDF glass is excluded). Replaces what used to
+// be a per-frame push constant here (TransparentLightingPushConstants) -- see
+// TransparentRefractionPushConstants' own doc (pixel_render_pipeline.h) for why: adding
+// per-object refraction fields to this file's push-constant block alongside that frame
+// block would have gone over the 128-byte guaranteed Vulkan minimum.
+layout(set = 6, binding = 0) uniform ForwardGlobalsBlock {
+    vec4  lighting0;  // x=light_bands, y=spec_threshold, z=soft_lighting, w=rim_strength
+    vec4  lighting1;  // x=ambient_intensity, y=sky_intensity, z=ssr_enabled, w=ssgi_intensity
+    vec4  ssr0;       // x=ssgi_distance, y=ssr_max_distance, z=ssr_bias_texels, w=ssr_thickness_min
+    vec4  ssr1;       // x=ssr_thickness_scale, y=ssr_roughness_cutoff, zw unused
+    ivec4 ssr_steps;  // x=ssr_max_iterations, y=ssr_max_hiz_mip, z=ssr_start_mip, w=ssr_min_mip0_steps
+    ivec4 ssr_mip;    // x=ssr_max_color_mip, yzw unused
+    vec4  refract0;   // x=enabled, y=strength, z=max_offset, w=chromatic
+    vec4  refract1;   // x=blur, y=density, z=fresnel_enabled, w unused
+} forward_globals;
+
 #include <gfx/ssr_trace_body.glsl>
 #include "indirect_hooks.glsl"
 #include "pixel_forward_shading.glsl"
+#include "refraction.glsl"
 
 // Push constants: [0, 32) is the per-object material block, byte-identical to
 // GBufferPipeline::PushConstants (model/normal_matrix moved to the per-instance vertex
 // stream -- see pbr.vert, which this pass's vertex stage uses) and pushed once per draw
-// by TransparentPass::push(). [32, 108) is a frame-level lighting/indirect/SSR block
-// pushed once per frame by PixelRenderPipeline::record_transparent_() via
+// by TransparentPass::push(). [32, 64) is a per-object refraction block (ior/thickness/
+// tint/enabled) pushed once per draw by PixelRenderPipeline::record_transparent_() via
 // TransparentPass's extra_pc_bytes ctor param -- GLSL permits only one push_constant
 // block per stage, so both live in this one struct despite coming from two separate
-// push_constants() calls. inv_proj is deliberately NOT pushed (unlike ssr.frag's own
-// SsrPushConstants) -- a mat4 here would take this block past 108 bytes, over the
-// 128-byte guaranteed-minimum Vulkan push constant budget once padding is counted, so
-// it's recomputed once per fragment via inverse(camera.proj) instead.
+// push_constants() calls. The frame-level lighting/indirect/SSR block that used to
+// occupy this region moved to set 6's UBO above (see TransparentRefractionPushConstants'
+// doc for why).
 layout(push_constant) uniform PushConstants {
     vec4  albedo;     // xyz = albedo, w = alpha
     float metallic;
@@ -87,30 +105,8 @@ layout(push_constant) uniform PushConstants {
     float ao;
     float alpha_cutoff;  // unused here -- BLEND materials never alpha-test
 
-    float light_bands;    // discrete N.L shading steps; used when soft_lighting is off
-    float spec_threshold; // hard specular highlight cutoff; used when soft_lighting is off
-    float soft_lighting;  // != 0 -> smooth Cook-Torrance direct lighting; 0 -> banded/ramped cel look
-    float rim_strength;     // 0 disables the rim term -- see pixel_lighting.frag's identical block
-    float ambient_intensity; // scales the sky/GI indirect diffuse term
-    float sky_intensity;     // scales the sky-gradient indirect specular base
-    float ssr_enabled;       // != 0 -> trace gfx_ssr_trace() below; else flat analytic sky only.
-                              // Must mirror config_.ssr_enabled exactly: when SSR is off this
-                              // frame, hiz_pass_->execute() never runs and u_hiz_map holds stale
-                              // data, so the trace itself must be skipped, not merely discounted.
-    float ssgi_intensity;    // diffuse colour-bleed strength; 0 = specular-only, matching
-                              // ssr_composite_body.glsl's own gate
-    float ssgi_distance;     // world-space offset along N for the SSGI bounce lookup
-
-    float ssr_max_distance;
-    float ssr_bias_texels;
-    float ssr_thickness_min;
-    float ssr_thickness_scale;
-    float ssr_roughness_cutoff;
-    int   ssr_max_iterations;
-    int   ssr_max_hiz_mip;
-    int   ssr_start_mip;
-    int   ssr_min_mip0_steps;
-    int   ssr_max_color_mip;
+    vec4  refraction_tint_thickness; // rgb = tint, w = thickness
+    vec4  refraction_ior_flags;      // x = ior, y = enabled (!= 0), zw reserved
 } material;
 
 layout(location = 0) out vec4 out_color;
@@ -127,25 +123,46 @@ void main() {
     mat.ao        = material.ao;
 
     GfxForwardLightingParams p;
-    p.light_bands          = material.light_bands;
-    p.spec_threshold       = material.spec_threshold;
-    p.soft_lighting        = material.soft_lighting;
-    p.rim_strength         = material.rim_strength;
-    p.ambient_intensity    = material.ambient_intensity;
-    p.sky_intensity        = material.sky_intensity;
-    p.ssr_enabled          = material.ssr_enabled;
-    p.ssgi_intensity       = material.ssgi_intensity;
-    p.ssgi_distance        = material.ssgi_distance;
-    p.ssr_max_distance     = material.ssr_max_distance;
-    p.ssr_bias_texels      = material.ssr_bias_texels;
-    p.ssr_thickness_min    = material.ssr_thickness_min;
-    p.ssr_thickness_scale  = material.ssr_thickness_scale;
-    p.ssr_roughness_cutoff = material.ssr_roughness_cutoff;
-    p.ssr_max_iterations   = material.ssr_max_iterations;
-    p.ssr_max_hiz_mip      = material.ssr_max_hiz_mip;
-    p.ssr_start_mip        = material.ssr_start_mip;
-    p.ssr_min_mip0_steps   = material.ssr_min_mip0_steps;
-    p.ssr_max_color_mip    = material.ssr_max_color_mip;
+    p.light_bands          = forward_globals.lighting0.x;
+    p.spec_threshold       = forward_globals.lighting0.y;
+    p.soft_lighting        = forward_globals.lighting0.z;
+    p.rim_strength         = forward_globals.lighting0.w;
+    p.ambient_intensity    = forward_globals.lighting1.x;
+    p.sky_intensity        = forward_globals.lighting1.y;
+    p.ssr_enabled          = forward_globals.lighting1.z;
+    p.ssgi_intensity       = forward_globals.lighting1.w;
+    p.ssgi_distance        = forward_globals.ssr0.x;
+    p.ssr_max_distance     = forward_globals.ssr0.y;
+    p.ssr_bias_texels      = forward_globals.ssr0.z;
+    p.ssr_thickness_min    = forward_globals.ssr0.w;
+    p.ssr_thickness_scale  = forward_globals.ssr1.x;
+    p.ssr_roughness_cutoff = forward_globals.ssr1.y;
+    p.ssr_max_iterations   = forward_globals.ssr_steps.x;
+    p.ssr_max_hiz_mip      = forward_globals.ssr_steps.y;
+    p.ssr_start_mip        = forward_globals.ssr_steps.z;
+    p.ssr_min_mip0_steps   = forward_globals.ssr_steps.w;
+    p.ssr_max_color_mip    = forward_globals.ssr_mip.x;
 
-    out_color = gfx_pixel_forward_shade(frag_world_pos, N, camera.camera_pos, camera.view, camera.proj, mat, p);
+    vec4 shaded = gfx_pixel_forward_shade(frag_world_pos, N, camera.camera_pos, camera.view, camera.proj, mat, p);
+
+    vec3 V = normalize(camera.camera_pos - frag_world_pos);
+    vec3 F0 = mix(vec3(0.04), mat.albedo, mat.metallic);
+
+    GfxRefractionMaterial rmat;
+    rmat.enabled   = material.refraction_ior_flags.y != 0.0;
+    rmat.ior       = material.refraction_ior_flags.x;
+    rmat.thickness = material.refraction_tint_thickness.w;
+    rmat.tint      = material.refraction_tint_thickness.rgb;
+
+    GfxRefractionParams rp;
+    rp.enabled         = forward_globals.refract0.x != 0.0;
+    rp.strength        = forward_globals.refract0.y;
+    rp.max_offset      = forward_globals.refract0.z;
+    rp.chromatic       = forward_globals.refract0.w;
+    rp.blur            = forward_globals.refract1.x;
+    rp.density         = forward_globals.refract1.y;
+    rp.fresnel_enabled = forward_globals.refract1.z != 0.0;
+
+    out_color = gfx_refraction_apply(shaded, frag_world_pos, N, V, mat.roughness, F0,
+                                     camera.view, camera.proj, rmat, rp, forward_globals.ssr_mip.x);
 }

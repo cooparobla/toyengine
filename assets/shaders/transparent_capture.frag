@@ -20,6 +20,11 @@
 //
 // No alpha, no blending (see TransparentCapturePass's doc: front-most transparent surface
 // wins per pixel by ordinary depth test, this pass owns and writes its own depth).
+//
+// No refraction either, deliberately: this pass runs before the lit scene colour exists
+// (see PixelRenderPipeline::render()'s ordering), so there is no valid background image
+// for a refracted glass object to sample here even if it wanted to -- refraction is applied
+// only in the visible forward draw (transparent.frag/refraction.glsl).
 
 #include <gfx/sky.glsl>
 #include <gfx/brdf.glsl>

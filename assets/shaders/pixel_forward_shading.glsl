@@ -87,6 +87,29 @@ float gfx_forward_calc_point_shadow(vec3 frag_to_light, float range) {
     return gfx_shadow_cube_hard(point_shadow_map, dir, current_dist, bias);
 }
 
+/// Limb fade for the sub-texel silhouette band of this RAW, undenoised forward
+/// path -- used by the SSR miss-fallback's weight and by refraction.glsl's
+/// fresnel dimming (keep both on THIS one curve so their energy ledgers stay in
+/// step; the trace's own hits are instead guarded by the asymmetric dark_trust
+/// clamp in gfx_pixel_forward_shade(), which deliberately does NOT fade bright
+/// hits).
+///
+/// gfx_ssr_trace()'s own grazing_fade spans NdotV [0, 0.05], but at this engine's
+/// low internal resolution that band is far thinner than one texel of a curved
+/// silhouette: NdotV rises like sqrt(texels-from-limb / radius), so a BLEND
+/// sphere ~12 render-texels in radius is already past 0.05 well inside its
+/// outermost texel. In that sub-texel band the trace's hit data is garbage (see
+/// the miss-fallback comment in gfx_pixel_forward_shade() for the geometry) and
+/// Schlick's pow5 fresnel spike zeroes refracted transmission with no rendered
+/// reflection to compensate -- both of which used to render as near-black pixels
+/// stippled along every BLEND silhouette. [0.05, 0.25] spans roughly the
+/// outermost texel of a small sphere and nothing more: wide enough to catch the
+/// sub-texel garbage, narrow enough that the look of everything past that first
+/// texel is untouched.
+float gfx_forward_silhouette_fade(float ndv) {
+    return smoothstep(0.05, 0.25, ndv);
+}
+
 // Banded diffuse + hard-thresholded specular, or smooth Cook-Torrance -- see
 // pixel_lighting.frag's identical formula/toggle for why this engine has
 // exactly one direct-lighting look, shared by every forward-shaded surface.
@@ -210,6 +233,9 @@ vec4 gfx_pixel_forward_shade(vec3 world_pos, vec3 N, vec3 camera_pos, mat4 view,
         sp.jitter_strength  = 0.0;
         sp.frame_index      = 0;
 
+        float ssr_ndv = max(dot(N, V), 0.0);
+        float silhouette_fade = gfx_forward_silhouette_fade(ssr_ndv);
+
         vec3 ssr_R = reflect(-V, N);
         GfxSsrHit ssr_hit = (roughness < p.ssr_roughness_cutoff && dot(ssr_R, N) > 0.0)
             ? gfx_ssr_trace(world_pos, N, roughness, inverse(proj), sp)
@@ -217,8 +243,60 @@ vec4 gfx_pixel_forward_shade(vec3 world_pos, vec3 N, vec3 camera_pos, mat4 view,
         vec3 ssr_color   = ssr_hit.color;
         float confidence = ssr_hit.confidence;
 
+        // Miss fallback for the grazing band. Where NdotV is low the reflected ray
+        // is nearly the view ray's own continuation (dot(-V,R) = 2*NdotV^2 - 1 ~ -1):
+        // it recedes into the depth buffer at almost its own pixel, so it MUST end on
+        // the geometry visible right behind this surface -- a miss there is a marching
+        // failure (the march barely moves in screen space, and hit-vs-miss flips on
+        // sub-texel Hi-Z differences texel to texel), not a ray that cleared the scene.
+        // On this undenoised path those failures used to read as a dark dotted ring
+        // along every curved BLEND silhouette: one texel's hit carried the bright
+        // floor reflection + SSGI bounce, its neighbour's miss fell back to the sky
+        // term. Synthesizing the miss from the prefiltered scene colour at the
+        // fragment's own UV (a couple of mips up -- the real hits land within texels
+        // of it) makes miss texels agree with their hit neighbours instead; the
+        // [0.45, 0.65] rolloff hands back to the plain sky fallback where rays point
+        // far enough off-axis that missing the whole depth buffer is legitimate.
+        if (!ssr_hit.hit) {
+            float fallback_w = silhouette_fade * (1.0 - smoothstep(0.45, 0.65, ssr_ndv));
+            // (silhouette_fade keeps the sub-texel limb band, where even the one-step
+            // estimate below reads garbage geometry, at the plain sky fallback.)
+            if (fallback_w > 0.0) {
+                // One-step ray estimate, not the fragment's own UV: neighbouring texels'
+                // REAL hits land a few texels along the projected ray (past e.g. the
+                // sphere's own contact shadow, onto the lit floor beyond it), so sampling
+                // in place would fill the miss with the wrong side of exactly the kind of
+                // high-contrast boundary that made the dots visible in the first place.
+                // The step length is a small fixed fraction of the trace's own reach so it
+                // scales with the same knob that scales every real hit's travel.
+                vec3 fb_point = world_pos + ssr_R * (p.ssr_max_distance * 0.03);
+                vec4 fb_clip  = proj * view * vec4(fb_point, 1.0);
+                if (fb_clip.w > 0.0) {
+                    vec2 fb_uv = clamp(ssr_ndc_to_uv(fb_clip.xy / fb_clip.w), 0.0, 1.0);
+                    float fb_lod = min(2.0, float(p.ssr_max_color_mip));
+                    ssr_color  = textureLod(u_scene_color, fb_uv, fb_lod).rgb * fallback_w;
+                    confidence = fallback_w;
+                }
+            }
+        }
+
         vec3 ssr_specular = ssr_color * (ind.F * ind.brdf.x + ind.brdf.y);
-        ambient = max(ambient + (ssr_specular - confidence * ind.value) * ao * ssao, 0.0);
+
+        // Asymmetric silhouette guard: BRIGHTENING deltas pass at full strength
+        // everywhere (they are what give a BLEND surface its lit reflection band, and
+        // symmetric fading here provably changes the look), but a delta that would
+        // DARKEN the pixel below its sky/indirect base is scaled down toward the limb.
+        // Near the limb the trace is a per-texel coin flip on sub-texel Hi-Z detail
+        // (see the miss-fallback comment above), and only its dark outcomes ever read
+        // as artifacts: a darker-than-sky hit swaps the bright sky term for e.g. the
+        // surface's own contact shadow, stippling near-black texels along the
+        // silhouette between bright-sky neighbours. dark_trust reaches 1 by NdotV
+        // 0.45 -- past the coin-flip ring -- so legitimately dark interior reflections
+        // are untouched.
+        vec3 delta = ssr_specular - confidence * ind.value;
+        float dark_trust = smoothstep(0.05, 0.45, ssr_ndv);
+        delta = mix(max(delta, vec3(0.0)), delta, dark_trust);
+        ambient = max(ambient + delta * ao * ssao, 0.0);
 
         if (p.ssgi_intensity > 0.0) {
             vec4 bounce_clip = proj * view * vec4(world_pos + N * p.ssgi_distance, 1.0);
@@ -228,6 +306,14 @@ vec4 gfx_pixel_forward_shade(vec3 world_pos, vec3 N, vec3 camera_pos, mat4 view,
                           * smoothstep(vec2(1.0), vec2(0.92), bounce_uv);
                 vec3 bounce = textureLod(u_scene_color, clamp(bounce_uv, 0.0, 1.0),
                                          float(p.ssr_max_color_mip)).rgb;
+                // `confidence` here is the unified weight from above -- a real hit's
+                // confidence, or the miss fallback's own weight in the grazing band.
+                // Weighting by raw hit confidence alone (the way ssr_composite_body.glsl
+                // does for the denoised opaque bounce) is what used to dot a dark broken
+                // ring along curved BLEND silhouettes: on this RAW path it was a
+                // per-texel binary, so one texel's ray hit (bounce added, visibly
+                // brighter) while its neighbour's missed (no bounce). The fallback
+                // filling misses in makes this weight smooth again.
                 ambient += kD_ind * albedo * bounce * (edge.x * edge.y) * confidence
                          * p.ssgi_intensity * ao * ssao;
             }

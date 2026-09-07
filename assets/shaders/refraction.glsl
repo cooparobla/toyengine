@@ -17,8 +17,9 @@
 //                         (see SceneColorMipPass; LINEAR/MIPMAP_MODE_LINEAR,
 //                         maxLod = mip_levels_, so a fractional LOD works).
 //   - #include <gfx/brdf.glsl> (fresnel_schlick), <gfx/ssr_common.glsl>
-//     (ssr_ndc_to_uv) -- both already included by transparent.frag ahead of
-//     pixel_forward_shading.glsl.
+//     (ssr_ndc_to_uv), and "pixel_forward_shading.glsl"
+//     (gfx_forward_silhouette_fade) -- all already included by
+//     transparent.frag ahead of this file.
 
 /// Per-object refraction inputs -- see TransparentRefractionPushConstants
 /// (pixel_render_pipeline.h) for the exact push-constant bytes this is filled
@@ -113,12 +114,24 @@ vec4 gfx_refraction_apply(vec4 shaded, vec3 world_pos, vec3 N, vec3 V, float rou
     transmitted *= absorption;
 
     if (p.fresnel_enabled) {
+        // Dimming transmission by (1-F) keeps this from double-counting the reflected
+        // energy already present in `shaded` via the SSR/sky term gfx_pixel_forward_shade()
+        // computed -- but that bookkeeping is only honest where the reflection term is
+        // actually live. Toward the silhouette it is not: the forward SSR/SSGI terms fade
+        // themselves out over gfx_forward_silhouette_fade()'s NdotV band (see that
+        // function's doc for the texel math), and the sky-gradient fallback for a
+        // down-facing limb normal is the dark ground half of the gradient. Meanwhile
+        // Schlick's pow5 spike crosses F ~0.35 -> ~1.0 entirely inside the last ~0.2 of
+        // cos_theta -- a sub-texel band of a curved silhouette at this engine's internal
+        // resolution. Unweighted, a limb texel multiplies its transmission by ~0 with no
+        // compensating reflection, collapsing to alpha * (dark shaded) with no background
+        // at all: a black outline stippled along every refracting silhouette. Fading the
+        // dimming with the SAME curve the reflection terms fade with keeps the two energy
+        // ledgers in step: full fresnel dimming where the reflection is live, none where
+        // it was never rendered.
         float cos_theta = max(dot(N, V), 0.0);
         vec3  F = fresnel_schlick(cos_theta, F0);
-        // Reflected energy is already present in `shaded` via the SSR/sky term computed by
-        // gfx_pixel_forward_shade() -- dimming transmission by (1-F) keeps the two from
-        // double-counting rather than fudging brightness.
-        transmitted *= (vec3(1.0) - F);
+        transmitted *= mix(vec3(1.0), vec3(1.0) - F, gfx_forward_silhouette_fade(cos_theta));
     }
 
     vec3 result = shaded.rgb * shaded.a + transmitted * (1.0 - shaded.a);

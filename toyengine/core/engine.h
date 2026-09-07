@@ -72,6 +72,7 @@ public:
         // since neither env read depends on any other member.
         fixed_dt_       = fixed_dt_from_env_();
         capture_frames_ = capture_frames_from_env_();
+        no_input_       = no_input_from_env_();
 
         bind_default_input_();
 
@@ -122,6 +123,9 @@ public:
      *   CAPTURE_FRAMES=<N>   dumps one PNG per tick to output/seq/frame_%04d.png (via
      *                        capture_sequence_frame_()) for N frames, then stops the loop --
      *                        independent of MAX_FRAMES, which still applies if also set.
+     *   NO_INPUT=1           zeroes all camera-controller input every frame (see
+     *                        drive_camera_controller_()), so a capture running on a live
+     *                        desktop isn't perturbed by real mouse/keyboard activity.
      */
     void run() {
         uint32_t captured = 0;
@@ -263,10 +267,24 @@ private:
      * Mouse motion and scroll drive Orbit mode; WASD/E/Q + arrow keys drive
      * Fly mode -- both read unconditionally since only one mode is ever
      * active on a given controller and the unused fields are simply ignored.
+     *
+     * NO_INPUT=1 (env var, read once at construction like FIXED_DT/CAPTURE_FRAMES)
+     * zeroes every field instead, so headless captures aren't perturbed by
+     * whatever the real mouse/keyboard happen to be doing during the run --
+     * without it, FIXED_DT alone can't make an interactive-camera capture
+     * reproducible.
      */
     void drive_camera_controller_(coopa::scene::Scene& scene) {
         auto* cc = scene.find_first_component<scene::CameraController>();
         if (!cc) return;
+
+        if (no_input_) {
+            cc->mouse_delta  = glm::vec2(0.0f);
+            cc->scroll_input = 0.0f;
+            cc->move_input   = glm::vec3(0.0f);
+            cc->look_input   = glm::vec2(0.0f);
+            return;
+        }
 
         // coopa::input::Input already suppresses the spurious first-frame jump
         // GLFW's virtual cursor reports right when CursorMode::Disabled is
@@ -316,6 +334,13 @@ private:
         return 0;
     }
 
+    /** @brief NO_INPUT env override for drive_camera_controller_() -- any non-empty value that
+     *  isn't "0" suppresses all camera input, for reproducible headless captures. */
+    static bool no_input_from_env_() {
+        const char* v = std::getenv("NO_INPUT");
+        return v && *v && std::string(v) != "0";
+    }
+
     /** @brief Copies AppConfig's render section into a PixelRenderConfig with shader_dir/palette_path resolved. */
     static render::PixelRenderConfig make_render_config_(const AppConfig& config) {
         render::PixelRenderConfig rc = config.render;
@@ -344,6 +369,7 @@ private:
     // (env vars don't change mid-run); -1.0f / 0 are their respective "off" values.
     float    fixed_dt_       = -1.0f;
     uint32_t capture_frames_ = 0;
+    bool     no_input_       = false;
 };
 
 } // namespace core

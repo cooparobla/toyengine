@@ -179,6 +179,39 @@ scene:
             ao: 1.0
       children: []
 
+    # Layered-shader test: a wind-swayed CUTOUT foliage card, proving the derived-shader
+    # architecture end to end (see foliage_surface.glsl and the "foliage" SurfaceShaderDesc
+    # in engine.h). Reuses plane.000 (a 2x2 quad, local Y from -1 at the root to +1 at the
+    # tip) rotated 90 deg about X so it stands upright, and the same noise_mask.png already
+    # used by cutout_sphere.000 as a stand-in leafy silhouette -- the point here is the
+    # displacement mechanism, not new art. cull: None isn't a material field (no such
+    # per-material override exists), it's baked into the "foliage" shader's
+    # SurfaceShaderDesc::cull, since every foliage card needs it, not just this one.
+    # Positioned at x=-3.0, clear of every other object's x=-2.5..3.35 range, so its own
+    # directional shadow falls on open floor.
+    - name: foliage_card.000
+      active: true
+      components:
+        - type: Transform
+          position: { x: -3.0, y: -1.0, z: 0.1 }
+          rotation: { x: 90.0, y: 0.0, z: 0.0 }
+          scale: { x: 0.6, y: 0.6, z: 0.6 }
+        - type: MeshRenderer
+          mesh_path: plane.000
+          material:
+            albedo: { r: 0.25, g: 0.55, b: 0.2 }
+            metallic: 0.0
+            roughness: 0.7
+            ao: 1.0
+            alpha_mode: CUTOUT
+            alpha_cutoff: 0.5
+            texture_alpha_mask: textures/noise_mask.png
+            shader: foliage
+            # x=wind_strength (world units), y=wind_frequency (rad/s), zw=wind_dir.xy --
+            # see foliage_surface.glsl's own doc for what each slot means.
+            shader_params: [0.12, 1.6, 1.0, 0.35]
+      children: []
+
     # CUTOUT test: alpha_mode CUTOUT is AlphaMode::Mask (see gfxcoopa's parse_alpha_mode_() --
     # "CUTOUT"/"MASK"/"CLIP" are all the same mode) with a real texture_alpha_mask, instead of
     # Mask's degenerate constant-albedo.a test. gbuffer.frag samples the mask's alpha at this
@@ -240,6 +273,45 @@ scene:
             ao: 1.0
             emissive: { r: 1.0, g: 0.45, b: 0.12 }
             emissive_strength: 1.6
+      children: []
+
+    # Layered-shader test: a wave-displaced, rippled-normal water plane, proving the
+    # derived-shader architecture on the Transparent domain (see water_surface.glsl and the
+    # "water" SurfaceShaderDesc in engine.h) -- the harder domain than foliage's Opaque one,
+    # since it also exercises TransparentCapturePass's own variant (SSR must reflect the
+    # same displaced/rippled surface the visible draw shows, not a flat undisplaced plane).
+    # Uses water_grid.000 (see tools/gen_water_grid_mesh.py), not plane.000: a 4-vertex
+    # quad can only tilt as a rigid whole under per-vertex displacement, not visibly
+    # ripple -- the grid has enough vertices for the sine wave to actually bend. Flat (no
+    # rotation, like the ground) so its rest normal already points up, and reuses the
+    # existing refraction/absorption/tint fields glass_sphere.000 already exercises -- this
+    # shader only adds the wave animation on top. Placed at y=-3.2, past every other
+    # object's y=-0.5..-1.6 row, so it reads as its own "pond" area of open floor rather
+    # than overlapping anything.
+    - name: water_plane.000
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -3.2, z: -0.48 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.2, y: 1.2, z: 1.2 }
+        - type: MeshRenderer
+          mesh_path: water_grid.000
+          material:
+            albedo: { r: 0.05, g: 0.25, b: 0.35 }
+            metallic: 0.0
+            roughness: 0.05
+            ao: 1.0
+            alpha: 0.55
+            alpha_mode: BLEND
+            refraction: true
+            ior: 1.33
+            refraction_thickness: 0.6
+            refraction_tint: { r: 0.6, g: 0.85, b: 0.9 }
+            shader: water
+            # x=wave_amplitude (world units), y=wave_speed (rad/s), zw=wave_dir.xy --
+            # see water_surface.glsl's own doc for what each slot means.
+            shader_params: [0.18, 1.2, 1.0, 0.4]
       children: []
 
     # Local fog volume test: a soft-edged pocket of mist between the two spheres, for

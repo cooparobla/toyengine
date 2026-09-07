@@ -85,6 +85,12 @@ public:
         scene::register_scene_components();
 
         scene_mgr_.load_scene(resolve_path_(config_.scene.default_scene));
+
+        // Fail fast on a typo'd/unregistered PBRMaterial::shader -- see
+        // PixelRenderPipeline::validate_material_shaders()'s doc for why this can't happen
+        // during YAML parsing itself.
+        pipeline_.validate_material_shaders(scene_mgr_.get_active_scene());
+
         apply_cursor_capture_();
     }
 
@@ -202,7 +208,7 @@ public:
         scene_mgr_.update(dt);
 
         if (scene_mgr_.has_scene()) {
-            pipeline_.render(ctx_.renderer(), scene_mgr_.get_active_scene());
+            pipeline_.render(ctx_.renderer(), scene_mgr_.get_active_scene(), dt);
         }
 
         return !ctx_.should_close();
@@ -350,6 +356,37 @@ private:
         rc.shaders = coopa::gfx::pipeline::ShaderLibrary::app_over_base(
             rc.shader_dir, std::string(PROJ_DIR) + "/gfxcoopa/assets/shaders");
         if (!rc.palette_path.empty()) rc.palette_path = resolve_path_(rc.palette_path);
+
+        // Derived surface shaders this app ships -- see gfx/surface/*.glsl and the
+        // layered-shaders plan. A scene material opts in via `shader: <name>` (see
+        // PBRMaterial::shader); a material that never sets it is completely unaffected by
+        // this registry existing.
+        rc.surface_shaders.add({
+            /* name  */ "foliage",
+            /* domain */ coopa::gfx::pipeline::SurfaceShaderDomain::Opaque,
+            /* vert  */ "foliage.vert",
+            /* frag  */ "",  // reuses stock gbuffer.frag -- CUTOUT needs no fragment override
+            /* shadow_vert */ "foliage_shadow.vert",
+            /* shadow_frag */ "", // reuses stock shadow_depth.frag
+            /* shadow_cube_vert */ "foliage_shadow_cube.vert",
+            /* shadow_cube_frag */ "", // reuses stock shadow_cube.frag
+            /* capture_frag */ "", // Opaque domain -- unused
+            /* cull */ coopa::gfx::CullMode::None, // two-sided card, not a closed opaque solid
+        });
+        rc.surface_shaders.add({
+            /* name  */ "water",
+            /* domain */ coopa::gfx::pipeline::SurfaceShaderDomain::Transparent,
+            /* vert  */ "water.vert",
+            /* frag  */ "water.frag",
+            /* shadow_vert */ "", // Transparent domain -- unused (BLEND only shadows at alpha==1.0,
+            /* shadow_frag */ "", //   and this demo's water is always translucent -- see water_surface.glsl)
+            /* shadow_cube_vert */ "",
+            /* shadow_cube_frag */ "",
+            /* capture_frag */ "water_capture.frag", // same hook, over the capture backbone --
+                                                      // see TransparentCapturePass::add_variant()
+            /* cull */ coopa::gfx::CullMode::Back, // matches every other BLEND mesh's cull mode
+        });
+
         return rc;
     }
 

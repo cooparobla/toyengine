@@ -160,6 +160,15 @@ struct TransparentRefractionPushConstants {
     glm::vec4 tint_thickness = {1.0f, 1.0f, 1.0f, 0.25f};  // rgb = refraction_tint, w = thickness
     glm::vec4 ior_flags      = {1.45f, 0.0f, 0.0f, 0.0f};  // x = ior, y = refraction on/off, zw reserved
 };
+// The actual combined push-constant range TransparentPass's pipeline layout declares
+// (see its extra_pc_bytes ctor param) -- checked here, not just on
+// TransparentPass::PushConstants alone, since that struct's own static_assert can't see
+// what a caller adds on top.
+static_assert(sizeof(coopa::gfx::engine::passes::TransparentPass::PushConstants) +
+             sizeof(TransparentRefractionPushConstants) <= 128,
+             "TransparentPass's combined push-constant range exceeds Vulkan's guaranteed "
+             "maxPushConstantsSize (128 bytes) -- see the layered-shaders plan's "
+             "push-constant budget table before growing either struct.");
 
 /**
  * @struct TransparentCaptureLightingPushConstants
@@ -177,6 +186,12 @@ struct TransparentCaptureLightingPushConstants {
     float ambient_intensity = 1.0f;
     float sky_intensity     = 1.0f;
 };
+// See TransparentRefractionPushConstants' identical static_assert above.
+static_assert(sizeof(coopa::gfx::engine::passes::TransparentCapturePass::PushConstants) +
+             sizeof(TransparentCaptureLightingPushConstants) <= 128,
+             "TransparentCapturePass's combined push-constant range exceeds Vulkan's "
+             "guaranteed maxPushConstantsSize (128 bytes) -- see the layered-shaders "
+             "plan's push-constant budget table before growing either struct.");
 
 /**
  * @struct SdfDrawItem
@@ -308,6 +323,26 @@ public:
             device, gbuffer_target_.render_pass(), camera_layout_->handle(), material_cache_->layout(),
             config_.shaders("gbuffer.vert"),
             config_.shaders("gbuffer.frag"));
+
+        // Register every Opaque-domain derived shader (e.g. foliage) as a named pipeline
+        // variant on both the G-buffer and shadow passes -- see SurfaceShaderDesc's doc on
+        // why an entry point left empty falls back to the STOCK logical name rather than
+        // being skipped: a shader that only overrides, say, the fragment stage still needs
+        // a real shadow entry point, or its shadow silently stops moving with it.
+        for (const auto& sd : config_.surface_shaders.all()) {
+            if (sd.domain != coopa::gfx::pipeline::SurfaceShaderDomain::Opaque) continue;
+            gbuffer_pipeline_->add_variant(
+                sd.name,
+                config_.shaders(sd.vert.empty() ? "gbuffer.vert" : sd.vert),
+                config_.shaders(sd.frag.empty() ? "gbuffer.frag" : sd.frag),
+                sd.cull);
+            shadow_pipeline_->add_variant(
+                sd.name,
+                config_.shaders(sd.shadow_vert.empty() ? "shadow_depth.vert" : sd.shadow_vert),
+                config_.shaders(sd.shadow_frag.empty() ? "shadow_depth.frag" : sd.shadow_frag),
+                config_.shaders(sd.shadow_cube_vert.empty() ? "shadow_cube.vert" : sd.shadow_cube_vert),
+                config_.shaders(sd.shadow_cube_frag.empty() ? "shadow_cube.frag" : sd.shadow_cube_frag));
+        }
 
         // --- SDF raymarching system ---
         // Three of the four SDF passes need nothing this pipeline hasn't already built by this
@@ -564,6 +599,22 @@ public:
             transparent_extra,
             static_cast<uint32_t>(sizeof(TransparentRefractionPushConstants)));
 
+        // Register every Transparent-domain derived shader (e.g. water) as a named pipeline
+        // variant on both the forward transparent pass and its SSR-secondary-source capture
+        // pass. The SAME vert entry point is registered on both -- see
+        // TransparentCapturePass::add_variant()'s doc on why: SSR must reflect the same
+        // displaced geometry the visible draw shows, not the undisplaced mesh.
+        for (const auto& sd : config_.surface_shaders.all()) {
+            if (sd.domain != coopa::gfx::pipeline::SurfaceShaderDomain::Transparent) continue;
+            const std::string vert_spv = config_.shaders(sd.vert.empty() ? "pbr.vert" : sd.vert);
+            transparent_pass_->add_variant(
+                sd.name, vert_spv,
+                config_.shaders(sd.frag.empty() ? "transparent.frag" : sd.frag));
+            transparent_capture_pass_->add_variant(
+                sd.name, vert_spv,
+                config_.shaders(sd.capture_frag.empty() ? "transparent_capture.frag" : sd.capture_frag));
+        }
+
         // SdfForwardPass shares transparent_pass_'s OWN render pass (see that accessor's doc) --
         // render passes only need to be attachment-compatible to back a second Pipeline, and
         // sharing lets record_transparent_() draw BLEND meshes and BLEND SdfRenderers inside the
@@ -707,15 +758,48 @@ public:
     }
 
     /**
+     * @brief Validates every loaded MeshRenderer/SdfRenderer material's `shader` field
+     *        against config_.surface_shaders, throwing on the first unregistered name.
+     *
+     * Call once after a scene finishes loading (see Engine's ctor) -- an unresolvable
+     * PBRMaterial::shader is a scene-authoring error, and this is what turns it into a
+     * startup failure instead of a silent fall-back-to-stock at draw time. Materials are
+     * plain YAML-parsed structs with no pipeline/registry context of their own (see
+     * PBRMaterial::shader's doc), so this check can't happen during parsing itself --
+     * it has to happen here, once both the scene and this pipeline's registry exist.
+     *
+     * @throws std::runtime_error via SurfaceShaderRegistry::require() if any material
+     *         references an unregistered shader name.
+     */
+    void validate_material_shaders(coopa::scene::Scene& scene) const {
+        for (auto* mr : scene.get_components<coopa::gfx::engine::components::MeshRenderer>()) {
+            config_.surface_shaders.require(mr->material.shader);
+        }
+        for (auto* sr : scene.get_components<coopa::gfx::engine::components::SdfRenderer>()) {
+            config_.surface_shaders.require(sr->material.shader);
+        }
+    }
+
+    /**
      * @brief Renders one frame of the given scene.
+     *
+     * @param dt Wall-clock (or FIXED_DT-overridden) seconds since the previous frame -- see
+     *           Engine::tick(). Accumulated into elapsed_time_ and pushed as gfx_time to
+     *           every surface-shader backbone (see gfx/surface/gbuffer_vs.glsl), so a
+     *           derived shader's displacement hook (e.g. foliage wind sway, water waves)
+     *           can animate. Not read at all by the stock hooks, so a scene with no
+     *           derived shaders is unaffected by this parameter's value.
      * @return True if the frame was presented, false if the window was minimized.
      */
-    bool render(coopa::gfx::presentation::Renderer& renderer, coopa::scene::Scene& scene) {
+    bool render(coopa::gfx::presentation::Renderer& renderer, coopa::scene::Scene& scene, float dt) {
         using coopa::gfx::engine::components::CameraComponent;
         using coopa::gfx::engine::components::CameraType;
         using coopa::gfx::engine::components::MeshRenderer;
         using coopa::gfx::engine::components::DirectionalLightComponent;
         using coopa::gfx::engine::components::PointLightComponent;
+
+        frame_dt_ = dt;
+        elapsed_time_ += dt;
 
         update_lights_(scene);
 
@@ -1454,6 +1538,14 @@ private:
 
             coopa::gfx::engine::passes::DirectionalShadowPushConstants pc{};
             pc.light_space_matrix = light_data_.data().dir_light_space_matrix;
+            pc.gfx_time = glm::vec4(elapsed_time_, frame_dt_, static_cast<float>(frame_index_), 0.0f);
+
+            // Same last-shader transition guard as record_gbuffer_() -- a caster's shadow
+            // must displace identically to its G-buffer draw (see gfx/surface/shadow_vs.glsl's
+            // doc), which means binding the SAME named variant here, not just the stock pass.
+            std::string last_shader;
+            bool have_bound = true; // stock, bound just above
+
             for (size_t i = 0; i < renderers.size(); ++i) {
                 if (instance_idx[i] == UINT32_MAX) continue;
                 // A BLEND material only casts a shadow at full opacity -- this pass has no
@@ -1462,9 +1554,17 @@ private:
                 // no way to draw a *partial* shadow for a translucent object; it's binary,
                 // caster or not.
                 if (renderers[i]->material.is_blended() && renderers[i]->material.alpha < 1.0f) continue;
+
+                if (!have_bound || renderers[i]->material.shader != last_shader) {
+                    shadow_pipeline_->bind_directional(cmd, renderers[i]->material.shader);
+                    last_shader = renderers[i]->material.shader;
+                    have_bound  = true;
+                }
+
                 // CUTOUT (AlphaMode::Mask): the mask texture punches through the shadow too,
                 // via the same set/cutoff shadow_depth.frag tests against.
                 pc.alpha_cutoff = renderers[i]->material.gpu_alpha_cutoff();
+                pc.gfx_params   = renderers[i]->material.shader_params;
                 cmd.bind_descriptor_set(material_cache_->set_for(renderers[i]->material), 0);
                 shadow_pipeline_->push_directional(cmd, pc);
                 renderers[i]->get_mesh()->bind(cmd);
@@ -1514,14 +1614,27 @@ private:
             coopa::gfx::engine::passes::CubeShadowPushConstants pc{};
             pc.light_space_matrix = coopa::gfx::engine::targets::ShadowMapTarget::get_cube_face_matrix(face, light_pos, range);
             pc.light_pos_range    = glm::vec4(light_pos, range);
+            pc.gfx_time = glm::vec4(elapsed_time_, frame_dt_, static_cast<float>(frame_index_), 0.0f);
+
+            // See record_directional_shadow_'s identical transition guard.
+            std::string last_shader;
+            bool have_bound = true; // stock, bound just above
 
             for (size_t i = 0; i < renderers.size(); ++i) {
                 if (instance_idx[i] == UINT32_MAX) continue;
                 // See record_directional_shadow_'s identical check -- a BLEND material only
                 // casts a shadow at full opacity, since this pass has no partial-alpha discard.
                 if (renderers[i]->material.is_blended() && renderers[i]->material.alpha < 1.0f) continue;
+
+                if (!have_bound || renderers[i]->material.shader != last_shader) {
+                    shadow_pipeline_->bind_cube(cmd, renderers[i]->material.shader);
+                    last_shader = renderers[i]->material.shader;
+                    have_bound  = true;
+                }
+
                 // See record_directional_shadow_'s identical CUTOUT handling.
                 pc.alpha_cutoff = renderers[i]->material.gpu_alpha_cutoff();
+                pc.gfx_params   = renderers[i]->material.shader_params;
                 cmd.bind_descriptor_set(material_cache_->set_for(renderers[i]->material), 0);
                 shadow_pipeline_->push_cube(cmd, pc);
                 renderers[i]->get_mesh()->bind(cmd);
@@ -1599,9 +1712,21 @@ private:
                          const std::vector<uint32_t>& instance_idx,
                          const std::vector<SdfDrawItem>& sdf_draws) {
         gbuffer_target_.begin(cmd);
+        // Stock pipeline bound first so a scene with no derived shaders (the overwhelming
+        // common case) pays for exactly one bind, as before this pass gained variants.
         gbuffer_pipeline_->bind(cmd);
         cmd.bind_descriptor_set(gbuffer_pipeline_->layout(), current_camera_set(), 0);
         cmd.bind_vertex_buffer(instance_stream_.buffer(), 0, 1);
+
+        // Tracks which named variant (or "" for stock) is currently bound, so a run of
+        // same-shader renderers in `renderers` only rebinds the pipeline at a transition --
+        // same idea as record_transparent_()'s last_kind guard. Renderers aren't sorted by
+        // shader first (unlike the back-to-front transparent list, opaque draw order is
+        // otherwise unconstrained, so sorting would be a real option), so this only pays off
+        // when a scene's derived-shader objects happen to be contiguous; interleaved shaders
+        // still render correctly, just with more binds than the theoretical minimum.
+        std::string last_shader;
+        bool have_bound = true; // stock, bound just above
 
         for (size_t i = 0; i < renderers.size(); ++i) {
             if (instance_idx[i] == UINT32_MAX) continue;
@@ -1610,6 +1735,12 @@ private:
             // never into the opaque G-buffer (see record_transparent_).
             if (mr->material.is_blended()) continue;
 
+            if (!have_bound || mr->material.shader != last_shader) {
+                gbuffer_pipeline_->bind(cmd, mr->material.shader);
+                last_shader = mr->material.shader;
+                have_bound  = true;
+            }
+
             coopa::gfx::engine::passes::GBufferPipeline::PushConstants pc;
             pc.albedo       = glm::vec4(mr->material.albedo, mr->material.alpha);
             pc.metallic     = mr->material.metallic;
@@ -1617,6 +1748,8 @@ private:
             pc.ao           = mr->material.ao;
             pc.alpha_cutoff = mr->material.gpu_alpha_cutoff();
             pc.emissive     = mr->material.gpu_emissive();
+            pc.gfx_time     = glm::vec4(elapsed_time_, frame_dt_, static_cast<float>(frame_index_), 0.0f);
+            pc.gfx_params   = mr->material.shader_params;
             gbuffer_pipeline_->push(cmd, pc);
             // Set 1: alpha-mask sampler (white 1x1 fallback unless this is a CUTOUT material
             // with a loaded texture_alpha_mask) -- see MaterialTextureCache.
@@ -1686,20 +1819,40 @@ private:
         lighting_pc.rim_strength      = config_.rim_strength;
         lighting_pc.ambient_intensity = config_.indirect.ambient_intensity;
         lighting_pc.sky_intensity     = config_.indirect.sky_intensity;
-        cmd.push_constants(transparent_capture_pass_->layout(), VK_SHADER_STAGE_FRAGMENT_BIT,
+        // VERTEX|FRAGMENT, not FRAGMENT alone: TransparentCapturePass's push-constant range now
+        // covers both stages (see its PushConstants' gfx_time/gfx_params doc), and Vulkan
+        // requires a push call's stageFlags to match the declared range for every byte it
+        // touches, including this trailing per-frame lighting block.
+        cmd.push_constants(transparent_capture_pass_->layout(),
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            sizeof(coopa::gfx::engine::passes::TransparentCapturePass::PushConstants),
                            sizeof(TransparentCaptureLightingPushConstants), &lighting_pc);
+
+        // Same last-shader transition guard as record_gbuffer_() -- and the SAME variant
+        // name TransparentPass binds for this material, since SSR must reflect the same
+        // displaced geometry the visible draw shows (see TransparentCapturePass::
+        // add_variant()'s doc).
+        std::string last_shader;
+        bool have_bound = true; // stock, bound just above
 
         for (size_t i = 0; i < renderers.size(); ++i) {
             if (instance_idx[i] == UINT32_MAX) continue;
             if (!renderers[i]->material.is_blended()) continue;
 
             auto* mr = renderers[i];
+            if (!have_bound || mr->material.shader != last_shader) {
+                transparent_capture_pass_->bind(cmd, mr->material.shader);
+                last_shader = mr->material.shader;
+                have_bound  = true;
+            }
+
             coopa::gfx::engine::passes::TransparentCapturePass::PushConstants pc;
-            pc.albedo    = glm::vec4(mr->material.albedo, mr->material.alpha);
-            pc.metallic  = mr->material.metallic;
-            pc.roughness = mr->material.roughness;
-            pc.ao        = mr->material.ao;
+            pc.albedo     = glm::vec4(mr->material.albedo, mr->material.alpha);
+            pc.metallic   = mr->material.metallic;
+            pc.roughness  = mr->material.roughness;
+            pc.ao         = mr->material.ao;
+            pc.gfx_time   = glm::vec4(elapsed_time_, frame_dt_, static_cast<float>(frame_index_), 0.0f);
+            pc.gfx_params = mr->material.shader_params;
             transparent_capture_pass_->push(cmd, pc);
 
             mr->get_mesh()->bind(cmd);
@@ -1817,11 +1970,33 @@ private:
         // -1 = neither yet bound, 0 = mesh, 1 = sdf -- tracks which pipeline+sets are current so
         // a run of same-kind items in `order` only rebinds once, at the transition.
         int last_kind = -1;
+        // Independent of last_kind: which named shader variant transparent_pass_ currently has
+        // bound. A mesh-kind run in `order` isn't sorted by shader (back-to-front depth is the
+        // only order that matters here -- see this function's own doc), so two consecutive mesh
+        // items can legitimately need different pipelines even though last_kind doesn't change;
+        // switching pipelines mid-run is safe without re-binding sets 0-2/extra, since every
+        // variant shares the same descriptor set layouts (see TransparentPass::add_variant()).
+        // Starts as "never bound" via last_kind's own -1 sentinel (checked alongside it below),
+        // so there's no separate bool to fall out of sync with last_kind.
+        std::string last_mesh_shader;
 
         for (const auto& item : order) {
             if (!item.is_sdf) {
+                auto* mr = renderers[item.index];
+
+                // The pipeline MUST be (re)bound before the 2-argument bind_descriptor_set()
+                // calls below -- that overload derives its pipeline layout from whatever
+                // CommandBuffer last had bound (see command_buffer.h's bound_pipeline_ cache),
+                // which after an SDF run (or nothing, at the very start of the frame) is NOT
+                // transparent_pass_'s layout. Binding descriptor sets first and the pipeline
+                // second, even briefly, resolves set 0 against the wrong layout and is a
+                // real validation error (descriptor type mismatch), not just a style issue.
+                if (last_kind != 0 || mr->material.shader != last_mesh_shader) {
+                    transparent_pass_->bind(cmd, mr->material.shader);
+                    last_mesh_shader = mr->material.shader;
+                }
+
                 if (last_kind != 0) {
-                    transparent_pass_->bind(cmd);
                     // An earlier SDF item in this back-to-front list narrows the scissor to
                     // its own px_rect (see the sdf branch below) and nothing widens it again
                     // until the loop ends -- reset here or this mesh draw inherits that SDF's
@@ -1838,12 +2013,13 @@ private:
                     last_kind = 0;
                 }
 
-                auto* mr = renderers[item.index];
                 coopa::gfx::engine::passes::TransparentPass::PushConstants pc;
-                pc.albedo    = glm::vec4(mr->material.albedo, mr->material.alpha);
-                pc.metallic  = mr->material.metallic;
-                pc.roughness = mr->material.roughness;
-                pc.ao        = mr->material.ao;
+                pc.albedo     = glm::vec4(mr->material.albedo, mr->material.alpha);
+                pc.metallic   = mr->material.metallic;
+                pc.roughness  = mr->material.roughness;
+                pc.ao         = mr->material.ao;
+                pc.gfx_time   = glm::vec4(elapsed_time_, frame_dt_, static_cast<float>(frame_index_), 0.0f);
+                pc.gfx_params = mr->material.shader_params;
                 transparent_pass_->push(cmd, pc);
 
                 // Pushed into transparent.frag's PushConstants' [32, 64) region (see the ctor's
@@ -1859,7 +2035,12 @@ private:
                                               ? mr->material.refraction_tint : config_.refraction_tint;
                 refract_pc.tint_thickness = glm::vec4(refract_tint, refract_thickness);
                 refract_pc.ior_flags      = glm::vec4(refract_ior, mr->material.has_refraction() ? 1.0f : 0.0f, 0.0f, 0.0f);
-                cmd.push_constants(transparent_pass_->layout(), VK_SHADER_STAGE_FRAGMENT_BIT,
+                // VERTEX|FRAGMENT, not FRAGMENT alone: TransparentPass's push-constant range now
+                // covers both stages (see its PushConstants' gfx_time/gfx_params doc), and
+                // Vulkan requires a push call's stageFlags to match the declared range for
+                // every byte it touches, including this trailing per-object refraction block.
+                cmd.push_constants(transparent_pass_->layout(),
+                                   VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                    sizeof(coopa::gfx::engine::passes::TransparentPass::PushConstants),
                                    sizeof(TransparentRefractionPushConstants), &refract_pc);
 
@@ -1897,6 +2078,15 @@ private:
     coopa::gfx::core::Swapchain&   swapchain_;
     PixelRenderConfig              config_;
     RenderExtent                   render_extent_;
+
+    // Fed to every surface-shader backbone's gfx_time field (see render()'s own doc) --
+    // elapsed_time_ accumulates render()'s dt parameter every frame, never reset, so a
+    // derived shader's displacement hook gets a monotonically increasing clock regardless
+    // of frame rate. frame_dt_ is gfx_time's y component; z reuses the existing frame_index_
+    // member below (already incremented once per frame for SSAO/SSR noise rotation) rather
+    // than adding a second counter.
+    float elapsed_time_ = 0.0f;
+    float frame_dt_     = 0.0f;
     // DISPLAY (letterboxed) size tilt_shift_pass_ is sized to -- computed once from the
     // STARTUP swapchain extent, same no-resize-support caveat as render_extent_ itself
     // (see this class's file doc / the comment at hiz_pass_'s construction site). A window

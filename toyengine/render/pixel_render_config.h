@@ -12,6 +12,7 @@
 #include <glm/glm.hpp>
 
 #include <gfxcoopa/pipeline/shader_library.h>
+#include <gfxcoopa/pipeline/surface_shader.h>
 #include <gfxcoopa/engine/render_features.h>
 
 namespace toy {
@@ -250,6 +251,15 @@ struct PixelRenderConfig {
     // alongside shader_dir (see engine.h's make_render_config_); shader_dir is kept for
     // logging/debugging, `shaders` is what every pass construction actually resolves through.
     coopa::gfx::pipeline::ShaderLibrary shaders;
+
+    // Derived surface shaders a scene's materials may select by name (PBRMaterial::shader) --
+    // see gfxcoopa/pipeline/surface_shader.h and the layered-shaders plan. Populated alongside
+    // `shaders` in engine.h's make_render_config_(); empty by default, so a scene that never
+    // references a custom shader behaves exactly as if this field didn't exist. Every entry's
+    // logical shader names are resolved through `shaders` above at pass-construction time (see
+    // PixelRenderPipeline's ctor), the same two-tier app-over-base search every stock entry
+    // point already goes through.
+    coopa::gfx::pipeline::SurfaceShaderRegistry surface_shaders;
 };
 
 } // namespace render

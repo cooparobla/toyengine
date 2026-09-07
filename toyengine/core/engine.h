@@ -24,14 +24,13 @@
 #include <string>
 
 #include <gfxcoopa/app/context.h>
-#include <gfxcoopa/presentation/input_adapter.h>
-#include <gfxcoopa/input/input_map.h>
 #include <gfxcoopa/util/image_readback.h>
 #include <gfxcoopa/engine/loaders/mesh_loader.h>
 #include <gfxcoopa/engine/components/register.h>
 #include <gfxcoopa/engine/components/camera_component.h>
 
 #include <coopa/asset/asset_manager.h>
+#include <coopa/input/input_map.h>
 #include <coopa/scene/scene_loader.h>
 #include <coopa/scene/scene_manager.h>
 
@@ -186,8 +185,7 @@ public:
     bool tick() {
         ctx_.poll(); // window_.new_frame() + poll_events() + frame timer update.
 
-        auto is_pressed = coopa::gfx::presentation::key_state_of(ctx_.window());
-        if (input_.is_down("quit", is_pressed)) {
+        if (input_.is_down("quit", ctx_.input())) {
             ctx_.window().set_should_close(true);
         }
 
@@ -216,7 +214,10 @@ public:
 
     coopa::gfx::presentation::Window& window() { return ctx_.window(); }
     coopa::gfx::core::Device&         device() { return ctx_.device(); }
-    coopa::gfx::input::InputMap&      input()  { return input_; }
+    coopa::input::InputMap&           input()  { return input_; }
+    /// @brief The raw per-frame keyboard/mouse state -- edges, deltas, held
+    /// time -- for game code that wants more than input()'s named actions.
+    coopa::input::Input&              input_state() { return ctx_.input(); }
     float    delta_time() const  { return ctx_.delta_time(); }
     float    elapsed() const     { return static_cast<float>(ctx_.elapsed()); }
     uint64_t frame_count() const { return ctx_.frame_index(); }
@@ -239,25 +240,20 @@ private:
     }
 
     /**
-     * @brief Binds the default action set: quit and fly move/look.
+     * @brief Binds the default action set: quit, fly move (as three axes),
+     *        and look (as one vector).
      *
      * Orbit no longer has keyboard bindings -- the mouse (yaw/pitch) and
      * scroll wheel (zoom) drive it directly, read in drive_camera_controller_().
      */
     void bind_default_input_() {
-        using coopa::gfx::input::Key;
+        using coopa::input::Key;
         input_.bind("quit", Key::Escape);
 
-        input_.bind("fly_forward", Key::W);
-        input_.bind("fly_back",    Key::S);
-        input_.bind("fly_left",    Key::A);
-        input_.bind("fly_right",   Key::D);
-        input_.bind("fly_up",      Key::E);
-        input_.bind("fly_down",    Key::Q);
-        input_.bind("look_yaw_left",   Key::Left);
-        input_.bind("look_yaw_right",  Key::Right);
-        input_.bind("look_pitch_up",   Key::Up);
-        input_.bind("look_pitch_down", Key::Down);
+        input_.bind_axis("fly_x", Key::D, Key::A); // strafe: +right/-left
+        input_.bind_axis("fly_y", Key::W, Key::S); // forward/back
+        input_.bind_axis("fly_z", Key::E, Key::Q); // world up/down
+        input_.bind_vector("look", Key::Right, Key::Left, Key::Up, Key::Down);
     }
 
     /**
@@ -272,32 +268,17 @@ private:
         auto* cc = scene.find_first_component<scene::CameraController>();
         if (!cc) return;
 
-        // GLFW's virtual cursor position jumps arbitrarily on the frame CursorMode::Disabled
-        // is first applied -- report zero delta that one frame so orbit doesn't snap.
-        auto [cursor_x, cursor_y] = ctx_.window().cursor_position();
-        glm::vec2 cursor(static_cast<float>(cursor_x), static_cast<float>(cursor_y));
-        if (cursor_valid_) {
-            cc->mouse_delta = cursor - prev_cursor_;
-        } else {
-            cc->mouse_delta = glm::vec2(0.0f);
-            cursor_valid_ = true;
-        }
-        prev_cursor_ = cursor;
-
-        cc->scroll_input = static_cast<float>(ctx_.window().scroll_delta().second);
-
-        auto is_pressed = coopa::gfx::presentation::key_state_of(ctx_.window());
-        auto pressed = [&](const char* action) {
-            return input_.is_down(action, is_pressed);
-        };
+        // coopa::input::Input already suppresses the spurious first-frame jump
+        // GLFW's virtual cursor reports right when CursorMode::Disabled is
+        // first applied -- see Input::push_cursor_position()'s doc.
+        cc->mouse_delta = ctx_.input().cursor_delta();
+        cc->scroll_input = ctx_.input().scroll_delta().y;
 
         cc->move_input = glm::vec3(
-            (pressed("fly_right") ? 1.0f : 0.0f) - (pressed("fly_left") ? 1.0f : 0.0f),
-            (pressed("fly_forward") ? 1.0f : 0.0f) - (pressed("fly_back") ? 1.0f : 0.0f),
-            (pressed("fly_up") ? 1.0f : 0.0f) - (pressed("fly_down") ? 1.0f : 0.0f));
-        cc->look_input = glm::vec2(
-            (pressed("look_yaw_right") ? 1.0f : 0.0f) - (pressed("look_yaw_left") ? 1.0f : 0.0f),
-            (pressed("look_pitch_up") ? 1.0f : 0.0f) - (pressed("look_pitch_down") ? 1.0f : 0.0f));
+            input_.axis("fly_x", ctx_.input()),
+            input_.axis("fly_y", ctx_.input()),
+            input_.axis("fly_z", ctx_.input()));
+        cc->look_input = input_.vector("look", ctx_.input());
     }
 
     /**
@@ -313,7 +294,7 @@ private:
         if (!scene_mgr_.has_scene()) return;
         auto* cc = scene_mgr_.get_active_scene().find_first_component<scene::CameraController>();
         if (cc && cc->capture_cursor) {
-            ctx_.window().set_cursor_mode(coopa::gfx::presentation::CursorMode::Disabled);
+            ctx_.input().set_cursor_mode(coopa::input::CursorMode::Disabled);
         }
     }
 
@@ -357,17 +338,12 @@ private:
     coopa::asset::AssetManager assets_;
     coopa::scene::SceneManager scene_mgr_;
 
-    coopa::gfx::input::InputMap input_;
+    coopa::input::InputMap input_;
 
     // Deterministic sequence-capture support -- see run()'s own doc. Read once at construction
     // (env vars don't change mid-run); -1.0f / 0 are their respective "off" values.
     float    fixed_dt_       = -1.0f;
     uint32_t capture_frames_ = 0;
-
-    // Mouse-delta tracking for drive_camera_controller_() -- cursor_valid_ suppresses the
-    // spurious first-frame delta GLFW reports right after CursorMode::Disabled is applied.
-    glm::vec2 prev_cursor_   = glm::vec2(0.0f);
-    bool      cursor_valid_  = false;
 };
 
 } // namespace core

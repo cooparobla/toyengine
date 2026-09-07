@@ -19,10 +19,11 @@
  * slowly, over roughly a couple of seconds, without ever fully stopping.
  *
  * Per-frame input is pushed in by the caller (toy::core::Engine::tick(), via
- * Window::cursor_position()/scroll_delta()/is_key_pressed()) BEFORE
- * SceneManager::update() runs, not read directly from a Window here -- keeps
- * this component testable without a live GLFW window, matching
- * toy::input::InputMap's own design.
+ * coopa::input::Input's cursor_delta()/scroll_delta() and
+ * coopa::input::InputMap's axis()/vector() reads) BEFORE SceneManager::update()
+ * runs, not read directly from an Input/Window here -- keeps this component
+ * testable without a live GLFW window, matching coopa::input::InputMap's own
+ * design.
  *
  * Fly mode is unchanged from the original: it moves along the CURRENT world
  * matrix's own basis columns (convention-free), and its look-input handling

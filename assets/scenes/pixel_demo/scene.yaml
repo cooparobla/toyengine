@@ -179,6 +179,34 @@ scene:
             ao: 1.0
       children: []
 
+    # CUTOUT test: alpha_mode CUTOUT is AlphaMode::Mask (see gfxcoopa's parse_alpha_mode_() --
+    # "CUTOUT"/"MASK"/"CLIP" are all the same mode) with a real texture_alpha_mask, instead of
+    # Mask's degenerate constant-albedo.a test. gbuffer.frag samples the mask's alpha at this
+    # sphere's UV and multiplies it into albedo.a before testing against alpha_cutoff, so the
+    # noise texture punches a per-texel silhouette straight through the sphere -- and, since
+    # ShadowPipeline also binds this material's mask (see record_directional_shadow_'s doc),
+    # the sun-cast shadow on the floor shows the same holes rather than a solid disc. Placed on
+    # its own row (y=-1.6, clear of every x=-2.2..3.35 front-row object above) so its shadow
+    # falls on open floor, not across another object.
+    - name: cutout_sphere.000
+      active: true
+      components:
+        - type: Transform
+          position: { x: -1.0, y: -1.6, z: -0.05 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 0.45, y: 0.45, z: 0.45 }
+        - type: MeshRenderer
+          mesh_path: sphere.000
+          material:
+            albedo: { r: 0.85, g: 0.35, b: 0.25 }
+            metallic: 0.0
+            roughness: 0.6
+            ao: 1.0
+            alpha_mode: CUTOUT
+            alpha_cutoff: 0.5
+            texture_alpha_mask: textures/noise_mask.png
+      children: []
+
     # Emissive test: a small glowing orb resting beside opaque_sphere.000, at the same height --
     # NOT above it. SSR can only reflect a surface whose CAMERA-FACING side is visible in the
     # G-buffer; an object directly above a sphere, viewed from this scene's overhead camera,
@@ -193,7 +221,9 @@ scene:
     # only bleeds onto it via the screen-space SSR/SSGI terms (and, separately, via the bloom
     # composite in pixel_stylize.frag, which is a screen-space glow, not a lighting effect
     # either) -- and, being OPAQUE, it still casts a normal directional shadow (the shadow pass
-    # never reads material).
+    # only reads material.gpu_alpha_cutoff(), for CUTOUT's masked-shadow support -- see
+    # cutout_sphere.000 above -- and material.alpha/is_blended() for the BLEND-caster rule; an
+    # OPAQUE material like this one always casts its full silhouette).
     - name: emissive_sphere.000
       active: true
       components:

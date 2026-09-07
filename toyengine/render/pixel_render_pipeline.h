@@ -108,6 +108,7 @@
 #include <toyengine/render/pixel_math.h>
 #include <toyengine/render/instance_stream.h>
 #include <toyengine/render/forward_globals.h>
+#include <toyengine/render/material_texture_cache.h>
 #include <gfxcoopa/engine/data/palette_lut.h>
 #include <gfxcoopa/engine/passes/deferred_lighting_pass.h>
 #include <gfxcoopa/engine/passes/ssr_pass.h>
@@ -289,15 +290,22 @@ public:
         shadow_set_->bind_image(0, shadow_target_.dir_shadow_view(), shadow_sampler_.handle());
         shadow_set_->bind_image(1, shadow_target_.cube_shadow_view(), shadow_sampler_.handle());
 
+        // Built before shadow_pipeline_/gbuffer_pipeline_ below -- both need material_cache_'s
+        // layout handle to append the CUTOUT alpha-mask sampler as their material set. See
+        // MaterialTextureCache's own doc for why lazily allocating sets from it later (once a
+        // scene's masked materials finish loading) is safe under overlapped command buffers.
+        material_cache_ = std::make_unique<toy::render::MaterialTextureCache>(device, allocator, cmd_pool);
+
         shadow_pipeline_ = std::make_unique<coopa::gfx::engine::passes::ShadowPipeline>(
             device, shadow_target_.dir_render_pass(), shadow_target_.cube_render_pass(),
             config_.shaders("shadow_depth.vert"),
             config_.shaders("shadow_depth.frag"),
             config_.shaders("shadow_cube.vert"),
-            config_.shaders("shadow_cube.frag"));
+            config_.shaders("shadow_cube.frag"),
+            &material_cache_->layout_object());
 
         gbuffer_pipeline_ = std::make_unique<coopa::gfx::engine::passes::GBufferPipeline>(
-            device, gbuffer_target_.render_pass(), camera_layout_->handle(), VK_NULL_HANDLE,
+            device, gbuffer_target_.render_pass(), camera_layout_->handle(), material_cache_->layout(),
             config_.shaders("gbuffer.vert"),
             config_.shaders("gbuffer.frag"));
 
@@ -1454,6 +1462,10 @@ private:
                 // no way to draw a *partial* shadow for a translucent object; it's binary,
                 // caster or not.
                 if (renderers[i]->material.is_blended() && renderers[i]->material.alpha < 1.0f) continue;
+                // CUTOUT (AlphaMode::Mask): the mask texture punches through the shadow too,
+                // via the same set/cutoff shadow_depth.frag tests against.
+                pc.alpha_cutoff = renderers[i]->material.gpu_alpha_cutoff();
+                cmd.bind_descriptor_set(material_cache_->set_for(renderers[i]->material), 0);
                 shadow_pipeline_->push_directional(cmd, pc);
                 renderers[i]->get_mesh()->bind(cmd);
                 renderers[i]->get_mesh()->draw(cmd, 1, instance_idx[i]);
@@ -1508,6 +1520,9 @@ private:
                 // See record_directional_shadow_'s identical check -- a BLEND material only
                 // casts a shadow at full opacity, since this pass has no partial-alpha discard.
                 if (renderers[i]->material.is_blended() && renderers[i]->material.alpha < 1.0f) continue;
+                // See record_directional_shadow_'s identical CUTOUT handling.
+                pc.alpha_cutoff = renderers[i]->material.gpu_alpha_cutoff();
+                cmd.bind_descriptor_set(material_cache_->set_for(renderers[i]->material), 0);
                 shadow_pipeline_->push_cube(cmd, pc);
                 renderers[i]->get_mesh()->bind(cmd);
                 renderers[i]->get_mesh()->draw(cmd, 1, instance_idx[i]);
@@ -1603,6 +1618,9 @@ private:
             pc.alpha_cutoff = mr->material.gpu_alpha_cutoff();
             pc.emissive     = mr->material.gpu_emissive();
             gbuffer_pipeline_->push(cmd, pc);
+            // Set 1: alpha-mask sampler (white 1x1 fallback unless this is a CUTOUT material
+            // with a loaded texture_alpha_mask) -- see MaterialTextureCache.
+            cmd.bind_descriptor_set(gbuffer_pipeline_->layout(), material_cache_->set_for(mr->material), 1);
 
             mr->get_mesh()->bind(cmd);
             mr->get_mesh()->draw(cmd, 1, instance_idx[i]);
@@ -1928,6 +1946,9 @@ private:
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout>   shadow_layout_;
     std::unique_ptr<coopa::gfx::pipeline::DescriptorPool>        shadow_pool_;
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>         shadow_set_;
+    // Material set (alpha-mask sampler) shared by gbuffer_pipeline_ and shadow_pipeline_ -- see
+    // MaterialTextureCache's own doc. Constructed before both in the ctor.
+    std::unique_ptr<toy::render::MaterialTextureCache>           material_cache_;
     std::unique_ptr<coopa::gfx::engine::passes::ShadowPipeline>  shadow_pipeline_;
 
     coopa::gfx::engine::data::PaletteLut palette_lut_;

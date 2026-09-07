@@ -17,6 +17,11 @@ layout(push_constant) uniform PushConstants {
     vec4  emissive;     // xyz = pre-multiplied emissive radiance, w reserved
 } material;
 
+// Set 1: material texture(s) -- currently just the CUTOUT alpha mask. Bound to a 1x1 white
+// fallback for every non-masked material (see MaterialTextureCache), so texture(...).a == 1.0
+// and the test below collapses back to the plain constant-alpha MASK test it replaces.
+layout(set = 1, binding = 0) uniform sampler2D u_alpha_mask;
+
 // G-Buffer Render Targets
 layout(location = 0) out vec4 out_albedo_ao;          // RGB = Albedo, A = AO
 layout(location = 1) out vec4 out_normal_metallic;    // RGB = World Normal, A = Metallic
@@ -24,10 +29,11 @@ layout(location = 2) out vec4 out_position_roughness; // RGB = World Pos, A = Ro
 layout(location = 3) out vec4 out_emissive;           // RGB = emissive radiance (HDR), A = unused
 
 void main() {
-    // MASK materials: alpha_cutoff > 0 arms the test; albedo.a carries the alpha. A constant
-    // per-material alpha makes this all-or-nothing today; it becomes a real silhouette test
-    // once a sampled texture alpha multiplies into material.albedo.a.
-    if (material.alpha_cutoff > 0.0 && material.albedo.a < material.alpha_cutoff) discard;
+    // CUTOUT/MASK materials: alpha_cutoff > 0 arms the test. albedo.a (the constant per-material
+    // alpha) multiplied by the sampled mask's alpha gives a real per-texel silhouette test when a
+    // texture_alpha_mask is authored, and collapses to the old constant-only test otherwise.
+    float alpha = material.albedo.a * texture(u_alpha_mask, frag_uv).a;
+    if (material.alpha_cutoff > 0.0 && alpha < material.alpha_cutoff) discard;
 
     vec3 albedo   = material.albedo.rgb;
     float metallic  = material.metallic;

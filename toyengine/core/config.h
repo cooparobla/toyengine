@@ -57,6 +57,22 @@ struct OutputConfig {
 };
 
 /**
+ * @struct JobsConfig
+ * @brief Job-system sizing and the per-frame parallel-dispatch threshold.
+ */
+struct JobsConfig {
+    /// Worker threads for the shared JobEngine. 0 = std::thread::hardware_concurrency().
+    unsigned int worker_threads = 0;
+    /**
+     * Minimum element count before a per-frame loop dispatches jobs instead of
+     * running serially. Deliberately low so the pixel demo (8 MeshRenderers,
+     * 4 SdfRenderers) exercises the parallel path; libcoopa's own house value for
+     * production-sized workloads is 256 (see AnimationSystem::parallel_threshold_).
+     */
+    std::size_t parallel_threshold = 4;
+};
+
+/**
  * @struct AppConfig
  * @brief Aggregated runtime configuration for toyengine.
  */
@@ -65,6 +81,7 @@ struct AppConfig {
     WindowConfig                 window;
     render::PixelRenderConfig    render;
     OutputConfig                 output;
+    JobsConfig                   jobs;
 
     /**
      * @brief Loads application configuration from a YAML file.
@@ -242,6 +259,12 @@ struct AppConfig {
                 if (r.contains("sdf_shadow_max_steps")) config.render.sdf_shadow_max_steps = r.at("sdf_shadow_max_steps").get_value<uint32_t>();
                 if (r.contains("sdf_max_renderers"))    config.render.sdf_max_renderers    = r.at("sdf_max_renderers").get_value<uint32_t>();
                 if (r.contains("sdf_max_shapes"))       config.render.sdf_max_shapes       = r.at("sdf_max_shapes").get_value<uint32_t>();
+            }
+
+            if (root.contains("jobs")) {
+                const auto& j = root.at("jobs");
+                if (j.contains("worker_threads"))    config.jobs.worker_threads    = j.at("worker_threads").get_value<unsigned int>();
+                if (j.contains("parallel_threshold")) config.jobs.parallel_threshold = j.at("parallel_threshold").get_value<std::size_t>();
             }
 
             if (root.contains("output")) {

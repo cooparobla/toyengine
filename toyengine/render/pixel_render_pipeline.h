@@ -57,6 +57,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <iostream>
 #include <limits>
@@ -101,6 +102,8 @@
 #include <gfxcoopa/engine/passes/sdf_shadow_pass.h>
 #include <gfxcoopa/engine/passes/sdf_capture_pass.h>
 
+#include <coopa/job/engine.h>
+#include <coopa/job/parallel_for.h>
 #include <coopa/scene/scene.h>
 #include <coopa/scene/components/transform_component.h>
 
@@ -741,6 +744,20 @@ public:
     PixelRenderPipeline(const PixelRenderPipeline&) = delete;
     PixelRenderPipeline& operator=(const PixelRenderPipeline&) = delete;
 
+    /**
+     * @brief Installs the JobEngine render()'s per-frame gathers may dispatch to.
+     * @param jobs Non-owning pointer, or nullptr to force every gather fully serial
+     *   (the default) -- see should_parallelize_()'s doc.
+     */
+    void set_job_engine(coopa::job::JobEngine* jobs) { jobs_ = jobs; }
+
+    /**
+     * @brief Sets the minimum element count before a gather dispatches jobs instead of
+     *        running serially -- see should_parallelize_()'s doc. Default 256, matching
+     *        coopa::anim::AnimationSystem's own house threshold.
+     */
+    void set_parallel_threshold(std::size_t n) { parallel_threshold_ = n; }
+
     /** @brief Low-resolution render width in pixels. */
     uint32_t render_width() const { return render_extent_.width; }
     /** @brief Low-resolution render height in pixels. */
@@ -848,14 +865,33 @@ public:
         // the same order.
         auto renderers = scene.get_components<MeshRenderer>();
         std::vector<glm::mat4> world_matrices(renderers.size(), glm::mat4(1.0f));
+        std::vector<uint8_t>   renderer_valid(renderers.size(), 0);
         instance_stream_.begin(frame_slot);
         std::vector<uint32_t> instance_idx(renderers.size(), UINT32_MAX);
+
+        // world_matrix() (a pure read -- see Transform's thread-safety doc) is safe from any
+        // number of concurrent readers, unlike get_world_matrix(), because TransformSystem's
+        // resolve pass (installed by Engine's ctor) has already recomputed every dirty
+        // transform earlier this frame. Each index writes only its own slot, so this is a
+        // clean parallel_for candidate; the merge below stays serial to preserve
+        // instance_stream_.add()'s required monotonic-index order.
+        auto gather_mesh = [&](size_t begin, size_t end) {
+            for (size_t i = begin; i < end; ++i) {
+                if (!renderers[i]->is_ready() || !renderers[i]->owner) continue;
+                auto* tc = renderers[i]->owner->get_transform();
+                if (!tc) continue;
+                world_matrices[i] = tc->transform().world_matrix();
+                renderer_valid[i] = 1;
+            }
+        };
+        if (should_parallelize_(renderers.size())) {
+            jobs_->parallel_for_blocking(renderers.size(), 0 /* auto grain */, gather_mesh);
+        } else {
+            gather_mesh(0, renderers.size());
+        }
+
         for (size_t i = 0; i < renderers.size(); ++i) {
-            if (!renderers[i]->is_ready() || !renderers[i]->owner) continue;
-            auto* tc = renderers[i]->owner->get_transform();
-            if (!tc) continue;
-            world_matrices[i] = tc->get_world_matrix();
-            instance_idx[i] = instance_stream_.add(world_matrices[i]);
+            if (renderer_valid[i]) instance_idx[i] = instance_stream_.add(world_matrices[i]);
         }
         instance_stream_.upload();
 
@@ -876,88 +912,136 @@ public:
             glm::mat4 view_proj = proj * view;
             auto sdf_renderer_comps = scene.get_components<SdfRenderer>();
 
-            for (auto* sr : sdf_renderer_comps) {
-                if (!sr->owner) continue;
-                auto* tc = sr->owner->get_transform();
-                if (!tc) continue;
-                glm::mat4 world = tc->get_world_matrix();
+            // Per-SdfRenderer scratch result: everything the loop body below used to compute
+            // and push straight into sdf_data_/sdf_draws, minus the two SSBO writes
+            // (sdf_data_.add_shape()/add_renderer()) -- those must stay serial (SdfData hands
+            // out contiguous indices), so they move to the merge pass below. This is the
+            // heaviest per-item work in the frame (an 8-corner AABB, a frustum cull, then per
+            // shape a glm::inverse + 3 glm::length + a cbrt), and every SdfRenderer here is
+            // independent of every other, so it's the best parallel_for candidate of the three.
+            struct SdfGatherResult {
+                bool visible = false;
+                SdfRenderer* comp = nullptr;
+                SdfRendererGPU rec{};
+                std::vector<SdfShapeGPU> shapes;
+                glm::vec3 world_min{0.0f}, world_max{0.0f};
+                bool is_blend = false, cast_shadows = true;
+                PixelRect px_rect{};
+            };
+            std::vector<SdfGatherResult> gather_results(sdf_renderer_comps.size());
 
-                // World AABB from the renderer's local bounds box.
-                glm::vec3 bmin_local = sr->bounds_center - sr->bounds_extent;
-                glm::vec3 bmax_local = sr->bounds_center + sr->bounds_extent;
-                glm::vec3 wmin(std::numeric_limits<float>::max());
-                glm::vec3 wmax(std::numeric_limits<float>::lowest());
-                for (int c = 0; c < 8; ++c) {
-                    glm::vec3 corner((c & 1) ? bmax_local.x : bmin_local.x,
-                                     (c & 2) ? bmax_local.y : bmin_local.y,
-                                     (c & 4) ? bmax_local.z : bmin_local.z);
-                    glm::vec3 wc = glm::vec3(world * glm::vec4(corner, 1.0f));
-                    wmin = glm::min(wmin, wc);
-                    wmax = glm::max(wmax, wc);
+            auto gather_sdf = [&](size_t begin, size_t end) {
+                for (size_t ri = begin; ri < end; ++ri) {
+                    SdfRenderer* sr = sdf_renderer_comps[ri];
+                    SdfGatherResult& out = gather_results[ri];
+                    if (!sr->owner) continue;
+                    auto* tc = sr->owner->get_transform();
+                    if (!tc) continue;
+                    // world_matrix() (pure read, safe for concurrent readers once
+                    // TransformSystem has resolved this frame) -- see the MeshRenderer
+                    // gather above for the same reasoning.
+                    glm::mat4 world = tc->transform().world_matrix();
+
+                    // World AABB from the renderer's local bounds box.
+                    glm::vec3 bmin_local = sr->bounds_center - sr->bounds_extent;
+                    glm::vec3 bmax_local = sr->bounds_center + sr->bounds_extent;
+                    glm::vec3 wmin(std::numeric_limits<float>::max());
+                    glm::vec3 wmax(std::numeric_limits<float>::lowest());
+                    for (int c = 0; c < 8; ++c) {
+                        glm::vec3 corner((c & 1) ? bmax_local.x : bmin_local.x,
+                                         (c & 2) ? bmax_local.y : bmin_local.y,
+                                         (c & 4) ? bmax_local.z : bmin_local.z);
+                        glm::vec3 wc = glm::vec3(world * glm::vec4(corner, 1.0f));
+                        wmin = glm::min(wmin, wc);
+                        wmax = glm::max(wmax, wc);
+                    }
+
+                    // Screen-space (pre-upscale) rectangle -- the whole performance story: only
+                    // pixels inside it ever raymarch (see record_gbuffer_()/record_transparent_()'s
+                    // cmd.set_scissor() calls). An empty/off-screen rect means free frustum culling.
+                    SdfClipRect clip_rect = compute_sdf_clip_rect(view_proj, wmin, wmax);
+                    if (!clip_rect.visible) continue;
+
+                    // Compute every shape's GPU record here; first_shape/shape_count (which
+                    // require sdf_data_'s shared, monotonic index allocator) are filled in by
+                    // the serial merge below instead of here.
+                    auto shapes = sr->collect_shapes();
+                    out.shapes.reserve(shapes.size());
+                    for (auto* shape : shapes) {
+                        if (!shape->owner) continue;
+                        auto* shape_tc = shape->owner->get_transform();
+                        if (!shape_tc) continue;
+                        glm::mat4 shape_world = shape_tc->transform().world_matrix();
+
+                        // Approximate uniform scale (geometric mean of the 3 basis lengths) -- true
+                        // SDFs don't support non-uniform scale exactly; this rescales the local-space
+                        // distance back to world units well enough for the common case. See
+                        // SdfShapeGPU::type_op_blend's doc.
+                        float sx = glm::length(glm::vec3(shape_world[0]));
+                        float sy = glm::length(glm::vec3(shape_world[1]));
+                        float sz = glm::length(glm::vec3(shape_world[2]));
+                        float uniform_scale = std::cbrt(std::max(sx * sy * sz, 1e-6f));
+
+                        SdfShapeGPU gpu;
+                        gpu.inv_world    = glm::inverse(shape_world);
+                        gpu.params_round = glm::vec4(shape->params, shape->rounding);
+                        float blend = shape->blend > 0.0f ? shape->blend : sr->smoothing;
+                        gpu.type_op_blend = glm::vec4(static_cast<float>(static_cast<int>(shape->type)),
+                                                      static_cast<float>(static_cast<int>(shape->op)),
+                                                      blend, uniform_scale);
+                        out.shapes.push_back(gpu);
+                    }
+                    if (out.shapes.empty()) continue; // no shapes collected -- nothing to draw
+
+                    out.rec.clip_rect    = glm::vec4(clip_rect.ndc_min, clip_rect.ndc_max);
+                    out.rec.bounds_min   = glm::vec4(wmin, 0.0f);
+                    out.rec.bounds_max   = glm::vec4(wmax, 0.0f);
+                    out.rec.albedo_alpha = glm::vec4(sr->material.albedo, sr->material.alpha);
+                    out.rec.mr_ao_cutoff = glm::vec4(sr->material.metallic, sr->material.roughness,
+                                                 sr->material.ao, sr->material.gpu_alpha_cutoff());
+                    out.rec.emissive     = sr->material.gpu_emissive();
+                    uint32_t clamped_steps = static_cast<uint32_t>(
+                        std::clamp(sr->max_steps, 1, static_cast<int>(config_.sdf_max_steps)));
+                    out.rec.range = glm::uvec4(0, static_cast<uint32_t>(out.shapes.size()), clamped_steps, 0);
+                    out.rec.march = glm::vec4(sr->surface_epsilon, sr->normal_epsilon, 0.0f, 0.0f);
+
+                    out.comp         = sr;
+                    out.is_blend     = sr->material.is_blended();
+                    out.cast_shadows = sr->cast_shadows && config_.sdf_shadows_enabled;
+                    out.world_min    = wmin;
+                    out.world_max    = wmax;
+                    out.px_rect      = sdf_clip_rect_to_pixels(clip_rect.ndc_min, clip_rect.ndc_max,
+                                                                render_extent_.width, render_extent_.height);
+                    out.visible = true;
                 }
+            };
+            if (should_parallelize_(sdf_renderer_comps.size())) {
+                jobs_->parallel_for_blocking(sdf_renderer_comps.size(), 0 /* auto grain */, gather_sdf);
+            } else {
+                gather_sdf(0, sdf_renderer_comps.size());
+            }
 
-                // Screen-space (pre-upscale) rectangle -- the whole performance story: only
-                // pixels inside it ever raymarch (see record_gbuffer_()/record_transparent_()'s
-                // cmd.set_scissor() calls). An empty/off-screen rect means free frustum culling.
-                SdfClipRect clip_rect = compute_sdf_clip_rect(view_proj, wmin, wmax);
-                if (!clip_rect.visible) continue;
+            // Serial merge, in gather order: sdf_data_.add_shape()/add_renderer() hand out
+            // contiguous SSBO indices and must not race, so this part stays a plain loop.
+            for (auto& out : gather_results) {
+                if (!out.visible) continue;
 
-                // Fold every SdfShape this object's hierarchy carries into the shape SSBO,
-                // contiguously, so `range` below describes one run.
-                auto shapes = sr->collect_shapes();
                 uint32_t first_shape = 0;
-                uint32_t shape_count = 0;
-                for (auto* shape : shapes) {
-                    if (!shape->owner) continue;
-                    auto* shape_tc = shape->owner->get_transform();
-                    if (!shape_tc) continue;
-                    glm::mat4 shape_world = shape_tc->get_world_matrix();
-
-                    // Approximate uniform scale (geometric mean of the 3 basis lengths) -- true
-                    // SDFs don't support non-uniform scale exactly; this rescales the local-space
-                    // distance back to world units well enough for the common case. See
-                    // SdfShapeGPU::type_op_blend's doc.
-                    float sx = glm::length(glm::vec3(shape_world[0]));
-                    float sy = glm::length(glm::vec3(shape_world[1]));
-                    float sz = glm::length(glm::vec3(shape_world[2]));
-                    float uniform_scale = std::cbrt(std::max(sx * sy * sz, 1e-6f));
-
-                    SdfShapeGPU gpu;
-                    gpu.inv_world    = glm::inverse(shape_world);
-                    gpu.params_round = glm::vec4(shape->params, shape->rounding);
-                    float blend = shape->blend > 0.0f ? shape->blend : sr->smoothing;
-                    gpu.type_op_blend = glm::vec4(static_cast<float>(static_cast<int>(shape->type)),
-                                                  static_cast<float>(static_cast<int>(shape->op)),
-                                                  blend, uniform_scale);
-                    uint32_t idx = sdf_data_.add_shape(gpu);
-                    if (shape_count == 0) first_shape = idx;
-                    ++shape_count;
+                for (size_t s = 0; s < out.shapes.size(); ++s) {
+                    uint32_t idx = sdf_data_.add_shape(out.shapes[s]);
+                    if (s == 0) first_shape = idx;
                 }
-                if (shape_count == 0) continue; // no shapes collected -- nothing to draw
-
-                SdfRendererGPU rec;
-                rec.clip_rect    = glm::vec4(clip_rect.ndc_min, clip_rect.ndc_max);
-                rec.bounds_min   = glm::vec4(wmin, 0.0f);
-                rec.bounds_max   = glm::vec4(wmax, 0.0f);
-                rec.albedo_alpha = glm::vec4(sr->material.albedo, sr->material.alpha);
-                rec.mr_ao_cutoff = glm::vec4(sr->material.metallic, sr->material.roughness,
-                                             sr->material.ao, sr->material.gpu_alpha_cutoff());
-                rec.emissive     = sr->material.gpu_emissive();
-                uint32_t clamped_steps = static_cast<uint32_t>(
-                    std::clamp(sr->max_steps, 1, static_cast<int>(config_.sdf_max_steps)));
-                rec.range = glm::uvec4(first_shape, shape_count, clamped_steps, 0);
-                rec.march = glm::vec4(sr->surface_epsilon, sr->normal_epsilon, 0.0f, 0.0f);
+                out.rec.range.x = first_shape;
 
                 SdfDrawItem item;
-                item.comp         = sr;
-                item.gpu_index    = sdf_data_.add_renderer(rec);
-                item.is_blend     = sr->material.is_blended();
-                item.cast_shadows = sr->cast_shadows && config_.sdf_shadows_enabled;
-                item.world_min    = wmin;
-                item.world_max    = wmax;
-                item.world_center = 0.5f * (wmin + wmax);
-                item.px_rect      = sdf_clip_rect_to_pixels(clip_rect.ndc_min, clip_rect.ndc_max,
-                                                            render_extent_.width, render_extent_.height);
+                item.comp         = out.comp;
+                item.gpu_index    = sdf_data_.add_renderer(out.rec);
+                item.is_blend     = out.is_blend;
+                item.cast_shadows = out.cast_shadows;
+                item.world_min    = out.world_min;
+                item.world_max    = out.world_max;
+                item.world_center = 0.5f * (out.world_min + out.world_max);
+                item.px_rect      = out.px_rect;
                 sdf_draws.push_back(item);
             }
 
@@ -1381,6 +1465,18 @@ public:
 
 private:
 
+    /**
+     * @brief True when `n` items justify job dispatch over a plain serial loop.
+     *
+     * Keeps the guard identical at every gather site (MeshRenderer gather, SDF gather,
+     * directional shadow AABB fit). jobs_ is nullptr unless the owning Engine calls
+     * set_job_engine(), so a pipeline used standalone (e.g. in a test) stays fully serial
+     * with no behavior change. parallel_threshold_ defaults to 256, matching
+     * coopa::anim::AnimationSystem's own house value; toyengine's Engine overrides it from
+     * AppConfig::jobs.parallel_threshold (see JobsConfig's doc for why that default is low).
+     */
+    bool should_parallelize_(std::size_t n) const { return jobs_ && n >= parallel_threshold_; }
+
     /** @brief Camera descriptor set for the slot render() most recently selected -- bound once
      *  at construction, never rewritten. Mirrors sdf_data_.current_set(). */
     const coopa::gfx::pipeline::DescriptorSet& current_camera_set() const {
@@ -1445,37 +1541,84 @@ private:
         glm::vec3 aabb_max(std::numeric_limits<float>::lowest());
         bool any_caster = false;
 
-        for (size_t i = 0; i < renderers.size(); ++i) {
-            if (!renderers[i]->is_ready()) continue;
-            const auto* mesh = renderers[i]->get_mesh().get();
-            if (!mesh) continue;
-            any_caster = true;
+        // Pure min/max reduction, no shared mutable state -- float min/max is associative, so
+        // splitting the range across workers and folding each worker's own partial result back
+        // in afterwards (in a fixed, worker-index order every run) is bit-identical to the
+        // plain serial fold. One accumulator slot per worker (indexed by JobContext::worker_index,
+        // which is the thread ACTUALLY running a given chunk -- safe even under work-stealing,
+        // since a worker only ever executes one job body at a time).
+        struct AabbAccum {
+            glm::vec3 mn{std::numeric_limits<float>::max()};
+            glm::vec3 mx{std::numeric_limits<float>::lowest()};
+            bool any = false;
+        };
+        size_t worker_slots = jobs_ ? std::max<size_t>(1, jobs_->worker_count()) : 1;
 
-            const glm::vec3& bmin = mesh->bounds_min();
-            const glm::vec3& bmax = mesh->bounds_max();
-            for (int c = 0; c < 8; ++c) {
-                glm::vec3 corner((c & 1) ? bmax.x : bmin.x, (c & 2) ? bmax.y : bmin.y, (c & 4) ? bmax.z : bmin.z);
-                glm::vec3 ls = glm::vec3(light_rot * (world_matrices[i] * glm::vec4(corner, 1.0f)));
-                aabb_min = glm::min(aabb_min, ls);
-                aabb_max = glm::max(aabb_max, ls);
+        std::vector<AabbAccum> mesh_accum(worker_slots);
+        auto fit_mesh = [&](size_t begin, size_t end, const coopa::job::JobContext& ctx) {
+            size_t widx = (ctx.worker_index < worker_slots) ? ctx.worker_index : 0;
+            AabbAccum& acc = mesh_accum[widx];
+            for (size_t i = begin; i < end; ++i) {
+                if (!renderers[i]->is_ready()) continue;
+                const auto* mesh = renderers[i]->get_mesh().get();
+                if (!mesh) continue;
+                acc.any = true;
+
+                const glm::vec3& bmin = mesh->bounds_min();
+                const glm::vec3& bmax = mesh->bounds_max();
+                for (int c = 0; c < 8; ++c) {
+                    glm::vec3 corner((c & 1) ? bmax.x : bmin.x, (c & 2) ? bmax.y : bmin.y, (c & 4) ? bmax.z : bmin.z);
+                    glm::vec3 ls = glm::vec3(light_rot * (world_matrices[i] * glm::vec4(corner, 1.0f)));
+                    acc.mn = glm::min(acc.mn, ls);
+                    acc.mx = glm::max(acc.mx, ls);
+                }
             }
+        };
+        if (should_parallelize_(renderers.size())) {
+            jobs_->parallel_for_blocking(renderers.size(), 0 /* auto grain */, fit_mesh);
+        } else {
+            fit_mesh(0, renderers.size(), coopa::job::JobContext{});
+        }
+        for (const auto& acc : mesh_accum) {
+            if (!acc.any) continue;
+            any_caster = true;
+            aabb_min = glm::min(aabb_min, acc.mn);
+            aabb_max = glm::max(aabb_max, acc.mx);
         }
 
         // Fold in every shadow-casting SdfRenderer's world AABB too, same BLEND-at-full-opacity
         // rule record_directional_shadow_()/record_point_shadow_() apply to their own draws --
         // an SDF that won't actually cast a shadow this frame shouldn't influence the fitted box.
-        for (const auto& d : sdf_draws) {
-            if (!d.cast_shadows) continue;
-            if (d.is_blend && d.comp->material.alpha < 1.0f) continue;
-            any_caster = true;
-            for (int c = 0; c < 8; ++c) {
-                glm::vec3 corner((c & 1) ? d.world_max.x : d.world_min.x,
-                                 (c & 2) ? d.world_max.y : d.world_min.y,
-                                 (c & 4) ? d.world_max.z : d.world_min.z);
-                glm::vec3 ls = glm::vec3(light_rot * glm::vec4(corner, 1.0f));
-                aabb_min = glm::min(aabb_min, ls);
-                aabb_max = glm::max(aabb_max, ls);
+        // Same reduction shape as the mesh loop above.
+        std::vector<AabbAccum> sdf_accum(worker_slots);
+        auto fit_sdf = [&](size_t begin, size_t end, const coopa::job::JobContext& ctx) {
+            size_t widx = (ctx.worker_index < worker_slots) ? ctx.worker_index : 0;
+            AabbAccum& acc = sdf_accum[widx];
+            for (size_t i = begin; i < end; ++i) {
+                const auto& d = sdf_draws[i];
+                if (!d.cast_shadows) continue;
+                if (d.is_blend && d.comp->material.alpha < 1.0f) continue;
+                acc.any = true;
+                for (int c = 0; c < 8; ++c) {
+                    glm::vec3 corner((c & 1) ? d.world_max.x : d.world_min.x,
+                                     (c & 2) ? d.world_max.y : d.world_min.y,
+                                     (c & 4) ? d.world_max.z : d.world_min.z);
+                    glm::vec3 ls = glm::vec3(light_rot * glm::vec4(corner, 1.0f));
+                    acc.mn = glm::min(acc.mn, ls);
+                    acc.mx = glm::max(acc.mx, ls);
+                }
             }
+        };
+        if (should_parallelize_(sdf_draws.size())) {
+            jobs_->parallel_for_blocking(sdf_draws.size(), 0 /* auto grain */, fit_sdf);
+        } else {
+            fit_sdf(0, sdf_draws.size(), coopa::job::JobContext{});
+        }
+        for (const auto& acc : sdf_accum) {
+            if (!acc.any) continue;
+            any_caster = true;
+            aabb_min = glm::min(aabb_min, acc.mn);
+            aabb_max = glm::max(aabb_max, acc.mx);
         }
 
         glm::mat4 light_proj;
@@ -2226,6 +2369,10 @@ private:
     std::unique_ptr<coopa::gfx::engine::passes::SdfForwardPass> sdf_forward_pass_;
     std::unique_ptr<coopa::gfx::engine::passes::SdfShadowPass>  sdf_shadow_pass_;
     std::unique_ptr<coopa::gfx::engine::passes::SdfCapturePass> sdf_capture_pass_;
+
+    // --- Job dispatch for the per-frame gathers -- see should_parallelize_()'s doc ---
+    coopa::job::JobEngine* jobs_ = nullptr;      // non-owning; nullptr = always serial
+    std::size_t            parallel_threshold_ = 256;
 };
 
 } // namespace render

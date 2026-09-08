@@ -167,6 +167,12 @@ render:
   sdf_max_renderers: 64        # SdfData renderer SSBO capacity (startup-fixed)
   sdf_max_shapes: 512          # SdfData shape SSBO capacity (startup-fixed)
 
+jobs:
+  worker_threads: 0        # 0 = std::thread::hardware_concurrency()
+  parallel_threshold: 4    # low on purpose: exercises the parallel path in the pixel demo
+                            # (8 MeshRenderers, 4 SdfRenderers); libcoopa's own house value
+                            # for production-sized workloads is 256 (AnimationSystem)
+
 output:
   save_on_exit: true
   filepath: "./output/frame.png"

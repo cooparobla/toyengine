@@ -3,12 +3,15 @@
  * @brief Owns the engine lifetime: window, Vulkan objects, assets, scene, and
  *        the render loop.
  *
- * Composes a gfx::app::Context (which owns the Window -> Instance -> Surface
- * -> Device -> Allocator -> Swapchain -> CommandPool -> RenderPass ->
- * Renderer bring-up chain, plus frame timing and resize handling) as its
- * first member, then layers PixelRenderPipeline, AssetManager, and
- * SceneManager on top. Engine no longer orders or constructs any Vulkan/
- * windowing object itself -- see gfxcoopa/app/context.h.
+ * Owns a shared coopa::job::JobEngine first (so it outlives every subsystem that
+ * submits to it), then composes a gfx::app::Context (which owns the Window ->
+ * Instance -> Surface -> Device -> Allocator -> Swapchain -> CommandPool ->
+ * RenderPass -> Renderer bring-up chain, plus frame timing and resize
+ * handling), then layers PixelRenderPipeline, AssetManager, and SceneManager
+ * on top -- all three are handed the JobEngine so asset decode, transform
+ * resolution, and the render-list gathers can dispatch to it. Engine no
+ * longer orders or constructs any Vulkan/windowing object itself -- see
+ * gfxcoopa/app/context.h.
  */
 
 #ifndef TOYENGINE_CORE_ENGINE_H
@@ -22,6 +25,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <thread>
 
 #include <gfxcoopa/app/context.h>
 #include <gfxcoopa/util/image_readback.h>
@@ -31,8 +35,10 @@
 
 #include <coopa/asset/asset_manager.h>
 #include <coopa/input/input_map.h>
+#include <coopa/job/engine.h>
 #include <coopa/scene/scene_loader.h>
 #include <coopa/scene/scene_manager.h>
+#include <coopa/scene/systems/transform_system.h>
 
 #include <toyengine/core/config.h>
 #include <toyengine/loaders/pixel_texture_loader.h>
@@ -62,9 +68,12 @@ public:
      */
     explicit Engine(AppConfig config)
         : config_(std::move(config)),
+          jobs_(config_.jobs.worker_threads ? config_.jobs.worker_threads
+                                             : std::thread::hardware_concurrency()),
           ctx_(make_context_config_(config_)),
           pipeline_(ctx_.device(), ctx_.allocator(), ctx_.swapchain(), ctx_.render_pass(),
-                   ctx_.command_pool(), make_render_config_(config_))
+                   ctx_.command_pool(), make_render_config_(config_)),
+          assets_(&jobs_)
     {
         // Read once here rather than in the initializer list -- these are declared after
         // assets_/scene_mgr_/input_, and initializing them there regardless of list order
@@ -76,6 +85,10 @@ public:
 
         bind_default_input_();
 
+        scene_mgr_.set_job_engine(&jobs_);
+        pipeline_.set_job_engine(&jobs_);
+        pipeline_.set_parallel_threshold(config_.jobs.parallel_threshold);
+
         assets_.add_search_root(std::string(ROOT_DIR) + "/assets");
         assets_.register_loader<coopa::gfx::engine::data::Mesh>(
             std::make_unique<coopa::gfx::engine::loaders::MeshLoader>(ctx_.device(), ctx_.allocator(), ctx_.command_pool()));
@@ -85,6 +98,14 @@ public:
         scene::register_scene_components();
 
         scene_mgr_.load_scene(resolve_path_(config_.scene.default_scene));
+
+        // Mesh decode (gfxcoopa's register.h) now runs via load_async() on jobs_'s workers,
+        // same as texture decode always has -- activate TransformSystem before the first
+        // drain/render so world_matrix() reads below are never asked to resolve a still-dirty
+        // transform, then block here until every load issued above has finished, so frame 0
+        // (and ONESHOT/CAPTURE_FRAMES captures) see a fully populated scene.
+        coopa::scene::install_transform_system(scene_mgr_.get_active_scene());
+        drain_pending_assets_();
 
         // Fail fast on a typo'd/unregistered PBRMaterial::shader -- see
         // PixelRenderPipeline::validate_material_shaders()'s doc for why this can't happen
@@ -328,6 +349,32 @@ private:
         return std::string(ROOT_DIR) + "/" + path;
     }
 
+    /**
+     * @brief Pumps AssetManager until every load issued during scene load has been finalized.
+     *
+     * Mesh decode now runs on jobs_'s worker threads (see gfxcoopa's register.h), so all of a
+     * scene's mesh YAML parses overlap instead of serializing at parse time -- but frame 0
+     * must still see a fully loaded scene, or ONESHOT/CAPTURE_FRAMES would capture an empty
+     * or partial image. Reports any mesh that failed to decode, since MeshRenderer's parser
+     * (register.h) can no longer check is_failed() synchronously once loading is async.
+     */
+    void drain_pending_assets_() {
+        while (assets_.pending_load_count() > 0) {
+            assets_.update(0.0f);
+            std::this_thread::yield();
+        }
+
+        if (!scene_mgr_.has_scene()) return;
+        for (auto* mr : scene_mgr_.get_active_scene()
+                             .get_components<coopa::gfx::engine::components::MeshRenderer>()) {
+            const auto& handle = mr->get_mesh();
+            if (handle.is_failed()) {
+                std::cerr << "[toyengine] Failed to load mesh '" << mr->mesh_path()
+                          << "': " << handle.error() << std::endl;
+            }
+        }
+    }
+
     /** @brief FIXED_DT env override for frame_dt_() -- unset (or unparsable) means -1, i.e. off. */
     static float fixed_dt_from_env_() {
         if (const char* v = std::getenv("FIXED_DT")) return std::strtof(v, nullptr);
@@ -391,6 +438,11 @@ private:
     }
 
     AppConfig config_;
+
+    // jobs_ is declared (and constructed) before ctx_/pipeline_/assets_/scene_mgr_, and
+    // destroyed after all of them, since every one of those may still be submitting to or
+    // waiting on it up through their own destruction.
+    coopa::job::JobEngine jobs_;
 
     // ctx_ is declared before pipeline_ (and constructed first, destroyed
     // last) since pipeline_ holds references into ctx_'s owned objects.

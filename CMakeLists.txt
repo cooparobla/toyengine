@@ -11,6 +11,11 @@ if(NOT TARGET coopa::gfx)
     add_subdirectory(${GFXCOOPA_DIR} ${CMAKE_CURRENT_BINARY_DIR}/gfxcoopa-build)
 endif()
 
+set(PHYSXCOOPA_DIR "${ROOT_DIR_PARENT}/physxcoopa")
+if(NOT TARGET coopa::physx)
+    add_subdirectory(${PHYSXCOOPA_DIR} ${CMAKE_CURRENT_BINARY_DIR}/physxcoopa-build)
+endif()
+
 include_directories(${CMAKE_SOURCE_DIR})
 
 configure_file(configuration/root_directory.h.in configuration/root_directory.h)
@@ -40,12 +45,12 @@ gfx_add_shader_target(toyengine_shaders
 
 add_executable(toyengine main.cpp)
 add_dependencies(toyengine toyengine_shaders)
-target_link_libraries(toyengine PRIVATE coopa::gfx)
+target_link_libraries(toyengine PRIVATE coopa::gfx coopa::physx)
 
 enable_testing()
 add_executable(toyengine_tests test.cpp)
 add_dependencies(toyengine_tests toyengine_shaders)
-target_link_libraries(toyengine_tests PRIVATE coopa::gfx)
+target_link_libraries(toyengine_tests PRIVATE coopa::gfx coopa::physx)
 add_test(NAME toyengine_render COMMAND toyengine_tests)
 
 # --- Vulkan/GLFW leak gate ---

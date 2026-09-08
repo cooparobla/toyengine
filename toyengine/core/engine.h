@@ -40,6 +40,8 @@
 #include <coopa/scene/scene_manager.h>
 #include <coopa/scene/systems/transform_system.h>
 
+#include <physxcoopa/physx_yaml.h>
+
 #include <toyengine/core/config.h>
 #include <toyengine/loaders/pixel_texture_loader.h>
 #include <toyengine/render/pixel_render_config.h>
@@ -96,8 +98,10 @@ public:
             std::make_unique<loaders::PixelTextureLoader>(ctx_.device(), ctx_.allocator(), ctx_.command_pool()));
         coopa::gfx::engine::components::register_render_components(ctx_.device(), ctx_.allocator(), ctx_.command_pool(), assets_);
         scene::register_scene_components();
+        coopa::physx::register_physics_components(assets_);
 
         scene_mgr_.load_scene(resolve_path_(config_.scene.default_scene));
+        coopa::physx::system::install_physics_system(scene_mgr_.get_active_scene());
 
         // Mesh decode (gfxcoopa's register.h) now runs via load_async() on jobs_'s workers,
         // same as texture decode always has -- activate TransformSystem before the first
@@ -246,6 +250,9 @@ public:
     coopa::gfx::presentation::Window& window() { return ctx_.window(); }
     coopa::gfx::core::Device&         device() { return ctx_.device(); }
     coopa::input::InputMap&           input()  { return input_; }
+    /// @brief The active scene -- for physics-focused headless tests and gameplay code that
+    /// needs to reach a system (e.g. `scene().find_system("Physics")`) or spawn objects.
+    coopa::scene::Scene&              scene()  { return scene_mgr_.get_active_scene(); }
     /// @brief The raw per-frame keyboard/mouse state -- edges, deltas, held
     /// time -- for game code that wants more than input()'s named actions.
     coopa::input::Input&              input_state() { return ctx_.input(); }

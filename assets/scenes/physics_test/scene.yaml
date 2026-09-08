@@ -1,0 +1,152 @@
+format: blender
+scene:
+  scene_name: PhysicsTest
+  root_objects:
+    # Static ground. plane.000 is a flat 2x2 quad at local z=0 with no thickness, so
+    # BoxCollider gives it a thin slab (size.z = 0.2) offset half that thickness below
+    # the visible surface (center.z = -0.1) -- the render surface stays exactly at
+    # world z=0, which is where every dropped object's rest height should land.
+    # scale.z is left at 1.0 (rather than matching x/y) so the collider's z-thickness
+    # isn't coupled to how wide the ground is rendered.
+    - name: ground
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 8.0, y: 8.0, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: plane.000
+          material:
+            albedo: { r: 0.35, g: 0.4, b: 0.3 }
+            metallic: 0.0
+            roughness: 0.8
+            ao: 1.0
+        - type: BoxCollider
+          size: { x: 2.0, y: 2.0, z: 0.2 }
+          center: { x: 0.0, y: 0.0, z: -0.1 }
+      children: []
+
+    # Dynamic box #1, dropped from directly above the origin. cube.000's vertices span
+    # local [0,1]^3 (corner-origin, not centre-origin -- see the physxcoopa plan's
+    # toyengine-integration notes), so placing its rendered centre at world (0,0,3)
+    # means the Transform's own position has to sit at that point minus half the
+    # (scaled) mesh extent per axis: (0,0,3) - 0.5*(1,1,1) = (-0.5,-0.5,2.5). The
+    # BoxCollider mirrors the same offset via `center`, in the object's local
+    # (pre-scale) space, so the collider lines up with what's actually drawn.
+    - name: box_a
+      active: true
+      components:
+        - type: Transform
+          position: { x: -0.5, y: -0.5, z: 2.5 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: cube.000
+          material:
+            albedo: { r: 0.8, g: 0.35, b: 0.25 }
+            metallic: 0.0
+            roughness: 0.6
+            ao: 1.0
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+          center: { x: 0.5, y: 0.5, z: 0.5 }
+        - type: Rigidbody
+          mass: 1.0
+          use_gravity: true
+          is_kinematic: false
+      children: []
+
+    # Dynamic box #2, dropped from higher up and offset in x/y so it lands near
+    # (not exactly on top of) box_a -- close enough that the two are likely to touch
+    # or nudge each other once they settle, exercising a second live box-box contact
+    # in addition to each box's own contact with the ground.
+    - name: box_b
+      active: true
+      components:
+        - type: Transform
+          position: { x: 1.0, y: 0.3, z: 4.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: cube.000
+          material:
+            albedo: { r: 0.25, g: 0.55, b: 0.8 }
+            metallic: 0.0
+            roughness: 0.6
+            ao: 1.0
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+          center: { x: 0.5, y: 0.5, z: 0.5 }
+        - type: Rigidbody
+          mass: 1.0
+          use_gravity: true
+          is_kinematic: false
+      children: []
+
+    # Dynamic sphere, dropped from the same height as box_b but well clear of both
+    # boxes in x/y. sphere.000 is already centred at its own local origin (unlike
+    # cube.000), so no corner-offset correction is needed here -- the Transform's
+    # position is exactly the sphere's rendered/physical centre.
+    - name: sphere_a
+      active: true
+      components:
+        - type: Transform
+          position: { x: -1.5, y: -0.5, z: 4.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 0.6, y: 0.6, z: 0.6 }
+        - type: MeshRenderer
+          mesh_path: sphere.000
+          material:
+            albedo: { r: 0.6, g: 0.8, b: 0.9 }
+            metallic: 0.0
+            roughness: 0.15
+            ao: 1.0
+        - type: SphereCollider
+          radius: 0.6
+        - type: Rigidbody
+          mass: 0.5
+          use_gravity: true
+          is_kinematic: false
+      children: []
+
+    - name: camera
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -10.0, z: 6.0 }
+          rotation: { x: 68.3269, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Camera
+          main: true
+          projection: Perspective
+          fov: 50.0
+          near_clip_plane: 0.1
+          far_clip_plane: 1000.0
+        - type: CameraController
+          mode: orbit
+          target: { x: 0.0, y: 0.0, z: 2.0 }
+          follow_smoothing: 10.0
+          movement_smoothing: 0.8
+          mouse_sensitivity: 0.08
+          zoom_speed: 1.0
+          min_distance: 2.0
+          max_distance: 30.0
+          min_pitch_deg: 0.0
+          max_pitch_deg: 85.0
+      children: []
+
+    - name: sun
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: DirectionalLight
+          direction: { x: -0.35, y: -0.45, z: -0.82 }
+          color: { r: 1.0, g: 0.97, b: 0.9 }
+          intensity: 1.0
+          ambient: { r: 0.08, g: 0.08, b: 0.1 }
+          cast_shadows: true
+      children: []

@@ -50,9 +50,14 @@ pixelated.
     `assets/shaders/refraction.glsl`) when `refraction_enabled` and the object's own
     material opt in; BLEND SDF objects never refract (see the refraction plan).
 8. Exposure + ACES tonemap + outline + dither + palette → `post_target_`
+8a. If `aa_mode != "off"`: FXAA/SMAA/TAA (whichever `aa_mode` selects) → `aa_target_`,
+    ported from blendy's `PbrRenderPipeline` (`FxaaPass`/`SmaaPass`/`TaaPass`, all reused
+    from gfxcoopa) — see `PixelRenderConfig::aa_mode`'s own doc. Runs at the low internal
+    resolution, after the pixel-art post stack and before the upscale, so it's the last
+    stage that still sees individual low-res texels.
 9. Nearest-neighbour upscale (fit or integer-scale letterboxed, per `upscale_mode`) → swapchain
 
-Steps 1–8 record into `Renderer::begin_frame()`'s `pre_pass_fn`; step 9 is the
+Steps 1–8a record into `Renderer::begin_frame()`'s `pre_pass_fn`; step 9 is the
 `record_fn`. See each pass's own file doc for descriptor set layout and
 which blendy/gfxcoopa shader (if any) it was derived from.
 

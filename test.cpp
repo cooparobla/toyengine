@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 
 #include <glm/gtc/matrix_transform.hpp>
@@ -114,6 +115,51 @@ void test_render_resolution_divisor_mode() {
     uint32_t w = 0, h = 0;
     toy::render::compute_render_resolution(cfg, 1920, 1080, w, h);
     expect(w == 480 && h == 270, "render_resolution: divisor mode divides swapchain size");
+}
+
+void test_pixel_render_config_aa_defaults() {
+    // Defaults mirror blendy's PbrRenderPipeline field-for-field (see
+    // PixelRenderConfig::aa_mode's own doc) except aa_mode itself, which defaults to "off"
+    // here so a scene that never opts in renders exactly as it did before AA existed.
+    toy::render::PixelRenderConfig cfg;
+    expect(cfg.aa_mode == "off", "PixelRenderConfig: aa_mode defaults to off");
+    expect(cfg.fxaa_subpixel == 0.75f, "PixelRenderConfig: fxaa_subpixel defaults to 0.75");
+    expect(cfg.fxaa_edge_threshold == 0.166f, "PixelRenderConfig: fxaa_edge_threshold defaults to 0.166");
+    expect(cfg.fxaa_edge_threshold_min == 0.0312f, "PixelRenderConfig: fxaa_edge_threshold_min defaults to 0.0312");
+    expect(cfg.smaa_threshold == 0.1f, "PixelRenderConfig: smaa_threshold defaults to 0.1");
+    expect(cfg.smaa_max_search_steps == 16, "PixelRenderConfig: smaa_max_search_steps defaults to 16");
+    expect(cfg.taa_blending_weight == 0.9f, "PixelRenderConfig: taa_blending_weight defaults to 0.9");
+    expect(cfg.taa_weight_scale == 30.0f, "PixelRenderConfig: taa_weight_scale defaults to 30.0");
+}
+
+void test_app_config_load_round_trips_aa_settings() {
+    // Distinct, non-default values for every AA knob, so a parser bug that silently kept
+    // the in-class default (e.g. a typo'd YAML key) wouldn't pass by coincidence.
+    std::string path = std::string(ROOT_DIR) + "/output/test_aa_config.yaml";
+    {
+        std::ofstream out(path);
+        out << "render:\n"
+               "  aa_mode: taa\n"
+               "  fxaa_subpixel: 0.5\n"
+               "  fxaa_edge_threshold: 0.2\n"
+               "  fxaa_edge_threshold_min: 0.01\n"
+               "  smaa_threshold: 0.05\n"
+               "  smaa_max_search_steps: 24\n"
+               "  taa_blending_weight: 0.8\n"
+               "  taa_weight_scale: 12.5\n";
+    }
+
+    toy::core::AppConfig config = toy::core::AppConfig::load(path);
+    expect(config.render.aa_mode == "taa", "AppConfig::load: aa_mode round-trips");
+    expect(config.render.fxaa_subpixel == 0.5f, "AppConfig::load: fxaa_subpixel round-trips");
+    expect(config.render.fxaa_edge_threshold == 0.2f, "AppConfig::load: fxaa_edge_threshold round-trips");
+    expect(config.render.fxaa_edge_threshold_min == 0.01f, "AppConfig::load: fxaa_edge_threshold_min round-trips");
+    expect(config.render.smaa_threshold == 0.05f, "AppConfig::load: smaa_threshold round-trips");
+    expect(config.render.smaa_max_search_steps == 24, "AppConfig::load: smaa_max_search_steps round-trips");
+    expect(config.render.taa_blending_weight == 0.8f, "AppConfig::load: taa_blending_weight round-trips");
+    expect(config.render.taa_weight_scale == 12.5f, "AppConfig::load: taa_weight_scale round-trips");
+
+    std::filesystem::remove(path);
 }
 
 void test_pixel_density_orthographic() {
@@ -556,6 +602,8 @@ int main() {
     test_display_rect_dispatches_on_upscale_mode();
     test_render_resolution_fixed_mode();
     test_render_resolution_divisor_mode();
+    test_pixel_render_config_aa_defaults();
+    test_app_config_load_round_trips_aa_settings();
     test_pixel_density_orthographic();
     test_pixel_density_perspective_disabled();
     test_sdf_clip_rect_on_screen();

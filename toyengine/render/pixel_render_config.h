@@ -255,6 +255,43 @@ struct PixelRenderConfig {
     float tilt_shift_angle        = 0.0f;  /**< Degrees; rotates the focus band off horizontal. */
 
     /**
+     * Anti-aliasing, ported from blendy's PbrRenderPipeline (see
+     * blendy/src/blendy/render/pbr_render_pipeline.h) -- same three modes, same field names
+     * ("aa_mode" is a string there too), same defaults for every knob except aa_mode itself
+     * (blendy defaults to "smaa"; here it defaults to "off" so this engine's output is
+     * unchanged unless a scene opts in). MSAA is NOT ported: blendy's own msaa_4x is parsed
+     * but never read by its render pipeline (every target there is SampleCount::X1), so there
+     * was nothing working to copy.
+     *
+     * aa_mode is a STARTUP-FIXED toggle, same policy as bloom_enabled/fog_enabled/
+     * tilt_shift_enabled above: going from "off" to any AA mode (or back) changes which
+     * descriptor upscale_pass_/tilt_shift_pass_ are bound to, decided once at pipeline
+     * construction (see PixelRenderPipeline's ctor and its aa_target_ member doc). Switching
+     * AMONG "fxaa"/"smaa"/"taa" at runtime IS safe -- all three passes are always constructed
+     * together whenever aa_mode != "off", and all three write the same aa_target_, so render()
+     * just branches per frame on which one's draw() to call.
+     *
+     * "taa" jitters the camera projection every frame (see render()'s halton_offset table,
+     * mirroring blendy's own PbrRenderPipeline::record_offscreen_() jitter) -- this is in
+     * inherent tension with camera_pixel_snap's whole-texel snapping above, not a bug to fix.
+     * blendy's own TAA has no motion vectors and no history reprojection: history is sampled
+     * at the same UV as the current frame and merely clamped to a YCoCg 3x3 AABB neighborhood,
+     * so it ghosts under camera motion at the default taa_blending_weight -- ported as-is,
+     * warts included, per instruction to mimic blendy rather than fix it up.
+     */
+    std::string aa_mode = "off"; /**< "off" | "fxaa" | "smaa" | "taa". */
+    float fxaa_subpixel           = 0.75f;   /**< Blend weight of FXAA's subpixel-aliasing term. */
+    float fxaa_edge_threshold     = 0.166f;  /**< Local contrast (fraction of lumaMax) below which FXAA does nothing. */
+    float fxaa_edge_threshold_min = 0.0312f; /**< Absolute contrast floor -- avoids AA-ing near-black noise. */
+    float smaa_threshold          = 0.1f;    /**< SMAA edge-detection local contrast threshold. */
+    int   smaa_max_search_steps   = 16;      /**< SMAA blend-weight pass's max horizontal/vertical search distance, in texels. */
+    float taa_blending_weight     = 0.9f;    /**< TAA's blend weight toward the (AABB-clamped) history sample. */
+    /** Plumbed for config parity with blendy only -- gfxcoopa's taa.frag declares this push-
+     *  constant field but never reads it (an older velocity-based weight-attenuation term that
+     *  was replaced by the neighborhood clamp; see TaaPass::PushConstants). */
+    float taa_weight_scale        = 30.0f;
+
+    /**
      * @brief Draws physics collider wireframes/contact normals (DebugLinePass), gathered each
      *        frame from PhysicsWorld::debug_draw() -- see toyengine/render/passes/debug_line_pass.h.
      *        Per-frame safe to toggle (it only gates whether the pass records draws, binds

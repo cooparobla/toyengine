@@ -36,12 +36,28 @@ pixelated look.
   an exact N×N block of screen pixels, at the cost of more letterbox bars.
 - **Orbit/fly camera controller**, YAML scene format (shared with blendy),
   nearest-filtered texture loading, headless `ONESHOT`/`MAX_FRAMES` capture.
+- **Anti-aliasing** (`aa_mode`, default `off`) — FXAA 3.11, SMAA 1x, or TAA,
+  ported from [blendy](../blendy)'s PbrRenderPipeline and run at the internal
+  low resolution, before the upscale (see `PixelRenderConfig::aa_mode`).
+  `off` is a true no-op: no extra target is allocated and the frame is
+  byte-identical to a build with no AA support at all. `fxaa`/`smaa` are
+  single-frame spatial filters; `taa` additionally jitters the camera
+  projection every frame (an 8-frame Halton sequence, matching blendy's own),
+  which is in genuine tension with `camera_pixel_snap`'s whole-texel
+  snapping — at this engine's default internal resolution TAA will visibly
+  soften the pixel grid it exists to keep crisp. It's included anyway
+  because a future higher-internal-resolution mode is exactly where TAA
+  earns its keep; until then, treat it as the mode you reach for on that
+  future mode, not the low-res default. Ported as-is, warts included:
+  blendy's TAA has no motion vectors or history reprojection (history is
+  sampled at the current frame's UV and clamped to a YCoCg 3×3 AABB), so it
+  ghosts under camera motion.
 
-Explicitly **not** included: GI probes, reflection probes, MSAA, and any
-temporal AA (FXAA/SMAA/TAA) — temporal jitter would destroy the pixel-grid
-stability this engine exists to produce. Those live in [blendy](../blendy),
-which shares this same gfxcoopa backbone with every feature (including this
-engine's own pixel-art stack) exposed as an option.
+Explicitly **not** included: GI probes, reflection probes, and MSAA (blendy's
+own `msaa_4x` is parsed but never read by its render pipeline, so there was
+no working implementation to port). [blendy](../blendy) shares this same
+gfxcoopa backbone with every feature (including this engine's own
+pixel-art stack) exposed as an option.
 
 ## Build & run
 

@@ -176,6 +176,20 @@ render:
                                # at -- prevents a hard seam where a grazing near-horizon ray's apparent distance
                                # blows up against an otherwise-unfogged sky
 
+  # --- Anti-aliasing (ported from blendy's PbrRenderPipeline; see PixelRenderConfig::aa_mode) ---
+  aa_mode: off                 # off | fxaa | smaa | taa -- startup-fixed, like bloom/fog/tilt_shift above.
+                                # "taa" jitters the camera every frame, which fights camera_pixel_snap --
+                                # expected at this engine's low internal resolution; intended for a future
+                                # higher-resolution mode where the jitter's sub-texel footprint is finer
+                                # than a rendered pixel.
+  fxaa_subpixel: 0.75           # blend weight of FXAA's subpixel-aliasing term
+  fxaa_edge_threshold: 0.166    # local contrast (fraction of lumaMax) below which FXAA does nothing
+  fxaa_edge_threshold_min: 0.0312 # absolute contrast floor -- avoids AA-ing near-black noise
+  smaa_threshold: 0.1           # SMAA edge-detection local contrast threshold
+  smaa_max_search_steps: 16     # SMAA blend-weight pass's max search distance, in texels
+  taa_blending_weight: 0.9      # TAA's blend weight toward the (AABB-clamped) history sample
+  taa_weight_scale: 30.0        # plumbed for parity with blendy; gfxcoopa's taa.frag never reads this
+
   # --- SDF ---
   sdf_max_steps: 64            # global ceiling on SdfRenderer::max_steps
   sdf_shadow_max_steps: 32     # cheaper budget for the depth-only shadow march

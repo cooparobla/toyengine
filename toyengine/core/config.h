@@ -278,6 +278,16 @@ struct AppConfig {
                 if (r.contains("tilt_shift_max_radius"))   config.render.tilt_shift_max_radius   = r.at("tilt_shift_max_radius").get_value<float>();
                 if (r.contains("tilt_shift_angle"))        config.render.tilt_shift_angle        = r.at("tilt_shift_angle").get_value<float>();
 
+                // --- Anti-aliasing ---
+                if (r.contains("aa_mode"))                  config.render.aa_mode                  = r.at("aa_mode").get_value<std::string>();
+                if (r.contains("fxaa_subpixel"))             config.render.fxaa_subpixel             = r.at("fxaa_subpixel").get_value<float>();
+                if (r.contains("fxaa_edge_threshold"))       config.render.fxaa_edge_threshold       = r.at("fxaa_edge_threshold").get_value<float>();
+                if (r.contains("fxaa_edge_threshold_min"))   config.render.fxaa_edge_threshold_min   = r.at("fxaa_edge_threshold_min").get_value<float>();
+                if (r.contains("smaa_threshold"))            config.render.smaa_threshold            = r.at("smaa_threshold").get_value<float>();
+                if (r.contains("smaa_max_search_steps"))     config.render.smaa_max_search_steps     = r.at("smaa_max_search_steps").get_value<int>();
+                if (r.contains("taa_blending_weight"))       config.render.taa_blending_weight       = r.at("taa_blending_weight").get_value<float>();
+                if (r.contains("taa_weight_scale"))          config.render.taa_weight_scale          = r.at("taa_weight_scale").get_value<float>();
+
                 // --- SDF ---
                 if (r.contains("sdf_max_steps"))        config.render.sdf_max_steps        = r.at("sdf_max_steps").get_value<uint32_t>();
                 if (r.contains("sdf_shadow_max_steps")) config.render.sdf_shadow_max_steps = r.at("sdf_shadow_max_steps").get_value<uint32_t>();

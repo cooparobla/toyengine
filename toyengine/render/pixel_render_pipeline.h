@@ -127,6 +127,9 @@
 #include <gfxcoopa/engine/passes/pixel_stylize_pass.h>
 #include <gfxcoopa/engine/passes/bloom_pass.h>
 #include <gfxcoopa/engine/passes/tilt_shift_pass.h>
+#include <gfxcoopa/engine/passes/fxaa_pass.h>
+#include <gfxcoopa/engine/passes/smaa_pass.h>
+#include <gfxcoopa/engine/passes/taa_pass.h>
 #include <toyengine/render/passes/upscale_pass.h>
 #include <toyengine/render/passes/debug_line_pass.h>
 
@@ -730,17 +733,59 @@ public:
             config_.bloom_enabled ? bloom_pass_->result_view_typed() : coopa::gfx::TextureView{},
             config_.bloom_enabled ? &linear_sampler_ : nullptr);
 
+        // Anti-aliasing -- see aa_target_'s own member doc. Conditionally constructed (unlike
+        // bloom_pass_/fog_pass_/tilt_shift_pass_ above, which always exist): config_.aa_mode ==
+        // "off" (the default) must allocate nothing extra and leave every downstream binding
+        // exactly as it was before AA existed, so aa_mode is checked here at construction, not
+        // per frame. All three passes are built together whenever it's not "off", each bound
+        // ONCE to post_target_'s color view -- no per-frame bind_image(), so unlike
+        // need_ssr_trace_inputs's hiz_pass_/scene_color_mip_pass_ this needs no per-frame
+        // device_.wait_idle() either.
+        if (config_.aa_mode != "off") {
+            aa_target_ = std::make_unique<coopa::gfx::engine::targets::OffscreenTarget>(
+                device, allocator, render_extent_.width, render_extent_.height,
+                coopa::gfx::Format::RGBA8_Unorm);
+
+            fxaa_pass_ = std::make_unique<coopa::gfx::engine::passes::FxaaPass>(
+                device, aa_target_->render_pass_object(),
+                config_.shaders("fullscreen.vert"),
+                config_.shaders("fxaa.frag"));
+            fxaa_pass_->set_source_image(post_target_.color_image_object()->view_typed(), linear_sampler_);
+
+            smaa_pass_ = std::make_unique<coopa::gfx::engine::passes::SmaaPass>(
+                device, allocator, aa_target_->render_pass_object(), cmd_pool,
+                render_extent_.width, render_extent_.height, linear_sampler_, config_.shaders);
+            smaa_pass_->set_source_image(post_target_.color_image_object()->view_typed(), linear_sampler_);
+
+            // history_format = UNORM, not gfxcoopa's SRGB default -- see taa_pass_'s own
+            // member doc for why post_target_'s color-space convention demands it.
+            taa_pass_ = std::make_unique<coopa::gfx::engine::passes::TaaPass>(
+                device, allocator, aa_target_->render_pass_object(), linear_sampler_,
+                render_extent_.width, render_extent_.height,
+                config_.shaders("taa.vert"), config_.shaders("taa.frag"),
+                VK_FORMAT_R8G8B8A8_UNORM);
+            taa_pass_->set_source_image(post_target_.color_image_object()->view_typed());
+        }
+
+        // Single source of truth for everything downstream of post_target_/aa_target_ -- same
+        // pattern as post_source_view/pre_fog_view_typed_ above. aa_target_ is null whenever
+        // aa_mode == "off", so this collapses to post_target_ exactly as before AA existed.
+        coopa::gfx::TextureView display_source_view =
+            aa_target_ ? aa_target_->color_view_typed()
+                       : post_target_.color_image_object()->view_typed();
+
         // Diorama tilt-shift blur -- always constructed (mirrors bloom_pass_/fog_pass_'s
         // always-on-but-gated policy), sized to the DISPLAY (letterboxed) rect, not
         // render_extent_ -- see gfxcoopa's TiltShiftPass file doc for why it must run
-        // after the upscale rather than before it. Reads post_target_ directly: it folds
-        // the nearest-neighbour upscale into its own horizontal stage (bit-identical to
-        // upscale_pass_'s own output wherever the blur strength is ~0), so when enabled
-        // (see the source selection below) upscale_pass_ becomes a 1:1 letterbox blit of
-        // this pass's already-full-resolution result instead of doing the upscale itself.
+        // after the upscale rather than before it. Reads display_source_view (post_target_,
+        // or aa_target_ once AA is on) -- it folds the nearest-neighbour upscale into its own
+        // horizontal stage (bit-identical to upscale_pass_'s own output wherever the blur
+        // strength is ~0), so when enabled (see the source selection below) upscale_pass_
+        // becomes a 1:1 letterbox blit of this pass's already-full-resolution result instead
+        // of doing the upscale itself.
         tilt_shift_pass_ = std::make_unique<coopa::gfx::engine::passes::TiltShiftPass>(
             device, allocator, upscaled_extent_.w, upscaled_extent_.h,
-            post_target_.color_image_object()->view_typed(), nearest_sampler_,
+            display_source_view, nearest_sampler_,
             config_.shaders("fullscreen.vert"),
             config_.shaders("tilt_shift.frag"));
 
@@ -753,7 +798,7 @@ public:
         // pipeline rebuild would leave upscale_pass_ reading a stale source.
         upscale_pass_->set_source_image(
             config_.tilt_shift_enabled ? tilt_shift_pass_->result_view_typed()
-                                       : post_target_.color_image_object()->view_typed(),
+                                       : display_source_view,
             nearest_sampler_);
 
         // Always constructed, like every other pass here -- config_.debug_lines_enabled is
@@ -805,8 +850,13 @@ public:
     uint32_t render_width() const { return render_extent_.width; }
     /** @brief Low-resolution render height in pixels. */
     uint32_t render_height() const { return render_extent_.height; }
-    /** @brief The final low-resolution LDR color image, for pixel-accurate screenshots. */
-    coopa::gfx::memory::Image& low_res_color_image() const { return *post_target_.color_image_object(); }
+    /**
+     * @brief The final low-resolution LDR color image, for pixel-accurate screenshots:
+     *        aa_target_'s result once config_.aa_mode != "off", else post_target_ directly.
+     */
+    coopa::gfx::memory::Image& low_res_color_image() const {
+        return aa_target_ ? *aa_target_->color_image_object() : *post_target_.color_image_object();
+    }
     /**
      * @brief The final DISPLAY-resolution image actually shown in the window: tilt_shift_pass_'s
      *        result when config_.tilt_shift_enabled (the same startup-fixed selection
@@ -869,6 +919,32 @@ public:
         glm::mat4 view = cam ? cam->get_view_matrix() : glm::mat4(1.0f);
         glm::mat4 proj = cam ? cam->get_projection_matrix(aspect) : glm::mat4(1.0f);
         glm::vec3 cam_pos = cam ? cam->get_world_position() : glm::vec3(0.0f);
+
+        // TAA sub-pixel jitter, ported verbatim from blendy's PbrRenderPipeline (see
+        // blendy/src/blendy/render/pbr_render_pipeline.h's own jitter block): an 8-frame
+        // Halton(2,3) sequence added to proj[2][0]/[2][1] (the projection matrix's jitter
+        // terms, not a [3][*] translation). unjittered_proj is kept for fog_pass_ below,
+        // which -- again matching blendy's own FogPass integration -- must NOT see the
+        // jitter (fog's inv_view_proj reprojects world-space samples, and jittering that
+        // would make fog swim independently of the visible pixel grid). Every OTHER
+        // consumer of `proj` in this function (camera_ubos_[slot]->update() just below, the
+        // SDF/mesh screen-rect fits, debug_line_pass_->draw(), and prev_view_proj_ at the end
+        // of render()) intentionally sees the jittered matrix: blendy stores the jittered VP
+        // in its own prev_view_proj_ equivalent specifically so SSAO's/SSR's temporal
+        // resolves reproject against the camera TAA is actually seeing, not an unjittered
+        // one an 8-frame Halton cycle would make them crawl against.
+        const glm::mat4 unjittered_proj = proj;
+        if (config_.aa_mode == "taa") {
+            static const float halton_offset[8][2] = {
+                {1.0f / 2.0f, 1.0f / 3.0f}, {1.0f / 4.0f, 2.0f / 3.0f},
+                {3.0f / 4.0f, 1.0f / 9.0f}, {1.0f / 8.0f, 4.0f / 9.0f},
+                {5.0f / 8.0f, 7.0f / 9.0f}, {3.0f / 8.0f, 2.0f / 9.0f},
+                {7.0f / 8.0f, 5.0f / 9.0f}, {1.0f / 16.0f, 8.0f / 9.0f},
+            };
+            proj[2][0] += (2.0f * halton_offset[taa_jitter_index_][0] - 1.0f) / static_cast<float>(render_extent_.width);
+            proj[2][1] += (2.0f * halton_offset[taa_jitter_index_][1] - 1.0f) / static_cast<float>(render_extent_.height);
+            taa_jitter_index_ = (taa_jitter_index_ + 1) & 0x7u;
+        }
 
         float pixel_density = 0.0f;
         if (cam && config_.camera_pixel_snap) {
@@ -1158,7 +1234,10 @@ public:
             // Documented rather than fixed here because FogPass owns its own descriptor set
             // (bound once at construction in gfxcoopa's fog_pass.h), so making it per-slot needs
             // an additive gfxcoopa API change for a feature no shipped scene turns on.
-            fog.inv_view_proj = glm::inverse(proj * view);
+            // unjittered_proj, not proj -- see that local's own doc just above: fog reprojects
+            // world-space samples, and jittering that would make fog swim independently of the
+            // visible pixel grid, matching blendy's own FogPass integration.
+            fog.inv_view_proj = glm::inverse(unjittered_proj * view);
             fog.camera_pos    = glm::vec4(cam_pos, 1.0f);
             fog.fog_color     = glm::vec4(config_.fog_color, 1.0f);
             if (dir_light) {
@@ -1213,9 +1292,16 @@ public:
             upscaled_extent_ = letterbox;
             if (config_.tilt_shift_enabled) {
                 device_.wait_idle(); // old TiltShiftPass's targets/descriptors may still be in flight
+                // Same display_source_view selection as the ctor (post_target_, or aa_target_
+                // once AA is on) -- easy to miss here since this rebuild site duplicates the
+                // ctor's TiltShiftPass construction; get it wrong and a resize silently reverts
+                // to the un-AA'd image.
+                coopa::gfx::TextureView display_source_view =
+                    aa_target_ ? aa_target_->color_view_typed()
+                               : post_target_.color_image_object()->view_typed();
                 tilt_shift_pass_ = std::make_unique<coopa::gfx::engine::passes::TiltShiftPass>(
                     device_, allocator_, upscaled_extent_.w, upscaled_extent_.h,
-                    post_target_.color_image_object()->view_typed(), nearest_sampler_,
+                    display_source_view, nearest_sampler_,
                     config_.shaders("fullscreen.vert"), config_.shaders("tilt_shift.frag"));
                 upscale_pass_->set_source_image(tilt_shift_pass_->result_view_typed(), nearest_sampler_);
             }
@@ -1522,6 +1608,45 @@ public:
                         LetterboxRect{0, 0, render_extent_.width, render_extent_.height});
                 }
                 post_target_.end(cmd);
+
+                // Anti-aliasing, after pixel_stylize_pass_ (and the debug-line overlay it
+                // hosts) and before tilt-shift -- see aa_target_'s own member doc for why
+                // this is nullptr (and this whole block a no-op) whenever config_.aa_mode ==
+                // "off". Note debug lines DO get AA'd: debug_line_pass_ draws as a guest
+                // inside post_target_ above, upstream of this block, which is desirable --
+                // wireframe edges are the jaggiest thing on screen.
+                if (aa_target_) {
+                    if (config_.aa_mode == "fxaa") {
+                        coopa::gfx::engine::passes::FxaaPass::PushConstants fxaa_pc{};
+                        fxaa_pc.screen_width        = static_cast<float>(render_extent_.width);
+                        fxaa_pc.screen_height       = static_cast<float>(render_extent_.height);
+                        fxaa_pc.subpixel_quality    = config_.fxaa_subpixel;
+                        fxaa_pc.edge_threshold      = config_.fxaa_edge_threshold;
+                        fxaa_pc.edge_threshold_min  = config_.fxaa_edge_threshold_min;
+                        aa_target_->begin(cmd);
+                        fxaa_pass_->draw(cmd, fxaa_pc, render_extent_.width, render_extent_.height);
+                        aa_target_->end(cmd);
+                    } else if (config_.aa_mode == "smaa") {
+                        // SmaaPass owns all three of its own begin/end brackets (edge -> blend
+                        // -> neighborhood-into-output_target) -- unlike fxaa_pass_/taa_pass_
+                        // above/below, the caller doesn't bracket this one itself.
+                        smaa_pass_->draw(cmd, *aa_target_, /*exposure (unused by the shader body,
+                                         see SmaaPass::NeighborhoodPush's doc)*/ 1.0f,
+                                         config_.smaa_threshold, config_.smaa_max_search_steps,
+                                         render_extent_.width, render_extent_.height);
+                    } else if (config_.aa_mode == "taa") {
+                        taa_pass_->prepare_history(cmd);
+                        taa_pass_->set_taa_config(config_.taa_blending_weight, config_.taa_weight_scale);
+                        aa_target_->begin(cmd);
+                        taa_pass_->draw(cmd, render_extent_.width, render_extent_.height);
+                        aa_target_->end(cmd);
+                        // Copies aa_target_'s just-drawn color image into history for next
+                        // frame -- OffscreenTarget::end() above leaves it in
+                        // SHADER_READ_ONLY_OPTIMAL, matching update_history()'s expected
+                        // oldLayout (see TaaPass::update_history's barriers).
+                        taa_pass_->update_history(cmd, *aa_target_);
+                    }
+                }
 
                 // Diorama tilt-shift blur, after every other post effect and at DISPLAY
                 // resolution -- see gfxcoopa's TiltShiftPass file doc for why it belongs
@@ -2398,6 +2523,40 @@ private:
     // bloom_pass_/fog_pass_'s bindings above.
     std::unique_ptr<coopa::gfx::engine::passes::TiltShiftPass> tilt_shift_pass_;
     std::unique_ptr<passes::UpscalePass>                         upscale_pass_;
+
+    /**
+     * Anti-aliasing (see PixelRenderConfig::aa_mode's own doc for the runtime-vs-startup-fixed
+     * split). Unlike bloom_pass_/fog_pass_/tilt_shift_pass_ above, aa_target_ and the three AA
+     * passes below are NOT always constructed -- they're nullptr whenever config_.aa_mode ==
+     * "off" (the ctor's default), so a scene that never opts in allocates no extra target and
+     * pays no extra draw call, keeping this pipeline's output byte-identical to before AA
+     * existed. When aa_mode != "off", all three passes ARE always constructed together (same
+     * "always construct, gate at record time" policy every other optional pass here uses) and
+     * all three write into aa_target_, letting render() switch among "fxaa"/"smaa"/"taa" every
+     * frame with no rebuild.
+     *
+     * aa_target_ sits between post_target_ (pixel_stylize_pass_'s output) and everything that
+     * used to read post_target_ directly -- tilt_shift_pass_'s source, upscale_pass_'s source,
+     * and low_res_color_image()'s screenshot accessor all redirect to it once AA is on (see
+     * display_source_view's construction-site comment in the ctor, and the resize-rebuild
+     * block in render()). Same RGBA8_Unorm format as post_target_: FXAA/SMAA/TAA are all LDR
+     * spatial/temporal filters, not tonemap steps.
+     */
+    std::unique_ptr<coopa::gfx::engine::targets::OffscreenTarget> aa_target_;
+    std::unique_ptr<coopa::gfx::engine::passes::FxaaPass> fxaa_pass_;
+    std::unique_ptr<coopa::gfx::engine::passes::SmaaPass> smaa_pass_;
+    // Constructed with history_format = VK_FORMAT_R8G8B8A8_UNORM (see TaaPass's ctor doc),
+    // NOT gfxcoopa's default VK_FORMAT_R8G8B8A8_SRGB blendy itself uses -- post_target_/
+    // aa_target_ are RGBA8_Unorm holding sRGB-*encoded* bytes (see upscale.frag's
+    // srgb_decode()), so an SRGB history view would silently re-decode on every sample and
+    // drift the temporal blend dark. Left at gfxcoopa's default, blendy's own construction
+    // site is untouched.
+    std::unique_ptr<coopa::gfx::engine::passes::TaaPass> taa_pass_;
+    // Halton(2,3) jitter phase for "taa" mode, ADVANCED ONLY when config_.aa_mode == "taa" --
+    // deliberately separate from frame_index_ below, which must keep advancing every frame
+    // regardless of aa_mode (SSAO/SSR/gfx_time all depend on it). Mirrors blendy's own
+    // frame_index_/ssao_frame_index_ split (see PbrRenderPipeline).
+    uint32_t taa_jitter_index_ = 0;
     // Physics collider/contact-normal gizmo overlay -- always constructed (same always-on-
     // but-gated policy as bloom_pass_/fog_pass_ above), config_.debug_lines_enabled gates only
     // whether render() calls draw() each frame. debug_lines_ is filled by the caller (see
@@ -2449,8 +2608,11 @@ private:
     std::unique_ptr<coopa::gfx::pipeline::DescriptorPool>          refraction_scene_color_pool_;
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>           refraction_scene_color_set_;
 
-    // Previous frame's proj * view, for SSAO's and SSR's temporal resolve passes. Not
-    // camera-jittered (this engine has no TAA), just last frame's camera -- see
+    // Previous frame's proj * view, for SSAO's and SSR's temporal resolve passes. When
+    // aa_mode == "taa" this IS the jittered proj -- matching blendy's own PbrRenderPipeline,
+    // which stores the jittered VP here for exactly the same reason: an unjittered prev-VP
+    // would give SSAO/SSR's temporal resolve an 8-frame crawl against TAA's own jittered
+    // current frame. See render()'s halton_offset jitter block and
     // SsrPass::Params::prev_view_proj / SsaoPass::Params::prev_view_proj.
     glm::mat4 prev_view_proj_       = glm::mat4(1.0f);
     bool      prev_view_proj_valid_ = false;

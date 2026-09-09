@@ -32,6 +32,13 @@ scene:
             metallic: 0.0
             roughness: 0.6
             ao: 1.0
+            # Demo brick set for albedo/normal/metallic-roughness mapping -- see
+            # tools/gen_material_maps.py for how these were generated. albedo above still
+            # applies as a per-material tint multiplied against crate_albedo.png's texels; a
+            # value of {1,1,1} would leave the texture unmodified.
+            texture_albedo: textures/crate_albedo.png
+            texture_normal: textures/crate_normal.png
+            texture_metallic_roughness: textures/crate_mr.png
       children: []
 
     # SDF raymarching test: an opaque smooth-union CSG blob (a sphere unioned with a

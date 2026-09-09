@@ -87,6 +87,14 @@ layout(set = 1, binding = 0) uniform LightUBO {
 layout(set = 2, binding = 0) uniform sampler2DShadow dir_shadow_map;
 layout(set = 2, binding = 1) uniform samplerCubeShadow point_shadow_map;
 
+// Set 3: material textures -- see engine::util::MaterialTextureCache and
+// transparent_fs.glsl's identical set (there at index 7, since it has sets 3-6 of its own
+// that this capture doesn't). Binding 0 (alpha mask) intentionally left undeclared -- this
+// capture, like the visible BLEND draw, never alpha-tests.
+layout(set = 3, binding = 1) uniform sampler2D u_albedo_map;
+layout(set = 3, binding = 2) uniform sampler2D u_normal_map;
+layout(set = 3, binding = 3) uniform sampler2D u_metallic_roughness_map;
+
 #include "indirect_hooks.glsl"
 
 // Push constants: [0, 32) is the per-object material block, byte-identical to
@@ -196,13 +204,21 @@ vec3 shade_light(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo, float metal
 }
 
 void main() {
-    vec3 albedo     = material.albedo.rgb;
-    float metallic  = material.metallic;
-    float roughness = material.roughness;
+    vec4 albedo_tex = texture(u_albedo_map, frag_uv);
+    // glTF packing: metallic in B, roughness in G. Fallback is opaque white, so mr ==
+    // vec2(1.0, 1.0) and the two lines below collapse to today's untextured values.
+    vec2 mr = texture(u_metallic_roughness_map, frag_uv).bg;
+
+    vec3 albedo     = material.albedo.rgb * albedo_tex.rgb;
+    float metallic  = material.metallic  * mr.x;
+    float roughness = material.roughness * mr.y;
     float ao        = material.ao;
     const float ssao = 1.0; // no screen-space AO for this forward capture pass either
 
-    vec3 N = normalize(frag_world_normal);
+    // Tangent-space normal map rotated into world space -- see gbuffer_fs.glsl's identical
+    // derivation and its doc on why the flat-normal fallback round-trips to frag_world_normal
+    // (up to ~0.32 degrees, not bit-identical).
+    vec3 N = normalize(frag_TBN * (texture(u_normal_map, frag_uv).xyz * 2.0 - 1.0));
     if (!gl_FrontFacing) N = -N;
 
     GfxTransparentSurface s;

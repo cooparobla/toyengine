@@ -5,7 +5,7 @@ window:
   vsync: true
 
 scene:
-  default_scene: "assets/scenes/physics_test/scene.yaml"
+  default_scene: "assets/scenes/pixel_demo/scene.yaml"
 
 render:
   # --- Feature toggles ---

@@ -119,7 +119,7 @@
 #include <toyengine/render/pixel_math.h>
 #include <toyengine/render/instance_stream.h>
 #include <toyengine/render/forward_globals.h>
-#include <toyengine/render/material_texture_cache.h>
+#include <gfxcoopa/engine/util/material_texture_cache.h>
 #include <gfxcoopa/engine/data/palette_lut.h>
 #include <gfxcoopa/engine/passes/deferred_lighting_pass.h>
 #include <gfxcoopa/engine/passes/ssr_pass.h>
@@ -331,7 +331,7 @@ public:
         // layout handle to append the CUTOUT alpha-mask sampler as their material set. See
         // MaterialTextureCache's own doc for why lazily allocating sets from it later (once a
         // scene's masked materials finish loading) is safe under overlapped command buffers.
-        material_cache_ = std::make_unique<toy::render::MaterialTextureCache>(device, allocator, cmd_pool);
+        material_cache_ = std::make_unique<coopa::gfx::engine::util::MaterialTextureCache>(device, allocator, cmd_pool);
 
         shadow_pipeline_ = std::make_unique<coopa::gfx::engine::passes::ShadowPipeline>(
             device, shadow_target_.dir_render_pass(), shadow_target_.cube_render_pass(),
@@ -506,7 +506,8 @@ public:
             camera_layout_->handle(), light_layout_->handle(), shadow_layout_->handle(),
             config_.shaders("pbr.vert"),
             config_.shaders("transparent_capture.frag"),
-            static_cast<uint32_t>(sizeof(TransparentCaptureLightingPushConstants)));
+            static_cast<uint32_t>(sizeof(TransparentCaptureLightingPushConstants)),
+            material_cache_->layout());
 
         // Second, independent HiZPass/SceneColorMipPass instances over transparent_capture_
         // target_'s own depth/shaded-color images -- both classes are fully generic
@@ -619,7 +620,8 @@ public:
             config_.shaders("pbr.vert"),
             config_.shaders("transparent.frag"),
             transparent_extra,
-            static_cast<uint32_t>(sizeof(TransparentRefractionPushConstants)));
+            static_cast<uint32_t>(sizeof(TransparentRefractionPushConstants)),
+            &material_cache_->layout_object());
 
         // Register every Transparent-domain derived shader (e.g. water) as a named pipeline
         // variant on both the forward transparent pass and its SSR-secondary-source capture
@@ -2202,6 +2204,9 @@ private:
             pc.gfx_time   = glm::vec4(elapsed_time_, frame_dt_, static_cast<float>(frame_index_), 0.0f);
             pc.gfx_params = mr->material.shader_params;
             transparent_capture_pass_->push(cmd, pc);
+            // Set 3: albedo/normal/metallic-roughness -- see gfx/surface/capture_fs.glsl and
+            // engine::util::MaterialTextureCache.
+            transparent_capture_pass_->bind_material(cmd, material_cache_->set_for(mr->material));
 
             mr->get_mesh()->bind(cmd);
             mr->get_mesh()->draw(cmd, 1, instance_idx[i]);
@@ -2392,6 +2397,13 @@ private:
                                    sizeof(coopa::gfx::engine::passes::TransparentPass::PushConstants),
                                    sizeof(TransparentRefractionPushConstants), &refract_pc);
 
+                // Set 7: albedo/normal/metallic-roughness -- see gfx/surface/transparent_fs.glsl
+                // and engine::util::MaterialTextureCache. Bound per-item, not just at the
+                // mesh/sdf transition above: two consecutive mesh items in this back-to-front
+                // list can have different textures even when neither the pipeline nor sets 0-6
+                // need rebinding.
+                transparent_pass_->bind_material(cmd, material_cache_->set_for(mr->material));
+
                 mr->get_mesh()->bind(cmd);
                 mr->get_mesh()->draw(cmd, 1, instance_idx[item.index]);
             } else {
@@ -2500,7 +2512,7 @@ private:
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>         shadow_set_;
     // Material set (alpha-mask sampler) shared by gbuffer_pipeline_ and shadow_pipeline_ -- see
     // MaterialTextureCache's own doc. Constructed before both in the ctor.
-    std::unique_ptr<toy::render::MaterialTextureCache>           material_cache_;
+    std::unique_ptr<coopa::gfx::engine::util::MaterialTextureCache>           material_cache_;
     std::unique_ptr<coopa::gfx::engine::passes::ShadowPipeline>  shadow_pipeline_;
 
     coopa::gfx::engine::data::PaletteLut palette_lut_;

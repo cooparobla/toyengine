@@ -1,0 +1,56 @@
+format: blender
+# Minimal scene for test_headless_render_material_maps_change_output() (test.cpp): the SAME
+# lit cube as scene_flat.yaml, but textured with the brick albedo/normal/metallic-roughness set
+# from tools/gen_material_maps.py. Every field outside the three texture_* lines below is
+# byte-identical to scene_flat.yaml on purpose -- the test's whole point is that ONLY those
+# three lines should be able to account for a rendered-pixel difference between the two.
+scene:
+  scene_name: MaterialMapsTestMapped
+  root_objects:
+    - name: cube.000
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: cube.000
+          material:
+            albedo: { r: 0.8, g: 0.35, b: 0.25 }
+            metallic: 0.0
+            roughness: 0.6
+            ao: 1.0
+            texture_albedo: textures/crate_albedo.png
+            texture_normal: textures/crate_normal.png
+            texture_metallic_roughness: textures/crate_mr.png
+      children: []
+
+    - name: camera
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -4.0, z: 2.2 }
+          rotation: { x: 68.3269, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Camera
+          main: true
+          projection: Perspective
+          fov: 50.0
+          near_clip_plane: 0.1
+          far_clip_plane: 1000.0
+      children: []
+
+    - name: sun
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: DirectionalLight
+          direction: { x: -0.35, y: -0.45, z: -0.82 }
+          color: { r: 1.0, g: 0.97, b: 0.9 }
+          intensity: 1.0
+          cast_shadows: false
+      children: []

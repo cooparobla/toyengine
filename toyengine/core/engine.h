@@ -30,6 +30,7 @@
 #include <gfxcoopa/app/context.h>
 #include <gfxcoopa/util/image_readback.h>
 #include <gfxcoopa/engine/loaders/mesh_loader.h>
+#include <gfxcoopa/engine/loaders/texture_loader.h>
 #include <gfxcoopa/engine/components/register.h>
 #include <gfxcoopa/engine/components/camera_component.h>
 
@@ -44,7 +45,6 @@
 #include <physxcoopa/debug/debug_draw.h>
 
 #include <toyengine/core/config.h>
-#include <toyengine/loaders/pixel_texture_loader.h>
 #include <toyengine/render/pixel_render_config.h>
 #include <toyengine/render/pixel_render_pipeline.h>
 #include <toyengine/scene/camera_controller.h>
@@ -95,8 +95,13 @@ public:
         assets_.add_search_root(std::string(ROOT_DIR) + "/assets");
         assets_.register_loader<coopa::gfx::engine::data::Mesh>(
             std::make_unique<coopa::gfx::engine::loaders::MeshLoader>(ctx_.device(), ctx_.allocator(), ctx_.command_pool()));
+        // NEAREST + clamp-to-edge (SamplerDesc::pixel_art()), not gfxcoopa's bilinear default --
+        // this is a pixel-art engine, and bilinear filtering blurs texel edges. Was a 99-line
+        // fork (toy::loaders::PixelTextureLoader) differing only in this sampler; folded into
+        // gfxcoopa's TextureLoader once it grew a sampler_desc parameter for exactly this.
         assets_.register_loader<coopa::gfx::engine::data::Texture>(
-            std::make_unique<loaders::PixelTextureLoader>(ctx_.device(), ctx_.allocator(), ctx_.command_pool()));
+            std::make_unique<coopa::gfx::engine::loaders::TextureLoader>(
+                ctx_.device(), ctx_.allocator(), ctx_.command_pool(), coopa::gfx::SamplerDesc::pixel_art()));
         coopa::gfx::engine::components::register_render_components(ctx_.device(), ctx_.allocator(), ctx_.command_pool(), assets_);
         scene::register_scene_components();
         coopa::physx::register_physics_components(assets_, config_.physics);

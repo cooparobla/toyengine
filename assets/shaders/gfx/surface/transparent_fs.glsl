@@ -72,6 +72,16 @@ layout(set = 3, binding = 2) uniform sampler2D g_position_roughness;
 layout(set = 4, binding = 0) uniform sampler2D u_hiz_map;
 layout(set = 5, binding = 0) uniform sampler2D u_scene_color;
 
+// Set 7: material textures -- see engine::util::MaterialTextureCache, appended after every
+// existing set (0-6) so none of their indices move. BLEND materials never alpha-test (see
+// PushConstants.alpha_cutoff's doc below), so binding 0 (alpha mask) is intentionally left
+// undeclared here even though the material set always binds it (a shader may leave a
+// descriptor set's binding undeclared as long as it never samples it -- same reasoning as
+// set 3 binding 0 above).
+layout(set = 7, binding = 1) uniform sampler2D u_albedo_map;
+layout(set = 7, binding = 2) uniform sampler2D u_normal_map;
+layout(set = 7, binding = 3) uniform sampler2D u_metallic_roughness_map;
+
 // Set 6: forward_globals_'s per-frame lighting/indirect/SSR/refraction UBO (see
 // forward_globals.h). Mesh-only -- sdf_forward.frag keeps reading its own SdfGlobals UBO
 // instead (see the refraction plan for why SDF glass is excluded). Replaces what used to
@@ -147,7 +157,15 @@ void gfx_surface_fragment(inout GfxTransparentSurface s) {}
 #endif
 
 void main() {
-    vec3 N = normalize(frag_world_normal);
+    vec4 albedo_tex = texture(u_albedo_map, frag_uv);
+    // glTF packing: metallic in B, roughness in G. Fallback is opaque white, so mr ==
+    // vec2(1.0, 1.0) and the two lines below collapse to today's untextured values.
+    vec2 mr = texture(u_metallic_roughness_map, frag_uv).bg;
+
+    // Tangent-space normal map rotated into world space -- see gbuffer_fs.glsl's identical
+    // derivation and its doc on why the flat-normal fallback round-trips to frag_world_normal
+    // (up to ~0.32 degrees, not bit-identical).
+    vec3 N = normalize(frag_TBN * (texture(u_normal_map, frag_uv).xyz * 2.0 - 1.0));
     if (!gl_FrontFacing) N = -N; // correct if cull_mode is ever relaxed to allow back faces
 
     GfxTransparentSurface s;
@@ -158,10 +176,10 @@ void main() {
     N = normalize(s.normal_ws);
 
     GfxForwardMaterial mat;
-    mat.albedo    = material.albedo.rgb;
-    mat.alpha     = material.albedo.a;
-    mat.metallic  = material.metallic;
-    mat.roughness = material.roughness;
+    mat.albedo    = material.albedo.rgb * albedo_tex.rgb;
+    mat.alpha     = material.albedo.a * albedo_tex.a;
+    mat.metallic  = material.metallic  * mr.x;
+    mat.roughness = material.roughness * mr.y;
     mat.ao        = material.ao;
 
     GfxForwardLightingParams p;

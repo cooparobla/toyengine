@@ -589,6 +589,56 @@ void test_headless_render_sdf_toggle_changes_output() {
     std::filesystem::remove(path_off);
 }
 
+/// Renders assets/scenes/material_maps_test/scene_flat.yaml and scene_mapped.yaml -- the SAME
+/// lit cube, byte-identical scenes but for scene_mapped's three texture_albedo/texture_normal/
+/// texture_metallic_roughness keys (see those files' own comments) -- and asserts the two
+/// frames differ. Exercises the whole path end to end: TextureLoader's sRGB/linear color-space
+/// split, MaterialTextureCache's 4-binding material set, and gbuffer_fs.glsl's albedo/normal/MR
+/// sampling. Same A/B shape as test_headless_render_sdf_toggle_changes_output() above.
+void test_headless_render_material_maps_change_output() {
+    auto render_scene = [](const char* scene_path, const char* tag) {
+        toy::core::AppConfig config;
+        config.window.title  = "toyengine_tests";
+        config.window.width  = 640;
+        config.window.height = 360;
+        config.window.vsync  = false;
+        config.scene.default_scene = scene_path;
+        config.render.render_width  = 160;
+        config.render.render_height = 90;
+        config.output.save_on_exit = false;
+
+        std::string out_path = std::string(ROOT_DIR) + "/output/test_frame_material_maps_" + tag + ".png";
+        {
+            toy::core::Engine engine(std::move(config));
+            for (int i = 0; i < 3; ++i) engine.tick();
+            engine.save_screenshot(out_path, /*low_res=*/true);
+        }
+        return out_path;
+    };
+
+    std::string path_flat   = render_scene("assets/scenes/material_maps_test/scene_flat.yaml",   "flat");
+    std::string path_mapped = render_scene("assets/scenes/material_maps_test/scene_mapped.yaml", "mapped");
+
+    int w1 = 0, h1 = 0, c1 = 0, w2 = 0, h2 = 0, c2 = 0;
+    uint8_t* px_flat   = stbi_load(path_flat.c_str(),   &w1, &h1, &c1, 4);
+    uint8_t* px_mapped = stbi_load(path_mapped.c_str(), &w2, &h2, &c2, 4);
+    expect(px_flat != nullptr && px_mapped != nullptr,
+          "material maps: both screenshots round-trip through stb_image");
+
+    if (px_flat && px_mapped && w1 == w2 && h1 == h2) {
+        int diff_count = 0;
+        for (int i = 0; i < w1 * h1 * 4; ++i) {
+            if (px_flat[i] != px_mapped[i]) ++diff_count;
+        }
+        expect(diff_count > 0, "albedo/normal/metallic_roughness maps measurably change the rendered frame");
+    }
+
+    if (px_flat)   stbi_image_free(px_flat);
+    if (px_mapped) stbi_image_free(px_mapped);
+    std::filesystem::remove(path_flat);
+    std::filesystem::remove(path_mapped);
+}
+
 } // namespace
 
 int main() {
@@ -622,6 +672,7 @@ int main() {
     test_headless_render_matches_palette();
     test_headless_render_with_all_toggles_off();
     test_headless_render_sdf_toggle_changes_output();
+    test_headless_render_material_maps_change_output();
 
     if (g_failures > 0) {
         std::cerr << "\n" << g_failures << " test(s) failed.\n";

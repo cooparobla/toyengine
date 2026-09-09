@@ -15,6 +15,9 @@ layout(set = 1, binding = 0) uniform sampler2D g_normal_metallic;
 
 layout(push_constant) uniform SkyboxPushConstants {
     mat4 inv_view_proj;
+    vec4 sky_zenith;   // xyz used; see IndirectParams (render_features.h)
+    vec4 sky_horizon;
+    vec4 sky_ground;
 } u_skybox;
 
 #include <gfx/sky.glsl>
@@ -34,5 +37,6 @@ void main() {
     vec4 world = u_skybox.inv_view_proj * vec4(ndc, 1.0);
     vec3 dir = normalize(world.xyz / world.w - camera.camera_pos);
 
-    out_color = vec4(sky_gradient(dir), 1.0);
+    out_color = vec4(sky_gradient(dir, u_skybox.sky_zenith.rgb, u_skybox.sky_horizon.rgb,
+                                  u_skybox.sky_ground.rgb), 1.0);
 }

@@ -45,7 +45,7 @@ render:
   tilt_shift_ramp_width:   0.22  # 0..1 distance the blur ramps in over; smoothstepped
   tilt_shift_blur_top:     1.0   # strength above the band (the "far" half -- strongest)
   tilt_shift_blur_bottom:  0.7   # strength below the band (the "near" half)
-  tilt_shift_max_radius:   6.0   # max blur radius in DISPLAY pixels
+  tilt_shift_max_radius:   4.0   # max blur radius in DISPLAY pixels
   tilt_shift_angle:        0.0   # degrees; rotates the focus band off horizontal
 
   # --- Internal resolution ---
@@ -53,15 +53,22 @@ render:
   render_width: 720
   render_height: 480
   scale_divisor: 4
-  upscale_mode: integer      # integer | stretch
+  upscale_mode: fit          # fit | integer
 
   # --- Lighting ---
   exposure: 1.0
   light_bands: 4
   spec_threshold: 0.55
   rim_strength: 0.0
-  ambient_intensity: 1.0     # scales sky_gradient(N) indirect diffuse
+  ambient_intensity: 1.0     # scales the sky gradient's contribution as indirect diffuse
   sky_intensity: 1.0         # scales the sky-gradient indirect specular base
+  # The three colours the sky gradient (ambient light, skybox background, SSR's
+  # env-specular base, and fog's sky blend -- all driven from the same values)
+  # mixes between: straight up / at the horizon / straight down. Kept well below
+  # 1.0 so ACES tonemapping doesn't wash the gradient out to flat grey.
+  sky_zenith:  [0.05, 0.18, 0.55]
+  sky_horizon: [0.25, 0.35, 0.45]
+  sky_ground:  [0.05, 0.045, 0.04]
 
   # --- Shadows ---
   shadow_map_resolution: 2048

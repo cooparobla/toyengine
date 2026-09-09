@@ -14,7 +14,7 @@ that rule gets bent, and why), and a `draw(cmd, ...)`/`execute(cmd, ...)`.
 |---|---|---|---|
 | [`pixel_lighting_pass.h`](pixel_lighting_pass.h) | camera, light, shadow, G-buffer, SSAO | `offscreen_target_` | A fork, not a reuse, of gfxcoopa's `DeferredLightingPass` — that class has a latent descriptor-set-index bug when built without GI (see its file doc). Banded/masked-specular direct lighting is fixed (see `pixel_lighting.frag`'s file doc); the SSAO binding and the sky-based indirect term are always present, toggle or not; shadows are always a single hard depth compare. |
 | [`ssr_pass.h`](ssr_pass.h) | camera, G-buffer, Hi-Z, scene-colour mips, SSAO | own composite target | Hi-Z raymarch → temporal resolve → composite (specular swap + SSGI diffuse bounce). A structural port of gfxcoopa's `SsrPass` with the reflection-probe/GI descriptor set and `half_res` removed — see its file doc. Only constructed when `ssr_enabled` is set. |
-| [`upscale_pass.h`](upscale_pass.h) | `post_target_` (NEAREST) | swapchain | Adds the x/y letterbox offset gfxcoopa's `PresentPass` doesn't support. |
+| [`upscale_pass.h`](upscale_pass.h) | `post_target_` (NEAREST) | swapchain | Adds the x/y destination-rect offset gfxcoopa's `PresentPass` doesn't support — the rect itself (fit or integer-scale letterboxed, per `upscale_mode`) comes from `pixel_math::compute_display_rect()`. |
 | [`gbuffer_visualize_pass.h`](gbuffer_visualize_pass.h) | G-buffer albedo | — | Unused diagnostic, kept from the Phase 3 milestone (unlit G-buffer visualization) for debugging. |
 
 Reused directly from gfxcoopa (not forked): `GBufferPipeline`, `ShadowPipeline`,

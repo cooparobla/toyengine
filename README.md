@@ -4,7 +4,9 @@ A basic pixel-art game engine, shaped like [blendy](../blendy) and built on
 [gfxcoopa](../gfxcoopa) (Vulkan) and [libcoopa](../libcoopa) (scene graph,
 assets, utilities). Its defining trait: the whole 3D scene renders into a
 small offscreen buffer, then upscales to the window with nearest-neighbour
-filtering and a centred integer-scale letterbox, for a crisp pixelated look.
+filtering and a centred, aspect-preserving best fit (`upscale_mode: fit`, the
+default) or an integer-scale letterbox (`upscale_mode: integer`), for a crisp
+pixelated look.
 
 ## Features
 
@@ -28,8 +30,10 @@ filtering and a centred integer-scale letterbox, for a crisp pixelated look.
   depth-tested against the opaque G-buffer, drawn after SSR compositing.
 - **Pixel-art post stack** — depth/normal outline, exposure, 8×8 Bayer ordered
   dithering, and palette quantization to an arbitrary Nx1 palette PNG.
-- **Integer-scale upscale** — every low-res texel becomes an exact N×N block
-  of screen pixels; the window can be any size, letterboxed with black bars.
+- **Fit or integer-scale upscale** (`upscale_mode`) — default `fit` fills the
+  window as closely as the render aspect allows, letterboxing only the one
+  mismatched axis; `integer` snaps to a whole scale factor so every texel is
+  an exact N×N block of screen pixels, at the cost of more letterbox bars.
 - **Orbit/fly camera controller**, YAML scene format (shared with blendy),
   nearest-filtered texture loading, headless `ONESHOT`/`MAX_FRAMES` capture.
 

@@ -53,12 +53,18 @@ struct PointLight {
 layout(set = 1, binding = 0) uniform LightUBO {
     vec4 dir_direction;
     vec4 dir_color;
-    vec4 dir_ambient;
+    vec4 _reserved_was_dir_ambient; // was dir_ambient; see LightUBO's C++ doc (light_data.h)
     mat4 dir_light_space_matrix;
     vec4 dir_shadow_params; // x=bias, y=unused, z=shadow_enabled, w=normal_bias
 
     uvec4 light_counts; // x=num_dir, y=num_point
     PointLight point_lights[16];
+
+    // Configurable sky/ambient colour (see IndirectParams in render_features.h).
+    // Trailing so no field above moves -- std140 only requires a matching prefix.
+    vec4 sky_zenith;
+    vec4 sky_horizon;
+    vec4 sky_ground;
 } lights;
 
 // Set 2: Shadow maps -- toyengine has exactly one directional map and one
@@ -254,8 +260,10 @@ void main() {
     // one call shared with ssr_composite.frag (gfx/indirect_specular.glsl,
     // indirect_hooks.glsl) so its confidence-weighted subtraction cancels
     // what this pass added when ssr_enabled is set.
-    vec3 ind_diff = sky_gradient(N) * params.ambient_intensity;
-    GfxIndirectSpecular ind = gfx_indirect_specular(world_pos, N, V, F0, roughness, params.sky_intensity);
+    vec3 ind_diff = sky_gradient(N, lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb)
+                  * params.ambient_intensity;
+    GfxIndirectSpecular ind = gfx_indirect_specular(world_pos, N, V, F0, roughness, params.sky_intensity,
+                                                    lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb);
     vec3 kD_ind = (vec3(1.0) - ind.F) * (1.0 - metallic);
     vec3 ambient = (kD_ind * albedo * ind_diff + ind.value) * ao * ssao;
 

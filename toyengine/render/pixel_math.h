@@ -31,7 +31,7 @@ struct LetterboxRect {
     int32_t  y = 0;      /**< Top edge in swapchain pixels. */
     uint32_t w = 0;       /**< Width in swapchain pixels. */
     uint32_t h = 0;       /**< Height in swapchain pixels. */
-    uint32_t scale = 1;   /**< Integer swapchain pixels per low-res texel. */
+    float    scale = 1.0f; /**< Swapchain pixels per low-res texel (fractional under "fit" mode). */
 };
 
 /**
@@ -103,26 +103,59 @@ inline LetterboxRect compute_letterbox(uint32_t sw, uint32_t sh, uint32_t rw, ui
 }
 
 /**
- * @brief Computes a fractional best-fit destination rect (no integer snapping).
+ * @brief Computes a fractional, aspect-preserving best-fit destination rect.
+ *
+ * scale = min(sw/rw, sh/rh), kept fractional (no integer snapping) so the
+ * render fills as much of the swapchain as the render aspect allows --
+ * letterboxing only the one axis whose aspect doesn't match, rather than
+ * every axis down to the nearest whole scale factor the way
+ * compute_letterbox() does. Despite the historical name this preserves
+ * aspect; it does not stretch to fill both axes.
+ *
  * @param sw Swapchain width in pixels.
  * @param sh Swapchain height in pixels.
  * @param rw Low-resolution render width in pixels.
  * @param rh Low-resolution render height in pixels.
- * @return The centred destination rect; `scale` is rounded for informational display only.
+ * @return The centred destination rect, clamped to the swapchain extent so
+ *   rounding can't leave a 1px gap on the axis that should fill exactly.
  */
-inline LetterboxRect compute_stretch_fit(uint32_t sw, uint32_t sh, uint32_t rw, uint32_t rh) {
+inline LetterboxRect compute_fit(uint32_t sw, uint32_t sh, uint32_t rw, uint32_t rh) {
     float sx = static_cast<float>(sw) / static_cast<float>(std::max<uint32_t>(1, rw));
     float sy = static_cast<float>(sh) / static_cast<float>(std::max<uint32_t>(1, rh));
     float scale = std::min(sx, sy);
-    uint32_t w = static_cast<uint32_t>(rw * scale);
-    uint32_t h = static_cast<uint32_t>(rh * scale);
+    uint32_t w = std::clamp(static_cast<uint32_t>(rw * scale + 0.5f), 1u, sw);
+    uint32_t h = std::clamp(static_cast<uint32_t>(rh * scale + 0.5f), 1u, sh);
     LetterboxRect rect;
     rect.x     = static_cast<int32_t>((sw > w) ? (sw - w) / 2 : 0);
     rect.y     = static_cast<int32_t>((sh > h) ? (sh - h) / 2 : 0);
     rect.w     = w;
     rect.h     = h;
-    rect.scale = static_cast<uint32_t>(scale + 0.5f);
+    rect.scale = scale;
     return rect;
+}
+
+/**
+ * @brief Computes the final upscale's destination rect, per config.upscale_mode.
+ *
+ * "integer" (compute_letterbox()) snaps to a whole scale factor: crisp NxN
+ * texel blocks, but can waste a large fraction of the window to letterbox
+ * bars. Anything else (the default, "fit") fits the window as closely as the
+ * render aspect allows (compute_fit()), letterboxing only the mismatched
+ * axis -- at the cost of texel blocks alternating by a pixel at non-integer
+ * scales, since sampling stays NEAREST either way.
+ *
+ * @param config Pixel render configuration; only `upscale_mode` is read.
+ * @param sw Swapchain width in pixels.
+ * @param sh Swapchain height in pixels.
+ * @param rw Low-resolution render width in pixels.
+ * @param rh Low-resolution render height in pixels.
+ * @return The centred destination rect for the chosen mode.
+ */
+inline LetterboxRect compute_display_rect(const PixelRenderConfig& config,
+                                          uint32_t sw, uint32_t sh,
+                                          uint32_t rw, uint32_t rh) {
+    return (config.upscale_mode == "integer") ? compute_letterbox(sw, sh, rw, rh)
+                                              : compute_fit(sw, sh, rw, rh);
 }
 
 /**

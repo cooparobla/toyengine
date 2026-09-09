@@ -242,8 +242,8 @@ public:
                         PixelRenderConfig config)
         : device_(device), allocator_(allocator), swapchain_(swapchain), config_(std::move(config)),
           render_extent_(compute_render_extent(config_, swapchain.extent().width, swapchain.extent().height)),
-          upscaled_extent_(compute_letterbox(swapchain.extent().width, swapchain.extent().height,
-                                             render_extent_.width, render_extent_.height)),
+          upscaled_extent_(compute_display_rect(config_, swapchain.extent().width, swapchain.extent().height,
+                                                render_extent_.width, render_extent_.height)),
           gbuffer_target_(device, allocator, render_extent_.width, render_extent_.height),
           // HDR always -- the sky-based indirect lighting (see pixel_lighting.frag) can exceed
           // 1.0 regardless of whether SSR/SSAO are toggled, and pixel_stylize.frag's tonemap
@@ -1172,6 +1172,11 @@ public:
                                           config_.fog_linear_start, config_.fog_linear_end);
             fog.height_params = glm::vec4(config_.fog_height_base, config_.fog_height_falloff,
                                           config_.fog_sky_blend, config_.fog_sun_amount);
+            // Same config_.indirect instance the lighting pass and SSR composite read --
+            // see IndirectParams' doc (render_features.h).
+            fog.sky_zenith  = glm::vec4(config_.indirect.sky_zenith, 0.0f);
+            fog.sky_horizon = glm::vec4(config_.indirect.sky_horizon, 0.0f);
+            fog.sky_ground  = glm::vec4(config_.indirect.sky_ground, 0.0f);
 
             auto fog_volumes = scene.get_components<FogVolumeComponent>();
             uint32_t volume_count = static_cast<uint32_t>(
@@ -1193,9 +1198,28 @@ public:
             fog_data_.upload();
         }
 
-        LetterboxRect letterbox = compute_letterbox(
-            swapchain_.extent().width, swapchain_.extent().height,
+        LetterboxRect letterbox = compute_display_rect(
+            config_, swapchain_.extent().width, swapchain_.extent().height,
             render_extent_.width, render_extent_.height);
+
+        // The display rect tracks the LIVE swapchain extent every frame (unlike
+        // render_extent_ and every low-res target, which are startup-fixed), so a window
+        // resize changes it. tilt_shift_pass_ is the one pass sized to that rect rather
+        // than render_extent_ (see its own construction site's doc) -- rebuild it here
+        // when the rect actually changes so it doesn't keep blurring into a stale-sized
+        // buffer. upscale_pass_ needs no rebuild: it's built against swapchain_pass, which
+        // Renderer::recreate_framebuffers() already keeps compatible across a resize.
+        if (letterbox.w != upscaled_extent_.w || letterbox.h != upscaled_extent_.h) {
+            upscaled_extent_ = letterbox;
+            if (config_.tilt_shift_enabled) {
+                device_.wait_idle(); // old TiltShiftPass's targets/descriptors may still be in flight
+                tilt_shift_pass_ = std::make_unique<coopa::gfx::engine::passes::TiltShiftPass>(
+                    device_, allocator_, upscaled_extent_.w, upscaled_extent_.h,
+                    post_target_.color_image_object()->view_typed(), nearest_sampler_,
+                    config_.shaders("fullscreen.vert"), config_.shaders("tilt_shift.frag"));
+                upscale_pass_->set_source_image(tilt_shift_pass_->result_view_typed(), nearest_sampler_);
+            }
+        }
 
         // transparent.frag traces the SAME Hi-Z pyramid / prefiltered scene-colour chain
         // ssr.frag does (see record_transparent_()'s ExtraSets) -- so whenever BLEND geometry
@@ -1333,7 +1357,8 @@ public:
                 pixel_lighting_pass_->draw(cmd, current_camera_set(), current_light_set(), *shadow_set_, lighting_pc,
                                           render_extent_.width, render_extent_.height);
 
-                skybox_pass_->draw(cmd, current_camera_set(), view, proj, render_extent_.width, render_extent_.height);
+                skybox_pass_->draw(cmd, current_camera_set(), view, proj, render_extent_.width, render_extent_.height,
+                                   config_.indirect);
 
                 offscreen_target_.end(cmd);
 
@@ -1370,6 +1395,9 @@ public:
                     ssr_params.sky_intensity     = config_.indirect.sky_intensity;
                     ssr_params.ssgi_intensity    = config_.indirect.ssgi_intensity;
                     ssr_params.ssgi_distance     = config_.indirect.ssgi_distance;
+                    ssr_params.sky_zenith        = config_.indirect.sky_zenith;
+                    ssr_params.sky_horizon       = config_.indirect.sky_horizon;
+                    ssr_params.sky_ground        = config_.indirect.sky_ground;
                     ssr_params.prev_view_proj       = prev_view_proj_;
                     ssr_params.prev_view_proj_valid = prev_view_proj_valid_;
 
@@ -1570,11 +1598,17 @@ private:
 
         auto& ubo = current_light_data();
 
+        // Configurable sky/ambient colour (see IndirectParams, config_.indirect) -- not tied
+        // to the directional light's presence, so set unconditionally every frame, same as
+        // the lighting pass's own ambient_intensity/sky_intensity push-constant fields.
+        ubo.sky_zenith  = glm::vec4(config_.indirect.sky_zenith, 0.0f);
+        ubo.sky_horizon = glm::vec4(config_.indirect.sky_horizon, 0.0f);
+        ubo.sky_ground  = glm::vec4(config_.indirect.sky_ground, 0.0f);
+
         auto* dir = scene.find_first_component<DirectionalLightComponent>();
         if (dir) {
             ubo.dir_direction = glm::vec4(dir->direction, dir->intensity);
             ubo.dir_color     = glm::vec4(dir->color, 0.0f);
-            ubo.dir_ambient   = glm::vec4(dir->ambient, 0.0f);
             ubo.light_counts.x = 1;
         } else {
             ubo.light_counts.x = 0;
@@ -2276,12 +2310,14 @@ private:
     // than adding a second counter.
     float elapsed_time_ = 0.0f;
     float frame_dt_     = 0.0f;
-    // DISPLAY (letterboxed) size tilt_shift_pass_ is sized to -- computed once from the
-    // STARTUP swapchain extent, same no-resize-support caveat as render_extent_ itself
-    // (see this class's file doc / the comment at hiz_pass_'s construction site). A window
-    // resize after construction would leave this pass's fixed-size targets mismatched with
-    // the swapchain's new letterbox rect, exactly like every other fixed-at-construction
-    // target in this pipeline.
+    // DISPLAY (letterboxed/fit) rect tilt_shift_pass_ is sized to -- initialised from the
+    // startup swapchain extent, then kept in sync with render()'s per-frame
+    // compute_display_rect() call, which rebuilds tilt_shift_pass_ (see render()'s own
+    // doc) whenever the live rect's size changes across a resize. Unlike render_extent_
+    // and every other target in this pipeline, this one IS resize-aware; the residual
+    // limitation is resolution_mode == "divisor", where render_extent_ itself (and every
+    // low-res target sized from it) stays startup-fixed, so a resize changes the fit rect
+    // but not the internal render resolution.
     LetterboxRect                  upscaled_extent_;
 
     coopa::gfx::engine::targets::GBufferTarget   gbuffer_target_;

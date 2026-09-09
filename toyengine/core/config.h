@@ -151,6 +151,27 @@ struct AppConfig {
                 if (r.contains("rim_strength"))      config.render.rim_strength      = r.at("rim_strength").get_value<float>();
                 if (r.contains("ambient_intensity")) config.render.indirect.ambient_intensity = r.at("ambient_intensity").get_value<float>();
                 if (r.contains("sky_intensity"))     config.render.indirect.sky_intensity     = r.at("sky_intensity").get_value<float>();
+                if (r.contains("sky_zenith")) {
+                    const auto& c = r.at("sky_zenith");
+                    if (c.size() >= 3) {
+                        config.render.indirect.sky_zenith = glm::vec3(
+                            c.at(0).get_value<float>(), c.at(1).get_value<float>(), c.at(2).get_value<float>());
+                    }
+                }
+                if (r.contains("sky_horizon")) {
+                    const auto& c = r.at("sky_horizon");
+                    if (c.size() >= 3) {
+                        config.render.indirect.sky_horizon = glm::vec3(
+                            c.at(0).get_value<float>(), c.at(1).get_value<float>(), c.at(2).get_value<float>());
+                    }
+                }
+                if (r.contains("sky_ground")) {
+                    const auto& c = r.at("sky_ground");
+                    if (c.size() >= 3) {
+                        config.render.indirect.sky_ground = glm::vec3(
+                            c.at(0).get_value<float>(), c.at(1).get_value<float>(), c.at(2).get_value<float>());
+                    }
+                }
 
                 // --- Shadows ---
                 if (r.contains("shadows_enabled"))        config.render.shadows_enabled        = r.at("shadows_enabled").get_value<bool>();

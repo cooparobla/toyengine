@@ -388,7 +388,6 @@ scene:
           direction: { x: -0.35, y: -0.45, z: -0.82 }
           color: { r: 1.0, g: 0.97, b: 0.9 }
           intensity: 1.0
-          ambient: { r: 0.08, g: 0.08, b: 0.1 }
           cast_shadows: true
       children: []
 

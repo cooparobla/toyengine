@@ -117,15 +117,19 @@ struct PixelRenderConfig {
     uint32_t    render_width    = 480;       /**< Used when resolution_mode == "fixed". */
     uint32_t    render_height   = 270;       /**< Used when resolution_mode == "fixed". */
     uint32_t    scale_divisor   = 4;         /**< Used when resolution_mode == "divisor". */
-    std::string upscale_mode    = "integer"; /**< "integer" (letterboxed) or "stretch". */
+    std::string upscale_mode    = "fit";     /**< "fit" (aspect-preserving best fit, default,
+                                                   letterboxed only on the mismatched axis) or
+                                                   "integer" (whole-number scale, more letterboxing
+                                                   but every texel is an exact NxN block). */
 
     // --- Lighting ---
     float exposure          = 1.0f;
     float light_bands       = 4.0f;   /**< Discrete shading steps per light; <= 1 disables banding. */
     float spec_threshold    = 0.55f;  /**< Hard specular highlight cutoff. */
     float rim_strength      = 0.0f;   /**< 0 disables the rim term. */
-    // ambient_intensity/sky_intensity/ssgi_intensity/ssgi_distance live in `indirect` below
-    // (shared with SsrPass::Params so the two can never disagree -- see render_features.h).
+    // ambient_intensity/sky_intensity/ssgi_intensity/ssgi_distance/sky_zenith/sky_horizon/
+    // sky_ground live in `indirect` below (shared with SsrPass::Params so the two can never
+    // disagree -- see render_features.h).
 
     // --- Shadows ---
     bool     shadows_enabled        = true;

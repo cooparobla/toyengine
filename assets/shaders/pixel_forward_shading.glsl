@@ -212,8 +212,10 @@ vec4 gfx_pixel_forward_shade(vec3 world_pos, vec3 N, vec3 camera_pos, mat4 view,
         Lo += albedo * rim;
     }
 
-    vec3 ind_diff = sky_gradient(N) * p.ambient_intensity;
-    GfxIndirectSpecular ind = gfx_indirect_specular(world_pos, N, V, F0, roughness, p.sky_intensity);
+    vec3 ind_diff = sky_gradient(N, lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb)
+                  * p.ambient_intensity;
+    GfxIndirectSpecular ind = gfx_indirect_specular(world_pos, N, V, F0, roughness, p.sky_intensity,
+                                                    lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb);
     vec3 kD_ind = (vec3(1.0) - ind.F) * (1.0 - metallic);
     vec3 ambient = (kD_ind * albedo * ind_diff + ind.value) * ao * ssao;
 

@@ -8,14 +8,15 @@ is independently toggleable on top of it —
 (pixel-art post/camera), `ssao_enabled`, and `ssr_enabled` (also gates the
 SSGI diffuse-bounce term, `ssgi_intensity`). Shadows are always a single hard
 depth compare. Still renders at a low internal resolution
-with an integer-scale upscale regardless of which toggles are set, so the
-output always stays pixelated.
+with a nearest-neighbour upscale (`upscale_mode`: `fit`, the default, or
+`integer`) regardless of which toggles are set, so the output always stays
+pixelated.
 
 | File | Purpose |
 |---|---|
 | [`pixel_render_pipeline.h`](pixel_render_pipeline.h) | `PixelRenderPipeline` — owns every target, UBO, descriptor set, and pass; `render(renderer, scene)` records the whole frame into one `Renderer::begin_frame()` call (no per-frame `vkQueueWaitIdle` in general — see below for the `ssr_enabled` exception). |
 | [`pixel_render_config.h`](pixel_render_config.h) | `PixelRenderConfig` — the six feature toggles up front, then resolution, lighting, shadow, outline, palette, dither, SSAO, and SSR+SSGI tunables, grouped the same way as `assets/config.yaml`. |
-| [`pixel_math.h`](pixel_math.h) | Pure-CPU, dependency-light math: `compute_render_extent()`, `compute_letterbox()` (integer-scale upscale rect), `compute_pixel_density()` (camera pixel-snap). Exercised directly by `toyengine_tests` with no Vulkan device needed. |
+| [`pixel_math.h`](pixel_math.h) | Pure-CPU, dependency-light math: `compute_render_extent()`, `compute_display_rect()` (dispatches to `compute_fit()`'s aspect-preserving best fit or `compute_letterbox()`'s integer-scale rect, per `upscale_mode`), `compute_pixel_density()` (camera pixel-snap). Exercised directly by `toyengine_tests` with no Vulkan device needed. |
 | [`instance_stream.h`](instance_stream.h) | `InstanceStream` — per-frame-in-flight instance transform buffer; a from-scratch equivalent of gfxcoopa's `InstanceBatcher`, needed because that class is documented safe only under a per-frame `vkQueueWaitIdle`, which this pipeline doesn't do. |
 | [`passes/`](passes/) | Every toyengine-specific render pass: `PixelLightingPass`, `UpscalePass`, `SsrPass`, `GBufferVisualizePass` (unused diagnostic), plus `HiZPass`/`SceneColorMipPass`/`SsaoPass` reused directly from gfxcoopa. `PaletteLut` and `PixelStylizePass` (the outline/dither/palette overlay) live in gfxcoopa too, shared with blendy. |
 
@@ -49,7 +50,7 @@ output always stays pixelated.
     `assets/shaders/refraction.glsl`) when `refraction_enabled` and the object's own
     material opt in; BLEND SDF objects never refract (see the refraction plan).
 8. Exposure + ACES tonemap + outline + dither + palette → `post_target_`
-9. Integer-scale letterboxed upscale → swapchain
+9. Nearest-neighbour upscale (fit or integer-scale letterboxed, per `upscale_mode`) → swapchain
 
 Steps 1–8 record into `Renderer::begin_frame()`'s `pre_pass_fn`; step 9 is the
 `record_fn`. See each pass's own file doc for descriptor set layout and

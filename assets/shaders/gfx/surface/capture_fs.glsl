@@ -66,12 +66,21 @@ struct PointLight {
 layout(set = 1, binding = 0) uniform LightUBO {
     vec4 dir_direction;
     vec4 dir_color;
-    vec4 dir_ambient;
+    vec4 _reserved_was_dir_ambient; // was dir_ambient; see LightUBO's C++ doc (light_data.h)
     mat4 dir_light_space_matrix;
     vec4 dir_shadow_params; // x=bias, y=unused, z=shadow_enabled, w=normal_bias
 
     uvec4 light_counts; // x=num_dir, y=num_point
     PointLight point_lights[16];
+
+    // Configurable sky/ambient colour (see IndirectParams in render_features.h). Routed
+    // through this UBO rather than PushConstants below (unlike ambient_intensity/
+    // sky_intensity) because this shader's push-constant range is already near Vulkan's
+    // 128-byte guaranteed minimum (see TransparentCaptureLightingPushConstants' own doc) --
+    // 3 vec4s would not fit. Trailing so no field above moves.
+    vec4 sky_zenith;
+    vec4 sky_horizon;
+    vec4 sky_ground;
 } lights;
 
 // Set 2: Shadow maps -- same bindings as transparent_fs.glsl's.
@@ -250,8 +259,10 @@ void main() {
     }
 
     // Base indirect term only -- no SSR trace here, see file doc.
-    vec3 ind_diff = sky_gradient(N) * material.ambient_intensity;
-    GfxIndirectSpecular ind = gfx_indirect_specular(frag_world_pos, N, V, F0, roughness, material.sky_intensity);
+    vec3 ind_diff = sky_gradient(N, lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb)
+                  * material.ambient_intensity;
+    GfxIndirectSpecular ind = gfx_indirect_specular(frag_world_pos, N, V, F0, roughness, material.sky_intensity,
+                                                    lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb);
     vec3 kD_ind = (vec3(1.0) - ind.F) * (1.0 - metallic);
     vec3 ambient = (kD_ind * albedo * ind_diff + ind.value) * ao * ssao;
 

@@ -1,8 +1,15 @@
 /**
  * @file upscale_pass.h
- * @brief Blits the low-resolution LDR buffer into a centred, integer-scaled
- *        sub-rect of the swapchain -- the letterboxed nearest-neighbour
- *        upscale that gives the engine its pixel-art look.
+ * @brief Blits the low-resolution LDR buffer into a centred sub-rect of the
+ *        swapchain -- the nearest-neighbour upscale that gives the engine
+ *        its pixel-art look.
+ *
+ * The destination rect (pixel_math::LetterboxRect, from compute_display_rect())
+ * is either integer-scaled (config.upscale_mode == "integer": crisp NxN texel
+ * blocks, letterboxed on every mismatched axis) or a fractional aspect-preserving
+ * best fit (the default, "fit": fills the window as closely as the render aspect
+ * allows, letterboxing only the one axis that doesn't match) -- UpscalePass itself
+ * doesn't care which; it just draws into whatever rect it's given.
  *
  * Modeled directly on gfxcoopa's PresentPass (gfxcoopa/engine/passes/present_pass.h),
  * but PresentPass::draw() always fills the full swapchain extent with no x/y
@@ -87,7 +94,7 @@ public:
     }
 
     /**
-     * @brief Draws into the centred, integer-scaled letterbox rect.
+     * @brief Draws into the centred destination rect.
      *
      * The swapchain pass's clear (black, by convention) fills the bars
      * outside `rect` -- this call only needs to draw inside it.

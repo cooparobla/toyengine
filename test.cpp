@@ -34,7 +34,7 @@ void expect(bool condition, const std::string& what) {
 void test_letterbox_exact_fit() {
     // 1920x1080 window, 480x270 buffer -> scale 4, exact fit, no bars.
     auto rect = toy::render::compute_letterbox(1920, 1080, 480, 270);
-    expect(rect.scale == 4, "letterbox: 1920x1080 / 480x270 -> scale 4");
+    expect(rect.scale == 4.0f, "letterbox: 1920x1080 / 480x270 -> scale 4");
     expect(rect.w == 1920 && rect.h == 1080, "letterbox: 1920x1080 / 480x270 -> exact fit");
     expect(rect.x == 0 && rect.y == 0, "letterbox: 1920x1080 / 480x270 -> no offset");
 }
@@ -42,14 +42,59 @@ void test_letterbox_exact_fit() {
 void test_letterbox_with_bars() {
     // 1600x900 window, 480x270 buffer -> scale 3, 1440x810, centred with bars.
     auto rect = toy::render::compute_letterbox(1600, 900, 480, 270);
-    expect(rect.scale == 3, "letterbox: 1600x900 / 480x270 -> scale 3");
+    expect(rect.scale == 3.0f, "letterbox: 1600x900 / 480x270 -> scale 3");
     expect(rect.w == 1440 && rect.h == 810, "letterbox: 1600x900 / 480x270 -> 1440x810");
     expect(rect.x == 80 && rect.y == 45, "letterbox: 1600x900 / 480x270 -> centred at (80,45)");
 }
 
 void test_letterbox_undersized_window_clamps_to_scale_1() {
     auto rect = toy::render::compute_letterbox(100, 100, 480, 270);
-    expect(rect.scale == 1, "letterbox: window smaller than buffer -> scale clamps to 1");
+    expect(rect.scale == 1.0f, "letterbox: window smaller than buffer -> scale clamps to 1");
+}
+
+void test_fit_pillarbox_only() {
+    // 1920x1080 window, 720x480 buffer (3:2 into 16:9) -> scale 2.25, 1620x1080,
+    // pillarboxed left/right only -- the exact case a floored integer scale (2 ->
+    // 1440x960) would letterbox on all four sides instead.
+    auto rect = toy::render::compute_fit(1920, 1080, 720, 480);
+    expect(std::fabs(rect.scale - 2.25f) < 1e-6f, "fit: 1920x1080 / 720x480 -> scale 2.25");
+    expect(rect.w == 1620 && rect.h == 1080, "fit: 1920x1080 / 720x480 -> 1620x1080");
+    expect(rect.x == 150 && rect.y == 0, "fit: 1920x1080 / 720x480 -> pillarboxed at (150,0), no top/bottom bars");
+}
+
+void test_fit_exact_match_fills_completely() {
+    // Matching aspect (16:9 into 16:9) -> fills the window exactly, same as integer mode.
+    auto rect = toy::render::compute_fit(1920, 1080, 480, 270);
+    expect(rect.w == 1920 && rect.h == 1080 && rect.x == 0 && rect.y == 0,
+          "fit: 1920x1080 / 480x270 -> exact fill, no bars");
+}
+
+void test_fit_beats_integer_bars() {
+    // Same input compute_letterbox's test_letterbox_with_bars uses (scale 3 -> 1440x810,
+    // 80/45px bars) -- fit uses the full fractional scale (3.333) and fills completely.
+    auto rect = toy::render::compute_fit(1600, 900, 480, 270);
+    expect(rect.w == 1600 && rect.h == 900 && rect.x == 0 && rect.y == 0,
+          "fit: 1600x900 / 480x270 -> fills completely, unlike integer mode's 1440x810");
+}
+
+void test_fit_undersized_window() {
+    auto rect = toy::render::compute_fit(100, 100, 480, 270);
+    expect(rect.w == 100 && rect.h == 56, "fit: window smaller than buffer -> scales down, fills width");
+    expect(rect.x == 0 && rect.y == 22, "fit: window smaller than buffer -> letterboxed top/bottom at (0,22)");
+}
+
+void test_display_rect_dispatches_on_upscale_mode() {
+    toy::render::PixelRenderConfig integer_cfg;
+    integer_cfg.upscale_mode = "integer";
+    auto integer_rect = toy::render::compute_display_rect(integer_cfg, 1920, 1080, 720, 480);
+    expect(integer_rect.w == 1440 && integer_rect.h == 960,
+          "display_rect: upscale_mode=integer dispatches to compute_letterbox");
+
+    toy::render::PixelRenderConfig fit_cfg;
+    fit_cfg.upscale_mode = "fit";
+    auto fit_rect = toy::render::compute_display_rect(fit_cfg, 1920, 1080, 720, 480);
+    expect(fit_rect.w == 1620 && fit_rect.h == 1080,
+          "display_rect: upscale_mode=fit dispatches to compute_fit");
 }
 
 void test_render_resolution_fixed_mode() {
@@ -504,6 +549,11 @@ int main() {
     test_letterbox_exact_fit();
     test_letterbox_with_bars();
     test_letterbox_undersized_window_clamps_to_scale_1();
+    test_fit_pillarbox_only();
+    test_fit_exact_match_fills_completely();
+    test_fit_beats_integer_bars();
+    test_fit_undersized_window();
+    test_display_rect_dispatches_on_upscale_mode();
     test_render_resolution_fixed_mode();
     test_render_resolution_divisor_mode();
     test_pixel_density_orthographic();

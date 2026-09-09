@@ -15,5 +15,6 @@ be hand-edited; everything in this folder is.
 ## Guides
 
 - [ambient-lighting.md](ambient-lighting.md) — the global ambient/indirect
-  light knob (`ambient_intensity`), how it reaches the GPU, and two
-  look-alike settings that don't do what they appear to.
+  light brightness and colour knobs (`ambient_intensity`, `sky_zenith`/
+  `sky_horizon`/`sky_ground`), how they reach the GPU, what GI exists in this
+  engine, and a look-alike setting that doesn't do what it appears to.

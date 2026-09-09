@@ -34,12 +34,19 @@ struct PointLight {
 layout(set = 1, binding = 0) uniform LightUBO {
     vec4 dir_direction;
     vec4 dir_color;
-    vec4 dir_ambient;
+    vec4 _reserved_was_dir_ambient; // was dir_ambient; see LightUBO's C++ doc (light_data.h)
     mat4 dir_light_space_matrix;
     vec4 dir_shadow_params; // x=bias, y=unused, z=shadow_enabled, w=normal_bias
 
     uvec4 light_counts; // x=num_dir, y=num_point
     PointLight point_lights[16];
+
+    // Configurable sky/ambient colour (see IndirectParams in render_features.h).
+    // Trailing so no field above moves -- std140 only requires a matching prefix.
+    // Read by pixel_forward_shading.glsl's gfx_pixel_forward_shade() via `lights.*`.
+    vec4 sky_zenith;
+    vec4 sky_horizon;
+    vec4 sky_ground;
 } lights;
 
 // Set 2: Shadow maps

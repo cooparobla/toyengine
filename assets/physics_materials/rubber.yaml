@@ -1,0 +1,6 @@
+# High grip AND high bounce -- stops fast on the slide lane, bounces high on the drop test.
+dynamic_friction: 0.9
+static_friction: 1.0
+restitution: 0.75
+friction_combine: Average
+restitution_combine: Average

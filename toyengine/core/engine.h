@@ -41,6 +41,7 @@
 #include <coopa/scene/systems/transform_system.h>
 
 #include <physxcoopa/physx_yaml.h>
+#include <physxcoopa/debug/debug_draw.h>
 
 #include <toyengine/core/config.h>
 #include <toyengine/loaders/pixel_texture_loader.h>
@@ -98,10 +99,10 @@ public:
             std::make_unique<loaders::PixelTextureLoader>(ctx_.device(), ctx_.allocator(), ctx_.command_pool()));
         coopa::gfx::engine::components::register_render_components(ctx_.device(), ctx_.allocator(), ctx_.command_pool(), assets_);
         scene::register_scene_components();
-        coopa::physx::register_physics_components(assets_);
+        coopa::physx::register_physics_components(assets_, config_.physics);
 
         scene_mgr_.load_scene(resolve_path_(config_.scene.default_scene));
-        coopa::physx::system::install_physics_system(scene_mgr_.get_active_scene());
+        coopa::physx::system::install_physics_system(scene_mgr_.get_active_scene(), config_.physics);
 
         // Mesh decode (gfxcoopa's register.h) now runs via load_async() on jobs_'s workers,
         // same as texture decode always has -- activate TransformSystem before the first
@@ -231,8 +232,15 @@ public:
             drive_camera_controller_(scene_mgr_.get_active_scene());
         }
         scene_mgr_.update(dt);
+        // late_update() runs LateBehaviourSystem (Component::late_update()) and, critically,
+        // flushes each worker's deferred SceneCommandBuffer and advances Scene::frame_index() --
+        // none of which happened before this call was added. Must run before render() below so
+        // a same-frame deferred spawn/destroy is reflected in what's drawn, matching Unity's
+        // Update -> LateUpdate -> render frame order.
+        scene_mgr_.late_update(dt);
 
         if (scene_mgr_.has_scene()) {
+            gather_debug_lines_(scene_mgr_.get_active_scene());
             pipeline_.render(ctx_.renderer(), scene_mgr_.get_active_scene(), dt);
         }
 
@@ -331,6 +339,32 @@ private:
             input_.axis("fly_y", ctx_.input()),
             input_.axis("fly_z", ctx_.input()));
         cc->look_input = input_.vector("look", ctx_.input());
+    }
+
+    /**
+     * @brief Fills pipeline_.debug_lines() from the active scene's PhysicsSystem, when
+     *        config_.render.debug_lines_enabled is set -- the physxcoopa <-> toy::render
+     *        bridge debug_line_pass.h's file doc describes: the render layer's DebugLine and
+     *        pack_gpu_color() know nothing about physics, so this is the one place a
+     *        coopa::physx::debug::DebugLine gets translated into one.
+     *
+     * No-op (and clears any stale lines) when disabled or when no "Physics" system is
+     * installed, so flipping the toggle at runtime never leaves last frame's overlay stuck.
+     */
+    void gather_debug_lines_(coopa::scene::Scene& scene) {
+        std::vector<render::DebugLine>& out = pipeline_.debug_lines();
+        out.clear();
+        if (!config_.render.debug_lines_enabled) return;
+
+        auto* sys = dynamic_cast<coopa::physx::system::PhysicsSystem*>(scene.find_system("Physics"));
+        if (!sys) return;
+
+        coopa::physx::debug::DebugDraw draw;
+        sys->world().debug_draw(draw, config_.physics.debug_draw);
+        out.reserve(draw.lines.size());
+        for (const auto& line : draw.lines) {
+            out.push_back(render::DebugLine{line.a, line.b, render::pack_gpu_color(line.color)});
+        }
     }
 
     /**

@@ -1,0 +1,6 @@
+# Moderate friction, slight bounce -- the spinner paddle and the cubes it knocks around.
+dynamic_friction: 0.3
+static_friction: 0.4
+restitution: 0.2
+friction_combine: Average
+restitution_combine: Average

@@ -132,7 +132,18 @@ struct PixelRenderConfig {
     uint32_t shadow_map_resolution  = 2048;
     uint32_t cube_shadow_resolution = 512;
     float    shadow_bias            = 0.005f;
-    float    shadow_max_extent      = 0.0f;   /**< Ceiling on the fitted ortho box's half-extent, in world units; <= 0 disables. */
+    /**
+     * @brief How far from the camera, in world units, the directional shadow is computed at
+     *        all -- Unity's own "Shadow Distance" quality setting. update_dir_shadow_matrix_()
+     *        fits the shadow frustum to a bounding sphere of the camera's OWN view frustum out
+     *        to this distance (clipped to the camera's far clip plane), and separately uses it
+     *        to size the near-side margin behind that sphere (so an off-frustum caster between
+     *        the light and the visible sphere still shadows into frame). This is the only knob
+     *        that affects the fit -- unlike the AABB-over-scene-content fit this replaced, no
+     *        renderer/SDF/physics-body position is ever read, so nothing in the scene (however
+     *        far off, however it got there) can perturb or blow out the shadow frustum.
+     */
+    float    shadow_distance        = 60.0f;
 
     // --- Outline ---
     float     outline_thickness = 1.0f;     /**< In low-resolution texels. */
@@ -238,6 +249,14 @@ struct PixelRenderConfig {
     float tilt_shift_blur_bottom  = 0.7f;  /**< Strength multiplier on the "near" side of the band. */
     float tilt_shift_max_radius   = 6.0f;  /**< Blur radius in DISPLAY pixels at full strength. */
     float tilt_shift_angle        = 0.0f;  /**< Degrees; rotates the focus band off horizontal. */
+
+    /**
+     * @brief Draws physics collider wireframes/contact normals (DebugLinePass), gathered each
+     *        frame from PhysicsWorld::debug_draw() -- see toyengine/render/passes/debug_line_pass.h.
+     *        Per-frame safe to toggle (it only gates whether the pass records draws, binds
+     *        nothing), unlike bloom_enabled/tilt_shift_enabled above.
+     */
+    bool  debug_lines_enabled     = false;
 
     // Indirect-lighting terms shared with SsrPass::Params (gfxcoopa/engine/render_features.h) --
     // fed to both the lighting pass and the SSR composite from this single instance so the two

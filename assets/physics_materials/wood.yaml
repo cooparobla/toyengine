@@ -1,0 +1,6 @@
+# Everyday-crate friction/bounce -- the baseline the other lanes/drops are compared against.
+dynamic_friction: 0.4
+static_friction: 0.5
+restitution: 0.2
+friction_combine: Average
+restitution_combine: Average

@@ -2,120 +2,611 @@ format: blender
 scene:
   scene_name: PhysicsTest
   root_objects:
-    # Static ground. plane.000 is a flat 2x2 quad at local z=0 with no thickness, so
-    # BoxCollider gives it a thin slab (size.z = 0.2) offset half that thickness below
-    # the visible surface (center.z = -0.1) -- the render surface stays exactly at
-    # world z=0, which is where every dropped object's rest height should land.
-    # scale.z is left at 1.0 (rather than matching x/y) so the collider's z-thickness
-    # isn't coupled to how wide the ground is rendered.
+    # ============================================================================
+    # ARENA
+    # ============================================================================
+    # Large static ground, `concrete` material. plane.000 is a flat 2x2 quad at local
+    # z=0 with no thickness, so BoxCollider gives it a thin slab (size.z = 0.2) offset
+    # half that thickness below the visible surface (center.z = -0.1) -- the render
+    # surface stays exactly at world z=0, where every dropped/settled object's rest
+    # height should land. scale.z is left at 1.0 (rather than matching x/y) so the
+    # collider's z-thickness isn't coupled to how wide the ground is rendered.
     - name: ground
       active: true
       components:
         - type: Transform
           position: { x: 0.0, y: 0.0, z: 0.0 }
           rotation: { x: 0.0, y: 0.0, z: 0.0 }
-          scale: { x: 8.0, y: 8.0, z: 1.0 }
+          scale: { x: 10.0, y: 10.0, z: 1.0 }
         - type: MeshRenderer
           mesh_path: plane.000
           material:
-            albedo: { r: 0.35, g: 0.4, b: 0.3 }
+            albedo: { r: 0.32, g: 0.34, b: 0.36 }
             metallic: 0.0
-            roughness: 0.8
+            roughness: 0.85
             ao: 1.0
         - type: BoxCollider
           size: { x: 2.0, y: 2.0, z: 0.2 }
           center: { x: 0.0, y: 0.0, z: -0.1 }
+          material: concrete
       children: []
 
-    # Dynamic box #1, dropped from directly above the origin. cube.000's vertices span
-    # local [0,1]^3 (corner-origin, not centre-origin -- see the physxcoopa plan's
-    # toyengine-integration notes), so placing its rendered centre at world (0,0,3)
-    # means the Transform's own position has to sit at that point minus half the
-    # (scaled) mesh extent per axis: (0,0,3) - 0.5*(1,1,1) = (-0.5,-0.5,2.5). The
-    # BoxCollider mirrors the same offset via `center`, in the object's local
-    # (pre-scale) space, so the collider lines up with what's actually drawn.
-    - name: box_a
+    # Perimeter walls -- the ground's top spans world x/y [-10, 10]; without these, anything
+    # that reaches the edge with residual horizontal speed (the ice lane's slider is exactly
+    # this: friction_combine: Minimum keeps it near-frictionless even after it leaves the lane
+    # and lands on the concrete ground) slides straight off and falls forever. Worth keeping
+    # even though the shadow frustum no longer cares (update_dir_shadow_matrix_() fits to the
+    # camera's own frustum now, not scene content -- see shadow_distance in config.yaml) --
+    # an object that falls through the world forever is still its own bug. Containment here
+    # works via the normal-direction contact response, not friction, so it stops the ice cube
+    # regardless of its material.
+    - name: wall_west
       active: true
       components:
         - type: Transform
-          position: { x: -0.5, y: -0.5, z: 2.5 }
-          rotation: { x: 0.0, y: 0.0, z: 0.0 }
-          scale: { x: 1.0, y: 1.0, z: 1.0 }
+          position: { x: -10.4, y: -10.2, z: 0.0 }
+          scale: { x: 0.4, y: 20.4, z: 1.2 }
         - type: MeshRenderer
           mesh_path: cube.000
-          material:
-            albedo: { r: 0.8, g: 0.35, b: 0.25 }
-            metallic: 0.0
-            roughness: 0.6
-            ao: 1.0
+          material: { albedo: { r: 0.3, g: 0.32, b: 0.34 }, metallic: 0.0, roughness: 0.85, ao: 1.0 }
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
           center: { x: 0.5, y: 0.5, z: 0.5 }
-        - type: Rigidbody
-          mass: 1.0
-          use_gravity: true
-          is_kinematic: false
+          material: concrete
       children: []
 
-    # Dynamic box #2, dropped from higher up and offset in x/y so it lands near
-    # (not exactly on top of) box_a -- close enough that the two are likely to touch
-    # or nudge each other once they settle, exercising a second live box-box contact
-    # in addition to each box's own contact with the ground.
-    - name: box_b
+    - name: wall_east
       active: true
       components:
         - type: Transform
-          position: { x: 1.0, y: 0.3, z: 4.0 }
-          rotation: { x: 0.0, y: 0.0, z: 0.0 }
-          scale: { x: 1.0, y: 1.0, z: 1.0 }
+          position: { x: 10.0, y: -10.2, z: 0.0 }
+          scale: { x: 0.4, y: 20.4, z: 1.2 }
         - type: MeshRenderer
           mesh_path: cube.000
-          material:
-            albedo: { r: 0.25, g: 0.55, b: 0.8 }
-            metallic: 0.0
-            roughness: 0.6
-            ao: 1.0
+          material: { albedo: { r: 0.3, g: 0.32, b: 0.34 }, metallic: 0.0, roughness: 0.85, ao: 1.0 }
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
           center: { x: 0.5, y: 0.5, z: 0.5 }
-        - type: Rigidbody
-          mass: 1.0
-          use_gravity: true
-          is_kinematic: false
+          material: concrete
       children: []
 
-    # Dynamic sphere, dropped from the same height as box_b but well clear of both
-    # boxes in x/y. sphere.000 is already centred at its own local origin (unlike
-    # cube.000), so no corner-offset correction is needed here -- the Transform's
-    # position is exactly the sphere's rendered/physical centre.
-    - name: sphere_a
+    - name: wall_south
       active: true
       components:
         - type: Transform
-          position: { x: -1.5, y: -0.5, z: 4.0 }
-          rotation: { x: 0.0, y: 0.0, z: 0.0 }
-          scale: { x: 0.6, y: 0.6, z: 0.6 }
+          position: { x: -10.2, y: -10.4, z: 0.0 }
+          scale: { x: 20.4, y: 0.4, z: 1.2 }
+        - type: MeshRenderer
+          mesh_path: cube.000
+          material: { albedo: { r: 0.3, g: 0.32, b: 0.34 }, metallic: 0.0, roughness: 0.85, ao: 1.0 }
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+          center: { x: 0.5, y: 0.5, z: 0.5 }
+          material: concrete
+      children: []
+
+    - name: wall_north
+      active: true
+      components:
+        - type: Transform
+          position: { x: -10.2, y: 10.0, z: 0.0 }
+          scale: { x: 20.4, y: 0.4, z: 1.2 }
+        - type: MeshRenderer
+          mesh_path: cube.000
+          material: { albedo: { r: 0.3, g: 0.32, b: 0.34 }, metallic: 0.0, roughness: 0.85, ao: 1.0 }
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+          center: { x: 0.5, y: 0.5, z: 0.5 }
+          material: concrete
+      children: []
+
+    # ============================================================================
+    # BOUNCE ROW -- four spheres dropped from identical height (z=4.5), same size,
+    # differing only in physics material. restitution (and restitution_combine's
+    # priority over the ground's own Average) is what separates how high each one
+    # rebounds: clay/Minimum stays dead, superball/Maximum bounces at its own high
+    # restitution even against concrete's low one, wood/rubber fall in between.
+    #
+    # sphere.000 is a unit sphere centred at its own local origin, so radius 1.0 on
+    # the collider plus a uniform Transform.scale gives an exact world-space radius
+    # match between the rendered mesh and the collider -- no double-scaling.
+    # ============================================================================
+    - name: bounce_clay
+      active: true
+      components:
+        - type: Transform
+          position: { x: -6.0, y: -5.0, z: 4.5 }
+          scale: { x: 0.5, y: 0.5, z: 0.5 }
         - type: MeshRenderer
           mesh_path: sphere.000
-          material:
-            albedo: { r: 0.6, g: 0.8, b: 0.9 }
-            metallic: 0.0
-            roughness: 0.15
-            ao: 1.0
+          material: { albedo: { r: 0.35, g: 0.22, b: 0.12 }, metallic: 0.0, roughness: 0.9, ao: 1.0 }
         - type: SphereCollider
-          radius: 0.6
+          radius: 1.0
+          material: clay
+        - type: Rigidbody
+          mass: 1.0
+          use_gravity: true
+          is_kinematic: false
+      children: []
+
+    - name: bounce_wood
+      active: true
+      components:
+        - type: Transform
+          position: { x: -2.0, y: -5.0, z: 4.5 }
+          scale: { x: 0.5, y: 0.5, z: 0.5 }
+        - type: MeshRenderer
+          mesh_path: sphere.000
+          material: { albedo: { r: 0.55, g: 0.4, b: 0.2 }, metallic: 0.0, roughness: 0.6, ao: 1.0 }
+        - type: SphereCollider
+          radius: 1.0
+          material: wood
+        - type: Rigidbody
+          mass: 1.0
+          use_gravity: true
+          is_kinematic: false
+      children: []
+
+    - name: bounce_rubber
+      active: true
+      components:
+        - type: Transform
+          position: { x: 2.0, y: -5.0, z: 4.5 }
+          scale: { x: 0.5, y: 0.5, z: 0.5 }
+        - type: MeshRenderer
+          mesh_path: sphere.000
+          material: { albedo: { r: 0.08, g: 0.08, b: 0.08 }, metallic: 0.0, roughness: 0.95, ao: 1.0 }
+        - type: SphereCollider
+          radius: 1.0
+          material: rubber
+        - type: Rigidbody
+          mass: 1.0
+          use_gravity: true
+          is_kinematic: false
+      children: []
+
+    - name: bounce_superball
+      active: true
+      components:
+        - type: Transform
+          position: { x: 6.0, y: -5.0, z: 4.5 }
+          scale: { x: 0.5, y: 0.5, z: 0.5 }
+        - type: MeshRenderer
+          mesh_path: sphere.000
+          material: { albedo: { r: 0.9, g: 0.15, b: 0.55 }, metallic: 0.0, roughness: 0.15, ao: 1.0 }
+        - type: SphereCollider
+          radius: 1.0
+          material: superball
+        - type: Rigidbody
+          mass: 1.0
+          use_gravity: true
+          is_kinematic: false
+      children: []
+
+    # Trigger volume spanning the bounce row's fall path -- every ball drops through
+    # it on the way down, exercising on_trigger_enter/stay/exit. On the "Triggers"
+    # layer, which config.yaml's ignore_layer_collisions turns off against itself
+    # (irrelevant with just one trigger here, but matches the documented pattern).
+    # No MeshRenderer -- an invisible volume, as Unity trigger colliders typically are.
+    - name: bounce_trigger
+      active: true
+      components:
+        - type: Transform
+          position: { x: -8.0, y: -6.5, z: 1.5 }
+          scale: { x: 16.0, y: 3.0, z: 2.0 }
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+          center: { x: 0.5, y: 0.5, z: 0.5 }
+          is_trigger: true
+          layer: Triggers
+      children: []
+
+    # ============================================================================
+    # SLIDE LANES -- three identical cubes, each given the same initial push
+    # (velocity.x = 4) atop its own material's static platform. Friction (and
+    # friction_combine's Minimum-wins-out rule on the ice lane) alone decides how
+    # far each one travels before stopping: ice barely slows down, wood settles
+    # partway, rubber grabs almost immediately.
+    # ============================================================================
+    - name: lane_ice
+      active: true
+      components:
+        - type: Transform
+          position: { x: -3.0, y: 2.5, z: 0.0 }
+          scale: { x: 6.0, y: 1.0, z: 0.2 }
+        - type: MeshRenderer
+          mesh_path: cube.000
+          material: { albedo: { r: 0.75, g: 0.9, b: 0.95 }, metallic: 0.0, roughness: 0.08, ao: 1.0 }
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+          center: { x: 0.5, y: 0.5, z: 0.5 }
+          material: ice
+      children: []
+
+    - name: lane_wood
+      active: true
+      components:
+        - type: Transform
+          position: { x: -3.0, y: 4.5, z: 0.0 }
+          scale: { x: 6.0, y: 1.0, z: 0.2 }
+        - type: MeshRenderer
+          mesh_path: cube.000
+          material: { albedo: { r: 0.55, g: 0.4, b: 0.2 }, metallic: 0.0, roughness: 0.6, ao: 1.0 }
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+          center: { x: 0.5, y: 0.5, z: 0.5 }
+          material: wood
+      children: []
+
+    - name: lane_rubber
+      active: true
+      components:
+        - type: Transform
+          position: { x: -3.0, y: 6.5, z: 0.0 }
+          scale: { x: 6.0, y: 1.0, z: 0.2 }
+        - type: MeshRenderer
+          mesh_path: cube.000
+          material: { albedo: { r: 0.25, g: 0.05, b: 0.05 }, metallic: 0.0, roughness: 0.95, ao: 1.0 }
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+          center: { x: 0.5, y: 0.5, z: 0.5 }
+          material: rubber
+      children: []
+
+    - name: slider_ice
+      active: true
+      components:
+        - type: Transform
+          position: { x: -2.8, y: 2.2, z: 0.2 }
+          scale: { x: 0.6, y: 0.6, z: 0.6 }
+        - type: MeshRenderer
+          mesh_path: cube.000
+          material: { albedo: { r: 0.75, g: 0.9, b: 0.95 }, metallic: 0.0, roughness: 0.08, ao: 1.0 }
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+          center: { x: 0.5, y: 0.5, z: 0.5 }
+          material: ice
+        - type: Rigidbody
+          mass: 1.0
+          use_gravity: true
+          is_kinematic: false
+          velocity: { x: 4.0, y: 0.0, z: 0.0 }
+      children: []
+
+    - name: slider_wood
+      active: true
+      components:
+        - type: Transform
+          position: { x: -2.8, y: 4.2, z: 0.2 }
+          scale: { x: 0.6, y: 0.6, z: 0.6 }
+        - type: MeshRenderer
+          mesh_path: cube.000
+          material: { albedo: { r: 0.55, g: 0.4, b: 0.2 }, metallic: 0.0, roughness: 0.6, ao: 1.0 }
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+          center: { x: 0.5, y: 0.5, z: 0.5 }
+          material: wood
+        - type: Rigidbody
+          mass: 1.0
+          use_gravity: true
+          is_kinematic: false
+          velocity: { x: 4.0, y: 0.0, z: 0.0 }
+      children: []
+
+    - name: slider_rubber
+      active: true
+      components:
+        - type: Transform
+          position: { x: -2.8, y: 6.2, z: 0.2 }
+          scale: { x: 0.6, y: 0.6, z: 0.6 }
+        - type: MeshRenderer
+          mesh_path: cube.000
+          material: { albedo: { r: 0.25, g: 0.05, b: 0.05 }, metallic: 0.0, roughness: 0.95, ao: 1.0 }
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+          center: { x: 0.5, y: 0.5, z: 0.5 }
+          material: rubber
+        - type: Rigidbody
+          mass: 1.0
+          use_gravity: true
+          is_kinematic: false
+          velocity: { x: 4.0, y: 0.0, z: 0.0 }
+      children: []
+
+    # ============================================================================
+    # STACK -- three concrete boxes, solver stability + sleeping under a stacked load.
+    # `concrete` (high friction, near-zero restitution) rather than `wood`: a flush-stacked
+    # tower needs low restitution to stay dead on settling -- wood's modest 0.2 bounce, fine
+    # for a single dropped sphere, compounds through the internal box-box contacts of a taller
+    # tower. Kept to three boxes rather than a taller tower for the same reason.
+    # ============================================================================
+    - name: stack_1
+      active: true
+      components:
+        - type: Transform
+          position: { x: 9.0, y: 6.0, z: 0.0 }
+          scale: { x: 0.8, y: 0.8, z: 0.8 }
+        - type: MeshRenderer
+          mesh_path: cube.000
+          material: { albedo: { r: 0.55, g: 0.55, b: 0.58 }, metallic: 0.0, roughness: 0.85, ao: 1.0 }
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+          center: { x: 0.5, y: 0.5, z: 0.5 }
+          material: concrete
+        - type: Rigidbody
+          mass: 1.0
+          use_gravity: true
+          is_kinematic: false
+      children: []
+
+    - name: stack_2
+      active: true
+      components:
+        - type: Transform
+          position: { x: 9.0, y: 6.0, z: 0.8 }
+          scale: { x: 0.8, y: 0.8, z: 0.8 }
+        - type: MeshRenderer
+          mesh_path: cube.000
+          material: { albedo: { r: 0.55, g: 0.55, b: 0.58 }, metallic: 0.0, roughness: 0.85, ao: 1.0 }
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+          center: { x: 0.5, y: 0.5, z: 0.5 }
+          material: concrete
+        - type: Rigidbody
+          mass: 1.0
+          use_gravity: true
+          is_kinematic: false
+      children: []
+
+    - name: stack_3
+      active: true
+      components:
+        - type: Transform
+          position: { x: 9.0, y: 6.0, z: 1.6 }
+          scale: { x: 0.8, y: 0.8, z: 0.8 }
+        - type: MeshRenderer
+          mesh_path: cube.000
+          material: { albedo: { r: 0.55, g: 0.55, b: 0.58 }, metallic: 0.0, roughness: 0.85, ao: 1.0 }
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+          center: { x: 0.5, y: 0.5, z: 0.5 }
+          material: concrete
+        - type: Rigidbody
+          mass: 1.0
+          use_gravity: true
+          is_kinematic: false
+      children: []
+
+    # ============================================================================
+    # MOVING PLATFORM -- kinematic box ping-ponging along X, carrying a rubber rider.
+    # PhysicsSystem::sync_transforms_in_() derives the platform's kinematic velocity
+    # from KinematicMover's own frame-to-frame Transform delta; friction against the
+    # rider (metal-vs-rubber, Average combine) is what actually carries the rider along.
+    # ============================================================================
+    - name: moving_platform
+      active: true
+      components:
+        - type: Transform
+          position: { x: -8.1, y: -3.1, z: 0.0 }
+          scale: { x: 2.2, y: 2.2, z: 0.3 }
+        - type: MeshRenderer
+          mesh_path: cube.000
+          material: { albedo: { r: 0.6, g: 0.6, b: 0.65 }, metallic: 0.7, roughness: 0.35, ao: 1.0 }
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+          center: { x: 0.5, y: 0.5, z: 0.5 }
+          material: metal
+        - type: Rigidbody
+          mass: 1.0
+          use_gravity: false
+          is_kinematic: true
+        - type: KinematicMover
+          mode: pingpong
+          axis: { x: 1.0, y: 0.0, z: 0.0 }
+          distance: 5.0
+          speed: 0.25
+      children: []
+
+    - name: platform_rider
+      active: true
+      components:
+        - type: Transform
+          position: { x: -7.3, y: -2.3, z: 0.3 }
+          scale: { x: 0.6, y: 0.6, z: 0.6 }
+        - type: MeshRenderer
+          mesh_path: cube.000
+          material: { albedo: { r: 0.25, g: 0.05, b: 0.05 }, metallic: 0.0, roughness: 0.95, ao: 1.0 }
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+          center: { x: 0.5, y: 0.5, z: 0.5 }
+          material: rubber
         - type: Rigidbody
           mass: 0.5
           use_gravity: true
           is_kinematic: false
       children: []
 
+    # ============================================================================
+    # SPINNER -- kinematic paddle spinning about its own Transform origin (a corner
+    # of the authored box, not its visual centre -- cube.000's local vertices span
+    # [0,1]^3, so this reads as a gate/turnstile hinged at one edge rather than
+    # spinning in place, which is a fine, clear "spinner" demo either way), knocking
+    # the two loose metal cubes placed within its sweep radius.
+    # ============================================================================
+    - name: spinner
+      active: true
+      components:
+        - type: Transform
+          position: { x: 7.0, y: -4.0, z: 0.3 }
+          scale: { x: 3.5, y: 0.3, z: 0.5 }
+        - type: MeshRenderer
+          mesh_path: cube.000
+          material: { albedo: { r: 0.6, g: 0.6, b: 0.65 }, metallic: 0.7, roughness: 0.35, ao: 1.0 }
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+          center: { x: 0.5, y: 0.5, z: 0.5 }
+          material: metal
+        - type: Rigidbody
+          mass: 1.0
+          use_gravity: false
+          is_kinematic: true
+        - type: KinematicMover
+          mode: spin
+          spin_axis: { x: 0.0, y: 0.0, z: 1.0 }
+          spin_speed: 60.0
+      children: []
+
+    - name: spin_target_1
+      active: true
+      components:
+        - type: Transform
+          position: { x: 6.75, y: -7.25, z: 0.3 }
+          scale: { x: 0.5, y: 0.5, z: 0.5 }
+        - type: MeshRenderer
+          mesh_path: cube.000
+          material: { albedo: { r: 0.6, g: 0.6, b: 0.65 }, metallic: 0.7, roughness: 0.35, ao: 1.0 }
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+          center: { x: 0.5, y: 0.5, z: 0.5 }
+          material: metal
+        - type: Rigidbody
+          mass: 0.3
+          use_gravity: true
+          is_kinematic: false
+      children: []
+
+    - name: spin_target_2
+      active: true
+      components:
+        - type: Transform
+          position: { x: 9.75, y: -4.25, z: 0.3 }
+          scale: { x: 0.5, y: 0.5, z: 0.5 }
+        - type: MeshRenderer
+          mesh_path: cube.000
+          material: { albedo: { r: 0.6, g: 0.6, b: 0.65 }, metallic: 0.7, roughness: 0.35, ao: 1.0 }
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+          center: { x: 0.5, y: 0.5, z: 0.5 }
+          material: metal
+        - type: Rigidbody
+          mass: 0.3
+          use_gravity: true
+          is_kinematic: false
+      children: []
+
+    # ============================================================================
+    # DOOR -- a HingeJoint swinging about a vertical edge, given an initial push
+    # (angular_velocity.z) rather than gravity: a vertical-axis hinge gets no gravity
+    # torque about its own axis (real doors don't swing open on their own either), so
+    # the push is what demonstrates the joint actually working. use_limits stops it
+    # at a bit past perpendicular, settling there rather than swinging forever.
+    #
+    # Both door_frame and door use cube.000's [0,1]^3 local span (the same "hinged at
+    # one edge, not the visual centre" trick spinner above uses) so the door's own
+    # Transform.position sits exactly at the hinge line and needs no anchor offset --
+    # the collider/mesh simply extends away from there. door_frame's Transform sits
+    # centered on that same hinge line so the post reads as holding the door up.
+    #
+    # z: 0.08, not 0.0 -- a real door clears the floor by a small gap; without one the
+    # door's bottom face sits flush against the ground slab's top surface (also z=0),
+    # and the resulting floor contact's friction drags against the swing, fighting the
+    # joint the same way an un-suppressed door/frame collision did (see HingeJoint::
+    # collide_connected's doc) -- collide_connected only ignores door<->frame, not
+    # door<->ground, so this is the door's own clearance problem to solve, not the
+    # joint's.
+    # ============================================================================
+    - name: door_frame
+      active: true
+      components:
+        - type: Transform
+          position: { x: 3.9, y: -8.1, z: 0.08 }
+          scale: { x: 0.2, y: 0.2, z: 2.4 }
+        - type: MeshRenderer
+          mesh_path: cube.000
+          material: { albedo: { r: 0.3, g: 0.32, b: 0.34 }, metallic: 0.0, roughness: 0.85, ao: 1.0 }
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+          center: { x: 0.5, y: 0.5, z: 0.5 }
+          material: concrete
+      children: []
+
+    - name: door
+      active: true
+      components:
+        - type: Transform
+          position: { x: 4.0, y: -8.0, z: 0.08 }
+          scale: { x: 1.6, y: 0.12, z: 2.2 }
+        - type: MeshRenderer
+          mesh_path: cube.000
+          material: { albedo: { r: 0.55, g: 0.4, b: 0.2 }, metallic: 0.0, roughness: 0.6, ao: 1.0 }
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+          center: { x: 0.5, y: 0.5, z: 0.5 }
+          material: wood
+        - type: Rigidbody
+          mass: 2.0
+          use_gravity: true
+          is_kinematic: false
+          angular_velocity: { x: 0.0, y: 0.0, z: 2.2 }
+        - type: HingeJoint
+          connected_object: door_frame
+          anchor: { x: 0.0, y: 0.0, z: 0.0 }
+          axis: { x: 0.0, y: 0.0, z: 1.0 }
+          limits: { min: 0.0, max: 100.0 }
+      children: []
+
+    # ============================================================================
+    # MESH FLOOR -- a static, non-convex MeshCollider slab (the only non-primitive
+    # collision shape in this scene), off to the side with a cube dropped onto it.
+    # ============================================================================
+    - name: mesh_floor
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 14.0, z: 0.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 3.0, y: 3.0, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: plane.000
+          material: { albedo: { r: 0.3, g: 0.45, b: 0.25 }, metallic: 0.0, roughness: 0.9, ao: 1.0 }
+        - type: MeshCollider
+          # A separate file from the MeshRenderer's plane.000 above -- deliberately, not
+          # duplicated data: AssetManager's slot cache is keyed by resolved file path only,
+          # so a gfx::Mesh load and a physx::TriangleMesh load of the exact same path collide
+          # ("already loaded as a different asset type"). Same vertex/face data, second file.
+          mesh_path: mesh_floor_collider
+          convex: false
+          material: concrete
+      children: []
+
+    - name: mesh_floor_drop
+      active: true
+      components:
+        - type: Transform
+          position: { x: -0.35, y: 13.65, z: 2.65 }
+          scale: { x: 0.7, y: 0.7, z: 0.7 }
+        - type: MeshRenderer
+          mesh_path: cube.000
+          material: { albedo: { r: 0.6, g: 0.6, b: 0.65 }, metallic: 0.7, roughness: 0.35, ao: 1.0 }
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+          center: { x: 0.5, y: 0.5, z: 0.5 }
+          material: metal
+        - type: Rigidbody
+          mass: 1.0
+          use_gravity: true
+          is_kinematic: false
+      children: []
+
+    # ============================================================================
+    # CAMERA + SUN
+    # ============================================================================
     - name: camera
       active: true
       components:
         - type: Transform
-          position: { x: 0.0, y: -10.0, z: 6.0 }
-          rotation: { x: 68.3269, y: 0.0, z: 0.0 }
+          position: { x: 0.0, y: -21.0, z: 12.6 }
+          rotation: { x: 65.0, y: 0.0, z: 0.0 }
           scale: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Camera
           main: true
@@ -125,13 +616,13 @@ scene:
           far_clip_plane: 1000.0
         - type: CameraController
           mode: orbit
-          target: { x: 0.0, y: 0.0, z: 2.0 }
+          target: { x: 0.0, y: 1.0, z: 1.5 }
           follow_smoothing: 10.0
           movement_smoothing: 0.8
           mouse_sensitivity: 0.08
           zoom_speed: 1.0
           min_distance: 2.0
-          max_distance: 30.0
+          max_distance: 60.0
           min_pitch_deg: 0.0
           max_pitch_deg: 85.0
       children: []

@@ -47,6 +47,14 @@
  * -- and with the SDF pass's own depth write in sdf_gbuffer.frag, which also
  * reads CameraUBO -- visible as SDF surfaces sliding against mesh geometry
  * under fast camera motion.
+ *
+ * light_datas_/light_sets_ follow the identical per-frame-in-flight policy, for the identical
+ * reason (gfxcoopa's LightData also owns exactly one buffer) -- see light_datas_'s own doc. This
+ * one was found the hard way: dir_light_space_matrix became a fast-changing function of the
+ * camera once update_dir_shadow_matrix_() switched from a scene-content AABB fit to a
+ * camera-frustum fit, and the pre-existing single-buffer race (previously masked by the old fit
+ * changing slowly enough that a one-frame-stale matrix went unnoticed) then showed up as
+ * directional shadows visibly lagging/desyncing from the rest of the scene under camera motion.
  */
 
 #ifndef TOYENGINE_RENDER_PIXEL_RENDER_PIPELINE_H
@@ -120,6 +128,7 @@
 #include <gfxcoopa/engine/passes/bloom_pass.h>
 #include <gfxcoopa/engine/passes/tilt_shift_pass.h>
 #include <toyengine/render/passes/upscale_pass.h>
+#include <toyengine/render/passes/debug_line_pass.h>
 
 namespace toy {
 namespace render {
@@ -255,7 +264,6 @@ public:
           // *Shadow-family doc (pixel_lighting.frag/transparent.frag's dir_shadow_map and
           // point_shadow_map are sampler2DShadow/samplerCubeShadow to match).
           shadow_sampler_(coopa::gfx::engine::util::Sampler::shadow(device)),
-          light_data_(device, allocator),
           fog_data_(device, allocator),
           shadow_target_(device, allocator, config_.shadow_map_resolution, config_.cube_shadow_resolution),
           palette_lut_(coopa::gfx::engine::data::PaletteLut::load(device, allocator, cmd_pool, config_.palette_path)),
@@ -292,10 +300,18 @@ public:
             coopa::gfx::pipeline::DescriptorLayoutBuilder()
                 .uniform_buffer(0, coopa::gfx::ShaderStage::Fragment)
                 .build(device));
+        // One LightData + one descriptor set per frame-in-flight slot -- see light_datas_'s own
+        // doc for why. Same shape as camera_ubos_/camera_sets_ above: bind_buffer() still only
+        // happens once per slot here at construction, not per frame.
         light_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
-            coopa::gfx::pipeline::DescriptorPoolBuilder().add_sets(*light_layout_, 1).build(device));
-        light_set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *light_pool_, *light_layout_);
-        light_set_->bind_buffer(0, light_data_.buffer());
+            coopa::gfx::pipeline::DescriptorPoolBuilder().add_sets(*light_layout_, kCameraFrames).build(device));
+        light_datas_.reserve(kCameraFrames);
+        light_sets_.reserve(kCameraFrames);
+        for (uint32_t i = 0; i < kCameraFrames; ++i) {
+            light_datas_.push_back(std::make_unique<coopa::gfx::engine::data::LightData>(device, allocator));
+            light_sets_.push_back(std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *light_pool_, *light_layout_));
+            light_sets_[i]->bind_buffer(0, light_datas_[i]->buffer());
+        }
 
         shadow_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
             coopa::gfx::pipeline::DescriptorLayoutBuilder()
@@ -739,6 +755,24 @@ public:
             config_.tilt_shift_enabled ? tilt_shift_pass_->result_view_typed()
                                        : post_target_.color_image_object()->view_typed(),
             nearest_sampler_);
+
+        // Always constructed, like every other pass here -- config_.debug_lines_enabled is
+        // checked per-frame in render(), not at construction (see debug_line_pass_'s own
+        // member doc for why that's safe: it binds no descriptors, so there's nothing a
+        // startup-fixed flag needs to lock in).
+        //
+        // Built against post_target_'s render pass, NOT swapchain_pass: pipeline::RenderPass
+        // hardcodes LOAD_OP_CLEAR, so this pass must draw as a guest inside post_target_'s
+        // already-open begin/end bracket (right after pixel_stylize_pass_, see render()) rather
+        // than reopening it. The tradeoff against a post-upscale swapchain overlay is real --
+        // low internal resolution and picked up by tilt_shift_pass_'s blur -- but it's what
+        // makes the overlay visible through low_res_color_image()/final_color_image(), which
+        // is how this engine's own screenshot/test capture reads a frame back; nothing reads
+        // the swapchain image itself.
+        debug_line_pass_ = std::make_unique<passes::DebugLinePass>(
+            device, allocator, post_target_.render_pass_object(),
+            config_.shaders("debug_line.vert"),
+            config_.shaders("debug_line.frag"));
     }
 
     PixelRenderPipeline(const PixelRenderPipeline&) = delete;
@@ -757,6 +791,15 @@ public:
      *        coopa::anim::AnimationSystem's own house threshold.
      */
     void set_parallel_threshold(std::size_t n) { parallel_threshold_ = n; }
+
+    /**
+     * @brief This frame's physics debug-draw lines -- fill it (typically from
+     *        PhysicsWorld::debug_draw(), see debug_line_pass.h's file doc) between
+     *        Scene::update()/late_update() and render(); drawn when config_.debug_lines_enabled
+     *        is set, cleared by the caller each frame (this pipeline never clears it itself,
+     *        matching how it never owns the scene it reads).
+     */
+    std::vector<DebugLine>& debug_lines() { return debug_lines_; }
 
     /** @brief Low-resolution render width in pixels. */
     uint32_t render_width() const { return render_extent_.width; }
@@ -818,8 +861,6 @@ public:
         frame_dt_ = dt;
         elapsed_time_ += dt;
 
-        update_lights_(scene);
-
         // The main camera, not merely "the first one found" -- CameraComponent::main()
         // guarantees a stable choice across multi-camera scenes (see camera_component.h).
         auto* cam = CameraComponent::main();
@@ -858,7 +899,16 @@ public:
         // Renderer::wait_for_current_frame() waits on an already-signaled fence in that case.
         renderer.wait_for_current_frame();
         camera_frame_ = frame_slot;
+        light_frame_ = frame_slot;
         camera_ubos_[frame_slot]->update(view, proj, cam_pos, pixel_density);
+
+        // Must run after light_frame_ is set to this frame's slot above -- update_lights_()
+        // writes through current_light_data(), which reads light_frame_ (see that accessor's
+        // doc). Writing before the slot was updated would silently populate the OTHER frame's
+        // slot with this frame's light color/intensity/count fields while the shadow-matrix and
+        // point-light-flag writes below (already slot-correct) landed in the right one -- a
+        // subtler version of the very race light_datas_ being per-slot exists to close.
+        update_lights_(scene);
 
         // Gather renderables once; the instance upload, the shadow AABB fit, and
         // the draw loops below all need the same list (and world matrices) in
@@ -868,6 +918,12 @@ public:
         std::vector<uint8_t>   renderer_valid(renderers.size(), 0);
         instance_stream_.begin(frame_slot);
         std::vector<uint32_t> instance_idx(renderers.size(), UINT32_MAX);
+
+        // debug_lines_ was filled by the caller before render() ran (see debug_lines()'s doc);
+        // upload it into this frame's slot unconditionally -- cheap when empty (see upload()'s
+        // early-out) and keeps the buffer valid even if debug_lines_enabled is flipped on
+        // between frames without a frame of stale/missing data.
+        debug_line_pass_->upload(frame_slot, debug_lines_);
 
         // world_matrix() (a pure read -- see Transform's thread-safety doc) is safe from any
         // number of concurrent readers, unlike get_world_matrix(), because TransformSystem's
@@ -1070,19 +1126,19 @@ public:
         auto* dir_light = scene.find_first_component<DirectionalLightComponent>();
         bool cast_dir_shadow = config_.shadows_enabled && dir_light && dir_light->cast_shadows;
         if (dir_light) {
-            update_dir_shadow_matrix_(dir_light->direction, renderers, world_matrices, sdf_draws, cam, cast_dir_shadow);
+            update_dir_shadow_matrix_(dir_light->direction, cam, cast_dir_shadow);
         }
 
         // Only the scene's first shadow-casting point light gets a real cube map
-        // (see the class doc for why). Marks light_data_.point_lights[0]'s
+        // (see the class doc for why). Marks current_light_data().point_lights[0]'s
         // cast_shadows flag so pixel_lighting.frag knows to sample it.
         auto* shadow_point = find_first_shadow_casting_point_light_(scene);
         bool cast_point_shadow = config_.shadows_enabled && shadow_point != nullptr;
         if (cast_point_shadow) {
-            auto& gpu0 = light_data_.data().point_lights[0];
+            auto& gpu0 = current_light_data().point_lights[0];
             gpu0.attenuation.w = 1.0f;
         }
-        light_data_.upload();
+        light_datas_[light_frame_]->upload();
 
         // Fog UBO. Gated on fog_enabled -- when fog is off, record() skips fog_pass_'s draw
         // entirely (see that call site), so this upload would otherwise be wasted work.
@@ -1274,7 +1330,7 @@ public:
                 lighting_pc.soft_lighting     = config_.soft_lighting ? 1.0f : 0.0f;
                 // gfxcoopa's DeferredLightingPass::draw() pushes this internally now (the
                 // templated overload), after its own bind_pipeline() -- no separate push needed.
-                pixel_lighting_pass_->draw(cmd, current_camera_set(), *light_set_, *shadow_set_, lighting_pc,
+                pixel_lighting_pass_->draw(cmd, current_camera_set(), current_light_set(), *shadow_set_, lighting_pc,
                                           render_extent_.width, render_extent_.height);
 
                 skybox_pass_->draw(cmd, current_camera_set(), view, proj, render_extent_.width, render_extent_.height);
@@ -1433,6 +1489,10 @@ public:
                 post_pc.exposure         = config_.exposure;
                 post_pc.bloom_intensity  = config_.bloom_enabled ? config_.bloom_intensity : 0.0f;
                 pixel_stylize_pass_->draw(cmd, post_pc, render_extent_.width, render_extent_.height);
+                if (config_.debug_lines_enabled) {
+                    debug_line_pass_->draw(cmd, proj * view,
+                        LetterboxRect{0, 0, render_extent_.width, render_extent_.height});
+                }
                 post_target_.end(cmd);
 
                 // Diorama tilt-shift blur, after every other post effect and at DISPLAY
@@ -1483,17 +1543,32 @@ private:
         return *camera_sets_[camera_frame_];
     }
 
+    /** @brief Light descriptor set for the slot render() most recently selected -- see
+     *  light_datas_'s own doc for why this is per-slot. Mirrors current_camera_set(). */
+    const coopa::gfx::pipeline::DescriptorSet& current_light_set() const {
+        return *light_sets_[light_frame_];
+    }
+
+    /** @brief LightUBO for the slot render() most recently selected -- write light parameters
+     *  through this, not any other slot's, so they land in the buffer current_light_set() binds.
+     *  Mirrors current_camera_set()/current_light_set(); see light_datas_'s own doc. */
+    coopa::gfx::engine::data::LightUBO& current_light_data() {
+        return light_datas_[light_frame_]->data();
+    }
+
     /**
-     * @brief Populates LightUBO color/intensity/count fields (not the shadow
-     *        matrix or cast_shadows flags -- see update_dir_shadow_matrix_ and
-     *        render()'s point-light handling, both of which run after this
-     *        and share the single light_data_.upload() at the end of render()).
+     * @brief Populates this frame's slot's LightUBO color/intensity/count fields (not the shadow
+     *        matrix or cast_shadows flags -- see update_dir_shadow_matrix_ and render()'s
+     *        point-light handling, both of which run after this and write the same slot via
+     *        current_light_data(), sharing this slot's light_datas_[light_frame_]->upload() at
+     *        the end of render()). Must run after render() sets light_frame_ to this frame's
+     *        slot -- see that call site's doc.
      */
     void update_lights_(coopa::scene::Scene& scene) {
         using coopa::gfx::engine::components::DirectionalLightComponent;
         using coopa::gfx::engine::components::PointLightComponent;
 
-        auto& ubo = light_data_.data();
+        auto& ubo = current_light_data();
 
         auto* dir = scene.find_first_component<DirectionalLightComponent>();
         if (dir) {
@@ -1519,141 +1594,112 @@ private:
     }
 
     /**
-     * @brief Fits an orthographic light-space box to the AABB of every ready
-     *        shadow caster, with texel-snapped centering to eliminate sub-texel
-     *        shadow crawl -- ported from blendy's PbrRenderPipeline::update_scene_data_
-     *        (see blendy/src/blendy/render/pbr_render_pipeline.h, "Directional
-     *        shadow-map projection" section). Writes light_data_.data()'s
-     *        dir_light_space_matrix and dir_shadow_params (upload() happens once
-     *        in render() after this and the point-light shadow flag are both set).
+     * @brief Fits an orthographic light-space box to a bounding sphere of the CAMERA's own
+     *        view frustum (out to config_.shadow_distance), with texel-snapped centering to
+     *        eliminate sub-texel shadow crawl -- the standard technique behind Unity/Unreal's
+     *        directional shadow distance, not the scene-content AABB fit this used to be
+     *        (see git history: that approach let literally any renderer/SDF's position, however
+     *        far off or however it got there -- e.g. an object that escaped the playable area
+     *        and is in unbounded freefall -- perturb or blow out the shadow frustum every frame).
+     *        A function of `cam` alone (position, orientation, FOV/ortho size, aspect, near
+     *        clip, shadow_distance) -- no renderer, SDF, or physics state is ever read here,
+     *        so nothing in the scene can affect this fit. Using a bounding SPHERE of the
+     *        frustum slice (not its raw box) additionally makes the fit stable under camera
+     *        rotation, not just translation -- the texel-snap alone only ever covered the
+     *        latter. Writes this frame's slot's dir_light_space_matrix and dir_shadow_params via
+     *        current_light_data() (upload() happens once in render() after this and the
+     *        point-light shadow flag are both set) -- must run after render() sets light_frame_
+     *        to this frame's slot, same requirement as update_lights_().
      */
     void update_dir_shadow_matrix_(const glm::vec3& direction,
-                                   const std::vector<coopa::gfx::engine::components::MeshRenderer*>& renderers,
-                                   const std::vector<glm::mat4>& world_matrices,
-                                   const std::vector<SdfDrawItem>& sdf_draws,
                                    const coopa::gfx::engine::components::CameraComponent* cam,
                                    bool cast_dir_shadow) {
+        using coopa::gfx::engine::components::CameraType;
+
         glm::vec3 light_dir = glm::normalize(direction);
         glm::vec3 up = (std::abs(light_dir.z) < 0.99f) ? glm::vec3(0.0f, 0.0f, 1.0f) : glm::vec3(0.0f, 1.0f, 0.0f);
         glm::mat4 light_rot = glm::lookAt(glm::vec3(0.0f), light_dir, up);
 
-        glm::vec3 aabb_min(std::numeric_limits<float>::max());
-        glm::vec3 aabb_max(std::numeric_limits<float>::lowest());
-        bool any_caster = false;
-
-        // Pure min/max reduction, no shared mutable state -- float min/max is associative, so
-        // splitting the range across workers and folding each worker's own partial result back
-        // in afterwards (in a fixed, worker-index order every run) is bit-identical to the
-        // plain serial fold. One accumulator slot per worker (indexed by JobContext::worker_index,
-        // which is the thread ACTUALLY running a given chunk -- safe even under work-stealing,
-        // since a worker only ever executes one job body at a time).
-        struct AabbAccum {
-            glm::vec3 mn{std::numeric_limits<float>::max()};
-            glm::vec3 mx{std::numeric_limits<float>::lowest()};
-            bool any = false;
-        };
-        size_t worker_slots = jobs_ ? std::max<size_t>(1, jobs_->worker_count()) : 1;
-
-        std::vector<AabbAccum> mesh_accum(worker_slots);
-        auto fit_mesh = [&](size_t begin, size_t end, const coopa::job::JobContext& ctx) {
-            size_t widx = (ctx.worker_index < worker_slots) ? ctx.worker_index : 0;
-            AabbAccum& acc = mesh_accum[widx];
-            for (size_t i = begin; i < end; ++i) {
-                if (!renderers[i]->is_ready()) continue;
-                const auto* mesh = renderers[i]->get_mesh().get();
-                if (!mesh) continue;
-                acc.any = true;
-
-                const glm::vec3& bmin = mesh->bounds_min();
-                const glm::vec3& bmax = mesh->bounds_max();
-                for (int c = 0; c < 8; ++c) {
-                    glm::vec3 corner((c & 1) ? bmax.x : bmin.x, (c & 2) ? bmax.y : bmin.y, (c & 4) ? bmax.z : bmin.z);
-                    glm::vec3 ls = glm::vec3(light_rot * (world_matrices[i] * glm::vec4(corner, 1.0f)));
-                    acc.mn = glm::min(acc.mn, ls);
-                    acc.mx = glm::max(acc.mx, ls);
-                }
-            }
-        };
-        if (should_parallelize_(renderers.size())) {
-            jobs_->parallel_for_blocking(renderers.size(), 0 /* auto grain */, fit_mesh);
-        } else {
-            fit_mesh(0, renderers.size(), coopa::job::JobContext{});
-        }
-        for (const auto& acc : mesh_accum) {
-            if (!acc.any) continue;
-            any_caster = true;
-            aabb_min = glm::min(aabb_min, acc.mn);
-            aabb_max = glm::max(aabb_max, acc.mx);
-        }
-
-        // Fold in every shadow-casting SdfRenderer's world AABB too, same BLEND-at-full-opacity
-        // rule record_directional_shadow_()/record_point_shadow_() apply to their own draws --
-        // an SDF that won't actually cast a shadow this frame shouldn't influence the fitted box.
-        // Same reduction shape as the mesh loop above.
-        std::vector<AabbAccum> sdf_accum(worker_slots);
-        auto fit_sdf = [&](size_t begin, size_t end, const coopa::job::JobContext& ctx) {
-            size_t widx = (ctx.worker_index < worker_slots) ? ctx.worker_index : 0;
-            AabbAccum& acc = sdf_accum[widx];
-            for (size_t i = begin; i < end; ++i) {
-                const auto& d = sdf_draws[i];
-                if (!d.cast_shadows) continue;
-                if (d.is_blend && d.comp->material.alpha < 1.0f) continue;
-                acc.any = true;
-                for (int c = 0; c < 8; ++c) {
-                    glm::vec3 corner((c & 1) ? d.world_max.x : d.world_min.x,
-                                     (c & 2) ? d.world_max.y : d.world_min.y,
-                                     (c & 4) ? d.world_max.z : d.world_min.z);
-                    glm::vec3 ls = glm::vec3(light_rot * glm::vec4(corner, 1.0f));
-                    acc.mn = glm::min(acc.mn, ls);
-                    acc.mx = glm::max(acc.mx, ls);
-                }
-            }
-        };
-        if (should_parallelize_(sdf_draws.size())) {
-            jobs_->parallel_for_blocking(sdf_draws.size(), 0 /* auto grain */, fit_sdf);
-        } else {
-            fit_sdf(0, sdf_draws.size(), coopa::job::JobContext{});
-        }
-        for (const auto& acc : sdf_accum) {
-            if (!acc.any) continue;
-            any_caster = true;
-            aabb_min = glm::min(aabb_min, acc.mn);
-            aabb_max = glm::max(aabb_max, acc.mx);
-        }
-
         glm::mat4 light_proj;
-        if (any_caster) {
+        if (!cam) {
+            // No main camera -- degenerate fallback, same fixed box the old no-caster branch
+            // used; still purely a function of the light direction, not scene content.
+            float ortho_extent = 15.0f;
+            light_proj = glm::orthoRH_ZO(-ortho_extent, ortho_extent, -ortho_extent, ortho_extent, 0.1f, 60.0f);
+        } else {
+            // Camera-to-world basis, via the view matrix's inverse (view = inverse(world), see
+            // CameraComponent::get_view_matrix()) rather than reaching into the owning
+            // SceneObject's Transform directly -- CameraComponent is the sealed surface this
+            // file already reads cam through everywhere else.
+            glm::mat4 cam_to_world = glm::inverse(cam->get_view_matrix());
+            glm::vec3 cam_pos = glm::vec3(cam_to_world[3]);
+            glm::vec3 cam_right = glm::vec3(cam_to_world[0]);
+            glm::vec3 cam_up = glm::vec3(cam_to_world[1]);
+            glm::vec3 cam_forward = -glm::vec3(cam_to_world[2]); // camera looks down local -Z
+
+            float aspect = static_cast<float>(render_extent_.width) / static_cast<float>(render_extent_.height);
+            float near_d = cam->clip_start;
+            float far_d = std::min(cam->clip_end, config_.shadow_distance);
+
+            // The 8 world-space corners of the camera's frustum, clipped to [near_d, far_d] --
+            // perspective corners scale with distance (tan(fov/2)); orthographic corners don't
+            // (same half-extent at both planes, Unity's own orthographic-camera convention).
+            glm::vec3 corners[8];
+            int idx = 0;
+            for (float d : {near_d, far_d}) {
+                float half_h, half_w;
+                if (cam->type == CameraType::Perspective) {
+                    half_h = d * std::tan(glm::radians(cam->fov) * 0.5f);
+                    half_w = half_h * aspect;
+                } else {
+                    half_h = cam->orthographic_size;
+                    half_w = half_h * aspect;
+                }
+                for (int sy = -1; sy <= 1; sy += 2) {
+                    for (int sx = -1; sx <= 1; sx += 2) {
+                        corners[idx++] = cam_pos + cam_forward * d + cam_right * (static_cast<float>(sx) * half_w)
+                                                                    + cam_up * (static_cast<float>(sy) * half_h);
+                    }
+                }
+            }
+
+            // Bounding sphere of those 8 corners -- centroid + max corner distance. Depends
+            // only on the corners just computed above, so it inherits their camera-only,
+            // rotation-invariant-radius property.
+            glm::vec3 centroid(0.0f);
+            for (const auto& c : corners) centroid += c;
+            centroid /= 8.0f;
+            float radius = 0.0f;
+            for (const auto& c : corners) radius = std::max(radius, glm::length(c - centroid));
+
+            glm::vec3 center_ls = glm::vec3(light_rot * glm::vec4(centroid, 1.0f));
+
             const float pad = 1.0f;
-            float half_w = 0.5f * (aabb_max.x - aabb_min.x) + pad;
-            float half_h = 0.5f * (aabb_max.y - aabb_min.y) + pad;
-            float extent = std::max(half_w, half_h);
+            float extent = radius + pad;
             const float extent_step = 0.5f;
             extent = std::ceil(extent / extent_step) * extent_step;
-            if (config_.shadow_max_extent > 0.0f) extent = std::min(extent, config_.shadow_max_extent);
 
-            glm::vec2 center(0.5f * (aabb_min.x + aabb_max.x), 0.5f * (aabb_min.y + aabb_max.y));
+            glm::vec2 center(center_ls.x, center_ls.y);
             float texel = (2.0f * extent) / static_cast<float>(config_.shadow_map_resolution);
             center.x = std::floor(center.x / texel) * texel;
             center.y = std::floor(center.y / texel) * texel;
 
-            float near_plane = -aabb_max.z - pad;
-            float far_plane  = -aabb_min.z + pad;
+            // far: just past the sphere. near: past the sphere on the towards-light side by a
+            // further shadow_distance margin, so a caster standing outside the visible sphere
+            // but between the light and it (e.g. a tall object just off to the side of the
+            // camera's view) still shadows into frame -- sized off the same single config
+            // knob, never off any actual object's position.
+            float far_plane = -center_ls.z + radius + pad;
+            float near_plane = -center_ls.z - radius - pad - config_.shadow_distance;
             if (far_plane - near_plane < 0.01f) far_plane = near_plane + 0.01f;
 
             light_proj = glm::orthoRH_ZO(center.x - extent, center.x + extent,
                                         center.y - extent, center.y + extent,
                                         near_plane, far_plane);
-        } else {
-            glm::vec3 center = cam ? cam->get_world_position() : glm::vec3(0.0f);
-            glm::vec3 center_ls = glm::vec3(light_rot * glm::vec4(center, 1.0f));
-            float ortho_extent = 15.0f;
-            light_proj = glm::orthoRH_ZO(center_ls.x - ortho_extent, center_ls.x + ortho_extent,
-                                        center_ls.y - ortho_extent, center_ls.y + ortho_extent,
-                                        0.1f, 60.0f);
         }
         light_proj[1][1] *= -1.0f; // Vulkan Y-flip
 
-        auto& ubo = light_data_.data();
+        auto& ubo = current_light_data();
         ubo.dir_light_space_matrix = light_proj * light_rot;
         // .y (formerly the PCF penumbra radius in texels) is unused now that this engine only
         // does a single hard depth compare -- zero-filled rather than restructuring the vec4,
@@ -1680,7 +1726,7 @@ private:
             cmd.bind_vertex_buffer(instance_stream_.buffer(), 0, 1);
 
             coopa::gfx::engine::passes::DirectionalShadowPushConstants pc{};
-            pc.light_space_matrix = light_data_.data().dir_light_space_matrix;
+            pc.light_space_matrix = current_light_data().dir_light_space_matrix;
             pc.gfx_time = glm::vec4(elapsed_time_, frame_dt_, static_cast<float>(frame_index_), 0.0f);
 
             // Same last-shader transition guard as record_gbuffer_() -- a caster's shadow
@@ -1719,7 +1765,7 @@ private:
                 cmd.bind_descriptor_set(sdf_data_.current_set(), 0);
 
                 coopa::gfx::engine::passes::SdfDirectionalShadowPushConstants sdf_pc{};
-                sdf_pc.light_space_matrix = light_data_.data().dir_light_space_matrix;
+                sdf_pc.light_space_matrix = current_light_data().dir_light_space_matrix;
                 sdf_pc.shadow_max_steps   = config_.sdf_shadow_max_steps;
                 for (const auto& d : sdf_draws) {
                     if (!d.cast_shadows) continue;
@@ -1948,7 +1994,7 @@ private:
         transparent_capture_target_.begin(cmd);
         transparent_capture_pass_->bind(cmd);
         cmd.bind_descriptor_set(transparent_capture_pass_->layout(), current_camera_set(), 0);
-        cmd.bind_descriptor_set(transparent_capture_pass_->layout(), *light_set_,  1);
+        cmd.bind_descriptor_set(transparent_capture_pass_->layout(), current_light_set(),  1);
         cmd.bind_descriptor_set(transparent_capture_pass_->layout(), *shadow_set_, 2);
         cmd.bind_vertex_buffer(instance_stream_.buffer(), 0, 1);
 
@@ -2011,7 +2057,7 @@ private:
             if (!any_blend_sdf) {
                 sdf_capture_pass_->bind(cmd);
                 cmd.bind_descriptor_set(current_camera_set(), 0);
-                cmd.bind_descriptor_set(*light_set_,  1);
+                cmd.bind_descriptor_set(current_light_set(),  1);
                 cmd.bind_descriptor_set(*shadow_set_, 2);
                 cmd.bind_descriptor_set(sdf_data_.current_set(), 3);
                 any_blend_sdf = true;
@@ -2146,7 +2192,7 @@ private:
                     // bounding box and gets clipped to it.
                     cmd.set_scissor(0, 0, render_extent_.width, render_extent_.height);
                     cmd.bind_descriptor_set(current_camera_set(), 0);
-                    cmd.bind_descriptor_set(*light_set_,  1);
+                    cmd.bind_descriptor_set(current_light_set(),  1);
                     cmd.bind_descriptor_set(*shadow_set_, 2);
                     // Sets 3/4/5 -- ssr_pass_'s own trace-input sets; set 6 -- forward_globals_'s
                     // UBO (see the ExtraSets bind lambda in the ctor). All bound via the
@@ -2193,7 +2239,7 @@ private:
                 if (last_kind != 1) {
                     sdf_forward_pass_->bind(cmd);
                     cmd.bind_descriptor_set(current_camera_set(), 0);
-                    cmd.bind_descriptor_set(*light_set_,  1);
+                    cmd.bind_descriptor_set(current_light_set(),  1);
                     cmd.bind_descriptor_set(*shadow_set_, 2);
                     cmd.bind_descriptor_set(sdf_data_.current_set(), 3);
                     // Sets 4/5/6 -- see sdf_forward_pass_'s own ExtraSets ctor argument.
@@ -2262,10 +2308,22 @@ private:
     std::vector<std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>> camera_sets_;
     uint32_t camera_frame_ = 0;
 
-    coopa::gfx::engine::data::LightData light_data_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> light_layout_;
+    // Per-frame-in-flight, same policy and same reason as camera_ubos_/camera_sets_ above:
+    // LightData owns exactly one buffer, so a single shared instance updated in place would let
+    // frame N's light_datas_[slot]->upload() (a plain CPU memcpy into the live buffer -- see
+    // LightData::upload()) race frame N-1's still-executing lighting-pass command buffer, which
+    // binds this same buffer through light_set_ at set 1. That raced write is exactly what used
+    // to make directional shadows visibly lag/desync from the rest of the scene under camera
+    // motion once dir_light_space_matrix became a fast-changing function of the camera (see
+    // update_dir_shadow_matrix_()'s doc) -- previously invisible only because the old
+    // scene-content AABB fit changed slowly enough that a one-frame-stale matrix went unnoticed.
+    // light_frame_ is set from the same frame_slot local as camera_frame_ (see render()), so the
+    // two can never disagree.
+    std::vector<std::unique_ptr<coopa::gfx::engine::data::LightData>> light_datas_;
+    std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> light_layout_; // one shared layout
     std::unique_ptr<coopa::gfx::pipeline::DescriptorPool>      light_pool_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>       light_set_;
+    std::vector<std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>> light_sets_;
+    uint32_t light_frame_ = 0;
 
     coopa::gfx::engine::data::FogData fog_data_;
     std::unique_ptr<coopa::gfx::engine::passes::FogPass> fog_pass_;
@@ -2304,6 +2362,14 @@ private:
     // bloom_pass_/fog_pass_'s bindings above.
     std::unique_ptr<coopa::gfx::engine::passes::TiltShiftPass> tilt_shift_pass_;
     std::unique_ptr<passes::UpscalePass>                         upscale_pass_;
+    // Physics collider/contact-normal gizmo overlay -- always constructed (same always-on-
+    // but-gated policy as bloom_pass_/fog_pass_ above), config_.debug_lines_enabled gates only
+    // whether render() calls draw() each frame. debug_lines_ is filled by the caller (see
+    // debug_lines()) once per frame, before render() runs -- kept physxcoopa-free by design
+    // (see debug_line_pass.h's file doc), so Engine is what bridges PhysicsWorld::debug_draw()
+    // into this vector.
+    std::unique_ptr<passes::DebugLinePass>                       debug_line_pass_;
+    std::vector<DebugLine>                                       debug_lines_;
 
     // Mesh-only forward-pass globals UBO (see forward_globals.h's file doc for why this
     // isn't a push constant) -- constructed before transparent_pass_ since that pass's

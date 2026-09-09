@@ -1,0 +1,6 @@
+# Ground/arena surface material -- grippy, dead (near-zero bounce).
+dynamic_friction: 0.6
+static_friction: 0.7
+restitution: 0.05
+friction_combine: Average
+restitution_combine: Average

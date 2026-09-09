@@ -1,0 +1,7 @@
+# Dead weight -- high friction, zero bounce, and restitution_combine: Minimum makes sure it
+# never inherits bounce from whatever it lands on either.
+dynamic_friction: 0.8
+static_friction: 0.9
+restitution: 0.0
+friction_combine: Average
+restitution_combine: Minimum

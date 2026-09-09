@@ -5,7 +5,7 @@ window:
   vsync: true
 
 scene:
-  default_scene: "assets/scenes/pixel_demo/scene.yaml"
+  default_scene: "assets/scenes/physics_test/scene.yaml"
 
 render:
   # --- Feature toggles ---
@@ -26,6 +26,10 @@ render:
   tilt_shift_enabled: true    # Link's Awakening (Switch) style diorama blur; runs at DISPLAY
                               # resolution after the upscale (a lens effect, not a pixel-grid
                               # effect) -- startup-fixed, like bloom/fog (see gfxcoopa's TiltShiftPass)
+  debug_lines_enabled: false  # physics collider/contact wireframes (toyengine's DebugLinePass);
+                              # per-frame toggle -- see the `physics.debug_draw` block below for
+                              # which categories (Colliders/Contacts/BVH) get gathered
+  shadows_enabled: true
 
   bloom_threshold: 1.0        # brightness (max of R,G,B) below which nothing glows; 1.0 = "brighter than white"
   bloom_soft_knee: 0.5        # 0..1 fraction of the threshold the quadratic knee spans; 0 = hard cutoff (pops under camera motion)
@@ -60,11 +64,15 @@ render:
   sky_intensity: 1.0         # scales the sky-gradient indirect specular base
 
   # --- Shadows ---
-  shadows_enabled: true
   shadow_map_resolution: 2048
   cube_shadow_resolution: 512
   shadow_bias: 0.005
-  shadow_max_extent: 0.0
+  shadow_distance: 60.0       # Unity-style "Shadow Distance": how far from the camera shadows
+                              # are computed. The directional shadow frustum is fit to the
+                              # camera's OWN view frustum out to this distance -- never to scene
+                              # content -- so no object's position (however far off, however it
+                              # got there) can perturb or blow out the shadow map. See
+                              # PixelRenderConfig::shadow_distance's doc
 
   # --- Outline ---
   outline_thickness: 0.6
@@ -172,6 +180,23 @@ jobs:
   parallel_threshold: 4    # low on purpose: exercises the parallel path in the pixel demo
                             # (8 MeshRenderers, 4 SdfRenderers); libcoopa's own house value
                             # for production-sized workloads is 256 (AnimationSystem)
+
+# Project-wide physics settings (coopa::physx::util::PhysicsSettings) -- see
+# physxcoopa/util/physics_settings.h for the full schema; every key here is optional.
+physics:
+  gravity: { x: 0.0, y: 0.0, z: -9.81 }
+  fixed_timestep: 0.016666667
+  solver:
+    velocity_iterations: 16
+    relax_iterations: 2
+    position_iterations: 4
+  layers: ["Default", "Ground", "Triggers"]
+  ignore_layer_collisions:
+    - [Triggers, Triggers]   # trigger volumes never need to push each other apart
+  debug_draw: [Colliders, Contacts]   # what a DebugLinePass draw would gather, when enabled
+  parallel_threshold: 16     # low on purpose, same reasoning as jobs.parallel_threshold above --
+                              # exercises PhysicsSystem's/PhysicsWorld's job-parallel passes on
+                              # physics_test's modest body count instead of always falling back serial
 
 output:
   save_on_exit: true

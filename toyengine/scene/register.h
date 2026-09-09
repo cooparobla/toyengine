@@ -15,6 +15,7 @@
 #include <fkYAML/node.hpp>
 
 #include <toyengine/scene/camera_controller.h>
+#include <toyengine/scene/kinematic_mover.h>
 
 namespace toy {
 namespace scene {
@@ -89,6 +90,33 @@ inline void register_scene_components() {
             if (node.contains("look_speed_deg_per_sec")) {
                 cc->look_speed_deg_per_sec = node.at("look_speed_deg_per_sec").get_value<float>();
             }
+        });
+
+    SceneLoader::register_component_parser("KinematicMover",
+        [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
+            auto* km = obj.add_component<KinematicMover>();
+
+            auto parse_vec3 = [](const fkyaml::node& n, const glm::vec3& fallback) {
+                glm::vec3 v = fallback;
+                if (n.contains("x")) v.x = n.at("x").get_value<float>();
+                if (n.contains("y")) v.y = n.at("y").get_value<float>();
+                if (n.contains("z")) v.z = n.at("z").get_value<float>();
+                return v;
+            };
+
+            if (node.contains("mode")) {
+                std::string m = node.at("mode").get_value<std::string>();
+                if (m == "orbit" || m == "Orbit") km->mode = KinematicMoverMode::Orbit;
+                else if (m == "spin" || m == "Spin") km->mode = KinematicMoverMode::Spin;
+                else km->mode = KinematicMoverMode::PingPong;
+            }
+            if (node.contains("axis")) km->axis = parse_vec3(node.at("axis"), km->axis);
+            if (node.contains("distance")) km->distance = node.at("distance").get_value<float>();
+            if (node.contains("speed")) km->speed = node.at("speed").get_value<float>();
+            if (node.contains("orbit_center")) km->orbit_center = parse_vec3(node.at("orbit_center"), km->orbit_center);
+            if (node.contains("orbit_radius")) km->orbit_radius = node.at("orbit_radius").get_value<float>();
+            if (node.contains("spin_axis")) km->spin_axis = parse_vec3(node.at("spin_axis"), km->spin_axis);
+            if (node.contains("spin_speed")) km->spin_speed = node.at("spin_speed").get_value<float>();
         });
 }
 

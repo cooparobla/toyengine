@@ -1,0 +1,7 @@
+# Nearly frictionless -- a cube given a push across an ice lane slides almost the
+# full length before friction bleeds off its speed.
+dynamic_friction: 0.02
+static_friction: 0.03
+restitution: 0.0
+friction_combine: Minimum      # the slicker of the two surfaces always wins
+restitution_combine: Average

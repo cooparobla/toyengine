@@ -25,6 +25,7 @@
 #include <glm/glm.hpp>
 
 #include <coopa/scene/config.h>
+#include <physxcoopa/util/physics_settings.h>
 #include <toyengine/render/pixel_render_config.h>
 
 namespace toy {
@@ -77,11 +78,12 @@ struct JobsConfig {
  * @brief Aggregated runtime configuration for toyengine.
  */
 struct AppConfig {
-    coopa::scene::SceneConfig    scene;
-    WindowConfig                 window;
-    render::PixelRenderConfig    render;
-    OutputConfig                 output;
-    JobsConfig                   jobs;
+    coopa::scene::SceneConfig         scene;
+    WindowConfig                      window;
+    render::PixelRenderConfig         render;
+    OutputConfig                      output;
+    JobsConfig                        jobs;
+    coopa::physx::util::PhysicsSettings physics;
 
     /**
      * @brief Loads application configuration from a YAML file.
@@ -133,6 +135,7 @@ struct AppConfig {
                 if (r.contains("sdf_shadows_enabled")) config.render.sdf_shadows_enabled = r.at("sdf_shadows_enabled").get_value<bool>();
                 if (r.contains("bloom_enabled"))     config.render.bloom_enabled     = r.at("bloom_enabled").get_value<bool>();
                 if (r.contains("tilt_shift_enabled")) config.render.tilt_shift_enabled = r.at("tilt_shift_enabled").get_value<bool>();
+                if (r.contains("debug_lines_enabled")) config.render.debug_lines_enabled = r.at("debug_lines_enabled").get_value<bool>();
 
                 // --- Internal resolution ---
                 if (r.contains("resolution_mode"))        config.render.resolution_mode = r.at("resolution_mode").get_value<std::string>();
@@ -154,7 +157,7 @@ struct AppConfig {
                 if (r.contains("shadow_map_resolution"))  config.render.shadow_map_resolution  = r.at("shadow_map_resolution").get_value<uint32_t>();
                 if (r.contains("cube_shadow_resolution")) config.render.cube_shadow_resolution = r.at("cube_shadow_resolution").get_value<uint32_t>();
                 if (r.contains("shadow_bias"))            config.render.shadow_bias            = r.at("shadow_bias").get_value<float>();
-                if (r.contains("shadow_max_extent"))      config.render.shadow_max_extent      = r.at("shadow_max_extent").get_value<float>();
+                if (r.contains("shadow_distance"))        config.render.shadow_distance        = r.at("shadow_distance").get_value<float>();
 
                 // --- Outline ---
                 if (r.contains("outline_thickness")) config.render.outline_thickness = r.at("outline_thickness").get_value<float>();
@@ -265,6 +268,15 @@ struct AppConfig {
                 const auto& j = root.at("jobs");
                 if (j.contains("worker_threads"))    config.jobs.worker_threads    = j.at("worker_threads").get_value<unsigned int>();
                 if (j.contains("parallel_threshold")) config.jobs.parallel_threshold = j.at("parallel_threshold").get_value<std::size_t>();
+            }
+
+            // Schema owned by physxcoopa itself (see util/physics_settings.h's doc) rather than
+            // hand-parsed field-by-field here, unlike every other block above -- physics settings
+            // are physxcoopa's concept end to end (PhysicsWorld/PhysicsSystem consume the parsed
+            // struct directly), so duplicating its YAML shape in toyengine would just be a second
+            // place to keep in sync.
+            if (root.contains("physics")) {
+                config.physics = coopa::physx::util::parse_physics_settings(root.at("physics"));
             }
 
             if (root.contains("output")) {

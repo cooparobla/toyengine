@@ -75,3 +75,10 @@ toyengine/
 ```
 
 See each subdirectory's own README for details on that module.
+
+## Documentation
+
+[`docs/`](docs/) holds hand-written guides to specific engine behaviour (e.g.
+[ambient lighting](docs/ambient-lighting.md)). This is separate from `.docs/`,
+the generated HTML API reference built from in-source docstrings via
+`coopadocs build`.

@@ -1,0 +1,7 @@
+# Near-perfectly elastic -- restitution_combine: Maximum means it bounces at its own high
+# restitution even against a dead surface like concrete, instead of averaging down.
+dynamic_friction: 0.4
+static_friction: 0.5
+restitution: 0.95
+friction_combine: Average
+restitution_combine: Maximum

@@ -427,6 +427,17 @@ public:
         // for why a per-frame rebind would be unsafe anyway.
         VkImageView ssao_view = config_.ssao_enabled ? ssao_pass_->output_view() : ssao_pass_->neutral_view();
 
+        // ssao_debug_view diagnostic: draws the exact same ssao_view bound into
+        // pixel_lighting_pass_/ssr_pass_ above fullscreen, so the debug image honestly
+        // reflects what lighting actually consumes (including the neutral texture when
+        // ssao_enabled is off). Reuses GBufferVisualizePass's shape (one combined-image-
+        // sampler set, no camera/light sets, depth test off) rather than a bespoke pass.
+        ssao_debug_pass_ = std::make_unique<passes::GBufferVisualizePass>(
+            device, offscreen_target_.render_pass_object(),
+            config_.shaders("fullscreen.vert"),
+            config_.shaders("ssao_debug.frag"));
+        ssao_debug_pass_->set_albedo_image(coopa::gfx::detail::wrap(ssao_view), ssao_pass_->sampler());
+
         // No ExtraSets (toyengine has neither GI nor reflection probes to plumb through), so
         // this collapses to the same {camera=0, light=1, shadow=2, gbuffer=3} layout the old
         // fork hardcoded -- gbuffer_set_index_ is derived, not hardcoded, so this is correct
@@ -1326,6 +1337,13 @@ public:
         bool need_ssr_trace_inputs = config_.ssr_enabled || config_.transparency_enabled
                                     || config_.ssr_reflect_transparent;
 
+        // ssao_debug_view is a runtime flag (re-read every frame, same policy as ssr_enabled):
+        // when set, ssao_debug_pass_ replaces pixel_lighting_pass_/skybox_pass_ below, and the
+        // SSR composite / forward transparent pass are skipped for this frame -- there is
+        // nothing left to composite reflections or transparent geometry onto once lighting
+        // itself has been replaced by a raw occlusion-buffer visualization.
+        const bool ao_debug = config_.ssao_debug_view;
+
         if (need_ssr_trace_inputs) {
             // HiZPass::execute() and SceneColorMipPass::execute() (reused unmodified from
             // gfxcoopa -- see the class doc) each rebind their own mip-0 descriptor set via
@@ -1433,20 +1451,26 @@ public:
                 // inside offscreen_target_'s single begin()/end(), not a separate pass.
                 offscreen_target_.begin(cmd);
 
-                PixelLightingPushConstants lighting_pc;
-                lighting_pc.light_bands       = config_.light_bands;
-                lighting_pc.spec_threshold    = config_.spec_threshold;
-                lighting_pc.rim_strength      = config_.rim_strength;
-                lighting_pc.ambient_intensity = config_.indirect.ambient_intensity;
-                lighting_pc.sky_intensity     = config_.indirect.sky_intensity;
-                lighting_pc.soft_lighting     = config_.soft_lighting ? 1.0f : 0.0f;
-                // gfxcoopa's DeferredLightingPass::draw() pushes this internally now (the
-                // templated overload), after its own bind_pipeline() -- no separate push needed.
-                pixel_lighting_pass_->draw(cmd, current_camera_set(), current_light_set(), *shadow_set_, lighting_pc,
-                                          render_extent_.width, render_extent_.height);
+                if (ao_debug) {
+                    // Replaces lighting+skybox entirely -- draws SsaoPass's bound output
+                    // (the exact ssao_view bound at construction, see that comment) fullscreen.
+                    ssao_debug_pass_->draw(cmd, render_extent_.width, render_extent_.height);
+                } else {
+                    PixelLightingPushConstants lighting_pc;
+                    lighting_pc.light_bands       = config_.light_bands;
+                    lighting_pc.spec_threshold    = config_.spec_threshold;
+                    lighting_pc.rim_strength      = config_.rim_strength;
+                    lighting_pc.ambient_intensity = config_.indirect.ambient_intensity;
+                    lighting_pc.sky_intensity     = config_.indirect.sky_intensity;
+                    lighting_pc.soft_lighting     = config_.soft_lighting ? 1.0f : 0.0f;
+                    // gfxcoopa's DeferredLightingPass::draw() pushes this internally now (the
+                    // templated overload), after its own bind_pipeline() -- no separate push needed.
+                    pixel_lighting_pass_->draw(cmd, current_camera_set(), current_light_set(), *shadow_set_, lighting_pc,
+                                              render_extent_.width, render_extent_.height);
 
-                skybox_pass_->draw(cmd, current_camera_set(), view, proj, render_extent_.width, render_extent_.height,
-                                   config_.indirect);
+                    skybox_pass_->draw(cmd, current_camera_set(), view, proj, render_extent_.width, render_extent_.height,
+                                       config_.indirect);
+                }
 
                 offscreen_target_.end(cmd);
 
@@ -1457,7 +1481,7 @@ public:
                     scene_color_mip_pass_->execute(cmd, offscreen_target_.color_view_typed());
                 }
 
-                if (config_.ssr_enabled) {
+                if (config_.ssr_enabled && !ao_debug) {
                     coopa::gfx::engine::passes::SsrPass::Params ssr_params{};
                     ssr_params.proj              = proj;
                     ssr_params.max_iterations    = config_.ssr_max_iterations;
@@ -1500,7 +1524,7 @@ public:
                     ssr_pass_->execute(cmd, current_camera_set(), ssr_params);
                 }
 
-                if (config_.transparency_enabled && config_.refraction_enabled) {
+                if (config_.transparency_enabled && config_.refraction_enabled && !ao_debug) {
                     // Builds refraction_scene_color_mip_pass_'s chain -- the dedicated,
                     // independent instance transparent.frag's u_scene_color reads instead of
                     // ssr_pass_'s own scene_color_set() whenever refraction is active (see that
@@ -1518,7 +1542,7 @@ public:
                     refraction_scene_color_mip_pass_->execute(cmd, refraction_source);
                 }
 
-                if (config_.transparency_enabled) {
+                if (config_.transparency_enabled && !ao_debug) {
                     // Per-frame globals for the forward MESH pass's lighting/indirect/SSR/
                     // refraction tuning -- sourced from the SAME config_ fields sdf_data_'s own
                     // globals() fill above uses, in particular config_.indirect (shared with
@@ -1733,13 +1757,39 @@ private:
         ubo.sky_ground  = glm::vec4(config_.indirect.sky_ground, 0.0f);
 
         auto* dir = scene.find_first_component<DirectionalLightComponent>();
+        ubo.light_counts.x = dir ? 1 : 0;
         if (dir) {
             ubo.dir_direction = glm::vec4(dir->direction, dir->intensity);
             ubo.dir_color     = glm::vec4(dir->color, 0.0f);
-            ubo.light_counts.x = 1;
-        } else {
-            ubo.light_counts.x = 0;
         }
+        // Soft-shadow tuning shared by every calc_dir_shadow()/calc_point_shadow() call
+        // site (see pixel_shadow_body.glsl) -- filled here, not left to
+        // update_dir_shadow_matrix_(), since none of it depends on the light-space matrix
+        // that function computes; frame_index_ already advances every frame regardless of
+        // aa_mode (see its own doc), which is what lets soft shadows decorrelate frame to
+        // frame even with TAA off.
+        //
+        // Written UNCONDITIONALLY (not just when `dir` exists): .y is the POINT-light PCF
+        // radius and .w is the shared TAA rotation offset, so a point-light-only scene (no
+        // DirectionalLightComponent at all) still needs this filled in -- it used to keep the
+        // struct's all-zero-softness default forever, silently forcing point shadows to their
+        // hard path regardless of soft_shadows. .x (directional shadow intensity) has no
+        // meaning without a directional light; kept at its struct default of 1.0 there.
+        //
+        // .y converts point_shadow_softness from cube-map TEXELS to a tangent-space offset on
+        // a unit sample direction -- see gfx_shadow_cube_pcf_vogel's doc for why that's the
+        // unit calc_point_shadow wants. Clamped to 8 texels (the cube-side counterpart of the
+        // directional radius's 12-texel clamp below): a too-large config value degrades to
+        // "slightly over-soft" instead of washing every point shadow out to a uniform grey.
+        float point_pcf_radius = config_.soft_shadows
+            ? std::min(config_.point_shadow_softness, 8.0f) *
+              (2.0f / static_cast<float>(std::max(config_.cube_shadow_resolution, 1u)))
+            : 0.0f;
+        ubo.dir_shadow_extra = glm::vec4(
+            dir ? glm::clamp(dir->shadow_intensity, 0.0f, 1.0f) : 1.0f,
+            point_pcf_radius,
+            static_cast<float>(std::clamp<uint32_t>(config_.shadow_pcf_samples, 1u, 32u)),
+            static_cast<float>(frame_index_ & 0xFFu));
 
         auto points = scene.get_components<PointLightComponent>();
         uint32_t count = std::min<uint32_t>(static_cast<uint32_t>(points.size()), 16);
@@ -1782,11 +1832,17 @@ private:
         glm::mat4 light_rot = glm::lookAt(glm::vec3(0.0f), light_dir, up);
 
         glm::mat4 light_proj;
+        // World-space size of one shadow-map texel in the box actually in effect this frame --
+        // computed in both branches below so soft_shadows' world->texel PCF-radius conversion
+        // (see the dir_shadow_params write at the end of this function) works even when there
+        // is no main camera yet.
+        float dir_texel_world;
         if (!cam) {
             // No main camera -- degenerate fallback, same fixed box the old no-caster branch
             // used; still purely a function of the light direction, not scene content.
             float ortho_extent = 15.0f;
             light_proj = glm::orthoRH_ZO(-ortho_extent, ortho_extent, -ortho_extent, ortho_extent, 0.1f, 60.0f);
+            dir_texel_world = (2.0f * ortho_extent) / static_cast<float>(config_.shadow_map_resolution);
         } else {
             // Camera-to-world basis, via the view matrix's inverse (view = inverse(world), see
             // CameraComponent::get_view_matrix()) rather than reaching into the owning
@@ -1841,9 +1897,9 @@ private:
             extent = std::ceil(extent / extent_step) * extent_step;
 
             glm::vec2 center(center_ls.x, center_ls.y);
-            float texel = (2.0f * extent) / static_cast<float>(config_.shadow_map_resolution);
-            center.x = std::floor(center.x / texel) * texel;
-            center.y = std::floor(center.y / texel) * texel;
+            dir_texel_world = (2.0f * extent) / static_cast<float>(config_.shadow_map_resolution);
+            center.x = std::floor(center.x / dir_texel_world) * dir_texel_world;
+            center.y = std::floor(center.y / dir_texel_world) * dir_texel_world;
 
             // far: just past the sphere. near: past the sphere on the towards-light side by a
             // further shadow_distance margin, so a caster standing outside the visible sphere
@@ -1862,10 +1918,18 @@ private:
 
         auto& ubo = current_light_data();
         ubo.dir_light_space_matrix = light_proj * light_rot;
-        // .y (formerly the PCF penumbra radius in texels) is unused now that this engine only
-        // does a single hard depth compare -- zero-filled rather than restructuring the vec4,
-        // since this UBO layout is shared with gfxcoopa's LightData::dir_shadow_params.
-        ubo.dir_shadow_params      = glm::vec4(config_.shadow_bias, 0.0f, cast_dir_shadow ? 1.0f : 0.0f, 0.05f);
+        // .y is the directional PCF radius in shadow-map TEXELS -- converted here, once per
+        // frame, from the world-space config_.shadow_softness against dir_texel_world (this
+        // frame's actual ortho-box texel size), so the penumbra stays visually constant in
+        // world units even as that box refits to the camera. Clamped to 12 texels: this
+        // radius is unbounded above (a small scene at high resolution asks for hundreds),
+        // while calc_dir_shadow's Vogel disk (pixel_shadow_body.glsl) is tuned for
+        // single-digit-to-low-teens radii. 0 (soft_shadows off) selects the single hard
+        // compare, reproducing this engine's original look exactly.
+        float dir_pcf_radius_texels = config_.soft_shadows
+            ? std::min(config_.shadow_softness / std::max(dir_texel_world, 1e-6f), 12.0f)
+            : 0.0f;
+        ubo.dir_shadow_params      = glm::vec4(config_.shadow_bias, dir_pcf_radius_texels, cast_dir_shadow ? 1.0f : 0.0f, 0.05f);
     }
 
     /** @brief The first PointLightComponent with cast_shadows set, or nullptr. */
@@ -2519,6 +2583,7 @@ private:
 
     std::unique_ptr<coopa::gfx::engine::passes::GBufferPipeline> gbuffer_pipeline_;
     std::unique_ptr<passes::GBufferVisualizePass>                gbuffer_visualize_pass_;
+    std::unique_ptr<passes::GBufferVisualizePass>                ssao_debug_pass_; // ssao_debug_view diagnostic
     std::unique_ptr<coopa::gfx::engine::passes::SsaoPass>        ssao_pass_;       // always constructed
     std::unique_ptr<coopa::gfx::engine::passes::DeferredLightingPass> pixel_lighting_pass_;
     std::unique_ptr<coopa::gfx::engine::passes::SkyboxPass>      skybox_pass_;

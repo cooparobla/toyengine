@@ -126,6 +126,7 @@ struct AppConfig {
                 if (r.contains("camera_pixel_snap")) config.render.camera_pixel_snap = r.at("camera_pixel_snap").get_value<bool>();
                 if (r.contains("soft_lighting"))     config.render.soft_lighting     = r.at("soft_lighting").get_value<bool>();
                 if (r.contains("ssao_enabled"))      config.render.ssao_enabled      = r.at("ssao_enabled").get_value<bool>();
+                if (r.contains("ssao_debug_view"))   config.render.ssao_debug_view   = r.at("ssao_debug_view").get_value<bool>();
                 if (r.contains("ssr_enabled"))       config.render.ssr_enabled       = r.at("ssr_enabled").get_value<bool>();
                 if (r.contains("transparency_enabled")) config.render.transparency_enabled = r.at("transparency_enabled").get_value<bool>();
                 if (r.contains("ssr_reflect_transparent")) config.render.ssr_reflect_transparent = r.at("ssr_reflect_transparent").get_value<bool>();
@@ -179,6 +180,10 @@ struct AppConfig {
                 if (r.contains("cube_shadow_resolution")) config.render.cube_shadow_resolution = r.at("cube_shadow_resolution").get_value<uint32_t>();
                 if (r.contains("shadow_bias"))            config.render.shadow_bias            = r.at("shadow_bias").get_value<float>();
                 if (r.contains("shadow_distance"))        config.render.shadow_distance        = r.at("shadow_distance").get_value<float>();
+                if (r.contains("soft_shadows"))            config.render.soft_shadows            = r.at("soft_shadows").get_value<bool>();
+                if (r.contains("shadow_softness"))         config.render.shadow_softness         = r.at("shadow_softness").get_value<float>();
+                if (r.contains("point_shadow_softness"))   config.render.point_shadow_softness   = r.at("point_shadow_softness").get_value<float>();
+                if (r.contains("shadow_pcf_samples"))      config.render.shadow_pcf_samples      = r.at("shadow_pcf_samples").get_value<uint32_t>();
 
                 // --- Outline ---
                 if (r.contains("outline_thickness")) config.render.outline_thickness = r.at("outline_thickness").get_value<float>();

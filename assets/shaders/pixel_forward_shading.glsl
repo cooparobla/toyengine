@@ -14,8 +14,8 @@
 // including this file, already have declared (with these exact names,
 // whatever their own set/binding indices are):
 //   - `lights`            -- the LightUBO block (dir_direction/dir_color/
-//                             dir_shadow_params/dir_light_space_matrix/
-//                             light_counts/point_lights[16]).
+//                             dir_shadow_params/dir_shadow_extra/
+//                             dir_light_space_matrix/light_counts/point_lights[16]).
 //   - `dir_shadow_map`    -- sampler2DShadow.
 //   - `point_shadow_map`  -- samplerCubeShadow.
 //   - #include <gfx/brdf.glsl>, <gfx/shadow_sampling.glsl>,
@@ -24,6 +24,11 @@
 //     `g_normal_metallic`/`g_position_roughness`/`u_hiz_map`/`u_scene_color`
 //     declared first -- see transparent.frag's own include order for the
 //     canonical sequence this file assumes was already followed).
+//
+// calc_dir_shadow()/calc_point_shadow() themselves come from "pixel_shadow_body.glsl",
+// included below -- this file used to carry its own gfx_forward_calc_* copies, byte-identical
+// to pixel_lighting.frag's and gfx/surface/capture_fs.glsl's; see that file's doc for why
+// they were unified.
 
 /// Per-fragment material inputs to gfx_pixel_forward_shade() -- the subset
 /// of PBRMaterial a forward-shaded surface (mesh or SDF) needs, regardless
@@ -63,29 +68,7 @@ struct GfxForwardLightingParams {
     int   ssr_max_color_mip;
 };
 
-// Directional shadow: single hard compare -- same kernel as pixel_lighting.frag's calc_dir_shadow.
-float gfx_forward_calc_dir_shadow(vec4 light_space_pos, vec3 N, vec3 L) {
-    if (lights.dir_shadow_params.z < 0.5) return 0.0;
-
-    vec3 proj_coords = light_space_pos.xyz / light_space_pos.w;
-    proj_coords.xy = proj_coords.xy * 0.5 + 0.5;
-
-    if (proj_coords.z > 1.0 || proj_coords.x < 0.0 || proj_coords.x > 1.0 ||
-        proj_coords.y < 0.0 || proj_coords.y > 1.0) {
-        return 0.0;
-    }
-
-    float bias = max(lights.dir_shadow_params.x * (1.0 - max(dot(N, L), 0.0)), 0.0002);
-    return gfx_shadow_dir_hard(dir_shadow_map, proj_coords, bias);
-}
-
-float gfx_forward_calc_point_shadow(vec3 frag_to_light, float range) {
-    vec3 light_to_surface = -frag_to_light;
-    vec3 dir = normalize(light_to_surface);
-    float current_dist = length(frag_to_light) / range;
-    float bias = 0.05 / range;
-    return gfx_shadow_cube_hard(point_shadow_map, dir, current_dist, bias);
-}
+#include "pixel_shadow_body.glsl"
 
 /// Limb fade for the sub-texel silhouette band of this RAW, undenoised forward
 /// path -- used by the SSR miss-fallback's weight and by refraction.glsl's
@@ -178,7 +161,7 @@ vec4 gfx_pixel_forward_shade(vec3 world_pos, vec3 N, vec3 camera_pos, mat4 view,
         float normal_bias_scale = clamp(1.0 - dot(N, L), 0.0, 1.0);
         vec3 biased_pos = world_pos + N * (lights.dir_shadow_params.w * (0.5 + 0.5 * normal_bias_scale));
         vec4 light_space_pos = lights.dir_light_space_matrix * vec4(biased_pos, 1.0);
-        float shadow = gfx_forward_calc_dir_shadow(light_space_pos, N, L);
+        float shadow = calc_dir_shadow(light_space_pos, N, L);
 
         Lo += gfx_forward_shade_light(N, V, L, radiance, albedo, metallic, roughness, F0, shadow, p);
     }
@@ -201,7 +184,7 @@ vec4 gfx_pixel_forward_shade(vec3 world_pos, vec3 N, vec3 camera_pos, mat4 view,
 
         vec3 shadow_bias_pos = world_pos + N * 0.02;
         float shadow = (i == 0u && pl.attenuation.w > 0.5)
-            ? gfx_forward_calc_point_shadow(pl.position_range.xyz - shadow_bias_pos, range) : 0.0;
+            ? calc_point_shadow(pl.position_range.xyz - shadow_bias_pos, range) : 0.0;
 
         Lo += gfx_forward_shade_light(N, V, L, radiance, albedo, metallic, roughness, F0, shadow, p);
     }

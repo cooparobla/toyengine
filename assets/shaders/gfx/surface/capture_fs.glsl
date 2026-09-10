@@ -66,9 +66,9 @@ struct PointLight {
 layout(set = 1, binding = 0) uniform LightUBO {
     vec4 dir_direction;
     vec4 dir_color;
-    vec4 _reserved_was_dir_ambient; // was dir_ambient; see LightUBO's C++ doc (light_data.h)
+    vec4 dir_shadow_extra; // x=shadow_intensity, y=point_pcf_radius, z=pcf_samples, w=frame_offset -- see LightUBO's C++ doc (light_data.h)
     mat4 dir_light_space_matrix;
-    vec4 dir_shadow_params; // x=bias, y=unused, z=shadow_enabled, w=normal_bias
+    vec4 dir_shadow_params; // x=bias, y=pcf_radius_texels (0=hard), z=shadow_enabled, w=normal_bias
 
     uvec4 light_counts; // x=num_dir, y=num_point
     PointLight point_lights[16];
@@ -148,29 +148,9 @@ void gfx_surface_fragment(inout GfxTransparentSurface s);
 void gfx_surface_fragment(inout GfxTransparentSurface s) {}
 #endif
 
-// Directional shadow: single hard compare -- same kernel as transparent_fs.glsl's calc_dir_shadow.
-float calc_dir_shadow(vec4 light_space_pos, vec3 N, vec3 L) {
-    if (lights.dir_shadow_params.z < 0.5) return 0.0;
-
-    vec3 proj_coords = light_space_pos.xyz / light_space_pos.w;
-    proj_coords.xy = proj_coords.xy * 0.5 + 0.5;
-
-    if (proj_coords.z > 1.0 || proj_coords.x < 0.0 || proj_coords.x > 1.0 ||
-        proj_coords.y < 0.0 || proj_coords.y > 1.0) {
-        return 0.0;
-    }
-
-    float bias = max(lights.dir_shadow_params.x * (1.0 - max(dot(N, L), 0.0)), 0.0002);
-    return gfx_shadow_dir_hard(dir_shadow_map, proj_coords, bias);
-}
-
-float calc_point_shadow(vec3 frag_to_light, float range) {
-    vec3 light_to_surface = -frag_to_light;
-    vec3 dir = normalize(light_to_surface);
-    float current_dist = length(frag_to_light) / range;
-    float bias = 0.05 / range;
-    return gfx_shadow_cube_hard(point_shadow_map, dir, current_dist, bias);
-}
+// calc_dir_shadow()/calc_point_shadow() now come from pixel_shadow_body.glsl -- see that
+// file's doc; this used to be a hand-rolled hard-compare-only duplicate.
+#include "pixel_shadow_body.glsl"
 
 // Identical to transparent_fs.glsl's band()/shade_light() -- see file doc.
 float band(float ndl) {

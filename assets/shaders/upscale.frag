@@ -10,11 +10,14 @@
 // prefers it), so writing to it auto-encodes this shader's output from
 // linear to sRGB -- correct for a physically-lit HDR pipeline (blendy's
 // case), wrong here: post_target_ (VK_FORMAT_R8G8B8A8_UNORM, sampled below)
-// already holds the exact display-referred bytes pixel_stylize.frag computed,
-// including palette-quantized colors that must reach the screen unchanged.
-// Left alone, the implicit encode brightens every pixel relative to those
-// bytes. srgb_decode() predistorts so the hardware's encode cancels out and
-// the window matches a headless screenshot of post_target_ exactly.
+// already holds the exact display-referred, sRGB-ENCODED bytes
+// pixel_stylize.frag computed (see that shader's srgb_encode() call, right
+// after its tonemap), including palette-quantized colors that must reach the
+// screen unchanged. Left alone, the implicit encode would re-encode already-
+// encoded bytes and brighten every pixel relative to them. srgb_decode()
+// here is a genuine decode back to linear, so the hardware's encode on write
+// cancels it out and the window matches a headless screenshot of
+// post_target_ exactly.
 
 layout(location = 0) in vec2 in_uv;
 

@@ -8,6 +8,13 @@ scene:
   default_scene: "assets/scenes/pixel_demo/scene.yaml"
 
 render:
+  # --- Internal resolution ---
+  resolution_mode: fixed     # fixed | divisor
+  render_width: 1440
+  render_height: 960
+  scale_divisor: 4
+  upscale_mode: fit          # fit | integer
+
   # --- Feature toggles ---
   outline_enabled: false
   palette_enabled: false
@@ -15,6 +22,8 @@ render:
   camera_pixel_snap: true
   soft_lighting: true        # true = smooth Cook-Torrance direct lighting; false = banded/ramped cel-shaded look (this engine's default)
   ssao_enabled: true
+  ssao_debug_view: false     # renders SsaoPass's blurred output fullscreen in place of lighting;
+                              # runtime toggle, see PixelRenderConfig::ssao_debug_view
   ssr_enabled: true          # also gates the SSGI diffuse-bounce term (ssgi_intensity)
   transparency_enabled: true # forward BLEND-material pass; off by default (no demo scene uses it yet)
   ssr_reflect_transparent: true # opaque surfaces also reflect transparent geometry (roughly doubles SSR cost; requires ssr_enabled + transparency_enabled)
@@ -30,7 +39,13 @@ render:
                               # per-frame toggle -- see the `physics.debug_draw` block below for
                               # which categories (Colliders/Contacts/BVH) get gathered
   shadows_enabled: true
+  aa_mode: taa                 # off | fxaa | smaa | taa -- startup-fixed, like bloom/fog/tilt_shift above.
+                                # "taa" jitters the camera every frame, which fights camera_pixel_snap --
+                                # expected at this engine's low internal resolution; intended for a future
+                                # higher-resolution mode where the jitter's sub-texel footprint is finer
+                                # than a rendered pixel.
 
+  # --- Bloom ---                                
   bloom_threshold: 1.0        # brightness (max of R,G,B) below which nothing glows; 1.0 = "brighter than white"
   bloom_soft_knee: 0.5        # 0..1 fraction of the threshold the quadratic knee spans; 0 = hard cutoff (pops under camera motion)
   bloom_intensity: 5.0        # final multiplier on the composited glow; <= 0 disables
@@ -47,13 +62,6 @@ render:
   tilt_shift_blur_bottom:  0.7   # strength below the band (the "near" half)
   tilt_shift_max_radius:   4.0   # max blur radius in DISPLAY pixels
   tilt_shift_angle:        0.0   # degrees; rotates the focus band off horizontal
-
-  # --- Internal resolution ---
-  resolution_mode: fixed     # fixed | divisor
-  render_width: 720
-  render_height: 480
-  scale_divisor: 4
-  upscale_mode: fit          # fit | integer
 
   # --- Lighting ---
   exposure: 1.0
@@ -80,6 +88,14 @@ render:
                               # content -- so no object's position (however far off, however it
                               # got there) can perturb or blow out the shadow map. See
                               # PixelRenderConfig::shadow_distance's doc
+  soft_shadows: true           # true = rotated Vogel-disk PCF penumbra; false = single hard depth compare
+  shadow_softness: 0.15       # directional penumbra radius in WORLD units, converted to a texel
+                              # count each frame against the ortho box actually in effect -- so the
+                              # penumbra stays visually constant as the box refits to the camera
+  point_shadow_softness: 3.0  # point-light cube PCF penumbra radius in CUBE-MAP TEXELS, converted
+                              # to a tangent-space offset each frame against cube_shadow_resolution
+                              # (not comparable to shadow_softness's world units above)
+  shadow_pcf_samples: 24      # Vogel disk taps, 1..32; lower is cheaper and grainier
 
   # --- Outline ---
   outline_thickness: 0.6
@@ -94,9 +110,13 @@ render:
   dither_strength: 0.08
 
   # --- SSAO ---
-  ssao_radius: 0.5
-  ssao_bias: 2.0
-  ssao_power: 1.5
+  ssao_radius: 0.75
+  ssao_bias: 0.025          # world-space depth offset for the occlusion test in ssao.frag.
+                            # MUST stay well under ssao_radius * 0.57 (the kernel's max sample
+                            # reach, see SsaoKernel) -- a larger bias makes the test in
+                            # ssao.frag:95 unsatisfiable and silently flattens AO to 1.0,
+                            # which is indistinguishable from ssao_enabled: false.
+  ssao_power: 2.5
   ssao_kernel_size: 24
   ssao_temporal_enabled: true
   ssao_temporal_blend: 0.85
@@ -177,11 +197,6 @@ render:
                                # blows up against an otherwise-unfogged sky
 
   # --- Anti-aliasing (ported from blendy's PbrRenderPipeline; see PixelRenderConfig::aa_mode) ---
-  aa_mode: off                 # off | fxaa | smaa | taa -- startup-fixed, like bloom/fog/tilt_shift above.
-                                # "taa" jitters the camera every frame, which fights camera_pixel_snap --
-                                # expected at this engine's low internal resolution; intended for a future
-                                # higher-resolution mode where the jitter's sub-texel footprint is finer
-                                # than a rendered pixel.
   fxaa_subpixel: 0.75           # blend weight of FXAA's subpixel-aliasing term
   fxaa_edge_threshold: 0.166    # local contrast (fraction of lumaMax) below which FXAA does nothing
   fxaa_edge_threshold_min: 0.0312 # absolute contrast floor -- avoids AA-ing near-black noise

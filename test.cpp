@@ -162,6 +162,41 @@ void test_app_config_load_round_trips_aa_settings() {
     std::filesystem::remove(path);
 }
 
+void test_pixel_render_config_soft_shadow_defaults() {
+    toy::render::PixelRenderConfig cfg;
+    expect(cfg.soft_shadows == true, "PixelRenderConfig: soft_shadows defaults to true");
+    expect(cfg.shadow_softness == 0.15f, "PixelRenderConfig: shadow_softness defaults to 0.15");
+    expect(cfg.point_shadow_softness == 3.0f, "PixelRenderConfig: point_shadow_softness defaults to 3.0");
+    expect(cfg.shadow_pcf_samples == 24u, "PixelRenderConfig: shadow_pcf_samples defaults to 24");
+}
+
+void test_app_config_load_round_trips_soft_shadow_settings() {
+    // Distinct, non-default values for every soft-shadow knob, so a parser bug that silently
+    // kept the in-class default (e.g. a typo'd YAML key) wouldn't pass by coincidence.
+    std::string path = std::string(ROOT_DIR) + "/output/test_soft_shadow_config.yaml";
+    {
+        std::ofstream out(path);
+        out << "render:\n"
+               "  soft_shadows: false\n"
+               "  shadow_softness: 0.42\n"
+               "  point_shadow_softness: 0.07\n"
+               "  shadow_pcf_samples: 8\n";
+    }
+
+    toy::core::AppConfig config = toy::core::AppConfig::load(path);
+    expect(config.render.soft_shadows == false, "AppConfig::load: soft_shadows round-trips");
+    expect(config.render.shadow_softness == 0.42f, "AppConfig::load: shadow_softness round-trips");
+    expect(config.render.point_shadow_softness == 0.07f, "AppConfig::load: point_shadow_softness round-trips");
+    expect(config.render.shadow_pcf_samples == 8u, "AppConfig::load: shadow_pcf_samples round-trips");
+
+    std::filesystem::remove(path);
+}
+
+void test_directional_light_shadow_intensity_default() {
+    coopa::gfx::engine::components::DirectionalLightComponent dl;
+    expect(dl.shadow_intensity == 1.0f, "DirectionalLightComponent: shadow_intensity defaults to 1.0 (full occlusion)");
+}
+
 void test_pixel_density_orthographic() {
     // ortho_size=5.4, render_height=270 -> 10.8/270 = 0.04 world units/px
     float density = toy::render::compute_pixel_density(true, 5.4f, 270);
@@ -654,6 +689,9 @@ int main() {
     test_render_resolution_divisor_mode();
     test_pixel_render_config_aa_defaults();
     test_app_config_load_round_trips_aa_settings();
+    test_pixel_render_config_soft_shadow_defaults();
+    test_app_config_load_round_trips_soft_shadow_settings();
+    test_directional_light_shadow_intensity_default();
     test_pixel_density_orthographic();
     test_pixel_density_perspective_disabled();
     test_sdf_clip_rect_on_screen();

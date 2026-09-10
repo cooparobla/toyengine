@@ -396,6 +396,7 @@ scene:
           color: { r: 1.0, g: 0.97, b: 0.9 }
           intensity: 1.0
           cast_shadows: true
+          shadow_intensity: 0.6
       children: []
 
     - name: point

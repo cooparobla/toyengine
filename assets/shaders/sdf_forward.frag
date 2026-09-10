@@ -34,9 +34,9 @@ struct PointLight {
 layout(set = 1, binding = 0) uniform LightUBO {
     vec4 dir_direction;
     vec4 dir_color;
-    vec4 _reserved_was_dir_ambient; // was dir_ambient; see LightUBO's C++ doc (light_data.h)
+    vec4 dir_shadow_extra; // x=shadow_intensity, y=point_pcf_radius, z=pcf_samples, w=frame_offset -- see LightUBO's C++ doc (light_data.h)
     mat4 dir_light_space_matrix;
-    vec4 dir_shadow_params; // x=bias, y=unused, z=shadow_enabled, w=normal_bias
+    vec4 dir_shadow_params; // x=bias, y=pcf_radius_texels (0=hard), z=shadow_enabled, w=normal_bias
 
     uvec4 light_counts; // x=num_dir, y=num_point
     PointLight point_lights[16];

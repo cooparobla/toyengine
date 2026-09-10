@@ -53,9 +53,9 @@ struct PointLight {
 layout(set = 1, binding = 0) uniform LightUBO {
     vec4 dir_direction;
     vec4 dir_color;
-    vec4 _reserved_was_dir_ambient; // was dir_ambient; see LightUBO's C++ doc (light_data.h)
+    vec4 dir_shadow_extra; // x=shadow_intensity, y=point_pcf_radius, z=pcf_samples, w=frame_offset -- see LightUBO's C++ doc (light_data.h)
     mat4 dir_light_space_matrix;
-    vec4 dir_shadow_params; // x=bias, y=unused, z=shadow_enabled, w=normal_bias
+    vec4 dir_shadow_params; // x=bias, y=pcf_radius_texels (0=hard), z=shadow_enabled, w=normal_bias
 
     uvec4 light_counts; // x=num_dir, y=num_point
     PointLight point_lights[16];
@@ -94,6 +94,7 @@ layout(push_constant) uniform PixelParams {
 layout(location = 0) out vec4 out_color;
 
 #include "indirect_hooks.glsl"
+#include "pixel_shadow_body.glsl"
 
 // Quantizes N.L into `params.light_bands` discrete steps -- the core of the
 // cel-shaded look. Bypassed entirely when soft_lighting is on (smooth N.L
@@ -103,36 +104,6 @@ float band(float ndl) {
     if (params.soft_lighting != 0.0) return ndl;
     if (params.light_bands <= 1.0) return ndl;
     return floor(ndl * params.light_bands) / params.light_bands;
-}
-
-// Directional shadow: single hard compare. Kernel shared with every other
-// consumer via gfx/shadow_sampling.glsl.
-float calc_dir_shadow(vec4 light_space_pos, vec3 N, vec3 L) {
-    if (lights.dir_shadow_params.z < 0.5) return 0.0;
-
-    vec3 proj_coords = light_space_pos.xyz / light_space_pos.w;
-    proj_coords.xy = proj_coords.xy * 0.5 + 0.5;
-
-    if (proj_coords.z > 1.0 || proj_coords.x < 0.0 || proj_coords.x > 1.0 ||
-        proj_coords.y < 0.0 || proj_coords.y > 1.0) {
-        return 0.0;
-    }
-
-    float bias = max(lights.dir_shadow_params.x * (1.0 - max(dot(N, L), 0.0)), 0.0002);
-    return gfx_shadow_dir_hard(dir_shadow_map, proj_coords, bias);
-}
-
-// Point shadow: single hard compare. Only lights.point_lights[0] can be a
-// real shadow caster -- toyengine's ShadowMapTarget holds exactly one cube
-// map at a time. `frag_to_light` here is surface-to-light (negated at the
-// point of sampling, since the cube map was rendered looking outward FROM
-// the light -- see shadow_cube.vert/frag).
-float calc_point_shadow(vec3 frag_to_light, float range) {
-    vec3 light_to_surface = -frag_to_light;
-    vec3 dir = normalize(light_to_surface);
-    float current_dist = length(frag_to_light) / range;
-    float bias = 0.05 / range;
-    return gfx_shadow_cube_hard(point_shadow_map, dir, current_dist, bias);
 }
 
 // Direct lighting for one light, multiplied by (1 - shadow). Two looks --

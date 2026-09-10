@@ -33,6 +33,15 @@ struct PixelRenderConfig {
     bool camera_pixel_snap = true;  /**< Orthographic cameras only. */
     bool soft_lighting     = false; /**< true = smooth Cook-Torrance direct lighting; false = this engine's default banded/ramped cel-shaded look. */
     bool ssao_enabled      = true;
+    /**
+     * Debug view: draws SsaoPass's bound output (its blurred occlusion buffer when
+     * ssao_enabled, or its neutral 1.0 texture otherwise -- see PixelRenderPipeline's
+     * ssao_view selection) fullscreen in place of lighting, via ssao_debug.frag. A runtime
+     * flag re-read every frame, same policy as ssr_enabled below. Skips the SSR composite
+     * and forward transparent pass for that frame (nothing left to composite onto); bloom
+     * and tonemapping still run over the debug image.
+     */
+    bool ssao_debug_view   = false;
     bool ssr_enabled       = true;  /**< Also gates the SSGI diffuse-bounce term (ssgi_intensity). */
     bool transparency_enabled = false;  /**< Forward BLEND-material pass, drawn after SSR compositing. */
     /**
@@ -148,6 +157,28 @@ struct PixelRenderConfig {
      *        far off, however it got there) can perturb or blow out the shadow frustum.
      */
     float    shadow_distance        = 60.0f;
+    bool     soft_shadows           = true;  /**< false = single hard depth compare (the pre-existing look). */
+    /**
+     * @brief Directional PCF penumbra radius in WORLD units, not texels. Converted to a
+     *        texel count every frame against the ortho box actually in effect (see
+     *        update_dir_shadow_matrix_()), so the penumbra stays visually constant in world
+     *        units even as that box refits to the camera -- a fixed texel-count radius would
+     *        otherwise shrink to imperceptible on a scene-spanning box and grow huge on a
+     *        tight one. Ignored when soft_shadows is false.
+     */
+    float    shadow_softness        = 0.15f;
+    /**
+     * @brief Point-light cube-map PCF penumbra radius, in cube-map TEXELS (comparable in
+     *        spirit to shadow_softness above, though that one is world units since a
+     *        directional shadow map has a single, frame-varying world-per-texel scale while
+     *        a point light's cube faces do not). Converted to a tangent-space offset on a
+     *        unit sample direction every frame against cube_shadow_resolution (see
+     *        gfx_shadow_cube_pcf_vogel's doc for that unit) and clamped to 8 texels, the
+     *        kernel's own practical limit before the penumbra swallows the whole shadow.
+     *        Ignored when soft_shadows is false.
+     */
+    float    point_shadow_softness  = 3.0f;
+    uint32_t shadow_pcf_samples     = 24;    /**< Vogel disk taps for directional soft shadows; clamped to 1..32, the kernel's own hard limit. */
 
     // --- Outline ---
     float     outline_thickness = 1.0f;     /**< In low-resolution texels. */

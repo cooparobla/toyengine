@@ -19,7 +19,7 @@ render:
   outline_enabled: false
   palette_enabled: false
   dither_enabled: false
-  camera_pixel_snap: true
+  camera_pixel_snap: false
   soft_lighting: true        # true = smooth Cook-Torrance direct lighting; false = banded/ramped cel-shaded look (this engine's default)
   ssao_enabled: true
   ssao_debug_view: false     # renders SsaoPass's blurred output fullscreen in place of lighting;
@@ -35,6 +35,14 @@ render:
   tilt_shift_enabled: true    # Link's Awakening (Switch) style diorama blur; runs at DISPLAY
                               # resolution after the upscale (a lens effect, not a pixel-grid
                               # effect) -- startup-fixed, like bloom/fog (see gfxcoopa's TiltShiftPass)
+  dof_enabled: true          # physically-based depth of field; runs at RENDER resolution, on
+                              # linear HDR, before bloom (so defocused highlights bloom into real
+                              # bokeh) -- startup-fixed, like bloom/fog/tilt_shift above. Independent
+                              # of tilt_shift_enabled: they compose (depth-driven lens blur here,
+                              # screen-position diorama blur there); see gfxcoopa's DofPass
+  dof_debug_view: false       # renders the signed circle-of-confusion field in place of the image
+                              # (red = near field, blue = far field, black = in focus); RUNTIME
+                              # flag, like ssao_debug_view
   debug_lines_enabled: false  # physics collider/contact wireframes (toyengine's DebugLinePass);
                               # per-frame toggle -- see the `physics.debug_draw` block below for
                               # which categories (Colliders/Contacts/BVH) get gathered
@@ -43,7 +51,11 @@ render:
                                 # "taa" jitters the camera every frame, which fights camera_pixel_snap --
                                 # expected at this engine's low internal resolution; intended for a future
                                 # higher-resolution mode where the jitter's sub-texel footprint is finer
-                                # than a rendered pixel.
+                                # than a rendered pixel. Previously also skipped outright whenever
+                                # dof_enabled was true (DofPass's bokeh gather used a fixed, unrotated tap
+                                # pattern that visibly swam under the jitter); no longer needed now that
+                                # the gather is per-pixel rotated -- see the jitter block's own comment in
+                                # PixelRenderPipeline::render().
 
   # --- Bloom ---                                
   bloom_threshold: 1.0        # brightness (max of R,G,B) below which nothing glows; 1.0 = "brighter than white"
@@ -62,6 +74,40 @@ render:
   tilt_shift_blur_bottom:  0.7   # strength below the band (the "near" half)
   tilt_shift_max_radius:   4.0   # max blur radius in DISPLAY pixels
   tilt_shift_angle:        0.0   # degrees; rotates the focus band off horizontal
+
+  # --- Depth of field ---
+  dof_focus_mode:      manual  # manual | orbit_target | object -- global fallback; the demo
+                                # camera's own `focus_object: cube.000` (scene.yaml) overrides
+                                # this for that camera, so this global setting only matters for
+                                # a camera that doesn't set focus_object itself
+  dof_focus_object:    ""      # ':'-separated scene path (e.g. sdf_blob:sdf_blob_sphere), used
+                                # when dof_focus_mode == object
+  dof_focus_smoothing: 8.0     # focus-rack rate, 1/sec; <= 0 snaps. Object-focus mode only --
+                                # eases the focal plane onto a newly (re)resolved target rather
+                                # than snapping, e.g. when focus_object first resolves or changes
+  dof_focus_distance: 8.0     # metres; fallback used only when dof_focus_mode == manual, or
+                              # orbit_target with a non-Orbit-mode camera (e.g. Fly)
+  dof_aperture:       2.8     # f-stop; lower = shallower depth of field (stronger blur away from focus)
+  dof_focal_length:   0.0     # mm; <= 0 takes the active camera's `lens`
+  dof_sensor_width:   0.0     # mm; <= 0 takes the active camera's `sensor_width`
+  dof_max_radius:     16.0    # |CoC| ceiling, in render-resolution pixels. Previously lowered to
+                              # 6.0 to hide a screen-locked dot lattice in the background -- but
+                              # that lattice was dof_spiral_tap()'s spiral being unrotated, since
+                              # fixed (gfxcoopa's dof_common.glsl now rotates it per-pixel via
+                              # dof_ign_angle()), and dof_composite.frag's blend used to be
+                              # normalized BY this value, so lowering it also silently raised
+                              # blur opacity on in-focus objects (see that shader's own fix
+                              # comment). With the blend now a fixed full-res-pixel band
+                              # independent of this ceiling, 16.0 sits above this demo's physical
+                              # CoC-at-infinity (~12.7px at 85mm/f2.0/~11.5m focus/1440px render
+                              # width), so this is a true no-op safety clamp again, not a de facto
+                              # strength dial -- retune dof_aperture (or the camera's own
+                              # `aperture`/`lens` in scene.yaml) to change how strong the blur is.
+  dof_sample_count:   48      # spiral gather taps; clamped to [8, 48] in-shader. Kept at the
+                              # in-shader ceiling now that max_radius is bigger again -- more
+                              # taps are needed to keep density up over the larger disc
+  dof_blade_count:    0       # < 3 = perfect disc bokeh; else an N-sided polygonal iris
+  dof_blade_rotation: 0.0     # degrees; rotates the polygonal iris
 
   # --- Lighting ---
   exposure: 1.0

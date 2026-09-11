@@ -16,8 +16,12 @@
 //   - `u_scene_color`  -- sampler2D, the prefiltered scene-colour mip chain
 //                         (see SceneColorMipPass; LINEAR/MIPMAP_MODE_LINEAR,
 //                         maxLod = mip_levels_, so a fractional LOD works).
+//   - `u_hiz_map`      -- sampler2D, opaque G-buffer depth (mip 0 is the raw
+//                         depth attachment; NEAREST filter -- see HiZPass),
+//                         for gfx_refraction_apply()'s occluder-validity walk.
 //   - #include <gfx/brdf.glsl> (fresnel_schlick), <gfx/ssr_common.glsl>
-//     (ssr_ndc_to_uv), and "pixel_forward_shading.glsl"
+//     (ssr_ndc_to_uv, ssr_texel_world_size), <gfx/ssr_trace_body.glsl>
+//     (gfx_ssr_get_view_z), and "pixel_forward_shading.glsl"
 //     (gfx_forward_silhouette_fade) -- all already included by
 //     transparent.frag ahead of this file.
 
@@ -42,6 +46,22 @@ struct GfxRefractionParams {
     float density;         // Beer-Lambert absorption strength
     bool  fresnel_enabled; // dim transmission at grazing angles
 };
+
+// Occluder-validity walk-back tuning for gfx_refraction_apply() below -- file-local
+// constants, not config knobs, since they're a numerical-robustness detail (how many NEAREST
+// depth taps to spend, how much bias to give the comparison) rather than an authored look.
+const int   GFX_REFRACTION_DEPTH_STEPS       = 4;   // halvings; 4 -> worst case shrinks duv to 1/16th
+const float GFX_REFRACTION_DEPTH_BIAS_TEXELS = 2.0; // mirrors ssr_bias_texels' role in ssr_trace_body.glsl
+
+/// Opaque view-space depth (negative; RH + DEPTH_ZERO_TO_ONE, more negative = farther) at
+/// `uv`. Hi-Z mip 0 is the G-buffer depth attachment verbatim and the sampler is NEAREST
+/// (see HiZPass), so this is an exact per-texel read, not a filtered blend across an
+/// occluder edge. Background texels clear to depth 1.0 (gbuffer_target.h) and therefore
+/// linearise to the far plane -- "behind everything" -- so the occluder-validity check below
+/// needs no separate background case.
+float gfx_refraction_scene_view_z(vec2 uv, mat4 inv_proj) {
+    return gfx_ssr_get_view_z(textureLod(u_hiz_map, clamp(uv, 0.0, 1.0), 0.0).r, inv_proj);
+}
 
 /// Samples u_scene_color at `uv` with chromatic aberration split by `chromatic`
 /// around `duv`'s direction, at mip level `lod`. A single tap when chromatic <= 0.
@@ -75,12 +95,15 @@ vec3 gfx_refraction_sample(vec2 uv, vec2 duv, float chromatic, float lod) {
 /// @param F0           Base reflectance (mix(0.04, albedo, metallic)), for the
 ///                     optional Fresnel transmission falloff.
 /// @param view, proj   Camera view/projection, for projecting the transmitted ray.
+/// @param inv_proj     inverse(proj) -- caller-supplied (not computed here) so the
+///                     occluder-validity walk below, which re-evaluates it per step,
+///                     doesn't each call inverse() itself.
 /// @param mat          Per-object refraction inputs.
 /// @param p            Per-frame refraction tuning.
 /// @param max_color_mip Highest valid LOD into u_scene_color (ForwardGlobals::ssr_mip.x).
 vec4 gfx_refraction_apply(vec4 shaded, vec3 world_pos, vec3 N, vec3 V, float roughness, vec3 F0,
-                          mat4 view, mat4 proj, GfxRefractionMaterial mat, GfxRefractionParams p,
-                          int max_color_mip) {
+                          mat4 view, mat4 proj, mat4 inv_proj, GfxRefractionMaterial mat,
+                          GfxRefractionParams p, int max_color_mip) {
     if (!p.enabled || !mat.enabled || mat.ior <= 1.0) return shaded;
 
     // Transmitted ray direction (Snell's law, air -> material) and the point it reaches after
@@ -102,6 +125,22 @@ vec4 gfx_refraction_apply(vec4 shaded, vec3 world_pos, vec3 N, vec3 V, float rou
     float max_offset = max(p.max_offset, 0.0);
     if (offset_len > max_offset && offset_len > 0.0) {
         duv *= max_offset / offset_len;
+    }
+    // Screen-space refraction can only show what u_scene_color already holds at the offset
+    // texel -- and nothing stops that texel belonging to geometry NEARER the camera than
+    // this surface. It did: the pixel_demo water plane sampled ~22 screen texels "into"
+    // cube.000, which stands well in front of it, and drew a ghost of the cube's top face
+    // inside the pond. Halving the offset until the tap lands on something actually behind
+    // this fragment degrades smoothly to zero offset near a foreground occluder, instead of
+    // a hard cutoff, which would read as a seam. i == "keep the full-length duv" is always a
+    // candidate; the loop only ever shrinks it, never grows it back once shortened.
+    float frag_view_z = (view * vec4(world_pos, 1.0)).z; // negative; RH + DEPTH_ZERO_TO_ONE
+    float depth_bias = GFX_REFRACTION_DEPTH_BIAS_TEXELS *
+        ssr_texel_world_size(frag_view_z, proj[1][1], float(textureSize(u_hiz_map, 0).y));
+    for (int i = 0; i < GFX_REFRACTION_DEPTH_STEPS; ++i) {
+        // More negative == farther, so "behind me" is scene_view_z <= my view_z (+ bias).
+        if (gfx_refraction_scene_view_z(uv_a + duv, inv_proj) <= frag_view_z + depth_bias) break;
+        duv *= 0.5;
     }
     vec2 uv = uv_a + duv;
 

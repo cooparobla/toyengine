@@ -187,6 +187,16 @@ public:
         }
     }
 
+    /**
+     * @brief Current smoothed camera-to-target orbit radius, in world units.
+     *
+     * Meaningful only in Orbit mode (0 in Fly mode, which has no target). Exposed
+     * for DofPass's `dof_focus_mode: orbit_target` autofocus (see
+     * PixelRenderPipeline::render()): the orbit rig already IS a camera-to-subject
+     * distance, so autofocus reads this directly rather than re-deriving it.
+     */
+    float orbit_distance() const { return mode == CameraControlMode::Orbit ? smoothed_distance_ : 0.0f; }
+
 private:
     /** @brief Sentinel meaning "not set in YAML, derive from the seed transform in start()". */
     static constexpr float kUnset = -10000.0f;

@@ -245,6 +245,13 @@ scene:
             alpha_mode: CUTOUT
             alpha_cutoff: 0.5
             texture_alpha_mask: textures/noise_mask.png
+            # cull_backfaces test: PBRMaterial::cull_backfaces (default true, matching every
+            # other material in this scene) is now a real per-material field -- see
+            # foliage_card.000's comment above, which used to note no such field existed.
+            # false here means both winding orders render, so the CUTOUT alpha holes this
+            # material already punches (via texture_alpha_mask above) reveal the sphere's
+            # own interior back wall instead of just showing the floor behind it.
+            cull_backfaces: false
       children: []
 
     # Emissive test: a small glowing orb resting beside opaque_sphere.000, at the same height --
@@ -352,6 +359,14 @@ scene:
           fov: 50.0
           near_clip_plane: 0.1
           far_clip_plane: 1000.0
+          lens: 85.0       # mm; per-camera override for DofPass's thin-lens CoC (see
+                            # render.dof_focal_length in config.yaml, which is <= 0 here so
+                            # this value is the one actually used)
+          aperture: 2.0     # f-stop; per-camera override for render.dof_aperture
+          focus_object: cube.000  # ':'-separated scene path (e.g. sdf_blob:sdf_blob_sphere);
+                                    # a non-empty value puts THIS camera in object-focus mode,
+                                    # tracking cube.000's own depth every frame regardless of
+                                    # render.dof_focus_mode below
         - type: CameraController
           mode: orbit
           target: { x: 0.0, y: 0.0, z: 0.5 }

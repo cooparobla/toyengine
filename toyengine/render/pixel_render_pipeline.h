@@ -71,6 +71,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <gfxcoopa/core/device.h>
@@ -125,6 +126,7 @@
 #include <gfxcoopa/engine/passes/ssr_pass.h>
 #include <toyengine/render/passes/gbuffer_visualize_pass.h>
 #include <gfxcoopa/engine/passes/pixel_stylize_pass.h>
+#include <gfxcoopa/engine/passes/dof_pass.h>
 #include <gfxcoopa/engine/passes/bloom_pass.h>
 #include <gfxcoopa/engine/passes/tilt_shift_pass.h>
 #include <gfxcoopa/engine/passes/fxaa_pass.h>
@@ -132,6 +134,7 @@
 #include <gfxcoopa/engine/passes/taa_pass.h>
 #include <toyengine/render/passes/upscale_pass.h>
 #include <toyengine/render/passes/debug_line_pass.h>
+#include <toyengine/scene/camera_controller.h>
 
 namespace toy {
 namespace render {
@@ -701,18 +704,42 @@ public:
         fog_pass_->set_source_images(pre_fog_view_typed_, gbuffer_target_.g1_view_typed(),
                                      gbuffer_target_.g2_view_typed(), linear_sampler_);
 
-        // The image BOTH pixel_stylize_pass_ and bloom_pass_ read: the final pre-tonemap HDR
-        // frame. One local, not two independent expressions, so the two can never drift apart
-        // (same single-source-of-truth reasoning as config_.indirect). Fixed at construction,
-        // same startup-only-binding policy as pre_fog_view_typed_ above.
+        // The image DofPass reads: the final pre-tonemap HDR frame, before any lens
+        // effect has touched it. Fixed at construction, same startup-only-binding
+        // policy as pre_fog_view_typed_ above.
         //
         // This is a deliberate CORRECTNESS change from bloom's previous implementation, not
         // just a stability one: that version sourced offscreen_target_ (pre-SSR, pre-
         // transparent, pre-fog) purely as a side effect of reusing scene_color_mip_pass_'s
         // chain, so SSR reflections, BLEND geometry and fog never contributed to the glow.
-        // They do now.
-        coopa::gfx::TextureView post_source_view =
+        // They do now (and, transitively, so does DOF's defocus).
+        coopa::gfx::TextureView pre_dof_view =
             config_.fog_enabled ? fog_target_.color_view_typed() : pre_fog_view_typed_;
+
+        // Physically-based depth of field (thin-lens CoC -> half-res bokeh gather ->
+        // full-res composite -- see gfxcoopa's dof_pass.h). Always constructed (mirrors
+        // bloom_pass_/fog_pass_/tilt_shift_pass_'s always-on-but-runtime-gated policy),
+        // sized to render_extent_ (NOT display resolution -- depth only exists at
+        // render_extent_, and DOF is a lens property of the image being formed, not a
+        // filter over the finished pixel-art frame the way tilt_shift_pass_ is).
+        dof_pass_ = std::make_unique<coopa::gfx::engine::passes::DofPass>(
+            device, allocator, render_extent_.width, render_extent_.height,
+            pre_dof_view, gbuffer_target_.depth_view_typed(),
+            linear_sampler_, nearest_sampler_,
+            config_.shaders("fullscreen.vert"),
+            config_.shaders("dof_coc.frag"),
+            config_.shaders("dof_bokeh.frag"),
+            config_.shaders("dof_composite.frag"));
+
+        // The image BOTH pixel_stylize_pass_ and bloom_pass_ read: pre_dof_view, or
+        // dof_pass_'s result once config_.dof_enabled was true at construction. One
+        // local, not two independent expressions, so the two can never drift apart
+        // (same single-source-of-truth reasoning as config_.indirect). Startup-fixed,
+        // same caveat as pre_fog_view_typed_/pre_dof_view above: flipping
+        // config_.dof_enabled without a pipeline rebuild would leave bloom and stylize
+        // reading a target dof_pass_ never wrote this frame.
+        coopa::gfx::TextureView post_source_view =
+            config_.dof_enabled ? dof_pass_->result_view_typed() : pre_dof_view;
 
         // Independent bloom pyramid (bright-pass threshold -> multi-tap downsample ->
         // tent-filter upsample+combine -- see gfxcoopa's bloom_pass.h). Always constructed
@@ -933,6 +960,13 @@ public:
         glm::mat4 proj = cam ? cam->get_projection_matrix(aspect) : glm::mat4(1.0f);
         glm::vec3 cam_pos = cam ? cam->get_world_position() : glm::vec3(0.0f);
 
+        // Resolved here (unjittered view, before the TAA jitter below) rather than
+        // inline in the DOF block further down: the object-focus branch advances
+        // smoothed_dof_focus_, a dt-driven mutable member, and that block sits inside
+        // the [&] command-recording lambda this function opens later -- advancing
+        // state during command recording is a hazard the rest of this pipeline avoids.
+        float dof_focus_distance = resolve_dof_focus_(cam, view, scene, dt);
+
         // TAA sub-pixel jitter, ported verbatim from blendy's PbrRenderPipeline (see
         // blendy/src/blendy/render/pbr_render_pipeline.h's own jitter block): an 8-frame
         // Halton(2,3) sequence added to proj[2][0]/[2][1] (the projection matrix's jitter
@@ -946,6 +980,22 @@ public:
         // in its own prev_view_proj_ equivalent specifically so SSAO's/SSR's temporal
         // resolves reproject against the camera TAA is actually seeing, not an unjittered
         // one an 8-frame Halton cycle would make them crawl against.
+        //
+        // This USED to be skipped whenever dof_enabled, because dof_bokeh.frag's spiral
+        // gather was a single FIXED, unrotated tap pattern (gfx/dof_common.glsl's
+        // dof_spiral_tap() had no per-pixel rotation): wherever the circle of confusion
+        // saturated -- most of a typical frame, since dof_max_radius clips a wide range of
+        // depths to the same value -- every fragment gathered the exact same n offsets, so
+        // the "blur" was really n copies of the source re-drawn at fixed screen-space
+        // offsets. Jittering the source each frame shifts which texels those fixed offsets
+        // land on, so the whole pattern visibly swam frame-to-frame -- variation taa_pass_'s
+        // naive, non-reprojecting 3x3 AABB clamp (no depth/velocity, see assets/shaders/
+        // taa.frag) couldn't distinguish from real new geometry, and it baked in as
+        // streaking on cube.000's albedo+normal-mapped faces. dof_spiral_tap() now takes a
+        // per-pixel rotation (dof_ign_angle(gl_FragCoord.xy), gfxcoopa's dof_bokeh.frag) --
+        // every fragment's gather decorrelates from its neighbours instead of repeating one
+        // fixed pattern, so a sub-pixel jitter no longer moves the result by more than TAA's
+        // own clamp already tolerates from ordinary lighting/SSAO/SSR noise.
         const glm::mat4 unjittered_proj = proj;
         if (config_.aa_mode == "taa") {
             static const float halton_offset[8][2] = {
@@ -1598,6 +1648,41 @@ public:
                     fog_target_.end(cmd);
                 }
 
+                // Depth of field. After fog (so fogged geometry defocuses too) and before
+                // bloom (so defocused HDR highlights bloom into real bokeh, rather than DOF
+                // blurring an already-glowing image). Gated on the same startup-fixed flag
+                // post_source_view was chosen from at construction.
+                if (config_.dof_enabled) {
+                    coopa::gfx::engine::passes::DofPass::Params dof_params{};
+
+                    // Per-camera override > config.yaml > CameraComponent fallback. The <= 0
+                    // sentinel on both the config field and the camera field is what keeps
+                    // scenes/configs that set neither on the built-in defaults.
+                    dof_params.focal_length_mm = config_.dof_focal_length > 0.0f
+                        ? config_.dof_focal_length : (cam ? cam->lens : 50.0f);
+                    dof_params.sensor_width_mm = config_.dof_sensor_width > 0.0f
+                        ? config_.dof_sensor_width : (cam ? cam->sensor_width : 36.0f);
+                    dof_params.aperture = (cam && cam->aperture > 0.0f)
+                        ? cam->aperture : config_.dof_aperture;
+
+                    // Resolved once per frame, outside this recording lambda -- see
+                    // resolve_dof_focus_()'s own doc for why (dt-driven smoothing state).
+                    dof_params.focus_distance = glm::max(dof_focus_distance, 0.01f);
+
+                    dof_params.max_radius        = config_.dof_max_radius;
+                    dof_params.sample_count      = config_.dof_sample_count;
+                    dof_params.blade_count       = config_.dof_blade_count;
+                    dof_params.blade_rotation_deg = config_.dof_blade_rotation;
+                    // Same three-line camera idiom pixel_stylize_pass_'s push constants use
+                    // below, for the same linearization formula (see gfx/depth.glsl).
+                    dof_params.camera_near           = cam ? cam->clip_start : 0.1f;
+                    dof_params.camera_far            = cam ? cam->clip_end : 1000.0f;
+                    dof_params.camera_is_perspective = (!cam || cam->type == CameraType::Perspective);
+                    dof_params.debug_view = config_.dof_debug_view;
+
+                    dof_pass_->execute(cmd, dof_params);
+                }
+
                 // Bloom pyramid. After the fog branch (so fog and everything before it
                 // bloom too) and before post_target_, whose pixel_stylize_pass_ draw below
                 // composites bloom_pass_'s finished result. Gated on the same startup-fixed
@@ -1733,6 +1818,97 @@ private:
      *  Mirrors current_camera_set()/current_light_set(); see light_datas_'s own doc. */
     coopa::gfx::engine::data::LightUBO& current_light_data() {
         return light_datas_[light_frame_]->data();
+    }
+
+    /**
+     * @brief Resolves this frame's DOF focus distance, in metres, before command recording.
+     *
+     * Precedence (unchanged from the pre-object-focus behavior for the first two, plus a
+     * new third source):
+     *   1. CameraComponent::focus_distance (per-camera, `> 0` overrides everything below)
+     *   2. config_.dof_focus_distance (manual, global fallback)
+     *   3a. CameraComponent::focus_object, if non-empty, self-activates object focus for
+     *       THIS camera regardless of config_.dof_focus_mode
+     *   3b. otherwise, config_.dof_focus_mode == "orbit_target" or "object" activates the
+     *       corresponding global mode
+     * Object focus resolves `path` via Scene::find_object_by_path() and takes the
+     * view-space depth (pixel_math.h's view_space_depth()) of its Transform -- exactly
+     * the quantity DofPass::dof_signed_coc() consumes, unlike orbit_target's RADIAL
+     * distance to the orbit pivot. A depth <= 0 (object behind the eye, or unresolved)
+     * falls through to the distance from steps 1-2 rather than being trusted -- same
+     * defensive shape as orbit_target's existing `orbit_dist > 0.0f` guard.
+     *
+     * Only object focus is smoothed (config_.dof_focus_smoothing, exp_smooth_toward()):
+     * orbit_target is already smoothed twice over by CameraController's own
+     * follow_smoothing/movement_smoothing, and manual/orbit_target must stay exactly as
+     * responsive as before this feature existed -- smoothing a NEW path only is what
+     * keeps existing scenes pixel-identical.
+     *
+     * Called once per frame from render(), before the [&] command-recording lambda:
+     * smoothed_dof_focus_ is dt-driven mutable state, and advancing it during command
+     * recording (where the old inline computation used to live) is a hazard the rest of
+     * this pipeline avoids elsewhere.
+     *
+     * @param cam  Active camera, or nullptr (falls back to config-only values).
+     * @param view This frame's UNJITTERED view matrix (render()'s `view`, built before
+     *             the TAA jitter is added to `proj` -- view-space depth doesn't involve
+     *             the projection matrix at all, but using the same matrix everything
+     *             else in this function calls "the" view matrix avoids any ambiguity).
+     * @param scene Scene to resolve dof_focus_object/focus_object's path against.
+     * @param dt    Frame delta time, for the object-focus smoothing step.
+     * @return Focus distance in metres (unclamped; render()'s DOF block still applies
+     *         its own glm::max(.., 0.01f) floor before handing it to DofPass).
+     */
+    float resolve_dof_focus_(const coopa::gfx::engine::components::CameraComponent* cam,
+                             const glm::mat4& view, coopa::scene::Scene& scene, float dt) {
+        float focus = (cam && cam->focus_distance > 0.0f)
+            ? cam->focus_distance : config_.dof_focus_distance;
+
+        std::string_view path = (cam && !cam->focus_object.empty())
+            ? std::string_view(cam->focus_object)
+            : (config_.dof_focus_mode == "object" ? std::string_view(config_.dof_focus_object)
+                                                   : std::string_view());
+
+        bool object_mode = false;
+        if (!path.empty()) {
+            object_mode = true;
+            if (auto* obj = scene.find_object_by_path(path)) {
+                if (auto* tc = obj->get_transform()) {
+                    float depth = view_space_depth(view, glm::vec3(tc->get_world_matrix()[3]));
+                    if (depth > 0.0f) focus = depth;
+                }
+            } else if (!warned_missing_dof_object_) {
+                std::cerr << "[toyengine] PixelRenderPipeline: dof focus_object \"" << path
+                          << "\" not found; falling back to dof_focus_distance.\n";
+                warned_missing_dof_object_ = true;
+            }
+        } else if (config_.dof_focus_mode == "orbit_target" && cam && cam->owner) {
+            // orbit_distance() returns 0 outside Orbit mode (see its own doc) -- that 0
+            // would collapse the focal plane onto the camera itself, so it falls through
+            // to the manual focus above rather than being trusted blindly.
+            if (auto* controller = cam->owner->get_component<toy::scene::CameraController>()) {
+                float orbit_dist = controller->orbit_distance();
+                if (orbit_dist > 0.0f) focus = orbit_dist;
+            }
+        }
+
+        if (object_mode) {
+            if (smoothed_dof_focus_ <= 0.0f) smoothed_dof_focus_ = focus; // seed, don't rack from 0
+            smoothed_dof_focus_ = exp_smooth_toward(smoothed_dof_focus_, focus,
+                                                    config_.dof_focus_smoothing, dt);
+            focus = smoothed_dof_focus_;
+        }
+        if (object_mode) {
+            float dmin = 1e9f, dmax = -1e9f;
+            for (float cx : {-0.5f, 0.5f}) for (float cy : {-0.5f, 0.5f}) for (float cz : {-0.5f, 0.5f}) {
+                float dd = view_space_depth(view, glm::vec3(cx, cy, cz));
+                dmin = std::min(dmin, dd); dmax = std::max(dmax, dd);
+            }
+            std::cerr << "[DOF DEBUG] focus(pivot)=" << focus
+                      << " cube corner depth range=[" << dmin << ", " << dmax << "]"
+                      << " span=" << (dmax - dmin) << "\n";
+        }
+        return focus;
     }
 
     /**
@@ -2139,7 +2315,13 @@ private:
         // otherwise unconstrained, so sorting would be a real option), so this only pays off
         // when a scene's derived-shader objects happen to be contiguous; interleaved shaders
         // still render correctly, just with more binds than the theoretical minimum.
+        //
+        // last_cull_backfaces must be tracked alongside last_shader: the stock ("") shader
+        // key now resolves to one of TWO pipelines (see GBufferPipeline::bind()'s doc on
+        // PBRMaterial::cull_backfaces), so shader name alone no longer disambiguates which
+        // one is actually bound.
         std::string last_shader;
+        bool last_cull_backfaces = true; // matches the initial pipeline_ bind above (Back)
         bool have_bound = true; // stock, bound just above
 
         for (size_t i = 0; i < renderers.size(); ++i) {
@@ -2149,10 +2331,12 @@ private:
             // never into the opaque G-buffer (see record_transparent_).
             if (mr->material.is_blended()) continue;
 
-            if (!have_bound || mr->material.shader != last_shader) {
-                gbuffer_pipeline_->bind(cmd, mr->material.shader);
-                last_shader = mr->material.shader;
-                have_bound  = true;
+            if (!have_bound || mr->material.shader != last_shader ||
+                mr->material.cull_backfaces != last_cull_backfaces) {
+                gbuffer_pipeline_->bind(cmd, mr->material.shader, mr->material.cull_backfaces);
+                last_shader         = mr->material.shader;
+                last_cull_backfaces = mr->material.cull_backfaces;
+                have_bound          = true;
             }
 
             coopa::gfx::engine::passes::GBufferPipeline::PushConstants pc;
@@ -2588,6 +2772,21 @@ private:
     std::unique_ptr<coopa::gfx::engine::passes::DeferredLightingPass> pixel_lighting_pass_;
     std::unique_ptr<coopa::gfx::engine::passes::SkyboxPass>      skybox_pass_;
     std::unique_ptr<coopa::gfx::engine::passes::PixelStylizePass> pixel_stylize_pass_;
+    // Physically-based depth of field -- see its construction-site comment and
+    // gfxcoopa's dof_pass.h file doc. Runs at RENDER resolution (unlike
+    // tilt_shift_pass_, which runs at display resolution), between fog and bloom:
+    // bloom_pass_/pixel_stylize_pass_'s shared post_source_view binding is chosen
+    // once at construction from config_.dof_enabled's startup value, same policy
+    // as bloom_pass_/fog_pass_'s bindings below. No resize rebuild needed --
+    // unlike tilt_shift_pass_'s upscaled_extent_ (which tracks the live swapchain
+    // letterbox rect), this pass is sized to render_extent_, which is
+    // startup-fixed; a window resize only moves the letterbox rect downstream.
+    std::unique_ptr<coopa::gfx::engine::passes::DofPass> dof_pass_;
+    // resolve_dof_focus_()'s object-focus smoothing state (see that method's own doc).
+    // <= 0 means "unseeded" -- the first object-focus frame snaps to the resolved
+    // depth rather than racking up from zero.
+    float smoothed_dof_focus_ = -1.0f;
+    bool  warned_missing_dof_object_ = false;
     // Independent bloom pyramid -- see its construction-site comment. Unlike
     // scene_color_mip_pass_/hiz_pass_, it binds every descriptor once at construction and
     // never rebinds, so it does NOT require the per-frame device_.wait_idle()

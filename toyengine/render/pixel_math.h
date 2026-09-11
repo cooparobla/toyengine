@@ -12,6 +12,7 @@
 #define TOYENGINE_RENDER_PIXEL_MATH_H
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 
@@ -285,6 +286,46 @@ inline PixelRect sdf_clip_rect_to_pixels(const glm::vec2& ndc_min, const glm::ve
     rect.w = (x1 > x0) ? static_cast<uint32_t>(x1 - x0) : 0;
     rect.h = (y1 > y0) ? static_cast<uint32_t>(y1 - y0) : 0;
     return rect;
+}
+
+/**
+ * @brief View-space depth (metres along the camera's forward axis) of a world point.
+ *
+ * `view` follows this engine's usual convention -- glm::inverse(world_matrix), the
+ * same one CameraComponent::get_view_matrix() and gfx's other view-space math use --
+ * under which the camera looks down its own -Z, so a point in front of the eye has a
+ * NEGATIVE view-space z. Negating gives a positive depth for anything in front,
+ * matching gfx_linear_depth()'s convention (positive, growing from near to far) that
+ * DofPass's dof_signed_coc() consumes as `view_depth_m`. A point behind the eye comes
+ * back negative, which callers should treat as "no valid focus" rather than clamping
+ * it positive (see resolve_dof_focus_()'s `depth > 0.0f` guard).
+ *
+ * @param view      Camera view matrix (world-to-view).
+ * @param world_pos World-space point.
+ * @return View-space depth in metres; negative if `world_pos` is behind the camera.
+ */
+inline float view_space_depth(const glm::mat4& view, const glm::vec3& world_pos) {
+    return -(view * glm::vec4(world_pos, 1.0f)).z;
+}
+
+/**
+ * @brief One frame of framerate-independent exponential easing toward `target`.
+ *
+ * Same `1 - exp(-rate * dt)` form as CameraController::update_orbit_()'s target
+ * smoothing, so a lens focus-rack (see dof_focus_smoothing) reads as consistent with
+ * the rest of this engine's follow/smoothing knobs: two half-steps at `dt` land at the
+ * same place as one step at `2*dt`, which a naive linear lerp does not guarantee.
+ *
+ * @param current Current smoothed value.
+ * @param target  Value being eased toward.
+ * @param rate    Smoothing rate, 1/sec; <= 0 snaps `current` straight to `target`.
+ * @param dt      Frame delta time, seconds.
+ * @return The eased value for this frame.
+ */
+inline float exp_smooth_toward(float current, float target, float rate, float dt) {
+    if (rate <= 0.0f) return target;
+    float alpha = 1.0f - std::exp(-rate * dt);
+    return current + (target - current) * alpha;
 }
 
 } // namespace render

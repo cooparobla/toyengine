@@ -162,6 +162,112 @@ void test_app_config_load_round_trips_aa_settings() {
     std::filesystem::remove(path);
 }
 
+void test_pixel_render_config_dof_defaults() {
+    // A scene/config that never opts in must render exactly as it did before DOF existed --
+    // see PixelRenderConfig::dof_enabled's own doc.
+    toy::render::PixelRenderConfig cfg;
+    expect(cfg.dof_enabled == false, "PixelRenderConfig: dof_enabled defaults to false");
+    expect(cfg.dof_focus_mode == "manual", "PixelRenderConfig: dof_focus_mode defaults to manual");
+    expect(cfg.dof_focus_object == "", "PixelRenderConfig: dof_focus_object defaults to empty");
+    expect(cfg.dof_focus_smoothing == 8.0f, "PixelRenderConfig: dof_focus_smoothing defaults to 8.0");
+    expect(cfg.dof_focus_distance == 8.0f, "PixelRenderConfig: dof_focus_distance defaults to 8.0");
+    expect(cfg.dof_aperture == 2.8f, "PixelRenderConfig: dof_aperture defaults to 2.8");
+    expect(cfg.dof_focal_length == 0.0f, "PixelRenderConfig: dof_focal_length defaults to 0.0 (inherit camera lens)");
+    expect(cfg.dof_sensor_width == 0.0f, "PixelRenderConfig: dof_sensor_width defaults to 0.0 (inherit camera sensor_width)");
+    expect(cfg.dof_max_radius == 12.0f, "PixelRenderConfig: dof_max_radius defaults to 12.0");
+    expect(cfg.dof_sample_count == 32, "PixelRenderConfig: dof_sample_count defaults to 32");
+    expect(cfg.dof_blade_count == 0, "PixelRenderConfig: dof_blade_count defaults to 0 (perfect disc)");
+    expect(cfg.dof_blade_rotation == 0.0f, "PixelRenderConfig: dof_blade_rotation defaults to 0.0");
+    expect(cfg.dof_debug_view == false, "PixelRenderConfig: dof_debug_view defaults to false");
+}
+
+void test_app_config_load_round_trips_dof_settings() {
+    // Distinct, non-default values for every DOF knob, so a parser bug that silently kept
+    // the in-class default (e.g. a typo'd YAML key) wouldn't pass by coincidence.
+    std::string path = std::string(ROOT_DIR) + "/output/test_dof_config.yaml";
+    {
+        std::ofstream out(path);
+        out << "render:\n"
+               "  dof_enabled: true\n"
+               "  dof_debug_view: true\n"
+               "  dof_focus_mode: object\n"
+               "  dof_focus_object: sdf_blob:sdf_blob_sphere\n"
+               "  dof_focus_smoothing: 3.5\n"
+               "  dof_focus_distance: 5.5\n"
+               "  dof_aperture: 1.4\n"
+               "  dof_focal_length: 85.0\n"
+               "  dof_sensor_width: 24.0\n"
+               "  dof_max_radius: 20.0\n"
+               "  dof_sample_count: 16\n"
+               "  dof_blade_count: 6\n"
+               "  dof_blade_rotation: 30.0\n";
+    }
+
+    toy::core::AppConfig config = toy::core::AppConfig::load(path);
+    expect(config.render.dof_enabled == true, "AppConfig::load: dof_enabled round-trips");
+    expect(config.render.dof_debug_view == true, "AppConfig::load: dof_debug_view round-trips");
+    expect(config.render.dof_focus_mode == "object", "AppConfig::load: dof_focus_mode round-trips");
+    expect(config.render.dof_focus_object == "sdf_blob:sdf_blob_sphere", "AppConfig::load: dof_focus_object round-trips");
+    expect(config.render.dof_focus_smoothing == 3.5f, "AppConfig::load: dof_focus_smoothing round-trips");
+    expect(config.render.dof_focus_distance == 5.5f, "AppConfig::load: dof_focus_distance round-trips");
+    expect(config.render.dof_aperture == 1.4f, "AppConfig::load: dof_aperture round-trips");
+    expect(config.render.dof_focal_length == 85.0f, "AppConfig::load: dof_focal_length round-trips");
+    expect(config.render.dof_sensor_width == 24.0f, "AppConfig::load: dof_sensor_width round-trips");
+    expect(config.render.dof_max_radius == 20.0f, "AppConfig::load: dof_max_radius round-trips");
+    expect(config.render.dof_sample_count == 16, "AppConfig::load: dof_sample_count round-trips");
+    expect(config.render.dof_blade_count == 6, "AppConfig::load: dof_blade_count round-trips");
+    expect(config.render.dof_blade_rotation == 30.0f, "AppConfig::load: dof_blade_rotation round-trips");
+
+    std::filesystem::remove(path);
+}
+
+void test_dof_view_space_depth() {
+    // Camera at (0,0,5) looking at the origin, standard RH lookAt -- glm's usual view-space
+    // convention (camera looks down its own -Z) applies regardless of which world axis this
+    // engine treats as "up" (CameraController's rig is Z-up; that only affects how a scene's
+    // camera Transform is built, not this pure view-matrix math).
+    glm::mat4 view = glm::lookAt(glm::vec3(0.0f, 0.0f, 5.0f), glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+
+    float depth_at_origin = toy::render::view_space_depth(view, glm::vec3(0.0f));
+    expect(std::abs(depth_at_origin - 5.0f) < 1e-4f,
+           "view_space_depth: point at the look-at target is 5m in front of a camera 5m away");
+
+    float depth_closer = toy::render::view_space_depth(view, glm::vec3(0.0f, 0.0f, 2.0f));
+    expect(std::abs(depth_closer - 3.0f) < 1e-4f,
+           "view_space_depth: a point 3m closer to the camera reports 3m less depth");
+
+    // A point behind the eye (camera at z=5 looking toward -z; z=8 is on the far side of the
+    // camera from the look-at target) must come back negative -- the case
+    // resolve_dof_focus_()'s `depth > 0.0f` guard exists to catch.
+    float depth_behind = toy::render::view_space_depth(view, glm::vec3(0.0f, 0.0f, 8.0f));
+    expect(depth_behind < 0.0f, "view_space_depth: a point behind the camera is negative");
+}
+
+void test_dof_focus_smoothing() {
+    // rate <= 0 snaps straight to target, regardless of dt.
+    expect(toy::render::exp_smooth_toward(0.0f, 10.0f, 0.0f, 0.5f) == 10.0f,
+           "exp_smooth_toward: rate <= 0 snaps to target");
+    expect(toy::render::exp_smooth_toward(0.0f, 10.0f, -1.0f, 0.5f) == 10.0f,
+           "exp_smooth_toward: negative rate also snaps to target");
+
+    // Monotone convergence toward the target, never overshooting it.
+    float value = 0.0f;
+    for (int i = 0; i < 60; ++i) {
+        float next = toy::render::exp_smooth_toward(value, 10.0f, 8.0f, 1.0f / 60.0f);
+        expect(next > value && next <= 10.0f, "exp_smooth_toward: monotone step toward target");
+        value = next;
+    }
+    expect(value > 9.0f, "exp_smooth_toward: converges close to target after 1 second at rate 8");
+
+    // Framerate independence: two half-steps at dt land at the same place as one step at 2*dt --
+    // the property the 1 - exp(-rate*dt) form buys over a naive linear lerp.
+    float two_steps = toy::render::exp_smooth_toward(
+        toy::render::exp_smooth_toward(2.0f, 20.0f, 5.0f, 0.1f), 20.0f, 5.0f, 0.1f);
+    float one_step = toy::render::exp_smooth_toward(2.0f, 20.0f, 5.0f, 0.2f);
+    expect(std::abs(two_steps - one_step) < 1e-4f,
+           "exp_smooth_toward: two dt steps match one 2*dt step (framerate-independent)");
+}
+
 void test_pixel_render_config_soft_shadow_defaults() {
     toy::render::PixelRenderConfig cfg;
     expect(cfg.soft_shadows == true, "PixelRenderConfig: soft_shadows defaults to true");
@@ -689,6 +795,10 @@ int main() {
     test_render_resolution_divisor_mode();
     test_pixel_render_config_aa_defaults();
     test_app_config_load_round_trips_aa_settings();
+    test_pixel_render_config_dof_defaults();
+    test_app_config_load_round_trips_dof_settings();
+    test_dof_view_space_depth();
+    test_dof_focus_smoothing();
     test_pixel_render_config_soft_shadow_defaults();
     test_app_config_load_round_trips_soft_shadow_settings();
     test_directional_light_shadow_intensity_default();

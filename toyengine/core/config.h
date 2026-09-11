@@ -136,6 +136,8 @@ struct AppConfig {
                 if (r.contains("sdf_shadows_enabled")) config.render.sdf_shadows_enabled = r.at("sdf_shadows_enabled").get_value<bool>();
                 if (r.contains("bloom_enabled"))     config.render.bloom_enabled     = r.at("bloom_enabled").get_value<bool>();
                 if (r.contains("tilt_shift_enabled")) config.render.tilt_shift_enabled = r.at("tilt_shift_enabled").get_value<bool>();
+                if (r.contains("dof_enabled"))        config.render.dof_enabled        = r.at("dof_enabled").get_value<bool>();
+                if (r.contains("dof_debug_view"))     config.render.dof_debug_view     = r.at("dof_debug_view").get_value<bool>();
                 if (r.contains("debug_lines_enabled")) config.render.debug_lines_enabled = r.at("debug_lines_enabled").get_value<bool>();
 
                 // --- Internal resolution ---
@@ -282,6 +284,19 @@ struct AppConfig {
                 if (r.contains("tilt_shift_blur_bottom"))  config.render.tilt_shift_blur_bottom  = r.at("tilt_shift_blur_bottom").get_value<float>();
                 if (r.contains("tilt_shift_max_radius"))   config.render.tilt_shift_max_radius   = r.at("tilt_shift_max_radius").get_value<float>();
                 if (r.contains("tilt_shift_angle"))        config.render.tilt_shift_angle        = r.at("tilt_shift_angle").get_value<float>();
+
+                // --- Depth of field ---
+                if (r.contains("dof_focus_mode"))      config.render.dof_focus_mode      = r.at("dof_focus_mode").get_value<std::string>();
+                if (r.contains("dof_focus_object"))    config.render.dof_focus_object    = r.at("dof_focus_object").get_value<std::string>();
+                if (r.contains("dof_focus_smoothing")) config.render.dof_focus_smoothing = r.at("dof_focus_smoothing").get_value<float>();
+                if (r.contains("dof_focus_distance")) config.render.dof_focus_distance = r.at("dof_focus_distance").get_value<float>();
+                if (r.contains("dof_aperture"))       config.render.dof_aperture       = r.at("dof_aperture").get_value<float>();
+                if (r.contains("dof_focal_length"))   config.render.dof_focal_length   = r.at("dof_focal_length").get_value<float>();
+                if (r.contains("dof_sensor_width"))   config.render.dof_sensor_width   = r.at("dof_sensor_width").get_value<float>();
+                if (r.contains("dof_max_radius"))     config.render.dof_max_radius     = r.at("dof_max_radius").get_value<float>();
+                if (r.contains("dof_sample_count"))   config.render.dof_sample_count   = r.at("dof_sample_count").get_value<int>();
+                if (r.contains("dof_blade_count"))    config.render.dof_blade_count    = r.at("dof_blade_count").get_value<int>();
+                if (r.contains("dof_blade_rotation")) config.render.dof_blade_rotation = r.at("dof_blade_rotation").get_value<float>();
 
                 // --- Anti-aliasing ---
                 if (r.contains("aa_mode"))                  config.render.aa_mode                  = r.at("aa_mode").get_value<std::string>();

@@ -224,7 +224,8 @@ void main() {
     rp.fresnel_enabled = forward_globals.refract1.z != 0.0;
 
     out_color = gfx_refraction_apply(shaded, frag_world_pos, N, V, mat.roughness, F0,
-                                     camera.view, camera.proj, rmat, rp, forward_globals.ssr_mip.x);
+                                     camera.view, camera.proj, inverse(camera.proj), rmat, rp,
+                                     forward_globals.ssr_mip.x);
 }
 
 #endif // GFX_SURFACE_TRANSPARENT_FS_GLSL

@@ -286,6 +286,57 @@ struct PixelRenderConfig {
     float tilt_shift_angle        = 0.0f;  /**< Degrees; rotates the focus band off horizontal. */
 
     /**
+     * Physically-based depth of field -- see gfxcoopa's DofPass. Unlike
+     * tilt_shift above, this runs at RENDER resolution, on linear HDR, before
+     * bloom_enabled's pyramid: the circle of confusion is a function of scene
+     * DEPTH (a thin-lens formula from focal length/aperture/focus distance), and
+     * defocused HDR highlights should bloom into real bokeh rather than DOF
+     * blurring an already-tonemapped image. See DofPass's own file doc for why a
+     * depth-driven CoC needs a single-pass gather rather than tilt_shift's
+     * separable blur.
+     *
+     * dof_focal_length/dof_sensor_width <= 0 fall back to the active camera's
+     * `lens`/`sensor_width` (CameraComponent) -- and a camera's own `aperture`/
+     * `focus_distance` (also <= 0 = inherit) override dof_aperture/
+     * dof_focus_distance below, so a scene can DOF one camera differently from
+     * another without touching this global config.
+     *
+     * dof_focus_mode == "object" focuses on a named scene object instead of a fixed
+     * distance: dof_focus_object gives its ':'-separated scene path (e.g.
+     * "sdf_blob:sdf_blob_sphere", resolved via Scene::find_object_by_path()), and the
+     * view-space depth of its Transform each frame becomes the focal plane. A camera's
+     * own CameraComponent::focus_object (see that class's doc) overrides this field AND
+     * self-activates object-focus mode for that camera even when dof_focus_mode here is
+     * "manual" -- see PixelRenderPipeline::resolve_dof_focus_() for the exact precedence.
+     * dof_focus_smoothing eases the focal plane toward a moving/retargeted object
+     * (1/sec, like CameraController::follow_smoothing; <= 0 snaps instead) -- it applies
+     * ONLY to object-focus mode, not orbit_target, which is already smoothed twice over
+     * by CameraController's own follow_smoothing/movement_smoothing.
+     *
+     * dof_enabled is a startup-fixed toggle (same policy as bloom_enabled/
+     * fog_enabled/tilt_shift_enabled above): its descriptor binding -- whether
+     * bloom_pass_/pixel_stylize_pass_ read dof_pass_'s result or the pre-DOF
+     * image directly -- is decided once at construction from this flag's
+     * startup value. dof_debug_view, dof_focus_mode/object/smoothing are RUNTIME
+     * fields, like ssao_debug_view: they only change push constants (or which scene
+     * object CPU code reads), not a descriptor binding, so they're safe to change
+     * every frame.
+     */
+    bool        dof_enabled         = false;
+    std::string dof_focus_mode      = "manual";  /**< manual | orbit_target | object. */
+    std::string dof_focus_object    = "";        /**< ':'-separated scene path; used when dof_focus_mode == "object". Overridden by CameraComponent::focus_object. */
+    float       dof_focus_smoothing = 8.0f;      /**< Focus-rack rate (1/sec) for object-focus mode; <= 0 snaps. */
+    float       dof_focus_distance  = 8.0f;      /**< Metres; used when dof_focus_mode == "manual". */
+    float       dof_aperture        = 2.8f;      /**< f-stop; lower = shallower depth of field. */
+    float       dof_focal_length    = 0.0f;      /**< mm; <= 0 takes the active camera's `lens`. */
+    float       dof_sensor_width    = 0.0f;      /**< mm; <= 0 takes the active camera's `sensor_width`. */
+    float       dof_max_radius      = 12.0f;     /**< |CoC| ceiling, in full-res pixels. */
+    int         dof_sample_count    = 32;        /**< Spiral gather taps; clamped to [8, 48] in-shader. */
+    int         dof_blade_count     = 0;         /**< < 3 = perfect disc bokeh; else an N-sided polygonal iris. */
+    float       dof_blade_rotation  = 0.0f;      /**< Iris rotation, degrees. */
+    bool        dof_debug_view      = false;     /**< Renders the signed CoC field in place of the image. */
+
+    /**
      * Anti-aliasing, ported from blendy's PbrRenderPipeline (see
      * blendy/src/blendy/render/pbr_render_pipeline.h) -- same three modes, same field names
      * ("aa_mode" is a string there too), same defaults for every knob except aa_mode itself

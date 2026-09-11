@@ -1,7 +1,7 @@
 # toyengine
 
 A basic pixel-art game engine, shaped like [blendy](../blendy) and built on
-[gfxcoopa](../gfxcoopa) (Vulkan) and [libcoopa](../libcoopa) (scene graph,
+[gfxcoopa](libs/gfxcoopa) (Vulkan) and [libcoopa](libs/libcoopa) (scene graph,
 assets, utilities). Its defining trait: the whole 3D scene renders into a
 small offscreen buffer, then upscales to the window with nearest-neighbour
 filtering and a centred, aspect-preserving best fit (`upscale_mode: fit`, the
@@ -13,7 +13,7 @@ pixelated look.
 - **Low-resolution deferred renderer** — G-buffer + banded-PBR lighting at a
   fixed internal resolution (480×270 by default), independent of window size.
   Built on gfxcoopa's shared `DeferredLightingPass`/`SsrPass`/`TransparentPass`
-  (see [gfxcoopa](../gfxcoopa)'s shared shader library and `ExtraSets`
+  (see [gfxcoopa](libs/gfxcoopa)'s shared shader library and `ExtraSets`
   decoupling), not a private fork of them.
 - **Cel-shaded or soft direct lighting** (`soft_lighting`) — default is
   banded/ramped: N·L quantized into discrete bands (`light_bands`), specular
@@ -61,6 +61,17 @@ pixel-art stack) exposed as an option.
 
 ## Build & run
 
+The coopa libraries are vendored as pinned git submodules under [`libs/`](libs/),
+so a clone must bring them down first. `--recursive` is required, not optional:
+gfxcoopa has its own nested submodule (`includes/volk`), and without it the build
+fails at `volk/volk.h: No such file or directory`.
+
+```bash
+git clone --recurse-submodules git@github.com:cooparobla/toyengine.git
+# or, in an existing clone:
+git submodule update --init --recursive
+```
+
 ```bash
 cbuild --vulkan   # compiles assets/shaders/*.{vert,frag} via glslc, then cmake
 cplay             # runs ./build/toyengine
@@ -92,9 +103,40 @@ toyengine/
 ├── render/     PixelRenderPipeline, PixelRenderConfig, pixel_math,
 │               InstanceStream, and every pass in render/passes/
 └── util/       screenshot.h (Vulkan image -> PNG)
+
+libs/           pinned submodules: libcoopa, gfxcoopa, physxcoopa,
+                sfxcoopa, caml, uicoopa
 ```
 
 See each subdirectory's own README for details on that module.
+
+### Working in `libs/`
+
+Each library under `libs/` is **still independently buildable in place** — the
+repos are vendored unmodified, so they keep their usual contract: a repo builds
+standalone as long as the repos it needs sit beside it under a shared parent.
+`libs/` satisfies that exactly as `~/git/` does, since it holds the same set.
+
+```bash
+cd libs/gfxcoopa && cbuild     # works, resolving peers to libs/libcoopa
+cd libs/uicoopa  && cplay      # ditto, demos included
+```
+
+Two things to know when building in there:
+
+- `git submodule add` leaves a submodule on `main`, but `git submodule update`
+  (and a fresh `--recurse-submodules` clone) checks out a **detached HEAD**.
+  Commits made from that state are easy to lose — run
+  `git submodule foreach git checkout main` first, or keep doing library work in
+  your standalone `~/git/<repo>` checkouts.
+- Building writes `.spv`/`.spv.d` next to the shader sources. Most repos gitignore
+  those, but `uicoopa` tracks three depfiles, so building it in place shows up as
+  a modified submodule in `git status`. `git -C libs/uicoopa checkout -- .` clears it.
+
+`libs/uicoopa` is checked out but deliberately **not** part of toyengine's build
+— it isn't consumable as a subdirectory yet (it uses `CMAKE_SOURCE_DIR` for its
+own paths and exposes no `coopa::ui` target). Building it standalone as above
+works fine.
 
 ## Documentation
 

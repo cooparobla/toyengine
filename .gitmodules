@@ -1,0 +1,18 @@
+[submodule "libs/libcoopa"]
+	path = libs/libcoopa
+	url = git@github.com:cooparobla/libcoopa.git
+[submodule "libs/caml"]
+	path = libs/caml
+	url = git@github.com:cooparobla/caml.git
+[submodule "libs/gfxcoopa"]
+	path = libs/gfxcoopa
+	url = git@github.com:cooparobla/gfxcoopa.git
+[submodule "libs/physxcoopa"]
+	path = libs/physxcoopa
+	url = git@github.com:cooparobla/physxcoopa.git
+[submodule "libs/sfxcoopa"]
+	path = libs/sfxcoopa
+	url = git@github.com:cooparobla/sfxcoopa.git
+[submodule "libs/uicoopa"]
+	path = libs/uicoopa
+	url = git@github.com:cooparobla/uicoopa.git

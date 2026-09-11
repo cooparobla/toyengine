@@ -1,9 +1,29 @@
 # Extra glslc flags for this repo's shaders. Read by cbuild --vulkan
-# (/home/coopa/.sww/packages/cbuild/cbuild) and by cmake/GfxShaders.cmake.
-# One token per line. ${SIBLINGS} expands to the parent directory of this
-# repo checkout (the same thing CMake's ROOT_DIR_PARENT means).
+# (/home/coopa/.sww/packages/cbuild/cbuild). One token per line.
 #
 # Lets toyengine's shaders #include <gfx/...> headers from gfxcoopa's shared
 # base shader library instead of keeping local copies.
+#
+# Path is RELATIVE to the repo root -- cbuild invokes glslc with cwd=repo root.
+# Not ${SIBLINGS}: cbuild hardcodes that to the parent of this checkout
+# (os.path.dirname(os.getcwd())), which points outside the repo now that the
+# coopa libraries are vendored as submodules under libs/.
+#
+# The CMake build does NOT read this file: gfx_add_shader_target() adds
+# gfxcoopa's assets/shaders to -I on its own, derived from the location of the
+# GfxShaders.cmake it included (see gfxcoopa/cmake/GfxShaders.cmake), so that
+# path follows the submodule automatically.
+# ORDER MATTERS, and matches gfx_add_shader_target() exactly (see
+# gfxcoopa/cmake/GfxShaders.cmake:81-82): this repo's OWN shader dir first, then
+# gfxcoopa's base library. glslc searches -I in order, so a gfx/ header present
+# in both resolves to toyengine's copy -- consumers shadow the base library.
+#
+# The second entry is new. CMake always passed it (INCLUDE_DIR defaults to
+# SHADER_DIR) but cbuild only ever got the gfxcoopa -I, so `cbuild --vulkan`
+# failed on shadow_cube.frag/.vert -- whose gfx/surface/shadow_cube_fs.glsl
+# exists only here -- while the CMake build compiled them fine. Unrelated to the
+# libs/ move: the same gap existed with the old ${SIBLINGS} path.
 -I
-${SIBLINGS}/gfxcoopa/assets/shaders
+assets/shaders
+-I
+libs/gfxcoopa/assets/shaders

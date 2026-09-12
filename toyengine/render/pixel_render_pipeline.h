@@ -102,7 +102,9 @@
 #include <gfxcoopa/engine/passes/transparent_capture_pass.h>
 #include <gfxcoopa/engine/passes/fog_pass.h>
 #include <gfxcoopa/engine/data/fog_data.h>
-#include <gfxcoopa/engine/components/fog_volume.h>
+#include <gfxcoopa/engine/passes/volumetrics_pass.h>
+#include <gfxcoopa/engine/data/volumetrics_data.h>
+#include <gfxcoopa/engine/components/volume.h>
 #include <gfxcoopa/engine/components/sdf_renderer.h>
 #include <gfxcoopa/engine/components/sdf_shape.h>
 #include <gfxcoopa/engine/data/sdf_data.h>
@@ -264,6 +266,9 @@ public:
           // hardcodes LOAD_OP_CLEAR, so FogPass can't reopen and composite in place onto the
           // image it reads from.
           fog_target_(device, allocator, render_extent_.width, render_extent_.height, coopa::gfx::Format::RGBA16_Sfloat),
+          // Wind composite target -- same HDR format and the same LOAD_OP_CLEAR-forced
+          // separation as fog_target_ above. Wind reads fog's output and writes its own.
+          volumetrics_target_(device, allocator, render_extent_.width, render_extent_.height, coopa::gfx::Format::RGBA16_Sfloat),
           nearest_sampler_(coopa::gfx::engine::util::Sampler::nearest(device)),
           linear_sampler_(coopa::gfx::engine::util::Sampler::linear(device)),
           // Hardware compareEnable, not a plain linear sampler -- see gfx/shadow_sampling.glsl's
@@ -271,6 +276,7 @@ public:
           // point_shadow_map are sampler2DShadow/samplerCubeShadow to match).
           shadow_sampler_(coopa::gfx::engine::util::Sampler::shadow(device)),
           fog_data_(device, allocator),
+          volumetrics_data_(device, allocator),
           shadow_target_(device, allocator, config_.shadow_map_resolution, config_.cube_shadow_resolution),
           palette_lut_(coopa::gfx::engine::data::PaletteLut::load(device, allocator, cmd_pool, config_.palette_path)),
           instance_stream_(device, allocator),
@@ -704,6 +710,25 @@ public:
         fog_pass_->set_source_images(pre_fog_view_typed_, gbuffer_target_.g1_view_typed(),
                                      gbuffer_target_.g2_view_typed(), linear_sampler_);
 
+        // What wind reads: fog's output if fog ran this build, otherwise straight through
+        // to the pre-fog source. A separate link rather than folding wind into the
+        // expression below, so wind works with fog DISABLED -- the two effects are
+        // independent toggles. Startup-fixed, exactly like pre_fog_view_typed_ above.
+        coopa::gfx::TextureView pre_volumetrics_view =
+            config_.fog_enabled ? fog_target_.color_view_typed() : pre_fog_view_typed_;
+
+        // Volumetric wind -- always constructed (same always-on-but-runtime-gated policy as
+        // fog_pass_ above); render() checks config_.volumetrics_enabled per frame. Where fog
+        // integrates an analytic everywhere-medium in one sample, this raymarches a sparse
+        // noise field advected along a wind vector, which is what makes it read as moving
+        // air rather than haze (see gfx/volumetrics.glsl's header for the three ideas involved).
+        volumetrics_pass_ = std::make_unique<coopa::gfx::engine::passes::VolumetricsPass>(
+            device, volumetrics_target_.render_pass_object(), volumetrics_data_.buffer(),
+            config_.shaders("fullscreen.vert"),
+            config_.shaders("volumetrics.frag"));
+        volumetrics_pass_->set_source_images(pre_volumetrics_view, gbuffer_target_.g1_view_typed(),
+                                      gbuffer_target_.g2_view_typed(), linear_sampler_);
+
         // The image DofPass reads: the final pre-tonemap HDR frame, before any lens
         // effect has touched it. Fixed at construction, same startup-only-binding
         // policy as pre_fog_view_typed_ above.
@@ -714,7 +739,7 @@ public:
         // chain, so SSR reflections, BLEND geometry and fog never contributed to the glow.
         // They do now (and, transitively, so does DOF's defocus).
         coopa::gfx::TextureView pre_dof_view =
-            config_.fog_enabled ? fog_target_.color_view_typed() : pre_fog_view_typed_;
+            config_.volumetrics_enabled ? volumetrics_target_.color_view_typed() : pre_volumetrics_view;
 
         // Physically-based depth of field (thin-lens CoC -> half-res bokeh gather ->
         // full-res composite -- see gfxcoopa's dof_pass.h). Always constructed (mirrors
@@ -927,6 +952,95 @@ public:
         }
         for (auto* sr : scene.get_components<coopa::gfx::engine::components::SdfRenderer>()) {
             config_.surface_shaders.require(sr->material.shader);
+        }
+    }
+
+    /**
+     * @brief Read-only access to the live render config.
+     */
+    const PixelRenderConfig& render_config() const { return config_; }
+
+    /**
+     * @brief MUTABLE access to the live render config, for changing parameters at runtime.
+     *
+     * Most parameters are re-read from config_ on every frame -- the fog and volumetrics
+     * UBO fills, and the bloom/DOF/stylize/tilt-shift push-constant blocks all source
+     * their values inside render(). Writing through this reference therefore takes effect
+     * on the very next frame with no other machinery:
+     *
+     * @code
+     * pipeline.render_config_mut().fog_density = 0.12f;   // visible next frame
+     * @endcode
+     *
+     * The exception is the STARTUP-FIXED set (every *_enabled toggle, aa_mode, the
+     * internal resolution, shadow map sizes, the SDF SSBO capacities and palette_path).
+     * Those were baked into pass construction and the post-process source-view chain when
+     * the pipeline was built -- see pre_fog_view_typed_ / pre_volumetrics_view and each
+     * toggle's own doc -- so writing them here changes the struct but NOT what renders,
+     * and can leave descriptors pointing at targets nothing writes. Use apply_live_config()
+     * instead when setting many fields at once: it refuses those and tells you which.
+     *
+     * Mutate between frames, not mid-record.
+     */
+    PixelRenderConfig& render_config_mut() { return config_; }
+
+    /**
+     * @brief Applies a whole config to the live pipeline, skipping startup-fixed fields.
+     *
+     * The bulk counterpart to render_config_mut(): use this when replacing many values at
+     * once and you cannot be sure none of them are startup-fixed. Those are restored from
+     * the live values and NAMED in a warning rather than silently dropped -- an edit that
+     * quietly does nothing is the failure mode that makes runtime tweaking feel broken.
+     *
+     * Call between frames, never mid-record.
+     *
+     * @param next The config to apply.
+     */
+    void apply_live_config(const PixelRenderConfig& next) {
+        PixelRenderConfig merged = next;
+        std::vector<const char*> ignored;
+
+        // Restore a startup-fixed field from the live config, remembering it if the
+        // file tried to change it.
+#define TOY_KEEP_STARTUP_FIXED(field)                             \
+        do {                                                      \
+            if (merged.field != config_.field) {                  \
+                ignored.push_back(#field);                        \
+            }                                                     \
+            merged.field = config_.field;                         \
+        } while (0)
+
+        TOY_KEEP_STARTUP_FIXED(fog_enabled);
+        TOY_KEEP_STARTUP_FIXED(volumetrics_enabled);
+        TOY_KEEP_STARTUP_FIXED(bloom_enabled);
+        TOY_KEEP_STARTUP_FIXED(dof_enabled);
+        TOY_KEEP_STARTUP_FIXED(tilt_shift_enabled);
+        TOY_KEEP_STARTUP_FIXED(ssr_enabled);
+        TOY_KEEP_STARTUP_FIXED(ssao_enabled);
+        TOY_KEEP_STARTUP_FIXED(transparency_enabled);
+        TOY_KEEP_STARTUP_FIXED(sdf_enabled);
+        TOY_KEEP_STARTUP_FIXED(shadows_enabled);
+        TOY_KEEP_STARTUP_FIXED(aa_mode);
+        TOY_KEEP_STARTUP_FIXED(resolution_mode);
+        TOY_KEEP_STARTUP_FIXED(render_width);
+        TOY_KEEP_STARTUP_FIXED(render_height);
+        TOY_KEEP_STARTUP_FIXED(shadow_map_resolution);
+        TOY_KEEP_STARTUP_FIXED(cube_shadow_resolution);
+        TOY_KEEP_STARTUP_FIXED(sdf_max_renderers);
+        TOY_KEEP_STARTUP_FIXED(sdf_max_shapes);
+        TOY_KEEP_STARTUP_FIXED(palette_path);
+
+#undef TOY_KEEP_STARTUP_FIXED
+
+        config_ = merged;
+
+        if (!ignored.empty()) {
+            std::cerr << "[toy::render] Config reloaded, but these are startup-fixed and were "
+                         "IGNORED (restart to apply):";
+            for (const char* name : ignored) {
+                std::cerr << ' ' << name;
+            }
+            std::cerr << '\n';
         }
     }
 
@@ -1281,14 +1395,11 @@ public:
 
         // Fog UBO. Gated on fog_enabled -- when fog is off, record() skips fog_pass_'s draw
         // entirely (see that call site), so this upload would otherwise be wasted work.
-        // Mirrors blendy's PbrRenderPipeline::update_scene_data_() fog fill (see
-        // blendy/src/blendy/render/pbr_render_pipeline.h) -- gather via
-        // scene.get_components<FogVolumeComponent>() instead of a cached traversal, matching
-        // how this pipeline already gathers PointLightComponent/MeshRenderer above.
+        //
+        // Fog is GLOBAL ONLY and sourced entirely from config_: there is no scene component
+        // and no local volume array. Local volumes of every kind -- including static fog
+        // pockets -- are raymarched by volumetrics_pass_ instead (see VolumeComponent).
         if (config_.fog_enabled) {
-            using coopa::gfx::engine::components::FogVolumeComponent;
-            using coopa::gfx::engine::components::FogVolumeShape;
-
             auto& fog = fog_data_.data();
             // CAVEAT: fog_data_ is single-buffered (FogData owns exactly one UBO, unlike
             // camera_ubos_/sdf_data_ above), so this inv_view_proj is the same hazard class that
@@ -1320,24 +1431,79 @@ public:
             fog.sky_horizon = glm::vec4(config_.indirect.sky_horizon, 0.0f);
             fog.sky_ground  = glm::vec4(config_.indirect.sky_ground, 0.0f);
 
-            auto fog_volumes = scene.get_components<FogVolumeComponent>();
-            uint32_t volume_count = static_cast<uint32_t>(
-                std::min<size_t>(fog_volumes.size(), coopa::gfx::engine::data::MAX_FOG_VOLUMES));
             fog.misc_params = glm::vec4(config_.fog_sun_anisotropy, config_.fog_max_opacity,
-                                        static_cast<float>(volume_count), config_.fog_max_distance);
-
-            for (uint32_t i = 0; i < volume_count; ++i) {
-                auto* fv = fog_volumes[i];
-                auto& gpu = fog.volumes[i];
-                glm::mat4 world = (fv->owner && fv->owner->get_transform())
-                    ? fv->owner->get_transform()->get_world_matrix() : glm::mat4(1.0f);
-                gpu.inv_world     = glm::inverse(world);
-                gpu.extent_shape  = glm::vec4(fv->extent, fv->shape == FogVolumeShape::Sphere ? 1.0f : 0.0f);
-                gpu.color_density = glm::vec4(fv->color, fv->density);
-                gpu.falloff       = glm::vec4(fv->falloff, 0.0f, 0.0f, 0.0f);
-            }
+                                        0.0f, config_.fog_max_distance);
 
             fog_data_.upload();
+        }
+
+        // Volumetrics UBO. Gated on volumetrics_enabled -- when off, record() skips the
+        // draw entirely, so this upload would otherwise be wasted work.
+        //
+        // There is NO global term here: fog above is the global atmosphere, and
+        // everything in this buffer is a bounded, scene-placed VolumeComponent that
+        // carries its own complete field description. Inherits fog_data_'s
+        // single-buffered caveat (see VolumetricsData's doc).
+        if (config_.volumetrics_enabled) {
+            using coopa::gfx::engine::components::VolumeComponent;
+            using coopa::gfx::engine::components::VolumeKind;
+            using coopa::gfx::engine::components::VolumeShape;
+
+            auto& vol = volumetrics_data_.data();
+
+            // unjittered_proj, not proj -- same reason fog uses it: these fields are
+            // sampled in WORLD space, so TAA jitter here would make them swim against
+            // the pixel grid on top of their own intended motion.
+            vol.inv_view_proj = glm::inverse(unjittered_proj * view);
+            vol.camera_pos    = glm::vec4(cam_pos, config_.volumetrics_debug_view ? 1.0f : 0.0f);
+            if (dir_light) {
+                vol.sun_direction = glm::vec4(glm::normalize(dir_light->direction), 0.0f);
+                vol.sun_color     = glm::vec4(dir_light->color * dir_light->intensity, 1.0f);
+            } else {
+                vol.sun_direction = glm::vec4(0.0f, 0.0f, -1.0f, 0.0f);
+                vol.sun_color     = glm::vec4(0.0f);
+            }
+            vol.march_params = glm::vec4(static_cast<float>(glm::max(config_.volumetrics_step_count, 1)),
+                                         config_.volumetrics_max_distance,
+                                         config_.volumetrics_max_opacity,
+                                         config_.volumetrics_sun_anisotropy);
+            vol.time_params  = glm::vec4(elapsed_time_, frame_dt_,
+                                         static_cast<float>(frame_index_), 0.0f);
+
+            auto volumes = scene.get_components<VolumeComponent>();
+            uint32_t volume_count = static_cast<uint32_t>(
+                std::min<size_t>(volumes.size(), coopa::gfx::engine::data::MAX_VOLUMES));
+            vol.counts = glm::vec4(static_cast<float>(volume_count), 0.0f, 0.0f, 0.0f);
+
+            for (uint32_t i = 0; i < volume_count; ++i) {
+                auto* vc  = volumes[i];
+                auto& gpu = vol.volumes[i];
+                glm::mat4 world = (vc->owner && vc->owner->get_transform())
+                    ? vc->owner->get_transform()->get_world_matrix() : glm::mat4(1.0f);
+                gpu.inv_world    = glm::inverse(world);
+                gpu.extent_shape = glm::vec4(vc->extent,
+                                             vc->shape == VolumeShape::Sphere ? 1.0f : 0.0f);
+
+                // Normalized here, not in the shader: gfx_volume_field decomposes the
+                // sample point against this vector, which is only a clean along/perp
+                // split at unit length. A zero vector (an easy authoring typo) would
+                // collapse that decomposition, so fall back to +X.
+                const float dir_len = glm::length(vc->direction);
+                const glm::vec3 dir = (dir_len > 1e-5f) ? vc->direction / dir_len
+                                                        : glm::vec3(1.0f, 0.0f, 0.0f);
+                gpu.direction_speed = glm::vec4(dir, vc->speed);
+                gpu.field_params    = glm::vec4(vc->noise_scale, vc->streak,
+                                                vc->coverage, vc->detail_gain);
+                gpu.shape_params    = glm::vec4(vc->density, vc->height_base, vc->height_falloff,
+                                                static_cast<float>(glm::clamp(vc->octaves, 1, 4)));
+                gpu.flow_params     = glm::vec4(vc->flow_warp, vc->flow_scale,
+                                                vc->sharpness, vc->gate_scale);
+                gpu.color_occlusion = glm::vec4(vc->color, vc->occlusion);
+                gpu.mode_params     = glm::vec4(static_cast<float>(static_cast<int>(vc->kind)),
+                                                vc->sun_amount, vc->falloff, 0.0f);
+            }
+
+            volumetrics_data_.upload();
         }
 
         LetterboxRect letterbox = compute_display_rect(
@@ -1646,6 +1812,18 @@ public:
                     fog_target_.begin(cmd);
                     fog_pass_->draw(cmd, render_extent_.width, render_extent_.height);
                     fog_target_.end(cmd);
+                }
+
+                // Volumetric wind. After fog (so wisps layer over fogged geometry, reading
+                // whichever image pre_volumetrics_view named at construction) and before DOF/bloom,
+                // so wisps defocus with everything else and sun-lit ones bloom. Gated on the
+                // same startup-fixed flag pre_dof_view was chosen from -- flipping it without
+                // a pipeline rebuild would leave DOF and stylize reading a target wind never
+                // wrote, exactly the caveat fog and ssr_enabled already document.
+                if (config_.volumetrics_enabled) {
+                    volumetrics_target_.begin(cmd);
+                    volumetrics_pass_->draw(cmd, render_extent_.width, render_extent_.height);
+                    volumetrics_target_.end(cmd);
                 }
 
                 // Depth of field. After fog (so fogged geometry defocuses too) and before
@@ -2714,6 +2892,7 @@ private:
     // config_.ssr_reflect_transparent per frame to decide whether to draw into/read from it.
     coopa::gfx::engine::targets::TransparentCaptureTarget transparent_capture_target_;
     coopa::gfx::engine::targets::OffscreenTarget fog_target_; // fog composite, pre-post, HDR
+    coopa::gfx::engine::targets::OffscreenTarget volumetrics_target_; // wind composite, after fog, pre-post, HDR
     coopa::gfx::engine::util::Sampler            nearest_sampler_;
     coopa::gfx::engine::util::Sampler            linear_sampler_;
     coopa::gfx::engine::util::Sampler            shadow_sampler_;
@@ -2753,6 +2932,12 @@ private:
     // comment). Kept as a member (not a local) so pixel_stylize_pass_'s own construction, later
     // in the ctor body, can fall back to it when fog is disabled.
     coopa::gfx::TextureView pre_fog_view_typed_;
+
+    // Volumetric wind -- the raymarched, moving, sparse counterpart to fog_pass_'s
+    // analytic everywhere-medium (see gfxcoopa's VolumetricsPass / gfx/volumetrics.glsl). Always
+    // constructed, runtime-gated on config_.volumetrics_enabled, same policy as fog_pass_.
+    coopa::gfx::engine::data::VolumetricsData volumetrics_data_;
+    std::unique_ptr<coopa::gfx::engine::passes::VolumetricsPass> volumetrics_pass_;
 
     coopa::gfx::engine::targets::ShadowMapTarget shadow_target_;
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout>   shadow_layout_;

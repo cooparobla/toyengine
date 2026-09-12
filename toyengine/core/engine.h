@@ -185,6 +185,19 @@ public:
     }
 
     /**
+     * @brief MUTABLE access to the live render config, for changing parameters at runtime.
+     *
+     * Forwards to PixelRenderPipeline::render_config_mut() -- see that method for which
+     * fields take effect immediately (most of them, including every fog parameter) and
+     * which are startup-fixed and will not.
+     *
+     * @code
+     * engine.render_config().fog_density = 0.12f;   // visible next frame
+     * @endcode
+     */
+    render::PixelRenderConfig& render_config() { return pipeline_.render_config_mut(); }
+
+    /**
      * @brief Writes the current offscreen buffer to a PNG.
      * @param path    Destination file path.
      * @param low_res True writes the internal low-resolution buffer 1:1 (pixel-perfect,

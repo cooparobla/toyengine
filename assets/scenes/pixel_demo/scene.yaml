@@ -328,23 +328,52 @@ scene:
             shader_params: [0.18, 1.2, 1.0, 0.4]
       children: []
 
-    # Local fog volume test: a soft-edged pocket of mist between the two spheres, for
-    # exercising gfxcoopa's FogPass (global fog + local FogVolume) in toyengine too -- see
-    # blendy's assets/scenes/cube/scene.yaml FogPocket for the sibling test in that engine.
-    - name: FogPocket
+    # Local volumes -- the single local-volume concept. Fog is GLOBAL only and lives in
+    # assets/config.yaml; everything bounded is a Volume raymarched by VolumetricsPass.
+    # `kind` picks the density function and brings its own defaults, so these stay short.
+    # - name: WindGust
+    #   active: true
+    #   components:
+    #     - type: Transform
+    #       position: { x: 3.0, y: 0.0, z: 1.0 }
+    #       rotation: { x: 0.0, y: 0.0, z: 0.0 }
+    #       scale: { x: 1.0, y: 1.0, z: 1.0 }
+    #     - type: Volume
+    #       kind: wind
+    #       shape: box
+    #       extent: { x: 5.0, y: 5.0, z: 2.5 }
+    #   children: []
+
+    - name: HazeBank
       active: true
       components:
         - type: Transform
-          position: { x: 1.7, y: -0.5, z: 0.2 }
-          rotation: { x: 0.0, y: 0.0, z: 0.3 }
+          position: { x: -3.0, y: 0.0, z: 1.5 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
           scale: { x: 1.0, y: 1.0, z: 1.0 }
-        - type: FogVolume
+        - type: Volume
+          kind: haze
           shape: box
-          extent: { x: 10.0, y: 10.0, z: 0.8 }
-          color: { r: 0.75, g: 0.8, b: 0.85 }
-          density: 0.5
-          falloff: 0.25
+          extent: { x: 6.0, y: 6.0, z: 3.0 }
       children: []
+
+    # Static pocket: kind: fog is uniform density inside its bounds. NOTE the density is
+    # far lower than the old analytic fog volume used -- that fed a closed-form segment
+    # integral, this feeds a per-sample march, so the same number reads much denser.
+    # - name: FogPocket
+    #   active: true
+    #   components:
+    #     - type: Transform
+    #       position: { x: 1.7, y: -0.5, z: 0.2 }
+    #       rotation: { x: 0.0, y: 0.0, z: 0.3 }
+    #       scale: { x: 1.0, y: 1.0, z: 1.0 }
+    #     - type: Volume
+    #       kind: fog
+    #       shape: box
+    #       extent: { x: 10.0, y: 10.0, z: 0.8 }
+    #       density: 0.12
+    #       falloff: 0.25
+    #   children: []
 
     - name: camera
       active: true

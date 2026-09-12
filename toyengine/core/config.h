@@ -132,6 +132,7 @@ struct AppConfig {
                 if (r.contains("ssr_reflect_transparent")) config.render.ssr_reflect_transparent = r.at("ssr_reflect_transparent").get_value<bool>();
                 if (r.contains("refraction_enabled")) config.render.refraction_enabled = r.at("refraction_enabled").get_value<bool>();
                 if (r.contains("fog_enabled"))       config.render.fog_enabled       = r.at("fog_enabled").get_value<bool>();
+                if (r.contains("volumetrics_enabled")) config.render.volumetrics_enabled = r.at("volumetrics_enabled").get_value<bool>();
                 if (r.contains("sdf_enabled"))         config.render.sdf_enabled         = r.at("sdf_enabled").get_value<bool>();
                 if (r.contains("sdf_shadows_enabled")) config.render.sdf_shadows_enabled = r.at("sdf_shadows_enabled").get_value<bool>();
                 if (r.contains("bloom_enabled"))     config.render.bloom_enabled     = r.at("bloom_enabled").get_value<bool>();
@@ -268,6 +269,13 @@ struct AppConfig {
                 if (r.contains("fog_sun_anisotropy")) config.render.fog_sun_anisotropy = r.at("fog_sun_anisotropy").get_value<float>();
                 if (r.contains("fog_max_opacity"))    config.render.fog_max_opacity    = r.at("fog_max_opacity").get_value<float>();
                 if (r.contains("fog_max_distance"))   config.render.fog_max_distance   = r.at("fog_max_distance").get_value<float>();
+
+                // --- Volumetrics (shared march settings; per-volume look lives on VolumeComponent) ---
+                if (r.contains("volumetrics_step_count"))     config.render.volumetrics_step_count     = r.at("volumetrics_step_count").get_value<int>();
+                if (r.contains("volumetrics_max_distance"))   config.render.volumetrics_max_distance   = r.at("volumetrics_max_distance").get_value<float>();
+                if (r.contains("volumetrics_max_opacity"))    config.render.volumetrics_max_opacity    = r.at("volumetrics_max_opacity").get_value<float>();
+                if (r.contains("volumetrics_sun_anisotropy")) config.render.volumetrics_sun_anisotropy = r.at("volumetrics_sun_anisotropy").get_value<float>();
+                if (r.contains("volumetrics_debug_view"))     config.render.volumetrics_debug_view     = r.at("volumetrics_debug_view").get_value<bool>();
 
                 if (r.contains("bloom_threshold")) config.render.bloom_threshold = r.at("bloom_threshold").get_value<float>();
                 if (r.contains("bloom_soft_knee")) config.render.bloom_soft_knee = r.at("bloom_soft_knee").get_value<float>();

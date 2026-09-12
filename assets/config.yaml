@@ -28,7 +28,8 @@ render:
   transparency_enabled: true # forward BLEND-material pass; off by default (no demo scene uses it yet)
   ssr_reflect_transparent: true # opaque surfaces also reflect transparent geometry (roughly doubles SSR cost; requires ssr_enabled + transparency_enabled)
   refraction_enabled: true   # screen-space refraction for BLEND MESH objects only (not SdfRenderer glass); requires transparency_enabled
-  fog_enabled: false          # Unity-style global fog + local FogVolume components (see gfxcoopa's FogPass)
+  fog_enabled: false          # Unity-style GLOBAL fog, analytic; parameters below are its only source
+  volumetrics_enabled: true   # raymarched LOCAL volumes: kind fog | wind | haze (see gfxcoopa's VolumetricsPass)
   sdf_enabled: true           # signed-distance-field raymarching (SdfRenderer/SdfShape); see toyengine's sdf_*.frag
   sdf_shadows_enabled: true   # independent of sdf_enabled -- SDFs can be visible without casting shadows
   bloom_enabled: true         # additive glow from bright HDR regions; independent BloomPass pyramid (no longer reuses SSR's mip chain)
@@ -227,8 +228,12 @@ render:
                                          # (vs. the plain pre-SSR image) so refraction sees SSR reflections too
 
   # --- Fog ---
+  # GLOBAL fog, and this block is its ONLY source -- there is no fog component and no
+  # local fog volume. Anything bounded is a Volume component in the scene instead.
+  # Every value below is re-read each frame, so it can be changed at runtime through
+  # Engine::render_config(); fog_enabled above is the exception, being startup-fixed.
   fog_mode: 2                 # 0 Linear, 1 Exponential, 2 Exp2 (Unity's default)
-  fog_density: 0.03           # extinction per world unit at the height falloff base (Exponential/Exp2 modes)
+  fog_density: 0.03           # extinction per world unit at the height falloff base
   fog_linear_start: 3.0       # world-space distance fog starts ramping in (Linear mode)
   fog_linear_end: 25.0        # world-space distance fog reaches max_opacity (Linear mode)
   fog_color: [0.6, 0.66, 0.75] # base fog colour
@@ -241,6 +246,18 @@ render:
   fog_max_distance: 60.0      # distance the global fog term saturates at, and the distance sky pixels are evaluated
                                # at -- prevents a hard seam where a grazing near-horizon ray's apparent distance
                                # blows up against an otherwise-unfogged sky
+
+  # --- Volumetrics (raymarched LOCAL volumes; see gfxcoopa's VolumetricsPass) ---
+  # Only SHARED march settings live here. How a volume looks -- kind, density, noise,
+  # advection, colour -- is per-volume and authored on a Volume component in the scene,
+  # because volumes are local by definition. Kinds: fog (static pocket), wind (ribbons),
+  # haze (drifting billows). Fog above is the GLOBAL atmosphere and is config-only.
+  # There is deliberately no global wind or haze: place a large Volume if you want one.
+  volumetrics_step_count: 48      # raymarch steps -- the primary perf knob
+  volumetrics_max_distance: 40.0  # distance the march stops at
+  volumetrics_max_opacity: 0.85   # ceiling on how much volumetrics can occlude the scene
+  volumetrics_sun_anisotropy: 0.6 # HG g; shared because it's a property of the light, not a volume
+  volumetrics_debug_view: false   # output accumulated density alone, scene colour suppressed
 
   # --- Anti-aliasing (ported from blendy's PbrRenderPipeline; see PixelRenderConfig::aa_mode) ---
   fxaa_subpixel: 0.75           # blend weight of FXAA's subpixel-aliasing term

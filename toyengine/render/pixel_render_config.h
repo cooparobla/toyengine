@@ -89,9 +89,10 @@ struct PixelRenderConfig {
     bool      refraction_include_reflections = true;
 
     /**
-     * Unity-style global fog (Linear/Exponential/Exp2) plus up to 8 local box/sphere
-     * FogVolume components, drawn after the transparent pass (so BLEND geometry is fogged
-     * too) and before pixel_stylize_pass_ (so fog sits in linear HDR, ahead of tonemap/
+     * Unity-style GLOBAL fog (Linear/Exponential/Exp2), analytic and config-driven. There
+     * is no fog component and no local fog volume: anything bounded is a VolumeComponent
+     * on the volumetrics pass instead. Drawn after the transparent pass (so BLEND geometry
+     * is fogged too) and before pixel_stylize_pass_ (so fog sits in linear HDR, ahead of tonemap/
      * outline/dither/palette -- see gfxcoopa's FogPass and PixelRenderPipeline's
      * pre_fog_view_typed_). Always constructed; render() checks this per frame. The pass's
      * SOURCE image is chosen once at construction from config_.ssr_enabled's startup value,
@@ -99,6 +100,24 @@ struct PixelRenderConfig {
      * per-frame rebind isn't safe under this pipeline's frame-overlap model.
      */
     bool fog_enabled = false;
+
+    /**
+     * Raymarched LOCAL volumes -- scene-placed VolumeComponents, each `kind: fog` (a
+     * static pocket), `wind` (advected ribbons) or `haze` (drifting billows). Runs in
+     * linear HDR immediately after fog and before DOF/bloom, so volumes defocus and
+     * sun-lit ones glow (see gfxcoopa's VolumetricsPass / gfx/volumetrics.glsl).
+     *
+     * A separate pass from fog rather than more fog parameters, because fog is an
+     * analytic medium that is everywhere, while these are bounded and their density
+     * varies within them -- which has no closed form, so they must march. The two
+     * toggle independently. The march clips to the union of the volumes' bounds, so a
+     * view with no volume in it skips the march entirely.
+     *
+     * Startup-fixed, same policy as fog_enabled/bloom_enabled/dof_enabled above: the
+     * pass's source image and DOF's source image are both chosen once at construction
+     * from this flag's value.
+     */
+    bool volumetrics_enabled = false;
 
     /**
      * Signed-distance-field raymarching system (see gfxcoopa's SdfRenderer/SdfShape
@@ -260,6 +279,20 @@ struct PixelRenderConfig {
     float     fog_max_distance   = 150.0f; /**< Distance the global fog term saturates at, and the distance sky pixels are
                                             evaluated at -- prevents a hard seam where a grazing near-horizon ray's apparent
                                             distance blows up against an otherwise-unfogged sky. */
+
+    // --- Volumetrics (raymarched LOCAL volumes; see gfxcoopa's VolumetricsPass) ---
+    // Only genuinely SHARED march settings live here. Everything about how a volume
+    // looks -- density, noise, advection, colour -- is per-volume and lives on
+    // VolumeComponent in the scene, because volumes are local by definition.
+    int   volumetrics_step_count     = 48;    /**< Raymarch steps. The primary perf knob, and what resolves
+                                                thin ribbons; the start offset is dithered per pixel and per
+                                                frame, so TAA recovers much of what a low count costs. */
+    float volumetrics_max_distance   = 40.0f; /**< Distance the march stops at. */
+    float volumetrics_max_opacity    = 0.85f; /**< Ceiling on how much volumetrics can occlude the scene. */
+    float volumetrics_sun_anisotropy = 0.6f;  /**< HG g; 0 isotropic, close to 1 = tight forward scatter.
+                                                Shared, not per-volume: it is a property of the light's
+                                                phase function, not of which medium a sample sits in. */
+    bool  volumetrics_debug_view     = false; /**< Output accumulated density alone, scene colour suppressed. */
 
     /**
      * Diorama-style tilt-shift blur (Zelda: Link's Awakening [Switch] reference) -- see

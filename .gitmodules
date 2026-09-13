@@ -16,3 +16,6 @@
 [submodule "libs/uicoopa"]
 	path = libs/uicoopa
 	url = git@github.com:cooparobla/uicoopa.git
+[submodule "libs/mapcoopa"]
+	path = libs/mapcoopa
+	url = git@github.com:cooparobla/mapcoopa.git

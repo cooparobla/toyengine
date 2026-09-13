@@ -14,8 +14,8 @@ scene:
 render:
   # --- Internal resolution ---
   resolution_mode: fixed     # fixed | divisor
-  render_width: 1440
-  render_height: 960
+  render_width: 1920
+  render_height: 1080
   scale_divisor: 4
   upscale_mode: fit          # fit | integer
 
@@ -95,6 +95,29 @@ render:
   dof_focus_smoothing: 8.0     # focus-rack rate, 1/sec; <= 0 snaps. Object-focus mode only --
                                 # eases the focal plane onto a newly (re)resolved target rather
                                 # than snapping, e.g. when focus_object first resolves or changes
+  dof_focus_range:     0.0     # metres; EXTRA forced-sharp half-depth around the focal plane,
+                                # added in every focus mode (including manual, which has no
+                                # bounds to fit to and for which this is the only band-widening
+                                # dial). See dof_focus_cover_object below for the automatic part
+                                # and the dof_max_radius block for why a band like this has to
+                                # exist at all.
+  dof_focus_cover_object: true  # object focus (focus_object / dof_focus_mode: object) also fits
+                                # the forced-sharp band to the SUBJECT'S OWN depth extent, from
+                                # its mesh bounds (or an SdfRenderer's bounds_extent), so the
+                                # whole subject stays sharp however close the camera gets. This
+                                # is the deliberate break from physical optics: a real 85mm f/4
+                                # has ~7cm of depth of field at 2.8m, so pixel_demo's 1m cube is
+                                # ~90% defocused the moment the orbit camera zooms in, at ANY
+                                # aperture. Turning this off restores pure thin-lens behaviour.
+                                # It also puts the focal plane on the subject's bounds CENTRE
+                                # rather than its transform ORIGIN -- cube.000's mesh spans
+                                # [0,1]^3, so its origin is a corner 0.2m in front of centre.
+  dof_blur_scale:      1.0     # plain |CoC| multiplier: the blur-STRENGTH dial. Kept separate
+                                # from dof_focus_range (which sets how WIDE the sharp zone is)
+                                # and from dof_max_radius (a safety ceiling, not a strength dial
+                                # -- see its comment). Applied before that clamp, so lowering it
+                                # really reduces blur instead of just moving which pixels sit at
+                                # the ceiling. 0 bypasses DoF entirely.
   dof_focus_distance: 8.0     # metres; fallback used only when dof_focus_mode == manual, or
                               # orbit_target with a non-Orbit-mode camera (e.g. Fly)
   dof_aperture:       2.8     # f-stop; lower = shallower depth of field (stronger blur away from focus)
@@ -108,11 +131,31 @@ render:
                               # normalized BY this value, so lowering it also silently raised
                               # blur opacity on in-focus objects (see that shader's own fix
                               # comment). With the blend now a fixed full-res-pixel band
-                              # independent of this ceiling, 16.0 sits above this demo's physical
-                              # CoC-at-infinity (~12.7px at 85mm/f2.0/~11.5m focus/1440px render
-                              # width), so this is a true no-op safety clamp again, not a de facto
-                              # strength dial -- retune dof_aperture (or the camera's own
-                              # `aperture`/`lens` in scene.yaml) to change how strong the blur is.
+                              # independent of this ceiling, this is a no-op safety clamp again,
+                              # not a de facto strength dial -- retune dof_aperture (or the
+                              # camera's own `aperture`/`lens` in scene.yaml) to change how
+                              # strong the blur is.
+                              #
+                              # The two numbers worth keeping straight, both in FULL-res px and
+                              # both scaling with render_width above (they were last written for
+                              # a 1440px render width and are 33% larger at today's 1920):
+                              #   c        = sensor_width_mm / render_width   (one px, in metres
+                              #              on the sensor -- DofPass's sharp cutoff is |CoC| < 1px)
+                              #   sharp    = c * N * F(F-f)/f^2 metres either side of focus
+                              #   CoC(inf) = (f^2/N)/(F-f) / c  pixels
+                              # pixel_demo runs 85mm at f/4.0 (scene.yaml's camera overrides both)
+                              # focused ~11.46m out at 1920px render width: sharp = +-1.35m and
+                              # CoC(inf) = 8.4px, comfortably under this ceiling. At the f/2.0
+                              # that scene used to author, CoC(inf) was 16.9px -- i.e. this clamp
+                              # was quietly biting the far field.
+                              #
+                              # Note `sharp` scales with F(F-f), i.e. it collapses with the SQUARE
+                              # of focus distance: the +-1.35m above becomes +-8cm once the orbit
+                              # camera zooms to its min_distance: 2.0, which is why aperture alone
+                              # could never keep the cube sharp across a zoom. That is genuinely
+                              # what the lens does, so it is fixed ABOVE the lens instead, by
+                              # dof_focus_cover_object's forced-sharp band -- the physical falloff
+                              # outside that band is untouched.
   dof_sample_count:   48      # spiral gather taps; clamped to [8, 48] in-shader. Kept at the
                               # in-shader ceiling now that max_radius is bigger again -- more
                               # taps are needed to keep density up over the larger disc

@@ -423,7 +423,7 @@ public:
         // smoothed_dof_focus_, a dt-driven mutable member, and that block sits inside
         // the [&] command-recording lambda this function opens later -- advancing
         // state during command recording is a hazard the rest of this pipeline avoids.
-        float dof_focus_distance = resolve_dof_focus_(cam, view, scene, dt);
+        DofFocus dof_focus = resolve_dof_focus_(cam, view, scene, dt);
 
         // TAA sub-pixel jitter: an 8-frame Halton(2,3) sequence added to the projection's
         // jitter terms (proj[2][0]/[2][1]), not a [3][*] translation.
@@ -538,7 +538,8 @@ public:
         ctx.cam_pos               = cam_pos;
         ctx.frame_slot            = frame_slot;
         ctx.letterbox             = letterbox;
-        ctx.dof_focus_distance    = dof_focus_distance;
+        ctx.dof_focus_distance    = dof_focus.distance;
+        ctx.dof_focus_range       = dof_focus.range;
         ctx.need_ssr_trace_inputs = need_ssr_trace_inputs;
         ctx.ao_debug              = ao_debug;
         ctx.cast_dir_shadow       = cast_dir_shadow;
@@ -607,6 +608,9 @@ private:
         uint32_t  frame_slot = 0;
         LetterboxRect letterbox{};
         float dof_focus_distance = 0.0f;
+        /** Half-width in metres of the forced-sharp band around the focal plane; see
+         *  DofPass::Params::focus_range and resolve_dof_focus_(). 0 = pure thin lens. */
+        float dof_focus_range = 0.0f;
         /** True when the Hi-Z pyramid and scene-colour mip chain must be built this frame --
          *  transparent.frag traces the same ones ssr.frag does, so this is wider than
          *  ssr_enabled alone. Also the flag that pays for the one per-frame wait_idle(). */
@@ -1470,6 +1474,8 @@ private:
             // Resolved once per frame, outside this recording lambda -- see
             // resolve_dof_focus_()'s own doc for why (dt-driven smoothing state).
             dof_params.focus_distance = glm::max(ctx.dof_focus_distance, 0.01f);
+            dof_params.focus_range    = ctx.dof_focus_range;
+            dof_params.blur_scale     = config_.dof_blur_scale;
 
             dof_params.max_radius        = config_.dof_max_radius;
             dof_params.sample_count      = config_.dof_sample_count;
@@ -2211,10 +2217,17 @@ private:
         return light_datas_[light_frame_]->data();
     }
 
+    /// @brief resolve_dof_focus_()'s pair of outputs: where the focal plane sits and how
+    /// wide a band around it is forced sharp. Both feed DofPass::Params of the same names.
+    struct DofFocus {
+        float distance = 0.0f; ///< Metres from the eye to the focal plane.
+        float range    = 0.0f; ///< Half-width in metres of the forced-sharp band; 0 = pure thin lens.
+    };
+
     /**
-     * @brief Resolves this frame's DOF focus distance in metres, before command recording.
+     * @brief Resolves this frame's DOF focal plane and forced-sharp band, before recording.
      *
-     * Precedence:
+     * Precedence (unchanged):
      *   1. CameraComponent::focus_distance (per-camera; > 0 overrides everything below)
      *   2. config_.dof_focus_distance (manual, global fallback)
      *   3a. CameraComponent::focus_object, if non-empty, self-activates object focus for THIS
@@ -2222,26 +2235,44 @@ private:
      *   3b. otherwise dof_focus_mode == "orbit_target" or "object" activates that global mode
      *
      * Object focus resolves `path` through Scene::find_object_by_path() and takes the view-space
-     * depth of its Transform -- exactly the quantity DofPass::dof_signed_coc() consumes, unlike
+     * DEPTH of the target -- exactly the quantity DofPass::dof_signed_coc() consumes, unlike
      * orbit_target's RADIAL distance to the pivot. A depth <= 0 (object behind the eye, or
      * unresolved) falls through to steps 1-2 rather than being trusted.
      *
-     * Only object focus is smoothed: orbit_target is already smoothed twice over by
-     * CameraController's own follow_smoothing/movement_smoothing.
+     * The target point is the object's world BOUNDS CENTRE where bounds are available
+     * (MeshRenderer via Mesh::bounds_min()/bounds_max(), SdfRenderer via its own
+     * bounds_center/bounds_extent), not its Transform origin. A mesh origin is not generally
+     * its centre -- pixel_demo's cube.000 spans [0,1]^3, so its origin is a CORNER, 0.2 m in
+     * front of the centre -- and focusing there spends half the depth of field on empty space
+     * in front of the subject.
+     *
+     * The same bounds give `range` (see view_depth_half_extent()): with
+     * config_.dof_focus_cover_object the band is fitted to the subject's own depth extent, so
+     * the WHOLE subject stays sharp no matter how close the camera gets. That is not a tuning
+     * nicety -- the physical sharp band goes as F^2 (see gfx/dof_common.glsl's dof_signed_coc()),
+     * so an object framed sharp at 11 m is ~90% defocused at 3 m at any aperture. config_.
+     * dof_focus_range is added on top in every mode, including manual focus.
+     *
+     * Both outputs are smoothed in object mode, at the same dof_focus_smoothing rate: the
+     * depth extent of a box swings with orbit angle, and an unsmoothed range pops the sharp
+     * region's edge around as the camera moves. orbit_target is left unsmoothed because it is
+     * already smoothed twice over by CameraController's follow_smoothing/movement_smoothing.
      *
      * Called once per frame from render(), OUTSIDE the recording lambda -- smoothed_dof_focus_
-     * is dt-driven mutable state, and advancing it during command recording is a hazard the rest
-     * of this pipeline avoids.
+     * and smoothed_dof_range_ are dt-driven mutable state, and advancing them during command
+     * recording is a hazard the rest of this pipeline avoids.
      *
      * @param cam   Active camera, or nullptr (config-only values).
      * @param view  This frame's UNJITTERED view matrix.
      * @param scene Scene to resolve the focus object's path against.
      * @param dt    Frame delta, for the object-focus smoothing step.
-     * @return Focus distance in metres, unclamped; the DOF block applies its own 0.01 floor.
+     * @return Focus distance and forced-sharp half-width in metres. The distance is unclamped;
+     *         the DOF block applies its own 0.01 floor.
      */
-    float resolve_dof_focus_(const coopa::gfx::engine::components::CameraComponent* cam,
-                             const glm::mat4& view, coopa::scene::Scene& scene, float dt) {
-        float focus = (cam && cam->focus_distance > 0.0f)
+    DofFocus resolve_dof_focus_(const coopa::gfx::engine::components::CameraComponent* cam,
+                                const glm::mat4& view, coopa::scene::Scene& scene, float dt) {
+        DofFocus out;
+        out.distance = (cam && cam->focus_distance > 0.0f)
             ? cam->focus_distance : config_.dof_focus_distance;
 
         std::string_view path = (cam && !cam->focus_object.empty())
@@ -2254,8 +2285,37 @@ private:
             object_mode = true;
             if (auto* obj = scene.find_object_by_path(path)) {
                 if (auto* tc = obj->get_transform()) {
-                    float depth = view_space_depth(view, glm::vec3(tc->get_world_matrix()[3]));
-                    if (depth > 0.0f) focus = depth;
+                    const glm::mat4 model = tc->get_world_matrix();
+
+                    // Local-space bounds of whatever renderable this object carries. Left
+                    // unset for an object with neither (an empty used purely as a focus
+                    // marker), which keeps today's transform-origin behaviour and a zero
+                    // range rather than inventing an extent for a point.
+                    glm::vec3 lo(0.0f), hi(0.0f);
+                    bool has_bounds = false;
+                    if (auto* mr = obj->get_component<coopa::gfx::engine::components::MeshRenderer>()) {
+                        // is_ready() gates the dereference: an async mesh load may still be in
+                        // flight on the first frames after a scene loads (see MeshRenderer's doc).
+                        if (mr->is_ready()) {
+                            lo = mr->get_mesh()->bounds_min();
+                            hi = mr->get_mesh()->bounds_max();
+                            has_bounds = true;
+                        }
+                    } else if (auto* sr = obj->get_component<coopa::gfx::engine::components::SdfRenderer>()) {
+                        lo = sr->bounds_center - sr->bounds_extent;
+                        hi = sr->bounds_center + sr->bounds_extent;
+                        has_bounds = true;
+                    }
+
+                    const glm::vec3 target = has_bounds ? world_bounds_center(model, lo, hi)
+                                                        : glm::vec3(model[3]);
+                    float depth = view_space_depth(view, target);
+                    if (depth > 0.0f) {
+                        out.distance = depth;
+                        if (has_bounds && config_.dof_focus_cover_object) {
+                            out.range = view_depth_half_extent(view, model, lo, hi);
+                        }
+                    }
                 }
             } else if (!warned_missing_dof_object_) {
                 std::cerr << "[toyengine] PixelRenderPipeline: dof focus_object \"" << path
@@ -2268,17 +2328,26 @@ private:
             // to the manual focus above rather than being trusted blindly.
             if (auto* controller = cam->owner->get_component<toy::scene::CameraController>()) {
                 float orbit_dist = controller->orbit_distance();
-                if (orbit_dist > 0.0f) focus = orbit_dist;
+                if (orbit_dist > 0.0f) out.distance = orbit_dist;
             }
         }
 
         if (object_mode) {
-            if (smoothed_dof_focus_ <= 0.0f) smoothed_dof_focus_ = focus; // seed, don't rack from 0
-            smoothed_dof_focus_ = exp_smooth_toward(smoothed_dof_focus_, focus,
+            if (smoothed_dof_focus_ <= 0.0f) smoothed_dof_focus_ = out.distance; // seed, don't rack from 0
+            if (smoothed_dof_range_ < 0.0f)  smoothed_dof_range_  = out.range;   // 0 is a legal range, so < 0 is the sentinel
+            smoothed_dof_focus_ = exp_smooth_toward(smoothed_dof_focus_, out.distance,
                                                     config_.dof_focus_smoothing, dt);
-            focus = smoothed_dof_focus_;
+            smoothed_dof_range_ = exp_smooth_toward(smoothed_dof_range_, out.range,
+                                                    config_.dof_focus_smoothing, dt);
+            out.distance = smoothed_dof_focus_;
+            out.range    = smoothed_dof_range_;
         }
-        return focus;
+
+        // Added last, and outside the object-mode branch, so it is a flat widening of the
+        // sharp band in EVERY mode -- including a manual-focus camera, which has no bounds to
+        // fit to and for which this is the only way to widen the band at all.
+        out.range += glm::max(config_.dof_focus_range, 0.0f);
+        return out;
     }
 
     /**
@@ -3144,6 +3213,8 @@ private:
     // <= 0 means "unseeded" -- the first object-focus frame snaps to the resolved
     // depth rather than racking up from zero.
     float smoothed_dof_focus_ = -1.0f;
+    /** Smoothed forced-sharp half-width, metres. Negative = unseeded (0 is a legal value). */
+    float smoothed_dof_range_ = -1.0f;
     bool  warned_missing_dof_object_ = false;
     // Independent bloom pyramid -- see its construction-site comment. Unlike
     // scene_color_mip_pass_/hiz_pass_, it binds every descriptor once at construction and

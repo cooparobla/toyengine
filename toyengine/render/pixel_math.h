@@ -434,6 +434,51 @@ inline float view_space_depth(const glm::mat4& view, const glm::vec3& world_pos)
 }
 
 /**
+ * @brief Half the extent of a transformed object-space AABB along the camera's forward axis.
+ *
+ * The standard "project an oriented box onto one axis" sum: for the model-view matrix's
+ * third ROW (the one producing view-space z), the box's support along that axis is the sum
+ * of the per-axis contributions taken in absolute value, which is exactly how far the box
+ * reaches in front of and behind its own centre IN DEPTH. Taking `abs()` per term is also
+ * what makes this independent of view_space_depth()'s sign convention -- a half-extent has
+ * no direction, so the negation that turns view-space z into a positive depth is irrelevant.
+ *
+ * Written for DofPass::Params::focus_range: pairing this with the view depth of the SAME
+ * box's centre gives the narrowest band that still holds a whole object sharp, which is the
+ * one quantity the thin-lens CoC cannot supply (see resolve_dof_focus_()).
+ *
+ * @param view      Camera view matrix (world-to-view).
+ * @param model     Object's world matrix.
+ * @param local_min Object-space AABB minimum corner (e.g. Mesh::bounds_min()).
+ * @param local_max Object-space AABB maximum corner (e.g. Mesh::bounds_max()).
+ * @return Half the box's depth extent in metres; always >= 0.
+ */
+inline float view_depth_half_extent(const glm::mat4& view, const glm::mat4& model,
+                                    const glm::vec3& local_min, const glm::vec3& local_max) {
+    const glm::mat4 mv = view * model;
+    const glm::vec3 he = (local_max - local_min) * 0.5f;
+    return std::abs(mv[0].z * he.x) + std::abs(mv[1].z * he.y) + std::abs(mv[2].z * he.z);
+}
+
+/**
+ * @brief World-space centre of an object-space AABB under a model matrix.
+ *
+ * The companion to view_depth_half_extent(): a mesh's transform ORIGIN is not generally its
+ * centre (assets/scenes/pixel_demo/meshes/cube.000.yaml spans [0,1]^3, so its origin is a
+ * corner), and focusing on the origin biases the focal plane off the subject by half its
+ * depth.
+ *
+ * @param model     Object's world matrix.
+ * @param local_min Object-space AABB minimum corner.
+ * @param local_max Object-space AABB maximum corner.
+ * @return The box centre in world space.
+ */
+inline glm::vec3 world_bounds_center(const glm::mat4& model,
+                                     const glm::vec3& local_min, const glm::vec3& local_max) {
+    return glm::vec3(model * glm::vec4((local_min + local_max) * 0.5f, 1.0f));
+}
+
+/**
  * @brief One frame of framerate-independent exponential easing toward `target`.
  *
  * Same `1 - exp(-rate * dt)` form as CameraController::update_orbit_()'s target

@@ -356,6 +356,16 @@ struct PixelRenderConfig {
     std::string dof_focus_object    = "";        /**< ':'-separated scene path; used when dof_focus_mode == "object". Overridden by CameraComponent::focus_object. */
     float       dof_focus_smoothing = 8.0f;      /**< Focus-rack rate (1/sec) for object-focus mode; <= 0 snaps. */
     float       dof_focus_distance  = 8.0f;      /**< Metres; used when dof_focus_mode == "manual". */
+    /** Extra forced-sharp half-depth in metres, added around the focal plane in EVERY focus
+     *  mode. Deliberately non-physical: the thin-lens sharp band goes as F^2, so it collapses
+     *  when the camera closes in and no aperture compensates -- see DofPass::Params::focus_range. */
+    float       dof_focus_range     = 0.0f;
+    /** Object focus also fits the forced-sharp band to the subject's own depth extent, so the
+     *  whole subject stays sharp at any distance. See resolve_dof_focus_(). */
+    bool        dof_focus_cover_object = true;
+    /** Plain |CoC| multiplier (blur strength), applied before the dof_max_radius clamp.
+     *  Separate from dof_focus_range (band WIDTH) and dof_max_radius (a safety ceiling). */
+    float       dof_blur_scale      = 1.0f;
     float       dof_aperture        = 2.8f;      /**< f-stop; lower = shallower depth of field. */
     float       dof_focal_length    = 0.0f;      /**< mm; <= 0 takes the active camera's `lens`. */
     float       dof_sensor_width    = 0.0f;      /**< mm; <= 0 takes the active camera's `sensor_width`. */

@@ -309,6 +309,9 @@ struct AppConfig {
                 if (r.contains("dof_focus_object"))    config.render.dof_focus_object    = r.at("dof_focus_object").get_value<std::string>();
                 if (r.contains("dof_focus_smoothing")) config.render.dof_focus_smoothing = r.at("dof_focus_smoothing").get_value<float>();
                 if (r.contains("dof_focus_distance")) config.render.dof_focus_distance = r.at("dof_focus_distance").get_value<float>();
+                if (r.contains("dof_focus_range"))    config.render.dof_focus_range    = r.at("dof_focus_range").get_value<float>();
+                if (r.contains("dof_focus_cover_object")) config.render.dof_focus_cover_object = r.at("dof_focus_cover_object").get_value<bool>();
+                if (r.contains("dof_blur_scale"))     config.render.dof_blur_scale     = r.at("dof_blur_scale").get_value<float>();
                 if (r.contains("dof_aperture"))       config.render.dof_aperture       = r.at("dof_aperture").get_value<float>();
                 if (r.contains("dof_focal_length"))   config.render.dof_focal_length   = r.at("dof_focal_length").get_value<float>();
                 if (r.contains("dof_sensor_width"))   config.render.dof_sensor_width   = r.at("dof_sensor_width").get_value<float>();

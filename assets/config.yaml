@@ -297,6 +297,14 @@ physics:
   layers: ["Default", "Ground", "Triggers"]
   ignore_layer_collisions:
     - [Triggers, Triggers]   # trigger volumes never need to push each other apart
+  cloth:
+    # XPBD substeps per fixed substep, and constraint iterations within each -- the two knobs
+    # governing cloth quality. Substeps are the one that matters: for a fixed budget, more
+    # substeps converges strictly better than more iterations (Macklin et al. 2019), which is
+    # why the ratio is the reverse of solver.velocity_iterations above. 4 keeps a 25x25 sheet
+    # under 0.15 ms; raise toward 8 if a fast-moving anchor shows visible stretch.
+    substeps: 4
+    iterations: 1
   debug_draw: [Colliders, Contacts]   # what a DebugLinePass draw would gather, when enabled
   parallel_threshold: 16     # low on purpose, same reasoning as jobs.parallel_threshold above --
                               # exercises PhysicsSystem's/PhysicsWorld's job-parallel passes on

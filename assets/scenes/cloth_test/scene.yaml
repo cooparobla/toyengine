@@ -1,0 +1,174 @@
+format: blender
+scene:
+  scene_name: ClothTest
+  root_objects:
+    # ============================================================================
+    # GROUND
+    # ============================================================================
+    # plane.000 is a flat 2x2 quad at local z=0 with no thickness, so BoxCollider gives it a
+    # thin slab (size.z = 0.2) offset half that below the visible surface (center.z = -0.1) --
+    # the render surface stays exactly at world z=0. Nothing in this scene is dynamic, but the
+    # ground is a real collider so the cloth catches on it if a corner ever reaches that far.
+    - name: ground
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 12.0, y: 12.0, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: plane.000
+          material:
+            albedo: { r: 0.30, g: 0.32, b: 0.35 }
+            metallic: 0.0
+            roughness: 0.9
+            ao: 1.0
+        - type: BoxCollider
+          size: { x: 2.0, y: 2.0, z: 0.2 }
+          center: { x: 0.0, y: 0.0, z: -0.1 }
+          material: concrete
+      children: []
+
+    # ============================================================================
+    # BALL -- WASD moves it across the XY plane at a fixed hover height
+    # ============================================================================
+    # Kinematic and gravity-free: a kinematic body is authoritative over its own pose, so it
+    # hovers exactly where KinematicController puts it and never falls, rolls or gets pushed.
+    # That also makes it a perfectly stable anchor for the cloth -- a freely-rolling dynamic ball
+    # would spin its anchor points and wind the sheet into a spiral within seconds of travel.
+    #
+    # sphere.000 is a unit sphere centred on its own local origin, so radius 1.0 on the collider
+    # with a uniform Transform scale of 1.0 makes the rendered mesh and the collider match exactly.
+    - name: ball
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 2.6 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: sphere.000
+          material:
+            albedo: { r: 0.85, g: 0.55, b: 0.15 }
+            metallic: 0.1
+            roughness: 0.4
+            ao: 1.0
+          affects_reflection_probes: false
+        - type: SphereCollider
+          radius: 1.0
+          material: rubber
+        - type: Rigidbody
+          mass: 1.0
+          use_gravity: false
+          is_kinematic: true
+        - type: KinematicController
+          move_speed: 4.0
+          smoothing: 8.0
+      children: []
+
+    # ============================================================================
+    # CLOTH -- a 4x4 m sheet pinned to the ball's crown, draping over it
+    # ============================================================================
+    # The Transform places the sheet's rest pose: flat, horizontal (the sheet is built in the
+    # owner's local XY plane, normal +Z), 5 cm above the ball's top (z = 2.6 + 1.0). It starts
+    # flat and drapes over the first second or so.
+    #
+    # MeshRenderer carries the material but deliberately has NO mesh_path -- ClothRenderer builds
+    # the mesh from the solver's particles and hands it over (the parser only kicks off a load
+    # when mesh_path is non-empty). cull_backfaces is off because a draped sheet shows both of its
+    # faces by definition; the G-buffer shader already flips the normal for back faces, so the
+    # underside shades correctly rather than going black.
+    #
+    # The anchor's `point` is in the BALL's local frame, so {0,0,1} means "the top of the ball"
+    # wherever the ball happens to be -- which is what lets the pinned cap ride along as it moves.
+    - name: cloth
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 3.65 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { r: 0.72, g: 0.18, b: 0.26 }
+            metallic: 0.0
+            roughness: 0.88
+            ao: 1.0
+            cull_backfaces: false
+          affects_reflection_probes: false
+        - type: Cloth
+          resolution: { x: 25, y: 25 }
+          size: { x: 4.0, y: 4.0 }
+          mass: 1.0
+          # 0 stretch compliance = inextensible, which XPBD is perfectly stable at. Bending is
+          # where the fabric's character lives: 5e-5 creases and folds over the ball like a
+          # mid-weight cotton sheet, 1e-6 would read as leather, 1e-3 as silk.
+          stretch_compliance: 0.0
+          bend_compliance: 0.00005
+          damping: 0.08
+          # Held 3 cm off the collider surface: the sheet is a zero-thickness triangle mesh, so
+          # without a standoff its rendered surface z-fights the ball's.
+          thickness: 0.03
+          friction: 0.6
+          self_collision: true
+          # A gentle steady breeze plus a slow gust, so the hanging corners keep moving instead of
+          # settling into a dead drape. Wind is a VELOCITY: the sheet feels only its motion
+          # relative to the air, so this reaches a steady flutter rather than accelerating away.
+          wind: { x: 0.8, y: 0.35, z: 0.0 }
+          wind_turbulence: 0.7
+          air_drag: 0.04
+          air_lift: 0.03
+          anchors:
+            - object: ball
+              point: { x: 0.0, y: 0.0, z: 1.0 }
+              radius: 0.45
+        - type: ClothRenderer
+      children: []
+
+    # ============================================================================
+    # CAMERA + LIGHTING
+    # ============================================================================
+    # Orbit mode tracking the ball, so driving it around keeps both it and the cloth framed.
+    - name: camera
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -9.0, z: 6.5 }
+          rotation: { x: 62.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Camera
+          main: true
+          projection: Perspective
+          fov: 50.0
+          near_clip_plane: 0.1
+          far_clip_plane: 1000.0
+        - type: CameraController
+          mode: orbit
+          tracker: ball
+          target_offset: { x: 0.0, y: 0.0, z: 0.5 }
+          follow_smoothing: 6.0
+          movement_smoothing: 0.8
+          mouse_sensitivity: 0.08
+          zoom_speed: 1.0
+          distance: 11.0
+          pitch_deg: 28.0
+          min_distance: 3.0
+          max_distance: 40.0
+          min_pitch_deg: -5.0
+          max_pitch_deg: 80.0
+      children: []
+
+    - name: sun
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: DirectionalLight
+          direction: { x: -0.4, y: -0.5, z: -0.77 }
+          color: { r: 1.0, g: 0.96, b: 0.88 }
+          intensity: 1.1
+          cast_shadows: true
+          shadow_intensity: 0.65
+      children: []

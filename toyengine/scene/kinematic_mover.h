@@ -80,7 +80,22 @@ public:
         origin_rotation_ = tc->transform().rotation_quat();
     }
 
-    void update(float dt) override {
+    /**
+     * @brief Intentionally empty -- the motion lives in advance(), driven by
+     *        toy::scene::KinematicControlSystem at order 50.
+     *
+     * A component's update() runs at UpdatePhase::Behaviour (200), which is AFTER
+     * UpdatePhase::Physics (100) has already read this object's Transform. Writing a kinematic
+     * body's pose here would therefore always be one frame too late for the physics step that
+     * consumes it -- see kinematic_control_system.h's file doc for the full trace.
+     */
+    void update(float) override {}
+
+    /**
+     * @brief Advances the scripted motion by one frame.
+     * @param dt Frame delta time in seconds.
+     */
+    void advance(float dt) {
         if (!owner) return;
         auto* tc = owner->get_transform();
         if (!tc) return;

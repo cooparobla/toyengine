@@ -47,6 +47,7 @@
 #include <uicoopa/ui_yaml.h>
 
 #include <toyengine/scene/camera_controller.h>
+#include <toyengine/scene/kinematic_control_system.h>
 #include <toyengine/scene/register.h>
 
 #include <root_directory.h>
@@ -100,7 +101,11 @@ public:
             std::make_unique<coopa::gfx::engine::loaders::TextureLoader>(
                 ctx_.device(), ctx_.allocator(), ctx_.command_pool(), coopa::gfx::SamplerDesc::pixel_art()));
         coopa::gfx::engine::components::register_render_components(ctx_.device(), ctx_.allocator(), ctx_.command_pool(), assets_);
-        scene::register_scene_components();
+        // The GPU-aware overload (a strict superset of the argument-free one): ClothRenderer
+        // allocates its own dynamic vertex buffers and publishes the result as a runtime asset,
+        // so it needs the same device/allocator/assets capture register_render_components() takes.
+        scene::register_scene_components(ctx_.device(), ctx_.allocator(), assets_,
+                                          ctx_.frames_in_flight());
         coopa::physx::register_physics_components(assets_, config_.physics);
         // The GPU overload, so font/sprite paths in scene YAML load on demand and
         // FontDefaults::resolve_font is wired for themes. Must precede load_scene(), like
@@ -109,6 +114,12 @@ public:
         coopa::ui::register_ui_components(ctx_.device(), ctx_.allocator(), ctx_.command_pool());
 
         scene_mgr_.load_scene(resolve_path_(scene_path_from_env_(config_.scene.default_scene)));
+
+        // BEFORE the physics system in numeric order (50 vs 100), which is the whole point: a
+        // component driving a kinematic body's Transform has to write it before PhysicsSystem reads
+        // it, or physics spends the frame solving against the previous pose while the renderer draws
+        // the new one. See kinematic_control_system.h's file doc.
+        scene::install_kinematic_control_system(scene_mgr_.get_active_scene());
         coopa::physx::system::install_physics_system(scene_mgr_.get_active_scene(), config_.physics);
 
         // Activate TransformSystem before the first drain or render, so the world_matrix()
@@ -261,6 +272,7 @@ public:
 
         if (scene_mgr_.has_scene()) {
             drive_camera_controller_(scene_mgr_.get_active_scene());
+            drive_kinematic_controllers_(scene_mgr_.get_active_scene());
         }
         scene_mgr_.update(dt);
         if (scene_mgr_.has_scene()) {
@@ -277,6 +289,7 @@ public:
         scene_mgr_.late_update(dt);
 
         if (scene_mgr_.has_scene()) {
+            upload_dynamic_meshes_(scene_mgr_.get_active_scene());
             gather_debug_lines_(scene_mgr_.get_active_scene());
             pipeline_.render(ctx_.renderer(), scene_mgr_.get_active_scene(), dt);
         }
@@ -337,6 +350,12 @@ private:
         input_.bind_axis("fly_y", Key::W, Key::S); // forward/back
         input_.bind_axis("fly_z", Key::E, Key::Q); // world up/down
         input_.bind_vector("look", Key::Right, Key::Left, Key::Up, Key::Down);
+
+        // Object movement gets its OWN axes rather than reusing fly_x/fly_y: those belong to the
+        // camera's Fly mode, and a scene with both a fly camera and a driveable object would
+        // otherwise move them together on the same keypress.
+        input_.bind_axis("move_x", Key::D, Key::A); // world +X / -X
+        input_.bind_axis("move_y", Key::W, Key::S); // world +Y / -Y
     }
 
     /**
@@ -376,6 +395,49 @@ private:
             input_.axis("fly_y", ctx_.input()),
             input_.axis("fly_z", ctx_.input()));
         cc->look_input = input_.vector("look", ctx_.input());
+    }
+
+    /**
+     * @brief Pushes this frame's movement keys into every KinematicController in the active scene,
+     *        before Scene::update() consumes them.
+     *
+     * Same push-model contract as drive_camera_controller_() -- a component that never reads
+     * coopa::input::Input stays testable with no live window, and NO_INPUT=1 zeroes the whole
+     * thing so a headless capture is not perturbed by whatever the real keyboard is doing.
+     *
+     * Every controller in the scene gets the same vector, not just the first: multiple
+     * simultaneously-driven objects is a legitimate (if unusual) authoring choice, and it costs
+     * nothing to support.
+     */
+    void drive_kinematic_controllers_(coopa::scene::Scene& scene) {
+        std::vector<scene::KinematicController*> controllers =
+            scene.get_components<scene::KinematicController>();
+        if (controllers.empty()) return;
+
+        const glm::vec2 move = no_input_
+            ? glm::vec2(0.0f)
+            : glm::vec2(input_.axis("move_x", ctx_.input()), input_.axis("move_y", ctx_.input()));
+        for (scene::KinematicController* kc : controllers) kc->move_input = move;
+    }
+
+    /**
+     * @brief Refreshes and uploads every CPU-simulated mesh in the scene (today: cloth).
+     *
+     * Called between Scene::late_update() and PixelRenderPipeline::render(), which is the only
+     * correct window and the reason this is an Engine step rather than a Component::late_update():
+     *
+     *   - It must come after UpdatePhase::Physics (100) and TransformResolve (350), so the cloth
+     *     particles and the owner's world matrix are both current for this frame.
+     *   - It must come before the frame's command buffer is recorded, since it writes the vertex
+     *     buffer that recording will bind.
+     *   - It needs ctx_.current_frame(), the in-flight slot -- which a Component has no way to
+     *     know, and which is exactly what keeps the write off the buffer the GPU is still reading
+     *     (this pipeline never waits per frame; see debug_line_pass.h's file doc).
+     */
+    void upload_dynamic_meshes_(coopa::scene::Scene& scene) {
+        for (scene::ClothRenderer* cr : scene.get_components<scene::ClothRenderer>()) {
+            cr->upload(ctx_.current_frame());
+        }
     }
 
     /**

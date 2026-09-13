@@ -17,6 +17,9 @@
 
 #include <toyengine/core/engine.h>
 #include <toyengine/render/pixel_math.h>
+#include <toyengine/scene/cloth_renderer.h>
+#include <toyengine/scene/kinematic_control_system.h>
+#include <toyengine/scene/kinematic_controller.h>
 
 #include <root_directory.h>
 
@@ -636,6 +639,274 @@ void test_camera_controller_movement_smoothing_drags_then_converges() {
           "camera_controller: movement_smoothing=1 still converges to the input-driven pose given enough time");
 }
 
+// --- KinematicController -------------------------------------------------------------------
+
+/** @brief Builds a one-object scene with a KinematicController seeded at `seed_pos`. */
+std::unique_ptr<Scene> make_controller_scene(toy::scene::KinematicController** out_kc,
+                                             const glm::vec3& seed_pos) {
+    auto scene = std::make_unique<Scene>("kinematic_controller_test");
+    auto obj = std::make_unique<SceneObject>("ball");
+    obj->add_component<TransformComponent>()->transform().set_position(seed_pos);
+    *out_kc = obj->add_component<toy::scene::KinematicController>();
+    scene->add_root_object(std::move(obj));
+    // The controller moves nothing without this: its motion lives in advance(), driven here at
+    // order 50 so it lands ahead of the physics phase. Installing it makes these tests exercise
+    // the same path Engine uses, rather than a Behaviour-phase update() that no longer exists.
+    toy::scene::install_kinematic_control_system(*scene);
+    return scene;
+}
+
+void test_kinematic_controller_moves_on_input_and_holds_height() {
+    toy::scene::KinematicController* kc = nullptr;
+    auto scene = make_controller_scene(&kc, glm::vec3(0.0f, 0.0f, 2.6f));
+    kc->move_speed = 4.0f;
+    kc->smoothing = 0.0f; // instant, so the travelled distance is exactly speed * time
+    scene->start();
+
+    kc->move_input = glm::vec2(1.0f, 0.0f);
+    for (int i = 0; i < 60; ++i) scene->update(1.0f / 60.0f);
+
+    auto* tc = scene->root_objects()[0]->get_transform();
+    const glm::vec3 p = tc->transform().position();
+    expect(std::fabs(p.x - 4.0f) < 0.05f, "kinematic_controller: +X input for 1 s travels move_speed metres");
+    expect(std::fabs(p.y) < 1e-5f, "kinematic_controller: no Y drift from pure +X input");
+    expect(std::fabs(p.z - 2.6f) < 1e-5f, "kinematic_controller: holds the authored hover height");
+
+    // Diagonal input is CLAMPED, not normalized: full deflection on both axes must not travel
+    // faster than full deflection on one.
+    kc->move_input = glm::vec2(1.0f, 1.0f);
+    const glm::vec3 before = tc->transform().position();
+    for (int i = 0; i < 60; ++i) scene->update(1.0f / 60.0f);
+    const float diagonal = glm::length(tc->transform().position() - before);
+    expect(std::fabs(diagonal - 4.0f) < 0.05f,
+          "kinematic_controller: diagonal input is clamped to move_speed, not sqrt(2) faster");
+}
+
+void test_kinematic_controller_smoothing_ramps_then_converges() {
+    toy::scene::KinematicController* kc = nullptr;
+    auto scene = make_controller_scene(&kc, glm::vec3(0.0f));
+    kc->move_speed = 4.0f;
+    kc->smoothing = 8.0f;
+    scene->start();
+
+    kc->move_input = glm::vec2(1.0f, 0.0f);
+    scene->update(1.0f / 60.0f);
+    expect(kc->velocity().x > 0.0f && kc->velocity().x < 4.0f,
+          "kinematic_controller: smoothing ramps velocity rather than snapping to move_speed");
+
+    for (int i = 0; i < 300; ++i) scene->update(1.0f / 60.0f);
+    expect(std::fabs(kc->velocity().x - 4.0f) < 0.05f,
+          "kinematic_controller: smoothed velocity converges to move_speed");
+
+    // Releasing the key must decay back to rest, not stop dead -- PhysicsSystem derives the
+    // kinematic body's velocity from this motion, so a discontinuity would jolt anything attached.
+    kc->move_input = glm::vec2(0.0f);
+    scene->update(1.0f / 60.0f);
+    expect(kc->velocity().x > 0.0f && kc->velocity().x < 4.0f,
+          "kinematic_controller: releasing input decays velocity instead of stopping instantly");
+}
+
+/**
+ * @brief The regression test for the clipping bug: physics must see the pose written THIS frame.
+ *
+ * KinematicControlSystem runs at order 50 and PhysicsSystem at 100, so by the time Scene::update()
+ * returns, the body's position must equal the Transform the controller just wrote. If the
+ * controller ever drifts back to the Behaviour phase (200), physics spends each frame solving
+ * against the PREVIOUS pose while the renderer draws the new one -- invisible for rigid contacts,
+ * but it is exactly what made the ball clip through the cloth in cloth_test.
+ */
+void test_kinematic_control_runs_before_physics() {
+    using coopa::physx::components::SphereCollider;
+    using coopa::physx::components::RigidbodyComponent;
+
+    Scene scene("kinematic_order_test");
+    auto obj = std::make_unique<SceneObject>("ball");
+    obj->add_component<TransformComponent>()->transform().set_position(glm::vec3(0.0f, 0.0f, 2.0f));
+    obj->add_component<SphereCollider>()->set_radius(1.0f);
+    auto* rb = obj->add_component<RigidbodyComponent>();
+    rb->is_kinematic = true;
+    rb->use_gravity = false;
+    auto* kc = obj->add_component<toy::scene::KinematicController>();
+    kc->move_speed = 4.0f;
+    kc->smoothing = 0.0f;
+    SceneObject* ball = obj.get();
+    scene.add_root_object(std::move(obj));
+
+    scene.start();
+    toy::scene::install_kinematic_control_system(scene);
+    auto* phys = coopa::physx::system::install_physics_system(scene);
+
+    const float dt = 1.0f / 60.0f;
+    kc->move_input = glm::vec2(1.0f, 0.0f);
+    for (int i = 0; i < 30; ++i) {
+        kc->move_input = glm::vec2(1.0f, 0.0f); // re-assert; Engine would push this every frame
+        scene.update(dt);
+        scene.late_update(dt);
+    }
+
+    const float transform_x = ball->get_transform()->transform().position().x;
+    const coopa::physx::dynamics::Body* body = phys->world().get_body(rb->body_id());
+    expect(body != nullptr, "kinematic order: the ball bound to a physics body");
+    expect(transform_x > 1.0f, "kinematic order: the controller actually moved the ball");
+    if (body) {
+        // One frame of lag would be move_speed * dt = 6.7 cm; require far tighter than that.
+        expect(std::fabs(body->position.x - transform_x) < 1e-4f,
+              "kinematic order: physics saw the pose written this frame, not the previous one");
+    }
+}
+
+/**
+ * @brief Full headless render of the cloth scene: the sheet must actually simulate (its particles
+ * move and end up outside the ball) AND that simulation must reach the screen (two frames far
+ * apart differ).
+ *
+ * The rendered-difference half is the part that matters most: everything else about cloth is
+ * covered by physxcoopa's own headless suite, but nothing there can catch a broken dynamic vertex
+ * buffer -- a mesh uploaded once and never again would still pass every physics assertion while
+ * drawing a frozen flat sheet.
+ */
+void test_headless_render_cloth_scene_simulates_and_animates() {
+    toy::core::AppConfig config;
+    config.window.title  = "toyengine_tests";
+    config.window.width  = 640;
+    config.window.height = 360;
+    config.window.vsync  = false;
+    config.scene.default_scene = "assets/scenes/cloth_test/scene.yaml";
+    config.render.render_width  = 320;
+    config.render.render_height = 180;
+    config.output.save_on_exit = false;
+
+    const std::string early_path = std::string(ROOT_DIR) + "/output/test_cloth_early.png";
+    const std::string late_path  = std::string(ROOT_DIR) + "/output/test_cloth_late.png";
+
+    // Pin the tick delta. Without this the Engine runs on wall-clock dt, which headless is a few
+    // milliseconds -- so the fixed per-frame displacement below would describe a ~22 m/s ball
+    // rather than the 4 m/s the scene is authored for, and most frames would run no physics substep
+    // at all. Both make the drape unreproducible. Same knob the world-canvas hover test uses.
+    setenv("FIXED_DT", "0.016666667", /*overwrite=*/1);
+
+    {
+        toy::core::Engine engine(std::move(config));
+
+        // A fixed dt, so the drape is reproducible rather than wall-clock dependent.
+        const float dt = 1.0f / 60.0f;
+        for (int i = 0; i < 4; ++i) engine.tick();
+        engine.save_screenshot(early_path, /*low_res=*/true);
+
+        auto* cc = engine.scene().find_first_component<coopa::physx::components::ClothComponent>();
+        expect(cc != nullptr, "cloth scene: the Cloth component parsed from YAML");
+        const coopa::physx::cloth::Cloth* sim = cc ? cc->cloth() : nullptr;
+        expect(sim != nullptr, "cloth scene: PhysicsSystem bound a simulated cloth to it");
+        expect(sim && sim->particles.size() == 25u * 25u, "cloth scene: resolution 25x25 round-trips from YAML");
+        expect(sim && !sim->anchors.empty(), "cloth scene: the ball anchor resolved by name");
+
+        auto* cr = engine.scene().find_first_component<toy::scene::ClothRenderer>();
+        expect(cr != nullptr && cr->is_ready(),
+              "cloth scene: ClothRenderer built and published its dynamic GPU mesh");
+
+        const float start_min_z = sim ? sim->bounds.min.z : 0.0f;
+        for (int i = 0; i < 150; ++i) engine.tick();
+        engine.save_screenshot(late_path, /*low_res=*/true);
+
+        sim = cc ? cc->cloth() : nullptr;
+        if (sim) {
+            expect(sim->bounds.min.z < start_min_z - 0.5f,
+                  "cloth scene: the sheet drapes downward over the ball instead of staying flat");
+            // The ball is a unit sphere at z = 2.6; no particle may be inside it.
+            bool outside = true;
+            for (const auto& p : sim->particles) {
+                if (glm::length(p.position - glm::vec3(0.0f, 0.0f, 2.6f)) < 1.0f) { outside = false; break; }
+            }
+            expect(outside, "cloth scene: no particle ends up inside the ball's collider");
+        }
+
+        // Now the moving-ball half. The ball's Transform is written directly rather than through
+        // its KinematicController: Engine::drive_kinematic_controllers_() re-reads the keyboard and
+        // overwrites move_input at the top of every tick(), so a value poked in from outside can
+        // never survive to Scene::update() -- and a headless test has no keyboard to press. The
+        // input -> move_input -> Transform half is covered by the two KinematicController tests
+        // above; what only this test can cover is everything BELOW the Transform write, which is
+        // exactly what is exercised here: Transform -> PhysicsSystem's derived kinematic velocity
+        // -> cloth anchors -> particles -> the uploaded vertex buffer.
+        expect(engine.scene().find_first_component<toy::scene::KinematicController>() != nullptr,
+              "cloth scene: the ball has a KinematicController");
+        auto* ball = engine.scene().find_object("ball");
+        expect(ball != nullptr, "cloth scene: the ball object resolves by name");
+        const glm::vec3 ball_before = ball ? ball->get_transform()->transform().position() : glm::vec3(0.0f);
+        float cloth_x_before = 0.0f;
+        if (sim) {
+            for (const auto& p : sim->particles) cloth_x_before += p.position.x;
+            cloth_x_before /= static_cast<float>(sim->particles.size());
+        }
+        // Worst penetration over EVERY moving frame, not just the final one: the clipping this
+        // guards against is transient by nature (it appears while the ball travels and vanishes the
+        // moment it stops), so sampling only the end state would miss it entirely.
+        float worst_clearance = 1e9f;
+        for (int i = 0; i < 120; ++i) {
+            if (ball) {
+                coopa::util::Transform& t = ball->get_transform()->transform();
+                t.set_position(t.position() + glm::vec3(4.0f / 60.0f, 0.0f, 0.0f));
+            }
+            engine.tick();
+            // Measured against the pose the ball was DRAWN at this frame -- the whole bug was that
+            // this differs from the pose the cloth was solved against.
+            const glm::vec3 drawn = ball ? ball->get_transform()->transform().position() : glm::vec3(0.0f);
+            if (const auto* live = cc ? cc->cloth() : nullptr) {
+                for (const auto& p : live->particles) {
+                    worst_clearance = std::min(worst_clearance, glm::length(p.position - drawn) - 1.0f);
+                }
+            }
+        }
+        expect(worst_clearance > 0.0f,
+              "cloth scene: no particle ever enters the ball at the pose it is rendered at");
+        if (worst_clearance <= 0.0f) {
+            std::cerr << "       worst clearance was " << worst_clearance << " m\n";
+        }
+
+        const glm::vec3 ball_after = ball ? ball->get_transform()->transform().position() : glm::vec3(0.0f);
+        expect(ball_after.x > ball_before.x + 0.5f, "cloth scene: the ball travels along +X");
+        expect(std::fabs(ball_after.z - ball_before.z) < 1e-4f,
+              "cloth scene: the ball holds its hover height while moving");
+
+        sim = cc ? cc->cloth() : nullptr;
+        if (sim) {
+            float cloth_x_after = 0.0f;
+            for (const auto& p : sim->particles) cloth_x_after += p.position.x;
+            cloth_x_after /= static_cast<float>(sim->particles.size());
+            expect(cloth_x_after > cloth_x_before + 0.4f, "cloth scene: the sheet travels with the ball");
+            expect(std::fabs(cloth_x_after - ball_after.x) < 1.0f,
+                  "cloth scene: the sheet trails the ball rather than being left behind");
+            bool outside = true;
+            for (const auto& p : sim->particles) {
+                if (glm::length(p.position - ball_after) < 1.0f) { outside = false; break; }
+            }
+            expect(outside, "cloth scene: no particle penetrates the ball while it is moving");
+        }
+        (void)dt;
+    }
+
+    unsetenv("FIXED_DT");
+
+    int w1 = 0, h1 = 0, c1 = 0, w2 = 0, h2 = 0, c2 = 0;
+    uint8_t* early = stbi_load(early_path.c_str(), &w1, &h1, &c1, 4);
+    uint8_t* late  = stbi_load(late_path.c_str(),  &w2, &h2, &c2, 4);
+    expect(early != nullptr && late != nullptr, "cloth scene: both screenshots round-trip through stb_image");
+
+    if (early && late && w1 == w2 && h1 == h2) {
+        int diff = 0;
+        for (int i = 0; i < w1 * h1 * 4; ++i) {
+            if (early[i] != late[i]) ++diff;
+        }
+        expect(diff > w1 * h1 / 20,
+              "cloth scene: the dynamic vertex buffer reaches the screen (frames 4 and 154 differ substantially)");
+    }
+
+    if (early) stbi_image_free(early);
+    if (late)  stbi_image_free(late);
+    std::filesystem::remove(early_path);
+    std::filesystem::remove(late_path);
+}
+
 /**
  * @brief Full headless render through a real Vulkan device: constructs an
  * Engine against the demo scene with a palette configured, ticks it a few
@@ -1082,6 +1353,10 @@ int main() {
     test_headless_render_world_canvas_changes_output();
     test_headless_render_world_canvas_button_hover();
     test_headless_render_material_maps_change_output();
+    test_kinematic_controller_moves_on_input_and_holds_height();
+    test_kinematic_controller_smoothing_ramps_then_converges();
+    test_kinematic_control_runs_before_physics();
+    test_headless_render_cloth_scene_simulates_and_animates();
 
     if (g_failures > 0) {
         std::cerr << "\n" << g_failures << " test(s) failed.\n";

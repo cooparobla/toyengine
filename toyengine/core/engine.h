@@ -1,17 +1,13 @@
 /**
  * @file engine.h
- * @brief Owns the engine lifetime: window, Vulkan objects, assets, scene, and
- *        the render loop.
+ * @brief Owns the engine lifetime: window, Vulkan objects, assets, scene, and the render loop.
  *
- * Owns a shared coopa::job::JobEngine first (so it outlives every subsystem that
- * submits to it), then composes a gfx::app::Context (which owns the Window ->
- * Instance -> Surface -> Device -> Allocator -> Swapchain -> CommandPool ->
- * RenderPass -> Renderer bring-up chain, plus frame timing and resize
- * handling), then layers PixelRenderPipeline, AssetManager, and SceneManager
- * on top -- all three are handed the JobEngine so asset decode, transform
- * resolution, and the render-list gathers can dispatch to it. Engine no
- * longer orders or constructs any Vulkan/windowing object itself -- see
- * gfxcoopa/app/context.h.
+ * Constructs a shared coopa::job::JobEngine first, so it outlives every subsystem that
+ * submits to it, then a gfx::app::Context (which owns the Window -> Instance -> Surface ->
+ * Device -> Allocator -> Swapchain -> CommandPool -> RenderPass -> Renderer bring-up chain,
+ * plus frame timing and resize handling), then layers PixelRenderPipeline, AssetManager and
+ * SceneManager on top -- all three handed the JobEngine so asset decode, transform resolution
+ * and the render-list gathers can dispatch to it.
  */
 
 #ifndef TOYENGINE_CORE_ENGINE_H
@@ -98,10 +94,8 @@ public:
         assets_.add_search_root(std::string(ROOT_DIR) + "/assets");
         assets_.register_loader<coopa::gfx::engine::data::Mesh>(
             std::make_unique<coopa::gfx::engine::loaders::MeshLoader>(ctx_.device(), ctx_.allocator(), ctx_.command_pool()));
-        // NEAREST + clamp-to-edge (SamplerDesc::pixel_art()), not gfxcoopa's bilinear default --
-        // this is a pixel-art engine, and bilinear filtering blurs texel edges. Was a 99-line
-        // fork (toy::loaders::PixelTextureLoader) differing only in this sampler; folded into
-        // gfxcoopa's TextureLoader once it grew a sampler_desc parameter for exactly this.
+        // NEAREST + clamp-to-edge (SamplerDesc::pixel_art()), not gfxcoopa's bilinear default:
+        // this is a pixel-art engine, and bilinear filtering blurs texel edges.
         assets_.register_loader<coopa::gfx::engine::data::Texture>(
             std::make_unique<coopa::gfx::engine::loaders::TextureLoader>(
                 ctx_.device(), ctx_.allocator(), ctx_.command_pool(), coopa::gfx::SamplerDesc::pixel_art()));
@@ -117,11 +111,9 @@ public:
         scene_mgr_.load_scene(resolve_path_(scene_path_from_env_(config_.scene.default_scene)));
         coopa::physx::system::install_physics_system(scene_mgr_.get_active_scene(), config_.physics);
 
-        // Mesh decode (gfxcoopa's register.h) now runs via load_async() on jobs_'s workers,
-        // same as texture decode always has -- activate TransformSystem before the first
-        // drain/render so world_matrix() reads below are never asked to resolve a still-dirty
-        // transform, then block here until every load issued above has finished, so frame 0
-        // (and ONESHOT/CAPTURE_FRAMES captures) see a fully populated scene.
+        // Activate TransformSystem before the first drain or render, so the world_matrix()
+        // reads below are never asked to resolve a still-dirty transform; then block until
+        // every load issued above has finished, so frame 0 sees a fully populated scene.
         coopa::scene::install_transform_system(scene_mgr_.get_active_scene());
         drain_pending_assets_();
 
@@ -278,11 +270,10 @@ public:
             // EventSystem::process() is dispatched from inside late_update() (400).
             drive_ui_canvases_(scene_mgr_.get_active_scene());
         }
-        // late_update() runs LateBehaviourSystem (Component::late_update()) and, critically,
-        // flushes each worker's deferred SceneCommandBuffer and advances Scene::frame_index() --
-        // none of which happened before this call was added. Must run before render() below so
-        // a same-frame deferred spawn/destroy is reflected in what's drawn, matching Unity's
-        // Update -> LateUpdate -> render frame order.
+        // late_update() runs LateBehaviourSystem, flushes each worker's deferred
+        // SceneCommandBuffer and advances Scene::frame_index(). Must precede render() so a
+        // same-frame deferred spawn or destroy is reflected in what is drawn, matching
+        // Unity's Update -> LateUpdate -> render order.
         scene_mgr_.late_update(dt);
 
         if (scene_mgr_.has_scene()) {
@@ -335,8 +326,8 @@ private:
      * @brief Binds the default action set: quit, fly move (as three axes),
      *        and look (as one vector).
      *
-     * Orbit no longer has keyboard bindings -- the mouse (yaw/pitch) and
-     * scroll wheel (zoom) drive it directly, read in drive_camera_controller_().
+     * Orbit has no keyboard bindings: the mouse drives yaw/pitch and the scroll wheel
+     * drives zoom, both read directly in drive_camera_controller_().
      */
     void bind_default_input_() {
         using coopa::input::Key;
@@ -466,9 +457,8 @@ private:
         glm::vec3 ray_dir(0.0f);
         for (coopa::ui::CanvasComponent* canvas : canvases) {
             if (!canvas->is_world_space()) {
-                // Same seeding as the world path below, and for the same reason -- this used
-                // to be missing entirely, so a screen-space canvas emitted every solid-colour
-                // quad against a null image view.
+                // Same seeding as the world path below, and for the same reason: without it
+                // a screen-space canvas emits every solid-colour quad against a null view.
                 canvas->set_default_texture(screen_white);
                 // The WINDOW extent, not the render extent: UiPass draws this canvas into the
                 // swapchain-sized overlay target, and ctx_.input()'s cursor is in window
@@ -568,11 +558,11 @@ private:
     /**
      * @brief Pumps AssetManager until every load issued during scene load has been finalized.
      *
-     * Mesh decode now runs on jobs_'s worker threads (see gfxcoopa's register.h), so all of a
-     * scene's mesh YAML parses overlap instead of serializing at parse time -- but frame 0
-     * must still see a fully loaded scene, or ONESHOT/CAPTURE_FRAMES would capture an empty
-     * or partial image. Reports any mesh that failed to decode, since MeshRenderer's parser
-     * (register.h) can no longer check is_failed() synchronously once loading is async.
+     * Mesh decode runs on jobs_'s worker threads, so a scene's mesh YAML parses overlap
+     * instead of serializing at parse time -- but frame 0 must still see a fully loaded
+     * scene, or an ONESHOT/CAPTURE_FRAMES capture would show an empty or partial image.
+     * Reports any mesh that failed to decode, since MeshRenderer's parser cannot check
+     * is_failed() synchronously while loading is async.
      */
     void drain_pending_assets_() {
         while (assets_.pending_load_count() > 0) {
@@ -679,10 +669,9 @@ private:
         });
         if (!rc.palette_path.empty()) rc.palette_path = resolve_path_(rc.palette_path);
 
-        // Derived surface shaders this app ships -- see gfx/surface/*.glsl and the
-        // layered-shaders plan. A scene material opts in via `shader: <name>` (see
-        // PBRMaterial::shader); a material that never sets it is completely unaffected by
-        // this registry existing.
+        // Derived surface shaders this app ships -- see gfx/surface/*.glsl. A scene material
+        // opts in via `shader: <name>` (see PBRMaterial::shader); a material that never sets it
+        // is completely unaffected by this registry existing.
         rc.surface_shaders.add({
             /* name  */ "foliage",
             /* domain */ coopa::gfx::pipeline::SurfaceShaderDomain::Opaque,

@@ -3,19 +3,17 @@
  * @brief Composites the world-space UI layer over the finished, post-processed frame
  *        (see assets/shaders/ui_composite.frag).
  *
- * This is the stage that keeps UI out of the display-space effects. The world canvases
- * used to be drawn as a guest inside post_target_'s bracket, which put them upstream of
- * the AA pass and TiltShiftPass -- so a moving canvas ghosted under TAA and the whole UI
- * smeared under tilt shift. They now render into their own transparent RGBA8 layer, sized
- * to the letterbox rect, and this pass puts that layer back on top once every display-space
- * effect has already run.
+ * This is the stage that keeps UI out of the display-space effects. World canvases render
+ * into their own transparent RGBA8 layer, sized to the letterbox rect, and this pass puts
+ * that layer back on top once AA and TiltShiftPass have already run -- drawing them as a
+ * guest of the post target instead would let TAA ghost a moving canvas and tilt shift smear
+ * the whole UI.
  *
- * Structurally a two-source UpscalePass (toyengine/render/passes/upscale_pass.h): same
- * fullscreen triangle, same nearest sampling, same draw-into-a-LetterboxRect idiom, one
- * extra combined-image-sampler binding. With tilt shift off, the BASE source is still at
- * render_extent_ and this pass performs the nearest-neighbour upscale UpscalePass used to --
- * over an identical rect with identical UV math, so the scene's pixel-art look is unchanged.
- * The UI source is different: it is built at the letterbox rect, so sampling it is an exact
+ * Structurally a two-source UpscalePass: same fullscreen triangle, same nearest sampling,
+ * same draw-into-a-LetterboxRect idiom, one extra combined-image-sampler binding. With tilt
+ * shift off the BASE source is still at render_extent_, so this pass performs the
+ * nearest-neighbour upscale itself, over an identical rect with identical UV math. The UI
+ * source is different: it is built at the letterbox rect, so sampling it is an exact
  * texel-for-texel fetch and the UI is never resampled at all.
  */
 
@@ -24,7 +22,6 @@
 
 #include <memory>
 #include <string>
-#include <vector>
 
 #include <gfxcoopa/core/device.h>
 #include <gfxcoopa/pipeline/pipeline.h>
@@ -64,7 +61,6 @@ public:
                     coopa::gfx::pipeline::RenderPass& target_pass,
                     const std::string& vert_spv,
                     const std::string& frag_spv)
-        : device_(device)
     {
         using namespace coopa::gfx;
 
@@ -137,8 +133,6 @@ public:
     }
 
 private:
-    coopa::gfx::core::Device& device_;
-
     std::unique_ptr<coopa::gfx::pipeline::Shader>              vert_shader_;
     std::unique_ptr<coopa::gfx::pipeline::Shader>              frag_shader_;
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> desc_layout_;

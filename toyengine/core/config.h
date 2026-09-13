@@ -44,7 +44,7 @@ struct WindowConfig {
 
 /**
  * @struct OutputConfig
- * @brief Headless frame export configuration (see util/screenshot.h).
+ * @brief Headless frame export configuration.
  */
 struct OutputConfig {
     bool        save_on_exit  = true;

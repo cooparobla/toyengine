@@ -23,7 +23,6 @@
 
 #include <memory>
 #include <string>
-#include <vector>
 
 #include <gfxcoopa/core/device.h>
 #include <gfxcoopa/pipeline/pipeline.h>
@@ -53,7 +52,6 @@ public:
                coopa::gfx::pipeline::RenderPass& swapchain_pass,
                const std::string& vert_spv,
                const std::string& frag_spv)
-        : device_(device)
     {
         using namespace coopa::gfx;
 
@@ -109,8 +107,6 @@ public:
     }
 
 private:
-    coopa::gfx::core::Device& device_;
-
     std::unique_ptr<coopa::gfx::pipeline::Shader>              vert_shader_;
     std::unique_ptr<coopa::gfx::pipeline::Shader>              frag_shader_;
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> desc_layout_;

@@ -104,18 +104,16 @@ void test_render_resolution_fixed_mode() {
     cfg.resolution_mode = "fixed";
     cfg.render_width = 480;
     cfg.render_height = 270;
-    uint32_t w = 0, h = 0;
-    toy::render::compute_render_resolution(cfg, 1920, 1080, w, h);
-    expect(w == 480 && h == 270, "render_resolution: fixed mode ignores swapchain size");
+    toy::render::RenderExtent e = toy::render::compute_render_extent(cfg, 1920, 1080);
+    expect(e.width == 480 && e.height == 270, "render_resolution: fixed mode ignores swapchain size");
 }
 
 void test_render_resolution_divisor_mode() {
     toy::render::PixelRenderConfig cfg;
     cfg.resolution_mode = "divisor";
     cfg.scale_divisor = 4;
-    uint32_t w = 0, h = 0;
-    toy::render::compute_render_resolution(cfg, 1920, 1080, w, h);
-    expect(w == 480 && h == 270, "render_resolution: divisor mode divides swapchain size");
+    toy::render::RenderExtent e = toy::render::compute_render_extent(cfg, 1920, 1080);
+    expect(e.width == 480 && e.height == 270, "render_resolution: divisor mode divides swapchain size");
 }
 
 void test_pixel_render_config_aa_defaults() {
@@ -302,6 +300,80 @@ void test_app_config_load_round_trips_soft_shadow_settings() {
 void test_directional_light_shadow_intensity_default() {
     coopa::gfx::engine::components::DirectionalLightComponent dl;
     expect(dl.shadow_intensity == 1.0f, "DirectionalLightComponent: shadow_intensity defaults to 1.0 (full occlusion)");
+}
+
+// --- Directional shadow frustum fit (pixel_math.h's compute_dir_shadow_fit) ---
+
+toy::render::ShadowFitCamera make_shadow_fit_camera(const glm::vec3& eye, const glm::vec3& at) {
+    toy::render::ShadowFitCamera cam;
+    cam.view              = glm::lookAt(eye, at, glm::vec3(0.0f, 0.0f, 1.0f));
+    cam.is_perspective    = true;
+    cam.fov_degrees       = 45.0f;
+    cam.near_clip         = 0.1f;
+    cam.far_clip          = 1000.0f;
+    cam.aspect            = 16.0f / 9.0f;
+    return cam;
+}
+
+void test_dir_shadow_fit_no_camera_fallback() {
+    // No camera: the fixed +-15 box, so texel size is 30 / resolution.
+    auto fit = toy::render::compute_dir_shadow_fit(glm::vec3(0.3f, 0.4f, -1.0f), nullptr, 60.0f, 2048);
+    expect(std::abs(fit.texel_world - 30.0f / 2048.0f) < 1e-6f,
+           "dir_shadow_fit: no camera falls back to the fixed +-15 box");
+    expect(fit.light_space_matrix != glm::mat4(1.0f),
+           "dir_shadow_fit: no camera still produces a real light-space matrix");
+}
+
+void test_dir_shadow_fit_is_camera_only() {
+    // Identical cameras must give an identical fit -- nothing else is an input, which is
+    // what keeps a far-off or freefalling scene object from perturbing the shadow frustum.
+    auto cam = make_shadow_fit_camera(glm::vec3(0.0f, -10.0f, 4.0f), glm::vec3(0.0f));
+    glm::vec3 dir(0.3f, 0.4f, -1.0f);
+    auto a = toy::render::compute_dir_shadow_fit(dir, &cam, 60.0f, 2048);
+    auto b = toy::render::compute_dir_shadow_fit(dir, &cam, 60.0f, 2048);
+    expect(a.light_space_matrix == b.light_space_matrix && a.texel_world == b.texel_world,
+           "dir_shadow_fit: same camera -> identical fit");
+}
+
+void test_dir_shadow_fit_radius_stable_under_rotation() {
+    // The bounding SPHERE of the frustum has a rotation-invariant radius, so orbiting the
+    // camera about its own target must not resize the box (texel size tracks the extent).
+    glm::vec3 dir(0.3f, 0.4f, -1.0f);
+    auto cam_a = make_shadow_fit_camera(glm::vec3(0.0f, -10.0f, 4.0f), glm::vec3(0.0f));
+    auto cam_b = make_shadow_fit_camera(glm::vec3(10.0f, 0.0f, 4.0f), glm::vec3(0.0f));
+    auto a = toy::render::compute_dir_shadow_fit(dir, &cam_a, 60.0f, 2048);
+    auto b = toy::render::compute_dir_shadow_fit(dir, &cam_b, 60.0f, 2048);
+    expect(std::abs(a.texel_world - b.texel_world) < 1e-6f,
+           "dir_shadow_fit: box size is invariant under camera rotation");
+}
+
+void test_dir_shadow_fit_center_snaps_to_texels() {
+    // The box centre must land on a whole multiple of the texel size -- that snap is what
+    // removes sub-texel shadow crawl as the camera translates.
+    glm::vec3 dir(0.3f, 0.4f, -1.0f);
+    auto cam = make_shadow_fit_camera(glm::vec3(1.234f, -9.117f, 4.0f), glm::vec3(0.5f, 0.25f, 0.0f));
+    const uint32_t resolution = 2048;
+    auto fit = toy::render::compute_dir_shadow_fit(dir, &cam, 60.0f, resolution);
+    // The box half-extent follows from texel_world (= 2*extent / resolution). The matrix's
+    // translation column survives the light rotation (which has none), so orthoRH_ZO's
+    // [3][0] = -centre_x / extent recovers the light-space centre, which must be a whole
+    // number of texels.
+    const float extent   = fit.texel_world * static_cast<float>(resolution) * 0.5f;
+    const float centre_x = -fit.light_space_matrix[3][0] * extent;
+    const float ratio    = centre_x / fit.texel_world;
+    expect(std::abs(ratio - std::round(ratio)) < 1e-2f,
+           "dir_shadow_fit: box centre is snapped to a whole texel");
+}
+
+void test_dir_shadow_fit_degenerate_shadow_distance() {
+    // A zero shadow distance collapses the frustum slice; the near/far separation floor
+    // must still leave a usable (non-inverted) depth range.
+    glm::vec3 dir(0.0f, 0.0f, -1.0f);
+    auto cam = make_shadow_fit_camera(glm::vec3(0.0f, -8.0f, 3.0f), glm::vec3(0.0f));
+    auto fit = toy::render::compute_dir_shadow_fit(dir, &cam, 0.0f, 1024);
+    expect(fit.texel_world > 0.0f, "dir_shadow_fit: degenerate shadow_distance keeps a positive texel size");
+    expect(std::isfinite(fit.light_space_matrix[2][2]) && fit.light_space_matrix[2][2] != 0.0f,
+           "dir_shadow_fit: degenerate shadow_distance keeps a finite depth range");
 }
 
 void test_pixel_density_orthographic() {
@@ -984,6 +1056,11 @@ int main() {
     test_pixel_render_config_soft_shadow_defaults();
     test_app_config_load_round_trips_soft_shadow_settings();
     test_directional_light_shadow_intensity_default();
+    test_dir_shadow_fit_no_camera_fallback();
+    test_dir_shadow_fit_is_camera_only();
+    test_dir_shadow_fit_radius_stable_under_rotation();
+    test_dir_shadow_fit_center_snaps_to_texels();
+    test_dir_shadow_fit_degenerate_shadow_distance();
     test_pixel_density_orthographic();
     test_pixel_density_perspective_disabled();
     test_sdf_clip_rect_on_screen();

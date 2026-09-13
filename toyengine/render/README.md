@@ -1,79 +1,85 @@
 # toyengine/render
 
-The low-resolution deferred pixel-art frame graph. One pipeline, not a
-choice between tracks: direct lighting is always the same banded-cel formula
-(`light_bands`/`spec_threshold` in `assets/config.yaml`), and everything else
-is independently toggleable on top of it —
-`outline_enabled`/`palette_enabled`/`dither_enabled`/`camera_pixel_snap`
-(pixel-art post/camera), `ssao_enabled`, and `ssr_enabled` (also gates the
-SSGI diffuse-bounce term, `ssgi_intensity`). Shadows are always a single hard
-depth compare. Still renders at a low internal resolution
-with a nearest-neighbour upscale (`upscale_mode`: `fit`, the default, or
-`integer`) regardless of which toggles are set, so the output always stays
-pixelated.
+The low-resolution deferred pixel-art frame graph. One pipeline, not a choice between
+tracks: everything is an independent toggle on top of the same G-buffer/deferred base, and
+the frame always renders at a low internal resolution with a nearest-neighbour upscale
+(`upscale_mode`: `fit`, the default, or `integer`) — so the output stays pixelated
+whatever is switched on.
 
 | File | Purpose |
 |---|---|
-| [`pixel_render_pipeline.h`](pixel_render_pipeline.h) | `PixelRenderPipeline` — owns every target, UBO, descriptor set, and pass; `render(renderer, scene)` records the whole frame into one `Renderer::begin_frame()` call (no per-frame `vkQueueWaitIdle` in general — see below for the `ssr_enabled` exception). |
-| [`pixel_render_config.h`](pixel_render_config.h) | `PixelRenderConfig` — the six feature toggles up front, then resolution, lighting, shadow, outline, palette, dither, SSAO, and SSR+SSGI tunables, grouped the same way as `assets/config.yaml`. |
-| [`pixel_math.h`](pixel_math.h) | Pure-CPU, dependency-light math: `compute_render_extent()`, `compute_display_rect()` (dispatches to `compute_fit()`'s aspect-preserving best fit or `compute_letterbox()`'s integer-scale rect, per `upscale_mode`), `compute_pixel_density()` (camera pixel-snap). Exercised directly by `toyengine_tests` with no Vulkan device needed. |
-| [`instance_stream.h`](instance_stream.h) | `InstanceStream` — per-frame-in-flight instance transform buffer; a from-scratch equivalent of gfxcoopa's `InstanceBatcher`, needed because that class is documented safe only under a per-frame `vkQueueWaitIdle`, which this pipeline doesn't do. |
-| [`passes/`](passes/) | Every toyengine-specific render pass: `PixelLightingPass`, `UpscalePass`, `SsrPass`, `GBufferVisualizePass` (unused diagnostic), plus `HiZPass`/`SceneColorMipPass`/`SsaoPass` reused directly from gfxcoopa. `PaletteLut` and `PixelStylizePass` (the outline/dither/palette overlay) live in gfxcoopa too, shared with blendy. |
+| [`pixel_render_pipeline.h`](pixel_render_pipeline.h) | `PixelRenderPipeline` — owns every target, UBO, descriptor set and pass; `render()` records the whole frame into one `Renderer::begin_frame()` call. **Read its file doc first**: two rules (descriptors bound once at construction; per-frame-in-flight data needs per-slot buffers) explain most of the design. |
+| [`pixel_render_config.h`](pixel_render_config.h) | `PixelRenderConfig` — feature toggles first, then resolution, lighting, shadow, outline, palette, dither, SSAO, SSR/SSGI, refraction, fog, volumetrics, SDF, bloom, DOF, tilt-shift and AA tunables, grouped the same way as `assets/config.yaml`. |
+| [`pixel_render_types.h`](pixel_render_types.h) | The three push-constant blocks this engine appends to gfxcoopa's passes, and `SdfDrawItem`. |
+| [`pixel_math.h`](pixel_math.h) | Pure-CPU, Vulkan-free math: render extent, letterbox/fit rects, pixel-snap density, SDF clip rects, view-space depth, exponential smoothing, and the directional-shadow frustum fit. Exercised directly by `toyengine_tests` with no device needed. |
+| [`instance_stream.h`](instance_stream.h) | `InstanceStream` — per-frame-in-flight instance transform buffer. |
+| [`forward_globals.h`](forward_globals.h) | `ForwardGlobalsData` — per-frame-in-flight UBO for the forward transparent pass's lighting/indirect/SSR/refraction tuning. |
+| [`passes/`](passes/) | The passes toyengine defines itself; everything else is reused from gfxcoopa. |
+
+## Startup-fixed vs runtime toggles
+
+A toggle that selects **which image a pass reads** is baked into a descriptor when the
+pipeline is built, and cannot change at runtime — `DescriptorSet::bind_image()` updates
+immediately, and the frame loop overlaps command buffers with no wait. A toggle that only
+changes push-constant contents is free to flip every frame.
+
+| Startup-fixed | Runtime |
+|---|---|
+| `ssr_enabled`, `ssao_enabled`, `transparency_enabled`, `refraction_enabled`, `fog_enabled`, `volumetrics_enabled`, `bloom_enabled`, `dof_enabled`, `tilt_shift_enabled`, `aa_mode`, `world_ui_enabled`, `screen_ui_enabled`, and every resolution/capacity field | `sdf_enabled`, `shadows_enabled`, `sdf_shadows_enabled`, `ssr_reflect_transparent`, `debug_lines_enabled`, `ssao_debug_view`, `dof_debug_view`, `volumetrics_debug_view`, and every numeric tunable |
+
+`apply_live_config()` enforces the split: it restores any startup-fixed field the caller
+tried to change and names it in a warning, rather than accepting an edit that would
+silently do nothing.
 
 ## Frame graph
 
-1. Directional shadow depth (`ShadowMapTarget`, reused from gfxcoopa)
-2. Point-light cubemap shadow, 6 faces (first shadow-caster only)
-3. G-buffer geometry (`GBufferTarget` + gfxcoopa's `GBufferPipeline`)
-4. If `ssr_enabled`: `HiZPass::execute()` (also performs the gbuffer-depth layout
-   transition `pixel_stylize.frag`'s outline sampler needs, as a side effect). Otherwise: the
-   manual transition (`transition_gbuffer_depth_to_shader_read_()`).
-5. If `ssao_enabled`: `SsaoPass::execute()`. Otherwise: `SsaoPass::invalidate_history()`.
-   `SsaoPass` itself is always constructed — `PixelLightingPass` (and `SsrPass`'s composite,
-   when built) always have a `g_ssao` binding to fill, pointing at either `output_view()` or
-   the pass's permanent neutral (fully-unoccluded) texture, decided once at construction from
-   `ssao_enabled`.
-6. `PixelLightingPass` + skybox → `offscreen_target_` (reused from gfxcoopa's `SkyboxPass`;
-   always HDR `R16G16B16A16_SFLOAT`, since the sky-based indirect term can exceed 1.0
-   regardless of which toggles are set)
-7. If `ssr_enabled`: `SceneColorMipPass` (prefiltered scene-colour mip chain) → `SsrPass`
-   (Hi-Z raymarch → temporal resolve → specular swap + SSGI diffuse bounce composite)
-7a. If `transparency_enabled` and `refraction_enabled` and
-    `refraction_include_reflections`: `SceneColorMipPass` re-run against the SSR composite
-    output (or the plain lit image if SSR is off), so the forward transparent pass below
-    refracts a background that includes SSR reflections, not the pre-SSR image the chain
-    otherwise still holds.
-7b. If `transparency_enabled`: `TransparentPass` (+ `SdfForwardPass` for BLEND SDFs) —
-    forward-shaded alpha-blended geometry, back-to-front sorted, drawn in place into the
-    SSR composite (or `offscreen_target_` if SSR is off). BLEND *mesh* objects additionally
-    apply screen-space refraction (bend/blur/tint/chromatic-aberration/Fresnel — see
-    `assets/shaders/refraction.glsl`) when `refraction_enabled` and the object's own
-    material opt in; BLEND SDF objects never refract (see the refraction plan).
-8. Exposure + ACES tonemap + outline + dither + palette → `post_target_`
-8a. If `aa_mode != "off"`: FXAA/SMAA/TAA (whichever `aa_mode` selects) → `aa_target_`,
-    ported from blendy's `PbrRenderPipeline` (`FxaaPass`/`SmaaPass`/`TaaPass`, all reused
-    from gfxcoopa) — see `PixelRenderConfig::aa_mode`'s own doc. Runs at the low internal
-    resolution, after the pixel-art post stack and before the upscale, so it's the last
-    stage that still sees individual low-res texels.
-9. Nearest-neighbour upscale (fit or integer-scale letterboxed, per `upscale_mode`) → swapchain
+Recorded in this order inside `Renderer::begin_frame()`'s `pre_pass_fn`; the `record_fn`
+is only the final 1:1 blit into the swapchain. `render()` delegates to three stages —
+`record_scene_()`, `record_post_chain_()` and `record_overlay_()` — which map onto the
+three groups below.
 
-Steps 1–8a record into `Renderer::begin_frame()`'s `pre_pass_fn`; step 9 is the
-`record_fn`. See each pass's own file doc for descriptor set layout and
-which blendy/gfxcoopa shader (if any) it was derived from.
+**Scene** (`record_scene_()`):
 
-**This list is not exhaustive** — it predates fog, bloom, tilt-shift, and the SDF
-raymarching system, all of which also have their own frame-graph steps. See
-`pixel_render_pipeline.h`'s own file doc (top of that file) and its `render()` method
-for the accurate, up-to-date ordering.
+1. Directional shadow depth, then the point-light cube map, 6 faces — first shadow-caster only.
+2. G-buffer geometry, meshes and opaque/masked SDFs.
+3. Hi-Z pyramid, when any of SSR / transparency / `ssr_reflect_transparent` is on. This also
+   performs the G-buffer depth transition `pixel_stylize.frag`'s outline sampler needs; when
+   it does not run, `transition_gbuffer_depth_to_shader_read_()` does it instead. Exactly one
+   of the two must happen.
+4. `ssr_reflect_transparent`: capture transparent geometry into its own target and build a
+   second Hi-Z pyramid and scene-colour mip chain, so opaque surfaces can reflect it.
+5. SSAO, or `invalidate_history()` when it is off.
+6. Deferred lighting + skybox → `offscreen_target_` (HDR; the sky-based indirect term can
+   exceed 1.0 whatever the toggles say). `ssao_debug_view` replaces both with a raw
+   occlusion visualization.
+7. Scene-colour mip chain, then SSR — Hi-Z raymarch → temporal resolve → specular swap plus
+   SSGI diffuse bounce.
+8. Refraction's own scene-colour chain, when refraction is on.
+9. Forward transparent pass: BLEND meshes and BLEND SDFs merged into one back-to-front list,
+   drawn in place into the SSR composite. BLEND *meshes* additionally refract; BLEND SDFs
+   never do.
 
-**`ssr_enabled` synchronization exception:** `HiZPass`/`SceneColorMipPass`
-(reused unmodified from gfxcoopa, only constructed when `ssr_enabled` is set)
-rebind their own descriptors on every `execute()` call, which is only safe
-under blendy's per-frame `vkQueueWaitIdle`. Since `PixelRenderPipeline`
-otherwise overlaps `MAX_FRAMES_IN_FLIGHT` command buffers with no such wait,
-`render()` calls `device_.wait_idle()` once per frame when `ssr_enabled` is
-true — see that call site's comment for the full reasoning. Every other
-toggle is unaffected.
+**Post** (`record_post_chain_()`):
+
+10. Fog (analytic, global) → `fog_target_`.
+11. Volumetrics (raymarched local `VolumeComponent`s) → `volumetrics_target_`.
+12. Depth of field, at render resolution.
+13. Bloom pyramid.
+14. Exposure + ACES tonemap + outline + dither + palette → `post_target_`, with debug lines
+    drawn as a guest in the same bracket.
+15. World-space UI → `ui_world_target_`, at the display rect.
+16. FXAA / SMAA / TAA → `aa_target_`, when `aa_mode != "off"`.
+17. Tilt shift, at display resolution.
+
+**Overlay** (`record_overlay_()`):
+
+18. `ui_composite_pass_` draws the post-processed scene into the letterbox sub-rect of
+    `overlay_target_` with the world-UI layer over it — performing the nearest upscale
+    itself when tilt shift is off — then screen-space UI draws as a guest at full window
+    resolution.
+19. `record_fn`: `upscale_pass_` blits `overlay_target_` 1:1 into the swapchain.
+
+Each stage is gated on its own toggle and skipped entirely when off.
 
 ## UI layers
 
@@ -110,11 +116,10 @@ its alpha as "how much UI is here". `UiWorldPass` draws it with `BlendMode::Alph
 `Alpha`: the two differ only in destination alpha, and `Alpha`'s `dstAlpha = ZERO` would leave the
 layer's alpha equal to the *last* fragment's instead of accumulated coverage.
 
-It used to live at `render_extent_`, on the theory that world UI belonged on the same pixel grid as
-the scene. What that actually bought was a non-integer NEAREST upscale in the composite — ×1.18 at a
-typical window — duplicating roughly every fifth row and column, which is what made world-canvas
-text read as visibly stepped next to the HUD. At the letterbox size the composite samples it **1:1**
-and nothing resamples the UI at all.
+Sizing it to the letterbox rect rather than `render_extent_` is what makes the composite sample it
+**1:1**, so nothing resamples the UI at all. At `render_extent_` the composite needs a non-integer
+NEAREST upscale — ×1.18 at a typical window — which duplicates roughly every fifth row and column
+and makes world-canvas text read as visibly stepped next to the HUD.
 
 `ui_composite_pass_` draws the post-processed scene into the letterbox rect of `overlay_target_`
 with that layer composited over it (a premultiplied "over"). The *base* is still nearest-sampled at

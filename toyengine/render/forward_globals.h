@@ -3,23 +3,17 @@
  * @brief Per-frame-in-flight UBO for the forward MESH transparent pass's
  *        lighting/indirect/SSR/refraction tuning.
  *
- * Replaces TransparentLightingPushConstants (a push constant) because
- * per-object refraction fields pushed alongside TransparentPass::PushConstants
- * would put transparent.frag's push-constant block over the 128-byte
- * guaranteed-minimum Vulkan budget -- see the refraction plan's own doc for
- * the byte count. gfxcoopa's SdfGlobals (sdf_data.h) hit the identical wall on
- * the SDF forward path and resolved it the same way; this mirrors that
- * struct's shape and ForwardGlobalsData mirrors SdfData's per-slot rationale
- * verbatim: the pipeline overlaps MAX_FRAMES_IN_FLIGHT command buffers with no
- * wait, so a single shared UBO would let frame N's upload race frame N-1's
- * still-in-flight draw reading stale data. Per-slot buffers plus binding one
- * descriptor set per slot ONCE at construction (see set()) keeps every write
- * going to a slot the GPU is provably not reading, with no per-frame
- * device_.wait_idle() -- the same policy toyengine's InstanceStream follows
- * (see instance_stream.h).
+ * A UBO rather than a push constant because the per-object refraction fields
+ * (TransparentRefractionPushConstants) and this block together would put transparent.frag's
+ * push-constant block over Vulkan's guaranteed 128-byte minimum. gfxcoopa's SdfGlobals hit
+ * the same wall on the SDF forward path and resolved it the same way.
  *
- * Mesh-only: the SDF forward path (sdf_forward.frag) keeps reading its own
- * SdfGlobals UBO, unchanged -- see the refraction plan for why SDF glass is
+ * Per-slot buffers, plus one descriptor set per slot bound ONCE at construction, for the
+ * reason every other per-frame-in-flight buffer in this engine is per-slot: the pipeline
+ * overlaps MAX_FRAMES_IN_FLIGHT command buffers with no wait, so a single shared UBO would
+ * let frame N's upload race frame N-1's still-in-flight draw.
+ *
+ * Mesh-only: the SDF forward path keeps reading its own SdfGlobals UBO, since SDF glass is
  * deliberately excluded from refraction.
  */
 
@@ -43,9 +37,8 @@ namespace render {
 
 /**
  * @struct ForwardGlobals
- * @brief std140-aligned per-frame globals for transparent.frag: byte-for-byte
- * the same lighting/indirect/SSR fields TransparentLightingPushConstants
- * carried, plus two new refraction vec4s.
+ * @brief std140-aligned per-frame globals for transparent.frag: the lighting and indirect/SSR
+ *        terms, plus two refraction vec4s.
  */
 struct alignas(16) ForwardGlobals {
     glm::vec4  lighting0 = glm::vec4(4.0f, 0.55f, 0.0f, 0.0f); /**< x=light_bands, y=spec_threshold, z=soft_lighting, w=rim_strength. */
@@ -106,10 +99,8 @@ public:
         buffers_[frame_index_].upload(&globals_, sizeof(ForwardGlobals));
     }
 
-    /** @brief The descriptor set bound once at construction for the given frame slot. */
-    coopa::gfx::pipeline::DescriptorSet& set(uint32_t frame_index) const { return *sets_[frame_index]; }
-
-    /** @brief set() for the slot most recently begin()'d -- the common case at every mesh transparent draw. */
+    /** @brief The descriptor set -- bound once at construction -- for the slot most recently
+     *         begin()'d. Bound at every mesh transparent draw. */
     coopa::gfx::pipeline::DescriptorSet& current_set() const { return *sets_[frame_index_]; }
 
     /** @brief The layout every set() shares -- for building a pipeline's descriptor_layouts list. */

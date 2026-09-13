@@ -2,9 +2,8 @@
  * @file register.h
  * @brief Registers toyengine's own scene components as SceneLoader parsers.
  *
- * Mirrors gfxcoopa/engine/components/register.h's pattern: unlike
- * MeshRenderer et al., CameraController needs no GPU handles, so its parser
- * is a free function taking no captured dependencies.
+ * Mirrors gfxcoopa/engine/components/register.h's pattern, minus its captured dependencies:
+ * none of these components needs GPU handles, so this is a free function taking no arguments.
  */
 
 #ifndef TOYENGINE_SCENE_REGISTER_H
@@ -21,10 +20,19 @@
 namespace toy {
 namespace scene {
 
+/** @brief Reads an {x, y, z} YAML mapping, leaving any absent component at `fallback`. */
+inline glm::vec3 parse_vec3(const fkyaml::node& n, const glm::vec3& fallback) {
+    glm::vec3 v = fallback;
+    if (n.contains("x")) v.x = n.at("x").get_value<float>();
+    if (n.contains("y")) v.y = n.at("y").get_value<float>();
+    if (n.contains("z")) v.z = n.at("z").get_value<float>();
+    return v;
+}
+
 /**
- * @brief Registers the "CameraController" component parser with SceneLoader.
+ * @brief Registers the "CameraController", "KinematicMover" and "HealthDriver" parsers.
  *
- * Call once at startup, before the first SceneLoader::load() that uses it.
+ * Call once at startup, before the first SceneLoader::load() that uses them.
  */
 inline void register_scene_components() {
     using coopa::scene::SceneLoader;
@@ -33,14 +41,6 @@ inline void register_scene_components() {
     SceneLoader::register_component_parser("CameraController",
         [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
             auto* cc = obj.add_component<CameraController>();
-
-            auto parse_vec3 = [](const fkyaml::node& n, const glm::vec3& fallback) {
-                glm::vec3 v = fallback;
-                if (n.contains("x")) v.x = n.at("x").get_value<float>();
-                if (n.contains("y")) v.y = n.at("y").get_value<float>();
-                if (n.contains("z")) v.z = n.at("z").get_value<float>();
-                return v;
-            };
 
             if (node.contains("mode")) {
                 std::string m = node.at("mode").get_value<std::string>();
@@ -96,14 +96,6 @@ inline void register_scene_components() {
     SceneLoader::register_component_parser("KinematicMover",
         [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
             auto* km = obj.add_component<KinematicMover>();
-
-            auto parse_vec3 = [](const fkyaml::node& n, const glm::vec3& fallback) {
-                glm::vec3 v = fallback;
-                if (n.contains("x")) v.x = n.at("x").get_value<float>();
-                if (n.contains("y")) v.y = n.at("y").get_value<float>();
-                if (n.contains("z")) v.z = n.at("z").get_value<float>();
-                return v;
-            };
 
             if (node.contains("mode")) {
                 std::string m = node.at("mode").get_value<std::string>();

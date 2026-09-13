@@ -5,13 +5,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # --- Vendored coopa libraries (libs/, git submodules) ---
-# ROOT_DIR_PARENT means "the directory the coopa repos live in". It used to be
-# the parent of this checkout (/home/coopa/git), which made the build depend on
-# whatever happened to be checked out beside toyengine; it is now the pinned
-# libs/ submodule tree. Still named ROOT_DIR_PARENT because
-# configuration/root_directory.h.in exports it as PROJ_DIR, which
-# toyengine/core/engine.h uses to locate gfxcoopa's shared shader library --
-# redefining it here keeps that resolution correct with no C++ change.
+# ROOT_DIR_PARENT is "the directory the coopa repos live in" -- the pinned libs/
+# submodule tree, so the build never depends on what happens to be checked out
+# beside toyengine. configuration/root_directory.h.in exports it as PROJ_DIR,
+# which toyengine/core/engine.h uses to locate gfxcoopa's shared shader library.
 set(ROOT_DIR_PARENT "${CMAKE_SOURCE_DIR}/libs")
 
 set(LIBCOOPA_DIR   "${ROOT_DIR_PARENT}/libcoopa")
@@ -30,18 +27,17 @@ endif()
 # !! ORDER IS LOAD-BEARING -- DO NOT REORDER !!
 # The library repos are deliberately left unpatched, so each still computes its
 # own libcoopa path as "parent of CMAKE_SOURCE_DIR" -- which, with toyengine as
-# the top-level project, resolves OUTSIDE this checkout to
-# /home/coopa/git/libcoopa. Each only dereferences that stale path inside an
-# `if(NOT TARGET coopa::lib)` guard (gfxcoopa:23-26, physxcoopa:13-16,
-# sfxcoopa:14-17), so adding libs/libcoopa FIRST defines coopa::lib, the guards
-# go false, and the stale path is never used. Move this line down and the build
-# silently starts compiling an unpinned checkout from outside the repo -- see
-# the assertion after this block, which exists to catch exactly that.
+# the top-level project, resolves OUTSIDE this checkout. Each only dereferences
+# that path inside an `if(NOT TARGET coopa::lib)` guard, so adding libs/libcoopa
+# FIRST defines coopa::lib, every guard goes false, and the outside path is
+# never used. Move this line down and the build silently compiles an unpinned
+# checkout from outside the repo -- the assertion after this block exists to
+# catch exactly that.
 #
-# Leaving the libraries unpatched also preserves their standalone contract: each
+# Leaving the libraries unpatched preserves their standalone contract: each
 # builds on its own (cbuild/cplay) as long as the repos it needs sit beside it
-# under a shared parent. libs/ satisfies that just as /home/coopa/git does, so
-# `cd libs/gfxcoopa && cbuild` works in place.
+# under a shared parent, which libs/ satisfies -- so `cd libs/gfxcoopa && cbuild`
+# works in place.
 add_subdirectory(${LIBCOOPA_DIR}   ${CMAKE_CURRENT_BINARY_DIR}/libcoopa-build)
 add_subdirectory(${GFXCOOPA_DIR}   ${CMAKE_CURRENT_BINARY_DIR}/gfxcoopa-build)
 add_subdirectory(${PHYSXCOOPA_DIR} ${CMAKE_CURRENT_BINARY_DIR}/physxcoopa-build)
@@ -64,25 +60,11 @@ endif()
 # OpenSSL/zstd discovery; it also contributes a `caml` executable target.
 add_subdirectory(${CAML_DIR} ${CMAKE_CURRENT_BINARY_DIR}/caml-build)
 
-# libs/uicoopa IS part of this build now -- see the add_subdirectory() above, which
-# sits in the ordered block for the same reason its siblings do. It could not be
-# before: it used CMAKE_SOURCE_DIR for its OWN include/shader/config paths rather than
-# just for locating siblings, so as a subdirectory of toyengine it aimed its includes
-# at toyengine's root, recompiled toyengine's shaders under a duplicate target,
-# hard-wired /home/coopa/git/caml, and flipped GFX_LEAK_CHECK on (failing the build).
-#
-# Fixed in uicoopa itself, backward-compatibly: every path is CMAKE_CURRENT_*_DIR now,
-# it exports a real coopa::ui INTERFACE target (plus a uicoopa_impl STATIC TU owning
-# stb_truetype's implementation block, which a directory-scoped add_definitions() could
-# never hand to a parent project), and its six demos, ctest registration, generated
-# root_directory.h and leak gate all sit behind a
-# `CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR` guard -- the one
-# physxcoopa:36/sfxcoopa:53 already use. `cd libs/uicoopa && cbuild` is unaffected.
-#
-# uicoopa's `uicoopa_shaders` target is deliberately NOT behind that guard: UiPass and
-# UiWorldPass are constructed from .spv paths, so this build needs them compiled too --
-# hence the add_dependencies() on it below, and the uicoopa search root in
-# toyengine/core/engine.h's make_render_config_() ShaderLibrary.
+# uicoopa's `uicoopa_shaders` target is deliberately NOT behind the
+# `CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR` guard its demos and ctest
+# registration sit behind: UiPass and UiWorldPass are constructed from .spv paths,
+# so this build needs them compiled too -- hence the add_dependencies() below, and
+# the uicoopa search root in toyengine/core/engine.h's make_render_config_().
 
 include_directories(${CMAKE_SOURCE_DIR})
 
@@ -97,15 +79,12 @@ include_directories(${CMAKE_BINARY_DIR}/configuration)
 # (unlike cbuild) via glslc -MD depfiles, so editing a shared gfx/*.glsl body
 # in gfxcoopa correctly retriggers toyengine's dependent shaders.
 #
-# INCLUDE_DIR no longer needs to be passed explicitly -- gfxcoopa's own
-# assets/shaders/ is always searched by gfx_add_shader_target() now (see
-# gfxcoopa/cmake/GfxShaders.cmake).
+# gfxcoopa's own assets/shaders/ is always searched by gfx_add_shader_target(),
+# so INCLUDE_DIR needs no explicit value here.
 #
-# Target name is toyengine_shaders, not the bare "shaders" every repo used
-# to use in isolation: now that gfxcoopa is add_subdirectory()'d for real
-# (see coopa::gfx above), gfxcoopa's OWN "shaders" target is also present in
-# this same build, and CMake target names must be unique across the whole
-# build, not just per-directory.
+# The target is toyengine_shaders, not a bare "shaders": gfxcoopa is
+# add_subdirectory()'d into this same build and brings its own "shaders" target,
+# and CMake target names must be unique across the whole build.
 include(${GFXCOOPA_DIR}/cmake/GfxShaders.cmake)
 gfx_add_shader_target(toyengine_shaders
     SHADER_DIR   "${CMAKE_SOURCE_DIR}/assets/shaders"
@@ -128,18 +107,13 @@ target_include_directories(toyengine_tests PRIVATE ${CAML_DIR} ${CAML_DIR}/inclu
 add_test(NAME toyengine_render COMMAND toyengine_tests)
 
 # --- Vulkan/GLFW leak gate ---
-# OFF by default here (unlike uicoopa/pixengine, which are clean): as of this
-# writing, render/pixel_render_pipeline.h still names 28 raw Vulkan symbols
-# (down from 46 after gfxcoopa's mechanical engine/passes/* reseal -- see the
-# refactor plan's Phase 4), all forced by the remaining "hard tier" gfxcoopa
-# internals still out of scope: GBufferPipeline/TransparentCapturePass's own
-# MRT/raw-render-pass construction, Renderer::begin_frame()'s raw
-# VkClearColorValue, and SsaoPass's raw view accessors (no Framebuffer
-# wrapper / MRT RenderPass / per-subresource layout tracking exist yet -- see
-# gfxcoopa/README.md's layering rule and the plan's "explicitly out of
-# scope" list). Run `${GFXCOOPA_DIR}/tools/check_no_vulkan.sh
-# ${CMAKE_SOURCE_DIR}` manually to see the current count. Flip ON once that
-# remaining redesign lands.
+# OFF by default here, unlike uicoopa/pixengine which are clean:
+# render/pixel_render_pipeline.h still names raw Vulkan symbols, forced by the
+# gfxcoopa internals that have no sealed equivalent yet -- GBufferPipeline and
+# TransparentCapturePass's MRT render-pass construction, Renderer::begin_frame()'s
+# raw VkClearColorValue, and SsaoPass's raw view accessors. Run
+# `${GFXCOOPA_DIR}/tools/check_no_vulkan.sh ${CMAKE_SOURCE_DIR}` for the current
+# count; flip ON once those gain wrappers.
 option(GFX_LEAK_CHECK "Fail the build if consumer source names raw Vulkan/GLFW symbols" OFF)
 if(GFX_LEAK_CHECK)
     add_custom_target(toyengine_leak_check ALL

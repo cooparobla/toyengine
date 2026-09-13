@@ -56,8 +56,8 @@ struct PixelRenderConfig {
     bool ssr_reflect_transparent = false;
 
     /**
-     * Screen-space refraction for BLEND MESH objects only (MeshRenderer, not SdfRenderer --
-     * see toyengine's refraction plan for why SDF glass is excluded). Bends the background
+     * Screen-space refraction for BLEND MESH objects only -- MeshRenderer, not SdfRenderer;
+     * SDF glass is deliberately excluded. Bends the background
      * sample by the surface's IOR/thickness, applies Beer-Lambert tint absorption and
      * roughness-driven blur, and optionally chromatic aberration and a Fresnel falloff --
      * see assets/shaders/refraction.glsl. Requires transparency_enabled; meaningless
@@ -243,18 +243,14 @@ struct PixelRenderConfig {
      * pre_fog_view_typed_) -- the same image pixel_stylize_pass_ itself reads, so SSR
      * reflections, transparent geometry and fog all bloom too.
      *
-     * Independent of ssr_enabled/scene_color_mip_pass_: an earlier version of this feature
-     * reused SSR's own mip chain as a shortcut, which both tied bloom's availability to SSR
-     * being on and produced a visibly unstable glow (a hard 2x2 texelFetch box downsample has
-     * no sub-texel interpolation, so which texels land in a box -- and thus the sampled
-     * brightness -- pops discretely as the camera moves). BloomPass fixes both: it's a
-     * separate pyramid with its own construction-fixed descriptors (no per-frame rebind, so
-     * unlike scene_color_mip_pass_ it needs no device_.wait_idle() either), and every kernel
-     * in it is a smooth multi-tap `texture()` read, not `texelFetch()`.
+     * An independent pyramid with its own construction-fixed descriptors, deliberately not a
+     * reuse of SSR's mip chain: sharing that would tie bloom's availability to SSR being on,
+     * and its hard 2x2 `texelFetch` box downsample has no sub-texel interpolation, so the
+     * sampled brightness pops discretely as the camera moves. Every kernel here is a smooth
+     * multi-tap `texture()` read. Needing no per-frame rebind, it also costs no device wait.
      *
-     * bloom_enabled is a startup-fixed toggle (the descriptor binding it controls is decided
-     * once at construction, same policy as ssr_enabled/fog_enabled's own source bindings).
-     * bloom_intensity <= 0 is a genuine per-frame no-op in the shader either way.
+     * bloom_enabled is startup-fixed (the descriptor binding it controls is decided once at
+     * construction); bloom_intensity <= 0 is a genuine per-frame no-op either way.
      */
     bool  bloom_enabled   = false;
     float bloom_threshold = 1.0f;   /**< Brightness (max3 of RGB) below which nothing glows. 1.0 = "brighter than white". */
@@ -370,29 +366,20 @@ struct PixelRenderConfig {
     bool        dof_debug_view      = false;     /**< Renders the signed CoC field in place of the image. */
 
     /**
-     * Anti-aliasing, ported from blendy's PbrRenderPipeline (see
-     * blendy/src/blendy/render/pbr_render_pipeline.h) -- same three modes, same field names
-     * ("aa_mode" is a string there too), same defaults for every knob except aa_mode itself
-     * (blendy defaults to "smaa"; here it defaults to "off" so this engine's output is
-     * unchanged unless a scene opts in). MSAA is NOT ported: blendy's own msaa_4x is parsed
-     * but never read by its render pipeline (every target there is SampleCount::X1), so there
-     * was nothing working to copy.
+     * Anti-aliasing. Three modes; MSAA is deliberately absent, since every target here is
+     * SampleCount::X1.
      *
-     * aa_mode is a STARTUP-FIXED toggle, same policy as bloom_enabled/fog_enabled/
-     * tilt_shift_enabled above: going from "off" to any AA mode (or back) changes which
-     * descriptor upscale_pass_/tilt_shift_pass_ are bound to, decided once at pipeline
-     * construction (see PixelRenderPipeline's ctor and its aa_target_ member doc). Switching
-     * AMONG "fxaa"/"smaa"/"taa" at runtime IS safe -- all three passes are always constructed
-     * together whenever aa_mode != "off", and all three write the same aa_target_, so render()
-     * just branches per frame on which one's draw() to call.
+     * aa_mode is STARTUP-FIXED: going from "off" to any AA mode (or back) changes which
+     * descriptor the composite and tilt shift are bound to, and that is decided once at
+     * pipeline construction. Switching AMONG "fxaa"/"smaa"/"taa" at runtime IS safe -- all
+     * three passes are constructed together whenever aa_mode != "off" and all three write the
+     * same target, so render() just branches per frame on which draw() to call.
      *
-     * "taa" jitters the camera projection every frame (see render()'s halton_offset table,
-     * mirroring blendy's own PbrRenderPipeline::record_offscreen_() jitter) -- this is in
-     * inherent tension with camera_pixel_snap's whole-texel snapping above, not a bug to fix.
-     * blendy's own TAA has no motion vectors and no history reprojection: history is sampled
-     * at the same UV as the current frame and merely clamped to a YCoCg 3x3 AABB neighborhood,
-     * so it ghosts under camera motion at the default taa_blending_weight -- ported as-is,
-     * warts included, per instruction to mimic blendy rather than fix it up.
+     * "taa" jitters the camera projection every frame, which is in inherent tension with
+     * camera_pixel_snap's whole-texel snapping above -- not a bug to fix. The TAA resolve has
+     * no motion vectors and no history reprojection: history is sampled at the current
+     * frame's UV and merely clamped to a YCoCg 3x3 neighbourhood, so it ghosts under camera
+     * motion at the default taa_blending_weight.
      */
     std::string aa_mode = "off"; /**< "off" | "fxaa" | "smaa" | "taa". */
     float fxaa_subpixel           = 0.75f;   /**< Blend weight of FXAA's subpixel-aliasing term. */
@@ -457,7 +444,7 @@ struct PixelRenderConfig {
     coopa::gfx::pipeline::ShaderLibrary shaders;
 
     // Derived surface shaders a scene's materials may select by name (PBRMaterial::shader) --
-    // see gfxcoopa/pipeline/surface_shader.h and the layered-shaders plan. Populated alongside
+    // see gfxcoopa/pipeline/surface_shader.h. Populated alongside
     // `shaders` in engine.h's make_render_config_(); empty by default, so a scene that never
     // references a custom shader behaves exactly as if this field didn't exist. Every entry's
     // logical shader names are resolved through `shaders` above at pass-construction time (see

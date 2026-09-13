@@ -17,6 +17,7 @@
 #include <limits>
 
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
 #include <toyengine/render/pixel_render_config.h>
 
@@ -51,27 +52,17 @@ struct RenderExtent {
  * @param swapchain_h Current swapchain height, used by "divisor" mode.
  * @return Low-resolution (width, height), each clamped to a minimum of 1.
  */
-inline void compute_render_resolution(const PixelRenderConfig& config,
-                                      uint32_t swapchain_w, uint32_t swapchain_h,
-                                      uint32_t& out_w, uint32_t& out_h) {
-    if (config.resolution_mode == "divisor") {
-        uint32_t divisor = std::max<uint32_t>(1, config.scale_divisor);
-        out_w = std::max<uint32_t>(1, swapchain_w / divisor);
-        out_h = std::max<uint32_t>(1, swapchain_h / divisor);
-    } else {
-        out_w = std::max<uint32_t>(1, config.render_width);
-        out_h = std::max<uint32_t>(1, config.render_height);
-    }
-}
-
-/**
- * @brief Value-returning convenience wrapper around compute_render_resolution(),
- *        for use in a member initializer list where out-parameters are awkward.
- */
 inline RenderExtent compute_render_extent(const PixelRenderConfig& config,
                                           uint32_t swapchain_w, uint32_t swapchain_h) {
     RenderExtent extent;
-    compute_render_resolution(config, swapchain_w, swapchain_h, extent.width, extent.height);
+    if (config.resolution_mode == "divisor") {
+        const uint32_t divisor = std::max<uint32_t>(1, config.scale_divisor);
+        extent.width  = std::max<uint32_t>(1, swapchain_w / divisor);
+        extent.height = std::max<uint32_t>(1, swapchain_h / divisor);
+    } else {
+        extent.width  = std::max<uint32_t>(1, config.render_width);
+        extent.height = std::max<uint32_t>(1, config.render_height);
+    }
     return extent;
 }
 
@@ -177,6 +168,140 @@ inline float compute_pixel_density(bool is_orthographic, float orthographic_size
         return 0.0f;
     }
     return (2.0f * orthographic_size) / static_cast<float>(render_height);
+}
+
+/**
+ * @struct ShadowFitCamera
+ * @brief The camera properties the directional-shadow fit reads -- nothing else about a
+ *        camera matters to it.
+ *
+ * A plain struct rather than a CameraComponent so the fit stays pure glm and is testable
+ * with no scene or Vulkan device (see toyengine_tests).
+ */
+struct ShadowFitCamera {
+    glm::mat4 view{1.0f};            /**< World-to-view, i.e. inverse of the camera's world matrix. */
+    bool  is_perspective   = true;
+    float fov_degrees      = 45.0f;  /**< Vertical FOV; perspective only. */
+    float orthographic_size = 5.0f;  /**< View-volume half-height in world units; orthographic only. */
+    float near_clip        = 0.1f;
+    float far_clip         = 1000.0f;
+    float aspect           = 16.0f / 9.0f;
+};
+
+/**
+ * @struct DirShadowFit
+ * @brief compute_dir_shadow_fit()'s result: the light-space matrix to render the shadow
+ *        map with, and the world size of one of its texels.
+ */
+struct DirShadowFit {
+    glm::mat4 light_space_matrix{1.0f};
+    float     texel_world = 0.0f; /**< World units per shadow-map texel in this frame's box. */
+};
+
+/**
+ * @brief Fits an orthographic light-space box to a bounding sphere of the CAMERA's view
+ *        frustum, clipped to `shadow_distance`, with texel-snapped centering.
+ *
+ * The technique behind Unity/Unreal's directional "shadow distance". Two properties matter
+ * and both are deliberate:
+ *
+ *  - **It is a function of the camera alone.** No renderer, SDF or physics position is read,
+ *    so nothing in the scene -- including an object that escaped the playable area and is in
+ *    unbounded freefall -- can perturb or blow out the shadow frustum.
+ *  - **It fits the frustum's bounding SPHERE, not its box.** A sphere's radius is invariant
+ *    under camera rotation, so the box size is stable as the camera turns; snapping the
+ *    centre to whole texels then removes the sub-texel crawl that remains under translation.
+ *
+ * The near plane sits a further `shadow_distance` behind the sphere on the towards-light
+ * side, so a caster outside the visible sphere but between it and the light still shadows
+ * into frame -- sized off that one config knob, never off any object's actual position.
+ *
+ * @param light_direction      Directional light's direction; normalized internally.
+ * @param cam                  Active camera, or nullptr for the fixed fallback box.
+ * @param shadow_distance      How far from the camera shadows are computed, in world units.
+ * @param shadow_map_resolution Shadow map edge length in texels; drives the texel snap.
+ * @return The light-space matrix and this frame's world-per-texel size.
+ */
+inline DirShadowFit compute_dir_shadow_fit(const glm::vec3& light_direction,
+                                           const ShadowFitCamera* cam,
+                                           float shadow_distance,
+                                           uint32_t shadow_map_resolution) {
+    const glm::vec3 light_dir = glm::normalize(light_direction);
+    // Any up vector not parallel to the light works; swap axes near the poles of the
+    // engine's Z-up convention so lookAt() never degenerates.
+    const glm::vec3 up = (std::abs(light_dir.z) < 0.99f) ? glm::vec3(0.0f, 0.0f, 1.0f)
+                                                         : glm::vec3(0.0f, 1.0f, 0.0f);
+    const glm::mat4 light_rot = glm::lookAt(glm::vec3(0.0f), light_dir, up);
+    const float resolution = static_cast<float>(std::max(shadow_map_resolution, 1u));
+
+    DirShadowFit fit;
+    glm::mat4 light_proj;
+
+    if (!cam) {
+        // No camera yet: a fixed box, still purely a function of the light direction.
+        const float ortho_extent = 15.0f;
+        light_proj = glm::orthoRH_ZO(-ortho_extent, ortho_extent, -ortho_extent, ortho_extent,
+                                     0.1f, 60.0f);
+        fit.texel_world = (2.0f * ortho_extent) / resolution;
+    } else {
+        const glm::mat4 cam_to_world = glm::inverse(cam->view);
+        const glm::vec3 cam_pos     = glm::vec3(cam_to_world[3]);
+        const glm::vec3 cam_right   = glm::vec3(cam_to_world[0]);
+        const glm::vec3 cam_up      = glm::vec3(cam_to_world[1]);
+        const glm::vec3 cam_forward = -glm::vec3(cam_to_world[2]); // camera looks down local -Z
+
+        const float near_d = cam->near_clip;
+        const float far_d  = std::min(cam->far_clip, shadow_distance);
+
+        // The 8 world-space frustum corners over [near_d, far_d]. Perspective corners scale
+        // with distance; orthographic ones have the same half-extent at both planes.
+        glm::vec3 corners[8];
+        int idx = 0;
+        for (float d : {near_d, far_d}) {
+            const float half_h = cam->is_perspective
+                ? d * std::tan(glm::radians(cam->fov_degrees) * 0.5f)
+                : cam->orthographic_size;
+            const float half_w = half_h * cam->aspect;
+            for (int sy = -1; sy <= 1; sy += 2) {
+                for (int sx = -1; sx <= 1; sx += 2) {
+                    corners[idx++] = cam_pos + cam_forward * d
+                                   + cam_right * (static_cast<float>(sx) * half_w)
+                                   + cam_up    * (static_cast<float>(sy) * half_h);
+                }
+            }
+        }
+
+        glm::vec3 centroid(0.0f);
+        for (const auto& c : corners) centroid += c;
+        centroid /= 8.0f;
+        float radius = 0.0f;
+        for (const auto& c : corners) radius = std::max(radius, glm::length(c - centroid));
+
+        const glm::vec3 center_ls = glm::vec3(light_rot * glm::vec4(centroid, 1.0f));
+
+        // Quantize the extent too, so a slowly changing radius doesn't rescale the box (and
+        // with it the texel grid the centre snaps to) on every single frame.
+        const float pad = 1.0f;
+        const float extent_step = 0.5f;
+        const float extent = std::ceil((radius + pad) / extent_step) * extent_step;
+
+        fit.texel_world = (2.0f * extent) / resolution;
+        glm::vec2 center(center_ls.x, center_ls.y);
+        center.x = std::floor(center.x / fit.texel_world) * fit.texel_world;
+        center.y = std::floor(center.y / fit.texel_world) * fit.texel_world;
+
+        const float far_plane  = -center_ls.z + radius + pad;
+        float near_plane = -center_ls.z - radius - pad - shadow_distance;
+        const float depth = std::max(far_plane - near_plane, 0.01f);
+
+        light_proj = glm::orthoRH_ZO(center.x - extent, center.x + extent,
+                                     center.y - extent, center.y + extent,
+                                     near_plane, near_plane + depth);
+    }
+
+    light_proj[1][1] *= -1.0f; // Vulkan Y-flip
+    fit.light_space_matrix = light_proj * light_rot;
+    return fit;
 }
 
 /**

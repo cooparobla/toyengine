@@ -2,23 +2,17 @@
  * @file instance_stream.h
  * @brief Per-frame-in-flight instance transform stream for the G-buffer pass.
  *
- * gfxcoopa's engine::util::InstanceBatcher documents that it is only safe
- * when the whole frame is submitted and vkQueueWaitIdle'd before the next
- * frame's instance data could be rewritten (see
- * gfxcoopa/engine/util/instance_batcher.h) -- exactly the stall
- * PixelRenderPipeline avoids, since everything records into one
- * double-buffered swapchain-frame command buffer via
- * Renderer::begin_frame's pre_pass_fn (see gfxcoopa/presentation/renderer.h).
- * Reusing InstanceBatcher unmodified there would race a write against a
+ * gfxcoopa's engine::util::InstanceBatcher is documented safe only when the whole frame is
+ * submitted and vkQueueWaitIdle'd before the next frame's instance data could be rewritten --
+ * exactly the stall PixelRenderPipeline avoids, since it records everything into one
+ * double-buffered command buffer. Reusing it there would race a write against a
  * still-in-flight read.
  *
- * This is a small from-scratch equivalent sized for
- * Renderer::MAX_FRAMES_IN_FLIGHT slots instead of one shared buffer, which
- * removes that hazard. It intentionally skips InstanceBatcher's
- * same-mesh-run batching -- one draw call per renderable instead of grouped
- * instanced draws -- a correctness-over-throughput trade acceptable at
- * toyengine's target scene scale; batching can be reintroduced per-frame-slot
- * later without changing this class's public surface.
+ * This is a small equivalent sized for MAX_FRAMES_IN_FLIGHT slots instead of one shared
+ * buffer. It skips InstanceBatcher's same-mesh-run batching -- one draw call per renderable
+ * rather than grouped instanced draws -- a correctness-over-throughput trade acceptable at
+ * this engine's scene scale; batching can be added per slot without changing this class's
+ * public surface.
  */
 
 #ifndef TOYENGINE_RENDER_INSTANCE_STREAM_H
@@ -50,6 +44,10 @@ public:
     /// hardcoded duplicate that could silently drift out of sync with it.
     static constexpr uint32_t kFrames = coopa::gfx::presentation::MAX_FRAMES_IN_FLIGHT;
 
+    /// @brief add()'s "not stored" result. Draw sites test for it to skip the instance;
+    /// returning a real index here would draw the object at another object's transform.
+    static constexpr uint32_t kInvalidIndex = UINT32_MAX;
+
     InstanceStream(coopa::gfx::core::Device& device, coopa::gfx::memory::Allocator& allocator,
                    uint32_t capacity = 256)
         : capacity_(capacity)
@@ -73,13 +71,14 @@ public:
 
     /**
      * @brief Appends one instance transform.
-     * @return Its index -- pass as `first_instance` to Mesh::draw(cmd, 1, index).
+     * @return Its index -- pass as `first_instance` to Mesh::draw(cmd, 1, index) -- or
+     *   kInvalidIndex when the buffer is full, which every draw site already skips on.
      */
     uint32_t add(const glm::mat4& model) {
         if (pending_.size() >= capacity_) {
             std::cerr << "[toyengine] InstanceStream capacity (" << capacity_
                      << ") exceeded; dropping instance.\n";
-            return 0;
+            return kInvalidIndex;
         }
         uint32_t idx = static_cast<uint32_t>(pending_.size());
         pending_.push_back(model);

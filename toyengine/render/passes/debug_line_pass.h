@@ -1,37 +1,23 @@
 /**
  * @file debug_line_pass.h
- * @brief Draws physics collider wireframes / contact normals as a plain LineList overlay, an
- *        un-occluded X-ray style (depth-test off) -- the standard gizmo look.
+ * @brief Draws physics collider wireframes and contact normals as a plain LineList overlay,
+ *        depth-test off for the un-occluded X-ray gizmo look.
  *
- * Built against PixelRenderPipeline's post_target_ render pass and drawn as a guest inside its
- * already-open begin/end bracket, right after pixel_stylize_pass_ (see PixelRenderPipeline::
- * render()) -- NOT the swapchain pass a first instinct might reach for. pipeline::RenderPass
- * hardcodes LOAD_OP_CLEAR, so a genuinely post-upscale overlay would need its own hand-built
- * LOAD_OP_LOAD render pass (as transparent_pass.h does); the more important reason is that
- * nothing in this engine reads the swapchain image back, so a swapchain overlay would be
- * invisible to low_res_color_image()/final_color_image() and therefore to every screenshot/
- * headless-test capture. Landing pre-upscale costs a little resolution and picks up the AA
- * pass and tilt_shift_pass_'s blur, but it's what makes the overlay both correct on real
- * display output and verifiable the same way everything else in this pipeline already is.
+ * Built against PixelRenderPipeline's post_target_ render pass and drawn as a guest inside
+ * its already-open bracket, right after pixel_stylize_pass_ -- NOT the swapchain pass a first
+ * instinct might reach for. pipeline::RenderPass hardcodes LOAD_OP_CLEAR, so a genuinely
+ * post-upscale overlay would need its own hand-built LOAD_OP_LOAD pass; the more important
+ * reason is that nothing in this engine reads the swapchain image back, so a swapchain
+ * overlay would be invisible to low_res_color_image()/final_color_image() and therefore to
+ * every screenshot and headless capture. Landing pre-upscale costs a little resolution and
+ * picks up AA and tilt shift, which for a wireframe gizmo is desirable.
  *
- * Note this is where the world-space UI pass USED to live too, for the same reasons -- it does
- * not any more. A wireframe gizmo wants to be anti-aliased and belongs to the image; UI does
- * not, so UI moved to its own layer composited after every post effect (see
- * PixelRenderPipeline::overlay_target_). Debug lines stay here deliberately, which is also why
- * they remain the one overlay visible in a low_res_color_image() capture.
+ * Deliberately physxcoopa-free: toy::render::DebugLine is a neutral {a, b, color} segment,
+ * not coopa::physx::debug::DebugLine, so the render layer never depends on the physics
+ * library. Engine::tick() bridges the two once per frame.
  *
- * Deliberately physxcoopa-free: toy::render::DebugLine is a neutral {a, b, color} segment, not
- * coopa::physx::debug::DebugLine, so the render layer never depends on the physics library.
- * Engine::tick() is what bridges the two, converting PhysicsWorld::debug_draw()'s output into
- * this vector once per frame (see engine.h). Follows the house pass convention documented in
- * toyengine/render/passes/README.md: ctor takes (Device&, RenderPass&, shader paths...), a
- * `draw(cmd, ...)` method, no virtuals. Per-frame-in-flight vertex buffers (modeled on
- * toy::render::InstanceStream) are mandatory here, not stylistic -- this pipeline never
- * vkQueueWaitIdle's per frame, so a single shared buffer would race a still-in-flight read.
- *
- * gfxcoopa's Topology::LineList already exists in pipeline::RasterState with zero other callers
- * in this workspace -- no gfxcoopa change was needed to add this pass (see the ctor's own note
- * on why PolygonMode stays Fill, not Line, despite the name suggesting otherwise).
+ * Per-frame-in-flight vertex buffers are mandatory rather than stylistic -- this pipeline
+ * never waits per frame, so a single shared buffer would race a still-in-flight read.
  */
 
 #ifndef TOYENGINE_RENDER_PASSES_DEBUG_LINE_PASS_H
@@ -104,7 +90,7 @@ public:
     };
 
     DebugLinePass(coopa::gfx::core::Device& device, coopa::gfx::memory::Allocator& allocator,
-                  coopa::gfx::pipeline::RenderPass& swapchain_pass,
+                  coopa::gfx::pipeline::RenderPass& target_pass,
                   const std::string& vert_spv, const std::string& frag_spv,
                   uint32_t initial_capacity_vertices = 4096)
         : device_(device), allocator_(allocator)
@@ -130,11 +116,11 @@ public:
         // universally supported, and Vulkan renders LineList primitives as thin lines under it.
         desc.raster.cull = CullMode::None;
         desc.raster.line_width = 1.0f; // >1.0 needs the unenabled wideLines device feature
-        desc.depth.test = false;       // post-upscale X-ray overlay -- see file doc
+        desc.depth.test = false;       // X-ray gizmo look: never occluded by scene geometry
         desc.depth.write = false;
         desc.push_constants = {{ShaderStage::Vertex, 0, sizeof(glm::mat4)}};
 
-        pipeline_ = std::make_unique<pipeline::Pipeline>(device, swapchain_pass, desc);
+        pipeline_ = std::make_unique<pipeline::Pipeline>(device, target_pass, desc);
 
         for (uint32_t i = 0; i < kFrames; ++i) {
             capacity_[i] = initial_capacity_vertices;

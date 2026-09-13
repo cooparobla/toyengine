@@ -2,33 +2,24 @@
  * @file camera_controller.h
  * @brief Mouse-orbit and fly camera control, driving the owning SceneObject's Transform.
  *
- * Orbit mode is a true spherical-coordinates rig: yaw/pitch/distance around a
- * target point, which may be a fixed world-space point or a named GameObject
- * followed with exponential smoothing (see `tracker`). This replaces an
- * earlier version that orbited by applying an identical rigid rotation about
- * world Z to both position and orientation -- convention-free, but unable to
- * express vertical (pitch) orbiting at all, since a roll about a single axis
- * can't tilt the camera up or down while keeping it aimed at the target.
+ * Orbit mode is a true spherical-coordinates rig: yaw/pitch/distance around a target point,
+ * which may be a fixed world-space point or a named GameObject followed with exponential
+ * smoothing (see `tracker`).
  *
- * `movement_smoothing` (0..1) adds drag to the camera's own response to
- * mouse/scroll input, independent of `follow_smoothing` (which only smooths
- * a moving *target*'s position). Yaw/pitch/distance are still accumulated
- * instantly into raw targets every frame -- what movement_smoothing changes
- * is how quickly the applied pose chases those targets: 0 chases them in the
- * same frame (this component's original, undamped feel), 1 chases them
- * slowly, over roughly a couple of seconds, without ever fully stopping.
+ * `movement_smoothing` (0..1) adds drag to the camera's own response to mouse and scroll
+ * input, independent of `follow_smoothing` (which only smooths a moving *target*'s
+ * position). Yaw/pitch/distance are accumulated instantly into raw targets every frame; what
+ * movement_smoothing changes is how quickly the applied pose chases those targets -- 0
+ * chases them in the same frame, 1 chases them over roughly a couple of seconds without ever
+ * fully stopping.
  *
- * Per-frame input is pushed in by the caller (toy::core::Engine::tick(), via
- * coopa::input::Input's cursor_delta()/scroll_delta() and
- * coopa::input::InputMap's axis()/vector() reads) BEFORE SceneManager::update()
- * runs, not read directly from an Input/Window here -- keeps this component
- * testable without a live GLFW window, matching coopa::input::InputMap's own
- * design.
+ * Per-frame input is pushed in by the caller (toy::core::Engine::tick()) BEFORE
+ * SceneManager::update() runs, rather than read from an Input or Window here -- that keeps
+ * the component testable without a live GLFW window, matching InputMap's own design.
  *
- * Fly mode is unchanged from the original: it moves along the CURRENT world
- * matrix's own basis columns (convention-free), and its look-input handling
- * assumes local Z is the forward axis (Blender's convention, matching every
- * camera authored elsewhere in this workspace).
+ * Fly mode moves along the CURRENT world matrix's own basis columns (convention-free), and
+ * its look handling assumes local Z is forward (Blender's convention, matching every camera
+ * authored elsewhere in this workspace).
  */
 
 #ifndef TOYENGINE_SCENE_CAMERA_CONTROLLER_H
@@ -130,7 +121,7 @@ public:
      */
     float movement_smoothing = 0.0f;
 
-    // --- Fly parameters (unchanged) ---
+    // --- Fly parameters ---
     float move_speed             = 5.0f;
     float look_speed_deg_per_sec = 90.0f;
 

@@ -3,20 +3,14 @@
  * @brief Demo component that owns a coopa::stat::Resource and binds it to a uicoopa
  *        ProgressBar in its own subtree -- the gameplay half of the world-space canvas demo.
  *
- * The point of this file is the *seam*, not the saw-tooth: uicoopa's widgets are deliberately
- * pure visualizations of a model they do not own (see uicoopa/widgets/inventory_binding.h's
- * ownership contract), so a health bar needs someone to own the health. That is exactly one
- * call -- ProgressBar::bind(&health_) -- after which the bar tracks the Resource's
- * on_changed signal and even drives its own chip-damage trail with no further help.
+ * The point of this file is the *seam*: uicoopa's widgets are pure visualizations of a model
+ * they do not own, so a health bar needs someone to own the health. That is exactly one call
+ * -- ProgressBar::bind(&health_) -- after which the bar tracks the Resource's on_changed
+ * signal and drives its own chip-damage trail with no further help. The Resource is a MEMBER,
+ * so it necessarily outlives the binding it hands out.
  *
- * Shaped like toyengine/scene/kinematic_mover.h: a plain coopa::scene::Component that only
- * touches its own fields and its own subtree, registered as `type: HealthDriver` in
- * toyengine/scene/register.h. The Resource is a MEMBER, so it necessarily outlives the
- * binding it hands out.
- *
- * The damage/regen cycle exists so a screenshot or a headless capture shows a partially
- * drained bar rather than a permanently full one -- a full ProgressBar is indistinguishable
- * from a plain panel, which would make the demo prove nothing.
+ * The damage/regen cycle exists so a screenshot or headless capture shows a partially drained
+ * bar: a full ProgressBar is indistinguishable from a plain panel.
  */
 
 #ifndef TOYENGINE_SCENE_HEALTH_DRIVER_H

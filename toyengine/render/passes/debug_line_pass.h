@@ -8,11 +8,17 @@
  * render()) -- NOT the swapchain pass a first instinct might reach for. pipeline::RenderPass
  * hardcodes LOAD_OP_CLEAR, so a genuinely post-upscale overlay would need its own hand-built
  * LOAD_OP_LOAD render pass (as transparent_pass.h does); the more important reason is that
- * nothing in this engine reads the swapchain image back, so a post-upscale overlay would be
+ * nothing in this engine reads the swapchain image back, so a swapchain overlay would be
  * invisible to low_res_color_image()/final_color_image() and therefore to every screenshot/
- * headless-test capture. Landing pre-upscale costs a little resolution and picks up
- * tilt_shift_pass_'s blur, but it's what makes the overlay both correct on real display output
- * and verifiable the same way everything else in this pipeline already is.
+ * headless-test capture. Landing pre-upscale costs a little resolution and picks up the AA
+ * pass and tilt_shift_pass_'s blur, but it's what makes the overlay both correct on real
+ * display output and verifiable the same way everything else in this pipeline already is.
+ *
+ * Note this is where the world-space UI pass USED to live too, for the same reasons -- it does
+ * not any more. A wireframe gizmo wants to be anti-aliased and belongs to the image; UI does
+ * not, so UI moved to its own layer composited after every post effect (see
+ * PixelRenderPipeline::overlay_target_). Debug lines stay here deliberately, which is also why
+ * they remain the one overlay visible in a low_res_color_image() capture.
  *
  * Deliberately physxcoopa-free: toy::render::DebugLine is a neutral {a, b, color} segment, not
  * coopa::physx::debug::DebugLine, so the render layer never depends on the physics library.

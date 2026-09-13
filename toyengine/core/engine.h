@@ -47,6 +47,9 @@
 #include <toyengine/core/config.h>
 #include <toyengine/render/pixel_render_config.h>
 #include <toyengine/render/pixel_render_pipeline.h>
+#include <uicoopa/layout/canvas.h>
+#include <uicoopa/ui_yaml.h>
+
 #include <toyengine/scene/camera_controller.h>
 #include <toyengine/scene/register.h>
 
@@ -105,8 +108,13 @@ public:
         coopa::gfx::engine::components::register_render_components(ctx_.device(), ctx_.allocator(), ctx_.command_pool(), assets_);
         scene::register_scene_components();
         coopa::physx::register_physics_components(assets_, config_.physics);
+        // The GPU overload, so font/sprite paths in scene YAML load on demand and
+        // FontDefaults::resolve_font is wired for themes. Must precede load_scene(), like
+        // every other parser registration above. Its captured device/allocator references
+        // are released by the SceneLoader::clear_component_parsers() already in ~Engine().
+        coopa::ui::register_ui_components(ctx_.device(), ctx_.allocator(), ctx_.command_pool());
 
-        scene_mgr_.load_scene(resolve_path_(config_.scene.default_scene));
+        scene_mgr_.load_scene(resolve_path_(scene_path_from_env_(config_.scene.default_scene)));
         coopa::physx::system::install_physics_system(scene_mgr_.get_active_scene(), config_.physics);
 
         // Mesh decode (gfxcoopa's register.h) now runs via load_async() on jobs_'s workers,
@@ -123,6 +131,7 @@ public:
         pipeline_.validate_material_shaders(scene_mgr_.get_active_scene());
 
         apply_cursor_capture_();
+        read_cursor_pos_override_();
     }
 
     ~Engine() {
@@ -134,6 +143,12 @@ public:
         // manager (which holds every loaded Mesh/Texture's GPU allocation) before ctx_
         // (and the device/allocator it owns) destructs.
         coopa::scene::SceneLoader::clear_component_parsers();
+
+        // UIResourceCache holds GPU-resident Fonts/Textures in function-local static storage,
+        // so without this they would only be released at program exit -- after ctx_'s Device
+        // and Allocator are gone, which trips VMA's "allocations not freed" assertion. Same
+        // contract as clear_component_parsers() above; see UIResourceCache::clear()'s doc.
+        coopa::ui::UIResourceCache::instance().clear();
         assets_.shutdown();
     }
 
@@ -163,6 +178,10 @@ public:
      *   NO_INPUT=1           zeroes all camera-controller input every frame (see
      *                        drive_camera_controller_()), so a capture running on a live
      *                        desktop isn't perturbed by real mouse/keyboard activity.
+     *
+     * One further env var is read by the CONSTRUCTOR, not this loop:
+     *   SCENE=<name|path>    loads a different scene than assets/config.yaml's
+     *                        scene.default_scene -- see scene_path_from_env_().
      */
     void run() {
         uint32_t captured = 0;
@@ -200,11 +219,12 @@ public:
     /**
      * @brief Writes the current offscreen buffer to a PNG.
      * @param path    Destination file path.
-     * @param low_res True writes the internal low-resolution buffer 1:1 (pixel-perfect,
-     *                but BEFORE any display-resolution effect such as tilt shift -- see
-     *                PixelRenderPipeline::low_res_color_image()). False writes the final
-     *                image actually shown in the window (PixelRenderPipeline::
-     *                final_color_image()), at DISPLAY resolution.
+     * @param low_res True writes the internal low-resolution buffer 1:1 (pixel-perfect, but
+     *                BEFORE any display-resolution effect such as tilt shift, and containing
+     *                NO UI -- neither canvas layer is part of it, since both composite later
+     *                and at window resolution; see PixelRenderPipeline::low_res_color_image()).
+     *                False writes the final image actually shown in the window, UI included
+     *                (PixelRenderPipeline::final_color_image()), at DISPLAY resolution.
      */
     void save_screenshot(const std::string& path, bool low_res = true) {
         coopa::gfx::memory::Image& src = low_res ? pipeline_.low_res_color_image()
@@ -244,12 +264,20 @@ public:
         }
 
         const float dt = frame_dt_();
+        apply_cursor_pos_override_();
         assets_.update(dt);
 
         if (scene_mgr_.has_scene()) {
             drive_camera_controller_(scene_mgr_.get_active_scene());
         }
         scene_mgr_.update(dt);
+        if (scene_mgr_.has_scene()) {
+            // Between update() and late_update(), and that window is the only correct slot:
+            // world matrices are current only after UpdatePhase::TransformResolve (350) has
+            // run inside update(), and a canvas needs its pointer position before
+            // EventSystem::process() is dispatched from inside late_update() (400).
+            drive_ui_canvases_(scene_mgr_.get_active_scene());
+        }
         // late_update() runs LateBehaviourSystem (Component::late_update()) and, critically,
         // flushes each worker's deferred SceneCommandBuffer and advances Scene::frame_index() --
         // none of which happened before this call was added. Must run before render() below so
@@ -386,6 +414,135 @@ private:
     }
 
     /**
+     * @brief Feeds every CanvasComponent in the scene the per-frame state it cannot get for
+     *        itself: the viewport (screen-space canvases) or the camera and pointer ray
+     *        (world-space ones).
+     *
+     * Called between Scene::update() and Scene::late_update() -- see tick() for why that
+     * window is the only correct one.
+     *
+     * The two kinds live in DIFFERENT spaces, and each is given the one its pass draws in.
+     * World-space UI is projected through the camera, so its layout and its pointer picking both
+     * happen in the internal render extent -- build_pointer_ray_() is what maps the window-pixel
+     * cursor through the letterbox into that space. (Its layer is RASTERIZED at the letterbox
+     * rect; see PixelRenderPipeline's ui_world_target_. That is a rendering resolution, not a
+     * coordinate space, and does not enter here.) Screen-space UI renders last, into the
+     * swapchain-sized overlay target at full window resolution, so it is sized to the window and
+     * the raw window-pixel cursor is already in its space.
+     *
+     * Getting that split wrong is not cosmetic: CanvasComponent::set_input() divides the
+     * cursor by the scale_factor set_viewport() derived, so sizing a screen canvas to the
+     * render extent while feeding it window pixels puts every hit test off by the upscale
+     * factor plus the letterbox offset.
+     *
+     * `view`/`proj` here are recomputed from the main camera rather than taken from the
+     * pipeline, which has not run yet this frame. They are used for TWO different things
+     * with different tolerances: the pointer ray (sub-pixel accuracy is irrelevant to
+     * picking) and CameraFacing's billboard basis (a rotation, which TAA jitter and
+     * camera_pixel_snap do not affect at all, since both perturb only the projection's
+     * translation). The canvas-to-clip matrix the UI is actually RASTERIZED with is formed
+     * inside the pipeline from its own authoritative jittered projection -- see
+     * UiWorldPass::draw()'s view_proj parameter -- so the UI and the depth buffer it is
+     * compared against never disagree.
+     */
+    void drive_ui_canvases_(coopa::scene::Scene& scene) {
+        std::vector<coopa::ui::CanvasComponent*> canvases = coopa::ui::collect_canvases(scene);
+        if (canvases.empty()) return;
+
+        const uint32_t rw = pipeline_.render_width();
+        const uint32_t rh = pipeline_.render_height();
+        const uint32_t ww = ctx_.swapchain().extent().width;
+        const uint32_t wh = ctx_.swapchain().extent().height;
+        const coopa::gfx::TextureView white        = pipeline_.world_ui_white_view();
+        const coopa::gfx::TextureView screen_white = pipeline_.screen_ui_white_view();
+
+        auto* cam = scene.find_first_component<coopa::gfx::engine::components::CameraComponent>();
+        const float aspect = rh > 0 ? static_cast<float>(rw) / static_cast<float>(rh) : 1.0f;
+        const glm::mat4 view = cam ? cam->get_view_matrix() : glm::mat4(1.0f);
+        const glm::mat4 proj = cam ? cam->get_projection_matrix(aspect) : glm::mat4(1.0f);
+
+        bool ray_valid = false;
+        glm::vec3 ray_origin(0.0f);
+        glm::vec3 ray_dir(0.0f);
+        for (coopa::ui::CanvasComponent* canvas : canvases) {
+            if (!canvas->is_world_space()) {
+                // Same seeding as the world path below, and for the same reason -- this used
+                // to be missing entirely, so a screen-space canvas emitted every solid-colour
+                // quad against a null image view.
+                canvas->set_default_texture(screen_white);
+                // The WINDOW extent, not the render extent: UiPass draws this canvas into the
+                // swapchain-sized overlay target, and ctx_.input()'s cursor is in window
+                // pixels, so this is the sizing that makes both agree. See the doc above.
+                canvas->set_viewport(ww, wh);
+                canvas->set_input(ctx_.input());
+                continue;
+            }
+            // Seed the DrawList's default texture BEFORE late_update() emits against it:
+            // every solid-colour quad (panels, bar fills) is drawn with this view, and an
+            // unseeded DrawList submits draws bound to a null image view. Idempotent and
+            // cheap, and done per frame rather than once so a scene loaded later is covered.
+            canvas->set_default_texture(white);
+            canvas->update_world_transform(view);
+            if (!ray_valid) {
+                ray_valid = build_pointer_ray_(view, proj, rw, rh, ray_origin, ray_dir);
+            }
+            std::optional<glm::vec2> hit =
+                ray_valid ? canvas->ray_to_canvas(ray_origin, ray_dir) : std::nullopt;
+            // A miss must land far OUTSIDE the canvas. (0, 0) would be the canvas's own
+            // bottom-left corner, which would leave whatever widget sits there permanently
+            // hovered whenever the pointer is anywhere else.
+            canvas->set_world_input(ctx_.input(), hit ? *hit : glm::vec2(-1.0e6f));
+        }
+    }
+
+    /**
+     * @brief Builds a world-space ray through the cursor, for world-space UI picking.
+     *
+     * Three coordinate hops, each of which has a way to be subtly wrong:
+     *  1. Window pixels -> internal render-extent pixels. The low-res image is blitted into
+     *     the window through a letterbox rect, so this must go through the SAME
+     *     compute_display_rect() the upscale itself uses -- it dispatches on
+     *     config.upscale_mode, which compute_fit()/compute_letterbox() alone would ignore.
+     *  2. Render-extent pixels -> NDC. The world UI is rasterized through a NEGATIVE-height
+     *     viewport, so framebuffer row 0 is ndc_y = +1: `ndc_y = 1 - 2*y/h`, the opposite
+     *     sign of the usual Vulkan relation.
+     *  3. NDC -> world, by unprojecting the near and far plane points. z = 0 is the near
+     *     plane because GLM_FORCE_DEPTH_ZERO_TO_ONE is set (on coopa::lib, for every
+     *     consumer), not because of anything this function does.
+     *
+     * @return False when the letterbox rect is degenerate (a zero-area window), in which
+     *         case there is no meaningful ray and no canvas should report a hit.
+     */
+    bool build_pointer_ray_(const glm::mat4& view, const glm::mat4& proj,
+                            uint32_t rw, uint32_t rh,
+                            glm::vec3& out_origin, glm::vec3& out_dir) {
+        if (rw == 0 || rh == 0) return false;
+        const uint32_t sw = ctx_.swapchain().extent().width;
+        const uint32_t sh = ctx_.swapchain().extent().height;
+        render::LetterboxRect box = render::compute_display_rect(config_.render, sw, sh, rw, rh);
+        if (box.w == 0 || box.h == 0) return false;
+
+        glm::vec2 cursor = ctx_.input().cursor_position() - glm::vec2(box.x, box.y);
+        // Divide by box.w/h rather than box.scale: under "fit" mode w/h are rounded to whole
+        // pixels, so w/rw and scale differ slightly, and w/h is what the blit actually used.
+        glm::vec2 px(cursor.x * static_cast<float>(rw) / static_cast<float>(box.w),
+                     cursor.y * static_cast<float>(rh) / static_cast<float>(box.h));
+        glm::vec2 ndc(2.0f * px.x / static_cast<float>(rw) - 1.0f,
+                      1.0f - 2.0f * px.y / static_cast<float>(rh));
+
+        glm::mat4 inv_vp = glm::inverse(proj * view);
+        glm::vec4 near_h = inv_vp * glm::vec4(ndc, 0.0f, 1.0f);
+        glm::vec4 far_h  = inv_vp * glm::vec4(ndc, 1.0f, 1.0f);
+        if (std::abs(near_h.w) < 1e-9f || std::abs(far_h.w) < 1e-9f) return false;
+        out_origin = glm::vec3(near_h) / near_h.w;
+        // Left unnormalized on purpose: ray_to_canvas() only ever uses ratios of dot
+        // products, so scale cancels -- and for an orthographic camera the near->far
+        // difference IS the (constant) direction.
+        out_dir = glm::vec3(far_h) / far_h.w - out_origin;
+        return true;
+    }
+
+    /**
      * @brief Puts the OS cursor into disabled (hidden + unbounded) mode if the
      *        active scene's CameraController wants it -- called once after
      *        the initial scene load.
@@ -446,6 +603,58 @@ private:
         return 0;
     }
 
+    /**
+     * @brief CURSOR_POS="<x>,<y>" env override: pins the pointer to a fixed window-pixel
+     *        position every frame.
+     *
+     * Mirrors uicoopa's own demo convention of the same name. Its reason to exist is
+     * world-space UI: hit testing there runs a mouse ray through the letterbox rect and
+     * against a canvas plane, and none of that is exercisable from a headless capture, where
+     * the OS cursor never moves off (0, 0). With this, a scripted run can park the pointer on
+     * a world-space Button and a screenshot shows its hover state.
+     *
+     * Re-applied every tick, before Input's per-frame edge detection is consumed, so it wins
+     * over any real pointer motion on a live desktop.
+     */
+    void apply_cursor_pos_override_() {
+        if (!cursor_pos_override_) return;
+        ctx_.input().push_cursor_position(cursor_pos_.x, cursor_pos_.y);
+    }
+
+    /** @brief Parses CURSOR_POS once at construction; see apply_cursor_pos_override_(). */
+    void read_cursor_pos_override_() {
+        const char* v = std::getenv("CURSOR_POS");
+        if (!v || !*v) return;
+        float x = 0.0f, y = 0.0f;
+        if (std::sscanf(v, "%f,%f", &x, &y) == 2) {
+            cursor_pos_ = glm::vec2(x, y);
+            cursor_pos_override_ = true;
+        }
+    }
+
+    /**
+     * @brief SCENE env override for the scene loaded at startup.
+     *
+     * Accepts either a bare scene NAME under assets/scenes (`SCENE=world_canvas_test`, which
+     * expands to assets/scenes/<name>/scene.yaml, the layout every scene in this repo uses)
+     * or an explicit path to a .yaml. Matches the ONESHOT/MAX_FRAMES/FIXED_DT/CAPTURE_FRAMES/
+     * NO_INPUT family: a scripted or one-off run should not have to edit assets/config.yaml,
+     * which is version-controlled and describes the DEFAULT scene.
+     *
+     * @param configured The config file's own scene.default_scene, returned unchanged when
+     *                   SCENE is unset or empty.
+     */
+    static std::string scene_path_from_env_(const std::string& configured) {
+        const char* v = std::getenv("SCENE");
+        if (!v || !*v) return configured;
+        std::string scene(v);
+        if (scene.size() >= 5 && scene.compare(scene.size() - 5, 5, ".yaml") == 0) return scene;
+        return "assets/scenes/" + scene + "/scene.yaml";
+    }
+
+    bool      cursor_pos_override_ = false;
+    glm::vec2 cursor_pos_{0.0f};
+
     /** @brief NO_INPUT env override for drive_camera_controller_() -- any non-empty value that
      *  isn't "0" suppresses all camera input, for reproducible headless captures. */
     static bool no_input_from_env_() {
@@ -458,9 +667,16 @@ private:
         render::PixelRenderConfig rc = config.render;
         rc.shader_dir = std::string(ROOT_DIR) + "/assets/shaders";
         // App directory first, gfxcoopa's shared base library second -- the runtime mirror of
-        // the glslc -I search order (see assets/shaders/.glslc_flags).
-        rc.shaders = coopa::gfx::pipeline::ShaderLibrary::app_over_base(
-            rc.shader_dir, std::string(PROJ_DIR) + "/gfxcoopa/assets/shaders");
+        // the glslc -I search order (see assets/shaders/.glslc_flags). uicoopa's own shader
+        // directory is a third root rather than app_over_base()'s two, for the UI passes'
+        // ui*.vert/frag; it goes LAST so that a future uicoopa file sharing a logical name
+        // with a gfxcoopa base shader can never shadow the base copy (ShaderLibrary::resolve()
+        // is first-match-wins). There are no collisions across the three roots today.
+        rc.shaders = coopa::gfx::pipeline::ShaderLibrary(std::vector<std::string>{
+            rc.shader_dir,
+            std::string(PROJ_DIR) + "/gfxcoopa/assets/shaders",
+            std::string(PROJ_DIR) + "/uicoopa/assets/shaders",
+        });
         if (!rc.palette_path.empty()) rc.palette_path = resolve_path_(rc.palette_path);
 
         // Derived surface shaders this app ships -- see gfx/surface/*.glsl and the

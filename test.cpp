@@ -7,6 +7,7 @@
 
 #include <cassert>
 #include <cmath>
+#include <cstdlib>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -730,6 +731,187 @@ void test_headless_render_sdf_toggle_changes_output() {
     std::filesystem::remove(path_off);
 }
 
+
+/// Renders assets/scenes/world_canvas_test/scene.yaml with world_ui_enabled on and off. The
+/// scene's two WorldSpace canvases (a camera-facing health bar over the cube, and a
+/// Transform-mode plate) are the only intended difference between the two frames, so a
+/// substantial region of changed pixels proves the world-space UI reached the captured image
+/// -- i.e. that CanvasComponent laid out, emitted, and UiWorldPass actually drew it as 3D
+/// geometry, and that the composite stage put it back on top of the frame.
+///
+/// Captures at DISPLAY resolution (low_res = false). The world UI is no longer part of the
+/// low-resolution image: it renders into its own layer and is composited over the frame after
+/// AA and tilt shift, so low_res_color_image() is scene-only by construction now (see
+/// PixelRenderPipeline::overlay_target_). A low-res capture here would compare two frames that
+/// genuinely are identical.
+///
+/// The comparison counts only pixels that differ by more than kNoiseTolerance in some channel.
+/// Two Engines tick on real wall-clock dt, which reaches the shaders as gfx_time, and that
+/// alone moves roughly a thousand pixels of sky by +-1 between any two runs -- a raw
+/// byte-inequality count sits above that floor whether or not the UI drew at all, which is
+/// exactly the kind of pass this test must not hand out.
+///
+/// Same A/B shape as test_headless_render_sdf_toggle_changes_output() above, and for the same
+/// reason it uses two separate Engines: world_ui_enabled is startup-fixed (it decides whether
+/// the UI pipelines and the scene-depth descriptor get built at all), so it cannot be flipped
+/// on a live pipeline.
+///
+/// aa_mode is left at its "off" default deliberately -- TAA's non-reprojecting history clamp
+/// would ghost a canvas moving under the scene's auto-orbiting camera and make the comparison
+/// depend on frame count.
+void test_headless_render_world_canvas_changes_output() {
+    auto render_with_world_ui = [](bool world_ui_enabled) {
+        toy::core::AppConfig config;
+        config.window.title  = "toyengine_tests";
+        config.window.width  = 640;
+        config.window.height = 360;
+        config.window.vsync  = false;
+        config.scene.default_scene = "assets/scenes/world_canvas_test/scene.yaml";
+        config.render.render_width  = 160;
+        config.render.render_height = 90;
+        config.render.world_ui_enabled = world_ui_enabled;
+        config.output.save_on_exit = false;
+
+        std::string out_path = std::string(ROOT_DIR) + "/output/test_frame_world_ui_" +
+            std::string(world_ui_enabled ? "on" : "off") + ".png";
+        {
+            toy::core::Engine engine(std::move(config));
+            // Three ticks, matching the SDF test: frame 0 has no temporal history, and the
+            // HealthDriver needs a tick or two for the bar to leave its full-health state.
+            for (int i = 0; i < 3; ++i) engine.tick();
+            engine.save_screenshot(out_path, /*low_res=*/false);
+        }
+        return out_path;
+    };
+
+    std::string path_on  = render_with_world_ui(true);
+    std::string path_off = render_with_world_ui(false);
+
+    int w1 = 0, h1 = 0, c1 = 0, w2 = 0, h2 = 0, c2 = 0;
+    uint8_t* px_on  = stbi_load(path_on.c_str(), &w1, &h1, &c1, 4);
+    uint8_t* px_off = stbi_load(path_off.c_str(), &w2, &h2, &c2, 4);
+    expect(px_on != nullptr && px_off != nullptr,
+           "world canvas: both screenshots round-trip through stb_image");
+
+    if (px_on && px_off && w1 == w2 && h1 == h2) {
+        // Above the +-1 gfx_time noise floor described above, below any real UI coverage.
+        constexpr int kNoiseTolerance = 8;
+        int diff_count = 0;
+        for (int i = 0; i < w1 * h1; ++i) {
+            for (int ch = 0; ch < 3; ++ch) { // RGB; alpha is a constant 255 in both
+                if (std::abs(static_cast<int>(px_on[i * 4 + ch]) -
+                             static_cast<int>(px_off[i * 4 + ch])) > kNoiseTolerance) {
+                    ++diff_count;
+                    break;
+                }
+            }
+        }
+        expect(diff_count > 0, "world_ui_enabled toggle measurably changes the rendered frame");
+        // A bar-plus-label canvas covers a real chunk of a 640x360 frame. Requiring a
+        // meaningful area (rather than diff_count > 0 alone) is what keeps this test honest
+        // if the canvas ever regresses to a stray pixel or two of edge difference.
+        expect(diff_count > 2000, "world canvas covers a substantial area of the frame");
+    }
+
+    if (px_on)  stbi_image_free(px_on);
+    if (px_off) stbi_image_free(px_off);
+    std::filesystem::remove(path_on);
+    std::filesystem::remove(path_off);
+}
+
+/// Parks the pointer on the world-space "Heal" Button in world_canvas_test and checks it
+/// actually lights up -- the end-to-end proof that world-space UI is INTERACTIVE, not just
+/// drawn.
+///
+/// Everything between a window pixel and a tinted button is exercised here and nowhere else:
+/// window pixel -> letterbox rect -> internal render extent -> NDC (through the
+/// negative-height viewport convention) -> world ray -> ray/plane intersection against the
+/// canvas -> canvas pixels -> Raycaster -> EventSystem -> Button::on_pointer_enter ->
+/// ColorTransition. uicoopa's own headless tests cover the ray/plane maths exactly; only a
+/// real render can cover the rest of that chain, because the letterbox and viewport
+/// conventions live in this repo.
+///
+/// The A/B is the same pointer position logic either way, differing only in WHERE it points,
+/// so a failure means the mapping is wrong rather than that the UI is missing entirely (which
+/// is what test_headless_render_world_canvas_changes_output() above covers).
+void test_headless_render_world_canvas_button_hover() {
+    // Window pixels. The scene's camera auto-orbits, so a tiny FIXED_DT keeps the button
+    // essentially still across the three ticks while still letting the frame advance.
+    auto render_with_cursor = [](const char* cursor_pos, const char* tag) {
+        setenv("CURSOR_POS", cursor_pos, /*overwrite=*/1);
+        setenv("FIXED_DT", "0.0005", 1);
+        setenv("NO_INPUT", "1", 1);
+
+        toy::core::AppConfig config;
+        config.window.title  = "toyengine_tests";
+        config.window.width  = 1920;
+        config.window.height = 1080;
+        config.window.vsync  = false;
+        config.scene.default_scene = "assets/scenes/world_canvas_test/scene.yaml";
+        config.render.render_width  = 1440;
+        config.render.render_height = 960;
+        config.output.save_on_exit = false;
+
+        std::string out_path = std::string(ROOT_DIR) + "/output/test_frame_hover_" + tag + ".png";
+        {
+            toy::core::Engine engine(std::move(config));
+            // Three ticks: Button's colour chase runs in update(), a phase EARLIER than the
+            // late_update() that detects the hover, so the tint can only land from the second
+            // frame onward however short fade_duration is.
+            for (int i = 0; i < 3; ++i) engine.tick();
+            engine.save_screenshot(out_path, /*low_res=*/false);
+        }
+        unsetenv("CURSOR_POS");
+        unsetenv("FIXED_DT");
+        unsetenv("NO_INPUT");
+        return out_path;
+    };
+
+    // (1097, 407) in window pixels is the Heal button; (850, 760) is empty floor below it.
+    std::string path_on  = render_with_cursor("1097,407", "on");
+    std::string path_off = render_with_cursor("850,760",  "off");
+
+    int w1 = 0, h1 = 0, c1 = 0, w2 = 0, h2 = 0, c2 = 0;
+    uint8_t* px_on  = stbi_load(path_on.c_str(),  &w1, &h1, &c1, 4);
+    uint8_t* px_off = stbi_load(path_off.c_str(), &w2, &h2, &c2, 4);
+    expect(px_on != nullptr && px_off != nullptr,
+           "world canvas hover: both screenshots round-trip through stb_image");
+
+    if (px_on && px_off && w1 == w2 && h1 == h2) {
+        // Count pixels close to the button's HIGHLIGHTED colour rather than sampling one
+        // hardcoded coordinate. The saved image's size depends on config (it is the display
+        // rect only when tilt-shift is on, the render extent otherwise) and the scene's camera
+        // auto-orbits, so a fixed pixel index is exactly the kind of assertion that rots.
+        //
+        // Scene colours: normal (0.20, 0.42, 0.30), highlighted (0.45, 0.92, 0.60). World UI
+        // is composited AFTER tonemapping, so these reach the framebuffer very nearly 1:1.
+        auto count_highlight = [](const uint8_t* px, int w, int h) {
+            int n = 0;
+            for (int i = 0; i < w * h; ++i) {
+                int r = px[i * 4], g = px[i * 4 + 1], b = px[i * 4 + 2];
+                if (std::abs(r - 115) < 26 && std::abs(g - 235) < 26 && std::abs(b - 153) < 26) ++n;
+            }
+            return n;
+        };
+        int on_count  = count_highlight(px_on,  w1, h1);
+        int off_count = count_highlight(px_off, w2, h2);
+
+        // The button is 34x13 canvas pixels on a 150x38 canvas; at this render extent that is
+        // a few hundred framebuffer pixels, comfortably clear of any stray match in the scene.
+        expect(off_count < 50,
+               "un-hovered world-space button stays its normal colour");
+        expect(on_count > 200,
+               "hovered world-space button lights up (ray -> canvas -> EventSystem works)");
+        expect(on_count > off_count * 4 + 100,
+               "hover is a large, unambiguous change, not noise");
+    }
+
+    if (px_on)  stbi_image_free(px_on);
+    if (px_off) stbi_image_free(px_off);
+    std::filesystem::remove(path_on);
+    std::filesystem::remove(path_off);
+}
+
 /// Renders assets/scenes/material_maps_test/scene_flat.yaml and scene_mapped.yaml -- the SAME
 /// lit cube, byte-identical scenes but for scene_mapped's three texture_albedo/texture_normal/
 /// texture_metallic_roughness keys (see those files' own comments) -- and asserts the two
@@ -820,6 +1002,8 @@ int main() {
     test_headless_render_matches_palette();
     test_headless_render_with_all_toggles_off();
     test_headless_render_sdf_toggle_changes_output();
+    test_headless_render_world_canvas_changes_output();
+    test_headless_render_world_canvas_button_hover();
     test_headless_render_material_maps_change_output();
 
     if (g_failures > 0) {

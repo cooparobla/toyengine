@@ -414,6 +414,35 @@ struct PixelRenderConfig {
      */
     bool  debug_lines_enabled     = false;
 
+    /**
+     * @brief Draws every WorldSpace uicoopa CanvasComponent in the scene (UiWorldPass) as a
+     *        guest inside post_target_'s bracket -- see uicoopa/render/ui_world_pass.h and
+     *        CanvasRenderMode.
+     *
+     * STARTUP-FIXED, unlike debug_lines_enabled above: turning it on builds the UI pipelines
+     * and binds the G-buffer depth into a descriptor set, neither of which can happen once
+     * the frame loop is running (DescriptorSet::bind_image() updates descriptors
+     * immediately). Off leaves the pass unconstructed and the descriptor unallocated, so it
+     * costs literally nothing. See PixelRenderPipeline::apply_live_config().
+     *
+     * Screen-space canvases are unaffected by this flag -- they are drawn by a separate pass
+     * with its own toggle, screen_ui_enabled below.
+     */
+    bool  world_ui_enabled        = true;
+
+    /**
+     * @brief Draws ScreenSpaceOverlay canvases (uicoopa's UiPass), at WINDOW resolution.
+     *
+     * The companion to world_ui_enabled, and STARTUP-FIXED for the same reason: it decides
+     * whether the pass and its descriptor pool are built at all.
+     *
+     * Unlike the world-space layer, this one is not part of the pixel-art image: it draws
+     * last, straight into the swapchain-sized overlay target, at full window resolution, so
+     * an HUD stays crisp instead of being quantised to the internal render grid. Both UI
+     * layers land after every post effect -- see PixelRenderPipeline's ui_composite_pass_.
+     */
+    bool  screen_ui_enabled       = true;
+
     // Indirect-lighting terms shared with SsrPass::Params (gfxcoopa/engine/render_features.h) --
     // fed to both the lighting pass and the SSR composite from this single instance so the two
     // can never disagree. ssgi_intensity defaults to 0.6 here (nonzero -- SSGI on by default),

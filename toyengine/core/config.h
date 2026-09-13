@@ -140,6 +140,8 @@ struct AppConfig {
                 if (r.contains("dof_enabled"))        config.render.dof_enabled        = r.at("dof_enabled").get_value<bool>();
                 if (r.contains("dof_debug_view"))     config.render.dof_debug_view     = r.at("dof_debug_view").get_value<bool>();
                 if (r.contains("debug_lines_enabled")) config.render.debug_lines_enabled = r.at("debug_lines_enabled").get_value<bool>();
+                if (r.contains("world_ui_enabled"))   config.render.world_ui_enabled   = r.at("world_ui_enabled").get_value<bool>();
+                if (r.contains("screen_ui_enabled"))  config.render.screen_ui_enabled  = r.at("screen_ui_enabled").get_value<bool>();
 
                 // --- Internal resolution ---
                 if (r.contains("resolution_mode"))        config.render.resolution_mode = r.at("resolution_mode").get_value<std::string>();

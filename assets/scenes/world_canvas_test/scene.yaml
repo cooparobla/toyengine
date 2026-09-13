@@ -1,0 +1,391 @@
+# World-space UI canvas demo -- a cube with a health bar floating above it.
+#
+# What this scene is for, feature by feature:
+#
+#  * health_canvas  -- a `Canvas` with `render_mode: WorldSpace` and the default
+#    `billboard: CameraFacing`, parented to the cube. It is an ordinary child object with an
+#    ordinary Transform, so "1.1 above the cube" is just `position: {z: 1.1}` -- this engine
+#    is Z-UP (gravity -Z, world up +Z), not Y-up.
+#  * Its children are plain uicoopa widgets -- Image, ProgressBar, Text -- with nothing
+#    world-space about them. That is the whole point of the feature: a world canvas hosts the
+#    normal widget library, and every element lays out in canvas pixels exactly as it would in
+#    a screen-space HUD.
+#  * wall_canvas   -- a second canvas with `billboard: Transform`, which honours its own 3D
+#    rotation instead of turning to face the camera. Compare the two as the camera orbits.
+#  * hud           -- a SCREEN-SPACE canvas (the default render_mode), which is a different
+#    pass entirely: UiPass draws it last, at full WINDOW resolution, over the finished frame.
+#    Compare it against the two world canvases as the camera orbits -- it never moves, never
+#    occludes, and its text stays crisp instead of being quantised to the internal render grid.
+#  * camera        -- auto-orbits (`auto_rotate_deg_per_sec`), which is what makes the
+#    difference between the two billboard modes visible without touching the mouse. Mouse look
+#    is disabled (`mouse_sensitivity: 0.0`) and the cursor is NOT captured
+#    (`capture_cursor: false`), so the pointer is free to interact with the world-space UI --
+#    hover the health bar and its Mask/hit-test path is exercised for real.
+#
+# Run it with:  scene.default_scene: assets/scenes/world_canvas_test/scene.yaml in
+# assets/config.yaml, or see toyengine/test.cpp's world-canvas tests.
+
+format: blender
+scene:
+  scene_name: WorldCanvasTest
+  root_objects:
+    - name: floor
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: -0.5 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 3.0, y: 3.0, z: 3.0 }
+        - type: MeshRenderer
+          mesh_path: plane.000
+          material:
+            albedo: { r: 0.30, g: 0.34, b: 0.28 }
+            metallic: 0.0
+            roughness: 0.85
+            ao: 1.0
+      children: []
+
+    # An opaque block between the camera and the far canvas, so `occlude: true` has something
+    # to actually be occluded BY. Without a real occluder the flag is untestable.
+    - name: occluder
+      active: true
+      components:
+        - type: Transform
+          # Same corner-origin mesh, so z = the floor height puts its base ON the floor.
+          position: { x: 1.4, y: -1.6, z: -0.5 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 0.5, y: 0.5, z: 1.8 }
+        - type: MeshRenderer
+          mesh_path: cube.000
+          material:
+            albedo: { r: 0.22, g: 0.24, b: 0.30 }
+            metallic: 0.0
+            roughness: 0.7
+            ao: 1.0
+      children: []
+
+    # NOTE ON PLACEMENT: cube.000's mesh spans 0..1 on every axis -- its origin is a CORNER,
+    # not its centre (check meshes/cube.000.yaml; pixel_demo offsets by -0.5 for the same
+    # reason). So the cube sits at -0.5 to centre it on the world origin and rest it on the
+    # floor, and health_canvas's local +0.5/+0.5 below cancels that back out so the canvas
+    # hangs centred over the cube rather than over one of its vertical edges.
+    - name: cube
+      active: true
+      components:
+        - type: Transform
+          position: { x: -0.5, y: -0.5, z: -0.5 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: cube.000
+          material:
+            albedo: { r: 0.80, g: 0.35, b: 0.25 }
+            metallic: 0.0
+            roughness: 0.6
+            ao: 1.0
+        # Owns the coopa::stat::Resource and binds it to HealthBar's ProgressBar at start().
+        # Lives on the cube rather than on the canvas so the "model" and the "view" are
+        # visibly separate objects -- see toyengine/scene/health_driver.h.
+        - type: HealthDriver
+          bar_object: HealthBar
+          max_health: 100.0
+          start_health: 100.0
+          damage_per_second: 22.0
+          regen_per_second: 14.0
+      children:
+        - name: health_canvas
+          active: true
+          components:
+            - type: Transform
+              # Local to the cube: +0.5,+0.5 cancels the cube's own corner-origin offset, and
+              # +1.6 clears its 1-unit height -- so this lands at world (0, 0, 1.1), centred
+              # above the cube. +Z is up in this engine.
+              position: { x: 0.5, y: 0.5, z: 1.6 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 1.0, y: 1.0, z: 1.0 }
+            - type: Canvas
+              render_mode: WorldSpace
+              billboard: CameraFacing
+              # Canvas PIXELS, not world units. 150x38 at 110 px/unit spans ~1.36 x 0.35
+              # world units -- a little wider than the cube, which reads as a nameplate.
+              # world_size/pixels_per_unit fixes the canvas's PHYSICAL size; how many screen
+              # pixels one canvas pixel covers is a separate question, and the answer here is
+              # display_height / (2 * distance * tan(fov/2)) / pixels_per_unit
+              #   = 1080 / (2 * 5.00 * tan(25 deg)) / 110 = 2.1
+              # i.e. this canvas is magnified ~2x on screen. Solid quads do not care (they
+              # sample a 1x1 white texel), but a glyph atlas baked at the authored font_size
+              # would be bilinearly stretched to mush -- so text_supersample bakes it denser.
+              # Round it DOWN rather than up: mild magnification is a soft edge, while
+              # minification through a sampler with no mipmaps aliases.
+              #
+              # DISPLAY height, not render_height: the world-UI layer is rasterized at the
+              # letterbox rect now (see PixelRenderPipeline::ui_world_target_), so this value
+              # tracks the WINDOW. That is a real if minor authoring wart -- the atlas is baked
+              # once, so any figure here is exactly right at exactly one window size. 2.1 is
+              # tuned for assets/config.yaml's 1920x1080.
+              world_size: { x: 150.0, y: 38.0 }
+              pixels_per_unit: 110.0
+              text_supersample: 2.1
+              occlude: false
+          children:
+            # Backing plate. StretchAll so it always fills the canvas, whatever world_size is.
+            - name: Backplate
+              active: true
+              components:
+                - type: RectTransform
+                  anchor_preset: StretchAll
+                  offset_min: { x: 0.0, y: 0.0 }
+                  offset_max: { x: 0.0, y: 0.0 }
+                - type: Image
+                  color: { r: 0.05, g: 0.06, b: 0.09, a: 0.82 }
+              children: []
+
+            - name: Label
+              active: true
+              components:
+                - type: RectTransform
+                  anchor_preset: TopLeft
+                  anchored_position: { x: 8.0, y: -3.0 }
+                  size_delta: { x: 134.0, y: 14.0 }
+                  pivot: { x: 0.0, y: 1.0 }
+                - type: Text
+                  text: "Crate"
+                  font: ../../fonts/Inter-Regular.ttf
+                  font_size: 11.0
+                  color: { r: 0.90, g: 0.92, b: 0.95, a: 1.0 }
+                  horizontal_align: Left
+              children: []
+
+            # A real interactive widget on a world canvas. Hovering it tints it through
+            # Button's ordinary ColorTransition -- which means the whole chain works: the
+            # mouse ray hit the canvas plane, converted to canvas pixels, and Raycaster /
+            # EventSystem dispatched to it with no world-space awareness of their own.
+            # Drive it headlessly with CURSOR_POS="<x>,<y>" (window pixels).
+            - name: HealButton
+              active: true
+              components:
+                - type: RectTransform
+                  anchor_preset: TopRight
+                  anchored_position: { x: -6.0, y: -4.0 }
+                  size_delta: { x: 34.0, y: 13.0 }
+                  pivot: { x: 1.0, y: 1.0 }
+                - type: Image
+                  color: { r: 0.20, g: 0.42, b: 0.30, a: 1.0 }
+                - type: Button
+                  colors:
+                    normal:      { r: 0.20, g: 0.42, b: 0.30, a: 1.0 }
+                    highlighted: { r: 0.45, g: 0.92, b: 0.60, a: 1.0 }
+                    pressed:     { r: 0.12, g: 0.28, b: 0.20, a: 1.0 }
+                    # Instant, not faded (note this key lives INSIDE colors:, where the
+                    # parser reads it -- it belongs to ColorTransition, not to Button).
+                    # Button's colour chase runs in update(), a phase EARLIER than the
+                    # late_update() that detects the hover, so with a fade the tint always
+                    # trails the pointer and a short headless capture never shows it.
+                    fade_duration: 0.0
+              children:
+                - name: HealLabel
+                  active: true
+                  components:
+                    - type: RectTransform
+                      anchor_preset: StretchAll
+                    - type: Text
+                      text: "Heal"
+                      font: ../../fonts/Inter-Regular.ttf
+                      font_size: 9.0
+                      color: { r: 0.92, g: 0.98, b: 0.94, a: 1.0 }
+                      horizontal_align: Center
+                      vertical_align: Middle
+                  children: []
+
+            # The bar itself. ProgressBar adds a Mask to this object in its own start() if one
+            # is absent, so this subtree exercises UiWorldPass's projected-scissor path --
+            # which is why that path is not optional.
+            - name: HealthBar
+              active: true
+              components:
+                - type: RectTransform
+                  anchor_preset: BottomLeft
+                  anchored_position: { x: 8.0, y: 6.0 }
+                  size_delta: { x: 134.0, y: 12.0 }
+                  pivot: { x: 0.0, y: 0.0 }
+                - type: Image
+                  color: { r: 0.16, g: 0.06, b: 0.08, a: 1.0 }   # empty track
+                - type: ProgressBar
+                  min: 0.0
+                  max: 100.0
+                  value: 100.0
+                  direction: LeftToRight
+                  fill: Fill
+                  ghost: Ghost
+                  ghost_delay: 0.35
+              children:
+                # Chip-damage trail, behind the fill (earlier sibling == drawn first).
+                - name: Ghost
+                  active: true
+                  components:
+                    - type: RectTransform
+                      anchor_preset: StretchVertical
+                      pivot: { x: 0.0, y: 0.5 }
+                    - type: Image
+                      color: { r: 0.95, g: 0.85, b: 0.45, a: 0.75 }
+                  children: []
+                - name: Fill
+                  active: true
+                  components:
+                    - type: RectTransform
+                      anchor_preset: StretchVertical
+                      pivot: { x: 0.0, y: 0.5 }
+                    - type: Image
+                      color: { r: 0.85, g: 0.22, b: 0.26, a: 1.0 }
+                  children: []
+
+    # Second canvas, Transform mode: rotated 35 degrees about world Z and NOT camera-facing,
+    # so it stays put in the world as the camera orbits past it. Unrotated, the default
+    # local_right_axis/local_up_axis (+X / +Z) make a canvas face world -Y.
+    - name: wall_canvas
+      active: true
+      components:
+        - type: Transform
+          position: { x: -1.9, y: 0.2, z: 0.45 }
+          rotation: { x: 0.0, y: 0.0, z: 30.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Canvas
+          render_mode: WorldSpace
+          billboard: Transform
+          # Fewer pixels per unit than health_canvas = physically bigger in the world. This one
+          # is deliberately larger, and set in a bigger face, to stay readable from further
+          # away. Same magnification arithmetic as health_canvas above:
+          #   1080 / (2 * 5.33 * tan(25 deg)) / 72 = 3.0, x cos(30 deg) horizontally -> ~2.6-3.0
+          # so it is magnified rather more, and wants a correspondingly denser glyph atlas.
+          # 2.8 is the midpoint of that anisotropic range.
+          #
+          # Doubly approximate: on top of the window-size dependence noted on health_canvas,
+          # THIS canvas's distance sweeps 2.4 - 7.7 units over the orbit, so no single figure is
+          # right throughout. Deriving it live would re-bake the atlas mid-orbit and pop.
+          world_size: { x: 130.0, y: 44.0 }
+          pixels_per_unit: 72.0
+          text_supersample: 2.8
+          # Occluded by the scene: walk the camera round behind the occluder cube and this
+          # canvas disappears behind it instead of floating on top. The compare is a
+          # fragment-shader discard against the G-buffer depth, not a hardware depth test --
+          # see uicoopa/assets/shaders/ui_world_occlude.glsl.
+          occlude: true
+      children:
+        - name: WallPlate
+          active: true
+          components:
+            - type: RectTransform
+              anchor_preset: StretchAll
+            - type: Image
+              color: { r: 0.07, g: 0.10, b: 0.16, a: 0.88 }
+          children: []
+        - name: WallText
+          active: true
+          components:
+            - type: RectTransform
+              anchor_preset: MiddleCenter
+              size_delta: { x: 118.0, y: 32.0 }
+            - type: Text
+              text: "Transform"
+              font: ../../fonts/Inter-Regular.ttf
+              font_size: 15.0
+              color: { r: 0.72, g: 0.86, b: 0.98, a: 1.0 }
+              horizontal_align: Center
+              vertical_align: Middle
+          children: []
+
+    # Screen-space HUD. No render_mode key at all, which is how a canvas asks for
+    # ScreenSpaceOverlay -- WorldSpace is the opt-in, not the default. It needs no Transform:
+    # nothing about it lives in the world, so it is sized by reference_resolution and its
+    # children anchor to the window's own corners.
+    #
+    # reference_resolution + match_width_or_height is the ScaleWithScreenSize scaler: widget
+    # sizes below are authored against a 640x360 window and scale with the real one, so the
+    # HUD keeps its proportions from a small test window up to fullscreen.
+    - name: hud
+      active: true
+      components:
+        - type: Canvas
+          reference_resolution: { x: 640.0, y: 360.0 }
+          match_width_or_height: 0.5
+      children:
+        - name: HudPlate
+          active: true
+          components:
+            - type: RectTransform
+              anchor_preset: TopLeft
+              anchored_position: { x: 12.0, y: -12.0 }
+              size_delta: { x: 176.0, y: 30.0 }
+            - type: Image
+              color: { r: 0.05, g: 0.07, b: 0.12, a: 0.78 }
+          children:
+            - name: HudText
+              active: true
+              components:
+                - type: RectTransform
+                  anchor_preset: StretchAll
+                - type: Text
+                  text: "screen-space HUD"
+                  font: ../../fonts/Inter-Regular.ttf
+                  font_size: 14.0
+                  color: { r: 0.85, g: 0.92, b: 1.0, a: 1.0 }
+                  horizontal_align: Center
+                  vertical_align: Middle
+              children: []
+
+    - name: camera
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -5.0, z: 1.6 }
+          rotation: { x: 78.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Camera
+          main: true
+          projection: Perspective
+          fov: 50.0
+          near_clip_plane: 0.1
+          far_clip_plane: 1000.0
+          # config.yaml's DoF defaults are a manual 8 m focus at f/2.8, which would put this
+          # scene's ~5 m subject well out of focus. A per-camera focus_object racks focus onto
+          # the cube regardless of dof_focus_mode (see config.yaml's note), and stopping down
+          # to f/11 keeps the CUBE legible while leaving DoF visibly on. The UI is unaffected
+          # either way -- both canvas layers composite after DoF (and after AA and tilt shift);
+          # see PixelRenderPipeline::overlay_target_.
+          lens: 50.0
+          aperture: 11.0
+          focus_object: cube
+        - type: CameraController
+          mode: orbit
+          target: { x: 0.0, y: 0.0, z: 0.6 }
+          follow_smoothing: 10.0
+          movement_smoothing: 0.8
+          # Mouse look OFF and cursor NOT captured: the pointer belongs to the world-space UI
+          # here, not to the camera. apply_cursor_capture_() only hides the OS cursor when
+          # capture_cursor is true, and there is no in-app way to release it once hidden.
+          mouse_sensitivity: 0.0
+          capture_cursor: false
+          # This is what demonstrates the billboard: the camera circles on its own, so
+          # health_canvas stays square-on while wall_canvas turns with the world.
+          auto_rotate_deg_per_sec: 18.0
+          zoom_speed: 1.0
+          min_distance: 2.0
+          max_distance: 30.0
+          min_pitch_deg: 0.0
+          max_pitch_deg: 85.0
+      children: []
+
+    - name: sun
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: DirectionalLight
+          direction: { x: -0.35, y: -0.45, z: -0.82 }
+          color: { r: 1.0, g: 0.97, b: 0.9 }
+          intensity: 1.0
+          cast_shadows: true
+          shadow_intensity: 0.6
+      children: []

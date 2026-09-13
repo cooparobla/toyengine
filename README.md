@@ -34,6 +34,20 @@ pixelated look.
   window as closely as the render aspect allows, letterboxing only the one
   mismatched axis; `integer` snaps to a whole scale factor so every texel is
   an exact N×N block of screen pixels, at the cost of more letterbox bars.
+- **World-space UI canvases** (`world_ui_enabled`) — [uicoopa](libs/uicoopa)'s entire widget
+  library (panels, text, buttons, sliders, progress bars, layout groups, masks) placed on a
+  quad in 3D, either billboarded to face the camera or honouring its own 3D Transform, and
+  optionally occluded by scene geometry. Rendered at the internal resolution and
+  nearest-upscaled, so it sits on the same pixel grid as the scene. Genuinely interactive: the
+  mouse ray is intersected with the canvas plane, so a `Button` on a world canvas is clickable.
+- **Screen-space UI overlay** (`screen_ui_enabled`) — the same widget library as a flat HUD,
+  drawn last at full **window** resolution, so text stays crisp instead of being quantised to
+  the render grid.
+- **Both UI layers composite after every post effect.** Depth of field, FXAA/SMAA/TAA and tilt
+  shift are filters over the finished image; UI is not part of what they filter, so it lands in
+  a stage of its own at the end of the frame (see [toyengine/render/README.md](toyengine/render/README.md#ui-layers)).
+  `assets/scenes/world_canvas_test/` is the demo — a cube with a health bar floating above it,
+  a rotated wall plate, and a screen-space HUD.
 - **Orbit/fly camera controller**, YAML scene format (shared with blendy),
   nearest-filtered texture loading, headless `ONESHOT`/`MAX_FRAMES` capture.
 - **Anti-aliasing** (`aa_mode`, default `off`) — FXAA 3.11, SMAA 1x, or TAA,
@@ -74,21 +88,28 @@ git submodule update --init --recursive
 
 ```bash
 cbuild --vulkan   # compiles assets/shaders/*.{vert,frag} via glslc, then cmake
-cplay             # runs ./build/toyengine
+cplay             # runs ./build/toyengine on config.yaml's scene (pixel_demo)
+cplay physics_test  # ...or on any other scene under assets/scenes, by name
 ```
 
 Fallback (no `cbuild`/`cplay`):
 
 ```bash
 cmake -B build && cmake --build build
-./build/toyengine
+./build/toyengine [scene]
 ```
+
+The optional scene argument takes a bare name under `assets/scenes` (expanded to
+`assets/scenes/<name>/scene.yaml`) or an explicit path to a `.yaml`. It overrides
+`scene.default_scene` in `assets/config.yaml` for that run only; the `SCENE` env var
+below still takes precedence over both.
 
 Headless verification:
 
 ```bash
 ONESHOT=1 ./build/toyengine        # render exactly one frame, save output/frame.png, exit
 MAX_FRAMES=30 ./build/toyengine    # render 30 frames then exit
+SCENE=world_canvas_test ./build/toyengine   # load a different scene than config.yaml's
 ctest --test-dir build             # pure-math + full headless-render integration tests
 ```
 
@@ -133,10 +154,13 @@ Two things to know when building in there:
   those, but `uicoopa` tracks three depfiles, so building it in place shows up as
   a modified submodule in `git status`. `git -C libs/uicoopa checkout -- .` clears it.
 
-`libs/uicoopa` is checked out but deliberately **not** part of toyengine's build
-— it isn't consumable as a subdirectory yet (it uses `CMAKE_SOURCE_DIR` for its
-own paths and exposes no `coopa::ui` target). Building it standalone as above
-works fine.
+`libs/uicoopa` **is** part of toyengine's build now, linked as `coopa::ui`. It used to be
+excluded because it used `CMAKE_SOURCE_DIR` for its own include/shader/config paths and
+exposed no consumable target; both are fixed in uicoopa itself, backward-compatibly, so
+building it standalone as above still works exactly as before. Its `uicoopa_shaders` target
+compiles `ui*.vert`/`.frag` into `.spv` next to the sources, and
+[`engine.h`](toyengine/core/engine.h)'s `ShaderLibrary` searches that directory as a third
+root after toyengine's own and gfxcoopa's.
 
 ## Documentation
 

@@ -48,6 +48,11 @@ render:
                               # per-frame toggle -- see the `physics.debug_draw` block below for
                               # which categories (Colliders/Contacts/BVH) get gathered
   shadows_enabled: true
+  world_ui_enabled: true      # WorldSpace canvases (uicoopa UiWorldPass), drawn at the INTERNAL
+                              # render resolution so they stay on the pixel-art grid; STARTUP-FIXED
+  screen_ui_enabled: true     # ScreenSpaceOverlay canvases (uicoopa UiPass), drawn at full WINDOW
+                              # resolution; STARTUP-FIXED. Both UI layers composite AFTER every post
+                              # effect -- DoF, AA and tilt shift never touch them
   aa_mode: taa                 # off | fxaa | smaa | taa -- startup-fixed, like bloom/fog/tilt_shift above.
                                 # "taa" jitters the camera every frame, which fights camera_pixel_snap --
                                 # expected at this engine's low internal resolution; intended for a future
@@ -301,5 +306,6 @@ output:
   save_on_exit: true
   filepath: "./output/frame.png"
   save_low_res: false  # false captures the final DISPLAY-resolution frame (after tilt
-                        # shift); true captures the pixel-perfect low-res buffer instead,
-                        # which is BEFORE tilt shift and so won't show that effect
+                        # shift, with both UI layers composited on top); true captures the
+                        # pixel-perfect low-res buffer instead, which is BEFORE tilt shift
+                        # and contains NO UI at all -- neither layer is part of it

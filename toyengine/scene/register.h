@@ -15,6 +15,7 @@
 #include <fkYAML/node.hpp>
 
 #include <toyengine/scene/camera_controller.h>
+#include <toyengine/scene/health_driver.h>
 #include <toyengine/scene/kinematic_mover.h>
 
 namespace toy {
@@ -117,6 +118,20 @@ inline void register_scene_components() {
             if (node.contains("orbit_radius")) km->orbit_radius = node.at("orbit_radius").get_value<float>();
             if (node.contains("spin_axis")) km->spin_axis = parse_vec3(node.at("spin_axis"), km->spin_axis);
             if (node.contains("spin_speed")) km->spin_speed = node.at("spin_speed").get_value<float>();
+        });
+
+    // Demo driver for the world-space UI canvas: owns a coopa::stat::Resource and binds it to
+    // a ProgressBar in its own subtree at start(). See toyengine/scene/health_driver.h.
+    SceneLoader::register_component_parser("HealthDriver",
+        [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
+            auto* hd = obj.add_component<HealthDriver>();
+
+            if (node.contains("bar_object")) hd->bar_object = node.at("bar_object").get_value<std::string>();
+            if (node.contains("max_health")) hd->max_health = node.at("max_health").get_value<float>();
+            if (node.contains("start_health")) hd->start_health = node.at("start_health").get_value<float>();
+            if (node.contains("damage_per_second")) hd->damage_per_second = node.at("damage_per_second").get_value<float>();
+            if (node.contains("regen_per_second")) hd->regen_per_second = node.at("regen_per_second").get_value<float>();
+            if (node.contains("turnaround_fraction")) hd->turnaround_fraction = node.at("turnaround_fraction").get_value<float>();
         });
 }
 

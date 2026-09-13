@@ -19,6 +19,7 @@ set(CAML_DIR       "${ROOT_DIR_PARENT}/caml")
 set(GFXCOOPA_DIR   "${ROOT_DIR_PARENT}/gfxcoopa")
 set(PHYSXCOOPA_DIR "${ROOT_DIR_PARENT}/physxcoopa")
 set(SFXCOOPA_DIR   "${ROOT_DIR_PARENT}/sfxcoopa")
+set(UICOOPA_DIR    "${ROOT_DIR_PARENT}/uicoopa")
 
 if(NOT EXISTS "${LIBCOOPA_DIR}/CMakeLists.txt")
     message(FATAL_ERROR
@@ -45,6 +46,7 @@ add_subdirectory(${LIBCOOPA_DIR}   ${CMAKE_CURRENT_BINARY_DIR}/libcoopa-build)
 add_subdirectory(${GFXCOOPA_DIR}   ${CMAKE_CURRENT_BINARY_DIR}/gfxcoopa-build)
 add_subdirectory(${PHYSXCOOPA_DIR} ${CMAKE_CURRENT_BINARY_DIR}/physxcoopa-build)
 add_subdirectory(${SFXCOOPA_DIR}   ${CMAKE_CURRENT_BINARY_DIR}/sfxcoopa-build)
+add_subdirectory(${UICOOPA_DIR}    ${CMAKE_CURRENT_BINARY_DIR}/uicoopa-build)
 
 # Backstop for the ordering dependency above: if a reorder ever lets a library
 # resolve libcoopa through its own stale path, we end up building an unpinned
@@ -62,14 +64,25 @@ endif()
 # OpenSSL/zstd discovery; it also contributes a `caml` executable target.
 add_subdirectory(${CAML_DIR} ${CMAKE_CURRENT_BINARY_DIR}/caml-build)
 
-# NOTE: libs/uicoopa is intentionally NOT add_subdirectory()'d. It uses
-# CMAKE_SOURCE_DIR for its OWN include/shader/config paths rather than just for
-# locating siblings, so as a subdirectory of toyengine it would point its
-# includes at toyengine's root, recompile toyengine's shaders under a duplicate
-# target, hard-wire /home/coopa/git/caml, and flip GFX_LEAK_CHECK on (failing
-# the build). It also exposes no coopa::ui target to link against. It builds
-# fine standalone from libs/uicoopa; making it consumable needs a small patch to
-# uicoopa itself -- see the plan's Phase 5.
+# libs/uicoopa IS part of this build now -- see the add_subdirectory() above, which
+# sits in the ordered block for the same reason its siblings do. It could not be
+# before: it used CMAKE_SOURCE_DIR for its OWN include/shader/config paths rather than
+# just for locating siblings, so as a subdirectory of toyengine it aimed its includes
+# at toyengine's root, recompiled toyengine's shaders under a duplicate target,
+# hard-wired /home/coopa/git/caml, and flipped GFX_LEAK_CHECK on (failing the build).
+#
+# Fixed in uicoopa itself, backward-compatibly: every path is CMAKE_CURRENT_*_DIR now,
+# it exports a real coopa::ui INTERFACE target (plus a uicoopa_impl STATIC TU owning
+# stb_truetype's implementation block, which a directory-scoped add_definitions() could
+# never hand to a parent project), and its six demos, ctest registration, generated
+# root_directory.h and leak gate all sit behind a
+# `CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR` guard -- the one
+# physxcoopa:36/sfxcoopa:53 already use. `cd libs/uicoopa && cbuild` is unaffected.
+#
+# uicoopa's `uicoopa_shaders` target is deliberately NOT behind that guard: UiPass and
+# UiWorldPass are constructed from .spv paths, so this build needs them compiled too --
+# hence the add_dependencies() on it below, and the uicoopa search root in
+# toyengine/core/engine.h's make_render_config_() ShaderLibrary.
 
 include_directories(${CMAKE_SOURCE_DIR})
 
@@ -99,14 +112,18 @@ gfx_add_shader_target(toyengine_shaders
 )
 
 add_executable(toyengine main.cpp)
-add_dependencies(toyengine toyengine_shaders)
-target_link_libraries(toyengine PRIVATE coopa::gfx coopa::physx coopa::sfx)
+add_dependencies(toyengine toyengine_shaders uicoopa_shaders)
+# coopa::ui LAST on purpose: uicoopa's includes/ also carries stb_image.h /
+# stb_image_write.h, whose implementations live in gfxcoopa_impl. Linking coopa::gfx
+# first keeps gfxcoopa's copies of those two headers ahead in the include search, so a
+# TU can never compile against uicoopa's copy while linking gfxcoopa's body.
+target_link_libraries(toyengine PRIVATE coopa::gfx coopa::physx coopa::sfx coopa::ui)
 target_include_directories(toyengine PRIVATE ${CAML_DIR} ${CAML_DIR}/includes)
 
 enable_testing()
 add_executable(toyengine_tests test.cpp)
-add_dependencies(toyengine_tests toyengine_shaders)
-target_link_libraries(toyengine_tests PRIVATE coopa::gfx coopa::physx coopa::sfx)
+add_dependencies(toyengine_tests toyengine_shaders uicoopa_shaders)
+target_link_libraries(toyengine_tests PRIVATE coopa::gfx coopa::physx coopa::sfx coopa::ui)
 target_include_directories(toyengine_tests PRIVATE ${CAML_DIR} ${CAML_DIR}/includes)
 add_test(NAME toyengine_render COMMAND toyengine_tests)
 

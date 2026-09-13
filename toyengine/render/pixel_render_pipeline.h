@@ -119,7 +119,13 @@
 #include <coopa/scene/components/transform_component.h>
 
 #include <toyengine/render/pixel_render_config.h>
+#include <uicoopa/layout/canvas.h>
+#include <uicoopa/ui_yaml.h>
+#include <uicoopa/render/ui_world_pass.h>
+#include <uicoopa/render/ui_pass.h>
+
 #include <toyengine/render/pixel_math.h>
+#include <toyengine/render/passes/ui_composite_pass.h>
 #include <toyengine/render/instance_stream.h>
 #include <toyengine/render/forward_globals.h>
 #include <gfxcoopa/engine/util/material_texture_cache.h>
@@ -248,7 +254,8 @@ public:
                         coopa::gfx::pipeline::RenderPass& swapchain_pass,
                         coopa::gfx::command::CommandPool& cmd_pool,
                         PixelRenderConfig config)
-        : device_(device), allocator_(allocator), swapchain_(swapchain), config_(std::move(config)),
+        : device_(device), allocator_(allocator), swapchain_(swapchain), cmd_pool_(cmd_pool),
+          config_(std::move(config)),
           render_extent_(compute_render_extent(config_, swapchain.extent().width, swapchain.extent().height)),
           upscaled_extent_(compute_display_rect(config_, swapchain.extent().width, swapchain.extent().height,
                                                 render_extent_.width, render_extent_.height)),
@@ -838,6 +845,11 @@ public:
         coopa::gfx::TextureView display_source_view =
             aa_target_ ? aa_target_->color_view_typed()
                        : post_target_.color_image_object()->view_typed();
+        // Cached for rebuild_overlay_chain_(), which reruns on every swapchain resize and has
+        // to make the identical choice -- the resize path already had one copy of this
+        // selection to keep in sync (see render()'s tilt-shift rebuild) and a second
+        // hand-written copy is exactly how those drift apart.
+        display_source_view_ = display_source_view;
 
         // Diorama tilt-shift blur -- always constructed (mirrors bloom_pass_/fog_pass_'s
         // always-on-but-gated policy), sized to the DISPLAY (letterboxed) rect, not
@@ -858,13 +870,13 @@ public:
             device, swapchain_pass,
             config_.shaders("fullscreen.vert"),
             config_.shaders("upscale.frag"));
-        // Startup-fixed source selection, same caveat as post_source_view/
-        // pre_fog_view_typed_ above: flipping config_.tilt_shift_enabled without a
-        // pipeline rebuild would leave upscale_pass_ reading a stale source.
-        upscale_pass_->set_source_image(
-            config_.tilt_shift_enabled ? tilt_shift_pass_->result_view_typed()
-                                       : display_source_view,
-            nearest_sampler_);
+        // upscale_pass_ no longer reads the post chain directly, and no longer performs the
+        // upscale: it is now a 1:1 blit of overlay_target_ (already at swapchain resolution,
+        // letterbox bars included) into the swapchain. The nearest upscale moved one stage
+        // earlier, into ui_composite_pass_, so that the world UI could be composited AFTER the
+        // display-space effects while still landing on the low-res pixel grid. The source
+        // binding is made by rebuild_overlay_chain_(), which also owns the startup-fixed
+        // tilt_shift_enabled selection this site used to make.
 
         // Always constructed, like every other pass here -- config_.debug_lines_enabled is
         // checked per-frame in render(), not at construction (see debug_line_pass_'s own
@@ -883,6 +895,49 @@ public:
             device, allocator, post_target_.render_pass_object(),
             config_.shaders("debug_line.vert"),
             config_.shaders("debug_line.frag"));
+
+        // --- World-space UI (uicoopa's UiWorldPass): the scene-depth descriptor ---
+        // Unlike debug_line_pass_ above, the world UI does NOT draw into post_target_. It draws
+        // into ui_world_target_, a transparent layer that ui_composite_pass_ composites back over
+        // the frame after AA and tilt shift have run (see that target's member doc). Drawing into
+        // post_target_ is what used to put the UI upstream of those two and let them blur it.
+        //
+        // Only the descriptor set is built here. The PASS is built by rebuild_world_ui_pass_(),
+        // because it is bound to ui_world_target_'s render pass and that target follows the
+        // window. This block must stay AHEAD of the rebuild_overlay_chain_() call at the end of
+        // this constructor, which is what does the building.
+        //
+        // Unlike debug lines, a world canvas can ask to be OCCLUDED by scene geometry. It
+        // cannot do that with a hardware depth test: post_target_ has its own D32 attachment,
+        // but that one is cleared at begin() and only ever written by a fullscreen triangle,
+        // so it holds nothing about the scene. The real scene depth is the G-buffer's, which
+        // is SAMPLED-capable and sits in SHADER_READ_ONLY_OPTIMAL from the Hi-Z/transition
+        // step onward -- so it is handed to the pass as a sampled texture at set 1 and
+        // compared per fragment instead (see ui_world_occlude.glsl).
+        if (config_.world_ui_enabled) {
+            world_ui_depth_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
+                coopa::gfx::pipeline::DescriptorLayoutBuilder()
+                    .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
+                    .build(device));
+            world_ui_depth_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
+                coopa::gfx::pipeline::DescriptorPoolBuilder()
+                    .add_sets(*world_ui_depth_layout_, 1).build(device));
+            world_ui_depth_set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(
+                device, *world_ui_depth_pool_, *world_ui_depth_layout_);
+            // Bound ONCE, here: bind_image() issues vkUpdateDescriptorSets immediately, which
+            // is unsafe from inside the frame loop. Safe to do once because gbuffer_target_ is
+            // a by-value member sized to the startup-fixed render_extent_ and never recreated
+            // -- the same assumption pixel_stylize_pass_'s own depth binding already makes.
+            // nearest_sampler_, not linear_: D32_Sfloat is not guaranteed to support linear
+            // filtering, and pixel_stylize_pass_ binds this same view the same way.
+            world_ui_depth_set_->bind_image(0, gbuffer_target_.depth_view_typed(), nearest_sampler_);
+        }
+
+        // Builds ui_world_target_ + world_ui_pass_ + overlay_target_ + ui_composite_pass_ +
+        // screen_ui_pass_ and points upscale_pass_ at the result. Last, because it reads
+        // tilt_shift_pass_, upscaled_extent_ and world_ui_depth_layout_, and binds
+        // upscale_pass_'s source -- all of which must already exist.
+        rebuild_overlay_chain_(swapchain.extent().width, swapchain.extent().height);
     }
 
     PixelRenderPipeline(const PixelRenderPipeline&) = delete;
@@ -911,6 +966,21 @@ public:
      */
     std::vector<DebugLine>& debug_lines() { return debug_lines_; }
 
+    /**
+     * @brief world_ui_pass_'s 1x1 white texture view, for seeding a world canvas's
+     *        DrawList::set_default_texture() -- or a default-constructed (null) view when
+     *        config_.world_ui_enabled is off.
+     *
+     * A DrawList emits solid-colour quads (every untextured Image, every panel) against its
+     * default texture, so a canvas whose default was never seeded submits draws bound to a
+     * VK_NULL_HANDLE image view. That is a validation error and, in a release build, undefined
+     * behaviour -- not a blank quad. The host seeds it before Scene::late_update() emits, since
+     * the DrawList captures the view at emit time; see Engine::drive_ui_canvases_().
+     */
+    coopa::gfx::TextureView world_ui_white_view() const {
+        return world_ui_pass_ ? world_ui_pass_->white_view() : coopa::gfx::TextureView{};
+    }
+
     /** @brief Low-resolution render width in pixels. */
     uint32_t render_width() const { return render_extent_.width; }
     /** @brief Low-resolution render height in pixels. */
@@ -918,18 +988,32 @@ public:
     /**
      * @brief The final low-resolution LDR color image, for pixel-accurate screenshots:
      *        aa_target_'s result once config_.aa_mode != "off", else post_target_ directly.
+     *
+     * Scene and debug lines only -- NEITHER UI layer is in here. Both are composited one
+     * stage later, at window resolution, which is the whole point of the overlay chain (see
+     * overlay_target_'s member doc); use final_color_image() for a capture that includes UI.
      */
     coopa::gfx::memory::Image& low_res_color_image() const {
         return aa_target_ ? *aa_target_->color_image_object() : *post_target_.color_image_object();
     }
     /**
-     * @brief The final DISPLAY-resolution image actually shown in the window: tilt_shift_pass_'s
-     *        result when config_.tilt_shift_enabled (the same startup-fixed selection
-     *        upscale_pass_'s own source binding uses), else low_res_color_image() -- there is
-     *        no separate full-resolution buffer to fall back to when tilt shift is off.
+     * @brief The full-window image actually presented: the post-processed scene with both UI
+     *        layers composited over it, letterbox bars included.
+     *
+     * Unconditional now, where this used to fall back to low_res_color_image() when tilt
+     * shift was off -- overlay_target_ always exists and is always the last thing written, so
+     * there is always a real display-resolution buffer to hand back.
      */
     coopa::gfx::memory::Image& final_color_image() const {
-        return config_.tilt_shift_enabled ? tilt_shift_pass_->result_image() : low_res_color_image();
+        return *overlay_target_->color_image_object();
+    }
+    /**
+     * @brief The screen-space UI pass's default white texture, for seeding a screen canvas's
+     *        DrawList::set_default_texture(). Empty when config_.screen_ui_enabled is off.
+     *        Same contract and the same null-view hazard as world_ui_white_view() above.
+     */
+    coopa::gfx::TextureView screen_ui_white_view() const {
+        return screen_ui_pass_ ? screen_ui_pass_->white_view() : coopa::gfx::TextureView{};
     }
 
     /**
@@ -1029,6 +1113,8 @@ public:
         TOY_KEEP_STARTUP_FIXED(sdf_max_renderers);
         TOY_KEEP_STARTUP_FIXED(sdf_max_shapes);
         TOY_KEEP_STARTUP_FIXED(palette_path);
+        TOY_KEEP_STARTUP_FIXED(world_ui_enabled);
+        TOY_KEEP_STARTUP_FIXED(screen_ui_enabled);
 
 #undef TOY_KEEP_STARTUP_FIXED
 
@@ -1065,6 +1151,59 @@ public:
         frame_dt_ = dt;
         elapsed_time_ += dt;
 
+        // --- Resize: everything sized to the window, rebuilt before anything else touches it ---
+        //
+        // This runs FIRST in render(), and the position is load-bearing rather than tidy.
+        // rebuild_overlay_chain_() replaces world_ui_pass_ and screen_ui_pass_, and a UI pass
+        // carries per-frame state that only the canvas gather below installs: its registered
+        // textures, its text-atlas marks, and the streaming-buffer capacity begin_frame() sizes.
+        // Rebuild after the gather and this frame draws every texture as the 1x1 white fallback,
+        // every glyph atlas through the RGBA "quad" variant, and uploads geometry into a buffer
+        // that was never sized for it -- Buffer::upload is an unchecked memcpy. (This was a live
+        // bug for screen_ui_pass_ while the rebuild sat ~400 lines further down.)
+        //
+        // The two triggers are genuinely different quantities and BOTH are needed:
+        //   * the swapchain extent sizes overlay_target_;
+        //   * the letterbox rect sizes ui_world_target_ and tilt_shift_pass_.
+        // Under upscale_mode == "integer" the rect snaps to render_extent_ * floor(scale), so the
+        // window can change size -- and the swapchain with it -- while the rect does not. Keying
+        // only on the rect would leave overlay_target_ at the old window size; keying only on the
+        // swapchain would be correct here but would rebuild TiltShiftPass for nothing, hence the
+        // inner guard.
+        //
+        // upscaled_extent_ is assigned before the rebuilds because rebuild_overlay_chain_() reads
+        // it to size the world-UI layer. upscale_pass_ needs no rebuild: it is built against
+        // swapchain_pass, which Renderer::recreate_framebuffers() keeps compatible across a resize.
+        LetterboxRect letterbox = compute_display_rect(
+            config_, swapchain_.extent().width, swapchain_.extent().height,
+            render_extent_.width, render_extent_.height);
+
+        const VkExtent2D swapchain_extent = swapchain_.extent();
+        const bool swapchain_changed = swapchain_extent.width  != overlay_extent_.width ||
+                                       swapchain_extent.height != overlay_extent_.height;
+        const bool letterbox_changed = letterbox.w != upscaled_extent_.w ||
+                                       letterbox.h != upscaled_extent_.h;
+        // The nonzero guard covers a minimized window, which reports 0x0 -- not a valid image
+        // size, and compute_display_rect() on it yields a degenerate 1x1 rect.
+        if (swapchain_extent.width != 0 && swapchain_extent.height != 0 &&
+            (swapchain_changed || letterbox_changed)) {
+            device_.wait_idle(); // old targets' images/descriptors may still be in flight
+            upscaled_extent_ = letterbox;
+            if (letterbox_changed && config_.tilt_shift_enabled) {
+                // display_source_view_ is the ctor's own cached selection (post_target_, or
+                // aa_target_ once AA is on). This site duplicates the ctor's TiltShiftPass
+                // construction, and re-deriving the source by hand here is exactly how a resize
+                // used to risk silently reverting to the un-AA'd image.
+                tilt_shift_pass_ = std::make_unique<coopa::gfx::engine::passes::TiltShiftPass>(
+                    device_, allocator_, upscaled_extent_.w, upscaled_extent_.h,
+                    display_source_view_, nearest_sampler_,
+                    config_.shaders("fullscreen.vert"), config_.shaders("tilt_shift.frag"));
+            }
+            // Last, and it binds the composite's base image itself -- which is why the tilt-shift
+            // rebuild above has to come first.
+            rebuild_overlay_chain_(swapchain_extent.width, swapchain_extent.height);
+        }
+
         // The main camera, not merely "the first one found" -- CameraComponent::main()
         // guarantees a stable choice across multi-camera scenes (see camera_component.h).
         auto* cam = CameraComponent::main();
@@ -1084,16 +1223,25 @@ public:
         // TAA sub-pixel jitter, ported verbatim from blendy's PbrRenderPipeline (see
         // blendy/src/blendy/render/pbr_render_pipeline.h's own jitter block): an 8-frame
         // Halton(2,3) sequence added to proj[2][0]/[2][1] (the projection matrix's jitter
-        // terms, not a [3][*] translation). unjittered_proj is kept for fog_pass_ below,
-        // which -- again matching blendy's own FogPass integration -- must NOT see the
-        // jitter (fog's inv_view_proj reprojects world-space samples, and jittering that
-        // would make fog swim independently of the visible pixel grid). Every OTHER
-        // consumer of `proj` in this function (camera_ubos_[slot]->update() just below, the
-        // SDF/mesh screen-rect fits, debug_line_pass_->draw(), and prev_view_proj_ at the end
-        // of render()) intentionally sees the jittered matrix: blendy stores the jittered VP
-        // in its own prev_view_proj_ equivalent specifically so SSAO's/SSR's temporal
-        // resolves reproject against the camera TAA is actually seeing, not an unjittered
-        // one an 8-frame Halton cycle would make them crawl against.
+        // terms, not a [3][*] translation). unjittered_proj is kept for the consumers that
+        // must NOT see the jitter, of which there are three:
+        //
+        //   * fog_pass_ and the volumetrics UBO fill below -- again matching blendy's own
+        //     FogPass integration. Their inv_view_proj reprojects WORLD-space samples, and
+        //     jittering that would make the field swim independently of the visible pixel grid.
+        //   * world_ui_pass_ -- it draws into ui_world_target_, which ui_composite_pass_
+        //     composites AFTER taa_pass_ has already resolved the scene, so the UI layer is
+        //     never one of TAA's inputs and nothing would ever average its jitter back out.
+        //
+        // The rule behind all three: the jitter exists only to be resolved, so anything
+        // outside the temporal resolve takes the unjittered matrix. Every OTHER consumer of
+        // `proj` in this function (camera_ubos_[slot]->update() just below, the SDF/mesh
+        // screen-rect fits, debug_line_pass_->draw() -- which IS inside post_target_ and so IS
+        // resolved -- and prev_view_proj_ at the end of render()) intentionally sees the
+        // jittered matrix: blendy stores the jittered VP in its own prev_view_proj_ equivalent
+        // specifically so SSAO's/SSR's temporal resolves reproject against the camera TAA is
+        // actually seeing, not an unjittered one an 8-frame Halton cycle would make them crawl
+        // against.
         //
         // This USED to be skipped whenever dof_enabled, because dof_bokeh.frag's spiral
         // gather was a single FIXED, unrotated tap pattern (gfx/dof_common.glsl's
@@ -1177,6 +1325,94 @@ public:
         // early-out) and keeps the buffer valid even if debug_lines_enabled is flipped on
         // between frames without a frame of stale/missing data.
         debug_line_pass_->upload(frame_slot, debug_lines_);
+
+        // World-space UI: gather this frame's canvases and resolve their textures into
+        // descriptor sets. This MUST stay ahead of renderer.begin_frame() below --
+        // register_textures() reaches DescriptorSet::bind_image(), which issues
+        // vkUpdateDescriptorSets immediately, and doing that once a render pass is open (or
+        // while a previous frame may still be reading the set) is exactly the unsafe case.
+        //
+        // collect_canvases() returns EVERY canvas in the scene, screen-space ones included,
+        // so the world-space filter here is load-bearing: without it a screen-space canvas's
+        // canvas-pixel geometry would be fed through a 3D projection.
+        //
+        // Each canvas's DrawList was emitted by CanvasComponent::late_update() during
+        // Scene::late_update(), which the caller runs before render() -- see Engine::tick().
+        //
+        // collect_canvases() is called ONCE and shared by both the world-space gather here and
+        // the screen-space one below -- it walks the whole scene, and the two gathers partition
+        // its result rather than each re-deriving it.
+        const std::vector<coopa::ui::CanvasComponent*> all_canvases = coopa::ui::collect_canvases(scene);
+
+        world_canvases_.clear();
+        if (world_ui_pass_) {
+            size_t ui_verts = 0;
+            size_t ui_indices = 0;
+            for (coopa::ui::CanvasComponent* canvas : all_canvases) {
+                if (!canvas->is_world_space()) continue;
+                world_canvases_.push_back(canvas);
+                world_ui_pass_->register_textures(canvas->draw_list());
+                ui_verts   += canvas->draw_list().vertices().size();
+                ui_indices += canvas->draw_list().indices().size();
+            }
+            // Painter's order: farthest canvas first. World UI is composited with the depth
+            // test OFF (post_target_ carries no scene depth -- see the ctor), so two canvases
+            // that overlap on screen resolve purely by draw order, and without this the one
+            // that happened to come later in the scene file wins regardless of which is
+            // actually in front. Sorting by view-space depth makes a nameplate behind a wall
+            // sign composite the way its position says it should.
+            //
+            // sort_order stays the primary key, so an author who set it explicitly still gets
+            // exactly what they asked for (that is its documented meaning); depth only breaks
+            // ties, which is the overwhelmingly common case of everything left at 0.
+            // stable_sort keeps scene order as the final tiebreak for exactly-coincident
+            // canvases. N here is the handful of canvases a scene has, so this is free.
+            std::stable_sort(world_canvases_.begin(), world_canvases_.end(),
+                [&view](const coopa::ui::CanvasComponent* a, const coopa::ui::CanvasComponent* b) {
+                    if (a->sort_order != b->sort_order) return a->sort_order < b->sort_order;
+                    // view maps world -> camera, which looks down -Z, so a SMALLER (more
+                    // negative) z is farther away and must be drawn first.
+                    float za = (view * a->model()[3]).z;
+                    float zb = (view * b->model()[3]).z;
+                    return za < zb;
+                });
+
+            // Size the shared geometry buffers for the WHOLE frame up front and reset the
+            // append cursor: every canvas streams into one buffer pair per frame slot, and
+            // growing it mid-frame would reallocate out from under geometry already uploaded.
+            world_ui_pass_->begin_frame(frame_slot, ui_verts, ui_indices);
+            // Glyph atlases are R8 coverage, not RGBA. Without this every world-space Text
+            // batch would bind the "quad" variant and draw coverage values as colour.
+            if (!world_canvases_.empty()) {
+                coopa::ui::UIResourceCache::instance().mark_text_atlases(*world_ui_pass_);
+            }
+        }
+
+        // Screen-space UI: the same gather, the same before-begin_frame() constraint, and the
+        // complementary half of the world-space filter above.
+        //
+        // Two things are deliberately NOT shared with the world path. There is no depth sort:
+        // collect_canvases() already ordered by sort_order, which for an overlay is the whole
+        // of what "in front" means -- a screen canvas has no view-space position to sort by.
+        // And mark_text_atlases() has to be repeated per pass: the marked-view set is a member
+        // of each pass, so marking world_ui_pass_ tells screen_ui_pass_ nothing, and an
+        // unmarked glyph atlas draws through the "quad" variant as raw coverage.
+        screen_canvases_.clear();
+        if (screen_ui_pass_) {
+            size_t ui_verts = 0;
+            size_t ui_indices = 0;
+            for (coopa::ui::CanvasComponent* canvas : all_canvases) {
+                if (canvas->is_world_space()) continue;
+                screen_canvases_.push_back(canvas);
+                screen_ui_pass_->register_textures(canvas->draw_list());
+                ui_verts   += canvas->draw_list().vertices().size();
+                ui_indices += canvas->draw_list().indices().size();
+            }
+            screen_ui_pass_->begin_frame(frame_slot, ui_verts, ui_indices);
+            if (!screen_canvases_.empty()) {
+                coopa::ui::UIResourceCache::instance().mark_text_atlases(*screen_ui_pass_);
+            }
+        }
 
         // world_matrix() (a pure read -- see Transform's thread-safety doc) is safe from any
         // number of concurrent readers, unlike get_world_matrix(), because TransformSystem's
@@ -1506,36 +1742,6 @@ public:
             volumetrics_data_.upload();
         }
 
-        LetterboxRect letterbox = compute_display_rect(
-            config_, swapchain_.extent().width, swapchain_.extent().height,
-            render_extent_.width, render_extent_.height);
-
-        // The display rect tracks the LIVE swapchain extent every frame (unlike
-        // render_extent_ and every low-res target, which are startup-fixed), so a window
-        // resize changes it. tilt_shift_pass_ is the one pass sized to that rect rather
-        // than render_extent_ (see its own construction site's doc) -- rebuild it here
-        // when the rect actually changes so it doesn't keep blurring into a stale-sized
-        // buffer. upscale_pass_ needs no rebuild: it's built against swapchain_pass, which
-        // Renderer::recreate_framebuffers() already keeps compatible across a resize.
-        if (letterbox.w != upscaled_extent_.w || letterbox.h != upscaled_extent_.h) {
-            upscaled_extent_ = letterbox;
-            if (config_.tilt_shift_enabled) {
-                device_.wait_idle(); // old TiltShiftPass's targets/descriptors may still be in flight
-                // Same display_source_view selection as the ctor (post_target_, or aa_target_
-                // once AA is on) -- easy to miss here since this rebuild site duplicates the
-                // ctor's TiltShiftPass construction; get it wrong and a resize silently reverts
-                // to the un-AA'd image.
-                coopa::gfx::TextureView display_source_view =
-                    aa_target_ ? aa_target_->color_view_typed()
-                               : post_target_.color_image_object()->view_typed();
-                tilt_shift_pass_ = std::make_unique<coopa::gfx::engine::passes::TiltShiftPass>(
-                    device_, allocator_, upscaled_extent_.w, upscaled_extent_.h,
-                    display_source_view, nearest_sampler_,
-                    config_.shaders("fullscreen.vert"), config_.shaders("tilt_shift.frag"));
-                upscale_pass_->set_source_image(tilt_shift_pass_->result_view_typed(), nearest_sampler_);
-            }
-        }
-
         // transparent.frag traces the SAME Hi-Z pyramid / prefiltered scene-colour chain
         // ssr.frag does (see record_transparent_()'s ExtraSets) -- so whenever BLEND geometry
         // might draw this frame, those images must be generated (and correctly laid out) even
@@ -1579,7 +1785,15 @@ public:
 
         bool frame_presented = renderer.begin_frame(
             [&](coopa::gfx::command::CommandBuffer& cmd) {
-                upscale_pass_->draw(cmd, letterbox);
+                // 1:1, full extent -- NOT the letterbox rect. overlay_target_ is already the
+                // swapchain's size and already contains the bars (see the overlay stage in the
+                // pre-pass below), so the nearest upscale and the letterboxing both happened
+                // one stage earlier, inside ui_composite_pass_. All this still does is
+                // upscale.frag's srgb_decode(), which cancels the SRGB swapchain's implicit
+                // encode on write -- overlay_target_ is UNORM and holds already-encoded bytes.
+                upscale_pass_->draw(cmd, LetterboxRect{0, 0,
+                                                       overlay_extent_.width,
+                                                       overlay_extent_.height});
             },
             VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}},
             nullptr,
@@ -1898,6 +2112,61 @@ public:
                 }
                 post_target_.end(cmd);
 
+                // World-space UI, into its OWN layer rather than into post_target_ above.
+                // Everything from here to the composite -- AA, tilt shift -- is a filter over
+                // the finished frame, and the UI has to sit above all of it; drawing it as a
+                // guest of post_target_ is what used to feed it through them.
+                //
+                // Cleared to fully TRANSPARENT black (post_target_ and friends clear to opaque
+                // dark grey): this is a coverage layer, not an image, and ui_composite.frag
+                // reads that alpha as "how much UI is here". Each canvas supplies its own
+                // model() (see UiWorldPass::draw()).
+                //
+                // unjittered_proj, NOT proj -- the same call fog_pass_ and the volumetrics UBO
+                // fill above already make, and for the same underlying reason: a consumer that
+                // is not part of TAA's temporal resolve must not see TAA's jitter. The Halton
+                // offset added to proj (see that block's own doc) is a uniform +-0.5 render-pixel
+                // translation of the whole image whose entire purpose is to be averaged back out
+                // by taa_pass_. This layer is composited AFTER taa_pass_ runs and is never one of
+                // its inputs, so nothing would ever average it out: the scene would resolve stable
+                // while the UI wobbled through the 8-frame jitter cycle on top of it. A
+                // CameraFacing billboard shows that worst, being a near-static screen-space rect.
+                //
+                // The cost is that ui_world_occlude.glsl's depth compare samples a G-buffer that
+                // IS still jittered, so an `occlude: true` canvas's clipped edge is displaced by
+                // up to half a render pixel. Accepted: it is confined to the silhouette of
+                // occluding geometry, where a whole-canvas wobble was not. Note the UI's own
+                // depth is unaffected either way -- the jitter lands in proj[2][0]/proj[2][1],
+                // a constant NDC x/y shift, so gl_FragCoord.z is identical with or without it.
+                //
+                // Since this layer moved to the display rect, that compare also samples a
+                // LOWER-resolution depth texture than the layer it is shading: the UI-pixel ->
+                // depth-texel map is no longer integer, so an occluded edge stair-steps in
+                // alternating 1/2-pixel runs and the NEAREST fetch can land up to half a render
+                // texel off centre. The canvas's own edges are crisp while its occluded edge
+                // stays render-grid chunky -- the one place this change trades away.
+                //
+                // Drawn at upscaled_extent_ -- the DISPLAY rect, not render_extent_. See
+                // ui_world_target_'s member doc: at the letterbox size the composite samples this
+                // 1:1, where a render-resolution layer had to be NEAREST-upscaled by a
+                // non-integer factor and came out visibly stepped.
+                //
+                // Recorded unconditionally, even with no canvases or world_ui_pass_ null: the
+                // target must be written (and so transitioned to SHADER_READ_ONLY_OPTIMAL) every
+                // frame, because ui_composite_pass_ samples it every frame regardless. The null
+                // check is for the target itself, which is now conditionally constructed.
+                if (ui_world_target_) {
+                    ui_world_target_->begin(cmd, VkClearColorValue{{0.0f, 0.0f, 0.0f, 0.0f}});
+                    if (world_ui_pass_) {
+                        for (coopa::ui::CanvasComponent* canvas : world_canvases_) {
+                            world_ui_pass_->draw(cmd, frame_slot,
+                                                 upscaled_extent_.w, upscaled_extent_.h,
+                                                 unjittered_proj * view, *canvas);
+                        }
+                    }
+                    ui_world_target_->end(cmd);
+                }
+
                 // Anti-aliasing, after pixel_stylize_pass_ (and the debug-line overlay it
                 // hosts) and before tilt-shift -- see aa_target_'s own member doc for why
                 // this is nullptr (and this whole block a no-op) whenever config_.aa_mode ==
@@ -1952,6 +2221,34 @@ public:
                     ts_params.angle_degrees = config_.tilt_shift_angle;
                     tilt_shift_pass_->execute(cmd, ts_params);
                 }
+
+                // --- Overlay: both UI layers, above every post effect ---
+                //
+                // overlay_target_ is the full swapchain extent, not the letterbox rect, so the
+                // bars are part of it and a screen-space HUD can draw over them. The clear is
+                // what fills them -- ui_composite_pass_ only draws inside `letterbox`.
+                //
+                // The composite performs the nearest-neighbour upscale upscale_pass_ used to:
+                // when tilt shift is off it samples post_target_/aa_target_ at destination-
+                // resolution UVs over exactly this rect, and when it is on, tilt shift already
+                // produced an upscaled_extent_-sized image that this samples 1:1. Either way
+                // the world-UI layer rides the same UVs and the same NEAREST sampler, so its
+                // texels land on the display-pixel blocks they always did.
+                //
+                // Screen UI draws second, as a guest in the same bracket, at FULL window
+                // resolution -- it is an overlay, not part of the pixel-art image, so unlike
+                // the world layer it is not quantised to the internal render grid. It sets its
+                // own viewport and per-batch scissor, overriding what the composite left.
+                overlay_target_->begin(cmd, VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+                ui_composite_pass_->draw(cmd, letterbox);
+                if (screen_ui_pass_) {
+                    for (coopa::ui::CanvasComponent* canvas : screen_canvases_) {
+                        screen_ui_pass_->draw(cmd, frame_slot,
+                                              overlay_extent_.width, overlay_extent_.height,
+                                              canvas->scale_factor(), canvas->draw_list());
+                    }
+                }
+                overlay_target_->end(cmd);
             }
         );
 
@@ -2076,17 +2373,116 @@ private:
                                                     config_.dof_focus_smoothing, dt);
             focus = smoothed_dof_focus_;
         }
-        if (object_mode) {
-            float dmin = 1e9f, dmax = -1e9f;
-            for (float cx : {-0.5f, 0.5f}) for (float cy : {-0.5f, 0.5f}) for (float cz : {-0.5f, 0.5f}) {
-                float dd = view_space_depth(view, glm::vec3(cx, cy, cz));
-                dmin = std::min(dmin, dd); dmax = std::max(dmax, dd);
-            }
-            std::cerr << "[DOF DEBUG] focus(pivot)=" << focus
-                      << " cube corner depth range=[" << dmin << ", " << dmax << "]"
-                      << " span=" << (dmax - dmin) << "\n";
-        }
         return focus;
+    }
+
+    /**
+     * @brief (Re)builds everything sized to the window: the world-UI layer and its pass, the
+     *        overlay target, the composite and screen-UI passes, and upscale_pass_'s source.
+     *
+     * Called once at construction and again from render() whenever the swapchain extent OR the
+     * letterbox rect changes. They all have to move together: TexturedQuad2DPass (which backs
+     * both UI passes) stores the `RenderPass&` it was built against, and
+     * ui_composite_pass_/upscale_pass_ hold descriptors pointing at images that are being
+     * replaced -- none of which survive their target being destroyed.
+     *
+     * **Reads upscaled_extent_, so the caller must assign it from this frame's letterbox first.**
+     *
+     * **Must run before render()'s canvas gather.** Rebuilding a UI pass drops its registered
+     * textures, its text-atlas marks and its streaming-buffer capacity, and the gather --
+     * register_textures() / mark_text_atlases() / begin_frame() -- is what restores them. Run it
+     * after the gather and that frame draws every texture as the 1x1 white fallback, every glyph
+     * atlas through the RGBA "quad" variant, and uploads geometry into a buffer whose capacity
+     * was never sized for it (Buffer::upload is an unchecked memcpy).
+     *
+     * The caller must have waited for the device to idle and must pass a nonzero extent (a
+     * minimized window reports 0x0, which is not a valid image size).
+     *
+     * @param w Swapchain width in pixels.
+     * @param h Swapchain height in pixels.
+     */
+    void rebuild_overlay_chain_(uint32_t w, uint32_t h) {
+        // --- The world-UI layer, at the DISPLAY rect ---
+        // Reset the pass BEFORE replacing the target it was built against: TexturedQuad2DPass
+        // stores the RenderPass& it was constructed from, and this closes the window in which
+        // that reference dangles. (device_.wait_idle() is the caller's job and has already run.)
+        world_ui_pass_.reset();
+        ui_world_target_ = std::make_unique<coopa::gfx::engine::targets::OffscreenTarget>(
+            device_, allocator_, upscaled_extent_.w, upscaled_extent_.h,
+            coopa::gfx::Format::RGBA8_Unorm);
+        rebuild_world_ui_pass_();
+
+        overlay_target_ = std::make_unique<coopa::gfx::engine::targets::OffscreenTarget>(
+            device_, allocator_, w, h, coopa::gfx::Format::RGBA8_Unorm);
+        overlay_extent_ = VkExtent2D{w, h};
+
+        ui_composite_pass_ = std::make_unique<passes::UiCompositePass>(
+            device_, overlay_target_->render_pass_object(),
+            config_.shaders("fullscreen.vert"),
+            config_.shaders("ui_composite.frag"));
+        // Startup-fixed source selection, the same caveat post_source_view/pre_fog_view_typed_
+        // carry: flipping config_.tilt_shift_enabled without a pipeline rebuild would leave
+        // this reading a target tilt_shift_pass_ never wrote this frame.
+        ui_composite_pass_->set_base_image(
+            config_.tilt_shift_enabled ? tilt_shift_pass_->result_view_typed()
+                                       : display_source_view_,
+            nearest_sampler_);
+        // NEAREST is an EXACT texel fetch here, not a filter choice: the layer is built at
+        // upscaled_extent_ and the composite draws over a viewport of exactly that size, so
+        // fullscreen.vert's in_uv.x = (x + 0.5)/w gives floor(uv * w) == x. Bilinear would be
+        // equally exact at 1:1 but would silently turn into a blur the moment the two sizes
+        // drift by a pixel, which is exactly the failure this binding should not hide.
+        ui_composite_pass_->set_ui_image(ui_world_target_->color_view_typed(), nearest_sampler_);
+
+        if (config_.screen_ui_enabled) {
+            // No ExtraSets, unlike world_ui_pass_: a screen-space overlay has nothing to be
+            // occluded by, so there is no scene-depth compare and no set 1.
+            screen_ui_pass_ = std::make_unique<coopa::ui::UiPass>(
+                device_, allocator_, cmd_pool_, overlay_target_->render_pass_object(),
+                config_.shaders("ui.vert"),
+                config_.shaders("ui_quad.frag"),
+                config_.shaders("ui_text.frag"));
+        }
+
+        // Null only on the ctor's first call, which runs before upscale_pass_ exists in an
+        // earlier draft; kept as a guard so the ordering is not a silent trap for a future edit.
+        if (upscale_pass_) {
+            upscale_pass_->set_source_image(overlay_target_->color_view_typed(), nearest_sampler_);
+        }
+    }
+
+    /**
+     * @brief (Re)builds world_ui_pass_ against the current ui_world_target_.
+     *
+     * Split out of rebuild_overlay_chain_() only for readability; it has no other caller and
+     * must not get one that skips the target rebuild. No-op when config_.world_ui_enabled is
+     * false, which is also when world_ui_depth_layout_ was never created.
+     *
+     * The ExtraSets is rebuilt from scratch each time, which is safe because TexturedQuad2DPass
+     * stores its TexturedQuad2DDesc (and so the ExtraSets) BY VALUE, and because the descriptor
+     * set the callback binds is a stable member bound once against the startup-fixed
+     * gbuffer_target_ -- it deliberately survives every rebuild, since re-binding it would mean
+     * a vkUpdateDescriptorSets from inside the frame loop.
+     */
+    void rebuild_world_ui_pass_() {
+        if (!config_.world_ui_enabled) return;
+
+        coopa::gfx::engine::passes::ExtraSets world_ui_extra;
+        world_ui_extra.layouts = {world_ui_depth_layout_.get()};
+        // Capturing `this` is safe only because PixelRenderPipeline is non-copyable and
+        // non-movable (see the deleted copy ctor, and the unique_ptr members that make a move
+        // meaningless), so the callback can never outlive its target. first_set comes from the
+        // pass, never hardcoded -- see ExtraSets' own doc.
+        world_ui_extra.bind = [this](coopa::gfx::command::CommandBuffer& cmd, uint32_t first_set) {
+            cmd.bind_descriptor_set(*world_ui_depth_set_, first_set);
+        };
+
+        world_ui_pass_ = std::make_unique<coopa::ui::UiWorldPass>(
+            device_, allocator_, cmd_pool_, ui_world_target_->render_pass_object(),
+            config_.shaders("ui_world.vert"),
+            config_.shaders("ui_world_quad.frag"),
+            config_.shaders("ui_world_text.frag"),
+            std::move(world_ui_extra));
     }
 
     /**
@@ -2862,6 +3258,9 @@ private:
     coopa::gfx::core::Device&      device_;
     coopa::gfx::memory::Allocator& allocator_;
     coopa::gfx::core::Swapchain&   swapchain_;
+    /// Retained because rebuild_overlay_chain_() constructs a UiPass outside the ctor, on
+    /// every swapchain resize -- see overlay_target_'s own doc.
+    coopa::gfx::command::CommandPool& cmd_pool_;
     PixelRenderConfig              config_;
     RenderExtent                   render_extent_;
 
@@ -2886,6 +3285,24 @@ private:
     coopa::gfx::engine::targets::GBufferTarget   gbuffer_target_;
     coopa::gfx::engine::targets::OffscreenTarget offscreen_target_; // lit + sky, pre-post, HDR
     coopa::gfx::engine::targets::OffscreenTarget post_target_;      // final low-res LDR, post PixelStylizePass
+    // The world-space UI layer -- a SEPARATE target from post_target_, and that separation is the
+    // whole point of this feature. World canvases used to draw as a guest inside post_target_'s
+    // bracket, which put them upstream of the AA passes and TiltShiftPass: TAA ghosted a canvas
+    // moving under an orbiting camera, and tilt shift smeared the UI along with the scene. They
+    // now land here, alpha-0-cleared, and ui_composite_pass_ puts them back on top once every
+    // display-space effect has run.
+    //
+    // Sized to upscaled_extent_ -- the DISPLAY (letterbox) rect, not render_extent_. It used to be
+    // render_extent_, on the theory that the UI belonged on the same pixel grid as the scene; what
+    // that actually bought was a non-integer NEAREST upscale in the composite (x1.18 at a typical
+    // window) that duplicated roughly every fifth row and column, which is precisely the uneven
+    // stepping that made world-canvas text look wrong next to the screen-space HUD. At the
+    // letterbox size the composite samples this 1:1 and nothing resamples the UI at all.
+    //
+    // A unique_ptr, and rebuilt by rebuild_overlay_chain_(), because upscaled_extent_ tracks the
+    // live swapchain -- unlike every other low-res target here, which is startup-fixed. Declared
+    // BEFORE world_ui_pass_ so it outlives the pass that holds its RenderPass&.
+    std::unique_ptr<coopa::gfx::engine::targets::OffscreenTarget> ui_world_target_;
     // Forward capture of transparent geometry -- a second reflection SOURCE for opaque
     // reflectors' SSR (see record_transparent_capture_()), not a visible target. Always
     // constructed (mirrors gbuffer_target_'s own always-on policy); render() checks
@@ -2986,6 +3403,35 @@ private:
     std::unique_ptr<passes::UpscalePass>                         upscale_pass_;
 
     /**
+     * The final, WINDOW-sized composite target, and the two passes that fill it.
+     *
+     * Everything above this point works at render_extent_ or at the letterbox content rect;
+     * overlay_target_ is the full swapchain extent, so the letterbox bars are part of it
+     * (cleared black) and a screen-space HUD can draw over them. ui_composite_pass_ draws the
+     * post-processed scene into the letterbox sub-rect with the world-UI layer composited on
+     * top -- performing, when tilt shift is off, the exact nearest upscale upscale_pass_ used
+     * to do -- and screen_ui_pass_ then draws as a guest in the same bracket at full window
+     * resolution. upscale_pass_ is left as a 1:1 blit of the result into the swapchain.
+     *
+     * Rebuilt together by rebuild_overlay_chain_() whenever the swapchain extent changes:
+     * TexturedQuad2DPass (which backs screen_ui_pass_) holds a RenderPass& that
+     * OffscreenTarget::recreate() would dangle, so the passes cannot outlive the target they
+     * were built against.
+     */
+    std::unique_ptr<coopa::gfx::engine::targets::OffscreenTarget> overlay_target_;
+    VkExtent2D                                                   overlay_extent_{0, 0};
+    std::unique_ptr<passes::UiCompositePass>                     ui_composite_pass_;
+    /// Screen-space UI (uicoopa's UiPass). Null when config_.screen_ui_enabled was false at
+    /// construction -- startup-fixed, same reasoning as world_ui_pass_.
+    std::unique_ptr<coopa::ui::UiPass>                           screen_ui_pass_;
+    /// This frame's screen-space canvases, gathered in render() alongside world_canvases_.
+    std::vector<coopa::ui::CanvasComponent*>                     screen_canvases_;
+    /// The image ui_composite_pass_ reads when tilt shift is off (post_target_, or aa_target_
+    /// once AA is on). Cached at construction because rebuild_overlay_chain_() has to rebind
+    /// it on a resize and must make exactly the same choice the ctor did.
+    coopa::gfx::TextureView                                      display_source_view_;
+
+    /**
      * Anti-aliasing (see PixelRenderConfig::aa_mode's own doc for the runtime-vs-startup-fixed
      * split). Unlike bloom_pass_/fog_pass_/tilt_shift_pass_ above, aa_target_ and the three AA
      * passes below are NOT always constructed -- they're nullptr whenever config_.aa_mode ==
@@ -3025,6 +3471,23 @@ private:
     // (see debug_line_pass.h's file doc), so Engine is what bridges PhysicsWorld::debug_draw()
     // into this vector.
     std::unique_ptr<passes::DebugLinePass>                       debug_line_pass_;
+
+    /// The G-buffer depth, as a set-1 sampler for world_ui_pass_'s occlusion compare. Declared
+    /// BEFORE world_ui_pass_ so it outlives it -- the pass holds this layout in its ExtraSets and
+    /// is REBUILT on every resize (see rebuild_world_ui_pass_()), while the set itself is bound
+    /// once, to the startup-fixed gbuffer_target_, and survives untouched. (This block used to sit
+    /// after the pass while its own comment claimed otherwise; the claim is now true.)
+    std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout>   world_ui_depth_layout_;
+    std::unique_ptr<coopa::gfx::pipeline::DescriptorPool>        world_ui_depth_pool_;
+    std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>         world_ui_depth_set_;
+    /// World-space UI (uicoopa). Null when config_.world_ui_enabled is false -- that flag is
+    /// startup-fixed, because the scene-depth descriptor above is built once and never rebound.
+    /// The PASS is not startup-fixed: it is built against ui_world_target_'s render pass, which
+    /// changes size with the window, so rebuild_overlay_chain_() replaces it.
+    std::unique_ptr<coopa::ui::UiWorldPass>                      world_ui_pass_;
+    /// This frame's world-space canvases, gathered from the scene in render(). A member
+    /// rather than a local so the per-frame allocation is reused.
+    std::vector<coopa::ui::CanvasComponent*>                     world_canvases_;
     std::vector<DebugLine>                                       debug_lines_;
 
     // Mesh-only forward-pass globals UBO (see forward_globals.h's file doc for why this

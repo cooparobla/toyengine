@@ -110,8 +110,24 @@ Headless verification:
 ONESHOT=1 ./build/toyengine        # render exactly one frame, save output/frame.png, exit
 MAX_FRAMES=30 ./build/toyengine    # render 30 frames then exit
 SCENE=world_canvas_test ./build/toyengine   # load a different scene than config.yaml's
-ctest --test-dir build             # pure-math + full headless-render integration tests
 ```
+
+Tests:
+
+```bash
+ctest --test-dir build -j4            # everything; -j4 overlaps the render groups
+ctest --test-dir build -R toyengine_math   # instant, no Vulkan device
+./build/toyengine_tests --list        # every test and its group
+./build/toyengine_tests --group scene # one group
+./build/toyengine_tests cloth -v      # name substring, every assertion printed
+```
+
+The groups are `math`, `config` and `scene` (pure CPU, milliseconds) plus `render_pixel`,
+`render_ui`, `render_material` and `render_cloth`, each of which brings up a real Vulkan
+device. Every render test runs with `window.visible: false` and `NO_INPUT=1`, so no window
+appears, nothing takes focus and the pointer is never grabbed -- a full run is invisible on
+a desktop you are still using. Nothing is written to `output/`; a frame is only dumped, to
+a temp directory whose path is printed, when an assertion fails.
 
 ## Layout
 

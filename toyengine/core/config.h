@@ -40,6 +40,14 @@ struct WindowConfig {
     uint32_t    width  = 1920;
     uint32_t    height = 1080;
     bool        vsync  = true;
+    /**
+     * False renders into a window that is never mapped: no window appears, and nothing can
+     * take focus or grab the pointer (Engine::apply_cursor_capture_() also stands down, since
+     * an invisible window has no business hiding the cursor). Frames are otherwise identical,
+     * which is what makes it the mode the headless test suite runs in -- see
+     * coopa::gfx::presentation::Window's constructor.
+     */
+    bool        visible = true;
 };
 
 /**
@@ -114,6 +122,7 @@ struct AppConfig {
                 if (w.contains("width"))  config.window.width  = w.at("width").get_value<uint32_t>();
                 if (w.contains("height")) config.window.height = w.at("height").get_value<uint32_t>();
                 if (w.contains("vsync"))  config.window.vsync  = w.at("vsync").get_value<bool>();
+                if (w.contains("visible")) config.window.visible = w.at("visible").get_value<bool>();
             }
 
             if (root.contains("render")) {

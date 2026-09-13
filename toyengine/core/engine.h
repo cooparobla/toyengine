@@ -220,6 +220,50 @@ public:
     render::PixelRenderConfig& render_config() { return pipeline_.render_config_mut(); }
 
     /**
+     * @brief Pins the pointer to a fixed window-pixel position from now on, exactly as
+     *        CURSOR_POS="<x>,<y>" does -- but settable on a running Engine.
+     *
+     * Re-applied every tick (see apply_cursor_pos_override_()), so it wins over real pointer
+     * motion. The env var is only read once, at construction, which is enough for a scripted
+     * capture but not for a test that wants to park the pointer on a world-space Button, look
+     * at the frame, then move it away and look again: doing that through the env var costs a
+     * whole second Engine -- window, device, pipelines and scene included -- to change two
+     * numbers.
+     *
+     * @param window_pixels Position in window pixels, the same space CURSOR_POS uses.
+     */
+    void set_cursor_override(const glm::vec2& window_pixels) {
+        cursor_pos_          = window_pixels;
+        cursor_pos_override_ = true;
+    }
+
+    /** @brief Releases set_cursor_override(), handing the pointer back to the real mouse. */
+    void clear_cursor_override() { cursor_pos_override_ = false; }
+
+    /**
+     * @brief Reads the current offscreen buffer back into host memory, as tightly-packed
+     *        row-major RGBA8.
+     *
+     * The in-memory half of save_screenshot() (which is now this plus a PNG write), for a
+     * caller that wants to look at the pixels rather than keep them: a headless test
+     * comparing two frames, or measuring how many of them carry a given colour, pays neither
+     * a PNG encode nor a decode nor a temporary file for the privilege.
+     *
+     * Waits for the device to go idle first, so the returned pixels are the frame the last
+     * tick() finished rather than one still being recorded.
+     *
+     * @param low_res Selects the same image save_screenshot() would write -- see its @p
+     *                low_res parameter for what each one contains.
+     * @return The image's pixel bytes, dimensions and bytes-per-texel.
+     */
+    coopa::gfx::util::ImageData capture_image(bool low_res = true) {
+        ctx_.wait_idle();
+        coopa::gfx::memory::Image& src = low_res ? pipeline_.low_res_color_image()
+                                                 : pipeline_.final_color_image();
+        return coopa::gfx::util::read_image(ctx_.device(), ctx_.allocator(), ctx_.command_pool(), src);
+    }
+
+    /**
      * @brief Writes the current offscreen buffer to a PNG.
      * @param path    Destination file path.
      * @param low_res True writes the internal low-resolution buffer 1:1 (pixel-perfect, but
@@ -230,9 +274,7 @@ public:
      *                (PixelRenderPipeline::final_color_image()), at DISPLAY resolution.
      */
     void save_screenshot(const std::string& path, bool low_res = true) {
-        coopa::gfx::memory::Image& src = low_res ? pipeline_.low_res_color_image()
-                                                 : pipeline_.final_color_image();
-        coopa::gfx::util::save_image_png(ctx_.device(), ctx_.allocator(), ctx_.command_pool(), src, path);
+        coopa::gfx::util::save_image_png(capture_image(low_res), path);
         if (low_res) {
             std::cout << "[toyengine] Saved " << path << " (" << pipeline_.render_width()
                       << "x" << pipeline_.render_height() << ")\n";
@@ -327,6 +369,7 @@ private:
         cc.height     = config.window.height;
         cc.resizable  = true;
         cc.vsync      = config.window.vsync;
+        cc.visible    = config.window.visible;
 #ifdef NDEBUG
         cc.validation = false;
 #else
@@ -602,8 +645,19 @@ private:
      * There is no in-app control to release the cursor once captured; quitting
      * (Escape, still bound) is the only way out. A scene author can opt out
      * entirely via `capture_cursor: false` on the CameraController.
+     *
+     * Two non-interactive modes stand down regardless of what the scene asks for, because
+     * capturing the pointer means GLFW_CURSOR_DISABLED -- a real, process-wide pointer grab
+     * that hides and re-centres the cursor of whoever happens to be using the desktop:
+     *   - NO_INPUT=1, which already means "this run must ignore the real keyboard and mouse"
+     *     (see drive_camera_controller_()); grabbing input it then throws away is pure harm.
+     *   - an invisible window (`window.visible: false`), which has no on-screen presence to
+     *     justify owning the pointer in the first place.
+     * Both are what lets the headless test suite render the same scenes a person plays,
+     * without stealing their mouse for the duration.
      */
     void apply_cursor_capture_() {
+        if (no_input_ || !config_.window.visible) return;
         if (!scene_mgr_.has_scene()) return;
         auto* cc = scene_mgr_.get_active_scene().find_first_component<scene::CameraController>();
         if (cc && cc->capture_cursor) {

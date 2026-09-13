@@ -3,6 +3,10 @@ window:
   width: 1920
   height: 1080
   vsync: true
+  # false renders into a window that is never mapped: nothing appears on screen, nothing
+  # takes focus, and the cursor is never captured. What the test suite runs with; for a
+  # scripted capture, pair it with ONESHOT/CAPTURE_FRAMES.
+  visible: true
 
 scene:
   default_scene: "assets/scenes/pixel_demo/scene.yaml"

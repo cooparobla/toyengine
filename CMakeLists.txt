@@ -104,7 +104,23 @@ add_executable(toyengine_tests test.cpp)
 add_dependencies(toyengine_tests toyengine_shaders uicoopa_shaders)
 target_link_libraries(toyengine_tests PRIVATE coopa::gfx coopa::physx coopa::sfx coopa::ui)
 target_include_directories(toyengine_tests PRIVATE ${CAML_DIR} ${CAML_DIR}/includes)
-add_test(NAME toyengine_render COMMAND toyengine_tests)
+# One ctest entry per test GROUP, not one for the whole binary: each render_* group
+# constructs its own Vulkan device, pipelines and scene, and that cost is CPU-bound
+# setup rather than GPU work -- so `ctest -j4` overlaps them and the suite finishes in
+# roughly the time of its slowest group. It also means `ctest -R toyengine_math` is an
+# instant, device-free check a dev can run on every save. See test.cpp's file doc for
+# the argument forms the binary accepts.
+foreach(_toy_test_group math config scene render_pixel render_ui render_material render_cloth)
+    add_test(NAME toyengine_${_toy_test_group}
+             COMMAND toyengine_tests --group ${_toy_test_group})
+endforeach()
+
+# The device-free groups have no business taking seconds; the render groups get a ceiling
+# generous enough for a cold shader cache on a slow GPU but short enough that a hung
+# frame fails instead of hanging the run.
+set_tests_properties(toyengine_math toyengine_config toyengine_scene PROPERTIES TIMEOUT 60)
+set_tests_properties(toyengine_render_pixel toyengine_render_ui toyengine_render_material
+                     toyengine_render_cloth PROPERTIES TIMEOUT 300)
 
 # --- Vulkan/GLFW leak gate ---
 # OFF by default here, unlike uicoopa/pixengine which are clean:

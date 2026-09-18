@@ -163,6 +163,7 @@ struct PixelRenderConfig {
     bool     shadows_enabled        = true;
     uint32_t shadow_map_resolution  = 2048;
     uint32_t cube_shadow_resolution = 512;
+    uint32_t spot_shadow_resolution = 1024;
     float    shadow_bias            = 0.005f;
     /**
      * @brief How far from the camera, in world units, the directional shadow is computed at
@@ -197,6 +198,18 @@ struct PixelRenderConfig {
      *        Ignored when soft_shadows is false.
      */
     float    point_shadow_softness  = 3.0f;
+    /**
+     * @brief Spot-light shadow-map PCF penumbra radius, in spot-map TEXELS -- unlike
+     *        point_shadow_softness above, this is NOT converted to a tangent-space offset;
+     *        the spot map is a plain perspective projection sampled the same way the
+     *        directional map is, so it reuses dir_shadow_params.y's texel-radius convention
+     *        directly (see calc_spot_shadow() in pixel_shadow_body.glsl). Texels rather than
+     *        world units because, like the point map and unlike the directional map, the
+     *        spot map's world-per-texel scale varies with the light's own range rather than
+     *        with a camera-fit box. Clamped to 12 texels, matching the directional radius's
+     *        own practical limit. Ignored when soft_shadows is false.
+     */
+    float    spot_shadow_softness   = 1.0f;
     uint32_t shadow_pcf_samples     = 24;    /**< Vogel disk taps for directional soft shadows; clamped to 1..32, the kernel's own hard limit. */
 
     // --- Outline ---

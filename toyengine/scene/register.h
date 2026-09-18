@@ -21,6 +21,7 @@
 #include <toyengine/scene/health_driver.h>
 #include <toyengine/scene/kinematic_controller.h>
 #include <toyengine/scene/kinematic_mover.h>
+#include <toyengine/scene/skinned_mesh_renderer.h>
 
 #include <coopa/asset/asset_manager.h>
 #include <gfxcoopa/core/device.h>
@@ -177,6 +178,32 @@ inline void register_scene_components(coopa::gfx::core::Device& device,
         [&device, &allocator, &assets, frames_in_flight](
             const fkyaml::node&, SceneObject& obj, const SceneLoader::ParseContext&) {
             obj.add_component<ClothRenderer>(device, allocator, assets, frames_in_flight);
+        });
+
+    // CPU-skins a bind-pose mesh against animated bone SceneObjects every frame -- see
+    // skinned_mesh_renderer.h's file doc for why toyengine does this on the CPU rather than
+    // via GPU vertex skinning. `mesh_path` is resolved and load-kicked off here (like
+    // register_render_components()'s "MeshRenderer" parser resolves its own), since only the
+    // parser has ctx.scene_dir; `bones:` name SceneObject paths in the mesh's joint-index order.
+    SceneLoader::register_component_parser("SkinnedMeshRenderer",
+        [&device, &allocator, &assets, frames_in_flight](
+            const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext& ctx) {
+            auto* smr = obj.add_component<SkinnedMeshRenderer>(device, allocator, assets, frames_in_flight);
+
+            if (node.contains("mesh_path")) {
+                std::string mesh_path_key = node.at("mesh_path").get_value<std::string>();
+                if (!mesh_path_key.empty()) {
+                    std::string virtual_path = "meshes/" + mesh_path_key + ".yaml";
+                    smr->set_source(
+                        assets.load_async<coopa::gfx::engine::data::SkinnedMeshSource>(virtual_path, ctx.scene_dir));
+                }
+            }
+
+            if (node.contains("bones")) {
+                std::vector<std::string> bones;
+                for (const auto& b : node.at("bones")) bones.push_back(b.get_value<std::string>());
+                smr->set_bones(std::move(bones));
+            }
         });
 }
 

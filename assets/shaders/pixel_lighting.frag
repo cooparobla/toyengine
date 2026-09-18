@@ -33,6 +33,7 @@
 #include <gfx/brdf.glsl>
 #include <gfx/shadow_sampling.glsl>
 #include <gfx/indirect_specular.glsl>
+#include <gfx/spot_light.glsl>
 
 layout(location = 0) in vec2 in_uv;
 
@@ -65,15 +66,23 @@ layout(set = 1, binding = 0) uniform LightUBO {
     vec4 sky_zenith;
     vec4 sky_horizon;
     vec4 sky_ground;
+
+    // Spot Lights -- appended after sky_ground; see light_data.h's LightUBO doc on why
+    // nothing above this line may move.
+    mat4 spot_light_space_matrix;
+    vec4 spot_shadow_params; // x=bias, y=pcf_radius_texels (0=hard), z=shadow_enabled, w=normal_bias
+    SpotLight spot_lights[8];
 } lights;
 
-// Set 2: Shadow maps -- toyengine has exactly one directional map and one
-// point cube map (see shadow_map_target.h), unlike blendy's four cube slots.
+// Set 2: Shadow maps -- toyengine has exactly one directional map, one point
+// cube map, and one spot map (see shadow_map_target.h), unlike blendy's four
+// cube slots.
 // *Shadow sampler types: the bound VkSampler has hardware compareEnable
 // (util::Sampler::shadow()), so the GPU compares depth before it filters --
 // see gfx/shadow_sampling.glsl's *Shadow-family doc for why that matters.
 layout(set = 2, binding = 0) uniform sampler2DShadow dir_shadow_map;
 layout(set = 2, binding = 1) uniform samplerCubeShadow point_shadow_map;
+layout(set = 2, binding = 2) uniform sampler2DShadow spot_shadow_map;
 
 // Set 3: G-Buffer textures + screen-space AO
 layout(set = 3, binding = 0) uniform sampler2D g_albedo_ao;          // RGB = Albedo, A = AO
@@ -214,6 +223,37 @@ void main() {
         vec3 shadow_bias_pos = world_pos + N * 0.02;
         float shadow = (i == 0u && pl.attenuation.w > 0.5)
             ? calc_point_shadow(pl.position_range.xyz - shadow_bias_pos, range) : 0.0;
+
+        Lo += shade_light(N, V, L, radiance, albedo, metallic, roughness, F0, shadow);
+    }
+
+    uint num_spots = min(lights.light_counts.z, 8u);
+    for (uint i = 0u; i < num_spots; ++i) {
+        SpotLight sl = lights.spot_lights[i];
+        vec3 frag_to_light = sl.position_range.xyz - world_pos;
+        float dist = length(frag_to_light);
+        float range = sl.position_range.w;
+        if (dist > range || dist < 0.0001) continue;
+
+        vec3 L = frag_to_light / dist;
+        float cone = gfx_spot_cone(L, sl.direction_cone.xyz, sl.direction_cone.w, sl.params.y);
+        if (cone <= 0.0) continue;
+
+        // Identical distance curve to the point loop directly above -- see
+        // gfx/spot_light.glsl's file doc on why that curve isn't shared here.
+        float sharpness = max(sl.params.x, 0.1);
+        float factor = clamp(dist / range, 0.0, 1.0);
+        float falloff = clamp(1.0 - pow(factor, sharpness), 0.0, 1.0);
+        falloff *= falloff;
+        float attenuation = falloff / (4.0 * BRDF_PI * (factor * factor + 1.0));
+        vec3 radiance = sl.color_intensity.rgb * (sl.color_intensity.w * 0.08) * attenuation * cone;
+
+        float shadow = 0.0;
+        if (i == lights.light_counts.w && sl.params.z > 0.5) {
+            float normal_bias_scale = clamp(1.0 - dot(N, L), 0.0, 1.0);
+            vec3 biased_pos = world_pos + N * (lights.spot_shadow_params.w * (0.5 + 0.5 * normal_bias_scale));
+            shadow = calc_spot_shadow(lights.spot_light_space_matrix * vec4(biased_pos, 1.0), N, L);
+        }
 
         Lo += shade_light(N, V, L, radiance, albedo, metallic, roughness, F0, shadow);
     }

@@ -1,8 +1,8 @@
 #ifndef TOY_PIXEL_SHADOW_BODY_GLSL
 #define TOY_PIXEL_SHADOW_BODY_GLSL
 
-// pixel_shadow_body.glsl -- shared calc_dir_shadow()/calc_point_shadow() body,
-// extracted from four byte-identical copies (pixel_lighting.frag,
+// pixel_shadow_body.glsl -- shared calc_dir_shadow()/calc_point_shadow()/calc_spot_shadow()
+// body, extracted from four byte-identical copies (pixel_lighting.frag,
 // pixel_forward_shading.glsl's gfx_forward_calc_* pair, gfx/surface/capture_fs.glsl,
 // sdf_capture.frag) so opaque, forward/BLEND, capture and SDF surfaces can never
 // silently diverge on shadow behavior the way transparent_capture.frag's
@@ -12,10 +12,12 @@
 // includer must, BEFORE including this file, already have declared (with these
 // exact names, whatever their own set/binding indices are):
 //   - `lights`            -- the LightUBO block (dir_shadow_params/dir_shadow_extra/
-//                             dir_light_space_matrix -- see light_data.h's C++ doc
-//                             for the packing of both vec4s).
+//                             dir_light_space_matrix/spot_shadow_params/
+//                             spot_light_space_matrix -- see light_data.h's C++ doc
+//                             for the packing of these).
 //   - `dir_shadow_map`    -- sampler2DShadow.
 //   - `point_shadow_map`  -- samplerCubeShadow.
+//   - `spot_shadow_map`   -- sampler2DShadow.
 //   - #include <gfx/shadow_sampling.glsl> (for gfx_shadow_dir_hard/_pcf_vogel,
 //     gfx_shadow_cube_hard/_pcf_vogel, gfx_ign_angle).
 
@@ -78,6 +80,37 @@ float calc_point_shadow(vec3 frag_to_light, float range) {
     float angle = gfx_ign_angle(gl_FragCoord.xy) + lights.dir_shadow_extra.w * 2.39996323;
     return gfx_shadow_cube_pcf_vogel(point_shadow_map, dir, current_dist, bias, disk_radius,
                                      angle, int(lights.dir_shadow_extra.z));
+}
+
+// Spot shadow: same structure as calc_dir_shadow() (single perspective frustum, sampler2DShadow,
+// hard compare when spot_shadow_params.y is 0 else a rotated Vogel-disk PCF penumbra) since a
+// spot map -- unlike the point light's cube map -- is one frustum too. Reuses dir_shadow_extra's
+// PCF tap count (.z) and per-frame rotation offset (.w) rather than duplicating them into
+// spot_shadow_params, since both maps share the same TAA-decorrelation scheme. Only
+// lights.spot_lights[light_counts.w] can be a real shadow caster -- toyengine's ShadowMapTarget
+// holds exactly one spot 2D map at a time, same one-caster rule as point lights' cube map.
+float calc_spot_shadow(vec4 light_space_pos, vec3 N, vec3 L) {
+    if (lights.spot_shadow_params.z < 0.5) return 0.0;
+
+    vec3 proj_coords = light_space_pos.xyz / light_space_pos.w;
+    proj_coords.xy = proj_coords.xy * 0.5 + 0.5;
+
+    if (proj_coords.z > 1.0 || proj_coords.x < 0.0 || proj_coords.x > 1.0 ||
+        proj_coords.y < 0.0 || proj_coords.y > 1.0) {
+        return 0.0;
+    }
+
+    float bias = max(lights.spot_shadow_params.x * (1.0 - max(dot(N, L), 0.0)), 0.0002);
+    float radius_texels = lights.spot_shadow_params.y;
+
+    if (radius_texels <= 0.0) {
+        return gfx_shadow_dir_hard(spot_shadow_map, proj_coords, bias);
+    }
+    // See calc_dir_shadow()'s identical IGN-vs-hash rationale.
+    float angle = gfx_ign_angle(gl_FragCoord.xy) + lights.dir_shadow_extra.w * 2.39996323;
+    vec2 texel_size = radius_texels / textureSize(spot_shadow_map, 0);
+    return gfx_shadow_dir_pcf_vogel(spot_shadow_map, proj_coords, bias, texel_size,
+                                    angle, int(lights.dir_shadow_extra.z));
 }
 
 #endif // TOY_PIXEL_SHADOW_BODY_GLSL

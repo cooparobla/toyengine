@@ -17,6 +17,7 @@
 #include <gfx/shadow_sampling.glsl>
 #include <gfx/indirect_specular.glsl>
 #include <gfx/ssr_common.glsl>
+#include <gfx/spot_light.glsl>
 
 layout(location = 0) in vec3 frag_world_pos;
 layout(location = 1) in vec3 frag_world_normal;
@@ -44,7 +45,7 @@ layout(set = 1, binding = 0) uniform LightUBO {
     mat4 dir_light_space_matrix;
     vec4 dir_shadow_params; // x=bias, y=pcf_radius_texels (0=hard), z=shadow_enabled, w=normal_bias
 
-    uvec4 light_counts; // x=num_dir, y=num_point
+    uvec4 light_counts; // x=num_dir, y=num_point, z=num_spot, w=spot_shadow_index
     PointLight point_lights[16];
 
     // Configurable sky/ambient colour (see IndirectParams in render_features.h).
@@ -53,13 +54,21 @@ layout(set = 1, binding = 0) uniform LightUBO {
     vec4 sky_zenith;
     vec4 sky_horizon;
     vec4 sky_ground;
+
+    // Spot Lights -- appended after sky_ground; see light_data.h's LightUBO doc. Also read
+    // by pixel_forward_shading.glsl's spot loop via `lights.*`, same as sky_* above.
+    mat4 spot_light_space_matrix;
+    vec4 spot_shadow_params; // x=bias, y=pcf_radius_texels (0=hard), z=shadow_enabled, w=normal_bias
+    SpotLight spot_lights[8];
 } lights;
 
-// Set 2: Shadow maps -- one directional map, one point cube map (see shadow_map_target.h).
-// *Shadow: hardware compareEnable sampler (util::Sampler::shadow()) -- see
-// gfx/shadow_sampling.glsl and pixel_lighting.frag's identical binding for why.
+// Set 2: Shadow maps -- one directional map, one point cube map, one spot map
+// (see shadow_map_target.h). *Shadow: hardware compareEnable sampler
+// (util::Sampler::shadow()) -- see gfx/shadow_sampling.glsl and
+// pixel_lighting.frag's identical binding for why.
 layout(set = 2, binding = 0) uniform sampler2DShadow dir_shadow_map;
 layout(set = 2, binding = 1) uniform samplerCubeShadow point_shadow_map;
+layout(set = 2, binding = 2) uniform sampler2DShadow spot_shadow_map;
 
 // Sets 3/4/5: ssr_pass_'s own trace-input sets (see pixel_render_pipeline.h's
 // transparent_extra ExtraSets), the same three sets ssr.frag itself binds at 1/2/3 --

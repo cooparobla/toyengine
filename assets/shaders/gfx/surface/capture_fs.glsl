@@ -17,6 +17,7 @@
 #include <gfx/brdf.glsl>
 #include <gfx/shadow_sampling.glsl>
 #include <gfx/indirect_specular.glsl>
+#include <gfx/spot_light.glsl>
 
 // Forward-shaded capture of transparent geometry -- NOT a visible draw. Feeds a second
 // reflection SOURCE (gfx_ssr_trace_secondary(), gfx/ssr_trace_secondary_body.glsl) so opaque
@@ -70,7 +71,7 @@ layout(set = 1, binding = 0) uniform LightUBO {
     mat4 dir_light_space_matrix;
     vec4 dir_shadow_params; // x=bias, y=pcf_radius_texels (0=hard), z=shadow_enabled, w=normal_bias
 
-    uvec4 light_counts; // x=num_dir, y=num_point
+    uvec4 light_counts; // x=num_dir, y=num_point, z=num_spot, w=spot_shadow_index
     PointLight point_lights[16];
 
     // Configurable sky/ambient colour (see IndirectParams in render_features.h). Routed
@@ -81,11 +82,17 @@ layout(set = 1, binding = 0) uniform LightUBO {
     vec4 sky_zenith;
     vec4 sky_horizon;
     vec4 sky_ground;
+
+    // Spot Lights -- appended after sky_ground; see light_data.h's LightUBO doc.
+    mat4 spot_light_space_matrix;
+    vec4 spot_shadow_params; // x=bias, y=pcf_radius_texels (0=hard), z=shadow_enabled, w=normal_bias
+    SpotLight spot_lights[8];
 } lights;
 
 // Set 2: Shadow maps -- same bindings as transparent_fs.glsl's.
 layout(set = 2, binding = 0) uniform sampler2DShadow dir_shadow_map;
 layout(set = 2, binding = 1) uniform samplerCubeShadow point_shadow_map;
+layout(set = 2, binding = 2) uniform sampler2DShadow spot_shadow_map;
 
 // Set 3: material textures -- see engine::util::MaterialTextureCache and
 // transparent_fs.glsl's identical set (there at index 7, since it has sets 3-6 of its own
@@ -244,6 +251,37 @@ void main() {
         vec3 shadow_bias_pos = frag_world_pos + N * 0.02;
         float shadow = (i == 0u && pl.attenuation.w > 0.5)
             ? calc_point_shadow(pl.position_range.xyz - shadow_bias_pos, range) : 0.0;
+
+        Lo += shade_light(N, V, L, radiance, albedo, metallic, roughness, F0, shadow);
+    }
+
+    uint num_spots = min(lights.light_counts.z, 8u);
+    for (uint i = 0u; i < num_spots; ++i) {
+        SpotLight sl = lights.spot_lights[i];
+        vec3 frag_to_light = sl.position_range.xyz - frag_world_pos;
+        float dist = length(frag_to_light);
+        float range = sl.position_range.w;
+        if (dist > range || dist < 0.0001) continue;
+
+        vec3 L = frag_to_light / dist;
+        float cone = gfx_spot_cone(L, sl.direction_cone.xyz, sl.direction_cone.w, sl.params.y);
+        if (cone <= 0.0) continue;
+
+        // Identical distance curve to the point loop directly above -- see
+        // gfx/spot_light.glsl's file doc on why that curve isn't shared here.
+        float sharpness = max(sl.params.x, 0.1);
+        float factor = clamp(dist / range, 0.0, 1.0);
+        float falloff = clamp(1.0 - pow(factor, sharpness), 0.0, 1.0);
+        falloff *= falloff;
+        float attenuation = falloff / (4.0 * BRDF_PI * (factor * factor + 1.0));
+        vec3 radiance = sl.color_intensity.rgb * (sl.color_intensity.w * 0.08) * attenuation * cone;
+
+        float shadow = 0.0;
+        if (i == lights.light_counts.w && sl.params.z > 0.5) {
+            float normal_bias_scale = clamp(1.0 - dot(N, L), 0.0, 1.0);
+            vec3 biased_pos = frag_world_pos + N * (lights.spot_shadow_params.w * (0.5 + 0.5 * normal_bias_scale));
+            shadow = calc_spot_shadow(lights.spot_light_space_matrix * vec4(biased_pos, 1.0), N, L);
+        }
 
         Lo += shade_light(N, V, L, radiance, albedo, metallic, roughness, F0, shadow);
     }

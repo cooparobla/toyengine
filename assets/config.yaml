@@ -180,6 +180,7 @@ render:
   # --- Shadows ---
   shadow_map_resolution: 2048
   cube_shadow_resolution: 512
+  spot_shadow_resolution: 1024
   shadow_bias: 0.005
   shadow_distance: 60.0       # Unity-style "Shadow Distance": how far from the camera shadows
                               # are computed. The directional shadow frustum is fit to the
@@ -194,6 +195,10 @@ render:
   point_shadow_softness: 3.0  # point-light cube PCF penumbra radius in CUBE-MAP TEXELS, converted
                               # to a tangent-space offset each frame against cube_shadow_resolution
                               # (not comparable to shadow_softness's world units above)
+  spot_shadow_softness: 1.0   # spot-light shadow-map PCF penumbra radius in SPOT-MAP TEXELS, used
+                              # directly (no tangent-space conversion, unlike point_shadow_softness
+                              # above) since the spot map is a plain perspective projection sampled
+                              # the same way the directional map is
   shadow_pcf_samples: 24      # Vogel disk taps, 1..32; lower is cheaper and grainier
 
   # --- Outline ---

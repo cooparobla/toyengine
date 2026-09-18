@@ -36,7 +36,10 @@
  * record site, so a toggle that only changes push-constant contents can flip at runtime.
  *
  * Only one point light casts a shadow: ShadowMapTarget holds exactly one cube map. Every other
- * point light still lights the scene, without occlusion.
+ * point light still lights the scene, without occlusion. Spot lights work the same way, via
+ * their own single dedicated 2D shadow map: exactly one shadow-casting spot light gets a real
+ * shadow (see find_first_shadow_casting_spot_light_()), every other spot still lights the
+ * scene unshadowed.
  */
 
 #ifndef TOYENGINE_RENDER_PIXEL_RENDER_PIPELINE_H
@@ -47,6 +50,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
@@ -78,6 +82,7 @@
 #include <gfxcoopa/engine/components/mesh_renderer.h>
 #include <gfxcoopa/engine/components/directional_light.h>
 #include <gfxcoopa/engine/components/point_light.h>
+#include <gfxcoopa/engine/components/spot_light.h>
 #include <gfxcoopa/engine/passes/skybox_pass.h>
 #include <gfxcoopa/engine/passes/transparent_pass.h>
 #include <gfxcoopa/engine/targets/transparent_capture_target.h>
@@ -176,7 +181,8 @@ public:
           shadow_sampler_(coopa::gfx::engine::util::Sampler::shadow(device)),
           fog_data_(device, allocator),
           volumetrics_data_(device, allocator),
-          shadow_target_(device, allocator, config_.shadow_map_resolution, config_.cube_shadow_resolution),
+          shadow_target_(device, allocator, config_.shadow_map_resolution, config_.cube_shadow_resolution,
+                        config_.spot_shadow_resolution),
           palette_lut_(coopa::gfx::engine::data::PaletteLut::load(device, allocator, cmd_pool, config_.palette_path)),
           instance_stream_(device, allocator),
           forward_globals_(device, allocator),
@@ -367,6 +373,7 @@ public:
         TOY_KEEP_STARTUP_FIXED(scale_divisor);
         TOY_KEEP_STARTUP_FIXED(shadow_map_resolution);
         TOY_KEEP_STARTUP_FIXED(cube_shadow_resolution);
+        TOY_KEEP_STARTUP_FIXED(spot_shadow_resolution);
         TOY_KEEP_STARTUP_FIXED(sdf_max_renderers);
         TOY_KEEP_STARTUP_FIXED(sdf_max_shapes);
         TOY_KEEP_STARTUP_FIXED(palette_path);
@@ -495,6 +502,23 @@ public:
             auto& gpu0 = current_light_data().point_lights[0];
             gpu0.attenuation.w = 1.0f;
         }
+
+        // Same one-shadow-casting-light rule as the point light above, but via an explicit
+        // index (light_counts.w) rather than a hardcoded slot 0 -- see
+        // find_first_shadow_casting_spot_light_()'s doc for why. update_spot_shadow_matrix_()
+        // must run even when there is no caster, same as update_dir_shadow_matrix_() is only
+        // skipped (not the shadow_params write) when there's no directional light: it still
+        // needs to clear spot_shadow_params.z to 0 so calc_spot_shadow() bails cleanly.
+        auto spot_caster = find_first_shadow_casting_spot_light_(scene);
+        bool cast_spot_shadow = config_.shadows_enabled && spot_caster.light != nullptr;
+        if (cast_spot_shadow) {
+            current_light_data().spot_lights[spot_caster.index].params.z = 1.0f;
+            current_light_data().light_counts.w = spot_caster.index;
+        } else {
+            current_light_data().light_counts.w = 0xFFFFFFFFu;
+        }
+        update_spot_shadow_matrix_(spot_caster.light, cast_spot_shadow);
+
         light_datas_[light_frame_]->upload();
 
         if (config_.fog_enabled) {
@@ -545,6 +569,7 @@ public:
         ctx.cast_dir_shadow       = cast_dir_shadow;
         ctx.cast_point_shadow     = cast_point_shadow;
         ctx.shadow_point          = shadow_point;
+        ctx.cast_spot_shadow      = cast_spot_shadow;
 
         bool frame_presented = renderer.begin_frame(
             [&](coopa::gfx::command::CommandBuffer& cmd) {
@@ -621,6 +646,12 @@ private:
         bool cast_dir_shadow   = false;
         bool cast_point_shadow = false;
         coopa::gfx::engine::components::PointLightComponent* shadow_point = nullptr;
+        /** Unlike shadow_point, record_spot_shadow_() needs no SpotLightComponent* -- its
+         *  light-space matrix is already resolved into current_light_data() by
+         *  update_spot_shadow_matrix_() before record_scene_() runs (a spot map, like the
+         *  directional map, needs no per-face light_pos_range the way the cube map's
+         *  per-face record_point_shadow_() loop does). */
+        bool cast_spot_shadow  = false;
     };
 
     /**
@@ -669,12 +700,14 @@ private:
             coopa::gfx::pipeline::DescriptorLayoutBuilder()
                 .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
                 .combined_sampler(1, coopa::gfx::ShaderStage::Fragment)
+                .combined_sampler(2, coopa::gfx::ShaderStage::Fragment)
                 .build(device_));
         shadow_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
             coopa::gfx::pipeline::DescriptorPoolBuilder().add_sets(*shadow_layout_, 1).build(device_));
         shadow_set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device_, *shadow_pool_, *shadow_layout_);
         shadow_set_->bind_image(0, shadow_target_.dir_shadow_view(), shadow_sampler_.handle());
         shadow_set_->bind_image(1, shadow_target_.cube_shadow_view(), shadow_sampler_.handle());
+        shadow_set_->bind_image(2, shadow_target_.spot_shadow_view(), shadow_sampler_.handle());
     }
     /**
      * @brief Builds the material texture cache and the shadow/G-buffer pipelines, plus one named
@@ -1239,6 +1272,7 @@ private:
                        const MeshGather& meshes, const std::vector<SdfDrawItem>& sdf_draws) {
         record_directional_shadow_(cmd, meshes, sdf_draws, ctx.cast_dir_shadow);
         record_point_shadow_(cmd, meshes, sdf_draws, ctx.shadow_point, ctx.cast_point_shadow);
+        record_spot_shadow_(cmd, meshes, sdf_draws, ctx.cast_spot_shadow);
         record_gbuffer_(cmd, meshes, sdf_draws);
 
         if (ctx.need_ssr_trace_inputs) {
@@ -2456,6 +2490,7 @@ private:
     void update_lights_(coopa::scene::Scene& scene) {
         using coopa::gfx::engine::components::DirectionalLightComponent;
         using coopa::gfx::engine::components::PointLightComponent;
+        using coopa::gfx::engine::components::SpotLightComponent;
 
         auto& ubo = current_light_data();
 
@@ -2493,7 +2528,7 @@ private:
             static_cast<float>(frame_index_ & 0xFFu));
 
         auto points = scene.get_components<PointLightComponent>();
-        uint32_t count = std::min<uint32_t>(static_cast<uint32_t>(points.size()), 16);
+        uint32_t count = std::min<uint32_t>(static_cast<uint32_t>(points.size()), coopa::gfx::engine::data::MAX_POINT_LIGHTS);
         ubo.light_counts.y = count;
         for (uint32_t i = 0; i < count; ++i) {
             auto* pl = points[i];
@@ -2502,6 +2537,30 @@ private:
             gpu.color_intensity = glm::vec4(pl->color, pl->intensity);
             gpu.attenuation     = glm::vec4(pl->attenuation_constant, pl->attenuation_linear,
                                             pl->attenuation_quadratic, 0.0f); // cast_shadows set below, light 0 only
+        }
+
+        // Spot-shadow PCF radius, written unconditionally like dir_shadow_extra.y above --
+        // it's already in spot-map TEXELS (see PixelRenderConfig::spot_shadow_softness's
+        // doc), so no per-frame conversion is needed the way the directional radius needs
+        // update_dir_shadow_matrix_()'s texel_world. Clamped to 12, matching the
+        // directional radius's own practical limit. render()'s update_spot_shadow_matrix_()
+        // fills x/z/w (bias/enabled/normal_bias) afterward, same split as dir_shadow_params.
+        ubo.spot_shadow_params.y = config_.soft_shadows
+            ? std::min(config_.spot_shadow_softness, 12.0f) : 0.0f;
+
+        auto spots = scene.get_components<SpotLightComponent>();
+        uint32_t spot_count = std::min<uint32_t>(static_cast<uint32_t>(spots.size()), coopa::gfx::engine::data::MAX_SPOT_LIGHTS);
+        ubo.light_counts.z = spot_count;
+        for (uint32_t i = 0; i < spot_count; ++i) {
+            auto* sl = spots[i];
+            auto& gpu = ubo.spot_lights[i];
+            gpu.position_range = glm::vec4(sl->get_world_position(), sl->range);
+            gpu.direction_cone = glm::vec4(sl->get_world_direction(),
+                                           std::cos(glm::radians(sl->clamped_outer_angle())));
+            gpu.color_intensity = glm::vec4(sl->color, sl->intensity);
+            gpu.params = glm::vec4(sl->attenuation_constant,
+                                   std::cos(glm::radians(sl->clamped_inner_angle())),
+                                   0.0f, 0.0f); // cast_shadows set below, shadow-owning slot only
         }
     }
 
@@ -2560,6 +2619,51 @@ private:
             if (pl->cast_shadows) return pl;
         }
         return nullptr;
+    }
+
+    /** @brief A shadow-casting SpotLightComponent plus its index into update_lights_()'s
+     *         spots array (get_components<SpotLightComponent>() order), or {nullptr, 0}. The
+     *         index is what light_counts.w names so the shader knows which spot_lights[] slot
+     *         owns spot_light_space_matrix -- unlike the point-light path, which hardcodes
+     *         slot 0, a spot doesn't get that shortcut since find_first_shadow_casting_point_light_'s
+     *         "first casting light" and "slot 0" already silently disagree whenever a
+     *         non-shadow-casting point light is authored before the shadow-casting one; this
+     *         spot path is deliberately exact instead of repeating that bug. */
+    struct SpotShadowCaster {
+        coopa::gfx::engine::components::SpotLightComponent* light = nullptr;
+        uint32_t index = 0;
+    };
+    SpotShadowCaster find_first_shadow_casting_spot_light_(coopa::scene::Scene& scene) {
+        auto spots = scene.get_components<coopa::gfx::engine::components::SpotLightComponent>();
+        uint32_t count = std::min<uint32_t>(static_cast<uint32_t>(spots.size()),
+                                            coopa::gfx::engine::data::MAX_SPOT_LIGHTS);
+        for (uint32_t i = 0; i < count; ++i) {
+            if (spots[i]->cast_shadows) return {spots[i], i};
+        }
+        return {};
+    }
+
+    /**
+     * @brief Writes this frame's spot shadow matrix and shadow parameters into the current
+     *        slot's LightUBO.
+     *
+     * Mirrors update_dir_shadow_matrix_(), but the spot map needs no camera-fit: its
+     * frustum is entirely a function of the light itself (position/direction/cone/range),
+     * via ShadowMapTarget::get_spot_matrix(). Must run after render() has set light_frame_
+     * to this frame's slot and after update_lights_() (which already filled
+     * spot_shadow_params.y), same ordering requirement update_dir_shadow_matrix_() has.
+     */
+    void update_spot_shadow_matrix_(const coopa::gfx::engine::components::SpotLightComponent* spot,
+                                    bool cast_spot_shadow) {
+        auto& ubo = current_light_data();
+        if (spot) {
+            ubo.spot_light_space_matrix = coopa::gfx::engine::targets::ShadowMapTarget::get_spot_matrix(
+                spot->get_world_position(), spot->get_world_direction(),
+                spot->clamped_outer_angle(), spot->range);
+        }
+        ubo.spot_shadow_params.x = config_.shadow_bias;
+        ubo.spot_shadow_params.z = cast_spot_shadow ? 1.0f : 0.0f;
+        ubo.spot_shadow_params.w = 0.05f;
     }
 
     void record_directional_shadow_(coopa::gfx::command::CommandBuffer& cmd,
@@ -2693,6 +2797,77 @@ private:
             }
             shadow_target_.end_cube_face_pass(cmd);
         }
+    }
+
+    /**
+     * @brief Records the spot shadow map: a single perspective depth pass, structurally a
+     *        copy of record_directional_shadow_() (same push-constant type, same per-material
+     *        shader-variant transition guard, same BLEND-at-full-opacity and CUTOUT rules,
+     *        same SDF loop) since a spot map, like the directional map, is one frustum -- only
+     *        light_space_matrix differs. Reuses shadow_pipeline_->bind_directional()/
+     *        push_directional() rather than adding a third named bind/push pair to
+     *        ShadowPipeline for that reason.
+     *
+     *        Always begins/ends the pass, even with no caster -- exactly like
+     *        record_directional_shadow_() -- so the image is never left UNDEFINED on frame 0
+     *        and transition_spot_to_shader_read()'s oldLayout stays honest.
+     */
+    void record_spot_shadow_(coopa::gfx::command::CommandBuffer& cmd,
+                             const MeshGather& meshes,
+                             const std::vector<SdfDrawItem>& sdf_draws,
+                             bool cast_spot_shadow) {
+        shadow_target_.begin_spot_pass(cmd);
+        if (cast_spot_shadow) {
+            shadow_pipeline_->bind_directional(cmd);
+            cmd.bind_vertex_buffer(instance_stream_.buffer(), 0, 1);
+
+            coopa::gfx::engine::passes::DirectionalShadowPushConstants pc{};
+            pc.light_space_matrix = current_light_data().spot_light_space_matrix;
+            pc.gfx_time = glm::vec4(elapsed_time_, frame_dt_, static_cast<float>(frame_index_), 0.0f);
+
+            // See record_directional_shadow_'s identical transition guard.
+            std::string last_shader;
+            bool have_bound = true; // stock, bound just above
+
+            for (size_t i = 0; i < meshes.renderers.size(); ++i) {
+                if (meshes.instance_idx[i] == InstanceStream::kInvalidIndex) continue;
+                // See record_directional_shadow_'s identical check.
+                if (meshes.renderers[i]->material.is_blended() && meshes.renderers[i]->material.alpha < 1.0f) continue;
+
+                if (!have_bound || meshes.renderers[i]->material.shader != last_shader) {
+                    shadow_pipeline_->bind_directional(cmd, meshes.renderers[i]->material.shader);
+                    last_shader = meshes.renderers[i]->material.shader;
+                    have_bound  = true;
+                }
+
+                // See record_directional_shadow_'s identical CUTOUT handling.
+                pc.alpha_cutoff = meshes.renderers[i]->material.gpu_alpha_cutoff();
+                pc.gfx_params   = meshes.renderers[i]->material.shader_params;
+                cmd.bind_descriptor_set(material_cache_->set_for(meshes.renderers[i]->material), 0);
+                shadow_pipeline_->push_directional(cmd, pc);
+                meshes.renderers[i]->get_mesh()->bind(cmd);
+                meshes.renderers[i]->get_mesh()->draw(cmd, 1, meshes.instance_idx[i]);
+            }
+
+            if (!sdf_draws.empty()) {
+                sdf_shadow_pass_->bind_directional(cmd);
+                cmd.bind_descriptor_set(sdf_data_.current_set(), 0);
+
+                coopa::gfx::engine::passes::SdfDirectionalShadowPushConstants sdf_pc{};
+                sdf_pc.light_space_matrix = current_light_data().spot_light_space_matrix;
+                sdf_pc.shadow_max_steps   = config_.sdf_shadow_max_steps;
+                for (const auto& d : sdf_draws) {
+                    if (!d.cast_shadows) continue;
+                    // Same binary BLEND-at-full-opacity rule as the mesh loop above.
+                    if (d.is_blend && d.comp->material.alpha < 1.0f) continue;
+                    sdf_pc.renderer_index = d.gpu_index;
+                    sdf_shadow_pass_->push_directional(cmd, sdf_pc);
+                    cmd.draw(6);
+                }
+            }
+        }
+        shadow_target_.end_spot_pass(cmd);
+        shadow_target_.transition_spot_to_shader_read(cmd);
     }
 
     /// Transitions the G-buffer depth image to SHADER_READ_ONLY_OPTIMAL for

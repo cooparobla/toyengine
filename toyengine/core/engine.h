@@ -26,10 +26,13 @@
 #include <gfxcoopa/app/context.h>
 #include <gfxcoopa/util/image_readback.h>
 #include <gfxcoopa/engine/loaders/mesh_loader.h>
+#include <gfxcoopa/engine/loaders/skinned_mesh_source_loader.h>
 #include <gfxcoopa/engine/loaders/texture_loader.h>
 #include <gfxcoopa/engine/components/register.h>
 #include <gfxcoopa/engine/components/camera_component.h>
 
+#include <coopa/animation/animation_system.h>
+#include <coopa/animation/animation_yaml.h>
 #include <coopa/asset/asset_manager.h>
 #include <coopa/input/input_map.h>
 #include <coopa/job/engine.h>
@@ -95,6 +98,11 @@ public:
         assets_.add_search_root(std::string(ROOT_DIR) + "/assets");
         assets_.register_loader<coopa::gfx::engine::data::Mesh>(
             std::make_unique<coopa::gfx::engine::loaders::MeshLoader>(ctx_.device(), ctx_.allocator(), ctx_.command_pool()));
+        // Pure-CPU bind-pose data for SkinnedMeshRenderer (toy::scene) -- no GPU handles, unlike
+        // the Mesh loader above; see skinned_mesh_source.h's file doc for why toyengine CPU-skins
+        // instead of uploading bone matrices to a shader.
+        assets_.register_loader<coopa::gfx::engine::data::SkinnedMeshSource>(
+            std::make_unique<coopa::gfx::engine::loaders::SkinnedMeshSourceLoader>());
         // NEAREST + clamp-to-edge (SamplerDesc::pixel_art()), not gfxcoopa's bilinear default:
         // this is a pixel-art engine, and bilinear filtering blurs texel edges.
         assets_.register_loader<coopa::gfx::engine::data::Texture>(
@@ -112,6 +120,11 @@ public:
         // every other parser registration above. Its captured device/allocator references
         // are released by the SceneLoader::clear_component_parsers() already in ~Engine().
         coopa::ui::register_ui_components(ctx_.device(), ctx_.allocator(), ctx_.command_pool());
+        // Registers the AnimationClip asset loader and the "Animator" component parser --
+        // blendy exports skeletal/object animation as baked Transform keyframe tracks (there is
+        // no vertex skinning in this engine), referenced from a scene's `Animator` component.
+        // Must precede load_scene(), like every other parser registration above.
+        coopa::anim::register_animation_components(assets_);
 
         scene_mgr_.load_scene(resolve_path_(scene_path_from_env_(config_.scene.default_scene)));
 
@@ -126,6 +139,10 @@ public:
         // reads below are never asked to resolve a still-dirty transform; then block until
         // every load issued above has finished, so frame 0 sees a fully populated scene.
         coopa::scene::install_transform_system(scene_mgr_.get_active_scene());
+        // Runs at UpdatePhase::Animation (300), before TransformResolve (350) -- Scene::update()
+        // orders installed systems by phase regardless of install call order, so this only needs
+        // to exist before the scene starts ticking, same as install_transform_system() above.
+        coopa::anim::install_animation_system(scene_mgr_.get_active_scene());
         drain_pending_assets_();
 
         // Fail fast on a typo'd/unregistered PBRMaterial::shader -- see
@@ -480,6 +497,11 @@ private:
     void upload_dynamic_meshes_(coopa::scene::Scene& scene) {
         for (scene::ClothRenderer* cr : scene.get_components<scene::ClothRenderer>()) {
             cr->upload(ctx_.current_frame());
+        }
+        // Same per-frame-in-flight re-upload contract as ClothRenderer above, driving a
+        // CPU skin instead of a cloth solver -- see skinned_mesh_renderer.h's file doc.
+        for (scene::SkinnedMeshRenderer* smr : scene.get_components<scene::SkinnedMeshRenderer>()) {
+            smr->upload(ctx_.current_frame());
         }
     }
 

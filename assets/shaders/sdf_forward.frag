@@ -12,6 +12,7 @@
 #include <gfx/shadow_sampling.glsl>
 #include <gfx/indirect_specular.glsl>
 #include <gfx/ssr_common.glsl>
+#include <gfx/spot_light.glsl>
 #include <gfx/sdf.glsl>
 
 layout(location = 0) in flat uint frag_renderer_index;
@@ -38,7 +39,7 @@ layout(set = 1, binding = 0) uniform LightUBO {
     mat4 dir_light_space_matrix;
     vec4 dir_shadow_params; // x=bias, y=pcf_radius_texels (0=hard), z=shadow_enabled, w=normal_bias
 
-    uvec4 light_counts; // x=num_dir, y=num_point
+    uvec4 light_counts; // x=num_dir, y=num_point, z=num_spot, w=spot_shadow_index
     PointLight point_lights[16];
 
     // Configurable sky/ambient colour (see IndirectParams in render_features.h).
@@ -47,11 +48,18 @@ layout(set = 1, binding = 0) uniform LightUBO {
     vec4 sky_zenith;
     vec4 sky_horizon;
     vec4 sky_ground;
+
+    // Spot Lights -- appended after sky_ground; see light_data.h's LightUBO doc. Also read
+    // by pixel_forward_shading.glsl's spot loop via `lights.*`, same as sky_* above.
+    mat4 spot_light_space_matrix;
+    vec4 spot_shadow_params; // x=bias, y=pcf_radius_texels (0=hard), z=shadow_enabled, w=normal_bias
+    SpotLight spot_lights[8];
 } lights;
 
 // Set 2: Shadow maps
 layout(set = 2, binding = 0) uniform sampler2DShadow dir_shadow_map;
 layout(set = 2, binding = 1) uniform samplerCubeShadow point_shadow_map;
+layout(set = 2, binding = 2) uniform sampler2DShadow spot_shadow_map;
 
 // Set 3: SdfData -- globals UBO + renderer/shape SSBOs (see
 // gfxcoopa/engine/data/sdf_data.h). Field order in `SdfGlobalsBlock` matches

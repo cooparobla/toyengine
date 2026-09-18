@@ -472,3 +472,21 @@ scene:
           cast_shadows: true
           attenuation_constant: 4.0  # falloff sharpness -- 4.0 keeps this engine's crisp, cel-shaded cutoff
       children: []
+
+    - name: spot
+      active: true
+      components:
+        - type: Transform
+          position: { x: -3.0, y: 1.5, z: 6.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: SpotLight
+          direction: { x: 0.4, y: -0.2, z: -1.0 }  # world-space aim (rotated by this object's world rotation); lands the cone on the floor near cube.000
+          color: { r: 1.0, g: 0.85, b: 0.55 }
+          intensity: 140.0
+          range: 20.0
+          inner_angle: 14.0   # degrees, half-angle of the full-brightness core
+          outer_angle: 26.0   # degrees, half-angle where the cone reaches zero
+          cast_shadows: true
+          attenuation_constant: 2.0  # falloff sharpness, same meaning as PointLight's
+      children: []

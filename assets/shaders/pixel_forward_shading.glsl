@@ -15,20 +15,23 @@
 // whatever their own set/binding indices are):
 //   - `lights`            -- the LightUBO block (dir_direction/dir_color/
 //                             dir_shadow_params/dir_shadow_extra/
-//                             dir_light_space_matrix/light_counts/point_lights[16]).
+//                             dir_light_space_matrix/light_counts/point_lights[16]/
+//                             spot_shadow_params/spot_light_space_matrix/spot_lights[8]).
 //   - `dir_shadow_map`    -- sampler2DShadow.
 //   - `point_shadow_map`  -- samplerCubeShadow.
+//   - `spot_shadow_map`   -- sampler2DShadow.
 //   - #include <gfx/brdf.glsl>, <gfx/shadow_sampling.glsl>,
 //     <gfx/indirect_specular.glsl>, <gfx/sky.glsl>, <gfx/ssr_common.glsl>,
-//     "indirect_hooks.glsl", <gfx/ssr_trace_body.glsl> (which itself needs
-//     `g_normal_metallic`/`g_position_roughness`/`u_hiz_map`/`u_scene_color`
-//     declared first -- see transparent.frag's own include order for the
-//     canonical sequence this file assumes was already followed).
+//     <gfx/spot_light.glsl>, "indirect_hooks.glsl", <gfx/ssr_trace_body.glsl>
+//     (which itself needs `g_normal_metallic`/`g_position_roughness`/
+//     `u_hiz_map`/`u_scene_color` declared first -- see transparent.frag's
+//     own include order for the canonical sequence this file assumes was
+//     already followed).
 //
-// calc_dir_shadow()/calc_point_shadow() themselves come from "pixel_shadow_body.glsl",
-// included below -- this file used to carry its own gfx_forward_calc_* copies, byte-identical
-// to pixel_lighting.frag's and gfx/surface/capture_fs.glsl's; see that file's doc for why
-// they were unified.
+// calc_dir_shadow()/calc_point_shadow()/calc_spot_shadow() themselves come from
+// "pixel_shadow_body.glsl", included below -- this file used to carry its own
+// gfx_forward_calc_* copies, byte-identical to pixel_lighting.frag's and
+// gfx/surface/capture_fs.glsl's; see that file's doc for why they were unified.
 
 /// Per-fragment material inputs to gfx_pixel_forward_shade() -- the subset
 /// of PBRMaterial a forward-shaded surface (mesh or SDF) needs, regardless
@@ -185,6 +188,37 @@ vec4 gfx_pixel_forward_shade(vec3 world_pos, vec3 N, vec3 camera_pos, mat4 view,
         vec3 shadow_bias_pos = world_pos + N * 0.02;
         float shadow = (i == 0u && pl.attenuation.w > 0.5)
             ? calc_point_shadow(pl.position_range.xyz - shadow_bias_pos, range) : 0.0;
+
+        Lo += gfx_forward_shade_light(N, V, L, radiance, albedo, metallic, roughness, F0, shadow, p);
+    }
+
+    uint num_spots = min(lights.light_counts.z, 8u);
+    for (uint i = 0u; i < num_spots; ++i) {
+        SpotLight sl = lights.spot_lights[i];
+        vec3 frag_to_light = sl.position_range.xyz - world_pos;
+        float dist = length(frag_to_light);
+        float range = sl.position_range.w;
+        if (dist > range || dist < 0.0001) continue;
+
+        vec3 L = frag_to_light / dist;
+        float cone = gfx_spot_cone(L, sl.direction_cone.xyz, sl.direction_cone.w, sl.params.y);
+        if (cone <= 0.0) continue;
+
+        // Identical distance curve to the point loop directly above -- see
+        // gfx/spot_light.glsl's file doc on why that curve isn't shared here.
+        float sharpness = max(sl.params.x, 0.1);
+        float factor = clamp(dist / range, 0.0, 1.0);
+        float falloff = clamp(1.0 - pow(factor, sharpness), 0.0, 1.0);
+        falloff *= falloff;
+        float attenuation = falloff / (4.0 * BRDF_PI * (factor * factor + 1.0));
+        vec3 radiance = sl.color_intensity.rgb * (sl.color_intensity.w * 0.08) * attenuation * cone;
+
+        float shadow = 0.0;
+        if (i == lights.light_counts.w && sl.params.z > 0.5) {
+            float normal_bias_scale = clamp(1.0 - dot(N, L), 0.0, 1.0);
+            vec3 biased_pos = world_pos + N * (lights.spot_shadow_params.w * (0.5 + 0.5 * normal_bias_scale));
+            shadow = calc_spot_shadow(lights.spot_light_space_matrix * vec4(biased_pos, 1.0), N, L);
+        }
 
         Lo += gfx_forward_shade_light(N, V, L, radiance, albedo, metallic, roughness, F0, shadow, p);
     }

@@ -192,11 +192,13 @@ struct AppConfig {
                 if (r.contains("shadows_enabled"))        config.render.shadows_enabled        = r.at("shadows_enabled").get_value<bool>();
                 if (r.contains("shadow_map_resolution"))  config.render.shadow_map_resolution  = r.at("shadow_map_resolution").get_value<uint32_t>();
                 if (r.contains("cube_shadow_resolution")) config.render.cube_shadow_resolution = r.at("cube_shadow_resolution").get_value<uint32_t>();
+                if (r.contains("spot_shadow_resolution")) config.render.spot_shadow_resolution = r.at("spot_shadow_resolution").get_value<uint32_t>();
                 if (r.contains("shadow_bias"))            config.render.shadow_bias            = r.at("shadow_bias").get_value<float>();
                 if (r.contains("shadow_distance"))        config.render.shadow_distance        = r.at("shadow_distance").get_value<float>();
                 if (r.contains("soft_shadows"))            config.render.soft_shadows            = r.at("soft_shadows").get_value<bool>();
                 if (r.contains("shadow_softness"))         config.render.shadow_softness         = r.at("shadow_softness").get_value<float>();
                 if (r.contains("point_shadow_softness"))   config.render.point_shadow_softness   = r.at("point_shadow_softness").get_value<float>();
+                if (r.contains("spot_shadow_softness"))    config.render.spot_shadow_softness    = r.at("spot_shadow_softness").get_value<float>();
                 if (r.contains("shadow_pcf_samples"))      config.render.shadow_pcf_samples      = r.at("shadow_pcf_samples").get_value<uint32_t>();
 
                 // --- Outline ---

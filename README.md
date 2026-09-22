@@ -48,9 +48,15 @@ pixelated look.
   a stage of its own at the end of the frame (see [toyengine/render/README.md](toyengine/render/README.md#ui-layers)).
   `assets/scenes/world_canvas_test/` is the demo — a cube with a health bar floating above it,
   a rotated wall plate, and a screen-space HUD.
+- **Streamed 3D tile terrain** ([`toyengine/world/`](toyengine/world/README.md)) — a
+  [mapcoopa](libs/mapcoopa) world (elevation, biomes, rivers) generated from a seed at load,
+  sampled into height columns, and built into one merged GPU mesh per chunk on the job system,
+  streamed around the camera. Each tile *side* is an authored mesh asset rotated onto its face,
+  so the blocky default and a chamfered or smooth tile set differ by one key in scene YAML, not
+  by any code. `assets/scenes/terrain_test/` is the demo — `cplay terrain_test`.
 - **Orbit/fly camera controller**, YAML scene format (shared with blendy),
   nearest-filtered texture loading, headless `ONESHOT`/`MAX_FRAMES` capture.
-- **Anti-aliasing** (`aa_mode`, default `off`) — FXAA 3.11, SMAA 1x, or TAA,
+- **Anti-aliasing** (`aa_mode`, `smaa` in `assets/config.yaml`) — FXAA 3.11, SMAA 1x, or TAA,
   ported from [blendy](../blendy)'s PbrRenderPipeline and run at the internal
   low resolution, before the upscale (see `PixelRenderConfig::aa_mode`).
   `off` is a true no-op: no extra target is allocated and the frame is
@@ -66,6 +72,17 @@ pixelated look.
   blendy's TAA has no motion vectors or history reprojection (history is
   sampled at the current frame's UV and clamped to a YCoCg 3×3 AABB), so it
   ghosts under camera motion.
+  **It also never converges.** The jitter is an 8-frame Halton cycle, so with a static camera
+  the whole render is exactly 8-periodic — and an exponential history blend converges a
+  *periodic* input to a periodic orbit, not to a fixed point. The image cycles forever with an
+  amplitude of roughly `(1 - taa_blending_weight)` times the per-phase difference. That is
+  invisible on smooth geometry and plainly visible as boiling on high-frequency geometry
+  (`terrain_test`'s block faces), which is why `assets/config.yaml` ships `smaa` rather than
+  `taa`; see that key's comment for the measurements, and
+  `test_static_camera_converges_to_a_static_image` in `test.cpp` for the regression guard.
+  Raising the blend weight only scales the orbit down — it cannot remove it, because the input
+  is deterministic rather than noise. Fixing this properly means motion vectors and history
+  reprojection.
 
 Explicitly **not** included: GI probes, reflection probes, and MSAA (blendy's
 own `msaa_4x` is parsed but never read by its render pipeline, so there was
@@ -139,10 +156,12 @@ toyengine/
 ├── scene/      CameraController (orbit/fly) + its SceneLoader registration
 ├── render/     PixelRenderPipeline, PixelRenderConfig, pixel_math,
 │               InstanceStream, and every pass in render/passes/
+├── world/      Streamed 3D tile terrain built from a mapcoopa world:
+│               TerrainSampler, TileMeshLibrary, the chunk mesher, TerrainSystem
 └── util/       screenshot.h (Vulkan image -> PNG)
 
 libs/           pinned submodules: libcoopa, gfxcoopa, physxcoopa,
-                sfxcoopa, caml, uicoopa
+                sfxcoopa, caml, uicoopa, mapcoopa
 ```
 
 See each subdirectory's own README for details on that module.

@@ -537,7 +537,9 @@ public:
         // independent pyramid with construction-fixed descriptors, so it needs neither this chain
         // nor the wait below.
         bool need_ssr_trace_inputs = config_.ssr_enabled || config_.transparency_enabled
-                                    || config_.ssr_reflect_transparent;
+                                    || config_.ssr_reflect_transparent
+                                    // ssao.frag marches the same Hi-Z pyramid.
+                                    || config_.ssao_enabled;
 
         // ssao_debug_view is a runtime flag (re-read every frame, same policy as ssr_enabled):
         // when set, ssao_debug_pass_ replaces pixel_lighting_pass_/skybox_pass_ below, and the
@@ -640,8 +642,9 @@ private:
          *  transparent.frag traces the same ones ssr.frag does, so this is wider than
          *  ssr_enabled alone. Also the flag that pays for the one per-frame wait_idle(). */
         bool need_ssr_trace_inputs = false;
-        /** ssao_debug_view: replaces lighting with a raw occlusion visualization, which leaves
-         *  the SSR composite and the forward transparent pass with nothing to composite onto. */
+        /** ssao_debug_view: replaces lighting with a raw occlusion visualization. The forward
+         *  transparent pass is skipped (nothing sensible to composite onto); the SSR composite
+         *  still runs, because the post chain reads its output whenever ssr_enabled. */
         bool ao_debug = false;
         bool cast_dir_shadow   = false;
         bool cast_point_shadow = false;
@@ -804,9 +807,8 @@ private:
             config_.shaders("ssao_resolve.frag"),
             config_.shaders("ssao_blur.frag"));
         ssao_pass_->recreate(render_extent_.width, render_extent_.height);
-        // Bound once: update_descriptors() calls bind_image(), and g1/g2 never change anyway
-        // (render_extent_ is startup-fixed). See rule 1 in the file doc.
-        ssao_pass_->update_descriptors(gbuffer_target_.g1_view_typed(), gbuffer_target_.g2_view_typed(), linear_sampler_);
+        // update_descriptors() happens in build_ssr_chain_(): the raw pass marches the Hi-Z
+        // pyramid, which is not constructed yet at this point in the ctor sequence.
 
         // ssao_enabled is a load-time config value (no live reload), so which image to bind is
         // decided once here rather than every frame -- see the update_descriptors comment above
@@ -858,6 +860,13 @@ private:
             config_.shaders("fullscreen.vert"),
             config_.shaders("hiz_downsample.frag"));
         hiz_pass_->recreate(render_extent_.width, render_extent_.height);
+
+        // Bound once: bind_image() semantics, and every view here is startup-fixed
+        // (render_extent_ never changes). Deferred from the SSAO construction site above
+        // because the raw pass's set includes the Hi-Z pyramid built just now.
+        ssao_pass_->update_descriptors(gbuffer_target_.g1_view_typed(), gbuffer_target_.g2_view_typed(),
+                                       hiz_pass_->full_hiz_view_typed(), hiz_pass_->sampler(),
+                                       linear_sampler_);
 
         scene_color_mip_pass_ = std::make_unique<coopa::gfx::engine::passes::SceneColorMipPass>(
             device_, allocator_,
@@ -1314,19 +1323,89 @@ private:
                 transparent_scene_color_mip_pass_->full_view_typed(), transparent_scene_color_mip_pass_->sampler());
         }
 
+        // The AO sample jitter advances EVERY frame the accumulator is running, still or
+        // moving -- the resolved image is then always the same many-frame average, so
+        // stopping the camera cannot reveal a different-looking AO (the artifact every
+        // "moving vs still" state split produced). Only once the camera has been still for
+        // kTemporalFreezeAfter frames do the stochastic terms freeze -- the AO jitter
+        // (together with the resolve's verbatim history hold) and SSR/SSGI's ray jitter --
+        // which is what makes a resting image byte-static (the static_camera_converges /
+        // image_settles_after_camera_stops contracts). Motion is tested on the UNJITTERED
+        // view-projection: TAA's sub-pixel jitter changes proj every frame by design, and a
+        // pure equality check would report motion forever on the last bits of a smoothed
+        // camera easing to rest, hence the epsilon.
+        {
+            const glm::mat4 vp = ctx.unjittered_proj * ctx.view;
+            float delta = 0.0f;
+            for (int c = 0; c < 4; ++c) {
+                for (int r = 0; r < 4; ++r) {
+                    delta = std::max(delta, std::abs(vp[c][r] - ssao_prev_unjittered_vp_[c][r]));
+                }
+            }
+            const bool moved      = delta > 1e-4f;
+            // Approximate image-space camera speed for the AO blur's velocity widening: the
+            // rotation angle between this frame's view and the last, converted to pixels at
+            // the screen centre. Translation-only motion under-reports here, which is fine --
+            // rotation is what sweeps AO detail across the grid fastest.
+            {
+                const glm::mat3 r_prev(ssao_prev_view_);
+                const glm::mat3 r_cur(ctx.view);
+                const float tr    = glm::clamp((r_prev[0][0]*r_cur[0][0] + r_prev[0][1]*r_cur[0][1] + r_prev[0][2]*r_cur[0][2]
+                                              + r_prev[1][0]*r_cur[1][0] + r_prev[1][1]*r_cur[1][1] + r_prev[1][2]*r_cur[1][2]
+                                              + r_prev[2][0]*r_cur[2][0] + r_prev[2][1]*r_cur[2][1] + r_prev[2][2]*r_cur[2][2]
+                                              - 1.0f) * 0.5f, -1.0f, 1.0f);
+                const float angle = std::acos(tr);
+                ssao_motion_px_   = angle * ctx.proj[1][1] * 0.5f * static_cast<float>(render_extent_.height);
+                ssao_prev_view_   = ctx.view;
+            }
+            camera_frames_still_  = moved ? 0u : camera_frames_still_ + 1u;
+            temporal_frozen_      = camera_frames_still_ > kTemporalFreezeAfter;
+            if (!temporal_frozen_) {
+                ++ssao_rotation_index_;
+                // SSR/SSGI's stochastic ray jitter freezes on the same signal: its temporal
+                // resolve is a plain EMA, and an EMA of a per-frame-rejittered input can only
+                // orbit that input forever -- measured as a perpetual ~0.03 level/px shimmer
+                // at rest that survives everything else being byte-static (and reads as "the
+                // AO keeps recalculating", since it is strongest in creases and contact
+                // regions where SSGI carries the most energy).
+                ++ssr_jitter_index_;
+            }
+            ssao_prev_unjittered_vp_ = vp;
+        }
+
         if (config_.ssao_enabled) {
             coopa::gfx::engine::passes::SsaoPass::Params ssao_params{};
             ssao_params.radius               = config_.ssao_radius;
             ssao_params.bias                 = config_.ssao_bias;
             ssao_params.power                = config_.ssao_power;
-            ssao_params.kernel_size          = config_.ssao_kernel_size;
-            ssao_params.noise_scale_x        = static_cast<float>(render_extent_.width)  / 4.0f;
-            ssao_params.noise_scale_y        = static_cast<float>(render_extent_.height) / 4.0f;
-            ssao_params.noise_rotation        = static_cast<int>(frame_index_ & 0x7u);
+            ssao_params.slices               = config_.ssao_slices;
+            ssao_params.steps                = config_.ssao_steps;
+            ssao_params.max_radius_px        = config_.ssao_max_radius_px;
+            ssao_params.blur_plane_sigma     = config_.ssao_blur_plane_sigma;
+            // The jittered proj: it rendered the depth buffer the Hi-Z pyramid mirrors, so
+            // reconstruction has to invert exactly it.
+            ssao_params.inv_proj             = glm::inverse(ctx.proj);
+            ssao_params.max_mip              = static_cast<int>(hiz_pass_->max_mip_level());
+            // ssao_rotation_index_, not frame_index_: the AO slice rotation must hold still
+            // whenever the camera does, or ssao_resolve.frag's accumulator has a fresh estimate
+            // to chase every frame and never converges -- the image would keep visibly settling
+            // for dozens of frames after the camera stopped. See that member's own doc.
+            //
+            // 0xFF, NOT 0x7. The mask is the PERIOD of the rotation, and at 8 it would be exactly
+            // apply_taa_jitter_()'s Halton period, phase-locking the two so every 8th frame
+            // reproduced both identically -- which defeats the decorrelation ssao.frag's comment
+            // says this rotation exists to provide. 256 matches what SSR (ssr_params.frame_index
+            // below) and the shadow PCF rotation (dir_shadow_extra.w) use, so no per-frame term
+            // shares a period with the jitter.
+            ssao_params.noise_rotation        = static_cast<int>(ssao_rotation_index_ & 0xFFu);
             ssao_params.temporal_enabled     = config_.ssao_temporal_enabled;
-            ssao_params.temporal_blend       = config_.ssao_temporal_blend;
+            ssao_params.temporal_frames      = config_.ssao_temporal_frames;
             ssao_params.prev_view_proj       = prev_view_proj_;
             ssao_params.prev_view_proj_valid = prev_view_proj_valid_;
+            // The eye ssao_resolve.frag measures its stored distance channel against.
+            ssao_params.camera_pos           = ctx.cam_pos;
+            ssao_params.frozen               = temporal_frozen_;
+            ssao_params.motion_px            = ssao_motion_px_;
             ssao_pass_->execute(cmd, current_camera_set(), ssao_params);
         } else {
             ssao_pass_->invalidate_history();
@@ -1354,6 +1433,7 @@ private:
             lighting_pc.ambient_intensity = config_.indirect.ambient_intensity;
             lighting_pc.sky_intensity     = config_.indirect.sky_intensity;
             lighting_pc.soft_lighting     = config_.soft_lighting ? 1.0f : 0.0f;
+            lighting_pc.ssao_direct_strength = config_.ssao_direct_lighting_strength;
             // gfxcoopa's DeferredLightingPass::draw() pushes this internally now (the
             // templated overload), after its own bind_pipeline() -- no separate push needed.
             pixel_lighting_pass_->draw(cmd, current_camera_set(), current_light_set(), *shadow_set_, lighting_pc,
@@ -1372,7 +1452,12 @@ private:
             scene_color_mip_pass_->execute(cmd, offscreen_target_.color_view_typed());
         }
 
-        if (config_.ssr_enabled && !ctx.ao_debug) {
+        // Runs in ao_debug frames too: with ssr_enabled, the whole post chain reads
+        // ssr_pass_'s composite output (see ssr_input in build_post_chain_), so skipping the
+        // composite would hand pixel_stylize a never-written image and the debug view would
+        // come out black. Reflections composited over the occlusion visualization are minor
+        // pollution on a diagnostic; an unreadable diagnostic is worse.
+        if (config_.ssr_enabled) {
             coopa::gfx::engine::passes::SsrPass::Params ssr_params{};
             ssr_params.proj              = ctx.proj;
             ssr_params.max_iterations    = config_.ssr_max_iterations;
@@ -1390,9 +1475,12 @@ private:
             ssr_params.temporal_gamma    = config_.ssr_temporal_gamma;
             ssr_params.ssr_blur_radius   = config_.ssr_blur_radius;
             ssr_params.jitter_strength   = config_.ssr_jitter;
-            // Longer period than SSAO's noise_rotation (& 0x7) -- matches ssr_ign2()'s
-            // own `frame & 0xFF` mask in gfx/ssr_common.glsl.
-            ssr_params.frame_index       = static_cast<int>(frame_index_ & 0xFFu);
+            // Matches ssr_ign2()'s own `frame & 0xFF` mask in gfx/ssr_common.glsl -- and the
+            // same 256 period SSAO's noise_rotation and the shadow PCF rotation use, so no
+            // per-frame term in this pipeline shares a period with the TAA jitter.
+            // ssr_jitter_index_, not frame_index_: held at rest (see the freeze block above)
+            // so the resolve's input goes constant and its accumulator can actually converge.
+            ssr_params.frame_index       = static_cast<int>(ssr_jitter_index_ & 0xFFu);
             // Fed from the SAME config_.indirect instance as lighting_pc above -- see
             // IndirectParams' doc (render_features.h) for why this must stay one source.
             ssr_params.sky_intensity     = config_.indirect.sky_intensity;
@@ -2072,6 +2160,13 @@ private:
      * An 8-frame Halton(2,3) sequence added to the projection's jitter terms
      * (proj[2][0]/[2][1]), not a [3][*] translation. Callers keep an unjittered copy for the
      * consumers that must not see it -- see render()'s own comment on that rule.
+     *
+     * The sequence length is deliberately SHORT, and lengthening it is a trap worth naming. A
+     * periodic jitter makes the whole render periodic, and TaaPass's exponential history blend is
+     * a low-pass filter: it attenuates a HIGH-frequency cycle more than a low-frequency one. A
+     * 16-entry table therefore leaves MORE residual flicker than this 8-entry one, not less
+     * (measured). The periodicity itself is what cannot be filtered away -- see config.yaml's
+     * `aa_mode` for why this engine does not ship TAA as its default.
      */
     void apply_taa_jitter_(glm::mat4& proj) {
         if (config_.aa_mode == "taa") {
@@ -2609,8 +2704,14 @@ private:
         const float dir_pcf_radius_texels = config_.soft_shadows
             ? std::min(config_.shadow_softness / std::max(fit.texel_world, 1e-6f), 12.0f)
             : 0.0f;
-        ubo.dir_shadow_params = glm::vec4(config_.shadow_bias, dir_pcf_radius_texels,
-                                          cast_dir_shadow ? 1.0f : 0.0f, 0.05f);
+        // .w is the normal-offset bias, in world units, derived from THIS frame's texel size --
+        // the same per-frame conversion .y just did for the PCF radius, and for the same reason:
+        // a world-space constant here means a different number of texels in every scene and at
+        // every fit. See compute_shadow_normal_bias().
+        ubo.dir_shadow_params = glm::vec4(
+            config_.shadow_bias, dir_pcf_radius_texels, cast_dir_shadow ? 1.0f : 0.0f,
+            compute_shadow_normal_bias(dir_pcf_radius_texels, config_.shadow_normal_bias,
+                                       fit.texel_world));
     }
 
     /** @brief The first PointLightComponent with cast_shadows set, or nullptr. */
@@ -2663,6 +2764,11 @@ private:
         }
         ubo.spot_shadow_params.x = config_.shadow_bias;
         ubo.spot_shadow_params.z = cast_spot_shadow ? 1.0f : 0.0f;
+        // Still a world-space constant, unlike the directional .w above, and deliberately so: a
+        // spot map is a PERSPECTIVE projection, so its texel world size varies with distance from
+        // the light and there is no single texel_world to convert against. Doing this properly
+        // needs the per-pixel texel size derived in-shader from depth; until then a constant is
+        // honest, and no scene in this repo lights blocky terrain with a shadow-casting spot.
         ubo.spot_shadow_params.w = 0.05f;
     }
 
@@ -3456,6 +3562,35 @@ private:
     // regardless of aa_mode (SSAO/SSR/gfx_time all depend on it). Mirrors blendy's own
     // frame_index_/ssao_frame_index_ split (see PbrRenderPipeline).
     uint32_t taa_jitter_index_ = 0;
+    // SSAO kernel-rotation phase, advanced only on frames where the camera's UNJITTERED
+    // view-projection changed -- see record_scene_()'s SSAO block. Separate from frame_index_
+    // for the same reason taa_jitter_index_ is: that counter must keep advancing every frame
+    // because SSR and gfx_time depend on it, while this one must be able to stand still.
+    //
+    // Standing still is what lets ssao_resolve.frag's exponential history blend converge. With a
+    // constant raw input the blend is a geometric series onto a fixed point (byte-static well
+    // inside a second at 0.85); with an input that changes every frame it can only ever orbit,
+    // which reads as AO that never finishes settling.
+    uint32_t  ssao_rotation_index_ = 0;
+    glm::mat4 ssao_prev_unjittered_vp_{0.0f};
+    /** Consecutive frames the camera has been still, and whether that has crossed the freeze
+     *  threshold. While frozen every stochastic per-frame term holds -- the AO sample jitter
+     *  (with its resolve keeping accepted-history pixels verbatim) and the SSR/SSGI ray
+     *  jitter -- so each temporal accumulator's input goes constant and the image can reach
+     *  byte-static. The AO hold freezes the accumulated AVERAGE, so there is no look change
+     *  at the freeze boundary, just a stop to sub-level residual updates. */
+    uint32_t  camera_frames_still_ = 0;
+    bool      temporal_frozen_     = false;
+    /** Still frames before freezing. Small enough that image_settles_after_camera_stops'
+     *  eight-frame budget is met with margin; the pre-freeze frames only add 1/(count+1)-scale
+     *  residuals, which that test's threshold tolerates. */
+    static constexpr uint32_t kTemporalFreezeAfter = 4;
+    /** SSR/SSGI stochastic jitter counter -- frame_index_ gated on temporal_frozen_. */
+    uint32_t  ssr_jitter_index_    = 0;
+    /** Rotation between consecutive views, as pixels swept at the screen centre -- drives the
+     *  AO blur's velocity widening (SsaoPass::Params::motion_px). */
+    float     ssao_motion_px_      = 0.0f;
+    glm::mat4 ssao_prev_view_{1.0f};
     // Physics collider/contact-normal gizmo overlay. Always constructed;
     // config_.debug_lines_enabled gates only whether render() calls draw(). debug_lines_ is
     // filled by the caller once per frame before render() -- this pass is kept physxcoopa-free

@@ -26,7 +26,7 @@ namespace render {
 
 /**
  * @struct PixelLightingPushConstants
- * @brief Matches pixel_lighting.frag's PixelParams push-constant block (24 bytes).
+ * @brief Matches pixel_lighting.frag's PixelParams push-constant block (28 bytes).
  *
  * This engine's own cel-shading tuning. gfxcoopa's DeferredLightingPass takes a trailing
  * push-constant range list, so declaring this block needs no fork of that pass.
@@ -40,6 +40,9 @@ struct PixelLightingPushConstants {
     /// > 0.5 selects smooth Cook-Torrance direct lighting; otherwise the banded look
     /// (light_bands-quantized diffuse, spec_threshold-masked specular).
     float soft_lighting     = 0.0f;
+    /// How much occlusion darkens direct lighting (Unity HDRP's Direct Lighting
+    /// Strength): 0 = occlusion affects indirect only, 1 = full-strength on direct too.
+    float ssao_direct_strength = 0.25f;
 };
 
 /**

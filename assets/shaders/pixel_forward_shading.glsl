@@ -150,7 +150,8 @@ vec4 gfx_pixel_forward_shade(vec3 world_pos, vec3 N, vec3 camera_pos, mat4 view,
     float metallic  = mat.metallic;
     float roughness = mat.roughness;
     float ao        = mat.ao;
-    const float ssao = 1.0; // no screen-space AO for any forward-shaded surface
+    // No screen-space AO for any forward-shaded surface (matching HDRP, whose SSAO
+    // buffer only applies to opaques) -- material AO alone feeds the occlusion terms.
 
     vec3 V = normalize(camera_pos - world_pos);
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
@@ -234,7 +235,13 @@ vec4 gfx_pixel_forward_shade(vec3 world_pos, vec3 N, vec3 camera_pos, mat4 view,
     GfxIndirectSpecular ind = gfx_indirect_specular(world_pos, N, V, F0, roughness, p.sky_intensity,
                                                     lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb);
     vec3 kD_ind = (vec3(1.0) - ind.F) * (1.0 - metallic);
-    vec3 ambient = (kD_ind * albedo * ind_diff + ind.value) * ao * ssao;
+    // Same HDRP-style occlusion composite as pixel_lighting.frag (gfx/ao_composite.glsl):
+    // multi-bounce diffuse occlusion, F0-tinted specular occlusion cone. ao_spec also
+    // scales the SSR delta below, mirroring ssr_composite_body.glsl's opaque path.
+    vec3  ao_diffuse = gfx_gtao_multi_bounce(ao, albedo);
+    float spec_occ   = gfx_specular_occlusion(max(dot(N, V), 0.0), ao, roughness);
+    vec3  ao_spec    = gfx_gtao_multi_bounce(spec_occ, F0);
+    vec3 ambient = kD_ind * albedo * ind_diff * ao_diffuse + ind.value * ao_spec;
 
     if (p.ssr_enabled != 0.0) {
         GfxSsrParams sp;
@@ -315,7 +322,7 @@ vec4 gfx_pixel_forward_shade(vec3 world_pos, vec3 N, vec3 camera_pos, mat4 view,
         vec3 delta = ssr_specular - confidence * ind.value;
         float dark_trust = smoothstep(0.05, 0.45, ssr_ndv);
         delta = mix(max(delta, vec3(0.0)), delta, dark_trust);
-        ambient = max(ambient + delta * ao * ssao, 0.0);
+        ambient = max(ambient + delta * ao_spec, 0.0);
 
         if (p.ssgi_intensity > 0.0) {
             vec4 bounce_clip = proj * view * vec4(world_pos + N * p.ssgi_distance, 1.0);
@@ -334,7 +341,7 @@ vec4 gfx_pixel_forward_shade(vec3 world_pos, vec3 N, vec3 camera_pos, mat4 view,
                 // brighter) while its neighbour's missed (no bounce). The fallback
                 // filling misses in makes this weight smooth again.
                 ambient += kD_ind * albedo * bounce * (edge.x * edge.y) * confidence
-                         * p.ssgi_intensity * ao * ssao;
+                         * p.ssgi_intensity * ao_diffuse;
             }
         }
     }

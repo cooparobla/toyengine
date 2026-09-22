@@ -17,6 +17,7 @@
 #include <gfx/brdf.glsl>
 #include <gfx/shadow_sampling.glsl>
 #include <gfx/indirect_specular.glsl>
+#include <gfx/ao_composite.glsl>
 #include <gfx/spot_light.glsl>
 
 // Forward-shaded capture of transparent geometry -- NOT a visible draw. Feeds a second
@@ -200,7 +201,8 @@ void main() {
     float metallic  = material.metallic  * mr.x;
     float roughness = material.roughness * mr.y;
     float ao        = material.ao;
-    const float ssao = 1.0; // no screen-space AO for this forward capture pass either
+    // No screen-space AO for this forward capture pass (matching HDRP, whose SSAO buffer
+    // only applies to opaques) -- material AO alone feeds the occlusion terms below.
 
     // Tangent-space normal map rotated into world space -- see gbuffer_fs.glsl's identical
     // derivation and its doc on why the flat-normal fallback round-trips to frag_world_normal
@@ -298,7 +300,12 @@ void main() {
     GfxIndirectSpecular ind = gfx_indirect_specular(frag_world_pos, N, V, F0, roughness, material.sky_intensity,
                                                     lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb);
     vec3 kD_ind = (vec3(1.0) - ind.F) * (1.0 - metallic);
-    vec3 ambient = (kD_ind * albedo * ind_diff + ind.value) * ao * ssao;
+    // Same HDRP-style occlusion composite as pixel_lighting.frag (gfx/ao_composite.glsl):
+    // multi-bounce diffuse occlusion and an F0-tinted specular occlusion cone. No direct
+    // term -- with material AO only, direct darkening would double-count baked shadowing.
+    float spec_occ = gfx_specular_occlusion(max(dot(N, V), 0.0), ao, roughness);
+    vec3 ambient = kD_ind * albedo * ind_diff * gfx_gtao_multi_bounce(ao, albedo)
+                 + ind.value * gfx_gtao_multi_bounce(spec_occ, F0);
 
     out_shaded_color      = vec4(ambient + Lo, 1.0);
     out_normal_metallic   = vec4(N, metallic);

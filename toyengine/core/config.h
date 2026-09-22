@@ -194,6 +194,7 @@ struct AppConfig {
                 if (r.contains("cube_shadow_resolution")) config.render.cube_shadow_resolution = r.at("cube_shadow_resolution").get_value<uint32_t>();
                 if (r.contains("spot_shadow_resolution")) config.render.spot_shadow_resolution = r.at("spot_shadow_resolution").get_value<uint32_t>();
                 if (r.contains("shadow_bias"))            config.render.shadow_bias            = r.at("shadow_bias").get_value<float>();
+                if (r.contains("shadow_normal_bias"))     config.render.shadow_normal_bias     = r.at("shadow_normal_bias").get_value<float>();
                 if (r.contains("shadow_distance"))        config.render.shadow_distance        = r.at("shadow_distance").get_value<float>();
                 if (r.contains("soft_shadows"))            config.render.soft_shadows            = r.at("soft_shadows").get_value<bool>();
                 if (r.contains("shadow_softness"))         config.render.shadow_softness         = r.at("shadow_softness").get_value<float>();
@@ -224,9 +225,15 @@ struct AppConfig {
                 if (r.contains("ssao_radius"))           config.render.ssao_radius           = r.at("ssao_radius").get_value<float>();
                 if (r.contains("ssao_bias"))             config.render.ssao_bias             = r.at("ssao_bias").get_value<float>();
                 if (r.contains("ssao_power"))            config.render.ssao_power            = r.at("ssao_power").get_value<float>();
-                if (r.contains("ssao_kernel_size"))      config.render.ssao_kernel_size      = r.at("ssao_kernel_size").get_value<int>();
+                if (r.contains("ssao_slices"))           config.render.ssao_slices           = r.at("ssao_slices").get_value<int>();
+                if (r.contains("ssao_steps"))            config.render.ssao_steps            = r.at("ssao_steps").get_value<int>();
+                if (r.contains("ssao_max_radius_px"))    config.render.ssao_max_radius_px    = r.at("ssao_max_radius_px").get_value<float>();
+                if (r.contains("ssao_blur_plane_sigma")) config.render.ssao_blur_plane_sigma = r.at("ssao_blur_plane_sigma").get_value<float>();
+                if (r.contains("ssao_direct_lighting_strength"))
+                    config.render.ssao_direct_lighting_strength = r.at("ssao_direct_lighting_strength").get_value<float>();
+
                 if (r.contains("ssao_temporal_enabled")) config.render.ssao_temporal_enabled = r.at("ssao_temporal_enabled").get_value<bool>();
-                if (r.contains("ssao_temporal_blend"))   config.render.ssao_temporal_blend   = r.at("ssao_temporal_blend").get_value<float>();
+                if (r.contains("ssao_temporal_frames"))  config.render.ssao_temporal_frames  = r.at("ssao_temporal_frames").get_value<int>();
 
                 // --- SSR + SSGI ---
                 if (r.contains("ssr_max_distance"))     config.render.ssr_max_distance     = r.at("ssr_max_distance").get_value<float>();

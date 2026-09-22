@@ -232,6 +232,9 @@ private:
         } else {
             float alpha = 1.0f - std::exp(-follow_smoothing * dt);
             smoothed_target_ += (desired - smoothed_target_) * alpha;
+            // Same deadband reasoning as the movement_smoothing block below: finish the chase
+            // once the error is sub-visible instead of ulp-walking forever.
+            if (glm::length(desired - smoothed_target_) < 1e-4f) smoothed_target_ = desired;
         }
 
         yaw_deg += mouse_delta.x * mouse_sensitivity * (invert_x ? -1.0f : 1.0f);
@@ -262,6 +265,15 @@ private:
             smoothed_yaw_deg_   += (yaw_deg - smoothed_yaw_deg_) * alpha;
             smoothed_pitch_deg_ += (pitch_deg - smoothed_pitch_deg_) * alpha;
             smoothed_distance_  += (distance - smoothed_distance_) * alpha;
+            // Deadband: an exponential chase never finishes on its own -- once the remaining
+            // error is far below anything visible, float rounding turns the update into a
+            // perpetual ulp-scale walk of the pose, and that micro-creep re-rasterizes the
+            // scene minutely differently every frame FOREVER after input stops, keeping every
+            // temporal filter downstream (AO accumulation, SSGI, edge antialiasing) churning
+            // at rest. Snap to the target once the error is sub-visible so rest is rest.
+            if (std::abs(yaw_deg   - smoothed_yaw_deg_)   < 1e-3f) smoothed_yaw_deg_   = yaw_deg;
+            if (std::abs(pitch_deg - smoothed_pitch_deg_) < 1e-3f) smoothed_pitch_deg_ = pitch_deg;
+            if (std::abs(distance  - smoothed_distance_)  < 1e-4f) smoothed_distance_  = distance;
         }
 
         float e = glm::radians(smoothed_pitch_deg_);

@@ -44,8 +44,13 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
+#include <functional>
+#include <limits>
+#include <random>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <iterator>
 #include <string>
@@ -56,8 +61,15 @@
 
 #include <gfxcoopa/util/image_readback.h>
 
+#include <coopa/debug/logger.h>
+#include <coopa/maps/map_generator.h>
+
 #include <toyengine/core/engine.h>
 #include <toyengine/render/pixel_math.h>
+#include <toyengine/scene/free_mover.h>
+#include <toyengine/world/terrain_chunk.h>
+#include <toyengine/world/terrain_component.h>
+#include <toyengine/world/terrain_sampler.h>
 #include <toyengine/scene/cloth_renderer.h>
 #include <toyengine/scene/health_driver.h>
 #include <toyengine/scene/kinematic_control_system.h>
@@ -1136,6 +1148,119 @@ void test_kinematic_controller_moves_on_input_and_holds_height() {
                 "kinematic_controller: diagonal input is clamped to move_speed, not sqrt(2) faster");
 }
 
+/**
+ * @brief Builds a one-object scene whose only component is a FreeMover, plus a Transform.
+ *
+ * No system to install, unlike make_controller_scene() above: FreeMover does its work in the
+ * ordinary update() at UpdatePhase::Behaviour, because it drives nothing physical and so has no
+ * reason to be hoisted ahead of the physics phase -- see free_mover.h's file doc.
+ */
+std::unique_ptr<Scene> make_free_mover_scene(toy::scene::FreeMover** out_fm,
+                                             const glm::vec3& seed_pos) {
+    auto scene = std::make_unique<Scene>("free_mover_test");
+    auto obj = std::make_unique<SceneObject>("focus_marker");
+    obj->add_component<TransformComponent>()->transform().set_position(seed_pos);
+    *out_fm = obj->add_component<toy::scene::FreeMover>();
+    scene->add_root_object(std::move(obj));
+    return scene;
+}
+
+void test_free_mover_travels_on_all_three_axes() {
+    toy::scene::FreeMover* fm = nullptr;
+    auto scene = make_free_mover_scene(&fm, glm::vec3(0.0f));
+    fm->move_speed = 6.0f;
+    fm->smoothing = 0.0f; // instant, so travelled distance is exactly speed * time
+    scene->start();
+
+    auto* tc = scene->root_objects()[0]->get_transform();
+
+    // Vertical is the axis KinematicController deliberately does not have -- it holds its
+    // authored height -- so it is the one worth checking first here.
+    fm->move_input = glm::vec3(0.0f, 0.0f, 1.0f);
+    for (int i = 0; i < 60; ++i) scene->update(1.0f / 60.0f);
+    glm::vec3 p = tc->transform().position();
+    expect_near(p.z, 6.0f, 0.05f, "free_mover: +Z input for 1 s rises move_speed units");
+    expect(std::fabs(p.x) < 1e-5f && std::fabs(p.y) < 1e-5f,
+           "free_mover: pure +Z input causes no horizontal drift");
+
+    fm->move_input = glm::vec3(0.0f, 0.0f, -1.0f);
+    for (int i = 0; i < 60; ++i) scene->update(1.0f / 60.0f);
+    expect_near(tc->transform().position().z, 0.0f, 0.05f, "free_mover: -Z input descends again");
+
+    // Movement is in WORLD axes, not the owner's basis: rotating the marker must not steer it.
+    tc->transform().set_rotation(glm::vec3(0.0f, 0.0f, 90.0f));
+    glm::vec3 before = tc->transform().position();
+    fm->move_input = glm::vec3(1.0f, 0.0f, 0.0f);
+    for (int i = 0; i < 60; ++i) scene->update(1.0f / 60.0f);
+    glm::vec3 delta = tc->transform().position() - before;
+    expect_near(delta.x, 6.0f, 0.05f, "free_mover: +X input travels world +X whatever the yaw");
+    expect(std::fabs(delta.y) < 1e-4f, "free_mover: a yawed marker does not steer with its basis");
+
+    // Diagonal input is CLAMPED, not normalized -- same contract as KinematicController, and the
+    // reason a three-axis mover does not travel sqrt(3) faster on a full-deflection diagonal.
+    before = tc->transform().position();
+    fm->move_input = glm::vec3(1.0f, 1.0f, 1.0f);
+    for (int i = 0; i < 60; ++i) scene->update(1.0f / 60.0f);
+    const float diagonal = glm::length(tc->transform().position() - before);
+    expect_near(diagonal, 6.0f, 0.05f,
+                "free_mover: full diagonal deflection is clamped to move_speed");
+
+    // A partial deflection must stay partial, which is what "clamp, don't normalize" buys.
+    before = tc->transform().position();
+    fm->move_input = glm::vec3(0.5f, 0.0f, 0.0f);
+    for (int i = 0; i < 60; ++i) scene->update(1.0f / 60.0f);
+    expect_near(glm::length(tc->transform().position() - before), 3.0f, 0.05f,
+                "free_mover: half deflection travels half speed");
+}
+
+void test_free_mover_smoothing_is_frame_rate_independent() {
+    toy::scene::FreeMover* fm = nullptr;
+    auto scene = make_free_mover_scene(&fm, glm::vec3(0.0f));
+    fm->move_speed = 6.0f;
+    fm->smoothing = 8.0f;
+    scene->start();
+
+    fm->move_input = glm::vec3(0.0f, 1.0f, 0.0f);
+    scene->update(1.0f / 60.0f);
+    expect(fm->velocity().y > 0.0f && fm->velocity().y < 6.0f,
+           "free_mover: smoothing ramps velocity rather than snapping to move_speed");
+
+    for (int i = 0; i < 300; ++i) scene->update(1.0f / 60.0f);
+    expect_near(fm->velocity().y, 6.0f, 0.05f, "free_mover: smoothed velocity converges to move_speed");
+
+    fm->move_input = glm::vec3(0.0f);
+    scene->update(1.0f / 60.0f);
+    expect(fm->velocity().y > 0.0f && fm->velocity().y < 6.0f,
+           "free_mover: releasing input decays velocity instead of stopping dead");
+
+    // The claim `1 - exp(-k*dt)` makes: the same wall-clock second covers the same ground
+    // whatever the tick rate. A raw lerp factor would fail this badly -- which is the whole
+    // reason the smoothing is written the way it is.
+    toy::scene::FreeMover* fast = nullptr;
+    auto fast_scene = make_free_mover_scene(&fast, glm::vec3(0.0f));
+    fast->move_speed = 6.0f;
+    fast->smoothing = 8.0f;
+    fast_scene->start();
+    fast->move_input = glm::vec3(0.0f, 1.0f, 0.0f);
+    for (int i = 0; i < 240; ++i) fast_scene->update(1.0f / 240.0f); // 1 s at 240 fps
+
+    toy::scene::FreeMover* slow = nullptr;
+    auto slow_scene = make_free_mover_scene(&slow, glm::vec3(0.0f));
+    slow->move_speed = 6.0f;
+    slow->smoothing = 8.0f;
+    slow_scene->start();
+    slow->move_input = glm::vec3(0.0f, 1.0f, 0.0f);
+    for (int i = 0; i < 30; ++i) slow_scene->update(1.0f / 30.0f);  // 1 s at 30 fps
+
+    const float fast_y = fast_scene->root_objects()[0]->get_transform()->transform().position().y;
+    const float slow_y = slow_scene->root_objects()[0]->get_transform()->transform().position().y;
+    expect_near(slow_y, fast_y, 0.15f,
+                "free_mover: one second of travel is the same at 30 and 240 fps");
+    if (std::fabs(slow_y - fast_y) > 0.15f) {
+        std::cerr << "         30 fps travelled " << slow_y << ", 240 fps travelled " << fast_y << "\n";
+    }
+}
+
 void test_kinematic_controller_smoothing_ramps_then_converges() {
     toy::scene::KinematicController* kc = nullptr;
     auto scene = make_controller_scene(&kc, glm::vec3(0.0f));
@@ -1383,6 +1508,349 @@ void test_health_driver_cycles_between_turnaround_and_full() {
     const float before_zero_dt = hd->health().current;
     scene.update(0.0f);
     expect(hd->health().current == before_zero_dt, "health_driver: a zero-dt frame changes nothing");
+}
+
+// =====================================================================================
+// Group "world" -- the terrain tile system's pure half: the atlas layout, the canonical
+// side-to-face transforms, the chunk mesher's face-exposure rules, and the sampler's
+// point-to-cell lookup against a really generated map. No Vulkan device, no window: chunk
+// meshing is deliberately free of all three (see toyengine/world/terrain_chunk.h), which is
+// what lets it run on job workers AND what lets it be tested this cheaply.
+// =====================================================================================
+
+/** @brief A Logger that says nothing, so map generation does not bury the test output. */
+class QuietLogger : public coopa::debug::Logger {
+public:
+    QuietLogger() : Logger("world_test") {}
+    void info(const std::string&, std::string = "", bool = false, unsigned int = 0) override {}
+};
+
+/**
+ * @brief A welded unit quad in the canonical side orientation: the +Z face of `[0,1]^3`.
+ *
+ * Built directly rather than loaded from assets/meshes/tile_side_flat.yaml
+ * so the counting assertions below rest on known numbers -- 4 vertices and 6 indices per
+ * appended side -- instead of on however the YAML path happens to weld its corners.
+ */
+coopa::gfx::engine::data::SkinnedMeshSource make_canonical_quad() {
+    using coopa::gfx::engine::data::Vertex;
+    coopa::gfx::engine::data::SkinnedMeshSource source;
+
+    const glm::vec3 positions[4] = {{0.0f, 0.0f, 1.0f}, {1.0f, 0.0f, 1.0f},
+                                    {1.0f, 1.0f, 1.0f}, {0.0f, 1.0f, 1.0f}};
+    const glm::vec2 uvs[4] = {{0.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 1.0f}};
+    for (int i = 0; i < 4; ++i) {
+        Vertex v{};
+        v.position = positions[i];
+        v.normal   = glm::vec3(0.0f, 0.0f, 1.0f);
+        v.uv       = uvs[i];
+        v.tangent  = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
+        source.vertices.push_back(v);
+    }
+    source.indices = {0, 1, 2, 0, 2, 3};
+    return source;
+}
+
+/** @brief Indices per appended side, for the quad above. Two triangles. */
+constexpr size_t kIndicesPerSide = 6;
+
+/** @brief A library with the same flat quad baked onto all six faces. */
+toy::world::TileMeshLibrary make_flat_library() {
+    toy::world::TileMeshLibrary library;
+    library.bake_canonical(make_canonical_quad());
+    return library;
+}
+
+/** @brief Test params: a small chunk, unit cells, no bottom faces, generous wall clamp. */
+toy::world::TerrainParams make_test_params(std::int32_t chunk_size = 4) {
+    toy::world::TerrainParams params;
+    params.chunk_size       = chunk_size;
+    params.tile_size        = 1.0f;
+    params.height_step      = 1.0f;
+    params.max_wall_steps   = 64;
+    params.soil_depth_steps = 3;
+    params.emit_bottom      = false;
+    return params;
+}
+
+/** @brief A pad whose every column -- skirt included -- stands at the same height. */
+toy::world::ColumnPad make_flat_pad(std::int32_t chunk_size, std::int32_t steps) {
+    toy::world::ColumnPad pad;
+    pad.resize(chunk_size);
+    for (std::int32_t y = -1; y <= chunk_size; ++y) {
+        for (std::int32_t x = -1; x <= chunk_size; ++x) {
+            pad.at(x, y).steps = steps;
+        }
+    }
+    return pad;
+}
+
+/** @brief Number of sides in a merged chunk, from its index count. */
+size_t side_count(const toy::world::ChunkMeshData& mesh) {
+    return mesh.indices.size() / kIndicesPerSide;
+}
+
+void test_tile_atlas_cells_are_disjoint_and_inset() {
+    using namespace toy::world;
+
+    for (size_t i = 0; i < k_tile_kind_count; ++i) {
+        const glm::vec4 cell = atlas_cell(static_cast<TileKind>(i));
+        expect(cell.x > 0.0f && cell.y > 0.0f, "atlas: cell origin is inset off the texture edge");
+        expect(cell.x + cell.z < 1.0f && cell.y + cell.w < 1.0f,
+               "atlas: cell stays inside the texture");
+        expect(cell.z > 0.0f && cell.w > 0.0f, "atlas: cell has positive extent");
+    }
+
+    // Disjointness is what keeps one surface from bleeding into another under NEAREST
+    // filtering, and it is a property of the layout arithmetic, not of the PNG.
+    bool overlap = false;
+    for (size_t i = 0; i < k_tile_kind_count && !overlap; ++i) {
+        const glm::vec4 a = atlas_cell(static_cast<TileKind>(i));
+        for (size_t j = i + 1; j < k_tile_kind_count; ++j) {
+            const glm::vec4 b = atlas_cell(static_cast<TileKind>(j));
+            const bool separated = a.x + a.z <= b.x || b.x + b.z <= a.x ||
+                                    a.y + a.w <= b.y || b.y + b.w <= a.y;
+            if (!separated) {
+                overlap = true;
+                break;
+            }
+        }
+    }
+    expect(!overlap, "atlas: no two tile kinds share texels");
+}
+
+void test_face_transforms_agree_with_face_normals() {
+    using namespace toy::world;
+
+    // The canonical mesh faces +Z, so its transform must carry +Z onto each face's own
+    // outward direction -- the one invariant the whole six-faces-from-one-mesh trick rests on.
+    for (size_t i = 0; i < k_tile_face_count; ++i) {
+        const TileFace face = static_cast<TileFace>(i);
+        const glm::vec3 rotated =
+            glm::mat3(face_transform(face)) * glm::vec3(0.0f, 0.0f, 1.0f);
+        const glm::vec3 expected = face_normal(face);
+        expect(glm::length(rotated - expected) < 1e-5f,
+               "face transform: canonical +Z maps onto the face's outward normal");
+    }
+
+    // ...and it must be a rotation ABOUT THE CELL CENTRE, so every baked face still occupies
+    // the same unit cell and can be placed by a plain translate.
+    const TileMeshLibrary library = make_flat_library();
+    for (size_t i = 0; i < k_tile_face_count; ++i) {
+        const TileFace face = static_cast<TileFace>(i);
+        bool inside = true;
+        for (const auto& v : library.side(face).vertices) {
+            inside = inside && v.position.x > -1e-4f && v.position.x < 1.0f + 1e-4f &&
+                     v.position.y > -1e-4f && v.position.y < 1.0f + 1e-4f &&
+                     v.position.z > -1e-4f && v.position.z < 1.0f + 1e-4f;
+        }
+        expect(inside, "face transform: the baked side still spans the [0,1]^3 cell");
+    }
+}
+
+void test_chunk_flat_ground_emits_tops_only() {
+    using namespace toy::world;
+    const TerrainParams params = make_test_params(4);
+    const TileMeshLibrary library = make_flat_library();
+
+    // Ground level with the skirt at the same height: nothing is exposed sideways anywhere,
+    // so the chunk is exactly one top face per column. This is the assertion that would fail
+    // if the pad were ignored -- every border column would wall itself in.
+    ChunkMeshData mesh;
+    mesh_chunk_columns(make_flat_pad(4, 3), library, params, mesh);
+    expect(side_count(mesh) == 16, "chunk: flat ground emits one face per column and no walls");
+    expect(mesh.vertices.size() == 16 * 4, "chunk: a flat quad side contributes four vertices");
+
+    // Every top sits at the column's surface height, not at its cell floor.
+    bool all_at_surface = true;
+    for (const auto& v : mesh.vertices) all_at_surface = all_at_surface && v.position.z == 3.0f;
+    expect(all_at_surface, "chunk: the top face lands at steps * height_step");
+}
+
+void test_chunk_perimeter_walls_follow_the_pad() {
+    using namespace toy::world;
+    const TerrainParams params = make_test_params(4);
+    const TileMeshLibrary library = make_flat_library();
+
+    // A plateau standing 3 steps above a skirt at 0: only the border columns have a lower
+    // neighbour, and only on the sides that face outward.
+    ColumnPad pad = make_flat_pad(4, 3);
+    for (std::int32_t i = -1; i <= 4; ++i) {
+        pad.at(i, -1).steps = 0;
+        pad.at(i, 4).steps  = 0;
+        pad.at(-1, i).steps = 0;
+        pad.at(4, i).steps  = 0;
+    }
+
+    ChunkMeshData mesh;
+    mesh_chunk_columns(pad, library, params, mesh);
+
+    // 16 tops, plus 3 steps of wall on each outward-facing side: 12 edge columns contribute
+    // one side each and the 4 corners contribute two.
+    const size_t expected_walls = static_cast<size_t>((12 - 4) * 1 + 4 * 2) * 3;
+    expect(side_count(mesh) == 16 + expected_walls,
+           "chunk: walls appear exactly where a neighbour is lower");
+}
+
+void test_chunk_step_exposure_is_symmetric() {
+    using namespace toy::world;
+    const TerrainParams params = make_test_params(4);
+    const TileMeshLibrary library = make_flat_library();
+
+    // One column raised by 2 in an otherwise flat field: four walls, two steps each, and
+    // nothing else changes.
+    ColumnPad pad = make_flat_pad(4, 1);
+    pad.at(2, 2).steps = 3;
+
+    ChunkMeshData mesh;
+    mesh_chunk_columns(pad, library, params, mesh);
+    expect(side_count(mesh) == 16 + 4 * 2, "chunk: a raised column exposes all four sides");
+
+    // The clamp is a cap on the wall, not on the column: the top stays where it was.
+    TerrainParams clamped = params;
+    clamped.max_wall_steps = 1;
+    ChunkMeshData clamped_mesh;
+    mesh_chunk_columns(pad, library, clamped, clamped_mesh);
+    expect(side_count(clamped_mesh) == 16 + 4 * 1, "chunk: max_wall_steps caps a wall's height");
+}
+
+void test_chunk_meshing_is_deterministic() {
+    using namespace toy::world;
+    const TerrainParams params = make_test_params(4);
+    const TileMeshLibrary library = make_flat_library();
+
+    ColumnPad pad = make_flat_pad(4, 2);
+    pad.at(0, 0).steps = 5;
+    pad.at(3, 1).steps = 1;
+    pad.at(1, 3).steps = 7;
+
+    // Chunks are meshed on whichever worker happens to be free, so nothing downstream may
+    // depend on which one -- two runs must agree byte for byte.
+    ChunkMeshData first;
+    ChunkMeshData second;
+    mesh_chunk_columns(pad, library, params, first);
+    mesh_chunk_columns(pad, library, params, second);
+
+    expect(first.indices == second.indices, "chunk: re-meshing the same pad gives the same indices");
+    bool same = first.vertices.size() == second.vertices.size();
+    for (size_t i = 0; same && i < first.vertices.size(); ++i) {
+        same = std::memcmp(&first.vertices[i], &second.vertices[i],
+                           sizeof(coopa::gfx::engine::data::Vertex)) == 0;
+    }
+    expect(same, "chunk: re-meshing the same pad gives byte-identical vertices");
+}
+
+void test_chunk_uvs_stay_inside_their_atlas_cell() {
+    using namespace toy::world;
+    const TerrainParams params = make_test_params(4);
+    const TileMeshLibrary library = make_flat_library();
+
+    ColumnPad pad = make_flat_pad(4, 2);
+    pad.at(1, 1).steps     = 6;          // a wall deep enough to reach the Stone band
+    pad.at(2, 2).top_kind  = TileKind::Sand;
+    pad.at(2, 2).side_kind = TileKind::Sand;
+
+    ChunkMeshData mesh;
+    mesh_chunk_columns(pad, library, params, mesh);
+
+    // Every emitted UV must land inside SOME kind's cell, and never in the gutter between
+    // cells -- that gutter is what a half-texel rounding error would sample.
+    bool all_inside = true;
+    for (const auto& v : mesh.vertices) {
+        bool in_any = false;
+        for (size_t i = 0; i < k_tile_kind_count; ++i) {
+            const glm::vec4 cell = atlas_cell(static_cast<TileKind>(i));
+            if (v.uv.x >= cell.x - 1e-5f && v.uv.x <= cell.x + cell.z + 1e-5f &&
+                v.uv.y >= cell.y - 1e-5f && v.uv.y <= cell.y + cell.w + 1e-5f) {
+                in_any = true;
+                break;
+            }
+        }
+        all_inside = all_inside && in_any;
+    }
+    expect(all_inside, "chunk: every emitted UV lands inside an atlas cell");
+}
+
+void test_sampler_cell_lookup_matches_brute_force() {
+    using namespace toy::world;
+
+    QuietLogger logger;
+    coopa::maps::MapConfig config;
+    config.seed      = 7;
+    config.grid_size = 24;   // small on purpose: this group must stay instant
+    coopa::maps::MapGenerator generator(config, logger);
+    generator.generate();
+
+    TerrainSampler sampler;
+    sampler.build(config, std::move(generator.graph()), make_test_params());
+    expect(sampler.is_built(), "sampler: a generated map builds");
+
+    // A Voronoi cell IS the set of points nearest its site, so the bucket index has to agree
+    // with an exhaustive scan at every point -- that equivalence is the whole justification
+    // for the index existing.
+    const coopa::maps::MapGraph& graph = sampler.graph();
+    std::mt19937 rng(1234);
+    std::uniform_real_distribution<double> pick(0.0, static_cast<double>(config.grid_size));
+
+    int mismatches = 0;
+    for (int i = 0; i < 2000; ++i) {
+        const double x = pick(rng);
+        const double y = pick(rng);
+
+        double best = std::numeric_limits<double>::max();
+        std::size_t best_index = 0;
+        for (std::size_t c = 0; c < graph.centers.size(); ++c) {
+            const double dx = graph.centers[c].point.x - x;
+            const double dy = graph.centers[c].point.y - y;
+            const double d = dx * dx + dy * dy;
+            if (d < best) {
+                best = d;
+                best_index = c;
+            }
+        }
+        if (sampler.cell_at(x, y).index != graph.centers[best_index].index) ++mismatches;
+    }
+    expect(mismatches == 0, "sampler: the bucket index finds the same cell a full scan does");
+    if (mismatches != 0) std::cerr << "         " << mismatches << " of 2000 points disagreed\n";
+}
+
+void test_sampler_chunks_agree_across_their_shared_border() {
+    using namespace toy::world;
+
+    QuietLogger logger;
+    coopa::maps::MapConfig config;
+    config.seed              = 11;
+    config.grid_size         = 24;
+    config.terrain_roughness = 0.2;
+    coopa::maps::MapGenerator generator(config, logger);
+    generator.generate();
+
+    TerrainParams params = make_test_params(8);
+    TerrainSampler sampler;
+    sampler.build(config, std::move(generator.graph()), params);
+
+    // Two neighbouring chunks, sampled independently exactly as two worker threads would.
+    ColumnPad left;
+    ColumnPad right;
+    sample_chunk_columns(sampler, params, ChunkCoord{1, 1}, left);
+    sample_chunk_columns(sampler, params, ChunkCoord{2, 1}, right);
+
+    // The left chunk's +X skirt is the right chunk's first column and vice versa. If those
+    // ever disagreed, each chunk would wall itself in against a neighbour that is not there,
+    // and the world would show a seam at every chunk boundary.
+    bool agree = true;
+    for (std::int32_t y = 0; y < params.chunk_size; ++y) {
+        agree = agree && left.at(params.chunk_size, y).steps == right.at(0, y).steps;
+        agree = agree && right.at(-1, y).steps == left.at(params.chunk_size - 1, y).steps;
+    }
+    expect(agree, "sampler: adjacent chunks sample their shared border identically");
+
+    // And the pad is genuinely load-bearing: with the neighbour's real heights, an interior
+    // border column emits a +X wall only where the terrain really does step down.
+    const TileMeshLibrary library = make_flat_library();
+    ChunkMeshData mesh;
+    mesh_chunk_columns(left, library, params, mesh);
+    expect(!mesh.empty(), "sampler: a chunk of generated terrain meshes to something drawable");
 }
 
 // =====================================================================================
@@ -1825,6 +2293,544 @@ void test_cloth_scene_simulates_and_animates() {
 }
 
 // =====================================================================================
+// Group "render_terrain" -- the half of the tile system the "world" group cannot reach:
+// generation on the job engine, GPU upload, the chunk SceneObjects, and the streaming that
+// re-centres them on a moving camera. One Engine, one scene, a real device.
+// =====================================================================================
+
+/** @brief Live (uploaded and drawing) chunks in a terrain. */
+int count_live_chunks(const toy::world::TerrainComponent& terrain) {
+    int live = 0;
+    for (const auto& entry : terrain.chunks()) {
+        if (entry.second.state == toy::world::ChunkState::Live) ++live;
+    }
+    return live;
+}
+
+/** @brief True when this coordinate has a Live chunk. */
+bool chunk_is_live(const toy::world::TerrainComponent& terrain, toy::world::ChunkCoord coord) {
+    auto it = terrain.chunks().find(coord);
+    return it != terrain.chunks().end() && it->second.state == toy::world::ChunkState::Live;
+}
+
+/** @brief Ticks until `predicate` holds or the budget runs out; returns the ticks spent. */
+int tick_until(toy::core::Engine& engine, int max_frames, const std::function<bool()>& predicate) {
+    for (int i = 0; i < max_frames; ++i) {
+        if (predicate()) return i;
+        engine.tick();
+    }
+    return max_frames;
+}
+
+/**
+ * @brief Generates a small world, builds its chunks, then flies the camera and watches the
+ *        loaded region follow it.
+ *
+ * The scene file is the shipped demo (assets/scenes/terrain_test), but its world is shrunk
+ * here before the first tick -- generation does not start until TerrainSystem's first
+ * execute(), so the component is still unconfigured at this point. That keeps this test to a
+ * 32-cell map and nine 8x8 chunks instead of the demo's ~10k cells and forty-nine 32x32 ones,
+ * which is the difference between a second and most of a minute.
+ *
+ * Everything is reached through CameraComponent::main()->scene rather than through an Engine
+ * accessor: the main camera is a registered singleton and every Component carries its Scene
+ * back-pointer, so the test needs no new engine API to see what it is testing.
+ *
+ * What gets DRIVEN is the scene's `focus_marker`, not the camera. The camera orbits that marker
+ * (`tracker: focus_marker`), so CameraController::update_orbit_() recomputes its pose from the
+ * marker every frame and a write straight to the camera's Transform would simply be overwritten
+ * the same frame. Driving the marker is also what a player does, so this exercises the real
+ * control path rather than a back door into it. The orbit rig is collapsed to a short, unsmoothed
+ * arm first, so "the camera's chunk" and "the marker's chunk" stay the same chunk and the
+ * assertions below can name one coordinate.
+ */
+void test_terrain_streams_chunks_around_the_camera() {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016");
+    ScopedEnv no_input("NO_INPUT", "1");
+
+    toy::core::AppConfig config =
+        make_test_config("assets/scenes/terrain_test/scene.yaml", 320, 180, 160, 90);
+    toy::core::Engine engine(std::move(config));
+
+    auto* camera = coopa::gfx::engine::components::CameraComponent::main();
+    expect(camera != nullptr, "terrain: the demo scene registers a main camera");
+    if (camera == nullptr || camera->scene == nullptr || camera->owner == nullptr) return;
+
+    coopa::scene::Scene& scene = *camera->scene;
+    auto* terrain = scene.find_first_component<toy::world::TerrainComponent>();
+    expect(terrain != nullptr, "terrain: the demo scene carries a Terrain component");
+    if (terrain == nullptr) return;
+
+    // Shrink the world. 32 cells x 2 tiles = 64 tiles per axis, in 8 chunks of 8 tiles.
+    terrain->grid_size                  = 32;
+    terrain->params.tiles_per_grid_unit = 2;
+    terrain->params.chunk_size          = 8;
+    terrain->params.view_radius         = 1;
+
+    const float chunk_world = terrain->params.chunk_world_size();
+
+    // The DOF focus target and the orbit pivot are the same object, and its name is what
+    // resolve_dof_focus_() will look up every frame -- so resolve it exactly the way that
+    // function does. A typo in either YAML key shows up here rather than as a silently
+    // mis-focused frame nobody asserts on.
+    expect(!camera->focus_object.empty(), "terrain: the camera names a DOF focus object");
+    coopa::scene::SceneObject* marker = scene.find_object_by_path(camera->focus_object);
+    expect(marker != nullptr, "terrain: the camera's focus_object resolves to a real object");
+    if (marker == nullptr) return;
+    expect(marker->get_component<toy::scene::FreeMover>() != nullptr,
+           "terrain: the focus marker is driveable (carries a FreeMover)");
+    // An invisible marker is the whole point: resolve_dof_focus_() falls back to the transform
+    // origin precisely because there are no renderer bounds to centre on.
+    expect(marker->get_component<coopa::gfx::engine::components::MeshRenderer>() == nullptr,
+           "terrain: the focus marker draws nothing");
+
+    auto* marker_transform = marker->get_transform();
+    expect(marker_transform != nullptr, "terrain: the focus marker has a Transform to drive");
+    if (marker_transform == nullptr) return;
+
+    // Collapse the orbit arm so the camera rides along with the marker: the streamer centres on
+    // the CAMERA, and the shipped 60-unit arm would put it seven chunks away from the marker at
+    // this test's 8-unit chunk size. Zeroing both smoothing rates makes the follow instant, so a
+    // move converges in ticks rather than in however long an exponential chase takes.
+    if (auto* controller = camera->owner->get_component<toy::scene::CameraController>()) {
+        controller->distance           = 2.0f;
+        controller->follow_smoothing   = 0.0f;
+        controller->movement_smoothing = 0.0f;
+    }
+
+    // Park the marker over chunk (4, 4), well inside the world on every side.
+    const toy::world::ChunkCoord start{4, 4};
+    marker_transform->transform().set_position(
+        glm::vec3((static_cast<float>(start.x) + 0.5f) * chunk_world,
+                  (static_cast<float>(start.y) + 0.5f) * chunk_world, 48.0f));
+
+    // Generation runs on the job engine and takes a while; the budget is generous because what
+    // is being asserted is "this converges", not "this converges in N frames".
+    const int wanted = 9; // (2 * view_radius + 1)^2
+    const int frames_to_ready =
+        tick_until(engine, 600, [&] { return count_live_chunks(*terrain) >= wanted; });
+    expect(count_live_chunks(*terrain) >= wanted,
+           "terrain: every chunk in the view radius becomes live");
+    expect(terrain->is_ready(), "terrain: the sampler and the side library both come up");
+    if (g_verbose) std::cout << "         converged after " << frames_to_ready << " frames\n";
+
+    // Each live chunk is a real drawable: a child object with a loaded mesh on it.
+    coopa::scene::SceneObject* terrain_object = scene.find_object("terrain");
+    expect(terrain_object != nullptr, "terrain: the terrain object is in the scene");
+    int drawable = 0;
+    if (terrain_object != nullptr) {
+        for (const auto& child : terrain_object->children()) {
+            auto* renderer =
+                child->get_component<coopa::gfx::engine::components::MeshRenderer>();
+            if (renderer != nullptr && renderer->is_ready()) ++drawable;
+        }
+    }
+    expect(drawable >= wanted, "terrain: every live chunk hung a ready MeshRenderer on the scene");
+
+    // The chunk under the marker (and so under the camera riding beside it) must be one of them
+    // -- a world that built only its fringe would still pass a bare count.
+    expect(chunk_is_live(*terrain, start), "terrain: the chunk under the marker is live");
+
+    // --- Streaming: fly the marker two chunks along +X and watch the region follow. ---
+    const toy::world::ChunkCoord moved{start.x + 2, start.y};
+    marker_transform->transform().set_position(
+        glm::vec3((static_cast<float>(moved.x) + 0.5f) * chunk_world,
+                  (static_cast<float>(moved.y) + 0.5f) * chunk_world, 48.0f));
+
+    tick_until(engine, 600, [&] {
+        return chunk_is_live(*terrain, toy::world::ChunkCoord{moved.x + 1, moved.y}) &&
+               terrain->chunks().find(toy::world::ChunkCoord{start.x - 1, start.y}) ==
+                   terrain->chunks().end();
+    });
+
+    expect(chunk_is_live(*terrain, toy::world::ChunkCoord{moved.x + 1, moved.y}),
+           "terrain: ground ahead of the marker is built as it advances");
+    expect(terrain->chunks().find(toy::world::ChunkCoord{start.x - 1, start.y}) ==
+               terrain->chunks().end(),
+           "terrain: ground left behind is released");
+    // Hysteresis: the retirement threshold is view_radius + 1, so the chunk exactly two behind
+    // is deliberately still loaded. Asserting it explicitly is what stops a future "tidy-up"
+    // from dropping the margin and reintroducing boundary thrash.
+    expect(terrain->chunks().find(start) != terrain->chunks().end(),
+           "terrain: the chunk one past the view radius is kept, not thrashed");
+
+    // Nothing leaked: the live set is still a bounded neighbourhood, not everything ever seen.
+    const int live_after = count_live_chunks(*terrain);
+    expect(live_after <= 25, "terrain: the live chunk count stays bounded while streaming");
+    if (live_after > 25) std::cerr << "         " << live_after << " chunks still live\n";
+
+    // --- And it reaches the screen. ---
+    tick_frames(engine, kNoiseCycle);
+    const Frame frame = engine.capture_image(/*low_res=*/true);
+    expect(frame.width == 160 && frame.height == 90, "terrain: the capture has the render size");
+
+    // The camera looks down at the ground from 48 units up, so the lower half of the frame
+    // should be terrain, not sky. Sky here is the EnvironmentLight gradient -- strongly
+    // blue-dominant -- which makes "blue beats both other channels by a clear margin" a
+    // reliable test for it without pinning an exact colour.
+    long long ground = 0;
+    long long total = 0;
+    for (uint32_t y = frame.height / 2; y < frame.height; ++y) {
+        for (uint32_t x = 0; x < frame.width; ++x) {
+            const size_t i = (static_cast<size_t>(y) * frame.width + x) * frame.channels;
+            const int r = frame.pixels[i], g = frame.pixels[i + 1], b = frame.pixels[i + 2];
+            if (!(b > r + 20 && b > g + 10)) ++ground;
+            ++total;
+        }
+    }
+    expect(total > 0 && ground * 2 > total,
+           "terrain: the lower half of the frame is terrain rather than sky");
+    if (total > 0 && ground * 2 <= total) {
+        std::cerr << "         only " << ground << " of " << total << " lower-half pixels\n";
+        dump_frame(frame, "terrain_stream");
+    }
+}
+
+/**
+ * @brief The shipped render config, with only the window/scene/output bits a test must own.
+ *
+ * make_test_config() default-constructs an AppConfig, so it exercises PixelRenderConfig's own
+ * defaults -- `aa_mode: "off"`, `dof_enabled: false` -- and NOT what the engine actually ships.
+ * That is fine for the pixel_demo groups, which assert on specific toggles they set themselves,
+ * but it is exactly why the flicker below went unnoticed: nothing in the suite ever rendered
+ * with the configuration a user runs.
+ *
+ * @param scene Scene path, relative to the repo root.
+ * @param rw    Internal render width; the low_res capture's width.
+ * @param rh    Internal render height.
+ */
+toy::core::AppConfig make_shipped_config(const std::string& scene, uint32_t rw, uint32_t rh) {
+    toy::core::AppConfig config =
+        toy::core::AppConfig::load(std::string(ROOT_DIR) + "/assets/config.yaml");
+    config.window.width   = rw * 2;
+    config.window.height  = rh * 2;
+    config.window.visible = false;
+    config.window.vsync   = false;
+    config.render.render_width  = rw;
+    config.render.render_height = rh;
+    config.scene.default_scene  = scene;
+    config.output.save_on_exit  = false;
+    return config;
+}
+
+/** @brief Mean per-channel |a - b| over a frame pair, in 0-255 levels per pixel. */
+double mean_abs_delta(const Frame& a, const Frame& b) {
+    if (a.pixels.size() != b.pixels.size() || a.pixels.empty()) return -1.0;
+    long long sum = 0;
+    for (size_t k = 0; k < a.pixels.size(); k += a.channels) {
+        sum += std::abs(int(a.pixels[k]) - int(b.pixels[k]));
+    }
+    return double(sum) / double(a.width * a.height);
+}
+
+/**
+ * @brief A static camera over static geometry must render a STATIC image.
+ *
+ * The regression test for a flicker that shipped unnoticed: with `aa_mode: taa`, TAA's 8-frame
+ * Halton jitter makes the whole render exactly 8-periodic, and TaaPass's exponential history
+ * blend -- a low-pass filter -- converges a periodic input to a periodic ORBIT rather than to a
+ * fixed point. The image never settles; on terrain_test's block faces the surviving orbit is
+ * plainly visible as boiling. See config.yaml's `aa_mode` for the full measurement.
+ *
+ * Two things make this test able to see what the existing suite could not:
+ *
+ *   - It renders with the SHIPPED config (make_shipped_config), so whatever `aa_mode` actually
+ *     ships is what gets exercised. make_test_config()'s defaults have AA off entirely.
+ *   - It compares ADJACENT frames. render_pixel's drift assertion spaces its captures by
+ *     kNoiseCycle -- a whole number of cycles -- which lands on the same jitter phase and is
+ *     therefore structurally blind to a phase-periodic orbit. Comparing neighbours is the whole
+ *     point; a cycle is invisible to any test sampling it stroboscopically.
+ */
+void test_static_camera_converges_to_a_static_image() {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016");
+    ScopedEnv no_input("NO_INPUT", "1");
+
+    toy::core::Engine engine(make_shipped_config("assets/scenes/terrain_test/scene.yaml", 320, 180));
+
+    auto* camera = coopa::gfx::engine::components::CameraComponent::main();
+    expect(camera != nullptr && camera->scene != nullptr, "converge: the scene has a main camera");
+    if (camera == nullptr || camera->scene == nullptr) return;
+    auto* terrain = camera->scene->find_first_component<toy::world::TerrainComponent>();
+    expect(terrain != nullptr, "converge: the scene has a Terrain component");
+    if (terrain == nullptr) return;
+
+    // Same shrink the streaming test uses -- a 32-cell map in nine 8x8 chunks, not the demo's
+    // ~10k cells, so generation and meshing finish in a second rather than most of a minute.
+    terrain->grid_size                  = 32;
+    terrain->params.tiles_per_grid_unit = 2;
+    terrain->params.chunk_size          = 8;
+    terrain->params.view_radius         = 1;
+
+    tick_until(engine, 900, [&] { return count_live_chunks(*terrain) >= 9; });
+    tick_frames(engine, 80); // let every temporal filter settle; nothing moves from here on
+
+    std::vector<Frame> frames;
+    for (int i = 0; i < 18; ++i) {
+        engine.tick();
+        frames.push_back(engine.capture_image(/*low_res=*/true));
+    }
+
+    auto lag_mean = [&](int lag) {
+        double acc = 0.0;
+        int n = 0;
+        for (size_t i = lag; i < frames.size(); ++i) {
+            acc += mean_abs_delta(frames[i], frames[i - static_cast<size_t>(lag)]);
+            ++n;
+        }
+        return n > 0 ? acc / n : 0.0;
+    };
+
+    // Budget in 0-255 levels per pixel, averaged over the frame. A converged renderer measures
+    // exactly 0.0000 here (smaa and off both do); taa measured 0.0086. The threshold sits an
+    // order of magnitude below that so it fails on a re-introduced orbit, while leaving room for
+    // a genuinely dithered effect to contribute a texel or two.
+    const double lag1 = lag_mean(1);
+    expect(lag1 < 0.002, "converge: a static camera renders a static image");
+    if (lag1 >= 0.002) std::cerr << "         adjacent-frame delta " << lag1 << " levels/px\n";
+
+    // On failure, print the lag profile -- it does not just say the image moves, it says WHY.
+    // A periodic orbit collapses to ~0 at a whole cycle while staying high at every other lag,
+    // so `1=0.006 2=0.008 4=0.009 8=0` names the cycle length in the output. (Deliberately not
+    // its own expect(): under the bug lag 8 is ~0, so any "lag8 must be small" assertion would
+    // PASS on exactly the case it is meant to catch. lag 1 is the assertion; this is evidence.)
+    if (lag1 >= 0.002) {
+        std::cerr << "         lag profile: 1=" << lag_mean(1) << " 2=" << lag_mean(2)
+                  << " 4=" << lag_mean(4) << " 8=" << lag_mean(8) << "\n";
+    }
+}
+
+/**
+ * @brief Shrinks a terrain to a test-sized world and parks its marker in the MIDDLE of it.
+ *
+ * Recentring is not optional. The scene authors the marker at tile (192, 192) -- the centre of
+ * the shipped 96-cell world -- so shrinking `grid_size` without moving it leaves the camera off
+ * the far corner, where most of the view radius falls outside the map and only a handful of
+ * chunks are ever built. Every measurement taken from there is of mostly-empty sky.
+ *
+ * @param terrain The component to shrink; its params are overwritten.
+ * @param scene   The scene, for resolving the marker object.
+ * @return World-space centre the marker was parked at.
+ */
+glm::vec3 shrink_terrain_and_centre(toy::world::TerrainComponent& terrain,
+                                    coopa::scene::Scene& scene) {
+    terrain.grid_size                  = 48;
+    terrain.params.tiles_per_grid_unit = 4;
+    terrain.params.chunk_size          = 16;
+    terrain.params.view_radius         = 2;
+
+    const float tiles = float(terrain.grid_size * terrain.params.tiles_per_grid_unit);
+    const glm::vec3 centre(tiles * 0.5f * terrain.params.tile_size,
+                           tiles * 0.5f * terrain.params.tile_size, 26.0f);
+    if (auto* marker = scene.find_object("focus_marker")) {
+        if (auto* tc = marker->get_transform()) tc->transform().set_position(centre);
+    }
+    return centre;
+}
+
+/**
+ * @brief After the camera stops, the image must stop too -- within a couple of frames.
+ *
+ * The regression test for the second flicker: SSAO's temporal resolve reprojects AO history and
+ * rejects it on only off-screen and behind-eye, with no depth/disocclusion test. Over blocky
+ * terrain, camera motion rejects history across every depth discontinuity at once, exposing raw
+ * 4x4-tile AO noise -- and the accumulator then refills at ssao_temporal_blend, so the image
+ * keeps changing for dozens of frames after the camera has stopped. See config.yaml's
+ * `ssao_temporal_enabled` for the measurement that pinned it.
+ *
+ * Three conditions are load-bearing and were each established by measurement:
+ *
+ *   - **Full render resolution.** SSAO's noise is a screen-locked 4x4 TEXEL tile, so it averages
+ *     away at a small render size: the identical trajectory at 320x180 settles in 0 frames even
+ *     with the bug present. A cheap low-res version of this test would pass on a broken build.
+ *   - **A close camera.** Rotating close to the terrain is what produces the disocclusion the
+ *     resolve mishandles; from far away the parallax is too small to reject much history.
+ *   - **Camera smoothing zeroed**, so the camera stops dead the frame the sweep ends. Otherwise
+ *     CameraController's own exponential chase is measured as a renderer tail.
+ */
+void test_image_settles_after_camera_stops() {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016");
+    ScopedEnv no_input("NO_INPUT", "1");
+
+    toy::core::AppConfig config =
+        make_shipped_config("assets/scenes/terrain_test/scene.yaml", 1920, 1080);
+    toy::core::Engine engine(std::move(config));
+
+    auto* camera = coopa::gfx::engine::components::CameraComponent::main();
+    expect(camera != nullptr && camera->scene != nullptr && camera->owner != nullptr,
+           "settle: the scene has a main camera");
+    if (camera == nullptr || camera->scene == nullptr || camera->owner == nullptr) return;
+
+    auto* terrain = camera->scene->find_first_component<toy::world::TerrainComponent>();
+    auto* controller = camera->owner->get_component<toy::scene::CameraController>();
+    expect(terrain != nullptr && controller != nullptr,
+           "settle: the scene has a Terrain and a CameraController");
+    if (terrain == nullptr || controller == nullptr) return;
+
+    shrink_terrain_and_centre(*terrain, *camera->scene);
+
+    controller->follow_smoothing   = 0.0f;  // stop dead, so the tail measured is the renderer's
+    controller->movement_smoothing = 0.0f;
+    controller->distance           = 18.0f; // close in: this is what disoccludes under rotation
+    controller->pitch_deg          = 18.0f;
+
+    tick_until(engine, 900, [&] { return count_live_chunks(*terrain) >= 25; });
+    tick_frames(engine, 90);
+
+    for (int i = 0; i < 24; ++i) {  // rotate...
+        controller->yaw_deg += 1.5f;
+        engine.tick();
+    }
+    // ...and stop. Everything after this point is the renderer failing to settle.
+
+    Frame prev = engine.capture_image(/*low_res=*/true);
+    std::vector<double> curve;
+    int settled_at = -1;
+    for (int i = 0; i < 40; ++i) {
+        engine.tick();
+        Frame current = engine.capture_image(true);
+        const double delta = mean_abs_delta(current, prev);
+        curve.push_back(delta);
+        if (settled_at < 0 && delta < 0.03) settled_at = i;
+        prev = std::move(current);
+    }
+
+    // What this guards is SSAO's temporal resolve, whose tail is ~10x everything else's: with it
+    // enabled the curve starts near 0.45 and is still above 0.13 forty frames later, while the
+    // shipped configuration is under 0.03 within a handful of frames. The threshold sits between
+    // those rather than at zero, because SSR's own temporal resolve leaves a real residual tail
+    // (~0.047, decaying) that this test deliberately does not fail on -- turning SSR off is the
+    // only thing that reaches 0.0000, and SSR earns its keep on other scenes.
+    expect(settled_at >= 0 && settled_at <= 8, "settle: the image stops when the camera stops");
+    if (settled_at < 0 || settled_at > 8) {
+        std::cerr << "         settled after " << settled_at << " frames; decay:";
+        for (size_t i = 0; i < curve.size() && i < 10; ++i) std::cerr << " " << curve[i];
+        std::cerr << "\n";
+    }
+}
+
+/**
+ * @brief TEMPORARY diagnosis probe (round 8b): the shimmer Coopa reproduces is WASD
+ *        marker TRAVEL past SHADOWED terrace walls, not the orbit flick of round 8a.
+ *
+ * Gesture: the focus marker translates +Y at FreeMover's shipped speed while the camera
+ * trails it at yaw 0 (facing the sun-away, shadowed wall faces), then input stops and the
+ * follow smoothing eases out. In shadow the ambient term is nearly all the light, so AO
+ * churn there survives into the image at full amplitude -- and GTAOMultiBounce's low-
+ * visibility slope (2.76*albedo + 0.69, up to ~3x) amplifies it, where the old
+ * pow(v, 1.5) estimator curve compressed it toward zero.
+ */
+void test_ssao_travel_probe() {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016");
+    ScopedEnv no_input("NO_INPUT", "1");
+
+    struct Variant {
+        const char* name;
+        bool  ao;
+        float radius;
+        float power;
+        float direct;
+        float blur_sigma;
+    };
+    const Variant variants[] = {
+        {"T0_ao_off",      false, 2.00f, 1.0f, 0.25f, 0.375f},
+        {"T1_shipped",     true,  2.00f, 1.0f, 0.25f, 0.375f},
+        {"T2_power15",     true,  2.00f, 1.5f, 0.25f, 0.375f}, // dark-delta compression restored
+        {"T5_pre_retune",  true,  0.75f, 1.5f, 0.25f, 0.375f}, // pre-retune estimator, new composite
+    };
+
+    constexpr int kMotionFrames = 60;   // ~25 wu of travel at FreeMover's 26 wu/s
+    constexpr int kAfterFrames  = 150;
+
+    const bool dump = std::getenv("SSAO_PROBE_DUMP") != nullptr;
+
+    for (const Variant& v : variants) {
+        toy::core::AppConfig config =
+            make_shipped_config("assets/scenes/terrain_test/scene.yaml", 1920, 1080);
+        config.render.ssao_enabled                  = v.ao;
+        config.render.ssao_radius                   = v.radius;
+        config.render.ssao_power                    = v.power;
+        config.render.ssao_direct_lighting_strength = v.direct;
+        config.render.ssao_blur_plane_sigma         = v.blur_sigma;
+        toy::core::Engine engine(std::move(config));
+
+        auto* camera = coopa::gfx::engine::components::CameraComponent::main();
+        if (camera == nullptr || camera->scene == nullptr || camera->owner == nullptr) {
+            expect(false, "travel probe: scene has a main camera");
+            return;
+        }
+        auto* terrain    = camera->scene->find_first_component<toy::world::TerrainComponent>();
+        auto* controller = camera->owner->get_component<toy::scene::CameraController>();
+        auto* marker     = camera->scene->find_object("focus_marker");
+        if (terrain == nullptr || controller == nullptr || marker == nullptr ||
+            marker->get_transform() == nullptr) {
+            expect(false, "travel probe: scene has Terrain, CameraController and focus_marker");
+            return;
+        }
+        shrink_terrain_and_centre(*terrain, *camera->scene);
+        controller->distance  = 14.0f;  // close to the walls, per Coopa's reproduction
+        controller->pitch_deg = 14.0f;  // low pitch: shadowed wall faces fill the frame
+        controller->yaw_deg   = 0.0f;   // on -Y looking +Y = at the sun-away faces
+
+        tick_until(engine, 900, [&] { return count_live_chunks(*terrain) >= 25; });
+        tick_frames(engine, 90);
+
+        auto& marker_t = marker->get_transform()->transform();
+
+        Frame prev = engine.capture_image(/*low_res=*/true);
+        std::vector<double> curve;
+        std::vector<double> blink8;
+        std::vector<double> blink16;
+        for (int i = 0; i < kMotionFrames + kAfterFrames; ++i) {
+            if (i < kMotionFrames) {
+                // FreeMover's shipped move_speed (26 wu/s) at this dt, straight +Y.
+                marker_t.set_position(marker_t.position() + glm::vec3(0.0f, 26.0f * 0.016f, 0.0f));
+            }
+            engine.tick();
+            Frame current = engine.capture_image(true);
+            if (dump) {
+                const std::string dir = std::string("output/probe/") + v.name;
+                std::filesystem::create_directories(dir);
+                char fname[32];
+                std::snprintf(fname, sizeof(fname), "/frame_%04d.png", i);
+                coopa::gfx::util::save_image_png(current, dir + fname);
+            }
+            curve.push_back(mean_abs_delta(current, prev));
+            long long n8 = 0, n16 = 0;
+            for (size_t k = 0; k < current.pixels.size(); k += current.channels) {
+                const int d = std::abs(int(current.pixels[k]) - int(prev.pixels[k]));
+                n8  += d > 8;
+                n16 += d > 16;
+            }
+            const double px = double(current.width) * double(current.height);
+            blink8.push_back(100.0 * double(n8) / px);
+            blink16.push_back(100.0 * double(n16) / px);
+            prev = std::move(current);
+        }
+
+        auto series_mean = [](const std::vector<double>& s, int from, int to) {
+            double acc = 0.0;
+            for (int i = from; i < to; ++i) acc += s[static_cast<size_t>(i)];
+            return acc / double(to - from);
+        };
+        int zero_at = -1;
+        for (int i = kMotionFrames; i < kMotionFrames + kAfterFrames; ++i) {
+            if (curve[static_cast<size_t>(i)] == 0.0) { zero_at = i - kMotionFrames; break; }
+        }
+        std::cerr << "travel " << v.name
+                  << ": motion=" << series_mean(curve, 5, kMotionFrames)
+                  << " ease=" << series_mean(curve, kMotionFrames, kMotionFrames + 31)
+                  << " tail=" << series_mean(curve, kMotionFrames + kAfterFrames - 30,
+                                             kMotionFrames + kAfterFrames)
+                  << " zero_at=" << zero_at
+                  << " | blink8 m=" << series_mean(blink8, 5, kMotionFrames)
+                  << " e=" << series_mean(blink8, kMotionFrames, kMotionFrames + 31)
+                  << " | blink16 m=" << series_mean(blink16, 5, kMotionFrames)
+                  << " e=" << series_mean(blink16, kMotionFrames, kMotionFrames + 31)
+                  << "\n";
+    }
+}
+
+// =====================================================================================
 // Registry
 // =====================================================================================
 
@@ -1847,6 +2853,17 @@ struct TestCase {
  * and are registered separately so `ctest -j` overlaps them.
  */
 const TestCase kTests[] = {
+    // --- world: the terrain tile system's pure half, no GPU ---
+    {"tile_atlas_cells_disjoint",                  "world", test_tile_atlas_cells_are_disjoint_and_inset},
+    {"tile_face_transforms_match_normals",         "world", test_face_transforms_agree_with_face_normals},
+    {"chunk_flat_ground_emits_tops_only",          "world", test_chunk_flat_ground_emits_tops_only},
+    {"chunk_perimeter_walls_follow_the_pad",       "world", test_chunk_perimeter_walls_follow_the_pad},
+    {"chunk_step_exposure_is_symmetric",           "world", test_chunk_step_exposure_is_symmetric},
+    {"chunk_meshing_is_deterministic",             "world", test_chunk_meshing_is_deterministic},
+    {"chunk_uvs_stay_inside_atlas_cell",           "world", test_chunk_uvs_stay_inside_their_atlas_cell},
+    {"sampler_cell_lookup_matches_brute_force",    "world", test_sampler_cell_lookup_matches_brute_force},
+    {"sampler_chunks_agree_across_border",         "world", test_sampler_chunks_agree_across_their_shared_border},
+
     // --- math: pure functions, no GPU ---
     {"letterbox_exact_fit",                        "math", test_letterbox_exact_fit},
     {"letterbox_with_bars",                        "math", test_letterbox_with_bars},
@@ -1896,6 +2913,8 @@ const TestCase kTests[] = {
     {"camera_controller_smoothing_converges",      "scene", test_camera_controller_movement_smoothing_drags_then_converges},
     {"kinematic_controller_moves_on_input",        "scene", test_kinematic_controller_moves_on_input_and_holds_height},
     {"kinematic_controller_smoothing",             "scene", test_kinematic_controller_smoothing_ramps_then_converges},
+    {"free_mover_travels_on_all_three_axes",       "scene", test_free_mover_travels_on_all_three_axes},
+    {"free_mover_smoothing_frame_rate_independent","scene", test_free_mover_smoothing_is_frame_rate_independent},
     {"kinematic_control_runs_before_physics",      "scene", test_kinematic_control_runs_before_physics},
     {"kinematic_mover_pingpong",                   "scene", test_kinematic_mover_pingpong_oscillates_about_origin},
     {"kinematic_mover_orbit",                      "scene", test_kinematic_mover_orbit_holds_radius_and_height},
@@ -1903,11 +2922,17 @@ const TestCase kTests[] = {
     {"health_driver_cycle",                        "scene", test_health_driver_cycles_between_turnaround_and_full},
 
     // --- render_*: one Vulkan device each ---
+    {"terrain_streams_chunks_around_camera",       "render_terrain",  test_terrain_streams_chunks_around_the_camera},
+    {"static_camera_converges",                    "render_terrain",  test_static_camera_converges_to_a_static_image},
+    {"image_settles_after_camera_stops",           "render_terrain",  test_image_settles_after_camera_stops},
     {"pixel_demo_render_and_live_toggles",         "render_pixel",    test_pixel_demo_render_and_live_toggles},
     {"headless_render_with_all_toggles_off",       "render_pixel",    test_headless_render_with_all_toggles_off},
     {"world_canvas_button_hover",                  "render_ui",       test_world_canvas_button_hover},
     {"material_maps_change_output",                "render_material", test_material_maps_change_output},
     {"cloth_scene_simulates_and_animates",         "render_cloth",    test_cloth_scene_simulates_and_animates},
+    // TEMPORARY (round-8b shimmer diagnosis) -- run via `toyengine_tests ssao_travel_probe`,
+    // removed once the cause is pinned. Not in any ctest group.
+    {"ssao_travel_probe",                          "probe",           test_ssao_travel_probe},
 };
 
 /** @brief True if `name` contains any of `filters` (or there are none, i.e. run everything). */
@@ -1923,7 +2948,7 @@ bool matches_filters(const char* name, const std::vector<std::string>& filters) 
 void print_usage() {
     std::cout << "usage: toyengine_tests [-v] [--list] [--group <name>] [name-substring ...]\n"
                  "  --list           print every test and its group, run nothing\n"
-                 "  --group <name>   run one group: math, config, scene, render_pixel,\n"
+                 "  --group <name>   run one group: math, config, scene, world, render_pixel,\n"
                  "                   render_ui, render_material, render_cloth\n"
                  "  -v, --verbose    print every assertion, not just failures\n"
                  "  <substring>      run the tests whose name contains it\n";

@@ -11,6 +11,7 @@
 #include <gfx/brdf.glsl>
 #include <gfx/shadow_sampling.glsl>
 #include <gfx/indirect_specular.glsl>
+#include <gfx/ao_composite.glsl>
 #include <gfx/ssr_common.glsl>
 #include <gfx/spot_light.glsl>
 #include <gfx/sdf.glsl>

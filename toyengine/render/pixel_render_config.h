@@ -166,6 +166,20 @@ struct PixelRenderConfig {
     uint32_t spot_shadow_resolution = 1024;
     float    shadow_bias            = 0.005f;
     /**
+     * @brief Normal-offset shadow bias, in shadow-map TEXELS BEYOND the PCF disk's own reach.
+     *
+     * Converted to world units every frame against the ortho box actually in effect, exactly as
+     * `shadow_softness` below is -- see toy::render::compute_shadow_normal_bias(), which also
+     * explains why the PCF radius is added in rather than left to the caller.
+     *
+     * Trades acne against peter-panning in the usual way: too small and grazing faces speckle
+     * and crawl as the camera moves, too large and a shadow visibly detaches from its caster at
+     * the contact point. At 1.0 the offset clears the PCF disk by a texel, which on
+     * assets/scenes/pixel_demo costs about 2% of the shadowed area -- a measurable but
+     * visually negligible recession.
+     */
+    float    shadow_normal_bias     = 1.0f;
+    /**
      * @brief How far from the camera, in world units, the directional shadow is computed at
      *        all -- Unity's own "Shadow Distance" quality setting. update_dir_shadow_matrix_()
      *        fits the shadow frustum to a bounding sphere of the camera's OWN view frustum out
@@ -228,9 +242,34 @@ struct PixelRenderConfig {
     float ssao_radius           = 0.5f;
     float ssao_bias             = 0.025f;
     float ssao_power            = 1.5f;
-    int   ssao_kernel_size      = 24;
+    int   ssao_slices           = 2;   ///< Horizon slices per pixel while the camera moves (ssao.frag).
+    int   ssao_steps            = 8;   ///< March steps per slice direction while the camera moves.
+    /**
+     * Upper clamp on the horizon march's screen-space extent, in render-target pixels
+     * (Unity HDRP's "Maximum Radius in Pixels": 40 medium, 80 high). Caps the cost and
+     * the screen-space reach of near-camera geometry regardless of ssao_radius.
+     */
+    float ssao_max_radius_px    = 80.0f;
+    /**
+     * How much occlusion darkens direct lighting (Unity HDRP's Direct Lighting
+     * Strength, pixel_lighting.frag): 0 = occlusion affects indirect only.
+     */
+    float ssao_direct_lighting_strength = 0.25f;
+    /**
+     * World-space plane-distance tolerance of the blur's bilateral weight, per dilation
+     * unit (ssao_blur.frag). Tracks the geometry's step scale (what depth gap separates
+     * two surfaces), independent of ssao_radius: coupling it to the gather radius made a
+     * wider radius silently blend AO across terrace faces the kernel should reject.
+     */
+    float ssao_blur_plane_sigma = 0.375f;
     bool  ssao_temporal_enabled = true;
-    float ssao_temporal_blend   = 0.85f;
+    /**
+     * Accumulation depth of the temporal resolve: each pixel averages this many frames of the
+     * continuously-jittered estimate (blending frame N at 1/(N+1)) before switching to a
+     * fixed-rate running average. Deeper = smoother and more stable AO in motion, at the cost
+     * of slower response to genuine content changes.
+     */
+    int   ssao_temporal_frames  = 32;
 
     // --- SSR + SSGI ---
     float ssr_max_distance     = 15.0f;

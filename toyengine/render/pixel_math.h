@@ -199,6 +199,44 @@ struct DirShadowFit {
 };
 
 /**
+ * @brief The directional shadow's normal-offset bias, in WORLD units, for this frame's fit.
+ *
+ * Normal-offset shadows: before projecting a shading point into light space, push it off its
+ * own surface along the geometric normal. Unlike a depth bias -- which shifts the comparison by
+ * a constant and so over-biases head-on surfaces to fix grazing ones -- this scales with the
+ * actual cause of the artifact, which is that one shadow-map texel covers more and more surface
+ * as the surface tilts away from the light.
+ *
+ * The offset is therefore measured in TEXELS and converted to world units per frame, for exactly
+ * the reason `shadow_softness` is (see PixelRenderConfig): the ortho box refits to the camera
+ * every frame, so a world-space constant means a different number of texels in every scene and
+ * at every fit. As a concrete scale: on assets/scenes/terrain_test one texel is ~0.076 world
+ * units, so 0.05 world units would be ~0.66 texels -- less than the PCF disk's own 2.0-texel
+ * reach, leaving every tap past 0.66 texels landing back on the surface's own depth.
+ *
+ * Which is why the PCF radius is part of the sum rather than something added on top by the
+ * caller. A Vogel tap `r` texels away must still clear the surface, so the offset has to exceed
+ * the disk's own reach before `extra_texels` buys any margin at all. With soft shadows off the
+ * radius is 0 and the whole offset is `extra_texels`.
+ *
+ * `extra_texels` may be NEGATIVE, which dials the offset back inside the disk's own reach --
+ * trading acne back for less peter-panning. Only the SUM is floored at zero: a negative total
+ * would pull the sample into the surface, which is strictly worse than no bias at all.
+ *
+ * @param pcf_radius_texels The PCF disk's radius in shadow-map texels; 0 for a hard compare.
+ * @param extra_texels      Margin beyond that reach, from PixelRenderConfig::shadow_normal_bias;
+ *                          may be negative.
+ * @param texel_world       World units per shadow-map texel, from DirShadowFit::texel_world.
+ * @return The offset in world units, as the shader's `dir_shadow_params.w` wants it; never
+ *         negative.
+ */
+inline float compute_shadow_normal_bias(float pcf_radius_texels, float extra_texels,
+                                        float texel_world) {
+    const float texels = std::max(pcf_radius_texels, 0.0f) + extra_texels;
+    return std::max(texels * texel_world, 0.0f);
+}
+
+/**
  * @brief Fits an orthographic light-space box to a bounding sphere of the CAMERA's view
  *        frustum, clipped to `shadow_distance`, with texel-snapped centering.
  *

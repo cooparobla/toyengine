@@ -6,7 +6,9 @@
  * dependencies at all, so the plain register_scene_components() overload stays argument-free;
  * ClothRenderer is the exception (it allocates a GPU mesh and publishes it as a runtime asset),
  * so it lives behind the second overload, which captures device/allocator/assets exactly the way
- * register_render_components() captures its own.
+ * register_render_components() captures its own. "Terrain" is there too, for the same reason at
+ * one remove: its chunk meshes are built and published at runtime by toy::world::TerrainSystem,
+ * and its own atlas texture and side meshes load through the AssetManager at parse time.
  */
 
 #ifndef TOYENGINE_SCENE_REGISTER_H
@@ -18,6 +20,7 @@
 
 #include <toyengine/scene/camera_controller.h>
 #include <toyengine/scene/cloth_renderer.h>
+#include <toyengine/scene/free_mover.h>
 #include <toyengine/scene/health_driver.h>
 #include <toyengine/scene/kinematic_controller.h>
 #include <toyengine/scene/kinematic_mover.h>
@@ -25,7 +28,10 @@
 
 #include <coopa/asset/asset_manager.h>
 #include <gfxcoopa/core/device.h>
+#include <gfxcoopa/engine/components/register.h>
 #include <gfxcoopa/memory/allocator.h>
+
+#include <toyengine/world/terrain_component.h>
 
 namespace toy {
 namespace scene {
@@ -136,6 +142,16 @@ inline void register_scene_components() {
             if (node.contains("turnaround_fraction")) hd->turnaround_fraction = node.at("turnaround_fraction").get_value<float>();
         });
 
+    // Free 3D movement for an object that is not a physics body -- typically an invisible
+    // marker a camera tracks and the lens focuses on. Input is pushed in by
+    // Engine::drive_free_movers_(), never read here; see the class doc.
+    SceneLoader::register_component_parser("FreeMover",
+        [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
+            auto* fm = obj.add_component<FreeMover>();
+            if (node.contains("move_speed")) fm->move_speed = node.at("move_speed").get_value<float>();
+            if (node.contains("smoothing"))  fm->smoothing  = node.at("smoothing").get_value<float>();
+        });
+
     // Input-driven horizontal motion for a kinematic Rigidbody. The input itself is pushed in by
     // Engine::drive_kinematic_controllers_(), never read here -- see the class doc.
     SceneLoader::register_component_parser("KinematicController",
@@ -178,6 +194,94 @@ inline void register_scene_components(coopa::gfx::core::Device& device,
         [&device, &allocator, &assets, frames_in_flight](
             const fkyaml::node&, SceneObject& obj, const SceneLoader::ParseContext&) {
             obj.add_component<ClothRenderer>(device, allocator, assets, frames_in_flight);
+        });
+
+    // The streamed tile world (toyengine/world/). The component is configuration plus state;
+    // every per-frame decision lives in toy::world::TerrainSystem, which toy::core::Engine
+    // installs. Only `assets` is captured -- the chunk meshes this eventually builds are created
+    // by that system, which holds the device and allocator itself.
+    SceneLoader::register_component_parser("Terrain",
+        [&assets](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext& ctx) {
+            auto* terrain = obj.add_component<world::TerrainComponent>();
+            world::TerrainParams& params = terrain->params;
+
+            // --- The world to generate ---
+            if (node.contains("seed"))      terrain->seed      = node.at("seed").get_value<int>();
+            if (node.contains("grid_size")) terrain->grid_size = node.at("grid_size").get_value<int>();
+            if (node.contains("sea_level")) terrain->sea_level = node.at("sea_level").get_value<double>();
+            if (node.contains("terrain_roughness")) {
+                terrain->terrain_roughness = node.at("terrain_roughness").get_value<double>();
+            }
+            if (node.contains("river_count")) {
+                terrain->river_count = node.at("river_count").get_value<int>();
+            }
+
+            // --- How it is tiled ---
+            if (node.contains("tiles_per_grid_unit")) {
+                params.tiles_per_grid_unit = node.at("tiles_per_grid_unit").get_value<std::int32_t>();
+            }
+            if (node.contains("tile_size"))    params.tile_size    = node.at("tile_size").get_value<float>();
+            if (node.contains("height_step"))  params.height_step  = node.at("height_step").get_value<float>();
+            if (node.contains("height_scale")) params.height_scale = node.at("height_scale").get_value<float>();
+            if (node.contains("chunk_size")) {
+                params.chunk_size = node.at("chunk_size").get_value<std::int32_t>();
+            }
+            if (node.contains("view_radius")) {
+                params.view_radius = node.at("view_radius").get_value<std::int32_t>();
+            }
+            if (node.contains("max_wall_steps")) {
+                params.max_wall_steps = node.at("max_wall_steps").get_value<std::int32_t>();
+            }
+            if (node.contains("soil_depth_steps")) {
+                params.soil_depth_steps = node.at("soil_depth_steps").get_value<std::int32_t>();
+            }
+            if (node.contains("emit_bottom")) {
+                params.emit_bottom = node.at("emit_bottom").get_value<bool>();
+            }
+            if (node.contains("max_chunk_jobs_per_frame")) {
+                terrain->max_chunk_jobs_per_frame = node.at("max_chunk_jobs_per_frame").get_value<int>();
+            }
+
+            // Shared with the "MeshRenderer" parser rather than reimplemented, so a terrain's
+            // atlas gets the same sRGB colour-space declaration and async load path every other
+            // textured material in the engine gets -- see gfxcoopa's parse_pbr_material_().
+            if (node.contains("material")) {
+                coopa::gfx::engine::components::parse_pbr_material_(
+                    node.at("material"), terrain->material, assets, ctx);
+            }
+
+            // --- The side meshes ---
+            // Resolved and load-kicked off here, like SkinnedMeshRenderer's `mesh_path` below,
+            // since only the parser has ctx.scene_dir. These are CPU-only SkinnedMeshSource
+            // loads (see tile_mesh_library.h for why that type); the component bakes them into
+            // its TileMeshLibrary once they land.
+            using coopa::gfx::engine::data::SkinnedMeshSource;
+            auto load_side = [&assets, &ctx](const std::string& key) {
+                return assets.load_async<SkinnedMeshSource>("meshes/" + key + ".yaml", ctx.scene_dir);
+            };
+
+            if (node.contains("side_mesh")) {
+                terrain->side_mesh = node.at("side_mesh").get_value<std::string>();
+            }
+            if (!terrain->side_mesh.empty()) terrain->set_side_source(load_side(terrain->side_mesh));
+
+            if (node.contains("sides")) {
+                // A face whose name is absent simply inherits the canonical mesh -- which is the
+                // point of the indirection: a smoother top is one key here, not a code change.
+                static const std::pair<const char*, world::TileFace> k_face_names[] = {
+                    {"top", world::TileFace::Top},     {"bottom", world::TileFace::Bottom},
+                    {"north", world::TileFace::North}, {"south", world::TileFace::South},
+                    {"east", world::TileFace::East},   {"west", world::TileFace::West}};
+
+                const fkyaml::node& sides = node.at("sides");
+                for (const auto& [name, face] : k_face_names) {
+                    if (!sides.contains(name)) continue;
+                    const std::string key = sides.at(name).get_value<std::string>();
+                    if (key.empty()) continue;
+                    terrain->face_meshes[static_cast<std::size_t>(face)] = key;
+                    terrain->set_face_source(face, load_side(key));
+                }
+            }
         });
 
     // CPU-skins a bind-pose mesh against animated bone SceneObjects every frame -- see

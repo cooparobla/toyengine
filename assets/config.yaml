@@ -57,11 +57,31 @@ render:
   screen_ui_enabled: true     # ScreenSpaceOverlay canvases (uicoopa UiPass), drawn at full WINDOW
                               # resolution; STARTUP-FIXED. Both UI layers composite AFTER every post
                               # effect -- DoF, AA and tilt shift never touch them
-  aa_mode: taa                 # off | fxaa | smaa | taa -- startup-fixed, like bloom/fog/tilt_shift above.
-                                # "taa" jitters the camera every frame, which fights camera_pixel_snap --
-                                # expected at this engine's low internal resolution; intended for a future
-                                # higher-resolution mode where the jitter's sub-texel footprint is finer
-                                # than a rendered pixel. Previously also skipped outright whenever
+  aa_mode: smaa               # off | fxaa | smaa | taa -- startup-fixed, like bloom/fog/tilt_shift above.
+                                #
+                                # NOT "taa", and the reason is measured rather than aesthetic. TAA's
+                                # sub-pixel jitter is an 8-frame Halton cycle, so with a static camera
+                                # the whole render is exactly 8-periodic -- and TaaPass's exponential
+                                # history blend is a low-pass filter, which converges a PERIODIC input
+                                # to a periodic orbit, never to a fixed point. The image therefore never
+                                # settles: it cycles forever with an amplitude of roughly (1-blend)
+                                # times the per-phase difference. On smooth scenes (pixel_demo) that
+                                # difference is tiny and invisible; on high-frequency geometry
+                                # (terrain_test's block faces) it reads as continuous flicker.
+                                # Measured on terrain_test, mean |frame(n)-frame(n-1)| over a static
+                                # camera: taa 0.0086, taa at blend 0.99 0.0051, smaa 0.0000, off 0.0000
+                                # -- and lag 8 is exactly 0.0000 under taa, which is the periodicity
+                                # itself. Raising the blend only scales the orbit down; it cannot
+                                # remove it, because the input is deterministic, not noise. Neither
+                                # shadows nor SSAO contribute: disabling either changes nothing.
+                                #
+                                # "smaa" is spatial-only, so it converges exactly while still
+                                # antialiasing edges. Use "off" for a strictly pixel-pure look.
+                                # "taa" remains correct for the future higher-internal-resolution mode
+                                # its own note below describes -- it needs motion vectors and history
+                                # reprojection first (this port has neither; see README.md).
+                                #
+                                # Previously also skipped outright whenever
                                 # dof_enabled was true (DofPass's bokeh gather used a fixed, unrotated tap
                                 # pattern that visibly swam under the jitter); no longer needed now that
                                 # the gather is per-pixel rotated -- see the jitter block's own comment in
@@ -80,8 +100,8 @@ render:
                                   # slightly below middle, as in the reference
   tilt_shift_focus_width:  0.15  # 0..1 half-height of the fully-sharp band
   tilt_shift_ramp_width:   0.22  # 0..1 distance the blur ramps in over; smoothstepped
-  tilt_shift_blur_top:     1.0   # strength above the band (the "far" half -- strongest)
-  tilt_shift_blur_bottom:  0.7   # strength below the band (the "near" half)
+  tilt_shift_blur_top:     0.3   # strength above the band (the "far" half -- strongest)
+  tilt_shift_blur_bottom:  0.2   # strength below the band (the "near" half)
   tilt_shift_max_radius:   4.0   # max blur radius in DISPLAY pixels
   tilt_shift_angle:        0.0   # degrees; rotates the focus band off horizontal
 
@@ -182,6 +202,13 @@ render:
   cube_shadow_resolution: 512
   spot_shadow_resolution: 1024
   shadow_bias: 0.005
+  shadow_normal_bias: 1.0     # normal-offset bias, in shadow-map TEXELS BEYOND the PCF disk's
+                              # reach. Converted to world units each frame against the ortho box
+                              # in effect, the same way shadow_softness is -- a world-space
+                              # constant here would mean a different number of texels in every
+                              # scene and at every fit. Too small and grazing faces speckle and
+                              # crawl; too large and shadows detach from their casters. At 1.0
+                              # the recession costs ~2% of the shadowed area on pixel_demo
   shadow_distance: 60.0       # Unity-style "Shadow Distance": how far from the camera shadows
                               # are computed. The directional shadow frustum is fit to the
                               # camera's OWN view frustum out to this distance -- never to scene
@@ -214,16 +241,63 @@ render:
   dither_strength: 0.08
 
   # --- SSAO ---
-  ssao_radius: 0.75
-  ssao_bias: 0.025          # world-space depth offset for the occlusion test in ssao.frag.
-                            # MUST stay well under ssao_radius * 0.57 (the kernel's max sample
-                            # reach, see SsaoKernel) -- a larger bias makes the test in
-                            # ssao.frag:95 unsatisfiable and silently flattens AO to 1.0,
-                            # which is indistinguishable from ssao_enabled: false.
-  ssao_power: 2.5
-  ssao_kernel_size: 24
-  ssao_temporal_enabled: true
-  ssao_temporal_blend: 0.85
+  ssao_radius: 2.0          # world-space gather radius (Unity HDRP's Radius default)
+  ssao_bias: 0.025          # world-space lift of the shading point along its normal before
+                            # the horizon march (ssao.frag) -- keeps depth quantisation on a
+                            # flat surface from registering as a horizon. Keep it a small
+                            # fraction of ssao_radius: it eats real contact occlusion linearly.
+  ssao_power: 1.0           # exponent on visibility (Unity HDRP's Intensity); the multi-bounce
+                            # composite in pixel_lighting.frag carries the perceived depth now
+  ssao_max_radius_px: 80    # upper clamp on the horizon march's screen extent in render-target
+                            # pixels (HDRP's Maximum Radius in Pixels: 40 medium, 80 high)
+  ssao_direct_lighting_strength: 0.25 # how much occlusion darkens DIRECT lighting
+                            # (HDRP's Direct Lighting Strength); 0 = indirect only
+  ssao_blur_plane_sigma: 0.375 # world-space depth tolerance of the blur's bilateral weight,
+                            # per dilation unit -- tracks the geometry's step scale (this
+                            # terrain's ~1 unit terraces), deliberately NOT tied to
+                            # ssao_radius (a wider gather radius must not blend AO across
+                            # faces the kernel should reject)
+  ssao_slices: 2            # horizon slices per pixel (ssao.frag); the per-pixel/per-frame
+                            # slice rotation covers the remaining directions, so 2-3 is standard
+  ssao_steps: 16             # Hi-Z march steps per slice direction
+  ssao_temporal_frames: 32  # accumulation depth of the temporal resolve: each pixel averages
+                            # this many continuously-jittered frames (blending frame N at
+                            # 1/(N+1)) before switching to a fixed-rate running average.
+                            # Deeper = smoother, more stable AO in motion; shallower responds
+                            # faster to genuine content changes.
+  ssao_temporal_enabled: true # Accumulates the raw hemisphere estimate across frames, which is
+                              # the only thing that can stabilise it. The raw pass rotates each
+                              # pixel's kernel by a SCREEN-ANCHORED noise texel, so a surface
+                              # sliding across the screen has its 24-sample estimate redrawn with
+                              # a different rotation every frame. That is per-pixel estimator
+                              # variance, not a filterable pattern: ssao_blur.frag can only trade
+                              # it against spatial detail, while reprojected history is anchored
+                              # to the SURFACE and averages the variance out where it occurs.
+                              #
+                              # The accumulation is CONTINUOUS (the scheme Unity HDRP's GTAO
+                              # and Intel's XeGTAO use): the sample jitter advances every frame
+                              # and each pixel keeps a running average with a stored count
+                              # (frame N blends at 1/(N+1), capped by ssao_temporal_frames),
+                              # so still and moving views show the SAME many-frame estimate --
+                              # stopping the camera cannot reveal a different-looking AO.
+                              # Three things make that safe, and all are load-bearing:
+                              #
+                              #  * ssao_resolve.frag rejects history whose stored eye distance
+                              #    disagrees with where the shading point actually was last
+                              #    frame. Without it, blocky terrain drags the occlusion of
+                              #    whatever the reprojected pixel used to show onto every
+                              #    freshly revealed surface.
+                              #  * The history VALUE is resampled with Catmull-Rom, not plain
+                              #    bilinear -- repeated subpixel bilinear reads erode the
+                              #    pixel-scale AO detail the average exists to preserve,
+                              #    which used to read as AO washing out at vista distances
+                              #    under camera motion.
+                              #  * Once the camera has been still for a few frames
+                              #    (PixelRenderPipeline's ssao_frozen_), the jitter holds and
+                              #    the resolve keeps accepted-history pixels verbatim: the
+                              #    resting image is byte-static (the settle-test contract)
+                              #    and holds the accumulated AVERAGE, so nothing visibly
+                              #    changes at the freeze boundary in either direction.
 
   # --- SSR + SSGI ---
   ssr_max_distance: 30.0

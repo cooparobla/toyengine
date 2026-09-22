@@ -50,8 +50,10 @@
 #include <uicoopa/ui_yaml.h>
 
 #include <toyengine/scene/camera_controller.h>
+#include <toyengine/scene/free_mover.h>
 #include <toyengine/scene/kinematic_control_system.h>
 #include <toyengine/scene/register.h>
+#include <toyengine/world/terrain_system.h>
 
 #include <root_directory.h>
 
@@ -133,6 +135,12 @@ public:
         // it, or physics spends the frame solving against the previous pose while the renderer draws
         // the new one. See kinematic_control_system.h's file doc.
         scene::install_kinematic_control_system(scene_mgr_.get_active_scene());
+        // Order 60, so it too sits ahead of Physics (100) -- and, more to the point, ahead of the
+        // Behaviour walk (200) and TransformResolve (350), so a terrain chunk that appears this
+        // frame already has its world matrix resolved when the render gather reads it. A scene
+        // with no Terrain component pays one empty get_components<>() sweep per frame.
+        world::install_terrain_system(scene_mgr_.get_active_scene(), ctx_.device(),
+                                       ctx_.allocator(), assets_);
         coopa::physx::system::install_physics_system(scene_mgr_.get_active_scene(), config_.physics);
 
         // Activate TransformSystem before the first drain or render, so the world_matrix()
@@ -332,6 +340,7 @@ public:
         if (scene_mgr_.has_scene()) {
             drive_camera_controller_(scene_mgr_.get_active_scene());
             drive_kinematic_controllers_(scene_mgr_.get_active_scene());
+            drive_free_movers_(scene_mgr_.get_active_scene());
         }
         scene_mgr_.update(dt);
         if (scene_mgr_.has_scene()) {
@@ -416,6 +425,10 @@ private:
         // otherwise move them together on the same keypress.
         input_.bind_axis("move_x", Key::D, Key::A); // world +X / -X
         input_.bind_axis("move_y", Key::W, Key::S); // world +Y / -Y
+        // Vertical, for FreeMover only -- KinematicController is planar by design and ignores it.
+        // Tab/Shift rather than the more usual Space/Shift because Space is left free for a jump
+        // action, which is the binding a character controller will want first.
+        input_.bind_axis("move_z", Key::Tab, Key::LeftShift); // world +Z (up) / -Z (down)
     }
 
     /**
@@ -478,6 +491,27 @@ private:
             ? glm::vec2(0.0f)
             : glm::vec2(input_.axis("move_x", ctx_.input()), input_.axis("move_y", ctx_.input()));
         for (scene::KinematicController* kc : controllers) kc->move_input = move;
+    }
+
+    /**
+     * @brief Pushes this frame's movement keys into every FreeMover in the active scene, before
+     *        Scene::update() consumes them.
+     *
+     * The three-axis counterpart to drive_kinematic_controllers_() above, sharing its move_x/
+     * move_y axes and adding move_z -- so one keypress drives a planar kinematic body and a free
+     * 3D marker the same way, which is what makes them feel like one control scheme rather than
+     * two. Same push-model and NO_INPUT=1 contract as every other driver here.
+     */
+    void drive_free_movers_(coopa::scene::Scene& scene) {
+        std::vector<scene::FreeMover*> movers = scene.get_components<scene::FreeMover>();
+        if (movers.empty()) return;
+
+        const glm::vec3 move = no_input_
+            ? glm::vec3(0.0f)
+            : glm::vec3(input_.axis("move_x", ctx_.input()),
+                        input_.axis("move_y", ctx_.input()),
+                        input_.axis("move_z", ctx_.input()));
+        for (scene::FreeMover* fm : movers) fm->move_input = move;
     }
 
     /**

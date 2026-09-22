@@ -1,0 +1,161 @@
+# Streamed 3D tile terrain, generated from a mapcoopa world at load time.
+#
+# Run it with `cplay terrain_test`. The whole world is the single `Terrain` component below:
+# toy::world::TerrainSystem generates the map from `seed`, samples it into height columns, and
+# streams a square of chunks around the camera, meshing each on the job system.
+#
+# Controls: WASD moves `focus_marker` -- an invisible point with nothing but a Transform and a
+# FreeMover -- across the world XY plane, Tab lifts it and Shift drops it. The camera ORBITS that
+# marker (`tracker: focus_marker`) and the lens FOCUSES on it (`focus_object: focus_marker`), so
+# the one thing you steer is simultaneously what you look at, what stays sharp, and what the
+# chunk streamer centres on. Mouse orbits, scroll zooms.
+#
+# The tile set itself -- the side meshes and the surface atlas -- is NOT in this directory. It
+# lives in the shared assets/meshes/ and assets/textures/, because a tile side is a primitive of
+# the tile system rather than demo content. The paths below still read `tile_side_flat` and
+# `textures/terrain_atlas.png`: AssetSource::resolve() tries this scene's own directory first and
+# the assets/ search root second, so dropping a file of the same name beside this scene.yaml is
+# all it takes to override the shared one.
+#
+# See toyengine/world/README.md for what each key does and how the pieces fit together.
+format: blender
+scene:
+  scene_name: TerrainTest
+  root_objects:
+    - name: terrain
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Terrain
+          # --- The world to generate (a coopa::maps::MapConfig, in part) ---
+          seed: 251              # change this and you get a different world, reproducibly
+          grid_size: 96          # map cells per axis; the world is 96 * 4 = 384 tiles square
+          sea_level: 0.25        # waterline as a fraction of the elevation range
+          terrain_roughness: 0.1  # fractal displacement over the cell mesh; 0 = faceted.
+                                  # Scaled by height_scale on the way to steps, so a little goes
+                                  # a long way: 0.35 here turns hillsides into fields of spikes.
+          river_count: 25        # rivers cut visible channels into the tiled surface
+
+          # --- How that world is cut into tiles and chunks ---
+          tiles_per_grid_unit: 4  # blocks per map cell; quadratic cost, so raise with care
+          tile_size: 1.0          # world units across one block
+          height_step: 1.0        # world units per vertical step -- the terracing
+          height_scale: 40.0      # world units from sea floor to highest peak
+          chunk_size: 32          # 32 x 32 columns merge into one GPU mesh
+          view_radius: 3          # 7 x 7 = 49 live chunks of 144; every one is drawn (no frustum cull)
+          max_wall_steps: 24      # longest cliff face a single column will emit
+          soil_depth_steps: 3     # steps of dirt under the turf before a wall turns to stone
+          max_chunk_jobs_per_frame: 4
+
+          # --- The side meshes ---
+          # Resolved as meshes/<name>.yaml against this scene's directory, then against assets/ --
+          # so these names find assets/meshes/ unless this scene grows a meshes/ of its own.
+          # One canonical mesh (the +Z face of a unit cube) becomes all six faces. Swap in the
+          # chamfered variant to see the "smoother tiles are a data change" claim hold:
+          #   side_mesh: tile_side_bevel
+          # ...or keep the flat default and override just the top:
+          #   sides: { top: tile_side_bevel }
+          side_mesh: tile_side_flat
+
+          material:
+            albedo: { r: 1.0, g: 1.0, b: 1.0 }   # white: the atlas supplies all the colour
+            metallic: 0.0
+            roughness: 0.9
+            ao: 1.0
+            texture_albedo: textures/terrain_atlas.png
+            texture_metallic_roughness: textures/terrain_atlas_mr.png
+      children: []
+
+    # An invisible object: a Transform and a FreeMover, no renderer of any kind. It exists to be
+    # steered, followed and focused on -- see toyengine/scene/free_mover.h. Starts over the middle
+    # of the map (tile 192, 192) at a height that clears most of the terrain.
+    - name: focus_marker
+      active: true
+      components:
+        - type: Transform
+          position: { x: 192.0, y: 192.0, z: 26.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: FreeMover
+          move_speed: 26.0   # ~26 blocks/second; crosses a 32-tile chunk in a little over a second
+          smoothing: 12.0    # exponential and frame-rate independent, not a raw lerp factor
+      children: []
+
+    - name: camera
+      active: true
+      components:
+        # Orbit mode recomputes this every frame from the marker's position plus yaw/pitch/
+        # distance below, so the authored pose here only matters for the very first frame.
+        - type: Transform
+          position: { x: 192.0, y: 150.0, z: 60.0 }
+          rotation: { x: 62.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Camera
+          main: true
+          projection: Perspective
+          fov: 60.0
+          near_clip_plane: 0.3
+          far_clip_plane: 2000.0   # the loaded region is ~224 world units corner to corner
+          # Keep the steered marker sharp. focus_object self-activates object focus for THIS
+          # camera whatever config.yaml's dof_focus_mode says, and resolves to the marker's
+          # transform origin because it carries no bounds -- see resolve_dof_focus_(), which
+          # calls out "an empty used purely as a focus marker" as the case it handles here.
+          focus_object: focus_marker
+          # An 85 mm lens at f/2.8 puts the sharp half-band at roughly +-26 m around the marker
+          # (Delta = c * N * F(F-f)/f^2, with c = sensor_width/render_width = 36/1920 mm and
+          # F ~ 60 m -- the orbit distance below). Narrow enough against a 224 m loaded region
+          # that flying the marker visibly racks focus across the landscape; the engine default
+          # 50 mm would leave a +-75 m band, which at this scale reads as no depth of field at
+          # all. Note this compounds with config.yaml's tilt_shift_enabled, which is a separate,
+          # screen-position blur -- together they give the diorama look this engine is after.
+          lens: 85.0
+          aperture: 2.8
+        - type: CameraController
+          mode: orbit
+          tracker: focus_marker     # follows the object WASD steers
+          distance: 60.0            # far enough back to keep the landscape vista this scene had
+          yaw_deg: 0.0              # sits on -Y looking toward +Y, as the old fly pose did
+          pitch_deg: 30.0
+          follow_smoothing: 8.0     # how fast the pivot chases the marker
+          movement_smoothing: 0.25  # drag on the camera's own yaw/pitch/zoom response
+          mouse_sensitivity: 0.12
+          zoom_speed: 2.0
+          min_distance: 6.0
+          max_distance: 140.0
+          min_pitch_deg: 2.0
+          max_pitch_deg: 85.0
+          capture_cursor: true
+      children: []
+
+    - name: sun
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 40.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        # Low-ish and off-axis on purpose: a terraced world only reads as terraced when its
+        # steps cast shadows onto each other, which a directly overhead sun would not do.
+        - type: DirectionalLight
+          direction: { x: -0.45, y: -0.35, z: -0.82 }
+          color: { r: 1.0, g: 0.96, b: 0.88 }
+          intensity: 1.2
+          cast_shadows: true
+          shadow_intensity: 1.0
+      children: []
+
+    - name: sky
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: EnvironmentLight
+          sky_color: { r: 0.45, g: 0.62, b: 0.88 }
+          ground_color: { r: 0.18, g: 0.16, b: 0.13 }
+          sky_intensity: 1.0
+      children: []

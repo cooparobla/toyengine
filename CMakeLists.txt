@@ -17,6 +17,7 @@ set(GFXCOOPA_DIR   "${ROOT_DIR_PARENT}/gfxcoopa")
 set(PHYSXCOOPA_DIR "${ROOT_DIR_PARENT}/physxcoopa")
 set(SFXCOOPA_DIR   "${ROOT_DIR_PARENT}/sfxcoopa")
 set(UICOOPA_DIR    "${ROOT_DIR_PARENT}/uicoopa")
+set(MAPCOOPA_DIR   "${ROOT_DIR_PARENT}/mapcoopa")
 
 if(NOT EXISTS "${LIBCOOPA_DIR}/CMakeLists.txt")
     message(FATAL_ERROR
@@ -43,6 +44,11 @@ add_subdirectory(${GFXCOOPA_DIR}   ${CMAKE_CURRENT_BINARY_DIR}/gfxcoopa-build)
 add_subdirectory(${PHYSXCOOPA_DIR} ${CMAKE_CURRENT_BINARY_DIR}/physxcoopa-build)
 add_subdirectory(${SFXCOOPA_DIR}   ${CMAKE_CURRENT_BINARY_DIR}/sfxcoopa-build)
 add_subdirectory(${UICOOPA_DIR}    ${CMAKE_CURRENT_BINARY_DIR}/uicoopa-build)
+# mapcoopa is header-only and pure data (a MapGraph; no Vulkan, no GLFW), consumed by
+# toyengine/world/ to build terrain from a generated world. Its own executables, tests and
+# ctest entries sit behind a `CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR` guard, so
+# add_subdirectory() here contributes exactly one INTERFACE target, coopa::maps.
+add_subdirectory(${MAPCOOPA_DIR}   ${CMAKE_CURRENT_BINARY_DIR}/mapcoopa-build)
 
 # Backstop for the ordering dependency above: if a reorder ever lets a library
 # resolve libcoopa through its own stale path, we end up building an unpinned
@@ -96,13 +102,18 @@ add_dependencies(toyengine toyengine_shaders uicoopa_shaders)
 # stb_image_write.h, whose implementations live in gfxcoopa_impl. Linking coopa::gfx
 # first keeps gfxcoopa's copies of those two headers ahead in the include search, so a
 # TU can never compile against uicoopa's copy while linking gfxcoopa's body.
-target_link_libraries(toyengine PRIVATE coopa::gfx coopa::physx coopa::sfx coopa::ui)
+#
+# coopa::maps sits between them for exactly the same reason -- mapcoopa's includes/ carries
+# a third copy of stb_image_write.h. Nothing in toyengine may include mapcoopa's
+# image_writer.h / map_export.h, which compile stb's *implementation*; toyengine/world/ uses
+# only the data headers (map_config.h, map_data.h, map_generator.h, noise.h, biome.h).
+target_link_libraries(toyengine PRIVATE coopa::gfx coopa::physx coopa::sfx coopa::maps coopa::ui)
 target_include_directories(toyengine PRIVATE ${CAML_DIR} ${CAML_DIR}/includes)
 
 enable_testing()
 add_executable(toyengine_tests test.cpp)
 add_dependencies(toyengine_tests toyengine_shaders uicoopa_shaders)
-target_link_libraries(toyengine_tests PRIVATE coopa::gfx coopa::physx coopa::sfx coopa::ui)
+target_link_libraries(toyengine_tests PRIVATE coopa::gfx coopa::physx coopa::sfx coopa::maps coopa::ui)
 target_include_directories(toyengine_tests PRIVATE ${CAML_DIR} ${CAML_DIR}/includes)
 # One ctest entry per test GROUP, not one for the whole binary: each render_* group
 # constructs its own Vulkan device, pipelines and scene, and that cost is CPU-bound
@@ -110,7 +121,7 @@ target_include_directories(toyengine_tests PRIVATE ${CAML_DIR} ${CAML_DIR}/inclu
 # roughly the time of its slowest group. It also means `ctest -R toyengine_math` is an
 # instant, device-free check a dev can run on every save. See test.cpp's file doc for
 # the argument forms the binary accepts.
-foreach(_toy_test_group math config scene render_pixel render_ui render_material render_cloth)
+foreach(_toy_test_group math config scene world render_pixel render_ui render_material render_cloth render_terrain)
     add_test(NAME toyengine_${_toy_test_group}
              COMMAND toyengine_tests --group ${_toy_test_group})
 endforeach()
@@ -118,9 +129,9 @@ endforeach()
 # The device-free groups have no business taking seconds; the render groups get a ceiling
 # generous enough for a cold shader cache on a slow GPU but short enough that a hung
 # frame fails instead of hanging the run.
-set_tests_properties(toyengine_math toyengine_config toyengine_scene PROPERTIES TIMEOUT 60)
+set_tests_properties(toyengine_math toyengine_config toyengine_scene toyengine_world PROPERTIES TIMEOUT 60)
 set_tests_properties(toyengine_render_pixel toyengine_render_ui toyengine_render_material
-                     toyengine_render_cloth PROPERTIES TIMEOUT 300)
+                     toyengine_render_cloth toyengine_render_terrain PROPERTIES TIMEOUT 300)
 
 # --- Vulkan/GLFW leak gate ---
 # OFF by default here, unlike uicoopa/pixengine which are clean:

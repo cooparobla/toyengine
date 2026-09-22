@@ -33,6 +33,7 @@
 #include <gfx/brdf.glsl>
 #include <gfx/shadow_sampling.glsl>
 #include <gfx/indirect_specular.glsl>
+#include <gfx/ao_composite.glsl>
 #include <gfx/spot_light.glsl>
 
 layout(location = 0) in vec2 in_uv;
@@ -98,6 +99,8 @@ layout(push_constant) uniform PixelParams {
     float ambient_intensity; // scales sky_gradient(N) indirect diffuse
     float sky_intensity;     // scales sky_gradient(reflect(-V,N)) indirect specular base
     float soft_lighting;     // != 0 -> smooth Cook-Torrance direct lighting; 0 -> banded/ramped cel look (default)
+    float ssao_direct_strength; // how much occlusion darkens DIRECT lighting (HDRP's
+                                // Direct Lighting Strength): 0 = indirect only
 } params;
 
 layout(location = 0) out vec4 out_color;
@@ -276,9 +279,24 @@ void main() {
     GfxIndirectSpecular ind = gfx_indirect_specular(world_pos, N, V, F0, roughness, params.sky_intensity,
                                                     lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb);
     vec3 kD_ind = (vec3(1.0) - ind.F) * (1.0 - metallic);
-    vec3 ambient = (kD_ind * albedo * ind_diff + ind.value) * ao * ssao;
 
-    // emissive is added last, after ambient's * ao * ssao -- an emissive surface glows
+    // Occlusion applied the way Unity HDRP applies its GTAO (gfx/ao_composite.glsl):
+    //  * material AO and screen-space AO combine by min() -- they estimate the same
+    //    quantity at different scales, so multiplying would double-darken overlaps;
+    //  * indirect diffuse gets multi-bounce AO (tints creases toward albedo);
+    //  * indirect specular gets its own NdotV/roughness occlusion cone, tinted by F0;
+    //  * direct lighting is scaled by the multi-bounce factor faded in with
+    //    params.ssao_direct_strength (0 = indirect only).
+    // ssr_composite.frag subtracts the same ind.value term this pass adds, so its
+    // occlusion factor must match this one exactly (see ssr_composite_body.glsl).
+    float occlusion = min(ao, ssao);
+    vec3 ao_diffuse = gfx_gtao_multi_bounce(occlusion, albedo);
+    float spec_occ  = gfx_specular_occlusion(max(dot(N, V), 0.0), occlusion, roughness);
+    vec3 ambient = kD_ind * albedo * ind_diff * ao_diffuse
+                 + ind.value * gfx_gtao_multi_bounce(spec_occ, F0);
+    Lo *= mix(vec3(1.0), ao_diffuse, params.ssao_direct_strength);
+
+    // emissive is added last, after the occluded terms -- an emissive surface glows
     // even in a fully occluded/dark crevice, unlike the lit terms above it.
     out_color = vec4(ambient + Lo + emissive, 1.0);
 }

@@ -36,8 +36,8 @@ render:
   camera_pixel_snap: false   # orthographic cameras only
   world_ui_enabled: true     # WorldSpace canvases, at INTERNAL resolution (startup-fixed)
   screen_ui_enabled: true    # ScreenSpaceOverlay canvases, at WINDOW resolution (startup-fixed)
-  aa_mode: taa               # off | fxaa | smaa | taa. taa never fully settles on a static
-                             # camera (8-frame jitter cycle); smaa converges exactly
+  aa_mode: taa               # off | fxaa | smaa | taa. taa reprojects + age-accumulates, so a
+                             # still camera converges (static_camera_converges guards it)
   ssao_debug_view: false     # runtime: SSAO buffer fullscreen in place of lighting
   dof_debug_view: false      # runtime: signed circle-of-confusion field in place of the image
   volumetrics_debug_view: false # runtime: accumulated density alone, scene colour suppressed
@@ -178,7 +178,11 @@ render:
   fxaa_edge_threshold_min: 0.0312 # absolute contrast floor
   smaa_threshold: 0.1        # SMAA edge-detection contrast threshold
   smaa_max_search_steps: 16  # SMAA blend-weight search distance, texels
-  taa_blending_weight: 0.9   # TAA blend toward the (AABB-clamped) history sample
+  taa_blending_weight: 0.99  # history weight TAA's accumulation converges to at rest
+  taa_feedback_motion: 0.85  # history weight floor under fast camera motion
+  taa_weight_scale: 30       # feedback hits its floor at ~100/scale px of per-frame velocity
+  taa_sharpness: 0.25        # motion-gated high-frequency restore; 0 disables
+  taa_variance_gamma: 1.0    # history clip half-width, std deviations of the 3x3 YCoCg box
 
   # --- Outline ---
   outline_thickness: 0.6     # low-resolution texels

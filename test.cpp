@@ -623,9 +623,12 @@ toy::core::AppConfig load_config_text(std::string_view filename, std::string_vie
 }
 
 void test_pixel_render_config_aa_defaults() {
-    // Defaults mirror blendy's PbrRenderPipeline field-for-field (see
+    // FXAA/SMAA defaults mirror blendy's PbrRenderPipeline field-for-field (see
     // PixelRenderConfig::aa_mode's own doc) except aa_mode itself, which defaults to "off"
-    // here so a scene that never opts in renders exactly as it did before AA existed.
+    // here so a scene that never opts in renders exactly as it did before AA existed. The
+    // TAA defaults are this engine's own (its resolve is reprojecting/age-weighted, see
+    // taa.frag): the still-camera feedback must sit high enough that the converged
+    // accumulation's residual jitter orbit stays inside static_camera_converges's budget.
     toy::render::PixelRenderConfig cfg;
     expect(cfg.aa_mode == "off", "PixelRenderConfig: aa_mode defaults to off");
     expect(cfg.fxaa_subpixel == 0.75f, "PixelRenderConfig: fxaa_subpixel defaults to 0.75");
@@ -633,7 +636,7 @@ void test_pixel_render_config_aa_defaults() {
     expect(cfg.fxaa_edge_threshold_min == 0.0312f, "PixelRenderConfig: fxaa_edge_threshold_min defaults to 0.0312");
     expect(cfg.smaa_threshold == 0.1f, "PixelRenderConfig: smaa_threshold defaults to 0.1");
     expect(cfg.smaa_max_search_steps == 16, "PixelRenderConfig: smaa_max_search_steps defaults to 16");
-    expect(cfg.taa_blending_weight == 0.9f, "PixelRenderConfig: taa_blending_weight defaults to 0.9");
+    expect(cfg.taa_blending_weight == 0.99f, "PixelRenderConfig: taa_blending_weight defaults to 0.99");
     expect(cfg.taa_weight_scale == 30.0f, "PixelRenderConfig: taa_weight_scale defaults to 30.0");
 }
 
@@ -2578,11 +2581,13 @@ double mean_abs_delta(const Frame& a, const Frame& b) {
 /**
  * @brief A static camera over static geometry must render a STATIC image.
  *
- * The regression test for a flicker that shipped unnoticed: with `aa_mode: taa`, TAA's 8-frame
- * Halton jitter makes the whole render exactly 8-periodic, and TaaPass's exponential history
- * blend -- a low-pass filter -- converges a periodic input to a periodic ORBIT rather than to a
- * fixed point. The image never settles; on terrain_test's block faces the surviving orbit is
- * plainly visible as boiling. See config.yaml's `aa_mode` for the full measurement.
+ * The regression test for a flicker that shipped unnoticed: with `aa_mode: taa`, the 8-frame
+ * Halton jitter makes the whole render exactly 8-periodic, and any resolve that filters it
+ * with a plain exponential blend converges that periodic input to a periodic ORBIT rather than
+ * a fixed point -- on terrain_test's block faces the surviving orbit reads as boiling. TAA's
+ * age-weighted accumulation (a true running average at rest, with a quantisation floor on the
+ * variance clip so flat regions keep their age) is what this test holds to the contract; the
+ * threshold below fails on any re-introduced orbit.
  *
  * Two things make this test able to see what the existing suite could not:
  *
@@ -2894,6 +2899,9 @@ void test_texel_aa_ring_repro() {
         // The proposed shipping stack: texel-AA for texture crawl + SMAA for the
         // geometric block-edge staircase crawl texel-AA cannot touch.
         {"ring_texelaa_smaa",  true,  true,  "smaa"},
+        // Same stack with the temporal resolve instead: the acceptance capture for TAA's
+        // motion behaviour (reprojection sharpness) and its post-stop settle.
+        {"ring_texelaa_taa",   true,  true,  "taa"},
     };
 
     const char* only = std::getenv("SSAO_PROBE_ONLY");

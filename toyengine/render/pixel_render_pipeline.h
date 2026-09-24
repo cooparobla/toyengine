@@ -432,8 +432,8 @@ public:
         // state during command recording is a hazard the rest of this pipeline avoids.
         DofFocus dof_focus = resolve_dof_focus_(cam, view, scene, dt);
 
-        // TAA sub-pixel jitter: an 8-frame Halton(2,3) sequence added to the projection's
-        // jitter terms (proj[2][0]/[2][1]), not a [3][*] translation.
+        // TAA sub-pixel jitter: an 8-frame Halton(2,3) sequence added to whichever projection
+        // terms shift NDC by a depth-independent constant (see apply_taa_jitter_).
         //
         // unjittered_proj is kept for the consumers that must NOT see the jitter -- fog, the
         // volumetrics UBO and the world-UI layer. The rule behind all three: the jitter exists
@@ -596,8 +596,9 @@ public:
         // Needed by both SSAO's and SSR's temporal resolve passes -- kept unconditional (not
         // gated on either toggle) since ssao_pass_ always exists and either toggle can be
         // re-enabled without a resize/reconstruct in between.
-        prev_view_proj_       = proj * view;
-        prev_view_proj_valid_ = true;
+        prev_view_proj_                = proj * view;
+        prev_unjittered_view_proj_     = unjittered_proj * view;
+        prev_view_proj_valid_          = true;
         ++frame_index_;
 
         return frame_presented;
@@ -1166,14 +1167,16 @@ private:
                 render_extent_.width, render_extent_.height, linear_sampler_, config_.shaders);
             smaa_pass_->set_source_image(post_target_.color_image_object()->view_typed(), linear_sampler_);
 
-            // history_format = UNORM, not gfxcoopa's SRGB default -- see taa_pass_'s own
-            // member doc for why post_target_'s color-space convention demands it.
             taa_pass_ = std::make_unique<coopa::gfx::engine::passes::TaaPass>(
-                device_, allocator_, aa_target_->render_pass_object(), linear_sampler_,
+                device_, allocator_, aa_target_->render_pass_object(),
+                linear_sampler_, nearest_sampler_,
                 render_extent_.width, render_extent_.height,
                 config_.shaders("taa.vert"), config_.shaders("taa.frag"),
-                VK_FORMAT_R8G8B8A8_UNORM);
-            taa_pass_->set_source_image(post_target_.color_image_object()->view_typed());
+                config_.shaders("taa_present.frag"));
+            // The depth buffer feeds the resolve's camera reprojection; like DoF's and the
+            // stylize pass's bindings above, it is the G-buffer depth at render_extent_.
+            taa_pass_->set_source_images(post_target_.color_image_object()->view_typed(),
+                                         gbuffer_target_.depth_view_typed());
         }
 
         // Single source of truth for everything downstream of post_target_/aa_target_ -- same
@@ -1687,8 +1690,8 @@ private:
         // ui_world_occlude.glsl's depth compare samples a G-buffer that IS still jittered, so an
         // occluded edge is displaced by up to half a render pixel; that is confined to the
         // silhouette of occluding geometry, where a whole-canvas wobble was not. The UI's own depth
-        // is unaffected either way -- the jitter lands in proj[2][0]/[2][1], a constant NDC x/y
-        // shift, so gl_FragCoord.z is identical with or without it.
+        // is unaffected either way -- the jitter is a constant NDC x/y shift (see
+        // apply_taa_jitter_), so gl_FragCoord.z is identical with or without it.
         //
         // Drawn at the DISPLAY rect, not render_extent_, so the composite samples it 1:1; at render
         // resolution it needed a non-integer NEAREST upscale and came out visibly stepped. The
@@ -1728,23 +1731,41 @@ private:
                 aa_target_->end(cmd);
             } else if (config_.aa_mode == "smaa") {
                 // SmaaPass owns all three of its own begin/end brackets (edge -> blend
-                // -> neighborhood-into-output_target) -- unlike fxaa_pass_/taa_pass_
-                // above/below, the caller doesn't bracket this one itself.
+                // -> neighborhood-into-output_target) -- unlike fxaa_pass_ above, the
+                // caller doesn't bracket this one itself.
                 smaa_pass_->draw(cmd, *aa_target_, /*exposure (unused by the shader body,
                                  see SmaaPass::NeighborhoodPush's doc)*/ 1.0f,
                                  config_.smaa_threshold, config_.smaa_max_search_steps,
                                  render_extent_.width, render_extent_.height);
             } else if (config_.aa_mode == "taa") {
                 taa_pass_->prepare_history(cmd);
-                taa_pass_->set_taa_config(config_.taa_blending_weight, config_.taa_weight_scale);
-                aa_target_->begin(cmd);
-                taa_pass_->draw(cmd, render_extent_.width, render_extent_.height);
-                aa_target_->end(cmd);
-                // Copies aa_target_'s just-drawn color image into history for next
-                // frame -- OffscreenTarget::end() above leaves it in
-                // SHADER_READ_ONLY_OPTIMAL, matching update_history()'s expected
-                // oldLayout (see TaaPass::update_history's barriers).
-                taa_pass_->update_history(cmd, *aa_target_);
+                coopa::gfx::engine::passes::TaaPass::Params taa_params{};
+                // Maps current jittered clip space to LAST frame's unjittered clip space:
+                // the current jitter is removed separately in the shader (jitter_ndc), and
+                // the previous frame's never enters -- both unjittered, so the velocity it
+                // yields is exactly zero for a still camera. SSAO/SSR deliberately keep
+                // using the JITTERED prev_view_proj_ instead (see their param fill above).
+                //
+                // The inverse runs in DOUBLE precision: a view-projection with a world
+                // translation of hundreds of units is ill-conditioned enough that an fp32
+                // inverse leaves ~1e-4 UV of noise in the reprojected position -- a quarter
+                // pixel at 1080p, which resamples the converged history at a wandering
+                // sub-pixel offset every frame and reads as permanent shimmer at rest. The
+                // composed matrix is near-identity, so the cast back to fp32 is harmless.
+                taa_params.reproject       = glm::mat4(
+                    glm::dmat4(prev_unjittered_view_proj_) *
+                    glm::inverse(glm::dmat4(ctx.proj * ctx.view)));
+                taa_params.reproject_valid = prev_view_proj_valid_;
+                taa_params.jitter_ndc      = taa_jitter_ndc_;
+                taa_params.feedback_still  = config_.taa_blending_weight;
+                taa_params.feedback_motion = config_.taa_feedback_motion;
+                taa_params.velocity_scale  = config_.taa_weight_scale;
+                taa_params.sharpness       = config_.taa_sharpness;
+                taa_params.variance_gamma  = config_.taa_variance_gamma;
+                // TaaPass owns its brackets (resolve into its accumulation ping-pong, then
+                // the passthrough into aa_target_) -- like smaa_pass_, no caller bracket.
+                taa_pass_->draw(cmd, *aa_target_, taa_params,
+                                render_extent_.width, render_extent_.height);
             }
         }
 
@@ -2181,9 +2202,11 @@ private:
     /**
      * @brief Adds this frame's TAA sub-pixel jitter to `proj`, when aa_mode == "taa".
      *
-     * An 8-frame Halton(2,3) sequence added to the projection's jitter terms
-     * (proj[2][0]/[2][1]), not a [3][*] translation. Callers keep an unjittered copy for the
-     * consumers that must not see it -- see render()'s own comment on that rule.
+     * An 8-frame Halton(2,3) sequence added to whichever projection terms displace NDC by a
+     * depth-independent constant -- proj[2][0]/[2][1] for perspective, proj[3][0]/[3][1] for
+     * orthographic. That constant is also stored in taa_jitter_ndc_, so the TAA resolve can
+     * subtract this frame's jitter out of its velocity. Callers keep an unjittered copy for
+     * the consumers that must not see the jitter -- see render()'s own comment on that rule.
      *
      * The sequence length is deliberately SHORT, and lengthening it is a trap worth naming. A
      * periodic jitter makes the whole render periodic, and TaaPass's exponential history blend is
@@ -2200,9 +2223,26 @@ private:
                 {5.0f / 8.0f, 7.0f / 9.0f}, {3.0f / 8.0f, 2.0f / 9.0f},
                 {7.0f / 8.0f, 5.0f / 9.0f}, {1.0f / 16.0f, 8.0f / 9.0f},
             };
-            proj[2][0] += (2.0f * halton_offset[taa_jitter_index_][0] - 1.0f) / static_cast<float>(render_extent_.width);
-            proj[2][1] += (2.0f * halton_offset[taa_jitter_index_][1] - 1.0f) / static_cast<float>(render_extent_.height);
+            const float jx = (2.0f * halton_offset[taa_jitter_index_][0] - 1.0f) / static_cast<float>(render_extent_.width);
+            const float jy = (2.0f * halton_offset[taa_jitter_index_][1] - 1.0f) / static_cast<float>(render_extent_.height);
+            if (proj[2][3] != 0.0f) {
+                // Perspective (perspectiveRH_ZO, proj[2][3] == -1): a [2][x] term contributes
+                // j * z_view to clip x/y while w_clip = -z_view, so the NDC displacement is
+                // the depth-independent constant -j.
+                proj[2][0] += jx;
+                proj[2][1] += jy;
+                taa_jitter_ndc_ = glm::vec2(-jx, -jy);
+            } else {
+                // Orthographic (w_clip == 1): a [2][x] term would scale with view depth, so
+                // the constant NDC shift lives in the translation column instead, where the
+                // displacement is +j.
+                proj[3][0] += jx;
+                proj[3][1] += jy;
+                taa_jitter_ndc_ = glm::vec2(jx, jy);
+            }
             taa_jitter_index_ = (taa_jitter_index_ + 1) & 0x7u;
+        } else {
+            taa_jitter_ndc_ = glm::vec2(0.0f);
         }
     }
 
@@ -3592,15 +3632,19 @@ private:
     std::unique_ptr<coopa::gfx::engine::targets::OffscreenTarget> aa_target_;
     std::unique_ptr<coopa::gfx::engine::passes::FxaaPass> fxaa_pass_;
     std::unique_ptr<coopa::gfx::engine::passes::SmaaPass> smaa_pass_;
-    // history_format is UNORM, not gfxcoopa's default SRGB: post_target_/aa_target_ are
-    // RGBA8_Unorm holding sRGB-ENCODED bytes (see upscale.frag's srgb_decode()), so an SRGB
-    // history view would re-decode on every sample and drift the temporal blend dark.
+    // Owns its own RGBA16F accumulation ping-pong (see TaaPass's member doc for why the
+    // shared RGBA8 aa_target_ cannot hold the history) and writes aa_target_ through a
+    // passthrough present draw.
     std::unique_ptr<coopa::gfx::engine::passes::TaaPass> taa_pass_;
     // Halton(2,3) jitter phase for "taa" mode, ADVANCED ONLY when config_.aa_mode == "taa" --
     // deliberately separate from frame_index_ below, which must keep advancing every frame
     // regardless of aa_mode (SSAO/SSR/gfx_time all depend on it). Mirrors blendy's own
     // frame_index_/ssao_frame_index_ split (see PbrRenderPipeline).
     uint32_t taa_jitter_index_ = 0;
+    // This frame's jitter as the NDC displacement it applies to the projection, written by
+    // apply_taa_jitter_() each frame (zero when aa_mode != "taa"). The TAA resolve subtracts
+    // it so its velocity is measured between UNjittered positions.
+    glm::vec2 taa_jitter_ndc_ = glm::vec2(0.0f);
     // SSAO kernel-rotation phase, advanced only on frames where the camera's UNJITTERED
     // view-projection changed -- see record_scene_()'s SSAO block. Separate from frame_index_
     // for the same reason taa_jitter_index_ is: that counter must keep advancing every frame
@@ -3711,6 +3755,10 @@ private:
     // resolves an 8-frame crawl against TAA's own jittered current frame.
     glm::mat4 prev_view_proj_       = glm::mat4(1.0f);
     bool      prev_view_proj_valid_ = false;
+    // Previous frame's UNjittered proj * view, for the TAA resolve's reprojection matrix --
+    // which must measure velocity between unjittered poses so a still camera measures exactly
+    // zero (the current frame's jitter is removed separately, via taa_jitter_ndc_).
+    glm::mat4 prev_unjittered_view_proj_ = glm::mat4(1.0f);
     // Monotonic per-rendered-frame counter, incremented once at the end of render(). Shared
     // by SSAO's noise-tile rotation and SSR's stochastic ray jitter (see each pass's own
     // Params::*frame_index* doc) -- both are per-pixel noise sources that need decorrelating

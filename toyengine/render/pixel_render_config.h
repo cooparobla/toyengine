@@ -522,10 +522,13 @@ struct PixelRenderConfig {
      * same target, so render() just branches per frame on which draw() to call.
      *
      * "taa" jitters the camera projection every frame, which is in inherent tension with
-     * camera_pixel_snap's whole-texel snapping above -- not a bug to fix. The TAA resolve has
-     * no motion vectors and no history reprojection: history is sampled at the current
-     * frame's UV and merely clamped to a YCoCg 3x3 neighbourhood, so it ghosts under camera
-     * motion at the default taa_blending_weight.
+     * camera_pixel_snap's whole-texel snapping above -- not a bug to fix. The TAA resolve
+     * reprojects its accumulation history through the camera's frame-to-frame motion (from
+     * the depth buffer and the previous unjittered view-projection; camera-only, there are
+     * no per-object motion vectors) and variance-clips it in YCoCg against the current 3x3
+     * neighbourhood, so dynamic objects shed ghosts through the clip rather than through
+     * true velocities. Accumulation is age-weighted: a still camera converges as a true
+     * running average of the jitter cycle rather than orbiting an exponential blend.
      */
     std::string aa_mode = "off"; /**< "off" | "fxaa" | "smaa" | "taa". */
     float fxaa_subpixel           = 0.75f;   /**< Blend weight of FXAA's subpixel-aliasing term. */
@@ -533,11 +536,14 @@ struct PixelRenderConfig {
     float fxaa_edge_threshold_min = 0.0312f; /**< Absolute contrast floor -- avoids AA-ing near-black noise. */
     float smaa_threshold          = 0.1f;    /**< SMAA edge-detection local contrast threshold. */
     int   smaa_max_search_steps   = 16;      /**< SMAA blend-weight pass's max horizontal/vertical search distance, in texels. */
-    float taa_blending_weight     = 0.9f;    /**< TAA's blend weight toward the (AABB-clamped) history sample. */
-    /** Plumbed for config parity with blendy only -- gfxcoopa's taa.frag declares this push-
-     *  constant field but never reads it (an older velocity-based weight-attenuation term that
-     *  was replaced by the neighborhood clamp; see TaaPass::PushConstants). */
+    float taa_blending_weight     = 0.99f;   /**< History weight TAA's accumulation converges to at rest. */
+    /** Velocity response: TAA's history weight falls from taa_blending_weight toward
+     *  taa_feedback_motion, reaching the floor at ~100/taa_weight_scale pixels of per-frame
+     *  screen velocity. */
     float taa_weight_scale        = 30.0f;
+    float taa_feedback_motion     = 0.85f;   /**< History weight floor under fast camera motion. */
+    float taa_sharpness           = 0.25f;   /**< Motion-gated high-frequency restore in the resolve; 0 disables. */
+    float taa_variance_gamma      = 1.0f;    /**< History clip box half-width, in standard deviations of the 3x3 YCoCg neighbourhood. */
 
     /**
      * @brief Draws physics collider wireframes/contact normals (DebugLinePass), gathered each

@@ -368,6 +368,9 @@ struct AppConfig {
                 if (r.contains("smaa_max_search_steps"))     config.render.smaa_max_search_steps     = r.at("smaa_max_search_steps").get_value<int>();
                 if (r.contains("taa_blending_weight"))       config.render.taa_blending_weight       = r.at("taa_blending_weight").get_value<float>();
                 if (r.contains("taa_weight_scale"))          config.render.taa_weight_scale          = r.at("taa_weight_scale").get_value<float>();
+                if (r.contains("taa_feedback_motion"))       config.render.taa_feedback_motion       = r.at("taa_feedback_motion").get_value<float>();
+                if (r.contains("taa_sharpness"))             config.render.taa_sharpness             = r.at("taa_sharpness").get_value<float>();
+                if (r.contains("taa_variance_gamma"))        config.render.taa_variance_gamma        = r.at("taa_variance_gamma").get_value<float>();
 
                 // --- SDF ---
                 if (r.contains("sdf_max_steps"))        config.render.sdf_max_steps        = r.at("sdf_max_steps").get_value<uint32_t>();

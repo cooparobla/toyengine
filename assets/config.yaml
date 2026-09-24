@@ -36,7 +36,7 @@ render:
   camera_pixel_snap: false   # orthographic cameras only
   world_ui_enabled: true     # WorldSpace canvases, at INTERNAL resolution (startup-fixed)
   screen_ui_enabled: true    # ScreenSpaceOverlay canvases, at WINDOW resolution (startup-fixed)
-  aa_mode: off               # off | fxaa | smaa | taa. taa never fully settles on a static
+  aa_mode: taa               # off | fxaa | smaa | taa. taa never fully settles on a static
                              # camera (8-frame jitter cycle); smaa converges exactly
   ssao_debug_view: false     # runtime: SSAO buffer fullscreen in place of lighting
   dof_debug_view: false      # runtime: signed circle-of-confusion field in place of the image

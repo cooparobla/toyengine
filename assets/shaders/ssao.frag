@@ -3,7 +3,9 @@
 #include <gfx/ssr_common.glsl>
 
 // Horizon-based ambient occlusion (GTAO -- Jimenez et al., "Practical Realtime Strategies
-// for Accurate Indirect Occlusion", 2016) over the SSR Hi-Z min-depth pyramid.
+// for Accurate Indirect Occlusion", 2016) over a dedicated prefiltered depth pyramid
+// (ao_depth_downsample.frag: depth-aware weighted average per level, not the SSR chain's
+// min() reduction).
 //
 // Per pixel, a small set of screen-space SLICES (half-planes through the view vector) each
 // march the depth pyramid away from the pixel in both directions and track the highest
@@ -29,17 +31,14 @@ layout(set = 0, binding = 0) uniform CameraUBO {
     vec3 camera_pos;
 } camera;
 
-// Set 1: G-Buffer normal/position + the SSR chain's Hi-Z min-depth pyramid (every mip
-// reachable -- HiZPass's sampler sets maxLod to the full chain).
+// Set 1: G-Buffer normal/position + the AO depth pyramid (ao_depth_downsample.frag's
+// weighted-average reduction; every mip reachable -- HiZPass's sampler sets maxLod to the
+// full chain).
 layout(set = 1, binding = 0) uniform sampler2D g_normal_metallic;
 layout(set = 1, binding = 1) uniform sampler2D g_position_roughness;
 layout(set = 1, binding = 2) uniform sampler2D u_hiz_map;
 
 layout(push_constant) uniform SsaoPushConstants {
-    // Reconstructs a marched sample's view-space position from (ndc.xy, hiz depth) -- the
-    // same convention as gfx_ssr_get_view_z() in gfx/ssr_trace_body.glsl. mat4 first
-    // (16-byte aligned), then plain scalars, matching ResolvePushConstants' house rule.
-    mat4  inv_proj;
     float radius;           // world-space gather radius
     float bias;             // world-space offset of the shading point along its normal --
                             // lifts the tangent plane so depth quantisation on a flat
@@ -65,13 +64,15 @@ layout(push_constant) uniform SsaoPushConstants {
 const float PI      = 3.14159265359;
 const float HALF_PI = 1.57079632679;
 
-/// Fraction of a sampled Hi-Z cell's world footprint tolerated as in-plane depth variation
-/// before it can raise a horizon. The pyramid stores each cell's MINIMUM depth but the march
-/// reconstructs it at the sampled UV, so a flat surface viewed at a grazing angle reads back
-/// a phantom bump of up to the cell footprint times the surface slope -- without this the
-/// open ground plane accumulates a distance-growing false-occlusion gradient. Scaling the
-/// tolerance with the footprint cancels the bump at exactly the scale it occurs, while a
-/// real wall -- whose horizon rise dwarfs one cell's footprint -- is barely dented.
+/// Fraction of a sampled pyramid cell's world footprint tolerated as in-plane depth
+/// variation before it can raise a horizon. The pyramid stores each cell's weighted-average
+/// depth but the march reconstructs it at the sampled UV, so a sloped surface viewed at a
+/// grazing angle still reads back a phantom bump of up to the cell footprint times the
+/// surface slope (the average centers the error where min() biased it fully near, but does
+/// not remove it) -- without this the open ground plane accumulates a distance-growing
+/// false-occlusion gradient. Scaling the tolerance with the footprint cancels the bump at
+/// exactly the scale it occurs, while a real wall -- whose horizon rise dwarfs one cell's
+/// footprint -- is barely dented.
 const float kMinDepthSlack = 0.75;
 
 /// How strongly an already-passed horizon decays when later, farther samples see open space
@@ -128,6 +129,22 @@ void main() {
     float p11 = camera.proj[1][1];
     vec2  texel_uv = 1.0 / vec2(pc.resolution_x, pc.resolution_y);
 
+    // Closed-form inverse of camera.proj for the march's (ndc.xy, hiz depth) -> view-space
+    // reconstruction, hoisted out of the loops. camera.proj is the JITTERED matrix (the camera
+    // UBO intentionally carries it), and the jitter terms live in different cells per
+    // projection kind -- proj[2][0/1] for perspectiveRH_ZO (proj[2][3] == -1), proj[3][0/1]
+    // for orthographic -- matching the pipeline's apply_taa_jitter_. The scalar form replaces
+    // a full mat4 multiply plus vec4 perspective divide per marched sample.
+    bool  proj_persp = camera.proj[2][3] != 0.0;
+    float inv_p00 = 1.0 / p00;
+    float inv_p11 = 1.0 / p11;
+    float c22 = camera.proj[2][2];
+    float c32 = camera.proj[3][2];
+    float jx  = camera.proj[2][0];
+    float jy  = camera.proj[2][1];
+    float tx  = camera.proj[3][0];
+    float ty  = camera.proj[3][1];
+
     float visibility = 0.0;
     for (int s = 0; s < pc.slices; ++s) {
         float phi = slice_rot + PI * float(s) / float(pc.slices);
@@ -170,20 +187,31 @@ void main() {
                 vec2 uv_s = in_uv + sgn * dir_px * d_px * texel_uv;
                 if (any(lessThan(uv_s, vec2(0.0))) || any(greaterThan(uv_s, vec2(1.0)))) break;
 
-                // Coarser pyramid mips with distance: the fetched value is then the NEAREST
-                // surface over the step's whole footprint (min-depth pyramid) -- a
-                // prefiltered, conservative occluder instead of whichever single texel the
-                // step happened to land on. Capped at mip 2 (4x4-texel cells): the pyramid
-                // stores each cell's MINIMUM depth but this march reconstructs it at the
-                // cell's sampled UV, which on a flat surface manufactures a phantom bump of
-                // up to the cell's world footprint -- at mip 3+ that lift exceeds any sane
-                // pc.bias and reads as broad over-darkening on open ground.
-                float mip = clamp(floor(log2(d_px)) - 2.0, 0.0, min(2.0, float(pc.max_mip)));
+                // Coarser pyramid mips with distance: the fetched value is then a
+                // prefiltered occluder over the step's whole footprint (near-surface-
+                // weighted average, see ao_depth_downsample.frag) instead of whichever
+                // single texel the step happened to land on -- which both stabilises far
+                // occluders under camera motion and keeps the taps cache-resident at any
+                // radius. The average reduction leaves no per-cell min() bias, so the march
+                // may use every level the pyramid built (pc.max_mip); the residual
+                // slope-reconstruction error is covered by kMinDepthSlack at every level.
+                float mip = clamp(floor(log2(d_px)) - 2.0, 0.0, float(pc.max_mip));
                 float depth = textureLod(u_hiz_map, uv_s, mip).r;
 
                 vec2 ndc = vec2(uv_s.x * 2.0 - 1.0, -(uv_s.y * 2.0 - 1.0));
-                vec4 v4  = pc.inv_proj * vec4(ndc, depth, 1.0);
-                vec3 S_v = v4.xyz / v4.w;
+                vec3 S_v;
+                if (proj_persp) {
+                    // clip = (p00 x + jx z, p11 y + jy z, c22 z + c32, -z), inverted.
+                    float z_v = -c32 / (depth + c22);
+                    S_v = vec3(-z_v * (ndc.x + jx) * inv_p00,
+                               -z_v * (ndc.y + jy) * inv_p11,
+                               z_v);
+                } else {
+                    // clip = (p00 x + tx, p11 y + ty, c22 z + c32, 1), inverted.
+                    S_v = vec3((ndc.x - tx) * inv_p00,
+                               (ndc.y - ty) * inv_p11,
+                               (depth - c32) / c22);
+                }
 
                 // The kMinDepthSlack tolerance: lower the candidate along the normal by
                 // a fraction of the sampled cell's world footprint before measuring its

@@ -538,7 +538,9 @@ public:
         // nor the wait below.
         bool need_ssr_trace_inputs = config_.ssr_enabled || config_.transparency_enabled
                                     || config_.ssr_reflect_transparent
-                                    // ssao.frag marches the same Hi-Z pyramid.
+                                    // ssao.frag marches its own prefiltered depth pyramid
+                                    // (ao_depth_pyramid_pass_), whose per-frame descriptor
+                                    // rebind needs the same wait as HiZPass's.
                                     || config_.ssao_enabled;
 
         // ssao_debug_view is a runtime flag (re-read every frame, same policy as ssr_enabled):
@@ -862,11 +864,24 @@ private:
             config_.shaders("hiz_downsample.frag"));
         hiz_pass_->recreate(render_extent_.width, render_extent_.height);
 
+        // The SSAO march's own prefiltered pyramid. Chain length is exactly what the march's
+        // pixel-radius clamp can reach: ssao.frag selects mip floor(log2(d_px)) - 2 with
+        // d_px <= ssao_max_radius_px, so deeper levels would never be sampled.
+        const uint32_t ao_pyramid_levels = 1u + static_cast<uint32_t>(std::max(
+            0.0, std::floor(std::log2(std::max(config_.ssao_max_radius_px, 1.0f))) - 2.0));
+        ao_depth_pyramid_pass_ = std::make_unique<coopa::gfx::engine::passes::HiZPass>(
+            device_, allocator_,
+            config_.shaders("fullscreen.vert"),
+            config_.shaders("ao_depth_downsample.frag"),
+            ao_pyramid_levels);
+        ao_depth_pyramid_pass_->recreate(render_extent_.width, render_extent_.height);
+
         // Bound once: bind_image() semantics, and every view here is startup-fixed
         // (render_extent_ never changes). Deferred from the SSAO construction site above
-        // because the raw pass's set includes the Hi-Z pyramid built just now.
+        // because the raw pass's set includes the AO depth pyramid built just now.
         ssao_pass_->update_descriptors(gbuffer_target_.g1_view_typed(), gbuffer_target_.g2_view_typed(),
-                                       hiz_pass_->full_hiz_view_typed(), hiz_pass_->sampler(),
+                                       ao_depth_pyramid_pass_->full_hiz_view_typed(),
+                                       ao_depth_pyramid_pass_->sampler(),
                                        linear_sampler_);
 
         scene_color_mip_pass_ = std::make_unique<coopa::gfx::engine::passes::SceneColorMipPass>(
@@ -1289,6 +1304,14 @@ private:
 
         if (ctx.need_ssr_trace_inputs) {
             hiz_pass_->execute(cmd, gbuffer_target_.depth_image_handle(), gbuffer_target_.depth_view_typed());
+            // The SSAO march reads its own prefiltered pyramid, not the min() chain above.
+            // transition_depth = false: hiz_pass_ just performed the depth transition, and
+            // ssao_enabled implies need_ssr_trace_inputs, so it always has by this point.
+            if (config_.ssao_enabled) {
+                ao_depth_pyramid_pass_->execute(cmd, gbuffer_target_.depth_image_handle(),
+                                                gbuffer_target_.depth_view_typed(),
+                                                /*transition_depth=*/false);
+            }
         } else {
             // GBufferTarget's render pass leaves depth in DEPTH_STENCIL_ATTACHMENT_OPTIMAL (only the
             // colour attachments end in SHADER_READ_ONLY_OPTIMAL), but pixel_stylize.frag samples
@@ -1400,10 +1423,7 @@ private:
             ssao_params.steps                = config_.ssao_steps;
             ssao_params.max_radius_px        = config_.ssao_max_radius_px;
             ssao_params.blur_plane_sigma     = config_.ssao_blur_plane_sigma;
-            // The jittered proj: it rendered the depth buffer the Hi-Z pyramid mirrors, so
-            // reconstruction has to invert exactly it.
-            ssao_params.inv_proj             = glm::inverse(ctx.proj);
-            ssao_params.max_mip              = static_cast<int>(hiz_pass_->max_mip_level());
+            ssao_params.max_mip              = static_cast<int>(ao_depth_pyramid_pass_->max_mip_level());
             // ssao_rotation_index_, not frame_index_: the AO slice rotation must hold still
             // whenever the camera does, or ssao_resolve.frag's accumulator has a fresh estimate
             // to chase every frame and never converges -- the image would keep visibly settling
@@ -3725,6 +3745,12 @@ private:
     std::unique_ptr<coopa::gfx::engine::passes::HiZPass>           hiz_pass_;
     std::unique_ptr<coopa::gfx::engine::passes::SceneColorMipPass> scene_color_mip_pass_;
     std::unique_ptr<coopa::gfx::engine::passes::SsrPass>            ssr_pass_;
+
+    // The SSAO march's own depth pyramid: a HiZPass instance running
+    // ao_depth_downsample.frag's weighted-average reduction instead of the SSR chain's
+    // min(), and capped at the few levels the march's pixel-radius clamp can reach.
+    // Always constructed (same policy as hiz_pass_); executed only when ssao_enabled.
+    std::unique_ptr<coopa::gfx::engine::passes::HiZPass>           ao_depth_pyramid_pass_;
 
     // --- ssr_reflect_transparent: opaque surfaces also reflect transparent geometry ---
     // Always constructed, gated per frame. transparent_hiz_pass_ and

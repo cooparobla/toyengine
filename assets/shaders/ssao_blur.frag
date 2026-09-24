@@ -82,20 +82,12 @@ void main() {
     // world-space pc.plane_sigma (see its doc on why it is not radius-derived).
     float sigma = max(pc.plane_sigma * spacing, 1e-4);
 
-    // -4..+3 on both axes: a span of 8, which is two whole periods of the 4x4 tile ssao.frag's
-    // kernel rotation is drawn from. Covering each phase of that tile an equal number of times is
-    // what cancels it, and the cancellation is the point -- the tile is locked to the pixel grid
-    // rather than to the surface, so any residual of it sits still on screen while the geometry
-    // slides underneath. A surface point then samples a different phase every frame, and its
-    // occlusion steps up and down for as long as the camera moves: the AO reads as flashing under
-    // motion and as fixed-pattern noise the moment the camera stops. A span that is not a multiple
-    // of 4 (a symmetric -2..+2, say) covers one phase more often than the rest and leaves exactly
-    // that residual.
-    //
-    // Two periods rather than one, because the span also sets how much the filter smooths: 64 taps
-    // against a single period's 16 measurably lowers the raw estimate's own frame-to-frame noise
-    // as well. The AO's strength and shape are unaffected either way -- the weights below decide
-    // those, not the tap count.
+    // -4..+3 on both axes: 64 taps. ssao.frag's estimate is white noise per pixel (its slice
+    // rotation and step jitter are fully per-pixel hashes), so this footprint's job is pure
+    // variance reduction: averaging ~64 independent draws cuts the raw estimate's residual
+    // noise by ~8x, which is what keeps single-pixel estimator events -- the shattered-bias
+    // events ssao.frag's per-pixel entropy deliberately produces -- below visibility. The AO's
+    // strength and shape are unaffected by the tap count; the weights below decide those.
     float sum  = 0.0;
     float wsum = 0.0;
     for (int y = -4; y <= 3; ++y) {

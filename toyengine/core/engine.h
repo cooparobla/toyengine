@@ -17,6 +17,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
 #include <filesystem>
 #include <iostream>
 #include <memory>
@@ -89,6 +90,7 @@ public:
         // since neither env read depends on any other member.
         fixed_dt_       = fixed_dt_from_env_();
         capture_frames_ = capture_frames_from_env_();
+        capture_ring_   = capture_ring_from_env_();
         no_input_       = no_input_from_env_();
 
         bind_default_input_();
@@ -105,11 +107,17 @@ public:
         // instead of uploading bone matrices to a shader.
         assets_.register_loader<coopa::gfx::engine::data::SkinnedMeshSource>(
             std::make_unique<coopa::gfx::engine::loaders::SkinnedMeshSourceLoader>());
-        // NEAREST + clamp-to-edge (SamplerDesc::pixel_art()), not gfxcoopa's bilinear default:
-        // this is a pixel-art engine, and bilinear filtering blurs texel edges.
+        // Pixel-art texture sampling. texel_aa (the default): LINEAR + clamp-to-edge
+        // (SamplerDesc::pixel_art_smooth()), paired with gfx_texel_aa_uv() in gbuffer.frag --
+        // texel interiors render flat and hard-edged exactly like point sampling, but texel
+        // boundaries blend over one screen pixel, so a moving camera glides them sub-pixel
+        // instead of snapping them to the pixel grid (the snap reads as full-surface shimmer
+        // on magnified texels). texel_aa: false restores raw NEAREST point sampling for A/B.
         assets_.register_loader<coopa::gfx::engine::data::Texture>(
             std::make_unique<coopa::gfx::engine::loaders::TextureLoader>(
-                ctx_.device(), ctx_.allocator(), ctx_.command_pool(), coopa::gfx::SamplerDesc::pixel_art()));
+                ctx_.device(), ctx_.allocator(), ctx_.command_pool(),
+                config_.render.texel_aa ? coopa::gfx::SamplerDesc::pixel_art_smooth()
+                                        : coopa::gfx::SamplerDesc::pixel_art()));
         coopa::gfx::engine::components::register_render_components(ctx_.device(), ctx_.allocator(), ctx_.command_pool(), assets_);
         // The GPU-aware overload (a strict superset of the argument-free one): ClothRenderer
         // allocates its own dynamic vertex buffers and publishes the result as a runtime asset,
@@ -203,6 +211,13 @@ public:
      *   CAPTURE_FRAMES=<N>   dumps one PNG per tick to output/seq/frame_%04d.png (via
      *                        capture_sequence_frame_()) for N frames, then stops the loop --
      *                        independent of MAX_FRAMES, which still applies if also set.
+     *   CAPTURE_RING=<N>     keeps the LAST N frames in RAM while playing normally, and
+     *                        writes them all to output/seq/ only on exit. Unlike
+     *                        CAPTURE_FRAMES there is no per-frame PNG encode, so gameplay
+     *                        stays close to full speed -- the cost is one GPU readback per
+     *                        frame plus N * width * height * 4 bytes of memory (~2.5 GB for
+     *                        300 frames at 1080p). Play until the artifact happens, then
+     *                        quit: the ring holds the final N frames losslessly.
      *   NO_INPUT=1           zeroes all camera-controller input every frame (see
      *                        drive_camera_controller_()), so a capture running on a live
      *                        desktop isn't perturbed by real mouse/keyboard activity.
@@ -213,6 +228,7 @@ public:
      */
     void run() {
         uint32_t captured = 0;
+        std::deque<coopa::gfx::util::ImageData> ring;
         while (!ctx_.should_close()) {
             if (!tick()) break;
 
@@ -221,8 +237,24 @@ public:
                 ++captured;
                 if (captured >= capture_frames_) break;
             }
+            if (capture_ring_ > 0) {
+                ctx_.wait_idle();
+                ring.push_back(capture_image(config_.output.save_low_res));
+                if (ring.size() > capture_ring_) ring.pop_front();
+            }
 
             if (ctx_.max_frames() > 0 && ctx_.frame_index() >= ctx_.max_frames()) break;
+        }
+
+        if (!ring.empty()) {
+            std::filesystem::create_directories("output/seq");
+            uint32_t index = 0;
+            for (const auto& frame : ring) {
+                char path[64];
+                std::snprintf(path, sizeof(path), "output/seq/frame_%04u.png", index++);
+                coopa::gfx::util::save_image_png(frame, path);
+            }
+            std::cout << "[toyengine] Wrote " << ring.size() << " ring-captured frames to output/seq/\n";
         }
 
         if (config_.output.save_on_exit) {
@@ -765,6 +797,12 @@ private:
         return 0;
     }
 
+    /** @brief CAPTURE_RING env override for run()'s in-memory rolling capture -- 0 means off. */
+    static uint32_t capture_ring_from_env_() {
+        if (const char* v = std::getenv("CAPTURE_RING")) return static_cast<uint32_t>(std::atoll(v));
+        return 0;
+    }
+
     /**
      * @brief CURSOR_POS="<x>,<y>" env override: pins the pointer to a fixed window-pixel
      *        position every frame.
@@ -894,6 +932,7 @@ private:
     // (env vars don't change mid-run); -1.0f / 0 are their respective "off" values.
     float    fixed_dt_       = -1.0f;
     uint32_t capture_frames_ = 0;
+    uint32_t capture_ring_   = 0;
     bool     no_input_       = false;
 };
 

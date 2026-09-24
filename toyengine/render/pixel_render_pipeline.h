@@ -1335,14 +1335,30 @@ private:
         // pure equality check would report motion forever on the last bits of a smoothed
         // camera easing to rest, hence the epsilon.
         {
-            const glm::mat4 vp = ctx.unjittered_proj * ctx.view;
-            float delta = 0.0f;
-            for (int c = 0; c < 4; ++c) {
-                for (int r = 0; r < 4; ++r) {
-                    delta = std::max(delta, std::abs(vp[c][r] - ssao_prev_unjittered_vp_[c][r]));
-                }
+            // Stillness is a DEADBAND ON VISIBLE MOTION, measured against the pose the
+            // camera last anchored at -- not a per-frame matrix-epsilon test. A hand
+            // resting on the mouse emits sub-pixel micro deltas; under a per-frame test
+            // each one unfroze the stochastic passes for the whole smoothing tail, blended
+            // a handful of freshly jittered AO/SSR draws into the held averages, and
+            // re-froze on a visibly different image -- a full-frame AO "pop" between
+            // every two micro inputs. The anchor makes oscillation around a point read as
+            // still (frozen, byte-static) while bounding staleness: sustained real drift
+            // accumulates deviation from the anchor and exits the deadband.
+            const glm::mat3 rot_cur(ctx.view);
+            const glm::mat3 rot_anchor(ssao_freeze_anchor_view_);
+            const float tr_anchor = glm::clamp(
+                (rot_anchor[0][0]*rot_cur[0][0] + rot_anchor[0][1]*rot_cur[0][1] + rot_anchor[0][2]*rot_cur[0][2]
+               + rot_anchor[1][0]*rot_cur[1][0] + rot_anchor[1][1]*rot_cur[1][1] + rot_anchor[1][2]*rot_cur[1][2]
+               + rot_anchor[2][0]*rot_cur[2][0] + rot_anchor[2][1]*rot_cur[2][1] + rot_anchor[2][2]*rot_cur[2][2]
+               - 1.0f) * 0.5f, -1.0f, 1.0f);
+            const float anchor_angle_px =
+                std::acos(tr_anchor) * ctx.proj[1][1] * 0.5f * static_cast<float>(render_extent_.height);
+            const float anchor_trans = glm::length(ctx.cam_pos - ssao_freeze_anchor_pos_);
+            const bool moved = anchor_angle_px > kFreezeDeadbandPx || anchor_trans > kFreezeDeadbandWu;
+            if (moved) {
+                ssao_freeze_anchor_view_ = ctx.view;
+                ssao_freeze_anchor_pos_  = ctx.cam_pos;
             }
-            const bool moved      = delta > 1e-4f;
             // Approximate image-space camera speed for the AO blur's velocity widening: the
             // rotation angle between this frame's view and the last, converted to pixels at
             // the screen centre. Translation-only motion under-reports here, which is fine --
@@ -1370,7 +1386,6 @@ private:
                 // regions where SSGI carries the most energy).
                 ++ssr_jitter_index_;
             }
-            ssao_prev_unjittered_vp_ = vp;
         }
 
         if (config_.ssao_enabled) {
@@ -1471,7 +1486,16 @@ private:
             ssr_params.min_mip0_steps    = config_.ssr_min_mip0_steps;
             ssr_params.max_color_mip     = static_cast<int>(scene_color_mip_pass_->max_mip_level());
             ssr_params.temporal_enabled  = config_.ssr_temporal_enabled;
-            ssr_params.temporal_blend    = config_.ssr_temporal_blend;
+            // While frozen, the resolve's input is CONSTANT (jitter held, camera still), so
+            // its EMA converges to the same fixed point at any blend rate -- only the speed
+            // differs. At the shipped 0.85 the post-stop convergence takes ~1 s and is
+            // visible as a mottled "recalculating" wash over bounce-lit surfaces (measured
+            // as ~6-10 frames of 0.2-0.6 level/px residual after every camera stop, gone
+            // with ssr_enabled=false -- the shimmer historically misattributed to SSAO).
+            // Dropping to kFrozenSsrBlend while frozen collapses that wash to a few frames.
+            ssr_params.temporal_blend    = temporal_frozen_
+                ? std::min(config_.ssr_temporal_blend, kFrozenSsrBlend)
+                : config_.ssr_temporal_blend;
             ssr_params.temporal_gamma    = config_.ssr_temporal_gamma;
             ssr_params.ssr_blur_radius   = config_.ssr_blur_radius;
             ssr_params.jitter_strength   = config_.ssr_jitter;
@@ -2634,14 +2658,10 @@ private:
                                             pl->attenuation_quadratic, 0.0f); // cast_shadows set below, light 0 only
         }
 
-        // Spot-shadow PCF radius, written unconditionally like dir_shadow_extra.y above --
-        // it's already in spot-map TEXELS (see PixelRenderConfig::spot_shadow_softness's
-        // doc), so no per-frame conversion is needed the way the directional radius needs
-        // update_dir_shadow_matrix_()'s texel_world. Clamped to 12, matching the
-        // directional radius's own practical limit. render()'s update_spot_shadow_matrix_()
-        // fills x/z/w (bias/enabled/normal_bias) afterward, same split as dir_shadow_params.
-        ubo.spot_shadow_params.y = config_.soft_shadows
-            ? std::min(config_.spot_shadow_softness, 12.0f) : 0.0f;
+        // spot_shadow_params (including .y, the PCF penumbra scale) is written entirely by
+        // render()'s update_spot_shadow_matrix_() afterward -- unlike dir_shadow_extra.y
+        // above, the spot radius needs the shadow-casting spot's cone angle for its
+        // world-to-texel conversion, and only that function has the caster in hand.
 
         auto spots = scene.get_components<SpotLightComponent>();
         uint32_t spot_count = std::min<uint32_t>(static_cast<uint32_t>(spots.size()), coopa::gfx::engine::data::MAX_SPOT_LIGHTS);
@@ -2750,25 +2770,44 @@ private:
      *
      * Mirrors update_dir_shadow_matrix_(), but the spot map needs no camera-fit: its
      * frustum is entirely a function of the light itself (position/direction/cone/range),
-     * via ShadowMapTarget::get_spot_matrix(). Must run after render() has set light_frame_
-     * to this frame's slot and after update_lights_() (which already filled
-     * spot_shadow_params.y), same ordering requirement update_dir_shadow_matrix_() has.
+     * via ShadowMapTarget::get_spot_matrix(). Fills ALL of spot_shadow_params (x/y/z/w) --
+     * the penumbra scale in .y needs the casting spot's cone angle, which only this
+     * function has. Must run after render() has set light_frame_ to this frame's slot,
+     * same ordering requirement update_dir_shadow_matrix_() has.
      */
     void update_spot_shadow_matrix_(const coopa::gfx::engine::components::SpotLightComponent* spot,
                                     bool cast_spot_shadow) {
         auto& ubo = current_light_data();
+        // .y is the PCF penumbra as a distance-scaled texel factor: the spot map is a
+        // PERSPECTIVE projection, so its texel world size grows linearly with distance d
+        // from the light -- texel_world(d) = 2*d*tan(outer_half)/resolution -- and there is
+        // no single per-frame texel count the way update_dir_shadow_matrix_()'s ortho fit
+        // has. Instead the CPU stores K = softness_world * resolution / (2*tan(outer_half))
+        // and calc_spot_shadow() divides by the fragment's own light-space depth
+        // (light_space_pos.w, the forward distance d for perspectiveRH_ZO * lookAt), giving
+        // radius_texels = K / d -- i.e. config_.spot_shadow_softness WORLD units of
+        // penumbra at every receiver distance, matching shadow_softness's behavior on the
+        // directional map. The 12-texel practical clamp is applied per-pixel in the shader.
+        // 0 (no caster, or soft_shadows off) selects the single hard compare.
         if (spot) {
             ubo.spot_light_space_matrix = coopa::gfx::engine::targets::ShadowMapTarget::get_spot_matrix(
                 spot->get_world_position(), spot->get_world_direction(),
                 spot->clamped_outer_angle(), spot->range);
+            ubo.spot_shadow_params.y = config_.soft_shadows
+                ? config_.spot_shadow_softness *
+                      static_cast<float>(config_.spot_shadow_resolution) /
+                      (2.0f * std::tan(glm::radians(spot->clamped_outer_angle())))
+                : 0.0f;
+        } else {
+            ubo.spot_shadow_params.y = 0.0f;
         }
         ubo.spot_shadow_params.x = config_.shadow_bias;
         ubo.spot_shadow_params.z = cast_spot_shadow ? 1.0f : 0.0f;
-        // Still a world-space constant, unlike the directional .w above, and deliberately so: a
-        // spot map is a PERSPECTIVE projection, so its texel world size varies with distance from
-        // the light and there is no single texel_world to convert against. Doing this properly
-        // needs the per-pixel texel size derived in-shader from depth; until then a constant is
-        // honest, and no scene in this repo lights blocky terrain with a shadow-casting spot.
+        // The normal-offset bias stays a world-space constant, unlike the directional .w: the
+        // per-pixel texel size the penumbra conversion above derives in-shader is not available
+        // HERE, and the callers apply this offset before they have a light-space position to
+        // derive it from. A constant is honest, and no scene in this repo lights blocky terrain
+        // with a shadow-casting spot.
         ubo.spot_shadow_params.w = 0.05f;
     }
 
@@ -3572,7 +3611,22 @@ private:
     // inside a second at 0.85); with an input that changes every frame it can only ever orbit,
     // which reads as AO that never finishes settling.
     uint32_t  ssao_rotation_index_ = 0;
-    glm::mat4 ssao_prev_unjittered_vp_{0.0f};
+    /** The pose the stillness deadband measures against: reset to the current pose whenever
+     *  visible motion exceeds the deadband, held while within it. Anchoring (rather than a
+     *  per-frame delta) makes hand tremor -- sub-pixel oscillation around a point -- count
+     *  as still, while sustained drift accumulates deviation and exits. */
+    glm::mat3 ssao_freeze_anchor_view_{1.0f};
+    glm::vec3 ssao_freeze_anchor_pos_{0.0f};
+    /** Deadband radii: rotation as pixels swept at the screen centre, translation in world
+     *  units (~0.3 px for geometry nearer than ~2 wu). Below these, a pose change cannot
+     *  visibly move the image, so it must not restart the stochastic redraw either. */
+    static constexpr float kFreezeDeadbandPx = 0.35f;
+    static constexpr float kFreezeDeadbandWu = 0.005f;
+    /** SSR resolve history weight while temporal_frozen_ (see the fill site's doc): with a
+     *  constant input the EMA's fixed point is blend-independent, so this only shortens the
+     *  post-stop convergence wash. 0.5 reaches sub-level residual in ~7 frames vs ~28 at
+     *  the shipped 0.85. */
+    static constexpr float kFrozenSsrBlend = 0.5f;
     /** Consecutive frames the camera has been still, and whether that has crossed the freeze
      *  threshold. While frozen every stochastic per-frame term holds -- the AO sample jitter
      *  (with its resolve keeping accepted-history pixels verbatim) and the SSR/SSGI ray

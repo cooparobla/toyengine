@@ -733,6 +733,58 @@ void test_app_config_load_round_trips_soft_shadow_settings() {
 }
 
 /**
+ * @brief Exercises the per-feature quality presets: tier strings (including the "med"
+ * alias and the unknown-string fallback) expand to the preset field values, an
+ * explicitly-written key overrides its preset, and a config with no quality keys
+ * keeps the High-tier values.
+ */
+void test_app_config_load_applies_quality_presets() {
+    using toy::render::RenderQuality;
+
+    // Tier expansion, "med" alias, and the explicit-key override in one config.
+    toy::core::AppConfig config = load_config_text("test_quality_config.yaml",
+        "render:\n"
+        "  shadow_quality: ultra\n"
+        "  ssao_quality: low\n"
+        "  ssr_quality: low\n"
+        "  volumetrics_quality: med\n"
+        "  sdf_quality: nonsense\n"
+        "  ssr_max_iterations: 200\n");
+
+    expect(config.render.shadow_quality == RenderQuality::Ultra, "AppConfig::load: shadow_quality parses ultra");
+    expect(config.render.shadow_map_resolution == 4096u, "quality preset: ultra shadow_map_resolution");
+    expect(config.render.cube_shadow_resolution == 1024u, "quality preset: ultra cube_shadow_resolution");
+    expect(config.render.spot_shadow_resolution == 2048u, "quality preset: ultra spot_shadow_resolution");
+    expect(config.render.shadow_pcf_samples == 32u, "quality preset: ultra shadow_pcf_samples");
+
+    expect(config.render.ssao_slices == 1, "quality preset: low ssao_slices");
+    expect(config.render.ssao_steps == 6, "quality preset: low ssao_steps");
+    expect(config.render.ssao_max_radius_px == 32.0f, "quality preset: low ssao_max_radius_px");
+    expect(config.render.ssao_temporal_frames == 16, "quality preset: low ssao_temporal_frames");
+
+    expect(config.render.volumetrics_quality == RenderQuality::Medium, "AppConfig::load: 'med' parses as Medium");
+    expect(config.render.volumetrics_step_count == 32, "quality preset: medium volumetrics_step_count");
+
+    expect(config.render.sdf_quality == RenderQuality::High, "AppConfig::load: unknown quality string falls back to High");
+    expect(config.render.sdf_max_steps == 64u, "quality preset: fallback High sdf_max_steps");
+    expect(config.render.sdf_shadow_max_steps == 32u, "quality preset: fallback High sdf_shadow_max_steps");
+
+    // ssr_quality: low would set 24, but the explicitly-written key wins.
+    expect(config.render.ssr_max_iterations == 200, "quality preset: explicit ssr_max_iterations overrides its preset");
+
+    // No quality keys at all: every covered field lands on the High row.
+    toy::core::AppConfig plain = load_config_text("test_quality_default_config.yaml",
+        "render:\n"
+        "  exposure: 1.0\n");
+    expect(plain.render.shadow_map_resolution == 2048u, "quality preset: default High shadow_map_resolution");
+    expect(plain.render.shadow_pcf_samples == 24u, "quality preset: default High shadow_pcf_samples");
+    expect(plain.render.ssao_steps == 16, "quality preset: default High ssao_steps");
+    expect(plain.render.ssr_max_iterations == 64, "quality preset: default High ssr_max_iterations");
+    expect(plain.render.dof_sample_count == 48, "quality preset: default High dof_sample_count");
+    expect(plain.render.volumetrics_step_count == 48, "quality preset: default High volumetrics_step_count");
+}
+
+/**
  * @brief Round-trips the fog, volumetrics, bloom and tilt-shift blocks -- every one of them
  * parsed by AppConfig::load() and, until now, by nothing that checks.
  */
@@ -2709,15 +2761,15 @@ void test_image_settles_after_camera_stops() {
 }
 
 /**
- * @brief TEMPORARY diagnosis probe (round 8b): the shimmer Coopa reproduces is WASD
- *        marker TRAVEL past SHADOWED terrace walls, not the orbit flick of round 8a.
+ * @brief TEMPORARY diagnosis probe (round 9): lossless frame dumps of two close-up
+ *        gestures under Coopa's crisp config (aa/dof/tilt off), across an attribution
+ *        matrix, for region-separated shimmer analysis.
  *
- * Gesture: the focus marker translates +Y at FreeMover's shipped speed while the camera
- * trails it at yaw 0 (facing the sun-away, shadowed wall faces), then input stops and the
- * follow smoothing eases out. In shadow the ambient term is nearly all the light, so AO
- * churn there survives into the image at full amplitude -- and GTAOMultiBounce's low-
- * visibility slope (2.76*albedo + 0.69, up to ~3x) amplifies it, where the old
- * pow(v, 1.5) estimator curve compressed it toward zero.
+ * Pose: close to terrace walls with AO visibly darkening faces. Gestures per variant:
+ * G1 fast flick then stop; G2 slow pan then stop -- both end at rest (the standing
+ * capture rule). With SSAO_PROBE_DUMP=1 every frame is written to
+ * output/probe/<variant>_<gesture>/ as PNG: the lossless record the analysis and the
+ * qp-0 evidence clips are built from.
  */
 void test_ssao_travel_probe() {
     ScopedEnv fixed_dt("FIXED_DT", "0.016");
@@ -2726,107 +2778,240 @@ void test_ssao_travel_probe() {
     struct Variant {
         const char* name;
         bool  ao;
-        float radius;
-        float power;
-        float direct;
-        float blur_sigma;
+        bool  temporal;
+        int   slices, steps, temporal_frames;
+        float max_radius_px;
+        float radius, power;
+        bool  debug_view;
     };
     const Variant variants[] = {
-        {"T0_ao_off",      false, 2.00f, 1.0f, 0.25f, 0.375f},
-        {"T1_shipped",     true,  2.00f, 1.0f, 0.25f, 0.375f},
-        {"T2_power15",     true,  2.00f, 1.5f, 0.25f, 0.375f}, // dark-delta compression restored
-        {"T5_pre_retune",  true,  0.75f, 1.5f, 0.25f, 0.375f}, // pre-retune estimator, new composite
+        //                        ao     temp   sl st  tf  maxpx  radius power  dbg
+        {"V0_ao_off",             false, true,  2, 16, 32, 80.0f, 2.00f, 1.0f, false},
+        {"V1_shipped",            true,  true,  2, 16, 32, 80.0f, 2.00f, 1.0f, false},
+        {"V2_no_temporal",        true,  false, 2, 16, 32, 80.0f, 2.00f, 1.0f, false},
+        {"V3_ultra",              true,  true,  3, 24, 64, 96.0f, 2.00f, 1.0f, false},
+        {"V4_radius075",          true,  true,  2, 16, 32, 80.0f, 0.75f, 1.0f, false},
+        {"V5_power15",            true,  true,  2, 16, 32, 80.0f, 2.00f, 1.5f, false},
+        // The blurred AO buffer itself, fullscreen -- what the estimator+resolve+blur
+        // actually produce, isolated from albedo/lighting.
+        {"V6_debug_view",         true,  true,  2, 16, 32, 80.0f, 2.00f, 1.0f, true},
     };
 
-    constexpr int kMotionFrames = 60;   // ~25 wu of travel at FreeMover's 26 wu/s
-    constexpr int kAfterFrames  = 150;
+    const bool  dump = std::getenv("SSAO_PROBE_DUMP") != nullptr;
+    const char* only = std::getenv("SSAO_PROBE_ONLY");
 
-    const bool dump = std::getenv("SSAO_PROBE_DUMP") != nullptr;
+    // Without the dump there is nothing to measure -- the probe's output IS the lossless
+    // frame record. Skip so a plain suite run doesn't pay ~15 engine-minutes for nothing.
+    if (!dump) {
+        std::cerr << "r9 probe skipped (set SSAO_PROBE_DUMP=1, optionally SSAO_PROBE_ONLY=<name>)\n";
+        return;
+    }
 
     for (const Variant& v : variants) {
+        if (only != nullptr && std::string_view(v.name).find(only) == std::string_view::npos) continue;
         toy::core::AppConfig config =
             make_shipped_config("assets/scenes/terrain_test/scene.yaml", 1920, 1080);
-        config.render.ssao_enabled                  = v.ao;
-        config.render.ssao_radius                   = v.radius;
-        config.render.ssao_power                    = v.power;
-        config.render.ssao_direct_lighting_strength = v.direct;
-        config.render.ssao_blur_plane_sigma         = v.blur_sigma;
+        config.render.ssao_enabled          = v.ao;
+        config.render.ssao_temporal_enabled = v.temporal;
+        config.render.ssao_slices           = v.slices;
+        config.render.ssao_steps            = v.steps;
+        config.render.ssao_temporal_frames  = v.temporal_frames;
+        config.render.ssao_max_radius_px    = v.max_radius_px;
+        config.render.ssao_radius           = v.radius;
+        config.render.ssao_power            = v.power;
+        config.render.ssao_debug_view       = v.debug_view;
         toy::core::Engine engine(std::move(config));
 
         auto* camera = coopa::gfx::engine::components::CameraComponent::main();
         if (camera == nullptr || camera->scene == nullptr || camera->owner == nullptr) {
-            expect(false, "travel probe: scene has a main camera");
+            expect(false, "r9 probe: scene has a main camera");
             return;
         }
         auto* terrain    = camera->scene->find_first_component<toy::world::TerrainComponent>();
         auto* controller = camera->owner->get_component<toy::scene::CameraController>();
-        auto* marker     = camera->scene->find_object("focus_marker");
-        if (terrain == nullptr || controller == nullptr || marker == nullptr ||
-            marker->get_transform() == nullptr) {
-            expect(false, "travel probe: scene has Terrain, CameraController and focus_marker");
+        if (terrain == nullptr || controller == nullptr) {
+            expect(false, "r9 probe: scene has Terrain and CameraController");
             return;
         }
         shrink_terrain_and_centre(*terrain, *camera->scene);
-        controller->distance  = 14.0f;  // close to the walls, per Coopa's reproduction
-        controller->pitch_deg = 14.0f;  // low pitch: shadowed wall faces fill the frame
-        controller->yaw_deg   = 0.0f;   // on -Y looking +Y = at the sun-away faces
+        controller->distance  = 12.0f;  // close: AO gradients on wall faces fill the frame
+        controller->pitch_deg = 14.0f;
+        controller->yaw_deg   = 0.0f;   // facing the sun-away (shadowed) wall faces
 
         tick_until(engine, 900, [&] { return count_live_chunks(*terrain) >= 25; });
         tick_frames(engine, 90);
 
-        auto& marker_t = marker->get_transform()->transform();
-
-        Frame prev = engine.capture_image(/*low_res=*/true);
-        std::vector<double> curve;
-        std::vector<double> blink8;
-        std::vector<double> blink16;
-        for (int i = 0; i < kMotionFrames + kAfterFrames; ++i) {
-            if (i < kMotionFrames) {
-                // FreeMover's shipped move_speed (26 wu/s) at this dt, straight +Y.
-                marker_t.set_position(marker_t.position() + glm::vec3(0.0f, 26.0f * 0.016f, 0.0f));
+        auto run_gesture = [&](const char* tag, int move_frames, float speed, int still_frames) {
+            const std::string dir = std::string("output/probe/") + v.name + "_" + tag;
+            if (dump) std::filesystem::create_directories(dir);
+            for (int f = 0; f < move_frames + still_frames; ++f) {
+                if (f < move_frames) controller->yaw_deg += speed;
+                engine.tick();
+                if (dump) {
+                    Frame fr = engine.capture_image(/*low_res=*/true);
+                    char fname[32];
+                    std::snprintf(fname, sizeof(fname), "/frame_%04d.png", f);
+                    coopa::gfx::util::save_image_png(fr, dir + fname);
+                }
             }
-            engine.tick();
-            Frame current = engine.capture_image(true);
-            if (dump) {
-                const std::string dir = std::string("output/probe/") + v.name;
-                std::filesystem::create_directories(dir);
-                char fname[32];
-                std::snprintf(fname, sizeof(fname), "/frame_%04d.png", i);
-                coopa::gfx::util::save_image_png(current, dir + fname);
-            }
-            curve.push_back(mean_abs_delta(current, prev));
-            long long n8 = 0, n16 = 0;
-            for (size_t k = 0; k < current.pixels.size(); k += current.channels) {
-                const int d = std::abs(int(current.pixels[k]) - int(prev.pixels[k]));
-                n8  += d > 8;
-                n16 += d > 16;
-            }
-            const double px = double(current.width) * double(current.height);
-            blink8.push_back(100.0 * double(n8) / px);
-            blink16.push_back(100.0 * double(n16) / px);
-            prev = std::move(current);
-        }
-
-        auto series_mean = [](const std::vector<double>& s, int from, int to) {
-            double acc = 0.0;
-            for (int i = from; i < to; ++i) acc += s[static_cast<size_t>(i)];
-            return acc / double(to - from);
         };
-        int zero_at = -1;
-        for (int i = kMotionFrames; i < kMotionFrames + kAfterFrames; ++i) {
-            if (curve[static_cast<size_t>(i)] == 0.0) { zero_at = i - kMotionFrames; break; }
+
+        run_gesture("g1", 10, 10.0f, 90);   // fast flick, then rest
+        tick_frames(engine, 30);            // re-anchor between gestures (not dumped)
+        run_gesture("g2", 80, 0.5f, 60);    // slow pan, then rest
+
+        std::cerr << "r9 " << v.name << " done\n";
+    }
+}
+
+/**
+ * @brief TEMPORARY verification probe (round 11): the ring-capture reproduction from
+ *        docs/shimmer-repro.md, run A/B with texel_aa on and off.
+ *
+ * Mirrors the reference `output/ring_capture_lossless.mp4` as closely as a scripted
+ * camera can: the same framing (close blocks, camera pitched steeply down), the same
+ * gesture rhythm (quick mouse flicks each followed by ~a second of holding still,
+ * five cycles over five seconds), SHIPPED controller smoothing, 300 frames at 60 Hz,
+ * ending at rest. Dumps every frame to output/probe/<variant>/ for lossless A/B
+ * encoding -- the acceptance evidence for the texel-AA fix on the reference test.
+ */
+void test_texel_aa_ring_repro() {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016");
+    ScopedEnv no_input("NO_INPUT", "1");
+
+    if (std::getenv("SSAO_PROBE_DUMP") == nullptr) {
+        std::cerr << "ring-repro probe skipped (set SSAO_PROBE_DUMP=1)\n";
+        return;
+    }
+
+    struct Variant { const char* name; bool texel_aa; bool ao; const char* aa; };
+    const Variant variants[] = {
+        {"ring_texelaa_off",   false, true,  "off"},
+        {"ring_texelaa_on",    true,  true,  "off"},
+        // texel-AA on but SSAO off: attributes the residual churn on occluded faces --
+        // whatever this variant lacks relative to ring_texelaa_on is AO-driven.
+        {"ring_texelaa_no_ao", true,  false, "off"},
+        // The proposed shipping stack: texel-AA for texture crawl + SMAA for the
+        // geometric block-edge staircase crawl texel-AA cannot touch.
+        {"ring_texelaa_smaa",  true,  true,  "smaa"},
+    };
+
+    const char* only = std::getenv("SSAO_PROBE_ONLY");
+    for (const Variant& v : variants) {
+        if (only != nullptr && std::string_view(v.name).find(only) == std::string_view::npos) continue;
+        toy::core::AppConfig config =
+            make_shipped_config("assets/scenes/terrain_test/scene.yaml", 1920, 1080);
+        config.render.texel_aa     = v.texel_aa;
+        config.render.ssao_enabled = v.ao;
+        config.render.aa_mode      = v.aa;
+        toy::core::Engine engine(std::move(config));
+
+        auto* camera = coopa::gfx::engine::components::CameraComponent::main();
+        if (camera == nullptr || camera->scene == nullptr || camera->owner == nullptr) {
+            expect(false, "ring repro: scene has a main camera");
+            return;
         }
-        std::cerr << "travel " << v.name
-                  << ": motion=" << series_mean(curve, 5, kMotionFrames)
-                  << " ease=" << series_mean(curve, kMotionFrames, kMotionFrames + 31)
-                  << " tail=" << series_mean(curve, kMotionFrames + kAfterFrames - 30,
-                                             kMotionFrames + kAfterFrames)
-                  << " zero_at=" << zero_at
-                  << " | blink8 m=" << series_mean(blink8, 5, kMotionFrames)
-                  << " e=" << series_mean(blink8, kMotionFrames, kMotionFrames + 31)
-                  << " | blink16 m=" << series_mean(blink16, 5, kMotionFrames)
-                  << " e=" << series_mean(blink16, kMotionFrames, kMotionFrames + 31)
-                  << "\n";
+        auto* terrain    = camera->scene->find_first_component<toy::world::TerrainComponent>();
+        auto* controller = camera->owner->get_component<toy::scene::CameraController>();
+        if (terrain == nullptr || controller == nullptr) {
+            expect(false, "ring repro: scene has Terrain and CameraController");
+            return;
+        }
+        shrink_terrain_and_centre(*terrain, *camera->scene);
+        controller->distance  = 10.0f;  // the reference capture's framing: close blocks,
+        controller->pitch_deg = 55.0f;  // camera pitched steeply down
+
+        tick_until(engine, 900, [&] { return count_live_chunks(*terrain) >= 25; });
+        tick_frames(engine, 90);
+
+        const std::string dir = std::string("output/probe/") + v.name;
+        std::filesystem::create_directories(dir);
+        int frame = 0;
+        auto tick_dump = [&](float yaw_delta) {
+            controller->yaw_deg += yaw_delta;
+            engine.tick();
+            Frame fr = engine.capture_image(/*low_res=*/true);
+            char fname[32];
+            std::snprintf(fname, sizeof(fname), "/frame_%04d.png", frame++);
+            coopa::gfx::util::save_image_png(fr, dir + fname);
+        };
+        for (int cycle = 0; cycle < 5; ++cycle) {
+            for (int f = 0; f < 10; ++f) tick_dump(10.0f);  // the flick
+            for (int f = 0; f < 50; ++f) tick_dump(0.0f);   // the hold
+        }
+        std::cerr << "ring repro " << v.name << " done (" << frame << " frames)\n";
+    }
+}
+
+/**
+ * @brief TEMPORARY diagnosis probe (round 9b): decomposes the LIVE isolated pop from
+ *        Coopa's 2026-09-22 screencast by subsystem.
+ *
+ * The screencast shows: image byte-static, then ONE frame where every terrain pixel
+ * changes by fine-grained ~2.5 levels (zero camera shift), then byte-static again --
+ * with the camera pitched steeply down at close blocks. Hypothesis: a sub-visible input
+ * blip exits the stillness freeze, the stochastic passes redraw for a handful of frames,
+ * and the image re-freezes on a different state. This probe reproduces that gesture at
+ * Coopa's pose and toggles each stochastic subsystem to see which one carries the pop.
+ */
+void test_ssao_blip_probe() {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016");
+    ScopedEnv no_input("NO_INPUT", "1");
+
+    struct Variant {
+        const char* name;
+        bool ao, ssr, shadows, soft_shadows;
+    };
+    const Variant variants[] = {
+        {"B0_all_on",      true,  true,  true,  true},
+        {"B1_no_ao",       false, true,  true,  true},
+        {"B2_no_ssr",      true,  false, true,  true},
+        {"B3_hard_shadow", true,  true,  true,  false},
+        {"B4_no_shadow",   true,  true,  false, false},
+        {"B5_all_off",     false, false, false, false},
+    };
+
+    for (const Variant& v : variants) {
+        toy::core::AppConfig config =
+            make_shipped_config("assets/scenes/terrain_test/scene.yaml", 1920, 1080);
+        config.render.ssao_enabled    = v.ao;
+        config.render.ssr_enabled     = v.ssr;
+        config.render.shadows_enabled = v.shadows;
+        config.render.soft_shadows    = v.soft_shadows;
+        toy::core::Engine engine(std::move(config));
+
+        auto* camera = coopa::gfx::engine::components::CameraComponent::main();
+        if (camera == nullptr || camera->scene == nullptr || camera->owner == nullptr) {
+            expect(false, "blip probe: scene has a main camera");
+            return;
+        }
+        auto* terrain    = camera->scene->find_first_component<toy::world::TerrainComponent>();
+        auto* controller = camera->owner->get_component<toy::scene::CameraController>();
+        if (terrain == nullptr || controller == nullptr) {
+            expect(false, "blip probe: scene has Terrain and CameraController");
+            return;
+        }
+        shrink_terrain_and_centre(*terrain, *camera->scene);
+        controller->distance  = 10.0f;  // Coopa's screencast pose: close, pitched steeply down
+        controller->pitch_deg = 55.0f;
+
+        tick_until(engine, 900, [&] { return count_live_chunks(*terrain) >= 25; });
+        tick_frames(engine, 90);
+
+        // The screencast gesture: flick, then hands off. The controller deadband snap fires
+        // once mid-settle (smoothing error crossing 1e-3 deg); the full per-frame curve
+        // shows whether that single frame re-draws the stochastic passes (the live "pop").
+        for (int f = 0; f < 10; ++f) { controller->yaw_deg += 10.0f; engine.tick(); }
+        Frame prev = engine.capture_image(/*low_res=*/true);
+        std::cerr << "blip9b " << v.name << " settle curve:";
+        for (int f = 0; f < 70; ++f) {
+            engine.tick();
+            Frame cur = engine.capture_image(true);
+            const double d = mean_abs_delta(cur, prev);
+            if (f < 20 || d > 0.01) std::cerr << " " << f << ":" << d;
+            prev = std::move(cur);
+        }
+        std::cerr << "\n";
     }
 }
 
@@ -2897,6 +3082,7 @@ const TestCase kTests[] = {
     {"config_dof_round_trip",                      "config", test_app_config_load_round_trips_dof_settings},
     {"config_soft_shadow_defaults",                "config", test_pixel_render_config_soft_shadow_defaults},
     {"config_soft_shadow_round_trip",              "config", test_app_config_load_round_trips_soft_shadow_settings},
+    {"config_quality_presets",                     "config", test_app_config_load_applies_quality_presets},
     {"config_atmosphere_round_trip",               "config", test_app_config_load_round_trips_atmosphere_settings},
     {"config_ssr_and_window_round_trip",           "config", test_app_config_load_round_trips_ssr_and_window_settings},
     {"config_tolerates_unknown_keys",              "config", test_app_config_load_tolerates_unknown_and_commented_keys},
@@ -2933,6 +3119,8 @@ const TestCase kTests[] = {
     // TEMPORARY (round-8b shimmer diagnosis) -- run via `toyengine_tests ssao_travel_probe`,
     // removed once the cause is pinned. Not in any ctest group.
     {"ssao_travel_probe",                          "probe",           test_ssao_travel_probe},
+    {"ssao_blip_probe",                            "probe",           test_ssao_blip_probe},
+    {"texel_aa_ring_repro",                        "probe",           test_texel_aa_ring_repro},
 };
 
 /** @brief True if `name` contains any of `filters` (or there are none, i.e. run everything). */

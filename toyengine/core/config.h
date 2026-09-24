@@ -82,6 +82,23 @@ struct JobsConfig {
 };
 
 /**
+ * @brief Parses one quality-tier string from config.yaml.
+ *
+ * Accepts `low`, `med`, `medium`, `high` and `ultra`; anything else falls back to
+ * `High` (the shipped defaults), matching the config loader's every-key-optional,
+ * never-fail policy.
+ *
+ * @param value The YAML string value of a `*_quality` key.
+ * @return The corresponding render::RenderQuality tier.
+ */
+inline render::RenderQuality parse_render_quality(const std::string& value) {
+    if (value == "low")                        return render::RenderQuality::Low;
+    if (value == "med" || value == "medium")   return render::RenderQuality::Medium;
+    if (value == "ultra")                      return render::RenderQuality::Ultra;
+    return render::RenderQuality::High;
+}
+
+/**
  * @struct AppConfig
  * @brief Aggregated runtime configuration for toyengine.
  */
@@ -127,6 +144,18 @@ struct AppConfig {
 
             if (root.contains("render")) {
                 const auto& r = root.at("render");
+
+                // --- Quality presets ---
+                // Parsed and applied BEFORE every other render key, so the per-key
+                // parsing below overrides preset-covered fields whenever a key is
+                // written explicitly: defaults < quality preset < explicit key.
+                if (r.contains("shadow_quality"))      config.render.shadow_quality      = parse_render_quality(r.at("shadow_quality").get_value<std::string>());
+                if (r.contains("ssao_quality"))        config.render.ssao_quality        = parse_render_quality(r.at("ssao_quality").get_value<std::string>());
+                if (r.contains("ssr_quality"))         config.render.ssr_quality         = parse_render_quality(r.at("ssr_quality").get_value<std::string>());
+                if (r.contains("dof_quality"))         config.render.dof_quality         = parse_render_quality(r.at("dof_quality").get_value<std::string>());
+                if (r.contains("volumetrics_quality")) config.render.volumetrics_quality = parse_render_quality(r.at("volumetrics_quality").get_value<std::string>());
+                if (r.contains("sdf_quality"))         config.render.sdf_quality         = parse_render_quality(r.at("sdf_quality").get_value<std::string>());
+                config.render.apply_quality_presets();
 
                 // --- Feature toggles ---
                 if (r.contains("outline_enabled"))   config.render.outline_enabled   = r.at("outline_enabled").get_value<bool>();
@@ -220,6 +249,7 @@ struct AppConfig {
 
                 // --- Dither ---
                 if (r.contains("dither_strength")) config.render.dither_strength = r.at("dither_strength").get_value<float>();
+                if (r.contains("texel_aa"))        config.render.texel_aa        = r.at("texel_aa").get_value<bool>();
 
                 // --- SSAO ---
                 if (r.contains("ssao_radius"))           config.render.ssao_radius           = r.at("ssao_radius").get_value<float>();

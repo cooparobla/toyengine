@@ -18,3 +18,7 @@ be hand-edited; everything in this folder is.
   light brightness and colour knobs (`ambient_intensity`, `sky_zenith`/
   `sky_horizon`/`sky_ground`), how they reach the GPU, what GI exists in this
   engine, and a look-alike setting that doesn't do what it appears to.
+- [shimmer-repro.md](shimmer-repro.md) — recipe to regenerate the terrain_test
+  shimmer reference capture (`output/ring_capture_lossless.mp4`): config state,
+  the `CAPTURE_RING` workflow, the real-input gesture, lossless encoding, the
+  per-frame analysis, and the investigation's confirmed non-causes.

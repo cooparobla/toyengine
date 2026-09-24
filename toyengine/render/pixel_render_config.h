@@ -19,6 +19,21 @@ namespace toy {
 namespace render {
 
 /**
+ * @brief One quality tier for a render feature's preset block.
+ *
+ * Selected per feature via PixelRenderConfig's `*_quality` fields and expanded into
+ * concrete parameter values by PixelRenderConfig::apply_quality_presets(). `High` is
+ * defined as the engine's shipped defaults, so a config that never mentions quality
+ * renders identically to one that sets every feature to `high`.
+ */
+enum class RenderQuality {
+    Low,     /**< Cheapest tier: lowest resolutions and sample counts. */
+    Medium,  /**< Balanced tier below the shipped defaults. */
+    High,    /**< The shipped defaults. */
+    Ultra    /**< Highest tier: maximum resolutions and sample counts. */
+};
+
+/**
  * @struct PixelRenderConfig
  * @brief Configuration for PixelRenderPipeline: internal resolution, upscaling,
  *        banded lighting, hard shadows, and the pixel-art post-process stack
@@ -140,6 +155,64 @@ struct PixelRenderConfig {
     uint32_t sdf_max_renderers = 64;
     uint32_t sdf_max_shapes    = 512;
 
+    // --- Quality presets ---
+    // One RenderQuality tier per feature with a meaningful cost dial. Expanded into the
+    // concrete fields by apply_quality_presets(); AppConfig::load() applies the presets
+    // BEFORE parsing the per-key values, so an explicitly-written key always overrides
+    // its preset. All default to High (= the shipped field defaults below).
+    RenderQuality shadow_quality      = RenderQuality::High;  /**< Sets shadow_map/cube/spot_shadow_resolution and shadow_pcf_samples. */
+    RenderQuality ssao_quality        = RenderQuality::High;  /**< Sets ssao_slices/ssao_steps/ssao_max_radius_px/ssao_temporal_frames. */
+    RenderQuality ssr_quality         = RenderQuality::High;  /**< Sets ssr_max_iterations. */
+    RenderQuality dof_quality         = RenderQuality::High;  /**< Sets dof_sample_count (Ultra equals High: the gather shader clamps taps to 48). */
+    RenderQuality volumetrics_quality = RenderQuality::High;  /**< Sets volumetrics_step_count. */
+    RenderQuality sdf_quality         = RenderQuality::High;  /**< Sets sdf_max_steps and sdf_shadow_max_steps. */
+
+    /**
+     * @brief Overwrites every preset-covered field from the `*_quality` tiers above.
+     *
+     * Called by AppConfig::load() after the quality keys are parsed and before the
+     * per-key values are, so explicit keys win over their preset. The High row of every
+     * table equals the fields' own defaults.
+     */
+    void apply_quality_presets() {
+        switch (shadow_quality) {
+            case RenderQuality::Low:    shadow_map_resolution = 1024; cube_shadow_resolution = 256;  spot_shadow_resolution = 512;  shadow_pcf_samples = 8;  break;
+            case RenderQuality::Medium: shadow_map_resolution = 2048; cube_shadow_resolution = 512;  spot_shadow_resolution = 1024; shadow_pcf_samples = 16; break;
+            case RenderQuality::High:   shadow_map_resolution = 2048; cube_shadow_resolution = 512;  spot_shadow_resolution = 1024; shadow_pcf_samples = 24; break;
+            case RenderQuality::Ultra:  shadow_map_resolution = 4096; cube_shadow_resolution = 1024; spot_shadow_resolution = 2048; shadow_pcf_samples = 32; break;
+        }
+        switch (ssao_quality) {
+            case RenderQuality::Low:    ssao_slices = 1; ssao_steps = 6;  ssao_max_radius_px = 32.0f; ssao_temporal_frames = 16; break;
+            case RenderQuality::Medium: ssao_slices = 2; ssao_steps = 8;  ssao_max_radius_px = 40.0f; ssao_temporal_frames = 32; break;
+            case RenderQuality::High:   ssao_slices = 2; ssao_steps = 16; ssao_max_radius_px = 80.0f; ssao_temporal_frames = 32; break;
+            case RenderQuality::Ultra:  ssao_slices = 3; ssao_steps = 24; ssao_max_radius_px = 96.0f; ssao_temporal_frames = 64; break;
+        }
+        switch (ssr_quality) {
+            case RenderQuality::Low:    ssr_max_iterations = 24;  break;
+            case RenderQuality::Medium: ssr_max_iterations = 48;  break;
+            case RenderQuality::High:   ssr_max_iterations = 64;  break;
+            case RenderQuality::Ultra:  ssr_max_iterations = 128; break;
+        }
+        switch (dof_quality) {
+            case RenderQuality::Low:    dof_sample_count = 16; break;
+            case RenderQuality::Medium: dof_sample_count = 32; break;
+            case RenderQuality::High:   dof_sample_count = 48; break;
+            case RenderQuality::Ultra:  dof_sample_count = 48; break; // dof.frag clamps taps to [8, 48]
+        }
+        switch (volumetrics_quality) {
+            case RenderQuality::Low:    volumetrics_step_count = 24; break;
+            case RenderQuality::Medium: volumetrics_step_count = 32; break;
+            case RenderQuality::High:   volumetrics_step_count = 48; break;
+            case RenderQuality::Ultra:  volumetrics_step_count = 96; break;
+        }
+        switch (sdf_quality) {
+            case RenderQuality::Low:    sdf_max_steps = 32;  sdf_shadow_max_steps = 16; break;
+            case RenderQuality::Medium: sdf_max_steps = 48;  sdf_shadow_max_steps = 24; break;
+            case RenderQuality::High:   sdf_max_steps = 64;  sdf_shadow_max_steps = 32; break;
+            case RenderQuality::Ultra:  sdf_max_steps = 128; sdf_shadow_max_steps = 64; break;
+        }
+    }
+
     // --- Internal resolution ---
     std::string resolution_mode = "fixed";   /**< "fixed" or "divisor". */
     uint32_t    render_width    = 480;       /**< Used when resolution_mode == "fixed". */
@@ -213,17 +286,17 @@ struct PixelRenderConfig {
      */
     float    point_shadow_softness  = 3.0f;
     /**
-     * @brief Spot-light shadow-map PCF penumbra radius, in spot-map TEXELS -- unlike
-     *        point_shadow_softness above, this is NOT converted to a tangent-space offset;
-     *        the spot map is a plain perspective projection sampled the same way the
-     *        directional map is, so it reuses dir_shadow_params.y's texel-radius convention
-     *        directly (see calc_spot_shadow() in pixel_shadow_body.glsl). Texels rather than
-     *        world units because, like the point map and unlike the directional map, the
-     *        spot map's world-per-texel scale varies with the light's own range rather than
-     *        with a camera-fit box. Clamped to 12 texels, matching the directional radius's
-     *        own practical limit. Ignored when soft_shadows is false.
+     * @brief Spot-light PCF penumbra radius in WORLD units, same convention as
+     *        shadow_softness above. The spot map is a perspective projection, so its
+     *        world-per-texel scale varies with each receiver's distance from the light;
+     *        the conversion to a texel radius therefore happens PER PIXEL in
+     *        calc_spot_shadow() (pixel_shadow_body.glsl), dividing a CPU-precomputed
+     *        scale (softness * resolution / (2*tan(outer_half)), see
+     *        update_spot_shadow_matrix_()) by the fragment's light-space depth. Clamped
+     *        to 12 texels per pixel, matching the directional radius's own practical
+     *        limit. Ignored when soft_shadows is false.
      */
-    float    spot_shadow_softness   = 1.0f;
+    float    spot_shadow_softness   = 0.15f;
     uint32_t shadow_pcf_samples     = 24;    /**< Vogel disk taps for directional soft shadows; clamped to 1..32, the kernel's own hard limit. */
 
     // --- Outline ---
@@ -237,6 +310,17 @@ struct PixelRenderConfig {
 
     // --- Dither ---
     float dither_strength = 0.0f;             /**< 0 disables ordered dithering. */
+
+    /**
+     * Texel-AA sampling for the pixel-art material textures (STARTUP-FIXED: chooses the
+     * TextureLoader's sampler at construction). True binds them LINEAR
+     * (SamplerDesc::pixel_art_smooth()) and gbuffer.frag sharpens UVs with
+     * gfx_texel_aa_uv(), which keeps texel interiors as flat and hard-edged as point
+     * sampling while blending each texel boundary over exactly one screen pixel -- the
+     * fix for magnified texels crawling/shimmering whenever the camera moves sub-pixel.
+     * False restores raw NEAREST point sampling.
+     */
+    bool texel_aa = true;
 
     // --- SSAO ---
     float ssao_radius           = 0.5f;

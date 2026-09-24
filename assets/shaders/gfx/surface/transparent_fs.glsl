@@ -59,7 +59,7 @@ layout(set = 1, binding = 0) uniform LightUBO {
     // Spot Lights -- appended after sky_ground; see light_data.h's LightUBO doc. Also read
     // by pixel_forward_shading.glsl's spot loop via `lights.*`, same as sky_* above.
     mat4 spot_light_space_matrix;
-    vec4 spot_shadow_params; // x=bias, y=pcf_radius_texels (0=hard), z=shadow_enabled, w=normal_bias
+    vec4 spot_shadow_params; // x=bias, y=penumbra scale K, texels*distance (0=hard; see calc_spot_shadow), z=shadow_enabled, w=normal_bias
     SpotLight spot_lights[8];
 } lights;
 

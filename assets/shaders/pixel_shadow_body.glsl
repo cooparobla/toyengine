@@ -89,6 +89,15 @@ float calc_point_shadow(vec3 frag_to_light, float range) {
 // spot_shadow_params, since both maps share the same TAA-decorrelation scheme. Only
 // lights.spot_lights[light_counts.w] can be a real shadow caster -- toyengine's ShadowMapTarget
 // holds exactly one spot 2D map at a time, same one-caster rule as point lights' cube map.
+//
+// spot_shadow_params.y is a distance-scaled penumbra factor, not a raw texel radius: the spot
+// map is a perspective projection, so one texel covers 2*d*tan(outer_half)/resolution world
+// units at forward distance d from the light. The CPU stores
+// K = softness_world * resolution / (2*tan(outer_half)) (see update_spot_shadow_matrix_()),
+// and dividing by light_space_pos.w (= d for this matrix) yields the texel radius that keeps
+// the penumbra a constant WORLD width at every receiver distance -- the same world-space
+// behavior calc_dir_shadow() gets from its per-frame texel_world conversion. Clamped to the
+// same 12-texel practical limit as the directional radius, per-pixel since d varies.
 float calc_spot_shadow(vec4 light_space_pos, vec3 N, vec3 L) {
     if (lights.spot_shadow_params.z < 0.5) return 0.0;
 
@@ -101,7 +110,8 @@ float calc_spot_shadow(vec4 light_space_pos, vec3 N, vec3 L) {
     }
 
     float bias = max(lights.spot_shadow_params.x * (1.0 - max(dot(N, L), 0.0)), 0.0002);
-    float radius_texels = lights.spot_shadow_params.y;
+    float radius_texels = lights.spot_shadow_params.y <= 0.0 ? 0.0
+        : min(lights.spot_shadow_params.y / max(light_space_pos.w, 1e-4), 12.0);
 
     if (radius_texels <= 0.0) {
         return gfx_shadow_dir_hard(spot_shadow_map, proj_coords, bias);

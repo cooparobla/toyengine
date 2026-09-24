@@ -306,7 +306,12 @@ scene:
       active: true
       components:
         - type: Transform
-          position: { x: 0.0, y: -3.2, z: -0.48 }
+          # z keeps the whole displaced sheet above the floor plane (top at z = -0.5):
+          # water_surface.glsl displaces position_ws.z by +-wave_amplitude (0.18, see
+          # shader_params below), so the troughs bottom out at z - 0.18 = -0.48. Any
+          # lower and the sheet cuts through the floor, leaving disconnected crest
+          # patches that read as hard-edged shadow shapes on the floor.
+          position: { x: 0.0, y: -3.2, z: -0.30 }
           rotation: { x: 0.0, y: 0.0, z: 0.0 }
           scale: { x: 1.2, y: 1.2, z: 1.2 }
         - type: MeshRenderer

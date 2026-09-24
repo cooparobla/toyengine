@@ -48,13 +48,21 @@ void main() {
     // the tight kernel -- resting and slow-moving detail is untouched. The resolve stores the
     // count in .b (see ssao_resolve.frag); max_accum 0 means temporal is off and every count
     // reads 1, so the spacing is pinned to 1 to keep this pass identical in that mode.
-    int spacing = 1;
+    // Spacing is CONTINUOUS (float, per-tap rounding below), never quantized here: both of
+    // its inputs vary smoothly across frames (counts climb one per frame, motion_px decays
+    // with the camera smoothing), and an integer spacing turns each threshold crossing into
+    // a single frame where all 64 taps of every pixel jump together -- the whole AO field's
+    // texture re-renders at once, which reads as a full-screen shimmer "pop" during hand-
+    // speed wobble and once or twice right after every camera stop. With float spacing the
+    // individual taps shift by one texel at different values, so the footprint morphs
+    // instead of snapping.
+    float spacing = 1.0;
     if (pc.max_accum > 0.0) {
         float trust = clamp(resolved.b / pc.max_accum, 0.0, 1.0);
         // pow 0.6: the mid-trust band is where most of a panning frame lives (counts climb
         // one per frame from every disocclusion edge), so the curve keeps real dilation
         // there instead of only at count~0.
-        spacing = 1 + int(round(4.0 * pow(1.0 - trust, 0.6)));
+        spacing = 1.0 + 4.0 * pow(1.0 - trust, 0.6);
     }
     // Velocity widening. The AO field is the frame's only unfiltered pixel-sharp content
     // (albedo edges get SMAA, textures get mips), so during a fast pan its 1-2 px creases
@@ -63,15 +71,16 @@ void main() {
     // remedy is lowering the field's spatial frequency while it moves. The eye cannot
     // resolve pixel-scale detail sweeping tens of pixels per frame, so this softening is
     // invisible in motion; at rest motion_px is 0 and the kernel is bit-identical to the
-    // resting one, which the byte-static contracts depend on.
-    spacing += int(round(clamp(pc.motion_px / 30.0, 0.0, 2.0)));
-    spacing = min(spacing, 5);
+    // resting one, which the byte-static contracts depend on (spacing 1.0 rounds every
+    // tap back to its exact undilated texel).
+    spacing += clamp(pc.motion_px / 30.0, 0.0, 2.0);
+    spacing = min(spacing, 5.0);
 
     // Plane-distance sigma scales with the dilation -- a widened footprint has to
     // tolerate proportionally more in-plane depth variation, or the bilateral weights
     // reject the very taps the dilation exists to reach. The base tolerance is the
     // world-space pc.plane_sigma (see its doc on why it is not radius-derived).
-    float sigma = max(pc.plane_sigma * float(spacing), 1e-4);
+    float sigma = max(pc.plane_sigma * spacing, 1e-4);
 
     // -4..+3 on both axes: a span of 8, which is two whole periods of the 4x4 tile ssao.frag's
     // kernel rotation is drawn from. Covering each phase of that tile an equal number of times is
@@ -91,7 +100,8 @@ void main() {
     float wsum = 0.0;
     for (int y = -4; y <= 3; ++y) {
         for (int x = -4; x <= 3; ++x) {
-            ivec2 tap_px = clamp(center_px + ivec2(x, y) * spacing, ivec2(0), size - 1);
+            ivec2 tap_px = clamp(center_px + ivec2(round(vec2(x, y) * spacing)),
+                                 ivec2(0), size - 1);
 
             vec3 Nt = texelFetch(g_normal_metallic, tap_px, 0).rgb;
             if (dot(Nt, Nt) < 0.001) continue; // background tap -- skip, don't drag AO toward 1.0
@@ -103,7 +113,7 @@ void main() {
             // preserves crease definition, while a dilated (low-trust) kernel must accept
             // moderately rotated normals or terraced geometry rejects the very taps the
             // dilation exists to reach and fresh regions keep their noise.
-            float wn = pow(max(dot(Nc, Nt), 0.0), 16.0 / float(spacing));
+            float wn = pow(max(dot(Nc, Nt), 0.0), 16.0 / spacing);
             float d  = dot(Nc, Pt - Pc);
             float wd = exp(-(d * d) / (2.0 * sigma * sigma));
             float w  = wn * wd;

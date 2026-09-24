@@ -3,413 +3,200 @@ window:
   width: 1920
   height: 1080
   vsync: true
-  # false renders into a window that is never mapped: nothing appears on screen, nothing
-  # takes focus, and the cursor is never captured. What the test suite runs with; for a
-  # scripted capture, pair it with ONESHOT/CAPTURE_FRAMES.
-  visible: true
+  visible: true              # false = never-mapped window (headless); what the test suite uses
 
 scene:
   default_scene: "assets/scenes/pixel_demo/scene.yaml"
 
 render:
+  # =========================================================================
+  # Feature toggles
+  # =========================================================================
+  shadows_enabled: true
+  soft_shadows: true         # true = Vogel-disk PCF penumbra; false = single hard depth compare
+  ssao_enabled: true
+  ssr_enabled: true          # also gates the SSGI diffuse-bounce term (ssgi_intensity)
+  ssr_reflect_transparent: true # opaque surfaces also reflect transparent geometry (~2x SSR cost; needs ssr + transparency)
+  transparency_enabled: true # forward BLEND-material pass
+  refraction_enabled: true   # screen-space refraction for BLEND MESH objects (needs transparency_enabled)
+  sdf_enabled: true          # signed-distance-field raymarching (SdfRenderer/SdfShape)
+  sdf_shadows_enabled: true  # SDFs cast shadows; independent of sdf_enabled
+  bloom_enabled: true        # additive glow from bright HDR regions
+  fog_enabled: false         # GLOBAL analytic fog (the Fog block below is its only source)
+  volumetrics_enabled: true  # raymarched LOCAL volumes (Volume components in the scene)
+  dof_enabled: false         # physically-based depth of field, at render resolution before bloom
+  tilt_shift_enabled: false  # diorama blur at DISPLAY resolution, after the upscale
+  outline_enabled: false
+  palette_enabled: false
+  dither_enabled: false
+  texel_aa: true             # texel-AA texture sampling (startup-fixed): hard texels at rest,
+                             # but texel boundaries blend over one screen pixel so magnified
+                             # faces stop crawling under camera motion; false = raw NEAREST
+  soft_lighting: true        # true = smooth Cook-Torrance; false = banded cel-shaded look
+  camera_pixel_snap: false   # orthographic cameras only
+  world_ui_enabled: true     # WorldSpace canvases, at INTERNAL resolution (startup-fixed)
+  screen_ui_enabled: true    # ScreenSpaceOverlay canvases, at WINDOW resolution (startup-fixed)
+  aa_mode: off               # off | fxaa | smaa | taa. taa never fully settles on a static
+                             # camera (8-frame jitter cycle); smaa converges exactly
+  ssao_debug_view: false     # runtime: SSAO buffer fullscreen in place of lighting
+  dof_debug_view: false      # runtime: signed circle-of-confusion field in place of the image
+  volumetrics_debug_view: false # runtime: accumulated density alone, scene colour suppressed
+  debug_lines_enabled: false # physics collider/contact wireframes
+
+  # =========================================================================
+  # Quality -- low | med | high | ultra ("med" and "medium" both work)
+  # high = the engine defaults. Each tier sets that feature's resolutions and
+  # sample/step counts; writing one of the covered keys explicitly (e.g.
+  # shadow_pcf_samples) still overrides its preset.
+  # =========================================================================
+  shadow_quality:      high  # shadow map resolutions + PCF taps
+  ssao_quality:        high  # slices, march steps, pixel radius, temporal depth
+  ssr_quality:         high  # raymarch iteration budget
+  dof_quality:         high  # bokeh gather taps (ultra = high: shader cap)
+  volumetrics_quality: high  # raymarch step count
+  sdf_quality:         high  # SDF march + SDF shadow-march step budgets
+
+  # =========================================================================
+  # Per-feature settings
+  # =========================================================================
+
   # --- Internal resolution ---
   resolution_mode: fixed     # fixed | divisor
   render_width: 1920
   render_height: 1080
-  scale_divisor: 4
+  scale_divisor: 4           # used when resolution_mode: divisor
   upscale_mode: fit          # fit | integer
 
-  # --- Feature toggles ---
-  outline_enabled: false
-  palette_enabled: false
-  dither_enabled: false
-  camera_pixel_snap: false
-  soft_lighting: true        # true = smooth Cook-Torrance direct lighting; false = banded/ramped cel-shaded look (this engine's default)
-  ssao_enabled: true
-  ssao_debug_view: false     # renders SsaoPass's blurred output fullscreen in place of lighting;
-                              # runtime toggle, see PixelRenderConfig::ssao_debug_view
-  ssr_enabled: true          # also gates the SSGI diffuse-bounce term (ssgi_intensity)
-  transparency_enabled: true # forward BLEND-material pass; off by default (no demo scene uses it yet)
-  ssr_reflect_transparent: true # opaque surfaces also reflect transparent geometry (roughly doubles SSR cost; requires ssr_enabled + transparency_enabled)
-  refraction_enabled: true   # screen-space refraction for BLEND MESH objects only (not SdfRenderer glass); requires transparency_enabled
-  fog_enabled: false          # Unity-style GLOBAL fog, analytic; parameters below are its only source
-  volumetrics_enabled: true   # raymarched LOCAL volumes: kind fog | wind | haze (see gfxcoopa's VolumetricsPass)
-  sdf_enabled: true           # signed-distance-field raymarching (SdfRenderer/SdfShape); see toyengine's sdf_*.frag
-  sdf_shadows_enabled: true   # independent of sdf_enabled -- SDFs can be visible without casting shadows
-  bloom_enabled: true         # additive glow from bright HDR regions; independent BloomPass pyramid (no longer reuses SSR's mip chain)
-  tilt_shift_enabled: true    # Link's Awakening (Switch) style diorama blur; runs at DISPLAY
-                              # resolution after the upscale (a lens effect, not a pixel-grid
-                              # effect) -- startup-fixed, like bloom/fog (see gfxcoopa's TiltShiftPass)
-  dof_enabled: true          # physically-based depth of field; runs at RENDER resolution, on
-                              # linear HDR, before bloom (so defocused highlights bloom into real
-                              # bokeh) -- startup-fixed, like bloom/fog/tilt_shift above. Independent
-                              # of tilt_shift_enabled: they compose (depth-driven lens blur here,
-                              # screen-position diorama blur there); see gfxcoopa's DofPass
-  dof_debug_view: false       # renders the signed circle-of-confusion field in place of the image
-                              # (red = near field, blue = far field, black = in focus); RUNTIME
-                              # flag, like ssao_debug_view
-  debug_lines_enabled: false  # physics collider/contact wireframes (toyengine's DebugLinePass);
-                              # per-frame toggle -- see the `physics.debug_draw` block below for
-                              # which categories (Colliders/Contacts/BVH) get gathered
-  shadows_enabled: true
-  world_ui_enabled: true      # WorldSpace canvases (uicoopa UiWorldPass), drawn at the INTERNAL
-                              # render resolution so they stay on the pixel-art grid; STARTUP-FIXED
-  screen_ui_enabled: true     # ScreenSpaceOverlay canvases (uicoopa UiPass), drawn at full WINDOW
-                              # resolution; STARTUP-FIXED. Both UI layers composite AFTER every post
-                              # effect -- DoF, AA and tilt shift never touch them
-  aa_mode: smaa               # off | fxaa | smaa | taa -- startup-fixed, like bloom/fog/tilt_shift above.
-                                #
-                                # NOT "taa", and the reason is measured rather than aesthetic. TAA's
-                                # sub-pixel jitter is an 8-frame Halton cycle, so with a static camera
-                                # the whole render is exactly 8-periodic -- and TaaPass's exponential
-                                # history blend is a low-pass filter, which converges a PERIODIC input
-                                # to a periodic orbit, never to a fixed point. The image therefore never
-                                # settles: it cycles forever with an amplitude of roughly (1-blend)
-                                # times the per-phase difference. On smooth scenes (pixel_demo) that
-                                # difference is tiny and invisible; on high-frequency geometry
-                                # (terrain_test's block faces) it reads as continuous flicker.
-                                # Measured on terrain_test, mean |frame(n)-frame(n-1)| over a static
-                                # camera: taa 0.0086, taa at blend 0.99 0.0051, smaa 0.0000, off 0.0000
-                                # -- and lag 8 is exactly 0.0000 under taa, which is the periodicity
-                                # itself. Raising the blend only scales the orbit down; it cannot
-                                # remove it, because the input is deterministic, not noise. Neither
-                                # shadows nor SSAO contribute: disabling either changes nothing.
-                                #
-                                # "smaa" is spatial-only, so it converges exactly while still
-                                # antialiasing edges. Use "off" for a strictly pixel-pure look.
-                                # "taa" remains correct for the future higher-internal-resolution mode
-                                # its own note below describes -- it needs motion vectors and history
-                                # reprojection first (this port has neither; see README.md).
-                                #
-                                # Previously also skipped outright whenever
-                                # dof_enabled was true (DofPass's bokeh gather used a fixed, unrotated tap
-                                # pattern that visibly swam under the jitter); no longer needed now that
-                                # the gather is per-pixel rotated -- see the jitter block's own comment in
-                                # PixelRenderPipeline::render().
-
-  # --- Bloom ---                                
-  bloom_threshold: 1.0        # brightness (max of R,G,B) below which nothing glows; 1.0 = "brighter than white"
-  bloom_soft_knee: 0.5        # 0..1 fraction of the threshold the quadratic knee spans; 0 = hard cutoff (pops under camera motion)
-  bloom_intensity: 5.0        # final multiplier on the composited glow; <= 0 disables
-  bloom_scatter: 0.7          # per-level blend toward the coarser tent (Unity URP's "Scatter"); higher = wider, softer halo
-  bloom_radius: 1.0           # tent-filter width multiplier on the upsample
-  bloom_clamp: 20.0           # per-tap HDR ceiling before thresholding; firefly guard
-
-  # --- Tilt shift ---
-  tilt_shift_focus_center: 0.55  # 0..1 screen position of the sharp band's centre (0 = top);
-                                  # slightly below middle, as in the reference
-  tilt_shift_focus_width:  0.15  # 0..1 half-height of the fully-sharp band
-  tilt_shift_ramp_width:   0.22  # 0..1 distance the blur ramps in over; smoothstepped
-  tilt_shift_blur_top:     0.3   # strength above the band (the "far" half -- strongest)
-  tilt_shift_blur_bottom:  0.2   # strength below the band (the "near" half)
-  tilt_shift_max_radius:   4.0   # max blur radius in DISPLAY pixels
-  tilt_shift_angle:        0.0   # degrees; rotates the focus band off horizontal
-
-  # --- Depth of field ---
-  dof_focus_mode:      manual  # manual | orbit_target | object -- global fallback; the demo
-                                # camera's own `focus_object: cube.000` (scene.yaml) overrides
-                                # this for that camera, so this global setting only matters for
-                                # a camera that doesn't set focus_object itself
-  dof_focus_object:    ""      # ':'-separated scene path (e.g. sdf_blob:sdf_blob_sphere), used
-                                # when dof_focus_mode == object
-  dof_focus_smoothing: 8.0     # focus-rack rate, 1/sec; <= 0 snaps. Object-focus mode only --
-                                # eases the focal plane onto a newly (re)resolved target rather
-                                # than snapping, e.g. when focus_object first resolves or changes
-  dof_focus_range:     0.0     # metres; EXTRA forced-sharp half-depth around the focal plane,
-                                # added in every focus mode (including manual, which has no
-                                # bounds to fit to and for which this is the only band-widening
-                                # dial). See dof_focus_cover_object below for the automatic part
-                                # and the dof_max_radius block for why a band like this has to
-                                # exist at all.
-  dof_focus_cover_object: true  # object focus (focus_object / dof_focus_mode: object) also fits
-                                # the forced-sharp band to the SUBJECT'S OWN depth extent, from
-                                # its mesh bounds (or an SdfRenderer's bounds_extent), so the
-                                # whole subject stays sharp however close the camera gets. This
-                                # is the deliberate break from physical optics: a real 85mm f/4
-                                # has ~7cm of depth of field at 2.8m, so pixel_demo's 1m cube is
-                                # ~90% defocused the moment the orbit camera zooms in, at ANY
-                                # aperture. Turning this off restores pure thin-lens behaviour.
-                                # It also puts the focal plane on the subject's bounds CENTRE
-                                # rather than its transform ORIGIN -- cube.000's mesh spans
-                                # [0,1]^3, so its origin is a corner 0.2m in front of centre.
-  dof_blur_scale:      1.0     # plain |CoC| multiplier: the blur-STRENGTH dial. Kept separate
-                                # from dof_focus_range (which sets how WIDE the sharp zone is)
-                                # and from dof_max_radius (a safety ceiling, not a strength dial
-                                # -- see its comment). Applied before that clamp, so lowering it
-                                # really reduces blur instead of just moving which pixels sit at
-                                # the ceiling. 0 bypasses DoF entirely.
-  dof_focus_distance: 8.0     # metres; fallback used only when dof_focus_mode == manual, or
-                              # orbit_target with a non-Orbit-mode camera (e.g. Fly)
-  dof_aperture:       2.8     # f-stop; lower = shallower depth of field (stronger blur away from focus)
-  dof_focal_length:   0.0     # mm; <= 0 takes the active camera's `lens`
-  dof_sensor_width:   0.0     # mm; <= 0 takes the active camera's `sensor_width`
-  dof_max_radius:     16.0    # |CoC| ceiling, in render-resolution pixels. Previously lowered to
-                              # 6.0 to hide a screen-locked dot lattice in the background -- but
-                              # that lattice was dof_spiral_tap()'s spiral being unrotated, since
-                              # fixed (gfxcoopa's dof_common.glsl now rotates it per-pixel via
-                              # dof_ign_angle()), and dof_composite.frag's blend used to be
-                              # normalized BY this value, so lowering it also silently raised
-                              # blur opacity on in-focus objects (see that shader's own fix
-                              # comment). With the blend now a fixed full-res-pixel band
-                              # independent of this ceiling, this is a no-op safety clamp again,
-                              # not a de facto strength dial -- retune dof_aperture (or the
-                              # camera's own `aperture`/`lens` in scene.yaml) to change how
-                              # strong the blur is.
-                              #
-                              # The two numbers worth keeping straight, both in FULL-res px and
-                              # both scaling with render_width above (they were last written for
-                              # a 1440px render width and are 33% larger at today's 1920):
-                              #   c        = sensor_width_mm / render_width   (one px, in metres
-                              #              on the sensor -- DofPass's sharp cutoff is |CoC| < 1px)
-                              #   sharp    = c * N * F(F-f)/f^2 metres either side of focus
-                              #   CoC(inf) = (f^2/N)/(F-f) / c  pixels
-                              # pixel_demo runs 85mm at f/4.0 (scene.yaml's camera overrides both)
-                              # focused ~11.46m out at 1920px render width: sharp = +-1.35m and
-                              # CoC(inf) = 8.4px, comfortably under this ceiling. At the f/2.0
-                              # that scene used to author, CoC(inf) was 16.9px -- i.e. this clamp
-                              # was quietly biting the far field.
-                              #
-                              # Note `sharp` scales with F(F-f), i.e. it collapses with the SQUARE
-                              # of focus distance: the +-1.35m above becomes +-8cm once the orbit
-                              # camera zooms to its min_distance: 2.0, which is why aperture alone
-                              # could never keep the cube sharp across a zoom. That is genuinely
-                              # what the lens does, so it is fixed ABOVE the lens instead, by
-                              # dof_focus_cover_object's forced-sharp band -- the physical falloff
-                              # outside that band is untouched.
-  dof_sample_count:   48      # spiral gather taps; clamped to [8, 48] in-shader. Kept at the
-                              # in-shader ceiling now that max_radius is bigger again -- more
-                              # taps are needed to keep density up over the larger disc
-  dof_blade_count:    0       # < 3 = perfect disc bokeh; else an N-sided polygonal iris
-  dof_blade_rotation: 0.0     # degrees; rotates the polygonal iris
-
-  # --- Lighting ---
+  # --- Lighting & sky ---
   exposure: 1.0
-  light_bands: 4
+  light_bands: 4             # banded-lighting step count (soft_lighting: false only)
   spec_threshold: 0.55
   rim_strength: 0.0
-  ambient_intensity: 1.0     # scales the sky gradient's contribution as indirect diffuse
-  sky_intensity: 1.0         # scales the sky-gradient indirect specular base
-  # The three colours the sky gradient (ambient light, skybox background, SSR's
-  # env-specular base, and fog's sky blend -- all driven from the same values)
-  # mixes between: straight up / at the horizon / straight down. Kept well below
-  # 1.0 so ACES tonemapping doesn't wash the gradient out to flat grey.
-  sky_zenith:  [0.05, 0.18, 0.55]
-  sky_horizon: [0.25, 0.35, 0.45]
-  sky_ground:  [0.05, 0.045, 0.04]
+  ambient_intensity: 1.0     # sky gradient's contribution as indirect diffuse
+  sky_intensity: 1.0         # sky-gradient indirect specular base
+  sky_zenith:  [0.05, 0.18, 0.55]   # sky gradient: straight up
+  sky_horizon: [0.25, 0.35, 0.45]   # sky gradient: at the horizon
+  sky_ground:  [0.05, 0.045, 0.04]  # sky gradient: straight down
 
   # --- Shadows ---
-  shadow_map_resolution: 2048
-  cube_shadow_resolution: 512
-  spot_shadow_resolution: 1024
   shadow_bias: 0.005
-  shadow_normal_bias: 1.0     # normal-offset bias, in shadow-map TEXELS BEYOND the PCF disk's
-                              # reach. Converted to world units each frame against the ortho box
-                              # in effect, the same way shadow_softness is -- a world-space
-                              # constant here would mean a different number of texels in every
-                              # scene and at every fit. Too small and grazing faces speckle and
-                              # crawl; too large and shadows detach from their casters. At 1.0
-                              # the recession costs ~2% of the shadowed area on pixel_demo
-  shadow_distance: 60.0       # Unity-style "Shadow Distance": how far from the camera shadows
-                              # are computed. The directional shadow frustum is fit to the
-                              # camera's OWN view frustum out to this distance -- never to scene
-                              # content -- so no object's position (however far off, however it
-                              # got there) can perturb or blow out the shadow map. See
-                              # PixelRenderConfig::shadow_distance's doc
-  soft_shadows: true           # true = rotated Vogel-disk PCF penumbra; false = single hard depth compare
-  shadow_softness: 0.15       # directional penumbra radius in WORLD units, converted to a texel
-                              # count each frame against the ortho box actually in effect -- so the
-                              # penumbra stays visually constant as the box refits to the camera
-  point_shadow_softness: 3.0  # point-light cube PCF penumbra radius in CUBE-MAP TEXELS, converted
-                              # to a tangent-space offset each frame against cube_shadow_resolution
-                              # (not comparable to shadow_softness's world units above)
-  spot_shadow_softness: 1.0   # spot-light shadow-map PCF penumbra radius in SPOT-MAP TEXELS, used
-                              # directly (no tangent-space conversion, unlike point_shadow_softness
-                              # above) since the spot map is a plain perspective projection sampled
-                              # the same way the directional map is
-  shadow_pcf_samples: 24      # Vogel disk taps, 1..32; lower is cheaper and grainier
-
-  # --- Outline ---
-  outline_thickness: 0.6
-  outline_color: [0.05, 0.04, 0.08, 1.0]
-  depth_threshold: 0.02      # relative depth step (fraction of the fragment's own distance); scale-invariant
-  normal_threshold: 0.75
-
-  # --- Palette ---
-  palette: "assets/palettes/duel-1x.png"
-
-  # --- Dither ---
-  dither_strength: 0.08
+  shadow_normal_bias: 1.0    # normal-offset bias in shadow-map texels beyond the PCF disk
+  shadow_distance: 60.0      # how far from the camera the directional shadow frustum reaches
+  shadow_softness: 0.15      # directional penumbra radius, WORLD units
+  point_shadow_softness: 3.0 # point-light penumbra radius, CUBE-MAP texels
+  spot_shadow_softness: 0.15 # spot penumbra radius, WORLD units (converted per pixel from light distance)
 
   # --- SSAO ---
-  ssao_radius: 2.0          # world-space gather radius (Unity HDRP's Radius default)
-  ssao_bias: 0.025          # world-space lift of the shading point along its normal before
-                            # the horizon march (ssao.frag) -- keeps depth quantisation on a
-                            # flat surface from registering as a horizon. Keep it a small
-                            # fraction of ssao_radius: it eats real contact occlusion linearly.
-  ssao_power: 1.0           # exponent on visibility (Unity HDRP's Intensity); the multi-bounce
-                            # composite in pixel_lighting.frag carries the perceived depth now
-  ssao_max_radius_px: 80    # upper clamp on the horizon march's screen extent in render-target
-                            # pixels (HDRP's Maximum Radius in Pixels: 40 medium, 80 high)
-  ssao_direct_lighting_strength: 0.25 # how much occlusion darkens DIRECT lighting
-                            # (HDRP's Direct Lighting Strength); 0 = indirect only
-  ssao_blur_plane_sigma: 0.375 # world-space depth tolerance of the blur's bilateral weight,
-                            # per dilation unit -- tracks the geometry's step scale (this
-                            # terrain's ~1 unit terraces), deliberately NOT tied to
-                            # ssao_radius (a wider gather radius must not blend AO across
-                            # faces the kernel should reject)
-  ssao_slices: 2            # horizon slices per pixel (ssao.frag); the per-pixel/per-frame
-                            # slice rotation covers the remaining directions, so 2-3 is standard
-  ssao_steps: 16             # Hi-Z march steps per slice direction
-  ssao_temporal_frames: 32  # accumulation depth of the temporal resolve: each pixel averages
-                            # this many continuously-jittered frames (blending frame N at
-                            # 1/(N+1)) before switching to a fixed-rate running average.
-                            # Deeper = smoother, more stable AO in motion; shallower responds
-                            # faster to genuine content changes.
-  ssao_temporal_enabled: true # Accumulates the raw hemisphere estimate across frames, which is
-                              # the only thing that can stabilise it. The raw pass rotates each
-                              # pixel's kernel by a SCREEN-ANCHORED noise texel, so a surface
-                              # sliding across the screen has its 24-sample estimate redrawn with
-                              # a different rotation every frame. That is per-pixel estimator
-                              # variance, not a filterable pattern: ssao_blur.frag can only trade
-                              # it against spatial detail, while reprojected history is anchored
-                              # to the SURFACE and averages the variance out where it occurs.
-                              #
-                              # The accumulation is CONTINUOUS (the scheme Unity HDRP's GTAO
-                              # and Intel's XeGTAO use): the sample jitter advances every frame
-                              # and each pixel keeps a running average with a stored count
-                              # (frame N blends at 1/(N+1), capped by ssao_temporal_frames),
-                              # so still and moving views show the SAME many-frame estimate --
-                              # stopping the camera cannot reveal a different-looking AO.
-                              # Three things make that safe, and all are load-bearing:
-                              #
-                              #  * ssao_resolve.frag rejects history whose stored eye distance
-                              #    disagrees with where the shading point actually was last
-                              #    frame. Without it, blocky terrain drags the occlusion of
-                              #    whatever the reprojected pixel used to show onto every
-                              #    freshly revealed surface.
-                              #  * The history VALUE is resampled with Catmull-Rom, not plain
-                              #    bilinear -- repeated subpixel bilinear reads erode the
-                              #    pixel-scale AO detail the average exists to preserve,
-                              #    which used to read as AO washing out at vista distances
-                              #    under camera motion.
-                              #  * Once the camera has been still for a few frames
-                              #    (PixelRenderPipeline's ssao_frozen_), the jitter holds and
-                              #    the resolve keeps accepted-history pixels verbatim: the
-                              #    resting image is byte-static (the settle-test contract)
-                              #    and holds the accumulated AVERAGE, so nothing visibly
-                              #    changes at the freeze boundary in either direction.
+  ssao_radius: 2.0           # world-space gather radius
+  ssao_bias: 0.025           # world-space normal lift before the horizon march; keep << ssao_radius
+  ssao_power: 1.0            # exponent on visibility
+  ssao_direct_lighting_strength: 0.25 # how much occlusion darkens DIRECT lighting; 0 = indirect only
+  ssao_temporal_enabled: true # accumulate the AO estimate across frames (needed for stability)
 
   # --- SSR + SSGI ---
-  ssr_max_distance: 30.0
-  ssr_max_iterations: 64
-  ssr_thickness: 0.08         # loosened from 0.05 -- reduces spurious thickness-test rejections
-                               # of otherwise-valid hits near silhouette edges (patchy reflection
-                               # boundaries); paired with the new SSR blur pass, not a substitute
-                               # for it -- this only shifts where the raw hit/miss boundary sits.
-  ssr_thickness_scale: 0.02   # loosened from 0.01, same reasoning as ssr_thickness above
+  ssr_max_distance: 30.0     # world-space trace cutoff
+  ssr_thickness: 0.08        # hit acceptance thickness
+  ssr_thickness_scale: 0.02  # extra thickness per unit distance
   ssr_bias_texels: 3.5
-  ssr_roughness_cutoff: 1.0   # 1.0 so rough surfaces still trace and feed the bounce
+  ssr_roughness_cutoff: 1.0  # roughness above which surfaces stop tracing; 1.0 = everything traces
   ssr_start_mip: 0
   ssr_min_mip0_steps: 1
   ssr_temporal_enabled: true
   ssr_temporal_blend: 0.85
-  ssr_blur_radius: 0.5        # world-space sigma for the spatial SSR denoise -- smooths raw
-                               # hit/miss noise at reflection boundaries that temporal
-                               # accumulation alone doesn't fully resolve
-  ssr_jitter: 0.25             # stochastic ray jitter, as a fraction of the GGX lobe cone --
-                               # turns the hard hit/miss silhouette boundary that causes rotation
-                               # shimmer into per-pixel noise the temporal/blur stages below can
-                               # integrate into a soft edge. Re-measured on this scene (pixel_demo,
-                               # roughness-0.8 floor, fog off) with a fixed-timestep frame-sequence
-                               # sweep across 0.15-0.4: the aggregate frame-to-frame flicker metric
-                               # over the FLOOR's own primary reflection is statistically identical
-                               # at every nonzero value tested, including vs 0.0 -- at this
-                               # roughness the cone-LOD colour sample is already saturated at the
-                               # mip clamp (see gfx_ssr_trace's own doc), so perturbing the ray
-                               # barely changes what gets sampled. It's kept ON, at a middling
-                               # value, because it has a real, separately-verified benefit: at this
-                               # camera framing the small glass sphere's SECONDARY reflection trace
-                               # only ever registers a hit with a jittered ray -- the deterministic
-                               # mirror ray misses the sphere's silhouette entirely from every floor
-                               # pixel tested. 0 would make that reflection permanently invisible
-                               # rather than merely faint. No visible downside found (denoised
-                               # output is visually identical to the jitter-off render).
-  ssr_temporal_gamma: 2.0     # variance-clipping width (std deviations) for the SSR temporal
-                               # resolve's history rejection, widened from 1.0 to pair with
-                               # ssr_jitter > 0 above -- at gamma 1.0 the resolve's neighbourhood
-                               # sigma is small on an otherwise-uniform floor patch, so gamma*sigma
-                               # is a much tighter band than the jitter's own induced noise,
-                               # meaning history gets clipped almost every frame instead of
-                               # integrating the noise into a stable average. 2.0 was verified (not
-                               # just assumed) via the same frame-sequence sweep as ssr_jitter.
-  ssgi_intensity: 0.6         # diffuse colour-bleed strength; 0 = specular-only SSR
-  ssgi_distance: 0.5          # world-space offset along N for the bounce lookup
+  ssr_temporal_gamma: 2.0    # variance-clipping width (std devs) for history rejection
+  ssr_blur_radius: 0.5       # world-space sigma of the spatial denoise
+  ssr_jitter: 0.25           # stochastic ray jitter as a fraction of the GGX lobe cone
+  ssgi_intensity: 0.6        # diffuse colour-bleed strength; 0 = specular-only SSR
+  ssgi_distance: 0.5         # world-space offset along the normal for the bounce lookup
 
-  # --- Refraction (transparent/BLEND MESH objects only; SdfRenderer glass is unaffected) ---
-  refraction_ior: 1.45              # engine-wide default IOR for materials that don't set their own (glass ~1.45, water ~1.33)
-  refraction_thickness: 0.25        # engine-wide default world-space distance the ray travels through the object
-  refraction_strength: 1.0          # global multiplier on the screen-space UV offset
-  refraction_max_offset: 0.08       # clamp in UV units; stops smearing at grazing angles
-  refraction_chromatic: 0.0         # RGB IOR split (chromatic aberration); 0 = single tap
-  refraction_blur: 1.0              # roughness -> scene-colour mip scale; frosted glass
-  refraction_density: 1.0           # Beer-Lambert absorption strength through refraction_tint
-  refraction_fresnel: true          # dim transmission at grazing angles (energy already in the SSR/sky term)
-  refraction_tint: [1.0, 1.0, 1.0]  # engine-wide default transmission tint
-  refraction_include_reflections: true  # source refraction's own scene-colour chain from the SSR composite
-                                         # (vs. the plain pre-SSR image) so refraction sees SSR reflections too
+  # --- Refraction (BLEND MESH objects only) ---
+  refraction_ior: 1.45       # default IOR for materials without their own (glass ~1.45, water ~1.33)
+  refraction_thickness: 0.25 # default world-space travel distance through the object
+  refraction_strength: 1.0   # multiplier on the screen-space UV offset
+  refraction_max_offset: 0.08 # UV-space clamp; stops smearing at grazing angles
+  refraction_chromatic: 0.0  # RGB IOR split; 0 = single tap
+  refraction_blur: 1.0       # roughness -> scene-colour mip scale (frosted glass)
+  refraction_density: 1.0    # Beer-Lambert absorption strength through refraction_tint
+  refraction_fresnel: true   # dim transmission at grazing angles
+  refraction_tint: [1.0, 1.0, 1.0]
+  refraction_include_reflections: true # refraction samples the post-SSR image, so it sees reflections
 
-  # --- Fog ---
-  # GLOBAL fog, and this block is its ONLY source -- there is no fog component and no
-  # local fog volume. Anything bounded is a Volume component in the scene instead.
-  # Every value below is re-read each frame, so it can be changed at runtime through
-  # Engine::render_config(); fog_enabled above is the exception, being startup-fixed.
-  fog_mode: 2                 # 0 Linear, 1 Exponential, 2 Exp2 (Unity's default)
-  fog_density: 0.03           # extinction per world unit at the height falloff base
-  fog_linear_start: 3.0       # world-space distance fog starts ramping in (Linear mode)
-  fog_linear_end: 25.0        # world-space distance fog reaches max_opacity (Linear mode)
-  fog_color: [0.6, 0.66, 0.75] # base fog colour
-  fog_height_base: -0.5       # world Z fog is at full density below (engine is Z-up; plane.000 sits at z=-0.5)
-  fog_height_falloff: 2.0     # exponential height falloff distance in world units; <= 0 disables height fog
-  fog_sky_blend: 0.5          # 0 = flat fog_color, 1 = fully blended toward the sky gradient at the horizon
-  fog_sun_amount: 0.3         # additive Henyey-Greenstein sun in-scatter tint strength; 0 disables
-  fog_sun_anisotropy: 0.7     # HG g; 0 isotropic, close to 1 = tight forward scatter toward the sun
-  fog_max_opacity: 1.0        # ceiling on how much fog can occlude the scene (1 = fully opaque at max density)
-  fog_max_distance: 60.0      # distance the global fog term saturates at, and the distance sky pixels are evaluated
-                               # at -- prevents a hard seam where a grazing near-horizon ray's apparent distance
-                               # blows up against an otherwise-unfogged sky
+  # --- Fog (GLOBAL; local volumes are Volume components in the scene) ---
+  fog_mode: 2                # 0 Linear, 1 Exponential, 2 Exp2
+  fog_density: 0.03          # extinction per world unit at the height falloff base
+  fog_linear_start: 3.0      # Linear mode: distance fog starts
+  fog_linear_end: 25.0       # Linear mode: distance fog reaches max_opacity
+  fog_color: [0.6, 0.66, 0.75]
+  fog_height_base: -0.5      # world Z of full density (engine is Z-up)
+  fog_height_falloff: 2.0    # exponential height falloff distance; <= 0 disables height fog
+  fog_sky_blend: 0.5         # 0 = flat fog_color, 1 = blended toward the sky gradient
+  fog_sun_amount: 0.3        # Henyey-Greenstein sun in-scatter strength; 0 disables
+  fog_sun_anisotropy: 0.7    # HG g; 0 isotropic, ~1 tight forward scatter
+  fog_max_opacity: 1.0       # ceiling on how much fog can occlude
+  fog_max_distance: 60.0     # distance the fog term (and sky-pixel evaluation) saturates at
 
-  # --- Volumetrics (raymarched LOCAL volumes; see gfxcoopa's VolumetricsPass) ---
-  # Only SHARED march settings live here. How a volume looks -- kind, density, noise,
-  # advection, colour -- is per-volume and authored on a Volume component in the scene,
-  # because volumes are local by definition. Kinds: fog (static pocket), wind (ribbons),
-  # haze (drifting billows). Fog above is the GLOBAL atmosphere and is config-only.
-  # There is deliberately no global wind or haze: place a large Volume if you want one.
-  volumetrics_step_count: 48      # raymarch steps -- the primary perf knob
+  # --- Volumetrics (shared march settings; per-volume look lives on the Volume component) ---
   volumetrics_max_distance: 40.0  # distance the march stops at
-  volumetrics_max_opacity: 0.85   # ceiling on how much volumetrics can occlude the scene
-  volumetrics_sun_anisotropy: 0.6 # HG g; shared because it's a property of the light, not a volume
-  volumetrics_debug_view: false   # output accumulated density alone, scene colour suppressed
+  volumetrics_max_opacity: 0.85   # ceiling on how much volumetrics can occlude
+  volumetrics_sun_anisotropy: 0.6 # HG g, shared across volumes
 
-  # --- Anti-aliasing (ported from blendy's PbrRenderPipeline; see PixelRenderConfig::aa_mode) ---
-  fxaa_subpixel: 0.75           # blend weight of FXAA's subpixel-aliasing term
-  fxaa_edge_threshold: 0.166    # local contrast (fraction of lumaMax) below which FXAA does nothing
-  fxaa_edge_threshold_min: 0.0312 # absolute contrast floor -- avoids AA-ing near-black noise
-  smaa_threshold: 0.1           # SMAA edge-detection local contrast threshold
-  smaa_max_search_steps: 16     # SMAA blend-weight pass's max search distance, in texels
-  taa_blending_weight: 0.9      # TAA's blend weight toward the (AABB-clamped) history sample
-  taa_weight_scale: 30.0        # plumbed for parity with blendy; gfxcoopa's taa.frag never reads this
+  # --- Depth of field ---
+  dof_focus_mode: manual     # manual | orbit_target | object; a camera's own focus_object overrides this
+  dof_focus_object: ""       # ':'-separated scene path, used when dof_focus_mode: object
+  dof_focus_smoothing: 8.0   # focus-rack rate, 1/sec; <= 0 snaps
+  dof_focus_range: 0.0       # metres of extra forced-sharp half-depth around the focal plane
+  dof_focus_cover_object: true # object focus also fits the sharp band to the subject's depth extent
+  dof_blur_scale: 1.0        # |CoC| multiplier -- the blur-strength dial; 0 bypasses DoF
+  dof_focus_distance: 8.0    # metres; used in manual mode
+  dof_aperture: 2.8          # f-stop; lower = shallower depth of field
+  dof_focal_length: 0.0      # mm; <= 0 takes the active camera's lens
+  dof_sensor_width: 0.0      # mm; <= 0 takes the active camera's sensor_width
+  dof_max_radius: 16.0       # |CoC| safety ceiling in render-resolution pixels (not a strength dial)
+  dof_blade_count: 0         # < 3 = perfect disc bokeh; else N-sided polygonal iris
+  dof_blade_rotation: 0.0    # degrees; rotates the polygonal iris
 
-  # --- SDF ---
-  sdf_max_steps: 64            # global ceiling on SdfRenderer::max_steps
-  sdf_shadow_max_steps: 32     # cheaper budget for the depth-only shadow march
-  sdf_max_renderers: 64        # SdfData renderer SSBO capacity (startup-fixed)
-  sdf_max_shapes: 512          # SdfData shape SSBO capacity (startup-fixed)
+  # --- Tilt shift ---
+  tilt_shift_focus_center: 0.55 # 0..1 screen position of the sharp band's centre (0 = top)
+  tilt_shift_focus_width:  0.15 # 0..1 half-height of the fully-sharp band
+  tilt_shift_ramp_width:   0.22 # 0..1 distance the blur ramps in over
+  tilt_shift_blur_top:     0.3  # strength above the band
+  tilt_shift_blur_bottom:  0.2  # strength below the band
+  tilt_shift_max_radius:   4.0  # max blur radius in DISPLAY pixels
+  tilt_shift_angle:        0.0  # degrees off horizontal
+
+  # --- Bloom ---
+  bloom_threshold: 1.0       # brightness (max of R,G,B) below which nothing glows
+  bloom_soft_knee: 0.5       # 0..1 fraction of the threshold the quadratic knee spans
+  bloom_intensity: 5.0       # final multiplier on the composited glow; <= 0 disables
+  bloom_scatter: 0.7         # per-level blend toward the coarser tent; higher = wider halo
+  bloom_radius: 1.0          # tent-filter width multiplier on the upsample
+  bloom_clamp: 20.0          # per-tap HDR ceiling before thresholding; firefly guard
+
+  # --- Anti-aliasing tuning ---
+  fxaa_subpixel: 0.75        # blend weight of FXAA's subpixel-aliasing term
+  fxaa_edge_threshold: 0.166 # local contrast below which FXAA does nothing
+  fxaa_edge_threshold_min: 0.0312 # absolute contrast floor
+  smaa_threshold: 0.1        # SMAA edge-detection contrast threshold
+  smaa_max_search_steps: 16  # SMAA blend-weight search distance, texels
+  taa_blending_weight: 0.9   # TAA blend toward the (AABB-clamped) history sample
+
+  # --- Outline ---
+  outline_thickness: 0.6     # low-resolution texels
+  outline_color: [0.05, 0.04, 0.08, 1.0]
+  depth_threshold: 0.02      # relative depth step that counts as an edge; scale-invariant
+  normal_threshold: 0.75
+
+  # --- Palette / dither ---
+  palette: "assets/palettes/duel-1x.png"
+  dither_strength: 0.08
+
+  # --- SDF capacities (startup-fixed SSBO sizing) ---
+  sdf_max_renderers: 64
+  sdf_max_shapes: 512
 
 jobs:
-  worker_threads: 0        # 0 = std::thread::hardware_concurrency()
-  parallel_threshold: 4    # low on purpose: exercises the parallel path in the pixel demo
-                            # (8 MeshRenderers, 4 SdfRenderers); libcoopa's own house value
-                            # for production-sized workloads is 256 (AnimationSystem)
+  worker_threads: 0          # 0 = std::thread::hardware_concurrency()
+  parallel_threshold: 4      # low on purpose: exercises the parallel path on the pixel demo
 
 # Project-wide physics settings (coopa::physx::util::PhysicsSettings) -- see
 # physxcoopa/util/physics_settings.h for the full schema; every key here is optional.
@@ -424,22 +211,12 @@ physics:
   ignore_layer_collisions:
     - [Triggers, Triggers]   # trigger volumes never need to push each other apart
   cloth:
-    # XPBD substeps per fixed substep, and constraint iterations within each -- the two knobs
-    # governing cloth quality. Substeps are the one that matters: for a fixed budget, more
-    # substeps converges strictly better than more iterations (Macklin et al. 2019), which is
-    # why the ratio is the reverse of solver.velocity_iterations above. 4 keeps a 25x25 sheet
-    # under 0.15 ms; raise toward 8 if a fast-moving anchor shows visible stretch.
-    substeps: 4
-    iterations: 1
-  debug_draw: [Colliders, Contacts]   # what a DebugLinePass draw would gather, when enabled
-  parallel_threshold: 16     # low on purpose, same reasoning as jobs.parallel_threshold above --
-                              # exercises PhysicsSystem's/PhysicsWorld's job-parallel passes on
-                              # physics_test's modest body count instead of always falling back serial
+    substeps: 4              # XPBD substeps per fixed substep -- the quality knob that matters
+    iterations: 1            # constraint iterations within each substep
+  debug_draw: [Colliders, Contacts] # what a DebugLinePass draw gathers, when enabled
+  parallel_threshold: 16     # low on purpose, same reasoning as jobs.parallel_threshold
 
 output:
   save_on_exit: true
   filepath: "./output/frame.png"
-  save_low_res: false  # false captures the final DISPLAY-resolution frame (after tilt
-                        # shift, with both UI layers composited on top); true captures the
-                        # pixel-perfect low-res buffer instead, which is BEFORE tilt shift
-                        # and contains NO UI at all -- neither layer is part of it
+  save_low_res: false        # false = final display-res frame; true = pre-tilt-shift low-res buffer, no UI

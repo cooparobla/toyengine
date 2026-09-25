@@ -25,7 +25,7 @@ changes push-constant contents is free to flip every frame.
 
 | Startup-fixed | Runtime |
 |---|---|
-| `ssr_enabled`, `ssao_enabled`, `transparency_enabled`, `refraction_enabled`, `fog_enabled`, `volumetrics_enabled`, `bloom_enabled`, `dof_enabled`, `tilt_shift_enabled`, `aa_mode`, `world_ui_enabled`, `screen_ui_enabled`, and every resolution/capacity field | `sdf_enabled`, `shadows_enabled`, `sdf_shadows_enabled`, `ssr_reflect_transparent`, `debug_lines_enabled`, `ssao_debug_view`, `dof_debug_view`, `volumetrics_debug_view`, and every numeric tunable |
+| `ssr_enabled`, `ssgi_traced`, `ssao_enabled`, `transparency_enabled`, `refraction_enabled`, `fog_enabled`, `volumetrics_enabled`, `bloom_enabled`, `dof_enabled`, `tilt_shift_enabled`, `auto_exposure_enabled`, `grading_lut_path`, `aa_mode`, `world_ui_enabled`, `screen_ui_enabled`, and every resolution/capacity field | `sdf_enabled`, `shadows_enabled`, `sdf_shadows_enabled`, `shadow_pcss_enabled`, `contact_shadows_enabled`, `volumetrics_shadows_enabled`, `grading_enabled`, `ssr_reflect_transparent`, `debug_lines_enabled`, `ssao_debug_view`, `dof_debug_view`, `volumetrics_debug_view`, and every numeric tunable |
 
 `apply_live_config()` enforces the split: it restores any startup-fixed field the caller
 tried to change and names it in a warning, rather than accepting an edit that would
@@ -53,7 +53,9 @@ three groups below.
    exceed 1.0 whatever the toggles say). `ssao_debug_view` replaces both with a raw
    occlusion visualization.
 7. Scene-colour mip chain, then SSR — Hi-Z raymarch → temporal resolve → specular swap plus
-   SSGI diffuse bounce.
+   the SSGI diffuse bounce. Under `ssgi_traced` the bounce is its own cosine-hemisphere Hi-Z
+   trace (`ssgi.frag`) through a second resolve+denoise chain inside `SsrPass`, rather than the
+   single normal-offset mip tap the composite falls back to.
 8. Refraction's own scene-colour chain, when refraction is on.
 9. Forward transparent pass: BLEND meshes and BLEND SDFs merged into one back-to-front list,
    drawn in place into the SSR composite. BLEND *meshes* additionally refract; BLEND SDFs
@@ -61,12 +63,19 @@ three groups below.
 
 **Post** (`record_post_chain_()`):
 
-10. Fog (analytic, global) → `fog_target_`.
-11. Volumetrics (raymarched local `VolumeComponent`s) → `volumetrics_target_`.
+10. Fog (analytic, global) → `fog_target_`. **Skipped when volumetrics is also on**: the two
+    are both fullscreen passes over the whole HDR frame and the second reads exactly what the
+    first wrote, so `volumetrics.frag` applies the global fog term itself through the same
+    `gfx_fog_apply()` call `fog.frag` makes — one pass instead of two, bit-identical bar the
+    half-float round-trip it skips. See `fog_merged_into_volumetrics_()`.
+11. Volumetrics (raymarched local `VolumeComponent`s) → `volumetrics_target_`. The march
+    shadows its sun in-scatter against the directional map (light shafts) and scatters the
+    nearest point/spot lights into each volume.
 12. Depth of field, at render resolution.
-13. Bloom pyramid.
-14. Exposure + ACES tonemap + outline + dither + palette → `post_target_`, with debug lines
-    drawn as a guest in the same bracket.
+13. Bloom pyramid, and auto-exposure metering (its own 1×1 ping-pong target; the value it
+    produces is consumed by the *next* frame's tonemap).
+14. Exposure + ACES tonemap + colour-grading LUT + outline + dither + palette → `post_target_`,
+    with debug lines drawn as a guest in the same bracket.
 15. World-space UI → `ui_world_target_`, at the display rect.
 16. FXAA / SMAA / TAA → `aa_target_`, when `aa_mode != "off"`.
 17. Tilt shift, at display resolution.

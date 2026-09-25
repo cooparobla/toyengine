@@ -196,6 +196,9 @@ struct ShadowFitCamera {
 struct DirShadowFit {
     glm::mat4 light_space_matrix{1.0f};
     float     texel_world = 0.0f; /**< World units per shadow-map texel in this frame's box. */
+    float     depth_range_world = 0.0f; /**< World-unit span of the box's [0,1] light-space depth --
+                                          what converts a stored-vs-receiver depth GAP back into
+                                          metres (PCSS's penumbra estimate needs exactly that). */
 };
 
 /**
@@ -281,6 +284,7 @@ inline DirShadowFit compute_dir_shadow_fit(const glm::vec3& light_direction,
         light_proj = glm::orthoRH_ZO(-ortho_extent, ortho_extent, -ortho_extent, ortho_extent,
                                      0.1f, 60.0f);
         fit.texel_world = (2.0f * ortho_extent) / resolution;
+        fit.depth_range_world = 60.0f - 0.1f;
     } else {
         const glm::mat4 cam_to_world = glm::inverse(cam->view);
         const glm::vec3 cam_pos     = glm::vec3(cam_to_world[3]);
@@ -331,13 +335,24 @@ inline DirShadowFit compute_dir_shadow_fit(const glm::vec3& light_direction,
         const float far_plane  = -center_ls.z + radius + pad;
         float near_plane = -center_ls.z - radius - pad - shadow_distance;
         const float depth = std::max(far_plane - near_plane, 0.01f);
+        fit.depth_range_world = depth;
 
         light_proj = glm::orthoRH_ZO(center.x - extent, center.x + extent,
                                      center.y - extent, center.y + extent,
                                      near_plane, near_plane + depth);
     }
 
-    light_proj[1][1] *= -1.0f; // Vulkan Y-flip
+    // No Vulkan Y-flip, deliberately. The shadow passes render with a POSITIVE-height
+    // viewport (ShadowMapTarget::begin_directional_pass), so the plain RH_ZO matrix is
+    // already the orientation the shader's `proj_coords.xy * 0.5 + 0.5` assumes --
+    // the same convention ShadowMapTarget::get_spot_matrix() documents and uses.
+    //
+    // A flip applied as `light_proj[1][1] *= -1` would be wrong in any case: it negates
+    // the ortho's Y SCALE without its Y TRANSLATION ([3][1]), which mirrors the box's
+    // light-space centre about 0 instead of about itself. That is invisible near the
+    // world origin -- where the centre is ~0 and the mirror is the identity -- and
+    // pushes the box clean off the scene once the camera sits far out, as it does on
+    // assets/scenes/terrain_test (centre ~-185, box half-extent ~79).
     fit.light_space_matrix = light_proj * light_rot;
     return fit;
 }

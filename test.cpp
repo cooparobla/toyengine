@@ -533,6 +533,24 @@ void test_dir_shadow_fit_center_snaps_to_texels() {
     expect_near(ratio, std::round(ratio), 1e-2f, "dir_shadow_fit: box centre is snapped to a whole texel");
 }
 
+void test_dir_shadow_fit_covers_camera_far_from_origin() {
+    // The fit is built around the camera's own frustum, so the camera position must land
+    // inside the box's clip volume no matter where in the world that camera is. Checked at
+    // a terrain_test-scale offset AND at the origin, in BOTH light-space axes: a projection
+    // whose Y scale is negated without its Y translation passes at the origin (where the
+    // centre is 0 and the mirror is the identity) and misses the scene entirely out here.
+    glm::vec3 dir(-0.45f, -0.35f, -0.82f);
+    for (const glm::vec3& target : {glm::vec3(192.0f, 192.0f, 26.0f), glm::vec3(0.0f)}) {
+        auto cam = make_shadow_fit_camera(target + glm::vec3(0.0f, -52.0f, 30.0f), target);
+        auto fit = toy::render::compute_dir_shadow_fit(dir, &cam, 60.0f, 2048);
+        const glm::vec3 cam_pos = glm::vec3(glm::inverse(cam.view)[3]);
+        const glm::vec4 clip    = fit.light_space_matrix * glm::vec4(cam_pos, 1.0f);
+        const glm::vec3 ndc     = glm::vec3(clip) / clip.w;
+        expect(std::abs(ndc.x) <= 1.0f && std::abs(ndc.y) <= 1.0f && ndc.z >= 0.0f && ndc.z <= 1.0f,
+               "dir_shadow_fit: camera position lands inside the fitted box wherever it is");
+    }
+}
+
 void test_dir_shadow_fit_degenerate_shadow_distance() {
     // A zero shadow distance collapses the frustum slice; the near/far separation floor
     // must still leave a usable (non-inverted) depth range.
@@ -751,6 +769,7 @@ void test_app_config_load_applies_quality_presets() {
         "  ssao_quality: low\n"
         "  ssr_quality: low\n"
         "  volumetrics_quality: med\n"
+        "  ssgi_quality: low\n"
         "  sdf_quality: nonsense\n"
         "  ssr_max_iterations: 200\n");
 
@@ -759,6 +778,12 @@ void test_app_config_load_applies_quality_presets() {
     expect(config.render.cube_shadow_resolution == 1024u, "quality preset: ultra cube_shadow_resolution");
     expect(config.render.spot_shadow_resolution == 2048u, "quality preset: ultra spot_shadow_resolution");
     expect(config.render.shadow_pcf_samples == 32u, "quality preset: ultra shadow_pcf_samples");
+    // The two PCSS/contact-shadow cost dials ride the same tier.
+    expect(config.render.shadow_pcss_taps == 16u, "quality preset: ultra shadow_pcss_taps");
+    expect(config.render.contact_shadow_steps == 16, "quality preset: ultra contact_shadow_steps");
+
+    expect(config.render.ssgi_quality == RenderQuality::Low, "AppConfig::load: ssgi_quality parses low");
+    expect(config.render.ssgi_max_iterations == 12, "quality preset: low ssgi_max_iterations");
 
     expect(config.render.ssao_slices == 1, "quality preset: low ssao_slices");
     expect(config.render.ssao_steps == 6, "quality preset: low ssao_steps");
@@ -767,6 +792,7 @@ void test_app_config_load_applies_quality_presets() {
 
     expect(config.render.volumetrics_quality == RenderQuality::Medium, "AppConfig::load: 'med' parses as Medium");
     expect(config.render.volumetrics_step_count == 32, "quality preset: medium volumetrics_step_count");
+    expect(config.render.volumetrics_max_scatter_lights == 2, "quality preset: medium volumetrics_max_scatter_lights");
 
     expect(config.render.sdf_quality == RenderQuality::High, "AppConfig::load: unknown quality string falls back to High");
     expect(config.render.sdf_max_steps == 64u, "quality preset: fallback High sdf_max_steps");
@@ -785,6 +811,18 @@ void test_app_config_load_applies_quality_presets() {
     expect(plain.render.ssr_max_iterations == 64, "quality preset: default High ssr_max_iterations");
     expect(plain.render.dof_sample_count == 48, "quality preset: default High dof_sample_count");
     expect(plain.render.volumetrics_step_count == 48, "quality preset: default High volumetrics_step_count");
+    expect(plain.render.ssgi_max_iterations == 32, "quality preset: default High ssgi_max_iterations");
+    expect(plain.render.shadow_pcss_taps == 8u, "quality preset: default High shadow_pcss_taps");
+    expect(plain.render.contact_shadow_steps == 8, "quality preset: default High contact_shadow_steps");
+    expect(plain.render.volumetrics_max_scatter_lights == 4, "quality preset: default High volumetrics_max_scatter_lights");
+
+    // Low volumetrics drops the light loop entirely, leaving only the (much cheaper)
+    // sun-shaft term -- the one tier row where a covered field goes to zero.
+    toy::core::AppConfig vol_low = load_config_text("test_quality_vol_low.yaml",
+        "render:\n"
+        "  volumetrics_quality: low\n");
+    expect(vol_low.render.volumetrics_max_scatter_lights == 0, "quality preset: low volumetrics_max_scatter_lights is 0");
+    expect(vol_low.render.volumetrics_step_count == 24, "quality preset: low volumetrics_step_count");
 }
 
 /**
@@ -3074,6 +3112,7 @@ const TestCase kTests[] = {
     {"dir_shadow_fit_is_camera_only",              "math", test_dir_shadow_fit_is_camera_only},
     {"dir_shadow_fit_radius_stable_under_rotation","math", test_dir_shadow_fit_radius_stable_under_rotation},
     {"dir_shadow_fit_center_snaps_to_texels",      "math", test_dir_shadow_fit_center_snaps_to_texels},
+    {"dir_shadow_fit_covers_camera_far_from_origin", "math", test_dir_shadow_fit_covers_camera_far_from_origin},
     {"dir_shadow_fit_degenerate_shadow_distance",  "math", test_dir_shadow_fit_degenerate_shadow_distance},
     {"pixel_density_orthographic",                 "math", test_pixel_density_orthographic},
     {"pixel_density_perspective_disabled",         "math", test_pixel_density_perspective_disabled},

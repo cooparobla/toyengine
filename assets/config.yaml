@@ -10,37 +10,71 @@ scene:
 
 render:
   # =========================================================================
-  # Feature toggles
+  # 1. RENDER FEATURES -- master on/off. One switch per feature; off means the
+  #    feature contributes nothing and (where marked startup-fixed) costs nothing.
+  #    Sub-options that only shape a feature already switched on live in block 2.
   # =========================================================================
   shadows_enabled: true
-  soft_shadows: true         # true = Vogel-disk PCF penumbra; false = single hard depth compare
   ssao_enabled: true
   ssr_enabled: true          # also gates the SSGI diffuse-bounce term (ssgi_intensity)
-  ssr_reflect_transparent: true # opaque surfaces also reflect transparent geometry (~2x SSR cost; needs ssr + transparency)
   transparency_enabled: true # forward BLEND-material pass
   refraction_enabled: true   # screen-space refraction for BLEND MESH objects (needs transparency_enabled)
   sdf_enabled: true          # signed-distance-field raymarching (SdfRenderer/SdfShape)
-  sdf_shadows_enabled: true  # SDFs cast shadows; independent of sdf_enabled
   bloom_enabled: true        # additive glow from bright HDR regions
   fog_enabled: false         # GLOBAL analytic fog (the Fog block below is its only source)
   volumetrics_enabled: true  # raymarched LOCAL volumes (Volume components in the scene)
   dof_enabled: false         # physically-based depth of field, at render resolution before bloom
   tilt_shift_enabled: false  # diorama blur at DISPLAY resolution, after the upscale
+  auto_exposure_enabled: true # eye adaptation: meter the frame and scale `exposure` by it
+  grading_enabled: true      # colour-grading LUT (no-op until `grading_lut` names a file)
   outline_enabled: false
   palette_enabled: false
   dither_enabled: false
+  world_ui_enabled: true     # WorldSpace canvases, at INTERNAL resolution (startup-fixed)
+  screen_ui_enabled: true    # ScreenSpaceOverlay canvases, at WINDOW resolution (startup-fixed)
+  aa_mode: taa               # AA's master switch -- off | fxaa | smaa | taa. Not a boolean, but
+                             # "off" is this block's meaning of off. taa reprojects +
+                             # age-accumulates, so a still camera converges.
+
+  # =========================================================================
+  # 2. FEATURE OPTIONS -- booleans one layer below block 1. Each needs its parent
+  #    feature switched on above; on its own, none of these turns anything on.
+  # =========================================================================
+  # Shadows (need shadows_enabled)
+  soft_shadows: true         # true = Vogel-disk PCF penumbra; false = single hard depth compare
+  shadow_pcss_enabled: true # PCSS contact hardening: a blocker search drives the penumbra, sharp
+                             # at contact and widening to shadow_softness with distance. Needs
+                             # soft_shadows -- shadow_softness becomes the MAXIMUM width, not a fixed one.
+  contact_shadows_enabled: false # short screen-space march toward the sun, closing the normal-bias
+                             # gap at object bases (deferred/directional light only)
+  sdf_shadows_enabled: true  # SDFs cast shadows; independent of sdf_enabled
+  # SSR / SSGI (need ssr_enabled)
+  ssr_reflect_transparent: true # opaque surfaces also reflect transparent geometry (~2x SSR cost; needs transparency_enabled too)
+  ssr_temporal_enabled: true # accumulate the reflection across frames
+  ssgi_traced: true          # traced cosine-hemisphere bounce instead of the single normal-offset
+                             # mip tap -- directional colour bleed rather than a uniform lift
+  # SSAO (needs ssao_enabled)
+  ssao_temporal_enabled: true # accumulate the AO estimate across frames (needed for stability)
+  # Volumetrics (needs volumetrics_enabled)
+  volumetrics_shadows_enabled: true # shadow the sun in-scatter term -- this is what makes light shafts
+  # Refraction (needs refraction_enabled)
+  refraction_fresnel: true   # dim transmission at grazing angles
+  refraction_include_reflections: true # refraction samples the post-SSR image, so it sees reflections
+  # Depth of field (needs dof_enabled)
+  dof_focus_cover_object: true # object focus also fits the sharp band to the subject's depth extent
+  # Shading / sampling style
   texel_aa: true             # texel-AA texture sampling (startup-fixed): hard texels at rest,
                              # but texel boundaries blend over one screen pixel so magnified
                              # faces stop crawling under camera motion; false = raw NEAREST
   soft_lighting: true        # true = smooth Cook-Torrance; false = banded cel-shaded look
   camera_pixel_snap: false   # orthographic cameras only
-  world_ui_enabled: true     # WorldSpace canvases, at INTERNAL resolution (startup-fixed)
-  screen_ui_enabled: true    # ScreenSpaceOverlay canvases, at WINDOW resolution (startup-fixed)
-  aa_mode: taa               # off | fxaa | smaa | taa. taa reprojects + age-accumulates, so a
-                             # still camera converges (static_camera_converges guards it)
-  ssao_debug_view: false     # runtime: SSAO buffer fullscreen in place of lighting
-  dof_debug_view: false      # runtime: signed circle-of-confusion field in place of the image
-  volumetrics_debug_view: false # runtime: accumulated density alone, scene colour suppressed
+
+  # =========================================================================
+  # 3. DEBUG VIEWS -- replace the image with an intermediate buffer. All runtime.
+  # =========================================================================
+  ssao_debug_view: false     # SSAO buffer fullscreen in place of lighting
+  dof_debug_view: false      # signed circle-of-confusion field in place of the image
+  volumetrics_debug_view: false # accumulated density alone, scene colour suppressed
   debug_lines_enabled: false # physics collider/contact wireframes
 
   # =========================================================================
@@ -49,11 +83,12 @@ render:
   # sample/step counts; writing one of the covered keys explicitly (e.g.
   # shadow_pcf_samples) still overrides its preset.
   # =========================================================================
-  shadow_quality:      high  # shadow map resolutions + PCF taps
+  shadow_quality:      high  # map resolutions + PCF taps + PCSS blocker taps + contact-shadow steps
   ssao_quality:        high  # slices, march steps, pixel radius, temporal depth
-  ssr_quality:         high  # raymarch iteration budget
+  ssr_quality:         high  # specular raymarch iteration budget
+  ssgi_quality:        high  # traced-bounce iteration budget (separate chain from ssr_quality)
   dof_quality:         high  # bokeh gather taps (ultra = high: shader cap)
-  volumetrics_quality: high  # raymarch step count
+  volumetrics_quality: high  # raymarch step count + how many lights in-scatter (they multiply)
   sdf_quality:         high  # SDF march + SDF shadow-march step budgets
 
   # =========================================================================
@@ -68,7 +103,12 @@ render:
   upscale_mode: fit          # fit | integer
 
   # --- Lighting & sky ---
-  exposure: 1.0
+  exposure: 1.0              # baseline stop; auto-exposure (block 1) scales this rather than replacing it
+  auto_exposure_compensation: 1.0  # multiplier on the metered exposure
+  auto_exposure_speed_up: 3.0      # adaptation rate (1/sec) when the scene gets brighter
+  auto_exposure_speed_down: 1.0    # ...and when it gets darker (slower, as the eye is)
+  auto_exposure_min: 0.05          # clamps on the adapted multiplier
+  auto_exposure_max: 8.0
   light_bands: 4             # banded-lighting step count (soft_lighting: false only)
   spec_threshold: 0.55
   rim_strength: 0.0
@@ -85,13 +125,23 @@ render:
   shadow_softness: 0.15      # directional penumbra radius, WORLD units
   point_shadow_softness: 3.0 # point-light penumbra radius, CUBE-MAP texels
   spot_shadow_softness: 0.15 # spot penumbra radius, WORLD units (converted per pixel from light distance)
+  shadow_pcss_light_size: 0.02 # tan of the sun's angular radius; penumbra growth per metre of gap
+  shadow_pcss_search_texels: 8.0 # blocker-search radius, shadow-map texels (1..16)
+  # shadow_pcss_taps: 8      # blocker-search taps (1..16). Driven by shadow_quality (4/6/8/16);
+                             # uncomment only to override the tier. The PCSS cost dial, since
+                             # the search runs on every shadowed pixel.
+  contact_shadow_length: 0.5    # march length, world units
+  contact_shadow_strength: 1.0  # occlusion strength of a contact hit
+  contact_shadow_thickness: 0.15 # assumed occluder thickness, world units
+  # contact_shadow_steps: 8     # march steps (1..24). Driven by shadow_quality (4/6/8/16);
+                                # uncomment only to override the tier. This march is the
+                                # feature's whole cost.
 
   # --- SSAO ---
   ssao_radius: 2.0           # world-space gather radius
   ssao_bias: 0.025           # world-space normal lift before the horizon march; keep << ssao_radius
   ssao_power: 1.0            # exponent on visibility
   ssao_direct_lighting_strength: 0.25 # how much occlusion darkens DIRECT lighting; 0 = indirect only
-  ssao_temporal_enabled: true # accumulate the AO estimate across frames (needed for stability)
 
   # --- SSR + SSGI ---
   ssr_max_distance: 30.0     # world-space trace cutoff
@@ -101,13 +151,18 @@ render:
   ssr_roughness_cutoff: 1.0  # roughness above which surfaces stop tracing; 1.0 = everything traces
   ssr_start_mip: 0
   ssr_min_mip0_steps: 1
-  ssr_temporal_enabled: true
   ssr_temporal_blend: 0.85
   ssr_temporal_gamma: 2.0    # variance-clipping width (std devs) for history rejection
   ssr_blur_radius: 0.5       # world-space sigma of the spatial denoise
   ssr_jitter: 0.25           # stochastic ray jitter as a fraction of the GGX lobe cone
   ssgi_intensity: 0.6        # diffuse colour-bleed strength; 0 = specular-only SSR
-  ssgi_distance: 0.5         # world-space offset along the normal for the bounce lookup
+  ssgi_distance: 0.5         # world-space offset along the normal for the FALLBACK bounce lookup
+  ssgi_max_distance: 8.0     # world-space ray length for the traced-SSGI march
+  ssgi_blur_radius: 1.0      # world-space sigma of the bounce's spatial denoise
+  # ssgi_max_iterations: 32  # Hi-Z steps for the bounce march. Driven by ssgi_quality
+                             # (12/20/32/48); uncomment only to override the tier. Lower than
+                             # ssr_max_iterations on purpose: the bounce ray is short and lands
+                             # in a coarse mip, so it converges in fewer steps.
 
   # --- Refraction (BLEND MESH objects only) ---
   refraction_ior: 1.45       # default IOR for materials without their own (glass ~1.45, water ~1.33)
@@ -117,9 +172,7 @@ render:
   refraction_chromatic: 0.0  # RGB IOR split; 0 = single tap
   refraction_blur: 1.0       # roughness -> scene-colour mip scale (frosted glass)
   refraction_density: 1.0    # Beer-Lambert absorption strength through refraction_tint
-  refraction_fresnel: true   # dim transmission at grazing angles
   refraction_tint: [1.0, 1.0, 1.0]
-  refraction_include_reflections: true # refraction samples the post-SSR image, so it sees reflections
 
   # --- Fog (GLOBAL; local volumes are Volume components in the scene) ---
   fog_mode: 2                # 0 Linear, 1 Exponential, 2 Exp2
@@ -139,13 +192,16 @@ render:
   volumetrics_max_distance: 40.0  # distance the march stops at
   volumetrics_max_opacity: 0.85   # ceiling on how much volumetrics can occlude
   volumetrics_sun_anisotropy: 0.6 # HG g, shared across volumes
+  volumetrics_light_scatter: 1.0  # point/spot in-scatter strength; 0 disables the light loop
+  # volumetrics_max_scatter_lights: 4 # how many lights in-scatter (0..4, nearest win). Driven by
+                                  # volumetrics_quality (0/2/4/4); uncomment only to override the
+                                  # tier. Multiplies against the step count.
 
   # --- Depth of field ---
   dof_focus_mode: manual     # manual | orbit_target | object; a camera's own focus_object overrides this
   dof_focus_object: ""       # ':'-separated scene path, used when dof_focus_mode: object
   dof_focus_smoothing: 8.0   # focus-rack rate, 1/sec; <= 0 snaps
   dof_focus_range: 0.0       # metres of extra forced-sharp half-depth around the focal plane
-  dof_focus_cover_object: true # object focus also fits the sharp band to the subject's depth extent
   dof_blur_scale: 1.0        # |CoC| multiplier -- the blur-strength dial; 0 bypasses DoF
   dof_focus_distance: 8.0    # metres; used in manual mode
   dof_aperture: 2.8          # f-stop; lower = shallower depth of field
@@ -192,6 +248,8 @@ render:
 
   # --- Palette / dither ---
   palette: "assets/palettes/duel-1x.png"
+  # Colour-grading strip LUT (N*N by N, e.g. 1024x32). Empty = no grading.
+  grading_lut: ""
   dither_strength: 0.08
 
   # --- SDF capacities (startup-fixed SSBO sizing) ---

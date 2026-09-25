@@ -128,6 +128,11 @@ struct PixelRenderConfig {
      * toggle independently. The march clips to the union of the volumes' bounds, so a
      * view with no volume in it skips the march entirely.
      *
+     * With fog_enabled ALSO set, the two run as one pass: this shader applies the
+     * global fog term itself rather than reading an image FogPass wrote it into, which
+     * is where the second full-resolution HDR pass would otherwise go. See
+     * PixelRenderPipeline::fog_merged_into_volumetrics_(); the result is identical.
+     *
      * Startup-fixed, same policy as fog_enabled/bloom_enabled/dof_enabled above: the
      * pass's source image and DOF's source image are both chosen once at construction
      * from this flag's value.
@@ -160,11 +165,12 @@ struct PixelRenderConfig {
     // concrete fields by apply_quality_presets(); AppConfig::load() applies the presets
     // BEFORE parsing the per-key values, so an explicitly-written key always overrides
     // its preset. All default to High (= the shipped field defaults below).
-    RenderQuality shadow_quality      = RenderQuality::High;  /**< Sets shadow_map/cube/spot_shadow_resolution and shadow_pcf_samples. */
+    RenderQuality shadow_quality      = RenderQuality::High;  /**< Sets shadow_map/cube/spot_shadow_resolution, shadow_pcf_samples, shadow_pcss_taps and contact_shadow_steps. */
     RenderQuality ssao_quality        = RenderQuality::High;  /**< Sets ssao_slices/ssao_steps/ssao_max_radius_px/ssao_temporal_frames. */
     RenderQuality ssr_quality         = RenderQuality::High;  /**< Sets ssr_max_iterations. */
+    RenderQuality ssgi_quality        = RenderQuality::High;  /**< Sets ssgi_max_iterations. Separate from ssr_quality: the traced bounce is its own trace/resolve/denoise chain with its own budget (see ssgi_max_iterations). */
     RenderQuality dof_quality         = RenderQuality::High;  /**< Sets dof_sample_count (Ultra equals High: the gather shader clamps taps to 48). */
-    RenderQuality volumetrics_quality = RenderQuality::High;  /**< Sets volumetrics_step_count. */
+    RenderQuality volumetrics_quality = RenderQuality::High;  /**< Sets volumetrics_step_count and volumetrics_max_scatter_lights. */
     RenderQuality sdf_quality         = RenderQuality::High;  /**< Sets sdf_max_steps and sdf_shadow_max_steps. */
 
     /**
@@ -175,11 +181,13 @@ struct PixelRenderConfig {
      * table equals the fields' own defaults.
      */
     void apply_quality_presets() {
+        // shadow_pcss_taps/contact_shadow_steps only cost anything when their own feature
+        // toggle is on, so scaling them here is free for a config that leaves both off.
         switch (shadow_quality) {
-            case RenderQuality::Low:    shadow_map_resolution = 1024; cube_shadow_resolution = 256;  spot_shadow_resolution = 512;  shadow_pcf_samples = 8;  break;
-            case RenderQuality::Medium: shadow_map_resolution = 2048; cube_shadow_resolution = 512;  spot_shadow_resolution = 1024; shadow_pcf_samples = 16; break;
-            case RenderQuality::High:   shadow_map_resolution = 2048; cube_shadow_resolution = 512;  spot_shadow_resolution = 1024; shadow_pcf_samples = 24; break;
-            case RenderQuality::Ultra:  shadow_map_resolution = 4096; cube_shadow_resolution = 1024; spot_shadow_resolution = 2048; shadow_pcf_samples = 32; break;
+            case RenderQuality::Low:    shadow_map_resolution = 1024; cube_shadow_resolution = 256;  spot_shadow_resolution = 512;  shadow_pcf_samples = 8;  shadow_pcss_taps = 4;  contact_shadow_steps = 4;  break;
+            case RenderQuality::Medium: shadow_map_resolution = 2048; cube_shadow_resolution = 512;  spot_shadow_resolution = 1024; shadow_pcf_samples = 16; shadow_pcss_taps = 6;  contact_shadow_steps = 6;  break;
+            case RenderQuality::High:   shadow_map_resolution = 2048; cube_shadow_resolution = 512;  spot_shadow_resolution = 1024; shadow_pcf_samples = 24; shadow_pcss_taps = 8;  contact_shadow_steps = 8;  break;
+            case RenderQuality::Ultra:  shadow_map_resolution = 4096; cube_shadow_resolution = 1024; spot_shadow_resolution = 2048; shadow_pcf_samples = 32; shadow_pcss_taps = 16; contact_shadow_steps = 16; break;
         }
         switch (ssao_quality) {
             case RenderQuality::Low:    ssao_slices = 1; ssao_steps = 6;  ssao_max_radius_px = 32.0f; ssao_temporal_frames = 16; break;
@@ -193,17 +201,29 @@ struct PixelRenderConfig {
             case RenderQuality::High:   ssr_max_iterations = 64;  break;
             case RenderQuality::Ultra:  ssr_max_iterations = 128; break;
         }
+        // Lower across the board than ssr_quality's rows, and deliberately: the bounce ray is
+        // short and lands in a coarse cone mip, so it converges in far fewer steps. This is
+        // the single biggest cost dial the traced bounce has -- it is three full-resolution
+        // passes (trace, resolve, denoise) when ssgi_traced is on.
+        switch (ssgi_quality) {
+            case RenderQuality::Low:    ssgi_max_iterations = 12; break;
+            case RenderQuality::Medium: ssgi_max_iterations = 20; break;
+            case RenderQuality::High:   ssgi_max_iterations = 32; break;
+            case RenderQuality::Ultra:  ssgi_max_iterations = 48; break;
+        }
         switch (dof_quality) {
             case RenderQuality::Low:    dof_sample_count = 16; break;
             case RenderQuality::Medium: dof_sample_count = 32; break;
             case RenderQuality::High:   dof_sample_count = 48; break;
             case RenderQuality::Ultra:  dof_sample_count = 48; break; // dof.frag clamps taps to [8, 48]
         }
+        // The two multiply: every scatter light is evaluated at every step. Low drops the
+        // light loop entirely and keeps only the sun-shaft term, which is one shadow tap.
         switch (volumetrics_quality) {
-            case RenderQuality::Low:    volumetrics_step_count = 24; break;
-            case RenderQuality::Medium: volumetrics_step_count = 32; break;
-            case RenderQuality::High:   volumetrics_step_count = 48; break;
-            case RenderQuality::Ultra:  volumetrics_step_count = 96; break;
+            case RenderQuality::Low:    volumetrics_step_count = 24; volumetrics_max_scatter_lights = 0; break;
+            case RenderQuality::Medium: volumetrics_step_count = 32; volumetrics_max_scatter_lights = 2; break;
+            case RenderQuality::High:   volumetrics_step_count = 48; volumetrics_max_scatter_lights = 4; break;
+            case RenderQuality::Ultra:  volumetrics_step_count = 96; volumetrics_max_scatter_lights = 4; break; // 4 == MAX_SCATTER_LIGHTS
         }
         switch (sdf_quality) {
             case RenderQuality::Low:    sdf_max_steps = 32;  sdf_shadow_max_steps = 16; break;
@@ -225,6 +245,35 @@ struct PixelRenderConfig {
 
     // --- Lighting ---
     float exposure          = 1.0f;
+    /**
+     * Auto-exposure (eye adaptation): a 1x1 metering pass measures the geometric-mean
+     * luminance of the final pre-tonemap frame each frame and adapts an exposure
+     * multiplier toward it, which `exposure` above is then scaled by -- so the config
+     * value keeps its meaning as the scene's baseline stop (see ExposurePass /
+     * exposure.frag). STARTUP-FIXED: it constructs a pass and binds the stylize pass's
+     * exposure descriptor. Every tunable below it is runtime.
+     */
+    bool  auto_exposure_enabled      = false;
+    float auto_exposure_compensation = 1.0f;  /**< Multiplier on the metered exposure. */
+    float auto_exposure_speed_up     = 3.0f;  /**< Adaptation rate (1/sec) when the scene gets BRIGHTER. */
+    float auto_exposure_speed_down   = 1.0f;  /**< Adaptation rate (1/sec) when the scene gets DARKER;
+                                                lower than speed_up on purpose -- the eye darkens fast
+                                                and brightens slowly, and one symmetric rate reads wrong
+                                                in both directions. */
+    float auto_exposure_min          = 0.05f; /**< Clamps on the adapted multiplier. Keep the range
+                                                narrow enough that a dark corner can't blow the whole
+                                                frame out on approach. */
+    float auto_exposure_max          = 8.0f;
+
+    /**
+     * Colour grading through a strip LUT (N*N by N, e.g. 1024x32 -- the format an image
+     * editor or grading tool exports), applied after the tonemap and before
+     * outline/dither/palette. Empty path loads a 1x1 dummy and disables the lookup, so
+     * this costs nothing when unused. STARTUP-FIXED (the image is loaded and bound once),
+     * unlike grading_enabled, which only zeroes a push constant.
+     */
+    std::string grading_lut_path;
+    bool        grading_enabled = true; /**< Independent of grading_lut_path, so toggling off keeps the configured path. */
     float light_bands       = 4.0f;   /**< Discrete shading steps per light; <= 1 disables banding. */
     float spec_threshold    = 0.55f;  /**< Hard specular highlight cutoff. */
     float rim_strength      = 0.0f;   /**< 0 disables the rim term. */
@@ -298,6 +347,48 @@ struct PixelRenderConfig {
      */
     float    spot_shadow_softness   = 0.15f;
     uint32_t shadow_pcf_samples     = 24;    /**< Vogel disk taps for directional soft shadows; clamped to 1..32, the kernel's own hard limit. */
+    /**
+     * PCSS contact hardening for the directional shadow (Unity HDRP's "High Quality"
+     * shadow filtering): a blocker search drives the Vogel-PCF radius per pixel, so a
+     * shadow is sharp where it meets its caster and widens with occluder distance,
+     * instead of one constant `shadow_softness` width everywhere. Requires
+     * soft_shadows; `shadow_softness` becomes the penumbra's MAXIMUM. Runtime toggle
+     * (UBO fields only). Costs 8 extra depth reads per shadowed pixel, minus the
+     * fully-lit early-out on open ground.
+     */
+    bool     shadow_pcss_enabled    = false;
+    /**
+     * Sun angular size for PCSS, as tan(angular radius): the penumbra grows by this
+     * many world units per world unit of blocker-to-receiver gap. The real sun is
+     * ~0.005; stylized scenes usually want it larger. Ignored unless
+     * shadow_pcss_enabled.
+     */
+    float    shadow_pcss_light_size = 0.02f;
+    /** PCSS blocker-search radius, in shadow-map texels; clamped to 1..16. */
+    float    shadow_pcss_search_texels = 8.0f;
+    /**
+     * PCSS blocker-search tap count; clamped to 1..16. Set by `shadow_quality`. This is the
+     * dial that actually costs, and it is separate from shadow_pcf_samples: the search runs
+     * on every shadowed pixel (including the fully-lit ones it then early-outs on), while the
+     * penumbra filter only runs where blockers were found.
+     */
+    uint32_t shadow_pcss_taps       = 8;
+    /**
+     * Screen-space contact shadows (Unity HDRP's feature of the same name): a short
+     * per-pixel march through the G-buffer toward the sun, max()-combined with the
+     * shadow map's result. Catches the few-centimetre contact occlusion the
+     * normal-offset bias necessarily recedes from -- the gap at every object's base.
+     * Deferred (directional light) only. All four fields are runtime.
+     */
+    bool     contact_shadows_enabled  = false;
+    float    contact_shadow_length    = 0.5f;  /**< March length in world units. */
+    float    contact_shadow_strength  = 1.0f;  /**< Occlusion strength of a contact hit, 0..1. */
+    float    contact_shadow_thickness = 0.15f; /**< Depth tolerance in world units -- how thick a
+                                                 screen-space occluder is assumed to be behind
+                                                 its visible surface. */
+    int      contact_shadow_steps     = 8;     /**< March steps; clamped to 1..24. Set by `shadow_quality` --
+                                                 this is a per-pixel screen-space march, so the step count is
+                                                 the feature's whole cost. */
 
     // --- Outline ---
     float     outline_thickness = 1.0f;     /**< In low-resolution texels. */
@@ -371,6 +462,33 @@ struct PixelRenderConfig {
                                               GGX lobe cone; 0 reproduces the old single-ray trace. */
     float ssr_temporal_gamma   = 1.0f;  /**< Variance-clipping width for the SSR temporal resolve,
                                               in std deviations of the 3x3 neighbourhood. */
+    /**
+     * Traced SSGI: the composite's diffuse-bounce term reads a real cosine-hemisphere
+     * Hi-Z trace (ssgi.frag, one ray per pixel per frame, temporally resolved through
+     * the same variance-clipped resolve as SSR) instead of its single normal-offset
+     * mip tap -- directional colour bleed rather than a uniform lift. STARTUP-FIXED
+     * (builds a pipeline and binds the composite's u_ssgi_map descriptor); the
+     * intensity dial stays `indirect.ssgi_intensity` either way, so 0 still disables
+     * the whole term at runtime. Meaningless without ssr_enabled.
+     */
+    bool  ssgi_traced          = true;
+    float ssgi_max_distance    = 8.0f;  /**< World-space ray length for the traced-SSGI march;
+                                              the specular trace keeps its own ssr_max_distance. */
+    /**
+     * Hi-Z iteration budget for the traced-SSGI march, set by `ssgi_quality`. Its own knob
+     * rather than a share of ssr_max_iterations, because the two marches want very different
+     * budgets: an SSGI ray is short (ssgi_max_distance, ~8 m) and its hit feeds a wide
+     * cone-mip lookup, so it converges in far fewer steps than a mirror reflection running
+     * out to ssr_max_distance.
+     */
+    int   ssgi_max_iterations  = 32;
+    /**
+     * World-space sigma for the traced-SSGI spatial denoise. Wider than ssr_blur_radius
+     * on purpose: one hemisphere ray per pixel is far noisier than a near-mirror ray, and
+     * a diffuse bounce is low-frequency enough that a wide kernel costs it no real detail.
+     * Too low and the image keeps visibly settling for several frames after the camera stops.
+     */
+    float ssgi_blur_radius     = 1.0f;
 
     /**
      * Additive glow from a dedicated BloomPass pyramid (bright-pass threshold -> multi-tap
@@ -424,6 +542,30 @@ struct PixelRenderConfig {
     float volumetrics_sun_anisotropy = 0.6f;  /**< HG g; 0 isotropic, close to 1 = tight forward scatter.
                                                 Shared, not per-volume: it is a property of the light's
                                                 phase function, not of which medium a sample sits in. */
+    /**
+     * Shadow the march's sun in-scatter term with the directional shadow map (one
+     * hardware-PCF tap per step), producing visible light shafts where geometry
+     * occludes a volume. A RUNTIME toggle -- it only gates a UBO flag; the shadow
+     * maps themselves are always bound (VolumetricsPass::set_shadow_images). The
+     * GLOBAL fog term stays analytic and unshadowed by design: it has no march to
+     * sample along, so god rays are a volumetrics feature, not a fog one.
+     */
+    bool  volumetrics_shadows_enabled = true;
+    /**
+     * Strength of point/spot light in-scatter into local volumes (the closest
+     * MAX_SCATTER_LIGHTS lights are fed to the march each frame); 0 skips the
+     * per-step light loop entirely. Each volume's own `sun_amount` scales its
+     * response to these lights exactly as it scales its response to the sun.
+     */
+    float volumetrics_light_scatter  = 1.0f;
+    /**
+     * How many point/spot lights may in-scatter into the march, set by
+     * `volumetrics_quality` and capped at MAX_SCATTER_LIGHTS (4). The nearest to the camera
+     * win. This multiplies against volumetrics_step_count -- every light is evaluated at
+     * every step of every pixel -- so it is the second real cost dial of the pass, and 0
+     * leaves the (much cheaper) sun-shaft term running on its own.
+     */
+    int   volumetrics_max_scatter_lights = 4;
     bool  volumetrics_debug_view     = false; /**< Output accumulated density alone, scene colour suppressed. */
 
     /**

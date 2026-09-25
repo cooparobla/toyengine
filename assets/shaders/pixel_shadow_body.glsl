@@ -16,10 +16,14 @@
 //                             spot_light_space_matrix -- see light_data.h's C++ doc
 //                             for the packing of these).
 //   - `dir_shadow_map`    -- sampler2DShadow.
+//   - `dir_shadow_map_raw`-- sampler2D: the SAME directional map bound a second
+//                            time through a plain nearest sampler, for the PCSS
+//                            blocker search (a compare sampler cannot return the
+//                            stored depth the search averages).
 //   - `point_shadow_map`  -- samplerCubeShadow.
 //   - `spot_shadow_map`   -- sampler2DShadow.
 //   - #include <gfx/shadow_sampling.glsl> (for gfx_shadow_dir_hard/_pcf_vogel,
-//     gfx_shadow_cube_hard/_pcf_vogel, gfx_ign_angle).
+//     gfx_shadow_dir_pcss, gfx_shadow_cube_hard/_pcf_vogel, gfx_ign_angle).
 
 // Directional shadow: hard compare when dir_shadow_params.y (PCF radius in shadow-map
 // texels) is 0, else a rotated Vogel-disk PCF penumbra -- see
@@ -50,9 +54,19 @@ float calc_dir_shadow(vec4 light_space_pos, vec3 N, vec3 L) {
         // gives TAA's history buffer a genuinely different sample set to average in over
         // time -- the same golden-angle trick ssao.frag's noise_rotation already uses.
         float angle = gfx_ign_angle(gl_FragCoord.xy) + lights.dir_shadow_extra.w * 2.39996323;
-        vec2 texel_size = radius_texels / textureSize(dir_shadow_map, 0);
-        shadow = gfx_shadow_dir_pcf_vogel(dir_shadow_map, proj_coords, bias, texel_size,
-                                          angle, int(lights.dir_shadow_extra.z));
+        if (lights.pcss_params.x > 0.5) {
+            // PCSS contact hardening: the constant radius above becomes the penumbra's
+            // MAX; the blocker search shrinks it toward the contact point. See
+            // gfx_shadow_dir_pcss's doc for the directional (linear-in-gap) penumbra model.
+            shadow = gfx_shadow_dir_pcss(dir_shadow_map, dir_shadow_map_raw, proj_coords, bias,
+                                         lights.pcss_params.y, lights.pcss_params.z,
+                                         radius_texels, angle, int(lights.dir_shadow_extra.z),
+                                         int(lights.pcss_params.w));
+        } else {
+            vec2 texel_size = radius_texels / textureSize(dir_shadow_map, 0);
+            shadow = gfx_shadow_dir_pcf_vogel(dir_shadow_map, proj_coords, bias, texel_size,
+                                              angle, int(lights.dir_shadow_extra.z));
+        }
     }
     // Per-light darkness (DirectionalLightComponent::shadow_intensity), applied HERE
     // rather than at each (1.0 - shadow) call site, so every shading path inherits it

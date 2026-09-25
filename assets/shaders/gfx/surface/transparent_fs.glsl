@@ -61,6 +61,12 @@ layout(set = 1, binding = 0) uniform LightUBO {
     mat4 spot_light_space_matrix;
     vec4 spot_shadow_params; // x=bias, y=penumbra scale K, texels*distance (0=hard; see calc_spot_shadow), z=shadow_enabled, w=normal_bias
     SpotLight spot_lights[8];
+
+    // Appended after spot_lights per light_data.h's append-only rule.
+    vec4 pcss_params;    // x=enabled, y=penumbra texels per unit depth gap,
+                         // z=blocker search radius texels (see calc_dir_shadow)
+    vec4 contact_params; // x=strength (0 disables), y=length m, z=thickness m,
+                         // w=steps -- read only by pixel_lighting.frag's contact march
 } lights;
 
 // Set 2: Shadow maps -- one directional map, one point cube map, one spot map
@@ -70,6 +76,9 @@ layout(set = 1, binding = 0) uniform LightUBO {
 layout(set = 2, binding = 0) uniform sampler2DShadow dir_shadow_map;
 layout(set = 2, binding = 1) uniform samplerCubeShadow point_shadow_map;
 layout(set = 2, binding = 2) uniform sampler2DShadow spot_shadow_map;
+// The directional map AGAIN, through a plain nearest sampler: PCSS's blocker
+// search needs stored depths, which a compare sampler cannot return.
+layout(set = 2, binding = 3) uniform sampler2D dir_shadow_map_raw;
 
 // Sets 3/4/5: ssr_pass_'s own trace-input sets (see pixel_render_pipeline.h's
 // transparent_extra ExtraSets), the same three sets ssr.frag itself binds at 1/2/3 --

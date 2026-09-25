@@ -878,6 +878,7 @@ private:
             std::string(PROJ_DIR) + "/uicoopa/assets/shaders",
         });
         if (!rc.palette_path.empty()) rc.palette_path = resolve_path_(rc.palette_path);
+        if (!rc.grading_lut_path.empty()) rc.grading_lut_path = resolve_path_(rc.grading_lut_path);
 
         // Derived surface shaders this app ships -- see gfx/surface/*.glsl. A scene material
         // opts in via `shader: <name>` (see PBRMaterial::shader); a material that never sets it

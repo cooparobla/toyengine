@@ -35,6 +35,10 @@
 #include <gfx/indirect_specular.glsl>
 #include <gfx/ao_composite.glsl>
 #include <gfx/spot_light.glsl>
+// Pure-function header (declares no uniforms or samplers), for the contact-shadow
+// march below: ssr_texel_world_size() sizes its bias to a screen texel, and
+// ssr_ndc_to_uv() is the same NDC->G-buffer mapping the SSR trace uses.
+#include <gfx/ssr_common.glsl>
 
 layout(location = 0) in vec2 in_uv;
 
@@ -73,6 +77,12 @@ layout(set = 1, binding = 0) uniform LightUBO {
     mat4 spot_light_space_matrix;
     vec4 spot_shadow_params; // x=bias, y=penumbra scale K, texels*distance (0=hard; see calc_spot_shadow), z=shadow_enabled, w=normal_bias
     SpotLight spot_lights[8];
+
+    // Appended after spot_lights per light_data.h's append-only rule.
+    vec4 pcss_params;    // x=enabled, y=penumbra texels per unit depth gap,
+                         // z=blocker search radius texels (see calc_dir_shadow)
+    vec4 contact_params; // x=strength (0 disables), y=length m, z=thickness m,
+                         // w=steps -- read only by pixel_lighting.frag's contact march
 } lights;
 
 // Set 2: Shadow maps -- toyengine has exactly one directional map, one point
@@ -84,6 +94,9 @@ layout(set = 1, binding = 0) uniform LightUBO {
 layout(set = 2, binding = 0) uniform sampler2DShadow dir_shadow_map;
 layout(set = 2, binding = 1) uniform samplerCubeShadow point_shadow_map;
 layout(set = 2, binding = 2) uniform sampler2DShadow spot_shadow_map;
+// The directional map AGAIN, through a plain nearest sampler: PCSS's blocker
+// search needs stored depths, which a compare sampler cannot return.
+layout(set = 2, binding = 3) uniform sampler2D dir_shadow_map_raw;
 
 // Set 3: G-Buffer textures + screen-space AO
 layout(set = 3, binding = 0) uniform sampler2D g_albedo_ao;          // RGB = Albedo, A = AO
@@ -182,6 +195,115 @@ void main() {
         vec3 biased_pos = world_pos + N * (lights.dir_shadow_params.w * (0.5 + 0.5 * normal_bias_scale));
         vec4 light_space_pos = lights.dir_light_space_matrix * vec4(biased_pos, 1.0);
         float shadow = calc_dir_shadow(light_space_pos, N, L);
+
+        // Screen-space contact shadows (HDRP's own feature of that name): a short
+        // G-buffer march from the surface toward the light, catching the
+        // small-scale occlusion the shadow map's normal-offset bias necessarily
+        // recedes from (see PixelRenderConfig::shadow_normal_bias's ~2% trade).
+        // max()-combined with the map's result so each technique only ever ADDS
+        // occlusion the other missed; scaled by the same per-light darkness
+        // calc_dir_shadow applies (dir_shadow_extra.x).
+        //
+        // The estimator is deliberately SMOOTH and DETERMINISTIC. A binary hit/miss
+        // with a per-pixel random start makes neighbouring pixels disagree about the
+        // same surface, and with nothing downstream to average them (unlike the
+        // traced SSGI, which has its own denoise) that reads as salt-and-pepper
+        // grain over every lit face. Here each sample contributes a soft occlusion,
+        // the strongest one wins, and three fades take the result to zero wherever
+        // the march is least trustworthy.
+        if (lights.contact_params.x > 0.0 && lights.dir_shadow_params.z > 0.5 &&
+            shadow < lights.dir_shadow_extra.x) {
+            float ndl = dot(N, L);
+            // Grazing fade: as N.L -> 0 the ray travels nearly parallel to the surface
+            // it started from, so every depth comparison is against that same surface.
+            float graze = smoothstep(0.0, 0.15, ndl);
+            if (graze > 0.0) {
+                ivec2 gsize    = textureSize(g_position_roughness, 0);
+                float view_z   = (camera.view * vec4(world_pos, 1.0)).z;
+                float px_world = ssr_texel_world_size(view_z, abs(camera.proj[1][1]),
+                                                      float(gsize.y));
+
+                // Start offset sized to the receiver's own screen texel, so the first
+                // sample always clears the surface it came from. The fixed constant this
+                // replaces was smaller than a texel at any real distance, which is what
+                // made whole faces darken with false self-occlusion. Divided by N.L
+                // because a grazing ray must travel further to gain the same height off
+                // its surface, and floored for the near plane where px_world -> 0 (the
+                // same floor, for the same reason, as gfx/ssr_trace_body.glsl's).
+                float bias = max(px_world * 2.0 / max(ndl, 0.15), 0.002);
+
+                // Clamp the march's SCREEN extent. A fixed world length spans hundreds of
+                // texels up close (so the samples straddle them and step over thin
+                // occluders) and less than one at range (so every sample lands in the same
+                // texel and the whole march is wasted). 64 px is the same order as SSAO's
+                // own ssao_max_radius_px cap.
+                float ray_len = min(lights.contact_params.y, px_world * 64.0);
+
+                int   steps      = int(max(lights.contact_params.w, 1.0));
+                float thickness  = max(lights.contact_params.z, 1e-4);
+                float depth_eps  = max(px_world, 0.002);  // depth-precision floor
+                float occ = 0.0;
+
+                // March in VIEW space: the ray is a straight line there too, so stepping
+                // it directly costs one mat4 multiply per sample instead of two (the
+                // world->view transform of the ray point disappears, and its view z --
+                // which the depth compare needs -- falls out for free).
+                vec3 view_o = (camera.view * vec4(world_pos, 1.0)).xyz;
+                vec3 view_L = mat3(camera.view) * L;
+
+                for (int s = 0; s < steps; ++s) {
+                    // Quadratic spacing concentrates samples near the contact point --
+                    // where this effect lives -- and spends least on the far end, where
+                    // screen-space data is least reliable.
+                    float f = (float(s) + 1.0) / float(steps);
+                    float t = ray_len * f * f;
+                    vec3  p_view = view_o + view_L * (t + bias);
+
+                    vec4 clip = camera.proj * vec4(p_view, 1.0);
+                    if (clip.w <= 0.0) break;
+                    vec2 uv = ssr_ndc_to_uv(clip.xy / clip.w);
+
+                    // texelFetch, NOT texture(): this set binds the G-buffer through a
+                    // LINEAR sampler (harmless for the lighting pass's own texel-centred
+                    // reads, where linear == nearest), but a march samples at arbitrary
+                    // UVs, and there bilinear filtering blends world positions ACROSS
+                    // silhouette edges into positions that exist on no real surface. It
+                    // also makes the result wobble with TAA's sub-pixel jitter, since the
+                    // blend weights shift every frame. The G-buffer is discrete per-pixel
+                    // data; fetch the texel. (SsrPass keeps a whole separate nearest
+                    // sampler for exactly this reason.)
+                    ivec2 px = clamp(ivec2(uv * vec2(gsize)), ivec2(0), gsize - 1);
+                    vec3 vis_pos = texelFetch(g_position_roughness, px, 0).rgb;
+                    if (dot(vis_pos, vis_pos) < 1e-6) continue;  // sky: no occluder there
+
+                    // RH view space looks down -Z, so a NEARER surface has the larger z.
+                    float ahead = (camera.view * vec4(vis_pos, 1.0)).z - p_view.z;
+
+                    // Soft acceptance: occlusion ramps in once the ray is meaningfully
+                    // behind the visible surface, and back out again as the gap exceeds
+                    // the assumed occluder thickness (beyond that the "occluder" is just
+                    // distant background that happens to be in the way on screen). A hard
+                    // in/out test here is the other half of what made this grainy.
+                    float hit = smoothstep(depth_eps, depth_eps + thickness * 0.5, ahead)
+                              * (1.0 - smoothstep(thickness, thickness * 2.0, ahead));
+
+                    // Fade with distance along the ray, and toward the screen edge where
+                    // the sample may have left the G-buffer entirely -- the same edge ramp
+                    // gfx/ssr_trace_body.glsl uses, so leaving the screen fades rather
+                    // than cutting off at a hard seam.
+                    vec2 e = smoothstep(vec2(0.0), vec2(0.08), uv)
+                           * smoothstep(vec2(1.0), vec2(0.92), uv);
+                    hit *= (1.0 - smoothstep(0.6, 1.0, f)) * e.x * e.y;
+
+                    // MAX, not a sum: one occluder must not darken more for being sampled
+                    // several times along the ray.
+                    occ = max(occ, hit);
+                }
+
+                shadow = max(shadow,
+                             occ * graze * lights.contact_params.x * lights.dir_shadow_extra.x);
+            }
+        }
 
         Lo += shade_light(N, V, L, radiance, albedo, metallic, roughness, F0, shadow);
     }

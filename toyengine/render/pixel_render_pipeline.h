@@ -118,6 +118,8 @@
 #include <toyengine/render/forward_globals.h>
 #include <gfxcoopa/engine/util/material_texture_cache.h>
 #include <gfxcoopa/engine/data/palette_lut.h>
+#include <gfxcoopa/engine/data/grading_lut.h>
+#include <gfxcoopa/engine/passes/exposure_pass.h>
 #include <gfxcoopa/engine/passes/deferred_lighting_pass.h>
 #include <gfxcoopa/engine/passes/ssr_pass.h>
 #include <toyengine/render/passes/fullscreen_blit_pass.h>
@@ -184,6 +186,7 @@ public:
           shadow_target_(device, allocator, config_.shadow_map_resolution, config_.cube_shadow_resolution,
                         config_.spot_shadow_resolution),
           palette_lut_(coopa::gfx::engine::data::PaletteLut::load(device, allocator, cmd_pool, config_.palette_path)),
+          grading_lut_(coopa::gfx::engine::data::GradingLut::load(device, allocator, cmd_pool, config_.grading_lut_path)),
           instance_stream_(device, allocator),
           forward_globals_(device, allocator),
           sdf_data_(device, allocator, config_.sdf_max_renderers, config_.sdf_max_shapes)
@@ -360,6 +363,7 @@ public:
         TOY_KEEP_STARTUP_FIXED(dof_enabled);
         TOY_KEEP_STARTUP_FIXED(tilt_shift_enabled);
         TOY_KEEP_STARTUP_FIXED(ssr_enabled);
+        TOY_KEEP_STARTUP_FIXED(ssgi_traced);
         TOY_KEEP_STARTUP_FIXED(ssao_enabled);
         TOY_KEEP_STARTUP_FIXED(transparency_enabled);
         TOY_KEEP_STARTUP_FIXED(refraction_enabled);
@@ -377,6 +381,8 @@ public:
         TOY_KEEP_STARTUP_FIXED(sdf_max_renderers);
         TOY_KEEP_STARTUP_FIXED(sdf_max_shapes);
         TOY_KEEP_STARTUP_FIXED(palette_path);
+        TOY_KEEP_STARTUP_FIXED(grading_lut_path);
+        TOY_KEEP_STARTUP_FIXED(auto_exposure_enabled);
         // sdf_enabled and shadows_enabled are deliberately absent: both are read fresh
         // every frame (the SDF gather, and the two cast_*_shadow flags), so they apply
         // at runtime like any other tunable.
@@ -707,6 +713,7 @@ private:
                 .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
                 .combined_sampler(1, coopa::gfx::ShaderStage::Fragment)
                 .combined_sampler(2, coopa::gfx::ShaderStage::Fragment)
+                .combined_sampler(3, coopa::gfx::ShaderStage::Fragment)
                 .build(device_));
         shadow_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
             coopa::gfx::pipeline::DescriptorPoolBuilder().add_sets(*shadow_layout_, 1).build(device_));
@@ -714,6 +721,10 @@ private:
         shadow_set_->bind_image(0, shadow_target_.dir_shadow_view(), shadow_sampler_.handle());
         shadow_set_->bind_image(1, shadow_target_.cube_shadow_view(), shadow_sampler_.handle());
         shadow_set_->bind_image(2, shadow_target_.spot_shadow_view(), shadow_sampler_.handle());
+        // Binding 3: the directional map AGAIN, through a plain nearest sampler --
+        // PCSS's blocker search reads stored depths, which the compare sampler at
+        // binding 0 cannot return (see gfx_shadow_dir_pcss).
+        shadow_set_->bind_image(3, shadow_target_.dir_shadow_view(), nearest_sampler_.handle());
     }
     /**
      * @brief Builds the material texture cache and the shadow/G-buffer pipelines, plus one named
@@ -910,7 +921,11 @@ private:
             // boundaries that temporal accumulation alone doesn't fully resolve, especially
             // under continuous camera motion (this scene's auto-rotating orbit camera).
             config_.shaders("fullscreen.vert"),
-            config_.shaders("ssr_blur.frag"));
+            config_.shaders("ssr_blur.frag"),
+            // Traced-SSGI stage (see ssgi.frag / the ctor's ssgi_frag_spv doc):
+            // startup-fixed on config_.ssgi_traced, since it constructs a pipeline and
+            // binds the composite's u_ssgi_map descriptor.
+            config_.ssgi_traced ? config_.shaders("ssgi.frag") : std::string{});
         ssr_pass_->update_descriptors(
             gbuffer_target_, hiz_pass_->full_hiz_view_typed(), hiz_pass_->sampler(),
             scene_color_mip_pass_->full_view_typed(), scene_color_mip_pass_->sampler(),
@@ -1094,8 +1109,15 @@ private:
         // to the pre-fog source. A separate link rather than folding wind into the
         // expression below, so wind works with fog DISABLED -- the two effects are
         // independent toggles. Startup-fixed, exactly like pre_fog_view_typed_ above.
+        // MERGED fog+volumetrics: when both are on, volumetrics_pass_ applies the global
+        // fog term itself (gfx_fog_apply, the same call fog.frag makes) over the pre-fog
+        // image, and fog_pass_ never draws -- saving one full-resolution HDR pass and its
+        // target's worth of bandwidth every frame. Startup-fixed like the views it feeds,
+        // since both toggles already are; record_post_chain_() and
+        // update_volumetrics_data_() both re-derive it from the same two flags.
         coopa::gfx::TextureView pre_volumetrics_view =
-            config_.fog_enabled ? fog_target_.color_view_typed() : pre_fog_view_typed_;
+            (config_.fog_enabled && !fog_merged_into_volumetrics_())
+                ? fog_target_.color_view_typed() : pre_fog_view_typed_;
 
         // Volumetric wind -- always constructed (same always-on-but-runtime-gated policy as
         // fog_pass_ above); render() checks config_.volumetrics_enabled per frame. Where fog
@@ -1104,10 +1126,18 @@ private:
         // air rather than haze (see gfx/volumetrics.glsl's header for the three ideas involved).
         volumetrics_pass_ = std::make_unique<coopa::gfx::engine::passes::VolumetricsPass>(
             device_, volumetrics_target_.render_pass_object(), volumetrics_data_.buffer(),
+            fog_data_.buffer(),
             config_.shaders("fullscreen.vert"),
             config_.shaders("volumetrics.frag"));
         volumetrics_pass_->set_source_images(pre_volumetrics_view, gbuffer_target_.g1_view_typed(),
                                       gbuffer_target_.g2_view_typed(), linear_sampler_);
+        // Shadow maps for the march's in-scatter terms (light shafts) -- same images and
+        // compare sampler shadow_set_ binds for the lighting pass, bound once here under
+        // the same construction-time rule. Whether they are actually sampled is the
+        // RUNTIME volumetrics_shadows_enabled flag, routed through the volumetrics UBO's
+        // shadow_params (see update_volumetrics_data_).
+        volumetrics_pass_->set_shadow_images(shadow_target_.dir_shadow_view_typed(),
+                                             shadow_target_.spot_shadow_view_typed(), shadow_sampler_);
 
         // What DOF reads: the final pre-tonemap HDR frame, before any lens effect. Sourcing the
         // full chain here (rather than the pre-SSR image) is what puts SSR reflections, BLEND
@@ -1146,6 +1176,20 @@ private:
             config_.shaders("bloom_downsample.frag"),
             config_.shaders("bloom_upsample.frag"));
 
+        // Auto-exposure meters the SAME image the stylize pass tonemaps (post_source_view),
+        // so the adaptation is measured against exactly what the viewer ends up seeing --
+        // metering the pre-DOF/pre-bloom image instead would chase a brightness the final
+        // frame never has. Constructed only when enabled: the pass owns two targets, and
+        // an unexecuted target would leave binding 5 on an image in UNDEFINED layout (the
+        // same rule bloom_pass_'s binding documents just above).
+        if (config_.auto_exposure_enabled) {
+            exposure_pass_ = std::make_unique<coopa::gfx::engine::passes::ExposurePass>(
+                device_, allocator_,
+                config_.shaders("fullscreen.vert"),
+                config_.shaders("exposure.frag"));
+            exposure_pass_->set_source_image(post_source_view);
+        }
+
         pixel_stylize_pass_ = std::make_unique<coopa::gfx::engine::passes::PixelStylizePass>(
             device_, post_target_.render_pass_object(),
             config_.shaders("fullscreen.vert"),
@@ -1159,7 +1203,14 @@ private:
             gbuffer_target_.depth_view_typed(), gbuffer_target_.g1_view_typed(),
             palette_lut_.view_typed(), linear_sampler_, nearest_sampler_,
             config_.bloom_enabled ? bloom_pass_->result_view_typed() : coopa::gfx::TextureView{},
-            config_.bloom_enabled ? &linear_sampler_ : nullptr);
+            config_.bloom_enabled ? &linear_sampler_ : nullptr,
+            // Same conditional-binding rule as bloom above, for the same reason.
+            exposure_pass_ ? exposure_pass_->output_view_typed() : coopa::gfx::TextureView{},
+            exposure_pass_ ? &exposure_pass_->sampler() : nullptr,
+            // The grading LUT is always a valid texture (a 1x1 dummy when no path is
+            // configured), so unlike the two above it binds unconditionally -- grading_size
+            // 0 is what disables the lookup.
+            grading_lut_.view_typed(), &grading_lut_.sampler_object());
 
         // Anti-aliasing. Conditionally constructed, unlike the passes above: aa_mode == "off"
         // must allocate nothing and leave every downstream binding as it was, so the mode is
@@ -1533,6 +1584,9 @@ private:
             ssr_params.sky_intensity     = config_.indirect.sky_intensity;
             ssr_params.ssgi_intensity    = config_.indirect.ssgi_intensity;
             ssr_params.ssgi_distance     = config_.indirect.ssgi_distance;
+            ssr_params.ssgi_max_distance   = config_.ssgi_max_distance;
+            ssr_params.ssgi_blur_radius    = config_.ssgi_blur_radius;
+            ssr_params.ssgi_max_iterations = config_.ssgi_max_iterations;
             ssr_params.sky_zenith        = config_.indirect.sky_zenith;
             ssr_params.sky_horizon       = config_.indirect.sky_horizon;
             ssr_params.sky_ground        = config_.indirect.sky_ground;
@@ -1608,7 +1662,9 @@ private:
         // in place into the same image), and before pixel_stylize_pass_, so fog sits in linear HDR
         // ahead of tonemap/outline/dither/palette. Gated on the startup-fixed flag both this pass's
         // source and pixel_stylize_pass_'s were chosen from.
-        if (config_.fog_enabled) {
+        // Skipped entirely on the merged path, where volumetrics_pass_ applies the same
+        // global fog term itself -- see fog_merged_into_volumetrics_().
+        if (config_.fog_enabled && !fog_merged_into_volumetrics_()) {
             fog_target_.begin(cmd);
             fog_pass_->draw(cmd, render_extent_.width, render_extent_.height);
             fog_target_.end(cmd);
@@ -1674,6 +1730,23 @@ private:
             bloom_pass_->execute(cmd, bloom_params);
         }
 
+        // Auto-exposure metering. Alongside the bloom pyramid rather than inside
+        // post_target_'s bracket: it writes its own 1x1 target, and it must read the
+        // same post_source_view image the stylize draw below tonemaps. The value it
+        // produces is consumed NEXT frame (this frame's stylize draw was already
+        // recorded against whatever the last execute() left in binding 5) -- one frame
+        // of lag on a multi-hundred-millisecond adaptation ramp is not observable.
+        if (exposure_pass_) {
+            coopa::gfx::engine::passes::ExposurePass::PushConstants exposure_pc{};
+            exposure_pc.dt           = frame_dt_;
+            exposure_pc.speed_up     = config_.auto_exposure_speed_up;
+            exposure_pc.speed_down   = config_.auto_exposure_speed_down;
+            exposure_pc.compensation = config_.auto_exposure_compensation;
+            exposure_pc.min_exposure = config_.auto_exposure_min;
+            exposure_pc.max_exposure = config_.auto_exposure_max;
+            exposure_pass_->execute(cmd, exposure_pc);
+        }
+
         post_target_.begin(cmd);
         coopa::gfx::engine::passes::PixelStylizePass::PushConstants post_pc;
         post_pc.outline_color    = config_.outline_color;
@@ -1690,6 +1763,9 @@ private:
         // keeps pixel_stylize.frag's tonemap step live (see PushConstants::exposure's doc).
         post_pc.exposure         = config_.exposure;
         post_pc.bloom_intensity  = config_.bloom_enabled ? config_.bloom_intensity : 0.0f;
+        post_pc.auto_exposure    = exposure_pass_ ? 1.0f : 0.0f;
+        post_pc.grading_size     = config_.grading_enabled
+            ? static_cast<float>(grading_lut_.size()) : 0.0f;
         pixel_stylize_pass_->draw(cmd, post_pc, render_extent_.width, render_extent_.height);
         if (config_.debug_lines_enabled) {
             debug_line_pass_->draw(cmd, ctx.proj * ctx.view,
@@ -2395,6 +2471,83 @@ private:
                                             vc->sun_amount, vc->falloff, 0.0f);
         }
 
+        // Shadowing + local-light in-scatter (light shafts). Sourced from this frame's
+        // already-populated LightUBO slot rather than re-gathered from the scene, so the
+        // march's lights and shadow matrices byte-match the surface lighting's -- render()
+        // calls this after update_lights_()/update_dir_shadow_matrix_()/
+        // update_spot_shadow_matrix_() have all written the current slot.
+        const auto& lubo = current_light_data();
+        vol.dir_light_space_matrix  = lubo.dir_light_space_matrix;
+        vol.spot_light_space_matrix = lubo.spot_light_space_matrix;
+        const bool dir_shadowed = config_.volumetrics_shadows_enabled &&
+                                  lubo.dir_shadow_params.z > 0.5f;
+        vol.shadow_params = glm::vec4(dir_shadowed ? 1.0f : 0.0f,
+                                      glm::clamp(lubo.dir_shadow_extra.x, 0.0f, 1.0f),
+                                      config_.shadow_bias, config_.shadow_bias);
+
+        // Nearest-to-camera selection: MAX_SCATTER_LIGHTS slots, each costing one
+        // falloff evaluation per march step per pixel, go to the lights closest to
+        // the camera -- the ones whose in-scatter is most likely to be visible.
+        struct ScatterCandidate { float dist2; uint32_t index; bool spot; };
+        ScatterCandidate cands[coopa::gfx::engine::data::MAX_POINT_LIGHTS +
+                               coopa::gfx::engine::data::MAX_SPOT_LIGHTS];
+        uint32_t cand_count = 0;
+        const uint32_t n_points = std::min(lubo.light_counts.y,
+                                           coopa::gfx::engine::data::MAX_POINT_LIGHTS);
+        for (uint32_t i = 0; i < n_points; ++i) {
+            const auto& pl = lubo.point_lights[i];
+            if (pl.color_intensity.w <= 0.0f || pl.position_range.w <= 0.0f) continue;
+            const glm::vec3 d = glm::vec3(pl.position_range) - cam_pos;
+            cands[cand_count++] = {glm::dot(d, d), i, false};
+        }
+        const uint32_t n_spots = std::min(lubo.light_counts.z,
+                                          coopa::gfx::engine::data::MAX_SPOT_LIGHTS);
+        for (uint32_t i = 0; i < n_spots; ++i) {
+            const auto& sl = lubo.spot_lights[i];
+            if (sl.color_intensity.w <= 0.0f || sl.position_range.w <= 0.0f) continue;
+            const glm::vec3 d = glm::vec3(sl.position_range) - cam_pos;
+            cands[cand_count++] = {glm::dot(d, d), i, true};
+        }
+
+        // volumetrics_max_scatter_lights (the volumetrics_quality dial) caps this below the
+        // buffer's own MAX_SCATTER_LIGHTS -- every light here is evaluated at every march
+        // step of every pixel, so it multiplies against volumetrics_step_count.
+        const uint32_t scatter_budget = std::min<uint32_t>(
+            static_cast<uint32_t>(std::max(config_.volumetrics_max_scatter_lights, 0)),
+            coopa::gfx::engine::data::MAX_SCATTER_LIGHTS);
+        const uint32_t scatter_count = std::min(cand_count, scatter_budget);
+        std::partial_sort(cands, cands + scatter_count, cands + cand_count,
+                          [](const ScatterCandidate& a, const ScatterCandidate& b) {
+                              return a.dist2 < b.dist2;
+                          });
+        const bool spot_shadowed = config_.volumetrics_shadows_enabled &&
+                                   lubo.spot_shadow_params.z > 0.5f;
+        for (uint32_t k = 0; k < scatter_count; ++k) {
+            auto& dst = vol.scatter_lights[k];
+            if (cands[k].spot) {
+                const auto& sl = lubo.spot_lights[cands[k].index];
+                dst.position_range  = sl.position_range;
+                dst.color_intensity = sl.color_intensity;
+                dst.direction_cone  = sl.direction_cone;
+                dst.params = glm::vec4(sl.params.x, sl.params.y, 1.0f,
+                                       (spot_shadowed && cands[k].index == lubo.light_counts.w)
+                                           ? 1.0f : 0.0f);
+            } else {
+                const auto& pl = lubo.point_lights[cands[k].index];
+                dst.position_range  = pl.position_range;
+                dst.color_intensity = pl.color_intensity;
+                dst.direction_cone  = glm::vec4(0.0f);
+                dst.params = glm::vec4(pl.attenuation.x, 0.0f, 0.0f, 0.0f);
+            }
+        }
+        vol.counts.y = static_cast<float>(scatter_count);
+        vol.counts.z = glm::max(config_.volumetrics_light_scatter, 0.0f);
+        // Merged path: the march applies the global fog term itself and fog_pass_ never
+        // draws (see fog_merged_into_volumetrics_()). update_fog_data_() has already run
+        // this frame -- render() calls it whenever fog_enabled, which the merge requires --
+        // so the fog UBO this flag sends the shader to read is current.
+        vol.counts.w = fog_merged_into_volumetrics_() ? 1.0f : 0.0f;
+
         volumetrics_data_.upload();
 
     }
@@ -2706,6 +2859,16 @@ private:
             static_cast<float>(std::clamp<uint32_t>(config_.shadow_pcf_samples, 1u, 32u)),
             static_cast<float>(frame_index_ & 0xFFu));
 
+        // Screen-space contact shadows (pixel_lighting.frag's directional block).
+        // Written unconditionally, same policy as dir_shadow_extra above; .x = 0
+        // disables the march outright.
+        ubo.contact_params = glm::vec4(
+            config_.contact_shadows_enabled
+                ? glm::clamp(config_.contact_shadow_strength, 0.0f, 1.0f) : 0.0f,
+            glm::max(config_.contact_shadow_length, 0.0f),
+            glm::max(config_.contact_shadow_thickness, 0.01f),
+            static_cast<float>(std::clamp(config_.contact_shadow_steps, 1, 24)));
+
         auto points = scene.get_components<PointLightComponent>();
         uint32_t count = std::min<uint32_t>(static_cast<uint32_t>(points.size()), coopa::gfx::engine::data::MAX_POINT_LIGHTS);
         ubo.light_counts.y = count;
@@ -2792,6 +2955,39 @@ private:
             config_.shadow_bias, dir_pcf_radius_texels, cast_dir_shadow ? 1.0f : 0.0f,
             compute_shadow_normal_bias(dir_pcf_radius_texels, config_.shadow_normal_bias,
                                        fit.texel_world));
+
+        // PCSS contact hardening (gfx_shadow_dir_pcss). .y folds the whole penumbra
+        // conversion into one factor: a stored-vs-receiver gap of `g` in [0,1]
+        // light-space depth spans g * depth_range_world metres, and a sun of angular
+        // size shadow_pcss_light_size grows the penumbra by that many metres * size --
+        // divided by texel_world to land in shadow-map texels, the unit
+        // gfx_shadow_dir_pcf_vogel wants. Requires the soft path (radius > 0): the
+        // constant radius above becomes PCSS's maximum, so shadow_softness keeps its
+        // role as the artist's width dial.
+        const bool pcss_on = config_.shadow_pcss_enabled && dir_pcf_radius_texels > 0.0f;
+        ubo.pcss_params = glm::vec4(
+            pcss_on ? 1.0f : 0.0f,
+            fit.depth_range_world * config_.shadow_pcss_light_size /
+                std::max(fit.texel_world, 1e-6f),
+            glm::clamp(config_.shadow_pcss_search_texels, 1.0f, 16.0f),
+            static_cast<float>(std::clamp<uint32_t>(config_.shadow_pcss_taps, 1u, 16u)));
+    }
+
+    /**
+     * @brief True when the global fog term is applied by volumetrics_pass_'s march
+     *        rather than by a separate fog_pass_ draw.
+     *
+     * Both effects are fullscreen passes over the whole HDR frame, and the second reads
+     * exactly what the first wrote -- so with both enabled the pair costs two full-resolution
+     * HDR passes to produce a result one pass can compute. The march applies fog to its
+     * scene-colour sample before marching, which is arithmetically identical to the two-pass
+     * order, through the same gfx_fog_apply() call fog.frag makes (see its doc).
+     *
+     * Derived, not stored: both inputs are startup-fixed, so every caller re-deriving it
+     * agrees by construction, and there is no second copy to keep in sync.
+     */
+    bool fog_merged_into_volumetrics_() const {
+        return config_.fog_enabled && config_.volumetrics_enabled;
     }
 
     /** @brief The first PointLightComponent with cast_shadows set, or nullptr. */
@@ -3576,6 +3772,14 @@ private:
     std::unique_ptr<coopa::gfx::engine::passes::ShadowPipeline>  shadow_pipeline_;
 
     coopa::gfx::engine::data::PaletteLut palette_lut_;
+    // Colour-grading strip LUT, applied by pixel_stylize_pass_ after the tonemap. Always a
+    // valid texture (a 1x1 dummy when grading_lut_path is empty), so its binding is
+    // unconditional -- size() == 0 is what disables the lookup. Startup-fixed, like
+    // palette_lut_: the image is loaded once and bound once.
+    coopa::gfx::engine::data::GradingLut grading_lut_;
+    // Auto-exposure metering (eye adaptation). Null unless config_.auto_exposure_enabled was
+    // set at construction -- see that flag's doc and the binding-5 comment at its call site.
+    std::unique_ptr<coopa::gfx::engine::passes::ExposurePass> exposure_pass_;
 
     std::unique_ptr<coopa::gfx::engine::passes::GBufferPipeline> gbuffer_pipeline_;
     /// ssao_debug_view diagnostic -- draws the same occlusion image lighting consumes.

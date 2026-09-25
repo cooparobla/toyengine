@@ -152,6 +152,7 @@ struct AppConfig {
                 if (r.contains("shadow_quality"))      config.render.shadow_quality      = parse_render_quality(r.at("shadow_quality").get_value<std::string>());
                 if (r.contains("ssao_quality"))        config.render.ssao_quality        = parse_render_quality(r.at("ssao_quality").get_value<std::string>());
                 if (r.contains("ssr_quality"))         config.render.ssr_quality         = parse_render_quality(r.at("ssr_quality").get_value<std::string>());
+                if (r.contains("ssgi_quality"))        config.render.ssgi_quality        = parse_render_quality(r.at("ssgi_quality").get_value<std::string>());
                 if (r.contains("dof_quality"))         config.render.dof_quality         = parse_render_quality(r.at("dof_quality").get_value<std::string>());
                 if (r.contains("volumetrics_quality")) config.render.volumetrics_quality = parse_render_quality(r.at("volumetrics_quality").get_value<std::string>());
                 if (r.contains("sdf_quality"))         config.render.sdf_quality         = parse_render_quality(r.at("sdf_quality").get_value<std::string>());
@@ -190,6 +191,13 @@ struct AppConfig {
 
                 // --- Lighting ---
                 if (r.contains("exposure"))          config.render.exposure          = r.at("exposure").get_value<float>();
+                if (r.contains("auto_exposure_enabled"))      config.render.auto_exposure_enabled      = r.at("auto_exposure_enabled").get_value<bool>();
+                if (r.contains("auto_exposure_compensation")) config.render.auto_exposure_compensation = r.at("auto_exposure_compensation").get_value<float>();
+                if (r.contains("auto_exposure_speed_up"))     config.render.auto_exposure_speed_up     = r.at("auto_exposure_speed_up").get_value<float>();
+                if (r.contains("auto_exposure_speed_down"))   config.render.auto_exposure_speed_down   = r.at("auto_exposure_speed_down").get_value<float>();
+                if (r.contains("auto_exposure_min"))          config.render.auto_exposure_min          = r.at("auto_exposure_min").get_value<float>();
+                if (r.contains("auto_exposure_max"))          config.render.auto_exposure_max          = r.at("auto_exposure_max").get_value<float>();
+                if (r.contains("grading_enabled"))            config.render.grading_enabled            = r.at("grading_enabled").get_value<bool>();
                 if (r.contains("light_bands"))       config.render.light_bands       = r.at("light_bands").get_value<float>();
                 if (r.contains("spec_threshold"))    config.render.spec_threshold    = r.at("spec_threshold").get_value<float>();
                 if (r.contains("rim_strength"))      config.render.rim_strength      = r.at("rim_strength").get_value<float>();
@@ -230,6 +238,15 @@ struct AppConfig {
                 if (r.contains("point_shadow_softness"))   config.render.point_shadow_softness   = r.at("point_shadow_softness").get_value<float>();
                 if (r.contains("spot_shadow_softness"))    config.render.spot_shadow_softness    = r.at("spot_shadow_softness").get_value<float>();
                 if (r.contains("shadow_pcf_samples"))      config.render.shadow_pcf_samples      = r.at("shadow_pcf_samples").get_value<uint32_t>();
+                if (r.contains("shadow_pcss_enabled"))       config.render.shadow_pcss_enabled       = r.at("shadow_pcss_enabled").get_value<bool>();
+                if (r.contains("shadow_pcss_light_size"))    config.render.shadow_pcss_light_size    = r.at("shadow_pcss_light_size").get_value<float>();
+                if (r.contains("shadow_pcss_search_texels")) config.render.shadow_pcss_search_texels = r.at("shadow_pcss_search_texels").get_value<float>();
+                if (r.contains("shadow_pcss_taps"))          config.render.shadow_pcss_taps          = r.at("shadow_pcss_taps").get_value<uint32_t>();
+                if (r.contains("contact_shadows_enabled"))   config.render.contact_shadows_enabled   = r.at("contact_shadows_enabled").get_value<bool>();
+                if (r.contains("contact_shadow_length"))     config.render.contact_shadow_length     = r.at("contact_shadow_length").get_value<float>();
+                if (r.contains("contact_shadow_strength"))   config.render.contact_shadow_strength   = r.at("contact_shadow_strength").get_value<float>();
+                if (r.contains("contact_shadow_thickness"))  config.render.contact_shadow_thickness  = r.at("contact_shadow_thickness").get_value<float>();
+                if (r.contains("contact_shadow_steps"))      config.render.contact_shadow_steps      = r.at("contact_shadow_steps").get_value<int>();
 
                 // --- Outline ---
                 if (r.contains("outline_thickness")) config.render.outline_thickness = r.at("outline_thickness").get_value<float>();
@@ -246,6 +263,7 @@ struct AppConfig {
 
                 // --- Palette ---
                 if (r.contains("palette")) config.render.palette_path = r.at("palette").get_value<std::string>();
+                if (r.contains("grading_lut")) config.render.grading_lut_path = r.at("grading_lut").get_value<std::string>();
 
                 // --- Dither ---
                 if (r.contains("dither_strength")) config.render.dither_strength = r.at("dither_strength").get_value<float>();
@@ -279,6 +297,10 @@ struct AppConfig {
                 if (r.contains("ssr_blur_radius"))      config.render.ssr_blur_radius      = r.at("ssr_blur_radius").get_value<float>();
                 if (r.contains("ssr_jitter"))           config.render.ssr_jitter           = r.at("ssr_jitter").get_value<float>();
                 if (r.contains("ssr_temporal_gamma"))   config.render.ssr_temporal_gamma   = r.at("ssr_temporal_gamma").get_value<float>();
+                if (r.contains("ssgi_traced"))          config.render.ssgi_traced          = r.at("ssgi_traced").get_value<bool>();
+                if (r.contains("ssgi_max_distance"))    config.render.ssgi_max_distance    = r.at("ssgi_max_distance").get_value<float>();
+                if (r.contains("ssgi_blur_radius"))     config.render.ssgi_blur_radius     = r.at("ssgi_blur_radius").get_value<float>();
+                if (r.contains("ssgi_max_iterations"))  config.render.ssgi_max_iterations  = r.at("ssgi_max_iterations").get_value<int>();
                 if (r.contains("ssgi_intensity"))       config.render.indirect.ssgi_intensity = r.at("ssgi_intensity").get_value<float>();
                 if (r.contains("ssgi_distance"))        config.render.indirect.ssgi_distance  = r.at("ssgi_distance").get_value<float>();
 
@@ -325,6 +347,9 @@ struct AppConfig {
                 if (r.contains("volumetrics_max_distance"))   config.render.volumetrics_max_distance   = r.at("volumetrics_max_distance").get_value<float>();
                 if (r.contains("volumetrics_max_opacity"))    config.render.volumetrics_max_opacity    = r.at("volumetrics_max_opacity").get_value<float>();
                 if (r.contains("volumetrics_sun_anisotropy")) config.render.volumetrics_sun_anisotropy = r.at("volumetrics_sun_anisotropy").get_value<float>();
+                if (r.contains("volumetrics_shadows_enabled")) config.render.volumetrics_shadows_enabled = r.at("volumetrics_shadows_enabled").get_value<bool>();
+                if (r.contains("volumetrics_light_scatter"))  config.render.volumetrics_light_scatter  = r.at("volumetrics_light_scatter").get_value<float>();
+                if (r.contains("volumetrics_max_scatter_lights")) config.render.volumetrics_max_scatter_lights = r.at("volumetrics_max_scatter_lights").get_value<int>();
                 if (r.contains("volumetrics_debug_view"))     config.render.volumetrics_debug_view     = r.at("volumetrics_debug_view").get_value<bool>();
 
                 if (r.contains("bloom_threshold")) config.render.bloom_threshold = r.at("bloom_threshold").get_value<float>();

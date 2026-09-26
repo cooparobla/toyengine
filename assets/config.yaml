@@ -46,7 +46,12 @@ render:
                              # at contact and widening to shadow_softness with distance. Needs
                              # soft_shadows -- shadow_softness becomes the MAXIMUM width, not a fixed one.
   contact_shadows_enabled: false # short screen-space march toward the sun, closing the normal-bias
-                             # gap at object bases (deferred/directional light only)
+                             # gap at object bases (deferred/directional light only). The one
+                             # exception to this block's needs-its-parent rule: works without
+                             # shadows_enabled -- shadows_enabled: false + this true renders a
+                             # contact-only view for isolating the effect. Follows soft_shadows:
+                             # on = a PCSS-style penumbra that softens with blocker distance,
+                             # widened by shadow_pcss_light_size; off = a hard single-ray edge.
   sdf_shadows_enabled: true  # SDFs cast shadows; independent of sdf_enabled
   # SSR / SSGI (need ssr_enabled)
   ssr_reflect_transparent: true # opaque surfaces also reflect transparent geometry (~2x SSR cost; needs transparency_enabled too)
@@ -125,7 +130,9 @@ render:
   shadow_softness: 0.15      # directional penumbra radius, WORLD units
   point_shadow_softness: 3.0 # point-light penumbra radius, CUBE-MAP texels
   spot_shadow_softness: 0.15 # spot penumbra radius, WORLD units (converted per pixel from light distance)
-  shadow_pcss_light_size: 0.02 # tan of the sun's angular radius; penumbra growth per metre of gap
+  shadow_pcss_light_size: 0.02 # tan of the sun's angular radius; penumbra growth per metre of gap.
+                             # Also drives the soft contact-shadow penumbra (when soft_shadows is on);
+                             # contact shadows are short-range, so they scale it up internally to stay visible.
   shadow_pcss_search_texels: 8.0 # blocker-search radius, shadow-map texels (1..16)
   # shadow_pcss_taps: 8      # blocker-search taps (1..16). Driven by shadow_quality (4/6/8/16);
                              # uncomment only to override the tier. The PCSS cost dial, since

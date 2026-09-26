@@ -24,6 +24,15 @@ layout(set = 0, binding = 0) uniform sampler2D u_ao_current;          // raw AO,
 layout(set = 0, binding = 1) uniform sampler2D u_ao_history;          // LINEAR (reprojected UV)
 layout(set = 0, binding = 2) uniform sampler2D g_position_roughness;  // NEAREST
 layout(set = 0, binding = 3) uniform sampler2D g_normal_metallic;     // NEAREST -- background test
+// The AO depth pyramid (SsaoPass binds the same image ssao.frag marches); only mip 0 is read
+// here -- an exact texelFetch copy of the rasterized depth buffer (ao_depth_downsample.frag's
+// first pass). Reprojection reconstructs this pixel's clip position from it rather than from
+// g_position_roughness: the G-buffer stores world position in RGBA16F, and at world
+// coordinates of a few hundred units its quantization step is 0.06-0.25 wu -- reprojected at
+// close range that is a multi-pixel, per-texel-random UV error, which makes the accumulated
+// history slide and boil against the geometry whenever the camera moves. Depth has no such
+// quantization, and pc.reproject maps clip to clip without ever touching large world numbers.
+layout(set = 0, binding = 4) uniform sampler2D u_depth;
 
 /// Slack around the current 3x3 neighbourhood range inside which history is trusted as-is.
 /// With exact reprojection and the distance-channel rejection below, deeply accumulated
@@ -32,8 +41,18 @@ layout(set = 0, binding = 3) uniform sampler2D g_normal_metallic;     // NEAREST
 /// same-distance surfaces with different occlusion).
 const float kClampSlack = 0.25;
 
+// Diagnostic build flag: when defined, every path overrides the resolved AO channel with
+// this pixel's accumulation count (b / max_accum), so the ssao_debug_view shows the count
+// field instead of AO. The count dynamics stay faithful under the override -- .b evolution
+// never reads .r. Capture-only; never ship with this defined.
+// #define COUNT_DEBUG
+
 layout(push_constant) uniform PushConstants {
-    mat4  prev_view_proj;   // previous frame's JITTERED proj * view
+    // Maps this frame's clip space to the PREVIOUS frame's: prev jittered (proj * view) times
+    // the inverse of the current jittered (proj * view), composed in double precision on the
+    // CPU (the same scheme TaaPass's reprojection uses) so no large world coordinate and no
+    // catastrophic float cancellation ever enters the shader math.
+    mat4  reproject;
     // Flattened vec2, matching the house rule in ssao.frag's SsaoPushConstants.
     float resolution_x;
     float resolution_y;
@@ -93,6 +112,9 @@ void main() {
     vec3 N = texture(g_normal_metallic, in_uv).rgb;
     if (dot(N, N) < 0.001) {
         out_ao = vec4(current, 0.0, 0.0, 0.0);
+#ifdef COUNT_DEBUG
+        out_ao.r = 0.0;
+#endif
         return;
     }
 
@@ -123,14 +145,25 @@ void main() {
 
     if (pc.history_valid == 0) {
         out_ao = vec4(spatial_fallback, current_dist, 1.0, 0.0);
+#ifdef COUNT_DEBUG
+        out_ao.r = out_ao.b / max(pc.max_accum, 1.0);
+#endif
         return;
     }
 
-    vec4 prev_clip = pc.prev_view_proj * vec4(P, 1.0);
+    // This pixel's exact clip position: NDC from the fragment's own UV (pixel center, matching
+    // rasterization) and the rasterized depth fetched from the pyramid's mip 0. See u_depth's
+    // doc for why reprojection starts here instead of at the G-buffer world position.
+    float depth = texelFetch(u_depth, ivec2(gl_FragCoord.xy), 0).r;
+    vec2 ndc = vec2(in_uv.x * 2.0 - 1.0, -(in_uv.y * 2.0 - 1.0));
+    vec4 prev_clip = pc.reproject * vec4(ndc, depth, 1.0);
 
     // Behind the previous frame's eye: no history exists for this point at all.
     if (prev_clip.w <= 0.0) {
         out_ao = vec4(spatial_fallback, current_dist, 1.0, 0.0);
+#ifdef COUNT_DEBUG
+        out_ao.r = out_ao.b / max(pc.max_accum, 1.0);
+#endif
         return;
     }
 
@@ -139,6 +172,9 @@ void main() {
     // Off-screen last frame -- the cheapest and most common disocclusion case.
     if (any(lessThan(prev_uv, vec2(0.0))) || any(greaterThan(prev_uv, vec2(1.0)))) {
         out_ao = vec4(spatial_fallback, current_dist, 1.0, 0.0);
+#ifdef COUNT_DEBUG
+        out_ao.r = out_ao.b / max(pc.max_accum, 1.0);
+#endif
         return;
     }
 
@@ -153,6 +189,9 @@ void main() {
     float prev_dist = length(P - vec3(pc.prev_camera_pos_x, pc.prev_camera_pos_y, pc.prev_camera_pos_z));
     if (abs(history_sample.g - prev_dist) > 0.05 * prev_dist) {
         out_ao = vec4(spatial_fallback, current_dist, 1.0, 0.0);
+#ifdef COUNT_DEBUG
+        out_ao.r = out_ao.b / max(pc.max_accum, 1.0);
+#endif
         return;
     }
 
@@ -165,6 +204,9 @@ void main() {
     if (pc.frozen != 0) {
         vec4 held = texelFetch(u_ao_history, ivec2(gl_FragCoord.xy), 0);
         out_ao = vec4(held.r, current_dist, held.b, 0.0);
+#ifdef COUNT_DEBUG
+        out_ao.r = out_ao.b / max(pc.max_accum, 1.0);
+#endif
         return;
     }
 
@@ -178,6 +220,12 @@ void main() {
     // (counts 1-3, i.e. the fresh bands a panning camera opens every frame): their noise
     // amplitude halves in exchange for AO fading in over ~4 frames instead of ~2 -- a soft
     // lag that reads far quieter than sparkle. Pixels at count 4+ are unaffected.
-    float w = min(1.0 / (n + 1.0), 0.25);
+    // max_accum 0 (temporal resolve disabled) takes the current frame verbatim -- the
+    // passthrough the file doc promises, which the capped running average would otherwise
+    // quietly turn into a fixed 0.25-weight EMA.
+    float w = (pc.max_accum <= 0.0) ? 1.0 : min(1.0 / (n + 1.0), 0.25);
     out_ao = vec4(mix(hist_ao, current, w), current_dist, n + 1.0, 0.0);
+#ifdef COUNT_DEBUG
+    out_ao.r = out_ao.b / max(pc.max_accum, 1.0);
+#endif
 }

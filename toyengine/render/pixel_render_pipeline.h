@@ -1489,8 +1489,17 @@ private:
             ssao_params.noise_rotation        = static_cast<int>(ssao_rotation_index_ & 0xFFu);
             ssao_params.temporal_enabled     = config_.ssao_temporal_enabled;
             ssao_params.temporal_frames      = config_.ssao_temporal_frames;
-            ssao_params.prev_view_proj       = prev_view_proj_;
-            ssao_params.prev_view_proj_valid = prev_view_proj_valid_;
+            // Composed in double, truncated to float only at the end -- same reasoning as
+            // taa_params.reproject below: the world-scale magnitudes inside the two
+            // view-projections cancel in the double product, leaving a matrix whose float
+            // truncation reprojects at sub-pixel accuracy. A float composition (or routing
+            // the reprojection through the RGBA16F G-buffer position, which this matrix
+            // replaces) is off by whole pixels at this scene's world-coordinate scale,
+            // which made the accumulated AO slide and boil against the geometry in motion.
+            ssao_params.reproject        = glm::mat4(
+                glm::dmat4(prev_view_proj_) *
+                glm::inverse(glm::dmat4(ctx.proj) * glm::dmat4(ctx.view)));
+            ssao_params.reproject_valid  = prev_view_proj_valid_;
             // The eye ssao_resolve.frag measures its stored distance channel against.
             ssao_params.camera_pos           = ctx.cam_pos;
             ssao_params.frozen               = temporal_frozen_;
@@ -2868,6 +2877,13 @@ private:
             glm::max(config_.contact_shadow_length, 0.0f),
             glm::max(config_.contact_shadow_thickness, 0.01f),
             static_cast<float>(std::clamp(config_.contact_shadow_steps, 1, 24)));
+        // Soft contact-shadow penumbra: .x is the sun's angular-size tangent, shared with
+        // the shadow map's PCSS growth dial (shadow_pcss_light_size), gated by soft_shadows.
+        // 0 selects the hard single-ray march. Written unconditionally, same policy as the
+        // rows above.
+        ubo.contact_soft_params = glm::vec4(
+            config_.soft_shadows ? std::max(config_.shadow_pcss_light_size, 0.0f) : 0.0f,
+            0.0f, 0.0f, 0.0f);
 
         auto points = scene.get_components<PointLightComponent>();
         uint32_t count = std::min<uint32_t>(static_cast<uint32_t>(points.size()), coopa::gfx::engine::data::MAX_POINT_LIGHTS);

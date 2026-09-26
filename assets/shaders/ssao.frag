@@ -97,11 +97,49 @@ void main() {
         return;
     }
 
-    vec3 P_w = texelFetch(g_position_roughness, px, 0).rgb;
-    vec3 N_v = normalize(mat3(camera.view) * normalize(N_w));
-    vec3 P_v = (camera.view * vec4(P_w, 1.0)).xyz
-             // The tangent-plane lift described at pc.bias.
-             + N_v * pc.bias;
+    // Closed-form inverse of camera.proj for every (ndc.xy, depth) -> view-space
+    // reconstruction in this shader -- the shading point below and each marched sample.
+    // camera.proj is the JITTERED matrix (the camera UBO intentionally carries it), and the
+    // jitter terms live in different cells per projection kind -- proj[2][0/1] for
+    // perspectiveRH_ZO (proj[2][3] == -1), proj[3][0/1] for orthographic -- matching the
+    // pipeline's apply_taa_jitter_. The scalar form replaces a full mat4 multiply plus vec4
+    // perspective divide per reconstruction.
+    bool  proj_persp = camera.proj[2][3] != 0.0;
+    float inv_p00 = 1.0 / camera.proj[0][0];
+    float inv_p11 = 1.0 / camera.proj[1][1];
+    float c22 = camera.proj[2][2];
+    float c32 = camera.proj[3][2];
+    float jx  = camera.proj[2][0];
+    float jy  = camera.proj[2][1];
+    float tx  = camera.proj[3][0];
+    float ty  = camera.proj[3][1];
+
+    // Shading point from the pixel's own NDC and the rasterized depth (pyramid mip 0 is an
+    // exact texelFetch copy of the depth buffer, see ao_depth_downsample.frag) -- NOT from
+    // the G-buffer position: G2 stores world position in RGBA16F, whose quantization step at
+    // world coordinates of a few hundred units is 0.06-0.25 wu -- larger than pc.bias -- so
+    // a G2-derived shading point oscillates against the depth-reconstructed marched samples
+    // as surfaces cross the half-float lattice, striping the AO along the lattice's
+    // iso-lines. Reconstructing both ends of the horizon test through the same inverse
+    // removes that offset entirely.
+    float depth0 = texelFetch(u_hiz_map, px, 0).r;
+    vec2  ndc0   = vec2(in_uv.x * 2.0 - 1.0, -(in_uv.y * 2.0 - 1.0));
+    vec3  N_v    = normalize(mat3(camera.view) * normalize(N_w));
+    vec3  P_v;
+    if (proj_persp) {
+        // clip = (p00 x + jx z, p11 y + jy z, c22 z + c32, -z), inverted.
+        float z_v = -c32 / (depth0 + c22);
+        P_v = vec3(-z_v * (ndc0.x + jx) * inv_p00,
+                   -z_v * (ndc0.y + jy) * inv_p11,
+                   z_v);
+    } else {
+        // clip = (p00 x + tx, p11 y + ty, c22 z + c32, 1), inverted.
+        P_v = vec3((ndc0.x - tx) * inv_p00,
+                   (ndc0.y - ty) * inv_p11,
+                   (depth0 - c32) / c22);
+    }
+    // The tangent-plane lift described at pc.bias.
+    P_v += N_v * pc.bias;
     vec3 V = normalize(-P_v);
 
     // World units per full-res texel at this depth -- converts the world-space radius into
@@ -128,22 +166,6 @@ void main() {
     float p00 = camera.proj[0][0];
     float p11 = camera.proj[1][1];
     vec2  texel_uv = 1.0 / vec2(pc.resolution_x, pc.resolution_y);
-
-    // Closed-form inverse of camera.proj for the march's (ndc.xy, hiz depth) -> view-space
-    // reconstruction, hoisted out of the loops. camera.proj is the JITTERED matrix (the camera
-    // UBO intentionally carries it), and the jitter terms live in different cells per
-    // projection kind -- proj[2][0/1] for perspectiveRH_ZO (proj[2][3] == -1), proj[3][0/1]
-    // for orthographic -- matching the pipeline's apply_taa_jitter_. The scalar form replaces
-    // a full mat4 multiply plus vec4 perspective divide per marched sample.
-    bool  proj_persp = camera.proj[2][3] != 0.0;
-    float inv_p00 = 1.0 / p00;
-    float inv_p11 = 1.0 / p11;
-    float c22 = camera.proj[2][2];
-    float c32 = camera.proj[3][2];
-    float jx  = camera.proj[2][0];
-    float jy  = camera.proj[2][1];
-    float tx  = camera.proj[3][0];
-    float ty  = camera.proj[3][1];
 
     float visibility = 0.0;
     for (int s = 0; s < pc.slices; ++s) {

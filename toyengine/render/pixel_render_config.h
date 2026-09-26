@@ -378,7 +378,14 @@ struct PixelRenderConfig {
      * per-pixel march through the G-buffer toward the sun, max()-combined with the
      * shadow map's result. Catches the few-centimetre contact occlusion the
      * normal-offset bias necessarily recedes from -- the gap at every object's base.
-     * Deferred (directional light) only. All four fields are runtime.
+     * Deferred (directional light) only. Independent of shadows_enabled: with the
+     * shadow maps off the march is the only directional occlusion term, which gives
+     * a contact-only view of the effect. All four fields are runtime.
+     *
+     * Follows soft_shadows: when on, the march averages several rays across the sun's
+     * angular cone (sized from shadow_pcss_light_size) for a PCSS-style penumbra that
+     * is sharp at the contact point and softens with blocker distance; when off, a
+     * single ray gives a hard edge.
      */
     bool     contact_shadows_enabled  = false;
     float    contact_shadow_length    = 0.5f;  /**< March length in world units. */

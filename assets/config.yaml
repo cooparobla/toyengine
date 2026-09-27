@@ -42,7 +42,7 @@ render:
   # =========================================================================
   # Shadows (need shadows_enabled)
   soft_shadows: true         # true = Vogel-disk PCF penumbra; false = single hard depth compare
-  shadow_pcss_enabled: true # PCSS contact hardening: a blocker search drives the penumbra, sharp
+  shadow_pcss_enabled: false # PCSS contact hardening: a blocker search drives the penumbra, sharp
                              # at contact and widening to shadow_softness with distance. Needs
                              # soft_shadows -- shadow_softness becomes the MAXIMUM width, not a fixed one.
   contact_shadows_enabled: false # short screen-space march toward the sun, closing the normal-bias
@@ -75,12 +75,38 @@ render:
   camera_pixel_snap: false   # orthographic cameras only
 
   # =========================================================================
-  # 3. DEBUG VIEWS -- replace the image with an intermediate buffer. All runtime.
+  # 3. DEBUG VIEW -- one field, one intermediate channel, raw (no tonemap, no
+  #    bloom, no TAA history blend) so the numbers on screen are the numbers
+  #    the renderer computed. Runtime.
   # =========================================================================
-  ssao_debug_view: false     # SSAO buffer fullscreen in place of lighting
-  dof_debug_view: false      # signed circle-of-confusion field in place of the image
-  volumetrics_debug_view: false # accumulated density alone, scene colour suppressed
-  debug_lines_enabled: false # physics collider/contact wireframes
+  debug_view: off
+  # off              normal render
+  # --- G-buffer / material ---
+  # albedo           G0.rgb
+  # normals          G1.rgb, remapped to 0..1
+  # roughness        G2.a
+  # metallic         G1.a
+  # emissive         G3.rgb
+  # material_ao      G0.a (baked/material AO, before SSAO)
+  # world_pos        G2.rgb, fract()-wrapped per metre
+  # depth            linear view depth, normalized over the camera's clip range
+  # --- lighting terms ---
+  # direct           direct light sum only (no ambient, no emissive)
+  # indirect         sky-gradient ambient + indirect specular only
+  # shadows          directional shadow-MAP occlusion alone (no contact term)
+  # contact_shadows  the resolved contact-shadow buffer lighting consumes, unscaled by
+  #                  strength (needs contact_shadows_enabled -- black without it, since
+  #                  the march early-outs when its strength is 0)
+  # ssao             the occlusion buffer lighting consumes
+  # --- screen-space ---
+  # ssr              resolved reflection radiance (needs ssr_enabled)
+  # ssr_confidence   that buffer's confidence/alpha as grayscale
+  # ssgi             resolved diffuse bounce radiance (needs ssr_enabled + ssgi_traced)
+  # --- in-chain (need their own feature enabled) ---
+  # dof              signed circle-of-confusion field (needs dof_enabled)
+  # volumetrics      accumulated density alone (needs volumetrics_enabled)
+  # --- overlay ---
+  # lines            normal image + physics collider/contact wireframes
 
   # =========================================================================
   # Quality -- low | med | high | ultra ("med" and "medium" both work)
@@ -127,6 +153,14 @@ render:
   shadow_bias: 0.005
   shadow_normal_bias: 1.0    # normal-offset bias in shadow-map texels beyond the PCF disk
   shadow_distance: 60.0      # how far from the camera the directional shadow frustum reaches
+  shadow_cascades: 4         # directional cascades, 1..4. Each gets its own ortho fit to one
+                             # slice of the depth range and its own tile of the shadow atlas, so
+                             # close-up shadows are sharp and distant ones coarse. Costs one extra
+                             # pass over the shadow casters per cascade. 1 = one box over the whole
+                             # range (the single-map behaviour). Tile size is shadow_map_resolution,
+                             # driven by shadow_quality -- the atlas is up to 2x that per axis.
+  shadow_cascade_split_lambda: 0.75 # where the cascade boundaries fall: 1 = logarithmic (equal
+                             # world-per-texel across cascades), 0 = uniform. Ignored at 1 cascade.
   shadow_softness: 0.15      # directional penumbra radius, WORLD units
   point_shadow_softness: 3.0 # point-light penumbra radius, CUBE-MAP texels
   spot_shadow_softness: 0.15 # spot penumbra radius, WORLD units (converted per pixel from light distance)
@@ -155,10 +189,17 @@ render:
   ssr_thickness: 0.08        # hit acceptance thickness
   ssr_thickness_scale: 0.02  # extra thickness per unit distance
   ssr_bias_texels: 3.5
-  ssr_roughness_cutoff: 1.0  # roughness above which surfaces stop tracing; 1.0 = everything traces
+  ssr_roughness_cutoff: 1.0  # roughness above which surfaces stop tracing; 1.0 = everything traces.
+                             # Measured on terrain_test, 1.0 vs 0.6 moves whole-frame saturation
+                             # by 0.002 and contrast by 0.2 -- i.e. nothing. Note this engine has
+                             # no reflection probes (indirect_hooks.glsl's hook_env_specular
+                             # returns the raw analytic sky term), so a lower cutoff does not hand
+                             # rough surfaces to a better estimator, it just stops tracing them.
   ssr_start_mip: 0
   ssr_min_mip0_steps: 1
-  ssr_temporal_blend: 0.85
+  ssr_temporal_frames: 32    # frames the reflection averages over (blends frame N at 1/N)
+  ssgi_temporal_frames: 48   # same for the diffuse bounce; deeper, it is the noisier estimator
+  ssr_temporal_blend: 0.85   # fallback fixed-rate blend, only where no shared count buffer exists
   ssr_temporal_gamma: 2.0    # variance-clipping width (std devs) for history rejection
   ssr_blur_radius: 0.5       # world-space sigma of the spatial denoise
   ssr_jitter: 0.25           # stochastic ray jitter as a fraction of the GGX lobe cone

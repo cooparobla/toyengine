@@ -162,10 +162,8 @@ vec4 gfx_pixel_forward_shade(vec3 world_pos, vec3 N, vec3 camera_pos, mat4 view,
         vec3 L = normalize(-lights.dir_direction.xyz);
         vec3 radiance = lights.dir_color.rgb * lights.dir_direction.w;
 
-        float normal_bias_scale = clamp(1.0 - dot(N, L), 0.0, 1.0);
-        vec3 biased_pos = world_pos + N * (lights.dir_shadow_params.w * (0.5 + 0.5 * normal_bias_scale));
-        vec4 light_space_pos = lights.dir_light_space_matrix * vec4(biased_pos, 1.0);
-        float shadow = calc_dir_shadow(light_space_pos, N, L);
+        // See pixel_lighting.frag's identical call: the raw point, biased per cascade inside.
+        float shadow = calc_dir_shadow(world_pos, N, L);
 
         Lo += gfx_forward_shade_light(N, V, L, radiance, albedo, metallic, roughness, F0, shadow, p);
     }

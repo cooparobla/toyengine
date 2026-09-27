@@ -240,40 +240,95 @@ inline float compute_shadow_normal_bias(float pcf_radius_texels, float extra_tex
 }
 
 /**
- * @brief Fits an orthographic light-space box to a bounding sphere of the CAMERA's view
- *        frustum, clipped to `shadow_distance`, with texel-snapped centering.
+ * @brief The view-space depth boundaries of a cascaded shadow map's slices.
  *
- * The technique behind Unity/Unreal's directional "shadow distance". Two properties matter
- * and both are deliberate:
+ * Entry `i` is the FAR edge of cascade `i`; the near edge of cascade 0 is `near_clip` and
+ * the near edge of cascade `i > 0` is `splits[i - 1]`. Entries past `count - 1` repeat the
+ * last boundary, so a caller that always reads four of them never sees an uninitialised one.
+ */
+struct CascadeSplits {
+    float distance[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+};
+
+/**
+ * @brief Practical split scheme (Zhang et al.): a `lambda` blend of the logarithmic and
+ *        uniform cascade distributions.
+ *
+ * The logarithmic distribution is what equalizes world-per-texel across cascades -- it is
+ * the correct answer for perspective projection -- but on its own it crushes the first
+ * cascade down to centimetres around a small `near_clip`, spending a whole tile on geometry
+ * that is mostly inside the camera. The uniform distribution has the opposite failure, a
+ * first cascade so large it barely improves on one map. Blending them is the standard fix;
+ * `lambda` = 1 is fully logarithmic, 0 fully uniform.
+ *
+ * @param near_clip       Camera near plane, in world units; floored at 0.01 so the log term
+ *                        stays finite.
+ * @param shadow_distance Far edge of the last cascade -- the whole shadowed range.
+ * @param count           Live cascade count; clamped to [1, 4].
+ * @param lambda          Log/uniform blend in [0, 1].
+ * @return The four boundaries, the last of which is always `shadow_distance`.
+ */
+inline CascadeSplits compute_cascade_splits(float near_clip, float shadow_distance,
+                                            uint32_t count, float lambda) {
+    const int   n    = static_cast<int>(std::clamp<uint32_t>(count, 1u, 4u));
+    const float near_d = std::max(near_clip, 0.01f);
+    const float far_d  = std::max(shadow_distance, near_d + 0.01f);
+    const float ratio  = far_d / near_d;
+    const float lerp_t = std::clamp(lambda, 0.0f, 1.0f);
+
+    CascadeSplits splits;
+    for (int i = 0; i < n; ++i) {
+        const float p       = static_cast<float>(i + 1) / static_cast<float>(n);
+        const float log_d   = near_d * std::pow(ratio, p);
+        const float uni_d   = near_d + (far_d - near_d) * p;
+        splits.distance[i]  = lerp_t * log_d + (1.0f - lerp_t) * uni_d;
+    }
+    // The last cascade must reach exactly shadow_distance -- the blend above lands there
+    // analytically, but only up to float error, and this is the boundary past which
+    // calc_dir_shadow() stops shadowing at all.
+    splits.distance[n - 1] = far_d;
+    for (int i = n; i < 4; ++i) splits.distance[i] = far_d;
+    return splits;
+}
+
+/**
+ * @brief Fits an orthographic light-space box to a bounding sphere of one SLICE of the
+ *        camera's view frustum, with texel-snapped centering.
+ *
+ * The technique behind Unity/Unreal's directional "shadow distance", applied per cascade.
+ * Two properties matter and both are deliberate:
  *
  *  - **It is a function of the camera alone.** No renderer, SDF or physics position is read,
  *    so nothing in the scene -- including an object that escaped the playable area and is in
  *    unbounded freefall -- can perturb or blow out the shadow frustum.
- *  - **It fits the frustum's bounding SPHERE, not its box.** A sphere's radius is invariant
+ *  - **It fits the slice's bounding SPHERE, not its box.** A sphere's radius is invariant
  *    under camera rotation, so the box size is stable as the camera turns; snapping the
  *    centre to whole texels then removes the sub-texel crawl that remains under translation.
  *
- * The near plane sits a further `shadow_distance` behind the sphere on the towards-light
- * side, so a caster outside the visible sphere but between it and the light still shadows
- * into frame -- sized off that one config knob, never off any object's actual position.
+ * The near plane sits a further `slice_far` behind the sphere on the towards-light side, so
+ * a caster outside the visible sphere but between it and the light still shadows into frame
+ * -- sized off the slice's own reach, never off any object's actual position.
  *
- * @param light_direction      Directional light's direction; normalized internally.
- * @param cam                  Active camera, or nullptr for the fixed fallback box.
- * @param shadow_distance      How far from the camera shadows are computed, in world units.
- * @param shadow_map_resolution Shadow map edge length in texels; drives the texel snap.
- * @return The light-space matrix and this frame's world-per-texel size.
+ * @param light_direction Directional light's direction; normalized internally.
+ * @param cam             Active camera, or nullptr for the fixed fallback box.
+ * @param slice_near      Near edge of this cascade's depth slice, in world units.
+ * @param slice_far       Far edge of this cascade's depth slice, in world units.
+ * @param tile_resolution Edge length of the cascade's atlas TILE in texels; drives the snap.
+ * @return The light-space matrix and this cascade's world-per-texel size.
  */
-inline DirShadowFit compute_dir_shadow_fit(const glm::vec3& light_direction,
-                                           const ShadowFitCamera* cam,
-                                           float shadow_distance,
-                                           uint32_t shadow_map_resolution) {
+inline DirShadowFit compute_dir_shadow_fit_slice(const glm::vec3& light_direction,
+                                                 const ShadowFitCamera* cam,
+                                                 float slice_near,
+                                                 float slice_far,
+                                                 float caster_reach,
+                                                 uint32_t tile_resolution) {
     const glm::vec3 light_dir = glm::normalize(light_direction);
     // Any up vector not parallel to the light works; swap axes near the poles of the
     // engine's Z-up convention so lookAt() never degenerates.
     const glm::vec3 up = (std::abs(light_dir.z) < 0.99f) ? glm::vec3(0.0f, 0.0f, 1.0f)
                                                          : glm::vec3(0.0f, 1.0f, 0.0f);
     const glm::mat4 light_rot = glm::lookAt(glm::vec3(0.0f), light_dir, up);
-    const float resolution = static_cast<float>(std::max(shadow_map_resolution, 1u));
+    const float resolution = static_cast<float>(std::max(tile_resolution, 1u));
 
     DirShadowFit fit;
     glm::mat4 light_proj;
@@ -292,8 +347,8 @@ inline DirShadowFit compute_dir_shadow_fit(const glm::vec3& light_direction,
         const glm::vec3 cam_up      = glm::vec3(cam_to_world[1]);
         const glm::vec3 cam_forward = -glm::vec3(cam_to_world[2]); // camera looks down local -Z
 
-        const float near_d = cam->near_clip;
-        const float far_d  = std::min(cam->far_clip, shadow_distance);
+        const float near_d = std::max(slice_near, cam->near_clip);
+        const float far_d  = std::min(cam->far_clip, std::max(slice_far, near_d));
 
         // The 8 world-space frustum corners over [near_d, far_d]. Perspective corners scale
         // with distance; orthographic ones have the same half-extent at both planes.
@@ -332,8 +387,11 @@ inline DirShadowFit compute_dir_shadow_fit(const glm::vec3& light_direction,
         center.x = std::floor(center.x / fit.texel_world) * fit.texel_world;
         center.y = std::floor(center.y / fit.texel_world) * fit.texel_world;
 
+        // `caster_reach`, not the slice's own depth: a cascade covering the nearest 5 metres
+        // must still catch a caster 30 metres up between the sun and that ground, so the
+        // towards-light pull stays sized off the whole shadowed range for every cascade.
         const float far_plane  = -center_ls.z + radius + pad;
-        float near_plane = -center_ls.z - radius - pad - shadow_distance;
+        float near_plane = -center_ls.z - radius - pad - std::max(caster_reach, 0.0f);
         const float depth = std::max(far_plane - near_plane, 0.01f);
         fit.depth_range_world = depth;
 
@@ -355,6 +413,59 @@ inline DirShadowFit compute_dir_shadow_fit(const glm::vec3& light_direction,
     // assets/scenes/terrain_test (centre ~-185, box half-extent ~79).
     fit.light_space_matrix = light_proj * light_rot;
     return fit;
+}
+
+/**
+ * @brief The single-cascade fit: one box over the whole `[near_clip, shadow_distance]`
+ *        range, i.e. compute_dir_shadow_fit_slice() with the slice set to everything.
+ *
+ * What `PixelRenderConfig::shadow_cascades` of 1 produces, and the shape the volumetrics
+ * fallback and the no-camera startup path want.
+ *
+ * @param light_direction      Directional light's direction; normalized internally.
+ * @param cam                  Active camera, or nullptr for the fixed fallback box.
+ * @param shadow_distance      How far from the camera shadows are computed, in world units.
+ * @param shadow_map_resolution Shadow map edge length in texels; drives the texel snap.
+ * @return The light-space matrix and this frame's world-per-texel size.
+ */
+inline DirShadowFit compute_dir_shadow_fit(const glm::vec3& light_direction,
+                                           const ShadowFitCamera* cam,
+                                           float shadow_distance,
+                                           uint32_t shadow_map_resolution) {
+    const float slice_near = cam ? cam->near_clip : 0.0f;
+    return compute_dir_shadow_fit_slice(light_direction, cam, slice_near, shadow_distance,
+                                        shadow_distance, shadow_map_resolution);
+}
+
+/**
+ * @struct CascadeTile
+ * @brief Where one cascade lives in the shadow atlas, in [0,1] ATLAS uv.
+ */
+struct CascadeTile {
+    glm::vec2 origin{0.0f}; /**< uv of the tile's lower-left corner. */
+    glm::vec2 scale{1.0f};  /**< Tile size in atlas uv; multiply a [0,1] tile uv by this. */
+};
+
+/**
+ * @brief The atlas grid a cascade count uses: `grid_x` tiles per row, `grid_y` rows.
+ *
+ * 1 -> 1x1 (literally today's single map), 2 -> 2x1, 3 and 4 -> 2x2. Never a square grid
+ * with unused rows: the atlas image is allocated at `tile * grid_x` by `tile * grid_y`, so
+ * a wasted row is wasted VRAM.
+ */
+inline glm::uvec2 cascade_atlas_grid(uint32_t cascade_count) {
+    const uint32_t n = std::clamp<uint32_t>(cascade_count, 1u, 4u);
+    return glm::uvec2(std::min(n, 2u), (n + 1u) / 2u);
+}
+
+/** @brief Cascade `index`'s tile rect in atlas uv, for the grid `cascade_count` implies. */
+inline CascadeTile cascade_atlas_tile(uint32_t index, uint32_t cascade_count) {
+    const glm::uvec2 grid = cascade_atlas_grid(cascade_count);
+    const uint32_t   i    = std::min(index, cascade_count > 0 ? cascade_count - 1u : 0u);
+    CascadeTile tile;
+    tile.scale  = glm::vec2(1.0f / static_cast<float>(grid.x), 1.0f / static_cast<float>(grid.y));
+    tile.origin = glm::vec2(static_cast<float>(i % grid.x), static_cast<float>(i / grid.x)) * tile.scale;
+    return tile;
 }
 
 /**

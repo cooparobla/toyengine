@@ -46,6 +46,30 @@ struct PixelLightingPushConstants {
 };
 
 /**
+ * @struct DebugViewPushConstants
+ * @brief Matches debug_view.frag's DebugViewParams push-constant block (40 bytes).
+ *
+ * All plain scalars (int32_t + float), same as PixelLightingPushConstants above, so
+ * this struct's layout matches the GLSL push_constant block byte-for-byte with no
+ * manual padding: push constants pack scalars at their natural alignment rather than
+ * the vec4-rounding uniform blocks require.
+ */
+struct DebugViewPushConstants {
+    /// DebugView enum value (pixel_render_config.h) -- MUST match debug_view.frag's
+    /// DBG_* constants member-for-member.
+    int32_t channel               = 0;
+    float   light_bands           = 4.0f;
+    float   spec_threshold        = 0.55f;
+    float   ambient_intensity     = 1.0f;
+    float   sky_intensity         = 1.0f;
+    float   soft_lighting         = 0.0f;
+    float   ssao_direct_strength  = 0.25f;
+    float   camera_near           = 0.1f;
+    float   camera_far            = 1000.0f;
+    float   camera_is_perspective = 1.0f;
+};
+
+/**
  * @struct TransparentRefractionPushConstants
  * @brief Matches transparent.frag's push-constant block over [32, 64) -- appended after
  *        TransparentPass::PushConstants' own 32-byte material block (see that pass's

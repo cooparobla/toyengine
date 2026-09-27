@@ -25,7 +25,7 @@ changes push-constant contents is free to flip every frame.
 
 | Startup-fixed | Runtime |
 |---|---|
-| `ssr_enabled`, `ssgi_traced`, `ssao_enabled`, `transparency_enabled`, `refraction_enabled`, `fog_enabled`, `volumetrics_enabled`, `bloom_enabled`, `dof_enabled`, `tilt_shift_enabled`, `auto_exposure_enabled`, `grading_lut_path`, `aa_mode`, `world_ui_enabled`, `screen_ui_enabled`, and every resolution/capacity field | `sdf_enabled`, `shadows_enabled`, `sdf_shadows_enabled`, `shadow_pcss_enabled`, `contact_shadows_enabled`, `volumetrics_shadows_enabled`, `grading_enabled`, `ssr_reflect_transparent`, `debug_lines_enabled`, `ssao_debug_view`, `dof_debug_view`, `volumetrics_debug_view`, and every numeric tunable |
+| `ssr_enabled`, `ssgi_traced`, `ssao_enabled`, `transparency_enabled`, `refraction_enabled`, `fog_enabled`, `volumetrics_enabled`, `bloom_enabled`, `dof_enabled`, `tilt_shift_enabled`, `auto_exposure_enabled`, `grading_lut_path`, `aa_mode`, `world_ui_enabled`, `screen_ui_enabled`, and every resolution/capacity field | `sdf_enabled`, `shadows_enabled`, `sdf_shadows_enabled`, `shadow_pcss_enabled`, `contact_shadows_enabled`, `volumetrics_shadows_enabled`, `grading_enabled`, `ssr_reflect_transparent`, `debug_view`, and every numeric tunable |
 
 `apply_live_config()` enforces the split: it restores any startup-fixed field the caller
 tried to change and names it in a warning, rather than accepting an edit that would
@@ -48,45 +48,58 @@ three groups below.
    of the two must happen.
 4. `ssr_reflect_transparent`: capture transparent geometry into its own target and build a
    second Hi-Z pyramid and scene-colour mip chain, so opaque surfaces can reflect it.
-5. SSAO, or `invalidate_history()` when it is off.
-6. Deferred lighting + skybox → `offscreen_target_` (HDR; the sky-based indirect term can
-   exceed 1.0 whatever the toggles say). `ssao_debug_view` replaces both with a raw
-   occlusion visualization.
-7. Scene-colour mip chain, then SSR — Hi-Z raymarch → temporal resolve → specular swap plus
+5. `TemporalHistoryPass` — the shared per-pixel accumulation count every temporally averaged
+   screen-space effect reads (Unity HDRP's `_HistoryValidityBuffer`). One depth-based
+   disocclusion answer per frame, reprojected clip-to-clip through a double-composed matrix,
+   published as a count that rises to the deepest cap any consumer asks for. What it buys the
+   consumers is a *converging* running average (frame N at `1/N`) in place of a fixed-rate
+   exponential blend, which cannot converge at all on a trace that re-jitters every frame.
+6. Contact shadows: the screen-space march into its own buffer, then its temporal resolve
+   (`contact_shadow_pass.h`). Runs before lighting, which samples the result.
+7. SSAO, or `invalidate_history()` when it is off.
+8. Deferred lighting + skybox → `offscreen_target_` (HDR; the sky-based indirect term can
+   exceed 1.0 whatever the toggles say). Always drawn now — `debug_view`'s channel views
+   replace step 16's final draw instead, reading the G-buffer/lighting/SSAO/SSR sources
+   directly rather than swapping out this step.
+9. Scene-colour mip chain, then SSR — Hi-Z raymarch → temporal resolve → specular swap plus
    the SSGI diffuse bounce. Under `ssgi_traced` the bounce is its own cosine-hemisphere Hi-Z
    trace (`ssgi.frag`) through a second resolve+denoise chain inside `SsrPass`, rather than the
    single normal-offset mip tap the composite falls back to.
-8. Refraction's own scene-colour chain, when refraction is on.
-9. Forward transparent pass: BLEND meshes and BLEND SDFs merged into one back-to-front list,
+10. Refraction's own scene-colour chain, when refraction is on.
+11. Forward transparent pass: BLEND meshes and BLEND SDFs merged into one back-to-front list,
    drawn in place into the SSR composite. BLEND *meshes* additionally refract; BLEND SDFs
    never do.
 
 **Post** (`record_post_chain_()`):
 
-10. Fog (analytic, global) → `fog_target_`. **Skipped when volumetrics is also on**: the two
+12. Fog (analytic, global) → `fog_target_`. **Skipped when volumetrics is also on**: the two
     are both fullscreen passes over the whole HDR frame and the second reads exactly what the
     first wrote, so `volumetrics.frag` applies the global fog term itself through the same
     `gfx_fog_apply()` call `fog.frag` makes — one pass instead of two, bit-identical bar the
     half-float round-trip it skips. See `fog_merged_into_volumetrics_()`.
-11. Volumetrics (raymarched local `VolumeComponent`s) → `volumetrics_target_`. The march
+13. Volumetrics (raymarched local `VolumeComponent`s) → `volumetrics_target_`. The march
     shadows its sun in-scatter against the directional map (light shafts) and scatters the
     nearest point/spot lights into each volume.
-12. Depth of field, at render resolution.
-13. Bloom pyramid, and auto-exposure metering (its own 1×1 ping-pong target; the value it
+14. Depth of field, at render resolution. `debug_view: dof` swaps its composite to the signed
+    CoC field instead of the blurred image; `debug_view: volumetrics` does the same to step 13's
+    volumetrics march (accumulated density, scene colour suppressed).
+15. Bloom pyramid, and auto-exposure metering (its own 1×1 ping-pong target; the value it
     produces is consumed by the *next* frame's tonemap).
-14. Exposure + ACES tonemap + colour-grading LUT + outline + dither + palette → `post_target_`,
-    with debug lines drawn as a guest in the same bracket.
-15. World-space UI → `ui_world_target_`, at the display rect.
-16. FXAA / SMAA / TAA → `aa_target_`, when `aa_mode != "off"`.
-17. Tilt shift, at display resolution.
+16. Exposure + ACES tonemap + colour-grading LUT + outline + dither + palette → `post_target_` —
+    or, when `debug_view` names a channel, that raw intermediate buffer instead, with every
+    other step in this line reduced to its no-op value. `debug_view: lines` draws the normal
+    image here and adds physics collider/contact wireframes as a guest in the same bracket.
+17. World-space UI → `ui_world_target_`, at the display rect.
+18. FXAA / SMAA / TAA → `aa_target_`, when `aa_mode != "off"`.
+19. Tilt shift, at display resolution.
 
 **Overlay** (`record_overlay_()`):
 
-18. `ui_composite_pass_` draws the post-processed scene into the letterbox sub-rect of
+20. `ui_composite_pass_` draws the post-processed scene into the letterbox sub-rect of
     `overlay_target_` with the world-UI layer over it — performing the nearest upscale
     itself when tilt shift is off — then screen-space UI draws as a guest at full window
     resolution.
-19. `record_fn`: `upscale_pass_` blits `overlay_target_` 1:1 into the swapchain.
+21. `record_fn`: `upscale_pass_` blits `overlay_target_` 1:1 into the swapchain.
 
 Each stage is gated on its own toggle and skipped entirely when off.
 

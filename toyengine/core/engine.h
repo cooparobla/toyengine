@@ -573,18 +573,19 @@ private:
 
     /**
      * @brief Fills pipeline_.debug_lines() from the active scene's PhysicsSystem, when
-     *        config_.render.debug_lines_enabled is set -- the physxcoopa <-> toy::render
+     *        config_.render.debug_view == "lines" -- the physxcoopa <-> toy::render
      *        bridge debug_line_pass.h's file doc describes: the render layer's DebugLine and
      *        pack_gpu_color() know nothing about physics, so this is the one place a
      *        coopa::physx::debug::DebugLine gets translated into one.
      *
-     * No-op (and clears any stale lines) when disabled or when no "Physics" system is
-     * installed, so flipping the toggle at runtime never leaves last frame's overlay stuck.
+     * No-op (and clears any stale lines) when a different debug_view is active or when no
+     * "Physics" system is installed, so switching debug_view at runtime never leaves last
+     * frame's overlay stuck.
      */
     void gather_debug_lines_(coopa::scene::Scene& scene) {
         std::vector<render::DebugLine>& out = pipeline_.debug_lines();
         out.clear();
-        if (!config_.render.debug_lines_enabled) return;
+        if (render::parse_debug_view(config_.render.debug_view) != render::DebugView::Lines) return;
 
         auto* sys = dynamic_cast<coopa::physx::system::PhysicsSystem*>(scene.find_system("Physics"));
         if (!sys) return;

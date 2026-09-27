@@ -42,7 +42,7 @@ layout(set = 0, binding = 4) uniform sampler2D u_depth;
 const float kClampSlack = 0.25;
 
 // Diagnostic build flag: when defined, every path overrides the resolved AO channel with
-// this pixel's accumulation count (b / max_accum), so the ssao_debug_view shows the count
+// this pixel's accumulation count (b / max_accum), so debug_view: ssao shows the count
 // field instead of AO. The count dynamics stay faithful under the override -- .b evolution
 // never reads .r. Capture-only; never ship with this defined.
 // #define COUNT_DEBUG

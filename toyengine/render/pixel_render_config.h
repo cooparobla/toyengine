@@ -7,6 +7,7 @@
 #define TOYENGINE_RENDER_PIXEL_RENDER_CONFIG_H
 
 #include <cstdint>
+#include <iostream>
 #include <string>
 
 #include <glm/glm.hpp>
@@ -34,6 +35,103 @@ enum class RenderQuality {
 };
 
 /**
+ * @brief Which intermediate render buffer `debug_view` replaces the image with.
+ *
+ * Explicit int values: `debug_view.frag`'s `DBG_*` push-constant constants MUST match
+ * this enum member-for-member (see PixelRenderPipeline's debug_view_pass_). Everything
+ * from Albedo through Ssgi is a "channel" (debug_view_is_channel() below) drawn by that
+ * one fullscreen pass, raw -- no tonemap, no bloom, no TAA history blend -- so what's on
+ * screen is exactly the number the renderer computed. Dof/Volumetrics instead flow
+ * through their own already-existing pass with the post chain's stylize step reduced to
+ * a no-op (see record_post_chain_()); Lines is an overlay on the normal image, not a
+ * replacement, and Off is the normal image.
+ */
+enum class DebugView : int {
+    Off = 0,
+    // --- G-buffer / material ---
+    Albedo,
+    Normals,
+    Roughness,
+    Metallic,
+    Emissive,
+    MaterialAo,
+    WorldPos,
+    Depth,
+    // --- lighting terms ---
+    Direct,
+    Indirect,
+    Shadows,
+    /// The resolved contact-shadow buffer (ContactShadowPass), unscaled by strength or per-light
+    /// darkness. Black unless `contact_shadows_enabled` -- the march returns 0 on its first line
+    /// when its strength is 0, the same way `ssgi` needs `ssgi_traced` and `dof` needs
+    /// `dof_enabled`. Shows what lighting actually samples, i.e. post temporal accumulation,
+    /// rather than a raw single-frame march.
+    ContactShadows,
+    Ssao,
+    // --- screen-space ---
+    Ssr,
+    SsrConfidence,
+    Ssgi,
+    // --- in-chain ---
+    Dof,
+    Volumetrics,
+    // --- overlay ---
+    Lines,
+};
+
+/**
+ * @brief Parses `debug_view`'s YAML string into a DebugView, defaulting to Off.
+ *
+ * Unlike an unrecognized YAML *key* (silently ignored, per this file's own parsing
+ * convention), a typo'd *value* here must not silently look like "the debug view is
+ * broken" -- so an unknown name is reported to stderr, naming the valid set, rather than
+ * failing quietly the way a bad key does.
+ */
+inline DebugView parse_debug_view(const std::string& value) {
+    if (value == "off")             return DebugView::Off;
+    if (value == "albedo")          return DebugView::Albedo;
+    if (value == "normals")         return DebugView::Normals;
+    if (value == "roughness")       return DebugView::Roughness;
+    if (value == "metallic")        return DebugView::Metallic;
+    if (value == "emissive")        return DebugView::Emissive;
+    if (value == "material_ao")     return DebugView::MaterialAo;
+    if (value == "world_pos")       return DebugView::WorldPos;
+    if (value == "depth")           return DebugView::Depth;
+    if (value == "direct")          return DebugView::Direct;
+    if (value == "indirect")        return DebugView::Indirect;
+    if (value == "shadows")         return DebugView::Shadows;
+    if (value == "contact_shadows") return DebugView::ContactShadows;
+    if (value == "ssao")            return DebugView::Ssao;
+    if (value == "ssr")             return DebugView::Ssr;
+    if (value == "ssr_confidence")  return DebugView::SsrConfidence;
+    if (value == "ssgi")            return DebugView::Ssgi;
+    if (value == "dof")             return DebugView::Dof;
+    if (value == "volumetrics")     return DebugView::Volumetrics;
+    if (value == "lines")           return DebugView::Lines;
+    std::cerr << "[toy::render] Unknown debug_view '" << value << "', expected one of: "
+                 "off | albedo | normals | roughness | metallic | emissive | material_ao | "
+                 "world_pos | depth | direct | indirect | shadows | contact_shadows | ssao | "
+                 "ssr | ssr_confidence | ssgi | dof | volumetrics | lines. Using 'off'.\n";
+    return DebugView::Off;
+}
+
+/**
+ * @brief True for every DebugView drawn by PixelRenderPipeline's debug_view_pass_ --
+ *        i.e. every value except Off, Dof, Volumetrics and Lines (see that enum's doc).
+ */
+inline bool debug_view_is_channel(DebugView view) {
+    switch (view) {
+        case DebugView::Off:
+        case DebugView::Dof:
+        case DebugView::Volumetrics:
+        case DebugView::Lines:
+            return false;
+        default:
+            return true;
+    }
+}
+
+/**
  * @struct PixelRenderConfig
  * @brief Configuration for PixelRenderPipeline: internal resolution, upscaling,
  *        banded lighting, hard shadows, and the pixel-art post-process stack
@@ -48,15 +146,6 @@ struct PixelRenderConfig {
     bool camera_pixel_snap = true;  /**< Orthographic cameras only. */
     bool soft_lighting     = false; /**< true = smooth Cook-Torrance direct lighting; false = this engine's default banded/ramped cel-shaded look. */
     bool ssao_enabled      = true;
-    /**
-     * Debug view: draws SsaoPass's bound output (its blurred occlusion buffer when
-     * ssao_enabled, or its neutral 1.0 texture otherwise -- see PixelRenderPipeline's
-     * ssao_view selection) fullscreen in place of lighting, via ssao_debug.frag. A runtime
-     * flag re-read every frame, same policy as ssr_enabled below. Skips the SSR composite
-     * and forward transparent pass for that frame (nothing left to composite onto); bloom
-     * and tonemapping still run over the debug image.
-     */
-    bool ssao_debug_view   = false;
     bool ssr_enabled       = true;  /**< Also gates the SSGI diffuse-bounce term (ssgi_intensity). */
     bool transparency_enabled = false;  /**< Forward BLEND-material pass, drawn after SSR compositing. */
     /**
@@ -184,10 +273,14 @@ struct PixelRenderConfig {
         // shadow_pcss_taps/contact_shadow_steps only cost anything when their own feature
         // toggle is on, so scaling them here is free for a config that leaves both off.
         switch (shadow_quality) {
-            case RenderQuality::Low:    shadow_map_resolution = 1024; cube_shadow_resolution = 256;  spot_shadow_resolution = 512;  shadow_pcf_samples = 8;  shadow_pcss_taps = 4;  contact_shadow_steps = 4;  break;
-            case RenderQuality::Medium: shadow_map_resolution = 2048; cube_shadow_resolution = 512;  spot_shadow_resolution = 1024; shadow_pcf_samples = 16; shadow_pcss_taps = 6;  contact_shadow_steps = 6;  break;
+            // shadow_map_resolution is PER CASCADE (see its doc): the directional atlas is up
+            // to 2x this on each axis, so the VRAM column at the default 4 cascades is
+            // 4/16/64/144 MB. Medium is where a single 2048 map used to sit, and high spends
+            // 4x that to beat the old single map's world-per-texel at every distance.
+            case RenderQuality::Low:    shadow_map_resolution = 512;  cube_shadow_resolution = 256;  spot_shadow_resolution = 512;  shadow_pcf_samples = 8;  shadow_pcss_taps = 4;  contact_shadow_steps = 4;  break;
+            case RenderQuality::Medium: shadow_map_resolution = 1024; cube_shadow_resolution = 512;  spot_shadow_resolution = 1024; shadow_pcf_samples = 16; shadow_pcss_taps = 6;  contact_shadow_steps = 6;  break;
             case RenderQuality::High:   shadow_map_resolution = 2048; cube_shadow_resolution = 512;  spot_shadow_resolution = 1024; shadow_pcf_samples = 24; shadow_pcss_taps = 8;  contact_shadow_steps = 8;  break;
-            case RenderQuality::Ultra:  shadow_map_resolution = 4096; cube_shadow_resolution = 1024; spot_shadow_resolution = 2048; shadow_pcf_samples = 32; shadow_pcss_taps = 16; contact_shadow_steps = 16; break;
+            case RenderQuality::Ultra:  shadow_map_resolution = 3072; cube_shadow_resolution = 1024; spot_shadow_resolution = 2048; shadow_pcf_samples = 32; shadow_pcss_taps = 16; contact_shadow_steps = 16; break;
         }
         switch (ssao_quality) {
             case RenderQuality::Low:    ssao_slices = 1; ssao_steps = 6;  ssao_max_radius_px = 32.0f; ssao_temporal_frames = 16; break;
@@ -283,7 +376,39 @@ struct PixelRenderConfig {
 
     // --- Shadows ---
     bool     shadows_enabled        = true;
+    /**
+     * @brief Edge length, in texels, of ONE directional cascade's tile -- not of the whole
+     *        directional shadow image.
+     *
+     * The directional map is an atlas of `shadow_cascades` tiles this size (1x1, 2x1 or 2x2
+     * -- see ShadowMapTarget), so the image is up to 2x this on each axis and up to 4x this
+     * many texels. At the default 4 cascades: low 512 -> 1024^2 (4 MB), medium 1024 ->
+     * 2048^2 (16 MB), high 2048 -> 4096^2 (64 MB), ultra 3072 -> 6144^2 (144 MB).
+     */
     uint32_t shadow_map_resolution  = 2048;
+    /**
+     * @brief How many cascades the directional shadow splits into, 1..4.
+     *
+     * Each cascade is an independent ortho fit to one slice of the camera's depth range, so
+     * the near cascade's texels land on a box a few metres across instead of one spanning
+     * the whole `shadow_distance` -- that is what makes close-up shadows sharp while distant
+     * ones stay coarse. Every cascade re-draws the shadow casters, so this multiplies the
+     * (depth-only) directional shadow pass cost directly.
+     *
+     * 1 is the single-map behaviour: one box over the whole range, no atlas, no per-pixel
+     * cascade selection. Deliberately NOT covered by `shadow_quality` -- the tier moves
+     * resolution only, so changing tiers can never silently change how many cascades exist.
+     */
+    uint32_t shadow_cascades        = 4;
+    /**
+     * @brief Log-vs-uniform blend for where the cascade boundaries fall, 0..1.
+     *
+     * 1 is fully logarithmic (equalizes world-per-texel across cascades, but crushes the
+     * first cascade to centimetres around the near plane), 0 fully uniform (first cascade so
+     * large it barely improves on one map). See toy::render::compute_cascade_splits().
+     * Ignored when `shadow_cascades` is 1.
+     */
+    float    shadow_cascade_split_lambda = 0.75f;
     uint32_t cube_shadow_resolution = 512;
     uint32_t spot_shadow_resolution = 1024;
     float    shadow_bias            = 0.005f;
@@ -396,6 +521,22 @@ struct PixelRenderConfig {
     int      contact_shadow_steps     = 8;     /**< March steps; clamped to 1..24. Set by `shadow_quality` --
                                                  this is a per-pixel screen-space march, so the step count is
                                                  the feature's whole cost. */
+    /**
+     * Accumulate the contact-shadow march across frames, the way `ssao_temporal_enabled` and
+     * `ssr_temporal_enabled` do for theirs. Off makes ContactShadowPass's resolve a passthrough
+     * of the current frame, which is what an A/B capture needs: with it on, the march's input
+     * moves with the TAA sub-pixel jitter, so the running average is not periodic in the jitter
+     * cycle and two captures a cycle apart are not the same frame.
+     */
+    bool     contact_shadow_temporal_enabled = true;
+    /**
+     * Accumulation depth of the contact-shadow temporal resolve, on the same converging
+     * `1/(N+1)` schedule (and against the same shared per-pixel count) as
+     * `ssao_temporal_frames` and `ssr_temporal_frames`. Shallower than either: a contact
+     * shadow is a thin, high-contrast, geometrically local feature, so deep accumulation
+     * trades its crispness for stability faster than the other two do.
+     */
+    int      contact_shadow_temporal_frames = 16;
 
     // --- Outline ---
     float     outline_thickness = 1.0f;     /**< In low-resolution texels. */
@@ -459,10 +600,45 @@ struct PixelRenderConfig {
     float ssr_thickness        = 0.05f;
     float ssr_thickness_scale  = 0.01f;
     float ssr_bias_texels      = 3.5f;
-    float ssr_roughness_cutoff = 1.0f;  /**< 1.0 so rough surfaces still trace and feed the SSGI bounce. */
+    /**
+     * Roughness above which a surface stops tracing. 1.0 = everything traces, so rough surfaces
+     * still feed the SSGI bounce.
+     *
+     * Worth knowing before tuning it: the composite does not *add* the reflection, it
+     * **replaces** the env/sky specular with it --
+     * `scene_color + (ssr_specular - confidence * ind.value) * ao_spec` in
+     * `gfx/ssr_composite_body.glsl`. Roughness past the cutoff fades confidence to 0, which skips
+     * that subtraction and leaves the analytic sky term standing, and this engine has no
+     * reflection probes to hand those surfaces to (`indirect_hooks.glsl`'s
+     * `hook_env_specular()` returns the sky gradient unmodified). Measured on terrain_test,
+     * though, 1.0 vs 0.6 moves whole-frame saturation by 0.002 -- the handover is not the visible
+     * lever it looks like on paper.
+     */
+    float ssr_roughness_cutoff = 1.0f;
     int   ssr_start_mip        = 0;
     int   ssr_min_mip0_steps   = 1;
     bool  ssr_temporal_enabled = true;
+    /**
+     * Accumulation depth of the SSR temporal resolve: each pixel averages this many frames of
+     * the stochastically-jittered trace (blending frame N at 1/(N+1), against the shared
+     * per-pixel count TemporalHistoryPass publishes) before switching to a fixed-rate running
+     * average. Deeper = quieter reflections in motion, slower response to genuine change.
+     * Same knob and same schedule as `ssao_temporal_frames`.
+     */
+    int   ssr_temporal_frames  = 32;
+    /**
+     * Accumulation depth of the traced-SSGI bounce's temporal resolve. Deeper than
+     * `ssr_temporal_frames` on purpose: one cosine-hemisphere ray per pixel has far higher
+     * variance than a near-mirror reflection ray, and a diffuse bounce is low-frequency enough
+     * that the extra lag is invisible.
+     */
+    int   ssgi_temporal_frames = 48;
+    /**
+     * Fallback exponential-blend weight on history, used only where the shared accumulation
+     * count is unavailable (a consumer bound to TemporalHistoryPass's 1x1 neutral texture, i.e.
+     * a frame where that pass never ran). The converging `*_temporal_frames` average above is
+     * what the shipped path uses.
+     */
     float ssr_temporal_blend   = 0.85f;
     float ssr_blur_radius      = 0.5f;  /**< World-space sigma for the spatial SSR denoise (ssr_blur.frag). */
     float ssr_jitter           = 0.0f;  /**< Stochastic ray jitter strength, as a fraction of the
@@ -573,7 +749,6 @@ struct PixelRenderConfig {
      * leaves the (much cheaper) sun-shaft term running on its own.
      */
     int   volumetrics_max_scatter_lights = 4;
-    bool  volumetrics_debug_view     = false; /**< Output accumulated density alone, scene colour suppressed. */
 
     /**
      * Diorama-style tilt-shift blur (Zelda: Link's Awakening [Switch] reference) -- see
@@ -631,10 +806,10 @@ struct PixelRenderConfig {
      * fog_enabled/tilt_shift_enabled above): its descriptor binding -- whether
      * bloom_pass_/pixel_stylize_pass_ read dof_pass_'s result or the pre-DOF
      * image directly -- is decided once at construction from this flag's
-     * startup value. dof_debug_view, dof_focus_mode/object/smoothing are RUNTIME
-     * fields, like ssao_debug_view: they only change push constants (or which scene
-     * object CPU code reads), not a descriptor binding, so they're safe to change
-     * every frame.
+     * startup value. dof_focus_mode/object/smoothing (and debug_view, see that
+     * enum's doc) are RUNTIME fields: they only change push constants (or which
+     * scene object CPU code reads), not a descriptor binding, so they're safe to
+     * change every frame.
      */
     bool        dof_enabled         = false;
     std::string dof_focus_mode      = "manual";  /**< manual | orbit_target | object. */
@@ -658,7 +833,6 @@ struct PixelRenderConfig {
     int         dof_sample_count    = 32;        /**< Spiral gather taps; clamped to [8, 48] in-shader. */
     int         dof_blade_count     = 0;         /**< < 3 = perfect disc bokeh; else an N-sided polygonal iris. */
     float       dof_blade_rotation  = 0.0f;      /**< Iris rotation, degrees. */
-    bool        dof_debug_view      = false;     /**< Renders the signed CoC field in place of the image. */
 
     /**
      * Anti-aliasing. Three modes; MSAA is deliberately absent, since every target here is
@@ -695,19 +869,25 @@ struct PixelRenderConfig {
     float taa_variance_gamma      = 1.0f;    /**< History clip box half-width, in standard deviations of the 3x3 YCoCg neighbourhood. */
 
     /**
-     * @brief Draws physics collider wireframes/contact normals (DebugLinePass), gathered each
-     *        frame from PhysicsWorld::debug_draw() -- see toyengine/render/passes/debug_line_pass.h.
-     *        Per-frame safe to toggle (it only gates whether the pass records draws, binds
-     *        nothing), unlike bloom_enabled/tilt_shift_enabled above.
+     * @brief Replaces the image with one intermediate render buffer, or (debug_view ==
+     *        "lines") overlays physics collider/contact wireframes (DebugLinePass, gathered
+     *        each frame from PhysicsWorld::debug_draw() -- see
+     *        toyengine/render/passes/debug_line_pass.h) on top of the normal image.
+     *
+     * See the DebugView enum's own doc for the full option list and what each one shows.
+     * RUNTIME, like ssr_enabled: PixelRenderPipeline's debug_view_pass_ (and every pass
+     * this reduces to a no-op) is always constructed, so re-reading this fresh every frame
+     * changes nothing about which descriptors exist -- only which fullscreen draw runs and
+     * which push-constant fields are zeroed.
      */
-    bool  debug_lines_enabled     = false;
+    std::string debug_view = "off";
 
     /**
      * @brief Draws every WorldSpace uicoopa CanvasComponent in the scene (UiWorldPass) as a
      *        guest inside post_target_'s bracket -- see uicoopa/render/ui_world_pass.h and
      *        CanvasRenderMode.
      *
-     * STARTUP-FIXED, unlike debug_lines_enabled above: turning it on builds the UI pipelines
+     * STARTUP-FIXED, unlike debug_view above: turning it on builds the UI pipelines
      * and binds the G-buffer depth into a descriptor set, neither of which can happen once
      * the frame loop is running (DescriptorSet::bind_image() updates descriptors
      * immediately). Off leaves the pass unconstructed and the descriptor unallocated, so it

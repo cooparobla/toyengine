@@ -32,42 +32,11 @@ layout(set = 0, binding = 0) uniform CameraUBO {
     vec3 camera_pos;
 } camera;
 
-// Set 1: Light UBO -- identical layout to pixel_lighting.frag's
-struct PointLight {
-    vec4 position_range;  // xyz = pos, w = range
-    vec4 color_intensity; // xyz = color, w = intensity
-    vec4 attenuation;     // x=const, y=lin, z=quad, w=cast_shadows (1 or 0)
-};
-
-layout(set = 1, binding = 0) uniform LightUBO {
-    vec4 dir_direction;
-    vec4 dir_color;
-    vec4 dir_shadow_extra; // x=shadow_intensity, y=point_pcf_radius, z=pcf_samples, w=frame_offset -- see LightUBO's C++ doc (light_data.h)
-    mat4 dir_light_space_matrix;
-    vec4 dir_shadow_params; // x=bias, y=pcf_radius_texels (0=hard), z=shadow_enabled, w=normal_bias
-
-    uvec4 light_counts; // x=num_dir, y=num_point, z=num_spot, w=spot_shadow_index
-    PointLight point_lights[16];
-
-    // Configurable sky/ambient colour (see IndirectParams in render_features.h).
-    // Trailing so no field above moves -- std140 only requires a matching prefix.
-    // Read by pixel_forward_shading.glsl's gfx_pixel_forward_shade() via `lights.*`.
-    vec4 sky_zenith;
-    vec4 sky_horizon;
-    vec4 sky_ground;
-
-    // Spot Lights -- appended after sky_ground; see light_data.h's LightUBO doc. Also read
-    // by pixel_forward_shading.glsl's spot loop via `lights.*`, same as sky_* above.
-    mat4 spot_light_space_matrix;
-    vec4 spot_shadow_params; // x=bias, y=penumbra scale K, texels*distance (0=hard; see calc_spot_shadow), z=shadow_enabled, w=normal_bias
-    SpotLight spot_lights[8];
-
-    // Appended after spot_lights per light_data.h's append-only rule.
-    vec4 pcss_params;    // x=enabled, y=penumbra texels per unit depth gap,
-                         // z=blocker search radius texels (see calc_dir_shadow)
-    vec4 contact_params; // x=strength (0 disables), y=length m, z=thickness m,
-                         // w=steps -- read only by pixel_lighting.frag's contact march
-} lights;
+// Set 1: Light UBO.
+// The `lights` block (and the PointLight struct it needs) comes from the single copy in
+// light_ubo_body.glsl -- see that file on why there is exactly one. Requires
+// <gfx/spot_light.glsl>, included above.
+#include <light_ubo_body.glsl>
 
 // Set 2: Shadow maps -- one directional map, one point cube map, one spot map
 // (see shadow_map_target.h). *Shadow: hardware compareEnable sampler

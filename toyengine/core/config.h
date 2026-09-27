@@ -165,7 +165,6 @@ struct AppConfig {
                 if (r.contains("camera_pixel_snap")) config.render.camera_pixel_snap = r.at("camera_pixel_snap").get_value<bool>();
                 if (r.contains("soft_lighting"))     config.render.soft_lighting     = r.at("soft_lighting").get_value<bool>();
                 if (r.contains("ssao_enabled"))      config.render.ssao_enabled      = r.at("ssao_enabled").get_value<bool>();
-                if (r.contains("ssao_debug_view"))   config.render.ssao_debug_view   = r.at("ssao_debug_view").get_value<bool>();
                 if (r.contains("ssr_enabled"))       config.render.ssr_enabled       = r.at("ssr_enabled").get_value<bool>();
                 if (r.contains("transparency_enabled")) config.render.transparency_enabled = r.at("transparency_enabled").get_value<bool>();
                 if (r.contains("ssr_reflect_transparent")) config.render.ssr_reflect_transparent = r.at("ssr_reflect_transparent").get_value<bool>();
@@ -177,8 +176,7 @@ struct AppConfig {
                 if (r.contains("bloom_enabled"))     config.render.bloom_enabled     = r.at("bloom_enabled").get_value<bool>();
                 if (r.contains("tilt_shift_enabled")) config.render.tilt_shift_enabled = r.at("tilt_shift_enabled").get_value<bool>();
                 if (r.contains("dof_enabled"))        config.render.dof_enabled        = r.at("dof_enabled").get_value<bool>();
-                if (r.contains("dof_debug_view"))     config.render.dof_debug_view     = r.at("dof_debug_view").get_value<bool>();
-                if (r.contains("debug_lines_enabled")) config.render.debug_lines_enabled = r.at("debug_lines_enabled").get_value<bool>();
+                if (r.contains("debug_view"))          config.render.debug_view          = r.at("debug_view").get_value<std::string>();
                 if (r.contains("world_ui_enabled"))   config.render.world_ui_enabled   = r.at("world_ui_enabled").get_value<bool>();
                 if (r.contains("screen_ui_enabled"))  config.render.screen_ui_enabled  = r.at("screen_ui_enabled").get_value<bool>();
 
@@ -228,6 +226,8 @@ struct AppConfig {
                 // --- Shadows ---
                 if (r.contains("shadows_enabled"))        config.render.shadows_enabled        = r.at("shadows_enabled").get_value<bool>();
                 if (r.contains("shadow_map_resolution"))  config.render.shadow_map_resolution  = r.at("shadow_map_resolution").get_value<uint32_t>();
+                if (r.contains("shadow_cascades"))        config.render.shadow_cascades        = r.at("shadow_cascades").get_value<uint32_t>();
+                if (r.contains("shadow_cascade_split_lambda")) config.render.shadow_cascade_split_lambda = r.at("shadow_cascade_split_lambda").get_value<float>();
                 if (r.contains("cube_shadow_resolution")) config.render.cube_shadow_resolution = r.at("cube_shadow_resolution").get_value<uint32_t>();
                 if (r.contains("spot_shadow_resolution")) config.render.spot_shadow_resolution = r.at("spot_shadow_resolution").get_value<uint32_t>();
                 if (r.contains("shadow_bias"))            config.render.shadow_bias            = r.at("shadow_bias").get_value<float>();
@@ -247,6 +247,8 @@ struct AppConfig {
                 if (r.contains("contact_shadow_strength"))   config.render.contact_shadow_strength   = r.at("contact_shadow_strength").get_value<float>();
                 if (r.contains("contact_shadow_thickness"))  config.render.contact_shadow_thickness  = r.at("contact_shadow_thickness").get_value<float>();
                 if (r.contains("contact_shadow_steps"))      config.render.contact_shadow_steps      = r.at("contact_shadow_steps").get_value<int>();
+                if (r.contains("contact_shadow_temporal_enabled")) config.render.contact_shadow_temporal_enabled = r.at("contact_shadow_temporal_enabled").get_value<bool>();
+                if (r.contains("contact_shadow_temporal_frames")) config.render.contact_shadow_temporal_frames = r.at("contact_shadow_temporal_frames").get_value<int>();
 
                 // --- Outline ---
                 if (r.contains("outline_thickness")) config.render.outline_thickness = r.at("outline_thickness").get_value<float>();
@@ -293,6 +295,8 @@ struct AppConfig {
                 if (r.contains("ssr_start_mip"))        config.render.ssr_start_mip        = r.at("ssr_start_mip").get_value<int>();
                 if (r.contains("ssr_min_mip0_steps"))   config.render.ssr_min_mip0_steps   = r.at("ssr_min_mip0_steps").get_value<int>();
                 if (r.contains("ssr_temporal_enabled")) config.render.ssr_temporal_enabled = r.at("ssr_temporal_enabled").get_value<bool>();
+                if (r.contains("ssr_temporal_frames"))  config.render.ssr_temporal_frames  = r.at("ssr_temporal_frames").get_value<int>();
+                if (r.contains("ssgi_temporal_frames")) config.render.ssgi_temporal_frames = r.at("ssgi_temporal_frames").get_value<int>();
                 if (r.contains("ssr_temporal_blend"))   config.render.ssr_temporal_blend   = r.at("ssr_temporal_blend").get_value<float>();
                 if (r.contains("ssr_blur_radius"))      config.render.ssr_blur_radius      = r.at("ssr_blur_radius").get_value<float>();
                 if (r.contains("ssr_jitter"))           config.render.ssr_jitter           = r.at("ssr_jitter").get_value<float>();
@@ -350,7 +354,6 @@ struct AppConfig {
                 if (r.contains("volumetrics_shadows_enabled")) config.render.volumetrics_shadows_enabled = r.at("volumetrics_shadows_enabled").get_value<bool>();
                 if (r.contains("volumetrics_light_scatter"))  config.render.volumetrics_light_scatter  = r.at("volumetrics_light_scatter").get_value<float>();
                 if (r.contains("volumetrics_max_scatter_lights")) config.render.volumetrics_max_scatter_lights = r.at("volumetrics_max_scatter_lights").get_value<int>();
-                if (r.contains("volumetrics_debug_view"))     config.render.volumetrics_debug_view     = r.at("volumetrics_debug_view").get_value<bool>();
 
                 if (r.contains("bloom_threshold")) config.render.bloom_threshold = r.at("bloom_threshold").get_value<float>();
                 if (r.contains("bloom_soft_knee")) config.render.bloom_soft_knee = r.at("bloom_soft_knee").get_value<float>();

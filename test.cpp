@@ -267,6 +267,53 @@ long long count_nonblack(const Frame& f) {
     return n;
 }
 
+/**
+ * @brief Mean pixel-scale deviation from the local 3x3 average, in levels -- a high-pass energy.
+ *
+ * The metric for "grainy": a stochastic trace that has not been integrated shows as per-pixel
+ * variance against its own neighbourhood. Deliberately NOT a frame-to-frame delta, which under
+ * camera motion is dominated by the image legitimately changing (measured: ~0.15 levels/px at
+ * 1.5 deg/frame, identical whether the traces are noisy or clean) and so cannot see the jitter at
+ * all. This reads the same number whether the camera is moving or still, which is exactly what
+ * lets the in-motion image be compared against the resting one.
+ */
+double local_high_pass(const Frame& f) {
+    if (f.pixels.empty() || f.width < 3 || f.height < 3) return -1.0;
+    const int w = int(f.width), h = int(f.height), c = int(f.channels);
+    // Only pixels with actual signal in them. This scene's terrain island sits in a large
+    // expanse of near-black sky, and averaging a noise measure over that expanse reports a
+    // number that mostly says "how much of the frame is empty" -- the same dilution that made
+    // every variant look alike before this cutoff existed.
+    const int kLitThreshold = 8;
+    double sum = 0.0;
+    long long n = 0;
+    for (int y = 1; y < h - 1; ++y) {
+        for (int x = 1; x < w - 1; ++x) {
+            int local = 0;
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    local += int(f.pixels[size_t((y + dy) * w + (x + dx)) * size_t(c)]);
+                }
+            }
+            if (local < kLitThreshold * 9) continue;
+            const int centre = int(f.pixels[size_t(y * w + x) * size_t(c)]);
+            sum += std::abs(centre - local / 9.0);
+            ++n;
+        }
+    }
+    return n > 0 ? sum / double(n) : -1.0;
+}
+
+/** @brief Mean per-channel |a - b| over a frame pair, in 0-255 levels per pixel. */
+double mean_abs_delta(const Frame& a, const Frame& b) {
+    if (a.pixels.size() != b.pixels.size() || a.pixels.empty()) return -1.0;
+    long long sum = 0;
+    for (size_t k = 0; k < a.pixels.size(); k += a.channels) {
+        sum += std::abs(int(a.pixels[k]) - int(b.pixels[k]));
+    }
+    return double(sum) / double(a.width * a.height);
+}
+
 /** @brief The first pixel in `f` that matches no entry of `palette`, or -1 if all do. */
 long long first_off_palette_pixel(const Frame& f, const uint8_t palette[][3], size_t entries) {
     const size_t pixels = static_cast<size_t>(f.width) * f.height;
@@ -320,6 +367,11 @@ toy::core::AppConfig make_test_config(const std::string& scene,
     config.render.render_height         = rh;
     config.render.ssao_temporal_enabled = false;
     config.render.ssr_temporal_enabled  = false;
+    config.render.contact_shadow_temporal_enabled = false;
+    // The stochastic ray jitter itself is deliberately NOT disabled here: SsrPass pins its
+    // noise seed to frame 0 whenever the temporal resolve is off (see its execute()), so the
+    // jittered trace is deterministic frame to frame and this config still exercises the code
+    // path that ships.
 
     config.output.save_on_exit = false;
     return config;
@@ -562,6 +614,161 @@ void test_dir_shadow_fit_degenerate_shadow_distance() {
            "dir_shadow_fit: degenerate shadow_distance keeps a finite depth range");
 }
 
+// --- Directional shadow cascades (pixel_math.h's compute_cascade_splits /
+//     compute_dir_shadow_fit_slice / cascade_atlas_tile) ---
+
+void test_cascade_splits_are_increasing_and_reach_the_distance() {
+    auto s = toy::render::compute_cascade_splits(0.1f, 60.0f, 4, 0.75f);
+    expect(s.distance[0] < s.distance[1] && s.distance[1] < s.distance[2] &&
+           s.distance[2] < s.distance[3],
+           "cascade_splits: boundaries strictly increase");
+    expect_near(s.distance[3], 60.0f, 1e-4f,
+                "cascade_splits: the last cascade reaches exactly shadow_distance");
+    // The whole point of cascades: the near slice must be a small fraction of the range,
+    // which is what makes its ortho box (and so its texels) small.
+    expect(s.distance[0] < 60.0f * 0.2f,
+           "cascade_splits: the near cascade covers a small fraction of the range");
+}
+
+void test_cascade_splits_single_cascade_is_the_whole_range() {
+    // shadow_cascades: 1 must degrade to exactly the pre-cascade behaviour -- one slice
+    // spanning everything -- so it stays a usable A/B baseline.
+    auto s = toy::render::compute_cascade_splits(0.1f, 60.0f, 1, 0.75f);
+    expect_near(s.distance[0], 60.0f, 1e-4f, "cascade_splits: one cascade spans the whole range");
+    expect_near(s.distance[3], 60.0f, 1e-4f, "cascade_splits: unused slots repeat the last boundary");
+}
+
+void test_cascade_splits_lambda_selects_the_distribution() {
+    // lambda 0 is the uniform distribution exactly; lambda 1 the logarithmic one. Between
+    // them the first boundary must move monotonically, or the config knob does nothing.
+    auto uni = toy::render::compute_cascade_splits(0.1f, 60.0f, 4, 0.0f);
+    auto mid = toy::render::compute_cascade_splits(0.1f, 60.0f, 4, 0.75f);
+    auto log = toy::render::compute_cascade_splits(0.1f, 60.0f, 4, 1.0f);
+    expect_near(uni.distance[0], 0.1f + (60.0f - 0.1f) * 0.25f, 1e-3f,
+                "cascade_splits: lambda 0 is the uniform distribution");
+    expect(log.distance[0] < mid.distance[0] && mid.distance[0] < uni.distance[0],
+           "cascade_splits: lambda moves the first boundary between log and uniform");
+}
+
+void test_cascade_fit_near_slice_is_finer_than_far_slice() {
+    // The reason the feature exists: at the SAME tile resolution, the near cascade's box is
+    // small, so its world-per-texel is far smaller than the far cascade's.
+    glm::vec3 dir(-0.45f, -0.35f, -0.82f);
+    auto cam = make_shadow_fit_camera(glm::vec3(0.0f, -10.0f, 4.0f), glm::vec3(0.0f));
+    auto splits = toy::render::compute_cascade_splits(cam.near_clip, 60.0f, 4, 0.75f);
+
+    auto near_fit = toy::render::compute_dir_shadow_fit_slice(
+        dir, &cam, cam.near_clip, splits.distance[0], 60.0f, 1024);
+    auto far_fit = toy::render::compute_dir_shadow_fit_slice(
+        dir, &cam, splits.distance[2], splits.distance[3], 60.0f, 1024);
+    expect(near_fit.texel_world < far_fit.texel_world,
+           "cascade_fit: the near cascade has smaller world-per-texel than the far one");
+
+    // And finer than the single whole-range map at the same resolution -- the actual user
+    // complaint, which is that close-up shadows are as coarse as distant ones.
+    auto whole = toy::render::compute_dir_shadow_fit(dir, &cam, 60.0f, 1024);
+    expect(near_fit.texel_world < whole.texel_world * 0.5f,
+           "cascade_fit: the near cascade is at least 2x finer than one map over the whole range");
+}
+
+void test_cascade_fit_contains_its_own_slice() {
+    // Containment-based cascade selection (gfx_csm_select) only works if a slice's frustum
+    // corners really do project inside that slice's own box -- otherwise a shading point
+    // would fall through to a coarser cascade, or off the end entirely.
+    glm::vec3 dir(-0.45f, -0.35f, -0.82f);
+    auto cam = make_shadow_fit_camera(glm::vec3(12.0f, -40.0f, 18.0f), glm::vec3(0.0f, 0.0f, 2.0f));
+    auto splits = toy::render::compute_cascade_splits(cam.near_clip, 60.0f, 4, 0.75f);
+
+    const glm::mat4 cam_to_world = glm::inverse(cam.view);
+    const glm::vec3 cam_pos     = glm::vec3(cam_to_world[3]);
+    const glm::vec3 cam_right   = glm::vec3(cam_to_world[0]);
+    const glm::vec3 cam_up      = glm::vec3(cam_to_world[1]);
+    const glm::vec3 cam_forward = -glm::vec3(cam_to_world[2]);
+
+    bool all_inside = true;
+    for (int c = 0; c < 4; ++c) {
+        const float slice_near = (c == 0) ? cam.near_clip : splits.distance[c - 1];
+        auto fit = toy::render::compute_dir_shadow_fit_slice(
+            dir, &cam, slice_near, splits.distance[c], 60.0f, 1024);
+        for (float d : {slice_near, splits.distance[c]}) {
+            const float half_h = d * std::tan(glm::radians(cam.fov_degrees) * 0.5f);
+            const float half_w = half_h * cam.aspect;
+            for (int sy = -1; sy <= 1; sy += 2) {
+                for (int sx = -1; sx <= 1; sx += 2) {
+                    const glm::vec3 corner = cam_pos + cam_forward * d
+                                           + cam_right * (static_cast<float>(sx) * half_w)
+                                           + cam_up    * (static_cast<float>(sy) * half_h);
+                    const glm::vec4 clip = fit.light_space_matrix * glm::vec4(corner, 1.0f);
+                    const glm::vec3 ndc  = glm::vec3(clip) / clip.w;
+                    if (std::abs(ndc.x) > 1.0f || std::abs(ndc.y) > 1.0f ||
+                        ndc.z < 0.0f || ndc.z > 1.0f) {
+                        all_inside = false;
+                    }
+                }
+            }
+        }
+    }
+    expect(all_inside, "cascade_fit: every slice's frustum corners project inside its own box");
+}
+
+void test_cascade_fit_reaches_casters_above_the_near_slice() {
+    // A cascade covering only the nearest few metres must still see a caster high above it,
+    // between the ground and the sun -- the near plane is pulled back by the whole
+    // shadow_distance (caster_reach), not by the slice's own depth.
+    const glm::vec3 dir(0.0f, 0.0f, -1.0f); // straight down
+    auto cam = make_shadow_fit_camera(glm::vec3(0.0f, -6.0f, 2.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+    auto fit = toy::render::compute_dir_shadow_fit_slice(dir, &cam, 0.1f, 5.0f, 60.0f, 1024);
+
+    const glm::vec4 clip = fit.light_space_matrix * glm::vec4(0.0f, -6.0f, 32.0f, 1.0f);
+    const glm::vec3 ndc  = glm::vec3(clip) / clip.w;
+    expect(ndc.z >= 0.0f && ndc.z <= 1.0f,
+           "cascade_fit: a caster 30m above the near cascade is still inside its depth range");
+}
+
+void test_cascade_atlas_tiles_are_disjoint_and_in_bounds() {
+    // The shader remaps a cascade's [0,1] light-space xy into its tile. Overlapping or
+    // out-of-range tiles would silently make two cascades sample each other's depths.
+    for (uint32_t count = 1; count <= 4; ++count) {
+        const glm::uvec2 grid = toy::render::cascade_atlas_grid(count);
+        expect(grid.x * grid.y >= count, "cascade_atlas: the grid holds every cascade");
+        expect(grid.x * grid.y - count <= 1, "cascade_atlas: the grid wastes at most one tile");
+
+        for (uint32_t a = 0; a < count; ++a) {
+            auto ta = toy::render::cascade_atlas_tile(a, count);
+            expect(ta.origin.x >= 0.0f && ta.origin.y >= 0.0f &&
+                   ta.origin.x + ta.scale.x <= 1.0f + 1e-6f &&
+                   ta.origin.y + ta.scale.y <= 1.0f + 1e-6f,
+                   "cascade_atlas: every tile lies inside the atlas");
+            for (uint32_t b = a + 1; b < count; ++b) {
+                auto tb = toy::render::cascade_atlas_tile(b, count);
+                const bool disjoint =
+                    ta.origin.x + ta.scale.x <= tb.origin.x + 1e-6f ||
+                    tb.origin.x + tb.scale.x <= ta.origin.x + 1e-6f ||
+                    ta.origin.y + ta.scale.y <= tb.origin.y + 1e-6f ||
+                    tb.origin.y + tb.scale.y <= ta.origin.y + 1e-6f;
+                expect(disjoint, "cascade_atlas: tiles never overlap");
+            }
+        }
+    }
+    // One cascade is the whole atlas -- exactly the pre-cascade single map.
+    auto solo = toy::render::cascade_atlas_tile(0, 1);
+    expect_near(solo.scale.x, 1.0f, 1e-6f, "cascade_atlas: one cascade fills the atlas");
+    expect_near(solo.scale.y, 1.0f, 1e-6f, "cascade_atlas: one cascade fills the atlas (y)");
+}
+
+void test_cascade_selection_inset_exceeds_the_pcf_reach() {
+    // The inset update_dir_shadow_matrix_() writes into dir_cascade_info.z is what keeps a
+    // PCF tap inside its own tile: no tap can reach further than the clamped 12-texel
+    // penumbra radius plus the 16-texel PCSS blocker-search cap. If a smaller tile
+    // resolution ever made that inset eat the whole tile, selection would reject everything.
+    for (uint32_t tile_res : {512u, 1024u, 2048u, 3072u}) {
+        const float max_reach_texels = 12.0f + 16.0f;
+        const float inset = max_reach_texels / static_cast<float>(tile_res);
+        expect(inset < 0.25f,
+               "cascade_inset: the PCF-reach inset stays a small fraction of every tile");
+    }
+}
+
 void test_pixel_density_orthographic() {
     // ortho_size=5.4, render_height=270 -> 10.8/270 = 0.04 world units/px
     expect_near(toy::render::compute_pixel_density(true, 5.4f, 270), 0.04f, 1e-6f,
@@ -696,14 +903,14 @@ void test_pixel_render_config_dof_defaults() {
     expect(cfg.dof_sample_count == 32, "PixelRenderConfig: dof_sample_count defaults to 32");
     expect(cfg.dof_blade_count == 0, "PixelRenderConfig: dof_blade_count defaults to 0 (perfect disc)");
     expect(cfg.dof_blade_rotation == 0.0f, "PixelRenderConfig: dof_blade_rotation defaults to 0.0");
-    expect(cfg.dof_debug_view == false, "PixelRenderConfig: dof_debug_view defaults to false");
+    expect(cfg.debug_view == "off", "PixelRenderConfig: debug_view defaults to off");
 }
 
 void test_app_config_load_round_trips_dof_settings() {
     toy::core::AppConfig config = load_config_text("test_dof_config.yaml",
         "render:\n"
         "  dof_enabled: true\n"
-        "  dof_debug_view: true\n"
+        "  debug_view: dof\n"
         "  dof_focus_mode: object\n"
         "  dof_focus_object: sdf_blob:sdf_blob_sphere\n"
         "  dof_focus_smoothing: 3.5\n"
@@ -717,7 +924,7 @@ void test_app_config_load_round_trips_dof_settings() {
         "  dof_blade_rotation: 30.0\n");
 
     expect(config.render.dof_enabled == true, "AppConfig::load: dof_enabled round-trips");
-    expect(config.render.dof_debug_view == true, "AppConfig::load: dof_debug_view round-trips");
+    expect(config.render.debug_view == "dof", "AppConfig::load: debug_view round-trips");
     expect(config.render.dof_focus_mode == "object", "AppConfig::load: dof_focus_mode round-trips");
     expect(config.render.dof_focus_object == "sdf_blob:sdf_blob_sphere", "AppConfig::load: dof_focus_object round-trips");
     expect(config.render.dof_focus_smoothing == 3.5f, "AppConfig::load: dof_focus_smoothing round-trips");
@@ -729,6 +936,26 @@ void test_app_config_load_round_trips_dof_settings() {
     expect(config.render.dof_sample_count == 16, "AppConfig::load: dof_sample_count round-trips");
     expect(config.render.dof_blade_count == 6, "AppConfig::load: dof_blade_count round-trips");
     expect(config.render.dof_blade_rotation == 30.0f, "AppConfig::load: dof_blade_rotation round-trips");
+}
+
+/**
+ * @brief debug_view round-trips through AppConfig::load() and parse_debug_view() maps a
+ *        recognized name to its DebugView value, defaulting an unrecognized one to Off.
+ */
+void test_debug_view_parsing() {
+    toy::core::AppConfig config = load_config_text("test_debug_view_config.yaml",
+        "render:\n"
+        "  debug_view: contact_shadows\n");
+    expect(config.render.debug_view == "contact_shadows", "AppConfig::load: debug_view round-trips");
+    expect(toy::render::parse_debug_view(config.render.debug_view) == toy::render::DebugView::ContactShadows,
+           "parse_debug_view: 'contact_shadows' maps to DebugView::ContactShadows");
+
+    expect(toy::render::parse_debug_view("off") == toy::render::DebugView::Off,
+           "parse_debug_view: 'off' maps to DebugView::Off");
+    expect(toy::render::parse_debug_view("lines") == toy::render::DebugView::Lines,
+           "parse_debug_view: 'lines' maps to DebugView::Lines");
+    expect(toy::render::parse_debug_view("nonsense") == toy::render::DebugView::Off,
+           "parse_debug_view: an unrecognized name defaults to DebugView::Off");
 }
 
 void test_pixel_render_config_soft_shadow_defaults() {
@@ -753,6 +980,25 @@ void test_app_config_load_round_trips_soft_shadow_settings() {
     expect(config.render.shadow_pcf_samples == 8u, "AppConfig::load: shadow_pcf_samples round-trips");
 }
 
+void test_app_config_load_round_trips_cascade_settings() {
+    toy::core::AppConfig config = load_config_text("test_cascade_config.yaml",
+        "render:\n"
+        "  shadow_cascades: 2\n"
+        "  shadow_cascade_split_lambda: 0.4\n");
+
+    expect(config.render.shadow_cascades == 2u, "AppConfig::load: shadow_cascades round-trips");
+    expect(config.render.shadow_cascade_split_lambda == 0.4f,
+           "AppConfig::load: shadow_cascade_split_lambda round-trips");
+
+    // Unwritten, the defaults are the shipped 4-cascade setup.
+    toy::core::AppConfig plain = load_config_text("test_cascade_default_config.yaml",
+        "render:\n"
+        "  exposure: 1.0\n");
+    expect(plain.render.shadow_cascades == 4u, "PixelRenderConfig: shadow_cascades defaults to 4");
+    expect(plain.render.shadow_cascade_split_lambda == 0.75f,
+           "PixelRenderConfig: shadow_cascade_split_lambda defaults to 0.75");
+}
+
 /**
  * @brief Exercises the per-feature quality presets: tier strings (including the "med"
  * alias and the unknown-string fallback) expand to the preset field values, an
@@ -774,7 +1020,9 @@ void test_app_config_load_applies_quality_presets() {
         "  ssr_max_iterations: 200\n");
 
     expect(config.render.shadow_quality == RenderQuality::Ultra, "AppConfig::load: shadow_quality parses ultra");
-    expect(config.render.shadow_map_resolution == 4096u, "quality preset: ultra shadow_map_resolution");
+    // Per CASCADE, not the whole directional image: at the default 4 cascades the atlas is
+    // twice this on each axis, so ultra allocates 6144^2 (see PixelRenderConfig's doc).
+    expect(config.render.shadow_map_resolution == 3072u, "quality preset: ultra shadow_map_resolution");
     expect(config.render.cube_shadow_resolution == 1024u, "quality preset: ultra cube_shadow_resolution");
     expect(config.render.spot_shadow_resolution == 2048u, "quality preset: ultra spot_shadow_resolution");
     expect(config.render.shadow_pcf_samples == 32u, "quality preset: ultra shadow_pcf_samples");
@@ -806,6 +1054,9 @@ void test_app_config_load_applies_quality_presets() {
         "render:\n"
         "  exposure: 1.0\n");
     expect(plain.render.shadow_map_resolution == 2048u, "quality preset: default High shadow_map_resolution");
+    // shadow_cascades is deliberately NOT preset-covered: the tier moves resolution only, so
+    // switching tiers can never silently change how many cascades a scene renders.
+    expect(plain.render.shadow_cascades == 4u, "quality preset: shadow_cascades is not tier-driven");
     expect(plain.render.shadow_pcf_samples == 24u, "quality preset: default High shadow_pcf_samples");
     expect(plain.render.ssao_steps == 16, "quality preset: default High ssao_steps");
     expect(plain.render.ssr_max_iterations == 64, "quality preset: default High ssr_max_iterations");
@@ -849,7 +1100,7 @@ void test_app_config_load_round_trips_atmosphere_settings() {
         "  volumetrics_max_distance: 22.0\n"
         "  volumetrics_max_opacity: 0.45\n"
         "  volumetrics_sun_anisotropy: 0.35\n"
-        "  volumetrics_debug_view: true\n"
+        "  debug_view: volumetrics\n"
         "  bloom_enabled: true\n"
         "  bloom_threshold: 0.8\n"
         "  bloom_soft_knee: 0.3\n"
@@ -884,7 +1135,7 @@ void test_app_config_load_round_trips_atmosphere_settings() {
     expect(config.render.volumetrics_max_distance == 22.0f, "AppConfig::load: volumetrics_max_distance round-trips");
     expect(config.render.volumetrics_max_opacity == 0.45f, "AppConfig::load: volumetrics_max_opacity round-trips");
     expect(config.render.volumetrics_sun_anisotropy == 0.35f, "AppConfig::load: volumetrics_sun_anisotropy round-trips");
-    expect(config.render.volumetrics_debug_view == true, "AppConfig::load: volumetrics_debug_view round-trips");
+    expect(config.render.debug_view == "volumetrics", "AppConfig::load: debug_view round-trips");
 
     expect(config.render.bloom_enabled == true, "AppConfig::load: bloom_enabled round-trips");
     expect(config.render.bloom_threshold == 0.8f, "AppConfig::load: bloom_threshold round-trips");
@@ -2004,7 +2255,6 @@ void test_pixel_demo_render_and_live_toggles() {
         make_test_config("assets/scenes/pixel_demo/scene.yaml", 640, 360, 160, 90);
     config.render.palette_path    = "assets/palettes/pico8.png";
     config.render.dither_strength = 0.08f;
-
     toy::core::Engine engine(std::move(config));
     tick_frames(engine, kNoiseCycle); // frame 0 has no temporal history of any kind
 
@@ -2030,6 +2280,7 @@ void test_pixel_demo_render_and_live_toggles() {
     const long long drift = count_diff(repeat, palette_frame);
     expect(drift <= kDriftBudget,
            "headless render: with FIXED_DT=0, two captures a noise cycle apart are the same frame");
+    if (drift > kDriftBudget) std::cerr << "         drift = " << drift << " px\n";
     if (drift > kDriftBudget) {
         std::cerr << "         " << drift << " pixels drifted with nothing changed -- every"
                      " threshold below is unreliable until this passes\n";
@@ -2110,6 +2361,148 @@ void test_headless_render_with_all_toggles_off() {
     const long long lit = count_nonblack(frame);
     expect_at_least(lit, 1, "all-toggles-off headless render: output is not entirely black");
     if (lit == 0) dump_frame(frame, "all_toggles_off_black");
+}
+
+/**
+ * @brief Every debug_view channel renders something -- not a uniformly black frame (the
+ * [[ssao-debug-view-broken]] failure mode this pass replaces, where a debug view came out
+ * fully black because the post chain silently ate it) -- and differs from debug_view: off.
+ *
+ * The G-buffer/lighting/ssao/ssr channels share one Engine (debug_view is RUNTIME, so
+ * switching between them needs no reconstruction); contact_shadows/dof/volumetrics each need
+ * their own STARTUP-FIXED feature flag on and so get their own Engine. contact_shadows is
+ * additionally checked against its own on/off switch, so "differs from off" can't be
+ * coincidence -- the same proof-of-life the shipped contact-shadow term itself relies on.
+ */
+void test_debug_view_channels_render() {
+    ScopedEnv fixed_dt("FIXED_DT", "0");
+    ScopedEnv no_input("NO_INPUT", "1");
+
+    {
+        toy::core::AppConfig config =
+            make_test_config("assets/scenes/pixel_demo/scene.yaml", 640, 360, 160, 90);
+        toy::core::Engine engine(std::move(config));
+        tick_frames(engine, kNoiseCycle);
+        const Frame off_frame = engine.capture_image(true);
+
+        static const char* kChannels[] = {
+            "albedo", "normals", "roughness", "metallic", "emissive", "material_ao",
+            "world_pos", "depth", "direct", "indirect", "shadows", "ssao",
+            "ssr", "ssr_confidence", "ssgi",
+        };
+        for (const char* name : kChannels) {
+            engine.render_config().debug_view = name;
+            tick_frames(engine, kNoiseCycle);
+            const Frame f = engine.capture_image(true);
+            const std::string label = std::string("debug_view '") + name + "'";
+            const long long lit = count_nonblack(f);
+            expect_at_least(lit, 1, label + " is not a uniformly black frame");
+            expect_at_least(count_diff(f, off_frame), 1, label + " differs from debug_view: off");
+            if (lit == 0) dump_frame(f, std::string("debug_view_") + name + "_black");
+        }
+    }
+
+    // contact_shadows: shadows_enabled off isolates the march as the only occlusion term --
+    // see pixel_lighting.frag's own doc on this combination.
+    {
+        toy::core::AppConfig config =
+            make_test_config("assets/scenes/pixel_demo/scene.yaml", 640, 360, 160, 90);
+        config.render.shadows_enabled         = false;
+        config.render.contact_shadows_enabled = true;
+        toy::core::Engine engine(std::move(config));
+        tick_frames(engine, kNoiseCycle);
+        const Frame off_frame = engine.capture_image(true);
+
+        engine.render_config().debug_view = "contact_shadows";
+        tick_frames(engine, kNoiseCycle);
+        const Frame contact_frame = engine.capture_image(true);
+        expect_at_least(count_nonblack(contact_frame), 1,
+                        "debug_view 'contact_shadows' is not a uniformly black frame");
+        expect_at_least(count_diff(contact_frame, off_frame), 1,
+                        "debug_view 'contact_shadows' differs from debug_view: off");
+
+        // contact_shadow_length is RUNTIME -- shortening the march's reach substantially
+        // shrinks the occluded area, proving the channel draws the LIVE march rather than a
+        // stale buffer. Not all the way to zero pixels: even a zero-length march still
+        // samples right at the bias offset (see toy_contact_shadow's own doc), which stays
+        // "in contact" for a receiver texel directly against an object's base -- shortening
+        // the reach removes everything BEYOND that, which is the bulk of the effect.
+        const long long before = count_nonblack(contact_frame);
+
+        // The march reads the receiver position and DIFFERENTIATES it (contact_shadow_body.glsl's
+        // CALLER CONTRACT) to undo the TAA sub-pixel jitter. Feed that a point-sampled value, or
+        // evaluate it under non-uniform control flow, and `bias` comes out wrong per texel, the
+        // ray self-intersects, and the resulting speckle is keyed to the TAA jitter phase -- so
+        // it CHANGES every frame even with nothing moving. That temporal signature is what this
+        // asserts, because it is the one property a correct term has regardless of scene: with
+        // FIXED_DT=0 and a static camera, the channel must be the same image twice.
+        //
+        // A spatial noise bound is deliberately NOT asserted here. The term is legitimately
+        // high-frequency on stepped geometry -- on voxel terrain it is a one-pixel line along
+        // every step edge -- so the number is scene- and resolution-dependent (measured 7.6
+        // levels/px accumulated at 1920x1080 on this scene, 19 raw, 32 raw at this test's
+        // 160x90) with no threshold that means the same thing across them.
+        engine.tick();
+        const Frame contact_again = engine.capture_image(true);
+        const double contact_drift = mean_abs_delta(contact_again, contact_frame);
+        expect(contact_drift <= 0.05,
+               "debug_view 'contact_shadows' is static when the camera and clock are");
+        if (contact_drift > 0.05) {
+            std::cerr << "         contact channel drifts " << contact_drift
+                      << " levels/px per frame at rest (expected ~0)\n";
+            dump_frame(contact_frame, "debug_view_contact_unstable");
+        }
+
+        engine.render_config().contact_shadow_length = 0.0f;
+        tick_frames(engine, kNoiseCycle);
+        const Frame zero_length = engine.capture_image(true);
+        const long long after = count_nonblack(zero_length);
+        expect(after < before / 2,
+               "debug_view 'contact_shadows' shrinks by more than half when contact_shadow_length is 0");
+    }
+
+    // dof / volumetrics draw through their OWN pass's existing debug branch (dof_composite.frag
+    // / volumetrics.frag), not debug_view_pass_ -- see the DebugView enum's own doc -- so each
+    // needs its feature enabled at STARTUP, unlike the channels above.
+    {
+        toy::core::AppConfig config =
+            make_test_config("assets/scenes/pixel_demo/scene.yaml", 640, 360, 160, 90);
+        config.render.dof_enabled = true;
+        toy::core::Engine engine(std::move(config));
+        tick_frames(engine, kNoiseCycle);
+        const Frame off_frame = engine.capture_image(true);
+        engine.render_config().debug_view = "dof";
+        tick_frames(engine, kNoiseCycle);
+        const Frame dof_frame = engine.capture_image(true);
+        expect_at_least(count_nonblack(dof_frame), 1, "debug_view 'dof' is not a uniformly black frame");
+        expect_at_least(count_diff(dof_frame, off_frame), 1, "debug_view 'dof' differs from debug_view: off");
+    }
+    {
+        toy::core::AppConfig config =
+            make_test_config("assets/scenes/pixel_demo/scene.yaml", 640, 360, 160, 90);
+        config.render.volumetrics_enabled = true;
+        toy::core::Engine engine(std::move(config));
+        tick_frames(engine, kNoiseCycle);
+        const Frame off_frame = engine.capture_image(true);
+        engine.render_config().debug_view = "volumetrics";
+        tick_frames(engine, kNoiseCycle);
+        const Frame vol_frame = engine.capture_image(true);
+        expect_at_least(count_nonblack(vol_frame), 1, "debug_view 'volumetrics' is not a uniformly black frame");
+        expect_at_least(count_diff(vol_frame, off_frame), 1, "debug_view 'volumetrics' differs from debug_view: off");
+    }
+
+    // lines: an overlay on the NORMAL image, not a replacement (unlike every view above) --
+    // must render fine even in a scene with no physics collider to draw a wireframe for.
+    {
+        toy::core::AppConfig config =
+            make_test_config("assets/scenes/pixel_demo/scene.yaml", 640, 360, 160, 90);
+        toy::core::Engine engine(std::move(config));
+        tick_frames(engine, kNoiseCycle);
+        engine.render_config().debug_view = "lines";
+        tick_frames(engine, kNoiseCycle);
+        const Frame lines_frame = engine.capture_image(true);
+        expect_at_least(count_nonblack(lines_frame), 1, "debug_view 'lines' still renders the normal image");
+    }
 }
 
 // =====================================================================================
@@ -2606,15 +2999,6 @@ toy::core::AppConfig make_shipped_config(const std::string& scene, uint32_t rw, 
     return config;
 }
 
-/** @brief Mean per-channel |a - b| over a frame pair, in 0-255 levels per pixel. */
-double mean_abs_delta(const Frame& a, const Frame& b) {
-    if (a.pixels.size() != b.pixels.size() || a.pixels.empty()) return -1.0;
-    long long sum = 0;
-    for (size_t k = 0; k < a.pixels.size(); k += a.channels) {
-        sum += std::abs(int(a.pixels[k]) - int(b.pixels[k]));
-    }
-    return double(sum) / double(a.width * a.height);
-}
 
 /**
  * @brief A static camera over static geometry must render a STATIC image.
@@ -2862,7 +3246,7 @@ void test_ssao_travel_probe() {
         config.render.ssao_max_radius_px    = v.max_radius_px;
         config.render.ssao_radius           = v.radius;
         config.render.ssao_power            = v.power;
-        config.render.ssao_debug_view       = v.debug_view;
+        config.render.debug_view            = v.debug_view ? "ssao" : "off";
         toy::core::Engine engine(std::move(config));
 
         auto* camera = coopa::gfx::engine::components::CameraComponent::main();
@@ -3061,6 +3445,293 @@ void test_ssao_blip_probe() {
     }
 }
 
+
+/**
+ * @brief Measures how grainy the screen-space traces are in motion, and how long their residual
+ *        takes to die after the camera stops, across the accumulation depths under test.
+ *
+ * The existing image_settles_after_camera_stops contract only looks at the tail. What reads as
+ * "SSR/SSGI are very jittery" is the in-motion grain: a stochastic trace whose temporal resolve
+ * cannot converge leaves a fixed fraction of its single-ray noise standing every frame the camera
+ * is moving, and no amount of holding still afterwards reveals that.
+ *
+ * Variants sweep `ssr_temporal_frames`/`ssgi_temporal_frames` rather than toggling `ssr_enabled`:
+ * a depth of 1 clamps the shared accumulation count to one sample, which is the 1-spp trace with
+ * no temporal integration at all -- the honest baseline for what the accumulator buys. Toggling
+ * the feature off would be the obvious control but is unusable here, because a capture with
+ * `ssr_enabled: false` comes back frozen (every frame byte-identical, including under motion --
+ * reproducible in test_ssao_blip_probe's own B2/B5 variants, so it predates this probe).
+ *
+ * Each variant is measured twice: once through `debug_view: ssr`, where the capture IS the
+ * resolved reflection buffer and the grain number is the reflection's own, and once with
+ * debug_view off, where it is the finished frame and the same noise is diluted by everything
+ * that is not reflective. Both are set explicitly here rather than inherited: make_shipped_config
+ * reads assets/config.yaml verbatim, so whatever debug_view happens to be left enabled there
+ * silently decides what every capture in this file is looking at.
+ *
+ * Every gesture ends with the camera stopped and held -- the standing capture rule. Diagnostic,
+ * not a pass/fail gate: it prints numbers for attribution rather than asserting a threshold, the
+ * same contract test_ssao_travel_probe follows.
+ */
+void test_ssr_jitter_probe() {
+    // FIXED_DT=0, not the 0.016 the settle contract uses: scene time must not advance, or the
+    // residual measured after the camera stops is the terrain's own animation rather than the
+    // renderer's. Measured with time running, the finished image never settles at all -- and
+    // does not settle with auto-exposure and TAA both disabled either, which is what identified
+    // the animation as the dominant term. Rendering still advances (the TAA jitter and every
+    // temporal resolve step per tick); only the world holds still.
+    ScopedEnv fixed_dt("FIXED_DT", "0");
+    ScopedEnv no_input("NO_INPUT", "1");
+
+    struct Variant {
+        const char* name;
+        int   ssr_frames;   // ssr_temporal_frames; 1 == no temporal integration
+        int   ssgi_frames;  // ssgi_temporal_frames
+        float jitter;       // ssr_jitter -- 0 reproduces the deterministic single mirror ray
+    };
+    const Variant variants[] = {
+        {"J0_shipped",     32, 48, 0.25f},
+        {"J1_accum_off",    1,  1, 0.25f},
+        {"J2_no_jitter",   32, 48, 0.00f},
+        {"J3_accum_off_no_jitter", 1, 1, 0.00f},
+    };
+
+    const char* const views[] = {"ssr", "off"};
+
+    // Attribution for the residual the finished image carries whatever SSR does: with
+    // debug_view off, nothing in the variant sweep below moves it, so the dominant term is not
+    // the traces at all. SSR_PROBE_NOEXPOSURE=1 is the one that identifies it -- it is the only
+    // toggle under which the finished image settles at all (measured: settled_at 39 vs never),
+    // which puts auto-exposure, not the screen-space traces, at the top of that list.
+    // SSR_PROBE_NOAA=1 is kept alongside it as the obvious second suspect it rules out.
+    const bool no_exposure = std::getenv("SSR_PROBE_NOEXPOSURE") != nullptr;
+    const bool no_aa       = std::getenv("SSR_PROBE_NOAA") != nullptr;
+
+    for (const char* view : views)
+    for (const Variant& v : variants) {
+        toy::core::AppConfig config =
+            make_shipped_config("assets/scenes/terrain_test/scene.yaml", 1920, 1080);
+        config.render.ssr_temporal_frames  = v.ssr_frames;
+        config.render.ssgi_temporal_frames = v.ssgi_frames;
+        config.render.ssr_jitter           = v.jitter;
+        config.render.debug_view           = view;
+        if (no_exposure) config.render.auto_exposure_enabled = false;
+        if (no_aa)       config.render.aa_mode               = "off";
+        toy::core::Engine engine(std::move(config));
+
+        auto* camera = coopa::gfx::engine::components::CameraComponent::main();
+        if (camera == nullptr || camera->scene == nullptr || camera->owner == nullptr) {
+            expect(false, "ssr jitter probe: scene has a main camera");
+            return;
+        }
+        auto* terrain    = camera->scene->find_first_component<toy::world::TerrainComponent>();
+        auto* controller = camera->owner->get_component<toy::scene::CameraController>();
+        if (terrain == nullptr || controller == nullptr) {
+            expect(false, "ssr jitter probe: scene has Terrain and CameraController");
+            return;
+        }
+        shrink_terrain_and_centre(*terrain, *camera->scene);
+        // Close and pitched down: the pose where the traces cover the most screen and where
+        // grazing reflections and contact lines are both in frame.
+        controller->follow_smoothing   = 0.0f;
+        controller->movement_smoothing = 0.0f;
+        // Coopa's screencast pose: close and pitched steeply down, so the terrain island fills
+        // the frame instead of sitting in a sea of empty sky.
+        controller->distance           = 10.0f;
+        controller->pitch_deg          = 55.0f;
+
+        tick_until(engine, 900, [&] { return count_live_chunks(*terrain) >= 25; });
+        tick_frames(engine, 90);
+
+        // --- Sustained pan at a realistic flick rate. Grain measured on the LAST pan frame, by
+        // which point the accumulator has reached whatever steady state that speed allows. ---
+        const int kPanFrames = 30;
+        Frame prev = engine.capture_image(/*low_res=*/true);
+        for (int f = 0; f < kPanFrames; ++f) {
+            controller->yaw_deg += 1.5f;
+            engine.tick();
+            prev = engine.capture_image(true);
+        }
+        const double grain_motion = local_high_pass(prev);
+
+        // --- ...and stop. Everything from here is the renderer failing to settle. ---
+        int settled_at = -1;
+        double first_delta = -1.0;
+        for (int f = 0; f < 40; ++f) {
+            engine.tick();
+            Frame cur = engine.capture_image(true);
+            const double d = mean_abs_delta(cur, prev);
+            if (f == 0) first_delta = d;
+            if (settled_at < 0 && d < 0.01) settled_at = f;
+            prev = std::move(cur);
+        }
+        const double grain_rest = local_high_pass(prev);
+
+        // Full-resolution frame of the settled image, for eyes rather than numbers: a denoiser
+        // that erased the reflection outright would score BETTER on grain than one that
+        // integrated it, so the numbers below are only meaningful next to a look at the result.
+        if (std::getenv("SSR_PROBE_DUMP") != nullptr) {
+            coopa::gfx::util::save_image_png(
+                prev, std::string("output/ssrjit_") + view + "_" + v.name + ".png");
+        }
+        double luma_sum = 0.0;
+        for (size_t k = 0; k < prev.pixels.size(); k += prev.channels) luma_sum += prev.pixels[k];
+        const double mean_luma = luma_sum / double(prev.width * prev.height);
+
+        std::cerr << "ssrjit " << view << " " << v.name
+                  << " [eff frames=" << engine.render_config().ssr_temporal_frames
+                  << "/" << engine.render_config().ssgi_temporal_frames
+                  << " jitter=" << engine.render_config().ssr_jitter
+                  << " cutoff=" << engine.render_config().ssr_roughness_cutoff << "]"
+                  << " mean_luma=" << mean_luma
+                  << " grain_motion=" << grain_motion
+                  << " grain_rest=" << grain_rest
+                  << " first_delta=" << first_delta
+                  << " settled_at=" << settled_at << "\n";
+    }
+}
+
+/**
+ * @brief Whole-frame look of the FINISHED image: mean luma, contrast, and **saturation**, for the
+ *        class of regression that changes how everything looks at once.
+ *
+ * Written after a descriptor-set-index mistake in `pixel_lighting.frag` drained 88% of the
+ * scene's colour and several checks in a row missed it. Each miss is a rule this test now
+ * encodes:
+ *
+ *  - **Measure saturation, not just tone.** The regression was luma-PRESERVING: mean 136 -> 139
+ *    and contrast 47 -> 32, both unremarkable, while mean saturation went 0.298 -> 0.036. The
+ *    lighting pass was sampling a one-binding set as its five-binding G-buffer set, so the frame
+ *    came out unlit and auto-exposure amplified the remainder into a plausible-looking grey.
+ *    Only a chroma metric sees that; the tone numbers shrug.
+ *  - **Point it at a scene with colour in it.** The first version defaulted to `pixel_demo`,
+ *    whose floor is already grey -- there was no chroma there to lose, so the A/B came back clean.
+ *    `terrain_test` has saturated albedo (grass, dirt, stone, sand) and is the default here.
+ *  - **A debug channel passing does not vindicate the shipped path.** `debug_view`'s
+ *    albedo/direct/indirect channels all looked perfectly coloured throughout, because they are
+ *    drawn by `debug_view.frag` -- a DIFFERENT shader, with its own (correct) set indices. Only a
+ *    capture of the finished image could see it.
+ *  - **Wait for the scene to finish loading.** Without the streaming wait every other terrain
+ *    test does, the capture is a half-streamed frame and not comparable run to run.
+ *
+ * `grain` is reported but is explicitly NOT a look metric: a wash has little high-frequency
+ * energy, so a regression that flattens the image makes grain go *down* and reads as an
+ * improvement. It is here only to sit next to `ssr_jitter_probe`'s numbers.
+ *
+ * Prints rather than asserts a baseline: there is no recorded one, and the probe group's contract
+ * is print-for-attribution. The numbers are the artifact -- put them in the commit message so the
+ * next change has something to be compared against.
+ */
+void test_look_canary() {
+    ScopedEnv fixed_dt("FIXED_DT", "0");
+    ScopedEnv no_input("NO_INPUT", "1");
+
+    // terrain_test, not config.yaml's default_scene: this test needs coloured albedo to watch.
+    const char* scene = std::getenv("CANARY_SCENE")
+        ? std::getenv("CANARY_SCENE") : "assets/scenes/terrain_test/scene.yaml";
+    toy::core::AppConfig config = make_shipped_config(scene, 1920, 1080);
+    // Never inherited -- see this test's doc. CANARY_VIEW swaps in one intermediate channel so a
+    // whole-frame look shift can be walked term by term (albedo first: it says immediately
+    // whether the G-buffer or the lighting/composite is the one that lost the colour).
+    config.render.debug_view = std::getenv("CANARY_VIEW") ? std::getenv("CANARY_VIEW") : "off";
+    // Bisect handles: each takes one suspect out of the finished image so a whole-frame look
+    // shift can be attributed to a term instead of guessed at.
+    if (std::getenv("CANARY_NOVOL"))      config.render.volumetrics_enabled    = false;
+    if (std::getenv("CANARY_NOBLOOM"))    config.render.bloom_enabled          = false;
+    if (std::getenv("CANARY_NOEXPOSURE")) config.render.auto_exposure_enabled  = false;
+    if (std::getenv("CANARY_NOSSGI"))     config.render.indirect.ssgi_intensity = 0.0f;
+    if (std::getenv("CANARY_NOSSR"))      config.render.ssr_enabled            = false;
+    if (std::getenv("CANARY_NOTRANSP"))   config.render.transparency_enabled   = false;
+    if (std::getenv("CANARY_NOAA"))       config.render.aa_mode                = "off";
+    if (std::getenv("CANARY_CONTACT"))    config.render.contact_shadows_enabled = true;
+    if (std::getenv("CANARY_NOCONTACTTEMP")) config.render.contact_shadow_temporal_enabled = false;
+    if (const char* c = std::getenv("CANARY_CUTOFF")) {
+        config.render.ssr_roughness_cutoff = float(atof(c));
+    }
+    toy::core::Engine engine(std::move(config));
+
+    // Same streaming wait every other terrain test uses, so the frame is the same scene each run.
+    auto* camera = coopa::gfx::engine::components::CameraComponent::main();
+    if (camera != nullptr && camera->scene != nullptr) {
+        if (auto* terrain = camera->scene->find_first_component<toy::world::TerrainComponent>()) {
+            tick_until(engine, 900, [&] { return count_live_chunks(*terrain) >= 25; });
+        }
+    }
+    tick_frames(engine, 90);  // let the temporal resolves and auto-exposure top up
+    const Frame f = engine.capture_image(/*low_res=*/true);
+
+    // At-rest stability of whatever is on screen: one more tick with nothing moving. A term that
+    // is spatially noisy but temporally stable reads 0 here while `grain` stays high -- which
+    // separates "this pattern is wrong" from "this pattern shimmers", two very different bugs.
+    engine.tick();
+    const double rest_delta = mean_abs_delta(engine.capture_image(true), f);
+
+    // ...and the same thing IN MOTION, which is where the user-visible artifacts of a temporal
+    // resolve live: reprojection error and history acceptance only misbehave when the camera
+    // moves, so an at-rest number says nothing about them. Panned at a realistic flick rate.
+    double motion_delta = 0.0;
+    if (auto* cc = camera != nullptr && camera->owner != nullptr
+                   ? camera->owner->get_component<toy::scene::CameraController>() : nullptr) {
+        cc->follow_smoothing = 0.0f;
+        cc->movement_smoothing = 0.0f;
+        for (int i = 0; i < 8; ++i) { cc->yaw_deg += 1.5f; engine.tick(); }
+        Frame prev = engine.capture_image(true);
+        const int kMotionFrames = 12;
+        for (int i = 0; i < kMotionFrames; ++i) {
+            cc->yaw_deg += 1.5f;
+            engine.tick();
+            Frame cur = engine.capture_image(true);
+            motion_delta += mean_abs_delta(cur, prev);
+            prev = std::move(cur);
+        }
+        motion_delta /= double(kMotionFrames);
+    }
+
+    double sum = 0.0, sum2 = 0.0, sat = 0.0;
+    long long n = 0;
+    for (size_t k = 0; k + 2 < f.pixels.size(); k += f.channels) {
+        const int r = f.pixels[k], g = f.pixels[k + 1], b = f.pixels[k + 2];
+        const double v = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        sum += v;
+        sum2 += v * v;
+        // HSV saturation: (max-min)/max. Scale-free, so a change in exposure alone does not move
+        // it -- which is exactly the separation this test needs from the two tone numbers.
+        const int mx = std::max(r, std::max(g, b));
+        const int mn = std::min(r, std::min(g, b));
+        if (mx > 0) sat += double(mx - mn) / double(mx);
+        ++n;
+    }
+    const double mean     = n > 0 ? sum / double(n) : 0.0;
+    const double contrast = n > 0 ? std::sqrt(std::max(sum2 / double(n) - mean * mean, 0.0)) : 0.0;
+    const double satur    = n > 0 ? sat / double(n) : 0.0;
+
+    std::cerr << "look_canary " << scene
+              << " mean=" << mean
+              << " contrast=" << contrast
+              << " saturation=" << satur
+              << " rest_delta=" << rest_delta
+              << " motion_delta=" << motion_delta
+              << " (grain=" << local_high_pass(f) << ", NOT a look metric -- see doc)"
+              << " [cutoff=" << engine.render_config().ssr_roughness_cutoff
+              << " vol=" << engine.render_config().volumetrics_enabled
+              << " fog=" << engine.render_config().fog_enabled
+              << " bloom=" << engine.render_config().bloom_enabled
+              << " transp=" << engine.render_config().transparency_enabled
+              << " ssr=" << engine.render_config().ssr_enabled
+              << " expo=" << engine.render_config().auto_exposure_enabled
+              << " aa=" << engine.render_config().aa_mode << "]\n";
+
+    if (std::getenv("SSR_PROBE_DUMP") != nullptr) {
+        coopa::gfx::util::save_image_png(f, std::string("output/look_canary") +
+                (std::getenv("CANARY_TAG") ? std::getenv("CANARY_TAG") : "") + ".png");
+    }
+
+    // The two things worth failing on outright: a frame with no tonal range left in it is not a
+    // render, and a frame with no colour left in it is the regression this test was written for.
+    expect(contrast > 1.0, "look canary: the finished image has some tonal range");
+    expect(satur > 0.10, "look canary: the finished image still has colour in it");
+}
+
 // =====================================================================================
 // Registry
 // =====================================================================================
@@ -3114,6 +3785,14 @@ const TestCase kTests[] = {
     {"dir_shadow_fit_center_snaps_to_texels",      "math", test_dir_shadow_fit_center_snaps_to_texels},
     {"dir_shadow_fit_covers_camera_far_from_origin", "math", test_dir_shadow_fit_covers_camera_far_from_origin},
     {"dir_shadow_fit_degenerate_shadow_distance",  "math", test_dir_shadow_fit_degenerate_shadow_distance},
+    {"cascade_splits_are_increasing_and_reach_the_distance", "math", test_cascade_splits_are_increasing_and_reach_the_distance},
+    {"cascade_splits_single_cascade_is_the_whole_range",     "math", test_cascade_splits_single_cascade_is_the_whole_range},
+    {"cascade_splits_lambda_selects_the_distribution",       "math", test_cascade_splits_lambda_selects_the_distribution},
+    {"cascade_fit_near_slice_is_finer_than_far_slice",       "math", test_cascade_fit_near_slice_is_finer_than_far_slice},
+    {"cascade_fit_contains_its_own_slice",                   "math", test_cascade_fit_contains_its_own_slice},
+    {"cascade_fit_reaches_casters_above_the_near_slice",     "math", test_cascade_fit_reaches_casters_above_the_near_slice},
+    {"cascade_atlas_tiles_are_disjoint_and_in_bounds",       "math", test_cascade_atlas_tiles_are_disjoint_and_in_bounds},
+    {"cascade_selection_inset_exceeds_the_pcf_reach",        "math", test_cascade_selection_inset_exceeds_the_pcf_reach},
     {"pixel_density_orthographic",                 "math", test_pixel_density_orthographic},
     {"pixel_density_perspective_disabled",         "math", test_pixel_density_perspective_disabled},
     {"sdf_clip_rect_on_screen",                    "math", test_sdf_clip_rect_on_screen},
@@ -3127,8 +3806,10 @@ const TestCase kTests[] = {
     {"config_aa_round_trip",                       "config", test_app_config_load_round_trips_aa_settings},
     {"config_dof_defaults",                        "config", test_pixel_render_config_dof_defaults},
     {"config_dof_round_trip",                      "config", test_app_config_load_round_trips_dof_settings},
+    {"config_debug_view_parsing",                  "config", test_debug_view_parsing},
     {"config_soft_shadow_defaults",                "config", test_pixel_render_config_soft_shadow_defaults},
     {"config_soft_shadow_round_trip",              "config", test_app_config_load_round_trips_soft_shadow_settings},
+    {"config_cascade_round_trip",                  "config", test_app_config_load_round_trips_cascade_settings},
     {"config_quality_presets",                     "config", test_app_config_load_applies_quality_presets},
     {"config_atmosphere_round_trip",               "config", test_app_config_load_round_trips_atmosphere_settings},
     {"config_ssr_and_window_round_trip",           "config", test_app_config_load_round_trips_ssr_and_window_settings},
@@ -3160,6 +3841,7 @@ const TestCase kTests[] = {
     {"image_settles_after_camera_stops",           "render_terrain",  test_image_settles_after_camera_stops},
     {"pixel_demo_render_and_live_toggles",         "render_pixel",    test_pixel_demo_render_and_live_toggles},
     {"headless_render_with_all_toggles_off",       "render_pixel",    test_headless_render_with_all_toggles_off},
+    {"debug_view_channels_render",                 "render_pixel",    test_debug_view_channels_render},
     {"world_canvas_button_hover",                  "render_ui",       test_world_canvas_button_hover},
     {"material_maps_change_output",                "render_material", test_material_maps_change_output},
     {"cloth_scene_simulates_and_animates",         "render_cloth",    test_cloth_scene_simulates_and_animates},
@@ -3167,6 +3849,8 @@ const TestCase kTests[] = {
     // removed once the cause is pinned. Not in any ctest group.
     {"ssao_travel_probe",                          "probe",           test_ssao_travel_probe},
     {"ssao_blip_probe",                            "probe",           test_ssao_blip_probe},
+    {"ssr_jitter_probe",                           "probe",           test_ssr_jitter_probe},
+    {"look_canary",                                "probe",           test_look_canary},
     {"texel_aa_ring_repro",                        "probe",           test_texel_aa_ring_repro},
 };
 

@@ -3,11 +3,12 @@
  * @brief Draws a single sampled texture over the whole target, unlit and depth-test-free.
  *
  * The minimal fullscreen pass: one combined-image-sampler binding, a fullscreen
- * triangle, no camera/light/shadow sets. Used for diagnostic views that replace the
- * lit image outright -- see `PixelRenderPipeline`'s `ssao_debug_pass_`, which binds the
- * exact occlusion image lighting itself consumes so the debug view can't disagree with
- * it. The fragment shader is supplied by the caller, so the same pass backs any
- * "show me this one texture" view.
+ * triangle, no camera/light/shadow sets -- for a diagnostic view that needs nothing
+ * beyond a single already-computed texture to show. The fragment shader is supplied by
+ * the caller, so the same pass can back any "show me this one texture" view; toyengine's
+ * own `debug_view` channels currently need the camera/light/shadow sets this pass
+ * doesn't declare (see `PixelRenderPipeline::debug_view_pass_`, a gfxcoopa
+ * `DeferredLightingPass` instance instead), so nothing in this repo instantiates it yet.
  */
 
 #ifndef TOYENGINE_RENDER_PASSES_FULLSCREEN_BLIT_PASS_H

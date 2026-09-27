@@ -75,6 +75,8 @@
 #include <gfxcoopa/engine/passes/hiz_pass.h>
 #include <gfxcoopa/engine/passes/scene_color_mip_pass.h>
 #include <gfxcoopa/engine/passes/ssao_pass.h>
+#include <gfxcoopa/engine/passes/temporal_history_pass.h>
+#include "toyengine/render/passes/contact_shadow_pass.h"
 #include <gfxcoopa/engine/util/sampler.h>
 #include <gfxcoopa/engine/data/camera_ubo.h>
 #include <gfxcoopa/engine/data/light_data.h>
@@ -122,7 +124,6 @@
 #include <gfxcoopa/engine/passes/exposure_pass.h>
 #include <gfxcoopa/engine/passes/deferred_lighting_pass.h>
 #include <gfxcoopa/engine/passes/ssr_pass.h>
-#include <toyengine/render/passes/fullscreen_blit_pass.h>
 #include <gfxcoopa/engine/passes/pixel_stylize_pass.h>
 #include <gfxcoopa/engine/passes/dof_pass.h>
 #include <gfxcoopa/engine/passes/bloom_pass.h>
@@ -184,7 +185,7 @@ public:
           fog_data_(device, allocator),
           volumetrics_data_(device, allocator),
           shadow_target_(device, allocator, config_.shadow_map_resolution, config_.cube_shadow_resolution,
-                        config_.spot_shadow_resolution),
+                        config_.spot_shadow_resolution, config_.shadow_cascades),
           palette_lut_(coopa::gfx::engine::data::PaletteLut::load(device, allocator, cmd_pool, config_.palette_path)),
           grading_lut_(coopa::gfx::engine::data::GradingLut::load(device, allocator, cmd_pool, config_.grading_lut_path)),
           instance_stream_(device, allocator),
@@ -230,8 +231,8 @@ public:
     /**
      * @brief This frame's physics debug-draw lines -- fill it (typically from
      *        PhysicsWorld::debug_draw(), see debug_line_pass.h's file doc) between
-     *        Scene::update()/late_update() and render(); drawn when config_.debug_lines_enabled
-     *        is set, cleared by the caller each frame (this pipeline never clears it itself,
+     *        Scene::update()/late_update() and render(); drawn when config_.debug_view ==
+     *        "lines", cleared by the caller each frame (this pipeline never clears it itself,
      *        matching how it never owns the scene it reads).
      */
     std::vector<DebugLine>& debug_lines() { return debug_lines_; }
@@ -376,6 +377,7 @@ public:
         TOY_KEEP_STARTUP_FIXED(render_height);
         TOY_KEEP_STARTUP_FIXED(scale_divisor);
         TOY_KEEP_STARTUP_FIXED(shadow_map_resolution);
+        TOY_KEEP_STARTUP_FIXED(shadow_cascades);
         TOY_KEEP_STARTUP_FIXED(cube_shadow_resolution);
         TOY_KEEP_STARTUP_FIXED(spot_shadow_resolution);
         TOY_KEEP_STARTUP_FIXED(sdf_max_renderers);
@@ -486,7 +488,7 @@ public:
 
         // debug_lines_ was filled by the caller before render() ran (see debug_lines()'s
         // doc); upload it unconditionally -- cheap when empty, and it keeps this slot's buffer
-        // valid if debug_lines_enabled is flipped on between frames.
+        // valid if debug_view is switched to "lines" between frames.
         debug_line_pass_->upload(frame_slot, debug_lines_);
 
         gather_ui_canvases_(scene, frame_slot, view);
@@ -549,13 +551,6 @@ public:
                                     // rebind needs the same wait as HiZPass's.
                                     || config_.ssao_enabled;
 
-        // ssao_debug_view is a runtime flag (re-read every frame, same policy as ssr_enabled):
-        // when set, ssao_debug_pass_ replaces pixel_lighting_pass_/skybox_pass_ below, and the
-        // SSR composite / forward transparent pass are skipped for this frame -- there is
-        // nothing left to composite reflections or transparent geometry onto once lighting
-        // itself has been replaced by a raw occlusion-buffer visualization.
-        const bool ao_debug = config_.ssao_debug_view;
-
         if (need_ssr_trace_inputs) {
             // HiZPass and SceneColorMipPass rebind their own mip-0 descriptor set inside every
             // execute(). That is safe only under a per-frame wait, which this pipeline otherwise does
@@ -575,7 +570,6 @@ public:
         ctx.dof_focus_distance    = dof_focus.distance;
         ctx.dof_focus_range       = dof_focus.range;
         ctx.need_ssr_trace_inputs = need_ssr_trace_inputs;
-        ctx.ao_debug              = ao_debug;
         ctx.cast_dir_shadow       = cast_dir_shadow;
         ctx.cast_point_shadow     = cast_point_shadow;
         ctx.shadow_point          = shadow_point;
@@ -651,10 +645,6 @@ private:
          *  transparent.frag traces the same ones ssr.frag does, so this is wider than
          *  ssr_enabled alone. Also the flag that pays for the one per-frame wait_idle(). */
         bool need_ssr_trace_inputs = false;
-        /** ssao_debug_view: replaces lighting with a raw occlusion visualization. The forward
-         *  transparent pass is skipped (nothing sensible to composite onto); the SSR composite
-         *  still runs, because the post chain reads its output whenever ssr_enabled. */
-        bool ao_debug = false;
         bool cast_dir_shadow   = false;
         bool cast_point_shadow = false;
         coopa::gfx::engine::components::PointLightComponent* shadow_point = nullptr;
@@ -824,30 +814,72 @@ private:
         // update_descriptors() happens in build_ssr_chain_(): the raw pass marches the Hi-Z
         // pyramid, which is not constructed yet at this point in the ctor sequence.
 
+        // Shared per-pixel accumulation count for every stochastic screen-space effect -- SSR,
+        // the traced SSGI bounce and the contact shadows all run their running average against
+        // it (see TemporalHistoryPass). Always constructed: contact shadows are a runtime
+        // toggle, so the buffer has to exist whether or not SSR was built.
+        temporal_history_pass_ = std::make_unique<coopa::gfx::engine::passes::TemporalHistoryPass>(
+            device_, allocator_, cmd_pool_,
+            config_.shaders("fullscreen.vert"),
+            config_.shaders("temporal_history.frag"));
+        temporal_history_pass_->recreate(render_extent_.width, render_extent_.height);
+        temporal_history_pass_->set_depth_image(gbuffer_target_.depth_view_typed());
+
+        // Contact shadows, as their own pass ahead of lighting. Always constructed and always
+        // executed: contact_shadows_enabled is a RUNTIME toggle, so there is no construction-time
+        // answer to "will this buffer ever be read", and an always-valid image layout is worth
+        // more than the one fullscreen draw it costs when the feature is off -- with
+        // contact_params.x at 0 the march early-outs on its first line and the buffer reads 0,
+        // which is the same value the disabled term contributed inline.
+        contact_shadow_pass_ = std::make_unique<passes::ContactShadowPass>(
+            device_, allocator_, *camera_layout_, *light_layout_,
+            render_extent_.width, render_extent_.height,
+            config_.shaders("fullscreen.vert"),
+            config_.shaders("contact_shadow.frag"),
+            // The SSR chain's temporal resolve, reused verbatim -- see ContactShadowPass's doc.
+            config_.shaders("ssr_resolve.frag"));
+        contact_shadow_pass_->update_descriptors(
+            gbuffer_target_.g0_view_typed(), gbuffer_target_.g1_view_typed(),
+            gbuffer_target_.g2_view_typed(), gbuffer_target_.depth_view_typed(),
+            temporal_history_pass_->count_view_typed(), temporal_history_pass_->sampler());
+
+        // pixel_lighting_pass_'s one app-supplied extra set (set 4): the resolved occlusion the
+        // directional term max()-combines in. An ExtraSets rather than a sixth binding on
+        // gfxcoopa's own G-buffer set, so DeferredLightingPass's layout -- shared with every
+        // other consumer of that library -- is untouched.
+        contact_extra_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
+            coopa::gfx::pipeline::DescriptorLayoutBuilder()
+                .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
+                .build(device_));
+        contact_extra_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
+            coopa::gfx::pipeline::DescriptorPoolBuilder()
+                .add_sets(*contact_extra_layout_, 1).build(device_));
+        contact_extra_set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(
+            device_, *contact_extra_pool_, *contact_extra_layout_);
+        contact_extra_set_->bind_image(0, contact_shadow_pass_->output_view_typed(),
+                                       contact_shadow_pass_->sampler());
+
         // ssao_enabled is a load-time config value (no live reload), so which image to bind is
         // decided once here rather than every frame -- see the update_descriptors comment above
         // for why a per-frame rebind would be unsafe anyway.
         const VkImageView ssao_view = ssao_source_view_();
 
-        // Draws the exact ssao_view bound into pixel_lighting_pass_/ssr_pass_ below, so the
-        // debug view always reflects what lighting actually consumes -- including the neutral
-        // 1x1 texture when ssao_enabled is off.
-        ssao_debug_pass_ = std::make_unique<passes::FullscreenBlitPass>(
-            device_, offscreen_target_.render_pass_object(),
-            config_.shaders("fullscreen.vert"),
-            config_.shaders("ssao_debug.frag"));
-        ssao_debug_pass_->set_source_image(coopa::gfx::detail::wrap(ssao_view), ssao_pass_->sampler());
-
         // No ExtraSets (toyengine has neither GI nor reflection probes to plumb through), so
         // this collapses to the same {camera=0, light=1, shadow=2, gbuffer=3} layout the old
         // fork hardcoded -- gbuffer_set_index_ is derived, not hardcoded, so this is correct
         // whether or not extras are ever added later (see the fix in deferred_lighting_pass.h).
+        coopa::gfx::engine::passes::ExtraSets lighting_extra;
+        lighting_extra.layouts = {contact_extra_layout_.get()};
+        lighting_extra.bind = [this](coopa::gfx::command::CommandBuffer& cmd, uint32_t first_set) {
+            cmd.bind_descriptor_set(*contact_extra_set_, first_set);
+        };
+
         pixel_lighting_pass_ = std::make_unique<coopa::gfx::engine::passes::DeferredLightingPass>(
             device_, offscreen_target_.render_pass_object(), *camera_layout_, *light_layout_,
             *shadow_layout_, linear_sampler_,
             config_.shaders("fullscreen.vert"),
             config_.shaders("pixel_lighting.frag"),
-            coopa::gfx::engine::passes::ExtraSets{},
+            lighting_extra,
             std::vector<coopa::gfx::pipeline::PushConstantRange>{
                 {coopa::gfx::ShaderStage::Fragment, 0, sizeof(PixelLightingPushConstants)}});
         pixel_lighting_pass_->set_gbuffer_images(
@@ -931,6 +963,12 @@ private:
             scene_color_mip_pass_->full_view_typed(), scene_color_mip_pass_->sampler(),
             offscreen_target_.color_view_typed(), linear_sampler_);
         ssr_pass_->set_ssao_image(ssao_source_view_(), ssao_pass_->sampler().handle());
+        // The shared accumulation count both resolve chains average against, in place of the
+        // fixed-rate blend that can never converge on a re-jittered trace. Bound once: that pass
+        // keeps one stable target image, and rebinding a descriptor per frame is unsafe under this
+        // pipeline's frame-overlap model (see the ssao_source_view_() comment).
+        ssr_pass_->set_temporal_count_image(temporal_history_pass_->count_view_typed(),
+                                            temporal_history_pass_->sampler());
     }
     /**
      * @brief Builds the transparent-capture chain, refraction's own scene-colour chain, and the forward
@@ -1212,6 +1250,68 @@ private:
             // 0 is what disables the lookup.
             grading_lut_.view_typed(), &grading_lut_.sampler_object());
 
+        // Debug view: replaces post_target_'s draw with a raw intermediate-buffer readout --
+        // see PixelRenderConfig::debug_view / the DebugView enum for the full option list, and
+        // record_post_chain_() for how the choice among this / pixel_stylize_pass_ / DOF-CoC /
+        // volumetrics-density is made every frame. Always constructed (same always-built,
+        // runtime-gated policy as fog_pass_/volumetrics_pass_ above), so debug_view stays a
+        // runtime field.
+        //
+        // Shares gfxcoopa's DeferredLightingPass with pixel_lighting_pass_ above -- same 3
+        // leading sets (camera/light/shadow) and the same owned 5-binding G-buffer+SSAO set,
+        // via debug_view.frag, which declares an identical descriptor contract to
+        // pixel_lighting.frag's so "direct"/"indirect"/"shadows"/"contact_shadows"/"ssao" are
+        // computed by the exact same functions the shipped lighting term uses. The one extra
+        // set (SSR reflection / traced-SSGI / G-buffer depth) is what pixel_lighting_pass_
+        // doesn't need and this shader does, for the "ssr"/"ssr_confidence"/"ssgi"/"depth"
+        // channels.
+        debug_view_extra_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
+            coopa::gfx::pipeline::DescriptorLayoutBuilder()
+                .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
+                .combined_sampler(1, coopa::gfx::ShaderStage::Fragment)
+                .combined_sampler(2, coopa::gfx::ShaderStage::Fragment)
+                .combined_sampler(3, coopa::gfx::ShaderStage::Fragment)
+                .build(device_));
+        debug_view_extra_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
+            coopa::gfx::pipeline::DescriptorPoolBuilder().add_sets(*debug_view_extra_layout_, 1).build(device_));
+        debug_view_extra_set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(
+            device_, *debug_view_extra_pool_, *debug_view_extra_layout_);
+        // ssr_enabled is startup-fixed (file doc, rule 1): decided once here, exactly like
+        // ssao_view above -- ssr_pass_ is always CONSTRUCTED (see its own file doc) but its
+        // targets stay in VK_IMAGE_LAYOUT_UNDEFINED until execute() has run at least once,
+        // which never happens on a frame where config_.ssr_enabled is false. Binding its real
+        // views in that case would be a hard Vulkan validation error even on a channel that
+        // never samples them at runtime -- so both fall back to the same permanent 1x1
+        // neutral texture SsrPass itself uses for its own never-enabled fallbacks.
+        debug_view_extra_set_->bind_image(0,
+            config_.ssr_enabled ? ssr_pass_->reflection_view_typed() : ssr_pass_->zero_view_typed(),
+            linear_sampler_);
+        debug_view_extra_set_->bind_image(1,
+            config_.ssr_enabled ? ssr_pass_->ssgi_view_typed() : ssr_pass_->zero_view_typed(),
+            linear_sampler_);
+        debug_view_extra_set_->bind_image(2, gbuffer_target_.depth_view_typed(), nearest_sampler_);
+        debug_view_extra_set_->bind_image(3, contact_shadow_pass_->output_view_typed(),
+                                          contact_shadow_pass_->sampler());
+
+        coopa::gfx::engine::passes::ExtraSets debug_view_extra;
+        debug_view_extra.layouts = {debug_view_extra_layout_.get()};
+        debug_view_extra.bind = [this](coopa::gfx::command::CommandBuffer& cmd, uint32_t first_set) {
+            cmd.bind_descriptor_set(*debug_view_extra_set_, first_set);
+        };
+
+        debug_view_pass_ = std::make_unique<coopa::gfx::engine::passes::DeferredLightingPass>(
+            device_, post_target_.render_pass_object(), *camera_layout_, *light_layout_,
+            *shadow_layout_, linear_sampler_,
+            config_.shaders("fullscreen.vert"),
+            config_.shaders("debug_view.frag"),
+            debug_view_extra,
+            std::vector<coopa::gfx::pipeline::PushConstantRange>{
+                {coopa::gfx::ShaderStage::Fragment, 0, sizeof(DebugViewPushConstants)}});
+        debug_view_pass_->set_gbuffer_images(
+            gbuffer_target_.g0_view_typed(), gbuffer_target_.g1_view_typed(), gbuffer_target_.g2_view_typed(),
+            gbuffer_target_.g3_view_typed(), linear_sampler_);
+        debug_view_pass_->set_ssao_image(ssao_source_view_(), ssao_pass_->sampler().handle());
+
         // Anti-aliasing. Conditionally constructed, unlike the passes above: aa_mode == "off"
         // must allocate nothing and leave every downstream binding as it was, so the mode is
         // checked here rather than per frame. All three passes are built together and share
@@ -1284,7 +1384,7 @@ private:
         // test reads a frame back -- nothing reads the swapchain image itself. The cost is that it
         // lands pre-upscale and picks up AA and tilt shift.
         //
-        // debug_lines_enabled is checked per frame, not here: this pass binds no descriptors, so
+        // debug_view is checked per frame, not here: this pass binds no descriptors, so
         // there is nothing for a startup-fixed flag to lock in.
         debug_line_pass_ = std::make_unique<passes::DebugLinePass>(
             device_, allocator_, post_target_.render_pass_object(),
@@ -1455,14 +1555,67 @@ private:
             temporal_frozen_      = camera_frames_still_ > kTemporalFreezeAfter;
             if (!temporal_frozen_) {
                 ++ssao_rotation_index_;
-                // SSR/SSGI's stochastic ray jitter freezes on the same signal: its temporal
-                // resolve is a plain EMA, and an EMA of a per-frame-rejittered input can only
-                // orbit that input forever -- measured as a perpetual ~0.03 level/px shimmer
-                // at rest that survives everything else being byte-static (and reads as "the
-                // AO keeps recalculating", since it is strongest in creases and contact
-                // regions where SSGI carries the most energy).
-                ++ssr_jitter_index_;
             }
+        }
+
+        // Current clip space -> previous frame's clip space, shared by every temporally
+        // accumulated pass below (the shared count buffer, SSAO, SSR/SSGI) and recomposed here
+        // rather than per consumer so they can never disagree about where a pixel was.
+        //
+        // Composed in double, truncated to float only at the end -- same reasoning as
+        // taa_params.reproject further down: the world-scale magnitudes inside the two
+        // view-projections cancel in the double product, leaving a matrix whose float truncation
+        // reprojects at sub-pixel accuracy. A float composition (or routing the reprojection
+        // through the RGBA16F G-buffer position, which this matrix replaces) is off by whole
+        // pixels at this scene's world-coordinate scale, which made the accumulated AO slide and
+        // boil against the geometry in motion, and did the same to the reflections.
+        const glm::mat4 temporal_reproject = glm::mat4(
+            glm::dmat4(prev_view_proj_) *
+            glm::inverse(glm::dmat4(ctx.proj) * glm::dmat4(ctx.view)));
+
+        // Shared accumulation count, written before any consumer reads it. The cap is the
+        // DEEPEST any consumer asks for; each one clamps the count to its own depth in-shader,
+        // so one buffer serves accumulation schedules of different lengths.
+        {
+            coopa::gfx::engine::passes::TemporalHistoryPass::Params th_params{};
+            th_params.reproject       = temporal_reproject;
+            th_params.reproject_valid = prev_view_proj_valid_;
+            th_params.max_accum       = std::max({config_.ssr_temporal_frames,
+                                                  config_.ssgi_temporal_frames,
+                                                  config_.contact_shadow_temporal_frames});
+            // Same three-line camera idiom every depth-linearizing consumer in this file uses.
+            th_params.near_z          = ctx.cam ? ctx.cam->clip_start : 0.1f;
+            th_params.far_z           = ctx.cam ? ctx.cam->clip_end : 1000.0f;
+            th_params.perspective     =
+                (!ctx.cam || ctx.cam->type == coopa::gfx::engine::components::CameraType::Perspective);
+            temporal_history_pass_->execute(cmd, th_params);
+        }
+
+        // Contact shadows, into their own buffer, before the lighting pass that reads it.
+        {
+            // The march's four knobs are RUNTIME, and an accumulated average necessarily lags a
+            // change to any of them -- at a depth of 16 a new value is still a third blended out
+            // eight frames later, which reads as the setting "not taking effect". Dropping the
+            // history on a change makes the next frame show the new march outright, which is
+            // what a live tweak has to do; the accumulation then rebuilds from there.
+            const ContactShadowKnobs knobs{config_.contact_shadow_length,
+                                           config_.contact_shadow_strength,
+                                           config_.contact_shadow_thickness,
+                                           config_.contact_shadow_steps,
+                                           config_.contact_shadows_enabled};
+            if (!(knobs == contact_shadow_knobs_)) {
+                contact_shadow_pass_->invalidate_history();
+                contact_shadow_knobs_ = knobs;
+            }
+
+            passes::ContactShadowPass::Params cs_params{};
+            cs_params.reproject       = temporal_reproject;
+            cs_params.reproject_valid = prev_view_proj_valid_;
+            cs_params.temporal_frames = config_.contact_shadow_temporal_enabled
+                ? config_.contact_shadow_temporal_frames : 0;
+            cs_params.temporal_gamma  = config_.ssr_temporal_gamma;
+            cs_params.frozen          = temporal_frozen_;
+            contact_shadow_pass_->execute(cmd, current_camera_set(), current_light_set(), cs_params);
         }
 
         if (config_.ssao_enabled) {
@@ -1489,16 +1642,7 @@ private:
             ssao_params.noise_rotation        = static_cast<int>(ssao_rotation_index_ & 0xFFu);
             ssao_params.temporal_enabled     = config_.ssao_temporal_enabled;
             ssao_params.temporal_frames      = config_.ssao_temporal_frames;
-            // Composed in double, truncated to float only at the end -- same reasoning as
-            // taa_params.reproject below: the world-scale magnitudes inside the two
-            // view-projections cancel in the double product, leaving a matrix whose float
-            // truncation reprojects at sub-pixel accuracy. A float composition (or routing
-            // the reprojection through the RGBA16F G-buffer position, which this matrix
-            // replaces) is off by whole pixels at this scene's world-coordinate scale,
-            // which made the accumulated AO slide and boil against the geometry in motion.
-            ssao_params.reproject        = glm::mat4(
-                glm::dmat4(prev_view_proj_) *
-                glm::inverse(glm::dmat4(ctx.proj) * glm::dmat4(ctx.view)));
+            ssao_params.reproject        = temporal_reproject;
             ssao_params.reproject_valid  = prev_view_proj_valid_;
             // The eye ssao_resolve.frag measures its stored distance channel against.
             ssao_params.camera_pos           = ctx.cam_pos;
@@ -1519,27 +1663,21 @@ private:
         // offscreen_target_'s single begin()/end().
         offscreen_target_.begin(cmd);
 
-        if (ctx.ao_debug) {
-            // Replaces lighting+skybox entirely -- draws SsaoPass's bound output
-            // (the exact ssao_view bound at construction, see that comment) fullscreen.
-            ssao_debug_pass_->draw(cmd, render_extent_.width, render_extent_.height);
-        } else {
-            PixelLightingPushConstants lighting_pc;
-            lighting_pc.light_bands       = config_.light_bands;
-            lighting_pc.spec_threshold    = config_.spec_threshold;
-            lighting_pc.rim_strength      = config_.rim_strength;
-            lighting_pc.ambient_intensity = config_.indirect.ambient_intensity;
-            lighting_pc.sky_intensity     = config_.indirect.sky_intensity;
-            lighting_pc.soft_lighting     = config_.soft_lighting ? 1.0f : 0.0f;
-            lighting_pc.ssao_direct_strength = config_.ssao_direct_lighting_strength;
-            // gfxcoopa's DeferredLightingPass::draw() pushes this internally now (the
-            // templated overload), after its own bind_pipeline() -- no separate push needed.
-            pixel_lighting_pass_->draw(cmd, current_camera_set(), current_light_set(), *shadow_set_, lighting_pc,
-                                      render_extent_.width, render_extent_.height);
+        PixelLightingPushConstants lighting_pc;
+        lighting_pc.light_bands       = config_.light_bands;
+        lighting_pc.spec_threshold    = config_.spec_threshold;
+        lighting_pc.rim_strength      = config_.rim_strength;
+        lighting_pc.ambient_intensity = config_.indirect.ambient_intensity;
+        lighting_pc.sky_intensity     = config_.indirect.sky_intensity;
+        lighting_pc.soft_lighting     = config_.soft_lighting ? 1.0f : 0.0f;
+        lighting_pc.ssao_direct_strength = config_.ssao_direct_lighting_strength;
+        // gfxcoopa's DeferredLightingPass::draw() pushes this internally now (the
+        // templated overload), after its own bind_pipeline() -- no separate push needed.
+        pixel_lighting_pass_->draw(cmd, current_camera_set(), current_light_set(), *shadow_set_, lighting_pc,
+                                  render_extent_.width, render_extent_.height);
 
-            skybox_pass_->draw(cmd, current_camera_set(), ctx.view, ctx.proj, render_extent_.width, render_extent_.height,
-                               config_.indirect);
-        }
+        skybox_pass_->draw(cmd, current_camera_set(), ctx.view, ctx.proj, render_extent_.width, render_extent_.height,
+                           config_.indirect);
 
         offscreen_target_.end(cmd);
 
@@ -1550,11 +1688,12 @@ private:
             scene_color_mip_pass_->execute(cmd, offscreen_target_.color_view_typed());
         }
 
-        // Runs in ao_debug frames too: with ssr_enabled, the whole post chain reads
-        // ssr_pass_'s composite output (see ssr_input in build_post_chain_), so skipping the
-        // composite would hand pixel_stylize a never-written image and the debug view would
-        // come out black. Reflections composited over the occlusion visualization are minor
-        // pollution on a diagnostic; an unreadable diagnostic is worse.
+        // Runs on debug_view frames too: with ssr_enabled, the whole post chain reads
+        // ssr_pass_'s composite output (see pre_fog_view_typed_ in build_post_chain_), so
+        // skipping the composite would leave that image never written this frame. The
+        // "ssr"/"ssr_confidence"/"ssgi" channels also read this pass's own resolved buffers
+        // directly (see debug_view_pass_'s extra set), so it must run whenever a channel
+        // might want them, not just when lighting does.
         if (config_.ssr_enabled) {
             coopa::gfx::engine::passes::SsrPass::Params ssr_params{};
             ssr_params.proj              = ctx.proj;
@@ -1569,25 +1708,29 @@ private:
             ssr_params.min_mip0_steps    = config_.ssr_min_mip0_steps;
             ssr_params.max_color_mip     = static_cast<int>(scene_color_mip_pass_->max_mip_level());
             ssr_params.temporal_enabled  = config_.ssr_temporal_enabled;
-            // While frozen, the resolve's input is CONSTANT (jitter held, camera still), so
-            // its EMA converges to the same fixed point at any blend rate -- only the speed
-            // differs. At the shipped 0.85 the post-stop convergence takes ~1 s and is
-            // visible as a mottled "recalculating" wash over bounce-lit surfaces (measured
-            // as ~6-10 frames of 0.2-0.6 level/px residual after every camera stop, gone
-            // with ssr_enabled=false -- the shimmer historically misattributed to SSAO).
-            // Dropping to kFrozenSsrBlend while frozen collapses that wash to a few frames.
-            ssr_params.temporal_blend    = temporal_frozen_
-                ? std::min(config_.ssr_temporal_blend, kFrozenSsrBlend)
-                : config_.ssr_temporal_blend;
+            ssr_params.temporal_frames   = config_.ssr_temporal_frames;
+            ssr_params.ssgi_temporal_frames = config_.ssgi_temporal_frames;
+            // Only reached where the shared count buffer is absent, which never happens in this
+            // pipeline (set_temporal_count_image() is called at construction) -- carried so the
+            // pass's own fallback path stays configurable rather than hardcoded.
+            ssr_params.temporal_blend    = config_.ssr_temporal_blend;
             ssr_params.temporal_gamma    = config_.ssr_temporal_gamma;
+            // Holds the accumulated reflection verbatim once the camera has been still long
+            // enough, the same way the AO resolve holds its own -- that verbatim hold, not a
+            // frozen ray jitter, is what makes a resting image byte-static.
+            ssr_params.temporal_frozen   = temporal_frozen_;
+            ssr_params.reproject         = temporal_reproject;
+            ssr_params.reproject_valid   = prev_view_proj_valid_;
             ssr_params.ssr_blur_radius   = config_.ssr_blur_radius;
             ssr_params.jitter_strength   = config_.ssr_jitter;
             // Matches ssr_ign2()'s own `frame & 0xFF` mask in gfx/ssr_common.glsl -- and the
             // same 256 period SSAO's noise_rotation and the shadow PCF rotation use, so no
             // per-frame term in this pipeline shares a period with the TAA jitter.
-            // ssr_jitter_index_, not frame_index_: held at rest (see the freeze block above)
-            // so the resolve's input goes constant and its accumulator can actually converge.
-            ssr_params.frame_index       = static_cast<int>(ssr_jitter_index_ & 0xFFu);
+            // frame_index_, advancing every frame including at rest: the resolve is a
+            // converging running average, so it needs a FRESH ray every frame to average -- a
+            // held jitter would pin it to one draw's grain. The resting image is made static by
+            // that resolve's verbatim hold (temporal_frozen above), not by freezing the input.
+            ssr_params.frame_index       = static_cast<int>(frame_index_ & 0xFFu);
             // Fed from the SAME config_.indirect instance as lighting_pc above -- see
             // IndirectParams' doc (render_features.h) for why this must stay one source.
             ssr_params.sky_intensity     = config_.indirect.sky_intensity;
@@ -1599,8 +1742,6 @@ private:
             ssr_params.sky_zenith        = config_.indirect.sky_zenith;
             ssr_params.sky_horizon       = config_.indirect.sky_horizon;
             ssr_params.sky_ground        = config_.indirect.sky_ground;
-            ssr_params.prev_view_proj       = prev_view_proj_;
-            ssr_params.prev_view_proj_valid = prev_view_proj_valid_;
 
             // Secondary source -- see SsrPushConstants' own doc. max_hiz_mip_b/
             // max_color_mip_b come from transparent_hiz_pass_/transparent_scene_
@@ -1613,7 +1754,7 @@ private:
             ssr_pass_->execute(cmd, current_camera_set(), ssr_params);
         }
 
-        if (config_.transparency_enabled && config_.refraction_enabled && !ctx.ao_debug) {
+        if (config_.transparency_enabled && config_.refraction_enabled) {
             // Builds refraction's own scene-colour chain -- the dedicated instance transparent.frag's
             // u_scene_color reads whenever refraction is active. It must be a SEPARATE instance, not a
             // second execute() on scene_color_mip_pass_: that pass rebinds its internal per-mip
@@ -1625,7 +1766,7 @@ private:
             refraction_scene_color_mip_pass_->execute(cmd, refraction_source);
         }
 
-        if (config_.transparency_enabled && !ctx.ao_debug) {
+        if (config_.transparency_enabled) {
             // Per-frame globals for the forward MESH pass, from the same config_ fields the SDF path's
             // own globals() fill uses -- in particular config_.indirect, shared with SsrPass::Params so
             // the opaque and transparent indirect terms can never disagree. Uploaded to this frame's
@@ -1666,6 +1807,10 @@ private:
      */
     void record_post_chain_(coopa::gfx::command::CommandBuffer& cmd, const FrameContext& ctx) {
         using coopa::gfx::engine::components::CameraType;
+
+        // Parsed once per frame -- debug_view is runtime (file doc, rule 1's exception list),
+        // so every branch below that reads it must see the SAME frame's value.
+        const DebugView active_view = parse_debug_view(config_.debug_view);
 
         // Fog composite. After the transparent pass, so BLEND geometry is fogged too (it was drawn
         // in place into the same image), and before pixel_stylize_pass_, so fog sits in linear HDR
@@ -1720,7 +1865,7 @@ private:
             dof_params.camera_near           = ctx.cam ? ctx.cam->clip_start : 0.1f;
             dof_params.camera_far            = ctx.cam ? ctx.cam->clip_end : 1000.0f;
             dof_params.camera_is_perspective = (!ctx.cam || ctx.cam->type == CameraType::Perspective);
-            dof_params.debug_view = config_.dof_debug_view;
+            dof_params.debug_view = (active_view == DebugView::Dof);
 
             dof_pass_->execute(cmd, dof_params);
         }
@@ -1757,26 +1902,54 @@ private:
         }
 
         post_target_.begin(cmd);
-        coopa::gfx::engine::passes::PixelStylizePass::PushConstants post_pc;
-        post_pc.outline_color    = config_.outline_color;
-        post_pc.inv_render_size  = glm::vec2(1.0f / render_extent_.width, 1.0f / render_extent_.height);
-        post_pc.outline_thickness = config_.outline_enabled ? config_.outline_thickness : 0.0f;
-        post_pc.depth_threshold  = config_.depth_threshold;
-        post_pc.normal_threshold = config_.normal_threshold;
-        post_pc.dither_strength  = config_.dither_enabled ? config_.dither_strength : 0.0f;
-        post_pc.palette_count    = config_.palette_enabled ? static_cast<float>(palette_lut_.count()) : 0.0f;
-        post_pc.camera_near           = ctx.cam ? ctx.cam->clip_start : 0.1f;
-        post_pc.camera_far            = ctx.cam ? ctx.cam->clip_end : 1000.0f;
-        post_pc.camera_is_perspective = (!ctx.cam || ctx.cam->type == CameraType::Perspective) ? 1.0f : 0.0f;
-        // This pipeline has no separate tonemap pass, unlike blendy -- exposure > 0
-        // keeps pixel_stylize.frag's tonemap step live (see PushConstants::exposure's doc).
-        post_pc.exposure         = config_.exposure;
-        post_pc.bloom_intensity  = config_.bloom_enabled ? config_.bloom_intensity : 0.0f;
-        post_pc.auto_exposure    = exposure_pass_ ? 1.0f : 0.0f;
-        post_pc.grading_size     = config_.grading_enabled
-            ? static_cast<float>(grading_lut_.size()) : 0.0f;
-        pixel_stylize_pass_->draw(cmd, post_pc, render_extent_.width, render_extent_.height);
-        if (config_.debug_lines_enabled) {
+        if (debug_view_is_channel(active_view)) {
+            // Replaces the stylize draw entirely -- debug_view_pass_ reads the G-buffer/
+            // lighting/SSAO/SSR sources directly (see build_post_chain_'s own doc), so none
+            // of post_source_view's tonemap/bloom/outline/dither/palette/grading chain
+            // touches it: what lands on screen is exactly what the renderer computed.
+            DebugViewPushConstants dbg_pc;
+            dbg_pc.channel               = static_cast<int32_t>(active_view);
+            dbg_pc.light_bands           = config_.light_bands;
+            dbg_pc.spec_threshold        = config_.spec_threshold;
+            dbg_pc.ambient_intensity     = config_.indirect.ambient_intensity;
+            dbg_pc.sky_intensity         = config_.indirect.sky_intensity;
+            dbg_pc.soft_lighting         = config_.soft_lighting ? 1.0f : 0.0f;
+            dbg_pc.ssao_direct_strength  = config_.ssao_direct_lighting_strength;
+            dbg_pc.camera_near           = ctx.cam ? ctx.cam->clip_start : 0.1f;
+            dbg_pc.camera_far            = ctx.cam ? ctx.cam->clip_end : 1000.0f;
+            dbg_pc.camera_is_perspective = (!ctx.cam || ctx.cam->type == CameraType::Perspective) ? 1.0f : 0.0f;
+            debug_view_pass_->draw(cmd, current_camera_set(), current_light_set(), *shadow_set_, dbg_pc,
+                                   render_extent_.width, render_extent_.height);
+        } else {
+            // Dof/Volumetrics debug views already replaced post_source_view's content with a
+            // raw intermediate buffer (dof_pass_/volumetrics_pass_'s own debug branch, driven
+            // by active_view above) -- raw_passthrough reduces every OTHER stylize step to its
+            // documented no-op value so the tonemap/bloom/outline/dither/palette/grading chain
+            // never rescales that buffer on its way to the screen. Off/Lines take none of this.
+            const bool raw_passthrough = (active_view == DebugView::Dof || active_view == DebugView::Volumetrics);
+
+            coopa::gfx::engine::passes::PixelStylizePass::PushConstants post_pc;
+            post_pc.outline_color    = config_.outline_color;
+            post_pc.inv_render_size  = glm::vec2(1.0f / render_extent_.width, 1.0f / render_extent_.height);
+            post_pc.outline_thickness = (config_.outline_enabled && !raw_passthrough) ? config_.outline_thickness : 0.0f;
+            post_pc.depth_threshold  = config_.depth_threshold;
+            post_pc.normal_threshold = config_.normal_threshold;
+            post_pc.dither_strength  = (config_.dither_enabled && !raw_passthrough) ? config_.dither_strength : 0.0f;
+            post_pc.palette_count    = (config_.palette_enabled && !raw_passthrough)
+                ? static_cast<float>(palette_lut_.count()) : 0.0f;
+            post_pc.camera_near           = ctx.cam ? ctx.cam->clip_start : 0.1f;
+            post_pc.camera_far            = ctx.cam ? ctx.cam->clip_end : 1000.0f;
+            post_pc.camera_is_perspective = (!ctx.cam || ctx.cam->type == CameraType::Perspective) ? 1.0f : 0.0f;
+            // This pipeline has no separate tonemap pass, unlike blendy -- exposure > 0
+            // keeps pixel_stylize.frag's tonemap step live (see PushConstants::exposure's doc).
+            post_pc.exposure         = raw_passthrough ? 0.0f : config_.exposure;
+            post_pc.bloom_intensity  = (config_.bloom_enabled && !raw_passthrough) ? config_.bloom_intensity : 0.0f;
+            post_pc.auto_exposure    = (exposure_pass_ && !raw_passthrough) ? 1.0f : 0.0f;
+            post_pc.grading_size     = (config_.grading_enabled && !raw_passthrough)
+                ? static_cast<float>(grading_lut_.size()) : 0.0f;
+            pixel_stylize_pass_->draw(cmd, post_pc, render_extent_.width, render_extent_.height);
+        }
+        if (active_view == DebugView::Lines) {
             debug_line_pass_->draw(cmd, ctx.proj * ctx.view,
                 LetterboxRect{0, 0, render_extent_.width, render_extent_.height});
         }
@@ -1862,8 +2035,15 @@ private:
                     glm::inverse(glm::dmat4(ctx.proj * ctx.view)));
                 taa_params.reproject_valid = prev_view_proj_valid_;
                 taa_params.jitter_ndc      = taa_jitter_ndc_;
-                taa_params.feedback_still  = config_.taa_blending_weight;
-                taa_params.feedback_motion = config_.taa_feedback_motion;
+                // Any debug view other than "off"/"lines" (channel views AND the DOF-CoC/
+                // volumetrics-density in-chain views) is a raw per-frame readout -- history
+                // blend forced to 0 so a jittered term's flicker shows up honestly instead of
+                // getting smoothed away by TAA's own accumulation (the very thing a debug view
+                // exists to let you see). "lines" overlays wireframes on the NORMAL image, so
+                // it keeps normal TAA.
+                const bool raw_taa = (active_view != DebugView::Off && active_view != DebugView::Lines);
+                taa_params.feedback_still  = raw_taa ? 0.0f : config_.taa_blending_weight;
+                taa_params.feedback_motion = raw_taa ? 0.0f : config_.taa_feedback_motion;
                 taa_params.velocity_scale  = config_.taa_weight_scale;
                 taa_params.sharpness       = config_.taa_sharpness;
                 taa_params.variance_gamma  = config_.taa_variance_gamma;
@@ -2432,7 +2612,8 @@ private:
         // sampled in WORLD space, so TAA jitter here would make them swim against
         // the pixel grid on top of their own intended motion.
         vol.inv_view_proj = glm::inverse(unjittered_proj * view);
-        vol.camera_pos    = glm::vec4(cam_pos, config_.volumetrics_debug_view ? 1.0f : 0.0f);
+        vol.camera_pos    = glm::vec4(cam_pos,
+            parse_debug_view(config_.debug_view) == DebugView::Volumetrics ? 1.0f : 0.0f);
         if (dir_light) {
             vol.sun_direction = glm::vec4(glm::normalize(dir_light->direction), 0.0f);
             vol.sun_color     = glm::vec4(dir_light->color * dir_light->intensity, 1.0f);
@@ -2488,6 +2669,14 @@ private:
         const auto& lubo = current_light_data();
         vol.dir_light_space_matrix  = lubo.dir_light_space_matrix;
         vol.spot_light_space_matrix = lubo.spot_light_space_matrix;
+        // The cascade set too, not just cascade 0's matrix: a sun shaft marches the whole
+        // volumetrics_max_distance, so a march point past the near cascade must find its own
+        // tile of the atlas or it would come back unshadowed. volumetrics.frag runs the same
+        // containment select calc_dir_shadow() does -- see vol_shadow_vis_cascaded().
+        for (uint32_t c = 0; c < coopa::gfx::engine::data::MAX_DIR_CASCADES; ++c) {
+            vol.dir_cascade_matrix[c] = lubo.dir_cascade_matrix[c];
+        }
+        vol.dir_cascade_info = lubo.dir_cascade_info;
         const bool dir_shadowed = config_.volumetrics_shadows_enabled &&
                                   lubo.dir_shadow_params.z > 0.5f;
         vol.shadow_params = glm::vec4(dir_shadowed ? 1.0f : 0.0f,
@@ -2919,14 +3108,22 @@ private:
     }
 
     /**
-     * @brief Writes this frame's directional shadow matrix and shadow parameters into the
+     * @brief Writes this frame's directional cascade matrices and shadow parameters into the
      *        current slot's LightUBO.
      *
-     * The fit itself is pure math (pixel_math.h's compute_dir_shadow_fit()); this adds the
-     * two things that need pipeline state: the world-to-texel conversion for the PCF radius,
-     * and the write through current_light_data(). Must run after render() has set
-     * light_frame_ to this frame's slot, same requirement as update_lights_(); the single
-     * upload() happens in render() once this and the point-light flag are both set.
+     * One ortho fit per cascade, each to its own slice of the camera's depth range
+     * (pixel_math.h's compute_cascade_splits() + compute_dir_shadow_fit_slice()); this adds
+     * the three things that need pipeline state: the world-to-texel conversions each cascade
+     * needs for its PCF radius, normal bias and PCSS penumbra, the atlas-tile geometry the
+     * shader selects against, and the write through current_light_data().
+     *
+     * Every conversion is PER CASCADE because every cascade has its own world-per-texel
+     * scale, while shadow_softness/shadow_normal_bias are world-space constants -- a single
+     * shared radius would make the near cascade's penumbra four times too wide in texels.
+     *
+     * Must run after render() has set light_frame_ to this frame's slot, same requirement as
+     * update_lights_(); the single upload() happens in render() once this and the point-light
+     * flag are both set.
      */
     void update_dir_shadow_matrix_(const glm::vec3& direction,
                                    const coopa::gfx::engine::components::CameraComponent* cam,
@@ -2947,46 +3144,90 @@ private:
             fit_cam.aspect            = static_cast<float>(render_extent_.width) /
                                         static_cast<float>(render_extent_.height);
         }
+        const ShadowFitCamera* fit_cam_ptr = cam ? &fit_cam : nullptr;
 
-        const DirShadowFit fit = compute_dir_shadow_fit(
-            direction, cam ? &fit_cam : nullptr,
-            config_.shadow_distance, config_.shadow_map_resolution);
+        const uint32_t cascades  = shadow_target_.dir_cascade_count();
+        const uint32_t tile_res  = shadow_target_.dir_tile_resolution();
+        const float    near_clip = cam ? cam->clip_start : 0.1f;
+        const CascadeSplits splits = compute_cascade_splits(
+            near_clip, config_.shadow_distance, cascades, config_.shadow_cascade_split_lambda);
+
+        const bool pcss_on_config = config_.shadow_pcss_enabled;
+        const float pcss_search = glm::clamp(config_.shadow_pcss_search_texels, 1.0f, 16.0f);
 
         auto& ubo = current_light_data();
-        ubo.dir_light_space_matrix = fit.light_space_matrix;
-        // .y is the PCF radius in shadow-map TEXELS, converted here from the world-space
-        // config_.shadow_softness against this frame's actual texel size, so the penumbra
-        // stays visually constant in world units as the box refits to the camera. Clamped to
-        // 12: the radius is unbounded above (a small scene at high resolution asks for
-        // hundreds) while calc_dir_shadow's Vogel disk is tuned for single-digit radii. 0
-        // (soft_shadows off) selects the single hard compare.
-        const float dir_pcf_radius_texels = config_.soft_shadows
-            ? std::min(config_.shadow_softness / std::max(fit.texel_world, 1e-6f), 12.0f)
-            : 0.0f;
-        // .w is the normal-offset bias, in world units, derived from THIS frame's texel size --
-        // the same per-frame conversion .y just did for the PCF radius, and for the same reason:
-        // a world-space constant here means a different number of texels in every scene and at
-        // every fit. See compute_shadow_normal_bias().
-        ubo.dir_shadow_params = glm::vec4(
-            config_.shadow_bias, dir_pcf_radius_texels, cast_dir_shadow ? 1.0f : 0.0f,
-            compute_shadow_normal_bias(dir_pcf_radius_texels, config_.shadow_normal_bias,
-                                       fit.texel_world));
 
-        // PCSS contact hardening (gfx_shadow_dir_pcss). .y folds the whole penumbra
-        // conversion into one factor: a stored-vs-receiver gap of `g` in [0,1]
-        // light-space depth spans g * depth_range_world metres, and a sun of angular
-        // size shadow_pcss_light_size grows the penumbra by that many metres * size --
-        // divided by texel_world to land in shadow-map texels, the unit
-        // gfx_shadow_dir_pcf_vogel wants. Requires the soft path (radius > 0): the
-        // constant radius above becomes PCSS's maximum, so shadow_softness keeps its
-        // role as the artist's width dial.
-        const bool pcss_on = config_.shadow_pcss_enabled && dir_pcf_radius_texels > 0.0f;
-        ubo.pcss_params = glm::vec4(
-            pcss_on ? 1.0f : 0.0f,
-            fit.depth_range_world * config_.shadow_pcss_light_size /
-                std::max(fit.texel_world, 1e-6f),
-            glm::clamp(config_.shadow_pcss_search_texels, 1.0f, 16.0f),
-            static_cast<float>(std::clamp<uint32_t>(config_.shadow_pcss_taps, 1u, 16u)));
+        bool any_soft = false;
+        for (uint32_t c = 0; c < coopa::gfx::engine::data::MAX_DIR_CASCADES; ++c) {
+            // Slots past the live count repeat the last cascade rather than holding an
+            // identity matrix: the shader's containment loop stops at the count, but a stale
+            // identity here would project every world position into the same degenerate tile
+            // if that bound were ever read wrong.
+            const uint32_t i = std::min(c, cascades - 1u);
+            const float slice_near = (i == 0) ? near_clip : splits.distance[i - 1];
+            const DirShadowFit fit = compute_dir_shadow_fit_slice(
+                direction, fit_cam_ptr, slice_near, splits.distance[i],
+                config_.shadow_distance, tile_res);
+
+            // The PCF radius in ATLAS texels (a tile texel and an atlas texel are the same
+            // physical texel, so no per-tile correction), converted from the world-space
+            // config_.shadow_softness against THIS cascade's texel size so the penumbra stays
+            // visually constant in world units. Clamped to 12: the radius is unbounded above
+            // (a fine cascade asks for tens) while the Vogel disk is tuned for single-digit
+            // radii. 0 (soft_shadows off) selects the single hard compare.
+            const float pcf_texels = config_.soft_shadows
+                ? std::min(config_.shadow_softness / std::max(fit.texel_world, 1e-6f), 12.0f)
+                : 0.0f;
+
+            ubo.dir_cascade_matrix[c]      = fit.light_space_matrix;
+            ubo.dir_cascade_pcf_texels[c]  = pcf_texels;
+            // The normal-offset bias, in world units, derived from THIS cascade's texel size --
+            // the same conversion the PCF radius just did, and for the same reason: a
+            // world-space constant means a different number of texels in every cascade. See
+            // compute_shadow_normal_bias().
+            ubo.dir_cascade_normal_bias[c] = compute_shadow_normal_bias(
+                pcf_texels, config_.shadow_normal_bias, fit.texel_world);
+            // PCSS contact hardening (gfx_shadow_dir_pcss): the whole penumbra conversion
+            // folded into one factor. A stored-vs-receiver gap of `g` in [0,1] light-space
+            // depth spans g * depth_range_world metres, and a sun of angular size
+            // shadow_pcss_light_size grows the penumbra by that many metres * size --
+            // divided by texel_world to land in the texels gfx_shadow_dir_pcf_vogel wants.
+            ubo.dir_cascade_pcss_scale[c]  = fit.depth_range_world *
+                config_.shadow_pcss_light_size / std::max(fit.texel_world, 1e-6f);
+
+            if (c < cascades && pcf_texels > 0.0f) any_soft = true;
+
+            if (c == 0) {
+                // Cascade 0 mirrored into the pre-cascade fields, which gfxcoopa's own
+                // shaders (pbr.frag/deferred_lighting.frag/transparent.frag) still read
+                // through the shorter LightUBO prefix -- see light_data.h's cascade doc.
+                ubo.dir_light_space_matrix = fit.light_space_matrix;
+                ubo.dir_shadow_params = glm::vec4(
+                    config_.shadow_bias, pcf_texels, cast_dir_shadow ? 1.0f : 0.0f,
+                    ubo.dir_cascade_normal_bias[0]);
+                ubo.pcss_params = glm::vec4(
+                    0.0f, ubo.dir_cascade_pcss_scale[0], pcss_search,
+                    static_cast<float>(std::clamp<uint32_t>(config_.shadow_pcss_taps, 1u, 16u)));
+            }
+        }
+        // PCSS requires the soft path (radius > 0) in at least one live cascade: the constant
+        // radius above becomes PCSS's maximum, so shadow_softness keeps its role as the
+        // artist's width dial.
+        ubo.pcss_params.x = (pcss_on_config && any_soft) ? 1.0f : 0.0f;
+
+        // .z is the cascade-SELECTION inset, in tile uv: a shading point is only accepted
+        // into a cascade whose tile it sits at least this far inside, which is exactly what
+        // keeps the widest PCF disk (and the PCSS blocker search around it) from reaching
+        // across a tile border into the neighbouring cascade's depths. That guarantee is why
+        // gfx/shadow_sampling.glsl's kernels need no atlas awareness at all.
+        // .w is the dithered transition band, the outer slice of that accepted region where
+        // calc_dir_shadow() randomly promotes a pixel to the next cascade so TAA can resolve
+        // the resolution step into a gradient instead of a seam.
+        const float inset = (12.0f + pcss_search) / static_cast<float>(std::max(tile_res, 1u));
+        ubo.dir_cascade_info = glm::vec4(
+            static_cast<float>(cascades),
+            static_cast<float>(coopa::gfx::engine::targets::ShadowMapTarget::grid_for(cascades).first),
+            inset, 0.06f);
     }
 
     /**
@@ -3089,58 +3330,68 @@ private:
                                     bool cast_dir_shadow) {
         shadow_target_.begin_directional_pass(cmd);
         if (cast_dir_shadow) {
-            shadow_pipeline_->bind_directional(cmd);
             cmd.bind_vertex_buffer(instance_stream_.buffer(), 0, 1);
 
-            coopa::gfx::engine::passes::DirectionalShadowPushConstants pc{};
-            pc.light_space_matrix = current_light_data().dir_light_space_matrix;
-            pc.gfx_time = glm::vec4(elapsed_time_, frame_dt_, static_cast<float>(frame_index_), 0.0f);
+            // One pass over the casters per cascade, each scissored to its own atlas tile and
+            // pushed that cascade's matrix. The atlas is cleared once by
+            // begin_directional_pass() and transitioned once after the loop, so a cascade
+            // costs exactly its draws -- no extra render pass, barrier or pipeline variant.
+            const uint32_t cascades = shadow_target_.dir_cascade_count();
+            for (uint32_t c = 0; c < cascades; ++c) {
+                shadow_target_.set_cascade_viewport(cmd, c);
+                shadow_pipeline_->bind_directional(cmd);
 
-            // Same last-shader transition guard as record_gbuffer_() -- a caster's shadow
-            // must displace identically to its G-buffer draw (see gfx/surface/shadow_vs.glsl's
-            // doc), which means binding the SAME named variant here, not just the stock pass.
-            std::string last_shader;
-            bool have_bound = true; // stock, bound just above
+                coopa::gfx::engine::passes::DirectionalShadowPushConstants pc{};
+                pc.light_space_matrix = current_light_data().dir_cascade_matrix[c];
+                pc.gfx_time = glm::vec4(elapsed_time_, frame_dt_, static_cast<float>(frame_index_), 0.0f);
 
-            for (size_t i = 0; i < meshes.renderers.size(); ++i) {
-                if (meshes.instance_idx[i] == InstanceStream::kInvalidIndex) continue;
-                // A BLEND material only casts a shadow at full opacity -- this pass has no
-                // per-fragment discard (single hard depth compare, no PCF to average a partial
-                // alpha into a partial shadow -- see gfx/shadow_dither.glsl's doc), so there is
-                // no way to draw a *partial* shadow for a translucent object; it's binary,
-                // caster or not.
-                if (meshes.renderers[i]->material.is_blended() && meshes.renderers[i]->material.alpha < 1.0f) continue;
+                // Same last-shader transition guard as record_gbuffer_() -- a caster's shadow
+                // must displace identically to its G-buffer draw (see gfx/surface/shadow_vs.glsl's
+                // doc), which means binding the SAME named variant here, not just the stock pass.
+                // Reset per cascade: the loop re-binds the stock pipeline above.
+                std::string last_shader;
+                bool have_bound = true; // stock, bound just above
 
-                if (!have_bound || meshes.renderers[i]->material.shader != last_shader) {
-                    shadow_pipeline_->bind_directional(cmd, meshes.renderers[i]->material.shader);
-                    last_shader = meshes.renderers[i]->material.shader;
-                    have_bound  = true;
+                for (size_t i = 0; i < meshes.renderers.size(); ++i) {
+                    if (meshes.instance_idx[i] == InstanceStream::kInvalidIndex) continue;
+                    // A BLEND material only casts a shadow at full opacity -- this pass has no
+                    // per-fragment discard (single hard depth compare, no PCF to average a partial
+                    // alpha into a partial shadow -- see gfx/shadow_dither.glsl's doc), so there is
+                    // no way to draw a *partial* shadow for a translucent object; it's binary,
+                    // caster or not.
+                    if (meshes.renderers[i]->material.is_blended() && meshes.renderers[i]->material.alpha < 1.0f) continue;
+
+                    if (!have_bound || meshes.renderers[i]->material.shader != last_shader) {
+                        shadow_pipeline_->bind_directional(cmd, meshes.renderers[i]->material.shader);
+                        last_shader = meshes.renderers[i]->material.shader;
+                        have_bound  = true;
+                    }
+
+                    // CUTOUT (AlphaMode::Mask): the mask texture punches through the shadow too,
+                    // via the same set/cutoff shadow_depth.frag tests against.
+                    pc.alpha_cutoff = meshes.renderers[i]->material.gpu_alpha_cutoff();
+                    pc.gfx_params   = meshes.renderers[i]->material.shader_params;
+                    cmd.bind_descriptor_set(material_cache_->set_for(meshes.renderers[i]->material), 0);
+                    shadow_pipeline_->push_directional(cmd, pc);
+                    meshes.renderers[i]->get_mesh()->bind(cmd);
+                    meshes.renderers[i]->get_mesh()->draw(cmd, 1, meshes.instance_idx[i]);
                 }
 
-                // CUTOUT (AlphaMode::Mask): the mask texture punches through the shadow too,
-                // via the same set/cutoff shadow_depth.frag tests against.
-                pc.alpha_cutoff = meshes.renderers[i]->material.gpu_alpha_cutoff();
-                pc.gfx_params   = meshes.renderers[i]->material.shader_params;
-                cmd.bind_descriptor_set(material_cache_->set_for(meshes.renderers[i]->material), 0);
-                shadow_pipeline_->push_directional(cmd, pc);
-                meshes.renderers[i]->get_mesh()->bind(cmd);
-                meshes.renderers[i]->get_mesh()->draw(cmd, 1, meshes.instance_idx[i]);
-            }
+                if (!sdf_draws.empty()) {
+                    sdf_shadow_pass_->bind_directional(cmd);
+                    cmd.bind_descriptor_set(sdf_data_.current_set(), 0);
 
-            if (!sdf_draws.empty()) {
-                sdf_shadow_pass_->bind_directional(cmd);
-                cmd.bind_descriptor_set(sdf_data_.current_set(), 0);
-
-                coopa::gfx::engine::passes::SdfDirectionalShadowPushConstants sdf_pc{};
-                sdf_pc.light_space_matrix = current_light_data().dir_light_space_matrix;
-                sdf_pc.shadow_max_steps   = config_.sdf_shadow_max_steps;
-                for (const auto& d : sdf_draws) {
-                    if (!d.cast_shadows) continue;
-                    // Same binary BLEND-at-full-opacity rule as the mesh loop above.
-                    if (d.is_blend && d.comp->material.alpha < 1.0f) continue;
-                    sdf_pc.renderer_index = d.gpu_index;
-                    sdf_shadow_pass_->push_directional(cmd, sdf_pc);
-                    cmd.draw(6);
+                    coopa::gfx::engine::passes::SdfDirectionalShadowPushConstants sdf_pc{};
+                    sdf_pc.light_space_matrix = current_light_data().dir_cascade_matrix[c];
+                    sdf_pc.shadow_max_steps   = config_.sdf_shadow_max_steps;
+                    for (const auto& d : sdf_draws) {
+                        if (!d.cast_shadows) continue;
+                        // Same binary BLEND-at-full-opacity rule as the mesh loop above.
+                        if (d.is_blend && d.comp->material.alpha < 1.0f) continue;
+                        sdf_pc.renderer_index = d.gpu_index;
+                        sdf_shadow_pass_->push_directional(cmd, sdf_pc);
+                        cmd.draw(6);
+                    }
                 }
             }
         }
@@ -3798,12 +4049,43 @@ private:
     std::unique_ptr<coopa::gfx::engine::passes::ExposurePass> exposure_pass_;
 
     std::unique_ptr<coopa::gfx::engine::passes::GBufferPipeline> gbuffer_pipeline_;
-    /// ssao_debug_view diagnostic -- draws the same occlusion image lighting consumes.
-    std::unique_ptr<passes::FullscreenBlitPass>                  ssao_debug_pass_;
     std::unique_ptr<coopa::gfx::engine::passes::SsaoPass>        ssao_pass_;       // always constructed
+    // Shared accumulation-count buffer every temporally accumulated screen-space effect reads
+    // (SSR, traced SSGI, contact shadows). Always constructed -- contact shadows are a runtime
+    // toggle, so the buffer must exist even when SSR was never built.
+    std::unique_ptr<coopa::gfx::engine::passes::TemporalHistoryPass> temporal_history_pass_;
+    /// Screen-space contact shadows and their temporal resolve. Always constructed and always
+    /// executed -- see the construction site for why the runtime toggle does not gate it.
+    std::unique_ptr<passes::ContactShadowPass>                   contact_shadow_pass_;
+    /** The contact march's runtime knobs as of last frame. A change to any of them invalidates
+     *  the accumulated history, so a live tweak shows up on the next frame rather than fading
+     *  in over the accumulation window. */
+    struct ContactShadowKnobs {
+        float length = 0.0f, strength = 0.0f, thickness = 0.0f;
+        int   steps = 0;
+        bool  enabled = false;
+        bool operator==(const ContactShadowKnobs& o) const {
+            return length == o.length && strength == o.strength && thickness == o.thickness
+                && steps == o.steps && enabled == o.enabled;
+        }
+    };
+    ContactShadowKnobs                                           contact_shadow_knobs_{};
+    /// pixel_lighting_pass_'s extra set (set 4): contact_shadow_pass_'s resolved occlusion.
+    /// Declared BEFORE pixel_lighting_pass_ so it outlives the pass holding it in its ExtraSets.
+    std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout>   contact_extra_layout_;
+    std::unique_ptr<coopa::gfx::pipeline::DescriptorPool>        contact_extra_pool_;
+    std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>         contact_extra_set_;
     std::unique_ptr<coopa::gfx::engine::passes::DeferredLightingPass> pixel_lighting_pass_;
     std::unique_ptr<coopa::gfx::engine::passes::SkyboxPass>      skybox_pass_;
     std::unique_ptr<coopa::gfx::engine::passes::PixelStylizePass> pixel_stylize_pass_;
+    // debug_view diagnostic (see build_post_chain_()'s own doc on this instance) -- the
+    // one extra descriptor set (SSR reflection / traced-SSGI / G-buffer depth) debug_view.frag
+    // needs on top of the camera/light/shadow/G-buffer+SSAO sets it shares with
+    // pixel_lighting_pass_ above.
+    std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout>   debug_view_extra_layout_;
+    std::unique_ptr<coopa::gfx::pipeline::DescriptorPool>        debug_view_extra_pool_;
+    std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>         debug_view_extra_set_;
+    std::unique_ptr<coopa::gfx::engine::passes::DeferredLightingPass> debug_view_pass_;
     // Physically-based depth of field. Runs at RENDER resolution (unlike tilt_shift_pass_,
     // which runs at display resolution), between volumetrics and bloom. Needs no resize rebuild:
     // it is sized to the startup-fixed render_extent_, and a window resize only moves the
@@ -3906,33 +4188,27 @@ private:
      *  visibly move the image, so it must not restart the stochastic redraw either. */
     static constexpr float kFreezeDeadbandPx = 0.35f;
     static constexpr float kFreezeDeadbandWu = 0.005f;
-    /** SSR resolve history weight while temporal_frozen_ (see the fill site's doc): with a
-     *  constant input the EMA's fixed point is blend-independent, so this only shortens the
-     *  post-stop convergence wash. 0.5 reaches sub-level residual in ~7 frames vs ~28 at
-     *  the shipped 0.85. */
-    static constexpr float kFrozenSsrBlend = 0.5f;
     /** Consecutive frames the camera has been still, and whether that has crossed the freeze
-     *  threshold. While frozen every stochastic per-frame term holds -- the AO sample jitter
-     *  (with its resolve keeping accepted-history pixels verbatim) and the SSR/SSGI ray
-     *  jitter -- so each temporal accumulator's input goes constant and the image can reach
-     *  byte-static. The AO hold freezes the accumulated AVERAGE, so there is no look change
-     *  at the freeze boundary, just a stop to sub-level residual updates. */
+     *  threshold. While frozen, each temporal resolve holds its accepted-history pixels
+     *  VERBATIM, which is what lets the image reach byte-static; the AO sample jitter also
+     *  holds. What holds is the accumulated AVERAGE, so there is no look change at the freeze
+     *  boundary, just a stop to sub-level residual updates. SSR/SSGI's ray jitter deliberately
+     *  keeps advancing: its resolve is a converging average that needs a fresh draw per frame,
+     *  and the verbatim hold is what makes its output static. */
     uint32_t  camera_frames_still_ = 0;
     bool      temporal_frozen_     = false;
     /** Still frames before freezing. Small enough that image_settles_after_camera_stops'
      *  eight-frame budget is met with margin; the pre-freeze frames only add 1/(count+1)-scale
      *  residuals, which that test's threshold tolerates. */
     static constexpr uint32_t kTemporalFreezeAfter = 4;
-    /** SSR/SSGI stochastic jitter counter -- frame_index_ gated on temporal_frozen_. */
-    uint32_t  ssr_jitter_index_    = 0;
     /** Rotation between consecutive views, as pixels swept at the screen centre -- drives the
      *  AO blur's velocity widening (SsaoPass::Params::motion_px). */
     float     ssao_motion_px_      = 0.0f;
     glm::mat4 ssao_prev_view_{1.0f};
-    // Physics collider/contact-normal gizmo overlay. Always constructed;
-    // config_.debug_lines_enabled gates only whether render() calls draw(). debug_lines_ is
-    // filled by the caller once per frame before render() -- this pass is kept physxcoopa-free
-    // by design, so Engine is what bridges PhysicsWorld::debug_draw() into that vector.
+    // Physics collider/contact-normal gizmo overlay. Always constructed; config_.debug_view
+    // == "lines" gates only whether render() calls draw(). debug_lines_ is filled by the
+    // caller once per frame before render() -- this pass is kept physxcoopa-free by design,
+    // so Engine is what bridges PhysicsWorld::debug_draw() into that vector.
     std::unique_ptr<passes::DebugLinePass>                       debug_line_pass_;
 
     /// The G-buffer depth, as a set-1 sampler for world_ui_pass_'s occlusion compare. Declared

@@ -137,8 +137,11 @@ Notes:
   `CMAKE_BUILD_TYPE`, since Homebrew zstd isn't found without pkg-config), so validation
   is off. Pass `-DCMAKE_BUILD_TYPE=Debug` to get the validation layer.
 - MoltenVK offers no MAILBOX present mode, so presentation is always FIFO (vsync).
-- Seeded mapcoopa worlds differ from Linux: libc++ and libstdc++ implement
-  `std::uniform_*_distribution`/`std::shuffle` differently, so the same seed gives different terrain.
+- Seeded mapcoopa worlds are byte-identical to Linux. libc++ and libstdc++ implement
+  `std::uniform_*_distribution`, `std::shuffle` and `std::sort`'s tie order differently, so
+  mapcoopa uses its own libstdc++-exact versions (`coopa/maps/portable_random.h`,
+  `portable_sort.h`) and builds with `-ffp-contract=off` on macOS (Clang otherwise fuses
+  `a*b+c` into FMA, which rounds differently from GCC).
 - All macOS-specific code is behind `__APPLE__` or only triggers on MoltenVK's
   portability extensions, so the Linux build is unchanged.
 

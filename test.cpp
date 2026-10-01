@@ -3152,6 +3152,12 @@ void test_image_settles_after_camera_stops() {
 
     toy::core::AppConfig config =
         make_shipped_config("assets/scenes/terrain_test/scene.yaml", 1920, 1080);
+    // Eye adaptation is deliberately excluded. It re-meters after the rotation and then eases
+    // exposure toward the new target at auto_exposure_speed_up/down -- a slow, intended,
+    // global brightness glide, not a renderer failing to settle. Left on (config.yaml ships it
+    // on), it alone keeps the per-frame delta far above the 0.03 threshold for the whole window,
+    // masking the temporal-resolve tail this test exists to catch.
+    config.render.auto_exposure_enabled = false;
     toy::core::Engine engine(std::move(config));
 
     auto* camera = coopa::gfx::engine::components::CameraComponent::main();

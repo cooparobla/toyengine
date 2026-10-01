@@ -40,6 +40,30 @@ endif()
 # under a shared parent, which libs/ satisfies -- so `cd libs/gfxcoopa && cbuild`
 # works in place.
 add_subdirectory(${LIBCOOPA_DIR}   ${CMAKE_CURRENT_BINARY_DIR}/libcoopa-build)
+
+# --- SMAA reference textures (SearchTex.h / AreaTex.h) ---
+# gfxcoopa's SMAA_TEXTURES_DIR cache default points at a fixed local checkout
+# (/home/coopa/third-party/smaa/Textures). Where that checkout exists -- or an
+# explicit -DSMAA_TEXTURES_DIR=... is given -- nothing here runs. Otherwise
+# (e.g. a macOS machine), fetch the reference implementation at a pinned commit
+# so render/pixel_render_pipeline.h's unconditional SmaaPass include compiles.
+set(_toy_smaa_default "/home/coopa/third-party/smaa/Textures")
+if(DEFINED SMAA_TEXTURES_DIR)
+    set(_toy_smaa_dir "${SMAA_TEXTURES_DIR}")
+else()
+    set(_toy_smaa_dir "${_toy_smaa_default}")
+endif()
+if(NOT EXISTS "${_toy_smaa_dir}/AreaTex.h")
+    include(FetchContent)
+    FetchContent_Declare(smaa
+        GIT_REPOSITORY https://github.com/iryoku/smaa.git
+        GIT_TAG        71c806a838bdd7d517df19192a20f0c61b3ca29d)
+    FetchContent_Populate(smaa)
+    set(SMAA_TEXTURES_DIR "${smaa_SOURCE_DIR}/Textures" CACHE PATH
+        "Directory containing the SMAA reference implementation's SearchTex.h/AreaTex.h" FORCE)
+    message(STATUS "toyengine: SMAA textures not found at ${_toy_smaa_dir}; fetched to ${SMAA_TEXTURES_DIR}")
+endif()
+
 add_subdirectory(${GFXCOOPA_DIR}   ${CMAKE_CURRENT_BINARY_DIR}/gfxcoopa-build)
 add_subdirectory(${PHYSXCOOPA_DIR} ${CMAKE_CURRENT_BINARY_DIR}/physxcoopa-build)
 add_subdirectory(${SFXCOOPA_DIR}   ${CMAKE_CURRENT_BINARY_DIR}/sfxcoopa-build)

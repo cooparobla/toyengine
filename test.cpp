@@ -2561,11 +2561,31 @@ void test_world_canvas_button_hover() {
     // Three ticks after each pointer move: Button's colour chase runs in update(), a phase
     // EARLIER than the late_update() that detects the hover, so the tint can only land from the
     // second frame onward however short fade_duration is.
-    engine.set_cursor_override(glm::vec2(1097.0f, 407.0f)); // the Heal button, in window pixels
+    // The two pointer positions below are authored against a 1920x1080 framebuffer. A window
+    // can come up with a different one -- Retina doubles it, and a window larger than the
+    // screen is clamped -- so re-express each point through the same letterbox maths the
+    // engine's own pointer ray uses (render::compute_display_rect). macOS only: elsewhere the
+    // points are used exactly as authored.
+#ifdef __APPLE__
+    const Frame probe = engine.capture_image(/*low_res=*/false);  // only its extent is used
+    auto to_window = [&](float x, float y) {
+        const uint32_t rw = 1440, rh = 960;
+        const auto ref = toy::render::compute_display_rect(engine.render_config(), 1920, 1080, rw, rh);
+        const auto act = toy::render::compute_display_rect(engine.render_config(), probe.width, probe.height, rw, rh);
+        const float u = (x - static_cast<float>(ref.x)) / static_cast<float>(ref.w);
+        const float v = (y - static_cast<float>(ref.y)) / static_cast<float>(ref.h);
+        return glm::vec2(static_cast<float>(act.x) + u * static_cast<float>(act.w),
+                         static_cast<float>(act.y) + v * static_cast<float>(act.h));
+    };
+#else
+    auto to_window = [](float x, float y) { return glm::vec2(x, y); };
+#endif
+
+    engine.set_cursor_override(to_window(1097.0f, 407.0f)); // the Heal button, in window pixels
     tick_frames(engine, 3);
     const Frame hovered = engine.capture_image(/*low_res=*/false);
 
-    engine.set_cursor_override(glm::vec2(850.0f, 760.0f));  // empty floor below it
+    engine.set_cursor_override(to_window(850.0f, 760.0f));  // empty floor below it
     tick_frames(engine, 3);
     const Frame idle = engine.capture_image(false);
 

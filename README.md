@@ -116,6 +116,32 @@ cmake -B build && cmake --build build
 ./build/toyengine [scene]
 ```
 
+### macOS (Apple Silicon)
+
+Vulkan runs through MoltenVK. One-time setup installs the loader, MoltenVK,
+headers, validation layers, glslc and GLFW via Homebrew:
+
+```bash
+tools/setup_macos.sh
+cmake -B build && cmake --build build -j
+./build/toyengine [scene]
+ctest --test-dir build -j4
+```
+
+Notes:
+
+- `cbuild`/`cplay` are Linux-only workspace tools; use the plain CMake path above.
+- The SMAA reference headers (`SearchTex.h`/`AreaTex.h`) are fetched at configure time
+  when `SMAA_TEXTURES_DIR` doesn't point at an existing checkout.
+- Plain `cmake -B build` ends up as a `Release` build here (caml's fetched zstd sets
+  `CMAKE_BUILD_TYPE`, since Homebrew zstd isn't found without pkg-config), so validation
+  is off. Pass `-DCMAKE_BUILD_TYPE=Debug` to get the validation layer.
+- MoltenVK offers no MAILBOX present mode, so presentation is always FIFO (vsync).
+- Seeded mapcoopa worlds differ from Linux: libc++ and libstdc++ implement
+  `std::uniform_*_distribution`/`std::shuffle` differently, so the same seed gives different terrain.
+- All macOS-specific code is behind `__APPLE__` or only triggers on MoltenVK's
+  portability extensions, so the Linux build is unchanged.
+
 The optional scene argument takes a bare name under `assets/scenes` (expanded to
 `assets/scenes/<name>/scene.yaml`) or an explicit path to a `.yaml`. It overrides
 `scene.default_scene` in `assets/config.yaml` for that run only; the `SCENE` env var

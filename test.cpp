@@ -47,6 +47,7 @@
 #include <cstring>
 #include <functional>
 #include <limits>
+#include <map>
 #include <random>
 #include <filesystem>
 #include <fstream>
@@ -66,6 +67,7 @@
 
 #include <toyengine/core/engine.h>
 #include <toyengine/render/pixel_math.h>
+#include <toyengine/render/visibility.h>
 #include <toyengine/scene/free_mover.h>
 #include <toyengine/world/terrain_chunk.h>
 #include <toyengine/world/terrain_component.h>
@@ -385,6 +387,186 @@ void tick_frames(toy::core::Engine& engine, int frames) {
 // =====================================================================================
 // Group "math" -- pure functions from toyengine/render/pixel_math.h. No GPU, no window.
 // =====================================================================================
+
+// --- toyengine/render/visibility.h ---
+
+void test_frustum_perspective_culls_boxes() {
+    using namespace toy::render;
+    const glm::mat4 view = glm::lookAt(glm::vec3(0, 0, 0), glm::vec3(0, 0, -1), glm::vec3(0, 1, 0));
+    const glm::mat4 proj = glm::perspective(glm::radians(60.0f), 1.0f, 0.1f, 100.0f);
+    const Frustum f = Frustum::from_matrix(proj * view);
+    auto box = [](glm::vec3 c, float e) { return WorldBounds{c, glm::vec3(e)}; };
+    expect(f.intersects(box({0, 0, -10}, 1)),   "box straight ahead is visible");
+    expect(!f.intersects(box({0, 0, 10}, 1)),   "box behind the camera is culled");
+    expect(!f.intersects(box({0, 0, -200}, 1)), "box past the far plane is culled");
+    expect(!f.intersects(box({50, 0, -10}, 1)), "box far to the right is culled");
+    expect(f.intersects(box({6.5f, 0, -10}, 1)), "box straddling the right plane is visible");
+    expect(f.intersects(box({0, 0, -0.1f}, 0.05f)),
+           "box straddling the near plane is visible");
+    expect(!f.intersects(box({0, 0, -0.03f}, 0.02f)),
+           "box wholly between the camera and the near plane is culled");
+}
+
+void test_frustum_ortho_and_cube_face() {
+    using namespace toy::render;
+    // Ortho shadow-cascade style: a 20x20 box looking down -Z from z=50, depth 0..100.
+    const glm::mat4 view = glm::lookAt(glm::vec3(0, 0, 50), glm::vec3(0, 0, 0), glm::vec3(0, 1, 0));
+    const glm::mat4 proj = glm::ortho(-10.0f, 10.0f, -10.0f, 10.0f, 0.0f, 100.0f);
+    const Frustum f = Frustum::from_matrix(proj * view);
+    expect(f.intersects({{0, 0, 0}, glm::vec3(1)}),   "ortho: centre box visible");
+    expect(!f.intersects({{15, 0, 0}, glm::vec3(1)}), "ortho: box outside the side planes culled");
+    expect(!f.intersects({{0, 0, 60}, glm::vec3(1)}), "ortho: box behind the near plane culled");
+
+    // A +X cube face (90-degree perspective).
+    const glm::mat4 fview = glm::lookAt(glm::vec3(0), glm::vec3(1, 0, 0), glm::vec3(0, -1, 0));
+    const glm::mat4 fproj = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, 20.0f);
+    const Frustum cf = Frustum::from_matrix(fproj * fview);
+    expect(cf.intersects({{5, 0, 0}, glm::vec3(0.5f)}),   "cube +X face sees +X");
+    expect(!cf.intersects({{-5, 0, 0}, glm::vec3(0.5f)}), "cube +X face does not see -X");
+    expect(!cf.intersects({{0, 5, 0}, glm::vec3(0.5f)}),  "cube +X face does not see +Y");
+}
+
+void test_world_aabb_matches_corners() {
+    using namespace toy::render;
+    glm::mat4 m(1.0f);
+    m = glm::translate(m, glm::vec3(3, -2, 1));
+    m = glm::rotate(m, 0.7f, glm::normalize(glm::vec3(1, 2, 3)));
+    m = glm::scale(m, glm::vec3(2, 0.5f, 1.5f));
+    const glm::vec3 lo(-1, -2, -0.5f), hi(1, 1, 2);
+    glm::vec3 mn(1e9f), mx(-1e9f);
+    for (int i = 0; i < 8; ++i) {
+        const glm::vec3 c((i & 1) ? hi.x : lo.x, (i & 2) ? hi.y : lo.y, (i & 4) ? hi.z : lo.z);
+        const glm::vec3 w = glm::vec3(m * glm::vec4(c, 1.0f));
+        mn = glm::min(mn, w);
+        mx = glm::max(mx, w);
+    }
+    const WorldBounds b = world_aabb(m, lo, hi);
+    for (int a = 0; a < 3; ++a) {
+        expect_near(b.center[a] - b.extent[a], mn[a], 1e-4f, "world_aabb min matches 8 corners");
+        expect_near(b.center[a] + b.extent[a], mx[a], 1e-4f, "world_aabb max matches 8 corners");
+    }
+}
+
+void test_screen_height_fraction() {
+    using namespace toy::render;
+    const glm::mat4 view(1.0f);   // camera at origin looking down -Z
+    const glm::mat4 proj = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, 100.0f);
+    // fov 90 -> p11 = 1: a radius-1 sphere 10 away covers 1/10 of the half-height... as a
+    // fraction of the full height: r * p11 / d.
+    expect_near(screen_height_fraction({0, 0, -10}, 1.0f, view, proj), 0.1f, 1e-5f,
+                "perspective fraction = r * cot(fov/2) / depth");
+    expect(screen_height_fraction({0, 0, -0.5f}, 1.0f, view, proj) > 1.0f,
+           "a sphere around the camera covers the screen");
+    const glm::mat4 ortho = glm::ortho(-5.0f, 5.0f, -5.0f, 5.0f, 0.0f, 50.0f);
+    expect_near(screen_height_fraction({0, 0, -10}, 1.0f, view, ortho), 0.2f, 1e-5f,
+                "ortho fraction = r * 2/height, independent of depth");
+}
+
+void test_projected_texels() {
+    using namespace toy::render;
+    // A 20-unit-wide ortho cascade at 2048 texels: 102.4 texels per unit, so a radius-0.5
+    // sphere (1 unit across) is ~102 texels.
+    const glm::mat4 vp = glm::ortho(-10.0f, 10.0f, -10.0f, 10.0f, 0.0f, 100.0f) *
+                         glm::lookAt(glm::vec3(0, 0, 50), glm::vec3(0), glm::vec3(0, 1, 0));
+    expect_near(projected_texels(vp, {0, 0, 0}, 0.5f, 2048.0f), 102.4f, 0.01f,
+                "ortho: 1 world unit = resolution / width texels");
+    // Perspective (90-degree cube face, 512): halving the distance doubles the size.
+    const glm::mat4 cf = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, 50.0f) *
+                         glm::lookAt(glm::vec3(0), glm::vec3(1, 0, 0), glm::vec3(0, -1, 0));
+    const float far_t  = projected_texels(cf, {20, 0, 0}, 0.5f, 512.0f);
+    const float near_t = projected_texels(cf, {10, 0, 0}, 0.5f, 512.0f);
+    expect_near(near_t / far_t, 2.0f, 1e-3f, "perspective: size scales with 1/distance");
+    expect(projected_texels(cf, {0.2f, 0, 0}, 0.5f, 512.0f) > 1.0e5f,
+           "a caster around the light is never small");
+}
+
+/// A flat n x n grid of quads in mesh-YAML form, with SHARED vertex indices across faces
+/// (the welded topology the loader should recover) but emitted per-corner by the parser.
+static std::string make_grid_mesh_yaml(int n) {
+    std::string y = "vertices:\n";
+    for (int j = 0; j <= n; ++j)
+        for (int i = 0; i <= n; ++i)
+            y += "  - [" + std::to_string(i) + ".0, " + std::to_string(j) + ".0, 0.0]\n";
+    y += "normals:\n";
+    for (int k = 0; k < (n + 1) * (n + 1); ++k) y += "  - [0.0, 0.0, 1.0]\n";
+    y += "uvs:\n";
+    for (int j = 0; j <= n; ++j)
+        for (int i = 0; i <= n; ++i)
+            y += "  - [" + std::to_string(i) + ".0, " + std::to_string(j) + ".0]\n";
+    y += "faces:\n";
+    for (int j = 0; j < n; ++j)
+        for (int i = 0; i < n; ++i) {
+            const int a = j * (n + 1) + i;
+            y += "  - [" + std::to_string(a) + ", " + std::to_string(a + 1) + ", " +
+                 std::to_string(a + n + 2) + ", " + std::to_string(a + n + 1) + "]\n";
+        }
+    return y;
+}
+
+void test_mesh_build_welds_and_generates_lods() {
+    using coopa::gfx::engine::data::Mesh;
+    const int n = 8;
+    const fkyaml::node node = fkyaml::node::deserialize(make_grid_mesh_yaml(n));
+
+    const auto plain = Mesh::build_cpu(node);
+    expect(plain.indices.size() == static_cast<size_t>(n * n * 6), "welding keeps every triangle");
+    expect(plain.vertices.size() == static_cast<size_t>((n + 1) * (n + 1)),
+           "per-corner vertices weld back to one per grid point");
+    expect(plain.lods.size() == 1, "no lods block -> a single LOD covering the whole mesh");
+    expect(plain.lods[0].index_count == plain.indices.size(), "LOD 0 is the full mesh");
+    expect_near(plain.bounds_max.x, static_cast<float>(n), 1e-6f, "bounds survive welding");
+
+    const fkyaml::node cfg = fkyaml::node::deserialize(std::string(
+        "lods:\n  - { ratio: 0.5, screen_size: 0.2 }\ncull_screen_size: 0.01\n"));
+    const auto lodded = Mesh::build_cpu(node, &cfg);
+    expect(lodded.lods.size() == 2, "one ratio level -> two LODs");
+    expect(lodded.lods[1].first_index == lodded.lods[0].index_count,
+           "LOD 1's indices follow LOD 0's in the shared index buffer");
+    expect(lodded.lods[1].index_count < lodded.lods[0].index_count, "LOD 1 has fewer triangles");
+    expect(lodded.lods[1].index_count % 3 == 0, "LOD 1 is whole triangles");
+    expect_near(lodded.lods[1].screen_size, 0.2f, 1e-6f, "screen_size is carried through");
+    expect_near(lodded.cull_screen_size, 0.01f, 1e-6f, "cull_screen_size is carried through");
+    expect(lodded.vertices.size() == plain.vertices.size(), "a ratio level shares LOD 0's vertices");
+}
+
+void test_mesh_lod_simplifies_flat_shaded_mesh() {
+    using coopa::gfx::engine::data::Mesh;
+    // pixel_demo's sphere is exported flat-shaded: every face has its own normals, so after
+    // welding no two triangles share a vertex. LOD generation must still reduce it.
+    std::ifstream in(std::string(ROOT_DIR) + "/assets/scenes/pixel_demo/meshes/sphere.000.yaml");
+    expect(static_cast<bool>(in), "sphere.000.yaml opens");
+    if (!in) return;
+    const fkyaml::node node = fkyaml::node::deserialize(in);
+    const fkyaml::node cfg = fkyaml::node::deserialize(std::string(
+        "lods:\n  - { ratio: 0.5, screen_size: 0.2 }\n  - { ratio: 0.2, screen_size: 0.05 }\n"));
+    const auto m = Mesh::build_cpu(node, &cfg);
+    expect(m.lods.size() == 3, "two ratio levels -> three LODs");
+    if (m.lods.size() != 3) return;
+    std::cout << "    sphere LOD index counts: " << m.lods[0].index_count << " / "
+              << m.lods[1].index_count << " / " << m.lods[2].index_count << "\n";
+    expect(m.lods[1].index_count <= m.lods[0].index_count * 6 / 10, "LOD 1 is roughly half of LOD 0");
+    expect(m.lods[2].index_count < m.lods[1].index_count, "LOD 2 is coarser than LOD 1");
+}
+
+void test_select_lod_thresholds_and_hysteresis() {
+    using namespace toy::render;
+    const std::vector<LodThreshold> t = {{0.0f}, {0.25f}, {0.1f}};
+    expect(select_lod(0.5f,  t, 0.0f, -2, 0.1f) == 0, "large -> LOD0");
+    expect(select_lod(0.2f,  t, 0.0f, -2, 0.1f) == 1, "medium -> LOD1");
+    expect(select_lod(0.05f, t, 0.0f, -2, 0.1f) == 2, "small -> LOD2");
+    expect(select_lod(0.005f, t, 0.01f, -2, 0.1f) == -1, "below cull size -> culled");
+    // Hysteresis: at 0.24 (just under LOD1's 0.25) an object already at LOD0 stays at LOD0...
+    expect(select_lod(0.24f, t, 0.0f, 0, 0.1f) == 0, "hysteresis holds LOD0 just under the threshold");
+    // ...but well under it, it switches.
+    expect(select_lod(0.2f, t, 0.0f, 0, 0.1f) == 1, "clearly under the threshold switches");
+    // Going back finer needs to clear the threshold by the margin too.
+    expect(select_lod(0.26f, t, 0.0f, 1, 0.1f) == 1, "hysteresis holds LOD1 just over the threshold");
+    expect(select_lod(0.3f, t, 0.0f, 1, 0.1f) == 0, "clearly over the threshold refines");
+    // A multi-level jump moves as far as the margin allows.
+    expect(select_lod(0.01f, t, 0.0f, 0, 0.1f) == 2, "a big drop jumps straight to LOD2");
+    const std::vector<LodThreshold> single = {{0.0f}};
+    expect(select_lod(0.0001f, single, 0.0f, -2, 0.1f) == 0, "no LODs and no cull -> always LOD0");
+}
 
 void test_letterbox_exact_fit() {
     // 1920x1080 window, 480x270 buffer -> scale 4, exact fit, no bars.
@@ -2011,6 +2193,88 @@ void test_chunk_flat_ground_emits_tops_only() {
     expect(all_at_surface, "chunk: the top face lands at steps * height_step");
 }
 
+/// Surface area of a chunk mesh per (face direction, tile kind) -- the invariant greedy
+/// merging must preserve. `encoded`: UVs are TileMeshLibrary::encode_uv tile-space (greedy
+/// mesher); otherwise atlas-space, decoded through the atlas grid.
+std::map<std::pair<int, int>, double> area_by_direction_and_kind(const toy::world::ChunkMeshData& mesh,
+                                                                 bool encoded) {
+    using namespace toy::world;
+    std::map<std::pair<int, int>, double> out;
+    for (size_t t = 0; t + 2 < mesh.indices.size(); t += 3) {
+        const auto& a = mesh.vertices[mesh.indices[t]];
+        const auto& b = mesh.vertices[mesh.indices[t + 1]];
+        const auto& c = mesh.vertices[mesh.indices[t + 2]];
+        const glm::vec3 cr = glm::cross(b.position - a.position, c.position - a.position);
+        const double area = 0.5 * glm::length(cr);
+        if (area < 1e-9) continue;
+        const glm::vec3 n = glm::normalize(cr);
+        int dir = 0;
+        for (int axis = 0; axis < 3; ++axis) {
+            if (std::abs(n[axis]) > 0.5f) dir = (axis + 1) * (n[axis] > 0.0f ? 1 : -1);
+        }
+        const glm::vec2 uv = (a.uv + b.uv + c.uv) / 3.0f;
+        int kind = 0;
+        if (encoded) {
+            kind = static_cast<int>(std::floor(uv.x / TileMeshLibrary::k_uv_cell_stride));
+        } else {
+            kind = static_cast<int>(std::floor(uv.y * k_atlas_rows)) * static_cast<int>(k_atlas_columns) +
+                   static_cast<int>(std::floor(uv.x * k_atlas_columns));
+        }
+        out[{dir, kind}] += area;
+    }
+    return out;
+}
+
+void test_chunk_greedy_merge_preserves_surface() {
+    using namespace toy::world;
+    TerrainParams params = make_test_params(8);
+    params.soil_depth_steps = 2;
+    const TileMeshLibrary library = make_flat_library();
+    expect(library.side(TileFace::Top).mergeable && library.side(TileFace::North).mergeable,
+           "greedy: the flat tile side is mergeable on every face");
+
+    // Rolling terrain with plateaus (so tops can merge) and a few kinds.
+    ColumnPad pad;
+    pad.resize(8);
+    std::mt19937 rng(1234);
+    for (std::int32_t y = -1; y <= 8; ++y) {
+        for (std::int32_t x = -1; x <= 8; ++x) {
+            TileColumn& c = pad.at(x, y);
+            c.steps     = 2 + ((x / 3 + y / 2) % 4) + static_cast<std::int32_t>(rng() % 2) * ((x + y) % 5 == 0);
+            c.top_kind  = static_cast<TileKind>(rng() % 3 == 0 ? 3 : 0);   // sand or grass
+            c.side_kind = (c.top_kind == TileKind::Sand) ? TileKind::Sand : TileKind::Dirt;
+        }
+    }
+
+    ChunkMeshData per_tile, greedy;
+    mesh_chunk_columns(pad, library, params, per_tile);
+    mesh_chunk_columns_greedy(pad, library, params, greedy);
+
+    const auto expected = area_by_direction_and_kind(per_tile, false);
+    const auto actual   = area_by_direction_and_kind(greedy, true);
+    bool same = expected.size() == actual.size();
+    for (const auto& [key, area] : expected) {
+        auto it = actual.find(key);
+        same = same && it != actual.end() && std::abs(it->second - area) < 1e-3;
+    }
+    expect(same, "greedy: every (direction, kind) covers exactly the per-tile area");
+    // This pad scatters sand tiles at random, so it merges far less than real terrain (which
+    // drops ~60% in terrain_test); the invariant is only that merging never adds triangles.
+    expect(greedy.indices.size() < per_tile.indices.size(),
+           "greedy: fewer triangles than the per-tile mesher");
+    std::cout << "    triangles per-tile " << per_tile.indices.size() / 3 << " -> greedy "
+              << greedy.indices.size() / 3 << "\n";
+
+    ChunkMeshData again;
+    mesh_chunk_columns_greedy(pad, library, params, again);
+    bool identical = again.indices == greedy.indices && again.vertices.size() == greedy.vertices.size();
+    for (size_t i = 0; identical && i < again.vertices.size(); ++i) {
+        identical = again.vertices[i].position == greedy.vertices[i].position &&
+                    again.vertices[i].uv == greedy.vertices[i].uv;
+    }
+    expect(identical, "greedy: deterministic -- equal pads give identical buffers");
+}
+
 void test_chunk_perimeter_walls_follow_the_pad() {
     using namespace toy::world;
     const TerrainParams params = make_test_params(4);
@@ -2462,7 +2726,7 @@ void test_debug_view_channels_render() {
     }
 
     // dof / volumetrics draw through their OWN pass's existing debug branch (dof_composite.frag
-    // / volumetrics.frag), not debug_view_pass_ -- see the DebugView enum's own doc -- so each
+    // / volumetrics_march.frag), not debug_view_pass_ -- see the DebugView enum's own doc -- so each
     // needs its feature enabled at STARTUP, unlike the channels above.
     {
         toy::core::AppConfig config =
@@ -3785,6 +4049,7 @@ const TestCase kTests[] = {
     {"tile_atlas_cells_disjoint",                  "world", test_tile_atlas_cells_are_disjoint_and_inset},
     {"tile_face_transforms_match_normals",         "world", test_face_transforms_agree_with_face_normals},
     {"chunk_flat_ground_emits_tops_only",          "world", test_chunk_flat_ground_emits_tops_only},
+    {"chunk_greedy_merge_preserves_surface",       "world", test_chunk_greedy_merge_preserves_surface},
     {"chunk_perimeter_walls_follow_the_pad",       "world", test_chunk_perimeter_walls_follow_the_pad},
     {"chunk_step_exposure_is_symmetric",           "world", test_chunk_step_exposure_is_symmetric},
     {"chunk_meshing_is_deterministic",             "world", test_chunk_meshing_is_deterministic},
@@ -3794,6 +4059,14 @@ const TestCase kTests[] = {
 
     // --- math: pure functions, no GPU ---
     {"letterbox_exact_fit",                        "math", test_letterbox_exact_fit},
+    {"frustum_perspective_culls_boxes",            "math", test_frustum_perspective_culls_boxes},
+    {"frustum_ortho_and_cube_face",                "math", test_frustum_ortho_and_cube_face},
+    {"world_aabb_matches_corners",                 "math", test_world_aabb_matches_corners},
+    {"screen_height_fraction",                     "math", test_screen_height_fraction},
+    {"select_lod_thresholds_and_hysteresis",       "math", test_select_lod_thresholds_and_hysteresis},
+    {"projected_texels",                           "math", test_projected_texels},
+    {"mesh_build_welds_and_generates_lods",        "math", test_mesh_build_welds_and_generates_lods},
+    {"mesh_lod_simplifies_flat_shaded_mesh",       "math", test_mesh_lod_simplifies_flat_shaded_mesh},
     {"letterbox_with_bars",                        "math", test_letterbox_with_bars},
     {"letterbox_undersized_window",                "math", test_letterbox_undersized_window_clamps_to_scale_1},
     {"fit_pillarbox_only",                         "math", test_fit_pillarbox_only},

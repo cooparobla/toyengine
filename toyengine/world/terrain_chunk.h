@@ -189,6 +189,145 @@ inline void mesh_chunk_columns(const ColumnPad& pad, const TileMeshLibrary& libr
 }
 
 /**
+ * @brief The greedy counterpart of mesh_chunk_columns(): the same surface, in far fewer quads.
+ *
+ * - Tops: rectangles of equal (surface height, top kind) merge into one quad, grown greedily
+ *   along +X then +Y.
+ * - Walls: each exposed column face's cells split into runs of one TileKind (the soil band,
+ *   then stone below it), each run one tall quad; a run also merges sideways across
+ *   neighbouring columns whose same face carries the identical run.
+ *
+ * Only sides the library reports as mergeable (flat unit quads) are stretched; any other side
+ * keeps the per-tile path. Every UV is written in tile space (TileMeshLibrary::encode_uv), so
+ * the chunk must be drawn with the `terrain` surface shader. Deterministic like the per-tile
+ * mesher: a fixed walk order, so equal pads produce byte-identical buffers.
+ */
+inline void mesh_chunk_columns_greedy(const ColumnPad& pad, const TileMeshLibrary& library,
+                                      const TerrainParams& params, ChunkMeshData& out) {
+    out.clear();
+    if (!library.is_baked()) return;
+
+    const glm::vec3    scale = params.cell_scale();
+    const std::int32_t n     = params.chunk_size;
+    auto origin_of = [&](std::int32_t lx, std::int32_t ly, std::int32_t cell) {
+        return glm::vec3(static_cast<float>(lx) * params.tile_size, static_cast<float>(ly) * params.tile_size,
+                         static_cast<float>(cell) * params.height_step);
+    };
+
+    // --- Tops ---
+    if (library.side(TileFace::Top).mergeable) {
+        std::vector<std::uint8_t> done(static_cast<std::size_t>(n) * static_cast<std::size_t>(n), 0);
+        auto same = [&](std::int32_t ax, std::int32_t ay, std::int32_t bx, std::int32_t by) {
+            const TileColumn& a = pad.at(ax, ay);
+            const TileColumn& b = pad.at(bx, by);
+            return a.steps == b.steps && a.top_kind == b.top_kind;
+        };
+        for (std::int32_t ly = 0; ly < n; ++ly) {
+            for (std::int32_t lx = 0; lx < n; ++lx) {
+                if (done[static_cast<std::size_t>(ly * n + lx)]) continue;
+                std::int32_t w = 1;
+                while (lx + w < n && !done[static_cast<std::size_t>(ly * n + lx + w)] && same(lx, ly, lx + w, ly)) ++w;
+                std::int32_t h = 1;
+                for (; ly + h < n; ++h) {
+                    bool row_ok = true;
+                    for (std::int32_t x = lx; x < lx + w && row_ok; ++x) {
+                        row_ok = !done[static_cast<std::size_t>((ly + h) * n + x)] && same(lx, ly, x, ly + h);
+                    }
+                    if (!row_ok) break;
+                }
+                for (std::int32_t y = ly; y < ly + h; ++y)
+                    for (std::int32_t x = lx; x < lx + w; ++x) done[static_cast<std::size_t>(y * n + x)] = 1;
+                const TileColumn& column = pad.at(lx, ly);
+                library.append_span(TileFace::Top, origin_of(lx, ly, column.steps - 1), scale,
+                                    glm::vec3(static_cast<float>(w), static_cast<float>(h), 1.0f),
+                                    column.top_kind, out.vertices, out.indices);
+            }
+        }
+    } else {
+        for (std::int32_t ly = 0; ly < n; ++ly)
+            for (std::int32_t lx = 0; lx < n; ++lx) {
+                const TileColumn& column = pad.at(lx, ly);
+                library.append(TileFace::Top, origin_of(lx, ly, column.steps - 1), scale, column.top_kind,
+                               out.vertices, out.indices, true);
+            }
+    }
+
+    if (params.emit_bottom) {
+        for (std::int32_t ly = 0; ly < n; ++ly)
+            for (std::int32_t lx = 0; lx < n; ++lx)
+                library.append(TileFace::Bottom, origin_of(lx, ly, 0), scale, pad.at(lx, ly).side_kind,
+                               out.vertices, out.indices, true);
+    }
+
+    // --- Walls ---
+    struct Run {
+        std::int32_t lo = 0, hi = 0;   // cell range, inclusive
+        TileKind     kind = TileKind::Stone;
+        bool         used = false;
+    };
+    std::vector<std::vector<Run>> runs(static_cast<std::size_t>(n) * static_cast<std::size_t>(n));
+    for (const TileFace face : k_lateral_faces) {
+        const glm::ivec2 step = face_step(face);
+        const bool mergeable  = library.side(face).mergeable;
+        // Same exposure walk as mesh_chunk_columns(), collapsed into same-kind runs.
+        for (std::int32_t ly = 0; ly < n; ++ly) {
+            for (std::int32_t lx = 0; lx < n; ++lx) {
+                std::vector<Run>& col_runs = runs[static_cast<std::size_t>(ly * n + lx)];
+                col_runs.clear();
+                const TileColumn& column    = pad.at(lx, ly);
+                const TileColumn& neighbour = pad.at(lx + step.x, ly + step.y);
+                if (neighbour.steps >= column.steps) continue;
+                const std::int32_t top_cell    = column.steps - 1;
+                const std::int32_t lowest_cell = std::max(neighbour.steps, column.steps - params.max_wall_steps);
+                for (std::int32_t cell = top_cell; cell >= lowest_cell; --cell) {
+                    const std::int32_t depth = top_cell - cell;
+                    const TileKind kind = (depth < params.soil_depth_steps || column.water)
+                                              ? column.side_kind : TileKind::Stone;
+                    if (!mergeable) {
+                        library.append(face, origin_of(lx, ly, cell), scale, kind, out.vertices, out.indices, true);
+                        continue;
+                    }
+                    if (!col_runs.empty() && col_runs.back().kind == kind && col_runs.back().lo == cell + 1) {
+                        col_runs.back().lo = cell;
+                    } else {
+                        col_runs.push_back(Run{cell, cell, kind, false});
+                    }
+                }
+            }
+        }
+        if (!mergeable) continue;
+
+        // Merge identical runs sideways, along the face's in-plane horizontal axis.
+        const bool along_x = (face == TileFace::North || face == TileFace::South);
+        auto find_run = [&](std::int32_t lx, std::int32_t ly, const Run& r) -> Run* {
+            if (lx >= n || ly >= n) return nullptr;
+            for (Run& c : runs[static_cast<std::size_t>(ly * n + lx)]) {
+                if (!c.used && c.lo == r.lo && c.hi == r.hi && c.kind == r.kind) return &c;
+            }
+            return nullptr;
+        };
+        for (std::int32_t ly = 0; ly < n; ++ly) {
+            for (std::int32_t lx = 0; lx < n; ++lx) {
+                for (Run& r : runs[static_cast<std::size_t>(ly * n + lx)]) {
+                    if (r.used) continue;
+                    r.used = true;
+                    std::int32_t m = 1;
+                    while (Run* next = along_x ? find_run(lx + m, ly, r) : find_run(lx, ly + m, r)) {
+                        next->used = true;
+                        ++m;
+                    }
+                    const float height = static_cast<float>(r.hi - r.lo + 1);
+                    const glm::vec3 span = along_x ? glm::vec3(static_cast<float>(m), 1.0f, height)
+                                                   : glm::vec3(1.0f, static_cast<float>(m), height);
+                    library.append_span(face, origin_of(lx, ly, r.lo), scale, span, r.kind,
+                                        out.vertices, out.indices);
+                }
+            }
+        }
+    }
+}
+
+/**
  * @brief Samples and meshes one chunk -- the whole unit of work a chunk job performs.
  *
  * @param sampler The built world sampler.
@@ -202,7 +341,11 @@ inline void build_chunk_mesh(const TerrainSampler& sampler, const TileMeshLibrar
                              ChunkMeshData& out) {
     ColumnPad pad;
     sample_chunk_columns(sampler, params, coord, pad);
-    mesh_chunk_columns(pad, library, params, out);
+    if (params.greedy_merge) {
+        mesh_chunk_columns_greedy(pad, library, params, out);
+    } else {
+        mesh_chunk_columns(pad, library, params, out);
+    }
 }
 
 /**
@@ -232,6 +375,9 @@ struct ChunkBuildJob {
     void run() {
         if (sampler == nullptr || library == nullptr) return;
         build_chunk_mesh(*sampler, *library, params, coord, mesh);
+        // Off the main thread like the meshing itself: the mesher emits every side as its own
+        // vertices, so shared corners weld back together here.
+        coopa::gfx::engine::data::Mesh::weld_and_optimize(mesh.vertices, mesh.indices);
     }
 };
 

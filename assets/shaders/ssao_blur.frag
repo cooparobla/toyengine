@@ -19,14 +19,26 @@ layout(push_constant) uniform BlurPushConstants {
     float max_accum;
     // Camera sweep speed in screen-centre pixels per frame; 0 at rest.
     float motion_px;
+    // 1 = same resolution as the G-buffer; 2 = half resolution (ssao_half_res): AO texel t's
+    // surface is G-buffer texel 2t + 1 (gfx/bilateral_upsample.glsl's convention).
+    int   gbuffer_scale;
+    // 1 = light kernel (ssao_blur_light): 4x4 taps at twice the step instead of 8x8, the same
+    // footprint for a quarter of the fetches, with the dilation cap halved so a pan cannot
+    // spread taps across a cache-hostile 40 px square. 0 = the original 8x8 kernel.
+    int   light;
 } pc;
+
+ivec2 gbuffer_px(ivec2 t) {
+    return t * pc.gbuffer_scale + (pc.gbuffer_scale - 1);
+}
 
 
 void main() {
     ivec2 size = textureSize(u_ao, 0);
     ivec2 center_px = clamp(ivec2(gl_FragCoord.xy), ivec2(0), size - 1);
 
-    vec3 Nc = texelFetch(g_normal_metallic, center_px, 0).rgb;
+    ivec2 gmax = textureSize(g_position_roughness, 0) - 1;
+    vec3 Nc = texelFetch(g_normal_metallic, min(gbuffer_px(center_px), gmax), 0).rgb;
     vec4 resolved = texelFetch(u_ao, center_px, 0);
     float center = resolved.r;
 
@@ -37,7 +49,7 @@ void main() {
         return;
     }
     Nc = normalize(Nc);
-    vec3 Pc = texelFetch(g_position_roughness, center_px, 0).rgb;
+    vec3 Pc = texelFetch(g_position_roughness, min(gbuffer_px(center_px), gmax), 0).rgb;
 
     // Count-adaptive a-trous dilation: pixels the temporal resolve has barely accumulated
     // (fresh disocclusions -- most of the screen's silhouettes during a fast pan) show the
@@ -74,7 +86,7 @@ void main() {
     // resting one, which the byte-static contracts depend on (spacing 1.0 rounds every
     // tap back to its exact undilated texel).
     spacing += clamp(pc.motion_px / 30.0, 0.0, 2.0);
-    spacing = min(spacing, 5.0);
+    spacing = min(spacing, pc.light != 0 ? 2.5 : 5.0);
 
     // Plane-distance sigma scales with the dilation -- a widened footprint has to
     // tolerate proportionally more in-plane depth variation, or the bilateral weights
@@ -88,18 +100,24 @@ void main() {
     // noise by ~8x, which is what keeps single-pixel estimator events -- the shattered-bias
     // events ssao.frag's per-pixel entropy deliberately produces -- below visibility. The AO's
     // strength and shape are unaffected by the tap count; the weights below decide those.
+    // Light kernel: -2..+1 at a doubled step covers the same -4..+3 extent. At half
+    // resolution each AO texel already spans two G-buffer texels, so there the step stays 1.
+    int   lo   = (pc.light != 0) ? -2 : -4;
+    int   hi   = (pc.light != 0) ?  1 :  3;
+    float step = (pc.light != 0 && pc.gbuffer_scale <= 1) ? 2.0 : 1.0;
     float sum  = 0.0;
     float wsum = 0.0;
-    for (int y = -4; y <= 3; ++y) {
-        for (int x = -4; x <= 3; ++x) {
-            ivec2 tap_px = clamp(center_px + ivec2(round(vec2(x, y) * spacing)),
+    for (int y = lo; y <= hi; ++y) {
+        for (int x = lo; x <= hi; ++x) {
+            ivec2 tap_px = clamp(center_px + ivec2(round(vec2(x, y) * step * spacing)),
                                  ivec2(0), size - 1);
+            ivec2 tap_g  = min(gbuffer_px(tap_px), gmax);
 
-            vec3 Nt = texelFetch(g_normal_metallic, tap_px, 0).rgb;
+            vec3 Nt = texelFetch(g_normal_metallic, tap_g, 0).rgb;
             if (dot(Nt, Nt) < 0.001) continue; // background tap -- skip, don't drag AO toward 1.0
 
             Nt = normalize(Nt);
-            vec3 Pt = texelFetch(g_position_roughness, tap_px, 0).rgb;
+            vec3 Pt = texelFetch(g_position_roughness, tap_g, 0).rgb;
 
             // The normal weight relaxes with the dilation: at spacing 1 the strict power
             // preserves crease definition, while a dilated (low-trust) kernel must accept

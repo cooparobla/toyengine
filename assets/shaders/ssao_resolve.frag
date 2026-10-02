@@ -71,6 +71,10 @@ layout(push_constant) uniform PushConstants {
     // Nonzero once the camera has been still long enough for the average to top up: hold
     // accepted history verbatim so the resting image is byte-static.
     int   frozen;
+    // 1 = same resolution as the G-buffer; 2 = half resolution (ssao_half_res): fragment h
+    // reads G-buffer texel 2h + 1, as ssao.frag does. The AO images themselves (current,
+    // history) are this pass's own resolution, so their reads are unchanged.
+    int   gbuffer_scale;
 } pc;
 
 /// Catmull-Rom resample of the history AO value (9 bilinear taps). A plain bilinear history
@@ -109,7 +113,13 @@ void main() {
     // reproject, so don't even attempt it. Distance 0 in .g: any real surface that later
     // reprojects onto this pixel fails the distance test below outright, which is correct --
     // there is no history for it here.
-    vec3 N = texture(g_normal_metallic, in_uv).rgb;
+    // The G-buffer texel this fragment stands for, and its UV (identical to in_uv at scale 1).
+    ivec2 gsize = textureSize(g_position_roughness, 0);
+    ivec2 gpx   = clamp(ivec2(gl_FragCoord.xy) * pc.gbuffer_scale + (pc.gbuffer_scale - 1), ivec2(0), gsize - 1);
+    vec2  uv0   = (pc.gbuffer_scale <= 1) ? in_uv : (vec2(gpx) + 0.5) / vec2(gsize);
+
+    vec3 N = (pc.gbuffer_scale <= 1) ? texture(g_normal_metallic, in_uv).rgb
+                                     : texelFetch(g_normal_metallic, gpx, 0).rgb;
     if (dot(N, N) < 0.001) {
         out_ao = vec4(current, 0.0, 0.0, 0.0);
 #ifdef COUNT_DEBUG
@@ -118,7 +128,8 @@ void main() {
         return;
     }
 
-    vec3 P = texture(g_position_roughness, in_uv).rgb;
+    vec3 P = (pc.gbuffer_scale <= 1) ? texture(g_position_roughness, in_uv).rgb
+                                     : texelFetch(g_position_roughness, gpx, 0).rgb;
     float current_dist = length(P - vec3(pc.camera_pos_x, pc.camera_pos_y, pc.camera_pos_z));
 
     // 3x3 neighbourhood of the CURRENT frame's raw AO: the accepted-history path bounds
@@ -152,10 +163,11 @@ void main() {
     }
 
     // This pixel's exact clip position: NDC from the fragment's own UV (pixel center, matching
-    // rasterization) and the rasterized depth fetched from the pyramid's mip 0. See u_depth's
+    // rasterization) and the rasterized depth buffer (the AO pyramid's level 0). See u_depth's
     // doc for why reprojection starts here instead of at the G-buffer world position.
-    float depth = texelFetch(u_depth, ivec2(gl_FragCoord.xy), 0).r;
-    vec2 ndc = vec2(in_uv.x * 2.0 - 1.0, -(in_uv.y * 2.0 - 1.0));
+    float depth = (pc.gbuffer_scale <= 1) ? texelFetch(u_depth, ivec2(gl_FragCoord.xy), 0).r
+                                          : texelFetch(u_depth, gpx, 0).r;
+    vec2 ndc = vec2(uv0.x * 2.0 - 1.0, -(uv0.y * 2.0 - 1.0));
     vec4 prev_clip = pc.reproject * vec4(ndc, depth, 1.0);
 
     // Behind the previous frame's eye: no history exists for this point at all.

@@ -36,6 +36,7 @@
 #include <glm/glm.hpp>
 
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -76,7 +77,28 @@ public:
         std::vector<std::uint32_t> indices;
 
         bool empty() const { return vertices.empty() || indices.empty(); }
+
+        /// True when this side is a flat, axis-aligned unit quad whose UVs are an affine
+        /// function of position -- the only shape the greedy mesher may stretch over several
+        /// tiles (see mesh_chunk_columns_greedy()). Then uv = uv_origin + uv_du * p[axis_u] +
+        /// uv_dv * p[axis_v] for any point p on it, extended past [0,1] by append_span().
+        bool      mergeable = false;
+        int       axis_u    = 0;
+        int       axis_v    = 1;
+        glm::vec2 uv_origin{0.0f};
+        glm::vec2 uv_du{0.0f};
+        glm::vec2 uv_dv{0.0f};
     };
+
+    /// Encodes a tile-space UV for the `terrain` surface shader: the atlas cell index rides
+    /// in u's high part (cell * k_uv_cell_stride, re-centred by half the stride so a local u
+    /// may run negative), the position within the tile repeat in the rest. terrain.frag
+    /// decodes it and samples cell + fract(local), so one quad may span many tiles.
+    static constexpr float k_uv_cell_stride = 1024.0f;
+    static glm::vec2 encode_uv(TileKind kind, const glm::vec2& local) {
+        return glm::vec2(static_cast<float>(kind) * k_uv_cell_stride + 0.5f * k_uv_cell_stride + local.x,
+                         local.y);
+    }
 
     /**
      * @brief Bakes one authored mesh onto all six faces.
@@ -116,6 +138,7 @@ public:
             rotated.tangent  = glm::vec4(rotation * glm::vec3(v.tangent), v.tangent.w);
             out.vertices.push_back(rotated);
         }
+        analyse_mergeable_(out, face);
     }
 
     /** @brief True once every face has geometry -- i.e. a chunk built from this can draw. */
@@ -151,7 +174,8 @@ public:
      * @param out_i     Index buffer to append to; rebased onto `out_v`'s current end.
      */
     void append(TileFace face, const glm::vec3& origin, const glm::vec3& scale, TileKind kind,
-                std::vector<Vertex>& out_v, std::vector<std::uint32_t>& out_i) const {
+                std::vector<Vertex>& out_v, std::vector<std::uint32_t>& out_i,
+                bool encode_terrain_uv = false) const {
         const SideGeometry& side = sides_[static_cast<std::size_t>(face)];
         if (side.empty()) return;
 
@@ -171,7 +195,10 @@ public:
                                                               : glm::vec3(1.0f, 0.0f, 0.0f),
                                        v.tangent.w);
 
-            placed.uv = glm::vec2(cell.x + v.uv.x * cell.z, cell.y + v.uv.y * cell.w);
+            // encode_terrain_uv: tile-space UVs for a chunk drawn with the `terrain` shader
+            // (see encode_uv()) instead of the atlas cell baked into the UV.
+            placed.uv = encode_terrain_uv ? encode_uv(kind, v.uv)
+                                          : glm::vec2(cell.x + v.uv.x * cell.z, cell.y + v.uv.y * cell.w);
             out_v.push_back(placed);
         }
 
@@ -179,7 +206,66 @@ public:
         for (std::uint32_t index : side.indices) out_i.push_back(base + index);
     }
 
+    /**
+     * @brief Appends a mergeable side stretched over `span` tiles/cells (1 on the face's
+     *        normal axis), with tile-space UVs encoded for the `terrain` shader -- so the
+     *        atlas cell repeats once per tile across the whole quad.
+     * @pre side(face).mergeable.
+     */
+    void append_span(TileFace face, const glm::vec3& origin, const glm::vec3& scale,
+                     const glm::vec3& span, TileKind kind,
+                     std::vector<Vertex>& out_v, std::vector<std::uint32_t>& out_i) const {
+        const SideGeometry& side = sides_[static_cast<std::size_t>(face)];
+        const std::uint32_t base = static_cast<std::uint32_t>(out_v.size());
+        for (const Vertex& v : side.vertices) {
+            Vertex placed = v;   // flat and axis-aligned: normal and tangent carry over as is
+            placed.position = origin + v.position * scale * span;
+            const glm::vec2 local = side.uv_origin +
+                                    side.uv_du * (v.position[side.axis_u] * span[side.axis_u]) +
+                                    side.uv_dv * (v.position[side.axis_v] * span[side.axis_v]);
+            placed.uv = encode_uv(kind, local);
+            out_v.push_back(placed);
+        }
+        for (std::uint32_t index : side.indices) out_i.push_back(base + index);
+    }
+
 private:
+    /// Fills SideGeometry's mergeable fields: the side must lie in one plane perpendicular to
+    /// `face`'s normal axis, every vertex must sit on a corner of the unit square in the other
+    /// two axes, and the UVs must be the affine map fitted from three of those corners.
+    static void analyse_mergeable_(SideGeometry& side, TileFace face) {
+        side.mergeable = false;
+        if (side.empty()) return;
+        const glm::vec3 n = face_normal(face);
+        const int axis_n = (std::abs(n.x) > 0.5f) ? 0 : (std::abs(n.y) > 0.5f) ? 1 : 2;
+        side.axis_u = (axis_n == 0) ? 1 : 0;
+        side.axis_v = (axis_n == 2) ? 1 : 2;
+        const float eps = 1e-4f;
+        auto snap = [eps](float x, int& out) {
+            if (std::abs(x) < eps)        { out = 0; return true; }
+            if (std::abs(x - 1.0f) < eps) { out = 1; return true; }
+            return false;
+        };
+        const Vertex* corner[2][2] = {{nullptr, nullptr}, {nullptr, nullptr}};
+        const float plane = side.vertices[0].position[axis_n];
+        for (const Vertex& v : side.vertices) {
+            int pu = 0, pv = 0;
+            if (std::abs(v.position[axis_n] - plane) > eps) return;
+            if (!snap(v.position[side.axis_u], pu) || !snap(v.position[side.axis_v], pv)) return;
+            corner[pu][pv] = &v;
+        }
+        if (!corner[0][0] || !corner[1][0] || !corner[0][1]) return;
+        side.uv_origin = corner[0][0]->uv;
+        side.uv_du     = corner[1][0]->uv - side.uv_origin;
+        side.uv_dv     = corner[0][1]->uv - side.uv_origin;
+        for (const Vertex& v : side.vertices) {
+            const glm::vec2 fit = side.uv_origin + side.uv_du * v.position[side.axis_u] +
+                                  side.uv_dv * v.position[side.axis_v];
+            if (glm::length(fit - v.uv) > 1e-3f) return;
+        }
+        side.mergeable = true;
+    }
+
     /** @brief One baked geometry per TileFace, indexed by `static_cast<std::size_t>(face)`. */
     std::array<SideGeometry, k_tile_face_count> sides_;
 };

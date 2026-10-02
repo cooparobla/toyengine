@@ -65,7 +65,8 @@ three groups below.
    the SSGI diffuse bounce. Under `ssgi_traced` the bounce is its own cosine-hemisphere Hi-Z
    trace (`ssgi.frag`) through a second resolve+denoise chain inside `SsrPass`, rather than the
    single normal-offset mip tap the composite falls back to.
-10. Refraction's own scene-colour chain, when refraction is on.
+10. Refraction's own scene-colour chain, when refraction is on and a BLEND mesh is in view
+   (`refraction_this_frame_`; nothing else samples it, so a frame without one skips the build).
 11. Forward transparent pass: BLEND meshes and BLEND SDFs merged into one back-to-front list,
    drawn in place into the SSR composite. BLEND *meshes* additionally refract; BLEND SDFs
    never do.
@@ -74,7 +75,7 @@ three groups below.
 
 12. Fog (analytic, global) → `fog_target_`. **Skipped when volumetrics is also on**: the two
     are both fullscreen passes over the whole HDR frame and the second reads exactly what the
-    first wrote, so `volumetrics.frag` applies the global fog term itself through the same
+    first wrote, so `volumetrics_composite.frag` applies the global fog term itself through the same
     `gfx_fog_apply()` call `fog.frag` makes — one pass instead of two, bit-identical bar the
     half-float round-trip it skips. See `fog_merged_into_volumetrics_()`.
 13. Volumetrics (raymarched local `VolumeComponent`s) → `volumetrics_target_`. The march

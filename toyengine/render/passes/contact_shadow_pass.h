@@ -48,10 +48,9 @@ namespace passes {
  *    scalar occlusion in `.r` is just a vec4 whose other channels are zero, so no third copy of
  *    the accumulation logic exists.
  *  - **History copy**: one resolve target plus one history image, copied at the end of every
- *    execute(), as SsrPass does. A ping-pong would save the copy but leave every consumer
- *    binding one of two alternating images at setup — and therefore reading a frame-stale
- *    occlusion on half the frames, since rebinding per frame is unsafe under an
- *    overlapped-frame pipeline.
+ *    execute(). SsrPass and TemporalHistoryPass ping-pong instead (one consumer set per
+ *    parity, selected per frame); this pass's lone consumer, the lighting draw, binds its
+ *    output once, and the copy is a small full-res R8-class transfer, so it keeps the copy.
  *
  * The consumer (`pixel_lighting.frag`, and `debug_view.frag`'s contact_shadows channel) samples
  * `output_view_typed()` and applies strength and per-light darkness itself, exactly as it did
@@ -77,6 +76,9 @@ public:
         /// True once the camera has been still long enough for the average to top up; accepted
         /// history is then held verbatim, which is what keeps a resting image byte-static.
         bool      frozen          = false;
+        /// Which of the two count images update_descriptors() bound holds THIS frame's counts
+        /// (TemporalHistoryPass::current_parity()).
+        uint32_t  count_parity    = 0;
     };
 
     /**
@@ -117,9 +119,9 @@ public:
         linear_sampler_  = std::make_unique<engine::util::Sampler>(device, linear_clamp);
 
         march_target_ = std::make_unique<engine::targets::OffscreenTarget>(
-            device, allocator, width, height, kFormat, SampleCount::X1);
+            device, allocator, width, height, kFormat, engine::targets::kColorOnly);
         resolved_target_ = std::make_unique<engine::targets::OffscreenTarget>(
-            device, allocator, width, height, kFormat, SampleCount::X1);
+            device, allocator, width, height, kFormat, engine::targets::kColorOnly);
         history_image_ = std::make_unique<memory::Image>(
             device, allocator, width, height, VK_FORMAT_R16G16B16A16_SFLOAT,
             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
@@ -146,11 +148,15 @@ public:
                 .build(device));
 
         pipeline::DescriptorPoolBuilder pool_builder;
-        pool_builder.add_sets(*gbuf_layout_, 1).add_sets(*resolve_layout_, 1);
+        // Two resolve sets: one per parity of TemporalHistoryPass's ping-pong count buffer,
+        // so the right one is selected per frame instead of a descriptor being rewritten.
+        pool_builder.add_sets(*gbuf_layout_, 1).add_sets(*resolve_layout_, 2);
         desc_pool_ = std::make_unique<pipeline::DescriptorPool>(pool_builder.build(device));
 
-        gbuf_set_    = std::make_unique<pipeline::DescriptorSet>(device, *desc_pool_, *gbuf_layout_);
-        resolve_set_ = std::make_unique<pipeline::DescriptorSet>(device, *desc_pool_, *resolve_layout_);
+        gbuf_set_ = std::make_unique<pipeline::DescriptorSet>(device, *desc_pool_, *gbuf_layout_);
+        for (uint32_t c = 0; c < 2; ++c) {
+            resolve_sets_[c] = std::make_unique<pipeline::DescriptorSet>(device, *desc_pool_, *resolve_layout_);
+        }
 
         pipeline::PipelineDesc common;
         common.vertex      = VertexLayout::none();
@@ -174,13 +180,14 @@ public:
             device, resolved_target_->render_pass_object(), resolve_desc);
     }
 
-    /// Binds the live G-buffer, the scene depth the resolve reprojects from, and the shared
-    /// accumulation count. Called once at construction (and after any resize): rebinding per
-    /// frame is unsafe under an overlapped-frame pipeline.
+    /// Binds the live G-buffer, the scene depth the resolve reprojects from, and both parities
+    /// of the shared accumulation count (TemporalHistoryPass::count_view_typed(0/1); execute()
+    /// selects with Params::count_parity). Called once at construction (and after any resize):
+    /// rebinding per frame is unsafe under an overlapped-frame pipeline.
     void update_descriptors(coopa::gfx::TextureView g0, coopa::gfx::TextureView g1,
                             coopa::gfx::TextureView g2,
                             coopa::gfx::TextureView depth,
-                            coopa::gfx::TextureView count,
+                            coopa::gfx::TextureView count0, coopa::gfx::TextureView count1,
                             const coopa::gfx::engine::util::Sampler& count_sampler)
     {
         // NEAREST. The march fetches the G-buffer at arbitrary UVs along its ray, where bilinear
@@ -192,12 +199,14 @@ public:
         gbuf_set_->bind_image(1, g1, *nearest_sampler_);
         gbuf_set_->bind_image(2, g2, *nearest_sampler_);
 
-        resolve_set_->bind_image(0, march_target_->color_view_typed(), *nearest_sampler_);
-        // LINEAR: the history is read at a reprojected, non-texel-aligned UV.
-        resolve_set_->bind_image(1, history_image_->view_typed(), *linear_sampler_);
-        // NEAREST is mandatory: D32_SFLOAT is not guaranteed to support linear filtering.
-        resolve_set_->bind_image(2, depth, *nearest_sampler_);
-        resolve_set_->bind_image(3, count, count_sampler);
+        for (uint32_t c = 0; c < 2; ++c) {
+            resolve_sets_[c]->bind_image(0, march_target_->color_view_typed(), *nearest_sampler_);
+            // LINEAR: the history is read at a reprojected, non-texel-aligned UV.
+            resolve_sets_[c]->bind_image(1, history_image_->view_typed(), *linear_sampler_);
+            // NEAREST is mandatory: D32_SFLOAT is not guaranteed to support linear filtering.
+            resolve_sets_[c]->bind_image(2, depth, *nearest_sampler_);
+            resolve_sets_[c]->bind_image(3, c == 0 ? count0 : count1, count_sampler);
+        }
     }
 
     void execute(coopa::gfx::command::CommandBuffer& cmd,
@@ -257,12 +266,22 @@ public:
         rpc.gamma         = params.temporal_gamma;
         rpc.frozen        = params.frozen ? 1 : 0;
         cmd.push_constants(coopa::gfx::ShaderStage::Fragment, rpc);
-        cmd.bind_descriptor_set(*resolve_set_, 0);
+        cmd.bind_descriptor_set(*resolve_sets_[params.count_parity & 1], 0);
         cmd.draw(3);
         resolved_target_->end(cmd);
 
         copy_history_(cmd);
         history_initialized_ = true;
+    }
+
+    /// Clears the output to 0 (no occlusion) without marching -- for a caller that skips
+    /// execute() while the feature is off. Leaves the image in SHADER_READ_ONLY_OPTIMAL, the
+    /// layout its consumers' descriptors expect, and holding exactly what a disabled march
+    /// would resolve to. Also drops the history, which no longer describes the output.
+    void clear_output(coopa::gfx::command::CommandBuffer& cmd) {
+        resolved_target_->begin(cmd, {{0.0f, 0.0f, 0.0f, 0.0f}});
+        resolved_target_->end(cmd);
+        history_initialized_ = false;
     }
 
     /// @brief The resolved occlusion buffer. One image for the pass's lifetime, so a consumer
@@ -349,7 +368,7 @@ private:
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> resolve_layout_;
     std::unique_ptr<coopa::gfx::pipeline::DescriptorPool>      desc_pool_;
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>       gbuf_set_;
-    std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>       resolve_set_;
+    std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>       resolve_sets_[2];   ///< [count parity]
 
     std::unique_ptr<coopa::gfx::pipeline::Pipeline> march_pipeline_;
     std::unique_ptr<coopa::gfx::pipeline::Pipeline> resolve_pipeline_;

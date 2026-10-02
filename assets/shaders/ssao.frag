@@ -36,7 +36,8 @@ layout(set = 0, binding = 0) uniform CameraUBO {
 // full chain).
 layout(set = 1, binding = 0) uniform sampler2D g_normal_metallic;
 layout(set = 1, binding = 1) uniform sampler2D g_position_roughness;
-layout(set = 1, binding = 2) uniform sampler2D u_hiz_map;
+layout(set = 1, binding = 2) uniform sampler2D u_hiz_map;   // prefiltered depth, levels 1..N (mip k-1 = level k)
+layout(set = 1, binding = 3) uniform sampler2D u_depth;     // rasterized depth = pyramid level 0
 
 layout(push_constant) uniform SsaoPushConstants {
     float radius;           // world-space gather radius
@@ -58,6 +59,11 @@ layout(push_constant) uniform SsaoPushConstants {
     int   noise_rotation;
     int   max_mip;          // top usable Hi-Z mip for the march
     float max_radius_px;    // upper clamp on the march extent in render-target pixels
+    // 1 = this pass runs at the G-buffer's resolution; 2 = half resolution (ssao_half_res),
+    // where fragment texel h samples G-buffer texel 2h + 1 (gfx/bilateral_upsample.glsl's
+    // convention). resolution_x/y stay the FULL size either way, so every pixel-unit
+    // quantity (radius_px, step floors, pyramid mips) keeps the full-res footprint.
+    int   gbuffer_scale;
                             // (Unity HDRP's "Maximum Radius in Pixels")
 } pc;
 
@@ -86,7 +92,15 @@ const float kThinOccluderBleed = 0.10;
 
 void main() {
     ivec2 gsize = textureSize(g_position_roughness, 0);
-    ivec2 px    = clamp(ivec2(in_uv * vec2(gsize)), ivec2(0), gsize - 1);
+    ivec2 px;
+    vec2  uv0;   // UV of the G-buffer texel this fragment shades
+    if (pc.gbuffer_scale <= 1) {
+        px  = clamp(ivec2(in_uv * vec2(gsize)), ivec2(0), gsize - 1);
+        uv0 = in_uv;
+    } else {
+        px  = clamp(ivec2(gl_FragCoord.xy) * pc.gbuffer_scale + (pc.gbuffer_scale - 1), ivec2(0), gsize - 1);
+        uv0 = (vec2(px) + 0.5) / vec2(gsize);
+    }
 
     // Background pixels write N = vec3(0) (gbuffer.frag never touches unwritten texels
     // beyond the clear value) -- must check before normalize() to avoid propagating a NaN,
@@ -122,8 +136,8 @@ void main() {
     // as surfaces cross the half-float lattice, striping the AO along the lattice's
     // iso-lines. Reconstructing both ends of the horizon test through the same inverse
     // removes that offset entirely.
-    float depth0 = texelFetch(u_hiz_map, px, 0).r;
-    vec2  ndc0   = vec2(in_uv.x * 2.0 - 1.0, -(in_uv.y * 2.0 - 1.0));
+    float depth0 = texelFetch(u_depth, px, 0).r;
+    vec2  ndc0   = vec2(uv0.x * 2.0 - 1.0, -(uv0.y * 2.0 - 1.0));
     vec3  N_v    = normalize(mat3(camera.view) * normalize(N_w));
     vec3  P_v;
     if (proj_persp) {
@@ -206,7 +220,7 @@ void main() {
                 // break once past the radius instead of wasted out-of-range taps.
                 float d_px = max(t * t * radius_px, float(j) + step_jitter + 1.0);
                 if (d_px > radius_px) break;
-                vec2 uv_s = in_uv + sgn * dir_px * d_px * texel_uv;
+                vec2 uv_s = uv0 + sgn * dir_px * d_px * texel_uv;
                 if (any(lessThan(uv_s, vec2(0.0))) || any(greaterThan(uv_s, vec2(1.0)))) break;
 
                 // Coarser pyramid mips with distance: the fetched value is then a
@@ -217,8 +231,11 @@ void main() {
                 // radius. The average reduction leaves no per-cell min() bias, so the march
                 // may use every level the pyramid built (pc.max_mip); the residual
                 // slope-reconstruction error is covered by kMinDepthSlack at every level.
+                // Level 0 is the depth buffer itself (not copied into the pyramid, whose
+                // mip 0 is level 1): same texel either way under the NEAREST sampler.
                 float mip = clamp(floor(log2(d_px)) - 2.0, 0.0, float(pc.max_mip));
-                float depth = textureLod(u_hiz_map, uv_s, mip).r;
+                float depth = (mip < 0.5) ? textureLod(u_depth, uv_s, 0.0).r
+                                          : textureLod(u_hiz_map, uv_s, mip - 1.0).r;
 
                 vec2 ndc = vec2(uv_s.x * 2.0 - 1.0, -(uv_s.y * 2.0 - 1.0));
                 vec3 S_v;

@@ -16,9 +16,11 @@
  * that selection was baked into a descriptor when the pipeline was built. Each such toggle
  * says so in PixelRenderConfig, and apply_live_config() refuses to change them.
  *
- * The one exception: HiZPass, SceneColorMipPass and TransparentCapturePass (reused unmodified
- * from gfxcoopa) rebind their own descriptors on every execute(). Frames that run them pay for
- * a single device_.wait_idle() -- see FrameContext::need_ssr_trace_inputs.
+ * The one exception: HiZPass and SceneColorMipPass (gfxcoopa) bind their own descriptors inside
+ * execute(), and ssr_pass_'s secondary source can only be bound once the transparent chain has
+ * run. All of these bind lazily and only once -- the passes skip the write when the source view
+ * is unchanged -- so only a frame that would actually write one (the first, or the first with
+ * ssr_reflect_transparent on) pays a device_.wait_idle(); see trace_inputs_need_rebind_().
  *
  * **2. Per-frame-in-flight data needs per-slot buffers.** gfxcoopa's CameraUBO, LightData,
  * SdfData and this engine's InstanceStream/ForwardGlobalsData each own one buffer, so a single
@@ -50,7 +52,13 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <functional>
+#include <unordered_map>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
@@ -85,13 +93,13 @@
 #include <gfxcoopa/engine/components/directional_light.h>
 #include <gfxcoopa/engine/components/point_light.h>
 #include <gfxcoopa/engine/components/spot_light.h>
-#include <gfxcoopa/engine/passes/skybox_pass.h>
 #include <gfxcoopa/engine/passes/transparent_pass.h>
 #include <gfxcoopa/engine/targets/transparent_capture_target.h>
 #include <gfxcoopa/engine/passes/transparent_capture_pass.h>
 #include <gfxcoopa/engine/passes/fog_pass.h>
 #include <gfxcoopa/engine/data/fog_data.h>
 #include <gfxcoopa/engine/passes/volumetrics_pass.h>
+#include <gfxcoopa/engine/passes/froxel_volumetrics_pass.h>
 #include <gfxcoopa/engine/data/volumetrics_data.h>
 #include <gfxcoopa/engine/components/volume.h>
 #include <gfxcoopa/engine/components/sdf_renderer.h>
@@ -117,6 +125,9 @@
 #include <toyengine/render/pixel_render_types.h>
 #include <toyengine/render/passes/ui_composite_pass.h>
 #include <toyengine/render/instance_stream.h>
+#include <toyengine/render/visibility.h>
+#include <toyengine/render/frame_profile.h>
+#include <toyengine/render/gpu_profiler.h>
 #include <toyengine/render/forward_globals.h>
 #include <gfxcoopa/engine/util/material_texture_cache.h>
 #include <gfxcoopa/engine/data/palette_lut.h>
@@ -164,7 +175,12 @@ public:
           // 1.0 regardless of whether SSR/SSAO are toggled, and pixel_stylize.frag's tonemap
           // step (gated on PushConstants::exposure) always applies before dither/palette to
           // bring it back down.
-          offscreen_target_(device, allocator, render_extent_.width, render_extent_.height, coopa::gfx::Format::RGBA16_Sfloat),
+          // Colour-only: the lighting draw is one depth-less fullscreen triangle, and nothing
+          // ever reads this target's depth (record_transparent_() attaches gbuffer_target_'s
+          // depth to its own render pass; stylize/debug sample gbuffer depth too). A D32
+          // attachment here would be cleared and stored for nothing every frame.
+          offscreen_target_(device, allocator, render_extent_.width, render_extent_.height, coopa::gfx::Format::RGBA16_Sfloat,
+                            coopa::gfx::engine::targets::kColorOnly),
           post_target_(device, allocator, render_extent_.width, render_extent_.height, coopa::gfx::Format::RGBA8_Unorm),
           transparent_capture_target_(device, allocator, render_extent_.width, render_extent_.height),
           // Fog composite target -- HDR, same reasoning as offscreen_target_ above: fog belongs
@@ -172,10 +188,20 @@ public:
           // step. A separate target is mandatory, not a style choice: pipeline::RenderPass
           // hardcodes LOAD_OP_CLEAR, so FogPass can't reopen and composite in place onto the
           // image it reads from.
-          fog_target_(device, allocator, render_extent_.width, render_extent_.height, coopa::gfx::Format::RGBA16_Sfloat),
+          fog_target_(device, allocator, render_extent_.width, render_extent_.height, coopa::gfx::Format::RGBA16_Sfloat,
+                              coopa::gfx::engine::targets::kColorOnly),
           // Wind composite target -- same HDR format and the same LOAD_OP_CLEAR-forced
           // separation as fog_target_ above. Wind reads fog's output and writes its own.
-          volumetrics_target_(device, allocator, render_extent_.width, render_extent_.height, coopa::gfx::Format::RGBA16_Sfloat),
+          volumetrics_target_(device, allocator, render_extent_.width, render_extent_.height, coopa::gfx::Format::RGBA16_Sfloat,
+                              coopa::gfx::engine::targets::kColorOnly),
+          // The march half of VolumetricsPass, at 1/volumetrics_resolution_scale per axis:
+          // rgb = in-scatter, a = transmittance, upsampled by the composite into
+          // volumetrics_target_ above.
+          volumetrics_march_target_(device, allocator,
+                                    volumetrics_march_dim_(render_extent_.width),
+                                    volumetrics_march_dim_(render_extent_.height),
+                                    coopa::gfx::Format::RGBA16_Sfloat,
+                                    coopa::gfx::engine::targets::kColorOnly),
           nearest_sampler_(coopa::gfx::engine::util::Sampler::nearest(device)),
           linear_sampler_(coopa::gfx::engine::util::Sampler::linear(device)),
           // Hardware compareEnable, not a plain linear sampler -- see gfx/shadow_sampling.glsl's
@@ -312,6 +338,62 @@ public:
     const PixelRenderConfig& render_config() const { return config_; }
 
     /**
+     * @brief Turns on profiling mode: CPU phase timers record into `profile`, and GPU
+     *        timestamp queries time each feature's passes (see GpuProfiler). Null turns it
+     *        off. Without it the frame loop records no queries and pays nothing.
+     */
+    void set_profiler(FrameProfile* profile) {
+        device_.wait_idle();
+        gpu_profiler_.reset();
+        profile_ = profile;
+        if (profile_) gpu_profiler_ = std::make_unique<GpuProfiler>(device_, *profile_);
+        if (froxel_volumetrics_pass_) {
+            using FStage = coopa::gfx::engine::passes::FroxelVolumetricsPass::Stage;
+            if (gpu_profiler_) {
+                froxel_volumetrics_pass_->set_stage_hook([this](coopa::gfx::command::CommandBuffer& cmd, FStage st) {
+                    gpu_mark_(cmd, st == FStage::Inject ? GpuScope::VolumetricsInject : GpuScope::VolumetricsIntegrate);
+                });
+            } else {
+                froxel_volumetrics_pass_->set_stage_hook({});
+            }
+        }
+        if (ssr_pass_) {
+            using Stage = coopa::gfx::engine::passes::SsrPass::Stage;
+            if (gpu_profiler_) {
+                ssr_pass_->set_stage_hook([this](coopa::gfx::command::CommandBuffer& cmd, Stage stage) {
+                    static constexpr GpuScope kScopes[] = {
+                        GpuScope::SsrTrace, GpuScope::SsrResolve, GpuScope::SsrBlur, GpuScope::SsgiTrace,
+                        GpuScope::SsgiResolve, GpuScope::SsgiBlur, GpuScope::SsrComposite};
+                    gpu_mark_(cmd, kScopes[static_cast<size_t>(stage)]);
+                });
+            } else {
+                ssr_pass_->set_stage_hook({});
+            }
+        }
+    }
+
+    /**
+     * @brief Per-frame mesh draw averages since startup -- MeshRenderers, how many the camera
+     *        sees, and draw calls / instances / triangles for the camera passes and for all
+     *        shadow views together. Empty before the second frame. Engine::run() prints it
+     *        on exit, beside the frame time.
+     */
+    std::string mesh_draw_stats_summary() const {
+        if (stats_frames_ == 0) return {};
+        const double f = static_cast<double>(stats_frames_);
+        char buf[320];
+        std::snprintf(buf, sizeof(buf),
+                      "meshes %.0f (camera-visible %.0f) | camera: %.0f draws, %.0f instances, %.0fk tris"
+                      " | shadows: %.0f draws, %.0f instances, %.0fk tris",
+                      stats_total_.renderers / f, stats_total_.camera_visible / f,
+                      stats_total_.camera_draws / f, stats_total_.camera_instances / f,
+                      stats_total_.camera_triangles / f / 1000.0,
+                      stats_total_.shadow_draws / f, stats_total_.shadow_instances / f,
+                      stats_total_.shadow_triangles / f / 1000.0);
+        return buf;
+    }
+
+    /**
      * @brief MUTABLE access to the live render config, for changing parameters at runtime.
      *
      * Most parameters are re-read from config_ every frame -- the fog and volumetrics UBO
@@ -376,6 +458,12 @@ public:
         TOY_KEEP_STARTUP_FIXED(render_width);
         TOY_KEEP_STARTUP_FIXED(render_height);
         TOY_KEEP_STARTUP_FIXED(scale_divisor);
+        TOY_KEEP_STARTUP_FIXED(ssr_half_res);
+        TOY_KEEP_STARTUP_FIXED(ssao_half_res);
+        TOY_KEEP_STARTUP_FIXED(volumetrics_resolution_scale);
+        TOY_KEEP_STARTUP_FIXED(volumetrics_mode);
+        TOY_KEEP_STARTUP_FIXED(volumetrics_froxel_tile);
+        TOY_KEEP_STARTUP_FIXED(volumetrics_froxel_slices);
         TOY_KEEP_STARTUP_FIXED(shadow_map_resolution);
         TOY_KEEP_STARTUP_FIXED(shadow_cascades);
         TOY_KEEP_STARTUP_FIXED(cube_shadow_resolution);
@@ -476,10 +564,21 @@ public:
         // draw_frame() waits on this same slot's fence later, but waiting HERE -- before the
         // per-slot writes below -- is what makes those writes race frame N-1 rather than N-2.
         // Cheap: the fence is already signaled in the common case.
-        renderer.wait_for_current_frame();
+        {
+            CpuTimer wait_timer(profile_, CpuScope::WaitFence);
+            renderer.wait_for_current_frame();
+        }
+        // This slot's previous frame has finished on the GPU: read its timestamps back now,
+        // before begin_frame() below reuses the slot (profiling mode only).
+        if (gpu_profiler_) gpu_profiler_->collect(frame_slot);
+        const auto gather_start = std::chrono::steady_clock::now();
         camera_frame_ = frame_slot;
         light_frame_ = frame_slot;
         camera_ubos_[frame_slot]->update(view, proj, cam_pos, pixel_density);
+
+        // One hierarchy walk for every component type this frame's gathers read -- see
+        // FrameScene. Everything below reads frame_scene_ instead of walking the scene again.
+        snapshot_scene_(scene);
 
         // Must follow the light_frame_ assignment above: update_lights_() writes through
         // current_light_data(), which reads light_frame_. Writing first would put this frame's
@@ -492,10 +591,9 @@ public:
         debug_line_pass_->upload(frame_slot, debug_lines_);
 
         gather_ui_canvases_(scene, frame_slot, view);
-        const MeshGather meshes = gather_meshes_(scene, frame_slot);
         const std::vector<SdfDrawItem> sdf_draws = gather_sdf_(scene, view, proj, cam_pos, frame_slot);
 
-        auto* dir_light = scene.find_first_component<DirectionalLightComponent>();
+        auto* dir_light = frame_scene_.dir_light;
         bool cast_dir_shadow = config_.shadows_enabled && dir_light && dir_light->cast_shadows;
         if (dir_light) {
             update_dir_shadow_matrix_(dir_light->direction, cam, cast_dir_shadow);
@@ -527,6 +625,29 @@ public:
         }
         update_spot_shadow_matrix_(spot_caster.light, cast_spot_shadow);
 
+        // After both shadow fits: every view's frustum is now known, so the gather can cull
+        // and batch each view's draw list (see gather_meshes_()).
+        const MeshGather meshes = gather_meshes_(frame_slot, view, unjittered_proj, cast_dir_shadow,
+                                                 shadow_point, cast_point_shadow, cast_spot_shadow);
+
+        // SSR's second trace source (ssr_reflect_transparent) only exists when something
+        // transparent is actually in view. Otherwise skip the capture pass and its pyramids AND
+        // the per-pixel second trace -- it could only ever miss.
+        secondary_this_frame_ = false;
+        if (config_.ssr_reflect_transparent) {
+            secondary_this_frame_ = !meshes.capture.empty();
+            for (const auto& d : sdf_draws) {
+                if (d.is_blend && d.px_rect.w > 0 && d.px_rect.h > 0) secondary_this_frame_ = true;
+            }
+        }
+
+        // Refraction's scene-colour chain is only ever sampled by transparent.frag, i.e. by a
+        // camera-visible BLEND mesh (BLEND SDFs read ssr_pass_'s chain instead). On a frame
+        // with none in view -- every frame of a scene without transparency -- the seven-mip
+        // build would be pure bandwidth, so it is skipped the same way the SSR capture is.
+        refraction_this_frame_ = config_.transparency_enabled && config_.refraction_enabled
+                              && meshes.has_blend_mesh;
+
         light_datas_[light_frame_]->upload();
 
         if (config_.fog_enabled) {
@@ -551,11 +672,11 @@ public:
                                     // rebind needs the same wait as HiZPass's.
                                     || config_.ssao_enabled;
 
-        if (need_ssr_trace_inputs) {
-            // HiZPass and SceneColorMipPass rebind their own mip-0 descriptor set inside every
-            // execute(). That is safe only under a per-frame wait, which this pipeline otherwise does
-            // not do -- see rule 1 in the file doc. Rather than fork two sizeable gfxcoopa passes to
-            // remove an internal rebind, frames that need them pay for one full wait here.
+        if (need_ssr_trace_inputs && trace_inputs_need_rebind_()) {
+            // HiZPass and SceneColorMipPass bind their descriptor sets inside execute(), and only
+            // when the source view differs from what the sets already hold -- in practice once,
+            // on the first frame. A write to a set a pending command buffer references is invalid
+            // (file doc, rule 1), so that one frame waits for the GPU; every later frame overlaps.
             device_.wait_idle();
         }
 
@@ -575,6 +696,12 @@ public:
         ctx.shadow_point          = shadow_point;
         ctx.cast_spot_shadow      = cast_spot_shadow;
 
+        if (profile_) {
+            profile_->add_cpu(CpuScope::Gather, std::chrono::duration<double, std::milli>(
+                                                    std::chrono::steady_clock::now() - gather_start).count());
+        }
+        const auto submit_start = std::chrono::steady_clock::now();
+        double record_ms = 0.0;
         bool frame_presented = renderer.begin_frame(
             [&](coopa::gfx::command::CommandBuffer& cmd) {
                 // 1:1 over the full extent, NOT the letterbox rect: overlay_target_ is already
@@ -589,11 +716,24 @@ public:
             VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}},
             nullptr,
             [&](coopa::gfx::command::CommandBuffer& cmd) {
+                const auto record_start = std::chrono::steady_clock::now();
+                if (gpu_profiler_) gpu_profiler_->begin_frame(cmd, frame_slot, profile_->current_frame());
                 record_scene_(cmd, ctx, meshes, sdf_draws);
                 record_post_chain_(cmd, ctx);
                 record_overlay_(cmd, ctx);
+                record_ms = std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - record_start).count();
+            },
+            [&](coopa::gfx::command::CommandBuffer& cmd) {
+                gpu_mark_(cmd, GpuScope::Present);   // after the swapchain copy pass
             }
         );
+        if (profile_) {
+            const double total_ms = std::chrono::duration<double, std::milli>(
+                                        std::chrono::steady_clock::now() - submit_start).count();
+            profile_->add_cpu(CpuScope::Record, record_ms);
+            profile_->add_cpu(CpuScope::SubmitPresent, std::max(0.0, total_ms - record_ms));
+        }
 
         // Needed by both SSAO's and SSR's temporal resolve passes -- kept unconditional (not
         // gated on either toggle) since ssao_pass_ always exists and either toggle can be
@@ -609,19 +749,58 @@ public:
 private:
 
     /**
+     * @struct MeshBatch
+     * @brief One instanced draw: `instance_count` renderers that share a mesh, an LOD level
+     *        and every material input the pass reads, whose transforms sit contiguously in
+     *        this frame's InstanceStream from `first_instance`. `item` is any one of them
+     *        (index into MeshGather::renderers) -- the source of the shared mesh/material.
+     */
+    struct MeshBatch {
+        uint32_t item           = 0;
+        uint32_t lod            = 0;
+        uint32_t first_instance = 0;
+        uint32_t instance_count = 0;
+    };
+
+    /**
      * @struct MeshGather
-     * @brief This frame's MeshRenderers with their resolved world matrices and instance-buffer
-     *        indices, all in the same order.
+     * @brief This frame's MeshRenderers, their world matrices/bounds and LOD, and the
+     *        frustum-culled, batched draw list of every view that draws meshes.
      *
-     * One list shared by the instance upload and every recording site, so no two of them can
-     * disagree about which renderer is which. instance_idx[i] is InstanceStream::kInvalidIndex
-     * for a renderer that was not uploaded (not ready, no transform, or the buffer was full);
-     * every draw loop skips on exactly that.
+     * Built once per frame by gather_meshes_(); every recording site draws its own list, so
+     * a view only ever pays for what it can see. Per-renderer arrays share one index space.
      */
     struct MeshGather {
         std::vector<coopa::gfx::engine::components::MeshRenderer*> renderers;
-        std::vector<glm::mat4> world_matrices;
-        std::vector<uint32_t>  instance_idx;
+        std::vector<glm::mat4>   world_matrices;
+        std::vector<WorldBounds> bounds;
+        std::vector<uint8_t>     valid;   ///< Ready, has a transform, not LOD-culled.
+        std::vector<uint32_t>    lod;     ///< Chosen against the camera; shadow views reuse it.
+        /// Single-instance index for each camera-visible BLEND renderer -- the forward pass
+        /// draws those one at a time, back to front, so they are never batched. Otherwise
+        /// InstanceStream::kInvalidIndex.
+        std::vector<uint32_t>    instance_idx;
+        /// Any camera-visible BLEND renderer this frame (some instance_idx is valid) -- the
+        /// only thing that samples refraction's scene-colour chain, so render() skips building
+        /// it when this is false.
+        bool                     has_blend_mesh = false;
+
+        std::vector<MeshBatch>                gbuffer;   ///< Camera; opaque + mask.
+        std::vector<MeshBatch>                capture;   ///< Camera; blend (SSR capture).
+        std::array<std::vector<MeshBatch>, 4> cascade;   ///< Directional shadow, per cascade.
+        std::array<std::vector<MeshBatch>, 6> cube;      ///< Point shadow, per cube face.
+        std::vector<MeshBatch>                spot;      ///< Spot shadow.
+    };
+
+    /**
+     * @struct MeshDrawStats
+     * @brief Draw calls / instances / triangles recorded for meshes in one frame, by pass
+     *        family. Accumulated across frames for Engine::run()'s exit summary.
+     */
+    struct MeshDrawStats {
+        uint64_t camera_draws = 0, camera_instances = 0, camera_triangles = 0;
+        uint64_t shadow_draws = 0, shadow_instances = 0, shadow_triangles = 0;
+        uint64_t renderers = 0, camera_visible = 0;
     };
 
     /**
@@ -643,7 +822,8 @@ private:
         float dof_focus_range = 0.0f;
         /** True when the Hi-Z pyramid and scene-colour mip chain must be built this frame --
          *  transparent.frag traces the same ones ssr.frag does, so this is wider than
-         *  ssr_enabled alone. Also the flag that pays for the one per-frame wait_idle(). */
+         *  ssr_enabled alone. Its passes bind descriptors lazily, which costs a wait_idle() on
+         *  the frames trace_inputs_need_rebind_() reports. */
         bool need_ssr_trace_inputs = false;
         bool cast_dir_shadow   = false;
         bool cast_point_shadow = false;
@@ -757,7 +937,8 @@ private:
                 config_.shaders(sd.shadow_vert.empty() ? "shadow_depth.vert" : sd.shadow_vert),
                 config_.shaders(sd.shadow_frag.empty() ? "shadow_depth.frag" : sd.shadow_frag),
                 config_.shaders(sd.shadow_cube_vert.empty() ? "shadow_cube.vert" : sd.shadow_cube_vert),
-                config_.shaders(sd.shadow_cube_frag.empty() ? "shadow_cube.frag" : sd.shadow_cube_frag));
+                config_.shaders(sd.shadow_cube_frag.empty() ? "shadow_cube.frag" : sd.shadow_cube_frag),
+                sd.cull);
         }
     }
     /**
@@ -792,15 +973,10 @@ private:
             config_.shaders("sdf_capture.frag"));
     }
     /**
-     * @brief Builds the skybox, SSAO, SSAO debug view and deferred lighting passes.
+     * @brief Builds the SSAO, SSAO debug view and deferred lighting passes. (The sky is drawn
+     *        by the lighting pass itself at background pixels -- see pixel_lighting.frag.)
      */
     void build_lighting_passes_() {
-        skybox_pass_ = std::make_unique<coopa::gfx::engine::passes::SkyboxPass>(
-            device_, offscreen_target_.render_pass_object(), *camera_layout_,
-            config_.shaders("fullscreen.vert"),
-            config_.shaders("skybox.frag"));
-        skybox_pass_->set_gbuffer_normal_image(gbuffer_target_.g1_view_typed(), linear_sampler_);
-
         // SsaoPass is always constructed: pixel_lighting.frag (and the SSR composite, when
         // that's built below) always has a g_ssao binding to fill, toggle or not -- cheap
         // either way, since SsaoPass's ctor already builds a permanent 1x1 neutral texture.
@@ -809,7 +985,9 @@ private:
             config_.shaders("fullscreen.vert"),
             config_.shaders("ssao.frag"),
             config_.shaders("ssao_resolve.frag"),
-            config_.shaders("ssao_blur.frag"));
+            config_.shaders("ssao_blur.frag"),
+            config_.ssao_half_res,
+            config_.shaders("ssao_upsample.frag"));
         ssao_pass_->recreate(render_extent_.width, render_extent_.height);
         // update_descriptors() happens in build_ssr_chain_(): the raw pass marches the Hi-Z
         // pyramid, which is not constructed yet at this point in the ctor sequence.
@@ -825,12 +1003,12 @@ private:
         temporal_history_pass_->recreate(render_extent_.width, render_extent_.height);
         temporal_history_pass_->set_depth_image(gbuffer_target_.depth_view_typed());
 
-        // Contact shadows, as their own pass ahead of lighting. Always constructed and always
-        // executed: contact_shadows_enabled is a RUNTIME toggle, so there is no construction-time
-        // answer to "will this buffer ever be read", and an always-valid image layout is worth
-        // more than the one fullscreen draw it costs when the feature is off -- with
-        // contact_params.x at 0 the march early-outs on its first line and the buffer reads 0,
-        // which is the same value the disabled term contributed inline.
+        // Contact shadows, as their own pass ahead of lighting. Always constructed:
+        // contact_shadows_enabled is a RUNTIME toggle, so there is no construction-time answer to
+        // "will this buffer ever be read". While it is off, record_scene_() skips the march and
+        // resolve and only clears the output once (ContactShadowPass::clear_output), which keeps
+        // the image validly laid out and reading 0 -- and lighting ignores it anyway, since
+        // contact_params.x is 0.
         contact_shadow_pass_ = std::make_unique<passes::ContactShadowPass>(
             device_, allocator_, *camera_layout_, *light_layout_,
             render_extent_.width, render_extent_.height,
@@ -841,7 +1019,8 @@ private:
         contact_shadow_pass_->update_descriptors(
             gbuffer_target_.g0_view_typed(), gbuffer_target_.g1_view_typed(),
             gbuffer_target_.g2_view_typed(), gbuffer_target_.depth_view_typed(),
-            temporal_history_pass_->count_view_typed(), temporal_history_pass_->sampler());
+            temporal_history_pass_->count_view_typed(0), temporal_history_pass_->count_view_typed(1),
+            temporal_history_pass_->sampler());
 
         // pixel_lighting_pass_'s one app-supplied extra set (set 4): the resolved occlusion the
         // directional term max()-combines in. An ExtraSets rather than a sixth binding on
@@ -909,21 +1088,28 @@ private:
 
         // The SSAO march's own prefiltered pyramid. Chain length is exactly what the march's
         // pixel-radius clamp can reach: ssao.frag selects mip floor(log2(d_px)) - 2 with
-        // d_px <= ssao_max_radius_px, so deeper levels would never be sampled.
+        // d_px <= ssao_max_radius_px, so deeper levels would never be sampled. Level 0 is
+        // not rendered (external_level0): it was a texelFetch copy of the depth buffer, so
+        // ssao.frag reads the depth buffer there and this chain holds levels 1..N.
         const uint32_t ao_pyramid_levels = 1u + static_cast<uint32_t>(std::max(
             0.0, std::floor(std::log2(std::max(config_.ssao_max_radius_px, 1.0f))) - 2.0));
         ao_depth_pyramid_pass_ = std::make_unique<coopa::gfx::engine::passes::HiZPass>(
             device_, allocator_,
             config_.shaders("fullscreen.vert"),
             config_.shaders("ao_depth_downsample.frag"),
-            ao_pyramid_levels);
+            ao_pyramid_levels, /*external_level0=*/true);
         ao_depth_pyramid_pass_->recreate(render_extent_.width, render_extent_.height);
 
         // Bound once: bind_image() semantics, and every view here is startup-fixed
         // (render_extent_ never changes). Deferred from the SSAO construction site above
         // because the raw pass's set includes the AO depth pyramid built just now.
+        // A one-level chain (ssao_max_radius_px < 8) renders nothing and owns no image; the
+        // march then never leaves level 0, so the depth view stands in for the pyramid.
         ssao_pass_->update_descriptors(gbuffer_target_.g1_view_typed(), gbuffer_target_.g2_view_typed(),
-                                       ao_depth_pyramid_pass_->full_hiz_view_typed(),
+                                       ao_depth_pyramid_pass_->max_mip_level() > 0
+                                           ? ao_depth_pyramid_pass_->full_hiz_view_typed()
+                                           : gbuffer_target_.depth_view_typed(),
+                                       gbuffer_target_.depth_view_typed(),
                                        ao_depth_pyramid_pass_->sampler(),
                                        linear_sampler_);
 
@@ -933,10 +1119,10 @@ private:
             config_.shaders("scene_color_downsample.frag"));
         scene_color_mip_pass_->recreate(render_extent_.width, render_extent_.height);
 
-        // No ExtraSets (toyengine has neither GI nor reflection probes to plumb through)
-        // and half_res left at its false default -- toyengine already renders at the
-        // pipeline's low internal resolution, so there is no separate "trace at half of
-        // that" tier worth the bilateral-upsample cost.
+        // No ExtraSets (toyengine has neither GI nor reflection probes to plumb through).
+        // half_res follows config ssr_half_res: at a full-HD internal resolution the trace,
+        // resolve and blur of both chains are worth tracing at a quarter of the pixels, and
+        // the composite's depth/normal-aware upsample keeps silhouettes sharp.
         ssr_pass_ = std::make_unique<coopa::gfx::engine::passes::SsrPass>(
             device_, allocator_, *camera_layout_,
             render_extent_.width, render_extent_.height,
@@ -946,7 +1132,7 @@ private:
             config_.shaders("ssr_composite.frag"),
             config_.shaders("fullscreen.vert"),
             config_.shaders("ssr_resolve.frag"),
-            /*half_res=*/false,
+            /*half_res=*/config_.ssr_half_res,
             coopa::gfx::engine::passes::ExtraSets{},
             // Spatial denoise for the SSR buffer (bilateral blur, same technique as
             // SsaoPass's own ssao_blur.frag) -- addresses hit/miss noise at reflection
@@ -967,7 +1153,8 @@ private:
         // fixed-rate blend that can never converge on a re-jittered trace. Bound once: that pass
         // keeps one stable target image, and rebinding a descriptor per frame is unsafe under this
         // pipeline's frame-overlap model (see the ssao_source_view_() comment).
-        ssr_pass_->set_temporal_count_image(temporal_history_pass_->count_view_typed(),
+        ssr_pass_->set_temporal_count_image(temporal_history_pass_->count_view_typed(0),
+                                            temporal_history_pass_->count_view_typed(1),
                                             temporal_history_pass_->sampler());
     }
     /**
@@ -1008,11 +1195,10 @@ private:
         // Refraction's own post-SSR scene-colour chain (see refraction_scene_color_mip_pass_'s
         // own doc for why this must be a separate instance/set, not a second execute() on
         // scene_color_mip_pass_ itself). Always constructed, matching this pipeline's usual
-        // policy elsewhere -- render() gates execute() per frame on config_.refraction_enabled
-        // && config_.transparency_enabled; its image simply never gets sampled if
-        // config_.refraction_enabled was false at construction (see the transparent_extra
-        // bind lambda just below, which is the only thing that ever reads this set, and only
-        // does so when that same condition held at startup).
+        // policy elsewhere -- render() gates execute() per frame on refraction_this_frame_
+        // (refraction + transparency enabled AND a BLEND mesh in view); its image is only ever
+        // sampled by the transparent_extra bind lambda just below, which only a BLEND mesh
+        // draw reaches, on a frame where that same gate built the chain first.
         refraction_scene_color_mip_pass_ = std::make_unique<coopa::gfx::engine::passes::SceneColorMipPass>(
             device_, allocator_,
             config_.shaders("fullscreen.vert"),
@@ -1162,13 +1348,40 @@ private:
         // integrates an analytic everywhere-medium in one sample, this raymarches a sparse
         // noise field advected along a wind vector, which is what makes it read as moving
         // air rather than haze (see gfx/volumetrics.glsl's header for the three ideas involved).
+        //
+        // volumetrics_mode selects how: "froxel" (FroxelVolumetricsPass -- grid inject, per-column
+        // integrate, per-pixel apply into volumetrics_target_) or "raymarch" (VolumetricsPass --
+        // the march into volumetrics_march_target_ at reduced resolution, then a depth-aware
+        // upsample + composite into volumetrics_target_). Only the selected one is built.
+        if (froxel_volumetrics_()) {
+            coopa::gfx::engine::passes::FroxelVolumetricsPass::Desc fd;
+            fd.render_width       = render_extent_.width;
+            fd.render_height      = render_extent_.height;
+            fd.tile               = std::max<uint32_t>(1u, config_.volumetrics_froxel_tile);
+            fd.slices             = std::max<uint32_t>(1u, config_.volumetrics_froxel_slices);
+            fd.vert_spv           = config_.shaders("fullscreen.vert");
+            fd.inject_frag_spv    = config_.shaders("volumetrics_froxel_inject.frag");
+            fd.integrate_partial_frag_spv = config_.shaders("volumetrics_froxel_integrate_partial.frag");
+            fd.integrate_frag_spv = config_.shaders("volumetrics_froxel_integrate.frag");
+            fd.apply_frag_spv     = config_.shaders("volumetrics_froxel_apply.frag");
+            froxel_volumetrics_pass_ = std::make_unique<coopa::gfx::engine::passes::FroxelVolumetricsPass>(
+                device_, allocator_, fd, volumetrics_target_.render_pass_object(),
+                volumetrics_data_.buffer(), fog_data_.buffer());
+            froxel_volumetrics_pass_->set_source_images(pre_volumetrics_view, gbuffer_target_.g1_view_typed(),
+                                                        gbuffer_target_.g2_view_typed(), linear_sampler_);
+            froxel_volumetrics_pass_->set_shadow_images(shadow_target_.dir_shadow_view_typed(),
+                                                        shadow_target_.spot_shadow_view_typed(), shadow_sampler_);
+        } else {
         volumetrics_pass_ = std::make_unique<coopa::gfx::engine::passes::VolumetricsPass>(
-            device_, volumetrics_target_.render_pass_object(), volumetrics_data_.buffer(),
+            device_, volumetrics_march_target_.render_pass_object(),
+            volumetrics_target_.render_pass_object(), volumetrics_data_.buffer(),
             fog_data_.buffer(),
             config_.shaders("fullscreen.vert"),
-            config_.shaders("volumetrics.frag"));
+            config_.shaders("volumetrics_march.frag"),
+            config_.shaders("volumetrics_composite.frag"));
         volumetrics_pass_->set_source_images(pre_volumetrics_view, gbuffer_target_.g1_view_typed(),
                                       gbuffer_target_.g2_view_typed(), linear_sampler_);
+        volumetrics_pass_->set_march_result(volumetrics_march_target_.color_view_typed());
         // Shadow maps for the march's in-scatter terms (light shafts) -- same images and
         // compare sampler shadow_set_ binds for the lighting pass, bound once here under
         // the same construction-time rule. Whether they are actually sampled is the
@@ -1176,6 +1389,7 @@ private:
         // shadow_params (see update_volumetrics_data_).
         volumetrics_pass_->set_shadow_images(shadow_target_.dir_shadow_view_typed(),
                                              shadow_target_.spot_shadow_view_typed(), shadow_sampler_);
+        }
 
         // What DOF reads: the final pre-tonemap HDR frame, before any lens effect. Sourcing the
         // full chain here (rather than the pre-SSR image) is what puts SSR reflections, BLEND
@@ -1318,9 +1532,11 @@ private:
         // aa_target_, so switching AMONG fxaa/smaa/taa at runtime is safe; going to or from
         // "off" is not. Each binds once, so no per-frame wait is needed.
         if (config_.aa_mode != "off") {
+            // Colour-only: FXAA, SMAA's final stage and TAA's present all draw a fullscreen
+            // triangle into it, and nothing reads a depth of its own.
             aa_target_ = std::make_unique<coopa::gfx::engine::targets::OffscreenTarget>(
                 device_, allocator_, render_extent_.width, render_extent_.height,
-                coopa::gfx::Format::RGBA8_Unorm);
+                coopa::gfx::Format::RGBA8_Unorm, coopa::gfx::engine::targets::kColorOnly);
 
             fxaa_pass_ = std::make_unique<coopa::gfx::engine::passes::FxaaPass>(
                 device_, aa_target_->render_pass_object(),
@@ -1449,9 +1665,13 @@ private:
     void record_scene_(coopa::gfx::command::CommandBuffer& cmd, const FrameContext& ctx,
                        const MeshGather& meshes, const std::vector<SdfDrawItem>& sdf_draws) {
         record_directional_shadow_(cmd, meshes, sdf_draws, ctx.cast_dir_shadow);
+        gpu_mark_(cmd, GpuScope::ShadowDirectional);
         record_point_shadow_(cmd, meshes, sdf_draws, ctx.shadow_point, ctx.cast_point_shadow);
+        gpu_mark_(cmd, GpuScope::ShadowPoint);
         record_spot_shadow_(cmd, meshes, sdf_draws, ctx.cast_spot_shadow);
+        gpu_mark_(cmd, GpuScope::ShadowSpot);
         record_gbuffer_(cmd, meshes, sdf_draws);
+        gpu_mark_(cmd, GpuScope::GBuffer);
 
         if (ctx.need_ssr_trace_inputs) {
             hiz_pass_->execute(cmd, gbuffer_target_.depth_image_handle(), gbuffer_target_.depth_view_typed());
@@ -1463,6 +1683,7 @@ private:
                                                 gbuffer_target_.depth_view_typed(),
                                                 /*transition_depth=*/false);
             }
+            gpu_mark_(cmd, GpuScope::HiZ);
         } else {
             // GBufferTarget's render pass leaves depth in DEPTH_STENCIL_ATTACHMENT_OPTIMAL (only the
             // colour attachments end in SHADER_READ_ONLY_OPTIMAL), but pixel_stylize.frag samples
@@ -1478,7 +1699,7 @@ private:
         // and let opaque surfaces reflect transparent ones. Placed right after the opaque Hi-Z
         // block: it needs only the shadows recorded above and the light UBO, and it must finish
         // before ssr_pass_->execute().
-        if (config_.ssr_reflect_transparent) {
+        if (secondary_this_frame_) {
             record_transparent_capture_(cmd, meshes, sdf_draws);
             // TransparentCaptureTarget is out of scope for the Vulkan-sealing refactor
             // (MRT, no sealed equivalent -- see gfxcoopa's plan), so its raw VkImageView
@@ -1489,16 +1710,21 @@ private:
             transparent_scene_color_mip_pass_->execute(
                 cmd, coopa::gfx::detail::wrap(transparent_capture_target_.shaded_color_view()));
 
-            // Rebind ssr_pass_'s secondary source (sets 4-6) to these now-populated, correctly
-            // laid-out images -- deliberately not done at construction, see that call site. Safe
-            // mid-recording only because this block runs solely when need_ssr_trace_inputs already
-            // paid for a device_.wait_idle() before begin_frame().
-            ssr_pass_->set_secondary_source(
-                coopa::gfx::detail::wrap(transparent_capture_target_.normal_metallic_view()),
-                coopa::gfx::detail::wrap(transparent_capture_target_.position_roughness_view()),
-                transparent_hiz_pass_->full_hiz_view_typed(), transparent_hiz_pass_->sampler(),
-                transparent_scene_color_mip_pass_->full_view_typed(), transparent_scene_color_mip_pass_->sampler());
+            // Bind ssr_pass_'s secondary source (sets 4-6) to these now-populated, correctly
+            // laid-out images -- deliberately not done at construction, see that call site. Once
+            // only: the views never change, and the first such frame is one
+            // trace_inputs_need_rebind_() made wait for the GPU before begin_frame().
+            if (!ssr_secondary_bound_) {
+                ssr_pass_->set_secondary_source(
+                    coopa::gfx::detail::wrap(transparent_capture_target_.normal_metallic_view()),
+                    coopa::gfx::detail::wrap(transparent_capture_target_.position_roughness_view()),
+                    transparent_hiz_pass_->full_hiz_view_typed(), transparent_hiz_pass_->sampler(),
+                    transparent_scene_color_mip_pass_->full_view_typed(), transparent_scene_color_mip_pass_->sampler());
+                ssr_secondary_bound_ = true;
+            }
+            gpu_mark_(cmd, GpuScope::TransparentCapture);
         }
+
 
         // The AO sample jitter advances EVERY frame the accumulator is running, still or
         // moving -- the resolved image is then always the same many-frame average, so
@@ -1589,6 +1815,7 @@ private:
             th_params.perspective     =
                 (!ctx.cam || ctx.cam->type == coopa::gfx::engine::components::CameraType::Perspective);
             temporal_history_pass_->execute(cmd, th_params);
+            gpu_mark_(cmd, GpuScope::TemporalHistory);
         }
 
         // Contact shadows, into their own buffer, before the lighting pass that reads it.
@@ -1615,7 +1842,18 @@ private:
                 ? config_.contact_shadow_temporal_frames : 0;
             cs_params.temporal_gamma  = config_.ssr_temporal_gamma;
             cs_params.frozen          = temporal_frozen_;
-            contact_shadow_pass_->execute(cmd, current_camera_set(), current_light_set(), cs_params);
+            cs_params.count_parity    = temporal_history_pass_->current_parity();
+            if (config_.contact_shadows_enabled) {
+                contact_shadow_pass_->execute(cmd, current_camera_set(), current_light_set(), cs_params);
+                contact_output_cleared_ = false;
+                gpu_mark_(cmd, GpuScope::ContactShadows);
+            } else if (!contact_output_cleared_) {
+                // Off: two full-resolution passes and a history copy would only ever produce 0.
+                // One clear leaves the buffer valid and neutral until the toggle flips back.
+                contact_shadow_pass_->clear_output(cmd);
+                contact_output_cleared_ = true;
+                gpu_mark_(cmd, GpuScope::ContactShadows);
+            }
         }
 
         if (config_.ssao_enabled) {
@@ -1627,6 +1865,7 @@ private:
             ssao_params.steps                = config_.ssao_steps;
             ssao_params.max_radius_px        = config_.ssao_max_radius_px;
             ssao_params.blur_plane_sigma     = config_.ssao_blur_plane_sigma;
+            ssao_params.blur_light           = config_.ssao_blur_light;
             ssao_params.max_mip              = static_cast<int>(ao_depth_pyramid_pass_->max_mip_level());
             // ssao_rotation_index_, not frame_index_: the AO slice rotation must hold still
             // whenever the camera does, or ssao_resolve.frag's accumulator has a fresh estimate
@@ -1649,6 +1888,7 @@ private:
             ssao_params.frozen               = temporal_frozen_;
             ssao_params.motion_px            = ssao_motion_px_;
             ssao_pass_->execute(cmd, current_camera_set(), ssao_params);
+            gpu_mark_(cmd, GpuScope::Ssao);
         } else {
             ssao_pass_->invalidate_history();
         }
@@ -1657,10 +1897,9 @@ private:
         // here -- see the constructor's comment on why a per-frame rebind would violate
         // this pipeline's frame-overlap model.
 
-        // Lighting and skybox draw into the SAME open render pass instance: pipeline::RenderPass
-        // always uses LOAD_OP_CLEAR, so a target can never be reopened to composite onto. The
-        // skybox's discard of already-lit pixels works only because it is a second draw inside
-        // offscreen_target_'s single begin()/end().
+        // One fullscreen draw writes every pixel of offscreen_target_: lit surfaces, and the
+        // procedural sky at background pixels (pixel_lighting.frag -- formerly a second
+        // SkyboxPass draw that re-read every pixel's normal just to discard the lit ones).
         offscreen_target_.begin(cmd);
 
         PixelLightingPushConstants lighting_pc;
@@ -1671,21 +1910,24 @@ private:
         lighting_pc.sky_intensity     = config_.indirect.sky_intensity;
         lighting_pc.soft_lighting     = config_.soft_lighting ? 1.0f : 0.0f;
         lighting_pc.ssao_direct_strength = config_.ssao_direct_lighting_strength;
+        // The sky is drawn by this same pass at background pixels (see pixel_lighting.frag),
+        // from the matrix SkyboxPass used to compute: identical sky, one fullscreen draw.
+        lighting_pc.sky_inv_view_proj    = glm::inverse(ctx.proj * ctx.view);
         // gfxcoopa's DeferredLightingPass::draw() pushes this internally now (the
         // templated overload), after its own bind_pipeline() -- no separate push needed.
         pixel_lighting_pass_->draw(cmd, current_camera_set(), current_light_set(), *shadow_set_, lighting_pc,
                                   render_extent_.width, render_extent_.height);
 
-        skybox_pass_->draw(cmd, current_camera_set(), ctx.view, ctx.proj, render_extent_.width, render_extent_.height,
-                           config_.indirect);
 
         offscreen_target_.end(cmd);
+        gpu_mark_(cmd, GpuScope::LightingSky);
 
         if (ctx.need_ssr_trace_inputs) {
             // Prefiltered scene-colour mip chain: also feeds transparent.frag's
             // gfx_ssr_trace() cone-LOD taps and SSGI bounce lookup, not just ssr.frag's
             // own -- see need_ssr_trace_inputs' own doc.
             scene_color_mip_pass_->execute(cmd, offscreen_target_.color_view_typed());
+            gpu_mark_(cmd, GpuScope::SceneColorMips);
         }
 
         // Runs on debug_view frames too: with ssr_enabled, the whole post chain reads
@@ -1722,6 +1964,9 @@ private:
             ssr_params.reproject         = temporal_reproject;
             ssr_params.reproject_valid   = prev_view_proj_valid_;
             ssr_params.ssr_blur_radius   = config_.ssr_blur_radius;
+            ssr_params.ssr_blur_light    = config_.ssr_blur_light;
+            ssr_params.count_parity      = temporal_history_pass_->current_parity();
+            ssr_params.ssr_blur_zero_skip = config_.ssr_blur_zero_skip;
             ssr_params.jitter_strength   = config_.ssr_jitter;
             // Matches ssr_ign2()'s own `frame & 0xFF` mask in gfx/ssr_common.glsl -- and the
             // same 256 period SSAO's noise_rotation and the shadow PCF rotation use, so no
@@ -1738,6 +1983,7 @@ private:
             ssr_params.ssgi_distance     = config_.indirect.ssgi_distance;
             ssr_params.ssgi_max_distance   = config_.ssgi_max_distance;
             ssr_params.ssgi_blur_radius    = config_.ssgi_blur_radius;
+            ssr_params.ssgi_blur_light     = config_.ssgi_blur_light;
             ssr_params.ssgi_max_iterations = config_.ssgi_max_iterations;
             ssr_params.sky_zenith        = config_.indirect.sky_zenith;
             ssr_params.sky_horizon       = config_.indirect.sky_horizon;
@@ -1747,16 +1993,19 @@ private:
             // max_color_mip_b come from transparent_hiz_pass_/transparent_scene_
             // color_mip_pass_'s OWN mip counts, not the primary pyramid's (they're
             // independent instances, possibly over a differently-sized image chain).
-            ssr_params.has_secondary   = config_.ssr_reflect_transparent;
+            ssr_params.has_secondary   = secondary_this_frame_;
+            ssr_params.skip_threshold  = config_.ssr_skip_negligible ? config_.ssr_skip_threshold : 0.0f;
             ssr_params.max_hiz_mip_b   = static_cast<int>(transparent_hiz_pass_->max_mip_level());
             ssr_params.max_color_mip_b = static_cast<int>(transparent_scene_color_mip_pass_->max_mip_level());
 
             ssr_pass_->execute(cmd, current_camera_set(), ssr_params);
+            // GPU scopes for SsrPass come from its stage hook (see set_profiler()).
         }
 
-        if (config_.transparency_enabled && config_.refraction_enabled) {
+        if (refraction_this_frame_) {
             // Builds refraction's own scene-colour chain -- the dedicated instance transparent.frag's
-            // u_scene_color reads whenever refraction is active. It must be a SEPARATE instance, not a
+            // u_scene_color reads whenever refraction is active and a BLEND mesh is in view (see
+            // refraction_this_frame_). It must be a SEPARATE instance, not a
             // second execute() on scene_color_mip_pass_: that pass rebinds its internal per-mip
             // descriptor sets on every execute(), and doing so twice in one not-yet-submitted command
             // buffer invalidates it. MESH-only -- BLEND SDFs keep reading the original chain.
@@ -1764,6 +2013,7 @@ private:
                 (config_.refraction_include_reflections && config_.ssr_enabled)
                     ? ssr_pass_->output_view_typed() : offscreen_target_.color_view_typed();
             refraction_scene_color_mip_pass_->execute(cmd, refraction_source);
+            gpu_mark_(cmd, GpuScope::RefractionMips);
         }
 
         if (config_.transparency_enabled) {
@@ -1794,6 +2044,7 @@ private:
             if (transparent_ran) {
                 transition_gbuffer_depth_to_shader_read_(cmd, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
             }
+            gpu_mark_(cmd, GpuScope::Transparent);
         }
 
     }
@@ -1822,15 +2073,28 @@ private:
             fog_target_.begin(cmd);
             fog_pass_->draw(cmd, render_extent_.width, render_extent_.height);
             fog_target_.end(cmd);
+            gpu_mark_(cmd, GpuScope::Fog);
         }
 
         // Volumetric wind. After fog, so wisps layer over fogged geometry, and before DOF and
         // bloom, so they defocus with everything else and sun-lit ones glow. Gated on the same
         // startup-fixed flag its source view was chosen from.
-        if (config_.volumetrics_enabled) {
+        if (config_.volumetrics_enabled && froxel_volumetrics_pass_) {
+            froxel_volumetrics_pass_->record_grid(cmd, static_cast<uint32_t>(frame_index_ & 1u));
             volumetrics_target_.begin(cmd);
-            volumetrics_pass_->draw(cmd, render_extent_.width, render_extent_.height);
+            froxel_volumetrics_pass_->draw_apply(cmd, render_extent_.width, render_extent_.height);
             volumetrics_target_.end(cmd);
+            gpu_mark_(cmd, GpuScope::Volumetrics);
+        } else if (config_.volumetrics_enabled) {
+            volumetrics_march_target_.begin(cmd);
+            volumetrics_pass_->draw_march(cmd, volumetrics_march_target_.width(),
+                                          volumetrics_march_target_.height());
+            volumetrics_march_target_.end(cmd);
+
+            volumetrics_target_.begin(cmd);
+            volumetrics_pass_->draw_composite(cmd, render_extent_.width, render_extent_.height);
+            volumetrics_target_.end(cmd);
+            gpu_mark_(cmd, GpuScope::Volumetrics);
         }
 
         // Depth of field. After fog (so fogged geometry defocuses too) and before
@@ -1868,6 +2132,7 @@ private:
             dof_params.debug_view = (active_view == DebugView::Dof);
 
             dof_pass_->execute(cmd, dof_params);
+            gpu_mark_(cmd, GpuScope::Dof);
         }
 
         // Bloom pyramid. After the fog branch (so fog and everything before it
@@ -1882,6 +2147,7 @@ private:
             bloom_params.radius    = config_.bloom_radius;
             bloom_params.scatter   = config_.bloom_scatter;
             bloom_pass_->execute(cmd, bloom_params);
+            gpu_mark_(cmd, GpuScope::Bloom);
         }
 
         // Auto-exposure metering. Alongside the bloom pyramid rather than inside
@@ -1899,6 +2165,7 @@ private:
             exposure_pc.min_exposure = config_.auto_exposure_min;
             exposure_pc.max_exposure = config_.auto_exposure_max;
             exposure_pass_->execute(cmd, exposure_pc);
+            gpu_mark_(cmd, GpuScope::Exposure);
         }
 
         post_target_.begin(cmd);
@@ -1954,6 +2221,7 @@ private:
                 LetterboxRect{0, 0, render_extent_.width, render_extent_.height});
         }
         post_target_.end(cmd);
+        gpu_mark_(cmd, GpuScope::Stylize);
 
         // World-space UI, into its OWN layer rather than post_target_: everything from here to the
         // composite (AA, tilt shift) is a filter over the finished frame, and the UI has to sit
@@ -1977,10 +2245,13 @@ private:
         // layer, so an occluded edge stair-steps on the render grid while the canvas's own edges
         // stay crisp.
         //
-        // Recorded unconditionally, even with no canvases: the target must be written (and so
-        // transitioned to SHADER_READ_ONLY_OPTIMAL) every frame, because ui_composite_pass_ samples
-        // it every frame regardless.
-        if (ui_world_target_) {
+        // ui_composite_pass_ samples the target every frame, so it must always hold a valid,
+        // SHADER_READ_ONLY_OPTIMAL image -- but with no canvases that image is just transparent
+        // black, and once it has been cleared to that it stays correct. So an empty frame skips
+        // the display-resolution clear whenever the previous write was already empty.
+        const bool world_ui_empty = world_canvases_.empty() || !world_ui_pass_;
+        if (ui_world_target_ && !(world_ui_empty && ui_world_layer_clear_)) {
+            ui_world_layer_clear_ = world_ui_empty;
             ui_world_target_->begin(cmd, VkClearColorValue{{0.0f, 0.0f, 0.0f, 0.0f}});
             if (world_ui_pass_) {
                 for (coopa::ui::CanvasComponent* canvas : world_canvases_) {
@@ -1990,6 +2261,7 @@ private:
                 }
             }
             ui_world_target_->end(cmd);
+            gpu_mark_(cmd, GpuScope::WorldUi);
         }
 
         // Anti-aliasing, after pixel_stylize_pass_ and before tilt shift. A no-op when aa_mode is
@@ -2052,6 +2324,7 @@ private:
                 taa_pass_->draw(cmd, *aa_target_, taa_params,
                                 render_extent_.width, render_extent_.height);
             }
+            gpu_mark_(cmd, GpuScope::Aa);
         }
 
         // Diorama tilt-shift blur, after every other post effect and at DISPLAY
@@ -2068,6 +2341,7 @@ private:
             ts_params.blur_bottom   = config_.tilt_shift_blur_bottom;
             ts_params.angle_degrees = config_.tilt_shift_angle;
             tilt_shift_pass_->execute(cmd, ts_params);
+            gpu_mark_(cmd, GpuScope::TiltShift);
         }
 
     }
@@ -2101,51 +2375,242 @@ private:
             }
         }
         overlay_target_->end(cmd);
+        gpu_mark_(cmd, GpuScope::Overlay);
     }
 
+    /// The per-renderer inputs a batch must agree on, precomputed once per frame so the
+    /// per-view sorts compare plain data. Two renderers batch together in a view only when
+    /// their key matches exactly (the pass then draws both with the first one's material).
+    struct MeshBatchKey {
+        size_t      shader_hash = 0;      ///< std::hash of material.shader -- the pipeline variant
+        uint32_t    flags       = 0;      ///< bit 0 cull_backfaces, bits 1-2 alpha_mode
+        const void* set         = nullptr; ///< MaterialTextureCache set: identifies the textures
+        const void* mesh        = nullptr;
+        /// Every scalar the camera passes push (GBuffer / capture constants). Compared bytewise.
+        struct Camera {
+            glm::vec4 albedo_alpha;
+            glm::vec4 mra_cutoff;   // metallic, roughness, ao, alpha cutoff
+            glm::vec4 emissive;
+            glm::vec4 params;       // shader_params
+        } camera{};
+        /// The subset the shadow passes push -- so casters that differ only in colour still
+        /// share one instanced shadow draw.
+        struct Shadow {
+            glm::vec4 params;
+            float     alpha_cutoff;
+            float     pad[3];
+        } shadow{};
+    };
+
     /**
-     * @brief Gathers every MeshRenderer's world matrix and uploads it into this frame's
-     *        instance-buffer slot.
+     * @brief Resolves every MeshRenderer's transform, bounds and LOD, then frustum-culls and
+     *        batches it into each view's draw list, uploading all transforms in batch order.
      *
-     * The per-index world_matrix() reads are a pure read (safe for concurrent readers, since
-     * TransformSystem resolved every dirty transform earlier this frame) and each writes only
-     * its own slot, so the gather parallelizes; the merge that follows stays serial to preserve
-     * InstanceStream::add()'s monotonic index order.
+     * Must run after update_dir_shadow_matrix_()/update_spot_shadow_matrix_(): the cascade
+     * and spot frusta come from the matrices those write.
+     *
+     * Per view: frustum test on the world AABB; for shadow views also the small-caster test
+     * (config shadow_min_caster_texels); then a sort on MeshBatchKey so identical
+     * mesh + LOD + material runs become one instanced draw, with their transforms appended
+     * contiguously. A transform is therefore uploaded once per view that sees it.
      */
-    MeshGather gather_meshes_(coopa::scene::Scene& scene, uint32_t frame_slot) {
+    MeshGather gather_meshes_(uint32_t frame_slot, const glm::mat4& view, const glm::mat4& unjittered_proj,
+                              bool cast_dir_shadow,
+                              coopa::gfx::engine::components::PointLightComponent* shadow_point,
+                              bool cast_point_shadow, bool cast_spot_shadow) {
         using coopa::gfx::engine::components::MeshRenderer;
-        // Gather renderables once; the instance upload, the shadow AABB fit, and
-        // the draw loops below all need the same list (and world matrices) in
-        // the same order.
         MeshGather out;
-        out.renderers = scene.get_components<MeshRenderer>();
-        out.world_matrices.assign(out.renderers.size(), glm::mat4(1.0f));
-        std::vector<uint8_t>   renderer_valid(out.renderers.size(), 0);
+        out.renderers = frame_scene_.mesh_renderers;
+        const size_t n = out.renderers.size();
+        out.world_matrices.assign(n, glm::mat4(1.0f));
+        out.bounds.assign(n, WorldBounds{});
+        out.valid.assign(n, 0);
+        out.lod.assign(n, 0);
+        out.instance_idx.assign(n, InstanceStream::kInvalidIndex);
         instance_stream_.begin(frame_slot);
-        out.instance_idx.assign(out.renderers.size(), InstanceStream::kInvalidIndex);
 
         // world_matrix() is a pure read, safe for any number of concurrent readers (unlike
         // get_world_matrix()), because TransformSystem already resolved every dirty transform
         // earlier this frame. Each index writes only its own slot.
         auto gather_mesh = [&](size_t begin, size_t end) {
             for (size_t i = begin; i < end; ++i) {
-                if (!out.renderers[i]->is_ready() || !out.renderers[i]->owner) continue;
-                auto* tc = out.renderers[i]->owner->get_transform();
+                MeshRenderer* mr = out.renderers[i];
+                if (!mr->is_ready() || !mr->owner) continue;
+                auto* tc = mr->owner->get_transform();
                 if (!tc) continue;
                 out.world_matrices[i] = tc->transform().world_matrix();
-                renderer_valid[i] = 1;
+                const auto& mesh = mr->get_mesh();
+                out.bounds[i] = world_aabb(out.world_matrices[i], mesh->bounds_min(), mesh->bounds_max());
+                out.valid[i] = 1;
             }
         };
-        if (should_parallelize_(out.renderers.size())) {
-            jobs_->parallel_for_blocking(out.renderers.size(), 0 /* auto grain */, gather_mesh);
+        if (should_parallelize_(n)) {
+            jobs_->parallel_for_blocking(n, 0 /* auto grain */, gather_mesh);
         } else {
-            gather_mesh(0, out.renderers.size());
+            gather_mesh(0, n);
         }
 
-        for (size_t i = 0; i < out.renderers.size(); ++i) {
-            if (renderer_valid[i]) out.instance_idx[i] = instance_stream_.add(out.world_matrices[i]);
+        // --- LOD (camera), and keys. Serial: MaterialTextureCache::set_for() may allocate. ---
+        std::vector<MeshBatchKey> keys(n);
+        std::unordered_map<const MeshRenderer*, int> next_lod_state;
+        next_lod_state.reserve(lod_state_.size());
+        std::vector<LodThreshold> thresholds;
+        std::hash<std::string> hash_str;
+        for (size_t i = 0; i < n; ++i) {
+            if (!out.valid[i]) continue;
+            MeshRenderer* mr = out.renderers[i];
+            const auto& mesh = *mr->get_mesh();
+
+            const bool has_lods = mesh.lods().size() > 1 || mesh.cull_screen_size() > 0.0f;
+            if (has_lods && mr->lods_enabled) {
+                thresholds.clear();
+                for (const auto& l : mesh.lods()) thresholds.push_back({l.screen_size});
+                const float size = screen_height_fraction(out.bounds[i].center, out.bounds[i].radius(),
+                                                          view, unjittered_proj)
+                                 * config_.mesh_lod_bias * mr->lod_bias;
+                auto it = lod_state_.find(mr);
+                const int prev = (it != lod_state_.end()) ? it->second : -2;
+                const int level = select_lod(size, thresholds, mesh.cull_screen_size(), prev, 0.1f);
+                next_lod_state[mr] = level;
+                if (level < 0) { out.valid[i] = 0; continue; }   // below cull size: no view draws it
+                out.lod[i] = static_cast<uint32_t>(level);
+            }
+
+            const auto& m = mr->material;
+            MeshBatchKey& k = keys[i];
+            k.shader_hash = hash_str(m.shader);
+            k.flags       = (m.cull_backfaces ? 1u : 0u) | (static_cast<uint32_t>(m.alpha_mode) << 1);
+            k.set         = &material_cache_->set_for(m);
+            k.mesh        = &mesh;
+            k.camera.albedo_alpha = glm::vec4(m.albedo, m.alpha);
+            k.camera.mra_cutoff   = glm::vec4(m.metallic, m.roughness, m.ao, m.gpu_alpha_cutoff());
+            k.camera.emissive     = m.gpu_emissive();
+            k.camera.params       = m.shader_params;
+            k.shadow.params       = m.shader_params;
+            k.shadow.alpha_cutoff = m.gpu_alpha_cutoff();
         }
+        lod_state_.swap(next_lod_state);
+
+        // --- Per-view culling + batching ---
+        std::vector<uint32_t> visible;
+        visible.reserve(n);
+        auto build = [&](const glm::mat4& view_proj, bool shadow, float shadow_res,
+                         const std::function<bool(size_t)>& accept, std::vector<MeshBatch>& list) {
+            list.clear();
+            visible.clear();
+            const Frustum f = Frustum::from_matrix(view_proj);
+            const float min_texels = shadow ? config_.shadow_min_caster_texels : 0.0f;
+            for (size_t i = 0; i < n; ++i) {
+                if (!out.valid[i] || !accept(i)) continue;
+                if (!f.intersects(out.bounds[i])) continue;
+                if (min_texels > 0.0f &&
+                    projected_texels(view_proj, out.bounds[i].center, out.bounds[i].radius(), shadow_res) < min_texels) {
+                    continue;
+                }
+                visible.push_back(static_cast<uint32_t>(i));
+            }
+            auto key_less = [&](uint32_t a, uint32_t b) {
+                const MeshBatchKey& ka = keys[a];
+                const MeshBatchKey& kb = keys[b];
+                if (ka.shader_hash != kb.shader_hash) return ka.shader_hash < kb.shader_hash;
+                if (ka.flags != kb.flags)             return ka.flags < kb.flags;
+                if (ka.set != kb.set)                 return std::less<const void*>()(ka.set, kb.set);
+                if (ka.mesh != kb.mesh)               return std::less<const void*>()(ka.mesh, kb.mesh);
+                if (out.lod[a] != out.lod[b])         return out.lod[a] < out.lod[b];
+                const int c = shadow ? std::memcmp(&ka.shadow, &kb.shadow, sizeof(ka.shadow))
+                                     : std::memcmp(&ka.camera, &kb.camera, sizeof(ka.camera));
+                if (c != 0) return c < 0;
+                return a < b;   // stable within a batch: scene order
+            };
+            auto same_batch = [&](uint32_t a, uint32_t b) {
+                const MeshBatchKey& ka = keys[a];
+                const MeshBatchKey& kb = keys[b];
+                return ka.shader_hash == kb.shader_hash && ka.flags == kb.flags && ka.set == kb.set &&
+                       ka.mesh == kb.mesh && out.lod[a] == out.lod[b] &&
+                       out.renderers[a]->material.shader == out.renderers[b]->material.shader &&
+                       (shadow ? std::memcmp(&ka.shadow, &kb.shadow, sizeof(ka.shadow)) == 0
+                               : std::memcmp(&ka.camera, &kb.camera, sizeof(ka.camera)) == 0);
+            };
+            std::sort(visible.begin(), visible.end(), key_less);
+            for (size_t r = 0; r < visible.size();) {
+                size_t e = r + 1;
+                while (e < visible.size() && same_batch(visible[r], visible[e])) ++e;
+                MeshBatch batch;
+                batch.item           = visible[r];
+                batch.lod            = out.lod[visible[r]];
+                batch.first_instance = instance_stream_.size();
+                batch.instance_count = static_cast<uint32_t>(e - r);
+                for (size_t j = r; j < e; ++j) instance_stream_.add(out.world_matrices[visible[j]]);
+                list.push_back(batch);
+                r = e;
+            }
+        };
+
+        // A BLEND material only casts a shadow at full opacity -- the shadow passes have no
+        // per-fragment discard (single hard depth compare, no PCF to average a partial alpha
+        // into a partial shadow -- see gfx/shadow_dither.glsl's doc), so a translucent object
+        // is binary: caster or not.
+        auto casts = [&](size_t i) {
+            const auto& m = out.renderers[i]->material;
+            return !(m.is_blended() && m.alpha < 1.0f);
+        };
+        auto opaque = [&](size_t i) { return !out.renderers[i]->material.is_blended(); };
+        auto blended = [&](size_t i) { return out.renderers[i]->material.is_blended(); };
+
+        const glm::mat4 camera_vp = unjittered_proj * view;
+        build(camera_vp, false, 0.0f, opaque, out.gbuffer);
+        if (config_.ssr_reflect_transparent) build(camera_vp, false, 0.0f, blended, out.capture);
+
+        // The forward BLEND pass draws one renderer at a time in back-to-front order, so its
+        // transforms are added singly.
+        {
+            const Frustum f = Frustum::from_matrix(camera_vp);
+            for (size_t i = 0; i < n; ++i) {
+                if (out.valid[i] && blended(i) && f.intersects(out.bounds[i])) {
+                    out.instance_idx[i] = instance_stream_.add(out.world_matrices[i]);
+                    out.has_blend_mesh  = true;
+                }
+            }
+        }
+
+        if (cast_dir_shadow) {
+            const uint32_t cascades = std::min<uint32_t>(shadow_target_.dir_cascade_count(), 4u);
+            const float tile_res = static_cast<float>(shadow_target_.dir_tile_resolution());
+            for (uint32_t c = 0; c < cascades; ++c) {
+                build(current_light_data().dir_cascade_matrix[c], true, tile_res, casts, out.cascade[c]);
+            }
+        }
+        if (cast_point_shadow && shadow_point) {
+            const glm::vec3 light_pos = shadow_point->get_world_position();
+            const float     range     = shadow_point->range;
+            const float     res       = static_cast<float>(config_.cube_shadow_resolution);
+            for (uint32_t face = 0; face < 6; ++face) {
+                build(coopa::gfx::engine::targets::ShadowMapTarget::get_cube_face_matrix(face, light_pos, range),
+                      true, res, casts, out.cube[face]);
+            }
+        }
+        if (cast_spot_shadow) {
+            build(current_light_data().spot_light_space_matrix, true,
+                  static_cast<float>(config_.spot_shadow_resolution), casts, out.spot);
+        }
+
         instance_stream_.upload();
+
+        // Fold LAST frame's counts (complete now: its recording has finished) into the totals.
+        if (frame_stats_.renderers > 0) {
+            stats_total_.camera_draws     += frame_stats_.camera_draws;
+            stats_total_.camera_instances += frame_stats_.camera_instances;
+            stats_total_.camera_triangles += frame_stats_.camera_triangles;
+            stats_total_.shadow_draws     += frame_stats_.shadow_draws;
+            stats_total_.shadow_instances += frame_stats_.shadow_instances;
+            stats_total_.shadow_triangles += frame_stats_.shadow_triangles;
+            stats_total_.renderers        += frame_stats_.renderers;
+            stats_total_.camera_visible   += frame_stats_.camera_visible;
+            ++stats_frames_;
+        }
+        frame_stats_ = MeshDrawStats{};
+        frame_stats_.renderers = n;
+        for (const MeshBatch& b : out.gbuffer) frame_stats_.camera_visible += b.instance_count;
         return out;
     }
 
@@ -2255,7 +2720,7 @@ private:
             using coopa::gfx::engine::data::SdfRendererGPU;
 
             glm::mat4 view_proj = proj * view;
-            auto sdf_renderer_comps = scene.get_components<SdfRenderer>();
+            const auto& sdf_renderer_comps = frame_scene_.sdf_renderers;
 
             // Per-SdfRenderer scratch result. Holds everything computable independently, but NOT the
             // two SSBO writes -- SdfData hands out contiguous indices, so those stay serial in the merge
@@ -2303,7 +2768,15 @@ private:
                     // pixels inside it ever raymarch (see record_gbuffer_()/record_transparent_()'s
                     // cmd.set_scissor() calls). An empty/off-screen rect means free frustum culling.
                     SdfClipRect clip_rect = compute_sdf_clip_rect(view_proj, wmin, wmax);
-                    if (!clip_rect.visible) continue;
+                    // Off camera, but possibly casting a shadow INTO view: keep it with an empty
+                    // pixel rect -- every camera pass skips those -- and let each shadow view
+                    // frustum-test and scissor it itself (see draw_sdf_shadow_casters_()).
+                    const bool casts = sr->cast_shadows && config_.sdf_shadows_enabled &&
+                                       config_.shadows_enabled;
+                    if (!clip_rect.visible) {
+                        if (!casts) continue;
+                        clip_rect = SdfClipRect{glm::vec2(0.0f), glm::vec2(0.0f), false};
+                    }
 
                     // Compute every shape's GPU record here; first_shape/shape_count (which
                     // require sdf_data_'s shared, monotonic index allocator) are filled in by
@@ -2353,8 +2826,10 @@ private:
                     out.cast_shadows = sr->cast_shadows && config_.sdf_shadows_enabled;
                     out.world_min    = wmin;
                     out.world_max    = wmax;
-                    out.px_rect      = sdf_clip_rect_to_pixels(clip_rect.ndc_min, clip_rect.ndc_max,
-                                                                render_extent_.width, render_extent_.height);
+                    out.px_rect      = clip_rect.visible
+                                     ? sdf_clip_rect_to_pixels(clip_rect.ndc_min, clip_rect.ndc_max,
+                                                               render_extent_.width, render_extent_.height)
+                                     : PixelRect{};
                     out.visible = true;
                 }
             };
@@ -2628,7 +3103,7 @@ private:
         vol.time_params  = glm::vec4(elapsed_time_, frame_dt_,
                                      static_cast<float>(frame_index_), 0.0f);
 
-        auto volumes = scene.get_components<VolumeComponent>();
+        const auto& volumes = frame_scene_.volumes;
         uint32_t volume_count = static_cast<uint32_t>(
             std::min<size_t>(volumes.size(), coopa::gfx::engine::data::MAX_VOLUMES));
         vol.counts = glm::vec4(static_cast<float>(volume_count), 0.0f, 0.0f, 0.0f);
@@ -2671,7 +3146,7 @@ private:
         vol.spot_light_space_matrix = lubo.spot_light_space_matrix;
         // The cascade set too, not just cascade 0's matrix: a sun shaft marches the whole
         // volumetrics_max_distance, so a march point past the near cascade must find its own
-        // tile of the atlas or it would come back unshadowed. volumetrics.frag runs the same
+        // tile of the atlas or it would come back unshadowed. volumetrics_march.frag runs the same
         // containment select calc_dir_shadow() does -- see vol_shadow_vis_cascaded().
         for (uint32_t c = 0; c < coopa::gfx::engine::data::MAX_DIR_CASCADES; ++c) {
             vol.dir_cascade_matrix[c] = lubo.dir_cascade_matrix[c];
@@ -2745,6 +3220,23 @@ private:
         // this frame -- render() calls it whenever fog_enabled, which the merge requires --
         // so the fog UBO this flag sends the shader to read is current.
         vol.counts.w = fog_merged_into_volumetrics_() ? 1.0f : 0.0f;
+
+        // Froxel mode's grid description and temporal history inputs (ignored by the march).
+        if (froxel_volumetrics_pass_) {
+            vol.froxel_grid = glm::vec4(static_cast<float>(froxel_volumetrics_pass_->grid_width()),
+                                        static_cast<float>(froxel_volumetrics_pass_->grid_height()),
+                                        static_cast<float>(froxel_volumetrics_pass_->slices()),
+                                        static_cast<float>(coopa::gfx::engine::passes::FroxelVolumetricsPass::kAtlasColumns));
+            const float far = glm::max(config_.volumetrics_max_distance, 0.2f);
+            // History is last frame's grid only if last frame ran this pass with the same grid.
+            const bool history_ok = froxel_history_valid_ && prev_view_proj_valid_;
+            vol.froxel_params   = glm::vec4(0.1f, far, glm::clamp(config_.volumetrics_froxel_history, 0.0f, 0.99f),
+                                            history_ok ? 1.0f : 0.0f);
+            vol.prev_view_proj  = prev_unjittered_view_proj_;
+            vol.prev_camera_pos = glm::vec4(prev_vol_cam_pos_, 0.0f);
+            prev_vol_cam_pos_     = cam_pos;
+            froxel_history_valid_ = true;
+        }
 
         volumetrics_data_.upload();
 
@@ -2940,6 +3432,7 @@ private:
         ui_world_target_ = std::make_unique<coopa::gfx::engine::targets::OffscreenTarget>(
             device_, allocator_, upscaled_extent_.w, upscaled_extent_.h,
             coopa::gfx::Format::RGBA8_Unorm);
+        ui_world_layer_clear_ = false;   // a fresh image is UNDEFINED until its first write
         rebuild_world_ui_pass_();
 
         overlay_target_ = std::make_unique<coopa::gfx::engine::targets::OffscreenTarget>(
@@ -3031,7 +3524,7 @@ private:
         ubo.sky_horizon = glm::vec4(config_.indirect.sky_horizon, 0.0f);
         ubo.sky_ground  = glm::vec4(config_.indirect.sky_ground, 0.0f);
 
-        auto* dir = scene.find_first_component<DirectionalLightComponent>();
+        auto* dir = frame_scene_.dir_light;
         ubo.light_counts.x = dir ? 1 : 0;
         if (dir) {
             ubo.dir_direction = glm::vec4(dir->direction, dir->intensity);
@@ -3074,7 +3567,7 @@ private:
             config_.soft_shadows ? std::max(config_.shadow_pcss_light_size, 0.0f) : 0.0f,
             0.0f, 0.0f, 0.0f);
 
-        auto points = scene.get_components<PointLightComponent>();
+        const auto& points = frame_scene_.point_lights;
         uint32_t count = std::min<uint32_t>(static_cast<uint32_t>(points.size()), coopa::gfx::engine::data::MAX_POINT_LIGHTS);
         ubo.light_counts.y = count;
         for (uint32_t i = 0; i < count; ++i) {
@@ -3091,7 +3584,7 @@ private:
         // above, the spot radius needs the shadow-casting spot's cone angle for its
         // world-to-texel conversion, and only that function has the caster in hand.
 
-        auto spots = scene.get_components<SpotLightComponent>();
+        const auto& spots = frame_scene_.spot_lights;
         uint32_t spot_count = std::min<uint32_t>(static_cast<uint32_t>(spots.size()), coopa::gfx::engine::data::MAX_SPOT_LIGHTS);
         ubo.light_counts.z = spot_count;
         for (uint32_t i = 0; i < spot_count; ++i) {
@@ -3236,20 +3729,132 @@ private:
      *
      * Both effects are fullscreen passes over the whole HDR frame, and the second reads
      * exactly what the first wrote -- so with both enabled the pair costs two full-resolution
-     * HDR passes to produce a result one pass can compute. The march applies fog to its
-     * scene-colour sample before marching, which is arithmetically identical to the two-pass
-     * order, through the same gfx_fog_apply() call fog.frag makes (see its doc).
+     * HDR passes to produce a result one pass can compute. The composite applies fog to its
+     * scene-colour sample before laying the march over it, which is arithmetically identical
+     * to the two-pass order, through the same gfx_fog_apply() call fog.frag makes (see its doc).
      *
      * Derived, not stored: both inputs are startup-fixed, so every caller re-deriving it
      * agrees by construction, and there is no second copy to keep in sync.
      */
+    /**
+     * @brief True when this frame's record_scene_() would write a descriptor set: a Hi-Z /
+     *        mip-chain pass whose sets don't yet hold the view it is about to be given, or
+     *        ssr_pass_'s secondary source on the first ssr_reflect_transparent frame. The
+     *        views mirror the execute() calls in record_scene_() exactly; all are fixed for
+     *        the pipeline's lifetime, so this is true on the first frame and then stays false.
+     */
+    bool trace_inputs_need_rebind_() const {
+        const coopa::gfx::TextureView depth = gbuffer_target_.depth_view_typed();
+        if (hiz_pass_ && hiz_pass_->needs_descriptor_update(depth)) return true;
+        if (config_.ssao_enabled && ao_depth_pyramid_pass_ &&
+            ao_depth_pyramid_pass_->needs_descriptor_update(depth)) return true;
+        if (scene_color_mip_pass_ &&
+            scene_color_mip_pass_->needs_descriptor_update(offscreen_target_.color_view_typed())) return true;
+        if (secondary_this_frame_) {
+            if (!ssr_secondary_bound_) return true;
+            if (transparent_hiz_pass_ && transparent_hiz_pass_->needs_descriptor_update(
+                    coopa::gfx::detail::wrap(transparent_capture_target_.depth_view()))) return true;
+            if (transparent_scene_color_mip_pass_ && transparent_scene_color_mip_pass_->needs_descriptor_update(
+                    coopa::gfx::detail::wrap(transparent_capture_target_.shaded_color_view()))) return true;
+        }
+        // Gated on the per-frame flag, not the config pair: needs_descriptor_update() stays true
+        // until the chain's first execute(), which never comes on a scene without BLEND meshes --
+        // the config gate alone would wait_idle() every frame there.
+        if (refraction_this_frame_ && refraction_scene_color_mip_pass_) {
+            const coopa::gfx::TextureView refraction_source =
+                (config_.refraction_include_reflections && config_.ssr_enabled)
+                    ? ssr_pass_->output_view_typed() : offscreen_target_.color_view_typed();
+            if (refraction_scene_color_mip_pass_->needs_descriptor_update(refraction_source)) return true;
+        }
+        return false;
+    }
+
     bool fog_merged_into_volumetrics_() const {
         return config_.fog_enabled && config_.volumetrics_enabled;
     }
 
+    /**
+     * @brief One axis of volumetrics_march_target_: render_extent_ divided by
+     *        volumetrics_resolution_scale (clamped to 1..4), rounded up so the march
+     *        covers every edge pixel.
+     */
+    /// volumetrics_mode == "froxel" (anything else is the raymarch).
+    bool froxel_volumetrics_() const { return config_.volumetrics_mode == "froxel"; }
+
+    uint32_t volumetrics_march_dim_(uint32_t full) const {
+        if (froxel_volumetrics_()) return 1u;   // froxel mode never marches: keep the target 1x1
+        const uint32_t s = std::clamp<uint32_t>(config_.volumetrics_resolution_scale, 1u, 4u);
+        return std::max<uint32_t>(1u, (full + s - 1) / s);
+    }
+
+    /**
+     * @brief Every component this frame's render() reads, gathered by ONE hierarchy walk.
+     *
+     * Scene::get_components<T>() / find_first_component<T>() each walk the whole tree with
+     * a dynamic_cast per component, and render() used to make about a dozen of them per
+     * frame (point and spot lights twice each). snapshot_scene_() makes one, with exactly
+     * get_components' semantics -- pre-order, inactive objects skipped (their children are
+     * still visited), the first component of each type per object -- so every consumer
+     * sees the same lists, in the same order, that its own walk would have produced.
+     */
+    struct FrameScene {
+        coopa::gfx::engine::components::DirectionalLightComponent*  dir_light = nullptr;
+        std::vector<coopa::gfx::engine::components::PointLightComponent*> point_lights;
+        std::vector<coopa::gfx::engine::components::SpotLightComponent*>  spot_lights;
+        std::vector<coopa::gfx::engine::components::MeshRenderer*>        mesh_renderers;
+        std::vector<coopa::gfx::engine::components::SdfRenderer*>         sdf_renderers;
+        std::vector<coopa::gfx::engine::components::VolumeComponent*>     volumes;
+    };
+
+    /** @brief Rebuilds frame_scene_ from `scene`; see FrameScene. Vectors keep their capacity. */
+    void snapshot_scene_(coopa::scene::Scene& scene) {
+        using namespace coopa::gfx::engine::components;
+        FrameScene& fs = frame_scene_;
+        fs.dir_light = nullptr;
+        fs.point_lights.clear();
+        fs.spot_lights.clear();
+        fs.mesh_renderers.clear();
+        fs.sdf_renderers.clear();
+        fs.volumes.clear();
+        for (const auto& root : scene.root_objects()) {
+            root->for_each_recursive([&fs](coopa::scene::SceneObject& obj) {
+                if (!obj.active()) return;
+                bool dir = false, point = false, spot = false, mesh = false, sdf = false, vol = false;
+                for (const auto& comp : obj.components()) {
+                    coopa::scene::Component* c = comp.get();
+                    if (!dir)   if (auto* x = dynamic_cast<DirectionalLightComponent*>(c)) { dir = true; if (!fs.dir_light) fs.dir_light = x; }
+                    if (!point) if (auto* x = dynamic_cast<PointLightComponent*>(c)) { point = true; fs.point_lights.push_back(x); }
+                    if (!spot)  if (auto* x = dynamic_cast<SpotLightComponent*>(c))  { spot = true;  fs.spot_lights.push_back(x); }
+                    if (!mesh)  if (auto* x = dynamic_cast<MeshRenderer*>(c))        { mesh = true;  fs.mesh_renderers.push_back(x); }
+                    if (!sdf)   if (auto* x = dynamic_cast<SdfRenderer*>(c))         { sdf = true;   fs.sdf_renderers.push_back(x); }
+                    if (!vol)   if (auto* x = dynamic_cast<VolumeComponent*>(c))     { vol = true;   fs.volumes.push_back(x); }
+                }
+            });
+        }
+    }
+
+    FrameScene frame_scene_;
+
+    FrameProfile*                profile_ = nullptr;   ///< Profiling mode's sink; null = off.
+    std::unique_ptr<GpuProfiler> gpu_profiler_;        ///< Exists only in profiling mode.
+
+    /// Closes a GPU timing scope (see GpuProfiler::mark). A no-op unless profiling. Every call
+    /// site sits between render passes.
+    void gpu_mark_(coopa::gfx::command::CommandBuffer& cmd, GpuScope scope) {
+        if (gpu_profiler_) gpu_profiler_->mark(cmd, scope);
+    }
+
+    /// Each LOD-switching renderer's level last frame, for select_lod()'s hysteresis. Rebuilt
+    /// every frame from the renderers still present, so destroyed ones drop out.
+    std::unordered_map<const coopa::gfx::engine::components::MeshRenderer*, int> lod_state_;
+
+    MeshDrawStats frame_stats_;     ///< This frame's mesh draw counts (see mesh_draw_stats_summary()).
+    MeshDrawStats stats_total_;     ///< Summed over stats_frames_ frames.
+    uint64_t      stats_frames_ = 0;
+
     /** @brief The first PointLightComponent with cast_shadows set, or nullptr. */
     coopa::gfx::engine::components::PointLightComponent* find_first_shadow_casting_point_light_(coopa::scene::Scene& scene) {
-        for (auto* pl : scene.get_components<coopa::gfx::engine::components::PointLightComponent>()) {
+        for (auto* pl : frame_scene_.point_lights) {
             if (pl->cast_shadows) return pl;
         }
         return nullptr;
@@ -3268,13 +3873,110 @@ private:
         uint32_t index = 0;
     };
     SpotShadowCaster find_first_shadow_casting_spot_light_(coopa::scene::Scene& scene) {
-        auto spots = scene.get_components<coopa::gfx::engine::components::SpotLightComponent>();
+        const auto& spots = frame_scene_.spot_lights;
         uint32_t count = std::min<uint32_t>(static_cast<uint32_t>(spots.size()),
                                             coopa::gfx::engine::data::MAX_SPOT_LIGHTS);
         for (uint32_t i = 0; i < count; ++i) {
             if (spots[i]->cast_shadows) return {spots[i], i};
         }
         return {};
+    }
+
+    /**
+     * @brief Draws the SDF shadow casters one shadow view can see, each scissored to its
+     *        bounds' footprint in that view.
+     *
+     * An SDF caster draws a viewport-filling quad and raymarches every fragment of it, so
+     * without the scissor each caster would cost a full cascade tile / cube face of marching
+     * whether it covered ten texels or ten thousand. The frustum test drops casters outside
+     * the view entirely (gather_sdf_() keeps off-camera casters precisely so the shadow views
+     * can decide this for themselves).
+     *
+     * Shadow maps render with a POSITIVE-height viewport (see ShadowPipeline's raster note),
+     * so NDC +y is DOWN in the framebuffer -- the opposite of the camera passes
+     * sdf_clip_rect_to_pixels() was written for; mirroring y on the way in accounts for it.
+     *
+     * @param view_proj   The view's light matrix.
+     * @param origin_x/y  The view's viewport origin in the framebuffer (a cascade's atlas tile).
+     * @param resolution  The view's square viewport size in texels.
+     * @param push        Pushes the pass's constants for one renderer index.
+     */
+    template <typename PushFn>
+    void draw_sdf_shadow_casters_(coopa::gfx::command::CommandBuffer& cmd,
+                                  const std::vector<SdfDrawItem>& sdf_draws, const glm::mat4& view_proj,
+                                  uint32_t origin_x, uint32_t origin_y, uint32_t resolution, PushFn&& push) {
+        const Frustum f = Frustum::from_matrix(view_proj);
+        bool scissored = false;
+        for (const auto& d : sdf_draws) {
+            if (!d.cast_shadows) continue;
+            // Same binary BLEND-at-full-opacity rule as the mesh casters.
+            if (d.is_blend && d.comp->material.alpha < 1.0f) continue;
+            const WorldBounds b{0.5f * (d.world_min + d.world_max), 0.5f * (d.world_max - d.world_min)};
+            if (!f.intersects(b)) continue;
+            const SdfClipRect clip = compute_sdf_clip_rect(view_proj, d.world_min, d.world_max);
+            if (!clip.visible) continue;
+            const PixelRect r = sdf_clip_rect_to_pixels(glm::vec2(clip.ndc_min.x, -clip.ndc_max.y),
+                                                        glm::vec2(clip.ndc_max.x, -clip.ndc_min.y),
+                                                        resolution, resolution);
+            if (r.w == 0 || r.h == 0) continue;
+            cmd.set_scissor(static_cast<int32_t>(origin_x) + r.x, static_cast<int32_t>(origin_y) + r.y,
+                            r.w, r.h);
+            scissored = true;
+            push(d.gpu_index);
+            cmd.draw(6);
+        }
+        if (scissored) {
+            cmd.set_scissor(static_cast<int32_t>(origin_x), static_cast<int32_t>(origin_y), resolution, resolution);
+        }
+    }
+
+    /**
+     * @brief Draws one shadow view's batched casters (see MeshGather). Shared by the
+     *        directional (per cascade), point (per face) and spot passes, which differ only in
+     *        their push-constant type and pipeline bind -- passed in as `bind` / `push`.
+     *
+     * Rebinds the pipeline only when the shader variant or face culling changes, the material
+     * set only when it changes, and the mesh only when it changes; push constants go out per
+     * batch, since every batch can differ in cutoff/params.
+     */
+    template <typename PushConstants, typename BindFn, typename PushFn>
+    void draw_shadow_batches_(coopa::gfx::command::CommandBuffer& cmd, const MeshGather& meshes,
+                              const std::vector<MeshBatch>& batches, PushConstants pc,
+                              BindFn&& bind, PushFn&& push) {
+        const std::string* last_shader = nullptr;
+        bool last_cull = false;
+        const void* last_set = nullptr;
+        const coopa::gfx::engine::data::Mesh* last_mesh = nullptr;
+        for (const MeshBatch& b : batches) {
+            const auto* mr = meshes.renderers[b.item];
+            const auto& m  = mr->material;
+            if (!last_shader || m.shader != *last_shader || m.cull_backfaces != last_cull) {
+                bind(m.shader, m.cull_backfaces);
+                last_shader = &m.shader;
+                last_cull   = m.cull_backfaces;
+                last_set    = nullptr;   // a variant owns its own pipeline layout
+            }
+            // CUTOUT (AlphaMode::Mask): the mask texture punches through the shadow too, via
+            // the same set/cutoff shadow_depth.frag tests against.
+            pc.alpha_cutoff = m.gpu_alpha_cutoff();
+            pc.gfx_params   = m.shader_params;
+            const auto& set = material_cache_->set_for(m);
+            if (&set != last_set) {
+                cmd.bind_descriptor_set(set, 0);
+                last_set = &set;
+            }
+            push(pc);
+            const auto* mesh = mr->get_mesh().get();
+            if (mesh != last_mesh) {
+                mesh->bind(cmd);
+                last_mesh = mesh;
+            }
+            mesh->draw_lod(cmd, b.lod, b.instance_count, b.first_instance);
+            frame_stats_.shadow_draws     += 1;
+            frame_stats_.shadow_instances += b.instance_count;
+            frame_stats_.shadow_triangles += static_cast<uint64_t>(b.instance_count) *
+                                             mesh->lods()[std::min<size_t>(b.lod, mesh->lods().size() - 1)].index_count / 3;
+        }
     }
 
     /**
@@ -3345,37 +4047,12 @@ private:
                 pc.light_space_matrix = current_light_data().dir_cascade_matrix[c];
                 pc.gfx_time = glm::vec4(elapsed_time_, frame_dt_, static_cast<float>(frame_index_), 0.0f);
 
-                // Same last-shader transition guard as record_gbuffer_() -- a caster's shadow
-                // must displace identically to its G-buffer draw (see gfx/surface/shadow_vs.glsl's
-                // doc), which means binding the SAME named variant here, not just the stock pass.
-                // Reset per cascade: the loop re-binds the stock pipeline above.
-                std::string last_shader;
-                bool have_bound = true; // stock, bound just above
-
-                for (size_t i = 0; i < meshes.renderers.size(); ++i) {
-                    if (meshes.instance_idx[i] == InstanceStream::kInvalidIndex) continue;
-                    // A BLEND material only casts a shadow at full opacity -- this pass has no
-                    // per-fragment discard (single hard depth compare, no PCF to average a partial
-                    // alpha into a partial shadow -- see gfx/shadow_dither.glsl's doc), so there is
-                    // no way to draw a *partial* shadow for a translucent object; it's binary,
-                    // caster or not.
-                    if (meshes.renderers[i]->material.is_blended() && meshes.renderers[i]->material.alpha < 1.0f) continue;
-
-                    if (!have_bound || meshes.renderers[i]->material.shader != last_shader) {
-                        shadow_pipeline_->bind_directional(cmd, meshes.renderers[i]->material.shader);
-                        last_shader = meshes.renderers[i]->material.shader;
-                        have_bound  = true;
-                    }
-
-                    // CUTOUT (AlphaMode::Mask): the mask texture punches through the shadow too,
-                    // via the same set/cutoff shadow_depth.frag tests against.
-                    pc.alpha_cutoff = meshes.renderers[i]->material.gpu_alpha_cutoff();
-                    pc.gfx_params   = meshes.renderers[i]->material.shader_params;
-                    cmd.bind_descriptor_set(material_cache_->set_for(meshes.renderers[i]->material), 0);
-                    shadow_pipeline_->push_directional(cmd, pc);
-                    meshes.renderers[i]->get_mesh()->bind(cmd);
-                    meshes.renderers[i]->get_mesh()->draw(cmd, 1, meshes.instance_idx[i]);
-                }
+                // Same per-material shader-variant binding as record_gbuffer_() -- a caster's
+                // shadow must displace identically to its G-buffer draw (see
+                // gfx/surface/shadow_vs.glsl's doc), so it binds the SAME named variant.
+                draw_shadow_batches_(cmd, meshes, meshes.cascade[std::min(c, 3u)], pc,
+                    [&](const std::string& shader, bool cull) { shadow_pipeline_->bind_directional(cmd, shader, cull); },
+                    [&](const auto& p) { shadow_pipeline_->push_directional(cmd, p); });
 
                 if (!sdf_draws.empty()) {
                     sdf_shadow_pass_->bind_directional(cmd);
@@ -3384,14 +4061,14 @@ private:
                     coopa::gfx::engine::passes::SdfDirectionalShadowPushConstants sdf_pc{};
                     sdf_pc.light_space_matrix = current_light_data().dir_cascade_matrix[c];
                     sdf_pc.shadow_max_steps   = config_.sdf_shadow_max_steps;
-                    for (const auto& d : sdf_draws) {
-                        if (!d.cast_shadows) continue;
-                        // Same binary BLEND-at-full-opacity rule as the mesh loop above.
-                        if (d.is_blend && d.comp->material.alpha < 1.0f) continue;
-                        sdf_pc.renderer_index = d.gpu_index;
-                        sdf_shadow_pass_->push_directional(cmd, sdf_pc);
-                        cmd.draw(6);
-                    }
+                    const uint32_t tile = shadow_target_.dir_tile_resolution();
+                    const uint32_t grid = std::max(1u, shadow_target_.dir_grid_columns());
+                    draw_sdf_shadow_casters_(cmd, sdf_draws, sdf_pc.light_space_matrix,
+                                             (c % grid) * tile, (c / grid) * tile, tile,
+                                             [&](uint32_t gpu_index) {
+                                                 sdf_pc.renderer_index = gpu_index;
+                                                 sdf_shadow_pass_->push_directional(cmd, sdf_pc);
+                                             });
                 }
             }
         }
@@ -3422,30 +4099,9 @@ private:
             pc.light_pos_range    = glm::vec4(light_pos, range);
             pc.gfx_time = glm::vec4(elapsed_time_, frame_dt_, static_cast<float>(frame_index_), 0.0f);
 
-            // See record_directional_shadow_'s identical transition guard.
-            std::string last_shader;
-            bool have_bound = true; // stock, bound just above
-
-            for (size_t i = 0; i < meshes.renderers.size(); ++i) {
-                if (meshes.instance_idx[i] == InstanceStream::kInvalidIndex) continue;
-                // See record_directional_shadow_'s identical check -- a BLEND material only
-                // casts a shadow at full opacity, since this pass has no partial-alpha discard.
-                if (meshes.renderers[i]->material.is_blended() && meshes.renderers[i]->material.alpha < 1.0f) continue;
-
-                if (!have_bound || meshes.renderers[i]->material.shader != last_shader) {
-                    shadow_pipeline_->bind_cube(cmd, meshes.renderers[i]->material.shader);
-                    last_shader = meshes.renderers[i]->material.shader;
-                    have_bound  = true;
-                }
-
-                // See record_directional_shadow_'s identical CUTOUT handling.
-                pc.alpha_cutoff = meshes.renderers[i]->material.gpu_alpha_cutoff();
-                pc.gfx_params   = meshes.renderers[i]->material.shader_params;
-                cmd.bind_descriptor_set(material_cache_->set_for(meshes.renderers[i]->material), 0);
-                shadow_pipeline_->push_cube(cmd, pc);
-                meshes.renderers[i]->get_mesh()->bind(cmd);
-                meshes.renderers[i]->get_mesh()->draw(cmd, 1, meshes.instance_idx[i]);
-            }
+            draw_shadow_batches_(cmd, meshes, meshes.cube[face], pc,
+                [&](const std::string& shader, bool cull) { shadow_pipeline_->bind_cube(cmd, shader, cull); },
+                [&](const auto& p) { shadow_pipeline_->push_cube(cmd, p); });
 
             if (!sdf_draws.empty()) {
                 sdf_shadow_pass_->bind_cube(cmd);
@@ -3455,13 +4111,12 @@ private:
                 sdf_pc.light_space_matrix = pc.light_space_matrix;
                 sdf_pc.light_pos_range    = pc.light_pos_range;
                 sdf_pc.shadow_max_steps   = config_.sdf_shadow_max_steps;
-                for (const auto& d : sdf_draws) {
-                    if (!d.cast_shadows) continue;
-                    if (d.is_blend && d.comp->material.alpha < 1.0f) continue;
-                    sdf_pc.renderer_index = d.gpu_index;
-                    sdf_shadow_pass_->push_cube(cmd, sdf_pc);
-                    cmd.draw(6);
-                }
+                draw_sdf_shadow_casters_(cmd, sdf_draws, sdf_pc.light_space_matrix, 0, 0,
+                                         config_.cube_shadow_resolution,
+                                         [&](uint32_t gpu_index) {
+                                             sdf_pc.renderer_index = gpu_index;
+                                             sdf_shadow_pass_->push_cube(cmd, sdf_pc);
+                                         });
             }
             shadow_target_.end_cube_face_pass(cmd);
         }
@@ -3493,29 +4148,9 @@ private:
             pc.light_space_matrix = current_light_data().spot_light_space_matrix;
             pc.gfx_time = glm::vec4(elapsed_time_, frame_dt_, static_cast<float>(frame_index_), 0.0f);
 
-            // See record_directional_shadow_'s identical transition guard.
-            std::string last_shader;
-            bool have_bound = true; // stock, bound just above
-
-            for (size_t i = 0; i < meshes.renderers.size(); ++i) {
-                if (meshes.instance_idx[i] == InstanceStream::kInvalidIndex) continue;
-                // See record_directional_shadow_'s identical check.
-                if (meshes.renderers[i]->material.is_blended() && meshes.renderers[i]->material.alpha < 1.0f) continue;
-
-                if (!have_bound || meshes.renderers[i]->material.shader != last_shader) {
-                    shadow_pipeline_->bind_directional(cmd, meshes.renderers[i]->material.shader);
-                    last_shader = meshes.renderers[i]->material.shader;
-                    have_bound  = true;
-                }
-
-                // See record_directional_shadow_'s identical CUTOUT handling.
-                pc.alpha_cutoff = meshes.renderers[i]->material.gpu_alpha_cutoff();
-                pc.gfx_params   = meshes.renderers[i]->material.shader_params;
-                cmd.bind_descriptor_set(material_cache_->set_for(meshes.renderers[i]->material), 0);
-                shadow_pipeline_->push_directional(cmd, pc);
-                meshes.renderers[i]->get_mesh()->bind(cmd);
-                meshes.renderers[i]->get_mesh()->draw(cmd, 1, meshes.instance_idx[i]);
-            }
+            draw_shadow_batches_(cmd, meshes, meshes.spot, pc,
+                [&](const std::string& shader, bool cull) { shadow_pipeline_->bind_directional(cmd, shader, cull); },
+                [&](const auto& p) { shadow_pipeline_->push_directional(cmd, p); });
 
             if (!sdf_draws.empty()) {
                 sdf_shadow_pass_->bind_directional(cmd);
@@ -3524,14 +4159,12 @@ private:
                 coopa::gfx::engine::passes::SdfDirectionalShadowPushConstants sdf_pc{};
                 sdf_pc.light_space_matrix = current_light_data().spot_light_space_matrix;
                 sdf_pc.shadow_max_steps   = config_.sdf_shadow_max_steps;
-                for (const auto& d : sdf_draws) {
-                    if (!d.cast_shadows) continue;
-                    // Same binary BLEND-at-full-opacity rule as the mesh loop above.
-                    if (d.is_blend && d.comp->material.alpha < 1.0f) continue;
-                    sdf_pc.renderer_index = d.gpu_index;
-                    sdf_shadow_pass_->push_directional(cmd, sdf_pc);
-                    cmd.draw(6);
-                }
+                draw_sdf_shadow_casters_(cmd, sdf_draws, sdf_pc.light_space_matrix, 0, 0,
+                                         config_.spot_shadow_resolution,
+                                         [&](uint32_t gpu_index) {
+                                             sdf_pc.renderer_index = gpu_index;
+                                             sdf_shadow_pass_->push_directional(cmd, sdf_pc);
+                                         });
             }
         }
         shadow_target_.end_spot_pass(cmd);
@@ -3590,10 +4223,9 @@ private:
         cmd.bind_descriptor_set(gbuffer_pipeline_->layout(), current_camera_set(), 0);
         cmd.bind_vertex_buffer(instance_stream_.buffer(), 0, 1);
 
-        // Tracks which named variant ("" for stock) is bound, so a run of same-shader renderers
-        // only rebinds at a transition. Opaque draw order is unconstrained, so this pays off only
-        // when a scene's derived-shader objects happen to be contiguous; interleaved shaders still
-        // render correctly, just with more binds.
+        // Tracks which named variant ("" for stock) is bound, so a run of same-shader batches only
+        // rebinds at a transition. gather_meshes_() sorts each view by shader first, so every
+        // variant is bound at most once per pass.
         //
         // last_cull_backfaces must be tracked alongside last_shader: the stock ("") key resolves to
         // one of TWO pipelines (see PBRMaterial::cull_backfaces), so the shader name alone does
@@ -3602,12 +4234,13 @@ private:
         bool last_cull_backfaces = true; // matches the initial pipeline_ bind above (Back)
         bool have_bound = true; // stock, bound just above
 
-        for (size_t i = 0; i < meshes.renderers.size(); ++i) {
-            if (meshes.instance_idx[i] == InstanceStream::kInvalidIndex) continue;
-            auto* mr = meshes.renderers[i];
-            // BLEND materials are drawn by transparent_pass_ instead, after SSR compositing --
-            // never into the opaque G-buffer (see record_transparent_).
-            if (mr->material.is_blended()) continue;
+        const void* last_set = nullptr;
+        const coopa::gfx::engine::data::Mesh* last_mesh = nullptr;
+        // Already frustum-culled and batched (see gather_meshes_): one instanced draw per run
+        // of identical mesh + LOD + material. BLEND materials never appear here -- they are
+        // drawn by transparent_pass_ instead, after SSR compositing (see record_transparent_).
+        for (const MeshBatch& batch : meshes.gbuffer) {
+            auto* mr = meshes.renderers[batch.item];
 
             if (!have_bound || mr->material.shader != last_shader ||
                 mr->material.cull_backfaces != last_cull_backfaces) {
@@ -3615,6 +4248,7 @@ private:
                 last_shader         = mr->material.shader;
                 last_cull_backfaces = mr->material.cull_backfaces;
                 have_bound          = true;
+                last_set            = nullptr;
             }
 
             coopa::gfx::engine::passes::GBufferPipeline::PushConstants pc;
@@ -3629,10 +4263,22 @@ private:
             gbuffer_pipeline_->push(cmd, pc);
             // Set 1: alpha-mask sampler (white 1x1 fallback unless this is a CUTOUT material
             // with a loaded texture_alpha_mask) -- see MaterialTextureCache.
-            cmd.bind_descriptor_set(gbuffer_pipeline_->layout(), material_cache_->set_for(mr->material), 1);
+            const auto& set = material_cache_->set_for(mr->material);
+            if (&set != last_set) {
+                cmd.bind_descriptor_set(gbuffer_pipeline_->layout(), set, 1);
+                last_set = &set;
+            }
 
-            mr->get_mesh()->bind(cmd);
-            mr->get_mesh()->draw(cmd, 1, meshes.instance_idx[i]);
+            const auto* mesh = mr->get_mesh().get();
+            if (mesh != last_mesh) {
+                mesh->bind(cmd);
+                last_mesh = mesh;
+            }
+            mesh->draw_lod(cmd, batch.lod, batch.instance_count, batch.first_instance);
+            frame_stats_.camera_draws     += 1;
+            frame_stats_.camera_instances += batch.instance_count;
+            frame_stats_.camera_triangles += static_cast<uint64_t>(batch.instance_count) *
+                mesh->lods()[std::min<size_t>(batch.lod, mesh->lods().size() - 1)].index_count / 3;
         }
 
         // Opaque/Mask SdfRenderers -- BLEND ones go through record_transparent_() instead, same
@@ -3706,11 +4352,8 @@ private:
         std::string last_shader;
         bool have_bound = true; // stock, bound just above
 
-        for (size_t i = 0; i < meshes.renderers.size(); ++i) {
-            if (meshes.instance_idx[i] == InstanceStream::kInvalidIndex) continue;
-            if (!meshes.renderers[i]->material.is_blended()) continue;
-
-            auto* mr = meshes.renderers[i];
+        for (const MeshBatch& batch : meshes.capture) {
+            auto* mr = meshes.renderers[batch.item];
             if (!have_bound || mr->material.shader != last_shader) {
                 transparent_capture_pass_->bind(cmd, mr->material.shader);
                 last_shader = mr->material.shader;
@@ -3729,8 +4372,9 @@ private:
             // engine::util::MaterialTextureCache.
             transparent_capture_pass_->bind_material(cmd, material_cache_->set_for(mr->material));
 
-            mr->get_mesh()->bind(cmd);
-            mr->get_mesh()->draw(cmd, 1, meshes.instance_idx[i]);
+            const auto* mesh = mr->get_mesh().get();
+            mesh->bind(cmd);
+            mesh->draw_lod(cmd, batch.lod, batch.instance_count, batch.first_instance);
         }
 
         // BLEND SdfRenderers -- feeds the exact same secondary reflection source, via
@@ -3810,7 +4454,9 @@ private:
         for (size_t i = 0; i < meshes.renderers.size(); ++i) {
             if (meshes.instance_idx[i] == InstanceStream::kInvalidIndex) continue;
             if (!meshes.renderers[i]->material.is_blended()) continue;
-            order.push_back({false, i, glm::vec3(meshes.world_matrices[i][3])});
+            // Sorted on the world-bounds centre, not the object origin: a mesh whose pivot sits
+            // at one end would otherwise sort by a point it barely occupies.
+            order.push_back({false, i, meshes.bounds[i].center});
         }
         for (size_t i = 0; i < sdf_draws.size(); ++i) {
             if (!sdf_draws[i].is_blend) continue;
@@ -3917,7 +4563,9 @@ private:
                 transparent_pass_->bind_material(cmd, material_cache_->set_for(mr->material));
 
                 mr->get_mesh()->bind(cmd);
-                mr->get_mesh()->draw(cmd, 1, meshes.instance_idx[item.index]);
+                mr->get_mesh()->draw_lod(cmd, meshes.lod[item.index], 1, meshes.instance_idx[item.index]);
+                frame_stats_.camera_draws     += 1;
+                frame_stats_.camera_instances += 1;
             } else {
                 if (last_kind != 1) {
                     sdf_forward_pass_->bind(cmd);
@@ -3982,6 +4630,8 @@ private:
     // A unique_ptr rebuilt by rebuild_overlay_chain_(), because upscaled_extent_ tracks the live
     // swapchain. Declared BEFORE world_ui_pass_ so it outlives the pass holding its RenderPass&.
     std::unique_ptr<coopa::gfx::engine::targets::OffscreenTarget> ui_world_target_;
+    /// ui_world_target_'s last write had no canvases, so it already holds transparent black.
+    bool ui_world_layer_clear_ = false;
     // Forward capture of transparent geometry -- a second reflection SOURCE for opaque
     // reflectors' SSR (see record_transparent_capture_()), not a visible target. Always
     // constructed (mirrors gbuffer_target_'s own always-on policy); render() checks
@@ -3989,6 +4639,12 @@ private:
     coopa::gfx::engine::targets::TransparentCaptureTarget transparent_capture_target_;
     coopa::gfx::engine::targets::OffscreenTarget fog_target_; // fog composite, pre-post, HDR
     coopa::gfx::engine::targets::OffscreenTarget volumetrics_target_; // wind composite, after fog, pre-post, HDR
+    coopa::gfx::engine::targets::OffscreenTarget volumetrics_march_target_; // reduced-res march: in-scatter + transmittance
+    bool ssr_secondary_bound_ = false;
+    /// This frame has transparent geometry for SSR's second source (set after the gathers in
+    /// render()); false skips the transparent capture and the second trace.
+    bool secondary_this_frame_ = false; // ssr_pass_->set_secondary_source() done (once; see record_scene_)
+    bool refraction_this_frame_ = false; // refraction's scene-colour chain is built + sampled this frame
     coopa::gfx::engine::util::Sampler            nearest_sampler_;
     coopa::gfx::engine::util::Sampler            linear_sampler_;
     coopa::gfx::engine::util::Sampler            shadow_sampler_;
@@ -4028,6 +4684,9 @@ private:
     // constructed, runtime-gated on config_.volumetrics_enabled, same policy as fog_pass_.
     coopa::gfx::engine::data::VolumetricsData volumetrics_data_;
     std::unique_ptr<coopa::gfx::engine::passes::VolumetricsPass> volumetrics_pass_;
+    std::unique_ptr<coopa::gfx::engine::passes::FroxelVolumetricsPass> froxel_volumetrics_pass_;
+    glm::vec3 prev_vol_cam_pos_{0.0f};      ///< Last frame's camera, for froxel reprojection.
+    bool      froxel_history_valid_ = false; ///< A previous frame filled the froxel grid.
 
     coopa::gfx::engine::targets::ShadowMapTarget shadow_target_;
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout>   shadow_layout_;
@@ -4070,13 +4729,14 @@ private:
         }
     };
     ContactShadowKnobs                                           contact_shadow_knobs_{};
+    /// contact_shadow_pass_'s output already holds the disabled-state clear (see record_scene_).
+    bool                                                         contact_output_cleared_ = false;
     /// pixel_lighting_pass_'s extra set (set 4): contact_shadow_pass_'s resolved occlusion.
     /// Declared BEFORE pixel_lighting_pass_ so it outlives the pass holding it in its ExtraSets.
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout>   contact_extra_layout_;
     std::unique_ptr<coopa::gfx::pipeline::DescriptorPool>        contact_extra_pool_;
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>         contact_extra_set_;
     std::unique_ptr<coopa::gfx::engine::passes::DeferredLightingPass> pixel_lighting_pass_;
-    std::unique_ptr<coopa::gfx::engine::passes::SkyboxPass>      skybox_pass_;
     std::unique_ptr<coopa::gfx::engine::passes::PixelStylizePass> pixel_stylize_pass_;
     // debug_view diagnostic (see build_post_chain_()'s own doc on this instance) -- the
     // one extra descriptor set (SSR reflection / traced-SSGI / G-buffer depth) debug_view.frag

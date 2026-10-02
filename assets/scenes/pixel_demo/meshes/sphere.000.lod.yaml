@@ -1,0 +1,12 @@
+# LOD setup for sphere.000 -- a sidecar so re-exporting sphere.000.yaml from Blender never
+# wipes it (Mesh::build_cpu also accepts the same keys inline in the mesh file itself).
+#
+# Each level is used while the sphere's projected height is below `screen_size` (a fraction
+# of the screen height; 1.0 = fills the screen vertically). `ratio` levels are generated at
+# load by simplifying LOD 0 to about that fraction of its triangles; a level may instead name
+# a hand-authored mesh in this directory with `mesh: <name>`.
+lods:
+  - { ratio: 0.5,  screen_size: 0.12 }
+  - { ratio: 0.2,  screen_size: 0.05 }
+# Below this projected size the sphere is not drawn at all (0 or absent = never culled).
+cull_screen_size: 0.004

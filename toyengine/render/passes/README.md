@@ -25,9 +25,11 @@ the frame loop would update a set a still-pending submission references. See rul
 ## Reused directly from gfxcoopa
 
 Constructed **unconditionally** and gated per frame at their record site:
-`GBufferPipeline`, `ShadowPipeline`, `SkyboxPass`, `DeferredLightingPass` (with this
-engine's banded-cel `pixel_lighting.frag`), `SsaoPass`, `HiZPass`, `SceneColorMipPass`,
-`SsrPass`, `TemporalHistoryPass`, `TransparentPass`, `TransparentCapturePass`, `FogPass`, `VolumetricsPass`,
+`GBufferPipeline`, `ShadowPipeline`, `DeferredLightingPass` (with this
+engine's banded-cel `pixel_lighting.frag`, which also draws the procedural sky at background
+pixels -- gfxcoopa's `SkyboxPass` is not used), `SsaoPass`, `HiZPass`, `SceneColorMipPass`,
+`SsrPass`, `TemporalHistoryPass`, `TransparentPass`, `TransparentCapturePass`, `FogPass`, `VolumetricsPass` /
+`FroxelVolumetricsPass` (per `volumetrics_mode`),
 `DofPass`, `BloomPass`, `TiltShiftPass`, `PixelStylizePass`, and the four SDF passes
 (`SdfGBufferPass`, `SdfForwardPass`, `SdfShadowPass`, `SdfCapturePass`).
 

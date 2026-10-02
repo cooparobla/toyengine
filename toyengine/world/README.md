@@ -58,11 +58,18 @@ touching the scene tree are all single-owner operations, so they stay on the own
 
 ## Cost model
 
-The pipeline does **no per-mesh frustum culling** (see `PixelRenderPipeline::gather_meshes_()`), so
-every live chunk is drawn and shadow-cast every frame. `view_radius` is therefore a direct cost
-dial: the live set is `(2 * view_radius + 1)²` draw calls. Prefer raising `chunk_size` over
-`view_radius` to see further — it buys coverage at a constant draw-call count, at the cost of a
-coarser streaming granularity.
+The pipeline frustum-culls every chunk per view (see `PixelRenderPipeline::gather_meshes_()`): the
+camera draws only the chunks it can see, and each shadow cascade/face draws only the chunks inside
+its own frustum. `view_radius` still sets the resident set — `(2 * view_radius + 1)²` chunks meshed
+and held in memory — and chunks behind the camera can still cast shadows into view. Prefer raising
+`chunk_size` over `view_radius` to see further — it buys coverage at fewer, larger draws, at the
+cost of a coarser streaming granularity.
+
+`greedy_merge` (on by default) merges coplanar faces: equal-height, same-kind tops into rectangles,
+and each wall's same-kind cells into tall strips spanning neighbouring columns — about 60% fewer
+triangles on `terrain_test`. Merged quads carry tile-space UVs, so a greedy chunk renders with the
+`terrain` surface shader (`assets/shaders/terrain.frag`), which repeats the atlas cell per tile.
+Only flat unit-quad sides merge; a bevelled side keeps the per-tile path.
 
 `tiles_per_grid_unit` is quadratic in tiles and does not add detail the map does not have; past
 the point where a map cell is a handful of blocks wide, all it resolves is
@@ -109,6 +116,6 @@ rectangle from the enum value alone, so a kind is appended, never inserted.
 ## Not here yet
 
 Caves and overhangs (the height-column model has no room for them, though mapcoopa generates cave
-systems), water as its own blended pass rather than an opaque surface, LOD or greedy face merging,
+systems), water as its own blended pass rather than an opaque surface, chunk LOD,
 rivers/roads/towns as 3D geometry, and terrain colliders. Each sits on top of this layer rather
 than requiring it to change shape.

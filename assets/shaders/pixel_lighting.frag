@@ -94,6 +94,8 @@ layout(push_constant) uniform PixelParams {
     float soft_lighting;     // != 0 -> smooth Cook-Torrance direct lighting; 0 -> banded/ramped cel look (default)
     float ssao_direct_strength; // how much occlusion darkens DIRECT lighting (HDRP's
                                 // Direct Lighting Strength): 0 = indirect only
+    float _pad0;
+    mat4  sky_inv_view_proj;     // inverse(proj * view), for the sky at background pixels
 } params;
 
 layout(location = 0) out vec4 out_color;
@@ -140,20 +142,28 @@ vec3 shade_light(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo, float metal
 }
 
 void main() {
-    vec4 g0 = texture(g_albedo_ao, in_uv);
+    // The normal alone decides sky vs surface, so it is read first: a sky pixel needs none
+    // of the other four G-buffer reads.
     vec4 g1 = texture(g_normal_metallic, in_uv);
+    vec3 N = g1.rgb;
+    if (dot(N, N) < 0.001) {
+        // Background pixel: the procedural sky, exactly as skybox.frag computes it (same
+        // CPU-inverted matrix, same sky colours via LightUBO). Drawn here rather than by a
+        // second fullscreen pass that would re-read every pixel's normal just to discard
+        // all the geometry ones.
+        vec3 ndc   = vec3(in_uv.x * 2.0 - 1.0, 1.0 - in_uv.y * 2.0, 1.0);
+        vec4 world = params.sky_inv_view_proj * vec4(ndc, 1.0);
+        vec3 dir   = normalize(world.xyz / world.w - camera.camera_pos);
+        out_color = vec4(sky_gradient(dir, lights.sky_zenith.rgb, lights.sky_horizon.rgb,
+                                      lights.sky_ground.rgb), 1.0);
+        return;
+    }
+    vec4 g0 = texture(g_albedo_ao, in_uv);
     vec4 g2 = texture(g_position_roughness, in_uv);
     // 1.0 (fully unoccluded) whenever SSAO is disabled -- PixelRenderPipeline binds
     // SsaoPass::neutral_view() in that case, so this read needs no separate flag.
     float ssao = texture(g_ssao, in_uv).r;
     vec3 emissive = texture(g_emissive, in_uv).rgb;
-
-    vec3 N = g1.rgb;
-    if (dot(N, N) < 0.001) {
-        // Background pixel -- left blank for the skybox pass to fill in
-        // afterward, in the same open render pass (see PixelRenderPipeline).
-        discard;
-    }
     N = normalize(N);
 
     vec3  albedo    = g0.rgb;
@@ -173,7 +183,10 @@ void main() {
 
         // The raw shading point: calc_dir_shadow() picks the cascade from it and applies
         // that cascade's own normal-offset bias, which the caller has no way to know.
-        float shadow = calc_dir_shadow(world_pos, N, L);
+        // shade_light() returns 0 for N.L <= 0 whatever the shadow is, so only a surface
+        // facing the light pays for the shadow lookups (the PCF is most of this pass's cost).
+        bool  faces_light = dot(N, L) > 0.0;
+        float shadow = faces_light ? calc_dir_shadow(world_pos, N, L) : 0.0;
 
         // Screen-space contact shadows (HDRP's own feature of that name): a short
         // G-buffer march from the surface toward the light, catching the small-scale
@@ -191,7 +204,7 @@ void main() {
         // renders a contact-only view. Skipped once the map alone already exceeds the
         // per-light darkness cap -- the march can only ADD occlusion, so it can never
         // move the result past what max() with a term already at that cap would give.
-        if (lights.contact_params.x > 0.0 && shadow < lights.dir_shadow_extra.x) {
+        if (faces_light && lights.contact_params.x > 0.0 && shadow < lights.dir_shadow_extra.x) {
             shadow = max(shadow, texture(u_contact_shadow, in_uv).r
                                 * lights.contact_params.x * lights.dir_shadow_extra.x);
         }
@@ -237,7 +250,8 @@ void main() {
         // lighting above stays unbiased) -- point lights have no analog of
         // dir_shadow_params.w to derive this from, unlike calc_dir_shadow's caller.
         vec3 shadow_bias_pos = world_pos + N * 0.02;
-        float shadow = (i == 0u && pl.attenuation.w > 0.5)
+        // As for the sun: no shadow lookups where shade_light() returns 0 anyway (N.L <= 0).
+        float shadow = (i == 0u && pl.attenuation.w > 0.5 && dot(N, L) > 0.0)
             ? calc_point_shadow(pl.position_range.xyz - shadow_bias_pos, range) : 0.0;
 
         Lo += shade_light(N, V, L, radiance, albedo, metallic, roughness, F0, shadow);
@@ -265,7 +279,7 @@ void main() {
         vec3 radiance = sl.color_intensity.rgb * (sl.color_intensity.w * 0.08) * attenuation * cone;
 
         float shadow = 0.0;
-        if (i == lights.light_counts.w && sl.params.z > 0.5) {
+        if (i == lights.light_counts.w && sl.params.z > 0.5 && dot(N, L) > 0.0) {
             float normal_bias_scale = clamp(1.0 - dot(N, L), 0.0, 1.0);
             vec3 biased_pos = world_pos + N * (lights.spot_shadow_params.w * (0.5 + 0.5 * normal_bias_scale));
             shadow = calc_spot_shadow(lights.spot_light_space_matrix * vec4(biased_pos, 1.0), N, L);

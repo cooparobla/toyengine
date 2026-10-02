@@ -585,6 +585,19 @@ struct PixelRenderConfig {
      * wider radius silently blend AO across terrace faces the kernel should reject.
      */
     float ssao_blur_plane_sigma = 0.375f;
+    /**
+     * Run the AO estimate, temporal resolve and blur at half resolution per axis (a quarter of
+     * the pixels), then upsample to full resolution with the depth/normal-aware filter the SSR
+     * composite uses -- Unity HDRP's and Unreal's default AO setup. The march keeps its
+     * full-resolution footprint; AO comes out very slightly softer. Startup-fixed (sizes targets).
+     */
+    bool  ssao_half_res = true;
+    /**
+     * Lighter bilateral blur: 4x4 taps over the 8x8 kernel's footprint (a quarter of the
+     * fetches), and the motion dilation capped at half the default so a pan cannot spread the
+     * taps across a cache-hostile 40 px square. false = the original 8x8 kernel. RUNTIME.
+     */
+    bool  ssao_blur_light = true;
     bool  ssao_temporal_enabled = true;
     /**
      * Accumulation depth of the temporal resolve: each pixel averages this many frames of the
@@ -641,8 +654,26 @@ struct PixelRenderConfig {
      */
     float ssr_temporal_blend   = 0.85f;
     float ssr_blur_radius      = 0.5f;  /**< World-space sigma for the spatial SSR denoise (ssr_blur.frag). */
+    bool  ssr_blur_light       = true;  /**< 3x3 SSR denoise footprint instead of 5x5 (a third of the reads). */
+    bool  ssr_blur_zero_skip   = true;  /**< Skip the SSR denoise kernel where its whole footprint is zero (exact). */
     float ssr_jitter           = 0.0f;  /**< Stochastic ray jitter strength, as a fraction of the
                                               GGX lobe cone; 0 reproduces the old single-ray trace. */
+    /**
+     * Trace SSR and SSGI at half the render resolution per axis (a quarter of the rays); the
+     * composite upsamples with a depth/normal-aware filter (gfx/ssr_composite_body.glsl), so
+     * geometry edges stay sharp and only the reflections themselves soften slightly. Cuts the
+     * trace, resolve and blur passes of both chains ~4x. Startup-fixed: it sizes targets.
+     */
+    bool  ssr_half_res         = true;
+    /**
+     * Skip the SSR trace for pixels whose reflection could add almost nothing: the specular
+     * weight the composite would apply (split-sum GGX, Fresnel) times the trace's own
+     * roughness and direction fades, all known before marching, below ssr_skip_threshold.
+     * On rough dielectrics (most terrain) that is nearly every pixel. SSGI is unaffected --
+     * it has its own trace. false = trace every pixel the roughness cutoff admits. RUNTIME.
+     */
+    bool  ssr_skip_negligible  = true;
+    float ssr_skip_threshold   = 0.02f; /**< Weight below which ssr_skip_negligible skips the trace. */
     float ssr_temporal_gamma   = 1.0f;  /**< Variance-clipping width for the SSR temporal resolve,
                                               in std deviations of the 3x3 neighbourhood. */
     /**
@@ -672,6 +703,7 @@ struct PixelRenderConfig {
      * Too low and the image keeps visibly settling for several frames after the camera stops.
      */
     float ssgi_blur_radius     = 1.0f;
+    bool  ssgi_blur_light      = true;  /**< 3x3 SSGI denoise footprint instead of 5x5 (a third of the reads). */
 
     /**
      * Additive glow from a dedicated BloomPass pyramid (bright-pass threshold -> multi-tap
@@ -721,6 +753,27 @@ struct PixelRenderConfig {
                                                 thin ribbons; the start offset is dithered per pixel and per
                                                 frame, so TAA recovers much of what a low count costs. */
     float volumetrics_max_distance   = 40.0f; /**< Distance the march stops at. */
+    /**
+     * Divisor on render resolution for the march (1 = full, 2 = half, 4 = quarter per
+     * axis). The march is the expensive half of VolumetricsPass and a low-frequency medium
+     * loses little at reduced resolution: the full-resolution composite upsamples it with
+     * a depth-aware filter, so geometry silhouettes stay sharp through the haze. Each step
+     * of the divisor cuts march cost ~4x. Startup-fixed: it sizes a target.
+     */
+    uint32_t volumetrics_resolution_scale = 2;
+    /**
+     * How the local volumes are resolved. Startup-fixed (it selects passes and targets):
+     *   "froxel"   -- the Unreal/HDRP technique: density and lighting evaluated once per froxel
+     *                 of a camera-aligned grid, temporally reprojected, integrated per column,
+     *                 one lookup per pixel (gfxcoopa's FroxelVolumetricsPass). Cost follows the
+     *                 grid, not the screen or a step count; thin features soften to the grid.
+     *   "raymarch" -- per-pixel march at 1/volumetrics_resolution_scale resolution with
+     *                 volumetrics_step_count steps (VolumetricsPass). Sharper, much costlier.
+     */
+    std::string volumetrics_mode = "froxel";
+    uint32_t volumetrics_froxel_tile   = 8;    /**< Render pixels per froxel, each axis. Startup-fixed. */
+    uint32_t volumetrics_froxel_slices = 64;   /**< Depth slices along the view ray. Startup-fixed. */
+    float    volumetrics_froxel_history = 0.9f; /**< Temporal reprojection weight (0 = none). RUNTIME. */
     float volumetrics_max_opacity    = 0.85f; /**< Ceiling on how much volumetrics can occlude the scene. */
     float volumetrics_sun_anisotropy = 0.6f;  /**< HG g; 0 isotropic, close to 1 = tight forward scatter.
                                                 Shared, not per-volume: it is a property of the light's
@@ -749,6 +802,20 @@ struct PixelRenderConfig {
      * leaves the (much cheaper) sun-shaft term running on its own.
      */
     int   volumetrics_max_scatter_lights = 4;
+
+    // --- Mesh visibility (frustum culling, batching and LOD; see toyengine/render/visibility.h) ---
+    /**
+     * Global multiplier on every renderer's projected screen size before LOD selection:
+     * > 1 keeps detail longer, < 1 switches to coarser levels sooner. Meshes without a
+     * `lods` block are unaffected (they have only LOD 0). RUNTIME.
+     */
+    float mesh_lod_bias = 1.0f;
+    /**
+     * A shadow caster whose bounds would cover fewer than this many texels of a shadow view
+     * (a cascade tile, a cube face, the spot map) is skipped in that view -- tiny props in a
+     * far cascade contribute nothing a filter could resolve. 0 disables. RUNTIME.
+     */
+    float shadow_min_caster_texels = 1.0f;
 
     /**
      * Diorama-style tilt-shift blur (Zelda: Link's Awakening [Switch] reference) -- see

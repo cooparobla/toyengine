@@ -331,6 +331,16 @@ private:
 
         auto* renderer = object->add_component<MeshRenderer>();
         renderer->material = terrain.material;
+        if (terrain.params.greedy_merge) {
+            // The greedy mesher writes tile-space UVs (TileMeshLibrary::encode_uv), which only
+            // the `terrain` surface shader decodes; it reads the atlas grid from shader_params.
+            renderer->material.shader        = "terrain";
+            renderer->material.shader_params = glm::vec4(static_cast<float>(k_atlas_columns),
+                                                         static_cast<float>(k_atlas_rows),
+                                                         static_cast<float>(k_atlas_cell_texels), 0.0f);
+            // Probe / GI bakes draw with stock shaders only and would misread those UVs.
+            renderer->affects_reflection_probes = false;
+        }
         renderer->set_mesh(std::move(handle));
 
         chunk.object = terrain.owner->add_child(std::move(object));

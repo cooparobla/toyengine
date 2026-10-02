@@ -26,7 +26,7 @@ namespace render {
 
 /**
  * @struct PixelLightingPushConstants
- * @brief Matches pixel_lighting.frag's PixelParams push-constant block (28 bytes).
+ * @brief Matches pixel_lighting.frag's PixelParams push-constant block (96 bytes).
  *
  * This engine's own cel-shading tuning. gfxcoopa's DeferredLightingPass takes a trailing
  * push-constant range list, so declaring this block needs no fork of that pass.
@@ -43,7 +43,13 @@ struct PixelLightingPushConstants {
     /// How much occlusion darkens direct lighting (Unity HDRP's Direct Lighting
     /// Strength): 0 = occlusion affects indirect only, 1 = full-strength on direct too.
     float ssao_direct_strength = 0.25f;
+    float _pad0 = 0.0f;   ///< std430: aligns the mat4 below to 16 bytes (offset 32)
+    /// inverse(proj * view) -- the lighting draw also writes the SKY at background pixels
+    /// (formerly a separate SkyboxPass draw) and reconstructs their view ray from this,
+    /// computed on the CPU exactly as SkyboxPass did so the sky is bit-identical.
+    glm::mat4 sky_inv_view_proj = glm::mat4(1.0f);
 };
+static_assert(sizeof(PixelLightingPushConstants) == 96, "must match pixel_lighting.frag's PixelParams");
 
 /**
  * @struct DebugViewPushConstants

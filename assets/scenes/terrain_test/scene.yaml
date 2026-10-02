@@ -45,7 +45,7 @@ scene:
           height_step: 1.0        # world units per vertical step -- the terracing
           height_scale: 40.0      # world units from sea floor to highest peak
           chunk_size: 32          # 32 x 32 columns merge into one GPU mesh
-          view_radius: 3          # 7 x 7 = 49 live chunks of 144; every one is drawn (no frustum cull)
+          view_radius: 3          # 7 x 7 = 49 live chunks of 144; each view draws only those in its frustum
           max_wall_steps: 24      # longest cliff face a single column will emit
           soil_depth_steps: 3     # steps of dirt under the turf before a wall turns to stone
           max_chunk_jobs_per_frame: 4

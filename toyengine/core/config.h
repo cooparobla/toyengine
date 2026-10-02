@@ -279,6 +279,8 @@ struct AppConfig {
                 if (r.contains("ssao_steps"))            config.render.ssao_steps            = r.at("ssao_steps").get_value<int>();
                 if (r.contains("ssao_max_radius_px"))    config.render.ssao_max_radius_px    = r.at("ssao_max_radius_px").get_value<float>();
                 if (r.contains("ssao_blur_plane_sigma")) config.render.ssao_blur_plane_sigma = r.at("ssao_blur_plane_sigma").get_value<float>();
+                if (r.contains("ssao_half_res"))         config.render.ssao_half_res         = r.at("ssao_half_res").get_value<bool>();
+                if (r.contains("ssao_blur_light"))       config.render.ssao_blur_light       = r.at("ssao_blur_light").get_value<bool>();
                 if (r.contains("ssao_direct_lighting_strength"))
                     config.render.ssao_direct_lighting_strength = r.at("ssao_direct_lighting_strength").get_value<float>();
 
@@ -299,11 +301,17 @@ struct AppConfig {
                 if (r.contains("ssgi_temporal_frames")) config.render.ssgi_temporal_frames = r.at("ssgi_temporal_frames").get_value<int>();
                 if (r.contains("ssr_temporal_blend"))   config.render.ssr_temporal_blend   = r.at("ssr_temporal_blend").get_value<float>();
                 if (r.contains("ssr_blur_radius"))      config.render.ssr_blur_radius      = r.at("ssr_blur_radius").get_value<float>();
+                if (r.contains("ssr_blur_light"))       config.render.ssr_blur_light       = r.at("ssr_blur_light").get_value<bool>();
+                if (r.contains("ssr_blur_zero_skip"))   config.render.ssr_blur_zero_skip   = r.at("ssr_blur_zero_skip").get_value<bool>();
                 if (r.contains("ssr_jitter"))           config.render.ssr_jitter           = r.at("ssr_jitter").get_value<float>();
+                if (r.contains("ssr_half_res"))         config.render.ssr_half_res         = r.at("ssr_half_res").get_value<bool>();
+                if (r.contains("ssr_skip_negligible"))  config.render.ssr_skip_negligible  = r.at("ssr_skip_negligible").get_value<bool>();
+                if (r.contains("ssr_skip_threshold"))   config.render.ssr_skip_threshold   = r.at("ssr_skip_threshold").get_value<float>();
                 if (r.contains("ssr_temporal_gamma"))   config.render.ssr_temporal_gamma   = r.at("ssr_temporal_gamma").get_value<float>();
                 if (r.contains("ssgi_traced"))          config.render.ssgi_traced          = r.at("ssgi_traced").get_value<bool>();
                 if (r.contains("ssgi_max_distance"))    config.render.ssgi_max_distance    = r.at("ssgi_max_distance").get_value<float>();
                 if (r.contains("ssgi_blur_radius"))     config.render.ssgi_blur_radius     = r.at("ssgi_blur_radius").get_value<float>();
+                if (r.contains("ssgi_blur_light"))      config.render.ssgi_blur_light      = r.at("ssgi_blur_light").get_value<bool>();
                 if (r.contains("ssgi_max_iterations"))  config.render.ssgi_max_iterations  = r.at("ssgi_max_iterations").get_value<int>();
                 if (r.contains("ssgi_intensity"))       config.render.indirect.ssgi_intensity = r.at("ssgi_intensity").get_value<float>();
                 if (r.contains("ssgi_distance"))        config.render.indirect.ssgi_distance  = r.at("ssgi_distance").get_value<float>();
@@ -349,11 +357,20 @@ struct AppConfig {
                 // --- Volumetrics (shared march settings; per-volume look lives on VolumeComponent) ---
                 if (r.contains("volumetrics_step_count"))     config.render.volumetrics_step_count     = r.at("volumetrics_step_count").get_value<int>();
                 if (r.contains("volumetrics_max_distance"))   config.render.volumetrics_max_distance   = r.at("volumetrics_max_distance").get_value<float>();
+                if (r.contains("volumetrics_resolution_scale")) config.render.volumetrics_resolution_scale = r.at("volumetrics_resolution_scale").get_value<uint32_t>();
+                if (r.contains("volumetrics_mode"))           config.render.volumetrics_mode           = r.at("volumetrics_mode").get_value<std::string>();
+                if (r.contains("volumetrics_froxel_tile"))    config.render.volumetrics_froxel_tile    = r.at("volumetrics_froxel_tile").get_value<uint32_t>();
+                if (r.contains("volumetrics_froxel_slices"))  config.render.volumetrics_froxel_slices  = r.at("volumetrics_froxel_slices").get_value<uint32_t>();
+                if (r.contains("volumetrics_froxel_history")) config.render.volumetrics_froxel_history = r.at("volumetrics_froxel_history").get_value<float>();
                 if (r.contains("volumetrics_max_opacity"))    config.render.volumetrics_max_opacity    = r.at("volumetrics_max_opacity").get_value<float>();
                 if (r.contains("volumetrics_sun_anisotropy")) config.render.volumetrics_sun_anisotropy = r.at("volumetrics_sun_anisotropy").get_value<float>();
                 if (r.contains("volumetrics_shadows_enabled")) config.render.volumetrics_shadows_enabled = r.at("volumetrics_shadows_enabled").get_value<bool>();
                 if (r.contains("volumetrics_light_scatter"))  config.render.volumetrics_light_scatter  = r.at("volumetrics_light_scatter").get_value<float>();
                 if (r.contains("volumetrics_max_scatter_lights")) config.render.volumetrics_max_scatter_lights = r.at("volumetrics_max_scatter_lights").get_value<int>();
+
+                // --- Mesh visibility ---
+                if (r.contains("mesh_lod_bias"))            config.render.mesh_lod_bias            = r.at("mesh_lod_bias").get_value<float>();
+                if (r.contains("shadow_min_caster_texels")) config.render.shadow_min_caster_texels = r.at("shadow_min_caster_texels").get_value<float>();
 
                 if (r.contains("bloom_threshold")) config.render.bloom_threshold = r.at("bloom_threshold").get_value<float>();
                 if (r.contains("bloom_soft_knee")) config.render.bloom_soft_knee = r.at("bloom_soft_knee").get_value<float>();

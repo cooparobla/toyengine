@@ -235,6 +235,9 @@ inline void register_scene_components(coopa::gfx::core::Device& device,
             if (node.contains("soil_depth_steps")) {
                 params.soil_depth_steps = node.at("soil_depth_steps").get_value<std::int32_t>();
             }
+            if (node.contains("greedy_merge")) {
+                params.greedy_merge = node.at("greedy_merge").get_value<bool>();
+            }
             if (node.contains("emit_bottom")) {
                 params.emit_bottom = node.at("emit_bottom").get_value<bool>();
             }

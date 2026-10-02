@@ -15,6 +15,7 @@
 
 #include <glm/glm.hpp>
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
@@ -98,6 +99,18 @@ public:
         scene_mgr_.set_job_engine(&jobs_);
         pipeline_.set_job_engine(&jobs_);
         pipeline_.set_parallel_threshold(config_.jobs.parallel_threshold);
+
+        // Profiling mode (PROFILE env var): per-frame CPU/GPU timings to a CSV + an exit summary.
+        if (const std::string path = profile_path_from_env_(); !path.empty()) {
+            profile_ = std::make_unique<render::FrameProfile>(path);
+            if (profile_->ok()) {
+                pipeline_.set_profiler(profile_.get());
+                std::cout << "[profile] Profiling mode: per-frame timings -> " << path << "\n";
+            } else {
+                std::cerr << "[profile] Could not open '" << path << "' for writing; profiling off\n";
+                profile_.reset();
+            }
+        }
 
         assets_.add_search_root(std::string(ROOT_DIR) + "/assets");
         assets_.register_loader<coopa::gfx::engine::data::Mesh>(
@@ -225,12 +238,27 @@ public:
      * One further env var is read by the CONSTRUCTOR, not this loop:
      *   SCENE=<name|path>    loads a different scene than assets/config.yaml's
      *                        scene.default_scene -- see scene_path_from_env_().
+     * (HEADLESS and CONFIG are applied by main.cpp, before the Engine exists.)
+     *
+     * Profiling mode, read by the constructor:
+     *   PROFILE=1 | <path>.csv  per-frame CPU phase + per-feature GPU timings to a CSV
+     *                        (output/profile.csv for "1"), plus an averaged per-feature
+     *                        breakdown printed on exit -- see render/frame_profile.h and
+     *                        render/gpu_profiler.h. Graph it with tools/plot_profile.py.
+     *
+     * On exit, prints the mean wall-clock frame time over every frame after the first
+     * kWarmupFrames -- startup, pipeline creation and first-use costs excluded -- so a
+     * MAX_FRAMES run doubles as a benchmark.
      */
     void run() {
+        constexpr uint64_t kWarmupFrames = 30;
         uint32_t captured = 0;
         std::deque<coopa::gfx::util::ImageData> ring;
+        uint64_t frames_run = 0;
+        std::chrono::steady_clock::time_point timed_start{};
         while (!ctx_.should_close()) {
             if (!tick()) break;
+            if (++frames_run == kWarmupFrames) timed_start = std::chrono::steady_clock::now();
 
             if (capture_frames_ > 0) {
                 capture_sequence_frame_(captured);
@@ -244,6 +272,22 @@ public:
             }
 
             if (ctx_.max_frames() > 0 && ctx_.frame_index() >= ctx_.max_frames()) break;
+        }
+
+        if (frames_run > kWarmupFrames) {
+            ctx_.wait_idle();   // count the GPU work of the frames already submitted
+            const double secs = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - timed_start).count();
+            const double ms = secs * 1000.0 / static_cast<double>(frames_run - kWarmupFrames);
+            std::printf("[toyengine] Frame time: %.2f ms (%.1f fps), mean of %llu frames after %llu warm-up\n",
+                        ms, 1000.0 / ms, static_cast<unsigned long long>(frames_run - kWarmupFrames),
+                        static_cast<unsigned long long>(kWarmupFrames));
+            const std::string mesh_stats = pipeline_.mesh_draw_stats_summary();
+            if (!mesh_stats.empty()) std::printf("[toyengine] Mesh draws/frame: %s\n", mesh_stats.c_str());
+        }
+        if (profile_) {
+            ctx_.wait_idle();
+            profile_->print_summary();
         }
 
         if (!ring.empty()) {
@@ -359,38 +403,63 @@ public:
      * @return False when the loop should stop (window close requested).
      */
     bool tick() {
-        ctx_.poll(); // window_.new_frame() + poll_events() + frame timer update.
+        using render::CpuScope;
+        using render::CpuTimer;
+        if (profile_) {
+            profile_->begin_frame(profile_frame_++);
+            profile_->prune();
+        }
+        render::FrameProfile* prof = profile_.get();
 
-        if (input_.is_down("quit", ctx_.input())) {
-            ctx_.window().set_should_close(true);
+        float dt = 0.0f;
+        {
+            CpuTimer t(prof, CpuScope::Input);
+            ctx_.poll(); // window_.new_frame() + poll_events() + frame timer update.
+
+            if (input_.is_down("quit", ctx_.input())) {
+                ctx_.window().set_should_close(true);
+            }
+
+            dt = frame_dt_();
+            apply_cursor_pos_override_();
+        }
+        {
+            CpuTimer t(prof, CpuScope::Assets);
+            assets_.update(dt);
         }
 
-        const float dt = frame_dt_();
-        apply_cursor_pos_override_();
-        assets_.update(dt);
+        {
+            CpuTimer t(prof, CpuScope::SceneUpdate);
+            if (scene_mgr_.has_scene()) {
+                drive_camera_controller_(scene_mgr_.get_active_scene());
+                drive_kinematic_controllers_(scene_mgr_.get_active_scene());
+                drive_free_movers_(scene_mgr_.get_active_scene());
+            }
+            scene_mgr_.update(dt);
+        }
+        {
+            CpuTimer t(prof, CpuScope::LateUpdate);
+            if (scene_mgr_.has_scene()) {
+                // Between update() and late_update(), and that window is the only correct slot:
+                // world matrices are current only after UpdatePhase::TransformResolve (350) has
+                // run inside update(), and a canvas needs its pointer position before
+                // EventSystem::process() is dispatched from inside late_update() (400).
+                drive_ui_canvases_(scene_mgr_.get_active_scene());
+            }
+            // late_update() runs LateBehaviourSystem, flushes each worker's deferred
+            // SceneCommandBuffer and advances Scene::frame_index(). Must precede render() so a
+            // same-frame deferred spawn or destroy is reflected in what is drawn, matching
+            // Unity's Update -> LateUpdate -> render order.
+            scene_mgr_.late_update(dt);
+        }
 
         if (scene_mgr_.has_scene()) {
-            drive_camera_controller_(scene_mgr_.get_active_scene());
-            drive_kinematic_controllers_(scene_mgr_.get_active_scene());
-            drive_free_movers_(scene_mgr_.get_active_scene());
-        }
-        scene_mgr_.update(dt);
-        if (scene_mgr_.has_scene()) {
-            // Between update() and late_update(), and that window is the only correct slot:
-            // world matrices are current only after UpdatePhase::TransformResolve (350) has
-            // run inside update(), and a canvas needs its pointer position before
-            // EventSystem::process() is dispatched from inside late_update() (400).
-            drive_ui_canvases_(scene_mgr_.get_active_scene());
-        }
-        // late_update() runs LateBehaviourSystem, flushes each worker's deferred
-        // SceneCommandBuffer and advances Scene::frame_index(). Must precede render() so a
-        // same-frame deferred spawn or destroy is reflected in what is drawn, matching
-        // Unity's Update -> LateUpdate -> render order.
-        scene_mgr_.late_update(dt);
-
-        if (scene_mgr_.has_scene()) {
-            upload_dynamic_meshes_(scene_mgr_.get_active_scene());
-            gather_debug_lines_(scene_mgr_.get_active_scene());
+            {
+                CpuTimer t(prof, CpuScope::DynamicMeshes);
+                upload_dynamic_meshes_(scene_mgr_.get_active_scene());
+                gather_debug_lines_(scene_mgr_.get_active_scene());
+            }
+            CpuTimer t(prof, CpuScope::Render);
             pipeline_.render(ctx_.renderer(), scene_mgr_.get_active_scene(), dt);
         }
 
@@ -858,6 +927,19 @@ private:
 
     /** @brief NO_INPUT env override for drive_camera_controller_() -- any non-empty value that
      *  isn't "0" suppresses all camera input, for reproducible headless captures. */
+    /**
+     * @brief PROFILE env override: "1" (or any non-path value like "on"/"true") profiles to
+     *        output/profile.csv; anything else ending in .csv is used as the path. Unset, empty
+     *        or "0" = off.
+     */
+    static std::string profile_path_from_env_() {
+        const char* v = std::getenv("PROFILE");
+        if (!v || !*v || std::string(v) == "0") return {};
+        const std::string s(v);
+        if (s.size() > 4 && s.compare(s.size() - 4, 4, ".csv") == 0) return s;
+        return "output/profile.csv";
+    }
+
     static bool no_input_from_env_() {
         const char* v = std::getenv("NO_INPUT");
         return v && *v && std::string(v) != "0";
@@ -895,6 +977,18 @@ private:
             /* shadow_cube_frag */ "", // reuses stock shadow_cube.frag
             /* capture_frag */ "", // Opaque domain -- unused
             /* cull */ coopa::gfx::CullMode::None, // two-sided card, not a closed opaque solid
+        });
+        rc.surface_shaders.add({
+            /* name  */ "terrain",
+            /* domain */ coopa::gfx::pipeline::SurfaceShaderDomain::Opaque,
+            /* vert  */ "",  // stock gbuffer.vert -- only the UV decode differs
+            /* frag  */ "terrain.frag", // tile-space UVs from the greedy chunk mesher
+            /* shadow_vert */ "", // stock: an opaque caster never reads UVs in the shadow pass
+            /* shadow_frag */ "",
+            /* shadow_cube_vert */ "",
+            /* shadow_cube_frag */ "",
+            /* capture_frag */ "", // Opaque domain -- unused
+            /* cull */ coopa::gfx::CullMode::Back, // closed columns, like any opaque solid
         });
         rc.surface_shaders.add({
             /* name  */ "water",
@@ -936,7 +1030,13 @@ private:
     uint32_t capture_frames_ = 0;
     uint32_t capture_ring_   = 0;
     bool     no_input_       = false;
+
+    /// Profiling mode's sink (PROFILE env var); null when off. Declared last so it outlives
+    /// nothing that records into it -- pipeline_'s GpuProfiler is reset in the destructor.
+    std::unique_ptr<render::FrameProfile> profile_;
+    uint64_t profile_frame_ = 0;
 };
+
 
 } // namespace core
 } // namespace toy

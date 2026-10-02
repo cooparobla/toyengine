@@ -86,9 +86,9 @@ struct TerrainParams {
     /**
      * @brief Chunks of terrain kept loaded in every direction from the camera's chunk.
      *
-     * The live region is a square of side `2 * view_radius + 1`. This directly sets how much
-     * geometry is drawn, because toy::render::PixelRenderPipeline does no per-mesh frustum
-     * culling -- every live chunk is drawn, and shadow-cast, every frame.
+     * The live region is a square of side `2 * view_radius + 1`. It sets how much geometry is
+     * resident and meshed; what is DRAWN is narrower -- toy::render::PixelRenderPipeline
+     * frustum-culls every chunk against the camera and each shadow view separately.
      */
     std::int32_t view_radius = 3;
 
@@ -112,6 +112,16 @@ struct TerrainParams {
      * visible, so emitting it is pure cost. Available for a flying/underside camera.
      */
     bool emit_bottom = false;
+
+    /**
+     * Merge coplanar neighbouring faces into larger quads: tops of equal height and surface
+     * kind into rectangles, and each wall's same-kind cells into tall strips spanning
+     * neighbouring columns. Only faces whose side mesh is a flat unit quad are merged (a
+     * bevelled side keeps the per-tile path), so the silhouette is unchanged. Merged quads
+     * still show one atlas cell per tile: the chunk material switches to the `terrain`
+     * surface shader, which repeats the cell across the quad (see terrain.frag).
+     */
+    bool greedy_merge = true;
 
     /** @brief World-space size of one chunk edge. */
     float chunk_world_size() const {

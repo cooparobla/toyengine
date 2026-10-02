@@ -2,7 +2,7 @@ window:
   title: "toyengine"
   width: 1920
   height: 1080
-  vsync: true
+  vsync: false
   visible: true              # false = never-mapped window (headless); what the test suite uses
 
 scene:
@@ -180,6 +180,8 @@ render:
 
   # --- SSAO ---
   ssao_radius: 2.0           # world-space gather radius
+  ssao_half_res: true        # AO at half res + depth-aware upsample (Unity/Unreal default; ~4x cheaper). Startup-fixed
+  ssao_blur_light: true      # 4x4 blur over the same footprint as the 8x8 (a quarter of the fetches)
   ssao_bias: 0.025           # world-space normal lift before the horizon march; keep << ssao_radius
   ssao_power: 1.0            # exponent on visibility
   ssao_direct_lighting_strength: 0.25 # how much occlusion darkens DIRECT lighting; 0 = indirect only
@@ -202,11 +204,17 @@ render:
   ssr_temporal_blend: 0.85   # fallback fixed-rate blend, only where no shared count buffer exists
   ssr_temporal_gamma: 2.0    # variance-clipping width (std devs) for history rejection
   ssr_blur_radius: 0.5       # world-space sigma of the spatial denoise
+  ssr_blur_light: true       # 3x3 denoise footprint instead of 5x5 (a third of the reads)
+  ssr_blur_zero_skip: true   # skip the denoise where the reflection buffer is all zero (exact, pure saving)
   ssr_jitter: 0.25           # stochastic ray jitter as a fraction of the GGX lobe cone
+  ssr_half_res: true         # trace SSR/SSGI at half res per axis (~4x cheaper; depth-aware upsample). Startup-fixed
+  ssr_skip_negligible: true  # skip SSR rays whose specular weight can't exceed ssr_skip_threshold (rough dielectrics)
+  ssr_skip_threshold: 0.02   # weight below which ssr_skip_negligible skips the trace
   ssgi_intensity: 0.6        # diffuse colour-bleed strength; 0 = specular-only SSR
   ssgi_distance: 0.5         # world-space offset along the normal for the FALLBACK bounce lookup
   ssgi_max_distance: 8.0     # world-space ray length for the traced-SSGI march
   ssgi_blur_radius: 1.0      # world-space sigma of the bounce's spatial denoise
+  ssgi_blur_light: true      # 3x3 denoise footprint instead of 5x5 (a third of the reads)
   # ssgi_max_iterations: 32  # Hi-Z steps for the bounce march. Driven by ssgi_quality
                              # (12/20/32/48); uncomment only to override the tier. Lower than
                              # ssr_max_iterations on purpose: the bounce ray is short and lands
@@ -238,12 +246,21 @@ render:
 
   # --- Volumetrics (shared march settings; per-volume look lives on the Volume component) ---
   volumetrics_max_distance: 40.0  # distance the march stops at
+  volumetrics_mode: froxel        # froxel (grid, Unreal/HDRP-style; fast) | raymarch (per-pixel march; sharper). Startup-fixed
+  volumetrics_froxel_tile: 8      # froxel mode: render pixels per froxel (each axis). Startup-fixed
+  volumetrics_froxel_slices: 64   # froxel mode: depth slices along the view ray. Startup-fixed
+  volumetrics_froxel_history: 0.9 # froxel mode: temporal reprojection weight (0 = off)
+  volumetrics_resolution_scale: 2 # raymarch mode: march at 1/N render resolution per axis (1 = full); depth-aware upsample
   volumetrics_max_opacity: 0.85   # ceiling on how much volumetrics can occlude
   volumetrics_sun_anisotropy: 0.6 # HG g, shared across volumes
   volumetrics_light_scatter: 1.0  # point/spot in-scatter strength; 0 disables the light loop
   # volumetrics_max_scatter_lights: 4 # how many lights in-scatter (0..4, nearest win). Driven by
                                   # volumetrics_quality (0/2/4/4); uncomment only to override the
                                   # tier. Multiplies against the step count.
+
+  # --- Mesh visibility (frustum culling + instanced batching run always; these tune them) ---
+  mesh_lod_bias: 1.0              # >1 keeps mesh LOD detail longer, <1 drops it sooner (meshes with `lods` only)
+  shadow_min_caster_texels: 1.0   # skip shadow casters smaller than this many texels in a shadow view; 0 = off
 
   # --- Depth of field ---
   dof_focus_mode: manual     # manual | orbit_target | object; a camera's own focus_object overrides this

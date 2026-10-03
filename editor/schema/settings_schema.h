@@ -112,7 +112,7 @@ inline const std::vector<SettingsGroup>& render_settings_groups() {
         g.push_back({"Debug", {
             f_enum("debug_view", {"off", "albedo", "normals", "roughness", "metallic", "emissive", "material_ao",
                                   "world_pos", "depth", "direct", "indirect", "shadows", "contact_shadows", "ssao",
-                                  "ssr", "ssr_confidence", "ssgi", "dof", "volumetrics", "lines", "solid", "wireframe"}),
+                                  "ssr", "ssr_confidence", "ssgi", "dof", "volumetrics", "lines", "solid", "wireframe", "material_preview"}),
         }});
         return g;
     }();

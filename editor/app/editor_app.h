@@ -71,14 +71,18 @@ namespace fs = std::filesystem;
 using coopa::input::Key;
 using coopa::input::Mods;
 
-enum class Tab { Scene = 0, Asset = 1, Render = 2, Project = 3 };
-enum class Shading { Wireframe = 0, Solid = 1, Full = 2 };
+/** @brief Blender-style workspaces (the top bar's tabs). */
+enum class Tab { Layout = 0, Modeling = 1, Shading = 2 };
+/** @brief Viewport shading, Blender's four buttons. */
+enum class Shading { Wireframe = 0, Solid = 1, MaterialPreview = 2, Full = 3 };
+/** @brief The Properties editor's tabs. */
+enum class PropTab { Tool, Render, Output, Scene, World, Object, Components, Physics, Data, Material };
 enum class AssetKind { None, Mesh, Material };
 
 /** @brief State carried across a renderer restart (the Engine is rebuilt underneath). */
 struct EditorState {
     std::optional<SceneDocument> scene;
-    Tab tab = Tab::Scene;
+    Tab tab = Tab::Layout;
     Shading shading = Shading::Solid;
     glm::vec3 cam_focus{0.0f};
     float cam_yaw = 35.0f, cam_pitch = 25.0f, cam_distance = 12.0f;
@@ -179,6 +183,20 @@ public:
     Tab tab() const { return tab_; }
     Shading shading() const { return shading_; }
     bool playing() const { return play_scene_ != nullptr; }
+    PropTab prop_tab() const { return prop_tab_; }
+    void set_prop_tab(PropTab t) { prop_tab_ = t; }
+    /** @brief The navigation gizmo's on-screen rect (canvas pixels), for tests. */
+    imm::Box nav_gizmo_rect() const { return nav_gizmo_rect_(); }
+    /** @brief Unity's Pause toggle / single Step for the running game. */
+    void pause() { toggle_pause_(); }
+    void step() { step_simulation_(); }
+    /** @brief Window-space rect of an object's Outliner eye toggle (if its row is visible). */
+    std::optional<imm::Box> outliner_eye_rect(ObjectId id) const {
+        auto it = eye_rects_.find(id);
+        if (it == eye_rects_.end()) return std::nullopt;
+        return it->second;
+    }
+    bool paused() const { return play_scene_ && !play_scene_->is_simulating() && step_countdown_ == 0; }
     /** @brief True while a scene object's mesh is in edit mode (Tab). */
     bool edit_mode_active() const { return in_edit_mode_(); }
     bool quit_requested() const { return quit_; }
@@ -316,30 +334,30 @@ public:
         queue_rebuild_();
     }
 
+    /** @brief Which document Ctrl+Z acts on: what the user is looking at / pointing at. */
+    enum class UndoTarget { Scene, Mesh, Material, Config };
+    UndoTarget undo_target_() const {
+        if (mesh_edit_view_() && mesh_.open()) return UndoTarget::Mesh;
+        if (tab_ == Tab::Shading && material_.open()) return UndoTarget::Material;
+        const bool config_tab = prop_tab_ == PropTab::Render || prop_tab_ == PropTab::Output || prop_tab_ == PropTab::World;
+        if (properties_hovered_ && config_tab) return UndoTarget::Config;
+        return UndoTarget::Scene;
+    }
+
     void undo() {
-        switch (tab_) {
-            case Tab::Scene:
-                if (in_edit_mode_()) mesh_.do_undo();
-                else if (!playing()) { doc_.undo(); queue_rebuild_(); }
-                break;
-            case Tab::Asset:
-                if (asset_kind_ == AssetKind::Mesh) mesh_.do_undo();
-                else if (asset_kind_ == AssetKind::Material) { material_.do_undo(); refresh_material_preview_(); }
-                break;
-            default: config_.do_undo(); apply_config_live(); break;
+        switch (undo_target_()) {
+            case UndoTarget::Mesh: mesh_.do_undo(); break;
+            case UndoTarget::Material: material_.do_undo(); refresh_material_preview_(); break;
+            case UndoTarget::Config: config_.do_undo(); apply_config_live(); break;
+            case UndoTarget::Scene: if (!playing()) { doc_.undo(); queue_rebuild_(); } break;
         }
     }
     void redo() {
-        switch (tab_) {
-            case Tab::Scene:
-                if (in_edit_mode_()) mesh_.do_redo();
-                else if (!playing()) { doc_.redo(); queue_rebuild_(); }
-                break;
-            case Tab::Asset:
-                if (asset_kind_ == AssetKind::Mesh) mesh_.do_redo();
-                else if (asset_kind_ == AssetKind::Material) { material_.do_redo(); refresh_material_preview_(); }
-                break;
-            default: config_.do_redo(); apply_config_live(); break;
+        switch (undo_target_()) {
+            case UndoTarget::Mesh: mesh_.do_redo(); break;
+            case UndoTarget::Material: material_.do_redo(); refresh_material_preview_(); break;
+            case UndoTarget::Config: config_.do_redo(); apply_config_live(); break;
+            case UndoTarget::Scene: if (!playing()) { doc_.redo(); queue_rebuild_(); } break;
         }
     }
 
@@ -347,7 +365,7 @@ public:
     void frame_selected() {
         glm::vec3 lo(1e30f), hi(-1e30f);
         bool any = false;
-        if ((tab_ == Tab::Asset && asset_kind_ == AssetKind::Mesh && mesh_.open()) || in_edit_mode_()) {
+        if (mesh_edit_view_() && mesh_.open()) {
             const glm::mat4 w = mesh_world_();
             const auto vs = mesh_.selection.affected_vertices(mesh_.mesh);
             auto add = [&](const glm::vec3& p) { const glm::vec3 q(w * glm::vec4(p, 1.0f)); lo = glm::min(lo, q); hi = glm::max(hi, q); };
@@ -364,7 +382,7 @@ public:
     void frame_all() {
         glm::vec3 lo(1e30f), hi(-1e30f);
         bool any = false;
-        if (tab_ == Tab::Asset && asset_kind_ != AssetKind::None) {
+        if (asset_view_()) {
             if (asset_kind_ == AssetKind::Mesh) mesh_.mesh.bounds(lo, hi);
             else { lo = glm::vec3(-0.6f); hi = glm::vec3(0.6f); }
             any = true;
@@ -413,11 +431,26 @@ public:
 
     void set_tab(Tab t) {
         if (t == tab_) return;
-        if ((tab_ == Tab::Asset) != (t == Tab::Asset)) {
+        const bool was_asset = asset_view_();
+        const Tab old = tab_;
+        // Each workspace keeps its own viewport shading (Shading opens in Material Preview).
+        workspace_shading_[static_cast<int>(old)] = shading_;
+        tab_ = t;
+        set_shading(workspace_shading_[static_cast<int>(t)]);
+        // Modeling enters Edit Mode on the active mesh (unless a standalone mesh asset is
+        // open); leaving it returns to Object Mode, as switching Blender workspaces does.
+        if (old == Tab::Modeling && edit_object_) edit_object_ = 0;
+        if (t == Tab::Modeling && !standalone_mesh_ && !edit_object_ && !playing()) {
+            const ObjectId id = doc_.primary();
+            if (id && doc_.find_component(id, "MeshRenderer") >= 0) toggle_edit_mode_();
+        }
+        if (t == Tab::Shading) prop_tab_ = PropTab::Material;
+        const bool now_asset = asset_view_();
+        if (was_asset != now_asset) {
             // The asset preview and the scene each keep their own view.
             gizmo_ = Gizmo{};
-            CameraPose& out = tab_ == Tab::Asset ? asset_pose_ : scene_pose_;
-            const CameraPose& in = t == Tab::Asset ? asset_pose_ : scene_pose_;
+            CameraPose& out = was_asset ? asset_pose_ : scene_pose_;
+            const CameraPose& in = now_asset ? asset_pose_ : scene_pose_;
             out = {camera_.focus, camera_.yaw_deg, camera_.pitch_deg, camera_.distance, camera_.ortho, true};
             if (in.valid) {
                 camera_.focus = in.focus; camera_.yaw_deg = in.yaw; camera_.pitch_deg = in.pitch;
@@ -425,7 +458,6 @@ public:
                 camera_.apply();
             }
         }
-        tab_ = t;
         deferred_.push_back([this] { ensure_active_scene_(); });
     }
 
@@ -441,7 +473,10 @@ public:
             return false;
         }
         asset_kind_ = AssetKind::Mesh;
-        set_tab(Tab::Asset);
+        standalone_mesh_ = true;
+        edit_object_ = 0;
+        tab_ = Tab::Layout;   // force set_tab() to re-evaluate the view
+        set_tab(Tab::Modeling);
         mesh_edit_ = true;
         uploaded_revision_ = 0;
         deferred_.push_back([this] { ensure_preview_(); frame_all(); });
@@ -455,9 +490,12 @@ public:
         for (char& c : key) if (c == ' ') c = '_';
         mesh_.reset(make_primitive(primitive), unique_asset_name_("meshes", key));
         asset_kind_ = AssetKind::Mesh;
+        standalone_mesh_ = true;
+        edit_object_ = 0;
         mesh_edit_ = true;
         uploaded_revision_ = 0;
-        set_tab(Tab::Asset);
+        tab_ = Tab::Layout;
+        set_tab(Tab::Modeling);
         deferred_.push_back([this] { ensure_preview_(); frame_all(); });
     }
 
@@ -492,7 +530,7 @@ public:
             return false;
         }
         asset_kind_ = AssetKind::Material;
-        set_tab(Tab::Asset);
+        set_tab(Tab::Shading);
         deferred_.push_back([this] { ensure_preview_(); refresh_material_preview_(); frame_all(); });
         log_info("Editing material " + ref);
         return true;
@@ -722,14 +760,14 @@ private:
     /** @brief Makes the scene the current tab wants the engine's active scene. */
     void ensure_active_scene_() {
         coopa::scene::Scene* want = nullptr;
-        if (tab_ == Tab::Asset && asset_kind_ != AssetKind::None) {
+        if (asset_view_()) {
             ensure_preview_();
             want = preview_scene_;
         } else {
             want = play_scene_ ? play_scene_ : sync_.scene();
         }
         if (want && engine_.has_scene() && &engine_.scene() != want) engine_.activate_scene(want);
-        if (!play_scene_ || tab_ == Tab::Asset) camera_.make_main();
+        if (!play_scene_ || asset_view_()) camera_.make_main();
         apply_shading_();
     }
 
@@ -842,9 +880,12 @@ private:
         deferred_.clear();
         for (auto& fn : pending) fn();
         // Keep live objects showing an edited, unsaved mesh; keep hidden objects hidden.
-        if (tab_ == Tab::Scene && !playing()) { push_mesh_to_scene_(); apply_hidden_(); }
+        if (!asset_view_() && !playing()) { push_mesh_to_scene_(); apply_hidden_(); }
+        // Unity's Step: one simulated tick, then paused again.
+        if (step_countdown_ > 0 && --step_countdown_ == 0 && play_scene_) play_scene_->set_simulating(false);
+        if (pause_after_start_ && play_scene_) { pause_after_start_ = false; play_scene_->set_simulating(true); step_countdown_ = 2; }
         // Keep the asset preview's mesh current.
-        if (tab_ == Tab::Asset && preview_scene_) {
+        if (asset_view_() && preview_scene_) {
             if (asset_kind_ == AssetKind::Mesh && uploaded_revision_ != mesh_.geometry_revision) {
                 upload_preview_mesh_(mesh_.mesh, "editor/preview_mesh");
                 refresh_material_preview_();
@@ -869,7 +910,7 @@ private:
             r.h = static_cast<uint32_t>(std::max(1.0f, viewport_box_.h * ui_scale_));
             engine_.set_display_region(r);
         }
-        if (!playing() || tab_ == Tab::Asset) camera_.make_main();
+        if (!playing() || asset_view_()) camera_.make_main();
 
     }
 
@@ -921,6 +962,7 @@ private:
         switch (shading_) {
             case Shading::Wireframe: view = "wireframe"; break;
             case Shading::Solid: view = "solid"; break;
+            case Shading::MaterialPreview: view = "material_preview"; break;
             case Shading::Full: view = full_debug_view_.empty() ? std::string("off") : full_debug_view_; break;
         }
         engine_.render_config().debug_view = view;
@@ -996,431 +1038,18 @@ private:
     }
 
     // =================================================================================
-    // UI: top level
+    // UI (Blender layout) -- see editor/app/ui/*.inl
     // =================================================================================
 
-    void draw_(imm::Context& ctx) {
-        const glm::vec2 sz = ctx.canvas_size();
-        const float menubar_h = 24, toolbar_h = 30, status_h = 22;
-        draw_menubar_(ctx, {0, 0, sz.x, menubar_h});
-        draw_toolbar_(ctx, {0, menubar_h, sz.x, toolbar_h});
-        const imm::Box content{0, menubar_h + toolbar_h, sz.x, std::max(0.0f, sz.y - menubar_h - toolbar_h - status_h)};
-        switch (tab_) {
-            case Tab::Scene:   draw_scene_tab_(ctx, content); break;
-            case Tab::Asset:   draw_asset_tab_(ctx, content); break;
-            case Tab::Render:  draw_render_tab_(ctx, content); break;
-            case Tab::Project: draw_project_tab_(ctx, content); break;
-        }
-        draw_status_(ctx, {0, sz.y - status_h, sz.x, status_h});
-        draw_modals_(ctx);
-        handle_shortcuts_(ctx);
-    }
+#include "ui/layout.inl"
+#include "ui/topbar.inl"
+#include "ui/outliner.inl"
+#include "ui/properties.inl"
+#include "ui/browser.inl"
+#include "ui/statusbar.inl"
+#include "ui/viewport_chrome.inl"
 
-    // --- menubar ---
-
-    void draw_menubar_(imm::Context& ctx, const imm::Box& b) {
-        ctx.begin_menubar(b);
-        if (ctx.begin_menu("File")) {
-            if (ctx.menu_item("New Scene", "Ctrl+N")) guarded_([this] { new_scene(); });
-            if (ctx.menu_item("Open Scene...", "Ctrl+O")) guarded_([this] { open_scene_dialog_(); });
-            if (ctx.begin_menu("Open Recent Scene")) {
-                for (const auto& s : project_.scenes()) {
-                    if (ctx.menu_item(s)) { const fs::path p = project_.absolute(s); guarded_([this, p] { open_scene(p); }); }
-                }
-                ctx.end_menu();
-            }
-            ctx.menu_separator();
-            if (ctx.menu_item("Save", "Ctrl+S")) save_active_();
-            if (ctx.menu_item("Save Scene As...", "Ctrl+Shift+S")) save_scene_as_dialog_();
-            if (ctx.menu_item("Save All")) save_all_();
-            ctx.menu_separator();
-            if (ctx.menu_item("New Project...")) new_project_dialog_();
-            if (ctx.menu_item("Open Project...")) open_project_dialog_();
-            if (ctx.begin_menu("Recent Projects")) {
-                for (const auto& r : Project::recent_projects()) {
-                    if (ctx.menu_item(r)) { const fs::path p = r; guarded_([this, p] { switch_project_ = p; }); }
-                }
-                ctx.end_menu();
-            }
-            ctx.menu_separator();
-            if (ctx.menu_item("Quit", "Ctrl+Q")) { if (request_close()) quit_ = true; }
-            ctx.end_menu();
-        }
-        if (ctx.begin_menu("Edit")) {
-            const std::string ul = "Undo " + current_undo_label_(true);
-            const std::string rl = "Redo " + current_undo_label_(false);
-            if (ctx.menu_item(ul, "Ctrl+Z")) undo();
-            if (ctx.menu_item(rl, "Ctrl+Shift+Z")) redo();
-            ctx.menu_separator();
-            const bool scene_tab = tab_ == Tab::Scene && !playing();
-            if (ctx.menu_item("Duplicate", "Shift D", nullptr, scene_tab)) { duplicate_selected(); pending_modal_kind_ = ModalKind::Grab; }
-            if (ctx.menu_item("Delete", "X", nullptr, scene_tab)) delete_selected();
-            if (ctx.menu_item("Select All", "A", nullptr, scene_tab)) { doc_.clear_selection(); for (ObjectId id : visible_ids_()) doc_.select(id, true); }
-            if (ctx.menu_item("Select None", "Alt A", nullptr, scene_tab)) doc_.clear_selection();
-            ctx.menu_separator();
-            if (ctx.menu_item(in_edit_mode_() ? "Object Mode" : "Edit Mode", "Tab", nullptr, tab_ == Tab::Scene && !playing())) toggle_edit_mode_();
-            if (ctx.menu_item("Parent to Active", "Ctrl P", nullptr, scene_tab)) parent_selection_to_active_();
-            if (ctx.menu_item("Clear Parent (keep transform)", "Alt P", nullptr, scene_tab)) clear_parent_keep_transform_();
-            if (ctx.menu_item("Hide Selected", "H", nullptr, scene_tab)) hide_(doc_.selection());
-            if (ctx.menu_item("Unhide All", "Alt H", nullptr, scene_tab)) unhide_all_();
-            ctx.end_menu();
-        }
-        if (ctx.begin_menu("View")) {
-            if (ctx.begin_menu("Shading")) {
-                bool w = shading_ == Shading::Wireframe, s = shading_ == Shading::Solid, f = shading_ == Shading::Full;
-                if (ctx.menu_item("Wireframe", "Z", &w)) set_shading(Shading::Wireframe);
-                if (ctx.menu_item("Solid", "Z", &s)) set_shading(Shading::Solid);
-                if (ctx.menu_item("Full Render", "Z", &f)) set_shading(Shading::Full);
-                ctx.end_menu();
-            }
-            if (ctx.begin_menu("Debug View (Full Render)")) {
-                static const std::vector<std::string> views = {"off", "albedo", "normals", "roughness", "metallic", "emissive",
-                    "material_ao", "world_pos", "depth", "direct", "indirect", "shadows", "contact_shadows", "ssao", "ssr",
-                    "ssr_confidence", "ssgi", "dof", "volumetrics", "lines"};
-                for (const auto& v : views) {
-                    bool on = (full_debug_view_.empty() ? std::string("off") : full_debug_view_) == v;
-                    if (ctx.menu_item(v, {}, &on)) { full_debug_view_ = v == "off" ? std::string() : v; set_shading(Shading::Full); }
-                }
-                ctx.end_menu();
-            }
-            if (ctx.menu_item("Grid", "", &show_grid_)) show_grid_ = !show_grid_;
-            if (ctx.menu_item("Gizmos", "", &show_gizmo_)) show_gizmo_ = !show_gizmo_;
-            ctx.menu_separator();
-            if (ctx.menu_item("Frame Selected", "Num.")) frame_selected();
-            if (ctx.menu_item("Frame All", "Home")) frame_all();
-            if (ctx.menu_item(camera_.ortho ? "Perspective" : "Orthographic", "Num5")) { camera_.ortho = !camera_.ortho; camera_.apply(); }
-            ctx.end_menu();
-        }
-        if (ctx.begin_menu("Create")) {
-            const bool ok = tab_ == Tab::Scene && !playing();
-            if (ctx.menu_item("Empty", "", nullptr, ok)) create_empty();
-            if (ctx.begin_menu("Mesh", ok)) {
-                for (const auto& p : primitive_names()) if (ctx.menu_item(p)) create_primitive(p);
-                ctx.end_menu();
-            }
-            if (ctx.begin_menu("Light", ok)) {
-                if (ctx.menu_item("Directional Light")) create_with_component("DirectionalLight", "Sun");
-                if (ctx.menu_item("Point Light")) create_with_component("PointLight", "Point Light");
-                if (ctx.menu_item("Spot Light")) create_with_component("SpotLight", "Spot Light");
-                if (ctx.menu_item("Environment Light")) create_with_component("EnvironmentLight", "Environment");
-                if (ctx.menu_item("Reflection Probe")) create_with_component("ReflectionProbe", "Reflection Probe");
-                ctx.end_menu();
-            }
-            if (ctx.menu_item("Camera", "", nullptr, ok)) create_with_component("Camera", "Camera");
-            if (ctx.menu_item("Terrain", "", nullptr, ok)) create_with_component("Terrain", "Terrain");
-            ctx.menu_separator();
-            if (ctx.begin_menu("New Mesh Asset")) {
-                for (const auto& p : primitive_names()) if (ctx.menu_item(p)) new_mesh(p);
-                ctx.end_menu();
-            }
-            if (ctx.menu_item("New Material Asset")) create_material("material");
-            ctx.end_menu();
-        }
-        if (ctx.begin_menu("Build")) {
-            if (ctx.menu_item(playing() ? "Stop" : "Play", "F5")) playing() ? stop() : play();
-            ctx.menu_separator();
-            if (ctx.menu_item("Package Project (.caml)...")) open_package_dialog_();
-            if (ctx.menu_item("Restart Renderer")) restart_ = true;
-            ctx.end_menu();
-        }
-        if (ctx.begin_menu("Help")) {
-            if (ctx.menu_item("Controls...")) ctx.open_modal("Controls");
-            if (ctx.menu_item("About toyengine editor")) ctx.open_modal("About");
-            ctx.end_menu();
-        }
-        ctx.end_menubar();
-    }
-
-    // --- toolbar: tabs, play, shading ---
-
-    void draw_toolbar_(imm::Context& ctx, const imm::Box& b) {
-        static const std::vector<std::string> tabs = {"Scene", "Asset", "Render Settings", "Project Settings"};
-        int t = static_cast<int>(tab_);
-        if (ctx.tab_bar("main_tabs", b, tabs, &t)) set_tab(static_cast<Tab>(t));
-        // Right side: play/stop + shading.
-        float x = b.right() - 8;
-        auto right_button = [&](const char* label, bool on, float w) {
-            x -= w;
-            const imm::Box r{x, b.y + 4, w, b.h - 8};
-            x -= 4;
-            bool hov = false, held = false;
-            const bool clicked = ctx.invisible_button(label, r, &hov, &held);
-            ctx.fill(r, on ? imm::with_alpha(ctx.style.accent, 0.85f) : held ? ctx.style.button_active : hov ? ctx.style.button_hover : ctx.style.button);
-            ctx.text_in(r, imm::label_text(label), on ? glm::vec4(0.08f, 0.08f, 0.09f, 1) : ctx.style.text, 0, true);
-            return clicked;
-        };
-        if (right_button("Full##sh", shading_ == Shading::Full, 46)) set_shading(Shading::Full);
-        if (right_button("Solid##sh", shading_ == Shading::Solid, 50)) set_shading(Shading::Solid);
-        if (right_button("Wire##sh", shading_ == Shading::Wireframe, 46)) set_shading(Shading::Wireframe);
-        x -= 14;
-        if (right_button(playing() ? "Stop##play" : "Play##play", playing(), 60)) playing() ? stop() : play();
-    }
-
-    void draw_status_(imm::Context& ctx, const imm::Box& b) {
-        ctx.fill(b, ctx.style.panel_alt);
-        ctx.fill({b.x, b.y, b.w, 1}, ctx.style.border);
-        std::string left = project_.name() + "  |  " + (doc_.path().empty() ? std::string("unsaved scene") : project_.relative(doc_.path())) +
-                           (doc_.dirty() ? " *" : "");
-        if (playing()) left += "  |  PLAYING";
-        ctx.text_in({b.x, b.y, b.w * 0.5f, b.h}, left, ctx.style.text_dim);
-        const double age = std::chrono::duration<double>(std::chrono::steady_clock::now() - status_time_).count();
-        if (!status_.empty() && age < 8.0) {
-            const glm::vec4 c = status_level_ == 2 ? ctx.style.error : status_level_ == 1 ? ctx.style.warning : ctx.style.text_dim;
-            const float w = ctx.text_width(status_) + 16;
-            ctx.text_in({b.right() - w, b.y, w, b.h}, status_, c);
-        }
-    }
-
-    // =================================================================================
-    // UI: Scene tab
-    // =================================================================================
-
-    void draw_scene_tab_(imm::Context& ctx, const imm::Box& c) {
-        if (maximized_) { draw_viewport_(ctx, c, in_edit_mode_()); return; }
-        if (!show_left_ || !show_right_) { draw_scene_tab_partial_(ctx, c); return; }
-        const float split = 4;
-        left_w_ = std::clamp(left_w_, 150.0f, c.w * 0.4f);
-        right_w_ = std::clamp(right_w_, 220.0f, c.w * 0.45f);
-        bottom_h_ = std::clamp(bottom_h_, 90.0f, c.h * 0.6f);
-        const imm::Box left{c.x, c.y, left_w_, c.h - bottom_h_ - split};
-        const imm::Box right{c.right() - right_w_, c.y, right_w_, c.h};
-        const imm::Box bottom{c.x, c.bottom() - bottom_h_, c.w - right_w_ - split, bottom_h_};
-        const imm::Box center{left.right() + split, c.y, right.x - split - (left.right() + split), c.h - bottom_h_ - split};
-
-        // Splitters drag their bar's position; the panel sizes follow from it.
-        float lx = left_w_;
-        if (ctx.splitter("split_left", {left.right(), c.y, split, left.h}, true, &lx, 150, c.w * 0.4f).changed) left_w_ = lx;
-        float rx = right.x - split;
-        if (ctx.splitter("split_right", {right.x - split, c.y, split, c.h}, true, &rx, c.right() - c.w * 0.45f, c.right() - 220).changed) {
-            right_w_ = c.right() - rx - split;
-        }
-        float by = bottom.y - split;
-        if (ctx.splitter("split_bottom", {c.x, bottom.y - split, c.w - right_w_ - split, split}, false, &by, c.bottom() - c.h * 0.6f,
-                         c.bottom() - 90).changed) {
-            bottom_h_ = c.bottom() - by - split;
-        }
-
-        draw_hierarchy_(ctx, left);
-        draw_viewport_(ctx, center, in_edit_mode_());
-        draw_inspector_(ctx, right);
-        draw_asset_browser_(ctx, bottom);
-    }
-
-    /** @brief The Scene tab with the left (T) and/or right (N) panels hidden. */
-    void draw_scene_tab_partial_(imm::Context& ctx, const imm::Box& c) {
-        const float split = 4;
-        const float lw = show_left_ ? std::clamp(left_w_, 150.0f, c.w * 0.4f) : 0.0f;
-        const float rw = show_right_ ? std::clamp(right_w_, 220.0f, c.w * 0.45f) : 0.0f;
-        const imm::Box left{c.x, c.y, lw, c.h};
-        const imm::Box right{c.right() - rw, c.y, rw, c.h};
-        const imm::Box center{c.x + lw + (lw > 0 ? split : 0), c.y, c.w - lw - rw - (lw > 0 ? split : 0) - (rw > 0 ? split : 0), c.h};
-        if (show_left_) draw_hierarchy_(ctx, left);
-        draw_viewport_(ctx, center, in_edit_mode_());
-        if (show_right_) draw_inspector_(ctx, right);
-    }
-
-    void draw_hierarchy_(imm::Context& ctx, const imm::Box& b) {
-        hierarchy_hovered_ = ctx.is_hovered(b);
-        ctx.begin_panel("hierarchy", b, playing() ? "Outliner (playing: edits disabled)" : "Outliner");
-        // Scene name row.
-        std::string scene_name = doc_.scene_name();
-        ctx.push_id("scene_name_row");
-        if (!playing() && ctx.input_text("Scene", &scene_name)) apply_(doc_.set_scene_key("scene_name", Node(scene_name)));
-        ctx.pop_id();
-        ctx.separator();
-        if (rename_id_ && !doc_.find(rename_id_)) rename_id_ = 0;
-        draw_tree_(ctx, doc_.root_objects(), 0);
-        // Drop on empty space: move to root.
-        if (!playing()) {
-            if (auto dropped = ctx.drop_target("object", imm::Box{b.x, ctx.cursor().y, b.w, std::max(20.0f, b.bottom() - ctx.cursor().y)})) {
-                const ObjectId id = std::stoll(*dropped);
-                apply_(doc_.reparent(id, 0));
-            }
-            if (ctx.open_context_popup_in("hier_ctx", b)) context_target_ = 0;
-        }
-        if (ctx.begin_popup("hier_ctx")) {
-            draw_object_context_menu_(ctx, context_target_);
-            ctx.end_popup();
-        }
-        ctx.end_panel();
-    }
-
-    void draw_tree_(imm::Context& ctx, const Node& list, int depth) {
-        if (!list.is_sequence()) return;
-        // Copy ids first: an action in this loop may restructure the document.
-        std::vector<ObjectId> ids;
-        for (const auto& o : list.as_seq()) ids.push_back(SceneDocument::id_of(o));
-        for (ObjectId id : ids) {
-            const Node* o = doc_.find(id);
-            if (!o) continue;
-            const std::string name = get_string(*o, "name", "Object");
-            const bool has_children = o->contains("children") && o->at("children").is_sequence() && o->at("children").size() > 0;
-            const bool active = get_bool(*o, "active", true);
-            ctx.push_id(static_cast<int64_t>(id));
-            if (rename_id_ == id) {
-                imm::Box row = ctx.next_box(ctx.style.row_height);
-                std::string n = name;
-                if (rename_frames_++ == 0) ctx.begin_text_edit("rename", n);
-                if (ctx.input_text_box("rename", {row.x + depth, row.y, row.w - depth, row.h}, &n) && !n.empty()) {
-                    apply_(doc_.set_object_key(id, "name", Node(n), "Rename"));
-                }
-                if (!ctx.wants_keyboard() && rename_frames_ > 1) rename_id_ = 0;
-                ctx.pop_id();
-                continue;
-            }
-            const glm::vec4 dim = ctx.style.text_disabled;
-            const bool inherited = o->contains("inherit_from");
-            const std::string label = inherited ? name + "  (prefab)" : name;
-            auto r = ctx.tree_node(ctx.get_id("node"), label, !has_children, doc_.is_selected(id), true, active ? nullptr : &dim);
-            if (r.clicked) {
-                const bool add = has(ctx.input().mods, Mods::Shift) || has(ctx.input().mods, imm::Context::command_mod());
-                doc_.select(id, add);
-            }
-            if (r.double_clicked && !playing()) { rename_id_ = id; rename_frames_ = 0; }   // Blender: double-click renames
-            if (r.right_clicked) { context_target_ = id; if (!doc_.is_selected(id)) doc_.select(id); ctx.open_popup("hier_ctx_obj"); }
-            if (!playing()) {
-                ctx.drag_source("object", std::to_string(id), name);
-                if (auto dropped = ctx.drop_target("object", r.rect)) {
-                    const ObjectId src = std::stoll(*dropped);
-                    if (src != id) apply_(doc_.reparent(src, id));
-                }
-            }
-            if (ctx.begin_popup("hier_ctx_obj")) {
-                draw_object_context_menu_(ctx, context_target_);
-                ctx.end_popup();
-            }
-            if (r.open) {
-                draw_tree_(ctx, o->at("children"), depth + 1);
-                ctx.tree_pop();
-            }
-            ctx.pop_id();
-        }
-    }
-
-    void draw_object_context_menu_(imm::Context& ctx, ObjectId target) {
-        const bool ok = !playing();
-        if (ctx.begin_menu("Create Child", ok && target != 0)) {
-            if (ctx.menu_item("Empty")) create_empty(target);
-            for (const auto& p : primitive_names()) if (ctx.menu_item(p)) create_primitive(p, target);
-            if (ctx.menu_item("Point Light")) create_with_component("PointLight", "Point Light", target);
-            ctx.end_menu();
-        }
-        if (ctx.begin_menu("Create", ok)) {
-            if (ctx.menu_item("Empty")) create_empty();
-            for (const auto& p : primitive_names()) if (ctx.menu_item(p)) create_primitive(p);
-            ctx.end_menu();
-        }
-        ctx.menu_separator();
-        if (ctx.menu_item("Rename", "F2", nullptr, ok && target != 0)) { rename_id_ = target; rename_frames_ = 0; }
-        if (ctx.menu_item("Duplicate", "Ctrl+D", nullptr, ok && target != 0)) duplicate_selected();
-        if (ctx.menu_item("Delete", "Del", nullptr, ok && target != 0)) delete_selected();
-        if (ctx.menu_item("Unparent", "", nullptr, ok && target != 0)) apply_(doc_.reparent(target, 0));
-        ctx.menu_separator();
-        if (ctx.menu_item("Frame", "Num.", nullptr, target != 0)) frame_selected();
-    }
-
-    void draw_inspector_(imm::Context& ctx, const imm::Box& b) {
-        ctx.begin_panel("inspector", b, "Inspector");
-        const ObjectId id = doc_.primary();
-        Node* obj = id ? doc_.find(id) : nullptr;
-        if (!obj) {
-            ctx.label_dim("Nothing selected.");
-            ctx.spacing();
-            ctx.heading("Scene");
-            Node scene = doc_.node().at("scene");
-            bool auto_t = get_bool(scene, "auto_transform", true);
-            if (!playing() && ctx.property_bool("Auto transform", &auto_t)) apply_(doc_.set_scene_key("auto_transform", Node(auto_t)));
-            if (doc_.node().at("scene").contains("inherit_from")) {
-                ctx.label_dim("Inherits: " + get_string(doc_.node().at("scene"), "inherit_from"));
-            }
-            ctx.end_panel();
-            return;
-        }
-        const bool editable = !playing();
-        // Header: active + name.
-        bool active = get_bool(*obj, "active", true);
-        if (editable && ctx.checkbox("##active", &active)) apply_(doc_.set_object_key(id, "active", Node(active), "Toggle Active"));
-        ctx.same_line();
-        std::string name = get_string(*obj, "name", "Object");
-        imm::Box nb = ctx.next_box(ctx.style.row_height);
-        if (editable && ctx.input_text_box("objname", nb, &name) && !name.empty()) apply_(doc_.set_object_key(id, "name", Node(name), "Rename"));
-        if (obj->contains("inherit_from")) ctx.label_dim("Prefab: " + get_string(*obj, "inherit_from") + " (edits override)");
-        if (doc_.selection().size() > 1) ctx.label_dim(std::to_string(doc_.selection().size()) + " objects selected (editing the last)");
-        ctx.spacing(2);
-
-        obj = doc_.find(id);
-        if (!obj || !obj->contains("components")) { ctx.end_panel(); return; }
-        const size_t count = obj->at("components").size();
-        InspectorEnv env = inspector_env_();
-        for (size_t i = 0; i < count; ++i) {
-            obj = doc_.find(id);
-            if (!obj || i >= obj->at("components").size()) break;
-            Node comp = obj->at("components").as_seq()[i];
-            const std::string type = component_type(comp);
-            const ComponentSchema* schema = find_schema(type);
-            ctx.push_id(static_cast<int64_t>(i));
-            bool remove = false;
-            const bool removable = editable && (!schema || schema->removable);
-            const bool open = ctx.collapsing_header(type.empty() ? std::string("(untyped)") : type, true, removable ? &remove : nullptr);
-            if (editable && ctx.open_context_popup_on_last("comp_ctx")) {}
-            if (ctx.begin_popup("comp_ctx")) {
-                if (ctx.menu_item("Move Up", "", nullptr, i > 0)) apply_(doc_.move_component(id, static_cast<int>(i), -1));
-                if (ctx.menu_item("Move Down", "", nullptr, i + 1 < count)) apply_(doc_.move_component(id, static_cast<int>(i), +1));
-                if (ctx.menu_item("Reset to Defaults", "", nullptr, schema != nullptr)) {
-                    apply_(doc_.set_component(id, static_cast<int>(i), default_component(type), "Reset " + type));
-                }
-                if (ctx.menu_item("Copy as YAML")) {
-                    Node c = comp;
-                    strip_private_keys(c);
-                    if (ctx.input().set_clipboard) ctx.input().set_clipboard(coopa::yaml::emit(c));
-                }
-                if (type == "MeshRenderer" && comp.contains("material") && comp.at("material").is_mapping() &&
-                    ctx.menu_item("Extract Material to Asset")) {
-                    extract_material_(id, static_cast<int>(i), comp);
-                }
-                if (ctx.menu_item("Remove", "", nullptr, removable)) remove = true;
-                ctx.end_popup();
-            }
-            if (remove) {
-                apply_(doc_.remove_component(id, static_cast<int>(i)));
-                ctx.pop_id();
-                break;
-            }
-            if (open) {
-                ctx.indent(4);
-                const Node before = comp;
-                EditResult r = draw_component(ctx, comp, env, [this](const std::string& rel) {
-                    open_material(project_.absolute(rel));
-                });
-                ctx.unindent(4);
-                if (r.changed && editable && !(comp == before)) {
-                    const std::string key = "c" + std::to_string(id) + ":" + std::to_string(i) + ":" + r.key;
-                    apply_(doc_.set_component(id, static_cast<int>(i), comp, "Edit " + type + "." + r.key,
-                                              r.active ? key : std::string()));
-                }
-                if (r.finished) doc_.end_merge();
-            }
-            ctx.pop_id();
-            ctx.spacing(4);
-        }
-        if (editable) {
-            ctx.spacing();
-            std::vector<std::string> addable = {"Add Component..."};
-            std::map<std::string, std::vector<std::string>> by_cat;
-            for (const auto& [t, s] : schemas()) {
-                if (s.unique && doc_.find_component(id, t) >= 0) continue;
-                by_cat[s.category].push_back(t);
-            }
-            for (const auto& [cat, types] : by_cat) for (const auto& t : types) addable.push_back(cat + " / " + t);
-            int pick = 0;
-            if (ctx.combo("##addcomp", &pick, addable) && pick > 0) {
-                const std::string entry = addable[static_cast<size_t>(pick)];
-                const std::string type = entry.substr(entry.find(" / ") + 3);
-                apply_(doc_.add_component(id, default_component(type)));
-            }
-        }
-        ctx.end_panel();
-    }
+    // --- helpers shared by the panels ---
 
     void extract_material_(ObjectId id, int index, const Node& comp) {
         const std::string base = get_string(*doc_.find(id), "name", "material");
@@ -1442,74 +1071,6 @@ private:
         c["material"] = Node("materials/" + n);
         apply_(doc_.set_component(id, index, c, "Extract Material"));
         log_info("Extracted material to materials/" + n + ".yaml");
-    }
-
-    // --- asset browser ---
-
-    void draw_asset_browser_(imm::Context& ctx, const imm::Box& b) {
-        static const std::vector<std::string> cats = {"Scenes", "Meshes", "Materials", "Textures", "Physics", "Log"};
-        ctx.fill(b, ctx.style.panel_bg);
-        const imm::Box tabs{b.x, b.y, b.w, 26};
-        ctx.tab_bar("asset_cats", tabs, cats, &asset_cat_);
-        // Refresh + search on the right of the tab strip.
-        const imm::Box search{b.right() - 200, b.y + 3, 150, 20};
-        ctx.input_text_box("asset_search", search, &asset_filter_, "filter...");
-        if (ctx.invisible_button("refresh", {b.right() - 44, b.y + 3, 40, 20})) project_.refresh();
-        ctx.text_in(ctx.last_rect(), "Scan", ctx.last_hovered() ? ctx.style.text : ctx.style.text_dim, 0, true);
-        const imm::Box list{b.x, tabs.bottom(), b.w, b.h - tabs.h};
-        ctx.begin_region("asset_list", list, true);
-        if (asset_cat_ == 5) {
-            for (auto it = log_.rbegin(); it != log_.rend(); ++it) {
-                const glm::vec4 c = it->first == 2 ? ctx.style.error : it->first == 1 ? ctx.style.warning : ctx.style.text_dim;
-                ctx.paragraph(it->second, &c);
-            }
-            ctx.end_region();
-            return;
-        }
-        std::vector<std::string> items;
-        std::string kind;
-        switch (asset_cat_) {
-            case 0: items = project_.scenes(); kind = "scene"; break;
-            case 1: items = project_.list("meshes", ".yaml"); kind = "mesh";
-                    if (!doc_.path().empty()) {
-                        const auto env = inspector_env_();
-                        for (const auto& s : env.list_assets("meshes", ".yaml"))
-                            if (std::find(items.begin(), items.end(), s) == items.end()) items.push_back(s);
-                    }
-                    break;
-            case 2: items = project_.list("materials", ".yaml"); kind = "material"; break;
-            case 3: items = project_.list("textures", ".png"); kind = "texture"; break;
-            case 4: items = project_.list("physics_materials", ".yaml"); kind = "physics"; break;
-        }
-        const float cell_w = 170;
-        const int cols = std::max(1, static_cast<int>(ctx.available_width() / cell_w));
-        int col = 0;
-        for (const auto& item : items) {
-            if (!asset_filter_.empty() && item.find(asset_filter_) == std::string::npos) continue;
-            if (col > 0) ctx.same_line();
-            ctx.push_id(item);
-            const std::string label = fs::path(item).filename().string();
-            const bool sel = selected_asset_ == item;
-            if (ctx.selectable(label, sel, cell_w - 6)) {
-                if (sel && ctx.time() - asset_click_time_ < 0.4) open_asset_(kind, item);
-                selected_asset_ = item;
-                asset_click_time_ = ctx.time();
-            }
-            ctx.tooltip(item);
-            ctx.drag_source("asset", item, label);
-            if (ctx.open_context_popup_on_last("asset_ctx")) selected_asset_ = item;
-            if (ctx.begin_popup("asset_ctx")) {
-                if (ctx.menu_item("Open")) open_asset_(kind, item);
-                if (kind == "mesh" && ctx.menu_item("Add to Scene")) add_mesh_to_scene_(item);
-                if (kind == "material" && ctx.menu_item("Assign to Selection")) assign_material_(item);
-                if (ctx.menu_item("Copy Path")) { if (ctx.input().set_clipboard) ctx.input().set_clipboard(item); }
-                ctx.end_popup();
-            }
-            ctx.pop_id();
-            col = (col + 1) % cols;
-        }
-        if (items.empty()) ctx.label_dim("(empty)");
-        ctx.end_region();
     }
 
     void open_asset_(const std::string& kind, const std::string& item) {
@@ -1546,6 +1107,124 @@ private:
         }
     }
 
+    void draw_mesh_tools_(imm::Context& ctx) {
+        auto& md = mesh_;
+        std::string name = md.name;
+        if (ctx.input_text("Name", &name) && !name.empty()) md.name = name;
+        ctx.label_dim(md.path.empty() ? std::string("(not saved yet: meshes/") + md.name + ".yaml)" : project_.relative(md.path));
+        ctx.label_dim(std::to_string(md.mesh.positions.size()) + " verts  " + std::to_string(md.mesh.faces.size()) + " faces  " +
+                      std::to_string(md.mesh.triangle_count()) + " tris" + (md.dirty() ? "  (modified)" : ""));
+        if (ctx.button("Save Mesh", 120)) save_mesh();
+        ctx.same_line();
+        if (ctx.button("Add to Scene", 120)) {
+            if (md.path.empty() || md.dirty()) save_mesh();
+            if (!md.path.empty()) { standalone_mesh_ = false; set_tab(Tab::Layout); add_mesh_to_scene_(project_.relative(md.path)); }
+        }
+        ctx.spacing();
+        if (ctx.collapsing_header("Select")) {
+            if (ctx.button("All (A)", 90)) md.selection.select_all(md.mesh);
+            ctx.same_line();
+            if (ctx.button("None", 70)) md.selection.clear();
+            ctx.same_line();
+            if (ctx.button("Linked (L)", 90)) select_linked(md.mesh, md.selection);
+        }
+        if (ctx.collapsing_header("Modelling")) {
+            ctx.drag_float("Extrude dist", &extrude_dist_, 0.01f, -100.0f, 100.0f);
+            if (ctx.button("Extrude (Ctrl+E)", -1)) extrude_();
+            ctx.drag_float("Inset amount", &inset_amount_, 0.005f, 0.0f, 0.99f);
+            if (ctx.button("Inset (I)", -1)) md.edit("Inset", [&](EditMesh& m, MeshSelection& s) { inset_faces(m, s, inset_amount_); });
+            ctx.drag_float("Bevel width", &bevel_width_, 0.005f, 0.0f, 10.0f);
+            if (ctx.button("Bevel (Ctrl+B)", -1)) md.edit("Bevel", [&](EditMesh& m, MeshSelection& s) { bevel_edges(m, s, bevel_width_); });
+            if (ctx.button("Delete (X)", -1)) md.edit("Delete", [](EditMesh& m, MeshSelection& s) { delete_selection(m, s); });
+            if (ctx.button("Merge at Center (M)", -1)) md.edit("Merge", [](EditMesh& m, MeshSelection& s) { merge_at_center(m, s); });
+            ctx.drag_float("Merge distance", &merge_dist_, 0.0005f, 0.0f, 10.0f, "%.4f");
+            if (ctx.button("Merge by Distance", -1)) {
+                size_t removed = 0;
+                md.edit("Merge by Distance", [&](EditMesh& m, MeshSelection& s) { removed = merge_by_distance(m, s, merge_dist_); });
+                log_info("Merged " + std::to_string(removed) + " vertices");
+            }
+            if (ctx.button("Flip Normals", -1)) md.edit("Flip Normals", [](EditMesh& m, MeshSelection& s) { flip_normals(m, s); });
+            if (ctx.button("Shade Smooth", -1)) md.edit("Shade Smooth", [](EditMesh& m, MeshSelection& s) { set_smooth(m, s, true); });
+            if (ctx.button("Shade Flat", -1)) md.edit("Shade Flat", [](EditMesh& m, MeshSelection& s) { set_smooth(m, s, false); });
+        }
+        if (ctx.collapsing_header("UVs")) {
+            ctx.drag_float("Box scale", &uv_scale_, 0.01f, 0.001f, 1000.0f);
+            if (ctx.button("Box Project", -1)) md.edit("Box UV", [&](EditMesh& m, MeshSelection& s) { uv_box_project(m, s, uv_scale_); });
+            if (ctx.button("Planar X", 80)) md.edit("Planar UV", [](EditMesh& m, MeshSelection& s) { uv_planar_project(m, s, 0); });
+            ctx.same_line();
+            if (ctx.button("Planar Y", 80)) md.edit("Planar UV", [](EditMesh& m, MeshSelection& s) { uv_planar_project(m, s, 1); });
+            ctx.same_line();
+            if (ctx.button("Planar Z", 80)) md.edit("Planar UV", [](EditMesh& m, MeshSelection& s) { uv_planar_project(m, s, 2); });
+        }
+        if (ctx.collapsing_header("Selection Transform", false)) {
+            const auto vs = md.selection.affected_vertices(md.mesh);
+            if (!vs.empty()) {
+                glm::vec3 c = selection_center(md.mesh, md.selection);
+                glm::vec3 nc = c;
+                if (ctx.drag_floatn("Center", &nc.x, 3, 0.01f)) {
+                    const glm::vec3 d = nc - c;
+                    md.edit("Move Vertices", [&](EditMesh& m, MeshSelection& s) { translate_selection(m, s, d); }, "sel_center");
+                }
+                if (ctx.last_deactivated()) md.undo.end_merge();
+            } else {
+                ctx.label_dim("Nothing selected.");
+            }
+        }
+    }
+
+    void extrude_() {
+        auto& md = mesh_;
+        if (md.selection.mode == SelectMode::Edge) {
+            glm::vec3 n(0, 0, extrude_dist_);
+            md.edit("Extrude Edges", [&](EditMesh& m, MeshSelection& s) { extrude_edges(m, s, n); });
+        } else {
+            md.edit("Extrude", [&](EditMesh& m, MeshSelection& s) { extrude_faces(m, s, extrude_dist_); });
+        }
+    }
+
+    void draw_material_editor_(imm::Context& ctx) {
+        auto& md = material_;
+        ctx.label_dim(md.ref + (md.dirty() ? "  (modified)" : ""));
+        if (ctx.button("Save Material", 130)) save_material();
+        ctx.same_line();
+        if (ctx.button("Assign to Selected", 150, true, imm::Icon::Material)) assign_material_(md.ref + ".yaml");
+        ctx.spacing();
+        Node before = md.node;
+        InspectorEnv env = inspector_env_();
+        EditResult r = draw_fields(ctx, material_fields(), md.node, env, true, {"base"});
+        if (r.changed) {
+            md.commit("Edit " + r.key, before, r.active ? "m:" + r.key : std::string());
+            refresh_material_preview_();
+        }
+        if (r.finished) md.undo.end_merge();
+    }
+
+    void draw_setting_row_(imm::Context& ctx, const FieldDesc& f, Node& section, const InspectorEnv& env, const std::string& section_name) {
+        ctx.push_id(f.key);
+        const bool present = section.contains(f.key);
+        const Node before = config_.node;
+        EditResult r = draw_field(ctx, f, section, env);
+        const imm::Box row = ctx.last_rect();
+        const imm::Box full_row{row.x - row.w, row.y, row.w * 2, ctx.style.row_height};
+        if (present && ctx.is_hovered(full_row)) {
+            // Reset (hover only) sits just right of the widget, Blender's "reset to default".
+            const imm::Box rb{row.right() - ctx.style.row_height + 1, row.y + 1, ctx.style.row_height - 2, ctx.style.row_height - 2};
+            if (ctx.icon_button("reset", imm::Icon::Restart, "Reset to Default\nRemoves the key so its quality preset / default applies",
+                                false, rb.h, imm::Context::kAll, rb)) {
+                erase_key(section, f.key);
+                r.changed = true;
+                r.finished = true;
+            }
+        }
+        if (r.changed) {
+            config_.commit("Edit " + section_name + "." + f.key, before, r.active ? "cfg:" + f.key : std::string());
+            if (section_name == "render") apply_config_live();
+            if (f.startup_only) log_info(f.key + " changes on renderer restart");
+        }
+        if (r.finished) config_.undo.end_merge();
+        ctx.pop_id();
+    }
+
     // =================================================================================
     // UI: viewport (shared by the Scene and Asset tabs)
     // =================================================================================
@@ -1569,77 +1248,59 @@ private:
     //               Alt+N normals
     // =================================================================================
 
-    enum class Tool { Select = 0, Move, Rotate, Scale };
+    enum class Tool { Select = 0, Move, Rotate, Scale, Cursor };
 
-    bool in_edit_mode_() const { return tab_ == Tab::Scene && edit_object_ != 0; }
+    bool in_edit_mode_() const { return !asset_view_() && edit_object_ != 0; }
 
     /** @brief The edited mesh's object-to-world matrix (identity in the Asset tab). */
     glm::mat4 mesh_world_() {
-        if (tab_ == Tab::Scene && edit_object_) {
+        if (!asset_view_() && edit_object_) {
             if (auto* live = sync_.live(edit_object_); live && live->get_transform()) return live->get_transform()->transform().get_world_matrix();
         }
         return glm::mat4(1.0f);
     }
 
     void draw_viewport_(imm::Context& ctx, const imm::Box& area, bool mesh_edit) {
-        // Header strip: mode, tools, orientation, overlays.
-        const imm::Box bar{area.x, area.y, area.w, 26};
-        ctx.fill(bar, ctx.style.panel_alt);
-        float x = bar.x + 4;
-        auto tool = [&](const char* label, bool on, float w) {
-            const imm::Box r{x, bar.y + 3, w, bar.h - 6};
-            x += w + 3;
-            bool hov = false, held = false;
-            const bool clicked = ctx.invisible_button(label, r, &hov, &held);
-            ctx.fill(r, on ? imm::with_alpha(ctx.style.accent, 0.8f) : hov ? ctx.style.button_hover : ctx.style.button);
-            ctx.text_in(r, imm::label_text(label), on ? glm::vec4(0.08f, 0.08f, 0.09f, 1) : ctx.style.text, 0, true);
-            return clicked;
-        };
-        if (tab_ == Tab::Scene) {
-            if (tool(in_edit_mode_() ? "Edit Mode##mode" : "Object Mode##mode", in_edit_mode_(), 96)) toggle_edit_mode_();
-            ctx.tooltip("Tab");
-            x += 6;
-        }
-        if (tool("Select##t", tool_ == Tool::Select, 52)) tool_ = Tool::Select;
-        if (tool("Move##t", tool_ == Tool::Move, 46)) tool_ = Tool::Move;
-        if (tool("Rotate##t", tool_ == Tool::Rotate, 54)) tool_ = Tool::Rotate;
-        if (tool("Scale##t", tool_ == Tool::Scale, 46)) tool_ = Tool::Scale;
-        x += 6;
-        if (tool(gizmo_.local ? "Local##sp" : "Global##sp", gizmo_.local, 54)) gizmo_.local = !gizmo_.local;
-        if (tool("Grid##gr", show_grid_, 40)) show_grid_ = !show_grid_;
-        if (tool(camera_.ortho ? "Ortho##pr" : "Persp##pr", camera_.ortho, 50)) { camera_.ortho = !camera_.ortho; camera_.apply(); }
-        if (mesh_edit) {
-            x += 6;
-            auto& sel = mesh_.selection;
-            if (tool("Vert##m", sel.mode == SelectMode::Vertex, 40)) convert_selection(mesh_.mesh, sel, SelectMode::Vertex);
-            if (tool("Edge##m", sel.mode == SelectMode::Edge, 40)) convert_selection(mesh_.mesh, sel, SelectMode::Edge);
-            if (tool("Face##m", sel.mode == SelectMode::Face, 40)) convert_selection(mesh_.mesh, sel, SelectMode::Face);
-        }
-        const char* shading_names[] = {"Wireframe", "Solid", "Full Render"};
-        ctx.text_in({bar.right() - 110, bar.y, 106, bar.h}, shading_names[static_cast<int>(shading_)], ctx.style.text_dim);
-
-        viewport_box_ = imm::Box{area.x, bar.bottom(), area.w, std::max(1.0f, area.h - bar.h)};
+        const imm::Box hb = area_header_(ctx, area);
+        draw_viewport_header_(ctx, hb, mesh_edit);
+        viewport_box_ = imm::Box{area.x, hb.bottom(), area.w, std::max(1.0f, area.h - hb.h)};
         ctx.push_clip(viewport_box_);
+        // The render keeps the game's aspect ratio; paint the bars beside it like Blender's
+        // viewport background rather than leaving them black.
+        if (auto vpr = view_proj_()) {
+            const imm::Box r = vpr->rect.intersect(viewport_box_);
+            if (!r.empty()) {
+                const glm::vec4 bars{0.23f, 0.23f, 0.23f, 1.0f};
+                ctx.fill({viewport_box_.x, viewport_box_.y, viewport_box_.w, r.y - viewport_box_.y}, bars);
+                ctx.fill({viewport_box_.x, r.bottom(), viewport_box_.w, viewport_box_.bottom() - r.bottom()}, bars);
+                ctx.fill({viewport_box_.x, r.y, r.x - viewport_box_.x, r.h}, bars);
+                ctx.fill({r.right(), r.y, viewport_box_.right() - r.right(), r.h}, bars);
+            }
+        }
         handle_viewport_input_(ctx, mesh_edit);
         draw_viewport_overlay_(ctx, mesh_edit);
         if (modal_.active()) {
             const std::string h = modal_.header();
-            const imm::Box hb{viewport_box_.x + 8, viewport_box_.y + 8, ctx.text_width(h) + 16, 24};
-            ctx.fill(hb, glm::vec4(0, 0, 0, 0.55f));
-            ctx.text_in(hb, h, ctx.style.text);
+            const imm::Box b{viewport_box_.x + (show_toolbar_ ? kToolSize + 20 : 10), viewport_box_.bottom() - 34, ctx.text_width(h) + 18, 24};
+            ctx.fill_rounded(b, glm::vec4(0, 0, 0, 0.6f));
+            ctx.text_in(b, h, ctx.style.text);
         }
+        // Furniture last, so it draws over the overlays (its rects were excluded from input).
+        if (show_toolbar_) draw_toolbar_(ctx, mesh_edit);
+        if (show_overlays_ || true) draw_nav_gizmo_(ctx);
+        if (show_sidebar_) draw_sidebar_(ctx, mesh_edit);
         ctx.pop_clip();
         draw_viewport_popups_(ctx, mesh_edit);
         // Asset drops into the viewport.
-        if (!mesh_edit && tab_ == Tab::Scene) {
+        if (!mesh_edit && !asset_view_()) {
             if (auto dropped = ctx.drop_target("asset", viewport_box_)) {
                 const std::string& item = *dropped;
-                if (item.rfind("meshes/", 0) == 0 || item.find("/meshes/") != std::string::npos) {
-                    add_mesh_to_scene_(item, ground_point_(ctx.mouse()));
-                } else if (item.rfind("materials/", 0) == 0) {
+                const auto kind = asset_kind_of_(item).second;
+                if (kind == "mesh") add_mesh_to_scene_(item, ground_point_(ctx.mouse()));
+                else if (kind == "material") {
                     const ObjectId hit = pick_object(ctx.mouse());
                     if (hit) assign_material_(item, hit);
-                } else if (item.rfind("scenes/", 0) == 0) {
+                } else if (kind == "scene") {
                     const fs::path p = project_.absolute(item);
                     guarded_([this, p] { open_scene(p); });
                 }
@@ -1693,7 +1354,9 @@ private:
         const bool alt = has(in.mods, Mods::Alt);
         const bool shift = has(in.mods, Mods::Shift);
         const bool ctrl = has(in.mods, Mods::Control) || has(in.mods, Mods::Super);
-        const bool hovered = ctx.is_hovered(viewport_box_);
+        // The toolbar, navigation gizmo and sidebar are drawn after this (on top); clicks on
+        // them must not select or navigate.
+        const bool hovered = ctx.is_hovered(viewport_box_) && !over_viewport_chrome_(m, mesh_edit);
         viewport_hovered_ = hovered;
         const auto vp = view_proj_();
         if (!vp) return;
@@ -1703,7 +1366,12 @@ private:
             run_modal_(ctx, *vp, ctrl, shift);
             return;
         }
-        if (pending_modal_kind_ != ModalKind::None && hovered) {
+        if (pending_extrude_ && mesh_edit) {
+            pending_extrude_ = false;
+            extrude_interactive_(*vp, ctx.is_hovered(viewport_box_) ? m : viewport_box_.center());
+            return;
+        }
+        if (pending_modal_kind_ != ModalKind::None && (hovered || ctx.is_hovered(viewport_box_))) {
             const ModalKind k = pending_modal_kind_;
             pending_modal_kind_ = ModalKind::None;
             start_modal_(k, *vp, m, mesh_edit, pending_modal_axis_);
@@ -1742,13 +1410,13 @@ private:
 
         // --- gizmo (the Move / Rotate / Scale tools) ---
         bool gizmo_took_mouse = false;
-        const bool can_edit = !(playing() && tab_ == Tab::Scene);
+        const bool can_edit = !(playing() && !asset_view_());
         if (tool_ != Tool::Select && show_gizmo_ && can_edit) {
             gizmo_.mode = tool_ == Tool::Move ? GizmoMode::Translate : tool_ == Tool::Rotate ? GizmoMode::Rotate : GizmoMode::Scale;
             glm::vec3 pivot;
             glm::mat3 basis(1.0f);
             if (gizmo_target_(mesh_edit, pivot, basis)) {
-                const GizmoDelta g = gizmo_.update(*vp, pivot, basis, m, in.pressed[0] && !alt, in.down[0], in.released[0], ctrl,
+                const GizmoDelta g = gizmo_.update(*vp, pivot, basis, m, in.pressed[0] && !alt, in.down[0], in.released[0], ctrl != snap_on_,
                                                    hovered && !ctx.popup_hovered());
                 gizmo_took_mouse = g.active || gizmo_.hot_axis() >= 0;
                 if (g.started) begin_transform_(mesh_edit);
@@ -1767,6 +1435,10 @@ private:
         }
 
         // --- click / box select ---
+        if (tool_ == Tool::Cursor && hovered && in.pressed[0] && !alt) {
+            cursor3d_ = surface_point_(m);   // the Cursor tool: click places the 3D cursor
+            return;
+        }
         if (!gizmo_took_mouse && hovered && in.pressed[0] && !alt) {
             select_press_ = m;
             select_pending_ = true;
@@ -1822,8 +1494,9 @@ private:
         if (ctx.shortcut(Key::GraveAccent)) ctx.open_popup("vp_view_menu", m);
         if (ctx.shortcut(Key::Z)) ctx.open_popup("vp_shading_menu", m);
         if (ctx.shortcut(Key::Z, Mods::Shift)) set_shading(shading_ == Shading::Wireframe ? Shading::Solid : Shading::Wireframe);
-        if (ctx.shortcut(Key::N)) show_right_ = !show_right_;
-        if (ctx.shortcut(Key::T)) show_left_ = !show_left_;
+        if (ctx.shortcut(Key::N)) show_sidebar_ = !show_sidebar_;
+        if (ctx.shortcut(Key::T)) show_toolbar_ = !show_toolbar_;
+        if (ctx.shortcut(Key::B)) tool_ = Tool::Select;
         if (ctx.shortcut(Key::Space, Mods::Control)) maximized_ = !maximized_;
         if (ctx.shortcut(Key::S, Mods::Shift)) ctx.open_popup("vp_snap_menu", m);
         if (ctx.shortcut(Key::C, Mods::Shift)) { cursor3d_ = glm::vec3(0.0f); frame_all(); }
@@ -1855,10 +1528,10 @@ private:
             if (ctx.shortcut(Key::M)) ctx.open_popup("vp_mesh_merge", m);
             if (ctx.shortcut(Key::U)) ctx.open_popup("vp_mesh_uv", m);
             if (ctx.shortcut(Key::N, Mods::Alt)) ctx.open_popup("vp_mesh_normals", m);
-            if (ctx.shortcut(Key::Tab) && tab_ == Tab::Scene) toggle_edit_mode_();
+            if (ctx.shortcut(Key::Tab) && !asset_view_()) toggle_edit_mode_();
             return;
         }
-        if (tab_ != Tab::Scene) return;
+        if (asset_view_()) return;
         if (ctx.shortcut(Key::A)) { doc_.clear_selection(); for (ObjectId id : visible_ids_()) doc_.select(id, true); }
         if (ctx.shortcut(Key::A, Mods::Alt)) doc_.clear_selection();
         if (ctx.shortcut(Key::I, Mods::Control)) {
@@ -1896,6 +1569,7 @@ private:
     void draw_viewport_popups_(imm::Context& ctx, bool mesh_edit) {
         auto vp = view_proj_();
         const glm::vec2 m = ctx.mouse();
+        if (open_add_menu_) { open_add_menu_ = false; ctx.open_popup("vp_add_menu", m); }
         if (ctx.begin_popup("vp_view_menu", 170)) {
             if (ctx.menu_item("Front", "Num1")) camera_.axis_view('f', false);
             if (ctx.menu_item("Back", "Ctrl Num1")) camera_.axis_view('f', true);
@@ -1913,9 +1587,11 @@ private:
         }
         if (ctx.begin_popup("vp_shading_menu", 150)) {
             bool w = shading_ == Shading::Wireframe, s = shading_ == Shading::Solid, f = shading_ == Shading::Full;
+            bool mp = shading_ == Shading::MaterialPreview;
             if (ctx.menu_item("Wireframe", "", &w)) set_shading(Shading::Wireframe);
             if (ctx.menu_item("Solid", "", &s)) set_shading(Shading::Solid);
-            if (ctx.menu_item("Full Render", "", &f)) set_shading(Shading::Full);
+            if (ctx.menu_item("Material Preview", "", &mp)) set_shading(Shading::MaterialPreview);
+            if (ctx.menu_item("Rendered", "", &f)) set_shading(Shading::Full);
             ctx.end_popup();
         }
         if (ctx.begin_popup("vp_tool_menu", 140)) {
@@ -1929,7 +1605,7 @@ private:
             if (ctx.menu_item("Cursor to Selected")) { glm::vec3 p; glm::mat3 b; if (gizmo_target_(mesh_edit, p, b)) cursor3d_ = p; }
             if (ctx.menu_item("Cursor to World Origin")) cursor3d_ = glm::vec3(0.0f);
             if (ctx.menu_item("Cursor to Grid")) cursor3d_ = glm::round(cursor3d_);
-            if (ctx.menu_item("Selection to Cursor", "", nullptr, !mesh_edit && tab_ == Tab::Scene)) selection_to_cursor_();
+            if (ctx.menu_item("Selection to Cursor", "", nullptr, !mesh_edit && !asset_view_())) selection_to_cursor_();
             ctx.end_popup();
         }
         if (ctx.begin_popup("vp_add_menu", 180)) {
@@ -2029,7 +1705,7 @@ private:
     // --- modal operators ---
 
     void start_modal_(ModalKind kind, const ViewProj& vp, glm::vec2 mouse, bool mesh, std::optional<glm::vec3> axis = std::nullopt) {
-        if (playing() && tab_ == Tab::Scene) return;
+        if (playing() && !asset_view_()) return;
         glm::vec3 pivot;
         glm::mat3 basis(1.0f);
         const bool saved_local = gizmo_.local;
@@ -2049,7 +1725,7 @@ private:
     void run_modal_(imm::Context& ctx, const ViewProj& vp, bool ctrl, bool shift) {
         const auto& in = ctx.input();
         const ModalKind kind = modal_.kind();
-        const auto outcome = modal_.update(vp, ctx.mouse(), in.keys, in.pressed[0], in.pressed[1], ctrl, shift);
+        const auto outcome = modal_.update(vp, ctx.mouse(), in.keys, in.pressed[0], in.pressed[1], ctrl != snap_on_, shift);
         ctx.consume_keyboard();
         select_pending_ = box_selecting_ = false;
         if (outcome == ModalTransform::Outcome::Cancelled) {
@@ -2246,7 +1922,7 @@ private:
     // --- edit mode in the scene ---
 
     void toggle_edit_mode_() {
-        if (tab_ != Tab::Scene || playing()) return;
+        if (asset_view_() || playing()) return;
         if (edit_object_) { edit_object_ = 0; tool_settings_restore_(); return; }
         const ObjectId id = doc_.primary();
         if (!id) return;
@@ -2470,9 +2146,9 @@ private:
 
     void draw_viewport_overlay_body_(imm::Context& ctx, bool mesh_edit, const ViewProj& vp_ref) {
         const ViewProj* vp = &vp_ref;
-        if (show_grid_ && !(playing() && !mesh_edit)) draw_grid_(ctx, *vp);
-        const glm::vec4 accent = ctx.style.accent;
-        const glm::vec4 active_col{1.0f, 0.78f, 0.35f, 1.0f};
+        if (show_overlays_ && show_grid_ && !(playing() && !mesh_edit)) draw_grid_(ctx, *vp);
+        const glm::vec4 accent = ctx.style.object_selected;
+        const glm::vec4 active_col = ctx.style.object_active;
         auto draw_mesh_edges = [&](const EditMesh& mm, const std::vector<Edge>& edges, const glm::mat4& world, glm::vec4 col, float t) {
             size_t drawn = 0;
             for (const auto& e : edges) {
@@ -2483,8 +2159,8 @@ private:
             }
         };
         if (!mesh_edit) {
-            // Wireframe mode: every mesh object's edges.
-            if (shading_ == Shading::Wireframe) {
+            // Wireframe mode / X-Ray: every mesh object's edges.
+            if (shading_ == Shading::Wireframe || xray_) {
                 for (const auto& [id, live] : sync_.live_objects()) {
                     const Node* node = doc_.find(id);
                     if (!node || !live || !live->active() || !live->get_transform() || doc_.is_selected(id)) continue;
@@ -2494,23 +2170,16 @@ private:
                     }
                 }
             }
-            // Non-mesh objects: an origin marker.
-            for (const auto& [id, live] : sync_.live_objects()) {
-                const Node* node = doc_.find(id);
-                if (!node || !live || !live->active() || !live->get_transform() || mesh_for_object_(*node)) continue;
-                auto p = vp->project(glm::vec3(live->get_transform()->transform().get_world_matrix()[3]));
-                if (!p) continue;
-                glm::vec4 col(0.8f, 0.8f, 0.85f, 0.9f);
-                std::string tag;
-                for (const auto& c : node->at("components").as_seq()) {
-                    const std::string t = component_type(c);
-                    if (t.find("Light") != std::string::npos) { col = glm::vec4(1.0f, 0.85f, 0.3f, 1.0f); tag = "L"; }
-                    else if (t == "Camera") { col = glm::vec4(0.5f, 0.75f, 1.0f, 1.0f); tag = "C"; }
+            // Non-mesh objects: Blender's glyphs (camera frustum, light symbols, empty axes).
+            if (show_overlays_) {
+                for (const auto& [id, live] : sync_.live_objects()) {
+                    const Node* node = doc_.find(id);
+                    if (!node || !live || !live->active() || !live->get_transform() || mesh_for_object_(*node)) continue;
+                    glm::vec4 col(0.02f, 0.02f, 0.02f, 0.9f);
+                    if (shading_ == Shading::Wireframe) col = glm::vec4(0.8f, 0.8f, 0.82f, 0.9f);
+                    if (doc_.is_selected(id)) col = doc_.primary() == id ? active_col : accent;
+                    draw_object_glyph_(ctx, *vp, *node, live->get_transform()->transform().get_world_matrix(), col);
                 }
-                if (doc_.is_selected(id)) col = doc_.primary() == id ? active_col : accent;
-                ctx.triangle({p->x, p->y - 7}, {p->x + 7, p->y}, {p->x, p->y + 7}, col);
-                ctx.triangle({p->x, p->y - 7}, {p->x - 7, p->y}, {p->x, p->y + 7}, col);
-                if (!tag.empty()) ctx.draw_text({p->x + 9, p->y - 8}, tag, col);
             }
             // Selection outlines (the active object brighter, as in Blender).
             for (ObjectId id : doc_.selection()) {
@@ -2520,6 +2189,13 @@ private:
                 if (const CachedMesh* cm = mesh_for_object_(*node)) {
                     draw_mesh_edges(cm->mesh, cm->edges, live->get_transform()->transform().get_world_matrix(),
                                     doc_.primary() == id ? active_col : accent, 1.5f);
+                }
+                // Origin dot.
+                if (show_overlays_) {
+                    if (auto o = vp->project(glm::vec3(live->get_transform()->transform().get_world_matrix()[3]))) {
+                        ctx.circle(*o, 3.0f, glm::vec4(0, 0, 0, 0.6f));
+                        ctx.circle(*o, 2.0f, doc_.primary() == id ? active_col : accent);
+                    }
                 }
             }
         } else if (mesh_.open()) {
@@ -2556,7 +2232,7 @@ private:
             }
         }
         // 3D cursor (scene).
-        if (tab_ == Tab::Scene) {
+        if (!asset_view_() && show_overlays_) {
             if (auto c = vp->project(cursor3d_)) {
                 for (int i = 0; i < 8; ++i) {
                     const float a0 = 6.2831853f * i / 8.0f, a1 = 6.2831853f * (i + 1) / 8.0f;
@@ -2575,289 +2251,12 @@ private:
             glm::mat3 basis;
             if (gizmo_target_(mesh_edit, pivot, basis)) gizmo_.draw(ctx, *vp, pivot, basis);
         }
-        // Orientation hint (bottom-left).
-        const glm::vec2 o{vp->rect.x + 34, vp->rect.bottom() - 34};
-        const glm::mat3 vr(vp->view);
-        const glm::vec4 cols[3] = {ctx.style.axis_x, ctx.style.axis_y, ctx.style.axis_z};
-        const char* names[3] = {"X", "Y", "Z"};
-        for (int i = 0; i < 3; ++i) {
-            glm::vec3 a(0.0f);
-            a[i] = 1.0f;
-            const glm::vec3 v = vr * a;
-            const glm::vec2 tip = o + glm::vec2(v.x, -v.y) * 22.0f;
-            ctx.line(o, tip, cols[i], 2.0f);
-            ctx.draw_text(tip + glm::vec2(-3, -8), names[i], cols[i]);
-        }
+        draw_overlay_text_(ctx, *vp);
         // Mode banner.
-        if (mesh_edit && tab_ == Tab::Scene) {
+        if (mesh_edit && !asset_view_()) {
             const std::string t = "Edit Mode  -  " + mesh_.name + (mesh_.dirty() ? " *" : "");
             ctx.text_in({vp->rect.x + 8, vp->rect.bottom() - 26, 400, 20}, t, ctx.style.text_dim);
         }
-    }
-
-    // =================================================================================
-    // UI: Asset tab
-    // =================================================================================
-
-    void draw_asset_tab_(imm::Context& ctx, const imm::Box& c) {
-        const float split = 4;
-        asset_left_w_ = std::clamp(asset_left_w_, 160.0f, c.w * 0.35f);
-        const float right_w = std::clamp(right_w_, 240.0f, c.w * 0.45f);
-        const imm::Box left{c.x, c.y, asset_left_w_, c.h};
-        const imm::Box right{c.right() - right_w, c.y, right_w, c.h};
-        const imm::Box center{left.right() + split, c.y, right.x - split - left.right() - split, c.h};
-        float lw = asset_left_w_;
-        if (ctx.splitter("asset_split", {left.right(), c.y, split, c.h}, true, &lw, 160, c.w * 0.35f).changed) asset_left_w_ = lw;
-
-        // Left: asset lists.
-        ctx.begin_panel("asset_lists", left, "Assets");
-        if (ctx.collapsing_header("Meshes")) {
-            if (ctx.button("New...##mesh", -1)) ctx.open_popup("new_mesh_popup");
-            if (ctx.begin_popup("new_mesh_popup")) {
-                for (const auto& p : primitive_names()) if (ctx.menu_item(p)) new_mesh(p);
-                ctx.end_popup();
-            }
-            for (const auto& m : project_.list("meshes", ".yaml")) {
-                ctx.push_id(m);
-                const bool sel = asset_kind_ == AssetKind::Mesh && project_.relative(mesh_.path) == m;
-                if (ctx.selectable(fs::path(m).stem().string(), sel)) open_mesh(project_.absolute(m));
-                ctx.drag_source("asset", m, fs::path(m).filename().string());
-                ctx.pop_id();
-            }
-        }
-        if (ctx.collapsing_header("Materials")) {
-            if (ctx.button("New##mat", -1)) create_material("material");
-            for (const auto& m : project_.list("materials", ".yaml")) {
-                ctx.push_id(m);
-                const bool sel = asset_kind_ == AssetKind::Material && project_.relative(material_.path) == m;
-                if (ctx.selectable(fs::path(m).stem().string(), sel)) open_material(project_.absolute(m));
-                ctx.drag_source("asset", m, fs::path(m).filename().string());
-                ctx.pop_id();
-            }
-        }
-        ctx.end_panel();
-
-        // Center: viewport over the preview scene.
-        if (asset_kind_ == AssetKind::None) {
-            viewport_box_ = imm::Box{center.x, center.y, center.w, center.h};
-            ctx.fill(center, ctx.style.window_bg);
-            ctx.text_in(center, "Open or create a mesh or material on the left.", ctx.style.text_dim, 0, true);
-        } else {
-            draw_viewport_(ctx, center, asset_kind_ == AssetKind::Mesh && mesh_edit_);
-        }
-
-        // Right: tools / properties.
-        ctx.begin_panel("asset_props", right, asset_kind_ == AssetKind::Mesh ? "Mesh" : asset_kind_ == AssetKind::Material ? "Material" : "Properties");
-        if (asset_kind_ == AssetKind::Mesh) draw_mesh_tools_(ctx);
-        else if (asset_kind_ == AssetKind::Material) draw_material_editor_(ctx);
-        ctx.end_panel();
-    }
-
-    void draw_mesh_tools_(imm::Context& ctx) {
-        auto& md = mesh_;
-        std::string name = md.name;
-        if (ctx.input_text("Name", &name) && !name.empty()) md.name = name;
-        ctx.label_dim(md.path.empty() ? std::string("(not saved yet: meshes/") + md.name + ".yaml)" : project_.relative(md.path));
-        ctx.label_dim(std::to_string(md.mesh.positions.size()) + " verts  " + std::to_string(md.mesh.faces.size()) + " faces  " +
-                      std::to_string(md.mesh.triangle_count()) + " tris" + (md.dirty() ? "  (modified)" : ""));
-        if (ctx.button("Save Mesh", 120)) save_mesh();
-        ctx.same_line();
-        if (ctx.button("Add to Scene", 120)) {
-            if (md.path.empty() || md.dirty()) save_mesh();
-            if (!md.path.empty()) { set_tab(Tab::Scene); add_mesh_to_scene_(project_.relative(md.path)); }
-        }
-        ctx.spacing();
-        if (ctx.collapsing_header("Select")) {
-            if (ctx.button("All (A)", 90)) md.selection.select_all(md.mesh);
-            ctx.same_line();
-            if (ctx.button("None", 70)) md.selection.clear();
-            ctx.same_line();
-            if (ctx.button("Linked (L)", 90)) select_linked(md.mesh, md.selection);
-        }
-        if (ctx.collapsing_header("Modelling")) {
-            ctx.drag_float("Extrude dist", &extrude_dist_, 0.01f, -100.0f, 100.0f);
-            if (ctx.button("Extrude (Ctrl+E)", -1)) extrude_();
-            ctx.drag_float("Inset amount", &inset_amount_, 0.005f, 0.0f, 0.99f);
-            if (ctx.button("Inset (I)", -1)) md.edit("Inset", [&](EditMesh& m, MeshSelection& s) { inset_faces(m, s, inset_amount_); });
-            ctx.drag_float("Bevel width", &bevel_width_, 0.005f, 0.0f, 10.0f);
-            if (ctx.button("Bevel (Ctrl+B)", -1)) md.edit("Bevel", [&](EditMesh& m, MeshSelection& s) { bevel_edges(m, s, bevel_width_); });
-            if (ctx.button("Delete (X)", -1)) md.edit("Delete", [](EditMesh& m, MeshSelection& s) { delete_selection(m, s); });
-            if (ctx.button("Merge at Center (M)", -1)) md.edit("Merge", [](EditMesh& m, MeshSelection& s) { merge_at_center(m, s); });
-            ctx.drag_float("Merge distance", &merge_dist_, 0.0005f, 0.0f, 10.0f, "%.4f");
-            if (ctx.button("Merge by Distance", -1)) {
-                size_t removed = 0;
-                md.edit("Merge by Distance", [&](EditMesh& m, MeshSelection& s) { removed = merge_by_distance(m, s, merge_dist_); });
-                log_info("Merged " + std::to_string(removed) + " vertices");
-            }
-            if (ctx.button("Flip Normals", -1)) md.edit("Flip Normals", [](EditMesh& m, MeshSelection& s) { flip_normals(m, s); });
-            if (ctx.button("Shade Smooth", -1)) md.edit("Shade Smooth", [](EditMesh& m, MeshSelection& s) { set_smooth(m, s, true); });
-            if (ctx.button("Shade Flat", -1)) md.edit("Shade Flat", [](EditMesh& m, MeshSelection& s) { set_smooth(m, s, false); });
-        }
-        if (ctx.collapsing_header("UVs")) {
-            ctx.drag_float("Box scale", &uv_scale_, 0.01f, 0.001f, 1000.0f);
-            if (ctx.button("Box Project", -1)) md.edit("Box UV", [&](EditMesh& m, MeshSelection& s) { uv_box_project(m, s, uv_scale_); });
-            if (ctx.button("Planar X", 80)) md.edit("Planar UV", [](EditMesh& m, MeshSelection& s) { uv_planar_project(m, s, 0); });
-            ctx.same_line();
-            if (ctx.button("Planar Y", 80)) md.edit("Planar UV", [](EditMesh& m, MeshSelection& s) { uv_planar_project(m, s, 1); });
-            ctx.same_line();
-            if (ctx.button("Planar Z", 80)) md.edit("Planar UV", [](EditMesh& m, MeshSelection& s) { uv_planar_project(m, s, 2); });
-        }
-        if (ctx.collapsing_header("Selection Transform", false)) {
-            const auto vs = md.selection.affected_vertices(md.mesh);
-            if (!vs.empty()) {
-                glm::vec3 c = selection_center(md.mesh, md.selection);
-                glm::vec3 nc = c;
-                if (ctx.drag_floatn("Center", &nc.x, 3, 0.01f)) {
-                    const glm::vec3 d = nc - c;
-                    md.edit("Move Vertices", [&](EditMesh& m, MeshSelection& s) { translate_selection(m, s, d); }, "sel_center");
-                }
-                if (ctx.last_deactivated()) md.undo.end_merge();
-            } else {
-                ctx.label_dim("Nothing selected.");
-            }
-        }
-    }
-
-    void extrude_() {
-        auto& md = mesh_;
-        if (md.selection.mode == SelectMode::Edge) {
-            glm::vec3 n(0, 0, extrude_dist_);
-            md.edit("Extrude Edges", [&](EditMesh& m, MeshSelection& s) { extrude_edges(m, s, n); });
-        } else {
-            md.edit("Extrude", [&](EditMesh& m, MeshSelection& s) { extrude_faces(m, s, extrude_dist_); });
-        }
-    }
-
-    void draw_material_editor_(imm::Context& ctx) {
-        auto& md = material_;
-        ctx.label_dim(md.ref + (md.dirty() ? "  (modified)" : ""));
-        if (ctx.button("Save Material", 130)) save_material();
-        ctx.same_line();
-        if (ctx.button("Assign to Selection", 150)) { set_tab(Tab::Scene); assign_material_(md.ref + ".yaml"); }
-        ctx.spacing();
-        Node before = md.node;
-        InspectorEnv env = inspector_env_();
-        EditResult r = draw_fields(ctx, material_fields(), md.node, env, true, {"base"});
-        if (r.changed) {
-            md.commit("Edit " + r.key, before, r.active ? "m:" + r.key : std::string());
-            refresh_material_preview_();
-        }
-        if (r.finished) md.undo.end_merge();
-    }
-
-    // =================================================================================
-    // UI: Render settings tab
-    // =================================================================================
-
-    void draw_render_tab_(imm::Context& ctx, const imm::Box& c) {
-        const float split = 4;
-        settings_w_ = std::clamp(settings_w_, 300.0f, c.w * 0.7f);
-        const imm::Box left{c.x, c.y, settings_w_, c.h};
-        const imm::Box right{left.right() + split, c.y, c.w - settings_w_ - split, c.h};
-        float sw = settings_w_;
-        if (ctx.splitter("render_split", {left.right(), c.y, split, c.h}, true, &sw, 300, c.w * 0.7f).changed) settings_w_ = sw;
-
-        ctx.begin_panel("render_settings", left, "Render Settings (config.yaml)");
-        if (ctx.button(config_.dirty() ? "Save config.yaml *" : "Save config.yaml", 160)) save_config();
-        ctx.same_line();
-        if (ctx.button("Restart Renderer", 150)) restart_ = true;
-        ctx.tooltip("Recreates the renderer with these settings (applies startup-only fields marked *).");
-        ctx.label_dim("* = applies after a renderer restart.  Reset hands a key back to its quality preset.");
-        ctx.spacing();
-        Node& render = config_.section("render");
-        InspectorEnv env = inspector_env_();
-        for (const auto& g : render_settings_groups()) {
-            if (!ctx.collapsing_header(g.title, g.title == "Features" || g.title == "Viewport & Resolution")) continue;
-            for (const auto& f0 : g.fields) {
-                FieldDesc f = f0;
-                if (f.startup_only) f.label = f.display() + " *";
-                draw_setting_row_(ctx, f, render, env, "render");
-            }
-        }
-        if (ctx.collapsing_header("Other Keys", false)) {
-            const auto known = render_settings_keys();
-            const std::set<std::string> skip(known.begin(), known.end());
-            Node before = config_.node;
-            EditResult r = draw_fields(ctx, {}, render, env, true, skip);
-            if (r.changed) { config_.commit("Edit render." + r.key, before, r.active ? "cfg:" + r.key : std::string()); apply_config_live(); }
-            if (r.finished) config_.undo.end_merge();
-        }
-        ctx.end_panel();
-
-        draw_viewport_(ctx, right, false);
-    }
-
-    /** @brief One config field with a reset button when the key is explicitly set. */
-    void draw_setting_row_(imm::Context& ctx, const FieldDesc& f, Node& section, const InspectorEnv& env, const std::string& section_name) {
-        ctx.push_id(f.key);
-        const bool present = section.contains(f.key);
-        const Node before = config_.node;
-        EditResult r = draw_field(ctx, f, section, env);
-        const imm::Box row = ctx.last_rect();
-        if (present) {
-            // Reset sits over the right end of the label column.
-            const imm::Box label_end{row.x - 22, row.y + 3, 18, ctx.style.row_height - 6};
-            if (ctx.invisible_button("reset", label_end)) {
-                erase_key(section, f.key);
-                r.changed = true;
-                r.finished = true;
-            }
-            ctx.text_in(label_end, "x", ctx.last_hovered() ? ctx.style.error : ctx.style.text_disabled, 0, true);
-            ctx.tooltip("Reset (remove the key: the quality preset / default applies)");
-        }
-        if (r.changed) {
-            config_.commit("Edit " + section_name + "." + f.key, before, r.active ? "cfg:" + f.key : std::string());
-            if (section_name == "render") apply_config_live();
-            if (f.startup_only) log_info(f.key + " changes on renderer restart");
-        }
-        if (r.finished) config_.undo.end_merge();
-        ctx.pop_id();
-    }
-
-    // =================================================================================
-    // UI: Project settings tab
-    // =================================================================================
-
-    void draw_project_tab_(imm::Context& ctx, const imm::Box& c) {
-        viewport_box_ = c;   // the scene keeps rendering underneath, fully covered
-        ctx.begin_panel("project_settings", c, "Project Settings  -  " + project_.root().string());
-        if (ctx.button(config_.dirty() ? "Save config.yaml *" : "Save config.yaml", 160)) save_config();
-        ctx.same_line();
-        if (ctx.button("Package Project...", 150)) open_package_dialog_();
-        ctx.spacing();
-        // Default scene.
-        if (ctx.collapsing_header("Startup")) {
-            Node& sc = config_.section("scene");
-            std::vector<std::string> scenes;
-            for (const auto& s : project_.scenes()) scenes.push_back("assets/" + s);
-            const std::string cur = get_string(sc, "default_scene");
-            int idx = -1;
-            for (size_t i = 0; i < scenes.size(); ++i) if (scenes[i] == cur) idx = static_cast<int>(i);
-            if (idx < 0 && !cur.empty()) { scenes.push_back(cur); idx = static_cast<int>(scenes.size()) - 1; }
-            const Node before = config_.node;
-            if (ctx.combo("Default scene", &idx, scenes) && idx >= 0) {
-                sc["default_scene"] = Node(scenes[static_cast<size_t>(idx)]);
-                config_.commit("Default Scene", before, {});
-            }
-            if (!doc_.path().empty() && ctx.button("Use Current Scene", 160)) {
-                sc["default_scene"] = Node("assets/" + project_.relative(doc_.path()));
-                config_.commit("Default Scene", before, {});
-            }
-        }
-        InspectorEnv env = inspector_env_();
-        for (const auto& g : project_settings_groups()) {
-            if (!ctx.collapsing_header(g.title)) continue;
-            Node& section = config_.section(project_section_key(g.title));
-            for (const auto& f : g.fields) draw_setting_row_(ctx, f, section, env, project_section_key(g.title));
-            const std::set<std::string> skip = [&] { std::set<std::string> s; for (const auto& f : g.fields) s.insert(f.key); return s; }();
-            const Node before = config_.node;
-            EditResult r = draw_fields(ctx, {}, section, env, true, skip);
-            if (r.changed) config_.commit("Edit " + g.title, before, r.active ? "cfg:" + g.title + r.key : std::string());
-            if (r.finished) config_.undo.end_merge();
-        }
-        ctx.spacing();
-        ctx.label_dim("Window, physics and jobs settings take effect the next time the game (or editor) starts.");
-        ctx.end_panel();
     }
 
     // =================================================================================
@@ -2976,16 +2375,7 @@ private:
         force_quit_ = true;
     }
 
-    void save_active_() {
-        switch (tab_) {
-            case Tab::Scene: save_scene(); break;
-            case Tab::Asset:
-                if (asset_kind_ == AssetKind::Mesh) save_mesh();
-                else if (asset_kind_ == AssetKind::Material) save_material();
-                break;
-            default: save_config(); break;
-        }
-    }
+    void save_active_() { save_all_(); }
 
     void save_all_() {
         if (doc_.dirty()) save_scene();
@@ -3029,14 +2419,13 @@ private:
 
     std::string current_undo_label_(bool undo) {
         auto pick = [&](const std::string& u, const std::string& r) { return undo ? u : r; };
-        switch (tab_) {
-            case Tab::Scene: return pick(doc_.undo_stack().undo_label(), doc_.undo_stack().redo_label());
-            case Tab::Asset:
-                if (asset_kind_ == AssetKind::Mesh) return pick(mesh_.undo.undo_label(), mesh_.undo.redo_label());
-                if (asset_kind_ == AssetKind::Material) return pick(material_.undo.undo_label(), material_.undo.redo_label());
-                return {};
-            default: return pick(config_.undo.undo_label(), config_.undo.redo_label());
+        switch (undo_target_()) {
+            case UndoTarget::Scene: return pick(doc_.undo_stack().undo_label(), doc_.undo_stack().redo_label());
+            case UndoTarget::Mesh: return pick(mesh_.undo.undo_label(), mesh_.undo.redo_label());
+            case UndoTarget::Material: return pick(material_.undo.undo_label(), material_.undo.redo_label());
+            case UndoTarget::Config: return pick(config_.undo.undo_label(), config_.undo.redo_label());
         }
+        return {};
     }
 
     // =================================================================================
@@ -3057,7 +2446,7 @@ private:
         if (ctx.shortcut(Key::Escape) && playing()) stop();
         if (ctx.any_popup_open()) return;
         // Outliner keymap (mouse over the outliner).
-        if (hierarchy_hovered_ && tab_ == Tab::Scene && !playing()) {
+        if (hierarchy_hovered_ && !asset_view_() && !playing()) {
             if (ctx.shortcut(Key::X) || ctx.shortcut(Key::Delete)) delete_selected();
             if (ctx.shortcut(Key::F2) && doc_.primary()) { rename_id_ = doc_.primary(); rename_frames_ = 0; }
             if (ctx.shortcut(Key::A)) { doc_.clear_selection(); for (ObjectId id : visible_ids_()) doc_.select(id, true); }
@@ -3066,7 +2455,7 @@ private:
             if (ctx.shortcut(Key::H, Mods::Alt)) unhide_all_();
             if (ctx.shortcut(Key::KpDecimal)) frame_selected();
         }
-        if (ctx.shortcut(Key::F2) && tab_ == Tab::Scene && doc_.primary() && !playing()) { rename_id_ = doc_.primary(); rename_frames_ = 0; }
+        if (ctx.shortcut(Key::F2) && !asset_view_() && doc_.primary() && !playing()) { rename_id_ = doc_.primary(); rename_frames_ = 0; }
     }
 
     // =================================================================================
@@ -3086,8 +2475,11 @@ private:
     MaterialDocument material_;
     ConfigDocument config_;
 
-    Tab tab_ = Tab::Scene;
+    Tab tab_ = Tab::Layout;
+    PropTab prop_tab_ = PropTab::Object;
+    bool standalone_mesh_ = false;
     Shading shading_ = Shading::Solid;
+    Shading workspace_shading_[3] = {Shading::Solid, Shading::Solid, Shading::MaterialPreview};   // per Tab
     std::string full_debug_view_;
     std::string config_base_debug_view_;
     AssetKind asset_kind_ = AssetKind::None;
@@ -3119,7 +2511,17 @@ private:
     uint64_t scene_uploaded_revision_ = 0;
     glm::vec3 cursor3d_{0.0f};
     std::set<ObjectId> hidden_;
-    bool show_left_ = true, show_right_ = true, maximized_ = false;
+    bool show_toolbar_ = true, show_sidebar_ = false, show_bottom_ = true, maximized_ = false;
+    bool show_overlays_ = true, xray_ = false, snap_on_ = false;
+    bool outliner_hovered_ = false, properties_hovered_ = false, nav_ball_dragged_ = false, pending_extrude_ = false;
+    int sidebar_tab_ = 0, bottom_tab_ = 0, step_countdown_ = 0;
+    bool pause_after_start_ = false;
+    std::unordered_map<ObjectId, imm::Box> eye_rects_;   // Outliner eye toggles (tests)
+    bool open_add_menu_ = false;
+    float outliner_h_ = 260;
+    std::string outliner_filter_, add_component_filter_, browser_dir_;
+    std::vector<std::string> asset_dirs_cache_;
+    bool console_show_[3] = {true, true, true};
     bool viewport_hovered_ = false, hierarchy_hovered_ = false;
     struct CameraPose { glm::vec3 focus{0.0f}; float yaw = 35, pitch = 25, distance = 12; bool ortho = false; bool valid = false; };
     CameraPose scene_pose_, asset_pose_;

@@ -101,6 +101,7 @@ layout(location = 0) out vec4 out_color;
 // 17-19 (dof, volumetrics, lines) are not drawn by this shader.
 #define DBG_SOLID           20
 #define DBG_WIREFRAME       21
+#define DBG_MATPREVIEW      22
 
 // band()/shade_light() -- byte-for-byte the same as pixel_lighting.frag's own (not a
 // shared body: they read `params` fields specific to each shader's own push-constant
@@ -259,6 +260,50 @@ void main() {
         float shade = 0.22 + 0.55 * head + 0.33 * key + 0.10 * fill;
         vec3 base = mix(vec3(0.82), g0.rgb, 0.35);
         out_color = vec4(base * shade, 1.0);
+        return;
+    }
+
+    if (params.channel == DBG_MATPREVIEW) {
+        // Blender's Material Preview: the authored material under a fixed studio rig (key,
+        // rim, hemispherical ambient + a soft environment reflection), scene lights ignored.
+        vec3 bg = mix(vec3(0.33, 0.34, 0.36), vec3(0.20, 0.21, 0.23), in_uv.y);
+        if (dot(N, N) < 0.001) { out_color = vec4(bg, 1.0); return; }
+        N = normalize(N);
+        vec4 p2 = texture(g_position_roughness, in_uv);
+        vec3 albedo = g0.rgb;
+        float metallic = clamp(g1.a, 0.0, 1.0);
+        float rough = clamp(p2.a, 0.04, 1.0);
+        vec3 V = normalize(camera.camera_pos - p2.rgb);
+        vec3 F0 = mix(vec3(0.04), albedo, metallic);
+        vec3 diff_col = albedo * (1.0 - metallic);
+        float NoV = max(dot(N, V), 1e-3);
+        vec3 F = F0 + (1.0 - F0) * pow(1.0 - NoV, 5.0) * (1.0 - rough);
+        // Hemispherical studio ambient (+Z up) and a blurred "softbox" reflection.
+        vec3 sky = vec3(0.80, 0.82, 0.86), ground = vec3(0.22, 0.21, 0.20);
+        vec3 amb = mix(ground, sky, N.z * 0.5 + 0.5);
+        vec3 R = reflect(-V, N);
+        vec3 env = mix(ground, sky * 1.15, smoothstep(-0.2, 0.6, R.z));
+        env = mix(env, amb, rough);
+        vec3 col = diff_col * amb * 0.75 + env * F * (1.0 - 0.5 * rough);
+        const vec3 Ls[2] = vec3[2](normalize(vec3(0.45, -0.55, 0.70)), normalize(vec3(-0.6, 0.5, 0.35)));
+        const float Is[2] = float[2](1.25, 0.45);
+        for (int i = 0; i < 2; ++i) {
+            vec3 L = Ls[i];
+            vec3 H = normalize(L + V);
+            float NoL = max(dot(N, L), 0.0), NoH = max(dot(N, H), 0.0);
+            float a2 = rough * rough * rough * rough;
+            float d = NoH * NoH * (a2 - 1.0) + 1.0;
+            float D = a2 / (3.14159 * d * d);
+            float k = (rough + 1.0) * (rough + 1.0) / 8.0;
+            float G = NoL / (NoL * (1.0 - k) + k) * NoV / (NoV * (1.0 - k) + k);
+            vec3 Fs = F0 + (1.0 - F0) * pow(1.0 - max(dot(H, V), 0.0), 5.0);
+            vec3 spec = D * G * Fs / max(4.0 * NoL * NoV, 1e-3);
+            col += (diff_col / 3.14159 * (1.0 - Fs) + spec) * NoL * Is[i] * 2.4;
+        }
+        col *= mix(1.0, g0.a, 0.6);                    // material AO
+        col += texture(g_emissive, in_uv).rgb;
+        col = col / (1.0 + col * 0.35);                 // gentle rolloff so highlights don't clip
+        out_color = vec4(pow(col, vec3(1.0)), 1.0);
         return;
     }
 

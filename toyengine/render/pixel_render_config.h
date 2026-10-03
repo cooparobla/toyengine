@@ -84,6 +84,9 @@ enum class DebugView : int {
     /// A flat backdrop with surfaces only faintly filled -- the base the editor's wireframe
     /// edges (debug lines) draw over.
     Wireframe,
+    /// Blender-style "material preview": the G-buffer material (albedo / metallic / roughness /
+    /// emissive) lit by a fixed studio rig on a neutral backdrop, independent of scene lights.
+    MaterialPreview,
 };
 
 /**
@@ -117,10 +120,11 @@ inline DebugView parse_debug_view(const std::string& value) {
     if (value == "lines")           return DebugView::Lines;
     if (value == "solid")           return DebugView::Solid;
     if (value == "wireframe")       return DebugView::Wireframe;
+    if (value == "material_preview") return DebugView::MaterialPreview;
     std::cerr << "[toy::render] Unknown debug_view '" << value << "', expected one of: "
                  "off | albedo | normals | roughness | metallic | emissive | material_ao | "
                  "world_pos | depth | direct | indirect | shadows | contact_shadows | ssao | "
-                 "ssr | ssr_confidence | ssgi | dof | volumetrics | lines | solid | wireframe. Using 'off'.\n";
+                 "ssr | ssr_confidence | ssgi | dof | volumetrics | lines | solid | wireframe | material_preview. Using 'off'.\n";
     return DebugView::Off;
 }
 

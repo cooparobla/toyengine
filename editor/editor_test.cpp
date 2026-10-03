@@ -500,6 +500,39 @@ void test_imm_drag_float_and_popup_blocking() {
     expect(!p.ctx.any_popup_open(), "choosing an item closes the popup");
 }
 
+
+void test_imm_icon_button_and_tooltip() {
+    using coopa::ui::imm::Icon;
+    ImmHarness h;
+    int clicks = 0;
+    bool on = false;
+    auto ui = [&](coopa::ui::imm::Context& c) {
+        c.begin_region("r", {0, 0, 300, 300}, false);
+        if (c.icon_button("play", Icon::Play, "Play\nStart the game", on, 24)) { ++clicks; on = !on; }
+        c.end_region();
+    };
+    h.frame(ui);
+    const size_t verts = h.dl.vertices().size();
+    expect(verts >= 3, "an icon button draws its glyph (" + std::to_string(verts) + " vertices)");
+    h.click({12, 12}, ui);
+    expect(clicks == 1 && on, "clicking the icon button fires once and toggles");
+    h.mouse = {250, 250};
+    h.frame(ui);
+    expect(h.dl.vertices().size() > verts, "a toggled-on icon button gets its highlighted rounded frame");
+    std::string tip;
+    h.mouse = {12, 12};
+    for (int i = 0; i < 40; ++i) { h.frame(ui); if (!h.ctx.tooltip_text().empty()) tip = h.ctx.tooltip_text(); }
+    expect(tip == "Play\nStart the game", "hovering shows the rich tooltip (got '" + tip + "')");
+    h.mouse = {250, 250};
+    h.frame(ui);
+    expect(h.ctx.tooltip_text().empty(), "moving away hides it");
+    // Rounded fills emit a fan per corner, unlike a plain quad.
+    h.frame([&](coopa::ui::imm::Context& c) { c.fill({0, 0, 10, 10}, glm::vec4(1)); });
+    const size_t quad = h.dl.vertices().size();
+    h.frame([&](coopa::ui::imm::Context& c) { c.fill_rounded({0, 0, 40, 40}, glm::vec4(1), 6); });
+    expect(h.dl.vertices().size() > quad, "fill_rounded emits more geometry than a square fill");
+}
+
 void test_imm_menubar_and_tree() {
     ImmHarness h;
     int saved = 0;
@@ -710,7 +743,7 @@ void test_editor_shell_end_to_end() {
         expect(app.create_material("brick"), "a material asset can be created");
         app.material_document().node["albedo"] = make_color({0.7f, 0.2f, 0.1f});
         app.save_material();
-        app.set_tab(Tab::Scene);
+        app.set_tab(Tab::Layout);
         tick(engine, 2);
         const int ci = app.document().find_component(sphere, "MeshRenderer");
         Node comp = app.document().find(sphere)->at("components").as_seq()[ci];
@@ -743,7 +776,7 @@ void test_editor_shell_end_to_end() {
         // Mesh editing in the Asset tab.
         app.new_mesh("Cube");
         tick(engine, 3);
-        expect(app.tab() == Tab::Asset && app.mesh_document().mesh.faces.size() == 6, "a new cube mesh opens in the Asset tab");
+        expect(app.tab() == Tab::Modeling && app.mesh_document().mesh.faces.size() == 6, "a new cube mesh opens in the Modeling workspace");
         {
             auto* po = engine.scene().find_object("PreviewObject");
             auto* pmr = po ? po->get_component<coopa::gfx::engine::components::MeshRenderer>() : nullptr;
@@ -766,7 +799,7 @@ void test_editor_shell_end_to_end() {
         expect(app.save_mesh() && coopa::yaml::document_exists(project.assets() / "meshes" / (md.name + ".yaml")), "the mesh saves");
 
         // Render settings apply live.
-        app.set_tab(Tab::Render);
+        app.set_prop_tab(PropTab::Render);
         const Node before = app.config_document().node;
         app.config_document().section("render")["exposure"] = make_float(2.0);
         app.config_document().commit("exposure", before, {});
@@ -774,12 +807,15 @@ void test_editor_shell_end_to_end() {
         tick(engine, 2);
         expect(std::abs(engine.render_config().exposure - 2.0f) < 1e-5f, "a render setting edit applies to the live renderer");
         dump(engine, "04_render_settings");
-        app.set_tab(Tab::Project);
+        app.set_prop_tab(PropTab::Output);
         tick(engine, 2);
-        dump(engine, "05_project_settings");
+        dump(engine, "05_output_props");
+        app.set_prop_tab(PropTab::World);
+        tick(engine, 2);
+        dump(engine, "05b_world_props");
 
         // Play / stop leaves the document alone.
-        app.set_tab(Tab::Scene);
+        app.set_tab(Tab::Layout);
         tick(engine, 2);
         const Node doc_before = app.document().node();
         app.play();
@@ -812,7 +848,7 @@ void test_editor_shell_end_to_end() {
         expect(engine.pipeline().render_width() == 320, "a restart applies startup-only render settings");
         expect(app.document().dirty() && app.document().find_component(sphere_id_for_restart(app), "MeshRenderer") >= 0,
                "unsaved scene edits survive the restart");
-        app.set_tab(Tab::Scene);
+        app.set_tab(Tab::Layout);
         tick(engine, 1);
         app.undo();
         tick(engine, 2);
@@ -937,7 +973,7 @@ void test_editor_real_input_blender_keymap() {
     InputDriver in{engine, std::max(1.0f, engine.display_scale())};
 
     // Menubar: clicking "File" where it is drawn opens it (catches any hover offset).
-    in.click({16, 12});
+    in.click({44, 14});
     expect(app.ui().any_popup_open(), "clicking the File menu header opens it");
     in.key(Key::Escape);
     in.click({4, 300});   // click elsewhere closes it
@@ -1034,6 +1070,97 @@ void test_editor_real_input_blender_keymap() {
     dump(engine, "06_after_input");
 }
 
+
+/** @brief Blender chrome: nav-gizmo axis clicks, Properties tabs per selection, Pause / Step. */
+void test_editor_blender_chrome() {
+    using coopa::input::Key;
+    using coopa::input::Mods;
+    setenv("FIXED_DT", "0.016666", 1);
+    unsetenv("NO_INPUT");
+    setenv("HOME", tmp_root().c_str(), 1);
+    const fs::path root = fresh_dir("chrome_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, 4);
+    InputDriver in{engine, std::max(1.0f, engine.display_scale())};
+
+    // Navigation gizmo: click the ball for +Z (screen position from the live view).
+    const imm::Box g = app.nav_gizmo_rect();
+    auto ball = [&](glm::vec3 axis) {
+        const glm::mat3 vr(coopa::gfx::engine::components::CameraComponent::main()->get_view_matrix());
+        const glm::vec3 v = vr * axis;
+        return glm::vec2(g.x + 55, g.y + 55) + glm::vec2(v.x, -v.y) * 40.0f;
+    };
+    in.click(ball(glm::vec3(0, 0, 1)));
+    expect(std::abs(app.camera().pitch_deg - 89.5f) < 0.01f, "clicking the gizmo's Z ball gives the top view");
+    in.click(ball(glm::vec3(0, -1, 0)));
+    expect(std::abs(app.camera().pitch_deg) < 0.01f && std::abs(app.camera().yaw_deg) < 0.01f,
+           "clicking its -Y ball gives the front view (pitch " + std::to_string(app.camera().pitch_deg) + ")");
+    expect(app.document().selection().empty(), "gizmo clicks never select objects behind it");
+
+    // Properties tabs follow the selection (Blender's object tabs appear with an object).
+    app.document().clear_selection();
+    app.set_prop_tab(PropTab::Material);
+    tick(engine, 2);
+    expect(app.prop_tab() == PropTab::Tool, "without a selection, object tabs fall back to Tool");
+    for (ObjectId id : app.document().all_ids()) if (get_string(*app.document().find(id), "name") == "Cube") app.document().select(id);
+    app.set_prop_tab(PropTab::Data);
+    tick(engine, 2);
+    expect(app.prop_tab() == PropTab::Data, "a mesh object offers the Object Data tab");
+
+    // Outliner eye: hides the object in the viewport (editor-only, the document is untouched).
+    {
+        const ObjectId sel = app.document().primary();
+        expect(app.outliner_eye_rect(sel).has_value(), "the selected object's outliner row has an eye toggle");
+        if (auto eye = app.outliner_eye_rect(sel)) {
+            in.click(glm::vec2(eye->x + eye->w * 0.5f, eye->y + eye->h * 0.5f));
+            tick(engine, 2);
+            auto* live = app.sync().live(sel);
+            expect(live && !live->active(), "clicking the eye hides the object in the viewport");
+            expect(get_bool(*app.document().find(sel), "active", true), "and leaves the saved `active` flag alone");
+            in.click(glm::vec2(eye->x + eye->w * 0.5f, eye->y + eye->h * 0.5f));
+            tick(engine, 2);
+            expect(live && live->active(), "clicking it again reveals it");
+        }
+    }
+
+    // Unity play controls: Pause freezes, Step advances exactly one frame.
+    ObjectId cube = 0;
+    for (ObjectId id : app.document().all_ids()) if (get_string(*app.document().find(id), "name") == "Cube") cube = id;
+    expect(app.document().selection().empty(), "hiding deselects, as in Blender");
+    app.document().select(cube);
+    Node rb = default_component("Rigidbody");
+    app.document().add_component(cube, rb);
+    Node box = default_component("BoxCollider");   // physics bodies are built from colliders
+    app.document().add_component(cube, box);
+    app.document().set_transform(cube, {0, 0, 5}, glm::vec3(0), glm::vec3(1), "Lift");
+    app.sync().rebuild(engine, app.document());
+    tick(engine, 2);
+    app.play();
+    tick(engine, 5);
+    expect(app.playing(), "playing");
+    app.pause();
+    tick(engine, 1);
+    expect(app.paused(), "Pause freezes the simulation");
+    auto z_of = [&] { return engine.scene().find_object("Cube")->get_transform()->transform().position().z; };
+    const float z0 = z_of();
+    tick(engine, 5);
+    expect(std::abs(z_of() - z0) < 1e-6f, "nothing moves while paused");
+    app.step();
+    tick(engine, 4);
+    const float z1 = z_of();
+    expect(z1 < z0 - 1e-6f && app.paused(), "Step advances one frame and stays paused (" + std::to_string(z0) + " -> " + std::to_string(z1) + ")");
+    tick(engine, 4);
+    expect(std::abs(z_of() - z1) < 1e-6f, "and then holds still");
+    app.stop();
+    tick(engine, 2);
+    expect(!app.playing(), "stop");
+    app.set_tab(Tab::Shading);
+    tick(engine, 4);
+    dump(engine, "07_shading_workspace");
+}
+
 // =====================================================================================
 // Group "package" -- Build > Package to .caml
 // =====================================================================================
@@ -1097,12 +1224,14 @@ const TestCase kTests[] = {
     {"imm_text_input_commits",               "imm",      test_imm_text_input_commits},
     {"imm_drag_float_and_popup_blocking",    "imm",      test_imm_drag_float_and_popup_blocking},
     {"imm_menubar_and_tree",                 "imm",      test_imm_menubar_and_tree},
+    {"imm_icon_button_and_tooltip",          "imm",      test_imm_icon_button_and_tooltip},
     {"projection_and_rays",                  "viewport", test_projection_and_rays},
     {"gizmo_translate_drag",                 "viewport", test_gizmo_translate_drag},
     {"config_untouched_and_minimal_edits",   "config",   test_config_untouched_and_minimal_edits},
     {"editor_shell_end_to_end",              "editor_shell", test_editor_shell_end_to_end},
     {"material_reference_forms",             "editor_shell", test_material_reference_forms},
     {"editor_real_input_blender_keymap",     "editor_shell", test_editor_real_input_blender_keymap},
+    {"editor_blender_chrome",                "editor_shell", test_editor_blender_chrome},
     {"package_renders_identically",          "package",  test_package_renders_identically},
 };
 

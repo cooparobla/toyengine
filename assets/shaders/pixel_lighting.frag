@@ -316,12 +316,9 @@ void main() {
     //    params.ssao_direct_strength (0 = indirect only).
     // ssr_composite.frag subtracts the same ind.value term this pass adds, so its
     // occlusion factor must match this one exactly (see ssr_composite_body.glsl).
-    float occlusion = min(ao, ssao);
-    vec3 ao_diffuse = gfx_gtao_multi_bounce(occlusion, albedo);
-    float spec_occ  = gfx_specular_occlusion(max(dot(N, V), 0.0), occlusion, roughness);
-    vec3 ambient = kD_ind * albedo * ind_diff * ao_diffuse
-                 + ind.value * gfx_gtao_multi_bounce(spec_occ, F0);
-    Lo *= mix(vec3(1.0), ao_diffuse, params.ssao_direct_strength);
+    const GfxAoTerms aot = gfx_ao_terms(ao, ssao, albedo, F0, max(dot(N, V), 0.0), roughness, params.ssao_direct_strength);
+    vec3 ambient = kD_ind * albedo * ind_diff * aot.diffuse + ind.value * aot.specular;
+    Lo *= aot.direct;
 
     // emissive is added last, after the occluded terms -- an emissive surface glows
     // even in a fully occluded/dark crevice, unlike the lit terms above it.

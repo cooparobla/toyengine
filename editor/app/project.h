@@ -141,7 +141,7 @@ public:
     static Project create(const fs::path& root) {
         Project p(root);
         std::error_code ec;
-        for (const char* d : {"scenes/main", "meshes", "materials", "physics_materials", "textures"}) {
+        for (const char* d : {"scenes/main", "objects", "meshes", "materials", "physics_materials", "textures"}) {
             fs::create_directories(p.assets() / d, ec);
         }
         auto write_if_missing = [&](const fs::path& path, const Node& node) {

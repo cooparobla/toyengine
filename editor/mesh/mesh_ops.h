@@ -180,6 +180,7 @@ inline void extrude_faces(EditMesh& m, MeshSelection& sel, float distance) {
             const float u0 = 0, u1 = 1;
             Face side;
             side.smooth = m.faces[f].smooth;
+            side.slot = m.faces[f].slot;
             side.corners = {{a.v, {u0, 0}}, {b.v, {u1, 0}}, {dup[b.v], {u1, 1}}, {dup[a.v], {u0, 1}}};
             sides.push_back(side);
         }
@@ -249,6 +250,7 @@ inline void inset_faces(EditMesh& m, MeshSelection& sel, float amount) {
             const size_t j = (i + 1) % c.size();
             Face rim;
             rim.smooth = m.faces[f].smooth;
+            rim.slot = m.faces[f].slot;
             rim.corners = {c[i], c[j], inner[j], inner[i]};
             rims.push_back(rim);
         }

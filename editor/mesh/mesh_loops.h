@@ -312,6 +312,7 @@ inline LoopCutResult loop_cut(EditMesh& m, MeshSelection& sel, Edge seed_edge, i
             const float s0 = j == 0 ? 0.0f : frac(j), s1 = j + 1 == cuts + 1 ? 1.0f : frac(j + 1);
             Face piece;
             piece.smooth = q.smooth;
+            piece.slot = q.slot;
             Corner c0{P(i, j), glm::mix(ua, ub, s0)}, c1{P(i, j + 1), glm::mix(ua, ub, s1)};
             Corner c2{P(i1, j + 1), glm::mix(ua1, ub1, s1)}, c3{P(i1, j), glm::mix(ua1, ub1, s0)};
             piece.corners = forward ? std::vector<Corner>{c0, c1, c2, c3} : std::vector<Corner>{c3, c2, c1, c0};

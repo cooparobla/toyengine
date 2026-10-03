@@ -59,8 +59,22 @@ public:
     // Lifetime
     // ---------------------------------------------------------------------------------
 
+    /**
+     * @brief A new, unsaved OBJECT ASSET (objects/<name>.yaml): one root object named `name`.
+     *        Object assets are edited as a one-object scene (see is_object_asset()).
+     */
+    void reset_object(const std::string& name) {
+        reset(name);
+        object_asset_ = true;
+        Node obj = make_object(name);
+        root_objects().as_seq().push_back(obj);
+        undo_.clear();
+        saved_revision_ = undo_.revision() - 1;   // unsaved: dirty from the start
+    }
+
     /** @brief A new, empty, unsaved scene named `name`. */
     void reset(const std::string& name = "Untitled") {
+        object_asset_ = false;
         doc_ = Node::mapping();
         doc_["format"] = Node(std::string("toyengine"));
         Node scene = Node::mapping();
@@ -78,6 +92,24 @@ public:
     void load(const std::filesystem::path& path) {
         Node doc = coopa::yaml::load_document(coopa::yaml::resolve_variant(path));
         if (!doc.is_mapping()) throw std::runtime_error("Not a scene document: " + path.string());
+        // An object asset (`object:` instead of `scene:`) is edited as a one-object scene so
+        // everything scene-shaped (hierarchy, inspector, undo, the live scene) works on it;
+        // save() writes it back in its own shape.
+        object_asset_ = doc.contains("object") && !doc.contains("scene");
+        if (object_asset_) {
+            Node obj = doc.at("object");
+            if (!obj.is_mapping()) obj = Node::mapping();
+            if (!obj.contains("name")) obj["name"] = Node(path.stem().string());
+            Node wrapped = Node::mapping();
+            wrapped["format"] = Node(std::string("toyengine"));
+            Node scene = Node::mapping();
+            scene["scene_name"] = obj.at("name");
+            Node roots = Node::sequence();
+            roots.as_seq().push_back(obj);
+            scene["root_objects"] = roots;
+            wrapped["scene"] = scene;
+            doc = std::move(wrapped);
+        }
         if (!doc.contains("scene")) doc["scene"] = Node::mapping();
         Node& scene = doc["scene"];
         if (!scene.contains("root_objects") || !scene.at("root_objects").is_sequence()) scene["root_objects"] = Node::sequence();
@@ -94,7 +126,21 @@ public:
     Node clean_copy() const {
         Node out = doc_;
         strip_private_keys(out);
-        return out;
+        if (!object_asset_) return out;
+        Node obj_doc = Node::mapping();
+        obj_doc["format"] = Node(std::string("toyengine-object"));
+        const Node& roots = out.at("scene").at("root_objects");
+        obj_doc["object"] = roots.is_sequence() && roots.size() > 0 ? roots.as_seq()[0] : Node::mapping();
+        return obj_doc;
+    }
+
+    /** @brief True when this document is an object asset (objects/*.yaml), not a scene. */
+    bool is_object_asset() const { return object_asset_; }
+    /** @brief The object asset's root object id (0 for scenes). */
+    ObjectId object_root() const {
+        if (!object_asset_) return 0;
+        const Node& roots = root_objects();
+        return roots.is_sequence() && roots.size() > 0 ? id_of(roots.as_seq()[0]) : 0;
     }
 
     /** @brief Saves to `path` (or the current path). @throws on I/O failure. */
@@ -255,6 +301,7 @@ public:
      * @return The new object's id.
      */
     ObjectId add_object(Node obj, ObjectId parent = 0, int index = -1, const std::string& label = "Add Object") {
+        if (object_asset_ && parent == 0 && object_root() != 0) parent = object_root();   // one root only
         restamp_subtree_(obj);
         const ObjectId id = id_of(obj);
         edit(label, [&](Node&) -> Change {
@@ -269,7 +316,10 @@ public:
     }
 
     /** @brief Removes objects (and their subtrees) as one step. */
-    Change delete_objects(const std::vector<ObjectId>& ids) {
+    Change delete_objects(const std::vector<ObjectId>& in_ids) {
+        std::vector<ObjectId> ids;
+        for (ObjectId id : in_ids) if (!(object_asset_ && id == object_root())) ids.push_back(id);   // the asset's root stays
+        if (ids.empty()) return {};
         auto c = edit(ids.size() > 1 ? "Delete Objects" : "Delete Object", [&](Node&) -> Change {
             bool any = false;
             for (ObjectId id : ids) any |= remove_(root_objects(), id);
@@ -306,6 +356,10 @@ public:
      *        Refuses to parent an object under itself or its descendants.
      */
     Change reparent(ObjectId id, ObjectId new_parent, int index = -1) {
+        if (object_asset_) {
+            if (id == object_root()) return {};
+            if (new_parent == 0) new_parent = object_root();
+        }
         if (id == new_parent || (new_parent != 0 && is_ancestor(id, new_parent))) return {};
         return edit("Reparent", [&](Node&) -> Change {
             const Node* src = find(id);
@@ -523,6 +577,7 @@ private:
     Node doc_ = Node::mapping();
     std::filesystem::path path_;
     ObjectId next_eid_ = 1;
+    bool object_asset_ = false;   ///< See is_object_asset().
     UndoStack<Node> undo_;
     uint64_t saved_revision_ = 0;
     std::vector<ObjectId> selection_;

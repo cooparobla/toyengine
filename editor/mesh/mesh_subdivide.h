@@ -115,6 +115,7 @@ inline void subdivide(EditMesh& m, MeshSelection& sel, int cuts) {
                 for (int i = 0; i < N; ++i) {
                     Face q;
                     q.smooth = f.smooth;
+                    q.slot = f.slot;
                     q.corners = {{G(i, j), UV(i, j)}, {G(i + 1, j), UV(i + 1, j)}, {G(i + 1, j + 1), UV(i + 1, j + 1)}, {G(i, j + 1), UV(i, j + 1)}};
                     out_faces.push_back(q);
                 }
@@ -142,6 +143,7 @@ inline void subdivide(EditMesh& m, MeshSelection& sel, int cuts) {
                 const auto px = P(x.first, x.second), py = P(y.first, y.second), pz = P(z.first, z.second);
                 Face t;
                 t.smooth = f.smooth;
+                t.slot = f.slot;
                 t.corners = {{px.first, px.second}, {py.first, py.second}, {pz.first, pz.second}};
                 out_faces.push_back(t);
             };
@@ -166,6 +168,7 @@ inline void subdivide(EditMesh& m, MeshSelection& sel, int cuts) {
                 const Corner& prv = c[(i + k - 1) % k];
                 Face q;
                 q.smooth = f.smooth;
+                q.slot = f.slot;
                 q.corners.push_back(cur);
                 // Forward edge up to ceil(N/2), backward edge up to floor(N/2): with an odd N
                 // the middle segment belongs to exactly one of the two corner faces.
@@ -276,6 +279,7 @@ inline void catmull_clark(EditMesh& m, MeshSelection& sel, int levels = 1) {
                 const Corner& prv = c[(i + k - 1) % k];
                 Face q;
                 q.smooth = m.faces[f].smooth;
+                q.slot = m.faces[f].slot;
                 q.corners = {{cur.v, cur.uv},
                              {ebase + t.face_edge(f, static_cast<int>(i)), (cur.uv + nxt.uv) * 0.5f},
                              {fbase + f, fuv},
@@ -350,6 +354,7 @@ inline void triangulate(EditMesh& m, MeshSelection& sel) {
         for (const auto& t : triangulate_face(m, f)) {
             Face tf;
             tf.smooth = m.faces[f].smooth;
+            tf.slot = m.faces[f].slot;
             for (size_t i : t) tf.corners.push_back(m.faces[f].corners[i]);
             new_sel.insert(static_cast<uint32_t>(out.size()));
             out.push_back(tf);
@@ -413,6 +418,7 @@ inline void tris_to_quads(EditMesh& m, MeshSelection& sel, float max_face_deg = 
         for (const auto& cc : f2.corners) if (cc.v != A.v && cc.v != B.v) D = cc;
         Face q;
         q.smooth = f1.smooth;
+        q.slot = f1.slot;
         q.corners = {A, D, B, C};
         m.faces[cd.f1] = q;
         dead[cd.f2] = 1;
@@ -497,6 +503,7 @@ inline void dissolve_edges(EditMesh& m, MeshSelection& sel, const std::set<Edge>
         for (const auto& [v, list] : out_from) if (list.size() != 1) ok = false;
         Face merged;
         merged.smooth = m.faces[fs[0]].smooth;
+        merged.slot = m.faces[fs[0]].slot;
         if (ok) {
             uint32_t v = out_from.begin()->first;
             const uint32_t start = v;

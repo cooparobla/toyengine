@@ -1,8 +1,25 @@
 # editor/ -- toyengine_editor
 
-A Unity/Blender-style editor for toyengine projects. Everything it saves is a file the game
-already loads: `scenes/*/scene.yaml`, `meshes/*.yaml`, `materials/*.yaml`, `config.yaml`
-(or their `.caml` encodings, via Build > Package).
+toyengine's asset editor (Blender look and keymaps, Unity's component model). It builds a
+project's assets -- every one a file the game loads directly: `scenes/*/scene.yaml`,
+`objects/*.yaml` (object assets, instanced with `prefab:`), `meshes/*.yaml` (with material
+slots), `materials/*.yaml`, `textures/`, `config.yaml` (or `.caml`, via Build > Package).
+
+**Layout.** Left: the Asset panel -- a tab per asset type, listing the project's assets.
+Clicking one opens it (one asset at a time; unsaved changes prompt first). Middle: the viewer
+(Console under it). Right: the Hierarchy (scenes / object assets; it mirrors the file) above
+Properties (tabs depend on the asset type).
+
+| Open asset | Viewer | Properties |
+|---|---|---|
+| Scene | the live scene; play / pause / step | Tool, Render, Output, Scene, World + the selected object's tabs |
+| Object | the object alone, studio-lit | the object's tabs; instances of other object assets can be placed |
+| Mesh | mesh viewer: Object / Edit / Sculpt modes | Tool, Mesh (stats, material slots: name, assign faces, preview materials) |
+| Material | lookdev scene (shape, ground, key / fill / rim + environment, turntable) | the material editor |
+| Texture | the image on a plane (a texture editor is a TODO) | info |
+
+Edit / Sculpt Mode on a scene or object's MeshRenderer edits the **mesh asset itself**
+(every object using it follows; Ctrl+S saves it).
 
 ## How it is put together
 

@@ -46,6 +46,7 @@ struct Corner {
 struct Face {
     std::vector<Corner> corners;
     bool smooth = false;
+    uint32_t slot = 0;   ///< Material slot (submesh) -- an index into EditMesh::slots.
 };
 
 using Edge = std::pair<uint32_t, uint32_t>;   ///< Always (min, max).
@@ -54,15 +55,18 @@ inline Edge make_edge(uint32_t a, uint32_t b) { return a < b ? Edge{a, b} : Edge
 struct EditMesh {
     std::vector<glm::vec3> positions;
     std::vector<Face> faces;
+    /// Material slot names (`material_slots`); empty = one unnamed slot. Faces pick a slot
+    /// with Face::slot; the engine draws each slot's faces as one part with its own material.
+    std::vector<std::string> slots;
     /// Keys carried through import -> export untouched (lods, cull_screen_size, ...).
     Node passthrough = Node::mapping();
 
     bool operator==(const EditMesh& o) const {
-        if (positions != o.positions || faces.size() != o.faces.size()) return false;
+        if (positions != o.positions || faces.size() != o.faces.size() || slots != o.slots) return false;
         for (size_t i = 0; i < faces.size(); ++i) {
             const auto& a = faces[i];
             const auto& b = o.faces[i];
-            if (a.smooth != b.smooth || a.corners.size() != b.corners.size()) return false;
+            if (a.smooth != b.smooth || a.slot != b.slot || a.corners.size() != b.corners.size()) return false;
             for (size_t k = 0; k < a.corners.size(); ++k) {
                 if (a.corners[k].v != b.corners[k].v || a.corners[k].uv != b.corners[k].uv) return false;
             }
@@ -211,9 +215,19 @@ inline EditMesh mesh_from_node(const Node& node, float weld_eps = 1e-5f) {
         }
         raw_to_weld[i] = it->second;
     }
+    if (node.contains("material_slots")) {
+        for (const auto& sn : node.at("material_slots").as_seq()) m.slots.push_back(sn.get_value<std::string>());
+    }
+    std::vector<uint32_t> face_slots;
+    if (node.contains("face_materials")) {
+        for (const auto& fm : node.at("face_materials").as_seq()) face_slots.push_back(static_cast<uint32_t>(fm.get_value<int64_t>()));
+    }
+    size_t face_index = 0;
     if (node.contains("faces")) {
         for (const auto& fn : node.at("faces").as_seq()) {
             Face f;
+            f.slot = face_index < face_slots.size() ? face_slots[face_index] : 0u;
+            ++face_index;
             std::vector<uint32_t> raw_idx;
             for (const auto& idx : fn.as_seq()) {
                 const auto r = static_cast<uint32_t>(idx.get_value<int64_t>());
@@ -276,6 +290,21 @@ inline Node mesh_to_node(const EditMesh& m) {
     out["normals"] = norms;
     out["uvs"] = uvs;
     out["faces"] = faces;
+    // Material slots (submeshes): written when named, or when any face uses a slot past 0.
+    bool any_slot = false;
+    for (const auto& f : m.faces) any_slot |= f.slot != 0;
+    if (!m.slots.empty() || any_slot) {
+        Node names = Node::sequence();
+        uint32_t count = static_cast<uint32_t>(m.slots.size());
+        for (const auto& f : m.faces) count = std::max(count, f.slot + 1);
+        for (uint32_t i = 0; i < count; ++i) names.as_seq().push_back(Node(i < m.slots.size() ? m.slots[i] : "slot" + std::to_string(i)));
+        out["material_slots"] = names;
+        if (any_slot) {
+            Node fm = Node::sequence();
+            for (const auto& f : m.faces) fm.as_seq().push_back(Node(static_cast<int64_t>(f.slot)));
+            out["face_materials"] = fm;
+        }
+    }
     if (m.passthrough.is_mapping()) for (const auto& kv : m.passthrough.as_map()) out[kv.first.get_value<std::string>()] = kv.second;
     return out;
 }

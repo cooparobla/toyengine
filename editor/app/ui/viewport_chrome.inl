@@ -20,8 +20,11 @@
         return {viewport_box_.right() - sidebar_w_() - 118, viewport_box_.y + 8, 110, 110 + 4 * 30};
     }
     /** @brief True if `p` is over viewport furniture (toolbar, nav gizmo, sidebar). */
+    /** @brief Material and texture views only look -- no selection, tools or transforms. */
+    bool preview_only_view_() const { return active_type_ == AssetType::Material || active_type_ == AssetType::Texture; }
+
     bool over_viewport_chrome_(glm::vec2 p, bool mesh_edit) const {
-        if (show_toolbar_ && toolbar_rect_(mesh_edit).contains(p)) return true;
+        if (show_toolbar_ && !preview_only_view_() && toolbar_rect_(mesh_edit).contains(p)) return true;
         const imm::Box g = nav_gizmo_rect_();
         if (glm::distance(p, glm::vec2(g.x + 55, g.y + 55)) < 52.0f) return true;
         if (imm::Box{g.x + 40, g.y + 112, 30, 4 * 30}.contains(p)) return true;
@@ -38,7 +41,7 @@
         const float bh = hb.h - 6;
         if (playing()) ctx.fill_rounded(hb, et_.chrome.play_tint, 6, imm::Context::kTop);   // Unity's play tint
         // Mode dropdown.
-        if (!asset_view_() || mesh_edit) {
+        if (active_type_ == AssetType::Scene || active_type_ == AssetType::Object || active_type_ == AssetType::Mesh) {
             const bool sculpting = in_sculpt_mode_();
             const std::string mode = sculpting ? "Sculpt Mode" : mesh_edit ? "Edit Mode" : "Object Mode";
             const float w = ctx.text_width(mode) + bh + 26;
@@ -78,7 +81,7 @@
         const float menus_w = 220;
         ctx.begin_menubar({x, hb.y, menus_w, hb.h}, false);
         draw_view_menu_(ctx);
-        if (!in_sculpt_mode_()) {
+        if (!in_sculpt_mode_() && !preview_only_view_()) {
             draw_select_menu_(ctx, mesh_edit);
             if (!mesh_edit && ctx.begin_menu("Add")) { draw_add_menu_items_(ctx); ctx.end_menu(); }
             if (mesh_edit) draw_mesh_menu_(ctx);
@@ -95,17 +98,7 @@
                             s * 0.7f, imm::Context::kAll, sdd)) {
             ctx.open_popup("shading_opts", glm::vec2(sdd.right() - 220, sdd.bottom() + 2));
         }
-        if (ctx.begin_popup("shading_opts", 220)) {
-            ctx.label_dim("Viewport Shading");
-            const bool has_ssao = engine_.render_config().ssao_enabled;
-            bool ao = viewport_ao_ && has_ssao;
-            if (ctx.checkbox("Ambient Occlusion", &ao) && has_ssao) set_viewport_ao(ao);
-            ctx.tooltip(has_ssao ? "Ambient Occlusion\nDarken creases with the renderer's SSAO in Solid and Material Preview"
-                                 : "Ambient Occlusion\nUnavailable: the project's render config has ssao_enabled: false");
-            bool xr = xray_;
-            if (ctx.checkbox("X-Ray", &xr)) xray_ = xr;
-            ctx.end_popup();
-        }
+        if (ctx.begin_popup("shading_opts", 250)) draw_shading_popover_(ctx);
         rx -= s * 0.7f + 2;
         rx -= s * 4;
         int sh = static_cast<int>(shading_);
@@ -121,9 +114,16 @@
                             imm::Box{rx, hb.y + 3, s, s}, true)) {
             xray_ = !xray_;
         }
-        rx -= s + 4;
-        if (ctx.icon_button("overlays", I::Overlays, "Overlays\nGrid, origins, light and camera glyphs", show_overlays_, s, imm::Context::kAll,
-                            imm::Box{rx, hb.y + 3, s, s}, true)) {
+        // Overlays: the toggle plus its popover (caret).
+        rx -= s * 0.7f + 4;
+        const imm::Box odd{rx, hb.y + 3, s * 0.7f, s};
+        if (ctx.icon_button("overlay_opts_btn", I::ArrowDown, "Viewport Overlays\nWhich overlays draw", false, s * 0.7f, imm::Context::kRight, odd)) {
+            ctx.open_popup("overlay_opts", glm::vec2(odd.right() - 220, odd.bottom() + 2));
+        }
+        if (ctx.begin_popup("overlay_opts", 220)) draw_overlays_popover_(ctx);
+        rx -= s;
+        if (ctx.icon_button("overlays", I::Overlays, "Overlays\nGrid, origins, light and camera glyphs (caret: choose which)", show_overlays_, s,
+                            imm::Context::kLeft, imm::Box{rx, hb.y + 3, s, s}, true)) {
             show_overlays_ = !show_overlays_;
         }
         rx -= s + 10;
@@ -503,11 +503,15 @@
         shadow_text_(ctx, {x, y0}, view_name_(), et_.viewport.overlay_text);
         (void)vp;
         std::string ctxline = "(1) " + doc_.scene_name();
-        if (asset_view_()) ctxline = asset_kind_ == AssetKind::Mesh ? "(Mesh) " + mesh_.name : "(Material) " + material_.ref;
+        if (asset_view_() || active_type_ == AssetType::Object) {
+            ctxline = "(" + std::string(asset_type_info_(active_type_).singular) + ") " + active_asset_label_();
+            if (active_type_ == AssetType::Object && doc_.primary() && doc_.find(doc_.primary())) ctxline += " | " + get_string(*doc_.find(doc_.primary()), "name");
+        }
         else if (doc_.primary() && doc_.find(doc_.primary())) ctxline += " | " + get_string(*doc_.find(doc_.primary()), "name");
         shadow_text_(ctx, {x, y0 + 16}, ctxline, imm::with_alpha(et_.viewport.overlay_text, et_.viewport.overlay_text.a * 0.9f));
         if (playing()) shadow_text_(ctx, {x, y0 + 32}, play_scene_ && !play_scene_->is_simulating() ? "PAUSED" : "PLAYING",
                                     ctx.style.object_active);
+        if (show_overlays_ && show_stats_overlay_) shadow_text_(ctx, {x, y0 + (playing() ? 48.0f : 32.0f)}, scene_stats_(), et_.viewport.overlay_text);
     }
 
     /** @brief Blender's glyphs for a non-mesh object: camera frustum, light symbols, empty axes. */
@@ -587,11 +591,73 @@
     /** @brief Object / Edit / Sculpt Mode entries (header dropdown, Ctrl+Tab, viewport RMB in Sculpt). */
     void draw_mode_menu_items_(imm::Context& ctx) {
         using I = imm::Icon;
-        const bool mesh_obj = !asset_view_() && (edit_object_ || (doc_.primary() && doc_.find_component(doc_.primary(), "MeshRenderer") >= 0));
+        const bool mesh_obj = active_type_ == AssetType::Mesh ||
+                              (!asset_view_() && (edit_object_ || (doc_.primary() && doc_.find_component(doc_.primary(), "MeshRenderer") >= 0)));
         const InteractionMode cur = interaction_mode();
         bool o = cur == InteractionMode::Object, e = cur == InteractionMode::Edit, sc = cur == InteractionMode::Sculpt;
-        if (asset_view_()) e = mesh_edit_view_();
-        if (ctx.menu_item("Object Mode", "Tab", &o, !asset_view_(), I::ObjectMode)) set_interaction_mode(InteractionMode::Object);
+        if (ctx.menu_item("Object Mode", "Tab", &o, true, I::ObjectMode)) set_interaction_mode(InteractionMode::Object);
         if (ctx.menu_item("Edit Mode", "Tab", &e, mesh_obj && !playing(), I::EditMode)) set_interaction_mode(InteractionMode::Edit);
         if (ctx.menu_item("Sculpt Mode", "", &sc, mesh_obj && !playing(), I::SculptMode)) set_interaction_mode(InteractionMode::Sculpt);
+    }
+
+    /**
+     * @brief Viewport Shading popover: per shading mode. Solid / Material Preview: ambient
+     *        occlusion (the renderer's own AO terms), X-ray. Rendered: the renderer's live
+     *        toggles; startup-only features are listed but need a renderer restart
+     *        (Properties > Render).
+     */
+    void draw_shading_popover_(imm::Context& ctx) {
+        auto& rc = engine_.render_config();
+        ctx.label_dim(shading_ == Shading::Full ? "Rendered" : shading_ == Shading::MaterialPreview ? "Material Preview"
+                     : shading_ == Shading::Solid ? "Solid" : "Wireframe");
+        if (shading_ == Shading::Solid || shading_ == Shading::MaterialPreview) {
+            const bool has_ssao = rc.ssao_enabled;
+            bool ao = viewport_ao_ && has_ssao;
+            if (ctx.checkbox("Ambient Occlusion", &ao) && has_ssao) set_viewport_ao(ao);
+            ctx.tooltip(has_ssao ? "Ambient Occlusion\nThe renderer's SSAO, applied exactly as the full render applies it"
+                                 : "Ambient Occlusion\nUnavailable: the project's render config has ssao_enabled: false");
+        }
+        bool xr = xray_;
+        if (ctx.checkbox("X-Ray", &xr)) xray_ = xr;
+        ctx.tooltip("X-Ray\nSee and select through surfaces (Alt Z)");
+        if (shading_ != Shading::Full) { ctx.end_popup(); return; }
+        ctx.separator();
+        ctx.label_dim("Renderer (live, this session)");
+        auto live = [&](const char* label, bool& v, const char* tip) {
+            ctx.checkbox(label, &v);
+            ctx.tooltip(tip);
+        };
+        live("Shadows", rc.shadows_enabled, "Shadows\nShadow maps for every light");
+        live("Contact Shadows", rc.contact_shadows_enabled, "Contact Shadows\nScreen-space short shadows");
+        live("Soft Lighting", rc.soft_lighting, "Soft Lighting\nSmooth lighting instead of the banded pixel-art look");
+        live("Outline", rc.outline_enabled, "Outline\nThe pixel-art edge outline");
+        live("Palette", rc.palette_enabled, "Palette\nPalette quantization");
+        live("Dither", rc.dither_enabled, "Dither\nOrdered dithering");
+        ctx.separator();
+        ctx.label_dim("Set at startup (Properties > Render)");
+        auto fixed = [&](const char* label, bool v) {
+            bool copy = v;
+            imm::Box row = ctx.next_box(ctx.style.row_height);
+            ctx.text_in(row, std::string(copy ? "on    " : "off   ") + label, ctx.style.text_disabled, 0.0f);
+            ctx.tooltip(std::string(label) + "\nChanged in Properties > Render; applies after Render > Restart Renderer");
+        };
+        fixed("SSAO", rc.ssao_enabled);
+        fixed("SSR", rc.ssr_enabled);
+        fixed("Bloom", rc.bloom_enabled);
+        fixed("Fog", rc.fog_enabled);
+        fixed("Volumetrics", rc.volumetrics_enabled);
+        fixed("Depth of Field", rc.dof_enabled);
+        ctx.end_popup();
+    }
+
+    /** @brief Viewport Overlays popover. */
+    void draw_overlays_popover_(imm::Context& ctx) {
+        ctx.label_dim("Viewport Overlays");
+        ctx.checkbox("Grid", &show_grid_);
+        ctx.checkbox("Origins", &show_origins_);
+        ctx.checkbox("Cameras / Lights", &show_glyphs_);
+        ctx.checkbox("3D Cursor", &show_cursor3d_);
+        ctx.checkbox("Statistics", &show_stats_overlay_);
+        ctx.tooltip("Statistics\nObject / vertex / face counts in the viewport corner");
+        ctx.end_popup();
     }

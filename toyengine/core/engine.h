@@ -158,6 +158,8 @@ public:
 
         edit_mode_ = options_.edit_mode;
         assets_.add_search_root((options_.project_root / "assets").string());
+        // `prefab: objects/crate` (object assets) resolves against the project's assets too.
+        coopa::scene::SceneLoader::set_search_roots({(options_.project_root / "assets").string()});
         assets_.register_loader<coopa::gfx::engine::data::Mesh>(
             std::make_unique<coopa::gfx::engine::loaders::MeshLoader>(ctx_.device(), ctx_.allocator(), ctx_.command_pool()));
         // Pure-CPU bind-pose data for SkinnedMeshRenderer (toy::scene) -- no GPU handles, unlike
@@ -791,6 +793,33 @@ public:
     coopa::gfx::memory::Allocator&    allocator() { return ctx_.allocator(); }
     coopa::gfx::command::CommandPool& command_pool() { return ctx_.command_pool(); }
     coopa::input::InputMap&           input()  { return input_; }
+    /**
+     * @brief Spawns an object asset (`objects/crate`) into the active scene at `position`,
+     *        started and ready -- the runtime half of object assets (see scene_inherit.h).
+     * @return The new object, or null if the asset could not be loaded (logged).
+     */
+    coopa::scene::SceneObject* spawn(const std::string& object_asset, const glm::vec3& position = glm::vec3(0.0f),
+                                     coopa::scene::SceneObject* parent = nullptr) {
+        if (!scene_mgr_.has_scene()) return nullptr;
+        try {
+            fkyaml::node overrides = fkyaml::node::mapping();
+            fkyaml::node comps = fkyaml::node::sequence();
+            fkyaml::node t = fkyaml::node::mapping();
+            t["type"] = fkyaml::node(std::string("Transform"));
+            fkyaml::node pos = fkyaml::node::mapping();
+            pos["x"] = fkyaml::node(static_cast<double>(position.x));
+            pos["y"] = fkyaml::node(static_cast<double>(position.y));
+            pos["z"] = fkyaml::node(static_cast<double>(position.z));
+            t["position"] = pos;
+            comps.as_seq().push_back(t);
+            overrides["components"] = comps;
+            return coopa::scene::SceneLoader::spawn(scene_mgr_.get_active_scene(), object_asset, parent, &overrides);
+        } catch (const std::exception& e) {
+            std::cerr << "[toyengine] spawn('" << object_asset << "') failed: " << e.what() << "\n";
+            return nullptr;
+        }
+    }
+
     /// @brief The active scene -- for physics-focused headless tests and gameplay code that
     /// needs to reach a system (e.g. `scene().find_system("Physics")`) or spawn objects.
     coopa::scene::Scene&              scene()  { return scene_mgr_.get_active_scene(); }

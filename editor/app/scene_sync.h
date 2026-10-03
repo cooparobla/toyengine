@@ -110,7 +110,7 @@ private:
     static bool inherits_(const SceneDocument& doc, ObjectId id) {
         for (std::optional<ObjectId> cur = id; cur && *cur != 0; cur = doc.parent_of(*cur)) {
             const Node* n = doc.find(*cur);
-            if (n && n->contains("inherit_from")) return true;
+            if (n && (n->contains("inherit_from") || n->contains("prefab"))) return true;
         }
         return doc.node().at("scene").contains("inherit_from");
     }

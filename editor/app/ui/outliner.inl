@@ -1,9 +1,11 @@
 // editor/app/ui/outliner.inl -- included inside EditorApp's class body.
 //
-// Blender's Outliner: a "Scene Collection" root, objects nested with expand arrows and
-// type icons, each object's components listed beneath it (as Blender lists modifiers and
-// data), and per-row eye (viewport visibility) and monitor (enabled in the game) toggles.
-// In the Shading workspace it lists the project's materials instead.
+// The Hierarchy: exactly what the open file holds. For a scene, the root row is the
+// file's `scene:` block (named by scene_name) and its rows are root_objects in file order,
+// nested children, then every component in order (Transform included). For an object asset
+// the root row is the object itself. Prefab instances (`prefab:`) show a link icon and their
+// inherited children dimmed. Rows have eye (viewport visibility) and monitor (enabled in
+// the game) toggles.
 
     void draw_outliner_(imm::Context& ctx, const imm::Box& area) {
         using I = imm::Icon;
@@ -11,26 +13,27 @@
         eye_rects_.clear();
         hierarchy_hovered_ = outliner_hovered_;
         const imm::Box hb = area_header_(ctx, area);
-        ctx.icon(tab_ == Tab::Shading ? I::Material : I::Collection, {hb.x + 6, hb.y + 4, hb.h - 8, hb.h - 8}, ctx.style.text_dim);
+        ctx.icon(doc_.is_object_asset() ? I::Object : I::Scene, {hb.x + 6, hb.y + 4, hb.h - 8, hb.h - 8}, ctx.style.text_dim);
         const imm::Box search{hb.x + hb.h + 4, hb.y + 4, hb.w - hb.h - 36, hb.h - 8};
         ctx.input_text_box("outliner_filter", search, &outliner_filter_, "    Filter");
         if (outliner_filter_.empty()) ctx.icon(I::Search, {search.x + 4, search.y + 3, search.h - 6, search.h - 6}, ctx.style.text_disabled);
-        if (ctx.icon_button("outliner_new", I::Plus, tab_ == Tab::Shading ? "New Material" : "Add Object\nShift A in the viewport", false,
+        if (ctx.icon_button("outliner_new", I::Plus, "Add Object\nShift A in the viewport (object assets too)", false,
                             hb.h - 6, imm::Context::kAll, imm::Box{hb.right() - hb.h + 2, hb.y + 3, hb.h - 6, hb.h - 6})) {
-            if (tab_ == Tab::Shading) create_material("material");
-            else open_add_menu_ = true;   // declared by the viewport (draw_viewport_popups_)
+            open_add_menu_ = true;   // declared by the viewport (draw_viewport_popups_)
         }
         const imm::Box body{area.x, hb.bottom(), area.w, area.h - hb.h};
         ctx.begin_region("outliner", body, true);
-        if (tab_ == Tab::Shading) {
-            draw_material_list_(ctx);
-            ctx.end_region();
-            return;
+        // An object asset's file IS its object: no scene row above it.
+        const bool object_file = doc_.is_object_asset();
+        imm::TreeNodeResult root{};
+        if (!object_file) {
+            root = ctx.tree_node(ctx.get_id("scene_root"), doc_.scene_name(), false, false, true, nullptr, I::Scene);
+            ctx.tooltip(doc_.scene_name() + "\nThe scene file's `scene:` block -- click for its settings (Properties > Scene)");
+            if (root.clicked) { doc_.clear_selection(); prop_tab_ = PropTab::Scene; }
+            if (root.right_clicked && !playing()) { context_target_ = 0; ctx.open_popup("outliner_ctx"); }
+        } else {
+            root.open = true;
         }
-        const ObjectId root_id = 0;
-        auto root = ctx.tree_node(ctx.get_id("scene_collection"), "Scene Collection", false, false, true, nullptr, I::Collection);
-        (void)root_id;
-        if (root.right_clicked && !playing()) { context_target_ = 0; ctx.open_popup("outliner_ctx"); }
         if (root.open) {
             if (outliner_filter_.empty()) draw_outliner_list_(ctx, doc_.root_objects());
             else {
@@ -43,7 +46,7 @@
                     if (ln.find(f) != std::string::npos) draw_outliner_row_(ctx, SceneDocument::id_of(o), true);
                 });
             }
-            ctx.tree_pop();
+            if (!object_file) ctx.tree_pop();
         }
         // Drop on empty space: un-parent to the root.
         if (!playing()) {
@@ -75,14 +78,23 @@
         const bool active = get_bool(*o, "active", true);
         const bool isolated = isolated_.count(id) > 0;   // hidden by Edit / Sculpt Mode isolation
         const bool hidden = hidden_.count(id) > 0 || isolated;
+        const bool instance = o->contains("prefab") || o->contains("inherit_from");
+        const Node shown = instance ? resolved_object_(*o) : *o;   // a prefab instance shows its resolved type
         std::vector<std::string> comps;
         if (o->contains("components")) {
-            for (const auto& c : o->at("components").as_seq()) {
-                const std::string t = component_type(c);
-                if (t != "Transform") comps.push_back(t);
+            for (const auto& c : o->at("components").as_seq()) comps.push_back(component_type(c));
+        }
+        std::vector<std::string> inherited;   // children that come from the prefab, not this file
+        if (instance && !flat && shown.contains("children") && shown.at("children").is_sequence()) {
+            for (const auto& ch : shown.at("children").as_seq()) {
+                const std::string cn = get_string(ch, "name");
+                bool own = false;
+                if (o->contains("children")) for (const auto& oc : o->at("children").as_seq()) own |= get_string(oc, "name") == cn;
+                if (!own) inherited.push_back(cn);
             }
         }
-        const bool has_children = !flat && o->contains("children") && o->at("children").is_sequence() && o->at("children").size() > 0;
+        const bool has_children = !flat && ((o->contains("children") && o->at("children").is_sequence() && o->at("children").size() > 0) ||
+                                            !inherited.empty());
         const bool leaf = flat || (!has_children && comps.empty());
         ctx.push_id(static_cast<int64_t>(id));
 
@@ -98,7 +110,8 @@
             return;
         }
 
-        auto [icon, tint] = object_icon_(*o, ctx.style);
+        auto [icon, tint] = object_icon_(shown, ctx.style);
+        if (instance) { icon = I::Link; tint = ctx.style.accent; }
         glm::vec4 text_col = ctx.style.text;
         if (!active || hidden) { text_col = ctx.style.text_disabled; tint = imm::with_alpha(tint, 0.45f); }
         const bool selected = doc_.is_selected(id);
@@ -139,8 +152,17 @@
             draw_object_context_menu_(ctx, context_target_);
             ctx.end_popup();
         }
+        if (instance) ctx.tooltip(name + "\nInstance of " + get_string(*o, "prefab", get_string(*o, "inherit_from")) +
+                                  " -- edits here are saved as overrides");
         if (r.open) {
-            if (has_children) draw_outliner_list_(ctx, o->at("children"));
+            if (o->contains("children")) draw_outliner_list_(ctx, o->at("children"));
+            for (size_t k = 0; k < inherited.size(); ++k) {
+                ctx.push_id(static_cast<int64_t>(1000 + k));
+                const glm::vec4 dim = ctx.style.text_disabled;
+                ctx.tree_node(ctx.get_id("inherited"), inherited[k], true, false, false, &dim, I::Link);
+                ctx.tooltip(inherited[k] + "\nFrom the object asset (open it to edit)");
+                ctx.pop_id();
+            }
             for (size_t i = 0; i < comps.size(); ++i) {
                 ctx.push_id(static_cast<int64_t>(i));
                 const glm::vec4 dim = ctx.style.text_dim;
@@ -148,7 +170,7 @@
                 if (cr.clicked) {
                     doc_.select(id);
                     const ComponentSchema* sc = find_schema(comps[i]);
-                    prop_tab_ = comps[i] == "MeshRenderer" ? PropTab::Material
+                    prop_tab_ = comps[i] == "Transform" ? PropTab::Object : comps[i] == "MeshRenderer" ? PropTab::Material
                               : (sc && sc->category == "Physics") ? PropTab::Physics : PropTab::Components;
                 }
                 ctx.tooltip(comps[i] + "\nComponent -- click to edit it in the Properties editor");
@@ -157,19 +179,6 @@
             ctx.tree_pop();
         }
         ctx.pop_id();
-    }
-
-    void draw_material_list_(imm::Context& ctx) {
-        using I = imm::Icon;
-        for (const auto& m : project_.list("materials", ".yaml")) {
-            ctx.push_id(m);
-            const bool sel = asset_kind_ == AssetKind::Material && project_.relative(material_.path) == m;
-            if (ctx.selectable(fs::path(m).stem().string(), sel, 0, I::Material)) open_material(project_.absolute(m));
-            ctx.drag_source("asset", m, fs::path(m).filename().string());
-            ctx.tooltip(m + "\nDrag onto an object in the viewport to assign");
-            ctx.pop_id();
-        }
-        if (project_.list("materials", ".yaml").empty()) ctx.label_dim("No materials yet -- press + to create one.");
     }
 
     void draw_object_context_menu_(imm::Context& ctx, ObjectId target) {
@@ -186,6 +195,18 @@
             for (const auto& p : primitive_names()) if (ctx.menu_item(p, "", nullptr, true, I::Cube)) create_primitive(p);
             ctx.end_menu();
         }
+        if (ctx.begin_menu("Object Asset", ok && !doc_.is_object_asset(), I::Object)) {
+            for (const auto& rel : list_assets_(AssetType::Object)) {
+                if (ctx.menu_item(fs::path(rel).stem().string(), "", nullptr, true, I::Link)) place_object_asset(rel);
+            }
+            if (list_assets_(AssetType::Object).empty()) ctx.label_dim("No object assets yet");
+            ctx.end_menu();
+        }
+        if (ctx.menu_item("Create Object Asset", "", nullptr, ok && target != 0 && !doc_.is_object_asset(), I::Object)) {
+            doc_.select(target);
+            create_object_asset_from_selection();
+        }
+        ctx.tooltip("Create Object Asset\nSave this object as objects/<name>.yaml and replace it with an instance");
         ctx.menu_separator();
         if (ctx.menu_item("Rename", "F2", nullptr, ok && target != 0)) { rename_id_ = target; rename_frames_ = 0; }
         if (ctx.menu_item("Duplicate", "Shift D", nullptr, ok && target != 0, I::Duplicate)) duplicate_selected();

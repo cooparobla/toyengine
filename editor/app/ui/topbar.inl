@@ -24,14 +24,23 @@
         }
         ctx.end_menubar();
 
-        // Workspace tabs.
-        static const std::vector<std::string> ws = {"Layout", "Modeling", "Shading", "Sculpting"};
-        static const std::vector<I> ws_icons = {I::Asset, I::EditMode, I::ShadeMaterial, I::SculptMode};
-        int t = static_cast<int>(tab_);
-        if (ctx.tab_bar("workspaces", {mb.right() + 12, b.y, 480, b.h}, ws, &t, &ws_icons, false)) set_tab(static_cast<Tab>(t));
+        // The open asset: type, name, unsaved marker, and the mesh being edited from a scene.
+        {
+            const auto& info = asset_type_info_(active_type_);
+            std::string label = std::string(info.singular) + "  " + active_asset_label_() + (open_asset_dirty_() ? "  *" : "");
+            if (edit_object_ && mesh_.open()) label += "   \u25b8   editing " + project_.relative(mesh_.path) + (mesh_.dirty() ? " *" : "");
+            const float w = ctx.text_width(label) + b.h + 18;
+            const imm::Box ab{mb.right() + 12, b.y + 4, w, b.h - 8};
+            ctx.fill_rounded(ab, ctx.style.field);
+            ctx.icon(info.icon, {ab.x + 5, ab.y + 2, ab.h - 4, ab.h - 4}, ctx.style.object_active);
+            ctx.text_in({ab.x + ab.h + 6, ab.y, ab.w - ab.h - 6, ab.h}, label, ctx.style.text, 0.0f);
+            ctx.tooltip(std::string("Open asset\n") + (active_path_.empty() ? std::string("not saved yet") : project_.relative(active_path_)) +
+                        " -- pick another in the Asset panel");
+        }
 
-        // Unity play controls, centred.
+        // Unity play controls, centred -- scenes only (play runs the open scene).
         const float s = b.h - 6;
+        if (active_type_ != AssetType::Scene) return draw_topbar_project_(ctx, b);
         const float cx = b.x + b.w * 0.5f - s * 1.5f;
         const bool paused = playing() && play_scene_ && !play_scene_->is_simulating() && step_countdown_ == 0;
         ctx.fill_rounded({cx - 2, b.y + 2, s * 3 + 4, s + 2}, et_.chrome.play_group_bg);
@@ -45,13 +54,18 @@
             step_simulation_();
         }
 
-        // Scene name at the right (Blender's scene selector).
-        const std::string scene = doc_.scene_name() + (doc_.dirty() ? " *" : "");
-        const float sw = ctx.text_width(scene) + 40;
+        draw_topbar_project_(ctx, b);
+    }
+
+    void draw_topbar_project_(imm::Context& ctx, const imm::Box& b) {
+        using I = imm::Icon;
+        // Project name at the right.
+        const std::string proj = project_.name();
+        const float sw = ctx.text_width(proj) + 40;
         const imm::Box sb{b.right() - sw - 8, b.y + 4, sw, b.h - 8};
-        ctx.fill_rounded(sb, ctx.style.field);
-        ctx.icon(I::Scene, {sb.x + 5, sb.y + 2, sb.h - 4, sb.h - 4}, ctx.style.text_dim);
-        ctx.text_in({sb.x + sb.h + 4, sb.y, sb.w - sb.h - 4, sb.h}, scene, ctx.style.text, 0.0f);
+        ctx.icon(I::Folder, {sb.x + 5, sb.y + 2, sb.h - 4, sb.h - 4}, ctx.style.text_dim);
+        ctx.text_in({sb.x + sb.h + 4, sb.y, sb.w - sb.h - 4, sb.h}, proj, ctx.style.text_dim, 0.0f);
+        ctx.tooltip("Project\n" + project_.root().string());
     }
 
     void draw_file_menu_(imm::Context& ctx) {
@@ -147,15 +161,12 @@
         bool t = show_toolbar_, n = show_sidebar_, bt = show_bottom_;
         if (ctx.menu_item("Toolbar", "T", &t)) show_toolbar_ = !show_toolbar_;
         if (ctx.menu_item("Sidebar", "N", &n)) show_sidebar_ = !show_sidebar_;
-        if (ctx.menu_item("Asset Browser / Console", "", &bt)) show_bottom_ = !show_bottom_;
+        if (ctx.menu_item("Console", "", &bt)) show_bottom_ = !show_bottom_;
         if (ctx.menu_item("Toggle Maximize Area", "Ctrl Space", nullptr, true, I::Zoom)) maximized_ = !maximized_;
         ctx.menu_separator();
-        if (ctx.menu_item("Layout", "", nullptr, true, I::Asset)) set_tab(Tab::Layout);
-        if (ctx.menu_item("Modeling", "", nullptr, true, I::EditMode)) set_tab(Tab::Modeling);
-        if (ctx.menu_item("Shading", "", nullptr, true, I::ShadeMaterial)) set_tab(Tab::Shading);
-        ctx.menu_separator();
+
         if (ctx.menu_item("Reset Layout", "", nullptr, true, I::Restart)) {
-            right_w_ = 340; bottom_h_ = 190; outliner_h_ = 260; show_toolbar_ = show_bottom_ = true; show_sidebar_ = false; maximized_ = false;
+            left_w_ = 260; right_w_ = 330; bottom_h_ = 130; outliner_h_ = 260; show_toolbar_ = show_bottom_ = true; show_sidebar_ = false; maximized_ = false;
         }
         ctx.end_menu();
     }

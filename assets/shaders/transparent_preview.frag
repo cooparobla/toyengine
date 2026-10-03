@@ -53,14 +53,20 @@ void main() {
 
     int mode = int(pc.view.x + 0.5);
     vec3 col;
+    // Forward surfaces get no screen-space AO and no direct-light AO -- same as the renderer's
+    // forward path (pixel_forward_shading.glsl).
+    const float ndotv = max(dot(N, normalize(camera.camera_pos - frag_world_pos)), 0.0);
     if (mode == 3) {
         col = vec3(0.12);                 // wireframe: a faint film, the edges come from overlays
         alpha *= 0.25;
     } else if (mode == 2) {
+        const vec3 F0 = mix(vec3(0.04), albedo, clamp(pc.metallic * mr.x, 0.0, 1.0));
+        const GfxAoTerms aot = gfx_ao_terms(pc.ao, 1.0, albedo, F0, ndotv, clamp(pc.roughness * mr.y, 0.04, 1.0), 0.0);
         col = editor_material_preview(N, frag_world_pos, camera.camera_pos, albedo, pc.metallic * mr.x,
-                                      pc.roughness * mr.y, pc.ao, pc.emissive.rgb);
+                                      pc.roughness * mr.y, aot, pc.emissive.rgb);
     } else {
-        col = editor_solid(N, frag_world_pos, camera.camera_pos, albedo);
+        const GfxAoTerms aot = gfx_ao_terms(1.0, 1.0, editor_solid_base(albedo), vec3(0.04), ndotv, 0.5, 0.0);
+        col = editor_solid(N, frag_world_pos, camera.camera_pos, albedo, aot);
     }
     out_color = vec4(col, alpha);
 }

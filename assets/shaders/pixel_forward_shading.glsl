@@ -236,9 +236,10 @@ vec4 gfx_pixel_forward_shade(vec3 world_pos, vec3 N, vec3 camera_pos, mat4 view,
     // Same HDRP-style occlusion composite as pixel_lighting.frag (gfx/ao_composite.glsl):
     // multi-bounce diffuse occlusion, F0-tinted specular occlusion cone. ao_spec also
     // scales the SSR delta below, mirroring ssr_composite_body.glsl's opaque path.
-    vec3  ao_diffuse = gfx_gtao_multi_bounce(ao, albedo);
-    float spec_occ   = gfx_specular_occlusion(max(dot(N, V), 0.0), ao, roughness);
-    vec3  ao_spec    = gfx_gtao_multi_bounce(spec_occ, F0);
+    // No screen-space AO on forward surfaces (ssao = 1), and no direct-light AO (strength 0).
+    const GfxAoTerms aot = gfx_ao_terms(ao, 1.0, albedo, F0, max(dot(N, V), 0.0), roughness, 0.0);
+    const vec3 ao_diffuse = aot.diffuse;
+    const vec3 ao_spec    = aot.specular;
     vec3 ambient = kD_ind * albedo * ind_diff * ao_diffuse + ind.value * ao_spec;
 
     if (p.ssr_enabled != 0.0) {

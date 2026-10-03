@@ -37,12 +37,17 @@
         sculpt_active_ = false;
         sculpt_preview_.reset();
         scene_uploaded_revision_ = 0;   // push_mesh_to_scene_ re-exports the sculpted mesh once
+        uploaded_revision_ = 0;         // and the mesh viewer re-uploads it
     }
 
     /** @brief Shows the preview mesh on every live object using the edited mesh file. */
     void assign_sculpt_preview_() {
         if (!sculpt_preview_.mesh()) return;
         auto handle = engine_.assets().create<coopa::gfx::engine::data::Mesh>("editor/sculpt_mesh", sculpt_preview_.mesh());
+        if (active_type_ == AssetType::Mesh) {   // the mesh asset's own viewer
+            if (auto* mr = preview_renderer_()) mr->set_mesh(handle);
+            return;
+        }
         const fs::path dir = (doc_.path().empty() ? sync_.fallback_path : doc_.path()).parent_path();
         for (const auto& [id, live] : sync_.live_objects()) {
             const int ci = doc_.find_component(id, "MeshRenderer");

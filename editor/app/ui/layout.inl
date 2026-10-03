@@ -1,9 +1,10 @@
 // editor/app/ui/layout.inl -- included inside EditorApp's class body.
 //
-// The window is laid out like Blender's default "Layout" workspace: a top bar (menus,
-// workspace tabs, Unity-style play controls), the 3D viewport with an asset browser /
-// console below it, and a right column holding the Outliner above the Properties editor.
-// Every area is a rounded panel separated by thin gaps, as in Blender 2.8+.
+// toyengine's asset editor layout: a top bar (menus, the open asset, play controls); on the
+// left the Asset panel (one tab per asset type, then the project's assets of that type --
+// clicking one opens it); the viewer in the middle with the Console under it; and on the
+// right the Hierarchy (scenes and object assets) above Properties. Every area is a rounded
+// panel separated by thin gaps, in the Blender style.
 
     // =================================================================================
     // UI: top level and workspaces
@@ -58,53 +59,60 @@
         return a;
     }
 
-    /** @brief Viewport + bottom area on the left, Outliner over Properties on the right. */
+    /** @brief Asset panel | viewer (+ console) | hierarchy over properties. */
     void draw_workspace_(imm::Context& ctx, const imm::Box& c) {
         const bool mesh_edit = mesh_edit_view_();
         if (maximized_) { draw_viewport_(ctx, viewport_area_(ctx, c), mesh_edit); return; }
         const float gap = 4;
-        right_w_ = std::clamp(right_w_, 260.0f, std::max(260.0f, c.w * 0.5f));
-        bottom_h_ = std::clamp(bottom_h_, 70.0f, std::max(70.0f, c.h * 0.6f));
+        left_w_ = std::clamp(left_w_, 200.0f, std::max(200.0f, c.w * 0.35f));
+        right_w_ = std::clamp(right_w_, 260.0f, std::max(260.0f, c.w * 0.4f));
+        bottom_h_ = std::clamp(bottom_h_, 60.0f, std::max(60.0f, c.h * 0.5f));
         outliner_h_ = std::clamp(outliner_h_, 90.0f, std::max(90.0f, c.h - 160.0f));
-        const float left_w = c.w - right_w_;
-        const imm::Box viewport{c.x, c.y, left_w, show_bottom_ ? c.h - bottom_h_ : c.h};
-        const imm::Box bottom{c.x, viewport.bottom(), left_w, bottom_h_};
-        const imm::Box outliner{c.x + left_w, c.y, right_w_, outliner_h_};
-        const imm::Box props{c.x + left_w, c.y + outliner_h_, right_w_, c.h - outliner_h_};
+        const float mid_w = std::max(100.0f, c.w - left_w_ - right_w_);
+        const imm::Box left{c.x, c.y, left_w_, c.h};
+        const imm::Box viewport{c.x + left_w_, c.y, mid_w, show_bottom_ ? c.h - bottom_h_ : c.h};
+        const imm::Box console{c.x + left_w_, viewport.bottom(), mid_w, bottom_h_};
+        const bool hierarchy = active_type_ == AssetType::Scene || active_type_ == AssetType::Object;
+        const imm::Box outliner{c.x + left_w_ + mid_w, c.y, right_w_, hierarchy ? outliner_h_ : 0.0f};
+        const imm::Box props{c.x + left_w_ + mid_w, c.y + outliner.h, right_w_, c.h - outliner.h};
 
-        float sx = left_w;
-        if (ctx.splitter("ws_split_right", {c.x + left_w - gap * 0.5f, c.y, gap, c.h}, true, &sx, c.w * 0.5f, c.w - 260.0f).changed) {
+        float lx = left_w_;
+        if (ctx.splitter("ws_split_left", {c.x + left_w_ - gap * 0.5f, c.y, gap, c.h}, true, &lx, 200.0f, c.w * 0.35f).changed) left_w_ = lx;
+        float sx = c.w - right_w_;
+        if (ctx.splitter("ws_split_right", {c.x + c.w - right_w_ - gap * 0.5f, c.y, gap, c.h}, true, &sx, c.w * 0.6f, c.w - 260.0f).changed) {
             right_w_ = c.w - sx;
         }
         if (show_bottom_) {
             float by = viewport.h;
-            if (ctx.splitter("ws_split_bottom", {c.x, viewport.bottom() - gap * 0.5f, left_w, gap}, false, &by, c.h * 0.4f, c.h - 70.0f).changed) {
+            if (ctx.splitter("ws_split_bottom", {viewport.x, viewport.bottom() - gap * 0.5f, mid_w, gap}, false, &by, c.h * 0.5f, c.h - 60.0f).changed) {
                 bottom_h_ = c.h - by;
             }
         }
-        float oy = outliner_h_;
-        if (ctx.splitter("ws_split_outliner", {outliner.x, outliner.bottom() - gap * 0.5f, right_w_, gap}, false, &oy, 90.0f, c.h - 160.0f).changed) {
-            outliner_h_ = oy;
+        if (hierarchy) {
+            float oy = outliner_h_;
+            if (ctx.splitter("ws_split_outliner", {outliner.x, outliner.bottom() - gap * 0.5f, right_w_, gap}, false, &oy, 90.0f, c.h - 160.0f).changed) {
+                outliner_h_ = oy;
+            }
         }
 
         // Non-viewport areas paint their own gap background first.
-        for (const imm::Box& b : {bottom, outliner, props}) ctx.fill(b, ctx.style.window_bg);
+        ctx.fill(left, ctx.style.window_bg);
+        if (show_bottom_) ctx.fill(console, ctx.style.window_bg);
+        if (hierarchy) ctx.fill(outliner, ctx.style.window_bg);
+        ctx.fill(props, ctx.style.window_bg);
         draw_viewport_(ctx, viewport_area_(ctx, viewport), mesh_edit);
-        if (show_bottom_) draw_bottom_area_(ctx, area_(ctx, bottom));
-        draw_outliner_(ctx, area_(ctx, outliner));
+        draw_asset_panel_(ctx, area_(ctx, left));
+        if (show_bottom_) draw_console_area_(ctx, area_(ctx, console));
+        if (hierarchy) draw_outliner_(ctx, area_(ctx, outliner));
         draw_properties_(ctx, area_(ctx, props));
     }
 
-    /** @brief Is the viewport editing mesh elements (scene edit mode, or a standalone mesh)? */
-    bool mesh_edit_view_() const {
-        if (tab_ == Tab::Modeling && standalone_mesh_ && asset_kind_ == AssetKind::Mesh) return true;
-        return in_edit_mode_();
-    }
+    /** @brief Is the viewport editing mesh elements (Edit Mode on a mesh asset or a scene object's mesh)? */
+    bool mesh_edit_view_() const { return in_edit_mode_(); }
 
-    /** @brief Does the viewport show the private preview scene instead of the edited scene? */
+    /** @brief Does the viewport show the private preview scene (mesh / material / texture assets)? */
     bool asset_view_() const {
-        return (tab_ == Tab::Shading && asset_kind_ == AssetKind::Material) ||
-               (tab_ == Tab::Modeling && standalone_mesh_ && asset_kind_ == AssetKind::Mesh);
+        return active_type_ == AssetType::Mesh || active_type_ == AssetType::Material || active_type_ == AssetType::Texture;
     }
 
     /** @brief A Blender area header strip at the top of an area (rounded top corners). */

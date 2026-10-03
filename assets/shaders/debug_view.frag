@@ -72,7 +72,7 @@ layout(push_constant) uniform DebugViewParams {
     float camera_near;          // for DBG_DEPTH; same three-field idiom as
     float camera_far;           // pixel_stylize.frag / DofPass's own linearization.
     float camera_is_perspective;
-    float editor_ao;            // editor shading (solid / material preview): SSAO weight 0..1
+    float editor_ao;            // editor shading (solid / material preview): 1 = apply SSAO, 0 = off
 } params;
 
 layout(location = 0) out vec4 out_color;
@@ -254,15 +254,22 @@ void main() {
             out_color = vec4(bg * 0.6 + vec3(0.035), 1.0);
             return;
         }
-        // Screen-space AO, when the editor's "Ambient Occlusion" shading option is on.
-        float ssao = mix(1.0, texture(g_ssao, in_uv).r, params.editor_ao);
+        // Screen-space AO exactly as the full render applies it (gfx_ao_terms); the viewer's
+        // "Ambient Occlusion" toggle off reads as ssao = 1, which is what the renderer does
+        // with ssao_enabled false.
+        float ssao = params.editor_ao > 0.5 ? texture(g_ssao, in_uv).r : 1.0;
         vec4 p2 = texture(g_position_roughness, in_uv);
+        float ndotv = max(dot(N, normalize(camera.camera_pos - p2.rgb)), 0.0);
         if (!prev) {
-            out_color = vec4(editor_solid(N, p2.rgb, camera.camera_pos, g0.rgb) * mix(1.0, ssao, 0.85), 1.0);
+            // Solid ignores material AO (it is lighting-independent), not screen-space AO.
+            const GfxAoTerms aot = gfx_ao_terms(1.0, ssao, editor_solid_base(g0.rgb), vec3(0.04), ndotv, 0.5,
+                                                params.ssao_direct_strength);
+            out_color = vec4(editor_solid(N, p2.rgb, camera.camera_pos, g0.rgb, aot), 1.0);
             return;
         }
-        float occlusion = mix(1.0, g0.a, 0.6) * ssao;
-        out_color = vec4(editor_material_preview(N, p2.rgb, camera.camera_pos, g0.rgb, g1.a, p2.a, occlusion,
+        const vec3 F0 = mix(vec3(0.04), g0.rgb, clamp(g1.a, 0.0, 1.0));
+        const GfxAoTerms aot = gfx_ao_terms(g0.a, ssao, g0.rgb, F0, ndotv, clamp(p2.a, 0.04, 1.0), params.ssao_direct_strength);
+        out_color = vec4(editor_material_preview(N, p2.rgb, camera.camera_pos, g0.rgb, g1.a, p2.a, aot,
                                                  texture(g_emissive, in_uv).rgb), 1.0);
         return;
     }
@@ -313,23 +320,20 @@ void main() {
             // channel shows exactly the direct-light number that reaches the final image,
             // not the unoccluded term.
             float ssao = texture(g_ssao, in_uv).r;
-            vec3 ao_diffuse = gfx_gtao_multi_bounce(min(ao, ssao), albedo);
-            result = Lo * mix(vec3(1.0), ao_diffuse, params.ssao_direct_strength);
+            result = Lo * gfx_ao_terms(ao, ssao, albedo, F0, max(dot(N, V), 0.0), roughness, params.ssao_direct_strength).direct;
             break;
         }
         case DBG_INDIRECT: {
             // Same expression as pixel_lighting.frag's ambient term -- see
             // gfx/ao_composite.glsl's own doc for the HDRP-style occlusion split.
             float ssao = texture(g_ssao, in_uv).r;
-            float occlusion = min(ao, ssao);
             vec3 ind_diff = sky_gradient(N, lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb)
                           * params.ambient_intensity;
             GfxIndirectSpecular ind = gfx_indirect_specular(world_pos, N, V, F0, roughness, params.sky_intensity,
                                                             lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb);
             vec3 kD_ind = (vec3(1.0) - ind.F) * (1.0 - metallic);
-            vec3 ao_diffuse = gfx_gtao_multi_bounce(occlusion, albedo);
-            float spec_occ = gfx_specular_occlusion(max(dot(N, V), 0.0), occlusion, roughness);
-            result = kD_ind * albedo * ind_diff * ao_diffuse + ind.value * gfx_gtao_multi_bounce(spec_occ, F0);
+            const GfxAoTerms aot = gfx_ao_terms(ao, ssao, albedo, F0, max(dot(N, V), 0.0), roughness, params.ssao_direct_strength);
+            result = kD_ind * albedo * ind_diff * aot.diffuse + ind.value * aot.specular;
             break;
         }
         case DBG_SHADOWS: {

@@ -513,6 +513,37 @@ void test_subdivide_triangulate_dissolve() {
                std::to_string(closed_and_consistent(box)) + ")");
 }
 
+/** @brief Material slots: YAML round trip, ops keep each face's slot, and the engine builds parts. */
+void test_mesh_material_slots() {
+    EditMesh m = make_cube();
+    m.slots = {"body", "trim"};
+    m.faces[1].slot = 1;   // top face is trim
+    const Node n = mesh_to_node(m);
+    expect(n.contains("material_slots") && n.contains("face_materials"), "slots are written");
+    const EditMesh back = mesh_from_node(n);
+    expect(back.slots == m.slots && back.faces.size() == 6, "slot names round-trip");
+    size_t trim = 0;
+    for (const auto& f : back.faces) trim += f.slot == 1;
+    expect(trim == 1, "face slots round-trip");
+
+    EditMesh cut = m;
+    MeshSelection sel;
+    loop_cut(cut, sel, make_edge(0, 4), 1);
+    size_t trim_after = 0;
+    for (const auto& f : cut.faces) trim_after += f.slot == 1;
+    expect(trim_after == 1, "a loop cut keeps the untouched trim face's slot");
+    EditMesh sub = m;
+    MeshSelection all;
+    all.select_all(sub);
+    subdivide(sub, all, 1);
+    size_t trim_sub = 0;
+    for (const auto& f : sub.faces) trim_sub += f.slot == 1;
+    expect(trim_sub == 4, "subdividing the trim face gives 4 trim faces");
+
+    const auto cpu = coopa::gfx::engine::data::Mesh::build_cpu(mesh_to_node(sub));
+    expect(cpu.lods[0].parts.size() == 2 && cpu.lods[0].parts[1].index_count == 4 * 6, "the engine builds a trim part of 8 triangles");
+}
+
 void test_mesh_io_roundtrip_and_engine_load() {
     for (const auto& name : primitive_names()) {
         EditMesh m = make_primitive(name);
@@ -1137,7 +1168,7 @@ void test_editor_shell_end_to_end() {
         expect(app.create_material("brick"), "a material asset can be created");
         app.material_document().node["albedo"] = make_color({0.7f, 0.2f, 0.1f});
         app.save_material();
-        app.set_tab(Tab::Layout);
+        app.show_document_view();
         tick(engine, 2);
         const int ci = app.document().find_component(sphere, "MeshRenderer");
         Node comp = app.document().find(sphere)->at("components").as_seq()[ci];
@@ -1170,7 +1201,7 @@ void test_editor_shell_end_to_end() {
         // Mesh editing in the Asset tab.
         app.new_mesh("Cube");
         tick(engine, 3);
-        expect(app.tab() == Tab::Modeling && app.mesh_document().mesh.faces.size() == 6, "a new cube mesh opens in the Modeling workspace");
+        expect(app.active_asset_type() == AssetType::Mesh && app.mesh_document().mesh.faces.size() == 6, "a new cube mesh opens in the mesh viewer");
         {
             auto* po = engine.scene().find_object("PreviewObject");
             auto* pmr = po ? po->get_component<coopa::gfx::engine::components::MeshRenderer>() : nullptr;
@@ -1209,7 +1240,7 @@ void test_editor_shell_end_to_end() {
         dump(engine, "05b_world_props");
 
         // Play / stop leaves the document alone.
-        app.set_tab(Tab::Layout);
+        app.show_document_view();
         tick(engine, 2);
         const Node doc_before = app.document().node();
         app.play();
@@ -1243,7 +1274,7 @@ void test_editor_shell_end_to_end() {
         expect(engine.pipeline().render_height() == 180, "a restart applies startup-only render settings");
         expect(app.document().dirty() && app.document().find_component(sphere_id_for_restart(app), "MeshRenderer") >= 0,
                "unsaved scene edits survive the restart");
-        app.set_tab(Tab::Layout);
+        app.show_document_view();
         tick(engine, 1);
         app.undo();
         tick(engine, 2);
@@ -1551,7 +1582,7 @@ void test_editor_blender_chrome() {
     app.stop();
     tick(engine, 2);
     expect(!app.playing(), "stop");
-    app.set_tab(Tab::Shading);
+    app.open_asset(AssetType::Material, "materials/default.yaml");
     tick(engine, 4);
     dump(engine, "07_shading_workspace");
 }
@@ -1908,9 +1939,9 @@ void test_editor_sculpt() {
     InputDriver in{engine, std::max(1.0f, engine.display_scale())};
     const ObjectId cube = object_named(app, "Cube");
     app.document().select(cube);
-    app.set_tab(Tab::Sculpting);
+    app.set_interaction_mode(InteractionMode::Sculpt);
     tick(engine, 4);
-    expect(app.interaction_mode() == InteractionMode::Sculpt, "the Sculpting workspace enters Sculpt Mode");
+    expect(app.interaction_mode() == InteractionMode::Sculpt, "the mode dropdown enters Sculpt Mode");
     auto& md = app.mesh_document();
     app.subdivide_smooth(2);
     tick(engine, 3);
@@ -1953,9 +1984,214 @@ void test_editor_sculpt() {
     engine.queue_input([](coopa::input::Input& i) { i.push_key(Key::LeftControl, 0, KeyAction::Release, Mods::None); });
     tick(engine, 2);
     expect(spread(md.mesh) < spread(before) - 1e-3f, "Ctrl+Draw pushes the surface in");
-    app.set_tab(Tab::Layout);
+    app.show_document_view();
     tick(engine, 3);
-    expect(app.interaction_mode() == InteractionMode::Object, "leaving the workspace returns to Object Mode");
+    expect(app.interaction_mode() == InteractionMode::Object, "switching the view returns to Object Mode");
+}
+
+/** @brief The asset-focused flow: each asset type opens its view; switching asks to save. */
+void test_editor_asset_views() {
+    setenv("FIXED_DT", "0.016666", 1);
+    setenv("NO_INPUT", "1", 1);
+    setenv("HOME", tmp_root().c_str(), 1);
+    fs::remove(Project::prefs_path());
+    const fs::path root = fresh_dir("asset_views_project");
+    Project project = Project::create(root);
+    {   // a small texture asset
+        coopa::gfx::util::ImageData img;
+        img.width = img.height = 4;
+        img.channels = 4;
+        img.pixels.assign(4 * 4 * 4, 200);
+        coopa::gfx::util::save_image_png(img, (project.assets() / "textures" / "checker.png").string());
+        project.refresh();
+    }
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, toy::core::Engine::kFillDebounceFrames + 4);
+    expect(app.active_asset_type() == AssetType::Scene, "the project opens its default scene");
+    expect(fs::is_directory(project.assets() / "objects"), "new projects have an objects/ folder");
+
+    app.open_asset(AssetType::Material, "materials/default.yaml");
+    tick(engine, 4);
+    expect(app.active_asset_type() == AssetType::Material && app.material_document().open(), "a material opens in the material view");
+    auto* po = engine.scene().find_object("PreviewObject");
+    auto* ground = engine.scene().find_object("PreviewGround");
+    auto* key = engine.scene().find_object("LookdevKey");
+    auto* pmr = po ? po->get_component<coopa::gfx::engine::components::MeshRenderer>() : nullptr;
+    expect(pmr && pmr->is_ready() && ground && ground->active() && key, "the lookdev scene shows the material on a shape, on a ground disc, lit");
+    expect(app.shading() == Shading::Full, "materials open in the game's renderer");
+    dump(engine, "16_lookdev");
+
+    app.open_asset(AssetType::Mesh, "meshes/cube.yaml");
+    tick(engine, 4);
+    expect(app.active_asset_type() == AssetType::Mesh && app.interaction_mode() == InteractionMode::Object, "a mesh opens in the mesh viewer");
+    app.set_interaction_mode(InteractionMode::Edit);
+    expect(app.edit_mode_active(), "the mode dropdown enters Edit Mode on the mesh asset");
+    app.set_interaction_mode(InteractionMode::Sculpt);
+    tick(engine, 2);
+    expect(app.interaction_mode() == InteractionMode::Sculpt, "and Sculpt Mode works on a standalone mesh asset");
+    app.set_interaction_mode(InteractionMode::Object);
+
+    app.open_asset(AssetType::Texture, "textures/checker.png");
+    tick(engine, 4);
+    po = engine.scene().find_object("PreviewObject");
+    pmr = po ? po->get_component<coopa::gfx::engine::components::MeshRenderer>() : nullptr;
+    expect(app.active_asset_type() == AssetType::Texture && pmr && !pmr->material.texture_albedo.empty(), "a texture shows on a plane");
+
+    app.open_asset(AssetType::Scene, "scenes/main/scene.yaml");
+    tick(engine, 4);
+    expect(app.active_asset_type() == AssetType::Scene && engine.scene().find_object("Cube"), "back to the scene");
+    // Unsaved changes: switching asks first and does nothing until answered.
+    const ObjectId cube = object_named(app, "Cube");
+    app.document().set_object_key(cube, "name", Node(std::string("Renamed")), "Rename");
+    app.open_asset(AssetType::Material, "materials/default.yaml");
+    tick(engine, 3);
+    expect(app.active_asset_type() == AssetType::Scene && app.ui().any_popup_open(), "switching with unsaved changes opens the save prompt");
+}
+
+/** @brief Object assets: create from a selection, place instances, edit the asset, override, spawn. */
+void test_editor_object_assets() {
+    setenv("FIXED_DT", "0.016666", 1);
+    setenv("NO_INPUT", "1", 1);
+    setenv("HOME", tmp_root().c_str(), 1);
+    fs::remove(Project::prefs_path());
+    const fs::path root = fresh_dir("object_assets_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, 4);
+    const ObjectId cube = object_named(app, "Cube");
+    app.document().select(cube);
+    expect(app.create_object_asset_from_selection(), "Create Object Asset from the selection");
+    tick(engine, 3);
+    const fs::path asset = project.assets() / "objects" / "Cube.yaml";
+    expect(coopa::yaml::document_exists(asset), "objects/Cube.yaml is written");
+    const Node* inst = app.document().find(cube);
+    expect(inst && get_string(*inst, "prefab") == "objects/Cube", "the selection becomes an instance (`prefab:`)");
+    auto* live = engine.scene().find_object("Cube");
+    auto* mr = live ? live->get_component<coopa::gfx::engine::components::MeshRenderer>() : nullptr;
+    expect(mr && mr->is_ready(), "the instance still renders its mesh");
+    const ObjectId second = app.place_object_asset("objects/Cube.yaml", glm::vec3(3, 0, 0.5f));
+    tick(engine, 3);
+    expect(second != 0 && engine.scene().find_object(get_string(*app.document().find(second), "name")), "a second instance is placed");
+
+    // An override on one instance: its own albedo, the other keeps the asset's.
+    Node ov = Node::mapping();
+    ov["type"] = Node(std::string("MeshRenderer"));
+    Node mat = Node::mapping();
+    mat["albedo"] = make_color({1.0f, 0.0f, 0.0f});
+    ov["material"] = mat;
+    app.document().add_component(second, ov);
+    app.sync().rebuild(engine, app.document());
+    tick(engine, 3);
+    auto* l2 = engine.scene().find_object(get_string(*app.document().find(second), "name"));
+    auto* m2 = l2 ? l2->get_component<coopa::gfx::engine::components::MeshRenderer>() : nullptr;
+    expect(m2 && m2->material.albedo.r > 0.99f && m2->is_ready(), "an instance override changes only that instance (mesh still from the asset)");
+    expect(app.save_scene(), "the scene with instances saves");
+
+    // The object asset opens as its own document; the hierarchy root is the object.
+    app.open_asset(AssetType::Object, "objects/Cube.yaml");
+    tick(engine, 4);
+    expect(app.active_asset_type() == AssetType::Object && app.document().is_object_asset() && app.document().object_root() != 0,
+           "an object asset opens as a one-object document");
+    const ObjectId oroot = app.document().object_root();
+    const ObjectId child = app.create_empty();
+    tick(engine, 2);
+    expect(child && app.document().parent_of(child).value_or(0) == oroot, "objects added to an object asset become children of its root");
+    expect(app.save_scene(), "the object asset saves");
+    const Node saved = coopa::yaml::load_document(asset);
+    expect(saved.contains("object") && !saved.contains("scene") && saved.at("object").contains("children"),
+           "it is written back as `object:` with the new child");
+
+    // Runtime: the engine instantiates object assets.
+    app.open_asset(AssetType::Scene, "scenes/main/scene.yaml");
+    tick(engine, 4);
+    const size_t before = engine.scene().root_objects().size();
+    auto* spawned = engine.spawn("objects/Cube", glm::vec3(0, 3, 1));
+    expect(spawned && engine.scene().root_objects().size() == before + 1 && spawned->children().size() == 1,
+           "Engine::spawn() instantiates the asset, child included");
+    dump(engine, "17_object_instances");
+}
+
+/** @brief Submeshes end to end: a two-slot mesh draws each slot with its own material. */
+void test_editor_submesh_materials() {
+    setenv("FIXED_DT", "0.016666", 1);
+    setenv("NO_INPUT", "1", 1);
+    setenv("HOME", tmp_root().c_str(), 1);
+    const fs::path root = fresh_dir("submesh_project");
+    Project project = Project::create(root);
+    {   // cube with its top face in slot "trim"; a pure red material for it
+        EditMesh m = make_cube();
+        m.slots = {"body", "trim"};
+        m.faces[1].slot = 1;
+        coopa::yaml::save_document(project.assets() / "meshes" / "two_slot.yaml", mesh_to_node(m));
+        Node red = Node::mapping();
+        red["albedo"] = make_color({1.0f, 0.0f, 0.0f});
+        red["emissive"] = make_color({1.0f, 0.0f, 0.0f});
+        red["emissive_strength"] = make_float(2.0);
+        coopa::yaml::save_document(project.assets() / "materials" / "red.yaml", red);
+        project.refresh();
+    }
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, toy::core::Engine::kFillDebounceFrames + 4);
+    const ObjectId cube = object_named(app, "Cube");
+    const int ci = app.document().find_component(cube, "MeshRenderer");
+    Node comp = app.document().find(cube)->at("components").as_seq()[static_cast<size_t>(ci)];
+    comp["mesh_path"] = Node(std::string("two_slot"));
+    Node mats = Node::mapping();
+    mats["trim"] = Node(std::string("materials/red"));
+    comp["materials"] = mats;
+    app.document().set_component(cube, ci, comp, "Slots");
+    app.sync().rebuild(engine, app.document());
+    tick(engine, 6);
+    auto* mr = engine.scene().find_object("Cube")->get_component<coopa::gfx::engine::components::MeshRenderer>();
+    expect(mr && mr->is_ready() && mr->get_mesh()->part_count() == 2, "the renderer's mesh has two parts");
+    expect(mr && mr->material_for(1).albedo.r > 0.99f && mr->material_for(0).albedo.r < 0.99f, "`materials: {trim: ...}` resolves by slot name");
+    app.set_shading(Shading::MaterialPreview);
+    tick(engine, 3);
+    const auto img = engine.capture_image(true);
+    size_t red = 0;
+    for (size_t i = 0; i + 3 < img.pixels.size(); i += img.channels) {
+        if (img.pixels[i] > 180 && img.pixels[i + 1] < 90 && img.pixels[i + 2] < 90) ++red;
+    }
+    expect(red > 30, "the trim slot renders red (" + std::to_string(red) + " px)");
+    dump(engine, "18_submesh_materials");
+}
+
+/** @brief Edit Mode on a scene object edits the mesh ASSET (every user follows), not a copy. */
+void test_editor_object_mesh_edit_is_asset() {
+    setenv("FIXED_DT", "0.016666", 1);
+    setenv("NO_INPUT", "1", 1);
+    setenv("HOME", tmp_root().c_str(), 1);
+    fs::remove(Project::prefs_path());
+    const fs::path root = fresh_dir("asset_edit_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, 4);
+    const ObjectId cube = object_named(app, "Cube");
+    app.document().select(cube);
+    app.duplicate_selected();
+    tick(engine, 3);
+    app.document().select(cube);
+    expect(app.set_interaction_mode(InteractionMode::Edit), "Edit Mode on the scene's cube");
+    auto& md = app.mesh_document();
+    expect(md.path.filename() == "cube.yaml", "it loads the object's mesh asset (meshes/cube.yaml)");
+    md.selection.mode = SelectMode::Face;
+    md.selection.faces = {1};
+    md.edit("Extrude", [](EditMesh& m, MeshSelection& s) { extrude_faces(m, s, 0.5f); });
+    tick(engine, 3);
+    size_t updated = 0;
+    for (const auto& [id, live] : app.sync().live_objects()) {
+        auto* mr = live ? live->get_component<coopa::gfx::engine::components::MeshRenderer>() : nullptr;
+        if (mr && mr->is_ready() && mr->get_mesh()->index_count() == 10u * 6u) ++updated;
+    }
+    expect(updated == 2, "both objects using meshes/cube show the edit (" + std::to_string(updated) + ")");
+    app.set_interaction_mode(InteractionMode::Object);
+    expect(app.save_mesh(), "saving writes the asset");
+    expect(mesh_from_node(coopa::yaml::load_document(project.assets() / "meshes" / "cube.yaml")).faces.size() == 10,
+           "meshes/cube.yaml itself has the extrusion");
 }
 
 // =====================================================================================
@@ -2021,6 +2257,7 @@ const TestCase kTests[] = {
     {"loop_cut_and_slide",                   "mesh",     test_loop_cut_and_slide},
     {"subdivide_triangulate_dissolve",       "mesh",     test_subdivide_triangulate_dissolve},
     {"normal_basis_and_sculpt",              "mesh",     test_normal_basis_and_sculpt},
+    {"mesh_material_slots",                  "mesh",     test_mesh_material_slots},
     {"imm_button_and_checkbox",              "imm",      test_imm_button_and_checkbox},
     {"imm_text_input_commits",               "imm",      test_imm_text_input_commits},
     {"imm_drag_float_and_popup_blocking",    "imm",      test_imm_drag_float_and_popup_blocking},
@@ -2042,6 +2279,10 @@ const TestCase kTests[] = {
     {"editor_quad_modelling",                "editor_shell", test_editor_quad_modelling},
     {"editor_isolation",                     "editor_shell", test_editor_isolation},
     {"editor_sculpt",                        "editor_shell", test_editor_sculpt},
+    {"editor_asset_views",                   "editor_shell", test_editor_asset_views},
+    {"editor_object_assets",                 "editor_shell", test_editor_object_assets},
+    {"editor_submesh_materials",             "editor_shell", test_editor_submesh_materials},
+    {"editor_object_mesh_edit_is_asset",     "editor_shell", test_editor_object_mesh_edit_is_asset},
     {"package_renders_identically",          "package",  test_package_renders_identically},
 };
 

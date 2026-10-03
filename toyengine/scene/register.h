@@ -260,7 +260,7 @@ inline void register_scene_components(coopa::gfx::core::Device& device,
             // its TileMeshLibrary once they land.
             using coopa::gfx::engine::data::SkinnedMeshSource;
             auto load_side = [&assets, &ctx](const std::string& key) {
-                return assets.load_async<SkinnedMeshSource>("meshes/" + key + ".yaml", ctx.scene_dir);
+                return assets.load_async<SkinnedMeshSource>("meshes/" + key + ".yaml", ctx.base_dir());
             };
 
             if (node.contains("side_mesh")) {
@@ -302,7 +302,7 @@ inline void register_scene_components(coopa::gfx::core::Device& device,
                 if (!mesh_path_key.empty()) {
                     std::string virtual_path = "meshes/" + mesh_path_key + ".yaml";
                     smr->set_source(
-                        assets.load_async<coopa::gfx::engine::data::SkinnedMeshSource>(virtual_path, ctx.scene_dir));
+                        assets.load_async<coopa::gfx::engine::data::SkinnedMeshSource>(virtual_path, ctx.base_dir()));
                 }
             }
 

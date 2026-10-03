@@ -531,6 +531,96 @@ void test_mesh_build_welds_and_generates_lods() {
     expect(lodded.vertices.size() == plain.vertices.size(), "a ratio level shares LOD 0's vertices");
 }
 
+
+/** @brief Material slots (submeshes): triangles grouped by slot into contiguous parts, per LOD. */
+void test_mesh_submesh_parts() {
+    using coopa::gfx::engine::data::Mesh;
+    const int n = 8;
+    // Left half of the grid (i < 4) is slot 0 "body", right half slot 1 "glass", interleaved in
+    // file order so the build has to regroup them.
+    std::string y = make_grid_mesh_yaml(n);
+    y += "material_slots: [body, glass]\nface_materials:\n";
+    for (int j = 0; j < n; ++j)
+        for (int i = 0; i < n; ++i) y += std::string("  - ") + (i < n / 2 ? "0" : "1") + "\n";
+    const fkyaml::node node = fkyaml::node::deserialize(y);
+    const auto m = Mesh::build_cpu(node);
+    expect(m.slot_names.size() == 2 && m.slot_names[1] == "glass", "slot names are kept");
+    expect(m.lods[0].parts.size() == 2, "LOD 0 has one part per slot");
+    const auto& p0 = m.lods[0].parts[0];
+    const auto& p1 = m.lods[0].parts[1];
+    expect(p0.first_index == 0 && p0.index_count == static_cast<uint32_t>(n * n / 2 * 6) &&
+               p1.first_index == p0.index_count && p0.index_count + p1.index_count == m.lods[0].index_count,
+           "the parts are contiguous and cover the whole level");
+    bool left = true, right = true;
+    for (uint32_t k = p0.first_index; k < p0.first_index + p0.index_count; ++k) left &= m.vertices[m.indices[k]].position.x <= n / 2 + 1e-4f;
+    for (uint32_t k = p1.first_index; k < p1.first_index + p1.index_count; ++k) right &= m.vertices[m.indices[k]].position.x >= n / 2 - 1e-4f;
+    expect(left && right, "each part holds exactly its slot's triangles");
+
+    const fkyaml::node cfg = fkyaml::node::deserialize(std::string("lods:\n  - { ratio: 0.5, screen_size: 0.2 }\n"));
+    const auto l = Mesh::build_cpu(node, &cfg);
+    expect(l.lods.size() == 2 && l.lods[1].parts.size() == 2, "a simplified LOD keeps one part per slot");
+    uint32_t sum = 0;
+    for (const auto& p : l.lods[1].parts) sum += p.index_count;
+    expect(sum == l.lods[1].index_count && l.lods[1].parts[0].first_index == l.lods[1].first_index,
+           "LOD 1's parts cover its range");
+
+    const auto plain = Mesh::build_cpu(fkyaml::node::deserialize(make_grid_mesh_yaml(n)));
+    expect(plain.lods[0].parts.empty() && plain.slot_names.empty(), "a mesh without slots has a single implicit part");
+}
+
+
+/** @brief Object assets: `prefab: objects/x` from a scene, Transform replace, overrides, spawn. */
+void test_object_assets_prefab() {
+    namespace fs = std::filesystem;
+    using coopa::scene::SceneLoader;
+    const fs::path root = tmp_dir() / "prefab_project" / "assets";
+    fs::remove_all(root.parent_path());
+    fs::create_directories(root / "objects");
+    fs::create_directories(root / "scenes" / "level");
+    {
+        std::ofstream o(root / "objects" / "crate.yaml");
+        o << "format: toyengine-object\n"
+             "object:\n"
+             "  name: Crate\n"
+             "  components:\n"
+             "    - { type: Transform, position: { x: 5, y: 5, z: 5 }, scale: { x: 2, y: 2, z: 2 } }\n"
+             "  children:\n"
+             "    - name: Lid\n"
+             "      components: [ { type: Transform, position: { x: 0, y: 0, z: 1 } } ]\n"
+             "    - name: Handle\n"
+             "      components: [ { type: Transform } ]\n";
+    }
+    {
+        std::ofstream o(root / "scenes" / "level" / "scene.yaml");
+        o << "format: toyengine\n"
+             "scene:\n"
+             "  scene_name: Level\n"
+             "  root_objects:\n"
+             "    - name: Crate.001\n"
+             "      prefab: objects/crate\n"
+             "      components: [ { type: Transform, position: { x: 1, y: 0, z: 0 } } ]\n"
+             "      children: [ { name: Handle, remove: true } ]\n";
+    }
+    SceneLoader::set_search_roots({root.string()});
+    coopa::scene::Scene scene = SceneLoader::load((root / "scenes" / "level" / "scene.yaml").string());
+    expect(scene.root_objects().size() == 1, "the instance loads");
+    if (scene.root_objects().empty()) return;
+    auto* crate = scene.root_objects()[0].get();
+    expect(crate->name() == "Crate.001", "the instance keeps its own name");
+    const glm::vec3 p = crate->get_transform()->transform().position();
+    const glm::vec3 sc = crate->get_transform()->transform().scale();
+    expect(glm::distance(p, glm::vec3(1, 0, 0)) < 1e-5f && glm::distance(sc, glm::vec3(1)) < 1e-5f,
+           "the instance's Transform replaces the prefab's root Transform");
+    expect(crate->children().size() == 1 && crate->children()[0]->name() == "Lid", "children come from the prefab; remove: true drops one");
+
+    auto* spawned = SceneLoader::spawn(scene, "objects/crate");
+    expect(spawned && scene.root_objects().size() == 2 && spawned->children().size() == 2, "spawn() instantiates an object asset at runtime");
+    bool threw = false;
+    try { SceneLoader::spawn(scene, "objects/missing"); } catch (const std::exception&) { threw = true; }
+    expect(threw, "spawning a missing asset throws");
+    SceneLoader::set_search_roots({});
+}
+
 void test_mesh_lod_simplifies_flat_shaded_mesh() {
     using coopa::gfx::engine::data::Mesh;
     // pixel_demo's sphere is exported flat-shaded: every face has its own normals, so after
@@ -4378,6 +4468,8 @@ const TestCase kTests[] = {
     {"select_lod_thresholds_and_hysteresis",       "math", test_select_lod_thresholds_and_hysteresis},
     {"projected_texels",                           "math", test_projected_texels},
     {"mesh_build_welds_and_generates_lods",        "math", test_mesh_build_welds_and_generates_lods},
+    {"mesh_submesh_parts",                         "math", test_mesh_submesh_parts},
+    {"object_assets_prefab",                       "math", test_object_assets_prefab},
     {"mesh_lod_simplifies_flat_shaded_mesh",       "math", test_mesh_lod_simplifies_flat_shaded_mesh},
     {"letterbox_with_bars",                        "math", test_letterbox_with_bars},
     {"letterbox_undersized_window",                "math", test_letterbox_undersized_window_clamps_to_scale_1},

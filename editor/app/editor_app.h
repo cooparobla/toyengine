@@ -91,20 +91,21 @@ inline void apply_editor_render_overrides(core::AppConfig& cfg) {
 using coopa::input::Key;
 using coopa::input::Mods;
 
-/** @brief Blender-style workspaces (the top bar's tabs). */
-enum class Tab { Layout = 0, Modeling = 1, Shading = 2, Sculpting = 3 };
+/**
+ * @brief The kind of asset the editor has open. Exactly one asset is open at a time, and its
+ *        type decides what the viewer shows and what the Properties editor offers.
+ */
+enum class AssetType { None = 0, Scene, Object, Mesh, Material, Texture };
 /** @brief Blender's interaction modes for a mesh object (the viewport header's mode dropdown). */
 enum class InteractionMode { Object = 0, Edit, Sculpt };
 /** @brief Viewport shading, Blender's four buttons. */
 enum class Shading { Wireframe = 0, Solid = 1, MaterialPreview = 2, Full = 3 };
 /** @brief The Properties editor's tabs. */
 enum class PropTab { Tool, Render, Output, Scene, World, Object, Components, Physics, Data, Material };
-enum class AssetKind { None, Mesh, Material };
 
 /** @brief State carried across a renderer restart (the Engine is rebuilt underneath). */
 struct EditorState {
-    std::optional<SceneDocument> scene;
-    Tab tab = Tab::Layout;
+    std::optional<SceneDocument> scene;   ///< The open scene or object asset
     Shading shading = Shading::Solid;
     glm::vec3 cam_focus{0.0f};
     float cam_yaw = 35.0f, cam_pitch = 25.0f, cam_distance = 12.0f;
@@ -157,13 +158,14 @@ public:
         engine_.set_frame_hooks(std::move(hooks));
 
         sync_.fallback_path = project_.assets() / "scenes" / "untitled" / "scene.yaml";
-        tab_ = state.tab;
         shading_ = state.shading;
         if (state.config) config_ = std::move(*state.config);
         else config_.load(project_.config_path());
 
         if (state.scene) {
             doc_ = std::move(*state.scene);
+            active_type_ = doc_.is_object_asset() ? AssetType::Object : AssetType::Scene;
+            active_path_ = doc_.path();
             rebuild_scene_();
         } else if (!scene.empty()) {
             open_scene(scene);
@@ -191,7 +193,6 @@ public:
     EditorState take_state() {
         EditorState s;
         s.scene = std::move(doc_);
-        s.tab = tab_;
         s.shading = shading_;
         s.cam_focus = camera_.focus;
         s.cam_yaw = camera_.yaw_deg;
@@ -213,7 +214,15 @@ public:
     Project& project() { return project_; }
     EditorCamera& camera() { return camera_; }
     Gizmo& gizmo() { return gizmo_; }
-    Tab tab() const { return tab_; }
+    /**
+     * @brief Shows the scene / object document that is loaded (without reloading it) -- e.g.
+     *        after a material was created and opened from it. Tests and internal flows.
+     */
+    void show_document_view() { set_view_(doc_.is_object_asset() ? AssetType::Object : AssetType::Scene); active_path_ = doc_.path(); }
+
+    /** @brief What's open: its type decides the viewer and the Properties tabs. */
+    AssetType active_asset_type() const { return active_type_; }
+    const fs::path& active_asset_path() const { return active_path_; }
     Shading shading() const { return shading_; }
     bool playing() const { return play_scene_ != nullptr; }
     PropTab prop_tab() const { return prop_tab_; }
@@ -305,6 +314,10 @@ public:
             log_error(std::string("Open failed: ") + e.what());
             return false;
         }
+        if (doc_.is_object_asset()) { return open_object_asset(path); }
+        set_view_(AssetType::Scene);
+        active_path_ = path;
+        sync_.fallback_path = path;
         rebuild_scene_();
         frame_all();
         log_info("Opened " + project_.relative(path));
@@ -395,7 +408,7 @@ public:
     enum class UndoTarget { Scene, Mesh, Material, Config };
     UndoTarget undo_target_() const {
         if ((mesh_edit_view_() || in_sculpt_mode_()) && mesh_.open()) return UndoTarget::Mesh;
-        if (tab_ == Tab::Shading && material_.open()) return UndoTarget::Material;
+        if (active_type_ == AssetType::Material && material_.open()) return UndoTarget::Material;
         const bool config_tab = prop_tab_ == PropTab::Render || prop_tab_ == PropTab::Output || prop_tab_ == PropTab::World;
         if (properties_hovered_ && config_tab) return UndoTarget::Config;
         return UndoTarget::Scene;
@@ -440,8 +453,9 @@ public:
         glm::vec3 lo(1e30f), hi(-1e30f);
         bool any = false;
         if (asset_view_()) {
-            if (asset_kind_ == AssetKind::Mesh) mesh_.mesh.bounds(lo, hi);
-            else { lo = glm::vec3(-0.6f); hi = glm::vec3(0.6f); }
+            if (active_type_ == AssetType::Mesh) mesh_.mesh.bounds(lo, hi);
+            else if (active_type_ == AssetType::Texture) { lo = glm::vec3(-0.55f, -0.55f, 0.0f); hi = glm::vec3(0.55f, 0.55f, 0.0f); }
+            else { lo = glm::vec3(-0.6f, -0.6f, -0.1f); hi = glm::vec3(0.6f, 0.6f, 1.1f); }
             any = true;
         } else {
             for (ObjectId id : doc_.all_ids()) any |= object_bounds_(id, lo, hi, /*meshes_only=*/true);
@@ -452,7 +466,7 @@ public:
     // --- play mode ---
 
     void play() {
-        if (playing()) return;
+        if (playing() || active_type_ != AssetType::Scene) return;   // play runs the open scene
         exit_mesh_mode_();   // the play scene is built from the document; isolation stays in the editor
         deferred_.push_back([this] {
             const std::string anchor = (doc_.path().empty() ? sync_.fallback_path : doc_.path()).string();
@@ -487,25 +501,18 @@ public:
         apply_shading_();
     }
 
-    void set_tab(Tab t) {
-        if (t == tab_) return;
+    /**
+     * @brief Switches what the viewer shows to asset type `t`: leaves mesh modes, swaps the
+     *        camera between the scene view and the asset preview, and restores the shading
+     *        this asset type last used.
+     */
+    void set_view_(AssetType t) {
         const bool was_asset = asset_view_();
-        const Tab old = tab_;
-        // Each workspace keeps its own viewport shading (Shading opens in Material Preview).
-        workspace_shading_[static_cast<int>(old)] = shading_;
-        tab_ = t;
-        set_shading(workspace_shading_[static_cast<int>(t)]);
-        // Modeling enters Edit Mode on the active mesh (unless a standalone mesh asset is
-        // open) and Sculpting enters Sculpt Mode; leaving them returns to Object Mode, as
-        // switching Blender workspaces does.
-        if ((old == Tab::Modeling || old == Tab::Sculpting) && edit_object_) exit_mesh_mode_();
-        if ((t == Tab::Modeling || t == Tab::Sculpting) && !(t == Tab::Modeling && standalone_mesh_) && !edit_object_ && !playing()) {
-            const ObjectId id = doc_.primary();
-            if (id && doc_.find_component(id, "MeshRenderer") >= 0) {
-                enter_mesh_mode_(t == Tab::Sculpting ? InteractionMode::Sculpt : InteractionMode::Edit);
-            }
-        }
-        if (t == Tab::Shading) prop_tab_ = PropTab::Material;
+        shading_by_type_[static_cast<int>(active_type_)] = shading_;
+        if (edit_object_ || mode_ != InteractionMode::Object) exit_mesh_mode_();
+        active_type_ = t;
+        set_shading(shading_by_type_[static_cast<int>(t)]);
+        prop_tab_ = t == AssetType::Material ? PropTab::Material : t == AssetType::Mesh ? PropTab::Data : PropTab::Tool;
         const bool now_asset = asset_view_();
         if (was_asset != now_asset) {
             // The asset preview and the scene each keep their own view.
@@ -513,7 +520,7 @@ public:
             CameraPose& out = was_asset ? asset_pose_ : scene_pose_;
             const CameraPose& in = now_asset ? asset_pose_ : scene_pose_;
             out = {camera_.focus, camera_.yaw_deg, camera_.pitch_deg, camera_.distance, camera_.ortho, true};
-            if (in.valid) {
+            if (in.valid && !now_asset) {
                 camera_.focus = in.focus; camera_.yaw_deg = in.yaw; camera_.pitch_deg = in.pitch;
                 camera_.distance = in.distance; camera_.ortho = in.ortho;
                 camera_.apply();
@@ -533,15 +540,11 @@ public:
             log_error(std::string("Open mesh failed: ") + e.what());
             return false;
         }
-        exit_mesh_mode_();
-        asset_kind_ = AssetKind::Mesh;
-        standalone_mesh_ = true;
-        tab_ = Tab::Layout;   // force set_tab() to re-evaluate the view
-        set_tab(Tab::Modeling);
-        mesh_edit_ = true;
+        set_view_(AssetType::Mesh);
+        active_path_ = path;
         uploaded_revision_ = 0;
         deferred_.push_back([this] { ensure_preview_(); frame_all(); });
-        log_info("Editing mesh " + project_.relative(path));
+        log_info("Opened mesh " + project_.relative(path) + " (Tab: Edit Mode)");
         return true;
     }
 
@@ -551,12 +554,9 @@ public:
         for (char& c : key) if (c == ' ') c = '_';
         exit_mesh_mode_();
         mesh_.reset(make_primitive(primitive), unique_asset_name_("meshes", key));
-        asset_kind_ = AssetKind::Mesh;
-        standalone_mesh_ = true;
-        mesh_edit_ = true;
+        set_view_(AssetType::Mesh);
+        active_path_.clear();
         uploaded_revision_ = 0;
-        tab_ = Tab::Layout;
-        set_tab(Tab::Modeling);
         deferred_.push_back([this] { ensure_preview_(); frame_all(); });
     }
 
@@ -590,10 +590,11 @@ public:
             log_error(std::string("Open material failed: ") + e.what());
             return false;
         }
-        asset_kind_ = AssetKind::Material;
-        set_tab(Tab::Shading);
+        set_view_(AssetType::Material);
+        active_path_ = path;
+        uploaded_revision_ = 0;
         deferred_.push_back([this] { ensure_preview_(); refresh_material_preview_(); frame_all(); });
-        log_info("Editing material " + ref);
+        log_info("Opened material " + ref);
         return true;
     }
 
@@ -786,8 +787,10 @@ private:
         mesh_cache_.clear();
         sync_.rebuild(engine_, doc_);
         if (!sync_.last_error.empty()) { log_error("Scene: " + sync_.last_error); sync_.last_error.clear(); }
+        add_object_view_lights_();
         preview_scene_ = nullptr;   // set_scene() replaced every engine scene
         preview_object_ = nullptr;
+        preview_ground_ = nullptr;
         uploaded_revision_ = 0;
         scene_uploaded_revision_ = 0;   // re-show an unsaved edited mesh on the new live objects
         if (edit_object_ && !doc_.find(edit_object_)) exit_mesh_mode_();
@@ -837,61 +840,6 @@ private:
     // Asset preview scene
     // =================================================================================
 
-    void ensure_preview_() {
-        if (preview_scene_) return;
-        Node doc = Node::mapping();
-        Node scene = Node::mapping();
-        scene["scene_name"] = Node(std::string("EditorPreview"));
-        Node roots = Node::sequence();
-        auto object = [](const std::string& name) {
-            Node o = Node::mapping();
-            o["name"] = Node(name);
-            Node comps = Node::sequence();
-            Node t = Node::mapping();
-            t["type"] = Node(std::string("Transform"));
-            comps.as_seq().push_back(t);
-            o["components"] = comps;
-            return o;
-        };
-        Node light = object("PreviewLight");
-        Node l = Node::mapping();
-        l["type"] = Node(std::string("DirectionalLight"));
-        l["direction"] = make_vec3({-0.45f, -0.55f, -0.7f});
-        l["intensity"] = make_float(1.3);
-        l["cast_shadows"] = Node(true);
-        light["components"].as_seq().push_back(l);
-        roots.as_seq().push_back(light);
-        Node fill = object("PreviewFill");
-        Node pl = Node::mapping();
-        pl["type"] = Node(std::string("PointLight"));
-        pl["intensity"] = make_float(40.0);
-        pl["range"] = make_float(30.0);
-        fill["components"].as_seq()[0]["position"] = make_vec3({3.0f, 4.0f, 3.0f});
-        fill["components"].as_seq().push_back(pl);
-        roots.as_seq().push_back(fill);
-        Node obj = object("PreviewObject");
-        Node mr = Node::mapping();
-        mr["type"] = Node(std::string("MeshRenderer"));
-        Node mat = Node::mapping();
-        mat["albedo"] = make_color(glm::vec3(0.72f));
-        mat["roughness"] = make_float(0.55);
-        mr["material"] = mat;
-        obj["components"].as_seq().push_back(mr);
-        roots.as_seq().push_back(obj);
-        scene["root_objects"] = roots;
-        doc["scene"] = scene;
-        try {
-            coopa::scene::Scene s = coopa::scene::SceneLoader::load_from_node(doc, (project_.assets() / "__preview__.yaml").string());
-            coopa::scene::Scene* active = engine_.has_scene() ? &engine_.scene() : nullptr;
-            preview_scene_ = &engine_.push_scene(std::move(s), false);
-            (void)active;
-            preview_object_ = preview_scene_->find_object("PreviewObject");
-            uploaded_revision_ = 0;
-        } catch (const std::exception& e) {
-            log_error(std::string("Preview scene failed: ") + e.what());
-        }
-    }
-
     coopa::gfx::engine::components::MeshRenderer* preview_renderer_() {
         return preview_object_ ? preview_object_->get_component<coopa::gfx::engine::components::MeshRenderer>() : nullptr;
     }
@@ -919,7 +867,7 @@ private:
         ctx.search_dirs = {ctx.scene_dir};
         mr->material = coopa::gfx::engine::components::PBRMaterial{};
         try {
-            if (asset_kind_ == AssetKind::Material) {
+            if (active_type_ == AssetType::Material) {
                 coopa::gfx::engine::components::parse_material_value_(material_.node, mr->material, engine_.assets(), ctx);
             } else {
                 Node m = Node::mapping();
@@ -948,17 +896,7 @@ private:
         if (step_countdown_ > 0 && --step_countdown_ == 0 && play_scene_) play_scene_->set_simulating(false);
         if (pause_after_start_ && play_scene_) { pause_after_start_ = false; play_scene_->set_simulating(true); step_countdown_ = 2; }
         // Keep the asset preview's mesh current.
-        if (asset_view_() && preview_scene_) {
-            if (asset_kind_ == AssetKind::Mesh && uploaded_revision_ != mesh_.geometry_revision) {
-                upload_preview_mesh_(mesh_.mesh, "editor/preview_mesh");
-                refresh_material_preview_();
-                uploaded_revision_ = mesh_.geometry_revision;
-            } else if (asset_kind_ == AssetKind::Material && uploaded_revision_ == 0) {
-                upload_preview_mesh_(make_uv_sphere(0.5f, 48, 24), "editor/preview_sphere");
-                refresh_material_preview_();
-                uploaded_revision_ = 1;
-            }
-        }
+        if (asset_view_() && preview_scene_) update_preview_();
     }
 
     void pre_render_(float) {
@@ -1178,6 +1116,7 @@ private:
 #include "ui/viewport_chrome.inl"
 #include "ui/mesh_tools.inl"
 #include "ui/sculpt.inl"
+#include "ui/assets.inl"
 
     // --- helpers shared by the panels ---
 
@@ -1201,16 +1140,6 @@ private:
         c["material"] = Node("materials/" + n);
         apply_(doc_.set_component(id, index, c, "Extract Material"));
         log_info("Extracted material to materials/" + n + ".yaml");
-    }
-
-    void open_asset_(const std::string& kind, const std::string& item) {
-        // Scene-local paths (from a scene directory listing) resolve against that directory.
-        fs::path abs = project_.absolute(item);
-        if (!coopa::yaml::document_exists(abs) && !doc_.path().empty()) abs = doc_.path().parent_path() / item;
-        if (kind == "scene") guarded_([this, abs] { open_scene(abs); });
-        else if (kind == "mesh") open_mesh(abs);
-        else if (kind == "material") open_material(abs);
-        else log_info(item);
     }
 
     void add_mesh_to_scene_(const std::string& item, std::optional<glm::vec3> at = std::nullopt) {
@@ -1246,10 +1175,11 @@ private:
                       std::to_string(md.mesh.triangle_count()) + " tris" + (md.dirty() ? "  (modified)" : ""));
         if (ctx.button("Save Mesh", 120)) save_mesh();
         ctx.same_line();
-        if (ctx.button("Add to Scene", 120)) {
+        if (ctx.button("Make Object Asset", 150)) {
             if (md.path.empty() || md.dirty()) save_mesh();
-            if (!md.path.empty()) { standalone_mesh_ = false; set_tab(Tab::Layout); add_mesh_to_scene_(project_.relative(md.path)); }
+            if (!md.path.empty()) create_object_asset_from_mesh_(project_.relative(md.path));
         }
+        ctx.tooltip("Make Object Asset\nWrites objects/<mesh>.yaml: an object with a MeshRenderer using this mesh, ready to place in scenes");
         ctx.spacing();
         if (ctx.collapsing_header("Select")) {
             if (ctx.button("All (A)", 90)) md.selection.select_all(md.mesh);
@@ -1382,8 +1312,10 @@ private:
     /** @brief Blender's transform orientations (header dropdown); Normal applies in edit mode. */
     enum class Orientation { Global = 0, Local, Normal };
 
-    bool in_edit_mode_() const { return !asset_view_() && edit_object_ != 0 && mode_ == InteractionMode::Edit; }
-    bool in_sculpt_mode_() const { return !asset_view_() && edit_object_ != 0 && mode_ == InteractionMode::Sculpt; }
+    /** @brief Editing a mesh: a scene/object's MeshRenderer (edit_object_) or a mesh asset. */
+    bool mesh_mode_target_() const { return (!asset_view_() && edit_object_ != 0) || active_type_ == AssetType::Mesh; }
+    bool in_edit_mode_() const { return mesh_mode_target_() && mode_ == InteractionMode::Edit; }
+    bool in_sculpt_mode_() const { return mesh_mode_target_() && mode_ == InteractionMode::Sculpt; }
 
     /** @brief The edited mesh's object-to-world matrix (identity in the Asset tab). */
     glm::mat4 mesh_world_() {
@@ -1421,7 +1353,7 @@ private:
         }
         // Furniture last, so it draws over the overlays (its rects were excluded from input).
         draw_last_op_panel_(ctx, viewport_box_);
-        if (show_toolbar_) draw_toolbar_(ctx, mesh_edit);
+        if (show_toolbar_ && !preview_only_view_()) draw_toolbar_(ctx, mesh_edit);
         if (show_overlays_ || true) draw_nav_gizmo_(ctx);
         if (show_sidebar_) draw_sidebar_(ctx, mesh_edit);
         ctx.pop_clip();
@@ -1430,15 +1362,30 @@ private:
         if (!mesh_edit && !asset_view_()) {
             if (auto dropped = ctx.drop_target("asset", viewport_box_)) {
                 const std::string& item = *dropped;
-                const auto kind = asset_kind_of_(item).second;
-                if (kind == "mesh") add_mesh_to_scene_(item, ground_point_(ctx.mouse()));
-                else if (kind == "material") {
-                    const ObjectId hit = pick_object(ctx.mouse());
-                    if (hit) assign_material_(item, hit);
-                } else if (kind == "scene") {
-                    const fs::path p = project_.absolute(item);
-                    guarded_([this, p] { open_scene(p); });
+                switch (asset_type_of_(item)) {
+                    case AssetType::Object: place_object_asset(item, ground_point_(ctx.mouse())); break;
+                    case AssetType::Mesh: add_mesh_to_scene_(item, ground_point_(ctx.mouse())); break;
+                    case AssetType::Material: {
+                        const ObjectId hit = pick_object(ctx.mouse());
+                        if (hit) assign_material_(item, hit);
+                        break;
+                    }
+                    default: open_asset(asset_type_of_(item), item); break;
                 }
+            }
+        } else if (active_type_ == AssetType::Mesh) {
+            // A material dropped on the mesh previews on the slot under the cursor.
+            if (auto dropped = ctx.drop_target("asset", viewport_box_); dropped && asset_type_of_(*dropped) == AssetType::Material) {
+                const std::string ref = dropped->substr(0, dropped->size() - fs::path(*dropped).extension().string().size());
+                uint32_t slot = 0;
+                if (auto vp2 = view_proj_()) {
+                    glm::vec3 o, d;
+                    mesh_local_ray_(*vp2, ctx.mouse(), o, d);
+                    if (auto hit = mesh_bvh_().raycast(mesh_.mesh, o, d)) slot = mesh_.mesh.faces[hit->face].slot;
+                }
+                if (slot_preview_materials_.size() <= slot) slot_preview_materials_.resize(slot + 1);
+                slot_preview_materials_[slot] = ref;
+                apply_slot_preview_materials_();
             }
         }
     }
@@ -1708,9 +1655,10 @@ private:
             if (ctx.shortcut(Key::M)) ctx.open_popup("vp_mesh_merge", m);
             if (ctx.shortcut(Key::U)) ctx.open_popup("vp_mesh_uv", m);
             if (ctx.shortcut(Key::N, Mods::Alt)) ctx.open_popup("vp_mesh_normals", m);
-            if (ctx.shortcut(Key::Tab) && !asset_view_()) toggle_edit_mode_();
+            if (ctx.shortcut(Key::Tab)) toggle_edit_mode_();
             return;
         }
+        if (active_type_ == AssetType::Mesh && ctx.shortcut(Key::Tab)) toggle_edit_mode_();
         if (asset_view_()) return;
         if (ctx.shortcut(Key::A)) { doc_.clear_selection(); for (ObjectId id : visible_ids_()) doc_.select(id, true); }
         if (ctx.shortcut(Key::A, Mods::Alt)) doc_.clear_selection();
@@ -2154,7 +2102,12 @@ private:
 
     /** @brief Tab: Object <-> Edit Mode on the active mesh (from Sculpt Mode: back to Object). */
     void toggle_edit_mode_() {
-        if (asset_view_() || playing()) return;
+        if (playing()) return;
+        if (active_type_ == AssetType::Mesh) {   // a mesh asset: Object <-> Edit on the asset itself
+            set_interaction_mode(mode_ == InteractionMode::Object ? InteractionMode::Edit : InteractionMode::Object);
+            return;
+        }
+        if (asset_view_()) return;
         if (edit_object_) { exit_mesh_mode_(); return; }
         enter_mesh_mode_(InteractionMode::Edit);
     }
@@ -2176,7 +2129,16 @@ private:
      *        between the two on the same object keeps the isolation and view.
      */
     bool enter_mesh_mode_(InteractionMode mode) {
-        if (asset_view_() || playing() || mode == InteractionMode::Object) return false;
+        if (playing() || mode == InteractionMode::Object) return false;
+        if (active_type_ == AssetType::Mesh) {
+            // The mesh asset is already the document: just switch mode.
+            if (mode_ == mode) return true;
+            if (mode_ == InteractionMode::Sculpt) sculpt_end_();
+            mode_ = mode;
+            if (mode_ == InteractionMode::Sculpt) sculpt_begin_();
+            return true;
+        }
+        if (asset_view_()) return false;
         const ObjectId id = edit_object_ ? edit_object_ : doc_.primary();
         if (!id) return false;
         if (edit_object_ == id) {
@@ -2205,6 +2167,13 @@ private:
 
     /** @brief Back to Object Mode -- the one way out (restores isolation and view). */
     void exit_mesh_mode_() {
+        if (active_type_ == AssetType::Mesh && !edit_object_) {
+            if (modal_.active()) { apply_modal_(modal_.kind(), ModalTransform::Result{}); modal_.cancel(); mesh_.undo.end_merge(); }
+            if (mode_ == InteractionMode::Sculpt) sculpt_end_();
+            loopcut_.active = false;
+            mode_ = InteractionMode::Object;
+            return;
+        }
         if (!edit_object_) return;
         if (modal_.active()) { apply_modal_(modal_.kind(), ModalTransform::Result{}); modal_.cancel(); mesh_.undo.end_merge(); }
         if (mode_ == InteractionMode::Sculpt) sculpt_end_();
@@ -2289,7 +2258,9 @@ public:
     }
     bool isolate_in_edit() const { return isolate_in_edit_; }
     bool is_isolated(ObjectId id) const { return isolated_.count(id) > 0; }
-    InteractionMode interaction_mode() const { return edit_object_ ? mode_ : InteractionMode::Object; }
+    InteractionMode interaction_mode() const {
+        return (edit_object_ || active_type_ == AssetType::Mesh) ? mode_ : InteractionMode::Object;
+    }
     bool set_interaction_mode(InteractionMode m) {
         if (m == InteractionMode::Object) { exit_mesh_mode_(); return true; }
         return enter_mesh_mode_(m);
@@ -2480,7 +2451,8 @@ private:
 
     void draw_viewport_overlay_body_(imm::Context& ctx, bool mesh_edit, const ViewProj& vp_ref) {
         const ViewProj* vp = &vp_ref;
-        grid_wanted_ = show_overlays_ && show_grid_ && !(playing() && !mesh_edit);
+        grid_wanted_ = show_overlays_ && show_grid_ && !(playing() && !mesh_edit) &&
+                       active_type_ != AssetType::Material && active_type_ != AssetType::Texture;
         const glm::vec4 accent = ctx.style.object_selected;
         const glm::vec4 active_col = ctx.style.object_active;
         auto draw_mesh_edges = [&](const EditMesh& mm, const std::vector<Edge>& edges, const glm::mat4& world, glm::vec4 col, float t) {
@@ -2494,6 +2466,8 @@ private:
         };
         if (in_sculpt_mode_()) {
             draw_sculpt_overlay_(ctx, *vp);   // no selection outline or wire while sculpting, as in Blender
+        } else if (asset_view_() && !mesh_edit) {
+            // Asset previews (mesh in Object Mode, material lookdev, texture): no scene overlays.
         } else if (!mesh_edit) {
             // Wireframe mode / X-Ray: every mesh object's edges.
             if (shading_ == Shading::Wireframe || xray_) {
@@ -2507,7 +2481,7 @@ private:
                 }
             }
             // Non-mesh objects: Blender's glyphs (camera frustum, light symbols, empty axes).
-            if (show_overlays_) {
+            if (show_overlays_ && show_glyphs_) {
                 for (const auto& [id, live] : sync_.live_objects()) {
                     const Node* node = doc_.find(id);
                     if (!node || !live || !live->active() || !live->get_transform() || mesh_for_object_(*node)) continue;
@@ -2527,7 +2501,7 @@ private:
                                     doc_.primary() == id ? active_col : accent, 1.5f);
                 }
                 // Origin dot.
-                if (show_overlays_) {
+                if (show_overlays_ && show_origins_) {
                     if (auto o = vp->project(glm::vec3(live->get_transform()->transform().get_world_matrix()[3]))) {
                         ctx.circle(*o, 3.0f, et_.viewport.origin_outline);
                         ctx.circle(*o, 2.0f, doc_.primary() == id ? active_col : accent);
@@ -2583,7 +2557,7 @@ private:
             draw_mesh_tool_overlay_(ctx, *vp);
         }
         // 3D cursor (scene).
-        if (!asset_view_() && show_overlays_) {
+        if (!asset_view_() && show_overlays_ && show_cursor3d_) {
             if (auto c = vp->project(cursor3d_)) {
                 for (int i = 0; i < 8; ++i) {
                     const float a0 = 6.2831853f * i / 8.0f, a1 = 6.2831853f * (i + 1) / 8.0f;
@@ -2827,15 +2801,14 @@ private:
     MaterialDocument material_;
     ConfigDocument config_;
 
-    Tab tab_ = Tab::Layout;
+    AssetType active_type_ = AssetType::Scene;   // what's open (see AssetType)
+    fs::path active_path_;                       // its file (empty while unsaved)
     PropTab prop_tab_ = PropTab::Object;
-    bool standalone_mesh_ = false;
     Shading shading_ = Shading::Solid;
-    Shading workspace_shading_[4] = {Shading::Solid, Shading::Solid, Shading::MaterialPreview, Shading::Solid};   // per Tab
+    /// Shading per asset type (index = AssetType): materials open in the game's renderer.
+    Shading shading_by_type_[6] = {Shading::Solid, Shading::Solid, Shading::Solid, Shading::Solid, Shading::Full, Shading::MaterialPreview};
     std::string full_debug_view_;
     std::string config_base_debug_view_;
-    AssetKind asset_kind_ = AssetKind::None;
-    bool mesh_edit_ = true;
 
     coopa::scene::Scene* play_scene_ = nullptr;
     coopa::scene::Scene* preview_scene_ = nullptr;
@@ -2846,7 +2819,13 @@ private:
     bool rebuild_queued_ = false;
 
     // Layout.
-    float left_w_ = 250, right_w_ = 330, bottom_h_ = 180, asset_left_w_ = 220, settings_w_ = 460;
+    float left_w_ = 260, right_w_ = 330, bottom_h_ = 130, asset_left_w_ = 220, settings_w_ = 460;
+    // Asset panel (ui/assets.inl).
+    AssetType asset_tab_ = AssetType::Scene;
+    std::string asset_context_, asset_rename_, asset_rename_to_, asset_delete_;
+    Lookdev lookdev_;
+    coopa::scene::SceneObject* preview_ground_ = nullptr;
+    std::vector<std::string> slot_preview_materials_;   // mesh viewer: material asset per slot (preview only)
     imm::Box viewport_box_;
     bool show_grid_ = true;
     bool grid_wanted_ = false;
@@ -2895,6 +2874,8 @@ private:
     std::set<ObjectId> hidden_;
     bool show_toolbar_ = true, show_sidebar_ = false, show_bottom_ = true, maximized_ = false;
     bool show_overlays_ = true, xray_ = false, snap_on_ = false;
+    // Overlays popover (each also needs show_overlays_).
+    bool show_glyphs_ = true, show_origins_ = true, show_cursor3d_ = true, show_stats_overlay_ = false;
     bool outliner_hovered_ = false, properties_hovered_ = false, nav_ball_dragged_ = false, pending_extrude_ = false;
     int sidebar_tab_ = 0, bottom_tab_ = 0, step_countdown_ = 0;
     bool pause_after_start_ = false;

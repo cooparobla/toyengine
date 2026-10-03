@@ -361,6 +361,7 @@ public:
     void validate_material_shaders(coopa::scene::Scene& scene) const {
         for (auto* mr : scene.get_components<coopa::gfx::engine::components::MeshRenderer>()) {
             config_.surface_shaders.require(mr->material.shader);
+            for (const auto& sm : mr->slot_materials) config_.surface_shaders.require(sm.shader);
         }
         for (auto* sr : scene.get_components<coopa::gfx::engine::components::SdfRenderer>()) {
             config_.surface_shaders.require(sr->material.shader);
@@ -809,7 +810,15 @@ private:
      * a view only ever pays for what it can see. Per-renderer arrays share one index space.
      */
     struct MeshGather {
+        /// One entry per DRAW ITEM: a renderer's material part (submesh, see data::MeshPart).
+        /// A renderer whose mesh has N material slots appears N times, with part 0..N-1;
+        /// every per-item array below shares this index space.
         std::vector<coopa::gfx::engine::components::MeshRenderer*> renderers;
+        std::vector<uint32_t>    part;    ///< The item's material slot.
+        /** @brief The material the item draws with (its renderer's material for its slot). */
+        const coopa::gfx::engine::components::PBRMaterial& material(size_t i) const {
+            return renderers[i]->material_for(part[i]);
+        }
         std::vector<glm::mat4>   world_matrices;
         std::vector<WorldBounds> bounds;
         std::vector<uint8_t>     valid;   ///< Ready, has a transform, not LOD-culled.
@@ -2441,6 +2450,7 @@ private:
         uint32_t    flags       = 0;      ///< bit 0 cull_backfaces, bits 1-2 alpha_mode
         const void* set         = nullptr; ///< MaterialTextureCache set: identifies the textures
         const void* mesh        = nullptr;
+        uint32_t    part        = 0;       ///< material slot of the mesh drawn
         /// Every scalar the camera passes push (GBuffer / capture constants). Compared bytewise.
         struct Camera {
             glm::vec4 albedo_alpha;
@@ -2475,7 +2485,15 @@ private:
                               bool cast_point_shadow, bool cast_spot_shadow) {
         using coopa::gfx::engine::components::MeshRenderer;
         MeshGather out;
-        out.renderers = frame_scene_.mesh_renderers;
+        // One draw item per (renderer, material part).
+        for (MeshRenderer* mr : frame_scene_.mesh_renderers) {
+            mr->resolve_slot_names();   // name-keyed `materials:` once the mesh has loaded
+            const uint32_t parts = mr->is_ready() ? mr->get_mesh()->part_count() : 1u;
+            for (uint32_t p = 0; p < parts; ++p) {
+                out.renderers.push_back(mr);
+                out.part.push_back(p);
+            }
+        }
         const size_t n = out.renderers.size();
         out.world_matrices.assign(n, glm::mat4(1.0f));
         out.bounds.assign(n, WorldBounds{});
@@ -2517,7 +2535,11 @@ private:
             const auto& mesh = *mr->get_mesh();
 
             const bool has_lods = mesh.lods().size() > 1 || mesh.cull_screen_size() > 0.0f;
-            if (has_lods && mr->lods_enabled) {
+            if (auto done = next_lod_state.find(mr); has_lods && mr->lods_enabled && done != next_lod_state.end()) {
+                // Another part of the same renderer chose already: every part shares its LOD.
+                if (done->second < 0) { out.valid[i] = 0; continue; }
+                out.lod[i] = static_cast<uint32_t>(done->second);
+            } else if (has_lods && mr->lods_enabled) {
                 thresholds.clear();
                 for (const auto& l : mesh.lods()) thresholds.push_back({l.screen_size});
                 const float size = screen_height_fraction(out.bounds[i].center, out.bounds[i].radius(),
@@ -2531,12 +2553,13 @@ private:
                 out.lod[i] = static_cast<uint32_t>(level);
             }
 
-            const auto& m = mr->material;
+            const auto& m = out.material(i);
             MeshBatchKey& k = keys[i];
             k.shader_hash = hash_str(m.shader);
             k.flags       = (m.cull_backfaces ? 1u : 0u) | (static_cast<uint32_t>(m.alpha_mode) << 1);
             k.set         = &material_cache_->set_for(m);
             k.mesh        = &mesh;
+            k.part        = out.part[i];
             k.camera.albedo_alpha = glm::vec4(m.albedo, m.alpha);
             k.camera.mra_cutoff   = glm::vec4(m.metallic, m.roughness, m.ao, m.gpu_alpha_cutoff());
             k.camera.emissive     = m.gpu_emissive();
@@ -2571,6 +2594,7 @@ private:
                 if (ka.flags != kb.flags)             return ka.flags < kb.flags;
                 if (ka.set != kb.set)                 return std::less<const void*>()(ka.set, kb.set);
                 if (ka.mesh != kb.mesh)               return std::less<const void*>()(ka.mesh, kb.mesh);
+                if (ka.part != kb.part)               return ka.part < kb.part;
                 if (out.lod[a] != out.lod[b])         return out.lod[a] < out.lod[b];
                 const int c = shadow ? std::memcmp(&ka.shadow, &kb.shadow, sizeof(ka.shadow))
                                      : std::memcmp(&ka.camera, &kb.camera, sizeof(ka.camera));
@@ -2581,8 +2605,8 @@ private:
                 const MeshBatchKey& ka = keys[a];
                 const MeshBatchKey& kb = keys[b];
                 return ka.shader_hash == kb.shader_hash && ka.flags == kb.flags && ka.set == kb.set &&
-                       ka.mesh == kb.mesh && out.lod[a] == out.lod[b] &&
-                       out.renderers[a]->material.shader == out.renderers[b]->material.shader &&
+                       ka.mesh == kb.mesh && ka.part == kb.part && out.lod[a] == out.lod[b] &&
+                       out.material(a).shader == out.material(b).shader &&
                        (shadow ? std::memcmp(&ka.shadow, &kb.shadow, sizeof(ka.shadow)) == 0
                                : std::memcmp(&ka.camera, &kb.camera, sizeof(ka.camera)) == 0);
             };
@@ -2606,11 +2630,11 @@ private:
         // into a partial shadow -- see gfx/shadow_dither.glsl's doc), so a translucent object
         // is binary: caster or not.
         auto casts = [&](size_t i) {
-            const auto& m = out.renderers[i]->material;
+            const auto& m = out.material(i);
             return !(m.is_blended() && m.alpha < 1.0f);
         };
-        auto opaque = [&](size_t i) { return !out.renderers[i]->material.is_blended(); };
-        auto blended = [&](size_t i) { return out.renderers[i]->material.is_blended(); };
+        auto opaque = [&](size_t i) { return !out.material(i).is_blended(); };
+        auto blended = [&](size_t i) { return out.material(i).is_blended(); };
 
         const glm::mat4 camera_vp = unjittered_proj * view;
         build(camera_vp, false, 0.0f, opaque, out.gbuffer);
@@ -4038,7 +4062,7 @@ private:
         const coopa::gfx::engine::data::Mesh* last_mesh = nullptr;
         for (const MeshBatch& b : batches) {
             const auto* mr = meshes.renderers[b.item];
-            const auto& m  = mr->material;
+            const auto& m  = meshes.material(b.item);
             if (!last_shader || m.shader != *last_shader || m.cull_backfaces != last_cull) {
                 bind(m.shader, m.cull_backfaces);
                 last_shader = &m.shader;
@@ -4060,7 +4084,7 @@ private:
                 mesh->bind(cmd);
                 last_mesh = mesh;
             }
-            mesh->draw_lod(cmd, b.lod, b.instance_count, b.first_instance);
+            mesh->draw_lod_part(cmd, b.lod, meshes.part[b.item], b.instance_count, b.first_instance);
             frame_stats_.shadow_draws     += 1;
             frame_stats_.shadow_instances += b.instance_count;
             frame_stats_.shadow_triangles += static_cast<uint64_t>(b.instance_count) *
@@ -4330,29 +4354,30 @@ private:
         // drawn by transparent_pass_ instead, after SSR compositing (see record_transparent_).
         for (const MeshBatch& batch : meshes.gbuffer) {
             auto* mr = meshes.renderers[batch.item];
+            const auto& mr_mat = meshes.material(batch.item);
 
-            if (!have_bound || mr->material.shader != last_shader ||
-                mr->material.cull_backfaces != last_cull_backfaces) {
-                gbuffer_pipeline_->bind(cmd, mr->material.shader, mr->material.cull_backfaces);
-                last_shader         = mr->material.shader;
-                last_cull_backfaces = mr->material.cull_backfaces;
+            if (!have_bound || mr_mat.shader != last_shader ||
+                mr_mat.cull_backfaces != last_cull_backfaces) {
+                gbuffer_pipeline_->bind(cmd, mr_mat.shader, mr_mat.cull_backfaces);
+                last_shader         = mr_mat.shader;
+                last_cull_backfaces = mr_mat.cull_backfaces;
                 have_bound          = true;
                 last_set            = nullptr;
             }
 
             coopa::gfx::engine::passes::GBufferPipeline::PushConstants pc;
-            pc.albedo       = glm::vec4(mr->material.albedo, mr->material.alpha);
-            pc.metallic     = mr->material.metallic;
-            pc.roughness    = mr->material.roughness;
-            pc.ao           = mr->material.ao;
-            pc.alpha_cutoff = mr->material.gpu_alpha_cutoff();
-            pc.emissive     = mr->material.gpu_emissive();
+            pc.albedo       = glm::vec4(mr_mat.albedo, mr_mat.alpha);
+            pc.metallic     = mr_mat.metallic;
+            pc.roughness    = mr_mat.roughness;
+            pc.ao           = mr_mat.ao;
+            pc.alpha_cutoff = mr_mat.gpu_alpha_cutoff();
+            pc.emissive     = mr_mat.gpu_emissive();
             pc.gfx_time     = glm::vec4(elapsed_time_, frame_dt_, static_cast<float>(frame_index_), 0.0f);
-            pc.gfx_params   = mr->material.shader_params;
+            pc.gfx_params   = mr_mat.shader_params;
             gbuffer_pipeline_->push(cmd, pc);
             // Set 1: alpha-mask sampler (white 1x1 fallback unless this is a CUTOUT material
             // with a loaded texture_alpha_mask) -- see MaterialTextureCache.
-            const auto& set = material_cache_->set_for(mr->material);
+            const auto& set = material_cache_->set_for(mr_mat);
             if (&set != last_set) {
                 cmd.bind_descriptor_set(gbuffer_pipeline_->layout(), set, 1);
                 last_set = &set;
@@ -4363,7 +4388,7 @@ private:
                 mesh->bind(cmd);
                 last_mesh = mesh;
             }
-            mesh->draw_lod(cmd, batch.lod, batch.instance_count, batch.first_instance);
+            mesh->draw_lod_part(cmd, batch.lod, meshes.part[batch.item], batch.instance_count, batch.first_instance);
             frame_stats_.camera_draws     += 1;
             frame_stats_.camera_instances += batch.instance_count;
             frame_stats_.camera_triangles += static_cast<uint64_t>(batch.instance_count) *
@@ -4443,27 +4468,28 @@ private:
 
         for (const MeshBatch& batch : meshes.capture) {
             auto* mr = meshes.renderers[batch.item];
-            if (!have_bound || mr->material.shader != last_shader) {
-                transparent_capture_pass_->bind(cmd, mr->material.shader);
-                last_shader = mr->material.shader;
+            const auto& mr_mat = meshes.material(batch.item);
+            if (!have_bound || mr_mat.shader != last_shader) {
+                transparent_capture_pass_->bind(cmd, mr_mat.shader);
+                last_shader = mr_mat.shader;
                 have_bound  = true;
             }
 
             coopa::gfx::engine::passes::TransparentCapturePass::PushConstants pc;
-            pc.albedo     = glm::vec4(mr->material.albedo, mr->material.alpha);
-            pc.metallic   = mr->material.metallic;
-            pc.roughness  = mr->material.roughness;
-            pc.ao         = mr->material.ao;
+            pc.albedo     = glm::vec4(mr_mat.albedo, mr_mat.alpha);
+            pc.metallic   = mr_mat.metallic;
+            pc.roughness  = mr_mat.roughness;
+            pc.ao         = mr_mat.ao;
             pc.gfx_time   = glm::vec4(elapsed_time_, frame_dt_, static_cast<float>(frame_index_), 0.0f);
-            pc.gfx_params = mr->material.shader_params;
+            pc.gfx_params = mr_mat.shader_params;
             transparent_capture_pass_->push(cmd, pc);
             // Set 3: albedo/normal/metallic-roughness -- see gfx/surface/capture_fs.glsl and
             // engine::util::MaterialTextureCache.
-            transparent_capture_pass_->bind_material(cmd, material_cache_->set_for(mr->material));
+            transparent_capture_pass_->bind_material(cmd, material_cache_->set_for(mr_mat));
 
             const auto* mesh = mr->get_mesh().get();
             mesh->bind(cmd);
-            mesh->draw_lod(cmd, batch.lod, batch.instance_count, batch.first_instance);
+            mesh->draw_lod_part(cmd, batch.lod, meshes.part[batch.item], batch.instance_count, batch.first_instance);
         }
 
         // BLEND SdfRenderers -- feeds the exact same secondary reflection source, via
@@ -4500,7 +4526,7 @@ private:
         std::vector<std::pair<float, size_t>> order;
         for (size_t i = 0; i < meshes.renderers.size(); ++i) {
             if (meshes.instance_idx[i] == InstanceStream::kInvalidIndex) continue;
-            if (!meshes.renderers[i]->material.is_blended()) continue;
+            if (!meshes.material(i).is_blended()) continue;
             const glm::vec3 d = meshes.bounds[i].center - camera_pos;
             order.push_back({glm::dot(d, d), i});
         }
@@ -4511,16 +4537,17 @@ private:
         const float mode = view == DebugView::MaterialPreview ? 2.0f : view == DebugView::Wireframe ? 3.0f : 1.0f;
         for (const auto& [dist, i] : order) {
             auto* mr = meshes.renderers[i];
+            const auto& mr_mat = meshes.material(i);
             passes::TransparentPreviewPass::PushConstants pc;
-            pc.albedo    = glm::vec4(mr->material.albedo, mr->material.alpha);
-            pc.metallic  = mr->material.metallic;
-            pc.roughness = mr->material.roughness;
-            pc.ao        = mr->material.ao;
+            pc.albedo    = glm::vec4(mr_mat.albedo, mr_mat.alpha);
+            pc.metallic  = mr_mat.metallic;
+            pc.roughness = mr_mat.roughness;
+            pc.ao        = mr_mat.ao;
             pc.view      = glm::vec4(mode, 0.0f, 0.0f, 0.0f);
-            pc.emissive  = mr->material.gpu_emissive();
-            transparent_preview_pass_->push(cmd, pc, material_cache_->set_for(mr->material));
+            pc.emissive  = mr_mat.gpu_emissive();
+            transparent_preview_pass_->push(cmd, pc, material_cache_->set_for(mr_mat));
             mr->get_mesh()->bind(cmd);
-            mr->get_mesh()->draw_lod(cmd, meshes.lod[i], 1, meshes.instance_idx[i]);
+            mr->get_mesh()->draw_lod_part(cmd, meshes.lod[i], meshes.part[i], 1, meshes.instance_idx[i]);
         }
     }
 
@@ -4575,7 +4602,7 @@ private:
         std::vector<Item> order;
         for (size_t i = 0; i < meshes.renderers.size(); ++i) {
             if (meshes.instance_idx[i] == InstanceStream::kInvalidIndex) continue;
-            if (!meshes.renderers[i]->material.is_blended()) continue;
+            if (!meshes.material(i).is_blended()) continue;
             // Sorted on the world-bounds centre, not the object origin: a mesh whose pivot sits
             // at one end would otherwise sort by a point it barely occupies.
             order.push_back({false, i, meshes.bounds[i].center});
@@ -4616,6 +4643,7 @@ private:
         for (const auto& item : order) {
             if (!item.is_sdf) {
                 auto* mr = meshes.renderers[item.index];
+                const auto& mr_mat = meshes.material(item.index);
 
                 // The pipeline MUST be (re)bound before the 2-argument bind_descriptor_set()
                 // calls below -- that overload derives its pipeline layout from whatever
@@ -4624,9 +4652,9 @@ private:
                 // transparent_pass_'s layout. Binding descriptor sets first and the pipeline
                 // second, even briefly, resolves set 0 against the wrong layout and is a
                 // real validation error (descriptor type mismatch), not just a style issue.
-                if (last_kind != 0 || mr->material.shader != last_mesh_shader) {
-                    transparent_pass_->bind(cmd, mr->material.shader);
-                    last_mesh_shader = mr->material.shader;
+                if (last_kind != 0 || mr_mat.shader != last_mesh_shader) {
+                    transparent_pass_->bind(cmd, mr_mat.shader);
+                    last_mesh_shader = mr_mat.shader;
                 }
 
                 if (last_kind != 0) {
@@ -4647,12 +4675,12 @@ private:
                 }
 
                 coopa::gfx::engine::passes::TransparentPass::PushConstants pc;
-                pc.albedo     = glm::vec4(mr->material.albedo, mr->material.alpha);
-                pc.metallic   = mr->material.metallic;
-                pc.roughness  = mr->material.roughness;
-                pc.ao         = mr->material.ao;
+                pc.albedo     = glm::vec4(mr_mat.albedo, mr_mat.alpha);
+                pc.metallic   = mr_mat.metallic;
+                pc.roughness  = mr_mat.roughness;
+                pc.ao         = mr_mat.ao;
                 pc.gfx_time   = glm::vec4(elapsed_time_, frame_dt_, static_cast<float>(frame_index_), 0.0f);
-                pc.gfx_params = mr->material.shader_params;
+                pc.gfx_params = mr_mat.shader_params;
                 transparent_pass_->push(cmd, pc);
 
                 // Pushed into transparent.frag's PushConstants' [32, 64) region (see the ctor's
@@ -4661,13 +4689,13 @@ private:
                 // material left it at PBRMaterial's negative sentinel (see that struct's own
                 // doc for why -1 rather than baking the default straight into PBRMaterial).
                 TransparentRefractionPushConstants refract_pc;
-                float refract_ior       = mr->material.ior >= 0.0f ? mr->material.ior : config_.refraction_ior;
-                float refract_thickness = mr->material.refraction_thickness >= 0.0f
-                                              ? mr->material.refraction_thickness : config_.refraction_thickness;
-                glm::vec3 refract_tint  = mr->material.refraction_tint.r >= 0.0f
-                                              ? mr->material.refraction_tint : config_.refraction_tint;
+                float refract_ior       = mr_mat.ior >= 0.0f ? mr_mat.ior : config_.refraction_ior;
+                float refract_thickness = mr_mat.refraction_thickness >= 0.0f
+                                              ? mr_mat.refraction_thickness : config_.refraction_thickness;
+                glm::vec3 refract_tint  = mr_mat.refraction_tint.r >= 0.0f
+                                              ? mr_mat.refraction_tint : config_.refraction_tint;
                 refract_pc.tint_thickness = glm::vec4(refract_tint, refract_thickness);
-                refract_pc.ior_flags      = glm::vec4(refract_ior, mr->material.has_refraction() ? 1.0f : 0.0f, 0.0f, 0.0f);
+                refract_pc.ior_flags      = glm::vec4(refract_ior, mr_mat.has_refraction() ? 1.0f : 0.0f, 0.0f, 0.0f);
                 // VERTEX|FRAGMENT, not FRAGMENT alone: TransparentPass's push-constant range now
                 // covers both stages (see its PushConstants' gfx_time/gfx_params doc), and
                 // Vulkan requires a push call's stageFlags to match the declared range for
@@ -4682,10 +4710,10 @@ private:
                 // mesh/sdf transition above: two consecutive mesh items in this back-to-front
                 // list can have different textures even when neither the pipeline nor sets 0-6
                 // need rebinding.
-                transparent_pass_->bind_material(cmd, material_cache_->set_for(mr->material));
+                transparent_pass_->bind_material(cmd, material_cache_->set_for(mr_mat));
 
                 mr->get_mesh()->bind(cmd);
-                mr->get_mesh()->draw_lod(cmd, meshes.lod[item.index], 1, meshes.instance_idx[item.index]);
+                mr->get_mesh()->draw_lod_part(cmd, meshes.lod[item.index], meshes.part[item.index], 1, meshes.instance_idx[item.index]);
                 frame_stats_.camera_draws     += 1;
                 frame_stats_.camera_instances += 1;
             } else {

@@ -497,7 +497,7 @@ private:
 
     /** @brief Lookdev settings (Material Properties > Preview). */
     struct Lookdev {
-        int shape = 0;            ///< 0 sphere, 1 rounded cube, 2 plane, 3 cylinder
+        int shape = 0;            ///< 0 shader ball, 1 sphere, 2 rounded cube, 3 plane, 4 cylinder
         bool turntable = false;
         bool ground = true;
         float angle = 0.0f;
@@ -588,7 +588,8 @@ private:
     /** @brief The lookdev shape for a material (object space, resting on z = 0 after placement). */
     EditMesh lookdev_shape_() const {
         switch (lookdev_.shape) {
-            case 1: {
+            case 1: return make_uv_sphere(0.5f, 48, 24);
+            case 2: {
                 EditMesh m = make_cube();
                 MeshSelection all;
                 all.select_all(m);
@@ -596,9 +597,9 @@ private:
                 for (auto& f : m.faces) f.smooth = true;
                 return m;
             }
-            case 2: return make_plane(1.2f, 1);
-            case 3: return make_cylinder(0.45f, 1.0f, 48, true);
-            default: return make_uv_sphere(0.5f, 48, 24);
+            case 3: return make_plane(1.2f, 1);
+            case 4: return make_cylinder(0.45f, 1.0f, 48, true);
+            default: return make_shader_ball();   // curves, flat planes and hard edges in one shape
         }
     }
 

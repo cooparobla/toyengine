@@ -2,7 +2,7 @@
 //
 // Blender's Sculpt Mode on the active mesh object: brushes (Draw, Smooth, Inflate, Grab,
 // Flatten) applied along the stroke, F / Shift+F to resize the brush radius / strength,
-// local-space X / Y / Z symmetry, and a surface-hugging brush circle. Strokes reshape the
+// X / Y / Z symmetry (local or global axes), and a surface-hugging brush circle. Strokes reshape the
 // mesh document directly (one undo step each); while sculpting, the GPU mesh is the
 // SculptPreview's dynamic buffer instead of a re-export per frame.
 
@@ -135,7 +135,7 @@
         d.invert = stroke_.invert;
         d.brush = stroke_.brush;
         float maxd = 0.0f;
-        for_each_symmetric(d, sculpt_.symmetry, [&](const SculptDab& md) {
+        for_each_symmetric(d, mirror_images(sculpt_.symmetry, mesh_world_()), [&](const SculptDab& md) {
             maxd = std::max(maxd, sculpt_dab(mesh_.mesh, sculpt_cache_, sculpt_grid_, md, moved));
         });
         sculpt_grid_.note_moved(maxd);
@@ -161,10 +161,8 @@
             SculptDab d;
             d.center = hit;
             d.radius = stroke_.radius;
-            for_each_symmetric(d, sculpt_.symmetry, [&](const SculptDab& md) {
-                glm::vec3 mirror(1.0f);
-                for (int a = 0; a < 3; ++a) if ((md.center[a] < 0) != (hit[a] < 0) && std::abs(hit[a]) > 1e-6f) mirror[a] = -1.0f;
-                stroke_.grabs.push_back(sculpt_grab_begin(mesh_.mesh, sculpt_grid_, md.center, stroke_.radius, sculpt_.strength, mirror));
+            for_each_symmetric(d, mirror_images(sculpt_.symmetry, mesh_world_()), [&](const SculptDab& md) {
+                stroke_.grabs.push_back(sculpt_grab_begin(mesh_.mesh, sculpt_grid_, md.center, stroke_.radius, sculpt_.strength, md.mirror));
             });
             return;
         }
@@ -320,7 +318,7 @@
     // UI
     // =================================================================================
 
-    /** @brief Header widgets in Sculpt Mode: radius, strength, symmetry. Returns the width used. */
+    /** @brief Header widgets in Sculpt Mode: radius, strength. Returns the width used. */
     float draw_sculpt_header_(imm::Context& ctx, float x, const imm::Box& hb) {
         using I = imm::Icon;
         const float bh = hb.h - 6;
@@ -337,21 +335,57 @@
         ctx.drag_float_box("sc_strength", {x, hb.y + 3, 56, bh}, &sculpt_.strength, 0.005f, 0.0f, 1.0f, "%.2f");
         ctx.tooltip("Strength\nHow strongly each dab acts (Shift F)");
         x += 64;
-        ctx.icon(I::BrushSmooth, {x, hb.y + 5, bh - 4, bh - 4}, ctx.style.text_dim);
-        x += bh;
-        static const char* kAxes[] = {"X", "Y", "Z"};
-        for (int a = 0; a < 3; ++a) {
-            const imm::Box b{x, hb.y + 3, bh, bh};
-            bool hov = false, held = false;
-            const std::string id = std::string("sc_sym_") + kAxes[a];
-            if (ctx.invisible_button(id, b, &hov, &held)) sculpt_.symmetry[a] = !sculpt_.symmetry[a];
-            const auto corners = a == 0 ? imm::Context::kLeft : a == 2 ? imm::Context::kRight : 0;
-            ctx.fill_rounded(b, sculpt_.symmetry[a] ? ctx.style.accent : hov ? ctx.style.button_hover : ctx.style.button, -1, corners);
-            ctx.text_in(b, kAxes[a], ctx.style.text, 0.0f, true);
-            ctx.tooltip(std::string("Symmetry ") + kAxes[a] + "\nMirror strokes across the mesh's local " + kAxes[a] + " axis");
-            x += bh;
+        return x + 8;   // symmetry sits after the menus (draw_viewport_header_), space permitting
+    }
+
+    /** @brief "Mirror", or "Mirror XZ" / "Mirror X (Global)" when axes are on. */
+    static std::string symmetry_label_(const MirrorSettings& sym) {
+        std::string l = "Mirror";
+        if (!sym.any()) return l;
+        l += ' ';
+        for (int a = 0; a < 3; ++a) if (sym.axis[a]) l += "XYZ"[a];
+        if (sym.global) l += " (Global)";
+        return l;
+    }
+
+    /** @brief The width draw_symmetry_buttons_() takes. */
+    float symmetry_buttons_width_(imm::Context& ctx, const imm::Box& hb, const MirrorSettings& sym) const {
+        return ctx.text_width(symmetry_label_(sym)) + (hb.h - 6) + 6;
+    }
+
+    /**
+     * @brief The symmetry control shared by the Edit and Sculpt headers: one button naming the
+     *        active axes (highlighted when any are on) that opens a popover with the X / Y / Z
+     *        toggles and the Local / Global choice. Returns the new x.
+     */
+    float draw_symmetry_buttons_(imm::Context& ctx, float x, const imm::Box& hb, MirrorSettings& sym, const char* id,
+                                 const char* what) {
+        const float bh = hb.h - 6;
+        const std::string label = symmetry_label_(sym);
+        const imm::Box b{x, hb.y + 3, symmetry_buttons_width_(ctx, hb, sym), bh};
+        bool hov = false, held = false;
+        const std::string popup = std::string(id) + "_pop";
+        if (ctx.invisible_button(id, b, &hov, &held)) ctx.open_popup(popup, glm::vec2(b.x, b.bottom() + 2));
+        ctx.fill_rounded(b, sym.any() ? ctx.style.accent : hov ? ctx.style.button_hover : ctx.style.button);
+        ctx.text_in({b.x + 6, b.y, b.w - bh, bh}, label, ctx.style.text, 0.0f);
+        ctx.arrow({b.right() - 14, b.y + 4, 10, bh - 8}, true, ctx.style.text_dim);
+        ctx.tooltip(std::string("Mirror\nRepeat ") + what + " across the chosen axes, the mesh's own (Local) or the world's (Global)");
+        if (ctx.begin_popup(popup, 200)) {
+            ctx.label_dim(std::string("Mirror ") + what);
+            draw_symmetry_panel_(ctx, sym);
+            ctx.end_popup();
         }
-        return x + 8;
+        return x + b.w;
+    }
+
+    /** @brief The same toggles as panel rows (Properties > Tool). */
+    void draw_symmetry_panel_(imm::Context& ctx, MirrorSettings& sym) {
+        ctx.checkbox("Mirror X", &sym.axis[0]);
+        ctx.checkbox("Mirror Y", &sym.axis[1]);
+        ctx.checkbox("Mirror Z", &sym.axis[2]);
+        int space = sym.global ? 1 : 0;
+        if (ctx.combo("Mirror Axes", &space, {"Local", "Global"})) sym.global = space == 1;
+        ctx.tooltip("Mirror Axes\nLocal: the mesh's own axes through its origin. Global: the world's axes through the world origin.");
     }
 
     /** @brief The brush column of the toolbar (Sculpt Mode). */
@@ -385,9 +419,7 @@
             ctx.drag_float("Radius (px)", &sculpt_.radius_px, 0.5f, 2.0f, 600.0f);
             ctx.slider_float("Strength", &sculpt_.strength, 0.0f, 1.0f, "%.2f");
             ctx.slider_float("Spacing", &sculpt_.spacing, 0.02f, 1.0f, "%.2f");
-            ctx.checkbox("Symmetry X", &sculpt_.symmetry[0]);
-            ctx.checkbox("Symmetry Y", &sculpt_.symmetry[1]);
-            ctx.checkbox("Symmetry Z", &sculpt_.symmetry[2]);
+            draw_symmetry_panel_(ctx, sculpt_.symmetry);
         }
         if (ctx.collapsing_header("Density", true, nullptr, I::Mesh)) {
             char buf[96];
@@ -416,6 +448,7 @@
 
 public:
     SculptSettings& sculpt_settings() { return sculpt_; }
+    MirrorSettings& edit_symmetry() { return edit_symmetry_; }
     bool sculpt_stroking() const { return stroke_.active; }
 
 private:

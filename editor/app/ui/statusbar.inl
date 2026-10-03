@@ -36,7 +36,7 @@
         // --- stats, Blender style (placed first, so the report can't run into them) ---
         std::string stats = scene_stats_();
         if (playing()) stats = "PLAYING  |  " + stats;
-        stats += "  |  toyengine 0.1";
+        stats += std::string("  |  ") + core::kEngineName + " " + core::kVersionString;
         const float sw = ctx.text_width(stats);
         const float stats_x = b.right() - sw - 10;
         ctx.text_in({stats_x, b.y, sw + 6, b.h}, stats, ctx.style.text_dim, 0.0f);

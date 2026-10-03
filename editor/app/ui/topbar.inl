@@ -9,8 +9,22 @@
         const char* menus[] = {"File", "Edit", "Render", "Window", "Help"};
         float menus_w = 8;
         for (const char* m : menus) menus_w += ctx.text_width(m) + ctx.style.padding * 3;
-        // App badge (Blender's logo slot).
-        ctx.icon(I::Cube, {b.x + 6, b.y + 5, b.h - 10, b.h - 10}, ctx.style.object_active);
+        // The toyengine logo (Blender's logo slot): a button with the app menu (About, ...).
+        {
+            const imm::Box lb{b.x + 4, b.y + 3, b.h - 6, b.h - 6};
+            bool hov = false, held = false;
+            if (ctx.invisible_button("app_logo", lb, &hov, &held)) ctx.open_popup("app_menu", glm::vec2(lb.x, lb.bottom() + 2));
+            if (hov || ctx.is_popup_open("app_menu")) ctx.fill_rounded(lb, ctx.style.button_hover, 5);
+            draw_logo_(ctx, lb.shrink(2));
+            ctx.tooltip(std::string(core::kEngineName) + " " + core::kVersionString + "\nAbout, controls and quit");
+            if (ctx.begin_popup("app_menu", 210)) {
+                if (ctx.menu_item("About toyengine...", "", nullptr, true, I::Info)) pending_modal_ = "About";
+                if (ctx.menu_item("Controls...", "", nullptr, true, I::Keyboard)) pending_modal_ = "Controls";
+                ctx.menu_separator();
+                if (ctx.menu_item("Quit", "Cmd Q")) { if (request_close()) quit_ = true; }
+                ctx.end_popup();
+            }
+        }
         const imm::Box mb{b.x + b.h, b.y, menus_w, b.h};
         ctx.begin_menubar(mb);
         draw_file_menu_(ctx);
@@ -19,7 +33,7 @@
         draw_window_menu_(ctx);
         if (ctx.begin_menu("Help")) {
             if (ctx.menu_item("Controls...", "", nullptr, true, I::Keyboard)) pending_modal_ = "Controls";
-            if (ctx.menu_item("About toyengine editor", "", nullptr, true, I::Info)) pending_modal_ = "About";
+            if (ctx.menu_item("About toyengine...", "", nullptr, true, I::Info)) pending_modal_ = "About";
             ctx.end_menu();
         }
         ctx.end_menubar();
@@ -198,4 +212,120 @@
         } catch (const std::exception& e) {
             log_error(std::string("Render failed: ") + e.what());
         }
+    }
+
+    // =================================================================================
+    // Branding: the logo (toyengine/core/branding.h) as vector triangles, and About
+    // =================================================================================
+
+    /** @brief Draws the toyengine logo into `box` (kept square, centred). */
+    static void draw_logo_(imm::Context& ctx, const imm::Box& box) {
+        const float side = std::min(box.w, box.h);
+        const glm::vec2 o{box.x + (box.w - side) * 0.5f, box.y + (box.h - side) * 0.5f};
+        auto at = [&](glm::vec2 u) { return o + u * side; };
+        for (const auto& sh : core::logo_shapes()) {
+            switch (sh.kind) {
+                case core::LogoShape::Kind::RoundRect: {
+                    // Horizontal bands, each a trapezoid following the rounded corners, carry the gradient.
+                    const int bands = side > 40.0f ? 32 : 12;
+                    auto half_w = [&](float y) {
+                        const float top = sh.min.y + sh.corner, bot = sh.max.y - sh.corner;
+                        const float dy = y < top ? top - y : y > bot ? y - bot : 0.0f;
+                        return (sh.max.x - sh.min.x) * 0.5f - sh.corner + std::sqrt(std::max(0.0f, sh.corner * sh.corner - dy * dy));
+                    };
+                    const float cx = (sh.min.x + sh.max.x) * 0.5f;
+                    for (int i = 0; i < bands; ++i) {
+                        const float y0 = sh.min.y + (sh.max.y - sh.min.y) * i / bands, y1 = sh.min.y + (sh.max.y - sh.min.y) * (i + 1) / bands;
+                        const float t = (i + 0.5f) / bands;
+                        const glm::vec4 col = sh.color_bottom.x >= 0.0f ? glm::mix(sh.color, sh.color_bottom, t) : sh.color;
+                        const float w0 = half_w(y0), w1 = half_w(y1);
+                        const glm::vec2 a = at({cx - w0, y0}), b = at({cx + w0, y0}), c = at({cx + w1, y1}), d = at({cx - w1, y1});
+                        ctx.triangle(a, b, c, col);
+                        ctx.triangle(a, c, d, col);
+                    }
+                    break;
+                }
+                case core::LogoShape::Kind::Polygon:
+                    for (size_t i = 1; i + 1 < sh.points.size(); ++i) ctx.triangle(at(sh.points[0]), at(sh.points[i]), at(sh.points[i + 1]), sh.color);
+                    break;
+                case core::LogoShape::Kind::Ellipse: {
+                    const int seg = side > 40.0f ? 40 : 16;
+                    for (int i = 0; i < seg; ++i) {
+                        const float a0 = 6.2831853f * i / seg, a1 = 6.2831853f * (i + 1) / seg;
+                        ctx.triangle(at(sh.center), at(sh.center + sh.radii * glm::vec2(std::cos(a0), std::sin(a0))),
+                                     at(sh.center + sh.radii * glm::vec2(std::cos(a1), std::sin(a1))), sh.color);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    /** @brief The About box's facts, as (label, value) rows -- also what "Copy" puts on the clipboard. */
+    std::vector<std::pair<std::string, std::string>> about_rows_() {
+#if defined(__APPLE__)
+        std::string platform = "macOS";
+#elif defined(_WIN32)
+        std::string platform = "Windows";
+#else
+        std::string platform = "Linux";
+#endif
+#if defined(__aarch64__) || defined(_M_ARM64)
+        platform += " (arm64)";
+#elif defined(__x86_64__) || defined(_M_X64)
+        platform += " (x86_64)";
+#endif
+#if defined(__clang__)
+        const std::string compiler = std::string("Clang ") + __clang_version__;
+#elif defined(__GNUC__)
+        const std::string compiler = "GCC " + std::to_string(__GNUC__) + "." + std::to_string(__GNUC_MINOR__);
+#elif defined(_MSC_VER)
+        const std::string compiler = "MSVC " + std::to_string(_MSC_VER);
+#else
+        const std::string compiler = "unknown";
+#endif
+#ifdef NDEBUG
+        const char* build = "optimized";
+#else
+        const char* build = "debug";
+#endif
+        return {
+            {"Build", std::string(__DATE__) + " " + __TIME__ + " (" + build + ")"},
+            {"Compiler", compiler},
+            {"Platform", platform},
+            {"Graphics", "Vulkan " + engine_.device().api_version_string() + " on " + engine_.device().gpu_name()},
+            {"Libraries", "libcoopa, gfxcoopa, uicoopa, physxcoopa, sfxcoopa, mapcoopa"},
+            {"Project", project_.root().string()},
+        };
+    }
+
+    void draw_about_modal_(imm::Context& ctx) {
+        if (!ctx.begin_modal("About", {520, 318})) return;
+        const imm::Box logo = ctx.next_box(84, 84);
+        draw_logo_(ctx, logo);
+        ctx.same_line(16);
+        const imm::Box head = ctx.next_box(84);
+        const float rh = ctx.style.row_height;
+        ctx.text_in({head.x, head.y + 6, head.w, rh}, "toyengine editor", ctx.style.accent, 0.0f);
+        ctx.text_in({head.x, head.y + 6 + rh, head.w, rh}, std::string("Version ") + core::kVersionString, ctx.style.text, 0.0f);
+        ctx.text_in({head.x, head.y + 6 + rh * 2, head.w, rh}, "Scenes, objects, meshes, materials and textures for toyengine",
+                    ctx.style.text_dim, 0.0f);
+        ctx.separator();
+        const auto rows = about_rows_();
+        for (const auto& [k, v] : rows) {
+            const imm::Box r = ctx.next_box(rh);
+            ctx.text_in({r.x, r.y, 86, r.h}, k, ctx.style.text_dim, 0.0f);
+            ctx.text_in({r.x + 90, r.y, r.w - 90, r.h}, v, ctx.style.text, 0.0f);
+            ctx.tooltip(k + "\n" + v);
+        }
+        ctx.spacing();
+        if (ctx.button("Copy Info", 110, true, imm::Icon::Duplicate) && ctx.input().set_clipboard) {
+            std::string text = std::string("toyengine editor ") + core::kVersionString + "\n";
+            for (const auto& [k, v] : rows) text += k + ": " + v + "\n";
+            ctx.input().set_clipboard(text);
+        }
+        ctx.tooltip("Copy Info\nPut these details on the clipboard (handy for bug reports)");
+        ctx.same_line();
+        if (ctx.button("Close", 100)) ctx.close_modal();
+        ctx.end_modal();
     }

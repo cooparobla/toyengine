@@ -88,6 +88,7 @@
             else draw_object_menu_(ctx);
         }
         ctx.end_menubar();
+        const float after_menus = ctx.menubar_end() + 10;
 
         // Right side: orientation, snap, overlays, x-ray, shading.
         float rx = hb.right() - 6;
@@ -126,28 +127,40 @@
                             imm::Context::kLeft, imm::Box{rx, hb.y + 3, s, s}, true)) {
             show_overlays_ = !show_overlays_;
         }
-        rx -= s + 10;
-        if (ctx.icon_button("snap", I::Snap, "Snap\nSnap transforms to increments (Ctrl inverts while dragging)", snap_on_, s, imm::Context::kAll,
-                            imm::Box{rx, hb.y + 3, s, s}, true)) {
-            snap_on_ = !snap_on_;
-        }
-        rx -= 92;
-        const imm::Box ob{rx, hb.y + 3, 88, s};
-        bool oh = false, oheld = false;
-        if (ctx.invisible_button("orient_dd", ob, &oh, &oheld)) ctx.open_popup("orient_menu", glm::vec2(ob.x, ob.bottom() + 2));
-        ctx.fill_rounded(ob, oh ? ctx.style.button_hover : ctx.style.button);
-        ctx.icon(I::Orientation, {ob.x + 3, ob.y + 2, s - 4, s - 4}, ctx.style.text);
-        static const char* kOrientNames[] = {"Global", "Local", "Normal"};
-        ctx.text_in({ob.x + s, ob.y, ob.w - s - 12, s}, kOrientNames[static_cast<int>(orient_)], ctx.style.text, 0.0f);
-        ctx.icon(I::ArrowDown, {ob.right() - 13, ob.y + 5, 9, s - 10}, ctx.style.text_dim);
-        ctx.tooltip("Transform Orientation\nAxes the gizmo and a second X / Y / Z press use: Global, the object's Local axes, "
-                    "or the selection's Normal (edit mode)");
-        if (ctx.begin_popup("orient_menu", 150)) {
-            for (int i = 0; i < 3; ++i) {
-                bool on = static_cast<int>(orient_) == i;
-                if (ctx.menu_item(kOrientNames[i], "", &on, i != 2 || mesh_edit)) orient_ = static_cast<Orientation>(i);
+        // Snap and orientation only steer transforms: Sculpt Mode has none, so they make room there.
+        if (!in_sculpt_mode_()) {
+            rx -= s + 10;
+            if (ctx.icon_button("snap", I::Snap, "Snap\nSnap transforms to increments (Ctrl inverts while dragging)", snap_on_, s, imm::Context::kAll,
+                                imm::Box{rx, hb.y + 3, s, s}, true)) {
+                snap_on_ = !snap_on_;
             }
-            ctx.end_popup();
+            rx -= 92;
+            const imm::Box ob{rx, hb.y + 3, 88, s};
+            bool oh = false, oheld = false;
+            if (ctx.invisible_button("orient_dd", ob, &oh, &oheld)) ctx.open_popup("orient_menu", glm::vec2(ob.x, ob.bottom() + 2));
+            ctx.fill_rounded(ob, oh ? ctx.style.button_hover : ctx.style.button);
+            ctx.icon(I::Orientation, {ob.x + 3, ob.y + 2, s - 4, s - 4}, ctx.style.text);
+            static const char* kOrientNames[] = {"Global", "Local", "Normal"};
+            ctx.text_in({ob.x + s, ob.y, ob.w - s - 12, s}, kOrientNames[static_cast<int>(orient_)], ctx.style.text, 0.0f);
+            ctx.icon(I::ArrowDown, {ob.right() - 13, ob.y + 5, 9, s - 10}, ctx.style.text_dim);
+            ctx.tooltip("Transform Orientation\nAxes the gizmo and a second X / Y / Z press use: Global, the object's Local axes, "
+                        "or the selection's Normal (edit mode)");
+            if (ctx.begin_popup("orient_menu", 150)) {
+                for (int i = 0; i < 3; ++i) {
+                    bool on = static_cast<int>(orient_) == i;
+                    if (ctx.menu_item(kOrientNames[i], "", &on, i != 2 || mesh_edit)) orient_ = static_cast<Orientation>(i);
+                }
+                ctx.end_popup();
+            }
+        }
+        // Edit Mode symmetry (Blender's X / Y / Z mirror toggles + Local / Global), between the
+        // menus and the right-hand cluster when it fits; Properties > Tool > Symmetry always has it.
+        // Sculpt Mode's stroke symmetry goes in the same place (Properties > Tool > Brush has it too).
+        const bool sculpting = in_sculpt_mode_();
+        MirrorSettings& header_sym = sculpting ? sculpt_.symmetry : edit_symmetry_;
+        if ((mesh_edit || sculpting) && after_menus + symmetry_buttons_width_(ctx, hb, header_sym) <= rx - 8) {
+            if (sculpting) draw_symmetry_buttons_(ctx, after_menus, hb, sculpt_.symmetry, "sc_sym", "strokes");
+            else draw_symmetry_buttons_(ctx, after_menus, hb, edit_symmetry_, "ed_sym", "moves, rotations and scales");
         }
     }
 
@@ -261,10 +274,35 @@
         ctx.end_menu();
     }
 
+    /** @brief Mesh > Mirror (and the Ctrl M menu): flip the selection along an axis through the pivot. */
+    void draw_mirror_menu_items_(imm::Context& ctx) {
+        static const char* kAxes[] = {"X", "Y", "Z"};
+        for (int global = 1; global >= 0; --global) {
+            for (int a = 0; a < 3; ++a) {
+                const std::string label = std::string(kAxes[a]) + (global ? " Global" : " Local");
+                if (ctx.menu_item(label)) mirror_mesh_selection_(a, global != 0);
+                ctx.tooltip(std::string("Mirror ") + label + "\nFlip the selection along the " + (global ? "world's " : "mesh's ") +
+                            kAxes[a] + " axis, through the selection's centre");
+            }
+            if (global) ctx.menu_separator();
+        }
+    }
+
     void draw_mesh_menu_(imm::Context& ctx) {
         using I = imm::Icon;
         if (!ctx.begin_menu("Mesh")) return;
         auto op = [&](const char* label, auto&& fn) { mesh_.edit(label, fn); };
+        if (ctx.begin_menu("Transform", true, I::Move)) {
+            if (ctx.menu_item("Move", "G", nullptr, true, I::Move)) pending_modal_kind_ = ModalKind::Grab;
+            if (ctx.menu_item("Rotate", "R", nullptr, true, I::Rotate)) pending_modal_kind_ = ModalKind::Rotate;
+            if (ctx.menu_item("Scale", "S", nullptr, true, I::Scale)) pending_modal_kind_ = ModalKind::Scale;
+            ctx.end_menu();
+        }
+        if (ctx.begin_menu("Mirror", true)) {
+            draw_mirror_menu_items_(ctx);
+            ctx.end_menu();
+        }
+        ctx.menu_separator();
         if (ctx.menu_item("Extrude", "E", nullptr, true, I::Extrude)) pending_extrude_ = true;
         if (ctx.menu_item("Inset Faces", "I", nullptr, true, I::Inset)) pending_modal_kind_ = ModalKind::Inset;
         if (ctx.menu_item("Bevel Edges", "Ctrl B", nullptr, true, I::Bevel)) pending_modal_kind_ = ModalKind::Bevel;

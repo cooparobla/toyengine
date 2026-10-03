@@ -272,7 +272,7 @@
         if (ctx.collapsing_header("Surface", true, nullptr, I::Material)) draw_material_editor_(ctx);
         if (ctx.collapsing_header("Preview", true, nullptr, I::ShadeMaterial)) {
             int shape = lookdev_.shape;
-            if (ctx.combo("Shape", &shape, {"Sphere", "Rounded Cube", "Plane", "Cylinder"}) && shape != lookdev_.shape) {
+            if (ctx.combo("Shape", &shape, {"Shader Ball", "Sphere", "Rounded Cube", "Plane", "Cylinder"}) && shape != lookdev_.shape) {
                 lookdev_.shape = shape;
                 ++lookdev_.revision;
             }
@@ -315,7 +315,10 @@
             ctx.drag_float("Move Increment", &gizmo_.translate_snap, 0.01f, 0.001f, 100.0f);
             ctx.drag_float("Rotate Increment", &gizmo_.rotate_snap, 0.5f, 0.1f, 90.0f, "%.1f");
         }
-        if (mesh_edit_view_() && mesh_.open()) draw_mesh_tools_(ctx);
+        if (mesh_edit_view_() && mesh_.open()) {
+            if (ctx.collapsing_header("Symmetry", true)) draw_symmetry_panel_(ctx, edit_symmetry_);
+            draw_mesh_tools_(ctx);
+        }
         if (ctx.collapsing_header("Workspace", false, nullptr, I::Asset)) {
             ctx.property_bool("Grid", &show_grid_);
             ctx.property_bool("Gizmos", &show_gizmo_);

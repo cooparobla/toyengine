@@ -4343,6 +4343,8 @@ private:
         // last_cull_backfaces must be tracked alongside last_shader: the stock ("") key resolves to
         // one of TWO pipelines (see PBRMaterial::cull_backfaces), so the shader name alone does
         // not say which is bound.
+        const DebugView gview = parse_debug_view(config_.debug_view);
+        const bool untextured_view = gview == DebugView::Solid || gview == DebugView::Wireframe;
         std::string last_shader;
         bool last_cull_backfaces = true; // matches the initial pipeline_ bind above (Back)
         bool have_bound = true; // stock, bound just above
@@ -4377,7 +4379,8 @@ private:
             gbuffer_pipeline_->push(cmd, pc);
             // Set 1: alpha-mask sampler (white 1x1 fallback unless this is a CUTOUT material
             // with a loaded texture_alpha_mask) -- see MaterialTextureCache.
-            const auto& set = material_cache_->set_for(mr_mat);
+            // The editor's Solid / Wireframe shading shows material colours, not textures.
+            const auto& set = untextured_view ? material_cache_->untextured_set() : material_cache_->set_for(mr_mat);
             if (&set != last_set) {
                 cmd.bind_descriptor_set(gbuffer_pipeline_->layout(), set, 1);
                 last_set = &set;
@@ -4545,7 +4548,8 @@ private:
             pc.ao        = mr_mat.ao;
             pc.view      = glm::vec4(mode, 0.0f, 0.0f, 0.0f);
             pc.emissive  = mr_mat.gpu_emissive();
-            transparent_preview_pass_->push(cmd, pc, material_cache_->set_for(mr_mat));
+            transparent_preview_pass_->push(cmd, pc, view == DebugView::MaterialPreview ? material_cache_->set_for(mr_mat)
+                                                                                        : material_cache_->untextured_set());
             mr->get_mesh()->bind(cmd);
             mr->get_mesh()->draw_lod_part(cmd, meshes.lod[i], meshes.part[i], 1, meshes.instance_idx[i]);
         }

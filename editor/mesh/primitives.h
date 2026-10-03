@@ -122,20 +122,9 @@ inline EditMesh make_uv_sphere(float radius = 0.5f, int segments = 24, int rings
     return m;
 }
 
-/**
- * @brief The terrain tile-side template: the +Z face of the unit cube [0,1]^3 (see
- *        toyengine/world/tile_mesh_library.h, which rotates it onto all six faces).
- */
-inline EditMesh make_tile_side() {
-    EditMesh m;
-    m.positions = {{0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}};
-    detail::add_face(m, {{0, {0, 0}}, {1, {1, 0}}, {2, {1, 1}}, {3, {0, 1}}});
-    return m;
-}
-
 /** @brief The primitive names the editor's Create menu offers, in order. */
 inline const std::vector<std::string>& primitive_names() {
-    static const std::vector<std::string> names = {"Cube", "Plane", "Grid", "Cylinder", "Sphere", "Tile Side"};
+    static const std::vector<std::string> names = {"Cube", "Plane", "Grid", "Cylinder", "Sphere"};
     return names;
 }
 
@@ -173,7 +162,6 @@ inline EditMesh make_primitive(const PrimitiveParams& p) {
     if (p.kind == "Grid") return make_grid(p.x_subdivisions, p.y_subdivisions, p.size);
     if (p.kind == "Cylinder") return make_cylinder(p.radius, p.depth, p.segments, p.caps);
     if (p.kind == "Sphere") return make_uv_sphere(p.radius, p.segments, p.rings);
-    if (p.kind == "Tile Side") return make_tile_side();
     return make_cube(glm::vec3(p.size));
 }
 

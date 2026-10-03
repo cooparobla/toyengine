@@ -101,6 +101,21 @@ inline EditResult draw_field(imm::Context& ctx, const FieldDesc& f, Node& block,
         }
         case FieldKind::Int: {
             int v = present ? get_int(block, f.key) : static_cast<int>(f.def.x);
+            if (!f.options.empty()) {
+                // Labelled int enum: a dropdown of names, the index is what gets written.
+                std::vector<std::string> shown = f.options;
+                if (v < 0 || v >= static_cast<int>(shown.size())) {
+                    shown.push_back(std::to_string(v) + " (unknown)");
+                    v = static_cast<int>(shown.size()) - 1;
+                }
+                const int before = v;
+                const bool ch = ctx.combo(label, &v, shown) && v != before && v < static_cast<int>(f.options.size());
+                const size_t sel = static_cast<size_t>(v);
+                if (sel < f.option_tips.size()) ctx.tooltip(shown[sel] + " (" + f.key + ": " + std::to_string(v) + ")\n" + f.option_tips[sel]);
+                if (ch) block[f.key] = Node(static_cast<int64_t>(v));
+                r.key = f.key; r.changed = ch; r.finished = ch;
+                break;
+            }
             const bool ch = ctx.drag_int(label, &v, f.speed, static_cast<int>(f.min), static_cast<int>(f.max));
             if (ch) block[f.key] = Node(static_cast<int64_t>(v));
             detail::finish(ctx, r, f.key, ch);

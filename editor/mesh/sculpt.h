@@ -10,7 +10,8 @@
  *   Inflate  along their own normals
  *   Flatten  onto the area plane
  *   Grab     with the cursor (sculpt_grab_*), the vertices captured at the stroke's start
- * All in mesh-local space; symmetry mirrors each dab across the enabled local axes.
+ * All in mesh-local space; symmetry repeats each dab at its mirror images across the enabled
+ * axes -- the mesh's own (Local) or the world's (Global), see mesh_mirror.h.
  */
 
 #ifndef TOYEDITOR_MESH_SCULPT_H
@@ -18,6 +19,7 @@
 
 #include "edit_mesh.h"
 #include "mesh_bvh.h"
+#include "mesh_mirror.h"
 
 #include <glm/glm.hpp>
 
@@ -48,7 +50,7 @@ struct SculptSettings {
     float radius_px = 50.0f;    ///< Brush radius on screen (F).
     float strength = 0.5f;      ///< 0..1 (Shift+F).
     float spacing = 0.1f;       ///< Dab spacing, a fraction of the radius.
-    bool symmetry[3] = {true, false, false};   ///< Mirror across local X / Y / Z (Blender: X on).
+    MirrorSettings symmetry{{true, false, false}, false};   ///< Mirror strokes across X / Y / Z (Blender: local X on).
 };
 
 /** @brief 1 at the centre, 0 at the rim, smooth at both (x = distance / radius). */
@@ -191,26 +193,31 @@ struct SculptDab {
     float strength = 0.5f;
     bool invert = false;
     SculptBrush brush = SculptBrush::Draw;
+    glm::mat3 mirror{1.0f};         ///< The mirror's linear part (identity for the dab itself); Grab maps its delta with it.
 };
 
-/** @brief Calls fn for the dab and its mirror images across the enabled local axes. */
-inline void for_each_symmetric(const SculptDab& d, const bool sym[3], const std::function<void(const SculptDab&)>& fn) {
-    for (int mask = 0; mask < 8; ++mask) {
-        bool ok = true;
-        for (int a = 0; a < 3; ++a) if ((mask >> a) & 1) ok &= sym[a];
-        if (!ok) continue;
+/**
+ * @brief Calls fn for the dab, then for its mirror images (mesh-local matrices from
+ *        mirror_images(); empty for no symmetry).
+ */
+inline void for_each_symmetric(const SculptDab& d, const std::vector<MirrorImage>& images,
+                               const std::function<void(const SculptDab&)>& fn) {
+    fn(d);
+    for (const MirrorImage& img : images) {
         SculptDab m = d;
-        for (int a = 0; a < 3; ++a) {
-            if ((mask >> a) & 1) { m.center[a] = -m.center[a]; m.view_dir[a] = -m.view_dir[a]; }
-        }
-        // A dab on the mirror plane would hit the same vertices twice.
-        if (mask != 0) {
-            bool same = true;
-            for (int a = 0; a < 3; ++a) if (((mask >> a) & 1) && std::abs(d.center[a]) > d.radius * 0.25f) same = false;
-            if (same) continue;
-        }
+        m.center = glm::vec3(img.local * glm::vec4(d.center, 1.0f));
+        m.mirror = glm::mat3(img.local);
+        const glm::vec3 vd = m.mirror * d.view_dir;
+        m.view_dir = glm::length(vd) > 1e-12f ? glm::normalize(vd) : d.view_dir;
+        // A dab on (or near) the mirror plane would hit the same vertices twice.
+        if (glm::length(m.center - d.center) < d.radius * 0.5f) continue;
         fn(m);
     }
+}
+
+/** @brief Local-space mirror images for `sym` (convenience for a mesh at the origin). */
+inline void for_each_symmetric(const SculptDab& d, const MirrorSettings& sym, const std::function<void(const SculptDab&)>& fn) {
+    for_each_symmetric(d, mirror_images(sym, glm::mat4(1.0f)), fn);
 }
 
 /**
@@ -272,11 +279,11 @@ struct SculptGrab {
     std::vector<uint32_t> verts;
     std::vector<float> weights;
     std::vector<glm::vec3> origin;
-    glm::vec3 mirror{1.0f};   ///< Sign applied to the cursor delta (symmetry copies).
+    glm::mat3 mirror{1.0f};   ///< Maps the cursor delta for a symmetry copy (the mirror's linear part).
 };
 
 inline SculptGrab sculpt_grab_begin(const EditMesh& m, const VertexGrid& grid, glm::vec3 center, float radius, float strength,
-                                    glm::vec3 mirror = glm::vec3(1.0f)) {
+                                    const glm::mat3& mirror = glm::mat3(1.0f)) {
     SculptGrab g;
     g.mirror = mirror;
     grid.query(m, center, radius, g.verts);
@@ -289,7 +296,7 @@ inline SculptGrab sculpt_grab_begin(const EditMesh& m, const VertexGrid& grid, g
 
 /** @brief Moves the grabbed vertices by `delta` (mesh-local), weighted. */
 inline void sculpt_grab_apply(EditMesh& m, const SculptGrab& g, glm::vec3 delta, std::vector<uint32_t>& moved) {
-    const glm::vec3 d = delta * g.mirror;
+    const glm::vec3 d = g.mirror * delta;
     for (size_t i = 0; i < g.verts.size(); ++i) {
         m.positions[g.verts[i]] = g.origin[i] + d * g.weights[i];
         moved.push_back(g.verts[i]);

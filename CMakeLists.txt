@@ -185,6 +185,11 @@ add_dependencies(toyengine_editor toyengine_shaders uicoopa_shaders)
 target_link_libraries(toyengine_editor PRIVATE coopa::gfx coopa::physx coopa::sfx coopa::maps coopa::ui)
 target_link_libraries(toyengine_editor PRIVATE coopa::caml)
 
+# toyengine_icon: exports the logo (toyengine/core/branding.h) as PNGs + a macOS .icns into
+# editor/branding/ for packaging (not assets/: that ships with games). Not needed at runtime -- Engine rasterizes the same shapes.
+add_executable(toyengine_icon tools/icon/export_icon.cpp)
+target_link_libraries(toyengine_icon PRIVATE coopa::gfx)
+
 add_executable(toyengine_editor_tests editor/editor_test.cpp)
 add_dependencies(toyengine_editor_tests toyengine_shaders uicoopa_shaders)
 target_link_libraries(toyengine_editor_tests PRIVATE coopa::gfx coopa::physx coopa::sfx coopa::maps coopa::ui)

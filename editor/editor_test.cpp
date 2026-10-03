@@ -27,6 +27,7 @@
 #include <vector>
 
 #include <toyengine/core/caml_codec.h>
+#include <toyengine/core/branding.h>
 #include <toyengine/core/engine.h>
 
 #include "app/editor_app.h"
@@ -36,9 +37,11 @@
 #include "mesh/mesh_ops.h"
 #include "mesh/mesh_bvh.h"
 #include "mesh/mesh_loops.h"
+#include "mesh/mesh_mirror.h"
 #include "mesh/mesh_subdivide.h"
 #include "mesh/mesh_topology.h"
 #include "mesh/sculpt.h"
+#include "mesh/shader_ball.h"
 #include "mesh/primitives.h"
 #include "schema/component_schema.h"
 #include "viewport/gizmo.h"
@@ -272,7 +275,7 @@ void test_primitives_are_closed() {
     for (const auto& name : primitive_names()) {
         const EditMesh m = make_primitive(name);
         expect(!m.faces.empty(), name + " has faces");
-        if (name == "Plane" || name == "Grid" || name == "Tile Side") {
+        if (name == "Plane" || name == "Grid") {
             expect(euler(m) == 1, name + " is a disc (V-E+F = 1)");
             continue;
         }
@@ -785,6 +788,42 @@ viewport:
 }
 
 /** @brief Clicking an open dropdown's opener closes it (instead of re-opening it). */
+/** @brief Int-coded modes (fog_mode) show names, and picking one still writes the int. */
+void test_schema_int_enum_labels() {
+    const FieldDesc* fog = nullptr;
+    for (const auto& g : render_settings_groups()) for (const auto& f : g.fields) if (f.key == "fog_mode") fog = &f;
+    expect(fog && fog->kind == FieldKind::Int && fog->options.size() == 3 && fog->option_tips.size() == 3,
+           "fog_mode is a labelled int enum");
+    expect(fog && fog->options[2] == "Exponential Squared", "fog_mode 2 reads as Exponential Squared");
+
+    ImmHarness h;
+    Node block = Node::mapping();
+    block["fog_mode"] = Node(static_cast<int64_t>(2));
+    InspectorEnv env;
+    auto ui = [&](coopa::ui::imm::Context& c) {
+        c.begin_region("r", {0, 0, 400, 300}, false);
+        draw_field(c, *fog, block, env);
+        c.end_region();
+    };
+    h.frame(ui);
+    expect(get_int(block, "fog_mode") == 2, "drawing does not change the value");
+    float row_y = -1.0f;
+    for (float y = 2.0f; y < 60.0f && row_y < 0.0f; y += 4.0f) {
+        h.click({330, y}, ui);
+        h.frame(ui);
+        if (h.ctx.any_popup_open()) row_y = y;
+    }
+    expect(row_y >= 0.0f, "the fog mode row is a dropdown");
+    // The list opens below the row with "Linear" first; pick it.
+    for (float y = row_y + 4.0f; y < row_y + 120.0f && get_int(block, "fog_mode") == 2; y += 4.0f) {
+        if (!h.ctx.any_popup_open()) { h.click({330, row_y}, ui); h.frame(ui); }
+        h.click({330, y}, ui);
+        h.frame(ui);
+    }
+    expect(block.at("fog_mode").is_scalar() && get_int(block, "fog_mode") != 2, "picking a mode writes its index");
+    expect(get_string(block, "fog_mode") != "Linear", "the file still stores an int, not the label");
+}
+
 void test_imm_dropdown_toggles() {
     ImmHarness h;
     int idx = 0;
@@ -985,7 +1024,8 @@ void test_normal_basis_and_sculpt() {
     d.center = glm::vec3(0.5f, 0, 0);
     d.radius = 0.3f;
     d.strength = 1.0f;
-    const bool axes[3] = {true, false, false};
+    MirrorSettings axes;
+    axes.axis[0] = true;
     for_each_symmetric(d, axes, [&](const SculptDab& md) { sculpt_dab(sym, cache, grid, md, moved); });
     const uint32_t right = 8 * 17 + 12, left = 8 * 17 + 4;   // x = +-0.5
     expect(sym.positions[right].z > 0.0f && std::abs(sym.positions[right].z - sym.positions[left].z) < 1e-6f,
@@ -1003,6 +1043,104 @@ void test_normal_basis_and_sculpt() {
     const SculptGrab gr = sculpt_grab_begin(gm, grid, glm::vec3(0), 0.5f, 0.5f);
     sculpt_grab_apply(gm, gr, glm::vec3(0, 0, 0.3f), moved);
     expect(std::abs(gm.positions[centre].z - 0.3f) < 1e-5f, "Grab moves the centre with the cursor");
+}
+
+/** @brief Symmetry pairs and Mirror, in local and global axes. */
+/** @brief The material viewer's shader ball: closed, consistently wound parts, facing out, with flat walls. */
+void test_shader_ball() {
+    const EditMesh m = make_shader_ball();
+    expect(closed_and_consistent(m), "every part of the shader ball is closed with consistent winding");
+    // Signed volume (divergence theorem over the triangulated faces): positive = facing out.
+    double vol = 0.0;
+    size_t flat = 0;
+    for (const auto& f : m.faces) {
+        flat += f.smooth ? 0 : 1;
+        for (size_t i = 1; i + 1 < f.corners.size(); ++i) {
+            const glm::dvec3 a = m.positions[f.corners[0].v], b = m.positions[f.corners[i].v], c = m.positions[f.corners[i + 1].v];
+            vol += glm::dot(a, glm::cross(b, c)) / 6.0;
+        }
+    }
+    const double pi = 3.14159265358979;
+    const double shell = 4.0 / 3.0 * pi * (0.125 - 0.43 * 0.43 * 0.43) * 7.0 / 8.0, core = 4.0 / 3.0 * pi * 0.34 * 0.34 * 0.34;
+    expect(vol > shell + core, "the shader ball faces outward (volume " + std::to_string(vol) + ")");
+    expect(flat >= 4 + 16 + 12, "it has flat, hard-edged faces: cut walls and the square plinth");
+    glm::vec3 lo, hi;
+    m.bounds(lo, hi);
+    expect(hi.z - lo.z > 1.0f && hi.x - lo.x < 1.05f, "about a unit ball on a plinth");
+}
+
+void test_mesh_mirror() {
+    // Local X: moving the +X face's vertices moves their -X partners the mirrored way.
+    EditMesh m = make_cube();
+    MeshSelection sel;
+    sel.mode = SelectMode::Vertex;
+    for (uint32_t v = 0; v < m.positions.size(); ++v) if (m.positions[v].x > 0) sel.verts.insert(v);
+    MirrorSettings sx;
+    sx.axis[0] = true;
+    const MirrorMap map = build_mirror_map(m, sel.affected_vertices(m), sx, glm::mat4(1.0f));
+    expect(map.pairs.size() == 4, "local X pairs the four +X vertices with the four -X ones");
+    const EditMesh before = m;
+    transform_selection(m, sel, glm::translate(glm::mat4(1.0f), glm::vec3(0.25f, 0.1f, 0)));
+    apply_mirror_map(m, map);
+    bool mirrored = true;
+    for (uint32_t v = 0; v < m.positions.size(); ++v) {
+        if (before.positions[v].x > 0) continue;
+        const glm::vec3 want = before.positions[v] + glm::vec3(-0.25f, 0.1f, 0);
+        mirrored &= glm::length(m.positions[v] - want) < 1e-5f;
+    }
+    expect(mirrored, "the -X side moves by the mirrored delta");
+
+    // On-plane vertices stay on the plane.
+    EditMesh g = make_grid(2, 2, 2.0f);
+    MeshSelection gs;
+    gs.mode = SelectMode::Vertex;
+    for (uint32_t v = 0; v < g.positions.size(); ++v) if (std::abs(g.positions[v].x) < 1e-6f) gs.verts.insert(v);
+    const MirrorMap gmap = build_mirror_map(g, gs.affected_vertices(g), sx, glm::mat4(1.0f));
+    transform_selection(g, gs, glm::translate(glm::mat4(1.0f), glm::vec3(0.3f, 0, 0.2f)));
+    apply_mirror_map(g, gmap);
+    bool on_plane = !gs.verts.empty();
+    for (uint32_t v : gs.verts) on_plane &= std::abs(g.positions[v].x) < 1e-5f && std::abs(g.positions[v].z - 0.2f) < 1e-5f;
+    expect(on_plane, "vertices on the mirror plane slide along it but stay on it");
+
+    // Global X on a mesh turned 90 degrees about Z: the world's X is the mesh's Y.
+    const glm::mat4 turned = glm::rotate(glm::mat4(1.0f), glm::radians(90.0f), glm::vec3(0, 0, 1));
+    EditMesh c = make_cube();
+    MeshSelection cs;
+    cs.mode = SelectMode::Vertex;
+    for (uint32_t v = 0; v < c.positions.size(); ++v) if (c.positions[v].y > 0) cs.verts.insert(v);
+    MirrorSettings gx = sx;
+    gx.global = true;
+    expect(build_mirror_map(c, cs.affected_vertices(c), gx, turned).pairs.size() == 4, "global X pairs across the mesh's local Y");
+    expect(build_mirror_map(c, cs.affected_vertices(c), sx, turned).pairs.empty(), "local X pairs nothing for a +Y selection");
+
+    // Mirror: an asymmetric cube flipped along X keeps closed, outward-facing faces.
+    EditMesh a = make_cube();
+    a.positions[7] += glm::vec3(0.3f, 0, 0);   // (+,+,+) corner pulled out
+    MeshSelection all;
+    all.mode = SelectMode::Face;
+    for (uint32_t f = 0; f < a.faces.size(); ++f) all.faces.insert(f);
+    mirror_selection(a, all, mirror_plane_matrix(0, false, glm::vec3(0.0f), glm::mat4(1.0f)));
+    expect(std::abs(a.positions[7].x + 0.8f) < 1e-5f, "Mirror X flips the pulled corner to -X");
+    glm::vec3 centre(0.0f);
+    for (const auto& p : a.positions) centre += p;
+    centre /= static_cast<float>(a.positions.size());
+    bool outward = closed_and_consistent(a);
+    for (uint32_t f = 0; f < a.faces.size(); ++f) outward &= glm::dot(a.face_normal(f), a.face_center(f) - centre) > 0.0f;
+    expect(outward, "mirrored faces still face outward");
+    // Global mirror through a pivot, on the turned mesh: world X flips local Y about the pivot.
+    EditMesh b = make_cube();
+    mirror_selection(b, all, mirror_plane_matrix(0, true, glm::vec3(0, 0.5f, 0), turned));
+    expect(std::abs(b.positions[0].y - 1.5f) < 1e-5f && std::abs(b.positions[0].x + 0.5f) < 1e-5f,
+           "a global Mirror on a rotated mesh flips along the world axis through the pivot");
+
+    // Sculpt: a global mirror image of a dab on the turned mesh lands at local -Y.
+    SculptDab d;
+    d.center = glm::vec3(0.1f, 0.4f, 0.0f);
+    d.radius = 0.1f;
+    std::vector<glm::vec3> centres;
+    for_each_symmetric(d, mirror_images(gx, turned), [&](const SculptDab& md) { centres.push_back(md.center); });
+    expect(centres.size() == 2 && glm::length(centres[1] - glm::vec3(0.1f, -0.4f, 0.0f)) < 1e-5f,
+           "a global X sculpt dab mirrors across the world axis");
 }
 
 void test_projection_and_rays() {
@@ -1383,6 +1521,41 @@ struct InputDriver {
         tick(e, 1);
     }
 };
+
+/** @brief Play mode: the game runs unfocused until the viewer is clicked; Esc releases, play continues. */
+void test_editor_play_input_focus() {
+    using coopa::input::Key;
+    setenv("FIXED_DT", "0", 1);
+    unsetenv("NO_INPUT");
+    setenv("HOME", tmp_root().c_str(), 1);
+    const fs::path root = fresh_dir("play_focus_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, 4);
+    InputDriver in{engine, std::max(1.0f, engine.display_scale())};
+
+    app.play();
+    tick(engine, 3);
+    expect(app.playing(), "playing");
+    expect(!app.game_focused() && !engine.game_input_focus(), "the game starts without the mouse and keyboard");
+
+    in.click(app.viewport_box().center());
+    expect(app.game_focused() && engine.game_input_focus(), "clicking the viewer gives the game input");
+    // While the game has the mouse, the editor UI ignores clicks (File menu stays shut).
+    in.click({44, 14});
+    expect(!app.ui().any_popup_open(), "editor menus ignore clicks while the game has the mouse");
+
+    in.key(Key::Escape);
+    expect(!app.game_focused() && !engine.game_input_focus(), "Esc hands the mouse back");
+    expect(app.playing() && engine.scene().is_simulating(), "and the game keeps running");
+
+    in.click(app.viewport_box().center());
+    expect(app.game_focused(), "clicking again refocuses");
+    in.key(Key::F5);
+    tick(engine, 2);
+    expect(!app.playing() && !app.game_focused() && engine.game_input_focus(), "F5 stops and restores the engine default");
+}
 
 void test_editor_real_input_blender_keymap() {
     using coopa::input::Key;
@@ -1777,6 +1950,162 @@ glm::vec2 visible_corner(EditorApp& app, ObjectId cube) {
 }
 
 /** @brief Ctrl+R loop cut and slide, Alt+click loops, G G edge slide, Ctrl+Alt rings, Ctrl+T -- with real input. */
+/** @brief Edit Mode R: rotate the selection, with axis locks and typed angles, like G. */
+/** @brief The toyengine logo button opens the app menu; About shows the version. */
+void test_editor_about_and_logo() {
+    // The logo rasterizes with transparent corners and an opaque, coloured block.
+    const std::vector<uint8_t> px = toy::core::rasterize_logo(64);
+    expect(px.size() == 64u * 64u * 4u, "logo is 64x64 RGBA");
+    expect(px[3] == 0, "the logo's corner is transparent (rounded tile)");
+    const size_t mid = (32u * 64u + 32u) * 4u;
+    expect(px[mid + 3] == 255, "the logo's centre is opaque");
+
+    setenv("FIXED_DT", "0", 1);
+    unsetenv("NO_INPUT");
+    setenv("HOME", tmp_root().c_str(), 1);
+    const fs::path root = fresh_dir("about_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, 4);
+    InputDriver in{engine, std::max(1.0f, engine.display_scale())};
+    in.click({16, 14});   // the logo, top-left
+    expect(app.ui().is_popup_open("app_menu"), "clicking the logo opens the app menu");
+    in.click({40, 14 + 26});   // first item: About
+    tick(engine, 2);
+    expect(app.ui().is_popup_open("About"), "About... opens the About window");
+    dump(engine, "about_modal");
+    in.key(coopa::input::Key::Escape);
+    tick(engine, 2);
+}
+
+void test_editor_mesh_rotate() {
+    using coopa::input::Key;
+    setenv("FIXED_DT", "0.016666", 1);
+    unsetenv("NO_INPUT");
+    setenv("HOME", tmp_root().c_str(), 1);
+    fs::remove(Project::prefs_path());
+    const fs::path root = fresh_dir("rotate_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, toy::core::Engine::kFillDebounceFrames + 4);
+    InputDriver in{engine, std::max(1.0f, engine.display_scale())};
+    const ObjectId cube = object_named(app, "Cube");
+    app.document().select(cube);
+    const glm::vec2 c = app.viewport_box().center();
+    in.move(c);
+    in.key(Key::Tab);
+    tick(engine, toy::core::Engine::kFillDebounceFrames + 2);
+    expect(app.edit_mode_active(), "Tab enters Edit Mode");
+    auto& md = app.mesh_document();
+    in.key(Key::Num1);
+    in.key(Key::A);
+    const EditMesh before = md.mesh;
+
+    // R Z 90 Enter: a quarter turn about Z through the selection's centre.
+    in.move(c + glm::vec2(60, 0));
+    in.key(Key::R);
+    expect(app.modal_active(), "R starts Rotate in Edit Mode");
+    in.key(Key::Z);
+    in.key(Key::Num9);
+    in.key(Key::Num0);
+    in.key(Key::Enter);
+    expect(!app.modal_active(), "Enter confirms");
+    glm::vec3 centre(0.0f);
+    for (const auto& p : before.positions) centre += p;
+    centre /= static_cast<float>(before.positions.size());
+    bool ok = md.mesh.positions.size() == before.positions.size();
+    for (size_t i = 0; ok && i < before.positions.size(); ++i) {
+        const glm::vec3 d = before.positions[i] - centre;
+        const glm::vec3 want = centre + glm::vec3(-d.y, d.x, d.z);
+        ok = glm::length(md.mesh.positions[i] - want) < 1e-3f;
+    }
+    expect(ok, "R Z 90 rotates every selected vertex 90 degrees about Z");
+
+    // Mouse-driven rotate, then RMB cancels back to the rotated state.
+    const EditMesh rotated = md.mesh;
+    in.key(Key::R);
+    in.move(c + glm::vec2(10, 70), 3);
+    bool moved = false;
+    for (size_t i = 0; i < rotated.positions.size(); ++i) moved |= glm::length(md.mesh.positions[i] - rotated.positions[i]) > 1e-3f;
+    expect(moved, "moving the mouse during R rotates live");
+    in.click(c + glm::vec2(10, 70), coopa::input::MouseButton::Right);
+    bool restored = true;
+    for (size_t i = 0; i < rotated.positions.size(); ++i) restored &= glm::length(md.mesh.positions[i] - rotated.positions[i]) < 1e-5f;
+    expect(restored, "RMB cancels the rotate");
+
+    // The same from a mesh asset (Meshes tab, Edit mode).
+    in.key(Key::Tab);
+    app.save_mesh();  // the rotated cube mesh is dirty; don't stop at the save prompt
+    app.open_asset(AssetType::Mesh, "meshes/cube.yaml");
+    tick(engine, toy::core::Engine::kFillDebounceFrames + 2);
+    app.set_interaction_mode(InteractionMode::Edit);
+    tick(engine, 2);
+    expect(app.edit_mode_active(), "mesh asset: Edit mode");
+    in.move(c);
+    in.key(Key::A);
+    const EditMesh asset_before = app.mesh_document().mesh;
+    in.move(c + glm::vec2(60, 0));
+    in.key(Key::R);
+    expect(app.modal_active(), "mesh asset: R starts Rotate");
+    in.key(Key::X);
+    in.key(Key::Num4);
+    in.key(Key::Num5);
+    in.key(Key::Enter);
+    bool changed = false;
+    for (size_t i = 0; i < asset_before.positions.size(); ++i)
+        changed |= glm::length(app.mesh_document().mesh.positions[i] - asset_before.positions[i]) > 1e-3f;
+    expect(changed, "mesh asset: R X 45 rotates the selection");
+
+    // X mirror on: G X on the +X vertices moves the -X ones the opposite way.
+    in.key(Key::Z, coopa::input::Mods::Control);   // undo the rotate
+    auto& amd = app.mesh_document();
+    const EditMesh sym_before = amd.mesh;
+    amd.selection.clear();
+    amd.selection.mode = SelectMode::Vertex;
+    for (uint32_t v = 0; v < amd.mesh.positions.size(); ++v) if (amd.mesh.positions[v].x > 0) amd.selection.verts.insert(v);
+    app.edit_symmetry().axis[0] = true;
+    tick(engine, 2);
+    dump(engine, "mesh_symmetry_header");
+    in.move(c);
+    in.key(Key::G);
+    in.key(Key::X);
+    in.key(Key::Period);
+    in.key(Key::Num5);
+    in.key(Key::Enter);
+    bool sym_ok = true;
+    for (uint32_t v = 0; v < sym_before.positions.size(); ++v) {
+        const float dx = amd.mesh.positions[v].x - sym_before.positions[v].x;
+        sym_ok &= std::abs(dx - (sym_before.positions[v].x > 0 ? 0.5f : -0.5f)) < 1e-4f;
+    }
+    expect(sym_ok, "with X mirror on, G X .5 widens both sides symmetrically");
+    app.edit_symmetry().axis[0] = false;
+    app.set_interaction_mode(InteractionMode::Sculpt);
+    tick(engine, 3);
+    dump(engine, "mesh_symmetry_sculpt_header");
+    app.set_interaction_mode(InteractionMode::Edit);
+    tick(engine, 2);
+
+    // Ctrl M opens Mirror; X Local flips the selection.
+    in.key(Key::M, coopa::input::Mods::Control);
+    expect(app.ui().any_popup_open(), "Ctrl M opens the Mirror menu");
+    in.key(Key::Escape);
+    // Mirror the +X half's -Y vertices along X: they cross the selection centre (x of the +X face).
+    amd.selection.verts.clear();
+    for (uint32_t v = 0; v < amd.mesh.positions.size(); ++v) if (amd.mesh.positions[v].y < 0) amd.selection.verts.insert(v);
+    glm::vec3 sc(0.0f);
+    for (uint32_t v : amd.selection.verts) sc += amd.mesh.positions[v];
+    sc /= static_cast<float>(amd.selection.verts.size());
+    const EditMesh pre_mirror = amd.mesh;
+    app.mirror_mesh_selection(0, false);
+    bool flipped = !amd.selection.verts.empty();
+    for (uint32_t v : amd.selection.verts)
+        flipped &= std::abs(amd.mesh.positions[v].x - (2.0f * sc.x - pre_mirror.positions[v].x)) < 1e-4f &&
+                   std::abs(amd.mesh.positions[v].y - pre_mirror.positions[v].y) < 1e-6f;
+    expect(flipped, "Mirror X Local reflects the selection across its centre plane");
+}
+
 void test_editor_quad_modelling() {
     using coopa::input::Key;
     using coopa::input::Mods;
@@ -1947,7 +2276,7 @@ void test_editor_sculpt() {
     tick(engine, 3);
     expect(md.mesh.faces.size() == 96 && closed_and_consistent(md.mesh), "Subdivide Smooth x2: 96 quads, closed (got " +
                                                                            std::to_string(md.mesh.faces.size()) + ")");
-    app.sculpt_settings().symmetry[0] = false;
+    app.sculpt_settings().symmetry.axis[0] = false;
     app.sculpt_settings().strength = 1.0f;
     app.sculpt_settings().radius_px = 60.0f;
 
@@ -2248,6 +2577,9 @@ const TestCase kTests[] = {
     {"scene_document_random_edits_undo",     "document", test_scene_document_random_edits_undo},
     {"scene_document_reparent_rules",        "document", test_scene_document_reparent_rules},
     {"schema_defaults",                      "document", test_schema_defaults},
+    {"shader_ball",                          "mesh", test_shader_ball},
+    {"mesh_mirror",                          "mesh", test_mesh_mirror},
+    {"schema_int_enum_labels",               "document", test_schema_int_enum_labels},
     {"primitives_are_closed",                "mesh",     test_primitives_are_closed},
     {"extrude_inset_flip",                   "mesh",     test_extrude_inset_flip},
     {"bevel_and_merge_and_delete",           "mesh",     test_bevel_and_merge_and_delete},
@@ -2272,6 +2604,9 @@ const TestCase kTests[] = {
     {"editor_shell_end_to_end",              "editor_shell", test_editor_shell_end_to_end},
     {"material_reference_forms",             "editor_shell", test_material_reference_forms},
     {"editor_real_input_blender_keymap",     "editor_shell", test_editor_real_input_blender_keymap},
+    {"editor_about_and_logo",                "editor_shell", test_editor_about_and_logo},
+    {"editor_mesh_rotate",                   "editor_shell", test_editor_mesh_rotate},
+    {"editor_play_input_focus",              "editor_shell", test_editor_play_input_focus},
     {"editor_blender_chrome",                "editor_shell", test_editor_blender_chrome},
     {"editor_themes",                        "editor_shell", test_editor_themes},
     {"editor_transparency_preview",          "editor_shell", test_editor_transparency_preview},

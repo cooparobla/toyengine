@@ -84,8 +84,14 @@ inline const std::vector<SettingsGroup>& render_settings_groups() {
             f_float("contact_shadow_length", 0.5f, 0.01f, 0.0f, 10.0f),
         }});
         g.push_back({"Fog", {
-            f_int("fog_mode", 2, 0, 2),
+            f_int_enum("fog_mode", {"Linear", "Exponential", "Exponential Squared"}, 2, {
+                "Fog ramps evenly from none at Linear Start to full at Linear End (density is ignored)",
+                "Fog thickens as exp(-density * distance): starts building right away, soft tail",
+                "Fog follows exp(-(density * distance)^2): clear up close, then closes in quickly (Unity's default)",
+            }),
             f_float("fog_density", 0.03f, 0.001f, 0.0f, 10.0f),
+            f_float("fog_linear_start", 5.0f, 0.1f, 0.0f, 100000.0f),
+            f_float("fog_linear_end", 60.0f, 0.1f, 0.0f, 100000.0f),
             listed(f_color("fog_color", glm::vec3(0.6f, 0.66f, 0.75f))),
             f_float("fog_height_base", -0.5f, 0.05f),
             f_float("fog_height_falloff", 2.0f, 0.05f),

@@ -492,7 +492,7 @@ private:
                         drag_i("Segments", &p.segments, 3, 500);
                         drag_i("Rings", &p.rings, 2, 500);
                         drag_f("Radius", &p.radius, 0.001f, 1e4f, 0.01f);
-                    } else if (p.kind != "Tile Side") {
+                    } else {
                         drag_f("Size", &p.size, 0.001f, 1e4f, 0.01f);
                     }
                 }
@@ -508,6 +508,19 @@ private:
         if (kind != ModalKind::EdgeSlide || slide_merge_key_ != "loopcut" || last_op_.kind != LastOp::Kind::LoopCut) return;
         last_op_.factor = factor;
         last_op_.revision_after = mesh_.geometry_revision;
+    }
+
+    /**
+     * @brief Mesh > Mirror: reflects the selection along axis `a` (the world's, or the mesh's
+     *        own) through the selection's centre. Wholly selected faces keep facing outward.
+     */
+    void mirror_mesh_selection_(int a, bool global) {
+        auto& md = mesh_;
+        if (md.selection.affected_vertices(md.mesh).empty()) { log_warn("Mirror: nothing selected"); return; }
+        const glm::vec3 pivot = selection_center(md.mesh, md.selection);
+        const glm::mat4 reflect = mirror_plane_matrix(a, global, pivot, mesh_world_());
+        static const char* kAxes[] = {"X", "Y", "Z"};
+        md.edit(std::string("Mirror ") + kAxes[a], [&](EditMesh& mm, MeshSelection& s) { mirror_selection(mm, s, reflect); });
     }
 
     void bridge_selected_() {

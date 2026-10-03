@@ -32,10 +32,12 @@
 #include "../core/scene_document.h"
 #include "../mesh/mesh_bvh.h"
 #include "../mesh/mesh_loops.h"
+#include "../mesh/mesh_mirror.h"
 #include "../mesh/mesh_ops.h"
 #include "../mesh/mesh_subdivide.h"
 #include "../mesh/mesh_topology.h"
 #include "../mesh/sculpt.h"
+#include "../mesh/shader_ball.h"
 #include "../mesh/primitives.h"
 #include "../schema/component_schema.h"
 #include "../schema/inspector.h"
@@ -45,6 +47,7 @@
 #include "../viewport/modal_transform.h"
 
 #include <toyengine/core/config.h>
+#include <toyengine/core/branding.h>
 #include <toyengine/core/engine.h>
 #include <toyengine/render/passes/debug_line_pass.h>
 
@@ -128,6 +131,19 @@ public:
         ui_scene_ = std::make_unique<coopa::scene::Scene>("EditorUI");
         canvas_ = coopa::ui::build_immediate_canvas(*ui_scene_, "EditorUI", 100000);
         canvas_->on_draw = [this](coopa::ui::imm::Context& ctx) { draw_(ctx); };
+        // While the running game has the mouse (play mode, after a click in the viewer), the
+        // editor UI sees nothing but the keys that hand it back (Esc) or stop play (F5).
+        canvas_->filter_input = [this](imm::FrameInput& in) {
+            if (!game_focused_) return;
+            in.mouse = glm::vec2(-1e6f);
+            in.mouse_delta = glm::vec2(0.0f);
+            for (int b = 0; b < 3; ++b) in.down[b] = in.pressed[b] = in.released[b] = false;
+            in.scroll = glm::vec2(0.0f);
+            in.chars.clear();
+            std::erase_if(in.keys, [](const coopa::input::KeyEvent& e) {
+                return e.key != coopa::input::Key::Escape && e.key != coopa::input::Key::F5;
+            });
+        };
         const std::string font_path = std::string(PROJ_DIR) + "/uicoopa/assets/fonts/Inter-Regular.ttf";
         default_font_ = current_font_ = font_path;
         canvas_->context().text.set_font(coopa::ui::UIResourceCache::instance().font_for_path(font_path));
@@ -254,6 +270,9 @@ public:
     bool paused() const { return play_scene_ && !play_scene_->is_simulating() && step_countdown_ == 0; }
     /** @brief True while a scene object's mesh is in edit mode (Tab). */
     bool edit_mode_active() const { return in_edit_mode_(); }
+    bool modal_active() const { return modal_.active(); }
+    /** @brief Mesh > Mirror on the current Edit Mode selection (axis 0-2; world or mesh axes). */
+    void mirror_mesh_selection(int axis, bool global) { mirror_mesh_selection_(axis, global); }
     /** @brief H on these objects (editor-only hide). */
     void hide_objects(const std::vector<ObjectId>& ids) { hide_(ids); }
     /** @brief Sculpt / Edit Mode: Catmull-Clark the whole edited mesh `levels` times (one undo step). */
@@ -475,8 +494,15 @@ public:
                 play_scene_ = &engine_.push_scene(std::move(scene), true);
                 engine_.set_edit_mode(false);
                 play_scene_->set_simulating(true);
-                if (auto* cam = play_scene_->find_first_component<coopa::gfx::engine::components::CameraComponent>()) cam->make_main();
-                log_info("Play");
+                // The editor viewport camera held main while the scene started, so hand it to the
+                // scene's `main: true` camera (else its first camera), as a standalone run would.
+                coopa::gfx::engine::components::CameraComponent* game_cam = nullptr;
+                for (auto* c : play_scene_->get_components<coopa::gfx::engine::components::CameraComponent>())
+                    if (!game_cam || (c->is_main && !game_cam->is_main)) game_cam = c;
+                if (game_cam) game_cam->make_main();
+                // The game runs, but gets no input until the viewer is clicked (Esc releases).
+                set_game_focus_(false);
+                log_info("Play  (click the viewer to control the game, Esc to release)");
             } catch (const std::exception& e) {
                 play_scene_ = nullptr;
                 log_error(std::string("Play failed: ") + e.what());
@@ -486,6 +512,8 @@ public:
 
     void stop() {
         if (!play_scene_) return;
+        set_game_focus_(false);
+        engine_.set_game_input_focus(true);   // back to the engine default (edit mode drives nothing anyway)
         engine_.remove_scene(play_scene_);
         play_scene_ = nullptr;
         engine_.set_edit_mode(true);
@@ -493,6 +521,9 @@ public:
         camera_.make_main();
         log_info("Stop");
     }
+
+    /** @brief True while the running game owns the keyboard and mouse (see set_game_focus_). */
+    bool game_focused() const { return game_focused_; }
 
     // --- shading / tabs ---
 
@@ -886,12 +917,16 @@ private:
 
     void post_late_update_(float dt) {
         poll_theme_(dt);
+        // The cursor the UI asked for this frame (resize arrows on panel borders, I-beam in text).
+        const coopa::input::CursorShape want = canvas_->context().mouse_cursor();
+        if (want != applied_cursor_) { engine_.input_state().set_cursor_shape(want); applied_cursor_ = want; }
         // Run queued actions; actions may queue more (run those next frame).
         auto pending = std::move(deferred_);
         deferred_.clear();
         for (auto& fn : pending) fn();
         // Keep live objects showing an edited, unsaved mesh; keep hidden objects hidden.
         if (!asset_view_() && !playing()) { push_mesh_to_scene_(); apply_hidden_(); }
+        if (game_focused_ && (!playing() || asset_view_())) set_game_focus_(false);
         // Unity's Step: one simulated tick, then paused again.
         if (step_countdown_ > 0 && --step_countdown_ == 0 && play_scene_) play_scene_->set_simulating(false);
         if (pause_after_start_ && play_scene_) { pause_after_start_ = false; play_scene_->set_simulating(true); step_countdown_ = 2; }
@@ -1351,6 +1386,13 @@ private:
             ctx.fill_rounded(b, et_.viewport.modal_backdrop);
             ctx.text_in(b, h, ctx.style.text);
         }
+        if (playing() && !asset_view_()) {
+            const std::string h = game_focused_ ? "Esc to release the mouse" : "Click to control the game";
+            const float w = ctx.text_width(h) + 18;
+            const imm::Box b{viewport_box_.center().x - w * 0.5f, viewport_box_.y + 8, w, 24};
+            ctx.fill_rounded(b, et_.viewport.modal_backdrop);
+            ctx.text_in(b, h, ctx.style.text);
+        }
         // Furniture last, so it draws over the overlays (its rects were excluded from input).
         draw_last_op_panel_(ctx, viewport_box_);
         if (show_toolbar_ && !preview_only_view_()) draw_toolbar_(ctx, mesh_edit);
@@ -1440,6 +1482,11 @@ private:
         // them must not select or navigate.
         const bool hovered = ctx.is_hovered(viewport_box_) && !over_viewport_chrome_(m, mesh_edit);
         viewport_hovered_ = hovered;
+        // Play mode: a click in the viewer hands the game the keyboard and mouse.
+        if (playing() && !asset_view_()) {
+            if (!game_focused_ && hovered && in.pressed[0]) set_game_focus_(true);
+            return;
+        }
         const auto vp = view_proj_();
         if (!vp) return;
 
@@ -1653,6 +1700,7 @@ private:
             if (ctx.shortcut(Key::W)) ctx.open_popup("vp_mesh_ctx", m);
             if (ctx.shortcut(Key::X) || ctx.shortcut(Key::Delete)) ctx.open_popup("vp_mesh_delete", m);
             if (ctx.shortcut(Key::M)) ctx.open_popup("vp_mesh_merge", m);
+            if (ctx.shortcut(Key::M, Mods::Control)) ctx.open_popup("vp_mesh_mirror", m);
             if (ctx.shortcut(Key::U)) ctx.open_popup("vp_mesh_uv", m);
             if (ctx.shortcut(Key::N, Mods::Alt)) ctx.open_popup("vp_mesh_normals", m);
             if (ctx.shortcut(Key::Tab)) toggle_edit_mode_();
@@ -1825,6 +1873,10 @@ private:
             if (ctx.menu_item("Dissolve Vertices")) mesh_op("Dissolve Vertices", [](EditMesh& mm, MeshSelection& s) { dissolve_verts(mm, s); });
             if (ctx.menu_item("Dissolve Edges")) dissolve_selected_edges_();
             if (ctx.menu_item("Dissolve Faces")) dissolve_selected_faces_();
+            ctx.end_popup();
+        }
+        if (ctx.begin_popup("vp_mesh_mirror", 170)) {
+            draw_mirror_menu_items_(ctx);
             ctx.end_popup();
         }
         if (ctx.begin_popup("vp_mesh_merge", 170)) {
@@ -2354,7 +2406,12 @@ private:
 
     /** @brief Captures the values a gizmo drag / modal operator applies its deltas to. */
     void begin_transform_(bool mesh_edit) {
-        if (mesh_edit) { mesh_drag_base_ = mesh_.mesh; return; }
+        if (mesh_edit) {
+            mesh_drag_base_ = mesh_.mesh;
+            // Symmetry: who mirrors whom, from the positions before anything moves.
+            mirror_map_ = build_mirror_map(mesh_.mesh, mesh_.selection.affected_vertices(mesh_.mesh), edit_symmetry_, mesh_world_());
+            return;
+        }
         drag_starts_.clear();
         for (ObjectId id : doc_.selection()) {
             DragStart s;
@@ -2384,6 +2441,7 @@ private:
             mesh_.edit(kind == 0 ? "Move" : kind == 1 ? "Rotate" : "Scale", [&](EditMesh& mm, MeshSelection& sel) {
                 mm = base;
                 transform_selection(mm, sel, local);
+                apply_mirror_map(mm, mirror_map_);
             }, "transform");
             return;
         }
@@ -2671,13 +2729,7 @@ private:
             if (ctx.button("Close", 100)) ctx.close_modal();
             ctx.end_modal();
         }
-        if (ctx.begin_modal("About", {420, 170})) {
-            ctx.heading("toyengine editor");
-            ctx.paragraph("Scenes, meshes, materials and render settings for toyengine, written as the same YAML / "
-                          ".caml files the game loads. UI built with uicoopa's immediate-mode layer.");
-            if (ctx.button("Close", 100)) ctx.close_modal();
-            ctx.end_modal();
-        }
+        draw_about_modal_(ctx);
         if (!pending_modal_.empty()) { ctx.open_modal(pending_modal_); pending_modal_.clear(); }
     }
 
@@ -2769,7 +2821,8 @@ private:
         if (ctx.shortcut(Key::O, cmd)) guarded_([this] { open_scene_dialog_(); });
         if (ctx.shortcut(Key::Q, cmd)) { if (request_close()) quit_ = true; }
         if (ctx.shortcut(Key::F5)) playing() ? stop() : play();
-        if (ctx.shortcut(Key::Escape) && playing()) stop();
+        // Esc gives the mouse back to the editor; the game keeps running (F5 / Stop ends it).
+        if (game_focused_ && ctx.shortcut(Key::Escape)) set_game_focus_(false);
         if (ctx.any_popup_open()) return;
         // Outliner keymap (mouse over the outliner).
         if (hierarchy_hovered_ && !asset_view_() && !playing()) {
@@ -2829,6 +2882,7 @@ private:
     imm::Box viewport_box_;
     bool show_grid_ = true;
     bool grid_wanted_ = false;
+    coopa::input::CursorShape applied_cursor_ = coopa::input::CursorShape::Arrow;
     bool viewport_ao_ = true;    // Viewport Shading > Ambient Occlusion
     // Theme (see load_theme_): the file, the editor's typed colours, hot-reload state.
     imm::Theme theme_;
@@ -2879,6 +2933,14 @@ private:
     bool outliner_hovered_ = false, properties_hovered_ = false, nav_ball_dragged_ = false, pending_extrude_ = false;
     int sidebar_tab_ = 0, bottom_tab_ = 0, step_countdown_ = 0;
     bool pause_after_start_ = false;
+    MirrorSettings edit_symmetry_;   ///< Edit Mode's X / Y / Z mirror toggles (off by default, as in Blender).
+    MirrorMap mirror_map_;           ///< The current transform's mirror partners (begin_transform_).
+    bool game_focused_ = false;   ///< Play mode: the game has the input (viewer clicked; Esc releases).
+
+    void set_game_focus_(bool focused) {
+        game_focused_ = focused;
+        engine_.set_game_input_focus(focused);
+    }
     std::unordered_map<ObjectId, imm::Box> eye_rects_;   // Outliner eye toggles (tests)
     bool open_add_menu_ = false;
     float outliner_h_ = 260;

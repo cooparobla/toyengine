@@ -37,7 +37,8 @@ struct FieldDesc {
     float       speed = 0.01f;         ///< Drag speed for numbers.
     float       min = -1e30f, max = 1e30f;
     glm::vec4   def{0.0f};             ///< Default (x for scalars, xyz vectors/colours).
-    std::vector<std::string> options;  ///< Enum values.
+    std::vector<std::string> options;  ///< Enum values; for Int, labels for 0, 1, 2... (a labelled int enum).
+    std::vector<std::string> option_tips;  ///< Per-option explanation, shown as the field's tooltip.
     std::string asset_dir;             ///< AssetRef: "meshes", "materials", "textures", ...
     std::string asset_ext;             ///< AssetRef: ".yaml", ".png", ...
     bool        strip_ext = false;     ///< AssetRef: store "name" instead of "dir/name.ext" (meshes).
@@ -87,6 +88,15 @@ inline FieldDesc f_color(std::string k, glm::vec3 def, bool in_default = false) 
 inline FieldDesc f_enum(std::string k, std::vector<std::string> opts, bool in_default = false) {
     FieldDesc f; f.key = std::move(k); f.kind = FieldKind::Enum; f.options = std::move(opts);
     f.default_string = f.options.empty() ? "" : f.options.front(); f.in_default = in_default; return f;
+}
+/**
+ * @brief An int-coded mode (`fog_mode: 2`) shown as a dropdown of `labels`; the file still
+ *        stores the index, which is what the engine parses.
+ */
+inline FieldDesc f_int_enum(std::string k, std::vector<std::string> labels, int def,
+                            std::vector<std::string> tips = {}, bool in_default = false) {
+    FieldDesc f = f_int(std::move(k), def, 0, static_cast<int>(labels.size()) - 1, in_default);
+    f.options = std::move(labels); f.option_tips = std::move(tips); return f;
 }
 inline FieldDesc f_string(std::string k, std::string def = "", bool in_default = false) {
     FieldDesc f; f.key = std::move(k); f.kind = FieldKind::String; f.default_string = std::move(def); f.in_default = in_default; return f;
@@ -225,7 +235,8 @@ inline const std::map<std::string, ComponentSchema>& schemas() {
         add({"CapsuleCollider", "Physics", {
             f_float("radius", 0.5f, 0.01f, 0.0f, 10000.0f, true),
             f_float("height", 2.0f, 0.01f, 0.0f, 10000.0f, true),
-            f_int("direction", 2, 0, 2),
+            f_int_enum("direction", {"X", "Y", "Z"}, 2,
+                       {"Capsule axis along local X", "Capsule axis along local Y", "Capsule axis along local Z (up)"}),
             f_vec3("center", glm::vec3(0.0f), 0.02f),
             phys_mat, f_bool("is_trigger", false), f_int("layer", 0, 0, 31),
         }, false});

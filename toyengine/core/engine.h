@@ -47,6 +47,7 @@
 #include <physxcoopa/physx_yaml.h>
 #include <physxcoopa/debug/debug_draw.h>
 
+#include <toyengine/core/branding.h>
 #include <toyengine/core/config.h>
 #include <toyengine/render/pixel_render_config.h>
 #include <toyengine/render/pixel_render_pipeline.h>
@@ -76,7 +77,9 @@ struct EngineOptions {
     /// Load config.scene.default_scene (or SCENE) during construction. A tool that picks its
     /// scene later turns this off and calls load_scene()/set_scene() itself.
     bool load_default_scene = true;
-    /// Start in edit mode: loaded scenes do not simulate (see set_edit_mode()).
+    /// Give the window / taskbar / Dock the toyengine logo (branding.h) at startup.
+    bool set_app_icon = true;
+        /// Start in edit mode: loaded scenes do not simulate (see set_edit_mode()).
     bool edit_mode = false;
     /// Escape closes the window (the game's default). An editor turns this off: Escape there
     /// cancels things.
@@ -157,6 +160,7 @@ public:
         }
 
         edit_mode_ = options_.edit_mode;
+        if (options_.set_app_icon) apply_app_icon_();
         assets_.add_search_root((options_.project_root / "assets").string());
         // `prefab: objects/crate` (object assets) resolves against the project's assets too.
         coopa::scene::SceneLoader::set_search_roots({(options_.project_root / "assets").string()});
@@ -271,6 +275,28 @@ public:
         if (scene_mgr_.has_scene()) scene_mgr_.get_active_scene().set_simulating(!edit);
     }
     bool edit_mode() const { return edit_mode_; }
+
+    /**
+     * @brief Gives the game the keyboard and mouse, or takes them away, while it keeps running.
+     *
+     * A standalone run always has focus (the default), so nothing changes there. A host that
+     * embeds the game -- the editor's play mode -- starts it unfocused and focuses it on a
+     * click in its viewer: unfocused, the gameplay input drivers push zero input (exactly as
+     * NO_INPUT=1 does) and the cursor is released; focused, the cursor is captured when the
+     * scene's CameraController asks for it (subject to the same NO_INPUT / invisible-window
+     * stand-downs as the startup capture).
+     */
+    void set_game_input_focus(bool focused) {
+        game_focused_ = focused;
+        if (focused) {
+            if (no_input_ || !config_.window.visible || !scene_mgr_.has_scene()) return;
+            auto* cc = scene_mgr_.get_active_scene().find_first_component<scene::CameraController>();
+            if (cc && cc->capture_cursor) ctx_.input().set_cursor_mode(coopa::input::CursorMode::Disabled);
+        } else if (ctx_.input().cursor_mode() != coopa::input::CursorMode::Normal) {
+            ctx_.input().set_cursor_mode(coopa::input::CursorMode::Normal);
+        }
+    }
+    bool game_input_focus() const { return game_focused_; }
 
     /** @brief Installs the host callbacks tick() runs; see FrameHooks. */
     void set_frame_hooks(FrameHooks hooks) { hooks_ = std::move(hooks); }
@@ -889,11 +915,14 @@ private:
      * without it, FIXED_DT alone can't make an interactive-camera capture
      * reproducible.
      */
+    /** @brief Gameplay drivers push zero input: NO_INPUT=1, or a host took focus away. */
+    bool input_blocked_() const { return no_input_ || !game_focused_; }
+
     void drive_camera_controller_(coopa::scene::Scene& scene) {
         auto* cc = scene.find_first_component<scene::CameraController>();
         if (!cc) return;
 
-        if (no_input_) {
+        if (input_blocked_()) {
             cc->mouse_delta  = glm::vec2(0.0f);
             cc->scroll_input = 0.0f;
             cc->move_input   = glm::vec3(0.0f);
@@ -931,7 +960,7 @@ private:
             scene.get_components<scene::KinematicController>();
         if (controllers.empty()) return;
 
-        const glm::vec2 move = no_input_
+        const glm::vec2 move = input_blocked_()
             ? glm::vec2(0.0f)
             : glm::vec2(input_.axis("move_x", ctx_.input()), input_.axis("move_y", ctx_.input()));
         for (scene::KinematicController* kc : controllers) kc->move_input = move;
@@ -950,7 +979,7 @@ private:
         std::vector<scene::FreeMover*> movers = scene.get_components<scene::FreeMover>();
         if (movers.empty()) return;
 
-        const glm::vec3 move = no_input_
+        const glm::vec3 move = input_blocked_()
             ? glm::vec3(0.0f)
             : glm::vec3(input_.axis("move_x", ctx_.input()),
                         input_.axis("move_y", ctx_.input()),
@@ -1166,6 +1195,19 @@ private:
         if (cc && cc->capture_cursor) {
             ctx_.input().set_cursor_mode(coopa::input::CursorMode::Disabled);
         }
+    }
+
+    /**
+     * @brief Sets the toyengine logo (rasterized from branding.h at the usual icon sizes) as the
+     *        window's taskbar icon -- or, on macOS, the Dock icon.
+     */
+    void apply_app_icon_() {
+        static const int kSizes[] = {16, 32, 48, 64, 128, 256, 512};
+        std::vector<std::vector<uint8_t>> pixels;
+        std::vector<coopa::gfx::presentation::Window::IconImage> images;
+        for (int s : kSizes) pixels.push_back(rasterize_logo(s));
+        for (size_t i = 0; i < pixels.size(); ++i) images.push_back({kSizes[i], kSizes[i], pixels[i].data()});
+        ctx_.window().set_icon(images);
     }
 
     /** @brief Resolves a config-relative asset path against the project root, unless already absolute. */
@@ -1386,6 +1428,7 @@ private:
     uint32_t capture_frames_ = 0;
     uint32_t capture_ring_   = 0;
     bool     no_input_       = false;
+    bool     game_focused_   = true;    ///< See set_game_input_focus().
 
     /// Profiling mode's sink (PROFILE env var); null when off. Declared last so it outlives
     /// nothing that records into it -- pipeline_'s GpuProfiler is reset in the destructor.

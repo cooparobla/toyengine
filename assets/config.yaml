@@ -250,6 +250,8 @@ render:
   volumetrics_froxel_tile: 8      # froxel mode: render pixels per froxel (each axis). Startup-fixed
   volumetrics_froxel_slices: 64   # froxel mode: depth slices along the view ray. Startup-fixed
   volumetrics_froxel_history: 0.9 # froxel mode: temporal reprojection weight (0 = off)
+  volumetrics_froxel_miss_samples: 4    # froxel mode: samples per froxel where history was rejected (1 = off)
+  volumetrics_froxel_lookup_jitter: 0.0 # froxel mode: per-pixel lookup jitter for TAA to resolve (0 = off; ~1 = Unreal-style)
   volumetrics_resolution_scale: 2 # raymarch mode: march at 1/N render resolution per axis (1 = full); depth-aware upsample
   volumetrics_max_opacity: 0.85   # ceiling on how much volumetrics can occlude
   volumetrics_sun_anisotropy: 0.6 # HG g, shared across volumes

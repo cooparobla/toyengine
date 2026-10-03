@@ -249,7 +249,7 @@ inline void register_scene_components(coopa::gfx::core::Device& device,
             // atlas gets the same sRGB colour-space declaration and async load path every other
             // textured material in the engine gets -- see gfxcoopa's parse_pbr_material_().
             if (node.contains("material")) {
-                coopa::gfx::engine::components::parse_pbr_material_(
+                coopa::gfx::engine::components::parse_material_value_(
                     node.at("material"), terrain->material, assets, ctx);
             }
 

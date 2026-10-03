@@ -41,6 +41,7 @@
  * only written when an assertion FAILS, into a temp directory whose path is printed.
  */
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -65,6 +66,7 @@
 #include <coopa/debug/logger.h>
 #include <coopa/maps/map_generator.h>
 
+#include <toyengine/core/caml_codec.h>
 #include <toyengine/core/engine.h>
 #include <toyengine/render/pixel_math.h>
 #include <toyengine/render/visibility.h>
@@ -4023,6 +4025,302 @@ void test_look_canary() {
 }
 
 // =====================================================================================
+// Group "yaml_io" -- coopa::yaml's document loading and the caml codec. No GPU.
+// (caml_scene_renders_identically, the end-to-end check, lives in render_pixel.)
+// =====================================================================================
+
+/** @brief Every .yaml/.yml file under assets/, sorted so failures list in a stable order. */
+std::vector<std::filesystem::path> asset_yaml_files() {
+    std::vector<std::filesystem::path> files;
+    for (const auto& e : std::filesystem::recursive_directory_iterator(std::string(ROOT_DIR) + "/assets")) {
+        if (!e.is_regular_file()) continue;
+        const std::string ext = e.path().extension().string();
+        if (ext == ".yaml" || ext == ".yml") files.push_back(e.path());
+    }
+    std::sort(files.begin(), files.end());
+    return files;
+}
+
+/** @brief A fresh, empty directory under tmp_dir(). */
+std::filesystem::path fresh_tmp_subdir(std::string_view name) {
+    const std::filesystem::path d = tmp_dir() / name;
+    std::filesystem::remove_all(d);
+    std::filesystem::create_directories(d);
+    return d;
+}
+
+/** @brief Writes `text` to `path`, replacing it. */
+void write_text_file(const std::filesystem::path& path, const std::string& text) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out << text;
+}
+
+/**
+ * @brief Copies `src` to `dst` recursively, then replaces every YAML document in `dst` with its
+ *        .caml encoding -- the layout Build > Package produces.
+ */
+void package_tree_as_caml(const std::filesystem::path& src, const std::filesystem::path& dst) {
+    std::filesystem::remove_all(dst);
+    std::filesystem::copy(src, dst, std::filesystem::copy_options::recursive);
+    std::vector<std::filesystem::path> docs;
+    for (const auto& e : std::filesystem::recursive_directory_iterator(dst)) {
+        const std::string ext = e.path().extension().string();
+        if (e.is_regular_file() && (ext == ".yaml" || ext == ".yml")) docs.push_back(e.path());
+    }
+    for (const auto& p : docs) {
+        std::filesystem::path out = p;
+        out.replace_extension(".caml");
+        toy::core::encode_caml_file(p, out);
+        std::filesystem::remove(p);
+    }
+}
+
+/** @brief Every YAML asset in the repo survives yaml -> .caml -> load_document as an equal node. */
+void test_caml_roundtrips_every_asset() {
+    const std::filesystem::path dir = fresh_tmp_subdir("caml_roundtrip");
+    const auto files = asset_yaml_files();
+    expect(files.size() > 10, "assets/ has YAML files to round-trip (found " + std::to_string(files.size()) + ")");
+    int index = 0;
+    for (const auto& src : files) {
+        const std::filesystem::path out = dir / (std::to_string(index++) + ".caml");
+        toy::core::encode_caml_file(src, out);
+        const fkyaml::node plain   = coopa::yaml::load_document(src);
+        const fkyaml::node decoded = coopa::yaml::load_document(out);
+        expect(plain == decoded, "caml round-trip preserves " + src.lexically_relative(ROOT_DIR).string());
+    }
+}
+
+/** @brief Detection is by magic bytes: an encoded file named .yaml still decodes, plain text passes through. */
+void test_caml_detected_by_magic_not_extension() {
+    const std::filesystem::path dir = fresh_tmp_subdir("caml_magic");
+    const std::string yaml = "a: 1\nlist: [1, 2, 3]\nname: hello\n";
+    const std::vector<uint8_t> bytes = toy::core::encode_caml_text(yaml);
+    {
+        std::ofstream out(dir / "misnamed.yaml", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    }
+    write_text_file(dir / "plain.yaml", yaml);
+
+    expect(coopa::yaml::read_text(dir / "misnamed.yaml") == yaml, "an encoded file named .yaml decodes by its magic");
+    expect(coopa::yaml::read_text(dir / "plain.yaml") == yaml, "plain YAML passes through unchanged");
+    expect(coopa::yaml::load_document(dir / "misnamed.yaml").at("name").get_value<std::string>() == "hello",
+           "load_document parses the decoded text");
+}
+
+/** @brief Without the codec, a .caml fails with a message naming the fix rather than a parse error. */
+void test_caml_without_codec_names_the_fix() {
+    const std::filesystem::path dir = fresh_tmp_subdir("caml_no_codec");
+    toy::core::encode_caml_file(std::string(ROOT_DIR) + "/assets/physics_materials/rubber.yaml", dir / "rubber.caml");
+
+    coopa::yaml::clear_decoders();
+    std::string message;
+    try {
+        coopa::yaml::load_document(dir / "rubber.caml");
+    } catch (const std::exception& e) {
+        message = e.what();
+    }
+    toy::core::install_caml_codec();
+
+    expect(message.find("install_caml_codec") != std::string::npos,
+           "loading .caml with no decoder names install_caml_codec() (got: '" + message + "')");
+    expect(coopa::yaml::load_document(dir / "rubber.caml").contains("restitution"), "reinstalling the codec restores loading");
+}
+
+/** @brief "x.yaml" references find "x.caml" (and back), including multi-dot sidecar names and AssetSource lookups. */
+void test_yaml_variant_resolution() {
+    const std::filesystem::path dir = fresh_tmp_subdir("caml_variants");
+    std::filesystem::create_directories(dir / "meshes");
+    write_text_file(dir / "plain.yaml", "k: 1\n");
+    toy::core::encode_caml_file(dir / "plain.yaml", dir / "meshes" / "sphere.000.lod.caml");
+    toy::core::encode_caml_file(dir / "plain.yaml", dir / "packed.caml");
+
+    using coopa::yaml::resolve_variant;
+    expect(resolve_variant(dir / "plain.yaml") == dir / "plain.yaml", "an existing path resolves to itself");
+    expect(resolve_variant(dir / "packed.yaml") == dir / "packed.caml", "x.yaml finds x.caml");
+    expect(resolve_variant(dir / "plain.caml") == dir / "plain.yaml", "x.caml finds x.yaml");
+    expect(resolve_variant(dir / "meshes" / "sphere.000.lod.yaml") == dir / "meshes" / "sphere.000.lod.caml",
+           "multi-dot sidecar names keep their stem");
+    expect(resolve_variant(dir / "missing.yaml") == dir / "missing.yaml", "no twin: the path comes back unchanged");
+    expect(resolve_variant(dir / "image.png") == dir / "image.png", "non-document paths are never rewritten");
+
+    coopa::asset::AssetSource source;
+    source.add_search_root(dir.string());
+    expect(std::filesystem::path(source.resolve("meshes/sphere.000.lod.yaml")) == dir / "meshes" / "sphere.000.lod.caml",
+           "AssetSource search roots resolve a .yaml reference to its .caml twin");
+    expect(std::filesystem::path(source.resolve("packed.yaml", (dir / "meshes").string())) == dir / "packed.caml",
+           "AssetSource falls through base_dir to the search root, variant-aware");
+}
+
+/** @brief AppConfig and SceneLoader read packaged files identically to their YAML originals. */
+void test_caml_config_and_scene_load_identically() {
+    const std::filesystem::path dir = fresh_tmp_subdir("caml_config_scene");
+    const std::string config_yaml = std::string(ROOT_DIR) + "/assets/config.yaml";
+    toy::core::encode_caml_file(config_yaml, dir / "config.caml");
+
+    const toy::core::AppConfig a = toy::core::AppConfig::load(config_yaml);
+    const toy::core::AppConfig b = toy::core::AppConfig::load((dir / "config.yaml").string()); // finds config.caml
+    expect(a.scene.default_scene == b.scene.default_scene, "config.caml: scene.default_scene matches");
+    expect(a.window.width == b.window.width && a.window.height == b.window.height, "config.caml: window size matches");
+    expect(a.render.render_width == b.render.render_width && a.render.aa_mode == b.render.aa_mode,
+           "config.caml: render settings match");
+
+    const std::filesystem::path scene_src = std::string(ROOT_DIR) + "/assets/scenes/physics_test";
+    package_tree_as_caml(scene_src, dir / "physics_test");
+    coopa::scene::Scene plain  = coopa::scene::SceneLoader::load((scene_src / "scene.yaml").string());
+    coopa::scene::Scene packed = coopa::scene::SceneLoader::load((dir / "physics_test" / "scene.yaml").string());
+    std::vector<std::string> plain_names, packed_names;
+    for (const auto& o : plain.root_objects())  plain_names.push_back(o->name());
+    for (const auto& o : packed.root_objects()) packed_names.push_back(o->name());
+    expect(!plain_names.empty() && plain_names == packed_names,
+           "scene.caml loads the same root objects (" + std::to_string(packed_names.size()) + ")");
+}
+
+/** @brief The PBKDF2 step runs once at install: 200 decodes must not cost 200 key derivations. */
+void test_caml_key_is_cached() {
+    const std::vector<uint8_t> bytes = toy::core::encode_caml_text("a: 1\n");
+    const auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < 200; ++i) (void)coopa::yaml::decode_bytes(bytes, "bench.caml");
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    expect(ms < 250.0, "200 small .caml decodes take under 250 ms (took " + std::to_string(ms) + " ms)");
+}
+
+/**
+ * @brief pixel_demo packaged to .caml (scene, meshes, LOD sidecars) renders byte-identically to
+ *        the YAML original -- the end-to-end claim behind Build > Package.
+ */
+void test_caml_scene_renders_identically() {
+    ScopedEnv fixed_dt("FIXED_DT", "0");
+    ScopedEnv no_input("NO_INPUT", "1");
+
+    const std::filesystem::path packed = fresh_tmp_subdir("caml_render") / "pixel_demo";
+    package_tree_as_caml(std::string(ROOT_DIR) + "/assets/scenes/pixel_demo", packed);
+
+    auto render = [](const std::string& scene) {
+        toy::core::Engine engine(make_test_config(scene, 320, 180, 160, 90));
+        tick_frames(engine, kNoiseCycle);
+        return engine.capture_image(/*low_res=*/true);
+    };
+    const Frame yaml_frame = render("assets/scenes/pixel_demo/scene.yaml");
+    const Frame caml_frame = render((packed / "scene.yaml").string());
+    const long long diff = count_diff(yaml_frame, caml_frame);
+    expect(diff == 0, "pixel_demo from .caml renders identically to .yaml (" + std::to_string(diff) + " px differ)");
+    if (diff != 0) {
+        dump_frame(yaml_frame, "caml_render_yaml");
+        dump_frame(caml_frame, "caml_render_caml");
+    }
+}
+
+// =====================================================================================
+// Group "editor_host" -- the Engine embedding surface the editor builds on: re-entrant scene
+// loading, edit vs play mode, push/remove scenes, display regions, viewport rays.
+// =====================================================================================
+
+/** @brief Local position of a named root object (its world position, being a root), or NaN if missing. */
+glm::vec3 object_position(coopa::scene::Scene& scene, const std::string& name) {
+    coopa::scene::SceneObject* obj = scene.find_object(name);
+    if (!obj || !obj->get_transform()) return glm::vec3(std::numeric_limits<float>::quiet_NaN());
+    return obj->get_transform()->transform().position();
+}
+
+/** @brief Edit mode freezes physics; play mode simulates; load_scene() is re-entrant. */
+void test_engine_edit_mode_freezes_simulation() {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016666");
+    ScopedEnv no_input("NO_INPUT", "1");
+    toy::core::EngineOptions opts;
+    opts.edit_mode = true;
+    toy::core::Engine engine(make_test_config("assets/scenes/physics_test/scene.yaml", 320, 180, 160, 90), opts);
+
+    expect(engine.edit_mode() && !engine.scene().is_simulating(), "edit-mode engine loads a non-simulating scene");
+    const glm::vec3 start = object_position(engine.scene(), "bounce_clay");
+    tick_frames(engine, 20);
+    const glm::vec3 frozen = object_position(engine.scene(), "bounce_clay");
+    expect(glm::distance(start, frozen) < 1e-5f, "a dynamic body does not move in edit mode (" +
+           std::to_string(start.z) + " -> " + std::to_string(frozen.z) + ")");
+
+    engine.set_edit_mode(false);
+    tick_frames(engine, 20);
+    const glm::vec3 moved = object_position(engine.scene(), "bounce_clay");
+    expect(glm::distance(start, moved) > 1e-3f, "the same body falls once simulation is on");
+
+    // Re-entrant load: same scene again, nothing accumulates.
+    engine.set_edit_mode(true);
+    engine.load_scene("assets/scenes/physics_test/scene.yaml");
+    expect(engine.scene_manager().scenes().size() == 1, "load_scene() replaces, never accumulates, scenes");
+    expect(engine.scene().find_system("Physics") != nullptr, "load_scene() installs the per-scene systems");
+    expect(glm::distance(object_position(engine.scene(), "bounce_clay"), start) < 1e-5f,
+           "a reloaded scene starts from its authored state");
+}
+
+/** @brief push_scene() runs a simulating copy over the edit scene; removing it restores the original untouched. */
+void test_engine_push_scene_restores_edit_scene() {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016666");
+    ScopedEnv no_input("NO_INPUT", "1");
+    toy::core::EngineOptions opts;
+    opts.edit_mode = true;
+    const std::string path = std::string(ROOT_DIR) + "/assets/scenes/physics_test/scene.yaml";
+    toy::core::Engine engine(make_test_config(path, 320, 180, 160, 90), opts);
+    coopa::scene::Scene* edit_scene = &engine.scene();
+    const glm::vec3 start = object_position(*edit_scene, "bounce_clay");
+
+    coopa::scene::Scene& play = engine.push_scene(
+        coopa::scene::SceneLoader::load_from_node(coopa::yaml::load_document(path), path), /*simulating=*/true);
+    expect(&engine.scene() == &play, "push_scene() makes the pushed scene active");
+    tick_frames(engine, 20);
+    expect(glm::distance(object_position(play, "bounce_clay"), start) > 1e-3f, "the pushed scene simulates");
+    expect(glm::distance(object_position(*edit_scene, "bounce_clay"), start) < 1e-5f,
+           "the edit scene underneath does not move while the pushed one plays");
+
+    engine.remove_scene(&play);
+    engine.activate_scene(edit_scene);
+    expect(&engine.scene() == edit_scene, "removing the pushed scene and reactivating restores the edit scene");
+    tick_frames(engine, 2);
+    expect(glm::distance(object_position(*edit_scene, "bounce_clay"), start) < 1e-5f, "the restored edit scene is untouched");
+}
+
+/** @brief A display region moves the image without changing a single low-res pixel, and rays go through it. */
+void test_engine_display_region_and_viewport_ray() {
+    ScopedEnv fixed_dt("FIXED_DT", "0");
+    ScopedEnv no_input("NO_INPUT", "1");
+    toy::core::Engine engine(make_test_config("assets/scenes/pixel_demo/scene.yaml", 640, 360, 160, 90));
+    tick_frames(engine, kNoiseCycle);
+    const Frame full = engine.capture_image(true);
+    // This config (no palette quantization) carries some frame-to-frame temporal drift of its
+    // own; the region must add nothing beyond it.
+    tick_frames(engine, kNoiseCycle);
+    const long long baseline = count_diff(full, engine.capture_image(true));
+
+    engine.set_display_region(toy::render::LetterboxRect{200, 40, 320, 180});
+    tick_frames(engine, kNoiseCycle);
+    const Frame region = engine.capture_image(true);
+    const long long region_diff = count_diff(full, region);
+    expect(region_diff >= 0 && region_diff <= baseline + kDriftBudget,
+           "the low-res image is unchanged by a display region (" + std::to_string(region_diff) + " px differ)");
+
+    const toy::render::LetterboxRect box = engine.display_rect();
+    expect(box.x == 200 && box.y == 40 && box.w == 320 && box.h == 180, "display_rect() reports the region (exact 2x fit)");
+
+    const Frame window = engine.capture_image(false);
+    auto pixel_lum = [&](int x, int y) {
+        const size_t i = (static_cast<size_t>(y) * window.width + x) * window.channels;
+        return int(window.pixels[i]) + window.pixels[i + 1] + window.pixels[i + 2];
+    };
+    expect(pixel_lum(20, 20) == 0 && pixel_lum(620, 340) == 0, "outside the region the window is black");
+
+    glm::vec3 origin, dir;
+    expect(engine.viewport_ray(glm::vec2(box.x + box.w * 0.5f, box.y + box.h * 0.5f), origin, dir),
+           "viewport_ray() succeeds at the region centre");
+    auto* cam = coopa::gfx::engine::components::CameraComponent::main();
+    const glm::vec3 forward = -glm::vec3(glm::inverse(cam->get_view_matrix())[2]);
+    expect(glm::dot(glm::normalize(forward), dir) > 0.999f, "the centre ray is the camera's forward axis");
+    expect(!engine.viewport_ray(glm::vec2(10, 10), origin, dir), "no ray outside the display rect");
+
+    glm::vec2 px;
+    expect(engine.world_to_window(origin + dir * 10.0f, px) &&
+           glm::distance(px, glm::vec2(box.x + box.w * 0.5f, box.y + box.h * 0.5f)) < 1.0f,
+           "world_to_window() inverts viewport_ray()");
+}
+
+// =====================================================================================
 // Registry
 // =====================================================================================
 
@@ -4045,6 +4343,20 @@ struct TestCase {
  * and are registered separately so `ctest -j` overlaps them.
  */
 const TestCase kTests[] = {
+    // --- yaml_io: coopa::yaml document loading + the caml codec, no GPU ---
+    {"caml_roundtrips_every_asset",                "yaml_io", test_caml_roundtrips_every_asset},
+    {"caml_detected_by_magic_not_extension",       "yaml_io", test_caml_detected_by_magic_not_extension},
+    {"caml_without_codec_names_the_fix",           "yaml_io", test_caml_without_codec_names_the_fix},
+    {"yaml_variant_resolution",                    "yaml_io", test_yaml_variant_resolution},
+    {"caml_config_and_scene_load_identically",     "yaml_io", test_caml_config_and_scene_load_identically},
+    {"caml_key_is_cached",                         "yaml_io", test_caml_key_is_cached},
+    {"caml_scene_renders_identically",             "render_pixel", test_caml_scene_renders_identically},
+
+    // --- editor_host: Engine embedding (edit/play mode, scene push, display region) ---
+    {"engine_edit_mode_freezes_simulation",        "editor_host", test_engine_edit_mode_freezes_simulation},
+    {"engine_push_scene_restores_edit_scene",      "editor_host", test_engine_push_scene_restores_edit_scene},
+    {"engine_display_region_and_viewport_ray",     "editor_host", test_engine_display_region_and_viewport_ray},
+
     // --- world: the terrain tile system's pure half, no GPU ---
     {"tile_atlas_cells_disjoint",                  "world", test_tile_atlas_cells_are_disjoint_and_inset},
     {"tile_face_transforms_match_normals",         "world", test_face_transforms_agree_with_face_normals},
@@ -4175,6 +4487,8 @@ void print_usage() {
 } // namespace
 
 int main(int argc, char** argv) {
+    toy::core::install_caml_codec();
+
     std::vector<std::string> filters;
     std::string              group;
     bool                     list_only = false;

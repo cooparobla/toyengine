@@ -84,11 +84,28 @@ if(NOT _libcoopa_inc MATCHES "${CMAKE_SOURCE_DIR}/libs/libcoopa")
         "Check add_subdirectory() order above -- libs/libcoopa must come first.")
 endif()
 
-# caml has no consumable target (no INTERFACE library, no coopa:: alias) -- it
-# is consumed by pointing -I at its source tree, the same way uicoopa does it
-# (uicoopa/CMakeLists.txt:41-42). add_subdirectory() is still needed for its
-# OpenSSL/zstd discovery; it also contributes a `caml` executable target.
+# caml ships no consumable target (just a `caml` test executable), and like the other
+# libs/ repos it stays unpatched -- so coopa::caml is defined here. add_subdirectory()
+# still runs first: when pkg-config can't find libzstd it FetchContent's zstd and
+# creates the global libzstd_static target this links. Its OpenSSL/zstd variables are
+# directory-scoped, so discovery is repeated below.
+#
+# Only toyengine/core/caml_codec.h includes caml.h; everything else reads YAML through
+# libcoopa's coopa/yaml/document.h, which decodes .caml via the codec it registers.
 add_subdirectory(${CAML_DIR} ${CMAKE_CURRENT_BINARY_DIR}/caml-build)
+find_package(OpenSSL REQUIRED)
+add_library(toy_caml INTERFACE)
+add_library(coopa::caml ALIAS toy_caml)
+target_include_directories(toy_caml INTERFACE ${CAML_DIR}/includes)
+target_link_libraries(toy_caml INTERFACE OpenSSL::Crypto)
+if(TARGET libzstd_static)
+    target_link_libraries(toy_caml INTERFACE libzstd_static)
+    target_include_directories(toy_caml INTERFACE ${zstd_SOURCE_DIR}/lib)
+else()
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(TOY_ZSTD REQUIRED IMPORTED_TARGET libzstd)
+    target_link_libraries(toy_caml INTERFACE PkgConfig::TOY_ZSTD)
+endif()
 
 # uicoopa's `uicoopa_shaders` target is deliberately NOT behind the
 # `CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR` guard its demos and ctest
@@ -132,20 +149,22 @@ add_dependencies(toyengine toyengine_shaders uicoopa_shaders)
 # image_writer.h / map_export.h, which compile stb's *implementation*; toyengine/world/ uses
 # only the data headers (map_config.h, map_data.h, map_generator.h, noise.h, biome.h).
 target_link_libraries(toyengine PRIVATE coopa::gfx coopa::physx coopa::sfx coopa::maps coopa::ui)
-target_include_directories(toyengine PRIVATE ${CAML_DIR} ${CAML_DIR}/includes)
+# coopa::caml after coopa::ui: its includes/ carries a second fkYAML copy, which must
+# never shadow libcoopa's.
+target_link_libraries(toyengine PRIVATE coopa::caml)
 
 enable_testing()
 add_executable(toyengine_tests test.cpp)
 add_dependencies(toyengine_tests toyengine_shaders uicoopa_shaders)
 target_link_libraries(toyengine_tests PRIVATE coopa::gfx coopa::physx coopa::sfx coopa::maps coopa::ui)
-target_include_directories(toyengine_tests PRIVATE ${CAML_DIR} ${CAML_DIR}/includes)
+target_link_libraries(toyengine_tests PRIVATE coopa::caml)
 # One ctest entry per test GROUP, not one for the whole binary: each render_* group
 # constructs its own Vulkan device, pipelines and scene, and that cost is CPU-bound
 # setup rather than GPU work -- so `ctest -j4` overlaps them and the suite finishes in
 # roughly the time of its slowest group. It also means `ctest -R toyengine_math` is an
 # instant, device-free check a dev can run on every save. See test.cpp's file doc for
 # the argument forms the binary accepts.
-foreach(_toy_test_group math config scene world render_pixel render_ui render_material render_cloth render_terrain)
+foreach(_toy_test_group math config scene world yaml_io render_pixel render_ui render_material render_cloth render_terrain editor_host)
     add_test(NAME toyengine_${_toy_test_group}
              COMMAND toyengine_tests --group ${_toy_test_group})
 endforeach()
@@ -153,9 +172,31 @@ endforeach()
 # The device-free groups have no business taking seconds; the render groups get a ceiling
 # generous enough for a cold shader cache on a slow GPU but short enough that a hung
 # frame fails instead of hanging the run.
-set_tests_properties(toyengine_math toyengine_config toyengine_scene toyengine_world PROPERTIES TIMEOUT 60)
+set_tests_properties(toyengine_math toyengine_config toyengine_scene toyengine_world toyengine_yaml_io PROPERTIES TIMEOUT 60)
 set_tests_properties(toyengine_render_pixel toyengine_render_ui toyengine_render_material
-                     toyengine_render_cloth toyengine_render_terrain PROPERTIES TIMEOUT 300)
+                     toyengine_render_cloth toyengine_render_terrain toyengine_editor_host PROPERTIES TIMEOUT 300)
+
+# --- Editor ---
+# toyengine_editor embeds the same Engine (so its "Full Render" viewport IS the game's
+# renderer) and builds its UI with uicoopa's immediate-mode layer. Same link line as the
+# game, and for the same stb-ordering reason coopa::ui stays after coopa::gfx.
+add_executable(toyengine_editor editor/editor.cpp)
+add_dependencies(toyengine_editor toyengine_shaders uicoopa_shaders)
+target_link_libraries(toyengine_editor PRIVATE coopa::gfx coopa::physx coopa::sfx coopa::maps coopa::ui)
+target_link_libraries(toyengine_editor PRIVATE coopa::caml)
+
+add_executable(toyengine_editor_tests editor/editor_test.cpp)
+add_dependencies(toyengine_editor_tests toyengine_shaders uicoopa_shaders)
+target_link_libraries(toyengine_editor_tests PRIVATE coopa::gfx coopa::physx coopa::sfx coopa::maps coopa::ui)
+target_link_libraries(toyengine_editor_tests PRIVATE coopa::caml)
+# Device-free groups first (instant), then the ones that build an Engine.
+foreach(_ed_group writer document mesh imm viewport config editor_shell package)
+    add_test(NAME toyengine_editor_${_ed_group}
+             COMMAND toyengine_editor_tests --group ${_ed_group})
+endforeach()
+set_tests_properties(toyengine_editor_writer toyengine_editor_document toyengine_editor_mesh
+                     toyengine_editor_imm toyengine_editor_viewport toyengine_editor_config PROPERTIES TIMEOUT 60)
+set_tests_properties(toyengine_editor_editor_shell toyengine_editor_package PROPERTIES TIMEOUT 300)
 
 # --- Vulkan/GLFW leak gate ---
 # OFF by default here, unlike uicoopa/pixengine which are clean:

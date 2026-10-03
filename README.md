@@ -175,6 +175,31 @@ appears, nothing takes focus and the pointer is never grabbed -- a full run is i
 a desktop you are still using. Nothing is written to `output/`; a frame is only dumped, to
 a temp directory whose path is printed, when an assertion fails.
 
+## Editor
+
+`toyengine_editor` is a scene / mesh / material / render-settings editor that writes a
+project's `assets/` folder in exactly the formats the game loads. It embeds the real
+`Engine`, so the viewport's **Full Render** mode *is* the game's renderer; **Solid** and
+**Wireframe** are lighting-independent authoring views.
+
+```bash
+./build/toyengine_editor                       # most recent project, else this repo's assets/
+./build/toyengine_editor path/to/project       # any folder containing assets/
+./build/toyengine_editor --new-project ~/game  # scaffold a project (config, meshes, starter scene)
+./build/toyengine_editor_tests                 # editor test suite (headless)
+```
+
+Tabs: **Scene** (hierarchy, viewport with gizmos, inspector, asset browser, play/stop),
+**Asset** (polygon modelling -- extrude, inset, bevel, merge, UVs -- and material assets),
+**Render Settings** (config.yaml's render block, applied live), **Project Settings**
+(window/physics/jobs/output, default scene, Build > Package to `.caml`). See
+[editor/README.md](editor/README.md).
+
+Every YAML loader in the engine also accepts caml-encoded `.caml` files (detected by their
+magic bytes), and a reference to `x.yaml` finds `x.caml` when only that exists -- so a
+packaged project needs no path rewriting. Materials can be shared assets:
+`material: materials/brick`, or `material: { base: materials/brick, roughness: 0.3 }`.
+
 ## Layout
 
 ```
@@ -188,6 +213,10 @@ toyengine/
 ├── world/      Streamed 3D tile terrain built from a mapcoopa world:
 │               TerrainSampler, TileMeshLibrary, the chunk mesher, TerrainSystem
 └── util/       screenshot.h (Vulkan image -> PNG)
+
+editor/         toyengine_editor: app/ (UI, documents, scene sync), core/ (scene document,
+                undo), schema/ (component + settings schemas, inspector), mesh/ (EditMesh,
+                primitives, modelling ops), viewport/ (camera, gizmo, picking), build/ (packager)
 
 libs/           pinned submodules: libcoopa, gfxcoopa, physxcoopa,
                 sfxcoopa, caml, uicoopa, mapcoopa

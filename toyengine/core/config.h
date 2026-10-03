@@ -6,10 +6,10 @@
  * blendy/src/blendy/core/config.h): every field has an in-class default, every
  * YAML key is individually optional, unknown keys are silently ignored, and a
  * missing or malformed file falls back to defaults rather than failing
- * startup. Unlike blendy, this parses fkYAML directly instead of going
- * through caml::CAMLMap -- toyengine has no need for encrypted/compressed
- * config or scene files, so it avoids the OpenSSL and zstd dependencies
- * entirely.
+ * startup. The file is read through coopa::yaml::load_document(), so a
+ * packaged config.caml (see toyengine/core/caml_codec.h) loads the same way
+ * as config.yaml, and a config.yaml path finds config.caml when only the
+ * encoded file exists.
  */
 
 #ifndef TOYENGINE_CORE_CONFIG_H
@@ -22,6 +22,7 @@
 #include <string>
 
 #include <fkYAML/node.hpp>
+#include <coopa/yaml/document.h>
 #include <glm/glm.hpp>
 
 #include <coopa/scene/config.h>
@@ -118,14 +119,26 @@ struct AppConfig {
     static AppConfig load(const std::string& path) {
         AppConfig config;
         try {
-            if (!std::filesystem::exists(path)) {
+            const std::filesystem::path resolved = coopa::yaml::resolve_variant(path);
+            if (!std::filesystem::exists(resolved)) {
                 std::cerr << "[toy::core::AppConfig] Config file not found at " << path << ", using defaults.\n";
                 return config;
             }
 
-            std::ifstream in(path);
-            fkyaml::node root = fkyaml::node::deserialize(in);
+            return from_node(coopa::yaml::load_document(resolved));
+        } catch (const std::exception& e) {
+            std::cerr << "[toy::core::AppConfig] Warning: Failed to parse config file (" << e.what() << "), using defaults.\n";
+        }
+        return config;
+    }
 
+    /**
+     * @brief Parses an already-loaded config document -- AppConfig::load() minus the file read.
+     *        The editor uses this to apply an edited, unsaved config.yaml to a live Engine.
+     */
+    static AppConfig from_node(const fkyaml::node& root) {
+        AppConfig config;
+        try {
             if (root.contains("scene")) {
                 const auto& s = root.at("scene");
                 if (s.contains("default_scene")) {
@@ -362,6 +375,8 @@ struct AppConfig {
                 if (r.contains("volumetrics_froxel_tile"))    config.render.volumetrics_froxel_tile    = r.at("volumetrics_froxel_tile").get_value<uint32_t>();
                 if (r.contains("volumetrics_froxel_slices"))  config.render.volumetrics_froxel_slices  = r.at("volumetrics_froxel_slices").get_value<uint32_t>();
                 if (r.contains("volumetrics_froxel_history")) config.render.volumetrics_froxel_history = r.at("volumetrics_froxel_history").get_value<float>();
+                if (r.contains("volumetrics_froxel_miss_samples")) config.render.volumetrics_froxel_miss_samples = r.at("volumetrics_froxel_miss_samples").get_value<uint32_t>();
+                if (r.contains("volumetrics_froxel_lookup_jitter")) config.render.volumetrics_froxel_lookup_jitter = r.at("volumetrics_froxel_lookup_jitter").get_value<float>();
                 if (r.contains("volumetrics_max_opacity"))    config.render.volumetrics_max_opacity    = r.at("volumetrics_max_opacity").get_value<float>();
                 if (r.contains("volumetrics_sun_anisotropy")) config.render.volumetrics_sun_anisotropy = r.at("volumetrics_sun_anisotropy").get_value<float>();
                 if (r.contains("volumetrics_shadows_enabled")) config.render.volumetrics_shadows_enabled = r.at("volumetrics_shadows_enabled").get_value<bool>();

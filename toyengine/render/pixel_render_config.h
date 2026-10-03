@@ -77,6 +77,13 @@ enum class DebugView : int {
     Volumetrics,
     // --- overlay ---
     Lines,
+    // --- editor viewport shading (debug_view_pass_ channels) ---
+    /// Blender-style "solid" shading: a headlight + fixed key term over the G-buffer normals,
+    /// lightly tinted by albedo, on a neutral background. No scene lights, shadows or post.
+    Solid,
+    /// A flat backdrop with surfaces only faintly filled -- the base the editor's wireframe
+    /// edges (debug lines) draw over.
+    Wireframe,
 };
 
 /**
@@ -108,10 +115,12 @@ inline DebugView parse_debug_view(const std::string& value) {
     if (value == "dof")             return DebugView::Dof;
     if (value == "volumetrics")     return DebugView::Volumetrics;
     if (value == "lines")           return DebugView::Lines;
+    if (value == "solid")           return DebugView::Solid;
+    if (value == "wireframe")       return DebugView::Wireframe;
     std::cerr << "[toy::render] Unknown debug_view '" << value << "', expected one of: "
                  "off | albedo | normals | roughness | metallic | emissive | material_ao | "
                  "world_pos | depth | direct | indirect | shadows | contact_shadows | ssao | "
-                 "ssr | ssr_confidence | ssgi | dof | volumetrics | lines. Using 'off'.\n";
+                 "ssr | ssr_confidence | ssgi | dof | volumetrics | lines | solid | wireframe. Using 'off'.\n";
     return DebugView::Off;
 }
 
@@ -774,6 +783,14 @@ struct PixelRenderConfig {
     uint32_t volumetrics_froxel_tile   = 8;    /**< Render pixels per froxel, each axis. Startup-fixed. */
     uint32_t volumetrics_froxel_slices = 64;   /**< Depth slices along the view ray. Startup-fixed. */
     float    volumetrics_froxel_history = 0.9f; /**< Temporal reprojection weight (0 = none). RUNTIME. */
+    /** Samples taken by a froxel whose history was rejected (newly revealed by camera motion),
+     *  so it does not start as one raw sample. 1 = no supersampling. RUNTIME. */
+    uint32_t volumetrics_froxel_miss_samples = 4;
+    /** Per-pixel jitter of the composite's grid lookup, in froxels / slices (0 = off). Breaks
+     *  up the froxel cell pattern for TAA to resolve; ignored unless aa_mode == "taa". Off by
+     *  default: with centre-reprojected history the cells no longer show in pixel_demo, and
+     *  the dither TAA leaves behind measured as slightly MORE flicker. RUNTIME. */
+    float    volumetrics_froxel_lookup_jitter = 0.0f;
     float volumetrics_max_opacity    = 0.85f; /**< Ceiling on how much volumetrics can occlude the scene. */
     float volumetrics_sun_anisotropy = 0.6f;  /**< HG g; 0 isotropic, close to 1 = tight forward scatter.
                                                 Shared, not per-volume: it is a property of the light's

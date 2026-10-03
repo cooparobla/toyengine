@@ -96,6 +96,8 @@ public:
         : device_(device), allocator_(allocator), assets_(assets) {}
 
     const char* system_name() const override { return "Terrain"; }
+    /// Terrain is authored data, not simulation: an editor scene still meshes it.
+    bool runs_in_edit_mode() const override { return true; }
 
     void execute(coopa::scene::Scene& scene, const coopa::scene::FrameContext& ctx) override {
         for (TerrainComponent* terrain : scene.get_components<TerrainComponent>()) {

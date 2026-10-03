@@ -19,6 +19,7 @@
 #include <iostream>
 #include <string>
 
+#include <toyengine/core/caml_codec.h>
 #include <toyengine/core/config.h>
 #include <toyengine/core/engine.h>
 
@@ -31,7 +32,7 @@ namespace {
  *
  * Accepts either a bare scene NAME under assets/scenes (`physics_test`, which expands to
  * assets/scenes/<name>/scene.yaml -- the layout every scene in this repo uses) or an
- * explicit path to a .yaml, matching the SCENE env override's rules exactly (see
+ * explicit path to a .yaml/.caml, matching the SCENE env override's rules exactly (see
  * Engine::scene_path_from_env_()). The returned path is repo-relative; Engine resolves
  * it against ROOT_DIR.
  *
@@ -39,7 +40,7 @@ namespace {
  * @return std::string A path to a scene.yaml, relative to the repo root.
  */
 std::string resolve_scene_arg(const std::string& scene) {
-    if (scene.size() >= 5 && scene.compare(scene.size() - 5, 5, ".yaml") == 0) return scene;
+    if (coopa::yaml::is_document_ext(scene)) return scene;
     return "assets/scenes/" + scene + "/scene.yaml";
 }
 
@@ -52,6 +53,9 @@ bool env_flag(const char* name) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    // Before anything reads YAML: every config/scene/mesh/material load accepts .caml too.
+    toy::core::install_caml_codec();
+
     // CONFIG=<path> loads a different config file than assets/config.yaml -- for a scripted
     // run (a benchmark, an A/B of one render toggle) that should not edit the tracked file.
     std::string config_path = std::string(ROOT_DIR) + "/assets/config.yaml";

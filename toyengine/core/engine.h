@@ -20,6 +20,8 @@
 #include <cstdlib>
 #include <deque>
 #include <filesystem>
+#include <functional>
+#include <optional>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -63,6 +65,41 @@ namespace toy {
 namespace core {
 
 /**
+ * @struct EngineOptions
+ * @brief How an Engine is embedded: by the game (the defaults) or by a tool like the editor.
+ */
+struct EngineOptions {
+    /// Directory holding the project's assets/ folder. Relative scene/palette/LUT paths in
+    /// the config resolve against it, and <project_root>/assets is the asset search root.
+    /// Empty means the repo root this binary was built from (ROOT_DIR).
+    std::filesystem::path project_root;
+    /// Load config.scene.default_scene (or SCENE) during construction. A tool that picks its
+    /// scene later turns this off and calls load_scene()/set_scene() itself.
+    bool load_default_scene = true;
+    /// Start in edit mode: loaded scenes do not simulate (see set_edit_mode()).
+    bool edit_mode = false;
+    /// Escape closes the window (the game's default). An editor turns this off: Escape there
+    /// cancels things.
+    bool escape_quits = true;
+};
+
+/**
+ * @struct FrameHooks
+ * @brief Optional callbacks a host (the editor) runs at fixed points inside tick().
+ */
+struct FrameHooks {
+    /// After input polling and asset updates, before the scene's update(). Input state for
+    /// this frame is current; the host updates its own tools here.
+    std::function<void(float dt)> pre_scene_update;
+    /// After every scene's late_update() (UI events dispatched, commands flushed): the safe
+    /// point to rebuild UI or restructure the scene.
+    std::function<void(float dt)> post_late_update;
+    /// Immediately before the pipeline records the frame: last chance to push debug lines or
+    /// change the display region.
+    std::function<void(float dt)> pre_render;
+};
+
+/**
  * @class Engine
  * @brief Top-level owner of the window, Vulkan device, assets, scene, and
  *        the render loop.
@@ -76,13 +113,19 @@ public:
      * @brief Constructs the window and every core Vulkan/asset/scene object.
      * @param config Application configuration (window, render, scene, output).
      */
-    explicit Engine(AppConfig config)
-        : config_(std::move(config)),
+    explicit Engine(AppConfig config) : Engine(std::move(config), EngineOptions{}) {}
+
+    /**
+     * @brief Constructs an Engine embedded per `options` (project root, edit mode, ...).
+     */
+    Engine(AppConfig config, EngineOptions options)
+        : options_(normalize_options_(std::move(options))),
+          config_(std::move(config)),
           jobs_(config_.jobs.worker_threads ? config_.jobs.worker_threads
                                              : std::thread::hardware_concurrency()),
           ctx_(make_context_config_(config_)),
           pipeline_(ctx_.device(), ctx_.allocator(), ctx_.swapchain(), ctx_.render_pass(),
-                   ctx_.command_pool(), make_render_config_(config_)),
+                   ctx_.command_pool(), make_render_config_(config_, options_.project_root)),
           assets_(&jobs_)
     {
         // Read once here rather than in the initializer list -- these are declared after
@@ -112,7 +155,8 @@ public:
             }
         }
 
-        assets_.add_search_root(std::string(ROOT_DIR) + "/assets");
+        edit_mode_ = options_.edit_mode;
+        assets_.add_search_root((options_.project_root / "assets").string());
         assets_.register_loader<coopa::gfx::engine::data::Mesh>(
             std::make_unique<coopa::gfx::engine::loaders::MeshLoader>(ctx_.device(), ctx_.allocator(), ctx_.command_pool()));
         // Pure-CPU bind-pose data for SkinnedMeshRenderer (toy::scene) -- no GPU handles, unlike
@@ -149,39 +193,241 @@ public:
         // Must precede load_scene(), like every other parser registration above.
         coopa::anim::register_animation_components(assets_);
 
-        scene_mgr_.load_scene(resolve_path_(scene_path_from_env_(config_.scene.default_scene)));
+        if (options_.load_default_scene) {
+            load_scene(resolve_path_(scene_path_from_env_(config_.scene.default_scene)));
+        }
+        read_cursor_pos_override_();
+    }
 
+    /**
+     * @brief Replaces every managed scene with the one at `path`, fully set up: per-scene
+     *        systems installed, every asset load drained, material shaders validated.
+     *
+     * Safe to call on a running Engine (the editor opens scenes this way). In edit mode the
+     * new scene starts non-simulating.
+     *
+     * @param path Scene file (.yaml/.caml); relative paths resolve against the project root.
+     * @return The new active scene.
+     */
+    coopa::scene::Scene& load_scene(const std::string& path) {
+        ctx_.wait_idle();
+        scene_mgr_.load_scene(resolve_path_(path));
+        prepare_scene_(scene_mgr_.get_active_scene());
+        return scene_mgr_.get_active_scene();
+    }
+
+    /**
+     * @brief Replaces every managed scene with an already-built one (e.g. from
+     *        SceneLoader::load_from_node()) and sets it up exactly as load_scene() does.
+     */
+    coopa::scene::Scene& set_scene(coopa::scene::Scene&& scene) {
+        ctx_.wait_idle();
+        clear_scenes_();
+        coopa::scene::Scene* raw = scene_mgr_.add_scene(std::make_unique<coopa::scene::Scene>(std::move(scene)));
+        prepare_scene_(*raw);
+        return *raw;
+    }
+
+    /**
+     * @brief Adds an already-built scene alongside the current ones and makes it active,
+     *        set up like load_scene(). The previously active scene keeps its state but stops
+     *        updating until reactivated with activate_scene().
+     *
+     * The editor's play mode and material preview use this: the edit scene stays intact
+     * underneath and comes back untouched when the added scene is removed.
+     */
+    coopa::scene::Scene& push_scene(coopa::scene::Scene&& scene, bool simulating) {
+        ctx_.wait_idle();
+        if (scene_mgr_.has_scene()) scene_mgr_.set_scene_active(&scene_mgr_.get_active_scene(), false);
+        coopa::scene::Scene* raw = scene_mgr_.add_scene(std::make_unique<coopa::scene::Scene>(std::move(scene)));
+        scene_mgr_.set_active_scene(raw);
+        prepare_scene_(*raw);
+        raw->set_simulating(simulating);
+        return *raw;
+    }
+
+    /** @brief Destroys a scene added by push_scene() (or any managed scene). */
+    void remove_scene(coopa::scene::Scene* scene) {
+        ctx_.wait_idle();
+        scene_mgr_.remove_scene(scene);
+    }
+
+    /** @brief Makes a managed scene the active, updating one; every other scene stops updating. */
+    void activate_scene(coopa::scene::Scene* scene) {
+        for (coopa::scene::Scene* s : scene_mgr_.scenes()) scene_mgr_.set_scene_active(s, s == scene);
+        scene_mgr_.set_active_scene(scene);
+    }
+
+    /**
+     * @brief Edit mode on/off. In edit mode the active scene does not simulate (only systems
+     *        with ISceneSystem::runs_in_edit_mode() run), gameplay input drivers stand down,
+     *        and the cursor is never captured.
+     */
+    void set_edit_mode(bool edit) {
+        edit_mode_ = edit;
+        if (scene_mgr_.has_scene()) scene_mgr_.get_active_scene().set_simulating(!edit);
+    }
+    bool edit_mode() const { return edit_mode_; }
+
+    /** @brief Installs the host callbacks tick() runs; see FrameHooks. */
+    void set_frame_hooks(FrameHooks hooks) { hooks_ = std::move(hooks); }
+
+    /**
+     * @brief A second scene ticked and drawn on top of the active one -- the editor's UI.
+     *
+     * It is updated after the active scene, simulates regardless of edit mode, has its
+     * canvases driven like the active scene's, and its screen-space canvases are drawn after
+     * (over) the active scene's. Never saved, never replaced by load_scene(). Null removes it.
+     */
+    void set_overlay_scene(coopa::scene::Scene* scene) {
+        overlay_scene_ = scene;
+        pipeline_.set_overlay_scene(scene);
+    }
+
+    /**
+     * @brief Confines the rendered scene to a window-pixel rect (an editor viewport panel),
+     *        letterboxed inside it. nullopt restores the whole window.
+     */
+    void set_display_region(std::optional<render::LetterboxRect> region) {
+        pipeline_.set_display_region(region);
+    }
+
+    /** @brief The window-pixel rect the low-res scene image currently lands in. */
+    render::LetterboxRect display_rect() const {
+        return pipeline_.display_rect_for(const_cast<coopa::gfx::app::Context&>(ctx_).swapchain().extent().width,
+                                         const_cast<coopa::gfx::app::Context&>(ctx_).swapchain().extent().height);
+    }
+
+    /**
+     * @brief World-space ray through a window-pixel position, through the current display
+     *        rect and the main camera. Direction is normalized.
+     * @return False when there is no camera or the position is outside the display rect.
+     */
+    bool viewport_ray(const glm::vec2& window_px, glm::vec3& out_origin, glm::vec3& out_dir) const {
+        auto* cam = coopa::gfx::engine::components::CameraComponent::main();
+        if (!cam) return false;
+        const uint32_t rw = pipeline_.render_width();
+        const uint32_t rh = pipeline_.render_height();
+        if (rw == 0 || rh == 0) return false;
+        const render::LetterboxRect box = display_rect();
+        if (box.w == 0 || box.h == 0) return false;
+        const glm::vec2 local = window_px - glm::vec2(box.x, box.y);
+        if (local.x < 0 || local.y < 0 || local.x > box.w || local.y > box.h) return false;
+        const float aspect = static_cast<float>(rw) / static_cast<float>(rh);
+        const glm::mat4 inv_vp = glm::inverse(cam->get_projection_matrix(aspect) * cam->get_view_matrix());
+        const glm::vec2 ndc(2.0f * local.x / static_cast<float>(box.w) - 1.0f,
+                            1.0f - 2.0f * local.y / static_cast<float>(box.h));
+        glm::vec4 near_h = inv_vp * glm::vec4(ndc, 0.0f, 1.0f);
+        glm::vec4 far_h  = inv_vp * glm::vec4(ndc, 1.0f, 1.0f);
+        if (std::abs(near_h.w) < 1e-9f || std::abs(far_h.w) < 1e-9f) return false;
+        out_origin = glm::vec3(near_h) / near_h.w;
+        out_dir = glm::vec3(far_h) / far_h.w - out_origin;
+        const float len = glm::length(out_dir);
+        if (len < 1e-12f) return false;
+        out_dir /= len;
+        return true;
+    }
+
+    /**
+     * @brief Projects a world point to window pixels through the main camera and display rect.
+     * @return False if there is no camera or the point is behind it.
+     */
+    bool world_to_window(const glm::vec3& world, glm::vec2& out_px) const {
+        auto* cam = coopa::gfx::engine::components::CameraComponent::main();
+        if (!cam) return false;
+        const uint32_t rw = pipeline_.render_width();
+        const uint32_t rh = pipeline_.render_height();
+        const render::LetterboxRect box = display_rect();
+        if (rw == 0 || rh == 0 || box.w == 0) return false;
+        const float aspect = static_cast<float>(rw) / static_cast<float>(rh);
+        const glm::vec4 clip = cam->get_projection_matrix(aspect) * cam->get_view_matrix() * glm::vec4(world, 1.0f);
+        if (clip.w <= 1e-6f) return false;
+        const glm::vec2 ndc = glm::vec2(clip) / clip.w;
+        out_px = glm::vec2(box.x + (ndc.x * 0.5f + 0.5f) * box.w,
+                           box.y + (0.5f - ndc.y * 0.5f) * box.h);
+        return true;
+    }
+
+    // --- Subsystem access, for embedding hosts (the editor) and tests ---
+    render::PixelRenderPipeline&  pipeline()      { return pipeline_; }
+    coopa::asset::AssetManager&   assets()        { return assets_; }
+    coopa::scene::SceneManager&   scene_manager() { return scene_mgr_; }
+    const AppConfig&              config() const  { return config_; }
+    const std::filesystem::path&  project_root() const { return options_.project_root; }
+    bool has_scene() const { return scene_mgr_.has_scene(); }
+    /// Window size in swapchain pixels.
+    glm::uvec2 window_extent() {
+        return {ctx_.swapchain().extent().width, ctx_.swapchain().extent().height};
+    }
+    /// Framebuffer pixels per Input cursor unit. Always 1: gfxcoopa's Window already converts
+    /// GLFW's screen-point cursor positions to framebuffer pixels at the boundary (see
+    /// presentation/window.h's to_framebuffer_coords_()), so Input speaks swapchain pixels on
+    /// every platform. Kept as the one place that would change if that ever stopped being true.
+    float cursor_scale() { return 1.0f; }
+
+    /**
+     * @brief Queues `fn` to run against the live Input right after the next poll -- synthetic
+     *        clicks, keys and scrolls for tests and scripted runs, injected exactly where real
+     *        events land (so per-frame pressed/released edges behave like real input).
+     */
+    void queue_input(std::function<void(coopa::input::Input&)> fn) { input_queue_.push_back(std::move(fn)); }
+    /// Framebuffer pixels per screen point for this display, whether or not the window is
+    /// visible -- what a tool UI scales by so its text keeps a physical size.
+    float display_scale() { return ctx_.window().content_scale(); }
+    /// The cursor in swapchain pixels (honours set_cursor_override()).
+    glm::vec2 cursor_pixels() { return ctx_.input().cursor_position() * cursor_scale(); }
+    /// Blocks until the GPU is idle (before destroying a resource a frame may reference).
+    void wait_idle() { ctx_.wait_idle(); }
+
+private:
+    /** @brief Fills in EngineOptions defaults (project_root -> ROOT_DIR). */
+    static EngineOptions normalize_options_(EngineOptions o) {
+        if (o.project_root.empty()) o.project_root = std::filesystem::path(ROOT_DIR);
+        return o;
+    }
+
+    /** @brief Destroys every managed scene. */
+    void clear_scenes_() {
+        for (coopa::scene::Scene* s : scene_mgr_.scenes()) scene_mgr_.remove_scene(s);
+    }
+
+    /**
+     * @brief Everything a freshly loaded scene needs before its first frame: per-scene
+     *        systems, drained asset loads, shader validation, edit-mode and cursor state.
+     */
+    void prepare_scene_(coopa::scene::Scene& scene) {
         // BEFORE the physics system in numeric order (50 vs 100), which is the whole point: a
         // component driving a kinematic body's Transform has to write it before PhysicsSystem reads
         // it, or physics spends the frame solving against the previous pose while the renderer draws
         // the new one. See kinematic_control_system.h's file doc.
-        scene::install_kinematic_control_system(scene_mgr_.get_active_scene());
+        scene::install_kinematic_control_system(scene);
         // Order 60, so it too sits ahead of Physics (100) -- and, more to the point, ahead of the
         // Behaviour walk (200) and TransformResolve (350), so a terrain chunk that appears this
         // frame already has its world matrix resolved when the render gather reads it. A scene
         // with no Terrain component pays one empty get_components<>() sweep per frame.
-        world::install_terrain_system(scene_mgr_.get_active_scene(), ctx_.device(),
-                                       ctx_.allocator(), assets_);
-        coopa::physx::system::install_physics_system(scene_mgr_.get_active_scene(), config_.physics);
+        world::install_terrain_system(scene, ctx_.device(), ctx_.allocator(), assets_);
+        coopa::physx::system::install_physics_system(scene, config_.physics);
 
         // Activate TransformSystem before the first drain or render, so the world_matrix()
         // reads below are never asked to resolve a still-dirty transform; then block until
         // every load issued above has finished, so frame 0 sees a fully populated scene.
-        coopa::scene::install_transform_system(scene_mgr_.get_active_scene());
+        coopa::scene::install_transform_system(scene);
         // Runs at UpdatePhase::Animation (300), before TransformResolve (350) -- Scene::update()
         // orders installed systems by phase regardless of install call order, so this only needs
         // to exist before the scene starts ticking, same as install_transform_system() above.
-        coopa::anim::install_animation_system(scene_mgr_.get_active_scene());
+        coopa::anim::install_animation_system(scene);
         drain_pending_assets_();
 
         // Fail fast on a typo'd/unregistered PBRMaterial::shader -- see
         // PixelRenderPipeline::validate_material_shaders()'s doc for why this can't happen
         // during YAML parsing itself.
-        pipeline_.validate_material_shaders(scene_mgr_.get_active_scene());
+        pipeline_.validate_material_shaders(scene);
 
+        scene.set_simulating(!edit_mode_);
         apply_cursor_capture_();
-        read_cursor_pos_override_();
     }
+
+public:
 
     ~Engine() {
         ctx_.wait_idle();
@@ -415,8 +661,10 @@ public:
         {
             CpuTimer t(prof, CpuScope::Input);
             ctx_.poll(); // window_.new_frame() + poll_events() + frame timer update.
+            for (auto& fn : input_queue_) fn(ctx_.input());
+            input_queue_.clear();
 
-            if (input_.is_down("quit", ctx_.input())) {
+            if (options_.escape_quits && input_.is_down("quit", ctx_.input())) {
                 ctx_.window().set_should_close(true);
             }
 
@@ -427,15 +675,17 @@ public:
             CpuTimer t(prof, CpuScope::Assets);
             assets_.update(dt);
         }
+        if (hooks_.pre_scene_update) hooks_.pre_scene_update(dt);
 
         {
             CpuTimer t(prof, CpuScope::SceneUpdate);
-            if (scene_mgr_.has_scene()) {
+            if (scene_mgr_.has_scene() && !edit_mode_) {
                 drive_camera_controller_(scene_mgr_.get_active_scene());
                 drive_kinematic_controllers_(scene_mgr_.get_active_scene());
                 drive_free_movers_(scene_mgr_.get_active_scene());
             }
             scene_mgr_.update(dt);
+            if (overlay_scene_) overlay_scene_->update(dt);
         }
         {
             CpuTimer t(prof, CpuScope::LateUpdate);
@@ -446,12 +696,15 @@ public:
                 // EventSystem::process() is dispatched from inside late_update() (400).
                 drive_ui_canvases_(scene_mgr_.get_active_scene());
             }
+            if (overlay_scene_) drive_ui_canvases_(*overlay_scene_);
             // late_update() runs LateBehaviourSystem, flushes each worker's deferred
             // SceneCommandBuffer and advances Scene::frame_index(). Must precede render() so a
             // same-frame deferred spawn or destroy is reflected in what is drawn, matching
             // Unity's Update -> LateUpdate -> render order.
             scene_mgr_.late_update(dt);
+            if (overlay_scene_) overlay_scene_->late_update(dt);
         }
+        if (hooks_.post_late_update) hooks_.post_late_update(dt);
 
         if (scene_mgr_.has_scene()) {
             {
@@ -459,6 +712,7 @@ public:
                 upload_dynamic_meshes_(scene_mgr_.get_active_scene());
                 gather_debug_lines_(scene_mgr_.get_active_scene());
             }
+            if (hooks_.pre_render) hooks_.pre_render(dt);
             CpuTimer t(prof, CpuScope::Render);
             pipeline_.render(ctx_.renderer(), scene_mgr_.get_active_scene(), dt);
         }
@@ -476,6 +730,8 @@ public:
 
     coopa::gfx::presentation::Window& window() { return ctx_.window(); }
     coopa::gfx::core::Device&         device() { return ctx_.device(); }
+    coopa::gfx::memory::Allocator&    allocator() { return ctx_.allocator(); }
+    coopa::gfx::command::CommandPool& command_pool() { return ctx_.command_pool(); }
     coopa::input::InputMap&           input()  { return input_; }
     /// @brief The active scene -- for physics-focused headless tests and gameplay code that
     /// needs to reach a system (e.g. `scene().find_system("Physics")`) or spawn objects.
@@ -654,6 +910,8 @@ private:
     void gather_debug_lines_(coopa::scene::Scene& scene) {
         std::vector<render::DebugLine>& out = pipeline_.debug_lines();
         out.clear();
+        // An embedding host (the editor's grid, gizmos, wireframe) appends after this, from
+        // FrameHooks::pre_render -- which runs after this clear, so it always wins the frame.
         if (render::parse_debug_view(config_.render.debug_view) != render::DebugView::Lines) return;
 
         auto* sys = dynamic_cast<coopa::physx::system::PhysicsSystem*>(scene.find_system("Physics"));
@@ -727,7 +985,9 @@ private:
                 // swapchain-sized overlay target, and ctx_.input()'s cursor is in window
                 // pixels, so this is the sizing that makes both agree. See the doc above.
                 canvas->set_viewport(ww, wh);
-                canvas->set_input(ctx_.input());
+                // Cursor positions arrive in screen points; the canvas is sized in framebuffer
+                // pixels. They differ on HiDPI displays.
+                canvas->set_input(ctx_.input(), cursor_scale());
                 continue;
             }
             // Seed the DrawList's default texture BEFORE late_update() emits against it:
@@ -770,12 +1030,10 @@ private:
                             uint32_t rw, uint32_t rh,
                             glm::vec3& out_origin, glm::vec3& out_dir) {
         if (rw == 0 || rh == 0) return false;
-        const uint32_t sw = ctx_.swapchain().extent().width;
-        const uint32_t sh = ctx_.swapchain().extent().height;
-        render::LetterboxRect box = render::compute_display_rect(config_.render, sw, sh, rw, rh);
+        render::LetterboxRect box = display_rect();
         if (box.w == 0 || box.h == 0) return false;
 
-        glm::vec2 cursor = ctx_.input().cursor_position() - glm::vec2(box.x, box.y);
+        glm::vec2 cursor = ctx_.input().cursor_position() * cursor_scale() - glm::vec2(box.x, box.y);
         // Divide by box.w/h rather than box.scale: under "fit" mode w/h are rounded to whole
         // pixels, so w/rw and scale differ slightly, and w/h is what the blit actually used.
         glm::vec2 px(cursor.x * static_cast<float>(rw) / static_cast<float>(box.w),
@@ -815,7 +1073,7 @@ private:
      * without stealing their mouse for the duration.
      */
     void apply_cursor_capture_() {
-        if (no_input_ || !config_.window.visible) return;
+        if (no_input_ || !config_.window.visible || edit_mode_) return;
         if (!scene_mgr_.has_scene()) return;
         auto* cc = scene_mgr_.get_active_scene().find_first_component<scene::CameraController>();
         if (cc && cc->capture_cursor) {
@@ -823,10 +1081,14 @@ private:
         }
     }
 
-    /** @brief Resolves a config-relative asset path against ROOT_DIR, unless already absolute. */
-    static std::string resolve_path_(const std::string& path) {
-        if (std::filesystem::path(path).is_absolute()) return path;
-        return std::string(ROOT_DIR) + "/" + path;
+    /** @brief Resolves a config-relative asset path against the project root, unless already absolute. */
+    std::string resolve_path_(const std::string& path) const {
+        return resolve_against_(options_.project_root, path);
+    }
+
+    static std::string resolve_against_(const std::filesystem::path& root, const std::string& path) {
+        if (path.empty() || std::filesystem::path(path).is_absolute()) return path;
+        return (root / path).string();
     }
 
     /**
@@ -907,7 +1169,7 @@ private:
      *
      * Accepts either a bare scene NAME under assets/scenes (`SCENE=world_canvas_test`, which
      * expands to assets/scenes/<name>/scene.yaml, the layout every scene in this repo uses)
-     * or an explicit path to a .yaml. Matches the ONESHOT/MAX_FRAMES/FIXED_DT/CAPTURE_FRAMES/
+     * or an explicit path to a .yaml/.caml. Matches the ONESHOT/MAX_FRAMES/FIXED_DT/CAPTURE_FRAMES/
      * NO_INPUT family: a scripted or one-off run should not have to edit assets/config.yaml,
      * which is version-controlled and describes the DEFAULT scene.
      *
@@ -918,7 +1180,7 @@ private:
         const char* v = std::getenv("SCENE");
         if (!v || !*v) return configured;
         std::string scene(v);
-        if (scene.size() >= 5 && scene.compare(scene.size() - 5, 5, ".yaml") == 0) return scene;
+        if (coopa::yaml::is_document_ext(scene)) return scene;
         return "assets/scenes/" + scene + "/scene.yaml";
     }
 
@@ -946,7 +1208,8 @@ private:
     }
 
     /** @brief Copies AppConfig's render section into a PixelRenderConfig with shader_dir/palette_path resolved. */
-    static render::PixelRenderConfig make_render_config_(const AppConfig& config) {
+    static render::PixelRenderConfig make_render_config_(const AppConfig& config,
+                                                         const std::filesystem::path& project_root) {
         render::PixelRenderConfig rc = config.render;
         rc.shader_dir = std::string(ROOT_DIR) + "/assets/shaders";
         // App directory first, gfxcoopa's shared base library second -- the runtime mirror of
@@ -960,8 +1223,8 @@ private:
             std::string(PROJ_DIR) + "/gfxcoopa/assets/shaders",
             std::string(PROJ_DIR) + "/uicoopa/assets/shaders",
         });
-        if (!rc.palette_path.empty()) rc.palette_path = resolve_path_(rc.palette_path);
-        if (!rc.grading_lut_path.empty()) rc.grading_lut_path = resolve_path_(rc.grading_lut_path);
+        if (!rc.palette_path.empty()) rc.palette_path = resolve_against_(project_root, rc.palette_path);
+        if (!rc.grading_lut_path.empty()) rc.grading_lut_path = resolve_against_(project_root, rc.grading_lut_path);
 
         // Derived surface shaders this app ships -- see gfx/surface/*.glsl. A scene material
         // opts in via `shader: <name>` (see PBRMaterial::shader); a material that never sets it
@@ -1007,7 +1270,8 @@ private:
         return rc;
     }
 
-    AppConfig config_;
+    EngineOptions options_;
+    AppConfig     config_;
 
     // jobs_ is declared (and constructed) before ctx_/pipeline_/assets_/scene_mgr_, and
     // destroyed after all of them, since every one of those may still be submitting to or
@@ -1035,6 +1299,11 @@ private:
     /// nothing that records into it -- pipeline_'s GpuProfiler is reset in the destructor.
     std::unique_ptr<render::FrameProfile> profile_;
     uint64_t profile_frame_ = 0;
+
+    bool                  edit_mode_     = false;
+    FrameHooks            hooks_;
+    std::vector<std::function<void(coopa::input::Input&)>> input_queue_;
+    coopa::scene::Scene*  overlay_scene_ = nullptr;
 };
 
 

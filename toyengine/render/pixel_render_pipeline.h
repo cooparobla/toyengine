@@ -64,6 +64,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -262,6 +263,39 @@ public:
      *        matching how it never owns the scene it reads).
      */
     std::vector<DebugLine>& debug_lines() { return debug_lines_; }
+
+    /**
+     * @brief Confines the scene image to a window-pixel rect (an editor viewport panel); the
+     *        image is letterboxed/fit inside it exactly as it would be inside the window.
+     *        nullopt (the default) uses the whole window.
+     *
+     * Applied at the next render(). Only the display-rect-sized resources (world-UI layer,
+     * tilt shift) are rebuilt when the rect's SIZE changes, and nothing when only its
+     * position does -- the screen-UI pass and overlay target follow the swapchain alone.
+     */
+    void set_display_region(std::optional<LetterboxRect> region) {
+        if (region && (region->w == 0 || region->h == 0)) region.reset();
+        display_region_ = region;
+    }
+    const std::optional<LetterboxRect>& display_region() const { return display_region_; }
+
+    /** @brief The window-pixel rect the scene image lands in for a swapchain of sw x sh. */
+    LetterboxRect display_rect_for(uint32_t sw, uint32_t sh) const {
+        if (display_region_) {
+            LetterboxRect box = compute_display_rect(config_, display_region_->w, display_region_->h,
+                                                     render_extent_.width, render_extent_.height);
+            box.x += display_region_->x;
+            box.y += display_region_->y;
+            return box;
+        }
+        return compute_display_rect(config_, sw, sh, render_extent_.width, render_extent_.height);
+    }
+
+    /**
+     * @brief A second scene whose screen-space canvases draw over the main scene's (the
+     *        editor UI). Null removes it. Needs screen_ui_enabled.
+     */
+    void set_overlay_scene(coopa::scene::Scene* scene) { overlay_scene_ = scene; }
 
     /**
      * @brief world_ui_pass_'s 1x1 white texture view, for seeding a world canvas's
@@ -2216,7 +2250,10 @@ private:
                 ? static_cast<float>(grading_lut_.size()) : 0.0f;
             pixel_stylize_pass_->draw(cmd, post_pc, render_extent_.width, render_extent_.height);
         }
-        if (active_view == DebugView::Lines) {
+        // Also whenever a host filled lines itself (the editor's grid, gizmos and wireframe): Engine
+        // clears debug_lines_ every frame unless debug_view is "lines", so a game frame with no host
+        // lines draws exactly as before.
+        if (active_view == DebugView::Lines || !debug_lines_.empty()) {
             debug_line_pass_->draw(cmd, ctx.proj * ctx.view,
                 LetterboxRect{0, 0, render_extent_.width, render_extent_.height});
         }
@@ -2631,7 +2668,14 @@ private:
         //
         // Each canvas's DrawList was emitted by CanvasComponent::late_update() during
         // Scene::late_update(), which the caller runs before render().
-        const std::vector<coopa::ui::CanvasComponent*> all_canvases = coopa::ui::collect_canvases(scene);
+        std::vector<coopa::ui::CanvasComponent*> all_canvases = coopa::ui::collect_canvases(scene);
+        // The overlay scene's (the editor UI's) screen canvases come last, so they draw over the
+        // game's own. Its world-space canvases, if any, are ignored: it has no camera of its own.
+        if (overlay_scene_) {
+            for (coopa::ui::CanvasComponent* c : coopa::ui::collect_canvases(*overlay_scene_)) {
+                if (!c->is_world_space()) all_canvases.push_back(c);
+            }
+        }
 
         world_canvases_.clear();
         if (world_ui_pass_) {
@@ -2928,9 +2972,7 @@ private:
         // upscaled_extent_ is assigned before the rebuilds because rebuild_overlay_chain_() reads
         // it to size the world-UI layer. upscale_pass_ needs no rebuild: it is built against
         // swapchain_pass, which Renderer::recreate_framebuffers() keeps compatible across a resize.
-        const LetterboxRect letterbox = compute_display_rect(
-            config_, swapchain_.extent().width, swapchain_.extent().height,
-            render_extent_.width, render_extent_.height);
+        const LetterboxRect letterbox = display_rect_for(swapchain_.extent().width, swapchain_.extent().height);
 
         const VkExtent2D swapchain_extent = swapchain_.extent();
         const bool swapchain_changed = swapchain_extent.width  != overlay_extent_.width ||
@@ -2953,8 +2995,16 @@ private:
                     config_.shaders("fullscreen.vert"), config_.shaders("tilt_shift.frag"));
             }
             // Last, and it binds the composite's base image itself -- which is why the tilt-shift
-            // rebuild above has to come first.
-            rebuild_overlay_chain_(swapchain_extent.width, swapchain_extent.height);
+            // rebuild above has to come first. A display-rect change alone (an editor viewport
+            // panel resized) leaves the swapchain-sized half -- overlay target, screen-UI pass --
+            // alone: rebuilding the screen-UI pass would drop the editor UI's registered textures
+            // on every splitter drag.
+            if (swapchain_changed) {
+                rebuild_overlay_chain_(swapchain_extent.width, swapchain_extent.height);
+            } else {
+                rebuild_display_layer_();
+                bind_composite_inputs_();
+            }
         }
         return letterbox;
     }
@@ -3228,14 +3278,22 @@ private:
                                         static_cast<float>(froxel_volumetrics_pass_->slices()),
                                         static_cast<float>(coopa::gfx::engine::passes::FroxelVolumetricsPass::kAtlasColumns));
             const float far = glm::max(config_.volumetrics_max_distance, 0.2f);
-            // History is last frame's grid only if last frame ran this pass with the same grid.
-            const bool history_ok = froxel_history_valid_ && prev_view_proj_valid_;
+            // History is last frame's grid only if last frame ran this pass with the same grid:
+            // record_grid() ping-pongs on frame parity, so a skipped frame (volumetrics toggled
+            // off and back on) would otherwise read a grid two or more frames stale.
+            const bool history_ok = froxel_history_valid_ && prev_view_proj_valid_ &&
+                                    froxel_last_frame_ + 1 == frame_index_;
             vol.froxel_params   = glm::vec4(0.1f, far, glm::clamp(config_.volumetrics_froxel_history, 0.0f, 0.99f),
                                             history_ok ? 1.0f : 0.0f);
             vol.prev_view_proj  = prev_unjittered_view_proj_;
             vol.prev_camera_pos = glm::vec4(prev_vol_cam_pos_, 0.0f);
+            vol.froxel_params2  = glm::vec4(
+                static_cast<float>(glm::clamp(config_.volumetrics_froxel_miss_samples, 1u, 16u)),
+                config_.aa_mode == "taa" ? glm::max(config_.volumetrics_froxel_lookup_jitter, 0.0f) : 0.0f,
+                0.0f, 0.0f);
             prev_vol_cam_pos_     = cam_pos;
             froxel_history_valid_ = true;
+            froxel_last_frame_    = frame_index_;
         }
 
         volumetrics_data_.upload();
@@ -3424,6 +3482,36 @@ private:
      * @param h Swapchain height in pixels.
      */
     void rebuild_overlay_chain_(uint32_t w, uint32_t h) {
+        rebuild_display_layer_();
+
+        overlay_target_ = std::make_unique<coopa::gfx::engine::targets::OffscreenTarget>(
+            device_, allocator_, w, h, coopa::gfx::Format::RGBA8_Unorm);
+        overlay_extent_ = VkExtent2D{w, h};
+
+        ui_composite_pass_ = std::make_unique<passes::UiCompositePass>(
+            device_, overlay_target_->render_pass_object(),
+            config_.shaders("fullscreen.vert"),
+            config_.shaders("ui_composite.frag"));
+        bind_composite_inputs_();
+
+        if (config_.screen_ui_enabled) {
+            // No ExtraSets, unlike world_ui_pass_: a screen-space overlay has nothing to be
+            // occluded by, so there is no scene-depth compare and no set 1.
+            screen_ui_pass_ = std::make_unique<coopa::ui::UiPass>(
+                device_, allocator_, cmd_pool_, overlay_target_->render_pass_object(),
+                config_.shaders("ui.vert"),
+                config_.shaders("ui_quad.frag"),
+                config_.shaders("ui_text.frag"));
+        }
+
+        upscale_pass_->set_source_image(overlay_target_->color_view_typed(), nearest_sampler_);
+    }
+
+    /**
+     * @brief (Re)builds the display-rect-sized world-UI layer and its pass. Reads
+     *        upscaled_extent_; the caller has waited for the device to idle.
+     */
+    void rebuild_display_layer_() {
         // --- The world-UI layer, at the DISPLAY rect ---
         // Reset the pass BEFORE replacing the target it was built against: TexturedQuad2DPass
         // stores the RenderPass& it was constructed from, and this closes the window in which
@@ -3434,15 +3522,10 @@ private:
             coopa::gfx::Format::RGBA8_Unorm);
         ui_world_layer_clear_ = false;   // a fresh image is UNDEFINED until its first write
         rebuild_world_ui_pass_();
+    }
 
-        overlay_target_ = std::make_unique<coopa::gfx::engine::targets::OffscreenTarget>(
-            device_, allocator_, w, h, coopa::gfx::Format::RGBA8_Unorm);
-        overlay_extent_ = VkExtent2D{w, h};
-
-        ui_composite_pass_ = std::make_unique<passes::UiCompositePass>(
-            device_, overlay_target_->render_pass_object(),
-            config_.shaders("fullscreen.vert"),
-            config_.shaders("ui_composite.frag"));
+    /** @brief Points ui_composite_pass_ at the current scene image and world-UI layer. */
+    void bind_composite_inputs_() {
         // Startup-fixed source selection, the same caveat post_source_view/pre_fog_view_typed_
         // carry: flipping config_.tilt_shift_enabled without a pipeline rebuild would leave
         // this reading a target tilt_shift_pass_ never wrote this frame.
@@ -3456,18 +3539,6 @@ private:
         // equally exact at 1:1 but would silently turn into a blur the moment the two sizes
         // drift by a pixel, which is exactly the failure this binding should not hide.
         ui_composite_pass_->set_ui_image(ui_world_target_->color_view_typed(), nearest_sampler_);
-
-        if (config_.screen_ui_enabled) {
-            // No ExtraSets, unlike world_ui_pass_: a screen-space overlay has nothing to be
-            // occluded by, so there is no scene-depth compare and no set 1.
-            screen_ui_pass_ = std::make_unique<coopa::ui::UiPass>(
-                device_, allocator_, cmd_pool_, overlay_target_->render_pass_object(),
-                config_.shaders("ui.vert"),
-                config_.shaders("ui_quad.frag"),
-                config_.shaders("ui_text.frag"));
-        }
-
-        upscale_pass_->set_source_image(overlay_target_->color_view_typed(), nearest_sampler_);
     }
 
     /**
@@ -4613,6 +4684,10 @@ private:
     // resolution_mode == "divisor", where render_extent_ itself stays startup-fixed, so a resize
     // moves the fit rect but not the internal render resolution.
     LetterboxRect                  upscaled_extent_;
+    /// See set_display_region(); nullopt = the whole window.
+    std::optional<LetterboxRect>   display_region_;
+    /// See set_overlay_scene(); non-owning.
+    coopa::scene::Scene*           overlay_scene_ = nullptr;
 
     coopa::gfx::engine::targets::GBufferTarget   gbuffer_target_;
     coopa::gfx::engine::targets::OffscreenTarget offscreen_target_; // lit + sky, pre-post, HDR
@@ -4687,6 +4762,7 @@ private:
     std::unique_ptr<coopa::gfx::engine::passes::FroxelVolumetricsPass> froxel_volumetrics_pass_;
     glm::vec3 prev_vol_cam_pos_{0.0f};      ///< Last frame's camera, for froxel reprojection.
     bool      froxel_history_valid_ = false; ///< A previous frame filled the froxel grid.
+    uint32_t  froxel_last_frame_    = 0;     ///< frame_index_ of the last frame that filled it.
 
     coopa::gfx::engine::targets::ShadowMapTarget shadow_target_;
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout>   shadow_layout_;

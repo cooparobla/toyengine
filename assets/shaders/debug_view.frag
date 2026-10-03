@@ -98,6 +98,9 @@ layout(location = 0) out vec4 out_color;
 #define DBG_SSR             14
 #define DBG_SSR_CONFIDENCE  15
 #define DBG_SSGI            16
+// 17-19 (dof, volumetrics, lines) are not drawn by this shader.
+#define DBG_SOLID           20
+#define DBG_WIREFRAME       21
 
 // band()/shade_light() -- byte-for-byte the same as pixel_lighting.frag's own (not a
 // shared body: they read `params` fields specific to each shader's own push-constant
@@ -233,6 +236,32 @@ void main() {
     vec4 g0 = texture(g_albedo_ao, in_uv);
     vec4 g1 = texture(g_normal_metallic, in_uv);
     vec3 N = g1.rgb;
+
+    // Editor viewport shading: lighting-independent, so it reads the same in a scene with no
+    // lights at all -- the point of authoring in it.
+    if (params.channel == DBG_SOLID || params.channel == DBG_WIREFRAME) {
+        // Vertical backdrop gradient (screen space; in_uv.y = 0 at the top).
+        vec3 bg = mix(vec3(0.24, 0.25, 0.27), vec3(0.15, 0.16, 0.18), in_uv.y);
+        if (dot(N, N) < 0.001) {
+            out_color = vec4(params.channel == DBG_WIREFRAME ? bg * 0.6 : bg, 1.0);
+            return;
+        }
+        N = normalize(N);
+        if (params.channel == DBG_WIREFRAME) {
+            out_color = vec4(bg * 0.6 + vec3(0.035), 1.0);
+            return;
+        }
+        vec3 wp = texture(g_position_roughness, in_uv).rgb;
+        vec3 Vh = normalize(camera.camera_pos - wp);
+        float head = max(dot(N, Vh), 0.0);
+        float key  = max(dot(N, normalize(vec3(0.35, 0.45, 0.82))), 0.0);
+        float fill = max(dot(N, normalize(vec3(-0.6, -0.3, 0.2))), 0.0);
+        float shade = 0.22 + 0.55 * head + 0.33 * key + 0.10 * fill;
+        vec3 base = mix(vec3(0.82), g0.rgb, 0.35);
+        out_color = vec4(base * shade, 1.0);
+        return;
+    }
+
     if (dot(N, N) < 0.001) {
         // Sky / unwritten texel: nothing to show on any material or lighting channel.
         out_color = vec4(0.0, 0.0, 0.0, 1.0);

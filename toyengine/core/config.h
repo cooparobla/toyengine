@@ -183,6 +183,7 @@ struct AppConfig {
                 if (r.contains("ssr_reflect_transparent")) config.render.ssr_reflect_transparent = r.at("ssr_reflect_transparent").get_value<bool>();
                 if (r.contains("refraction_enabled")) config.render.refraction_enabled = r.at("refraction_enabled").get_value<bool>();
                 if (r.contains("fog_enabled"))       config.render.fog_enabled       = r.at("fog_enabled").get_value<bool>();
+                if (r.contains("underwater_enabled")) config.render.underwater_enabled = r.at("underwater_enabled").get_value<bool>();
                 if (r.contains("volumetrics_enabled")) config.render.volumetrics_enabled = r.at("volumetrics_enabled").get_value<bool>();
                 if (r.contains("sdf_enabled"))         config.render.sdf_enabled         = r.at("sdf_enabled").get_value<bool>();
                 if (r.contains("sdf_shadows_enabled")) config.render.sdf_shadows_enabled = r.at("sdf_shadows_enabled").get_value<bool>();

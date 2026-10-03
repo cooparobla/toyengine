@@ -253,6 +253,44 @@ inline const std::map<std::string, ComponentSchema>& schemas() {
             f_bool("is_kinematic", false, true),
             f_bool("interpolation", false),
         }});
+        // toyengine/water/: a body of water (baked by WaterSystem onto the sibling MeshRenderer)
+        // and a floating Rigidbody. `size` uses x/y only (the procedural grid's extent).
+        add({"WaterBody", "Water", {
+            f_enum("mode", {"planar", "flowing"}, true),
+            f_asset("mesh_path", "meshes", ".yaml", true),
+            f_vec3("size", glm::vec3(20.0f, 20.0f, 0.0f), 0.1f, true),
+            f_int("resolution", 48, 1, 512, true),
+            f_float("wave_amplitude", 0.15f, 0.005f, 0.0f, 20.0f, true),
+            f_float("wave_length", 8.0f, 0.05f, 0.1f, 500.0f, true),
+            f_float("wave_direction", 0.0f, 0.5f, -360.0f, 360.0f),
+            f_float("wave_steepness", 0.5f, 0.005f, 0.0f, 1.0f),
+            f_float("flow_speed", 1.0f, 0.01f, 0.0f, 50.0f),
+            f_float("flow_min_speed", 0.6f, 0.01f, 0.0f, 50.0f),
+            f_float("flow_slope_gain", 4.0f, 0.05f, 0.0f, 100.0f),
+            f_float("obstacle_radius", 1.5f, 0.02f, 0.0f, 50.0f),
+            f_float("wake_length", 4.0f, 0.05f, 0.0f, 100.0f),
+            f_color("foam_color", glm::vec3(0.92f, 0.96f, 1.0f)),
+            f_float("foam_amount", 1.0f, 0.01f, 0.0f, 4.0f),
+            f_float("shore_foam_depth", 0.6f, 0.01f, 0.0f, 20.0f),
+            f_float("edge_fade_depth", 0.15f, 0.005f, 0.0f, 5.0f),
+            f_float("ripple_strength", 0.35f, 0.005f, 0.0f, 4.0f),
+            f_float("ripple_scale", 1.2f, 0.01f, 0.01f, 20.0f),
+            f_float("clarity", 3.0f, 0.02f, 0.01f, 200.0f),
+            f_color("underwater_color", glm::vec3(0.05f, 0.24f, 0.28f)),
+            f_float("underwater_visibility", 14.0f, 0.1f, 0.1f, 1000.0f),
+            f_color("underwater_absorption", glm::vec3(0.35f, 0.09f, 0.06f)),
+            f_float("caustics", 1.0f, 0.01f, 0.0f, 10.0f),
+            f_float("density", 1000.0f, 1.0f, 1.0f, 20000.0f),
+            f_float("max_depth", 60.0f, 0.5f, 0.1f, 10000.0f),
+        }});
+        add({"Buoyancy", "Water", {
+            f_int("subdivisions", 2, 1, 4, true),
+            f_float("volume", -1.0f, 0.01f, -1.0f, 1e6f),
+            f_float("linear_drag", 1.5f, 0.01f, 0.0f, 100.0f, true),
+            f_float("angular_drag", 1.0f, 0.01f, 0.0f, 100.0f, true),
+            f_float("form_drag", 1.0f, 0.01f, 0.0f, 10.0f),
+            f_float("buoyancy_scale", 1.0f, 0.01f, 0.0f, 10.0f),
+        }});
         add({"CameraController", "Gameplay", {
             f_enum("mode", {"Orbit", "Fly"}, true),
             f_vec3("target", glm::vec3(0.0f), 0.02f),

@@ -72,6 +72,10 @@
 #include <toyengine/render/visibility.h>
 #include <toyengine/scene/free_mover.h>
 #include <toyengine/world/terrain_chunk.h>
+#include <toyengine/water/buoyancy.h>
+#include <toyengine/water/water_body.h>
+#include <toyengine/water/water_flow_bake.h>
+#include <toyengine/water/water_system.h>
 #include <toyengine/world/terrain_component.h>
 #include <toyengine/world/terrain_sampler.h>
 #include <toyengine/scene/cloth_renderer.h>
@@ -4414,6 +4418,488 @@ void test_engine_display_region_and_viewport_ray() {
 // Registry
 // =====================================================================================
 
+
+// =====================================================================================
+// Group "water" -- toyengine/water/: the wave mirror, the surface query, the flow bake and
+// buoyancy, all CPU-only (a WaterSystem with no device bakes the query but publishes no mesh).
+// Group "render_water" -- the water_test scene end to end.
+// =====================================================================================
+
+/** @brief Gerstner's horizontal displacement means "height above XY" needs the inverse; the
+ *         CPU query must land on the same crest the forward sum (what the GPU draws) puts there. */
+void test_water_wave_height_inverse_matches_forward() {
+    toy::water::WaveParams w;
+    w.amplitude = 0.4f;
+    w.wavelength = 7.0f;
+    w.direction = 0.6f;
+    w.steepness = 0.8f;
+    float worst = 0.0f;
+    for (int i = 0; i < 64; ++i) {
+        glm::vec2 p0(std::sin(i * 1.7f) * 20.0f, std::cos(i * 2.3f) * 20.0f);
+        const float t = 0.37f * static_cast<float>(i);
+        toy::water::WaveSample fwd = toy::water::evaluate(w, p0, t);
+        glm::vec2 target = p0 + glm::vec2(fwd.displacement);
+        float h = toy::water::height_at(w, target, t, [](const glm::vec2&) { return 1.0f; }, nullptr, 4);
+        worst = std::max(worst, std::fabs(h - fwd.displacement.z));
+    }
+    expect(worst < 0.02f * w.amplitude * 4.0f,
+           "water waves: inverted height matches the forward Gerstner sum (worst " + std::to_string(worst) + ")");
+
+    toy::water::WaveParams calm;
+    calm.amplitude = 0.0f;
+    expect_near(toy::water::evaluate(calm, glm::vec2(3.0f), 1.0f).displacement.z, 0.0f, 1e-7f,
+                "water waves: zero amplitude is flat");
+    expect(toy::water::depth_attenuation(0.0f, 8.0f) < toy::water::depth_attenuation(10.0f, 8.0f),
+           "water waves: shallow water calms the waves");
+}
+
+/** @brief The XY triangle grid: inside interpolates, outside reports no water. */
+void test_water_surface_query_interpolates_and_bounds() {
+    toy::water::WaterSurfaceQuery q;
+    std::vector<toy::water::WaterVertex> v(4);
+    v[0].position = {0.0f, 0.0f, 1.0f};
+    v[1].position = {10.0f, 0.0f, 2.0f};
+    v[2].position = {10.0f, 10.0f, 2.0f};
+    v[3].position = {0.0f, 10.0f, 1.0f};
+    for (auto& x : v) x.depth = 3.0f;
+    v[1].flow = v[2].flow = glm::vec3(2.0f, 0.0f, 0.0f);
+    q.build(v, {0, 1, 2, 0, 2, 3});
+    toy::water::WaterBaseSample b;
+    expect(q.sample_base(glm::vec2(5.0f, 5.0f), b), "water query: centre is on the surface");
+    expect_near(b.height, 1.5f, 1e-4f, "water query: height interpolates across the quad");
+    expect_near(b.flow.x, 1.0f, 1e-4f, "water query: flow interpolates across the quad");
+    expect(!q.sample_base(glm::vec2(-1.0f, 5.0f), b), "water query: outside the mesh is not water");
+}
+
+namespace water_test_util {
+
+/** @brief A strip `length` x `width` along +X (local), resolution `nx` x `ny`, height z(x). */
+template <typename HeightFn>
+void make_strip(float length, float width, int nx, int ny, HeightFn z, std::vector<glm::vec3>& pos,
+                std::vector<glm::vec2>& uv, std::vector<uint32_t>& idx) {
+    pos.clear();
+    uv.clear();
+    idx.clear();
+    for (int j = 0; j <= ny; ++j) {
+        for (int i = 0; i <= nx; ++i) {
+            float x = length * static_cast<float>(i) / nx;
+            float y = width * (static_cast<float>(j) / ny - 0.5f);
+            pos.push_back({x, y, z(x)});
+            uv.push_back({x, y});
+        }
+    }
+    const uint32_t row = static_cast<uint32_t>(nx + 1);
+    for (uint32_t j = 0; j < static_cast<uint32_t>(ny); ++j) {
+        for (uint32_t i = 0; i < static_cast<uint32_t>(nx); ++i) {
+            uint32_t a = j * row + i;
+            idx.insert(idx.end(), {a, a + 1, a + row + 1, a, a + row + 1, a + row});
+        }
+    }
+}
+
+/** @brief Mean flow over the strip's centre row for x in [x0, x1]. */
+glm::vec3 mean_flow(const std::vector<glm::vec3>& pos, const std::vector<glm::vec3>& flow, float x0, float x1) {
+    glm::vec3 sum(0.0f);
+    int n = 0;
+    for (std::size_t i = 0; i < pos.size(); ++i) {
+        if (pos[i].x < x0 || pos[i].x > x1 || std::fabs(pos[i].y) > 0.6f) continue;
+        sum += flow[i];
+        ++n;
+    }
+    return n ? sum / static_cast<float>(n) : sum;
+}
+
+} // namespace water_test_util
+
+/** @brief The bake's whole premise: water runs downhill, faster and whiter where it is steep. */
+void test_water_flow_bake_runs_downhill_faster_when_steep() {
+    using namespace water_test_util;
+    std::vector<glm::vec3> pos, flow;
+    std::vector<glm::vec2> uv;
+    std::vector<uint32_t> idx;
+    std::vector<float> turb;
+    // Gentle (2%) for x < 20, steep (40%) for 20..30, gentle again after. Descends along +X.
+    auto z = [](float x) {
+        if (x < 20.0f) return -0.02f * x;
+        if (x < 30.0f) return -0.4f - 0.4f * (x - 20.0f);
+        return -4.4f - 0.02f * (x - 30.0f);
+    };
+    make_strip(50.0f, 4.0f, 100, 4, z, pos, uv, idx);
+    toy::water::bake_flow(pos, uv, idx, {}, {}, flow, turb);
+
+    glm::vec3 gentle = mean_flow(pos, flow, 4.0f, 16.0f);
+    glm::vec3 steep  = mean_flow(pos, flow, 22.0f, 28.0f);
+    expect(gentle.x > 0.3f && std::fabs(gentle.y) < 0.05f * gentle.x, "water flow: gentle reach flows downhill (+X)");
+    expect(steep.x > 0.0f && steep.z < 0.0f, "water flow: steep reach flows downhill and down the slope");
+    expect(glm::length(steep) > 1.8f * glm::length(gentle), "water flow: the steep reach runs much faster");
+
+    float t_gentle = 0.0f, t_steep = 0.0f;
+    for (std::size_t i = 0; i < pos.size(); ++i) {
+        if (pos[i].x > 4.0f && pos[i].x < 16.0f) t_gentle = std::max(t_gentle, turb[i]);
+        if (pos[i].x > 23.0f && pos[i].x < 27.0f) t_steep = std::min(t_steep == 0.0f ? 1.0f : t_steep, turb[i]);
+    }
+    expect(t_gentle < 0.05f, "water flow: no white water on the gentle reach");
+    expect(t_steep > 0.5f, "water flow: rapids are turbulent");
+
+    // Level water follows the UVs instead: u increasing along -X.
+    make_strip(20.0f, 4.0f, 40, 4, [](float) { return 0.0f; }, pos, uv, idx);
+    for (auto& u : uv) u.x = -u.x;
+    toy::water::bake_flow(pos, uv, idx, {}, {}, flow, turb);
+    glm::vec3 level = mean_flow(pos, flow, 4.0f, 16.0f);
+    expect(level.x < -0.3f, "water flow: level water follows UV u when there is no slope to follow");
+}
+
+/** @brief A vertical wall across part of the stream: flow slides along it, a wake forms behind. */
+void test_water_flow_bake_obstacle_deflects_and_wakes() {
+    using namespace water_test_util;
+    std::vector<glm::vec3> pos, flow_free, flow_obs;
+    std::vector<glm::vec2> uv;
+    std::vector<uint32_t> idx;
+    std::vector<float> turb_free, turb_obs;
+    make_strip(30.0f, 6.0f, 60, 12, [](float x) { return -0.03f * x; }, pos, uv, idx);
+    // A post: an infinite vertical cylinder of radius 0.5 at (15, 0).
+    toy::water::FlowRayFn post = [](const glm::vec3& o, const glm::vec3& d, float max_d, toy::water::FlowRayHit& hit) {
+        glm::vec2 oc = glm::vec2(o) - glm::vec2(15.0f, 0.0f);
+        glm::vec2 dh(d);
+        float a = glm::dot(dh, dh);
+        if (a < 1e-8f) return false;
+        float b = glm::dot(oc, dh), c = glm::dot(oc, oc) - 0.25f;
+        float disc = b * b - a * c;
+        if (disc < 0.0f) return false;
+        float t = (-b - std::sqrt(disc)) / a;
+        if (t < 0.0f || t > max_d) return false;
+        glm::vec2 p = glm::vec2(o) + dh * t - glm::vec2(15.0f, 0.0f);
+        hit.distance = t;
+        hit.normal = glm::vec3(glm::normalize(p), 0.0f);
+        return true;
+    };
+    toy::water::FlowBakeParams fp;
+    toy::water::bake_flow(pos, uv, idx, fp, {}, flow_free, turb_free);
+    toy::water::bake_flow(pos, uv, idx, fp, post, flow_obs, turb_obs);
+
+    float ahead_free = 0.0f, ahead_obs = 0.0f, wake_turb = 0.0f, far_turb = 0.0f;
+    for (std::size_t i = 0; i < pos.size(); ++i) {
+        const glm::vec3& p = pos[i];
+        if (p.x > 13.6f && p.x < 14.4f && std::fabs(p.y) < 0.3f) {
+            ahead_free += flow_free[i].x;
+            ahead_obs += flow_obs[i].x;
+        }
+        if (p.x > 16.0f && p.x < 18.0f && std::fabs(p.y) < 0.3f) wake_turb = std::max(wake_turb, turb_obs[i]);
+        if (p.x > 16.0f && p.x < 18.0f && std::fabs(p.y) > 2.5f) far_turb = std::max(far_turb, turb_obs[i]);
+    }
+    expect(ahead_obs < 0.8f * ahead_free, "water flow: the current into a post is turned aside");
+    expect(wake_turb > 0.15f, "water flow: white water trails behind the post");
+    expect(far_turb < wake_turb, "water flow: the wake stays behind the post, not across the stream");
+}
+
+namespace water_test_util {
+
+struct BuoyScene {
+    std::unique_ptr<Scene> scene;
+    toy::water::WaterSystem* water = nullptr;
+    coopa::physx::system::PhysicsSystem* physics = nullptr;
+    toy::water::WaterBody* body = nullptr;
+};
+
+/** @brief A scene with one WaterBody (calm 40x40 m planar at z = 0 unless configured). */
+BuoyScene make_water_scene(const std::function<void(toy::water::WaterBody&)>& configure = {}) {
+    BuoyScene bs;
+    bs.scene = std::make_unique<Scene>("water_test_cpu");
+    auto obj = std::make_unique<SceneObject>("water");
+    obj->add_component<TransformComponent>();
+    bs.body = obj->add_component<toy::water::WaterBody>();
+    bs.body->size = glm::vec2(40.0f);
+    bs.body->resolution = 20;
+    if (configure) configure(*bs.body);
+    bs.scene->add_root_object(std::move(obj));
+    return bs;
+}
+
+/** @brief Adds a dynamic box with a Buoyancy component. */
+SceneObject* add_box(BuoyScene& bs, const std::string& name, const glm::vec3& pos, const glm::vec3& size,
+                     float mass) {
+    auto obj = std::make_unique<SceneObject>(name);
+    obj->add_component<TransformComponent>()->transform().set_position(pos);
+    obj->add_component<coopa::physx::components::BoxCollider>()->set_size(size);
+    obj->add_component<coopa::physx::components::RigidbodyComponent>()->mass = mass;
+    obj->add_component<toy::water::Buoyancy>();
+    SceneObject* raw = obj.get();
+    bs.scene->add_root_object(std::move(obj));
+    return raw;
+}
+
+void start(BuoyScene& bs) {
+    bs.scene->start();
+    bs.water = toy::water::install_water_system(*bs.scene);
+    bs.physics = coopa::physx::system::install_physics_system(*bs.scene);
+}
+
+void run(BuoyScene& bs, float seconds) {
+    const float dt = 1.0f / 60.0f;
+    for (int i = 0; i < static_cast<int>(seconds / dt); ++i) {
+        bs.scene->update(dt);
+        bs.scene->late_update(dt);
+    }
+}
+
+glm::vec3 com_of(SceneObject* o) {
+    return o->get_component<coopa::physx::components::RigidbodyComponent>()->world_center_of_mass();
+}
+
+} // namespace water_test_util
+
+/** @brief Archimedes: a box floats with mass/(rho V) of it under water, and settles there. */
+void test_buoyancy_box_floats_at_its_density_ratio() {
+    using namespace water_test_util;
+    BuoyScene bs = make_water_scene();
+    // Flat slabs (2 x 2 x 0.5 m = 2 m^3), not cubes: a cube of density 0.25-0.75 is unstable
+    // flat-side-up and floats on an edge (correctly -- that is real hydrostatics), which would
+    // make the waterline assertions below depend on the tilt it settles at.
+    SceneObject* half = add_box(bs, "half", glm::vec3(-5.0f, 0.0f, 1.0f), glm::vec3(2.0f, 2.0f, 0.5f), 1000.0f);
+    SceneObject* light = add_box(bs, "light", glm::vec3(5.0f, 0.0f, 1.0f), glm::vec3(2.0f, 2.0f, 0.5f), 500.0f);
+    start(bs);
+    run(bs, 12.0f);
+
+    auto* bh = half->get_component<toy::water::Buoyancy>();
+    auto* bl = light->get_component<toy::water::Buoyancy>();
+    expect(bh->resolved.size() == 8u, "buoyancy: a box collider generates a 2x2x2 pontoon lattice");
+    expect_near(bh->submerged_fraction, 0.5f, 0.03f, "buoyancy: 500 kg/m^3 floats half submerged");
+    expect_near(com_of(half).z, 0.0f, 0.03f, "buoyancy: ...which puts its centre on the waterline");
+    expect_near(bl->submerged_fraction, 0.25f, 0.03f, "buoyancy: 250 kg/m^3 floats a quarter submerged");
+    expect_near(com_of(light).z, 0.125f, 0.03f, "buoyancy: ...riding a quarter of its 0.5 m height higher");
+    auto* rb = half->get_component<coopa::physx::components::RigidbodyComponent>();
+    expect(glm::length(rb->velocity()) < 0.02f, "buoyancy: the bob has damped out on calm water");
+    expect(rb->is_sleeping(), "buoyancy: a body at rest on calm water is allowed to fall asleep");
+}
+
+/** @brief Denser than water sinks -- but at a bounded speed, water drag doing its job. */
+void test_buoyancy_dense_body_sinks_with_drag() {
+    using namespace water_test_util;
+    BuoyScene bs = make_water_scene();
+    SceneObject* stone = add_box(bs, "stone", glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(1.0f), 2400.0f);
+    start(bs);
+    run(bs, 4.0f);
+    auto* rb = stone->get_component<coopa::physx::components::RigidbodyComponent>();
+    expect(com_of(stone).z < -3.0f, "buoyancy: a 2400 kg/m^3 block sinks");
+    expect(rb->velocity().z > -5.0f, "buoyancy: ...at a drag-limited speed, not in free fall");
+    expect(stone->get_component<toy::water::Buoyancy>()->submerged_fraction > 0.99f,
+           "buoyancy: ...fully submerged");
+}
+
+/** @brief Nothing outside a water body's footprint is touched (free fall stays analytic). */
+void test_buoyancy_ignores_bodies_away_from_water() {
+    using namespace water_test_util;
+    BuoyScene bs = make_water_scene();
+    SceneObject* far = add_box(bs, "far", glm::vec3(100.0f, 0.0f, 50.0f), glm::vec3(1.0f), 100.0f);
+    start(bs);
+    run(bs, 0.5f);
+    auto* rb = far->get_component<coopa::physx::components::RigidbodyComponent>();
+    expect_near(rb->velocity().z, -9.81f * 0.5f, 0.2f, "buoyancy: a body away from the water falls freely");
+    expect(!far->get_component<toy::water::Buoyancy>()->in_water, "buoyancy: ...and reports dry");
+}
+
+/** @brief Waves move floating things: a calm-water body stays put, a wavy one keeps moving. */
+void test_buoyancy_rides_waves() {
+    using namespace water_test_util;
+    BuoyScene bs = make_water_scene([](toy::water::WaterBody& w) {
+        w.waves.amplitude = 0.3f;
+        w.waves.wavelength = 8.0f;
+    });
+    SceneObject* box = add_box(bs, "box", glm::vec3(0.0f, 0.0f, 0.5f), glm::vec3(1.0f), 400.0f);
+    start(bs);
+    run(bs, 6.0f);
+    float lo = 1e9f, hi = -1e9f;
+    for (int i = 0; i < 180; ++i) {
+        run(bs, 1.0f / 60.0f);
+        lo = std::min(lo, com_of(box).z);
+        hi = std::max(hi, com_of(box).z);
+    }
+    expect(hi - lo > 0.2f, "buoyancy: a floating box heaves with the waves (range " + std::to_string(hi - lo) + " m)");
+    toy::water::WaterSample s;
+    expect(bs.water->sample(glm::vec2(com_of(box)), s), "water system: samples the surface under the box");
+    expect(std::fabs(com_of(box).z - s.surface_height) < 0.5f, "buoyancy: the box stays at the surface it rides");
+}
+
+/** @brief A flowing body carries a floating box downstream, along the derived current. */
+void test_buoyancy_carried_downstream_by_flow() {
+    using namespace water_test_util;
+    BuoyScene bs = make_water_scene([](toy::water::WaterBody& w) {
+        std::vector<glm::vec3> pos;
+        std::vector<glm::vec2> uv;
+        std::vector<uint32_t> idx;
+        make_strip(60.0f, 8.0f, 60, 8, [](float x) { return -0.03f * x; }, pos, uv, idx);
+        w.mode = toy::water::WaterMode::Flowing;
+        w.set_geometry(pos, uv, idx);
+    });
+    SceneObject* box = add_box(bs, "drifter", glm::vec3(5.0f, 0.0f, 0.0f), glm::vec3(0.6f), 60.0f);
+    start(bs);
+    run(bs, 5.0f);
+    toy::water::WaterSample s;
+    expect(bs.water->sample(glm::vec2(10.0f, 0.0f), s), "water system: the flowing strip is sampleable");
+    expect(s.flow.x > 0.5f, "water system: the strip's current runs downhill (+X)");
+    const glm::vec3 p = com_of(box);
+    expect(p.x > 9.0f, "buoyancy: the current carried the box downstream (x = " + std::to_string(p.x) + ")");
+    expect(std::fabs(p.y) < 1.0f, "buoyancy: ...along the current, not across it");
+}
+
+/** @brief Moving bodies ring the water: a splash on entry, a wake trail behind a moving body,
+ *         and silence once everything is at rest. */
+void test_water_ripples_from_splash_wake_and_rest() {
+    using namespace water_test_util;
+    BuoyScene bs = make_water_scene();
+    SceneObject* drop = add_box(bs, "drop", glm::vec3(-6.0f, 0.0f, 3.0f), glm::vec3(1.0f), 300.0f);
+    // A kinematic paddle driven straight through the water along +X at 2 m/s.
+    auto paddle_obj = std::make_unique<SceneObject>("paddle");
+    paddle_obj->add_component<TransformComponent>()->transform().set_position(glm::vec3(0.0f, 8.0f, 0.0f));
+    paddle_obj->add_component<coopa::physx::components::BoxCollider>()->set_size(glm::vec3(0.8f, 0.4f, 0.6f));
+    auto* prb = paddle_obj->add_component<coopa::physx::components::RigidbodyComponent>();
+    prb->is_kinematic = true;
+    prb->use_gravity = false;
+    SceneObject* paddle = paddle_obj.get();
+    bs.scene->add_root_object(std::move(paddle_obj));
+    start(bs);
+
+    // Splash: the dropped crate hits the water within ~0.8 s.
+    float strongest = 0.0f;
+    for (int i = 0; i < 90; ++i) {
+        run(bs, 1.0f / 60.0f);
+        for (const auto& r : bs.water->ripples()) {
+            if (glm::distance(r.position, glm::vec2(-6.0f, 0.0f)) < 1.0f) strongest = std::max(strongest, r.strength);
+        }
+    }
+    expect(strongest > 0.3f, "ripples: a falling crate splashes (strength " + std::to_string(strongest) + ")");
+
+    // Wake: 2 s of travel leaves a trail of rings along the path, in order.
+    const float dt = 1.0f / 60.0f;
+    for (int i = 0; i < 120; ++i) {
+        coopa::util::Transform& t = paddle->get_transform()->transform();
+        t.set_position(t.position() + glm::vec3(2.0f * dt, 0.0f, 0.0f));
+        run(bs, dt);
+    }
+    std::vector<float> trail;
+    for (const auto& r : bs.water->ripples()) {
+        if (std::fabs(r.position.y - 8.0f) < 0.5f) trail.push_back(r.position.x);
+    }
+    expect(trail.size() >= 6u, "ripples: a moving body leaves a wake trail (" + std::to_string(trail.size()) + " rings)");
+    expect(std::is_sorted(trail.begin(), trail.end()), "ripples: ...laid down in the order it travelled");
+    expect(!trail.empty() && trail.back() > 3.0f, "ripples: ...all along its path");
+
+    // Rest: the paddle stops, the crate settles; after the ring lifetime the lake is quiet.
+    run(bs, 12.0f);
+    expect(bs.water->ripples().empty(), "ripples: everything at rest -> no rings left (" +
+                                            std::to_string(bs.water->ripples().size()) + ")");
+    (void)drop;
+}
+
+/** @brief underwater_at(): below the surface, above it, and away from any water. */
+void test_water_underwater_query() {
+    using namespace water_test_util;
+    BuoyScene bs = make_water_scene();
+    start(bs);
+    run(bs, 0.1f);
+    auto below = bs.water->underwater_at(glm::vec3(0.0f, 0.0f, -2.0f));
+    auto above = bs.water->underwater_at(glm::vec3(0.0f, 0.0f, 2.0f));
+    auto away  = bs.water->underwater_at(glm::vec3(100.0f, 0.0f, -2.0f));
+    expect(below.underwater && below.body == bs.body, "underwater: a point 2 m down is underwater");
+    expect_near(below.depth, 2.0f, 0.05f, "underwater: ...at depth 2 m");
+    expect(!above.underwater && above.body == bs.body, "underwater: a point above is not, but is over the body");
+    expect(!away.underwater && away.body == nullptr, "underwater: a point away from any water is neither");
+}
+
+/** @brief The whole scene: water draws, floaters float, the river delivers its crates. */
+void test_water_scene_renders_and_simulates() {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
+    ScopedEnv no_input("NO_INPUT", "1");
+    toy::core::AppConfig config = make_test_config("assets/scenes/water_test/scene.yaml", 640, 360, 320, 180);
+    toy::core::Engine engine(std::move(config));
+
+    tick_frames(engine, 3);
+    auto* water = dynamic_cast<toy::water::WaterSystem*>(engine.scene().find_system("Water"));
+    expect(water != nullptr, "water scene: Engine installed the WaterSystem");
+    std::size_t baked = 0;
+    for (auto* b : engine.scene().get_components<toy::water::WaterBody>()) baked += b->bake_stage == 2 ? 1 : 0;
+    expect(baked == 2u, "water scene: lake and river both baked with physics (depth + obstacles)");
+
+    auto river_s = [&]() {
+        auto* o = engine.scene().find_object("river_crate_a");
+        return o ? water_test_util::com_of(o) : glm::vec3(0.0f);
+    };
+    const glm::vec3 crate_start = river_s();
+    tick_frames(engine, 600);
+    const glm::vec3 crate_end = river_s();
+    expect(crate_end.z < crate_start.z - 4.0f, "water scene: the river crate rode the rapids down the hill");
+    expect(glm::length(glm::vec2(crate_end) - glm::vec2(crate_start)) > 12.0f,
+           "water scene: ...a long way downstream");
+
+    auto* stone = engine.scene().find_object("stone");
+    auto* light = engine.scene().find_object("crate_light");
+    expect(stone && water_test_util::com_of(stone).z < -2.0f, "water scene: the stone sank to the bed");
+    if (light) {
+        auto* b = light->get_component<toy::water::Buoyancy>();
+        expect(b->in_water && b->submerged_fraction > 0.15f && b->submerged_fraction < 0.6f,
+               "water scene: the light crate floats (submerged " + std::to_string(b->submerged_fraction) + ")");
+    }
+
+    expect(!engine.pipeline().water_state().ripples.empty(),
+           "water scene: ripple rings (boat wake, bobbing floaters) reach the renderer");
+    expect(!engine.pipeline().underwater_active(), "water scene: the overview camera is not underwater");
+
+    const Frame frame = engine.capture_image(/*low_res=*/true);
+    long long watery = 0;
+    const size_t pixels = static_cast<size_t>(frame.width) * frame.height;
+    for (size_t i = 0; i < pixels; ++i) {
+        const uint8_t* px = &frame.pixels[i * frame.channels];
+        if (px[2] > px[0] + 40 && px[2] > 90) ++watery; // distinctly blue
+    }
+    expect(watery > static_cast<long long>(pixels / 20), "water scene: the lake is on screen and blue");
+    if (watery <= static_cast<long long>(pixels / 20)) dump_frame(frame, "water_scene");
+}
+
+namespace water_test_util {
+/** @brief Mean RGB of a capture. */
+glm::vec3 mean_rgb(const Frame& f) {
+    glm::dvec3 sum(0.0);
+    const size_t pixels = static_cast<size_t>(f.width) * f.height;
+    for (size_t i = 0; i < pixels; ++i) {
+        const uint8_t* px = &f.pixels[i * f.channels];
+        sum += glm::dvec3(px[0], px[1], px[2]);
+    }
+    return glm::vec3(sum / static_cast<double>(std::max<size_t>(pixels, 1)));
+}
+} // namespace water_test_util
+
+/** @brief The camera under a water surface: UnderwaterPass engages, the frame turns to water
+ *         (red absorbed first), and rising above the surface turns it back off. */
+void test_underwater_scene_renders_and_toggles() {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
+    ScopedEnv no_input("NO_INPUT", "1");
+    toy::core::AppConfig config = make_test_config("assets/scenes/underwater_test/scene.yaml", 640, 360, 320, 180);
+    toy::core::Engine engine(std::move(config));
+    tick_frames(engine, 60);
+
+    expect(engine.pipeline().underwater_active(), "underwater scene: the camera starts below the surface");
+    const Frame below = engine.capture_image(/*low_res=*/true);
+    const glm::vec3 c_below = water_test_util::mean_rgb(below);
+    expect(c_below.g > c_below.r * 1.4f && c_below.b > c_below.r * 1.4f,
+           "underwater scene: the frame is water-tinted, red absorbed (mean rgb " +
+               std::to_string(c_below.r) + ", " + std::to_string(c_below.g) + ", " + std::to_string(c_below.b) + ")");
+
+    // Rise above the surface.
+    auto* cc = engine.scene().find_first_component<toy::scene::CameraController>();
+    expect(cc != nullptr, "underwater scene: has an orbit camera");
+    if (cc) {
+        cc->movement_smoothing = 0.0f;
+        cc->distance = 30.0f;
+        cc->pitch_deg = 45.0f;
+    }
+    tick_frames(engine, 30);
+    expect(!engine.pipeline().underwater_active(), "underwater scene: above the surface the pass is off");
+    const Frame above = engine.capture_image(true);
+    const glm::vec3 c_above = water_test_util::mean_rgb(above);
+    expect(glm::length(c_above - c_below) > 15.0f, "underwater scene: ...and the frame changes accordingly");
+    if (!(c_below.g > c_below.r * 1.4f)) dump_frame(below, "underwater_below");
+}
+
 /** @brief One registered test: its name (also its filter key), its group, and its body. */
 struct TestCase {
     const char* name;
@@ -4538,6 +5024,19 @@ const TestCase kTests[] = {
     {"kinematic_mover_spin",                       "scene", test_kinematic_mover_spin_rotates_in_place},
     {"health_driver_cycle",                        "scene", test_health_driver_cycles_between_turnaround_and_full},
 
+    // --- water: the water system's CPU half (waves, query, flow bake, buoyancy), no GPU ---
+    {"water_wave_height_inverse_matches_forward",  "water", test_water_wave_height_inverse_matches_forward},
+    {"water_surface_query_interpolates",           "water", test_water_surface_query_interpolates_and_bounds},
+    {"water_flow_runs_downhill_faster_when_steep", "water", test_water_flow_bake_runs_downhill_faster_when_steep},
+    {"water_flow_obstacle_deflects_and_wakes",     "water", test_water_flow_bake_obstacle_deflects_and_wakes},
+    {"buoyancy_floats_at_density_ratio",           "water", test_buoyancy_box_floats_at_its_density_ratio},
+    {"buoyancy_dense_body_sinks_with_drag",        "water", test_buoyancy_dense_body_sinks_with_drag},
+    {"buoyancy_ignores_bodies_away_from_water",    "water", test_buoyancy_ignores_bodies_away_from_water},
+    {"buoyancy_rides_waves",                       "water", test_buoyancy_rides_waves},
+    {"buoyancy_carried_downstream_by_flow",        "water", test_buoyancy_carried_downstream_by_flow},
+    {"water_ripples_splash_wake_rest",             "water", test_water_ripples_from_splash_wake_and_rest},
+    {"water_underwater_query",                     "water", test_water_underwater_query},
+
     // --- render_*: one Vulkan device each ---
     {"terrain_streams_chunks_around_camera",       "render_terrain",  test_terrain_streams_chunks_around_the_camera},
     {"static_camera_converges",                    "render_terrain",  test_static_camera_converges_to_a_static_image},
@@ -4548,6 +5047,8 @@ const TestCase kTests[] = {
     {"world_canvas_button_hover",                  "render_ui",       test_world_canvas_button_hover},
     {"material_maps_change_output",                "render_material", test_material_maps_change_output},
     {"cloth_scene_simulates_and_animates",         "render_cloth",    test_cloth_scene_simulates_and_animates},
+    {"water_scene_renders_and_simulates",          "render_water",    test_water_scene_renders_and_simulates},
+    {"underwater_scene_renders_and_toggles",       "render_water",    test_underwater_scene_renders_and_toggles},
     // TEMPORARY (round-8b shimmer diagnosis) -- run via `toyengine_tests ssao_travel_probe`,
     // removed once the cause is pinned. Not in any ctest group.
     {"ssao_travel_probe",                          "probe",           test_ssao_travel_probe},
@@ -4570,8 +5071,8 @@ bool matches_filters(const char* name, const std::vector<std::string>& filters) 
 void print_usage() {
     std::cout << "usage: toyengine_tests [-v] [--list] [--group <name>] [name-substring ...]\n"
                  "  --list           print every test and its group, run nothing\n"
-                 "  --group <name>   run one group: math, config, scene, world, render_pixel,\n"
-                 "                   render_ui, render_material, render_cloth\n"
+                 "  --group <name>   run one group: math, config, scene, world, water, render_pixel,\n"
+                 "                   render_ui, render_material, render_cloth, render_water\n"
                  "  -v, --verbose    print every assertion, not just failures\n"
                  "  <substring>      run the tests whose name contains it\n";
 }

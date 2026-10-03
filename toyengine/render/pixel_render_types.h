@@ -12,6 +12,7 @@
 #define TOYENGINE_RENDER_PIXEL_RENDER_TYPES_H
 
 #include <cstdint>
+#include <vector>
 
 #include <glm/glm.hpp>
 
@@ -23,6 +24,32 @@
 
 namespace toy {
 namespace render {
+
+/**
+ * @struct WaterFrameState
+ * @brief What the renderer needs from the water system each frame, handed over by Engine
+ *        (PixelRenderPipeline::set_water_state()) so render/ never depends on toyengine/water/.
+ */
+struct WaterFrameState {
+    /// An expanding ring (see toy::water::WaterSystem::Ripple), already aged.
+    struct Ripple {
+        glm::vec2 position{0.0f};
+        float     age = 0.0f;
+        float     strength = 0.0f;
+        float     radius = 0.0f;
+    };
+    std::vector<Ripple> ripples;  ///< At most kMaxWaterRipples are drawn (newest kept).
+
+    /// UnderwaterPass: the camera is below `surface_level`. Pixels whose near-plane point is
+    /// still below that level get the underwater look; the rest (a camera straddling the
+    /// waterline) draw as normal.
+    bool      underwater = false;
+    float     surface_level = 0.0f;
+    glm::vec3 fog_color{0.05f, 0.24f, 0.28f};
+    float     visibility = 14.0f;                    ///< Metres until ~95% fogged.
+    glm::vec3 absorption{0.35f, 0.09f, 0.06f};       ///< Per-metre extinction, r/g/b.
+    float     caustics = 1.0f;
+};
 
 /**
  * @struct PixelLightingPushConstants
@@ -79,7 +106,7 @@ struct DebugViewPushConstants {
 
 /**
  * @struct TransparentRefractionPushConstants
- * @brief Matches transparent.frag's push-constant block over [32, 64) -- appended after
+ * @brief Matches transparent.frag's push-constant block over [64, 128) -- appended after
  *        TransparentPass::PushConstants' own 32-byte material block (see that pass's
  *        extra_pc_bytes ctor parameter).
  *
@@ -91,6 +118,11 @@ struct DebugViewPushConstants {
 struct TransparentRefractionPushConstants {
     glm::vec4 tint_thickness = {1.0f, 1.0f, 1.0f, 0.25f};  ///< rgb = refraction_tint, w = thickness.
     glm::vec4 ior_flags      = {1.45f, 0.0f, 0.0f, 0.0f};  ///< x = ior, y = refraction on/off, zw reserved.
+    /// PBRMaterial::shader_params_ext, verbatim -- transparent_fs.glsl's gfx_params_ext0/1 over
+    /// [96, 128). Rides in this per-object block (rather than its own) since it is pushed at
+    /// exactly the same point, per BLEND mesh; brings the combined range to the full 128 bytes.
+    glm::vec4 shader_ext0    = {0.0f, 0.0f, 0.0f, 0.0f};
+    glm::vec4 shader_ext1    = {0.0f, 0.0f, 0.0f, 0.0f};
 };
 // Checked against the COMBINED range TransparentPass's pipeline layout declares -- that
 // struct's own static_assert cannot see what a caller appends on top.

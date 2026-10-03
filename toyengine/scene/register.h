@@ -9,10 +9,15 @@
  * register_render_components() captures its own. "Terrain" is there too, for the same reason at
  * one remove: its chunk meshes are built and published at runtime by toy::world::TerrainSystem,
  * and its own atlas texture and side meshes load through the AssetManager at parse time.
+ * "WaterBody" likewise: toy::water::WaterSystem bakes and publishes its mesh, and its own
+ * `mesh_path` source loads through the AssetManager at parse time.
  */
 
 #ifndef TOYENGINE_SCENE_REGISTER_H
 #define TOYENGINE_SCENE_REGISTER_H
+
+#include <cctype>
+#include <stdexcept>
 
 #include <coopa/scene/scene_loader.h>
 #include <coopa/scene/scene_object.h>
@@ -32,6 +37,8 @@
 #include <gfxcoopa/memory/allocator.h>
 
 #include <toyengine/world/terrain_component.h>
+#include <toyengine/water/buoyancy.h>
+#include <toyengine/water/water_body.h>
 
 namespace toy {
 namespace scene {
@@ -42,6 +49,15 @@ inline glm::vec3 parse_vec3(const fkyaml::node& n, const glm::vec3& fallback) {
     if (n.contains("x")) v.x = n.at("x").get_value<float>();
     if (n.contains("y")) v.y = n.at("y").get_value<float>();
     if (n.contains("z")) v.z = n.at("z").get_value<float>();
+    return v;
+}
+
+/** @brief Reads an {r, g, b} YAML mapping, leaving any absent channel at `fallback`. */
+inline glm::vec3 parse_rgb(const fkyaml::node& n, const glm::vec3& fallback) {
+    glm::vec3 v = fallback;
+    if (n.contains("r")) v.r = n.at("r").get_value<float>();
+    if (n.contains("g")) v.g = n.at("g").get_value<float>();
+    if (n.contains("b")) v.b = n.at("b").get_value<float>();
     return v;
 }
 
@@ -160,6 +176,28 @@ inline void register_scene_components() {
             if (node.contains("move_speed")) kc->move_speed = node.at("move_speed").get_value<float>();
             if (node.contains("smoothing")) kc->smoothing = node.at("smoothing").get_value<float>();
             if (node.contains("lock_height")) kc->lock_height = node.at("lock_height").get_value<bool>();
+        });
+
+    // Makes a sibling Rigidbody float -- see toyengine/water/buoyancy.h. Everything per-substep
+    // happens in toy::water::WaterSystem; this is configuration only.
+    SceneLoader::register_component_parser("Buoyancy",
+        [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
+            auto* b = obj.add_component<water::Buoyancy>();
+            if (node.contains("subdivisions"))   b->subdivisions   = node.at("subdivisions").get_value<int>();
+            if (node.contains("volume"))         b->volume         = node.at("volume").get_value<float>();
+            if (node.contains("linear_drag"))    b->linear_drag    = node.at("linear_drag").get_value<float>();
+            if (node.contains("angular_drag"))   b->angular_drag   = node.at("angular_drag").get_value<float>();
+            if (node.contains("form_drag"))      b->form_drag      = node.at("form_drag").get_value<float>();
+            if (node.contains("buoyancy_scale")) b->buoyancy_scale = node.at("buoyancy_scale").get_value<float>();
+            if (node.contains("pontoons")) {
+                // [{x, y, z, radius}] in the owner's unscaled local frame.
+                for (const auto& p : node.at("pontoons")) {
+                    water::PontoonDesc d;
+                    d.position = parse_vec3(p, glm::vec3(0.0f));
+                    if (p.contains("radius")) d.radius = p.at("radius").get_value<float>();
+                    b->pontoons.push_back(d);
+                }
+            }
         });
 }
 
@@ -284,6 +322,68 @@ inline void register_scene_components(coopa::gfx::core::Device& device,
                     terrain->face_meshes[static_cast<std::size_t>(face)] = key;
                     terrain->set_face_source(face, load_side(key));
                 }
+            }
+        });
+
+    // A lake, ocean or river -- see toyengine/water/water_body.h. Baked and published (mesh +
+    // material params on the sibling MeshRenderer) by toy::water::WaterSystem, which Engine
+    // installs. `mesh_path` loads CPU-side only (a SkinnedMeshSource, since the bake needs the
+    // vertices), so the sibling MeshRenderer must not name the same mesh itself.
+    SceneLoader::register_component_parser("WaterBody",
+        [&assets](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext& ctx) {
+            auto* w = obj.add_component<water::WaterBody>();
+            auto f = [&node](const char* key, float& out) {
+                if (node.contains(key)) out = node.at(key).get_value<float>();
+            };
+            if (node.contains("mode")) {
+                std::string mode = node.at("mode").get_value<std::string>();
+                for (char& c : mode) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                if (mode == "flowing" || mode == "river") w->mode = water::WaterMode::Flowing;
+                else if (mode == "planar" || mode == "static" || mode == "lake") w->mode = water::WaterMode::Planar;
+                else throw std::runtime_error("[WaterBody] unknown mode '" + mode + "' (planar | flowing)");
+            }
+            if (node.contains("mesh_path")) w->mesh_path = node.at("mesh_path").get_value<std::string>();
+            if (node.contains("size")) {
+                const auto& sz = node.at("size");
+                if (sz.contains("x")) w->size.x = sz.at("x").get_value<float>();
+                if (sz.contains("y")) w->size.y = sz.at("y").get_value<float>();
+            }
+            if (node.contains("resolution")) w->resolution = node.at("resolution").get_value<int>();
+
+            f("wave_amplitude", w->waves.amplitude);
+            f("wave_length", w->waves.wavelength);
+            f("wave_steepness", w->waves.steepness);
+            if (node.contains("wave_direction")) {
+                w->waves.direction = glm::radians(node.at("wave_direction").get_value<float>());
+            }
+
+            f("flow_speed", w->flow_speed);
+            f("flow_min_speed", w->flow_min_speed);
+            f("flow_slope_gain", w->flow_slope_gain);
+            f("obstacle_radius", w->obstacle_radius);
+            f("wake_length", w->wake_length);
+
+            if (node.contains("foam_color")) w->foam_color = parse_rgb(node.at("foam_color"), w->foam_color);
+            f("foam_amount", w->foam_amount);
+            f("shore_foam_depth", w->shore_foam_depth);
+            f("edge_fade_depth", w->edge_fade_depth);
+            f("ripple_strength", w->ripple_strength);
+            f("ripple_scale", w->ripple_scale);
+            f("clarity", w->clarity);
+
+            if (node.contains("underwater_color")) w->underwater_color = parse_rgb(node.at("underwater_color"), w->underwater_color);
+            f("underwater_visibility", w->underwater_visibility);
+            if (node.contains("underwater_absorption")) {
+                w->underwater_absorption = parse_rgb(node.at("underwater_absorption"), w->underwater_absorption);
+            }
+            f("caustics", w->caustics);
+
+            f("density", w->density);
+            f("max_depth", w->max_depth);
+
+            if (!w->mesh_path.empty()) {
+                w->source = assets.load_async<coopa::gfx::engine::data::SkinnedMeshSource>(
+                    "meshes/" + w->mesh_path + ".yaml", ctx.base_dir());
             }
         });
 

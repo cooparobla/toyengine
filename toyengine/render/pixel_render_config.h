@@ -234,6 +234,14 @@ struct PixelRenderConfig {
     bool fog_enabled = false;
 
     /**
+     * The underwater look (toyengine/render/passes/underwater_pass.h): fog, absorption and
+     * caustics when the camera is below a water surface, driven per frame by set_water_state().
+     * Startup-fixed like fog_enabled -- it sits in the post chain's source path -- and costs one
+     * full-resolution HDR copy per frame while the camera is above water.
+     */
+    bool underwater_enabled = true;
+
+    /**
      * Raymarched LOCAL volumes -- scene-placed VolumeComponents, each `kind: fog` (a
      * static pocket), `wind` (advected ribbons) or `haze` (drifting billows). Runs in
      * linear HDR immediately after fog and before DOF/bloom, so volumes defocus and

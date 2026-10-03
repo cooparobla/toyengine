@@ -7,6 +7,10 @@
 // separate file from water.frag, not a reuse of it: TransparentCapturePass's pipeline
 // layout only has sets 0-2, so a fragment shader declaring transparent_fs.glsl's sets 3-6
 // would exceed it.
+// WATER_CAPTURE: this backbone has no scene depth or extended push constants -- see
+// water_surface.glsl's file doc for what the hook drops here.
 #define GFX_SURFACE_FRAGMENT
+#define GFX_SURFACE_CUSTOM_VARYING
+#define WATER_CAPTURE
 #include <gfx/surface/capture_fs.glsl>
 #include "water_surface.glsl"

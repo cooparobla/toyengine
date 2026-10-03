@@ -17,10 +17,11 @@ quads, fan-triangulated on load -- see gfxcoopa/engine/data/mesh.h's own doc).
 import pathlib
 
 GRID_SIZE = 12
-"""Quads per side. (GRID_SIZE + 1)^2 vertices, GRID_SIZE^2 quad faces. High enough that
-water_surface.glsl's sin-wave (spatial frequency k=1.6 rad/world-unit over this mesh's
-2x2-unit local extent, before the object's own Transform.scale) resolves multiple visible
-crests rather than aliasing into a jagged few-vertex fold."""
+"""Quads per side. (GRID_SIZE + 1)^2 vertices, GRID_SIZE^2 quad faces. High enough that the
+pond's Gerstner waves (wave_length 1.6 on its WaterBody, over this mesh's 2x2-unit local extent
+before the object's own Transform.scale) resolve visible crests rather than aliasing into a
+jagged few-vertex fold. The pond's WaterBody loads this mesh CPU-side and bakes it (see
+toyengine/water/water_system.h); the MeshRenderer itself names no mesh."""
 
 OUTPUT_PATH = pathlib.Path(__file__).parent.parent / "assets/scenes/pixel_demo/meshes/water_grid.000.yaml"
 

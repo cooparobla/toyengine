@@ -72,6 +72,7 @@ enum class GpuScope : uint32_t {
     SsrComposite,        ///< composite + history copies
     RefractionMips,
     Transparent,
+    Underwater,          ///< UnderwaterPass (a copy when the camera is above water).
     Fog,
     VolumetricsInject,     ///< froxel mode only: density + lighting into the grid
     VolumetricsIntegrate,  ///< froxel mode only: per-column accumulation
@@ -103,7 +104,7 @@ inline const char* scope_name(GpuScope s) {
         "shadow.directional", "shadow.point", "shadow.spot", "gbuffer", "hiz", "transparent_capture",
         "temporal_history", "contact_shadows", "ssao", "lighting+sky", "scene_color_mips",
         "ssr.trace", "ssr.resolve", "ssr.blur", "ssgi.trace", "ssgi.resolve", "ssgi.blur", "ssr.composite",
-        "refraction_mips", "transparent", "fog", "volumetrics.inject", "volumetrics.integrate", "volumetrics", "dof", "bloom", "exposure",
+        "refraction_mips", "transparent", "underwater", "fog", "volumetrics.inject", "volumetrics.integrate", "volumetrics", "dof", "bloom", "exposure",
         "stylize", "world_ui", "aa", "tilt_shift", "overlay", "present"};
     return names[static_cast<size_t>(s)];
 }

@@ -35,6 +35,10 @@
 namespace toy {
 namespace render {
 
+/// Ripple rings the forward water shader can draw per frame (see WaterFrameState). Must match
+/// WATER_MAX_RIPPLES in gfx/surface/transparent_fs.glsl.
+inline constexpr int kMaxWaterRipples = 64;
+
 /**
  * @struct ForwardGlobals
  * @brief std140-aligned per-frame globals for transparent.frag: the lighting and indirect/SSR
@@ -49,6 +53,11 @@ struct alignas(16) ForwardGlobals {
     glm::ivec4 ssr_mip    = glm::ivec4(0, 0, 0, 0);               /**< x=ssr_max_color_mip, yzw unused. */
     glm::vec4  refract0   = glm::vec4(0.0f, 1.0f, 0.08f, 0.0f);   /**< x=enabled, y=strength, z=max_offset, w=chromatic. */
     glm::vec4  refract1   = glm::vec4(1.0f, 1.0f, 1.0f, 0.0f);    /**< x=blur, y=density, z=fresnel_enabled, w unused. */
+    /// Water ripples (toy::water::WaterSystem's live rings, handed over by Engine as
+    /// WaterFrameState): x = count. Read by water_surface.glsl only.
+    glm::vec4  water_ripple_info = glm::vec4(0.0f);
+    /// Two vec4 per ring: [2i] = (x, y, age seconds, strength), [2i+1] = (start radius, 0, 0, 0).
+    glm::vec4  water_ripples[2 * kMaxWaterRipples] = {};
 };
 
 /**

@@ -289,33 +289,27 @@ scene:
             emissive_strength: 1.6
       children: []
 
-    # Layered-shader test: a wave-displaced, rippled-normal water plane, proving the
-    # derived-shader architecture on the Transparent domain (see water_surface.glsl and the
-    # "water" SurfaceShaderDesc in engine.h) -- the harder domain than foliage's Opaque one,
-    # since it also exercises TransparentCapturePass's own variant (SSR must reflect the
-    # same displaced/rippled surface the visible draw shows, not a flat undisplaced plane).
-    # Uses water_grid.000 (see tools/gen_water_grid_mesh.py), not plane.000: a 4-vertex
-    # quad can only tilt as a rigid whole under per-vertex displacement, not visibly
-    # ripple -- the grid has enough vertices for the sine wave to actually bend. Flat (no
-    # rotation, like the ground) so its rest normal already points up, and reuses the
-    # existing refraction/absorption/tint fields glass_sphere.000 already exercises -- this
-    # shader only adds the wave animation on top. Placed at y=-3.2, past every other
-    # object's y=-0.5..-1.6 row, so it reads as its own "pond" area of open floor rather
-    # than overlapping anything.
+    # A small pond, driven by the water system (toyengine/water/): a planar WaterBody whose
+    # mesh WaterSystem bakes and publishes to the sibling MeshRenderer (which therefore names
+    # no mesh_path of its own), with the "water" derived shader on the Transparent domain --
+    # Gerstner waves in the vertex hook, which TransparentCapturePass's variant shares (SSR
+    # must reflect the same displaced surface the visible draw shows), and depth-based colour
+    # and contact foam in the fragment hook. Uses water_grid.000 (tools/gen_water_grid_mesh.py)
+    # rather than plane.000: a 4-vertex quad can only tilt as a whole, not ripple. Placed at
+    # y=-3.2, past every other object's row, so it reads as its own "pond" on the open floor.
+    # See assets/scenes/water_test for the full system (lake, river, buoyancy).
     - name: water_plane.000
       active: true
       components:
         - type: Transform
-          # z keeps the whole displaced sheet above the floor plane (top at z = -0.5):
-          # water_surface.glsl displaces position_ws.z by +-wave_amplitude (0.18, see
-          # shader_params below), so the troughs bottom out at z - 0.18 = -0.48. Any
-          # lower and the sheet cuts through the floor, leaving disconnected crest
-          # patches that read as hard-edged shadow shapes on the floor.
+          # The floor's top is at z = -0.5, so the pond is only 0.2 deep: the waves stay small
+          # (all four derived waves together crest at ~2x the base amplitude, 0.1 here), and
+          # the foam/edge depths are scaled down to match, or the whole pond would read as
+          # shoreline.
           position: { x: 0.0, y: -3.2, z: -0.30 }
           rotation: { x: 0.0, y: 0.0, z: 0.0 }
           scale: { x: 1.2, y: 1.2, z: 1.2 }
         - type: MeshRenderer
-          mesh_path: water_grid.000
           material:
             albedo: { r: 0.05, g: 0.25, b: 0.35 }
             metallic: 0.0
@@ -325,12 +319,19 @@ scene:
             alpha_mode: BLEND
             refraction: true
             ior: 1.33
-            refraction_thickness: 0.6
             refraction_tint: { r: 0.6, g: 0.85, b: 0.9 }
-            shader: water
-            # x=wave_amplitude (world units), y=wave_speed (rad/s), zw=wave_dir.xy --
-            # see water_surface.glsl's own doc for what each slot means.
-            shader_params: [0.18, 1.2, 1.0, 0.4]
+        - type: WaterBody
+          mode: planar
+          mesh_path: water_grid.000
+          wave_amplitude: 0.05
+          wave_length: 1.6
+          wave_direction: 22.0
+          wave_steepness: 0.4
+          clarity: 0.6
+          shore_foam_depth: 0.06
+          edge_fade_depth: 0.03
+          ripple_strength: 0.25
+          ripple_scale: 2.0
       children: []
 
     # Local volumes -- the single local-volume concept. Fog is GLOBAL only and lives in

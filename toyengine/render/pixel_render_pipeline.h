@@ -146,6 +146,7 @@
 #include <toyengine/render/passes/upscale_pass.h>
 #include <toyengine/render/passes/debug_line_pass.h>
 #include <toyengine/render/passes/transparent_preview_pass.h>
+#include <toyengine/render/passes/underwater_pass.h>
 #include <toyengine/scene/camera_controller.h>
 
 namespace toy {
@@ -192,6 +193,10 @@ public:
           // image it reads from.
           fog_target_(device, allocator, render_extent_.width, render_extent_.height, coopa::gfx::Format::RGBA16_Sfloat,
                               coopa::gfx::engine::targets::kColorOnly),
+          // Underwater composite target -- the same HDR format and LOAD_OP_CLEAR-forced
+          // separation as fog_target_ (see UnderwaterPass's file doc).
+          underwater_target_(device, allocator, render_extent_.width, render_extent_.height,
+                             coopa::gfx::Format::RGBA16_Sfloat, coopa::gfx::engine::targets::kColorOnly),
           // Wind composite target -- same HDR format and the same LOAD_OP_CLEAR-forced
           // separation as fog_target_ above. Wind reads fog's output and writes its own.
           volumetrics_target_(device, allocator, render_extent_.width, render_extent_.height, coopa::gfx::Format::RGBA16_Sfloat,
@@ -343,6 +348,18 @@ public:
     coopa::gfx::TextureView screen_ui_white_view() const {
         return screen_ui_pass_ ? screen_ui_pass_->white_view() : coopa::gfx::TextureView{};
     }
+
+    /**
+     * @brief Hands over this frame's water state -- ripple rings for the water shader and the
+     *        underwater parameters for UnderwaterPass. Engine calls it every frame before
+     *        render() from toy::water::WaterSystem; keeping it a plain struct means render/ never
+     *        depends on toyengine/water/.
+     */
+    void set_water_state(WaterFrameState state) { water_state_ = std::move(state); }
+    const WaterFrameState& water_state() const { return water_state_; }
+
+    /** @brief True when UnderwaterPass exists and is applying the underwater look this frame. */
+    bool underwater_active() const { return underwater_pass_ != nullptr && water_state_.underwater; }
 
     /**
      * @brief Validates every loaded MeshRenderer/SdfRenderer material's `shader` field
@@ -690,6 +707,7 @@ public:
         if (config_.fog_enabled) {
             update_fog_data_(unjittered_proj, view, cam_pos, dir_light);
         }
+        update_underwater_params_(unjittered_proj, view, cam_pos, dir_light);
 
         if (config_.volumetrics_enabled) {
             update_volumetrics_data_(scene, unjittered_proj, view, cam_pos, dir_light);
@@ -1323,7 +1341,7 @@ private:
             const std::string vert_spv = config_.shaders(sd.vert.empty() ? "pbr.vert" : sd.vert);
             transparent_pass_->add_variant(
                 sd.name, vert_spv,
-                config_.shaders(sd.frag.empty() ? "transparent.frag" : sd.frag));
+                config_.shaders(sd.frag.empty() ? "transparent.frag" : sd.frag), sd.cull);
             transparent_capture_pass_->add_variant(
                 sd.name, vert_spv,
                 config_.shaders(sd.capture_frag.empty() ? "transparent_capture.frag" : sd.capture_frag));
@@ -1365,6 +1383,18 @@ private:
         // doc, rule 1). fog_pass_ reads this same fixed source.
         pre_fog_view_typed_ =
             config_.ssr_enabled ? ssr_pass_->output_view_typed() : offscreen_target_.color_view_typed();
+
+        // Underwater: first in the chain, right after the transparent pass drew into the source
+        // (so the water's underside is fogged by its in-water distance like everything else),
+        // and ahead of global fog. Everything downstream then reads its output instead.
+        if (config_.underwater_enabled) {
+            underwater_pass_ = std::make_unique<passes::UnderwaterPass>(
+                device_, underwater_target_.render_pass_object(),
+                config_.shaders("fullscreen.vert"), config_.shaders("underwater.frag"));
+            underwater_pass_->set_source_images(pre_fog_view_typed_, gbuffer_target_.g1_view_typed(),
+                                                gbuffer_target_.g2_view_typed(), linear_sampler_);
+            pre_fog_view_typed_ = underwater_target_.color_view_typed();
+        }
 
         // Fog composite -- always constructed, gated per frame on fog_enabled. Reads
         // pre_fog_view_typed_, so transparent geometry (drawn in place into that same image) is
@@ -2125,6 +2155,15 @@ private:
         // source and pixel_stylize_pass_'s were chosen from.
         // Skipped entirely on the merged path, where volumetrics_pass_ applies the same
         // global fog term itself -- see fog_merged_into_volumetrics_().
+        // Underwater -- every frame once built (see UnderwaterPass's file doc); a copy unless the
+        // camera is below a water surface.
+        if (underwater_pass_) {
+            underwater_target_.begin(cmd);
+            underwater_pass_->draw(cmd, render_extent_.width, render_extent_.height, underwater_params_);
+            underwater_target_.end(cmd);
+            gpu_mark_(cmd, GpuScope::Underwater);
+        }
+
         if (config_.fog_enabled && !fog_merged_into_volumetrics_()) {
             fog_target_.begin(cmd);
             fog_pass_->draw(cmd, render_extent_.width, render_extent_.height);
@@ -3107,6 +3146,22 @@ private:
      * Takes the UNJITTERED projection -- fog reprojects world-space samples, so TAA jitter
      * here would make it swim independently of the visible pixel grid.
      */
+    /** @brief Fills UnderwaterPass's push constants from water_state_ (see set_water_state()). */
+    void update_underwater_params_(const glm::mat4& unjittered_proj, const glm::mat4& view, const glm::vec3& cam_pos,
+                                   const coopa::gfx::engine::components::DirectionalLightComponent* dir_light) {
+        auto& p = underwater_params_;
+        const WaterFrameState& w = water_state_;
+        // Visibility is where the in-scatter reaches ~95%: exp(-3) -> density = 3 / visibility.
+        const float density = 3.0f / std::max(w.visibility, 0.1f);
+        float light = 1.0f;
+        if (dir_light) light = glm::clamp(dir_light->intensity, 0.0f, 4.0f);
+        p.inv_view_proj = glm::inverse(unjittered_proj * view);
+        p.camera_time   = glm::vec4(cam_pos, elapsed_time_);
+        p.water         = glm::vec4(w.surface_level, density, w.caustics, w.underwater ? 1.0f : 0.0f);
+        p.fog_color     = glm::vec4(w.fog_color, 1.0f);
+        p.absorption    = glm::vec4(w.absorption, light);
+    }
+
     void update_fog_data_(const glm::mat4& unjittered_proj, const glm::mat4& view,
                           const glm::vec3& cam_pos,
                           const coopa::gfx::engine::components::DirectionalLightComponent* dir_light) {
@@ -4575,6 +4630,17 @@ private:
                                config_.refraction_max_offset, config_.refraction_chromatic);
         g.refract1 = glm::vec4(config_.refraction_blur, config_.refraction_density,
                                config_.refraction_fresnel ? 1.0f : 0.0f, 0.0f);
+
+        // Water ripples: the newest kMaxWaterRipples rings.
+        const auto& rs = water_state_.ripples;
+        const std::size_t first = rs.size() > static_cast<std::size_t>(kMaxWaterRipples)
+                                      ? rs.size() - kMaxWaterRipples : 0;
+        int n = 0;
+        for (std::size_t i = first; i < rs.size(); ++i, ++n) {
+            g.water_ripples[2 * n]     = glm::vec4(rs[i].position, rs[i].age, rs[i].strength);
+            g.water_ripples[2 * n + 1] = glm::vec4(rs[i].radius, 0.0f, 0.0f, 0.0f);
+        }
+        g.water_ripple_info = glm::vec4(static_cast<float>(n), 0.0f, 0.0f, 0.0f);
     }
 
     /// Draws every BLEND-material renderer AND every BLEND SdfRenderer, back-to-front by squared
@@ -4700,6 +4766,8 @@ private:
                                               ? mr_mat.refraction_tint : config_.refraction_tint;
                 refract_pc.tint_thickness = glm::vec4(refract_tint, refract_thickness);
                 refract_pc.ior_flags      = glm::vec4(refract_ior, mr_mat.has_refraction() ? 1.0f : 0.0f, 0.0f, 0.0f);
+                refract_pc.shader_ext0    = mr_mat.shader_params_ext[0];
+                refract_pc.shader_ext1    = mr_mat.shader_params_ext[1];
                 // VERTEX|FRAGMENT, not FRAGMENT alone: TransparentPass's push-constant range now
                 // covers both stages (see its PushConstants' gfx_time/gfx_params doc), and
                 // Vulkan requires a push call's stageFlags to match the declared range for
@@ -4796,6 +4864,7 @@ private:
     // config_.ssr_reflect_transparent per frame to decide whether to draw into/read from it.
     coopa::gfx::engine::targets::TransparentCaptureTarget transparent_capture_target_;
     coopa::gfx::engine::targets::OffscreenTarget fog_target_; // fog composite, pre-post, HDR
+    coopa::gfx::engine::targets::OffscreenTarget underwater_target_; // UnderwaterPass output, HDR
     coopa::gfx::engine::targets::OffscreenTarget volumetrics_target_; // wind composite, after fog, pre-post, HDR
     coopa::gfx::engine::targets::OffscreenTarget volumetrics_march_target_; // reduced-res march: in-scatter + transmittance
     bool ssr_secondary_bound_ = false;
@@ -4831,6 +4900,9 @@ private:
 
     coopa::gfx::engine::data::FogData fog_data_;
     std::unique_ptr<coopa::gfx::engine::passes::FogPass> fog_pass_;
+    std::unique_ptr<passes::UnderwaterPass> underwater_pass_;   // null when !underwater_enabled
+    passes::UnderwaterPass::Params underwater_params_;           // filled in render()
+    WaterFrameState water_state_;                                // set_water_state(), per frame
     // Fixed source view fog_pass_ reads from -- chosen once from config_.ssr_enabled's startup
     // value, same policy as pixel_stylize_pass_'s own binding (see that construction-time
     // comment). Kept as a member (not a local) so pixel_stylize_pass_'s own construction, later

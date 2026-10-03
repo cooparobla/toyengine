@@ -50,6 +50,9 @@ layout(location = 0) in vec3 frag_world_pos;
 layout(location = 1) in vec3 frag_world_normal;
 layout(location = 2) in vec2 frag_uv;
 layout(location = 3) in mat3 frag_TBN;
+#ifdef GFX_SURFACE_CUSTOM_VARYING
+layout(location = 6) in vec4 frag_custom; // see transparent_vs.glsl's frag_custom
+#endif
 
 // Set 0: Camera UBO
 layout(set = 0, binding = 0) uniform CameraUBO {
@@ -119,12 +122,21 @@ layout(location = 1) out vec4 out_normal_metallic;
 layout(location = 2) out vec4 out_position_roughness;
 
 /// Same hook contract as gfx/surface/transparent_fs.glsl's GfxTransparentSurface -- see
-/// that file's doc for why it's just the normal (plus position/uv for context), not the
-/// full GfxSurface set.
+/// that file's doc. alpha/thickness are filled but unread here (this capture neither blends
+/// nor refracts -- see file doc).
 struct GfxTransparentSurface {
-    vec3 normal_ws;
-    vec3 position_ws;
-    vec2 uv;
+    vec3  normal_ws;
+    vec3  position_ws;
+    vec2  uv;
+    vec4  custom;     // frag_custom under GFX_SURFACE_CUSTOM_VARYING, else vec4(0)
+    // Material terms, pre-filled from the material/textures and read back after the hook --
+    // still the SAME BRDF/refraction model (a hook can tint, fade or roughen the surface,
+    // e.g. water's foam and shoreline fade, but not swap the shading model out).
+    vec3  albedo;
+    float alpha;
+    float roughness;
+    float thickness;  // refraction/Beer-Lambert path length; unused by the capture backbone
+    float ior;        // refraction IOR (outside / inside); water's underside inverts it. Capture: unused
 };
 
 #ifdef GFX_SURFACE_FRAGMENT
@@ -191,8 +203,20 @@ void main() {
     s.normal_ws   = N;
     s.position_ws = frag_world_pos;
     s.uv          = frag_uv;
+#ifdef GFX_SURFACE_CUSTOM_VARYING
+    s.custom      = frag_custom;
+#else
+    s.custom      = vec4(0.0);
+#endif
+    s.albedo      = albedo;
+    s.alpha       = material.albedo.a;
+    s.roughness   = roughness;
+    s.ior         = 1.0;
+    s.thickness   = 0.0;
     gfx_surface_fragment(s);
     N = normalize(s.normal_ws);
+    albedo    = s.albedo;
+    roughness = clamp(s.roughness, 0.0, 1.0);
 
     vec3 V = normalize(camera.camera_pos - frag_world_pos);
     vec3 F0 = mix(vec3(0.04), albedo, metallic);

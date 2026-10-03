@@ -54,6 +54,14 @@ pixelated look.
   streamed around the camera. Each tile *side* is an authored mesh asset rotated onto its face,
   so the blocky default and a chamfered or smooth tile set differ by one key in scene YAML, not
   by any code. `assets/scenes/terrain_test/` is the demo — `cplay terrain_test`.
+- **Water** ([`toyengine/water/`](toyengine/water/README.md)) — planar lakes/oceans and flowing
+  rivers as `WaterBody` components: Gerstner waves shared bit-for-bit between the shader and a CPU
+  surface query, a current derived from a river mesh's own slope (bent around static obstacles),
+  depth-based colour, contact and shoreline foam, flow-mapped ripples and rapids. `Buoyancy`
+  makes any Rigidbody float, rock on waves and drift with the current (pontoons, per physics
+  substep); anything moving through the surface leaves ripple rings, and a camera below it gets
+  underwater fog, absorption, caustics and Snell's window. Demos: `cplay water_test`,
+  `cplay underwater_test`.
 - **Orbit/fly camera controller**, YAML scene format (shared with blendy),
   nearest-filtered texture loading, headless `ONESHOT`/`MAX_FRAMES` capture.
 - **Anti-aliasing** (`aa_mode`, `smaa` in `assets/config.yaml`) — FXAA 3.11, SMAA 1x, or TAA,
@@ -212,6 +220,7 @@ toyengine/
 │               InstanceStream, and every pass in render/passes/
 ├── world/      Streamed 3D tile terrain built from a mapcoopa world:
 │               TerrainSampler, TileMeshLibrary, the chunk mesher, TerrainSystem
+├── water/      WaterBody (lakes, rivers), Buoyancy, WaterSystem: waves, flow bake, floating
 └── util/       screenshot.h (Vulkan image -> PNG)
 
 editor/         toyengine_editor: app/ (UI, documents, scene sync), core/ (scene document,

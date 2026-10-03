@@ -54,6 +54,15 @@ layout(location = 0) out vec3 frag_world_pos;
 layout(location = 1) out vec3 frag_world_normal;
 layout(location = 2) out vec2 frag_uv;
 layout(location = 3) out mat3 frag_TBN;
+// Opt-in generic varying (locations 3-5 are frag_TBN's three columns): a derived shader that
+// defines GFX_SURFACE_CUSTOM_VARYING in BOTH its vertex and fragment entry points gets a vec4
+// carried from GfxSurfaceVertex.custom to GfxTransparentSurface.custom -- e.g. water's
+// per-vertex flow/turbulence/depth. Opt-in rather than always-on so pbr.vert/transparent.frag
+// and every other stage pairing keep byte-identical interfaces (an unmatched fragment input
+// is an interface-mismatch validation error).
+#ifdef GFX_SURFACE_CUSTOM_VARYING
+layout(location = 6) out vec4 frag_custom;
+#endif
 
 struct GfxSurfaceVertex {
     vec3 position_os;
@@ -65,6 +74,7 @@ struct GfxSurfaceVertex {
     vec3 position_ws;
     vec3 normal_ws;
     vec3 tangent_ws;
+    vec4 custom;   // -> frag_custom (GFX_SURFACE_CUSTOM_VARYING only); starts at vec4(0)
 };
 
 #ifdef GFX_SURFACE_VERTEX
@@ -86,6 +96,7 @@ void main() {
     v.position_ws = world_pos.xyz;
     v.normal_ws   = normalize(v.normal_matrix * in_normal);
     v.tangent_ws  = normalize(v.normal_matrix * in_tangent.xyz);
+    v.custom      = vec4(0.0);
 
     gfx_surface_vertex(v);
 
@@ -96,6 +107,9 @@ void main() {
     frag_world_normal = v.normal_ws;
     frag_uv           = v.uv;
     frag_TBN          = mat3(T, B, v.normal_ws);
+#ifdef GFX_SURFACE_CUSTOM_VARYING
+    frag_custom       = v.custom;
+#endif
 
     gl_Position = camera.proj * camera.view * vec4(v.position_ws, 1.0);
 }

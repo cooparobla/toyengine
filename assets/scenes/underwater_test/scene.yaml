@@ -1,0 +1,218 @@
+# underwater_test -- the camera under a water surface (toyengine/water/ + UnderwaterPass).
+#
+# The orbit camera starts BELOW the surface of a deep pool, looking across the floor:
+#   * fog and per-channel absorption along each pixel's path through the water (reds die first),
+#   * caustics dancing on the floor, the mounds and the rocks, fading with depth,
+#   * the surface seen from below -- Snell's window straight up, a dark total-internal-reflection
+#     mirror at grazing angles -- with floating crates, a barrel and a ball hanging in it,
+#   * ripple rings from the bobbing floaters and from a kinematic boat circling overhead,
+#   * a rock pillar breaking the surface.
+# Scroll out (or lower the pitch) to rise through the surface: as the camera crosses it the image
+# splits at the waterline, then the regular above-water look takes over.
+#
+# Meshes: tools/gen_water_test_meshes.py. Run: ./build/toyengine underwater_test
+# World: Z up, metres. The water surface is at z = 0, the floor ~6 m down.
+format: blender
+scene:
+  scene_name: UnderwaterTest
+  root_objects:
+    - name: pool_basin
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: pool_basin
+          material: { albedo: { r: 0.62, g: 0.56, b: 0.42 }, metallic: 0.0, roughness: 0.9, ao: 1.0 }
+        - type: MeshCollider
+          mesh_path: pool_basin_collider
+          convex: false
+      children: []
+
+    - name: pool_water
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: MeshRenderer
+          affects_reflection_probes: false
+          material:
+            albedo: { r: 0.03, g: 0.17, b: 0.21 }
+            metallic: 0.0
+            roughness: 0.05
+            ao: 1.0
+            alpha: 0.35
+            alpha_mode: BLEND
+            refraction: true
+            ior: 1.33
+            refraction_tint: { r: 0.5, g: 0.8, b: 0.82 }
+        - type: WaterBody
+          mode: planar
+          size: { x: 30.0, y: 30.0 }
+          resolution: 72
+          wave_amplitude: 0.07
+          wave_length: 4.0
+          wave_direction: 40.0
+          wave_steepness: 0.5
+          clarity: 3.0
+          shore_foam_depth: 0.4
+          # Under the surface:
+          underwater_color: { r: 0.04, g: 0.22, b: 0.26 }
+          underwater_visibility: 18.0          # metres to ~95% fog
+          underwater_absorption: { r: 0.3, g: 0.07, b: 0.05 }
+          caustics: 1.2
+      children: []
+
+    # --- Submerged scenery ---
+    - name: rock_a
+      active: true
+      components:
+        - { type: Transform, position: { x: -3.0, y: 2.0, z: -4.5 }, rotation: { x: 8.0, y: -5.0, z: 25.0 }, scale: { x: 1.6, y: 1.3, z: 2.4 } }
+        - { type: MeshRenderer, mesh_path: cube, material: { albedo: { r: 0.45, g: 0.43, b: 0.4 }, roughness: 0.9 } }
+        - { type: BoxCollider, size: { x: 1.0, y: 1.0, z: 1.0 } }
+      children: []
+    - name: rock_b
+      active: true
+      components:
+        - { type: Transform, position: { x: 2.5, y: 5.0, z: -5.0 }, rotation: { x: -10.0, y: 6.0, z: -40.0 }, scale: { x: 2.2, y: 1.4, z: 1.6 } }
+        - { type: MeshRenderer, mesh_path: cube, material: { albedo: { r: 0.4, g: 0.39, b: 0.37 }, roughness: 0.9 } }
+        - { type: BoxCollider, size: { x: 1.0, y: 1.0, z: 1.0 } }
+      children: []
+    # A pillar breaking the surface: the waterline seen from below.
+    - name: pillar
+      active: true
+      components:
+        - { type: Transform, position: { x: 5.0, y: -1.0, z: -2.4 }, rotation: { x: 0.0, y: 0.0, z: 15.0 }, scale: { x: 1.0, y: 1.0, z: 7.6 } }
+        - { type: MeshRenderer, mesh_path: cube, material: { albedo: { r: 0.5, g: 0.48, b: 0.44 }, roughness: 0.85 } }
+        - { type: BoxCollider, size: { x: 1.0, y: 1.0, z: 1.0 } }
+      children: []
+    # Kelp: tall thin green slabs rising from the floor toward the surface.
+    - { name: kelp_0, active: true, components: [ { type: Transform, position: { x: -6.0, y: -2.0, z: -3.6 }, rotation: { x: 4.0, y: 0.0, z: 10.0 }, scale: { x: 0.15, y: 0.5, z: 4.6 } }, { type: MeshRenderer, mesh_path: cube, material: { albedo: { r: 0.18, g: 0.45, b: 0.16 }, roughness: 0.7 } } ], children: [] }
+    - { name: kelp_1, active: true, components: [ { type: Transform, position: { x: -5.2, y: -3.1, z: -3.9 }, rotation: { x: -6.0, y: 3.0, z: 70.0 }, scale: { x: 0.15, y: 0.5, z: 4.0 } }, { type: MeshRenderer, mesh_path: cube, material: { albedo: { r: 0.2, g: 0.5, b: 0.18 }, roughness: 0.7 } } ], children: [] }
+    - { name: kelp_2, active: true, components: [ { type: Transform, position: { x: -6.8, y: -3.6, z: -3.4 }, rotation: { x: 5.0, y: -4.0, z: 140.0 }, scale: { x: 0.15, y: 0.5, z: 5.0 } }, { type: MeshRenderer, mesh_path: cube, material: { albedo: { r: 0.16, g: 0.42, b: 0.15 }, roughness: 0.7 } } ], children: [] }
+    - { name: kelp_3, active: true, components: [ { type: Transform, position: { x: 1.0, y: -6.0, z: -3.8 }, rotation: { x: 3.0, y: 5.0, z: 40.0 }, scale: { x: 0.15, y: 0.5, z: 4.4 } }, { type: MeshRenderer, mesh_path: cube, material: { albedo: { r: 0.2, g: 0.48, b: 0.17 }, roughness: 0.7 } } ], children: [] }
+    - name: statue
+      active: true
+      components:
+        - { type: Transform, position: { x: -1.5, y: -3.5, z: -5.0 }, scale: { x: 0.9, y: 0.9, z: 0.9 } }
+        - { type: MeshRenderer, mesh_path: ball, material: { albedo: { r: 0.85, g: 0.3, b: 0.2 }, roughness: 0.5 } }
+        - { type: SphereCollider, radius: 1.0 }
+      children: []
+
+    # --- Things in the water ---
+    - name: sunken_crate
+      active: true
+      components:
+        - { type: Transform, position: { x: 0.5, y: 1.0, z: 1.5 }, rotation: { x: 20.0, y: 10.0, z: 5.0 }, scale: { x: 0.8, y: 0.8, z: 0.8 } }
+        - { type: MeshRenderer, mesh_path: cube, material: { albedo: { r: 0.5, g: 0.36, b: 0.2 }, roughness: 0.8 } }
+        - { type: BoxCollider, size: { x: 1.0, y: 1.0, z: 1.0 } }
+        - { type: Rigidbody, mass: 900.0 }       # 1760 kg/m^3: sinks
+        - { type: Buoyancy, linear_drag: 2.0 }
+      children: []
+    - name: float_crate_a
+      active: true
+      components:
+        - { type: Transform, position: { x: -1.0, y: 3.0, z: 1.0 }, rotation: { x: 0.0, y: 0.0, z: 20.0 }, scale: { x: 1.0, y: 1.0, z: 1.0 } }
+        - { type: MeshRenderer, mesh_path: cube, material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, roughness: 0.75 } }
+        - { type: BoxCollider, size: { x: 1.0, y: 1.0, z: 1.0 } }
+        - { type: Rigidbody, mass: 300.0 }
+        - { type: Buoyancy }
+      children: []
+    - name: float_crate_b
+      active: true
+      components:
+        - { type: Transform, position: { x: 2.0, y: -2.5, z: 2.0 }, rotation: { x: 30.0, y: 0.0, z: 0.0 }, scale: { x: 0.7, y: 0.7, z: 0.7 } }
+        - { type: MeshRenderer, mesh_path: cube, material: { albedo: { r: 0.66, g: 0.46, b: 0.24 }, roughness: 0.75 } }
+        - { type: BoxCollider, size: { x: 1.0, y: 1.0, z: 1.0 } }
+        - { type: Rigidbody, mass: 130.0 }
+        - { type: Buoyancy }
+      children: []
+    - name: barrel
+      active: true
+      components:
+        - { type: Transform, position: { x: -3.5, y: -1.0, z: 0.8 }, rotation: { x: 0.0, y: 90.0, z: 0.0 } }
+        - { type: MeshRenderer, mesh_path: barrel, material: { albedo: { r: 0.5, g: 0.28, b: 0.15 }, roughness: 0.7 } }
+        - { type: CapsuleCollider, radius: 0.35, height: 1.3, direction: 2 }
+        - { type: Rigidbody, mass: 150.0 }
+        - { type: Buoyancy }
+      children: []
+    - name: ball
+      active: true
+      components:
+        - { type: Transform, position: { x: 0.5, y: -0.5, z: 2.5 }, scale: { x: 0.45, y: 0.45, z: 0.45 } }
+        - { type: MeshRenderer, mesh_path: ball, material: { albedo: { r: 0.9, g: 0.85, b: 0.2 }, roughness: 0.5 } }
+        - { type: SphereCollider, radius: 1.0 }
+        - { type: Rigidbody, mass: 40.0 }
+        - { type: Buoyancy }
+      children: []
+    - name: boat
+      active: true
+      components:
+        - { type: Transform, position: { x: 6.0, y: 3.0, z: 0.05 }, scale: { x: 1.6, y: 0.8, z: 0.4 } }
+        - { type: MeshRenderer, mesh_path: cube, material: { albedo: { r: 0.75, g: 0.2, b: 0.15 }, roughness: 0.6 } }
+        - { type: BoxCollider, size: { x: 1.0, y: 1.0, z: 1.0 } }
+        - { type: Rigidbody, mass: 400.0, is_kinematic: true, use_gravity: false }
+        - type: KinematicMover
+          mode: orbit
+          orbit_center: { x: 0.0, y: 0.0, z: 0.05 }
+          orbit_radius: 7.0
+          speed: 20.0
+      children: []
+
+    # --- Camera, light, sky ---
+    - name: camera
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -9.0, z: -1.5 }
+          rotation: { x: 85.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Camera
+          main: true
+          projection: Perspective
+          fov: 65.0
+          near_clip_plane: 0.1
+          far_clip_plane: 200.0
+        - type: CameraController
+          mode: orbit
+          target: { x: 0.0, y: 0.0, z: -3.0 }
+          distance: 9.0
+          yaw_deg: 0.0
+          pitch_deg: 10.0             # camera ~1.4 m below the surface; raise it to surface
+          movement_smoothing: 0.25
+          mouse_sensitivity: 0.12
+          zoom_speed: 1.0
+          min_distance: 2.0
+          max_distance: 40.0
+          min_pitch_deg: -60.0        # look up at the surface from below
+          max_pitch_deg: 85.0
+          capture_cursor: true
+      children: []
+
+    - name: sun
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 30.0 }
+        - type: DirectionalLight
+          direction: { x: -0.3, y: 0.25, z: -0.92 }
+          color: { r: 1.0, g: 0.96, b: 0.88 }
+          intensity: 1.3
+          cast_shadows: true
+          shadow_intensity: 1.0
+      children: []
+
+    - name: sky
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.0 }
+        - type: EnvironmentLight
+          sky_color: { r: 0.5, g: 0.66, b: 0.9 }
+          ground_color: { r: 0.2, g: 0.18, b: 0.14 }
+          sky_intensity: 1.0
+      children: []

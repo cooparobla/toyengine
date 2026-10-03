@@ -59,6 +59,7 @@
 #include <toyengine/scene/kinematic_control_system.h>
 #include <toyengine/scene/register.h>
 #include <toyengine/world/terrain_system.h>
+#include <toyengine/water/water_system.h>
 
 #include <root_directory.h>
 
@@ -438,6 +439,9 @@ private:
         // frame already has its world matrix resolved when the render gather reads it. A scene
         // with no Terrain component pays one empty get_components<>() sweep per frame.
         world::install_terrain_system(scene, ctx_.device(), ctx_.allocator(), assets_);
+        // Order 90: bakes water surfaces and refreshes the buoyant-body list right before
+        // Physics (100) steps, whose substep callback it drives -- see water_system.h's file doc.
+        water::install_water_system(scene, &ctx_.device(), &ctx_.allocator(), &assets_);
         coopa::physx::system::install_physics_system(scene, config_.physics);
 
         // Activate TransformSystem before the first drain or render, so the world_matrix()
@@ -746,11 +750,47 @@ public:
             }
             if (hooks_.pre_render) hooks_.pre_render(dt);
             update_fill_extent_();
+            sync_water_render_state_(scene_mgr_.get_active_scene());
             CpuTimer t(prof, CpuScope::Render);
             pipeline_->render(ctx_.renderer(), scene_mgr_.get_active_scene(), dt);
         }
 
         return !ctx_.should_close();
+    }
+
+    /**
+     * @brief Hands the renderer this frame's water state: the live ripple rings (aged) and, if
+     *        the main camera is below a water surface, that body's underwater look. The bridge
+     *        between toyengine/water/ and render/, which deliberately don't know each other.
+     */
+    void sync_water_render_state_(coopa::scene::Scene& scene) {
+        render::WaterFrameState state;
+        auto* water = dynamic_cast<water::WaterSystem*>(scene.find_system("Water"));
+        if (water) {
+            const float now = water->time();
+            state.ripples.reserve(water->ripples().size());
+            for (const auto& r : water->ripples()) {
+                state.ripples.push_back({r.position, now - r.birth, r.strength, r.radius});
+            }
+            auto* cam = coopa::gfx::engine::components::CameraComponent::main();
+            if (cam && cam->owner) {
+                const glm::vec3 eye(cam->owner->get_transform()->transform().get_world_matrix()[3]);
+                const water::WaterSystem::UnderwaterInfo info = water->underwater_at(eye);
+                // Also just ABOVE the surface (within half a metre): the bottom of the near plane
+                // can already be under water, and the pass decides per pixel which side it is on
+                // -- that is what splits the image at the waterline.
+                const bool near_surface = info.body && info.depth > -0.5f && info.depth <= 0.0f;
+                if ((info.underwater || near_surface) && info.body) {
+                    state.underwater    = true;
+                    state.surface_level = info.surface_height;
+                    state.fog_color     = info.body->underwater_color;
+                    state.visibility    = info.body->underwater_visibility;
+                    state.absorption    = info.body->underwater_absorption;
+                    state.caustics      = info.body->caustics;
+                }
+            }
+        }
+        pipeline_->set_water_state(std::move(state));
     }
 
     /**
@@ -1393,7 +1433,10 @@ private:
             /* shadow_cube_frag */ "",
             /* capture_frag */ "water_capture.frag", // same hook, over the capture backbone --
                                                       // see TransparentCapturePass::add_variant()
-            /* cull */ coopa::gfx::CullMode::Back, // matches every other BLEND mesh's cull mode
+            /* cull */ coopa::gfx::CullMode::None, // two-sided: a camera under the surface
+                                                   // sees its underside (Snell's window) --
+                                                   // see water_surface.glsl. The SSR capture
+                                                   // keeps back-face culling regardless.
         });
 
         return rc;

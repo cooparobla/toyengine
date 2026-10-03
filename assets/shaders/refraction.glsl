@@ -104,7 +104,9 @@ vec3 gfx_refraction_sample(vec2 uv, vec2 duv, float chromatic, float lod) {
 vec4 gfx_refraction_apply(vec4 shaded, vec3 world_pos, vec3 N, vec3 V, float roughness, vec3 F0,
                           mat4 view, mat4 proj, mat4 inv_proj, GfxRefractionMaterial mat,
                           GfxRefractionParams p, int max_color_mip) {
-    if (!p.enabled || !mat.enabled || mat.ior <= 1.0) return shaded;
+    // ior < 1 is legal: light leaving a denser medium (water seen from below, see water_surface.glsl)
+    // -- refract() then reports total internal reflection beyond the critical angle.
+    if (!p.enabled || !mat.enabled || mat.ior <= 0.0 || abs(mat.ior - 1.0) < 1e-4) return shaded;
 
     // Transmitted ray direction (Snell's law, air -> material) and the point it reaches after
     // travelling `thickness` through the object -- projecting both world_pos and that point

@@ -24,6 +24,9 @@ layout(location = 0) in vec3 frag_world_pos;
 layout(location = 1) in vec3 frag_world_normal;
 layout(location = 2) in vec2 frag_uv;
 layout(location = 3) in mat3 frag_TBN;
+#ifdef GFX_SURFACE_CUSTOM_VARYING
+layout(location = 6) in vec4 frag_custom; // see transparent_vs.glsl's frag_custom
+#endif
 
 // Set 0: Camera UBO
 layout(set = 0, binding = 0) uniform CameraUBO {
@@ -77,6 +80,7 @@ layout(set = 7, binding = 3) uniform sampler2D u_metallic_roughness_map;
 // TransparentRefractionPushConstants' own doc (pixel_render_pipeline.h) for why: adding
 // per-object refraction fields to this file's push-constant block alongside that frame
 // block would have gone over the 128-byte guaranteed Vulkan minimum.
+#define WATER_MAX_RIPPLES 64 // == toy::render::kMaxWaterRipples (forward_globals.h)
 layout(set = 6, binding = 0) uniform ForwardGlobalsBlock {
     vec4  lighting0;  // x=light_bands, y=spec_threshold, z=soft_lighting, w=rim_strength
     vec4  lighting1;  // x=ambient_intensity, y=sky_intensity, z=ssr_enabled, w=ssgi_intensity
@@ -86,6 +90,10 @@ layout(set = 6, binding = 0) uniform ForwardGlobalsBlock {
     ivec4 ssr_mip;    // x=ssr_max_color_mip, yzw unused
     vec4  refract0;   // x=enabled, y=strength, z=max_offset, w=chromatic
     vec4  refract1;   // x=blur, y=density, z=fresnel_enabled, w unused
+    // Water ripple rings (toy::render::kMaxWaterRipples): info.x = count; per ring
+    // [2i] = (x, y, age, strength), [2i+1] = (start radius, -, -, -). Read by water_surface.glsl.
+    vec4  water_ripple_info;
+    vec4  water_ripples[2 * WATER_MAX_RIPPLES];
 } forward_globals;
 
 #include <gfx/ssr_trace_body.glsl>
@@ -118,24 +126,38 @@ layout(push_constant) uniform PushConstants {
 
     vec4  refraction_tint_thickness; // rgb = tint, w = thickness
     vec4  refraction_ior_flags;      // x = ior, y = enabled (!= 0), zw reserved
+
+    vec4  gfx_params_ext0;           // PBRMaterial::shader_params_ext[0] -- [96, 112)
+    vec4  gfx_params_ext1;           // PBRMaterial::shader_params_ext[1] -- [112, 128)
 } material;
 
 // See gfx/surface/gbuffer_vs.glsl's identical aliases.
-vec4 gfx_time   = material.gfx_time;
-vec4 gfx_params = material.gfx_params;
+vec4 gfx_time        = material.gfx_time;
+vec4 gfx_params      = material.gfx_params;
+vec4 gfx_params_ext0 = material.gfx_params_ext0;
+vec4 gfx_params_ext1 = material.gfx_params_ext1;
 
 layout(location = 0) out vec4 out_color;
 
-/// What a fragment-shading hook may edit before lighting/SSR/refraction consume it --
-/// deliberately just the normal (plus position/uv for context), unlike GfxSurface's fuller
-/// albedo/metallic/roughness set: a derived TRANSPARENT shader (water) still wants the
-/// exact same BRDF and refraction the backbone already computes, just fed a perturbed
-/// normal, so the surface stays recognizably glass/water rather than becoming a different
-/// material model per shader.
+/// What a fragment-shading hook may edit before lighting/SSR/refraction consume it: the
+/// normal plus the albedo/alpha/roughness/thickness inputs of the SAME BRDF and refraction the
+/// backbone already computes -- so a derived TRANSPARENT shader (water) can perturb, tint and
+/// fade the surface (ripples, foam, shoreline depth) while it stays recognizably glass/water
+/// rather than becoming a different material model per shader. Metallic/AO stay the
+/// material's.
 struct GfxTransparentSurface {
-    vec3 normal_ws;
-    vec3 position_ws;
-    vec2 uv;
+    vec3  normal_ws;
+    vec3  position_ws;
+    vec2  uv;
+    vec4  custom;     // frag_custom under GFX_SURFACE_CUSTOM_VARYING, else vec4(0)
+    // Material terms, pre-filled from the material/textures and read back after the hook --
+    // still the SAME BRDF/refraction model (a hook can tint, fade or roughen the surface,
+    // e.g. water's foam and shoreline fade, but not swap the shading model out).
+    vec3  albedo;
+    float alpha;
+    float roughness;
+    float thickness;  // refraction/Beer-Lambert path length; unused by the capture backbone
+    float ior;        // refraction IOR (outside / inside); water's underside inverts it. Capture: unused
 };
 
 #ifdef GFX_SURFACE_FRAGMENT
@@ -160,14 +182,24 @@ void main() {
     s.normal_ws   = N;
     s.position_ws = frag_world_pos;
     s.uv          = frag_uv;
+#ifdef GFX_SURFACE_CUSTOM_VARYING
+    s.custom      = frag_custom;
+#else
+    s.custom      = vec4(0.0);
+#endif
+    s.albedo      = material.albedo.rgb * albedo_tex.rgb;
+    s.alpha       = material.albedo.a * albedo_tex.a;
+    s.roughness   = material.roughness * mr.y;
+    s.ior         = material.refraction_ior_flags.x;
+    s.thickness   = material.refraction_tint_thickness.w;
     gfx_surface_fragment(s);
     N = normalize(s.normal_ws);
 
     GfxForwardMaterial mat;
-    mat.albedo    = material.albedo.rgb * albedo_tex.rgb;
-    mat.alpha     = material.albedo.a * albedo_tex.a;
+    mat.albedo    = s.albedo;
+    mat.alpha     = clamp(s.alpha, 0.0, 1.0);
     mat.metallic  = material.metallic  * mr.x;
-    mat.roughness = material.roughness * mr.y;
+    mat.roughness = clamp(s.roughness, 0.0, 1.0);
     mat.ao        = material.ao;
 
     GfxForwardLightingParams p;
@@ -198,8 +230,8 @@ void main() {
 
     GfxRefractionMaterial rmat;
     rmat.enabled   = material.refraction_ior_flags.y != 0.0;
-    rmat.ior       = material.refraction_ior_flags.x;
-    rmat.thickness = material.refraction_tint_thickness.w;
+    rmat.ior       = s.ior;
+    rmat.thickness = max(s.thickness, 0.0);
     rmat.tint      = material.refraction_tint_thickness.rgb;
 
     GfxRefractionParams rp;

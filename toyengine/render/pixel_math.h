@@ -55,7 +55,15 @@ struct RenderExtent {
 inline RenderExtent compute_render_extent(const PixelRenderConfig& config,
                                           uint32_t swapchain_w, uint32_t swapchain_h) {
     RenderExtent extent;
-    if (config.resolution_mode == "divisor") {
+    if (config.resolution_mode == "fill") {
+        // Fixed vertical resolution, width following the display aspect (fill_aspect, set by
+        // the Engine from the display region; 0 = the swapchain's).
+        const float aspect = config.fill_aspect > 0.0f
+            ? config.fill_aspect
+            : static_cast<float>(std::max<uint32_t>(1, swapchain_w)) / static_cast<float>(std::max<uint32_t>(1, swapchain_h));
+        extent.height = std::max<uint32_t>(1, config.render_height);
+        extent.width  = std::max<uint32_t>(1, static_cast<uint32_t>(std::lround(extent.height * aspect)));
+    } else if (config.resolution_mode == "divisor") {
         const uint32_t divisor = std::max<uint32_t>(1, config.scale_divisor);
         extent.width  = std::max<uint32_t>(1, swapchain_w / divisor);
         extent.height = std::max<uint32_t>(1, swapchain_h / divisor);

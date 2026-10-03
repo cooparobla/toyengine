@@ -47,6 +47,7 @@ toy::core::AppConfig editor_config(const toy::core::AppConfig& project_config, c
     // The editor UI is a screen-space canvas; the game may not use one.
     cfg.render.screen_ui_enabled = true;
     cfg.output.save_on_exit = false;
+    toy::editor::apply_editor_render_overrides(cfg);
     return cfg;
 }
 

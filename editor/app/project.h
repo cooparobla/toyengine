@@ -165,6 +165,7 @@ public:
         render["render_height"] = Node(int64_t(270));
         render["shadows_enabled"] = Node(true);
         render["aa_mode"] = Node(std::string("off"));
+        render["transparency_enabled"] = Node(true);   // BLEND materials render (engine default: off)
         cfg["render"] = render;
         write_if_missing(p.config_path(), cfg);
 

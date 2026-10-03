@@ -5,7 +5,7 @@
 
     void draw_statusbar_(imm::Context& ctx, const imm::Box& b) {
         using I = imm::Icon;
-        ctx.fill(b, glm::vec4(0.137f, 0.137f, 0.137f, 1.0f));
+        ctx.fill(b, et_.chrome.statusbar_bg);
         // --- hints ---
         std::vector<std::pair<I, std::string>> hints;
         if (modal_.active()) {
@@ -13,6 +13,11 @@
                      {I::Keyboard, "Shift  Precision"}};
         } else if (nav_active_) {
             hints = {{I::MouseMiddle, "Orbit"}, {I::Keyboard, "Shift  Pan"}, {I::Keyboard, "Ctrl  Zoom"}};
+        } else if (in_sculpt_mode_()) {
+            hints = {{I::MouseLeft, "Sculpt"}, {I::Keyboard, "Ctrl  Invert"}, {I::Keyboard, "Shift  Smooth"}, {I::Keyboard, "F  Radius"},
+                     {I::Keyboard, "Shift F  Strength"}, {I::MouseMiddle, "Rotate View"}, {I::Keyboard, "Tab  Object Mode"}};
+        } else if (loopcut_.active) {
+            hints = {{I::MouseLeft, "Cut and Slide"}, {I::MouseMiddle, "Cuts (wheel)"}, {I::MouseRight, "Cancel"}, {I::Keyboard, "1-9  Cuts"}};
         } else if (mesh_edit_view_()) {
             hints = {{I::MouseLeft, "Select"}, {I::MouseMiddle, "Rotate View"}, {I::MouseRight, "Context Menu"},
                      {I::Keyboard, "G R S  Transform"}, {I::Keyboard, "E  Extrude"}, {I::Keyboard, "Tab  Object Mode"}};
@@ -28,25 +33,38 @@
             ctx.text_in({x, b.y, tw + 4, b.h}, text, ctx.style.text_dim, 0.0f);
             x += tw + 16;
         }
-        // --- latest report ---
-        const double age = std::chrono::duration<double>(std::chrono::steady_clock::now() - status_time_).count();
-        if (!status_.empty() && age < 8.0) {
-            const I ic = status_level_ == 2 ? I::Error : status_level_ == 1 ? I::Warning : I::Info;
-            const glm::vec4 c = status_level_ == 2 ? ctx.style.error : status_level_ == 1 ? ctx.style.warning : ctx.style.text;
-            ctx.icon(ic, {x + 10, b.y + 4, b.h - 8, b.h - 8}, status_level_ == 0 ? ctx.style.text_dim : glm::vec4(1));
-            ctx.text_in({x + 10 + b.h, b.y, b.w * 0.4f, b.h}, status_, c, 0.0f);
-        }
-        // --- stats, Blender style ---
+        // --- stats, Blender style (placed first, so the report can't run into them) ---
         std::string stats = scene_stats_();
         if (playing()) stats = "PLAYING  |  " + stats;
         stats += "  |  toyengine 0.1";
         const float sw = ctx.text_width(stats);
-        ctx.text_in({b.right() - sw - 10, b.y, sw + 6, b.h}, stats, ctx.style.text_dim, 0.0f);
+        const float stats_x = b.right() - sw - 10;
+        ctx.text_in({stats_x, b.y, sw + 6, b.h}, stats, ctx.style.text_dim, 0.0f);
+        // --- latest report, clipped to the space left between the hints and the stats ---
+        const double age = std::chrono::duration<double>(std::chrono::steady_clock::now() - status_time_).count();
+        const float room = stats_x - 20 - (x + 10 + b.h);
+        if (!status_.empty() && age < 8.0 && room > 40) {
+            const I ic = status_level_ == 2 ? I::Error : status_level_ == 1 ? I::Warning : I::Info;
+            const glm::vec4 c = status_level_ == 2 ? ctx.style.error : status_level_ == 1 ? ctx.style.warning : ctx.style.text;
+            ctx.icon(ic, {x + 10, b.y + 4, b.h - 8, b.h - 8}, status_level_ == 0 ? ctx.style.text_dim : glm::vec4(1));
+            std::string msg = status_;
+            if (ctx.text_width(msg) > room) {
+                while (!msg.empty() && ctx.text_width(msg + "...") > room) msg.pop_back();
+                msg += "...";
+            }
+            ctx.text_in({x + 10 + b.h, b.y, room, b.h}, msg, c, 0.0f);
+        }
     }
 
     /** @brief "Scene | Objects 1/4 | Verts 8 | Faces 6 | Tris 12" (edit mode: selected/total). */
     std::string scene_stats_() {
         char buf[200];
+        if (in_sculpt_mode_() && mesh_.open()) {
+            const auto& m = mesh_.mesh;
+            std::snprintf(buf, sizeof(buf), "%s  |  Verts %zu  |  Faces %zu  |  Tris %zu", mesh_.name.c_str(), m.positions.size(),
+                          m.faces.size(), m.triangle_count());
+            return buf;
+        }
         if (mesh_edit_view_() && mesh_.open()) {
             const auto& m = mesh_.mesh;
             const auto vs = mesh_.selection.affected_vertices(m);

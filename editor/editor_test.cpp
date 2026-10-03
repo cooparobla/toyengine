@@ -34,6 +34,11 @@
 #include "core/scene_document.h"
 #include "mesh/edit_mesh.h"
 #include "mesh/mesh_ops.h"
+#include "mesh/mesh_bvh.h"
+#include "mesh/mesh_loops.h"
+#include "mesh/mesh_subdivide.h"
+#include "mesh/mesh_topology.h"
+#include "mesh/sculpt.h"
 #include "mesh/primitives.h"
 #include "schema/component_schema.h"
 #include "viewport/gizmo.h"
@@ -267,7 +272,7 @@ void test_primitives_are_closed() {
     for (const auto& name : primitive_names()) {
         const EditMesh m = make_primitive(name);
         expect(!m.faces.empty(), name + " has faces");
-        if (name == "Plane" || name == "Tile Side") {
+        if (name == "Plane" || name == "Grid" || name == "Tile Side") {
             expect(euler(m) == 1, name + " is a disc (V-E+F = 1)");
             continue;
         }
@@ -338,6 +343,174 @@ void test_bevel_and_merge_and_delete() {
     top.faces.insert(0);
     delete_selection(d, top);
     expect(d.faces.size() == 5 && euler(d) == 1, "deleting a face opens the cube");
+}
+
+
+/** @brief MeshTopology adjacency; edge rings and loops on cubes, grids and spheres. */
+void test_topology_loops_rings() {
+    const EditMesh cube = make_cube();
+    const MeshTopology t(cube);
+    bool two = t.edges.size() == 12;
+    for (uint32_t e = 0; e < t.edges.size(); ++e) two = two && t.faces_of(e).size() == 2;
+    expect(two, "a cube has 12 edges, each with 2 faces");
+    expect(t.find_edge(4, 0) == t.find_edge(0, 4) && t.find_edge(0, 4) != MeshTopology::kNone, "find_edge ignores direction");
+    const EdgePath ring = edge_ring(t, t.find_edge(0, 4));
+    expect(ring.closed && ring.edges.size() == 4 && ring.faces.size() == 4, "the ring of a cube's vertical edge: 4 edges, closed");
+    expect(edge_loop(t, t.find_edge(0, 4)).edges.size() == 1, "a cube's loops stop at its valence-3 corners");
+
+    EditMesh sc = make_cube();
+    MeshSelection all;
+    all.select_all(sc);
+    subdivide(sc, all, 1);
+    const MeshTopology ts(sc);
+    uint32_t eq = MeshTopology::kNone;
+    for (uint32_t e = 0; e < ts.edges.size(); ++e) {
+        const auto& [a, b] = ts.edges[e];
+        if (std::abs(sc.positions[a].z) < 1e-5f && std::abs(sc.positions[b].z) < 1e-5f) { eq = e; break; }
+    }
+    const EdgePath equator = edge_loop(ts, eq);
+    expect(equator.closed && equator.edges.size() == 8, "a subdivided cube's equator loop: 8 edges, closed (got " +
+                                                            std::to_string(equator.edges.size()) + ")");
+    const EditMesh grid = make_grid(2, 4);
+    const MeshTopology tg(grid);
+    const EdgePath open = edge_loop(tg, tg.find_edge(4, 7));   // x = 0, y rows 1-2: interior vertical edge
+    expect(!open.closed && open.edges.size() == 4, "an interior grid loop runs boundary to boundary (got " +
+                                                       std::to_string(open.edges.size()) + ")");
+    MeshSelection sel;
+    sel.mode = SelectMode::Edge;
+    select_edge_loop(grid, sel, make_edge(4, 7), false);
+    expect(sel.edges.size() == 4, "Alt+click selects the loop");
+    select_edge_loop(grid, sel, make_edge(4, 7), true);
+    expect(sel.edges.empty(), "Shift+Alt+click on a selected loop deselects it");
+    select_edge_ring(grid, sel, make_edge(4, 7), false);
+    expect(sel.edges.size() == 3, "Ctrl+Alt+click selects the ring across the grid (got " + std::to_string(sel.edges.size()) + ")");
+}
+
+/** @brief Loop Cut: counts, closure, UVs, terminal triangles, and Edge Slide. */
+void test_loop_cut_and_slide() {
+    EditMesh m = make_cube();
+    MeshSelection sel;
+    LoopCutResult r = loop_cut(m, sel, make_edge(0, 4), 1);
+    expect(r.ok && m.positions.size() == 12 && m.faces.size() == 10, "one cut around a cube: 12 verts, 10 faces");
+    expect(closed_and_consistent(m) && euler(m) == 2, "the cut cube stays closed and consistently wound");
+    bool mid = true, uv_mid = false;
+    for (uint32_t v = 8; v < 12; ++v) mid = mid && std::abs(m.positions[v].z) < 1e-5f;
+    for (const auto& f : m.faces) for (const auto& c : f.corners) if (c.v >= 8 && (std::abs(c.uv.x - 0.5f) < 1e-5f || std::abs(c.uv.y - 0.5f) < 1e-5f)) uv_mid = true;
+    expect(mid && uv_mid, "new vertices sit halfway, with halfway UVs");
+    expect(sel.mode == SelectMode::Edge && sel.edges.size() == 4, "the new loop is selected");
+
+    // Edge Slide: t = +-1 puts the loop on either rail.
+    EditMesh base = m;
+    apply_edge_slide(m, r.rails, 1.0f);
+    const float z_up = m.positions[8].z;
+    m = base;
+    apply_edge_slide(m, r.rails, -1.0f);
+    expect(std::abs(std::abs(z_up) - 0.5f) < 1e-5f && std::abs(m.positions[8].z + z_up) < 1e-5f, "slide moves to either end");
+    m = base;
+    auto rails = edge_slide_rails(m, sel.edges);
+    expect(rails && rails->size() == 4, "G G builds a rail for each loop vertex");
+    if (rails) {
+        apply_edge_slide(m, *rails, 0.5f);
+        bool moved = true;
+        for (uint32_t v = 8; v < 12; ++v) moved = moved && std::abs(std::abs(m.positions[v].z) - 0.25f) < 1e-5f;
+        expect(moved, "sliding halfway moves the loop to z = +-0.25");
+    }
+    std::set<Edge> branch = {make_edge(0, 1), make_edge(0, 2), make_edge(0, 4)};
+    std::string err;
+    expect(!edge_slide_rails(make_cube(), branch, &err) && !err.empty(), "a branching selection can't slide");
+
+    EditMesh m3 = make_cube();
+    expect(loop_cut(m3, sel, make_edge(0, 4), 3).ok && m3.faces.size() == 18 && m3.positions.size() == 20 && closed_and_consistent(m3),
+           "three cuts: 20 verts, 18 faces, closed");
+
+    EditMesh sph = make_uv_sphere(0.5f, 8, 4);
+    const LoopCutResult rs = loop_cut(sph, sel, make_edge(1, 2), 1);   // a ring-1 edge: the ring runs pole to pole
+    size_t cap_quads = 0;
+    for (const auto& f : sph.faces) {
+        bool touches_pole = false;
+        for (const auto& c : f.corners) touches_pole |= c.v == 0 || c.v == static_cast<uint32_t>(sph.positions.size() - 1) - 0 ? false : false;
+        (void)touches_pole;
+    }
+    for (size_t f = 0; f < sph.faces.size(); ++f) {
+        for (const auto& c : sph.faces[f].corners) {
+            if (std::abs(std::abs(sph.positions[c.v].z) - 0.5f) < 1e-5f && sph.faces[f].corners.size() == 4) { ++cap_quads; break; }
+        }
+    }
+    expect(rs.ok && closed_and_consistent(sph) && euler(sph) == 2, "a cut through a sphere's caps stays closed");
+    expect(cap_quads == 2, "the two cap triangles it crosses become quads (got " + std::to_string(cap_quads) + ")");
+}
+
+/** @brief Subdivide, Catmull-Clark, Triangulate, Tris to Quads, Dissolve, Grid, Bridge. */
+void test_subdivide_triangulate_dissolve() {
+    EditMesh c1 = make_cube();
+    MeshSelection all;
+    all.select_all(c1);
+    subdivide(c1, all, 1);
+    expect(c1.positions.size() == 26 && c1.faces.size() == 24 && closed_and_consistent(c1), "subdivide a cube once: 26 / 24, closed");
+    expect(all.faces.size() == 24, "the new faces are selected");
+    EditMesh c2 = make_cube();
+    all.select_all(c2);
+    subdivide(c2, all, 2);
+    expect(c2.positions.size() == 56 && c2.faces.size() == 54 && closed_and_consistent(c2), "two cuts: 56 / 54, closed");
+    EditMesh c3 = make_cube();
+    MeshSelection one;
+    one.faces = {1};
+    subdivide(c3, one, 1);
+    expect(closed_and_consistent(c3) && euler(c3) == 2, "subdividing one face keeps the mesh closed (neighbours gain the cuts)");
+    EditMesh hex = make_cylinder(0.5f, 1.0f, 6, true);
+    MeshSelection cap;
+    cap.faces = {static_cast<uint32_t>(hex.faces.size() - 1)};
+    subdivide(hex, cap, 2);
+    expect(closed_and_consistent(hex) && euler(hex) == 2, "an n-gon with an odd segment count subdivides without holes");
+
+    EditMesh cc = make_cube();
+    catmull_clark(cc, all, 1);
+    float maxlen = 0.0f;
+    for (const auto& p : cc.positions) maxlen = std::max(maxlen, glm::length(p));
+    expect(cc.positions.size() == 26 && cc.faces.size() == 24 && closed_and_consistent(cc) && maxlen < 0.8f,
+           "Catmull-Clark: 26 / 24, closed, corners pulled in");
+
+    EditMesh tc = make_cube();
+    all.select_all(tc);
+    triangulate(tc, all);
+    expect(tc.faces.size() == 12 && closed_and_consistent(tc), "triangulate a cube: 12 triangles");
+    tris_to_quads(tc, all);
+    expect(tc.faces.size() == 6 && closed_and_consistent(tc), "tris to quads restores the 6 quads (got " + std::to_string(tc.faces.size()) + ")");
+    EditMesh cyl = make_cylinder(0.5f, 1.0f, 16, true);
+    MeshSelection capsel;
+    capsel.faces = {static_cast<uint32_t>(cyl.faces.size() - 1)};
+    triangulate(cyl, capsel);
+    expect(capsel.faces.size() == 14 && closed_and_consistent(cyl), "a 16-gon cap becomes 14 triangles");
+
+    EditMesh g = make_grid(2, 1);
+    MeshSelection ds;
+    ds.mode = SelectMode::Edge;
+    dissolve_edges(g, ds, {make_edge(1, 4)});
+    expect(g.faces.size() == 1 && g.positions.size() == 4, "dissolving a grid's middle edge leaves one quad (got " +
+                                                               std::to_string(g.faces.size()) + " faces, " + std::to_string(g.positions.size()) + " verts)");
+    EditMesh g2 = make_grid(2, 2);
+    MeshSelection dv;
+    dv.mode = SelectMode::Vertex;
+    dv.verts = {4};
+    dissolve_verts(g2, dv);
+    expect(g2.faces.size() == 1 && g2.faces[0].corners.size() == 8, "dissolving a grid's centre vertex leaves one 8-gon");
+
+    const EditMesh g35 = make_grid(3, 5);
+    expect(g35.positions.size() == 24 && g35.faces.size() == 15, "grid 3 x 5: 24 verts, 15 quads");
+
+    // Two facing squares (bottom facing down, top facing up) bridge into a closed box.
+    EditMesh box = make_plane(1.0f, 1);
+    MeshSelection tmp;
+    flip_normals(box, [&] { MeshSelection a; a.faces = {0}; return a; }());
+    append_mesh(box, make_plane(1.0f, 1), glm::translate(glm::mat4(1.0f), glm::vec3(0, 0, 1)), tmp);
+    MeshSelection bs;
+    bs.mode = SelectMode::Edge;
+    for (const auto& e : box.edges()) bs.edges.insert(e);
+    std::string err;
+    const bool bridged = bridge_edge_loops(box, bs, &err);
+    expect(bridged && box.faces.size() == 6 && closed_and_consistent(box) && euler(box) == 2,
+           "bridging two facing squares closes a box (" + err + "; faces " + std::to_string(box.faces.size()) + ", closed " +
+               std::to_string(closed_and_consistent(box)) + ")");
 }
 
 void test_mesh_io_roundtrip_and_engine_load() {
@@ -533,6 +706,93 @@ void test_imm_icon_button_and_tooltip() {
     expect(h.dl.vertices().size() > quad, "fill_rounded emits more geometry than a square fill");
 }
 
+
+/** @brief imm themes: colour formats, inheritance, app sections, errors, and a lossless round trip. */
+void test_imm_theme_files() {
+    namespace imm = coopa::ui::imm;
+    const imm::Theme t = imm::parse_theme(R"(
+name: Test
+metrics:
+  font_size: 14
+  rounding: 2.5
+colors:
+  accent: "#ff8000"
+  selection: "#11223380"
+  text: [0.5, 0.25, 1.0]
+  panel_bg: {r: 0.1, g: 0.2, b: 0.3, a: 0.4}
+viewport:
+  grid: "#fff"
+)");
+    expect(t.name == "Test" && t.style.font_size == 14.0f && t.style.rounding == 2.5f, "metrics apply");
+    expect(glm::distance(t.style.accent, glm::vec4(1.0f, 128 / 255.0f, 0.0f, 1.0f)) < 1e-4f, "#rrggbb colours");
+    expect(std::abs(t.style.selection.a - 128 / 255.0f) < 1e-4f, "#rrggbbaa carries alpha");
+    expect(t.style.text == glm::vec4(0.5f, 0.25f, 1.0f, 1.0f), "[r, g, b] float lists (alpha 1)");
+    expect(t.style.panel_bg == glm::vec4(0.1f, 0.2f, 0.3f, 0.4f), "{r, g, b, a} maps");
+    expect(t.color("viewport", "grid", glm::vec4(0)) == glm::vec4(1), "app sections, #rgb shorthand");
+    expect(t.color("viewport", "missing", glm::vec4(0.5f)) == glm::vec4(0.5f), "unknown roles fall back");
+    expect(t.style.row_height == imm::Style{}.row_height, "unmentioned fields keep the built-in value");
+
+    bool threw = false;
+    try { imm::parse_theme("colors:\n  accent: \"#12345\"\n"); } catch (const std::exception& e) {
+        threw = std::string(e.what()).find("colors.accent") != std::string::npos;
+    }
+    expect(threw, "a malformed colour names its key");
+
+    // Round trip: every field survives save -> load (to 8-bit colour precision).
+    const imm::Theme back = imm::parse_theme(imm::theme_to_yaml(t));
+    struct Flat {
+        std::vector<float>* out;
+        void metric(const char*, const float& v) const { out->push_back(v); }
+        void color(const char*, const glm::vec4& c) const { for (int i = 0; i < 4; ++i) out->push_back(c[i]); }
+    };
+    std::vector<float> a, b;
+    imm::visit_style(t.style, Flat{&a});
+    imm::visit_style(back.style, Flat{&b});
+    bool same = back.name == t.name && back.sections == t.sections && a.size() == b.size();
+    for (size_t i = 0; i < a.size() && i < b.size(); ++i) same = same && std::abs(a[i] - b[i]) < 0.003f;
+    expect(same, "theme_to_yaml round-trips every field");
+}
+
+/** @brief Clicking an open dropdown's opener closes it (instead of re-opening it). */
+void test_imm_dropdown_toggles() {
+    ImmHarness h;
+    int idx = 0;
+    auto ui = [&](coopa::ui::imm::Context& c) {
+        c.combo_box("dd", {10, 10, 120, 20}, &idx, {"One", "Two", "Three"});
+    };
+    h.frame(ui);
+    h.click({40, 20}, ui);
+    h.frame(ui);
+    expect(h.ctx.any_popup_open(), "clicking a dropdown opens it");
+    h.click({40, 20}, ui);
+    h.frame(ui);
+    expect(!h.ctx.any_popup_open(), "clicking the open dropdown closes it");
+    h.click({40, 20}, ui);
+    h.frame(ui);
+    expect(h.ctx.any_popup_open(), "and the next click opens it again");
+
+    // A plain button that opens a popup below itself behaves the same.
+    ImmHarness p;
+    auto ui2 = [&](coopa::ui::imm::Context& c) {
+        c.begin_region("r", {0, 0, 400, 300}, false);
+        if (c.button("Open", 100)) c.open_popup("menu", glm::vec2(6, 40));
+        if (c.begin_popup("menu", 200)) { c.menu_item("Item"); c.end_popup(); }
+        c.end_region();
+    };
+    p.frame(ui2);
+    p.click({20, 15}, ui2);
+    p.frame(ui2);
+    expect(p.ctx.any_popup_open(), "button popup opened");
+    p.click({20, 15}, ui2);
+    p.frame(ui2);
+    expect(!p.ctx.any_popup_open(), "clicking its opener again closes it");
+    // Right-clicking elsewhere while open still closes it (and re-opening via another click works).
+    p.click({20, 15}, ui2);
+    p.frame(ui2);
+    p.click({300, 250}, ui2);
+    expect(!p.ctx.any_popup_open(), "clicking empty space closes it");
+}
+
 void test_imm_menubar_and_tree() {
     ImmHarness h;
     int saved = 0;
@@ -579,6 +839,139 @@ ViewProj test_view_proj() {
     vp.proj = glm::perspective(glm::radians(50.0f), 16.0f / 9.0f, 0.1f, 100.0f);
     vp.rect = {100, 50, 640, 360};
     return vp;
+}
+
+coopa::input::KeyEvent key_press(coopa::input::Key k, coopa::input::Mods m = coopa::input::Mods::None) {
+    coopa::input::KeyEvent e;
+    e.key = k;
+    e.action = coopa::input::KeyAction::Press;
+    e.mods = m;
+    return e;
+}
+
+/** @brief Axis locking: per-component typed input, plane typing, local scale, MMB auto axis, edge slide. */
+void test_modal_axis_locking() {
+    using coopa::input::Key;
+    using coopa::input::Mods;
+    const ViewProj vp = test_view_proj();
+    const glm::vec2 c = *vp.project(glm::vec3(0));
+    ModalTransform mt;
+    auto run = [&](std::vector<coopa::input::KeyEvent> keys) {
+        mt.update(vp, c, keys, false, false, false, false);
+        return mt.update(vp, c, {key_press(Key::Enter)}, false, false, false, false);
+    };
+    mt.begin(ModalKind::Grab, vp, glm::vec3(0), glm::mat3(1.0f), c);
+    expect(run({key_press(Key::Z, Mods::Shift), key_press(Key::Num1), key_press(Key::Tab), key_press(Key::Num2)}) ==
+               ModalTransform::Outcome::Confirmed &&
+               glm::distance(mt.result().translate, glm::vec3(1, 2, 0)) < 1e-5f,
+           "G Shift+Z 1 Tab 2 moves (1, 2, 0) in the XY plane");
+    mt.begin(ModalKind::Grab, vp, glm::vec3(0), glm::mat3(1.0f), c);
+    run({key_press(Key::Num1), key_press(Key::Tab), key_press(Key::Num2), key_press(Key::Tab), key_press(Key::Num3)});
+    expect(glm::distance(mt.result().translate, glm::vec3(1, 2, 3)) < 1e-5f, "free G 1 Tab 2 Tab 3 moves (1, 2, 3)");
+
+    // A basis rotated 90 degrees about Z: local X is world Y.
+    const glm::mat3 rot(glm::vec3(0, 1, 0), glm::vec3(-1, 0, 0), glm::vec3(0, 0, 1));
+    mt.begin(ModalKind::Grab, vp, glm::vec3(0), rot, c, std::nullopt, "local");
+    run({key_press(Key::X), key_press(Key::X), key_press(Key::Num2)});
+    expect(glm::distance(mt.result().translate, glm::vec3(0, 2, 0)) < 1e-5f, "G X X 2 moves along the local X axis");
+    mt.begin(ModalKind::Scale, vp, glm::vec3(0), rot, c, std::nullopt, "local");
+    run({key_press(Key::X), key_press(Key::X), key_press(Key::Num2)});
+    const glm::mat4 sm = delta_matrix(glm::vec3(0), glm::vec3(0, 0, 1), 0.0f, mt.result().scale, glm::vec3(0), mt.result().scale_basis);
+    expect(glm::distance(glm::vec3(sm * glm::vec4(0, 1, 0, 1)), glm::vec3(0, 2, 0)) < 1e-5f &&
+               glm::distance(glm::vec3(sm * glm::vec4(1, 0, 0, 1)), glm::vec3(1, 0, 0)) < 1e-5f,
+           "S X X 2 scales along the local axis only");
+
+    // MMB auto constraint: a horizontal drag picks X (screen right is +X from this view), a vertical one Z.
+    mt.begin(ModalKind::Grab, vp, glm::vec3(0), glm::mat3(1.0f), c);
+    mt.update(vp, c, {}, false, false, false, false, true, true);
+    mt.update(vp, c + glm::vec2(60, 2), {}, false, false, false, false, true, false);
+    expect(mt.axis() == 0, "MMB drag sideways locks X (got " + std::to_string(mt.axis()) + ")");
+    mt.update(vp, c + glm::vec2(60, 2), {}, false, false, false, false, false, false);
+    mt.update(vp, c + glm::vec2(60, 2), {}, false, false, false, false, true, true);
+    mt.update(vp, c + glm::vec2(62, -60), {}, false, false, false, false, true, false);
+    expect(mt.axis() == 2, "MMB drag up locks Z");
+    expect(mt.guide_axes().size() == 1, "an axis constraint draws one guide line");
+    mt.update(vp, c, {key_press(Key::Y, Mods::Shift)}, false, false, false, false);
+    expect(mt.guide_axes().size() == 2, "a plane constraint draws its two axes");
+    mt.cancel();
+
+    mt.begin(ModalKind::Grab, vp, glm::vec3(0), glm::mat3(1.0f), c, std::nullopt, "local", true);
+    expect(mt.update(vp, c, {key_press(Key::G)}, false, false, false, false) == ModalTransform::Outcome::SwitchToSlide,
+           "G during an edit-mode Grab asks for Edge Slide");
+    mt.begin(ModalKind::EdgeSlide, vp, glm::vec3(0), glm::mat3(1.0f), c, glm::vec3(1, 0, 0));
+    run({key_press(Key::Period), key_press(Key::Num5)});
+    expect(std::abs(mt.result().amount - 0.5f) < 1e-5f, "Edge Slide takes a typed factor");
+}
+
+/** @brief Normal orientation and the sculpt brushes. */
+void test_normal_basis_and_sculpt() {
+    EditMesh cube = make_cube();
+    MeshSelection top;
+    top.faces = {1};
+    const glm::mat3 nb = normal_basis(cube, top);
+    expect(glm::distance(nb[2], glm::vec3(0, 0, 1)) < 1e-5f && std::abs(glm::dot(nb[0], nb[2])) < 1e-5f,
+           "Normal orientation of the top face: Z up, X in the face");
+
+    expect(sculpt_falloff(0.0f) == 1.0f && sculpt_falloff(1.0f) == 0.0f && sculpt_falloff(0.5f) == 0.5f, "falloff ends");
+    EditMesh g = make_grid(16, 16, 2.0f);
+    SculptCache cache;
+    cache.build(g);
+    VertexGrid grid;
+    grid.build(g, 0.5f);
+    std::vector<uint32_t> moved;
+    const uint32_t centre = 8 * 17 + 8;
+    SculptDab d;
+    d.center = glm::vec3(0);
+    d.radius = 0.5f;
+    d.strength = 1.0f;
+    sculpt_dab(g, cache, grid, d, moved);
+    bool outside_still = true;
+    for (uint32_t v = 0; v < g.positions.size(); ++v) {
+        if (glm::length(glm::vec2(g.positions[v])) > 0.5f + 1e-4f) outside_still &= g.positions[v].z == 0.0f;
+    }
+    expect(g.positions[centre].z > 0.0f && outside_still, "Draw raises the centre and leaves the rest alone");
+    d.invert = true;
+    const float z1 = g.positions[centre].z;
+    sculpt_dab(g, cache, grid, d, moved);
+    expect(g.positions[centre].z < z1, "Ctrl (invert) pushes back in");
+
+    EditMesh spike = make_grid(16, 16, 2.0f);
+    spike.positions[centre].z = 1.0f;
+    cache.build(spike);
+    grid.build(spike, 0.5f);
+    d = SculptDab{};
+    d.center = glm::vec3(0, 0, 1.0f);   // the brush is a sphere: centred on the spike
+    d.radius = 0.6f;
+    d.strength = 1.0f;
+    d.brush = SculptBrush::Smooth;
+    sculpt_dab(spike, cache, grid, d, moved);
+    expect(spike.positions[centre].z < 0.5f, "Smooth flattens a spike");
+
+    EditMesh sym = make_grid(16, 16, 2.0f);
+    cache.build(sym);
+    grid.build(sym, 0.3f);
+    d = SculptDab{};
+    d.center = glm::vec3(0.5f, 0, 0);
+    d.radius = 0.3f;
+    d.strength = 1.0f;
+    const bool axes[3] = {true, false, false};
+    for_each_symmetric(d, axes, [&](const SculptDab& md) { sculpt_dab(sym, cache, grid, md, moved); });
+    const uint32_t right = 8 * 17 + 12, left = 8 * 17 + 4;   // x = +-0.5
+    expect(sym.positions[right].z > 0.0f && std::abs(sym.positions[right].z - sym.positions[left].z) < 1e-6f,
+           "X symmetry raises both sides the same");
+
+    // The grid query matches brute force.
+    std::vector<uint32_t> q;
+    grid.query(sym, glm::vec3(0.1f, -0.2f, 0), 0.37f, q);
+    size_t brute = 0;
+    for (const auto& p : sym.positions) brute += glm::length(p - glm::vec3(0.1f, -0.2f, 0)) <= 0.37f;
+    expect(q.size() == brute, "VertexGrid::query finds exactly the vertices in range");
+
+    EditMesh gm = make_grid(16, 16, 2.0f);
+    grid.build(gm, 0.5f);
+    const SculptGrab gr = sculpt_grab_begin(gm, grid, glm::vec3(0), 0.5f, 0.5f);
+    sculpt_grab_apply(gm, gr, glm::vec3(0, 0, 0.3f), moved);
+    expect(std::abs(gm.positions[centre].z - 0.3f) < 1e-5f, "Grab moves the centre with the cursor");
 }
 
 void test_projection_and_rays() {
@@ -667,6 +1060,7 @@ toy::core::AppConfig shell_config(const Project& p) {
     cfg.render.ssao_temporal_enabled = false;
     cfg.render.ssr_temporal_enabled = false;
     cfg.output.save_on_exit = false;
+    apply_editor_render_overrides(cfg);
     return cfg;
 }
 
@@ -842,10 +1236,11 @@ void test_editor_shell_end_to_end() {
         toy::core::AppConfig cfg = restart_config;
         cfg.window.visible = false;
         cfg.render.screen_ui_enabled = true;
+        apply_editor_render_overrides(cfg);
         toy::core::Engine engine(cfg, shell_options(project));
         EditorApp app(engine, project, {}, std::move(restart_state));
         tick(engine, 3);
-        expect(engine.pipeline().render_width() == 320, "a restart applies startup-only render settings");
+        expect(engine.pipeline().render_height() == 180, "a restart applies startup-only render settings");
         expect(app.document().dirty() && app.document().find_component(sphere_id_for_restart(app), "MeshRenderer") >= 0,
                "unsaved scene edits survive the restart");
         app.set_tab(Tab::Layout);
@@ -1161,6 +1556,408 @@ void test_editor_blender_chrome() {
     dump(engine, "07_shading_workspace");
 }
 
+/** @brief Bundled editor themes: all load, Blender Dark spells out every role, switching applies live. */
+void test_editor_themes() {
+    namespace imm = coopa::ui::imm;
+    setenv("FIXED_DT", "0.016666", 1);
+    setenv("NO_INPUT", "1", 1);
+    setenv("HOME", tmp_root().c_str(), 1);
+    fs::remove(Project::prefs_path());
+
+    const auto themes = imm::list_themes(editor_themes_dir());
+    expect(themes.size() >= 3, "editor/themes ships several themes (" + std::to_string(themes.size()) + ")");
+    for (const auto& e : themes) {
+        bool ok = true;
+        try { imm::load_theme(e.path); } catch (const std::exception& ex) { ok = false; std::cerr << ex.what() << "\n"; }
+        expect(ok, "theme '" + e.id + "' loads");
+    }
+    // The default theme is the complete reference: every Style field and editor role present.
+    const fkyaml::node dark = coopa::yaml::load_document(editor_themes_dir() / "blender_dark.yaml");
+    std::vector<std::string> missing;
+    struct Presence {
+        const fkyaml::node* root; std::vector<std::string>* missing;
+        void metric(const char* k, const float&) const { if (!root->at("metrics").contains(k)) missing->push_back(std::string("metrics.") + k); }
+        void color(const char* k, const glm::vec4&) const { if (!root->at("colors").contains(k)) missing->push_back(std::string("colors.") + k); }
+    };
+    const imm::Style ref_style;
+    const EditorTheme ref_editor;
+    imm::visit_style(ref_style, Presence{&dark, &missing});
+    visit_editor_theme(ref_editor, [&](const char* sec, const char* role, const glm::vec4&) {
+        if (!dark.contains(sec) || !dark.at(sec).contains(role)) missing.push_back(std::string(sec) + "." + role);
+    });
+    std::string list;
+    for (const auto& m : missing) list += " " + m;
+    expect(missing.empty(), "blender_dark.yaml lists every themable role (missing:" + list + ")");
+
+    const fs::path root = fresh_dir("theme_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, 3);
+    expect(app.theme_id() == "blender_dark" && app.theme().name == "Blender Dark", "Blender Dark is the default theme");
+    expect(app.ui().style.panel_bg == app.theme().style.panel_bg, "the theme drives the UI style");
+
+    expect(app.set_theme("unity_dark"), "switch to Unity Dark");
+    tick(engine, 3);
+    dump(engine, "08_theme_unity_dark");
+    expect(app.ui().style.selection == imm::load_theme(editor_themes_dir() / "unity_dark.yaml").style.selection,
+           "the new theme applies immediately");
+    expect(app.theme().style.axis_x == imm::load_theme(editor_themes_dir() / "blender_dark.yaml").style.axis_x,
+           "`inherits:` keeps the base theme's roles");
+    const Node prefs = Project::load_prefs();
+    expect(prefs.contains("theme") && prefs.at("theme").get_value<std::string>() == "unity_dark", "the choice is remembered");
+
+    expect(app.set_theme("blender_light"), "switch to Blender Light");
+    tick(engine, 3);
+    dump(engine, "09_theme_blender_light");
+    expect(app.ui().style.text.r < 0.3f, "light theme: dark text");
+    expect(!app.set_theme("no_such_theme") && app.theme_id() == "blender_light", "a missing theme keeps the current one");
+    {
+        EditorApp again(engine, project);   // a new session starts with the remembered theme
+        expect(again.theme_id() == "blender_light", "the remembered theme loads at startup");
+    }
+    fs::remove(Project::prefs_path());
+}
+
+/** @brief BLEND materials are drawn in Solid / Material Preview (and the full render). */
+void test_editor_transparency_preview() {
+    setenv("FIXED_DT", "0.016666", 1);
+    setenv("NO_INPUT", "1", 1);
+    setenv("HOME", tmp_root().c_str(), 1);
+    const fs::path root = fresh_dir("transparency_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, toy::core::Engine::kFillDebounceFrames + 4);   // let the fill-mode rebuild settle
+    ObjectId cube = 0;
+    for (ObjectId id : app.document().all_ids()) if (get_string(*app.document().find(id), "name") == "Cube") cube = id;
+    expect(cube != 0, "the new project has a Cube");
+    const int mr = app.document().find_component(cube, "MeshRenderer");
+    auto set_alpha = [&](float a) {
+        Node comp = app.document().find(cube)->at("components").as_seq()[static_cast<size_t>(mr)];
+        Node mat = Node::mapping();
+        mat["albedo"] = make_color({0.9f, 0.1f, 0.1f});
+        mat["alpha_mode"] = Node(std::string("BLEND"));
+        mat["alpha"] = make_float(a);
+        comp["material"] = mat;
+        app.document().set_component(cube, mr, comp, "Glass");
+        app.sync().rebuild(engine, app.document());
+        tick(engine, 4);
+    };
+    auto differing = [](const coopa::gfx::util::ImageData& a, const coopa::gfx::util::ImageData& b) {
+        size_t n = 0;
+        if (a.pixels.size() != b.pixels.size()) return size_t(0);
+        for (size_t i = 0; i + 3 < a.pixels.size(); i += a.channels) {
+            int d = 0;
+            for (int c = 0; c < 3; ++c) d = std::max(d, std::abs(int(a.pixels[i + c]) - int(b.pixels[i + c])));
+            if (d > 12) ++n;
+        }
+        return n;
+    };
+    for (Shading sh : {Shading::Solid, Shading::MaterialPreview, Shading::Full}) {
+        app.set_shading(sh);
+        set_alpha(0.0f);
+        const auto clear = engine.capture_image(true);
+        set_alpha(0.6f);
+        const auto glass = engine.capture_image(true);
+        const size_t n = differing(clear, glass);
+        const char* name = sh == Shading::Solid ? "Solid" : sh == Shading::MaterialPreview ? "Material Preview" : "Rendered";
+        expect(n > 200, std::string("a 60% alpha cube shows in ") + name + " (" + std::to_string(n) + " px changed)");
+        if (sh == Shading::MaterialPreview) dump(engine, "10_glass_material_preview");
+    }
+}
+
+/** @brief The viewport fills its panel: the render follows the panel's aspect (resolution_mode fill). */
+void test_editor_viewport_fill() {
+    using coopa::input::Key;
+    using coopa::input::Mods;
+    setenv("FIXED_DT", "0.016666", 1);
+    unsetenv("NO_INPUT");
+    setenv("HOME", tmp_root().c_str(), 1);
+    const fs::path root = fresh_dir("fill_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    InputDriver in{engine, std::max(1.0f, engine.display_scale())};
+    auto aspect_matches = [&](const std::string& what) {
+        const imm::Box vb = app.viewport_box();
+        const float panel = vb.w / std::max(1.0f, vb.h);
+        const float render = float(engine.pipeline().render_width()) / float(engine.pipeline().render_height());
+        expect(std::abs(panel - render) < 0.02f, what + ": render aspect " + std::to_string(render) +
+                                                     " matches the panel's " + std::to_string(panel));
+        const auto d = engine.display_rect();
+        const float s = std::max(1.0f, engine.display_scale());
+        expect(std::abs(d.w - vb.w * s) <= 2.0f && std::abs(d.h - vb.h * s) <= 2.0f,
+               what + ": the image covers the whole panel (no bars)");
+    };
+    tick(engine, toy::core::Engine::kFillDebounceFrames + 4);
+    expect(engine.pipeline().render_height() == 270, "the project's vertical resolution is kept");
+    aspect_matches("default layout");
+    const uint32_t w0 = engine.pipeline().render_width();
+
+    in.move(glm::vec2(app.viewport_box().center()));
+    in.key(Key::Space, Mods::Control);   // Blender's Toggle Maximize Area
+    tick(engine, toy::core::Engine::kFillDebounceFrames + 4);
+    expect(engine.pipeline().render_width() != w0, "maximizing the viewport changes the render width");
+    aspect_matches("maximized");
+    dump(engine, "11_viewport_maximized");
+
+    // The view still works after a rebuild: clicking the cube selects it.
+    ObjectId cube = 0;
+    for (ObjectId id : app.document().all_ids()) if (get_string(*app.document().find(id), "name") == "Cube") cube = id;
+    glm::vec2 px;
+    if (engine.world_to_window(glm::vec3(0, 0, 0.5f), px)) {
+        app.document().clear_selection();
+        in.click(px / in.scale);
+        tick(engine, 2);
+        expect(app.document().primary() == cube, "picking works after the pipeline rebuild");
+    }
+}
+
+ObjectId object_named(EditorApp& app, const std::string& name) {
+    for (ObjectId id : app.document().all_ids()) if (get_string(*app.document().find(id), "name") == name) return id;
+    return 0;
+}
+
+glm::mat4 world_of(EditorApp& app, ObjectId id) {
+    auto* live = app.sync().live(id);
+    return live && live->get_transform() ? live->get_transform()->transform().get_world_matrix() : glm::mat4(1.0f);
+}
+
+/** @brief Window point (canvas px) of a mesh-local point on `id`, or nullopt. */
+std::optional<glm::vec2> screen_of(toy::core::Engine& engine, EditorApp& app, ObjectId id, const glm::vec3& local, float scale) {
+    glm::vec2 px;
+    if (!engine.world_to_window(glm::vec3(world_of(app, id) * glm::vec4(local, 1.0f)), px)) return std::nullopt;
+    return px / scale;
+}
+
+/** @brief The cube corner (x, y) nearest the camera, so its vertical edge is visible. */
+glm::vec2 visible_corner(EditorApp& app, ObjectId cube) {
+    const glm::mat4 view = coopa::gfx::engine::components::CameraComponent::main()->get_view_matrix();
+    const glm::vec3 eye = glm::vec3(glm::inverse(view)[3]);
+    const glm::mat4 w = world_of(app, cube);
+    glm::vec2 best(0.5f);
+    float bd = 1e30f;
+    for (float x : {-0.5f, 0.5f}) for (float y : {-0.5f, 0.5f}) {
+        const float d = glm::distance(glm::vec3(w * glm::vec4(x, y, 0, 1)), eye);
+        if (d < bd) { bd = d; best = {x, y}; }
+    }
+    return best;
+}
+
+/** @brief Ctrl+R loop cut and slide, Alt+click loops, G G edge slide, Ctrl+Alt rings, Ctrl+T -- with real input. */
+void test_editor_quad_modelling() {
+    using coopa::input::Key;
+    using coopa::input::Mods;
+    using coopa::input::MouseButton;
+    setenv("FIXED_DT", "0.016666", 1);
+    unsetenv("NO_INPUT");
+    setenv("HOME", tmp_root().c_str(), 1);
+    fs::remove(Project::prefs_path());
+    const fs::path root = fresh_dir("quad_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, toy::core::Engine::kFillDebounceFrames + 4);
+    InputDriver in{engine, std::max(1.0f, engine.display_scale())};
+    const ObjectId cube = object_named(app, "Cube");
+    app.document().select(cube);
+    in.move(app.viewport_box().center());
+    in.key(Key::Tab);
+    tick(engine, toy::core::Engine::kFillDebounceFrames + 2);
+    expect(app.edit_mode_active(), "Tab enters Edit Mode");
+    in.key(Key::Num2);
+    auto& md = app.mesh_document();
+    expect(md.selection.mode == SelectMode::Edge, "2: edge select mode");
+
+    const glm::vec2 corner = visible_corner(app, cube);
+    const auto edge_px = screen_of(engine, app, cube, glm::vec3(corner, 0.1f), in.scale);
+    expect(edge_px.has_value(), "the cube's near vertical edge is on screen");
+    if (!edge_px) return;
+
+    // Ctrl+R: the wheel changes the cut count, Esc cancels.
+    in.move(*edge_px);
+    in.key(Key::R, Mods::Control);
+    expect(app.loop_cut_active(), "Ctrl+R starts Loop Cut and Slide");
+    engine.queue_input([](coopa::input::Input& i) { i.push_scroll(0, 1); });
+    tick(engine, 2);
+    expect(app.loop_cut_cuts() == 2, "the wheel adds a cut (got " + std::to_string(app.loop_cut_cuts()) + ")");
+    in.key(Key::Escape);
+    expect(!app.loop_cut_active() && md.mesh.faces.size() == 6, "Esc cancels without cutting");
+
+    // Ctrl+R, LMB (cut, then slide), RMB (keep the cut centred).
+    in.move(*edge_px);
+    in.key(Key::R, Mods::Control);
+    in.move(*edge_px + glm::vec2(1, 0));
+    in.click(*edge_px);
+    in.click(*edge_px, MouseButton::Right);
+    expect(md.mesh.faces.size() == 10 && closed_and_consistent(md.mesh), "one cut around the cube: 10 faces, closed (got " +
+                                                                          std::to_string(md.mesh.faces.size()) + ")");
+    bool centred = true;
+    for (uint32_t v = 8; v < md.mesh.positions.size(); ++v) centred &= std::abs(md.mesh.positions[v].z) < 1e-4f;
+    expect(centred, "RMB after the cut leaves the loop centred");
+    in.key(Key::Z, Mods::Control);
+    expect(md.mesh.faces.size() == 6, "one undo step removes the cut and its slide");
+    in.key(Key::Z, Mods::Control | Mods::Shift);
+    expect(md.mesh.faces.size() == 10, "redo brings it back");
+
+    // Alt+click a loop edge: the whole new loop, without orbiting.
+    const float yaw = app.camera().yaw_deg;
+    const auto loop_px = screen_of(engine, app, cube, glm::vec3(corner.x, 0.0f, 0.0f), in.scale);
+    if (loop_px) in.click(*loop_px, MouseButton::Left, Mods::Alt);
+    in.key(Key::Num2);   // (a key event clears the held Alt)
+    expect(md.selection.edges.size() == 4 && std::abs(app.camera().yaw_deg - yaw) < 1e-4f,
+           "Alt+click selects the 4-edge loop and the view stays put (got " + std::to_string(md.selection.edges.size()) + ")");
+
+    // G G 0.5 Enter: Edge Slide halfway.
+    in.move(app.viewport_box().center());
+    in.key(Key::G);
+    in.key(Key::G);
+    in.key(Key::Period);
+    in.key(Key::Num5);
+    in.key(Key::Enter);
+    bool slid = true;
+    for (uint32_t v = 8; v < 12; ++v) slid &= std::abs(std::abs(md.mesh.positions[v].z) - 0.25f) < 1e-4f;
+    expect(slid, "G G .5 slides the loop halfway along its rails");
+
+    // Ctrl+Alt+click a vertical edge: its ring.
+    const auto ring_px = screen_of(engine, app, cube, glm::vec3(corner, -0.3f), in.scale);
+    if (ring_px) in.click(*ring_px, MouseButton::Left, Mods::Control | Mods::Alt);
+    in.key(Key::Num2);
+    expect(md.selection.edges.size() == 4, "Ctrl+Alt+click selects the edge ring (got " + std::to_string(md.selection.edges.size()) + ")");
+
+    // Ctrl+T: triangulate everything.
+    in.key(Key::Num3);
+    in.key(Key::A);
+    in.key(Key::T, Mods::Control);
+    expect(md.mesh.faces.size() == 20 && closed_and_consistent(md.mesh), "Ctrl+T: 10 quads become 20 triangles");
+    in.key(Key::J, Mods::Alt);
+    expect(md.mesh.faces.size() == 10, "Alt+J joins them back into quads");
+    dump(engine, "12_quad_modelling");
+    // Subdivide (W menu op) shows the Adjust Last Operation panel.
+    in.key(Key::A);
+    in.move(app.viewport_box().center());
+    in.key(Key::W);
+    tick(engine, 2);
+    expect(app.ui().any_popup_open(), "W opens the edit-mode context menu");
+    in.key(Key::Escape);
+    in.key(Key::Tab);
+    tick(engine, 2);
+    const ObjectId grid = app.create_primitive("Grid");
+    tick(engine, 3);
+    expect(grid != 0, "Add > Grid creates a grid object");
+    dump(engine, "15_adjust_last_operation");
+}
+
+/** @brief Edit Mode isolates the mesh (lights stay), Tab restores, and the toggle persists. */
+void test_editor_isolation() {
+    using coopa::input::Key;
+    setenv("FIXED_DT", "0.016666", 1);
+    unsetenv("NO_INPUT");
+    setenv("HOME", tmp_root().c_str(), 1);
+    fs::remove(Project::prefs_path());
+    const fs::path root = fresh_dir("isolate_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, 4);
+    InputDriver in{engine, std::max(1.0f, engine.display_scale())};
+    const ObjectId cube = object_named(app, "Cube"), ground = object_named(app, "Ground"), sun = object_named(app, "Sun");
+    expect(cube && ground && sun, "the new project has Cube, Ground and Sun");
+    app.hide_objects({object_named(app, "Camera")});
+    const float yaw0 = app.camera().yaw_deg, dist0 = app.camera().distance;
+    app.document().select(cube);
+    in.move(app.viewport_box().center());
+    in.key(Key::Tab);
+    tick(engine, 2);
+    expect(app.edit_mode_active() && app.is_isolated(ground) && !app.sync().live(ground)->active(), "Edit Mode hides the other mesh");
+    expect(!app.is_isolated(sun) && app.sync().live(sun)->active(), "lights stay on");
+    expect(std::abs(app.camera().distance - dist0) > 1e-3f, "the view frames the edited mesh");
+    dump(engine, "13_isolated_edit_mode");
+    in.key(Key::Tab);
+    tick(engine, 2);
+    expect(!app.edit_mode_active() && app.sync().live(ground)->active() && !app.is_isolated(ground), "Tab brings everything back");
+    expect(std::abs(app.camera().yaw_deg - yaw0) < 1e-3f && std::abs(app.camera().distance - dist0) < 1e-3f, "and restores the view");
+    expect(!app.sync().live(object_named(app, "Camera"))->active(), "an object the user hid stays hidden");
+
+    app.set_isolate_in_edit(false);
+    in.key(Key::Tab);
+    tick(engine, 2);
+    expect(app.edit_mode_active() && app.sync().live(ground)->active(), "with the toggle off, Edit Mode leaves the scene visible");
+    in.key(Key::Tab);
+    const Node prefs = Project::load_prefs();
+    expect(prefs.contains("isolate_edit_mode") && !prefs.at("isolate_edit_mode").get_value<bool>(), "the toggle is saved");
+    fs::remove(Project::prefs_path());
+}
+
+/** @brief Sculpting workspace: Subdivide Smooth, a Draw stroke, Ctrl inverts, one undo step per stroke. */
+void test_editor_sculpt() {
+    using coopa::input::Key;
+    using coopa::input::Mods;
+    using coopa::input::MouseButton;
+    using coopa::input::KeyAction;
+    setenv("FIXED_DT", "0.016666", 1);
+    unsetenv("NO_INPUT");
+    setenv("HOME", tmp_root().c_str(), 1);
+    fs::remove(Project::prefs_path());
+    const fs::path root = fresh_dir("sculpt_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, toy::core::Engine::kFillDebounceFrames + 4);
+    InputDriver in{engine, std::max(1.0f, engine.display_scale())};
+    const ObjectId cube = object_named(app, "Cube");
+    app.document().select(cube);
+    app.set_tab(Tab::Sculpting);
+    tick(engine, 4);
+    expect(app.interaction_mode() == InteractionMode::Sculpt, "the Sculpting workspace enters Sculpt Mode");
+    auto& md = app.mesh_document();
+    app.subdivide_smooth(2);
+    tick(engine, 3);
+    expect(md.mesh.faces.size() == 96 && closed_and_consistent(md.mesh), "Subdivide Smooth x2: 96 quads, closed (got " +
+                                                                           std::to_string(md.mesh.faces.size()) + ")");
+    app.sculpt_settings().symmetry[0] = false;
+    app.sculpt_settings().strength = 1.0f;
+    app.sculpt_settings().radius_px = 60.0f;
+
+    // A Draw stroke across the visible face pushes vertices outward.
+    const glm::vec2 corner = visible_corner(app, cube);
+    const glm::vec3 face_point(corner.x * 0.8f, corner.y * 0.8f, 0.0f);
+    auto start = screen_of(engine, app, cube, glm::vec3(corner.x, corner.y * 0.3f, 0.0f), in.scale);
+    auto stop = screen_of(engine, app, cube, glm::vec3(corner.x * 0.3f, corner.y, 0.0f), in.scale);
+    (void)face_point;
+    expect(start && stop, "the stroke lies on screen");
+    if (!start || !stop) return;
+    const EditMesh before = md.mesh;
+    const size_t undo0 = md.undo.undo_count();
+    auto spread = [](const EditMesh& m) { float r = 0; for (const auto& p : m.positions) r += glm::length(p); return r; };
+    in.move(*start);
+    in.drag(*stop, MouseButton::Left, 10);
+    tick(engine, 2);
+    expect(spread(md.mesh) > spread(before) + 1e-3f, "Draw pulls the surface outward");
+    expect(md.undo.undo_count() == undo0 + 1, "the whole stroke is one undo step");
+    dump(engine, "14_sculpt_stroke");
+    app.undo();
+    tick(engine, 2);
+    expect(md.mesh == before, "undo restores the exact shape");
+
+    // Ctrl inverts: push in.
+    in.move(*start);
+    engine.queue_input([](coopa::input::Input& i) { i.push_key(Key::LeftControl, 0, KeyAction::Press, Mods::Control); });
+    tick(engine, 1);
+    engine.queue_input([](coopa::input::Input& i) { i.push_mouse_button(MouseButton::Left, KeyAction::Press, Mods::Control); });
+    tick(engine, 1);
+    for (int i = 1; i <= 10; ++i) in.move(glm::mix(*start, *stop, i / 10.0f));
+    engine.queue_input([](coopa::input::Input& i) { i.push_mouse_button(MouseButton::Left, KeyAction::Release, Mods::Control); });
+    tick(engine, 1);
+    engine.queue_input([](coopa::input::Input& i) { i.push_key(Key::LeftControl, 0, KeyAction::Release, Mods::None); });
+    tick(engine, 2);
+    expect(spread(md.mesh) < spread(before) - 1e-3f, "Ctrl+Draw pushes the surface in");
+    app.set_tab(Tab::Layout);
+    tick(engine, 3);
+    expect(app.interaction_mode() == InteractionMode::Object, "leaving the workspace returns to Object Mode");
+}
+
 // =====================================================================================
 // Group "package" -- Build > Package to .caml
 // =====================================================================================
@@ -1220,18 +2017,31 @@ const TestCase kTests[] = {
     {"bevel_and_merge_and_delete",           "mesh",     test_bevel_and_merge_and_delete},
     {"mesh_io_roundtrip_and_engine_load",    "mesh",     test_mesh_io_roundtrip_and_engine_load},
     {"uv_projection_and_selection",          "mesh",     test_uv_projection_and_selection},
+    {"topology_loops_rings",                 "mesh",     test_topology_loops_rings},
+    {"loop_cut_and_slide",                   "mesh",     test_loop_cut_and_slide},
+    {"subdivide_triangulate_dissolve",       "mesh",     test_subdivide_triangulate_dissolve},
+    {"normal_basis_and_sculpt",              "mesh",     test_normal_basis_and_sculpt},
     {"imm_button_and_checkbox",              "imm",      test_imm_button_and_checkbox},
     {"imm_text_input_commits",               "imm",      test_imm_text_input_commits},
     {"imm_drag_float_and_popup_blocking",    "imm",      test_imm_drag_float_and_popup_blocking},
     {"imm_menubar_and_tree",                 "imm",      test_imm_menubar_and_tree},
     {"imm_icon_button_and_tooltip",          "imm",      test_imm_icon_button_and_tooltip},
+    {"imm_theme_files",                      "imm",      test_imm_theme_files},
+    {"imm_dropdown_toggles",                 "imm",      test_imm_dropdown_toggles},
     {"projection_and_rays",                  "viewport", test_projection_and_rays},
+    {"modal_axis_locking",                   "viewport", test_modal_axis_locking},
     {"gizmo_translate_drag",                 "viewport", test_gizmo_translate_drag},
     {"config_untouched_and_minimal_edits",   "config",   test_config_untouched_and_minimal_edits},
     {"editor_shell_end_to_end",              "editor_shell", test_editor_shell_end_to_end},
     {"material_reference_forms",             "editor_shell", test_material_reference_forms},
     {"editor_real_input_blender_keymap",     "editor_shell", test_editor_real_input_blender_keymap},
     {"editor_blender_chrome",                "editor_shell", test_editor_blender_chrome},
+    {"editor_themes",                        "editor_shell", test_editor_themes},
+    {"editor_transparency_preview",          "editor_shell", test_editor_transparency_preview},
+    {"editor_viewport_fill",                 "editor_shell", test_editor_viewport_fill},
+    {"editor_quad_modelling",                "editor_shell", test_editor_quad_modelling},
+    {"editor_isolation",                     "editor_shell", test_editor_isolation},
+    {"editor_sculpt",                        "editor_shell", test_editor_sculpt},
     {"package_renders_identically",          "package",  test_package_renders_identically},
 };
 

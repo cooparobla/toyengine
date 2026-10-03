@@ -145,6 +145,7 @@
 #include <gfxcoopa/engine/passes/taa_pass.h>
 #include <toyengine/render/passes/upscale_pass.h>
 #include <toyengine/render/passes/debug_line_pass.h>
+#include <toyengine/render/passes/transparent_preview_pass.h>
 #include <toyengine/scene/camera_controller.h>
 
 namespace toy {
@@ -491,6 +492,7 @@ public:
         TOY_KEEP_STARTUP_FIXED(resolution_mode);
         TOY_KEEP_STARTUP_FIXED(render_width);
         TOY_KEEP_STARTUP_FIXED(render_height);
+        TOY_KEEP_STARTUP_FIXED(fill_aspect);
         TOY_KEEP_STARTUP_FIXED(scale_divisor);
         TOY_KEEP_STARTUP_FIXED(ssr_half_res);
         TOY_KEEP_STARTUP_FIXED(ssao_half_res);
@@ -753,7 +755,9 @@ public:
                 const auto record_start = std::chrono::steady_clock::now();
                 if (gpu_profiler_) gpu_profiler_->begin_frame(cmd, frame_slot, profile_->current_frame());
                 record_scene_(cmd, ctx, meshes, sdf_draws);
+                frame_meshes_ = &meshes;
                 record_post_chain_(cmd, ctx);
+                frame_meshes_ = nullptr;
                 record_overlay_(cmd, ctx);
                 record_ms = std::chrono::duration<double, std::milli>(
                                 std::chrono::steady_clock::now() - record_start).count();
@@ -1634,12 +1638,21 @@ private:
         // test reads a frame back -- nothing reads the swapchain image itself. The cost is that it
         // lands pre-upscale and picks up AA and tilt shift.
         //
-        // debug_view is checked per frame, not here: this pass binds no descriptors, so
-        // there is nothing for a startup-fixed flag to lock in.
+        // debug_view is checked per frame, not here. Its one descriptor (the G-buffer depth that
+        // occluded lines -- the editor grid -- compare against) is bound once below: gbuffer_target_
+        // is startup-sized and never recreated.
         debug_line_pass_ = std::make_unique<passes::DebugLinePass>(
             device_, allocator_, post_target_.render_pass_object(),
             config_.shaders("debug_line.vert"),
             config_.shaders("debug_line.frag"));
+        debug_line_pass_->set_scene_depth(gbuffer_target_.depth_view_typed(), nearest_sampler_,
+                                          render_extent_.width, render_extent_.height);
+        // Same guest arrangement, for BLEND meshes in the editor's viewport shading modes.
+        transparent_preview_pass_ = std::make_unique<passes::TransparentPreviewPass>(
+            device_, post_target_.render_pass_object(), *camera_layout_, material_cache_->layout_object(),
+            config_.shaders("pbr.vert"), config_.shaders("transparent_preview.frag"));
+        transparent_preview_pass_->set_scene_depth(gbuffer_target_.depth_view_typed(), nearest_sampler_,
+                                                   render_extent_.width, render_extent_.height);
     }
     /**
      * @brief Builds the scene-depth descriptor set the world-space UI pass compares against. The PASS
@@ -2219,8 +2232,12 @@ private:
             dbg_pc.camera_near           = ctx.cam ? ctx.cam->clip_start : 0.1f;
             dbg_pc.camera_far            = ctx.cam ? ctx.cam->clip_end : 1000.0f;
             dbg_pc.camera_is_perspective = (!ctx.cam || ctx.cam->type == CameraType::Perspective) ? 1.0f : 0.0f;
+            dbg_pc.editor_ao             = (config_.editor_ssao && config_.ssao_enabled) ? 1.0f : 0.0f;
             debug_view_pass_->draw(cmd, current_camera_set(), current_light_set(), *shadow_set_, dbg_pc,
                                    render_extent_.width, render_extent_.height);
+            if (debug_view_is_editor_shading(active_view) && frame_meshes_) {
+                record_transparent_preview_(cmd, *frame_meshes_, active_view, ctx.cam_pos);
+            }
         } else {
             // Dof/Volumetrics debug views already replaced post_source_view's content with a
             // raw intermediate buffer (dof_pass_/volumetrics_pass_'s own debug branch, driven
@@ -2349,8 +2366,9 @@ private:
                 // blend forced to 0 so a jittered term's flicker shows up honestly instead of
                 // getting smoothed away by TAA's own accumulation (the very thing a debug view
                 // exists to let you see). "lines" overlays wireframes on the NORMAL image, so
-                // it keeps normal TAA.
-                const bool raw_taa = (active_view != DebugView::Off && active_view != DebugView::Lines);
+                // it keeps normal TAA, as do the editor's viewport shading modes.
+                const bool raw_taa = (active_view != DebugView::Off && active_view != DebugView::Lines &&
+                                      !debug_view_is_editor_shading(active_view));
                 taa_params.feedback_still  = raw_taa ? 0.0f : config_.taa_blending_weight;
                 taa_params.feedback_motion = raw_taa ? 0.0f : config_.taa_feedback_motion;
                 taa_params.velocity_scale  = config_.taa_weight_scale;
@@ -4473,6 +4491,39 @@ private:
         transparent_capture_target_.end(cmd);
     }
 
+    /**
+     * @brief The editor shading modes' BLEND meshes, back-to-front, over the debug-view image
+     *        (inside post_target_'s open bracket). BLEND SDFs are not drawn here.
+     */
+    void record_transparent_preview_(coopa::gfx::command::CommandBuffer& cmd, const MeshGather& meshes,
+                                     DebugView view, const glm::vec3& camera_pos) {
+        std::vector<std::pair<float, size_t>> order;
+        for (size_t i = 0; i < meshes.renderers.size(); ++i) {
+            if (meshes.instance_idx[i] == InstanceStream::kInvalidIndex) continue;
+            if (!meshes.renderers[i]->material.is_blended()) continue;
+            const glm::vec3 d = meshes.bounds[i].center - camera_pos;
+            order.push_back({glm::dot(d, d), i});
+        }
+        if (order.empty()) return;
+        std::stable_sort(order.begin(), order.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+        transparent_preview_pass_->begin(cmd, current_camera_set(), LetterboxRect{0, 0, render_extent_.width, render_extent_.height});
+        cmd.bind_vertex_buffer(instance_stream_.buffer(), 0, 1);
+        const float mode = view == DebugView::MaterialPreview ? 2.0f : view == DebugView::Wireframe ? 3.0f : 1.0f;
+        for (const auto& [dist, i] : order) {
+            auto* mr = meshes.renderers[i];
+            passes::TransparentPreviewPass::PushConstants pc;
+            pc.albedo    = glm::vec4(mr->material.albedo, mr->material.alpha);
+            pc.metallic  = mr->material.metallic;
+            pc.roughness = mr->material.roughness;
+            pc.ao        = mr->material.ao;
+            pc.view      = glm::vec4(mode, 0.0f, 0.0f, 0.0f);
+            pc.emissive  = mr->material.gpu_emissive();
+            transparent_preview_pass_->push(cmd, pc, material_cache_->set_for(mr->material));
+            mr->get_mesh()->bind(cmd);
+            mr->get_mesh()->draw_lod(cmd, meshes.lod[i], 1, meshes.instance_idx[i]);
+        }
+    }
+
     /// Fills the forward MESH pass's per-frame globals (lighting/indirect/SSR/refraction)
     /// from config_ -- the exact same fields sdf_data_'s own globals() fill (in render()'s
     /// SDF gather block) sources, kept in sync by hand since the two are independent UBOs
@@ -4946,6 +4997,10 @@ private:
     // caller once per frame before render() -- this pass is kept physxcoopa-free by design,
     // so Engine is what bridges PhysicsWorld::debug_draw() into that vector.
     std::unique_ptr<passes::DebugLinePass>                       debug_line_pass_;
+    /// BLEND meshes in the editor shading modes (see transparent_preview_pass.h).
+    std::unique_ptr<passes::TransparentPreviewPass>              transparent_preview_pass_;
+    /// This frame's gather, for record_post_chain_()'s transparent preview (valid during recording).
+    const MeshGather*                                            frame_meshes_ = nullptr;
 
     /// The G-buffer depth, as a set-1 sampler for world_ui_pass_'s occlusion compare. Declared
     /// BEFORE world_ui_pass_ so it outlives it: the pass holds this layout in its ExtraSets and

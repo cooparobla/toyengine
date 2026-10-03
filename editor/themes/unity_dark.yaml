@@ -1,0 +1,51 @@
+# Unity Dark -- the Unity editor's Pro (dark) skin: flatter, cooler greys, squarer corners
+# and Unity's selection blue. Overrides Blender Dark.
+name: Unity Dark
+author: toyengine
+description: Unity editor's dark (Pro) skin
+inherits: blender_dark
+
+metrics:
+  row_height: 20
+  rounding: 2.5
+
+colors:
+  window_bg: "#191919"
+  panel_bg: "#383838"
+  panel_alt: "#2e2e2e"
+  header: "#3e3e3e"
+  header_hover: "#474747"
+  subpanel: "#3c3c3c"
+  border: "#232323"
+  text: "#d2d2d2"
+  text_dim: "#9a9a9a"
+  text_disabled: "#6b6b6b"
+  accent: "#3a79bb"
+  button: "#585858"
+  button_hover: "#676767"
+  button_active: "#46607c"
+  field: "#2a2a2a"
+  field_hover: "#303030"
+  number: "#2a2a2a"
+  number_hover: "#303030"
+  selection: "#2c5d87"
+  selection_dim: "#4d4d4d"
+  popup_bg: "#282828f7"
+  object_selected: "#f7964a"
+  object_active: "#ffc380"
+
+chrome:
+  topbar_bg: "#191919"
+  statusbar_bg: "#191919"
+  play_group_bg: "#2e2e2e"
+  play_tint: "#2c4a66"
+
+viewport:
+  toolbar_bg: "#383838eb"
+  sidebar_bg: "#383838f2"
+
+outliner:
+  active_label: "#ffffff"
+  mesh: "#c2c2c2"
+  light: "#f2d16b"
+  camera: "#c2c2c2"

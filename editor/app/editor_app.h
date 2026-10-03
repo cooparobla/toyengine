@@ -22,13 +22,20 @@
 #define TOYEDITOR_APP_EDITOR_APP_H
 
 #include "asset_documents.h"
+#include "editor_theme.h"
+#include "sculpt_preview.h"
 #include "file_dialog.h"
 #include "project.h"
 #include "scene_sync.h"
 
 #include "../build/packager.h"
 #include "../core/scene_document.h"
+#include "../mesh/mesh_bvh.h"
+#include "../mesh/mesh_loops.h"
 #include "../mesh/mesh_ops.h"
+#include "../mesh/mesh_subdivide.h"
+#include "../mesh/mesh_topology.h"
+#include "../mesh/sculpt.h"
 #include "../mesh/primitives.h"
 #include "../schema/component_schema.h"
 #include "../schema/inspector.h"
@@ -57,6 +64,7 @@
 #include <cstdio>
 #include <deque>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <map>
 #include <memory>
@@ -68,11 +76,25 @@
 namespace toy::editor {
 
 namespace fs = std::filesystem;
+
+/**
+ * @brief Render settings the editor always uses on top of the project's: the viewport fills
+ *        its panel (resolution_mode "fill", keeping the project's vertical resolution so pixel
+ *        density matches the game) and is fitted, never integer-letterboxed.
+ */
+inline void apply_editor_render_overrides(core::AppConfig& cfg) {
+    auto& r = cfg.render;
+    if (r.resolution_mode == "divisor") r.render_height = std::max(1u, cfg.window.height / std::max(1u, r.scale_divisor));
+    r.resolution_mode = "fill";
+    r.upscale_mode = "fit";
+}
 using coopa::input::Key;
 using coopa::input::Mods;
 
 /** @brief Blender-style workspaces (the top bar's tabs). */
-enum class Tab { Layout = 0, Modeling = 1, Shading = 2 };
+enum class Tab { Layout = 0, Modeling = 1, Shading = 2, Sculpting = 3 };
+/** @brief Blender's interaction modes for a mesh object (the viewport header's mode dropdown). */
+enum class InteractionMode { Object = 0, Edit, Sculpt };
 /** @brief Viewport shading, Blender's four buttons. */
 enum class Shading { Wireframe = 0, Solid = 1, MaterialPreview = 2, Full = 3 };
 /** @brief The Properties editor's tabs. */
@@ -106,7 +128,18 @@ public:
         canvas_ = coopa::ui::build_immediate_canvas(*ui_scene_, "EditorUI", 100000);
         canvas_->on_draw = [this](coopa::ui::imm::Context& ctx) { draw_(ctx); };
         const std::string font_path = std::string(PROJ_DIR) + "/uicoopa/assets/fonts/Inter-Regular.ttf";
+        default_font_ = current_font_ = font_path;
         canvas_->context().text.set_font(coopa::ui::UIResourceCache::instance().font_for_path(font_path));
+        {
+            const Node prefs = Project::load_prefs();
+            std::string id = default_theme_id();
+            if (prefs.contains("theme") && prefs.at("theme").is_string()) id = prefs.at("theme").get_value<std::string>();
+            if (!load_theme_(id)) load_theme_(default_theme_id());
+            if (prefs.contains("viewport_ao") && prefs.at("viewport_ao").is_boolean()) viewport_ao_ = prefs.at("viewport_ao").get_value<bool>();
+            if (prefs.contains("isolate_edit_mode") && prefs.at("isolate_edit_mode").is_boolean()) {
+                isolate_in_edit_ = prefs.at("isolate_edit_mode").get_value<bool>();
+            }
+        }
         camera_.create(*ui_scene_);
         camera_.focus = state.cam_focus;
         camera_.yaw_deg = state.cam_yaw;
@@ -187,6 +220,19 @@ public:
     void set_prop_tab(PropTab t) { prop_tab_ = t; }
     /** @brief The navigation gizmo's on-screen rect (canvas pixels), for tests. */
     imm::Box nav_gizmo_rect() const { return nav_gizmo_rect_(); }
+
+    // --- themes (Edit > Theme) ---
+    /** @brief Switches to the theme `editor/themes/<id>.yaml` and remembers it; false if it failed to load. */
+    bool set_theme(const std::string& id) {
+        if (!load_theme_(id)) return false;
+        Node prefs = Project::load_prefs();
+        prefs["theme"] = Node(id);
+        Project::save_prefs(prefs);
+        return true;
+    }
+    const std::string& theme_id() const { return theme_id_; }
+    const imm::Theme& theme() const { return theme_; }
+    const EditorTheme& editor_theme() const { return et_; }
     /** @brief Unity's Pause toggle / single Step for the running game. */
     void pause() { toggle_pause_(); }
     void step() { step_simulation_(); }
@@ -199,6 +245,10 @@ public:
     bool paused() const { return play_scene_ && !play_scene_->is_simulating() && step_countdown_ == 0; }
     /** @brief True while a scene object's mesh is in edit mode (Tab). */
     bool edit_mode_active() const { return in_edit_mode_(); }
+    /** @brief H on these objects (editor-only hide). */
+    void hide_objects(const std::vector<ObjectId>& ids) { hide_(ids); }
+    /** @brief Sculpt / Edit Mode: Catmull-Clark the whole edited mesh `levels` times (one undo step). */
+    void subdivide_smooth(int levels) { if (edit_object_ || mesh_edit_view_()) run_catmull_clark_(levels); }
     bool quit_requested() const { return quit_; }
     bool restart_requested() const { return restart_; }
     /** @brief A project switch was requested: the main loop rebuilds everything for it. */
@@ -300,6 +350,13 @@ public:
         obj["components"].as_seq().push_back(mr);
         const ObjectId id = doc_.add_object(obj, parent, -1, "Create " + primitive);
         after_structure_change_(id);
+        // Adjust Last Operation: the primitive's parameters (sizes, subdivisions...).
+        LastOp op;
+        op.kind = LastOp::Kind::AddObjectPrimitive;
+        op.object = id;
+        op.prim = PrimitiveParams::defaults(primitive);
+        op.doc_revision_after = doc_.undo_revision();
+        last_op_ = op;
         return id;
     }
 
@@ -337,7 +394,7 @@ public:
     /** @brief Which document Ctrl+Z acts on: what the user is looking at / pointing at. */
     enum class UndoTarget { Scene, Mesh, Material, Config };
     UndoTarget undo_target_() const {
-        if (mesh_edit_view_() && mesh_.open()) return UndoTarget::Mesh;
+        if ((mesh_edit_view_() || in_sculpt_mode_()) && mesh_.open()) return UndoTarget::Mesh;
         if (tab_ == Tab::Shading && material_.open()) return UndoTarget::Material;
         const bool config_tab = prop_tab_ == PropTab::Render || prop_tab_ == PropTab::Output || prop_tab_ == PropTab::World;
         if (properties_hovered_ && config_tab) return UndoTarget::Config;
@@ -396,6 +453,7 @@ public:
 
     void play() {
         if (playing()) return;
+        exit_mesh_mode_();   // the play scene is built from the document; isolation stays in the editor
         deferred_.push_back([this] {
             const std::string anchor = (doc_.path().empty() ? sync_.fallback_path : doc_.path()).string();
             try {
@@ -438,11 +496,14 @@ public:
         tab_ = t;
         set_shading(workspace_shading_[static_cast<int>(t)]);
         // Modeling enters Edit Mode on the active mesh (unless a standalone mesh asset is
-        // open); leaving it returns to Object Mode, as switching Blender workspaces does.
-        if (old == Tab::Modeling && edit_object_) edit_object_ = 0;
-        if (t == Tab::Modeling && !standalone_mesh_ && !edit_object_ && !playing()) {
+        // open) and Sculpting enters Sculpt Mode; leaving them returns to Object Mode, as
+        // switching Blender workspaces does.
+        if ((old == Tab::Modeling || old == Tab::Sculpting) && edit_object_) exit_mesh_mode_();
+        if ((t == Tab::Modeling || t == Tab::Sculpting) && !(t == Tab::Modeling && standalone_mesh_) && !edit_object_ && !playing()) {
             const ObjectId id = doc_.primary();
-            if (id && doc_.find_component(id, "MeshRenderer") >= 0) toggle_edit_mode_();
+            if (id && doc_.find_component(id, "MeshRenderer") >= 0) {
+                enter_mesh_mode_(t == Tab::Sculpting ? InteractionMode::Sculpt : InteractionMode::Edit);
+            }
         }
         if (t == Tab::Shading) prop_tab_ = PropTab::Material;
         const bool now_asset = asset_view_();
@@ -472,9 +533,9 @@ public:
             log_error(std::string("Open mesh failed: ") + e.what());
             return false;
         }
+        exit_mesh_mode_();
         asset_kind_ = AssetKind::Mesh;
         standalone_mesh_ = true;
-        edit_object_ = 0;
         tab_ = Tab::Layout;   // force set_tab() to re-evaluate the view
         set_tab(Tab::Modeling);
         mesh_edit_ = true;
@@ -488,10 +549,10 @@ public:
         std::string key = primitive;
         std::transform(key.begin(), key.end(), key.begin(), ::tolower);
         for (char& c : key) if (c == ' ') c = '_';
+        exit_mesh_mode_();
         mesh_.reset(make_primitive(primitive), unique_asset_name_("meshes", key));
         asset_kind_ = AssetKind::Mesh;
         standalone_mesh_ = true;
-        edit_object_ = 0;
         mesh_edit_ = true;
         uploaded_revision_ = 0;
         tab_ = Tab::Layout;
@@ -729,8 +790,9 @@ private:
         preview_object_ = nullptr;
         uploaded_revision_ = 0;
         scene_uploaded_revision_ = 0;   // re-show an unsaved edited mesh on the new live objects
-        if (edit_object_ && !doc_.find(edit_object_)) edit_object_ = 0;
+        if (edit_object_ && !doc_.find(edit_object_)) exit_mesh_mode_();
         for (auto it = hidden_.begin(); it != hidden_.end();) it = doc_.find(*it) ? std::next(it) : hidden_.erase(it);
+        for (auto it = isolated_.begin(); it != isolated_.end();) it = doc_.find(*it) ? std::next(it) : isolated_.erase(it);
         ensure_active_scene_();
         apply_hidden_();
     }
@@ -874,7 +936,8 @@ private:
     // Frame hooks
     // =================================================================================
 
-    void post_late_update_(float) {
+    void post_late_update_(float dt) {
+        poll_theme_(dt);
         // Run queued actions; actions may queue more (run those next frame).
         auto pending = std::move(deferred_);
         deferred_.clear();
@@ -911,7 +974,8 @@ private:
             engine_.set_display_region(r);
         }
         if (!playing() || asset_view_()) camera_.make_main();
-
+        sculpt_frame_();
+        if (grid_wanted_) push_grid_lines_();
     }
 
     coopa::ui::CanvasComponent* canvas_canvas_() {
@@ -920,40 +984,90 @@ private:
     }
 
     /**
-     * @brief The ground grid, drawn in the full-resolution UI layer: faint, adaptive spacing
-     *        (lines stay ~25+ px apart), fading out with distance from the focus point.
+     * @brief Loads a theme by id and applies it to the UI (Style, font, editor colours). On
+     *        failure the current look stays and the error goes to the console.
      */
-    void draw_grid_(imm::Context& ctx, const ViewProj& vp) {
+    bool load_theme_(const std::string& id) {
+        fs::path path = editor_themes_dir() / (id + ".yaml");
+        try {
+            imm::Theme t = imm::load_theme(path);
+            theme_ = std::move(t);
+        } catch (const std::exception& e) {
+            log_error(std::string("Theme: ") + e.what());
+            return false;
+        }
+        theme_id_ = id;
+        et_ = editor_theme_from(theme_);
+        imm::Context& ctx = canvas_->context();
+        ctx.style = theme_.style;
+        const std::string font = theme_.font.empty() ? default_font_ : theme_.font;
+        if (font != current_font_) {
+            if (auto* f = coopa::ui::UIResourceCache::instance().font_for_path(font)) { ctx.text.set_font(f); current_font_ = font; }
+        }
+        theme_stamp_ = themes_stamp_();
+        return true;
+    }
+
+    /** @brief Newest modification time across the themes folder (a base theme may change too). */
+    static fs::file_time_type themes_stamp_() {
+        fs::file_time_type t{};
+        std::error_code ec;
+        for (const auto& e : fs::directory_iterator(editor_themes_dir(), ec)) t = std::max(t, e.last_write_time(ec));
+        return t;
+    }
+
+    /** @brief Hot reload: re-applies the active theme when any theme file changes on disk. */
+    void poll_theme_(float dt) {
+        theme_poll_ += dt;
+        if (theme_poll_ < 0.5f) return;
+        theme_poll_ = 0.0f;
+        if (themes_stamp_() != theme_stamp_ && load_theme_(theme_id_)) log_info("Theme reloaded: " + theme_.name);
+        theme_stamp_ = themes_stamp_();   // a broken edit isn't retried until the next save
+    }
+
+    /**
+     * @brief The ground grid, as 3D lines in the scene's line pass -- occluded by geometry, as
+     *        Blender's is. Faint, adaptive spacing (lines stay ~25+ px apart), fading out with
+     *        distance from the focus point; the X / Y axes tinted.
+     */
+    void push_grid_lines_() {
+        auto pack = [](glm::vec4 c) {
+            auto b = [](float v) { return static_cast<uint32_t>(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f); };
+            return b(c.r) | (b(c.g) << 8) | (b(c.b) << 16) | (b(c.a) << 24);
+        };
+        std::vector<render::DebugLine>& out = engine_.pipeline().debug_lines();
+        const imm::Style& st = canvas_->context().style;
         const float d = camera_.distance;
         float step = 0.1f;
         while (step * 40.0f < d * 2.0f) step *= (std::fmod(std::log10(step) + 10.0f, 1.0f) < 0.1f) ? 5.0f : 2.0f;
         const float half = step * 30.0f;
         const glm::vec2 c(std::round(camera_.focus.x / step) * step, std::round(camera_.focus.y / step) * step);
         const int n = 30;
-        auto seg_line = [&](glm::vec3 a, glm::vec3 b, glm::vec4 col, float t) {
-            // Segmented so lines that cross behind the camera still draw their visible part.
+        auto seg_line = [&](glm::vec3 a, glm::vec3 b, glm::vec4 col) {
+            // Segmented so the radial fade (per-vertex alpha) stays smooth.
             const int k = 24;
-            std::optional<glm::vec2> prev = vp.project(a);
-            glm::vec3 pa = a;
+            auto at = [&](int i) {
+                const glm::vec3 p = glm::mix(a, b, i / float(k));
+                const float fade = 1.0f - std::min(1.0f, glm::length(glm::vec2(p) - glm::vec2(camera_.focus)) / half);
+                return std::pair{p, pack(imm::with_alpha(col, col.a * fade))};
+            };
+            auto prev = at(0);
             for (int i = 1; i <= k; ++i) {
-                const glm::vec3 pb = glm::mix(a, b, i / float(k));
-                const auto q = vp.project(pb);
-                const float fade = 1.0f - std::min(1.0f, glm::length(glm::vec2((pa + pb) * 0.5f) - glm::vec2(camera_.focus)) / half);
-                if (prev && q && fade > 0.0f) ctx.line(*prev, *q, imm::with_alpha(col, col.a * fade), t);
-                prev = q;
-                pa = pb;
+                auto cur = at(i);
+                out.push_back(render::DebugLine{prev.first, cur.first, prev.second, true});
+                prev = cur;
             }
         };
         for (int i = -n; i <= n; ++i) {
             const float x = c.x + i * step, y = c.y + i * step;
             const bool major_x = std::abs(std::remainder(x, step * 10.0f)) < step * 0.01f;
             const bool major_y = std::abs(std::remainder(y, step * 10.0f)) < step * 0.01f;
-            glm::vec4 cx = major_x ? glm::vec4(1, 1, 1, 0.14f) : glm::vec4(1, 1, 1, 0.055f);
-            glm::vec4 cy = major_y ? glm::vec4(1, 1, 1, 0.14f) : glm::vec4(1, 1, 1, 0.055f);
-            if (std::abs(x) < step * 0.01f) cx = imm::with_alpha(ctx.style.axis_y, 0.45f);
-            if (std::abs(y) < step * 0.01f) cy = imm::with_alpha(ctx.style.axis_x, 0.45f);
-            seg_line({x, c.y - half, 0.0f}, {x, c.y + half, 0.0f}, cx, 1.0f);
-            seg_line({c.x - half, y, 0.0f}, {c.x + half, y, 0.0f}, cy, 1.0f);
+            glm::vec4 cx = major_x ? et_.viewport.grid_major : et_.viewport.grid;
+            glm::vec4 cy = major_y ? et_.viewport.grid_major : et_.viewport.grid;
+            if (std::abs(x) < step * 0.01f) cx = imm::with_alpha(st.axis_y, 0.6f);
+            if (std::abs(y) < step * 0.01f) cy = imm::with_alpha(st.axis_x, 0.6f);
+            seg_line({x, c.y - half, 0.0f}, {x, c.y + half, 0.0f}, cx);
+            seg_line({c.x - half, y, 0.0f}, {c.x + half, y, 0.0f}, cy);
         }
     }
 
@@ -966,7 +1080,21 @@ private:
             case Shading::Full: view = full_debug_view_.empty() ? std::string("off") : full_debug_view_; break;
         }
         engine_.render_config().debug_view = view;
+        engine_.render_config().editor_ssao = viewport_ao_;
     }
+
+public:
+    /** @brief The Viewport Shading popover's "Ambient Occlusion" option (saved in prefs). */
+    void set_viewport_ao(bool on) {
+        viewport_ao_ = on;
+        apply_shading_();
+        Node prefs = Project::load_prefs();
+        prefs["viewport_ao"] = Node(on);
+        Project::save_prefs(prefs);
+    }
+    bool viewport_ao() const { return viewport_ao_; }
+
+private:
 
     // =================================================================================
     // Viewport math
@@ -1048,6 +1176,8 @@ private:
 #include "ui/browser.inl"
 #include "ui/statusbar.inl"
 #include "ui/viewport_chrome.inl"
+#include "ui/mesh_tools.inl"
+#include "ui/sculpt.inl"
 
     // --- helpers shared by the panels ---
 
@@ -1249,8 +1379,11 @@ private:
     // =================================================================================
 
     enum class Tool { Select = 0, Move, Rotate, Scale, Cursor };
+    /** @brief Blender's transform orientations (header dropdown); Normal applies in edit mode. */
+    enum class Orientation { Global = 0, Local, Normal };
 
-    bool in_edit_mode_() const { return !asset_view_() && edit_object_ != 0; }
+    bool in_edit_mode_() const { return !asset_view_() && edit_object_ != 0 && mode_ == InteractionMode::Edit; }
+    bool in_sculpt_mode_() const { return !asset_view_() && edit_object_ != 0 && mode_ == InteractionMode::Sculpt; }
 
     /** @brief The edited mesh's object-to-world matrix (identity in the Asset tab). */
     glm::mat4 mesh_world_() {
@@ -1265,7 +1398,8 @@ private:
         draw_viewport_header_(ctx, hb, mesh_edit);
         viewport_box_ = imm::Box{area.x, hb.bottom(), area.w, std::max(1.0f, area.h - hb.h)};
         ctx.push_clip(viewport_box_);
-        // The render keeps the game's aspect ratio; paint the bars beside it like Blender's
+        // In fill mode the render matches the panel; bars only show while a resize waits out
+        // the pipeline-rebuild debounce (Engine::update_fill_extent_). Painted like Blender.s
         // viewport background rather than leaving them black.
         if (auto vpr = view_proj_()) {
             const imm::Box r = vpr->rect.intersect(viewport_box_);
@@ -1282,10 +1416,11 @@ private:
         if (modal_.active()) {
             const std::string h = modal_.header();
             const imm::Box b{viewport_box_.x + (show_toolbar_ ? kToolSize + 20 : 10), viewport_box_.bottom() - 34, ctx.text_width(h) + 18, 24};
-            ctx.fill_rounded(b, glm::vec4(0, 0, 0, 0.6f));
+            ctx.fill_rounded(b, et_.viewport.modal_backdrop);
             ctx.text_in(b, h, ctx.style.text);
         }
         // Furniture last, so it draws over the overlays (its rects were excluded from input).
+        draw_last_op_panel_(ctx, viewport_box_);
         if (show_toolbar_) draw_toolbar_(ctx, mesh_edit);
         if (show_overlays_ || true) draw_nav_gizmo_(ctx);
         if (show_sidebar_) draw_sidebar_(ctx, mesh_edit);
@@ -1379,8 +1514,32 @@ private:
             return;
         }
 
+        // --- Alt+click loop / ring select (edit mode); Alt+drag still navigates ---
+        if (mesh_edit && hovered && in.pressed[0] && alt && !loopcut_.active) {
+            alt_click_ = true;
+            alt_press_ = m;
+            alt_shift_ = shift;
+            alt_ctrl_ = ctrl;
+        }
+        if (alt_click_) {
+            if (in.released[0]) {
+                alt_click_ = false;
+                if (glm::distance(m, alt_press_) <= 4.0f) loop_select_at_(alt_press_, alt_ctrl_, alt_shift_);
+                return;
+            }
+            if (!in.down[0]) { alt_click_ = false; }
+            else if (glm::distance(m, alt_press_) > 4.0f) {
+                alt_click_ = false;
+                nav_active_ = true;
+                nav_button_ = 0;
+                nav_mode_ = alt_shift_ ? 1 : alt_ctrl_ ? 2 : 0;
+            } else {
+                return;
+            }
+        }
+
         // --- navigation ---
-        const bool nav_press = hovered && (in.pressed[2] || (in.pressed[0] && alt));
+        const bool nav_press = hovered && (in.pressed[2] || (in.pressed[0] && alt && !mesh_edit));
         if (nav_press) {
             nav_active_ = true;
             nav_button_ = in.pressed[2] ? 2 : 0;
@@ -1393,6 +1552,18 @@ private:
                 else if (nav_mode_ == 2) camera_.dolly(-in.mouse_delta.y * 0.05f);
                 else camera_.orbit(in.mouse_delta);
             }
+            return;
+        }
+        if (loopcut_.active) {
+            if (mesh_edit) run_loop_cut_(ctx, *vp, hovered);
+            else loopcut_.active = false;
+            return;
+        }
+        if (in_sculpt_mode_()) {
+            // Wheel zoom stays (below is skipped), so handle it here first.
+            if (hovered && in.scroll.y != 0.0f && !ctx.popup_hovered() && !stroke_.active) camera_.dolly(in.scroll.y);
+            if (hovered && in.pressed[1]) ctx.open_popup("mode_menu_vp", m);
+            handle_sculpt_input_(ctx, *vp, hovered);
             return;
         }
         if (hovered && (in.scroll.x != 0.0f || in.scroll.y != 0.0f) && !ctx.popup_hovered()) {
@@ -1422,7 +1593,7 @@ private:
                 if (g.started) begin_transform_(mesh_edit);
                 if (g.active) {
                     const int kind = gizmo_.mode == GizmoMode::Translate ? 0 : gizmo_.mode == GizmoMode::Rotate ? 1 : 2;
-                    apply_transform_(mesh_edit, kind, g.translate, g.rotate_axis, g.rotate_deg, g.scale);
+                    apply_transform_(mesh_edit, kind, g.translate, g.rotate_axis, g.rotate_deg, g.scale, basis);
                 }
                 if (g.finished) { if (mesh_edit) mesh_.undo.end_merge(); else doc_.end_merge(); }
             }
@@ -1463,8 +1634,8 @@ private:
         if (box_selecting_) {
             const imm::Box r{std::min(select_press_.x, m.x), std::min(select_press_.y, m.y),
                              std::abs(m.x - select_press_.x), std::abs(m.y - select_press_.y)};
-            ctx.fill(r, glm::vec4(1, 1, 1, 0.06f));
-            ctx.outline(r, glm::vec4(1, 1, 1, 0.6f));
+            ctx.fill(r, et_.viewport.box_select_fill);
+            ctx.outline(r, et_.viewport.box_select_outline);
         }
 
         if (hovered && !ctx.wants_keyboard() && !ctx.any_popup_open()) viewport_keymap_(ctx, *vp, mesh_edit, can_edit);
@@ -1501,13 +1672,16 @@ private:
         if (ctx.shortcut(Key::S, Mods::Shift)) ctx.open_popup("vp_snap_menu", m);
         if (ctx.shortcut(Key::C, Mods::Shift)) { cursor3d_ = glm::vec3(0.0f); frame_all(); }
         if (ctx.shortcut(Key::Space, Mods::Shift)) ctx.open_popup("vp_tool_menu", m);
+        if (ctx.shortcut(Key::Tab, Mods::Control)) ctx.open_popup("mode_menu_vp", m);   // Blender's mode pie
         if (!can_edit) return;
 
         if (mesh_edit) {
             auto& md = mesh_;
-            if (ctx.shortcut(Key::Num1)) convert_selection(md.mesh, md.selection, SelectMode::Vertex);
-            if (ctx.shortcut(Key::Num2)) convert_selection(md.mesh, md.selection, SelectMode::Edge);
-            if (ctx.shortcut(Key::Num3)) convert_selection(md.mesh, md.selection, SelectMode::Face);
+            // Switching select mode converts the selection; pressing the current mode is a no-op.
+            auto set_mode = [&](SelectMode sm) { if (md.selection.mode != sm) convert_selection(md.mesh, md.selection, sm); };
+            if (ctx.shortcut(Key::Num1)) set_mode(SelectMode::Vertex);
+            if (ctx.shortcut(Key::Num2)) set_mode(SelectMode::Edge);
+            if (ctx.shortcut(Key::Num3)) set_mode(SelectMode::Face);
             if (ctx.shortcut(Key::A)) md.selection.select_all(md.mesh);
             if (ctx.shortcut(Key::A, Mods::Alt)) md.selection.clear();
             if (ctx.shortcut(Key::I, Mods::Control)) invert_mesh_selection_();
@@ -1524,6 +1698,12 @@ private:
                 md.edit("Duplicate", [](EditMesh& mm, MeshSelection& s) { duplicate_faces(mm, s); });
                 start_modal_(ModalKind::Grab, vp, m, true);
             }
+            if (ctx.shortcut(Key::R, Mods::Control)) begin_loop_cut();
+            if (ctx.shortcut(Key::T, Mods::Control)) md.edit("Triangulate", [](EditMesh& mm, MeshSelection& s) { triangulate(mm, s); });
+            if (ctx.shortcut(Key::J, Mods::Alt)) md.edit("Tris to Quads", [](EditMesh& mm, MeshSelection& s) { tris_to_quads(mm, s); });
+            if (ctx.shortcut(Key::E, Mods::Control)) bridge_selected_();
+            if (ctx.shortcut(Key::A, Mods::Shift)) ctx.open_popup("vp_mesh_add", m);
+            if (ctx.shortcut(Key::W)) ctx.open_popup("vp_mesh_ctx", m);
             if (ctx.shortcut(Key::X) || ctx.shortcut(Key::Delete)) ctx.open_popup("vp_mesh_delete", m);
             if (ctx.shortcut(Key::M)) ctx.open_popup("vp_mesh_merge", m);
             if (ctx.shortcut(Key::U)) ctx.open_popup("vp_mesh_uv", m);
@@ -1570,6 +1750,10 @@ private:
         auto vp = view_proj_();
         const glm::vec2 m = ctx.mouse();
         if (open_add_menu_) { open_add_menu_ = false; ctx.open_popup("vp_add_menu", m); }
+        if (ctx.begin_popup("mode_menu_vp", 170)) {
+            draw_mode_menu_items_(ctx);
+            ctx.end_popup();
+        }
         if (ctx.begin_popup("vp_view_menu", 170)) {
             if (ctx.menu_item("Front", "Num1")) camera_.axis_view('f', false);
             if (ctx.menu_item("Back", "Ctrl Num1")) camera_.axis_view('f', true);
@@ -1654,7 +1838,12 @@ private:
             ctx.end_popup();
         }
         auto mesh_op = [&](const char* label, auto&& fn) { mesh_.edit(label, fn); };
-        if (ctx.begin_popup("vp_mesh_ctx", 200)) {
+        if (ctx.begin_popup("vp_mesh_ctx", 220)) {
+            if (ctx.menu_item("Subdivide")) run_subdivide_(1);
+            if (ctx.menu_item("Subdivide Smooth")) run_catmull_clark_(1);
+            if (ctx.menu_item("Loop Cut and Slide", "Ctrl R")) begin_loop_cut();
+            if (ctx.menu_item("Edge Slide", "G G") && vp) begin_edge_slide_from_selection_(*vp, m);
+            ctx.menu_separator();
             if (ctx.menu_item("Extrude", "E") && vp) extrude_interactive_(*vp, m);
             if (ctx.menu_item("Inset", "I")) pending_modal_kind_ = ModalKind::Inset;
             if (ctx.menu_item("Bevel", "Ctrl B")) pending_modal_kind_ = ModalKind::Bevel;
@@ -1664,7 +1853,17 @@ private:
             if (ctx.menu_item("Shade Smooth")) mesh_op("Shade Smooth", [](EditMesh& mm, MeshSelection& s) { set_smooth(mm, s, true); });
             if (ctx.menu_item("Shade Flat")) mesh_op("Shade Flat", [](EditMesh& mm, MeshSelection& s) { set_smooth(mm, s, false); });
             ctx.menu_separator();
+            if (ctx.menu_item("Triangulate Faces", "Ctrl T")) mesh_op("Triangulate", [](EditMesh& mm, MeshSelection& s) { triangulate(mm, s); });
+            if (ctx.menu_item("Tris to Quads", "Alt J")) mesh_op("Tris to Quads", [](EditMesh& mm, MeshSelection& s) { tris_to_quads(mm, s); });
+            if (ctx.menu_item("Bridge Edge Loops", "Ctrl E")) bridge_selected_();
+            ctx.menu_separator();
+            if (ctx.menu_item("Dissolve Edges")) dissolve_selected_edges_();
             if (ctx.menu_item("Delete Faces", "X")) mesh_op("Delete", [](EditMesh& mm, MeshSelection& s) { delete_selection(mm, s); });
+            ctx.end_popup();
+        }
+        if (ctx.begin_popup("vp_mesh_add", 180)) {
+            ctx.label_dim("Add Mesh");
+            for (const auto& p : primitive_names()) if (ctx.menu_item(p)) add_mesh_primitive_(p);
             ctx.end_popup();
         }
         if (ctx.begin_popup("vp_mesh_delete", 170)) {
@@ -1674,6 +1873,10 @@ private:
             if (ctx.menu_item("Vertices")) del(SelectMode::Vertex);
             if (ctx.menu_item("Edges")) del(SelectMode::Edge);
             if (ctx.menu_item("Faces")) del(SelectMode::Face);
+            ctx.menu_separator();
+            if (ctx.menu_item("Dissolve Vertices")) mesh_op("Dissolve Vertices", [](EditMesh& mm, MeshSelection& s) { dissolve_verts(mm, s); });
+            if (ctx.menu_item("Dissolve Edges")) dissolve_selected_edges_();
+            if (ctx.menu_item("Dissolve Faces")) dissolve_selected_faces_();
             ctx.end_popup();
         }
         if (ctx.begin_popup("vp_mesh_merge", 170)) {
@@ -1708,51 +1911,78 @@ private:
         if (playing() && !asset_view_()) return;
         glm::vec3 pivot;
         glm::mat3 basis(1.0f);
-        const bool saved_local = gizmo_.local;
-        gizmo_.local = true;   // the local basis feeds double-pressed axis constraints
-        const bool ok = gizmo_target_(mesh, pivot, basis);
-        gizmo_.local = saved_local;
-        if (!ok) return;
-        if (kind == ModalKind::Inset || kind == ModalKind::Bevel) {
-            if (!mesh) return;
-        }
+        if (!gizmo_target_(mesh, pivot, basis)) return;
+        if ((kind == ModalKind::Inset || kind == ModalKind::Bevel) && !mesh) return;
+        // A second axis press uses the header orientation (Local when it says Global).
+        const Orientation second = orient_ == Orientation::Global || (orient_ == Orientation::Normal && !mesh) ? Orientation::Local : orient_;
+        const glm::mat3 second_basis = orientation_basis_(mesh, second);
         begin_transform_(mesh);
         modal_mesh_ = mesh;
         modal_base_sel_ = mesh_.selection;
-        modal_.begin(kind, vp, pivot, basis, mouse, axis);
+        slide_merge_key_ = "modal";
+        modal_.begin(kind, vp, pivot, second_basis, mouse, axis, second == Orientation::Normal ? "normal" : "local",
+                     mesh && kind == ModalKind::Grab);
     }
 
     void run_modal_(imm::Context& ctx, const ViewProj& vp, bool ctrl, bool shift) {
         const auto& in = ctx.input();
         const ModalKind kind = modal_.kind();
-        const auto outcome = modal_.update(vp, ctx.mouse(), in.keys, in.pressed[0], in.pressed[1], ctrl != snap_on_, shift);
+        const auto outcome = modal_.update(vp, ctx.mouse(), in.keys, in.pressed[0], in.pressed[1], ctrl != snap_on_, shift,
+                                           in.down[2], in.pressed[2]);
         ctx.consume_keyboard();
         select_pending_ = box_selecting_ = false;
-        if (outcome == ModalTransform::Outcome::Cancelled) {
+        nav_active_ = false;   // MMB belongs to the operator (auto constraint) while it runs
+        if (outcome == ModalTransform::Outcome::SwitchToSlide) {
+            // G G: put the grab back and slide the selected edges instead.
             apply_modal_(kind, ModalTransform::Result{});
+            mesh_.undo.end_merge();
+            begin_edge_slide_from_selection_(vp, ctx.mouse());
+            return;
+        }
+        if (outcome == ModalTransform::Outcome::Cancelled) {
+            ModalTransform::Result zero;
+            apply_modal_(kind, zero);
             if (modal_mesh_) mesh_.undo.end_merge(); else doc_.end_merge();
+            note_slide_finished_(kind, 0.0f);
             return;
         }
         apply_modal_(kind, modal_.result());
         if (outcome == ModalTransform::Outcome::Confirmed) {
             if (modal_mesh_) mesh_.undo.end_merge(); else doc_.end_merge();
+            note_slide_finished_(kind, modal_.result().amount);
         }
-        // Guide line along the constraint axis.
-        if (auto axis = modal_.constraint_axis()) {
+        // Guide lines: the constraint axis, or both axes of a constraint plane (dimmer).
+        if (kind == ModalKind::EdgeSlide) return;
+        for (const auto& [axis_v, primary] : modal_.guide_axes()) {
             const glm::vec3 p = modal_.pivot();
-            auto a = vp.project(p - *axis * 1000.0f), b = vp.project(p + *axis * 1000.0f);
+            auto a = vp.project(p - axis_v * 1000.0f), b = vp.project(p + axis_v * 1000.0f);
             auto c = vp.project(p);
-            if (c) {
-                if (!a) a = c;
-                if (!b) b = c;
-                const glm::vec4 col = std::abs(axis->x) > 0.9f ? ctx.style.axis_x : std::abs(axis->y) > 0.9f ? ctx.style.axis_y
-                                    : std::abs(axis->z) > 0.9f ? ctx.style.axis_z : ctx.style.accent;
-                ctx.line(*a, *b, col, 1.5f);
+            if (!c) continue;
+            if (!a) a = c;
+            if (!b) b = c;
+            glm::vec4 col = ctx.style.accent;
+            const int ax = modal_.axis();
+            if (modal_.axis_is_second() || ax < 0) {
+                // Local / normal axes: colour by the closest world axis, as Blender does.
+                const glm::vec3 av = glm::abs(axis_v);
+                col = av.x >= av.y && av.x >= av.z ? ctx.style.axis_x : av.y >= av.z ? ctx.style.axis_y : ctx.style.axis_z;
+                if (ax < 0) col = ctx.style.accent;
+            } else {
+                col = std::abs(axis_v.x) > 0.9f ? ctx.style.axis_x : std::abs(axis_v.y) > 0.9f ? ctx.style.axis_y : ctx.style.axis_z;
             }
+            ctx.line(*a, *b, primary ? col : imm::with_alpha(col, 0.55f), primary ? 1.5f : 1.0f);
         }
     }
 
     void apply_modal_(ModalKind kind, const ModalTransform::Result& r) {
+        if (kind == ModalKind::EdgeSlide) {
+            const EditMesh base = mesh_drag_base_;
+            mesh_.edit("Edge Slide", [&](EditMesh& mm, MeshSelection&) {
+                mm = base;
+                apply_edge_slide(mm, slide_rails_, r.amount);
+            }, slide_merge_key_);
+            return;
+        }
         if (kind == ModalKind::Inset || kind == ModalKind::Bevel) {
             const EditMesh base = mesh_drag_base_;
             const MeshSelection base_sel = modal_base_sel_;
@@ -1765,7 +1995,7 @@ private:
             return;
         }
         const int k = kind == ModalKind::Grab ? 0 : kind == ModalKind::Rotate ? 1 : 2;
-        apply_transform_(modal_mesh_, k, r.translate, r.rotate_axis, r.rotate_deg, r.scale);
+        apply_transform_(modal_mesh_, k, r.translate, r.rotate_axis, r.rotate_deg, r.scale, r.scale_basis);
     }
 
     void extrude_interactive_(const ViewProj& vp, glm::vec2 m) {
@@ -1821,6 +2051,7 @@ private:
     }
     void apply_hidden_() {
         for (ObjectId id : hidden_) if (auto* live = sync_.live(id)) live->set_active(false);
+        for (ObjectId id : isolated_) if (auto* live = sync_.live(id)) live->set_active(false);
     }
 
     /** @brief World matrix of an object (live), or identity. */
@@ -1921,30 +2152,155 @@ private:
 
     // --- edit mode in the scene ---
 
+    /** @brief Tab: Object <-> Edit Mode on the active mesh (from Sculpt Mode: back to Object). */
     void toggle_edit_mode_() {
         if (asset_view_() || playing()) return;
-        if (edit_object_) { edit_object_ = 0; tool_settings_restore_(); return; }
-        const ObjectId id = doc_.primary();
-        if (!id) return;
+        if (edit_object_) { exit_mesh_mode_(); return; }
+        enter_mesh_mode_(InteractionMode::Edit);
+    }
+
+    /** @brief The active object's mesh file, or empty (logging why). */
+    fs::path active_mesh_path_(ObjectId id) {
         const int ci = doc_.find_component(id, "MeshRenderer");
-        if (ci < 0) { log_warn("Edit mode needs a mesh object"); return; }
+        if (ci < 0) { log_warn("This mode needs a mesh object"); return {}; }
         const std::string key = get_string(doc_.find(id)->at("components").as_seq()[static_cast<size_t>(ci)], "mesh_path");
-        if (key.empty()) return;
+        if (key.empty()) return {};
         const fs::path dir = (doc_.path().empty() ? sync_.fallback_path : doc_.path()).parent_path();
         const fs::path path = coopa::yaml::resolve_variant(engine_.assets().source().resolve("meshes/" + key + ".yaml", dir.string()));
-        if (!coopa::yaml::document_exists(path)) { log_error("Mesh file not found for '" + key + "'"); return; }
+        if (!coopa::yaml::document_exists(path)) { log_error("Mesh file not found for '" + key + "'"); return {}; }
+        return path;
+    }
+
+    /**
+     * @brief Enters Edit or Sculpt Mode on the active mesh object -- the one way in. Switching
+     *        between the two on the same object keeps the isolation and view.
+     */
+    bool enter_mesh_mode_(InteractionMode mode) {
+        if (asset_view_() || playing() || mode == InteractionMode::Object) return false;
+        const ObjectId id = edit_object_ ? edit_object_ : doc_.primary();
+        if (!id) return false;
+        if (edit_object_ == id) {
+            if (mode_ == mode) return true;
+            if (mode_ == InteractionMode::Sculpt) sculpt_end_();
+            mode_ = mode;
+            if (mode_ == InteractionMode::Sculpt) sculpt_begin_();
+            return true;
+        }
+        if (edit_object_) exit_mesh_mode_();
+        const fs::path path = active_mesh_path_(id);
+        if (path.empty()) return false;
         if (mesh_.open() && mesh_.dirty() && mesh_.path != path) save_mesh();
         if (mesh_.path != path || !mesh_.open()) {
-            try { mesh_.load(path); } catch (const std::exception& e) { log_error(e.what()); return; }
+            try { mesh_.load(path); } catch (const std::exception& e) { log_error(e.what()); return false; }
         }
         edit_object_ = id;
+        mode_ = mode;
         scene_uploaded_revision_ = 0;
-        log_info("Edit mode: " + project_.relative(path) + " (Tab to leave, Ctrl+S saves it)");
+        if (isolate_in_edit_) isolate_(id);
+        if (mode_ == InteractionMode::Sculpt) sculpt_begin_();
+        log_info(std::string(mode == InteractionMode::Sculpt ? "Sculpt" : "Edit") + " mode: " + project_.relative(path) +
+                 " (Tab to leave, Ctrl+S saves it)");
+        return true;
     }
+
+    /** @brief Back to Object Mode -- the one way out (restores isolation and view). */
+    void exit_mesh_mode_() {
+        if (!edit_object_) return;
+        if (modal_.active()) { apply_modal_(modal_.kind(), ModalTransform::Result{}); modal_.cancel(); mesh_.undo.end_merge(); }
+        if (mode_ == InteractionMode::Sculpt) sculpt_end_();
+        loopcut_.active = false;
+        unisolate_();
+        edit_object_ = 0;
+        mode_ = InteractionMode::Object;
+        tool_settings_restore_();
+    }
+
+    // --- Local-View-style isolation while editing a mesh ---
+
+    /** @brief Does this object draw geometry (and is not a light / probe that lights the mesh)? */
+    static bool isolate_candidate_(const Node& obj) {
+        if (!obj.contains("components")) return false;
+        bool renders = false, lights = false;
+        for (const auto& c : obj.at("components").as_seq()) {
+            const std::string t = component_type(c);
+            if (t == "MeshRenderer" || t == "SkinnedMeshRenderer" || t == "Terrain" || t == "SdfRenderer" || t == "Cloth") renders = true;
+            if (t.find("Light") != std::string::npos || t == "ReflectionProbe" || t == "GiProbeVolume" || t == "Volume") lights = true;
+        }
+        return renders && !lights;
+    }
+
+    /** @brief Hides every other renderable object (lights stay) and frames the mesh. */
+    void isolate_(ObjectId keep) {
+        isolated_.clear();
+        for (const auto& [id, live] : sync_.live_objects()) {
+            if (id == keep || !live || hidden_.count(id)) continue;
+            const Node* n = doc_.find(id);
+            if (n && isolate_candidate_(*n)) isolated_.insert(id);
+        }
+        apply_hidden_();
+        pre_isolate_pose_ = {camera_.focus, camera_.yaw_deg, camera_.pitch_deg, camera_.distance, camera_.ortho, true};
+        if (!mesh_.mesh.positions.empty()) {
+            glm::vec3 lo, hi;
+            mesh_.mesh.bounds(lo, hi);
+            const glm::mat4 w = mesh_world_();
+            glm::vec3 wlo(1e30f), whi(-1e30f);
+            for (int i = 0; i < 8; ++i) {
+                const glm::vec3 c((i & 1) ? hi.x : lo.x, (i & 2) ? hi.y : lo.y, (i & 4) ? hi.z : lo.z);
+                const glm::vec3 p = glm::vec3(w * glm::vec4(c, 1.0f));
+                wlo = glm::min(wlo, p);
+                whi = glm::max(whi, p);
+            }
+            camera_.frame(wlo, whi);
+        }
+    }
+
+    /** @brief Undoes isolate_(): objects come back (unless the user hid them) and the view returns. */
+    void unisolate_() {
+        for (ObjectId id : isolated_) {
+            if (hidden_.count(id)) continue;
+            if (auto* live = sync_.live(id)) {
+                const Node* n = doc_.find(id);
+                live->set_active(n ? get_bool(*n, "active", true) : true);
+            }
+        }
+        const bool had = !isolated_.empty() || pre_isolate_pose_.valid;
+        isolated_.clear();
+        if (had && pre_isolate_pose_.valid) {
+            camera_.focus = pre_isolate_pose_.focus;
+            camera_.yaw_deg = pre_isolate_pose_.yaw;
+            camera_.pitch_deg = pre_isolate_pose_.pitch;
+            camera_.distance = pre_isolate_pose_.distance;
+            camera_.ortho = pre_isolate_pose_.ortho;
+            camera_.apply();
+        }
+        pre_isolate_pose_.valid = false;
+    }
+
+public:
+    /** @brief The viewport header's "Isolate in Edit Mode" toggle (saved in prefs). */
+    void set_isolate_in_edit(bool on) {
+        isolate_in_edit_ = on;
+        Node prefs = Project::load_prefs();
+        prefs["isolate_edit_mode"] = Node(on);
+        Project::save_prefs(prefs);
+        if (!edit_object_) return;
+        if (on && isolated_.empty()) isolate_(edit_object_);
+        else if (!on) unisolate_();
+    }
+    bool isolate_in_edit() const { return isolate_in_edit_; }
+    bool is_isolated(ObjectId id) const { return isolated_.count(id) > 0; }
+    InteractionMode interaction_mode() const { return edit_object_ ? mode_ : InteractionMode::Object; }
+    bool set_interaction_mode(InteractionMode m) {
+        if (m == InteractionMode::Object) { exit_mesh_mode_(); return true; }
+        return enter_mesh_mode_(m);
+    }
+
+private:
     void tool_settings_restore_() {}
 
     /** @brief Shows the edited (unsaved) mesh on every live object that uses its file. */
     void push_mesh_to_scene_() {
+        if (sculpt_active_) return;   // Sculpt Mode shows its own dynamic mesh (sculpt_frame_)
         if (!mesh_.open() || mesh_.path.empty() || scene_uploaded_revision_ == mesh_.geometry_revision) return;
         if (!mesh_.dirty() && !edit_object_) return;
         scene_uploaded_revision_ = mesh_.geometry_revision;
@@ -1970,14 +2326,38 @@ private:
         mesh_cache_.clear();
     }
 
-    /** @brief The gizmo / modal pivot and axes for the current selection (world space). */
+    /**
+     * @brief World-space axes (columns) for a transform orientation: identity for Global,
+     *        the object's (or edited mesh's) axes for Local, the selection's Normal basis in
+     *        edit mode (Local outside it).
+     */
+    glm::mat3 orientation_basis_(bool mesh_edit, Orientation o) {
+        if (o == Orientation::Global) return glm::mat3(1.0f);
+        auto axes = [](const glm::mat4& w) {
+            return glm::mat3(glm::normalize(glm::vec3(w[0])), glm::normalize(glm::vec3(w[1])), glm::normalize(glm::vec3(w[2])));
+        };
+        if (mesh_edit) {
+            const glm::mat4 w = mesh_world_();
+            if (o == Orientation::Normal) {
+                const glm::mat3 nb = normal_basis(mesh_.mesh, mesh_.selection);
+                const glm::vec3 z = glm::normalize(glm::inverse(glm::transpose(glm::mat3(w))) * nb[2]);
+                glm::vec3 x = glm::mat3(w) * nb[0];
+                x -= z * glm::dot(x, z);
+                x = glm::length(x) > 1e-9f ? glm::normalize(x) : (std::abs(z.x) < 0.9f ? glm::vec3(1, 0, 0) : glm::vec3(0, 1, 0));
+                return glm::mat3(x, glm::cross(z, x), z);
+            }
+            return axes(w);
+        }
+        if (auto* live = sync_.live(doc_.primary()); live && live->get_transform()) return axes(live->get_transform()->transform().get_world_matrix());
+        return glm::mat3(1.0f);
+    }
+
     bool gizmo_target_(bool mesh_edit, glm::vec3& pivot, glm::mat3& basis) {
-        basis = glm::mat3(1.0f);
+        basis = orientation_basis_(mesh_edit, orient_);
         if (mesh_edit) {
             if (mesh_.selection.affected_vertices(mesh_.mesh).empty()) return false;
             const glm::mat4 w = mesh_world_();
             pivot = glm::vec3(w * glm::vec4(selection_center(mesh_.mesh, mesh_.selection), 1.0f));
-            if (gizmo_.local) basis = glm::mat3(glm::normalize(glm::vec3(w[0])), glm::normalize(glm::vec3(w[1])), glm::normalize(glm::vec3(w[2])));
             return true;
         }
         if (doc_.selection().empty()) return false;
@@ -1989,9 +2369,6 @@ private:
             const glm::mat4 w = live->get_transform()->transform().get_world_matrix();
             sum += glm::vec3(w[3]);
             ++n;
-            if (gizmo_.local && id == doc_.primary()) {
-                basis = glm::mat3(glm::normalize(glm::vec3(w[0])), glm::normalize(glm::vec3(w[1])), glm::normalize(glm::vec3(w[2])));
-            }
         }
         if (n == 0) return false;
         pivot = sum / static_cast<float>(n);
@@ -2025,12 +2402,12 @@ private:
      * @param kind 0 translate, 1 rotate, 2 scale.
      */
     void apply_transform_(bool mesh_edit, int kind, const glm::vec3& translate, const glm::vec3& rot_axis, float rot_deg,
-                          const glm::vec3& scale) {
+                          const glm::vec3& scale, const glm::mat3& scale_basis = glm::mat3(1.0f)) {
         if (mesh_edit) {
             const glm::mat4 w = mesh_world_();
             const glm::vec3 pivot = glm::vec3(w * glm::vec4(selection_center(mesh_drag_base_, mesh_.selection), 1.0f));
             const glm::mat4 xf_world = delta_matrix(kind == 0 ? translate : glm::vec3(0.0f), rot_axis, kind == 1 ? rot_deg : 0.0f,
-                                                    kind == 2 ? scale : glm::vec3(1.0f), pivot);
+                                                    kind == 2 ? scale : glm::vec3(1.0f), pivot, scale_basis);
             const glm::mat4 local = glm::inverse(w) * xf_world * w;
             const EditMesh base = mesh_drag_base_;
             mesh_.edit(kind == 0 ? "Move" : kind == 1 ? "Rotate" : "Scale", [&](EditMesh& mm, MeshSelection& sel) {
@@ -2060,49 +2437,6 @@ private:
                 if (multi) pos = glm::vec3(inv_parent * glm::vec4(pivot + (s.world_pos - pivot) * scale, 1.0f));
             }
             apply_(doc_.set_transform(id, pos, rot, scl, kind == 0 ? "Move" : kind == 1 ? "Rotate" : "Scale", "transform"));
-        }
-    }
-
-    void pick_mesh_element_(glm::vec2 px, bool additive) {
-        auto vp = view_proj_();
-        if (!vp) return;
-        auto& mm = mesh_.mesh;
-        auto& sel = mesh_.selection;
-        const glm::mat4 w = mesh_world_();
-        auto wp = [&](uint32_t v) { return glm::vec3(w * glm::vec4(mm.positions[v], 1.0f)); };
-        if (!additive) { sel.verts.clear(); sel.edges.clear(); sel.faces.clear(); }
-        auto toggle = [&](auto& set, const auto& v) { if (!set.insert(v).second && additive) set.erase(v); };
-        if (sel.mode == SelectMode::Vertex) {
-            int best = -1;
-            float bd = 12.0f;
-            for (uint32_t v = 0; v < mm.positions.size(); ++v) {
-                auto p = vp->project(wp(v));
-                if (p && glm::distance(*p, px) < bd) { bd = glm::distance(*p, px); best = static_cast<int>(v); }
-            }
-            if (best >= 0) toggle(sel.verts, static_cast<uint32_t>(best));
-        } else if (sel.mode == SelectMode::Edge) {
-            std::optional<Edge> best;
-            float bd = 10.0f;
-            for (const auto& e : mm.edges()) {
-                auto a = vp->project(wp(e.first)), b = vp->project(wp(e.second));
-                if (!a || !b) continue;
-                const float d = point_segment_distance(px, *a, *b);
-                if (d < bd) { bd = d; best = e; }
-            }
-            if (best) toggle(sel.edges, *best);
-        } else {
-            glm::vec3 o, d;
-            vp->ray(px, o, d);
-            int best = -1;
-            float bt = 1e30f;
-            for (uint32_t f = 0; f < mm.faces.size(); ++f) {
-                const auto& c = mm.faces[f].corners;
-                for (size_t k = 1; k + 1 < c.size(); ++k) {
-                    auto t = ray_triangle(o, d, wp(c[0].v), wp(c[k].v), wp(c[k + 1].v));
-                    if (t && *t < bt) { bt = *t; best = static_cast<int>(f); }
-                }
-            }
-            if (best >= 0) toggle(sel.faces, static_cast<uint32_t>(best));
         }
     }
 
@@ -2146,7 +2480,7 @@ private:
 
     void draw_viewport_overlay_body_(imm::Context& ctx, bool mesh_edit, const ViewProj& vp_ref) {
         const ViewProj* vp = &vp_ref;
-        if (show_overlays_ && show_grid_ && !(playing() && !mesh_edit)) draw_grid_(ctx, *vp);
+        grid_wanted_ = show_overlays_ && show_grid_ && !(playing() && !mesh_edit);
         const glm::vec4 accent = ctx.style.object_selected;
         const glm::vec4 active_col = ctx.style.object_active;
         auto draw_mesh_edges = [&](const EditMesh& mm, const std::vector<Edge>& edges, const glm::mat4& world, glm::vec4 col, float t) {
@@ -2158,7 +2492,9 @@ private:
                 if (a && b) ctx.line(*a, *b, col, t);
             }
         };
-        if (!mesh_edit) {
+        if (in_sculpt_mode_()) {
+            draw_sculpt_overlay_(ctx, *vp);   // no selection outline or wire while sculpting, as in Blender
+        } else if (!mesh_edit) {
             // Wireframe mode / X-Ray: every mesh object's edges.
             if (shading_ == Shading::Wireframe || xray_) {
                 for (const auto& [id, live] : sync_.live_objects()) {
@@ -2166,7 +2502,7 @@ private:
                     if (!node || !live || !live->active() || !live->get_transform() || doc_.is_selected(id)) continue;
                     if (const CachedMesh* cm = mesh_for_object_(*node)) {
                         draw_mesh_edges(cm->mesh, cm->edges, live->get_transform()->transform().get_world_matrix(),
-                                        glm::vec4(0.75f, 0.78f, 0.82f, 0.85f), 1.0f);
+                                        et_.viewport.object_wire, 1.0f);
                     }
                 }
             }
@@ -2176,7 +2512,7 @@ private:
                     const Node* node = doc_.find(id);
                     if (!node || !live || !live->active() || !live->get_transform() || mesh_for_object_(*node)) continue;
                     glm::vec4 col(0.02f, 0.02f, 0.02f, 0.9f);
-                    if (shading_ == Shading::Wireframe) col = glm::vec4(0.8f, 0.8f, 0.82f, 0.9f);
+                    if (shading_ == Shading::Wireframe) col = et_.viewport.wire;
                     if (doc_.is_selected(id)) col = doc_.primary() == id ? active_col : accent;
                     draw_object_glyph_(ctx, *vp, *node, live->get_transform()->transform().get_world_matrix(), col);
                 }
@@ -2193,7 +2529,7 @@ private:
                 // Origin dot.
                 if (show_overlays_) {
                     if (auto o = vp->project(glm::vec3(live->get_transform()->transform().get_world_matrix()[3]))) {
-                        ctx.circle(*o, 3.0f, glm::vec4(0, 0, 0, 0.6f));
+                        ctx.circle(*o, 3.0f, et_.viewport.origin_outline);
                         ctx.circle(*o, 2.0f, doc_.primary() == id ? active_col : accent);
                     }
                 }
@@ -2203,33 +2539,48 @@ private:
             const auto& sel = mesh_.selection;
             const glm::mat4 w = mesh_world_();
             auto wp = [&](const glm::vec3& p) { return glm::vec3(w * glm::vec4(p, 1.0f)); };
-            draw_mesh_edges(mm, mm.edges(), w, glm::vec4(0.04f, 0.04f, 0.05f, 0.9f), 1.0f);
+            // Only what the camera can see (Solid shading), as in Blender; X-ray shows all.
+            const EditVisibility& vis = edit_visibility_(*vp);
+            std::vector<Edge> shown;
+            shown.reserve(vis.edges.size());
+            for (const auto& [e, visible] : vis.edges) if (visible) shown.push_back(e);
+            draw_mesh_edges(mm, shown, w, et_.viewport.edit_wire, 1.0f);
+            auto edge_shown = [&](uint32_t x, uint32_t y) {
+                auto it = vis.edges.find(make_edge(x, y));
+                return it != vis.edges.end() && it->second;
+            };
             if (sel.mode == SelectMode::Face) {
                 for (uint32_t f : sel.faces) {
                     if (f >= mm.faces.size()) continue;
                     const auto& c = mm.faces[f].corners;
                     for (size_t i = 0; i < c.size(); ++i) {
-                        auto a = vp->project(wp(mm.positions[c[i].v])), b = vp->project(wp(mm.positions[c[(i + 1) % c.size()].v]));
+                        const uint32_t x = c[i].v, y = c[(i + 1) % c.size()].v;
+                        if (!edge_shown(x, y)) continue;
+                        auto a = vp->project(wp(mm.positions[x])), b = vp->project(wp(mm.positions[y]));
                         if (a && b) ctx.line(*a, *b, accent, 2.0f);
                     }
                 }
                 for (uint32_t f = 0; f < mm.faces.size(); ++f) {
+                    if (!vis.faces[f]) continue;
                     if (auto p = vp->project(wp(mm.face_center(f)))) {
-                        ctx.fill({p->x - 2, p->y - 2, 4, 4}, sel.faces.count(f) ? accent : glm::vec4(0.1f, 0.1f, 0.12f, 0.9f));
+                        ctx.fill({p->x - 2, p->y - 2, 4, 4}, sel.faces.count(f) ? accent : et_.viewport.face_dot);
                     }
                 }
             } else if (sel.mode == SelectMode::Edge) {
                 for (const auto& e : sel.edges) {
+                    if (!edge_shown(e.first, e.second)) continue;
                     auto a = vp->project(wp(mm.positions[e.first])), b = vp->project(wp(mm.positions[e.second]));
                     if (a && b) ctx.line(*a, *b, accent, 2.5f);
                 }
             } else {
                 for (uint32_t v = 0; v < mm.positions.size(); ++v) {
+                    if (!vis.verts[v]) continue;
                     auto p = vp->project(wp(mm.positions[v]));
                     if (!p) continue;
-                    ctx.fill({p->x - 3, p->y - 3, 6, 6}, sel.verts.count(v) ? accent : glm::vec4(0.06f, 0.06f, 0.07f, 1.0f));
+                    ctx.fill({p->x - 3, p->y - 3, 6, 6}, sel.verts.count(v) ? accent : et_.viewport.vertex);
                 }
             }
+            draw_mesh_tool_overlay_(ctx, *vp);
         }
         // 3D cursor (scene).
         if (!asset_view_() && show_overlays_) {
@@ -2237,18 +2588,19 @@ private:
                 for (int i = 0; i < 8; ++i) {
                     const float a0 = 6.2831853f * i / 8.0f, a1 = 6.2831853f * (i + 1) / 8.0f;
                     ctx.line(*c + glm::vec2(std::cos(a0), std::sin(a0)) * 9.0f, *c + glm::vec2(std::cos(a1), std::sin(a1)) * 9.0f,
-                             i % 2 ? glm::vec4(1, 1, 1, 0.9f) : glm::vec4(0.9f, 0.2f, 0.2f, 0.9f), 1.5f);
+                             i % 2 ? et_.viewport.cursor_ring_a : et_.viewport.cursor_ring_b, 1.5f);
                 }
-                ctx.line(*c - glm::vec2(14, 0), *c - glm::vec2(5, 0), glm::vec4(0, 0, 0, 0.8f), 1.0f);
-                ctx.line(*c + glm::vec2(5, 0), *c + glm::vec2(14, 0), glm::vec4(0, 0, 0, 0.8f), 1.0f);
-                ctx.line(*c - glm::vec2(0, 14), *c - glm::vec2(0, 5), glm::vec4(0, 0, 0, 0.8f), 1.0f);
-                ctx.line(*c + glm::vec2(0, 5), *c + glm::vec2(0, 14), glm::vec4(0, 0, 0, 0.8f), 1.0f);
+                ctx.line(*c - glm::vec2(14, 0), *c - glm::vec2(5, 0), et_.viewport.cursor_cross, 1.0f);
+                ctx.line(*c + glm::vec2(5, 0), *c + glm::vec2(14, 0), et_.viewport.cursor_cross, 1.0f);
+                ctx.line(*c - glm::vec2(0, 14), *c - glm::vec2(0, 5), et_.viewport.cursor_cross, 1.0f);
+                ctx.line(*c + glm::vec2(0, 5), *c + glm::vec2(0, 14), et_.viewport.cursor_cross, 1.0f);
             }
         }
         // Gizmo (transform tools only, hidden while a modal operator runs).
         if (tool_ != Tool::Select && show_gizmo_ && !modal_.active() && !(playing() && !mesh_edit)) {
             glm::vec3 pivot;
             glm::mat3 basis;
+            gizmo_.free_color = et_.viewport.gizmo_free;
             if (gizmo_target_(mesh_edit, pivot, basis)) gizmo_.draw(ctx, *vp, pivot, basis);
         }
         draw_overlay_text_(ctx, *vp);
@@ -2479,7 +2831,7 @@ private:
     PropTab prop_tab_ = PropTab::Object;
     bool standalone_mesh_ = false;
     Shading shading_ = Shading::Solid;
-    Shading workspace_shading_[3] = {Shading::Solid, Shading::Solid, Shading::MaterialPreview};   // per Tab
+    Shading workspace_shading_[4] = {Shading::Solid, Shading::Solid, Shading::MaterialPreview, Shading::Solid};   // per Tab
     std::string full_debug_view_;
     std::string config_base_debug_view_;
     AssetKind asset_kind_ = AssetKind::None;
@@ -2497,12 +2849,42 @@ private:
     float left_w_ = 250, right_w_ = 330, bottom_h_ = 180, asset_left_w_ = 220, settings_w_ = 460;
     imm::Box viewport_box_;
     bool show_grid_ = true;
+    bool grid_wanted_ = false;
+    bool viewport_ao_ = true;    // Viewport Shading > Ambient Occlusion
+    // Theme (see load_theme_): the file, the editor's typed colours, hot-reload state.
+    imm::Theme theme_;
+    EditorTheme et_;
+    std::string theme_id_, default_font_, current_font_;
+    fs::file_time_type theme_stamp_{};
+    float theme_poll_ = 0.0f;   // set by the overlay pass, drawn in pre_render_ (line pass)
     bool show_gizmo_ = true;
 
     // Viewport interaction (Blender-style; see the viewport section).
     Tool tool_ = Tool::Select;
     ModalTransform modal_;
     bool modal_mesh_ = false;
+    Orientation orient_ = Orientation::Global;   // header Transform Orientation
+    std::vector<SlideRail> slide_rails_;          // Edge Slide in progress
+    std::string slide_merge_key_ = "modal";      // "loopcut" folds a slide into its Loop Cut undo step
+    TriangleBVH bvh_;                              // edited mesh, mesh-local (mesh_bvh_())
+    uint64_t bvh_revision_ = 0;
+    EditVisibility edit_vis_;
+    LoopCutTool loopcut_;
+    Edge preview_seed_{0, 0};
+    LastOp last_op_;
+    bool last_op_open_ = true;
+    imm::Box last_op_rect_{};
+    bool alt_click_ = false, alt_shift_ = false, alt_ctrl_ = false;   // Alt+click loop select, pending
+    glm::vec2 alt_press_{0.0f};
+    // Sculpt Mode (ui/sculpt.inl).
+    SculptSettings sculpt_;
+    SculptCache sculpt_cache_;
+    VertexGrid sculpt_grid_;
+    SculptPreview sculpt_preview_;
+    bool sculpt_active_ = false;
+    uint64_t sculpt_cache_geom_ = 0, sculpt_preview_pos_ = 0;
+    Stroke stroke_;
+    SculptResize sculpt_resize_;
     MeshSelection modal_base_sel_;
     ModalKind pending_modal_kind_ = ModalKind::None;
     std::optional<glm::vec3> pending_modal_axis_;
@@ -2524,7 +2906,10 @@ private:
     bool console_show_[3] = {true, true, true};
     bool viewport_hovered_ = false, hierarchy_hovered_ = false;
     struct CameraPose { glm::vec3 focus{0.0f}; float yaw = 35, pitch = 25, distance = 12; bool ortho = false; bool valid = false; };
-    CameraPose scene_pose_, asset_pose_;
+    CameraPose scene_pose_, asset_pose_, pre_isolate_pose_;
+    InteractionMode mode_ = InteractionMode::Object;
+    std::set<ObjectId> isolated_;        // hidden by Edit / Sculpt Mode isolation (not saved, not hidden_)
+    bool isolate_in_edit_ = true;        // header toggle, prefs "isolate_edit_mode"
     Gizmo gizmo_;
     bool nav_active_ = false;
     int nav_button_ = 2;

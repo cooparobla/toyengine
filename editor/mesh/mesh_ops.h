@@ -86,6 +86,54 @@ inline glm::vec3 selection_center(const EditMesh& m, const MeshSelection& sel) {
     return vs.empty() ? c : c / static_cast<float>(vs.size());
 }
 
+/**
+ * @brief Blender's Normal transform orientation (mesh-local axes, columns): Z is the
+ *        area-weighted normal of the selected faces (vertex / edge modes: the faces around
+ *        the selection), X follows the longest selected edge with Z projected out.
+ */
+inline glm::mat3 normal_basis(const EditMesh& m, const MeshSelection& sel) {
+    std::set<uint32_t> fs = sel.affected_faces(m);
+    const auto vs = sel.affected_vertices(m);
+    if (fs.empty()) {
+        for (uint32_t f = 0; f < m.faces.size(); ++f) {
+            for (const auto& c : m.faces[f].corners) if (vs.count(c.v)) { fs.insert(f); break; }
+        }
+    }
+    glm::vec3 z(0.0f);
+    for (uint32_t f : fs) {
+        // Newell's vector is area-weighted before normalization.
+        const auto& c = m.faces[f].corners;
+        glm::vec3 n(0.0f);
+        for (size_t i = 0; i < c.size(); ++i) {
+            const glm::vec3& a = m.positions[c[i].v];
+            const glm::vec3& b = m.positions[c[(i + 1) % c.size()].v];
+            n += glm::cross(a, b);
+        }
+        z += n;
+    }
+    z = glm::length(z) > 1e-9f ? glm::normalize(z) : glm::vec3(0, 0, 1);
+    glm::vec3 x(0.0f);
+    float best = 0.0f;
+    auto consider = [&](uint32_t a, uint32_t b) {
+        glm::vec3 d = m.positions[b] - m.positions[a];
+        d -= z * glm::dot(d, z);
+        const float l = glm::length(d);
+        if (l > best) { best = l; x = d / l; }
+    };
+    for (uint32_t f : fs) {
+        const auto& c = m.faces[f].corners;
+        for (size_t i = 0; i < c.size(); ++i) {
+            const uint32_t a = c[i].v, b = c[(i + 1) % c.size()].v;
+            if (vs.count(a) && vs.count(b)) consider(a, b);
+        }
+    }
+    if (best < 1e-9f) {
+        x = std::abs(z.x) < 0.9f ? glm::vec3(1, 0, 0) : glm::vec3(0, 1, 0);
+        x = glm::normalize(x - z * glm::dot(x, z));
+    }
+    return glm::mat3(x, glm::cross(z, x), z);
+}
+
 /** @brief Applies `xf` (about the origin) to every selected vertex. */
 inline void transform_selection(EditMesh& m, const MeshSelection& sel, const glm::mat4& xf) {
     for (uint32_t v : sel.affected_vertices(m)) m.positions[v] = glm::vec3(xf * glm::vec4(m.positions[v], 1.0f));

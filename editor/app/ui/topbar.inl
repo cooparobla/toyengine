@@ -5,7 +5,7 @@
 
     void draw_topbar_(imm::Context& ctx, const imm::Box& b) {
         using I = imm::Icon;
-        ctx.fill(b, glm::vec4(0.137f, 0.137f, 0.137f, 1.0f));   // #232323
+        ctx.fill(b, et_.chrome.topbar_bg);
         const char* menus[] = {"File", "Edit", "Render", "Window", "Help"};
         float menus_w = 8;
         for (const char* m : menus) menus_w += ctx.text_width(m) + ctx.style.padding * 3;
@@ -25,16 +25,16 @@
         ctx.end_menubar();
 
         // Workspace tabs.
-        static const std::vector<std::string> ws = {"Layout", "Modeling", "Shading"};
-        static const std::vector<I> ws_icons = {I::Asset, I::EditMode, I::ShadeMaterial};
+        static const std::vector<std::string> ws = {"Layout", "Modeling", "Shading", "Sculpting"};
+        static const std::vector<I> ws_icons = {I::Asset, I::EditMode, I::ShadeMaterial, I::SculptMode};
         int t = static_cast<int>(tab_);
-        if (ctx.tab_bar("workspaces", {mb.right() + 12, b.y, 360, b.h}, ws, &t, &ws_icons, false)) set_tab(static_cast<Tab>(t));
+        if (ctx.tab_bar("workspaces", {mb.right() + 12, b.y, 480, b.h}, ws, &t, &ws_icons, false)) set_tab(static_cast<Tab>(t));
 
         // Unity play controls, centred.
         const float s = b.h - 6;
         const float cx = b.x + b.w * 0.5f - s * 1.5f;
         const bool paused = playing() && play_scene_ && !play_scene_->is_simulating() && step_countdown_ == 0;
-        ctx.fill_rounded({cx - 2, b.y + 2, s * 3 + 4, s + 2}, glm::vec4(0.2f, 0.2f, 0.2f, 1.0f));
+        ctx.fill_rounded({cx - 2, b.y + 2, s * 3 + 4, s + 2}, et_.chrome.play_group_bg);
         if (ctx.icon_button("tb_play", playing() ? I::Stop : I::Play, playing() ? "Stop\nLeave play mode (F5 / Esc)" : "Play\nRun the scene in the game simulation (F5)",
                             playing(), s, imm::Context::kLeft, imm::Box{cx, b.y + 3, s, s})) {
             playing() ? stop() : play();
@@ -95,8 +95,39 @@
         if (ctx.menu_item("Delete", "X", nullptr, ok, I::Trash)) delete_selected();
         ctx.menu_separator();
         if (ctx.menu_item("Rename Active Item", "F2", nullptr, ok && doc_.primary() != 0)) { rename_id_ = doc_.primary(); rename_frames_ = 0; }
+        draw_theme_menu_(ctx);
         if (ctx.menu_item("Preferences...", "", nullptr, true, I::Gear)) pending_modal_ = "Controls";
         ctx.end_menu();
+    }
+
+    /** @brief Edit > Theme: every theme in editor/themes, the active one checked. */
+    void draw_theme_menu_(imm::Context& ctx) {
+        using I = imm::Icon;
+        if (!ctx.begin_menu("Theme", true, I::Palette)) return;
+        for (const auto& t : imm::list_themes(editor_themes_dir())) {
+            bool on = t.id == theme_id_;
+            if (ctx.menu_item(t.name, "", &on)) set_theme(t.id);
+            ctx.tooltip(t.name + "\n" + t.path.filename().string() + " -- edits to the file apply live");
+        }
+        ctx.menu_separator();
+        if (ctx.menu_item("Reload Theme", "", nullptr, true, I::Restart)) load_theme_(theme_id_);
+        ctx.tooltip("Reload Theme\nRe-read " + (editor_themes_dir() / (theme_id_ + ".yaml")).string());
+        if (ctx.menu_item("Export Full Theme", "", nullptr, true, I::File)) export_theme_();
+        ctx.tooltip("Export Full Theme\nWrites every role of the current theme to editor/themes/" + theme_id_ + "_full.yaml, a starting point for a new theme");
+        ctx.end_menu();
+    }
+
+    /** @brief Writes the active theme with every role spelled out (inherited ones included). */
+    void export_theme_() {
+        imm::Theme t = theme_;
+        // Spell out the editor roles too, so the file lists everything that can be themed.
+        visit_editor_theme(et_, [&](const char* section, const char* role, const glm::vec4& c) { t.sections[section][role] = c; });
+        const fs::path out = editor_themes_dir() / (theme_id_ + "_full.yaml");
+        t.name += " (full)";
+        std::ofstream f(out);
+        f << "# Exported from \"" << theme_.name << "\" -- every themable role. Rename `name:` and edit.\n" << imm::theme_to_yaml(t);
+        if (f) log_info("Theme exported: " + out.string());
+        else log_error("Could not write " + out.string());
     }
 
     void draw_render_menu_(imm::Context& ctx) {

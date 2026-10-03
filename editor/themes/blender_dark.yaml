@@ -1,0 +1,91 @@
+# Blender Dark -- the toyengine editor's default look, after Blender 2.8+'s default theme.
+# Every role is listed; a theme only needs the ones it changes (see `inherits:` in the others).
+# Colours: "#rrggbb" / "#rrggbbaa", [r, g, b, a] floats or {r, g, b, a}. Edits hot-reload.
+name: Blender Dark
+author: toyengine
+description: Blender 2.8+ default dark theme
+
+metrics:
+  font_size: 12
+  row_height: 21
+  padding: 6
+  spacing: 3
+  indent: 16
+  label_ratio: 0.46
+  scrollbar: 7
+  rounding: 4
+
+colors:
+  window_bg: "#1d1d1d"            # gaps between areas
+  panel_bg: "#303030"             # editor background
+  panel_alt: "#282828"            # regions, headers' base
+  header: "#3d3d3d"               # area headers, sub-panel headers
+  header_hover: "#4a4a4a"
+  subpanel: "#363636"             # sub-panel body
+  border: "#171717"
+  text: "#e6e6e6"
+  text_dim: "#a6a6a6"
+  text_disabled: "#707070"
+  accent: "#4772b3"               # Blender's UI blue
+  button: "#545454"
+  button_hover: "#656565"
+  button_active: "#4772b3"
+  field: "#1d1d1d"                # text / number fields
+  field_hover: "#282828"
+  number: "#545454"               # number sliders
+  number_hover: "#656565"
+  selection: "#4772b3d9"          # selected rows (active)
+  selection_dim: "#334d80d9"      # selected rows (not active)
+  row_hover: "#ffffff0f"
+  popup_bg: "#181818f7"           # menus
+  scroll_grab: "#666666cc"
+  axis_x: "#ff3352"
+  axis_y: "#8bdc00"
+  axis_z: "#2890ff"
+  object_selected: "#f15800"      # viewport selection
+  object_active: "#ffaa40"        # viewport active object
+  warning: "#facc4c"
+  error: "#f26159"
+  hover_tint: "#ffffff1a"         # overlay on hovered flat widgets
+  edge_highlight: "#ffffff14"     # bevel line on frames, popups, menus
+  separator: "#00000059"          # dividers inside grouped widgets
+  shadow: "#00000017"             # one layer of a popup's soft shadow
+  modal_dim: "#00000073"          # behind modal dialogs
+  check_mark: "#ffffff"
+
+chrome:
+  topbar_bg: "#232323"
+  statusbar_bg: "#232323"
+  play_group_bg: "#333333"
+  play_tint: "#4c381f"            # viewport header while playing (Unity)
+
+viewport:
+  grid: "#ffffff0e"
+  grid_major: "#ffffff24"
+  wire: "#ccccd1e6"               # wireframe shading edges
+  edit_wire: "#0a0a0de6"          # edit-mode edges
+  vertex: "#0f0f12"               # edit-mode vertices (selected: accent)
+  face_dot: "#1a1a1fe6"
+  object_wire: "#bfc7d1d9"        # camera / light / empty glyphs
+  origin_outline: "#00000099"
+  overlay_text: "#f2f2f2f2"
+  text_shadow: "#000000bf"
+  toolbar_bg: "#292929eb"
+  sidebar_bg: "#303030f2"
+  nav_backdrop: "#0000002e"
+  nav_hover: "#ffffff1a"
+  nav_label: "#0d0d0d"
+  box_select_fill: "#ffffff0f"
+  box_select_outline: "#ffffff99"
+  cursor_ring_a: "#ffffffe6"      # 3D cursor's dashed ring
+  cursor_ring_b: "#e63333e6"
+  cursor_cross: "#000000cc"
+  gizmo_free: "#d9d9d9cc"         # the gizmo's view-plane handle
+  modal_backdrop: "#00000099"     # G / R / S header readout
+
+outliner:
+  active_label: "#ffe6b2"
+  mesh: "#f59e52"
+  light: "#ffdb66"
+  camera: "#8cd98c"
+  terrain: "#8cbf73"

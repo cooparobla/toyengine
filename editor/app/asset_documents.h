@@ -33,6 +33,8 @@ struct MeshDocument {
     UndoStack<EditMesh> undo;
     uint64_t saved_revision = 0;
     uint64_t geometry_revision = 1;   ///< Bumps on every change (drives preview uploads).
+    EditMesh live_before_;
+    bool live_ = false;
 
     bool open() const { return !mesh.faces.empty() || !path.empty(); }
     bool dirty() const { return undo.revision() != saved_revision; }
@@ -69,6 +71,25 @@ struct MeshDocument {
         undo.push(label, std::move(before), mesh, merge_key);
         ++geometry_revision;
     }
+    // --- live edits (sculpt strokes): positions change every frame, one undo step at the end ---
+
+    uint64_t position_revision = 1;   ///< Bumps on live edits (and every geometry change).
+    /** @brief Starts a live edit: one copy of the mesh for undo, none per frame. */
+    void begin_live() { live_before_ = mesh; live_ = true; }
+    /** @brief Positions changed during the live edit (no undo entry, no topology change). */
+    void touch_live() { ++position_revision; }
+    /** @brief Ends it as one undo step (skipped if nothing changed). */
+    void end_live(const std::string& label) {
+        if (!live_) return;
+        live_ = false;
+        if (live_before_ == mesh) { live_before_ = {}; return; }
+        undo.push(label, std::move(live_before_), mesh, {});
+        live_before_ = {};
+        ++geometry_revision;
+        ++position_revision;
+    }
+    bool live() const { return live_; }
+
     void do_undo() { if (const EditMesh* m = undo.undo()) { mesh = *m; selection.validate(mesh); ++geometry_revision; } }
     void do_redo() { if (const EditMesh* m = undo.redo()) { mesh = *m; selection.validate(mesh); ++geometry_revision; } }
 };

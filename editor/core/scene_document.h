@@ -109,6 +109,8 @@ public:
     const std::filesystem::path& path() const { return path_; }
     void set_path(const std::filesystem::path& p) { path_ = p; }
     bool dirty() const { return undo_.revision() != saved_revision_; }
+    /** @brief Bumps with every undoable change (and undo / redo). */
+    uint64_t undo_revision() const { return undo_.revision(); }
     std::string scene_name() const { return get_string(doc_.at("scene"), "scene_name", "Scene"); }
 
     UndoStack<Node>& undo_stack() { return undo_; }

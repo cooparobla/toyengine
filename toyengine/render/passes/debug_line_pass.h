@@ -3,6 +3,11 @@
  * @brief Draws physics collider wireframes and contact normals as a plain LineList overlay,
  *        depth-test off for the un-occluded X-ray gizmo look.
  *
+ * A line flagged `occluded` is hidden behind scene geometry instead (the editor's ground grid):
+ * post_target_ carries no scene depth, so the G-buffer depth arrives as a sampled texture at
+ * set 0 and the fragment shader discards what lies behind it -- the same approach as uicoopa's
+ * ui_world_occlude.glsl. X-ray lines draw first, then occluded ones, from one buffer.
+ *
  * Built against PixelRenderPipeline's post_target_ render pass and drawn as a guest inside
  * its already-open bracket, right after pixel_stylize_pass_ -- NOT the swapchain pass a first
  * instinct might reach for. pipeline::RenderPass hardcodes LOAD_OP_CLEAR, so a genuinely
@@ -36,6 +41,7 @@
 #include <gfxcoopa/core/device.h>
 #include <gfxcoopa/memory/allocator.h>
 #include <gfxcoopa/memory/buffer.h>
+#include <gfxcoopa/pipeline/descriptor.h>
 #include <gfxcoopa/pipeline/pipeline.h>
 #include <gfxcoopa/pipeline/render_pass.h>
 #include <gfxcoopa/pipeline/shader.h>
@@ -60,6 +66,7 @@ struct DebugLine {
     glm::vec3 a{0.0f};
     glm::vec3 b{0.0f};
     uint32_t color = 0xFFFFFFFFu;
+    bool occluded = false;   ///< Hidden behind scene geometry (else drawn X-ray, always on top).
 };
 
 /**
@@ -89,6 +96,12 @@ public:
         uint32_t color;
     };
 
+    /** @brief Matches debug_line.vert/.frag's push block. */
+    struct PushConstants {
+        glm::mat4 view_proj;
+        glm::vec4 params;   ///< x: occlude (0/1), yz: 1 / target size, w: relative depth slack.
+    };
+
     DebugLinePass(coopa::gfx::core::Device& device, coopa::gfx::memory::Allocator& allocator,
                   coopa::gfx::pipeline::RenderPass& target_pass,
                   const std::string& vert_spv, const std::string& frag_spv,
@@ -116,9 +129,16 @@ public:
         // universally supported, and Vulkan renders LineList primitives as thin lines under it.
         desc.raster.cull = CullMode::None;
         desc.raster.line_width = 1.0f; // >1.0 needs the unenabled wideLines device feature
-        desc.depth.test = false;       // X-ray gizmo look: never occluded by scene geometry
+        desc.depth.test = false;       // X-ray gizmo look; occluded lines test in the shader
         desc.depth.write = false;
-        desc.push_constants = {{ShaderStage::Vertex, 0, sizeof(glm::mat4)}};
+        desc.blend.mode = pipeline::BlendMode::Alpha;   // faint lines (grid) fade
+        depth_layout_ = std::make_unique<pipeline::DescriptorSetLayout>(
+            pipeline::DescriptorLayoutBuilder().combined_sampler(0, ShaderStage::Fragment).build(device));
+        depth_pool_ = std::make_unique<pipeline::DescriptorPool>(
+            pipeline::DescriptorPoolBuilder().add_sets(*depth_layout_, 1).build(device));
+        depth_set_ = std::make_unique<pipeline::DescriptorSet>(device, *depth_pool_, *depth_layout_);
+        desc.descriptor_layouts = {depth_layout_.get()};
+        desc.push_constants = {{ShaderStage::Vertex | ShaderStage::Fragment, 0, sizeof(PushConstants)}};
 
         pipeline_ = std::make_unique<pipeline::Pipeline>(device, target_pass, desc);
 
@@ -127,6 +147,17 @@ public:
             vbo_[i] = std::make_unique<memory::Buffer>(
                 memory::Buffer::vertex(device_, allocator_, capacity_[i] * sizeof(Vertex)));
         }
+    }
+
+    /**
+     * @brief The scene depth occluded lines compare against (bind once; the G-buffer is never
+     *        recreated). Until bound, nothing draws occluded lines.
+     */
+    void set_scene_depth(coopa::gfx::TextureView depth, const coopa::gfx::engine::util::Sampler& nearest,
+                         uint32_t width, uint32_t height) {
+        depth_set_->bind_image(0, depth, nearest);
+        depth_bound_ = true;
+        inv_size_ = glm::vec2(1.0f / std::max(1u, width), 1.0f / std::max(1u, height));
     }
 
     DebugLinePass(const DebugLinePass&) = delete;
@@ -140,15 +171,20 @@ public:
     void upload(uint32_t frame_index, const std::vector<DebugLine>& lines) {
         frame_index_ = frame_index;
         vertex_count_ = static_cast<uint32_t>(lines.size()) * 2;
+        xray_count_ = 0;
         if (lines.empty()) return;
 
         ensure_capacity_(frame_index, vertex_count_);
 
         scratch_.clear();
         scratch_.reserve(vertex_count_);
-        for (const DebugLine& line : lines) {
-            scratch_.push_back(Vertex{line.a, line.color});
-            scratch_.push_back(Vertex{line.b, line.color});
+        for (int pass = 0; pass < 2; ++pass) {
+            for (const DebugLine& line : lines) {
+                if (line.occluded != (pass == 1)) continue;
+                scratch_.push_back(Vertex{line.a, line.color});
+                scratch_.push_back(Vertex{line.b, line.color});
+            }
+            if (pass == 0) xray_count_ = static_cast<uint32_t>(scratch_.size());
         }
         vbo_[frame_index]->upload(scratch_.data(), sizeof(Vertex) * scratch_.size());
     }
@@ -170,9 +206,19 @@ public:
         cmd.set_viewport(static_cast<float>(rect.x), static_cast<float>(rect.y + static_cast<int32_t>(rect.h)),
                          static_cast<float>(rect.w), -static_cast<float>(rect.h));
         cmd.set_scissor(rect.x, rect.y, rect.w, rect.h);
-        cmd.push_constants(coopa::gfx::ShaderStage::Vertex, view_proj);
+        cmd.bind_descriptor_set(*depth_set_, 0);
         cmd.bind_vertex_buffer(*vbo_[frame_index_]);
-        cmd.draw(vertex_count_);
+        const auto stages = coopa::gfx::ShaderStage::Vertex | coopa::gfx::ShaderStage::Fragment;
+        // Occluded lines first, so X-ray gizmos and wireframes blend on top of the grid.
+        const uint32_t occluded = vertex_count_ - xray_count_;
+        if (occluded > 0 && depth_bound_) {
+            cmd.push_constants(stages, PushConstants{view_proj, glm::vec4(1.0f, inv_size_, 0.003f)});
+            cmd.draw(occluded, xray_count_);
+        }
+        if (xray_count_ > 0) {
+            cmd.push_constants(stages, PushConstants{view_proj, glm::vec4(0.0f)});
+            cmd.draw(xray_count_, 0);
+        }
     }
 
 private:
@@ -193,7 +239,13 @@ private:
 
     std::unique_ptr<coopa::gfx::pipeline::Shader> vert_shader_;
     std::unique_ptr<coopa::gfx::pipeline::Shader> frag_shader_;
+    std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout> depth_layout_;
+    std::unique_ptr<coopa::gfx::pipeline::DescriptorPool> depth_pool_;
+    std::unique_ptr<coopa::gfx::pipeline::DescriptorSet> depth_set_;
     std::unique_ptr<coopa::gfx::pipeline::Pipeline> pipeline_;
+    bool depth_bound_ = false;
+    glm::vec2 inv_size_{1.0f};
+    uint32_t xray_count_ = 0;
 
     std::array<std::unique_ptr<coopa::gfx::memory::Buffer>, kFrames> vbo_;
     std::array<uint32_t, kFrames> capacity_{};

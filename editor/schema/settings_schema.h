@@ -43,7 +43,7 @@ inline const std::vector<SettingsGroup>& render_settings_groups() {
             f_bool("shadows_enabled", true),
             startup(f_bool("ssao_enabled", true)),
             startup(f_bool("ssr_enabled", true)),
-            startup(f_bool("transparency_enabled", true)),
+            startup(f_bool("transparency_enabled", false)),
             startup(f_bool("refraction_enabled", true)),
             f_bool("sdf_enabled", true),
             startup(f_bool("bloom_enabled", true)),

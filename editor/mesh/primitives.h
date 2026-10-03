@@ -43,22 +43,25 @@ inline EditMesh make_cube(glm::vec3 size = glm::vec3(1.0f)) {
     return m;
 }
 
-/** @brief A flat grid in XY facing +Z, `size` across, `subdivisions` quads per side. */
-inline EditMesh make_plane(float size = 2.0f, int subdivisions = 1) {
+/** @brief A flat quad grid in XY facing +Z, `size` across, `xs` x `ys` quads. */
+inline EditMesh make_grid(int xs, int ys, float size = 2.0f) {
     EditMesh m;
-    const int n = std::max(1, subdivisions);
-    for (int y = 0; y <= n; ++y)
-        for (int x = 0; x <= n; ++x)
-            m.positions.push_back({(x / float(n) - 0.5f) * size, (y / float(n) - 0.5f) * size, 0.0f});
-    auto idx = [&](int x, int y) { return static_cast<uint32_t>(y * (n + 1) + x); };
-    for (int y = 0; y < n; ++y)
-        for (int x = 0; x < n; ++x)
-            detail::add_face(m, {{idx(x, y), {x / float(n), y / float(n)}},
-                                 {idx(x + 1, y), {(x + 1) / float(n), y / float(n)}},
-                                 {idx(x + 1, y + 1), {(x + 1) / float(n), (y + 1) / float(n)}},
-                                 {idx(x, y + 1), {x / float(n), (y + 1) / float(n)}}});
+    const int nx = std::max(1, xs), ny = std::max(1, ys);
+    for (int y = 0; y <= ny; ++y)
+        for (int x = 0; x <= nx; ++x)
+            m.positions.push_back({(x / float(nx) - 0.5f) * size, (y / float(ny) - 0.5f) * size, 0.0f});
+    auto idx = [&](int x, int y) { return static_cast<uint32_t>(y * (nx + 1) + x); };
+    for (int y = 0; y < ny; ++y)
+        for (int x = 0; x < nx; ++x)
+            detail::add_face(m, {{idx(x, y), {x / float(nx), y / float(ny)}},
+                                 {idx(x + 1, y), {(x + 1) / float(nx), y / float(ny)}},
+                                 {idx(x + 1, y + 1), {(x + 1) / float(nx), (y + 1) / float(ny)}},
+                                 {idx(x, y + 1), {x / float(nx), (y + 1) / float(ny)}}});
     return m;
 }
+
+/** @brief A flat grid in XY facing +Z, `size` across, `subdivisions` quads per side. */
+inline EditMesh make_plane(float size = 2.0f, int subdivisions = 1) { return make_grid(subdivisions, subdivisions, size); }
 
 /** @brief A cylinder along Z, centred on the origin, with optional N-gon caps. */
 inline EditMesh make_cylinder(float radius = 0.5f, float height = 1.0f, int segments = 16, bool caps = true) {
@@ -132,16 +135,65 @@ inline EditMesh make_tile_side() {
 
 /** @brief The primitive names the editor's Create menu offers, in order. */
 inline const std::vector<std::string>& primitive_names() {
-    static const std::vector<std::string> names = {"Cube", "Plane", "Cylinder", "Sphere", "Tile Side"};
+    static const std::vector<std::string> names = {"Cube", "Plane", "Grid", "Cylinder", "Sphere", "Tile Side"};
     return names;
 }
 
-inline EditMesh make_primitive(const std::string& name) {
-    if (name == "Plane") return make_plane();
-    if (name == "Cylinder") return make_cylinder();
-    if (name == "Sphere") return make_uv_sphere();
-    if (name == "Tile Side") return make_tile_side();
-    return make_cube();
+/**
+ * @brief A primitive's parameters -- what Blender's "Adjust Last Operation" panel edits
+ *        after Add > Mesh. Each kind reads the fields that apply to it.
+ */
+struct PrimitiveParams {
+    std::string kind = "Cube";
+    float size = 2.0f;          ///< Cube edge, plane / grid width.
+    float radius = 0.5f;        ///< Cylinder, sphere.
+    float depth = 1.0f;         ///< Cylinder height.
+    int x_subdivisions = 10;    ///< Grid.
+    int y_subdivisions = 10;    ///< Grid.
+    int segments = 16;          ///< Cylinder, sphere (around).
+    int rings = 12;             ///< Sphere.
+    bool caps = true;           ///< Cylinder.
+
+    /** @brief The defaults for a kind (Blender's: a 2 m cube / plane, a 10 x 10 grid...). */
+    static PrimitiveParams defaults(const std::string& kind) {
+        PrimitiveParams p;
+        p.kind = kind;
+        if (kind == "Cube") p.size = 1.0f;
+        if (kind == "Sphere") p.segments = 24;
+        return p;
+    }
+    bool operator==(const PrimitiveParams& o) const {
+        return kind == o.kind && size == o.size && radius == o.radius && depth == o.depth && x_subdivisions == o.x_subdivisions &&
+               y_subdivisions == o.y_subdivisions && segments == o.segments && rings == o.rings && caps == o.caps;
+    }
+};
+
+inline EditMesh make_primitive(const PrimitiveParams& p) {
+    if (p.kind == "Plane") return make_plane(p.size, 1);
+    if (p.kind == "Grid") return make_grid(p.x_subdivisions, p.y_subdivisions, p.size);
+    if (p.kind == "Cylinder") return make_cylinder(p.radius, p.depth, p.segments, p.caps);
+    if (p.kind == "Sphere") return make_uv_sphere(p.radius, p.segments, p.rings);
+    if (p.kind == "Tile Side") return make_tile_side();
+    return make_cube(glm::vec3(p.size));
+}
+
+inline EditMesh make_primitive(const std::string& name) { return make_primitive(PrimitiveParams::defaults(name)); }
+
+/**
+ * @brief Appends `src` (transformed by `xf`) to `dst` as new, separate geometry -- Shift+A in
+ *        Edit Mode -- and selects it (Face mode).
+ */
+template <class Selection>
+inline void append_mesh(EditMesh& dst, const EditMesh& src, const glm::mat4& xf, Selection& sel) {
+    const uint32_t base = static_cast<uint32_t>(dst.positions.size());
+    for (const auto& p : src.positions) dst.positions.push_back(glm::vec3(xf * glm::vec4(p, 1.0f)));
+    sel.clear();
+    for (const auto& f : src.faces) {
+        Face nf = f;
+        for (auto& c : nf.corners) c.v += base;
+        sel.faces.insert(static_cast<uint32_t>(dst.faces.size()));
+        dst.faces.push_back(std::move(nf));
+    }
 }
 
 } // namespace toy::editor

@@ -77,13 +77,14 @@
 
     void draw_tool_tab_(imm::Context& ctx) {
         using I = imm::Icon;
+        if (in_sculpt_mode_()) { draw_sculpt_tool_panel_(ctx); return; }
         static const char* tool_names[] = {"Select Box", "Move", "Rotate", "Scale", "Cursor"};
         static const I tool_icons[] = {I::SelectBox, I::Move, I::Rotate, I::Scale, I::Cursor};
         const int t = static_cast<int>(tool_);
         if (ctx.collapsing_header("Active Tool", true, nullptr, tool_icons[t])) {
             ctx.label(tool_names[t]);
-            int orient = gizmo_.local ? 1 : 0;
-            if (ctx.combo("Orientation", &orient, {"Global", "Local"})) gizmo_.local = orient == 1;
+            int orient = static_cast<int>(orient_);
+            if (ctx.combo("Orientation", &orient, {"Global", "Local", "Normal"})) orient_ = static_cast<Orientation>(orient);
             ctx.property_bool("Snap (Ctrl inverts)", &snap_on_);
             ctx.drag_float("Move Increment", &gizmo_.translate_snap, 0.01f, 0.001f, 100.0f);
             ctx.drag_float("Rotate Increment", &gizmo_.rotate_snap, 0.5f, 0.1f, 90.0f, "%.1f");

@@ -145,6 +145,16 @@ inline bool debug_view_is_channel(DebugView view) {
 }
 
 /**
+ * @brief The editor's viewport shading modes (Solid / Wireframe / MaterialPreview): drawn by
+ *        the channel pass, but meant to be looked at, not measured -- so unlike the diagnostic
+ *        channels they keep TAA's normal history blend (otherwise the sub-pixel jitter shows
+ *        as shaking edges).
+ */
+inline bool debug_view_is_editor_shading(DebugView view) {
+    return view == DebugView::Solid || view == DebugView::Wireframe || view == DebugView::MaterialPreview;
+}
+
+/**
  * @struct PixelRenderConfig
  * @brief Configuration for PixelRenderPipeline: internal resolution, upscaling,
  *        banded lighting, hard shadows, and the pixel-art post-process stack
@@ -161,6 +171,11 @@ struct PixelRenderConfig {
     bool ssao_enabled      = true;
     bool ssr_enabled       = true;  /**< Also gates the SSGI diffuse-bounce term (ssgi_intensity). */
     bool transparency_enabled = false;  /**< Forward BLEND-material pass, drawn after SSR compositing. */
+    /**
+     * Editor viewport shading (debug_view solid / material_preview): darken with SSAO.
+     * Runtime-switchable; needs ssao_enabled (startup-fixed) for there to be any AO to show.
+     */
+    bool editor_ssao = true;
     /**
      * Opaque surfaces (e.g. the floor) also reflect transparent geometry, via a second forward
      * capture of BLEND objects (depth/normal/position/shaded-color) and a second Hi-Z pyramid
@@ -340,9 +355,16 @@ struct PixelRenderConfig {
     }
 
     // --- Internal resolution ---
-    std::string resolution_mode = "fixed";   /**< "fixed" or "divisor". */
+    /**
+     * "fixed", "divisor", or "fill": render_height rows, width following the display region's
+     * aspect so the image fills it (the Engine rebuilds the pipeline when that aspect changes).
+     */
+    std::string resolution_mode = "fixed";
     uint32_t    render_width    = 480;       /**< Used when resolution_mode == "fixed". */
-    uint32_t    render_height   = 270;       /**< Used when resolution_mode == "fixed". */
+    uint32_t    render_height   = 270;       /**< Used when resolution_mode == "fixed" or "fill". */
+    /// fill mode: the display region's aspect (width / height). Set by the Engine, not YAML;
+    /// 0 = use the swapchain's.
+    float       fill_aspect     = 0.0f;
     uint32_t    scale_divisor   = 4;         /**< Used when resolution_mode == "divisor". */
     std::string upscale_mode    = "fit";     /**< "fit" (aspect-preserving best fit, default,
                                                    letterboxed only on the mismatched axis) or

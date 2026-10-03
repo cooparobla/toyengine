@@ -11,7 +11,7 @@
     static constexpr float kToolSize = 32.0f;
 
     imm::Box toolbar_rect_(bool mesh_edit) const {
-        const int n = mesh_edit ? 8 : 5;
+        const int n = in_sculpt_mode_() ? 5 : mesh_edit ? 9 : 5;
         return {viewport_box_.x + 6, viewport_box_.y + 6, kToolSize + 6, n * (kToolSize + 2) + 14};
     }
     float sidebar_w_() const { return show_sidebar_ ? 230.0f : 0.0f; }
@@ -26,6 +26,7 @@
         if (glm::distance(p, glm::vec2(g.x + 55, g.y + 55)) < 52.0f) return true;
         if (imm::Box{g.x + 40, g.y + 112, 30, 4 * 30}.contains(p)) return true;
         if (show_sidebar_ && sidebar_rect_().contains(p)) return true;
+        if (last_op_rect_.contains(p)) return true;
         return false;
     }
 
@@ -35,31 +36,41 @@
         using I = imm::Icon;
         float x = hb.x + 6;
         const float bh = hb.h - 6;
-        if (playing()) ctx.fill_rounded(hb, glm::vec4(0.30f, 0.22f, 0.12f, 1.0f), 6, imm::Context::kTop);   // Unity's play tint
+        if (playing()) ctx.fill_rounded(hb, et_.chrome.play_tint, 6, imm::Context::kTop);   // Unity's play tint
         // Mode dropdown.
         if (!asset_view_() || mesh_edit) {
-            const std::string mode = mesh_edit ? "Edit Mode" : "Object Mode";
+            const bool sculpting = in_sculpt_mode_();
+            const std::string mode = sculpting ? "Sculpt Mode" : mesh_edit ? "Edit Mode" : "Object Mode";
             const float w = ctx.text_width(mode) + bh + 26;
             const imm::Box mb{x, hb.y + 3, w, bh};
             bool hov = false, held = false;
             if (ctx.invisible_button("mode_dd", mb, &hov, &held)) ctx.open_popup("mode_menu", glm::vec2(mb.x, mb.bottom() + 2));
             ctx.fill_rounded(mb, hov ? ctx.style.button_hover : ctx.style.button);
-            ctx.icon(mesh_edit ? I::EditMode : I::ObjectMode, {mb.x + 4, mb.y + 2, bh - 4, bh - 4}, ctx.style.text);
+            ctx.icon(sculpting ? I::SculptMode : mesh_edit ? I::EditMode : I::ObjectMode, {mb.x + 4, mb.y + 2, bh - 4, bh - 4}, ctx.style.text);
             ctx.text_in({mb.x + bh + 2, mb.y, w - bh - 16, bh}, mode, ctx.style.text, 0.0f);
             ctx.arrow({mb.right() - 14, mb.y + 4, 10, bh - 8}, true, ctx.style.text_dim);
-            ctx.tooltip("Mode\nObject Mode / Edit Mode (Tab)");
+            ctx.tooltip("Mode\nObject Mode / Edit Mode (Tab) / Sculpt Mode (Ctrl Tab for the menu)");
             x += w + 8;
             if (ctx.begin_popup("mode_menu", 170)) {
-                if (ctx.menu_item("Object Mode", "Tab", nullptr, true, I::ObjectMode) && mesh_edit && !asset_view_()) toggle_edit_mode_();
-                if (ctx.menu_item("Edit Mode", "Tab", nullptr, !playing(), I::EditMode) && !mesh_edit) toggle_edit_mode_();
+                draw_mode_menu_items_(ctx);
                 ctx.end_popup();
             }
+            // Edit / Sculpt Mode isolation (Blender's Local View, entered automatically).
+            if (edit_object_ && !asset_view_()) {
+                if (ctx.icon_button("isolate", I::LocalView, "Isolate in Edit Mode\nEdit and Sculpt Mode hide the other objects and frame "
+                                    "this one (lights stay). Saved as a preference.", isolate_in_edit_, bh, imm::Context::kAll,
+                                    imm::Box{x, hb.y + 3, bh, bh}, true)) {
+                    set_isolate_in_edit(!isolate_in_edit_);
+                }
+                x += bh + 8;
+            }
+            if (sculpting) x = draw_sculpt_header_(ctx, x, hb);
         }
         if (mesh_edit) {
             int sm = static_cast<int>(mesh_.selection.mode);
             if (ctx.icon_group("selmode", {{I::Vertex, "Vertex Select\n1"}, {I::Edge, "Edge Select\n2"}, {I::Face, "Face Select\n3"}}, &sm,
                                imm::Box{x, hb.y + 3, bh * 3, bh}, bh)) {
-                convert_selection(mesh_.mesh, mesh_.selection, static_cast<SelectMode>(sm));
+                if (static_cast<SelectMode>(sm) != mesh_.selection.mode) convert_selection(mesh_.mesh, mesh_.selection, static_cast<SelectMode>(sm));
             }
             x += bh * 3 + 8;
         }
@@ -67,15 +78,35 @@
         const float menus_w = 220;
         ctx.begin_menubar({x, hb.y, menus_w, hb.h}, false);
         draw_view_menu_(ctx);
-        draw_select_menu_(ctx, mesh_edit);
-        if (!mesh_edit && ctx.begin_menu("Add")) { draw_add_menu_items_(ctx); ctx.end_menu(); }
-        if (mesh_edit) draw_mesh_menu_(ctx);
-        else draw_object_menu_(ctx);
+        if (!in_sculpt_mode_()) {
+            draw_select_menu_(ctx, mesh_edit);
+            if (!mesh_edit && ctx.begin_menu("Add")) { draw_add_menu_items_(ctx); ctx.end_menu(); }
+            if (mesh_edit) draw_mesh_menu_(ctx);
+            else draw_object_menu_(ctx);
+        }
         ctx.end_menubar();
 
         // Right side: orientation, snap, overlays, x-ray, shading.
         float rx = hb.right() - 6;
         const float s = bh;
+        // Blender's Viewport Shading popover, right of the four buttons.
+        const imm::Box sdd{rx - s * 0.7f, hb.y + 3, s * 0.7f, s};
+        if (ctx.icon_button("shading_opts_btn", I::ArrowDown, "Viewport Shading\nAmbient occlusion and other display options", false,
+                            s * 0.7f, imm::Context::kAll, sdd)) {
+            ctx.open_popup("shading_opts", glm::vec2(sdd.right() - 220, sdd.bottom() + 2));
+        }
+        if (ctx.begin_popup("shading_opts", 220)) {
+            ctx.label_dim("Viewport Shading");
+            const bool has_ssao = engine_.render_config().ssao_enabled;
+            bool ao = viewport_ao_ && has_ssao;
+            if (ctx.checkbox("Ambient Occlusion", &ao) && has_ssao) set_viewport_ao(ao);
+            ctx.tooltip(has_ssao ? "Ambient Occlusion\nDarken creases with the renderer's SSAO in Solid and Material Preview"
+                                 : "Ambient Occlusion\nUnavailable: the project's render config has ssao_enabled: false");
+            bool xr = xray_;
+            if (ctx.checkbox("X-Ray", &xr)) xray_ = xr;
+            ctx.end_popup();
+        }
+        rx -= s * 0.7f + 2;
         rx -= s * 4;
         int sh = static_cast<int>(shading_);
         if (ctx.icon_group("shading", {{I::ShadeWire, "Wireframe\nShift Z toggles, Z for the menu"},
@@ -103,11 +134,21 @@
         rx -= 92;
         const imm::Box ob{rx, hb.y + 3, 88, s};
         bool oh = false, oheld = false;
-        if (ctx.invisible_button("orient_dd", ob, &oh, &oheld)) gizmo_.local = !gizmo_.local;
+        if (ctx.invisible_button("orient_dd", ob, &oh, &oheld)) ctx.open_popup("orient_menu", glm::vec2(ob.x, ob.bottom() + 2));
         ctx.fill_rounded(ob, oh ? ctx.style.button_hover : ctx.style.button);
         ctx.icon(I::Orientation, {ob.x + 3, ob.y + 2, s - 4, s - 4}, ctx.style.text);
-        ctx.text_in({ob.x + s, ob.y, ob.w - s, s}, gizmo_.local ? "Local" : "Global", ctx.style.text, 0.0f);
-        ctx.tooltip("Transform Orientation\nGlobal or the active object's Local axes (click to switch)");
+        static const char* kOrientNames[] = {"Global", "Local", "Normal"};
+        ctx.text_in({ob.x + s, ob.y, ob.w - s - 12, s}, kOrientNames[static_cast<int>(orient_)], ctx.style.text, 0.0f);
+        ctx.icon(I::ArrowDown, {ob.right() - 13, ob.y + 5, 9, s - 10}, ctx.style.text_dim);
+        ctx.tooltip("Transform Orientation\nAxes the gizmo and a second X / Y / Z press use: Global, the object's Local axes, "
+                    "or the selection's Normal (edit mode)");
+        if (ctx.begin_popup("orient_menu", 150)) {
+            for (int i = 0; i < 3; ++i) {
+                bool on = static_cast<int>(orient_) == i;
+                if (ctx.menu_item(kOrientNames[i], "", &on, i != 2 || mesh_edit)) orient_ = static_cast<Orientation>(i);
+            }
+            ctx.end_popup();
+        }
     }
 
     void draw_view_menu_(imm::Context& ctx) {
@@ -266,13 +307,14 @@
     void draw_toolbar_(imm::Context& ctx, bool mesh_edit) {
         using I = imm::Icon;
         const imm::Box r = toolbar_rect_(mesh_edit);
-        ctx.fill_rounded(r, glm::vec4(0.16f, 0.16f, 0.16f, 0.92f), 6);
+        ctx.fill_rounded(r, et_.viewport.toolbar_bg, 6);
         float y = r.y + 4;
         auto tool_btn = [&](const char* id, I ic, const char* tip, bool on) {
             const imm::Box b{r.x + 3, y, kToolSize, kToolSize};
             y += kToolSize + 2;
             return ctx.icon_button(id, ic, tip, on, kToolSize, imm::Context::kAll, b);
         };
+        if (in_sculpt_mode_()) { draw_sculpt_toolbar_(ctx, r); return; }
         if (tool_btn("t_select", I::SelectBox, "Select Box\nClick or drag to select (Shift adds, Ctrl removes)", tool_ == Tool::Select)) tool_ = Tool::Select;
         if (tool_btn("t_cursor", I::Cursor, "Cursor\nClick to place the 3D cursor (Shift RMB anywhere)", tool_ == Tool::Cursor)) tool_ = Tool::Cursor;
         y += 6;
@@ -284,6 +326,10 @@
             if (tool_btn("t_extrude", I::Extrude, "Extrude Region\nExtrude the selection, then move it (E)", false)) pending_extrude_ = true;
             if (tool_btn("t_inset", I::Inset, "Inset Faces\nInset the selected faces; move the mouse to size (I)", false)) pending_modal_kind_ = ModalKind::Inset;
             if (tool_btn("t_bevel", I::Bevel, "Bevel\nBevel the selected edges; move the mouse to size (Ctrl B)", false)) pending_modal_kind_ = ModalKind::Bevel;
+            if (tool_btn("t_loopcut", I::LoopCut, "Loop Cut and Slide\nHover an edge ring, wheel for more cuts, click to cut and slide (Ctrl R)",
+                         loopcut_.active)) {
+                begin_loop_cut();
+            }
         }
     }
 
@@ -299,7 +345,7 @@
         bool hov = false, held = false;
         ctx.invisible_button("navball", {c.x - 50, c.y - 50, 100, 100}, &hov, &held);
         if (held && ctx.input().mouse_delta != glm::vec2(0.0f)) camera_.orbit(ctx.input().mouse_delta);
-        if (hov || held) ctx.circle(c, 50, glm::vec4(1, 1, 1, 0.08f));
+        if (hov || held) ctx.circle(c, 50, et_.viewport.nav_hover);
         struct Ball { glm::vec3 axis; int idx; bool pos; float depth; glm::vec2 p; };
         std::vector<Ball> balls;
         for (int i = 0; i < 3; ++i) {
@@ -321,7 +367,7 @@
             if (b.pos) {
                 ctx.line(c, b.p, imm::with_alpha(col, 0.9f), 2.0f);
                 ctx.circle(b.p, over ? 10.5f : 9.0f, col);
-                ctx.text_in({b.p.x - 8, b.p.y - 8, 16, 16}, names[b.idx], glm::vec4(0.05f, 0.05f, 0.05f, 1.0f), 0, true);
+                ctx.text_in({b.p.x - 8, b.p.y - 8, 16, 16}, names[b.idx], et_.viewport.nav_label, 0, true);
             } else {
                 ctx.circle(b.p, over ? 9.0f : 7.5f, imm::with_alpha(col, over ? 0.7f : 0.35f));
                 ctx.ring(b.p, 7.5f, 1.2f, imm::with_alpha(col, 0.8f));
@@ -340,15 +386,15 @@
         float y = g.y + 114;
         const float s = 26;
         const imm::Box zb{g.x + 42, y, s, s}, pb{g.x + 42, y + 30, s, s}, cb{g.x + 42, y + 60, s, s}, ob{g.x + 42, y + 90, s, s};
-        ctx.fill_rounded({zb.x - 2, zb.y - 2, s + 4, s * 4 + 4 * 3 + 4}, glm::vec4(0, 0, 0, 0.18f), (s + 4) * 0.5f);
+        ctx.fill_rounded({zb.x - 2, zb.y - 2, s + 4, s * 4 + 4 * 3 + 4}, et_.viewport.nav_backdrop, (s + 4) * 0.5f);
         bool zh = false, zheld = false, ph = false, pheld = false;
         ctx.invisible_button("nav_zoom", zb, &zh, &zheld);
-        if (zh || zheld) ctx.circle(zb.center(), s * 0.5f, glm::vec4(1, 1, 1, 0.12f));
+        if (zh || zheld) ctx.circle(zb.center(), s * 0.5f, et_.viewport.nav_hover);
         ctx.icon(I::Zoom, zb.shrink(5), ctx.style.text);
         ctx.tooltip("Zoom\nDrag up and down to zoom the view");
         if (zheld) camera_.dolly(-ctx.input().mouse_delta.y * 0.04f);
         ctx.invisible_button("nav_pan", pb, &ph, &pheld);
-        if (ph || pheld) ctx.circle(pb.center(), s * 0.5f, glm::vec4(1, 1, 1, 0.12f));
+        if (ph || pheld) ctx.circle(pb.center(), s * 0.5f, et_.viewport.nav_hover);
         ctx.icon(I::Hand, pb.shrink(5), ctx.style.text);
         ctx.tooltip("Move\nDrag to pan the view");
         if (pheld) camera_.pan(ctx.input().mouse_delta, viewport_box_.h);
@@ -367,7 +413,7 @@
     void draw_sidebar_(imm::Context& ctx, bool mesh_edit) {
         using I = imm::Icon;
         const imm::Box r = sidebar_rect_();
-        ctx.fill_rounded(r, glm::vec4(0.19f, 0.19f, 0.19f, 0.95f), 6, imm::Context::kLeft);
+        ctx.fill_rounded(r, et_.viewport.sidebar_bg, 6, imm::Context::kLeft);
         static const std::vector<std::string> tabs = {"Item", "View"};
         ctx.tab_bar("sidebar_tabs", {r.x, r.y, r.w, 26}, tabs, &sidebar_tab_, nullptr, false);
         ctx.begin_region("sidebar", {r.x, r.y + 26, r.w, r.h - 26}, true);
@@ -446,20 +492,20 @@
     }
 
     /** @brief Viewport text with Blender's soft drop shadow, legible over any render. */
-    static void shadow_text_(imm::Context& ctx, glm::vec2 p, const std::string& s, const glm::vec4& c) {
-        ctx.draw_text(p + glm::vec2(1, 1), s, glm::vec4(0, 0, 0, 0.75f * c.a));
+    void shadow_text_(imm::Context& ctx, glm::vec2 p, const std::string& s, const glm::vec4& c) const {
+        ctx.draw_text(p + glm::vec2(1, 1), s, imm::with_alpha(et_.viewport.text_shadow, et_.viewport.text_shadow.a * c.a));
         ctx.draw_text(p, s, c);
     }
 
     void draw_overlay_text_(imm::Context& ctx, const ViewProj& vp) {
         const float x = viewport_box_.x + (show_toolbar_ ? kToolSize + 22 : 10);
         const float y0 = viewport_box_.y + 8;
-        shadow_text_(ctx, {x, y0}, view_name_(), glm::vec4(0.95f, 0.95f, 0.95f, 0.95f));
+        shadow_text_(ctx, {x, y0}, view_name_(), et_.viewport.overlay_text);
         (void)vp;
         std::string ctxline = "(1) " + doc_.scene_name();
         if (asset_view_()) ctxline = asset_kind_ == AssetKind::Mesh ? "(Mesh) " + mesh_.name : "(Material) " + material_.ref;
         else if (doc_.primary() && doc_.find(doc_.primary())) ctxline += " | " + get_string(*doc_.find(doc_.primary()), "name");
-        shadow_text_(ctx, {x, y0 + 16}, ctxline, glm::vec4(0.95f, 0.95f, 0.95f, 0.85f));
+        shadow_text_(ctx, {x, y0 + 16}, ctxline, imm::with_alpha(et_.viewport.overlay_text, et_.viewport.overlay_text.a * 0.9f));
         if (playing()) shadow_text_(ctx, {x, y0 + 32}, play_scene_ && !play_scene_->is_simulating() ? "PAUSED" : "PLAYING",
                                     ctx.style.object_active);
     }
@@ -536,4 +582,16 @@
         seg(pos - Y * a, pos + Y * a);
         seg(pos - Z * a, pos + Z * a);
         (void)wpp;
+    }
+
+    /** @brief Object / Edit / Sculpt Mode entries (header dropdown, Ctrl+Tab, viewport RMB in Sculpt). */
+    void draw_mode_menu_items_(imm::Context& ctx) {
+        using I = imm::Icon;
+        const bool mesh_obj = !asset_view_() && (edit_object_ || (doc_.primary() && doc_.find_component(doc_.primary(), "MeshRenderer") >= 0));
+        const InteractionMode cur = interaction_mode();
+        bool o = cur == InteractionMode::Object, e = cur == InteractionMode::Edit, sc = cur == InteractionMode::Sculpt;
+        if (asset_view_()) e = mesh_edit_view_();
+        if (ctx.menu_item("Object Mode", "Tab", &o, !asset_view_(), I::ObjectMode)) set_interaction_mode(InteractionMode::Object);
+        if (ctx.menu_item("Edit Mode", "Tab", &e, mesh_obj && !playing(), I::EditMode)) set_interaction_mode(InteractionMode::Edit);
+        if (ctx.menu_item("Sculpt Mode", "", &sc, mesh_obj && !playing(), I::SculptMode)) set_interaction_mode(InteractionMode::Sculpt);
     }

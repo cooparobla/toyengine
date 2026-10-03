@@ -141,15 +141,15 @@
         if (!obj.contains("components")) return {I::Empty, white};
         for (const auto& c : obj.at("components").as_seq()) {
             const std::string t = component_type(c);
-            if (t == "Camera") return {I::Camera, glm::vec4(0.55f, 0.85f, 0.55f, 1.0f)};
-            if (t.find("Light") != std::string::npos) return {icon_for_component_(t), glm::vec4(1.0f, 0.86f, 0.4f, 1.0f)};
+            if (t == "Camera") return {I::Camera, et_.outliner.camera};
+            if (t.find("Light") != std::string::npos) return {icon_for_component_(t), et_.outliner.light};
         }
         for (const auto& c : obj.at("components").as_seq()) {
             const std::string t = component_type(c);
-            if (t == "MeshRenderer" || t == "SkinnedMeshRenderer") return {I::Mesh, glm::vec4(0.96f, 0.62f, 0.32f, 1.0f)};
-            if (t == "Terrain") return {I::Terrain, glm::vec4(0.55f, 0.75f, 0.45f, 1.0f)};
-            if (t == "SdfRenderer") return {I::Sphere, glm::vec4(0.96f, 0.62f, 0.32f, 1.0f)};
-            if (t == "ReflectionProbe" || t == "EnvironmentLight") return {I::EnvLight, glm::vec4(1.0f, 0.86f, 0.4f, 1.0f)};
+            if (t == "MeshRenderer" || t == "SkinnedMeshRenderer") return {I::Mesh, et_.outliner.mesh};
+            if (t == "Terrain") return {I::Terrain, et_.outliner.terrain};
+            if (t == "SdfRenderer") return {I::Sphere, et_.outliner.mesh};
+            if (t == "ReflectionProbe" || t == "EnvironmentLight") return {I::EnvLight, et_.outliner.light};
         }
         return {I::Empty, white};
     }

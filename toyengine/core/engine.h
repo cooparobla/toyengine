@@ -124,8 +124,9 @@ public:
           jobs_(config_.jobs.worker_threads ? config_.jobs.worker_threads
                                              : std::thread::hardware_concurrency()),
           ctx_(make_context_config_(config_)),
-          pipeline_(ctx_.device(), ctx_.allocator(), ctx_.swapchain(), ctx_.render_pass(),
-                   ctx_.command_pool(), make_render_config_(config_, options_.project_root)),
+          pipeline_(std::make_unique<render::PixelRenderPipeline>(
+              ctx_.device(), ctx_.allocator(), ctx_.swapchain(), ctx_.render_pass(),
+              ctx_.command_pool(), make_render_config_(config_, options_.project_root))),
           assets_(&jobs_)
     {
         // Read once here rather than in the initializer list -- these are declared after
@@ -140,14 +141,14 @@ public:
         bind_default_input_();
 
         scene_mgr_.set_job_engine(&jobs_);
-        pipeline_.set_job_engine(&jobs_);
-        pipeline_.set_parallel_threshold(config_.jobs.parallel_threshold);
+        pipeline_->set_job_engine(&jobs_);
+        pipeline_->set_parallel_threshold(config_.jobs.parallel_threshold);
 
         // Profiling mode (PROFILE env var): per-frame CPU/GPU timings to a CSV + an exit summary.
         if (const std::string path = profile_path_from_env_(); !path.empty()) {
             profile_ = std::make_unique<render::FrameProfile>(path);
             if (profile_->ok()) {
-                pipeline_.set_profiler(profile_.get());
+                pipeline_->set_profiler(profile_.get());
                 std::cout << "[profile] Profiling mode: per-frame timings -> " << path << "\n";
             } else {
                 std::cerr << "[profile] Could not open '" << path << "' for writing; profiling off\n";
@@ -281,7 +282,7 @@ public:
      */
     void set_overlay_scene(coopa::scene::Scene* scene) {
         overlay_scene_ = scene;
-        pipeline_.set_overlay_scene(scene);
+        pipeline_->set_overlay_scene(scene);
     }
 
     /**
@@ -289,12 +290,12 @@ public:
      *        letterboxed inside it. nullopt restores the whole window.
      */
     void set_display_region(std::optional<render::LetterboxRect> region) {
-        pipeline_.set_display_region(region);
+        pipeline_->set_display_region(region);
     }
 
     /** @brief The window-pixel rect the low-res scene image currently lands in. */
     render::LetterboxRect display_rect() const {
-        return pipeline_.display_rect_for(const_cast<coopa::gfx::app::Context&>(ctx_).swapchain().extent().width,
+        return pipeline_->display_rect_for(const_cast<coopa::gfx::app::Context&>(ctx_).swapchain().extent().width,
                                          const_cast<coopa::gfx::app::Context&>(ctx_).swapchain().extent().height);
     }
 
@@ -306,8 +307,8 @@ public:
     bool viewport_ray(const glm::vec2& window_px, glm::vec3& out_origin, glm::vec3& out_dir) const {
         auto* cam = coopa::gfx::engine::components::CameraComponent::main();
         if (!cam) return false;
-        const uint32_t rw = pipeline_.render_width();
-        const uint32_t rh = pipeline_.render_height();
+        const uint32_t rw = pipeline_->render_width();
+        const uint32_t rh = pipeline_->render_height();
         if (rw == 0 || rh == 0) return false;
         const render::LetterboxRect box = display_rect();
         if (box.w == 0 || box.h == 0) return false;
@@ -335,8 +336,8 @@ public:
     bool world_to_window(const glm::vec3& world, glm::vec2& out_px) const {
         auto* cam = coopa::gfx::engine::components::CameraComponent::main();
         if (!cam) return false;
-        const uint32_t rw = pipeline_.render_width();
-        const uint32_t rh = pipeline_.render_height();
+        const uint32_t rw = pipeline_->render_width();
+        const uint32_t rh = pipeline_->render_height();
         const render::LetterboxRect box = display_rect();
         if (rw == 0 || rh == 0 || box.w == 0) return false;
         const float aspect = static_cast<float>(rw) / static_cast<float>(rh);
@@ -349,7 +350,10 @@ public:
     }
 
     // --- Subsystem access, for embedding hosts (the editor) and tests ---
-    render::PixelRenderPipeline&  pipeline()      { return pipeline_; }
+    render::PixelRenderPipeline&  pipeline()      { return *pipeline_; }
+    /// @brief The frame-in-flight slot this tick records into -- for a host re-uploading a
+    /// dynamic mesh (Mesh::update_vertices) the way ClothRenderer does.
+    uint32_t                      frame_slot()    { return ctx_.current_frame(); }
     coopa::asset::AssetManager&   assets()        { return assets_; }
     coopa::scene::SceneManager&   scene_manager() { return scene_mgr_; }
     const AppConfig&              config() const  { return config_; }
@@ -421,7 +425,7 @@ private:
         // Fail fast on a typo'd/unregistered PBRMaterial::shader -- see
         // PixelRenderPipeline::validate_material_shaders()'s doc for why this can't happen
         // during YAML parsing itself.
-        pipeline_.validate_material_shaders(scene);
+        pipeline_->validate_material_shaders(scene);
 
         scene.set_simulating(!edit_mode_);
         apply_cursor_capture_();
@@ -528,7 +532,7 @@ public:
             std::printf("[toyengine] Frame time: %.2f ms (%.1f fps), mean of %llu frames after %llu warm-up\n",
                         ms, 1000.0 / ms, static_cast<unsigned long long>(frames_run - kWarmupFrames),
                         static_cast<unsigned long long>(kWarmupFrames));
-            const std::string mesh_stats = pipeline_.mesh_draw_stats_summary();
+            const std::string mesh_stats = pipeline_->mesh_draw_stats_summary();
             if (!mesh_stats.empty()) std::printf("[toyengine] Mesh draws/frame: %s\n", mesh_stats.c_str());
         }
         if (profile_) {
@@ -564,7 +568,7 @@ public:
      * engine.render_config().fog_density = 0.12f;   // visible next frame
      * @endcode
      */
-    render::PixelRenderConfig& render_config() { return pipeline_.render_config_mut(); }
+    render::PixelRenderConfig& render_config() { return pipeline_->render_config_mut(); }
 
     /**
      * @brief Pins the pointer to a fixed window-pixel position from now on, exactly as
@@ -605,8 +609,8 @@ public:
      */
     coopa::gfx::util::ImageData capture_image(bool low_res = true) {
         ctx_.wait_idle();
-        coopa::gfx::memory::Image& src = low_res ? pipeline_.low_res_color_image()
-                                                 : pipeline_.final_color_image();
+        coopa::gfx::memory::Image& src = low_res ? pipeline_->low_res_color_image()
+                                                 : pipeline_->final_color_image();
         return coopa::gfx::util::read_image(ctx_.device(), ctx_.allocator(), ctx_.command_pool(), src);
     }
 
@@ -623,8 +627,8 @@ public:
     void save_screenshot(const std::string& path, bool low_res = true) {
         coopa::gfx::util::save_image_png(capture_image(low_res), path);
         if (low_res) {
-            std::cout << "[toyengine] Saved " << path << " (" << pipeline_.render_width()
-                      << "x" << pipeline_.render_height() << ")\n";
+            std::cout << "[toyengine] Saved " << path << " (" << pipeline_->render_width()
+                      << "x" << pipeline_->render_height() << ")\n";
         } else {
             std::cout << "[toyengine] Saved " << path << " (display resolution)\n";
         }
@@ -713,11 +717,65 @@ public:
                 gather_debug_lines_(scene_mgr_.get_active_scene());
             }
             if (hooks_.pre_render) hooks_.pre_render(dt);
+            update_fill_extent_();
             CpuTimer t(prof, CpuScope::Render);
-            pipeline_.render(ctx_.renderer(), scene_mgr_.get_active_scene(), dt);
+            pipeline_->render(ctx_.renderer(), scene_mgr_.get_active_scene(), dt);
         }
 
         return !ctx_.should_close();
+    }
+
+    /**
+     * @brief `resolution_mode: fill`: keeps the render target's aspect equal to the display
+     *        region's (the window, or an editor viewport panel), so the image fills it instead
+     *        of letterboxing. The pipeline's targets are sized at construction, so a new aspect
+     *        means rebuilding it -- done once the wanted extent has held for a few frames (a
+     *        splitter drag doesn't rebuild every frame; until then the old image is fitted).
+     */
+    void update_fill_extent_() {
+        const render::PixelRenderConfig& cfg = pipeline_->render_config();
+        if (cfg.resolution_mode != "fill") return;
+        const VkExtent2D sc = ctx_.swapchain().extent();
+        if (sc.width == 0 || sc.height == 0) return;
+        const auto& region = pipeline_->display_region();
+        const float rw = region ? static_cast<float>(region->w) : static_cast<float>(sc.width);
+        const float rh = region ? static_cast<float>(region->h) : static_cast<float>(sc.height);
+        if (rw < 2 || rh < 2) return;
+        render::PixelRenderConfig want = cfg;
+        want.fill_aspect = rw / rh;
+        const render::RenderExtent e = render::compute_render_extent(want, sc.width, sc.height);
+        if (e.width == pipeline_->render_width() && e.height == pipeline_->render_height()) {
+            fill_stable_frames_ = 0;
+            return;
+        }
+        if (e.width != fill_pending_.width || e.height != fill_pending_.height) {
+            fill_pending_ = e;
+            fill_stable_frames_ = 0;
+        }
+        if (++fill_stable_frames_ < kFillDebounceFrames) return;
+        fill_stable_frames_ = 0;
+        rebuild_pipeline(want);
+    }
+
+    /// Frames a new fill-mode extent must hold before the pipeline is rebuilt for it.
+    static constexpr int kFillDebounceFrames = 8;
+
+    /**
+     * @brief Rebuilds the render pipeline with `cfg` (e.g. a new render size), carrying over
+     *        everything the Engine configured on the old one. Temporal history restarts.
+     */
+    void rebuild_pipeline(const render::PixelRenderConfig& cfg) {
+        ctx_.wait_idle();
+        const std::optional<render::LetterboxRect> region = pipeline_->display_region();
+        pipeline_.reset();   // free the old targets before allocating the new ones
+        pipeline_ = std::make_unique<render::PixelRenderPipeline>(ctx_.device(), ctx_.allocator(), ctx_.swapchain(),
+                                                                  ctx_.render_pass(), ctx_.command_pool(), cfg);
+        pipeline_->set_job_engine(&jobs_);
+        pipeline_->set_parallel_threshold(config_.jobs.parallel_threshold);
+        if (profile_) pipeline_->set_profiler(profile_.get());
+        pipeline_->set_overlay_scene(overlay_scene_);
+        pipeline_->set_display_region(region);
+        if (scene_mgr_.has_scene()) pipeline_->validate_material_shaders(scene_mgr_.get_active_scene());
     }
 
     /**
@@ -897,7 +955,7 @@ private:
     }
 
     /**
-     * @brief Fills pipeline_.debug_lines() from the active scene's PhysicsSystem, when
+     * @brief Fills pipeline_->debug_lines() from the active scene's PhysicsSystem, when
      *        config_.render.debug_view == "lines" -- the physxcoopa <-> toy::render
      *        bridge debug_line_pass.h's file doc describes: the render layer's DebugLine and
      *        pack_gpu_color() know nothing about physics, so this is the one place a
@@ -908,7 +966,7 @@ private:
      * frame's overlay stuck.
      */
     void gather_debug_lines_(coopa::scene::Scene& scene) {
-        std::vector<render::DebugLine>& out = pipeline_.debug_lines();
+        std::vector<render::DebugLine>& out = pipeline_->debug_lines();
         out.clear();
         // An embedding host (the editor's grid, gizmos, wireframe) appends after this, from
         // FrameHooks::pre_render -- which runs after this clear, so it always wins the frame.
@@ -961,12 +1019,12 @@ private:
         std::vector<coopa::ui::CanvasComponent*> canvases = coopa::ui::collect_canvases(scene);
         if (canvases.empty()) return;
 
-        const uint32_t rw = pipeline_.render_width();
-        const uint32_t rh = pipeline_.render_height();
+        const uint32_t rw = pipeline_->render_width();
+        const uint32_t rh = pipeline_->render_height();
         const uint32_t ww = ctx_.swapchain().extent().width;
         const uint32_t wh = ctx_.swapchain().extent().height;
-        const coopa::gfx::TextureView white        = pipeline_.world_ui_white_view();
-        const coopa::gfx::TextureView screen_white = pipeline_.screen_ui_white_view();
+        const coopa::gfx::TextureView white        = pipeline_->world_ui_white_view();
+        const coopa::gfx::TextureView screen_white = pipeline_->screen_ui_white_view();
 
         auto* cam = scene.find_first_component<coopa::gfx::engine::components::CameraComponent>();
         const float aspect = rh > 0 ? static_cast<float>(rw) / static_cast<float>(rh) : 1.0f;
@@ -1281,7 +1339,12 @@ private:
     // ctx_ is declared before pipeline_ (and constructed first, destroyed
     // last) since pipeline_ holds references into ctx_'s owned objects.
     coopa::gfx::app::Context    ctx_;
-    render::PixelRenderPipeline pipeline_;
+    /// Owned by pointer so `resolution_mode: fill` can rebuild it at a new render size (see
+    /// update_fill_extent_()); its render targets and bind-once descriptors are sized at
+    /// construction.
+    std::unique_ptr<render::PixelRenderPipeline> pipeline_;
+    render::RenderExtent fill_pending_{};      ///< fill mode: the extent waiting out the debounce
+    int                  fill_stable_frames_ = 0;
 
     coopa::asset::AssetManager assets_;
     coopa::scene::SceneManager scene_mgr_;

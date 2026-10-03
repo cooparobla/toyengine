@@ -73,7 +73,8 @@
         if (!o) return;
         const std::string name = get_string(*o, "name", "Object");
         const bool active = get_bool(*o, "active", true);
-        const bool hidden = hidden_.count(id) > 0;
+        const bool isolated = isolated_.count(id) > 0;   // hidden by Edit / Sculpt Mode isolation
+        const bool hidden = hidden_.count(id) > 0 || isolated;
         std::vector<std::string> comps;
         if (o->contains("components")) {
             for (const auto& c : o->at("components").as_seq()) {
@@ -103,7 +104,7 @@
         const bool selected = doc_.is_selected(id);
         const bool is_active = doc_.primary() == id;
         // Row label tinted like Blender: the active object's name brighter.
-        const glm::vec4 label_col = is_active ? glm::vec4(1.0f, 0.9f, 0.7f, 1.0f) : text_col;
+        const glm::vec4 label_col = is_active ? et_.outliner.active_label : text_col;
         auto r = ctx.tree_node(ctx.get_id("row"), name, leaf, selected, false, &label_col, icon, 46.0f, is_active, &tint);
         if (r.clicked) {
             const bool add = has(ctx.input().mods, Mods::Shift) || has(ctx.input().mods, imm::Context::command_mod());
@@ -123,8 +124,10 @@
         const imm::Box eye{r.rect.right() - s * 2 - 6, r.rect.y + 1, s, s};
         const imm::Box mon{r.rect.right() - s - 4, r.rect.y + 1, s, s};
         eye_rects_[id] = eye;
-        if (ctx.icon_button("eye", hidden ? I::EyeClosed : I::Eye, "Hide in Viewport\nH hides, Alt H reveals (editor only, not saved)",
-                            false, s, imm::Context::kAll, eye)) {
+        if (ctx.icon_button("eye", hidden ? I::EyeClosed : I::Eye,
+                            isolated ? "Hidden by Isolation\nEdit / Sculpt Mode is showing only the edited object (header toggle)"
+                                     : "Hide in Viewport\nH hides, Alt H reveals (editor only, not saved)",
+                            false, s, imm::Context::kAll, eye) && !isolated) {
             if (hidden) { hidden_.erase(id); if (auto* live = sync_.live(id)) live->set_active(active); }
             else hide_({id});
         }

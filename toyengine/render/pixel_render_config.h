@@ -297,6 +297,10 @@ struct PixelRenderConfig {
     RenderQuality dof_quality         = RenderQuality::High;  /**< Sets dof_sample_count (Ultra equals High: the gather shader clamps taps to 48). */
     RenderQuality volumetrics_quality = RenderQuality::High;  /**< Sets volumetrics_step_count and volumetrics_max_scatter_lights. */
     RenderQuality sdf_quality         = RenderQuality::High;  /**< Sets sdf_max_steps and sdf_shadow_max_steps. */
+    /** Water: simulation range, ripples, mesh density/LOD and shader detail. Not expanded here --
+     *  Engine maps it to toy::water::WaterSettings (toyengine/water/water_settings.h) every
+     *  frame, so it is live-switchable. */
+    RenderQuality water_quality       = RenderQuality::High;
 
     /**
      * @brief Overwrites every preset-covered field from the `*_quality` tiers above.

@@ -40,6 +40,12 @@ struct WaterFrameState {
     };
     std::vector<Ripple> ripples;  ///< At most kMaxWaterRipples are drawn (newest kept).
 
+    /// Shader detail (toy::water::WaterSettings): flow-ripple layers (1-2), the distance (m) past
+    /// which ripples/foam noise give way to a rougher surface, and the ring draw range (m).
+    int   ripple_layers = 2;
+    float detail_distance = 150.0f;
+    float ripple_range = 80.0f;
+
     /// UnderwaterPass: the camera is below `surface_level`. Pixels whose near-plane point is
     /// still below that level get the underwater look; the rest (a camera straddling the
     /// waterline) draw as normal.

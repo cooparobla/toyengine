@@ -37,7 +37,7 @@ inline const std::vector<SettingsGroup>& render_settings_groups() {
         g.push_back({"Quality Tiers", {
             f_enum("shadow_quality", q), f_enum("ssao_quality", q), f_enum("ssr_quality", q),
             f_enum("ssgi_quality", q), f_enum("dof_quality", q), f_enum("volumetrics_quality", q),
-            f_enum("sdf_quality", q),
+            f_enum("sdf_quality", q), f_enum("water_quality", q),
         }});
         g.push_back({"Features", {
             f_bool("shadows_enabled", true),

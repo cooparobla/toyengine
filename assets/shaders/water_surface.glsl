@@ -25,6 +25,12 @@
 // Ripple rings from moving bodies arrive in forward_globals (water_ripple_rings()), and the
 // surface is two-sided: from below it shows Snell's window and total internal reflection.
 //
+// Distance and quality (toy::water::WaterSettings, water_quality in config.yaml). The vertex
+// stage fades each derived wave out with camera distance (water_waves.glsl). The fragment stage
+// reads forward_globals.water_ripple_info.yzw = (flow-ripple layers, detail distance, ring range):
+// past the detail distance the ripples and foam noise are skipped for a rougher surface, and
+// rings are only looped over within the ring range.
+//
 // WATER_CAPTURE (water_capture.frag) compiles the fragment hook for the SSR-secondary-source
 // capture backbone, which has no depth buffer and no extended push constants: ripples and
 // turbulence foam only, with default look parameters.
@@ -55,6 +61,22 @@ float water_noise(vec2 p) {
     return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
 }
 
+// water_noise() and its analytic gradient in one evaluation: .x = value, .yz = d/dp. One noise
+// instead of the three a finite difference needs.
+vec3 water_noise_d(vec2 p) {
+    vec2 i  = floor(p);
+    vec2 f  = fract(p);
+    vec2 u  = f * f * (3.0 - 2.0 * f);
+    vec2 du = 6.0 * f * (1.0 - f);
+    float a = water_hash(i);
+    float b = water_hash(i + vec2(1.0, 0.0));
+    float c = water_hash(i + vec2(0.0, 1.0));
+    float d = water_hash(i + vec2(1.0, 1.0));
+    float k1 = b - a, k2 = c - a, k3 = a - b - c + d;
+    return vec3(a + k1 * u.x + k2 * u.y + k3 * u.x * u.y,
+                du * vec2(k1 + k3 * u.y, k2 + k3 * u.x));
+}
+
 // ---------------------------------------------------------------------------------------------
 // Vertex: waves, flow hand-off
 // ---------------------------------------------------------------------------------------------
@@ -67,7 +89,8 @@ void gfx_surface_vertex(inout GfxSurfaceVertex v) {
     vec3  flow_ws    = baked ? mat3(v.model) * v.tangent_os.xyz : vec3(0.0);
 
     WaterWave w = water_gerstner(gfx_params, v.position_ws.xy, gfx_time.x,
-                                 water_depth_attenuation(depth, gfx_params.y));
+                                 water_depth_attenuation(depth, gfx_params.y),
+                                 distance(camera.camera_pos, v.position_ws));
     v.position_ws += w.displacement;
 
     // Tilt the mesh's own normal (not +Z: a river surface slopes) by the wave slope.
@@ -88,16 +111,9 @@ void gfx_surface_vertex(inout GfxSurfaceVertex v) {
 
 #ifdef GFX_SURFACE_FRAGMENT
 
-float water_ripple_height(vec2 p) {
-    return water_noise(p) * 0.6 + water_noise(p * 2.31 + vec2(17.3, 5.1)) * 0.4;
-}
-
+// Slope of the ripple height field noise(p) * 0.6 + noise(p * 2.31 + offset) * 0.4, analytic.
 vec2 water_ripple_slope(vec2 p) {
-    const float e = 0.08;
-    float h  = water_ripple_height(p);
-    float hx = water_ripple_height(p + vec2(e, 0.0));
-    float hy = water_ripple_height(p + vec2(0.0, e));
-    return vec2(hx - h, hy - h) / e;
+    return water_noise_d(p).yz * 0.6 + water_noise_d(p * 2.31 + vec2(17.3, 5.1)).yz * (0.4 * 2.31);
 }
 
 // Two-phase flow-map advection (Vlachos, "Water Flow in Portal 2"): two copies of a pattern
@@ -160,6 +176,9 @@ void gfx_surface_fragment(inout GfxTransparentSurface s) {
     float foam_amount     = 1.0;
     float ripple_strength = 0.35;
     float ripple_scale    = 1.2;
+    // The capture backbone has no forward globals: a fixed, cheap detail level.
+    int   ripple_layers   = 1;
+    float detail_distance = 150.0;
 #else
     vec3  foam_color      = gfx_params_ext0.rgb;
     float foam_amount     = gfx_params_ext0.a;
@@ -167,22 +186,40 @@ void gfx_surface_fragment(inout GfxTransparentSurface s) {
     float edge_depth      = max(gfx_params_ext1.y, 1e-3);
     float ripple_strength = gfx_params_ext1.z;
     float ripple_scale    = max(gfx_params_ext1.w, 1e-3);
+    // water_quality (toy::water::WaterSettings), via forward_globals.water_ripple_info.
+    int   ripple_layers   = int(forward_globals.water_ripple_info.y + 0.5);
+    float detail_distance = max(forward_globals.water_ripple_info.z, 1.0);
+    float ring_range      = forward_globals.water_ripple_info.w;
 #endif
+
+    // Detail falls off with distance: past detail_distance the per-pixel ripples and foam noise
+    // are below what a pixel resolves (they would only sparkle), so they are skipped and the
+    // surface turns rougher instead -- the filtered look of the ripples it no longer draws.
+    float view_dist = distance(camera.camera_pos, s.position_ws);
+    float detail    = 1.0 - smoothstep(0.6 * detail_distance, detail_distance, view_dist);
 
     // Still water still drifts a little with the wind (the base wave's direction).
     vec2 wind = vec2(cos(gfx_params.z), sin(gfx_params.z)) * 0.25;
     vec2 drift = flow + wind;
 
     // --- Ripples: advected along the current, stronger where the water is churned up ---
-    vec2 slope = water_flow_ripples(pos, drift, t, ripple_scale) * 0.6
-               + water_flow_ripples(pos * 1.9 + vec2(4.3, 1.7), drift * 1.3, t + 0.4, ripple_scale) * 0.4;
-    float strength = ripple_strength * (1.0 + turb * 1.5);
-    slope *= strength;
+    vec2  slope = vec2(0.0);
     float ring_foam = 0.0;
+    if (detail > 0.0) {
+        if (ripple_layers >= 2) {
+            slope = water_flow_ripples(pos, drift, t, ripple_scale) * 0.6
+                  + water_flow_ripples(pos * 1.9 + vec2(4.3, 1.7), drift * 1.3, t + 0.4, ripple_scale) * 0.4;
+        } else {
+            slope = water_flow_ripples(pos, drift, t, ripple_scale) * 0.85;
+        }
+        float strength = ripple_strength * (1.0 + turb * 1.5);
+        slope *= strength * detail;
 #ifndef WATER_CAPTURE
-    water_ripple_rings(pos, slope, ring_foam);
+        if (length(camera.camera_pos.xy - pos) <= ring_range) water_ripple_rings(pos, slope, ring_foam);
 #endif
+    }
     s.normal_ws = normalize(s.normal_ws - vec3(slope, 0.0));
+    s.roughness = mix(max(s.roughness, 0.2), s.roughness, detail);
 
 #ifndef WATER_CAPTURE
     // --- The underside, seen from below (water is two-sided; the backbone has already turned
@@ -207,17 +244,27 @@ void gfx_surface_fragment(inout GfxTransparentSurface s) {
 #endif
 
     // --- Whitewater: rapids and obstacle wakes (turbulence), wave crests ---
-    float n_turb = water_flow_noise(pos, flow, t, 2.2);
-    float foam = step(1.0 - turb * 0.7, n_turb) * step(0.05, turb);
-    float n_crest = water_noise(pos * 1.7 + wind * t * 2.0);
-    foam = max(foam, step(0.82, crest + n_crest * 0.35) * step(0.35, crest));
+    // Far away the broken foam patterns are replaced by their expected coverage (the fraction of
+    // the noise range each threshold passes), blended in across the detail band -- so distant
+    // rapids read as partly white, not as a solid sheet or as sparkle.
+    float foam = max(0.7 * turb * step(0.05, turb),
+                     clamp((crest - 0.47) / 0.35, 0.0, 1.0) * step(0.35, crest));
+    if (detail > 0.0) {
+        float n_turb  = water_flow_noise(pos, flow, t, 2.2);
+        float n_crest = water_noise(pos * 1.7 + wind * t * 2.0);
+        float broken  = max(step(1.0 - turb * 0.7, n_turb) * step(0.05, turb),
+                            step(0.82, crest + n_crest * 0.35) * step(0.35, crest));
+        foam = mix(foam, broken, detail);
+    }
 
 #ifndef WATER_CAPTURE
     // --- Water depth under this pixel, from the opaque scene depth ---
     vec4  view_pos = camera.view * vec4(s.position_ws, 1.0);
     vec4  clip     = camera.proj * view_pos;
     vec2  suv      = ssr_ndc_to_uv(clip.xy / clip.w);
-    float scene_z  = gfx_refraction_scene_view_z(suv, inverse(camera.proj));
+    // Linearized directly (perspective: view z = -P32 / (ndc z + P22)) -- no per-pixel inverse().
+    float ndc_z    = textureLod(u_hiz_map, clamp(suv, 0.0, 1.0), 0.0).r;
+    float scene_z  = -camera.proj[3][2] / (ndc_z + camera.proj[2][2]);
     float ratio    = scene_z / min(view_pos.z, -1e-4);            // >= 1 when the scene is behind
     float ray_len  = length(view_pos.xyz) * max(ratio - 1.0, 0.0); // water traversed by the view ray
     vec3  V        = normalize(camera.camera_pos - s.position_ws);
@@ -233,10 +280,16 @@ void gfx_surface_fragment(inout GfxTransparentSurface s) {
 
     // --- Shore and contact foam: a broken band hugging every intersection ---
     float band     = 1.0 - clamp(depth / shore_depth, 0.0, 1.0);
-    float n_shore  = water_flow_noise(pos, drift * 0.5, t, 2.6);
-    float lines    = step(0.86, sin(depth / shore_depth * 12.566 - t * 2.2) * 0.5 + 0.5 + n_shore * 0.25);
-    float shore    = max(step(n_shore, band * band * 1.15), lines * band);
-    shore          = max(shore, step(depth, edge_depth * 1.5) * step(0.25, n_shore)); // contact line
+    float contact  = step(depth, edge_depth * 1.5);
+    // Expected coverage far away (see the whitewater note), the broken band up close.
+    float shore    = max(clamp(band * band * 1.15, 0.0, 1.0), 0.75 * contact);
+    if (detail > 0.0) {
+        float n_shore = water_flow_noise(pos, drift * 0.5, t, 2.6);
+        float lines   = step(0.86, sin(depth / shore_depth * 12.566 - t * 2.2) * 0.5 + 0.5 + n_shore * 0.25);
+        float broken  = max(step(n_shore, band * band * 1.15), lines * band);
+        broken        = max(broken, contact * step(0.25, n_shore)); // contact line
+        shore = mix(shore, broken, detail);
+    }
     foam = max(foam, shore * step(1e-3, band));
 #endif
 

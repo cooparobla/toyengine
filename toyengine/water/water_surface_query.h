@@ -54,6 +54,13 @@ struct WaterSample {
     float     turbulence = 0.0f;
 };
 
+/** @brief How a WaterSurfaceQuery::sample() evaluates the waves (see WaterSettings). */
+struct WaveQueryOptions {
+    int       iterations = 3;      ///< Fixed-point inversion steps (see height_at()).
+    bool      has_focus = false;   ///< Apply wave_distance_fade() from `focus` (the camera).
+    glm::vec3 focus{0.0f};
+};
+
 /**
  * @class WaterSurfaceQuery
  * @brief Uniform XY grid over a water body's baked surface triangles.
@@ -145,9 +152,11 @@ public:
      * @brief The wave-displaced surface above XY `p` at time `t`. Mirrors the vertex shader:
      *        the wave sum is evaluated at the undisplaced point p0 whose displaced position lands
      *        on `p` (fixed-point inversion, see water_waves.h's height_at()), with p0's own baked
-     *        depth attenuation. False if `p` is off the surface.
+     *        depth attenuation and, given a focus, the same distance fade the shader applies.
+     *        False if `p` is off the surface.
      */
-    bool sample(const glm::vec2& p, const WaveParams& waves, float t, WaterSample& out) const {
+    bool sample(const glm::vec2& p, const WaveSet& waves, float t, WaterSample& out,
+                const WaveQueryOptions& opt = {}) const {
         WaterBaseSample base;
         if (!sample_base(p, base)) return false;
         out.surface_height = base.height;
@@ -155,23 +164,33 @@ public:
         out.flow           = base.flow;
         out.depth          = base.depth;
         out.turbulence     = base.turbulence;
-        if (waves.calm()) return true;
+        if (waves.calm) return true;
 
+        const float wavelength = waves.waves[0].lambda;
+        auto dist = [&](const glm::vec2& q, float h) {
+            return opt.has_focus ? glm::distance(opt.focus, glm::vec3(q, h)) : 0.0f;
+        };
         glm::vec2 p0 = p;
         WaterBaseSample b0 = base;
         WaveSample s;
-        for (int i = 0; i < 3; ++i) {
-            s = evaluate(waves, p0, t, depth_attenuation(b0.depth, waves.wavelength));
+        for (int i = 0; i < opt.iterations; ++i) {
+            s = evaluate(waves, p0, t, depth_attenuation(b0.depth, wavelength), dist(p0, b0.height));
             glm::vec2 next = p - glm::vec2(s.displacement);
             WaterBaseSample bn;
             if (!sample_base(next, bn)) break; // near the mesh edge: keep the last valid p0
             p0 = next;
             b0 = bn;
         }
-        s = evaluate(waves, p0, t, depth_attenuation(b0.depth, waves.wavelength));
+        s = evaluate(waves, p0, t, depth_attenuation(b0.depth, wavelength), dist(p0, b0.height));
         out.surface_height = b0.height + s.displacement.z;
         out.normal         = s.normal;
         return true;
+    }
+
+    /** @brief sample() from plain WaveParams (builds the WaveSet on the spot). */
+    bool sample(const glm::vec2& p, const WaveParams& waves, float t, WaterSample& out,
+                const WaveQueryOptions& opt = {}) const {
+        return sample(p, WaveSet::from(waves), t, out, opt);
     }
 
 private:

@@ -169,6 +169,7 @@ struct AppConfig {
                 if (r.contains("dof_quality"))         config.render.dof_quality         = parse_render_quality(r.at("dof_quality").get_value<std::string>());
                 if (r.contains("volumetrics_quality")) config.render.volumetrics_quality = parse_render_quality(r.at("volumetrics_quality").get_value<std::string>());
                 if (r.contains("sdf_quality"))         config.render.sdf_quality         = parse_render_quality(r.at("sdf_quality").get_value<std::string>());
+                if (r.contains("water_quality"))       config.render.water_quality       = parse_render_quality(r.at("water_quality").get_value<std::string>());
                 config.render.apply_quality_presets();
 
                 // --- Feature toggles ---

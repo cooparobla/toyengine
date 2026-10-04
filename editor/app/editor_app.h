@@ -63,6 +63,7 @@
 #include <root_directory.h>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <deque>
@@ -438,7 +439,7 @@ public:
             case UndoTarget::Mesh: mesh_.do_undo(); break;
             case UndoTarget::Material: material_.do_undo(); refresh_material_preview_(); break;
             case UndoTarget::Config: config_.do_undo(); apply_config_live(); break;
-            case UndoTarget::Scene: if (!playing()) { doc_.undo(); queue_rebuild_(); } break;
+            case UndoTarget::Scene: scene_undo_(); break;
         }
     }
     void redo() {
@@ -446,8 +447,109 @@ public:
             case UndoTarget::Mesh: mesh_.do_redo(); break;
             case UndoTarget::Material: material_.do_redo(); refresh_material_preview_(); break;
             case UndoTarget::Config: config_.do_redo(); apply_config_live(); break;
-            case UndoTarget::Scene: if (!playing()) { doc_.redo(); queue_rebuild_(); } break;
+            case UndoTarget::Scene: scene_redo_(); break;
         }
+    }
+
+    /**
+     * @brief Object Mode's Ctrl+Z: ONE timeline across the scene document and every mesh edited
+     *        from its objects (the open one and the parked ones), newest step first -- so leaving
+     *        Edit Mode does not strand its edits beyond undo. A mesh step undone here is applied
+     *        to the live scene and saved, keeping the file in step (it was saved on leaving Edit
+     *        Mode). Inside Edit/Sculpt Mode, Ctrl+Z stays on that mesh's own steps.
+     */
+    void scene_undo_() {
+        if (playing()) return;
+        uint64_t best = doc_.undo_stack().top_undo_seq();
+        fs::path mesh_path;
+        if (mesh_.scene_owned && mesh_.undo.top_undo_seq() > best) { best = mesh_.undo.top_undo_seq(); mesh_path = mesh_.path; }
+        for (const auto& [p, d] : parked_meshes_) {
+            if (d.scene_owned && d.undo.top_undo_seq() > best) { best = d.undo.top_undo_seq(); mesh_path = p; }
+        }
+        if (best == 0) return;
+        if (mesh_path.empty()) { doc_.undo(); queue_rebuild_(); return; }
+        if (!activate_scene_mesh_(mesh_path)) return;
+        mesh_.do_undo();
+        commit_scene_mesh_();
+    }
+
+    /** @brief scene_undo_()'s counterpart: re-applies the most recently undone step of that timeline. */
+    void scene_redo_() {
+        if (playing()) return;
+        uint64_t best = 0;
+        bool scene = false;
+        fs::path mesh_path;
+        auto consider = [&](uint64_t seq, bool is_scene, const fs::path& p) {
+            if (seq != 0 && (best == 0 || seq < best)) { best = seq; scene = is_scene; mesh_path = p; }
+        };
+        if (doc_.undo_stack().redo_fresh()) consider(doc_.undo_stack().top_redo_seq(), true, {});
+        if (mesh_.scene_owned && mesh_.undo.redo_fresh()) consider(mesh_.undo.top_redo_seq(), false, mesh_.path);
+        for (const auto& [p, d] : parked_meshes_) {
+            if (d.scene_owned && d.undo.redo_fresh()) consider(d.undo.top_redo_seq(), false, p);
+        }
+        if (best == 0) return;
+        if (scene) { doc_.redo(); queue_rebuild_(); return; }
+        if (!activate_scene_mesh_(mesh_path)) return;
+        mesh_.do_redo();
+        commit_scene_mesh_();
+    }
+
+    /** @brief Makes `path`'s mesh history the open one (resuming it from the parked set). */
+    bool activate_scene_mesh_(const fs::path& path) {
+        if (mesh_.open() && mesh_.path == path) return true;
+        try { switch_mesh_doc_(path); } catch (const std::exception& e) { log_error(e.what()); return false; }
+        mesh_.scene_owned = true;
+        return true;
+    }
+
+    /** @brief After an Object Mode undo/redo of a mesh step: save it and show it on every user. */
+    void commit_scene_mesh_() {
+        if (!edit_object_) save_mesh();
+        force_scene_push_ = true;
+        mesh_cache_.clear();
+    }
+
+    // --- mesh histories ------------------------------------------------------------------
+
+    /**
+     * @brief Moves the open mesh document -- with its whole undo history -- aside, so switching
+     *        to another mesh and back keeps it (load() would start a fresh history). A dirty
+     *        document is saved first, as switching always did, so parked ones match their files.
+     *        The most recent kMaxParkedMeshes are kept.
+     */
+    void park_mesh_doc_() {
+        if (mesh_.open() && mesh_.dirty() && !mesh_.path.empty()) save_mesh();
+        if (mesh_.open() && !mesh_.path.empty()) {
+            const fs::path p = mesh_.path;
+            parked_order_.erase(std::remove(parked_order_.begin(), parked_order_.end(), p), parked_order_.end());
+            parked_meshes_.erase(p);
+            parked_meshes_.emplace(p, std::move(mesh_));
+            parked_order_.push_back(p);
+            while (parked_order_.size() > kMaxParkedMeshes) {
+                parked_meshes_.erase(parked_order_.front());
+                parked_order_.erase(parked_order_.begin());
+            }
+        }
+        mesh_ = MeshDocument{};
+    }
+
+    /** @brief Opens `path` as the mesh document: its parked history if the file is unchanged, else a fresh load. */
+    void switch_mesh_doc_(const fs::path& path) {
+        if (mesh_.open() && mesh_.path == path) return;
+        park_mesh_doc_();
+        auto it = parked_meshes_.find(path);
+        if (it != parked_meshes_.end()) {
+            std::error_code ec;
+            const auto now = fs::last_write_time(coopa::yaml::resolve_variant(path), ec);
+            if (!ec && now == it->second.file_time) {
+                mesh_ = std::move(it->second);
+                ++mesh_.geometry_revision;
+            }
+            parked_meshes_.erase(it);
+            parked_order_.erase(std::remove(parked_order_.begin(), parked_order_.end(), path), parked_order_.end());
+            if (mesh_.open() && mesh_.path == path) return;
+        }
+        mesh_.load(path);
     }
 
     /** @brief Frames the selection (or everything) in the viewport. */
@@ -513,10 +615,12 @@ public:
     void stop() {
         if (!play_scene_) return;
         set_game_focus_(false);
-        engine_.set_game_input_focus(true);   // back to the engine default (edit mode drives nothing anyway)
         engine_.remove_scene(play_scene_);
         play_scene_ = nullptr;
-        engine_.set_edit_mode(true);
+        engine_.set_edit_mode(true);          // releases the cursor if the game still held it
+        // Back to the engine default (edit mode drives nothing anyway). After set_edit_mode():
+        // before it, this would re-capture the cursor for the still-active play scene's camera.
+        engine_.set_game_input_focus(true);
         if (sync_.scene()) engine_.activate_scene(sync_.scene());
         camera_.make_main();
         log_info("Stop");
@@ -566,7 +670,8 @@ public:
 
     bool open_mesh(const fs::path& path) {
         try {
-            mesh_.load(path);
+            switch_mesh_doc_(path);
+            mesh_.scene_owned = false;
         } catch (const std::exception& e) {
             log_error(std::string("Open mesh failed: ") + e.what());
             return false;
@@ -584,6 +689,7 @@ public:
         std::transform(key.begin(), key.end(), key.begin(), ::tolower);
         for (char& c : key) if (c == ' ') c = '_';
         exit_mesh_mode_();
+        park_mesh_doc_();
         mesh_.reset(make_primitive(primitive), unique_asset_name_("meshes", key));
         set_view_(AssetType::Mesh);
         active_path_.clear();
@@ -597,6 +703,10 @@ public:
         try {
             mesh_.save();
             project_.refresh();
+            // Every user of the file -- render meshes, MeshColliders, water sources -- re-reads
+            // it now, not a hot-reload poll later: a Play started this frame must not build its
+            // scene from the previous version.
+            engine_.assets().reload_changed();
             log_info("Saved mesh " + project_.relative(mesh_.path));
             if (coopa::yaml::document_exists(fs::path(mesh_.path).replace_extension(".lod.yaml"))) {
                 log_warn("This mesh has a .lod.yaml sidecar: its simplified LODs regenerate at load, "
@@ -1067,6 +1177,17 @@ public:
     }
     bool viewport_ao() const { return viewport_ao_; }
 
+    /** @brief Local-space bounds of the geometry an object's outline is drawn from (see
+     *        mesh_for_object_()); false for an object with no mesh. */
+    bool outline_bounds(ObjectId id, glm::vec3& lo, glm::vec3& hi) {
+        const Node* node = doc_.find(id);
+        const CachedMesh* cm = node ? mesh_for_object_(*node) : nullptr;
+        if (!cm) return false;
+        lo = cm->lo;
+        hi = cm->hi;
+        return true;
+    }
+
 private:
 
     // =================================================================================
@@ -1092,18 +1213,31 @@ private:
         glm::vec3 lo{0.0f}, hi{0.0f};
     };
 
-    /** @brief CPU geometry for an object's MeshRenderer (cached by resolved path). */
+    /**
+     * @brief CPU geometry for an object's mesh (cached by resolved path) -- what selection
+     *        outlines, wireframe/X-ray overlays and bounds draw. When that file is the one open in
+     *        the mesh editor, this is the OPEN (possibly unsaved) mesh, not the file on disk: the
+     *        scene already shows the edit (push_mesh_to_scene_()), so outlines read from disk would
+     *        snap back to the saved shape the moment Edit Mode is left. push_mesh_to_scene_()
+     *        clears the cache on every edit, so the copy here stays current.
+     */
     const CachedMesh* mesh_for_object_(const Node& obj) {
         if (!obj.contains("components")) return nullptr;
-        for (const auto& c : obj.at("components").as_seq()) {
-            if (component_type(c) != "MeshRenderer") continue;
-            const std::string key = get_string(c, "mesh_path");
+        {
+            const std::string key = object_mesh_key_(obj);   // MeshRenderer's, else a WaterBody's
             if (key.empty()) return nullptr;
             const fs::path dir = (doc_.path().empty() ? sync_.fallback_path : doc_.path()).parent_path();
             const std::string resolved = engine_.assets().source().resolve("meshes/" + key + ".yaml", dir.string());
             auto it = mesh_cache_.find(resolved);
             if (it != mesh_cache_.end()) return it->second.mesh.faces.empty() ? nullptr : &it->second;
             CachedMesh cm;
+            if (mesh_.open() && !mesh_.path.empty() && coopa::yaml::resolve_variant(resolved) == mesh_.path) {
+                cm.mesh = mesh_.mesh;
+                cm.edges = cm.mesh.edges();
+                cm.mesh.bounds(cm.lo, cm.hi);
+                auto& slot = mesh_cache_[resolved] = std::move(cm);
+                return slot.mesh.faces.empty() ? nullptr : &slot;
+            }
             try {
                 if (coopa::yaml::document_exists(resolved)) {
                     cm.mesh = mesh_from_node(coopa::yaml::load_document(coopa::yaml::resolve_variant(resolved)));
@@ -2164,14 +2298,105 @@ private:
         enter_mesh_mode_(InteractionMode::Edit);
     }
 
+    /**
+     * @brief The mesh key an object's geometry comes from: its MeshRenderer's `mesh_path`, or --
+     *        when that is empty -- its WaterBody's. A water body's MeshRenderer names no mesh on
+     *        purpose: toy::water::WaterSystem bakes the WaterBody's mesh and publishes it there at
+     *        runtime, so for editing (and outlines, bounds) the WaterBody's key is the real one.
+     */
+    static std::string object_mesh_key_(const Node& obj) {
+        if (!obj.contains("components")) return {};
+        std::string water;
+        for (const auto& c : obj.at("components").as_seq()) {
+            const std::string type = component_type(c);
+            if (type == "MeshRenderer") {
+                std::string key = get_string(c, "mesh_path");
+                if (!key.empty()) return key;
+            } else if (type == "WaterBody") {
+                water = get_string(c, "mesh_path");
+            }
+        }
+        return water;
+    }
+
+    /** @brief A mesh key's file, resolved like the engine does (scene folder, then asset roots). */
+    fs::path resolve_mesh_key_(const std::string& key) {
+        const fs::path dir = (doc_.path().empty() ? sync_.fallback_path : doc_.path()).parent_path();
+        return coopa::yaml::resolve_variant(engine_.assets().source().resolve("meshes/" + key + ".yaml", dir.string()));
+    }
+
+    /**
+     * @brief A WaterBody with no `mesh_path` draws a procedural grid (`size` x `resolution`). To edit
+     *        it, write that exact grid out as a mesh file -- next to the scene, in its meshes/
+     *        folder -- and point the WaterBody at it (one undo step). Returns the new key, or empty.
+     */
+    std::string water_grid_to_mesh_(ObjectId id, int water_ci) {
+        const Node* obj = doc_.find(id);
+        if (!obj) return {};
+        Node comp = obj->at("components").as_seq()[static_cast<size_t>(water_ci)];
+        glm::vec2 size(20.0f);   // WaterBody's defaults
+        int res = 48;
+        if (comp.contains("size")) {
+            const Node& s = comp.at("size");
+            if (s.contains("x")) size.x = s.at("x").get_value<float>();
+            if (s.contains("y")) size.y = s.at("y").get_value<float>();
+        }
+        if (comp.contains("resolution")) res = static_cast<int>(comp.at("resolution").get_value<int64_t>());
+        res = std::clamp(res, 1, 512);
+
+        // The same grid WaterSystem generates (local XY, centred, one UV tile across).
+        EditMesh m;
+        for (int y = 0; y <= res; ++y)
+            for (int x = 0; x <= res; ++x)
+                m.positions.push_back({(x / float(res) - 0.5f) * size.x, (y / float(res) - 0.5f) * size.y, 0.0f});
+        auto idx = [&](int x, int y) { return static_cast<uint32_t>(y * (res + 1) + x); };
+        auto uv = [&](int x, int y) { return glm::vec2(x / float(res), y / float(res)); };
+        for (int y = 0; y < res; ++y)
+            for (int x = 0; x < res; ++x) {
+                Face f;
+                f.corners = {{idx(x, y), uv(x, y)}, {idx(x + 1, y), uv(x + 1, y)},
+                             {idx(x + 1, y + 1), uv(x + 1, y + 1)}, {idx(x, y + 1), uv(x, y + 1)}};
+                m.faces.push_back(std::move(f));
+            }
+
+        std::string base = get_string(*obj, "name");
+        if (base.empty()) base = "water";
+        for (char& c : base) {
+            if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_' && c != '-') c = '_';
+        }
+        base += "_surface";
+        const fs::path dir = doc_.path().empty() ? project_.assets() / "meshes" : doc_.path().parent_path() / "meshes";
+        std::string key = base;
+        for (int n = 2; coopa::yaml::document_exists(dir / (key + ".yaml")); ++n) key = base + "_" + std::to_string(n);
+        try {
+            fs::create_directories(dir);
+            coopa::yaml::save_document(dir / (key + ".yaml"), mesh_to_node(m));
+            project_.refresh();
+        } catch (const std::exception& e) {
+            log_error(std::string("Could not write the water mesh: ") + e.what());
+            return {};
+        }
+        comp["mesh_path"] = Node(key);
+        apply_(doc_.set_component(id, water_ci, comp, "Water grid to mesh", "water_mesh"));
+        mesh_cache_.clear();
+        log_info("Water grid written to meshes/" + key + ".yaml -- the WaterBody now uses it");
+        return key;
+    }
+
     /** @brief The active object's mesh file, or empty (logging why). */
     fs::path active_mesh_path_(ObjectId id) {
-        const int ci = doc_.find_component(id, "MeshRenderer");
-        if (ci < 0) { log_warn("This mode needs a mesh object"); return {}; }
-        const std::string key = get_string(doc_.find(id)->at("components").as_seq()[static_cast<size_t>(ci)], "mesh_path");
-        if (key.empty()) return {};
-        const fs::path dir = (doc_.path().empty() ? sync_.fallback_path : doc_.path()).parent_path();
-        const fs::path path = coopa::yaml::resolve_variant(engine_.assets().source().resolve("meshes/" + key + ".yaml", dir.string()));
+        const Node* obj = doc_.find(id);
+        std::string key = obj ? object_mesh_key_(*obj) : std::string();
+        if (key.empty()) {
+            const int water_ci = doc_.find_component(id, "WaterBody");
+            if (water_ci >= 0) {
+                key = water_grid_to_mesh_(id, water_ci);
+            } else if (doc_.find_component(id, "MeshRenderer") < 0) {
+                log_warn("This mode needs a mesh object");
+            }
+            if (key.empty()) return {};
+        }
+        const fs::path path = resolve_mesh_key_(key);
         if (!coopa::yaml::document_exists(path)) { log_error("Mesh file not found for '" + key + "'"); return {}; }
         return path;
     }
@@ -2203,10 +2428,10 @@ private:
         if (edit_object_) exit_mesh_mode_();
         const fs::path path = active_mesh_path_(id);
         if (path.empty()) return false;
-        if (mesh_.open() && mesh_.dirty() && mesh_.path != path) save_mesh();
         if (mesh_.path != path || !mesh_.open()) {
-            try { mesh_.load(path); } catch (const std::exception& e) { log_error(e.what()); return false; }
+            try { switch_mesh_doc_(path); } catch (const std::exception& e) { log_error(e.what()); return false; }
         }
+        mesh_.scene_owned = true;
         edit_object_ = id;
         mode_ = mode;
         scene_uploaded_revision_ = 0;
@@ -2234,6 +2459,9 @@ private:
         edit_object_ = 0;
         mode_ = InteractionMode::Object;
         tool_settings_restore_();
+        // A mesh edited from a scene object is saved on the way out (as Blender's Edit Mode
+        // commits to the object): the scene, its colliders and a Play all see the file.
+        if (mesh_.scene_owned && mesh_.dirty()) save_mesh();
     }
 
     // --- Local-View-style isolation while editing a mesh ---
@@ -2325,7 +2553,8 @@ private:
     void push_mesh_to_scene_() {
         if (sculpt_active_) return;   // Sculpt Mode shows its own dynamic mesh (sculpt_frame_)
         if (!mesh_.open() || mesh_.path.empty() || scene_uploaded_revision_ == mesh_.geometry_revision) return;
-        if (!mesh_.dirty() && !edit_object_) return;
+        if (!mesh_.dirty() && !edit_object_ && !force_scene_push_) return;
+        force_scene_push_ = false;
         scene_uploaded_revision_ = mesh_.geometry_revision;
         std::shared_ptr<coopa::gfx::engine::data::Mesh> payload;
         try {
@@ -2337,14 +2566,39 @@ private:
             return;
         }
         auto handle = engine_.assets().create<coopa::gfx::engine::data::Mesh>("editor/edit_mesh", payload);
-        const fs::path dir = (doc_.path().empty() ? sync_.fallback_path : doc_.path()).parent_path();
+        // Triangle soup of the edited mesh for water bodies, built only if one uses this file.
+        std::vector<glm::vec3> water_pos;
+        std::vector<glm::vec2> water_uv;
+        std::vector<uint32_t>  water_idx;
         for (const auto& [id, live] : sync_.live_objects()) {
-            const int ci = doc_.find_component(id, "MeshRenderer");
-            if (ci < 0 || !live) continue;
-            const std::string key = get_string(doc_.find(id)->at("components").as_seq()[static_cast<size_t>(ci)], "mesh_path");
-            const fs::path p = coopa::yaml::resolve_variant(engine_.assets().source().resolve("meshes/" + key + ".yaml", dir.string()));
-            if (p != mesh_.path) continue;
-            if (auto* mr = live->get_component<coopa::gfx::engine::components::MeshRenderer>()) mr->set_mesh(handle);
+            const Node* obj = doc_.find(id);
+            if (!obj || !live) continue;
+            const std::string key = object_mesh_key_(*obj);
+            if (key.empty() || resolve_mesh_key_(key) != mesh_.path) continue;
+            const int mr_ci = doc_.find_component(id, "MeshRenderer");
+            const bool via_renderer = mr_ci >= 0 &&
+                !get_string(obj->at("components").as_seq()[static_cast<size_t>(mr_ci)], "mesh_path").empty();
+            if (via_renderer) {
+                if (auto* mr = live->get_component<coopa::gfx::engine::components::MeshRenderer>()) mr->set_mesh(handle);
+                continue;
+            }
+            // A water body: its MeshRenderer shows WaterSystem's bake, not the raw mesh. Hand the
+            // edited geometry to the WaterBody instead; WaterSystem re-bakes it (it runs in edit
+            // mode) with waves, foam and flow intact.
+            auto* water = live->get_component<toy::water::WaterBody>();
+            if (!water) continue;
+            if (water_idx.empty()) {
+                for (const auto& f : mesh_.mesh.faces) {
+                    for (size_t k = 1; k + 1 < f.corners.size(); ++k) {
+                        for (const Corner* c : {&f.corners[0], &f.corners[k], &f.corners[k + 1]}) {
+                            water_idx.push_back(static_cast<uint32_t>(water_pos.size()));
+                            water_pos.push_back(mesh_.mesh.positions[c->v]);
+                            water_uv.push_back(c->uv);
+                        }
+                    }
+                }
+            }
+            if (!water_idx.empty()) water->set_geometry(water_pos, water_uv, water_idx);
         }
         mesh_cache_.clear();
     }
@@ -2924,6 +3178,11 @@ private:
     int nav_mode_ = 0;   // 0 orbit, 1 pan, 2 zoom
     ObjectId edit_object_ = 0;
     uint64_t scene_uploaded_revision_ = 0;
+    bool force_scene_push_ = false;   ///< Push the mesh to the scene even though it is saved (Object Mode undo).
+    /// Mesh documents switched away from, with their undo histories (see park_mesh_doc_()).
+    static constexpr size_t kMaxParkedMeshes = 8;
+    std::map<fs::path, MeshDocument> parked_meshes_;
+    std::vector<fs::path> parked_order_;
     glm::vec3 cursor3d_{0.0f};
     std::set<ObjectId> hidden_;
     bool show_toolbar_ = true, show_sidebar_ = false, show_bottom_ = true, maximized_ = false;

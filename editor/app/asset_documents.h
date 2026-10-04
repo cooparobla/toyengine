@@ -24,13 +24,32 @@
 
 namespace toy::editor {
 
+/** @brief Rough heap size of an EditMesh snapshot, for the undo history's memory budget. */
+inline size_t edit_mesh_bytes(const EditMesh& m) {
+    size_t b = sizeof(EditMesh) + m.positions.size() * sizeof(glm::vec3) + m.faces.size() * sizeof(Face);
+    for (const Face& f : m.faces) b += f.corners.size() * sizeof(Corner);
+    return b;
+}
+
 /** @brief One mesh file being edited. */
 struct MeshDocument {
+    /// History: up to 200 steps or ~384 MB of snapshots, whichever binds first (a dense mesh -- a
+    /// 100x100 water grid is ~1.5 MB per step -- still keeps well over 100), never under 16.
+    static constexpr size_t kUndoBudgetBytes = size_t(384) << 20;
+
+    MeshDocument() { undo.set_budget(kUndoBudgetBytes, edit_mesh_bytes); }
+
     std::filesystem::path path;   ///< Empty until first saved.
     std::string name = "mesh";
     EditMesh mesh;
     MeshSelection selection;
     UndoStack<EditMesh> undo;
+    /// Opened by Edit/Sculpt Mode on a scene object (not as a mesh asset of its own): saved
+    /// automatically when the mode is left, and part of the scene's Ctrl+Z timeline.
+    bool scene_owned = false;
+    /// The file's write time when last loaded or saved -- a parked history (see EditorApp's
+    /// park_mesh_doc_()) is only resumed if the file has not changed since.
+    std::filesystem::file_time_type file_time{};
     uint64_t saved_revision = 0;
     uint64_t geometry_revision = 1;   ///< Bumps on every change (drives preview uploads).
     EditMesh live_before_;
@@ -47,6 +66,8 @@ struct MeshDocument {
         undo.clear();
         saved_revision = undo.revision();
         ++geometry_revision;
+        std::error_code ec;
+        file_time = std::filesystem::last_write_time(coopa::yaml::resolve_variant(p), ec);
     }
     void reset(EditMesh m, const std::string& n) {
         mesh = std::move(m);
@@ -61,6 +82,8 @@ struct MeshDocument {
         if (!p.empty()) path = p;
         coopa::yaml::save_document(path, mesh_to_node(mesh));
         saved_revision = undo.revision();
+        std::error_code ec;
+        file_time = std::filesystem::last_write_time(path, ec);
     }
     /** @brief Applies `fn` as one undoable step. */
     void edit(const std::string& label, const std::function<void(EditMesh&, MeshSelection&)>& fn,

@@ -2523,6 +2523,330 @@ void test_editor_object_mesh_edit_is_asset() {
            "meshes/cube.yaml itself has the extrusion");
 }
 
+/** @brief Water bodies are editable meshes too: Edit Mode on a WaterBody object edits its
+ *         WaterBody's mesh (a procedural grid is written out to a mesh file first), the live
+ *         water re-bakes from the unsaved edit, and saving writes the file. */
+/** @brief A water body larger than one render tile draws as runtime tile children: they render,
+ *         clicking the water still picks the water object, and they never reach the saved scene. */
+void test_editor_large_water_tiles_pick_and_save() {
+    setenv("FIXED_DT", "0.016666", 1);
+    setenv("NO_INPUT", "1", 1);
+    setenv("HOME", tmp_root().c_str(), 1);
+    fs::remove(Project::prefs_path());
+    const fs::path root = fresh_dir("water_tiles_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, 4);
+
+    const ObjectId lake = app.create_primitive("Plane");
+    auto& doc = app.document();
+    const int mr_ci = doc.find_component(lake, "MeshRenderer");
+    Node mr = doc.find(lake)->at("components").as_seq()[static_cast<size_t>(mr_ci)];
+    mr["mesh_path"] = Node(std::string(""));
+    doc.set_component(lake, mr_ci, mr, "No mesh");
+    Node water = Node::mapping();
+    water["type"] = Node(std::string("WaterBody"));
+    water["mode"] = Node(std::string("planar"));
+    Node size = Node::mapping();
+    size["x"] = make_float(120.0);
+    size["y"] = make_float(120.0);
+    water["size"] = size;
+    water["resolution"] = Node(static_cast<int64_t>(24));
+    doc.add_component(lake, water);
+    doc.set_transform(lake, {0.0f, 80.0f, 0.5f}, {0, 0, 0}, glm::vec3(1), "Move");
+    app.sync().rebuild(engine, doc);
+    tick(engine, 3);
+    // A grid body has no surface the editor can pick (only its origin marker): one round trip
+    // through Edit Mode writes the grid to a mesh file, as an author editing the shape would.
+    // That also makes it a mesh-sourced body, tiled by triangle with simplified LODs.
+    doc.select(lake);
+    expect(app.set_interaction_mode(InteractionMode::Edit), "Edit Mode converts the grid to a mesh");
+    app.set_interaction_mode(InteractionMode::Object);
+    tick(engine, 4);
+
+    toy::water::WaterBody* live = nullptr;
+    for (const auto& [id, obj] : app.sync().live_objects()) {
+        if (id == lake && obj) live = obj->get_component<toy::water::WaterBody>();
+    }
+    expect(live && live->tiles.size() > 1u, "a 120 m lake is drawn as several tiles (" +
+                                                std::to_string(live ? live->tiles.size() : 0u) + ")");
+    expect(live && toy::water::WaterSystem::is_published(*live), "...every one of them published");
+    bool placed = live != nullptr;
+    if (live) {
+        for (const auto& t : live->tiles) {
+            const glm::vec3 p(t.object->get_transform()->transform().get_world_matrix()[3]);
+            placed = placed && glm::distance(p, glm::vec3(0.0f, 80.0f, 0.5f)) < 1e-4f;
+        }
+    }
+    expect(placed, "...placed with the lake (tiles follow the owner's transform)");
+
+    // Clicking the water picks the lake itself (picking is per document object).
+    app.camera().focus = glm::vec3(10.0f, 80.0f, 0.5f);
+    app.camera().distance = 60.0f;
+    app.camera().pitch_deg = 50.0f;
+    app.camera().apply();
+    tick(engine, 2);
+    glm::vec2 px;
+    const bool on_screen = engine.world_to_window(glm::vec3(10.0f, 80.0f, 0.5f), px);
+    expect(on_screen, "the lake is on screen");
+    if (on_screen) {
+        const float s = std::max(1.0f, engine.display_scale());
+        expect(app.pick_object(px / s) == lake, "clicking the tiled water's surface picks the water object");
+    }
+
+    // The tiles are runtime only: the saved scene has the lake and no tiles.
+    const fs::path out = root / "tiles_saved.yaml";
+    expect(app.save_scene_as(out), "the scene saves");
+    std::ifstream in(out);
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    expect(text.find("WaterBody") != std::string::npos && text.find("water_tile") == std::string::npos,
+           "...with the water body and none of its render tiles");
+}
+
+void test_editor_water_body_mesh_is_editable() {
+    setenv("FIXED_DT", "0.016666", 1);
+    setenv("NO_INPUT", "1", 1);
+    setenv("HOME", tmp_root().c_str(), 1);
+    fs::remove(Project::prefs_path());
+    const fs::path root = fresh_dir("water_edit_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, 4);
+
+    // A plane turned into a grid-based water body: MeshRenderer keeps only the material.
+    const ObjectId pond = app.create_primitive("Plane");
+    auto& doc = app.document();
+    const int mr_ci = doc.find_component(pond, "MeshRenderer");
+    Node mr = doc.find(pond)->at("components").as_seq()[static_cast<size_t>(mr_ci)];
+    mr["mesh_path"] = Node(std::string(""));
+    doc.set_component(pond, mr_ci, mr, "No mesh");
+    Node water = Node::mapping();
+    water["type"] = Node(std::string("WaterBody"));
+    water["mode"] = Node(std::string("planar"));
+    Node size = Node::mapping();
+    size["x"] = make_float(6.0);
+    size["y"] = make_float(4.0);
+    water["size"] = size;
+    water["resolution"] = Node(static_cast<int64_t>(6));
+    doc.add_component(pond, water);
+    app.sync().rebuild(engine, doc);
+    tick(engine, 3);
+
+    doc.select(pond);
+    expect(app.set_interaction_mode(InteractionMode::Edit), "Edit Mode on a WaterBody object");
+    auto& md = app.mesh_document();
+    const int w_ci = doc.find_component(pond, "WaterBody");
+    const std::string key = get_string(doc.find(pond)->at("components").as_seq()[static_cast<size_t>(w_ci)], "mesh_path");
+    expect(!key.empty() && md.path.filename() == key + ".yaml",
+           "the grid was written to a mesh file and the WaterBody points at it (" + key + ")");
+    expect(md.mesh.positions.size() == 7u * 7u && md.mesh.faces.size() == 36u, "...the same 6x6 grid the water drew");
+
+    // Raise the whole surface by a metre: the live water re-bakes from the unsaved edit.
+    md.selection.mode = SelectMode::Vertex;
+    md.edit("Raise", [](EditMesh& m, MeshSelection&) { for (auto& p : m.positions) p.z += 1.0f; });
+    tick(engine, 4);
+    toy::water::WaterBody* live = nullptr;
+    for (const auto& [id, obj] : app.sync().live_objects()) {
+        if (id == pond && obj) live = obj->get_component<toy::water::WaterBody>();
+    }
+    const glm::vec3 base = live && live->owner
+        ? glm::vec3(live->owner->get_transform()->transform().get_world_matrix()[3]) : glm::vec3(0.0f);
+    expect(live && live->baked && std::fabs(live->query.bounds_max().z - (base.z + 1.0f)) < 1e-3f,
+           "the live water shows the edit before saving");
+
+    app.set_interaction_mode(InteractionMode::Object);
+    tick(engine, 4);
+    live = nullptr;
+    for (const auto& [id, obj] : app.sync().live_objects()) {
+        if (id == pond && obj) live = obj->get_component<toy::water::WaterBody>();
+    }
+    expect(live && live->baked && std::fabs(live->query.bounds_max().z - (base.z + 1.0f)) < 1e-3f,
+           "leaving Edit Mode keeps showing the unsaved edit (z max " +
+               std::to_string(live ? live->query.bounds_max().z : -1.0f) + ")");
+    glm::vec3 olo(0.0f), ohi(0.0f);
+    expect(app.outline_bounds(pond, olo, ohi) && std::fabs(ohi.z - 1.0f) < 1e-4f,
+           "...and so does its selection outline (drawn from the open mesh, not the file on disk)");
+    expect(app.save_mesh(), "saving writes the water's mesh");
+    const EditMesh saved = mesh_from_node(coopa::yaml::load_document(md.path));
+    expect(!saved.positions.empty() && std::fabs(saved.positions[0].z - 1.0f) < 1e-5f, "...with the edit in it");
+
+    // Re-entering edits the same file -- no second conversion.
+    doc.select(pond);
+    expect(app.set_interaction_mode(InteractionMode::Edit), "Edit Mode again");
+    expect(app.mesh_document().path.filename() == key + ".yaml", "...on the same mesh file");
+    app.set_interaction_mode(InteractionMode::Object);
+}
+
+
+/** @brief UndoStack's cross-stack ordering, redo freshness and memory budget. */
+void test_undo_stack_sequence_and_budget() {
+    UndoStack<int> a, b;
+    a.push("a1", 0, 1);
+    b.push("b1", 0, 1);
+    a.push("a2", 1, 2);
+    expect(a.top_undo_seq() > b.top_undo_seq() && b.top_undo_seq() > 0, "sequence numbers order steps across stacks");
+    a.undo();
+    b.undo();
+    expect(a.redo_fresh() && b.redo_fresh(), "redo stays valid while nothing new is pushed");
+    expect(b.top_redo_seq() < a.top_redo_seq(), "the step undone last is the older one (redo it first)");
+    UndoStack<int> c;
+    c.push("c1", 0, 1);
+    expect(!a.redo_fresh() && !b.redo_fresh(), "a push anywhere invalidates every other stack's redo");
+
+    UndoStack<std::vector<int>> big;
+    big.set_budget(1000, [](const std::vector<int>& v) { return v.size() * sizeof(int); }, 3);
+    for (int i = 0; i < 20; ++i) big.push("step", std::vector<int>(50), std::vector<int>(50));   // 400 B per step
+    expect(big.undo_count() == 3, "a memory budget trims the oldest steps, keeping the minimum (" +
+                                      std::to_string(big.undo_count()) + ")");
+    expect(big.bytes() == 3u * 400u, "...and tracks what is left");
+}
+
+namespace {
+/** @brief Faces of a mesh file on disk. */
+size_t faces_on_disk(const fs::path& p) { return mesh_from_node(coopa::yaml::load_document(p)).faces.size(); }
+/** @brief Index count of the live renderer of the document object named `name`. */
+uint32_t live_indices(EditorApp& app, const std::string& name) {
+    for (const auto& [id, live] : app.sync().live_objects()) {
+        if (!live || live->name() != name) continue;
+        auto* mr = live->get_component<coopa::gfx::engine::components::MeshRenderer>();
+        return mr && mr->is_ready() ? mr->get_mesh()->index_count() : 0u;
+    }
+    return 0u;
+}
+}
+
+/**
+ * @brief Editing a scene object's mesh: saved automatically on leaving Edit Mode, and the
+ *        edit stays undoable afterwards -- Object Mode's Ctrl+Z walks one timeline across the
+ *        scene and every mesh edited from it (across meshes, in order), keeping files and the
+ *        live scene in step; redo walks it back.
+ */
+void test_editor_mesh_autosave_and_unified_undo() {
+    setenv("FIXED_DT", "0.016666", 1);
+    setenv("NO_INPUT", "1", 1);
+    setenv("HOME", tmp_root().c_str(), 1);
+    fs::remove(Project::prefs_path());
+    const fs::path root = fresh_dir("unified_undo_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, 4);
+    auto& doc = app.document();
+    const fs::path cube_file = project.assets() / "meshes" / "cube.yaml";
+    const ObjectId cube = object_named(app, "Cube");
+
+    // 1. Edit the cube, leave Edit Mode: saved without asking.
+    doc.select(cube);
+    expect(app.set_interaction_mode(InteractionMode::Edit), "Edit Mode on the cube");
+    app.mesh_document().selection.mode = SelectMode::Face;
+    app.mesh_document().selection.faces = {1};
+    app.mesh_document().edit("Extrude", [](EditMesh& m, MeshSelection& s) { extrude_faces(m, s, 0.5f); });
+    tick(engine, 2);
+    app.set_interaction_mode(InteractionMode::Object);
+    expect(faces_on_disk(cube_file) == 10u, "leaving Edit Mode saved the cube's mesh");
+    expect(!app.mesh_document().dirty(), "...and nothing is left unsaved");
+
+    // 2. A second mesh (a plane), edited and left the same way.
+    const ObjectId plane = app.create_primitive("Plane");
+    tick(engine, 3);
+    doc.select(plane);
+    expect(app.set_interaction_mode(InteractionMode::Edit), "Edit Mode on the plane");
+    const fs::path plane_file = app.mesh_document().path;
+    const size_t plane_faces = app.mesh_document().mesh.faces.size();
+    app.mesh_document().selection.mode = SelectMode::Face;
+    app.mesh_document().selection.faces = {0};
+    app.mesh_document().edit("Extrude", [](EditMesh& m, MeshSelection& s) { extrude_faces(m, s, 0.3f); });
+    app.set_interaction_mode(InteractionMode::Object);
+    tick(engine, 2);
+    expect(faces_on_disk(plane_file) == plane_faces + 4u, "leaving Edit Mode saved the plane's mesh");
+
+    // 3. Then a scene edit: move the cube.
+    const int ti = doc.find_component(cube, "Transform");
+    Node t = doc.find(cube)->at("components").as_seq()[static_cast<size_t>(ti)];
+    t["position"] = make_vec3(glm::vec3(3.0f, 0.0f, 0.0f));
+    doc.set_component(cube, ti, t, "Move");
+    tick(engine, 2);
+
+    // Object Mode undo, newest first: the move, the plane's extrude, the plane's creation (a scene
+    // step), then the cube's extrude.
+    app.undo();
+    tick(engine, 3);
+    expect(glm::vec3(get_vec3(doc.find(cube)->at("components").as_seq()[static_cast<size_t>(ti)], "position")).x == 0.0f,
+           "undo 1: the move");
+    expect(faces_on_disk(plane_file) == plane_faces + 4u && faces_on_disk(cube_file) == 10u, "...meshes untouched");
+    app.undo();
+    tick(engine, 3);
+    expect(faces_on_disk(plane_file) == plane_faces, "undo 2: the plane's extrude (file reverted)");
+    expect(faces_on_disk(cube_file) == 10u, "...the cube's still there");
+    app.undo();
+    tick(engine, 3);
+    expect(doc.find(plane) == nullptr, "undo 3: the plane's creation");
+    app.undo();
+    tick(engine, 3);
+    expect(faces_on_disk(cube_file) == 6u, "undo 4: the cube's extrude, across the mesh switch (history kept)");
+    expect(live_indices(app, "Cube") == 6u * 6u, "...and the live cube shows it");
+
+    // Redo walks it back in order.
+    app.redo();
+    tick(engine, 3);
+    expect(faces_on_disk(cube_file) == 10u && live_indices(app, "Cube") == 10u * 6u, "redo 1: the cube's extrude");
+    app.redo();
+    tick(engine, 3);
+    expect(doc.find(plane) != nullptr, "redo 2: the plane's creation");
+    app.redo();
+    tick(engine, 3);
+    expect(faces_on_disk(plane_file) == plane_faces + 4u, "redo 3: the plane's extrude");
+    app.redo();
+    tick(engine, 3);
+    expect(glm::vec3(get_vec3(doc.find(cube)->at("components").as_seq()[static_cast<size_t>(ti)], "position")).x == 3.0f,
+           "redo 4: the move");
+
+    // Re-entering a mesh resumes its history: Edit Mode's own Ctrl+Z still reaches the extrude.
+    doc.select(cube);
+    expect(app.set_interaction_mode(InteractionMode::Edit), "Edit Mode on the cube again");
+    expect(app.mesh_document().undo.can_undo(), "...with its earlier history");
+    app.set_interaction_mode(InteractionMode::Object);
+}
+
+/** @brief Saving a mesh refreshes every asset built from the file at once -- a MeshCollider too. */
+void test_editor_mesh_save_refreshes_colliders() {
+    setenv("FIXED_DT", "0.016666", 1);
+    setenv("NO_INPUT", "1", 1);
+    setenv("HOME", tmp_root().c_str(), 1);
+    fs::remove(Project::prefs_path());
+    const fs::path root = fresh_dir("collider_refresh_project");
+    Project project = Project::create(root);
+    const fs::path col_file = project.assets() / "meshes" / "floor_col.yaml";
+    coopa::yaml::save_document(col_file, mesh_to_node(make_plane(4.0f, 1)));
+    project.refresh();
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, 4);
+    auto& doc = app.document();
+    const ObjectId floor = app.create_with_component("MeshCollider", "Floor");
+    const int ci = doc.find_component(floor, "MeshCollider");
+    Node comp = doc.find(floor)->at("components").as_seq()[static_cast<size_t>(ci)];
+    comp["mesh_path"] = Node(std::string("floor_col"));
+    doc.set_component(floor, ci, comp, "Collider mesh");
+    app.sync().rebuild(engine, doc);
+    tick(engine, 4);
+    auto triangles = [&]() -> size_t {
+        for (const auto& [id, live] : app.sync().live_objects()) {
+            if (id != floor || !live) continue;
+            auto* mc = live->get_component<coopa::physx::components::MeshCollider>();
+            return mc && mc->mesh().is_loaded() ? mc->mesh()->triangle_count() : 0u;
+        }
+        return 0u;
+    };
+    expect(triangles() == 2u, "the collider loaded its 1-quad mesh");
+    expect(app.open_mesh(col_file), "open the collider's mesh as an asset");
+    app.mesh_document().edit("Subdivide", [](EditMesh& m, MeshSelection&) { m = make_plane(4.0f, 3); });
+    expect(app.save_mesh(), "save it");
+    expect(triangles() == 18u, "the live collider has the saved mesh immediately (" + std::to_string(triangles()) + " tris)");
+}
+
 // =====================================================================================
 // Group "package" -- Build > Package to .caml
 // =====================================================================================
@@ -2575,6 +2899,7 @@ const TestCase kTests[] = {
     {"writer_roundtrips_every_asset",        "writer",   test_writer_roundtrips_every_asset},
     {"scene_documents_save_load_stable",     "document", test_scene_documents_save_load_stable},
     {"scene_document_random_edits_undo",     "document", test_scene_document_random_edits_undo},
+    {"undo_stack_sequence_and_budget",       "document", test_undo_stack_sequence_and_budget},
     {"scene_document_reparent_rules",        "document", test_scene_document_reparent_rules},
     {"schema_defaults",                      "document", test_schema_defaults},
     {"shader_ball",                          "mesh", test_shader_ball},
@@ -2618,6 +2943,10 @@ const TestCase kTests[] = {
     {"editor_object_assets",                 "editor_shell", test_editor_object_assets},
     {"editor_submesh_materials",             "editor_shell", test_editor_submesh_materials},
     {"editor_object_mesh_edit_is_asset",     "editor_shell", test_editor_object_mesh_edit_is_asset},
+    {"editor_water_body_mesh_is_editable", "editor_shell", test_editor_water_body_mesh_is_editable},
+    {"editor_large_water_tiles_pick_and_save", "editor_shell", test_editor_large_water_tiles_pick_and_save},
+    {"editor_mesh_autosave_and_unified_undo", "editor_shell", test_editor_mesh_autosave_and_unified_undo},
+    {"editor_mesh_save_refreshes_colliders", "editor_shell", test_editor_mesh_save_refreshes_colliders},
     {"package_renders_identically",          "package",  test_package_renders_identically},
 };
 

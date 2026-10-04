@@ -349,6 +349,7 @@ inline void register_scene_components(coopa::gfx::core::Device& device,
                 if (sz.contains("y")) w->size.y = sz.at("y").get_value<float>();
             }
             if (node.contains("resolution")) w->resolution = node.at("resolution").get_value<int>();
+            f("tile_size", w->tile_size);
 
             f("wave_amplitude", w->waves.amplitude);
             f("wave_length", w->waves.wavelength);

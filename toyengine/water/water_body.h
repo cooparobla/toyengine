@@ -30,6 +30,7 @@
 
 #include <coopa/asset/asset_handle.h>
 #include <coopa/scene/component.h>
+#include <coopa/scene/scene_object.h>
 
 #include <gfxcoopa/engine/data/mesh.h>
 #include <gfxcoopa/engine/data/skinned_mesh_source.h>
@@ -56,7 +57,10 @@ public:
     // --- Geometry ---
     std::string mesh_path;                ///< Logical mesh name (scene meshes/ dir); empty = grid.
     glm::vec2   size{20.0f, 20.0f};       ///< Procedural grid extent (local units).
-    int         resolution = 48;          ///< Procedural grid quads per side.
+    int         resolution = 48;          ///< Procedural grid quads per side (scaled by water_quality).
+    /// Render tile edge (local units); 0 = auto (~32 m). A body larger than one tile is drawn as
+    /// several runtime child objects, each culled and LOD'd on its own (see water_tiles.h).
+    float       tile_size = 0.0f;
 
     // --- Waves (see water_waves.h) ---
     WaveParams waves;
@@ -108,10 +112,19 @@ public:
 
     // --- Baked state (WaterSystem only) ---
     WaterSurfaceQuery query;
-    std::shared_ptr<coopa::gfx::engine::data::Mesh> gpu_mesh;
+    std::shared_ptr<coopa::gfx::engine::data::Mesh> gpu_mesh; ///< Single-tile bodies only.
     glm::mat4 baked_world{0.0f};
     bool      baked = false;
     int       bake_stage = 0;  ///< 1 = baked before physics existed, 2 = with depth/obstacle raycasts.
+    float     baked_density = -1.0f; ///< WaterSettings::grid_density the bake used.
+
+    /** @brief A published render tile of a multi-tile body: a runtime child object. */
+    struct TileSlot {
+        std::string                 asset_id;
+        coopa::scene::SceneObject*  object = nullptr;
+    };
+    std::vector<TileSlot> tiles;   ///< Empty for a single-tile body (its mesh is on the owner).
+    std::string single_asset_id;   ///< Asset id of the owner-published mesh, if any.
 
     /** @brief Marks the bake stale (e.g. after editing a field at runtime). */
     void mark_dirty() {
@@ -123,9 +136,18 @@ public:
      * @brief Samples this body's surface above world XY `p` at water time `t`.
      * @return false if `p` is not over this body, or it has not been baked yet.
      */
-    bool sample(const glm::vec2& p, float t, WaterSample& out) const {
-        return baked && query.sample(p, waves, t, out);
+    bool sample(const glm::vec2& p, float t, WaterSample& out, const WaveQueryOptions& opt = {}) const {
+        return baked && query.sample(p, wave_set(), t, out, opt);
     }
+
+    /** @brief `waves` with its per-wave constants precomputed; rebuilt whenever `waves` changes. */
+    const WaveSet& wave_set() const {
+        if (!wave_set_.matches(waves)) wave_set_ = WaveSet::from(waves);
+        return wave_set_;
+    }
+
+private:
+    mutable WaveSet wave_set_;
 };
 
 } // namespace water

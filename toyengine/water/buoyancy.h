@@ -70,10 +70,15 @@ public:
     // --- Resolved by WaterSystem ---
     std::vector<Pontoon> resolved;
     bool  initialized = false;
+    int   resolved_subdivision_cap = -1; ///< WaterSettings::max_box_subdivisions resolved with.
 
     // --- Live state, for gameplay/debug: written every substep ---
     float submerged_fraction = 0.0f;    ///< Volume-weighted, 0..1.
     bool  in_water = false;
+    /// Inside WaterSystem's simulation range (full pontoon buoyancy). Outside it the body is
+    /// frozen: put to sleep where it floats (see WaterSystem::substep_()).
+    bool  simulated = true;
+    float frozen_rest_time = 0.0f;      ///< Out of range and awake: seconds spent near rest.
 };
 
 } // namespace water

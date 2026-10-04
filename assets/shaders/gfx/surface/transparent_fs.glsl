@@ -90,7 +90,8 @@ layout(set = 6, binding = 0) uniform ForwardGlobalsBlock {
     ivec4 ssr_mip;    // x=ssr_max_color_mip, yzw unused
     vec4  refract0;   // x=enabled, y=strength, z=max_offset, w=chromatic
     vec4  refract1;   // x=blur, y=density, z=fresnel_enabled, w unused
-    // Water ripple rings (toy::render::kMaxWaterRipples): info.x = count; per ring
+    // Water ripple rings (toy::render::kMaxWaterRipples): info.x = count, .y = flow-ripple
+    // layers, .z = detail distance (m), .w = ring draw range (m); per ring
     // [2i] = (x, y, age, strength), [2i+1] = (start radius, -, -, -). Read by water_surface.glsl.
     vec4  water_ripple_info;
     vec4  water_ripples[2 * WATER_MAX_RIPPLES];

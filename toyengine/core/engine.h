@@ -274,6 +274,10 @@ public:
     void set_edit_mode(bool edit) {
         edit_mode_ = edit;
         if (scene_mgr_.has_scene()) scene_mgr_.get_active_scene().set_simulating(!edit);
+        // Edit mode never holds the pointer: hand back a cursor a game may have captured.
+        if (edit && ctx_.input().cursor_mode() != coopa::input::CursorMode::Normal) {
+            ctx_.input().set_cursor_mode(coopa::input::CursorMode::Normal);
+        }
     }
     bool edit_mode() const { return edit_mode_; }
 
@@ -290,7 +294,9 @@ public:
     void set_game_input_focus(bool focused) {
         game_focused_ = focused;
         if (focused) {
-            if (no_input_ || !config_.window.visible || !scene_mgr_.has_scene()) return;
+            // Edit mode never captures (see set_edit_mode()): focus is only recorded for when
+            // the game runs again.
+            if (edit_mode_ || no_input_ || !config_.window.visible || !scene_mgr_.has_scene()) return;
             auto* cc = scene_mgr_.get_active_scene().find_first_component<scene::CameraController>();
             if (cc && cc->capture_cursor) ctx_.input().set_cursor_mode(coopa::input::CursorMode::Disabled);
         } else if (ctx_.input().cursor_mode() != coopa::input::CursorMode::Normal) {
@@ -441,7 +447,8 @@ private:
         world::install_terrain_system(scene, ctx_.device(), ctx_.allocator(), assets_);
         // Order 90: bakes water surfaces and refreshes the buoyant-body list right before
         // Physics (100) steps, whose substep callback it drives -- see water_system.h's file doc.
-        water::install_water_system(scene, &ctx_.device(), &ctx_.allocator(), &assets_);
+        water::install_water_system(scene, &ctx_.device(), &ctx_.allocator(), &assets_)
+            ->set_settings(water_settings_for_(pipeline_->render_config().water_quality));
         coopa::physx::system::install_physics_system(scene, config_.physics);
 
         // Activate TransformSystem before the first drain or render, so the world_matrix()
@@ -758,6 +765,17 @@ public:
         return !ctx_.should_close();
     }
 
+    /** @brief render::RenderQuality (config.yaml's water_quality) as the water module's tier. */
+    static water::WaterSettings water_settings_for_(render::RenderQuality q) {
+        switch (q) {
+            case render::RenderQuality::Low:    return water::WaterSettings::from_quality(water::WaterQuality::Low);
+            case render::RenderQuality::Medium: return water::WaterSettings::from_quality(water::WaterQuality::Medium);
+            case render::RenderQuality::Ultra:  return water::WaterSettings::from_quality(water::WaterQuality::Ultra);
+            case render::RenderQuality::High:   break;
+        }
+        return water::WaterSettings::from_quality(water::WaterQuality::High);
+    }
+
     /**
      * @brief Hands the renderer this frame's water state: the live ripple rings (aged) and, if
      *        the main camera is below a water surface, that body's underwater look. The bridge
@@ -767,14 +785,41 @@ public:
         render::WaterFrameState state;
         auto* water = dynamic_cast<water::WaterSystem*>(scene.find_system("Water"));
         if (water) {
+            // water_quality is live: a changed tier reaches the system for its next update.
+            const render::RenderQuality q = pipeline_->render_config().water_quality;
+            if (water->settings().quality != water_settings_for_(q).quality) water->set_settings(water_settings_for_(q));
+            const water::WaterSettings& ws = water->settings();
+            state.ripple_layers   = ws.ripple_layers;
+            state.detail_distance = ws.detail_distance;
+            state.ripple_range    = ws.ripple_range;
+
+            // Hooks between Scene::update() and here (the editor applying its edits) may have
+            // destroyed or rebuilt water objects since the system cached its list.
+            water->refresh_bodies(scene);
             const float now = water->time();
-            state.ripples.reserve(water->ripples().size());
-            for (const auto& r : water->ripples()) {
+            auto* cam = coopa::gfx::engine::components::CameraComponent::main();
+            const bool has_eye = cam && cam->owner;
+            const glm::vec3 eye = has_eye ? glm::vec3(cam->owner->get_transform()->transform().get_world_matrix()[3])
+                                          : glm::vec3(0.0f);
+            // Rings within the draw range, nearest first, at most the tier's cap -- then handed
+            // over oldest first, the order the pipeline expects.
+            std::vector<std::pair<float, std::size_t>> near;
+            near.reserve(water->ripples().size());
+            for (std::size_t i = 0; i < water->ripples().size(); ++i) {
+                const float d = has_eye ? glm::distance(glm::vec2(eye), water->ripples()[i].position) : 0.0f;
+                if (d <= ws.ripple_range) near.push_back({d, i});
+            }
+            if (near.size() > ws.max_ripples) {
+                std::partial_sort(near.begin(), near.begin() + static_cast<std::ptrdiff_t>(ws.max_ripples), near.end());
+                near.resize(ws.max_ripples);
+            }
+            std::sort(near.begin(), near.end(), [](const auto& a, const auto& b) { return a.second < b.second; });
+            state.ripples.reserve(near.size());
+            for (const auto& [d, i] : near) {
+                const auto& r = water->ripples()[i];
                 state.ripples.push_back({r.position, now - r.birth, r.strength, r.radius});
             }
-            auto* cam = coopa::gfx::engine::components::CameraComponent::main();
-            if (cam && cam->owner) {
-                const glm::vec3 eye(cam->owner->get_transform()->transform().get_world_matrix()[3]);
+            if (has_eye) {
                 const water::WaterSystem::UnderwaterInfo info = water->underwater_at(eye);
                 // Also just ABOVE the surface (within half a metre): the bottom of the near plane
                 // can already be under water, and the pass decides per pixel which side it is on

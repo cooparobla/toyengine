@@ -260,6 +260,7 @@ inline const std::map<std::string, ComponentSchema>& schemas() {
             f_asset("mesh_path", "meshes", ".yaml", true),
             f_vec3("size", glm::vec3(20.0f, 20.0f, 0.0f), 0.1f, true),
             f_int("resolution", 48, 1, 512, true),
+            f_float("tile_size", 0.0f, 0.5f, 0.0f, 1000.0f),
             f_float("wave_amplitude", 0.15f, 0.005f, 0.0f, 20.0f, true),
             f_float("wave_length", 8.0f, 0.05f, 0.1f, 500.0f, true),
             f_float("wave_direction", 0.0f, 0.5f, -360.0f, 360.0f),

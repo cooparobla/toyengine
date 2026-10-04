@@ -1,272 +1,260 @@
 # toyengine
 
-A basic pixel-art game engine, shaped like [blendy](../blendy) and built on
-[gfxcoopa](libs/gfxcoopa) (Vulkan) and [libcoopa](libs/libcoopa) (scene graph,
-assets, utilities). Its defining trait: the whole 3D scene renders into a
-small offscreen buffer, then upscales to the window with nearest-neighbour
-filtering and a centred, aspect-preserving best fit (`upscale_mode: fit`, the
-default) or an integer-scale letterbox (`upscale_mode: integer`), for a crisp
-pixelated look.
+**A modern C++20 / Vulkan 3D game engine with a Blender-style editor.**
+
+toyengine pairs a full-resolution deferred PBR renderer with rigid-body and cloth physics,
+dynamic water, streamed procedural terrain, an interactive UI toolkit, and a native editor
+that writes exactly the files the game loads. It runs on Linux and macOS (Apple Silicon,
+via MoltenVK).
+
+![Lake with Gerstner waves, shoreline foam, a flowing river and buoyant crates](docs/images/water_test.jpg)
+
+<table>
+  <tr>
+    <td><img src="docs/images/terrain_test.jpg" alt="Streamed procedural tile terrain"></td>
+    <td><img src="docs/images/underwater_test.jpg" alt="Underwater fog, caustics and Snell's window"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub><b>terrain_test</b>: procedural world streamed in chunks around the camera</sub></td>
+    <td align="center"><sub><b>underwater_test</b>: absorption, caustics, the surface seen from below</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/images/pixel_demo.jpg" alt="PBR materials, glass, emissive and water"></td>
+    <td><img src="docs/images/physics_test.jpg" alt="Rigid-body physics arena"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub><b>pixel_demo</b>: PBR, refraction, SDFs, bloom, SSR</sub></td>
+    <td align="center"><sub><b>physics_test</b>: bounciness, friction, stacking, hinges, triggers</sub></td>
+  </tr>
+</table>
+
+## The editor
+
+![toyengine_editor with the water_test scene open](docs/images/editor.jpg)
+
+`toyengine_editor` embeds the real engine, so its **Full Render** viewport *is* the game's
+renderer. It looks and feels like Blender (keymaps, gizmos, modes, outliner) and uses a
+Unity-style component model:
+
+- **Scenes and object assets.** Hierarchy, inspector, gizmos, play / pause / step in place.
+  Prefab-like object assets are instanced with `prefab:`.
+- **Mesh modelling.** Edit Mode has extrude, inset, bevel, loop cut and slide, bridge,
+  subdivide (including Catmull-Clark), mirror and UVs. Sculpt Mode has draw, smooth, inflate,
+  grab and flatten brushes, with symmetry.
+- **Material lookdev.** A shader ball, studio lighting and a turntable.
+- **Render and project settings,** applied live.
+- **Build > Package** turns a project into compact `.caml` binaries.
+- Snapshot undo, hot-reloading themes and a console.
+
+Everything it saves is plain YAML in your project's `assets/` folder, so you can hand-edit,
+diff and merge it. See [editor/README.md](editor/README.md) for the full tour.
 
 ## Features
 
-- **Low-resolution deferred renderer** — G-buffer + banded-PBR lighting at a
-  fixed internal resolution (480×270 by default), independent of window size.
-  Built on gfxcoopa's shared `DeferredLightingPass`/`SsrPass`/`TransparentPass`
-  (see [gfxcoopa](libs/gfxcoopa)'s shared shader library and `ExtraSets`
-  decoupling), not a private fork of them.
-- **Cel-shaded or soft direct lighting** (`soft_lighting`) — default is
-  banded/ramped: N·L quantized into discrete bands (`light_bands`), specular
-  a hard-thresholded highlight (`spec_threshold`). `soft_lighting` switches
-  both to a smooth, continuous Cook-Torrance falloff instead.
-- **Screen-space reflections + SSGI** (`ssr_enabled`) — Hi-Z raymarched
-  specular reflections, plus an optional diffuse colour-bleed bounce term
-  (`ssgi_intensity`) reusing the same trace.
-- **SSAO** (`ssao_enabled`) — hemisphere-sampled ambient occlusion with
-  temporal accumulation.
-- **Hard shadows** — directional (AABB-fit orthographic, texel-snapped) and
-  one point-light cubemap, both a single hardware depth compare.
-- **Forward transparency** (`transparency_enabled`) — BLEND-material meshes,
-  depth-tested against the opaque G-buffer, drawn after SSR compositing.
-- **Pixel-art post stack** — depth/normal outline, exposure, 8×8 Bayer ordered
-  dithering, and palette quantization to an arbitrary Nx1 palette PNG.
-- **Fit or integer-scale upscale** (`upscale_mode`) — default `fit` fills the
-  window as closely as the render aspect allows, letterboxing only the one
-  mismatched axis; `integer` snaps to a whole scale factor so every texel is
-  an exact N×N block of screen pixels, at the cost of more letterbox bars.
-- **World-space UI canvases** (`world_ui_enabled`) — [uicoopa](libs/uicoopa)'s entire widget
-  library (panels, text, buttons, sliders, progress bars, layout groups, masks) placed on a
-  quad in 3D, either billboarded to face the camera or honouring its own 3D Transform, and
-  optionally occluded by scene geometry. Rendered at the internal resolution and
-  nearest-upscaled, so it sits on the same pixel grid as the scene. Genuinely interactive: the
-  mouse ray is intersected with the canvas plane, so a `Button` on a world canvas is clickable.
-- **Screen-space UI overlay** (`screen_ui_enabled`) — the same widget library as a flat HUD,
-  drawn last at full **window** resolution, so text stays crisp instead of being quantised to
-  the render grid.
-- **Both UI layers composite after every post effect.** Depth of field, FXAA/SMAA/TAA and tilt
-  shift are filters over the finished image; UI is not part of what they filter, so it lands in
-  a stage of its own at the end of the frame (see [toyengine/render/README.md](toyengine/render/README.md#ui-layers)).
-  `assets/scenes/world_canvas_test/` is the demo — a cube with a health bar floating above it,
-  a rotated wall plate, and a screen-space HUD.
-- **Streamed 3D tile terrain** ([`toyengine/world/`](toyengine/world/README.md)) — a
-  [mapcoopa](libs/mapcoopa) world (elevation, biomes, rivers) generated from a seed at load,
-  sampled into height columns, and built into one merged GPU mesh per chunk on the job system,
-  streamed around the camera. Each tile *side* is an authored mesh asset rotated onto its face,
-  so the blocky default and a chamfered or smooth tile set differ by one key in scene YAML, not
-  by any code. `assets/scenes/terrain_test/` is the demo — `cplay terrain_test`.
-- **Water** ([`toyengine/water/`](toyengine/water/README.md)) — planar lakes/oceans and flowing
-  rivers as `WaterBody` components: Gerstner waves shared bit-for-bit between the shader and a CPU
-  surface query, a current derived from a river mesh's own slope (bent around static obstacles),
-  depth-based colour, contact and shoreline foam, flow-mapped ripples and rapids. `Buoyancy`
-  makes any Rigidbody float, rock on waves and drift with the current (pontoons, per physics
-  substep); anything moving through the surface leaves ripple rings, and a camera below it gets
-  underwater fog, absorption, caustics and Snell's window. Demos: `cplay water_test`,
-  `cplay underwater_test`.
-- **Orbit/fly camera controller**, YAML scene format (shared with blendy),
-  nearest-filtered texture loading, headless `ONESHOT`/`MAX_FRAMES` capture.
-- **Anti-aliasing** (`aa_mode`, `smaa` in `assets/config.yaml`) — FXAA 3.11, SMAA 1x, or TAA,
-  ported from [blendy](../blendy)'s PbrRenderPipeline and run at the internal
-  low resolution, before the upscale (see `PixelRenderConfig::aa_mode`).
-  `off` is a true no-op: no extra target is allocated and the frame is
-  byte-identical to a build with no AA support at all. `fxaa`/`smaa` are
-  single-frame spatial filters; `taa` additionally jitters the camera
-  projection every frame (an 8-frame Halton sequence, matching blendy's own),
-  which is in genuine tension with `camera_pixel_snap`'s whole-texel
-  snapping — at this engine's default internal resolution TAA will visibly
-  soften the pixel grid it exists to keep crisp. It's included anyway
-  because a future higher-internal-resolution mode is exactly where TAA
-  earns its keep; until then, treat it as the mode you reach for on that
-  future mode, not the low-res default. Ported as-is, warts included:
-  blendy's TAA has no motion vectors or history reprojection (history is
-  sampled at the current frame's UV and clamped to a YCoCg 3×3 AABB), so it
-  ghosts under camera motion.
-  **It also never converges.** The jitter is an 8-frame Halton cycle, so with a static camera
-  the whole render is exactly 8-periodic — and an exponential history blend converges a
-  *periodic* input to a periodic orbit, not to a fixed point. The image cycles forever with an
-  amplitude of roughly `(1 - taa_blending_weight)` times the per-phase difference. That is
-  invisible on smooth geometry and plainly visible as boiling on high-frequency geometry
-  (`terrain_test`'s block faces), which is why `assets/config.yaml` ships `smaa` rather than
-  `taa`; see that key's comment for the measurements, and
-  `test_static_camera_converges_to_a_static_image` in `test.cpp` for the regression guard.
-  Raising the blend weight only scales the orbit down — it cannot remove it, because the input
-  is deterministic rather than noise. Fixing this properly means motion vectors and history
-  reprojection.
+### Rendering
+- **Deferred PBR pipeline.** G-buffer plus Cook-Torrance lighting with directional, point and
+  spot lights, an environment and sky, and texture maps (albedo, normal, roughness, metallic, AO).
+- **Shadows.** Cascaded directional and point/spot shadows, soft PCF, optional PCSS contact
+  hardening and screen-space contact shadows.
+- **Screen-space effects.** Hi-Z SSR with temporal accumulation, traced SSGI colour bleed and
+  temporally stable SSAO.
+- **Transparency and refraction.** A forward pass for blended materials, with screen-space
+  refraction and Fresnel.
+- **SDF raymarching.** Signed-distance-field shapes that cast shadows and mix freely with meshes.
+- **Volumetrics and fog.** Raymarched local volumes with shadowed light shafts, plus global
+  height fog.
+- **Post-processing.** Bloom, auto exposure, colour-grading LUTs, physically based depth of
+  field, tilt-shift, and anti-aliasing (TAA, SMAA or FXAA).
+- **Quality presets.** Per-feature tiers in `assets/config.yaml`. Every feature has a master
+  switch, and "off" really costs nothing.
+- **GPU and CPU profiler.** `PROFILE=1` writes per-feature timings to CSV.
+- **Optional stylisation.** Banded cel lighting, outlines, ordered dithering and palette
+  quantisation are available when a project wants them.
 
-Explicitly **not** included: GI probes, reflection probes, and MSAA (blendy's
-own `msaa_4x` is parsed but never read by its render pipeline, so there was
-no working implementation to port). [blendy](../blendy) shares this same
-gfxcoopa backbone with every feature (including this engine's own
-pixel-art stack) exposed as an option.
+### Simulation
+- **Rigid-body physics** ([physxcoopa](libs/physxcoopa)). Box, sphere, capsule and mesh
+  colliders, physics materials, hinge joints, triggers, collision layers, and kinematic movers and controllers.
+- **Cloth.** XPBD cloth that collides with the world and renders as a shaded, shadow-casting
+  mesh.
+- **Water** ([toyengine/water](toyengine/water/README.md)):
+  - Lakes and oceans with Gerstner waves. The same wave math runs in the shader and in a CPU
+    surface query, so gameplay and visuals agree.
+  - Rivers whose current comes from the mesh's own slope and bends around obstacles.
+  - Shoreline and contact foam, and ripple rings from anything crossing the surface.
+  - `Buoyancy` makes any rigid body float, bob on waves and drift with the current.
+  - Underwater, you get fog, absorption, caustics and Snell's window.
+- **Procedural terrain** ([toyengine/world](toyengine/world/README.md)):
+  - A seeded [mapcoopa](libs/mapcoopa) world with elevation, biomes and rivers.
+  - Meshed in chunks on the job system and streamed around the camera.
+  - Tile shapes are mesh assets, so the look changes with one line of YAML.
 
-## Build & run
+### UI and scenes
+- **UI toolkit** ([uicoopa](libs/uicoopa)). Panels, text, buttons, sliders, progress bars,
+  layouts and masks. Use it as a crisp screen-space HUD, or on world-space canvases that
+  billboard or sit in 3D and stay clickable.
+- **Data-driven scenes.** YAML scenes, object assets and shared material assets. Every loader
+  also reads binary `.caml`, so a packaged project needs no path rewriting.
+- **Components.** Cameras (orbit, fly, tracking), movers, skinned meshes, a multithreaded job
+  system and named input actions.
 
-The coopa libraries are vendored as pinned git submodules under [`libs/`](libs/),
-so a clone must bring them down first. `--recursive` is required, not optional:
-gfxcoopa has its own nested submodule (`includes/volk`), and without it the build
-fails at `volk/volk.h: No such file or directory`.
+## Getting started
+
+### 1. Clone
+
+The coopa libraries are pinned submodules under [`libs/`](libs/). Clone them recursively,
+because gfxcoopa has a nested submodule of its own:
 
 ```bash
 git clone --recurse-submodules git@github.com:cooparobla/toyengine.git
-# or, in an existing clone:
+# already cloned?
 git submodule update --init --recursive
 ```
 
-```bash
-cbuild --vulkan   # compiles assets/shaders/*.{vert,frag} via glslc, then cmake
-cplay             # runs ./build/toyengine on config.yaml's scene (pixel_demo)
-cplay physics_test  # ...or on any other scene under assets/scenes, by name
-```
+### 2. Build
 
-Fallback (no `cbuild`/`cplay`):
+**Linux.** You need the Vulkan SDK (with `glslc`), GLFW, CMake and a C++20 compiler:
 
 ```bash
-cmake -B build && cmake --build build
-./build/toyengine [scene]
+cmake -B build && cmake --build build -j
 ```
 
-### macOS (Apple Silicon)
-
-Vulkan runs through MoltenVK. One-time setup installs the loader, MoltenVK,
-headers, validation layers, glslc and GLFW via Homebrew:
+**macOS (Apple Silicon).** A one-time script installs MoltenVK, the Vulkan loader, validation
+layers, `glslc` and GLFW through Homebrew:
 
 ```bash
 tools/setup_macos.sh
 cmake -B build && cmake --build build -j
-./build/toyengine [scene]
-ctest --test-dir build -j4
 ```
 
-Notes:
-
-- `cbuild`/`cplay` are Linux-only workspace tools; use the plain CMake path above.
-- The SMAA reference headers (`SearchTex.h`/`AreaTex.h`) are fetched at configure time
-  when `SMAA_TEXTURES_DIR` doesn't point at an existing checkout.
-- Plain `cmake -B build` ends up as a `Release` build here (caml's fetched zstd sets
-  `CMAKE_BUILD_TYPE`, since Homebrew zstd isn't found without pkg-config), so validation
-  is off. Pass `-DCMAKE_BUILD_TYPE=Debug` to get the validation layer.
-- MoltenVK offers no MAILBOX present mode, so presentation is always FIFO (vsync).
-- Seeded mapcoopa worlds are byte-identical to Linux. libc++ and libstdc++ implement
-  `std::uniform_*_distribution`, `std::shuffle` and `std::sort`'s tie order differently, so
-  mapcoopa uses its own libstdc++-exact versions (`coopa/maps/portable_random.h`,
-  `portable_sort.h`) and builds with `-ffp-contract=off` on macOS (Clang otherwise fuses
-  `a*b+c` into FMA, which rounds differently from GCC).
-- All macOS-specific code is behind `__APPLE__` or only triggers on MoltenVK's
-  portability extensions, so the Linux build is unchanged.
-
-The optional scene argument takes a bare name under `assets/scenes` (expanded to
-`assets/scenes/<name>/scene.yaml`) or an explicit path to a `.yaml`. It overrides
-`scene.default_scene` in `assets/config.yaml` for that run only; the `SCENE` env var
-below still takes precedence over both.
-
-Headless verification:
+### 3. Run a demo
 
 ```bash
-ONESHOT=1 ./build/toyengine        # render exactly one frame, save output/frame.png, exit
-MAX_FRAMES=30 ./build/toyengine    # render 30 frames then exit
-SCENE=world_canvas_test ./build/toyengine   # load a different scene than config.yaml's
+./build/toyengine                  # the default scene from assets/config.yaml
+./build/toyengine water_test       # or any scene under assets/scenes/ by name
+./build/toyengine path/to/scene.yaml
 ```
 
-Tests:
+| Scene | What it shows |
+|---|---|
+| `pixel_demo` | Materials showcase: PBR, glass and refraction, SDFs, emissive bloom, water |
+| `water_test` | Lake, river, foam, ripples, buoyant crates, a raft and a circling boat |
+| `underwater_test` | Underwater fog, caustics, Snell's window; scroll out to break the surface |
+| `terrain_test` | Streamed procedural world. WASD moves the focus, Tab/Shift change height |
+| `physics_test` | Restitution, friction, stacking, joints, triggers, kinematic platforms |
+| `cloth_test` | XPBD cloth draped over a moving ball |
+| `world_canvas_test` | World-space and screen-space UI, with a clickable health bar |
+| `material_maps_test` | Texture-mapped vs. flat materials (`scene_mapped.yaml` / `scene_flat.yaml`) |
 
-```bash
-ctest --test-dir build -j4            # everything; -j4 overlaps the render groups
-ctest --test-dir build -R toyengine_math   # instant, no Vulkan device
-./build/toyengine_tests --list        # every test and its group
-./build/toyengine_tests --group scene # one group
-./build/toyengine_tests cloth -v      # name substring, every assertion printed
-```
+Default controls: the mouse orbits the camera (the cursor is captured), the scroll wheel zooms, and Esc quits.
 
-The groups are `math`, `config` and `scene` (pure CPU, milliseconds) plus `render_pixel`,
-`render_ui`, `render_material` and `render_cloth`, each of which brings up a real Vulkan
-device. Every render test runs with `window.visible: false` and `NO_INPUT=1`, so no window
-appears, nothing takes focus and the pointer is never grabbed -- a full run is invisible on
-a desktop you are still using. Nothing is written to `output/`; a frame is only dumped, to
-a temp directory whose path is printed, when an assertion fails.
-
-## Editor
-
-`toyengine_editor` is a scene / mesh / material / render-settings editor that writes a
-project's `assets/` folder in exactly the formats the game loads. It embeds the real
-`Engine`, so the viewport's **Full Render** mode *is* the game's renderer; **Solid** and
-**Wireframe** are lighting-independent authoring views.
+### 4. Open the editor
 
 ```bash
 ./build/toyengine_editor                       # most recent project, else this repo's assets/
 ./build/toyengine_editor path/to/project       # any folder containing assets/
-./build/toyengine_editor --new-project ~/game  # scaffold a project (config, meshes, starter scene)
-./build/toyengine_editor_tests                 # editor test suite (headless)
+./build/toyengine_editor --new-project ~/game  # scaffold a new project with a starter scene
 ```
 
-Tabs: **Scene** (hierarchy, viewport with gizmos, inspector, asset browser, play/stop),
-**Asset** (polygon modelling -- extrude, inset, bevel, merge, UVs -- and material assets),
-**Render Settings** (config.yaml's render block, applied live), **Project Settings**
-(window/physics/jobs/output, default scene, Build > Package to `.caml`). See
-[editor/README.md](editor/README.md).
+### 5. Write a scene by hand
 
-Every YAML loader in the engine also accepts caml-encoded `.caml` files (detected by their
-magic bytes), and a reference to `x.yaml` finds `x.caml` when only that exists -- so a
-packaged project needs no path rewriting. Materials can be shared assets:
-`material: materials/brick`, or `material: { base: materials/brick, roughness: 0.3 }`.
+Scenes are a tree of objects with components. The engine is **Z-up**, in metres.
 
-## Layout
+```yaml
+format: blender
+scene:
+  scene_name: Hello
+  root_objects:
+    - name: camera
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -10.0, z: 6.0 }
+          rotation: { x: 68.0, y: 0.0, z: 0.0 }
+        - type: Camera
+          main: true
+          fov: 50.0
+    - name: sun
+      components:
+        - type: Transform
+        - type: DirectionalLight
+          direction: { x: -0.35, y: -0.45, z: -0.82 }
+          cast_shadows: true
+    - name: ball
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 4.0 }
+          scale: { x: 0.5, y: 0.5, z: 0.5 }
+        - type: MeshRenderer
+          mesh_path: sphere.000
+          material: { albedo: { r: 0.8, g: 0.3, b: 0.2 }, roughness: 0.4 }
+        - type: SphereCollider
+          radius: 1.0
+        - type: Rigidbody
+          mass: 1.0
+```
+
+The scenes in [`assets/scenes/`](assets/scenes/) are heavily commented and are the best
+reference for every component. Rendering is configured in
+[`assets/config.yaml`](assets/config.yaml), with a comment on every key.
+
+## Testing and headless runs
+
+```bash
+ctest --test-dir build -j4                         # engine + editor suites
+./build/toyengine_tests --list                     # tests and groups
+./build/toyengine_tests --group scene              # one group
+./build/toyengine_editor_tests                     # editor suite
+```
+
+Render tests use a never-mapped window, so a full run is invisible on your desktop. You can
+also script the engine:
+
+```bash
+HEADLESS=1 MAX_FRAMES=600 ./build/toyengine terrain_test   # benchmark, then save output/frame.png
+ONESHOT=1 ./build/toyengine                                # render one frame and exit
+HEADLESS=1 PROFILE=1 MAX_FRAMES=600 ./build/toyengine      # per-feature timings -> output/profile.csv
+```
+
+`FIXED_DT`, `NO_INPUT`, `CAPTURE_FRAMES`, `SCENE` and `CONFIG` make captures reproducible. See
+the docs on `Engine::run()` in [toyengine/core/engine.h](toyengine/core/engine.h).
+
+## Project layout
 
 ```
 toyengine/
-├── core/       Engine, AppConfig, Time
-├── input/      InputMap (named actions over GLFW keys)
-├── loaders/    PixelTextureLoader (NEAREST-filtered texture asset loader)
-├── scene/      CameraController (orbit/fly) + its SceneLoader registration
-├── render/     PixelRenderPipeline, PixelRenderConfig, pixel_math,
-│               InstanceStream, and every pass in render/passes/
-├── world/      Streamed 3D tile terrain built from a mapcoopa world:
-│               TerrainSampler, TileMeshLibrary, the chunk mesher, TerrainSystem
-├── water/      WaterBody (lakes, rivers), Buoyancy, WaterSystem: waves, flow bake, floating
-└── util/       screenshot.h (Vulkan image -> PNG)
-
-editor/         toyengine_editor: app/ (UI, documents, scene sync), core/ (scene document,
-                undo), schema/ (component + settings schemas, inspector), mesh/ (EditMesh,
-                primitives, modelling ops), viewport/ (camera, gizmo, picking), build/ (packager)
-
-libs/           pinned submodules: libcoopa, gfxcoopa, physxcoopa,
-                sfxcoopa, caml, uicoopa, mapcoopa
+├── core/       Engine, AppConfig, caml codec, branding
+├── render/     the render pipeline, its config, profiler, and passes/
+├── scene/      gameplay components: camera controller, movers, cloth & skinned renderers
+├── world/      streamed procedural tile terrain
+└── water/      WaterBody, Buoyancy, WaterSystem
+editor/         toyengine_editor: app, documents & undo, schemas, mesh modelling, viewport, packager
+assets/         config.yaml, scenes, meshes, materials, textures, shaders, fonts
+docs/           hand-written guides (e.g. ambient lighting); docs/images holds these screenshots
+libs/           pinned submodules: libcoopa (scene graph, assets, jobs), gfxcoopa (Vulkan),
+                physxcoopa (physics), sfxcoopa, uicoopa (UI), mapcoopa (world gen), caml
 ```
 
-See each subdirectory's own README for details on that module.
+Each module has its own README with the details.
 
-### Working in `libs/`
+## Platform notes
 
-Each library under `libs/` is **still independently buildable in place** — the
-repos are vendored unmodified, so they keep their usual contract: a repo builds
-standalone as long as the repos it needs sit beside it under a shared parent.
-`libs/` satisfies that exactly as `~/git/` does, since it holds the same set.
-
-```bash
-cd libs/gfxcoopa && cbuild     # works, resolving peers to libs/libcoopa
-cd libs/uicoopa  && cplay      # ditto, demos included
-```
-
-Two things to know when building in there:
-
-- `git submodule add` leaves a submodule on `main`, but `git submodule update`
-  (and a fresh `--recurse-submodules` clone) checks out a **detached HEAD**.
-  Commits made from that state are easy to lose — run
-  `git submodule foreach git checkout main` first, or keep doing library work in
-  your standalone `~/git/<repo>` checkouts.
-- Building writes `.spv`/`.spv.d` next to the shader sources. Most repos gitignore
-  those, but `uicoopa` tracks three depfiles, so building it in place shows up as
-  a modified submodule in `git status`. `git -C libs/uicoopa checkout -- .` clears it.
-
-`libs/uicoopa` **is** part of toyengine's build now, linked as `coopa::ui`. It used to be
-excluded because it used `CMAKE_SOURCE_DIR` for its own include/shader/config paths and
-exposed no consumable target; both are fixed in uicoopa itself, backward-compatibly, so
-building it standalone as above still works exactly as before. Its `uicoopa_shaders` target
-compiles `ui*.vert`/`.frag` into `.spv` next to the sources, and
-[`engine.h`](toyengine/core/engine.h)'s `ShaderLibrary` searches that directory as a third
-root after toyengine's own and gfxcoopa's.
+- **macOS.** Use the plain CMake path; `cbuild`/`cplay` are Linux-only workspace tools.
+  - Plain `cmake -B build` configures a Release build here. Pass `-DCMAKE_BUILD_TYPE=Debug`
+    to get validation layers.
+  - MoltenVK has no MAILBOX present mode, so presentation is always FIFO.
+  - Seeded worlds are byte-identical to Linux. mapcoopa ships its own libstdc++-exact random
+    and sort functions and builds with `-ffp-contract=off`.
+- **SMAA lookup textures** are fetched at configure time unless `SMAA_TEXTURES_DIR` points at
+  a checkout.
+- **Working inside `libs/`.** Each library still builds standalone in place. Submodules check
+  out a detached HEAD, so run `git submodule foreach git checkout main` before committing to
+  one. Building `uicoopa` in place touches three tracked depfiles;
+  `git -C libs/uicoopa checkout -- .` clears them.
 
 ## Documentation
 
-[`docs/`](docs/) holds hand-written guides to specific engine behaviour (e.g.
-[ambient lighting](docs/ambient-lighting.md)). This is separate from `.docs/`,
-the generated HTML API reference built from in-source docstrings via
-`coopadocs build`.
+- Per-module READMEs: [core](toyengine/core/README.md), [render](toyengine/render/README.md),
+  [scene](toyengine/scene/README.md), [world](toyengine/world/README.md),
+  [water](toyengine/water/README.md), [editor](editor/README.md).
+- [`docs/`](docs/) holds hand-written guides to specific engine behaviour.
+- `.docs/` is the generated HTML API reference, built from in-source docstrings with
+  `coopadocs build`.

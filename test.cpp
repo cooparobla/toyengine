@@ -4345,6 +4345,60 @@ void test_engine_edit_mode_freezes_simulation() {
            "a reloaded scene starts from its authored state");
 }
 
+/** @brief Water is visible in the editor: bodies bake (and publish their mesh) in edit mode
+ *         without simulating -- nothing floats, nothing ripples -- in both the rendered view and
+ *         the editor's material-preview shading; entering play mode re-bakes with physics. */
+void test_engine_edit_mode_shows_water() {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016666");
+    ScopedEnv no_input("NO_INPUT", "1");
+    toy::core::EngineOptions opts;
+    opts.edit_mode = true;
+    toy::core::Engine engine(make_test_config("assets/scenes/water_test/scene.yaml", 640, 360, 320, 180), opts);
+    tick_frames(engine, 5);
+
+    auto bodies = engine.scene().get_components<toy::water::WaterBody>();
+    expect(bodies.size() == 2u, "editor water: both water bodies loaded");
+    bool all_visible = !bodies.empty();
+    for (auto* b : bodies) {
+        // On the owner's MeshRenderer, or (a body larger than one render tile) on its tiles.
+        all_visible = all_visible && b->bake_stage == 1 && toy::water::WaterSystem::is_published(*b);
+    }
+    expect(all_visible, "editor water: every body baked and published its mesh in edit mode");
+    auto* water = dynamic_cast<toy::water::WaterSystem*>(engine.scene().find_system("Water"));
+    expect(water && water->ripples().empty(), "editor water: no ripples while editing");
+    const glm::vec3 crate = object_position(engine.scene(), "crate_light");
+
+    // `margin`: how much bluer than red a pixel must be -- the preview modes' studio shading is
+    // far less saturated than the stylized frame.
+    auto count_blue = [](const Frame& f, int margin = 40) {
+        long long n = 0;
+        const size_t pixels = static_cast<size_t>(f.width) * f.height;
+        for (size_t i = 0; i < pixels; ++i) {
+            const uint8_t* px = &f.pixels[i * f.channels];
+            if (px[2] > px[0] + margin && px[2] > 70) ++n;
+        }
+        return n;
+    };
+    const Frame rendered = engine.capture_image(/*low_res=*/true);
+    const long long px = static_cast<long long>(rendered.width) * rendered.height;
+    expect(count_blue(rendered) > px / 20, "editor water: the lake is visible in the rendered view");
+
+    engine.pipeline().render_config_mut().debug_view = "material_preview";
+    tick_frames(engine, 2);
+    const Frame preview = engine.capture_image(true);
+    expect(count_blue(preview, 20) > px / 20, "editor water: ...and in material-preview shading");
+    if (count_blue(preview, 20) <= px / 20) dump_frame(preview, "editor_water_preview");
+    engine.pipeline().render_config_mut().debug_view = "off";
+    expect(glm::distance(object_position(engine.scene(), "crate_light"), crate) < 1e-5f,
+           "editor water: a buoyant crate stays put while editing");
+
+    engine.set_edit_mode(false);
+    tick_frames(engine, 3);
+    bool stage2 = true;
+    for (auto* b : engine.scene().get_components<toy::water::WaterBody>()) stage2 = stage2 && b->bake_stage == 2;
+    expect(stage2, "editor water: entering play mode re-bakes with physics (depth, obstacles)");
+}
+
 /** @brief push_scene() runs a simulating copy over the edit scene; removing it restores the original untouched. */
 void test_engine_push_scene_restores_edit_scene() {
     ScopedEnv fixed_dt("FIXED_DT", "0.016666");
@@ -4806,6 +4860,255 @@ void test_water_underwater_query() {
     expect(!away.underwater && away.body == nullptr, "underwater: a point away from any water is neither");
 }
 
+/** @brief A water object destroyed after the system's update (as the editor's deferred edits
+ *         do) must not be visible to queries once the list is refreshed -- the regression behind
+ *         an intermittent editor crash (Engine queried a freed WaterBody). */
+void test_water_queries_survive_body_destruction() {
+    using namespace water_test_util;
+    BuoyScene bs = make_water_scene();
+    start(bs);
+    run(bs, 0.1f);
+    expect(bs.water->underwater_at(glm::vec3(0.0f, 0.0f, -1.0f)).underwater, "query: underwater before");
+    SceneObject* water_obj = bs.body->owner;
+    bs.scene->remove_root_object(water_obj);   // destroyed now, like an editor rebuild
+    bs.water->refresh_bodies(*bs.scene);
+    const auto info = bs.water->underwater_at(glm::vec3(0.0f, 0.0f, -1.0f));
+    expect(!info.underwater && info.body == nullptr, "query: a destroyed body is gone after refresh_bodies()");
+}
+
+/** @brief The precomputed WaveSet is the same wave sum as the reference evaluate(), and the
+ *         distance fade removes the short waves first and everything far enough away. */
+void test_water_waveset_matches_reference_and_fades() {
+    toy::water::WaveParams w;
+    w.amplitude = 0.4f;
+    w.wavelength = 7.0f;
+    w.direction = 0.6f;
+    w.steepness = 0.8f;
+    const toy::water::WaveSet ws = toy::water::WaveSet::from(w);
+    expect(ws.matches(w), "waveset: built from these params");
+    float worst = 0.0f;
+    for (int i = 0; i < 64; ++i) {
+        const glm::vec2 p(std::sin(i * 1.3f) * 30.0f, std::cos(i * 0.7f) * 30.0f);
+        const float t = 0.21f * static_cast<float>(i);
+        const float atten = 0.25f + 0.75f * static_cast<float>(i % 5) / 4.0f;
+        const auto a = toy::water::evaluate(w, p, t, atten);
+        const auto b = toy::water::evaluate(ws, p, t, atten, 0.0f);
+        worst = std::max({worst, glm::length(a.displacement - b.displacement), glm::length(a.normal - b.normal),
+                          std::fabs(a.crest - b.crest)});
+    }
+    expect(worst < 1e-5f, "waveset: matches the reference sum (worst " + std::to_string(worst) + ")");
+
+    const float shortest = w.wavelength * toy::water::k_wave_length_ratio[toy::water::k_wave_count - 1];
+    const float fs = toy::water::k_wave_fade_start;
+    expect_near(toy::water::wave_distance_fade(shortest, fs * shortest * 0.9f), 1.0f, 1e-6f, "wave fade: none up close");
+    expect_near(toy::water::wave_distance_fade(shortest, fs * shortest * 2.0f), 0.0f, 1e-6f, "wave fade: gone at 2x start");
+    expect(toy::water::wave_distance_fade(shortest, fs * shortest * 1.5f) <
+               toy::water::wave_distance_fade(w.wavelength, fs * shortest * 1.5f),
+           "wave fade: short waves fade before long ones");
+    const auto far = toy::water::evaluate(ws, glm::vec2(3.0f), 1.0f, 1.0f, 2.0f * fs * w.wavelength + 1.0f);
+    expect(glm::length(far.displacement) < 1e-7f, "wave fade: nothing moves beyond every wave's fade");
+
+    // The CPU query applies the same fade given a focus.
+    toy::water::WaterSurfaceQuery q;
+    std::vector<toy::water::WaterVertex> v(4);
+    v[0].position = {-50.0f, -50.0f, 0.0f};
+    v[1].position = {50.0f, -50.0f, 0.0f};
+    v[2].position = {50.0f, 50.0f, 0.0f};
+    v[3].position = {-50.0f, 50.0f, 0.0f};
+    for (auto& x : v) x.depth = 100.0f;
+    q.build(v, {0, 1, 2, 0, 2, 3});
+    toy::water::WaveQueryOptions far_opt;
+    far_opt.has_focus = true;
+    far_opt.focus = glm::vec3(0.0f, 0.0f, 2.0f * fs * w.wavelength + 10.0f);
+    toy::water::WaterSample s_near, s_far;
+    expect(q.sample(glm::vec2(1.0f), ws, 0.5f, s_near) && q.sample(glm::vec2(1.0f), ws, 0.5f, s_far, far_opt),
+           "water query: samples with and without a focus");
+    expect(std::fabs(s_near.surface_height) > 1e-3f && std::fabs(s_far.surface_height) < 1e-6f,
+           "water query: far from the focus the waves have faded, as on the GPU");
+}
+
+/** @brief Quality tiers order sensibly, and High is the shipped defaults. */
+void test_water_quality_presets_expand() {
+    using toy::water::WaterQuality;
+    using toy::water::WaterSettings;
+    const WaterSettings lo = WaterSettings::from_quality(WaterQuality::Low);
+    const WaterSettings me = WaterSettings::from_quality(WaterQuality::Medium);
+    const WaterSettings hi = WaterSettings::from_quality(WaterQuality::High);
+    const WaterSettings ul = WaterSettings::from_quality(WaterQuality::Ultra);
+    const WaterSettings def;
+    expect(hi.sim_radius == def.sim_radius && hi.max_ripples == def.max_ripples &&
+               hi.grid_density == def.grid_density && hi.detail_distance == def.detail_distance,
+           "water quality: high == the defaults");
+    expect(lo.sim_radius < me.sim_radius && me.sim_radius < hi.sim_radius && hi.sim_radius < ul.sim_radius,
+           "water quality: simulation range grows with the tier");
+    expect(lo.max_ripples < me.max_ripples && me.max_ripples < hi.max_ripples && hi.max_ripples <= ul.max_ripples &&
+               ul.max_ripples <= toy::water::WaterSystem::k_max_ripples,
+           "water quality: ripple cap grows with the tier, within the renderer's limit");
+    expect(lo.grid_density < me.grid_density && me.grid_density <= hi.grid_density,
+           "water quality: grid density grows with the tier");
+    expect(lo.lod_bias > hi.lod_bias && ul.lod_bias < hi.lod_bias, "water quality: low coarsens LODs sooner, ultra later");
+    expect(lo.detail_distance < ul.detail_distance && lo.ripple_layers <= ul.ripple_layers,
+           "water quality: shader detail grows with the tier");
+    expect(toy::core::parse_render_quality("medium") == toy::render::RenderQuality::Medium,
+           "water quality: config tier strings parse");
+}
+
+/** @brief A floater outside the simulation range is frozen -- but one that is awake out there
+ *         (dropped in) floats at its density ratio rather than sinking, then goes to sleep. */
+void test_buoyancy_far_floater_freezes_and_does_not_sink() {
+    using namespace water_test_util;
+    BuoyScene bs = make_water_scene();
+    SceneObject* slab = add_box(bs, "far_slab", glm::vec3(0.0f, 0.0f, 1.0f), glm::vec3(2.0f, 2.0f, 0.5f), 1000.0f);
+    start(bs);
+    bs.water->set_focus(glm::vec3(1000.0f, 0.0f, 0.0f));
+    run(bs, 10.0f);
+    auto* b = slab->get_component<toy::water::Buoyancy>();
+    auto* rb = slab->get_component<coopa::physx::components::RigidbodyComponent>();
+    expect(!b->simulated, "frozen floater: 1 km away is outside the simulation range");
+    expect(bs.water->active_buoyant_count() == 0u, "frozen floater: ...so full buoyancy skips it");
+    expect_near(com_of(slab).z, 0.0f, 0.08f, "frozen floater: ...yet it floats at its waterline (z " +
+                                                  std::to_string(com_of(slab).z) + ")");
+    expect(b->in_water && b->submerged_fraction > 0.4f && b->submerged_fraction < 0.6f,
+           "frozen floater: ...half submerged, like a simulated one");
+    expect(rb->is_sleeping(), "frozen floater: ...and is put to sleep once settled");
+
+    // Back in range: full buoyancy again, and it stays where it is on calm water.
+    const glm::vec3 before = com_of(slab);
+    bs.water->set_focus(glm::vec3(10.0f, 0.0f, 0.0f));
+    run(bs, 2.0f);
+    expect(b->simulated, "frozen floater: simulated again once the focus comes near");
+    expect(glm::distance(com_of(slab), before) < 0.05f, "frozen floater: ...without a jump");
+}
+
+/** @brief The simulation range has hysteresis: in at r, out only past r * hysteresis. */
+void test_buoyancy_sim_range_hysteresis() {
+    using namespace water_test_util;
+    BuoyScene bs = make_water_scene();
+    SceneObject* box = add_box(bs, "box", glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(1.0f), 400.0f);
+    start(bs);
+    const float r = bs.water->settings().sim_radius;
+    const float mid = r * (1.0f + 0.5f * (bs.water->settings().sim_hysteresis - 1.0f)) + 1.0f;
+    auto* b = box->get_component<toy::water::Buoyancy>();
+    auto at = [&](float d) {
+        bs.water->set_focus(glm::vec3(d, 0.0f, 0.0f));
+        run(bs, 2.0f / 60.0f);
+        return b->simulated;
+    };
+    expect(at(r * 0.5f), "sim range: well inside is simulated");
+    expect(at(mid), "sim range: between r and r * hysteresis stays simulated");
+    expect(!at(r * 2.0f), "sim range: far outside is frozen");
+    expect(!at(mid), "sim range: coming back between r and r * hysteresis stays frozen");
+    expect(at(r * 0.5f), "sim range: inside again is simulated");
+}
+
+/** @brief The expensive physics-aware bake waits until the body is in range. */
+void test_water_stage2_bake_deferred_until_in_range() {
+    using namespace water_test_util;
+    BuoyScene bs = make_water_scene();
+    add_box(bs, "box", glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(1.0f), 400.0f);
+    start(bs);
+    bs.water->set_focus(glm::vec3(5000.0f, 0.0f, 0.0f));
+    run(bs, 0.2f);
+    expect(bs.body->baked && bs.body->bake_stage == 1, "deferred bake: out of range it stays at stage 1");
+    bs.water->set_focus(glm::vec3(0.0f, 0.0f, 10.0f));
+    run(bs, 2.0f / 60.0f);
+    expect(bs.body->bake_stage == 2, "deferred bake: in range it bakes with physics");
+}
+
+/** @brief The ripple cap follows the tier, and bodies beyond the ripple range ring nothing. */
+void test_water_ripples_capped_and_ranged() {
+    using namespace water_test_util;
+    BuoyScene bs = make_water_scene();
+    add_box(bs, "drop", glm::vec3(-6.0f, 0.0f, 3.0f), glm::vec3(1.0f), 300.0f);
+    start(bs);
+    bs.water->set_settings(toy::water::WaterSettings::from_quality(toy::water::WaterQuality::Low));
+    bs.water->set_focus(glm::vec3(-6.0f, 0.0f, 0.0f) + glm::vec3(bs.water->settings().ripple_range + 20.0f, 0.0f, 0.0f));
+    run(bs, 1.5f);
+    expect(bs.water->ripples().empty(), "ripples: a splash beyond the ripple range rings nothing");
+    for (int i = 0; i < 40; ++i) bs.water->emit_ripple(glm::vec2(static_cast<float>(i) * 0.1f, 0.0f), 0.5f, 0.5f);
+    expect(bs.water->ripples().size() == bs.water->settings().max_ripples,
+           "ripples: live rings are capped at the tier's maximum (" + std::to_string(bs.water->ripples().size()) + ")");
+    expect(std::fabs(bs.water->ripples().back().position.x - 3.9f) < 1e-4f, "ripples: ...keeping the newest");
+}
+
+/** @brief Render tiles cover the surface exactly; every LOD is a subset of LOD 0, wound +Z,
+ *         with LOD switch sizes decreasing; a mesh tiling keeps every triangle once. */
+void test_water_tiles_cover_surface() {
+    using coopa::gfx::engine::data::Vertex;
+    const int res = 40;
+    const float size = 40.0f;
+    std::vector<Vertex> verts;
+    for (int y = 0; y <= res; ++y)
+        for (int x = 0; x <= res; ++x) {
+            Vertex v{};
+            v.position = glm::vec3(-size * 0.5f + size * x / res, -size * 0.5f + size * y / res, 0.0f);
+            v.normal = glm::vec3(0.0f, 0.0f, 1.0f);
+            v.uv = glm::vec2(static_cast<float>(x), static_cast<float>(y)); // identifies the grid vertex
+            verts.push_back(v);
+        }
+    toy::water::WaterTileLodParams lod;
+    lod.wave_lambdas[0] = 6.0f;
+    lod.wave_amps[0] = 0.5f;
+    lod.wave_lambdas[3] = 1.4f;
+    lod.wave_amps[3] = 0.02f;
+    const auto tiles = toy::water::build_grid_tiles(verts, res, res, 16, size / res, lod, glm::vec3(0.1f));
+    expect(tiles.size() == 9u, "water tiles: a 40-quad grid in 16-quad tiles is 3 x 3 (" + std::to_string(tiles.size()) + ")");
+    std::size_t tris = 0;
+    bool subset = true, up = true, decreasing = true, chains = true;
+    for (const auto& t : tiles) {
+        const auto& d = t.data;
+        chains = chains && !d.lods.empty();
+        if (d.lods.empty()) continue;
+        tris += d.lods[0].index_count / 3;
+        for (std::size_t k = 0; k < d.lods.size(); ++k) {
+            const auto& l = d.lods[k];
+            if (k >= 2) decreasing = decreasing && l.screen_size < d.lods[k - 1].screen_size;
+            for (uint32_t i = l.first_index; i + 2 < l.first_index + l.index_count; i += 3) {
+                const glm::vec3 a = d.vertices[l.vertex_offset + d.indices[i]].position;
+                const glm::vec3 b = d.vertices[l.vertex_offset + d.indices[i + 1]].position;
+                const glm::vec3 c = d.vertices[l.vertex_offset + d.indices[i + 2]].position;
+                up = up && glm::cross(b - a, c - a).z > 0.0f;
+            }
+            for (int32_t v = l.vertex_offset; v < static_cast<int32_t>(d.vertices.size()); ++v) {
+                const glm::vec2 g = d.vertices[v].uv;
+                const Vertex& src = verts[static_cast<std::size_t>(g.y) * (res + 1) + static_cast<std::size_t>(g.x)];
+                subset = subset && glm::distance(src.position, d.vertices[v].position) < 1e-6f;
+            }
+        }
+        chains = chains && d.lods.size() >= 2;
+    }
+    expect(chains, "water tiles: every grid tile carries a LOD chain");
+    expect(tris == static_cast<std::size_t>(res * res * 2), "water tiles: LOD 0 tiles cover the grid exactly once");
+    expect(subset, "water tiles: every LOD vertex is a LOD 0 vertex (baked attributes carry over)");
+    expect(up, "water tiles: every triangle faces +Z");
+    expect(decreasing, "water tiles: coarser LODs switch in at smaller screen sizes");
+    const float d4 = toy::water::water_lod_distance(4.0f, lod);
+    toy::water::WaterTileLodParams calm;
+    expect(toy::water::water_lod_crack(4.0f, d4, lod) <= 0.5f * toy::water::k_pixel_angle * d4 + 1e-6f,
+           "water tiles: a coarse LOD waits until its T-junction gaps are under half a pixel");
+    expect(d4 > toy::water::water_lod_distance(4.0f, calm),
+           "water tiles: ...which waves push further out than calm water");
+
+    // An arbitrary mesh: bucketed by centroid, every triangle exactly once, simplified LODs.
+    std::vector<uint32_t> idx;
+    for (int y = 0; y < res; ++y)
+        for (int x = 0; x < res; ++x) {
+            uint32_t i0 = static_cast<uint32_t>(y * (res + 1) + x), i1 = i0 + 1, i2 = i0 + res + 1, i3 = i2 + 1;
+            idx.insert(idx.end(), {i0, i1, i3, i0, i3, i2});
+        }
+    const auto mtiles = toy::water::build_mesh_tiles(verts, idx, 16.0f, glm::vec3(0.1f), &lod);
+    std::size_t mtris = 0;
+    bool fewer = true;
+    for (const auto& t : mtiles) {
+        const auto& d = t.data;
+        mtris += (d.lods.empty() ? d.indices.size() : d.lods[0].index_count) / 3;
+        for (std::size_t k = 1; k < d.lods.size(); ++k) fewer = fewer && d.lods[k].index_count < d.lods[k - 1].index_count;
+    }
+    expect(mtiles.size() == 9u, "water tiles: a mesh is bucketed into tile squares");
+    expect(mtris == idx.size() / 3, "water tiles: ...keeping every triangle exactly once");
+    expect(fewer, "water tiles: ...with simplified LODs that shrink");
+}
+
 /** @brief The whole scene: water draws, floaters float, the river delivers its crates. */
 void test_water_scene_renders_and_simulates() {
     ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
@@ -4900,6 +5203,53 @@ void test_underwater_scene_renders_and_toggles() {
     if (!(c_below.g > c_below.r * 1.4f)) dump_frame(below, "underwater_below");
 }
 
+/** @brief water_quality switches live: every tier re-bakes and draws the lake (as several LOD'd
+ *         tiles), Low at a coarser grid than High, with the tier's shader detail handed over. */
+void test_water_scene_quality_tiers_render() {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
+    ScopedEnv no_input("NO_INPUT", "1");
+    toy::core::Engine engine(make_test_config("assets/scenes/water_test/scene.yaml", 640, 360, 320, 180));
+    tick_frames(engine, 3);
+    using toy::render::RenderQuality;
+    std::size_t high_verts = 0, low_verts = 0;
+    for (RenderQuality q : {RenderQuality::High, RenderQuality::Low, RenderQuality::Medium, RenderQuality::Ultra}) {
+        engine.render_config().water_quality = q;
+        tick_frames(engine, 4);
+        const std::string tier = std::to_string(static_cast<int>(q));
+        auto* water = dynamic_cast<toy::water::WaterSystem*>(engine.scene().find_system("Water"));
+        expect(water && static_cast<int>(water->settings().quality) == static_cast<int>(q),
+               "water tiers: the system runs tier " + tier);
+        const toy::water::WaterBody* lake = nullptr;
+        bool published = true;
+        for (auto* b : engine.scene().get_components<toy::water::WaterBody>()) {
+            published = published && toy::water::WaterSystem::is_published(*b);
+            if (b->mode == toy::water::WaterMode::Planar) lake = b;
+        }
+        expect(published, "water tiers: every body published at tier " + tier);
+        if (lake && q == RenderQuality::High) {
+            high_verts = lake->query.vertices().size();
+            expect(lake->tiles.size() > 1u, "water tiers: the 46 m lake is drawn as several tiles (" +
+                                                std::to_string(lake->tiles.size()) + ")");
+        }
+        if (lake && q == RenderQuality::Low) low_verts = lake->query.vertices().size();
+        expect(engine.pipeline().water_state().ripple_layers == water->settings().ripple_layers &&
+                   engine.pipeline().water_state().ripples.size() <= water->settings().max_ripples,
+               "water tiers: the tier's shader detail and ring cap reach the renderer");
+
+        const Frame frame = engine.capture_image(/*low_res=*/true);
+        long long watery = 0;
+        const size_t pixels = static_cast<size_t>(frame.width) * frame.height;
+        for (size_t i = 0; i < pixels; ++i) {
+            const uint8_t* px = &frame.pixels[i * frame.channels];
+            if (px[2] > px[0] + 40 && px[2] > 90) ++watery;
+        }
+        expect(watery > static_cast<long long>(pixels / 20), "water tiers: the lake draws at tier " + tier);
+        if (watery <= static_cast<long long>(pixels / 20)) dump_frame(frame, "water_tier_" + tier);
+    }
+    expect(low_verts > 0 && low_verts < high_verts, "water tiers: low bakes a coarser grid than high (" +
+                                                        std::to_string(low_verts) + " vs " + std::to_string(high_verts) + ")");
+}
+
 /** @brief One registered test: its name (also its filter key), its group, and its body. */
 struct TestCase {
     const char* name;
@@ -4930,6 +5280,7 @@ const TestCase kTests[] = {
 
     // --- editor_host: Engine embedding (edit/play mode, scene push, display region) ---
     {"engine_edit_mode_freezes_simulation",        "editor_host", test_engine_edit_mode_freezes_simulation},
+    {"engine_edit_mode_shows_water",               "editor_host", test_engine_edit_mode_shows_water},
     {"engine_push_scene_restores_edit_scene",      "editor_host", test_engine_push_scene_restores_edit_scene},
     {"engine_display_region_and_viewport_ray",     "editor_host", test_engine_display_region_and_viewport_ray},
 
@@ -5036,6 +5387,14 @@ const TestCase kTests[] = {
     {"buoyancy_carried_downstream_by_flow",        "water", test_buoyancy_carried_downstream_by_flow},
     {"water_ripples_splash_wake_rest",             "water", test_water_ripples_from_splash_wake_and_rest},
     {"water_underwater_query",                     "water", test_water_underwater_query},
+    {"water_queries_survive_body_destruction",     "water", test_water_queries_survive_body_destruction},
+    {"water_waveset_matches_reference_and_fades",  "water", test_water_waveset_matches_reference_and_fades},
+    {"water_quality_presets_expand",               "water", test_water_quality_presets_expand},
+    {"buoyancy_far_floater_freezes_and_does_not_sink", "water", test_buoyancy_far_floater_freezes_and_does_not_sink},
+    {"buoyancy_sim_range_hysteresis",              "water", test_buoyancy_sim_range_hysteresis},
+    {"water_stage2_bake_deferred_until_in_range",  "water", test_water_stage2_bake_deferred_until_in_range},
+    {"water_ripples_capped_and_ranged",            "water", test_water_ripples_capped_and_ranged},
+    {"water_tiles_cover_surface",                  "water", test_water_tiles_cover_surface},
 
     // --- render_*: one Vulkan device each ---
     {"terrain_streams_chunks_around_camera",       "render_terrain",  test_terrain_streams_chunks_around_the_camera},
@@ -5049,6 +5408,7 @@ const TestCase kTests[] = {
     {"cloth_scene_simulates_and_animates",         "render_cloth",    test_cloth_scene_simulates_and_animates},
     {"water_scene_renders_and_simulates",          "render_water",    test_water_scene_renders_and_simulates},
     {"underwater_scene_renders_and_toggles",       "render_water",    test_underwater_scene_renders_and_toggles},
+    {"water_scene_quality_tiers_render",           "render_water",    test_water_scene_quality_tiers_render},
     // TEMPORARY (round-8b shimmer diagnosis) -- run via `toyengine_tests ssao_travel_probe`,
     // removed once the cause is pinned. Not in any ctest group.
     {"ssao_travel_probe",                          "probe",           test_ssao_travel_probe},

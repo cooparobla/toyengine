@@ -34,8 +34,21 @@ float water_depth_attenuation(float depth, float wavelength) {
     return 0.25 + 0.75 * t;
 }
 
-/// Sum of the derived Gerstner waves at undisplaced world XY `p`. C++: evaluate().
-WaterWave water_gerstner(vec4 base, vec2 p, float t, float atten) {
+/// A derived wave fades over [START, 2 * START] wavelengths from the camera, the shortest first:
+/// waves a few pixels long only alias, and coarse water LODs cannot carry them.
+/// C++: k_wave_fade_start.
+const float WATER_WAVE_FADE_START = 100.0;
+
+/// C++: wave_distance_fade().
+float water_wave_distance_fade(float lambda, float distance) {
+    float a = WATER_WAVE_FADE_START * lambda;
+    float t = clamp((distance - a) / a, 0.0, 1.0);
+    return 1.0 - t * t * (3.0 - 2.0 * t);
+}
+
+/// Sum of the derived Gerstner waves at undisplaced world XY `p`, seen from `distance` metres
+/// (0 = no fade). C++: evaluate(const WaveSet&, ...).
+WaterWave water_gerstner(vec4 base, vec2 p, float t, float atten, float distance) {
     WaterWave w;
     w.displacement = vec3(0.0);
     w.normal = vec3(0.0, 0.0, 1.0);
@@ -47,22 +60,26 @@ WaterWave water_gerstner(vec4 base, vec2 p, float t, float atten) {
     float crest = 0.0;
     for (int i = 0; i < WATER_WAVE_COUNT; ++i) {
         float lambda = wavelength * WATER_WAVE_LENGTH_RATIO[i];
-        float amp    = amplitude * WATER_WAVE_AMP_RATIO[i] * atten;
+        float fade   = water_wave_distance_fade(lambda, distance);
+        if (fade <= 0.0) continue;
+        float amp    = amplitude * WATER_WAVE_AMP_RATIO[i] * atten * fade;
         float angle  = direction + WATER_WAVE_ANGLE_OFFSET[i];
         vec2  d      = vec2(cos(angle), sin(angle));
         float k      = WATER_TWO_PI / lambda;
         float omega  = sqrt(WATER_GRAVITY * k);
-        float q      = amp > 1e-6 ? q_total / (k * amp * float(WATER_WAVE_COUNT)) : 0.0;
+        // q * amp == q_total / (k N), independent of the depth attenuation; the distance fade
+        // scales it too, so a faded wave vanishes horizontally as well.
+        float qa     = amp > 1e-6 ? q_total / (k * float(WATER_WAVE_COUNT)) * fade : 0.0;
         float f      = k * dot(d, p) - omega * t + WATER_WAVE_PHASE_OFFSET[i];
         float c = cos(f), s = sin(f);
-        w.displacement.x += q * amp * d.x * c;
-        w.displacement.y += q * amp * d.y * c;
+        w.displacement.x += qa * d.x * c;
+        w.displacement.y += qa * d.y * c;
         w.displacement.z += amp * s;
         float wa = k * amp;
         n_acc.x += d.x * wa * c;
         n_acc.y += d.y * wa * c;
-        n_acc.z += q * wa * s;
-        crest   += q * wa * s;
+        n_acc.z += qa * k * s;
+        crest   += qa * k * s;
     }
     w.normal = normalize(vec3(-n_acc.x, -n_acc.y, 1.0 - n_acc.z));
     w.crest  = clamp(crest, 0.0, 1.0);

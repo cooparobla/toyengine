@@ -15,6 +15,15 @@
  *
  * Waves are attenuated by water depth (`depth_attenuation()`): a vertex's baked depth (see
  * WaterSystem) calms the surface toward the shore, and the CPU query applies the identical factor.
+ *
+ * Each derived wave also fades out with distance from the camera (`wave_distance_fade()`), the
+ * shortest first: a wave a few pixels long only aliases, and the coarse LODs of a tiled water
+ * mesh (water_tiles.h) cannot carry it. The GPU measures from the camera; the CPU from
+ * WaterSystem's focus point (the main camera), so the two still agree wherever anything floats.
+ *
+ * Hot paths use a WaveSet: the per-wave constants (direction, wavenumber, frequency, crest
+ * factor) precomputed once per body instead of on every evaluation. evaluate(WaveParams, ...)
+ * is the same math without the cache.
  */
 
 #ifndef TOYENGINE_WATER_WATER_WAVES_H
@@ -72,9 +81,104 @@ inline float depth_attenuation(float depth, float wavelength) {
     return 0.25f + 0.75f * t;
 }
 
+/// A derived wave fades over [k_wave_fade_start, 2 * k_wave_fade_start] wavelengths from the
+/// camera: at 1080p and a 60-degree field of view, from ~10 to ~5 pixels per wavelength.
+/// GLSL: WATER_WAVE_FADE_START.
+inline constexpr float k_wave_fade_start = 100.0f;
+
+/**
+ * @brief Distance fade of a derived wave of wavelength `lambda` seen from `distance` metres:
+ *        1 near, 0 beyond 2 * k_wave_fade_start wavelengths. GLSL: water_wave_distance_fade().
+ */
+inline float wave_distance_fade(float lambda, float distance) {
+    const float a = k_wave_fade_start * lambda;
+    float t = glm::clamp((distance - a) / a, 0.0f, 1.0f);
+    return 1.0f - t * t * (3.0f - 2.0f * t);
+}
+
+/**
+ * @struct WaveSet
+ * @brief A WaveParams with every per-wave constant precomputed -- what the CPU hot paths
+ *        (buoyancy, surface queries) evaluate. Build with WaveSet::from().
+ */
+struct WaveSet {
+    struct Wave {
+        glm::vec2 d{1.0f, 0.0f}; ///< Unit travel direction.
+        float lambda = 1.0f;     ///< Wavelength (m).
+        float k = 0.0f;          ///< Wavenumber 2 pi / lambda.
+        float omega = 0.0f;      ///< sqrt(g k).
+        float phase = 0.0f;
+        float amp = 0.0f;        ///< Undamped amplitude (before depth attenuation and fade).
+        float qa = 0.0f;         ///< q * amp == q_total / (k N): independent of the attenuation.
+    };
+    Wave      waves[k_wave_count];
+    glm::vec4 key{-1.0f};        ///< The WaveParams::pack() this was built from.
+    bool      calm = true;
+
+    static WaveSet from(const WaveParams& w) {
+        WaveSet ws;
+        ws.key  = w.pack();
+        ws.calm = w.calm();
+        if (ws.calm) return ws;
+        const float q_total = glm::clamp(w.steepness, 0.0f, 1.0f);
+        for (int i = 0; i < k_wave_count; ++i) {
+            Wave& v = ws.waves[i];
+            const float angle = w.direction + k_wave_angle_offset[i];
+            v.d      = glm::vec2(std::cos(angle), std::sin(angle));
+            v.lambda = w.wavelength * k_wave_length_ratio[i];
+            v.k      = k_two_pi / v.lambda;
+            v.omega  = std::sqrt(k_gravity * v.k);
+            v.phase  = k_wave_phase_offset[i];
+            v.amp    = w.amplitude * k_wave_amp_ratio[i];
+            v.qa     = q_total / (v.k * static_cast<float>(k_wave_count));
+        }
+        return ws;
+    }
+
+    /** @brief Whether this set was built from `w` (cheap staleness check for a cached set). */
+    bool matches(const WaveParams& w) const { return key == w.pack(); }
+};
+
+/**
+ * @brief evaluate() over a precomputed WaveSet. `distance` is the undisplaced point's distance
+ *        from the camera / focus, for wave_distance_fade(); 0 = no fade.
+ *        GLSL: water_gerstner().
+ */
+inline WaveSample evaluate(const WaveSet& ws, const glm::vec2& p, float t, float atten = 1.0f,
+                           float distance = 0.0f) {
+    WaveSample out;
+    if (ws.calm) return out;
+    glm::vec3 n_acc(0.0f);
+    float crest = 0.0f;
+    for (int i = 0; i < k_wave_count; ++i) {
+        const WaveSet::Wave& v = ws.waves[i];
+        const float fade = wave_distance_fade(v.lambda, distance);
+        if (fade <= 0.0f) continue;
+        const float amp = v.amp * atten * fade;
+        // Per-wave Q so the SUM of Q_i*k_i*A_i never exceeds q_total -- the no-loop condition.
+        // q * amp is independent of the depth attenuation; the distance fade scales it too, so a
+        // faded wave vanishes entirely, horizontally as well.
+        const float qa = amp > 1e-6f ? v.qa * fade : 0.0f;
+        const float f  = v.k * glm::dot(v.d, p) - v.omega * t + v.phase;
+        const float c = std::cos(f), s = std::sin(f);
+        out.displacement.x += qa * v.d.x * c;
+        out.displacement.y += qa * v.d.y * c;
+        out.displacement.z += amp * s;
+        const float wa = v.k * amp;
+        n_acc.x += v.d.x * wa * c;
+        n_acc.y += v.d.y * wa * c;
+        n_acc.z += qa * v.k * s;
+        crest   += qa * v.k * s;
+    }
+    out.normal = glm::normalize(glm::vec3(-n_acc.x, -n_acc.y, 1.0f - n_acc.z));
+    out.crest  = glm::clamp(crest, 0.0f, 1.0f);
+    return out;
+}
+
 /**
  * @brief Sum of k_wave_count Gerstner waves at undisplaced world XY `p`, time `t`, scaled by
- *        `atten` (depth_attenuation()). GLSL: water_gerstner().
+ *        `atten` (depth_attenuation()). The uncached reference form of evaluate(WaveSet, ...),
+ *        without the distance fade. GLSL: water_gerstner().
  */
 inline WaveSample evaluate(const WaveParams& w, const glm::vec2& p, float t, float atten = 1.0f) {
     WaveSample out;

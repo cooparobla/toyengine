@@ -121,6 +121,7 @@ render:
   dof_quality:         high  # bokeh gather taps (ultra = high: shader cap)
   volumetrics_quality: high  # raymarch step count + how many lights in-scatter (they multiply)
   sdf_quality:         high  # SDF march + SDF shadow-march step budgets
+  water_quality:       high  # buoyancy/ripple range, water mesh density + LOD, shader detail (live)
 
   # =========================================================================
   # Per-feature settings

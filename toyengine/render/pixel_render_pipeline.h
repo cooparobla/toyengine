@@ -4600,6 +4600,13 @@ private:
             pc.albedo    = glm::vec4(mr_mat.albedo, mr_mat.alpha);
             pc.metallic  = mr_mat.metallic;
             pc.roughness = mr_mat.roughness;
+            if (mr_mat.shader == "water") {
+                // Real water is a near-mirror at low opacity: under the preview modes' studio
+                // lighting it reads as a white sheet. Give it enough body and roughness that its
+                // own colour shows -- these modes are for seeing what is where, not for the look.
+                pc.albedo.a  = std::max(pc.albedo.a, 0.75f);
+                pc.roughness = std::max(pc.roughness, 0.45f);
+            }
             pc.ao        = mr_mat.ao;
             pc.view      = glm::vec4(mode, 0.0f, 0.0f, 0.0f);
             pc.emissive  = mr_mat.gpu_emissive();
@@ -4640,7 +4647,8 @@ private:
             g.water_ripples[2 * n]     = glm::vec4(rs[i].position, rs[i].age, rs[i].strength);
             g.water_ripples[2 * n + 1] = glm::vec4(rs[i].radius, 0.0f, 0.0f, 0.0f);
         }
-        g.water_ripple_info = glm::vec4(static_cast<float>(n), 0.0f, 0.0f, 0.0f);
+        g.water_ripple_info = glm::vec4(static_cast<float>(n), static_cast<float>(water_state_.ripple_layers),
+                                        water_state_.detail_distance, water_state_.ripple_range);
     }
 
     /// Draws every BLEND-material renderer AND every BLEND SdfRenderer, back-to-front by squared

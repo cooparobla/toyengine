@@ -18,8 +18,22 @@ Properties (tabs depend on the asset type).
 | Material | lookdev scene (a shader ball by default -- curves, a cutaway with flat hard-edged walls, a square chamfered plinth -- or sphere / rounded cube / plane / cylinder; ground, key / fill / rim + environment, turntable) | the material editor |
 | Texture | the image on a plane (a texture editor is a TODO) | info |
 
-Edit / Sculpt Mode on a scene or object's MeshRenderer edits the **mesh asset itself**
-(every object using it follows; Ctrl+S saves it).
+Edit / Sculpt Mode on a scene object edits the **mesh asset itself**: its MeshRenderer's mesh,
+or, for a water object, its WaterBody's.
+- **Who follows the edit:** every object using that mesh, live, including outlines and water.
+- **Saving:** the mesh is saved automatically when you leave the mode. Ctrl+S also saves. A mesh
+  opened as an asset tab saves on Ctrl+S only.
+- **Refresh on save:** every asset built from the file reloads at once (render meshes,
+  MeshColliders, water sources).
+
+Undo:
+- **In Edit / Sculpt Mode,** Ctrl+Z steps through that mesh's own history.
+- **In Object Mode,** Ctrl+Z is one timeline across the scene and every mesh edited from it,
+  newest first. A mesh step undone there is applied live and saved.
+- **Each mesh keeps its history** when you switch to another one: the 8 most recent mesh
+  histories are kept and resumed if the file is unchanged.
+- **Depth:** a history holds up to 200 steps, trimmed to ~384 MB of snapshots for dense meshes,
+  never below 16.
 
 ## How it is put together
 

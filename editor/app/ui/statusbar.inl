@@ -16,6 +16,14 @@
         } else if (in_sculpt_mode_()) {
             hints = {{I::MouseLeft, "Sculpt"}, {I::Keyboard, "Ctrl  Invert"}, {I::Keyboard, "Shift  Smooth"}, {I::Keyboard, "F  Radius"},
                      {I::Keyboard, "Shift F  Strength"}, {I::MouseMiddle, "Rotate View"}, {I::Keyboard, "Tab  Object Mode"}};
+        } else if (in_paint_mode_()) {
+            if (in_weight_paint_()) {
+                hints = {{I::MouseLeft, "Paint Weight"}, {I::Keyboard, "Ctrl  Subtract"}, {I::Keyboard, "Shift  Blur"},
+                         {I::Keyboard, "S  Sample"}, {I::Keyboard, "F  Radius"}, {I::Keyboard, "Shift F  Strength"}, {I::Keyboard, "Tab  Object Mode"}};
+            } else {
+                hints = {{I::MouseLeft, "Paint"}, {I::Keyboard, "Ctrl  Secondary"}, {I::Keyboard, "Shift  Blur"}, {I::Keyboard, "X  Swap Colors"},
+                         {I::Keyboard, "S  Sample"}, {I::Keyboard, "F  Radius"}, {I::Keyboard, "Tab  Object Mode"}};
+            }
         } else if (loopcut_.active) {
             hints = {{I::MouseLeft, "Cut and Slide"}, {I::MouseMiddle, "Cuts (wheel)"}, {I::MouseRight, "Cancel"}, {I::Keyboard, "1-9  Cuts"}};
         } else if (mesh_edit_view_()) {
@@ -59,7 +67,7 @@
     /** @brief "Scene | Objects 1/4 | Verts 8 | Faces 6 | Tris 12" (edit mode: selected/total). */
     std::string scene_stats_() {
         char buf[200];
-        if (in_sculpt_mode_() && mesh_.open()) {
+        if (in_brush_mode_() && mesh_.open()) {
             const auto& m = mesh_.mesh;
             std::snprintf(buf, sizeof(buf), "%s  |  Verts %zu  |  Faces %zu  |  Tris %zu", mesh_.name.c_str(), m.positions.size(),
                           m.faces.size(), m.triangle_count());

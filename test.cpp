@@ -5250,6 +5250,151 @@ void test_water_scene_quality_tiers_render() {
                                                         std::to_string(low_verts) + " vs " + std::to_string(high_verts) + ")");
 }
 
+// =====================================================================================
+// Group "rig" -- rigs as object hierarchies: quaternion clips and vertex-group skinning
+// =====================================================================================
+
+/** @brief A clip file's rotation_quat track drives a bone of an object hierarchy (nlerp), and
+ *         a position track a deeper one, both addressed by paths under the Animator's object. */
+void test_rig_clip_drives_hierarchy() {
+    auto scene = std::make_unique<Scene>("rig_cpu");
+    auto root = std::make_unique<SceneObject>("Rig");
+    root->add_component<TransformComponent>();
+    auto* animator = root->add_component<coopa::anim::Animator>();
+    auto arm = std::make_unique<SceneObject>("Arm");
+    arm->add_component<TransformComponent>();
+    auto hand = std::make_unique<SceneObject>("Hand");
+    hand->add_component<TransformComponent>()->transform().set_position(glm::vec3(1, 0, 0));
+    SceneObject* hand_raw = hand.get();
+    SceneObject* arm_raw = arm->add_child(std::move(hand)) ? arm.get() : nullptr;
+    arm_raw->get_transform();
+    hand_raw->get_transform()->set_parent_transform(&arm_raw->get_transform()->transform());
+    root->add_child(std::move(arm));
+    arm_raw->get_transform()->set_parent_transform(&root->get_transform()->transform());
+    SceneObject* root_raw = root.get();
+    scene->add_root_object(std::move(root));
+
+    const float s = std::sqrt(0.5f);
+    const fkyaml::node clip_yaml = fkyaml::node::deserialize(std::string(
+        "clip:\n"
+        "  name: wave\n"
+        "  wrap: loop\n"
+        "  length: 1.0\n"
+        "  tracks:\n"
+        "    - object: Arm\n"
+        "      property: rotation_quat\n"
+        "      keys:\n"
+        "        - {time: 0.0, value: [0, 0, 0, 1]}\n"
+        "        - {time: 1.0, value: [0, 0, ") + std::to_string(s) + ", " + std::to_string(s) + "]}\n"
+        "    - object: Arm/Hand\n"
+        "      property: position\n"
+        "      keys:\n"
+        "        - {time: 0.0, value: [1, 0, 0]}\n"
+        "        - {time: 1.0, value: [2, 0, 0]}\n");
+    animator->add_state("wave", std::make_shared<coopa::anim::AnimationClip>(coopa::anim::parse_clip(clip_yaml)));
+    scene->start();
+    animator->play("wave");
+    animator->sample_at(0.5f);
+    const glm::quat q = arm_raw->get_transform()->transform().rotation_quat();
+    const float angle = glm::degrees(2.0f * std::atan2(std::abs(q.z), q.w));
+    expect_near(angle, 45.0f, 0.5f, "rig: a rotation_quat track halfway through 0 -> 90 deg is 45 deg (nlerp)");
+    expect_near(glm::length(q), 1.0f, 1e-5f, "rig: ...and stays a unit quaternion");
+    expect_near(hand_raw->get_transform()->transform().position().x, 1.5f, 1e-5f, "rig: a nested path (Arm/Hand) is animated too");
+    const glm::vec3 hand_world(hand_raw->get_transform()->get_world_matrix()[3]);
+    expect(std::abs(hand_world.x - 1.5f * std::cos(glm::radians(45.0f))) < 1e-3f &&
+               std::abs(hand_world.y - 1.5f * std::sin(glm::radians(45.0f))) < 1e-3f,
+           "rig: the child follows its animated parent (it is an object hierarchy)");
+    (void)root_raw;
+}
+
+/** @brief A mesh whose vertex groups name the bones skins with no joints: the palette comes
+ *         from the groups (strongest four per vertex), and a vertex follows its groups' blend. */
+void test_rig_vertex_group_skinning() {
+    const fkyaml::node mesh = fkyaml::node::deserialize(std::string(
+        "vertices: [[0, 0, 0], [1, 0, 0], [0, 1, 0]]\n"
+        "normals: [[0, 0, 1], [0, 0, 1], [0, 0, 1]]\n"
+        "uvs: [[0, 0], [1, 0], [0, 1]]\n"
+        "faces: [[0, 1, 2]]\n"
+        "weights:\n"
+        "  - {Arm: 1.0}\n"
+        "  - {Arm: 0.5, Hand: 0.5}\n"
+        "  - {}\n"));
+    const auto src = coopa::gfx::engine::data::SkinnedMeshSource::from_node(mesh);
+    expect(src.groups.size() == 2 && src.groups[0] == "Arm" && src.groups[1] == "Hand",
+           "skinning: the vertex groups become the bone palette, in first-use order");
+    expect(src.joints.size() == 3 && src.joints[1].x >= 0 && src.joints[1].y >= 0 && src.joints[2].x == -1,
+           "skinning: each corner indexes its groups (none for an unweighted vertex)");
+    std::vector<coopa::gfx::engine::data::Vertex> out;
+    const std::vector<glm::mat4> mats = {glm::mat4(1.0f), glm::translate(glm::mat4(1.0f), glm::vec3(0, 0, 2))};
+    toy::scene::SkinnedMeshRenderer::skin(src, mats, out);
+    expect_near(out[0].position.z, 0.0f, 1e-6f, "skinning: a vertex all in the still bone stays");
+    expect_near(out[1].position.z, 1.0f, 1e-6f, "skinning: a vertex split half and half moves half way");
+    expect_near(out[2].position.z, 0.0f, 1e-6f, "skinning: an unweighted vertex keeps its bind pose");
+}
+
+/** @brief A rig end to end in the engine: an Animator auto-plays a clip FILE on a bone of an
+ *         object hierarchy, and a mesh whose vertex groups name the bones (no `bones:`, no inverse
+ *         bind matrices -- what the editor's Weight Paint writes) follows it. */
+void test_rig_skinned_mesh_follows_animated_bone() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "toyengine_rig_test";
+    fs::remove_all(dir);
+    fs::create_directories(dir / "meshes");
+    fs::create_directories(dir / "animations" / "Rig");
+    {
+        std::ofstream(dir / "meshes" / "strip.yaml") <<
+            "vertices: [[-0.5, 0, 0], [0.5, 0, 0], [0.5, 0, 2], [-0.5, 0, 2]]\n"
+            "normals: [[0, -1, 0], [0, -1, 0], [0, -1, 0], [0, -1, 0]]\n"
+            "uvs: [[0, 0], [1, 0], [1, 1], [0, 1]]\n"
+            "faces: [[0, 1, 2, 3]]\n"
+            "colors: []\n"
+            "weights:\n  - {Lower: 1.0}\n  - {Lower: 1.0}\n  - {Upper: 1.0}\n  - {Upper: 1.0}\n";
+        std::ofstream(dir / "animations" / "Rig" / "sway.yaml") <<
+            "clip:\n  name: sway\n  wrap: once\n  length: 0.5\n  tracks:\n"
+            "    - object: Lower/Upper\n      property: position\n      keys:\n"
+            "        - {time: 0.0, value: [0, 0, 1]}\n        - {time: 0.5, value: [1, 0, 1]}\n";
+        std::ofstream(dir / "scene.yaml") <<
+            "format: blender\nscene:\n  scene_name: RigTest\n  root_objects:\n"
+            "    - name: Camera\n      components:\n        - type: Transform\n          position: {x: 0, y: -6, z: 1}\n"
+            "          rotation: {x: 90, y: 0, z: 0}\n        - type: Camera\n          main: true\n"
+            "    - name: Rig\n      components:\n        - type: Transform\n"
+            "        - type: Animator\n          auto_play: sway\n          states:\n"
+            "            - {name: sway, clip: animations/Rig/sway.yaml}\n"
+            "      children:\n"
+            "        - name: Lower\n          components:\n            - type: Transform\n"
+            "          children:\n"
+            "            - name: Upper\n              components:\n                - type: Transform\n"
+            "                  position: {x: 0, y: 0, z: 1}\n"
+            "        - name: Skin\n          components:\n            - type: Transform\n"
+            "            - type: MeshRenderer\n              material: {albedo: {r: 0.8, g: 0.6, b: 0.4}}\n"
+            "            - type: SkinnedMeshRenderer\n              mesh_path: strip\n";
+    }
+    ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
+    ScopedEnv no_input("NO_INPUT", "1");
+    toy::core::Engine engine(make_test_config((dir / "scene.yaml").string(), 320, 180, 160, 90));
+    tick_frames(engine, 3);
+    auto* skin_obj = engine.scene().find_object("Skin");
+    auto* smr = skin_obj ? skin_obj->get_component<toy::scene::SkinnedMeshRenderer>() : nullptr;
+    expect(smr && smr->is_ready(), "rig: the skinned mesh built its GPU mesh");
+    if (!smr || !smr->is_ready()) return;
+    expect(smr->rig() && smr->rig()->name() == "Rig", "rig: the rig root is the nearest Animator up the hierarchy");
+    expect(smr->bones().size() == 2 && smr->bones()[0] && smr->bones()[1] && smr->bones()[1]->name() == "Upper",
+           "rig: the vertex groups name the bones, found under the rig");
+    tick_frames(engine, 45);   // past the clip's end: Upper rests at x = 1
+    float top_x = 0.0f, bottom_x = 0.0f;
+    for (const auto& v : smr->skinned_vertices()) {
+        if (v.position.z > 1.5f) top_x += v.position.x; else bottom_x += v.position.x;
+    }
+    // The quad's triangle corners: top (0.5, 0.5, -0.5) and bottom (-0.5, 0.5, -0.5) -- bind
+    // means of +1/6 and -1/6 in x.
+    const float n = static_cast<float>(smr->skinned_vertices().size()) / 2.0f;
+    expect(std::abs(top_x / n - (1.0f / 6.0f + 1.0f)) < 0.02f,
+           "rig: the vertices weighted to the animated bone moved with it, 1 m (mean x " + std::to_string(top_x / n) + ")");
+    expect(std::abs(bottom_x / n + 1.0f / 6.0f) < 0.02f,
+           "rig: the vertices weighted to the still bone stayed (bind pose from the rest pose)");
+    fs::remove_all(dir);
+}
+
 /** @brief One registered test: its name (also its filter key), its group, and its body. */
 struct TestCase {
     const char* name;
@@ -5409,6 +5554,9 @@ const TestCase kTests[] = {
     {"water_scene_renders_and_simulates",          "render_water",    test_water_scene_renders_and_simulates},
     {"underwater_scene_renders_and_toggles",       "render_water",    test_underwater_scene_renders_and_toggles},
     {"water_scene_quality_tiers_render",           "render_water",    test_water_scene_quality_tiers_render},
+    {"rig_clip_drives_hierarchy",                  "rig",             test_rig_clip_drives_hierarchy},
+    {"rig_vertex_group_skinning",                  "rig",             test_rig_vertex_group_skinning},
+    {"rig_skinned_mesh_follows_animated_bone",     "render_rig",      test_rig_skinned_mesh_follows_animated_bone},
     // TEMPORARY (round-8b shimmer diagnosis) -- run via `toyengine_tests ssao_travel_probe`,
     // removed once the cause is pinned. Not in any ctest group.
     {"ssao_travel_probe",                          "probe",           test_ssao_travel_probe},

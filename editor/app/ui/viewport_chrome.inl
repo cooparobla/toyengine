@@ -11,7 +11,7 @@
     static constexpr float kToolSize = 32.0f;
 
     imm::Box toolbar_rect_(bool mesh_edit) const {
-        const int n = in_sculpt_mode_() ? 5 : mesh_edit ? 9 : 5;
+        const int n = in_sculpt_mode_() ? 5 : in_paint_mode_() ? 3 : mesh_edit ? 9 : 5;
         return {viewport_box_.x + 6, viewport_box_.y + 6, kToolSize + 6, n * (kToolSize + 2) + 14};
     }
     float sidebar_w_() const { return show_sidebar_ ? 230.0f : 0.0f; }
@@ -43,16 +43,19 @@
         // Mode dropdown.
         if (active_type_ == AssetType::Scene || active_type_ == AssetType::Object || active_type_ == AssetType::Mesh) {
             const bool sculpting = in_sculpt_mode_();
-            const std::string mode = sculpting ? "Sculpt Mode" : mesh_edit ? "Edit Mode" : "Object Mode";
+            const bool vpaint = in_paint_mode_() && !in_weight_paint_(), wpaint = in_weight_paint_();
+            const std::string mode = sculpting ? "Sculpt Mode" : vpaint ? "Vertex Paint" : wpaint ? "Weight Paint"
+                                   : mesh_edit ? "Edit Mode" : "Object Mode";
             const float w = ctx.text_width(mode) + bh + 26;
             const imm::Box mb{x, hb.y + 3, w, bh};
             bool hov = false, held = false;
             if (ctx.invisible_button("mode_dd", mb, &hov, &held)) ctx.open_popup("mode_menu", glm::vec2(mb.x, mb.bottom() + 2));
             ctx.fill_rounded(mb, hov ? ctx.style.button_hover : ctx.style.button);
-            ctx.icon(sculpting ? I::SculptMode : mesh_edit ? I::EditMode : I::ObjectMode, {mb.x + 4, mb.y + 2, bh - 4, bh - 4}, ctx.style.text);
+            ctx.icon(sculpting ? I::SculptMode : vpaint ? I::VertexPaint : wpaint ? I::WeightPaint : mesh_edit ? I::EditMode : I::ObjectMode,
+                     {mb.x + 4, mb.y + 2, bh - 4, bh - 4}, ctx.style.text);
             ctx.text_in({mb.x + bh + 2, mb.y, w - bh - 16, bh}, mode, ctx.style.text, 0.0f);
             ctx.arrow({mb.right() - 14, mb.y + 4, 10, bh - 8}, true, ctx.style.text_dim);
-            ctx.tooltip("Mode\nObject Mode / Edit Mode (Tab) / Sculpt Mode (Ctrl Tab for the menu)");
+            ctx.tooltip("Mode\nObject Mode / Edit Mode (Tab) / Sculpt / Vertex Paint / Weight Paint (Ctrl Tab for the menu)");
             x += w + 8;
             if (ctx.begin_popup("mode_menu", 170)) {
                 draw_mode_menu_items_(ctx);
@@ -68,6 +71,7 @@
                 x += bh + 8;
             }
             if (sculpting) x = draw_sculpt_header_(ctx, x, hb);
+            else if (vpaint || wpaint) x = draw_paint_header_(ctx, x, hb);
         }
         if (mesh_edit) {
             int sm = static_cast<int>(mesh_.selection.mode);
@@ -81,7 +85,8 @@
         const float menus_w = 220;
         ctx.begin_menubar({x, hb.y, menus_w, hb.h}, false);
         draw_view_menu_(ctx);
-        if (!in_sculpt_mode_() && !preview_only_view_()) {
+        if (in_paint_mode_()) draw_paint_menu_(ctx);
+        if (!in_brush_mode_() && !preview_only_view_()) {
             draw_select_menu_(ctx, mesh_edit);
             if (!mesh_edit && ctx.begin_menu("Add")) { draw_add_menu_items_(ctx); ctx.end_menu(); }
             if (mesh_edit) draw_mesh_menu_(ctx);
@@ -127,8 +132,8 @@
                             imm::Context::kLeft, imm::Box{rx, hb.y + 3, s, s}, true)) {
             show_overlays_ = !show_overlays_;
         }
-        // Snap and orientation only steer transforms: Sculpt Mode has none, so they make room there.
-        if (!in_sculpt_mode_()) {
+        // Snap and orientation only steer transforms: the brush modes have none, so they make room there.
+        if (!in_brush_mode_()) {
             rx -= s + 10;
             if (ctx.icon_button("snap", I::Snap, "Snap\nSnap transforms to increments (Ctrl inverts while dragging)", snap_on_, s, imm::Context::kAll,
                                 imm::Box{rx, hb.y + 3, s, s}, true)) {
@@ -156,10 +161,10 @@
         // Edit Mode symmetry (Blender's X / Y / Z mirror toggles + Local / Global), between the
         // menus and the right-hand cluster when it fits; Properties > Tool > Symmetry always has it.
         // Sculpt Mode's stroke symmetry goes in the same place (Properties > Tool > Brush has it too).
-        const bool sculpting = in_sculpt_mode_();
-        MirrorSettings& header_sym = sculpting ? sculpt_.symmetry : edit_symmetry_;
-        if ((mesh_edit || sculpting) && after_menus + symmetry_buttons_width_(ctx, hb, header_sym) <= rx - 8) {
-            if (sculpting) draw_symmetry_buttons_(ctx, after_menus, hb, sculpt_.symmetry, "sc_sym", "strokes");
+        const bool sculpting = in_sculpt_mode_(), painting = in_paint_mode_();
+        MirrorSettings& header_sym = sculpting ? sculpt_.symmetry : painting ? paint_settings_().symmetry : edit_symmetry_;
+        if ((mesh_edit || sculpting || painting) && after_menus + symmetry_buttons_width_(ctx, hb, header_sym) <= rx - 8) {
+            if (sculpting || painting) draw_symmetry_buttons_(ctx, after_menus, hb, header_sym, sculpting ? "sc_sym" : "pt_sym", "strokes");
             else draw_symmetry_buttons_(ctx, after_menus, hb, edit_symmetry_, "ed_sym", "moves, rotations and scales");
         }
     }
@@ -353,6 +358,7 @@
             return ctx.icon_button(id, ic, tip, on, kToolSize, imm::Context::kAll, b);
         };
         if (in_sculpt_mode_()) { draw_sculpt_toolbar_(ctx, r); return; }
+        if (in_paint_mode_()) { draw_paint_toolbar_(ctx, r); return; }
         if (tool_btn("t_select", I::SelectBox, "Select Box\nClick or drag to select (Shift adds, Ctrl removes)", tool_ == Tool::Select)) tool_ = Tool::Select;
         if (tool_btn("t_cursor", I::Cursor, "Cursor\nClick to place the 3D cursor (Shift RMB anywhere)", tool_ == Tool::Cursor)) tool_ = Tool::Cursor;
         y += 6;
@@ -475,13 +481,13 @@
             } else if (const ObjectId id = doc_.primary(); id && doc_.find(id)) {
                 if (ctx.collapsing_header("Transform", true, nullptr, I::Orientation)) {
                     glm::vec3 p, rr, s;
-                    doc_.get_transform(id, p, rr, s);
+                    get_object_transform_(id, p, rr, s);
                     glm::vec3 np = p, nr = rr, ns = s;
                     bool act = false, fin = false;
                     const bool a = ctx.drag_float_stacked("Location", &np.x, 3, 0.02f, "%.3f m"); act |= ctx.last_group_active(); fin |= ctx.last_deactivated();
                     const bool b = ctx.drag_float_stacked("Rotation", &nr.x, 3, 0.5f, "%.1f"); act |= ctx.last_group_active(); fin |= ctx.last_deactivated();
                     const bool cc = ctx.drag_float_stacked("Scale", &ns.x, 3, 0.01f, "%.3f"); act |= ctx.last_group_active(); fin |= ctx.last_deactivated();
-                    if ((a || b || cc) && !playing()) apply_(doc_.set_transform(id, np, nr, ns, "Transform", act ? "sidebar_transform" : std::string()));
+                    if ((a || b || cc) && !playing()) set_object_transform_(id, np, nr, ns, "Transform", act ? "sidebar_transform" : std::string());
                     if (fin) doc_.end_merge();
                     glm::vec3 lo(1e30f), hi(-1e30f);
                     if (object_bounds_(id, lo, hi, true)) {
@@ -633,9 +639,12 @@
                               (!asset_view_() && (edit_object_ || (doc_.primary() && doc_.find_component(doc_.primary(), "MeshRenderer") >= 0)));
         const InteractionMode cur = interaction_mode();
         bool o = cur == InteractionMode::Object, e = cur == InteractionMode::Edit, sc = cur == InteractionMode::Sculpt;
+        bool vp = cur == InteractionMode::VertexPaint, wp = cur == InteractionMode::WeightPaint;
         if (ctx.menu_item("Object Mode", "Tab", &o, true, I::ObjectMode)) set_interaction_mode(InteractionMode::Object);
         if (ctx.menu_item("Edit Mode", "Tab", &e, mesh_obj && !playing(), I::EditMode)) set_interaction_mode(InteractionMode::Edit);
         if (ctx.menu_item("Sculpt Mode", "", &sc, mesh_obj && !playing(), I::SculptMode)) set_interaction_mode(InteractionMode::Sculpt);
+        if (ctx.menu_item("Vertex Paint", "", &vp, mesh_obj && !playing(), I::VertexPaint)) set_interaction_mode(InteractionMode::VertexPaint);
+        if (ctx.menu_item("Weight Paint", "", &wp, mesh_obj && !playing(), I::WeightPaint)) set_interaction_mode(InteractionMode::WeightPaint);
     }
 
     /**

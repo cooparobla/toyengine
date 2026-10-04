@@ -41,6 +41,8 @@
 #include "mesh/mesh_subdivide.h"
 #include "mesh/mesh_topology.h"
 #include "mesh/sculpt.h"
+#include "mesh/paint.h"
+#include "anim/clip_model.h"
 #include "mesh/shader_ball.h"
 #include "mesh/primitives.h"
 #include "schema/component_schema.h"
@@ -574,6 +576,248 @@ void test_mesh_io_roundtrip_and_engine_load() {
         expect(b.lods.at(0).index_count <= a.lods.at(0).index_count && b.lods.at(0).index_count * 10 >= a.lods.at(0).index_count * 9,
                "re-exported (" + std::to_string(a.lods.at(0).index_count) + " vs " + std::to_string(b.lods.at(0).index_count) + ") " + p.filename().string() + " has the same triangle count");
     }
+}
+
+/** @brief Blender's export attributes survive the editor: colours, vertex groups, skinning
+ *         palettes and unknown keys round-trip, and the exported tangents are Blender's. */
+void test_mesh_io_preserves_blender_attributes() {
+    // Tangents: every asset mesh exported with tangents re-exports with the same ones (matched
+    // per engine vertex by position, normal and UV).
+    int checked = 0;
+    for (const auto& p : asset_yaml_files()) {
+        if (p.parent_path().filename() != "meshes" || p.filename().string().find(".lod.") != std::string::npos) continue;
+        const Node src = coopa::yaml::load_document(p);
+        if (!src.contains("faces") || !src.contains("tangents") || src.at("tangents").as_seq().empty()) continue;
+        const auto a = coopa::gfx::engine::data::Mesh::build_cpu(src);
+        const auto b = coopa::gfx::engine::data::Mesh::build_cpu(Node::deserialize(coopa::yaml::emit(mesh_to_node(mesh_from_node(src)))));
+        std::map<std::tuple<int, int, int, int, int, int, int, int>, glm::vec4> ref;
+        auto key = [](const coopa::gfx::engine::data::Vertex& v) {
+            auto q = [](float x) { return static_cast<int>(std::lround(x * 1000.0f)); };
+            return std::make_tuple(q(v.position.x), q(v.position.y), q(v.position.z), q(v.normal.x), q(v.normal.y),
+                                   q(v.normal.z), q(v.uv.x), q(v.uv.y));
+        };
+        for (const auto& v : a.vertices) ref[key(v)] = v.tangent;
+        int matched = 0, agree = 0;
+        float worst = 1.0f;
+        for (const auto& v : b.vertices) {
+            auto it = ref.find(key(v));
+            if (it == ref.end()) continue;
+            ++matched;
+            const float d = glm::dot(glm::vec3(v.tangent), glm::vec3(it->second));
+            worst = std::min(worst, d);
+            agree += (d > 0.98f && v.tangent.w == it->second.w) ? 1 : 0;
+        }
+        expect(matched > 0 && agree == matched,
+               p.filename().string() + ": re-exported tangents equal the file's (" + std::to_string(agree) + "/" +
+                   std::to_string(matched) + " agree, worst dot " + std::to_string(worst) + ")");
+        ++checked;
+    }
+    expect(checked > 0, "found asset meshes with tangents");
+
+    // Colours, vertex groups, the skinning palette and unknown keys round-trip.
+    EditMesh m = make_cube();
+    m.has_colors = true;
+    for (auto& f : m.faces) for (auto& c : f.corners) c.color = glm::vec4(m.positions[c.v] + 0.5f, 1.0f);
+    const uint32_t root = m.group_index("Root"), tip = m.group_index("Tip");
+    m.joints.assign(m.positions.size(), glm::ivec4(0, 1, -1, -1));
+    m.joint_weights.assign(m.positions.size(), glm::vec4(0.5f, 0.5f, 0.0f, 0.0f));
+    for (uint32_t v = 0; v < m.positions.size(); ++v) {
+        const float z = m.positions[v].z + 0.5f;   // 0 at the bottom, 1 at the top
+        m.set_weight(v, root, 1.0f - z);
+        m.set_weight(v, tip, z);
+    }
+    m.passthrough["bones"] = Node::sequence();
+    m.passthrough["bones"].as_seq().push_back(Node(std::string("root")));
+    const Node n = Node::deserialize(coopa::yaml::emit(mesh_to_node(m)));
+    const EditMesh back = mesh_from_node(n);
+    // Import numbers vertices by first use, so match them up by position, then compare the rest.
+    std::vector<uint32_t> to_m(back.positions.size(), ~0u);
+    for (uint32_t i = 0; i < back.positions.size(); ++i)
+        for (uint32_t j = 0; j < m.positions.size(); ++j)
+            if (glm::distance(back.positions[i], m.positions[j]) < 1e-5f) to_m[i] = j;
+    bool same = back.positions.size() == m.positions.size() && back.faces.size() == m.faces.size() &&
+                back.groups == m.groups && back.has_colors;
+    for (uint32_t i = 0; same && i < back.positions.size(); ++i) {
+        const uint32_t j = to_m[i];
+        same = j != ~0u && back.joints[i] == m.joints[j] && back.joint_weights[i] == m.joint_weights[j];
+        for (uint32_t g = 0; same && g < m.groups.size(); ++g) same = std::abs(back.weight(i, g) - m.weight(j, g)) < 1e-5f;
+    }
+    for (size_t f = 0; same && f < m.faces.size(); ++f) {
+        for (size_t k = 0; same && k < m.faces[f].corners.size(); ++k) {
+            const Corner& a = back.faces[f].corners[k];
+            const Corner& b = m.faces[f].corners[k];
+            same = to_m[a.v] == b.v && a.uv == b.uv && glm::distance(a.color, b.color) < 1e-5f;
+        }
+    }
+    expect(same, "colours, vertex groups and the joint palette survive save -> load");
+    expect(back.passthrough.contains("bones"), "...and keys the editor does not know ride along");
+    const auto cpu = coopa::gfx::engine::data::Mesh::build_cpu(n);
+    expect(!cpu.vertices.empty(), "...in a file the engine still loads");
+
+    // Operations keep the per-vertex data parallel and interpolate it.
+    auto parallel = [](const EditMesh& x) {
+        return x.weights.size() == x.positions.size() && x.joints.size() == x.positions.size() &&
+               x.joint_weights.size() == x.positions.size();
+    };
+    EditMesh cut = m;
+    MeshSelection sel;
+    loop_cut(cut, sel, make_edge(0, 4), 1);
+    bool mid_ok = parallel(cut);
+    for (uint32_t v = static_cast<uint32_t>(m.positions.size()); v < cut.positions.size(); ++v) {
+        // A cut across the vertical edges lands half way up: half Root, half Tip.
+        mid_ok = mid_ok && std::abs(cut.weight(v, root) - 0.5f) < 1e-4f && std::abs(cut.weight(v, tip) - 0.5f) < 1e-4f;
+        mid_ok = mid_ok && std::abs(cut.vertex_color(v).z - 0.5f) < 1e-4f;
+    }
+    expect(cut.positions.size() > m.positions.size() && mid_ok,
+           "a loop cut's new vertices take the interpolated weights and colours");
+    EditMesh cc = m;
+    cc.slots = {"a", "b"};
+    cc.faces[1].slot = 1;
+    MeshSelection none;
+    catmull_clark(cc, none, 1);
+    size_t slot_b = 0;
+    for (const auto& f : cc.faces) slot_b += f.slot == 1;
+    expect(parallel(cc) && cc.groups == m.groups && cc.has_colors && cc.slots.size() == 2 && slot_b == 4,
+           "Catmull-Clark keeps vertex groups, colours and material slots");
+    EditMesh del = m;
+    MeshSelection top;
+    top.mode = SelectMode::Face;
+    top.faces = {0};
+    delete_selection(del, top);
+    expect(parallel(del) && del.positions.size() == m.positions.size(),
+           "deleting a face keeps the data parallel (no vertex orphaned on a cube)");
+    MeshSelection all;
+    all.select_all(del);
+    subdivide(del, all, 1);
+    expect(parallel(del), "subdividing keeps the data parallel");
+}
+
+/** @brief Vertex Paint and Weight Paint dabs: falloff, blend modes, blur, front faces only,
+ *         auto-normalize, and the fills. */
+void test_paint_brushes() {
+    EditMesh g = make_grid(16, 16, 2.0f);   // spacing 0.125, centre vertex at the origin
+    SculptCache cache;
+    cache.build(g);
+    VertexGrid grid;
+    grid.build(g, 0.5f);
+    const uint32_t centre = 8 * 17 + 8, edge = 0;
+    PaintSettings s;
+    s.color = glm::vec4(1, 0, 0, 1);
+    PaintDab d;
+    d.center = glm::vec3(0.0f);
+    d.radius = 0.5f;
+    d.view_dir = glm::vec3(0, 0, -1);   // looking down at the +Z grid
+
+    // Vertex Paint.
+    std::vector<uint32_t> changed;
+    expect(!g.has_colors, "a fresh mesh has no colour attribute");
+    PaintDab back = d;
+    back.view_dir = glm::vec3(0, 0, 1);
+    vertex_paint_dab(g, cache, grid, s, back, changed);
+    expect(changed.empty() && g.vertex_color(centre) == glm::vec4(1.0f), "front faces only: a dab from behind paints nothing");
+    vertex_paint_dab(g, cache, grid, s, d, changed);
+    expect(g.has_colors && !changed.empty(), "painting turns the colour attribute on");
+    const glm::vec4 c0 = g.vertex_color(centre);
+    expect(c0.r > 0.99f && c0.g < 0.01f, "Mix at full strength paints the centre the brush colour");
+    expect(g.vertex_color(edge) == glm::vec4(1.0f), "...and leaves vertices outside the radius white");
+    const uint32_t mid = 8 * 17 + 8 + 3;   // 0.375 from the centre: partly painted
+    const glm::vec4 cm = g.vertex_color(mid);
+    expect(cm.g > 0.01f && cm.g < 0.99f, "the falloff blends part-way toward the rim");
+    s.tool = PaintTool::Blur;
+    vertex_paint_dab(g, cache, grid, s, d, changed);
+    expect(g.vertex_color(centre).g > c0.g, "Blur pulls the painted centre toward its neighbours");
+    s.tool = PaintTool::Draw;
+    s.blend = PaintBlend::Subtract;
+    s.color = glm::vec4(1, 1, 1, 1);
+    vertex_paint_dab(g, cache, grid, s, d, changed);
+    expect(g.vertex_color(centre).r < 0.01f, "Subtract darkens");
+    d.invert = true;
+    s.blend = PaintBlend::Mix;
+    s.secondary = glm::vec4(0, 0, 1, 1);
+    vertex_paint_dab(g, cache, grid, s, d, changed);
+    expect(g.vertex_color(centre).b > 0.99f, "Ctrl paints the secondary colour");
+    d.invert = false;
+    fill_vertex_colors(g, glm::vec4(0.25f, 0.5f, 0.75f, 1.0f));
+    invert_vertex_colors(g);
+    expect(glm::distance(g.vertex_color(edge), glm::vec4(0.75f, 0.5f, 0.25f, 1.0f)) < 1e-5f, "Fill then Invert");
+    clear_vertex_colors(g);
+    expect(!g.has_colors && !mesh_to_node(g).at("colors").as_seq().size(), "Clear removes the attribute from the file");
+
+    // Weight Paint.
+    const uint32_t a = g.group_index("Arm"), b = g.group_index("Body");
+    PaintSettings w;
+    w.weight = 1.0f;
+    weight_paint_dab(g, cache, grid, w, a, d, changed);
+    expect(g.weight(centre, a) > 0.99f && g.weight(edge, a) == 0.0f, "Draw lays weight 1 at the centre, none outside");
+    d.invert = true;
+    d.strength = 0.5f;   // the app fills the dab's strength from PaintSettings::strength
+    weight_paint_dab(g, cache, grid, w, a, d, changed);
+    expect(std::abs(g.weight(centre, a) - 0.5f) < 1e-3f, "Ctrl (Mix) takes weight away");
+    d.invert = false;
+    w.blend = PaintBlend::Add;
+    w.weight = 0.2f;
+    d.strength = 1.0f;
+    weight_paint_dab(g, cache, grid, w, a, d, changed);
+    expect(std::abs(g.weight(centre, a) - 0.7f) < 1e-3f, "Add adds the brush weight");
+    assign_weight(g, b, 1.0f);
+    w.blend = PaintBlend::Mix;
+    w.weight = 0.8f;
+    w.auto_normalize = true;
+    weight_paint_dab(g, cache, grid, w, a, d, changed);
+    expect(std::abs(g.weight(centre, a) + g.weight(centre, b) - 1.0f) < 1e-4f && g.weight(centre, a) > 0.79f,
+           "Auto Normalize rescales the other groups so the weights sum to 1");
+    expect(g.weight(edge, b) == 1.0f, "...only where the brush touched");
+    w.auto_normalize = false;
+    w.tool = PaintTool::Blur;
+    const float before = g.weight(centre, a);
+    weight_paint_dab(g, cache, grid, w, a, d, changed);
+    expect(g.weight(centre, a) < before, "Blur softens the peak");
+    normalize_all_weights(g);
+    float sum = 0.0f;
+    for (const auto& vw : g.weights[mid]) sum += vw.weight;
+    expect(std::abs(sum - 1.0f) < 1e-4f, "Normalize All");
+    g.remove_group(a);
+    expect(g.groups.size() == 1 && g.groups[0] == "Body" && g.weight(centre, 0) > 0.0f, "removing a group renumbers the rest");
+    expect(weight_heatmap(0.0f) == glm::vec3(0, 0, 1) && weight_heatmap(1.0f) == glm::vec3(1, 0, 0), "heatmap: blue 0, red 1");
+}
+
+/** @brief The clip model: the runtime's YAML round trip, keying (quaternion hemisphere), moving
+ *         and deleting dope-sheet cells, and renaming an object's tracks. */
+void test_clip_model() {
+    ClipModel m;
+    m.name = "Wave";
+    m.wrap = "pingpong";
+    m.length = 2.0f;
+    m.set_key("Arm", "position", 0.0f, glm::vec4(0, 0, 0, 0));
+    m.set_key("Arm", "position", 1.0f, glm::vec4(1, 2, 3, 0));
+    m.set_key("Arm", "rotation_quat", 0.0f, glm::vec4(0, 0, 0, 1));
+    m.set_key("Arm", "rotation_quat", 1.0f, glm::vec4(0, 0, -0.7071f, -0.7071f));   // same rotation as +, other hemisphere
+    m.set_key("Arm/Hand", "scale", 0.5f, glm::vec4(2, 2, 2, 0));
+    expect(m.find_track("Arm", "rotation_quat")->keys[1].value.w > 0.0f,
+           "a key in the opposite hemisphere is flipped next to its neighbour");
+    m.set_key("Arm", "position", 1.0f, glm::vec4(5, 0, 0, 0));
+    expect(m.find_track("Arm", "position")->keys.size() == 2 && m.find_track("Arm", "position")->keys[1].value.x == 5.0f,
+           "keying an existing time replaces the key");
+
+    const Node n = Node::deserialize(coopa::yaml::emit(m.to_node()));
+    expect(ClipModel::from_node(n) == m, "the clip round-trips through YAML");
+    const coopa::anim::AnimationClip rt = coopa::anim::parse_clip(n);
+    expect(rt.tracks.size() == 3 && rt.effective_length() == 2.0f && rt.wrap == coopa::anim::WrapMode::PingPong,
+           "the runtime parses the editor's file (tracks, length, wrap)");
+
+    const std::string arm = "Arm";
+    expect(m.key_times(&arm) == std::vector<float>{0.0f, 1.0f} && m.key_times().size() == 3, "key times per object and in summary");
+    auto moved = m.move_keys({{"Arm", 1.0f}}, 0.5f);
+    expect(moved.count({"Arm", 1.5f}) && m.find_track("Arm", "position")->keys[1].time == 1.5f &&
+               m.find_track("Arm", "rotation_quat")->keys[1].time == 1.5f,
+           "moving a cell moves every track's key of that object at that time");
+    m.delete_keys({{"Arm", 0.0f}});
+    expect(m.find_track("Arm", "position")->keys.size() == 1, "deleting a cell removes the object's keys there");
+    m.delete_keys({{"Arm/Hand", 0.5f}});
+    expect(m.find_track("Arm/Hand", "scale") == nullptr, "a track left without keys goes");
+    m.set_key("Arm/Hand", "scale", 0.5f, glm::vec4(1));
+    m.rename_object("Arm", "Limb");
+    expect(m.find_track("Limb", "position") && m.find_track("Limb/Hand", "scale"), "renaming an object renames its descendants' tracks");
 }
 
 void test_uv_projection_and_selection() {
@@ -2318,6 +2562,210 @@ void test_editor_sculpt() {
     expect(app.interaction_mode() == InteractionMode::Object, "switching the view returns to Object Mode");
 }
 
+/** @brief Vertex Paint and Weight Paint end to end: the modes swap in the paint display, a
+ *         stroke paints colour / weight as one undo step, Ctrl inverts, leaving the mode puts the
+ *         material back and saves the colours and vertex groups into the mesh file. */
+void test_editor_paint_modes() {
+    using coopa::input::Key;
+    using coopa::input::Mods;
+    using coopa::input::MouseButton;
+    using coopa::input::KeyAction;
+    setenv("FIXED_DT", "0.016666", 1);
+    unsetenv("NO_INPUT");
+    setenv("HOME", tmp_root().c_str(), 1);
+    fs::remove(Project::prefs_path());
+    const fs::path root = fresh_dir("paint_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, toy::core::Engine::kFillDebounceFrames + 4);
+    InputDriver in{engine, std::max(1.0f, engine.display_scale())};
+    const ObjectId cube = object_named(app, "Cube");
+    app.document().select(cube);
+    const std::string own_shader = app.edited_mesh_shader();
+    app.set_interaction_mode(InteractionMode::VertexPaint);
+    tick(engine, 4);
+    expect(app.interaction_mode() == InteractionMode::VertexPaint, "the mode menu enters Vertex Paint");
+    expect(app.edited_mesh_shader() == "editor_paint", "Vertex Paint draws the mesh with the paint display shader");
+    auto& md = app.mesh_document();
+    app.subdivide_smooth(2);   // vertices for the brush to land on
+    tick(engine, 3);
+    expect(!md.mesh.has_colors, "the default cube starts without colours");
+    auto& vs = app.vertex_paint_settings();
+    vs.symmetry.axis[0] = false;
+    vs.radius_px = 60.0f;
+    vs.color = glm::vec4(1, 0, 0, 1);
+    vs.secondary = glm::vec4(0, 0, 1, 1);
+
+    const glm::vec2 corner = visible_corner(app, cube);
+    auto start = screen_of(engine, app, cube, glm::vec3(corner.x, corner.y * 0.3f, 0.0f), in.scale);
+    auto stop = screen_of(engine, app, cube, glm::vec3(corner.x * 0.3f, corner.y, 0.0f), in.scale);
+    expect(start && stop, "the stroke lies on screen");
+    if (!start || !stop) return;
+    auto count = [&](auto pred) {
+        size_t n = 0;
+        for (const auto& f : md.mesh.faces) for (const auto& c : f.corners) n += pred(c.color) ? 1 : 0;
+        return n;
+    };
+    const size_t undo0 = md.undo.undo_count();
+    in.move(*start);
+    in.drag(*stop, MouseButton::Left, 10);
+    tick(engine, 2);
+    const size_t reds = count([](const glm::vec4& c) { return c.r > 0.9f && c.g < 0.5f; });
+    expect(md.mesh.has_colors && reds > 0, "a stroke paints the brush colour (" + std::to_string(reds) + " red corners)");
+    expect(count([](const glm::vec4& c) { return c == glm::vec4(1.0f); }) > 0, "...only under the brush");
+    expect(md.undo.undo_count() == undo0 + 1, "the whole stroke is one undo step");
+    dump(engine, "15_vertex_paint");
+
+    // Ctrl paints the secondary colour.
+    in.move(*start);
+    engine.queue_input([](coopa::input::Input& i) { i.push_key(Key::LeftControl, 0, KeyAction::Press, Mods::Control); });
+    tick(engine, 1);
+    engine.queue_input([](coopa::input::Input& i) { i.push_mouse_button(MouseButton::Left, KeyAction::Press, Mods::Control); });
+    tick(engine, 1);
+    for (int i = 1; i <= 10; ++i) in.move(glm::mix(*start, *stop, i / 10.0f));
+    engine.queue_input([](coopa::input::Input& i) { i.push_mouse_button(MouseButton::Left, KeyAction::Release, Mods::Control); });
+    tick(engine, 1);
+    engine.queue_input([](coopa::input::Input& i) { i.push_key(Key::LeftControl, 0, KeyAction::Release, Mods::None); });
+    tick(engine, 2);
+    expect(count([](const glm::vec4& c) { return c.b > 0.9f && c.r < 0.5f; }) > 0, "Ctrl paints the secondary colour");
+
+    // Weight Paint on the same mesh: the first stroke creates a group to paint into.
+    app.set_interaction_mode(InteractionMode::WeightPaint);
+    tick(engine, 3);
+    expect(app.interaction_mode() == InteractionMode::WeightPaint && app.edited_mesh_shader() == "editor_paint",
+           "switching straight to Weight Paint keeps the paint display");
+    auto& ws = app.weight_paint_settings();
+    ws.symmetry.axis[0] = false;
+    ws.radius_px = 60.0f;
+    ws.weight = 1.0f;
+    in.move(*start);
+    in.drag(*stop, MouseButton::Left, 10);
+    tick(engine, 2);
+    size_t weighted = 0;
+    for (uint32_t v = 0; v < md.mesh.positions.size(); ++v) weighted += md.mesh.weight(v, 0) > 0.5f ? 1 : 0;
+    expect(md.mesh.groups.size() == 1 && weighted > 0 && weighted < md.mesh.positions.size(),
+           "a weight stroke creates \"Group\" and weights the vertices under it (" + std::to_string(weighted) + ")");
+    dump(engine, "16_weight_paint");
+    engine.queue_input([](coopa::input::Input& i) { i.push_key(Key::K, 0, KeyAction::Press, Mods::Shift); });
+    tick(engine, 1);
+    engine.queue_input([](coopa::input::Input& i) { i.push_key(Key::K, 0, KeyAction::Release, Mods::None); });
+    tick(engine, 2);
+    size_t full = 0;
+    for (uint32_t v = 0; v < md.mesh.positions.size(); ++v) full += md.mesh.weight(v, 0) == 1.0f ? 1 : 0;
+    expect(full == md.mesh.positions.size(), "Shift+K sets the brush weight on every vertex");
+
+    // Back to Object Mode: the material's own shader returns and the file has the paint.
+    const fs::path file = md.path;
+    app.set_interaction_mode(InteractionMode::Object);
+    tick(engine, 3);
+    expect(app.edited_mesh_shader() == own_shader || app.interaction_mode() == InteractionMode::Object,
+           "leaving the paint modes restores the material's shader");
+    for (const auto& [id, obj] : app.sync().live_objects()) {
+        if (id != cube || !obj) continue;
+        auto* mr = obj->get_component<coopa::gfx::engine::components::MeshRenderer>();
+        expect(mr && mr->material.shader != "editor_paint", "the live renderer no longer uses the paint shader");
+    }
+    const EditMesh saved = mesh_from_node(coopa::yaml::load_document(file));
+    expect(saved.has_colors && saved.groups.size() == 1 && saved.groups[0] == "Group",
+           "the saved mesh file carries the colours and the vertex group");
+}
+
+/** @brief Animation end to end: an Animator makes a rig, a clip is a file of that object's,
+ *         Record poses without touching the rest pose, keys interpolate when scrubbed, the rest
+ *         pose comes back, Ctrl+Z undoes a key, and Play runs the clip. */
+void test_editor_animation_timeline() {
+    setenv("FIXED_DT", "0.016666", 1);
+    setenv("NO_INPUT", "1", 1);
+    setenv("HOME", tmp_root().c_str(), 1);
+    fs::remove(Project::prefs_path());
+    const fs::path root = fresh_dir("anim_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, 4);
+    auto& doc = app.document();
+    const ObjectId cube = object_named(app, "Cube");
+    const ObjectId bone = doc.add_object(doc.make_object("Bone"), cube);
+    app.sync().rebuild(engine, doc);
+    tick(engine, 2);
+
+    doc.select(cube);
+    app.show_timeline();
+    app.add_animator(cube);
+    tick(engine, 2);
+    expect(app.animation_rig() == cube, "an Animator makes the object a rig");
+    app.new_animation_clip("Wave");
+    tick(engine, 2);
+    const fs::path scene_dir = doc.path().parent_path();
+    expect(app.animation_clip() && fs::exists(scene_dir / "animations" / "Cube" / "Wave.yaml"),
+           "a new clip is a file under animations/<rig>/");
+    const Node& anim = doc.find(cube)->at("components").as_seq()[static_cast<size_t>(doc.find_component(cube, "Animator"))];
+    expect(get_string(anim, "auto_play") == "Wave" && anim.at("states").as_seq().size() == 1,
+           "...listed as the Animator's state, and played on start");
+
+    // Record two keys on the bone.
+    doc.select(bone);
+    app.set_animation_record(true);
+    tick(engine, 2);
+    expect(app.animation_rig() == cube, "selecting a bone keeps its rig");
+    glm::vec3 rp, rr, rs;
+    doc.get_transform(bone, rp, rr, rs);
+    app.set_animation_time(0.0f);
+    tick(engine, 1);
+    app.set_object_transform(bone, glm::vec3(0, 0, 1), glm::vec3(0), glm::vec3(1));
+    app.insert_keyframes();
+    app.set_animation_time(1.0f);
+    tick(engine, 1);
+    app.set_object_transform(bone, glm::vec3(2, 0, 1), glm::vec3(0, 0, 90), glm::vec3(1));
+    app.insert_keyframes();
+    tick(engine, 1);
+    glm::vec3 dp, dr, ds;
+    doc.get_transform(bone, dp, dr, ds);
+    expect(dp == rp && dr == rr, "Record poses the live rig only: the document's rest pose is untouched");
+    const ClipModel* clip = app.animation_clip();
+    expect(clip && clip->find_track("Bone", "position") && clip->find_track("Bone", "position")->keys.size() == 2 &&
+               clip->find_track("Bone", "rotation_quat"),
+           "I keys position, rotation (quaternion) and scale on the bone's path");
+
+    auto live_bone = [&]() -> coopa::scene::SceneObject* { return app.sync().live(bone); };
+    app.set_animation_time(0.5f);
+    tick(engine, 2);
+    const auto& lt = live_bone()->get_transform()->transform();
+    const glm::quat q = lt.rotation_quat();
+    expect(std::abs(lt.position().x - 1.0f) < 1e-3f, "scrubbing to the middle interpolates the position");
+    expect(std::abs(glm::degrees(2.0f * std::atan2(std::abs(q.z), q.w)) - 45.0f) < 0.5f, "...and the rotation (45 deg)");
+    dump(engine, "17_timeline");
+
+    // Ctrl+Z (recording): the last key goes, from the file too.
+    app.undo();
+    tick(engine, 1);
+    const ClipModel saved = ClipModel::from_node(coopa::yaml::load_document(scene_dir / "animations" / "Cube" / "Wave.yaml"));
+    expect(app.animation_clip()->find_track("Bone", "position")->keys.size() == 1 &&
+               saved.find_track("Bone", "position") && saved.find_track("Bone", "position")->keys.size() == 1,
+           "undo removes the last keys, and the file follows");
+    app.redo();
+    tick(engine, 1);
+
+    // The rest pose returns when the clip is not shown.
+    app.set_animation_record(false);
+    app.set_timeline_rest_pose(true);
+    tick(engine, 2);
+    expect(glm::distance(live_bone()->get_transform()->transform().position(), rp) < 1e-5f,
+           "Rest Pose puts the authored transform back on the live rig");
+    app.set_timeline_rest_pose(false);
+
+    // Play: the Animator plays the clip file.
+    app.play();
+    tick(engine, 40);
+    auto* played = engine.scene().find_object("Bone");
+    expect(app.playing() && played && played->get_transform()->transform().position().x > 0.2f,
+           "in Play the Animator runs the clip (Bone x = " +
+               std::to_string(played ? played->get_transform()->transform().position().x : -1.0f) + ")");
+    app.stop();
+    tick(engine, 2);
+}
+
 /** @brief The asset-focused flow: each asset type opens its view; switching asks to save. */
 void test_editor_asset_views() {
     setenv("FIXED_DT", "0.016666", 1);
@@ -2903,6 +3351,9 @@ const TestCase kTests[] = {
     {"scene_document_reparent_rules",        "document", test_scene_document_reparent_rules},
     {"schema_defaults",                      "document", test_schema_defaults},
     {"shader_ball",                          "mesh", test_shader_ball},
+    {"mesh_io_preserves_blender_attributes", "mesh", test_mesh_io_preserves_blender_attributes},
+    {"paint_brushes",                        "mesh", test_paint_brushes},
+    {"clip_model",                           "mesh", test_clip_model},
     {"mesh_mirror",                          "mesh", test_mesh_mirror},
     {"schema_int_enum_labels",               "document", test_schema_int_enum_labels},
     {"primitives_are_closed",                "mesh",     test_primitives_are_closed},
@@ -2945,6 +3396,8 @@ const TestCase kTests[] = {
     {"editor_object_mesh_edit_is_asset",     "editor_shell", test_editor_object_mesh_edit_is_asset},
     {"editor_water_body_mesh_is_editable", "editor_shell", test_editor_water_body_mesh_is_editable},
     {"editor_large_water_tiles_pick_and_save", "editor_shell", test_editor_large_water_tiles_pick_and_save},
+    {"editor_paint_modes", "editor_shell", test_editor_paint_modes},
+    {"editor_animation_timeline", "editor_shell", test_editor_animation_timeline},
     {"editor_mesh_autosave_and_unified_undo", "editor_shell", test_editor_mesh_autosave_and_unified_undo},
     {"editor_mesh_save_refreshes_colliders", "editor_shell", test_editor_mesh_save_refreshes_colliders},
     {"package_renders_identically",          "package",  test_package_renders_identically},

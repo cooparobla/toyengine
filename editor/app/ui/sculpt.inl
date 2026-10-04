@@ -115,10 +115,7 @@
 
     /** @brief The brush's screen radius as a mesh-local distance at `local_hit`. */
     float sculpt_local_radius_(const ViewProj& vp, const glm::vec3& local_hit) {
-        const glm::mat4 w = mesh_world_();
-        const glm::vec3 world = glm::vec3(w * glm::vec4(local_hit, 1.0f));
-        const float scale = std::max({glm::length(glm::vec3(w[0])), glm::length(glm::vec3(w[1])), glm::length(glm::vec3(w[2])), 1e-6f});
-        return sculpt_.radius_px * vp.world_per_pixel(world) / scale;
+        return brush_local_radius_(vp, local_hit, sculpt_.radius_px);
     }
 
     void sculpt_dab_at_(const ViewProj& vp, glm::vec2 px, std::vector<uint32_t>& moved) {
@@ -265,30 +262,40 @@
     /** @brief The brush circle (on the surface when over the mesh) and the F / Shift+F gauge. */
     void draw_sculpt_overlay_(imm::Context& ctx, const ViewProj& vp) {
         if (!sculpt_active_) return;
+        draw_brush_overlay_(ctx, vp, sculpt_.radius_px, sculpt_.strength, sculpt_resize_, stroke_.active, stroke_.active && stroke_.invert);
+    }
+
+    /**
+     * @brief The brush circle every brush mode draws (Sculpt, Vertex / Weight Paint): on the
+     *        surface when over the mesh with an inner strength ring, a screen circle otherwise,
+     *        and the F / Shift+F gauge while `resize` is active.
+     */
+    void draw_brush_overlay_(imm::Context& ctx, const ViewProj& vp, float radius_px, float strength, const SculptResize& resize,
+                             bool stroking, bool inverted) {
         const glm::vec2 m = ctx.mouse();
-        const glm::vec4 col = stroke_.active && stroke_.invert ? glm::vec4(0.55f, 0.75f, 1.0f, 0.9f) : glm::vec4(1.0f, 1.0f, 1.0f, 0.85f);
-        if (sculpt_resize_.active) {
-            const glm::vec2 c = sculpt_resize_.start;
-            const float r = sculpt_.radius_px;
+        const glm::vec4 col = inverted ? glm::vec4(0.55f, 0.75f, 1.0f, 0.9f) : glm::vec4(1.0f, 1.0f, 1.0f, 0.85f);
+        if (resize.active) {
+            const glm::vec2 c = resize.start;
+            const float r = radius_px;
             for (int i = 0; i < 64; ++i) {
                 const float a0 = 6.2831853f * i / 64, a1 = 6.2831853f * (i + 1) / 64;
                 ctx.line(c + glm::vec2(std::cos(a0), std::sin(a0)) * r, c + glm::vec2(std::cos(a1), std::sin(a1)) * r, col, 1.5f);
             }
-            if (sculpt_resize_.strength) ctx.circle(c, std::max(2.0f, r * sculpt_.strength), imm::with_alpha(ctx.style.accent, 0.35f));
+            if (resize.strength) ctx.circle(c, std::max(2.0f, r * strength), imm::with_alpha(ctx.style.accent, 0.35f));
             char buf[64];
-            if (sculpt_resize_.strength) std::snprintf(buf, sizeof(buf), "Strength %.2f", sculpt_.strength);
-            else std::snprintf(buf, sizeof(buf), "Radius %.0f px", sculpt_.radius_px);
+            if (resize.strength) std::snprintf(buf, sizeof(buf), "Strength %.2f", strength);
+            else std::snprintf(buf, sizeof(buf), "Radius %.0f px", radius_px);
             shadow_text_(ctx, c + glm::vec2(-30, -8), buf, et_.viewport.overlay_text);
             return;
         }
-        if (!viewport_hovered_ && !stroke_.active) return;
+        if (!viewport_hovered_ && !stroking) return;
         glm::vec3 hit, n;
         if (sculpt_hit_(vp, m, hit, n)) {
             const glm::mat4 w = mesh_world_();
-            const float r = sculpt_local_radius_(vp, hit);
+            const float r = brush_local_radius_(vp, hit, radius_px);
             const glm::vec3 u = glm::normalize(glm::cross(n, std::abs(n.z) < 0.9f ? glm::vec3(0, 0, 1) : glm::vec3(1, 0, 0)));
             const glm::vec3 v = glm::cross(n, u);
-            std::optional<glm::vec2> prev, first;
+            std::optional<glm::vec2> prev;
             for (int i = 0; i <= 48; ++i) {
                 const float a = 6.2831853f * i / 48;
                 const glm::vec3 p = hit + (u * std::cos(a) + v * std::sin(a)) * r + n * (r * 0.02f);
@@ -299,13 +306,13 @@
             // The inner ring shows the strength.
             for (int i = 0; i < 32; ++i) {
                 const float a0 = 6.2831853f * i / 32, a1 = 6.2831853f * (i + 1) / 32;
-                const float rr = r * std::max(0.08f, sculpt_.strength * 0.6f);
+                const float rr = r * std::max(0.08f, strength * 0.6f);
                 auto qa = vp.project(glm::vec3(w * glm::vec4(hit + (u * std::cos(a0) + v * std::sin(a0)) * rr, 1.0f)));
                 auto qb = vp.project(glm::vec3(w * glm::vec4(hit + (u * std::cos(a1) + v * std::sin(a1)) * rr, 1.0f)));
                 if (qa && qb) ctx.line(*qa, *qb, imm::with_alpha(col, 0.4f), 1.0f);
             }
         } else {
-            const float r = sculpt_.radius_px;
+            const float r = radius_px;
             for (int i = 0; i < 48; ++i) {
                 const float a0 = 6.2831853f * i / 48, a1 = 6.2831853f * (i + 1) / 48;
                 ctx.line(m + glm::vec2(std::cos(a0), std::sin(a0)) * r, m + glm::vec2(std::cos(a1), std::sin(a1)) * r,

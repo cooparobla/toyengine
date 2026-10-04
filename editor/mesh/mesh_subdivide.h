@@ -35,6 +35,11 @@ inline glm::vec2 corner_uv(const Face& f, uint32_t v) {
     return glm::vec2(0.0f);
 }
 
+/** @brief A corner part-way between two (UV and colour interpolated). */
+inline Corner lerp_corner(uint32_t v, const Corner& a, const Corner& b, float t) {
+    return {v, glm::mix(a.uv, b.uv, t), glm::mix(a.color, b.color, t)};
+}
+
 /** @brief Cut vertices on undirected edges, created on demand in min -> max order. */
 struct EdgeCuts {
     EditMesh* m;
@@ -46,9 +51,8 @@ struct EdgeCuts {
         if (it != cuts.end()) return it->second;
         std::vector<uint32_t> ids;
         for (int j = 1; j <= n; ++j) {
-            ids.push_back(static_cast<uint32_t>(m->positions.size()));
             const float s = static_cast<float>(j) / static_cast<float>(n + 1);
-            m->positions.push_back(glm::mix(m->positions[e.first], m->positions[e.second], s));
+            ids.push_back(m->add_vertex_lerp(glm::mix(m->positions[e.first], m->positions[e.second], s), e.first, e.second, s));
         }
         return cuts.emplace(e, std::move(ids)).first->second;
     }
@@ -91,22 +95,25 @@ inline void subdivide(EditMesh& m, MeshSelection& sel, int cuts) {
             // Grid point (i along c0->c1, j along c0->c3).
             std::vector<uint32_t> grid(static_cast<size_t>((N + 1) * (N + 1)));
             std::vector<glm::vec2> guv(grid.size());
+            std::vector<glm::vec4> gcol(grid.size());
             auto G = [&](int i, int j) -> uint32_t& { return grid[static_cast<size_t>(j * (N + 1) + i)]; };
             auto UV = [&](int i, int j) -> glm::vec2& { return guv[static_cast<size_t>(j * (N + 1) + i)]; };
+            auto COL = [&](int i, int j) -> glm::vec4& { return gcol[static_cast<size_t>(j * (N + 1) + i)]; };
             for (int j = 0; j <= N; ++j) {
                 for (int i = 0; i <= N; ++i) {
                     const float u = static_cast<float>(i) / N, v = static_cast<float>(j) / N;
                     UV(i, j) = glm::mix(glm::mix(c[0].uv, c[1].uv, u), glm::mix(c[3].uv, c[2].uv, u), v);
+                    COL(i, j) = glm::mix(glm::mix(c[0].color, c[1].color, u), glm::mix(c[3].color, c[2].color, u), v);
                     uint32_t id;
                     if (j == 0) id = ec.at(c[0].v, c[1].v, i);
                     else if (j == N) id = ec.at(c[3].v, c[2].v, i);
                     else if (i == 0) id = ec.at(c[0].v, c[3].v, j);
                     else if (i == N) id = ec.at(c[1].v, c[2].v, j);
                     else {
-                        id = static_cast<uint32_t>(m.positions.size());
                         const glm::vec3 p = glm::mix(glm::mix(m.positions[c[0].v], m.positions[c[1].v], u),
                                                      glm::mix(m.positions[c[3].v], m.positions[c[2].v], u), v);
-                        m.positions.push_back(p);
+                        id = m.add_vertex_mix(p, {{c[0].v, (1 - u) * (1 - v)}, {c[1].v, u * (1 - v)},
+                                                  {c[2].v, u * v}, {c[3].v, (1 - u) * v}});
                     }
                     G(i, j) = id;
                 }
@@ -116,35 +123,36 @@ inline void subdivide(EditMesh& m, MeshSelection& sel, int cuts) {
                     Face q;
                     q.smooth = f.smooth;
                     q.slot = f.slot;
-                    q.corners = {{G(i, j), UV(i, j)}, {G(i + 1, j), UV(i + 1, j)}, {G(i + 1, j + 1), UV(i + 1, j + 1)}, {G(i, j + 1), UV(i, j + 1)}};
+                    q.corners = {{G(i, j), UV(i, j), COL(i, j)}, {G(i + 1, j), UV(i + 1, j), COL(i + 1, j)},
+                                 {G(i + 1, j + 1), UV(i + 1, j + 1), COL(i + 1, j + 1)}, {G(i, j + 1), UV(i, j + 1), COL(i, j + 1)}};
                     out_faces.push_back(q);
                 }
             }
         } else if (k == 3) {
             // Lattice point (i along c0->c1, j along c0->c2), i + j <= N.
-            std::map<std::pair<int, int>, std::pair<uint32_t, glm::vec2>> pts;
-            auto P = [&](int i, int j) -> std::pair<uint32_t, glm::vec2> {
+            std::map<std::pair<int, int>, Corner> pts;
+            auto P = [&](int i, int j) -> Corner {
                 auto it = pts.find({i, j});
                 if (it != pts.end()) return it->second;
                 const float u = static_cast<float>(i) / N, v = static_cast<float>(j) / N;
                 const glm::vec2 uv = c[0].uv + (c[1].uv - c[0].uv) * u + (c[2].uv - c[0].uv) * v;
+                const glm::vec4 col = c[0].color + (c[1].color - c[0].color) * u + (c[2].color - c[0].color) * v;
                 uint32_t id;
                 if (j == 0) id = ec.at(c[0].v, c[1].v, i);
                 else if (i == 0) id = ec.at(c[0].v, c[2].v, j);
                 else if (i + j == N) id = ec.at(c[1].v, c[2].v, j);
                 else {
-                    id = static_cast<uint32_t>(m.positions.size());
                     const glm::vec3 a = m.positions[c[0].v], b = m.positions[c[1].v], d = m.positions[c[2].v];
-                    m.positions.push_back(a + (b - a) * u + (d - a) * v);
+                    id = m.add_vertex_mix(a + (b - a) * u + (d - a) * v, {{c[0].v, 1 - u - v}, {c[1].v, u}, {c[2].v, v}});
                 }
-                return pts[{i, j}] = {id, uv};
+                return pts[{i, j}] = Corner{id, uv, col};
             };
             auto tri = [&](std::pair<int, int> x, std::pair<int, int> y, std::pair<int, int> z) {
-                const auto px = P(x.first, x.second), py = P(y.first, y.second), pz = P(z.first, z.second);
+                const Corner px = P(x.first, x.second), py = P(y.first, y.second), pz = P(z.first, z.second);
                 Face t;
                 t.smooth = f.smooth;
                 t.slot = f.slot;
-                t.corners = {{px.first, px.second}, {py.first, py.second}, {pz.first, pz.second}};
+                t.corners = {px, py, pz};
                 out_faces.push_back(t);
             };
             for (int j = 0; j < N; ++j) {
@@ -157,11 +165,13 @@ inline void subdivide(EditMesh& m, MeshSelection& sel, int cuts) {
             // N-gon: a centre point; each corner becomes one face.
             glm::vec3 centre(0.0f);
             glm::vec2 cuv(0.0f);
-            for (const auto& cc : c) { centre += m.positions[cc.v]; cuv += cc.uv; }
+            glm::vec4 ccol(0.0f);
+            std::vector<std::pair<uint32_t, float>> src;
+            for (const auto& cc : c) { centre += m.positions[cc.v]; cuv += cc.uv; ccol += cc.color; src.push_back({cc.v, 1.0f}); }
             centre /= static_cast<float>(k);
             cuv /= static_cast<float>(k);
-            const uint32_t cid = static_cast<uint32_t>(m.positions.size());
-            m.positions.push_back(centre);
+            ccol /= static_cast<float>(k);
+            const uint32_t cid = m.add_vertex_mix(centre, src);
             for (size_t i = 0; i < k; ++i) {
                 const Corner& cur = c[i];
                 const Corner& nxt = c[(i + 1) % k];
@@ -174,13 +184,13 @@ inline void subdivide(EditMesh& m, MeshSelection& sel, int cuts) {
                 // the middle segment belongs to exactly one of the two corner faces.
                 for (int j = 1; j <= (N + 1) / 2 && j <= cuts; ++j) {
                     const float s = static_cast<float>(j) / N;
-                    q.corners.push_back({ec.at(cur.v, nxt.v, j), glm::mix(cur.uv, nxt.uv, s)});
+                    q.corners.push_back(lerp_corner(ec.at(cur.v, nxt.v, j), cur, nxt, s));
                 }
-                q.corners.push_back({cid, cuv});
+                q.corners.push_back({cid, cuv, ccol});
                 std::vector<Corner> back;
                 for (int j = 1; j <= N / 2 && j <= cuts; ++j) {
                     const float s = static_cast<float>(j) / N;
-                    back.push_back({ec.at(cur.v, prv.v, j), glm::mix(cur.uv, prv.uv, s)});
+                    back.push_back(lerp_corner(ec.at(cur.v, prv.v, j), cur, prv, s));
                 }
                 for (auto it = back.rbegin(); it != back.rend(); ++it) q.corners.push_back(*it);
                 out_faces.push_back(q);
@@ -198,7 +208,7 @@ inline void subdivide(EditMesh& m, MeshSelection& sel, int cuts) {
             const Corner& y = f.corners[(i + 1) % k];
             nc.push_back(x);
             if (!ec.has(x.v, y.v)) continue;
-            for (int j = 1; j <= cuts; ++j) nc.push_back({ec.at(x.v, y.v, j), glm::mix(x.uv, y.uv, static_cast<float>(j) / N)});
+            for (int j = 1; j <= cuts; ++j) nc.push_back(lerp_corner(ec.at(x.v, y.v, j), x, y, static_cast<float>(j) / N));
         }
         f.corners = std::move(nc);
     }
@@ -260,19 +270,28 @@ inline void catmull_clark(EditMesh& m, MeshSelection& sel, int levels = 1) {
             const float n = static_cast<float>(es.size());
             vp[v] = (Q + 2.0f * R + (n - 3.0f) * S) / n;
         }
-        EditMesh out;
-        out.passthrough = m.passthrough;
-        out.positions = vp;
+        // Built fresh, so carry over everything that is not geometry; vertices keep their own
+        // data, edge points mix their endpoints', face points their face's.
+        EditMesh out = m;
+        out.faces.clear();
+        out.positions.resize(nv);
+        for (uint32_t v = 0; v < nv; ++v) out.positions[v] = vp[v];
         const uint32_t ebase = static_cast<uint32_t>(nv);
-        for (const auto& p : ep) out.positions.push_back(p);
+        for (size_t e = 0; e < ne; ++e) out.add_vertex_mix(ep[e], {{t.edges[e].first, 1.0f}, {t.edges[e].second, 1.0f}});
         const uint32_t fbase = static_cast<uint32_t>(out.positions.size());
-        for (const auto& p : fp) out.positions.push_back(p);
+        for (size_t f = 0; f < nf; ++f) {
+            std::vector<std::pair<uint32_t, float>> src;
+            for (const auto& cc : m.faces[f].corners) src.push_back({cc.v, 1.0f});
+            out.add_vertex_mix(fp[f], src);
+        }
         for (uint32_t f = 0; f < nf; ++f) {
             const auto& c = m.faces[f].corners;
             const size_t k = c.size();
             glm::vec2 fuv(0.0f);
-            for (const auto& cc : c) fuv += cc.uv;
+            glm::vec4 fcol(0.0f);
+            for (const auto& cc : c) { fuv += cc.uv; fcol += cc.color; }
             fuv /= static_cast<float>(k);
+            fcol /= static_cast<float>(k);
             for (size_t i = 0; i < k; ++i) {
                 const Corner& cur = c[i];
                 const Corner& nxt = c[(i + 1) % k];
@@ -280,10 +299,10 @@ inline void catmull_clark(EditMesh& m, MeshSelection& sel, int levels = 1) {
                 Face q;
                 q.smooth = m.faces[f].smooth;
                 q.slot = m.faces[f].slot;
-                q.corners = {{cur.v, cur.uv},
-                             {ebase + t.face_edge(f, static_cast<int>(i)), (cur.uv + nxt.uv) * 0.5f},
-                             {fbase + f, fuv},
-                             {ebase + t.face_edge(f, static_cast<int>(i) - 1), (cur.uv + prv.uv) * 0.5f}};
+                q.corners = {{cur.v, cur.uv, cur.color},
+                             subdiv_detail::lerp_corner(ebase + t.face_edge(f, static_cast<int>(i)), cur, nxt, 0.5f),
+                             {fbase + static_cast<uint32_t>(f), fuv, fcol},
+                             subdiv_detail::lerp_corner(ebase + t.face_edge(f, static_cast<int>(i) - 1), cur, prv, 0.5f)};
                 out.faces.push_back(q);
             }
         }

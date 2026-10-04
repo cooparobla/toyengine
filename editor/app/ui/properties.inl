@@ -304,6 +304,7 @@
     void draw_tool_tab_(imm::Context& ctx) {
         using I = imm::Icon;
         if (in_sculpt_mode_()) { draw_sculpt_tool_panel_(ctx); return; }
+        if (in_paint_mode_()) { draw_paint_tool_panel_(ctx); return; }
         static const char* tool_names[] = {"Select Box", "Move", "Rotate", "Scale", "Cursor"};
         static const I tool_icons[] = {I::SelectBox, I::Move, I::Rotate, I::Scale, I::Cursor};
         const int t = static_cast<int>(tool_);
@@ -318,6 +319,7 @@
         if (mesh_edit_view_() && mesh_.open()) {
             if (ctx.collapsing_header("Symmetry", true)) draw_symmetry_panel_(ctx, edit_symmetry_);
             draw_mesh_tools_(ctx);
+            draw_vertex_groups_panel_(ctx);
         }
         if (ctx.collapsing_header("Workspace", false, nullptr, I::Asset)) {
             ctx.property_bool("Grid", &show_grid_);
@@ -449,7 +451,7 @@
         }
         if (ctx.collapsing_header("Transform", true, nullptr, I::Orientation)) {
             glm::vec3 p, r, s;
-            doc_.get_transform(id, p, r, s);
+            get_object_transform_(id, p, r, s);
             glm::vec3 np = p, nr = r, ns = s;
             bool active = false, finished = false;
             auto track = [&]() { active |= ctx.last_group_active(); finished |= ctx.last_deactivated(); };
@@ -460,7 +462,7 @@
             const bool cs = ctx.drag_float_stacked("Scale", &ns.x, 3, 0.01f, "%.3f");
             track();
             if ((cp || cr || cs) && editable) {
-                apply_(doc_.set_transform(id, np, nr, ns, cp ? "Move" : cr ? "Rotate" : "Scale", active ? "props_transform" : std::string()));
+                set_object_transform_(id, np, nr, ns, cp ? "Move" : cr ? "Rotate" : "Scale", active ? "props_transform" : std::string());
             }
             if (finished) doc_.end_merge();
         }

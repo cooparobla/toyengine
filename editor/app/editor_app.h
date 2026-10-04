@@ -24,6 +24,9 @@
 #include "asset_documents.h"
 #include "editor_theme.h"
 #include "sculpt_preview.h"
+#include "paint_preview.h"
+#include "../anim/clip_model.h"
+#include "../anim/clip_pose.h"
 #include "file_dialog.h"
 #include "project.h"
 #include "scene_sync.h"
@@ -101,7 +104,7 @@ using coopa::input::Mods;
  */
 enum class AssetType { None = 0, Scene, Object, Mesh, Material, Texture };
 /** @brief Blender's interaction modes for a mesh object (the viewport header's mode dropdown). */
-enum class InteractionMode { Object = 0, Edit, Sculpt };
+enum class InteractionMode { Object = 0, Edit, Sculpt, VertexPaint, WeightPaint };
 /** @brief Viewport shading, Blender's four buttons. */
 enum class Shading { Wireframe = 0, Solid = 1, MaterialPreview = 2, Full = 3 };
 /** @brief The Properties editor's tabs. */
@@ -425,9 +428,11 @@ public:
     }
 
     /** @brief Which document Ctrl+Z acts on: what the user is looking at / pointing at. */
-    enum class UndoTarget { Scene, Mesh, Material, Config };
+    enum class UndoTarget { Scene, Mesh, Material, Config, Clip };
     UndoTarget undo_target_() const {
-        if ((mesh_edit_view_() || in_sculpt_mode_()) && mesh_.open()) return UndoTarget::Mesh;
+        if ((mesh_edit_view_() || in_brush_mode_()) && mesh_.open()) return UndoTarget::Mesh;
+        // The Timeline's clip: while the panel is under the mouse, or while recording keys.
+        if (anim_clip_.open() && show_bottom_ && bottom_view_ == 1 && (timeline_hovered_ || anim_record_)) return UndoTarget::Clip;
         if (active_type_ == AssetType::Material && material_.open()) return UndoTarget::Material;
         const bool config_tab = prop_tab_ == PropTab::Render || prop_tab_ == PropTab::Output || prop_tab_ == PropTab::World;
         if (properties_hovered_ && config_tab) return UndoTarget::Config;
@@ -440,6 +445,9 @@ public:
             case UndoTarget::Material: material_.do_undo(); refresh_material_preview_(); break;
             case UndoTarget::Config: config_.do_undo(); apply_config_live(); break;
             case UndoTarget::Scene: scene_undo_(); break;
+            case UndoTarget::Clip:
+                if (const ClipModel* m = anim_clip_.undo.undo()) { anim_clip_.model = *m; anim_save_clip_(); anim_sel_keys_.clear(); }
+                break;
         }
     }
     void redo() {
@@ -448,6 +456,9 @@ public:
             case UndoTarget::Material: material_.do_redo(); refresh_material_preview_(); break;
             case UndoTarget::Config: config_.do_redo(); apply_config_live(); break;
             case UndoTarget::Scene: scene_redo_(); break;
+            case UndoTarget::Clip:
+                if (const ClipModel* m = anim_clip_.undo.redo()) { anim_clip_.model = *m; anim_save_clip_(); anim_sel_keys_.clear(); }
+                break;
         }
     }
 
@@ -592,6 +603,7 @@ public:
         deferred_.push_back([this] {
             const std::string anchor = (doc_.path().empty() ? sync_.fallback_path : doc_.path()).string();
             try {
+                engine_.assets().reload_changed();   // clip files the Timeline wrote since they were loaded
                 coopa::scene::Scene scene = coopa::scene::SceneLoader::load_from_node(doc_.node(), anchor);
                 play_scene_ = &engine_.push_scene(std::move(scene), true);
                 engine_.set_edit_mode(false);
@@ -1044,7 +1056,7 @@ private:
         if (asset_view_() && preview_scene_) update_preview_();
     }
 
-    void pre_render_(float) {
+    void pre_render_(float dt) {
         // Scale the UI to the display's points (2x framebuffer pixels on Retina).
         ui_scale_ = std::max(1.0f, engine_.display_scale());
         if (auto* canvas = canvas_canvas_()) canvas->scaler.scale_factor = ui_scale_;
@@ -1058,6 +1070,8 @@ private:
         }
         if (!playing() || asset_view_()) camera_.make_main();
         sculpt_frame_();
+        paint_frame_();
+        timeline_frame_(dt);
         if (grid_wanted_) push_grid_lines_();
     }
 
@@ -1158,7 +1172,9 @@ private:
         std::string view;
         switch (shading_) {
             case Shading::Wireframe: view = "wireframe"; break;
-            case Shading::Solid: view = "solid"; break;
+            // Painting shows its colours / weights in full: Solid tints only lightly by albedo,
+            // so a paint mode looks at Solid through Material Preview's studio rig instead.
+            case Shading::Solid: view = paint_active_ ? "material_preview" : "solid"; break;
             case Shading::MaterialPreview: view = "material_preview"; break;
             case Shading::Full: view = full_debug_view_.empty() ? std::string("off") : full_debug_view_; break;
         }
@@ -1285,6 +1301,8 @@ private:
 #include "ui/viewport_chrome.inl"
 #include "ui/mesh_tools.inl"
 #include "ui/sculpt.inl"
+#include "ui/paint.inl"
+#include "ui/timeline.inl"
 #include "ui/assets.inl"
 
     // --- helpers shared by the panels ---
@@ -1687,11 +1705,12 @@ private:
             else loopcut_.active = false;
             return;
         }
-        if (in_sculpt_mode_()) {
+        if (in_brush_mode_()) {
             // Wheel zoom stays (below is skipped), so handle it here first.
-            if (hovered && in.scroll.y != 0.0f && !ctx.popup_hovered() && !stroke_.active) camera_.dolly(in.scroll.y);
+            if (hovered && in.scroll.y != 0.0f && !ctx.popup_hovered() && !stroke_.active && !paint_stroke_.active) camera_.dolly(in.scroll.y);
             if (hovered && in.pressed[1]) ctx.open_popup("mode_menu_vp", m);
-            handle_sculpt_input_(ctx, *vp, hovered);
+            if (in_sculpt_mode_()) handle_sculpt_input_(ctx, *vp, hovered);
+            else handle_paint_input_(ctx, *vp, hovered);
             return;
         }
         if (hovered && (in.scroll.x != 0.0f || in.scroll.y != 0.0f) && !ctx.popup_hovered()) {
@@ -1772,6 +1791,8 @@ private:
     /** @brief Keys that act while the mouse is over the viewport (Blender's 3D View keymap). */
     void viewport_keymap_(imm::Context& ctx, const ViewProj& vp, bool mesh_edit, bool can_edit) {
         const glm::vec2 m = ctx.mouse();
+        // Blender's I in Object Mode: key the selected rig objects on the Timeline's clip.
+        if (!mesh_edit && can_edit && !in_brush_mode_() && anim_rig_ && ctx.shortcut(Key::I)) anim_insert_keys_();
         // --- views (any mode) ---
         if (ctx.shortcut(Key::Kp1)) camera_.axis_view('f', false);
         if (ctx.shortcut(Key::Kp1, Mods::Control)) camera_.axis_view('f', true);
@@ -2207,7 +2228,7 @@ private:
     void set_world_transform_(ObjectId id, const glm::mat4& world, const glm::mat4& parent_world, const std::string& label) {
         glm::vec3 p, r, s;
         decompose_(glm::inverse(parent_world) * world, p, r, s);
-        apply_(doc_.set_transform(id, p, r, s, label));
+        apply_(doc_.set_transform(id, p, r, s, label));   // structural (reparenting): always the document
     }
 
     void parent_selection_to_active_() {
@@ -2233,11 +2254,11 @@ private:
     void clear_transform_(int what) {
         for (ObjectId id : doc_.selection()) {
             glm::vec3 p, r, s;
-            doc_.get_transform(id, p, r, s);
+            get_object_transform_(id, p, r, s);
             if (what == 0) p = glm::vec3(0.0f);
             if (what == 1) r = glm::vec3(0.0f);
             if (what == 2) s = glm::vec3(1.0f);
-            apply_(doc_.set_transform(id, p, r, s, what == 0 ? "Clear Location" : what == 1 ? "Clear Rotation" : "Clear Scale"));
+            set_object_transform_(id, p, r, s, what == 0 ? "Clear Location" : what == 1 ? "Clear Rotation" : "Clear Scale");
         }
     }
 
@@ -2410,9 +2431,9 @@ private:
         if (active_type_ == AssetType::Mesh) {
             // The mesh asset is already the document: just switch mode.
             if (mode_ == mode) return true;
-            if (mode_ == InteractionMode::Sculpt) sculpt_end_();
+            mode_end_(mode_);
             mode_ = mode;
-            if (mode_ == InteractionMode::Sculpt) sculpt_begin_();
+            mode_begin_(mode_);
             return true;
         }
         if (asset_view_()) return false;
@@ -2420,9 +2441,9 @@ private:
         if (!id) return false;
         if (edit_object_ == id) {
             if (mode_ == mode) return true;
-            if (mode_ == InteractionMode::Sculpt) sculpt_end_();
+            mode_end_(mode_);
             mode_ = mode;
-            if (mode_ == InteractionMode::Sculpt) sculpt_begin_();
+            mode_begin_(mode_);
             return true;
         }
         if (edit_object_) exit_mesh_mode_();
@@ -2436,8 +2457,9 @@ private:
         mode_ = mode;
         scene_uploaded_revision_ = 0;
         if (isolate_in_edit_) isolate_(id);
-        if (mode_ == InteractionMode::Sculpt) sculpt_begin_();
-        log_info(std::string(mode == InteractionMode::Sculpt ? "Sculpt" : "Edit") + " mode: " + project_.relative(path) +
+        mode_begin_(mode_);
+        static const char* kModeNames[] = {"Object", "Edit", "Sculpt", "Vertex Paint", "Weight Paint"};
+        log_info(std::string(kModeNames[static_cast<int>(mode)]) + " mode: " + project_.relative(path) +
                  " (Tab to leave, Ctrl+S saves it)");
         return true;
     }
@@ -2446,14 +2468,14 @@ private:
     void exit_mesh_mode_() {
         if (active_type_ == AssetType::Mesh && !edit_object_) {
             if (modal_.active()) { apply_modal_(modal_.kind(), ModalTransform::Result{}); modal_.cancel(); mesh_.undo.end_merge(); }
-            if (mode_ == InteractionMode::Sculpt) sculpt_end_();
+            mode_end_(mode_);
             loopcut_.active = false;
             mode_ = InteractionMode::Object;
             return;
         }
         if (!edit_object_) return;
         if (modal_.active()) { apply_modal_(modal_.kind(), ModalTransform::Result{}); modal_.cancel(); mesh_.undo.end_merge(); }
-        if (mode_ == InteractionMode::Sculpt) sculpt_end_();
+        mode_end_(mode_);
         loopcut_.active = false;
         unisolate_();
         edit_object_ = 0;
@@ -2551,7 +2573,7 @@ private:
 
     /** @brief Shows the edited (unsaved) mesh on every live object that uses its file. */
     void push_mesh_to_scene_() {
-        if (sculpt_active_) return;   // Sculpt Mode shows its own dynamic mesh (sculpt_frame_)
+        if (sculpt_active_ || paint_active_) return;   // Sculpt / paint modes show their own dynamic mesh
         if (!mesh_.open() || mesh_.path.empty() || scene_uploaded_revision_ == mesh_.geometry_revision) return;
         if (!mesh_.dirty() && !edit_object_ && !force_scene_push_) return;
         force_scene_push_ = false;
@@ -2669,7 +2691,7 @@ private:
         drag_starts_.clear();
         for (ObjectId id : doc_.selection()) {
             DragStart s;
-            doc_.get_transform(id, s.pos, s.rot, s.scl);
+            get_object_transform_(id, s.pos, s.rot, s.scl);
             auto* live = sync_.live(id);
             if (live && live->parent() && live->parent()->get_transform()) {
                 s.parent_world = live->parent()->get_transform()->transform().get_world_matrix();
@@ -2719,7 +2741,7 @@ private:
                 scl = s.scl * scale;
                 if (multi) pos = glm::vec3(inv_parent * glm::vec4(pivot + (s.world_pos - pivot) * scale, 1.0f));
             }
-            apply_(doc_.set_transform(id, pos, rot, scl, kind == 0 ? "Move" : kind == 1 ? "Rotate" : "Scale", "transform"));
+            set_object_transform_(id, pos, rot, scl, kind == 0 ? "Move" : kind == 1 ? "Rotate" : "Scale", "transform");
         }
     }
 
@@ -2776,8 +2798,10 @@ private:
                 if (a && b) ctx.line(*a, *b, col, t);
             }
         };
-        if (in_sculpt_mode_()) {
-            draw_sculpt_overlay_(ctx, *vp);   // no selection outline or wire while sculpting, as in Blender
+        if (in_brush_mode_()) {
+            // No selection outline or wire while sculpting or painting, as in Blender.
+            if (in_sculpt_mode_()) draw_sculpt_overlay_(ctx, *vp);
+            else draw_paint_overlay_(ctx, *vp);
         } else if (asset_view_() && !mesh_edit) {
             // Asset previews (mesh in Object Mode, material lookdev, texture): no scene overlays.
         } else if (!mesh_edit) {
@@ -3172,6 +3196,30 @@ private:
     uint64_t sculpt_cache_geom_ = 0, sculpt_preview_pos_ = 0;
     Stroke stroke_;
     SculptResize sculpt_resize_;
+    // Vertex / Weight Paint (ui/paint.inl); the cache and grid above are shared (exclusive modes).
+    PaintSettings vpaint_;
+    PaintSettings wpaint_;
+    PaintPreview paint_preview_;
+    bool paint_active_ = false;
+    uint64_t paint_geom_ = 0, paint_pos_ = 0;
+    PaintPreview::Show paint_shown_;
+    PaintStroke paint_stroke_;
+    SculptResize paint_resize_;
+    uint32_t active_group_ = 0;
+    float edit_assign_weight_ = 1.0f;
+    std::map<ObjectId, std::string> paint_saved_shader_;   ///< Surface shaders swapped for editor_paint
+    // Animation Timeline (ui/timeline.inl).
+    ObjectId anim_rig_ = 0;
+    ClipDocument anim_clip_;
+    float anim_time_ = 0.0f;
+    bool anim_playing_ = false, anim_record_ = false, anim_show_rest_ = false, anim_posed_ = false, anim_scrubbing_ = false;
+    std::shared_ptr<coopa::anim::AnimationClip> anim_runtime_;
+    uint64_t anim_runtime_rev_ = 0, anim_pose_rev_ = 0;
+    float anim_pose_time_ = -1.0f;
+    std::set<ClipModel::KeyRef> anim_sel_keys_;
+    KeyDrag anim_drag_;
+    int bottom_view_ = 0;   ///< Bottom area: 0 Console, 1 Timeline
+    bool timeline_hovered_ = false;
     MeshSelection modal_base_sel_;
     ModalKind pending_modal_kind_ = ModalKind::None;
     std::optional<glm::vec3> pending_modal_axis_;

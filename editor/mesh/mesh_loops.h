@@ -288,14 +288,17 @@ inline LoopCutResult loop_cut(EditMesh& m, MeshSelection& sel, Edge seed_edge, i
     std::vector<std::vector<uint32_t>> cutv(ne);
     for (size_t i = 0; i < ne; ++i) {
         for (int j = 1; j <= cuts; ++j) {
-            cutv[i].push_back(static_cast<uint32_t>(m.positions.size()));
-            m.positions.push_back(glm::mix(m.positions[a[i]], m.positions[b[i]], frac(j)));
+            cutv[i].push_back(m.add_vertex_lerp(glm::mix(m.positions[a[i]], m.positions[b[i]], frac(j)), a[i], b[i], frac(j)));
         }
     }
     auto P = [&](size_t i, int j) -> uint32_t { return j == 0 ? a[i] : j == cuts + 1 ? b[i] : cutv[i][static_cast<size_t>(j - 1)]; };
     auto uv_in = [&](const Face& f, uint32_t v) {
         for (const auto& c : f.corners) if (c.v == v) return c.uv;
         return glm::vec2(0.0f);
+    };
+    auto col_in = [&](const Face& f, uint32_t v) {
+        for (const auto& c : f.corners) if (c.v == v) return c.color;
+        return glm::vec4(1.0f);
     };
 
     // Split each ring quad into cuts + 1 quads (first piece reuses the slot).
@@ -308,13 +311,14 @@ inline LoopCutResult loop_cut(EditMesh& m, MeshSelection& sel, Edge seed_edge, i
         const int k = t.corner_of_edge(ring.faces[i], ring.edges[i]);
         const bool forward = q.corners[static_cast<size_t>(k)].v == a[i];   // walks a_i -> b_i
         const glm::vec2 ua = uv_in(q, a[i]), ub = uv_in(q, b[i]), ua1 = uv_in(q, a[i1]), ub1 = uv_in(q, b[i1]);
+        const glm::vec4 ca = col_in(q, a[i]), cb = col_in(q, b[i]), ca1 = col_in(q, a[i1]), cb1 = col_in(q, b[i1]);
         for (int j = 0; j <= cuts; ++j) {
             const float s0 = j == 0 ? 0.0f : frac(j), s1 = j + 1 == cuts + 1 ? 1.0f : frac(j + 1);
             Face piece;
             piece.smooth = q.smooth;
             piece.slot = q.slot;
-            Corner c0{P(i, j), glm::mix(ua, ub, s0)}, c1{P(i, j + 1), glm::mix(ua, ub, s1)};
-            Corner c2{P(i1, j + 1), glm::mix(ua1, ub1, s1)}, c3{P(i1, j), glm::mix(ua1, ub1, s0)};
+            Corner c0{P(i, j), glm::mix(ua, ub, s0), glm::mix(ca, cb, s0)}, c1{P(i, j + 1), glm::mix(ua, ub, s1), glm::mix(ca, cb, s1)};
+            Corner c2{P(i1, j + 1), glm::mix(ua1, ub1, s1), glm::mix(ca1, cb1, s1)}, c3{P(i1, j), glm::mix(ua1, ub1, s0), glm::mix(ca1, cb1, s0)};
             piece.corners = forward ? std::vector<Corner>{c0, c1, c2, c3} : std::vector<Corner>{c3, c2, c1, c0};
             if (j == 0) m.faces[ring.faces[i]] = piece;
             else appended.push_back(piece);
@@ -331,13 +335,14 @@ inline LoopCutResult loop_cut(EditMesh& m, MeshSelection& sel, Edge seed_edge, i
             const uint32_t x = face.corners[c].v, y = face.corners[(c + 1) % n].v;
             if (!((x == va && y == vb) || (x == vb && y == va))) continue;
             const glm::vec2 ux = face.corners[c].uv, uy = face.corners[(c + 1) % n].uv;
+            const glm::vec4 cx = face.corners[c].color, cy = face.corners[(c + 1) % n].color;
             std::vector<Corner> ins;
             for (int j = 1; j <= cuts; ++j) {
                 // Walking x -> y: from a toward b when x == a.
                 const int jj = x == va ? j : cuts + 1 - j;
                 const float s = frac(jj);
                 const float along = x == va ? s : 1.0f - s;
-                ins.push_back({P(ring_index, jj), glm::mix(ux, uy, along)});
+                ins.push_back({P(ring_index, jj), glm::mix(ux, uy, along), glm::mix(cx, cy, along)});
             }
             face.corners.insert(face.corners.begin() + static_cast<std::ptrdiff_t>(c + 1), ins.begin(), ins.end());
             return;

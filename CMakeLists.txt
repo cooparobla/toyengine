@@ -164,7 +164,7 @@ target_link_libraries(toyengine_tests PRIVATE coopa::caml)
 # roughly the time of its slowest group. It also means `ctest -R toyengine_math` is an
 # instant, device-free check a dev can run on every save. See test.cpp's file doc for
 # the argument forms the binary accepts.
-foreach(_toy_test_group math config scene world water yaml_io render_pixel render_ui render_material render_cloth render_terrain render_water editor_host)
+foreach(_toy_test_group math config scene world water rig yaml_io render_pixel render_ui render_material render_cloth render_terrain render_water render_rig editor_host)
     add_test(NAME toyengine_${_toy_test_group}
              COMMAND toyengine_tests --group ${_toy_test_group})
 endforeach()

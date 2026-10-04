@@ -182,6 +182,7 @@ inline void append_mesh(EditMesh& dst, const EditMesh& src, const glm::mat4& xf,
         sel.faces.insert(static_cast<uint32_t>(dst.faces.size()));
         dst.faces.push_back(std::move(nf));
     }
+    dst.sync_vertex_data();   // the added vertices join no vertex groups
 }
 
 } // namespace toy::editor

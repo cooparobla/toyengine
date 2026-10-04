@@ -337,7 +337,13 @@ inline const std::map<std::string, ComponentSchema>& schemas() {
             f_asset("side_mesh", "meshes", ".yaml", true, true, "tile_side_flat"),
             f_material(),
         }});
-        add({"Animator", "Animation", {f_bool("auto_play", true, true), f_float("speed", 1.0f, 0.01f), f_float("default_crossfade", 0.2f, 0.005f)}});
+        // A rig root: its clips are `states` (managed in the Timeline -- one file each under
+        // animations/<object>/), `auto_play` names the state played on start.
+        add({"Animator", "Animation", {f_string("auto_play", "", true), f_float("speed", 1.0f, 0.01f, 0.0f, 100.0f),
+                                       f_float("default_crossfade", 0.0f, 0.005f, 0.0f, 10.0f)}});
+        // A mesh deformed by a rig's bones: `bones:` (or, omitted, the mesh's vertex groups)
+        // resolved under `rig:` (default: the nearest Animator up the hierarchy).
+        add({"SkinnedMeshRenderer", "Rendering", {f_asset("mesh_path", "meshes", ".yaml", true, true, "", true), f_string("rig", "")}});
         return t;
     }();
     return table;

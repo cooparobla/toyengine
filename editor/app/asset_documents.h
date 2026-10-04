@@ -28,6 +28,8 @@ namespace toy::editor {
 inline size_t edit_mesh_bytes(const EditMesh& m) {
     size_t b = sizeof(EditMesh) + m.positions.size() * sizeof(glm::vec3) + m.faces.size() * sizeof(Face);
     for (const Face& f : m.faces) b += f.corners.size() * sizeof(Corner);
+    for (const auto& w : m.weights) b += sizeof(w) + w.size() * sizeof(VertexWeight);
+    b += m.joints.size() * sizeof(glm::ivec4) + m.joint_weights.size() * sizeof(glm::vec4);
     return b;
 }
 
@@ -90,6 +92,7 @@ struct MeshDocument {
               const std::string& merge_key = {}) {
         EditMesh before = mesh;
         fn(mesh, selection);
+        mesh.sync_vertex_data();   // any vertex an operation added without data joins no group
         selection.validate(mesh);
         undo.push(label, std::move(before), mesh, merge_key);
         ++geometry_revision;

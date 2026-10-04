@@ -412,6 +412,7 @@ inline void register_scene_components(coopa::gfx::core::Device& device,
                 for (const auto& b : node.at("bones")) bones.push_back(b.get_value<std::string>());
                 smr->set_bones(std::move(bones));
             }
+            if (node.contains("rig")) smr->set_rig(node.at("rig").get_value<std::string>());
         });
 }
 

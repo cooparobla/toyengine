@@ -165,10 +165,7 @@ inline void extrude_faces(EditMesh& m, MeshSelection& sel, float distance) {
     std::map<uint32_t, uint32_t> dup;
     for (uint32_t f : region) {
         for (const auto& c : m.faces[f].corners) {
-            if (!dup.count(c.v)) {
-                dup[c.v] = static_cast<uint32_t>(m.positions.size());
-                m.positions.push_back(m.positions[c.v] + n * distance);
-            }
+            if (!dup.count(c.v)) dup[c.v] = m.add_vertex_like(m.positions[c.v] + n * distance, c.v);
         }
     }
     std::vector<Face> sides;
@@ -181,7 +178,8 @@ inline void extrude_faces(EditMesh& m, MeshSelection& sel, float distance) {
             Face side;
             side.smooth = m.faces[f].smooth;
             side.slot = m.faces[f].slot;
-            side.corners = {{a.v, {u0, 0}}, {b.v, {u1, 0}}, {dup[b.v], {u1, 1}}, {dup[a.v], {u0, 1}}};
+            side.corners = {{a.v, {u0, 0}, a.color}, {b.v, {u1, 0}, b.color},
+                            {dup[b.v], {u1, 1}, b.color}, {dup[a.v], {u0, 1}, a.color}};
             sides.push_back(side);
         }
         for (auto& corner : c) corner.v = dup[corner.v];
@@ -203,7 +201,7 @@ inline void extrude_edges(EditMesh& m, MeshSelection& sel, const glm::vec3& offs
     std::map<uint32_t, uint32_t> dup;
     std::set<Edge> new_edges;
     auto copy = [&](uint32_t v) {
-        if (!dup.count(v)) { dup[v] = static_cast<uint32_t>(m.positions.size()); m.positions.push_back(m.positions[v] + offset); }
+        if (!dup.count(v)) dup[v] = m.add_vertex_like(m.positions[v] + offset, v);
         return dup[v];
     };
     for (const auto& e : sel.edges) {
@@ -217,8 +215,10 @@ inline void extrude_edges(EditMesh& m, MeshSelection& sel, const glm::vec3& offs
             }
         }
         const uint32_t a2 = copy(a), b2 = copy(b);
+        const uint32_t src = (it != ef.end() && !it->second.empty()) ? it->second.front() : ~0u;
+        const glm::vec4 ca = m.corner_color(src, a), cb = m.corner_color(src, b);
         Face f;
-        f.corners = {{a, {0, 0}}, {b, {1, 0}}, {b2, {1, 1}}, {a2, {0, 1}}};
+        f.corners = {{a, {0, 0}, ca}, {b, {1, 0}, cb}, {b2, {1, 1}, cb}, {a2, {0, 1}, ca}};
         m.faces.push_back(f);
         new_edges.insert(make_edge(a2, b2));
     }
@@ -238,13 +238,17 @@ inline void inset_faces(EditMesh& m, MeshSelection& sel, float amount) {
         auto& c = m.faces[f].corners;
         const glm::vec3 ctr = m.face_center(f);
         glm::vec2 uv_ctr(0.0f);
-        for (const auto& k : c) uv_ctr += k.uv;
+        glm::vec4 col_ctr(0.0f);
+        for (const auto& k : c) { uv_ctr += k.uv; col_ctr += k.color; }
         uv_ctr /= static_cast<float>(c.size());
+        col_ctr /= static_cast<float>(c.size());
         std::vector<Corner> inner;
         for (const auto& k : c) {
-            const uint32_t nv = static_cast<uint32_t>(m.positions.size());
-            m.positions.push_back(glm::mix(m.positions[k.v], ctr, amount));
-            inner.push_back({nv, glm::mix(k.uv, uv_ctr, amount)});
+            // The inner vertex sits `amount` of the way to the centre: its data likewise.
+            std::vector<std::pair<uint32_t, float>> src{{k.v, 1.0f - amount}};
+            for (const auto& o : c) src.push_back({o.v, amount / static_cast<float>(c.size())});
+            const uint32_t nv = m.add_vertex_mix(glm::mix(m.positions[k.v], ctr, amount), src);
+            inner.push_back({nv, glm::mix(k.uv, uv_ctr, amount), glm::mix(k.color, col_ctr, amount)});
         }
         for (size_t i = 0; i < c.size(); ++i) {
             const size_t j = (i + 1) % c.size();
@@ -310,11 +314,14 @@ inline void bevel_edges(EditMesh& m, MeshSelection& sel, float width) {
             const uint32_t other = prev == o ? next : prev;
             const glm::vec3 dir = m.positions[other] - m.positions[v];
             const float dl = glm::length(dir);
-            const glm::vec3 p = m.positions[v] + (dl > 1e-8f ? dir / dl * std::min(w, dl * 0.45f) : glm::vec3(0.0f));
-            const uint32_t nv = static_cast<uint32_t>(m.positions.size());
-            m.positions.push_back(p);
+            const float slide = dl > 1e-8f ? std::min(w, dl * 0.45f) : 0.0f;
+            const glm::vec3 p = m.positions[v] + (dl > 1e-8f ? dir / dl * slide : glm::vec3(0.0f));
+            const uint32_t nv = m.add_vertex_lerp(p, v, other, dl > 1e-8f ? slide / dl : 0.0f);
             return {nv, other};
         };
+        // Colours of the corners the split replaces, for the strip and the corner fills.
+        const glm::vec4 col_a1 = m.corner_color(F1, e.first), col_b1 = m.corner_color(F1, e.second);
+        const glm::vec4 col_a2 = m.corner_color(F2, e.first), col_b2 = m.corner_color(F2, e.second);
         const auto [a1, an1] = split(F1, e.first, e.second);
         const auto [b1, bn1] = split(F1, e.second, e.first);
         const auto [a2, an2] = split(F2, e.first, e.second);
@@ -334,13 +341,13 @@ inline void bevel_edges(EditMesh& m, MeshSelection& sel, float width) {
                 auto& c = m.faces[f].corners;
                 for (size_t i = 0; i < c.size(); ++i) {
                     const size_t j = (i + 1) % c.size();
-                    if ((c[i].v == v && c[j].v == nbr)) { c.insert(c.begin() + static_cast<long>(j), Corner{nv, c[i].uv}); touched = f; break; }
-                    if ((c[i].v == nbr && c[j].v == v)) { c.insert(c.begin() + static_cast<long>(j), Corner{nv, c[j].uv}); touched = f; break; }
+                    if ((c[i].v == v && c[j].v == nbr)) { c.insert(c.begin() + static_cast<long>(j), Corner{nv, c[i].uv, c[i].color}); touched = f; break; }
+                    if ((c[i].v == nbr && c[j].v == v)) { c.insert(c.begin() + static_cast<long>(j), Corner{nv, c[j].uv, c[j].color}); touched = f; break; }
                 }
             }
             return touched;
         };
-        auto close_corner = [&](uint32_t v, uint32_t n1, uint32_t v1, uint32_t n2, uint32_t v2) {
+        auto close_corner = [&](uint32_t v, uint32_t n1, uint32_t v1, uint32_t n2, uint32_t v2, glm::vec4 col) {
             const int g = insert_between(F1, F2, v, n1, v1);
             const int h = insert_between(F1, F2, v, n2, v2);
             if (g >= 0 && g == h) {
@@ -354,16 +361,16 @@ inline void bevel_edges(EditMesh& m, MeshSelection& sel, float width) {
             for (const auto& f : m.faces) for (const auto& c : f.corners) still_used |= c.v == v;
             if (!still_used) return;
             Face tri;
-            tri.corners = {{v1, {0, 0}}, {v, {0.5f, 1}}, {v2, {1, 0}}};
+            tri.corners = {{v1, {0, 0}, col}, {v, {0.5f, 1}, col}, {v2, {1, 0}, col}};
             m.faces.push_back(tri);
         };
-        close_corner(e.first, an1, a1, an2, a2);
-        close_corner(e.second, bn1, b1, bn2, b2);
+        close_corner(e.first, an1, a1, an2, a2, glm::mix(col_a1, col_a2, 0.5f));
+        close_corner(e.second, bn1, b1, bn2, b2, glm::mix(col_b1, col_b2, 0.5f));
 
         // The strip: shares a1-b1 with F1 (walked the opposite way) and a2-b2 with F2.
         Face strip;
-        if (f1_forward) strip.corners = {{b1, {0, 0}}, {a1, {1, 0}}, {a2, {1, 1}}, {b2, {0, 1}}};
-        else            strip.corners = {{a1, {0, 0}}, {b1, {1, 0}}, {b2, {1, 1}}, {a2, {0, 1}}};
+        if (f1_forward) strip.corners = {{b1, {0, 0}, col_b1}, {a1, {1, 0}, col_a1}, {a2, {1, 1}, col_a2}, {b2, {0, 1}, col_b2}};
+        else            strip.corners = {{a1, {0, 0}, col_a1}, {b1, {1, 0}, col_b1}, {b2, {1, 1}, col_b2}, {a2, {0, 1}, col_a2}};
         m.faces.push_back(strip);
         new_faces.insert(static_cast<uint32_t>(m.faces.size() - 1));
     }
@@ -422,8 +429,10 @@ inline void merge_at_center(EditMesh& m, MeshSelection& sel) {
     const auto vs = sel.affected_vertices(m);
     if (vs.size() < 2) return;
     const glm::vec3 c = selection_center(m, sel);
-    const uint32_t keep = *vs.begin();
-    m.positions[keep] = c;
+    // The merged vertex takes the mean of their data (a new vertex, then the old ones go).
+    std::vector<std::pair<uint32_t, float>> src;
+    for (uint32_t v : vs) src.push_back({v, 1.0f});
+    const uint32_t keep = m.add_vertex_mix(c, src);
     for (auto& f : m.faces) for (auto& k : f.corners) if (vs.count(k.v)) k.v = keep;
     m.cleanup_faces();
     m.compact();
@@ -536,7 +545,7 @@ inline bool fill_face(EditMesh& m, MeshSelection& sel) {
     m.bounds(lo, hi);
     if (glm::dot(n, c - (lo + hi) * 0.5f) < 0.0f) std::reverse(ids.begin(), ids.end());
     Face f;
-    for (uint32_t v : ids) f.corners.push_back({v, glm::vec2(0.0f)});
+    for (uint32_t v : ids) f.corners.push_back({v, glm::vec2(0.0f), m.has_colors ? m.vertex_color(v) : glm::vec4(1.0f)});
     m.faces.push_back(f);
     sel.mode = SelectMode::Face;
     sel.faces = {static_cast<uint32_t>(m.faces.size() - 1)};
@@ -552,7 +561,7 @@ inline void duplicate_faces(EditMesh& m, MeshSelection& sel) {
     for (uint32_t f : region) {
         Face nf = m.faces[f];
         for (auto& c : nf.corners) {
-            if (!dup.count(c.v)) { dup[c.v] = static_cast<uint32_t>(m.positions.size()); m.positions.push_back(m.positions[c.v]); }
+            if (!dup.count(c.v)) dup[c.v] = m.add_vertex_like(m.positions[c.v], c.v);
             c.v = dup[c.v];
         }
         m.faces.push_back(nf);

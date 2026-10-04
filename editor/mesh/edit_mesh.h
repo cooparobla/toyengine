@@ -9,9 +9,17 @@
  *
  *   - `positions` are WELDED: one entry per topological vertex, so moving a vertex moves
  *     every face that uses it;
- *   - each face corner carries its own UV; normals are not stored at all -- they are
- *     derived on export from the geometry (flat, or averaged across a face's `smooth`
- *     neighbours), so they can never go stale after an edit.
+ *   - each face corner carries its own UV and colour; normals are not stored at all -- they
+ *     are derived on export from the geometry (flat, or averaged across a face's `smooth`
+ *     neighbours), so they can never go stale after an edit. A corner keeps the tangent its
+ *     file gave it, re-exported exactly as long as the corner's normal is unchanged; a new
+ *     corner, or one whose face turned, gets one computed from the UVs;
+ *   - vertex-group weights (Blender's, the file's `weights:` -- one {group: weight} map per
+ *     vertex) are per WELDED vertex, like `positions`. So are `joints` / `joint_weights`
+ *     (SkinnedMeshSource's palette form), carried through untouched when present.
+ *
+ * Every other key of the file is carried through export unchanged (bones, lods, ...), except
+ * the per-raw-vertex arrays, which are rebuilt (`k_regenerated_keys`).
  *
  * A face list rather than a half-edge structure: the file format is already N-gons with
  * per-corner attributes, the operations at authoring scale are cheap with a rebuilt edge
@@ -41,6 +49,19 @@ namespace toy::editor {
 struct Corner {
     uint32_t  v = 0;
     glm::vec2 uv{0.0f};
+    glm::vec4 color{1.0f};   ///< Vertex colour (linear RGBA); written only when EditMesh::has_colors.
+    /// The tangent the file gave this corner (xyz + handedness; zero = none, a corner an edit
+    /// created) and the normal it had then. Re-exported unchanged while the corner's normal is
+    /// still that one -- see export_tangents().
+    glm::vec4 tangent{0.0f};
+    glm::vec3 tangent_normal{0.0f};
+};
+
+/** @brief One vertex-group weight on a vertex. */
+struct VertexWeight {
+    uint32_t group = 0;      ///< Index into EditMesh::groups.
+    float    weight = 0.0f;
+    bool operator==(const VertexWeight& o) const { return group == o.group && weight == o.weight; }
 };
 
 struct Face {
@@ -58,20 +79,138 @@ struct EditMesh {
     /// Material slot names (`material_slots`); empty = one unnamed slot. Faces pick a slot
     /// with Face::slot; the engine draws each slot's faces as one part with its own material.
     std::vector<std::string> slots;
-    /// Keys carried through import -> export untouched (lods, cull_screen_size, ...).
+    /// The mesh has a colour attribute (Corner::color is written). Off for a mesh that never
+    /// had one, so it is not given an all-white one.
+    bool has_colors = false;
+    /// Vertex groups (Blender's): names, and per vertex its sparse weights. `weights` is either
+    /// empty (no vertex has any) or parallel to `positions` -- see sync_vertex_data().
+    std::vector<std::string> groups;
+    std::vector<std::vector<VertexWeight>> weights;
+    /// SkinnedMeshSource's per-vertex palette form, carried through when the file has it
+    /// (empty, or parallel to `positions`).
+    std::vector<glm::ivec4> joints;
+    std::vector<glm::vec4>  joint_weights;
+    /// Keys carried through import -> export untouched (lods, cull_screen_size, bones, ...).
     Node passthrough = Node::mapping();
 
     bool operator==(const EditMesh& o) const {
         if (positions != o.positions || faces.size() != o.faces.size() || slots != o.slots) return false;
+        if (has_colors != o.has_colors || groups != o.groups || weights != o.weights) return false;
+        if (joints != o.joints || joint_weights != o.joint_weights) return false;
         for (size_t i = 0; i < faces.size(); ++i) {
             const auto& a = faces[i];
             const auto& b = o.faces[i];
             if (a.smooth != b.smooth || a.slot != b.slot || a.corners.size() != b.corners.size()) return false;
             for (size_t k = 0; k < a.corners.size(); ++k) {
                 if (a.corners[k].v != b.corners[k].v || a.corners[k].uv != b.corners[k].uv) return false;
+                if (has_colors && a.corners[k].color != b.corners[k].color) return false;
             }
         }
         return true;
+    }
+
+    // --- per-vertex data ---
+
+    /**
+     * @brief Keeps the per-vertex arrays parallel to `positions` after an operation added
+     *        vertices (new ones get no weights / an unused joint palette). Removals go through
+     *        compact(), which remaps them. Cheap; call after any topology edit.
+     */
+    void sync_vertex_data() {
+        if (!weights.empty() || !groups.empty()) weights.resize(positions.size());
+        if (!joints.empty()) joints.resize(positions.size(), glm::ivec4(-1));
+        if (!joint_weights.empty()) joint_weights.resize(positions.size(), glm::vec4(0.0f));
+    }
+
+    /**
+     * @brief Adds a vertex at `p` whose per-vertex data (weights, skinning palette) is the
+     *        weighted mix of `sources` (vertex, weight) -- what an operation calls for every
+     *        vertex it creates, so vertex groups follow the geometry. Weights normalise.
+     */
+    uint32_t add_vertex_mix(const glm::vec3& p, const std::vector<std::pair<uint32_t, float>>& sources) {
+        sync_vertex_data();
+        const uint32_t nv = static_cast<uint32_t>(positions.size());
+        positions.push_back(p);
+        float total = 0.0f;
+        for (const auto& s : sources) total += std::max(s.second, 0.0f);
+        if (!weights.empty()) {
+            std::vector<VertexWeight> mixed;
+            for (const auto& [v, k] : sources) {
+                if (v >= nv || k <= 0.0f || total <= 0.0f) continue;
+                for (const auto& w : weights[v]) {
+                    auto it = std::find_if(mixed.begin(), mixed.end(), [&](const VertexWeight& x) { return x.group == w.group; });
+                    if (it == mixed.end()) mixed.push_back({w.group, w.weight * k / total});
+                    else it->weight += w.weight * k / total;
+                }
+            }
+            weights.push_back(std::move(mixed));
+        }
+        // The palette can't be blended index-wise: take the strongest source's.
+        uint32_t best = sources.empty() ? 0u : sources.front().first;
+        float best_k = -1.0f;
+        for (const auto& [v, k] : sources) if (k > best_k && v < nv) { best = v; best_k = k; }
+        if (!joints.empty()) joints.push_back(best < nv && best_k >= 0.0f ? joints[best] : glm::ivec4(-1));
+        if (!joint_weights.empty()) joint_weights.push_back(best < nv && best_k >= 0.0f ? joint_weights[best] : glm::vec4(0.0f));
+        return nv;
+    }
+    /** @brief add_vertex_mix() with one source: a copy of `like`'s data at `p`. */
+    uint32_t add_vertex_like(const glm::vec3& p, uint32_t like) { return add_vertex_mix(p, {{like, 1.0f}}); }
+    /** @brief add_vertex_mix() between `a` and `b`, `t` of the way to `b`. */
+    uint32_t add_vertex_lerp(const glm::vec3& p, uint32_t a, uint32_t b, float t) {
+        return add_vertex_mix(p, {{a, 1.0f - t}, {b, t}});
+    }
+
+    /** @brief The colour of the corner of face `f` at vertex `v` (white if `f` lacks `v`). */
+    glm::vec4 corner_color(uint32_t f, uint32_t v) const {
+        if (f < faces.size()) for (const auto& c : faces[f].corners) if (c.v == v) return c.color;
+        return glm::vec4(1.0f);
+    }
+
+    /** @brief Vertex `v`'s weight in `group` (0 if it has none). */
+    float weight(uint32_t v, uint32_t group) const {
+        if (v >= weights.size()) return 0.0f;
+        for (const auto& w : weights[v]) if (w.group == group) return w.weight;
+        return 0.0f;
+    }
+
+    /** @brief Sets vertex `v`'s weight in `group`; a weight of 0 removes the vertex from it. */
+    void set_weight(uint32_t v, uint32_t group, float w) {
+        if (v >= positions.size()) return;
+        if (weights.size() < positions.size()) weights.resize(positions.size());
+        auto& list = weights[v];
+        for (auto it = list.begin(); it != list.end(); ++it) {
+            if (it->group != group) continue;
+            if (w <= 0.0f) list.erase(it);
+            else it->weight = w;
+            return;
+        }
+        if (w > 0.0f) list.push_back({group, w});
+    }
+
+    /** @brief Index of vertex group `name`, adding it if missing. */
+    uint32_t group_index(const std::string& name) {
+        for (uint32_t i = 0; i < groups.size(); ++i) if (groups[i] == name) return i;
+        groups.push_back(name);
+        sync_vertex_data();
+        return static_cast<uint32_t>(groups.size() - 1);
+    }
+
+    /** @brief Removes vertex group `g`, dropping its weights and renumbering the later groups. */
+    void remove_group(uint32_t g) {
+        if (g >= groups.size()) return;
+        groups.erase(groups.begin() + g);
+        for (auto& list : weights) {
+            list.erase(std::remove_if(list.begin(), list.end(), [&](const VertexWeight& w) { return w.group == g; }), list.end());
+            for (auto& w : list) if (w.group > g) --w.group;
+        }
+    }
+
+    /** @brief The colour of vertex `v`: the mean of its corners' colours (white if none). */
+    glm::vec4 vertex_color(uint32_t v) const {
+        glm::vec4 sum(0.0f);
+        float n = 0.0f;
+        for (const auto& f : faces) for (const auto& c : f.corners) if (c.v == v) { sum += c.color; n += 1.0f; }
+        return n > 0.0f ? sum / n : glm::vec4(1.0f);
     }
 
     // --- geometry queries ---
@@ -132,17 +271,30 @@ struct EditMesh {
         if (positions.empty()) lo = hi = glm::vec3(0.0f);
     }
 
-    /** @brief Drops vertices no face uses, remapping indices. */
+    /** @brief Drops vertices no face uses, remapping indices (and the per-vertex arrays). */
     void compact() {
+        sync_vertex_data();
         std::vector<int64_t> remap(positions.size(), -1);
         std::vector<glm::vec3> kept;
+        std::vector<std::vector<VertexWeight>> kept_w;
+        std::vector<glm::ivec4> kept_j;
+        std::vector<glm::vec4> kept_jw;
         for (auto& f : faces) {
             for (auto& c : f.corners) {
-                if (remap[c.v] < 0) { remap[c.v] = static_cast<int64_t>(kept.size()); kept.push_back(positions[c.v]); }
+                if (remap[c.v] < 0) {
+                    remap[c.v] = static_cast<int64_t>(kept.size());
+                    kept.push_back(positions[c.v]);
+                    if (!weights.empty()) kept_w.push_back(weights[c.v]);
+                    if (!joints.empty()) kept_j.push_back(joints[c.v]);
+                    if (!joint_weights.empty()) kept_jw.push_back(joint_weights[c.v]);
+                }
                 c.v = static_cast<uint32_t>(remap[c.v]);
             }
         }
         positions = std::move(kept);
+        if (!weights.empty()) weights = std::move(kept_w);
+        if (!joints.empty()) joints = std::move(kept_j);
+        if (!joint_weights.empty()) joint_weights = std::move(kept_jw);
     }
 
     /** @brief Removes consecutive duplicate corners and faces left with fewer than 3. */
@@ -185,6 +337,11 @@ struct EditMesh {
 // YAML round trip
 // =====================================================================================
 
+/// Keys mesh_to_node() writes itself from the EditMesh (everything else is passthrough).
+inline const std::vector<std::string> k_regenerated_keys = {
+    "vertices", "normals", "uvs", "tangents", "colors", "weights", "joints", "joint_weights",
+    "faces", "material_slots", "face_materials"};
+
 /**
  * @brief Builds an EditMesh from a mesh document. Corner positions equal within `weld_eps`
  *        become one vertex; a face whose stored normals differ from its flat normal is
@@ -194,6 +351,9 @@ inline EditMesh mesh_from_node(const Node& node, float weld_eps = 1e-5f) {
     EditMesh m;
     std::vector<glm::vec3> raw_pos, raw_nrm;
     std::vector<glm::vec2> raw_uv;
+    std::vector<glm::vec4> raw_col, raw_tan;
+    std::vector<glm::ivec4> raw_joints;
+    std::vector<glm::vec4> raw_jw;
     if (node.contains("vertices")) for (const auto& v : node.at("vertices").as_seq()) raw_pos.push_back(as_vec3(v));
     if (node.contains("normals"))  for (const auto& v : node.at("normals").as_seq()) raw_nrm.push_back(as_vec3(v));
     if (node.contains("uvs")) {
@@ -202,6 +362,32 @@ inline EditMesh mesh_from_node(const Node& node, float weld_eps = 1e-5f) {
             raw_uv.push_back({s.size() > 0 ? as_float(s[0]) : 0.0f, s.size() > 1 ? as_float(s[1]) : 0.0f});
         }
     }
+    if (node.contains("colors")) {
+        for (const auto& v : node.at("colors").as_seq()) {
+            const auto& s = v.as_seq();
+            raw_col.push_back({s.size() > 0 ? as_float(s[0]) : 1.0f, s.size() > 1 ? as_float(s[1]) : 1.0f,
+                               s.size() > 2 ? as_float(s[2]) : 1.0f, s.size() > 3 ? as_float(s[3]) : 1.0f});
+        }
+    }
+    m.has_colors = !raw_col.empty();
+    if (node.contains("tangents")) {
+        for (const auto& v : node.at("tangents").as_seq()) {
+            const auto& s = v.as_seq();
+            raw_tan.push_back({s.size() > 0 ? as_float(s[0]) : 0.0f, s.size() > 1 ? as_float(s[1]) : 0.0f,
+                               s.size() > 2 ? as_float(s[2]) : 0.0f, s.size() > 3 ? as_float(s[3]) : 1.0f});
+        }
+    }
+    auto vec4_seq = [&](const char* key, auto& out, auto conv) {
+        if (!node.contains(key)) return;
+        for (const auto& v : node.at(key).as_seq()) {
+            const auto& s = v.as_seq();
+            typename std::decay_t<decltype(out)>::value_type x{};
+            for (int i = 0; i < 4; ++i) x[i] = conv(i < static_cast<int>(s.size()) ? &s[static_cast<size_t>(i)] : nullptr);
+            out.push_back(x);
+        }
+    };
+    vec4_seq("joints", raw_joints, [](const Node* n) { return n ? static_cast<int>(n->get_value<int64_t>()) : -1; });
+    vec4_seq("joint_weights", raw_jw, [](const Node* n) { return n ? as_float(*n) : 0.0f; });
     // Weld by quantized position.
     const float q = 1.0f / std::max(weld_eps, 1e-9f);
     std::map<std::tuple<long long, long long, long long>, uint32_t> weld;
@@ -214,6 +400,33 @@ inline EditMesh mesh_from_node(const Node& node, float weld_eps = 1e-5f) {
             m.positions.push_back(raw_pos[i]);
         }
         raw_to_weld[i] = it->second;
+    }
+    // Per-vertex data from the raw arrays: the first raw corner of each welded vertex wins
+    // (the exporter writes the same groups/palette on every corner of a vertex).
+    std::vector<bool> seen_vertex(m.positions.size(), false);
+    if (node.contains("weights")) {
+        const auto& ws = node.at("weights").as_seq();
+        m.weights.resize(m.positions.size());
+        for (size_t i = 0; i < ws.size() && i < raw_pos.size(); ++i) {
+            const uint32_t v = raw_to_weld[i];
+            if (seen_vertex[v] || !ws[i].is_mapping()) continue;
+            seen_vertex[v] = true;
+            for (const auto& kv : ws[i].as_map()) {
+                const float w = as_float(kv.second);
+                if (w > 0.0f) m.set_weight(v, m.group_index(kv.first.get_value<std::string>()), w);
+            }
+        }
+        bool any = !m.groups.empty();
+        if (!any) m.weights.clear();
+    }
+    if (!raw_joints.empty() || !raw_jw.empty()) {
+        if (!raw_joints.empty()) m.joints.assign(m.positions.size(), glm::ivec4(-1));
+        if (!raw_jw.empty()) m.joint_weights.assign(m.positions.size(), glm::vec4(0.0f));
+        for (size_t i = raw_pos.size(); i-- > 0;) {   // backwards: the first corner wins
+            const uint32_t v = raw_to_weld[i];
+            if (i < raw_joints.size()) m.joints[v] = raw_joints[i];
+            if (i < raw_jw.size()) m.joint_weights[v] = raw_jw[i];
+        }
     }
     if (node.contains("material_slots")) {
         for (const auto& sn : node.at("material_slots").as_seq()) m.slots.push_back(sn.get_value<std::string>());
@@ -236,6 +449,11 @@ inline EditMesh mesh_from_node(const Node& node, float weld_eps = 1e-5f) {
                 Corner c;
                 c.v = raw_to_weld[r];
                 if (r < raw_uv.size()) c.uv = raw_uv[r];
+                if (r < raw_col.size()) c.color = raw_col[r];
+                if (r < raw_tan.size()) {
+                    c.tangent = raw_tan[r];
+                    c.tangent_normal = r < raw_nrm.size() ? raw_nrm[r] : glm::vec3(0.0f);
+                }
                 f.corners.push_back(c);
             }
             if (f.corners.size() < 3) continue;
@@ -250,19 +468,87 @@ inline EditMesh mesh_from_node(const Node& node, float weld_eps = 1e-5f) {
         }
     }
     m.cleanup_faces();
-    for (const char* k : {"lods", "cull_screen_size"}) {
-        if (node.contains(k)) m.passthrough[k] = node.at(k);
+    // Everything the editor does not rebuild rides along to export unchanged.
+    if (node.is_mapping()) {
+        for (const auto& kv : node.as_map()) {
+            const std::string key = kv.first.get_value<std::string>();
+            if (std::find(k_regenerated_keys.begin(), k_regenerated_keys.end(), key) == k_regenerated_keys.end()) {
+                m.passthrough[key] = kv.second;
+            }
+        }
     }
     return m;
+}
+
+/**
+ * @brief Export tangents (xyz + handedness w), one per exported vertex (`corner_ids` maps each
+ *        face corner to one). A corner's authored tangent (Corner::tangent, from the file) is
+ *        kept, exactly, while the exported normal is still the one the file gave that corner
+ *        -- the editor does not rewrite data an edit did not touch. Otherwise it is computed from the
+ *        UVs: each triangle's UV-derived tangent and bitangent summed over the corners sharing
+ *        the exported vertex (they share position, normal and UV, so tangents stay split at
+ *        hard edges and seams), Gram-Schmidt'd against the normal, with the handedness sign.
+ */
+inline std::vector<glm::vec4> export_tangents(const EditMesh& m, const std::vector<std::vector<int64_t>>& corner_ids,
+                                              const std::vector<glm::vec3>& normals, size_t count) {
+    std::vector<glm::vec3> t_sum(count, glm::vec3(0.0f)), b_sum(count, glm::vec3(0.0f));
+    for (size_t f = 0; f < m.faces.size(); ++f) {
+        const auto& c = m.faces[f].corners;
+        for (size_t i = 1; i + 1 < c.size(); ++i) {
+            const size_t k[3] = {0, i, i + 1};
+            const glm::vec3 e1 = m.positions[c[k[1]].v] - m.positions[c[k[0]].v];
+            const glm::vec3 e2 = m.positions[c[k[2]].v] - m.positions[c[k[0]].v];
+            const glm::vec2 d1 = c[k[1]].uv - c[k[0]].uv;
+            const glm::vec2 d2 = c[k[2]].uv - c[k[0]].uv;
+            const float det = d1.x * d2.y - d2.x * d1.y;
+            if (std::abs(det) < 1e-12f) continue;
+            const glm::vec3 t = (e1 * d2.y - e2 * d1.y) / det;
+            const glm::vec3 b = (e2 * d1.x - e1 * d2.x) / det;
+            for (size_t j : k) {
+                t_sum[static_cast<size_t>(corner_ids[f][j])] += t;
+                b_sum[static_cast<size_t>(corner_ids[f][j])] += b;
+            }
+        }
+    }
+    // Authored tangents still valid for their exported vertex.
+    std::vector<glm::vec4> authored(count, glm::vec4(0.0f));
+    for (size_t f = 0; f < m.faces.size(); ++f) {
+        for (size_t k = 0; k < m.faces[f].corners.size(); ++k) {
+            const Corner& c = m.faces[f].corners[k];
+            const size_t id = static_cast<size_t>(corner_ids[f][k]);
+            if (authored[id] != glm::vec4(0.0f) || glm::length(glm::vec3(c.tangent)) < 1e-6f) continue;
+            if (glm::length(c.tangent_normal) > 0.5f &&
+                glm::dot(glm::normalize(c.tangent_normal), normals[id]) > 0.9995f) authored[id] = c.tangent;
+        }
+    }
+    std::vector<glm::vec4> out(count);
+    for (size_t i = 0; i < count; ++i) {
+        if (authored[i] != glm::vec4(0.0f)) {
+            out[i] = authored[i];
+            continue;
+        }
+        const glm::vec3 n = normals[i];
+        glm::vec3 t = t_sum[i] - n * glm::dot(n, t_sum[i]);
+        if (glm::length(t) < 1e-8f) {   // no usable UVs here: any tangent perpendicular to n
+            t = glm::cross(n, std::abs(n.x) < 0.9f ? glm::vec3(1, 0, 0) : glm::vec3(0, 1, 0));
+        }
+        t = glm::normalize(t);
+        const float w = glm::dot(glm::cross(n, t), b_sum[i]) < 0.0f ? -1.0f : 1.0f;
+        out[i] = glm::vec4(t, w);
+    }
+    return out;
 }
 
 /** @brief The engine mesh document for `m` (per-corner arrays, N-gon faces). */
 inline Node mesh_to_node(const EditMesh& m) {
     Node out = Node::mapping();
     Node verts = Node::sequence(), norms = Node::sequence(), uvs = Node::sequence(), faces = Node::sequence();
+    Node colors = Node::sequence(), weights = Node::sequence(), joints = Node::sequence(), jweights = Node::sequence();
     const auto cn = m.corner_normals();
-    // Dedup identical (vertex, normal, uv) corners so files stay small; the engine welds anyway.
-    std::map<std::tuple<uint32_t, int, int, int, int, int>, int64_t> seen;
+    // Dedup identical (vertex, normal, uv, colour) corners so files stay small; the engine welds anyway.
+    std::map<std::tuple<uint32_t, int, int, int, int, int, std::tuple<int, int, int, int>>, int64_t> seen;
+    std::vector<std::vector<int64_t>> corner_ids(m.faces.size());
+    std::vector<glm::vec3> out_normals;
     int64_t next = 0;
     auto qz = [](float v) { return static_cast<int>(std::lround(v * 10000.0f)); };
     for (size_t f = 0; f < m.faces.size(); ++f) {
@@ -270,7 +556,9 @@ inline Node mesh_to_node(const EditMesh& m) {
         for (size_t k = 0; k < m.faces[f].corners.size(); ++k) {
             const Corner& c = m.faces[f].corners[k];
             const glm::vec3 n = cn[f][k];
-            const auto key = std::make_tuple(c.v, qz(n.x), qz(n.y), qz(n.z), qz(c.uv.x), qz(c.uv.y));
+            const glm::vec4 col = m.has_colors ? c.color : glm::vec4(1.0f);
+            const auto key = std::make_tuple(c.v, qz(n.x), qz(n.y), qz(n.z), qz(c.uv.x), qz(c.uv.y),
+                                             std::make_tuple(qz(col.r), qz(col.g), qz(col.b), qz(col.a)));
             auto it = seen.find(key);
             if (it == seen.end()) {
                 it = seen.emplace(key, next++).first;
@@ -281,15 +569,51 @@ inline Node mesh_to_node(const EditMesh& m) {
                 verts.as_seq().push_back(make_float_seq(pv, 3));
                 norms.as_seq().push_back(make_float_seq(nv, 3));
                 uvs.as_seq().push_back(make_float_seq(uv, 2));
+                out_normals.push_back(n);
+                if (m.has_colors) {
+                    float cv[4] = {col.r, col.g, col.b, col.a};
+                    colors.as_seq().push_back(make_float_seq(cv, 4));
+                }
+                Node w = Node::mapping();
+                if (c.v < m.weights.size()) {
+                    for (const auto& vw : m.weights[c.v]) {
+                        if (vw.group < m.groups.size()) w[m.groups[vw.group]] = make_float(vw.weight);
+                    }
+                }
+                weights.as_seq().push_back(w);
+                if (!m.joints.empty()) {
+                    const glm::ivec4 j = c.v < m.joints.size() ? m.joints[c.v] : glm::ivec4(-1);
+                    Node js = Node::sequence();
+                    for (int i = 0; i < 4; ++i) js.as_seq().push_back(Node(static_cast<int64_t>(j[i])));
+                    joints.as_seq().push_back(js);
+                }
+                if (!m.joint_weights.empty()) {
+                    const glm::vec4 jw = c.v < m.joint_weights.size() ? m.joint_weights[c.v] : glm::vec4(0.0f);
+                    float jv[4] = {jw.x, jw.y, jw.z, jw.w};
+                    jweights.as_seq().push_back(make_float_seq(jv, 4));
+                }
             }
+            corner_ids[f].push_back(it->second);
             face.as_seq().push_back(Node(it->second));
         }
         faces.as_seq().push_back(face);
+    }
+    Node tangents = Node::sequence();
+    for (const glm::vec4& t : export_tangents(m, corner_ids, out_normals, static_cast<size_t>(next))) {
+        float tv[4] = {t.x, t.y, t.z, t.w};
+        tangents.as_seq().push_back(make_float_seq(tv, 4));
     }
     out["vertices"] = verts;
     out["normals"] = norms;
     out["uvs"] = uvs;
     out["faces"] = faces;
+    // The rest of Blender's export layout: colours (empty without a colour attribute), one
+    // vertex-group map per vertex, and tangents.
+    out["colors"] = colors;
+    out["weights"] = weights;
+    out["tangents"] = tangents;
+    if (!m.joints.empty()) out["joints"] = joints;
+    if (!m.joint_weights.empty()) out["joint_weights"] = jweights;
     // Material slots (submeshes): written when named, or when any face uses a slot past 0.
     bool any_slot = false;
     for (const auto& f : m.faces) any_slot |= f.slot != 0;

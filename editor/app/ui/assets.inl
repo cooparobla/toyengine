@@ -483,12 +483,32 @@ private:
     // Console (under the viewer)
     // =================================================================================
 
+    /** @brief The bottom area: Console and Timeline tabs. */
     void draw_console_area_(imm::Context& ctx, const imm::Box& area) {
         using I = imm::Icon;
         const imm::Box hb = area_header_(ctx, area, 24);
-        ctx.icon(I::Console, {hb.x + 6, hb.y + 4, hb.h - 8, hb.h - 8}, ctx.style.text_dim);
-        ctx.text_in({hb.x + hb.h + 4, hb.y, 120, hb.h}, "Console", ctx.style.text_dim, 0.0f);
-        draw_console_(ctx, hb, imm::Box{area.x, hb.bottom(), area.w, area.h - hb.h});
+        float x = hb.x + 4;
+        auto tab = [&](const char* id, I ic, const char* label, int index) {
+            const float w = ctx.text_width(label) + hb.h + 12;
+            const imm::Box b{x, hb.y + 2, w, hb.h - 4};
+            bool hov = false, held = false;
+            if (ctx.invisible_button(id, b, &hov, &held)) bottom_view_ = index;
+            if (bottom_view_ == index) ctx.fill_rounded(b, ctx.style.panel_bg);
+            else if (hov) ctx.fill_rounded(b, ctx.style.header_hover);
+            const glm::vec4 c = bottom_view_ == index ? ctx.style.text : ctx.style.text_dim;
+            ctx.icon(ic, {b.x + 4, b.y + 3, b.h - 6, b.h - 6}, c);
+            ctx.text_in({b.x + b.h + 2, b.y, w - b.h, b.h}, label, c, 0.0f);
+            x += w + 2;
+        };
+        tab("bt_console", I::Console, "Console", 0);
+        tab("bt_timeline", I::Play, "Timeline", 1);
+        const imm::Box body{area.x, hb.bottom(), area.w, area.h - hb.h};
+        if (bottom_view_ == 1) {
+            draw_timeline_(ctx, hb, body, x + 10);
+        } else {
+            timeline_hovered_ = false;
+            draw_console_(ctx, hb, body);
+        }
     }
 
     // =================================================================================
@@ -622,7 +642,7 @@ private:
         if (!mr) return;
         switch (active_type_) {
             case AssetType::Mesh:
-                if (!sculpt_active_ && uploaded_revision_ != mesh_.geometry_revision) {
+                if (!sculpt_active_ && !paint_active_ && uploaded_revision_ != mesh_.geometry_revision) {
                     upload_preview_mesh_(mesh_.mesh, "editor/preview_mesh");
                     refresh_material_preview_();
                     apply_slot_preview_materials_();

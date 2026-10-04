@@ -1468,6 +1468,18 @@ private:
             /* cull */ coopa::gfx::CullMode::Back, // closed columns, like any opaque solid
         });
         rc.surface_shaders.add({
+            /* name  */ "editor_paint",   // the toyeditor's Vertex / Weight Paint display -- see
+            /* domain */ coopa::gfx::pipeline::SurfaceShaderDomain::Opaque,   // editor_paint.vert
+            /* vert  */ "editor_paint.vert",   // colour packed in the uv / tangent.w of an
+            /* frag  */ "editor_paint.frag",   // editor-built preview mesh; nothing else uses it
+            /* shadow_vert */ "",
+            /* shadow_frag */ "",
+            /* shadow_cube_vert */ "",
+            /* shadow_cube_frag */ "",
+            /* capture_frag */ "", // Opaque domain -- unused
+            /* cull */ coopa::gfx::CullMode::Back,
+        });
+        rc.surface_shaders.add({
             /* name  */ "water",
             /* domain */ coopa::gfx::pipeline::SurfaceShaderDomain::Transparent,
             /* vert  */ "water.vert",

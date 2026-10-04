@@ -73,6 +73,7 @@ layout(push_constant) uniform DebugViewParams {
     float camera_far;           // pixel_stylize.frag / DofPass's own linearization.
     float camera_is_perspective;
     float editor_ao;            // editor shading (solid / material preview): 1 = apply SSAO, 0 = off
+    float editor_xray_alpha;    // editor shading: surface opacity over the backdrop (X-Ray), 1 = opaque
 } params;
 
 layout(location = 0) out vec4 out_color;
@@ -264,13 +265,13 @@ void main() {
             // Solid ignores material AO (it is lighting-independent), not screen-space AO.
             const GfxAoTerms aot = gfx_ao_terms(1.0, ssao, editor_solid_base(g0.rgb), vec3(0.04), ndotv, 0.5,
                                                 params.ssao_direct_strength);
-            out_color = vec4(editor_solid(N, p2.rgb, camera.camera_pos, g0.rgb, aot), 1.0);
+            out_color = vec4(mix(bg, editor_solid(N, p2.rgb, camera.camera_pos, g0.rgb, aot), params.editor_xray_alpha), 1.0);
             return;
         }
         const vec3 F0 = mix(vec3(0.04), g0.rgb, clamp(g1.a, 0.0, 1.0));
         const GfxAoTerms aot = gfx_ao_terms(g0.a, ssao, g0.rgb, F0, ndotv, clamp(p2.a, 0.04, 1.0), params.ssao_direct_strength);
-        out_color = vec4(editor_material_preview(N, p2.rgb, camera.camera_pos, g0.rgb, g1.a, p2.a, aot,
-                                                 texture(g_emissive, in_uv).rgb), 1.0);
+        out_color = vec4(mix(bg, editor_material_preview(N, p2.rgb, camera.camera_pos, g0.rgb, g1.a, p2.a, aot,
+                                                         texture(g_emissive, in_uv).rgb), params.editor_xray_alpha), 1.0);
         return;
     }
 

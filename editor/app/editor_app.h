@@ -25,6 +25,7 @@
 #include "editor_theme.h"
 #include "sculpt_preview.h"
 #include "paint_preview.h"
+#include "trackpad.h"
 #include "../anim/clip_model.h"
 #include "../anim/clip_pose.h"
 #include "file_dialog.h"
@@ -137,6 +138,7 @@ public:
         canvas_->on_draw = [this](coopa::ui::imm::Context& ctx) { draw_(ctx); };
         // While the running game has the mouse (play mode, after a click in the viewer), the
         // editor UI sees nothing but the keys that hand it back (Esc) or stop play (F5).
+        trackpad::install();   // pinch and trackpad-vs-wheel scrolls (macOS)
         canvas_->filter_input = [this](imm::FrameInput& in) {
             if (!game_focused_) return;
             in.mouse = glm::vec2(-1e6f);
@@ -234,6 +236,11 @@ public:
     Project& project() { return project_; }
     EditorCamera& camera() { return camera_; }
     Gizmo& gizmo() { return gizmo_; }
+    float grid_step() const { return grid_step_(); }
+    /** @brief Tests: treat scrolls as trackpad gestures (or a wheel); queue a pinch. */
+    void set_trackpad_for_test(std::optional<bool> trackpad) { trackpad_override_ = trackpad; }
+    void pinch_for_test(double magnify) { pinch_override_ += magnify; }
+    int grid_normal_axis() const { return grid_normal_axis_(); }
     /**
      * @brief Shows the scene / object document that is loaded (without reloading it) -- e.g.
      *        after a material was created and opened from it. Tests and internal flows.
@@ -669,7 +676,7 @@ public:
             out = {camera_.focus, camera_.yaw_deg, camera_.pitch_deg, camera_.distance, camera_.ortho, true};
             if (in.valid && !now_asset) {
                 camera_.focus = in.focus; camera_.yaw_deg = in.yaw; camera_.pitch_deg = in.pitch;
-                camera_.distance = in.distance; camera_.ortho = in.ortho;
+                camera_.distance = in.distance; camera_.ortho = in.ortho; camera_.auto_ortho = false;
                 camera_.apply();
             }
         }
@@ -1072,6 +1079,9 @@ private:
         sculpt_frame_();
         paint_frame_();
         timeline_frame_(dt);
+        // X-Ray: surfaces turn translucent over the backdrop (Solid / Material Preview; paint
+        // modes look through the surface they paint on, so they stay opaque).
+        engine_.render_config().editor_xray_alpha = xray_surfaces_() ? xray_alpha_ : 1.0f;
         if (grid_wanted_) push_grid_lines_();
     }
 
@@ -1123,9 +1133,66 @@ private:
     }
 
     /**
-     * @brief The ground grid, as 3D lines in the scene's line pass -- occluded by geometry, as
-     *        Blender's is. Faint, adaptive spacing (lines stay ~25+ px apart), fading out with
-     *        distance from the focus point; the X / Y axes tinted.
+     * @brief Scroll and pinch over the viewport, as Blender reads them.
+     *   Wheel:     zoom; Shift pans vertically, Ctrl horizontally; sideways (tilt) orbits.
+     *              Deltas are used as-is, so macOS smooth scrolling zooms smoothly.
+     *   Trackpad:  two-finger swipe orbits (both ways, so the view can tilt up / down),
+     *              Shift+swipe pans, Ctrl+swipe zooms, pinch zooms; the momentum coast
+     *              after the fingers lift is ignored, so the view stops with them.
+     */
+    void scroll_navigate_(const imm::FrameInput& in, double pinch, bool shift, bool ctrl) {
+        const auto& tp = trackpad::state();
+        const bool trackpad = trackpad_override_ ? *trackpad_override_ : tp.scroll_is_trackpad;
+        if (pinch != 0.0) camera_.dolly(static_cast<float>(pinch) * 7.5f);   // +10% spread ~ one notch closer
+        if (in.scroll == glm::vec2(0.0f)) return;
+        if (trackpad) {
+            if (tp.momentum && !trackpad_override_) return;
+            if (shift) camera_.pan(in.scroll * glm::vec2(-20.0f, -20.0f), viewport_box_.h);
+            else if (ctrl) camera_.dolly(in.scroll.y);
+            else camera_.orbit(in.scroll * -6.0f);
+            return;
+        }
+        if (in.scroll.y != 0.0f) {
+            if (shift) camera_.pan(glm::vec2(0.0f, in.scroll.y * -20.0f), viewport_box_.h);
+            else if (ctrl) camera_.pan(glm::vec2(in.scroll.y * -20.0f, 0.0f), viewport_box_.h);
+            else camera_.dolly(in.scroll.y);
+        }
+        if (in.scroll.x != 0.0f && !shift && !ctrl) camera_.orbit(glm::vec2(in.scroll.x * -6.0f, 0.0f));
+    }
+
+    /** @brief X-Ray is on and the shading has surfaces to see through (Blender: not in Rendered). */
+    bool xray_surfaces_() const {
+        return xray_ && !playing() && !in_brush_mode_() &&
+               (shading_ == Shading::Solid || shading_ == Shading::MaterialPreview);
+    }
+
+    /**
+     * @brief The grid's current spacing: the smallest 1 / 5 x 10^k (down to 1 mm) keeping lines
+     *        ~25+ px apart at the camera's zoom. Ctrl / Snap moves in these units, so -- as in
+     *        Blender -- zooming in gives a finer grid and finer snapping.
+     */
+    float grid_step_() const {
+        const float target = std::max(camera_.distance / 20.0f, 0.001f);
+        const float base = std::pow(10.0f, std::floor(std::log10(target)));
+        if (target <= base * 1.0001f) return base;
+        return target <= base * 5.0001f ? base * 5.0f : base * 10.0f;
+    }
+
+    /** @brief The world axis (0 X, 1 Y, 2 Z) the grid is drawn perpendicular to: the view axis in
+     *         an axis-aligned view (numpad 1 / 3: the XZ / YZ planes, as Blender), else Z (floor). */
+    int grid_normal_axis_() const {
+        const glm::vec3 f = camera_.forward();
+        if (std::abs(f.x) > 0.999f) return 0;
+        if (std::abs(f.y) > 0.999f) return 1;
+        return 2;
+    }
+
+    /**
+     * @brief The grid, as 3D lines in the scene's line pass -- occluded by geometry, as Blender's
+     *        is. The floor (Z = 0) normally; looking straight down X or Y, the plane facing the
+     *        view instead (through the origin in perspective; in ortho, behind the scene, as
+     *        Blender's backdrop grid). Faint, adaptive spacing (grid_step_()), fading out with
+     *        distance from the focus point; the axes through the origin tinted.
      */
     void push_grid_lines_() {
         auto pack = [](glm::vec4 c) {
@@ -1134,37 +1201,44 @@ private:
         };
         std::vector<render::DebugLine>& out = engine_.pipeline().debug_lines();
         const imm::Style& st = canvas_->context().style;
-        const float d = camera_.distance;
-        float step = 0.1f;
-        while (step * 40.0f < d * 2.0f) step *= (std::fmod(std::log10(step) + 10.0f, 1.0f) < 0.1f) ? 5.0f : 2.0f;
+        const glm::vec4* axis_col[3] = {&st.axis_x, &st.axis_y, &st.axis_z};
+        const float step = grid_step_();
         const float half = step * 30.0f;
-        const glm::vec2 c(std::round(camera_.focus.x / step) * step, std::round(camera_.focus.y / step) * step);
+        const bool depth_tested = !xray_surfaces_();   // X-Ray: seen through the translucent surfaces
+        // The plane: normal axis `nax`, spanned by `ua` / `va`, at `w` along the normal.
+        const int nax = grid_normal_axis_();
+        const int ua = nax == 0 ? 1 : 0, va = nax == 2 ? 1 : 2;
+        const bool aligned_ortho = camera_.ortho && (nax != 2 || std::abs(camera_.forward().z) > 0.999f);
+        const float w = aligned_ortho ? camera_.focus[nax] + camera_.forward()[nax] * camera_.distance * 10.0f : 0.0f;
+        auto at3 = [&](float u, float v) { glm::vec3 p; p[ua] = u; p[va] = v; p[nax] = w; return p; };
+        const glm::vec2 f2(camera_.focus[ua], camera_.focus[va]);
+        const glm::vec2 c = glm::round(f2 / step) * step;
         const int n = 30;
-        auto seg_line = [&](glm::vec3 a, glm::vec3 b, glm::vec4 col) {
+        auto seg_line = [&](glm::vec2 a, glm::vec2 b, glm::vec4 col) {
             // Segmented so the radial fade (per-vertex alpha) stays smooth.
             const int k = 24;
             auto at = [&](int i) {
-                const glm::vec3 p = glm::mix(a, b, i / float(k));
-                const float fade = 1.0f - std::min(1.0f, glm::length(glm::vec2(p) - glm::vec2(camera_.focus)) / half);
-                return std::pair{p, pack(imm::with_alpha(col, col.a * fade))};
+                const glm::vec2 p = glm::mix(a, b, i / float(k));
+                const float fade = 1.0f - std::min(1.0f, glm::length(p - f2) / half);
+                return std::pair{at3(p.x, p.y), pack(imm::with_alpha(col, col.a * fade))};
             };
             auto prev = at(0);
             for (int i = 1; i <= k; ++i) {
                 auto cur = at(i);
-                out.push_back(render::DebugLine{prev.first, cur.first, prev.second, true});
+                out.push_back(render::DebugLine{prev.first, cur.first, prev.second, depth_tested});
                 prev = cur;
             }
         };
         for (int i = -n; i <= n; ++i) {
-            const float x = c.x + i * step, y = c.y + i * step;
-            const bool major_x = std::abs(std::remainder(x, step * 10.0f)) < step * 0.01f;
-            const bool major_y = std::abs(std::remainder(y, step * 10.0f)) < step * 0.01f;
-            glm::vec4 cx = major_x ? et_.viewport.grid_major : et_.viewport.grid;
-            glm::vec4 cy = major_y ? et_.viewport.grid_major : et_.viewport.grid;
-            if (std::abs(x) < step * 0.01f) cx = imm::with_alpha(st.axis_y, 0.6f);
-            if (std::abs(y) < step * 0.01f) cy = imm::with_alpha(st.axis_x, 0.6f);
-            seg_line({x, c.y - half, 0.0f}, {x, c.y + half, 0.0f}, cx);
-            seg_line({c.x - half, y, 0.0f}, {c.x + half, y, 0.0f}, cy);
+            const float u = c.x + i * step, v = c.y + i * step;
+            const bool major_u = std::abs(std::remainder(u, step * 10.0f)) < step * 0.01f;
+            const bool major_v = std::abs(std::remainder(v, step * 10.0f)) < step * 0.01f;
+            glm::vec4 cu = major_u ? et_.viewport.grid_major : et_.viewport.grid;   // the line u = const runs along v
+            glm::vec4 cv = major_v ? et_.viewport.grid_major : et_.viewport.grid;
+            if (std::abs(u) < step * 0.01f) cu = imm::with_alpha(*axis_col[va], 0.6f);
+            if (std::abs(v) < step * 0.01f) cv = imm::with_alpha(*axis_col[ua], 0.6f);
+            seg_line({u, c.y - half}, {u, c.y + half}, cu);
+            seg_line({c.x - half, v}, {c.x + half, v}, cv);
         }
     }
 
@@ -1480,9 +1554,11 @@ private:
     // Viewport: Blender-style interaction
     //
     //   Navigation  MMB orbit, Shift+MMB pan, Ctrl+MMB / wheel zoom; Alt+LMB emulates MMB;
-    //               Shift+wheel / Ctrl+wheel pan, horizontal scroll orbits
+    //               Shift+wheel / Ctrl+wheel pan, horizontal scroll orbits; trackpad: swipe
+    //               orbits, Shift+swipe pans, Ctrl+swipe / pinch zoom (scroll_navigate_)
     //   Views       numpad 1/3/7 (+Ctrl opposite), 5 ortho, 0 camera, 2/4/6/8 orbit,
-    //               +/- zoom, numpad . frame selected, Home frame all, ` view menu
+    //               +/- zoom, numpad . / . / F frame selected (F: Object Mode), Home frame all,
+    //               ` view menu
     //   Select      LMB click, Shift+LMB toggle, drag box (Shift add, Ctrl subtract),
     //               A all, Alt+A none, Ctrl+I invert
     //   Operators   G/R/S modal transform (X/Y/Z, Shift+axis, typed values, Ctrl snap),
@@ -1634,6 +1710,8 @@ private:
         // them must not select or navigate.
         const bool hovered = ctx.is_hovered(viewport_box_) && !over_viewport_chrome_(m, mesh_edit);
         viewport_hovered_ = hovered;
+        // Pinches are taken every frame, so one made over another panel never lands here later.
+        const double pinch = trackpad::take_magnify() + std::exchange(pinch_override_, 0.0);
         // Play mode: a click in the viewer hands the game the keyboard and mouse.
         if (playing() && !asset_view_()) {
             if (!game_focused_ && hovered && in.pressed[0]) set_game_focus_(true);
@@ -1706,25 +1784,14 @@ private:
             return;
         }
         if (in_brush_mode_()) {
-            // Wheel zoom stays (below is skipped), so handle it here first.
-            if (hovered && in.scroll.y != 0.0f && !ctx.popup_hovered() && !stroke_.active && !paint_stroke_.active) camera_.dolly(in.scroll.y);
+            // Scroll navigation stays (below is skipped), so handle it here first.
+            if (hovered && !ctx.popup_hovered() && !stroke_.active && !paint_stroke_.active) scroll_navigate_(in, pinch, shift, ctrl);
             if (hovered && in.pressed[1]) ctx.open_popup("mode_menu_vp", m);
             if (in_sculpt_mode_()) handle_sculpt_input_(ctx, *vp, hovered);
             else handle_paint_input_(ctx, *vp, hovered);
             return;
         }
-        if (hovered && (in.scroll.x != 0.0f || in.scroll.y != 0.0f) && !ctx.popup_hovered()) {
-            // Blender's wheel: zoom; Shift+wheel pans vertically, Ctrl+wheel horizontally.
-            // Deltas are used as-is, so macOS smooth scrolling (fractional notches) zooms
-            // smoothly instead of being mistaken for a gesture. Horizontal scroll (tilt
-            // wheels, trackpad sideways swipes) orbits around the view.
-            if (in.scroll.y != 0.0f) {
-                if (shift) camera_.pan(glm::vec2(0.0f, in.scroll.y * -20.0f), viewport_box_.h);
-                else if (ctrl) camera_.pan(glm::vec2(in.scroll.y * -20.0f, 0.0f), viewport_box_.h);
-                else camera_.dolly(in.scroll.y);
-            }
-            if (in.scroll.x != 0.0f && !shift && !ctrl) camera_.orbit(glm::vec2(in.scroll.x * -6.0f, 0.0f));
-        }
+        if (hovered && !ctx.popup_hovered()) scroll_navigate_(in, pinch, shift, ctrl);
 
         // --- gizmo (the Move / Rotate / Scale tools) ---
         bool gizmo_took_mouse = false;
@@ -1734,6 +1801,7 @@ private:
             glm::vec3 pivot;
             glm::mat3 basis(1.0f);
             if (gizmo_target_(mesh_edit, pivot, basis)) {
+                if (snap_adaptive_) gizmo_.translate_snap = grid_step_();
                 const GizmoDelta g = gizmo_.update(*vp, pivot, basis, m, in.pressed[0] && !alt, in.down[0], in.released[0], ctrl != snap_on_,
                                                    hovered && !ctx.popup_hovered());
                 gizmo_took_mouse = g.active || gizmo_.hot_axis() >= 0;
@@ -1800,7 +1868,7 @@ private:
         if (ctx.shortcut(Key::Kp3, Mods::Control)) camera_.axis_view('r', true);
         if (ctx.shortcut(Key::Kp7)) camera_.axis_view('t', false);
         if (ctx.shortcut(Key::Kp7, Mods::Control)) camera_.axis_view('t', true);
-        if (ctx.shortcut(Key::Kp5)) { camera_.ortho = !camera_.ortho; camera_.apply(); }
+        if (ctx.shortcut(Key::Kp5)) camera_.set_ortho(!camera_.ortho);
         if (ctx.shortcut(Key::Kp0)) view_through_scene_camera_();
         if (ctx.shortcut(Key::Kp0, Mods::Control | Mods::Alt)) align_scene_camera_to_view_();
         if (ctx.shortcut(Key::Kp4)) camera_.orbit(glm::vec2(15.0f / 0.35f, 0));
@@ -1809,10 +1877,17 @@ private:
         if (ctx.shortcut(Key::Kp2)) camera_.orbit(glm::vec2(0, 15.0f / 0.35f));
         if (ctx.shortcut(Key::KpAdd) || ctx.shortcut(Key::Equal)) camera_.dolly(1.0f);
         if (ctx.shortcut(Key::KpSubtract) || ctx.shortcut(Key::Minus)) camera_.dolly(-1.0f);
-        if (ctx.shortcut(Key::KpDecimal)) frame_selected();
+        // Frame Selected: numpad . (Blender), . on the main keyboard (no numpad needed) in every
+        // mode, and F where F is free -- Edit Mode's F is Make Face, the brush modes' F is radius.
+        if (ctx.shortcut(Key::KpDecimal) || ctx.shortcut(Key::Period)) frame_selected();
+        if (!mesh_edit && !in_brush_mode_() && ctx.shortcut(Key::F)) frame_selected();
         if (ctx.shortcut(Key::Home)) frame_all();
         if (ctx.shortcut(Key::GraveAccent)) ctx.open_popup("vp_view_menu", m);
         if (ctx.shortcut(Key::Z)) ctx.open_popup("vp_shading_menu", m);
+        if (ctx.shortcut(Key::Z, Mods::Alt)) {
+            xray_ = !xray_;
+            log_info(xray_ ? "X-Ray on (Alt Z toggles)" : "X-Ray off");
+        }
         if (ctx.shortcut(Key::Z, Mods::Shift)) set_shading(shading_ == Shading::Wireframe ? Shading::Solid : Shading::Wireframe);
         if (ctx.shortcut(Key::N)) show_sidebar_ = !show_sidebar_;
         if (ctx.shortcut(Key::T)) show_toolbar_ = !show_toolbar_;
@@ -1915,9 +1990,9 @@ private:
             ctx.menu_separator();
             if (ctx.menu_item("Camera", "Num0")) view_through_scene_camera_();
             if (ctx.menu_item("Align Camera to View", "Ctrl Alt Num0")) align_scene_camera_to_view_();
-            if (ctx.menu_item("Frame Selected", "Num.")) frame_selected();
+            if (ctx.menu_item("Frame Selected", "F / .")) frame_selected();
             if (ctx.menu_item("Frame All", "Home")) frame_all();
-            if (ctx.menu_item(camera_.ortho ? "Perspective" : "Orthographic", "Num5")) { camera_.ortho = !camera_.ortho; camera_.apply(); }
+            if (ctx.menu_item(camera_.ortho ? "Perspective" : "Orthographic", "Num5")) camera_.set_ortho(!camera_.ortho);
             ctx.end_popup();
         }
         if (ctx.begin_popup("vp_shading_menu", 150)) {
@@ -1939,7 +2014,7 @@ private:
         if (ctx.begin_popup("vp_snap_menu", 210)) {
             if (ctx.menu_item("Cursor to Selected")) { glm::vec3 p; glm::mat3 b; if (gizmo_target_(mesh_edit, p, b)) cursor3d_ = p; }
             if (ctx.menu_item("Cursor to World Origin")) cursor3d_ = glm::vec3(0.0f);
-            if (ctx.menu_item("Cursor to Grid")) cursor3d_ = glm::round(cursor3d_);
+            if (ctx.menu_item("Cursor to Grid")) { const float g = grid_step_(); cursor3d_ = glm::round(cursor3d_ / g) * g; }
             if (ctx.menu_item("Selection to Cursor", "", nullptr, !mesh_edit && !asset_view_())) selection_to_cursor_();
             ctx.end_popup();
         }
@@ -1984,7 +2059,7 @@ private:
             ctx.menu_separator();
             if (ctx.menu_item("Hide", "H", nullptr, any)) hide_(doc_.selection());
             if (ctx.menu_item("Unhide All", "Alt H")) unhide_all_();
-            if (ctx.menu_item("Frame Selected", "Num.", nullptr, any)) frame_selected();
+            if (ctx.menu_item("Frame Selected", "F / .", nullptr, any)) frame_selected();
             if (ctx.menu_item("Set 3D Cursor Here", "Shift RMB")) cursor3d_ = surface_point_(ctx_popup_origin_(m));
             ctx.end_popup();
         }
@@ -2082,6 +2157,7 @@ private:
     void run_modal_(imm::Context& ctx, const ViewProj& vp, bool ctrl, bool shift) {
         const auto& in = ctx.input();
         const ModalKind kind = modal_.kind();
+        modal_.snap_step = snap_adaptive_ ? grid_step_() : gizmo_.translate_snap;
         const auto outcome = modal_.update(vp, ctx.mouse(), in.keys, in.pressed[0], in.pressed[1], ctrl != snap_on_, shift,
                                            in.down[2], in.pressed[2]);
         ctx.consume_keyboard();
@@ -2543,6 +2619,7 @@ private:
             camera_.pitch_deg = pre_isolate_pose_.pitch;
             camera_.distance = pre_isolate_pose_.distance;
             camera_.ortho = pre_isolate_pose_.ortho;
+            camera_.auto_ortho = false;
             camera_.apply();
         }
         pre_isolate_pose_.valid = false;
@@ -2772,12 +2849,17 @@ private:
             auto wp = [&](const glm::vec3& p) { return glm::vec3(w * glm::vec4(p, 1.0f)); };
             if (!additive && !subtract) { sel.verts.clear(); sel.edges.clear(); sel.faces.clear(); }
             auto apply = [&](auto& set, const auto& v) { if (subtract) set.erase(v); else set.insert(v); };
+            // As in Blender: only what is in view, unless X-Ray (or Wireframe) sees through.
+            const EditVisibility& vis = edit_visibility_(*vp);
             if (sel.mode == SelectMode::Vertex) {
-                for (uint32_t v = 0; v < mm.positions.size(); ++v) if (inside(wp(mm.positions[v]))) apply(sel.verts, v);
+                for (uint32_t v = 0; v < mm.positions.size(); ++v) if (vis.verts[v] && inside(wp(mm.positions[v]))) apply(sel.verts, v);
             } else if (sel.mode == SelectMode::Edge) {
-                for (const auto& e : mm.edges()) if (inside(wp((mm.positions[e.first] + mm.positions[e.second]) * 0.5f))) apply(sel.edges, e);
+                for (const auto& e : mm.edges()) {
+                    auto it = vis.edges.find(e);
+                    if (it != vis.edges.end() && it->second && inside(wp((mm.positions[e.first] + mm.positions[e.second]) * 0.5f))) apply(sel.edges, e);
+                }
             } else {
-                for (uint32_t f = 0; f < mm.faces.size(); ++f) if (inside(wp(mm.face_center(f)))) apply(sel.faces, f);
+                for (uint32_t f = 0; f < mm.faces.size(); ++f) if (vis.faces[f] && inside(wp(mm.face_center(f)))) apply(sel.faces, f);
             }
             return;
         }
@@ -2827,8 +2909,9 @@ private:
         } else if (asset_view_() && !mesh_edit) {
             // Asset previews (mesh in Object Mode, material lookdev, texture): no scene overlays.
         } else if (!mesh_edit) {
-            // Wireframe mode / X-Ray: every mesh object's edges.
-            if (shading_ == Shading::Wireframe || xray_) {
+            // Wireframe shading: every mesh object's edges. (Not X-Ray: as in Blender, it makes
+            // surfaces translucent and draws no wires -- they read as outlines on everything.)
+            if (shading_ == Shading::Wireframe) {
                 for (const auto& [id, live] : sync_.live_objects()) {
                     const Node* node = doc_.find(id);
                     if (!node || !live || !live->active() || !live->get_transform() || doc_.is_selected(id)) continue;
@@ -2871,16 +2954,23 @@ private:
             const auto& sel = mesh_.selection;
             const glm::mat4 w = mesh_world_();
             auto wp = [&](const glm::vec3& p) { return glm::vec3(w * glm::vec4(p, 1.0f)); };
-            // Only what the camera can see (Solid shading), as in Blender; X-ray shows all.
+            // Only what the camera can see (Solid shading), as in Blender; X-ray shows all, what
+            // is behind the surface dimmed (EditVisibility::kBehind) so the depth still reads.
             const EditVisibility& vis = edit_visibility_(*vp);
-            std::vector<Edge> shown;
-            shown.reserve(vis.edges.size());
-            for (const auto& [e, visible] : vis.edges) if (visible) shown.push_back(e);
-            draw_mesh_edges(mm, shown, w, et_.viewport.edit_wire, 1.0f);
-            auto edge_shown = [&](uint32_t x, uint32_t y) {
+            auto dim = [&](char state, glm::vec4 c) { return state == EditVisibility::kBehind ? imm::with_alpha(c, c.a * 0.4f) : c; };
+            std::vector<Edge> front, behind;
+            front.reserve(vis.edges.size());
+            for (const auto& [e, state] : vis.edges) {
+                if (state == EditVisibility::kBehind) behind.push_back(e);
+                else if (state) front.push_back(e);
+            }
+            draw_mesh_edges(mm, behind, w, dim(EditVisibility::kBehind, et_.viewport.edit_wire), 1.0f);
+            draw_mesh_edges(mm, front, w, et_.viewport.edit_wire, 1.0f);
+            auto edge_state = [&](uint32_t x, uint32_t y) -> char {
                 auto it = vis.edges.find(make_edge(x, y));
-                return it != vis.edges.end() && it->second;
+                return it != vis.edges.end() ? it->second : 0;
             };
+            auto edge_shown = [&](uint32_t x, uint32_t y) { return edge_state(x, y) != 0; };
             if (sel.mode == SelectMode::Face) {
                 for (uint32_t f : sel.faces) {
                     if (f >= mm.faces.size()) continue;
@@ -2889,27 +2979,27 @@ private:
                         const uint32_t x = c[i].v, y = c[(i + 1) % c.size()].v;
                         if (!edge_shown(x, y)) continue;
                         auto a = vp->project(wp(mm.positions[x])), b = vp->project(wp(mm.positions[y]));
-                        if (a && b) ctx.line(*a, *b, accent, 2.0f);
+                        if (a && b) ctx.line(*a, *b, dim(edge_state(x, y), accent), 2.0f);
                     }
                 }
                 for (uint32_t f = 0; f < mm.faces.size(); ++f) {
                     if (!vis.faces[f]) continue;
                     if (auto p = vp->project(wp(mm.face_center(f)))) {
-                        ctx.fill({p->x - 2, p->y - 2, 4, 4}, sel.faces.count(f) ? accent : et_.viewport.face_dot);
+                        ctx.fill({p->x - 2, p->y - 2, 4, 4}, dim(vis.faces[f], sel.faces.count(f) ? accent : et_.viewport.face_dot));
                     }
                 }
             } else if (sel.mode == SelectMode::Edge) {
                 for (const auto& e : sel.edges) {
                     if (!edge_shown(e.first, e.second)) continue;
                     auto a = vp->project(wp(mm.positions[e.first])), b = vp->project(wp(mm.positions[e.second]));
-                    if (a && b) ctx.line(*a, *b, accent, 2.5f);
+                    if (a && b) ctx.line(*a, *b, dim(edge_state(e.first, e.second), accent), 2.5f);
                 }
             } else {
                 for (uint32_t v = 0; v < mm.positions.size(); ++v) {
                     if (!vis.verts[v]) continue;
                     auto p = vp->project(wp(mm.positions[v]));
                     if (!p) continue;
-                    ctx.fill({p->x - 3, p->y - 3, 6, 6}, sel.verts.count(v) ? accent : et_.viewport.vertex);
+                    ctx.fill({p->x - 3, p->y - 3, 6, 6}, dim(vis.verts[v], sel.verts.count(v) ? accent : et_.viewport.vertex));
                 }
             }
             draw_mesh_tool_overlay_(ctx, *vp);
@@ -2950,22 +3040,22 @@ private:
     void draw_modals_(imm::Context& ctx) {
         file_dialog_.draw(ctx);
 
-        if (ctx.begin_modal("Unsaved Changes", {440, 170})) {
+        if (ctx.begin_modal("Unsaved Changes", {370, 0})) {   // height fits the content
             ctx.paragraph("There are unsaved changes. Save them first?");
-            ctx.spacing();
-            if (ctx.button("Save All", 120)) {
+            ctx.spacing(4);
+            if (ctx.button("Save All", 110)) {
                 save_all_();
                 ctx.close_modal();
                 if (auto fn = std::move(pending_after_confirm_)) { pending_after_confirm_ = {}; fn(); }
             }
             ctx.same_line();
-            if (ctx.button("Discard", 120)) {
+            if (ctx.button("Discard", 110)) {
                 ctx.close_modal();
                 discard_all_changes_();
                 if (auto fn = std::move(pending_after_confirm_)) { pending_after_confirm_ = {}; fn(); }
             }
             ctx.same_line();
-            if (ctx.button("Cancel", 100)) { ctx.close_modal(); pending_after_confirm_ = {}; }
+            if (ctx.button("Cancel", 110)) { ctx.close_modal(); pending_after_confirm_ = {}; }
             ctx.end_modal();
         }
 
@@ -3007,12 +3097,13 @@ private:
             ctx.end_modal();
         }
 
-        if (ctx.begin_modal("Controls", {720, 420})) {
+        if (ctx.begin_modal("Controls", {720, 0})) {   // height fits the content
             static const char* lines[] = {
                 "Navigate:   MMB orbit, Shift+MMB pan, Ctrl+MMB / wheel zoom; Alt+LMB = MMB (no middle button)",
                 "            Shift+wheel / Ctrl+wheel pan vertically / horizontally, sideways scroll orbits",
+                "Trackpad:   two-finger swipe orbits, Shift+swipe pans, pinch / Ctrl+swipe zooms",
                 "Views:      numpad 1/3/7 front/right/top (Ctrl opposite), 5 ortho, 0 camera, 2/4/6/8 orbit,",
-                "            numpad . frame selected, Home frame all, ` view menu, Ctrl+Alt+Num0 camera to view",
+                "            F or . frame selected (F: Object Mode), Home frame all, ` view menu, Ctrl+Alt+Num0 camera to view",
                 "Select:     LMB, Shift+LMB toggle, drag box (Shift add, Ctrl subtract), A all, Alt+A none, Ctrl+I invert",
                 "Transform:  G move, R rotate, S scale -- then X/Y/Z axis (twice: local), Shift+X plane,",
                 "            type a value, Ctrl snap, Shift precise, LMB/Enter confirm, RMB/Esc cancel",
@@ -3132,7 +3223,7 @@ private:
             if (ctx.shortcut(Key::A, Mods::Alt)) doc_.clear_selection();
             if (ctx.shortcut(Key::H)) hide_(doc_.selection());
             if (ctx.shortcut(Key::H, Mods::Alt)) unhide_all_();
-            if (ctx.shortcut(Key::KpDecimal)) frame_selected();
+            if (ctx.shortcut(Key::KpDecimal) || ctx.shortcut(Key::Period) || ctx.shortcut(Key::F)) frame_selected();
         }
         if (ctx.shortcut(Key::F2) && !asset_view_() && doc_.primary() && !playing()) { rename_id_ = doc_.primary(); rename_frames_ = 0; }
     }
@@ -3265,6 +3356,10 @@ private:
     std::set<ObjectId> hidden_;
     bool show_toolbar_ = true, show_sidebar_ = false, show_bottom_ = true, maximized_ = false;
     bool show_overlays_ = true, xray_ = false, snap_on_ = false;
+    float xray_alpha_ = 0.5f;
+    std::optional<bool> trackpad_override_;   ///< Tests: force trackpad (true) / wheel (false) scrolls.
+    double pinch_override_ = 0.0;             ///< Tests: a pinch to apply next frame.   ///< X-Ray surface opacity (Blender's default 0.5).
+    bool snap_adaptive_ = true;   ///< Move snapping follows the grid's zoom-dependent spacing (Blender); off: Move Increment.
     // Overlays popover (each also needs show_overlays_).
     bool show_glyphs_ = true, show_origins_ = true, show_cursor3d_ = true, show_stats_overlay_ = false;
     bool outliner_hovered_ = false, properties_hovered_ = false, nav_ball_dragged_ = false, pending_extrude_ = false;

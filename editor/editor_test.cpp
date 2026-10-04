@@ -1016,6 +1016,30 @@ void test_imm_text_input_commits() {
     expect(!h.ctx.wants_keyboard(), "and releases the keyboard");
 }
 
+/** @brief A modal with height 0 fits its content: no empty band under the last row. */
+void test_imm_modal_fits_content() {
+    ImmHarness h;
+    coopa::ui::imm::Box region;
+    float content_end = 0.0f;
+    auto ui = [&](coopa::ui::imm::Context& c) {
+        if (c.begin_modal("Unsaved Changes", {370, 0})) {
+            c.paragraph("There are unsaved changes. Save them first?");
+            c.spacing(4);
+            c.button("Save All", 110);
+            c.same_line();
+            c.button("Discard", 110);
+            region = c.content_region();
+            content_end = c.cursor().y - c.style.spacing;
+            c.end_modal();
+        }
+    };
+    h.frame([&](coopa::ui::imm::Context& c) { c.open_modal("Unsaved Changes"); ui(c); });
+    h.frame(ui);
+    h.frame(ui);
+    expect(region.h > 0.0f && std::abs(region.bottom() - content_end) <= 2.0f,
+           "the fitted modal ends at its last row (gap " + std::to_string(region.bottom() - content_end) + " px)");
+}
+
 void test_imm_drag_float_and_popup_blocking() {
     ImmHarness h;
     float v = 1.0f;
@@ -3335,6 +3359,258 @@ void test_editor_object_asset_click_and_tab() {
     dump(engine, "21_object_click");
 }
 
+/** @brief Blender's viewport grid and increment snap: the grid faces the view down X / Y, its
+ *         spacing follows the zoom, Ctrl moves in that spacing, and F frames the selection. */
+void test_editor_grid_snap_and_frame() {
+    using coopa::input::Key;
+    {   // ModalTransform snaps a free move to snap_step.
+        const ViewProj vp = test_view_proj();
+        const glm::vec2 c = *vp.project(glm::vec3(0));
+        ModalTransform mt;
+        mt.snap_step = 0.05f;
+        mt.begin(ModalKind::Grab, vp, glm::vec3(0), glm::mat3(1.0f), c);
+        mt.update(vp, c + glm::vec2(37.0f, -11.0f), {}, false, false, /*ctrl=*/true, false);
+        const glm::vec3 t = mt.result().translate;
+        bool on_grid = glm::length(t) > 0.0f;
+        for (int i = 0; i < 3; ++i) on_grid &= std::abs(t[i] / 0.05f - std::round(t[i] / 0.05f)) < 1e-3f;
+        expect(on_grid, "Ctrl snaps a free move to the 0.05 increment");
+        mt.cancel();
+    }
+    setenv("FIXED_DT", "0.016666", 1);
+    unsetenv("NO_INPUT");
+    setenv("HOME", tmp_root().c_str(), 1);
+    fs::remove(Project::prefs_path());
+    const fs::path root = fresh_dir("grid_snap_project");
+    Project project = Project::create(root);
+    const fs::path src = fs::path(ROOT_DIR) / "assets";
+    fs::copy(src / "objects", project.assets() / "objects", fs::copy_options::recursive);
+    fs::copy(src / "animations", project.assets() / "animations", fs::copy_options::recursive);
+    for (const char* m : {"tentacle.yaml", "ball.yaml"}) fs::copy_file(src / "meshes" / m, project.assets() / "meshes" / m);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, toy::core::Engine::kFillDebounceFrames + 4);
+    InputDriver in{engine, std::max(1.0f, engine.display_scale())};
+    expect(app.open_object_asset(project.assets() / "objects" / "robot_arm.yaml"), "the robot arm opens");
+    tick(engine, 4);
+
+    auto& cam = app.camera();
+    cam.distance = 12.0f; cam.apply();
+    expect(std::abs(app.grid_step() - 1.0f) < 1e-5f, "12 m out the grid is 1 m");
+    cam.distance = 0.5f; cam.apply();
+    expect(std::abs(app.grid_step() - 0.05f) < 1e-5f, "zoomed in to 0.5 m it is 5 cm");
+    cam.distance = 300.0f; cam.apply();
+    expect(std::abs(app.grid_step() - 50.0f) < 1e-3f, "300 m out it is 50 m");
+    cam.distance = 12.0f; cam.apply();
+    expect(app.grid_normal_axis() == 2, "an orbit view draws the floor grid");
+
+    const ObjectId plate = object_named(app, "BasePlate");
+    const auto px = screen_of(engine, app, plate, glm::vec3(0.0f, -0.5f, 0.0f), in.scale);
+    expect(px.has_value(), "BasePlate is on screen");
+    if (px) {
+        in.click(*px);
+        tick(engine, 2);
+        expect(app.document().primary() == plate, "the click selects BasePlate");
+        const glm::vec3 framed = cam.focus;
+        cam.focus = glm::vec3(40.0f, -30.0f, 5.0f);
+        cam.apply();
+        in.move(*px);
+        tick(engine, 1);
+        in.key(Key::F);
+        tick(engine, 2);
+        expect(glm::length(cam.focus - glm::vec3(40.0f, -30.0f, 5.0f)) > 10.0f && glm::length(cam.focus - framed) < 3.0f,
+               "F refocuses the orbit on the selection");
+        cam.focus = glm::vec3(40.0f, -30.0f, 5.0f);
+        cam.apply();
+        in.key(Key::Period);
+        tick(engine, 2);
+        expect(glm::length(cam.focus - framed) < 3.0f, ". frames the selection too");
+    }
+
+    in.key(Key::Kp1);
+    tick(engine, 2);
+    expect(app.grid_normal_axis() == 1, "front view (numpad 1, looking down Y) draws the XZ grid");
+    dump(engine, "22_grid_front");
+    in.key(Key::Kp3);
+    tick(engine, 2);
+    expect(app.grid_normal_axis() == 0, "right view (numpad 3, looking down X) draws the YZ grid");
+    in.key(Key::Kp7);
+    tick(engine, 2);
+    expect(app.grid_normal_axis() == 2, "top view draws the floor grid");
+}
+
+/** @brief Blender's X-Ray in Edit Mode: Alt+Z makes the surface translucent, and what is behind it
+ *         is drawn (dimmed) and can be clicked. */
+void test_editor_xray_edit_mode() {
+    using coopa::input::Key;
+    using coopa::input::Mods;
+    setenv("FIXED_DT", "0.016666", 1);
+    unsetenv("NO_INPUT");
+    setenv("HOME", tmp_root().c_str(), 1);
+    fs::remove(Project::prefs_path());
+    const fs::path root = fresh_dir("xray_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, toy::core::Engine::kFillDebounceFrames + 4);
+    InputDriver in{engine, std::max(1.0f, engine.display_scale())};
+    const ObjectId cube = object_named(app, "Cube");
+    app.document().select(cube);
+    in.move(app.viewport_box().center());
+    in.key(Key::Tab);
+    tick(engine, toy::core::Engine::kFillDebounceFrames + 2);
+    expect(app.edit_mode_active(), "Tab enters Edit Mode");
+    in.key(Key::Num1);   // vertex select
+    tick(engine, 2);
+
+    auto& md = app.mesh_document();
+    // The vertex farthest from the camera: behind the cube's surface.
+    const glm::mat4 view = coopa::gfx::engine::components::CameraComponent::main()->get_view_matrix();
+    const glm::vec3 eye = glm::vec3(glm::inverse(view)[3]);
+    const glm::mat4 w = world_of(app, cube);
+    uint32_t back = 0;
+    float bd = -1.0f;
+    for (uint32_t v = 0; v < md.mesh.positions.size(); ++v) {
+        const float d = glm::distance(glm::vec3(w * glm::vec4(md.mesh.positions[v], 1.0f)), eye);
+        if (d > bd) { bd = d; back = v; }
+    }
+    const auto back_px = screen_of(engine, app, cube, md.mesh.positions[back], in.scale);
+    expect(back_px.has_value(), "the hidden vertex projects on screen");
+    if (!back_px) return;
+    auto pixel = [&](glm::vec2 p) {
+        const auto img = engine.capture_image(false);
+        const int x = std::clamp(static_cast<int>(p.x * in.scale), 0, static_cast<int>(img.width) - 1);
+        const int y = std::clamp(static_cast<int>(p.y * in.scale), 0, static_cast<int>(img.height) - 1);
+        const uint8_t* q = &img.pixels[(static_cast<size_t>(y) * img.width + x) * img.channels];
+        return glm::vec3(q[0], q[1], q[2]);
+    };
+    const glm::vec2 body = app.viewport_box().center() + glm::vec2(9.0f, 7.0f);   // on the cube, off the overlay
+    const glm::vec3 opaque = pixel(body);
+
+    md.selection.verts.clear();
+    in.click(*back_px);
+    tick(engine, 2);
+    expect(!md.selection.verts.count(back), "without X-Ray the hidden vertex can't be clicked");
+
+    in.move(app.viewport_box().center());
+    in.key(Key::Z, Mods::Alt);
+    tick(engine, 3);
+    expect(engine.render_config().editor_xray_alpha < 0.99f, "Alt+Z turns X-Ray on: the surface is translucent");
+    const glm::vec3 xray = pixel(body);
+    expect(glm::length(xray - opaque) > 6.0f, "the X-Ray surface lets the backdrop through");
+    dump(engine, "23_xray_edit");
+
+    md.selection.verts.clear();
+    in.click(*back_px);
+    tick(engine, 2);
+    expect(md.selection.verts.count(back) == 1, "with X-Ray the vertex behind the surface is clicked");
+    // Box select: a drag over the whole cube takes the hidden vertex only with X-Ray.
+    glm::vec2 lo(1e9f), hi(-1e9f);
+    for (const auto& p : md.mesh.positions)
+        if (auto q = screen_of(engine, app, cube, p, in.scale)) { lo = glm::min(lo, *q); hi = glm::max(hi, *q); }
+    auto box_all = [&] {
+        md.selection.verts.clear();
+        in.move(lo - glm::vec2(15.0f));
+        in.drag(hi + glm::vec2(15.0f), coopa::input::MouseButton::Left);
+        tick(engine, 2);
+    };
+    box_all();
+    expect(md.selection.verts.size() == md.mesh.positions.size(), "with X-Ray a box takes every vertex, hidden ones too");
+
+    // Faces: X-Ray picks the face whose centre is nearest the click on screen, even one behind
+    // the face the ray would hit first.
+    in.key(Key::Num3);
+    tick(engine, 2);
+    uint32_t back_face = 0;
+    float fd = -1.0f;
+    for (uint32_t f = 0; f < md.mesh.faces.size(); ++f) {
+        const float d = glm::distance(glm::vec3(w * glm::vec4(md.mesh.face_center(f), 1.0f)), eye);
+        if (d > fd) { fd = d; back_face = f; }
+    }
+    const auto face_px = screen_of(engine, app, cube, md.mesh.face_center(back_face), in.scale);
+    expect(face_px.has_value(), "the hidden face's centre projects on screen");
+    if (face_px) {
+        md.selection.faces.clear();
+        in.click(*face_px);
+        tick(engine, 2);
+        expect(md.selection.faces.size() == 1 && md.selection.faces.count(back_face),
+               "with X-Ray a click on a hidden face's dot selects that face");
+    }
+
+    in.move(app.viewport_box().center());
+    in.key(Key::Z, Mods::Alt);
+    tick(engine, 3);
+    expect(engine.render_config().editor_xray_alpha >= 1.0f, "Alt+Z again: opaque");
+    if (face_px) {
+        md.selection.faces.clear();
+        in.click(*face_px);
+        tick(engine, 2);
+        expect(md.selection.faces.size() == 1 && !md.selection.faces.count(back_face),
+               "without X-Ray the same click takes the face in front");
+    }
+    in.key(Key::Num1);
+    tick(engine, 2);
+    box_all();
+    expect(!md.selection.verts.empty() && !md.selection.verts.count(back), "without X-Ray a box takes only the vertices in view");
+}
+
+/** @brief The nav gizmo's axis balls go orthographic along that axis (orbiting returns to
+ *         perspective), and trackpad swipes orbit both ways while pinch zooms. */
+void test_editor_nav_axis_and_trackpad() {
+    setenv("FIXED_DT", "0.016666", 1);
+    unsetenv("NO_INPUT");
+    setenv("HOME", tmp_root().c_str(), 1);
+    fs::remove(Project::prefs_path());
+    const fs::path root = fresh_dir("nav_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, toy::core::Engine::kFillDebounceFrames + 4);
+    InputDriver in{engine, std::max(1.0f, engine.display_scale())};
+    auto& cam = app.camera();
+    expect(!cam.ortho, "the view starts in perspective");
+
+    // Click the +X ball: its screen spot is the view rotation applied to +X around the ball's centre.
+    const coopa::ui::imm::Box g = app.nav_gizmo_rect();
+    const glm::vec2 c{g.x + 55, g.y + 55};
+    const glm::mat3 vr = glm::mat3(coopa::gfx::engine::components::CameraComponent::main()->get_view_matrix());
+    const glm::vec3 vx = vr * glm::vec3(1, 0, 0);
+    in.click(c + glm::vec2(vx.x, -vx.y) * 40.0f);
+    tick(engine, 2);
+    expect(cam.ortho, "clicking the X ball goes orthographic");
+    expect(std::abs(cam.forward().x + 1.0f) < 1e-3f, "and looks down the X axis (from +X)");
+
+    auto scroll = [&](glm::vec2 d) {
+        in.move(app.viewport_box().center());
+        engine.queue_input([d](coopa::input::Input& i) { i.push_scroll(d.x, d.y); });
+        tick(engine, 2);
+    };
+    // Trackpad: a vertical swipe tilts the view (and leaves the auto-ortho axis view).
+    app.set_trackpad_for_test(true);
+    const float pitch0 = cam.pitch_deg, dist0 = cam.distance;
+    scroll({0.0f, 3.0f});
+    expect(std::abs(cam.pitch_deg - pitch0) > 1.0f, "a vertical trackpad swipe tilts the view up / down");
+    expect(std::abs(cam.distance - dist0) < 1e-4f, "...without zooming");
+    expect(!cam.ortho, "orbiting out of the axis view returns to perspective");
+
+    app.pinch_for_test(0.2);
+    tick(engine, 2);
+    expect(cam.distance < dist0 * 0.9f, "pinching out zooms in");
+
+    // A wheel still zooms.
+    app.set_trackpad_for_test(false);
+    const float pitch1 = cam.pitch_deg, dist1 = cam.distance;
+    scroll({0.0f, 1.0f});
+    expect(cam.distance < dist1 && std::abs(cam.pitch_deg - pitch1) < 1e-4f, "a mouse wheel zooms, as before");
+
+    // An explicit numpad 5 ortho stays ortho through orbits.
+    cam.set_ortho(true);
+    scroll({0.0f, 0.0f});
+    app.set_trackpad_for_test(true);
+    scroll({2.0f, 0.0f});
+    expect(cam.ortho, "a chosen orthographic view stays orthographic when orbited");
+    app.set_trackpad_for_test(std::nullopt);
+}
+
 /** @brief The asset-focused flow: each asset type opens its view; switching asks to save. */
 void test_editor_asset_views() {
     setenv("FIXED_DT", "0.016666", 1);
@@ -3393,6 +3669,8 @@ void test_editor_asset_views() {
     app.open_asset(AssetType::Material, "materials/default.yaml");
     tick(engine, 3);
     expect(app.active_asset_type() == AssetType::Scene && app.ui().any_popup_open(), "switching with unsaved changes opens the save prompt");
+    tick(engine, 2);
+    dump(engine, "24_unsaved_prompt");
 }
 
 /** @brief Object assets: create from a selection, place instances, edit the asset, override, spawn. */
@@ -3939,6 +4217,7 @@ const TestCase kTests[] = {
     {"imm_button_and_checkbox",              "imm",      test_imm_button_and_checkbox},
     {"imm_text_input_commits",               "imm",      test_imm_text_input_commits},
     {"imm_drag_float_and_popup_blocking",    "imm",      test_imm_drag_float_and_popup_blocking},
+    {"imm_modal_fits_content",               "imm",      test_imm_modal_fits_content},
     {"imm_menubar_and_tree",                 "imm",      test_imm_menubar_and_tree},
     {"imm_icon_button_and_tooltip",          "imm",      test_imm_icon_button_and_tooltip},
     {"imm_theme_files",                      "imm",      test_imm_theme_files},
@@ -3973,6 +4252,9 @@ const TestCase kTests[] = {
     {"editor_rig_object_assets", "editor_shell", test_editor_rig_object_assets},
     {"editor_object_asset_pick_and_edit", "editor_shell", test_editor_object_asset_pick_and_edit},
     {"editor_object_asset_click_and_tab", "editor_shell", test_editor_object_asset_click_and_tab},
+    {"editor_grid_snap_and_frame", "editor_shell", test_editor_grid_snap_and_frame},
+    {"editor_xray_edit_mode", "editor_shell", test_editor_xray_edit_mode},
+    {"editor_nav_axis_and_trackpad", "editor_shell", test_editor_nav_axis_and_trackpad},
     {"asset_fidelity_component_schemas", "editor_shell", test_asset_fidelity_component_schemas},
     {"asset_fidelity_editor_created_files", "editor_shell", test_asset_fidelity_editor_created_files},
     {"asset_fidelity_object_assets", "document", test_asset_fidelity_object_assets},

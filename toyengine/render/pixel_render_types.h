@@ -86,7 +86,7 @@ static_assert(sizeof(PixelLightingPushConstants) == 96, "must match pixel_lighti
 
 /**
  * @struct DebugViewPushConstants
- * @brief Matches debug_view.frag's DebugViewParams push-constant block (44 bytes).
+ * @brief Matches debug_view.frag's DebugViewParams push-constant block (48 bytes).
  *
  * All plain scalars (int32_t + float), same as PixelLightingPushConstants above, so
  * this struct's layout matches the GLSL push_constant block byte-for-byte with no
@@ -108,6 +108,8 @@ struct DebugViewPushConstants {
     float   camera_is_perspective = 1.0f;
     /// Editor shading modes (Solid / Material Preview): how much SSAO darkens them, 0..1.
     float   editor_ao             = 0.0f;
+    /// Editor shading modes: surface opacity over the backdrop (X-Ray), 1 = opaque.
+    float   editor_xray_alpha     = 1.0f;
 };
 
 /**

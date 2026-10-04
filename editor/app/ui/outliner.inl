@@ -215,5 +215,5 @@
         ctx.menu_separator();
         if (ctx.menu_item("Hide", "H", nullptr, target != 0, I::EyeClosed)) hide_(doc_.selection());
         if (ctx.menu_item("Show All", "Alt H", nullptr, true, I::Eye)) unhide_all_();
-        if (ctx.menu_item("Frame", "Num .", nullptr, target != 0, I::Zoom)) frame_selected();
+        if (ctx.menu_item("Frame", "F / .", nullptr, target != 0, I::Zoom)) frame_selected();
     }

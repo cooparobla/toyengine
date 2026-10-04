@@ -2281,6 +2281,7 @@ private:
             dbg_pc.camera_far            = ctx.cam ? ctx.cam->clip_end : 1000.0f;
             dbg_pc.camera_is_perspective = (!ctx.cam || ctx.cam->type == CameraType::Perspective) ? 1.0f : 0.0f;
             dbg_pc.editor_ao             = (config_.editor_ssao && config_.ssao_enabled) ? 1.0f : 0.0f;
+            dbg_pc.editor_xray_alpha     = std::clamp(config_.editor_xray_alpha, 0.0f, 1.0f);
             debug_view_pass_->draw(cmd, current_camera_set(), current_light_set(), *shadow_set_, dbg_pc,
                                    render_extent_.width, render_extent_.height);
             if (debug_view_is_editor_shading(active_view) && frame_meshes_) {

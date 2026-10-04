@@ -32,9 +32,17 @@
         d = glm::normalize(glm::vec3(inv * glm::vec4(dw, 0.0f)));
     }
 
-    /** @brief Does the surface hide this mesh-local point from the camera? */
+    /** @brief X-ray or Wireframe: surfaces hide nothing, so picks go by screen distance, not ray hits. */
+    bool see_through_() const { return xray_ || shading_ == Shading::Wireframe; }
+
+    /** @brief Does the surface hide this mesh-local point from the camera? (X-ray: never.) */
     bool mesh_point_visible_(const ViewProj& vp, const glm::vec3& local_p) {
         if (xray_ || shading_ == Shading::Wireframe) return true;
+        return mesh_point_unoccluded_(vp, local_p);
+    }
+
+    /** @brief The occlusion test itself, regardless of X-ray. */
+    bool mesh_point_unoccluded_(const ViewProj& vp, const glm::vec3& local_p) {
         const glm::mat4 w = mesh_world_();
         const glm::vec3 pw = glm::vec3(w * glm::vec4(local_p, 1.0f));
         glm::vec3 eye_w;
@@ -45,37 +53,44 @@
     }
 
     /**
-     * @brief Per-element visibility for the edit overlay, cached per (geometry, view).
-     *        Large meshes (> 60k vertices) skip the test and draw everything.
+     * @brief Per-element visibility for the edit overlay, cached per (geometry, view): 0 hidden,
+     *        kFront in view, kBehind behind the surface but shown and selectable (X-ray, which
+     *        draws it dimmed). Large meshes (> 60k vertices) skip the test and draw everything.
      */
     struct EditVisibility {
+        static constexpr char kFront = 1, kBehind = 2;
         uint64_t revision = 0;
         glm::mat4 view{0.0f}, proj{0.0f};
-        bool xray = false;
+        int xray = -1;   ///< Cache key: 0 occlusion, 1 everything shown, 2 X-ray.
         std::vector<char> verts, faces;
         std::map<Edge, char> edges;
     };
     const EditVisibility& edit_visibility_(const ViewProj& vp) {
-        const bool see_all = xray_ || shading_ == Shading::Wireframe || mesh_.mesh.positions.size() > 60000;
+        const bool big = mesh_.mesh.positions.size() > 60000;
+        const bool see_all = shading_ == Shading::Wireframe || big;
+        const bool xray = xray_ && !see_all;   // test occlusion, but only to dim what is behind
         EditVisibility& v = edit_vis_;
-        if (v.revision == mesh_.geometry_revision && v.view == vp.view && v.proj == vp.proj && v.xray == see_all) return v;
+        const int key = see_all ? 1 : xray ? 2 : 0;
+        if (v.revision == mesh_.geometry_revision && v.view == vp.view && v.proj == vp.proj && v.xray == key) return v;
         v.revision = mesh_.geometry_revision;
         v.view = vp.view;
         v.proj = vp.proj;
-        v.xray = see_all;
+        v.xray = key;
         const auto& mm = mesh_.mesh;
-        v.verts.assign(mm.positions.size(), 1);
-        v.faces.assign(mm.faces.size(), 1);
+        v.verts.assign(mm.positions.size(), EditVisibility::kFront);
+        v.faces.assign(mm.faces.size(), EditVisibility::kFront);
         v.edges.clear();
         if (see_all) {
-            for (const auto& e : mm.edges()) v.edges[e] = 1;
+            for (const auto& e : mm.edges()) v.edges[e] = EditVisibility::kFront;
             return v;
         }
-        for (uint32_t i = 0; i < mm.positions.size(); ++i) v.verts[i] = mesh_point_visible_(vp, mm.positions[i]);
-        for (uint32_t f = 0; f < mm.faces.size(); ++f) v.faces[f] = mesh_point_visible_(vp, mm.face_center(f));
+        const char hidden = xray ? EditVisibility::kBehind : 0;
+        auto state = [&](const glm::vec3& p) { return mesh_point_unoccluded_(vp, p) ? EditVisibility::kFront : hidden; };
+        for (uint32_t i = 0; i < mm.positions.size(); ++i) v.verts[i] = state(mm.positions[i]);
+        for (uint32_t f = 0; f < mm.faces.size(); ++f) v.faces[f] = state(mm.face_center(f));
         for (const auto& e : mm.edges()) {
-            v.edges[e] = (v.verts[e.first] && v.verts[e.second]) ||
-                         mesh_point_visible_(vp, (mm.positions[e.first] + mm.positions[e.second]) * 0.5f);
+            const bool ends = v.verts[e.first] == EditVisibility::kFront && v.verts[e.second] == EditVisibility::kFront;
+            v.edges[e] = ends ? EditVisibility::kFront : state((mm.positions[e.first] + mm.positions[e.second]) * 0.5f);
         }
         return v;
     }
@@ -83,7 +98,8 @@
     /**
      * @brief The edge under the cursor, as Blender's Loop Cut and edge picking choose it: the
      *        nearest side (on screen) of the face under the cursor; failing a face hit, the
-     *        nearest visible edge within 12 px.
+     *        nearest visible edge within 12 px. X-ray: always the nearest edge on screen, in
+     *        front or behind (the first face a ray hits means nothing when all show).
      */
     std::optional<Edge> pick_edge_(const ViewProj& vp, glm::vec2 px) {
         const auto& mm = mesh_.mesh;
@@ -92,7 +108,7 @@
         auto scr = [&](uint32_t v) { return vp.project(glm::vec3(w * glm::vec4(mm.positions[v], 1.0f))); };
         glm::vec3 o, d;
         mesh_local_ray_(vp, px, o, d);
-        if (auto hit = mesh_bvh_().raycast(mm, o, d)) {
+        if (auto hit = see_through_() ? std::nullopt : mesh_bvh_().raycast(mm, o, d)) {
             const auto& c = mm.faces[hit->face].corners;
             std::optional<Edge> best;
             float bd = 1e30f;
@@ -151,11 +167,52 @@
                 if (d < bd) { bd = d; best = e; }
             }
             if (best) toggle(sel.edges, *best);
+        } else if (see_through_()) {
+            if (auto f = pick_face_screen_(*vp, px)) toggle(sel.faces, *f);
         } else {
             glm::vec3 o, d;
             mesh_local_ray_(*vp, px, o, d);
             if (auto hit = mesh_bvh_().raycast(mm, o, d)) toggle(sel.faces, hit->face);
         }
+    }
+
+    /**
+     * @brief X-ray face picking, as Blender's: the face whose centre dot is nearest the click on
+     *        screen -- among the faces whose outline contains the click, else any dot within
+     *        40 px. Front or behind counts the same; an exact tie (a face straight behind
+     *        another) goes to the nearer one.
+     */
+    std::optional<uint32_t> pick_face_screen_(const ViewProj& vp, glm::vec2 px) {
+        const auto& mm = mesh_.mesh;
+        const glm::mat4 w = mesh_world_();
+        const glm::vec3 eye = glm::vec3(glm::inverse(vp.view)[3]);
+        auto scr = [&](const glm::vec3& p) { return vp.project(glm::vec3(w * glm::vec4(p, 1.0f))); };
+        auto contains = [&](uint32_t f) {
+            const auto& c = mm.faces[f].corners;
+            bool in = false;
+            for (size_t i = 0, j = c.size() - 1; i < c.size(); j = i++) {
+                auto a = scr(mm.positions[c[i].v]), b = scr(mm.positions[c[j].v]);
+                if (!a || !b) return false;
+                if ((a->y > px.y) != (b->y > px.y) && px.x < (b->x - a->x) * (px.y - a->y) / (b->y - a->y) + a->x) in = !in;
+            }
+            return in;
+        };
+        std::optional<uint32_t> best;
+        bool best_inside = false;
+        float bd = 40.0f, bdepth = 1e30f;
+        for (uint32_t f = 0; f < mm.faces.size(); ++f) {
+            const glm::vec3 c = mm.face_center(f);
+            auto q = scr(c);
+            if (!q) continue;
+            const bool inside = contains(f);
+            if (best_inside && !inside) continue;
+            const float dist = glm::distance(*q, px);
+            const float depth = glm::distance(glm::vec3(w * glm::vec4(c, 1.0f)), eye);
+            const bool better = (inside && !best_inside) || dist < bd - 0.5f || (dist < bd + 0.5f && depth < bdepth);
+            if (!better || (!inside && dist >= 40.0f)) continue;
+            best = f; best_inside = inside; bd = dist; bdepth = depth;
+        }
+        return best;
     }
 
     /** @brief Alt+click (loop) / Ctrl+Alt+click (ring) at `px`; Shift toggles. */

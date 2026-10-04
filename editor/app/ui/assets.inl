@@ -442,7 +442,7 @@ private:
     }
 
     void draw_asset_modals_(imm::Context& ctx) {
-        if (ctx.begin_modal("Rename Asset", {360, 130})) {
+        if (ctx.begin_modal("Rename Asset", {360, 0})) {
             ctx.label("Rename " + asset_rename_);
             ctx.input_text("New name", &asset_rename_to_);
             if (ctx.button("Rename", 100) && !asset_rename_to_.empty()) {
@@ -459,7 +459,7 @@ private:
             if (ctx.button("Cancel", 80)) ctx.close_current_popup();
             ctx.end_modal();
         }
-        if (ctx.begin_modal("Delete Asset", {380, 120})) {
+        if (ctx.begin_modal("Delete Asset", {380, 0})) {
             ctx.label("Delete " + asset_delete_ + "?");
             ctx.label_dim("Scenes and objects referring to it will fail to load it.");
             if (ctx.button("Delete", 100)) {

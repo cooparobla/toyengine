@@ -8,8 +8,10 @@
  *   pan     Shift + any orbit gesture
  *   dolly   scroll wheel (trackpad two-finger scroll)
  *   fly     hold right button + W/A/S/D/Q/E
- *   frame   F (selection), Home (everything)
- *   views   numpad 1/3/7 (front/right/top; Ctrl = opposite), numpad 5 toggles ortho
+ *   frame   numpad . / . / F (selection; F in Object Mode), Home (everything)
+ *   views   numpad 1/3/7 or the nav gizmo's axis balls (front/right/top; Ctrl = opposite):
+ *           orthographic, back to perspective once orbited (Blender's Auto Perspective);
+ *           numpad 5 toggles ortho
  *
  * Z-up, camera looking down its local -Z: the same pose convention CameraController's
  * orbit uses (position = focus + spherical offset, Euler = (90 - pitch, 0, yaw)).
@@ -38,6 +40,9 @@ public:
     float pitch_deg = 25.0f;
     float distance = 12.0f;
     bool  ortho = false;
+    /// Blender's Auto Perspective: an axis view went orthographic on its own, so orbiting out
+    /// of it returns to perspective. Cleared by an explicit projection toggle.
+    bool  auto_ortho = false;
     float fov = 50.0f;
 
     /** @brief Creates the camera object as a root of `scene` (the editor UI scene). */
@@ -79,6 +84,7 @@ public:
     glm::vec3 up() const { return glm::normalize(glm::cross(right(), forward())); }
 
     void orbit(glm::vec2 mouse_delta) {
+        if (auto_ortho && mouse_delta != glm::vec2(0.0f)) { ortho = false; auto_ortho = false; }
         yaw_deg -= mouse_delta.x * 0.35f;
         pitch_deg += mouse_delta.y * 0.35f;
         apply();
@@ -111,8 +117,20 @@ public:
         apply();
     }
 
-    /** @brief Snaps to an axis view: 'f'ront (-Y), 'r'ight (+X), 't'op (+Z); `opposite` flips. */
+    /** @brief Explicit perspective / orthographic switch (numpad 5, the nav button). */
+    void set_ortho(bool o) {
+        ortho = o;
+        auto_ortho = false;
+        apply();
+    }
+
+    /**
+     * @brief Snaps to an axis view: 'f'ront (-Y), 'r'ight (+X), 't'op (+Z); `opposite` flips.
+     *        Goes orthographic as Blender's Auto Perspective does (unless already), and
+     *        orbiting away goes back to perspective.
+     */
     void axis_view(char which, bool opposite) {
+        if (!ortho) { ortho = true; auto_ortho = true; }
         switch (which) {
             case 'f': yaw_deg = opposite ? 180.0f : 0.0f; pitch_deg = 0.0f; break;
             case 'r': yaw_deg = opposite ? -90.0f : 90.0f; pitch_deg = 0.0f; break;

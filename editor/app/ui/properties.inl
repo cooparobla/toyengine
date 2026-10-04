@@ -313,7 +313,14 @@
             int orient = static_cast<int>(orient_);
             if (ctx.combo("Orientation", &orient, {"Global", "Local", "Normal"})) orient_ = static_cast<Orientation>(orient);
             ctx.property_bool("Snap (Ctrl inverts)", &snap_on_);
-            ctx.drag_float("Move Increment", &gizmo_.translate_snap, 0.01f, 0.001f, 100.0f);
+            ctx.property_bool("Increment Follows Grid", &snap_adaptive_);
+            ctx.tooltip("Move snapping uses the grid's spacing, which gets finer as you zoom in (Blender)");
+            if (snap_adaptive_) {
+                char buf[48];
+                std::snprintf(buf, sizeof buf, "Move Increment  %g m (grid)", grid_step_());
+                ctx.label_dim(buf);
+            }
+            else ctx.drag_float("Move Increment", &gizmo_.translate_snap, 0.01f, 0.001f, 100.0f);
             ctx.drag_float("Rotate Increment", &gizmo_.rotate_snap, 0.5f, 0.1f, 90.0f, "%.1f");
         }
         if (mesh_edit_view_() && mesh_.open()) {

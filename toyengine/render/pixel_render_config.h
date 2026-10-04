@@ -177,6 +177,11 @@ struct PixelRenderConfig {
      */
     bool editor_ssao = true;
     /**
+     * Editor viewport shading (solid / material preview): Blender's X-Ray -- surfaces drawn at
+     * this opacity over the backdrop (1 = opaque, off). Runtime-switchable, editor-only.
+     */
+    float editor_xray_alpha = 1.0f;
+    /**
      * Opaque surfaces (e.g. the floor) also reflect transparent geometry, via a second forward
      * capture of BLEND objects (depth/normal/position/shaded-color) and a second Hi-Z pyramid
      * ssr.frag's raymarch tries alongside its primary opaque source -- see

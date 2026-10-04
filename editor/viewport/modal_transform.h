@@ -10,7 +10,8 @@
  *   MMB (held)       pick the axis the mouse moves along (auto constraint)
  *   digits . - Bksp  type an exact value (units, degrees, factor); Tab moves to the next
  *                    component (free move: X Y Z, plane: its two axes, scale: X Y Z)
- *   Ctrl (held)      snap: 1 unit / 5 degrees / 0.1 factor
+ *   Ctrl (held)      snap: `snap_step` units (the editor passes the grid's current spacing,
+ *                    so it follows the zoom as Blender's increment snap does) / 5 degrees / 0.1 factor
  *   Shift (held)     precision: one tenth of the mouse motion
  *   G (during Grab)  in edit mode: switch to Edge Slide, as Blender's G G
  *   LMB / Enter      confirm          RMB / Esc   cancel
@@ -55,6 +56,8 @@ public:
 
     bool active() const { return kind_ != ModalKind::None; }
     ModalKind kind() const { return kind_; }
+
+    float snap_step = 1.0f;   ///< Ctrl's move increment, in world units.
 
     /**
      * @param pivot        World-space pivot (selection centre).
@@ -266,6 +269,7 @@ private:
         v[a] = 1.0f;
         return axis_local_ ? glm::normalize(local_[a]) : v;
     }
+    float snap_(float v) const { return snap_step > 0.0f ? std::round(v / snap_step) * snap_step : v; }
     glm::mat3 basis_() const { return axis_local_ ? local_ : glm::mat3(1.0f); }
 
     std::optional<float> typed_(int i = 0) const {
@@ -291,7 +295,7 @@ private:
                         const float len2 = std::max(1e-6f, glm::dot(sa, sa));
                         t = glm::dot(m - start_mouse_, sa) / len2;
                     }
-                    if (ctrl_ && !typed_(0)) t = std::round(t);
+                    if (ctrl_ && !typed_(0)) t = snap_(t);
                     r.translate = *axis * t;
                 } else if (plane_ && axis_ >= 0) {
                     const int u = axis_ == 0 ? 1 : 0, v = axis_ == 2 ? 1 : 2;
@@ -311,7 +315,7 @@ private:
                             // Snap in the constraint basis.
                             const glm::mat3 B = basis_();
                             glm::vec3 l = glm::transpose(B) * t;
-                            t = B * glm::round(l);
+                            t = B * glm::vec3(snap_(l.x), snap_(l.y), snap_(l.z));
                         }
                         r.translate = t;
                     }
@@ -323,7 +327,7 @@ private:
                     const glm::vec3 right = glm::normalize(glm::vec3(inv[0])), up = glm::normalize(glm::vec3(inv[1]));
                     const glm::vec2 dm = m - start_mouse_;
                     glm::vec3 t = (right * dm.x - up * dm.y) * wpp_;
-                    if (ctrl_) t = glm::round(t);
+                    if (ctrl_) t = glm::vec3(snap_(t.x), snap_(t.y), snap_(t.z));
                     r.translate = t;
                 }
                 break;

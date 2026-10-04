@@ -116,7 +116,7 @@
             set_shading(static_cast<Shading>(sh));
         }
         rx -= s + 10;
-        if (ctx.icon_button("xray", I::XRay, "Toggle X-Ray\nShow wireframes of every object through surfaces", xray_, s, imm::Context::kAll,
+        if (ctx.icon_button("xray", I::XRay, "Toggle X-Ray (Alt Z)\nMake surfaces translucent to see -- and select -- what is behind them", xray_, s, imm::Context::kAll,
                             imm::Box{rx, hb.y + 3, s, s}, true)) {
             xray_ = !xray_;
         }
@@ -176,11 +176,10 @@
         if (ctx.menu_item("Toolbar", "T", &t)) show_toolbar_ = !show_toolbar_;
         if (ctx.menu_item("Sidebar", "N", &n)) show_sidebar_ = !show_sidebar_;
         ctx.menu_separator();
-        if (ctx.menu_item("Frame Selected", "Num .", nullptr, true, I::Zoom)) frame_selected();
+        if (ctx.menu_item("Frame Selected", "F / .", nullptr, true, I::Zoom)) frame_selected();
         if (ctx.menu_item("Frame All", "Home", nullptr, true, I::Zoom)) frame_all();
         if (ctx.menu_item(camera_.ortho ? "Perspective" : "Orthographic", "Num 5", nullptr, true, camera_.ortho ? I::Persp : I::Ortho)) {
-            camera_.ortho = !camera_.ortho;
-            camera_.apply();
+            camera_.set_ortho(!camera_.ortho);
         }
         if (ctx.begin_menu("Viewpoint", true, I::ViewCamera)) {
             if (ctx.menu_item("Camera", "Num 0", nullptr, true, I::Camera)) view_through_scene_camera_();
@@ -447,8 +446,7 @@
         }
         if (ctx.icon_button("nav_ortho", camera_.ortho ? I::Ortho : I::Persp, "Switch Projection\nPerspective / orthographic (Numpad 5)", false, s,
                             imm::Context::kAll, ob)) {
-            camera_.ortho = !camera_.ortho;
-            camera_.apply();
+            camera_.set_ortho(!camera_.ortho);
         }
     }
 
@@ -506,7 +504,7 @@
                 if (ctx.drag_float("Field of View", &camera_.fov, 0.2f, 5.0f, 150.0f, "%.1f")) camera_.apply();
                 if (ctx.drag_float("Distance", &camera_.distance, 0.05f, 0.05f, 5000.0f, "%.2f m")) camera_.apply();
                 bool ortho = camera_.ortho;
-                if (ctx.property_bool("Orthographic", &ortho)) { camera_.ortho = ortho; camera_.apply(); }
+                if (ctx.property_bool("Orthographic", &ortho)) camera_.set_ortho(ortho);
             }
             if (ctx.collapsing_header("3D Cursor", true, nullptr, I::Cursor)) {
                 ctx.drag_float_stacked("Location", &cursor3d_.x, 3, 0.02f, "%.3f m");
@@ -667,6 +665,10 @@
         bool xr = xray_;
         if (ctx.checkbox("X-Ray", &xr)) xray_ = xr;
         ctx.tooltip("X-Ray\nSee and select through surfaces (Alt Z)");
+        if (xray_ && (shading_ == Shading::Solid || shading_ == Shading::MaterialPreview)) {
+            ctx.slider_float("X-Ray Alpha", &xray_alpha_, 0.0f, 1.0f);
+            ctx.tooltip("X-Ray Alpha\nHow opaque surfaces stay in X-Ray (Blender's default 0.5)");
+        }
         if (shading_ != Shading::Full) { ctx.end_popup(); return; }
         ctx.separator();
         ctx.label_dim("Renderer (live, this session)");

@@ -169,6 +169,16 @@ public:
         mesh_->update_vertices(vertices_.data(), vertices_.size(), frame_slot);
     }
 
+    /**
+     * @brief Drops the GPU mesh so the next upload rebuilds it from the (new) source -- for a tool
+     *        replacing the bind pose (the toyeditor editing the mesh). Bones are re-resolved against
+     *        the rest pose captured in start(), never the current animated one.
+     */
+    void rebuild() {
+        mesh_.reset();
+        vertices_.clear();
+    }
+
     /** @brief True once the GPU mesh exists and is bound to the sibling MeshRenderer. */
     bool is_ready() const { return mesh_ != nullptr; }
     /** @brief The last skinned vertices uploaded (object space; tests and tools). */

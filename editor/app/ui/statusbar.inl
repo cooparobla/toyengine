@@ -13,6 +13,10 @@
                      {I::Keyboard, "Shift  Precision"}};
         } else if (nav_active_) {
             hints = {{I::MouseMiddle, "Orbit"}, {I::Keyboard, "Shift  Pan"}, {I::Keyboard, "Ctrl  Zoom"}};
+        } else if (timeline_hovered_ && bottom_view_ == 1 && anim_clip_.open()) {
+            hints = {{I::MouseLeft, "Select / Drag Keys"}, {I::MouseRight, "Key Menu"}, {I::Keyboard, "I  Key"},
+                     {I::Keyboard, "X  Delete"}, {I::Keyboard, "Space  Play"}, {I::Keyboard, "Up/Down  Next Key"},
+                     {I::MouseMiddle, "Zoom / Pan"}};
         } else if (in_sculpt_mode_()) {
             hints = {{I::MouseLeft, "Sculpt"}, {I::Keyboard, "Ctrl  Invert"}, {I::Keyboard, "Shift  Smooth"}, {I::Keyboard, "F  Radius"},
                      {I::Keyboard, "Shift F  Strength"}, {I::MouseMiddle, "Rotate View"}, {I::Keyboard, "Tab  Object Mode"}};

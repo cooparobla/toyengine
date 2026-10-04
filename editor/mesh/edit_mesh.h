@@ -11,9 +11,10 @@
  *     every face that uses it;
  *   - each face corner carries its own UV and colour; normals are not stored at all -- they
  *     are derived on export from the geometry (flat, or averaged across a face's `smooth`
- *     neighbours), so they can never go stale after an edit. A corner keeps the tangent its
- *     file gave it, re-exported exactly as long as the corner's normal is unchanged; a new
- *     corner, or one whose face turned, gets one computed from the UVs;
+ *     neighbours), so they can never go stale after an edit. A corner keeps the normal and
+ *     tangent its file gave it, re-exported exactly as long as nothing around it changed (the
+ *     editor still computes the normal it computed at import); a new corner, or one an edit
+ *     moved, turned or reshaded, gets them derived afresh;
  *   - vertex-group weights (Blender's, the file's `weights:` -- one {group: weight} map per
  *     vertex) are per WELDED vertex, like `positions`. So are `joints` / `joint_weights`
  *     (SkinnedMeshSource's palette form), carried through untouched when present.
@@ -34,6 +35,7 @@
 #include <glm/glm.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <map>
@@ -50,11 +52,19 @@ struct Corner {
     uint32_t  v = 0;
     glm::vec2 uv{0.0f};
     glm::vec4 color{1.0f};   ///< Vertex colour (linear RGBA); written only when EditMesh::has_colors.
-    /// The tangent the file gave this corner (xyz + handedness; zero = none, a corner an edit
-    /// created) and the normal it had then. Re-exported unchanged while the corner's normal is
-    /// still that one -- see export_tangents().
+    /// What the file authored for this corner -- its normal and tangent (zero = none: a corner an
+    /// edit created) -- and `ref_normal`, the normal the EDITOR computed for it at import. While
+    /// the editor still computes that same normal on export, nothing around the corner changed,
+    /// so the authored normal and tangent are written back exactly (custom / smoothed normals
+    /// and exporter tangents survive a save); otherwise both are derived afresh.
+    glm::vec3 normal{0.0f};
     glm::vec4 tangent{0.0f};
-    glm::vec3 tangent_normal{0.0f};
+    glm::vec3 ref_normal{0.0f};
+
+    /** @brief Whether this corner's authored normal / tangent still apply, given its current computed normal. */
+    bool authored_valid(const glm::vec3& computed) const {
+        return glm::dot(normal, normal) > 0.25f && glm::dot(computed, ref_normal) > 0.99999f * glm::length(ref_normal) * glm::length(computed);
+    }
 };
 
 /** @brief One vertex-group weight on a vertex. */
@@ -82,6 +92,11 @@ struct EditMesh {
     /// The mesh has a colour attribute (Corner::color is written). Off for a mesh that never
     /// had one, so it is not given an all-white one.
     bool has_colors = false;
+    /// Whether the file had `normals` / `tangents`. A file without them is written without them
+    /// (the engine derives them on load, as it did from the original -- a collider has no use
+    /// for normals); a mesh made in the editor has normals and leaves tangents to the engine.
+    bool has_normals = true;
+    bool has_tangents = false;
     /// Vertex groups (Blender's): names, and per vertex its sparse weights. `weights` is either
     /// empty (no vertex has any) or parallel to `positions` -- see sync_vertex_data().
     std::vector<std::string> groups;
@@ -96,6 +111,7 @@ struct EditMesh {
     bool operator==(const EditMesh& o) const {
         if (positions != o.positions || faces.size() != o.faces.size() || slots != o.slots) return false;
         if (has_colors != o.has_colors || groups != o.groups || weights != o.weights) return false;
+        if (has_normals != o.has_normals || has_tangents != o.has_tangents) return false;
         if (joints != o.joints || joint_weights != o.joint_weights) return false;
         for (size_t i = 0; i < faces.size(); ++i) {
             const auto& a = faces[i];
@@ -337,6 +353,58 @@ struct EditMesh {
 // YAML round trip
 // =====================================================================================
 
+/**
+ * @brief Drops a face's consecutive corners that welded onto the same vertex (a UV sphere's pole
+ *        quads), keeping, of each duplicate pair, the corner the engine actually drew: of the
+ *        possible choices, the one whose fan triangulation's non-degenerate triangles (vertex +
+ *        UV + colour + authored data) are exactly the original face's. Ties and faces with more
+ *        than a few duplicates fall back to keeping the first.
+ */
+inline void resolve_welded_duplicates(const EditMesh& m, Face& f) {
+    const auto& c = f.corners;
+    std::vector<size_t> dup;   // index i where c[i] repeats c[i-1] (cyclically)
+    for (size_t i = 0; i < c.size(); ++i) if (c[i].v == c[(i + c.size() - 1) % c.size()].v) dup.push_back(i);
+    if (dup.empty()) return;
+    auto fan = [&](const std::vector<Corner>& cs) {
+        std::vector<std::array<const Corner*, 3>> tris;
+        for (size_t i = 1; i + 1 < cs.size(); ++i) {
+            const glm::vec3 a = m.positions[cs[0].v], b = m.positions[cs[i].v], d = m.positions[cs[i + 1].v];
+            if (glm::length(glm::cross(b - a, d - a)) < 1e-12f) continue;
+            tris.push_back({&cs[0], &cs[i], &cs[i + 1]});
+        }
+        return tris;
+    };
+    auto same = [](const Corner& a, const Corner& b) { return a.v == b.v && a.uv == b.uv && a.color == b.color && a.normal == b.normal && a.tangent == b.tangent; };
+    const auto want = fan(c);
+    std::vector<Corner> best;
+    const size_t k = std::min<size_t>(dup.size(), 4);
+    for (uint32_t mask = 0; mask < (1u << k); ++mask) {
+        // Bit set: drop the earlier corner of the pair (keep the later); clear: drop the later.
+        std::vector<bool> drop(c.size(), false);
+        for (size_t j = 0; j < dup.size(); ++j) {
+            const size_t i = dup[j];
+            const bool keep_later = j < k && ((mask >> j) & 1u);
+            drop[keep_later ? (i + c.size() - 1) % c.size() : i] = true;
+        }
+        std::vector<Corner> cand;
+        for (size_t i = 0; i < c.size(); ++i) if (!drop[i]) cand.push_back(c[i]);
+        if (cand.size() < 3) continue;
+        const auto got = fan(cand);
+        bool match = got.size() == want.size();
+        for (size_t t = 0; match && t < got.size(); ++t) {
+            // Same triangle (any rotation of its corners: the fan may start elsewhere).
+            bool rot = false;
+            for (int r = 0; r < 3 && !rot; ++r) {
+                rot = same(*got[t][0], *want[t][r]) && same(*got[t][1], *want[t][(r + 1) % 3]) && same(*got[t][2], *want[t][(r + 2) % 3]);
+            }
+            match = rot;
+        }
+        if (match) { f.corners = std::move(cand); return; }
+        if (best.empty()) best = cand;
+    }
+    if (!best.empty()) f.corners = std::move(best);
+}
+
 /// Keys mesh_to_node() writes itself from the EditMesh (everything else is passthrough).
 inline const std::vector<std::string> k_regenerated_keys = {
     "vertices", "normals", "uvs", "tangents", "colors", "weights", "joints", "joint_weights",
@@ -370,6 +438,8 @@ inline EditMesh mesh_from_node(const Node& node, float weld_eps = 1e-5f) {
         }
     }
     m.has_colors = !raw_col.empty();
+    m.has_normals = !raw_nrm.empty();
+    m.has_tangents = node.contains("tangents") && node.at("tangents").is_sequence() && !node.at("tangents").as_seq().empty();
     if (node.contains("tangents")) {
         for (const auto& v : node.at("tangents").as_seq()) {
             const auto& s = v.as_seq();
@@ -450,12 +520,12 @@ inline EditMesh mesh_from_node(const Node& node, float weld_eps = 1e-5f) {
                 c.v = raw_to_weld[r];
                 if (r < raw_uv.size()) c.uv = raw_uv[r];
                 if (r < raw_col.size()) c.color = raw_col[r];
-                if (r < raw_tan.size()) {
-                    c.tangent = raw_tan[r];
-                    c.tangent_normal = r < raw_nrm.size() ? raw_nrm[r] : glm::vec3(0.0f);
-                }
+                if (r < raw_nrm.size() && glm::length(raw_nrm[r]) > 0.5f) c.normal = raw_nrm[r];   // verbatim
+                if (r < raw_tan.size()) c.tangent = raw_tan[r];
                 f.corners.push_back(c);
             }
+            if (f.corners.size() < 3) continue;
+            resolve_welded_duplicates(m, f);
             if (f.corners.size() < 3) continue;
             m.faces.push_back(std::move(f));
             const glm::vec3 flat = m.face_normal(m.faces.size() - 1);
@@ -468,6 +538,12 @@ inline EditMesh mesh_from_node(const Node& node, float weld_eps = 1e-5f) {
         }
     }
     m.cleanup_faces();
+    // What the editor computes for each corner now: the reference an export compares against.
+    {
+        const auto cn = m.corner_normals();
+        for (size_t f = 0; f < m.faces.size(); ++f)
+            for (size_t k = 0; k < m.faces[f].corners.size(); ++k) m.faces[f].corners[k].ref_normal = cn[f][k];
+    }
     // Everything the editor does not rebuild rides along to export unchanged.
     if (node.is_mapping()) {
         for (const auto& kv : node.as_map()) {
@@ -483,14 +559,15 @@ inline EditMesh mesh_from_node(const Node& node, float weld_eps = 1e-5f) {
 /**
  * @brief Export tangents (xyz + handedness w), one per exported vertex (`corner_ids` maps each
  *        face corner to one). A corner's authored tangent (Corner::tangent, from the file) is
- *        kept, exactly, while the exported normal is still the one the file gave that corner
+ *        kept, exactly, where `keep_authored` says the corner is untouched (Corner::authored_valid)
  *        -- the editor does not rewrite data an edit did not touch. Otherwise it is computed from the
  *        UVs: each triangle's UV-derived tangent and bitangent summed over the corners sharing
  *        the exported vertex (they share position, normal and UV, so tangents stay split at
  *        hard edges and seams), Gram-Schmidt'd against the normal, with the handedness sign.
  */
 inline std::vector<glm::vec4> export_tangents(const EditMesh& m, const std::vector<std::vector<int64_t>>& corner_ids,
-                                              const std::vector<glm::vec3>& normals, size_t count) {
+                                              const std::vector<glm::vec3>& normals, size_t count,
+                                              const std::vector<std::vector<char>>& keep_authored) {
     std::vector<glm::vec3> t_sum(count, glm::vec3(0.0f)), b_sum(count, glm::vec3(0.0f));
     for (size_t f = 0; f < m.faces.size(); ++f) {
         const auto& c = m.faces[f].corners;
@@ -517,8 +594,7 @@ inline std::vector<glm::vec4> export_tangents(const EditMesh& m, const std::vect
             const Corner& c = m.faces[f].corners[k];
             const size_t id = static_cast<size_t>(corner_ids[f][k]);
             if (authored[id] != glm::vec4(0.0f) || glm::length(glm::vec3(c.tangent)) < 1e-6f) continue;
-            if (glm::length(c.tangent_normal) > 0.5f &&
-                glm::dot(glm::normalize(c.tangent_normal), normals[id]) > 0.9995f) authored[id] = c.tangent;
+            if (keep_authored[f][k]) authored[id] = c.tangent;
         }
     }
     std::vector<glm::vec4> out(count);
@@ -548,6 +624,7 @@ inline Node mesh_to_node(const EditMesh& m) {
     // Dedup identical (vertex, normal, uv, colour) corners so files stay small; the engine welds anyway.
     std::map<std::tuple<uint32_t, int, int, int, int, int, std::tuple<int, int, int, int>>, int64_t> seen;
     std::vector<std::vector<int64_t>> corner_ids(m.faces.size());
+    std::vector<std::vector<char>> keep_authored(m.faces.size());
     std::vector<glm::vec3> out_normals;
     int64_t next = 0;
     auto qz = [](float v) { return static_cast<int>(std::lround(v * 10000.0f)); };
@@ -555,7 +632,9 @@ inline Node mesh_to_node(const EditMesh& m) {
         Node face = Node::sequence();
         for (size_t k = 0; k < m.faces[f].corners.size(); ++k) {
             const Corner& c = m.faces[f].corners[k];
-            const glm::vec3 n = cn[f][k];
+            const bool keep = c.authored_valid(cn[f][k]);
+            keep_authored[f].push_back(keep ? 1 : 0);
+            const glm::vec3 n = keep ? c.normal : cn[f][k];
             const glm::vec4 col = m.has_colors ? c.color : glm::vec4(1.0f);
             const auto key = std::make_tuple(c.v, qz(n.x), qz(n.y), qz(n.z), qz(c.uv.x), qz(c.uv.y),
                                              std::make_tuple(qz(col.r), qz(col.g), qz(col.b), qz(col.a)));
@@ -599,19 +678,19 @@ inline Node mesh_to_node(const EditMesh& m) {
         faces.as_seq().push_back(face);
     }
     Node tangents = Node::sequence();
-    for (const glm::vec4& t : export_tangents(m, corner_ids, out_normals, static_cast<size_t>(next))) {
+    for (const glm::vec4& t : export_tangents(m, corner_ids, out_normals, static_cast<size_t>(next), keep_authored)) {
         float tv[4] = {t.x, t.y, t.z, t.w};
         tangents.as_seq().push_back(make_float_seq(tv, 4));
     }
     out["vertices"] = verts;
-    out["normals"] = norms;
+    if (m.has_normals) out["normals"] = norms;
     out["uvs"] = uvs;
     out["faces"] = faces;
     // The rest of Blender's export layout: colours (empty without a colour attribute), one
-    // vertex-group map per vertex, and tangents.
+    // vertex-group map per vertex, and tangents (when the source had them -- see has_tangents).
     out["colors"] = colors;
     out["weights"] = weights;
-    out["tangents"] = tangents;
+    if (m.has_tangents) out["tangents"] = tangents;
     if (!m.joints.empty()) out["joints"] = joints;
     if (!m.joint_weights.empty()) out["joint_weights"] = jweights;
     // Material slots (submeshes): written when named, or when any face uses a slot past 0.

@@ -1,0 +1,20 @@
+clip:
+  name: bounce
+  wrap: loop
+  length: 1.0
+  tracks:
+    - object: Ball
+      property: position
+      keys:
+        - {time: 0, value: [0, 0, 2.2], easing: ease_in}
+        - {time: 0.45, value: [0, 0, 0.3]}
+        - {time: 0.55, value: [0, 0, 0.3], easing: ease_out}
+        - {time: 1, value: [0, 0, 2.2]}
+    - object: Ball
+      property: scale
+      keys:
+        - {time: 0, value: [0.6, 0.6, 0.6], easing: step}
+        - {time: 0.4, value: [0.6, 0.6, 0.6], easing: ease_in}
+        - {time: 0.5, value: [0.8, 0.8, 0.36], easing: ease_out}
+        - {time: 0.62, value: [0.6, 0.6, 0.6]}
+        - {time: 1, value: [0.6, 0.6, 0.6]}

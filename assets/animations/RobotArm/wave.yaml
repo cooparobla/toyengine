@@ -1,0 +1,42 @@
+clip:
+  name: wave
+  wrap: loop
+  length: 2.0
+  tracks:
+    - object: Base/Shoulder
+      property: rotation_quat
+      keys:
+        - {time: 0, value: [-0, -0, -0.422618, 0.906308], easing: ease_in_out}
+        - {time: 1, value: [0, 0, 0.422618, 0.906308], easing: ease_in_out}
+        - {time: 2, value: [-0, -0, -0.422618, 0.906308], easing: ease_in_out}
+    - object: Base/Shoulder/UpperArm/Elbow
+      property: rotation_quat
+      keys:
+        - {time: 0, value: [0.0871557, 0, 0, 0.996195], easing: ease_in_out}
+        - {time: 0.5, value: [0.608761, 0, 0, 0.793353], easing: ease_in_out}
+        - {time: 1, value: [0.0871557, 0, 0, 0.996195], easing: ease_in_out}
+        - {time: 1.5, value: [0.608761, 0, 0, 0.793353], easing: ease_in_out}
+        - {time: 2, value: [0.0871557, 0, 0, 0.996195], easing: ease_in_out}
+    - object: Base/Shoulder/UpperArm/Elbow/Forearm/Wrist
+      property: rotation_quat
+      keys:
+        - {time: 0, value: [0, 0, 0, 1], easing: ease_in_out}
+        - {time: 0.25, value: [0, 0.300706, 0, 0.953717], easing: ease_in_out}
+        - {time: 0.5, value: [-0, -0.300706, -0, 0.953717], easing: ease_in_out}
+        - {time: 0.75, value: [0, 0.300706, 0, 0.953717], easing: ease_in_out}
+        - {time: 1, value: [0, 0, 0, 1], easing: ease_in_out}
+        - {time: 2, value: [0, 0, 0, 1], easing: ease_in_out}
+    - object: Base/Shoulder/UpperArm/Elbow/Forearm/Wrist/Hand/FingerL
+      property: position
+      keys:
+        - {time: 0, value: [-0.12, 0, 0.18], easing: ease_in_out}
+        - {time: 0.5, value: [-0.04, 0, 0.18], easing: ease_in_out}
+        - {time: 1, value: [-0.12, 0, 0.18]}
+        - {time: 2, value: [-0.12, 0, 0.18]}
+    - object: Base/Shoulder/UpperArm/Elbow/Forearm/Wrist/Hand/FingerR
+      property: position
+      keys:
+        - {time: 0, value: [0.12, 0, 0.18], easing: ease_in_out}
+        - {time: 0.5, value: [0.04, 0, 0.18], easing: ease_in_out}
+        - {time: 1, value: [0.12, 0, 0.18]}
+        - {time: 2, value: [0.12, 0, 0.18]}

@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <initializer_list>
 #include <set>
 #include <string>
 #include <vector>
@@ -34,7 +35,8 @@ struct ClipKey {
     float time = 0.0f;
     glm::vec4 value{0.0f, 0.0f, 0.0f, 1.0f};
     std::string easing;   ///< "" = linear; else step / ease_in / ease_out / ease_in_out.
-    bool operator==(const ClipKey& o) const { return time == o.time && value == o.value && easing == o.easing; }
+    Node extra = Node::mapping();   ///< Keys this model does not know, written back verbatim.
+    bool operator==(const ClipKey& o) const { return time == o.time && value == o.value && easing == o.easing && extra == o.extra; }
 };
 
 struct ClipTrack {
@@ -43,10 +45,11 @@ struct ClipTrack {
     std::string property;                  ///< e.g. position, rotation_quat, scale, position.x
     std::vector<ClipKey> keys;             ///< Sorted by time.
     Node procedural;                       ///< A procedural track's node, kept verbatim (keys empty).
+    Node extra = Node::mapping();          ///< Unknown track keys (component_index, ...), written back verbatim.
     bool is_procedural() const { return !procedural.is_null(); }
     bool operator==(const ClipTrack& o) const {
         return object == o.object && component == o.component && property == o.property && keys == o.keys &&
-               is_procedural() == o.is_procedural();
+               is_procedural() == o.is_procedural() && extra == o.extra && (!is_procedural() || procedural == o.procedural);
     }
 };
 
@@ -64,9 +67,26 @@ struct ClipModel {
     std::string wrap = "loop";    ///< loop / once / pingpong
     float length = 1.0f;          ///< Seconds (always written: the runtime needs it to wrap).
     std::vector<ClipTrack> tracks;
+    Node extra = Node::mapping();   ///< Unknown `clip:` keys (and other top-level keys under `__root`), written back verbatim.
 
     bool operator==(const ClipModel& o) const {
-        return name == o.name && wrap == o.wrap && length == o.length && tracks == o.tracks;
+        return name == o.name && wrap == o.wrap && length == o.length && tracks == o.tracks && extra == o.extra;
+    }
+
+    /** @brief The keys of `n` not in `known`, as a mapping. */
+    static Node extras_of(const Node& n, std::initializer_list<const char*> known) {
+        Node out = Node::mapping();
+        if (!n.is_mapping()) return out;
+        for (const auto& kv : n.as_map()) {
+            const std::string k = kv.first.get_value<std::string>();
+            bool is_known = false;
+            for (const char* kk : known) is_known |= k == kk;
+            if (!is_known) out[k] = kv.second;
+        }
+        return out;
+    }
+    static void put_extras(Node& n, const Node& extra) {
+        if (extra.is_mapping()) for (const auto& kv : extra.as_map()) n[kv.first.get_value<std::string>()] = kv.second;
     }
 
     static constexpr float kTimeEps = 1e-4f;   ///< Keys closer than this are the same key.
@@ -77,22 +97,26 @@ struct ClipModel {
         ClipModel m;
         if (!root.is_mapping() || !root.contains("clip")) return m;
         const Node& c = root.at("clip");
+        m.extra = extras_of(c, {"name", "wrap", "length", "tracks"});
         m.name = get_string(c, "name", m.name);
         m.wrap = get_string(c, "wrap", m.wrap);
         float max_t = 0.0f;
         if (c.contains("tracks")) {
             for (const auto& tn : c.at("tracks").as_seq()) {
                 ClipTrack t;
+                t.extra = extras_of(tn, {"object", "component", "property", "keys", "procedural"});
                 t.object = get_string(tn, "object", "");
                 t.component = get_string(tn, "component", "Transform");
                 t.property = get_string(tn, "property", "");
                 if (tn.contains("procedural")) {
-                    t.procedural = tn;
+                    t.procedural = tn;          // the whole track node, verbatim
+                    t.extra = Node::mapping();
                 } else if (tn.contains("keys")) {
                     for (const auto& kn : tn.at("keys").as_seq()) {
                         ClipKey k;
                         k.value = glm::vec4(0.0f);   // channels past the property's count stay 0 (canonical)
                         k.time = get_float(kn, "time", 0.0f);
+                        k.extra = extras_of(kn, {"time", "value", "easing"});
                         k.easing = get_string(kn, "easing", "");
                         if (k.easing == "linear") k.easing.clear();
                         if (kn.contains("value")) {
@@ -140,12 +164,15 @@ struct ClipModel {
                 for (int i = 0; i < n; ++i) v.as_seq().push_back(make_float(k.value[i]));
                 kn["value"] = v;
                 if (!k.easing.empty()) kn["easing"] = Node(k.easing);
+                put_extras(kn, k.extra);
                 ks.as_seq().push_back(kn);
             }
             tn["keys"] = ks;
+            put_extras(tn, t.extra);
             ts.as_seq().push_back(tn);
         }
         c["tracks"] = ts;
+        put_extras(c, extra);
         Node root = Node::mapping();
         root["clip"] = c;
         return root;
@@ -204,14 +231,76 @@ struct ClipModel {
     }
 
     /** @brief One dope-sheet cell: an object's keys at a time ("" object... the root). */
+    /**
+     * @brief One dope-sheet cell: an object's keys at a time -- all its tracks (`property`
+     *        empty), or one channel's when the row is expanded (`property` = "position", ...).
+     */
     struct KeyRef {
         std::string object;
         float time = 0.0f;
+        std::string property;   ///< "" = every track of the object.
         bool operator<(const KeyRef& o) const {
             if (object != o.object) return object < o.object;
-            return time < o.time - kTimeEps;
+            if (std::abs(time - o.time) > kTimeEps) return time < o.time;
+            return property < o.property;
         }
     };
+
+    /** @brief Whether a key of track `t` at `time` is covered by `refs` (whole-object or that channel's ref). */
+    static bool covered(const std::set<KeyRef>& refs, const ClipTrack& t, float time) {
+        return refs.count({t.object, time, ""}) > 0 || refs.count({t.object, time, t.property}) > 0;
+    }
+
+    /** @brief The distinct key times of one track of `object`. */
+    std::vector<float> key_times(const std::string& object, const std::string& property) const {
+        std::vector<float> out;
+        for (const auto& t : tracks) {
+            if (t.object != object || t.property != property) continue;
+            for (const auto& k : t.keys) out.push_back(k.time);
+        }
+        std::sort(out.begin(), out.end());
+        return out;
+    }
+
+    /** @brief Sets the interpolation leaving each covered key ("" linear, step, ease_in, ease_out, ease_in_out). */
+    size_t set_easing(const std::set<KeyRef>& refs, const std::string& easing) {
+        size_t n = 0;
+        for (auto& t : tracks) {
+            for (auto& k : t.keys) {
+                if (!covered(refs, t, k.time)) continue;
+                k.easing = easing == "linear" ? std::string() : easing;
+                ++n;
+            }
+        }
+        return n;
+    }
+
+    /** @brief The interpolation shared by every covered key, or "mixed" / "" when none. */
+    std::string easing_of(const std::set<KeyRef>& refs) const {
+        std::string e;
+        bool any = false;
+        for (const auto& t : tracks) {
+            for (const auto& k : t.keys) {
+                if (!covered(refs, t, k.time)) continue;
+                const std::string ke = k.easing.empty() ? "linear" : k.easing;
+                if (any && ke != e) return "mixed";
+                e = ke;
+                any = true;
+            }
+        }
+        return e;
+    }
+
+    /** @brief The nearest key time strictly after (dir > 0) or before `t`, over every track; `t` if none. */
+    float neighbour_key(float t, int dir) const {
+        float best = t;
+        bool found = false;
+        for (float k : key_times()) {
+            if (dir > 0 && k > t + kTimeEps && (!found || k < best)) { best = k; found = true; }
+            if (dir < 0 && k < t - kTimeEps && (!found || k > best)) { best = k; found = true; }
+        }
+        return best;
+    }
 
     /** @brief Removes every key of each referenced (object, time); drops tracks left empty. */
     size_t delete_keys(const std::set<KeyRef>& refs) {
@@ -219,7 +308,7 @@ struct ClipModel {
         for (auto& t : tracks) {
             const size_t before = t.keys.size();
             t.keys.erase(std::remove_if(t.keys.begin(), t.keys.end(), [&](const ClipKey& k) {
-                return refs.count({t.object, k.time}) > 0;
+                return covered(refs, t, k.time);
             }), t.keys.end());
             n += before - t.keys.size();
         }
@@ -238,11 +327,11 @@ struct ClipModel {
         for (auto& t : tracks) {
             std::vector<ClipKey> keep, shifted;
             for (const auto& k : t.keys) {
-                if (refs.count({t.object, k.time})) {
+                if (covered(refs, t, k.time)) {
                     ClipKey s = k;
                     s.time = std::max(0.0f, k.time + dt);
                     shifted.push_back(s);
-                    moved.insert({t.object, s.time});
+                    moved.insert({t.object, s.time, refs.count({t.object, k.time, ""}) ? std::string() : t.property});
                 } else {
                     keep.push_back(k);
                 }

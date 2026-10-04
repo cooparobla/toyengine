@@ -2330,7 +2330,8 @@ private:
         std::string water;
         for (const auto& c : obj.at("components").as_seq()) {
             const std::string type = component_type(c);
-            if (type == "MeshRenderer") {
+            if (type == "MeshRenderer" || type == "SkinnedMeshRenderer") {
+                // A skinned mesh's MeshRenderer has no mesh of its own: the SkinnedMeshRenderer's is it.
                 std::string key = get_string(c, "mesh_path");
                 if (!key.empty()) return key;
             } else if (type == "WaterBody") {
@@ -2604,6 +2605,20 @@ private:
                 if (auto* mr = live->get_component<coopa::gfx::engine::components::MeshRenderer>()) mr->set_mesh(handle);
                 continue;
             }
+            // A skinned mesh: hand its SkinnedMeshRenderer the edited bind pose; it rebuilds and keeps
+            // deforming it with the rig (bound against the rest pose it captured at start).
+            if (auto* smr = live->get_component<toy::scene::SkinnedMeshRenderer>()) {
+                try {
+                    auto src = std::make_shared<coopa::gfx::engine::data::SkinnedMeshSource>(
+                        coopa::gfx::engine::data::SkinnedMeshSource::from_node(Node::deserialize(coopa::yaml::emit(mesh_to_node(mesh_.mesh)))));
+                    smr->set_source(engine_.assets().create<coopa::gfx::engine::data::SkinnedMeshSource>(
+                        "editor/edit_skin@" + std::to_string(id), src));
+                    smr->rebuild();
+                } catch (const std::exception& e) {
+                    log_error(std::string("Skinned mesh update failed: ") + e.what());
+                }
+                continue;
+            }
             // A water body: its MeshRenderer shows WaterSystem's bake, not the raw mesh. Hand the
             // edited geometry to the WaterBody instead; WaterSystem re-bakes it (it runs in edit
             // mode) with waves, foam and flow intact.
@@ -2780,6 +2795,13 @@ private:
         if (!vp) return;
         ctx.push_clip(vp->rect);   // the scene image, not the letterbox bars around it
         draw_viewport_overlay_body_(ctx, mesh_edit, *vp);
+        if (anim_record_ && anim_posed_) {
+            // Recording (the Timeline's red dot): Blender's red frame -- moves become keys.
+            const imm::Box r = vp->rect;
+            ctx.outline({r.x + 1, r.y + 1, r.w - 2, r.h - 2}, glm::vec4(0.9f, 0.18f, 0.18f, 0.9f), 3.0f);
+            shadow_text_(ctx, glm::vec2(r.x + 10, r.bottom() - 24), "Recording: moves become keys at frame " +
+                         std::to_string(static_cast<int>(std::round(anim_time_ * kAnimFps))), glm::vec4(1.0f, 0.45f, 0.45f, 1));
+        }
         ctx.pop_clip();
     }
 
@@ -3219,6 +3241,14 @@ private:
     std::set<ClipModel::KeyRef> anim_sel_keys_;
     KeyDrag anim_drag_;
     int bottom_view_ = 0;   ///< Bottom area: 0 Console, 1 Timeline
+    bool anim_clip_dirty_ = false;
+    std::set<std::string> anim_expanded_;   ///< Timeline rows opened into channels (track paths)
+    TimelineView anim_view_;
+    float anim_menu_time_ = 0.0f;
+    std::string anim_rename_buf_;
+    bool anim_show_all_ = false;   ///< Timeline lists every rig object (else animated + selected)
+    int anim_row_scroll_ = 0;
+    fs::path anim_doc_path_;   ///< The document the Timeline's state belongs to
     bool timeline_hovered_ = false;
     MeshSelection modal_base_sel_;
     ModalKind pending_modal_kind_ = ModalKind::None;

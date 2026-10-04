@@ -181,6 +181,61 @@ void test_writer_roundtrips_every_asset() {
     expect(n > 10, "round-tripped the repository's assets (" + std::to_string(n) + " files)");
 }
 
+/**
+ * @brief Every mesh the editor saves is the mesh it loaded: for each asset mesh, the engine
+ *        builds the identical vertex stream (position, normal, UV, tangent) from the editor's
+ *        re-save as from the original, and no top-level key is lost.
+ */
+void test_asset_fidelity_meshes() {
+    int n = 0;
+    for (const auto& p : asset_yaml_files()) {
+        if (p.parent_path().filename() != "meshes" || p.filename().string().find(".lod.") != std::string::npos) continue;
+        const Node src = coopa::yaml::load_document(p);
+        if (!src.contains("faces")) continue;
+        const std::string rel = fs::relative(p, ROOT_DIR).string();
+        const Node saved = Node::deserialize(coopa::yaml::emit(mesh_to_node(mesh_from_node(src))));
+        std::vector<std::string> lost;
+        for (const auto& kv : src.as_map()) {
+            const std::string k = kv.first.get_value<std::string>();
+            if (!saved.contains(k)) lost.push_back(k);
+        }
+        std::string lost_s;
+        for (const auto& k : lost) lost_s += " " + k;
+        expect(lost.empty(), rel + ": every top-level key survives (lost:" + lost_s + ")");
+        const auto a = coopa::gfx::engine::data::Mesh::build_cpu(src);
+        const auto b = coopa::gfx::engine::data::Mesh::build_cpu(saved);
+        auto key = [](const coopa::gfx::engine::data::Vertex& v) {
+            auto q = [](float x) { return static_cast<long>(std::lround(x * 2000.0f)); };
+            return std::vector<long>{q(v.position.x), q(v.position.y), q(v.position.z), q(v.normal.x), q(v.normal.y), q(v.normal.z),
+                                     q(v.uv.x), q(v.uv.y), q(v.tangent.x), q(v.tangent.y), q(v.tangent.z), q(v.tangent.w)};
+        };
+        std::multiset<std::vector<long>> va, vb;
+        // Per triangle corner (index stream), so welding differences do not matter -- only what is
+        // drawn. Zero-area triangles (a UV sphere's pole quads) are never drawn nor collided with;
+        // the editor's weld drops them, so they are left out on both sides.
+        auto corners = [&](const coopa::gfx::engine::data::MeshCpuData& d, std::multiset<std::vector<long>>& out) {
+            size_t tris = 0;
+            for (size_t t = 0; t + 2 < d.lods.at(0).index_count; t += 3) {
+                const auto& v0 = d.vertices[d.indices[t]];
+                const auto& v1 = d.vertices[d.indices[t + 1]];
+                const auto& v2 = d.vertices[d.indices[t + 2]];
+                if (glm::length(glm::cross(v1.position - v0.position, v2.position - v0.position)) < 1e-9f) continue;
+                for (int c = 0; c < 3; ++c) out.insert(key(d.vertices[d.indices[t + c]]));
+                ++tris;
+            }
+            return tris;
+        };
+        const size_t ta = corners(a, va), tb = corners(b, vb);
+        std::vector<std::vector<long>> diff;
+        std::set_symmetric_difference(va.begin(), va.end(), vb.begin(), vb.end(), std::back_inserter(diff));
+        expect(ta == tb && diff.empty(),
+               rel + ": the engine draws the identical mesh from the editor's save (" + std::to_string(diff.size()) +
+                   " differing corners, " + std::to_string(ta) + " vs " + std::to_string(tb) + " triangles)");
+        ++n;
+    }
+    expect(n >= 5, "checked the repository's meshes (" + std::to_string(n) + ")");
+}
+
 // =====================================================================================
 // Group "document" -- SceneDocument, undo, schemas
 // =====================================================================================
@@ -209,6 +264,25 @@ void test_scene_documents_save_load_stable() {
         expect(text == text2, "save -> load -> save is byte-identical");
     }
     expect(count >= 10, "every scene was round-tripped");
+}
+
+/** @brief An object asset keeps everything on save: its object (unknown keys included) and any
+ *         other top-level keys. */
+void test_asset_fidelity_object_assets() {
+    const fs::path dir = fresh_dir("object_assets");
+    const fs::path in = dir / "crate.yaml";
+    {
+        std::ofstream f(in);
+        f << "format: toyengine-object\nversion: 3\nauthor: someone\nobject:\n  name: Crate\n  tag: props\n"
+             "  components:\n    - type: Transform\n      position: {x: 1.0, y: 2.0, z: 3.0}\n"
+             "    - type: FutureThing\n      odd: [1, 2, 3]\n  children:\n    - name: Lid\n      components:\n        - type: Transform\n";
+    }
+    SceneDocument doc;
+    doc.load(in);
+    const fs::path out = dir / "crate_saved.yaml";
+    doc.save(out);
+    const Node a = coopa::yaml::load_document(in), b = coopa::yaml::load_document(out);
+    expect(a == b, "an object asset saves exactly as loaded:\n" + coopa::yaml::emit(b));
 }
 
 void test_scene_document_random_edits_undo() {
@@ -801,6 +875,37 @@ void test_clip_model() {
 
     const Node n = Node::deserialize(coopa::yaml::emit(m.to_node()));
     expect(ClipModel::from_node(n) == m, "the clip round-trips through YAML");
+    // Keys the model does not know -- at clip, track and key level, and a procedural track --
+    // come back verbatim.
+    const Node odd = Node::deserialize(std::string(
+        "clip:\n  name: odd\n  wrap: once\n  length: 2.0\n  events: [{time: 1.0, name: step}]\n  tracks:\n"
+        "    - object: Arm\n      component: Light\n      component_index: 1\n      property: color.x\n"
+        "      keys:\n        - {time: 0.0, value: [1.0], easing: step, note: hi}\n"
+        "    - object: Arm\n      property: position\n      procedural: {type: sine, amplitude: [0.0, 0.0, 1.0], frequency: 2.0}\n"));
+    const Node odd_back = Node::deserialize(coopa::yaml::emit(ClipModel::from_node(odd).to_node()));
+    expect(odd_back == odd, "unknown clip, track and key fields and procedural tracks survive the editor:\n" + coopa::yaml::emit(odd_back));
+    // Every clip file in the repository: the editor's model writes it back as it was.
+    int clips = 0;
+    for (const auto& p : asset_yaml_files()) {
+        const Node src = coopa::yaml::load_document(p);
+        if (!src.is_mapping() || !src.contains("clip")) continue;
+        const Node back = Node::deserialize(coopa::yaml::emit(ClipModel::from_node(src).to_node()));
+        const auto a = coopa::anim::parse_clip(src), b = coopa::anim::parse_clip(back);
+        bool same = a.tracks.size() == b.tracks.size() && a.effective_length() == b.effective_length() && a.wrap == b.wrap;
+        for (size_t t = 0; same && t < a.tracks.size(); ++t) {
+            same = a.tracks[t].object_path == b.tracks[t].object_path && a.tracks[t].property == b.tracks[t].property &&
+                   a.tracks[t].curve.keys().size() == b.tracks[t].curve.keys().size();
+            for (size_t k = 0; same && k < a.tracks[t].curve.keys().size(); ++k) {
+                const auto& ka = a.tracks[t].curve.keys()[k];
+                const auto& kb = b.tracks[t].curve.keys()[k];
+                same = std::abs(ka.time - kb.time) < 1e-6f && ka.easing == kb.easing;
+                for (int c = 0; same && c < 4; ++c) same = std::abs(ka.value[c] - kb.value[c]) < 1e-5f;
+            }
+        }
+        expect(same, fs::relative(p, ROOT_DIR).string() + ": the editor rewrites the clip the runtime reads identically");
+        ++clips;
+    }
+    expect(clips >= 3, "checked the repository's clip files (" + std::to_string(clips) + ")");
     const coopa::anim::AnimationClip rt = coopa::anim::parse_clip(n);
     expect(rt.tracks.size() == 3 && rt.effective_length() == 2.0f && rt.wrap == coopa::anim::WrapMode::PingPong,
            "the runtime parses the editor's file (tracks, length, wrap)");
@@ -2737,13 +2842,15 @@ void test_editor_animation_timeline() {
     expect(std::abs(glm::degrees(2.0f * std::atan2(std::abs(q.z), q.w)) - 45.0f) < 0.5f, "...and the rotation (45 deg)");
     dump(engine, "17_timeline");
 
-    // Ctrl+Z (recording): the last key goes, from the file too.
+    // Ctrl+Z (recording): the last keys go -- the move's auto-key and then I's -- from the file too.
+    app.undo();
     app.undo();
     tick(engine, 1);
     const ClipModel saved = ClipModel::from_node(coopa::yaml::load_document(scene_dir / "animations" / "Cube" / "Wave.yaml"));
     expect(app.animation_clip()->find_track("Bone", "position")->keys.size() == 1 &&
                saved.find_track("Bone", "position") && saved.find_track("Bone", "position")->keys.size() == 1,
            "undo removes the last keys, and the file follows");
+    app.redo();
     app.redo();
     tick(engine, 1);
 
@@ -2764,6 +2871,468 @@ void test_editor_animation_timeline() {
                std::to_string(played ? played->get_transform()->transform().position().x : -1.0f) + ")");
     app.stop();
     tick(engine, 2);
+}
+
+/**
+ * @brief Every component the inspector can write loads in the engine: for each schema, a
+ *        component with EVERY field at its schema default (what editing each field writes) goes
+ *        through the engine's own scene loader without error and creates the component.
+ */
+void test_asset_fidelity_component_schemas() {
+    setenv("FIXED_DT", "0.016666", 1);
+    setenv("NO_INPUT", "1", 1);
+    setenv("HOME", tmp_root().c_str(), 1);
+    const fs::path root = fresh_dir("schema_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));   // registers every component parser
+    int checked = 0;
+    for (const auto& [type, schema] : schemas()) {
+        Node comp = default_component(type);
+        for (const auto& f : schema.fields) {
+            if (comp.contains(f.key)) continue;
+            switch (f.kind) {
+                case FieldKind::Bool:  comp[f.key] = Node(f.def.x != 0.0f); break;
+                case FieldKind::Int:   comp[f.key] = Node(static_cast<int64_t>(f.def.x)); break;
+                case FieldKind::Float: comp[f.key] = make_float(f.def.x); break;
+                case FieldKind::Vec3:  comp[f.key] = make_vec3(glm::vec3(f.def)); break;
+                case FieldKind::Vec4:  { float v[4] = {f.def.x, f.def.y, f.def.z, f.def.w}; comp[f.key] = make_float_seq(v, 4); break; }
+                case FieldKind::Color: comp[f.key] = make_color(glm::vec3(f.def)); break;
+                case FieldKind::Enum:  if (!f.options.empty()) comp[f.key] = Node(f.options.front()); break;
+                case FieldKind::String:
+                case FieldKind::AssetRef: if (!f.default_string.empty()) comp[f.key] = Node(f.default_string); break;
+                case FieldKind::Material: break;   // default_component() writes it when the schema has one
+            }
+        }
+        Node obj = Node::mapping();
+        obj["name"] = Node(std::string("Probe"));
+        Node comps = Node::sequence();
+        Node t = Node::mapping();
+        t["type"] = Node(std::string("Transform"));
+        comps.as_seq().push_back(t);
+        if (type != "Transform") comps.as_seq().push_back(comp);
+        obj["components"] = comps;
+        Node doc = Node::mapping();
+        doc["format"] = Node(std::string("toyengine"));
+        Node sc = Node::mapping();
+        sc["scene_name"] = Node(std::string("SchemaProbe"));
+        Node roots = Node::sequence();
+        roots.as_seq().push_back(obj);
+        sc["root_objects"] = roots;
+        doc["scene"] = sc;
+        std::string error;
+        bool has = false;
+        try {
+            coopa::scene::Scene scene = coopa::scene::SceneLoader::load_from_node(doc, (root / "assets" / "scenes" / "probe.yaml").string());
+            auto* o = scene.find_object("Probe");
+            has = o && (type == "Transform" || o->get_component_by_type_name(type) != nullptr ||
+                        o->get_component_by_type_name(type + "Component") != nullptr);
+            if (!has && o) {
+                for (const auto& c : o->components()) error += " " + c->type_name();
+            }
+        } catch (const std::exception& e) {
+            error = e.what();
+        }
+        expect(error.empty() || has, "schema " + type + ": every field at its default loads in the engine (" + error + ")");
+        expect(has, "schema " + type + ": ...and creates the component (has:" + error + ")");
+        ++checked;
+    }
+    expect(checked >= 20, "checked every component schema (" + std::to_string(checked) + ")");
+}
+
+/**
+ * @brief Files the editor CREATES are legitimate: a scene built in the editor from primitive
+ *        meshes, a new material and a rig with a keyed clip is saved, then run through Play --
+ *        the engine's own loaders -- and every mesh builds, the material's values arrive, and
+ *        the Animator plays its clip file.
+ */
+void test_asset_fidelity_editor_created_files() {
+    setenv("FIXED_DT", "0.016666", 1);
+    setenv("NO_INPUT", "1", 1);
+    setenv("HOME", tmp_root().c_str(), 1);
+    fs::remove(Project::prefs_path());
+    const fs::path root = fresh_dir("created_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, 4);
+    auto& doc = app.document();
+
+    std::vector<ObjectId> prims;
+    for (const char* p : {"Cube", "Sphere", "Cylinder", "Plane", "Cone", "Torus", "Icosphere"}) {
+        const ObjectId id = app.create_primitive(p);
+        if (id) prims.push_back(id);
+    }
+    expect(prims.size() >= 4, "created primitive objects (" + std::to_string(prims.size()) + ")");
+    Node mat = Node::mapping();
+    mat["albedo"] = make_color(glm::vec3(0.1f, 0.6f, 0.3f));
+    mat["metallic"] = make_float(0.25);
+    mat["roughness"] = make_float(0.7);
+    expect(app.create_material("painted", mat), "created a material asset");
+    app.show_document_view();   // creating a material opens it; back to the scene
+    tick(engine, 2);
+    const int mr = doc.find_component(prims[0], "MeshRenderer");
+    Node mrn = doc.find(prims[0])->at("components").as_seq()[static_cast<size_t>(mr)];
+    mrn["material"] = Node(std::string("materials/painted"));
+    doc.set_component(prims[0], mr, mrn, "Material");
+    const ObjectId bone = doc.add_object(doc.make_object("Bone"), prims[0]);
+    app.sync().rebuild(engine, doc);
+    tick(engine, 2);
+    doc.select(prims[0]);
+    app.show_timeline();
+    app.add_animator(prims[0]);
+    app.new_animation_clip("Spin");
+    tick(engine, 2);
+    doc.select(bone);
+    app.set_animation_record(true);
+    tick(engine, 1);
+    app.set_animation_time(0.0f);
+    tick(engine, 1);
+    app.insert_keyframes();
+    app.set_animation_time(1.0f);
+    tick(engine, 1);
+    app.set_object_transform(bone, glm::vec3(0, 0, 3), glm::vec3(0), glm::vec3(1));
+    app.insert_keyframes();
+    app.set_animation_record(false);
+    tick(engine, 1);
+    expect(app.save_scene(), "the scene saves");
+
+    // Play loads the saved document through the engine's own loaders.
+    app.play();
+    tick(engine, 30);
+    expect(app.playing(), "Play started from the editor-built scene");
+    auto& scene = engine.scene();
+    int ready = 0, renderers = 0;
+    for (auto* r : scene.get_components<coopa::gfx::engine::components::MeshRenderer>()) {
+        if (!r->owner) continue;
+        bool prim = false;
+        for (const auto& [id, live] : app.sync().live_objects()) (void)id, (void)live;
+        for (ObjectId pid : prims) prim |= r->owner->name() == get_string(*doc.find(pid), "name");
+        if (!prim) continue;
+        ++renderers;
+        ready += r->is_ready() ? 1 : 0;
+    }
+    expect(renderers == static_cast<int>(prims.size()) && ready == renderers,
+           "every editor-made mesh loads in the engine (" + std::to_string(ready) + "/" + std::to_string(renderers) + ")");
+    auto* painted = scene.find_object(get_string(*doc.find(prims[0]), "name"));
+    auto* pmr = painted ? painted->get_component<coopa::gfx::engine::components::MeshRenderer>() : nullptr;
+    expect(pmr && glm::distance(pmr->material.albedo, glm::vec3(0.1f, 0.6f, 0.3f)) < 1e-3f && std::abs(pmr->material.metallic - 0.25f) < 1e-4f &&
+               std::abs(pmr->material.roughness - 0.7f) < 1e-4f,
+           "the editor-made material's values reach the engine");
+    auto* animator = painted ? painted->get_component<coopa::anim::Animator>() : nullptr;
+    auto* live_bone = painted ? painted->find_descendant("Bone") : nullptr;
+    expect(animator && animator->is_playing() && animator->current_state() == "Spin",
+           "the editor-made Animator plays its clip state");
+    expect(live_bone && live_bone->get_transform()->transform().position().z > 0.5f,
+           "...and the clip file drives the bone (z = " +
+               std::to_string(live_bone ? live_bone->get_transform()->transform().position().z : -1.0f) + ")");
+    app.stop();
+    tick(engine, 2);
+}
+
+/** @brief Animating the friendly way: Record auto-keys exactly the channels a move changes (a
+ *         drag of many moves is one undo step), the inspector's diamonds key one channel, the key
+ *         menu's interpolation reaches the file and the sampling, and a clip renames cleanly. */
+void test_editor_animation_autokey() {
+    setenv("FIXED_DT", "0.016666", 1);
+    setenv("NO_INPUT", "1", 1);
+    setenv("HOME", tmp_root().c_str(), 1);
+    fs::remove(Project::prefs_path());
+    const fs::path root = fresh_dir("autokey_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, 4);
+    auto& doc = app.document();
+    const ObjectId cube = object_named(app, "Cube");
+    const ObjectId arm = doc.add_object(doc.make_object("Arm"), cube);
+    app.sync().rebuild(engine, doc);
+    tick(engine, 2);
+    doc.select(cube);
+    app.show_timeline();
+    app.add_animator(cube);
+    app.new_animation_clip("Reach");
+    tick(engine, 2);
+    doc.select(arm);
+    app.set_animation_record(true);
+    app.set_animation_time(10.0f / 30.0f);
+    tick(engine, 2);
+
+    // A "drag": several moves of the position only.
+    auto& md = *app.animation_clip();
+    const size_t undo0 = 0;
+    (void)undo0;
+    for (int i = 1; i <= 5; ++i) app.set_object_transform(arm, glm::vec3(0.1f * i, 0, 0), glm::vec3(0), glm::vec3(1));
+    tick(engine, 2);
+    expect(md.find_track("Arm", "position") && md.find_track("Arm", "position")->keys.size() == 1 &&
+               std::abs(md.find_track("Arm", "position")->keys[0].value.x - 0.5f) < 1e-5f,
+           "Record auto-keys the moved channel at the playhead (the last value of the drag)");
+    expect(!md.find_track("Arm", "rotation_quat") && !md.find_track("Arm", "scale"), "...and only that channel");
+    app.undo();
+    tick(engine, 1);
+    expect(!app.animation_clip()->find_track("Arm", "position"), "the whole drag is one undo step");
+    app.redo();
+    tick(engine, 1);
+
+    // The inspector diamond keys one channel; it then reads as keyed on this frame.
+    expect(!app.keyed_now(arm, "scale"), "scale is not keyed yet");
+    app.key_channel(arm, "scale");
+    tick(engine, 1);
+    expect(app.keyed_now(arm, "scale") && app.animation_clip()->find_track("Arm", "scale"), "the diamond keys scale at this frame");
+
+    // A second key, then Step interpolation holds the first value until the next key.
+    app.set_animation_time(20.0f / 30.0f);
+    tick(engine, 1);
+    app.set_object_transform(arm, glm::vec3(1.5f, 0, 0), glm::vec3(0), glm::vec3(1));
+    tick(engine, 1);
+    app.select_all_keys();
+    app.set_selected_key_interpolation("step");
+    app.set_animation_time(15.0f / 30.0f);
+    tick(engine, 3);
+    const float x_mid = app.sync().live(arm)->get_transform()->transform().position().x;
+    expect(std::abs(x_mid - 0.5f) < 1e-4f, "Step interpolation holds the earlier key (x = " + std::to_string(x_mid) + ")");
+    const fs::path dir = doc.path().parent_path() / "animations" / "Cube";
+    const ClipModel on_disk = ClipModel::from_node(coopa::yaml::load_document(dir / "Reach.yaml"));
+    expect(on_disk.find_track("Arm", "position") && on_disk.find_track("Arm", "position")->keys[0].easing == "step",
+           "the interpolation is in the clip file");
+
+    // Rename.
+    app.rename_animation_clip("Grab");
+    tick(engine, 2);
+    const Node& anim = doc.find(cube)->at("components").as_seq()[static_cast<size_t>(doc.find_component(cube, "Animator"))];
+    expect(fs::exists(dir / "Grab.yaml") && !fs::exists(dir / "Reach.yaml") && get_string(anim, "auto_play") == "Grab" &&
+               get_string(anim.at("states").as_seq()[0], "clip") == "animations/Cube/Grab.yaml",
+           "renaming moves the file and updates the Animator's state and auto_play");
+    dump(engine, "18_autokey");
+}
+
+/** @brief The animation_test scene in the editor: each rig's Timeline offers exactly that
+ *         object's clips (from any object inside it), previews them, and its clip files are
+ *         the editor's to edit without loss. */
+void test_editor_animation_test_scene() {
+    setenv("FIXED_DT", "0.016666", 1);
+    setenv("NO_INPUT", "1", 1);
+    setenv("HOME", tmp_root().c_str(), 1);
+    fs::remove(Project::prefs_path());
+    const fs::path root = fresh_dir("anim_scene_project");
+    Project project = Project::create(root);
+    const fs::path dst = project.assets() / "scenes" / "animation_test";
+    fs::create_directories(dst.parent_path());
+    fs::copy(fs::path(ROOT_DIR) / "assets" / "scenes" / "animation_test", dst, fs::copy_options::recursive);
+    // The rigs' shared clips and meshes (assets/animations, assets/meshes).
+    fs::copy(fs::path(ROOT_DIR) / "assets" / "animations", project.assets() / "animations", fs::copy_options::recursive);
+    for (const char* m : {"tentacle.yaml", "ball.yaml"}) {
+        fs::copy_file(fs::path(ROOT_DIR) / "assets" / "meshes" / m, project.assets() / "meshes" / m, fs::copy_options::overwrite_existing);
+    }
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, 4);
+    expect(app.open_scene(dst / "scene.yaml"), "the animation test scene opens");
+    tick(engine, 4);
+    app.show_timeline();
+    auto& doc = app.document();
+    auto states_of = [&](ObjectId rig) {
+        std::vector<std::string> out;
+        const Node& a = doc.find(rig)->at("components").as_seq()[static_cast<size_t>(doc.find_component(rig, "Animator"))];
+        for (const auto& st : a.at("states").as_seq()) out.push_back(get_string(st, "name"));
+        return out;
+    };
+    const ObjectId arm = object_named(app, "RobotArm"), elbow = object_named(app, "Elbow"), ball = object_named(app, "BouncingBall");
+    expect(arm && elbow && ball, "the rigs are in the scene");
+    doc.select(elbow);
+    tick(engine, 2);
+    expect(app.animation_rig() == arm && app.animation_clip() && app.animation_clip_state() == "wave",
+           "selecting a joint opens its rig's first clip");
+    expect(states_of(arm) == std::vector<std::string>{"wave", "idle"}, "the arm's clips are its own two");
+    const glm::quat rest = app.sync().live(elbow)->get_transform()->transform().rotation_quat();
+    app.set_animation_time(0.5f);
+    tick(engine, 2);
+    const glm::quat posed = app.sync().live(elbow)->get_transform()->transform().rotation_quat();
+    expect(std::abs(glm::dot(rest, posed)) < 0.95f, "scrubbing previews the clip on the joint");
+    dump(engine, "19_animation_test");
+    doc.select(ball);
+    tick(engine, 2);
+    expect(app.animation_rig() == ball && app.animation_clip_state() == "bounce", "the ball's Timeline is the ball's own clip");
+    app.set_timeline_rest_pose(true);
+    tick(engine, 2);
+    // Nothing was edited: every clip file is byte-identical to the shipped one.
+    for (const char* rel : {"animations/RobotArm/wave.yaml", "animations/BouncingBall/bounce.yaml"}) {
+        const Node a = coopa::yaml::load_document(project.assets() / rel);
+        const Node b = coopa::yaml::load_document(fs::path(ROOT_DIR) / "assets" / rel);
+        expect(a == b, std::string("browsing and previewing leaves ") + rel + " untouched");
+    }
+}
+
+/** @brief The test rigs ship as object assets: the Objects tab lists them, opening one gives a
+ *         working Timeline, and a copy placed in a scene plays its clips (paths resolve from the
+ *         object asset to the shared assets/animations) -- and points back to the asset to edit. */
+void test_editor_rig_object_assets() {
+    setenv("FIXED_DT", "0.016666", 1);
+    setenv("NO_INPUT", "1", 1);
+    setenv("HOME", tmp_root().c_str(), 1);
+    fs::remove(Project::prefs_path());
+    const fs::path root = fresh_dir("rig_objects_project");
+    Project project = Project::create(root);
+    const fs::path src = fs::path(ROOT_DIR) / "assets";
+    fs::copy(src / "objects", project.assets() / "objects", fs::copy_options::recursive);
+    fs::copy(src / "animations", project.assets() / "animations", fs::copy_options::recursive);
+    for (const char* m : {"tentacle.yaml", "ball.yaml"}) fs::copy_file(src / "meshes" / m, project.assets() / "meshes" / m);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, 4);
+    const auto objects = app.list_assets(AssetType::Object);
+    auto listed = [&](const std::string& rel) { return std::find(objects.begin(), objects.end(), rel) != objects.end(); };
+    expect(listed("objects/robot_arm.yaml") && listed("objects/tentacle.yaml") && listed("objects/bouncing_ball.yaml"),
+           "the Objects tab lists the test rigs (" + std::to_string(objects.size()) + ")");
+
+    // Open the robot arm: a rig with its clips, previewed by the Timeline.
+    expect(app.open_object_asset(project.assets() / "objects" / "robot_arm.yaml"), "the robot arm object asset opens");
+    tick(engine, 3);
+    auto& doc = app.document();
+    app.show_timeline();
+    const ObjectId elbow = object_named(app, "Elbow");
+    doc.select(elbow);
+    tick(engine, 2);
+    expect(app.animation_clip() && app.animation_clip_state() == "wave", "its Timeline opens the arm's clip (shared from assets/animations)");
+    const glm::quat rest = app.sync().live(elbow)->get_transform()->transform().rotation_quat();
+    app.set_animation_time(0.5f);
+    tick(engine, 2);
+    expect(std::abs(glm::dot(rest, app.sync().live(elbow)->get_transform()->transform().rotation_quat())) < 0.95f,
+           "scrubbing poses the object asset's rig");
+    dump(engine, "20_robot_arm_asset");
+
+    // Place the ball in a scene and play: the placed copy bounces from the shared clip.
+    app.show_document_view();
+    app.open_scene(project.assets() / "scenes" / "main" / "scene.yaml");
+    tick(engine, 3);
+    const ObjectId placed = app.place_object_asset("objects/bouncing_ball.yaml", glm::vec3(2, 0, 0));
+    tick(engine, 3);
+    app.document().select(placed);
+    tick(engine, 2);
+    expect(app.animation_instance_asset(placed) == "objects/bouncing_ball" && app.animation_rig() == 0,
+           "a placed copy points the Timeline at its object asset");
+    app.play();
+    tick(engine, 15);
+    float lo = 1e9f, hi = -1e9f;
+    for (int i = 0; i < 60; ++i) {
+        tick(engine, 1);
+        coopa::scene::SceneObject* ball = nullptr;
+        for (auto* o : engine.scene().get_components<coopa::gfx::engine::components::MeshRenderer>()) {
+            if (o->owner && o->owner->name() == "Ball") ball = o->owner;
+        }
+        if (!ball) continue;
+        const float z = glm::vec3(ball->get_transform()->get_world_matrix()[3]).z;
+        lo = std::min(lo, z);
+        hi = std::max(hi, z);
+    }
+    expect(app.playing() && hi - lo > 1.0f, "in Play the placed ball bounces (z " + std::to_string(lo) + " .. " + std::to_string(hi) + ")");
+    app.stop();
+    tick(engine, 2);
+}
+
+/** @brief In an opened object asset (the robot arm rig), its meshes are pickable in the
+ *         viewport and enter Edit Mode like any scene object's. */
+void test_editor_object_asset_pick_and_edit() {
+    setenv("FIXED_DT", "0.016666", 1);
+    setenv("NO_INPUT", "1", 1);
+    setenv("HOME", tmp_root().c_str(), 1);
+    fs::remove(Project::prefs_path());
+    const fs::path root = fresh_dir("object_pick_project");
+    Project project = Project::create(root);
+    const fs::path src = fs::path(ROOT_DIR) / "assets";
+    fs::copy(src / "objects", project.assets() / "objects", fs::copy_options::recursive);
+    fs::copy(src / "animations", project.assets() / "animations", fs::copy_options::recursive);
+    for (const char* m : {"tentacle.yaml", "ball.yaml"}) fs::copy_file(src / "meshes" / m, project.assets() / "meshes" / m);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, 4);
+    expect(app.open_object_asset(project.assets() / "objects" / "robot_arm.yaml"), "the robot arm opens");
+    tick(engine, 6);
+    const ObjectId plate = object_named(app, "BasePlate");
+    expect(plate != 0, "the base plate is in the document");
+    const float scale = std::max(1.0f, engine.display_scale());
+    // The plate's top face near its front corner (its centre is under the shoulder joint).
+    const auto px = screen_of(engine, app, plate, glm::vec3(0.4f, -0.4f, 0.5f), scale);
+    expect(px.has_value(), "the plate is on screen");
+    if (px) {
+        const ObjectId got = app.pick_object(*px);
+        expect(got == plate, "clicking the plate picks it (got " +
+                                 (got && app.document().find(got) ? get_string(*app.document().find(got), "name") : std::string("nothing")) + ")");
+    }
+    app.document().select(plate);
+    tick(engine, 2);
+    expect(app.set_interaction_mode(InteractionMode::Edit), "Tab enters Edit Mode on the plate's mesh");
+    tick(engine, 2);
+    expect(app.interaction_mode() == InteractionMode::Edit && !app.mesh_document().mesh.faces.empty(),
+           "...editing the cube mesh it uses");
+    app.set_interaction_mode(InteractionMode::Object);
+    tick(engine, 2);
+
+    // The skinned tentacle: its mesh (a SkinnedMeshRenderer's) picks, edits and weight-paints.
+    expect(app.open_object_asset(project.assets() / "objects" / "tentacle.yaml"), "the tentacle opens");
+    tick(engine, 6);
+    const ObjectId skin = object_named(app, "TentacleSkin");
+    const auto spx = screen_of(engine, app, skin, glm::vec3(0.0f, -0.2f, 0.6f), scale);   // the tube's front, low down
+    expect(spx && app.pick_object(*spx) == skin, "clicking the skinned tentacle picks it");
+    app.document().select(skin);
+    tick(engine, 2);
+    expect(app.set_interaction_mode(InteractionMode::Edit), "Tab enters Edit Mode on the skinned mesh");
+    tick(engine, 2);
+    auto& md = app.mesh_document();
+    expect(md.mesh.groups.size() == 4 && md.mesh.has_colors, "...with its vertex groups and colours");
+    auto* smr = app.sync().live(skin)->get_component<toy::scene::SkinnedMeshRenderer>();
+    float top_before = -1e9f;
+    for (const auto& v : smr->skinned_vertices()) top_before = std::max(top_before, v.position.z);
+    md.edit("Raise", [](EditMesh& m, MeshSelection&) { for (auto& p : m.positions) p.z += 0.5f; });
+    tick(engine, 4);
+    float top_after = -1e9f;
+    for (const auto& v : smr->skinned_vertices()) top_after = std::max(top_after, v.position.z);
+    expect(top_after > top_before + 0.4f, "an edit reaches the live skinned mesh (top " + std::to_string(top_before) + " -> " +
+                                              std::to_string(top_after) + ")");
+    expect(app.set_interaction_mode(InteractionMode::WeightPaint) && app.edited_mesh_shader() == "editor_paint",
+           "Weight Paint shows the tentacle's groups");
+    app.set_interaction_mode(InteractionMode::Object);
+    tick(engine, 2);
+}
+
+/** @brief The same through real input, with the Timeline open and posing the rig: a click in
+ *         the viewport selects the clicked mesh and Tab enters Edit Mode on it. */
+void test_editor_object_asset_click_and_tab() {
+    using coopa::input::Key;
+    setenv("FIXED_DT", "0.016666", 1);
+    unsetenv("NO_INPUT");
+    setenv("HOME", tmp_root().c_str(), 1);
+    fs::remove(Project::prefs_path());
+    const fs::path root = fresh_dir("object_click_project");
+    Project project = Project::create(root);
+    const fs::path src = fs::path(ROOT_DIR) / "assets";
+    fs::copy(src / "objects", project.assets() / "objects", fs::copy_options::recursive);
+    fs::copy(src / "animations", project.assets() / "animations", fs::copy_options::recursive);
+    for (const char* m : {"tentacle.yaml", "ball.yaml"}) fs::copy_file(src / "meshes" / m, project.assets() / "meshes" / m);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, toy::core::Engine::kFillDebounceFrames + 4);
+    InputDriver in{engine, std::max(1.0f, engine.display_scale())};
+    expect(app.open_object_asset(project.assets() / "objects" / "robot_arm.yaml"), "the robot arm opens");
+    app.show_timeline();
+    tick(engine, 6);
+    for (const char* name : {"BasePlate", "UpperArmShape"}) {
+        const ObjectId target = object_named(app, name);
+        const auto px = screen_of(engine, app, target, glm::vec3(0.0f, -0.5f, 0.0f), in.scale);   // the shape's front face
+        expect(px.has_value(), std::string(name) + " is on screen");
+        if (!px) continue;
+        in.click(*px);
+        tick(engine, 2);
+        expect(app.document().primary() == target, std::string("clicking ") + name + " selects it (selected: " +
+               (app.document().primary() ? get_string(*app.document().find(app.document().primary()), "name") : std::string("nothing")) + ")");
+        in.move(*px);
+        in.key(Key::Tab);
+        tick(engine, 2);
+        expect(app.interaction_mode() == InteractionMode::Edit, std::string("Tab enters Edit Mode on ") + name);
+        in.key(Key::Tab);
+        tick(engine, 2);
+        expect(app.interaction_mode() == InteractionMode::Object, "Tab returns to Object Mode");
+    }
+    dump(engine, "21_object_click");
 }
 
 /** @brief The asset-focused flow: each asset type opens its view; switching asks to save. */
@@ -3352,6 +3921,7 @@ const TestCase kTests[] = {
     {"schema_defaults",                      "document", test_schema_defaults},
     {"shader_ball",                          "mesh", test_shader_ball},
     {"mesh_io_preserves_blender_attributes", "mesh", test_mesh_io_preserves_blender_attributes},
+    {"asset_fidelity_meshes",                "writer", test_asset_fidelity_meshes},
     {"paint_brushes",                        "mesh", test_paint_brushes},
     {"clip_model",                           "mesh", test_clip_model},
     {"mesh_mirror",                          "mesh", test_mesh_mirror},
@@ -3398,6 +3968,14 @@ const TestCase kTests[] = {
     {"editor_large_water_tiles_pick_and_save", "editor_shell", test_editor_large_water_tiles_pick_and_save},
     {"editor_paint_modes", "editor_shell", test_editor_paint_modes},
     {"editor_animation_timeline", "editor_shell", test_editor_animation_timeline},
+    {"editor_animation_autokey", "editor_shell", test_editor_animation_autokey},
+    {"editor_animation_test_scene", "editor_shell", test_editor_animation_test_scene},
+    {"editor_rig_object_assets", "editor_shell", test_editor_rig_object_assets},
+    {"editor_object_asset_pick_and_edit", "editor_shell", test_editor_object_asset_pick_and_edit},
+    {"editor_object_asset_click_and_tab", "editor_shell", test_editor_object_asset_click_and_tab},
+    {"asset_fidelity_component_schemas", "editor_shell", test_asset_fidelity_component_schemas},
+    {"asset_fidelity_editor_created_files", "editor_shell", test_asset_fidelity_editor_created_files},
+    {"asset_fidelity_object_assets", "document", test_asset_fidelity_object_assets},
     {"editor_mesh_autosave_and_unified_undo", "editor_shell", test_editor_mesh_autosave_and_unified_undo},
     {"editor_mesh_save_refreshes_colliders", "editor_shell", test_editor_mesh_save_refreshes_colliders},
     {"package_renders_identically",          "package",  test_package_renders_identically},

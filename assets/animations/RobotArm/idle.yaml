@@ -1,0 +1,17 @@
+clip:
+  name: idle
+  wrap: loop
+  length: 3.0
+  tracks:
+    - object: Base/Shoulder
+      property: rotation_quat
+      keys:
+        - {time: 0, value: [-0, -0, -0.0697565, 0.997564], easing: ease_in_out}
+        - {time: 1.5, value: [0, 0, 0.0697565, 0.997564], easing: ease_in_out}
+        - {time: 3, value: [-0, -0, -0.0697565, 0.997564], easing: ease_in_out}
+    - object: Base/Shoulder/UpperArm/Elbow
+      property: rotation_quat
+      keys:
+        - {time: 0, value: [0.173648, 0, 0, 0.984808], easing: ease_in_out}
+        - {time: 1.5, value: [0.241922, 0, 0, 0.970296], easing: ease_in_out}
+        - {time: 3, value: [0.173648, 0, 0, 0.984808], easing: ease_in_out}

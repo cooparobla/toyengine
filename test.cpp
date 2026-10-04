@@ -5395,6 +5395,39 @@ void test_rig_skinned_mesh_follows_animated_bone() {
     fs::remove_all(dir);
 }
 
+/** @brief The animation_test scene runs: the arm's joints, the skinned tentacle and the
+ *         self-animating ball all move, from their clip files. */
+void test_animation_test_scene_runs() {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
+    ScopedEnv no_input("NO_INPUT", "1");
+    toy::core::Engine engine(make_test_config("assets/scenes/animation_test/scene.yaml", 640, 360, 320, 180));
+    tick_frames(engine, 2);
+    auto& scene = engine.scene();
+    auto* elbow = scene.find_object("Elbow");
+    auto* ball = scene.find_object("Ball");
+    auto* skin = scene.find_object("TentacleSkin");
+    auto* smr = skin ? skin->get_component<toy::scene::SkinnedMeshRenderer>() : nullptr;
+    expect(elbow && ball && smr, "animation_test: the rigs loaded");
+    if (!elbow || !ball || !smr) return;
+    float min_z = 1e9f, max_z = -1e9f, min_scale_z = 1e9f;
+    glm::quat q0 = elbow->get_transform()->transform().rotation_quat();
+    float max_turn = 0.0f, max_tip_x = 0.0f;
+    for (int i = 0; i < 90; ++i) {
+        tick_frames(engine, 1);
+        const auto& bt = ball->get_transform()->transform();
+        min_z = std::min(min_z, bt.position().z);
+        max_z = std::max(max_z, bt.position().z);
+        min_scale_z = std::min(min_scale_z, bt.scale().z);
+        max_turn = std::max(max_turn, 1.0f - std::abs(glm::dot(q0, elbow->get_transform()->transform().rotation_quat())));
+        for (const auto& v : smr->skinned_vertices()) if (v.position.z > 2.0f) max_tip_x = std::max(max_tip_x, std::abs(v.position.x));
+    }
+    expect(max_z - min_z > 1.2f, "animation_test: the ball bounces (z " + std::to_string(min_z) + " .. " + std::to_string(max_z) + ")");
+    expect(min_scale_z < 0.45f, "animation_test: ...and squashes on landing (scale z " + std::to_string(min_scale_z) + ")");
+    expect(max_turn > 0.05f, "animation_test: the arm's elbow bends");
+    expect(smr->is_ready() && smr->bones().size() == 4 && max_tip_x > 0.4f,
+           "animation_test: the tentacle's skin follows its bones (tip x " + std::to_string(max_tip_x) + ")");
+}
+
 /** @brief One registered test: its name (also its filter key), its group, and its body. */
 struct TestCase {
     const char* name;
@@ -5557,6 +5590,7 @@ const TestCase kTests[] = {
     {"rig_clip_drives_hierarchy",                  "rig",             test_rig_clip_drives_hierarchy},
     {"rig_vertex_group_skinning",                  "rig",             test_rig_vertex_group_skinning},
     {"rig_skinned_mesh_follows_animated_bone",     "render_rig",      test_rig_skinned_mesh_follows_animated_bone},
+    {"animation_test_scene_runs",                  "render_rig",      test_animation_test_scene_runs},
     // TEMPORARY (round-8b shimmer diagnosis) -- run via `toyengine_tests ssao_travel_probe`,
     // removed once the cause is pinned. Not in any ctest group.
     {"ssao_travel_probe",                          "probe",           test_ssao_travel_probe},

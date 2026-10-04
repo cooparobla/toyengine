@@ -1,0 +1,29 @@
+clip:
+  name: sway
+  wrap: loop
+  length: 2.0
+  tracks:
+    - object: Seg0
+      property: rotation_quat
+      keys:
+        - {time: 0, value: [-0, -0.121869, -0, 0.992546], easing: ease_in_out}
+        - {time: 1, value: [0, 0.121869, 0, 0.992546], easing: ease_in_out}
+        - {time: 2, value: [-0, -0.121869, -0, 0.992546], easing: ease_in_out}
+    - object: Seg0/Seg1
+      property: rotation_quat
+      keys:
+        - {time: 0, value: [-0, -0.173648, -0, 0.984808], easing: ease_in_out}
+        - {time: 1.15, value: [0, 0.173648, 0, 0.984808], easing: ease_in_out}
+        - {time: 2, value: [-0, -0.173648, -0, 0.984808], easing: ease_in_out}
+    - object: Seg0/Seg1/Seg2
+      property: rotation_quat
+      keys:
+        - {time: 0, value: [-0, -0.224951, -0, 0.97437], easing: ease_in_out}
+        - {time: 1.3, value: [0, 0.224951, 0, 0.97437], easing: ease_in_out}
+        - {time: 2, value: [-0, -0.224951, -0, 0.97437], easing: ease_in_out}
+    - object: Seg0/Seg1/Seg2/Seg3
+      property: rotation_quat
+      keys:
+        - {time: 0, value: [-0, -0.275637, -0, 0.961262], easing: ease_in_out}
+        - {time: 1.45, value: [0, 0.275637, 0, 0.961262], easing: ease_in_out}
+        - {time: 2, value: [-0, -0.275637, -0, 0.961262], easing: ease_in_out}

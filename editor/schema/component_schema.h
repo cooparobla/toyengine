@@ -251,7 +251,7 @@ inline const std::map<std::string, ComponentSchema>& schemas() {
             f_float("angular_drag", 0.05f, 0.005f, 0.0f, 100.0f),
             f_bool("use_gravity", true, true),
             f_bool("is_kinematic", false, true),
-            f_bool("interpolation", false),
+            f_enum("interpolation", {"Interpolate", "None"}),   // physx_yaml.h reads a string: "None" or anything else
         }});
         // toyengine/water/: a body of water (baked by WaterSystem onto the sibling MeshRenderer)
         // and a floating Rigidbody. `size` uses x/y only (the procedural grid's extent).

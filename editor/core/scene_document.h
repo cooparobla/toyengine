@@ -75,6 +75,7 @@ public:
     /** @brief A new, empty, unsaved scene named `name`. */
     void reset(const std::string& name = "Untitled") {
         object_asset_ = false;
+        object_extras_ = Node::mapping();
         doc_ = Node::mapping();
         doc_["format"] = Node(std::string("toyengine"));
         Node scene = Node::mapping();
@@ -96,7 +97,13 @@ public:
         // everything scene-shaped (hierarchy, inspector, undo, the live scene) works on it;
         // save() writes it back in its own shape.
         object_asset_ = doc.contains("object") && !doc.contains("scene");
+        object_extras_ = Node::mapping();
         if (object_asset_) {
+            // Top-level keys besides the object itself ride along to save() unchanged.
+            for (const auto& kv : doc.as_map()) {
+                const std::string k = kv.first.get_value<std::string>();
+                if (k != "object") object_extras_[k] = kv.second;
+            }
             Node obj = doc.at("object");
             if (!obj.is_mapping()) obj = Node::mapping();
             if (!obj.contains("name")) obj["name"] = Node(path.stem().string());
@@ -129,6 +136,7 @@ public:
         if (!object_asset_) return out;
         Node obj_doc = Node::mapping();
         obj_doc["format"] = Node(std::string("toyengine-object"));
+        if (object_extras_.is_mapping()) for (const auto& kv : object_extras_.as_map()) obj_doc[kv.first.get_value<std::string>()] = kv.second;
         const Node& roots = out.at("scene").at("root_objects");
         obj_doc["object"] = roots.is_sequence() && roots.size() > 0 ? roots.as_seq()[0] : Node::mapping();
         return obj_doc;
@@ -577,7 +585,8 @@ private:
     Node doc_ = Node::mapping();
     std::filesystem::path path_;
     ObjectId next_eid_ = 1;
-    bool object_asset_ = false;   ///< See is_object_asset().
+    bool object_asset_ = false;
+    Node object_extras_ = Node::mapping();   ///< An object asset's other top-level keys (kept for save()).
     UndoStack<Node> undo_;
     uint64_t saved_revision_ = 0;
     std::vector<ObjectId> selection_;

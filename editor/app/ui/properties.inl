@@ -455,12 +455,39 @@
             glm::vec3 np = p, nr = r, ns = s;
             bool active = false, finished = false;
             auto track = [&]() { active |= ctx.last_group_active(); finished |= ctx.last_deactivated(); };
+            // Animating (a Timeline clip open on this object's rig): a diamond per channel keys it at
+            // the playhead -- filled when it is keyed on this frame.
+            const bool animatable = anim_clip_.open() && in_anim_rig_(id) && editable;
+            auto key_diamond = [&](const char* idk, const char* prop) {
+                if (!animatable) return;
+                const imm::Box row = ctx.last_rect();
+                const glm::vec2 c{row.x + 8, row.y + 10};
+                const bool keyed = anim_keyed_now_(id, prop);
+                const imm::Box hit{c.x - 7, c.y - 7, 14, 14};
+                bool hov = false, held = false;
+                if (ctx.invisible_button(idk, hit, &hov, &held)) anim_key_channel_(id, prop);
+                const glm::vec4 col = keyed ? glm::vec4(1.0f, 0.75f, 0.2f, 1) : hov ? ctx.style.text : ctx.style.text_dim;
+                const float r = 4.5f;
+                if (keyed) {
+                    ctx.triangle({c.x, c.y - r}, {c.x + r, c.y}, {c.x, c.y + r}, col);
+                    ctx.triangle({c.x, c.y - r}, {c.x, c.y + r}, {c.x - r, c.y}, col);
+                } else {
+                    ctx.line({c.x, c.y - r}, {c.x + r, c.y}, col);
+                    ctx.line({c.x + r, c.y}, {c.x, c.y + r}, col);
+                    ctx.line({c.x, c.y + r}, {c.x - r, c.y}, col);
+                    ctx.line({c.x - r, c.y}, {c.x, c.y - r}, col);
+                }
+                ctx.tooltip(keyed ? "Keyed at this frame\nClick to key it again with the current value" : "Insert Keyframe\nKey this channel at the playhead");
+            };
             const bool cp = ctx.drag_float_stacked("Location", &np.x, 3, 0.02f, "%.3f m");
             track();
+            key_diamond("kd_pos", "position");
             const bool cr = ctx.drag_float_stacked("Rotation", &nr.x, 3, 0.5f, "%.1f");
             track();
+            key_diamond("kd_rot", "rotation_quat");
             const bool cs = ctx.drag_float_stacked("Scale", &ns.x, 3, 0.01f, "%.3f");
             track();
+            key_diamond("kd_scl", "scale");
             if ((cp || cr || cs) && editable) {
                 set_object_transform_(id, np, nr, ns, cp ? "Move" : cr ? "Rotate" : "Scale", active ? "props_transform" : std::string());
             }

@@ -4,9 +4,9 @@ format: blender
 # that file's own comment. Not meant to be visually interesting, just to differ measurably from
 # scene_mapped.yaml once albedo/normal/metallic_roughness maps are applied there.
 scene:
-  scene_name: MaterialMapsTestFlat
+  scene_name: material_maps_test_flat
   root_objects:
-    - name: cube.000
+    - name: cube
       active: true
       components:
         - type: Transform
@@ -14,7 +14,7 @@ scene:
           rotation: { x: 0.0, y: 0.0, z: 0.0 }
           scale: { x: 1.0, y: 1.0, z: 1.0 }
         - type: MeshRenderer
-          mesh_path: cube.000
+          mesh_path: cube_corner
           material:
             albedo: { r: 0.8, g: 0.35, b: 0.25 }
             metallic: 0.0

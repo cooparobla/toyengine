@@ -1,0 +1,5 @@
+# Polished gold. For a metal, albedo is the specular (F0) colour.
+albedo: { r: 1.0, g: 0.78, b: 0.34 }
+metallic: 1.0
+roughness: 0.25
+ao: 1.0

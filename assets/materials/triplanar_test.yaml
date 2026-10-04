@@ -1,0 +1,14 @@
+# Triplanar test: the brick maps (albedo, normal, metallic-roughness) projected along X/Y/Z by
+# the `triplanar` surface shader instead of read through mesh UVs -- see shaders/triplanar.frag.
+# shader_params: [tiling, blend sharpness, space (0 world / 1 object), normal strength].
+# Here: world space; override shader_params per object ({ base: materials/triplanar_test,
+# shader_params: [...] }) to switch an object to object space (z = 1).
+albedo: { r: 0.85, g: 0.45, b: 0.3 }
+metallic: 0.0
+roughness: 0.8
+ao: 1.0
+texture_albedo: textures/brick_albedo.png
+texture_normal: textures/brick_normal.png
+texture_metallic_roughness: textures/brick_mr.png
+shader: triplanar
+shader_params: [1.0, 4.0, 0.0, 1.0]

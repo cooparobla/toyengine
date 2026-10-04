@@ -1,0 +1,10 @@
+# Blockout grid, projected in WORLD space by the `triplanar` surface shader: one tile per metre
+# on any mesh at any scale, so level geometry reads its own size at a glance.
+# shader_params: [tiling, blend sharpness, space (0 world / 1 object), normal strength].
+albedo: { r: 1.0, g: 1.0, b: 1.0 }
+metallic: 0.0
+roughness: 0.7
+ao: 1.0
+texture_albedo: textures/prototype_grid.png
+shader: triplanar
+shader_params: [1.0, 8.0, 0.0, 1.0]

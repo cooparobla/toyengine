@@ -1,0 +1,11 @@
+# Frosted glass: as glass.yaml, but rough enough to blur what it refracts and reflects.
+albedo: { r: 0.85, g: 0.9, b: 0.95 }
+metallic: 0.0
+roughness: 0.35
+ao: 1.0
+alpha: 0.6
+alpha_mode: BLEND
+refraction: true
+ior: 1.5
+refraction_thickness: 0.2
+refraction_tint: { r: 0.92, g: 0.96, b: 1.0 }

@@ -133,10 +133,59 @@ inline const std::vector<FieldDesc>& material_fields() {
         with_label(f_asset("texture_normal", "textures", ".png"), "Normal map"),
         with_label(f_asset("texture_metallic_roughness", "textures", ".png"), "Metal/rough map"),
         with_label(f_asset("texture_alpha_mask", "textures", ".png"), "Alpha mask"),
-        f_enum("shader", {"", "foliage", "terrain", "water"}),
+        // Drawn by draw_material_block()'s Shader section (named per-shader params), not as
+        // plain fields -- listed here so they count as known material keys and overrides.
+        f_enum("shader", {"", "triplanar", "foliage", "water"}),
         [] { FieldDesc f; f.key = "shader_params"; f.kind = FieldKind::Vec4; f.speed = 0.01f; return f; }(),
     };
     return fields;
+}
+
+/** @brief One slot of a surface shader's `shader_params`, as the material editor labels it. */
+struct ShaderParamDesc {
+    std::string label;
+    float def = 0.0f, min = 0.0f, max = 0.0f, speed = 0.01f;
+    std::vector<std::string> options;   ///< Non-empty: a dropdown whose index is the value.
+};
+
+/**
+ * @brief A shader a material can choose: the stock PBR one ("") or a surface shader the engine
+ *        registers in toyengine/core/engine.h's make_render_config_(). Engine-internal ones
+ *        (terrain, editor_paint) are left out; the editor tests check every name here is
+ *        registered.
+ */
+struct SurfaceShaderInfo {
+    std::string name;
+    std::string label;
+    bool transparent = false;   ///< Transparent domain: only drawn for alpha_mode BLEND.
+    std::string note;           ///< One line under the dropdown.
+    bool driven = false;        ///< shader_params are written by a component at runtime.
+    std::vector<ShaderParamDesc> params;   ///< shader_params[0..3], in order.
+};
+
+inline const std::vector<SurfaceShaderInfo>& surface_shaders() {
+    static const std::vector<SurfaceShaderInfo> shaders = {
+        {"", "Standard (PBR)", false, "Deferred PBR, mesh UVs. Every material uses it unless it picks another.", false, {}},
+        {"triplanar", "Triplanar", false, "Maps projected along X/Y/Z instead of mesh UVs. Opaque only.", false, {
+            {"Tiling", 1.0f, 0.01f, 100.0f, 0.01f, {}},
+            {"Blend sharpness", 4.0f, 1.0f, 32.0f, 0.05f, {}},
+            {"Space", 0.0f, 0.0f, 1.0f, 1.0f, {"World", "Object"}},
+            {"Normal strength", 1.0f, 0.0f, 4.0f, 0.01f, {}},
+        }},
+        {"foliage", "Foliage", false, "Wind-swayed two-sided card; pair with CUTOUT + an alpha mask.", false, {
+            {"Wind strength", 0.12f, 0.0f, 10.0f, 0.005f, {}},
+            {"Wind frequency", 1.6f, 0.0f, 50.0f, 0.01f, {}},
+            {"Wind dir X", 1.0f, -1.0f, 1.0f, 0.01f, {}},
+            {"Wind dir Y", 0.35f, -1.0f, 1.0f, 0.01f, {}},
+        }},
+        {"water", "Water", true, "Waves, depth colour and foam. Needs a WaterBody on the object.", true, {}},
+    };
+    return shaders;
+}
+
+inline const SurfaceShaderInfo* find_surface_shader(const std::string& name) {
+    for (const auto& s : surface_shaders()) if (s.name == name) return &s;
+    return nullptr;
 }
 
 /** @brief Every built-in component schema, keyed by type name. */
@@ -321,19 +370,25 @@ inline const std::map<std::string, ComponentSchema>& schemas() {
         add({"KinematicController", "Gameplay", {
             f_float("move_speed", 5.0f, 0.05f, 0.0f, 1000.0f, true), f_float("smoothing", 0.1f, 0.005f, 0.0f, 1.0f),
             f_bool("lock_height", true)}});
+        // Defaults mirror the runtime's (toyengine/world/terrain_component.h, terrain_sampler.h):
+        // an absent key shows the value the terrain actually uses.
         add({"Terrain", "World", {
-            f_int("seed", 1, 0, 1000000000, true),
+            f_int("seed", 251, 0, 1000000000, true),
             f_int("grid_size", 64, 4, 4096, true),
-            f_float("sea_level", 0.3f, 0.005f, 0.0f, 1.0f),
-            f_float("terrain_roughness", 0.5f, 0.005f, 0.0f, 1.0f),
-            f_int("river_count", 4, 0, 1000),
-            f_int("tiles_per_grid_unit", 1, 1, 64),
+            f_float("sea_level", 0.25f, 0.005f, 0.0f, 1.0f),
+            f_float("terrain_roughness", 0.35f, 0.005f, 0.0f, 1.0f),
+            f_int("river_count", 25, 0, 1000),
+            f_int("tiles_per_grid_unit", 4, 1, 64),
             f_float("tile_size", 1.0f, 0.01f, 0.01f, 100.0f),
-            f_float("height_step", 0.25f, 0.005f, 0.01f, 100.0f),
-            f_float("height_scale", 8.0f, 0.05f, 0.0f, 1000.0f),
-            f_int("chunk_size", 32, 4, 512),
-            f_float("view_radius", 64.0f, 0.5f, 1.0f, 100000.0f),
+            f_float("height_step", 1.0f, 0.005f, 0.01f, 100.0f),
+            f_float("height_scale", 40.0f, 0.05f, 0.0f, 1000.0f),
+            f_int("chunk_size", 16, 4, 512),
+            with_label(f_int("view_radius", 3, 0, 64), "View radius (chunks)"),
+            f_int("max_wall_steps", 24, 0, 1024),
+            f_int("soil_depth_steps", 3, 0, 1024),
             f_bool("greedy_merge", true),
+            f_bool("emit_bottom", false),
+            f_int("max_chunk_jobs_per_frame", 4, 1, 64),
             f_asset("side_mesh", "meshes", ".yaml", true, true, "tile_side_flat"),
             f_material(),
         }});

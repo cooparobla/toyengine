@@ -1,0 +1,10 @@
+# Running-bond brick: albedo, tangent-space normal and metallic-roughness maps (see
+# tools/gen_material_maps.py). albedo is white so the texture shows as authored; override it
+# per object ({ base: materials/brick, albedo: ... }) to tint the bricks.
+albedo: { r: 1.0, g: 1.0, b: 1.0 }
+metallic: 0.0
+roughness: 0.8
+ao: 1.0
+texture_albedo: textures/brick_albedo.png
+texture_normal: textures/brick_normal.png
+texture_metallic_roughness: textures/brick_mr.png

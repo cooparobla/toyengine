@@ -14,7 +14,7 @@
 # World: Z up, metres. The water surface is at z = 0, the floor ~6 m down.
 format: blender
 scene:
-  scene_name: UnderwaterTest
+  scene_name: underwater_test
   root_objects:
     - name: pool_basin
       active: true
@@ -99,7 +99,7 @@ scene:
       active: true
       components:
         - { type: Transform, position: { x: -1.5, y: -3.5, z: -5.0 }, scale: { x: 0.9, y: 0.9, z: 0.9 } }
-        - { type: MeshRenderer, mesh_path: ball, material: { albedo: { r: 0.85, g: 0.3, b: 0.2 }, roughness: 0.5 } }
+        - { type: MeshRenderer, mesh_path: sphere_low, material: { albedo: { r: 0.85, g: 0.3, b: 0.2 }, roughness: 0.5 } }
         - { type: SphereCollider, radius: 1.0 }
       children: []
 
@@ -144,7 +144,7 @@ scene:
       active: true
       components:
         - { type: Transform, position: { x: 0.5, y: -0.5, z: 2.5 }, scale: { x: 0.45, y: 0.45, z: 0.45 } }
-        - { type: MeshRenderer, mesh_path: ball, material: { albedo: { r: 0.9, g: 0.85, b: 0.2 }, roughness: 0.5 } }
+        - { type: MeshRenderer, mesh_path: sphere_low, material: { albedo: { r: 0.9, g: 0.85, b: 0.2 }, roughness: 0.5 } }
         - { type: SphereCollider, radius: 1.0 }
         - { type: Rigidbody, mass: 40.0 }
         - { type: Buoyancy }

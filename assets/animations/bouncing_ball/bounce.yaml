@@ -3,14 +3,14 @@ clip:
   wrap: loop
   length: 1.0
   tracks:
-    - object: Ball
+    - object: ball
       property: position
       keys:
         - {time: 0, value: [0, 0, 2.2], easing: ease_in}
         - {time: 0.45, value: [0, 0, 0.3]}
         - {time: 0.55, value: [0, 0, 0.3], easing: ease_out}
         - {time: 1, value: [0, 0, 2.2]}
-    - object: Ball
+    - object: ball
       property: scale
       keys:
         - {time: 0, value: [0.6, 0.6, 0.6], easing: step}

@@ -1,0 +1,5 @@
+# Mid-brown unfinished wood.
+albedo: { r: 0.55, g: 0.4, b: 0.2 }
+metallic: 0.0
+roughness: 0.6
+ao: 1.0

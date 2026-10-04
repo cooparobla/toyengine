@@ -12,7 +12,7 @@ no code or config selecting between them.
 
 A terrain tile's geometry is its sides, and each side is an ordinary mesh asset. Every side
 mesh is authored in ONE canonical orientation -- the +Z face of a unit cube spanning [0,1]^3,
-matching cube.000.yaml's own [0,1]^3 convention -- and toy::world::TileMeshLibrary rotates it
+matching meshes/cube_corner.yaml's own [0,1]^3 convention -- and toy::world::TileMeshLibrary rotates it
 onto the other five faces at load (see toyengine/world/tile_types.h's face_transform()). So
 these files describe a *top*, and the engine derives the walls from it.
 

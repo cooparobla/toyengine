@@ -1,0 +1,5 @@
+# Dark red matte rubber.
+albedo: { r: 0.25, g: 0.05, b: 0.05 }
+metallic: 0.0
+roughness: 0.95
+ao: 1.0

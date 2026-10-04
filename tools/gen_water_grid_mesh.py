@@ -2,12 +2,12 @@
 
 Standalone generator, not part of the C++ build -- run it manually (`python3
 tools/gen_water_grid_mesh.py`) whenever
-assets/scenes/pixel_demo/meshes/water_grid.000.yaml needs regenerating.
+assets/meshes/water_grid.yaml needs regenerating.
 
 water_surface.glsl's wave displacement moves each vertex independently; a flat single-quad
-mesh (like plane.000, 4 vertices) can only tilt as a rigid whole under that displacement,
+mesh (like plane, 4 vertices) can only tilt as a rigid whole under that displacement,
 which reads as a plane wobbling rather than a rippling surface. This generates a flat
-GRID_SIZE x GRID_SIZE quad grid in the same local space and orientation as plane.000
+GRID_SIZE x GRID_SIZE quad grid in the same local space and orientation as plane
 (-1..1 in X/Y, normal +Z, one UV tile across the whole grid) so the wave actually has
 enough vertices to bend into a visible surface, while staying exactly the same mesh YAML
 format Mesh::from_node() already parses for every other mesh in this scene (faces are
@@ -23,7 +23,7 @@ before the object's own Transform.scale) resolve visible crests rather than alia
 jagged few-vertex fold. The pond's WaterBody loads this mesh CPU-side and bakes it (see
 toyengine/water/water_system.h); the MeshRenderer itself names no mesh."""
 
-OUTPUT_PATH = pathlib.Path(__file__).parent.parent / "assets/scenes/pixel_demo/meshes/water_grid.000.yaml"
+OUTPUT_PATH = pathlib.Path(__file__).parent.parent / "assets/meshes/water_grid.yaml"
 
 
 def fmt_vec(v):
@@ -48,7 +48,7 @@ def main():
     faces = []
     for j in range(n):
         for i in range(n):
-            # CCW winding, matching plane.000's [0,1,2,3] convention.
+            # CCW winding, matching plane's [0,1,2,3] convention.
             faces.append([idx(i, j), idx(i + 1, j), idx(i + 1, j + 1), idx(i, j + 1)])
 
     lines = ["vertices:"]

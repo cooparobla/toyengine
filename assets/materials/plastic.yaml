@@ -1,0 +1,5 @@
+# Glossy off-white plastic. Tint per object: { base: materials/plastic, albedo: ... }.
+albedo: { r: 0.85, g: 0.85, b: 0.82 }
+metallic: 0.0
+roughness: 0.3
+ao: 1.0

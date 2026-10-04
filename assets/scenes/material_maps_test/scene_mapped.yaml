@@ -5,9 +5,9 @@ format: blender
 # byte-identical to scene_flat.yaml on purpose -- the test's whole point is that ONLY those
 # three lines should be able to account for a rendered-pixel difference between the two.
 scene:
-  scene_name: MaterialMapsTestMapped
+  scene_name: material_maps_test_mapped
   root_objects:
-    - name: cube.000
+    - name: cube
       active: true
       components:
         - type: Transform
@@ -15,15 +15,15 @@ scene:
           rotation: { x: 0.0, y: 0.0, z: 0.0 }
           scale: { x: 1.0, y: 1.0, z: 1.0 }
         - type: MeshRenderer
-          mesh_path: cube.000
+          mesh_path: cube_corner
           material:
             albedo: { r: 0.8, g: 0.35, b: 0.25 }
             metallic: 0.0
             roughness: 0.6
             ao: 1.0
-            texture_albedo: textures/crate_albedo.png
-            texture_normal: textures/crate_normal.png
-            texture_metallic_roughness: textures/crate_mr.png
+            texture_albedo: textures/brick_albedo.png
+            texture_normal: textures/brick_normal.png
+            texture_metallic_roughness: textures/brick_mr.png
       children: []
 
     - name: camera

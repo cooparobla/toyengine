@@ -1,0 +1,12 @@
+# Clear glass: BLEND with screen-space refraction. Needs render.transparency_enabled. A BLEND
+# material with alpha < 1 casts no shadow.
+albedo: { r: 0.6, g: 0.8, b: 0.9 }
+metallic: 0.0
+roughness: 0.05
+ao: 1.0
+alpha: 0.5
+alpha_mode: BLEND
+refraction: true
+ior: 1.45
+refraction_thickness: 0.35
+refraction_tint: { r: 0.85, g: 0.95, b: 1.0 }

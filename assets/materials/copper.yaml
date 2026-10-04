@@ -1,0 +1,5 @@
+# Satin copper.
+albedo: { r: 0.95, g: 0.64, b: 0.54 }
+metallic: 1.0
+roughness: 0.3
+ao: 1.0

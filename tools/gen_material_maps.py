@@ -1,19 +1,19 @@
-"""Generates a demo albedo/normal/metallic-roughness texture set for the pixel_demo cube.
+"""Generates the brick albedo/normal/metallic-roughness texture set (materials/brick.yaml).
 
 Standalone generator, not part of the C++ build -- run it manually (`python3
-tools/gen_material_maps.py`) whenever the assets/scenes/pixel_demo/textures/crate_*.png files
+tools/gen_material_maps.py`) whenever the assets/textures/brick_*.png files
 need regenerating. Requires numpy and Pillow.
 
 Produces a simple running-bond brick pattern -- chosen because a brick's mortar grooves give the
 normal map an unambiguous, easy-to-eyeball bump (flat brick faces, recessed mortar lines) rather
 than something that could pass for noise or a lighting bug. Three files, glTF-conventioned:
 
-  crate_albedo.png -- base color (RGB), authored in sRGB (see PBRMaterial's texture_albedo
+  brick_albedo.png -- base color (RGB), authored in sRGB (see PBRMaterial's texture_albedo
       doc / TextureLoader::declare_color_space()'s default slot mapping for why: this is the
       one map of the three that actually needs gamma decoding).
-  crate_normal.png -- tangent-space normal map (RGB, green-up/OpenGL convention -- matches
+  brick_normal.png -- tangent-space normal map (RGB, green-up/OpenGL convention -- matches
       gfx/surface/gbuffer_vs.glsl's Gram-Schmidt TBN, which needs no further sign flip), linear.
-  crate_mr.png -- metallic-roughness (metallic in B, roughness in G, R/A unused), linear.
+  brick_mr.png -- metallic-roughness (metallic in B, roughness in G, R/A unused), linear.
 
 All three are NEAREST-sampled (see toy::loaders::PixelTextureLoader / SamplerDesc::pixel_art())
 and small on purpose -- this is a pixel-art engine, and a chunky, blocky brick texture is more in
@@ -42,8 +42,8 @@ BUMP_STRENGTH = 2.5
 tuning constant -- see _height_to_normal()'s central-difference gradient, which this scales.
 """
 
-OUTPUT_DIR = pathlib.Path(__file__).resolve().parent.parent / "assets" / "scenes" / "pixel_demo" / "textures"
-"""Directory the three crate_*.png files are written into; resolved relative to this repo, not
+OUTPUT_DIR = pathlib.Path(__file__).resolve().parent.parent / "assets" / "textures"
+"""Directory the three brick_*.png files are written into; resolved relative to this repo, not
 the caller's cwd.
 """
 
@@ -83,7 +83,7 @@ def _height_to_normal(height: np.ndarray) -> np.ndarray:
         np.ndarray: A (SIZE, SIZE, 3) uint8 array, RGB-encoded per gbuffer_fs.glsl's decode
             (texel * 2 - 1 recovers the unit tangent-space normal). Wraps at the texture edges
             (np.roll, not a clamped/zero-padded gradient) so the map tiles seamlessly if the
-            crate is ever applied to a UV-repeating surface.
+            brick set is applied to a repeating (e.g. triplanar) surface.
     """
     dx = (np.roll(height, -1, axis=1) - np.roll(height, 1, axis=1)) * 0.5
     dy = (np.roll(height, -1, axis=0) - np.roll(height, 1, axis=0)) * 0.5
@@ -150,7 +150,7 @@ def _brick_metallic_roughness(height: np.ndarray) -> np.ndarray:
 
 
 def main() -> None:
-    """Generates all three crate_*.png maps and writes them to OUTPUT_DIR."""
+    """Generates all three brick_*.png maps and writes them to OUTPUT_DIR."""
     height = _brick_height_field()
 
     albedo = _brick_albedo(height)
@@ -159,9 +159,9 @@ def main() -> None:
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    albedo_path = OUTPUT_DIR / "crate_albedo.png"
-    normal_path = OUTPUT_DIR / "crate_normal.png"
-    mr_path = OUTPUT_DIR / "crate_mr.png"
+    albedo_path = OUTPUT_DIR / "brick_albedo.png"
+    normal_path = OUTPUT_DIR / "brick_normal.png"
+    mr_path = OUTPUT_DIR / "brick_mr.png"
 
     Image.fromarray(albedo, mode="RGB").save(albedo_path)
     Image.fromarray(normal, mode="RGB").save(normal_path)

@@ -797,6 +797,7 @@ public:
             // destroyed or rebuilt water objects since the system cached its list.
             water->refresh_bodies(scene);
             const float now = water->time();
+            state.time = water->render_time();
             auto* cam = coopa::gfx::engine::components::CameraComponent::main();
             const bool has_eye = cam && cam->owner;
             const glm::vec3 eye = has_eye ? glm::vec3(cam->owner->get_transform()->transform().get_world_matrix()[3])
@@ -1466,6 +1467,18 @@ private:
             /* shadow_cube_frag */ "",
             /* capture_frag */ "", // Opaque domain -- unused
             /* cull */ coopa::gfx::CullMode::Back, // closed columns, like any opaque solid
+        });
+        rc.surface_shaders.add({
+            /* name  */ "triplanar",
+            /* domain */ coopa::gfx::pipeline::SurfaceShaderDomain::Opaque,
+            /* vert  */ "triplanar.vert", // object-space position/normal for local mode
+            /* frag  */ "triplanar.frag", // world/object-space triplanar maps -- see its doc
+            /* shadow_vert */ "", // stock: no displacement, and an opaque caster reads no maps
+            /* shadow_frag */ "",
+            /* shadow_cube_vert */ "",
+            /* shadow_cube_frag */ "",
+            /* capture_frag */ "", // Opaque domain -- unused
+            /* cull */ coopa::gfx::CullMode::Back,
         });
         rc.surface_shaders.add({
             /* name  */ "editor_paint",   // the toyeditor's Vertex / Weight Paint display -- see

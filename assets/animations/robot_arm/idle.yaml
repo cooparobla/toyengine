@@ -3,13 +3,13 @@ clip:
   wrap: loop
   length: 3.0
   tracks:
-    - object: Base/Shoulder
+    - object: base/shoulder
       property: rotation_quat
       keys:
         - {time: 0, value: [-0, -0, -0.0697565, 0.997564], easing: ease_in_out}
         - {time: 1.5, value: [0, 0, 0.0697565, 0.997564], easing: ease_in_out}
         - {time: 3, value: [-0, -0, -0.0697565, 0.997564], easing: ease_in_out}
-    - object: Base/Shoulder/UpperArm/Elbow
+    - object: base/shoulder/upper_arm/elbow
       property: rotation_quat
       keys:
         - {time: 0, value: [0.173648, 0, 0, 0.984808], easing: ease_in_out}

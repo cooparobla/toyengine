@@ -284,7 +284,7 @@ inline EditResult draw_fields(imm::Context& ctx, const std::vector<FieldDesc>& f
     std::set<std::string> known = skip;
     for (const auto& f : fields) {
         known.insert(f.key);
-        if (f.kind == FieldKind::Material) continue;
+        if (f.kind == FieldKind::Material || skip.count(f.key)) continue;   // skipped keys are drawn by the caller
         ctx.push_id(f.key);
         total.absorb(draw_field(ctx, f, block, env));
         ctx.pop_id();
@@ -298,6 +298,83 @@ inline EditResult draw_fields(imm::Context& ctx, const std::vector<FieldDesc>& f
         }
     }
     return total;
+}
+
+/**
+ * @brief A material's Shader section: which shader it renders with, and that shader's own
+ *        shader_params under their names. Choosing a shader keeps alpha_mode in the shader's
+ *        pass (a Transparent shader is only drawn for BLEND, an Opaque one never is -- the
+ *        renderer would silently fall back to the stock shader) and resets the params to the
+ *        new shader's defaults.
+ */
+inline EditResult draw_shader_section(imm::Context& ctx, Node& m) {
+    EditResult r;
+    const std::string cur = m.contains("shader") ? get_string(m, "shader") : std::string();
+    const auto& shaders = surface_shaders();
+    std::vector<std::string> shown;
+    int idx = -1;
+    for (size_t i = 0; i < shaders.size(); ++i) {
+        shown.push_back(shaders[i].label);
+        if (shaders[i].name == cur) idx = static_cast<int>(i);
+    }
+    if (idx < 0) { shown.push_back(cur + " (internal)"); idx = static_cast<int>(shown.size()) - 1; }
+    const int before = idx;
+    if (ctx.combo("Shader##shader", &idx, shown) && idx != before && idx < static_cast<int>(shaders.size())) {
+        const SurfaceShaderInfo& s = shaders[static_cast<size_t>(idx)];
+        if (s.name.empty()) erase_key(m, "shader");
+        else m["shader"] = Node(s.name);
+        erase_key(m, "shader_params");
+        if (!s.params.empty()) {
+            float d[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            for (size_t i = 0; i < s.params.size() && i < 4; ++i) d[i] = s.params[i].def;
+            m["shader_params"] = make_float_seq(d, 4);
+        }
+        const bool blend = m.contains("alpha_mode") && get_string(m, "alpha_mode") == "BLEND";
+        if (s.transparent && !blend) m["alpha_mode"] = Node(std::string("BLEND"));
+        if (!s.transparent && !s.name.empty() && blend) m["alpha_mode"] = Node(std::string("OPAQUE"));
+        r.key = "shader"; r.changed = r.finished = true;
+    }
+    const SurfaceShaderInfo* info = find_surface_shader(m.contains("shader") ? get_string(m, "shader") : std::string());
+    if (!info) return r;
+    if (!info->note.empty()) ctx.label_dim(info->note);
+    if (info->driven) {
+        ctx.label_dim("Parameters are set by the object's WaterBody.");
+        return r;
+    }
+    if (info->params.empty()) return r;
+
+    float v[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    for (size_t i = 0; i < info->params.size() && i < 4; ++i) v[i] = info->params[i].def;
+    if (m.contains("shader_params") && m.at("shader_params").is_sequence()) {
+        const auto& seq = m.at("shader_params").as_seq();
+        for (size_t i = 0; i < std::min<size_t>(4, seq.size()); ++i) v[i] = as_float(seq[i]);
+    }
+    for (size_t i = 0; i < info->params.size() && i < 4; ++i) {
+        const ShaderParamDesc& p = info->params[i];
+        const std::string label = p.label + "##shader_param" + std::to_string(i);
+        bool ch = false;
+        EditResult pr;
+        if (!p.options.empty()) {
+            int sel = std::clamp(static_cast<int>(std::lround(v[i])), 0, static_cast<int>(p.options.size()) - 1);
+            ch = ctx.combo(label, &sel, p.options);
+            if (ch) v[i] = static_cast<float>(sel);
+            pr.key = "shader_params"; pr.changed = ch; pr.finished = ch;
+        } else {
+            ch = ctx.drag_float(label, &v[i], p.speed, p.min, p.max);
+            detail::finish(ctx, pr, "shader_params", ch);
+        }
+        if (ch) m["shader_params"] = make_float_seq(v, 4);
+        r.absorb(pr);
+    }
+    return r;
+}
+
+/** @brief Every field of a material block: the Shader section first, then the PBR fields. */
+inline EditResult draw_material_block(imm::Context& ctx, Node& m, const InspectorEnv& env, bool show_unknown = true) {
+    EditResult r = draw_shader_section(ctx, m);
+    ctx.spacing();
+    r.absorb(draw_fields(ctx, material_fields(), m, env, show_unknown, {"base", "shader", "shader_params"}));
+    return r;
 }
 
 /**
@@ -360,10 +437,12 @@ inline EditResult draw_material_field(imm::Context& ctx, Node& comp, const Inspe
             std::vector<FieldDesc> present_fields;
             std::vector<std::string> addable;
             for (const auto& f : material_fields()) {
+                if (f.key == "shader_params") continue;   // part of the Shader override
                 if (m.contains(f.key)) present_fields.push_back(f);
                 else addable.push_back(f.key);
             }
-            r.absorb(draw_fields(ctx, present_fields, m, env, false, {"base"}));
+            if (m.contains("shader")) r.absorb(draw_shader_section(ctx, m));
+            r.absorb(draw_fields(ctx, present_fields, m, env, false, {"base", "shader", "shader_params"}));
             addable.insert(addable.begin(), "+ Override...");
             int pick = 0;
             if (ctx.combo("##add_override", &pick, addable) && pick > 0) {
@@ -380,7 +459,7 @@ inline EditResult draw_material_field(imm::Context& ctx, Node& comp, const Inspe
                 r.changed = r.finished = true;
             }
         } else {
-            r.absorb(draw_fields(ctx, material_fields(), m, env, true, {"base"}));
+            r.absorb(draw_material_block(ctx, m, env));
         }
         ctx.unindent(6);
     }

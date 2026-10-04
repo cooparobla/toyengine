@@ -1512,7 +1512,7 @@ private:
         ctx.spacing();
         Node before = md.node;
         InspectorEnv env = inspector_env_();
-        EditResult r = draw_fields(ctx, material_fields(), md.node, env, true, {"base"});
+        EditResult r = draw_material_block(ctx, md.node, env);
         if (r.changed) {
             md.commit("Edit " + r.key, before, r.active ? "m:" + r.key : std::string());
             refresh_material_preview_();

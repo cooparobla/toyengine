@@ -1,7 +1,7 @@
-"""Generates the blobby value-noise alpha mask used by the pixel_demo scene's CUTOUT sphere.
+"""Generates the blobby value-noise alpha mask (pixel_demo's CUTOUT sphere, materials/foliage.yaml).
 
 Standalone generator, not part of the C++ build -- run it manually (`python3
-tools/gen_noise_mask.py`) whenever assets/scenes/pixel_demo/textures/noise_mask.png needs
+tools/gen_noise_mask.py`) whenever assets/textures/noise_mask.png needs
 regenerating. Requires numpy and Pillow.
 
 The output is deliberately NOT pre-thresholded to a binary 0/1 mask: it stores continuous
@@ -23,7 +23,7 @@ chunky noise texels reads as a clean silhouette test; a smoothly filtered high-r
 blur the cutout edge, defeating the point of AlphaMode::Mask's hard discard.
 """
 
-OUTPUT_PATH = pathlib.Path(__file__).resolve().parent.parent / "assets" / "scenes" / "pixel_demo" / "textures" / "noise_mask.png"
+OUTPUT_PATH = pathlib.Path(__file__).resolve().parent.parent / "assets" / "textures" / "noise_mask.png"
 """Where the generated PNG is written; resolved relative to this repo, not the caller's cwd."""
 
 

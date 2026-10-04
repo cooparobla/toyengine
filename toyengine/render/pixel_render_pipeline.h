@@ -356,6 +356,18 @@ public:
      *        depends on toyengine/water/.
      */
     void set_water_state(WaterFrameState state) { water_state_ = std::move(state); }
+
+    /**
+     * @brief gfx_time for every surface-shader push: x = renderer clock, y = frame dt,
+     *        z = frame index, w = the water clock (WaterFrameState::time) -- the wave phase the
+     *        water shader must share with the CPU's buoyancy queries. The renderer clock runs
+     *        from pipeline creation and the water clock from scene start, so they are never the
+     *        same; w falls back to x when no water system reported a time.
+     */
+    glm::vec4 surface_gfx_time_() const {
+        const float water_time = water_state_.time >= 0.0f ? water_state_.time : elapsed_time_;
+        return glm::vec4(elapsed_time_, frame_dt_, static_cast<float>(frame_index_), water_time);
+    }
     const WaterFrameState& water_state() const { return water_state_; }
 
     /** @brief True when UnderwaterPass exists and is applying the underwater look this frame. */
@@ -3454,7 +3466,7 @@ private:
      * The target point is the object's world BOUNDS CENTRE where bounds are available
      * (MeshRenderer via Mesh::bounds_min()/bounds_max(), SdfRenderer via its own
      * bounds_center/bounds_extent), not its Transform origin. A mesh origin is not generally
-     * its centre -- pixel_demo's cube.000 spans [0,1]^3, so its origin is a CORNER, 0.2 m in
+     * its centre -- pixel_demo's pillar spans [0,1] in plan, so its origin is a CORNER, 0.2 m in
      * front of the centre -- and focusing there spends half the depth of field on empty space
      * in front of the subject.
      *
@@ -4214,7 +4226,7 @@ private:
 
                 coopa::gfx::engine::passes::DirectionalShadowPushConstants pc{};
                 pc.light_space_matrix = current_light_data().dir_cascade_matrix[c];
-                pc.gfx_time = glm::vec4(elapsed_time_, frame_dt_, static_cast<float>(frame_index_), 0.0f);
+                pc.gfx_time = surface_gfx_time_();
 
                 // Same per-material shader-variant binding as record_gbuffer_() -- a caster's
                 // shadow must displace identically to its G-buffer draw (see
@@ -4266,7 +4278,7 @@ private:
             coopa::gfx::engine::passes::CubeShadowPushConstants pc{};
             pc.light_space_matrix = coopa::gfx::engine::targets::ShadowMapTarget::get_cube_face_matrix(face, light_pos, range);
             pc.light_pos_range    = glm::vec4(light_pos, range);
-            pc.gfx_time = glm::vec4(elapsed_time_, frame_dt_, static_cast<float>(frame_index_), 0.0f);
+            pc.gfx_time = surface_gfx_time_();
 
             draw_shadow_batches_(cmd, meshes, meshes.cube[face], pc,
                 [&](const std::string& shader, bool cull) { shadow_pipeline_->bind_cube(cmd, shader, cull); },
@@ -4315,7 +4327,7 @@ private:
 
             coopa::gfx::engine::passes::DirectionalShadowPushConstants pc{};
             pc.light_space_matrix = current_light_data().spot_light_space_matrix;
-            pc.gfx_time = glm::vec4(elapsed_time_, frame_dt_, static_cast<float>(frame_index_), 0.0f);
+            pc.gfx_time = surface_gfx_time_();
 
             draw_shadow_batches_(cmd, meshes, meshes.spot, pc,
                 [&](const std::string& shader, bool cull) { shadow_pipeline_->bind_directional(cmd, shader, cull); },
@@ -4430,7 +4442,7 @@ private:
             pc.ao           = mr_mat.ao;
             pc.alpha_cutoff = mr_mat.gpu_alpha_cutoff();
             pc.emissive     = mr_mat.gpu_emissive();
-            pc.gfx_time     = glm::vec4(elapsed_time_, frame_dt_, static_cast<float>(frame_index_), 0.0f);
+            pc.gfx_time     = surface_gfx_time_();
             pc.gfx_params   = mr_mat.shader_params;
             gbuffer_pipeline_->push(cmd, pc);
             // Set 1: alpha-mask sampler (white 1x1 fallback unless this is a CUTOUT material
@@ -4539,7 +4551,7 @@ private:
             pc.metallic   = mr_mat.metallic;
             pc.roughness  = mr_mat.roughness;
             pc.ao         = mr_mat.ao;
-            pc.gfx_time   = glm::vec4(elapsed_time_, frame_dt_, static_cast<float>(frame_index_), 0.0f);
+            pc.gfx_time   = surface_gfx_time_();
             pc.gfx_params = mr_mat.shader_params;
             transparent_capture_pass_->push(cmd, pc);
             // Set 3: albedo/normal/metallic-roughness -- see gfx/surface/capture_fs.glsl and
@@ -4758,7 +4770,7 @@ private:
                 pc.metallic   = mr_mat.metallic;
                 pc.roughness  = mr_mat.roughness;
                 pc.ao         = mr_mat.ao;
-                pc.gfx_time   = glm::vec4(elapsed_time_, frame_dt_, static_cast<float>(frame_index_), 0.0f);
+                pc.gfx_time   = surface_gfx_time_();
                 pc.gfx_params = mr_mat.shader_params;
                 transparent_pass_->push(cmd, pc);
 

@@ -1,0 +1,11 @@
+# Wind-swayed CUTOUT leaf card for the `foliage` surface shader (two-sided; see
+# shaders/foliage_surface.glsl). shader_params: [wind_strength, wind_frequency, wind_dir.x, wind_dir.y].
+albedo: { r: 0.25, g: 0.55, b: 0.2 }
+metallic: 0.0
+roughness: 0.7
+ao: 1.0
+alpha_mode: CUTOUT
+alpha_cutoff: 0.5
+texture_alpha_mask: textures/noise_mask.png
+shader: foliage
+shader_params: [0.12, 1.6, 1.0, 0.35]

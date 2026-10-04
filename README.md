@@ -162,7 +162,7 @@ Scenes are a tree of objects with components. The engine is **Z-up**, in metres.
 ```yaml
 format: blender
 scene:
-  scene_name: Hello
+  scene_name: hello
   root_objects:
     - name: camera
       components:
@@ -184,7 +184,7 @@ scene:
           position: { x: 0.0, y: 0.0, z: 4.0 }
           scale: { x: 0.5, y: 0.5, z: 0.5 }
         - type: MeshRenderer
-          mesh_path: sphere.000
+          mesh_path: sphere
           material: { albedo: { r: 0.8, g: 0.3, b: 0.2 }, roughness: 0.4 }
         - type: SphereCollider
           radius: 1.0

@@ -315,7 +315,7 @@ render:
   normal_threshold: 0.75
 
   # --- Palette / dither ---
-  palette: "assets/palettes/duel-1x.png"
+  palette: "assets/palettes/duel_1x.png"
   # Colour-grading strip LUT (N*N by N, e.g. 1024x32). Empty = no grading.
   grading_lut: ""
   dither_strength: 0.08

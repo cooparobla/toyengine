@@ -27,7 +27,7 @@
 
 format: blender
 scene:
-  scene_name: WorldCanvasTest
+  scene_name: world_canvas_test
   root_objects:
     - name: floor
       active: true
@@ -37,7 +37,7 @@ scene:
           rotation: { x: 0.0, y: 0.0, z: 0.0 }
           scale: { x: 3.0, y: 3.0, z: 3.0 }
         - type: MeshRenderer
-          mesh_path: plane.000
+          mesh_path: plane
           material:
             albedo: { r: 0.30, g: 0.34, b: 0.28 }
             metallic: 0.0
@@ -56,7 +56,7 @@ scene:
           rotation: { x: 0.0, y: 0.0, z: 0.0 }
           scale: { x: 0.5, y: 0.5, z: 1.8 }
         - type: MeshRenderer
-          mesh_path: cube.000
+          mesh_path: cube_corner
           material:
             albedo: { r: 0.22, g: 0.24, b: 0.30 }
             metallic: 0.0
@@ -64,8 +64,8 @@ scene:
             ao: 1.0
       children: []
 
-    # NOTE ON PLACEMENT: cube.000's mesh spans 0..1 on every axis -- its origin is a CORNER,
-    # not its centre (check meshes/cube.000.yaml; pixel_demo offsets by -0.5 for the same
+    # NOTE ON PLACEMENT: cube_corner's mesh spans 0..1 on every axis -- its origin is a CORNER,
+    # not its centre (check assets/meshes/cube_corner.yaml; pixel_demo offsets by -0.5 for the same
     # reason). So the cube sits at -0.5 to centre it on the world origin and rest it on the
     # floor, and health_canvas's local +0.5/+0.5 below cancels that back out so the canvas
     # hangs centred over the cube rather than over one of its vertical edges.
@@ -77,17 +77,17 @@ scene:
           rotation: { x: 0.0, y: 0.0, z: 0.0 }
           scale: { x: 1.0, y: 1.0, z: 1.0 }
         - type: MeshRenderer
-          mesh_path: cube.000
+          mesh_path: cube_corner
           material:
             albedo: { r: 0.80, g: 0.35, b: 0.25 }
             metallic: 0.0
             roughness: 0.6
             ao: 1.0
-        # Owns the coopa::stat::Resource and binds it to HealthBar's ProgressBar at start().
+        # Owns the coopa::stat::Resource and binds it to health_bar's ProgressBar at start().
         # Lives on the cube rather than on the canvas so the "model" and the "view" are
         # visibly separate objects -- see toyengine/scene/health_driver.h.
         - type: HealthDriver
-          bar_object: HealthBar
+          bar_object: health_bar
           max_health: 100.0
           start_health: 100.0
           damage_per_second: 22.0
@@ -129,7 +129,7 @@ scene:
               occlude: false
           children:
             # Backing plate. StretchAll so it always fills the canvas, whatever world_size is.
-            - name: Backplate
+            - name: backplate
               active: true
               components:
                 - type: RectTransform
@@ -140,7 +140,7 @@ scene:
                   color: { r: 0.05, g: 0.06, b: 0.09, a: 0.82 }
               children: []
 
-            - name: Label
+            - name: label
               active: true
               components:
                 - type: RectTransform
@@ -150,7 +150,7 @@ scene:
                   pivot: { x: 0.0, y: 1.0 }
                 - type: Text
                   text: "Crate"
-                  font: ../../fonts/Inter-Regular.ttf
+                  font: ../../fonts/inter_regular.ttf
                   font_size: 11.0
                   color: { r: 0.90, g: 0.92, b: 0.95, a: 1.0 }
                   horizontal_align: Left
@@ -161,7 +161,7 @@ scene:
             # mouse ray hit the canvas plane, converted to canvas pixels, and Raycaster /
             # EventSystem dispatched to it with no world-space awareness of their own.
             # Drive it headlessly with CURSOR_POS="<x>,<y>" (window pixels).
-            - name: HealButton
+            - name: heal_button
               active: true
               components:
                 - type: RectTransform
@@ -183,14 +183,14 @@ scene:
                     # trails the pointer and a short headless capture never shows it.
                     fade_duration: 0.0
               children:
-                - name: HealLabel
+                - name: heal_label
                   active: true
                   components:
                     - type: RectTransform
                       anchor_preset: StretchAll
                     - type: Text
                       text: "Heal"
-                      font: ../../fonts/Inter-Regular.ttf
+                      font: ../../fonts/inter_regular.ttf
                       font_size: 9.0
                       color: { r: 0.92, g: 0.98, b: 0.94, a: 1.0 }
                       horizontal_align: Center
@@ -200,7 +200,7 @@ scene:
             # The bar itself. ProgressBar adds a Mask to this object in its own start() if one
             # is absent, so this subtree exercises UiWorldPass's projected-scissor path --
             # which is why that path is not optional.
-            - name: HealthBar
+            - name: health_bar
               active: true
               components:
                 - type: RectTransform
@@ -215,12 +215,12 @@ scene:
                   max: 100.0
                   value: 100.0
                   direction: LeftToRight
-                  fill: Fill
-                  ghost: Ghost
+                  fill: fill
+                  ghost: ghost
                   ghost_delay: 0.35
               children:
                 # Chip-damage trail, behind the fill (earlier sibling == drawn first).
-                - name: Ghost
+                - name: ghost
                   active: true
                   components:
                     - type: RectTransform
@@ -229,7 +229,7 @@ scene:
                     - type: Image
                       color: { r: 0.95, g: 0.85, b: 0.45, a: 0.75 }
                   children: []
-                - name: Fill
+                - name: fill
                   active: true
                   components:
                     - type: RectTransform
@@ -271,7 +271,7 @@ scene:
           # see uicoopa/assets/shaders/ui_world_occlude.glsl.
           occlude: true
       children:
-        - name: WallPlate
+        - name: wall_plate
           active: true
           components:
             - type: RectTransform
@@ -279,7 +279,7 @@ scene:
             - type: Image
               color: { r: 0.07, g: 0.10, b: 0.16, a: 0.88 }
           children: []
-        - name: WallText
+        - name: wall_text
           active: true
           components:
             - type: RectTransform
@@ -287,7 +287,7 @@ scene:
               size_delta: { x: 118.0, y: 32.0 }
             - type: Text
               text: "Transform"
-              font: ../../fonts/Inter-Regular.ttf
+              font: ../../fonts/inter_regular.ttf
               font_size: 15.0
               color: { r: 0.72, g: 0.86, b: 0.98, a: 1.0 }
               horizontal_align: Center
@@ -309,7 +309,7 @@ scene:
           reference_resolution: { x: 640.0, y: 360.0 }
           match_width_or_height: 0.5
       children:
-        - name: HudPlate
+        - name: hud_plate
           active: true
           components:
             - type: RectTransform
@@ -319,14 +319,14 @@ scene:
             - type: Image
               color: { r: 0.05, g: 0.07, b: 0.12, a: 0.78 }
           children:
-            - name: HudText
+            - name: hud_text
               active: true
               components:
                 - type: RectTransform
                   anchor_preset: StretchAll
                 - type: Text
                   text: "screen-space HUD"
-                  font: ../../fonts/Inter-Regular.ttf
+                  font: ../../fonts/inter_regular.ttf
                   font_size: 14.0
                   color: { r: 0.85, g: 0.92, b: 1.0, a: 1.0 }
                   horizontal_align: Center

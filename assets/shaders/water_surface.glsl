@@ -13,6 +13,8 @@
 //   gfx_params        = base wave: amplitude, wavelength, direction (radians), steepness
 //   gfx_params_ext0   = foam colour rgb, foam amount           (forward pass only)
 //   gfx_params_ext1   = shore foam depth, edge fade depth, ripple strength, ripple scale
+//   gfx_time.w        = the water clock (WaterSystem::render_time()) -- waves animate on it, NOT
+//                       gfx_time.x, so the drawn surface and buoyancy's CPU queries share a phase
 //   refraction thickness (pushed) = clarity: depth in m at which the water reads ~63% opaque.
 //                          The hook replaces it with the MEASURED depth for Beer-Lambert.
 //
@@ -88,7 +90,7 @@ void gfx_surface_vertex(inout GfxSurfaceVertex v) {
     float turbulence = baked ? v.uv.y : 0.0;
     vec3  flow_ws    = baked ? mat3(v.model) * v.tangent_os.xyz : vec3(0.0);
 
-    WaterWave w = water_gerstner(gfx_params, v.position_ws.xy, gfx_time.x,
+    WaterWave w = water_gerstner(gfx_params, v.position_ws.xy, gfx_time.w,
                                  water_depth_attenuation(depth, gfx_params.y),
                                  distance(camera.camera_pos, v.position_ws));
     v.position_ws += w.displacement;
@@ -165,7 +167,7 @@ void water_ripple_rings(vec2 pos, inout vec2 slope, inout float foam) {
 #endif
 
 void gfx_surface_fragment(inout GfxTransparentSurface s) {
-    float t     = gfx_time.x;
+    float t     = gfx_time.w;
     vec2  pos   = s.position_ws.xy;
     vec2  flow  = s.custom.xy;
     float turb  = s.custom.z;

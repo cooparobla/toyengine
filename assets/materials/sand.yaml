@@ -1,0 +1,5 @@
+# Wet-sand lake bed.
+albedo: { r: 0.55, g: 0.5, b: 0.36 }
+metallic: 0.0
+roughness: 0.95
+ao: 1.0

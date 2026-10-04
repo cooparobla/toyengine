@@ -29,7 +29,7 @@ void gfx_surface_vertex(inout GfxSurfaceVertex v) {
     // different point in its cycle, like wind actually moving across a field.
     float phase = dot(v.position_ws.xy, dir) * 0.6 + gfx_time.x * gfx_params.y;
 
-    // position_os.y is the card's local height axis (see plane.000's mesh data: a 2x2 quad
+    // position_os.y is the card's local height axis (see plane's mesh data: a 2x2 quad
     // from y=-1 at the root to y=+1 at the tip, BEFORE this object's Transform rotation is
     // baked into the model matrix) -- smoothstep so the root (y<=0) stays planted and only
     // the upper half sways, growing to full amplitude at the tip.

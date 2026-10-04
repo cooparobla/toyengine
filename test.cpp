@@ -627,10 +627,10 @@ void test_object_assets_prefab() {
 
 void test_mesh_lod_simplifies_flat_shaded_mesh() {
     using coopa::gfx::engine::data::Mesh;
-    // pixel_demo's sphere is exported flat-shaded: every face has its own normals, so after
+    // The shared sphere mesh is exported flat-shaded: every face has its own normals, so after
     // welding no two triangles share a vertex. LOD generation must still reduce it.
-    std::ifstream in(std::string(ROOT_DIR) + "/assets/scenes/pixel_demo/meshes/sphere.000.yaml");
-    expect(static_cast<bool>(in), "sphere.000.yaml opens");
+    std::ifstream in(std::string(ROOT_DIR) + "/assets/meshes/sphere.yaml");
+    expect(static_cast<bool>(in), "meshes/sphere.yaml opens");
     if (!in) return;
     const fkyaml::node node = fkyaml::node::deserialize(in);
     const fkyaml::node cfg = fkyaml::node::deserialize(std::string(
@@ -4225,21 +4225,21 @@ void test_yaml_variant_resolution() {
     const std::filesystem::path dir = fresh_tmp_subdir("caml_variants");
     std::filesystem::create_directories(dir / "meshes");
     write_text_file(dir / "plain.yaml", "k: 1\n");
-    toy::core::encode_caml_file(dir / "plain.yaml", dir / "meshes" / "sphere.000.lod.caml");
+    toy::core::encode_caml_file(dir / "plain.yaml", dir / "meshes" / "sphere.lod.caml");
     toy::core::encode_caml_file(dir / "plain.yaml", dir / "packed.caml");
 
     using coopa::yaml::resolve_variant;
     expect(resolve_variant(dir / "plain.yaml") == dir / "plain.yaml", "an existing path resolves to itself");
     expect(resolve_variant(dir / "packed.yaml") == dir / "packed.caml", "x.yaml finds x.caml");
     expect(resolve_variant(dir / "plain.caml") == dir / "plain.yaml", "x.caml finds x.yaml");
-    expect(resolve_variant(dir / "meshes" / "sphere.000.lod.yaml") == dir / "meshes" / "sphere.000.lod.caml",
+    expect(resolve_variant(dir / "meshes" / "sphere.lod.yaml") == dir / "meshes" / "sphere.lod.caml",
            "multi-dot sidecar names keep their stem");
     expect(resolve_variant(dir / "missing.yaml") == dir / "missing.yaml", "no twin: the path comes back unchanged");
     expect(resolve_variant(dir / "image.png") == dir / "image.png", "non-document paths are never rewritten");
 
     coopa::asset::AssetSource source;
     source.add_search_root(dir.string());
-    expect(std::filesystem::path(source.resolve("meshes/sphere.000.lod.yaml")) == dir / "meshes" / "sphere.000.lod.caml",
+    expect(std::filesystem::path(source.resolve("meshes/sphere.lod.yaml")) == dir / "meshes" / "sphere.lod.caml",
            "AssetSource search roots resolve a .yaml reference to its .caml twin");
     expect(std::filesystem::path(source.resolve("packed.yaml", (dir / "meshes").string())) == dir / "packed.caml",
            "AssetSource falls through base_dir to the search root, variant-aware");
@@ -5203,6 +5203,34 @@ void test_underwater_scene_renders_and_toggles() {
     if (!(c_below.g > c_below.r * 1.4f)) dump_frame(below, "underwater_below");
 }
 
+/**
+ * @brief The water shader animates waves on the water system's clock, not the renderer's.
+ *
+ * Buoyancy evaluates the waves on the CPU at WaterSystem::time(), which starts with the scene;
+ * the renderer's own clock starts with the pipeline. Before the two were tied, the drawn waves
+ * and the ones floaters rode were at unrelated phases (any time spent before the scene loaded,
+ * e.g. the editor before Play, was the offset), so bodies bobbed out of step with the surface.
+ * Here the renderer has already run frames before the scene loads, so the clocks differ, and the
+ * time handed to the shader must be the water clock (less the interpolation lag, < one step).
+ */
+void test_water_shader_shares_the_buoyancy_clock() {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
+    ScopedEnv no_input("NO_INPUT", "1");
+    toy::core::Engine engine(make_test_config("assets/scenes/pixel_demo/scene.yaml", 640, 360, 320, 180));
+    tick_frames(engine, 30);   // the renderer's clock runs ahead of any later scene's
+    engine.load_scene("assets/scenes/water_test/scene.yaml");
+    tick_frames(engine, 20);
+    auto* water = dynamic_cast<toy::water::WaterSystem*>(engine.scene().find_system("Water"));
+    expect(water != nullptr, "water clock: water_test has a water system");
+    if (!water) return;
+    const float handed = engine.pipeline().water_state().time;
+    expect(handed >= 0.0f && handed <= water->time() && water->time() - handed <= 1.0f / 60.0f + 1e-4f,
+           "water clock: the shader gets the water system's time (" + std::to_string(handed) +
+           " vs " + std::to_string(water->time()) + ")");
+    expect(water->time() < 0.5f + 20.0f / 60.0f,
+           "water clock: the water clock started with the scene (" + std::to_string(water->time()) + " s)");
+}
+
 /** @brief water_quality switches live: every tier re-bakes and draws the lake (as several LOD'd
  *         tiles), Low at a coarser grid than High, with the tier's shader detail handed over. */
 void test_water_scene_quality_tiers_render() {
@@ -5403,9 +5431,9 @@ void test_animation_test_scene_runs() {
     toy::core::Engine engine(make_test_config("assets/scenes/animation_test/scene.yaml", 640, 360, 320, 180));
     tick_frames(engine, 2);
     auto& scene = engine.scene();
-    auto* elbow = scene.find_object("Elbow");
-    auto* ball = scene.find_object("Ball");
-    auto* skin = scene.find_object("TentacleSkin");
+    auto* elbow = scene.find_object("elbow");
+    auto* ball = scene.find_object("ball");
+    auto* skin = scene.find_object("tentacle_skin");
     auto* smr = skin ? skin->get_component<toy::scene::SkinnedMeshRenderer>() : nullptr;
     expect(elbow && ball && smr, "animation_test: the rigs loaded");
     if (!elbow || !ball || !smr) return;
@@ -5587,6 +5615,7 @@ const TestCase kTests[] = {
     {"water_scene_renders_and_simulates",          "render_water",    test_water_scene_renders_and_simulates},
     {"underwater_scene_renders_and_toggles",       "render_water",    test_underwater_scene_renders_and_toggles},
     {"water_scene_quality_tiers_render",           "render_water",    test_water_scene_quality_tiers_render},
+    {"water_shader_shares_the_buoyancy_clock",     "render_water",    test_water_shader_shares_the_buoyancy_clock},
     {"rig_clip_drives_hierarchy",                  "rig",             test_rig_clip_drives_hierarchy},
     {"rig_vertex_group_skinning",                  "rig",             test_rig_vertex_group_skinning},
     {"rig_skinned_mesh_follows_animated_bone",     "render_rig",      test_rig_skinned_mesh_follows_animated_bone},

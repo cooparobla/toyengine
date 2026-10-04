@@ -1,11 +1,11 @@
 format: blender
 scene:
-  scene_name: PhysicsTest
+  scene_name: physics_test
   root_objects:
     # ============================================================================
     # ARENA
     # ============================================================================
-    # Large static ground, `concrete` material. plane.000 is a flat 2x2 quad at local
+    # Large static ground, `concrete` material. plane is a flat 2x2 quad at local
     # z=0 with no thickness, so BoxCollider gives it a thin slab (size.z = 0.2) offset
     # half that thickness below the visible surface (center.z = -0.1) -- the render
     # surface stays exactly at world z=0, where every dropped/settled object's rest
@@ -19,7 +19,7 @@ scene:
           rotation: { x: 0.0, y: 0.0, z: 0.0 }
           scale: { x: 10.0, y: 10.0, z: 1.0 }
         - type: MeshRenderer
-          mesh_path: plane.000
+          mesh_path: plane
           material:
             albedo: { r: 0.32, g: 0.34, b: 0.36 }
             metallic: 0.0
@@ -47,8 +47,8 @@ scene:
           position: { x: -10.4, y: -10.2, z: 0.0 }
           scale: { x: 0.4, y: 20.4, z: 1.2 }
         - type: MeshRenderer
-          mesh_path: cube.000
-          material: { albedo: { r: 0.3, g: 0.32, b: 0.34 }, metallic: 0.0, roughness: 0.85, ao: 1.0 }
+          mesh_path: cube_corner
+          material: materials/concrete
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
           center: { x: 0.5, y: 0.5, z: 0.5 }
@@ -62,8 +62,8 @@ scene:
           position: { x: 10.0, y: -10.2, z: 0.0 }
           scale: { x: 0.4, y: 20.4, z: 1.2 }
         - type: MeshRenderer
-          mesh_path: cube.000
-          material: { albedo: { r: 0.3, g: 0.32, b: 0.34 }, metallic: 0.0, roughness: 0.85, ao: 1.0 }
+          mesh_path: cube_corner
+          material: materials/concrete
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
           center: { x: 0.5, y: 0.5, z: 0.5 }
@@ -77,8 +77,8 @@ scene:
           position: { x: -10.2, y: -10.4, z: 0.0 }
           scale: { x: 20.4, y: 0.4, z: 1.2 }
         - type: MeshRenderer
-          mesh_path: cube.000
-          material: { albedo: { r: 0.3, g: 0.32, b: 0.34 }, metallic: 0.0, roughness: 0.85, ao: 1.0 }
+          mesh_path: cube_corner
+          material: materials/concrete
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
           center: { x: 0.5, y: 0.5, z: 0.5 }
@@ -92,8 +92,8 @@ scene:
           position: { x: -10.2, y: 10.0, z: 0.0 }
           scale: { x: 20.4, y: 0.4, z: 1.2 }
         - type: MeshRenderer
-          mesh_path: cube.000
-          material: { albedo: { r: 0.3, g: 0.32, b: 0.34 }, metallic: 0.0, roughness: 0.85, ao: 1.0 }
+          mesh_path: cube_corner
+          material: materials/concrete
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
           center: { x: 0.5, y: 0.5, z: 0.5 }
@@ -107,7 +107,7 @@ scene:
     # rebounds: clay/Minimum stays dead, superball/Maximum bounces at its own high
     # restitution even against concrete's low one, wood/rubber fall in between.
     #
-    # sphere.000 is a unit sphere centred at its own local origin, so radius 1.0 on
+    # sphere is a unit sphere centred at its own local origin, so radius 1.0 on
     # the collider plus a uniform Transform.scale gives an exact world-space radius
     # match between the rendered mesh and the collider -- no double-scaling.
     # ============================================================================
@@ -118,7 +118,7 @@ scene:
           position: { x: -6.0, y: -5.0, z: 4.5 }
           scale: { x: 0.5, y: 0.5, z: 0.5 }
         - type: MeshRenderer
-          mesh_path: sphere.000
+          mesh_path: sphere
           material: { albedo: { r: 0.35, g: 0.22, b: 0.12 }, metallic: 0.0, roughness: 0.9, ao: 1.0 }
         - type: SphereCollider
           radius: 1.0
@@ -136,8 +136,8 @@ scene:
           position: { x: -2.0, y: -5.0, z: 4.5 }
           scale: { x: 0.5, y: 0.5, z: 0.5 }
         - type: MeshRenderer
-          mesh_path: sphere.000
-          material: { albedo: { r: 0.55, g: 0.4, b: 0.2 }, metallic: 0.0, roughness: 0.6, ao: 1.0 }
+          mesh_path: sphere
+          material: materials/wood
         - type: SphereCollider
           radius: 1.0
           material: wood
@@ -154,7 +154,7 @@ scene:
           position: { x: 2.0, y: -5.0, z: 4.5 }
           scale: { x: 0.5, y: 0.5, z: 0.5 }
         - type: MeshRenderer
-          mesh_path: sphere.000
+          mesh_path: sphere
           material: { albedo: { r: 0.08, g: 0.08, b: 0.08 }, metallic: 0.0, roughness: 0.95, ao: 1.0 }
         - type: SphereCollider
           radius: 1.0
@@ -172,7 +172,7 @@ scene:
           position: { x: 6.0, y: -5.0, z: 4.5 }
           scale: { x: 0.5, y: 0.5, z: 0.5 }
         - type: MeshRenderer
-          mesh_path: sphere.000
+          mesh_path: sphere
           material: { albedo: { r: 0.9, g: 0.15, b: 0.55 }, metallic: 0.0, roughness: 0.15, ao: 1.0 }
         - type: SphereCollider
           radius: 1.0
@@ -215,8 +215,8 @@ scene:
           position: { x: -3.0, y: 2.5, z: 0.0 }
           scale: { x: 6.0, y: 1.0, z: 0.2 }
         - type: MeshRenderer
-          mesh_path: cube.000
-          material: { albedo: { r: 0.75, g: 0.9, b: 0.95 }, metallic: 0.0, roughness: 0.08, ao: 1.0 }
+          mesh_path: cube_corner
+          material: materials/ice
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
           center: { x: 0.5, y: 0.5, z: 0.5 }
@@ -230,8 +230,8 @@ scene:
           position: { x: -3.0, y: 4.5, z: 0.0 }
           scale: { x: 6.0, y: 1.0, z: 0.2 }
         - type: MeshRenderer
-          mesh_path: cube.000
-          material: { albedo: { r: 0.55, g: 0.4, b: 0.2 }, metallic: 0.0, roughness: 0.6, ao: 1.0 }
+          mesh_path: cube_corner
+          material: materials/wood
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
           center: { x: 0.5, y: 0.5, z: 0.5 }
@@ -245,8 +245,8 @@ scene:
           position: { x: -3.0, y: 6.5, z: 0.0 }
           scale: { x: 6.0, y: 1.0, z: 0.2 }
         - type: MeshRenderer
-          mesh_path: cube.000
-          material: { albedo: { r: 0.25, g: 0.05, b: 0.05 }, metallic: 0.0, roughness: 0.95, ao: 1.0 }
+          mesh_path: cube_corner
+          material: materials/rubber
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
           center: { x: 0.5, y: 0.5, z: 0.5 }
@@ -260,8 +260,8 @@ scene:
           position: { x: -2.8, y: 2.2, z: 0.2 }
           scale: { x: 0.6, y: 0.6, z: 0.6 }
         - type: MeshRenderer
-          mesh_path: cube.000
-          material: { albedo: { r: 0.75, g: 0.9, b: 0.95 }, metallic: 0.0, roughness: 0.08, ao: 1.0 }
+          mesh_path: cube_corner
+          material: materials/ice
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
           center: { x: 0.5, y: 0.5, z: 0.5 }
@@ -280,8 +280,8 @@ scene:
           position: { x: -2.8, y: 4.2, z: 0.2 }
           scale: { x: 0.6, y: 0.6, z: 0.6 }
         - type: MeshRenderer
-          mesh_path: cube.000
-          material: { albedo: { r: 0.55, g: 0.4, b: 0.2 }, metallic: 0.0, roughness: 0.6, ao: 1.0 }
+          mesh_path: cube_corner
+          material: materials/wood
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
           center: { x: 0.5, y: 0.5, z: 0.5 }
@@ -300,8 +300,8 @@ scene:
           position: { x: -2.8, y: 6.2, z: 0.2 }
           scale: { x: 0.6, y: 0.6, z: 0.6 }
         - type: MeshRenderer
-          mesh_path: cube.000
-          material: { albedo: { r: 0.25, g: 0.05, b: 0.05 }, metallic: 0.0, roughness: 0.95, ao: 1.0 }
+          mesh_path: cube_corner
+          material: materials/rubber
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
           center: { x: 0.5, y: 0.5, z: 0.5 }
@@ -327,8 +327,8 @@ scene:
           position: { x: 9.0, y: 6.0, z: 0.0 }
           scale: { x: 0.8, y: 0.8, z: 0.8 }
         - type: MeshRenderer
-          mesh_path: cube.000
-          material: { albedo: { r: 0.55, g: 0.55, b: 0.58 }, metallic: 0.0, roughness: 0.85, ao: 1.0 }
+          mesh_path: cube_corner
+          material: materials/stone
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
           center: { x: 0.5, y: 0.5, z: 0.5 }
@@ -346,8 +346,8 @@ scene:
           position: { x: 9.0, y: 6.0, z: 0.8 }
           scale: { x: 0.8, y: 0.8, z: 0.8 }
         - type: MeshRenderer
-          mesh_path: cube.000
-          material: { albedo: { r: 0.55, g: 0.55, b: 0.58 }, metallic: 0.0, roughness: 0.85, ao: 1.0 }
+          mesh_path: cube_corner
+          material: materials/stone
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
           center: { x: 0.5, y: 0.5, z: 0.5 }
@@ -365,8 +365,8 @@ scene:
           position: { x: 9.0, y: 6.0, z: 1.6 }
           scale: { x: 0.8, y: 0.8, z: 0.8 }
         - type: MeshRenderer
-          mesh_path: cube.000
-          material: { albedo: { r: 0.55, g: 0.55, b: 0.58 }, metallic: 0.0, roughness: 0.85, ao: 1.0 }
+          mesh_path: cube_corner
+          material: materials/stone
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
           center: { x: 0.5, y: 0.5, z: 0.5 }
@@ -390,8 +390,8 @@ scene:
           position: { x: -8.1, y: -3.1, z: 0.0 }
           scale: { x: 2.2, y: 2.2, z: 0.3 }
         - type: MeshRenderer
-          mesh_path: cube.000
-          material: { albedo: { r: 0.6, g: 0.6, b: 0.65 }, metallic: 0.7, roughness: 0.35, ao: 1.0 }
+          mesh_path: cube_corner
+          material: materials/steel
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
           center: { x: 0.5, y: 0.5, z: 0.5 }
@@ -414,8 +414,8 @@ scene:
           position: { x: -7.3, y: -2.3, z: 0.3 }
           scale: { x: 0.6, y: 0.6, z: 0.6 }
         - type: MeshRenderer
-          mesh_path: cube.000
-          material: { albedo: { r: 0.25, g: 0.05, b: 0.05 }, metallic: 0.0, roughness: 0.95, ao: 1.0 }
+          mesh_path: cube_corner
+          material: materials/rubber
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
           center: { x: 0.5, y: 0.5, z: 0.5 }
@@ -428,7 +428,7 @@ scene:
 
     # ============================================================================
     # SPINNER -- kinematic paddle spinning about its own Transform origin (a corner
-    # of the authored box, not its visual centre -- cube.000's local vertices span
+    # of the authored box, not its visual centre -- cube_corner's local vertices span
     # [0,1]^3, so this reads as a gate/turnstile hinged at one edge rather than
     # spinning in place, which is a fine, clear "spinner" demo either way), knocking
     # the two loose metal cubes placed within its sweep radius.
@@ -440,8 +440,8 @@ scene:
           position: { x: 7.0, y: -4.0, z: 0.3 }
           scale: { x: 3.5, y: 0.3, z: 0.5 }
         - type: MeshRenderer
-          mesh_path: cube.000
-          material: { albedo: { r: 0.6, g: 0.6, b: 0.65 }, metallic: 0.7, roughness: 0.35, ao: 1.0 }
+          mesh_path: cube_corner
+          material: materials/steel
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
           center: { x: 0.5, y: 0.5, z: 0.5 }
@@ -463,8 +463,8 @@ scene:
           position: { x: 6.75, y: -7.25, z: 0.3 }
           scale: { x: 0.5, y: 0.5, z: 0.5 }
         - type: MeshRenderer
-          mesh_path: cube.000
-          material: { albedo: { r: 0.6, g: 0.6, b: 0.65 }, metallic: 0.7, roughness: 0.35, ao: 1.0 }
+          mesh_path: cube_corner
+          material: materials/steel
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
           center: { x: 0.5, y: 0.5, z: 0.5 }
@@ -482,8 +482,8 @@ scene:
           position: { x: 9.75, y: -4.25, z: 0.3 }
           scale: { x: 0.5, y: 0.5, z: 0.5 }
         - type: MeshRenderer
-          mesh_path: cube.000
-          material: { albedo: { r: 0.6, g: 0.6, b: 0.65 }, metallic: 0.7, roughness: 0.35, ao: 1.0 }
+          mesh_path: cube_corner
+          material: materials/steel
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
           center: { x: 0.5, y: 0.5, z: 0.5 }
@@ -501,7 +501,7 @@ scene:
     # the push is what demonstrates the joint actually working. use_limits stops it
     # at a bit past perpendicular, settling there rather than swinging forever.
     #
-    # Both door_frame and door use cube.000's [0,1]^3 local span (the same "hinged at
+    # Both door_frame and door use cube_corner's [0,1]^3 local span (the same "hinged at
     # one edge, not the visual centre" trick spinner above uses) so the door's own
     # Transform.position sits exactly at the hinge line and needs no anchor offset --
     # the collider/mesh simply extends away from there. door_frame's Transform sits
@@ -522,8 +522,8 @@ scene:
           position: { x: 3.9, y: -8.1, z: 0.08 }
           scale: { x: 0.2, y: 0.2, z: 2.4 }
         - type: MeshRenderer
-          mesh_path: cube.000
-          material: { albedo: { r: 0.3, g: 0.32, b: 0.34 }, metallic: 0.0, roughness: 0.85, ao: 1.0 }
+          mesh_path: cube_corner
+          material: materials/concrete
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
           center: { x: 0.5, y: 0.5, z: 0.5 }
@@ -537,8 +537,8 @@ scene:
           position: { x: 4.0, y: -8.0, z: 0.08 }
           scale: { x: 1.6, y: 0.12, z: 2.2 }
         - type: MeshRenderer
-          mesh_path: cube.000
-          material: { albedo: { r: 0.55, g: 0.4, b: 0.2 }, metallic: 0.0, roughness: 0.6, ao: 1.0 }
+          mesh_path: cube_corner
+          material: materials/wood
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
           center: { x: 0.5, y: 0.5, z: 0.5 }
@@ -567,10 +567,10 @@ scene:
           rotation: { x: 0.0, y: 0.0, z: 0.0 }
           scale: { x: 3.0, y: 3.0, z: 1.0 }
         - type: MeshRenderer
-          mesh_path: plane.000
+          mesh_path: plane
           material: { albedo: { r: 0.3, g: 0.45, b: 0.25 }, metallic: 0.0, roughness: 0.9, ao: 1.0 }
         - type: MeshCollider
-          # A separate file from the MeshRenderer's plane.000 above -- deliberately, not
+          # A separate file from the MeshRenderer's plane above -- deliberately, not
           # duplicated data: AssetManager's slot cache is keyed by resolved file path only,
           # so a gfx::Mesh load and a physx::TriangleMesh load of the exact same path collide
           # ("already loaded as a different asset type"). Same vertex/face data, second file.
@@ -586,8 +586,8 @@ scene:
           position: { x: -0.35, y: 13.65, z: 2.65 }
           scale: { x: 0.7, y: 0.7, z: 0.7 }
         - type: MeshRenderer
-          mesh_path: cube.000
-          material: { albedo: { r: 0.6, g: 0.6, b: 0.65 }, metallic: 0.7, roughness: 0.35, ao: 1.0 }
+          mesh_path: cube_corner
+          material: materials/steel
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
           center: { x: 0.5, y: 0.5, z: 0.5 }

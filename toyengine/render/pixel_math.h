@@ -636,8 +636,7 @@ inline float view_depth_half_extent(const glm::mat4& view, const glm::mat4& mode
  * @brief World-space centre of an object-space AABB under a model matrix.
  *
  * The companion to view_depth_half_extent(): a mesh's transform ORIGIN is not generally its
- * centre (assets/scenes/pixel_demo/meshes/cube.000.yaml spans [0,1]^3, so its origin is a
- * corner), and focusing on the origin biases the focal plane off the subject by half its
+ * centre (assets/meshes/cube_corner.yaml spans [0,1]^3, so its origin is a corner), and focusing on the origin biases the focal plane off the subject by half its
  * depth.
  *
  * @param model     Object's world matrix.

@@ -1,4 +1,4 @@
-# LOD setup for sphere.000 -- a sidecar so re-exporting sphere.000.yaml from Blender never
+# LOD setup for sphere -- a sidecar so re-exporting sphere.yaml from Blender never
 # wipes it (Mesh::build_cpu also accepts the same keys inline in the mesh file itself).
 #
 # Each level is used while the sphere's projected height is below `screen_size` (a fraction

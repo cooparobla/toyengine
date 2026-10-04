@@ -4,20 +4,20 @@
 Outputs (all under assets/):
   * objects/robot_arm.yaml, objects/tentacle.yaml, objects/bouncing_ball.yaml -- the rigs as
     OBJECT ASSETS (the editor's Objects tab): open one to animate it, or place it in any scene.
-  * animations/<Rig>/*.yaml -- their clips; meshes/tentacle.yaml, meshes/ball.yaml.
+  * animations/<rig>/*.yaml -- their clips; meshes/tentacle.yaml, meshes/ball.yaml.
   * scenes/animation_test/scene.yaml -- the three rigs inline (editable in the scene itself),
     sharing those clips and meshes (paths resolve next to the scene, then from assets/).
 
 
-  * RobotArm: a rig of plain objects (Base > Shoulder > UpperArm, Elbow > Forearm, Wrist > Hand,
+  * robot_arm: a rig of plain objects (base > shoulder > upper_arm, elbow > forearm, wrist > hand,
     fingers). Two clips: `wave` (auto-played) and `idle`. Rotations are `rotation_quat` keys with
     eased interpolation -- exactly what the toyeditor's Timeline records.
-  * Tentacle: a SKINNED rig. A tube mesh whose vertex groups (Seg0..Seg3, as Weight Paint writes
+  * tentacle: a SKINNED rig. A tube mesh whose vertex groups (seg_0..seg_3, as Weight Paint writes
     them) blend smoothly between four chained bones; no `bones:` list and no inverse bind
     matrices -- the SkinnedMeshRenderer binds the groups to the rig's objects by name against the
     rest pose. It also carries a vertex-colour gradient (data, as Vertex Paint writes it). Clip
     `sway`.
-  * Ball: an object animating ITSELF (track object ""): a bounce with squash and stretch, using
+  * ball: an object animating ITSELF (track object ""): a bounce with squash and stretch, using
     step and ease keys. Clip `bounce`.
 
 Run:  python3 tools/gen_animation_test_scene.py   then   ./build/toyengine animation_test
@@ -71,7 +71,7 @@ def tentacle_mesh(path, height=3.0, radius=0.22, sides=10, rings=24, bones=4):
             normals.append([math.cos(a), math.sin(a), 0.0])
             uvs.append([s / sides, t])
             colors.append(col)
-            weights.append({f"Seg{b}": round(w[b], 4) for b in range(bones) if w[b] > 1e-4})
+            weights.append({f"seg_{b}": round(w[b], 4) for b in range(bones) if w[b] > 1e-4})
     row = sides + 1
     for r in range(rings):
         for s in range(sides):
@@ -149,26 +149,26 @@ def rot_keys(axis, frames, ease="ease_in_out"):
 
 
 def write_clips():
-    arm = os.path.join(ASSETS, "animations", "RobotArm")
+    arm = os.path.join(ASSETS, "animations", "robot_arm")
     clip(os.path.join(arm, "wave.yaml"), "wave", "loop", 2.0, [
-        ("Base/Shoulder", "rotation_quat", rot_keys((0, 0, 1), [(0, -50), (1.0, 50), (2.0, -50)])),
-        ("Base/Shoulder/UpperArm/Elbow", "rotation_quat", rot_keys((1, 0, 0), [(0, 10), (0.5, 75), (1.0, 10), (1.5, 75), (2.0, 10)])),
-        ("Base/Shoulder/UpperArm/Elbow/Forearm/Wrist", "rotation_quat",
+        ("base/shoulder", "rotation_quat", rot_keys((0, 0, 1), [(0, -50), (1.0, 50), (2.0, -50)])),
+        ("base/shoulder/upper_arm/elbow", "rotation_quat", rot_keys((1, 0, 0), [(0, 10), (0.5, 75), (1.0, 10), (1.5, 75), (2.0, 10)])),
+        ("base/shoulder/upper_arm/elbow/forearm/wrist", "rotation_quat",
          rot_keys((0, 1, 0), [(0, 0), (0.25, 35), (0.5, -35), (0.75, 35), (1.0, 0), (2.0, 0)])),
-        ("Base/Shoulder/UpperArm/Elbow/Forearm/Wrist/Hand/FingerL", "position",
+        ("base/shoulder/upper_arm/elbow/forearm/wrist/hand/finger_l", "position",
          [(0, [-0.12, 0, 0.18], "ease_in_out"), (0.5, [-0.04, 0, 0.18], "ease_in_out"), (1.0, [-0.12, 0, 0.18]), (2.0, [-0.12, 0, 0.18])]),
-        ("Base/Shoulder/UpperArm/Elbow/Forearm/Wrist/Hand/FingerR", "position",
+        ("base/shoulder/upper_arm/elbow/forearm/wrist/hand/finger_r", "position",
          [(0, [0.12, 0, 0.18], "ease_in_out"), (0.5, [0.04, 0, 0.18], "ease_in_out"), (1.0, [0.12, 0, 0.18]), (2.0, [0.12, 0, 0.18])]),
     ])
     clip(os.path.join(arm, "idle.yaml"), "idle", "loop", 3.0, [
-        ("Base/Shoulder", "rotation_quat", rot_keys((0, 0, 1), [(0, -8), (1.5, 8), (3.0, -8)])),
-        ("Base/Shoulder/UpperArm/Elbow", "rotation_quat", rot_keys((1, 0, 0), [(0, 20), (1.5, 28), (3.0, 20)])),
+        ("base/shoulder", "rotation_quat", rot_keys((0, 0, 1), [(0, -8), (1.5, 8), (3.0, -8)])),
+        ("base/shoulder/upper_arm/elbow", "rotation_quat", rot_keys((1, 0, 0), [(0, 20), (1.5, 28), (3.0, 20)])),
     ])
-    tent = os.path.join(ASSETS, "animations", "Tentacle")
+    tent = os.path.join(ASSETS, "animations", "tentacle")
     tracks = []
     path = ""
     for b in range(4):
-        path = f"Seg{b}" if b == 0 else f"{path}/Seg{b}"
+        path = f"seg_{b}" if b == 0 else f"{path}/seg_{b}"
         amp = 14 + 6 * b
         frames = [(0.0, -amp), (1.0, amp), (2.0, -amp)]
         keys = rot_keys((0, 1, 0), frames)   # side to side, across the camera's view
@@ -176,12 +176,12 @@ def write_clips():
         keys[1] = (1.0 + 0.15 * b, keys[1][1], "ease_in_out")
         tracks.append((path, "rotation_quat", keys))
     clip(os.path.join(tent, "sway.yaml"), "sway", "loop", 2.0, tracks)
-    ball = os.path.join(ASSETS, "animations", "BouncingBall")
+    ball = os.path.join(ASSETS, "animations", "bouncing_ball")
     # The ball (a child) bounces relative to its rig, so a placed copy bounces where it stands.
     clip(os.path.join(ball, "bounce.yaml"), "bounce", "loop", 1.0, [
-        ("Ball", "position", [(0.0, [0, 0, 2.2], "ease_in"), (0.45, [0, 0, 0.3]), (0.55, [0, 0, 0.3], "ease_out"),
+        ("ball", "position", [(0.0, [0, 0, 2.2], "ease_in"), (0.45, [0, 0, 0.3]), (0.55, [0, 0, 0.3], "ease_out"),
                               (1.0, [0, 0, 2.2])]),
-        ("Ball", "scale", [(0.0, [0.6, 0.6, 0.6], "step"), (0.4, [0.6, 0.6, 0.6], "ease_in"), (0.5, [0.8, 0.8, 0.36], "ease_out"),
+        ("ball", "scale", [(0.0, [0.6, 0.6, 0.6], "step"), (0.4, [0.6, 0.6, 0.6], "ease_in"), (0.5, [0.8, 0.8, 0.36], "ease_out"),
                            (0.62, [0.6, 0.6, 0.6]), (1.0, [0.6, 0.6, 0.6])]),
     ])
 
@@ -220,24 +220,24 @@ def rigs(at):
     """The three rigs as list items; `at` maps rig name -> root position."""
     steel, orange, dark = (0.55, 0.58, 0.62), (0.95, 0.5, 0.15), (0.2, 0.22, 0.25)
     # Shapes are child cubes, so scaling them never scales the joints below.
-    fingers = indent(cube("FingerL", (-0.12, 0, 0.18), (0.06, 0.12, 0.28), dark), 4) + "\n" + \
-              indent(cube("FingerR", (0.12, 0, 0.18), (0.06, 0.12, 0.28), dark), 4)
-    hand = empty("Hand", (0, 0, 0.1), indent(cube("Palm", (0, 0, 0), (0.34, 0.16, 0.12), orange), 4) + "\n" + fingers)
-    wrist = empty("Wrist", (0, 0, 0.9), indent(hand, 4))
-    forearm = empty("Forearm", (0, 0, 0), indent(cube("ForearmShape", (0, 0, 0.45), (0.2, 0.2, 0.9), steel), 4) + "\n" + indent(wrist, 4))
-    elbow = empty("Elbow", (0, 0, 1.1), indent(cube("ElbowJoint", (0, 0, 0), (0.3, 0.3, 0.3), orange), 4) + "\n" + indent(forearm, 4))
-    upper = empty("UpperArm", (0, 0, 0), indent(cube("UpperArmShape", (0, 0, 0.55), (0.26, 0.26, 1.1), steel), 4) + "\n" + indent(elbow, 4))
-    shoulder = empty("Shoulder", (0, 0, 0.35), indent(cube("ShoulderJoint", (0, 0, 0), (0.36, 0.36, 0.36), orange), 4) + "\n" + indent(upper, 4))
-    base = empty("Base", (0, 0, 0), indent(cube("BasePlate", (0, 0, 0.15), (0.9, 0.9, 0.3), dark), 4) + "\n" + indent(shoulder, 4))
-    robot = f"""- name: RobotArm
+    fingers = indent(cube("finger_l", (-0.12, 0, 0.18), (0.06, 0.12, 0.28), dark), 4) + "\n" + \
+              indent(cube("finger_r", (0.12, 0, 0.18), (0.06, 0.12, 0.28), dark), 4)
+    hand = empty("hand", (0, 0, 0.1), indent(cube("palm", (0, 0, 0), (0.34, 0.16, 0.12), orange), 4) + "\n" + fingers)
+    wrist = empty("wrist", (0, 0, 0.9), indent(hand, 4))
+    forearm = empty("forearm", (0, 0, 0), indent(cube("forearm_shape", (0, 0, 0.45), (0.2, 0.2, 0.9), steel), 4) + "\n" + indent(wrist, 4))
+    elbow = empty("elbow", (0, 0, 1.1), indent(cube("elbow_joint", (0, 0, 0), (0.3, 0.3, 0.3), orange), 4) + "\n" + indent(forearm, 4))
+    upper = empty("upper_arm", (0, 0, 0), indent(cube("upper_arm_shape", (0, 0, 0.55), (0.26, 0.26, 1.1), steel), 4) + "\n" + indent(elbow, 4))
+    shoulder = empty("shoulder", (0, 0, 0.35), indent(cube("shoulder_joint", (0, 0, 0), (0.36, 0.36, 0.36), orange), 4) + "\n" + indent(upper, 4))
+    base = empty("base", (0, 0, 0), indent(cube("base_plate", (0, 0, 0.15), (0.9, 0.9, 0.3), dark), 4) + "\n" + indent(shoulder, 4))
+    robot = f"""- name: robot_arm
   components:
     - type: Transform
-      position: {{x: {at['RobotArm'][0]}, y: {at['RobotArm'][1]}, z: {at['RobotArm'][2]}}}
+      position: {{x: {at['robot_arm'][0]}, y: {at['robot_arm'][1]}, z: {at['robot_arm'][2]}}}
     - type: Animator
       auto_play: wave
       states:
-        - {{name: wave, clip: animations/RobotArm/wave.yaml}}
-        - {{name: idle, clip: animations/RobotArm/idle.yaml}}
+        - {{name: wave, clip: animations/robot_arm/wave.yaml}}
+        - {{name: idle, clip: animations/robot_arm/idle.yaml}}
   children:
 {indent(base, 4)}"""
 
@@ -245,23 +245,23 @@ def rigs(at):
     for b in reversed(range(4)):
         z = 0.0 if b == 0 else 0.75
         inner = indent(segs, 4) if segs else "    []"
-        segs = f"""- name: Seg{b}
+        segs = f"""- name: seg_{b}
   components:
     - type: Transform
       position: {{x: 0, y: 0, z: {z}}}
   children:
 {inner}"""
-    tentacle = f"""- name: Tentacle
+    tentacle = f"""- name: tentacle
   components:
     - type: Transform
-      position: {{x: {at['Tentacle'][0]}, y: {at['Tentacle'][1]}, z: {at['Tentacle'][2]}}}
+      position: {{x: {at['tentacle'][0]}, y: {at['tentacle'][1]}, z: {at['tentacle'][2]}}}
     - type: Animator
       auto_play: sway
       states:
-        - {{name: sway, clip: animations/Tentacle/sway.yaml}}
+        - {{name: sway, clip: animations/tentacle/sway.yaml}}
   children:
 {indent(segs, 4)}
-    - name: TentacleSkin
+    - name: tentacle_skin
       components:
         - type: Transform
         - type: MeshRenderer
@@ -270,16 +270,16 @@ def rigs(at):
           mesh_path: tentacle
       children: []"""
 
-    ball = f"""- name: BouncingBall
+    ball = f"""- name: bouncing_ball
   components:
     - type: Transform
-      position: {{x: {at['BouncingBall'][0]}, y: {at['BouncingBall'][1]}, z: {at['BouncingBall'][2]}}}
+      position: {{x: {at['bouncing_ball'][0]}, y: {at['bouncing_ball'][1]}, z: {at['bouncing_ball'][2]}}}
     - type: Animator
       auto_play: bounce
       states:
-        - {{name: bounce, clip: animations/BouncingBall/bounce.yaml}}
+        - {{name: bounce, clip: animations/bouncing_ball/bounce.yaml}}
   children:
-    - name: Ball
+    - name: ball
       components:
         - type: Transform
           position: {{x: 0, y: 0, z: 2.2}}
@@ -288,14 +288,14 @@ def rigs(at):
           mesh_path: ball
           material: {{albedo: {{r: 0.85, g: 0.15, b: 0.2}}, metallic: 0.0, roughness: 0.35}}
       children: []"""
-    return {"RobotArm": robot, "Tentacle": tentacle, "BouncingBall": ball}
+    return {"robot_arm": robot, "tentacle": tentacle, "bouncing_ball": ball}
 
 
-OBJECT_FILES = {"RobotArm": "robot_arm", "Tentacle": "tentacle", "BouncingBall": "bouncing_ball"}
+OBJECT_FILES = {"robot_arm": "robot_arm", "tentacle": "tentacle", "bouncing_ball": "bouncing_ball"}
 OBJECT_NOTES = {
-    "RobotArm": "an object-hierarchy rig (joints are empties, shapes are child cubes); clips wave + idle",
-    "Tentacle": "a skinned rig: vertex groups Seg0..Seg3 bind the tube to its chain of bones; clip sway",
-    "BouncingBall": "a squash-and-stretch bounce of the child Ball, relative to where the rig is placed; clip bounce",
+    "robot_arm": "an object-hierarchy rig (joints are empties, shapes are child cubes); clips wave + idle",
+    "tentacle": "a skinned rig: vertex groups seg_0..seg_3 bind the tube to its chain of bones; clip sway",
+    "bouncing_ball": "a squash-and-stretch bounce of the child ball, relative to where the rig is placed; clip bounce",
 }
 
 
@@ -314,25 +314,25 @@ def write_objects():
 
 
 def scene():
-    r = rigs({"RobotArm": (-2.2, 0.0, 0.0), "Tentacle": (0.8, 0.6, 0.0), "BouncingBall": (3.2, -1.2, 0.0)})
-    robot, tentacle, ball = r["RobotArm"], r["Tentacle"], r["BouncingBall"]
+    r = rigs({"robot_arm": (-2.2, 0.0, 0.0), "tentacle": (0.8, 0.6, 0.0), "bouncing_ball": (3.2, -1.2, 0.0)})
+    robot, tentacle, ball = r["robot_arm"], r["tentacle"], r["bouncing_ball"]
 
 
     text = f"""# animation_test -- rigs as object hierarchies, animated by clip files (toyengine + toyeditor).
 # GENERATED by tools/gen_animation_test_scene.py; edit that, not this file.
 #
-#   * RobotArm: an object-hierarchy rig, clips `wave` (auto-played) and `idle`.
-#   * Tentacle: a skinned rig -- vertex groups bind the tube mesh to its chain of bones.
-#   * BouncingBall: a squash-and-stretch bounce.
+#   * robot_arm: an object-hierarchy rig, clips `wave` (auto-played) and `idle`.
+#   * tentacle: a skinned rig -- vertex groups bind the tube mesh to its chain of bones.
+#   * bouncing_ball: a squash-and-stretch bounce.
 # Clips and meshes are shared with the object assets (assets/objects/): assets/animations/,
 # assets/meshes/ -- paths resolve next to this scene first, then from assets/.
 #
 # In the toyeditor, select any rig object and open the Timeline tab (bottom panel).
 format: blender
 scene:
-  scene_name: AnimationTest
+  scene_name: animation_test
   root_objects:
-    - name: Ground
+    - name: ground
       components:
         - type: Transform
           position: {{x: 0, y: 0, z: -0.05}}
@@ -346,7 +346,7 @@ scene:
 {indent(robot, 4)}
 {indent(tentacle, 4)}
 {indent(ball, 4)}
-    - name: Camera
+    - name: camera
       components:
         - type: Transform
           position: {{x: 0.5, y: -9.0, z: 3.4}}
@@ -368,7 +368,7 @@ scene:
           max_distance: 40.0
           capture_cursor: true
       children: []
-    - name: Sun
+    - name: sun
       components:
         - type: Transform
           position: {{x: 0, y: 0, z: 10}}
@@ -379,7 +379,7 @@ scene:
           cast_shadows: true
           shadow_intensity: 1.0
       children: []
-    - name: Sky
+    - name: sky
       components:
         - type: Transform
         - type: EnvironmentLight

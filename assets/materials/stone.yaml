@@ -1,0 +1,5 @@
+# Pale weathered stone.
+albedo: { r: 0.55, g: 0.55, b: 0.58 }
+metallic: 0.0
+roughness: 0.85
+ao: 1.0

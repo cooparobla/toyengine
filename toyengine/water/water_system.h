@@ -146,6 +146,7 @@ public:
         // Advanced per substep, in lockstep with physics, while simulating; otherwise (edit mode,
         // or no physics) by the frame clock so CPU queries still see moving waves.
         if (!physics_ || !simulating) time_ += ctx.delta_time;
+        simulating_ = simulating;
         resolve_focus_(scene);
 
         // Depth and obstacle raycasts need PhysicsSystem's colliders, which it only gathers once
@@ -260,6 +261,18 @@ public:
 
     /** @brief Water clock (seconds) -- the time every wave on the CPU is evaluated at. */
     float time() const { return time_; }
+
+    /**
+     * @brief The water clock as the renderer should draw waves at -- the shader's wave phase
+     *        (Engine hands it over as WaterFrameState::time). While physics runs, rendered bodies
+     *        are interpolated a fraction of a substep behind the last solve, so the drawn surface
+     *        is pulled back by the same amount; otherwise it is time() itself.
+     */
+    float render_time() const {
+        if (!physics_ || !simulating_) return time_;
+        const auto& world = physics_->world();
+        return time_ - world.config().fixed_dt * (1.0f - world.interpolation_alpha());
+    }
 
     /**
      * @brief Samples the highest water surface above world XY `p` across every water body.
@@ -1219,6 +1232,7 @@ private:
     std::vector<Ripple> ripples_;
     std::unordered_map<const coopa::physx::components::RigidbodyComponent*, RippleEmitter> emitters_;
     float       time_ = 0.0f;
+    bool        simulating_ = false;   ///< Last execute()'s scene.is_simulating(), for render_time().
     std::size_t active_count_ = 0;
 
     WaterSettings settings_;

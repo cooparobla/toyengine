@@ -19,7 +19,7 @@
 # World: Z up, metres. The lake surface is at z = 0.
 format: blender
 scene:
-  scene_name: WaterTest
+  scene_name: water_test
   root_objects:
     # ============================================================================
     # TERRAIN -- render mesh + a static, non-convex MeshCollider (a separate file: AssetManager
@@ -200,7 +200,7 @@ scene:
           rotation: { x: 0.0, y: 0.0, z: 0.0 }
           scale: { x: 0.75, y: 0.75, z: 0.6 }
         - type: MeshRenderer
-          mesh_path: ball
+          mesh_path: sphere_low
           material: { albedo: { r: 0.38, g: 0.37, b: 0.35 }, metallic: 0.0, roughness: 0.9, ao: 1.0 }
         - type: SphereCollider
           radius: 1.0
@@ -295,7 +295,7 @@ scene:
           position: { x: -6.0, y: 0.0, z: 3.0 }
           scale: { x: 0.5, y: 0.5, z: 0.5 }
         - type: MeshRenderer
-          mesh_path: ball
+          mesh_path: sphere_low
           material: { albedo: { r: 0.85, g: 0.2, b: 0.15 }, metallic: 0.0, roughness: 0.5, ao: 1.0 }
         - type: SphereCollider
           radius: 1.0

@@ -10,7 +10,7 @@
  * mesher (terrain_chunk.h) merges every exposed side in a chunk into one GPU mesh.
  *
  * The key geometric convention lives here: every side mesh is authored ONCE, as the **+Z face
- * of a unit cube spanning [0,1]^3** (matching assets/scenes/pixel_demo/meshes/cube.000.yaml's
+ * of a unit cube spanning [0,1]^3** (matching assets/meshes/cube_corner.yaml's
  * own [0,1]^3 convention), and every other face is that same mesh rotated about the cube's
  * centre by face_transform(). That is what lets a smoother tile -- a chamfered rim, a sloped
  * cap, a curved patch -- be dropped in as a data change: the mesher never learns what shape a

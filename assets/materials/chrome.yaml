@@ -1,0 +1,5 @@
+# Polished chrome: a near-perfect mirror (shows SSR / reflection probes clearly).
+albedo: { r: 0.95, g: 0.95, b: 0.95 }
+metallic: 1.0
+roughness: 0.05
+ao: 1.0

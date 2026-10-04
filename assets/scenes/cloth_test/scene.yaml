@@ -1,11 +1,11 @@
 format: blender
 scene:
-  scene_name: ClothTest
+  scene_name: cloth_test
   root_objects:
     # ============================================================================
     # GROUND
     # ============================================================================
-    # plane.000 is a flat 2x2 quad at local z=0 with no thickness, so BoxCollider gives it a
+    # plane is a flat 2x2 quad at local z=0 with no thickness, so BoxCollider gives it a
     # thin slab (size.z = 0.2) offset half that below the visible surface (center.z = -0.1) --
     # the render surface stays exactly at world z=0. Nothing in this scene is dynamic, but the
     # ground is a real collider so the cloth catches on it if a corner ever reaches that far.
@@ -17,7 +17,7 @@ scene:
           rotation: { x: 0.0, y: 0.0, z: 0.0 }
           scale: { x: 12.0, y: 12.0, z: 1.0 }
         - type: MeshRenderer
-          mesh_path: plane.000
+          mesh_path: plane
           material:
             albedo: { r: 0.30, g: 0.32, b: 0.35 }
             metallic: 0.0
@@ -37,7 +37,7 @@ scene:
     # That also makes it a perfectly stable anchor for the cloth -- a freely-rolling dynamic ball
     # would spin its anchor points and wind the sheet into a spiral within seconds of travel.
     #
-    # sphere.000 is a unit sphere centred on its own local origin, so radius 1.0 on the collider
+    # sphere is a unit sphere centred on its own local origin, so radius 1.0 on the collider
     # with a uniform Transform scale of 1.0 makes the rendered mesh and the collider match exactly.
     - name: ball
       active: true
@@ -47,7 +47,7 @@ scene:
           rotation: { x: 0.0, y: 0.0, z: 0.0 }
           scale: { x: 1.0, y: 1.0, z: 1.0 }
         - type: MeshRenderer
-          mesh_path: sphere.000
+          mesh_path: sphere
           material:
             albedo: { r: 0.85, g: 0.55, b: 0.15 }
             metallic: 0.1

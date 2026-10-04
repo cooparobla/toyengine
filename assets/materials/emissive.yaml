@@ -1,0 +1,8 @@
+# Warm self-lit glow. Near-black albedo so what shows is the emissive term alone; emissive does
+# not light other surfaces (it reaches them only through SSR/SSGI and bloom).
+albedo: { r: 0.05, g: 0.03, b: 0.02 }
+metallic: 0.0
+roughness: 0.9
+ao: 1.0
+emissive: { r: 1.0, g: 0.45, b: 0.12 }
+emissive_strength: 1.6

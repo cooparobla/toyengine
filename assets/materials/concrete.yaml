@@ -1,0 +1,5 @@
+# Cool grey cast concrete -- walls, floors, blockout.
+albedo: { r: 0.3, g: 0.32, b: 0.34 }
+metallic: 0.0
+roughness: 0.85
+ao: 1.0

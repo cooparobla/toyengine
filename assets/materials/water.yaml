@@ -1,0 +1,11 @@
+# Open water for a WaterBody's MeshRenderer: deep blue-green, translucent, refractive. The water
+# system supplies the waves and foam; this is only the surface's look.
+albedo: { r: 0.03, g: 0.16, b: 0.22 }
+metallic: 0.0
+roughness: 0.05
+ao: 1.0
+alpha: 0.4
+alpha_mode: BLEND
+refraction: true
+ior: 1.33
+refraction_tint: { r: 0.45, g: 0.78, b: 0.82 }

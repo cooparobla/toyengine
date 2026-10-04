@@ -85,7 +85,7 @@ assets/meshes/tile_side_bevel.yaml    assets/textures/terrain_atlas_mr.png
 ```
 
 A tile side and a surface atlas are primitives of this system, not demo content the way
-`pixel_demo`'s `cube.000.yaml` is — every terrain scene wants the same ones, and keeping them
+`pixel_demo`'s `pillar.yaml` is — every terrain scene wants the same ones, and keeping them
 inside one scene would mean the second terrain scene copies them.
 
 Nothing selects between shared and local. `coopa::asset::AssetSource::resolve()` tries the

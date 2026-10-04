@@ -40,6 +40,11 @@ struct WaterFrameState {
     };
     std::vector<Ripple> ripples;  ///< At most kMaxWaterRipples are drawn (newest kept).
 
+    /// Water clock (s) the water shader animates waves at -- toy::water::WaterSystem's own, so
+    /// the drawn surface and buoyancy's CPU queries share one wave phase. Negative (no water
+    /// system this frame) falls back to the renderer's clock.
+    float time = -1.0f;
+
     /// Shader detail (toy::water::WaterSettings): flow-ripple layers (1-2), the distance (m) past
     /// which ripples/foam noise give way to a rougher surface, and the ring draw range (m).
     int   ripple_layers = 2;

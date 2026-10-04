@@ -1,0 +1,5 @@
+# Glassy blue-white ice (opaque; see glass.yaml for a transparent surface).
+albedo: { r: 0.75, g: 0.9, b: 0.95 }
+metallic: 0.0
+roughness: 0.08
+ao: 1.0

@@ -1,4 +1,5 @@
-"""Generates the meshes for the water_test scene (assets/scenes/water_test/meshes/).
+"""Generates the meshes for the water_test scene (assets/scenes/water_test/meshes/), the
+underwater_test pool, and the shared water props (assets/meshes/sphere_low.yaml, barrel.yaml).
 
 Standalone generator, not part of the C++ build -- run it manually
 (`python3 tools/gen_water_test_meshes.py`) whenever the scene's terrain or river needs
@@ -256,10 +257,11 @@ def write_lathe(path, profile, segments=20):
     write_mesh(path, verts, faces, normals, uvs)
 
 
-def build_props(out_dir=OUT_DIR):
-    # Unit sphere (radius 1) for the ball and the river boulder.
+def build_props(out_dir=None):
+    out_dir = out_dir or PROPS_DIR
+    # Low-poly unit sphere (radius 1) for the ball and the river boulder.
     sphere = [(math.sin(math.pi * k / 12), -math.cos(math.pi * k / 12)) for k in range(13)]
-    write_lathe(out_dir / "ball.yaml", sphere, 20)
+    write_lathe(out_dir / "sphere_low.yaml", sphere, 20)
     # Barrel-ish capsule along Z: radius 0.35, total height 1.3 -- matches a CapsuleCollider
     # with radius 0.35, height 1.3, direction 2.
     r, hh = 0.35, 0.65 - 0.35
@@ -269,6 +271,7 @@ def build_props(out_dir=OUT_DIR):
 
 
 POOL_DIR = pathlib.Path(__file__).parent.parent / "assets/scenes/underwater_test/meshes"
+PROPS_DIR = pathlib.Path(__file__).parent.parent / "assets/meshes"   # shared by both scenes
 POOL_EXTENT = 16.0
 POOL_CELLS = 64
 
@@ -312,7 +315,6 @@ def main():
     build_river()
     build_props()
     build_pool()
-    build_props(POOL_DIR)   # the underwater scene's own copies of the props
 
 
 if __name__ == "__main__":

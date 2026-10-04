@@ -1,0 +1,4 @@
+# Neutral light-grey dielectric -- what a new MeshRenderer gets when nothing else is chosen.
+albedo: { r: 0.8, g: 0.8, b: 0.8 }
+metallic: 0.0
+roughness: 0.5

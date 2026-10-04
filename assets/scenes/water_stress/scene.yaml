@@ -8,7 +8,7 @@
 # out of range), how the ocean's render tiles cull and LOD, and the stage-2 bake budget.
 format: blender
 scene:
-  scene_name: WaterStress
+  scene_name: water_stress
   root_objects:
     - name: ocean
       active: true
@@ -17,16 +17,7 @@ scene:
           position: { x: 0.0, y: 0.0, z: 0.0 }
         - type: MeshRenderer
           affects_reflection_probes: false
-          material:
-            albedo: { r: 0.03, g: 0.16, b: 0.22 }
-            metallic: 0.0
-            roughness: 0.05
-            ao: 1.0
-            alpha: 0.4
-            alpha_mode: BLEND
-            refraction: true
-            ior: 1.33
-            refraction_tint: { r: 0.45, g: 0.78, b: 0.82 }
+          material: materials/water
         - type: WaterBody
           mode: planar
           size: { x: 1000.0, y: 1000.0 }
@@ -45,7 +36,7 @@ scene:
           scale: { x: 1000.0, y: 1000.0, z: 1.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.55, g: 0.5, b: 0.36 }, metallic: 0.0, roughness: 0.95, ao: 1.0 }
+          material: materials/sand
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
       children: []
@@ -56,16 +47,7 @@ scene:
           position: { x: 650.0, y: 0.0, z: 0.0 }
         - type: MeshRenderer
           affects_reflection_probes: false
-          material:
-            albedo: { r: 0.03, g: 0.16, b: 0.22 }
-            metallic: 0.0
-            roughness: 0.05
-            ao: 1.0
-            alpha: 0.4
-            alpha_mode: BLEND
-            refraction: true
-            ior: 1.33
-            refraction_tint: { r: 0.45, g: 0.78, b: 0.82 }
+          material: materials/water
         - type: WaterBody
           mode: planar
           size: { x: 80.0, y: 80.0 }
@@ -84,7 +66,7 @@ scene:
           scale: { x: 80.0, y: 80.0, z: 1.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.55, g: 0.5, b: 0.36 }, metallic: 0.0, roughness: 0.95, ao: 1.0 }
+          material: materials/sand
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
       children: []
@@ -95,16 +77,7 @@ scene:
           position: { x: 0.0, y: 760.0, z: 0.0 }
         - type: MeshRenderer
           affects_reflection_probes: false
-          material:
-            albedo: { r: 0.03, g: 0.16, b: 0.22 }
-            metallic: 0.0
-            roughness: 0.05
-            ao: 1.0
-            alpha: 0.4
-            alpha_mode: BLEND
-            refraction: true
-            ior: 1.33
-            refraction_tint: { r: 0.45, g: 0.78, b: 0.82 }
+          material: materials/water
         - type: WaterBody
           mode: planar
           size: { x: 80.0, y: 80.0 }
@@ -123,7 +96,7 @@ scene:
           scale: { x: 80.0, y: 80.0, z: 1.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.55, g: 0.5, b: 0.36 }, metallic: 0.0, roughness: 0.95, ao: 1.0 }
+          material: materials/sand
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
       children: []
@@ -134,16 +107,7 @@ scene:
           position: { x: -700.0, y: -500.0, z: 0.0 }
         - type: MeshRenderer
           affects_reflection_probes: false
-          material:
-            albedo: { r: 0.03, g: 0.16, b: 0.22 }
-            metallic: 0.0
-            roughness: 0.05
-            ao: 1.0
-            alpha: 0.4
-            alpha_mode: BLEND
-            refraction: true
-            ior: 1.33
-            refraction_tint: { r: 0.45, g: 0.78, b: 0.82 }
+          material: materials/water
         - type: WaterBody
           mode: planar
           size: { x: 80.0, y: 80.0 }
@@ -162,7 +126,7 @@ scene:
           scale: { x: 80.0, y: 80.0, z: 1.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.55, g: 0.5, b: 0.36 }, metallic: 0.0, roughness: 0.95, ao: 1.0 }
+          material: materials/sand
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
       children: []
@@ -174,7 +138,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 0.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -189,7 +153,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 37.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -204,7 +168,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 74.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -219,7 +183,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 111.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -234,7 +198,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 148.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -249,7 +213,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 185.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -264,7 +228,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 222.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -279,7 +243,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 259.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -294,7 +258,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 296.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -309,7 +273,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 333.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -324,7 +288,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 10.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -339,7 +303,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 47.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -354,7 +318,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 84.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -369,7 +333,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 121.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -384,7 +348,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 158.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -399,7 +363,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 195.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -414,7 +378,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 232.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -429,7 +393,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 269.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -444,7 +408,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 306.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -459,7 +423,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 343.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -474,7 +438,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 20.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -489,7 +453,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 57.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -504,7 +468,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 94.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -519,7 +483,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 131.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -534,7 +498,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 168.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -549,7 +513,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 205.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -564,7 +528,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 242.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -579,7 +543,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 279.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -594,7 +558,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 316.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -609,7 +573,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 353.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -624,7 +588,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 30.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -639,7 +603,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 67.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -654,7 +618,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 104.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -669,7 +633,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 141.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -684,7 +648,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 178.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -699,7 +663,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 215.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -714,7 +678,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 252.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -729,7 +693,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 289.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -744,7 +708,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 326.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -759,7 +723,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 3.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -774,7 +738,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 40.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -789,7 +753,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 77.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -804,7 +768,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 114.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -819,7 +783,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 151.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -834,7 +798,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 188.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -849,7 +813,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 225.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -864,7 +828,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 262.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -879,7 +843,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 299.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -894,7 +858,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 336.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -909,7 +873,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 13.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -924,7 +888,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 50.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -939,7 +903,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 87.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -954,7 +918,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 124.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -969,7 +933,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 161.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -984,7 +948,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 198.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -999,7 +963,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 235.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1014,7 +978,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 272.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1029,7 +993,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 309.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1044,7 +1008,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 346.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1059,7 +1023,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 23.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1074,7 +1038,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 60.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1089,7 +1053,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 97.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1104,7 +1068,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 134.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1119,7 +1083,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 171.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1134,7 +1098,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 208.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1149,7 +1113,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 245.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1164,7 +1128,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 282.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1179,7 +1143,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 319.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1194,7 +1158,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 356.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1209,7 +1173,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 33.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1224,7 +1188,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 70.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1239,7 +1203,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 107.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1254,7 +1218,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 144.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1269,7 +1233,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 181.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1284,7 +1248,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 218.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1299,7 +1263,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 255.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1314,7 +1278,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 292.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1329,7 +1293,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 329.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1344,7 +1308,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 6.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1359,7 +1323,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 43.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1374,7 +1338,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 80.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1389,7 +1353,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 117.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1404,7 +1368,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 154.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1419,7 +1383,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 191.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1434,7 +1398,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 228.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1449,7 +1413,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 265.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1464,7 +1428,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 302.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1479,7 +1443,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 339.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1494,7 +1458,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 16.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1509,7 +1473,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 53.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1524,7 +1488,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 90.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1539,7 +1503,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 127.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1554,7 +1518,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 164.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1569,7 +1533,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 201.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1584,7 +1548,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 238.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1599,7 +1563,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 275.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1614,7 +1578,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 312.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1629,7 +1593,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 349.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1644,7 +1608,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 26.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1659,7 +1623,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 63.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1674,7 +1638,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 100.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1689,7 +1653,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 137.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1704,7 +1668,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 174.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1719,7 +1683,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 211.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1734,7 +1698,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 248.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1749,7 +1713,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 285.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1764,7 +1728,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 322.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1779,7 +1743,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 359.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1794,7 +1758,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 36.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1809,7 +1773,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 73.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1824,7 +1788,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 110.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1839,7 +1803,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 147.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1854,7 +1818,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 184.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1869,7 +1833,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 221.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1884,7 +1848,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 258.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1899,7 +1863,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 295.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1914,7 +1878,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 332.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1929,7 +1893,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 9.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1944,7 +1908,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 46.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1959,7 +1923,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 83.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1974,7 +1938,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 120.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -1989,7 +1953,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 157.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2004,7 +1968,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 194.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2019,7 +1983,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 231.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2034,7 +1998,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 268.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2049,7 +2013,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 305.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2064,7 +2028,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 342.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2079,7 +2043,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 19.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2094,7 +2058,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 56.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2109,7 +2073,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 93.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2124,7 +2088,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 130.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2139,7 +2103,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 167.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2154,7 +2118,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 204.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2169,7 +2133,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 241.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2184,7 +2148,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 278.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2199,7 +2163,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 315.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2214,7 +2178,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 352.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2229,7 +2193,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 29.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2244,7 +2208,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 66.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2259,7 +2223,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 103.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2274,7 +2238,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 140.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2289,7 +2253,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 177.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2304,7 +2268,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 214.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2319,7 +2283,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 251.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2334,7 +2298,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 288.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2349,7 +2313,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 325.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2364,7 +2328,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 2.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2379,7 +2343,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 39.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2394,7 +2358,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 76.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2409,7 +2373,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 113.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2424,7 +2388,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 150.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2439,7 +2403,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 187.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2454,7 +2418,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 224.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2469,7 +2433,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 261.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2484,7 +2448,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 298.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2499,7 +2463,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 335.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2514,7 +2478,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 12.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2529,7 +2493,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 49.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2544,7 +2508,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 86.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2559,7 +2523,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 123.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2574,7 +2538,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 160.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2589,7 +2553,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 197.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2604,7 +2568,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 234.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2619,7 +2583,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 271.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2634,7 +2598,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 308.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2649,7 +2613,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 345.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2664,7 +2628,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 22.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2679,7 +2643,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 59.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2694,7 +2658,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 96.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2709,7 +2673,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 133.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2724,7 +2688,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 170.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2739,7 +2703,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 207.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2754,7 +2718,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 244.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2769,7 +2733,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 281.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2784,7 +2748,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 318.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2799,7 +2763,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 355.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2814,7 +2778,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 32.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2829,7 +2793,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 69.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2844,7 +2808,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 106.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2859,7 +2823,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 143.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2874,7 +2838,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 180.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2889,7 +2853,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 217.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2904,7 +2868,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 254.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2919,7 +2883,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 291.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2934,7 +2898,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 328.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2949,7 +2913,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 5.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2964,7 +2928,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 42.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2979,7 +2943,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 79.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -2994,7 +2958,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 116.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -3009,7 +2973,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 153.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -3024,7 +2988,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 190.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -3039,7 +3003,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 227.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -3054,7 +3018,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 264.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -3069,7 +3033,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 301.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -3084,7 +3048,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 338.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -3099,7 +3063,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 15.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -3114,7 +3078,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 52.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -3129,7 +3093,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 89.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -3144,7 +3108,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 126.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody
@@ -3159,7 +3123,7 @@ scene:
           rotation: { x: 10.0, y: 20.0, z: 163.0 }
         - type: MeshRenderer
           mesh_path: cube
-          material: { albedo: { r: 0.7, g: 0.5, b: 0.26 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+          material: materials/wood_crate
         - type: BoxCollider
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Rigidbody

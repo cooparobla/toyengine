@@ -20,7 +20,7 @@
 # See toyengine/world/README.md for what each key does and how the pieces fit together.
 format: blender
 scene:
-  scene_name: TerrainTest
+  scene_name: terrain_test
   root_objects:
     - name: terrain
       active: true

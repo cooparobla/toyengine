@@ -18,16 +18,7 @@ import random
 
 OUT = os.path.join(os.path.dirname(__file__), "..", "assets", "scenes", "water_stress", "scene.yaml")
 
-WATER_MATERIAL = """          material:
-            albedo: { r: 0.03, g: 0.16, b: 0.22 }
-            metallic: 0.0
-            roughness: 0.05
-            ao: 1.0
-            alpha: 0.4
-            alpha_mode: BLEND
-            refraction: true
-            ior: 1.33
-            refraction_tint: { r: 0.45, g: 0.78, b: 0.82 }"""
+WATER_MATERIAL = """          material: materials/water"""
 
 
 def water(name, x, y, size, res, amp, length):
@@ -61,7 +52,7 @@ def bed(name, x, y, size, depth):
           scale: {{ x: {size}, y: {size}, z: 1.0 }}
         - type: MeshRenderer
           mesh_path: cube
-          material: {{ albedo: {{ r: 0.55, g: 0.5, b: 0.36 }}, metallic: 0.0, roughness: 0.95, ao: 1.0 }}
+          material: materials/sand
         - type: BoxCollider
           size: {{ x: 1.0, y: 1.0, z: 1.0 }}
       children: []
@@ -77,7 +68,7 @@ def crate(i, x, y, mass):
           rotation: {{ x: 10.0, y: 20.0, z: {(i * 37) % 360}.0 }}
         - type: MeshRenderer
           mesh_path: cube
-          material: {{ albedo: {{ r: 0.7, g: 0.5, b: 0.26 }}, metallic: 0.0, roughness: 0.75, ao: 1.0 }}
+          material: materials/wood_crate
         - type: BoxCollider
           size: {{ x: 1.0, y: 1.0, z: 1.0 }}
         - type: Rigidbody
@@ -100,7 +91,7 @@ def main():
 # out of range), how the ocean's render tiles cull and LOD, and the stage-2 bake budget.
 format: blender
 scene:
-  scene_name: WaterStress
+  scene_name: water_stress
   root_objects:
 """]
     parts.append(water("ocean", 0.0, 0.0, 1000.0, 512, 0.35, 14.0))

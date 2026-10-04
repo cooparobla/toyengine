@@ -1197,6 +1197,45 @@ void test_schema_int_enum_labels() {
     expect(get_string(block, "fog_mode") != "Linear", "the file still stores an int, not the label");
 }
 
+/** @brief The material panel draws its Shader dropdown once, at the top: draw_fields() leaves
+ *         a skipped schema field to its caller instead of drawing it again further down. */
+void test_imm_material_shader_drawn_once() {
+    ImmHarness h;
+    InspectorEnv env;
+    Node m = Node::mapping();
+    m["shader"] = Node(std::string("triplanar"));
+    const float params[4] = {1.0f, 4.0f, 0.0f, 1.0f};
+    m["shader_params"] = make_float_seq(params, 4);
+    m["albedo"] = make_color(glm::vec3(0.8f));
+    auto height_of = [&](const std::function<void(coopa::ui::imm::Context&)>& draw) {
+        float y0 = 0.0f, y1 = 0.0f;
+        h.frame([&](coopa::ui::imm::Context& c) {
+            c.begin_region("r", {0, 0, 400, 2000}, false);
+            y0 = c.cursor().y;
+            draw(c);
+            y1 = c.cursor().y;
+            c.end_region();
+        });
+        return y1 - y0;
+    };
+    const float empty = height_of([](auto&) {});   // the region's own offset, not a row
+    auto rows = [&](const std::function<void(coopa::ui::imm::Context&)>& draw) { return height_of(draw) - empty; };
+    std::vector<FieldDesc> shader_fields, rest;
+    for (const auto& f : material_fields()) (f.key == "shader" || f.key == "shader_params" ? shader_fields : rest).push_back(f);
+    expect(shader_fields.size() == 2, "the material schema lists shader and shader_params");
+
+    const float skipped = rows([&](auto& c) { draw_fields(c, shader_fields, m, env, false, {"shader", "shader_params"}); });
+    expect(skipped == 0.0f, "draw_fields() draws no row for a skipped schema field (" + std::to_string(skipped) + ")");
+
+    const float section = rows([&](auto& c) { draw_shader_section(c, m); });
+    const float space = rows([&](auto& c) { c.spacing(); });
+    const float fields = rows([&](auto& c) { draw_fields(c, rest, m, env, false, {"base"}); });
+    const float block = rows([&](auto& c) { draw_material_block(c, m, env); });
+    expect(section > 0.0f && block == section + space + fields,
+           "the material block is the Shader section plus the other fields, nothing more (" +
+           std::to_string(block) + " vs " + std::to_string(section + space + fields) + ")");
+}
+
 void test_imm_dropdown_toggles() {
     ImmHarness h;
     int idx = 0;
@@ -3160,7 +3199,7 @@ void test_editor_animation_test_scene() {
         for (const auto& st : a.at("states").as_seq()) out.push_back(get_string(st, "name"));
         return out;
     };
-    const ObjectId arm = object_named(app, "RobotArm"), elbow = object_named(app, "Elbow"), ball = object_named(app, "BouncingBall");
+    const ObjectId arm = object_named(app, "robot_arm"), elbow = object_named(app, "elbow"), ball = object_named(app, "bouncing_ball");
     expect(arm && elbow && ball, "the rigs are in the scene");
     doc.select(elbow);
     tick(engine, 2);
@@ -3179,7 +3218,7 @@ void test_editor_animation_test_scene() {
     app.set_timeline_rest_pose(true);
     tick(engine, 2);
     // Nothing was edited: every clip file is byte-identical to the shipped one.
-    for (const char* rel : {"animations/RobotArm/wave.yaml", "animations/BouncingBall/bounce.yaml"}) {
+    for (const char* rel : {"animations/robot_arm/wave.yaml", "animations/bouncing_ball/bounce.yaml"}) {
         const Node a = coopa::yaml::load_document(project.assets() / rel);
         const Node b = coopa::yaml::load_document(fs::path(ROOT_DIR) / "assets" / rel);
         expect(a == b, std::string("browsing and previewing leaves ") + rel + " untouched");
@@ -3213,7 +3252,7 @@ void test_editor_rig_object_assets() {
     tick(engine, 3);
     auto& doc = app.document();
     app.show_timeline();
-    const ObjectId elbow = object_named(app, "Elbow");
+    const ObjectId elbow = object_named(app, "elbow");
     doc.select(elbow);
     tick(engine, 2);
     expect(app.animation_clip() && app.animation_clip_state() == "wave", "its Timeline opens the arm's clip (shared from assets/animations)");
@@ -3241,7 +3280,7 @@ void test_editor_rig_object_assets() {
         tick(engine, 1);
         coopa::scene::SceneObject* ball = nullptr;
         for (auto* o : engine.scene().get_components<coopa::gfx::engine::components::MeshRenderer>()) {
-            if (o->owner && o->owner->name() == "Ball") ball = o->owner;
+            if (o->owner && o->owner->name() == "ball") ball = o->owner;
         }
         if (!ball) continue;
         const float z = glm::vec3(ball->get_transform()->get_world_matrix()[3]).z;
@@ -3271,7 +3310,7 @@ void test_editor_object_asset_pick_and_edit() {
     tick(engine, 4);
     expect(app.open_object_asset(project.assets() / "objects" / "robot_arm.yaml"), "the robot arm opens");
     tick(engine, 6);
-    const ObjectId plate = object_named(app, "BasePlate");
+    const ObjectId plate = object_named(app, "base_plate");
     expect(plate != 0, "the base plate is in the document");
     const float scale = std::max(1.0f, engine.display_scale());
     // The plate's top face near its front corner (its centre is under the shoulder joint).
@@ -3294,7 +3333,7 @@ void test_editor_object_asset_pick_and_edit() {
     // The skinned tentacle: its mesh (a SkinnedMeshRenderer's) picks, edits and weight-paints.
     expect(app.open_object_asset(project.assets() / "objects" / "tentacle.yaml"), "the tentacle opens");
     tick(engine, 6);
-    const ObjectId skin = object_named(app, "TentacleSkin");
+    const ObjectId skin = object_named(app, "tentacle_skin");
     const auto spx = screen_of(engine, app, skin, glm::vec3(0.0f, -0.2f, 0.6f), scale);   // the tube's front, low down
     expect(spx && app.pick_object(*spx) == skin, "clicking the skinned tentacle picks it");
     app.document().select(skin);
@@ -3339,7 +3378,7 @@ void test_editor_object_asset_click_and_tab() {
     expect(app.open_object_asset(project.assets() / "objects" / "robot_arm.yaml"), "the robot arm opens");
     app.show_timeline();
     tick(engine, 6);
-    for (const char* name : {"BasePlate", "UpperArmShape"}) {
+    for (const char* name : {"base_plate", "upper_arm_shape"}) {
         const ObjectId target = object_named(app, name);
         const auto px = screen_of(engine, app, target, glm::vec3(0.0f, -0.5f, 0.0f), in.scale);   // the shape's front face
         expect(px.has_value(), std::string(name) + " is on screen");
@@ -3361,6 +3400,27 @@ void test_editor_object_asset_click_and_tab() {
 
 /** @brief Blender's viewport grid and increment snap: the grid faces the view down X / Y, its
  *         spacing follows the zoom, Ctrl moves in that spacing, and F frames the selection. */
+/** @brief The material editor's Shader dropdown only offers shaders the engine registers, in
+ *         the pass (domain) the catalogue claims -- a mismatch would silently render stock PBR. */
+void test_editor_material_shader_catalogue() {
+    setenv("FIXED_DT", "0.016666", 1);
+    setenv("NO_INPUT", "1", 1);
+    setenv("HOME", tmp_root().c_str(), 1);
+    const fs::path root = fresh_dir("shader_catalogue_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    const auto& registry = engine.render_config().surface_shaders;
+    for (const auto& s : surface_shaders()) {
+        if (s.name.empty()) continue;
+        const auto* desc = registry.find(s.name);
+        expect(desc != nullptr, "the engine registers the '" + s.name + "' shader the dropdown offers");
+        if (!desc) continue;
+        const bool transparent = desc->domain == coopa::gfx::pipeline::SurfaceShaderDomain::Transparent;
+        expect(transparent == s.transparent, "'" + s.name + "' is in the pass the editor assumes");
+        expect(s.params.size() <= 4, "'" + s.name + "' labels at most the four shader_params slots");
+    }
+}
+
 void test_editor_grid_snap_and_frame() {
     using coopa::input::Key;
     {   // ModalTransform snaps a free move to snap_step.
@@ -3403,13 +3463,13 @@ void test_editor_grid_snap_and_frame() {
     cam.distance = 12.0f; cam.apply();
     expect(app.grid_normal_axis() == 2, "an orbit view draws the floor grid");
 
-    const ObjectId plate = object_named(app, "BasePlate");
+    const ObjectId plate = object_named(app, "base_plate");
     const auto px = screen_of(engine, app, plate, glm::vec3(0.0f, -0.5f, 0.0f), in.scale);
-    expect(px.has_value(), "BasePlate is on screen");
+    expect(px.has_value(), "base_plate is on screen");
     if (px) {
         in.click(*px);
         tick(engine, 2);
-        expect(app.document().primary() == plate, "the click selects BasePlate");
+        expect(app.document().primary() == plate, "the click selects base_plate");
         const glm::vec3 framed = cam.focus;
         cam.focus = glm::vec3(40.0f, -30.0f, 5.0f);
         cam.apply();
@@ -4222,6 +4282,7 @@ const TestCase kTests[] = {
     {"imm_icon_button_and_tooltip",          "imm",      test_imm_icon_button_and_tooltip},
     {"imm_theme_files",                      "imm",      test_imm_theme_files},
     {"imm_dropdown_toggles",                 "imm",      test_imm_dropdown_toggles},
+    {"imm_material_shader_drawn_once",       "imm",      test_imm_material_shader_drawn_once},
     {"projection_and_rays",                  "viewport", test_projection_and_rays},
     {"modal_axis_locking",                   "viewport", test_modal_axis_locking},
     {"gizmo_translate_drag",                 "viewport", test_gizmo_translate_drag},
@@ -4252,6 +4313,7 @@ const TestCase kTests[] = {
     {"editor_rig_object_assets", "editor_shell", test_editor_rig_object_assets},
     {"editor_object_asset_pick_and_edit", "editor_shell", test_editor_object_asset_pick_and_edit},
     {"editor_object_asset_click_and_tab", "editor_shell", test_editor_object_asset_click_and_tab},
+    {"editor_material_shader_catalogue", "editor_shell", test_editor_material_shader_catalogue},
     {"editor_grid_snap_and_frame", "editor_shell", test_editor_grid_snap_and_frame},
     {"editor_xray_edit_mode", "editor_shell", test_editor_xray_edit_mode},
     {"editor_nav_axis_and_trackpad", "editor_shell", test_editor_nav_axis_and_trackpad},

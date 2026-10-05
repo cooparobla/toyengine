@@ -21,6 +21,9 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <map>
+
+#include <glm/gtc/epsilon.hpp>
 #include <iostream>
 #include <random>
 #include <string>
@@ -1824,6 +1827,106 @@ void test_config_untouched_and_minimal_edits() {
     cfg.save();
     expect(!coopa::yaml::load_document(dir / "config.yaml").at("render").contains("exposure"), "reset removes the key");
     expect(cfg.dirty() == false, "saving clears the dirty flag");
+}
+
+
+// The settings panel shows a field's schema default while its key is absent, so those defaults
+// must be what the engine actually runs with (PixelRenderConfig / WindowConfig / ...).
+void test_settings_defaults_match_engine() {
+    const toy::core::AppConfig eng = toy::core::AppConfig::from_node(Node::mapping());
+    const auto& r = eng.render;
+    const std::map<std::string, float> floats = {
+        {"fog_density", r.fog_density}, {"fog_height_base", r.fog_height_base}, {"fog_height_falloff", r.fog_height_falloff},
+        {"fog_sky_blend", r.fog_sky_blend}, {"fog_max_distance", r.fog_max_distance}, {"bloom_intensity", r.bloom_intensity},
+        {"auto_exposure_compensation", r.auto_exposure_compensation}, {"depth_threshold", r.depth_threshold},
+        {"normal_threshold", r.normal_threshold}, {"dither_strength", r.dither_strength}, {"exposure", r.exposure},
+        {"shadow_distance", r.shadow_distance}, {"outline_thickness", r.outline_thickness},
+    };
+    const std::map<std::string, bool> bools = {
+        {"bloom_enabled", r.bloom_enabled}, {"grading_enabled", r.grading_enabled}, {"palette_enabled", r.palette_enabled},
+        {"dither_enabled", r.dither_enabled}, {"camera_pixel_snap", r.camera_pixel_snap}, {"outline_enabled", r.outline_enabled},
+        {"shadows_enabled", r.shadows_enabled}, {"ssao_enabled", r.ssao_enabled}, {"fog_enabled", r.fog_enabled},
+    };
+    for (const auto& g : render_settings_groups()) {
+        for (const auto& f : g.fields) {
+            if (auto it = floats.find(f.key); it != floats.end()) {
+                expect(std::abs(f.def.x - it->second) < 1e-6f, f.key + " shows the engine default");
+            }
+            if (auto it = bools.find(f.key); it != bools.end()) {
+                expect((f.def.x != 0.0f) == it->second, f.key + " shows the engine default");
+            }
+            if (f.key.size() > 8 && f.key.compare(f.key.size() - 8, 8, "_quality") == 0) {
+                expect(f.default_string == "high", f.key + " shows High, the engine default");
+            }
+            if (f.key == "outline_color") {
+                // An edited colour is written as the 4-element list the engine reads.
+                Node render = Node::mapping();
+                render["outline_color"] = field_default_node(f);
+                Node root = Node::mapping();
+                root["render"] = render;
+                expect(render.at("outline_color").size() == 4, "outline_color is written with alpha");
+                const auto parsed = toy::core::AppConfig::from_node(root);
+                expect(glm::all(glm::epsilonEqual(parsed.render.outline_color, r.outline_color, 1e-6f)), "outline_color default matches");
+            }
+        }
+    }
+    // The engine also takes a 3-element outline colour (files saved before the fix).
+    Node root = Node::mapping();
+    root["render"] = Node::mapping();
+    float rgb[3] = {1.0f, 0.0f, 0.0f};
+    root["render"]["outline_color"] = make_float_seq(rgb, 3);
+    expect(toy::core::AppConfig::from_node(root).render.outline_color == glm::vec4(1, 0, 0, 1), "rgb outline_color loads opaque");
+}
+
+void test_asset_refs_and_rename() {
+    expect(mesh_ref("meshes/rock.yaml") == "rock", "mesh_ref: top-level mesh");
+    expect(mesh_ref("meshes/props/rock.yaml") == "props/rock", "mesh_ref keeps subfolders");
+    expect(mesh_ref("scenes/lake/meshes/basin.yaml") == "basin", "mesh_ref: scene-local mesh");
+    expect(strip_yaml_ext("objects/props/crate.yaml") == "objects/props/crate", "strip_yaml_ext");
+
+    const fs::path root = fresh_dir("rename_refs");
+    const fs::path a = root / "assets";
+    auto write = [&](const std::string& rel, const std::string& text) {
+        fs::create_directories((a / rel).parent_path());
+        std::ofstream(a / rel) << text;
+    };
+    write("objects/props/crate.yaml", "object:\n  name: crate\n  components: []\n");
+    write("meshes/props/rock.yaml", "vertices: []\nfaces: []\n");
+    write("meshes/props/rock.lod.yaml", "lods: []\n");
+    write("materials/stone.yaml", "albedo: {r: 1.0, g: 1.0, b: 1.0}\ntexture_albedo: textures/stone.png\n");
+    write("textures/stone.png", "png");
+    write("scenes/lake/meshes/basin.yaml", "vertices: []\nfaces: []\n");
+    write("scenes/lake/scene.yaml",
+          "scene:\n  scene_name: lake\n  root_objects:\n"
+          "    - name: props/rock\n      prefab: objects/props/crate\n      components:\n"
+          "        - type: MeshRenderer\n          mesh_path: props/rock\n          material: materials/stone\n"
+          "        - type: MeshCollider\n          mesh_path: basin\n");
+    write("scenes/other/scene.yaml",
+          "scene:\n  scene_name: other\n  root_objects:\n"
+          "    - name: basin\n      components:\n        - type: MeshRenderer\n          mesh_path: basin\n");
+    Project project(root);
+
+    auto scene = [&](const std::string& s) { return coopa::yaml::load_document(a / "scenes" / s / "scene.yaml").at("scene").at("root_objects")[0]; };
+    auto rewritten = project.rename_asset("objects/props/crate.yaml", "objects/props/box.yaml");
+    expect(get_string(scene("lake"), "prefab") == "objects/props/box", "renaming an object asset rewrites prefab:");
+    expect(rewritten.size() == 1, "only the referring scene is rewritten");
+
+    project.rename_asset("meshes/props/rock.yaml", "meshes/props/boulder.yaml");
+    const Node lake = scene("lake");
+    expect(get_string(lake.at("components")[0], "mesh_path") == "props/boulder", "renaming a mesh rewrites mesh_path");
+    expect(get_string(lake, "name") == "props/rock", "an object name equal to the old ref is left alone");
+    expect(fs::exists(a / "meshes/props/boulder.lod.yaml") && !fs::exists(a / "meshes/props/rock.lod.yaml"), "the LOD sidecar moves too");
+
+    project.rename_asset("materials/stone.yaml", "materials/granite.yaml");
+    expect(get_string(scene("lake").at("components")[0], "material") == "materials/granite", "renaming a material rewrites material:");
+
+    project.rename_asset("textures/stone.png", "textures/granite.png");
+    expect(get_string(coopa::yaml::load_document(a / "materials/granite.yaml"), "texture_albedo") == "textures/granite.png",
+           "renaming a texture rewrites the material's map");
+
+    project.rename_asset("scenes/lake/meshes/basin.yaml", "scenes/lake/meshes/pool.yaml");
+    expect(get_string(scene("lake").at("components")[1], "mesh_path") == "pool", "a scene-local mesh is renamed in its scene");
+    expect(get_string(scene("other").at("components")[0], "mesh_path") == "basin", "other scenes' same-named meshes are untouched");
 }
 
 // =====================================================================================
@@ -5697,6 +5800,7 @@ const TestCase kTests[] = {
     {"undo_stack_sequence_and_budget",       "document", test_undo_stack_sequence_and_budget},
     {"scene_document_reparent_rules",        "document", test_scene_document_reparent_rules},
     {"schema_defaults",                      "document", test_schema_defaults},
+    {"asset_refs_and_rename",                "document", test_asset_refs_and_rename},
     {"shader_ball",                          "mesh", test_shader_ball},
     {"mesh_io_preserves_blender_attributes", "mesh", test_mesh_io_preserves_blender_attributes},
     {"asset_fidelity_meshes",                "writer", test_asset_fidelity_meshes},
@@ -5731,6 +5835,7 @@ const TestCase kTests[] = {
     {"ui_rect_gizmo",                        "viewport", test_ui_rect_gizmo},
     {"ui_palette_entries_load",              "document", test_ui_palette_entries_load},
     {"config_untouched_and_minimal_edits",   "config",   test_config_untouched_and_minimal_edits},
+    {"settings_defaults_match_engine",       "config",   test_settings_defaults_match_engine},
     {"editor_shell_end_to_end",              "editor_shell", test_editor_shell_end_to_end},
     {"material_reference_forms",             "editor_shell", test_material_reference_forms},
     {"editor_real_input_blender_keymap",     "editor_shell", test_editor_real_input_blender_keymap},

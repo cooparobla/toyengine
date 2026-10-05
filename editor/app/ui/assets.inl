@@ -244,7 +244,7 @@ private:
         const std::string n = unique_asset_name_("objects", stem);
         Node obj = doc_.make_object(n);
         Node mr = default_component("MeshRenderer");
-        mr["mesh_path"] = Node(stem);
+        mr["mesh_path"] = Node(mesh_ref(mesh_rel));
         obj["components"].as_seq().push_back(mr);
         const fs::path path = project_.assets() / "objects" / (n + ".yaml");
         if (write_object_asset_(path, object_asset_node_(obj))) open_asset(AssetType::Object, project_.relative(path));
@@ -289,10 +289,11 @@ public:
     ObjectId place_object_asset(const std::string& object_rel, std::optional<glm::vec3> at = std::nullopt) {
         if (playing() || asset_view_()) return 0;
         const std::string stem = fs::path(object_rel).stem().string();
-        if (doc_.is_object_asset() && active_path_.stem().string() == stem) { log_warn("An object asset can't contain itself"); return 0; }
+        const std::string ref = strip_yaml_ext(fs::path(object_rel).generic_string());   // objects/props/crate
+        if (doc_.is_object_asset() && strip_yaml_ext(project_.relative(active_path_)) == ref) { log_warn("An object asset can't contain itself"); return 0; }
         Node obj = Node::mapping();
         obj["name"] = Node(doc_.unique_name(stem));
-        obj["prefab"] = Node("objects/" + stem);
+        obj["prefab"] = Node(ref);
         Node comps = Node::sequence();
         Node t = Node::mapping();
         t["type"] = Node(std::string("Transform"));
@@ -545,6 +546,28 @@ private:
         else log_info("Duplicated to " + project_.relative(dst));
     }
 
+    /** @brief Renames an asset and every reference to it; reloads open documents that changed. */
+    void rename_asset_(const std::string& from, const std::string& to) {
+        std::vector<std::string> rewritten;
+        try {
+            rewritten = project_.rename_asset(from, to);
+        } catch (const std::exception& e) {
+            log_error(std::string("Rename failed: ") + e.what());
+            project_.refresh();
+            return;
+        }
+        for (const auto& f : rewritten) log_info("Updated references in " + f);
+        log_info("Renamed " + from + " to " + to);
+        auto touched = [&](const fs::path& p) {
+            return !p.empty() && std::find(rewritten.begin(), rewritten.end(), project_.relative(p)) != rewritten.end();
+        };
+        if ((active_type_ == AssetType::Scene || active_type_ == AssetType::Object || active_type_ == AssetType::UI) && touched(active_path_)) {
+            open_asset_now_(active_type_, active_path_);
+        }
+        if (active_type_ == AssetType::Material && touched(material_.path)) open_material(material_.path);
+        if (touched(config_.path)) config_.load(config_.path);
+    }
+
     void draw_asset_modals_(imm::Context& ctx) {
         if (ctx.begin_modal("Rename Asset", {360, 0})) {
             ctx.label("Rename " + asset_rename_);
@@ -552,11 +575,9 @@ private:
             if (ctx.button("Rename", 100) && !asset_rename_to_.empty()) {
                 const fs::path src = project_.absolute(asset_rename_);
                 const fs::path dst = src.parent_path() / (asset_rename_to_ + src.extension().string());
-                std::error_code ec;
                 if (fs::exists(dst)) log_error(project_.relative(dst) + " already exists");
-                else fs::rename(src, dst, ec);
-                if (ec) log_error("Rename failed: " + ec.message());
-                project_.refresh();
+                // References are rewritten on disk, so unsaved edits are settled first.
+                else guarded_([this, from = asset_rename_, to = project_.relative(dst)] { rename_asset_(from, to); });
                 ctx.close_current_popup();
             }
             ctx.same_line();

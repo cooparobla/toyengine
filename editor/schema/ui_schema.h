@@ -114,7 +114,7 @@ inline void add_ui_schemas(const std::function<void(ComponentSchema)>& add) {
         f_string("text", "Text", true), f_asset("font", "fonts", ".ttf"), f_int("font_size", 18, 1, 512, true),
         f_color4("color", white, true), f_enum("horizontal_align", halign, true), f_enum("vertical_align", valign, true),
         f_enum("overflow", {"Overflow", "Wrap", "Truncate"}), f_float("line_spacing", 1.0f, 0.01f, 0.1f, 10.0f),
-        f_bool("raycast_target", false),
+        f_bool("raycast_target", true),
     }});
     add({"Mask", "UI", {}});
 
@@ -124,17 +124,17 @@ inline void add_ui_schemas(const std::function<void(ComponentSchema)>& add) {
     {
         auto f = layout_common();
         f.push_back(f_vec2("cell_size", {64.0f, 64.0f}, 1.0f, true));
-        f.push_back(f_vec2("cell_spacing", {4.0f, 4.0f}));
+        f.push_back(f_vec2("cell_spacing", {0.0f, 0.0f}));
         f.push_back(f_enum("start_corner", {"UpperLeft", "UpperRight", "LowerLeft", "LowerRight"}));
         f.push_back(f_enum("start_axis", {"Horizontal", "Vertical"}));
         f.push_back(f_enum("constraint", {"Flexible", "FixedColumnCount", "FixedRowCount"}));
-        f.push_back(f_int("constraint_count", 2, 1, 1000));
+        f.push_back(f_int("constraint_count", 1, 1, 1000));
         add({"GridLayoutGroup", "UI Layout", f});
     }
     add({"ContentSizeFitter", "UI Layout", {f_enum("horizontal_fit", {"Unconstrained", "MinSize", "PreferredSize"}),
                                             f_enum("vertical_fit", {"PreferredSize", "Unconstrained", "MinSize"}, true)}});
     add({"LayoutElement", "UI Layout", {
-        f_vec2("min_size", {-1.0f, -1.0f}), f_vec2("preferred_size", {-1.0f, 40.0f}, 1.0f, true), f_vec2("flexible_size", {0.0f, 0.0f}, 0.05f),
+        f_vec2("min_size", {-1.0f, -1.0f}), f_vec2("preferred_size", {-1.0f, 40.0f}, 1.0f, true), with_tip(f_vec2("flexible_size", {-1.0f, -1.0f}, 0.05f), "-1: automatic"),
         f_bool("ignore_layout", false),
     }});
     add({"ScrollRect", "UI Layout", {
@@ -142,13 +142,13 @@ inline void add_ui_schemas(const std::function<void(ComponentSchema)>& add) {
         f_enum("movement_type", {"Elastic", "Clamped", "Unrestricted"}), f_float("elasticity", 0.1f, 0.005f, 0.0f, 10.0f),
         f_bool("inertia", true), f_float("deceleration_rate", 0.135f, 0.005f, 0.0f, 1.0f), f_float("scroll_sensitivity", 20.0f, 0.5f),
         f_child("vertical_scrollbar"), f_child("horizontal_scrollbar"), f_bool("auto_scrollbars", true),
-        f_float("scrollbar_thickness", 8.0f, 0.5f, 0.0f, 100.0f), f_bool("hide_scrollbar_when_unneeded", false),
+        f_float("scrollbar_thickness", 10.0f, 0.5f, 0.0f, 100.0f), f_bool("hide_scrollbar_when_unneeded", true),
     }});
 
     // --- widgets ---
     add({"Button", "UI Widgets", {f_bool("interactable", true), with_tip(f_child("target_graphic"), "The Image that tints on hover/press")}});
     add({"Scrollbar", "UI Widgets", {f_bool("interactable", true), f_child("handle", "Handle", true), f_enum("direction", {"Vertical", "Horizontal"}),
-                                     f_float("size", 0.2f, 0.01f, 0.0f, 1.0f), f_float("value", 0.0f, 0.01f, 0.0f, 1.0f)}});
+                                     f_float("size", 1.0f, 0.01f, 0.0f, 1.0f), f_float("value", 0.0f, 0.01f, 0.0f, 1.0f)}});
     add({"Slider", "UI Widgets", {
         f_bool("interactable", true), f_float("min", 0.0f, 0.1f, -1e30f, 1e30f, true), f_float("max", 1.0f, 0.1f, -1e30f, 1e30f, true),
         f_float("value", 0.5f, 0.01f, -1e30f, 1e30f, true), f_float("step", 0.0f, 0.01f, 0.0f), f_int("decimals", -1, -1, 6),
@@ -158,7 +158,7 @@ inline void add_ui_schemas(const std::function<void(ComponentSchema)>& add) {
     add({"ProgressBar", "UI Widgets", {
         f_float("min", 0.0f, 0.1f, -1e30f, 1e30f, true), f_float("max", 100.0f, 0.1f, -1e30f, 1e30f, true),
         f_float("value", 100.0f, 0.1f, -1e30f, 1e30f, true), f_child("fill", "Fill", true), f_child("ghost"), f_child("label"),
-        f_string("label_format"), f_float("ghost_delay", 0.35f, 0.01f, 0.0f, 10.0f), f_float("ghost_speed", 45.0f, 0.5f, 0.0f, 1000.0f),
+        with_tip(f_string("label_format", "{cur} / {max}"), "{cur} and {max} are replaced by the value and maximum"), f_float("ghost_delay", 0.35f, 0.01f, 0.0f, 10.0f), f_float("ghost_speed", 45.0f, 0.5f, 0.0f, 1000.0f),
         f_enum("direction", directions),
     }});
     add({"Toggle", "UI Widgets", {f_bool("interactable", true), f_child("checkmark", "Checkmark", true), f_bool("hide_when_off", true),
@@ -183,23 +183,25 @@ inline void add_ui_schemas(const std::function<void(ComponentSchema)>& add) {
     add({"ColorOnSignal", "UI Reactors", reactor({f_color4("color", white, true), f_float("fade_duration", 0.1f, 0.01f, 0.0f, 10.0f),
                                                   f_string("target_component")}), false});
     add({"TextOnSignal", "UI Reactors", reactor({f_string("text", "", true)}), false});
-    add({"LogOnSignal", "UI Reactors", reactor({f_string("message", "", true)}), false});
+    add({"LogOnSignal", "UI Reactors", reactor({f_string("message", "signal fired", true)}), false});
 
     // --- composites (uicoopa/builder/ui_composites_yaml.h) ---
     add({"ThemedPanel", "UI Composites", {f_enum("style", {"panel", "panel_alt", "background", "header", "border"}, true),
-                                          f_color4("color", white), f_bool("blocks_clicks", false),
+                                          with_tip(f_color4("color", white), "Unset: the theme's colour for the style"), f_bool("blocks_clicks", false),
                                           with_tip(f_bool("shadow", false), "A soft shadow (the theme's shape.shadow_size)"),
                                           with_tip(f_bool("border", true), "The theme's outline (shape.border_width)")}});
     add({"ThemedText", "UI Composites", {f_string("text", "Text", true), f_enum("font_role", font_roles, true), f_enum("text_role", text_roles),
                                          f_enum("align", halign), f_enum("valign", {"Middle", "Top", "Bottom"}), f_bool("wrap", false),
-                                         f_float("size", 0.0f, 0.5f, 0.0f, 512.0f), f_color4("color", white)}});
+                                         with_tip(f_float("size", 0.0f, 0.5f, 0.0f, 512.0f), "0: the font role's size"),
+                                         with_tip(f_color4("color", white), "Unset: the theme's colour for the text role")}});
     add({"ThemedButton", "UI Composites", {f_string("label", "Button", true), f_enum("role", roles, true), f_enum("font_role", {"Label", "Body", "Heading", "Title"}),
                                            f_bool("interactable", true)}});
     auto window = [&](bool dialog) {
         std::vector<FieldDesc> f = {
             f_string("title", dialog ? "Dialog" : "Window", true), f_bool("close_button", false), f_bool("show_header", true),
-            f_float("padding", 16.0f, 0.5f, 0.0f, 500.0f), f_enum("layout", {"vertical", "horizontal", "none"}),
-            f_float("spacing", 8.0f, 0.5f, 0.0f, 500.0f), f_enum("align", child_align), f_enum("style", {"panel", "panel_alt", "background", "none"}),
+            with_tip(f_float("padding", 16.0f, 0.5f, 0.0f, 500.0f), "Unset: the theme's metrics.dialog_padding"),
+            f_enum("layout", {"vertical", "horizontal", "none"}),
+            with_tip(f_float("spacing", 8.0f, 0.5f, 0.0f, 500.0f), "Unset: the theme's metrics.row_spacing"), f_enum("align", child_align), f_enum("style", {"panel", "panel_alt", "background", "none"}),
             f_enum("title_align", halign), f_enum("title_role", {"Heading", "Title", "Label"}),
             with_tip(f_bool("shadow", true), "A soft shadow under the window (the theme's shape.shadow_size)"),
         };
@@ -213,42 +215,45 @@ inline void add_ui_schemas(const std::function<void(ComponentSchema)>& add) {
     };
     add({"Window", "UI Composites", window(false)});
     add({"Dialog", "UI Composites", window(true)});
-    add({"ScrollView", "UI Composites", {f_float("spacing", 8.0f, 0.5f, 0.0f, 500.0f, true), f_float("padding", 6.0f, 0.5f, 0.0f, 500.0f),
+    add({"ScrollView", "UI Composites", {f_float("spacing", 8.0f, 0.5f, 0.0f, 500.0f, true), with_tip(f_float("padding", 6.0f, 0.5f, 0.0f, 500.0f), "Unset: the theme's metrics.scroll_frame_padding"),
                                          f_bool("background", true), f_bool("horizontal", false), f_float("scroll_sensitivity", 30.0f, 0.5f)}});
     add({"TabView", "UI Composites", {with_tip(f_strings("tabs", {"General", "Advanced"}, true), "One tab per entry; the object's children fill them in order"),
-                                      f_float("tab_height", 32.0f, 0.5f, 8.0f, 200.0f), f_float("tab_spacing", 4.0f, 0.5f, 0.0f, 100.0f)}});
+                                      with_tip(f_float("tab_height", 32.0f, 0.5f, 8.0f, 200.0f), "Unset: the theme's value"),
+                                      with_tip(f_float("tab_spacing", 4.0f, 0.5f, 0.0f, 100.0f), "Unset: the theme's value")}});
     add({"Collapsible", "UI Composites", {f_string("title", "Section", true), f_bool("start_expanded", true), f_bool("boxed", true)}});
-    auto menu = [&](const char* dir) {
+    auto menu = [&](const char* dir, const char* align) {
         return std::vector<FieldDesc>{
             f_items("items", button_item_fields, button_items({{"Play", "Play"}, {"Options", "Options"}, {"Quit", "Quit"}}), true),
             f_enum("direction", dir == std::string("vertical") ? std::vector<std::string>{"vertical", "horizontal"}
                                                                : std::vector<std::string>{"horizontal", "vertical"}),
-            f_float("spacing", 8.0f, 0.5f, 0.0f, 500.0f), f_float("button_height", 38.0f, 0.5f, 8.0f, 500.0f),
-            f_float("button_width", 0.0f, 0.5f, 0.0f, 2000.0f), f_enum("align", child_align),
+            with_tip(f_float("spacing", 8.0f, 0.5f, 0.0f, 500.0f), "Unset: the theme's value"),
+            with_tip(f_float("button_height", 38.0f, 0.5f, 8.0f, 500.0f), "Unset: 1.35 x the theme's metrics.row_height"),
+            f_float("button_width", 0.0f, 0.5f, 0.0f, 2000.0f), with_default(f_enum("align", child_align), align),
         };
     };
-    add({"MenuList", "UI Composites", menu("vertical")});
-    add({"ActionBar", "UI Composites", menu("horizontal")});
+    add({"MenuList", "UI Composites", menu("vertical", "UpperCenter")});
+    add({"ActionBar", "UI Composites", menu("horizontal", "MiddleRight")});
     add({"SettingRow", "UI Composites", {
         f_enum("kind", {"slider", "toggle", "dropdown", "spinbox", "text", "value"}, true), f_string("label", "Setting", true),
-        f_float("label_width", 175.0f, 0.5f, 0.0f, 2000.0f), f_float("min", 0.0f, 0.1f), f_float("max", 1.0f, 0.1f),
+        with_tip(f_float("label_width", 175.0f, 0.5f, 0.0f, 2000.0f), "Unset: the theme's metrics.label_width"), f_float("min", 0.0f, 0.1f), f_float("max", 1.0f, 0.1f),
         f_float("value", 0.5f, 0.01f), f_float("step", 0.0f, 0.01f, 0.0f), f_int("decimals", -1, -1, 6),
         f_strings("items"), f_int("selected_index", 0, 0, 10000), f_bool("is_on", false), f_string("text"),
     }});
-    add({"HudCorner", "UI Composites", {f_enum("flow", {"vertical", "horizontal"}, true), f_float("spacing", 6.0f, 0.5f, 0.0f, 500.0f),
+    add({"HudCorner", "UI Composites", {f_enum("flow", {"vertical", "horizontal"}, true), with_tip(f_float("spacing", 6.0f, 0.5f, 0.0f, 500.0f), "Unset: the theme's hud.bar_spacing"),
                                         with_tip(f_enum("align", [&] { auto a = child_align; a.insert(a.begin(), ""); return a; }()),
                                                  "Empty: pack toward the corner the object is anchored to")}});
     add({"StatBar", "UI Composites", {
         f_enum("role", {"health", "stamina", "mana", "neutral"}, true), f_string("icon"), f_float("min", 0.0f, 0.1f),
         f_float("max", 100.0f, 0.1f, -1e30f, 1e30f, true), f_float("value", 100.0f, 0.1f, -1e30f, 1e30f, true),
-        f_bool("show_label", true), with_tip(f_string("label_format"), "e.g. {value} / {max}"), f_float("bar_height", 14.0f, 0.5f, 1.0f, 200.0f),
-        f_color4("fill_color", white),
+        f_bool("show_label", true), with_tip(f_string("label_format"), "e.g. {cur} / {max}"),
+        with_tip(f_float("bar_height", 14.0f, 0.5f, 1.0f, 200.0f), "Unset: the theme's hud.bar_height"),
+        with_tip(f_color4("fill_color", white), "Unset: the theme's colour for the role"),
     }});
     add({"Hotbar", "UI Composites", {f_int("count", 10, 1, 32, true), f_float("slot_size", 52.0f, 0.5f, 8.0f, 512.0f),
                                      f_float("spacing", 6.0f, 0.5f, 0.0f, 100.0f), f_bool("key_labels", true)}});
     add({"ItemGrid", "UI Composites", {f_int("rows", 4, 1, 64, true), f_int("cols", 6, 1, 64, true), f_float("slot_size", 56.0f, 0.5f, 8.0f, 512.0f),
                                        f_float("spacing", 6.0f, 0.5f, 0.0f, 100.0f), f_enum("align", {"center", "top", "topleft"})}});
-    add({"MessageLog", "UI Composites", {f_int("max_lines", 6, 1, 200, true), f_bool("boxed", false), f_float("hold_seconds", 6.0f, 0.1f, 0.0f, 600.0f)}});
+    add({"MessageLog", "UI Composites", {f_int("max_lines", 6, 1, 200, true), f_bool("boxed", false), with_tip(f_float("hold_seconds", 6.0f, 0.1f, 0.0f, 600.0f), "Unset: the theme's value")}});
     {
         Node def = Node::sequence();
         for (auto [a, l] : {std::pair<const char*, const char*>{"Confirm", "Select"}, {"Back", "Back"}}) {

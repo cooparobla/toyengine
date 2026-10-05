@@ -28,6 +28,8 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <string>
 #include <system_error>
@@ -36,6 +38,87 @@
 namespace toy::editor {
 
 namespace fs = std::filesystem;
+
+/** @brief An assets-relative path without its .yaml / .caml extension (`objects/props/crate`). */
+inline std::string strip_yaml_ext(const std::string& rel) {
+    const std::string e = fs::path(rel).extension().string();
+    return (e == ".yaml" || e == ".caml") ? rel.substr(0, rel.size() - e.size()) : rel;
+}
+
+/**
+ * @brief The `mesh_path` value naming a mesh file: its path under the `meshes/` folder it lives
+ *        in, without the extension -- the engine loads `meshes/<value>.yaml` from the scene's
+ *        directory, then the assets root. `meshes/props/rock.yaml` -> `props/rock`;
+ *        `scenes/lake/meshes/basin.yaml` -> `basin`.
+ */
+inline std::string mesh_ref(const std::string& rel) {
+    const std::string g = strip_yaml_ext(fs::path(rel).generic_string());
+    if (g.rfind("meshes/", 0) == 0) return g.substr(7);
+    const size_t at = g.find("/meshes/");
+    if (at != std::string::npos) return g.substr(at + 8);
+    return fs::path(g).filename().string();
+}
+
+/**
+ * @brief How references to a renamed asset are rewritten. Paths that name their folder
+ *        (`objects/x`, `materials/x`, `textures/x.png`, `ui/themes/x.yaml`) are unambiguous, so
+ *        they are matched as whole string values under any key; a mesh is named by a bare
+ *        `mesh_ref()`, so it is only matched under the keys that hold one.
+ */
+struct RefRename {
+    std::vector<std::pair<std::string, std::string>> paths;   ///< old -> new, any key
+    std::vector<std::string> mesh_keys;                       ///< keys holding a mesh_ref()
+    std::string mesh_old, mesh_new;
+
+    /** @brief The rewrite for renaming assets-relative `from` to `to` (empty if nothing refers to it by path). */
+    static RefRename between(const std::string& from, const std::string& to) {
+        RefRename r;
+        const std::string f = fs::path(from).generic_string(), t = fs::path(to).generic_string();
+        if (f.find("meshes/") != std::string::npos) {
+            r.mesh_keys = {"mesh_path", "side_mesh", "mesh"};
+            r.mesh_old = mesh_ref(f);
+            r.mesh_new = mesh_ref(t);
+            return r;
+        }
+        r.paths.push_back({f, t});
+        r.paths.push_back({"assets/" + f, "assets/" + t});   // config.yaml's root-relative refs
+        if (strip_yaml_ext(f) != f) r.paths.push_back({strip_yaml_ext(f), strip_yaml_ext(t)});
+        return r;
+    }
+    /** @brief Strings a file must contain to possibly refer to the asset (a cheap pre-check). */
+    std::vector<std::string> needles() const {
+        std::vector<std::string> out;
+        for (const auto& p : paths) out.push_back(p.first);
+        if (!mesh_old.empty()) out.push_back(mesh_old);
+        return out;
+    }
+    /** @brief Rewrites matching references in `n`; returns how many changed. */
+    int apply(Node& n) const { return apply_(n, nullptr); }
+
+private:
+    int apply_(Node& n, const std::string* key) const {
+        int changed = 0;
+        if (n.is_string()) {
+            const std::string v = n.get_value<std::string>();
+            for (const auto& p : paths) {
+                if (v == p.first) { n = Node(p.second); return 1; }
+            }
+            if (key && !mesh_old.empty() && v == mesh_old &&
+                std::find(mesh_keys.begin(), mesh_keys.end(), *key) != mesh_keys.end()) {
+                n = Node(mesh_new);
+                return 1;
+            }
+        } else if (n.is_mapping()) {
+            for (auto& kv : n.as_map()) {
+                const std::string k = kv.first.is_string() ? kv.first.get_value<std::string>() : std::string();
+                changed += apply_(kv.second, &k);
+            }
+        } else if (n.is_sequence()) {
+            for (auto& item : n.as_seq()) changed += apply_(item, key);
+        }
+        return changed;
+    }
+};
 
 class Project {
 public:
@@ -87,6 +170,60 @@ public:
         return cache_[key] = out;
     }
     void refresh() { cache_.clear(); }
+
+    /**
+     * @brief Renames assets-relative `from` to `to` and rewrites every reference to it in the
+     *        project's YAML (scenes, object / UI assets, materials, config, LOD sidecars). A
+     *        mesh's `.lod.yaml` sidecar moves with it. Returns the files rewritten
+     *        (assets-relative); throws on a failed rename.
+     */
+    std::vector<std::string> rename_asset(const std::string& from, const std::string& to) {
+        const fs::path src = absolute(from), dst = absolute(to);
+        fs::create_directories(dst.parent_path());
+        fs::rename(src, dst);
+        std::error_code ec;
+        if (from.find("meshes/") != std::string::npos) {
+            const fs::path lod_src = src.parent_path() / (src.stem().string() + ".lod" + src.extension().string());
+            if (fs::exists(lod_src, ec)) {
+                fs::rename(lod_src, dst.parent_path() / (dst.stem().string() + ".lod" + dst.extension().string()), ec);
+            }
+        }
+        const RefRename r = RefRename::between(from, to);
+        const auto needles = r.needles();
+        const bool mesh = !r.mesh_old.empty();
+        // A scene-local mesh (scenes/<s>/meshes/x.yaml) is only visible to its own scene's files;
+        // a global one is shadowed in any directory that has its own meshes/<ref>.yaml.
+        const std::string g = fs::path(from).generic_string();
+        const bool local_mesh = mesh && g.rfind("meshes/", 0) != 0;
+        const fs::path scan_root = local_mesh ? assets() / g.substr(0, g.find("/meshes/")) : assets();
+        std::vector<std::string> rewritten;
+        for (auto e = fs::recursive_directory_iterator(scan_root, ec); e != fs::recursive_directory_iterator(); e.increment(ec)) {
+            if (ec) break;
+            if (!e->is_regular_file() || e->path().extension() != ".yaml") continue;   // .caml is a packaged copy
+            if (mesh && !local_mesh && e->path().parent_path() != assets() &&
+                fs::exists(e->path().parent_path() / "meshes" / (r.mesh_old + ".yaml"), ec)) continue;
+            // Mesh files are large and only refer to other meshes in `lods:`.
+            const bool in_meshes = e->path().parent_path().filename() == "meshes";
+            if (in_meshes && !mesh) continue;
+            std::string text;
+            {
+                std::ifstream in(e->path(), std::ios::binary);
+                text.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+            }
+            if (in_meshes && text.find("lods:") == std::string::npos) continue;
+            if (std::none_of(needles.begin(), needles.end(), [&](const std::string& n) { return text.find(n) != std::string::npos; })) continue;
+            try {
+                Node doc = coopa::yaml::load_document(e->path());
+                if (r.apply(doc) == 0) continue;
+                coopa::yaml::save_document(e->path(), doc);
+                rewritten.push_back(relative(e->path()));
+            } catch (...) {
+                // An unparsable file is left alone; the engine can't load it either.
+            }
+        }
+        refresh();
+        return rewritten;
+    }
 
     /** @brief All scene files (assets/scenes/<name>/scene.yaml and any other .yaml in scenes/). */
     std::vector<std::string> scenes() {

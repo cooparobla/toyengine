@@ -1494,7 +1494,7 @@ private:
         Node obj = doc_.make_object(doc_.unique_name(key));
         set_object_position_(obj, at.value_or(spawn_point_()));
         Node mr = default_component("MeshRenderer");
-        mr["mesh_path"] = Node(key);
+        mr["mesh_path"] = Node(mesh_ref(item));
         obj["components"].as_seq().push_back(mr);
         after_structure_change_(doc_.add_object(obj, 0, -1, "Add " + key));
     }

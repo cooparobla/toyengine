@@ -235,13 +235,23 @@ inline EditResult draw_field(imm::Context& ctx, const FieldDesc& f, Node& block,
         }
         case FieldKind::Color4: {
             const Node* n = present ? &block.at(f.key) : nullptr;
-            float rgba[4] = {n ? get_float(*n, "r", f.def.r) : f.def.r, n ? get_float(*n, "g", f.def.g) : f.def.g,
-                             n ? get_float(*n, "b", f.def.b) : f.def.b, n ? get_float(*n, "a", f.def.a) : f.def.a};
+            float rgba[4] = {f.def.r, f.def.g, f.def.b, f.def.a};
+            if (n && n->is_mapping()) {
+                rgba[0] = get_float(*n, "r", f.def.r); rgba[1] = get_float(*n, "g", f.def.g);
+                rgba[2] = get_float(*n, "b", f.def.b); rgba[3] = get_float(*n, "a", f.def.a);
+            } else if (n && n->is_sequence()) {
+                const auto& seq = n->as_seq();
+                for (size_t i = 0; i < std::min<size_t>(4, seq.size()); ++i) rgba[i] = as_float(seq[i]);
+            }
             const bool ch = ctx.color_edit(label, rgba, true);
             if (ch) {
-                Node o = make_color({rgba[0], rgba[1], rgba[2]});
-                o["a"] = make_float(rgba[3]);
-                block[f.key] = o;
+                if (f.as_list) {
+                    block[f.key] = make_float_seq(rgba, 4);
+                } else {
+                    Node o = make_color({rgba[0], rgba[1], rgba[2]});
+                    o["a"] = make_float(rgba[3]);
+                    block[f.key] = o;
+                }
             }
             detail::finish(ctx, r, f.key, ch, true);
             break;

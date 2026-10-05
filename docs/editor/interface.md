@@ -151,13 +151,13 @@ Right-click an asset in the list for these commands:
 | **Add to Scene** | Meshes | Adds an object that shows the mesh to the open scene |
 | **Assign to Selected** | Materials | Puts the material on the selected objects |
 | **Duplicate** | All | Makes a copy named `<name>_copy` |
-| **Rename...** | All but the open asset | Renames the asset |
+| **Rename...** | All but the open asset | Renames the asset and updates the scenes, objects and materials that use it |
 | **Delete...** | All but the open asset | Deletes the asset after you confirm |
 | **Copy Path** | All | Copies the asset's path to the clipboard |
 
 > [!WARNING]
-> Renaming or deleting an asset doesn't update the scenes and objects that use it. They can no
-> longer find it.
+> Deleting an asset doesn't update the scenes and objects that use it. They can no longer find
+> it.
 
 ## Read the Hierarchy
 

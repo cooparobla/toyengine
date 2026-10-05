@@ -154,6 +154,7 @@ inline Node field_default_node(const FieldDesc& f) {
             Node n = Node::mapping(); n["x"] = make_float(f.def.x); n["y"] = make_float(f.def.y); return n;
         }
         case FieldKind::Color4: {
+            if (f.as_list) { float v[4] = {f.def.r, f.def.g, f.def.b, f.def.a}; return make_float_seq(v, 4); }
             Node n = make_color(glm::vec3(f.def)); n["a"] = make_float(f.def.w); return n;
         }
         case FieldKind::Padding: {
@@ -181,6 +182,8 @@ inline FieldDesc with_label(FieldDesc f, std::string l) { f.label = std::move(l)
 inline FieldDesc listed(FieldDesc f) { f.as_list = true; return f; }
 inline FieldDesc root_relative(FieldDesc f) { f.ref_prefix = "assets/"; return f; }
 inline FieldDesc startup(FieldDesc f) { f.startup_only = true; return f; }
+/** @brief An enum whose engine default is not its first option. */
+inline FieldDesc with_default(FieldDesc f, std::string def) { f.default_string = std::move(def); return f; }
 
 /** @brief The keys of a PBRMaterial block (inline, or a materials/*.yaml asset). */
 inline const std::vector<FieldDesc>& material_fields() {
@@ -190,14 +193,14 @@ inline const std::vector<FieldDesc>& material_fields() {
         f_float("roughness", 0.5f, 0.005f, 0.0f, 1.0f, true),
         f_float("ao", 1.0f, 0.005f, 0.0f, 1.0f),
         f_color("emissive", glm::vec3(0.0f)),
-        f_float("emissive_strength", 0.0f, 0.02f, 0.0f, 1000.0f),
-        f_enum("alpha_mode", {"OPAQUE", "MASK", "BLEND"}),
+        f_float("emissive_strength", 1.0f, 0.02f, 0.0f, 1000.0f),
+        f_enum("alpha_mode", {"OPAQUE", "MASK", "CUTOUT", "BLEND"}),
         f_float("alpha", 1.0f, 0.005f, 0.0f, 1.0f),
         f_float("alpha_cutoff", 0.5f, 0.005f, 0.0f, 1.0f),
         f_bool("cull_backfaces", true),
         f_bool("refraction", false),
-        f_float("ior", 1.33f, 0.005f, 1.0f, 3.0f),
-        f_float("refraction_thickness", 0.1f, 0.005f, 0.0f, 10.0f),
+        with_tip(f_float("ior", -1.0f, 0.005f, -1.0f, 3.0f), "-1: the render settings' refraction_ior (glass ~1.45, water ~1.33)"),
+        with_tip(f_float("refraction_thickness", -1.0f, 0.005f, -1.0f, 10.0f), "-1: the render settings' refraction_thickness"),
         f_color("refraction_tint", glm::vec3(1.0f)),
         with_label(f_asset("texture_albedo", "textures", ".png"), "Albedo map"),
         with_label(f_asset("texture_normal", "textures", ".png"), "Normal map"),
@@ -279,7 +282,7 @@ inline const std::map<std::string, ComponentSchema>& schemas() {
         add({"MeshRenderer", "Rendering", {
             f_asset("mesh_path", "meshes", ".yaml", true, true, "cube", true),
             f_material(),
-            f_float("lod_bias", 0.0f, 0.01f),
+            with_tip(f_float("lod_bias", 1.0f, 0.01f, 0.0f, 100.0f), "Multiplier on the LOD switch distances (1 = as authored)"),
             f_bool("lods_enabled", true),
             f_bool("affects_reflection_probes", true),
         }});
@@ -287,12 +290,12 @@ inline const std::map<std::string, ComponentSchema>& schemas() {
             f_bool("main", true, true),
             f_enum("projection", {"Perspective", "Orthographic"}, true),
             f_float("fov", 60.0f, 0.2f, 1.0f, 179.0f, true),
-            f_float("orthographic_size", 5.0f, 0.05f, 0.01f, 10000.0f),
+            f_float("orthographic_size", 3.0f, 0.05f, 0.01f, 10000.0f),
             f_float("near_clip_plane", 0.1f, 0.01f, 0.0001f, 1000.0f, true),
             f_float("far_clip_plane", 1000.0f, 1.0f, 0.01f, 100000.0f, true),
             f_float("lens", 50.0f, 0.5f, 1.0f, 1000.0f),
-            f_float("aperture", 4.0f, 0.05f, 0.5f, 64.0f),
-            f_float("focus_distance", 10.0f, 0.05f, 0.0f, 10000.0f),
+            with_tip(f_float("aperture", 0.0f, 0.05f, 0.0f, 64.0f), "f-stop; 0 uses the render settings' dof_aperture"),
+            with_tip(f_float("focus_distance", 0.0f, 0.05f, 0.0f, 10000.0f), "Metres; 0 uses the render settings' dof_focus_distance"),
             f_string("focus_object"),
         }});
         add({"DirectionalLight", "Lighting", {
@@ -300,14 +303,14 @@ inline const std::map<std::string, ComponentSchema>& schemas() {
             f_color("color", glm::vec3(1.0f, 0.97f, 0.9f), true),
             f_float("intensity", 1.0f, 0.01f, 0.0f, 1000.0f, true),
             f_bool("cast_shadows", true, true),
-            f_float("shadow_intensity", 0.6f, 0.01f, 0.0f, 1.0f),
+            f_float("shadow_intensity", 1.0f, 0.01f, 0.0f, 1.0f),
         }});
         add({"PointLight", "Lighting", {
             f_color("color", glm::vec3(1.0f), true),
             f_float("intensity", 50.0f, 0.2f, 0.0f, 100000.0f, true),
             f_float("range", 10.0f, 0.05f, 0.0f, 10000.0f, true),
             f_bool("cast_shadows", false, true),
-            f_float("attenuation_constant", 4.0f, 0.05f, 0.1f, 64.0f),
+            f_float("attenuation_constant", 1.0f, 0.05f, 0.1f, 64.0f),
         }, false});
         add({"SpotLight", "Lighting", {
             f_color("color", glm::vec3(1.0f), true),
@@ -316,8 +319,8 @@ inline const std::map<std::string, ComponentSchema>& schemas() {
             f_float("range", 10.0f, 0.05f, 0.0f, 10000.0f, true),
             f_float("inner_angle", 20.0f, 0.2f, 0.0f, 89.0f, true),
             f_float("outer_angle", 30.0f, 0.2f, 0.0f, 89.0f, true),
-            f_bool("cast_shadows", false),
-            f_float("attenuation_constant", 4.0f, 0.05f, 0.1f, 64.0f),
+            f_bool("cast_shadows", true),
+            f_float("attenuation_constant", 1.0f, 0.05f, 0.1f, 64.0f),
         }, false});
         add({"EnvironmentLight", "Lighting", {
             f_color("sky_color", glm::vec3(0.55f, 0.65f, 0.85f), true),
@@ -329,7 +332,7 @@ inline const std::map<std::string, ComponentSchema>& schemas() {
             f_vec3("box_extent", glm::vec3(5.0f), 0.05f, true),
             f_int("resolution", 64, 8, 1024, true),
             f_float("blend_distance", 1.0f, 0.02f, 0.0f, 100.0f),
-            f_int("importance", 0, -100, 100),
+            f_int("importance", 1, -100, 100),
             f_float("intensity", 1.0f, 0.01f, 0.0f, 10.0f),
         }, false});
         add({"SdfRenderer", "Rendering", {
@@ -382,7 +385,7 @@ inline const std::map<std::string, ComponentSchema>& schemas() {
         // and a floating Rigidbody. `size` uses x/y only (the procedural grid's extent).
         add({"WaterBody", "Water", {
             f_enum("mode", {"planar", "flowing"}, true),
-            f_asset("mesh_path", "meshes", ".yaml", true),
+            f_asset("mesh_path", "meshes", ".yaml", true, true),
             f_vec3("size", glm::vec3(20.0f, 20.0f, 0.0f), 0.1f, true),
             f_int("resolution", 48, 1, 512, true),
             f_float("tile_size", 0.0f, 0.5f, 0.0f, 1000.0f),
@@ -420,12 +423,12 @@ inline const std::map<std::string, ComponentSchema>& schemas() {
         add({"CameraController", "Gameplay", {
             f_enum("mode", {"Orbit", "Fly"}, true),
             f_vec3("target", glm::vec3(0.0f), 0.02f),
-            f_float("distance", 10.0f, 0.05f, 0.0f, 10000.0f, true),
-            f_float("yaw_deg", 0.0f, 0.5f),
-            f_float("pitch_deg", 30.0f, 0.5f, -89.0f, 89.0f),
-            f_float("min_distance", 1.0f, 0.05f, 0.0f, 10000.0f),
+            with_tip(f_float("distance", -1.0f, 0.05f, -1.0f, 10000.0f), "-1: from the camera's placement relative to the target"),
+            with_tip(f_float("yaw_deg", 0.0f, 0.5f), "Unset: from the camera's placement relative to the target"),
+            with_tip(f_float("pitch_deg", 0.0f, 0.5f, -89.0f, 89.0f), "Unset: from the camera's placement relative to the target"),
+            f_float("min_distance", 0.5f, 0.05f, 0.0f, 10000.0f),
             f_float("max_distance", 100.0f, 0.5f, 0.0f, 100000.0f),
-            f_float("mouse_sensitivity", 0.2f, 0.005f, 0.0f, 10.0f),
+            f_float("mouse_sensitivity", 0.15f, 0.005f, 0.0f, 10.0f),
             f_float("zoom_speed", 1.0f, 0.01f, 0.0f, 100.0f),
             f_bool("capture_cursor", false, true),
             f_float("auto_rotate_deg_per_sec", 0.0f, 0.1f),
@@ -442,9 +445,11 @@ inline const std::map<std::string, ComponentSchema>& schemas() {
             f_vec3("spin_axis", glm::vec3(0.0f, 0.0f, 1.0f), 0.01f),
             f_float("spin_speed", 90.0f, 0.5f),
         }});
-        add({"FreeMover", "Gameplay", {f_float("move_speed", 5.0f, 0.05f, 0.0f, 1000.0f, true), f_float("smoothing", 0.1f, 0.005f, 0.0f, 1.0f)}});
+        add({"FreeMover", "Gameplay", {f_float("move_speed", 5.0f, 0.05f, 0.0f, 1000.0f, true),
+                                       with_tip(f_float("smoothing", 12.0f, 0.1f, 0.0f, 100.0f), "Follow rate (1/s); 0 snaps")}});
         add({"KinematicController", "Gameplay", {
-            f_float("move_speed", 5.0f, 0.05f, 0.0f, 1000.0f, true), f_float("smoothing", 0.1f, 0.005f, 0.0f, 1.0f),
+            f_float("move_speed", 5.0f, 0.05f, 0.0f, 1000.0f, true),
+            with_tip(f_float("smoothing", 10.0f, 0.1f, 0.0f, 100.0f), "Follow rate (1/s); 0 snaps"),
             f_bool("lock_height", true)}});
         // Defaults mirror the runtime's (toyengine/world/terrain_component.h, terrain_sampler.h):
         // an absent key shows the value the terrain actually uses.

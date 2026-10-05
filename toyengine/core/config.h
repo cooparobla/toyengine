@@ -275,10 +275,10 @@ struct AppConfig {
                 if (r.contains("outline_thickness")) config.render.outline_thickness = r.at("outline_thickness").get_value<float>();
                 if (r.contains("outline_color")) {
                     const auto& c = r.at("outline_color");
-                    if (c.size() >= 4) {
+                    if (c.size() >= 3) {   // [r, g, b] or [r, g, b, a]; alpha defaults to opaque
                         config.render.outline_color = glm::vec4(
                             c.at(0).get_value<float>(), c.at(1).get_value<float>(),
-                            c.at(2).get_value<float>(), c.at(3).get_value<float>());
+                            c.at(2).get_value<float>(), c.size() >= 4 ? c.at(3).get_value<float>() : 1.0f);
                     }
                 }
                 if (r.contains("depth_threshold"))   config.render.depth_threshold   = r.at("depth_threshold").get_value<float>();

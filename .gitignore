@@ -12,6 +12,8 @@ _deps
 CMakeUserPresets.json
 
 build/
+# ...but not the editor's packaging source.
+!editor/build/
 .docs/
 output/
 

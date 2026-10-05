@@ -27,7 +27,7 @@ inline const std::vector<SettingsGroup>& render_settings_groups() {
         const std::vector<std::string> q = {"low", "medium", "high", "ultra"};
         std::vector<SettingsGroup> g;
         g.push_back({"Viewport & Resolution", {
-            startup(f_enum("resolution_mode", {"fixed", "divisor"})),
+            startup(f_enum("resolution_mode", {"fixed", "divisor", "fill"})),
             startup(f_int("render_width", 480, 16, 7680)),
             startup(f_int("render_height", 270, 16, 4320)),
             startup(f_int("scale_divisor", 4, 1, 16)),
@@ -35,9 +35,11 @@ inline const std::vector<SettingsGroup>& render_settings_groups() {
             startup(f_enum("aa_mode", {"off", "fxaa", "smaa", "taa"})),
         }});
         g.push_back({"Quality Tiers", {
-            f_enum("shadow_quality", q), f_enum("ssao_quality", q), f_enum("ssr_quality", q),
-            f_enum("ssgi_quality", q), f_enum("dof_quality", q), f_enum("volumetrics_quality", q),
-            f_enum("sdf_quality", q), f_enum("water_quality", q),
+            // Absent tiers run at High (PixelRenderConfig), so that is what the combo shows.
+            with_default(f_enum("shadow_quality", q), "high"), with_default(f_enum("ssao_quality", q), "high"),
+            with_default(f_enum("ssr_quality", q), "high"), with_default(f_enum("ssgi_quality", q), "high"),
+            with_default(f_enum("dof_quality", q), "high"), with_default(f_enum("volumetrics_quality", q), "high"),
+            with_default(f_enum("sdf_quality", q), "high"), with_default(f_enum("water_quality", q), "high"),
         }});
         g.push_back({"Features", {
             f_bool("shadows_enabled", true),
@@ -46,19 +48,19 @@ inline const std::vector<SettingsGroup>& render_settings_groups() {
             startup(f_bool("transparency_enabled", false)),
             startup(f_bool("refraction_enabled", true)),
             f_bool("sdf_enabled", true),
-            startup(f_bool("bloom_enabled", true)),
+            startup(f_bool("bloom_enabled", false)),
             startup(f_bool("fog_enabled", false)),
             startup(f_bool("volumetrics_enabled", false)),
             startup(f_bool("dof_enabled", false)),
             startup(f_bool("tilt_shift_enabled", false)),
             startup(f_bool("auto_exposure_enabled", false)),
-            f_bool("grading_enabled", false),
+            f_bool("grading_enabled", true),
             f_bool("outline_enabled", true),
-            f_bool("palette_enabled", false),
-            f_bool("dither_enabled", false),
+            f_bool("palette_enabled", true),
+            f_bool("dither_enabled", true),
             f_bool("soft_lighting", false),
             f_bool("texel_aa", true),
-            f_bool("camera_pixel_snap", false),
+            f_bool("camera_pixel_snap", true),
         }});
         g.push_back({"Lighting & Sky", {
             f_float("exposure", 1.0f, 0.01f, 0.0f, 64.0f),
@@ -89,29 +91,29 @@ inline const std::vector<SettingsGroup>& render_settings_groups() {
                 "Fog thickens as exp(-density * distance): starts building right away, soft tail",
                 "Fog follows exp(-(density * distance)^2): clear up close, then closes in quickly (Unity's default)",
             }),
-            f_float("fog_density", 0.03f, 0.001f, 0.0f, 10.0f),
+            f_float("fog_density", 0.02f, 0.001f, 0.0f, 10.0f),
             f_float("fog_linear_start", 5.0f, 0.1f, 0.0f, 100000.0f),
             f_float("fog_linear_end", 60.0f, 0.1f, 0.0f, 100000.0f),
-            listed(f_color("fog_color", glm::vec3(0.6f, 0.66f, 0.75f))),
-            f_float("fog_height_base", -0.5f, 0.05f),
-            f_float("fog_height_falloff", 2.0f, 0.05f),
-            f_float("fog_sky_blend", 0.5f, 0.01f, 0.0f, 1.0f),
+            listed(f_color("fog_color", glm::vec3(0.55f, 0.62f, 0.72f))),
+            f_float("fog_height_base", 0.0f, 0.05f),
+            f_float("fog_height_falloff", 0.0f, 0.05f),
+            f_float("fog_sky_blend", 0.0f, 0.01f, 0.0f, 1.0f),
             f_float("fog_max_opacity", 1.0f, 0.01f, 0.0f, 1.0f),
-            f_float("fog_max_distance", 60.0f, 0.5f, 0.0f, 100000.0f),
+            f_float("fog_max_distance", 150.0f, 0.5f, 0.0f, 100000.0f),
         }});
         g.push_back({"Bloom & Exposure", {
             f_float("bloom_threshold", 1.0f, 0.01f, 0.0f, 64.0f),
             f_float("bloom_soft_knee", 0.5f, 0.01f, 0.0f, 1.0f),
-            f_float("bloom_intensity", 5.0f, 0.05f, 0.0f, 100.0f),
+            f_float("bloom_intensity", 1.0f, 0.05f, 0.0f, 100.0f),
             f_float("bloom_scatter", 0.7f, 0.01f, 0.0f, 1.0f),
-            f_float("auto_exposure_compensation", 0.0f, 0.01f, -16.0f, 16.0f),
+            with_tip(f_float("auto_exposure_compensation", 1.0f, 0.01f, 0.0f, 16.0f), "Multiplier on the metered exposure"),
         }});
         g.push_back({"Stylize", {
             f_float("outline_thickness", 1.0f, 0.05f, 0.0f, 8.0f),
-            listed(f_color("outline_color", glm::vec3(0.0f))),
-            f_float("depth_threshold", 0.1f, 0.001f, 0.0f, 10.0f),
-            f_float("normal_threshold", 0.5f, 0.005f, 0.0f, 2.0f),
-            f_float("dither_strength", 0.08f, 0.005f, 0.0f, 1.0f),
+            listed(f_color4("outline_color", glm::vec4(0.05f, 0.04f, 0.08f, 1.0f))),
+            f_float("depth_threshold", 0.02f, 0.001f, 0.0f, 10.0f),
+            f_float("normal_threshold", 0.75f, 0.005f, 0.0f, 2.0f),
+            f_float("dither_strength", 0.0f, 0.005f, 0.0f, 1.0f),
             startup(root_relative(f_asset("palette", "palettes", ".png"))),
             startup(root_relative(f_asset("grading_lut", "textures", ".png"))),
         }});
@@ -134,11 +136,11 @@ inline std::vector<std::string> render_settings_keys() {
 
 inline const std::vector<SettingsGroup>& project_settings_groups() {
     static const std::vector<SettingsGroup> groups = {
-        {"Window", {f_string("title", "toyengine"), f_int("width", 1280, 64, 16384), f_int("height", 720, 64, 16384),
+        {"Window", {f_string("title", "toyengine"), f_int("width", 1920, 64, 16384), f_int("height", 1080, 64, 16384),
                     f_bool("vsync", true)}},
         {"Physics", {f_vec3("gravity", glm::vec3(0.0f, 0.0f, -9.81f), 0.05f), f_float("fixed_timestep", 1.0f / 60.0f, 0.0005f, 0.0001f, 1.0f)}},
-        {"Jobs", {f_int("worker_threads", 0, 0, 256), f_int("parallel_threshold", 64, 1, 1 << 20)}},
-        {"Output", {f_bool("save_on_exit", false), f_string("filepath", "output/screenshot.png"), f_bool("save_low_res", true)}},
+        {"Jobs", {f_int("worker_threads", 0, 0, 256), f_int("parallel_threshold", 4, 1, 1 << 20)}},
+        {"Output", {f_bool("save_on_exit", true), f_string("filepath", "./output/frame.png"), f_bool("save_low_res", true)}},
     };
     return groups;
 }

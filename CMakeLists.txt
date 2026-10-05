@@ -190,7 +190,7 @@ target_link_libraries(toyengine_tests PRIVATE toyengine::engine)
 # roughly the time of its slowest group. It also means `ctest -R toyengine_math` is an
 # instant, device-free check a dev can run on every save. See test.cpp's file doc for
 # the argument forms the binary accepts.
-foreach(_toy_test_group math config scene ui world water rig yaml_io render_pixel render_ui render_material render_cloth render_terrain render_water render_rig editor_host)
+foreach(_toy_test_group math config scene ui world water rig yaml_io runtime audio render_pixel render_ui render_material render_cloth render_terrain render_water render_rig editor_host)
     add_test(NAME toyengine_${_toy_test_group}
              COMMAND toyengine_tests --group ${_toy_test_group})
 endforeach()
@@ -198,7 +198,8 @@ endforeach()
 # The device-free groups have no business taking seconds; the render groups get a ceiling
 # generous enough for a cold shader cache on a slow GPU but short enough that a hung
 # frame fails instead of hanging the run.
-set_tests_properties(toyengine_math toyengine_config toyengine_scene toyengine_ui toyengine_world toyengine_yaml_io PROPERTIES TIMEOUT 60)
+set_tests_properties(toyengine_math toyengine_config toyengine_scene toyengine_ui toyengine_world toyengine_yaml_io
+                     toyengine_runtime toyengine_audio PROPERTIES TIMEOUT 60)
 set_tests_properties(toyengine_render_pixel toyengine_render_ui toyengine_render_material
                      toyengine_render_cloth toyengine_render_terrain toyengine_editor_host PROPERTIES TIMEOUT 300)
 
@@ -220,16 +221,17 @@ target_include_directories(toyengine_icon PRIVATE ${TOYENGINE_DIR})
 target_link_libraries(toyengine_icon PRIVATE coopa::gfx)
 
 add_executable(toyengine_editor_tests editor/editor_test.cpp)
-add_dependencies(toyengine_editor_tests toyengine_shaders uicoopa_shaders)
+# toyengine: the game binary the build group packages and runs relocated.
+add_dependencies(toyengine_editor_tests toyengine_shaders uicoopa_shaders toyengine)
 target_link_libraries(toyengine_editor_tests PRIVATE toyengine::engine)
 # Device-free groups first (instant), then the ones that build an Engine.
-foreach(_ed_group writer document mesh imm viewport config project editor_shell package hub)
+foreach(_ed_group writer document mesh imm viewport config project editor_shell package hub build)
     add_test(NAME toyengine_editor_${_ed_group}
              COMMAND toyengine_editor_tests --group ${_ed_group})
 endforeach()
 set_tests_properties(toyengine_editor_writer toyengine_editor_document toyengine_editor_mesh
                      toyengine_editor_imm toyengine_editor_viewport toyengine_editor_config toyengine_editor_project PROPERTIES TIMEOUT 60)
-set_tests_properties(toyengine_editor_editor_shell toyengine_editor_package toyengine_editor_hub PROPERTIES TIMEOUT 300)
+set_tests_properties(toyengine_editor_editor_shell toyengine_editor_package toyengine_editor_hub toyengine_editor_build PROPERTIES TIMEOUT 300)
 
 # --- Vulkan/GLFW leak gate ---
 # OFF by default here, unlike uicoopa/pixengine which are clean:

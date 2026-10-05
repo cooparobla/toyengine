@@ -1,10 +1,12 @@
 // toyengine editor -- scenes, meshes, materials and render settings for toyengine projects.
 //
 // Usage:   toyengine_editor [project_dir] [--scene <scene.yaml>] [--new-project <dir>]
-//                          [--package <out_dir>]
+//                          [--package <out_dir>] [--build <dev|ship> [--out <dir>] [--skip-compile]]
 //          (no project: a game project's editor opens its own project; toyengine's opens the
 //           most recent one, else this repository's own assets/)
-//          --package: Build > Package from the command line (no window), then exit.
+//          --package: Build > Package (assets only) from the command line (no window), then exit.
+//          --build:   Build > Build: compile, stage and bundle a relocatable, signed game for this
+//                     platform (Development or Shipping; see editor/build/build_pipeline.h), then exit.
 // Build > Refresh (Shift Ctrl B) rebuilds this editor's own build; when that changed the binary,
 // "Relaunch Editor" exec()s the new one on the same project.
 // Headless smoke run (no visible window):
@@ -29,6 +31,7 @@
 #include <toyengine/core/engine.h>
 
 #include "app/editor_app.h"
+#include "build/build_pipeline.h"
 #include "build/packager.h"
 #include "core/process.h"
 
@@ -70,6 +73,9 @@ int main(int argc, char** argv) {
     fs::path project_dir;
     fs::path scene_arg;
     fs::path package_dir;
+    std::optional<toy::editor::BuildProfile> build_profile;
+    fs::path build_out;
+    bool skip_compile = false;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--scene" && i + 1 < argc) scene_arg = argv[++i];
@@ -77,8 +83,14 @@ int main(int argc, char** argv) {
             project_dir = argv[++i];
             toy::editor::Project::create(project_dir);
         } else if (a == "--package" && i + 1 < argc) package_dir = argv[++i];
+        else if (a == "--build" && i + 1 < argc) {
+            build_profile = toy::editor::parse_profile(argv[++i]);
+            if (!build_profile) { std::cerr << "--build takes dev or ship\n"; return 2; }
+        } else if (a == "--out" && i + 1 < argc) build_out = argv[++i];
+        else if (a == "--skip-compile") skip_compile = true;
         else if (a == "-h" || a == "--help") {
-            std::cout << "usage: toyengine_editor [project_dir] [--scene <scene.yaml>] [--new-project <dir>] [--package <out_dir>]\n";
+            std::cout << "usage: toyengine_editor [project_dir] [--scene <scene.yaml>] [--new-project <dir>] [--package <out_dir>]\n"
+                         "                        [--build <dev|ship> [--out <dir>] [--skip-compile]]\n";
             return 0;
         } else if (!a.empty() && a[0] != '-') project_dir = a;
     }
@@ -103,10 +115,24 @@ int main(int argc, char** argv) {
         project = toy::editor::Project::create(project.root());
     }
 
+    if (build_profile) {
+        toy::editor::BuildRequest req;
+        req.profile = *build_profile;
+        if (!build_out.empty()) req.out_dir = fs::absolute(build_out);
+        req.skip_compile = skip_compile;
+        toy::editor::CommandRunner run([](const std::string& line) { std::cout << line << "\n" << std::flush; });
+        const toy::editor::BuildResult res = toy::editor::run_build(
+            project, toy::editor::BuildSettings::load(project), req, toy::editor::BuildEnvironment::current(), run);
+        if (!res.ok) { std::cerr << "[build] FAILED: " << res.error << "\n"; return 1; }
+        std::cout << "[build] " << res.artifact.string() << "\n";
+        return 0;
+    }
+
     if (!package_dir.empty()) {
         toy::editor::PackageOptions opt;
         opt.out_dir = fs::absolute(package_dir);
         opt.engine_assets = fs::path(ROOT_DIR) / "assets";
+        opt.library_layers = toy::editor::default_library_layers();
 #ifdef TOY_GAME_BINARY
         if (fs::exists(TOY_GAME_BINARY)) opt.game_binary = TOY_GAME_BINARY;
 #endif

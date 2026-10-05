@@ -67,6 +67,21 @@ struct OutputConfig {
 };
 
 /**
+ * @struct AudioConfig
+ * @brief The `audio:` section: output device and default bus volumes (a player's own volume
+ *        choices, saved in UserSettings, override these).
+ */
+struct AudioConfig {
+    bool        enabled     = true;        ///< False: no device at all (everything silent).
+    uint32_t    sample_rate = 48000;
+    std::string device      = "default";   ///< "default", or "null" (no sound card; still mixes).
+    float       master      = 1.0f;
+    float       music       = 0.8f;
+    float       sfx         = 1.0f;
+    float       ui          = 0.8f;
+};
+
+/**
  * @struct JobsConfig
  * @brief Job-system sizing and the per-frame parallel-dispatch threshold.
  */
@@ -108,6 +123,7 @@ struct AppConfig {
     WindowConfig                      window;
     render::PixelRenderConfig         render;
     OutputConfig                      output;
+    AudioConfig                       audio;
     JobsConfig                        jobs;
     coopa::physx::util::PhysicsSettings physics;
 
@@ -460,6 +476,23 @@ struct AppConfig {
             // place to keep in sync.
             if (root.contains("physics")) {
                 config.physics = coopa::physx::util::parse_physics_settings(root.at("physics"));
+            }
+
+            if (root.contains("audio")) {
+                const auto& a = root.at("audio");
+                auto num = [&](const char* k, float& out) {
+                    if (!a.contains(k)) return;
+                    const auto& v = a.at(k);
+                    if (v.is_float_number()) out = static_cast<float>(v.get_value<double>());
+                    else if (v.is_integer()) out = static_cast<float>(v.get_value<int64_t>());
+                };
+                if (a.contains("enabled")) config.audio.enabled = a.at("enabled").get_value<bool>();
+                if (a.contains("sample_rate")) config.audio.sample_rate = static_cast<uint32_t>(a.at("sample_rate").get_value<int64_t>());
+                if (a.contains("device")) config.audio.device = a.at("device").get_value<std::string>();
+                num("master", config.audio.master);
+                num("music", config.audio.music);
+                num("sfx", config.audio.sfx);
+                num("ui", config.audio.ui);
             }
 
             if (root.contains("output")) {

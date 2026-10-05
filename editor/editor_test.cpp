@@ -26,6 +26,7 @@
 #include <glm/gtc/epsilon.hpp>
 #include <iostream>
 #include <random>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -34,6 +35,7 @@
 #include <toyengine/core/engine.h>
 
 #include "app/editor_app.h"
+#include "build/build_pipeline.h"
 #include "build/packager.h"
 #include "../hub/hub_app.h"
 #include "core/process.h"
@@ -5886,15 +5888,15 @@ void test_project_toy_file() {
     expect(before == after, "create() leaves an existing .toy byte-identical");
 
     // config.yaml starts as the engine's own: same settings and comments, only the title and
-    // default scene are the project's.
+    // default scene are the project's -- and a game doesn't save a screenshot on exit.
     auto read = [](const fs::path& f) { std::ifstream in(f); std::vector<std::string> l; for (std::string x; std::getline(in, x);) l.push_back(x); return l; };
     const auto engine_cfg = read(fs::path(ROOT_DIR) / "assets" / "config.yaml");
     const auto project_cfg = read(p.config_path());
     std::vector<std::string> changed;
     for (size_t i = 0; i < std::min(engine_cfg.size(), project_cfg.size()); ++i) if (engine_cfg[i] != project_cfg[i]) changed.push_back(project_cfg[i]);
-    expect(engine_cfg.size() == project_cfg.size() && changed.size() == 2 && changed[0] == "  title: \"Fancy Game\"" &&
-               changed[1] == "  default_scene: \"assets/scenes/main/scene.yaml\"",
-           "a new project's config.yaml is the engine's, with only the title and default scene changed");
+    expect(engine_cfg.size() == project_cfg.size() && changed.size() == 3 && changed[0] == "  title: \"Fancy Game\"" &&
+               changed[1] == "  default_scene: \"assets/scenes/main/scene.yaml\"" && changed[2] == "  save_on_exit: false",
+           "a new project's config.yaml is the engine's, with only the title, default scene and save_on_exit changed");
     int toys = 0;
     for (const auto& e : fs::directory_iterator(root)) toys += e.path().extension() == ".toy";
     expect(toys == 1, "create() adds no second .toy");
@@ -6295,7 +6297,188 @@ void test_hub_project_actions() {
 
 struct TestCase { const char* name; const char* group; void (*fn)(); };
 
+
+// =====================================================================================
+// Group "build" -- Build > Build: settings, staging layers, dependency parsing, and a real
+// relocated Development package that must run with no source tree, Homebrew or SDK in reach.
+// =====================================================================================
+
+void test_build_settings_roundtrip() {
+    const fs::path root = fresh_dir("build_settings");
+    Project project = Project::create(root);
+    BuildSettings d = BuildSettings::load(project);
+    expect(d.product_name == project.name() && d.bundle_id.rfind("com.", 0) == 0, "defaults: the project's name, a com.* bundle id");
+    d.version = "1.2.3";
+    d.macos.sign_identity = "Developer ID Application: Example (TEAM123)";
+    d.macos.notary_profile = "toy-notary";
+    d.macos.dmg = true;
+    d.linux_.tarball = false;
+    d.save(project);
+    const BuildSettings r = BuildSettings::load(project);
+    expect(r.version == "1.2.3" && r.macos.sign_identity == d.macos.sign_identity && r.macos.notary_profile == "toy-notary" &&
+           r.macos.dmg && !r.linux_.tarball, "build_settings.yaml round-trips");
+    expect(fs::exists(root / "build_settings.yaml") && !fs::exists(project.assets() / "build_settings.yaml"),
+           "build settings live outside assets/ (never shipped)");
+    expect(parse_profile("dev") == BuildProfile::Development && parse_profile("ship") == BuildProfile::Shipping &&
+           !parse_profile("release"), "profile names parse");
+}
+
+void test_build_otool_and_ldd_parsers() {
+    const std::string otool_L =
+        "build/game:\n"
+        "\t/opt/homebrew/opt/glfw/lib/libglfw.3.dylib (compatibility version 3.0.0, current version 3.4.0)\n"
+        "\t/System/Library/Frameworks/AppKit.framework/Versions/C/AppKit (compatibility version 45.0.0)\n"
+        "\t@rpath/libcrypto.3.dylib (compatibility version 3.0.0, current version 3.0.0)\n"
+        "\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0)\n";
+    const auto refs = parse_otool_L(otool_L);
+    expect(refs.size() == 4 && refs[0] == "/opt/homebrew/opt/glfw/lib/libglfw.3.dylib" && refs[2] == "@rpath/libcrypto.3.dylib",
+           "otool -L install names parse");
+    expect(!is_system_dep(refs[0], DepPlatform::MacOS) && is_system_dep(refs[1], DepPlatform::MacOS) &&
+           is_system_dep(refs[3], DepPlatform::MacOS), "Homebrew libraries bundle, system ones don't");
+    const std::string otool_l =
+        "Load command 12\n          cmd LC_RPATH\n      cmdsize 32\n         path /opt/homebrew/lib (offset 12)\n"
+        "Load command 13\n      cmd LC_BUILD_VERSION\n  cmdsize 32\n platform 1\n    minos 14.0\n      sdk 14.5\n";
+    const auto rp = parse_otool_rpaths(otool_l);
+    expect(rp.size() == 1 && rp[0] == "/opt/homebrew/lib", "LC_RPATH entries parse");
+    expect(parse_otool_minos(otool_l) == "14.0", "the minimum macOS parses");
+    expect(compare_versions("13.0", "14.0") < 0 && compare_versions("14.2", "14.10") < 0 && compare_versions("14", "14.0") == 0,
+           "dotted versions compare numerically");
+    const std::string ldd =
+        "\tlinux-vdso.so.1 (0x00007ffd)\n"
+        "\tlibglfw.so.3 => /usr/lib/x86_64-linux-gnu/libglfw.so.3 (0x00007f)\n"
+        "\tlibvulkan.so.1 => /lib/x86_64-linux-gnu/libvulkan.so.1 (0x00007f)\n"
+        "\tlibmissing.so.2 => not found\n"
+        "\t/lib64/ld-linux-x86-64.so.2 (0x00007f)\n";
+    const auto e = parse_ldd(ldd);
+    expect(e.size() == 5 && e[1].soname == "libglfw.so.3" && e[1].path == "/usr/lib/x86_64-linux-gnu/libglfw.so.3" &&
+           e[3].path.empty() && e[4].path == "/lib64/ld-linux-x86-64.so.2", "ldd lines parse");
+    expect(!is_system_dep(e[1].path, DepPlatform::Linux) && is_system_dep(e[2].path, DepPlatform::Linux) &&
+           is_system_dep(e[0].soname, DepPlatform::Linux), "Linux: GLFW bundles, the Vulkan loader and C runtime never do");
+    const std::string icd = "{\n  \"ICD\": {\n    \"library_path\": \"../../../lib/libMoltenVK.dylib\",\n    \"api_version\": \"1.4.0\"\n  }\n}\n";
+    const std::string out = rewrite_icd_json(icd, "../../../Frameworks/libMoltenVK.dylib");
+    expect(out.find("\"../../../Frameworks/libMoltenVK.dylib\"") != std::string::npos && out.find("1.4.0") != std::string::npos,
+           "the ICD manifest points at the bundled driver and keeps its api_version");
+}
+
+void test_build_staging_layers_and_shipping_config() {
+    setenv("HOME", tmp_root().c_str(), 1);
+    const fs::path root = fresh_dir("build_layers_src");
+    Project project = Project::create(root);
+    const fs::path out = fresh_dir("build_layers_out");
+    PackageOptions opt;
+    opt.out_dir = out;
+    opt.encode_yaml = false;
+    opt.shipping = true;
+    opt.engine_assets = fs::path(ROOT_DIR) / "assets";
+    opt.library_layers = default_library_layers();
+    const PackageReport rep = package_project(project, opt);
+    expect(rep.ok(), "staging succeeds");
+    const fs::path sh = out / "assets" / "shaders";
+    // A gfxcoopa base shader the engine doesn't override, and a uicoopa UI shader, both merged in.
+    bool gfx_only = false;
+    for (const auto& e : fs::directory_iterator(fs::path(PROJ_DIR) / "gfxcoopa" / "assets" / "shaders")) {
+        if (e.path().extension() != ".spv") continue;
+        if (fs::exists(fs::path(ROOT_DIR) / "assets" / "shaders" / e.path().filename())) continue;
+        gfx_only = fs::exists(sh / e.path().filename());
+        break;
+    }
+    expect(gfx_only, "gfxcoopa's base shaders are merged into the package");
+    bool ui = false;
+    for (const auto& e : fs::directory_iterator(fs::path(PROJ_DIR) / "uicoopa" / "assets" / "shaders")) {
+        if (e.path().extension() == ".spv") { ui = fs::exists(sh / e.path().filename()); break; }
+    }
+    expect(ui, "uicoopa's UI shaders are merged into the package");
+    // The engine overrides a gfxcoopa shader of the same name: the package must carry the engine's.
+    bool precedence_checked = false;
+    for (const auto& e : fs::directory_iterator(fs::path(ROOT_DIR) / "assets" / "shaders")) {
+        if (e.path().extension() != ".spv") continue;
+        const fs::path gfx = fs::path(PROJ_DIR) / "gfxcoopa" / "assets" / "shaders" / e.path().filename();
+        if (!fs::exists(gfx) || fs::file_size(gfx) == fs::file_size(e.path())) continue;
+        expect(fs::file_size(sh / e.path().filename()) == fs::file_size(e.path()),
+               "the engine's " + e.path().filename().string() + " wins over gfxcoopa's (first match, like the runtime)");
+        precedence_checked = true;
+        break;
+    }
+    if (!precedence_checked) std::cout << "  (no differing engine/gfxcoopa shader pair to check precedence on)\n";
+    expect(fs::exists(out / "assets" / "sounds" / "sounds.yaml"), "uicoopa's default UI sounds ship");
+    const Node cfg = coopa::yaml::load_document(out / "assets" / "config.yaml");
+    expect(cfg.contains("output") && !cfg["output"]["save_on_exit"].get_value<bool>(), "a shipping config never saves a screenshot on exit");
+}
+
+/**
+ * @brief The real thing: a Development build of a fresh project, launched from an unrelated
+ *        directory with a scrubbed environment, must load nothing from the source tree or
+ *        Homebrew.
+ */
+void test_build_dev_relocated() {
+    setenv("HOME", tmp_root().c_str(), 1);
+    const fs::path game = fs::path(ROOT_DIR) / "build" / "toyengine";
+    if (!fs::exists(game)) { expect(false, "build/toyengine exists (build the toyengine target first)"); return; }
+    const fs::path root = fresh_dir("build_reloc_src");
+    Project project = Project::create(root);
+    const fs::path out = fresh_dir("build_reloc_out");
+    BuildRequest req;
+    req.profile = BuildProfile::Development;
+    req.out_dir = out;
+    req.skip_compile = true;
+    req.binary_override = game;
+    std::vector<std::string> log;
+    CommandRunner run([&](const std::string& l) { log.push_back(l); });
+    const BuildResult res = run_build(project, BuildSettings::load(project), req, BuildEnvironment::current(), run);
+    if (!res.ok) for (const auto& l : log) std::cout << "    " << l << "\n";
+    expect(res.ok, "the Development build succeeds (" + res.error + ")");
+    if (!res.ok) return;
+    expect(fs::exists(res.executable), "the packaged executable exists");
+#if defined(__APPLE__)
+    expect(res.artifact.extension() == ".app" && fs::exists(res.artifact / "Contents" / "Info.plist"), "a .app with an Info.plist");
+    for (const auto& e : fs::directory_iterator(res.artifact / "Contents" / "Frameworks")) {
+        for (const std::string& ref : parse_otool_L(run.run("otool -L " + shell_quote(e.path().string()), false).output)) {
+            expect(is_system_dep(ref, DepPlatform::MacOS) || ref.rfind("@rpath/", 0) == 0,
+                   e.path().filename().string() + " references only system libraries or @rpath (" + ref + ")");
+        }
+    }
+    expect(run.run("codesign --verify --deep --strict " + shell_quote(res.artifact.string()), false).ok(), "the .app's signature verifies");
+    expect(fs::exists(res.artifact / "Contents" / "Frameworks" / "libMoltenVK.dylib") &&
+           fs::exists(res.artifact / "Contents" / "Resources" / "vulkan" / "icd.d" / "MoltenVK_icd.json"),
+           "MoltenVK and its ICD manifest are bundled");
+    const std::string trace = "DYLD_PRINT_LIBRARIES=1";
+#else
+    const std::string trace = "LD_DEBUG=libs";
+#endif
+    // Run it: a scrubbed environment, an unrelated working directory, its own HOME.
+    const fs::path cwd = fresh_dir("build_reloc_cwd");
+    const fs::path home = fresh_dir("build_reloc_home");
+    const CommandResult r = run.run("cd " + shell_quote(cwd.string()) + " && env -i PATH=/usr/bin:/bin HOME=" + shell_quote(home.string()) +
+                                    " HEADLESS=1 MAX_FRAMES=20 SFX_DEVICE=null " + trace + " " + shell_quote(res.executable.string()), false);
+    if (r.exit_code != 0) std::cout << r.output.substr(r.output.size() > 4000 ? r.output.size() - 4000 : 0) << "\n";
+    expect(r.exit_code == 0, "the packaged game runs relocated and exits cleanly");
+    expect(r.output.find("Layout : packaged") != std::string::npos, "it detects its packaged layout");
+    // Only the runtime's resolved roots line names asset/shader directories; none may be the checkout.
+    std::istringstream lines(r.output);
+    std::string line;
+    while (std::getline(lines, line)) {
+        if (line.find("Assets :") != std::string::npos || line.find("Shaders:") != std::string::npos) {
+            expect(line.find(std::string(ROOT_DIR) + "/assets") == std::string::npos && line.find(std::string(PROJ_DIR) + "/gfxcoopa") == std::string::npos,
+                   "no asset/shader root in the source tree: " + line);
+        }
+        if (line.find("dyld[") != std::string::npos || line.find("calling init") != std::string::npos) {
+            expect(line.find("/opt/homebrew") == std::string::npos && line.find("/usr/local/") == std::string::npos,
+                   "no library loads from Homebrew: " + line);
+        }
+    }
+    expect(!fs::exists(cwd / "output"), "nothing is written into the working directory");
+    bool logged = false;
+    for (auto it = fs::recursive_directory_iterator(home); it != fs::recursive_directory_iterator(); ++it) {
+        logged |= it->path().extension() == ".log";
+    }
+    expect(logged, "a log file is written under the player's HOME");
+}
+
 const TestCase kTests[] = {
+    {"build_settings_roundtrip",             "build",    test_build_settings_roundtrip},
+    {"build_otool_and_ldd_parsers",          "build",    test_build_otool_and_ldd_parsers},
+    {"build_staging_layers_and_shipping_config", "build", test_build_staging_layers_and_shipping_config},
+    {"build_dev_relocated",                  "build",    test_build_dev_relocated},
     {"writer_scalars_roundtrip",             "writer",   test_writer_scalars_roundtrip},
     {"writer_key_order_and_flow",            "writer",   test_writer_key_order_and_flow},
     {"writer_roundtrips_every_asset",        "writer",   test_writer_roundtrips_every_asset},

@@ -129,12 +129,53 @@ Open it from the tab icon, or click the scene's name at the top of the Hierarchy
   **Fixed timestep** (how often physics updates, in seconds). A scene's own values apply when
   it starts or plays.
 
-## Package the project
+## Build the game
+
+**Build** turns your project into a game that runs on its own on any computer with the same
+operating system: a `.app` on macOS, or a folder on Linux. Players don't need toyengine,
+Homebrew or the Vulkan SDK.
+
+1. Choose **Build > Build Settings...** once. Set the **Product name**, **Version** and
+   **Bundle identifier** (for example `com.yourstudio.yourgame`), and optionally an **Icon**
+   (a square PNG). Click **Save**. The settings go in `build_settings.yaml` beside your project
+   file, never into the game.
+2. Choose **Build > Build (Development)** to make a version you can test and share with
+   testers. It builds quickly and keeps debug options available.
+3. Choose **Build > Build (Shipping)** for the version players get. It recompiles the game
+   optimized, encodes your assets and turns debug options off.
+
+A **Build Project** window shows progress. When the build finishes, click **Run** to start
+it, or **Show in Finder** to find it. Builds go in `build/dist/development` or
+`build/dist/shipping` inside your project. **Build and Run** does a Development build and
+starts it.
+
+### Signing on macOS
+
+A Development build is signed ad-hoc: it runs on your Mac. For other people's Macs, a
+Shipping build must be signed with a **Developer ID** and notarized by Apple:
+
+1. Install a *Developer ID Application* certificate from your Apple Developer account.
+2. Run `xcrun notarytool store-credentials toy-notary` once in Terminal, and follow its
+   prompts.
+3. In **Build Settings**, click **Detect identities**, pick yours (or leave **auto**), and set
+   **Notary profile** to `toy-notary`.
+
+The Shipping build then signs, notarizes and staples the app, and makes a `.zip` to hand out
+(and a `.dmg` if you turn that on). Without an identity it still builds, signed ad-hoc, and
+the Console warns that other Macs will block it.
+
+> [!NOTE]
+> A game writes its log and crash reports to `~/Library/Logs/<bundle id>/` on macOS
+> (`~/.local/state/<name>/logs` on Linux). Players' saved settings, such as volume, go in
+> `~/Library/Application Support/<bundle id>/`.
+
+## Package the assets only
 
 ![The Package Project window with the Output folder and Keep .yaml copies options](../images/editor/package_dialog.jpg)
 
-Packaging makes a copy of your project that is ready to ship, with its scene and asset files
-encoded so they can't be read as plain text.
+Packaging copies only your project's assets, with its scene and asset files encoded so they
+can't be read as plain text. There is no program in it; use [Build](#build-the-game) to make a
+game you can hand out.
 
 1. Choose **File > Package Project (.caml)...**, or click **Package Project...** on the
    **Output** tab.
@@ -152,6 +193,6 @@ holds a copy of your assets and, if the game program has been built, the game it
 
 ---
 
-Sources: `editor/schema/settings_schema.h`, `editor/app/ui/properties.inl`, `editor/app/ui/topbar.inl`, `editor/app/editor_app.h`, `editor/core/scene_document.h`, `editor/build/packager.h`, `editor/app/project.h`
+Sources: `editor/schema/settings_schema.h`, `editor/app/ui/properties.inl`, `editor/app/ui/topbar.inl`, `editor/app/editor_app.h`, `editor/core/scene_document.h`, `editor/build/packager.h`, `editor/build/build_pipeline.h`, `editor/build/build_settings.h`, `editor/app/ui/build.inl`, `editor/app/project.h`
 
 Previous: [UI designer](ui-designer.md) | Next: [Shortcuts](shortcuts.md)

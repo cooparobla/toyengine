@@ -121,7 +121,8 @@
 
     /** @brief Does the viewport show the private preview scene (mesh / material / texture assets)? */
     bool asset_view_() const {
-        return active_type_ == AssetType::Mesh || active_type_ == AssetType::Material || active_type_ == AssetType::Texture;
+        return active_type_ == AssetType::Mesh || active_type_ == AssetType::Material || active_type_ == AssetType::Texture ||
+               active_type_ == AssetType::Audio;
     }
 
     /** @brief A Blender area header strip at the top of an area (rounded top corners). */

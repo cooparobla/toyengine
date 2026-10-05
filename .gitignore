@@ -12,6 +12,7 @@ _deps
 CMakeUserPresets.json
 
 build/
+build-ship/
 # ...but not the editor's packaging source.
 !editor/build/
 .docs/

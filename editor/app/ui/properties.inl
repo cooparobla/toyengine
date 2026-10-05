@@ -36,6 +36,8 @@
             tabs = {{PropTab::Material, I::Material, "Material\nThe material asset and its lookdev preview"}};
         } else if (active_type_ == AssetType::Texture) {
             tabs = {{PropTab::Data, I::Image, "Texture\nThe texture asset"}};
+        } else if (active_type_ == AssetType::Audio) {
+            tabs = {{PropTab::Data, I::Play, "Sound\nThe sound's import settings and a preview"}};
         } else if (active_type_ == AssetType::UI) {
             tabs = {{PropTab::Canvas, I::UiCanvas, "Canvas\nPreview resolution, the canvas's scaling, the theme"},
                     {PropTab::Bindings, I::Link, "Bindings\nThe named widgets game code reaches (UiHandle), and their signals"}};
@@ -105,6 +107,7 @@
         }
         else if (active_type_ == AssetType::Material) draw_material_asset_props_(ctx);
         else if (active_type_ == AssetType::Texture) draw_texture_properties_(ctx);
+        else if (active_type_ == AssetType::Audio) draw_audio_properties_(ctx);
         else if (active_type_ == AssetType::Mesh && prop_tab_ == PropTab::Data) draw_mesh_asset_props_(ctx);
         else switch (prop_tab_) {
             case PropTab::Tool:       draw_tool_tab_(ctx); break;
@@ -186,6 +189,7 @@
             case AssetType::Mesh: return mesh_.name;
             case AssetType::Material: return material_.open() ? fs::path(material_.ref).filename().string() : std::string("material");
             case AssetType::Texture: return active_path_.filename().string();
+            case AssetType::Audio: return active_path_.filename().string();
             case AssetType::UI: return doc_.scene_name();
             default: return "";
         }
@@ -332,6 +336,47 @@
             // TODO(texture-editor): channel / mip views, import settings (sRGB, filtering,
             // compression), resizing and painting go here -- see refresh_texture_preview_().
             ctx.label_dim("Texture editing is not available yet.");
+        }
+    }
+
+    /** @brief A sound: file info, Preview / Stop, and its .import sidecar (how it plays by default). */
+    void draw_audio_properties_(imm::Context& ctx) {
+        using I = imm::Icon;
+        if (ctx.collapsing_header("Sound", true, nullptr, I::Play)) {
+            ctx.label(active_path_.filename().string());
+            ctx.label_dim(project_.relative(active_path_));
+            std::error_code ec;
+            const auto bytes = fs::file_size(active_path_, ec);
+            if (!ec) ctx.label_dim(std::to_string(bytes / 1024) + " KB on disk");
+            const bool playing = audio_preview_.is_valid() && engine_.audio().engine().is_voice_active(audio_preview_);
+            if (ctx.button(playing ? "Restart" : "Preview", 110, true, I::Play)) preview_audio();
+            ctx.same_line();
+            if (ctx.button("Stop", 90, playing, I::Stop)) stop_audio_preview();
+            if (!engine_.audio().has_output()) ctx.label_dim("No audio output device -- previews are silent.");
+        }
+        if (ctx.collapsing_header("Import Settings", true, nullptr, I::Gear)) {
+            auto& s = audio_import_;
+            bool changed = false;
+            changed |= ctx.slider_float("Volume", &s.volume, 0.0f, 2.0f);
+            changed |= ctx.slider_float("Pitch", &s.pitch, 0.25f, 4.0f);
+            changed |= ctx.property_bool("Loop", &s.loop);
+            changed |= ctx.property_bool("Force Mono", &s.force_mono);
+            ctx.tooltip("Downmix to one channel at load -- required for a sound that plays positioned in 3D");
+            changed |= ctx.property_bool("Spatialize", &s.spatialize);
+            static const std::vector<std::string> buses = {"Master", "Music", "SFX", "UI"};
+            int bus = 0;
+            for (size_t i = 0; i < buses.size(); ++i) if (buses[i] == s.default_bus) bus = static_cast<int>(i);
+            if (ctx.combo("Default Bus", &bus, buses)) { s.default_bus = buses[static_cast<size_t>(bus)]; changed = true; }
+            if (changed) audio_import_dirty_ = true;
+            if (ctx.button("Save Import Settings", 180, audio_import_dirty_, I::Save)) {
+                try {
+                    s.save(active_path_.string());
+                    audio_import_dirty_ = false;
+                    log_info("Saved " + project_.relative(active_path_) + ".import");
+                } catch (const std::exception& e) {
+                    log_error(std::string("Save import settings failed: ") + e.what());
+                }
+            }
         }
     }
 

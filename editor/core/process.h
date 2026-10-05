@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -26,9 +27,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#if defined(__APPLE__)
-#include <mach-o/dyld.h>
-#endif
+#include <toyengine/core/runtime_paths.h>
 
 extern char** environ;
 
@@ -50,17 +49,7 @@ inline std::string tool_path_prefix() {
 }
 
 /** @brief The running executable's absolute path (empty if it can't be found). */
-inline std::filesystem::path current_executable() {
-    std::error_code ec;
-#if defined(__APPLE__)
-    char buf[4096];
-    uint32_t size = sizeof(buf);
-    if (_NSGetExecutablePath(buf, &size) == 0) return std::filesystem::weakly_canonical(buf, ec);
-    return {};
-#else
-    return std::filesystem::read_symlink("/proc/self/exe", ec);
-#endif
-}
+inline std::filesystem::path current_executable() { return toy::core::executable_path(); }
 
 /**
  * @class Task
@@ -139,13 +128,58 @@ public:
         return true;
     }
 
+    /**
+     * @brief A C++ job's view of its Task: where its log lines go, whether cancel() was asked,
+     *        and the slot a child process it spawns registers in (own process group) so cancel()
+     *        can stop it -- see CommandRunner (editor/build/deps.h).
+     */
+    struct JobContext {
+        std::function<void(const std::string&)> log;
+        const std::atomic<bool>* cancelled = nullptr;
+        std::atomic<pid_t>* child = nullptr;
+    };
+
+    /**
+     * @brief Starts `body` on the task's thread (a multi-step job such as Build): its lines
+     *        collect like a command's, its return value is the exit code. False if busy.
+     */
+    bool start(std::string title, std::function<int(JobContext&)> body) {
+        if (running()) return false;
+        if (thread_.joinable()) thread_.join();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            title_ = std::move(title);
+            lines_.clear();
+        }
+        exit_code_ = -1;
+        cancelled_ = false;
+        pid_ = 0;
+        running_ = true;
+        ++generation_;
+        thread_ = std::thread([this, body = std::move(body)] {
+            JobContext ctx;
+            ctx.log = [this](const std::string& l) { append_(l); };
+            ctx.cancelled = &cancelled_;
+            ctx.child = &pid_;
+            int code = 1;
+            try {
+                code = body(ctx);
+            } catch (const std::exception& e) {
+                append_(std::string("error: ") + e.what());
+            }
+            exit_code_ = cancelled_ ? 130 : code;
+            pid_ = 0;
+            running_ = false;
+        });
+        return true;
+    }
+
     /** @brief Stops the running command and everything it started (SIGTERM to its group). */
     void cancel() {
+        if (!running_) return;
+        cancelled_ = true;
         const pid_t pid = pid_;
-        if (running_ && pid > 0) {
-            cancelled_ = true;
-            ::kill(-pid, SIGTERM);
-        }
+        if (pid > 0) ::kill(-pid, SIGTERM);
     }
 
     /** @brief Blocks until the current command finishes (tests, shutdown). */

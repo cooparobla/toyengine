@@ -411,6 +411,9 @@ public:
         quoted += "\"";
         set_line("window", "title", quoted);
         set_line("scene", "default_scene", "\"assets/scenes/main/scene.yaml\"");
+        // A game should not write a screenshot every time it quits (the engine repo's own config
+        // keeps it on: its tests and capture workflow rely on it).
+        set_line("output", "save_on_exit", "false");
         return text;
     }
 

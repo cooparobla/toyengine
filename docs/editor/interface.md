@@ -54,7 +54,7 @@ or while the game is playing.
 | **New Project...** | | Creates a new project with a starter scene and switches to it |
 | **Open Project...** | | Opens another project folder |
 | **Recent Projects** | | The last 8 projects you opened |
-| **Package Project (.caml)...** | | Makes a copy of the project that is ready to ship. See [Project settings](project-settings.md#package-the-project). |
+| **Package Project (.caml)...** | | Copies only the project's assets, encoded. To make a game you can hand out, use **Build** instead. See [Project settings](project-settings.md#build-the-game). |
 | **Quit** | **Ctrl+Q** | Closes the editor |
 
 ### Edit
@@ -82,6 +82,11 @@ or while the game is playing.
 
 | Item | What it does |
 |---|---|
+| **Build (Development)** | Makes a standalone game for this computer's platform that you can test and share. See [Build the game](project-settings.md#build-the-game). |
+| **Build (Shipping)** | Makes the version players get: optimized, assets encoded, debug options off, and on macOS signed and notarized when Build Settings has a signing identity and notary profile |
+| **Build and Run** | A Development build, then starts it |
+| **Build Settings...** | Product name, version, bundle id, icon and signing, saved in `build_settings.yaml` |
+| **Package Assets (.caml)...** | Only the encoded `assets/` folder, with no program |
 | **Refresh** (**Shift+Ctrl+B**) | Rebuilds this project's game and editor, so changes to its C++ in `src/` take effect, for example after editing them in VS Code. Any running game stops first. |
 
 While it builds, a **Build Project** window shows the build output and blocks the editor until

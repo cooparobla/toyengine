@@ -10,6 +10,7 @@
 #   toyhub forget <dir>                stop listing a project (its files stay)
 #   toyhub delete <dir> [--yes]        move a project's folder to the Trash and stop listing it
 #   toyhub build|run|editor|package <dir> [args...]   run that project's script
+#                                      (package <dir> [dev|ship|assets] [out]: Build for this platform)
 #   toyhub open <dir>                  build if needed, then launch the editor detached
 #   toyhub upgrade <dir> [--ref R]     re-pin the engine (default: this checkout's HEAD)
 #   toyhub link <dir> [ENGINE_DIR]     build against a local engine checkout (default: this one)

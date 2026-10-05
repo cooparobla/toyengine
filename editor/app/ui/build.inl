@@ -5,6 +5,10 @@
 // the build log; compiler errors are listed (click one to open it in VS Code / the default app)
 // and also go to the Console. A build that changed the editor binary offers to relaunch it,
 // since new C++ only loads in a new process.
+//
+// Build > Build (Development / Shipping): compiles the game, stages its assets and bundles a
+// relocatable, signed package for this platform (editor/build/build_pipeline.h), in the same
+// modal. Build Settings edits <project>/build_settings.yaml (name, version, bundle id, signing).
 
 public:
     /**
@@ -27,6 +31,7 @@ public:
     void build_refresh(const std::string& command = {}) {
         if (build_task_.running()) return;
         stop();   // the running game holds the old code
+        build_kind_ = BuildKind::Refresh;
         build_diags_.clear();
         build_relaunch_offered_ = false;
         const fs::path exe = current_executable();
@@ -41,6 +46,42 @@ public:
         build_gen_ = build_task_.generation();
         pending_modal_ = "Build Project";
         log_info("Build > Refresh: building " + project_.name() + "...");
+    }
+
+    /**
+     * @brief Starts Build > Build for `profile` (in the background, the Build modal streaming
+     *        its log). `run_after`: launch the built game when it succeeds. `req` overrides the
+     *        output / compile step (tests).
+     */
+    void build_game(BuildProfile profile, bool run_after = false, BuildRequest req = {}) {
+        if (build_task_.running()) return;
+        stop();
+        build_diags_.clear();
+        build_relaunch_offered_ = false;
+        build_kind_ = BuildKind::Game;
+        build_run_after_ = run_after;
+        req.profile = profile;
+        const BuildSettings settings = BuildSettings::load(project_);
+        build_settings_snapshot_ = settings;
+        auto result = std::make_shared<BuildResult>();
+        build_game_result_ = result;
+        const Project project = project_;
+        build_task_.start(std::string("Build ") + settings.product_name + " (" + profile_name(profile) + ")",
+                          [project, settings, req, result](Task::JobContext& job) {
+                              CommandRunner run(job);
+                              *result = run_build(project, settings, req, BuildEnvironment::current(), run);
+                              return result->ok ? 0 : 1;
+                          });
+        build_log_.follow();
+        build_gen_ = build_task_.generation();
+        pending_modal_ = "Build Project";
+        log_info(std::string("Build: building ") + settings.product_name + " (" + profile_name(profile) + ")...");
+    }
+
+    /** @brief The last Build > Build's outcome (empty until one finishes). */
+    std::optional<BuildResult> last_build_result() const {
+        if (build_task_.running() || !build_game_result_) return std::nullopt;
+        return *build_game_result_;
     }
 
     const Task& build_task() const { return build_task_; }
@@ -59,8 +100,20 @@ private:
     void draw_build_menu_(imm::Context& ctx) {
         using I = imm::Icon;
         if (ctx.begin_menu("Build")) {
-            if (ctx.menu_item("Refresh", "Shift Ctrl B", nullptr, !build_task_.running(), I::Restart)) build_refresh();
+            const bool idle = !build_task_.running();
+            if (ctx.menu_item("Build (Development)", "", nullptr, idle, I::Package)) build_game(BuildProfile::Development);
+            ctx.tooltip(std::string("A standalone ") + host_platform_name() + " build to test and share: plain assets, "
+                        "debug hooks on, signed ad-hoc");
+            if (ctx.menu_item("Build (Shipping)", "", nullptr, idle, I::Package)) build_game(BuildProfile::Shipping);
+            ctx.tooltip("The build players get: Release, encoded assets, no debug hooks; Developer ID signed and "
+                        "notarized on macOS when configured in Build Settings");
+            if (ctx.menu_item("Build and Run", "", nullptr, idle, I::Play)) build_game(BuildProfile::Development, true);
+            if (ctx.menu_item("Build Settings...", "", nullptr, true, I::Gear)) open_build_settings_();
+            ctx.menu_separator();
+            if (ctx.menu_item("Refresh", "Shift Ctrl B", nullptr, idle, I::Restart)) build_refresh();
             ctx.tooltip("Rebuild this project's game and editor so src/ changes made outside the editor take effect");
+            if (ctx.menu_item("Package Assets (.caml)...", "", nullptr, true, I::Package)) open_package_dialog_();
+            ctx.tooltip("Only the encoded assets/ folder, no executable");
             ctx.end_menu();
         }
     }
@@ -82,6 +135,15 @@ private:
             const std::string where = d.file + (d.line > 0 ? ":" + std::to_string(d.line) : "");
             if (d.error) { ++errors; log_error("Build: " + where + ": " + d.message); }
             else { ++warnings; log_warn("Build: " + where + ": " + d.message); }
+        }
+        if (build_kind_ == BuildKind::Game) {
+            if (build_task_.cancelled()) { log_warn("Build cancelled"); return; }
+            const BuildResult r = build_game_result_ ? *build_game_result_ : BuildResult{};
+            for (const auto& w : r.warnings) log_warn("Build: " + w);
+            if (!r.ok) { log_error("Build failed: " + r.error); return; }
+            log_info("Build succeeded: " + r.artifact.string() + (r.archive.empty() ? std::string() : " (" + r.archive.filename().string() + ")"));
+            if (build_run_after_) run_built_game_(r);
+            return;
         }
         if (build_task_.cancelled()) {
             log_warn("Build cancelled");
@@ -110,12 +172,20 @@ private:
         // Status line.
         std::string head;
         glm::vec4 col = st.text;
+        const bool game = build_kind_ == BuildKind::Game;
+        const BuildResult game_res = game && build_game_result_ && !running ? *build_game_result_ : BuildResult{};
         if (running) {
             static const char* spin[] = {"|", "/", "-", "\\"};
-            head = std::string(spin[(engine_.frame_count() / 8) % 4]) + "  Building " + project_.name() + " ...";
+            head = std::string(spin[(engine_.frame_count() / 8) % 4]) + "  " + build_task_.title() + " ...";
         } else if (build_task_.cancelled()) {
             head = "Build cancelled";
             col = st.warning;
+        } else if (game) {
+            head = game_res.ok ? "Built " + game_res.artifact.filename().string() +
+                                     (game_res.signed_with.empty() || game_res.signed_with == "n/a" ? std::string()
+                                          : "  --  signed " + game_res.signed_with + (game_res.notarized ? ", notarized" : ""))
+                               : "Build failed -- " + game_res.error;
+            col = game_res.ok ? glm::vec4(0.45f, 0.85f, 0.45f, 1.0f) : st.error;
         } else if (ok) {
             head = build_relaunch_offered_ ? "Build succeeded -- the editor was rebuilt" : "Build succeeded -- already up to date";
             col = glm::vec4(0.45f, 0.85f, 0.45f, 1.0f);
@@ -162,6 +232,21 @@ private:
         imm::Box b{bar.right() - bw, bar.y, bw, bar.h};
         if (running) {
             if (build_button_(ctx, "Cancel Build", b)) build_task_.cancel();
+        } else if (game) {
+            if (build_button_(ctx, "Close", b, !game_res.ok)) ctx.close_modal();
+            if (game_res.ok) {
+                b.x -= bw + 8;
+                if (build_button_(ctx, "Run", b, true)) { ctx.close_modal(); run_built_game_(game_res); }
+                b.x -= bw + 8;
+                if (build_button_(ctx, "Show in Finder", b)) reveal_in_file_browser_(game_res.archive.empty() ? game_res.artifact : game_res.archive);
+            }
+            b.x -= bw + 8;
+            if (build_button_(ctx, "Copy Log", b)) {
+                std::string all;
+                for (const auto& l : build_task_.lines()) all += l + "\n";
+                if (ctx.input().set_clipboard) ctx.input().set_clipboard(all);
+                log_info("Build log copied to the clipboard");
+            }
         } else {
             if (build_relaunch_offered_) {
                 if (build_button_(ctx, "Relaunch Editor", b, true)) { ctx.close_modal(); relaunch_after_build(); }
@@ -198,6 +283,88 @@ private:
         return clicked;
     }
 
+    /** @brief Launches a built game detached (Build and Run / Run). */
+    void run_built_game_(const BuildResult& r) {
+        if (!r.ok) return;
+        const std::string name = build_settings_snapshot_ ? build_settings_snapshot_->file_name() : r.executable.filename().string();
+        launch_detached(artifact_launch_command(r.artifact, name), project_.root() / ".toyeditor" / "game_run.log");
+        log_info("Running " + r.artifact.filename().string());
+    }
+
+    static void reveal_in_file_browser_(const fs::path& p) {
+#if defined(__APPLE__)
+        [[maybe_unused]] const int rc = std::system(("open -R " + shell_quote(p.string())).c_str());
+#else
+        open_with_system(p.parent_path());
+#endif
+    }
+
+    void open_build_settings_() {
+        build_settings_edit_ = BuildSettings::load(project_);
+        sign_identities_.clear();
+        pending_modal_ = "Build Settings";
+    }
+
+    void draw_build_settings_modal_(imm::Context& ctx) {
+        if (!ctx.begin_modal("Build Settings", {640, 0})) return;
+        BuildSettings& s = build_settings_edit_;
+        ctx.label(std::string("Platform: ") + host_platform_name() + " (" + host_arch_name() + ") -- builds target this machine");
+        ctx.separator();
+        ctx.input_text("Product name", &s.product_name);
+        ctx.input_text("Version", &s.version);
+        ctx.input_text("Build number", &s.build_number);
+        ctx.input_text("Bundle identifier", &s.bundle_id);
+        ctx.input_text("Copyright", &s.copyright);
+        ctx.input_text("Icon (PNG)", &s.icon_png);
+        ctx.tooltip("Project-relative square PNG, ideally 1024x1024; empty uses the toyengine icon");
+        ctx.input_text("Output folder", &s.output_dir);
+        ctx.input_text("Asset key (shipping)", &s.caml_key);
+        ctx.tooltip("Passphrase compiled into a Shipping build to decode its .caml assets; empty uses the default");
+#if defined(__APPLE__)
+        ctx.separator();
+        ctx.label("macOS signing (Shipping)");
+        ctx.input_text("Signing identity", &s.macos.sign_identity);
+        ctx.tooltip("\"auto\": the first Developer ID Application identity in your keychain; \"-\": ad-hoc");
+        if (ctx.button("Detect identities", 160)) {
+            CommandRunner run;
+            sign_identities_ = list_sign_identities(run);
+            if (sign_identities_.empty()) sign_identities_.push_back("(none found -- Shipping builds will be signed ad-hoc)");
+        }
+        for (const auto& id : sign_identities_) {
+            if (ctx.selectable(id, id == s.macos.sign_identity) && id.rfind("(", 0) != 0) s.macos.sign_identity = id;
+        }
+        ctx.input_text("Notary profile", &s.macos.notary_profile);
+        ctx.tooltip("A notarytool keychain profile, created once with:\n  xcrun notarytool store-credentials <profile>");
+        ctx.property_bool("Notarize", &s.macos.notarize);
+        ctx.property_bool("Also make a .dmg", &s.macos.dmg);
+        ctx.input_text("Minimum macOS", &s.macos.min_version);
+        ctx.input_text("Entitlements (.plist)", &s.macos.entitlements);
+#else
+        ctx.separator();
+        ctx.property_bool("Make a .tar.gz (Shipping)", &s.linux_.tarball);
+#endif
+        ctx.separator();
+        if (ctx.button("Save", 110)) {
+            try {
+                s.save(project_);
+                log_info("Saved " + std::string(BuildSettings::k_file_name));
+                ctx.close_modal();
+            } catch (const std::exception& e) {
+                log_error(std::string("Save build settings failed: ") + e.what());
+            }
+        }
+        ctx.same_line();
+        if (ctx.button("Cancel", 100)) ctx.close_modal();
+        ctx.end_modal();
+    }
+
+    enum class BuildKind { Refresh, Game };
+    BuildKind build_kind_ = BuildKind::Refresh;
+    bool build_run_after_ = false;
+    std::shared_ptr<BuildResult> build_game_result_;
+    std::optional<BuildSettings> build_settings_snapshot_;
+    BuildSettings build_settings_edit_;
+    std::vector<std::string> sign_identities_;
     Task build_task_;
     int build_gen_ = 0;
     std::vector<Diagnostic> build_diags_;

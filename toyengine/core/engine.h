@@ -50,6 +50,13 @@
 
 #include <toyengine/core/branding.h>
 #include <toyengine/core/config.h>
+#include <toyengine/core/runtime_paths.h>
+#include <toyengine/core/user_settings.h>
+#include <toyengine/audio/audio_components.h>
+#include <toyengine/audio/audio_system.h>
+#include <sfxcoopa/sfx_yaml.h>
+#include <uicoopa/audio/audio_yaml.h>
+#include <uicoopa/audio/sound_library.h>
 #include <toyengine/render/pixel_render_config.h>
 #include <toyengine/render/pixel_render_pipeline.h>
 #include <uicoopa/layout/canvas.h>
@@ -206,6 +213,7 @@ public:
         // no vertex skinning in this engine), referenced from a scene's `Animator` component.
         // Must precede load_scene(), like every other parser registration above.
         coopa::anim::register_animation_components(assets_);
+        init_audio_();
         // Project modules (TOY_MODULE in a project's src/, see module.h) last, so they can
         // build on -- or replace -- any parser registered above.
         for (const Module& m : modules()) {
@@ -478,14 +486,18 @@ public:
     coopa::asset::AssetManager&   assets()        { return assets_; }
     coopa::scene::SceneManager&   scene_manager() { return scene_mgr_; }
     const AppConfig&              config() const  { return config_; }
+    /// The engine's audio: buses (Master/Music/SFX/UI), one-shots, pause. See audio_system.h.
+    audio::AudioSystem&           audio()          { return *audio_; }
     const std::filesystem::path&  project_root() const { return options_.project_root; }
     /// Asset search roots, highest priority first: <project_root>/assets, then the engine
-    /// checkout's assets/ (omitted when they are the same directory).
+    /// checkout's assets/ (omitted when they are the same directory, and in a packaged build,
+    /// whose assets/ already holds everything -- see RuntimeLayout).
     std::vector<std::string> asset_roots() const {
         std::vector<std::string> roots{(options_.project_root / "assets").string()};
-        const std::filesystem::path engine_assets = std::filesystem::path(ROOT_DIR) / "assets";
+        const std::filesystem::path& engine_assets = RuntimeLayout::current().engine_assets;
         std::error_code ec;
-        if (!std::filesystem::equivalent(options_.project_root / "assets", engine_assets, ec)) {
+        if (!engine_assets.empty() &&
+            !std::filesystem::equivalent(options_.project_root / "assets", engine_assets, ec)) {
             roots.push_back(engine_assets.string());
         }
         return roots;
@@ -516,26 +528,103 @@ public:
     void wait_idle() { ctx_.wait_idle(); }
 
 private:
-    /** @brief Fills in EngineOptions defaults (project_root -> TOY_PROJECT_DIR env, else TOY_PROJECT_ROOT). */
+    /**
+     * @brief Fills in EngineOptions defaults (project_root -> default_project_root()). Runs first
+     *        in the constructor, before the Vulkan context exists, so it is also where a packaged
+     *        build points the loader at its bundled driver (prepare_runtime_environment()).
+     */
     static EngineOptions normalize_options_(EngineOptions o) {
+        prepare_runtime_environment();
         if (o.project_root.empty()) o.project_root = default_project_root();
         return o;
     }
 
 public:
     /**
-     * @brief The project this process runs when nothing says otherwise: TOY_PROJECT_DIR if set
-     *        (a packaged or relocated build), else the project it was compiled for.
+     * @brief The project this process runs when nothing says otherwise: a packaged build's own
+     *        resources; else TOY_PROJECT_DIR if set (a relocated run), else the project it was
+     *        compiled for. See RuntimeLayout::project_root().
      */
     static std::filesystem::path default_project_root() {
-        if (const char* p = std::getenv("TOY_PROJECT_DIR"); p && *p) return std::filesystem::path(p);
-        return std::filesystem::path(TOY_PROJECT_ROOT);
+        return RuntimeLayout::current().project_root();
     }
 
 private:
 
+    /**
+     * @brief Brings up audio: the AudioSystem (null device when headless or config says so),
+     *        sfxcoopa's AudioSource / AudioListener parsers and uicoopa's UI sound components on
+     *        the same engine, the UI sound library, and the player's saved bus volumes.
+     */
+    void init_audio_() {
+        audio::AudioSystemOptions ao;
+        ao.sample_rate = config_.audio.sample_rate;
+        ao.open_device = config_.audio.enabled;
+        // A run with no visible window (tests, headless captures, the editor's offscreen
+        // engines) never takes over the sound card.
+        ao.null_backend = config_.audio.device == "null" || !config_.window.visible;
+        audio_ = std::make_unique<audio::AudioSystem>(ao);
+        audio::AudioSystem::set_active(audio_.get());
+
+        auto& sfx = coopa::sfx::SfxResources::instance();
+        sfx.set_engine(&audio_->engine());
+        sfx.set_search_roots(asset_roots());
+        coopa::sfx::register_sfx_components();
+        audio::register_audio_components();
+#ifdef UICOOPA_HAS_AUDIO
+        coopa::ui::UiAudio::set_active(audio_->ui());
+        coopa::ui::register_ui_audio_components();
+        // UI sounds: the first asset root with a sounds/ manifest (a packaged build carries
+        // uicoopa's defaults there), else uicoopa's own from source.
+        std::string sounds_dir;
+        std::error_code ec;
+        for (const std::string& r : asset_roots()) {
+            if (coopa::yaml::document_exists(std::filesystem::path(r) / "sounds" / "sounds.yaml")) { sounds_dir = r + "/sounds"; break; }
+        }
+        if (sounds_dir.empty() && !RuntimeLayout::current().packaged()) sounds_dir = std::string(PROJ_DIR) + "/uicoopa/assets/sounds";
+        if (!sounds_dir.empty() && coopa::yaml::document_exists(std::filesystem::path(sounds_dir) / "sounds.yaml")) {
+            coopa::ui::SoundLibrary::instance().set_search_dir(sounds_dir);
+            coopa::ui::SoundLibrary::instance().load_manifest("sounds.yaml");
+        }
+#endif
+        // Bus volumes: config.yaml's defaults, then whatever this player chose last time.
+        UserSettings& us = UserSettings::instance();
+        us.load();
+        const std::pair<const char*, float> buses[] = {
+            {audio::k_bus_master, config_.audio.master}, {audio::k_bus_music, config_.audio.music},
+            {audio::k_bus_sfx, config_.audio.sfx}, {audio::k_bus_ui, config_.audio.ui}};
+        for (const auto& [bus, def] : buses) audio_->set_bus_volume(bus, us.get_float(audio::volume_setting_key(bus), def));
+    }
+
+    void shutdown_audio_() {
+        if (!audio_) return;
+        UserSettings::instance().flush();
+        audio_->stop_all();
+        if (audio::AudioSystem::active() == audio_.get()) audio::AudioSystem::set_active(nullptr);
+        auto& sfx = coopa::sfx::SfxResources::instance();
+        if (sfx.engine() == &audio_->engine()) sfx.set_engine(nullptr);
+#ifdef UICOOPA_HAS_AUDIO
+        if (coopa::ui::UiAudio::active() == audio_->ui()) coopa::ui::UiAudio::set_active(nullptr);
+#endif
+    }
+
+    /** @brief Per frame: the listener follows an AudioListener, else the main camera. */
+    void update_audio_(float dt) {
+        if (!audio_) return;
+        glm::mat4 cam_world;
+        const glm::mat4* cam_ptr = nullptr;
+        if (auto* cam = coopa::gfx::engine::components::CameraComponent::main()) {
+            cam_world = glm::inverse(cam->get_view_matrix());
+            cam_ptr = &cam_world;
+        }
+        audio_->update(dt, cam_ptr);
+        // Persist a changed volume promptly (a player who quits by killing the app keeps it).
+        if (UserSettings::instance().dirty() && (++settings_flush_frames_ % 120) == 0) UserSettings::instance().flush();
+    }
+
     /** @brief Destroys every managed scene. */
     void clear_scenes_() {
+        if (audio_) audio_->stop_all();
         for (coopa::scene::Scene* s : scene_mgr_.scenes()) scene_mgr_.remove_scene(s);
         scene_settings_.clear();
     }
@@ -622,6 +711,7 @@ public:
 
     ~Engine() {
         ctx_.wait_idle();
+        shutdown_audio_();
         // register_render_components()'s parser lambdas capture ctx_'s device/allocator/
         // cmd_pool by reference in SceneLoader's function-local static registry, which
         // would otherwise only be destroyed at program exit -- after ctx_ goes out of
@@ -738,9 +828,15 @@ public:
             std::cout << "[toyengine] Wrote " << ring.size() << " ring-captured frames to output/seq/\n";
         }
 
-        if (config_.output.save_on_exit) {
+        // Never in a shipping build: a player's game must not write screenshots on quit.
+        if (!k_shipping && config_.output.save_on_exit) {
             ctx_.wait_idle();
-            save_screenshot(config_.output.filepath, config_.output.save_low_res);
+            const std::string out = output_path_(config_.output.filepath);
+            std::error_code dir_ec;
+            if (const auto dir = std::filesystem::path(out).parent_path(); !dir.empty()) {
+                std::filesystem::create_directories(dir, dir_ec);
+            }
+            save_screenshot(out, config_.output.save_low_res);
         }
     }
 
@@ -895,6 +991,7 @@ public:
             scene_mgr_.late_update(dt);
             if (overlay_scene_) overlay_scene_->late_update(dt);
         }
+        update_audio_(dt);
         if (hooks_.post_late_update) hooks_.post_late_update(dt);
 
         if (scene_mgr_.has_scene()) {
@@ -1105,6 +1202,14 @@ private:
 #else
         cc.validation = true;
 #endif
+        // Shipping: no validation and none of gfxcoopa's scripted-run env hooks (MAX_FRAMES,
+        // ONESHOT, ...) -- a player's environment must not reconfigure the game.
+        if constexpr (k_shipping) {
+            cc.validation = false;
+            return cc;
+        }
+        // TOY_VALIDATION=1/0 forces the Khronos layer on/off regardless of build type.
+        if (const char* v = std::getenv("TOY_VALIDATION"); v && *v) cc.validation = std::string(v) != "0";
         return coopa::gfx::app::ContextConfig::from_env(cc);
     }
 
@@ -1474,6 +1579,18 @@ private:
     }
 
     /**
+     * @brief Where a relative output file (output.filepath) goes: as given (cwd-relative) when
+     *        running from source, under the per-user data directory when packaged -- an .app's
+     *        cwd is "/" and its own folder may be read-only.
+     */
+    static std::string output_path_(const std::string& path) {
+        if (path.empty() || std::filesystem::path(path).is_absolute() || !RuntimeLayout::current().packaged()) {
+            return path;
+        }
+        return (user_data_dir() / path).string();
+    }
+
+    /**
      * @brief resolve_against_(), with the engine checkout as the fallback layer: a file the
      *        project doesn't have (a game project's config.yaml starts as a copy of the engine's,
      *        whose `palette:` names assets/palettes/...) resolves to the engine's copy if that
@@ -1484,7 +1601,10 @@ private:
         if (in_project.empty() || std::filesystem::path(path).is_absolute()) return in_project;
         std::error_code ec;
         if (std::filesystem::exists(in_project, ec)) return in_project;
-        const std::filesystem::path in_engine = std::filesystem::path(ROOT_DIR) / path;
+        // engine_assets is <checkout>/assets; `path` is project-relative (assets/palettes/...).
+        const std::filesystem::path& engine_assets = RuntimeLayout::current().engine_assets;
+        if (engine_assets.empty()) return in_project;   // packaged: nothing outside the package
+        const std::filesystem::path in_engine = engine_assets.parent_path() / path;
         return std::filesystem::exists(in_engine, ec) ? in_engine.string() : in_project;
     }
 
@@ -1516,19 +1636,19 @@ private:
 
     /** @brief FIXED_DT env override for frame_dt_() -- unset (or unparsable) means -1, i.e. off. */
     static float fixed_dt_from_env_() {
-        if (const char* v = std::getenv("FIXED_DT")) return std::strtof(v, nullptr);
+        if (const char* v = debug_env("FIXED_DT")) return std::strtof(v, nullptr);
         return -1.0f;
     }
 
     /** @brief CAPTURE_FRAMES env override for run()'s sequence capture -- 0 means off. */
     static uint32_t capture_frames_from_env_() {
-        if (const char* v = std::getenv("CAPTURE_FRAMES")) return static_cast<uint32_t>(std::atoll(v));
+        if (const char* v = debug_env("CAPTURE_FRAMES")) return static_cast<uint32_t>(std::atoll(v));
         return 0;
     }
 
     /** @brief CAPTURE_RING env override for run()'s in-memory rolling capture -- 0 means off. */
     static uint32_t capture_ring_from_env_() {
-        if (const char* v = std::getenv("CAPTURE_RING")) return static_cast<uint32_t>(std::atoll(v));
+        if (const char* v = debug_env("CAPTURE_RING")) return static_cast<uint32_t>(std::atoll(v));
         return 0;
     }
 
@@ -1552,7 +1672,7 @@ private:
 
     /** @brief Parses CURSOR_POS once at construction; see apply_cursor_pos_override_(). */
     void read_cursor_pos_override_() {
-        const char* v = std::getenv("CURSOR_POS");
+        const char* v = debug_env("CURSOR_POS");
         if (!v || !*v) return;
         float x = 0.0f, y = 0.0f;
         if (std::sscanf(v, "%f,%f", &x, &y) == 2) {
@@ -1574,7 +1694,7 @@ private:
      *                   SCENE is unset or empty.
      */
     static std::string scene_path_from_env_(const std::string& configured) {
-        const char* v = std::getenv("SCENE");
+        const char* v = debug_env("SCENE");
         if (!v || !*v) return configured;
         std::string scene(v);
         if (coopa::yaml::is_document_ext(scene)) return scene;
@@ -1592,7 +1712,7 @@ private:
      *        or "0" = off.
      */
     static std::string profile_path_from_env_() {
-        const char* v = std::getenv("PROFILE");
+        const char* v = debug_env("PROFILE");
         if (!v || !*v || std::string(v) == "0") return {};
         const std::string s(v);
         if (s.size() > 4 && s.compare(s.size() - 4, 4, ".csv") == 0) return s;
@@ -1600,7 +1720,7 @@ private:
     }
 
     static bool no_input_from_env_() {
-        const char* v = std::getenv("NO_INPUT");
+        const char* v = debug_env("NO_INPUT");
         return v && *v && std::string(v) != "0";
     }
 
@@ -1608,25 +1728,16 @@ private:
     static render::PixelRenderConfig make_render_config_(const AppConfig& config,
                                                          const std::filesystem::path& project_root) {
         render::PixelRenderConfig rc = config.render;
-        rc.shader_dir = std::string(ROOT_DIR) + "/assets/shaders";
-        // A project's own assets/shaders goes in front of everything (first-match-wins), so a
-        // project shader shadows the engine's of the same name -- see cmake/ToyProject.cmake.
-        const std::filesystem::path project_shaders = project_root / "assets" / "shaders";
-        std::error_code shader_ec;
-        const bool has_project_shaders =
-            std::filesystem::is_directory(project_shaders, shader_ec) &&
-            !std::filesystem::equivalent(project_shaders, rc.shader_dir, shader_ec);
-        // App directory first, gfxcoopa's shared base library second -- the runtime mirror of
-        // the glslc -I search order (see assets/shaders/.glslc_flags). uicoopa's own shader
-        // directory is a third root rather than app_over_base()'s two, for the UI passes'
-        // ui*.vert/frag; it goes LAST so that a future uicoopa file sharing a logical name
-        // with a gfxcoopa base shader can never shadow the base copy (ShaderLibrary::resolve()
-        // is first-match-wins). There are no collisions across the three roots today.
-        std::vector<std::string> shader_roots;
-        if (has_project_shaders) shader_roots.push_back(project_shaders.string());
-        shader_roots.push_back(rc.shader_dir);
-        shader_roots.push_back(std::string(PROJ_DIR) + "/gfxcoopa/assets/shaders");
-        shader_roots.push_back(std::string(PROJ_DIR) + "/uicoopa/assets/shaders");
+        // From source: a project's own assets/shaders in front of everything (first-match-wins,
+        // so a project shader shadows the engine's of the same name -- see cmake/ToyProject.cmake),
+        // then the engine's, gfxcoopa's shared base library, and uicoopa's UI shaders LAST so a
+        // uicoopa file can never shadow a gfxcoopa base shader -- the runtime mirror of the glslc
+        // -I search order (assets/shaders/.glslc_flags). Packaged: the one directory the
+        // packager merged those layers into, in that same precedence. See RuntimeLayout.
+        const std::vector<std::string> shader_roots = RuntimeLayout::current().shader_roots(project_root);
+        rc.shader_dir = RuntimeLayout::current().packaged()
+            ? shader_roots.front()
+            : (RuntimeLayout::current().engine_assets / "shaders").string();
         rc.shaders = coopa::gfx::pipeline::ShaderLibrary(shader_roots);
         if (!rc.palette_path.empty()) rc.palette_path = resolve_asset_file_(project_root, rc.palette_path);
         if (!rc.grading_lut_path.empty()) rc.grading_lut_path = resolve_asset_file_(project_root, rc.grading_lut_path);
@@ -1726,6 +1837,10 @@ private:
     int                  fill_stable_frames_ = 0;
 
     coopa::asset::AssetManager assets_;
+    /// Declared before scene_mgr_ so it outlives every scene (an AudioSource stops its voice
+    /// on destruction). Created in init_audio_().
+    std::unique_ptr<audio::AudioSystem> audio_;
+    uint32_t settings_flush_frames_ = 0;
     coopa::scene::SceneManager scene_mgr_;
 
     coopa::input::InputMap input_;

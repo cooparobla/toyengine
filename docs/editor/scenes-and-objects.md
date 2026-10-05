@@ -157,6 +157,7 @@ the same way with an **Add Physics Component** button.
 | Lighting | DirectionalLight, PointLight, SpotLight, EnvironmentLight, ReflectionProbe |
 | Physics | Rigidbody, BoxCollider, SphereCollider, CapsuleCollider, MeshCollider |
 | Water | WaterBody, Buoyancy |
+| Audio | AudioSource, AudioListener, VolumeBinding (see [Sounds](#add-sound)) |
 | Gameplay | CameraController, KinematicMover, FreeMover, KinematicController |
 | World | Terrain |
 | Animation | Animator (see [Animation](animation.md#make-an-object-animatable)) |
@@ -164,6 +165,21 @@ the same way with an **Add Physics Component** button.
 
 An object can have more than one PointLight, SpotLight, ReflectionProbe, SdfShape or collider,
 but only one of each other component.
+
+## Add sound
+
+1. In the **Asset** panel, open the **Audio** tab and click **+** to import a `.wav` or `.mp3`.
+   It's copied into `assets/audio/`.
+2. Click the sound to open it. In Properties, **Preview** plays it. **Import Settings** set its
+   default volume, pitch, looping and bus. Turn on **Force Mono** for a sound that should come
+   from a place in the world. Click **Save Import Settings**.
+3. Select an object, add an **AudioSource** component and pick the sound as its **Clip**.
+   **Play on start** plays it when the game starts. Turn on **Spatialize** to hear it from the
+   object's position.
+
+The main camera hears the game. Add an **AudioListener** to an object (a player character,
+for example) to hear from there instead. Sounds play only while the game runs (**Play**),
+never while you edit.
 
 ## Reuse an object in many places
 

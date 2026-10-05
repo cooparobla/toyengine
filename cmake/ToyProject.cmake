@@ -31,6 +31,12 @@ cmake_minimum_required(VERSION 3.21)
 # variable set here would not reach.
 set(TOYENGINE_CMAKE_DIR "${CMAKE_CURRENT_LIST_DIR}" CACHE INTERNAL "toyengine's cmake/ directory")
 
+# Build > Build (editor/build/build_pipeline.h) configures a separate build-ship/ directory with
+# these for a Shipping build: Release, no debug env hooks / validation / exit screenshots
+# (toyengine/core/runtime_paths.h's k_shipping), and optionally the .caml passphrase compiled in.
+option(TOY_SHIPPING "Build the game for players (no debug hooks; see runtime_paths.h)" OFF)
+set(TOY_CAML_KEY_BAKED "" CACHE STRING "Passphrase compiled into the game for .caml assets (empty: TOY_CAML_KEY / default)")
+
 function(toyengine_add_project)
     cmake_parse_arguments(TP "" "NAME;DIR;EDITOR_NAME" "SOURCES" ${ARGN})
     if(NOT TP_NAME OR NOT TP_DIR)
@@ -69,7 +75,28 @@ function(toyengine_add_project)
         target_compile_definitions(${_t} PRIVATE TOY_PROJECT_ROOT="${TP_DIR}")
     endforeach()
     target_compile_definitions(${TP_EDITOR_NAME} PRIVATE TOY_EDITOR=1
-        TOY_GAME_BINARY="$<TARGET_FILE:${TP_NAME}>")
+        TOY_GAME_BINARY="$<TARGET_FILE:${TP_NAME}>"
+        # What Build compiles: this build tree's game target, and (for Shipping) the source
+        # directory a fresh Release tree is configured from.
+        TOY_BUILD_DIR="${CMAKE_BINARY_DIR}"
+        TOY_GAME_TARGET="${TP_NAME}"
+        TOY_GAME_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+
+    if(TOY_SHIPPING)
+        target_compile_definitions(${TP_NAME} PRIVATE TOY_SHIPPING=1)
+    endif()
+    if(TOY_CAML_KEY_BAKED)
+        target_compile_definitions(${TP_NAME} PRIVATE TOY_CAML_KEY_BAKED="${TOY_CAML_KEY_BAKED}")
+    endif()
+    # Relocation: room for install_name_tool to rewrite library paths to @rpath when the game is
+    # bundled into a .app (editor/build/bundle_macos.h); on Linux, look for bundled libraries
+    # in <exe dir>/lib first (DT_RPATH, which also covers those libraries' own dependencies).
+    if(APPLE)
+        target_link_options(${TP_NAME} PRIVATE "LINKER:-headerpad_max_install_names")
+    elseif(UNIX)
+        target_link_options(${TP_NAME} PRIVATE "LINKER:--disable-new-dtags")
+        set_property(TARGET ${TP_NAME} APPEND PROPERTY BUILD_RPATH "\$ORIGIN/lib")
+    endif()
 endfunction()
 
 # Incremental glslc for a project's own shaders -- gfx_add_shader_target() (gfxcoopa) with the

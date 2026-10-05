@@ -191,6 +191,8 @@
     void toggle_pause_() {
         if (!play_scene_) return;
         play_scene_->set_simulating(!play_scene_->is_simulating());
+        if (play_scene_->is_simulating()) engine_.audio().resume_all();
+        else engine_.audio().pause_all();
         step_countdown_ = 0;
     }
 

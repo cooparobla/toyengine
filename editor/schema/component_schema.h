@@ -420,6 +420,28 @@ inline std::map<std::string, ComponentSchema>& schema_table_() {
             f_float("form_drag", 1.0f, 0.01f, 0.0f, 10.0f),
             f_float("buoyancy_scale", 1.0f, 0.01f, 0.0f, 10.0f),
         }});
+        // sfxcoopa (toyengine/audio/): a positioned or 2D sound, the ears (else the main camera
+        // hears), and a settings-menu slider bound to a mixer bus.
+        add({"AudioSource", "Audio", {
+            f_asset("clip", "audio", ".wav", false, false, "", true),
+            f_enum("bus", {"SFX", "Music", "UI", "Master"}, true),
+            f_float("volume", 1.0f, 0.01f, 0.0f, 4.0f, true),
+            f_float("pitch", 1.0f, 0.01f, 0.05f, 8.0f),
+            f_bool("loop", false, true),
+            f_bool("play_on_start", true, true),
+            with_tip(f_bool("spatialize", false, true), "Positioned in 3D at this object (needs a mono clip: Force Mono in its import settings)"),
+            f_float("min_distance", 1.0f, 0.05f, 0.0f, 10000.0f),
+            f_float("max_distance", 50.0f, 0.5f, 0.0f, 100000.0f),
+            f_enum("curve", {"Inverse", "Linear", "Logarithmic"}),
+            f_int("priority", 0, -100, 100),
+        }, false});
+        add({"AudioListener", "Audio", {
+            f_bool("track_velocity", true),
+        }});
+        add({"VolumeBinding", "Audio", {
+            with_tip(f_enum("bus", {"Master", "Music", "SFX", "UI"}, true),
+                     "The mixer bus a Slider on this element (e.g. a SettingRow's) controls; remembered per player"),
+        }});
         add({"CameraController", "Gameplay", {
             f_enum("mode", {"Orbit", "Fly"}, true),
             f_vec3("target", glm::vec3(0.0f), 0.02f),

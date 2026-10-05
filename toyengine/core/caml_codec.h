@@ -46,10 +46,21 @@ inline CamlKeyState& caml_key_state() {
     return s;
 }
 
-/** @brief TOY_CAML_KEY, or caml's default passphrase. */
+/**
+ * @brief The passphrase a game decodes with: one compiled in at build time
+ *        (-DTOY_CAML_KEY_BAKED=..., what a shipping build with a custom key uses, since a
+ *        player's machine has no TOY_CAML_KEY), else TOY_CAML_KEY (never read in a shipping
+ *        build), else caml's default.
+ */
 inline std::string default_caml_passphrase() {
+#ifdef TOY_CAML_KEY_BAKED
+    if (const char* baked = TOY_CAML_KEY_BAKED; baked && *baked) return std::string(baked);
+#endif
+#ifndef TOY_SHIPPING
     const char* v = std::getenv("TOY_CAML_KEY");
-    return (v && *v) ? std::string(v) : std::string(caml::DEFAULT_PASSPHRASE);
+    if (v && *v) return std::string(v);
+#endif
+    return std::string(caml::DEFAULT_PASSPHRASE);
 }
 
 /** @brief The cached 32-byte key for `passphrase`, derived on first use or when it changes. */

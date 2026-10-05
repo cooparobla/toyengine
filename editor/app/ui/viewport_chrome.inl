@@ -21,7 +21,9 @@
     }
     /** @brief True if `p` is over viewport furniture (toolbar, nav gizmo, sidebar). */
     /** @brief Material and texture views only look -- no selection, tools or transforms. */
-    bool preview_only_view_() const { return active_type_ == AssetType::Material || active_type_ == AssetType::Texture; }
+    bool preview_only_view_() const {
+        return active_type_ == AssetType::Material || active_type_ == AssetType::Texture || active_type_ == AssetType::Audio;
+    }
 
     bool over_viewport_chrome_(glm::vec2 p, bool mesh_edit) const {
         if (show_toolbar_ && !preview_only_view_() && toolbar_rect_(mesh_edit).contains(p)) return true;

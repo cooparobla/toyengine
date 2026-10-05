@@ -43,7 +43,8 @@ Unity-style component model:
   grab and flatten brushes, with symmetry.
 - **Material lookdev.** A shader ball, studio lighting and a turntable.
 - **Render and project settings,** applied live.
-- **Build > Package** turns a project into compact `.caml` binaries.
+- **Build** makes a standalone, signed game for this platform (a `.app` on macOS, a folder on
+  Linux) in a **Development** or **Shipping** profile. See [Shipping a game](#shipping-a-game).
 - Snapshot undo, hot-reloading themes and a console.
 
 Everything it saves is plain YAML in your project's `assets/` folder, so you can hand-edit,
@@ -96,6 +97,16 @@ diff and merge it. See [editor/README.md](editor/README.md) for the full tour.
   also reads binary `.caml`, so a packaged project needs no path rewriting.
 - **Components.** Cameras (orbit, fly, tracking), movers, skinned meshes, a multithreaded job
   system and named input actions.
+
+### Audio
+- **Mixer and 3D sound** ([sfxcoopa](libs/sfxcoopa)). WAV and MP3 clips, buses
+  (Master > Music / SFX / UI), binaural panning, distance falloff and doppler.
+- **Scene components.** `AudioSource` (2D or positioned, `play_on_start`, loop) and
+  `AudioListener`. Without a listener, the main camera hears. `VolumeBinding` connects a
+  settings-menu slider to a bus and remembers the player's choice.
+- **From code.** `engine.audio().play_oneshot("audio/hit.wav")`, `set_bus_volume()` and
+  `pause_all()`. UI sounds (`UiSoundPlayer`) share the same mixer.
+- Headless runs and tests use a null device, so they never take over the sound card.
 
 ## Getting started
 
@@ -210,7 +221,8 @@ cd ~/Games/MyGame
                                            # later rebuilds: the editor's Build > Refresh
 ./editor.sh                                # first open creates assets/
 ./run.sh [scene]                           # HEADLESS=1 MAX_FRAMES=600 ./run.sh for no window
-./package.sh dist                          # .caml assets + engine runtime files + game binary
+./package.sh dev                           # standalone game: build/dist/development/MyGame.app
+./package.sh ship                          # Release, encoded, signed (+ notarized): build/dist/shipping
 ```
 
 A project contains:
@@ -222,6 +234,7 @@ A project contains:
 | `src/` | C++ compiled into both the game and the editor, so the editor's Play runs it. Register components with `TOY_MODULE` ([`toyengine/core/module.h`](toyengine/core/module.h)). Describe them to the inspector with `register_component_schema()` under `#if TOY_EDITOR`. `src/main.cpp` replaces the game's `main`. `src/toyengine/<path>.h` replaces that engine header, and must keep its API. |
 | `.libs/toyengine` | The engine and its submodules. `setup.sh` clones it at `engine.ref`, or symlinks it to `engine.link`. Git-ignored. |
 | `setup.sh build.sh run.sh editor.sh package.sh clean.sh` | The project's scripts (from [`templates/project/`](templates/project/)). |
+| `build_settings.yaml` | Build Settings: product name, version, bundle id, signing. Written by the editor; never shipped. |
 
 A **linked** project builds against this working tree directly, uncommitted edits in the engine
 and `libs/` included. This is how to work on the engine and a game together. A **pinned**
@@ -230,6 +243,37 @@ project clones the engine at a pushed commit, which makes it reproducible on any
 re-pins. The CMake side is [`cmake/ToyProject.cmake`](cmake/ToyProject.cmake)
 (`toyengine_add_project()`). When `.libs/toyengine` is not the top-level build, it adds only the
 engine; its own tests and tools are skipped.
+
+### Shipping a game
+
+**Build** in the editor's **Build** menu (or `./package.sh dev|ship`, or
+`toyengine_editor <project> --build dev|ship [--out <dir>]`) makes a game that runs from
+anywhere. It doesn't need this repo, Homebrew or the Vulkan SDK on the player's machine.
+
+| | Development | Shipping |
+|---|---|---|
+| Compiled | the editor's own build tree, incrementally | a separate Release tree, `build-ship/`, with `TOY_SHIPPING=ON` |
+| Assets | plain YAML | encoded `.caml` (the key can be compiled in) |
+| Debug hooks | `HEADLESS`, `SCENE`, `CAPTURE_*`, validation layers... | all off; no screenshot on exit |
+| macOS signing | ad-hoc | Developer ID + hardened runtime, notarized and stapled (ad-hoc if no identity is set up) |
+| Archive | none | `.zip` (and optionally a `.dmg`) / `.tar.gz` |
+
+What the build contains:
+- **macOS.** A `.app`. It bundles GLFW, libcrypto, the Vulkan loader, MoltenVK and its ICD
+  manifest under `Contents/Frameworks`, and every library path is rewritten to `@rpath`.
+- **Linux.** A folder with `lib/` (`$ORIGIN/lib`) and a launcher. It uses the system's Vulkan
+  loader and drivers.
+- **Assets.** The project's assets are merged with the engine's runtime files (shaders from
+  every library, fonts, UI themes and default sounds).
+- **Logs and crashes.** The packaged game writes its log and crash reports to
+  `~/Library/Logs/<bundle id>/` (Linux: `$XDG_STATE_HOME`).
+- **Player data.** Player settings go in `~/Library/Application Support/<bundle id>/`.
+
+Per-project choices live in `build_settings.yaml` (**Build > Build Settings...**). It holds
+the product name, version, bundle id, icon, signing identity and notary profile, and it is
+never shipped. To notarize, store your App Store Connect credentials once with
+`xcrun notarytool store-credentials <profile>`, then put that profile name in Build Settings.
+Builds target the machine you build on. There is no cross-compiling.
 
 ### toyengine Hub
 

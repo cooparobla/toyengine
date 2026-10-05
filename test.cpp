@@ -68,6 +68,13 @@
 
 #include <toyengine/core/caml_codec.h>
 #include <toyengine/core/engine.h>
+#include <toyengine/core/runtime_paths.h>
+#include <toyengine/core/user_settings.h>
+#include <toyengine/audio/audio_components.h>
+#include <toyengine/audio/audio_system.h>
+#include <sfxcoopa/sfx_yaml.h>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/constants.hpp>
 #include <toyengine/render/pixel_math.h>
 #include <toyengine/render/visibility.h>
 #include <toyengine/scene/free_mover.h>
@@ -5915,7 +5922,264 @@ struct TestCase {
  * render_* each construct at least one Engine (window, device, every pipeline, a loaded scene)
  * and are registered separately so `ctest -j` overlaps them.
  */
+
+// =====================================================================================
+// Group "runtime" -- where a packaged game finds its files (runtime_paths.h), its per-user
+// directories and settings. No GPU.
+// =====================================================================================
+
+void test_runtime_layout_folder_package() {
+    namespace fs = std::filesystem;
+    const fs::path root = fresh_tmp_subdir("layout_folder");
+    write_text_file(root / "game", "");
+    toy::core::PackageManifest m;
+    m.name = "Game";
+    m.bundle_id = "com.example.game";
+    m.profile = "shipping";
+    m.save(root / toy::core::PackageManifest::k_file_name);
+    const auto l = toy::core::RuntimeLayout::detect(root / "game");
+    expect(l.packaged() && l.resources_root == root, "a toy_package.yaml beside the executable marks a packaged folder");
+    expect(l.engine_assets.empty(), "a package never falls back to the engine checkout's assets/");
+    expect(l.project_root() == root, "the package itself is the project root");
+    const auto roots = l.shader_roots(l.project_root());
+    expect(roots.size() == 1 && roots[0] == (root / "assets" / "shaders").string(), "one merged shader directory");
+    for (const auto& r : roots) {
+        expect(r.find(ROOT_DIR) == std::string::npos && r.find(PROJ_DIR) == std::string::npos,
+               "no packaged shader root points into the source tree (" + r + ")");
+    }
+    expect(l.manifest && l.manifest->name == "Game" && l.manifest->profile == "shipping", "the manifest round-trips");
+}
+
+void test_runtime_layout_app_bundle() {
+    namespace fs = std::filesystem;
+    const fs::path app = fresh_tmp_subdir("layout_app") / "Game.app" / "Contents";
+    fs::create_directories(app / "MacOS");
+    fs::create_directories(app / "Resources");
+    write_text_file(app / "MacOS" / "Game", "");
+    toy::core::PackageManifest m;
+    m.name = "Game";
+    m.bundle_id = "com.example.game";
+    m.save(app / "Resources" / toy::core::PackageManifest::k_file_name);
+    const auto l = toy::core::RuntimeLayout::detect(app / "MacOS" / "Game");
+    expect(l.packaged() && l.resources_root == app / "Resources", "Contents/Resources/toy_package.yaml marks a .app");
+#if defined(__APPLE__)
+    expect(l.app_id() == "com.example.game", "a .app's user directories are named by its bundle id");
+#endif
+}
+
+void test_runtime_layout_source_without_marker() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fresh_tmp_subdir("layout_source");
+    write_text_file(dir / "game", "");
+    const auto l = toy::core::RuntimeLayout::detect(dir / "game");
+    expect(!l.packaged(), "no marker: running from source");
+    expect(l.engine_assets == fs::path(ROOT_DIR) / "assets", "from source the engine checkout is the fallback layer");
+    const auto roots = l.shader_roots(fs::path(ROOT_DIR));
+    expect(roots.size() == 3 && roots[1].find("gfxcoopa") != std::string::npos && roots[2].find("uicoopa") != std::string::npos,
+           "from source: engine, gfxcoopa, uicoopa shader roots in -I order");
+}
+
+void test_runtime_user_dirs_follow_home() {
+    ScopedEnv home("HOME", "/tmp/toy_home_test");
+#if defined(__APPLE__)
+    expect(toy::core::user_data_dir("g") == std::filesystem::path("/tmp/toy_home_test/Library/Application Support/g"),
+           "macOS user data under ~/Library/Application Support");
+    expect(toy::core::user_log_dir("g") == std::filesystem::path("/tmp/toy_home_test/Library/Logs/g"), "macOS logs under ~/Library/Logs");
+#else
+    ScopedEnv xdg("XDG_DATA_HOME", "/tmp/toy_xdg");
+    expect(toy::core::user_data_dir("g") == std::filesystem::path("/tmp/toy_xdg/g"), "Linux user data under $XDG_DATA_HOME");
+#endif
+    expect(toy::core::debug_env("PATH") != nullptr, "debug env hooks are live in a non-shipping build");
+}
+
+void test_runtime_user_settings_roundtrip() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fresh_tmp_subdir("user_settings");
+    const fs::path file = dir / "sub" / "settings.yaml";
+    toy::core::UserSettings s;
+    s.load(file);
+    expect(!s.get_float("audio.music") && s.get_float("audio.music", 0.25f) == 0.25f, "an unset value falls back");
+    expect(s.flush() && !fs::exists(file), "nothing changed: nothing written");
+    s.set_float("audio.music", 0.5f);
+    expect(s.dirty() && s.flush() && fs::exists(file), "a change is written (directories created)");
+    toy::core::UserSettings again;
+    again.load(file);
+    expect_near(again.get_float("audio.music", 0.0f), 0.5f, 1e-6f, "the value survives a reload");
+}
+
+// =====================================================================================
+// Group "audio" -- the engine's AudioSystem over sfxcoopa, rendered offline (no sound card).
+// =====================================================================================
+
+namespace audio_test {
+
+std::string whoosh() { return std::string(PROJ_DIR) + "/sfxcoopa/ex/SEFE_Whoosh03.wav"; }
+
+/** @brief A mono copy of the whoosh (a .import sidecar with force_mono) for spatial tests. */
+std::string mono_whoosh() {
+    const std::filesystem::path dst = tmp_dir() / "audio_mono_whoosh.wav";
+    std::filesystem::copy_file(whoosh(), dst, std::filesystem::copy_options::overwrite_existing);
+    coopa::sfx::data::ClipImportSettings settings;
+    settings.force_mono = true;
+    settings.save(dst.string());
+    return dst.string();
+}
+
+/** @brief Left/right RMS of the next `frames` the engine renders. */
+void render_rms(coopa::sfx::core::AudioEngine& e, uint32_t frames, float& l, float& r) {
+    std::vector<float> buf(frames * 2);
+    e.render_offline(buf.data(), frames);
+    double sl = 0, sr = 0;
+    for (uint32_t i = 0; i < frames; ++i) { sl += buf[i * 2] * buf[i * 2]; sr += buf[i * 2 + 1] * buf[i * 2 + 1]; }
+    l = static_cast<float>(std::sqrt(sl / frames));
+    r = static_cast<float>(std::sqrt(sr / frames));
+}
+
+/** @brief An AudioSystem wired as Engine wires it, minus the device. */
+struct Rig {
+    toy::audio::AudioSystem audio{toy::audio::AudioSystemOptions{48000, false, false}};
+    Rig() {
+        coopa::sfx::SfxResources::instance().set_engine(&audio.engine());
+        coopa::sfx::register_sfx_components();
+        toy::audio::register_audio_components();
+        toy::audio::AudioSystem::set_active(&audio);
+    }
+    ~Rig() {
+        toy::audio::AudioSystem::set_active(nullptr);
+        coopa::sfx::SfxResources::instance().set_engine(nullptr);
+    }
+};
+
+coopa::scene::Scene load(const std::string& yaml) {
+    coopa::scene::Scene scene = coopa::scene::SceneLoader::load_from_node(fkyaml::node::deserialize(yaml),
+                                                                          (tmp_dir() / "audio_scene.yaml").string());
+    scene.update(0.0f);   // first frame: play_on_start
+    return scene;
+}
+
+std::string source_yaml(const std::string& clip, const std::string& extra, float x = 0.0f) {
+    return "scene:\n  root_objects:\n    - name: Speaker\n      components:\n        - type: Transform\n"
+           "          position: { x: " + std::to_string(x) + ", y: 0.0, z: 0.0 }\n"
+           "        - type: AudioSource\n          clip: \"" + clip + "\"\n" + extra;
+}
+
+} // namespace audio_test
+
+void test_audio_source_plays_through_sfx_bus() {
+    using namespace audio_test;
+    Rig rig;
+    coopa::scene::Scene scene = load(source_yaml(whoosh(), "          play_on_start: true\n          loop: true\n"));
+    rig.audio.update(0.016f, nullptr);
+    float l = 0, r = 0;
+    render_rms(rig.audio.engine(), 4096, l, r);
+    expect(l > 1e-3f && r > 1e-3f, "an AudioSource with play_on_start is heard (" + std::to_string(l) + ")");
+    rig.audio.set_bus_volume(toy::audio::k_bus_sfx, 0.0f);
+    render_rms(rig.audio.engine(), 4096, l, r);   // the bus ramps to its new gain
+    render_rms(rig.audio.engine(), 4096, l, r);
+    expect(l < 1e-4f && r < 1e-4f, "SFX bus at 0 silences it (" + std::to_string(l) + ")");
+}
+
+void test_audio_play_on_start_waits_for_first_update() {
+    using namespace audio_test;
+    Rig rig;
+    coopa::scene::Scene scene = coopa::scene::SceneLoader::load_from_node(
+        fkyaml::node::deserialize(source_yaml(whoosh(), "          play_on_start: true\n")), (tmp_dir() / "audio_scene.yaml").string());
+    float l = 0, r = 0;
+    render_rms(rig.audio.engine(), 2048, l, r);
+    expect(l < 1e-6f, "a loaded (editor, edit mode) scene stays silent until it simulates a frame");
+}
+
+void test_audio_oneshot_and_stop_all() {
+    using namespace audio_test;
+    Rig rig;
+    const auto h = rig.audio.play_oneshot(whoosh());
+    expect(h.is_valid(), "play_oneshot starts a voice");
+    float l = 0, r = 0;
+    render_rms(rig.audio.engine(), 2048, l, r);
+    expect(l > 1e-3f, "the one-shot is heard");
+    rig.audio.stop_all();
+    render_rms(rig.audio.engine(), 4096, l, r);   // stop fades out
+    render_rms(rig.audio.engine(), 2048, l, r);
+    expect(l < 1e-5f, "stop_all silences one-shots (" + std::to_string(l) + ")");
+    expect(!rig.audio.play_oneshot("does/not/exist.wav").is_valid(), "a missing clip is an invalid handle, not a throw");
+}
+
+void test_audio_listener_follows_camera() {
+    using namespace audio_test;
+    Rig rig;
+    // Source at +X; the camera (listener) at the origin looking down -Z: the source is on the right.
+    coopa::scene::Scene scene = load(source_yaml(mono_whoosh(), "          play_on_start: true\n          loop: true\n"
+                                                                "          spatialize: true\n", 3.0f));
+    const glm::mat4 cam(1.0f);
+    rig.audio.update(0.016f, &cam);
+    float l = 0, r = 0;
+    render_rms(rig.audio.engine(), 4096, l, r);
+    render_rms(rig.audio.engine(), 4096, l, r);
+    expect(r > l * 1.5f, "with no AudioListener the camera hears: a source on its right is louder right (" +
+                             std::to_string(l) + " / " + std::to_string(r) + ")");
+    // Turn the camera around (look down +Z): now the source is on its left.
+    const glm::mat4 turned = glm::rotate(glm::mat4(1.0f), glm::pi<float>(), glm::vec3(0, 1, 0));
+    rig.audio.update(0.016f, &turned);
+    render_rms(rig.audio.engine(), 4096, l, r);
+    render_rms(rig.audio.engine(), 4096, l, r);
+    expect(l > r * 1.5f, "turning the camera swaps the ears");
+}
+
+void test_audio_pause_freezes_device_output() {
+    toy::audio::AudioSystem audio(toy::audio::AudioSystemOptions{48000, false, false});
+    audio.pause_all();
+    expect(audio.paused(), "pause_all pauses");
+    audio.resume_all();
+    expect(!audio.paused(), "resume_all resumes");
+}
+
+void test_audio_volume_binding_drives_bus_and_settings() {
+    using namespace audio_test;
+    Rig rig;
+    const std::filesystem::path file = fresh_tmp_subdir("volume_binding") / "settings.yaml";
+    toy::core::UserSettings::instance().load(file);
+    rig.audio.set_bus_volume(toy::audio::k_bus_music, 0.7f);
+    coopa::scene::SceneObject obj("MusicRow");
+    auto* slider = obj.add_component<coopa::ui::Slider>();
+    auto* vb = obj.add_component<toy::audio::VolumeBinding>();
+    vb->bus = toy::audio::k_bus_music;
+    vb->update(0.016f);
+    expect(vb->slider() == slider && std::fabs(slider->value() - 0.7f) < 1e-4f, "the slider starts at the bus's volume");
+    slider->set_value(0.25f, false);
+    vb->update(0.016f);
+    expect_near(rig.audio.bus_volume(toy::audio::k_bus_music), 0.25f, 1e-4f, "moving the slider sets the bus");
+    expect_near(toy::core::UserSettings::instance().get_float("audio.music", -1.0f), 0.25f, 1e-4f, "and remembers it for the player");
+    toy::core::UserSettings::instance().load(tmp_dir() / "no_such_settings.yaml");   // leave nothing dirty behind
+}
+
+/** @brief Engine owns audio: config.yaml's bus defaults apply, one-shots play (null device). */
+void test_engine_owns_audio() {
+    ScopedEnv home("HOME", (tmp_dir() / "engine_audio_home").string());
+    toy::core::AppConfig cfg = make_test_config("assets/scenes/physics_test/scene.yaml", 320, 180, 160, 90);
+    cfg.audio.music = 0.3f;
+    toy::core::Engine engine(cfg);
+    expect_near(engine.audio().bus_volume(toy::audio::k_bus_music), 0.3f, 1e-4f, "config.yaml's audio.music sets the Music bus");
+    expect(!engine.audio().has_output(), "a hidden-window engine never opens the real sound card");
+    expect(engine.audio().play_oneshot(audio_test::whoosh()).is_valid(), "Engine::audio().play_oneshot plays");
+    tick_frames(engine, 3);
+}
+
 const TestCase kTests[] = {
+    // --- runtime: packaged-layout detection, user directories and settings (no GPU) ---
+    {"runtime_layout_folder_package",              "runtime", test_runtime_layout_folder_package},
+    {"runtime_layout_app_bundle",                  "runtime", test_runtime_layout_app_bundle},
+    {"runtime_layout_source_without_marker",       "runtime", test_runtime_layout_source_without_marker},
+    {"runtime_user_dirs_follow_home",              "runtime", test_runtime_user_dirs_follow_home},
+    {"runtime_user_settings_roundtrip",            "runtime", test_runtime_user_settings_roundtrip},
+
+    // --- audio: AudioSystem + sfxcoopa components, rendered offline (no sound card) ---
+    {"audio_source_plays_through_sfx_bus",         "audio", test_audio_source_plays_through_sfx_bus},
+    {"audio_play_on_start_waits_for_first_update", "audio", test_audio_play_on_start_waits_for_first_update},
+    {"audio_oneshot_and_stop_all",                 "audio", test_audio_oneshot_and_stop_all},
+    {"audio_listener_follows_camera",              "audio", test_audio_listener_follows_camera},
+    {"audio_pause_freezes_device_output",          "audio", test_audio_pause_freezes_device_output},
+    {"audio_volume_binding_drives_bus_and_settings", "audio", test_audio_volume_binding_drives_bus_and_settings},
+    {"engine_owns_audio",                          "editor_host", test_engine_owns_audio},
     // --- yaml_io: coopa::yaml document loading + the caml codec, no GPU ---
     {"caml_roundtrips_every_asset",                "yaml_io", test_caml_roundtrips_every_asset},
     {"caml_detected_by_magic_not_extension",       "yaml_io", test_caml_detected_by_magic_not_extension},

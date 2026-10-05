@@ -31,6 +31,7 @@
             {AssetType::Texture, "Textures", "Texture", I::Image, "textures"},
             {AssetType::UI, "UI", "UI", I::UiCanvas, "ui"},
             {AssetType::Theme, "Themes", "Theme", I::Palette, "ui/themes"},
+            {AssetType::Audio, "Audio", "Sound", I::Play, "audio"},
         };
         return t;
     }
@@ -53,6 +54,13 @@
                 return out;
             }
             case AssetType::Theme: return project_.list("ui/themes", ".yaml");
+            case AssetType::Audio: {
+                std::vector<std::string> out;
+                for (const char* dir : {"audio", "sounds"}) {
+                    for (const auto& p : project_.list(dir, "")) if (is_audio_ext_(fs::path(p).extension().string())) out.push_back(p);
+                }
+                return out;
+            }
             case AssetType::Texture: {
                 std::vector<std::string> out;
                 for (const auto& p : project_.list("textures", "")) {
@@ -83,6 +91,13 @@
                 return out;
             }
             case AssetType::Theme: return project_.list_engine("ui/themes", ".yaml");
+            case AssetType::Audio: {
+                std::vector<std::string> out;
+                for (const char* dir : {"audio", "sounds"}) {
+                    for (const auto& p : project_.list_engine(dir, "")) if (is_audio_ext_(fs::path(p).extension().string())) out.push_back(p);
+                }
+                return out;
+            }
             case AssetType::Texture: {
                 std::vector<std::string> out;
                 for (const auto& p : project_.list_engine("textures", "")) {
@@ -150,11 +165,18 @@ private:
         return true;
     }
 
+    /** @brief Audio clip extensions sfxcoopa decodes. */
+    static bool is_audio_ext_(std::string ext) {
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+        return ext == ".wav" || ext == ".mp3";
+    }
+
     /** @brief The asset type of an assets-relative path (by folder / extension). */
     static AssetType asset_type_of_(const std::string& rel) {
         const fs::path p(rel);
         const std::string ext = p.extension().string();
         const std::string g = p.generic_string();
+        if (is_audio_ext_(ext)) return AssetType::Audio;
         if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".tga") return AssetType::Texture;
         if (g.rfind("objects/", 0) == 0) return AssetType::Object;
         if (g.rfind("ui/themes/", 0) == 0) return AssetType::Theme;
@@ -221,6 +243,7 @@ private:
             case AssetType::Texture: open_texture(abs); break;
             case AssetType::UI: open_ui_asset(abs); break;
             case AssetType::Theme: open_theme(abs); break;
+            case AssetType::Audio: open_audio(abs); break;
             default: log_info(abs.string()); break;
         }
     }
@@ -234,6 +257,7 @@ private:
         else if (kind == "texture") open_asset(AssetType::Texture, item);
         else if (kind == "ui") open_asset(AssetType::UI, item);
         else if (kind == "theme") open_asset(AssetType::Theme, item);
+        else if (kind == "audio") open_asset(AssetType::Audio, item);
         else log_info(item);
     }
 
@@ -274,6 +298,61 @@ public:
             return false;
         }
         return open_object_asset(path);
+    }
+
+    /** @brief Opens a sound: Properties shows its import settings and a preview player. */
+    bool open_audio(const fs::path& path) {
+        if (!fs::exists(path)) { log_error("Sound not found: " + path.string()); return false; }
+        stop_audio_preview();
+        set_view_(AssetType::Audio);
+        prop_tab_ = PropTab::Data;
+        active_path_ = path;
+        audio_import_ = coopa::sfx::data::ClipImportSettings::load(path.string());
+        audio_import_dirty_ = false;
+        log_info("Opened sound " + project_.relative(path));
+        return true;
+    }
+
+    /** @brief Plays the open sound once on the UI bus (the editor's engine is silent otherwise). */
+    void preview_audio() {
+        stop_audio_preview();
+        if (active_type_ != AssetType::Audio || active_path_.empty()) return;
+        coopa::sfx::core::PlayParams p;
+        p.bus_name = audio::k_bus_ui;
+        p.gain = audio_import_.volume;
+        p.pitch = audio_import_.pitch;
+        try {
+            audio_preview_ = engine_.audio().engine().play(active_path_.string(), p);
+        } catch (const std::exception& e) {
+            log_error(std::string("Preview failed: ") + e.what());
+        }
+    }
+    void stop_audio_preview() {
+        if (audio_preview_.is_valid()) engine_.audio().engine().stop(audio_preview_);
+        audio_preview_ = {};
+    }
+
+    /**
+     * @brief Copies sound files into assets/audio/ (keeping an .import sidecar beside each).
+     * @return How many were imported.
+     */
+    int import_audio(const std::vector<fs::path>& files) {
+        int n = 0;
+        std::error_code ec;
+        const fs::path dir = project_.assets() / "audio";
+        fs::create_directories(dir, ec);
+        for (const fs::path& f : files) {
+            if (!is_audio_ext_(f.extension().string())) { log_warn("Not a .wav / .mp3: " + f.string()); continue; }
+            const fs::path dst = dir / f.filename();
+            fs::copy_file(f, dst, fs::copy_options::overwrite_existing, ec);
+            if (ec) { log_error("Import " + f.filename().string() + " failed: " + ec.message()); continue; }
+            const fs::path sidecar = f.string() + ".import";
+            if (fs::exists(sidecar, ec)) fs::copy_file(sidecar, dst.string() + ".import", fs::copy_options::overwrite_existing, ec);
+            ++n;
+        }
+        project_.refresh();
+        if (n) log_info("Imported " + std::to_string(n) + " sound" + (n == 1 ? "" : "s") + " into assets/audio/");
+        return n;
     }
 
     /** @brief Shows a texture asset in the viewer (texture editing is a TODO). */
@@ -441,8 +520,13 @@ private:
             }
             test_rects_["asset_engine_toggle"] = eb;
         }
-        const bool can_new = asset_tab_ != AssetType::Texture;
-        if (ctx.icon_button("asset_new", I::Plus,
+        const bool can_new = asset_tab_ != AssetType::Texture && asset_tab_ != AssetType::Audio;
+        if (asset_tab_ == AssetType::Audio) {
+            if (ctx.icon_button("asset_new", I::Plus, "Import Sounds\nCopy .wav / .mp3 files into assets/audio/", false, s,
+                                imm::Context::kAll, nb)) {
+                import_audio_dialog_();
+            }
+        } else if (ctx.icon_button("asset_new", I::Plus,
                             can_new ? std::string("New ") + info.singular + "\nCreate one in assets/" + info.dir + "/"
                                     : std::string("Import textures by copying image files into assets/textures/"),
                             false, s, imm::Context::kAll, nb) && can_new) {

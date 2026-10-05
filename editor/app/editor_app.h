@@ -31,6 +31,7 @@
 #include "project.h"
 #include "scene_sync.h"
 
+#include "../build/build_pipeline.h"
 #include "../build/packager.h"
 #include "../core/naming.h"
 #include "../core/process.h"
@@ -113,7 +114,7 @@ using FileDialog = coopa::ui::imm::FileDialog;
  * @brief The kind of asset the editor has open. Exactly one asset is open at a time, and its
  *        type decides what the viewer shows and what the Properties editor offers.
  */
-enum class AssetType { None = 0, Scene, Object, Mesh, Material, Texture, UI, Theme };
+enum class AssetType { None = 0, Scene, Object, Mesh, Material, Texture, UI, Theme, Audio };
 /** @brief Blender's interaction modes for a mesh object (the viewport header's mode dropdown). */
 enum class InteractionMode { Object = 0, Edit, Sculpt, VertexPaint, WeightPaint };
 /** @brief Viewport shading, Blender's four buttons. */
@@ -671,6 +672,8 @@ public:
     void stop() {
         if (!play_scene_) return;
         set_game_focus_(false);
+        engine_.audio().resume_all();   // a paused game's audio must not stay frozen
+        engine_.audio().stop_all();
         engine_.remove_scene(play_scene_);
         play_scene_ = nullptr;
         engine_.set_edit_mode(true);          // releases the cursor if the game still held it
@@ -883,6 +886,7 @@ public:
         opt.out_dir = out_dir;
         opt.keep_yaml = keep_yaml;
         opt.engine_assets = fs::path(ROOT_DIR) / "assets";
+        opt.library_layers = default_library_layers();
 #ifdef TOY_GAME_BINARY
         // This editor's own game executable (cmake/ToyProject.cmake). toyengine's own is the
         // generic player any assets-only project runs on; a game project's binary carries that
@@ -3250,6 +3254,7 @@ private:
     void draw_modals_(imm::Context& ctx) {
         file_dialog_.draw(ctx);
         draw_build_modal_(ctx);
+        draw_build_settings_modal_(ctx);
 
         if (ctx.begin_modal("Unsaved Changes", {370, 0})) {   // height fits the content
             ctx.paragraph("There are unsaved changes. Save them first?");
@@ -3366,6 +3371,16 @@ private:
         if (config_.dirty()) save_config();
     }
 
+    void import_audio_dialog_() {
+        const char* home = std::getenv("HOME");
+        file_dialog_.open(ui(), FileDialog::Mode::OpenFile, "Import Sound", home ? fs::path(home) : project_.root(), {".wav", ".mp3"},
+                          [this](const fs::path& p) {
+                              deferred_.push_back([this, p] {
+                                  if (import_audio({p}) > 0) open_asset(AssetType::Audio, project_.relative(project_.assets() / "audio" / p.filename()));
+                              });
+                          });
+    }
+
     void open_scene_dialog_() {
         file_dialog_.open(ui(), FileDialog::Mode::OpenFile, "Open Scene", project_.assets() / "scenes", {".yaml", ".caml"},
                           [this](const fs::path& p) { deferred_.push_back([this, p] { open_scene(p); }); });
@@ -3469,8 +3484,11 @@ private:
     PropTab prop_tab_ = PropTab::Object;
     Shading shading_ = Shading::Solid;
     /// Shading per asset type (index = AssetType): materials open in the game's renderer.
-    Shading shading_by_type_[8] = {Shading::Solid, Shading::Solid, Shading::Solid, Shading::Solid, Shading::Full, Shading::MaterialPreview,
-                                   Shading::Full, Shading::Full};
+    coopa::sfx::data::ClipImportSettings audio_import_;   ///< The open sound's .import sidecar.
+    bool audio_import_dirty_ = false;
+    coopa::sfx::mixer::VoiceHandle audio_preview_;
+    Shading shading_by_type_[9] = {Shading::Solid, Shading::Solid, Shading::Solid, Shading::Solid, Shading::Full, Shading::MaterialPreview,
+                                   Shading::Full, Shading::Full, Shading::MaterialPreview};
     std::string full_debug_view_;
     std::string config_base_debug_view_;
 

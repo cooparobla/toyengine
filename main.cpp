@@ -22,6 +22,8 @@
 #include <toyengine/core/caml_codec.h>
 #include <toyengine/core/config.h>
 #include <toyengine/core/engine.h>
+#include <toyengine/core/runtime_log.h>
+#include <toyengine/core/runtime_paths.h>
 
 #include <root_directory.h>
 
@@ -44,15 +46,43 @@ std::string resolve_scene_arg(const std::string& scene) {
     return "assets/scenes/" + scene + "/scene.yaml";
 }
 
-/** @brief True when env var `name` is set to anything but empty or "0". */
+/** @brief True when debug env var `name` is set to anything but empty or "0" (never when shipping). */
 bool env_flag(const char* name) {
-    const char* v = std::getenv(name);
+    const char* v = toy::core::debug_env(name);
     return v && *v && std::string(v) != "0";
 }
 
 }  // namespace
 
+int run_game(int argc, char** argv);
+
 int main(int argc, char** argv) {
+    namespace core = toy::core;
+    // A packaged build points the Vulkan loader at its bundled driver before anything starts it.
+    core::prepare_runtime_environment();
+
+    // Packaged builds (and TOY_LOG_FILE=1 from source) log to the per-user log directory and
+    // leave a crash report there; a source run keeps plain console output.
+    const core::RuntimeLayout& layout = core::RuntimeLayout::current();
+    if (layout.packaged() || env_flag("TOY_LOG_FILE")) {
+        const std::string name = layout.manifest && !layout.manifest->name.empty() ? layout.manifest->name : "toyengine";
+        const auto log = core::install_runtime_log(name);
+        core::install_crash_handlers();
+        if (!log.empty()) std::cout << "[toyengine] Logging to " << log.string() << "\n";
+    }
+
+    int code = 1;
+    try {
+        code = run_game(argc, argv);
+    } catch (const std::exception& e) {
+        std::cerr << "[toyengine] Fatal error: " << e.what() << "\n";
+        core::write_crash_report(e.what());
+    }
+    core::shutdown_runtime_log();
+    return code;
+}
+
+int run_game(int argc, char** argv) {
     // Before anything reads YAML: every config/scene/mesh/material load accepts .caml too.
     toy::core::install_caml_codec();
 
@@ -61,7 +91,7 @@ int main(int argc, char** argv) {
     // The project is this repo when building toyengine itself, or the game project this binary
     // was built for (TOY_PROJECT_DIR overrides either; see Engine::default_project_root()).
     std::string config_path = (toy::core::Engine::default_project_root() / "assets" / "config.yaml").string();
-    if (const char* c = std::getenv("CONFIG"); c && *c) config_path = c;
+    if (const char* c = toy::core::debug_env("CONFIG"); c && *c) config_path = c;
     toy::core::AppConfig app_config = toy::core::AppConfig::load(config_path);
 
     // HEADLESS=1: never map the window (the same never-shown window the test suite renders
@@ -86,6 +116,20 @@ int main(int argc, char** argv) {
               << " (\"" << app_config.window.title << "\", VSync: "
               << (app_config.window.vsync ? "On" : "Off") << ")\n";
     std::cout << "  Scene  : " << app_config.scene.default_scene << "\n";
+    {
+        const toy::core::RuntimeLayout& layout = toy::core::RuntimeLayout::current();
+        const std::filesystem::path root = toy::core::Engine::default_project_root();
+        std::cout << "  Layout : " << (layout.packaged() ? "packaged" : "source")
+                  << (toy::core::k_shipping ? " (shipping)" : "") << "\n";
+        std::cout << "  Assets : " << (root / "assets").string();
+        std::error_code ec;
+        if (!layout.engine_assets.empty() && !std::filesystem::equivalent(root / "assets", layout.engine_assets, ec)) {
+            std::cout << " + " << layout.engine_assets.string();
+        }
+        std::cout << "\n  Shaders:";
+        for (const std::string& r : layout.shader_roots(root)) std::cout << " " << r;
+        std::cout << "\n";
+    }
     std::cout << "==========================================================\n\n";
 
     toy::core::Engine engine(std::move(app_config));

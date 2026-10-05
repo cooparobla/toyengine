@@ -279,6 +279,14 @@ public:
     /** @brief Unity's Pause toggle / single Step for the running game. */
     void pause() { toggle_pause_(); }
     void step() { step_simulation_(); }
+    /** @brief Where a named widget was last drawn ("asset_row:<rel>", "asset_delete", "asset_add",
+     *         "asset_new:<item>"), for tests driving the UI with real input. */
+    std::optional<imm::Box> test_rect(const std::string& name) const {
+        auto it = test_rects_.find(name);
+        if (it == test_rects_.end()) return std::nullopt;
+        return it->second;
+    }
+    void set_asset_tab(AssetType t) { asset_tab_ = t; }
     /** @brief Window-space rect of an object's Outliner eye toggle (if its row is visible). */
     std::optional<imm::Box> outliner_eye_rect(ObjectId id) const {
         auto it = eye_rects_.find(id);
@@ -3529,6 +3537,7 @@ private:
         engine_.set_game_input_focus(focused);
     }
     std::unordered_map<ObjectId, imm::Box> eye_rects_;   // Outliner eye toggles (tests)
+    std::map<std::string, imm::Box> test_rects_;           // Where named widgets were last drawn (tests)
     bool open_add_menu_ = false;
     float outliner_h_ = 260;
     std::string outliner_filter_, add_component_filter_, browser_dir_;

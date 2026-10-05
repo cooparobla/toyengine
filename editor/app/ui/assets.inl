@@ -344,34 +344,17 @@ private:
         // New (+)
         const imm::Box nb{hb.right() - s - 6, hb.y + 4, s, s};
         const bool can_new = asset_tab_ != AssetType::Texture;
-        if (ctx.begin_popup("asset_new_ui", 220)) {
-            ctx.label_dim("New UI");
-            if (ctx.menu_item("Blank Canvas", "", nullptr, true, I::UiCanvas)) guarded_([this] { new_ui_asset("new_ui", "blank"); });
-            ctx.tooltip("Blank Canvas\nA screen-space canvas (HUD, menu, screen) scaled from 1920 x 1080");
-            if (ctx.menu_item("Blank Widget", "", nullptr, true, I::UiWidget)) guarded_([this] { new_ui_asset("new_widget", "widget"); });
-            ctx.tooltip("Blank Widget\nA reusable piece (an item slot, a quest entry) placed inside other UI");
-            const auto templates = ui_templates();
-            if (!templates.empty()) ctx.menu_separator();
-            for (const auto& t : templates) {
-                std::string label = t;
-                for (char& c : label) if (c == '_') c = ' ';
-                if (!label.empty()) label[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(label[0])));
-                if (ctx.menu_item(label, "", nullptr, true, I::UiWidget)) guarded_([this, t] { new_ui_asset(t, t); });
-                ctx.tooltip(label + "\nStart from the " + label + " template (editor/templates/ui/" + t + ".yaml)");
-            }
-            ctx.end_popup();
-        }
         if (ctx.icon_button("asset_new", I::Plus,
                             can_new ? std::string("New ") + info.singular + "\nCreate one in assets/" + info.dir + "/"
                                     : std::string("Import textures by copying image files into assets/textures/"),
                             false, s, imm::Context::kAll, nb) && can_new) {
-            if (asset_tab_ == AssetType::Mesh) ctx.open_popup("asset_new_mesh", glm::vec2(nb.x, nb.bottom()));
-            else if (asset_tab_ == AssetType::UI) ctx.open_popup("asset_new_ui", glm::vec2(nb.x, nb.bottom()));
+            // A type with choices (mesh primitives, UI templates) opens them; the rest create directly.
+            if (asset_new_has_choices_(asset_tab_)) ctx.open_popup("asset_new", glm::vec2(nb.x, nb.bottom()));
             else new_asset_(asset_tab_);
         }
-        if (ctx.begin_popup("asset_new_mesh", 160)) {
-            ctx.label_dim("New Mesh");
-            for (const auto& p : primitive_names()) if (ctx.menu_item(p)) guarded_([this, p] { new_mesh(p); save_mesh(); project_.refresh(); });
+        if (ctx.begin_popup("asset_new", 220)) {
+            ctx.label_dim(std::string("New ") + info.singular);
+            draw_new_asset_items_(ctx, asset_tab_);
             ctx.end_popup();
         }
         // Title + search.
@@ -386,6 +369,8 @@ private:
         std::string f = asset_filter_;
         std::transform(f.begin(), f.end(), f.begin(), ::tolower);
         size_t shown = 0;
+        bool row_hovered = false;
+        std::string right_clicked;
         for (const auto& rel : items) {
             const std::string name = asset_display_name_(asset_tab_, rel);
             std::string ln = rel;
@@ -406,8 +391,17 @@ private:
                                                     asset_tab_ == AssetType::UI ? "\nDrag into a scene (or another UI) to place it" :
                                                     asset_tab_ == AssetType::Theme ? "\nOpens in the Theme tab, previewed on a UI" : ""));
             ctx.drag_source("asset", rel, name);
-            if (ctx.last_clicked(imm::Mouse::Right)) { asset_context_ = rel; ctx.open_popup("asset_ctx"); }
+            row_hovered |= ctx.last_hovered();
+            test_rects_["asset_row:" + rel] = ctx.last_rect();
+            if (ctx.last_clicked(imm::Mouse::Right)) right_clicked = rel;
             ctx.pop_id();
+        }
+        // Opened OUTSIDE the row's push_id(): a popup's id is scoped like any widget's, so one
+        // opened inside the row would never match the begin_popup("asset_ctx") below.
+        if (!right_clicked.empty()) { asset_context_ = right_clicked; ctx.open_popup("asset_ctx"); }
+        // Right-click on empty space in the list: Add (what + offers for this tab).
+        else if (!row_hovered && ctx.is_hovered(body) && !ctx.popup_hovered() && ctx.input().released[1]) {
+            ctx.open_popup("asset_list_ctx");
         }
         if (shown == 0) {
             ctx.label_dim(items.empty() ? std::string("No ") + info.label + " yet -- press + to create one." : "Nothing matches.");
@@ -415,6 +409,27 @@ private:
         }
         if (ctx.begin_popup("asset_ctx", 210)) {
             draw_asset_context_menu_(ctx, asset_tab_, asset_context_);
+            ctx.end_popup();
+        }
+        if (ctx.begin_popup("asset_list_ctx", 200)) {
+            const bool can_add = asset_tab_ != AssetType::Texture;
+            if (asset_new_has_choices_(asset_tab_)) {
+                if (ctx.begin_menu("Add", can_add, I::Plus)) {
+                    test_rects_["asset_add"] = ctx.last_rect();
+                    draw_new_asset_items_(ctx, asset_tab_);
+                    ctx.end_menu();
+                } else {
+                    test_rects_["asset_add"] = ctx.last_rect();
+                }
+            } else {
+                if (ctx.menu_item(std::string("Add ") + info.singular, "", nullptr, can_add, I::Plus)) new_asset_(asset_tab_);
+                test_rects_["asset_add"] = ctx.last_rect();
+            }
+            ctx.tooltip(can_add ? std::string("Add\nCreate a new ") + info.singular + " in assets/" + info.dir + "/ (same as the + button)"
+                                : std::string("Add\nImport textures by copying image files into assets/textures/"));
+            ctx.menu_separator();
+            if (ctx.menu_item("Refresh", "", nullptr, true, I::Restart)) project_.refresh();
+            ctx.tooltip("Refresh\nRescan assets/ for files added or removed outside the editor");
             ctx.end_popup();
         }
         ctx.end_region();
@@ -439,8 +454,45 @@ private:
         if (ctx.menu_item("Duplicate", "", nullptr, true, I::Duplicate)) duplicate_asset_(t, rel);
         if (ctx.menu_item("Rename...", "", nullptr, !asset_is_open_(t, rel))) { asset_rename_ = rel; asset_rename_to_ = fs::path(rel).stem().string(); pending_modal_ = "Rename Asset"; }
         if (ctx.menu_item("Delete...", "", nullptr, !asset_is_open_(t, rel), I::Trash)) { asset_delete_ = rel; pending_modal_ = "Delete Asset"; }
+        test_rects_["asset_delete"] = ctx.last_rect();
+        if (asset_is_open_(t, rel)) ctx.tooltip("Delete\nClose it first: open another asset, then delete this one");
         ctx.menu_separator();
         if (ctx.menu_item("Copy Path", "", nullptr, true) && ctx.input().set_clipboard) ctx.input().set_clipboard(rel);
+    }
+
+    /** @brief True when New for this type is a choice (mesh primitives, UI templates). */
+    static bool asset_new_has_choices_(AssetType t) { return t == AssetType::Mesh || t == AssetType::UI; }
+
+    /** @brief The New items of an asset type -- shared by the + button and the list's Add menu. */
+    void draw_new_asset_items_(imm::Context& ctx, AssetType t) {
+        using I = imm::Icon;
+        if (t == AssetType::Mesh) {
+            for (const auto& p : primitive_names()) {
+                if (ctx.menu_item(p, "", nullptr, true, I::Mesh)) guarded_([this, p] { new_mesh(p); save_mesh(); project_.refresh(); });
+                test_rects_["asset_new:" + p] = ctx.last_rect();
+            }
+            return;
+        }
+        if (t == AssetType::UI) {
+            if (ctx.menu_item("Blank Canvas", "", nullptr, true, I::UiCanvas)) guarded_([this] { new_ui_asset("new_ui", "blank"); });
+            ctx.tooltip("Blank Canvas\nA screen-space canvas (HUD, menu, screen) scaled from 1920 x 1080");
+            test_rects_["asset_new:Blank Canvas"] = ctx.last_rect();
+            if (ctx.menu_item("Blank Widget", "", nullptr, true, I::UiWidget)) guarded_([this] { new_ui_asset("new_widget", "widget"); });
+            ctx.tooltip("Blank Widget\nA reusable piece (an item slot, a quest entry) placed inside other UI");
+            const auto templates = ui_templates();
+            if (!templates.empty()) ctx.menu_separator();
+            for (const auto& tpl : templates) {
+                std::string label = tpl;
+                for (char& c : label) if (c == '_') c = ' ';
+                if (!label.empty()) label[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(label[0])));
+                if (ctx.menu_item(label, "", nullptr, true, I::UiWidget)) guarded_([this, tpl] { new_ui_asset(tpl, tpl); });
+                ctx.tooltip(label + "\nStart from the " + label + " template (editor/templates/ui/" + tpl + ".yaml)");
+            }
+            return;
+        }
+        const AssetTypeInfo& info = asset_type_info_(t);
+        if (ctx.menu_item(std::string("New ") + info.singular, "", nullptr, t != AssetType::Texture, info.icon)) new_asset_(t);
+        test_rects_["asset_new:" + std::string(info.singular)] = ctx.last_rect();
     }
 
     void new_asset_(AssetType t) {
@@ -514,7 +566,9 @@ private:
         if (ctx.begin_modal("Delete Asset", {380, 0})) {
             ctx.label("Delete " + asset_delete_ + "?");
             ctx.label_dim("Scenes and objects referring to it will fail to load it.");
-            if (ctx.button("Delete", 100)) {
+            const bool confirm = ctx.button("Delete", 100);
+            test_rects_["asset_delete_confirm"] = ctx.last_rect();
+            if (confirm) {
                 std::error_code ec;
                 const fs::path p = project_.absolute(asset_delete_);
                 const bool scene_dir = asset_type_of_(asset_delete_) == AssetType::Scene && p.filename().string().rfind("scene", 0) == 0;
@@ -730,7 +784,50 @@ private:
         }
     }
 
-    /** @brief The texture view's material: the image as albedo, fully rough. */
+    /**
+     * @brief How the project uses a texture: "linear" when a material, scene or object asset names
+     *        it as a normal / metallic-roughness / alpha-mask map (data, not colour), "srgb" when
+     *        as an albedo map; with no reference, guessed from the file name (_normal, _mr...).
+     *
+     * The preview must declare the SAME color space the project's materials will: the texture
+     * loader keeps the first declaration for a file, so previewing a normal map as sRGB would
+     * mis-decode it for every material that uses it for the rest of the session.
+     */
+    std::string texture_color_space_(const std::string& rel) {
+        const std::string file = fs::path(rel).filename().string();
+        int linear = 0, srgb = 0;
+        std::function<void(const Node&)> scan = [&](const Node& n) {
+            if (n.is_mapping()) {
+                for (const auto& kv : n.as_map()) {
+                    const std::string k = kv.first.is_string() ? kv.first.get_value<std::string>() : std::string();
+                    if (kv.second.is_string() && k.rfind("texture_", 0) == 0) {
+                        const std::string v = kv.second.get_value<std::string>();
+                        if (v == rel || fs::path(v).filename().string() == file) (k == "texture_albedo" ? srgb : linear)++;
+                    } else {
+                        scan(kv.second);
+                    }
+                }
+            } else if (n.is_sequence()) {
+                for (const auto& e : n.as_seq()) scan(e);
+            }
+        };
+        std::vector<std::string> docs = project_.list("materials", ".yaml");
+        for (const auto& sc : project_.scenes()) docs.push_back(sc);
+        for (const auto& o : project_.list("objects", ".yaml")) docs.push_back(o);
+        for (const auto& d : docs) {
+            try { scan(coopa::yaml::load_document(coopa::yaml::resolve_variant(project_.absolute(d)))); } catch (...) {}
+        }
+        if (linear || srgb) return linear > srgb ? "linear" : "srgb";
+        std::string low = file;
+        std::transform(low.begin(), low.end(), low.begin(), ::tolower);
+        for (const char* tag : {"normal", "_nrm", "_n.", "_mr", "metal", "rough", "_ao", "occlusion", "mask", "height", "_orm"}) {
+            if (low.find(tag) != std::string::npos) return "linear";
+        }
+        return "srgb";
+    }
+
+    /** @brief The texture view's material: the image as albedo (decoded in the color space the
+     *         project uses it in -- see texture_color_space_()), fully rough. */
     void refresh_texture_preview_() {
         auto* mr = preview_renderer_();
         if (!mr) return;
@@ -745,7 +842,11 @@ private:
         m["albedo"] = make_color(glm::vec3(1.0f));
         m["roughness"] = make_float(1.0);
         m["metallic"] = make_float(0.0);
-        m["texture_albedo"] = Node(project_.relative(active_path_));
+        const std::string rel = project_.relative(active_path_);
+        m["texture_albedo"] = Node(rel);
+        Node spaces = Node::mapping();
+        spaces[rel] = Node(texture_color_space_(rel));
+        m["texture_color_space"] = spaces;
         mr->material = coopa::gfx::engine::components::PBRMaterial{};
         try {
             coopa::gfx::engine::components::parse_material_value_(m, mr->material, engine_.assets(), ctx);

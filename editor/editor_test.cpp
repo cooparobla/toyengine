@@ -4417,6 +4417,132 @@ void test_editor_text_pixel_aligned() {
     expect(off_grid == 0, "every glyph starts on a device pixel (" + std::to_string(off_grid) + " off the grid)");
 }
 
+
+/**
+ * @brief The Asset panel's right-click menus, through real input: right-clicking an asset
+ *        offers Delete (and the confirmation deletes the file); right-clicking empty space in the
+ *        list offers Add, with what the + button offers for that tab.
+ */
+void test_editor_asset_browser_context_menus() {
+    using coopa::input::MouseButton;
+    setenv("FIXED_DT", "0", 1);
+    unsetenv("NO_INPUT");
+    setenv("HOME", tmp_root().c_str(), 1);
+    const fs::path root = fresh_dir("asset_menu_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, 4);
+    InputDriver in{engine, std::max(1.0f, engine.display_scale())};
+    for (const char* n : {"stone", "brick"}) {
+        Node m = Node::mapping();
+        m["albedo"] = make_color({0.5f, 0.5f, 0.5f});
+        coopa::yaml::save_document(project.assets() / "materials" / (std::string(n) + ".yaml"), m);
+    }
+    project.refresh();
+    app.project().refresh();
+    app.set_asset_tab(AssetType::Material);
+    tick(engine, 3);
+
+    // Right-click an asset: its menu, with Delete.
+    auto row = app.test_rect("asset_row:materials/stone.yaml");
+    expect(row.has_value(), "the stone material is listed");
+    if (!row) return;
+    in.click(row->center(), MouseButton::Right);
+    expect(app.ui().any_popup_open(), "right-clicking an asset opens its context menu");
+    auto del = app.test_rect("asset_delete");
+    expect(del.has_value(), "the menu has Delete...");
+    if (!del) return;
+    in.click(del->center());
+    tick(engine, 2);
+    auto confirm = app.test_rect("asset_delete_confirm");
+    expect(confirm.has_value(), "Delete... asks for confirmation");
+    if (!confirm) return;
+    in.click(confirm->center());
+    tick(engine, 2);
+    expect(!coopa::yaml::document_exists(project.assets() / "materials" / "stone.yaml") &&
+           coopa::yaml::document_exists(project.assets() / "materials" / "brick.yaml"),
+           "confirming deletes that asset's file (and only it)");
+
+    // Right-click empty space: Add, the same as + (Materials: creates one directly).
+    auto brick = app.test_rect("asset_row:materials/brick.yaml");
+    expect(brick.has_value() && !app.test_rect("asset_row:materials/stone.yaml").has_value() ? true : brick.has_value(),
+           "the list now shows the remaining material");
+    if (!brick) return;
+    const glm::vec2 empty = brick->center() + glm::vec2(0.0f, 120.0f);
+    in.click(empty, MouseButton::Right);
+    expect(app.ui().any_popup_open(), "right-clicking empty space in the list opens the Add menu");
+    auto add = app.test_rect("asset_add");
+    expect(add.has_value(), "the menu has Add");
+    if (!add) return;
+    const size_t before = app.project().list("materials", ".yaml").size();
+    in.click(add->center());
+    tick(engine, 3);
+    app.project().refresh();
+    expect(app.project().list("materials", ".yaml").size() == before + 1, "Add creates a new material, as + does");
+
+    // A tab whose + offers choices (meshes) shows them under Add.
+    app.set_asset_tab(AssetType::Mesh);
+    tick(engine, 3);
+    in.click(empty, MouseButton::Right);
+    add = app.test_rect("asset_add");
+    expect(app.ui().any_popup_open() && add.has_value(), "the Meshes tab's empty-space menu has Add");
+    if (!add) return;
+    in.move(add->center(), 3);   // hovering opens the submenu
+    auto cube = app.test_rect("asset_new:Cube");
+    expect(cube.has_value(), "Add lists the mesh primitives the + button offers");
+    if (cube) {
+        in.click(cube->center());
+        tick(engine, 3);
+        expect(app.active_asset_type() == AssetType::Mesh && coopa::yaml::document_exists(project.assets() / "meshes" / "cube.yaml"),
+               "picking Cube creates (and opens) a cube mesh asset");
+    }
+}
+
+
+/**
+ * @brief Previewing a texture in the Textures tab declares the color space the project uses it
+ *        in. It used to always declare sRGB (the preview shows it as albedo), and the loader keeps
+ *        the first declaration -- so viewing a normal map mis-decoded it for every material
+ *        using it ("declare_color_space ... conflicts" on the console).
+ */
+void test_editor_texture_preview_color_space() {
+    setenv("FIXED_DT", "0", 1);
+    setenv("NO_INPUT", "1", 1);
+    setenv("HOME", tmp_root().c_str(), 1);
+    const fs::path root = fresh_dir("texture_space_project");
+    Project project = Project::create(root);
+    for (const char* t : {"brick_normal.png", "brick_albedo.png", "noise_mask.png"}) {
+        fs::copy_file(fs::path(ROOT_DIR) / "assets" / "textures" / t, project.assets() / "textures" / t);
+    }
+    Node mat = Node::mapping();
+    mat["albedo"] = make_color({1, 1, 1});
+    mat["texture_albedo"] = Node(std::string("textures/brick_albedo.png"));
+    mat["texture_normal"] = Node(std::string("textures/brick_normal.png"));
+    coopa::yaml::save_document(project.assets() / "materials" / "brick.yaml", mat);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, 4);
+    auto* loader = dynamic_cast<coopa::gfx::engine::loaders::TextureLoader*>(
+        engine.assets().loader<coopa::gfx::engine::data::Texture>());
+    expect(loader != nullptr, "the engine has a texture loader");
+    if (!loader) return;
+    auto space_of = [&](const char* rel) {
+        return loader->declared_color_space(engine.assets().source().resolve(rel, project.assets().string()));
+    };
+    using coopa::gfx::ColorSpace;
+    app.open_asset(AssetType::Texture, "textures/brick_normal.png");
+    tick(engine, 4);
+    expect(space_of("textures/brick_normal.png") == ColorSpace::Linear,
+           "previewing a normal map (used as texture_normal) declares it linear, not sRGB");
+    app.open_asset(AssetType::Texture, "textures/noise_mask.png");
+    tick(engine, 4);
+    expect(space_of("textures/noise_mask.png") == ColorSpace::Linear, "an unreferenced *_mask texture is treated as data (linear)");
+    app.open_asset(AssetType::Texture, "textures/brick_albedo.png");
+    tick(engine, 4);
+    expect(space_of("textures/brick_albedo.png") == ColorSpace::Srgb, "an albedo map previews as sRGB");
+}
+
 /** @brief Submeshes end to end: a two-slot mesh draws each slot with its own material. */
 void test_editor_submesh_materials() {
     setenv("FIXED_DT", "0.016666", 1);
@@ -5624,6 +5750,8 @@ const TestCase kTests[] = {
     {"editor_ui_templates",                  "editor_shell", test_editor_ui_templates},
     {"editor_ui_theme_shapes",               "editor_shell", test_editor_ui_theme_shapes},
     {"editor_text_pixel_aligned",            "editor_shell", test_editor_text_pixel_aligned},
+    {"editor_asset_browser_context_menus",   "editor_shell", test_editor_asset_browser_context_menus},
+    {"editor_texture_preview_color_space",   "editor_shell", test_editor_texture_preview_color_space},
     {"editor_game_ui_themes",                "editor_shell", test_editor_game_ui_themes},
     {"editor_submesh_materials",             "editor_shell", test_editor_submesh_materials},
     {"editor_object_mesh_edit_is_asset",     "editor_shell", test_editor_object_mesh_edit_is_asset},

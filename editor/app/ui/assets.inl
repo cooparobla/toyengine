@@ -65,6 +65,91 @@
         }
     }
 
+    /**
+     * @brief toyengine's own assets of a type that the project doesn't have a copy of -- the
+     *        read-only layer the Asset panel shows below the project's (empty when the project is
+     *        toyengine itself, or while the panel's toyengine toggle is off).
+     */
+    std::vector<std::string> list_engine_assets_(AssetType t) {
+        if (!show_engine_assets_ || project_.is_engine()) return {};
+        switch (t) {
+            case AssetType::Scene: return project_.engine_scenes();
+            case AssetType::Object: return project_.list_engine("objects", ".yaml");
+            case AssetType::Mesh: return project_.list_engine("meshes", ".yaml");
+            case AssetType::Material: return project_.list_engine("materials", ".yaml");
+            case AssetType::UI: {
+                std::vector<std::string> out;
+                for (const auto& p : project_.list_engine("ui", ".yaml")) if (p.rfind("ui/themes/", 0) != 0) out.push_back(p);
+                return out;
+            }
+            case AssetType::Theme: return project_.list_engine("ui/themes", ".yaml");
+            case AssetType::Texture: {
+                std::vector<std::string> out;
+                for (const auto& p : project_.list_engine("textures", "")) {
+                    const std::string e = fs::path(p).extension().string();
+                    if (e == ".png" || e == ".jpg" || e == ".jpeg" || e == ".tga") out.push_back(p);
+                }
+                return out;
+            }
+            default: return {};
+        }
+    }
+
+    /** @brief Materials a picker offers: the project's, then toyengine's (while shown). */
+    std::vector<std::string> material_choices_() {
+        std::vector<std::string> out = list_assets_(AssetType::Material);
+        for (const auto& m : list_engine_assets_(AssetType::Material)) out.push_back(m);
+        return out;
+    }
+
+public:
+    /** @brief Shows / hides toyengine's assets in the Asset panel and pickers (remembered). */
+    void set_show_engine_assets(bool on) {
+        show_engine_assets_ = on;
+        Node prefs = Project::load_prefs();
+        prefs["show_engine_assets"] = Node(on);
+        Project::save_prefs(prefs);
+    }
+    bool show_engine_assets() const { return show_engine_assets_; }
+    /** @brief The Asset panel's engine rows for a type, as listed (tests). */
+    std::vector<std::string> engine_assets_listed(AssetType t) { return list_engine_assets_(t); }
+
+    /**
+     * @brief Copies a read-only toyengine asset into the project (same path, so the copy now
+     *        resolves instead of toyengine's) and opens it -- the way to edit one. A scene copies
+     *        its whole folder (scene-local meshes and textures come along).
+     */
+    bool copy_engine_asset_to_project(AssetType t, const std::string& rel) {
+        const fs::path src = coopa::yaml::resolve_variant(Project::engine_assets() / rel);
+        std::error_code ec;
+        if (!fs::exists(src, ec)) { log_error("Not a toyengine asset: " + rel); return false; }
+        const fs::path dst = project_.assets() / fs::relative(src, Project::engine_assets(), ec);
+        if (t == AssetType::Scene && src.filename().string().rfind("scene", 0) == 0) {
+            fs::create_directories(dst.parent_path().parent_path(), ec);
+            fs::copy(src.parent_path(), dst.parent_path(), fs::copy_options::recursive | fs::copy_options::skip_existing, ec);
+        } else {
+            fs::create_directories(dst.parent_path(), ec);
+            fs::copy_file(src, dst, fs::copy_options::skip_existing, ec);
+            // A mesh's LOD sidecar travels with it.
+            const fs::path lod = src.parent_path() / (src.stem().string() + ".lod" + src.extension().string());
+            if (!ec && fs::exists(lod)) fs::copy_file(lod, dst.parent_path() / lod.filename(), fs::copy_options::skip_existing, ec);
+        }
+        project_.refresh();
+        if (ec) { log_error("Copy to Project failed: " + ec.message()); return false; }
+        log_info("Copied " + rel + " into the project -- this copy is editable and now replaces toyengine's");
+        open_asset(t, project_.relative(dst));
+        return true;
+    }
+
+private:
+    /** @brief Refuses to open / edit a toyengine asset outside toyengine itself (logging why). */
+    bool refuse_engine_asset_(const fs::path& abs) {
+        if (!project_.is_engine_path(abs)) return false;
+        log_warn(project_.relative(abs) + " is a read-only toyengine asset: drag it into a scene to use it, or right-click > "
+                 "Copy to Project to edit it");
+        return true;
+    }
+
     /** @brief The asset type of an assets-relative path (by folder / extension). */
     static AssetType asset_type_of_(const std::string& rel) {
         const fs::path p(rel);
@@ -118,6 +203,7 @@ public:
     void open_asset(AssetType t, const std::string& item) {
         fs::path abs = project_.absolute(item);
         if (!fs::exists(abs) && !coopa::yaml::document_exists(abs) && !doc_.path().empty()) abs = doc_.path().parent_path() / item;
+        if (refuse_engine_asset_(abs)) return;
         // A theme opens beside the open UI, replacing only the open theme (and, without a UI
         // open, the document it previews on) -- so only those need saving first.
         const bool replaces = t != AssetType::Theme || game_theme_.dirty() || (active_type_ != AssetType::UI && doc_.dirty());
@@ -342,8 +428,19 @@ private:
             x += s + 3;
         }
         const AssetTypeInfo& info = asset_type_info_(asset_tab_);
-        // New (+)
+        // New (+), and left of it the toyengine toggle (a game project only).
         const imm::Box nb{hb.right() - s - 6, hb.y + 4, s, s};
+        if (!project_.is_engine()) {
+            const imm::Box eb{nb.x - s - 4, nb.y, s, s};
+            if (ctx.icon_button("asset_engine", I::Package,
+                                std::string(show_engine_assets_ ? "Hide" : "Show") + " toyengine's assets\n"
+                                "Listed below the project's, read-only: drag them into a scene to use them, or "
+                                "right-click > Copy to Project to edit one",
+                                show_engine_assets_, s, imm::Context::kAll, eb, true)) {
+                set_show_engine_assets(!show_engine_assets_);
+            }
+            test_rects_["asset_engine_toggle"] = eb;
+        }
         const bool can_new = asset_tab_ != AssetType::Texture;
         if (ctx.icon_button("asset_new", I::Plus,
                             can_new ? std::string("New ") + info.singular + "\nCreate one in assets/" + info.dir + "/"
@@ -361,7 +458,10 @@ private:
         // Title + search.
         const imm::Box title{area.x + 8, hb.bottom() + 4, area.w - 16, 20};
         const auto items = list_assets_(asset_tab_);
-        ctx.text_in(title, std::string(info.label) + "  (" + std::to_string(items.size()) + ")", ctx.style.text, 0.0f);
+        const auto engine_items = list_engine_assets_(asset_tab_);
+        ctx.text_in(title, std::string(info.label) + "  (" + std::to_string(items.size()) + ")" +
+                               (engine_items.empty() ? std::string() : "  + " + std::to_string(engine_items.size()) + " toyengine"),
+                    ctx.style.text, 0.0f);
         const imm::Box search{area.x + 6, title.bottom() + 2, area.w - 12, 22};
         ctx.input_text_box("asset_filter", search, &asset_filter_, "    Search");
         if (asset_filter_.empty()) ctx.icon(I::Search, {search.x + 4, search.y + 4, 14, 14}, ctx.style.text_disabled);
@@ -397,6 +497,32 @@ private:
             if (ctx.last_clicked(imm::Mouse::Right)) right_clicked = rel;
             ctx.pop_id();
         }
+        // toyengine's assets, read-only: drag and drop (and the right-click uses), no editing.
+        bool engine_header = false;
+        for (const auto& rel : engine_items) {
+            const std::string name = asset_display_name_(asset_tab_, rel);
+            std::string ln = rel;
+            std::transform(ln.begin(), ln.end(), ln.begin(), ::tolower);
+            if (!f.empty() && ln.find(f) == std::string::npos) continue;
+            if (!engine_header) {
+                engine_header = true;
+                ctx.spacing(4);
+                const imm::Box sep = ctx.next_box(18);
+                ctx.fill({sep.x, sep.y + 2, sep.w, 1}, ctx.style.separator);
+                ctx.icon(I::Lock, {sep.x + 2, sep.y + 5, 12, 12}, ctx.style.text_disabled);
+                ctx.text_in({sep.x + 18, sep.y + 2, sep.w - 18, sep.h}, "toyengine  (read-only)", ctx.style.text_disabled, 0.0f);
+            }
+            ++shown;
+            ctx.push_id("engine:" + rel);
+            if (ctx.selectable(name, false, 0, info.icon)) refuse_engine_asset_(project_.absolute(rel));
+            ctx.tooltip(name + "\ntoyengine: assets/" + rel + "\nRead-only -- drag it into a scene to use it, or right-click > "
+                        "Copy to Project to edit a copy");
+            ctx.drag_source("asset", rel, name);
+            row_hovered |= ctx.last_hovered();
+            test_rects_["asset_row:engine:" + rel] = ctx.last_rect();
+            if (ctx.last_clicked(imm::Mouse::Right)) right_clicked = rel;
+            ctx.pop_id();
+        }
         // Opened OUTSIDE the row's push_id(): a popup's id is scoped like any widget's, so one
         // opened inside the row would never match the begin_popup("asset_ctx") below.
         if (!right_clicked.empty()) { asset_context_ = right_clicked; ctx.open_popup("asset_ctx"); }
@@ -405,7 +531,8 @@ private:
             ctx.open_popup("asset_list_ctx");
         }
         if (shown == 0) {
-            ctx.label_dim(items.empty() ? std::string("No ") + info.label + " yet -- press + to create one." : "Nothing matches.");
+            ctx.label_dim(items.empty() && engine_items.empty() ? std::string("No ") + info.label + " yet -- press + to create one."
+                                                                : "Nothing matches.");
             if (asset_tab_ == AssetType::Texture && items.empty()) ctx.label_dim("Copy .png files into assets/textures/.");
         }
         if (ctx.begin_popup("asset_ctx", 210)) {
@@ -439,8 +566,9 @@ private:
 
     void draw_asset_context_menu_(imm::Context& ctx, AssetType t, const std::string& rel) {
         using I = imm::Icon;
-        ctx.label_dim(asset_display_name_(t, rel));
-        if (ctx.menu_item("Open", "", nullptr, true, asset_type_info_(t).icon)) open_asset(t, rel);
+        const bool engine = project_.is_engine_asset(rel);
+        ctx.label_dim(asset_display_name_(t, rel) + (engine ? "  (toyengine, read-only)" : ""));
+        if (!engine && ctx.menu_item("Open", "", nullptr, true, asset_type_info_(t).icon)) open_asset(t, rel);
         if (t == AssetType::Object && ctx.menu_item("Place in Scene", "", nullptr, !asset_view_() && !playing(), I::Plus)) place_object_asset(rel);
         if (t == AssetType::UI && ctx.menu_item(active_type_ == AssetType::UI ? "Place in this UI" : "Place in Scene", "", nullptr,
                                                 !asset_view_() && !playing() && !asset_is_open_(t, rel), I::Plus)) {
@@ -452,6 +580,15 @@ private:
             assign_material_(rel);
         }
         ctx.menu_separator();
+        if (engine) {
+            // Using it is fine; changing it is toyengine's business. A copy is the project's own.
+            if (ctx.menu_item("Copy to Project", "", nullptr, true, I::Duplicate)) copy_engine_asset_to_project(t, rel);
+            ctx.tooltip("Copy to Project\nCopies it into this project's assets/" + std::string(asset_type_info_(t).dir) +
+                        "/ under the same name. The copy is editable and replaces toyengine's everywhere it is used.");
+            ctx.menu_separator();
+            if (ctx.menu_item("Copy Path", "", nullptr, true) && ctx.input().set_clipboard) ctx.input().set_clipboard(rel);
+            return;
+        }
         if (ctx.menu_item("Duplicate", "", nullptr, true, I::Duplicate)) duplicate_asset_(t, rel);
         if (ctx.menu_item("Rename...", "", nullptr, !asset_is_open_(t, rel))) { asset_rename_ = rel; asset_rename_to_ = fs::path(rel).stem().string(); pending_modal_ = "Rename Asset"; }
         if (ctx.menu_item("Delete...", "", nullptr, !asset_is_open_(t, rel), I::Trash)) { asset_delete_ = rel; pending_modal_ = "Delete Asset"; }

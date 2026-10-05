@@ -232,7 +232,7 @@
         auto ensure_names = [&](EditMesh& m) {
             while (m.slots.size() < count) m.slots.push_back(m.slots.empty() ? "default" : "slot" + std::to_string(m.slots.size()));
         };
-        const auto materials = list_assets_(AssetType::Material);
+        const auto materials = material_choices_();
         std::vector<std::string> mat_names = {"(palette colour)"};
         for (const auto& m : materials) mat_names.push_back(fs::path(m).stem().string());
         for (uint32_t sidx = 0; sidx < count; ++sidx) {
@@ -798,7 +798,7 @@
         if (!cm || cm->mesh.slots.size() <= 1) return;
         if (!ctx.collapsing_header("Slot Materials", true, nullptr, I::Material)) return;
         Node comp = node->at("components").as_seq()[static_cast<size_t>(ci)];
-        const auto mats = list_assets_(AssetType::Material);
+        const auto mats = material_choices_();
         std::vector<std::string> names = {"(same as " + cm->mesh.slots[0] + ")"};
         for (const auto& m : mats) names.push_back(fs::path(m).stem().string());
         ctx.label_dim(cm->mesh.slots[0] + ": the material above");

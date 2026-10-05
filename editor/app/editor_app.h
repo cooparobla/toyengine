@@ -169,6 +169,9 @@ public:
             if (prefs.contains("theme") && prefs.at("theme").is_string()) id = prefs.at("theme").get_value<std::string>();
             if (!load_theme_(id)) load_theme_(default_theme_id());
             if (prefs.contains("viewport_ao") && prefs.at("viewport_ao").is_boolean()) viewport_ao_ = prefs.at("viewport_ao").get_value<bool>();
+            if (prefs.contains("show_engine_assets") && prefs.at("show_engine_assets").is_boolean()) {
+                show_engine_assets_ = prefs.at("show_engine_assets").get_value<bool>();
+            }
             if (prefs.contains("isolate_edit_mode") && prefs.at("isolate_edit_mode").is_boolean()) {
                 isolate_in_edit_ = prefs.at("isolate_edit_mode").get_value<bool>();
             }
@@ -362,6 +365,7 @@ public:
     }
 
     bool open_scene(const fs::path& path) {
+        if (refuse_engine_asset_(path)) return false;   // toyengine's scenes are read-only here
         stop();
         try {
             doc_.load(path);
@@ -979,6 +983,8 @@ private:
         InspectorEnv env;
         env.list_assets = [this](const std::string& dir, const std::string& ext) {
             std::vector<std::string> out = project_.list(dir, ext);
+            // toyengine's assets resolve under the project's: offer them too (while shown).
+            if (show_engine_assets_) for (const auto& e : project_.list_engine(dir, ext)) out.push_back(e);
             // Scene-local assets (assets/scenes/<name>/meshes/...) resolve first at load time.
             if (!doc_.path().empty()) {
                 const fs::path local = doc_.path().parent_path() / dir;
@@ -2699,6 +2705,7 @@ private:
         }
         const fs::path path = resolve_mesh_key_(key);
         if (!coopa::yaml::document_exists(path)) { log_error("Mesh file not found for '" + key + "'"); return {}; }
+        if (refuse_engine_asset_(path)) return {};   // toyengine's mesh: Copy to Project to edit it
         return path;
     }
 
@@ -3488,6 +3495,7 @@ private:
     bool grid_wanted_ = false;
     coopa::input::CursorShape applied_cursor_ = coopa::input::CursorShape::Arrow;
     bool viewport_ao_ = true;    // Viewport Shading > Ambient Occlusion
+    bool show_engine_assets_ = true;   // Asset panel: list toyengine's (read-only) assets too
     // Theme (see load_theme_): the file, the editor's typed colours, hot-reload state.
     imm::Theme theme_;
     EditorTheme et_;

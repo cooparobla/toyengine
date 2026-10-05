@@ -4653,6 +4653,7 @@ void test_editor_asset_browser_context_menus() {
     Project project = Project::create(root);
     toy::core::Engine engine(shell_config(project), shell_options(project));
     EditorApp app(engine, project);
+    app.set_show_engine_assets(false);   // the project's list only: "empty space" below it must stay empty
     tick(engine, 4);
     InputDriver in{engine, std::max(1.0f, engine.display_scale())};
     for (const char* n : {"stone", "brick"}) {
@@ -6132,6 +6133,81 @@ void test_editor_build_refresh() {
     expect(app.build_task().cancelled(), "Cancel Build stops it");
 }
 
+void test_editor_engine_assets() {
+    // toyengine's assets/ is a read-only layer under a game project's: listed (toggle, on by
+    // default), usable by drag and drop, never edited -- Copy to Project makes an editable copy.
+    using coopa::input::MouseButton;
+    setenv("FIXED_DT", "0", 1);
+    unsetenv("NO_INPUT");
+    const fs::path home = fresh_dir("engine_assets_home");
+    setenv("HOME", home.c_str(), 1);
+    const fs::path root = fresh_dir("engine_assets_project");
+    Project project = Project::create(root);
+    expect(!project.is_engine() && Project(fs::path(ROOT_DIR)).is_engine(), "a game project is not toyengine; the checkout is");
+    expect(project.is_engine_asset("materials/brick.yaml") && !project.is_engine_asset("materials/default.yaml"),
+           "a file only toyengine has resolves to toyengine's; one the project has stays the project's");
+    expect(project.absolute("materials/brick.yaml") == Project::engine_assets() / "materials/brick.yaml" &&
+           project.relative(project.absolute("materials/brick.yaml")) == "materials/brick.yaml",
+           "absolute() / relative() round-trip through toyengine's assets/");
+    expect(Project(fs::path(ROOT_DIR)).list_engine("materials", ".yaml").empty(), "inside toyengine nothing is a separate layer");
+
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    InputDriver in{engine, std::max(1.0f, engine.display_scale())};
+    tick(engine, 4);
+    expect(app.show_engine_assets(), "toyengine's assets are shown by default");
+    auto has = [](const std::vector<std::string>& v, const std::string& x) { return std::find(v.begin(), v.end(), x) != v.end(); };
+    const auto meshes = app.engine_assets_listed(AssetType::Mesh);
+    expect(has(meshes, "meshes/barrel.yaml") && !has(meshes, "meshes/cube.yaml"),
+           "the Asset panel lists toyengine's meshes, minus those the project has its own copy of");
+
+    // Not editable: opening is refused, so nothing can be saved back into toyengine.
+    app.open_asset(AssetType::Material, "materials/brick.yaml");
+    tick(engine, 3);
+    expect(app.active_asset_type() == AssetType::Scene, "a toyengine material doesn't open for editing");
+
+    // Usable: drag a toyengine mesh from the panel into the viewport.
+    app.set_asset_tab(AssetType::Mesh);
+    tick(engine, 3);
+    const auto row = app.test_rect("asset_row:engine:meshes/barrel.yaml");
+    expect(row.has_value(), "the barrel row is drawn in the toyengine section");
+    if (row) {
+        const imm::Box vb = app.viewport_box();
+        in.move({row->x + row->w * 0.5f, row->y + row->h * 0.5f});
+        in.drag({vb.x + vb.w * 0.5f, vb.y + vb.h * 0.5f}, MouseButton::Left, 8);
+        tick(engine, 4);
+    }
+    const ObjectId barrel = object_named(app, "barrel");
+    expect(barrel != 0, "dropping it adds a barrel to the scene");
+    expect(engine.scene().find_object("barrel") != nullptr, "...which loads (toyengine's mesh resolves under the project)");
+    dump(engine, "engine_assets_drop");
+
+    // ...but its mesh can't be edited in place.
+    if (barrel) {
+        app.document().clear_selection();
+        app.document().select(barrel);
+        tick(engine, 1);
+        expect(!app.set_interaction_mode(InteractionMode::Edit) && app.interaction_mode() == InteractionMode::Object,
+               "Edit Mode on toyengine's mesh is refused");
+    }
+
+    // Copy to Project: the project's own, editable copy now resolves instead.
+    expect(app.copy_engine_asset_to_project(AssetType::Material, "materials/brick.yaml"), "Copy to Project");
+    tick(engine, 4);
+    expect(fs::exists(root / "assets" / "materials" / "brick.yaml") && !app.project().is_engine_asset("materials/brick.yaml"),
+           "the copy is the project's");
+    // It opens for editing -- after the usual save prompt, since the barrel left the scene unsaved.
+    expect(app.active_asset_type() == AssetType::Material || app.ui().is_popup_open("Unsaved Changes"),
+           "...and opens for editing (after the unsaved-changes prompt)");
+    expect(!has(app.engine_assets_listed(AssetType::Material), "materials/brick.yaml"), "...and leaves the toyengine section");
+
+    // The toggle hides the layer, and is remembered.
+    app.set_show_engine_assets(false);
+    expect(app.engine_assets_listed(AssetType::Mesh).empty(), "the toggle hides toyengine's assets");
+    expect(Project::load_prefs().contains("show_engine_assets") && !Project::load_prefs().at("show_engine_assets").get_value<bool>(),
+           "...and is remembered");
+}
+
 // =====================================================================================
 // Group "hub" -- the project hub, driven through real input
 // =====================================================================================
@@ -6317,6 +6393,7 @@ const TestCase kTests[] = {
     {"process_task_and_diagnostics",         "project",  test_process_task_and_diagnostics},
     {"package_renders_identically",          "package",  test_package_renders_identically},
     {"editor_build_refresh",                 "editor_shell", test_editor_build_refresh},
+    {"editor_engine_assets",                 "editor_shell", test_editor_engine_assets},
     {"hub_project_actions",                  "hub",      test_hub_project_actions},
     {"docs_overview", "docs", test_docs_overview},
     {"docs_menu_file", "docs", test_docs_menu_file},

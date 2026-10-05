@@ -174,18 +174,70 @@ public:
         return toy;
     }
 
-    /** @brief `p` relative to assets/ with forward slashes, or `p` unchanged if outside. */
+    /** @brief `p` relative to assets/ (or, for a toyengine asset, to toyengine's assets/) with
+     *         forward slashes, or `p` unchanged if outside both. */
     std::string relative(const fs::path& p) const {
-        std::error_code ec;
-        const fs::path rel = fs::relative(p, assets(), ec);
-        const std::string s = rel.generic_string();
-        if (ec || s.empty() || s.rfind("..", 0) == 0) return p.generic_string();
-        return s;
+        auto under = [&](const fs::path& base) -> std::string {
+            std::error_code ec;
+            const std::string s = fs::relative(p, base, ec).generic_string();
+            return ec || s.empty() || s.rfind("..", 0) == 0 ? std::string() : s;
+        };
+        if (std::string s = under(assets()); !s.empty()) return s;
+        if (!is_engine()) if (std::string s = under(engine_assets()); !s.empty()) return s;
+        return p.generic_string();
     }
+    /**
+     * @brief An assets-relative path's file: the project's, else -- like the engine's asset
+     *        search roots -- toyengine's (when the project has no file there and toyengine does).
+     *        Paths for NEW files are built from assets() directly, never from this.
+     */
     fs::path absolute(const std::string& rel) const {
         const fs::path p(rel);
-        return p.is_absolute() ? p : assets() / p;
+        if (p.is_absolute()) return p;
+        const fs::path mine = assets() / p;
+        if (is_engine() || exists_(mine)) return mine;
+        const fs::path theirs = engine_assets() / p;
+        return exists_(theirs) ? theirs : mine;
     }
+
+    // --- toyengine's own assets: the read-only layer under a game project's ---
+
+    /** @brief toyengine's assets/ (the engine checkout this editor was built from). */
+    static fs::path engine_assets() { return fs::path(ROOT_DIR) / "assets"; }
+    /** @brief True when this project IS the toyengine checkout: its assets are all editable. */
+    bool is_engine() const {
+        std::error_code ec;
+        return fs::equivalent(root_, fs::path(ROOT_DIR), ec);
+    }
+    /** @brief True for a file in toyengine's assets/ while editing another project: read-only. */
+    bool is_engine_path(const fs::path& abs) const {
+        if (is_engine() || abs.empty()) return false;
+        const std::string s = fs::path(abs).lexically_normal().generic_string();
+        const std::string base = engine_assets().lexically_normal().generic_string() + "/";
+        return s.rfind(base, 0) == 0;
+    }
+    /** @brief True when `rel` resolves to toyengine's copy (the project has none). */
+    bool is_engine_asset(const std::string& rel) const { return is_engine_path(absolute(rel)); }
+
+    /**
+     * @brief toyengine's assets under <dir> with `ext`, like list(), minus those the project has
+     *        its own copy of (that copy is what resolves). Empty when this project is toyengine.
+     */
+    const std::vector<std::string>& list_engine(const std::string& dir, const std::string& ext) {
+        static const std::vector<std::string> none;
+        if (is_engine()) return none;
+        const std::string key = "engine|" + dir + "|" + ext;
+        auto it = cache_.find(key);
+        if (it != cache_.end()) return it->second;
+        const auto& mine = list(dir, ext);
+        std::vector<std::string> out;
+        for (const auto& rel : scan_(engine_assets(), dir, ext)) {
+            if (std::find(mine.begin(), mine.end(), rel) == mine.end()) out.push_back(rel);
+        }
+        return cache_[key] = out;
+    }
+    /** @brief toyengine's scenes (see scenes()) the project doesn't have. */
+    std::vector<std::string> engine_scenes() { return scene_files_(list_engine("scenes", ".yaml")); }
 
     /**
      * @brief Every file under assets/<dir> with extension `ext` (a .yaml request also
@@ -195,22 +247,7 @@ public:
         const std::string key = dir + "|" + ext;
         auto it = cache_.find(key);
         if (it != cache_.end()) return it->second;
-        std::vector<std::string> out;
-        std::error_code ec;
-        const fs::path base = dir.empty() ? assets() : assets() / dir;
-        if (fs::is_directory(base, ec)) {
-            for (auto e = fs::recursive_directory_iterator(base, ec); e != fs::recursive_directory_iterator(); e.increment(ec)) {
-                if (ec) break;
-                if (!e->is_regular_file()) continue;
-                const std::string fe = e->path().extension().string();
-                const std::string fname = e->path().filename().string();
-                if (fname.find(".lod.") != std::string::npos) continue;   // sidecars aren't meshes
-                if (!ext.empty() && fe != ext && !(ext == ".yaml" && fe == ".caml")) continue;
-                out.push_back(relative(e->path()));
-            }
-        }
-        std::sort(out.begin(), out.end());
-        return cache_[key] = out;
+        return cache_[key] = scan_(assets(), dir, ext);
     }
     void refresh() { cache_.clear(); }
 
@@ -269,15 +306,7 @@ public:
     }
 
     /** @brief All scene files (assets/scenes/<name>/scene.yaml and any other .yaml in scenes/). */
-    std::vector<std::string> scenes() {
-        std::vector<std::string> out;
-        for (const auto& p : list("scenes", ".yaml")) {
-            const std::string f = fs::path(p).filename().string();
-            if (fs::path(p).parent_path().filename() == "meshes") continue;
-            if (f.rfind("scene", 0) == 0 || fs::path(p).parent_path() == "scenes") out.push_back(p);
-        }
-        return out;
-    }
+    std::vector<std::string> scenes() { return scene_files_(list("scenes", ".yaml")); }
 
     // --- recent projects (~/.toyengine_editor.yaml) ---
 
@@ -452,6 +481,40 @@ public:
     }
 
 private:
+    /** @brief Files under <root>/<dir> with `ext` (.yaml also matches .caml), relative to `root`, sorted. */
+    static std::vector<std::string> scan_(const fs::path& root, const std::string& dir, const std::string& ext) {
+        std::vector<std::string> out;
+        std::error_code ec;
+        const fs::path base = dir.empty() ? root : root / dir;
+        if (fs::is_directory(base, ec)) {
+            for (auto e = fs::recursive_directory_iterator(base, ec); e != fs::recursive_directory_iterator(); e.increment(ec)) {
+                if (ec) break;
+                if (!e->is_regular_file()) continue;
+                const std::string fe = e->path().extension().string();
+                const std::string fname = e->path().filename().string();
+                if (fname.find(".lod.") != std::string::npos) continue;   // sidecars aren't meshes
+                if (!ext.empty() && fe != ext && !(ext == ".yaml" && fe == ".caml")) continue;
+                out.push_back(fs::relative(e->path(), root, ec).generic_string());
+            }
+        }
+        std::sort(out.begin(), out.end());
+        return out;
+    }
+    /** @brief The scene documents among scenes/ files (not their scene-local meshes). */
+    static std::vector<std::string> scene_files_(const std::vector<std::string>& files) {
+        std::vector<std::string> out;
+        for (const auto& p : files) {
+            const std::string f = fs::path(p).filename().string();
+            if (fs::path(p).parent_path().filename() == "meshes") continue;
+            if (f.rfind("scene", 0) == 0 || fs::path(p).parent_path() == "scenes") out.push_back(p);
+        }
+        return out;
+    }
+    static bool exists_(const fs::path& p) {
+        std::error_code ec;
+        return fs::exists(p, ec) || coopa::yaml::document_exists(p);
+    }
+
     fs::path root_;
     std::map<std::string, std::vector<std::string>> cache_;
 };

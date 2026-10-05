@@ -135,6 +135,28 @@ where it is saved.
 A theme from the **Themes** tab is different: it opens in an extra **Theme** tab in Properties
 and leaves the open asset where it is. See [UI designer](ui-designer.md#style-the-ui-with-a-theme).
 
+### Use toyengine's built-in assets
+
+In a game project, the Asset panel also lists toyengine's own assets: meshes such as **barrel**,
+materials such as **brick**, fonts, themes and more. They appear under a **toyengine
+(read-only)** heading below the project's assets. The **toyengine** button (the box icon to the
+left of **+**) shows or hides them, and the editor remembers your choice. They are shown by
+default, and the material, mesh and texture lists in Properties offer them too.
+
+toyengine's assets can be used but not changed:
+
+- **Use one.** Drag it into the viewport or onto an object, the same as a project asset.
+  Right-click it for **Place in Scene**, **Add to Scene**, **Assign to Selected** or **Make
+  Object Asset**.
+- **Change one.** Right-click it and choose **Copy to Project**. The copy goes into the
+  project's `assets/` under the same name, opens for editing, and replaces toyengine's
+  everywhere it is used.
+
+Clicking a toyengine asset doesn't open it, and Edit, Sculpt or Paint mode won't start on an
+object that uses a toyengine mesh. In both cases the Console explains how to copy it into the
+project. When the open project is toyengine itself, its assets are ordinary, editable project
+assets, and the button and heading don't appear.
+
 ### Create an asset
 
 1. Pick the asset type's tab.
@@ -265,6 +287,6 @@ theme, see [UI designer](ui-designer.md#style-the-ui-with-a-theme).
 
 ---
 
-Sources: `editor/app/ui/topbar.inl`, `editor/app/ui/layout.inl`, `editor/app/ui/assets.inl`, `editor/app/ui/browser.inl`, `editor/app/ui/outliner.inl`, `editor/app/ui/statusbar.inl`, `editor/app/ui/properties.inl`, `editor/app/ui/theme_editor.inl`, `editor/app/editor_theme.h`, `editor/app/editor_app.h`, `editor/app/ui/build.inl`
+Sources: `editor/app/ui/topbar.inl`, `editor/app/ui/layout.inl`, `editor/app/ui/assets.inl`, `editor/app/ui/browser.inl`, `editor/app/ui/outliner.inl`, `editor/app/ui/statusbar.inl`, `editor/app/ui/properties.inl`, `editor/app/ui/theme_editor.inl`, `editor/app/editor_theme.h`, `editor/app/editor_app.h`, `editor/app/ui/build.inl`, `editor/app/project.h`
 
 Previous: [Editor manual](README.md) | Next: [Scenes and objects](scenes-and-objects.md)

@@ -154,6 +154,12 @@ struct MaterialDocument {
 };
 
 /**
+ * @brief One ui/themes/*.yaml game UI theme being edited -- the same shape as a material: a
+ *        raw document with undo, saved on request. `ref` is "ui/themes/<name>".
+ */
+using ThemeDocument = MaterialDocument;
+
+/**
  * @brief config.yaml, edited as its raw document.
  *
  * Only keys the user touches are written (plus the ones already in the file): config

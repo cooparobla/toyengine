@@ -2485,9 +2485,18 @@ private:
         ui_composite_pass_->draw(cmd, ctx.letterbox);
         if (screen_ui_pass_) {
             for (coopa::ui::CanvasComponent* canvas : screen_canvases_) {
+                // A canvas a host placed inside part of the window (Engine::set_scene_ui_placement())
+                // draws at its own origin and size, clipped to them; every other canvas covers the
+                // target exactly as before.
+                const glm::uvec2 vs = canvas->viewport_size();
+                const bool placed = vs.x > 0 && vs.y > 0;
+                const float zoom = placed ? canvas->display_zoom() : 1.0f;
                 screen_ui_pass_->draw(cmd, ctx.frame_slot,
                                       overlay_extent_.width, overlay_extent_.height,
-                                      canvas->scale_factor(), canvas->draw_list());
+                                      placed ? canvas->screen_origin() : glm::vec2(0.0f),
+                                      placed ? static_cast<uint32_t>(std::lround(vs.x * zoom)) : overlay_extent_.width,
+                                      placed ? static_cast<uint32_t>(std::lround(vs.y * zoom)) : overlay_extent_.height,
+                                      canvas->scale_factor() * zoom, canvas->draw_list());
             }
         }
         overlay_target_->end(cmd);

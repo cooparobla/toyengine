@@ -36,6 +36,14 @@
             tabs = {{PropTab::Material, I::Material, "Material\nThe material asset and its lookdev preview"}};
         } else if (active_type_ == AssetType::Texture) {
             tabs = {{PropTab::Data, I::Image, "Texture\nThe texture asset"}};
+        } else if (active_type_ == AssetType::UI) {
+            tabs = {{PropTab::Canvas, I::UiCanvas, "Canvas\nPreview resolution, the canvas's scaling, the theme"},
+                    {PropTab::Bindings, I::Link, "Bindings\nThe named widgets game code reaches (UiHandle), and their signals"}};
+            if (obj) {
+                object_start = static_cast<int>(tabs.size());
+                tabs.push_back({PropTab::Object, I::UiAnchor, "Element\nName, Rect Transform (anchors, position, size), visibility"});
+                tabs.push_back({PropTab::Components, I::Component, "Components\nThe element's widgets and composites, Add Component"});
+            }
         }
         if (scene_like && obj) {
             object_start = static_cast<int>(tabs.size());
@@ -47,28 +55,55 @@
                 tabs.push_back({PropTab::Material, I::Material, "Materials\nOne material per mesh slot: inline, asset or asset + overrides"});
             }
         }
+        // An open game UI theme keeps its tab whatever else is open (ui/theme_editor.inl).
+        if (game_theme_.open()) tabs.push_back({PropTab::Theme, I::Palette, "Theme\nThe open game UI theme: colours, fonts, sizes"});
         int active = -1;
         for (size_t i = 0; i < tabs.size(); ++i) if (tabs[i].tab == prop_tab_) active = static_cast<int>(i);
         if (active < 0) { active = object_start >= 0 ? object_start : 0; prop_tab_ = tabs[static_cast<size_t>(active)].tab; }
 
+        // The area's own title bar, like every other area's header.
+        const imm::Box ah = area_header_(ctx, area);
+        ctx.icon(I::Gear, {ah.x + 6, ah.y + 4, ah.h - 8, ah.h - 8}, ctx.style.text_dim);
+        ctx.text_in({ah.x + ah.h + 2, ah.y, ah.w - ah.h - 4, ah.h}, "Properties", ctx.style.text, 0.0f);
+        const imm::Box below{area.x, ah.bottom(), area.w, area.h - ah.h};
+
         const float strip_w = 30;
         std::vector<std::pair<I, std::string>> items;
         for (const auto& t : tabs) items.push_back({t.icon, t.tip});
-        const imm::Box strip{area.x, area.y + 4, strip_w, area.h - 8};
+        const imm::Box strip{below.x, below.y + 4, strip_w, below.h - 8};
         std::vector<int> separators;
         if (object_start > 0) separators.push_back(object_start);
         if (ctx.vertical_tabs("prop_tabs", strip, items, &active, separators)) prop_tab_ = tabs[static_cast<size_t>(active)].tab;
 
-        // Header: breadcrumb -- the open asset, then the selected object.
-        const imm::Box content{area.x + strip_w, area.y, area.w - strip_w, area.h};
-        const imm::Box hb{content.x, content.y, content.w, 26};
+        // Title row: which tab this is (its icon and name, from the tab's tooltip), then -- dimmed
+        // -- what it is showing: the open asset, then the selected object.
+        const imm::Box content{below.x + strip_w, below.y, below.w - strip_w, below.h};
+        const imm::Box hb{content.x, content.y, content.w, 28};
+        const TabDef& cur = tabs[static_cast<size_t>(active)];
+        const std::string tab_title = std::string(cur.tip).substr(0, std::string(cur.tip).find('\n'));
         std::string crumb = active_asset_label_();
-        I crumb_icon = asset_type_info_(active_type_).icon;
-        if (scene_like && prop_tab_ >= PropTab::Object && obj) { crumb += "  >  " + get_string(*obj, "name"); crumb_icon = object_icon_(*obj, ctx.style).first; }
-        ctx.icon(crumb_icon, {hb.x + 8, hb.y + 5, hb.h - 10, hb.h - 10}, ctx.style.text_dim);
-        ctx.text_in({hb.x + hb.h + 6, hb.y, hb.w - hb.h - 6, hb.h}, crumb, ctx.style.text_dim, 0.0f);
+        if ((scene_like || active_type_ == AssetType::UI) && (prop_tab_ == PropTab::Object || prop_tab_ == PropTab::Components) && obj) {
+            crumb += "  >  " + get_string(*obj, "name");
+        }
+        ctx.icon(cur.icon, {hb.x + 8, hb.y + 6, hb.h - 12, hb.h - 12}, ctx.style.text);
+        const float title_x = hb.x + hb.h + 4;
+        ctx.text_in({title_x, hb.y, hb.w - (title_x - hb.x), hb.h}, tab_title, ctx.style.text, 0.0f);
+        const float crumb_x = title_x + ctx.text_width(tab_title) + 10;
+        if (crumb_x < hb.right() - 20) {
+            ctx.text_in({crumb_x, hb.y, hb.right() - crumb_x - 4, hb.h}, crumb, ctx.style.text_dim, 0.0f);
+        }
+        ctx.fill({hb.x + 6, hb.bottom() - 1, hb.w - 12, 1}, ctx.style.border);
         ctx.begin_region("prop_body", {content.x, hb.bottom(), content.w, content.h - hb.h}, true);
-        if (active_type_ == AssetType::Material) draw_material_asset_props_(ctx);
+        if (prop_tab_ == PropTab::Theme) draw_theme_props_(ctx);
+        else if (active_type_ == AssetType::UI) {
+            switch (prop_tab_) {
+                case PropTab::Canvas:     draw_ui_canvas_props_(ctx); break;
+                case PropTab::Bindings:   draw_ui_bindings_(ctx); break;
+                case PropTab::Object:     draw_ui_object_props_(ctx, id); break;
+                default:                  draw_component_list_(ctx, id, false); break;
+            }
+        }
+        else if (active_type_ == AssetType::Material) draw_material_asset_props_(ctx);
         else if (active_type_ == AssetType::Texture) draw_texture_properties_(ctx);
         else if (active_type_ == AssetType::Mesh && prop_tab_ == PropTab::Data) draw_mesh_asset_props_(ctx);
         else switch (prop_tab_) {
@@ -151,6 +186,7 @@
             case AssetType::Mesh: return mesh_.name;
             case AssetType::Material: return material_.open() ? fs::path(material_.ref).filename().string() : std::string("material");
             case AssetType::Texture: return active_path_.filename().string();
+            case AssetType::UI: return doc_.scene_name();
             default: return "";
         }
     }
@@ -361,7 +397,9 @@
         ctx.same_line();
         if (ctx.button("Restart Renderer", 150, true, I::Restart)) restart_ = true;
         ctx.tooltip("Restart Renderer\nRebuilds the renderer so startup-only settings (marked *) apply. Open documents are kept.");
-        ctx.label_dim("Changes apply live; * needs a restart. x resets a key to its preset.");
+        ctx.label_dim(active_type_ == AssetType::Scene ? "Edits override config.yaml for this scene (tinted rows)."
+                                                       : "Edits change config.yaml, the project's settings.");
+        ctx.label_dim("Right-click a row: revert / apply. * = project-wide.");
         ctx.spacing(4);
         draw_setting_groups_(ctx, render_settings_groups(), "render",
                              {"Viewport & Resolution", "Quality Tiers", "Features", "Shadows", "Bloom & Exposure", "Stylize", "Debug"});
@@ -377,7 +415,7 @@
     }
 
     void draw_world_props_(imm::Context& ctx) {
-        ctx.label_dim("The sky gradient lights every scene; fog is global.");
+        ctx.label_dim("Project-wide in config.yaml; edits in a scene override them for that scene.");
         ctx.spacing(4);
         draw_setting_groups_(ctx, render_settings_groups(), "render", {"Lighting & Sky", "Fog"});
     }
@@ -432,6 +470,7 @@
         if (ctx.collapsing_header("Physics", true, nullptr, I::Physics)) {
             InspectorEnv env = inspector_env_();
             Node& section = config_.section("physics");
+            ctx.label_dim("Scene overrides (tinted) apply when the scene starts or plays.");
             for (const auto& g : project_settings_groups()) {
                 if (g.title != "Physics") continue;
                 for (const auto& f : g.fields) draw_setting_row_(ctx, f, section, env, "physics");
@@ -570,6 +609,7 @@
             Node comp = list_now.at("components").as_seq()[i];
             const std::string type = component_type(comp);
             if (type == "Transform") continue;
+            if (type == "RectTransform" && active_type_ == AssetType::UI) continue;   // the Element tab edits it
             const ComponentSchema* schema = find_schema(type);
             const bool is_physics = schema && schema->category == "Physics";
             if (is_physics != physics) continue;
@@ -641,7 +681,8 @@
             ctx.pop_id();
             ctx.spacing(5);
         }
-        if (!any) ctx.label_dim(physics ? "No physics components." : "No components besides Transform.");
+        if (!any) ctx.label_dim(physics ? "No physics components." : active_type_ == AssetType::UI ? "No components besides its Rect Transform."
+                                                                    : "No components besides Transform.");
         if (!editable) return;
         ctx.spacing(6);
         if (ctx.button(physics ? "Add Physics Component" : "Add Component", -1, true, I::Plus)) {
@@ -657,6 +698,7 @@
             for (const auto& [t, sc] : schemas()) {
                 if (t == "Transform" || (sc.unique && doc_.find_component(id, t) >= 0)) continue;
                 if (phys_only && sc.category != "Physics") continue;
+                if (active_type_ == AssetType::UI && sc.category.rfind("UI", 0) != 0) continue;   // UI elements take UI components
                 if (!add_component_filter_.empty()) {
                     std::string a = t, b = add_component_filter_;
                     std::transform(a.begin(), a.end(), a.begin(), ::tolower);

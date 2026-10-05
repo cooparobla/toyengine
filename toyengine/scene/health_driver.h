@@ -23,6 +23,7 @@
 #include <coopa/scene/scene_object.h>
 #include <coopa/stat/resource.h>
 
+#include <uicoopa/binding/ui_handle.h>
 #include <uicoopa/widgets/progress_bar.h>
 
 namespace toy {
@@ -76,6 +77,9 @@ public:
     }
 
     void update(float delta_time) override {
+        // A bar a composite builds (a StatBar's) only exists once that composite has started,
+        // which can be after this component's own start(): look again until it turns up.
+        if (!bar_ && (bar_ = find_bar_())) bar_->bind(&health_);
         if (delta_time <= 0.0f || health_.max <= 0.0f) return;
 
         if (draining_) {
@@ -90,24 +94,13 @@ public:
 private:
     /** @brief Resolves bar_object (or the first ProgressBar in the subtree) at start() time --
      *         never in a YAML parser, which runs before this object's children exist. */
+    /**
+     * @brief The bar this drives, by name through the same lookup game code binds authored UI
+     *        with (UiHandle): `bar_object` names it -- or an object, a StatBar say, carrying
+     *        one below it -- and empty means this object or the first bar in its subtree.
+     */
     coopa::ui::ProgressBar* find_bar_() const {
-        if (!owner) return nullptr;
-        if (!bar_object.empty()) {
-            if (auto* node = owner->find_descendant(bar_object)) {
-                return node->get_component<coopa::ui::ProgressBar>();
-            }
-            return nullptr;
-        }
-        if (auto* self = owner->get_component<coopa::ui::ProgressBar>()) return self;
-        return find_in_subtree_(*owner);
-    }
-
-    static coopa::ui::ProgressBar* find_in_subtree_(coopa::scene::SceneObject& obj) {
-        for (auto& child : obj.children()) {
-            if (auto* bar = child->get_component<coopa::ui::ProgressBar>()) return bar;
-            if (auto* deeper = find_in_subtree_(*child)) return deeper;
-        }
-        return nullptr;
+        return coopa::ui::UiHandle(owner).find<coopa::ui::ProgressBar>(bar_object);
     }
 
     coopa::stat::Resource   health_{100.0f};

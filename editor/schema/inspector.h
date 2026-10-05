@@ -30,6 +30,8 @@ namespace imm = coopa::ui::imm;
 struct InspectorEnv {
     /// Project-relative asset paths ("meshes/cube.yaml") under `dir` with extension `ext`.
     std::function<std::vector<std::string>(const std::string& dir, const std::string& ext)> list_assets;
+    /// Names a ChildRef field may pick (the edited object's descendants, then other objects).
+    std::function<std::vector<std::string>()> object_names;
 };
 
 struct EditResult {
@@ -218,7 +220,145 @@ inline EditResult draw_field(imm::Context& ctx, const FieldDesc& f, Node& block,
         }
         case FieldKind::Material:
             break;  // drawn by draw_material_field()
+        case FieldKind::Vec2: {
+            const Node* n = present ? &block.at(f.key) : nullptr;
+            float v[2] = {n ? get_float(*n, "x", f.def.x) : f.def.x, n ? get_float(*n, "y", f.def.y) : f.def.y};
+            const bool ch = ctx.drag_floatn(label, v, 2, f.speed);
+            if (ch) {
+                Node o = Node::mapping();
+                o["x"] = make_float(v[0]);
+                o["y"] = make_float(v[1]);
+                block[f.key] = o;
+            }
+            detail::finish(ctx, r, f.key, ch, true);
+            break;
+        }
+        case FieldKind::Color4: {
+            const Node* n = present ? &block.at(f.key) : nullptr;
+            float rgba[4] = {n ? get_float(*n, "r", f.def.r) : f.def.r, n ? get_float(*n, "g", f.def.g) : f.def.g,
+                             n ? get_float(*n, "b", f.def.b) : f.def.b, n ? get_float(*n, "a", f.def.a) : f.def.a};
+            const bool ch = ctx.color_edit(label, rgba, true);
+            if (ch) {
+                Node o = make_color({rgba[0], rgba[1], rgba[2]});
+                o["a"] = make_float(rgba[3]);
+                block[f.key] = o;
+            }
+            detail::finish(ctx, r, f.key, ch, true);
+            break;
+        }
+        case FieldKind::Padding: {
+            static const char* keys[4] = {"left", "right", "top", "bottom"};
+            const Node* n = present ? &block.at(f.key) : nullptr;
+            float v[4];
+            for (int i = 0; i < 4; ++i) v[i] = n ? get_float(*n, keys[i], f.def[i]) : f.def[i];
+            const bool ch = ctx.drag_floatn(label, v, 4, f.speed);
+            ctx.tooltip(f.display() + "\nLeft, right, top, bottom");
+            if (ch) {
+                Node o = Node::mapping();
+                for (int i = 0; i < 4; ++i) o[keys[i]] = make_float(v[i]);
+                block[f.key] = o;
+            }
+            detail::finish(ctx, r, f.key, ch, true);
+            break;
+        }
+        case FieldKind::StringList: {
+            // One line, comma separated: quick to edit, and the list stays visible at a glance.
+            std::string joined;
+            const Node& src = present ? block.at(f.key) : f.def_node;
+            if (src.is_sequence()) {
+                for (const auto& e : src.as_seq()) {
+                    if (!joined.empty()) joined += ", ";
+                    if (e.is_string()) joined += e.get_value<std::string>();
+                }
+            }
+            const bool ch = ctx.input_text(label, &joined);
+            ctx.tooltip(f.display() + "\nComma-separated");
+            if (ch) {
+                Node seq = Node::sequence();
+                size_t start = 0;
+                while (start <= joined.size()) {
+                    size_t comma = joined.find(',', start);
+                    std::string part = joined.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+                    while (!part.empty() && part.front() == ' ') part.erase(part.begin());
+                    while (!part.empty() && part.back() == ' ') part.pop_back();
+                    if (!part.empty()) seq.as_seq().push_back(Node(part));
+                    if (comma == std::string::npos) break;
+                    start = comma + 1;
+                }
+                block[f.key] = seq;
+            }
+            r.key = f.key; r.changed = ch; r.finished = ch;
+            break;
+        }
+        case FieldKind::ChildRef: {
+            const std::string cur = present ? get_string(block, f.key) : f.default_string;
+            std::vector<std::string> values{""};
+            if (env.object_names) for (const auto& n : env.object_names()) values.push_back(n);
+            int idx = -1;
+            for (size_t i = 0; i < values.size(); ++i) if (values[i] == cur) idx = static_cast<int>(i);
+            if (idx < 0) { values.push_back(cur); idx = static_cast<int>(values.size()) - 1; }
+            std::vector<std::string> shown = values;
+            shown[0] = "(none)";
+            const bool ch = ctx.combo(label, &idx, shown);
+            if (ch) {
+                const std::string& v = values[static_cast<size_t>(idx)];
+                if (v.empty()) erase_key(block, f.key);
+                else block[f.key] = Node(v);
+            }
+            r.key = f.key; r.changed = ch; r.finished = ch;
+            break;
+        }
+        case FieldKind::ItemList: {
+            if (!present || !block.at(f.key).is_sequence()) block[f.key] = f.def_node.is_sequence() ? f.def_node : Node::sequence();
+            Node& list = block[f.key];
+            ctx.label_dim(f.display());
+            int remove = -1, move_up = -1;
+            for (size_t i = 0; i < list.size(); ++i) {
+                ctx.push_id(static_cast<int64_t>(i));
+                Node& item = list.as_seq()[i];
+                if (item.is_string()) {   // shorthand `- Label` -> a full item
+                    Node m = Node::mapping();
+                    m["label"] = item;
+                    item = m;
+                }
+                ctx.indent(6);
+                for (const auto& sub : f.item_fields) {
+                    ctx.push_id(sub.key);
+                    EditResult er = draw_field(ctx, sub, item, env);
+                    if (er.changed) er.key = f.key;
+                    r.absorb(er);
+                    ctx.pop_id();
+                }
+                if (ctx.button("Remove", 80)) remove = static_cast<int>(i);
+                if (i > 0) {
+                    ctx.same_line();
+                    if (ctx.button("Move Up", 80)) move_up = static_cast<int>(i);
+                }
+                ctx.unindent(6);
+                ctx.separator();
+                ctx.pop_id();
+            }
+            if (ctx.button(("Add " + f.display()).c_str(), -1)) {
+                Node m = Node::mapping();
+                for (const auto& sub : f.item_fields) {
+                    if (sub.kind == FieldKind::Enum && !sub.options.empty()) m[sub.key] = Node(sub.options.front());
+                    else m[sub.key] = Node(sub.key == "label" ? std::string("Item ") + std::to_string(list.size() + 1)
+                                                               : sub.key == "name" ? std::string("Item") + std::to_string(list.size() + 1)
+                                                                                   : std::string());
+                }
+                list.as_seq().push_back(m);
+                r.key = f.key; r.changed = r.finished = true;
+            }
+            if (remove >= 0) { list.as_seq().erase(list.as_seq().begin() + remove); r.key = f.key; r.changed = r.finished = true; }
+            if (move_up > 0) {
+                std::swap(list.as_seq()[static_cast<size_t>(move_up)], list.as_seq()[static_cast<size_t>(move_up - 1)]);
+                r.key = f.key; r.changed = r.finished = true;
+            }
+            if (r.changed) r.key = f.key;
+            break;
+        }
     }
+    if (!f.tooltip.empty() && f.kind != FieldKind::Padding && f.kind != FieldKind::StringList) ctx.tooltip(f.display() + "\n" + f.tooltip);
     return r;
 }
 

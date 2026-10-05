@@ -199,7 +199,7 @@ What is range-limited, and what happens out of range:
   `sim_radius`. It then runs a few bodies per frame, nearest first, so a large world neither
   hitches on its first simulated frame nor bakes lakes nobody visits. Until then the body draws
   from its stage-1 bake.
-  - The depth probes run in parallel on the job workers.
+  - The depth probes run in parallel on the job workers (see **Threading** below).
   - Each probe takes the closest-hit raycast, and only falls back to collecting every hit when a
     dynamic body is in the way.
   - Procedural grids skip the vertex weld.
@@ -230,6 +230,38 @@ Rendering:
   surface turns rougher instead. That is the filtered look of the detail it no longer draws, so
   far water reads as a broad sheen rather than sparkle. Rings are only looped over within the
   ripple range.
+
+**Threading.** CPU water work runs on the frame's libcoopa `JobEngine` wherever it splits into
+independent items, through one hook: `WaterSystem::parallel_()` builds a `ParallelFor`
+([`water_parallel.h`](water_parallel.h)), and the free functions (tile builders, the surface query)
+take it optionally and run inline without it.
+- What goes parallel:
+  - **Buoyancy, per floater:** a floater reads the const water bodies and writes only its own
+    `Body` and `Buoyancy`.
+  - **Bake (vertex-count gated):** grid generation, world transforms, depth raycasts, the
+    surface query's triangle cell ranges, vertex packing.
+  - **Tiles:** one job slice per render tile, LOD chains and meshoptimizer included.
+- What stays serial:
+  - Per-triangle normal sums, since triangles scatter into shared vertices.
+  - The query's cell binning.
+  - GPU uploads and scene edits.
+  - Ripple emission and the floater gather; parallelising them measured no gain, since their
+    cost is component lookups.
+- **Results are bit-identical on any worker count.** Every parallel range writes only its own
+  items, and anything that resolves lazily is primed or done serially first:
+  - each active body's `WaveSet` is warmed before the floaters step;
+  - Transform-reading set-up (pontoon resolution, bounding radii) runs serially.
+
+  `water_parallel_matches_serial` (`render_water`) simulates `water_stress` on 1 and 8 workers
+  and requires identical floater poses and surface samples.
+- **Thresholds:** ranges below them run inline, since the dispatch would cost more than the
+  work. They are 32 floaters, 64k vertices, 256 rays and 2 tiles.
+- **Measured on `water_stress`, inline vs parallel:**
+  - Buoyancy for 200 floaters: 0.50 to 0.15 ms per frame.
+  - The ocean's stage-1 bake: 21 to 15 ms (26 ms before this work, which also gave procedural
+    grids exact +Z normals without summing).
+  - The ocean's stage-2 bake: 50 to 25 ms.
+  - These were measured on a loaded machine, best of 5.
 
 Benchmark: `HEADLESS=1 NO_INPUT=1 PROFILE=out.csv MAX_FRAMES=600 CONFIG=<config with a tier>
 ./build/toyengine water_stress`, then `tools/plot_profile.py`. CPU water work lands in

@@ -28,6 +28,13 @@ enum class FieldKind {
     Bool, Int, Float, Vec3, Vec4, Color, Enum, String,
     AssetRef,   ///< A path into the project's assets (dir + extension); a dropdown of files.
     Material,   ///< A `material:` value: inline block, asset reference, or asset + overrides.
+    // --- UI (uicoopa's YAML spellings) ---
+    Vec2,       ///< `{x, y}`.
+    Color4,     ///< `{r, g, b, a}` -- colour with alpha.
+    Padding,    ///< `{left, right, top, bottom}`.
+    StringList, ///< A sequence of strings (ComboBox items, TabView tabs).
+    ChildRef,   ///< The NAME of another object (usually a descendant): a dropdown of names.
+    ItemList,   ///< A sequence of small maps described by `item_fields` (MenuList buttons).
 };
 
 struct FieldDesc {
@@ -49,6 +56,8 @@ struct FieldDesc {
     bool        startup_only = false;  ///< Render settings: needs a renderer restart to apply.
     std::string default_string;
     std::string tooltip;
+    Node def_node;                     ///< Default for list kinds (StringList / ItemList); null: empty.
+    std::vector<FieldDesc> item_fields;        ///< ItemList: the keys of one item.
 
     std::string display() const {
         if (!label.empty()) return label;
@@ -107,6 +116,67 @@ inline FieldDesc f_asset(std::string k, std::string dir, std::string ext, bool s
     f.strip_ext = strip_ext; f.strip_dir = strip_dir; f.default_string = std::move(def); f.in_default = in_default; return f;
 }
 inline FieldDesc f_material() { FieldDesc f; f.key = "material"; f.kind = FieldKind::Material; f.in_default = true; return f; }
+inline FieldDesc f_vec2(std::string k, glm::vec2 def, float speed = 1.0f, bool in_default = false) {
+    FieldDesc f; f.key = std::move(k); f.kind = FieldKind::Vec2; f.def = glm::vec4(def, 0.0f, 0.0f); f.speed = speed; f.in_default = in_default; return f;
+}
+inline FieldDesc f_color4(std::string k, glm::vec4 def, bool in_default = false) {
+    FieldDesc f; f.key = std::move(k); f.kind = FieldKind::Color4; f.def = def; f.in_default = in_default; return f;
+}
+inline FieldDesc f_padding(std::string k, bool in_default = false) {
+    FieldDesc f; f.key = std::move(k); f.kind = FieldKind::Padding; f.def = glm::vec4(0.0f); f.speed = 0.5f; f.in_default = in_default; return f;
+}
+inline FieldDesc f_strings(std::string k, std::vector<std::string> def = {}, bool in_default = false) {
+    FieldDesc f; f.key = std::move(k); f.kind = FieldKind::StringList; f.in_default = in_default;
+    f.def_node = Node::sequence();
+    for (auto& d : def) f.def_node.as_seq().push_back(Node(d));
+    return f;
+}
+inline FieldDesc f_child(std::string k, std::string def = "", bool in_default = false) {
+    FieldDesc f; f.key = std::move(k); f.kind = FieldKind::ChildRef; f.default_string = std::move(def); f.in_default = in_default; return f;
+}
+/** @brief A list of items, each a map of `item` fields; `def` is the starting list. */
+inline FieldDesc f_items(std::string k, std::vector<FieldDesc> item, Node def = Node::sequence(), bool in_default = false) {
+    FieldDesc f; f.key = std::move(k); f.kind = FieldKind::ItemList; f.item_fields = std::move(item); f.def_node = std::move(def);
+    f.in_default = in_default; return f;
+}
+inline FieldDesc with_tip(FieldDesc f, std::string tip) { f.tooltip = std::move(tip); return f; }
+
+/** @brief The value a field is written with when it is added at its default. */
+inline Node field_default_node(const FieldDesc& f) {
+    switch (f.kind) {
+        case FieldKind::Bool:  return Node(f.def.x != 0.0f);
+        case FieldKind::Int:   return Node(static_cast<int64_t>(f.def.x));
+        case FieldKind::Float: return make_float(f.def.x);
+        case FieldKind::Vec3:  return make_vec3(glm::vec3(f.def));
+        case FieldKind::Vec4:  { float v[4] = {f.def.x, f.def.y, f.def.z, f.def.w}; return make_float_seq(v, 4); }
+        case FieldKind::Color: return make_color(glm::vec3(f.def));
+        case FieldKind::Vec2: {
+            Node n = Node::mapping(); n["x"] = make_float(f.def.x); n["y"] = make_float(f.def.y); return n;
+        }
+        case FieldKind::Color4: {
+            Node n = make_color(glm::vec3(f.def)); n["a"] = make_float(f.def.w); return n;
+        }
+        case FieldKind::Padding: {
+            Node n = Node::mapping();
+            n["left"] = make_float(f.def.x); n["right"] = make_float(f.def.y); n["top"] = make_float(f.def.z); n["bottom"] = make_float(f.def.w);
+            return n;
+        }
+        case FieldKind::StringList:
+        case FieldKind::ItemList: return f.def_node.is_sequence() ? f.def_node : Node::sequence();
+        case FieldKind::Enum:
+        case FieldKind::String:
+        case FieldKind::AssetRef:
+        case FieldKind::ChildRef: return Node(f.default_string);
+        case FieldKind::Material: {
+            Node m = Node::mapping();
+            m["albedo"] = make_color(glm::vec3(0.8f));
+            m["metallic"] = make_float(0.0);
+            m["roughness"] = make_float(0.5);
+            return m;
+        }
+    }
+    return Node();
+}
 inline FieldDesc with_label(FieldDesc f, std::string l) { f.label = std::move(l); return f; }
 inline FieldDesc listed(FieldDesc f) { f.as_list = true; return f; }
 inline FieldDesc root_relative(FieldDesc f) { f.ref_prefix = "assets/"; return f; }
@@ -187,6 +257,12 @@ inline const SurfaceShaderInfo* find_surface_shader(const std::string& name) {
     for (const auto& s : surface_shaders()) if (s.name == name) return &s;
     return nullptr;
 }
+
+} // namespace toy::editor
+
+#include "ui_schema.h"   // the UI components' schemas (add_ui_schemas()); needs the builders above
+
+namespace toy::editor {
 
 /** @brief Every built-in component schema, keyed by type name. */
 inline const std::map<std::string, ComponentSchema>& schemas() {
@@ -399,6 +475,7 @@ inline const std::map<std::string, ComponentSchema>& schemas() {
         // A mesh deformed by a rig's bones: `bones:` (or, omitted, the mesh's vertex groups)
         // resolved under `rig:` (default: the nearest Animator up the hierarchy).
         add({"SkinnedMeshRenderer", "Rendering", {f_asset("mesh_path", "meshes", ".yaml", true, true, "", true), f_string("rig", "")}});
+        add_ui_schemas(add);
         return t;
     }();
     return table;
@@ -417,27 +494,10 @@ inline Node default_component(const std::string& type) {
     if (!s) return c;
     for (const auto& f : s->fields) {
         if (!f.in_default) continue;
-        switch (f.kind) {
-            case FieldKind::Bool:  c[f.key] = Node(f.def.x != 0.0f); break;
-            case FieldKind::Int:   c[f.key] = Node(static_cast<int64_t>(f.def.x)); break;
-            case FieldKind::Float: c[f.key] = make_float(f.def.x); break;
-            case FieldKind::Vec3:  c[f.key] = make_vec3(glm::vec3(f.def)); break;
-            case FieldKind::Vec4:  { float v[4] = {f.def.x, f.def.y, f.def.z, f.def.w}; c[f.key] = make_float_seq(v, 4); break; }
-            case FieldKind::Color: c[f.key] = make_color(glm::vec3(f.def)); break;
-            case FieldKind::Enum:
-            case FieldKind::String:
-            case FieldKind::AssetRef:
-                if (!f.default_string.empty()) c[f.key] = Node(f.default_string);
-                break;
-            case FieldKind::Material: {
-                Node m = Node::mapping();
-                m["albedo"] = make_color(glm::vec3(0.8f));
-                m["metallic"] = make_float(0.0);
-                m["roughness"] = make_float(0.5);
-                c[f.key] = m;
-                break;
-            }
-        }
+        const bool stringish = f.kind == FieldKind::Enum || f.kind == FieldKind::String || f.kind == FieldKind::AssetRef ||
+                               f.kind == FieldKind::ChildRef;
+        if (stringish && f.default_string.empty()) continue;
+        c[f.key] = field_default_node(f);
     }
     return c;
 }

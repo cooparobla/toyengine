@@ -45,10 +45,14 @@
 #include "../mesh/primitives.h"
 #include "../schema/component_schema.h"
 #include "../schema/inspector.h"
+#include "../schema/ui_theme_schema.h"
 #include "../schema/settings_schema.h"
 #include "../viewport/editor_camera.h"
 #include "../viewport/gizmo.h"
 #include "../viewport/modal_transform.h"
+#include "../viewport/rect_gizmo.h"
+#include "../ui/ui_canvas_math.h"
+#include "../ui/ui_palette.h"
 
 #include <toyengine/core/config.h>
 #include <toyengine/core/branding.h>
@@ -103,13 +107,13 @@ using coopa::input::Mods;
  * @brief The kind of asset the editor has open. Exactly one asset is open at a time, and its
  *        type decides what the viewer shows and what the Properties editor offers.
  */
-enum class AssetType { None = 0, Scene, Object, Mesh, Material, Texture };
+enum class AssetType { None = 0, Scene, Object, Mesh, Material, Texture, UI, Theme };
 /** @brief Blender's interaction modes for a mesh object (the viewport header's mode dropdown). */
 enum class InteractionMode { Object = 0, Edit, Sculpt, VertexPaint, WeightPaint };
 /** @brief Viewport shading, Blender's four buttons. */
 enum class Shading { Wireframe = 0, Solid = 1, MaterialPreview = 2, Full = 3 };
 /** @brief The Properties editor's tabs. */
-enum class PropTab { Tool, Render, Output, Scene, World, Object, Components, Physics, Data, Material };
+enum class PropTab { Tool, Render, Output, Scene, World, Object, Components, Physics, Data, Material, Canvas, Bindings, Theme };
 
 /** @brief State carried across a renderer restart (the Engine is rebuilt underneath). */
 struct EditorState {
@@ -183,6 +187,9 @@ public:
         shading_ = state.shading;
         if (state.config) config_ = std::move(*state.config);
         else config_.load(project_.config_path());
+        // Scenes run with config.yaml plus their own `scene.settings` overrides; the Engine
+        // layers them, on the edited config.yaml rather than the one it started with.
+        engine_.set_config_source(config_.node, apply_editor_render_overrides);
 
         if (state.scene) {
             doc_ = std::move(*state.scene);
@@ -295,10 +302,13 @@ public:
     const std::deque<std::pair<int, std::string>>& log() const { return log_; }
     imm::Box viewport_box() const { return viewport_box_; }
     coopa::ui::imm::Context& ui() { return canvas_->context(); }
+    /** @brief The editor UI's own canvas (its DrawList, scale), for tests. */
+    coopa::ui::CanvasComponent* editor_canvas() { return canvas_canvas_(); }
 
     /** @brief True if anything is unsaved (scene, mesh, material, config). */
     bool has_unsaved() const {
-        return doc_.dirty() || (mesh_.open() && mesh_.dirty()) || (material_.open() && material_.dirty()) || config_.dirty();
+        return doc_.dirty() || (mesh_.open() && mesh_.dirty()) || (material_.open() && material_.dirty()) ||
+               (game_theme_.open() && game_theme_.dirty()) || config_.dirty();
     }
 
     /**
@@ -360,6 +370,7 @@ public:
     }
 
     bool save_scene_as(const fs::path& path) {
+        if (active_type_ == AssetType::UI) ui_store_editor_extras_();
         try {
             doc_.save(path);
             sync_.fallback_path = path;
@@ -435,14 +446,16 @@ public:
     }
 
     /** @brief Which document Ctrl+Z acts on: what the user is looking at / pointing at. */
-    enum class UndoTarget { Scene, Mesh, Material, Config, Clip };
+    enum class UndoTarget { Scene, Mesh, Material, Theme, Config, Clip };
     UndoTarget undo_target_() const {
         if ((mesh_edit_view_() || in_brush_mode_()) && mesh_.open()) return UndoTarget::Mesh;
         // The Timeline's clip: while the panel is under the mouse, or while recording keys.
         if (anim_clip_.open() && show_bottom_ && bottom_view_ == 1 && (timeline_hovered_ || anim_record_)) return UndoTarget::Clip;
         if (active_type_ == AssetType::Material && material_.open()) return UndoTarget::Material;
+        if (prop_tab_ == PropTab::Theme && game_theme_.open() && properties_hovered_) return UndoTarget::Theme;
         const bool config_tab = prop_tab_ == PropTab::Render || prop_tab_ == PropTab::Output || prop_tab_ == PropTab::World;
-        if (properties_hovered_ && config_tab) return UndoTarget::Config;
+        // Settings rows edit config.yaml or the scene's overrides: undo whichever changed last.
+        if (properties_hovered_ && config_tab) return settings_edit_was_scene_ ? UndoTarget::Scene : UndoTarget::Config;
         return UndoTarget::Scene;
     }
 
@@ -450,6 +463,7 @@ public:
         switch (undo_target_()) {
             case UndoTarget::Mesh: mesh_.do_undo(); break;
             case UndoTarget::Material: material_.do_undo(); refresh_material_preview_(); break;
+            case UndoTarget::Theme: game_theme_.do_undo(); theme_changed_(); break;
             case UndoTarget::Config: config_.do_undo(); apply_config_live(); break;
             case UndoTarget::Scene: scene_undo_(); break;
             case UndoTarget::Clip:
@@ -461,6 +475,7 @@ public:
         switch (undo_target_()) {
             case UndoTarget::Mesh: mesh_.do_redo(); break;
             case UndoTarget::Material: material_.do_redo(); refresh_material_preview_(); break;
+            case UndoTarget::Theme: game_theme_.do_redo(); theme_changed_(); break;
             case UndoTarget::Config: config_.do_redo(); apply_config_live(); break;
             case UndoTarget::Scene: scene_redo_(); break;
             case UndoTarget::Clip:
@@ -572,6 +587,7 @@ public:
 
     /** @brief Frames the selection (or everything) in the viewport. */
     void frame_selected() {
+        if (active_type_ == AssetType::UI) { ui_frame_selection_(); return; }
         glm::vec3 lo(1e30f), hi(-1e30f);
         bool any = false;
         if (mesh_edit_view_() && mesh_.open()) {
@@ -589,6 +605,7 @@ public:
     }
 
     void frame_all() {
+        if (active_type_ == AssetType::UI) { ui_fit_ = true; return; }
         glm::vec3 lo(1e30f), hi(-1e30f);
         bool any = false;
         if (asset_view_()) {
@@ -612,7 +629,7 @@ public:
             try {
                 engine_.assets().reload_changed();   // clip files the Timeline wrote since they were loaded
                 coopa::scene::Scene scene = coopa::scene::SceneLoader::load_from_node(doc_.node(), anchor);
-                play_scene_ = &engine_.push_scene(std::move(scene), true);
+                play_scene_ = &engine_.push_scene(std::move(scene), true, doc_.scene_settings());
                 engine_.set_edit_mode(false);
                 play_scene_->set_simulating(true);
                 // The editor viewport camera held main while the scene started, so hand it to the
@@ -664,9 +681,11 @@ public:
         const bool was_asset = asset_view_();
         shading_by_type_[static_cast<int>(active_type_)] = shading_;
         if (edit_object_ || mode_ != InteractionMode::Object) exit_mesh_mode_();
+        if (t != AssetType::UI && ui_interact_) ui_set_interact_(false);
         active_type_ = t;
         set_shading(shading_by_type_[static_cast<int>(t)]);
-        prop_tab_ = t == AssetType::Material ? PropTab::Material : t == AssetType::Mesh ? PropTab::Data : PropTab::Tool;
+        prop_tab_ = t == AssetType::Material ? PropTab::Material : t == AssetType::Mesh ? PropTab::Data
+                  : t == AssetType::UI ? PropTab::Object : PropTab::Tool;
         const bool now_asset = asset_view_();
         if (was_asset != now_asset) {
             // The asset preview and the scene each keep their own view.
@@ -797,19 +816,31 @@ public:
     // =================================================================================
 
     /** @brief Pushes the edited config's live-safe render values into the running renderer. */
+    /**
+     * @brief Overrides config.yaml's `section.key` for the open scene (null `value`: reverts to
+     *        the project's setting) and applies it -- what editing a tinted settings row does.
+     */
+    void set_scene_setting(const std::string& section, const std::string& key, const Node* value) {
+        settings_edit_was_scene_ = true;
+        apply_(doc_.set_scene_setting(section, key, value, (value ? "Override " : "Revert ") + section + "." + key));
+    }
+
+    /**
+     * @brief Applies the edited config.yaml (and the open scene's overrides on top) to the
+     *        live renderer. The Engine does the layering -- see Engine::set_config_source().
+     */
     void apply_config_live() {
-        core::AppConfig parsed = core::AppConfig::from_node(config_.node);
-        render::PixelRenderConfig next = parsed.render;
-        const render::PixelRenderConfig& live = engine_.render_config();
-        next.shader_dir = live.shader_dir;
-        next.shaders = live.shaders;
-        next.surface_shaders = live.surface_shaders;
-        next.palette_path = live.palette_path;
-        next.grading_lut_path = live.grading_lut_path;
-        // The viewport shading mode owns debug_view while the editor runs.
-        next.debug_view = live.debug_view;
-        engine_.pipeline().apply_live_config(next);
-        config_base_debug_view_ = parsed.render.debug_view;
+        engine_.set_config_source(config_.node, apply_editor_render_overrides);
+        if (coopa::scene::Scene* s = sync_.scene()) engine_.set_scene_settings(*s, doc_.scene_settings());
+        refresh_config_debug_view_();
+    }
+
+    /** @brief Re-reads the effective debug_view (config + overrides) the shading modes restore. */
+    void refresh_config_debug_view_() {
+        // The viewport shading mode owns the live debug_view while the editor runs.
+        coopa::scene::Scene* s = sync_.scene();
+        config_base_debug_view_ = s ? engine_.scene_config(*s).render.debug_view
+                                    : core::AppConfig::from_node(config_.node).render.debug_view;
         apply_shading_();
     }
 
@@ -935,6 +966,22 @@ private:
             std::sort(out.begin(), out.end());
             return out;
         };
+        // ChildRef fields (a Slider's fill, a reactor's target): the selected object's
+        // descendants first -- what such a name usually refers to -- then every other object.
+        env.object_names = [this] {
+            std::vector<std::string> out;
+            const ObjectId sel = doc_.primary();
+            std::function<void(const Node&)> walk = [&](const Node& o) {
+                if (!o.contains("children") || !o.at("children").is_sequence()) return;
+                for (const auto& c : o.at("children").as_seq()) { out.push_back(get_string(c, "name")); walk(c); }
+            };
+            if (const Node* s = sel ? doc_.find(sel) : nullptr) walk(*s);
+            doc_.for_each_object([&](const Node& o, int) {
+                const std::string n = get_string(o, "name");
+                if (std::find(out.begin(), out.end(), n) == out.end()) out.push_back(n);
+            });
+            return out;
+        };
         return env;
     }
 
@@ -945,9 +992,14 @@ private:
     void rebuild_scene_() {
         stop();   // set_scene() below replaces every engine scene, a playing one included
         mesh_cache_.clear();
+        // Composites fall back to the library's active theme when no Theme component is above
+        // them; reset it so one file's theme never leaks into the next.
+        coopa::ui::ThemeLibrary::instance().set_active(coopa::ui::UITheme::builtin_dark());
+        apply_theme_preview_();   // an open theme's unsaved edits shadow its file (ui/theme_editor.inl)
         sync_.rebuild(engine_, doc_);
         if (!sync_.last_error.empty()) { log_error("Scene: " + sync_.last_error); sync_.last_error.clear(); }
         add_object_view_lights_();
+        ui_after_rebuild_();
         preview_scene_ = nullptr;   // set_scene() replaced every engine scene
         preview_object_ = nullptr;
         preview_ground_ = nullptr;
@@ -969,7 +1021,14 @@ private:
     /** @brief Applies a document change to the live scene (deferred to a safe point). */
     void apply_(const Change& c) {
         if (c.scope == ChangeScope::None) return;
+        if (c.scope == ChangeScope::Settings) {   // config overrides: re-apply, rebuild nothing
+            if (coopa::scene::Scene* s = sync_.scene()) engine_.set_scene_settings(*s, doc_.scene_settings());
+            if (play_scene_) engine_.set_scene_settings(*play_scene_, doc_.scene_settings());   // render: live
+            refresh_config_debug_view_();
+            return;
+        }
         if (c.scope == ChangeScope::Structure) { queue_rebuild_(); return; }
+        if (c.scope == ChangeScope::Rect && sync_.patch_rect(doc_, c.object)) return;   // likewise
         if (c.scope == ChangeScope::Transform) {   // cheap and safe immediately
             sync_.apply(engine_, doc_, c);
             return;
@@ -1075,6 +1134,7 @@ private:
             r.h = static_cast<uint32_t>(std::max(1.0f, viewport_box_.h * ui_scale_));
             engine_.set_display_region(r);
         }
+        update_scene_ui_placement_();
         if (!playing() || asset_view_()) camera_.make_main();
         sculpt_frame_();
         paint_frame_();
@@ -1083,6 +1143,21 @@ private:
         // modes look through the surface they paint on, so they stay opaque).
         engine_.render_config().editor_xray_alpha = xray_surfaces_() ? xray_alpha_ : 1.0f;
         if (grid_wanted_) push_grid_lines_();
+    }
+
+    /**
+     * @brief Keeps the open scene's screen-space UI (a HUD) inside the viewer rather than
+     *        across the whole editor window: in the scene view it covers the rendered image
+     *        (and reacts only while the running game has focus); the UI designer places it in
+     *        its preview frame (see ui_canvas.inl).
+     */
+    void update_scene_ui_placement_() {
+        if (active_type_ == AssetType::UI) { engine_.set_scene_ui_placement(ui_preview_placement_()); return; }
+        if (asset_view_() || viewport_box_.empty()) { engine_.set_scene_ui_placement(std::nullopt); return; }
+        core::Engine::ScreenUiPlacement p;
+        p.rect = engine_.display_rect();
+        p.input = playing() && game_focused_;
+        engine_.set_scene_ui_placement(p);
     }
 
     coopa::ui::CanvasComponent* canvas_canvas_() {
@@ -1378,6 +1453,8 @@ private:
 #include "ui/paint.inl"
 #include "ui/timeline.inl"
 #include "ui/assets.inl"
+#include "ui/ui_canvas.inl"
+#include "ui/theme_editor.inl"
 
     // --- helpers shared by the panels ---
 
@@ -1520,30 +1597,97 @@ private:
         if (r.finished) md.undo.end_merge();
     }
 
+    /**
+     * @brief True if `f` (a key of config.yaml's `section`) can be overridden by the open scene:
+     *        render and physics keys that apply live, while a scene (not an object asset) is open.
+     *        Startup-only keys and every other section stay project-wide.
+     */
+    bool scene_overridable_(const std::string& section, const FieldDesc& f) const {
+        return (section == "render" || section == "physics") && !f.startup_only &&
+               active_type_ == AssetType::Scene && !doc_.is_object_asset();
+    }
+
+    /**
+     * @brief One settings row, over two layers: config.yaml (the project's value) and, where
+     *        scene_overridable_(), the open scene's `scene.settings` override.
+     *
+     * A row showing the project's value looks as it always has. Editing it in a scene writes an
+     * override instead, and an overridden row gets the theme's setting_override hue and edge
+     * marker. Right-click: Revert to Project Setting (drop the override), Apply to Project
+     * Settings (move it into config.yaml), or Reset to Default (drop config.yaml's key so the
+     * preset / engine default applies). Rows that can't be overridden edit config.yaml directly.
+     */
     void draw_setting_row_(imm::Context& ctx, const FieldDesc& f, Node& section, const InspectorEnv& env, const std::string& section_name) {
+        using I = imm::Icon;
         ctx.push_id(f.key);
-        const bool present = section.contains(f.key);
-        const Node before = config_.node;
-        EditResult r = draw_field(ctx, f, section, env);
-        const imm::Box row = ctx.last_rect();
-        const imm::Box full_row{row.x - row.w, row.y, row.w * 2, ctx.style.row_height};
-        if (present && ctx.is_hovered(full_row)) {
-            // Reset (hover only) sits just right of the widget, Blender's "reset to default".
-            const imm::Box rb{row.right() - ctx.style.row_height + 1, row.y + 1, ctx.style.row_height - 2, ctx.style.row_height - 2};
-            if (ctx.icon_button("reset", imm::Icon::Restart, "Reset to Default\nRemoves the key so its quality preset / default applies",
-                                false, rb.h, imm::Context::kAll, rb)) {
-                erase_key(section, f.key);
-                r.changed = true;
-                r.finished = true;
+        const bool layered = scene_overridable_(section_name, f);
+        const Node* over = layered ? doc_.scene_setting(section_name, f.key) : nullptr;
+        const bool in_config = section.contains(f.key);
+
+        const glm::vec2 top = ctx.cursor();
+        const imm::Box band{top.x - 4.0f, top.y, ctx.available_width() + 4.0f, ctx.style.row_height};
+        if (over) {
+            ctx.fill(band, et_.chrome.setting_override);
+            ctx.fill(imm::Box{band.x, band.y + 1.0f, 2.0f, band.h - 2.0f}, et_.chrome.setting_override_bar);
+        }
+
+        if (layered) {
+            // Edit a view of the project's section with this scene's value on top.
+            Node view = section;
+            if (over) view[f.key] = *over;
+            const EditResult r = draw_field(ctx, f, view, env);
+            if (over) ctx.tooltip(f.display() + "\nOverridden by this scene" + (in_config ? "" : " (the project uses the default)") +
+                                  "\nRight-click to revert or apply to the project");
+            if (r.changed) {
+                const Node* value = view.contains(f.key) ? &view.at(f.key) : nullptr;
+                settings_edit_was_scene_ = true;
+                apply_(doc_.set_scene_setting(section_name, f.key, value, "Override " + section_name + "." + f.key,
+                                              r.active ? "set:" + section_name + "." + f.key : std::string()));
             }
+            if (r.finished) doc_.end_merge();
+        } else {
+            const Node before = config_.node;
+            const EditResult r = draw_field(ctx, f, section, env);
+            if (r.changed) commit_setting_(before, section_name, f, r.active);
+            if (r.finished) config_.undo.end_merge();
         }
-        if (r.changed) {
-            config_.commit("Edit " + section_name + "." + f.key, before, r.active ? "cfg:" + f.key : std::string());
-            if (section_name == "render") apply_config_live();
-            if (f.startup_only) log_info(f.key + " changes on renderer restart");
+
+        const imm::Box row{band.x, band.y, band.w, std::max(band.h, ctx.cursor().y - top.y)};
+        if (ctx.is_hovered(row) && ctx.input().released[1]) ctx.open_popup("setting_ctx");
+        if (ctx.begin_popup("setting_ctx", 230)) {
+            if (layered) {
+                if (ctx.menu_item("Revert to Project Setting", "", nullptr, over != nullptr, I::Restart)) {
+                    settings_edit_was_scene_ = true;
+                    apply_(doc_.set_scene_setting(section_name, f.key, nullptr, "Revert " + section_name + "." + f.key));
+                }
+                if (ctx.menu_item("Apply to Project Settings", "", nullptr, over != nullptr, I::Save)) {
+                    // Into config.yaml (the project's value), then drop the now-redundant override.
+                    const Node value = *over;
+                    const Node before = config_.node;
+                    section[f.key] = value;
+                    commit_setting_(before, section_name, f, false);
+                    settings_edit_was_scene_ = true;
+                    apply_(doc_.set_scene_setting(section_name, f.key, nullptr, "Apply " + section_name + "." + f.key + " to project"));
+                }
+                ctx.separator();
+            }
+            if (ctx.menu_item("Reset to Default", "", nullptr, in_config, I::Restart)) {
+                const Node before = config_.node;
+                erase_key(section, f.key);
+                commit_setting_(before, section_name, f, false);
+            }
+            ctx.tooltip("Reset to Default\nRemoves the key from config.yaml so its quality preset / engine default applies");
+            ctx.end_popup();
         }
-        if (r.finished) config_.undo.end_merge();
         ctx.pop_id();
+    }
+
+    /** @brief Records a config.yaml edit of `section_name.f.key` and applies it live. */
+    void commit_setting_(const Node& before, const std::string& section_name, const FieldDesc& f, bool merging) {
+        settings_edit_was_scene_ = false;
+        config_.commit("Edit " + section_name + "." + f.key, before, merging ? "cfg:" + f.key : std::string());
+        if (section_name == "render" || section_name == "physics") apply_config_live();
+        if (f.startup_only) log_info(f.key + " changes on renderer restart");
     }
 
     // =================================================================================
@@ -1589,6 +1733,7 @@ private:
     }
 
     void draw_viewport_(imm::Context& ctx, const imm::Box& area, bool mesh_edit) {
+        if (active_type_ == AssetType::UI) { draw_ui_view_(ctx, area); return; }   // the UI designer (ui/ui_canvas.inl)
         const imm::Box hb = area_header_(ctx, area);
         draw_viewport_header_(ctx, hb, mesh_edit);
         viewport_box_ = imm::Box{area.x, hb.bottom(), area.w, std::max(1.0f, area.h - hb.h)};
@@ -1634,6 +1779,7 @@ private:
                 const std::string& item = *dropped;
                 switch (asset_type_of_(item)) {
                     case AssetType::Object: place_object_asset(item, ground_point_(ctx.mouse())); break;
+                    case AssetType::UI: place_ui_asset(item); break;   // a HUD / menu the scene starts with
                     case AssetType::Mesh: add_mesh_to_scene_(item, ground_point_(ctx.mouse())); break;
                     case AssetType::Material: {
                         const ObjectId hit = pick_object(ctx.mouse());
@@ -3140,6 +3286,7 @@ private:
         if (doc_.dirty()) { doc_.undo_stack().clear(); }
         mesh_.saved_revision = mesh_.undo.revision();
         material_.saved_revision = material_.undo.revision();
+        game_theme_.saved_revision = game_theme_.undo.revision();
         config_.saved_revision = config_.undo.revision();
         force_quit_ = true;
     }
@@ -3150,6 +3297,7 @@ private:
         if (doc_.dirty()) save_scene();
         if (mesh_.open() && mesh_.dirty()) save_mesh();
         if (material_.open() && material_.dirty()) save_material();
+        if (game_theme_.open() && game_theme_.dirty()) save_theme();
         if (config_.dirty()) save_config();
     }
 
@@ -3192,6 +3340,7 @@ private:
             case UndoTarget::Scene: return pick(doc_.undo_stack().undo_label(), doc_.undo_stack().redo_label());
             case UndoTarget::Mesh: return pick(mesh_.undo.undo_label(), mesh_.undo.redo_label());
             case UndoTarget::Material: return pick(material_.undo.undo_label(), material_.undo.redo_label());
+            case UndoTarget::Theme: return pick(game_theme_.undo.undo_label(), game_theme_.undo.redo_label());
             case UndoTarget::Config: return pick(config_.undo.undo_label(), config_.undo.redo_label());
         }
         return {};
@@ -3211,7 +3360,10 @@ private:
         if (ctx.shortcut(Key::N, cmd)) guarded_([this] { new_scene(); });
         if (ctx.shortcut(Key::O, cmd)) guarded_([this] { open_scene_dialog_(); });
         if (ctx.shortcut(Key::Q, cmd)) { if (request_close()) quit_ = true; }
-        if (ctx.shortcut(Key::F5)) playing() ? stop() : play();
+        if (ctx.shortcut(Key::F5)) {
+            if (active_type_ == AssetType::UI) ui_set_interact_(!ui_interact_);
+            else playing() ? stop() : play();
+        }
         // Esc gives the mouse back to the editor; the game keeps running (F5 / Stop ends it).
         if (game_focused_ && ctx.shortcut(Key::Escape)) set_game_focus_(false);
         if (ctx.any_popup_open()) return;
@@ -3243,6 +3395,7 @@ private:
     SceneSync sync_;
     MeshDocument mesh_;
     MaterialDocument material_;
+    ThemeDocument game_theme_;   ///< The game UI theme open in the Theme tab (ui/theme_editor.inl).
     ConfigDocument config_;
 
     AssetType active_type_ = AssetType::Scene;   // what's open (see AssetType)
@@ -3250,7 +3403,8 @@ private:
     PropTab prop_tab_ = PropTab::Object;
     Shading shading_ = Shading::Solid;
     /// Shading per asset type (index = AssetType): materials open in the game's renderer.
-    Shading shading_by_type_[6] = {Shading::Solid, Shading::Solid, Shading::Solid, Shading::Solid, Shading::Full, Shading::MaterialPreview};
+    Shading shading_by_type_[8] = {Shading::Solid, Shading::Solid, Shading::Solid, Shading::Solid, Shading::Full, Shading::MaterialPreview,
+                                   Shading::Full, Shading::Full};
     std::string full_debug_view_;
     std::string config_base_debug_view_;
 
@@ -3278,6 +3432,7 @@ private:
     // Theme (see load_theme_): the file, the editor's typed colours, hot-reload state.
     imm::Theme theme_;
     EditorTheme et_;
+    bool settings_edit_was_scene_ = false;   ///< The last settings-row edit was a scene override (undo_target_()).
     std::string theme_id_, default_font_, current_font_;
     fs::file_time_type theme_stamp_{};
     float theme_poll_ = 0.0f;   // set by the overlay pass, drawn in pre_render_ (line pass)

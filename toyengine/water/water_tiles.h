@@ -36,6 +36,8 @@
 #ifndef TOYENGINE_WATER_WATER_TILES_H
 #define TOYENGINE_WATER_WATER_TILES_H
 
+#include "water_parallel.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -152,17 +154,23 @@ inline std::vector<int> grid_lines_(int a, int b, int step) {
  */
 inline std::vector<WaterTile> build_grid_tiles(const std::vector<coopa::gfx::engine::data::Vertex>& verts,
                                                int res_x, int res_y, int quads_per_tile, float spacing,
-                                               const WaterTileLodParams& lod, const glm::vec3& inflate) {
+                                               const WaterTileLodParams& lod, const glm::vec3& inflate,
+                                               const ParallelFor* par = nullptr) {
     using coopa::gfx::engine::data::MeshLod;
     std::vector<WaterTile> tiles;
     const int row = res_x + 1;
     if (res_x < 1 || res_y < 1 || static_cast<int>(verts.size()) != row * (res_y + 1)) return tiles;
     const int qpt = std::max(quads_per_tile, 1);
-    for (int ty = 0; ty * qpt < res_y; ++ty) {
-        for (int tx = 0; tx * qpt < res_x; ++tx) {
+    const int tiles_x = (res_x + qpt - 1) / qpt, tiles_y = (res_y + qpt - 1) / qpt;
+    tiles.resize(static_cast<std::size_t>(tiles_x) * static_cast<std::size_t>(tiles_y));
+    // Tiles are independent: each is built into its own slot, row-major as before.
+    run_range(par, tiles.size(), [&](std::size_t begin, std::size_t end) {
+        for (std::size_t ti = begin; ti < end; ++ti) {
+            const int tx = static_cast<int>(ti % static_cast<std::size_t>(tiles_x));
+            const int ty = static_cast<int>(ti / static_cast<std::size_t>(tiles_x));
             const int x0 = tx * qpt, x1 = std::min(x0 + qpt, res_x);
             const int y0 = ty * qpt, y1 = std::min(y0 + qpt, res_y);
-            WaterTile tile;
+            WaterTile& tile = tiles[ti];
             tile.coord = glm::ivec2(tx, ty);
             auto& d = tile.data;
             float threshold_r = 0.0f; // bounding radius for the screen-size thresholds
@@ -197,9 +205,8 @@ inline std::vector<WaterTile> build_grid_tiles(const std::vector<coopa::gfx::eng
                 d.lods.push_back(std::move(l));
             }
             detail::finish_tile_(d, inflate);
-            tiles.push_back(std::move(tile));
         }
-    }
+    });
     return tiles;
 }
 
@@ -256,7 +263,8 @@ inline void simplify_tile_lods_(coopa::gfx::engine::data::MeshCpuData& d, const 
  */
 inline std::vector<WaterTile> build_mesh_tiles(const std::vector<coopa::gfx::engine::data::Vertex>& verts,
                                                const std::vector<uint32_t>& indices, float tile_size,
-                                               const glm::vec3& inflate, const WaterTileLodParams* lod = nullptr) {
+                                               const glm::vec3& inflate, const WaterTileLodParams* lod = nullptr,
+                                               const ParallelFor* par = nullptr) {
     std::vector<WaterTile> tiles;
     if (verts.empty() || indices.size() < 3) return tiles;
     glm::vec2 lo(std::numeric_limits<float>::max());
@@ -269,25 +277,34 @@ inline std::vector<WaterTile> build_mesh_tiles(const std::vector<coopa::gfx::eng
         const glm::ivec2 cell(glm::floor((c - lo) / ts));
         buckets[{cell.y, cell.x}].push_back(static_cast<uint32_t>(t));
     }
-    for (auto& [key, tris] : buckets) {
-        WaterTile tile;
-        tile.coord = glm::ivec2(key.second, key.first);
-        auto& d = tile.data;
+    // Buckets (in key order) become tiles independently: each into its own slot.
+    std::vector<const std::pair<const std::pair<int, int>, std::vector<uint32_t>>*> order;
+    order.reserve(buckets.size());
+    for (const auto& b : buckets) order.push_back(&b);
+    tiles.resize(order.size());
+    run_range(par, order.size(), [&](std::size_t begin, std::size_t end) {
         std::vector<int32_t> remap(verts.size(), -1);
-        for (uint32_t t : tris) {
-            for (int k = 0; k < 3; ++k) {
-                const uint32_t v = indices[t + k];
-                if (remap[v] < 0) {
-                    remap[v] = static_cast<int32_t>(d.vertices.size());
-                    d.vertices.push_back(verts[v]);
+        for (std::size_t bi = begin; bi < end; ++bi) {
+            const auto& [key, tris] = *order[bi];
+            WaterTile& tile = tiles[bi];
+            tile.coord = glm::ivec2(key.second, key.first);
+            auto& d = tile.data;
+            for (uint32_t t : tris) {
+                for (int k = 0; k < 3; ++k) {
+                    const uint32_t v = indices[t + k];
+                    if (remap[v] < 0) {
+                        remap[v] = static_cast<int32_t>(d.vertices.size());
+                        d.vertices.push_back(verts[v]);
+                    }
+                    d.indices.push_back(static_cast<uint32_t>(remap[v]));
                 }
-                d.indices.push_back(static_cast<uint32_t>(remap[v]));
             }
+            // Reset only what this tile touched, for the next tile in this range.
+            for (uint32_t t : tris) for (int k = 0; k < 3; ++k) remap[indices[t + k]] = -1;
+            if (lod) detail::simplify_tile_lods_(d, *lod, inflate);
+            detail::finish_tile_(d, inflate);
         }
-        if (lod) detail::simplify_tile_lods_(d, *lod, inflate);
-        detail::finish_tile_(d, inflate);
-        tiles.push_back(std::move(tile));
-    }
+    });
     return tiles;
 }
 

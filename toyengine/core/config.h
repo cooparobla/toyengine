@@ -111,6 +111,11 @@ struct AppConfig {
     JobsConfig                        jobs;
     coopa::physx::util::PhysicsSettings physics;
 
+    /// The document this config was parsed from (config.yaml), kept so a scene's `settings:`
+    /// overrides can be layered on at the YAML level -- see with_scene_settings(). Empty for a
+    /// config built in code.
+    fkyaml::node source = fkyaml::node::mapping();
+
     /**
      * @brief Loads application configuration from a YAML file.
      * @param path Path to the configuration file (e.g. assets/config.yaml).
@@ -138,6 +143,7 @@ struct AppConfig {
      */
     static AppConfig from_node(const fkyaml::node& root) {
         AppConfig config;
+        if (root.is_mapping()) config.source = root;
         try {
             if (root.contains("scene")) {
                 const auto& s = root.at("scene");
@@ -466,6 +472,53 @@ struct AppConfig {
             std::cerr << "[toy::core::AppConfig] Warning: Failed to parse config file (" << e.what() << "), using defaults.\n";
         }
         return config;
+    }
+
+    /**
+     * @brief This config with a scene's `settings:` overrides applied -- the config a scene
+     *        actually runs with.
+     *
+     * Scenes may override the `render` and `physics` sections of config.yaml key by key:
+     * @code
+     * scene:
+     *   settings:
+     *     render: { fog_density: 0.08, sky_intensity: 1.4 }
+     *     physics: { gravity: { x: 0, y: 0, z: -4.0 } }
+     * @endcode
+     * The merge happens on the documents (config.yaml + overrides, then parsed), not on the
+     * parsed structs, so quality presets resolve exactly as if the keys were in config.yaml:
+     * a scene overriding `shadow_quality` re-runs that preset beneath config.yaml's own
+     * explicit keys. Only render and physics are taken from the merge; every other section,
+     * and anything set on this config in code rather than in its source document, is kept.
+     * With no overrides this config is returned unchanged.
+     */
+    AppConfig with_scene_settings(const fkyaml::node& settings) const {
+        if (!has_scene_overrides(settings)) return *this;
+        fkyaml::node merged = source;
+        for (const char* section : kSceneSettingsSections) {
+            if (!settings.contains(section) || !settings.at(section).is_mapping()) continue;
+            if (!merged.contains(section) || !merged.at(section).is_mapping()) merged[section] = fkyaml::node::mapping();
+            for (auto item : settings.at(section).map_items()) {
+                merged[section][item.key().get_value<std::string>()] = item.value();
+            }
+        }
+        const AppConfig parsed = from_node(merged);
+        AppConfig out = *this;
+        out.render = parsed.render;
+        out.physics = parsed.physics;
+        return out;
+    }
+
+    /// The config.yaml sections a scene's `settings:` may override.
+    static constexpr const char* kSceneSettingsSections[] = {"render", "physics"};
+
+    /** @brief True if `settings` overrides at least one key of an overridable section. */
+    static bool has_scene_overrides(const fkyaml::node& settings) {
+        if (!settings.is_mapping()) return false;
+        for (const char* section : kSceneSettingsSections) {
+            if (settings.contains(section) && settings.at(section).is_mapping() && settings.at(section).size() > 0) return true;
+        }
+        return false;
     }
 };
 

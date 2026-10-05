@@ -164,7 +164,7 @@ target_link_libraries(toyengine_tests PRIVATE coopa::caml)
 # roughly the time of its slowest group. It also means `ctest -R toyengine_math` is an
 # instant, device-free check a dev can run on every save. See test.cpp's file doc for
 # the argument forms the binary accepts.
-foreach(_toy_test_group math config scene world water rig yaml_io render_pixel render_ui render_material render_cloth render_terrain render_water render_rig editor_host)
+foreach(_toy_test_group math config scene ui world water rig yaml_io render_pixel render_ui render_material render_cloth render_terrain render_water render_rig editor_host)
     add_test(NAME toyengine_${_toy_test_group}
              COMMAND toyengine_tests --group ${_toy_test_group})
 endforeach()
@@ -172,7 +172,7 @@ endforeach()
 # The device-free groups have no business taking seconds; the render groups get a ceiling
 # generous enough for a cold shader cache on a slow GPU but short enough that a hung
 # frame fails instead of hanging the run.
-set_tests_properties(toyengine_math toyengine_config toyengine_scene toyengine_world toyengine_yaml_io PROPERTIES TIMEOUT 60)
+set_tests_properties(toyengine_math toyengine_config toyengine_scene toyengine_ui toyengine_world toyengine_yaml_io PROPERTIES TIMEOUT 60)
 set_tests_properties(toyengine_render_pixel toyengine_render_ui toyengine_render_material
                      toyengine_render_cloth toyengine_render_terrain toyengine_editor_host PROPERTIES TIMEOUT 300)
 

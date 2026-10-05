@@ -67,6 +67,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <memory>
@@ -79,6 +80,7 @@
 
 #include <coopa/asset/asset_manager.h>
 #include <coopa/event/signal.h>
+#include <coopa/job/parallel_for.h>
 #include <coopa/scene/components/transform_component.h>
 #include <coopa/scene/scene.h>
 #include <coopa/scene/scene_object.h>
@@ -97,6 +99,7 @@
 #include <toyengine/water/buoyancy.h>
 #include <toyengine/water/water_body.h>
 #include <toyengine/water/water_flow_bake.h>
+#include <toyengine/water/water_parallel.h>
 #include <toyengine/water/water_settings.h>
 #include <toyengine/water/water_surface_query.h>
 #include <toyengine/water/water_tiles.h>
@@ -404,6 +407,31 @@ private:
         return o;
     }
 
+    // Minimum range sizes worth spreading over the job workers -- below them the dispatch costs
+    // more than the work. Per item: a few multiplies (per-vertex packing), a wave sample per
+    // pontoon (a floater), two raycasts (a depth probe), a whole tile.
+    static constexpr std::size_t k_parallel_vertices = 65536;
+    static constexpr std::size_t k_parallel_floaters = 32;
+    static constexpr std::size_t k_parallel_rays     = 256;
+    static constexpr std::size_t k_parallel_tiles    = 2;
+
+    /**
+     * @brief A ParallelFor (water_parallel.h) over this frame's job workers for ranges of at
+     *        least `min_items`; smaller ranges, and all of them without a job engine, run inline.
+     *        Every user writes only to its own indices, so the result is identical either way.
+     */
+    ParallelFor parallel_(std::size_t min_items) const {
+        coopa::job::JobEngine* jobs = jobs_;
+        if (!jobs || jobs->worker_count() < 2) return {};
+        return [jobs, min_items](std::size_t n, const RangeFn& fn) {
+            if (n < min_items) {
+                fn(0, n);
+                return;
+            }
+            jobs->parallel_for_blocking(n, 0, [&fn](std::size_t begin, std::size_t end) { fn(begin, end); });
+        };
+    }
+
     /** @brief Bodies near enough to the focus that a simulated floater could touch them. */
     void gather_active_bodies_() {
         active_bodies_.clear();
@@ -433,7 +461,8 @@ private:
     /** @brief The body's local-space triangle soup: its mesh source or a procedural grid of
      *         `grid_res` quads per side (set to -1 for mesh geometry). */
     static bool local_geometry_(const WaterBody& body, float density, std::vector<glm::vec3>& positions,
-                                std::vector<glm::vec2>& uvs, std::vector<uint32_t>& indices, int& grid_res) {
+                                std::vector<glm::vec2>& uvs, std::vector<uint32_t>& indices, int& grid_res,
+                                const ParallelFor* par = nullptr) {
         positions.clear();
         uvs.clear();
         indices.clear();
@@ -460,20 +489,27 @@ private:
         const int res = grid_resolution_(body, density);
         grid_res = res;
         const glm::vec2 half = body.size * 0.5f;
-        for (int y = 0; y <= res; ++y) {
-            for (int x = 0; x <= res; ++x) {
-                glm::vec2 f(static_cast<float>(x) / res, static_cast<float>(y) / res);
-                positions.push_back(glm::vec3(-half + f * body.size, 0.0f));
-                uvs.push_back(f);
+        const std::size_t row = static_cast<std::size_t>(res) + 1;
+        positions.resize(row * row);
+        uvs.resize(row * row);
+        indices.resize(static_cast<std::size_t>(res) * static_cast<std::size_t>(res) * 6);
+        // Row by row, each row into its own slots (rows of vertices, then rows of quads).
+        run_range(par, row, [&](std::size_t y0, std::size_t y1) {
+            for (std::size_t y = y0; y < y1; ++y) {
+                for (std::size_t x = 0; x < row; ++x) {
+                    const glm::vec2 f(static_cast<float>(x) / res, static_cast<float>(y) / res);
+                    positions[y * row + x] = glm::vec3(-half + f * body.size, 0.0f);
+                    uvs[y * row + x] = f;
+                }
+                if (y >= static_cast<std::size_t>(res)) continue;
+                for (std::size_t x = 0; x < static_cast<std::size_t>(res); ++x) {
+                    const uint32_t i0 = static_cast<uint32_t>(y * row + x), i1 = i0 + 1;
+                    const uint32_t i2 = i0 + static_cast<uint32_t>(row), i3 = i2 + 1;
+                    uint32_t* q = &indices[(y * static_cast<std::size_t>(res) + x) * 6];
+                    q[0] = i0; q[1] = i1; q[2] = i3; q[3] = i0; q[4] = i3; q[5] = i2;
+                }
             }
-        }
-        const uint32_t row = static_cast<uint32_t>(res + 1);
-        for (uint32_t y = 0; y < static_cast<uint32_t>(res); ++y) {
-            for (uint32_t x = 0; x < static_cast<uint32_t>(res); ++x) {
-                uint32_t i0 = y * row + x, i1 = i0 + 1, i2 = i0 + row, i3 = i2 + 1;
-                indices.insert(indices.end(), {i0, i1, i3, i0, i3, i2});
-            }
-        }
+        });
         return true;
     }
 
@@ -535,7 +571,11 @@ private:
         std::vector<glm::vec2> corner_uv;
         std::vector<uint32_t>  corner_idx;
         int grid_res = -1;
-        if (!local_geometry_(body, settings_.grid_density, corner_pos, corner_uv, corner_idx, grid_res)) return;
+        // Bake work spread over the job workers where a body is big enough (water_parallel.h).
+        const ParallelFor par_rows  = parallel_(256);
+        const ParallelFor par_verts = parallel_(k_parallel_vertices);
+        const ParallelFor par_rays  = parallel_(k_parallel_rays);
+        if (!local_geometry_(body, settings_.grid_density, corner_pos, corner_uv, corner_idx, grid_res, &par_rows)) return;
 
         std::vector<glm::vec3> local_pos;
         std::vector<glm::vec2> uvs;
@@ -551,7 +591,9 @@ private:
 
         const std::size_t n = local_pos.size();
         std::vector<glm::vec3> world_pos(n);
-        for (std::size_t i = 0; i < n; ++i) world_pos[i] = glm::vec3(world * glm::vec4(local_pos[i], 1.0f));
+        run_range(&par_verts, n, [&](std::size_t begin, std::size_t end) {
+            for (std::size_t i = begin; i < end; ++i) world_pos[i] = glm::vec3(world * glm::vec4(local_pos[i], 1.0f));
+        });
 
         std::vector<glm::vec3> flow(n, glm::vec3(0.0f));
         std::vector<float> turbulence(n, 0.0f);
@@ -576,17 +618,17 @@ private:
             // Two raycasts a vertex, independent of each other: spread over the job workers.
             // PhysicsWorld's queries are read-only and safe to run concurrently (thread_local
             // traversal stacks -- see broadphase/aabb_tree.h).
-            auto probe = [&](std::size_t begin, std::size_t end) {
+            run_range(&par_rays, n, [&](std::size_t begin, std::size_t end) {
                 for (std::size_t i = begin; i < end; ++i) depth[i] = probe_depth_(world_pos[i], body.max_depth);
-            };
-            if (jobs_ && n >= 4096) jobs_->parallel_for_blocking(n, 0, probe);
-            else probe(0, n);
+            });
         }
 
         // CPU query (world space).
         std::vector<WaterVertex> wv(n);
-        for (std::size_t i = 0; i < n; ++i) wv[i] = {world_pos[i], flow[i], depth[i], turbulence[i]};
-        body.query.build(std::move(wv), indices);
+        run_range(&par_verts, n, [&](std::size_t begin, std::size_t end) {
+            for (std::size_t i = begin; i < end; ++i) wv[i] = {world_pos[i], flow[i], depth[i], turbulence[i]};
+        });
+        body.query.build(std::move(wv), indices, &par_verts);
 
         publish_gpu_mesh_(scene, body, world, local_pos, indices, flow, depth, turbulence, grid_res);
         apply_material_(body);
@@ -601,11 +643,13 @@ private:
     static std::vector<coopa::gfx::engine::data::Vertex>
     make_vertices_(const glm::mat4& world, const std::vector<glm::vec3>& local_pos, const std::vector<uint32_t>& indices,
                    const std::vector<glm::vec3>& flow_ws, const std::vector<float>& depth,
-                   const std::vector<float>& turbulence) {
+                   const std::vector<float>& turbulence, const ParallelFor* par = nullptr, bool flat = false) {
         using coopa::gfx::engine::data::Vertex;
-        // Object-space normals, area-weighted from the welded triangles.
-        std::vector<glm::vec3> normals(local_pos.size(), glm::vec3(0.0f));
-        for (std::size_t t = 0; t + 2 < indices.size(); t += 3) {
+        // Object-space normals, area-weighted from the welded triangles. Serial: triangles scatter
+        // into shared vertices, and a fixed summation order keeps the result reproducible.
+        // A procedural grid (`flat`) lies in its local XY plane: every normal is +Z, nothing to sum.
+        std::vector<glm::vec3> normals(local_pos.size(), flat ? glm::vec3(0.0f, 0.0f, 1.0f) : glm::vec3(0.0f));
+        for (std::size_t t = 0; !flat && t + 2 < indices.size(); t += 3) {
             glm::vec3 a = local_pos[indices[t]], b = local_pos[indices[t + 1]], c = local_pos[indices[t + 2]];
             glm::vec3 cr = glm::cross(b - a, c - a);
             if (cr.z < 0.0f) cr = -cr; // winding is fixed per tile; the normal faces +Z regardless
@@ -613,20 +657,22 @@ private:
         }
         const glm::mat3 to_local = glm::inverse(glm::mat3(world));
         std::vector<Vertex> verts(local_pos.size());
-        for (std::size_t i = 0; i < local_pos.size(); ++i) {
-            glm::vec3 nrm = glm::length(normals[i]) > 1e-12f ? glm::normalize(normals[i]) : glm::vec3(0.0f, 0.0f, 1.0f);
-            if (nrm.z < 0.0f) nrm = -nrm;
-            verts[i].position = local_pos[i];
-            verts[i].normal   = nrm;
-            verts[i].uv       = glm::vec2(depth[i], turbulence[i]);
-            // w == 2: baked (see file doc). Never exactly zero: stock vertex shaders (the editor's
-            // preview shading draws water with pbr.vert, not water.vert) normalize this slot as a
-            // real tangent, and a zero vector would turn the whole surface NaN. 1e-4 m/s of
-            // "flow" is invisible to water.vert and buoyancy alike.
-            glm::vec3 t = to_local * flow_ws[i];
-            if (glm::dot(t, t) < 1e-8f) t = glm::vec3(1e-4f, 0.0f, 0.0f);
-            verts[i].tangent  = glm::vec4(t, 2.0f);
-        }
+        run_range(par, local_pos.size(), [&](std::size_t begin, std::size_t end) {
+            for (std::size_t i = begin; i < end; ++i) {
+                glm::vec3 nrm = glm::length(normals[i]) > 1e-12f ? glm::normalize(normals[i]) : glm::vec3(0.0f, 0.0f, 1.0f);
+                if (nrm.z < 0.0f) nrm = -nrm;
+                verts[i].position = local_pos[i];
+                verts[i].normal   = nrm;
+                verts[i].uv       = glm::vec2(depth[i], turbulence[i]);
+                // w == 2: baked (see file doc). Never exactly zero: stock vertex shaders (the editor's
+                // preview shading draws water with pbr.vert, not water.vert) normalize this slot as a
+                // real tangent, and a zero vector would turn the whole surface NaN. 1e-4 m/s of
+                // "flow" is invisible to water.vert and buoyancy alike.
+                glm::vec3 t = to_local * flow_ws[i];
+                if (glm::dot(t, t) < 1e-8f) t = glm::vec3(1e-4f, 0.0f, 0.0f);
+                verts[i].tangent  = glm::vec4(t, 2.0f);
+            }
+        });
         return verts;
     }
 
@@ -643,7 +689,9 @@ private:
         using coopa::gfx::engine::data::Mesh;
         if (!device_ || !allocator_ || !assets_ || !body.owner) return;
 
-        const auto verts = make_vertices_(world, local_pos, indices, flow_ws, depth, turbulence);
+        const ParallelFor par_verts = parallel_(k_parallel_vertices);
+        const ParallelFor par_tiles = parallel_(k_parallel_tiles);
+        const auto verts = make_vertices_(world, local_pos, indices, flow_ws, depth, turbulence, &par_verts, grid_res >= 1);
 
         // Bounds inflation for what the vertex shader adds: the full wave sum, vertically and
         // horizontally (local space; a scaled body is rare and the margin is generous).
@@ -692,9 +740,9 @@ private:
             if (body.tile_size <= 0.0f) {
                 while ((grid_res + qpt - 1) / qpt > k_max_tiles_per_side) qpt *= 2;
             }
-            tiles = build_grid_tiles(verts, grid_res, grid_res, qpt, spacing, lod, inflate);
+            tiles = build_grid_tiles(verts, grid_res, grid_res, qpt, spacing, lod, inflate, &par_tiles);
         } else {
-            tiles = build_mesh_tiles(verts, indices, tile_len, inflate, &lod);
+            tiles = build_mesh_tiles(verts, indices, tile_len, inflate, &lod, &par_tiles);
         }
         if (tiles.empty()) return;
 
@@ -1038,121 +1086,142 @@ private:
         // reach of every one of them (then it is simply dry).
 
         const glm::vec3 gravity = world.gravity();
-        const float g = std::max(-gravity.z, 0.0f);
         const WaveQueryOptions opt = wave_options_();
 
-        for (BuoyantEntry& e : buoyant_) {
-            Buoyancy& buoy = *e.buoyancy;
-            auto* body = world.get_body(e.rigidbody->body_id());
-            if (!body || body->type != coopa::physx::dynamics::BodyType::Dynamic) continue;
-            if (!buoy.simulated) {
-                frozen_substep_(e, *body, gravity, h);
-                continue;
-            }
+        // Floaters are independent -- each reads the (const) water bodies and writes only its own
+        // Body and Buoyancy -- so they step across the job workers. Each body's lazily built
+        // WaveSet is warmed here first, so the parallel samples below only ever read it.
+        for (const WaterBody* wb : active_bodies_) (void)wb->wave_set();
+        std::atomic<int> active{0};
+        const ParallelFor par = parallel_(k_parallel_floaters);
+        run_range(&par, buoyant_.size(), [&](std::size_t begin, std::size_t end) {
+            int n = 0;
+            for (std::size_t i = begin; i < end; ++i) n += floater_substep_(buoyant_[i], world, gravity, h, opt) ? 1 : 0;
+            active.fetch_add(n, std::memory_order_relaxed);
+        });
+        active_count_ = active.load();
+    }
 
-            // Broad phase: which water bodies (near the focus) can this body touch at all?
-            std::array<const WaterBody*, 4> cand{};
-            int cand_n = 0;
-            glm::vec2 lo = glm::vec2(body->position) - e.bound_radius;
-            glm::vec2 hi = glm::vec2(body->position) + e.bound_radius;
-            for (const WaterBody* wb : active_bodies_) {
-                if (!wb->baked || !wb->query.overlaps_xy(lo, hi)) continue;
-                if (body->position.z - e.bound_radius > wb->query.bounds_max().z + wb->waves.amplitude * 2.0f) continue;
-                if (cand_n < 4) cand[cand_n++] = wb;
-            }
-            if (cand_n == 0) {
-                buoy.in_water = false;
-                buoy.submerged_fraction = 0.0f;
-                continue;
-            }
-
-            // A sleeping body on still water stays asleep -- nothing would move it.
-            if (!body->awake) {
-                bool moving = false;
-                for (int c = 0; c < cand_n; ++c) {
-                    WaterSample s;
-                    if (!cand[c]->waves.calm()) moving = true;
-                    else if (cand[c]->sample(glm::vec2(body->position), time_, s, opt) && glm::length(s.flow) > 0.05f)
-                        moving = true;
-                }
-                if (!moving) continue; // keeps its last in_water/submerged_fraction
-                body->wake();
-            }
-            buoy.in_water = false;
-
-            ++active_count_;
-            const glm::mat3 rot = glm::mat3_cast(body->orientation);
-            const glm::vec3 com_local = e.rigidbody->local_center_of_mass();
-            const float m_share = body->mass / static_cast<float>(buoy.resolved.size());
-            float vol_total = 0.0f, vol_sub = 0.0f;
-            glm::vec3 flow_acc(0.0f);   // submersion-weighted current under the body
-            float     area_sub = 0.0f;  // submersion-weighted frontal area, for form drag
-            float     density_acc = 0.0f;
-            const glm::vec3 up = g > 0.0f ? -gravity / g : glm::vec3(0.0f, 0.0f, 1.0f);
-
-            for (const Pontoon& p : buoy.resolved) {
-                const glm::vec3 wp = body->position + rot * (p.local - com_local);
-                vol_total += p.volume;
-
-                // Highest surface among candidate bodies (a river mouth overlapping its lake).
-                WaterSample s;
-                bool hit = false;
-                float density = 1000.0f;
-                for (int c = 0; c < cand_n; ++c) {
-                    WaterSample sc;
-                    if (!cand[c]->sample(glm::vec2(wp), time_, sc, opt)) continue;
-                    if (!hit || sc.surface_height > s.surface_height) {
-                        s = sc;
-                        density = cand[c]->density;
-                        hit = true;
-                    }
-                }
-                if (!hit) continue;
-
-                // Submersion ramps over the pontoon's body-frame vertical half extent. Constant on
-                // purpose: an orientation-dependent ramp makes the buoyancy field non-conservative
-                // (the force would depend on rotation with no matching torque), and that pumps
-                // energy into a slow, never-damped rolling drift.
-                const float r = std::max(p.half_extents.z, 1e-3f);
-                const float f = glm::clamp((s.surface_height - (wp.z - r)) / (2.0f * r), 0.0f, 1.0f);
-                if (f <= 0.0f) continue;
-                buoy.in_water = true;
-                vol_sub     += p.volume * f;
-                flow_acc    += s.flow * (p.volume * f);
-                density_acc += density * (p.volume * f);
-                const float area = std::cbrt(p.volume * p.volume);
-                area_sub    += area * f;
-
-                // Archimedes, straight up (against gravity), plus the VERTICAL part of the drag,
-                // both at the pontoon: off-centre application is what rights the body and damps
-                // its pitch and roll. Drag is removed as a fraction of the relative velocity --
-                // exponential for the linear term, clamped to 1 with the quadratic form drag
-                // (0.5 rho Cd A |v|) -- so it is unconditionally stable and never reverses it.
-                const float v_up = glm::dot(body->velocity_at_point(wp) - s.flow, up);
-                const float quad = 0.5f * density * buoy.form_drag * area * f * std::abs(v_up) * h / std::max(m_share, 1e-4f);
-                const float removed = std::min(1.0f, (1.0f - std::exp(-buoy.linear_drag * f * h)) + quad);
-                const float j = density * g * p.volume * f * buoy.buoyancy_scale * h - v_up * removed * m_share;
-                body->apply_impulse_at_position(up * j, wp, /*wake_body=*/false);
-            }
-
-            buoy.submerged_fraction = vol_total > 0.0f ? vol_sub / vol_total : 0.0f;
-            if (vol_sub <= 0.0f) continue;
-
-            // HORIZONTAL drag acts on the centre-of-mass velocity relative to the mean current
-            // under the body, through the COM. Applied per pontoon instead, it is delivered
-            // almost entirely below the COM of a floating body, couples sway into roll and yaw,
-            // and leaves a slow rolling drift that never damps (and never lets a calm floater
-            // sleep). What carries a body downstream is exactly this term.
-            const float frac = buoy.submerged_fraction;
-            const glm::vec3 flow = flow_acc / vol_sub;
-            const float rho = density_acc / vol_sub;
-            glm::vec3 v_rel = body->linear_velocity - flow;
-            v_rel -= up * glm::dot(v_rel, up);
-            const float quad = 0.5f * rho * buoy.form_drag * area_sub * glm::length(v_rel) * h / std::max(body->mass, 1e-4f);
-            const float removed = std::min(1.0f, (1.0f - std::exp(-buoy.linear_drag * frac * h)) + quad);
-            body->linear_velocity -= v_rel * removed;
-            body->angular_velocity *= std::exp(-buoy.angular_drag * frac * h);
+    /**
+     * @brief One floater's buoyancy for one substep: Archimedes and vertical drag per pontoon,
+     *        horizontal drag toward the current through the centre of mass. Reads only shared
+     *        const state and writes only `e`'s Body and Buoyancy -- safe to run concurrently with
+     *        other floaters.
+     * @return True if the floater was simulated in the water this substep (active_buoyant_count()).
+     */
+    bool floater_substep_(BuoyantEntry& e, coopa::physx::PhysicsWorld& world, const glm::vec3& gravity, float h,
+                          const WaveQueryOptions& opt) {
+        const float g = std::max(-gravity.z, 0.0f);
+        Buoyancy& buoy = *e.buoyancy;
+        auto* body = world.get_body(e.rigidbody->body_id());
+        if (!body || body->type != coopa::physx::dynamics::BodyType::Dynamic) return false;
+        if (!buoy.simulated) {
+            frozen_substep_(e, *body, gravity, h);
+            return false;
         }
+
+        // Broad phase: which water bodies (near the focus) can this body touch at all?
+        std::array<const WaterBody*, 4> cand{};
+        int cand_n = 0;
+        glm::vec2 lo = glm::vec2(body->position) - e.bound_radius;
+        glm::vec2 hi = glm::vec2(body->position) + e.bound_radius;
+        for (const WaterBody* wb : active_bodies_) {
+            if (!wb->baked || !wb->query.overlaps_xy(lo, hi)) continue;
+            if (body->position.z - e.bound_radius > wb->query.bounds_max().z + wb->waves.amplitude * 2.0f) continue;
+            if (cand_n < 4) cand[cand_n++] = wb;
+        }
+        if (cand_n == 0) {
+            buoy.in_water = false;
+            buoy.submerged_fraction = 0.0f;
+            return false;
+        }
+
+        // A sleeping body on still water stays asleep -- nothing would move it.
+        if (!body->awake) {
+            bool moving = false;
+            for (int c = 0; c < cand_n; ++c) {
+                WaterSample s;
+                if (!cand[c]->waves.calm()) moving = true;
+                else if (cand[c]->sample(glm::vec2(body->position), time_, s, opt) && glm::length(s.flow) > 0.05f)
+                    moving = true;
+            }
+            if (!moving) return false; // keeps its last in_water/submerged_fraction
+            body->wake();
+        }
+        buoy.in_water = false;
+
+        const glm::mat3 rot = glm::mat3_cast(body->orientation);
+        const glm::vec3 com_local = e.rigidbody->local_center_of_mass();
+        const float m_share = body->mass / static_cast<float>(buoy.resolved.size());
+        float vol_total = 0.0f, vol_sub = 0.0f;
+        glm::vec3 flow_acc(0.0f);   // submersion-weighted current under the body
+        float     area_sub = 0.0f;  // submersion-weighted frontal area, for form drag
+        float     density_acc = 0.0f;
+        const glm::vec3 up = g > 0.0f ? -gravity / g : glm::vec3(0.0f, 0.0f, 1.0f);
+
+        for (const Pontoon& p : buoy.resolved) {
+            const glm::vec3 wp = body->position + rot * (p.local - com_local);
+            vol_total += p.volume;
+
+            // Highest surface among candidate bodies (a river mouth overlapping its lake).
+            WaterSample s;
+            bool hit = false;
+            float density = 1000.0f;
+            for (int c = 0; c < cand_n; ++c) {
+                WaterSample sc;
+                if (!cand[c]->sample(glm::vec2(wp), time_, sc, opt)) continue;
+                if (!hit || sc.surface_height > s.surface_height) {
+                    s = sc;
+                    density = cand[c]->density;
+                    hit = true;
+                }
+            }
+            if (!hit) continue;
+
+            // Submersion ramps over the pontoon's body-frame vertical half extent. Constant on
+            // purpose: an orientation-dependent ramp makes the buoyancy field non-conservative
+            // (the force would depend on rotation with no matching torque), and that pumps
+            // energy into a slow, never-damped rolling drift.
+            const float r = std::max(p.half_extents.z, 1e-3f);
+            const float f = glm::clamp((s.surface_height - (wp.z - r)) / (2.0f * r), 0.0f, 1.0f);
+            if (f <= 0.0f) continue;
+            buoy.in_water = true;
+            vol_sub     += p.volume * f;
+            flow_acc    += s.flow * (p.volume * f);
+            density_acc += density * (p.volume * f);
+            const float area = std::cbrt(p.volume * p.volume);
+            area_sub    += area * f;
+
+            // Archimedes, straight up (against gravity), plus the VERTICAL part of the drag,
+            // both at the pontoon: off-centre application is what rights the body and damps
+            // its pitch and roll. Drag is removed as a fraction of the relative velocity --
+            // exponential for the linear term, clamped to 1 with the quadratic form drag
+            // (0.5 rho Cd A |v|) -- so it is unconditionally stable and never reverses it.
+            const float v_up = glm::dot(body->velocity_at_point(wp) - s.flow, up);
+            const float quad = 0.5f * density * buoy.form_drag * area * f * std::abs(v_up) * h / std::max(m_share, 1e-4f);
+            const float removed = std::min(1.0f, (1.0f - std::exp(-buoy.linear_drag * f * h)) + quad);
+            const float j = density * g * p.volume * f * buoy.buoyancy_scale * h - v_up * removed * m_share;
+            body->apply_impulse_at_position(up * j, wp, /*wake_body=*/false);
+        }
+
+        buoy.submerged_fraction = vol_total > 0.0f ? vol_sub / vol_total : 0.0f;
+        if (vol_sub <= 0.0f) return true;
+
+        // HORIZONTAL drag acts on the centre-of-mass velocity relative to the mean current
+        // under the body, through the COM. Applied per pontoon instead, it is delivered
+        // almost entirely below the COM of a floating body, couples sway into roll and yaw,
+        // and leaves a slow rolling drift that never damps (and never lets a calm floater
+        // sleep). What carries a body downstream is exactly this term.
+        const float frac = buoy.submerged_fraction;
+        const glm::vec3 flow = flow_acc / vol_sub;
+        const float rho = density_acc / vol_sub;
+        glm::vec3 v_rel = body->linear_velocity - flow;
+        v_rel -= up * glm::dot(v_rel, up);
+        const float quad = 0.5f * rho * buoy.form_drag * area_sub * glm::length(v_rel) * h / std::max(body->mass, 1e-4f);
+        const float removed = std::min(1.0f, (1.0f - std::exp(-buoy.linear_drag * frac * h)) + quad);
+        body->linear_velocity -= v_rel * removed;
+        body->angular_velocity *= std::exp(-buoy.angular_drag * frac * h);
+        return true;
     }
 
     /**

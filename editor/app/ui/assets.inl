@@ -29,6 +29,8 @@
             {AssetType::Mesh, "Meshes", "Mesh", I::Mesh, "meshes"},
             {AssetType::Material, "Materials", "Material", I::Material, "materials"},
             {AssetType::Texture, "Textures", "Texture", I::Image, "textures"},
+            {AssetType::UI, "UI", "UI", I::UiCanvas, "ui"},
+            {AssetType::Theme, "Themes", "Theme", I::Palette, "ui/themes"},
         };
         return t;
     }
@@ -44,6 +46,13 @@
             case AssetType::Object: return project_.list("objects", ".yaml");
             case AssetType::Mesh: return project_.list("meshes", ".yaml");
             case AssetType::Material: return project_.list("materials", ".yaml");
+            case AssetType::UI: {
+                // ui/themes/ holds themes, not canvases.
+                std::vector<std::string> out;
+                for (const auto& p : project_.list("ui", ".yaml")) if (p.rfind("ui/themes/", 0) != 0) out.push_back(p);
+                return out;
+            }
+            case AssetType::Theme: return project_.list("ui/themes", ".yaml");
             case AssetType::Texture: {
                 std::vector<std::string> out;
                 for (const auto& p : project_.list("textures", "")) {
@@ -63,6 +72,8 @@
         const std::string g = p.generic_string();
         if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".tga") return AssetType::Texture;
         if (g.rfind("objects/", 0) == 0) return AssetType::Object;
+        if (g.rfind("ui/themes/", 0) == 0) return AssetType::Theme;
+        if (g.rfind("ui/", 0) == 0) return AssetType::UI;
         if (g.rfind("materials/", 0) == 0) return AssetType::Material;
         if (g.find("meshes/") != std::string::npos) return AssetType::Mesh;
         if (g.rfind("scenes/", 0) == 0) return AssetType::Scene;
@@ -80,6 +91,7 @@
 
     /** @brief Is this (assets-relative) asset the one that's open? */
     bool asset_is_open_(AssetType t, const std::string& rel) const {
+        if (t == AssetType::Theme) return game_theme_.open() && project_.relative(game_theme_.path) == rel;   // open beside a UI
         if (active_type_ != t) return false;
         if (t == AssetType::Mesh) return !mesh_.path.empty() && project_.relative(mesh_.path) == rel;
         return !active_path_.empty() && project_.relative(active_path_) == rel;
@@ -87,7 +99,7 @@
     /** @brief Unsaved changes on the open asset (for the list's dot). */
     bool open_asset_dirty_() const {
         switch (active_type_) {
-            case AssetType::Scene: case AssetType::Object: return doc_.dirty();
+            case AssetType::Scene: case AssetType::Object: case AssetType::UI: return doc_.dirty();
             case AssetType::Mesh: return mesh_.open() && mesh_.dirty();
             case AssetType::Material: return material_.open() && material_.dirty();
             default: return false;
@@ -106,7 +118,11 @@ public:
     void open_asset(AssetType t, const std::string& item) {
         fs::path abs = project_.absolute(item);
         if (!fs::exists(abs) && !coopa::yaml::document_exists(abs) && !doc_.path().empty()) abs = doc_.path().parent_path() / item;
-        guarded_([this, t, abs] { open_asset_now_(t, abs); });
+        // A theme opens beside the open UI, replacing only the open theme (and, without a UI
+        // open, the document it previews on) -- so only those need saving first.
+        const bool replaces = t != AssetType::Theme || game_theme_.dirty() || (active_type_ != AssetType::UI && doc_.dirty());
+        if (replaces) guarded_([this, t, abs] { open_asset_now_(t, abs); });
+        else deferred_.push_back([this, t, abs] { open_asset_now_(t, abs); });
     }
 
 private:
@@ -117,6 +133,8 @@ private:
             case AssetType::Mesh: open_mesh(abs); break;
             case AssetType::Material: open_material(abs); break;
             case AssetType::Texture: open_texture(abs); break;
+            case AssetType::UI: open_ui_asset(abs); break;
+            case AssetType::Theme: open_theme(abs); break;
             default: log_info(abs.string()); break;
         }
     }
@@ -128,12 +146,16 @@ private:
         else if (kind == "mesh") open_asset(AssetType::Mesh, item);
         else if (kind == "material") open_asset(AssetType::Material, item);
         else if (kind == "texture") open_asset(AssetType::Texture, item);
+        else if (kind == "ui") open_asset(AssetType::UI, item);
+        else if (kind == "theme") open_asset(AssetType::Theme, item);
         else log_info(item);
     }
 
 public:
     /** @brief Opens an object asset (objects/*.yaml) as a one-object scene. */
     bool open_object_asset(const fs::path& path) {
+        // UI assets are object assets too, edited in the UI designer.
+        if (asset_type_of_(project_.relative(path)) == AssetType::UI) return open_ui_asset(path);
         stop();
         try {
             doc_.load(path);
@@ -322,11 +344,29 @@ private:
         // New (+)
         const imm::Box nb{hb.right() - s - 6, hb.y + 4, s, s};
         const bool can_new = asset_tab_ != AssetType::Texture;
+        if (ctx.begin_popup("asset_new_ui", 220)) {
+            ctx.label_dim("New UI");
+            if (ctx.menu_item("Blank Canvas", "", nullptr, true, I::UiCanvas)) guarded_([this] { new_ui_asset("new_ui", "blank"); });
+            ctx.tooltip("Blank Canvas\nA screen-space canvas (HUD, menu, screen) scaled from 1920 x 1080");
+            if (ctx.menu_item("Blank Widget", "", nullptr, true, I::UiWidget)) guarded_([this] { new_ui_asset("new_widget", "widget"); });
+            ctx.tooltip("Blank Widget\nA reusable piece (an item slot, a quest entry) placed inside other UI");
+            const auto templates = ui_templates();
+            if (!templates.empty()) ctx.menu_separator();
+            for (const auto& t : templates) {
+                std::string label = t;
+                for (char& c : label) if (c == '_') c = ' ';
+                if (!label.empty()) label[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(label[0])));
+                if (ctx.menu_item(label, "", nullptr, true, I::UiWidget)) guarded_([this, t] { new_ui_asset(t, t); });
+                ctx.tooltip(label + "\nStart from the " + label + " template (editor/templates/ui/" + t + ".yaml)");
+            }
+            ctx.end_popup();
+        }
         if (ctx.icon_button("asset_new", I::Plus,
                             can_new ? std::string("New ") + info.singular + "\nCreate one in assets/" + info.dir + "/"
                                     : std::string("Import textures by copying image files into assets/textures/"),
                             false, s, imm::Context::kAll, nb) && can_new) {
             if (asset_tab_ == AssetType::Mesh) ctx.open_popup("asset_new_mesh", glm::vec2(nb.x, nb.bottom()));
+            else if (asset_tab_ == AssetType::UI) ctx.open_popup("asset_new_ui", glm::vec2(nb.x, nb.bottom()));
             else new_asset_(asset_tab_);
         }
         if (ctx.begin_popup("asset_new_mesh", 160)) {
@@ -354,11 +394,17 @@ private:
             ++shown;
             ctx.push_id(rel);
             const bool open = asset_is_open_(asset_tab_, rel);
-            const std::string label = name + (open && open_asset_dirty_() ? "  *" : "");
-            if (ctx.selectable(label, open, 0, info.icon) && !open) open_asset(asset_tab_, rel);
+            const bool dirty = asset_tab_ == AssetType::Theme ? game_theme_.dirty() : open_asset_dirty_();
+            const std::string label = name + (open && dirty ? "  *" : "");
+            if (ctx.selectable(label, open, 0, info.icon)) {
+                if (!open) open_asset(asset_tab_, rel);
+                else if (asset_tab_ == AssetType::Theme) prop_tab_ = PropTab::Theme;
+            }
             ctx.tooltip(name + "\nassets/" + rel + (asset_tab_ == AssetType::Object ? "\nDrag into a scene to place an instance" :
                                                     asset_tab_ == AssetType::Material ? "\nDrag onto an object or a mesh slot" :
-                                                    asset_tab_ == AssetType::Mesh ? "\nDrag into a scene to add it" : ""));
+                                                    asset_tab_ == AssetType::Mesh ? "\nDrag into a scene to add it" :
+                                                    asset_tab_ == AssetType::UI ? "\nDrag into a scene (or another UI) to place it" :
+                                                    asset_tab_ == AssetType::Theme ? "\nOpens in the Theme tab, previewed on a UI" : ""));
             ctx.drag_source("asset", rel, name);
             if (ctx.last_clicked(imm::Mouse::Right)) { asset_context_ = rel; ctx.open_popup("asset_ctx"); }
             ctx.pop_id();
@@ -380,6 +426,10 @@ private:
         ctx.label_dim(asset_display_name_(t, rel));
         if (ctx.menu_item("Open", "", nullptr, true, asset_type_info_(t).icon)) open_asset(t, rel);
         if (t == AssetType::Object && ctx.menu_item("Place in Scene", "", nullptr, !asset_view_() && !playing(), I::Plus)) place_object_asset(rel);
+        if (t == AssetType::UI && ctx.menu_item(active_type_ == AssetType::UI ? "Place in this UI" : "Place in Scene", "", nullptr,
+                                                !asset_view_() && !playing() && !asset_is_open_(t, rel), I::Plus)) {
+            place_ui_asset(rel, active_type_ == AssetType::UI ? doc_.object_root() : 0);
+        }
         if (t == AssetType::Mesh && ctx.menu_item("Make Object Asset", "", nullptr, true, I::Object)) create_object_asset_from_mesh_(rel);
         if (t == AssetType::Mesh && ctx.menu_item("Add to Scene", "", nullptr, !asset_view_() && !playing(), I::Plus)) add_mesh_to_scene_(rel);
         if (t == AssetType::Material && ctx.menu_item("Assign to Selected", "", nullptr, !asset_view_() && !doc_.selection().empty(), I::Link)) {
@@ -398,6 +448,8 @@ private:
             case AssetType::Scene: guarded_([this] { new_scene_asset_("scene"); }); break;
             case AssetType::Object: guarded_([this] { new_object_asset("object"); }); break;
             case AssetType::Material: guarded_([this] { create_material("material"); }); break;
+            case AssetType::UI: guarded_([this] { new_ui_asset("new_ui", "blank"); }); break;
+            case AssetType::Theme: guarded_([this] { create_theme("theme"); }); break;
             default: break;
         }
     }
@@ -739,7 +791,7 @@ private:
 
     /** @brief Studio lights for an object asset's view (live scene, never saved). */
     void add_object_view_lights_() {
-        if (!doc_.is_object_asset() || !sync_.scene()) return;
+        if (!doc_.is_object_asset() || !sync_.scene() || active_type_ == AssetType::UI) return;
         Node key = lookdev_object_("__ObjectViewKey");
         Node l = Node::mapping();
         l["type"] = Node(std::string("DirectionalLight"));

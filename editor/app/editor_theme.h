@@ -22,6 +22,8 @@ struct EditorTheme {
         glm::vec4 statusbar_bg{0.137f, 0.137f, 0.137f, 1.0f};
         glm::vec4 play_group_bg{0.2f, 0.2f, 0.2f, 1.0f};
         glm::vec4 play_tint{0.30f, 0.22f, 0.12f, 1.0f};     ///< viewport header while playing (Unity)
+        glm::vec4 setting_override{0.20f, 0.55f, 0.75f, 0.16f};      ///< a setting row the scene overrides
+        glm::vec4 setting_override_bar{0.30f, 0.65f, 0.90f, 0.90f};  ///< ...and its left-edge marker
     } chrome;
     struct Viewport {
         glm::vec4 grid{1.0f, 1.0f, 1.0f, 0.055f};
@@ -63,6 +65,8 @@ void visit_editor_theme(T& t, V&& v) {
     v("chrome", "statusbar_bg", t.chrome.statusbar_bg);
     v("chrome", "play_group_bg", t.chrome.play_group_bg);
     v("chrome", "play_tint", t.chrome.play_tint);
+    v("chrome", "setting_override", t.chrome.setting_override);
+    v("chrome", "setting_override_bar", t.chrome.setting_override_bar);
     v("viewport", "grid", t.viewport.grid);
     v("viewport", "grid_major", t.viewport.grid_major);
     v("viewport", "wire", t.viewport.wire);

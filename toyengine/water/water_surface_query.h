@@ -24,6 +24,7 @@
 
 #include <glm/glm.hpp>
 
+#include <toyengine/water/water_parallel.h>
 #include <toyengine/water/water_waves.h>
 
 namespace toy {
@@ -70,8 +71,10 @@ public:
     /**
      * @brief Builds the grid. `indices` are triangle triples into `vertices` (both world space).
      *        Cell size targets ~2 triangles per cell.
+     * @param par Optional (water_parallel.h): spreads the per-triangle cell ranges over threads;
+     *            the binning itself stays serial, so the result is identical either way.
      */
-    void build(std::vector<WaterVertex> vertices, std::vector<uint32_t> indices) {
+    void build(std::vector<WaterVertex> vertices, std::vector<uint32_t> indices, const ParallelFor* par = nullptr) {
         vertices_ = std::move(vertices);
         indices_  = std::move(indices);
         cell_start_.clear();
@@ -94,17 +97,24 @@ public:
                            std::clamp(static_cast<int>(std::ceil(extent.y / cell)), 1, 1024));
         inv_cell_ = glm::vec2(dims_) / extent;
 
-        // Counting sort into CSR: one pass to count, one to fill.
-        std::vector<uint32_t> counts(static_cast<std::size_t>(dims_.x * dims_.y) + 1, 0u);
+        // Each triangle's cell range (independent per triangle), then a counting sort into CSR:
+        // one pass to count, one to fill.
+        std::vector<glm::ivec4> ranges(tri_count);   // lo.x, lo.y, hi.x, hi.y
+        run_range(par, tri_count, [&](std::size_t begin, std::size_t end) {
+            for (std::size_t t = begin; t < end; ++t) {
+                glm::vec2 a(vertices_[indices_[t * 3 + 0]].position);
+                glm::vec2 b(vertices_[indices_[t * 3 + 1]].position);
+                glm::vec2 c(vertices_[indices_[t * 3 + 2]].position);
+                ranges[t] = glm::ivec4(cell_of_(glm::min(a, glm::min(b, c))), cell_of_(glm::max(a, glm::max(b, c))));
+            }
+        });
+        const std::size_t cells = static_cast<std::size_t>(dims_.x * dims_.y);
         auto for_cells = [&](std::size_t t, auto&& fn) {
-            glm::vec2 a(vertices_[indices_[t * 3 + 0]].position);
-            glm::vec2 b(vertices_[indices_[t * 3 + 1]].position);
-            glm::vec2 c(vertices_[indices_[t * 3 + 2]].position);
-            glm::ivec2 lo = cell_of_(glm::min(a, glm::min(b, c)));
-            glm::ivec2 hi = cell_of_(glm::max(a, glm::max(b, c)));
-            for (int y = lo.y; y <= hi.y; ++y)
-                for (int x = lo.x; x <= hi.x; ++x) fn(static_cast<std::size_t>(y * dims_.x + x));
+            const glm::ivec4& r = ranges[t];
+            for (int y = r.y; y <= r.w; ++y)
+                for (int x = r.x; x <= r.z; ++x) fn(static_cast<std::size_t>(y * dims_.x + x));
         };
+        std::vector<uint32_t> counts(cells + 1, 0u);
         for (std::size_t t = 0; t < tri_count; ++t) for_cells(t, [&](std::size_t c) { ++counts[c + 1]; });
         for (std::size_t i = 1; i < counts.size(); ++i) counts[i] += counts[i - 1];
         cell_start_ = counts;

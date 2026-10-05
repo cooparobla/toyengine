@@ -28,6 +28,11 @@
                 hints = {{I::MouseLeft, "Paint"}, {I::Keyboard, "Ctrl  Secondary"}, {I::Keyboard, "Shift  Blur"}, {I::Keyboard, "X  Swap Colors"},
                          {I::Keyboard, "S  Sample"}, {I::Keyboard, "F  Radius"}, {I::Keyboard, "Tab  Object Mode"}};
             }
+        } else if (active_type_ == AssetType::UI) {
+            if (ui_interact_) hints = {{I::MouseLeft, "Use the UI"}, {I::Keyboard, "Esc / Tab  Design"}, {I::MouseMiddle, "Pan"}};
+            else if (ui_gizmo_.dragging()) hints = {{I::Keyboard, "Shift  Keep Aspect / 15 deg"}, {I::Keyboard, "Alt  From Centre"}, {I::Keyboard, "Ctrl  Snap Off"}};
+            else hints = {{I::MouseLeft, "Select / Move"}, {I::Keyboard, "Alt  Cycle"}, {I::Keyboard, "Shift A  Add"},
+                          {I::Keyboard, "Arrows  Nudge"}, {I::Keyboard, "Tab  Interact"}, {I::Keyboard, "F / Home  Frame"}, {I::MouseMiddle, "Pan"}};
         } else if (loopcut_.active) {
             hints = {{I::MouseLeft, "Cut and Slide"}, {I::MouseMiddle, "Cuts (wheel)"}, {I::MouseRight, "Cancel"}, {I::Keyboard, "1-9  Cuts"}};
         } else if (mesh_edit_view_()) {

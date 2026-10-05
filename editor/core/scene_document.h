@@ -44,8 +44,10 @@ inline constexpr const char* kEidKey = "__eid";
 enum class ChangeScope {
     None,
     Transform,    ///< Only Transform values of `object` changed: patch the live transform.
+    Rect,         ///< Only RectTransform values of `object` changed: patch the live UI rect.
     Object,       ///< `object`'s components/children changed: rebuild that object.
     Structure,    ///< Objects added/removed/reordered/reparented: rebuild the scene.
+    Settings,     ///< Only `scene.settings` (config overrides) changed: re-apply them, rebuild nothing.
 };
 
 struct Change {
@@ -140,6 +142,14 @@ public:
         const Node& roots = out.at("scene").at("root_objects");
         obj_doc["object"] = roots.is_sequence() && roots.size() > 0 ? roots.as_seq()[0] : Node::mapping();
         return obj_doc;
+    }
+
+    /** @brief An object asset's top-level keys besides `object:` (e.g. the UI designer's `ui_editor:`). */
+    const Node& object_extras() const { return object_extras_; }
+    /** @brief Sets one of those keys; written by the next save(). Not an undoable edit. */
+    void set_object_extra(const std::string& key, Node value) {
+        if (!object_extras_.is_mapping()) object_extras_ = Node::mapping();
+        object_extras_[key] = std::move(value);
     }
 
     /** @brief True when this document is an object asset (objects/*.yaml), not a scene. */
@@ -422,9 +432,9 @@ public:
         return edit(label, [&](Node&) -> Change {
             Node* list = components(id);
             if (!list || index < 0 || index >= static_cast<int>(list->size())) return {};
-            const bool transform = component_type(list->as_seq()[static_cast<size_t>(index)]) == "Transform";
+            const std::string type = component_type(list->as_seq()[static_cast<size_t>(index)]);
             list->as_seq()[static_cast<size_t>(index)] = comp;
-            return {transform ? ChangeScope::Transform : ChangeScope::Object, id};
+            return {type == "Transform" ? ChangeScope::Transform : type == "RectTransform" ? ChangeScope::Rect : ChangeScope::Object, id};
         }, merge_key);
     }
 
@@ -466,6 +476,52 @@ public:
             d["scene"][key] = value;
             return {ChangeScope::Structure, 0};
         });
+    }
+
+    /**
+     * @brief The scene's config overrides -- `scene.settings`, sections of config.yaml
+     *        (render, physics) whose keys win over the project's for this scene. An empty
+     *        mapping when there are none or this is not a scene.
+     */
+    Node scene_settings() const {
+        if (doc_.is_mapping() && doc_.contains("scene") && doc_.at("scene").is_mapping() &&
+            doc_.at("scene").contains("settings") && doc_.at("scene").at("settings").is_mapping()) {
+            return doc_.at("scene").at("settings");
+        }
+        return Node::mapping();
+    }
+
+    /** @brief One override, or nullptr: `scene.settings.<section>.<key>`. */
+    const Node* scene_setting(const std::string& section, const std::string& key) const {
+        if (!doc_.is_mapping() || !doc_.contains("scene")) return nullptr;
+        const Node& sc = doc_.at("scene");
+        if (!sc.is_mapping() || !sc.contains("settings")) return nullptr;
+        const Node& st = sc.at("settings");
+        if (!st.is_mapping() || !st.contains(section) || !st.at(section).is_mapping()) return nullptr;
+        const Node& sec = st.at(section);
+        return sec.contains(key) ? &sec.at(key) : nullptr;
+    }
+
+    /**
+     * @brief Sets (or, with a null `value`, removes) one override. Empty sections and an empty
+     *        `settings` block are dropped, so a scene with no overrides has no `settings:` key.
+     *        Undoable; ChangeScope::Settings (nothing rebuilds).
+     */
+    Change set_scene_setting(const std::string& section, const std::string& key, const Node* value, const std::string& label,
+                             const std::string& merge_key = {}) {
+        if (is_object_asset()) return {};
+        return edit(label, [&](Node& d) -> Change {
+            Node& sc = d["scene"];
+            Node settings = sc.contains("settings") && sc.at("settings").is_mapping() ? sc.at("settings") : Node::mapping();
+            Node sec = settings.contains(section) && settings.at(section).is_mapping() ? settings.at(section) : Node::mapping();
+            if (value) sec[key] = *value;
+            else erase_key(sec, key);
+            if (sec.size() > 0) settings[section] = sec;
+            else erase_key(settings, section);
+            if (settings.size() > 0) sc["settings"] = settings;
+            else erase_key(sc, "settings");
+            return {ChangeScope::Settings, 0};
+        }, merge_key);
     }
 
     /** @brief Convenience: reads an object's Transform (position, rotation degrees, scale). */

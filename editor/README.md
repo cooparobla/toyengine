@@ -3,7 +3,11 @@
 toyengine's asset editor (Blender look and keymaps, Unity's component model). It builds a
 project's assets -- every one a file the game loads directly: `scenes/*/scene.yaml`,
 `objects/*.yaml` (object assets, instanced with `prefab:`), `meshes/*.yaml` (with material
-slots), `materials/*.yaml`, `textures/`, `config.yaml` (or `.caml`, via Build > Package).
+slots), `materials/*.yaml`, `textures/`, `ui/*.yaml` (game UI: HUDs, menus, screens),
+`config.yaml` (or `.caml`, via Build > Package).
+
+This file is the developer tour. For how to *use* the editor, see the
+[editor manual](../docs/editor/README.md).
 
 **Layout.** Left: the Asset panel -- a tab per asset type, listing the project's assets.
 Clicking one opens it (one asset at a time; unsaved changes prompt first). Middle: the viewer
@@ -17,6 +21,45 @@ Properties (tabs depend on the asset type).
 | Mesh | mesh viewer: Object / Edit / Sculpt / Vertex Paint / Weight Paint modes | Tool, Mesh (stats, material slots: name, assign faces, preview materials) |
 | Material | lookdev scene (a shader ball by default -- curves, a cutaway with flat hard-edged walls, a square chamfered plinth -- or sphere / rounded cube / plane / cylinder; ground, key / fill / rim + environment, turntable) | the material editor |
 | Texture | the image on a plane (a texture editor is a TODO) | info |
+| UI | the UI designer: the asset's canvas, drawn by the game's own UI pass in a frame the size of a game resolution (Design / Interact) | Canvas (preview, scaling, theme + colour editor), Bindings, the element's Element / Components tabs |
+
+**The UI designer** (UI tab; `app/ui/ui_canvas.inl`). A UI asset is an object asset whose root
+carries a `Canvas` (or, for a reusable widget, none) -- place one in a scene with `prefab: ui/x`
+(drag it into the viewer), or open it at runtime with `toy::ui::open(scene, "ui/x")`.
+- **New UI** (UI tab, +): Blank Canvas, Blank Widget, or a template -- HUD, Main Menu, Pause
+  Menu, Dialog Box, Inventory, Settings (`templates/ui/`, written by `tools/gen_ui_templates.py`).
+  Templates bring `ui/themes/default.yaml` and its fonts along.
+- **Preview.** The header picks the game resolution (1080p, 1440p, 4K, ultrawide, handheld,
+  4:3, portrait); the canvas is laid out for it exactly as the game will, then drawn scaled into
+  the frame (`Engine::set_scene_ui_placement`, `CanvasComponent::set_display_zoom`). Wheel /
+  pinch zooms about the cursor, middle or Space drag pans, Home fits, F frames the selection.
+  Safe-area guides, element outlines, Dark / Light / 3D backdrops.
+- **Design.** Click selects (Alt-click cycles through what's under the cursor; Shift adds; drag
+  on empty space box-selects); press-and-drag moves in one gesture. The rect gizmo
+  (`viewport/rect_gizmo.h`): 8 resize handles (Alt from the centre, Shift keeps aspect), four
+  anchor triangles (drag one alone to split them into a stretch), the pivot ring, rotation just
+  outside a corner (Shift: 15 degrees). Snapping (header magnet; Ctrl inverts) to the parent's
+  and siblings' edges and centres with magenta guides, and to a 1-16 px grid. Arrows nudge
+  (Shift: 10 px), [ / ] restack, Shift+D duplicates. Inside a layout group a drag reorders
+  (an insertion line shows where) and resizing sets the element's LayoutElement size. Every
+  edit is one undo step; rect edits patch the live RectTransform (`ChangeScope::Rect`).
+- **Widgets palette** (left, under the asset list) and **Shift+A**: themed composites (Panel,
+  Text, Button, Window, Dialog, Menu List, Tab View, Setting rows, Health / Stamina / Mana bars,
+  Hotbar, Item Grid, Message Log, Button Prompts...), pre-wired primitives (Slider, Progress
+  Bar), layout containers, and reactors. Click adds to the selection (or the canvas); drag onto
+  the frame or an outliner row to place it there. UI assets nest the same way (widget prefabs).
+- **Element tab.** Unity's anchor-preset picker (Shift also sets the pivot, Alt snaps the
+  position), then Position / Size -- or Left / Right / Top / Bottom on a stretched axis --
+  anchors, pivot, rotation, scale, Z order, hittable.
+- **Bindings tab.** Every name game code reaches (`coopa::ui::UiHandle`): buttons and their
+  `click`, sliders' `value_changed`, bars for `bind_bar`, grids for `bind_inventory`...,
+  duplicate names flagged; "Copy C++ Binding Stub" writes the calls to the clipboard.
+- **Interact** (header play button, Tab or F5; Esc returns): the canvas runs -- hover, press,
+  sliders, tabs, dialogs -- and every named signal is echoed to the Console. Back in Design the
+  canvas is rebuilt from the document.
+
+In the scene view a scene's screen-space UI is drawn on the rendered image (not over the editor),
+and is laid out and drawn while editing, not only in Play.
 
 Edit / Sculpt Mode on a scene object edits the **mesh asset itself**: its MeshRenderer's mesh,
 or, for a water object, its WaterBody's.
@@ -59,6 +102,7 @@ Undo:
 | Viewport | `viewport/editor_camera.h`, `viewport/gizmo.h` | Orbit/pan/dolly/fly camera; translate/rotate/scale gizmo and picking, drawn and hit-tested at full window resolution. |
 | Themes | `themes/*.yaml`, `app/editor_theme.h` | The look, loaded at startup (`blender_dark` by default; Edit > Theme switches, the choice is saved in `~/.toyengine` prefs). Widget colours/metrics come from uicoopa's `imm_theme.h`; the editor's own roles live in the `chrome:`, `viewport:` and `outliner:` sections. Theme files hot-reload; Edit > Theme > Export Full Theme writes every role out as a starting point. |
 | Packaging | `build/packager.h` | Copies `assets/` with every YAML encoded to `.caml`. |
+| UI designer | `app/ui/ui_canvas.inl`, `ui/ui_canvas_math.h`, `ui/ui_palette.h`, `viewport/rect_gizmo.h`, `schema/ui_schema.h` | See above. The math (view mapping, picking, anchors, snapping, the RectTransform block's canonical form) and the gizmo are headless and unit-tested; `schema/ui_schema.h` describes every uicoopa component and composite for the inspector (Vec2, Color4, Padding, StringList, ChildRef and ItemList fields). |
 
 ## Notes
 

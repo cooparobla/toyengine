@@ -5,6 +5,7 @@
  *
  *   ChangeScope::Transform -> the live object's Transform is patched in place (gizmo drags
  *                             stay at full frame rate);
+ *   ChangeScope::Rect      -> likewise its RectTransform (the UI designer's rect gizmo);
  *   ChangeScope::Object    -> that object's subtree is rebuilt from its node;
  *   ChangeScope::Structure -> the whole scene is rebuilt (SceneLoader::load_from_node()).
  *
@@ -20,6 +21,8 @@
 #include <toyengine/core/engine.h>
 
 #include <coopa/scene/scene_loader.h>
+
+#include <uicoopa/ui_yaml.h>
 
 #include <filesystem>
 #include <functional>
@@ -42,7 +45,7 @@ public:
         try {
             coopa::scene::Scene scene = coopa::scene::SceneLoader::load_from_node(doc.node(), path);
             remove_observer_();
-            scene_ = &engine.set_scene(std::move(scene));
+            scene_ = &engine.set_scene(std::move(scene), doc.scene_settings());
         } catch (const std::exception& e) {
             remove_observer_();
             last_error = e.what();
@@ -58,6 +61,7 @@ public:
         if (!scene_ || c.scope == ChangeScope::None) return;
         if (c.scope == ChangeScope::Structure || c.object == 0) { rebuild(engine, doc); return; }
         if (c.scope == ChangeScope::Transform && patch_transform_(doc, c.object)) return;
+        if (c.scope == ChangeScope::Rect && patch_rect(doc, c.object)) return;
         if (!rebuild_object_(engine, doc, c.object)) rebuild(engine, doc);
     }
 
@@ -79,6 +83,26 @@ public:
     }
 
     const std::unordered_map<ObjectId, coopa::scene::SceneObject*>& live_objects() const { return live_; }
+
+    /**
+     * @brief Re-parses the document's RectTransform onto the live one in place. Only for a
+     *        plain object: a prefab instance's rect is merged with its asset's, which only a
+     *        rebuild resolves.
+     */
+    bool patch_rect(const SceneDocument& doc, ObjectId id) {
+        coopa::scene::SceneObject* obj = live(id);
+        auto* rt = obj ? obj->get_component<coopa::ui::RectTransform>() : nullptr;
+        const int ci = doc.find_component(id, "RectTransform");
+        if (!rt || ci < 0 || inherits_(doc, id)) return false;
+        coopa::ui::RectTransform fresh;
+        coopa::ui::detail::parse_rect_transform(doc.find(id)->at("components").as_seq()[static_cast<size_t>(ci)], fresh);
+        rt->params() = fresh.params();
+        rt->set_local_rotation_degrees(fresh.local_rotation_degrees());
+        rt->set_local_scale(fresh.local_scale());
+        rt->hittable = fresh.hittable;
+        rt->z_order = fresh.z_order;
+        return true;
+    }
 
     std::string last_error;
 

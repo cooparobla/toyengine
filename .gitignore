@@ -17,3 +17,6 @@ output/
 
 *.spv
 *.spv.d
+
+# The editor's scratch space inside a project (e.g. the Theme editor's unsaved-theme preview).
+.toyeditor/

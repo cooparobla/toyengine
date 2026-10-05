@@ -14,7 +14,12 @@
         hierarchy_hovered_ = outliner_hovered_;
         const imm::Box hb = area_header_(ctx, area);
         ctx.icon(doc_.is_object_asset() ? I::Object : I::Scene, {hb.x + 6, hb.y + 4, hb.h - 8, hb.h - 8}, ctx.style.text_dim);
-        const imm::Box search{hb.x + hb.h + 4, hb.y + 4, hb.w - hb.h - 36, hb.h - 8};
+        // The area's title, then the filter in what's left of the header.
+        const char* title = "Hierarchy";
+        const float title_w = ctx.text_width(title) + 10;
+        ctx.text_in({hb.x + hb.h + 2, hb.y, title_w, hb.h}, title, ctx.style.text, 0.0f);
+        const float sx = hb.x + hb.h + 2 + title_w + 4;
+        const imm::Box search{sx, hb.y + 4, std::max(40.0f, hb.right() - hb.h - 6 - sx), hb.h - 8};
         ctx.input_text_box("outliner_filter", search, &outliner_filter_, "    Filter");
         if (outliner_filter_.empty()) ctx.icon(I::Search, {search.x + 4, search.y + 3, search.h - 6, search.h - 6}, ctx.style.text_disabled);
         if (ctx.icon_button("outliner_new", I::Plus, "Add Object\nShift A in the viewport (object assets too)", false,
@@ -130,6 +135,11 @@
             if (auto dropped = ctx.drop_target("object", r.rect)) {
                 const ObjectId src = std::stoll(*dropped);
                 if (src != id) apply_(doc_.reparent(src, id));
+            }
+            if (active_type_ == AssetType::UI) {
+                // The UI designer's palette and UI assets drop onto a row: added as its child.
+                if (auto w = ctx.drop_target("ui_widget", r.rect)) ui_add_widget_(*w, id, std::nullopt);
+                if (auto a = ctx.drop_target("asset", r.rect); a && asset_type_of_(*a) == AssetType::UI) place_ui_asset(*a, id);
             }
         }
         // Row toggles: eye (hide in viewport) and monitor (enabled in the game).

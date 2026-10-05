@@ -26,6 +26,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <unordered_map>
 
 #include <gfxcoopa/app/context.h>
 #include <gfxcoopa/util/image_readback.h>
@@ -219,7 +220,9 @@ public:
      */
     coopa::scene::Scene& load_scene(const std::string& path) {
         ctx_.wait_idle();
-        scene_mgr_.load_scene(resolve_path_(path));
+        const std::string resolved = resolve_path_(path);
+        scene_mgr_.load_scene(resolved);
+        scene_settings_[&scene_mgr_.get_active_scene()] = read_scene_settings_(resolved);
         prepare_scene_(scene_mgr_.get_active_scene());
         return scene_mgr_.get_active_scene();
     }
@@ -227,11 +230,14 @@ public:
     /**
      * @brief Replaces every managed scene with an already-built one (e.g. from
      *        SceneLoader::load_from_node()) and sets it up exactly as load_scene() does.
+     * @param settings The scene document's `scene.settings` (its config overrides -- see
+     *                 AppConfig::with_scene_settings()); null for none.
      */
-    coopa::scene::Scene& set_scene(coopa::scene::Scene&& scene) {
+    coopa::scene::Scene& set_scene(coopa::scene::Scene&& scene, const fkyaml::node& settings = fkyaml::node()) {
         ctx_.wait_idle();
         clear_scenes_();
         coopa::scene::Scene* raw = scene_mgr_.add_scene(std::make_unique<coopa::scene::Scene>(std::move(scene)));
+        scene_settings_[raw] = settings;
         prepare_scene_(*raw);
         return *raw;
     }
@@ -244,10 +250,12 @@ public:
      * The editor's play mode and material preview use this: the edit scene stays intact
      * underneath and comes back untouched when the added scene is removed.
      */
-    coopa::scene::Scene& push_scene(coopa::scene::Scene&& scene, bool simulating) {
+    coopa::scene::Scene& push_scene(coopa::scene::Scene&& scene, bool simulating,
+                                    const fkyaml::node& settings = fkyaml::node()) {
         ctx_.wait_idle();
         if (scene_mgr_.has_scene()) scene_mgr_.set_scene_active(&scene_mgr_.get_active_scene(), false);
         coopa::scene::Scene* raw = scene_mgr_.add_scene(std::make_unique<coopa::scene::Scene>(std::move(scene)));
+        scene_settings_[raw] = settings;
         scene_mgr_.set_active_scene(raw);
         prepare_scene_(*raw);
         raw->set_simulating(simulating);
@@ -258,12 +266,59 @@ public:
     void remove_scene(coopa::scene::Scene* scene) {
         ctx_.wait_idle();
         scene_mgr_.remove_scene(scene);
+        scene_settings_.erase(scene);
+        if (scene_mgr_.has_scene()) apply_scene_settings_(scene_mgr_.get_active_scene());
     }
 
     /** @brief Makes a managed scene the active, updating one; every other scene stops updating. */
     void activate_scene(coopa::scene::Scene* scene) {
         for (coopa::scene::Scene* s : scene_mgr_.scenes()) scene_mgr_.set_scene_active(s, s == scene);
         scene_mgr_.set_active_scene(scene);
+        apply_scene_settings_(*scene);
+    }
+
+    // --- Scene settings (per-scene config overrides) -----------------------------------
+    //
+    // A scene file may override config.yaml's render and physics keys under `scene.settings`
+    // (see AppConfig::with_scene_settings()). Whichever scene is active runs with config.yaml
+    // plus its own overrides: render settings are applied live whenever the active scene
+    // changes, physics settings when the scene's physics system is installed. Startup-fixed
+    // render keys (see PixelRenderPipeline::apply_live_config()) cannot vary per scene.
+
+    /**
+     * @brief Replaces the config document scene overrides are layered on -- the editor hands
+     *        over its edited (possibly unsaved) config.yaml. From then on render and physics are
+     *        always re-derived from this document, overrides or not. Re-applies to the active
+     *        scene now.
+     * @param adjust Runs on every config derived from the document, e.g. the editor's own
+     *               render overrides, so a re-derivation never undoes them.
+     */
+    void set_config_source(const fkyaml::node& config_yaml, std::function<void(AppConfig&)> adjust = {}) {
+        config_.source = config_yaml.is_mapping() ? config_yaml : fkyaml::node::mapping();
+        config_adjust_ = std::move(adjust);
+        source_driven_ = true;
+        if (scene_mgr_.has_scene()) apply_scene_settings_(scene_mgr_.get_active_scene());
+    }
+
+    /** @brief Sets a managed scene's overrides (its `scene.settings`), applying them if it is active. */
+    void set_scene_settings(coopa::scene::Scene& scene, const fkyaml::node& settings) {
+        scene_settings_[&scene] = settings;
+        if (scene_mgr_.has_scene() && &scene_mgr_.get_active_scene() == &scene) apply_scene_settings_(scene);
+    }
+
+    /** @brief The config `scene` runs with: config.yaml plus its overrides. */
+    AppConfig scene_config(const coopa::scene::Scene& scene) const {
+        auto it = scene_settings_.find(&scene);
+        const fkyaml::node none;
+        const fkyaml::node& settings = it != scene_settings_.end() ? it->second : none;
+        if (!source_driven_) return config_.with_scene_settings(settings);
+        AppConfig derived = AppConfig::from_node(config_.source).with_scene_settings(settings);
+        derived.window = config_.window;   // what the adjust hook sizes against
+        if (config_adjust_) config_adjust_(derived);
+        AppConfig out = config_;
+        out.render = derived.render;
+        out.physics = derived.physics;
+        return out;
     }
 
     /**
@@ -327,6 +382,27 @@ public:
     void set_display_region(std::optional<render::LetterboxRect> region) {
         pipeline_->set_display_region(region);
     }
+
+    /**
+     * @brief Where the ACTIVE scene's screen-space canvases sit, in window (framebuffer)
+     *        pixels: inside `rect` instead of across the whole window. nullopt (the default)
+     *        is a game's full-window HUD.
+     *
+     * For a host that shows the game in part of its window -- the editor's viewport, or its
+     * UI designer's preview frame. Each screen canvas is sized to the rect, offset to it, its
+     * draws clipped to it and its cursor mapped into it; with `input` false it draws but
+     * never reacts. The overlay scene (the editor's own UI) is never placed.
+     */
+    struct ScreenUiPlacement {
+        render::LetterboxRect rect;
+        bool input = true;
+        /// Magnification: the canvas is laid out for rect / zoom pixels and drawn scaled into
+        /// rect -- a 1920x1080 HUD previewed in a 960x540 frame is zoom 0.5. See
+        /// CanvasComponent::set_display_zoom().
+        float zoom = 1.0f;
+    };
+    void set_scene_ui_placement(std::optional<ScreenUiPlacement> placement) { scene_ui_placement_ = placement; }
+    const std::optional<ScreenUiPlacement>& scene_ui_placement() const { return scene_ui_placement_; }
 
     /** @brief The window-pixel rect the low-res scene image currently lands in. */
     render::LetterboxRect display_rect() const {
@@ -428,6 +504,42 @@ private:
     /** @brief Destroys every managed scene. */
     void clear_scenes_() {
         for (coopa::scene::Scene* s : scene_mgr_.scenes()) scene_mgr_.remove_scene(s);
+        scene_settings_.clear();
+    }
+
+    /** @brief A scene file's `scene.settings` block (null if it has none or can't be read). */
+    static fkyaml::node read_scene_settings_(const std::string& path) {
+        try {
+            const fkyaml::node doc = coopa::yaml::load_document(coopa::yaml::resolve_variant(path));
+            if (doc.contains("scene") && doc.at("scene").contains("settings")) return doc.at("scene").at("settings");
+        } catch (const std::exception&) {}
+        return fkyaml::node();
+    }
+
+    /**
+     * @brief Applies `scene`'s effective render config live (see scene_config()) and returns
+     *        its full effective config, for the physics install in prepare_scene_().
+     *
+     * A scene without overrides leaves the live config alone -- unless the previous one had
+     * overrides to undo, or the editor drives the config document -- so code that tweaks
+     * render_config() at runtime keeps its changes across plain scene loads. The live
+     * debug_view and the resolved shader/palette state are always kept.
+     */
+    AppConfig apply_scene_settings_(const coopa::scene::Scene& scene) {
+        const AppConfig eff = scene_config(scene);
+        auto it = scene_settings_.find(&scene);
+        const bool overrides = it != scene_settings_.end() && AppConfig::has_scene_overrides(it->second);
+        if (overrides || overrides_applied_ || source_driven_) {
+            render::PixelRenderConfig next = make_render_config_(eff, options_.project_root);
+            const render::PixelRenderConfig& live = pipeline_->render_config();
+            next.shaders = live.shaders;
+            next.surface_shaders = live.surface_shaders;
+            next.debug_view = live.debug_view;
+            next.fill_aspect = live.fill_aspect;   // the engine's, from the display region -- see update_fill_extent_()
+            pipeline_->apply_live_config(next);
+        }
+        overrides_applied_ = overrides;
+        return eff;
     }
 
     /**
@@ -435,6 +547,9 @@ private:
      *        systems, drained asset loads, shader validation, edit-mode and cursor state.
      */
     void prepare_scene_(coopa::scene::Scene& scene) {
+        // The scene's own settings first: render (live) before the water system reads
+        // water_quality below, physics for install_physics_system().
+        const AppConfig scene_cfg = apply_scene_settings_(scene);
         // BEFORE the physics system in numeric order (50 vs 100), which is the whole point: a
         // component driving a kinematic body's Transform has to write it before PhysicsSystem reads
         // it, or physics spends the frame solving against the previous pose while the renderer draws
@@ -449,7 +564,7 @@ private:
         // Physics (100) steps, whose substep callback it drives -- see water_system.h's file doc.
         water::install_water_system(scene, &ctx_.device(), &ctx_.allocator(), &assets_)
             ->set_settings(water_settings_for_(pipeline_->render_config().water_quality));
-        coopa::physx::system::install_physics_system(scene, config_.physics);
+        coopa::physx::system::install_physics_system(scene, scene_cfg.physics);
 
         // Activate TransformSystem before the first drain or render, so the world_matrix()
         // reads below are never asked to resolve a still-dirty transform; then block until
@@ -737,9 +852,9 @@ public:
                 // world matrices are current only after UpdatePhase::TransformResolve (350) has
                 // run inside update(), and a canvas needs its pointer position before
                 // EventSystem::process() is dispatched from inside late_update() (400).
-                drive_ui_canvases_(scene_mgr_.get_active_scene());
+                drive_ui_canvases_(scene_mgr_.get_active_scene(), scene_ui_placement_);
             }
-            if (overlay_scene_) drive_ui_canvases_(*overlay_scene_);
+            if (overlay_scene_) drive_ui_canvases_(*overlay_scene_, std::nullopt);
             // late_update() runs LateBehaviourSystem, flushes each worker's deferred
             // SceneCommandBuffer and advances Scene::frame_index(). Must precede render() so a
             // same-frame deferred spawn or destroy is reflected in what is drawn, matching
@@ -1159,9 +1274,13 @@ private:
      * UiWorldPass::draw()'s view_proj parameter -- so the UI and the depth buffer it is
      * compared against never disagree.
      */
-    void drive_ui_canvases_(coopa::scene::Scene& scene) {
+    void drive_ui_canvases_(coopa::scene::Scene& scene, const std::optional<ScreenUiPlacement>& placement) {
         std::vector<coopa::ui::CanvasComponent*> canvases = coopa::ui::collect_canvases(scene);
         if (canvases.empty()) return;
+        // A scene that is drawn but not simulating (the editor's edit mode) never runs a
+        // canvas's late_update(), which is where layout and emit happen -- so without this
+        // every HUD and nameplate would be invisible while editing.
+        const bool preview = !scene.is_simulating();
 
         const uint32_t rw = pipeline_->render_width();
         const uint32_t rh = pipeline_->render_height();
@@ -1183,13 +1302,27 @@ private:
                 // Same seeding as the world path below, and for the same reason: without it
                 // a screen-space canvas emits every solid-colour quad against a null view.
                 canvas->set_default_texture(screen_white);
-                // The WINDOW extent, not the render extent: UiPass draws this canvas into the
-                // swapchain-sized overlay target, and ctx_.input()'s cursor is in window
-                // pixels, so this is the sizing that makes both agree. See the doc above.
-                canvas->set_viewport(ww, wh);
+                if (placement && placement->rect.w > 0 && placement->rect.h > 0) {
+                    // Placed inside part of the window (see set_scene_ui_placement()).
+                    const float zoom = placement->zoom > 0.0f ? placement->zoom : 1.0f;
+                    canvas->set_viewport(std::max(1u, static_cast<uint32_t>(std::lround(placement->rect.w / zoom))),
+                                         std::max(1u, static_cast<uint32_t>(std::lround(placement->rect.h / zoom))));
+                    canvas->set_screen_origin(glm::vec2(placement->rect.x, placement->rect.y));
+                    canvas->set_display_zoom(zoom);
+                    canvas->set_input_enabled(placement->input);
+                } else {
+                    // The WINDOW extent, not the render extent: UiPass draws this canvas into the
+                    // swapchain-sized overlay target, and ctx_.input()'s cursor is in window
+                    // pixels, so this is the sizing that makes both agree. See the doc above.
+                    canvas->set_viewport(ww, wh);
+                    canvas->set_screen_origin(glm::vec2(0.0f));
+                    canvas->set_display_zoom(1.0f);
+                    canvas->set_input_enabled(true);
+                }
                 // Cursor positions arrive in screen points; the canvas is sized in framebuffer
                 // pixels. They differ on HiDPI displays.
                 canvas->set_input(ctx_.input(), cursor_scale());
+                if (preview) canvas->preview_refresh();
                 continue;
             }
             // Seed the DrawList's default texture BEFORE late_update() emits against it:
@@ -1207,6 +1340,7 @@ private:
             // bottom-left corner, which would leave whatever widget sits there permanently
             // hovered whenever the pointer is anywhere else.
             canvas->set_world_input(ctx_.input(), hit ? *hit : glm::vec2(-1.0e6f));
+            if (preview) canvas->preview_refresh();
         }
     }
 
@@ -1514,6 +1648,11 @@ private:
 
     EngineOptions options_;
     AppConfig     config_;
+    /// Each managed scene's `scene.settings` overrides (null: none) -- see scene_config().
+    std::unordered_map<const coopa::scene::Scene*, fkyaml::node> scene_settings_;
+    bool overrides_applied_ = false;   ///< The live render config carries some scene's overrides.
+    bool source_driven_ = false;       ///< set_config_source() was called (the editor).
+    std::function<void(AppConfig&)> config_adjust_;   ///< set_config_source()'s adjust hook.
 
     // jobs_ is declared (and constructed) before ctx_/pipeline_/assets_/scene_mgr_, and
     // destroyed after all of them, since every one of those may still be submitting to or
@@ -1549,6 +1688,7 @@ private:
     uint64_t profile_frame_ = 0;
 
     bool                  edit_mode_     = false;
+    std::optional<ScreenUiPlacement> scene_ui_placement_;   ///< See set_scene_ui_placement().
     FrameHooks            hooks_;
     std::vector<std::function<void(coopa::input::Input&)>> input_queue_;
     coopa::scene::Scene*  overlay_scene_ = nullptr;

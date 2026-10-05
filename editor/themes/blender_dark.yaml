@@ -58,6 +58,8 @@ chrome:
   statusbar_bg: "#232323"
   play_group_bg: "#333333"
   play_tint: "#4c381f"            # viewport header while playing (Unity)
+  setting_override: "#338cbf29"   # a setting row the open scene overrides (vs config.yaml)
+  setting_override_bar: "#4da6e6e6"
 
 viewport:
   grid: "#ffffff0e"

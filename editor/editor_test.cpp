@@ -48,6 +48,10 @@
 #include "schema/component_schema.h"
 #include "viewport/gizmo.h"
 #include "viewport/modal_transform.h"
+#include "viewport/rect_gizmo.h"
+#include "ui/ui_canvas_math.h"
+#include "ui/ui_palette.h"
+#include <uicoopa/binding/ui_handle.h>
 
 #include <coopa/yaml/writer.h>
 #include <gfxcoopa/util/image_readback.h>
@@ -335,7 +339,8 @@ void test_schema_defaults() {
         const Node c = default_component(type);
         expect(component_type(c) == type, "default " + type + " carries its type");
         for (const auto& f : schema.fields) {
-            if (f.in_default && f.kind != FieldKind::AssetRef && f.kind != FieldKind::String && f.kind != FieldKind::Enum) {
+            if (f.in_default && f.kind != FieldKind::AssetRef && f.kind != FieldKind::String && f.kind != FieldKind::Enum &&
+                f.kind != FieldKind::ChildRef) {
                 expect(c.contains(f.key), type + "." + f.key + " is written by default");
             }
         }
@@ -1572,6 +1577,200 @@ void test_projection_and_rays() {
     expect(hit && std::abs(*hit - 4.0f) < 1e-5f, "ray-box entry distance");
     const glm::vec3 e(10, 20, 30);
     expect(glm::distance(matrix_to_euler(euler_to_matrix(e)), e) < 1e-3f, "Euler <-> matrix round trip uses Transform's convention");
+}
+
+// =====================================================================================
+// UI designer math (group "viewport") -- ui_canvas_math.h / rect_gizmo.h, no GPU
+// =====================================================================================
+
+bool near_rect(const ui::Rect& a, const ui::Rect& b, float eps = 1e-3f) {
+    return glm::all(glm::lessThan(glm::abs(a.min - b.min), glm::vec2(eps))) && glm::all(glm::lessThan(glm::abs(a.max - b.max), glm::vec2(eps)));
+}
+
+void test_ui_rect_math() {
+    const ui::Rect parent{{0, 0}, {1000, 500}};
+    ui::RectParams p;
+    p.anchor_min = p.anchor_max = {0.5f, 0.5f};
+    p.pivot = {0.5f, 0.5f};
+    p.size_delta = {200, 100};
+    p.anchored_position = {50, 20};
+    const ui::Rect r0 = coopa::ui::resolve_rect(parent, p);
+    expect(near_rect(r0, {{450, 220}, {650, 320}}), "ui math: a centred rect resolves where expected");
+
+    // View mapping is an exact round trip, with Y flipped (canvas up, editor down).
+    ui::UiView v;
+    v.origin = {100, 50};
+    v.scale = 0.5f;
+    v.canvas_size = {1000, 500};
+    const glm::vec2 e = v.to_editor({250, 100});
+    expect(glm::distance(e, glm::vec2(225, 250)) < 1e-4f && glm::distance(v.to_canvas(e), glm::vec2(250, 100)) < 1e-4f,
+           "ui math: editor <-> canvas mapping round-trips with Y flipped");
+
+    // Resize from the right edge keeps the left edge; from a corner with Alt keeps the centre.
+    const ui::Rect rr = ui::resize_rect(r0, 1, 0, {30, 0}, false, false);
+    expect(std::abs(rr.min.x - r0.min.x) < 1e-4f && std::abs(rr.max.x - (r0.max.x + 30)) < 1e-4f && rr.min.y == r0.min.y,
+           "ui math: resizing the right edge keeps the left edge");
+    const ui::Rect rs = ui::resize_rect(r0, 1, 1, {20, 10}, true, false);
+    expect(glm::distance(rs.center(), r0.center()) < 1e-3f && std::abs(rs.size().x - (r0.size().x + 40)) < 1e-3f,
+           "ui math: Alt resizes symmetrically about the centre");
+    const ui::Rect ra = ui::resize_rect(r0, 1, 1, {100, 0}, false, true);
+    expect(std::abs(ra.size().x / ra.size().y - r0.size().x / r0.size().y) < 1e-3f, "ui math: Shift keeps the aspect ratio");
+    const ui::Rect inv = ui::resize_rect(r0, -1, 0, {500, 0}, false, false);
+    expect(inv.size().x >= 1.0f && std::abs(inv.max.x - r0.max.x) < 1e-4f, "ui math: a resize never inverts the rect");
+
+    // set_rect / anchors / pivot all keep the rect where it is.
+    ui::RectParams q = p;
+    ui::set_rect(parent, q, rr);
+    expect(near_rect(coopa::ui::resolve_rect(parent, q), rr), "ui math: set_rect() re-expresses a rect exactly");
+    q = p;
+    ui::set_anchors_keep_rect(parent, q, {0, 0}, {1, 1});
+    expect(near_rect(coopa::ui::resolve_rect(parent, q), r0), "ui math: changing anchors keeps the rect on screen");
+    ui::set_pivot_keep_rect(parent, q, {0, 1});
+    expect(near_rect(coopa::ui::resolve_rect(parent, q), r0) && q.pivot == glm::vec2(0, 1), "ui math: moving the pivot keeps the rect");
+    // ...and the stretched rect follows its parent when the parent grows.
+    const ui::Rect big{{0, 0}, {2000, 1000}};
+    const ui::Rect stretched = coopa::ui::resolve_rect(big, q);
+    expect(std::abs(stretched.size().x - (r0.size().x + 1000)) < 1e-3f, "ui math: stretch anchors grow with the parent");
+
+    // Presets: Unity's picker (rect stays; Shift pivot; Alt snaps).
+    const auto& presets = ui::anchor_presets();
+    expect(presets.size() == 16, "ui math: 16 anchor presets (the 4x4 picker)");
+    q = p;
+    const ui::AnchorPresetInfo* tl = nullptr;
+    for (const auto& pr : presets) if (std::string(pr.name) == "TopLeft") tl = &pr;
+    ui::apply_anchor_preset(parent, q, *tl, false, false);
+    expect(near_rect(coopa::ui::resolve_rect(parent, q), r0) && q.anchor_min == glm::vec2(0, 1), "ui math: a preset alone keeps the rect");
+    ui::apply_anchor_preset(parent, q, *tl, true, true);
+    expect(q.pivot == glm::vec2(0, 1) && q.anchored_position == glm::vec2(0) &&
+           near_rect(coopa::ui::resolve_rect(parent, q), {{0, 400}, {200, 500}}), "ui math: Shift+Alt preset snaps into the top-left corner");
+    expect(ui::matching_preset(q) && std::string(ui::matching_preset(q)->name) == "TopLeft", "ui math: the current preset is recognised");
+
+    // Snapping: an edge within the threshold moves onto the target and reports a guide.
+    std::vector<ui::SnapLine> lines;
+    ui::add_rect_lines(lines, parent);
+    const bool all[2][3] = {{true, true, true}, {true, true, true}};
+    std::vector<ui::SnapLine> hit;
+    const glm::vec2 d = ui::snap_rect({{3, 100}, {103, 150}}, lines, 5.0f, all, &hit);
+    expect(std::abs(d.x + 3.0f) < 1e-4f && !hit.empty(), "ui math: an edge 3 px from the parent's snaps to it");
+}
+
+void test_ui_rect_block_roundtrip() {
+    Node blk = fkyaml::node::deserialize(std::string(
+        "{type: RectTransform, anchor_preset: StretchAll, offset_min: {x: 10, y: 20}, offset_max: {x: -30, y: -40}, rotation: 15}"));
+    const coopa::ui::RectTransform rt = ui::parse_rect_block(blk);
+    coopa::ui::RectTransform engine_rt;
+    coopa::ui::detail::parse_rect_transform(blk, engine_rt);
+    const ui::Rect parent{{0, 0}, {800, 600}};
+    expect(near_rect(coopa::ui::resolve_rect(parent, rt.params()), coopa::ui::resolve_rect(parent, engine_rt.params())),
+           "ui block: the editor reads a RectTransform exactly as the engine does (preset + offsets)");
+    Node out = blk;
+    ui::write_rect_params(out, rt.params());
+    expect(!out.contains("anchor_preset") && !out.contains("offset_min") && out.contains("anchor_min") && out.contains("size_delta") &&
+           out.contains("rotation"), "ui block: writing normalises to anchors/pivot/position/size (rotation kept)");
+    coopa::ui::RectTransform again;
+    coopa::ui::detail::parse_rect_transform(out, again);
+    expect(near_rect(coopa::ui::resolve_rect(parent, again.params()), coopa::ui::resolve_rect(parent, engine_rt.params())),
+           "ui block: ...and resolves to the same rect");
+}
+
+void test_ui_rect_gizmo() {
+    const ui::Rect parent{{0, 0}, {1000, 500}};
+    ui::UiView v;
+    v.origin = {0, 0};
+    v.scale = 1.0f;
+    v.canvas_size = {1000, 500};
+    RectGizmoTarget t;
+    t.parent = parent;
+    t.params.anchor_min = t.params.anchor_max = {0.5f, 0.5f};
+    t.params.size_delta = {200, 100};
+    t.rect = coopa::ui::resolve_rect(parent, t.params);   // (400,200)-(600,300)
+    RectGizmo g;
+    RectGizmoSettings s;
+    s.snap = false;
+    // Handles: editor Y is down, so the top edge (canvas y 300) is at editor y 200.
+    expect(g.hit(v, t, {600, 250}) == RectHandle::Right && g.hit(v, t, {500, 200}) == RectHandle::Top &&
+           g.hit(v, t, {450, 260}) == RectHandle::Body && g.hit(v, t, {500, 250}) == RectHandle::Pivot,
+           "rect gizmo: edges, body and pivot are hit where they are drawn");
+    auto drive = [&](glm::vec2 from, glm::vec2 to, bool shift = false) {
+        RectGizmoInput in;
+        in.mouse = from; in.pressed = true; in.down = true; in.shift = shift;
+        g.update(v, t, in, s);
+        in.pressed = false; in.mouse = to;
+        RectGizmoResult r = g.update(v, t, in, s);
+        in.down = false; in.released = true;
+        const RectGizmoResult f = g.update(v, t, in, s);
+        r.finished = f.finished;
+        return r;
+    };
+    RectGizmoResult r = drive({450, 260}, {490, 240});
+    expect(r.changed && std::abs(r.params.anchored_position.x - 40) < 1e-3f && std::abs(r.params.anchored_position.y - 20) < 1e-3f && r.finished,
+           "rect gizmo: a body drag moves by the drag (Y flipped into canvas space)");
+    r = drive({600, 250}, {650, 250});
+    expect(std::abs(r.rect.max.x - 650) < 1e-3f && std::abs(r.rect.min.x - 400) < 1e-3f, "rect gizmo: the right handle resizes, the left edge stays");
+    // Anchor split: drag the top-right anchor triangle (drawn just outside the anchor point).
+    t.params.anchor_min = {0.4f, 0.4f};
+    t.params.anchor_max = {0.4f, 0.4f};
+    t.params.anchored_position = {100, 50};
+    t.rect = coopa::ui::resolve_rect(parent, t.params);
+    const glm::vec2 anchor_px = v.to_editor({400, 200});
+    expect(g.hit(v, t, anchor_px + glm::vec2(6, -6)) == RectHandle::AnchorTR || g.hit(v, t, anchor_px) != RectHandle::None,
+           "rect gizmo: the anchors are grabbable");
+    // Snapping to the parent's centre line.
+    s.snap = true;
+    s.lines.clear();
+    ui::add_rect_lines(s.lines, parent);
+    t.params.anchor_min = t.params.anchor_max = {0.5f, 0.5f};
+    t.params.anchored_position = {0, 0};
+    t.rect = coopa::ui::resolve_rect(parent, t.params);
+    r = drive({450, 260}, {453, 260});
+    expect(std::abs(r.params.anchored_position.x) < 1e-3f && !r.guides.empty(), "rect gizmo: a small drag snaps back onto the centre line");
+    // Rotation with Shift snaps to 15 degrees.
+    s.snap = false;
+    r = drive({615, 185}, {640, 250}, true);
+    expect(std::abs(std::fmod(std::abs(r.rotation), 15.0f)) < 1e-3f, "rect gizmo: Shift snaps rotation to 15 degrees");
+}
+
+void test_ui_palette_entries_load() {
+    coopa::ui::register_ui_components();
+    int loaded = 0;
+    for (const auto& e : ui::palette()) {
+        Node made = e.make();
+        Node obj;
+        if (e.component) {
+            obj = ui::palette_detail::object("Host", {ui::palette_detail::centered(100, 100), made});
+        } else {
+            obj = made;
+        }
+        Node canvas = ui::palette_detail::object("Canvas", {ui::palette_detail::stretch(), ui::palette_detail::comp("Canvas")}, {obj});
+        Node doc = Node::mapping();
+        doc["format"] = Node(std::string("toyengine"));
+        Node sc = Node::mapping();
+        sc["scene_name"] = Node(std::string("PaletteProbe"));
+        Node roots = Node::sequence();
+        roots.as_seq().push_back(canvas);
+        sc["root_objects"] = roots;
+        doc["scene"] = sc;
+        try {
+            coopa::scene::Scene scene = coopa::scene::SceneLoader::load_from_node(doc, "palette_probe.yaml");
+            auto* c = scene.find_object("Canvas");
+            auto* canvas_comp = c ? c->get_component<coopa::ui::CanvasComponent>() : nullptr;
+            expect(canvas_comp != nullptr && c->children().size() == 1, "palette " + e.id + ": loads under a canvas");
+            if (canvas_comp) {
+                canvas_comp->set_viewport(1920, 1080);
+                canvas_comp->preview_refresh();
+                expect(!canvas_comp->draw_list().vertices().empty() || e.id == "container" || e.id == "spacer" ||
+                       e.id == "vstack" || e.id == "hstack" || e.id == "grid" || e.id == "hud_corner" || e.id == "message_log" ||
+                       e.id == "label" || e.id == "text" || e.id == "title" || e.id == "prompt_bar" || e.component,   // text / icons only: no font headless
+                       "palette " + e.id + ": draws something");
+            }
+            ++loaded;
+        } catch (const std::exception& ex) {
+            expect(false, "palette " + e.id + " throws: " + ex.what());
+        }
+        expect(find_schema(component_type(e.component ? made : made.at("components").as_seq().back())) != nullptr,
+               "palette " + e.id + ": its main component has an inspector schema");
+    }
+    expect(loaded >= 30, "every palette entry loads (" + std::to_string(loaded) + ")");
 }
 
 void test_gizmo_translate_drag() {
@@ -2954,16 +3153,12 @@ void test_asset_fidelity_component_schemas() {
         for (const auto& f : schema.fields) {
             if (comp.contains(f.key)) continue;
             switch (f.kind) {
-                case FieldKind::Bool:  comp[f.key] = Node(f.def.x != 0.0f); break;
-                case FieldKind::Int:   comp[f.key] = Node(static_cast<int64_t>(f.def.x)); break;
-                case FieldKind::Float: comp[f.key] = make_float(f.def.x); break;
-                case FieldKind::Vec3:  comp[f.key] = make_vec3(glm::vec3(f.def)); break;
-                case FieldKind::Vec4:  { float v[4] = {f.def.x, f.def.y, f.def.z, f.def.w}; comp[f.key] = make_float_seq(v, 4); break; }
-                case FieldKind::Color: comp[f.key] = make_color(glm::vec3(f.def)); break;
-                case FieldKind::Enum:  if (!f.options.empty()) comp[f.key] = Node(f.options.front()); break;
+                case FieldKind::Enum:  if (!f.options.empty() && !f.options.front().empty()) comp[f.key] = Node(f.options.front()); break;
                 case FieldKind::String:
-                case FieldKind::AssetRef: if (!f.default_string.empty()) comp[f.key] = Node(f.default_string); break;
+                case FieldKind::AssetRef:
+                case FieldKind::ChildRef: if (!f.default_string.empty()) comp[f.key] = Node(f.default_string); break;
                 case FieldKind::Material: break;   // default_component() writes it when the schema has one
+                default: comp[f.key] = field_default_node(f); break;
             }
         }
         Node obj = Node::mapping();
@@ -2995,6 +3190,8 @@ void test_asset_fidelity_component_schemas() {
         } catch (const std::exception& e) {
             error = e.what();
         }
+        // A Theme with no file loads nothing (by design); one with a file is covered by the UI tests.
+        if (type == "Theme") { ++checked; continue; }
         expect(error.empty() || has, "schema " + type + ": every field at its default loads in the engine (" + error + ")");
         expect(has, "schema " + type + ": ...and creates the component (has:" + error + ")");
         ++checked;
@@ -3400,6 +3597,80 @@ void test_editor_object_asset_click_and_tab() {
 
 /** @brief Blender's viewport grid and increment snap: the grid faces the view down X / Y, its
  *         spacing follows the zoom, Ctrl moves in that spacing, and F frames the selection. */
+/**
+ * @brief Settings rows edited in a scene become that scene's overrides of config.yaml: they
+ *        apply live, leave config.yaml alone, undo like any scene edit, reach Play (physics
+ *        included), revert to the project's value, and save into the scene as `settings:`.
+ */
+void test_editor_scene_settings_override() {
+    setenv("FIXED_DT", "0.016666", 1);
+    setenv("NO_INPUT", "1", 1);
+    setenv("HOME", tmp_root().c_str(), 1);
+    fs::remove(Project::prefs_path());
+    const fs::path root = fresh_dir("scene_settings_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, 4);
+    const float project_exposure = engine.render_config().exposure;
+
+    app.set_prop_tab(PropTab::Render);
+    const Node three = make_float(3.0);
+    app.set_scene_setting("render", "exposure", &three);
+    tick(engine, 2);
+    expect(std::abs(engine.render_config().exposure - 3.0f) < 1e-5f, "a scene override applies live");
+    expect(!app.config_document().section("render").contains("exposure") && !app.config_document().dirty(),
+           "config.yaml is untouched by a scene override");
+    expect(app.document().scene_setting("render", "exposure") != nullptr, "the scene document carries the override");
+
+    app.undo();
+    tick(engine, 4);
+    expect(app.document().scene_setting("render", "exposure") == nullptr &&
+           std::abs(engine.render_config().exposure - project_exposure) < 1e-5f, "undo removes the override");
+    app.redo();
+    tick(engine, 4);
+    expect(std::abs(engine.render_config().exposure - 3.0f) < 1e-5f, "redo restores it");
+
+    // A config.yaml edit still shows through wherever the scene doesn't override.
+    {
+        const Node before = app.config_document().node;
+        app.config_document().section("render")["fog_density"] = make_float(0.07);
+        app.config_document().commit("fog", before, {});
+        app.apply_config_live();
+        tick(engine, 2);
+        expect(std::abs(engine.render_config().fog_density - 0.07f) < 1e-5f &&
+               std::abs(engine.render_config().exposure - 3.0f) < 1e-5f,
+               "a project setting applies under the scene's overrides");
+    }
+
+    const Node gravity = make_vec3({0.0f, 0.0f, -2.0f});
+    app.set_scene_setting("physics", "gravity", &gravity);
+    app.play();
+    tick(engine, 4);
+    auto* physics = dynamic_cast<coopa::physx::system::PhysicsSystem*>(engine.scene().find_system("Physics"));
+    expect(app.playing() && physics && std::abs(physics->world().gravity().z + 2.0f) < 1e-5f,
+           "Play runs with the scene's physics override");
+    expect(std::abs(engine.render_config().exposure - 3.0f) < 1e-5f, "...and its render overrides");
+    app.stop();
+    tick(engine, 3);
+
+    app.set_scene_setting("render", "exposure", nullptr);
+    tick(engine, 2);
+    expect(std::abs(engine.render_config().exposure - project_exposure) < 1e-5f, "reverting returns to the project's value");
+
+    expect(app.save_scene(), "the scene saves");
+    const Node saved = coopa::yaml::load_document(project.assets() / "scenes" / "main" / "scene.yaml");
+    const Node& sc = saved.at("scene");
+    expect(sc.contains("settings") && sc.at("settings").contains("physics") && !sc.at("settings").contains("render"),
+           "the file keeps only the remaining overrides (" + coopa::yaml::emit(sc.contains("settings") ? sc.at("settings") : Node()) + ")");
+
+    const Node off(false);
+    app.set_scene_setting("render", "shadows_enabled", &off);   // a visible row, for the dump
+    tick(engine, 2);
+    expect(!engine.render_config().shadows_enabled, "a bool override applies");
+    dump(engine, "21_scene_setting_override");
+}
+
 /** @brief The material editor's Shader dropdown only offers shaders the engine registers, in
  *         the pass (domain) the catalogue claims -- a mismatch would silently render stock PBR. */
 void test_editor_material_shader_catalogue() {
@@ -3795,6 +4066,355 @@ void test_editor_object_assets() {
     expect(spawned && engine.scene().root_objects().size() == before + 1 && spawned->children().size() == 1,
            "Engine::spawn() instantiates the asset, child included");
     dump(engine, "17_object_instances");
+}
+
+/**
+ * @brief The UI designer end to end, through real input: a new UI asset opens in the designer
+ *        with its canvas drawn inside the preview frame; widgets are added and land in the
+ *        right parent; a click picks, a drag moves (one undo step); Interact runs the UI and
+ *        echoes a button's click; the file saves; placed in a scene, the HUD stays inside the
+ *        viewer.
+ */
+void test_editor_ui_designer() {
+    using coopa::input::MouseButton;
+    setenv("FIXED_DT", "0", 1);
+    unsetenv("NO_INPUT");
+    setenv("HOME", tmp_root().c_str(), 1);
+    fs::remove(Project::prefs_path());
+    const fs::path root = fresh_dir("ui_designer_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, 4);
+    InputDriver in{engine, std::max(1.0f, engine.display_scale())};
+
+    expect(app.new_ui_asset("test_hud", "blank"), "a blank UI asset is created");
+    tick(engine, 4);
+    expect(app.active_asset_type() == AssetType::UI && app.ui_mode(), "it opens in the UI designer");
+    expect(coopa::yaml::document_exists(project.assets() / "ui" / "test_hud.yaml"), "as assets/ui/test_hud.yaml");
+    const imm::Box frame = app.ui_frame();
+    expect(frame.w > 100 && frame.h > 50 && std::abs(frame.w / frame.h - 1920.0f / 1080.0f) < 0.02f,
+           "the preview frame has the preview resolution's aspect");
+    const auto placement = engine.scene_ui_placement();
+    expect(placement && std::abs(static_cast<float>(placement->rect.w) - frame.w * in.scale) < 2.0f && !placement->input,
+           "the engine places the asset's canvas in the frame (input off in Design)");
+
+    // Add a window (into the root) and a menu into the window: the menu lands in its body.
+    const ObjectId win = app.ui_add_widget("window");
+    tick(engine, 3);
+    expect(win && app.document().parent_of(win).value_or(0) == app.document().object_root(), "Add Window: a child of the canvas");
+    const ObjectId menu = app.ui_add_widget("menu", win);
+    tick(engine, 3);
+    expect(menu && app.document().parent_of(menu).value_or(0) == win, "Add Menu List into the window");
+    auto* menu_live = app.sync().live(menu);
+    expect(menu_live && menu_live->parent() && menu_live->parent()->name() == "Body", "...and it sits in the Window's Body slot");
+    auto wr = app.ui_live_rect(win);
+    expect(wr && std::abs(wr->size().x - 440.0f) < 1.0f && std::abs(wr->size().y - 340.0f) < 1.0f, "the window is its authored 440 x 340");
+
+    // The canvas draws: the window's panel colour is in the frame, the backdrop elsewhere.
+    tick(engine, 2);
+    const auto shot = engine.capture_image(false);
+    const ui::UiView view = app.ui_view();
+    const glm::vec2 wc = view.to_editor(wr->center() + glm::vec2(0, -40));
+    auto px = [&](glm::vec2 e) {
+        const uint32_t x = static_cast<uint32_t>(e.x * in.scale), y = static_cast<uint32_t>(e.y * in.scale);
+        const size_t i = (static_cast<size_t>(y) * shot.width + x) * shot.channels;
+        return glm::ivec3(shot.pixels[i], shot.pixels[i + 1], shot.pixels[i + 2]);
+    };
+    const glm::ivec3 inside = px(wc), backdrop = px({frame.x + 6, frame.y + 6});
+    expect(glm::length(glm::vec3(inside - backdrop)) > 8.0f, "the window is drawn inside the frame (got " +
+           std::to_string(inside.x) + "," + std::to_string(inside.y) + "," + std::to_string(inside.z) + " vs backdrop " +
+           std::to_string(backdrop.x) + "," + std::to_string(backdrop.y) + "," + std::to_string(backdrop.z) + ")");
+    dump(engine, "30_ui_designer");
+
+    // Picking: the window's title bar picks the window (the menu covers its body).
+    // (Left of centre: the middle of the top edge is the resize handle.)
+    const glm::vec2 title_px = view.to_editor({wr->center().x - 120.0f, wr->max.y - 10.0f});
+    const auto hits = app.ui_pick(title_px);
+    expect(!hits.empty() && hits.front() == win, "a click on the title bar picks the window");
+
+    // Real input: click selects; drag moves by the drag (one undo step).
+    in.click(title_px);
+    expect(app.document().primary() == win, "a real click on the window selects it");
+    const glm::vec2 before = ui::parse_rect_block(*[&] {
+        const Node* o = app.document().find(win);
+        for (const auto& c : o->at("components").as_seq()) if (component_type(c) == "RectTransform") return &c;
+        return static_cast<const Node*>(nullptr);
+    }()).anchored_position();
+    in.move(title_px);
+    in.drag(title_px + glm::vec2(60.0f, 0.0f), MouseButton::Left, 6);
+    tick(engine, 2);
+    auto rect_of = [&](ObjectId id) {
+        const Node* o = app.document().find(id);
+        for (const auto& c : o->at("components").as_seq()) if (component_type(c) == "RectTransform") return ui::parse_rect_block(c);
+        return coopa::ui::RectTransform{};
+    };
+    const glm::vec2 after = rect_of(win).anchored_position();
+    const float expect_dx = 60.0f / view.scale;
+    expect(std::abs((after.x - before.x) - expect_dx) < 2.0f && std::abs(after.y - before.y) < 1.5f,
+           "dragging the window moves it by the drag (dx " + std::to_string(after.x - before.x) + ", want " + std::to_string(expect_dx) + ")");
+    wr = app.ui_live_rect(win);
+    expect(wr && std::abs(wr->center().x - 960.0f - after.x) < 2.0f, "...and the live rect follows without a rebuild");
+    app.undo();
+    tick(engine, 2);
+    expect(glm::distance(rect_of(win).anchored_position(), before) < 1e-3f, "one Ctrl+Z undoes the whole drag");
+
+    // Interact: the UI runs; clicking a menu button echoes its named click.
+    app.set_ui_interact(true);
+    tick(engine, 2);
+    expect(app.ui_interacting() && engine.scene().is_simulating() && engine.scene_ui_placement()->input,
+           "Interact runs the canvas and gives it input");
+    coopa::scene::SceneObject* play_btn = app.sync().live(menu) ? app.sync().live(menu)->find_descendant("Play") : nullptr;
+    auto* play_rt = play_btn ? play_btn->get_component<coopa::ui::RectTransform>() : nullptr;
+    expect(play_rt != nullptr, "the menu built a button named Play");
+    if (play_rt) {
+        in.click(app.ui_view().to_editor(play_rt->rect().center()));
+        tick(engine, 2);
+        bool echoed = false;
+        for (const auto& [lvl, line] : app.log()) echoed |= line.find("[UI] Play  click") != std::string::npos;
+        expect(echoed, "clicking Play in Interact echoes its named click to the Console");
+    }
+    app.set_ui_interact(false);
+    tick(engine, 3);
+    expect(!engine.scene().is_simulating(), "back in Design the canvas stops");
+
+    // Save: an object asset with the designer's preview settings riding along.
+    expect(app.save_scene(), "the UI saves");
+    const Node saved = coopa::yaml::load_document(project.assets() / "ui" / "test_hud.yaml");
+    expect(saved.contains("object") && saved.contains("ui_editor") && saved.at("object").contains("children"),
+           "saved as `object:` plus a `ui_editor:` block");
+
+    // In a scene, the HUD draws inside the viewer -- not over the whole editor.
+    app.open_asset(AssetType::Scene, "scenes/main/scene.yaml");
+    tick(engine, 4);
+    const ObjectId inst = app.place_ui_asset("ui/test_hud.yaml");
+    tick(engine, 4);
+    expect(inst && get_string(*app.document().find(inst), "prefab") == "ui/test_hud", "the UI is placed as `prefab: ui/test_hud`");
+    const auto sp = engine.scene_ui_placement();
+    const auto dr = engine.display_rect();
+    expect(sp && sp->rect.x == dr.x && sp->rect.w == dr.w && sp->rect.h == dr.h && !sp->input,
+           "in the scene view the HUD is placed on the rendered image, not the whole window");
+    auto* hud_live = engine.scene().find_object("Window");
+    expect(hud_live != nullptr, "the placed HUD's window is in the live scene");
+    dump(engine, "31_ui_in_scene");
+}
+
+/** @brief The shipped templates load, open, and expose the names their docs promise. */
+/**
+ * @brief Game UI themes are assets: the Themes tab lists the shipped ones (default, Blender,
+ *        Unity), opening one previews it on a UI with its unsaved edits -- in place of the UI's
+ *        own theme -- and only Save writes the file.
+ */
+void test_editor_game_ui_themes() {
+    setenv("FIXED_DT", "0", 1);
+    setenv("NO_INPUT", "1", 1);
+    setenv("HOME", tmp_root().c_str(), 1);
+    const fs::path root = fresh_dir("ui_themes_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, 4);
+    expect(app.new_ui_asset("menu", "settings"), "a UI asset to preview on");
+    tick(engine, 4);
+    const auto themes = app.list_assets(AssetType::Theme);
+    for (const char* t : {"ui/themes/default.yaml", "ui/themes/blender.yaml", "ui/themes/unity.yaml"}) {
+        expect(std::find(themes.begin(), themes.end(), t) != themes.end(), std::string("the Themes tab lists ") + t);
+    }
+    const auto uis = app.list_assets(AssetType::UI);
+    expect(std::none_of(uis.begin(), uis.end(), [](const std::string& r) { return r.rfind("ui/themes/", 0) == 0; }),
+           "themes are not UI assets");
+
+    auto live_theme = [&]() -> const coopa::ui::UITheme* {
+        auto* live = app.sync().live(app.document().object_root());
+        auto* scope = live ? live->get_component<coopa::ui::ThemeScope>() : nullptr;
+        return scope ? &scope->theme : nullptr;
+    };
+    const fs::path blender_file = project.assets() / "ui" / "themes" / "blender.yaml";
+    const Node on_disk = coopa::yaml::load_document(blender_file);
+
+    app.open_asset(AssetType::Theme, "ui/themes/blender.yaml");
+    tick(engine, 4);
+    expect(app.theme_document().open() && app.active_asset_type() == AssetType::UI, "a theme opens beside the UI it previews on");
+    const auto* t = live_theme();
+    const Node& bp = on_disk.at("panel").at("panel");
+    expect(t && std::abs(t->panel.panel.r - get_float(bp, "r", -1.0f)) < 1e-4f,
+           "the UI previews with the opened theme in place of its own (default.yaml)");
+    dump(engine, "39_theme_blender");
+
+    app.edit_theme("Panel", [](Node& n) {
+        Node c = make_color({1.0f, 0.0f, 0.0f});
+        c["a"] = make_float(1.0);
+        n["panel"]["panel"] = c;
+    });
+    tick(engine, 4);
+    t = live_theme();
+    expect(t && t->panel.panel.r > 0.99f && t->panel.panel.g < 0.01f, "an unsaved edit shows in the preview");
+    expect(coopa::yaml::load_document(blender_file) == on_disk && app.theme_document().dirty(), "...without touching the file");
+    dump(engine, "40_theme_preview");
+
+    app.theme_document().do_undo();
+    expect(app.theme_document().node == on_disk, "theme edits undo");
+    app.theme_document().do_redo();
+    expect(app.save_theme() && !app.theme_document().dirty(), "Save Theme writes it");
+    expect(get_float(coopa::yaml::load_document(blender_file).at("panel").at("panel"), "g", -1.0f) < 0.01f, "the file has the edit");
+
+    // Another theme replaces it in the preview.
+    app.open_asset(AssetType::Theme, "ui/themes/unity.yaml");
+    tick(engine, 4);
+    const Node unity_doc = coopa::yaml::load_document(project.assets() / "ui" / "themes" / "unity.yaml");
+    const Node& up = unity_doc.at("panel").at("panel");
+    t = live_theme();
+    expect(app.theme_document().ref == "ui/themes/unity" && t && std::abs(t->panel.panel.r - get_float(up, "r", -1.0f)) < 1e-4f,
+           "opening another theme previews that one (" + app.theme_document().ref + ", panel.r " +
+           std::to_string(t ? t->panel.panel.r : -1.0f) + " vs " + std::to_string(get_float(up, "r", -1.0f)) + ")");
+    dump(engine, "41_theme_unity");
+}
+
+void test_editor_ui_templates() {
+    setenv("FIXED_DT", "0", 1);
+    setenv("NO_INPUT", "1", 1);
+    setenv("HOME", tmp_root().c_str(), 1);
+    const fs::path root = fresh_dir("ui_templates_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, 4);
+    const auto templates = EditorApp::ui_templates();
+    expect(templates.size() >= 6, "UI templates ship with the editor (" + std::to_string(templates.size()) + ")");
+    const std::map<std::string, std::vector<std::string>> names = {
+        {"hud", {"Health", "Stamina", "Hotbar", "MessageLog"}},
+        {"main_menu", {"NewGame", "Continue", "Settings", "Quit"}},
+        {"pause_menu", {"Resume", "Settings", "QuitToMenu"}},
+        {"dialog_box", {"Speaker", "Line", "Choices"}},
+        {"inventory", {"Bag", "Equipment", "Gold"}},
+        {"settings", {"MasterVolume", "Fullscreen", "Quality", "Apply"}},
+    };
+    for (const auto& t : templates) {
+        expect(app.new_ui_asset(t, t), "template " + t + ": creates a UI asset");
+        tick(engine, 4);
+        expect(app.active_asset_type() == AssetType::UI && app.sync().scene(), "template " + t + ": opens in the designer");
+        coopa::ui::UiHandle ui(app.sync().live(app.document().object_root()));
+        auto it = names.find(t);
+        if (it != names.end()) {
+            for (const auto& n : it->second) expect(ui.has(n), "template " + t + ": has `" + n + "`");
+        }
+        dump(engine, "32_template_" + t);
+    }
+    expect(coopa::yaml::document_exists(project.assets() / "ui" / "themes" / "default.yaml"), "templates install their theme");
+}
+
+
+/**
+ * @brief Theme shapes reach the pixels: the Settings template under each shipped theme draws a
+ *        window whose corner is rounded away (the backdrop shows where a square corner would be).
+ */
+void test_editor_ui_theme_shapes() {
+    setenv("FIXED_DT", "0", 1);
+    setenv("NO_INPUT", "1", 1);
+    setenv("HOME", tmp_root().c_str(), 1);
+    const fs::path root = fresh_dir("ui_shapes_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, 4);
+    expect(app.new_ui_asset("shapes", "settings"), "the Settings template opens");
+    tick(engine, 4);
+    const float scale = std::max(1.0f, engine.display_scale());
+    for (const char* theme : {"default", "blender", "unity"}) {
+        const ObjectId rootid = app.document().object_root();
+        const int ti = app.document().find_component(rootid, "Theme");
+        Node comp = Node::mapping();
+        comp["type"] = Node(std::string("Theme"));
+        comp["source"] = Node(std::string("ui/themes/") + theme + ".yaml");
+        app.document().set_component(rootid, ti, comp, "Theme");
+        app.sync().rebuild(engine, app.document());
+        tick(engine, 4);
+        ObjectId win = 0;
+        for (ObjectId id : app.document().all_ids()) if (get_string(*app.document().find(id), "name") == "Settings") win = id;
+        auto r = app.ui_live_rect(win);
+        expect(r.has_value(), std::string("theme ") + theme + ": the window has a live rect");
+        if (!r) continue;
+        const auto shot = engine.capture_image(false);
+        const ui::UiView v = app.ui_view();
+        auto px = [&](glm::vec2 canvas) {
+            const glm::vec2 e = v.to_editor(canvas) * scale;
+            const size_t i = (static_cast<size_t>(e.y) * shot.width + static_cast<size_t>(e.x)) * shot.channels;
+            return glm::vec3(shot.pixels[i], shot.pixels[i + 1], shot.pixels[i + 2]);
+        };
+        const glm::vec3 corner = px({r->min.x + 0.6f, r->min.y + 0.6f});            // bottom-left corner
+        const glm::vec3 panel = px({r->min.x + 40.0f, r->min.y + 40.0f});           // inside the window
+        // Just outside the window, under the same drop shadow the rounded-off corner shows.
+        const glm::vec3 outside = px({r->min.x - 1.5f, r->min.y - 1.5f});
+        // Unity's 4 px radius is ~2 framebuffer pixels in this 1x window: inside the edge's
+        // anti-aliasing, so its pixels prove nothing either way. Check its shape data instead.
+        if (std::string(theme) == "unity") {
+            auto* frame = app.sync().live(win) ? app.sync().live(win)->children().front().get() : nullptr;
+            auto* img = frame ? frame->get_component<coopa::ui::Image>() : nullptr;
+            expect(img && std::abs(img->corner_radius - 4.0f) < 1e-3f && img->border_width > 0.0f,
+                   "theme unity: the window takes the theme's 4 px corner radius and outline");
+            dump(engine, std::string("33_theme_shape_") + theme);
+            continue;
+        }
+        expect(glm::distance(corner, panel) > 6.0f && glm::distance(corner, outside) < glm::distance(corner, panel),
+               std::string("theme ") + theme + ": the window's corner is rounded (corner " + std::to_string(int(corner.x)) +
+               " panel " + std::to_string(int(panel.x)) + " outside " + std::to_string(int(outside.x)) + ")");
+        dump(engine, std::string("33_theme_shape_") + theme);
+    }
+}
+
+
+/**
+ * @brief Editor text sits on the device-pixel grid: every glyph quad in the Add menu (and the
+ *        rest of the UI) starts on a whole framebuffer pixel. Sub-pixel glyph origins made
+ *        bilinear sampling smear each letter differently -- "Empty" looked out of line.
+ */
+void test_editor_text_pixel_aligned() {
+    using coopa::input::Key;
+    using coopa::input::Mods;
+    setenv("FIXED_DT", "0", 1);
+    unsetenv("NO_INPUT");
+    setenv("HOME", tmp_root().c_str(), 1);
+    const fs::path root = fresh_dir("text_align_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, 4);
+    InputDriver in{engine, std::max(1.0f, engine.display_scale())};
+    in.move(app.viewport_box().center() + glm::vec2(7.3f, 3.6f));   // an off-grid point: popups open at the mouse
+    in.key(Key::A, Mods::Shift);
+    tick(engine, 2);
+    expect(app.ui().any_popup_open(), "Shift A opens the Add menu");
+    dump(engine, "34_add_menu_text");
+    auto* canvas = app.editor_canvas();
+    expect(canvas != nullptr, "the editor canvas exists");
+    if (!canvas) return;
+    const coopa::ui::DrawList& dl = canvas->draw_list();
+    const auto& atlases = coopa::ui::TextAtlasRegistry::instance().views();
+    const float scale = dl.text_scale();
+    // Each glyph is one add_quad(): 4 vertices min.x/min.y, max.x/min.y, max, min.x/max.y. Its
+    // ORIGIN -- left edge and top edge (canvas max.y) -- must be on a device pixel; the far
+    // edges may be fractional at 1x, where the atlas is 2x oversampled by design.
+    size_t glyph_vertices = 0, off_grid = 0;
+    for (const auto& b : dl.batches()) {
+        if (std::find(atlases.begin(), atlases.end(), b.texture_view) == atlases.end()) continue;
+        for (uint32_t k = 0; k + 5 < b.index_count; k += 6) {
+            const uint32_t base = dl.indices()[b.first_index + k];
+            const auto& v0 = dl.vertices()[base];
+            const auto& v2 = dl.vertices()[base + 2];
+            glyph_vertices += 4;
+            // Vertically every glyph must be whole pixels -- top edge AND height -- or its row of
+            // texels lands between screen rows and blurs differently from its neighbours; the same
+            // goes for the left edge (a stem between two pixel columns draws as two grey ones).
+            const float fx = v0.x * scale, fy = v2.y * scale, fh = (v2.y - v0.y) * scale;
+            const bool x_off = std::abs(fx - std::round(fx)) > 0.02f;
+            if (x_off || std::abs(fy - std::round(fy)) > 0.02f || std::abs(fh - std::round(fh)) > 0.02f) {
+                if (off_grid < 6) std::cerr << "    off grid: " << fx << ", " << fy << "  (scale " << scale << ")\n";
+                ++off_grid;
+            }
+        }
+    }
+    expect(glyph_vertices > 200, "text was drawn (" + std::to_string(glyph_vertices) + " glyph vertices)");
+    expect(off_grid == 0, "every glyph starts on a device pixel (" + std::to_string(off_grid) + " off the grid)");
 }
 
 /** @brief Submeshes end to end: a two-slot mesh draws each slot with its own material. */
@@ -4203,6 +4823,700 @@ void test_editor_mesh_save_refreshes_colliders() {
 }
 
 // =====================================================================================
+// Group "docs" -- screenshots for the user manual (docs/editor/). NOT registered with ctest:
+//
+//   DOCS_SHOT_DIR=/path/to/out ./build/toyengine_editor_tests --group docs [docs_<shot>]
+//
+// Each test stages one clean, user-representative editor state against a scratch copy of
+// this repo's assets/ (named my_game, like the manual's examples) and saves <shot>.png at
+// display resolution. Without DOCS_SHOT_DIR every test returns at once. One test per shot,
+// so a flaky run can be retried by name.
+// =====================================================================================
+
+const char* docs_shot_dir() {
+    const char* d = std::getenv("DOCS_SHOT_DIR");
+    return d && *d ? d : nullptr;
+}
+
+/** @brief The editor as a user sees it: 1600 x 900, full resolution, no pixel-art post effects. */
+toy::core::AppConfig docs_config(const Project& p) {
+    toy::core::AppConfig cfg = toy::core::AppConfig::load(p.config_path().string());
+    cfg.window.width = 1600;
+    cfg.window.height = 900;
+    cfg.window.visible = false;
+    cfg.window.vsync = false;
+    cfg.render.screen_ui_enabled = true;
+    cfg.render.outline_enabled = false;
+    cfg.render.palette_enabled = false;
+    cfg.render.dither_enabled = false;
+    cfg.output.save_on_exit = false;
+    apply_editor_render_overrides(cfg);
+    return cfg;
+}
+
+/** @brief A scratch project: a copy of this repo's assets/, plus the starter scenes/main. */
+Project docs_project(const std::string& shot) {
+    const fs::path root = fresh_dir("docs_" + shot) / "my_game";
+    fs::create_directories(root);
+    fs::copy(fs::path(ROOT_DIR) / "assets", root / "assets", fs::copy_options::recursive);
+    return Project::create(root);   // adds only what is missing: the starter scenes/main
+}
+
+/** @brief One editor session staged for one screenshot. */
+struct DocsEditor {
+    std::string shot;
+    Project project;
+    std::unique_ptr<toy::core::Engine> engine;
+    std::unique_ptr<EditorApp> app;
+    std::unique_ptr<InputDriver> in;
+    std::chrono::steady_clock::time_point cleared;
+
+    DocsEditor(const std::string& name, const std::string& scene_rel, const std::string& theme = {})
+        : shot(name), project(docs_project(name)) {
+        setenv("FIXED_DT", "0.016666", 1);
+        unsetenv("NO_INPUT");
+        setenv("HOME", tmp_root().c_str(), 1);   // preferences stay in the scratch dir
+        fs::remove(Project::prefs_path());       // default theme and preferences
+        if (!theme.empty()) {
+            Node prefs = Node::mapping();
+            prefs["theme"] = Node(theme);
+            Project::save_prefs(prefs);
+        }
+        engine = std::make_unique<toy::core::Engine>(docs_config(project), shell_options(project));
+        app = std::make_unique<EditorApp>(*engine, project, project.assets() / scene_rel);
+        in = std::make_unique<InputDriver>(InputDriver{*engine, std::max(1.0f, engine->display_scale())});
+        tick(*engine, toy::core::Engine::kFillDebounceFrames + 6);
+        // A window the OS shrank to fit a smaller screen lays the editor out differently.
+        const glm::vec2 canvas = app->ui().canvas_size();
+        if (std::abs(canvas.x - 1600.0f) > 0.5f || std::abs(canvas.y - 900.0f) > 0.5f) {
+            throw std::runtime_error("the editor window is " + std::to_string(int(canvas.x)) + " x " +
+                                     std::to_string(int(canvas.y)) + ", not 1600 x 900 (retry)");
+        }
+        // The starter scene is written without object ids; loading stamps them (unsaved).
+        // A user's project has been saved: so is this one.
+        if (app->document().dirty()) app->save_scene();
+        tick(*engine, 2);
+        clear_console();
+    }
+    ~DocsEditor() {
+        app.reset();
+        engine.reset();
+        fs::remove(Project::prefs_path());
+    }
+    EditorApp& a() { return *app; }
+    toy::core::Engine& e() { return *engine; }
+    imm::Box vb() { return app->viewport_box(); }
+
+    /** @brief Clicks the Console's Clear (trash) button: the opening messages name scratch paths. */
+    void clear_console() {
+        const imm::Box v = vb();
+        in->click({v.right() - 22.0f, v.bottom() + 14.0f});
+        rest();
+        cleared = std::chrono::steady_clock::now();
+    }
+    /** @brief Parks the mouse where it hovers nothing (the viewport's lower right). */
+    void rest() {
+        const imm::Box v = vb();
+        in->move({v.right() - 160.0f, v.bottom() - 60.0f}, 2);
+    }
+    /** @brief Centre of a top-bar menu header (0 File, 1 Edit, 2 Render, 3 Window, 4 Help). */
+    glm::vec2 topbar_menu(int index) {
+        static const char* menus[] = {"File", "Edit", "Render", "Window", "Help"};
+        auto& ctx = app->ui();
+        float x = 28.0f + 4.0f;
+        for (int i = 0; i < index; ++i) x += ctx.text_width(menus[i]) + ctx.style.padding * 3;
+        return {x + (ctx.text_width(menus[index]) + ctx.style.padding * 3) * 0.5f, 14.0f};
+    }
+    /** @brief Centre of an item in a drop-down opened at `top_left`: `rows` items and `seps` separators above it. */
+    glm::vec2 menu_row(glm::vec2 top_left, int rows, int seps) {
+        auto& st = app->ui().style;
+        const float y = top_left.y + 4.0f + rows * (st.row_height + st.spacing) + seps * (5.0f + st.spacing) + st.row_height * 0.5f;
+        return {top_left.x + 70.0f, y};
+    }
+    /** @brief Saves <shot>.png (or <shot><suffix>.png) once the status bar's opening message has timed out. */
+    void capture(const std::string& name = {}) {
+        // The status bar repeats the latest Console message for 8 s (wall clock). With the
+        // Console cleared, the latest is still the opening "Opened project <scratch path>".
+        if (app->log().empty()) {
+            const auto until = cleared + std::chrono::milliseconds(8300);
+            while (std::chrono::steady_clock::now() < until) tick(*engine, 1);
+        }
+        tick(*engine, 3);
+        for (const auto& [lvl, line] : app->log()) std::cout << "    console: " << line << "\n";
+        const fs::path out = fs::path(docs_shot_dir()) / ((name.empty() ? shot : name) + ".png");
+        fs::create_directories(out.parent_path());
+        engine->save_screenshot(out.string(), false);
+        std::cout << "    saved " << out.string() << "\n";
+    }
+};
+
+/** @brief Numpad 0: the view through the scene's own camera (how the scene author framed it). */
+void docs_scene_camera(DocsEditor& d) {
+    d.in->move(d.vb().center());
+    d.in->key(coopa::input::Key::Kp0);
+    d.rest();
+}
+
+/** @brief A closer orbit view of the starter scene's cube. */
+void docs_main_view(DocsEditor& d, float distance = 7.0f) {
+    auto& cam = d.a().camera();
+    cam.focus = glm::vec3(0.0f, 0.0f, 0.6f);
+    cam.yaw_deg = 35.0f;
+    cam.pitch_deg = 28.0f;
+    cam.distance = distance;
+    cam.apply();
+    tick(d.e(), 2);
+}
+
+/** @brief Selects the move tool in the viewport toolbar (its gizmo then shows on the selection). */
+void docs_pick_move_tool(DocsEditor& d) {
+    const imm::Box v = d.vb();
+    d.in->click({v.x + 25.0f, v.y + 100.0f});
+}
+
+// 1. The water_test scene in Rendered shading, an object selected with its gizmo, Object tab.
+void test_docs_overview() {
+    if (!docs_shot_dir()) return;
+    DocsEditor d("overview", "scenes/water_test/scene.yaml");
+    d.a().set_shading(Shading::Full);
+    docs_scene_camera(d);
+    const ObjectId boat = object_named(d.a(), "boat");
+    expect(boat != 0, "water_test has the boat");
+    docs_pick_move_tool(d);
+    d.a().document().select(boat);
+    d.a().set_prop_tab(PropTab::Object);
+    d.rest();
+    tick(d.e(), 60);
+    d.capture();
+}
+
+// 2. File menu open.
+void test_docs_menu_file() {
+    if (!docs_shot_dir()) return;
+    DocsEditor d("menu_file", "scenes/water_test/scene.yaml");
+    d.a().set_shading(Shading::Full);
+    docs_scene_camera(d);
+    tick(d.e(), 40);
+    d.in->click(d.topbar_menu(0));
+    d.in->move(d.menu_row({32.0f, 27.0f}, 3, 1), 2);   // hover Save
+    expect(d.a().ui().any_popup_open(), "the File menu is open");
+    d.capture();
+}
+
+// 3. An object with several components selected; its components in Properties.
+void test_docs_hierarchy_inspector() {
+    if (!docs_shot_dir()) return;
+    DocsEditor d("hierarchy_inspector", "scenes/water_test/scene.yaml");
+    d.a().set_shading(Shading::Full);
+    docs_scene_camera(d);
+    // Click lake_water's Hierarchy row, then its arrow to list its components.
+    const float row_y = 119.0f, right_x = d.vb().right() + 1.0f;
+    d.in->click({right_x + 90.0f, row_y});
+    d.in->click({right_x + 31.0f, row_y});
+    expect(d.a().document().primary() == object_named(d.a(), "lake_water"), "lake_water is selected");
+    d.a().set_prop_tab(PropTab::Components);
+    d.rest();
+    tick(d.e(), 60);
+    d.capture();
+}
+
+// 4. The Add Component menu open.
+void test_docs_add_component() {
+    if (!docs_shot_dir()) return;
+    DocsEditor d("add_component", "scenes/main/scene.yaml");
+    docs_main_view(d);
+    const ObjectId cube = object_named(d.a(), "Cube");
+    d.a().document().select(cube);
+    d.a().set_prop_tab(PropTab::Components);
+    tick(d.e(), 4);
+    // Find the button on screen: the lowest block of the theme's button colour in the
+    // Properties column (Add Component follows the last component panel).
+    const glm::vec4 bc = d.a().ui().style.button;
+    const auto img = d.e().capture_image(false);
+    const float sc = d.in->scale;
+    const int x = static_cast<int>((d.vb().right() + 46.0f) * sc);
+    int run = 0, best_mid = -1;
+    for (int y = 0; y < static_cast<int>(img.height); ++y) {
+        const uint8_t* q = &img.pixels[(static_cast<size_t>(y) * img.width + x) * img.channels];
+        bool match = true;
+        for (int c = 0; c < 3; ++c) match &= std::abs(int(q[c]) - int(std::lround(bc[c] * 255.0f))) <= 4;
+        run = match ? run + 1 : 0;
+        if (run >= static_cast<int>(14 * sc)) best_mid = y - static_cast<int>(7 * sc);
+    }
+    expect(best_mid >= 0, "the Add Component button is on screen");
+    const glm::vec2 button{d.vb().right() + 46.0f, best_mid / sc};
+    d.in->click(button);
+    expect(d.a().ui().any_popup_open(), "Add Component opens its menu");
+    // Type into its search box: "light" narrows the list to the lights. The full list is
+    // taller than the window, so the menu sits against the top edge until it is filtered.
+    d.in->click({button.x - 46.0f + 1.0f + 100.0f, 14.0f});
+    for (char ch : std::string("light")) {
+        d.e().queue_input([ch](coopa::input::Input& i) { i.push_char(static_cast<uint32_t>(ch)); });
+        tick(d.e(), 1);
+    }
+    d.in->key(coopa::input::Key::Enter);   // the search field applies on Enter
+    tick(d.e(), 3);
+    d.in->move(button + glm::vec2(30.0f, 123.0f), 3);   // hover PointLight
+    tick(d.e(), 20);
+    d.capture();
+}
+
+// 5. Solid shading with the Viewport Shading popover open.
+void test_docs_viewport_solid() {
+    if (!docs_shot_dir()) return;
+    DocsEditor d("viewport_solid", "scenes/main/scene.yaml");
+    docs_main_view(d);
+    d.a().set_shading(Shading::Solid);
+    tick(d.e(), 10);
+    const imm::Box v = d.vb();
+    d.in->click({v.right() - 13.0f, v.y - 13.0f});
+    expect(d.a().ui().any_popup_open(), "the Viewport Shading popover is open");
+    d.in->move({v.right() - 120.0f, v.y + 160.0f}, 2);
+    d.capture();
+}
+
+// 6. Mid G-move constrained to X, with the axis line.
+void test_docs_gizmo_move() {
+    if (!docs_shot_dir()) return;
+    using coopa::input::Key;
+    DocsEditor d("gizmo_move", "scenes/main/scene.yaml");
+    docs_main_view(d);
+    const ObjectId cube = object_named(d.a(), "Cube");
+    docs_pick_move_tool(d);
+    d.a().document().select(cube);
+    tick(d.e(), 4);
+    const auto c = screen_of(d.e(), d.a(), cube, glm::vec3(0.0f), d.in->scale);
+    const glm::vec2 start = c ? *c : d.vb().center();
+    d.in->move(start + glm::vec2(40.0f, 0.0f));
+    d.in->key(Key::G);
+    d.in->key(Key::X);
+    for (int i = 1; i <= 8; ++i) d.in->move(start + glm::vec2(40.0f + 12.0f * i, -4.0f * i));
+    expect(d.a().modal_active(), "the move is in progress");
+    tick(d.e(), 4);
+    d.capture();
+}
+
+void docs_stage_edit_mode(DocsEditor& d);
+
+// 7. X-Ray in Edit Mode.
+void test_docs_xray_edit() {
+    if (!docs_shot_dir()) return;
+    using coopa::input::Key;
+    using coopa::input::Mods;
+    DocsEditor d("xray_edit", "scenes/main/scene.yaml");
+    docs_stage_edit_mode(d);
+    d.in->move(d.vb().center());
+    d.in->key(Key::Num1);
+    d.in->key(Key::A);
+    d.in->key(Key::Z, Mods::Alt);
+    expect(d.a().edit_mode_active() && d.e().render_config().editor_xray_alpha < 0.99f, "X-Ray is on in Edit Mode");
+    d.rest();
+    tick(d.e(), 10);
+    d.capture();
+}
+
+/** @brief Edit Mode on the starter cube, face select, a loop cut and an extruded top face. */
+void docs_stage_edit_mode(DocsEditor& d) {
+    using coopa::input::Key;
+    using coopa::input::Mods;
+    using coopa::input::MouseButton;
+    const ObjectId cube = object_named(d.a(), "Cube");
+    d.a().document().select(cube);
+    d.in->move(d.vb().center());
+    d.in->key(Key::Tab);
+    tick(d.e(), toy::core::Engine::kFillDebounceFrames + 2);
+    expect(d.a().edit_mode_active(), "Tab enters Edit Mode");
+    // Ctrl+R on a vertical edge: one loop around the middle.
+    const glm::vec2 corner = visible_corner(d.a(), cube);
+    if (auto edge = screen_of(d.e(), d.a(), cube, glm::vec3(corner, 0.1f), d.in->scale)) {
+        d.in->move(*edge);
+        d.in->key(Key::R, Mods::Control);
+        d.in->move(*edge + glm::vec2(1, 0));
+        d.in->click(*edge);
+        d.in->click(*edge, MouseButton::Right);
+    }
+    // Face select, the top face, E 0.6 Enter.
+    d.in->key(Key::Num3);
+    auto& md = d.a().mesh_document();
+    md.selection.faces.clear();
+    for (uint32_t f = 0; f < md.mesh.faces.size(); ++f) {
+        if (md.mesh.face_center(f).z > 0.49f) md.selection.faces.insert(f);
+    }
+    d.in->move(d.vb().center());
+    d.in->key(Key::E);
+    d.in->key(Key::Period);
+    d.in->key(Key::Num6);
+    d.in->key(Key::Enter);
+    // Step back to see the whole (now taller) mesh.
+    auto& cam = d.a().camera();
+    cam.focus = glm::vec3(0.0f, 0.0f, 0.75f);
+    cam.distance = 4.6f;
+    cam.apply();
+    tick(d.e(), 4);
+}
+
+// 8. Edit Mode, face select, faces selected after an extrude.
+void test_docs_edit_mode() {
+    if (!docs_shot_dir()) return;
+    DocsEditor d("edit_mode", "scenes/main/scene.yaml");
+    docs_stage_edit_mode(d);
+    d.rest();
+    tick(d.e(), 6);
+    d.capture();
+}
+
+// 9. The Adjust Last Operation panel after a loop cut.
+void test_docs_adjust_last_operation() {
+    if (!docs_shot_dir()) return;
+    using coopa::input::Key;
+    using coopa::input::Mods;
+    using coopa::input::MouseButton;
+    DocsEditor d("adjust_last_operation", "scenes/main/scene.yaml");
+    const ObjectId cube = object_named(d.a(), "Cube");
+    d.a().document().select(cube);
+    d.in->move(d.vb().center());
+    d.in->key(Key::Tab);
+    tick(d.e(), toy::core::Engine::kFillDebounceFrames + 2);
+    d.in->key(Key::Num2);
+    const glm::vec2 corner = visible_corner(d.a(), cube);
+    if (auto edge = screen_of(d.e(), d.a(), cube, glm::vec3(corner, 0.1f), d.in->scale)) {
+        d.in->move(*edge);
+        d.in->key(Key::R, Mods::Control);
+        d.in->move(*edge + glm::vec2(1, 0));
+        d.in->click(*edge);
+        d.in->click(*edge, MouseButton::Right);
+    }
+    expect(d.a().mesh_document().mesh.faces.size() > 6, "the loop cut ran");
+    d.rest();
+    tick(d.e(), 6);
+    d.capture();
+}
+
+/** @brief A sphere added to the starter scene, selected, in `mode`, smoothed for the brushes. */
+ObjectId docs_brush_sphere(DocsEditor& d, InteractionMode mode) {
+    const ObjectId cube = object_named(d.a(), "Cube");
+    d.a().document().select(cube);
+    d.a().delete_selected();
+    tick(d.e(), 2);
+    const ObjectId sphere = d.a().create_primitive("Sphere");
+    tick(d.e(), 3);
+    d.a().document().set_transform(sphere, {0, 0, 1}, glm::vec3(0), glm::vec3(1), "Move");
+    d.a().sync().apply(d.e(), d.a().document(), {ChangeScope::Transform, sphere});
+    d.a().document().select(sphere);
+    d.a().frame_selected();
+    tick(d.e(), 4);
+    d.a().set_interaction_mode(mode);
+    tick(d.e(), toy::core::Engine::kFillDebounceFrames + 2);
+    d.a().subdivide_smooth(1);
+    tick(d.e(), 3);
+    return sphere;
+}
+
+/** @brief A brush stroke across the sphere (local points on its surface, in screen space). */
+void docs_stroke(DocsEditor& d, ObjectId id, glm::vec3 a, glm::vec3 b) {
+    auto p0 = screen_of(d.e(), d.a(), id, a, d.in->scale);
+    auto p1 = screen_of(d.e(), d.a(), id, b, d.in->scale);
+    if (!p0 || !p1) return;
+    d.in->move(*p0);
+    d.in->drag(*p1, coopa::input::MouseButton::Left, 14);
+    tick(d.e(), 2);
+}
+
+/** @brief The sphere's camera-facing side: local points for strokes. */
+glm::vec3 docs_front(DocsEditor& d, float u, float v) {
+    const glm::mat4 view = coopa::gfx::engine::components::CameraComponent::main()->get_view_matrix();
+    const glm::mat3 inv = glm::transpose(glm::mat3(view));
+    const glm::vec3 right = inv[0], up = inv[1], back = inv[2];
+    return glm::normalize(back + right * u + up * v) * 0.98f;
+}
+
+// 10. Sculpt Mode after a few strokes, the brush circle under the mouse.
+void test_docs_sculpt() {
+    if (!docs_shot_dir()) return;
+    DocsEditor d("sculpt", "scenes/main/scene.yaml");
+    const ObjectId s = docs_brush_sphere(d, InteractionMode::Sculpt);
+    expect(d.a().interaction_mode() == InteractionMode::Sculpt, "Sculpt Mode");
+    d.a().sculpt_settings().radius_px = 35.0f;
+    d.a().sculpt_settings().strength = 0.45f;
+    docs_stroke(d, s, docs_front(d, -0.6f, 0.3f), docs_front(d, 0.5f, 0.35f));
+    docs_stroke(d, s, docs_front(d, -0.5f, -0.2f), docs_front(d, 0.4f, -0.3f));
+    if (auto p = screen_of(d.e(), d.a(), s, docs_front(d, 0.15f, 0.05f), d.in->scale)) d.in->move(*p, 3);
+    tick(d.e(), 4);
+    d.capture();
+}
+
+// 11. Vertex Paint with painted colours.
+void test_docs_vertex_paint() {
+    if (!docs_shot_dir()) return;
+    DocsEditor d("vertex_paint", "scenes/main/scene.yaml");
+    const ObjectId s = docs_brush_sphere(d, InteractionMode::VertexPaint);
+    expect(d.a().interaction_mode() == InteractionMode::VertexPaint, "Vertex Paint");
+    auto& vs = d.a().vertex_paint_settings();
+    vs.radius_px = 40.0f;
+    vs.color = glm::vec4(0.9f, 0.15f, 0.1f, 1.0f);
+    docs_stroke(d, s, docs_front(d, -0.6f, 0.4f), docs_front(d, 0.6f, 0.4f));
+    vs.color = glm::vec4(0.15f, 0.5f, 0.95f, 1.0f);
+    docs_stroke(d, s, docs_front(d, -0.6f, -0.3f), docs_front(d, 0.6f, -0.3f));
+    vs.color = glm::vec4(1.0f, 0.8f, 0.1f, 1.0f);
+    docs_stroke(d, s, docs_front(d, 0.0f, 0.6f), docs_front(d, 0.0f, -0.6f));
+    if (auto p = screen_of(d.e(), d.a(), s, docs_front(d, 0.3f, 0.05f), d.in->scale)) d.in->move(*p, 3);
+    tick(d.e(), 4);
+    d.capture();
+}
+
+// 12. Weight Paint heatmap with a vertex group.
+void test_docs_weight_paint() {
+    if (!docs_shot_dir()) return;
+    DocsEditor d("weight_paint", "scenes/main/scene.yaml");
+    const ObjectId s = docs_brush_sphere(d, InteractionMode::WeightPaint);
+    expect(d.a().interaction_mode() == InteractionMode::WeightPaint, "Weight Paint");
+    auto& ws = d.a().weight_paint_settings();
+    ws.radius_px = 55.0f;
+    ws.weight = 1.0f;
+    docs_stroke(d, s, docs_front(d, -0.7f, 0.5f), docs_front(d, 0.7f, 0.5f));
+    docs_stroke(d, s, docs_front(d, -0.5f, 0.2f), docs_front(d, 0.5f, 0.2f));
+    ws.weight = 0.5f;
+    docs_stroke(d, s, docs_front(d, -0.6f, -0.2f), docs_front(d, 0.6f, -0.2f));
+    expect(!d.a().mesh_document().mesh.groups.empty(), "a vertex group was painted");
+    if (auto p = screen_of(d.e(), d.a(), s, docs_front(d, 0.35f, -0.45f), d.in->scale)) d.in->move(*p, 3);
+    tick(d.e(), 4);
+    d.capture();
+}
+
+// 13. A material in the material editor, on the shader-ball lookdev.
+void test_docs_material_editor() {
+    if (!docs_shot_dir()) return;
+    DocsEditor d("material_editor", "scenes/main/scene.yaml");
+    d.in->click({18.0f + 25.0f * 3.0f, 44.0f});   // the Materials tab
+    d.a().open_asset(AssetType::Material, "materials/brick.yaml");
+    tick(d.e(), 6);
+    expect(d.a().active_asset_type() == AssetType::Material, "the material opens");
+    tick(d.e(), 60);
+    d.rest();
+    d.capture();
+}
+
+/** @brief Opens the robot arm object asset, the joint `elbow` selected. */
+ObjectId docs_robot_arm(DocsEditor& d) {
+    d.in->click({18.0f + 25.0f, 44.0f});   // the Objects tab
+    d.a().open_asset(AssetType::Object, "objects/robot_arm.yaml");
+    tick(d.e(), 8);
+    expect(d.a().active_asset_type() == AssetType::Object, "the robot arm opens");
+    return object_named(d.a(), "elbow");
+}
+
+// 14. The Timeline dope sheet with keys.
+void test_docs_timeline() {
+    if (!docs_shot_dir()) return;
+    DocsEditor d("timeline", "scenes/main/scene.yaml");
+    const ObjectId elbow = docs_robot_arm(d);
+    d.a().show_timeline();
+    d.a().document().select(elbow);
+    tick(d.e(), 3);
+    d.a().set_animation_time(0.6f);
+    expect(d.a().animation_clip() != nullptr, "the arm's clip is open");
+    d.rest();
+    tick(d.e(), 30);
+    d.capture();
+}
+
+// 15. Record on: the red viewport frame.
+void test_docs_record_autokey() {
+    if (!docs_shot_dir()) return;
+    DocsEditor d("record_autokey", "scenes/main/scene.yaml");
+    const ObjectId elbow = docs_robot_arm(d);
+    d.a().show_timeline();
+    d.a().document().select(elbow);
+    tick(d.e(), 3);
+    d.a().set_animation_time(0.4f);
+    d.a().set_animation_record(true);
+    expect(d.a().animation_record(), "Record is on");
+    d.rest();
+    tick(d.e(), 30);
+    d.capture();
+}
+
+// 16. An object asset open.
+void test_docs_object_asset() {
+    if (!docs_shot_dir()) return;
+    DocsEditor d("object_asset", "scenes/main/scene.yaml");
+    docs_robot_arm(d);
+    d.in->click({d.vb().right() + 15.0f, 71.0f});   // expand the root's Hierarchy row
+    d.a().set_prop_tab(PropTab::Object);
+    d.rest();
+    tick(d.e(), 30);
+    d.capture();
+}
+
+/** @brief Opens ui/<name>.yaml in the UI designer. */
+void docs_open_ui(DocsEditor& d, const std::string& name) {
+    d.a().open_asset(AssetType::UI, "ui/" + name + ".yaml");
+    tick(d.e(), 8);
+    expect(d.a().ui_mode(), "ui/" + name + " opens in the UI designer");
+}
+
+// 17. The HUD in the designer, an element selected (rect gizmo), Element tab.
+void test_docs_ui_designer() {
+    if (!docs_shot_dir()) return;
+    DocsEditor d("ui_designer", "scenes/main/scene.yaml");
+    docs_open_ui(d, "hud");
+    d.in->click({d.vb().right() + 15.0f, 71.0f});   // expand the root's Hierarchy row
+    const ObjectId hotbar = object_named(d.a(), "Hotbar");
+    expect(hotbar != 0, "the HUD has a Hotbar");
+    d.a().document().select(hotbar);
+    d.a().set_prop_tab(PropTab::Object);
+    d.rest();
+    tick(d.e(), 10);
+    d.capture();
+}
+
+// 18. The UI tab's + menu (New UI) listing the templates.
+void test_docs_ui_new_menu() {
+    if (!docs_shot_dir()) return;
+    DocsEditor d("ui_new_menu", "scenes/main/scene.yaml");
+    docs_open_ui(d, "main_menu");
+    d.in->click({242.0f, 44.0f});
+    expect(d.a().ui().any_popup_open(), "+ opens the New UI menu");
+    d.in->move({300.0f, 400.0f}, 2);
+    d.capture();
+}
+
+// 19. Interact mode running.
+void test_docs_ui_interact() {
+    if (!docs_shot_dir()) return;
+    DocsEditor d("ui_interact", "scenes/main/scene.yaml");
+    docs_open_ui(d, "main_menu");
+    d.a().set_ui_interact(true);
+    tick(d.e(), 10);
+    expect(d.a().ui_interacting(), "Interact is running");
+    // Click Continue (its click is echoed to the Console), then hover Settings.
+    auto button = [&](const char* name) -> std::optional<glm::vec2> {
+        auto* live = d.a().sync().live(d.a().document().object_root());
+        auto* b = live ? live->find_descendant(name) : nullptr;
+        auto* rt = b ? b->get_component<coopa::ui::RectTransform>() : nullptr;
+        if (!rt) return std::nullopt;
+        return d.a().ui_view().to_editor(rt->rect().center());
+    };
+    if (auto c = button("Continue")) d.in->click(*c);
+    if (auto st = button("Settings")) d.in->move(*st, 4);
+    tick(d.e(), 10);
+    d.capture();
+}
+
+// 20. The Bindings tab.
+void test_docs_ui_bindings() {
+    if (!docs_shot_dir()) return;
+    DocsEditor d("ui_bindings", "scenes/main/scene.yaml");
+    docs_open_ui(d, "main_menu");
+    d.a().set_prop_tab(PropTab::Bindings);
+    d.rest();
+    tick(d.e(), 6);
+    d.capture();
+}
+
+// 21 / 22. Render and World properties.
+void docs_settings_tab(const std::string& shot, PropTab tab) {
+    DocsEditor d(shot, "scenes/water_test/scene.yaml");
+    d.a().set_shading(Shading::Full);
+    docs_scene_camera(d);
+    d.a().document().clear_selection();
+    d.a().set_prop_tab(tab);
+    d.rest();
+    tick(d.e(), 60);
+    d.capture();
+}
+void test_docs_render_settings() { if (docs_shot_dir()) docs_settings_tab("render_settings", PropTab::Render); }
+void test_docs_world_settings() { if (docs_shot_dir()) docs_settings_tab("world_settings", PropTab::World); }
+
+// 23. File > Package Project (.caml)... open.
+void test_docs_package_dialog() {
+    if (!docs_shot_dir()) return;
+    DocsEditor d("package_dialog", "scenes/water_test/scene.yaml");
+    d.a().set_shading(Shading::Full);
+    docs_scene_camera(d);
+    tick(d.e(), 40);
+    d.in->click(d.topbar_menu(0));
+    d.in->click(d.menu_row({32.0f, 27.0f}, 8, 3));
+    tick(d.e(), 3);
+    expect(d.a().ui().is_popup_open("Package Project"), "the Package Project window is open");
+    // The default output folder is <project>/build/package; this project lives in a scratch
+    // folder, so show it as it reads for a project at ~/my_game (typed into the field).
+    d.in->click({540.0f + 380.0f, 345.0f + 69.0f});   // the Output folder field (520 x 210 window, centred)
+    for (char ch : std::string("~/my_game/build/package")) {
+        d.e().queue_input([ch](coopa::input::Input& i) { i.push_char(static_cast<uint32_t>(ch)); });
+        tick(d.e(), 1);
+    }
+    d.in->key(coopa::input::Key::Enter);
+    d.rest();
+    d.capture();
+}
+
+// 24. Blender Light theme, overview-like.
+void test_docs_theme_light() {
+    if (!docs_shot_dir()) return;
+    DocsEditor d("theme_light", "scenes/water_test/scene.yaml", "blender_light");
+    expect(d.a().theme_id() == "blender_light", "Blender Light is active");
+    d.a().set_shading(Shading::Full);
+    docs_scene_camera(d);
+    docs_pick_move_tool(d);
+    d.a().document().select(object_named(d.a(), "boat"));
+    d.a().set_prop_tab(PropTab::Object);
+    d.rest();
+    tick(d.e(), 60);
+    d.capture();
+}
+
+// 25. Help > Controls... open.
+void test_docs_controls_modal() {
+    if (!docs_shot_dir()) return;
+    DocsEditor d("controls_modal", "scenes/water_test/scene.yaml");
+    d.a().set_shading(Shading::Full);
+    docs_scene_camera(d);
+    tick(d.e(), 40);
+    const glm::vec2 help = d.topbar_menu(4);
+    d.in->click(help);
+    const float hx = help.x - (d.a().ui().text_width("Help") + d.a().ui().style.padding * 3) * 0.5f;
+    d.in->click(d.menu_row({hx, 27.0f}, 0, 0));
+    tick(d.e(), 3);
+    expect(d.a().ui().is_popup_open("Controls"), "the Controls window is open");
+    d.rest();
+    d.capture();
+}
+
+// 26. The Unsaved Changes prompt.
+void test_docs_unsaved_prompt() {
+    if (!docs_shot_dir()) return;
+    using coopa::input::Key;
+    DocsEditor d("unsaved_prompt", "scenes/main/scene.yaml");
+    docs_main_view(d);
+    const ObjectId cube = object_named(d.a(), "Cube");
+    d.a().document().select(cube);
+    d.in->move(d.vb().center());
+    d.in->key(Key::G);
+    d.in->key(Key::X);
+    d.in->key(Key::Num2);
+    d.in->key(Key::Enter);
+    d.a().open_asset(AssetType::Material, "materials/brick.yaml");
+    tick(d.e(), 4);
+    expect(d.a().ui().is_popup_open("Unsaved Changes"), "switching asks to save first");
+    d.rest();
+    d.capture();
+}
+
+// 27. The Asset panel's Meshes tab, a mesh open in the mesh viewer.
+void test_docs_asset_panel_meshes() {
+    if (!docs_shot_dir()) return;
+    DocsEditor d("asset_panel_meshes", "scenes/main/scene.yaml");
+    d.in->click({18.0f + 25.0f * 2.0f, 44.0f});   // the Meshes tab
+    d.a().open_asset(AssetType::Mesh, "meshes/barrel.yaml");
+    tick(d.e(), 8);
+    expect(d.a().active_asset_type() == AssetType::Mesh, "the mesh opens in the mesh viewer");
+    d.rest();
+    tick(d.e(), 30);
+    d.capture();
+}
+
+// =====================================================================================
 // Group "package" -- Build > Package to .caml
 // =====================================================================================
 
@@ -4286,6 +5600,10 @@ const TestCase kTests[] = {
     {"projection_and_rays",                  "viewport", test_projection_and_rays},
     {"modal_axis_locking",                   "viewport", test_modal_axis_locking},
     {"gizmo_translate_drag",                 "viewport", test_gizmo_translate_drag},
+    {"ui_rect_math",                         "viewport", test_ui_rect_math},
+    {"ui_rect_block_roundtrip",              "viewport", test_ui_rect_block_roundtrip},
+    {"ui_rect_gizmo",                        "viewport", test_ui_rect_gizmo},
+    {"ui_palette_entries_load",              "document", test_ui_palette_entries_load},
     {"config_untouched_and_minimal_edits",   "config",   test_config_untouched_and_minimal_edits},
     {"editor_shell_end_to_end",              "editor_shell", test_editor_shell_end_to_end},
     {"material_reference_forms",             "editor_shell", test_material_reference_forms},
@@ -4302,6 +5620,11 @@ const TestCase kTests[] = {
     {"editor_sculpt",                        "editor_shell", test_editor_sculpt},
     {"editor_asset_views",                   "editor_shell", test_editor_asset_views},
     {"editor_object_assets",                 "editor_shell", test_editor_object_assets},
+    {"editor_ui_designer",                   "editor_shell", test_editor_ui_designer},
+    {"editor_ui_templates",                  "editor_shell", test_editor_ui_templates},
+    {"editor_ui_theme_shapes",               "editor_shell", test_editor_ui_theme_shapes},
+    {"editor_text_pixel_aligned",            "editor_shell", test_editor_text_pixel_aligned},
+    {"editor_game_ui_themes",                "editor_shell", test_editor_game_ui_themes},
     {"editor_submesh_materials",             "editor_shell", test_editor_submesh_materials},
     {"editor_object_mesh_edit_is_asset",     "editor_shell", test_editor_object_mesh_edit_is_asset},
     {"editor_water_body_mesh_is_editable", "editor_shell", test_editor_water_body_mesh_is_editable},
@@ -4314,6 +5637,7 @@ const TestCase kTests[] = {
     {"editor_object_asset_pick_and_edit", "editor_shell", test_editor_object_asset_pick_and_edit},
     {"editor_object_asset_click_and_tab", "editor_shell", test_editor_object_asset_click_and_tab},
     {"editor_material_shader_catalogue", "editor_shell", test_editor_material_shader_catalogue},
+    {"editor_scene_settings_override", "editor_shell", test_editor_scene_settings_override},
     {"editor_grid_snap_and_frame", "editor_shell", test_editor_grid_snap_and_frame},
     {"editor_xray_edit_mode", "editor_shell", test_editor_xray_edit_mode},
     {"editor_nav_axis_and_trackpad", "editor_shell", test_editor_nav_axis_and_trackpad},
@@ -4323,6 +5647,33 @@ const TestCase kTests[] = {
     {"editor_mesh_autosave_and_unified_undo", "editor_shell", test_editor_mesh_autosave_and_unified_undo},
     {"editor_mesh_save_refreshes_colliders", "editor_shell", test_editor_mesh_save_refreshes_colliders},
     {"package_renders_identically",          "package",  test_package_renders_identically},
+    {"docs_overview", "docs", test_docs_overview},
+    {"docs_menu_file", "docs", test_docs_menu_file},
+    {"docs_hierarchy_inspector", "docs", test_docs_hierarchy_inspector},
+    {"docs_add_component", "docs", test_docs_add_component},
+    {"docs_viewport_solid", "docs", test_docs_viewport_solid},
+    {"docs_gizmo_move", "docs", test_docs_gizmo_move},
+    {"docs_xray_edit", "docs", test_docs_xray_edit},
+    {"docs_edit_mode", "docs", test_docs_edit_mode},
+    {"docs_adjust_last_operation", "docs", test_docs_adjust_last_operation},
+    {"docs_sculpt", "docs", test_docs_sculpt},
+    {"docs_vertex_paint", "docs", test_docs_vertex_paint},
+    {"docs_weight_paint", "docs", test_docs_weight_paint},
+    {"docs_material_editor", "docs", test_docs_material_editor},
+    {"docs_timeline", "docs", test_docs_timeline},
+    {"docs_record_autokey", "docs", test_docs_record_autokey},
+    {"docs_object_asset", "docs", test_docs_object_asset},
+    {"docs_ui_designer", "docs", test_docs_ui_designer},
+    {"docs_ui_new_menu", "docs", test_docs_ui_new_menu},
+    {"docs_ui_interact", "docs", test_docs_ui_interact},
+    {"docs_ui_bindings", "docs", test_docs_ui_bindings},
+    {"docs_render_settings", "docs", test_docs_render_settings},
+    {"docs_world_settings", "docs", test_docs_world_settings},
+    {"docs_package_dialog", "docs", test_docs_package_dialog},
+    {"docs_theme_light", "docs", test_docs_theme_light},
+    {"docs_controls_modal", "docs", test_docs_controls_modal},
+    {"docs_unsaved_prompt", "docs", test_docs_unsaved_prompt},
+    {"docs_asset_panel_meshes", "docs", test_docs_asset_panel_meshes},
 };
 
 } // namespace

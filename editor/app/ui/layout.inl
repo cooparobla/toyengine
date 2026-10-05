@@ -72,7 +72,7 @@
         const imm::Box left{c.x, c.y, left_w_, c.h};
         const imm::Box viewport{c.x + left_w_, c.y, mid_w, show_bottom_ ? c.h - bottom_h_ : c.h};
         const imm::Box console{c.x + left_w_, viewport.bottom(), mid_w, bottom_h_};
-        const bool hierarchy = active_type_ == AssetType::Scene || active_type_ == AssetType::Object;
+        const bool hierarchy = active_type_ == AssetType::Scene || active_type_ == AssetType::Object || active_type_ == AssetType::UI;
         const imm::Box outliner{c.x + left_w_ + mid_w, c.y, right_w_, hierarchy ? outliner_h_ : 0.0f};
         const imm::Box props{c.x + left_w_ + mid_w, c.y + outliner.h, right_w_, c.h - outliner.h};
 
@@ -101,7 +101,16 @@
         if (hierarchy) ctx.fill(outliner, ctx.style.window_bg);
         ctx.fill(props, ctx.style.window_bg);
         draw_viewport_(ctx, viewport_area_(ctx, viewport), mesh_edit);
-        draw_asset_panel_(ctx, area_(ctx, left));
+        if (active_type_ == AssetType::UI) {
+            // The UI designer: the asset list above the Widgets palette.
+            const imm::Box a = area_(ctx, left);
+            const float split = std::max(140.0f, a.h * 0.4f);
+            draw_asset_panel_(ctx, {a.x, a.y, a.w, split});
+            ctx.fill({a.x + 6, a.y + split, a.w - 12, 1}, ctx.style.border);
+            draw_ui_palette_(ctx, {a.x, a.y + split + 2, a.w, a.h - split - 2});
+        } else {
+            draw_asset_panel_(ctx, area_(ctx, left));
+        }
         if (show_bottom_) draw_console_area_(ctx, area_(ctx, console));
         if (hierarchy) draw_outliner_(ctx, area_(ctx, outliner));
         draw_properties_(ctx, area_(ctx, props));
@@ -139,6 +148,15 @@
         if (type == "SdfRenderer" || type == "SdfShape") return I::Sphere;
         if (type == "Animator") return I::Play;
         if (type == "Volume") return I::World;
+        if (type == "RectTransform") return I::UiAnchor;
+        if (type == "Canvas") return I::UiCanvas;
+        if (type == "Text" || type == "ThemedText") return I::UiText;
+        if (type == "Button" || type == "ThemedButton") return I::UiButton;
+        if (type == "Image") return I::Image;
+        if (type.find("LayoutGroup") != std::string::npos || type == "LayoutElement" || type == "ContentSizeFitter") return I::UiLayout;
+        if (type.find("OnSignal") != std::string::npos) return I::Link;
+        if (type == "Theme") return I::Palette;
+        if (const ComponentSchema* sc = find_schema(type); sc && sc->category.rfind("UI", 0) == 0) return I::UiWidget;
         return I::Component;
     }
 
@@ -147,6 +165,18 @@
         using I = imm::Icon;
         const glm::vec4 white = st.text;
         if (!obj.contains("components")) return {I::Empty, white};
+        // UI elements: by their most telling component.
+        for (const auto& c : obj.at("components").as_seq()) {
+            const std::string t = component_type(c);
+            if (t == "Canvas") return {I::UiCanvas, et_.outliner.light};
+            if (t == "Text" || t == "ThemedText") return {I::UiText, white};
+            if (t == "Button" || t == "ThemedButton") return {I::UiButton, et_.outliner.mesh};
+            if (t.find("LayoutGroup") != std::string::npos || t == "HudCorner") return {I::UiLayout, white};
+            if (t == "Window" || t == "Dialog" || t == "MenuList" || t == "ActionBar" || t == "TabView" || t == "ScrollView" ||
+                t == "StatBar" || t == "Hotbar" || t == "ItemGrid" || t == "SettingRow" || t == "MessageLog" || t == "PromptBar" ||
+                t == "Collapsible" || t == "ThemedPanel") return {I::UiWidget, et_.outliner.mesh};
+            if (t == "Image") return {I::Image, white};
+        }
         for (const auto& c : obj.at("components").as_seq()) {
             const std::string t = component_type(c);
             if (t == "Camera") return {I::Camera, et_.outliner.camera};

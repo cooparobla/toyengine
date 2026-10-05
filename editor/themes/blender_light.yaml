@@ -41,6 +41,8 @@ chrome:
   statusbar_bg: "#a3a3a3"
   play_group_bg: "#bdbdbd"
   play_tint: "#d9b98c"
+  setting_override: "#2a7ab040"
+  setting_override_bar: "#1f6fa8e6"
 
 viewport:
   toolbar_bg: "#c8c8c8eb"

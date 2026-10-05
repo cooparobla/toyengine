@@ -1,0 +1,8 @@
+# Engine checkout (./setup.sh recreates it from the .toy file's engine: block)
+.libs/
+build/
+build-*/
+dist/
+.toyeditor/
+*.spv
+*.spv.d

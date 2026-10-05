@@ -35,6 +35,9 @@
 
 #include "app/editor_app.h"
 #include "build/packager.h"
+#include "../hub/hub_app.h"
+#include "core/process.h"
+#include "core/naming.h"
 #include "core/scene_document.h"
 #include "mesh/edit_mesh.h"
 #include "mesh/mesh_ops.h"
@@ -54,6 +57,7 @@
 #include "viewport/rect_gizmo.h"
 #include "ui/ui_canvas_math.h"
 #include "ui/ui_palette.h"
+#include "ui/log_view.h"
 #include <uicoopa/binding/ui_handle.h>
 
 #include <coopa/yaml/writer.h>
@@ -99,6 +103,11 @@ fs::path fresh_dir(const std::string& name) {
     fs::remove_all(d);
     fs::create_directories(d);
     return d;
+}
+
+void write_text(const fs::path& p, const std::string& text) {
+    fs::create_directories(p.parent_path());
+    std::ofstream(p) << text;
 }
 
 std::vector<fs::path> asset_yaml_files() {
@@ -332,9 +341,30 @@ void test_scene_document_reparent_rules() {
     expect(doc.reparent(p, g).scope == ChangeScope::None, "an object cannot move under its own descendant");
     expect(doc.reparent(p, p).scope == ChangeScope::None, "or under itself");
     expect(doc.reparent(g, 0).scope == ChangeScope::Structure && doc.parent_of(g) == ObjectId(0), "moving to the root works");
-    expect(doc.unique_name("Parent") == "Parent.001", "unique names number like Blender");
+    expect(doc.unique_name("Parent") == "Parent_001", "unique names number in snake_case style (_001)");
     auto dup = doc.duplicate_objects({c});
     expect(dup.size() == 1 && dup[0] != c && doc.find(dup[0]) != nullptr, "duplicates get fresh ids");
+}
+
+void test_snake_case_names() {
+    // What the editor creates is named like assets/: snake_case.
+    expect(snake_case("Point Light") == "point_light" && snake_case("ReflectionProbe") == "reflection_probe" &&
+           snake_case("my-Asset 2") == "my_asset_2" && snake_case("HTTPServer") == "http_server" &&
+           snake_case("already_snake") == "already_snake" && snake_case("  Wood Crate! ") == "wood_crate",
+           "snake_case() handles spaces, camelCase, acronyms and punctuation");
+    SceneDocument doc;
+    doc.reset("t");
+    doc.add_object(doc.make_object("cube"));
+    expect(doc.unique_name("cube") == "cube_001", "a taken name gets _001");
+    doc.add_object(doc.make_object("cube_001"));
+    expect(doc.unique_name("cube_001") == "cube_002", "duplicating cube_001 renumbers it (cube_002, not cube_001_001)");
+    expect(doc.unique_name("Cube.001") == "Cube.001", "a free name is kept exactly as typed");
+
+    const Node scene = Project::default_scene_node("main");
+    std::vector<std::string> names;
+    for (const auto& o : scene.at("scene").at("root_objects").as_seq()) names.push_back(get_string(o, "name"));
+    expect(get_string(scene.at("scene"), "scene_name") == "main" && names == std::vector<std::string>{"camera", "sun", "ground", "cube"},
+           "the default scene and its objects are snake_case");
 }
 
 void test_schema_defaults() {
@@ -958,6 +988,7 @@ struct ImmHarness {
     glm::vec2 mouse{0.0f};
     bool down = false;
     bool prev_down = false;
+    glm::vec2 scroll{0.0f};   ///< Wheel delta for the next frame only
 
     void frame(const std::function<void(coopa::ui::imm::Context&)>& fn, std::vector<uint32_t> chars = {},
                std::vector<coopa::input::KeyEvent> keys = {}, glm::vec2 delta = glm::vec2(0.0f)) {
@@ -969,6 +1000,8 @@ struct ImmHarness {
         in.released[0] = !down && prev_down;
         in.chars = std::move(chars);
         in.keys = std::move(keys);
+        in.scroll = scroll;
+        scroll = glm::vec2(0.0f);
         prev_down = down;
         dl.begin(coopa::ui::Rect{{0, 0}, {800, 600}});
         ctx.begin_frame(dl, in, {800, 600});
@@ -1046,6 +1079,88 @@ void test_imm_modal_fits_content() {
     h.frame(ui);
     expect(region.h > 0.0f && std::abs(region.bottom() - content_end) <= 2.0f,
            "the fitted modal ends at its last row (gap " + std::to_string(region.bottom() - content_end) + " px)");
+}
+
+void test_imm_file_dialog() {
+    // uicoopa's picker (the editor's and the hub's), driven through real frames.
+    using coopa::input::Key;
+    using coopa::input::KeyAction;
+    using coopa::input::KeyEvent;
+    using FD = coopa::ui::imm::FileDialog;
+    const fs::path dir = fresh_dir("file_dialog");
+    fs::create_directories(dir / "sub");
+    for (const char* f : {"a.yaml", "b.png", "c.txt"}) write_text(dir / f, "x");
+    ImmHarness h;
+    FD fd;
+    auto ui = [&](coopa::ui::imm::Context& c) { fd.draw(c); };
+    const auto enter = std::vector<KeyEvent>{{Key::Enter, 0, KeyAction::Press, coopa::input::Mods::None}};
+
+    fs::path got;
+    fd.open(h.ctx, FD::Mode::OpenFile, "Open", dir, {".yaml"}, [&](const fs::path& p) { got = p; });
+    h.frame(ui);
+    h.frame(ui);
+    expect(fd.is_open(), "open() shows the picker from the next frame");
+    h.frame(ui, {'a'});                 // type-to-select
+    h.frame(ui, {}, enter);
+    expect(got == dir / "a.yaml" && !fd.is_open(), "typing a name selects it and Enter opens it");
+
+    got.clear();
+    fd.open(h.ctx, FD::Mode::OpenFile, "Open", dir, {".yaml"}, [&](const fs::path& p) { got = p; });
+    h.frame(ui);
+    h.frame(ui, {'b'});
+    h.frame(ui, {}, enter);
+    expect(got.empty() && fd.is_open(), "a file the Format filter rejects can't be opened");
+    h.frame(ui, {}, {{Key::Escape, 0, KeyAction::Press, coopa::input::Mods::None}});
+    expect(!fd.is_open() && got.empty(), "Escape cancels");
+
+    got.clear();
+    fd.open(h.ctx, FD::Mode::PickFolder, "Choose", dir, {}, [&](const fs::path& p) { got = p; });
+    h.frame(ui);
+    h.frame(ui, {'s'});
+    h.frame(ui, {}, enter);
+    expect(got == dir / "sub", "PickFolder chooses the selected folder");
+
+    got.clear();
+    fd.open(h.ctx, FD::Mode::SaveFile, "Save", dir, {".yaml"}, [&](const fs::path& p) { got = p; }, "a.yaml");
+    h.frame(ui);
+    h.frame(ui);
+    h.frame(ui, {}, enter);
+    expect(got.empty() && fd.is_open(), "saving over an existing file asks first");
+    h.frame(ui, {}, enter);
+    expect(got == dir / "a.yaml", "...and the second press replaces it");
+
+    std::vector<fs::path> used;
+    fd.on_folder_used = [&](const fs::path& p, FD::Mode) { used.push_back(p); };
+    fd.open(h.ctx, FD::Mode::SaveFile, "Save", dir / "sub", {".yaml"}, [&](const fs::path& p) { got = p; }, "fresh");
+    h.frame(ui);
+    h.frame(ui);
+    h.frame(ui, {}, enter);
+    expect(got == dir / "sub" / "fresh.yaml", "Save adds the format's extension to a bare name");
+    expect(used.size() == 1 && used[0] == dir / "sub", "on_folder_used reports the folder the dialog finished in");
+}
+
+void test_imm_log_view_follows_output() {
+    // The hub's log drawer / the editor's build window: newest line in view while output
+    // streams in, unless the user scrolls up; back at the bottom, it follows again.
+    ImmHarness h;
+    toy::editor::LogView view;
+    std::vector<std::string> lines;
+    const coopa::ui::imm::Box box{10, 10, 400, 168};   // 10 lines of 16 px
+    auto ui = [&](coopa::ui::imm::Context& c) { view.draw(c, box, lines); };
+    h.mouse = {100, 50};
+    for (int i = 0; i < 40; ++i) { lines.push_back("line " + std::to_string(i)); h.frame(ui); }
+    expect(view.following() && view.scroll() == 30, "it shows the newest lines while output streams in (" + std::to_string(view.scroll()) + ")");
+    h.scroll = {0, 2};   // wheel up
+    h.frame(ui);
+    const int held = view.scroll();
+    expect(!view.following() && held < 30, "scrolling up stops following");
+    for (int i = 0; i < 10; ++i) { lines.push_back("more"); h.frame(ui); }
+    expect(view.scroll() == held, "...and new output doesn't move the view");
+    for (int i = 0; i < 10; ++i) { h.scroll = {0, -2}; h.frame(ui); }
+    expect(view.following() && view.scroll() == 40, "scrolling back to the bottom follows again");
+    lines.push_back("last");
+    h.frame(ui);
+    expect(view.scroll() == 41, "...so the next line is in view");
 }
 
 void test_imm_drag_float_and_popup_blocking() {
@@ -2130,7 +2245,7 @@ void test_editor_shell_end_to_end() {
         tick(engine, 1);
         app.undo();
         tick(engine, 2);
-        expect(engine.scene().find_object("Sphere") != nullptr, "and remain undoable afterwards");
+        expect(engine.scene().find_object("sphere") != nullptr, "and remain undoable afterwards");
     }
 
     // The saved project loads in the plain game Engine.
@@ -2141,7 +2256,7 @@ void test_editor_shell_end_to_end() {
         o.project_root = project.root();
         toy::core::Engine game(cfg, o);
         tick(game, 2);
-        auto* obj = game.scene().find_object("Sphere");
+        auto* obj = game.scene().find_object("sphere");
         expect(obj != nullptr, "the game finds the editor-created object");
         auto* mr = obj ? obj->get_component<coopa::gfx::engine::components::MeshRenderer>() : nullptr;
         expect(mr && mr->get_mesh().is_loaded() && std::abs(mr->material.albedo.r - 0.7f) < 1e-4f,
@@ -2297,7 +2412,7 @@ void test_editor_real_input_blender_keymap() {
     const glm::vec2 centre = vp.center();
 
     // Click-select the cube at its projected centre.
-    const ObjectId cube = [&] { for (ObjectId id : app.document().all_ids()) if (get_string(*app.document().find(id), "name") == "Cube") return id; return ObjectId(0); }();
+    const ObjectId cube = [&] { for (ObjectId id : app.document().all_ids()) if (get_string(*app.document().find(id), "name") == "cube") return id; return ObjectId(0); }();
     glm::vec2 px;
     expect(engine.world_to_window(glm::vec3(0, 0, 0.5f), px), "the cube projects into the viewport");
     in.click(px / in.scale);
@@ -2417,7 +2532,7 @@ void test_editor_blender_chrome() {
     app.set_prop_tab(PropTab::Material);
     tick(engine, 2);
     expect(app.prop_tab() == PropTab::Tool, "without a selection, object tabs fall back to Tool");
-    for (ObjectId id : app.document().all_ids()) if (get_string(*app.document().find(id), "name") == "Cube") app.document().select(id);
+    for (ObjectId id : app.document().all_ids()) if (get_string(*app.document().find(id), "name") == "cube") app.document().select(id);
     app.set_prop_tab(PropTab::Data);
     tick(engine, 2);
     expect(app.prop_tab() == PropTab::Data, "a mesh object offers the Object Data tab");
@@ -2440,7 +2555,7 @@ void test_editor_blender_chrome() {
 
     // Unity play controls: Pause freezes, Step advances exactly one frame.
     ObjectId cube = 0;
-    for (ObjectId id : app.document().all_ids()) if (get_string(*app.document().find(id), "name") == "Cube") cube = id;
+    for (ObjectId id : app.document().all_ids()) if (get_string(*app.document().find(id), "name") == "cube") cube = id;
     expect(app.document().selection().empty(), "hiding deselects, as in Blender");
     app.document().select(cube);
     Node rb = default_component("Rigidbody");
@@ -2456,7 +2571,7 @@ void test_editor_blender_chrome() {
     app.pause();
     tick(engine, 1);
     expect(app.paused(), "Pause freezes the simulation");
-    auto z_of = [&] { return engine.scene().find_object("Cube")->get_transform()->transform().position().z; };
+    auto z_of = [&] { return engine.scene().find_object("cube")->get_transform()->transform().position().z; };
     const float z0 = z_of();
     tick(engine, 5);
     expect(std::abs(z_of() - z0) < 1e-6f, "nothing moves while paused");
@@ -2548,7 +2663,7 @@ void test_editor_transparency_preview() {
     EditorApp app(engine, project);
     tick(engine, toy::core::Engine::kFillDebounceFrames + 4);   // let the fill-mode rebuild settle
     ObjectId cube = 0;
-    for (ObjectId id : app.document().all_ids()) if (get_string(*app.document().find(id), "name") == "Cube") cube = id;
+    for (ObjectId id : app.document().all_ids()) if (get_string(*app.document().find(id), "name") == "cube") cube = id;
     expect(cube != 0, "the new project has a Cube");
     const int mr = app.document().find_component(cube, "MeshRenderer");
     auto set_alpha = [&](float a) {
@@ -2609,7 +2724,9 @@ void test_editor_viewport_fill() {
                what + ": the image covers the whole panel (no bars)");
     };
     tick(engine, toy::core::Engine::kFillDebounceFrames + 4);
-    expect(engine.pipeline().render_height() == 270, "the project's vertical resolution is kept");
+    // A new project's config.yaml is the engine's own, so its vertical resolution is that one's.
+    const uint32_t project_height = toy::core::AppConfig::load(project.config_path().string()).render.render_height;
+    expect(engine.pipeline().render_height() == project_height, "the project's vertical resolution is kept");
     aspect_matches("default layout");
     const uint32_t w0 = engine.pipeline().render_width();
 
@@ -2622,7 +2739,7 @@ void test_editor_viewport_fill() {
 
     // The view still works after a rebuild: clicking the cube selects it.
     ObjectId cube = 0;
-    for (ObjectId id : app.document().all_ids()) if (get_string(*app.document().find(id), "name") == "Cube") cube = id;
+    for (ObjectId id : app.document().all_ids()) if (get_string(*app.document().find(id), "name") == "cube") cube = id;
     glm::vec2 px;
     if (engine.world_to_window(glm::vec3(0, 0, 0.5f), px)) {
         app.document().clear_selection();
@@ -2705,7 +2822,7 @@ void test_editor_mesh_rotate() {
     EditorApp app(engine, project);
     tick(engine, toy::core::Engine::kFillDebounceFrames + 4);
     InputDriver in{engine, std::max(1.0f, engine.display_scale())};
-    const ObjectId cube = object_named(app, "Cube");
+    const ObjectId cube = object_named(app, "cube");
     app.document().select(cube);
     const glm::vec2 c = app.viewport_box().center();
     in.move(c);
@@ -2834,7 +2951,7 @@ void test_editor_quad_modelling() {
     EditorApp app(engine, project);
     tick(engine, toy::core::Engine::kFillDebounceFrames + 4);
     InputDriver in{engine, std::max(1.0f, engine.display_scale())};
-    const ObjectId cube = object_named(app, "Cube");
+    const ObjectId cube = object_named(app, "cube");
     app.document().select(cube);
     in.move(app.viewport_box().center());
     in.key(Key::Tab);
@@ -2936,9 +3053,9 @@ void test_editor_isolation() {
     EditorApp app(engine, project);
     tick(engine, 4);
     InputDriver in{engine, std::max(1.0f, engine.display_scale())};
-    const ObjectId cube = object_named(app, "Cube"), ground = object_named(app, "Ground"), sun = object_named(app, "Sun");
+    const ObjectId cube = object_named(app, "cube"), ground = object_named(app, "ground"), sun = object_named(app, "sun");
     expect(cube && ground && sun, "the new project has Cube, Ground and Sun");
-    app.hide_objects({object_named(app, "Camera")});
+    app.hide_objects({object_named(app, "camera")});
     const float yaw0 = app.camera().yaw_deg, dist0 = app.camera().distance;
     app.document().select(cube);
     in.move(app.viewport_box().center());
@@ -2952,7 +3069,7 @@ void test_editor_isolation() {
     tick(engine, 2);
     expect(!app.edit_mode_active() && app.sync().live(ground)->active() && !app.is_isolated(ground), "Tab brings everything back");
     expect(std::abs(app.camera().yaw_deg - yaw0) < 1e-3f && std::abs(app.camera().distance - dist0) < 1e-3f, "and restores the view");
-    expect(!app.sync().live(object_named(app, "Camera"))->active(), "an object the user hid stays hidden");
+    expect(!app.sync().live(object_named(app, "camera"))->active(), "an object the user hid stays hidden");
 
     app.set_isolate_in_edit(false);
     in.key(Key::Tab);
@@ -2980,7 +3097,7 @@ void test_editor_sculpt() {
     EditorApp app(engine, project);
     tick(engine, toy::core::Engine::kFillDebounceFrames + 4);
     InputDriver in{engine, std::max(1.0f, engine.display_scale())};
-    const ObjectId cube = object_named(app, "Cube");
+    const ObjectId cube = object_named(app, "cube");
     app.document().select(cube);
     app.set_interaction_mode(InteractionMode::Sculpt);
     tick(engine, 4);
@@ -3050,7 +3167,7 @@ void test_editor_paint_modes() {
     EditorApp app(engine, project);
     tick(engine, toy::core::Engine::kFillDebounceFrames + 4);
     InputDriver in{engine, std::max(1.0f, engine.display_scale())};
-    const ObjectId cube = object_named(app, "Cube");
+    const ObjectId cube = object_named(app, "cube");
     app.document().select(cube);
     const std::string own_shader = app.edited_mesh_shader();
     app.set_interaction_mode(InteractionMode::VertexPaint);
@@ -3155,7 +3272,7 @@ void test_editor_animation_timeline() {
     EditorApp app(engine, project);
     tick(engine, 4);
     auto& doc = app.document();
-    const ObjectId cube = object_named(app, "Cube");
+    const ObjectId cube = object_named(app, "cube");
     const ObjectId bone = doc.add_object(doc.make_object("Bone"), cube);
     app.sync().rebuild(engine, doc);
     tick(engine, 2);
@@ -3168,7 +3285,7 @@ void test_editor_animation_timeline() {
     app.new_animation_clip("Wave");
     tick(engine, 2);
     const fs::path scene_dir = doc.path().parent_path();
-    expect(app.animation_clip() && fs::exists(scene_dir / "animations" / "Cube" / "Wave.yaml"),
+    expect(app.animation_clip() && fs::exists(scene_dir / "animations" / "cube" / "Wave.yaml"),
            "a new clip is a file under animations/<rig>/");
     const Node& anim = doc.find(cube)->at("components").as_seq()[static_cast<size_t>(doc.find_component(cube, "Animator"))];
     expect(get_string(anim, "auto_play") == "Wave" && anim.at("states").as_seq().size() == 1,
@@ -3211,7 +3328,7 @@ void test_editor_animation_timeline() {
     app.undo();
     app.undo();
     tick(engine, 1);
-    const ClipModel saved = ClipModel::from_node(coopa::yaml::load_document(scene_dir / "animations" / "Cube" / "Wave.yaml"));
+    const ClipModel saved = ClipModel::from_node(coopa::yaml::load_document(scene_dir / "animations" / "cube" / "Wave.yaml"));
     expect(app.animation_clip()->find_track("Bone", "position")->keys.size() == 1 &&
                saved.find_track("Bone", "position") && saved.find_track("Bone", "position")->keys.size() == 1,
            "undo removes the last keys, and the file follows");
@@ -3406,7 +3523,7 @@ void test_editor_animation_autokey() {
     EditorApp app(engine, project);
     tick(engine, 4);
     auto& doc = app.document();
-    const ObjectId cube = object_named(app, "Cube");
+    const ObjectId cube = object_named(app, "cube");
     const ObjectId arm = doc.add_object(doc.make_object("Arm"), cube);
     app.sync().rebuild(engine, doc);
     tick(engine, 2);
@@ -3453,7 +3570,7 @@ void test_editor_animation_autokey() {
     tick(engine, 3);
     const float x_mid = app.sync().live(arm)->get_transform()->transform().position().x;
     expect(std::abs(x_mid - 0.5f) < 1e-4f, "Step interpolation holds the earlier key (x = " + std::to_string(x_mid) + ")");
-    const fs::path dir = doc.path().parent_path() / "animations" / "Cube";
+    const fs::path dir = doc.path().parent_path() / "animations" / "cube";
     const ClipModel on_disk = ClipModel::from_node(coopa::yaml::load_document(dir / "Reach.yaml"));
     expect(on_disk.find_track("Arm", "position") && on_disk.find_track("Arm", "position")->keys[0].easing == "step",
            "the interpolation is in the clip file");
@@ -3463,7 +3580,7 @@ void test_editor_animation_autokey() {
     tick(engine, 2);
     const Node& anim = doc.find(cube)->at("components").as_seq()[static_cast<size_t>(doc.find_component(cube, "Animator"))];
     expect(fs::exists(dir / "Grab.yaml") && !fs::exists(dir / "Reach.yaml") && get_string(anim, "auto_play") == "Grab" &&
-               get_string(anim.at("states").as_seq()[0], "clip") == "animations/Cube/Grab.yaml",
+               get_string(anim.at("states").as_seq()[0], "clip") == "animations/cube/Grab.yaml",
            "renaming moves the file and updates the Animator's state and auto_play");
     dump(engine, "18_autokey");
 }
@@ -3716,13 +3833,14 @@ void test_editor_scene_settings_override() {
     EditorApp app(engine, project);
     tick(engine, 4);
     const float project_exposure = engine.render_config().exposure;
+    const Node config_render_before = app.config_document().section("render");
 
     app.set_prop_tab(PropTab::Render);
     const Node three = make_float(3.0);
     app.set_scene_setting("render", "exposure", &three);
     tick(engine, 2);
     expect(std::abs(engine.render_config().exposure - 3.0f) < 1e-5f, "a scene override applies live");
-    expect(!app.config_document().section("render").contains("exposure") && !app.config_document().dirty(),
+    expect(app.config_document().section("render") == config_render_before && !app.config_document().dirty(),
            "config.yaml is untouched by a scene override");
     expect(app.document().scene_setting("render", "exposure") != nullptr, "the scene document carries the override");
 
@@ -3887,7 +4005,7 @@ void test_editor_xray_edit_mode() {
     EditorApp app(engine, project);
     tick(engine, toy::core::Engine::kFillDebounceFrames + 4);
     InputDriver in{engine, std::max(1.0f, engine.display_scale())};
-    const ObjectId cube = object_named(app, "Cube");
+    const ObjectId cube = object_named(app, "cube");
     app.document().select(cube);
     in.move(app.viewport_box().center());
     in.key(Key::Tab);
@@ -4096,9 +4214,9 @@ void test_editor_asset_views() {
 
     app.open_asset(AssetType::Scene, "scenes/main/scene.yaml");
     tick(engine, 4);
-    expect(app.active_asset_type() == AssetType::Scene && engine.scene().find_object("Cube"), "back to the scene");
+    expect(app.active_asset_type() == AssetType::Scene && engine.scene().find_object("cube"), "back to the scene");
     // Unsaved changes: switching asks first and does nothing until answered.
-    const ObjectId cube = object_named(app, "Cube");
+    const ObjectId cube = object_named(app, "cube");
     app.document().set_object_key(cube, "name", Node(std::string("Renamed")), "Rename");
     app.open_asset(AssetType::Material, "materials/default.yaml");
     tick(engine, 3);
@@ -4118,18 +4236,18 @@ void test_editor_object_assets() {
     toy::core::Engine engine(shell_config(project), shell_options(project));
     EditorApp app(engine, project);
     tick(engine, 4);
-    const ObjectId cube = object_named(app, "Cube");
+    const ObjectId cube = object_named(app, "cube");
     app.document().select(cube);
     expect(app.create_object_asset_from_selection(), "Create Object Asset from the selection");
     tick(engine, 3);
-    const fs::path asset = project.assets() / "objects" / "Cube.yaml";
-    expect(coopa::yaml::document_exists(asset), "objects/Cube.yaml is written");
+    const fs::path asset = project.assets() / "objects" / "cube.yaml";
+    expect(coopa::yaml::document_exists(asset), "objects/cube.yaml is written");
     const Node* inst = app.document().find(cube);
-    expect(inst && get_string(*inst, "prefab") == "objects/Cube", "the selection becomes an instance (`prefab:`)");
-    auto* live = engine.scene().find_object("Cube");
+    expect(inst && get_string(*inst, "prefab") == "objects/cube", "the selection becomes an instance (`prefab:`)");
+    auto* live = engine.scene().find_object("cube");
     auto* mr = live ? live->get_component<coopa::gfx::engine::components::MeshRenderer>() : nullptr;
     expect(mr && mr->is_ready(), "the instance still renders its mesh");
-    const ObjectId second = app.place_object_asset("objects/Cube.yaml", glm::vec3(3, 0, 0.5f));
+    const ObjectId second = app.place_object_asset("objects/cube.yaml", glm::vec3(3, 0, 0.5f));
     tick(engine, 3);
     expect(second != 0 && engine.scene().find_object(get_string(*app.document().find(second), "name")), "a second instance is placed");
 
@@ -4148,7 +4266,7 @@ void test_editor_object_assets() {
     expect(app.save_scene(), "the scene with instances saves");
 
     // The object asset opens as its own document; the hierarchy root is the object.
-    app.open_asset(AssetType::Object, "objects/Cube.yaml");
+    app.open_asset(AssetType::Object, "objects/cube.yaml");
     tick(engine, 4);
     expect(app.active_asset_type() == AssetType::Object && app.document().is_object_asset() && app.document().object_root() != 0,
            "an object asset opens as a one-object document");
@@ -4165,7 +4283,7 @@ void test_editor_object_assets() {
     app.open_asset(AssetType::Scene, "scenes/main/scene.yaml");
     tick(engine, 4);
     const size_t before = engine.scene().root_objects().size();
-    auto* spawned = engine.spawn("objects/Cube", glm::vec3(0, 3, 1));
+    auto* spawned = engine.spawn("objects/cube", glm::vec3(0, 3, 1));
     expect(spawned && engine.scene().root_objects().size() == before + 1 && spawned->children().size() == 1,
            "Engine::spawn() instantiates the asset, child included");
     dump(engine, "17_object_instances");
@@ -4668,7 +4786,7 @@ void test_editor_submesh_materials() {
     toy::core::Engine engine(shell_config(project), shell_options(project));
     EditorApp app(engine, project);
     tick(engine, toy::core::Engine::kFillDebounceFrames + 4);
-    const ObjectId cube = object_named(app, "Cube");
+    const ObjectId cube = object_named(app, "cube");
     const int ci = app.document().find_component(cube, "MeshRenderer");
     Node comp = app.document().find(cube)->at("components").as_seq()[static_cast<size_t>(ci)];
     comp["mesh_path"] = Node(std::string("two_slot"));
@@ -4678,7 +4796,7 @@ void test_editor_submesh_materials() {
     app.document().set_component(cube, ci, comp, "Slots");
     app.sync().rebuild(engine, app.document());
     tick(engine, 6);
-    auto* mr = engine.scene().find_object("Cube")->get_component<coopa::gfx::engine::components::MeshRenderer>();
+    auto* mr = engine.scene().find_object("cube")->get_component<coopa::gfx::engine::components::MeshRenderer>();
     expect(mr && mr->is_ready() && mr->get_mesh()->part_count() == 2, "the renderer's mesh has two parts");
     expect(mr && mr->material_for(1).albedo.r > 0.99f && mr->material_for(0).albedo.r < 0.99f, "`materials: {trim: ...}` resolves by slot name");
     app.set_shading(Shading::MaterialPreview);
@@ -4703,7 +4821,7 @@ void test_editor_object_mesh_edit_is_asset() {
     toy::core::Engine engine(shell_config(project), shell_options(project));
     EditorApp app(engine, project);
     tick(engine, 4);
-    const ObjectId cube = object_named(app, "Cube");
+    const ObjectId cube = object_named(app, "cube");
     app.document().select(cube);
     app.duplicate_selected();
     tick(engine, 3);
@@ -4939,7 +5057,7 @@ void test_editor_mesh_autosave_and_unified_undo() {
     tick(engine, 4);
     auto& doc = app.document();
     const fs::path cube_file = project.assets() / "meshes" / "cube.yaml";
-    const ObjectId cube = object_named(app, "Cube");
+    const ObjectId cube = object_named(app, "cube");
 
     // 1. Edit the cube, leave Edit Mode: saved without asking.
     doc.select(cube);
@@ -4990,12 +5108,12 @@ void test_editor_mesh_autosave_and_unified_undo() {
     app.undo();
     tick(engine, 3);
     expect(faces_on_disk(cube_file) == 6u, "undo 4: the cube's extrude, across the mesh switch (history kept)");
-    expect(live_indices(app, "Cube") == 6u * 6u, "...and the live cube shows it");
+    expect(live_indices(app, "cube") == 6u * 6u, "...and the live cube shows it");
 
     // Redo walks it back in order.
     app.redo();
     tick(engine, 3);
-    expect(faces_on_disk(cube_file) == 10u && live_indices(app, "Cube") == 10u * 6u, "redo 1: the cube's extrude");
+    expect(faces_on_disk(cube_file) == 10u && live_indices(app, "cube") == 10u * 6u, "redo 1: the cube's extrude");
     app.redo();
     tick(engine, 3);
     expect(doc.find(plane) != nullptr, "redo 2: the plane's creation");
@@ -5254,7 +5372,7 @@ void test_docs_add_component() {
     if (!docs_shot_dir()) return;
     DocsEditor d("add_component", "scenes/main/scene.yaml");
     docs_main_view(d);
-    const ObjectId cube = object_named(d.a(), "Cube");
+    const ObjectId cube = object_named(d.a(), "cube");
     d.a().document().select(cube);
     d.a().set_prop_tab(PropTab::Components);
     tick(d.e(), 4);
@@ -5310,7 +5428,7 @@ void test_docs_gizmo_move() {
     using coopa::input::Key;
     DocsEditor d("gizmo_move", "scenes/main/scene.yaml");
     docs_main_view(d);
-    const ObjectId cube = object_named(d.a(), "Cube");
+    const ObjectId cube = object_named(d.a(), "cube");
     docs_pick_move_tool(d);
     d.a().document().select(cube);
     tick(d.e(), 4);
@@ -5349,7 +5467,7 @@ void docs_stage_edit_mode(DocsEditor& d) {
     using coopa::input::Key;
     using coopa::input::Mods;
     using coopa::input::MouseButton;
-    const ObjectId cube = object_named(d.a(), "Cube");
+    const ObjectId cube = object_named(d.a(), "cube");
     d.a().document().select(cube);
     d.in->move(d.vb().center());
     d.in->key(Key::Tab);
@@ -5401,7 +5519,7 @@ void test_docs_adjust_last_operation() {
     using coopa::input::Mods;
     using coopa::input::MouseButton;
     DocsEditor d("adjust_last_operation", "scenes/main/scene.yaml");
-    const ObjectId cube = object_named(d.a(), "Cube");
+    const ObjectId cube = object_named(d.a(), "cube");
     d.a().document().select(cube);
     d.in->move(d.vb().center());
     d.in->key(Key::Tab);
@@ -5423,7 +5541,7 @@ void test_docs_adjust_last_operation() {
 
 /** @brief A sphere added to the starter scene, selected, in `mode`, smoothed for the brushes. */
 ObjectId docs_brush_sphere(DocsEditor& d, InteractionMode mode) {
-    const ObjectId cube = object_named(d.a(), "Cube");
+    const ObjectId cube = object_named(d.a(), "cube");
     d.a().document().select(cube);
     d.a().delete_selected();
     tick(d.e(), 2);
@@ -5718,7 +5836,7 @@ void test_docs_unsaved_prompt() {
     using coopa::input::Key;
     DocsEditor d("unsaved_prompt", "scenes/main/scene.yaml");
     docs_main_view(d);
-    const ObjectId cube = object_named(d.a(), "Cube");
+    const ObjectId cube = object_named(d.a(), "cube");
     d.a().document().select(cube);
     d.in->move(d.vb().center());
     d.in->key(Key::G);
@@ -5743,6 +5861,179 @@ void test_docs_asset_panel_meshes() {
     d.rest();
     tick(d.e(), 30);
     d.capture();
+}
+
+// =====================================================================================
+// Group "project" -- .toy projects, project component schemas, the hub's model (device-free)
+// =====================================================================================
+
+void test_project_toy_file() {
+    // A toyhub-made project starts as a .toy and scripts; the editor creates assets/ on first open.
+    const fs::path root = fresh_dir("Fancy Game");
+    write_text(root / "fancy.toy",
+               "format: toyproject\nversion: 1\nname: \"Ignored\"\ntarget: fancy_game\n"
+               "engine:\n  source: git@github.com:cooparobla/toyengine.git\n  ref: abc123\n");
+    Project p(root);
+    expect(p.valid() && !p.has_assets(), "a .toy without assets/ is a valid project awaiting its skeleton");
+    expect(p.name() == "Fancy Game", "a project's name is its folder's, whatever the .toy says");
+    expect(Project(root.string() + "/").name() == "Fancy Game", "...with or without a trailing slash");
+    expect(p.project_file() == root / "fancy.toy", "project_file() finds the .toy");
+    const std::string before = [&] { std::ifstream in(root / "fancy.toy"); return std::string(std::istreambuf_iterator<char>(in), {}); }();
+    p = Project::create(root);
+    expect(p.has_assets() && coopa::yaml::document_exists(p.assets() / "scenes/main/scene.yaml"), "create() lays down assets/");
+    const std::string after = [&] { std::ifstream in(root / "fancy.toy"); return std::string(std::istreambuf_iterator<char>(in), {}); }();
+    expect(before == after, "create() leaves an existing .toy byte-identical");
+
+    // config.yaml starts as the engine's own: same settings and comments, only the title and
+    // default scene are the project's.
+    auto read = [](const fs::path& f) { std::ifstream in(f); std::vector<std::string> l; for (std::string x; std::getline(in, x);) l.push_back(x); return l; };
+    const auto engine_cfg = read(fs::path(ROOT_DIR) / "assets" / "config.yaml");
+    const auto project_cfg = read(p.config_path());
+    std::vector<std::string> changed;
+    for (size_t i = 0; i < std::min(engine_cfg.size(), project_cfg.size()); ++i) if (engine_cfg[i] != project_cfg[i]) changed.push_back(project_cfg[i]);
+    expect(engine_cfg.size() == project_cfg.size() && changed.size() == 2 && changed[0] == "  title: \"Fancy Game\"" &&
+               changed[1] == "  default_scene: \"assets/scenes/main/scene.yaml\"",
+           "a new project's config.yaml is the engine's, with only the title and default scene changed");
+    int toys = 0;
+    for (const auto& e : fs::directory_iterator(root)) toys += e.path().extension() == ".toy";
+    expect(toys == 1, "create() adds no second .toy");
+
+    // A bare folder gets a minimal .toy named after it.
+    const fs::path bare = fresh_dir("bare_project");
+    Project b = Project::create(bare);
+    expect(b.project_file() == bare / "bare_project.toy", "create() writes <dir>.toy into a bare folder");
+    expect(b.name() == "bare_project", "...whose name is the folder name");
+    const Node toy = Project::load_toy(b.project_file());
+    expect(get_string(toy, "format") == "toyproject" && !toy.contains("name"), "...in the toyproject format, with no name key");
+
+    // An assets-only folder (this repository) is still a project, named after its folder.
+    Project repo{fs::path(ROOT_DIR)};
+    expect(repo.valid() && repo.name() == fs::path(ROOT_DIR).filename().string(), "the engine checkout stays a valid project");
+}
+
+void test_project_component_schema() {
+    expect(find_schema("TestProjectSpinner") == nullptr, "no schema before registration");
+    register_component_schema({"TestProjectSpinner", "Gameplay", {f_float("speed", 90.0f, 1.0f, -3600.0f, 3600.0f, true)}});
+    const ComponentSchema* s = find_schema("TestProjectSpinner");
+    expect(s && s->category == "Gameplay", "a registered project schema is found");
+    expect(schemas().count("TestProjectSpinner") == 1, "...and listed for Add Component");
+    const Node c = default_component("TestProjectSpinner");
+    expect(c.contains("speed") && std::abs(get_float(c, "speed") - 90.0) < 1e-6, "its in_default fields seed a new component");
+    expect(find_schema("Transform") != nullptr, "built-in schemas are still there");
+}
+
+void test_hub_projects_and_registry() {
+    namespace hub = toy::hub;
+    const fs::path home = fresh_dir("hub_home");
+    setenv("HOME", home.c_str(), 1);
+    expect(hub::projects_file() == home / ".toyengine" / "projects.yaml" &&
+           hub::settings_file() == home / ".toyengine" / "settings.yaml", "the hub keeps everything in ~/.toyengine");
+    const fs::path a = fresh_dir("Alpha"), b = fresh_dir("Beta");
+    write_text(a / "alpha.toy", "target: alpha\nengine:\n  source: x\n  ref: 0123456789abcdef0123\n");
+    write_text(b / "beta.toy", "target: beta\nengine:\n  source: x\n  ref: main\n  link: /some/engine\n");
+    hub::list_project(a);
+    hub::list_project(b);
+    hub::list_project(a.string() + "/");   // the same project, spelled differently
+    expect(hub::read_project_list().size() == 2, "the list holds each project once");
+    expect(!hub::list_project(ROOT_DIR) && hub::read_project_list().size() == 2, "the engine checkout is never listed");
+
+    // Nothing is auto-detected: the editor's recent projects (which include the engine
+    // checkout) never show up in the hub.
+    toy::editor::Project::remember(ROOT_DIR);
+    toy::editor::Project::remember(fresh_dir("only_in_editor_recents"));
+    auto list = hub::load_projects();
+    expect(list.size() == 2, "only listed projects are shown");
+    auto find = [&](const std::string& n) -> const hub::HubProject* {
+        for (const auto& p : list) if (p.name == n) return &p;
+        return nullptr;
+    };
+    const auto* pa = find("Alpha");
+    const auto* pb = find("Beta");
+    expect(pa && pb, "projects are named after their folders");
+    expect(pa && pa->target == "alpha" && !pa->linked() && pa->engine_label() == "0123456789", "a pinned project shows its short ref");
+    expect(pb && pb->linked() && pb->engine_link == "/some/engine" && pb->engine_label() == "linked", "a linked project shows as linked");
+    expect(pa && !pa->built() && pa->editor_binary() == a / "build" / "alpha_editor", "unbuilt projects report no editor binary");
+    hub::forget_project(a);
+    list = hub::load_projects();
+    expect(list.size() == 1 && list[0].name == "Beta", "forget removes a project from the list (not from disk)");
+    expect(fs::exists(a / "alpha.toy"), "...and leaves its files alone");
+
+    // Settings: the hub's own, blender_dark until set.
+    expect(std::string(hub::default_hub_theme()) == "blender_dark" && !hub::load_settings().contains("theme"),
+           "the hub starts on blender_dark");
+    toy::editor::Node st = hub::load_settings();
+    st["theme"] = toy::editor::Node(std::string("unity_dark"));
+    hub::save_settings(st);
+    expect(get_string(hub::load_settings(), "theme") == "unity_dark", "the hub's theme persists in ~/.toyengine/settings.yaml");
+    expect(!toy::editor::Project::load_prefs().contains("theme"), "...without touching the editor's preferences");
+
+    // Tasks: combined output line by line, exit status, quoting.
+    hub::Task t;
+    t.start("t", "echo " + hub::shell_quote("it's") + "; echo two >&2; exit 3");
+    t.wait();
+    const auto lines = t.lines();
+    expect(t.exit_code() == 3 && !t.succeeded(), "a task reports its exit status");
+    expect(lines.size() == 3 && lines[1] == "it's" && lines[2] == "two", "stdout and stderr stream in, quoting intact");
+    expect(hub::toyhub_command({"new", "a b"}).find("'a b'") != std::string::npos, "toyhub arguments are shell-quoted");
+}
+
+void test_process_task_and_diagnostics() {
+    // Cancel stops the command and everything it started (its process group), promptly.
+    Task t;
+    const auto t0 = std::chrono::steady_clock::now();
+    t.start("sleepy", "echo started; sleep 30 & sleep 30; echo never");
+    while (t.line_count() < 2 && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(5)) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    t.cancel();
+    t.wait();
+    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    expect(!t.running() && t.cancelled() && !t.succeeded() && secs < 10.0, "cancel() ends a running task (" + std::to_string(secs) + " s)");
+    const auto lines = t.lines();
+    expect(std::find(lines.begin(), lines.end(), "never") == lines.end(), "...before it finishes");
+
+    // Compiler diagnostics, as the build modal lists them.
+    auto d = parse_diagnostic("/p/src/game.cpp:12:5: error: no member named 'x'");
+    expect(d && d->error && d->file == "/p/src/game.cpp" && d->line == 12 && d->column == 5 && d->message == "no member named 'x'",
+           "a clang error parses into file, line, column, message");
+    d = parse_diagnostic("/p/src/game.h:7: warning: unused");
+    expect(d && !d->error && d->line == 7 && d->column == 0, "a warning without a column parses");
+    d = parse_diagnostic("ld: error: undefined symbol: foo");
+    expect(d && d->error && d->line == 0, "a linker error without a location still counts");
+    expect(!parse_diagnostic("[ 42%] Building CXX object CMakeFiles/x.dir/a.cpp.o"), "progress lines are not diagnostics");
+    expect(current_executable().filename() == "toyengine_editor_tests" && fs::exists(current_executable()),
+           "current_executable() finds this binary (what Relaunch Editor exec()s)");
+}
+
+void test_package_engine_fallback() {
+    setenv("HOME", tmp_root().c_str(), 1);
+    const fs::path root = fresh_dir("fallback_src");
+    Project project = Project::create(root);
+    const fs::path out = fresh_dir("fallback_out");
+    PackageOptions opt;
+    opt.out_dir = out;
+    opt.engine_assets = fs::path(ROOT_DIR) / "assets";
+    const PackageReport rep = package_project(project, opt);
+    expect(rep.ok(), "packaging with the engine fallback succeeds");
+    bool spv = false, glsl = false;
+    for (const auto& e : fs::directory_iterator(out / "assets" / "shaders")) {
+        spv |= e.path().extension() == ".spv";
+        glsl |= e.path().extension() == ".frag" || e.path().extension() == ".vert";
+    }
+    expect(spv && !glsl, "engine shaders ship compiled only");
+    expect(fs::is_directory(out / "assets" / "fonts"), "engine fonts ship");
+    expect(!fs::exists(out / "assets" / "scenes" / "pixel_demo"), "engine scenes never ship");
+    expect(coopa::yaml::document_exists(out / "assets" / "scenes" / "main" / "scene.yaml"), "the project's own scene ships");
+    expect(!fs::exists(out / "assets" / "materials" / "brick.caml"), "engine content outside the runtime dirs never ships");
+
+    // A project that ships its own copy of an engine runtime file keeps its own.
+    write_text(project.assets() / "ui" / "marker.txt", "project");
+    write_text(project.assets() / "fonts" / "LICENSE-OFL.txt", "project copy");
+    const fs::path out2 = fresh_dir("fallback_out2");
+    opt.out_dir = out2;
+    expect(package_project(project, opt).ok(), "repackaging succeeds");
+    std::ifstream lic(out2 / "assets" / "fonts" / "LICENSE-OFL.txt");
+    std::string first;
+    std::getline(lic, first);
+    expect(first == "project copy", "a project file shadows the engine's of the same name");
 }
 
 // =====================================================================================
@@ -5771,6 +6062,10 @@ void test_package_renders_identically() {
         cfg.window.height = 360;
         cfg.render.ssao_temporal_enabled = false;
         cfg.render.ssr_temporal_enabled = false;
+        // Likewise every other effect that accumulates across frames (a new project's config.yaml
+        // is the engine's, which turns them on): this compares YAML vs .caml loading, not timing.
+        cfg.render.aa_mode = "off";
+        cfg.render.auto_exposure_enabled = false;
         cfg.output.save_on_exit = false;
         toy::core::EngineOptions o;
         o.project_root = proj;
@@ -5783,6 +6078,139 @@ void test_package_renders_identically() {
     size_t diff = 0;
     for (size_t i = 0; i < std::min(a.pixels.size(), b.pixels.size()); i += 4) diff += a.pixels[i] != b.pixels[i];
     expect(a.pixels.size() == b.pixels.size() && diff == 0, "the packaged (.caml) project renders identically (" + std::to_string(diff) + " px)");
+}
+
+// =====================================================================================
+// Group "editor_shell" (continued) -- Build > Refresh
+// =====================================================================================
+
+void test_editor_build_refresh() {
+    setenv("FIXED_DT", "0", 1);
+    setenv("NO_INPUT", "1", 1);
+    setenv("HOME", tmp_root().c_str(), 1);
+    const fs::path root = fresh_dir("build_refresh_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, 3);
+    auto run = [&](const std::string& cmd) {
+        app.build_refresh(cmd);
+        tick(engine, 2);
+        for (int i = 0; i < 400 && app.build_task().running(); ++i) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); tick(engine, 1); }
+        tick(engine, 2);
+    };
+    auto modal_open = [&] { return app.ui().is_popup_open("Build Project"); };
+    expect(EditorApp::default_build_command().find("cmake --build") != std::string::npos &&
+           EditorApp::default_build_command().find("--target") != std::string::npos,
+           "Refresh builds this editor's own targets with cmake --build");
+
+    // A failing build: blocking modal, errors listed and in the Console, no relaunch.
+    run("echo '[ 50%] Building CXX object game.cpp.o'; echo '/p/src/game.cpp:12:5: error: no member named x'; exit 2");
+    expect(modal_open(), "the build modal is up");
+    expect(!app.build_task().succeeded() && app.build_diagnostics().size() == 1 && app.build_diagnostics()[0].line == 12,
+           "a failed build lists its compiler errors");
+    bool console = false;
+    for (const auto& [lvl, msg] : app.log()) console |= lvl == 2 && msg.find("game.cpp:12") != std::string::npos;
+    expect(console, "...and puts them in the Console for the traceback");
+    expect(!app.build_relaunch_offered() && !app.relaunch_requested(), "a failed build offers no relaunch");
+    dump(engine, "build_refresh_failed");
+
+    // A build that leaves the binary as it was: up to date, nothing to relaunch.
+    run("echo all up to date");
+    expect(app.build_task().succeeded() && app.build_diagnostics().empty() && !app.build_relaunch_offered(),
+           "an up-to-date build succeeds without offering a relaunch");
+
+    // While building, the modal can't be dismissed: Escape leaves it up.
+    app.build_refresh("sleep 2");
+    tick(engine, 3);
+    engine.queue_input([](coopa::input::Input& in) { in.push_key(coopa::input::Key::Escape, 0, coopa::input::KeyAction::Press, coopa::input::Mods::None); });
+    tick(engine, 2);
+    expect(modal_open() && app.build_task().running(), "the build modal blocks the editor while it builds");
+    const_cast<Task&>(app.build_task()).cancel();
+    for (int i = 0; i < 200 && app.build_task().running(); ++i) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); tick(engine, 1); }
+    tick(engine, 2);
+    expect(app.build_task().cancelled(), "Cancel Build stops it");
+}
+
+// =====================================================================================
+// Group "hub" -- the project hub, driven through real input
+// =====================================================================================
+
+/** @brief A listed hub project whose "editor" is a script that records being opened. */
+fs::path make_hub_project(const fs::path& dir) {
+    write_text(dir / "game.toy", "format: toyproject\ntarget: game\nengine:\n  source: x\n  ref: abc\n");
+    write_text(dir / "editor.sh", "#!/bin/sh\ntouch \"$(dirname \"$0\")/opened\"\n");
+    fs::permissions(dir / "editor.sh", fs::perms::owner_all);
+    write_text(dir / "build" / "game_editor", "");   // "built"
+    toy::hub::list_project(dir);
+    return dir;
+}
+
+void test_hub_project_actions() {
+    namespace hub = toy::hub;
+    setenv("HOME", fresh_dir("hub_ui_home").c_str(), 1);
+    const fs::path base = fresh_dir("hub_ui");
+    const fs::path a = make_hub_project(base / "Alpha");
+    toy::core::Engine engine(hub::HubApp::engine_config(false), hub::HubApp::engine_options());
+    hub::HubApp app(engine);
+    InputDriver in{engine, std::max(1.0f, engine.display_scale())};
+    tick(engine, 3);
+    expect(app.projects().size() == 1, "the listed project shows");
+    auto centre = [](const coopa::ui::imm::Box& b) { return glm::vec2(b.x + b.w * 0.5f, b.y + b.h * 0.5f); };
+
+    // "..." opens the project menu (the row's own click target must not swallow it).
+    in.click(centre(app.row_menu_box(0)));
+    tick(engine, 2);
+    expect(app.menu_shown_for() == 0, "the ... button opens the project menu");
+    dump(engine, "hub_menu");
+    in.key(coopa::input::Key::Escape);
+    in.click({600, 600});
+    tick(engine, 2);
+
+    // Open launches the project's editor (here: a script that leaves a marker).
+    in.click(centre(app.row_open_box(0)));
+    for (int i = 0; i < 200 && !fs::exists(a / "opened"); ++i) { std::this_thread::sleep_for(std::chrono::milliseconds(10)); tick(engine, 1); }
+    expect(fs::exists(a / "opened"), "Open launches the project's editor");
+
+    // Add: a bare folder gets the options dialog; an existing project is listed straight away.
+    const fs::path bare = base / "Bare";
+    fs::create_directories(bare);
+    app.add_folder(bare);
+    tick(engine, 3);
+    expect(app.modal_shown() == "Add Project", "adding a folder with no project asks for its options");
+    dump(engine, "hub_add_options");
+    in.key(coopa::input::Key::Escape);
+    tick(engine, 2);
+    expect(app.modal_shown().empty(), "Escape cancels the dialog");
+    const fs::path existing = base / "Existing";
+    write_text(existing / "existing.toy", "target: existing\nengine:\n  source: x\n  ref: abc\n");
+    app.add_folder(existing);
+    for (int i = 0; i < 500 && (app.task().running() || app.projects().size() < 2); ++i) { std::this_thread::sleep_for(std::chrono::milliseconds(10)); tick(engine, 1); }
+    expect(app.projects().size() == 2, "adding an existing project lists it (" + std::to_string(app.projects().size()) + ")");
+    expect(app.modal_shown().empty(), "...without the options dialog (shown: " + app.modal_shown() + ")");
+
+    // New project names are snake_case: the default, and whatever is typed.
+    expect(app.project_form().name == "my_game", "the New project dialog suggests my_game");
+    app.project_form().adding = false;
+    app.project_form().location = base.string();
+    app.project_form().name = "My Game";
+    expect(app.project_form().target() == base / "my_game", "a typed \"My Game\" creates the folder my_game");
+
+    // Remove: the confirmation, then Remove from List (files stay) / Move to Trash (folder goes).
+    app.open_remove_dialog(app.projects()[0]);
+    tick(engine, 3);
+    expect(app.modal_shown() == "Remove Project", "Remove Project asks first");
+    dump(engine, "hub_remove");
+    in.key(coopa::input::Key::Escape);
+    tick(engine, 2);
+    hub::HubProject alpha;
+    for (const auto& p : app.projects()) if (p.name == "Alpha") alpha = p;
+    app.delete_project(alpha);
+    for (int i = 0; i < 500 && app.task().running(); ++i) { std::this_thread::sleep_for(std::chrono::milliseconds(10)); tick(engine, 1); }
+    tick(engine, 2);
+    const char* home = std::getenv("HOME");
+    expect(!fs::exists(a) && fs::exists(fs::path(home) / ".Trash" / "Alpha"), "Move to Trash moves the project folder to the Trash");
+    expect(app.projects().size() == 1 && app.projects()[0].name == "Existing", "...and drops it from the list");
 }
 
 // =====================================================================================
@@ -5800,6 +6228,7 @@ const TestCase kTests[] = {
     {"undo_stack_sequence_and_budget",       "document", test_undo_stack_sequence_and_budget},
     {"scene_document_reparent_rules",        "document", test_scene_document_reparent_rules},
     {"schema_defaults",                      "document", test_schema_defaults},
+    {"snake_case_names",                     "document", test_snake_case_names},
     {"asset_refs_and_rename",                "document", test_asset_refs_and_rename},
     {"shader_ball",                          "mesh", test_shader_ball},
     {"mesh_io_preserves_blender_attributes", "mesh", test_mesh_io_preserves_blender_attributes},
@@ -5822,6 +6251,8 @@ const TestCase kTests[] = {
     {"imm_text_input_commits",               "imm",      test_imm_text_input_commits},
     {"imm_drag_float_and_popup_blocking",    "imm",      test_imm_drag_float_and_popup_blocking},
     {"imm_modal_fits_content",               "imm",      test_imm_modal_fits_content},
+    {"imm_file_dialog",                      "imm",      test_imm_file_dialog},
+    {"imm_log_view_follows_output",          "imm",      test_imm_log_view_follows_output},
     {"imm_menubar_and_tree",                 "imm",      test_imm_menubar_and_tree},
     {"imm_icon_button_and_tooltip",          "imm",      test_imm_icon_button_and_tooltip},
     {"imm_theme_files",                      "imm",      test_imm_theme_files},
@@ -5879,7 +6310,14 @@ const TestCase kTests[] = {
     {"asset_fidelity_object_assets", "document", test_asset_fidelity_object_assets},
     {"editor_mesh_autosave_and_unified_undo", "editor_shell", test_editor_mesh_autosave_and_unified_undo},
     {"editor_mesh_save_refreshes_colliders", "editor_shell", test_editor_mesh_save_refreshes_colliders},
+    {"project_toy_file",                     "project",  test_project_toy_file},
+    {"project_component_schema",             "project",  test_project_component_schema},
+    {"hub_projects_and_registry",            "project",  test_hub_projects_and_registry},
+    {"package_engine_fallback",              "project",  test_package_engine_fallback},
+    {"process_task_and_diagnostics",         "project",  test_process_task_and_diagnostics},
     {"package_renders_identically",          "package",  test_package_renders_identically},
+    {"editor_build_refresh",                 "editor_shell", test_editor_build_refresh},
+    {"hub_project_actions",                  "hub",      test_hub_project_actions},
     {"docs_overview", "docs", test_docs_overview},
     {"docs_menu_file", "docs", test_docs_menu_file},
     {"docs_hierarchy_inspector", "docs", test_docs_hierarchy_inspector},

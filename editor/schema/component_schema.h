@@ -267,9 +267,9 @@ inline const SurfaceShaderInfo* find_surface_shader(const std::string& name) {
 
 namespace toy::editor {
 
-/** @brief Every built-in component schema, keyed by type name. */
-inline const std::map<std::string, ComponentSchema>& schemas() {
-    static const std::map<std::string, ComponentSchema> table = [] {
+/** @brief The schema table: every built-in schema, plus any register_component_schema() added. */
+inline std::map<std::string, ComponentSchema>& schema_table_() {
+    static std::map<std::string, ComponentSchema> table = [] {
         std::map<std::string, ComponentSchema> t;
         auto add = [&](ComponentSchema s) { t[s.type] = std::move(s); };
         const auto phys_mat = f_asset("material", "physics_materials", ".yaml", true, true);
@@ -484,6 +484,28 @@ inline const std::map<std::string, ComponentSchema>& schemas() {
         return t;
     }();
     return table;
+}
+
+/** @brief Every component schema, keyed by type name. */
+inline const std::map<std::string, ComponentSchema>& schemas() { return schema_table_(); }
+
+/**
+ * @brief Adds (or replaces) a component schema -- how a game project describes its own
+ *        components to the inspector and "Add Component". Call it from a project module under
+ *        `#if TOY_EDITOR` (toyengine_add_project() defines that for the editor build only):
+ * @code
+ * #if TOY_EDITOR
+ * #include <editor/schema/component_schema.h>
+ * static const bool spinner_schema = toy::editor::register_component_schema(
+ *     {"Spinner", "Gameplay", {toy::editor::f_vec3("axis", {0, 0, 1}, 0.01f, true)}});
+ * #endif
+ * @endcode
+ * @return true, so it can initialise a static.
+ */
+inline bool register_component_schema(ComponentSchema schema) {
+    std::string type = schema.type;
+    schema_table_()[type] = std::move(schema);
+    return true;
 }
 
 inline const ComponentSchema* find_schema(const std::string& type) {

@@ -1127,6 +1127,28 @@ toy::core::AppConfig load_config_text(std::string_view filename, std::string_vie
     return config;
 }
 
+// A project module, registered exactly the way a game project's src/ does it.
+int g_test_module_inits = 0;
+TOY_MODULE(test_project_module) { ++g_test_module_inits; }
+
+void test_project_modules_and_root() {
+    // Static registration ran before main(); Engine's constructor runs each body (exercised by
+    // every render group's Engine, where this module just counts).
+    const auto& mods = toy::core::modules();
+    const auto it = std::find_if(mods.begin(), mods.end(), [](const toy::core::Module& m) { return m.name == "test_project_module"; });
+    expect(it != mods.end() && it->on_engine_init, "TOY_MODULE registers a named module with an init body");
+
+    // Project root: the compiled-in project (this checkout, for the engine's own build), unless
+    // TOY_PROJECT_DIR points elsewhere.
+    unsetenv("TOY_PROJECT_DIR");
+    expect(toy::core::Engine::default_project_root() == std::filesystem::path(ROOT_DIR),
+           "the engine's own build runs its own checkout as the project");
+    setenv("TOY_PROJECT_DIR", "/tmp/some_project", 1);
+    expect(toy::core::Engine::default_project_root() == std::filesystem::path("/tmp/some_project"),
+           "TOY_PROJECT_DIR overrides the compiled-in project");
+    unsetenv("TOY_PROJECT_DIR");
+}
+
 void test_pixel_render_config_aa_defaults() {
     // FXAA/SMAA defaults mirror blendy's PbrRenderPipeline field-for-field (see
     // PixelRenderConfig::aa_mode's own doc) except aa_mode itself, which defaults to "off"
@@ -5968,6 +5990,7 @@ const TestCase kTests[] = {
     {"sdf_clip_rect_to_pixels_flips_y",            "math", test_sdf_clip_rect_to_pixels_flips_y},
 
     // --- config: defaults and YAML round-trips ---
+    {"config_project_modules_and_root",            "config", test_project_modules_and_root},
     {"config_aa_defaults",                         "config", test_pixel_render_config_aa_defaults},
     {"config_aa_round_trip",                       "config", test_app_config_load_round_trips_aa_settings},
     {"config_scene_settings_layer",                "config", test_app_config_scene_settings_layer},

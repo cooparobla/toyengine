@@ -28,11 +28,12 @@
 #include "trackpad.h"
 #include "../anim/clip_model.h"
 #include "../anim/clip_pose.h"
-#include "file_dialog.h"
 #include "project.h"
 #include "scene_sync.h"
 
 #include "../build/packager.h"
+#include "../core/naming.h"
+#include "../core/process.h"
 #include "../core/scene_document.h"
 #include "../mesh/mesh_bvh.h"
 #include "../mesh/mesh_loops.h"
@@ -52,6 +53,8 @@
 #include "../viewport/modal_transform.h"
 #include "../viewport/rect_gizmo.h"
 #include "../ui/ui_canvas_math.h"
+#include "../ui/log_view.h"
+#include "../ui/logo.h"
 #include "../ui/ui_palette.h"
 
 #include <toyengine/core/config.h>
@@ -64,6 +67,7 @@
 #include <gfxcoopa/engine/data/mesh.h>
 
 #include <uicoopa/immediate/imm_canvas.h>
+#include <uicoopa/immediate/imm_file_dialog.h>
 #include <uicoopa/ui_yaml.h>
 
 #include <coopa/scene/scene_loader.h>
@@ -102,6 +106,8 @@ inline void apply_editor_render_overrides(core::AppConfig& cfg) {
 }
 using coopa::input::Key;
 using coopa::input::Mods;
+/// uicoopa's Finder-style picker (Open / Save / folders), shared with the hub.
+using FileDialog = coopa::ui::imm::FileDialog;
 
 /**
  * @brief The kind of asset the editor has open. Exactly one asset is open at a time, and its
@@ -207,6 +213,7 @@ public:
         }
         Project::remember(project_.root());
         log_info("Opened project " + project_.root().string());
+        setup_file_dialog_();
     }
 
     ~EditorApp() {
@@ -343,8 +350,8 @@ public:
 
     void new_scene() {
         stop();
-        doc_.reset("Untitled");
-        Node starter = Project::default_scene_node("Untitled");
+        doc_.reset("untitled");
+        Node starter = Project::default_scene_node("untitled");
         for (const auto& o : starter.at("scene").at("root_objects").as_seq()) {
             Node copy = o;
             doc_.add_object(copy, 0, -1, "New Scene");
@@ -405,7 +412,7 @@ public:
                 log_error(std::string("Could not write mesh: ") + e.what());
             }
         }
-        Node obj = doc_.make_object(doc_.unique_name(primitive, parent));
+        Node obj = doc_.make_object(doc_.unique_name(key, parent));
         set_object_position_(obj, spawn_point_());
         Node mr = default_component("MeshRenderer");
         mr["mesh_path"] = Node(key);
@@ -423,16 +430,17 @@ public:
     }
 
     ObjectId create_empty(ObjectId parent = 0) {
-        Node obj = doc_.make_object(doc_.unique_name("Empty", parent));
+        Node obj = doc_.make_object(doc_.unique_name("empty", parent));
         set_object_position_(obj, parent ? glm::vec3(0.0f) : spawn_point_());
         const ObjectId id = doc_.add_object(obj, parent, -1, "Create Empty");
         after_structure_change_(id);
         return id;
     }
 
-    /** @brief Creates an object carrying one component of `type` (lights, cameras, ...). */
+    /** @brief Creates an object carrying one component of `type` (lights, cameras, ...), named
+     *         `name` in snake_case ("Point Light" -> point_light). */
     ObjectId create_with_component(const std::string& type, const std::string& name, ObjectId parent = 0) {
-        Node obj = doc_.make_object(doc_.unique_name(name, parent));
+        Node obj = doc_.make_object(doc_.unique_name(snake_case(name), parent));
         set_object_position_(obj, spawn_point_() + glm::vec3(0, 0, type == "Camera" ? 2.0f : 3.0f));
         obj["components"].as_seq().push_back(default_component(type));
         const ObjectId id = doc_.add_object(obj, parent, -1, "Create " + name);
@@ -870,8 +878,21 @@ public:
         PackageOptions opt;
         opt.out_dir = out_dir;
         opt.keep_yaml = keep_yaml;
+        opt.engine_assets = fs::path(ROOT_DIR) / "assets";
+#ifdef TOY_GAME_BINARY
+        // This editor's own game executable (cmake/ToyProject.cmake). toyengine's own is the
+        // generic player any assets-only project runs on; a game project's binary carries that
+        // project's code, so it only ships with that project.
+        const fs::path game = TOY_GAME_BINARY;
+        std::error_code same_ec;
+        const bool generic = std::string(TOY_PROJECT_ROOT) == std::string(ROOT_DIR);
+        if (fs::exists(game) && (generic || fs::equivalent(project_.root(), fs::path(TOY_PROJECT_ROOT), same_ec))) {
+            opt.game_binary = game;
+        }
+#else
         const fs::path game = fs::path(ROOT_DIR) / "build" / "toyengine";
         if (fs::exists(game)) opt.game_binary = game;
+#endif
         PackageReport rep = package_project(project_, opt);
         if (rep.ok()) log_info("Packaged " + std::to_string(rep.files) + " files (" + std::to_string(rep.encoded) +
                                " encoded) to " + out_dir.string());
@@ -933,7 +954,10 @@ private:
         if (level >= 1) std::fprintf(stderr, "[editor] %s\n", s.c_str());
     }
 
-    std::string unique_asset_name_(const std::string& dir, const std::string& base) {
+    /** @brief A free asset file name in assets/<dir>: `base` in snake_case, then base_01, base_02... */
+    std::string unique_asset_name_(const std::string& dir, const std::string& raw_base) {
+        std::string base = snake_case(raw_base);
+        if (base.empty()) base = "untitled";
         auto exists = [&](const std::string& n) { return coopa::yaml::document_exists(project_.assets() / dir / (n + ".yaml")); };
         if (!exists(base)) return base;
         for (int i = 1; i < 1000; ++i) {
@@ -1113,6 +1137,7 @@ private:
 
     void post_late_update_(float dt) {
         poll_theme_(dt);
+        poll_build_();
         // The cursor the UI asked for this frame (resize arrows on panel borders, I-beam in text).
         const coopa::input::CursorShape want = canvas_->context().mouse_cursor();
         if (want != applied_cursor_) { engine_.input_state().set_cursor_shape(want); applied_cursor_ = want; }
@@ -1171,6 +1196,29 @@ private:
     coopa::ui::CanvasComponent* canvas_canvas_() {
         coopa::scene::SceneObject* o = canvas_->owner ? canvas_->owner->parent() : nullptr;
         return o ? o->get_component<coopa::ui::CanvasComponent>() : nullptr;
+    }
+
+    /** @brief The picker's toyengine bits: the project (and its assets/) as Favorites, toyengine's
+     *         YAML / caml documents named as such, and this session's folders under Recent. */
+    void setup_file_dialog_() {
+        file_dialog_.favorites = {
+            {project_.name(), project_.root(), imm::Icon::Package, "This project"},
+            {"assets", project_.assets(), imm::Icon::Folder, "This project's assets"},
+        };
+        file_dialog_.kind_name = [](const std::string& e) -> std::string {
+            if (e == ".yaml" || e == ".yml") return "toyengine Document";
+            if (e == ".caml") return "toyengine Document (caml)";
+            return {};
+        };
+        file_dialog_.format_group = [](const std::string& e) -> std::string {
+            return e == ".yaml" || e == ".yml" || e == ".caml" ? "toyengine Document" : std::string();
+        };
+        file_dialog_.on_folder_used = [this](const fs::path& dir, FileDialog::Mode) {
+            auto& r = file_dialog_.recent_dirs;
+            r.erase(std::remove(r.begin(), r.end(), dir), r.end());
+            r.insert(r.begin(), dir);
+            if (r.size() > 8) r.resize(8);
+        };
     }
 
     /**
@@ -1463,6 +1511,7 @@ private:
 #include "ui/assets.inl"
 #include "ui/ui_canvas.inl"
 #include "ui/theme_editor.inl"
+#include "ui/build.inl"
 
     // --- helpers shared by the panels ---
 
@@ -3193,6 +3242,7 @@ private:
 
     void draw_modals_(imm::Context& ctx) {
         file_dialog_.draw(ctx);
+        draw_build_modal_(ctx);
 
         if (ctx.begin_modal("Unsaved Changes", {370, 0})) {   // height fits the content
             ctx.paragraph("There are unsaved changes. Save them first?");
@@ -3324,10 +3374,10 @@ private:
     }
 
     void open_project_dialog_() {
-        file_dialog_.open(ui(), FileDialog::Mode::PickFolder, "Open Project (folder containing assets/)", project_.root().parent_path(), {},
+        file_dialog_.open(ui(), FileDialog::Mode::PickFolder, "Open Project (folder with a .toy or assets/)", project_.root().parent_path(), {},
                           [this](const fs::path& p) {
                               Project candidate(p);
-                              if (!candidate.valid()) { log_error(p.string() + " has no assets/ folder"); return; }
+                              if (!candidate.valid()) { log_error(p.string() + " has no .toy file or assets/ folder"); return; }
                               guarded_([this, p] { switch_project_ = p; });
                           });
     }
@@ -3367,6 +3417,7 @@ private:
         if (ctx.shortcut(Key::Z, cmd | Mods::Shift) || ctx.shortcut(Key::Y, cmd)) redo();
         if (ctx.shortcut(Key::N, cmd)) guarded_([this] { new_scene(); });
         if (ctx.shortcut(Key::O, cmd)) guarded_([this] { open_scene_dialog_(); });
+        if (ctx.shortcut(Key::B, cmd | Mods::Shift)) build_refresh();
         if (ctx.shortcut(Key::Q, cmd)) { if (request_close()) quit_ = true; }
         if (ctx.shortcut(Key::F5)) {
             if (active_type_ == AssetType::UI) ui_set_interact_(!ui_interact_);

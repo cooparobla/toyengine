@@ -196,6 +196,71 @@ The scenes in [`assets/scenes/`](assets/scenes/) are heavily commented and are t
 reference for every component. Rendering is configured in
 [`assets/config.yaml`](assets/config.yaml), with a comment on every key.
 
+## Projects
+
+This repository builds and tests on its own, with the demo scenes in `assets/`. A game lives in
+its own **project** folder, which builds this engine from `<project>/.libs/toyengine` alongside
+the project's own C++ and assets.
+
+```sh
+tools/toyhub new ~/Games/MyGame --link     # or: --ref <pushed commit>; default pins this HEAD
+                                           # (toyhub add <folder> adopts an existing folder)
+cd ~/Games/MyGame
+./build.sh                                 # game (build/mygame) + editor (build/mygame_editor);
+                                           # later rebuilds: the editor's Build > Refresh
+./editor.sh                                # first open creates assets/
+./run.sh [scene]                           # HEADLESS=1 MAX_FRAMES=600 ./run.sh for no window
+./package.sh dist                          # .caml assets + engine runtime files + game binary
+```
+
+A project contains:
+
+| Path | What |
+|---|---|
+| `<target>.toy` | The project file (YAML): `target` (the executable name) and `engine:`, which holds `source` (`git@github.com:cooparobla/toyengine.git`), `ref` (the pinned commit) and optionally `link` (a local engine checkout). |
+| `assets/` | The project's content. It sits over this repo's `assets/`, which is the fallback for shaders, fonts, shared meshes and materials. `assets/shaders/*` compile with the engine and gfxcoopa shader headers on the include path. |
+| `src/` | C++ compiled into both the game and the editor, so the editor's Play runs it. Register components with `TOY_MODULE` ([`toyengine/core/module.h`](toyengine/core/module.h)). Describe them to the inspector with `register_component_schema()` under `#if TOY_EDITOR`. `src/main.cpp` replaces the game's `main`. `src/toyengine/<path>.h` replaces that engine header, and must keep its API. |
+| `.libs/toyengine` | The engine and its submodules. `setup.sh` clones it at `engine.ref`, or symlinks it to `engine.link`. Git-ignored. |
+| `setup.sh build.sh run.sh editor.sh package.sh clean.sh` | The project's scripts (from [`templates/project/`](templates/project/)). |
+
+A **linked** project builds against this working tree directly, uncommitted edits in the engine
+and `libs/` included. This is how to work on the engine and a game together. A **pinned**
+project clones the engine at a pushed commit, which makes it reproducible on any machine.
+`toyhub link|unlink <dir>` switches between the two, and `toyhub upgrade <dir> [--ref R]`
+re-pins. The CMake side is [`cmake/ToyProject.cmake`](cmake/ToyProject.cmake)
+(`toyengine_add_project()`). When `.libs/toyengine` is not the top-level build, it adds only the
+engine; its own tests and tools are skipped.
+
+### toyengine Hub
+
+`build/toyengine_hub` (source in [`hub/`](hub/)) is a small launcher that lists, creates, adds,
+opens, re-pins and removes projects. It is drawn with the editor's UI and themes
+and calls `tools/toyhub` for everything. Build output streams into its log drawer.
+
+- A project's name is always its folder's name. **New project** takes a name and a location and
+  creates `<location>/<name>`. **Add** takes any folder. A folder that already has a `.toy` is
+  listed as it is. One without a `.toy` is set up as a new project in place, and no existing file
+  is overwritten. Both ask for the project's options: the engine (**Pinned** to a commit, or
+  **Linked** to any local toyengine checkout) and whether to fetch or link the engine now.
+- **Open** opens the project in its editor. A project that has never been built is built
+  first, with the output in the log. After that, building is the editor's job: **Build >
+  Refresh** (**Shift+Ctrl+B**) rebuilds the game and editor after `src/` changes and offers to
+  relaunch the editor.
+- The **...** menu has Open in Editor, Reveal in Finder, re-pin or link the engine, and **Remove
+  Project...**. Remove asks first, then either moves the folder to the Trash (`toyhub delete`) or
+  only removes it from the list.
+- Nothing is auto-detected. The hub lists only the projects you created or added through it or
+  `toyhub`. The engine checkout itself is never a project.
+- The hub keeps its data in `~/.toyengine/`: `projects.yaml` (the list, shared with `toyhub`) and
+  `settings.yaml` (its theme, `blender_dark` by default, separate from the editor's).
+
+```sh
+cmake --build build --target toyengine_hub && ./build/toyengine_hub
+tools/toyhub app        # macOS: ~/Applications/toyengine Hub.app (a launcher for that build)
+tools/toyhub install    # ~/.local/bin/toyhub for the CLI
+tools/toyhub list       # listed projects (~/.toyengine/projects.yaml)
+```
+
 ## Testing and headless runs
 
 ```bash
@@ -226,7 +291,10 @@ toyengine/
 ├── scene/      gameplay components: camera controller, movers, cloth & skinned renderers
 ├── world/      streamed procedural tile terrain
 └── water/      WaterBody, Buoyancy, WaterSystem
-editor/         toyengine_editor: app, documents & undo, schemas, mesh modelling, viewport, packager
+editor/         toyengine_editor: app, documents & undo, schemas, mesh modelling, viewport, packager;
+hub/            toyengine_hub: the project launcher (a GUI over tools/toyhub)
+templates/      project/: the files `toyhub new` / `toyhub add` create a project from
+cmake/          ToyProject.cmake: toyengine_add_project() (game + editor for a project dir)
 assets/         config.yaml, scenes, meshes, materials, textures, shaders, fonts
 docs/           hand-written guides (e.g. ambient lighting); docs/images holds these screenshots
 libs/           pinned submodules: libcoopa (scene graph, assets, jobs), gfxcoopa (Vulkan),

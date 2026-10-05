@@ -1,15 +1,21 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.21)  # PROJECT_IS_TOP_LEVEL
 project(toyengine)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+# This file builds toyengine standalone (the top-level project: engine, editor, tests, test
+# scenes in assets/) AND is add_subdirectory()'d by a game project from <project>/.libs/toyengine
+# (see templates/project/ and tools/toyhub). Every path that means "the engine checkout" is
+# therefore TOYENGINE_DIR, never CMAKE_SOURCE_DIR -- which, in a project build, is the project.
+set(TOYENGINE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 
 # --- Vendored coopa libraries (libs/, git submodules) ---
 # ROOT_DIR_PARENT is "the directory the coopa repos live in" -- the pinned libs/
 # submodule tree, so the build never depends on what happens to be checked out
 # beside toyengine. configuration/root_directory.h.in exports it as PROJ_DIR,
 # which toyengine/core/engine.h uses to locate gfxcoopa's shared shader library.
-set(ROOT_DIR_PARENT "${CMAKE_SOURCE_DIR}/libs")
+set(ROOT_DIR_PARENT "${TOYENGINE_DIR}/libs")
 
 set(LIBCOOPA_DIR   "${ROOT_DIR_PARENT}/libcoopa")
 set(CAML_DIR       "${ROOT_DIR_PARENT}/caml")
@@ -27,8 +33,8 @@ endif()
 
 # !! ORDER IS LOAD-BEARING -- DO NOT REORDER !!
 # The library repos are deliberately left unpatched, so each still computes its
-# own libcoopa path as "parent of CMAKE_SOURCE_DIR" -- which, with toyengine as
-# the top-level project, resolves OUTSIDE this checkout. Each only dereferences
+# own libcoopa path as "parent of CMAKE_SOURCE_DIR" -- which, with toyengine (or a
+# game project) as the top-level project, resolves OUTSIDE this checkout. Each only dereferences
 # that path inside an `if(NOT TARGET coopa::lib)` guard, so adding libs/libcoopa
 # FIRST defines coopa::lib, every guard goes false, and the outside path is
 # never used. Move this line down and the build silently compiles an unpinned
@@ -78,7 +84,7 @@ add_subdirectory(${MAPCOOPA_DIR}   ${CMAKE_CURRENT_BINARY_DIR}/mapcoopa-build)
 # resolve libcoopa through its own stale path, we end up building an unpinned
 # checkout from outside this repo. Fail at configure time instead of silently.
 get_target_property(_libcoopa_inc libcoopa_lib INTERFACE_INCLUDE_DIRECTORIES)
-if(NOT _libcoopa_inc MATCHES "${CMAKE_SOURCE_DIR}/libs/libcoopa")
+if(NOT _libcoopa_inc MATCHES "${TOYENGINE_DIR}/libs/libcoopa")
     message(FATAL_ERROR
         "coopa::lib resolved to '${_libcoopa_inc}', outside libs/. "
         "Check add_subdirectory() order above -- libs/libcoopa must come first.")
@@ -113,10 +119,7 @@ endif()
 # so this build needs them compiled too -- hence the add_dependencies() below, and
 # the uicoopa search root in toyengine/core/engine.h's make_render_config_().
 
-include_directories(${CMAKE_SOURCE_DIR})
-
 configure_file(configuration/root_directory.h.in configuration/root_directory.h)
-include_directories(${CMAKE_BINARY_DIR}/configuration)
 
 # --- Shader compilation ---
 # cbuild --vulkan (the primary build tool for this workspace) already walks
@@ -134,11 +137,15 @@ include_directories(${CMAKE_BINARY_DIR}/configuration)
 # and CMake target names must be unique across the whole build.
 include(${GFXCOOPA_DIR}/cmake/GfxShaders.cmake)
 gfx_add_shader_target(toyengine_shaders
-    SHADER_DIR   "${CMAKE_SOURCE_DIR}/assets/shaders"
+    SHADER_DIR   "${TOYENGINE_DIR}/assets/shaders"
 )
 
-add_executable(toyengine main.cpp)
-add_dependencies(toyengine toyengine_shaders uicoopa_shaders)
+# --- toyengine::engine: everything a game / editor / test executable links ---
+# The engine is header-only, so this INTERFACE target is the whole engine: its include roots
+# (the checkout, for <toyengine/...> and <editor/...>; the configured root_directory.h) and the
+# coopa link line. A target-level include path rather than include_directories(), which is
+# directory-scoped and would not reach a game project's targets.
+#
 # coopa::ui LAST on purpose: uicoopa's includes/ also carries stb_image.h /
 # stb_image_write.h, whose implementations live in gfxcoopa_impl. Linking coopa::gfx
 # first keeps gfxcoopa's copies of those two headers ahead in the include search, so a
@@ -148,16 +155,35 @@ add_dependencies(toyengine toyengine_shaders uicoopa_shaders)
 # a third copy of stb_image_write.h. Nothing in toyengine may include mapcoopa's
 # image_writer.h / map_export.h, which compile stb's *implementation*; toyengine/world/ uses
 # only the data headers (map_config.h, map_data.h, map_generator.h, noise.h, biome.h).
-target_link_libraries(toyengine PRIVATE coopa::gfx coopa::physx coopa::sfx coopa::maps coopa::ui)
+#
 # coopa::caml after coopa::ui: its includes/ carries a second fkYAML copy, which must
 # never shadow libcoopa's.
-target_link_libraries(toyengine PRIVATE coopa::caml)
+add_library(toyengine_engine INTERFACE)
+add_library(toyengine::engine ALIAS toyengine_engine)
+target_include_directories(toyengine_engine INTERFACE
+    ${TOYENGINE_DIR}
+    ${CMAKE_CURRENT_BINARY_DIR}/configuration)
+target_link_libraries(toyengine_engine INTERFACE coopa::gfx coopa::physx coopa::sfx coopa::maps coopa::ui)
+target_link_libraries(toyengine_engine INTERFACE coopa::caml)
+
+# toyengine_add_project(): the game + editor executables for a project directory. This repo is
+# itself the project "toyengine" (its assets/ holds the test scenes), which is what keeps the
+# standalone build's toyengine / toyengine_editor targets exactly as they were.
+include(${TOYENGINE_DIR}/cmake/ToyProject.cmake)
+
+# Everything below is engine development only (the engine's own game/editor over this repo's
+# assets/, tests, the hub, the icon exporter, the leak gate): a game project that
+# add_subdirectory()s this checkout gets just the engine, its shaders and toyengine_add_project().
+if(NOT PROJECT_IS_TOP_LEVEL)
+    return()
+endif()
+
+toyengine_add_project(NAME toyengine DIR "${TOYENGINE_DIR}" EDITOR_NAME toyengine_editor)
 
 enable_testing()
 add_executable(toyengine_tests test.cpp)
 add_dependencies(toyengine_tests toyengine_shaders uicoopa_shaders)
-target_link_libraries(toyengine_tests PRIVATE coopa::gfx coopa::physx coopa::sfx coopa::maps coopa::ui)
-target_link_libraries(toyengine_tests PRIVATE coopa::caml)
+target_link_libraries(toyengine_tests PRIVATE toyengine::engine)
 # One ctest entry per test GROUP, not one for the whole binary: each render_* group
 # constructs its own Vulkan device, pipelines and scene, and that cost is CPU-bound
 # setup rather than GPU work -- so `ctest -j4` overlaps them and the suite finishes in
@@ -177,31 +203,33 @@ set_tests_properties(toyengine_render_pixel toyengine_render_ui toyengine_render
                      toyengine_render_cloth toyengine_render_terrain toyengine_editor_host PROPERTIES TIMEOUT 300)
 
 # --- Editor ---
-# toyengine_editor embeds the same Engine (so its "Full Render" viewport IS the game's
-# renderer) and builds its UI with uicoopa's immediate-mode layer. Same link line as the
-# game, and for the same stb-ordering reason coopa::ui stays after coopa::gfx.
-add_executable(toyengine_editor editor/editor.cpp)
-add_dependencies(toyengine_editor toyengine_shaders uicoopa_shaders)
-target_link_libraries(toyengine_editor PRIVATE coopa::gfx coopa::physx coopa::sfx coopa::maps coopa::ui)
-target_link_libraries(toyengine_editor PRIVATE coopa::caml)
+# toyengine_editor (defined by toyengine_add_project() above) embeds the same Engine, so its
+# "Full Render" viewport IS the game's renderer, and builds its UI with uicoopa's
+# immediate-mode layer.
+
+# toyengine_hub: the project launcher (hub/) -- a GUI over tools/toyhub, drawn with the editor's
+# UI and themes. Engine-level, so it is not part of a game project's build.
+add_executable(toyengine_hub hub/hub.cpp)
+add_dependencies(toyengine_hub toyengine_shaders uicoopa_shaders)
+target_link_libraries(toyengine_hub PRIVATE toyengine::engine)
 
 # toyengine_icon: exports the logo (toyengine/core/branding.h) as PNGs + a macOS .icns into
 # editor/branding/ for packaging (not assets/: that ships with games). Not needed at runtime -- Engine rasterizes the same shapes.
 add_executable(toyengine_icon tools/icon/export_icon.cpp)
+target_include_directories(toyengine_icon PRIVATE ${TOYENGINE_DIR})
 target_link_libraries(toyengine_icon PRIVATE coopa::gfx)
 
 add_executable(toyengine_editor_tests editor/editor_test.cpp)
 add_dependencies(toyengine_editor_tests toyengine_shaders uicoopa_shaders)
-target_link_libraries(toyengine_editor_tests PRIVATE coopa::gfx coopa::physx coopa::sfx coopa::maps coopa::ui)
-target_link_libraries(toyengine_editor_tests PRIVATE coopa::caml)
+target_link_libraries(toyengine_editor_tests PRIVATE toyengine::engine)
 # Device-free groups first (instant), then the ones that build an Engine.
-foreach(_ed_group writer document mesh imm viewport config editor_shell package)
+foreach(_ed_group writer document mesh imm viewport config project editor_shell package hub)
     add_test(NAME toyengine_editor_${_ed_group}
              COMMAND toyengine_editor_tests --group ${_ed_group})
 endforeach()
 set_tests_properties(toyengine_editor_writer toyengine_editor_document toyengine_editor_mesh
-                     toyengine_editor_imm toyengine_editor_viewport toyengine_editor_config PROPERTIES TIMEOUT 60)
-set_tests_properties(toyengine_editor_editor_shell toyengine_editor_package PROPERTIES TIMEOUT 300)
+                     toyengine_editor_imm toyengine_editor_viewport toyengine_editor_config toyengine_editor_project PROPERTIES TIMEOUT 60)
+set_tests_properties(toyengine_editor_editor_shell toyengine_editor_package toyengine_editor_hub PROPERTIES TIMEOUT 300)
 
 # --- Vulkan/GLFW leak gate ---
 # OFF by default here, unlike uicoopa/pixengine which are clean:
@@ -209,13 +237,13 @@ set_tests_properties(toyengine_editor_editor_shell toyengine_editor_package PROP
 # gfxcoopa internals that have no sealed equivalent yet -- GBufferPipeline and
 # TransparentCapturePass's MRT render-pass construction, Renderer::begin_frame()'s
 # raw VkClearColorValue, and SsaoPass's raw view accessors. Run
-# `${GFXCOOPA_DIR}/tools/check_no_vulkan.sh ${CMAKE_SOURCE_DIR}` for the current
+# `${GFXCOOPA_DIR}/tools/check_no_vulkan.sh ${TOYENGINE_DIR}` for the current
 # count; flip ON once those gain wrappers.
 option(GFX_LEAK_CHECK "Fail the build if consumer source names raw Vulkan/GLFW symbols" OFF)
 if(GFX_LEAK_CHECK)
     add_custom_target(toyengine_leak_check ALL
-        COMMAND ${GFXCOOPA_DIR}/tools/check_no_vulkan.sh ${CMAKE_SOURCE_DIR})
+        COMMAND ${GFXCOOPA_DIR}/tools/check_no_vulkan.sh ${TOYENGINE_DIR})
     add_dependencies(toyengine toyengine_leak_check)
     add_dependencies(toyengine_tests toyengine_leak_check)
-    add_test(NAME toyengine_no_vulkan COMMAND ${GFXCOOPA_DIR}/tools/check_no_vulkan.sh ${CMAKE_SOURCE_DIR})
+    add_test(NAME toyengine_no_vulkan COMMAND ${GFXCOOPA_DIR}/tools/check_no_vulkan.sh ${TOYENGINE_DIR})
 endif()

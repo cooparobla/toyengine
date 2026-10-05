@@ -30,6 +30,7 @@ See [Interface](interface.md#use-the-menus) and [Scenes and objects](scenes-and-
 | **Shift+Ctrl+Z** or **Ctrl+Y** | Redo |
 | **Ctrl+N** | New scene |
 | **Ctrl+O** | Open a scene |
+| **Shift+Ctrl+B** | **Build > Refresh**: rebuild the project's code |
 | **Ctrl+Q** | Quit |
 | **F5** | Play / stop the game (in the UI designer: switch Design / Interact) |
 | **Esc** | While playing: take the mouse and keyboard back from the game |
@@ -262,6 +263,29 @@ With a UI asset open and the pointer over the preview. See [Move around the canv
 While dragging a handle: **Shift** keeps the shape (and snaps rotation to 15 degrees), **Alt**
 resizes from the centre, and **Ctrl** turns snapping off.
 
+## File browser
+
+The Open / Save / folder picker (**Open Scene...**, **Save Scene As...**, **Open Project...**).
+It works like the macOS Finder panels. **Back**, **Forward** and **Enclosing Folder** buttons sit
+next to a clickable path bar and a search field. The sidebar lists **Favorites** (this project and
+its `assets/` folder first), **Recent** folders and disks. The file list can be sorted by
+**Name**, **Date Modified**, **Size** and **Kind**. Files the **Format** menu doesn't accept are
+greyed out. On Windows / Linux, use **Ctrl** wherever **Cmd** appears.
+
+| Input | Action |
+|---|---|
+| **Up** / **Down**, **Home** / **End** | Select |
+| Type a name | Select the first match |
+| Double-click, **Enter** or **Cmd+Down** | Open the folder or file (Save: save) |
+| **Cmd+Up** | Enclosing folder |
+| **Cmd+[** / **Cmd+]** | Back / forward |
+| **/**, **~** or **Shift+Cmd+G** | Type a path to go to |
+| **Cmd+F** | Search this folder |
+| **Shift+Cmd+.** | Show / hide hidden files |
+| **Shift+Cmd+H** / **Shift+Cmd+D** | Home / Desktop |
+| **Esc** | Cancel (in the search field: clear it first) |
+
 ---
-Sources: `editor/app/editor_app.h`, `editor/app/ui/topbar.inl`, `editor/app/ui/viewport_chrome.inl`, `editor/app/ui/outliner.inl`, `editor/app/ui/mesh_tools.inl`, `editor/app/ui/sculpt.inl`, `editor/app/ui/paint.inl`, `editor/app/ui/timeline.inl`, `editor/app/ui/ui_canvas.inl`, `editor/app/ui/statusbar.inl`, `editor/app/file_dialog.h`, `editor/viewport/modal_transform.h`, `editor/viewport/rect_gizmo.h`, `editor/app/trackpad.h`, `libs/uicoopa/uicoopa/immediate/imm.h`
+
+Sources: `editor/app/editor_app.h`, `editor/app/ui/topbar.inl`, `editor/app/ui/viewport_chrome.inl`, `editor/app/ui/outliner.inl`, `editor/app/ui/mesh_tools.inl`, `editor/app/ui/sculpt.inl`, `editor/app/ui/paint.inl`, `editor/app/ui/timeline.inl`, `editor/app/ui/ui_canvas.inl`, `editor/app/ui/statusbar.inl`, `libs/uicoopa/uicoopa/immediate/imm_file_dialog.h`, `editor/viewport/modal_transform.h`, `editor/viewport/rect_gizmo.h`, `editor/app/trackpad.h`, `libs/uicoopa/uicoopa/immediate/imm.h`
 Previous: [Project settings and packaging](project-settings.md) | Next: [Editor manual](README.md)

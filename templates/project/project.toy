@@ -1,0 +1,8 @@
+# @NAME@ -- a toyengine project (its name is its folder's). Opened by ./editor.sh and the hub.
+format: toyproject
+version: 1
+target: @TARGET@                # CMake / executable name: build/@TARGET@, build/@TARGET@_editor
+engine:
+  source: @SOURCE@
+  ref: @REF@                    # commit, tag or branch .libs/toyengine is checked out at
+@LINK_LINE@

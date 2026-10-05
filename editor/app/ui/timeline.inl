@@ -176,7 +176,7 @@
     }
 
     /** @brief A new clip on the rig: a file under animations/<rig>/, a state, and (first clip) auto_play. */
-    void anim_new_clip_(std::string name = "Clip") {
+    void anim_new_clip_(std::string name = "clip") {
         if (!anim_rig_) return;
         const auto states = anim_states_();
         auto taken = [&](const std::string& n) {
@@ -184,7 +184,11 @@
             return false;
         };
         const std::string base = name;
-        for (int i = 1; taken(name); ++i) name = base + "." + std::to_string(i);
+        for (int i = 1; taken(name); ++i) {   // clip, clip_001, clip_002... (snake_case, like assets/)
+            char buf[16];
+            std::snprintf(buf, sizeof(buf), "_%03d", i);
+            name = base + buf;
+        }
         const std::string rig_name = get_string(*doc_.find(anim_rig_), "name", "Rig");
         const std::string rel = "animations/" + rig_name + "/" + name + ".yaml";
         ClipModel m;
@@ -908,7 +912,7 @@ public:
     }
     void rename_animation_clip(const std::string& to) { anim_rename_clip_(to); }
     void add_animator(ObjectId id) { anim_add_animator_(id); }
-    void new_animation_clip(const std::string& name = "Clip") { anim_new_clip_(name); }
+    void new_animation_clip(const std::string& name = "clip") { anim_new_clip_(name); }
     void insert_keyframes() { anim_insert_keys_(); }
     /** @brief Moves an object the way the gizmo does (the live pose while recording a rig object). */
     void set_object_transform(ObjectId id, const glm::vec3& p, const glm::vec3& r, const glm::vec3& s) {

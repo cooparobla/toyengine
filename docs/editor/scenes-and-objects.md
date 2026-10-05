@@ -16,8 +16,8 @@ scene in the Hierarchy and Properties, reuse objects across scenes, test the sce
 
 To start a new scene, do one of these:
 
-- Choose **File > New Scene** (**Ctrl+N**). You get an unsaved scene called **Untitled** with a
-  **Camera**, a **Sun**, a **Ground** plane and a **Cube**. To keep it, choose
+- Choose **File > New Scene** (**Ctrl+N**). You get an unsaved scene called `untitled` with a
+  `camera`, a `sun`, a `ground` plane and a `cube`. To keep it, choose
   **File > Save Scene As...** (**Shift+Ctrl+S**) and give it a name.
 - Open the **Scenes** tab of the Asset panel and click **+**. The new scene has the same
   starter objects, is saved straight away and opens.
@@ -45,8 +45,9 @@ asset list, right-click it there and choose **Rename...**.
 | **Terrain** | A terrain |
 
 The new object appears at the [**3D cursor**](viewport.md#place-the-3d-cursor) (the small red-and-white ring in the viewport that
-marks where new things go) and is selected. If another object already has the name, a number
-is added (**Cube.001**). Right after adding a shape you can change its size and detail in the
+marks where new things go) and is selected. It is named in snake_case, like the files in
+`assets/`: **Point Light** becomes `point_light`. If another object already has the name, a
+number is added (`cube_001`, then `cube_002`). Names you type yourself are kept as you write them. Right after adding a shape you can change its size and detail in the
 **Adjust Last Operation** panel, see [Modeling](modeling.md#adjust-the-last-operation).
 
 You can also drag a mesh or an object from the Asset panel into the viewport.

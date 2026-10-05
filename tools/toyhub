@@ -1,0 +1,401 @@
+#!/usr/bin/env bash
+# toyhub -- create and manage toyengine projects from the command line (the GUI is
+# build/toyengine_hub, which drives this same script).
+#
+#   toyhub new <dir> [--ref R | --link [ENGINE_DIR]] [--no-setup]
+#                                      create <dir> as a new project (named after the folder)
+#   toyhub add <dir> [same options]    list a folder as a project; one without a .toy is set up
+#                                      as a new project in place first (nothing is overwritten)
+#   toyhub list [--porcelain]          listed projects (porcelain: name<TAB>path<TAB>engine)
+#   toyhub forget <dir>                stop listing a project (its files stay)
+#   toyhub delete <dir> [--yes]        move a project's folder to the Trash and stop listing it
+#   toyhub build|run|editor|package <dir> [args...]   run that project's script
+#   toyhub open <dir>                  build if needed, then launch the editor detached
+#   toyhub upgrade <dir> [--ref R]     re-pin the engine (default: this checkout's HEAD)
+#   toyhub link <dir> [ENGINE_DIR]     build against a local engine checkout (default: this one)
+#   toyhub unlink <dir>                back to the pinned clone
+#   toyhub install                     symlink toyhub into ~/.local/bin
+#   toyhub app [DEST]                  macOS: write "toyengine Hub.app" (default ~/Applications)
+#
+# The engine this script belongs to is the checkout it lives in (tools/..). Projects pin
+# git@github.com:cooparobla/toyengine.git (public) at a commit; a pinned clone can only use a
+# commit that is pushed, so `new` refuses an unpushed HEAD unless --link or --ref is given.
+# A project's name is always its folder's name. The project list is ~/.toyengine/projects.yaml
+# (shared with the hub, build/toyengine_hub); only `new` and `add` put a project there --
+# nothing is auto-detected -- and the engine checkout itself is never a project.
+set -euo pipefail
+
+TOY_ENGINE_SOURCE="git@github.com:cooparobla/toyengine.git"
+
+# Resolve symlinks (toyhub install) to find the engine checkout.
+_self="${BASH_SOURCE[0]}"
+while [[ -L "$_self" ]]; do
+    _t="$(readlink "$_self")"
+    [[ "$_t" = /* ]] && _self="$_t" || _self="$(dirname "$_self")/$_t"
+done
+ENGINE_DIR="$(cd "$(dirname "$_self")/.." && pwd)"
+TEMPLATE_DIR="$ENGINE_DIR/templates/project"
+HUB_HOME="$HOME/.toyengine"
+REGISTRY="$HUB_HOME/projects.yaml"
+
+for _p in /opt/homebrew/bin /usr/local/bin; do
+    if [[ -d "$_p" && ":$PATH:" != *":$_p:"* ]]; then PATH="$_p:$PATH"; fi
+done
+export PATH
+
+die()  { echo "toyhub: $*" >&2; exit 1; }
+warn() { echo "toyhub: warning: $*" >&2; }
+abspath() { (cd "$1" && pwd); }
+
+usage() { sed -n '2,20p' "$ENGINE_DIR/tools/toyhub" | sed 's/^# \{0,1\}//'; }
+
+# --- .toy access (same flat-YAML reader as a project's .toyenv.sh) ---------------------------
+
+toy_file() { ls "$1"/*.toy 2>/dev/null | head -n 1 || true; }
+
+toy_get() {   # toy_get <file> <key | section.key>
+    awk -v want="$2" '
+        /^[[:space:]]*#/ { next }
+        {
+            line = $0
+            sub(/[[:space:]]+#.*$/, "", line)
+            if (line ~ /^[[:space:]]*$/) next
+            match(line, /^ */); ind = RLENGTH
+            body = substr(line, ind + 1)
+            c = index(body, ":"); if (c == 0) next
+            key = substr(body, 1, c - 1)
+            val = substr(body, c + 1)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", val)
+            gsub(/^["\047]|["\047]$/, "", val)
+            if (ind == 0) { sect = key; full = key } else { full = sect "." key }
+            if (full == want) { print val; exit }
+        }' "$1"
+}
+
+# Rewrites the .toy's engine: block (everything else is kept verbatim).
+toy_set_engine() {   # toy_set_engine <file> <source> <ref> <link>
+    local f="$1" src="$2" ref="$3" link="$4" tmp
+    tmp="$(mktemp)"
+    awk -v src="$src" -v ref="$ref" -v link="$link" '
+        function block() {
+            print "engine:"
+            print "  source: " src
+            print "  ref: " ref "                    # commit, tag or branch .libs/toyengine is checked out at"
+            if (link != "") print "  link: " link "   # local checkout: .libs/toyengine is a symlink to it, ref unused"
+            done = 1
+        }
+        /^engine:/ { block(); skip = 1; next }
+        skip && /^[^[:space:]#]/ { skip = 0 }
+        skip { next }
+        { print }
+        END { if (!done) block() }' "$f" > "$tmp"
+    mv "$tmp" "$f"
+}
+
+project_dir() {   # project_dir <dir or registered name>
+    local d="${1:-.}"
+    if [[ ! -d "$d" ]]; then
+        local p
+        while IFS= read -r p; do
+            [[ -n "$p" && -d "$p" ]] || continue
+            if [[ "$(basename "$p")" == "$d" ]]; then echo "$p"; return; fi
+        done < <(all_projects)
+        die "no project '$d'"
+    fi
+    d="$(abspath "$d")"
+    [[ -n "$(toy_file "$d")" ]] || die "$d has no .toy project file"
+    echo "$d"
+}
+
+# --- project list (~/.toyengine/projects.yaml; the hub's hub_core.h reads/writes the same form) ---
+
+registry_read() {   # one path per line
+    [[ -f "$REGISTRY" ]] || return 0
+    awk '/^[[:space:]]*-[[:space:]]/ { sub(/^[[:space:]]*-[[:space:]]*/, ""); sub(/^"/, ""); sub(/"[[:space:]]*$/, ""); gsub(/\\"/, "\""); print }' "$REGISTRY"
+}
+registry_write() {   # paths on stdin
+    mkdir -p "$HUB_HOME"
+    local tmp; tmp="$(mktemp)"
+    {
+        echo "# Projects listed by the toyengine hub and tools/toyhub (add / new / forget)."
+        echo "projects:"
+        local p
+        while IFS= read -r p; do [[ -n "$p" ]] && printf '  - "%s"\n' "${p//\"/\\\"}"; done
+    } > "$tmp"
+    mv "$tmp" "$REGISTRY"
+}
+is_engine_checkout() { [[ "$(cd "$1" 2>/dev/null && pwd -P)" == "$(cd "$ENGINE_DIR" && pwd -P)" ]]; }
+register() {
+    is_engine_checkout "$1" && die "$1 is the engine checkout, not a project"
+    { registry_read; echo "$1"; } | awk 'NF && !seen[$0]++' | registry_write
+}
+forget() { registry_read | grep -vxF "$1" | registry_write || true; }
+all_projects() { registry_read | awk 'NF && !seen[$0]++'; }
+
+engine_desc() {   # one-line engine description of a project dir
+    local f; f="$(toy_file "$1")"
+    [[ -n "$f" ]] || { echo "(no .toy)"; return; }
+    local link ref
+    link="$(toy_get "$f" engine.link)"; ref="$(toy_get "$f" engine.ref)"
+    if [[ -n "$link" ]]; then echo "linked: $link"; elif [[ -n "$ref" ]]; then echo "${ref:0:12}"; else echo "(no engine pin)"; fi
+}
+
+# --- commands ---------------------------------------------------------------------------------
+
+# Parses new/add options into the caller's ref/link/setup/dir variables.
+parse_project_opts() {
+    while (( $# )); do
+        case "$1" in
+            --ref)  ref="$2"; shift 2 ;;
+            --link) if [[ -n "${2:-}" && "$2" != --* ]]; then link="$2"; shift 2; else link="$ENGINE_DIR"; shift; fi ;;
+            --no-setup) setup=0; shift ;;
+            --name) die "a project's name is its folder's name: pick the folder instead of --name" ;;
+            -*) die "unknown option $1" ;;
+            *)  dir="$1"; shift ;;
+        esac
+    done
+}
+
+# scaffold <dir> <ref> <link>: lays the project template into <dir> (named after it), never
+# overwriting a file that already exists.
+scaffold() {
+    local dir="$1" ref="$2" link="$3"
+    local name; name="$(basename "$dir")"
+    # CMake target / C identifier: lower-case, [a-z0-9_], not starting with a digit.
+    local target
+    target="$(echo "$name" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_]+/_/g; s/^_+|_+$//g')"
+    [[ -n "$target" ]] || target="game"
+    if [[ "$target" =~ ^[0-9] ]]; then target="game_$target"; fi
+    if [[ "$target" == "toyengine" || "$target" == toyengine_* ]]; then target="game_$target"; fi
+
+    if [[ -n "$link" ]]; then
+        link="$(abspath "$link")"
+        [[ -n "$ref" ]] || ref="$(git -C "$link" rev-parse HEAD 2>/dev/null || echo main)"
+    elif [[ -z "$ref" ]]; then
+        ref="$(git -C "$ENGINE_DIR" rev-parse HEAD)"
+        if [[ -z "$(git -C "$ENGINE_DIR" branch -r --contains "$ref" 2>/dev/null)" ]]; then
+            die "this checkout's HEAD ($(git -C "$ENGINE_DIR" rev-parse --short HEAD)) is not pushed, so a clone could not check it out. Push it, pass --ref <pushed ref>, or use --link"
+        fi
+    fi
+
+    # A .toy without a target (the editor's minimal one) is replaced by the template's.
+    local old
+    for old in "$dir"/*.toy; do
+        if [[ -f "$old" && -z "$(toy_get "$old" target)" ]]; then rm "$old"; fi
+    done
+
+    # Template files (dotfiles included), placeholders substituted.
+    (cd "$TEMPLATE_DIR" && find . -type f) | while IFS= read -r rel; do
+        local out="$dir/${rel#./}"
+        if [[ "$rel" == "./project.toy" ]]; then out="$dir/$target.toy"; fi
+        if [[ -e "$out" ]]; then echo "[toyhub] kept existing ${out#$dir/}"; continue; fi
+        mkdir -p "$(dirname "$out")"
+        sed -e "s|@NAME@|$name|g" -e "s|@TARGET@|$target|g" -e "s|@SOURCE@|$TOY_ENGINE_SOURCE|g" -e "s|@REF@|$ref|g" \
+            "$TEMPLATE_DIR/$rel" > "$out"
+        if [[ -x "$TEMPLATE_DIR/$rel" ]]; then chmod +x "$out"; fi
+        if [[ "$rel" == "./project.toy" ]]; then
+            if [[ -n "$link" ]]; then
+                sed -i.bak "s|^@LINK_LINE@$|  link: $link   # local checkout: .libs/toyengine is a symlink to it, ref unused|" "$out"
+            else
+                sed -i.bak '/^@LINK_LINE@$/d' "$out"
+            fi
+            rm -f "$out.bak"
+        fi
+    done
+    echo "[toyhub] set up $name in $dir (engine: $([[ -n "$link" ]] && echo "linked $link" || echo "$ref"))"
+}
+
+cmd_new() {
+    local dir="" ref="" link="" setup=1
+    parse_project_opts "$@"
+    [[ -n "$dir" ]] || die "usage: toyhub new <dir> [--ref R | --link [ENGINE_DIR]]"
+    if [[ -e "$dir" && -n "$(ls -A "$dir" 2>/dev/null)" ]]; then die "$dir exists and is not empty (use: toyhub add $dir)"; fi
+    mkdir -p "$dir"
+    dir="$(abspath "$dir")"
+    if ! (scaffold "$dir" "$ref" "$link"); then rmdir "$dir" 2>/dev/null || true; exit 1; fi
+    register "$dir"
+    if (( setup )); then "$dir/setup.sh"; fi
+    echo "[toyhub] next: cd \"$dir\" && ./build.sh && ./editor.sh"
+}
+
+cmd_add() {
+    local dir="" ref="" link="" setup=1
+    parse_project_opts "$@"
+    [[ -n "$dir" ]] || die "usage: toyhub add <dir> [--ref R | --link [ENGINE_DIR]]"
+    [[ -d "$dir" ]] || die "$dir is not a folder"
+    dir="$(abspath "$dir")"
+    is_engine_checkout "$dir" && die "$dir is the engine checkout, not a project"
+    local f; f="$(toy_file "$dir")"
+    if [[ -n "$f" && -n "$(toy_get "$f" target)" ]]; then
+        register "$dir"
+        echo "[toyhub] added $(basename "$dir") ($dir)"
+        return
+    fi
+    # No project file yet: set the folder up as a new project around whatever it holds.
+    scaffold "$dir" "$ref" "$link"
+    register "$dir"
+    if (( setup )); then "$dir/setup.sh"; fi
+    echo "[toyhub] added $(basename "$dir") ($dir) -- next: ./build.sh && ./editor.sh"
+}
+
+# Moves <path> to the user's Trash (macOS ~/.Trash, freedesktop ~/.local/share/Trash), so a
+# deleted project can be put back. Falls back to rm -rf only where there is no Trash.
+move_to_trash() {
+    local src="$1" trash=""
+    if [[ "$(uname -s)" == Darwin ]]; then trash="$HOME/.Trash"
+    elif [[ -n "${XDG_DATA_HOME:-}" || -d "$HOME/.local/share" ]]; then trash="${XDG_DATA_HOME:-$HOME/.local/share}/Trash/files"; fi
+    if [[ -z "$trash" ]]; then rm -rf "$src"; echo "[toyhub] deleted $src"; return; fi
+    mkdir -p "$trash"
+    local name dest; name="$(basename "$src")"; dest="$trash/$name"
+    if [[ -e "$dest" ]]; then dest="$trash/$name $(date +%H.%M.%S)"; fi
+    mv "$src" "$dest"
+    echo "[toyhub] moved $src to the Trash ($dest)"
+}
+
+cmd_delete() {
+    local dir="" yes=0
+    while (( $# )); do
+        case "$1" in --yes|-y) yes=1; shift ;; -*) die "delete: unknown option $1" ;; *) dir="$1"; shift ;; esac
+    done
+    [[ -n "$dir" ]] || die "usage: toyhub delete <dir> [--yes]"
+    [[ -d "$dir" ]] || { forget "$(abspath "$(dirname "$dir")")/$(basename "$dir")"; die "$dir does not exist (removed from the list)"; }
+    dir="$(abspath "$dir")"
+    is_engine_checkout "$dir" && die "$dir is the engine checkout, not a project"
+    [[ -n "$(toy_file "$dir")" ]] || die "$dir has no .toy project file; refusing to delete it"
+    if (( ! yes )); then
+        read -r -p "Move $dir to the Trash? [y/N] " reply
+        [[ "$reply" == [yY]* ]] || { echo "[toyhub] cancelled"; return; }
+    fi
+    # A linked engine is only a symlink in .libs/: moving the folder never touches the checkout.
+    move_to_trash "$dir"
+    forget "$dir"
+}
+
+cmd_list() {
+    local porcelain=0
+    if [[ "${1:-}" == "--porcelain" ]]; then porcelain=1; fi
+    local p
+    while IFS= read -r p; do
+        [[ -d "$p" ]] || continue
+        local name; name="$(basename "$p")"
+        [[ -n "$(toy_file "$p")" ]] || continue
+        if (( porcelain )); then printf '%s\t%s\t%s\n' "$name" "$p" "$(engine_desc "$p")"
+        else printf '%-24s %-52s %s\n' "$name" "$p" "$(engine_desc "$p")"; fi
+    done < <(all_projects)
+}
+
+cmd_script() {   # cmd_script <script> <dir> [args...]
+    local script="$1" dir; dir="$(project_dir "${2:-.}")"; shift 2 || shift $#
+    register "$dir"
+    exec "$dir/$script.sh" "$@"
+}
+
+cmd_open() {
+    local dir; dir="$(project_dir "${1:-.}")"
+    register "$dir"
+    local f target; f="$(toy_file "$dir")"; target="$(toy_get "$f" target)"
+    if [[ ! -x "$dir/build/${target}_editor" ]]; then "$dir/build.sh"; fi
+    mkdir -p "$dir/.toyeditor"
+    # Detached: the editor outlives this script (and the hub that may have run it).
+    nohup "$dir/editor.sh" > "$dir/.toyeditor/editor.log" 2>&1 < /dev/null &
+    echo "[toyhub] editor started for $dir (log: .toyeditor/editor.log)"
+}
+
+cmd_upgrade() {
+    local dir="" ref=""
+    while (( $# )); do
+        case "$1" in --ref) ref="$2"; shift 2 ;; *) dir="$1"; shift ;; esac
+    done
+    dir="$(project_dir "${dir:-.}")"
+    local f; f="$(toy_file "$dir")"
+    [[ -n "$ref" ]] || ref="$(git -C "$ENGINE_DIR" rev-parse HEAD)"
+    local src; src="$(toy_get "$f" engine.source)"
+    toy_set_engine "$f" "${src:-$TOY_ENGINE_SOURCE}" "$ref" "$(toy_get "$f" engine.link)"
+    echo "[toyhub] $(basename "$f"): engine.ref = $ref"
+    "$dir/setup.sh"
+}
+
+cmd_link() {
+    local dir; dir="$(project_dir "${1:-.}")"
+    local eng="${2:-$ENGINE_DIR}"; eng="$(abspath "$eng")"
+    local f; f="$(toy_file "$dir")"
+    local src ref; src="$(toy_get "$f" engine.source)"; ref="$(toy_get "$f" engine.ref)"
+    if [[ -e "$dir/.libs/toyengine" && ! -L "$dir/.libs/toyengine" ]]; then
+        local dirty; dirty="$(git -C "$dir/.libs/toyengine" status --porcelain --untracked-files=no 2>/dev/null || true)"
+        [[ -z "$dirty" ]] || die "$dir/.libs/toyengine has local changes; commit or discard them before linking"
+        rm -rf "$dir/.libs/toyengine"
+    fi
+    toy_set_engine "$f" "${src:-$TOY_ENGINE_SOURCE}" "${ref:-main}" "$eng"
+    rm -rf "$dir/build" "$dir"/build-*   # the CMake cache remembers the old engine path
+    "$dir/setup.sh"
+}
+
+cmd_unlink() {
+    local dir; dir="$(project_dir "${1:-.}")"
+    local f; f="$(toy_file "$dir")"
+    local src ref; src="$(toy_get "$f" engine.source)"; ref="$(toy_get "$f" engine.ref)"
+    toy_set_engine "$f" "${src:-$TOY_ENGINE_SOURCE}" "${ref:-main}" ""
+    if [[ -L "$dir/.libs/toyengine" ]]; then rm "$dir/.libs/toyengine"; fi
+    rm -rf "$dir/build" "$dir"/build-*
+    "$dir/setup.sh"
+}
+
+cmd_install() {
+    mkdir -p "$HOME/.local/bin"
+    ln -sfn "$ENGINE_DIR/tools/toyhub" "$HOME/.local/bin/toyhub"
+    echo "[toyhub] linked ~/.local/bin/toyhub -> $ENGINE_DIR/tools/toyhub"
+    [[ ":$PATH:" == *":$HOME/.local/bin:"* ]] || warn "~/.local/bin is not on PATH"
+}
+
+cmd_app() {
+    [[ "$(uname -s)" == Darwin ]] || die "app: macOS only"
+    local dest="${1:-$HOME/Applications}"
+    local hub="$ENGINE_DIR/build/toyengine_hub"
+    [[ -x "$hub" ]] || die "$hub not built -- cmake --build build --target toyengine_hub (in $ENGINE_DIR)"
+    local app="$dest/toyengine Hub.app"
+    mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+    cat > "$app/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleName</key><string>toyengine Hub</string>
+  <key>CFBundleDisplayName</key><string>toyengine Hub</string>
+  <key>CFBundleIdentifier</key><string>com.cooparobla.toyengine.hub</string>
+  <key>CFBundleExecutable</key><string>toyengine-hub</string>
+  <key>CFBundleIconFile</key><string>toyengine</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>0.1.0</string>
+  <key>NSHighResolutionCapable</key><true/>
+</dict></plist>
+PLIST
+    # A launcher, not a copy: the hub stays the engine checkout's build (it finds the engine,
+    # themes and templates there), so rebuilding the engine updates the app.
+    cat > "$app/Contents/MacOS/toyengine-hub" <<LAUNCH
+#!/usr/bin/env bash
+export PATH="/opt/homebrew/bin:/usr/local/bin:\$PATH"
+exec "$hub" "\$@"
+LAUNCH
+    chmod +x "$app/Contents/MacOS/toyengine-hub"
+    local icns="$ENGINE_DIR/editor/branding/toyengine.icns"
+    if [[ -f "$icns" ]]; then cp "$icns" "$app/Contents/Resources/toyengine.icns"; fi
+    echo "[toyhub] wrote $app"
+}
+
+cmd="${1:-help}"; shift || true
+case "$cmd" in
+    new)      cmd_new "$@" ;;
+    list|ls)  cmd_list "$@" ;;
+    add)      cmd_add "$@" ;;
+    forget)   d="$(abspath "${1:-.}")"; forget "$d"; echo "[toyhub] forgot $d" ;;
+    delete)   cmd_delete "$@" ;;
+    build|run|editor|package|setup|clean) cmd_script "$cmd" "$@" ;;
+    open)     cmd_open "$@" ;;
+    upgrade)  cmd_upgrade "$@" ;;
+    link)     cmd_link "$@" ;;
+    unlink)   cmd_unlink "$@" ;;
+    install)  cmd_install ;;
+    app)      cmd_app "$@" ;;
+    engine)   echo "$ENGINE_DIR" ;;
+    help|-h|--help) usage ;;
+    *) die "unknown command '$cmd' (toyhub help)" ;;
+esac

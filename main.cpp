@@ -33,11 +33,11 @@ namespace {
  * Accepts either a bare scene NAME under assets/scenes (`physics_test`, which expands to
  * assets/scenes/<name>/scene.yaml -- the layout every scene in this repo uses) or an
  * explicit path to a .yaml/.caml, matching the SCENE env override's rules exactly (see
- * Engine::scene_path_from_env_()). The returned path is repo-relative; Engine resolves
- * it against ROOT_DIR.
+ * Engine::scene_path_from_env_()). The returned path is project-relative; Engine resolves
+ * it against the project root.
  *
  * @param scene The argument as typed, e.g. "world_canvas_test" or "assets/scenes/x/scene.yaml".
- * @return std::string A path to a scene.yaml, relative to the repo root.
+ * @return std::string A path to a scene.yaml, relative to the project root.
  */
 std::string resolve_scene_arg(const std::string& scene) {
     if (coopa::yaml::is_document_ext(scene)) return scene;
@@ -58,7 +58,9 @@ int main(int argc, char** argv) {
 
     // CONFIG=<path> loads a different config file than assets/config.yaml -- for a scripted
     // run (a benchmark, an A/B of one render toggle) that should not edit the tracked file.
-    std::string config_path = std::string(ROOT_DIR) + "/assets/config.yaml";
+    // The project is this repo when building toyengine itself, or the game project this binary
+    // was built for (TOY_PROJECT_DIR overrides either; see Engine::default_project_root()).
+    std::string config_path = (toy::core::Engine::default_project_root() / "assets" / "config.yaml").string();
     if (const char* c = std::getenv("CONFIG"); c && *c) config_path = c;
     toy::core::AppConfig app_config = toy::core::AppConfig::load(config_path);
 

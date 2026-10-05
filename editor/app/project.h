@@ -4,6 +4,7 @@
  *
  * Layout the editor reads and writes -- the same one the game loads:
  * @code
+ * <root>/<name>.toy                       (project file; optional -- see below)
  * <root>/assets/config.yaml
  *              scenes/<name>/scene.yaml   (+ scene-local meshes/, textures/)
  *              meshes/*.yaml              (+ <mesh>.lod.yaml sidecars)
@@ -12,6 +13,11 @@
  *              textures/*.png
  * @endcode
  * Shaders and fonts come from the engine build, not the project.
+ *
+ * A project made by tools/toyhub also has a `<target>.toy` (YAML: `target`, and an `engine:`
+ * block pinning the toyengine checkout in .libs/toyengine), src/ for its C++ and the build/run
+ * scripts. A project's name is always its folder's name. A bare directory with an assets/
+ * folder -- this repository itself -- is a project to the editor too.
  */
 
 #ifndef TOYEDITOR_APP_PROJECT_H
@@ -23,6 +29,8 @@
 
 #include <coopa/yaml/document.h>
 #include <coopa/yaml/writer.h>
+
+#include <root_directory.h>
 
 #include <algorithm>
 #include <chrono>
@@ -128,8 +136,43 @@ public:
     const fs::path& root() const { return root_; }
     fs::path assets() const { return root_ / "assets"; }
     fs::path config_path() const { return assets() / "config.yaml"; }
-    bool valid() const { std::error_code ec; return fs::is_directory(assets(), ec); }
-    std::string name() const { return root_.filename().string(); }
+    /** @brief A project has an assets/ folder, or a `.toy` file (assets/ not created yet). */
+    bool valid() const { std::error_code ec; return fs::is_directory(assets(), ec) || !project_file().empty(); }
+    /** @brief True once assets/ exists (a fresh `.toy` project gets it from create()). */
+    bool has_assets() const { std::error_code ec; return fs::is_directory(assets(), ec); }
+    /** @brief The project's name: always its folder's name. */
+    std::string name() const {
+        const fs::path r = root_.has_filename() ? root_ : root_.parent_path();   // "/x/y/" -> "y"
+        return r.filename().string();
+    }
+
+    // --- the .toy project file ---
+
+    /** @brief The project's `.toy` file (the first, alphabetically), or empty if it has none. */
+    fs::path project_file() const { return find_project_file(root_); }
+    static fs::path find_project_file(const fs::path& root) {
+        std::error_code ec;
+        std::vector<fs::path> found;
+        for (auto it = fs::directory_iterator(root, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+            if (it->is_regular_file(ec) && it->path().extension() == ".toy") found.push_back(it->path());
+        }
+        std::sort(found.begin(), found.end());
+        return found.empty() ? fs::path() : found.front();
+    }
+    /** @brief A `.toy` document (an empty mapping if unreadable). */
+    static Node load_toy(const fs::path& path) {
+        try { if (auto n = coopa::yaml::try_load_document(path)) return *n; } catch (...) {}
+        return Node::mapping();
+    }
+    /** @brief The minimal `.toy` the editor writes for a project it creates (no engine pin --
+     *         tools/toyhub adds that when it sets a project up for building). No name: a
+     *         project's name is its folder's. */
+    static Node default_toy() {
+        Node toy = Node::mapping();
+        toy["format"] = Node(std::string("toyproject"));
+        toy["version"] = Node(int64_t(1));
+        return toy;
+    }
 
     /** @brief `p` relative to assets/ with forward slashes, or `p` unchanged if outside. */
     std::string relative(const fs::path& p) const {
@@ -271,40 +314,31 @@ public:
     }
 
     /**
-     * @brief Creates a new project skeleton at `root`: folders, a config.yaml, starter
-     *        meshes and a default scene with a camera, a sun and a ground plane.
+     * @brief Creates a new project skeleton at `root`: a `.toy` (unless it has one), folders,
+     *        a config.yaml, starter meshes and a default scene with a camera, a sun and a
+     *        ground plane.
      * @return The project. Existing files are never overwritten.
      */
     static Project create(const fs::path& root) {
         Project p(root);
         std::error_code ec;
+        fs::create_directories(root, ec);
+        if (p.project_file().empty()) {
+            const std::string n = p.name().empty() ? std::string("project") : p.name();
+            coopa::yaml::save_document(root / (n + ".toy"), default_toy());
+        }
         for (const char* d : {"scenes/main", "objects", "meshes", "materials", "physics_materials", "textures", "ui"}) {
             fs::create_directories(p.assets() / d, ec);
         }
         auto write_if_missing = [&](const fs::path& path, const Node& node) {
             if (!fs::exists(path, ec)) coopa::yaml::save_document(path, node);
         };
-        // config.yaml: the handful of keys a fresh project wants explicit; everything else
-        // falls back to engine defaults / quality presets (so nothing gets pinned).
-        Node cfg = Node::mapping();
-        Node win = Node::mapping();
-        win["title"] = Node(p.name().empty() ? std::string("toyengine") : p.name());
-        win["width"] = Node(int64_t(1280));
-        win["height"] = Node(int64_t(720));
-        win["vsync"] = Node(true);
-        cfg["window"] = win;
-        Node sc = Node::mapping();
-        sc["default_scene"] = Node(std::string("assets/scenes/main/scene.yaml"));
-        cfg["scene"] = sc;
-        Node render = Node::mapping();
-        render["resolution_mode"] = Node(std::string("fixed"));
-        render["render_width"] = Node(int64_t(480));
-        render["render_height"] = Node(int64_t(270));
-        render["shadows_enabled"] = Node(true);
-        render["aa_mode"] = Node(std::string("off"));
-        render["transparency_enabled"] = Node(true);   // BLEND materials render (engine default: off)
-        cfg["render"] = render;
-        write_if_missing(p.config_path(), cfg);
+        // config.yaml: the engine's own (ROOT_DIR/assets/config.yaml), copied as text so its
+        // comments come along -- only the window title and the default scene are this project's.
+        // Paths it names that the project lacks (the palette) resolve to the engine's assets/.
+        if (!fs::exists(p.config_path(), ec)) {
+            std::ofstream(p.config_path()) << default_config_text(p.name().empty() ? std::string("toyengine") : p.name());
+        }
 
         write_if_missing(p.assets() / "meshes" / "cube.yaml", mesh_to_node(make_cube()));
         write_if_missing(p.assets() / "meshes" / "plane.yaml", mesh_to_node(make_plane(1.0f)));
@@ -322,11 +356,37 @@ public:
         phys["restitution"] = make_float(0.1);
         write_if_missing(p.assets() / "physics_materials" / "default.yaml", phys);
 
-        write_if_missing(p.assets() / "scenes" / "main" / "scene.yaml", default_scene_node("Main"));
-        return p;
+        write_if_missing(p.assets() / "scenes" / "main" / "scene.yaml", default_scene_node("main"));
+        return Project(root);
     }
 
-    /** @brief A starter scene document: camera, sun, ground plane, a cube. */
+    /**
+     * @brief The engine's assets/config.yaml text with `window.title` set to `title` and
+     *        `scene.default_scene` pointing at the new project's main scene; every other line
+     *        (settings and comments) verbatim.
+     */
+    static std::string default_config_text(const std::string& title) {
+        std::ifstream in(fs::path(ROOT_DIR) / "assets" / "config.yaml", std::ios::binary);
+        std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        auto set_line = [&](const std::string& section, const std::string& key, const std::string& value) {
+            const size_t sec = text.find("\n" + section + ":");
+            const size_t from = text.rfind(section + ":", 0) == 0 ? 0 : sec;
+            if (from == std::string::npos) { text += "\n" + section + ":\n  " + key + ": " + value + "\n"; return; }
+            const size_t at = text.find("\n  " + key + ":", from);
+            if (at == std::string::npos) return;
+            const size_t eol = text.find('\n', at + 1);
+            text.replace(at + 1, (eol == std::string::npos ? text.size() : eol) - at - 1, "  " + key + ": " + value);
+        };
+        std::string quoted = "\"";
+        for (char c : title) { if (c == '"' || c == '\\') quoted += '\\'; quoted += c; }
+        quoted += "\"";
+        set_line("window", "title", quoted);
+        set_line("scene", "default_scene", "\"assets/scenes/main/scene.yaml\"");
+        return text;
+    }
+
+    /** @brief A starter scene document: camera, sun, ground plane, a cube -- named in snake_case,
+     *         like everything in assets/. */
     static Node default_scene_node(const std::string& name) {
         auto obj = [](const std::string& n, glm::vec3 pos, glm::vec3 rot, glm::vec3 scl) {
             Node o = Node::mapping();
@@ -344,7 +404,7 @@ public:
             return o;
         };
         Node roots = Node::sequence();
-        Node cam = obj("Camera", {6.0f, -6.0f, 4.5f}, {63.0f, 0.0f, 45.0f}, glm::vec3(1.0f));
+        Node cam = obj("camera", {6.0f, -6.0f, 4.5f}, {63.0f, 0.0f, 45.0f}, glm::vec3(1.0f));
         Node c = Node::mapping();
         c["type"] = Node(std::string("Camera"));
         c["main"] = Node(true);
@@ -353,7 +413,7 @@ public:
         cam["components"].as_seq().push_back(c);
         roots.as_seq().push_back(cam);
 
-        Node sun = obj("Sun", glm::vec3(0.0f), glm::vec3(0.0f), glm::vec3(1.0f));
+        Node sun = obj("sun", glm::vec3(0.0f), glm::vec3(0.0f), glm::vec3(1.0f));
         Node l = Node::mapping();
         l["type"] = Node(std::string("DirectionalLight"));
         l["direction"] = make_vec3({-0.35f, -0.45f, -0.82f});
@@ -363,7 +423,7 @@ public:
         sun["components"].as_seq().push_back(l);
         roots.as_seq().push_back(sun);
 
-        Node ground = obj("Ground", glm::vec3(0.0f), glm::vec3(0.0f), {8.0f, 8.0f, 1.0f});
+        Node ground = obj("ground", glm::vec3(0.0f), glm::vec3(0.0f), {8.0f, 8.0f, 1.0f});
         Node gm = Node::mapping();
         gm["type"] = Node(std::string("MeshRenderer"));
         gm["mesh_path"] = Node(std::string("plane"));
@@ -371,7 +431,7 @@ public:
         ground["components"].as_seq().push_back(gm);
         roots.as_seq().push_back(ground);
 
-        Node cube = obj("Cube", {0.0f, 0.0f, 0.5f}, glm::vec3(0.0f), glm::vec3(1.0f));
+        Node cube = obj("cube", {0.0f, 0.0f, 0.5f}, glm::vec3(0.0f), glm::vec3(1.0f));
         Node cm = Node::mapping();
         cm["type"] = Node(std::string("MeshRenderer"));
         cm["mesh_path"] = Node(std::string("cube"));

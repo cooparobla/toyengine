@@ -61,6 +61,7 @@
 #include <toyengine/scene/register.h>
 #include <toyengine/world/terrain_system.h>
 #include <toyengine/water/water_system.h>
+#include <toyengine/core/module.h>
 
 #include <root_directory.h>
 
@@ -73,8 +74,10 @@ namespace core {
  */
 struct EngineOptions {
     /// Directory holding the project's assets/ folder. Relative scene/palette/LUT paths in
-    /// the config resolve against it, and <project_root>/assets is the asset search root.
-    /// Empty means the repo root this binary was built from (ROOT_DIR).
+    /// the config resolve against it, and <project_root>/assets is the first asset search
+    /// root (the engine checkout's assets/ is the fallback under it). Empty means the
+    /// TOY_PROJECT_DIR env var, else the project this binary was built for (TOY_PROJECT_ROOT,
+    /// which is ROOT_DIR when building toyengine itself).
     std::filesystem::path project_root;
     /// Load config.scene.default_scene (or SCENE) during construction. A tool that picks its
     /// scene later turns this off and calls load_scene()/set_scene() itself.
@@ -163,9 +166,11 @@ public:
 
         edit_mode_ = options_.edit_mode;
         if (options_.set_app_icon) apply_app_icon_();
-        assets_.add_search_root((options_.project_root / "assets").string());
-        // `prefab: objects/crate` (object assets) resolves against the project's assets too.
-        coopa::scene::SceneLoader::set_search_roots({(options_.project_root / "assets").string()});
+        // The project's assets first, then the engine checkout's as the fallback layer (shared
+        // meshes, materials, fonts, UI themes); the same directory when building toyengine itself.
+        for (const std::string& root : asset_roots()) assets_.add_search_root(root);
+        // `prefab: objects/crate` (object assets) resolves against the same roots.
+        coopa::scene::SceneLoader::set_search_roots(asset_roots());
         assets_.register_loader<coopa::gfx::engine::data::Mesh>(
             std::make_unique<coopa::gfx::engine::loaders::MeshLoader>(ctx_.device(), ctx_.allocator(), ctx_.command_pool()));
         // Pure-CPU bind-pose data for SkinnedMeshRenderer (toy::scene) -- no GPU handles, unlike
@@ -201,6 +206,11 @@ public:
         // no vertex skinning in this engine), referenced from a scene's `Animator` component.
         // Must precede load_scene(), like every other parser registration above.
         coopa::anim::register_animation_components(assets_);
+        // Project modules (TOY_MODULE in a project's src/, see module.h) last, so they can
+        // build on -- or replace -- any parser registered above.
+        for (const Module& m : modules()) {
+            if (m.on_engine_init) m.on_engine_init(*this);
+        }
 
         if (options_.load_default_scene) {
             load_scene(resolve_path_(scene_path_from_env_(config_.scene.default_scene)));
@@ -469,6 +479,17 @@ public:
     coopa::scene::SceneManager&   scene_manager() { return scene_mgr_; }
     const AppConfig&              config() const  { return config_; }
     const std::filesystem::path&  project_root() const { return options_.project_root; }
+    /// Asset search roots, highest priority first: <project_root>/assets, then the engine
+    /// checkout's assets/ (omitted when they are the same directory).
+    std::vector<std::string> asset_roots() const {
+        std::vector<std::string> roots{(options_.project_root / "assets").string()};
+        const std::filesystem::path engine_assets = std::filesystem::path(ROOT_DIR) / "assets";
+        std::error_code ec;
+        if (!std::filesystem::equivalent(options_.project_root / "assets", engine_assets, ec)) {
+            roots.push_back(engine_assets.string());
+        }
+        return roots;
+    }
     bool has_scene() const { return scene_mgr_.has_scene(); }
     /// Window size in swapchain pixels.
     glm::uvec2 window_extent() {
@@ -495,11 +516,23 @@ public:
     void wait_idle() { ctx_.wait_idle(); }
 
 private:
-    /** @brief Fills in EngineOptions defaults (project_root -> ROOT_DIR). */
+    /** @brief Fills in EngineOptions defaults (project_root -> TOY_PROJECT_DIR env, else TOY_PROJECT_ROOT). */
     static EngineOptions normalize_options_(EngineOptions o) {
-        if (o.project_root.empty()) o.project_root = std::filesystem::path(ROOT_DIR);
+        if (o.project_root.empty()) o.project_root = default_project_root();
         return o;
     }
+
+public:
+    /**
+     * @brief The project this process runs when nothing says otherwise: TOY_PROJECT_DIR if set
+     *        (a packaged or relocated build), else the project it was compiled for.
+     */
+    static std::filesystem::path default_project_root() {
+        if (const char* p = std::getenv("TOY_PROJECT_DIR"); p && *p) return std::filesystem::path(p);
+        return std::filesystem::path(TOY_PROJECT_ROOT);
+    }
+
+private:
 
     /** @brief Destroys every managed scene. */
     void clear_scenes_() {
@@ -1441,6 +1474,21 @@ private:
     }
 
     /**
+     * @brief resolve_against_(), with the engine checkout as the fallback layer: a file the
+     *        project doesn't have (a game project's config.yaml starts as a copy of the engine's,
+     *        whose `palette:` names assets/palettes/...) resolves to the engine's copy if that
+     *        exists. Same rule as the asset search roots (asset_roots()).
+     */
+    static std::string resolve_asset_file_(const std::filesystem::path& root, const std::string& path) {
+        const std::string in_project = resolve_against_(root, path);
+        if (in_project.empty() || std::filesystem::path(path).is_absolute()) return in_project;
+        std::error_code ec;
+        if (std::filesystem::exists(in_project, ec)) return in_project;
+        const std::filesystem::path in_engine = std::filesystem::path(ROOT_DIR) / path;
+        return std::filesystem::exists(in_engine, ec) ? in_engine.string() : in_project;
+    }
+
+    /**
      * @brief Pumps AssetManager until every load issued during scene load has been finalized.
      *
      * Mesh decode runs on jobs_'s worker threads, so a scene's mesh YAML parses overlap
@@ -1561,19 +1609,27 @@ private:
                                                          const std::filesystem::path& project_root) {
         render::PixelRenderConfig rc = config.render;
         rc.shader_dir = std::string(ROOT_DIR) + "/assets/shaders";
+        // A project's own assets/shaders goes in front of everything (first-match-wins), so a
+        // project shader shadows the engine's of the same name -- see cmake/ToyProject.cmake.
+        const std::filesystem::path project_shaders = project_root / "assets" / "shaders";
+        std::error_code shader_ec;
+        const bool has_project_shaders =
+            std::filesystem::is_directory(project_shaders, shader_ec) &&
+            !std::filesystem::equivalent(project_shaders, rc.shader_dir, shader_ec);
         // App directory first, gfxcoopa's shared base library second -- the runtime mirror of
         // the glslc -I search order (see assets/shaders/.glslc_flags). uicoopa's own shader
         // directory is a third root rather than app_over_base()'s two, for the UI passes'
         // ui*.vert/frag; it goes LAST so that a future uicoopa file sharing a logical name
         // with a gfxcoopa base shader can never shadow the base copy (ShaderLibrary::resolve()
         // is first-match-wins). There are no collisions across the three roots today.
-        rc.shaders = coopa::gfx::pipeline::ShaderLibrary(std::vector<std::string>{
-            rc.shader_dir,
-            std::string(PROJ_DIR) + "/gfxcoopa/assets/shaders",
-            std::string(PROJ_DIR) + "/uicoopa/assets/shaders",
-        });
-        if (!rc.palette_path.empty()) rc.palette_path = resolve_against_(project_root, rc.palette_path);
-        if (!rc.grading_lut_path.empty()) rc.grading_lut_path = resolve_against_(project_root, rc.grading_lut_path);
+        std::vector<std::string> shader_roots;
+        if (has_project_shaders) shader_roots.push_back(project_shaders.string());
+        shader_roots.push_back(rc.shader_dir);
+        shader_roots.push_back(std::string(PROJ_DIR) + "/gfxcoopa/assets/shaders");
+        shader_roots.push_back(std::string(PROJ_DIR) + "/uicoopa/assets/shaders");
+        rc.shaders = coopa::gfx::pipeline::ShaderLibrary(shader_roots);
+        if (!rc.palette_path.empty()) rc.palette_path = resolve_asset_file_(project_root, rc.palette_path);
+        if (!rc.grading_lut_path.empty()) rc.grading_lut_path = resolve_asset_file_(project_root, rc.grading_lut_path);
 
         // Derived surface shaders this app ships -- see gfx/surface/*.glsl. A scene material
         // opts in via `shader: <name>` (see PBRMaterial::shader); a material that never sets it

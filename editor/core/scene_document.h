@@ -27,6 +27,7 @@
 #include <coopa/yaml/writer.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -75,7 +76,7 @@ public:
     }
 
     /** @brief A new, empty, unsaved scene named `name`. */
-    void reset(const std::string& name = "Untitled") {
+    void reset(const std::string& name = "untitled") {
         object_asset_ = false;
         object_extras_ = Node::mapping();
         doc_ = Node::mapping();
@@ -292,8 +293,12 @@ public:
         return obj;
     }
 
-    /** @brief A name unique among the parent's children: "Cube", "Cube.001", ... */
-    std::string unique_name(const std::string& base, ObjectId parent = 0) const {
+    /**
+     * @brief A name unique among the parent's children: "cube", "cube_001", "cube_002"... (the
+     *        snake_case numbering assets/ uses). A base that already carries a number
+     *        ("cube_001", or Blender's "Cube.001") is renumbered rather than suffixed again.
+     */
+    std::string unique_name(std::string base, ObjectId parent = 0) const {
         const Node* list = parent == 0 ? &root_objects() : nullptr;
         if (parent != 0) {
             const Node* p = find(parent);
@@ -305,9 +310,16 @@ public:
             return false;
         };
         if (!taken(base)) return base;
+        // Strip an existing _NNN / .NNN so duplicating cube_001 gives cube_002, not cube_001_001.
+        if (base.size() > 4) {
+            const size_t k = base.size() - 4;
+            const bool digits = std::isdigit(static_cast<unsigned char>(base[k + 1])) && std::isdigit(static_cast<unsigned char>(base[k + 2])) &&
+                                std::isdigit(static_cast<unsigned char>(base[k + 3]));
+            if (digits && (base[k] == '_' || base[k] == '.')) base.erase(k);
+        }
         for (int i = 1; i < 10000; ++i) {
             char buf[32];
-            std::snprintf(buf, sizeof(buf), ".%03d", i);
+            std::snprintf(buf, sizeof(buf), "_%03d", i);
             if (!taken(base + buf)) return base + buf;
         }
         return base;

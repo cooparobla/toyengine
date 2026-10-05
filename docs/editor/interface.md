@@ -78,6 +78,23 @@ or while the game is playing.
 | **Render Settings** | Opens the **Render** tab in Properties |
 | **World Settings** | Opens the **World** tab in Properties |
 
+### Build
+
+| Item | What it does |
+|---|---|
+| **Refresh** (**Shift+Ctrl+B**) | Rebuilds this project's game and editor, so changes to its C++ in `src/` take effect, for example after editing them in VS Code. Any running game stops first. |
+
+While it builds, a **Build Project** window shows the build output and blocks the editor until
+the build finishes or you press **Cancel Build**.
+
+- **The build fails.** The window lists each compiler error with its file and line. Click one
+  to open it in VS Code (or, without VS Code, in the file's default app). The errors also go to
+  the Console. **Rebuild** tries again, and **Copy Log** copies the whole output.
+- **The build changes the editor.** Press **Relaunch Editor** to restart it on the same project
+  so the new code loads. If anything is unsaved, the editor asks whether to save it first.
+  **Later** keeps working in the current editor.
+- **Nothing changed.** The window says the build is already up to date.
+
 ### Window
 
 | Item | Shortcut | What it does |
@@ -248,6 +265,6 @@ theme, see [UI designer](ui-designer.md#style-the-ui-with-a-theme).
 
 ---
 
-Sources: `editor/app/ui/topbar.inl`, `editor/app/ui/layout.inl`, `editor/app/ui/assets.inl`, `editor/app/ui/browser.inl`, `editor/app/ui/outliner.inl`, `editor/app/ui/statusbar.inl`, `editor/app/ui/properties.inl`, `editor/app/ui/theme_editor.inl`, `editor/app/editor_theme.h`, `editor/app/editor_app.h`
+Sources: `editor/app/ui/topbar.inl`, `editor/app/ui/layout.inl`, `editor/app/ui/assets.inl`, `editor/app/ui/browser.inl`, `editor/app/ui/outliner.inl`, `editor/app/ui/statusbar.inl`, `editor/app/ui/properties.inl`, `editor/app/ui/theme_editor.inl`, `editor/app/editor_theme.h`, `editor/app/editor_app.h`, `editor/app/ui/build.inl`
 
 Previous: [Editor manual](README.md) | Next: [Scenes and objects](scenes-and-objects.md)

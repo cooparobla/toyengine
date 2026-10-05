@@ -78,6 +78,7 @@
 #include <toyengine/render/pixel_math.h>
 #include <toyengine/render/visibility.h>
 #include <toyengine/scene/free_mover.h>
+#include <coopa/yaml/document.h>
 #include <toyengine/world/terrain_chunk.h>
 #include <toyengine/water/buoyancy.h>
 #include <toyengine/water/water_body.h>
@@ -2621,6 +2622,342 @@ void test_sampler_chunks_agree_across_their_shared_border() {
     expect(!mesh.empty(), "sampler: a chunk of generated terrain meshes to something drawable");
 }
 
+// --- Styled tiles (toyengine/world/tile_topology.h) -------------------------------------
+
+/** @brief Loads one generated piece from the repo's assets/meshes, whatever the working directory. */
+coopa::gfx::engine::data::SkinnedMeshSource load_tile_piece(const std::string& name) {
+    return coopa::gfx::engine::data::SkinnedMeshSource::from_node(coopa::yaml::load_document(
+        std::filesystem::path(ROOT_DIR) / "assets" / "meshes" / (name + ".yaml")));
+}
+
+/**
+ * @brief A library with all four shipped styles: `round` (style 0, every kind not listed),
+ *        `rock` (Stone, Rock), `soft` (Sand) and `flat` (Snow) -- so seams between every pair
+ *        of styles get exercised.
+ *        Built once: it is immutable, and loading twenty YAML files per test adds up.
+ */
+const toy::world::TileMeshLibrary& styled_library() {
+    using namespace toy::world;
+    static const TileMeshLibrary library = [] {
+        TileMeshLibrary lib;
+        lib.bake_canonical(make_canonical_quad());
+        for (const char* style : {"tile_round", "tile_rock", "tile_soft", "tile_flat"}) {
+            const std::uint8_t index = lib.add_style();
+            for (std::size_t p = 0; p < k_tile_piece_count; ++p) {
+                const auto piece = static_cast<TilePiece>(p);
+                lib.bake_style_piece(index, piece,
+                                     load_tile_piece(std::string(style) + "_" + tile_piece_name(piece)));
+            }
+        }
+        lib.finish_styles();
+        lib.set_kind_style(TileKind::Stone, 1);
+        lib.set_kind_style(TileKind::Rock, 1);
+        lib.set_kind_style(TileKind::Sand, 2);
+        lib.set_kind_style(TileKind::Snow, 3);
+        return lib;
+    }();
+    return library;
+}
+
+/** @brief A pad (skirt included) with every column at `steps`. */
+toy::world::ColumnPad make_styled_pad(std::int32_t chunk_size, std::int32_t steps) {
+    toy::world::ColumnPad pad;
+    pad.resize(chunk_size);
+    for (auto& column : pad.columns) column.steps = steps;
+    return pad;
+}
+
+/** @brief Geometric (winding) normal of triangle `t` of a merged chunk mesh, unnormalised. */
+glm::vec3 chunk_triangle_normal(const toy::world::ChunkMeshData& mesh, std::size_t t) {
+    const glm::vec3& a = mesh.vertices[mesh.indices[t * 3]].position;
+    const glm::vec3& b = mesh.vertices[mesh.indices[t * 3 + 1]].position;
+    const glm::vec3& c = mesh.vertices[mesh.indices[t * 3 + 2]].position;
+    return glm::cross(b - a, c - a);
+}
+
+/** @brief Centroid of triangle `t` of a merged chunk mesh. */
+glm::vec3 chunk_triangle_centroid(const toy::world::ChunkMeshData& mesh, std::size_t t) {
+    return (mesh.vertices[mesh.indices[t * 3]].position + mesh.vertices[mesh.indices[t * 3 + 1]].position +
+            mesh.vertices[mesh.indices[t * 3 + 2]].position) / 3.0f;
+}
+
+/** @brief Counts triangles whose unit normal is within ~8 degrees of `dir` and that pass `where`. */
+template <typename Pred>
+int count_facing(const toy::world::ChunkMeshData& mesh, const glm::vec3& dir, Pred where) {
+    int n = 0;
+    for (std::size_t t = 0; t < mesh.indices.size() / 3; ++t) {
+        const glm::vec3 normal = chunk_triangle_normal(mesh, t);
+        const float length = glm::length(normal);
+        if (length < 1e-9f || glm::dot(normal / length, dir) < 0.99f) continue;
+        if (where(chunk_triangle_centroid(mesh, t))) ++n;
+    }
+    return n;
+}
+
+void test_tile_variant_transforms_are_rigid() {
+    using namespace toy::world;
+    bool inside = true, orthogonal = true, handed = true;
+    for (std::uint8_t o = 0; o < k_tile_orientation_count; ++o) {
+        const glm::mat4& m = variant_transform(o);
+        for (int corner = 0; corner < 8; ++corner) {
+            const glm::vec3 p(corner & 1, (corner >> 1) & 1, (corner >> 2) & 1);
+            const glm::vec3 q = glm::vec3(m * glm::vec4(p, 1.0f));
+            for (int k = 0; k < 3; ++k) inside = inside && q[k] > -1e-5f && q[k] < 1.0f + 1e-5f;
+        }
+        const glm::mat3 r(m);
+        const glm::mat3 rtr = glm::transpose(r) * r;
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j) orthogonal = orthogonal && std::abs(rtr[i][j] - (i == j ? 1.0f : 0.0f)) < 1e-5f;
+        handed = handed && std::abs(glm::determinant(r) - (orientation_mirrors(o) ? -1.0f : 1.0f)) < 1e-5f;
+        // Mirror first, then rotate: +X goes to -X, then turns.
+        const glm::vec3 x = r * glm::vec3(1, 0, 0);
+        const glm::ivec2 expected = rotate_ccw(glm::ivec2(orientation_mirrors(o) ? -1 : 1, 0), o & 3u);
+        handed = handed && std::abs(x.x - expected.x) < 1e-5f && std::abs(x.y - expected.y) < 1e-5f;
+    }
+    expect(inside, "styled tiles: every orientation keeps the cell inside [0,1]^3");
+    expect(orthogonal, "styled tiles: every orientation is a rigid motion");
+    expect(handed, "styled tiles: mirrored orientations flip handedness, mirror applied before rotation");
+}
+
+void test_tile_quadrant_classification_is_congruent() {
+    using namespace toy::world;
+    bool centred = true, edges = true, pieces = true;
+    for (std::uint8_t q = 0; q < 4; ++q) {
+        const glm::ivec2 cy = rotate_ccw({0, 1}, q);
+        const glm::ivec2 cx = rotate_ccw({1, 0}, q);
+        const glm::vec2 centre = glm::vec2(0.5f) + 0.25f * glm::vec2(cx + cy);
+        for (int mask = 0; mask < 4; ++mask) {
+            const bool ey = mask & 1, ex = mask & 2;
+            const PiecePlacement place = classify_quadrant(q, ey, ex);
+            const glm::mat4& m = variant_transform(place.orientation);
+            const glm::vec3 c = glm::vec3(m * glm::vec4(0.75f, 0.75f, 1.0f, 1.0f));
+            centred = centred && glm::length(glm::vec2(c) - centre) < 1e-5f;
+            const TilePiece want = (ey && ex) ? TilePiece::TopOuter : (ey || ex) ? TilePiece::TopEdge : TilePiece::TopInner;
+            pieces = pieces && place.piece == want;
+            if (place.piece == TilePiece::TopEdge) {
+                const glm::vec3 e = glm::mat3(m) * glm::vec3(0, 1, 0);
+                const glm::ivec2 exposed = ey ? cy : cx;
+                edges = edges && std::abs(e.x - exposed.x) < 1e-5f && std::abs(e.y - exposed.y) < 1e-5f;
+            }
+        }
+    }
+    expect(pieces, "styled tiles: the exposure count picks inner / edge / outer");
+    expect(centred, "styled tiles: every quadrant placement lands in its own quadrant");
+    expect(edges, "styled tiles: a placed edge quadrant's lip faces its exposed cardinal");
+}
+
+void test_tile_wall_end_classification() {
+    using namespace toy::world;
+    // Column (1,1) at 3 with a north wall facing the low cell (1,2) at 1. Its right end reaches
+    // +X: along-wall neighbour a = (2,1), diagonal d = (2,2).
+    auto classify = [](std::int32_t a, std::int32_t d, std::int32_t cell) {
+        ColumnPad pad = make_styled_pad(4, 0);
+        pad.at(1, 1).steps = 3;
+        pad.at(1, 2).steps = 1;
+        pad.at(2, 1).steps = a;
+        pad.at(2, 2).steps = d;
+        return classify_wall_end(pad, {1, 1}, TileFace::North, wall_end_direction(TileFace::North, true), cell);
+    };
+    expect(classify(1, 0, 2) == WallEnd::Convex, "wall end: a lower along-wall neighbour wraps a convex corner");
+    expect(classify(3, 1, 2) == WallEnd::Continue, "wall end: a tall neighbour over a low diagonal continues");
+    expect(classify(3, 3, 2) == WallEnd::Concave, "wall end: a tall neighbour and tall diagonal turn concave");
+    expect(classify(2, 1, 2) == WallEnd::Convex && classify(2, 1, 1) == WallEnd::Continue,
+           "wall end: classified per cell -- a short neighbour is convex above its top, straight below");
+
+    bool placed = true;
+    for (const TileFace face : k_lateral_faces) {
+        for (const bool right : {true, false}) {
+            const glm::mat3 r(variant_transform(wall_orientation(face, right)));
+            const glm::vec3 n = r * glm::vec3(0, 1, 0);
+            const glm::vec3 e = r * glm::vec3(1, 0, 0);
+            const glm::ivec2 along = wall_end_direction(face, right);
+            placed = placed && glm::length(n - face_normal(face)) < 1e-5f &&
+                     std::abs(e.x - along.x) < 1e-5f && std::abs(e.y - along.y) < 1e-5f;
+        }
+    }
+    expect(placed, "wall end: each half is placed on its face, reaching toward its own end");
+}
+
+void test_chunk_styled_plateau_interior_stays_flat() {
+    using namespace toy::world;
+    const TileMeshLibrary& library = styled_library();
+    const TerrainParams params = make_test_params(4);
+    const ColumnPad pad = make_styled_pad(4, 3);
+
+    ChunkMeshData mesh;
+    mesh_chunk_styled(pad, library, params, mesh);
+    // The quilt tripwire: a plateau interior has no rims, whatever the style -- and with the
+    // interior tops merged, a uniform 4x4 plateau is a single quad.
+    expect(mesh.indices.size() == 6u, "styled chunk: a flat plateau merges into one quad");
+    expect(count_facing(mesh, {0, 0, 1}, [](const glm::vec3&) { return true; }) ==
+               static_cast<int>(mesh.indices.size() / 3),
+           "styled chunk: ...all of it flat, facing up, with no rim, wall or cap");
+}
+
+void test_chunk_styled_section_caps_only_at_style_changes() {
+    using namespace toy::world;
+    const TileMeshLibrary& library = styled_library();
+    TerrainParams params = make_test_params(4);
+    params.soil_depth_steps = 8; // keep the whole wall one kind: only the top style varies
+
+    // A straight north-facing cliff along y = 2: rows y <= 1 at 2 steps, y >= 2 at 1 step.
+    ColumnPad pad = make_styled_pad(4, 1);
+    for (std::int32_t y = -1; y <= 1; ++y)
+        for (std::int32_t x = -1; x < 5; ++x) pad.at(x, y).steps = 2;
+
+    auto lateral_caps = [&](const ColumnPad& p) {
+        ChunkMeshData mesh;
+        mesh_chunk_styled(p, library, params, mesh);
+        const auto anywhere = [](const glm::vec3&) { return true; };
+        return count_facing(mesh, {1, 0, 0}, anywhere) + count_facing(mesh, {-1, 0, 0}, anywhere);
+    };
+    expect(lateral_caps(pad) == 0, "section caps: a uniform cliff needs none");
+
+    // One column of the cliff in the rock style: its round neighbours' lips no longer match.
+    pad.at(1, 1).top_kind = TileKind::Stone;
+    ChunkMeshData mesh;
+    mesh_chunk_styled(pad, library, params, mesh);
+    const auto at_boundary = [](const glm::vec3& c) {
+        return (std::abs(c.x - 1.0f) < 1e-3f || std::abs(c.x - 2.0f) < 1e-3f) && c.y > 1.0f - 1e-3f;
+    };
+    const int east = count_facing(mesh, {1, 0, 0}, at_boundary);
+    const int west = count_facing(mesh, {-1, 0, 0}, at_boundary);
+    const int all  = lateral_caps(pad);
+    expect(east > 0 && west > 0, "section caps: both sides of a style change close their profiles");
+    expect(all == east + west, "section caps: ...and only there");
+}
+
+/**
+ * @brief Ray-casts a merged chunk: the nearest triangle along the ray, or none.
+ * @return The ray parameter, or a negative value for a miss; `normal` gets the winding normal.
+ */
+float cast_chunk_ray(const toy::world::ChunkMeshData& mesh, const glm::vec3& origin, const glm::vec3& dir,
+                     glm::vec3& normal) {
+    float best = -1.0f;
+    float best_front = -1.0f;
+    for (std::size_t t = 0; t < mesh.indices.size() / 3; ++t) {
+        const glm::vec3& a = mesh.vertices[mesh.indices[t * 3]].position;
+        const glm::vec3& b = mesh.vertices[mesh.indices[t * 3 + 1]].position;
+        const glm::vec3& c = mesh.vertices[mesh.indices[t * 3 + 2]].position;
+        const glm::vec3 e1 = b - a, e2 = c - a;
+        const glm::vec3 p = glm::cross(dir, e2);
+        const float det = glm::dot(e1, p);
+        if (std::abs(det) < 1e-12f) continue;
+        const float inv = 1.0f / det;
+        const glm::vec3 s = origin - a;
+        const float u = glm::dot(s, p) * inv;
+        if (u < -1e-5f || u > 1.0f + 1e-5f) continue;
+        const glm::vec3 q = glm::cross(s, e1);
+        const float v = glm::dot(dir, q) * inv;
+        if (v < -1e-5f || u + v > 1.0f + 1e-5f) continue;
+        const float hit = glm::dot(e2, q) * inv;
+        if (hit <= 1e-4f) continue;
+        const glm::vec3 n = glm::cross(e1, e2);
+        if (best < 0.0f || hit < best) {
+            best = hit;
+            normal = n;
+        }
+        if (glm::dot(n, dir) < 0.0f && (best_front < 0.0f || hit < best_front)) best_front = hit;
+    }
+    // A ray grazing the exact edge two surfaces share can hit the back one first by a rounding
+    // error; a front face within a hair of the nearest hit is what a rasteriser would draw.
+    if (best_front >= 0.0f && best_front - best < 1e-3f) {
+        normal = -dir;
+        return best_front;
+    }
+    return best;
+}
+
+/**
+ * @brief A deterministic, deliberately busy pad: 3x3-tile blocks at 1-4 steps (plateaus, single
+ *        steps, cliffs, convex and concave corners), and 5x5 patches of every style's kind, so
+ *        styles meet both across columns and down walls.
+ */
+toy::world::ColumnPad make_busy_pad(std::int32_t chunk_size, std::uint32_t seed) {
+    using namespace toy::world;
+    ColumnPad pad;
+    pad.resize(chunk_size);
+    auto hash = [seed](std::int32_t x, std::int32_t y) {
+        std::uint32_t h = static_cast<std::uint32_t>(x) * 73856093u ^ static_cast<std::uint32_t>(y) * 19349663u ^
+                          seed * 83492791u;
+        h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
+        return h;
+    };
+    auto block = [](std::int32_t v, std::int32_t size) { return v >= 0 ? v / size : (v - size + 1) / size; };
+    for (std::int32_t y = -1; y <= chunk_size; ++y) {
+        for (std::int32_t x = -1; x <= chunk_size; ++x) {
+            TileColumn& c = pad.at(x, y);
+            c.steps     = 1 + static_cast<std::int32_t>(hash(block(x, 3), block(y, 3)) % 4u);
+            static const TileKind kinds[] = {TileKind::Grass, TileKind::Grass, TileKind::Stone, TileKind::Sand,
+                                             TileKind::Snow};
+            c.top_kind  = kinds[hash(block(x, 5) + 101, block(y, 5)) % 5u];
+            c.side_kind = TileKind::Dirt;
+        }
+    }
+    return pad;
+}
+
+void test_chunk_styled_surface_has_no_holes() {
+    using namespace toy::world;
+    const TileMeshLibrary& library = styled_library();
+    TerrainParams params = make_test_params(16);
+    params.soil_depth_steps = 1;   // soil over stone: two atlas kinds down most walls
+
+    int misses = 0, backfaces = 0, rays = 0;
+    std::string first_failure;
+    std::mt19937 rng(7);
+    std::uniform_real_distribution<float> target(6.0f, 10.0f);
+    std::uniform_real_distribution<float> tilt(0.0f, glm::radians(40.0f));
+    std::uniform_real_distribution<float> azimuth(0.0f, glm::two_pi<float>());
+    // STYLED_RAY_STRESS=1 casts 120k rays over 40 pads instead of 1.6k over 4 -- for after
+    // changing a piece, the classifier or the cap rules.
+    const std::uint32_t seeds = std::getenv("STYLED_RAY_STRESS") ? 40u : 4u;
+    const int rays_per_seed   = std::getenv("STYLED_RAY_STRESS") ? 3000 : 400;
+    for (std::uint32_t seed = 1; seed <= seeds; ++seed) {
+        const ColumnPad pad = make_busy_pad(16, seed);
+        ChunkMeshData mesh;
+        mesh_chunk_styled(pad, library, params, mesh);
+        for (int i = 0; i < rays_per_seed; ++i) {
+            const float t = tilt(rng), a = azimuth(rng);
+            const glm::vec3 dir(std::sin(t) * std::cos(a), std::sin(t) * std::sin(a), -std::cos(t));
+            const glm::vec3 aim(target(rng), target(rng), 0.0f);
+            const glm::vec3 origin = aim - dir * (20.0f / std::cos(t));
+            glm::vec3 normal;
+            const float hit = cast_chunk_ray(mesh, origin, dir, normal);
+            ++rays;
+            const bool miss = hit < 0.0f;
+            const bool back = !miss && glm::dot(normal, dir) >= 0.0f;
+            misses += miss;
+            backfaces += back;
+            if ((miss || back) && first_failure.empty()) {
+                const glm::vec3 p = origin + dir * (miss ? 20.0f / std::cos(t) : hit);
+                first_failure = std::string(miss ? "miss" : "back face") + " near (" + std::to_string(p.x) + ", " +
+                                std::to_string(p.y) + ", " + std::to_string(p.z) + "), seed " + std::to_string(seed);
+            }
+        }
+    }
+    expect(misses == 0, "styled chunk: every ray from above hits the surface (no see-through holes)");
+    expect(backfaces == 0, "styled chunk: every first hit is a front face (no inside showing)");
+    if (!first_failure.empty()) {
+        std::cerr << "         " << misses << " misses, " << backfaces << " back faces of " << rays
+                  << " rays; first: " << first_failure << "\n";
+    }
+}
+
+void test_chunk_styled_meshing_is_deterministic() {
+    using namespace toy::world;
+    TerrainParams params = make_test_params(16);
+    params.soil_depth_steps = 1;
+    const ColumnPad pad = make_busy_pad(16, 9);
+    ChunkMeshData a, b;
+    mesh_chunk_styled(pad, styled_library(), params, a);
+    mesh_chunk_styled(pad, styled_library(), params, b);
+    const bool same = a.indices == b.indices && a.vertices.size() == b.vertices.size() &&
+                      std::memcmp(a.vertices.data(), b.vertices.data(),
+                                  a.vertices.size() * sizeof(a.vertices[0])) == 0;
+    expect(!a.empty() && same, "styled chunk: meshing the same pad twice is byte-identical");
+}
+
 // =====================================================================================
 // Group "render_pixel" -- full headless renders of assets/scenes/pixel_demo through a real
 // Vulkan device.
@@ -3414,6 +3751,90 @@ void test_terrain_streams_chunks_around_the_camera() {
         std::cerr << "         only " << ground << " of " << total << " lower-half pixels\n";
         dump_frame(frame, "terrain_stream");
     }
+}
+
+/**
+ * @brief The styled scene end to end: assets/scenes/terrain_smooth_test parses its styles, bakes
+ *        every piece, streams chunks through the styled mesher, and puts terrain on screen.
+ *
+ * World shrunk before the first tick exactly as test_terrain_streams_chunks_around_the_camera
+ * does; what this adds is the styled half -- that `styles:`/`kind_styles:` reach the library,
+ * that every style resolved all nine of its piece files, and that styled chunks draw with the
+ * `terrain_styled` surface shader.
+ */
+void test_terrain_smooth_scene_streams_styled_chunks() {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016");
+    ScopedEnv no_input("NO_INPUT", "1");
+
+    toy::core::AppConfig config =
+        make_test_config("assets/scenes/terrain_smooth_test/scene.yaml", 320, 180, 160, 90);
+    toy::core::Engine engine(std::move(config));
+
+    auto* camera = coopa::gfx::engine::components::CameraComponent::main();
+    expect(camera != nullptr, "smooth terrain: the scene registers a main camera");
+    if (camera == nullptr || camera->scene == nullptr || camera->owner == nullptr) return;
+    coopa::scene::Scene& scene = *camera->scene;
+    auto* terrain = scene.find_first_component<toy::world::TerrainComponent>();
+    expect(terrain != nullptr, "smooth terrain: the scene carries a Terrain component");
+    if (terrain == nullptr) return;
+
+    expect(terrain->styles.size() == 4, "smooth terrain: all four styles parse");
+    expect(terrain->kind_styles[static_cast<std::size_t>(toy::world::TileKind::Stone)] !=
+               terrain->kind_styles[static_cast<std::size_t>(toy::world::TileKind::Grass)],
+           "smooth terrain: stone and grass are shaped by different styles");
+
+    terrain->grid_size                  = 32;
+    terrain->params.tiles_per_grid_unit = 2;
+    terrain->params.chunk_size          = 8;
+    terrain->params.view_radius         = 1;
+    if (auto* controller = camera->owner->get_component<toy::scene::CameraController>()) {
+        controller->distance           = 12.0f;
+        controller->follow_smoothing   = 0.0f;
+        controller->movement_smoothing = 0.0f;
+    }
+    coopa::scene::SceneObject* marker = scene.find_object_by_path(camera->focus_object);
+    expect(marker != nullptr && marker->get_transform() != nullptr, "smooth terrain: the focus marker exists");
+    if (marker == nullptr || marker->get_transform() == nullptr) return;
+    const float chunk_world = terrain->params.chunk_world_size();
+    marker->get_transform()->transform().set_position(glm::vec3(4.5f * chunk_world, 4.5f * chunk_world, 12.0f));
+
+    tick_until(engine, 600, [&] { return count_live_chunks(*terrain) >= 9; });
+    expect(count_live_chunks(*terrain) >= 9, "smooth terrain: every chunk in the view radius becomes live");
+    expect(terrain->is_ready() && terrain->library().has_styles(),
+           "smooth terrain: the library comes up styled");
+    bool every_piece = terrain->library().style_count() == terrain->styles.size();
+    for (std::uint8_t s = 0; s < terrain->library().style_count(); ++s) {
+        for (std::size_t p = 0; p < toy::world::k_tile_piece_count; ++p) {
+            every_piece = every_piece && terrain->library().has_piece(s, static_cast<toy::world::TilePiece>(p));
+        }
+    }
+    expect(every_piece, "smooth terrain: every style resolved all nine of its pieces");
+
+    int drawable = 0, styled_shader = 0;
+    if (coopa::scene::SceneObject* terrain_object = scene.find_object("terrain")) {
+        for (const auto& child : terrain_object->children()) {
+            auto* renderer = child->get_component<coopa::gfx::engine::components::MeshRenderer>();
+            if (renderer == nullptr || !renderer->is_ready()) continue;
+            ++drawable;
+            if (renderer->material.shader == "terrain_styled") ++styled_shader;
+        }
+    }
+    expect(drawable >= 9, "smooth terrain: every live chunk hung a ready MeshRenderer");
+    expect(styled_shader == drawable, "smooth terrain: styled chunks draw with the terrain_styled shader");
+
+    tick_frames(engine, kNoiseCycle);
+    const Frame frame = engine.capture_image(/*low_res=*/true);
+    long long ground = 0, total = 0;
+    for (uint32_t y = frame.height / 2; y < frame.height; ++y) {
+        for (uint32_t x = 0; x < frame.width; ++x) {
+            const size_t i = (static_cast<size_t>(y) * frame.width + x) * frame.channels;
+            const int r = frame.pixels[i], g = frame.pixels[i + 1], b = frame.pixels[i + 2];
+            if (!(b > r + 20 && b > g + 10)) ++ground;
+            ++total;
+        }
+    }
+    expect(total > 0 && ground * 2 > total, "smooth terrain: the lower half of the frame is terrain rather than sky");
+    if (total > 0 && ground * 2 <= total) dump_frame(frame, "terrain_smooth");
 }
 
 /**
@@ -6207,6 +6628,13 @@ const TestCase kTests[] = {
     {"chunk_uvs_stay_inside_atlas_cell",           "world", test_chunk_uvs_stay_inside_their_atlas_cell},
     {"sampler_cell_lookup_matches_brute_force",    "world", test_sampler_cell_lookup_matches_brute_force},
     {"sampler_chunks_agree_across_border",         "world", test_sampler_chunks_agree_across_their_shared_border},
+    {"tile_variant_transforms_are_rigid",          "world", test_tile_variant_transforms_are_rigid},
+    {"tile_quadrant_classification_congruent",     "world", test_tile_quadrant_classification_is_congruent},
+    {"tile_wall_end_classification",               "world", test_tile_wall_end_classification},
+    {"chunk_styled_plateau_interior_stays_flat",   "world", test_chunk_styled_plateau_interior_stays_flat},
+    {"chunk_styled_caps_only_at_style_changes",    "world", test_chunk_styled_section_caps_only_at_style_changes},
+    {"chunk_styled_surface_has_no_holes",          "world", test_chunk_styled_surface_has_no_holes},
+    {"chunk_styled_meshing_is_deterministic",      "world", test_chunk_styled_meshing_is_deterministic},
 
     // --- math: pure functions, no GPU ---
     {"letterbox_exact_fit",                        "math", test_letterbox_exact_fit},
@@ -6320,6 +6748,7 @@ const TestCase kTests[] = {
 
     // --- render_*: one Vulkan device each ---
     {"terrain_streams_chunks_around_camera",       "render_terrain",  test_terrain_streams_chunks_around_the_camera},
+    {"terrain_smooth_scene_streams_styled_chunks", "render_terrain",  test_terrain_smooth_scene_streams_styled_chunks},
     {"static_camera_converges",                    "render_terrain",  test_static_camera_converges_to_a_static_image},
     {"image_settles_after_camera_stops",           "render_terrain",  test_image_settles_after_camera_stops},
     {"pixel_demo_render_and_live_toggles",         "render_pixel",    test_pixel_demo_render_and_live_toggles},

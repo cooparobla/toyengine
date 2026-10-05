@@ -242,6 +242,66 @@ inline glm::ivec2 face_step(TileFace face) {
     }
 }
 
+/** @brief Number of D4 orientations a styled tile piece is pre-baked in; see variant_transform(). */
+inline constexpr std::size_t k_tile_orientation_count = 8;
+
+/**
+ * @brief The D4 element `orientation` names, as a transform of the unit cell about its vertical axis.
+ *
+ * Used by styled tiles (tile_topology.h): every piece is authored once, in one canonical corner
+ * of the cell, and placed by one of these. Bit 2 mirrors across the `x = 0.5` plane; bits 0-1
+ * then turn the result that many quarter turns counter-clockwise about +Z through the cell
+ * centre. **Mirror first, then rotate.** Both act about `(0.5, 0.5)`, so the result still spans
+ * `[0,1]^3` and is placed by a plain translate, exactly like face_transform().
+ *
+ * @param orientation `0..7`.
+ * @return The object-space transform.
+ */
+inline const glm::mat4& variant_transform(std::uint8_t orientation) {
+    static const std::array<glm::mat4, k_tile_orientation_count> table = [] {
+        const glm::vec3 centre(0.5f, 0.5f, 0.0f);
+        std::array<glm::mat4, k_tile_orientation_count> out{};
+        for (std::size_t o = 0; o < k_tile_orientation_count; ++o) {
+            glm::mat4 mirror(1.0f);
+            if (o & 4u) mirror[0][0] = -1.0f;
+            const glm::mat4 rotate =
+                glm::rotate(glm::mat4(1.0f), glm::radians(90.0f * static_cast<float>(o & 3u)),
+                            glm::vec3(0.0f, 0.0f, 1.0f));
+            out[o] = glm::translate(glm::mat4(1.0f), centre) * rotate * mirror *
+                     glm::translate(glm::mat4(1.0f), -centre);
+        }
+        return out;
+    }();
+    return table[orientation & 7u];
+}
+
+/** @brief True when `orientation` includes the mirror -- a baked piece must reverse its winding. */
+inline bool orientation_mirrors(std::uint8_t orientation) {
+    return (orientation & 4u) != 0;
+}
+
+/**
+ * @brief Resolves a lower-case kind name (`"grass"`, `"stone"`, ...) to its TileKind.
+ *
+ * @param name  The name, as scene YAML spells it.
+ * @param out   Receives the kind when the name is known.
+ * @return False for an unknown name; `out` is left untouched.
+ */
+inline bool tile_kind_from_name(const char* name, TileKind& out) {
+    static const char* const names[k_tile_kind_count] = {
+        "grass", "dirt", "stone", "sand", "snow", "rock", "water", "ice", "moss", "clay", "ash", "salt"};
+    for (std::size_t i = 0; i < k_tile_kind_count; ++i) {
+        const char* a = names[i];
+        const char* b = name;
+        while (*a && *a == *b) { ++a; ++b; }
+        if (*a == *b) {
+            out = static_cast<TileKind>(i);
+            return true;
+        }
+    }
+    return false;
+}
+
 } // namespace world
 } // namespace toy
 

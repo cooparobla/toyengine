@@ -36,6 +36,7 @@
 #ifndef TOYENGINE_WORLD_TERRAIN_COMPONENT_H
 #define TOYENGINE_WORLD_TERRAIN_COMPONENT_H
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <memory>
@@ -59,6 +60,7 @@
 #include <toyengine/world/terrain_chunk.h>
 #include <toyengine/world/terrain_sampler.h>
 #include <toyengine/world/tile_mesh_library.h>
+#include <toyengine/world/tile_topology.h>
 #include <toyengine/world/tile_types.h>
 
 namespace toy {
@@ -162,6 +164,58 @@ public:
     /** @brief River sources to attempt. Rivers cut visible channels into the tiled surface. */
     int river_count = 25;
 
+    // --- The landmass outline (mapcoopa ShapeConfig) ---
+    // Distances are mapcoopa's physical metres (against its 60 m grid unit by default), NOT
+    // world units: they shape the map, and `height_scale`/`tile_size` then size the tiles.
+
+    /** @brief `rectangle` (fills the canvas), `circle`, `triangle`, `continent` or `archipelago`. */
+    std::string shape = "rectangle";
+
+    /** @brief Archipelago only: landmasses to place. */
+    int continent_count = 4;
+
+    /** @brief Continent/archipelago: mean landmass diameter in metres; 0 sizes it to the canvas. */
+    double continent_size_m = 0.0;
+
+    /** @brief How far a landmass outline wanders from a circle, `[0, 0.6]`. */
+    double irregularity = 0.35;
+
+    /** @brief Fine coastline noise amplitude. */
+    double coast_detail = 0.12;
+
+    /**
+     * @brief Added to the whole map's temperature, roughly `[-0.5, 0.5]`: negative cools hot
+     *        deserts and savanna toward temperate grassland and forest.
+     */
+    double temperature_offset = 0.0;
+
+    // --- Styled tiles (see tile_topology.h) ---
+
+    /**
+     * @struct StyleEntry
+     * @brief One named tile style and the mesh prefix its pieces load from:
+     *        `meshes/<prefix>_<piece>.yaml`, one file per TilePiece.
+     */
+    struct StyleEntry {
+        std::string name;
+        std::string prefix;
+    };
+
+    /**
+     * @brief The scene's tile styles. Empty keeps the voxel look; any entry switches every
+     *        chunk to the styled mesher.
+     */
+    std::vector<StyleEntry> styles;
+
+    /**
+     * @brief The style each surface kind's cells are shaped with, by style index; kinds not
+     *        listed take `default_style`.
+     */
+    std::array<int, k_tile_kind_count> kind_styles = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
+
+    /** @brief The style for kinds `kind_styles` leaves unassigned (-1 entries). */
+    int default_style = 0;
+
     /** @brief Logical path of the canonical (+Z) side mesh, relative to the scene's meshes/ dir. */
     std::string side_mesh = "tile_side_flat";
 
@@ -205,6 +259,12 @@ public:
         config.sea_level         = sea_level;
         config.terrain_roughness = terrain_roughness;
         config.river_count       = river_count;
+        config.shape.shape            = coopa::maps::map_shape_from_name(shape);
+        config.shape.continent_count  = continent_count;
+        config.shape.continent_size_m = continent_size_m;
+        config.shape.irregularity     = irregularity;
+        config.shape.coast_detail     = coast_detail;
+        config.temperature_offset     = temperature_offset;
         map_config_              = config;
 
         generator_ = std::make_unique<coopa::maps::MapGenerator>(config, logger_);
@@ -255,6 +315,13 @@ public:
         face_sources_[static_cast<std::size_t>(face)] = std::move(handle);
     }
 
+    /** @brief The asset handle for one styled piece; set by the "Terrain" scene parser. */
+    void set_style_piece_source(std::size_t style, TilePiece piece,
+                                coopa::asset::AssetHandle<SkinnedMeshSource> handle) {
+        if (style_sources_.size() <= style) style_sources_.resize(style + 1);
+        style_sources_[style][static_cast<std::size_t>(piece)] = std::move(handle);
+    }
+
     /**
      * @brief Bakes the loaded side meshes into the library, once they have finished loading.
      *
@@ -278,16 +345,51 @@ public:
             return false;
         }
 
+        // Styled pieces must all have settled (loaded or failed) before anything bakes: chunk
+        // jobs start the moment is_baked() turns true, and a library must not change under them.
+        for (const auto& pieces : style_sources_) {
+            for (const auto& handle : pieces) {
+                if (handle.is_valid() && !handle.is_loaded() && !handle.is_failed()) return false;
+            }
+        }
+
         library_.bake_canonical(*side_source_.get());
         for (std::size_t i = 0; i < k_tile_face_count; ++i) {
             if (face_sources_[i].is_loaded()) {
                 library_.bake_side(static_cast<TileFace>(i), *face_sources_[i].get());
             }
         }
+        bake_styles_();
         return library_.is_baked();
     }
 
 private:
+    /// Bakes every loaded styled piece and maps kinds onto styles. A piece that failed to load
+    /// is reported once and left to TileMeshLibrary::finish_styles()'s fallbacks.
+    void bake_styles_() {
+        for (std::size_t s = 0; s < styles.size(); ++s) {
+            const std::uint8_t index = library_.add_style();
+            if (s >= style_sources_.size()) continue;
+            for (std::size_t p = 0; p < k_tile_piece_count; ++p) {
+                const auto& handle = style_sources_[s][p];
+                if (handle.is_loaded()) {
+                    library_.bake_style_piece(index, static_cast<TilePiece>(p), *handle.get());
+                } else if (handle.is_failed()) {
+                    logger_.warn("tile style '" + styles[s].name + "': piece '" +
+                                 tile_piece_name(static_cast<TilePiece>(p)) + "' failed to load: " +
+                                 handle.error() + " -- falling back to a simpler piece.");
+                }
+            }
+        }
+        if (!library_.has_styles()) return;
+        library_.finish_styles();
+        for (std::size_t k = 0; k < k_tile_kind_count; ++k) {
+            const int style = kind_styles[k] >= 0 ? kind_styles[k] : default_style;
+            library_.set_kind_style(static_cast<TileKind>(k),
+                                    static_cast<std::uint8_t>(std::clamp(style, 0, static_cast<int>(styles.size()) - 1)));
+        }
+    }
+
     coopa::debug::Logger logger_; /**< Named "terrain"; MapGenerator logs one line per stage. */
     coopa::job::JobEngine* jobs_ = nullptr; /**< Non-owning; only for draining jobs in the destructor. */
     bool warned_side_mesh_ = false; /**< Latches the "side mesh failed" message to one line. */
@@ -301,6 +403,7 @@ private:
 
     coopa::asset::AssetHandle<SkinnedMeshSource> side_source_;
     std::array<coopa::asset::AssetHandle<SkinnedMeshSource>, k_tile_face_count> face_sources_;
+    std::vector<std::array<coopa::asset::AssetHandle<SkinnedMeshSource>, k_tile_piece_count>> style_sources_;
 
     std::unordered_map<ChunkCoord, TerrainChunk> chunks_;
 };

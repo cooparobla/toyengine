@@ -253,6 +253,18 @@ inline void register_scene_components(coopa::gfx::core::Device& device,
             if (node.contains("river_count")) {
                 terrain->river_count = node.at("river_count").get_value<int>();
             }
+            if (node.contains("shape")) terrain->shape = node.at("shape").get_value<std::string>();
+            if (node.contains("continent_count")) {
+                terrain->continent_count = node.at("continent_count").get_value<int>();
+            }
+            if (node.contains("continent_size_m")) {
+                terrain->continent_size_m = node.at("continent_size_m").get_value<double>();
+            }
+            if (node.contains("irregularity")) terrain->irregularity = node.at("irregularity").get_value<double>();
+            if (node.contains("coast_detail")) terrain->coast_detail = node.at("coast_detail").get_value<double>();
+            if (node.contains("temperature_offset")) {
+                terrain->temperature_offset = node.at("temperature_offset").get_value<double>();
+            }
 
             // --- How it is tiled ---
             if (node.contains("tiles_per_grid_unit")) {
@@ -321,6 +333,47 @@ inline void register_scene_components(coopa::gfx::core::Device& device,
                     if (key.empty()) continue;
                     terrain->face_meshes[static_cast<std::size_t>(face)] = key;
                     terrain->set_face_source(face, load_side(key));
+                }
+            }
+
+            // --- Styled tiles (toyengine/world/tile_topology.h) ---
+            // `styles: {round: tile_round, rock: tile_rock}` names each style and the prefix its
+            // pieces load from (meshes/<prefix>_<piece>.yaml, piece names from
+            // tile_piece_name()); `kind_styles: {stone: rock, default: round}` shapes each
+            // surface kind with one of them. Give `default` explicitly: without it, unlisted
+            // kinds take the first style in the parsed mapping's order, which need not be the
+            // order written.
+            if (node.contains("styles") && node.at("styles").is_mapping()) {
+                for (auto item : node.at("styles").map_items()) {
+                    world::TerrainComponent::StyleEntry entry;
+                    entry.name   = item.key().get_value<std::string>();
+                    entry.prefix = item.value().get_value<std::string>();
+                    const std::size_t index = terrain->styles.size();
+                    for (std::size_t p = 0; p < world::k_tile_piece_count; ++p) {
+                        const auto piece = static_cast<world::TilePiece>(p);
+                        terrain->set_style_piece_source(
+                            index, piece, load_side(entry.prefix + "_" + world::tile_piece_name(piece)));
+                    }
+                    terrain->styles.push_back(std::move(entry));
+                }
+            }
+            if (node.contains("kind_styles") && node.at("kind_styles").is_mapping()) {
+                auto style_index = [terrain](const std::string& name) {
+                    for (std::size_t i = 0; i < terrain->styles.size(); ++i) {
+                        if (terrain->styles[i].name == name) return static_cast<int>(i);
+                    }
+                    return -1;
+                };
+                for (auto item : node.at("kind_styles").map_items()) {
+                    const std::string kind_name = item.key().get_value<std::string>();
+                    const int style = style_index(item.value().get_value<std::string>());
+                    if (style < 0) continue;
+                    world::TileKind kind;
+                    if (kind_name == "default") {
+                        terrain->default_style = style;
+                    } else if (world::tile_kind_from_name(kind_name.c_str(), kind)) {
+                        terrain->kind_styles[static_cast<std::size_t>(kind)] = style;
+                    }
                 }
             }
         });

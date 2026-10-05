@@ -35,6 +35,7 @@
 
 #include <toyengine/world/terrain_sampler.h>
 #include <toyengine/world/tile_mesh_library.h>
+#include <toyengine/world/tile_topology.h>
 #include <toyengine/world/tile_types.h>
 
 namespace toy {
@@ -57,44 +58,6 @@ struct ChunkMeshData {
     void clear() {
         vertices.clear();
         indices.clear();
-    }
-};
-
-/**
- * @struct ColumnPad
- * @brief A chunk's columns plus a one-tile skirt of its neighbours', in local chunk coordinates.
- *
- * Indexed by local tile coordinates running `[-1, chunk_size]` on both axes: `at(-1, 0)` is the
- * neighbouring chunk's edge column, `at(0, 0)` this chunk's corner.
- */
-struct ColumnPad {
-    std::int32_t            chunk_size = 0;
-    std::vector<TileColumn> columns;
-
-    /** @brief Allocates the pad for a chunk of `size` tiles per edge. */
-    void resize(std::int32_t size) {
-        chunk_size = size;
-        const std::size_t stride = static_cast<std::size_t>(size) + 2;
-        columns.assign(stride * stride, TileColumn{});
-    }
-
-    /** @brief Mutable access by local tile coordinate, valid over `[-1, chunk_size]`. */
-    TileColumn& at(std::int32_t local_x, std::int32_t local_y) {
-        return columns[index_(local_x, local_y)];
-    }
-
-    /** @brief Read-only access by local tile coordinate, valid over `[-1, chunk_size]`. */
-    const TileColumn& at(std::int32_t local_x, std::int32_t local_y) const {
-        return columns[index_(local_x, local_y)];
-    }
-
-private:
-    std::size_t index_(std::int32_t local_x, std::int32_t local_y) const {
-        const std::int32_t stride = chunk_size + 2;
-        const std::int32_t cx = std::clamp(local_x + 1, 0, stride - 1);
-        const std::int32_t cy = std::clamp(local_y + 1, 0, stride - 1);
-        return static_cast<std::size_t>(cy) * static_cast<std::size_t>(stride) +
-               static_cast<std::size_t>(cx);
     }
 };
 
@@ -328,6 +291,237 @@ inline void mesh_chunk_columns_greedy(const ColumnPad& pad, const TileMeshLibrar
 }
 
 /**
+ * @brief The styled counterpart of mesh_chunk_columns(): the same columns, assembled from a
+ *        style's authored pieces by neighbourhood (see tile_topology.h) instead of one shape
+ *        per side.
+ *
+ * A column is shaped by ONE style, its top kind's, from lip to base: an ACNH cliff is one
+ * smooth shape all the way down, and its soil and stone bands are texture, not geometry. Per
+ * column, in a fixed walk (row-major; top, then lateral faces in `k_lateral_faces` order, each
+ * as its right half then its left half, cells top-down), so equal pads produce byte-identical
+ * buffers exactly like the voxel meshers:
+ *
+ * - **Top**: four classified quadrants where any cardinal is exposed; tiles with none (the
+ *   overwhelmingly common plateau interior) are merged into flat rectangles of equal height and
+ *   kind after the walk, like the voxel greedy mesher's tops.
+ * - **Walls**: per exposed cell and half, the cap (top cell, with the lip) or plain piece for
+ *   its end state. Straight halves are merged along each wall line into runs and stamped as
+ *   one stretched strip per run -- most of a cliff is straight, and most of a lip's cost is
+ *   its round-over rings.
+ * - **Section caps** wherever the next piece across a boundary differs: the cell below where a
+ *   wall's end state changes with depth, or the next wall along (a straight or concave end)
+ *   where the neighbouring column has another style or ends its wall at a different height.
+ * - **Feet** under convex halves at a real floor, covering the corner the rounding carved out.
+ */
+inline void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
+                              const TerrainParams& params, ChunkMeshData& out) {
+    out.clear();
+    if (!library.has_styles()) return;
+
+    using Plane = TileMeshLibrary::SectionPlane;
+    const glm::vec3 scale = params.cell_scale();
+
+    auto origin_of = [&](const glm::ivec2& c, std::int32_t cell) {
+        return glm::vec3(static_cast<float>(c.x) * params.tile_size, static_cast<float>(c.y) * params.tile_size,
+                         static_cast<float>(cell) * params.height_step);
+    };
+    auto wall_kind = [&](const TileColumn& col, std::int32_t cell) {
+        const std::int32_t depth = col.steps - 1 - cell;
+        return (depth < params.soil_depth_steps || col.water) ? col.side_kind : TileKind::Stone;
+    };
+    // Whether column `c` has a wall cell on `face` at `cell`, and whether that cell is its cap.
+    struct WallCell {
+        bool exists = false;
+        bool cap    = false;
+    };
+    auto wall_cell_at = [&](const glm::ivec2& c, TileFace face, std::int32_t cell) {
+        WallCell w;
+        const TileColumn& col = pad.at(c);
+        const TileColumn& nb  = pad.at(c + face_step(face));
+        if (cell >= col.steps || cell < nb.steps || cell < col.steps - params.max_wall_steps) return w;
+        w.exists = true;
+        w.cap    = cell == col.steps - 1;
+        return w;
+    };
+    auto stamp = [&](const TileMeshLibrary::SideGeometry& g, const glm::vec3& origin, TileKind top_kind,
+                     TileKind wall, bool anchored) {
+        library.append_styled(g, origin, scale, top_kind, wall, anchored, out.vertices, out.indices);
+    };
+
+    // Straight halves are not stamped where they are met: they are collected, then merged along
+    // each wall line into runs and stamped once per run (see the end of this function). A
+    // straight lip is an extrusion, so a run of twenty halves costs what one half does.
+    struct StraightHalf {
+        std::uint8_t turns;  // the face, as lateral_quarter_turns()
+        std::int32_t cell;
+        std::int32_t line;   // the column coordinate across the face
+        std::int32_t slot;   // half-tile index along the face's axis
+        std::uint8_t style;
+        bool         cap;
+        TileKind     top_kind;
+        TileKind     wall_kind;
+    };
+    std::vector<StraightHalf> straights;
+    // Tiles with no exposed edge, merged into rectangles after the walk like the voxel greedy
+    // mesher's tops: a flat plateau is then a handful of quads, not two triangles a tile.
+    std::vector<std::uint8_t> full(static_cast<std::size_t>(params.chunk_size) * static_cast<std::size_t>(params.chunk_size), 0);
+
+    // A styled chunk runs ~20 triangles a tile; one up-front reservation saves the regrowth.
+    const std::size_t tiles = static_cast<std::size_t>(params.chunk_size) * static_cast<std::size_t>(params.chunk_size);
+    out.vertices.reserve(tiles * 48);
+    out.indices.reserve(tiles * 64);
+
+    for (std::int32_t ly = 0; ly < params.chunk_size; ++ly) {
+        for (std::int32_t lx = 0; lx < params.chunk_size; ++lx) {
+            const glm::ivec2  c(lx, ly);
+            const TileColumn& col       = pad.at(c);
+            const std::int32_t top_cell = col.steps - 1;
+            const std::uint8_t style    = library.style_of(col.top_kind);
+            auto exposed = [&](const glm::ivec2& dir) { return pad.at(c + dir).steps < col.steps; };
+
+            // --- Top ---
+            if (!exposed({0, 1}) && !exposed({0, -1}) && !exposed({1, 0}) && !exposed({-1, 0})) {
+                full[static_cast<std::size_t>(ly * params.chunk_size + lx)] = 1;
+            } else {
+                for (std::uint8_t q = 0; q < 4; ++q) {
+                    const PiecePlacement place = classify_quadrant(q, exposed(rotate_ccw({0, 1}, q)),
+                                                                   exposed(rotate_ccw({1, 0}, q)));
+                    stamp(library.piece(style, place.piece, place.orientation), origin_of(c, top_cell),
+                          col.top_kind, col.top_kind, false);
+                }
+            }
+
+            // --- Walls ---
+            for (const TileFace face : k_lateral_faces) {
+                const glm::ivec2  step = face_step(face);
+                const TileColumn& nb   = pad.at(c + step);
+                if (nb.steps >= col.steps) continue;
+
+                const std::int32_t lowest = std::max(nb.steps, col.steps - params.max_wall_steps);
+                for (const bool right : {true, false}) {
+                    const glm::ivec2   along  = wall_end_direction(face, right);
+                    const std::uint8_t orient = wall_orientation(face, right);
+
+                    bool      have_above  = false;
+                    WallEnd   above_end   = WallEnd::Continue;
+                    TilePiece above_piece = TilePiece::WallContinue;
+                    TileKind  above_kind  = TileKind::Stone;
+                    bool      above_cap   = false;
+                    WallEnd   end         = WallEnd::Continue;
+
+                    for (std::int32_t cell = top_cell; cell >= lowest; --cell) {
+                        end = classify_wall_end(pad, c, face, along, cell);
+                        const bool      cap   = cell == top_cell;
+                        const TileKind  wk    = wall_kind(col, cell);
+                        const TilePiece piece = wall_piece(cap, end);
+                        const glm::vec3 o     = origin_of(c, cell);
+
+                        if (end == WallEnd::Continue) {
+                            const bool along_x = face == TileFace::North || face == TileFace::South;
+                            const std::int32_t t = along_x ? c.x : c.y;
+                            const bool upper = (along_x ? along.x : along.y) > 0;
+                            straights.push_back({lateral_quarter_turns(face), cell, along_x ? c.y : c.x,
+                                                 2 * t + (upper ? 1 : 0), style, cap, col.top_kind, wk});
+                        } else {
+                            stamp(library.piece(style, piece, orient), o, col.top_kind, wk, cap);
+                        }
+
+                        if (have_above && above_end != end) {
+                            stamp(library.section(style, piece, Plane::Top, orient), o, wk, wk, false);
+                            stamp(library.section(style, above_piece, Plane::Bottom, orient),
+                                  origin_of(c, cell + 1), above_kind, above_kind, above_cap);
+                        }
+
+                        if (end != WallEnd::Convex) {
+                            const glm::ivec2 owner = end == WallEnd::Continue ? c + along : c + along + step;
+                            const TileFace   owner_face = end == WallEnd::Continue ? face : face_of_step(-along);
+                            const WallCell   next = wall_cell_at(owner, owner_face, cell);
+                            if (next.exists && (library.style_of(pad.at(owner).top_kind) != style || next.cap != cap)) {
+                                stamp(library.section(style, piece, Plane::End, orient), o, col.top_kind, wk, cap);
+                            }
+                        }
+
+                        have_above  = true;
+                        above_end   = end;
+                        above_piece = piece;
+                        above_kind  = wk;
+                        above_cap   = cap;
+                    }
+
+                    if (lowest == nb.steps && end == WallEnd::Convex) {
+                        stamp(library.foot(orient), origin_of(c, lowest), nb.top_kind, nb.top_kind, false);
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Interior tops, as greedy rectangles of equal height and kind ---
+    {
+        const std::int32_t n = params.chunk_size;
+        auto at = [&](std::int32_t x, std::int32_t y) -> std::uint8_t& {
+            return full[static_cast<std::size_t>(y * n + x)];
+        };
+        auto same = [&](std::int32_t ax, std::int32_t ay, std::int32_t bx, std::int32_t by) {
+            const TileColumn& a = pad.at(ax, ay);
+            const TileColumn& b = pad.at(bx, by);
+            return at(bx, by) == 1 && a.steps == b.steps && a.top_kind == b.top_kind;
+        };
+        for (std::int32_t ly = 0; ly < n; ++ly) {
+            for (std::int32_t lx = 0; lx < n; ++lx) {
+                if (at(lx, ly) != 1) continue;
+                std::int32_t w = 1;
+                while (lx + w < n && same(lx, ly, lx + w, ly)) ++w;
+                std::int32_t h = 1;
+                for (; ly + h < n; ++h) {
+                    bool row = true;
+                    for (std::int32_t x = lx; x < lx + w && row; ++x) row = same(lx, ly, x, ly + h);
+                    if (!row) break;
+                }
+                for (std::int32_t y = ly; y < ly + h; ++y)
+                    for (std::int32_t x = lx; x < lx + w; ++x) at(x, y) = 2;
+                const TileColumn& col = pad.at(lx, ly);
+                library.append_styled(library.full_top(), origin_of({lx, ly}, col.steps - 1),
+                                      glm::vec3(scale.x * static_cast<float>(w), scale.y * static_cast<float>(h), scale.z),
+                                      col.top_kind, col.top_kind, false, out.vertices, out.indices);
+            }
+        }
+    }
+
+    // --- Straight runs ---
+    // Sorted into wall lines, then each maximal run of adjacent halves sharing style, tier and
+    // kinds becomes one stretched strip. The sort key is total, so the output stays deterministic.
+    std::sort(straights.begin(), straights.end(), [](const StraightHalf& a, const StraightHalf& b) {
+        if (a.turns != b.turns) return a.turns < b.turns;
+        if (a.cell != b.cell) return a.cell < b.cell;
+        if (a.line != b.line) return a.line < b.line;
+        return a.slot < b.slot;
+    });
+    for (std::size_t i = 0; i < straights.size();) {
+        const StraightHalf& first = straights[i];
+        std::size_t j = i + 1;
+        while (j < straights.size()) {
+            const StraightHalf& h = straights[j];
+            if (h.turns != first.turns || h.cell != first.cell || h.line != first.line ||
+                h.slot != first.slot + static_cast<std::int32_t>(j - i) || h.style != first.style ||
+                h.cap != first.cap || h.top_kind != first.top_kind || h.wall_kind != first.wall_kind) {
+                break;
+            }
+            ++j;
+        }
+        const bool  along_x = first.turns == 0 || first.turns == 2; // North / South
+        const float start   = 0.5f * static_cast<float>(first.slot) * params.tile_size;
+        const float across  = static_cast<float>(first.line) * params.tile_size;
+        const glm::vec3 origin(along_x ? start : across, along_x ? across : start,
+                               static_cast<float>(first.cell) * params.height_step);
+        library.append_styled(library.straight(first.style, first.cap, first.turns), origin, scale,
+                              first.top_kind, first.wall_kind, first.cap, out.vertices, out.indices,
+                              along_x ? 0 : 1, 0.5f * static_cast<float>(j - i));
+        i = j;
+    }
+}
+
+/**
  * @brief Samples and meshes one chunk -- the whole unit of work a chunk job performs.
  *
  * @param sampler The built world sampler.
@@ -341,7 +535,9 @@ inline void build_chunk_mesh(const TerrainSampler& sampler, const TileMeshLibrar
                              ChunkMeshData& out) {
     ColumnPad pad;
     sample_chunk_columns(sampler, params, coord, pad);
-    if (params.greedy_merge) {
+    if (library.has_styles()) {
+        mesh_chunk_styled(pad, library, params, out);
+    } else if (params.greedy_merge) {
         mesh_chunk_columns_greedy(pad, library, params, out);
     } else {
         mesh_chunk_columns(pad, library, params, out);

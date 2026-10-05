@@ -9,7 +9,7 @@ reason that file's generator gives: the tile set is a primitive of the tile syst
 content. A scene overrides it by putting a file of the same name in its own textures/, which
 AssetSource::resolve() tries before the registered search roots.
 
-Two files, matching the glTF convention the rest of this repo uses (see
+Two styles, each two files (the smooth style is described at SMOOTH_KINDS), matching the glTF convention the rest of this repo uses (see
 tools/gen_material_maps.py):
 
   terrain_atlas.png    -- base color (RGB), authored in sRGB. One 16x16 cell per
@@ -63,6 +63,31 @@ KINDS = [
 ]
 """One entry per toy::world::TileKind, IN ENUM ORDER. See this module's docstring."""
 
+SMOOTH_CELL = 16
+"""Edge length of one cell in the smooth atlas. Every cell is a single flat colour, so its size
+only has to clear the half-texel inset atlas_cell() applies -- see SMOOTH_KINDS."""
+
+SMOOTH_KINDS = [
+    # (name, base colour RGB, roughness) -- IN ENUM ORDER.
+    ("grass", (118, 184, 76), 0.92),
+    ("dirt", (158, 110, 72), 0.94),
+    ("stone", (138, 140, 150), 0.86),
+    ("sand", (236, 222, 170), 0.90),
+    ("snow", (244, 247, 252), 0.70),
+    ("rock", (112, 108, 116), 0.86),
+    ("water", (78, 150, 205), 0.15),
+    ("ice", (182, 224, 240), 0.25),
+    ("moss", (112, 160, 84), 0.94),
+    ("clay", (190, 138, 96), 0.92),
+    ("ash", (96, 90, 88), 0.90),
+    ("salt", (238, 236, 226), 0.82),
+]
+"""The `smooth` style, for styled (rounded) tiles: one flat colour per kind and nothing else.
+Styled chunks draw with assets/shaders/terrain_styled.frag, which reads a kind's colour from the
+centre of its cell and adds the surface detail procedurally, in world space and filtered to the
+pixel footprint -- a texture cannot do that here (the engine has no mipmaps, and a styled piece's
+projected UVs seam across rounded lips). Same kinds in the same order as KINDS."""
+
 OUTPUT_DIR = pathlib.Path(__file__).resolve().parent.parent / "assets" / "textures"
 """Where the generated PNGs are written; resolved relative to this repo, not the caller's cwd."""
 
@@ -95,8 +120,29 @@ def build_cell(index, color, noise_amplitude, rim_scale):
     return np.clip(cell * rim, 0, 255).astype(np.uint8)
 
 
+def write_smooth_atlas():
+    """Writes terrain_atlas_smooth.png and terrain_atlas_smooth_mr.png into OUTPUT_DIR."""
+    width = COLUMNS * SMOOTH_CELL
+    height = ROWS * SMOOTH_CELL
+    albedo = np.zeros((height, width, 3), dtype=np.uint8)
+    mr = np.zeros((height, width, 3), dtype=np.uint8)
+    mr[:, :, 1] = 255
+    for index, (_name, color, roughness) in enumerate(SMOOTH_KINDS):
+        y0 = (index // COLUMNS) * SMOOTH_CELL
+        x0 = (index % COLUMNS) * SMOOTH_CELL
+        albedo[y0:y0 + SMOOTH_CELL, x0:x0 + SMOOTH_CELL] = color
+        mr[y0:y0 + SMOOTH_CELL, x0:x0 + SMOOTH_CELL, 1] = int(round(roughness * 255))
+        mr[y0:y0 + SMOOTH_CELL, x0:x0 + SMOOTH_CELL, 2] = 0
+    Image.fromarray(albedo, mode="RGB").save(OUTPUT_DIR / "terrain_atlas_smooth.png")
+    Image.fromarray(mr, mode="RGB").save(OUTPUT_DIR / "terrain_atlas_smooth_mr.png")
+    print(f"wrote {OUTPUT_DIR / 'terrain_atlas_smooth.png'} ({width}x{height}, {len(SMOOTH_KINDS)} kinds)")
+    print(f"wrote {OUTPUT_DIR / 'terrain_atlas_smooth_mr.png'}")
+
+
 def main():
-    """Writes terrain_atlas.png and terrain_atlas_mr.png into OUTPUT_DIR."""
+    """Writes both atlas styles (and their metallic-roughness maps) into OUTPUT_DIR."""
+    if [k[0] for k in SMOOTH_KINDS] != [k[0] for k in KINDS]:
+        raise SystemExit("SMOOTH_KINDS must list exactly KINDS, in the same order")
     if len(KINDS) > COLUMNS * ROWS:
         raise SystemExit(f"{len(KINDS)} kinds do not fit in a {COLUMNS}x{ROWS} atlas")
 
@@ -123,6 +169,7 @@ def main():
     Image.fromarray(mr, mode="RGB").save(OUTPUT_DIR / "terrain_atlas_mr.png")
     print(f"wrote {OUTPUT_DIR / 'terrain_atlas.png'} ({width}x{height}, {len(KINDS)} kinds)")
     print(f"wrote {OUTPUT_DIR / 'terrain_atlas_mr.png'}")
+    write_smooth_atlas()
 
 
 if __name__ == "__main__":

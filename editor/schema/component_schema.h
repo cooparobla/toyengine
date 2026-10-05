@@ -224,7 +224,7 @@ struct ShaderParamDesc {
 /**
  * @brief A shader a material can choose: the stock PBR one ("") or a surface shader the engine
  *        registers in toyengine/core/engine.h's make_render_config_(). Engine-internal ones
- *        (terrain, editor_paint) are left out; the editor tests check every name here is
+ *        (terrain, terrain_styled, editor_paint) are left out; the editor tests check every name here is
  *        registered.
  */
 struct SurfaceShaderInfo {
@@ -481,6 +481,12 @@ inline std::map<std::string, ComponentSchema>& schema_table_() {
             f_float("sea_level", 0.25f, 0.005f, 0.0f, 1.0f),
             f_float("terrain_roughness", 0.35f, 0.005f, 0.0f, 1.0f),
             f_int("river_count", 25, 0, 1000),
+            f_enum("shape", {"rectangle", "circle", "triangle", "continent", "archipelago"}),
+            f_int("continent_count", 4, 1, 64),
+            f_float("continent_size_m", 0.0f, 10.0f, 0.0f, 1000000.0f),
+            f_float("irregularity", 0.35f, 0.005f, 0.0f, 0.6f),
+            f_float("coast_detail", 0.12f, 0.005f, 0.0f, 1.0f),
+            f_float("temperature_offset", 0.0f, 0.005f, -0.5f, 0.5f),
             f_int("tiles_per_grid_unit", 4, 1, 64),
             f_float("tile_size", 1.0f, 0.01f, 0.01f, 100.0f),
             f_float("height_step", 1.0f, 0.005f, 0.01f, 100.0f),
@@ -491,6 +497,7 @@ inline std::map<std::string, ComponentSchema>& schema_table_() {
             f_int("soil_depth_steps", 3, 0, 1024),
             f_bool("greedy_merge", true),
             f_bool("emit_bottom", false),
+            // Styled tiles: `styles:` / `kind_styles:` are YAML-only maps, preserved on save.
             f_int("max_chunk_jobs_per_frame", 4, 1, 64),
             f_asset("side_mesh", "meshes", ".yaml", true, true, "tile_side_flat"),
             f_material(),

@@ -30,8 +30,9 @@ uses (quads, fan-triangulated on load -- see gfxcoopa/engine/data/mesh.h), becau
 loaded through gfxcoopa's ordinary CPU-side mesh path.
 """
 
-import math
 import pathlib
+
+from mesh_yaml import write_mesh
 
 OUTPUT_DIR = pathlib.Path(__file__).resolve().parent.parent / "assets" / "meshes"
 """Where the generated YAML is written; resolved relative to this repo, not the caller's cwd."""
@@ -41,88 +42,6 @@ BEVEL_INSET = 0.15
 
 BEVEL_DROP = 0.12
 """How far below the centre panel the outer rim sits, in tile heights."""
-
-
-def fmt_vec(v):
-    """Formats a vector as a YAML flow sequence, matching tools/gen_water_grid_mesh.py."""
-    return "[" + ", ".join(f"{c:.6g}" for c in v) + "]"
-
-
-def face_normal(verts, face):
-    """Returns the unnormalised normal of a polygon, whose length is twice its area.
-
-    Using the unnormalised cross product is what makes the per-vertex averaging below
-    area-weighted for free -- the same trick toy::scene::ClothRenderer uses on its sheet.
-
-    Args:
-        verts (list): All vertex positions.
-        face (list): Vertex indices of one polygon, in winding order.
-
-    Returns:
-        list: The (x, y, z) cross product of its first two edges.
-    """
-    a, b, c = verts[face[0]], verts[face[1]], verts[face[2]]
-    u = [b[i] - a[i] for i in range(3)]
-    v = [c[i] - a[i] for i in range(3)]
-    return [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]]
-
-
-def vertex_normals(verts, faces):
-    """Area-weighted per-vertex normals, so a chamfer shades as a curve rather than as facets.
-
-    Args:
-        verts (list): Vertex positions.
-        faces (list): Polygons as index lists.
-
-    Returns:
-        list: One unit normal per vertex; +Z for any vertex no face touches.
-    """
-    accumulated = [[0.0, 0.0, 0.0] for _ in verts]
-    for face in faces:
-        n = face_normal(verts, face)
-        for index in face:
-            for axis in range(3):
-                accumulated[index][axis] += n[axis]
-
-    out = []
-    for n in accumulated:
-        length = math.sqrt(sum(c * c for c in n))
-        out.append([c / length for c in n] if length > 1e-9 else [0.0, 0.0, 1.0])
-    return out
-
-
-def write_mesh(path, verts, faces, uvs):
-    """Writes one mesh YAML in the repo's standard schema.
-
-    Tangents are +X with handedness +1 throughout: these meshes are parameterised so that U
-    runs along +X in the canonical orientation, which makes +X the analytic tangent -- and
-    TileMeshLibrary transports it onto the other five faces with the same rotation it applies
-    to the normal, so a normal-mapped tile set would shade correctly on every face.
-
-    Args:
-        path (pathlib.Path): Destination file.
-        verts (list): Vertex positions.
-        faces (list): Polygons as index lists.
-        uvs (list): One UV per vertex, spanning the cell's [0,1] footprint.
-    """
-    normals = vertex_normals(verts, faces)
-
-    lines = ["vertices:"]
-    lines += [f"  - {fmt_vec(v)}" for v in verts]
-    lines.append("normals:")
-    lines += [f"  - {fmt_vec(v)}" for v in normals]
-    lines.append("uvs:")
-    lines += [f"  - {fmt_vec(v)}" for v in uvs]
-    lines.append("faces:")
-    lines += [f"  - {fmt_vec(f)}" for f in faces]
-    lines.append("colors: []")
-    lines.append("weights:")
-    lines += ["  - {  }" for _ in verts]
-    lines.append("tangents:")
-    lines += [f"  - {fmt_vec([1.0, 0.0, 0.0, 1.0])}" for _ in verts]
-
-    path.write_text("\n".join(lines) + "\n")
-    print(f"wrote {len(verts)} vertices, {len(faces)} faces to {path}")
 
 
 def build_flat():

@@ -333,7 +333,13 @@ private:
 
         auto* renderer = object->add_component<MeshRenderer>();
         renderer->material = terrain.material;
-        if (terrain.params.greedy_merge) {
+        if (terrain.library().has_styles()) {
+            // Styled chunks carry one atlas cell per kind; terrain_styled.frag takes the kind's
+            // colour from it and adds world-space detail, which needs the atlas grid.
+            renderer->material.shader        = "terrain_styled";
+            renderer->material.shader_params = glm::vec4(static_cast<float>(k_atlas_columns),
+                                                         static_cast<float>(k_atlas_rows), 0.0f, 0.0f);
+        } else if (terrain.params.greedy_merge) {
             // The greedy mesher writes tile-space UVs (TileMeshLibrary::encode_uv), which only
             // the `terrain` surface shader decodes; it reads the atlas grid from shader_params.
             renderer->material.shader        = "terrain";

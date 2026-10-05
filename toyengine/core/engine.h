@@ -1770,6 +1770,18 @@ private:
             /* cull */ coopa::gfx::CullMode::Back, // closed columns, like any opaque solid
         });
         rc.surface_shaders.add({
+            /* name  */ "terrain_styled",
+            /* domain */ coopa::gfx::pipeline::SurfaceShaderDomain::Opaque,
+            /* vert  */ "",  // stock gbuffer.vert
+            /* frag  */ "terrain_styled.frag", // kind colour from the atlas, procedural world-space detail
+            /* shadow_vert */ "",
+            /* shadow_frag */ "",
+            /* shadow_cube_vert */ "",
+            /* shadow_cube_frag */ "",
+            /* capture_frag */ "", // Opaque domain -- unused
+            /* cull */ coopa::gfx::CullMode::Back,
+        });
+        rc.surface_shaders.add({
             /* name  */ "triplanar",
             /* domain */ coopa::gfx::pipeline::SurfaceShaderDomain::Opaque,
             /* vert  */ "triplanar.vert", // object-space position/normal for local mode

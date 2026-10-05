@@ -23,3 +23,6 @@ output/
 
 # The editor's scratch space inside a project (e.g. the Theme editor's unsaved-theme preview).
 .toyeditor/
+
+# Python bytecode from the tools/ generators (they import tools/mesh_yaml.py)
+__pycache__/

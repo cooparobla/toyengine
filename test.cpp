@@ -84,6 +84,8 @@
 #include <toyengine/water/water_body.h>
 #include <toyengine/water/water_flow_bake.h>
 #include <toyengine/water/water_system.h>
+#include <toyengine/particles/particle_system_runner.h>
+#include <toyengine/particles/particle_yaml.h>
 #include <toyengine/world/terrain_component.h>
 #include <toyengine/world/terrain_sampler.h>
 #include <toyengine/scene/cloth_renderer.h>
@@ -6487,6 +6489,483 @@ void test_ui_showcase_scene_runs() {
     expect(count_near_color(f, 209, 51, 56, 30) > 50, "ui_showcase: the health bar's red is on screen");
 }
 
+// -------------------------------------------------------------------------------------------
+// Group "particles" -- toyengine/particles/: curves, emission, the mesh emitter, scatter,
+// collision + sub emitters, YAML, render prep, and the job split. Device-free.
+// Group "render_particles" -- the particles_test scene end to end.
+// -------------------------------------------------------------------------------------------
+
+namespace particle_test_util {
+
+using toy::particles::ParticleSystem;
+
+/** @brief A scene of ParticleSystems on their own objects (configure each before start). */
+struct PScene {
+    std::unique_ptr<Scene> scene;
+    toy::particles::ParticleSimulationSystem* runner = nullptr;
+};
+
+ParticleSystem* add_system(PScene& ps, const std::string& name, const glm::vec3& pos,
+                           const std::function<void(ParticleSystem&)>& configure) {
+    if (!ps.scene) ps.scene = std::make_unique<Scene>("particles_cpu");
+    auto obj = std::make_unique<SceneObject>(name);
+    obj->add_component<TransformComponent>()->transform().set_position(pos);
+    auto* sys = obj->add_component<ParticleSystem>();
+    if (configure) configure(*sys);
+    ps.scene->add_root_object(std::move(obj));
+    return sys;
+}
+
+void start(PScene& ps) {
+    ps.scene->start();
+    ps.runner = toy::particles::install_particle_system(*ps.scene);
+}
+
+void run(PScene& ps, float seconds, float dt = 1.0f / 60.0f) {
+    for (int i = 0; i < static_cast<int>(std::lround(seconds / dt)); ++i) {
+        ps.scene->update(dt);
+        ps.scene->late_update(dt);
+    }
+}
+
+/** @brief Two triangles in the z = 0 plane: [0,1]x[0,1] lower-left half (area 0.5) and a big one
+ *         over x in [2,5] (area 4.5), with +Z normals. */
+toy::particles::MeshSurface two_triangle_surface() {
+    toy::particles::MeshSurface s;
+    std::vector<glm::vec3> p = {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {2, 0, 0}, {5, 0, 0}, {2, 3, 0}};
+    std::vector<glm::vec3> n(6, glm::vec3(0, 0, 1));
+    s.build(p, n, {}, {});
+    return s;
+}
+
+} // namespace particle_test_util
+
+/** @brief Curves and gradients bake to tables that match the exact piecewise-linear evaluation. */
+void test_particles_curves_and_gradients() {
+    using namespace toy::particles;
+    FloatCurve c({{0.0f, 0.0f}, {0.25f, 1.0f}, {1.0f, 0.5f}});
+    expect_near(c.evaluate(0.0f), 0.0f, 1e-5f, "curve: starts at its first key");
+    expect_near(c.evaluate(0.25f), 1.0f, 0.02f, "curve: hits its middle key");
+    expect_near(c.evaluate(1.0f), 0.5f, 1e-5f, "curve: ends at its last key");
+    for (float t = 0.0f; t <= 1.0f; t += 0.037f) {
+        if (std::abs(c.evaluate(t) - c.evaluate_exact(t)) > 0.02f) {
+            expect(false, "curve: table lookup matches exact evaluation at t=" + std::to_string(t));
+            break;
+        }
+    }
+    expect_near(c.evaluate(-3.0f), 0.0f, 1e-5f, "curve: clamps below 0");
+    expect_near(FloatCurve().evaluate(0.7f), 1.0f, 1e-6f, "curve: an empty curve is 1 everywhere");
+    expect_near(FloatCurve::linear(0.0f, 2.0f).integral(1.0f), 1.0f, 0.01f, "curve: integral of a 0->2 ramp is 1");
+
+    Gradient g({{0.0f, glm::vec4(1, 0, 0, 1)}, {1.0f, glm::vec4(0, 0, 1, 0)}});
+    const glm::vec4 mid = g.evaluate(0.5f);
+    expect_near(mid.r, 0.5f, 0.02f, "gradient: red halfway down");
+    expect_near(mid.b, 0.5f, 0.02f, "gradient: blue halfway up");
+    expect_near(mid.a, 0.5f, 0.02f, "gradient: alpha interpolates too");
+    expect(Gradient().evaluate(0.3f) == glm::vec4(1.0f), "gradient: an empty gradient is opaque white");
+
+    // Turbulence: divergence-free (the whole point of the curl) and unit RMS.
+    TurbulenceField f;
+    f.configure(7, 0.8f, 2);
+    double sum2 = 0.0, max_div = 0.0;
+    Rng rng(3);
+    const float h = 1e-3f;
+    for (int i = 0; i < 400; ++i) {
+        const glm::vec3 p(rng.range(-5, 5), rng.range(-5, 5), rng.range(-5, 5));
+        const glm::vec3 v = f.sample(p, 1.3f);
+        sum2 += glm::dot(v, v);
+        const float div = (f.sample(p + glm::vec3(h, 0, 0), 1.3f).x - f.sample(p - glm::vec3(h, 0, 0), 1.3f).x +
+                           f.sample(p + glm::vec3(0, h, 0), 1.3f).y - f.sample(p - glm::vec3(0, h, 0), 1.3f).y +
+                           f.sample(p + glm::vec3(0, 0, h), 1.3f).z - f.sample(p - glm::vec3(0, 0, h), 1.3f).z) / (2.0f * h);
+        max_div = std::max(max_div, static_cast<double>(std::abs(div)));
+    }
+    expect_near(static_cast<float>(std::sqrt(sum2 / 400.0)), 1.0f, 0.35f, "turbulence: about unit RMS magnitude");
+    expect(max_div < 0.05, "turbulence: divergence-free (max |div| " + std::to_string(max_div) + ")");
+}
+
+/** @brief Rate, bursts, lifetime and a non-looping duration produce the expected counts. */
+void test_particles_emission_rate_bursts_lifetime() {
+    using namespace particle_test_util;
+    PScene ps;
+    auto* rate = add_system(ps, "rate", glm::vec3(0), [](ParticleSystem& s) {
+        s.settings.rate = 30.0f;
+        s.settings.start_lifetime = 100.0f;
+    });
+    auto* burst = add_system(ps, "burst", glm::vec3(0), [](ParticleSystem& s) {
+        s.settings.rate = 0.0f;
+        s.settings.start_lifetime = 100.0f;
+        s.settings.bursts.push_back({0.5f, toy::particles::Range(7.0f), 3, 0.2f, 1.0f});   // 0.5, 0.7, 0.9 s
+    });
+    auto* oneshot = add_system(ps, "oneshot", glm::vec3(0), [](ParticleSystem& s) {
+        s.settings.rate = 40.0f;
+        s.settings.looping = false;
+        s.settings.duration = 0.5f;
+        s.settings.start_lifetime = 0.25f;
+    });
+    auto* capped = add_system(ps, "capped", glm::vec3(0), [](ParticleSystem& s) {
+        s.settings.rate = 1000.0f;
+        s.settings.max_particles = 50;
+        s.settings.start_lifetime = 100.0f;
+    });
+    start(ps);
+    run(ps, 1.0f);
+    expect(std::abs(static_cast<int>(rate->particle_count()) - 30) <= 1,
+           "emission: 30/s for 1 s makes 30 particles (" + std::to_string(rate->particle_count()) + ")");
+    expect(burst->particle_count() == 21u, "emission: a 3-cycle burst of 7 fires 21 (" + std::to_string(burst->particle_count()) + ")");
+    expect(capped->particle_count() == 50u, "emission: max_particles caps the pool");
+    run(ps, 0.5f);
+    expect(oneshot->particle_count() == 0u && !oneshot->is_alive(),
+           "emission: a non-looping system stops after its duration and its particles die");
+    expect(rate->is_alive(), "emission: a looping system keeps going");
+}
+
+/** @brief The mesh emitter samples by AREA, puts points on the surface, and carries its normal. */
+void test_particles_mesh_surface_area_weighted() {
+    using namespace toy::particles;
+    const MeshSurface s = particle_test_util::two_triangle_surface();
+    expect(s.triangle_count() == 2u && s.vertex_count() == 6u, "mesh surface: two triangles, six vertices");
+    expect_near(s.area(), 5.0f, 1e-4f, "mesh surface: total area");
+    Rng rng(42);
+    int big = 0;
+    const int n = 20000;
+    bool on_surface = true, normals_up = true;
+    for (int i = 0; i < n; ++i) {
+        const EmitSample e = s.sample(MeshEmitFrom::Faces, rng.next01(), rng);
+        if (e.position.x >= 2.0f) ++big;
+        on_surface &= std::abs(e.position.z) < 1e-5f;
+        normals_up &= e.normal.z > 0.999f;
+        // Inside the triangle it was drawn from.
+        if (e.position.x < 2.0f) on_surface &= e.position.x + e.position.y <= 1.0001f;
+    }
+    expect_near(static_cast<float>(big) / n, 0.9f, 0.015f, "mesh surface: 90% of samples land on the triangle with 90% of the area");
+    expect(on_surface, "mesh surface: every sample lies on its triangle");
+    expect(normals_up, "mesh surface: samples carry the surface normal");
+
+    // Even distribution: stratified u covers both triangles in exact proportion.
+    int big_even = 0;
+    for (int i = 0; i < 100; ++i) {
+        const EmitSample e = s.sample(MeshEmitFrom::Faces, (i + rng.next01()) / 100.0f, rng);
+        if (e.position.x >= 2.0f) ++big_even;
+    }
+    expect(big_even == 90, "mesh surface: an even distribution of 100 puts exactly 90 on the big triangle (" +
+                               std::to_string(big_even) + ")");
+    const EmitSample v = s.sample(MeshEmitFrom::Vertices, 0.0f, rng);
+    expect(v.position == glm::vec3(0.0f), "mesh surface: vertex emission lands on a vertex");
+    const EmitSample ed = s.sample(MeshEmitFrom::Edges, 0.5f, rng);
+    expect(std::abs(ed.position.z) < 1e-6f && std::abs(glm::length(ed.tangent) - 1.0f) < 1e-4f,
+           "mesh surface: edge emission lies on an edge, its tangent along it");
+}
+
+/** @brief A scatter places `count` instances on a tilted mesh, each oriented to its normal, once. */
+void test_particles_scatter_aligned_to_normals() {
+    using namespace particle_test_util;
+    using namespace toy::particles;
+    // A 45-degree slope: z = x over [0,2]x[0,2].
+    MeshSurface slope;
+    const glm::vec3 n = glm::normalize(glm::vec3(-1, 0, 1));
+    slope.build({{0, 0, 0}, {2, 0, 2}, {2, 2, 2}, {0, 0, 0}, {2, 2, 2}, {0, 2, 0}}, std::vector<glm::vec3>(6, n), {}, {});
+    PScene ps;
+    auto* sys = add_system(ps, "scatter", glm::vec3(10, 0, 0), [&](ParticleSystem& s) {
+        s.settings.mode = ParticleMode::Scatter;
+        s.settings.shape.type = EmitShape::Mesh;
+        s.settings.shape.distribution = MeshDistribution::Even;
+        s.settings.count = 64;
+        s.settings.align_to_normal = true;
+        s.settings.random_spin = true;
+        s.settings.look.mode = toy::render::ParticleRenderMode::Aligned;
+        s.set_shape_surface(slope);
+    });
+    start(ps);
+    run(ps, 0.5f);
+    expect(sys->particle_count() == 64u, "scatter: exactly `count` instances");
+    const auto pos0 = sys->pool().pos;
+    bool on_plane = true, aligned = true;
+    for (size_t i = 0; i < sys->pool().size(); ++i) {
+        const glm::vec3 p = sys->pool().pos[i];
+        on_plane &= std::abs(p.z - p.x) < 1e-4f;
+        aligned &= glm::dot(sys->pool().orient[i] * glm::vec3(0, 0, 1), n) > 0.9999f;
+    }
+    expect(on_plane, "scatter: every instance sits on the slope");
+    expect(aligned, "scatter: every instance's +Z is the surface normal");
+    run(ps, 2.0f);
+    expect(sys->pool().pos == pos0, "scatter: instances never move or respawn");
+
+    // Render prep follows the object: world position = object transform * local.
+    sys->prepare_render(ParticleView{glm::vec3(0, -10, 5)});
+    const auto& inst = sys->instances();
+    expect(inst.size() == 64u, "scatter: one instance per particle");
+    bool in_world = true;
+    for (const auto& q : inst) in_world &= q.pos_size.x >= 10.0f - 1e-4f && q.pos_size.x <= 12.0f + 1e-4f;
+    expect(in_world, "scatter: instances are drawn where the emitter object is");
+}
+
+/** @brief Ground collision kills droplets, and each death spawns into a sub emitter by name. */
+void test_particles_collision_and_sub_emitters() {
+    using namespace particle_test_util;
+    using namespace toy::particles;
+    PScene ps;
+    auto* rain = add_system(ps, "rain", glm::vec3(0, 0, 3), [](ParticleSystem& s) {
+        s.settings.shape.type = EmitShape::Box;
+        s.settings.shape.box = glm::vec3(1.0f);
+        s.settings.start_speed = 0.0f;
+        s.settings.gravity = 1.0f;
+        s.settings.rate = 0.0f;
+        s.settings.start_lifetime = 100.0f;
+        s.settings.collide = true;
+        s.settings.ground_height = 0.0f;
+        s.settings.kill_on_collide = true;
+        s.settings.on_death.push_back({"splash", Range(2.0f), 0.0f});
+        s.settings.bursts.push_back({0.0f, Range(20.0f), 1, 1.0f, 1.0f});
+    });
+    auto* splash = add_system(ps, "splash", glm::vec3(0), [](ParticleSystem& s) {
+        s.settings.rate = 0.0f;
+        s.settings.start_speed = 0.0f;
+        s.settings.start_lifetime = 100.0f;
+    });
+    auto* bouncy = add_system(ps, "bouncy", glm::vec3(5, 0, 2), [](ParticleSystem& s) {
+        s.settings.shape.type = EmitShape::Point;
+        s.settings.start_speed = 0.0f;
+        s.settings.gravity = 1.0f;
+        s.settings.rate = 0.0f;
+        s.settings.start_lifetime = 100.0f;
+        s.settings.collide = true;
+        s.settings.bounce = 0.5f;
+        s.settings.bursts.push_back({0.0f, Range(1.0f), 1, 1.0f, 1.0f});
+    });
+    start(ps);
+    run(ps, 2.0f);
+    expect(rain->particle_count() == 0u, "collision: every droplet died on the ground");
+    expect(splash->particle_count() == 40u, "sub emitters: each death spawned 2 splashes (" +
+                                                std::to_string(splash->particle_count()) + ")");
+    bool at_ground = true;
+    for (const auto& p : splash->pool().pos) at_ground &= std::abs(p.z) < 0.2f;
+    expect(at_ground, "sub emitters: splashes are born where the droplets died");
+    expect(bouncy->particle_count() == 1u && bouncy->pool().pos[0].z >= 0.0f,
+           "collision: a bouncing particle never goes through the ground");
+}
+
+/** @brief World-space trails stay behind a moving emitter; local space moves with it. */
+void test_particles_simulation_space() {
+    using namespace particle_test_util;
+    using namespace toy::particles;
+    PScene ps;
+    auto setup = [](SimulationSpace space) {
+        return [space](ParticleSystem& s) {
+            s.settings.space = space;
+            s.settings.shape.type = EmitShape::Point;
+            s.settings.start_speed = 0.0f;
+            s.settings.rate = 0.0f;
+            s.settings.start_lifetime = 100.0f;
+            s.settings.bursts.push_back({0.0f, Range(1.0f), 1, 1.0f, 1.0f});
+        };
+    };
+    auto* world = add_system(ps, "world_space", glm::vec3(0), setup(SimulationSpace::World));
+    auto* local = add_system(ps, "local_space", glm::vec3(0), setup(SimulationSpace::Local));
+    start(ps);
+    run(ps, 0.1f);
+    for (auto* s : {world, local}) s->owner->get_transform()->transform().set_position(glm::vec3(4, 0, 0));
+    run(ps, 0.1f);
+    world->prepare_render(ParticleView{});
+    local->prepare_render(ParticleView{});
+    expect_near(world->instances()[0].pos_size.x, 0.0f, 1e-4f, "space: a world particle stays where it was born");
+    expect_near(local->instances()[0].pos_size.x, 4.0f, 1e-4f, "space: a local particle moves with its emitter");
+}
+
+/** @brief The YAML parser reads every value form: ranges, enums, curves, gradients, bursts. */
+void test_particles_yaml_parses() {
+    using namespace toy::particles;
+    const fkyaml::node node = fkyaml::node::deserialize(std::string(R"(
+mode: emitter
+start_size: [0.2, 0.6]
+start_speed: {min: 1, max: 2}
+start_lifetime: 3
+start_rotation: {x: 10, y: 20}
+shape: mesh
+emit_from: vertices
+distribution: even
+simulation_space: local
+render_mode: stretched
+sprite: flame
+blend: additive
+toon_bands: 4
+size_over_life: [{t: 0, value: 0.5}, [1.0, 2.0]]
+color_over_life: [{t: 0, color: {r: 1, g: 0, b: 0, a: 1}}, {t: 1, r: 0, g: 0, b: 1, a: 0}]
+bursts: [{time: 0.5, count: [3, 5], cycles: 2, interval: 0.1}]
+on_death: [{target: sparks, count: 4, inherit_velocity: 0.5}]
+velocity: [1, 2, 3]
+)"));
+    ParticleSettings s;
+    parse_particle_settings(node, s);
+    expect(s.start_size.min == 0.2f && s.start_size.max == 0.6f, "yaml: [min, max] range");
+    expect(s.start_speed.min == 1.0f && s.start_speed.max == 2.0f, "yaml: {min, max} range");
+    expect(s.start_lifetime.min == 3.0f && s.start_lifetime.max == 3.0f, "yaml: an integer constant");
+    expect(s.start_rotation.min == 10.0f && s.start_rotation.max == 20.0f, "yaml: the editor's {x, y} range");
+    expect(s.shape.type == EmitShape::Mesh && s.shape.emit_from == MeshEmitFrom::Vertices &&
+               s.shape.distribution == MeshDistribution::Even, "yaml: mesh shape enums");
+    expect(s.space == SimulationSpace::Local, "yaml: simulation space");
+    expect(s.look.mode == toy::render::ParticleRenderMode::Stretched && s.look.sprite == toy::render::ParticleSprite::Flame,
+           "yaml: render mode and sprite");
+    expect(s.look.additive == 1.0f && s.look.toon_bands == 4.0f, "yaml: blend: additive, toon bands");
+    expect_near(s.size_over_life.evaluate(1.0f), 2.0f, 1e-4f, "yaml: curve keys in both spellings");
+    expect_near(s.color_over_life.evaluate(1.0f).b, 1.0f, 1e-4f, "yaml: gradient keys, flat spelling");
+    expect(s.bursts.size() == 1u && s.bursts[0].cycles == 2 && s.bursts[0].count.max == 5.0f, "yaml: bursts");
+    expect(s.on_death.size() == 1u && s.on_death[0].target == "sparks", "yaml: sub emitters");
+    expect(s.velocity == glm::vec3(1, 2, 3), "yaml: a vec3 as a sequence");
+    bool threw = false;
+    try {
+        ParticleSettings bad;
+        parse_particle_settings(fkyaml::node::deserialize(std::string("sprite: sparkle\n")), bad);
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    expect(threw, "yaml: an unknown enum value is a load error, not a silent default");
+}
+
+/** @brief Distance sort draws farthest first; instances carry size/colour over life. */
+void test_particles_render_prep_sorts_back_to_front() {
+    using namespace particle_test_util;
+    using namespace toy::particles;
+    PScene ps;
+    auto* sys = add_system(ps, "sorted", glm::vec3(0), [](ParticleSystem& s) {
+        s.settings.shape.type = EmitShape::Box;
+        s.settings.shape.box = glm::vec3(20.0f, 20.0f, 0.0f);
+        s.settings.start_speed = 0.0f;
+        s.settings.rate = 0.0f;
+        s.settings.start_lifetime = 2.0f;
+        s.settings.start_size = 1.0f;
+        s.settings.size_over_life = FloatCurve::linear(1.0f, 3.0f);
+        s.settings.bursts.push_back({0.0f, Range(200.0f), 1, 1.0f, 1.0f});
+        s.settings.sort = SortMode::Distance;
+    });
+    start(ps);
+    run(ps, 1.0f);
+    const glm::vec3 eye(0, -30, 10);
+    sys->prepare_render(ParticleView{eye});
+    const auto& inst = sys->instances();
+    bool sorted = inst.size() == 200u;
+    for (size_t i = 1; i < inst.size(); ++i) {
+        sorted &= glm::distance(glm::vec3(inst[i - 1].pos_size), eye) >= glm::distance(glm::vec3(inst[i].pos_size), eye) - 1e-4f;
+    }
+    expect(sorted, "render prep: instances are back to front");
+    expect_near(inst[0].pos_size.w, 2.0f, 0.05f, "render prep: size follows size_over_life at half life");
+    expect_near(inst[0].misc.x, 0.5f, 0.02f, "render prep: normalized age is handed to the shader");
+    const glm::vec3 lo = sys->bounds_min(), hi = sys->bounds_max();
+    expect(lo.x <= -9.0f && hi.x >= 9.0f, "render prep: bounds cover the particles");
+}
+
+/** @brief The job-split step is bit-identical to the serial one (positions, ages, render data). */
+void test_particles_parallel_matches_serial() {
+    using namespace particle_test_util;
+    using namespace toy::particles;
+    auto build = [](bool serial, coopa::job::JobEngine* jobs) {
+        PScene ps;
+        auto cfg = [](ParticleSystem& s) {
+            s.settings.shape.type = EmitShape::Sphere;
+            s.settings.shape.radius = 2.0f;
+            s.settings.rate = 4000.0f;
+            s.settings.max_particles = 20000;
+            s.settings.start_lifetime = Range(1.0f, 3.0f);
+            s.settings.start_speed = Range(0.5f, 2.0f);
+            s.settings.gravity = 0.3f;
+            s.settings.drag = 0.4f;
+            s.settings.noise_strength = 2.0f;
+            s.settings.orbital = 0.8f;
+            s.settings.collide = true;
+            s.settings.bounce = 0.4f;
+            s.settings.ground_height = -1.0f;
+        };
+        add_system(ps, "big", glm::vec3(0, 0, 2), cfg);
+        for (int i = 0; i < 12; ++i) {
+            add_system(ps, "small_" + std::to_string(i), glm::vec3(i * 2.0f, 5, 1), [](ParticleSystem& s) {
+                s.settings.rate = 60.0f;
+                s.settings.noise_strength = 1.0f;
+            });
+        }
+        if (jobs) ps.scene->set_job_engine(jobs);
+        start(ps);
+        ps.runner->set_force_serial(serial);
+        run(ps, 1.5f);
+        return ps;
+    };
+    coopa::job::JobEngine jobs(8);
+    PScene a = build(true, nullptr);
+    PScene b = build(false, &jobs);
+    const auto& sa = a.runner->systems();
+    const auto& sb = b.runner->systems();
+    bool same = sa.size() == sb.size();
+    for (size_t i = 0; same && i < sa.size(); ++i) {
+        same &= sa[i]->pool().pos == sb[i]->pool().pos && sa[i]->pool().age == sb[i]->pool().age &&
+                sa[i]->pool().vel == sb[i]->pool().vel;
+    }
+    expect(sa.size() == 13u && sa[0]->particle_count() > k_parallel_particles,
+           "parallel: the big system is past the per-particle split threshold (" +
+               std::to_string(sa.empty() ? 0u : sa[0]->particle_count()) + ")");
+    expect(same, "parallel: 8 workers give bit-identical particles to the serial path");
+    sa[0]->prepare_render(ParticleView{glm::vec3(0, -10, 3)});
+    toy::particles::ParallelFor par = [&jobs](std::size_t n, const toy::particles::RangeFn& fn) {
+        jobs.parallel_for_blocking(n, 0, [&fn](std::size_t b, std::size_t e) { fn(b, e); });
+    };
+    sb[0]->prepare_render(ParticleView{glm::vec3(0, -10, 3)}, &par);
+    bool same_inst = sa[0]->instances().size() == sb[0]->instances().size();
+    for (size_t i = 0; same_inst && i < sa[0]->instances().size(); ++i) {
+        same_inst &= std::memcmp(&sa[0]->instances()[i], &sb[0]->instances()[i], sizeof(toy::render::ParticleInstance)) == 0;
+    }
+    expect(same_inst, "parallel: render prep is identical too, sort order included");
+}
+
+/** @brief particles_test end to end: every system simulates, quads and mesh scatters reach the
+ *         renderer, and the fire is on screen -- warm, bright, and free of NaN blowouts. */
+void test_particles_scene_renders() {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
+    ScopedEnv no_input("NO_INPUT", "1");
+    toy::core::AppConfig config = make_test_config("assets/scenes/particles_test/scene.yaml", 640, 360, 640, 360);
+    config.render.transparency_enabled = true;   // particle quads draw in the forward transparent pass
+    config.render.bloom_enabled = true;
+    toy::core::Engine engine(std::move(config));
+    tick_frames(engine, 90);
+
+    auto* runner = dynamic_cast<toy::particles::ParticleSimulationSystem*>(engine.scene().find_system("Particles"));
+    expect(runner != nullptr, "particles scene: Engine installed the particle system");
+    if (!runner) return;
+    std::size_t live = 0, empty = 0;
+    for (auto* s : runner->systems()) {
+        live += s->particle_count();
+        if (s->particle_count() == 0) ++empty;
+    }
+    expect(runner->systems().size() >= 15u, "particles scene: every authored system is gathered (" +
+                                                std::to_string(runner->systems().size()) + ")");
+    expect(empty == 0u, "particles scene: every system has live particles after 1.5 s");
+    expect(live > 800u, "particles scene: a healthy particle count (" + std::to_string(live) + ")");
+
+    auto* mush = engine.scene().find_object("mushrooms");
+    auto* ps = mush ? mush->get_component<toy::particles::ParticleSystem>() : nullptr;
+    expect(ps && ps->particle_count() == 70u, "particles scene: the mushroom scatter placed all 70 on the mound");
+
+    const auto& st = engine.pipeline().particle_state();
+    expect(st.quads.size() >= 8u && st.total_quads() > 300u, "particles scene: quad batches reach the renderer");
+    expect(st.meshes.size() == 2u, "particles scene: the mushroom and pebble scatters draw as instanced meshes");
+
+    const Frame f = engine.capture_image(/*low_res=*/true);
+    long long warm = 0, blown = 0, black = 0;
+    const size_t pixels = static_cast<size_t>(f.width) * f.height;
+    for (size_t i = 0; i < pixels; ++i) {
+        const uint8_t* px = &f.pixels[i * f.channels];
+        if (px[0] > 200 && px[1] > 110 && px[2] < px[1]) ++warm;   // fire: bright, orange-yellow
+        if (px[0] > 250 && px[1] > 250 && px[2] > 250) ++blown;
+        if (px[0] < 2 && px[1] < 2 && px[2] < 2) ++black;
+    }
+    expect(warm > 400, "particles scene: the campfire glows warm on screen (" + std::to_string(warm) + " px)");
+    expect(blown < static_cast<long long>(pixels / 50), "particles scene: no white blowout (" + std::to_string(blown) + " px)");
+    expect(black < static_cast<long long>(pixels / 200), "particles scene: no NaN black blocks (" + std::to_string(black) + " px)");
+    if (warm <= 400 || blown >= static_cast<long long>(pixels / 50)) dump_frame(f, "particles_scene");
+
+    // A frame with every particle system gone draws no quads at all -- the transparent pass
+    // must still run cleanly with nothing but particles to skip.
+    for (auto* s : runner->systems()) s->stop(true);
+    tick_frames(engine, 2);
+    expect(engine.pipeline().particle_state().total_quads() == 0u, "particles scene: stopped and cleared, nothing is drawn");
+}
+
 /** @brief One registered test: its name (also its filter key), its group, and its body. */
 struct TestCase {
     const char* name;
@@ -6910,6 +7389,15 @@ const TestCase kTests[] = {
     {"water_stage2_bake_deferred_until_in_range",  "water", test_water_stage2_bake_deferred_until_in_range},
     {"water_ripples_capped_and_ranged",            "water", test_water_ripples_capped_and_ranged},
     {"water_tiles_cover_surface",                  "water", test_water_tiles_cover_surface},
+    {"particles_curves_and_gradients",             "particles", test_particles_curves_and_gradients},
+    {"particles_emission_rate_bursts_lifetime",    "particles", test_particles_emission_rate_bursts_lifetime},
+    {"particles_mesh_surface_area_weighted",       "particles", test_particles_mesh_surface_area_weighted},
+    {"particles_scatter_aligned_to_normals",       "particles", test_particles_scatter_aligned_to_normals},
+    {"particles_collision_and_sub_emitters",       "particles", test_particles_collision_and_sub_emitters},
+    {"particles_simulation_space",                 "particles", test_particles_simulation_space},
+    {"particles_yaml_parses",                      "particles", test_particles_yaml_parses},
+    {"particles_render_prep_sorts_back_to_front",  "particles", test_particles_render_prep_sorts_back_to_front},
+    {"particles_parallel_matches_serial",          "particles", test_particles_parallel_matches_serial},
 
     // --- render_*: one Vulkan device each ---
     {"terrain_streams_chunks_around_camera",       "render_terrain",  test_terrain_streams_chunks_around_the_camera},
@@ -6929,6 +7417,7 @@ const TestCase kTests[] = {
     {"water_scene_quality_tiers_render",           "render_water",    test_water_scene_quality_tiers_render},
     {"water_shader_shares_the_buoyancy_clock",     "render_water",    test_water_shader_shares_the_buoyancy_clock},
     {"water_parallel_matches_serial",              "render_water",    test_water_parallel_matches_serial},
+    {"particles_scene_renders",                    "render_particles", test_particles_scene_renders},
     {"rig_clip_drives_hierarchy",                  "rig",             test_rig_clip_drives_hierarchy},
     {"rig_vertex_group_skinning",                  "rig",             test_rig_vertex_group_skinning},
     {"rig_skinned_mesh_follows_animated_bone",     "render_rig",      test_rig_skinned_mesh_follows_animated_bone},
@@ -6955,8 +7444,9 @@ bool matches_filters(const char* name, const std::vector<std::string>& filters) 
 void print_usage() {
     std::cout << "usage: toyengine_tests [-v] [--list] [--group <name>] [name-substring ...]\n"
                  "  --list           print every test and its group, run nothing\n"
-                 "  --group <name>   run one group: math, config, scene, ui, world, water, render_pixel,\n"
-                 "                   render_ui, render_material, render_cloth, render_water\n"
+                 "  --group <name>   run one group: math, config, scene, ui, world, water, particles,\n"
+                 "                   render_pixel, render_ui, render_material, render_cloth, render_water,\n"
+                 "                   render_particles\n"
                  "  -v, --verbose    print every assertion, not just failures\n"
                  "  <substring>      run the tests whose name contains it\n";
 }

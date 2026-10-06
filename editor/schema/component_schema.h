@@ -420,6 +420,141 @@ inline std::map<std::string, ComponentSchema>& schema_table_() {
             f_float("form_drag", 1.0f, 0.01f, 0.0f, 10.0f),
             f_float("buoyancy_scale", 1.0f, 0.01f, 0.0f, 10.0f),
         }});
+        // toyengine/particles/: Unity-style modules + Blender's mesh emitter / scatter, keys as in
+        // particle_yaml.h. Ranges are {x: min, y: max} (the parser also takes a scalar or [a, b]).
+        {
+            auto range = [](std::string k, glm::vec2 def, float speed, std::string tip, bool in_default = false) {
+                return with_tip(f_vec2(std::move(k), def, speed, in_default), std::move(tip) + " -- random in [x, y]; x = y is a constant");
+            };
+            auto color_key = [](float t, glm::vec4 c) {
+                Node n = Node::mapping();
+                n["t"] = make_float(t);
+                Node col = Node::mapping();
+                col["r"] = make_float(c.r); col["g"] = make_float(c.g); col["b"] = make_float(c.b); col["a"] = make_float(c.a);
+                n["color"] = col;
+                return n;
+            };
+            auto value_key = [](float t, float v) {
+                Node n = Node::mapping();
+                n["t"] = make_float(t);
+                n["value"] = make_float(v);
+                return n;
+            };
+            Node fade = Node::sequence();
+            fade.as_seq().push_back(color_key(0.0f, glm::vec4(1.0f)));
+            fade.as_seq().push_back(color_key(1.0f, glm::vec4(1.0f, 1.0f, 1.0f, 0.0f)));
+            Node grow = Node::sequence();
+            grow.as_seq().push_back(value_key(0.0f, 1.0f));
+            grow.as_seq().push_back(value_key(1.0f, 1.0f));
+            FieldDesc mesh_material = f_material();
+            mesh_material.in_default = false;
+            mesh_material.tooltip = "Render mode `mesh`: the instanced mesh's material (opaque / cutout)";
+            add({"ParticleSystem", "Effects", {
+                // Main
+                with_tip(f_enum("mode", {"emitter", "scatter"}, true),
+                         "emitter: born over time and die (Unity); scatter: `count` placed once over the shape, never moving (Blender hair as instances)"),
+                f_float("duration", 5.0f, 0.05f, 0.01f, 1e4f),
+                f_bool("looping", true),
+                with_tip(f_bool("prewarm", false), "Start as if it had already run one full duration"),
+                f_float("start_delay", 0.0f, 0.01f, 0.0f, 1e4f),
+                f_bool("play_on_start", true),
+                range("start_lifetime", glm::vec2(1.5f, 2.5f), 0.01f, "Seconds", true),
+                range("start_speed", glm::vec2(1.0f, 1.5f), 0.01f, "m/s along the shape's direction (a mesh's normal)", true),
+                range("start_size", glm::vec2(0.2f, 0.35f), 0.005f, "Metres (quad height / mesh scale)", true),
+                range("start_rotation", glm::vec2(0.0f, 0.0f), 0.5f, "Degrees"),
+                f_color4("start_color", glm::vec4(1.0f), true),
+                with_tip(f_color4("start_color_b", glm::vec4(1.0f)), "Each particle takes a random mix of start_color and this"),
+                with_tip(f_float("gravity", 0.0f, 0.01f, -100.0f, 100.0f), "Multiplier on 9.81 m/s^2 down; negative rises (hot air)"),
+                with_tip(f_enum("simulation_space", {"world", "local"}), "world: particles stay where born (trails); local: they move with the object"),
+                f_int("max_particles", 1000, 0, 1000000),
+                with_tip(f_int("seed", 0, 0, 2147483647), "0: derived from the object's name"),
+                f_float("time_scale", 1.0f, 0.01f, 0.0f, 100.0f),
+                // Emission
+                with_tip(f_float("rate", 10.0f, 0.1f, 0.0f, 1e6f, true), "Particles per second"),
+                with_tip(f_float("rate_over_distance", 0.0f, 0.1f, 0.0f, 1e6f), "Per metre the emitter travels"),
+                with_tip(f_items("bursts", {f_float("time", 0.0f, 0.01f, 0.0f, 1e4f), f_vec2("count", glm::vec2(10.0f, 10.0f), 0.2f),
+                                            f_int("cycles", 1, 0, 100000), f_float("interval", 0.5f, 0.01f, 0.001f, 1e4f),
+                                            f_float("probability", 1.0f, 0.01f, 0.0f, 1.0f)}),
+                         "Timed bursts; cycles 0 repeats every interval forever"),
+                with_tip(f_int("count", 100, 0, 1000000), "Scatter mode: instances placed over the shape"),
+                // Shape
+                f_enum("shape", {"cone", "sphere", "hemisphere", "box", "circle", "edge", "point", "mesh"}, true),
+                f_float("radius", 0.5f, 0.005f, 0.0f, 1e4f),
+                with_tip(f_float("radius_thickness", 1.0f, 0.01f, 0.0f, 1.0f), "0: born on the shell only; 1: anywhere inside"),
+                with_tip(f_float("angle", 25.0f, 0.2f, 0.0f, 179.0f), "Cone half-angle (degrees)"),
+                f_float("arc", 360.0f, 1.0f, 0.0f, 360.0f),
+                f_vec3("box", glm::vec3(1.0f), 0.01f),
+                f_float("length", 1.0f, 0.01f, 0.0f, 1e4f),
+                f_vec3("shape_offset", glm::vec3(0.0f), 0.01f),
+                with_tip(f_float("random_direction", 0.0f, 0.01f, 0.0f, 1.0f), "Blend each direction toward a random one"),
+                with_tip(f_asset("mesh_path", "meshes", ".yaml", true), "Shape `mesh`: the emitter surface; empty uses this object's MeshRenderer"),
+                f_enum("emit_from", {"faces", "vertices", "edges"}),
+                with_tip(f_enum("distribution", {"random", "even"}), "even: stratified by area -- no clumps or bald patches (Blender's Jittered)"),
+                with_tip(f_float("normal_offset", 0.0f, 0.001f, -10.0f, 10.0f), "Push mesh spawn points off the surface (m)"),
+                with_tip(f_bool("align_to_normal", false), "Orient each particle to the emission normal (aligned sprites, instanced meshes)"),
+                with_tip(f_bool("random_spin", true), "With align_to_normal: random twist about the normal"),
+                f_float("inherit_velocity", 0.0f, 0.01f, -10.0f, 10.0f),
+                // Velocity / forces / noise
+                f_vec3("velocity", glm::vec3(0.0f), 0.01f),
+                with_tip(f_vec3("force", glm::vec3(0.0f), 0.01f), "Constant acceleration, world space (wind, buoyancy)"),
+                with_tip(f_float("drag", 0.0f, 0.01f, 0.0f, 100.0f), "Linear damping (1/s)"),
+                with_tip(f_float("orbital", 0.0f, 0.01f, -100.0f, 100.0f), "Swirl about the emitter's +Z axis (rad/s)"),
+                f_float("radial", 0.0f, 0.01f, -100.0f, 100.0f),
+                with_tip(f_float("tumble", 0.0f, 1.0f, -1e4f, 1e4f), "3D tumble about a random axis (deg/s)"),
+                range("angular_velocity", glm::vec2(0.0f, 0.0f), 0.5f, "In-plane spin, deg/s"),
+                with_tip(f_float("noise_strength", 0.0f, 0.01f, 0.0f, 1000.0f), "Curl-noise turbulence (m/s^2 RMS)"),
+                f_float("noise_frequency", 0.5f, 0.01f, 0.001f, 100.0f),
+                f_float("noise_scroll", 0.5f, 0.01f, 0.0f, 100.0f),
+                f_int("noise_octaves", 2, 1, 3),
+                // Over lifetime
+                with_tip(f_items("color_over_life", {f_float("t", 0.0f, 0.01f, 0.0f, 1.0f), f_color4("color", glm::vec4(1.0f))}, fade, true),
+                         "Multiplies start colour over normalized life (scatter: per-instance variety)"),
+                with_tip(f_items("size_over_life", {f_float("t", 0.0f, 0.01f, 0.0f, 1.0f), f_float("value", 1.0f, 0.01f, 0.0f, 1e4f)}, grow),
+                         "Multiplies start size over normalized life"),
+                with_tip(f_items("alpha_over_life", {f_float("t", 0.0f, 0.01f, 0.0f, 1.0f), f_float("value", 1.0f, 0.01f, 0.0f, 1.0f)}),
+                         "Extra alpha multiplier over life"),
+                // Collision
+                with_tip(f_bool("collide", false), "Collide with a ground plane at ground_height (world space systems)"),
+                f_float("ground_height", 0.0f, 0.01f),
+                f_float("bounce", 0.3f, 0.01f, 0.0f, 1.0f),
+                f_float("collision_friction", 0.2f, 0.01f, 0.0f, 1.0f),
+                f_bool("kill_on_collide", false),
+                with_tip(f_items("on_death", {f_string("target"), f_vec2("count", glm::vec2(1.0f, 1.0f), 0.1f),
+                                              f_float("inherit_velocity", 0.0f, 0.01f, -10.0f, 10.0f)}),
+                         "Sub emitters: each death spawns into the named object's ParticleSystem"),
+                // Renderer
+                with_tip(f_enum("render_mode", {"billboard", "stretched", "horizontal", "vertical", "aligned", "mesh", "none"}, true),
+                         "billboard: faces the camera; stretched: along velocity; vertical: upright (flames); aligned: in the particle's own plane"),
+                f_enum("sprite", {"soft", "circle", "puff", "flame", "spark", "ring", "star", "leaf", "texture"}, true),
+                with_tip(f_float("additive", 0.0f, 0.01f, 0.0f, 1.0f), "0 alpha blend .. 1 additive glow"),
+                with_tip(f_float("lit", 0.0f, 0.01f, 0.0f, 1.0f), "How much sun / sky / point lights shade it (smoke 1, fire 0)"),
+                with_tip(f_float("toon_bands", 0.0f, 0.1f, 0.0f, 16.0f), "> 1: lighting and flame cores in this many bands"),
+                with_tip(f_float("emissive", 1.0f, 0.01f, 0.0f, 100.0f), "HDR multiplier; > ~1.4 blooms"),
+                with_tip(f_float("softness", 0.5f, 0.01f, 0.0f, 1.0f), "Sprite edge: 0 crisp cel edge .. 1 feathered"),
+                with_tip(f_float("soft_distance", 0.4f, 0.01f, 0.0f, 100.0f), "Fade where it meets opaque geometry (m)"),
+                f_float("camera_fade", 0.3f, 0.01f, 0.0f, 100.0f),
+                with_tip(f_float("aspect", 1.0f, 0.01f, 0.01f, 100.0f), "Quad width / height"),
+                with_tip(f_float("pivot", 0.0f, 0.01f, -10.0f, 10.0f), "Shift along the quad's up, in sizes"),
+                f_float("stretch_speed", 0.05f, 0.001f, 0.0f, 10.0f),
+                f_float("stretch_length", 1.0f, 0.01f, 0.0f, 100.0f),
+                with_tip(f_float("distortion", 0.5f, 0.01f, 0.0f, 4.0f), "Noise breakup of puff / flame / leaf edges"),
+                f_float("opacity", 1.0f, 0.01f, 0.0f, 1.0f),
+                with_tip(f_asset("texture", "textures", ".png"), "Sprite `texture`: albedo map (or flipbook atlas)"),
+                with_tip(f_vec2("flipbook", glm::vec2(1.0f, 1.0f), 0.1f), "Atlas columns (x) and rows (y)"),
+                f_enum("flipbook_mode", {"lifetime", "random", "fps"}),
+                f_float("flipbook_fps", 12.0f, 0.1f, 0.0f, 240.0f),
+                f_enum("sort", {"distance", "none", "oldest", "youngest"}),
+                with_tip(f_float("max_draw_distance", 0.0f, 0.5f, 0.0f, 1e6f), "Cull beyond this from the camera (m); 0 never"),
+                with_tip(f_asset("render_mesh", "meshes", ".yaml", true), "Render mode `mesh`: the instanced mesh"),
+                mesh_material,
+            }, false});
+            add({"LightFlicker", "Effects", {
+                with_tip(f_float("amount", 0.3f, 0.01f, 0.0f, 4.0f, true), "Fraction of the sibling PointLight's intensity it swings by"),
+                f_float("speed", 6.0f, 0.05f, 0.0f, 100.0f, true),
+                with_tip(f_float("wobble", 0.0f, 0.005f, 0.0f, 10.0f), "Positional jitter (m)"),
+                with_tip(f_color("color_shift", glm::vec3(0.0f)), "Added to the light colour at bright peaks"),
+            }});
+        }
         // sfxcoopa (toyengine/audio/): a positioned or 2D sound, the ears (else the main camera
         // hears), and a settings-menu slider bound to a mixer bus.
         add({"AudioSource", "Audio", {

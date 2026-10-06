@@ -1,0 +1,328 @@
+# campfire: a ring of stones, a teepee of logs, and the fire itself -- flames, a glowing coal
+# bed, rising embers, a smoke column and a flickering light. Every effect is a ParticleSystem
+# (toyengine/particles/); place it with `prefab: objects/campfire`.
+#
+# The look follows the engine's stylized-real register (the water's): procedural sprites with
+# crisp, noise-broken edges and toon-banded cores, lit by the real scene lights.
+#   flames  -- `flame` sprites, upright (`vertical`), mostly additive, HDR so bloom catches them
+#   glow    -- a soft additive halo at the base, slow and large
+#   coals   -- a SCATTER of tiny `circle` sprites lying flat in the fire bed (never move)
+#   embers  -- `spark` sprites stretched along their velocity, swirled by curl noise, with
+#              periodic pops (a burst every few seconds)
+#   smoke   -- lit `puff` sprites, alpha-blended, growing and drifting downwind
+#   light   -- a PointLight whose intensity LightFlicker modulates in step with the flames
+format: toyengine-object
+object:
+  name: campfire
+  components:
+    - type: Transform
+      position: {x: 0, y: 0, z: 0}
+  children:
+    - name: fire_light
+      components:
+        - type: Transform
+          position: {x: 0.0, y: 0.0, z: 0.75}
+        - type: PointLight
+          color: {r: 1.0, g: 0.52, b: 0.18}
+          intensity: 240.0
+          range: 11.0
+          cast_shadows: true
+          attenuation_constant: 1.6
+        - type: LightFlicker
+          amount: 0.32
+          speed: 7.0
+          wobble: 0.04
+          color_shift: {r: 0.0, g: 0.08, b: 0.02}
+      children: []
+
+    - name: fire_glow
+      components:
+        - type: Transform
+          position: {x: 0.0, y: 0.0, z: 0.3}
+        - type: ParticleSystem
+          shape: sphere
+          radius: 0.15
+          rate: 7
+          max_particles: 20
+          prewarm: true
+          start_lifetime: [0.7, 1.0]
+          start_speed: [0.0, 0.1]
+          start_size: [1.1, 1.5]
+          start_color: {r: 1.0, g: 0.42, b: 0.1, a: 1.0}
+          alpha_over_life: [{t: 0.0, value: 0.0}, {t: 0.35, value: 0.16}, {t: 1.0, value: 0.0}]
+          render_mode: billboard
+          sprite: soft
+          blend: additive
+          emissive: 1.1
+          soft_distance: 0.5
+          sort: none
+      children: []
+
+    - name: flames
+      components:
+        - type: Transform
+          position: {x: 0.0, y: 0.0, z: 0.1}
+        - type: ParticleSystem
+          shape: cone
+          radius: 0.32
+          angle: 6
+          rate: 48
+          max_particles: 120
+          prewarm: true
+          start_lifetime: [0.45, 0.8]
+          start_speed: [0.7, 1.25]
+          start_size: [0.45, 0.8]
+          gravity: -0.25                 # hot air: a gentle upward pull
+          drag: 1.2
+          noise_strength: 0.9
+          noise_frequency: 1.2
+          noise_scroll: 1.6
+          size_over_life: [{t: 0.0, value: 0.55}, {t: 0.25, value: 1.0}, {t: 1.0, value: 0.25}]
+          color_over_life:
+            - {t: 0.0,  color: {r: 1.0,  g: 0.86, b: 0.36, a: 1.0}}
+            - {t: 0.35, color: {r: 1.0,  g: 0.46, b: 0.08, a: 1.0}}
+            - {t: 0.75, color: {r: 0.78, g: 0.13, b: 0.02, a: 0.85}}
+            - {t: 1.0,  color: {r: 0.3,  g: 0.03, b: 0.0,  a: 0.0}}
+          render_mode: vertical
+          sprite: flame
+          aspect: 0.7
+          pivot: 0.3                     # the tongue's bulb sits on the particle
+          additive: 0.55
+          emissive: 1.9
+          toon_bands: 4
+          softness: 0.12
+          distortion: 0.85
+          soft_distance: 0.25
+          sort: distance
+      children: []
+
+    - name: coals
+      components:
+        - type: Transform
+          position: {x: 0.0, y: 0.0, z: 0.05}
+        - type: ParticleSystem
+          mode: scatter
+          shape: circle
+          radius: 0.42
+          count: 46
+          start_size: [0.07, 0.15]
+          start_rotation: [0, 360]
+          start_color: {r: 0.85, g: 0.16, b: 0.03, a: 1.0}
+          start_color_b: {r: 1.0, g: 0.45, b: 0.08, a: 1.0}
+          # In a scatter, over-life curves give per-instance VARIETY: some coals dim, some bright.
+          color_over_life: [{t: 0.0, color: {r: 0.35, g: 0.25, b: 0.2, a: 1.0}}, {t: 1.0, color: {r: 1.0, g: 1.0, b: 1.0, a: 1.0}}]
+          render_mode: horizontal
+          sprite: circle
+          additive: 0.4
+          emissive: 1.4
+          toon_bands: 3
+          softness: 0.2
+          soft_distance: 0.0
+          sort: none
+      children: []
+
+    - name: embers
+      components:
+        - type: Transform
+          position: {x: 0.0, y: 0.0, z: 0.35}
+        - type: ParticleSystem
+          shape: cone
+          radius: 0.22
+          angle: 35
+          rate: 12
+          bursts:
+            - {time: 0.4, count: [6, 12], cycles: 0, interval: 2.7, probability: 0.85}
+          max_particles: 220
+          prewarm: true
+          start_lifetime: [1.2, 2.6]
+          start_speed: [0.8, 2.0]
+          start_size: [0.03, 0.05]
+          gravity: -0.15
+          drag: 1.1
+          noise_strength: 3.0
+          noise_frequency: 1.5
+          noise_scroll: 1.0
+          color_over_life:
+            - {t: 0.0, color: {r: 1.0, g: 0.6,  b: 0.2,  a: 1.0}}
+            - {t: 0.5, color: {r: 1.0, g: 0.32, b: 0.05, a: 1.0}}
+            - {t: 1.0, color: {r: 0.7, g: 0.1,  b: 0.02, a: 0.0}}
+          render_mode: stretched
+          sprite: spark
+          stretch_speed: 0.035
+          stretch_length: 1.0
+          blend: additive
+          emissive: 1.8
+          softness: 0.3
+          soft_distance: 0.1
+          sort: none
+      children: []
+
+    - name: smoke
+      components:
+        - type: Transform
+          position: {x: 0.0, y: 0.0, z: 0.95}
+        - type: ParticleSystem
+          shape: cone
+          radius: 0.25
+          angle: 12
+          rate: 7
+          max_particles: 80
+          prewarm: true
+          start_lifetime: [4.5, 6.5]
+          start_speed: [0.45, 0.85]
+          start_size: [0.5, 0.8]
+          start_rotation: [0, 360]
+          angular_velocity: [-25, 25]
+          start_color: {r: 0.24, g: 0.23, b: 0.22, a: 1.0}
+          start_color_b: {r: 0.36, g: 0.34, b: 0.32, a: 1.0}
+          force: {x: 0.32, y: 0.12, z: 0.2}  # a light breeze, and the column's own buoyancy
+          drag: 0.35
+          noise_strength: 0.3
+          noise_frequency: 0.35
+          noise_scroll: 0.4
+          size_over_life: [{t: 0.0, value: 0.55}, {t: 1.0, value: 3.4}]
+          color_over_life:
+            - {t: 0.0,  color: {r: 1.0, g: 1.0, b: 1.0, a: 0.0}}
+            - {t: 0.12, color: {r: 1.0, g: 1.0, b: 1.0, a: 0.6}}
+            - {t: 0.6,  color: {r: 1.0, g: 1.0, b: 1.0, a: 0.34}}
+            - {t: 1.0,  color: {r: 1.0, g: 1.0, b: 1.0, a: 0.0}}
+          render_mode: billboard
+          sprite: puff
+          lit: 0.9
+          toon_bands: 0                  # smooth light: banded puffs stack up as plates
+          softness: 0.55
+          distortion: 0.9
+          soft_distance: 0.6
+          sort: distance
+      children: []
+
+    - name: stone_0
+      components:
+        - type: Transform
+          position: {x: 0.774, y: -0.006, z: -0.02}
+          rotation: {x: 5.9, y: -7.9, z: 181.0}
+          scale: {x: 0.340, y: 0.291, z: 0.240}
+        - type: MeshRenderer
+          mesh_path: camp_stone
+          material: {albedo: {r: 0.36, g: 0.35, b: 0.33}, roughness: 0.92, metallic: 0.0}
+      children: []
+    - name: stone_1
+      components:
+        - type: Transform
+          position: {x: 0.604, y: 0.518, z: -0.02}
+          rotation: {x: -1.9, y: 3.3, z: 162.7}
+          scale: {x: 0.317, y: 0.283, z: 0.240}
+        - type: MeshRenderer
+          mesh_path: camp_stone
+          material: {albedo: {r: 0.36, g: 0.35, b: 0.33}, roughness: 0.92, metallic: 0.0}
+      children: []
+    - name: stone_2
+      components:
+        - type: Transform
+          position: {x: 0.169, y: 0.731, z: -0.02}
+          rotation: {x: 6.8, y: 1.4, z: 278.7}
+          scale: {x: 0.325, y: 0.321, z: 0.328}
+        - type: MeshRenderer
+          mesh_path: camp_stone
+          material: {albedo: {r: 0.36, g: 0.35, b: 0.33}, roughness: 0.92, metallic: 0.0}
+      children: []
+    - name: stone_3
+      components:
+        - type: Transform
+          position: {x: -0.329, y: 0.692, z: -0.02}
+          rotation: {x: 3.6, y: -1.3, z: 31.6}
+          scale: {x: 0.327, y: 0.334, z: 0.288}
+        - type: MeshRenderer
+          mesh_path: camp_stone
+          material: {albedo: {r: 0.36, g: 0.35, b: 0.33}, roughness: 0.92, metallic: 0.0}
+      children: []
+    - name: stone_4
+      components:
+        - type: Transform
+          position: {x: -0.751, y: 0.311, z: -0.02}
+          rotation: {x: 6.2, y: 6.1, z: 19.7}
+          scale: {x: 0.300, y: 0.296, z: 0.280}
+        - type: MeshRenderer
+          mesh_path: camp_stone
+          material: {albedo: {r: 0.36, g: 0.35, b: 0.33}, roughness: 0.92, metallic: 0.0}
+      children: []
+    - name: stone_5
+      components:
+        - type: Transform
+          position: {x: -0.753, y: -0.195, z: -0.02}
+          rotation: {x: -6.2, y: 1.5, z: 43.6}
+          scale: {x: 0.378, y: 0.353, z: 0.377}
+        - type: MeshRenderer
+          mesh_path: camp_stone
+          material: {albedo: {r: 0.36, g: 0.35, b: 0.33}, roughness: 0.92, metallic: 0.0}
+      children: []
+    - name: stone_6
+      components:
+        - type: Transform
+          position: {x: -0.408, y: -0.618, z: -0.02}
+          rotation: {x: 0.6, y: -7.7, z: 30.5}
+          scale: {x: 0.301, y: 0.287, z: 0.309}
+        - type: MeshRenderer
+          mesh_path: camp_stone
+          material: {albedo: {r: 0.36, g: 0.35, b: 0.33}, roughness: 0.92, metallic: 0.0}
+      children: []
+    - name: stone_7
+      components:
+        - type: Transform
+          position: {x: 0.122, y: -0.766, z: -0.02}
+          rotation: {x: -6.5, y: 1.3, z: 62.1}
+          scale: {x: 0.358, y: 0.331, z: 0.360}
+        - type: MeshRenderer
+          mesh_path: camp_stone
+          material: {albedo: {r: 0.36, g: 0.35, b: 0.33}, roughness: 0.92, metallic: 0.0}
+      children: []
+    - name: stone_8
+      components:
+        - type: Transform
+          position: {x: 0.558, y: -0.560, z: -0.02}
+          rotation: {x: -5.6, y: -3.7, z: 358.2}
+          scale: {x: 0.394, y: 0.329, z: 0.275}
+        - type: MeshRenderer
+          mesh_path: camp_stone
+          material: {albedo: {r: 0.36, g: 0.35, b: 0.33}, roughness: 0.92, metallic: 0.0}
+      children: []
+    - name: log_0
+      components:
+        - type: Transform
+          position: {x: 0.203, y: 0.086, z: 0.36}
+          rotation: {x: 4.1, y: 50.0, z: 22.9}
+          scale: {x: 0.9, y: 0.9, z: 0.9}
+        - type: MeshRenderer
+          mesh_path: camp_log
+          material: {albedo: {r: 0.13, g: 0.08, b: 0.05}, roughness: 0.95, metallic: 0.0, emissive: {r: 1.0, g: 0.28, b: 0.04}, emissive_strength: 0.15}
+      children: []
+    - name: log_1
+      components:
+        - type: Transform
+          position: {x: -0.086, y: 0.203, z: 0.36}
+          rotation: {x: 9.0, y: 50.0, z: 112.9}
+          scale: {x: 0.9, y: 0.9, z: 0.9}
+        - type: MeshRenderer
+          mesh_path: camp_log
+          material: {albedo: {r: 0.13, g: 0.08, b: 0.05}, roughness: 0.95, metallic: 0.0, emissive: {r: 1.0, g: 0.28, b: 0.04}, emissive_strength: 0.15}
+      children: []
+    - name: log_2
+      components:
+        - type: Transform
+          position: {x: -0.203, y: -0.086, z: 0.36}
+          rotation: {x: -5.3, y: 50.0, z: 202.9}
+          scale: {x: 0.9, y: 0.9, z: 0.9}
+        - type: MeshRenderer
+          mesh_path: camp_log
+          material: {albedo: {r: 0.13, g: 0.08, b: 0.05}, roughness: 0.95, metallic: 0.0, emissive: {r: 1.0, g: 0.28, b: 0.04}, emissive_strength: 0.15}
+      children: []
+    - name: log_3
+      components:
+        - type: Transform
+          position: {x: 0.086, y: -0.203, z: 0.36}
+          rotation: {x: 2.2, y: 50.0, z: 292.9}
+          scale: {x: 0.9, y: 0.9, z: 0.9}
+        - type: MeshRenderer
+          mesh_path: camp_log
+          material: {albedo: {r: 0.13, g: 0.08, b: 0.05}, roughness: 0.95, metallic: 0.0, emissive: {r: 1.0, g: 0.28, b: 0.04}, emissive_strength: 0.15}
+      children: []

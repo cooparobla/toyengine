@@ -40,6 +40,7 @@ asset list, right-click it there and choose **Rename...**.
 | **Mesh > Cube**, **Plane**, **Grid**, **Cylinder**, **Sphere** | A basic 3D shape |
 | **Light > Sun**, **Point**, **Spot**, **Environment** | A light |
 | **Camera** | A camera |
+| **Particle System** | A particle effect (sparks, smoke, fire, a scatter of instances over a mesh). It plays in the viewport while you edit. While it is selected, its emission shape and the bounds of its particles are drawn in orange. |
 | **Empty** | An object with nothing but a position. Useful as a parent for other objects. |
 | **Reflection Probe** | A probe that captures reflections for nearby surfaces |
 | **Terrain** | A terrain |

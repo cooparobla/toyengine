@@ -149,6 +149,8 @@
 #include <toyengine/render/passes/debug_line_pass.h>
 #include <toyengine/render/passes/transparent_preview_pass.h>
 #include <toyengine/render/passes/underwater_pass.h>
+#include <toyengine/render/passes/particle_pass.h>
+#include <toyengine/render/particle_types.h>
 #include <toyengine/scene/camera_controller.h>
 
 namespace toy {
@@ -371,6 +373,15 @@ public:
         return glm::vec4(elapsed_time_, frame_dt_, static_cast<float>(frame_index_), water_time);
     }
     const WaterFrameState& water_state() const { return water_state_; }
+
+    /**
+     * @brief Hands over this frame's particle draw batches (toy::particles, via Engine). Quads
+     *        draw inside the forward transparent pass, sorted with BLEND meshes and SDFs; mesh
+     *        batches join the opaque G-buffer and shadow batching as instanced draws. The batch
+     *        pointers must stay valid until render() returns.
+     */
+    void set_particle_state(ParticleFrameState state) { particle_state_ = std::move(state); }
+    const ParticleFrameState& particle_state() const { return particle_state_; }
 
     /** @brief True when UnderwaterPass exists and is applying the underwater look this frame. */
     bool underwater_active() const { return underwater_pass_ != nullptr && water_state_.underwater; }
@@ -706,6 +717,21 @@ public:
         const MeshGather meshes = gather_meshes_(frame_slot, view, unjittered_proj, cast_dir_shadow,
                                                  shadow_point, cast_point_shadow, cast_spot_shadow);
 
+        // Particle quads: every batch's instances into this slot's buffer in one go. They only
+        // draw inside the forward transparent pass, so nothing uploads when that is off -- said
+        // once, rather than an effect silently missing.
+        if (!config_.transparency_enabled && !particle_state_.quads.empty() && !warned_particles_need_transparency_) {
+            std::cerr << "[toy::render] This scene has particle effects, but transparency_enabled is off: "
+                         "particle quads draw in the forward transparent pass and are skipped "
+                         "(mesh-mode particles still draw).\n";
+            warned_particles_need_transparency_ = true;
+        }
+        if (config_.transparency_enabled) {
+            particle_pass_->upload(frame_slot, particle_state_.quads);
+            particle_depth_ = glm::vec4(cam ? cam->clip_start : 0.1f, cam ? cam->clip_end : 1000.0f,
+                                        (!cam || cam->type != CameraType::Orthographic) ? 1.0f : 0.0f, 0.0f);
+        }
+
         // SSR's second trace source (ssr_reflect_transparent) only exists when something
         // transparent is actually in view. Otherwise skip the capture pass and its pyramids AND
         // the per-pixel second trace -- it could only ever miss.
@@ -862,6 +888,12 @@ private:
         std::vector<glm::mat4>   world_matrices;
         std::vector<WorldBounds> bounds;
         std::vector<uint8_t>     valid;   ///< Ready, has a transform, not LOD-culled.
+        /// Per item: a particle mesh batch's world matrices (ParticleMeshBatch), null for an
+        /// ordinary renderer. Such an item contributes `multi_count[i]` instances from these
+        /// matrices to whichever batch it joins, instead of world_matrices[i]; its bounds are
+        /// the whole particle batch's.
+        std::vector<const glm::mat4*> multi;
+        std::vector<uint32_t>         multi_count;
         std::vector<uint32_t>    lod;     ///< Chosen against the camera; shadow views reuse it.
         /// Single-instance index for each camera-visible BLEND renderer -- the forward pass
         /// draws those one at a time, back to front, so they are never batched. Otherwise
@@ -1395,6 +1427,14 @@ private:
             config_.shaders("sdf_quad.vert"),
             config_.shaders("sdf_forward.frag"),
             sdf_forward_extra);
+
+        // Particle quads share the same render pass for the same reason SDFs do: one bracket,
+        // one back-to-front list. Set 2 is the Hi-Z pyramid (mip 0 = opaque depth, for soft
+        // particles), set 3 the material set (the sprite texture in its albedo slot).
+        particle_pass_ = std::make_unique<passes::ParticlePass>(
+            device_, allocator_, transparent_pass_->render_pass(),
+            *camera_layout_, *light_layout_, ssr_pass_->hiz_layout(), material_cache_->layout_object(),
+            config_.shaders("particle.vert"), config_.shaders("particle.frag"));
     }
     /**
      * @brief Builds the post-process chain in frame-graph order -- fog, volumetrics, DOF, bloom,
@@ -2571,7 +2611,27 @@ private:
                 out.part.push_back(p);
             }
         }
+        // Mesh-mode particle systems: one item per (batch, part), drawn from the batch's own
+        // instance matrices through the same batching as every other opaque mesh.
+        const size_t first_particle_item = out.renderers.size();
+        std::vector<const ParticleMeshBatch*> particle_items;
+        for (const ParticleMeshBatch& pb : particle_state_.meshes) {
+            MeshRenderer* mr = pb.proxy;
+            if (!mr || pb.count == 0 || !pb.matrices || !mr->is_ready()) continue;
+            mr->resolve_slot_names();
+            for (uint32_t p = 0; p < mr->get_mesh()->part_count(); ++p) {
+                out.renderers.push_back(mr);
+                out.part.push_back(p);
+                particle_items.push_back(&pb);
+            }
+        }
         const size_t n = out.renderers.size();
+        out.multi.assign(n, nullptr);
+        out.multi_count.assign(n, 0u);
+        for (size_t k = 0; k < particle_items.size(); ++k) {
+            out.multi[first_particle_item + k]       = particle_items[k]->matrices;
+            out.multi_count[first_particle_item + k] = particle_items[k]->count;
+        }
         out.world_matrices.assign(n, glm::mat4(1.0f));
         out.bounds.assign(n, WorldBounds{});
         out.valid.assign(n, 0);
@@ -2585,6 +2645,14 @@ private:
         auto gather_mesh = [&](size_t begin, size_t end) {
             for (size_t i = begin; i < end; ++i) {
                 MeshRenderer* mr = out.renderers[i];
+                if (out.multi[i]) {
+                    // A particle batch: world-space matrices already, bounds from the system.
+                    const ParticleMeshBatch& pb = *particle_items[i - first_particle_item];
+                    out.bounds[i].center = 0.5f * (pb.bounds_min + pb.bounds_max);
+                    out.bounds[i].extent = 0.5f * (pb.bounds_max - pb.bounds_min);
+                    out.valid[i] = 1;
+                    continue;
+                }
                 if (!mr->is_ready() || !mr->owner) continue;
                 auto* tc = mr->owner->get_transform();
                 if (!tc) continue;
@@ -2695,8 +2763,18 @@ private:
                 batch.item           = visible[r];
                 batch.lod            = out.lod[visible[r]];
                 batch.first_instance = instance_stream_.size();
-                batch.instance_count = static_cast<uint32_t>(e - r);
-                for (size_t j = r; j < e; ++j) instance_stream_.add(out.world_matrices[visible[j]]);
+                uint32_t added = 0;
+                for (size_t j = r; j < e; ++j) {
+                    const uint32_t it = visible[j];
+                    if (out.multi[it]) {
+                        for (uint32_t m = 0; m < out.multi_count[it]; ++m) instance_stream_.add(out.multi[it][m]);
+                        added += out.multi_count[it];
+                    } else {
+                        instance_stream_.add(out.world_matrices[it]);
+                        ++added;
+                    }
+                }
+                batch.instance_count = added;
                 list.push_back(batch);
                 r = e;
             }
@@ -4817,6 +4895,22 @@ private:
                                         water_state_.detail_distance, water_state_.ripple_range);
     }
 
+    /// One particle batch's push block: its look, plus the frame's clock, depth range and ambient.
+    passes::ParticlePass::PushConstants particle_push_constants_(const ParticleDrawBatch& b) const {
+        const ParticleLook& l = b.look;
+        passes::ParticlePass::PushConstants pc;
+        pc.mode    = glm::vec4(static_cast<float>(l.mode), static_cast<float>(l.sprite), l.flipbook.x, l.flipbook.y);
+        pc.shading = glm::vec4(l.lit, l.toon_bands, l.emissive, glm::clamp(l.additive, 0.0f, 1.0f));
+        pc.shape   = glm::vec4(l.softness, l.soft_distance, l.camera_fade, l.aspect);
+        pc.stretch = glm::vec4(l.stretch_speed, l.stretch_length, l.distortion, elapsed_time_);
+        pc.misc    = glm::vec4(l.opacity, b.texture_material ? 1.0f : 0.0f, l.pivot_z, particle_depth_.z);
+        pc.depth   = glm::vec4(particle_depth_.x, particle_depth_.y,
+                               1.0f / static_cast<float>(std::max(1u, render_extent_.width)),
+                               1.0f / static_cast<float>(std::max(1u, render_extent_.height)));
+        pc.ambient = glm::vec4(config_.indirect.ambient_intensity, 0.0f, 0.0f, 0.0f);
+        return pc;
+    }
+
     /// Draws every BLEND-material renderer AND every BLEND SdfRenderer, back-to-front by squared
     /// distance from the camera, into hdr_target_view.
     ///
@@ -4841,7 +4935,9 @@ private:
         struct Item {
             bool      is_sdf;
             size_t    index; // into `renderers`/`world_matrices` if !is_sdf, else into `sdf_draws`
+                             // (or particle_state_.quads, for a particle batch)
             glm::vec3 pos;
+            bool      is_particle = false;
         };
         std::vector<Item> order;
         for (size_t i = 0; i < meshes.renderers.size(); ++i) {
@@ -4855,6 +4951,14 @@ private:
             if (!sdf_draws[i].is_blend) continue;
             if (sdf_draws[i].px_rect.w == 0 || sdf_draws[i].px_rect.h == 0) continue;
             order.push_back({true, i, sdf_draws[i].world_center});
+        }
+        // Particle batches sort as a whole by their bounds centre (each is already sorted
+        // internally, back to front, by toy::particles).
+        if (particle_pass_ && particle_pass_->total_instances() > 0) {
+            for (size_t i = 0; i < particle_state_.quads.size(); ++i) {
+                if (particle_state_.quads[i].count == 0) continue;
+                order.push_back({false, i, particle_state_.quads[i].sort_center, true});
+            }
         }
         if (order.empty()) return false;
 
@@ -4874,7 +4978,7 @@ private:
         // to a pipeline with an incompatible layout, so it needs no re-issue at every
         // mesh-kind transition.
 
-        // -1 = neither yet bound, 0 = mesh, 1 = sdf -- tracks which pipeline+sets are current so
+        // -1 = nothing yet bound, 0 = mesh, 1 = sdf, 2 = particles -- tracks which pipeline+sets are current so
         // a run of same-kind items in `order` only rebinds once, at the transition.
         int last_kind = -1;
         // Independent of last_kind: which named variant transparent_pass_ currently has bound. A
@@ -4885,6 +4989,25 @@ private:
         std::string last_mesh_shader;
 
         for (const auto& item : order) {
+            if (item.is_particle) {
+                // -- a particle batch: ParticlePass's pipeline, sets 0-2 once per run of batches,
+                // the material set (sprite texture) per batch.
+                if (last_kind != 2) {
+                    particle_pass_->bind(cmd);
+                    cmd.set_scissor(0, 0, render_extent_.width, render_extent_.height);
+                    cmd.bind_descriptor_set(current_camera_set(), 0);
+                    cmd.bind_descriptor_set(current_light_set(), 1);
+                    cmd.bind_descriptor_set(ssr_pass_->hiz_set(), 2);
+                    last_kind = 2;
+                }
+                const ParticleDrawBatch& pb = particle_state_.quads[item.index];
+                cmd.bind_descriptor_set(material_cache_->set_for(pb.texture_material ? *pb.texture_material
+                                                                                      : particle_default_material_), 3);
+                particle_pass_->draw(cmd, item.index, pb.count, particle_push_constants_(pb));
+                frame_stats_.camera_draws     += 1;
+                frame_stats_.camera_instances += pb.count;
+                continue;
+            }
             if (!item.is_sdf) {
                 auto* mr = meshes.renderers[item.index];
                 const auto& mr_mat = meshes.material(item.index);
@@ -5077,6 +5200,13 @@ private:
     std::unique_ptr<passes::UnderwaterPass> underwater_pass_;   // null when !underwater_enabled
     passes::UnderwaterPass::Params underwater_params_;           // filled in render()
     WaterFrameState water_state_;                                // set_water_state(), per frame
+    ParticleFrameState particle_state_;                          // set_particle_state(), per frame
+    glm::vec4 particle_depth_{0.1f, 1000.0f, 1.0f, 0.0f};         ///< near, far, is_perspective -- render()
+    bool warned_particles_need_transparency_ = false;
+    /// Quads drawn inside transparent_pass_'s bracket (see record_transparent_()). Built with it.
+    std::unique_ptr<passes::ParticlePass> particle_pass_;
+    /// The white-texture material set untextured particle batches bind at set 3.
+    coopa::gfx::engine::components::PBRMaterial particle_default_material_;
     // Fixed source view fog_pass_ reads from -- chosen once from config_.ssr_enabled's startup
     // value, same policy as pixel_stylize_pass_'s own binding (see that construction-time
     // comment). Kept as a member (not a local) so pixel_stylize_pass_'s own construction, later

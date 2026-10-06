@@ -89,6 +89,15 @@ diff and merge it. See [editor/README.md](editor/README.md) for the full tour.
   - Meshed in chunks on the job system and streamed around the camera.
   - Tile shapes are mesh assets, so the look changes with one line of YAML.
 
+- **Particles** ([toyengine/particles](toyengine/particles/README.md)):
+  - Unity-style modules: emission rate and bursts, shapes, forces, curl-noise turbulence,
+    colour/size over life, ground collision and sub emitters.
+  - Blender-style mesh emission from faces, vertices or edges, oriented to the surface, plus a
+    hair-like scatter mode that places instanced meshes or surface-aligned cards over a mesh.
+  - Simulated on the job system; rendered as sorted, instanced quads in the transparent pass,
+    with soft depth fades and HDR glow.
+  - Procedural sprites with a stylized look: flame, smoke puff, spark, ring, star and leaf.
+
 ### UI and scenes
 - **UI toolkit** ([uicoopa](libs/uicoopa)). Panels, text, buttons, sliders, progress bars,
   layouts and masks. Use it as a crisp screen-space HUD, or on world-space canvases that

@@ -68,6 +68,9 @@
 #include <toyengine/scene/register.h>
 #include <toyengine/world/terrain_system.h>
 #include <toyengine/water/water_system.h>
+#include <toyengine/particles/particle_system_runner.h>
+#include <toyengine/particles/particle_yaml.h>
+#include <toyengine/render/visibility.h>
 #include <toyengine/core/module.h>
 
 #include <root_directory.h>
@@ -203,6 +206,9 @@ public:
         scene::register_scene_components(ctx_.device(), ctx_.allocator(), assets_,
                                           ctx_.frames_in_flight());
         coopa::physx::register_physics_components(assets_, config_.physics);
+        // "ParticleSystem" + "LightFlicker" (toyengine/particles/): emitter meshes load CPU-side,
+        // mesh-mode render meshes and sprite textures through the same loaders as MeshRenderer.
+        particles::register_particle_components(assets_);
         // The GPU overload, so font/sprite paths in scene YAML load on demand and
         // FontDefaults::resolve_font is wired for themes. Must precede load_scene(), like
         // every other parser registration above. Its captured device/allocator references
@@ -687,6 +693,10 @@ private:
         water::install_water_system(scene, &ctx_.device(), &ctx_.allocator(), &assets_)
             ->set_settings(water_settings_for_(pipeline_->render_config().water_quality));
         coopa::physx::system::install_physics_system(scene, scene_cfg.physics);
+        // Order 360: after TransformResolve (350), so every emitter's world matrix is current;
+        // runs in edit mode too, so effects preview live in the editor -- see
+        // particle_system_runner.h.
+        particles::install_particle_system(scene);
 
         // Activate TransformSystem before the first drain or render, so the world_matrix()
         // reads below are never asked to resolve a still-dirty transform; then block until
@@ -712,6 +722,13 @@ public:
     ~Engine() {
         ctx_.wait_idle();
         shutdown_audio_();
+        // Scenes before assets_.shutdown() below: every MeshRenderer (and texture, font, clip...)
+        // holds an AssetHandle whose destructor releases its slot in the AssetManager. Left to
+        // member destruction, the scenes went AFTER shutdown() had already freed those slots --
+        // a use-after-free on every Engine teardown (AddressSanitizer: ~MeshRenderer writing a
+        // slot freed by AssetManager::shutdown()), which corrupted the heap for whatever a
+        // process did next (the editor tests' "random" segfaults).
+        clear_scenes_();
         // register_render_components()'s parser lambdas capture ctx_'s device/allocator/
         // cmd_pool by reference in SceneLoader's function-local static registry, which
         // would otherwise only be destroyed at program exit -- after ctx_ goes out of
@@ -725,6 +742,11 @@ public:
         // and Allocator are gone, which trips VMA's "allocations not freed" assertion. Same
         // contract as clear_component_parsers() above; see UIResourceCache::clear()'s doc.
         coopa::ui::UIResourceCache::instance().clear();
+        // font_for_path() publishes the first font it loads as the static FontDefaults::font,
+        // and clear() just destroyed it without resetting that. Left dangling, the NEXT Engine
+        // in this process (every editor test) hands it to its first unthemed Text as the
+        // fallback font -- a use-after-free AddressSanitizer caught in mark_text_atlases().
+        coopa::ui::FontDefaults::font = nullptr;
         assets_.shutdown();
     }
 
@@ -1003,11 +1025,48 @@ public:
             if (hooks_.pre_render) hooks_.pre_render(dt);
             update_fill_extent_();
             sync_water_render_state_(scene_mgr_.get_active_scene());
+            {
+                // After the host's pre_render hook and a fill-mode pipeline rebuild, like the water
+                // sync: the batches point into the systems' buffers and go to THIS pipeline.
+                CpuTimer t(prof, CpuScope::DynamicMeshes);
+                sync_particle_render_state_(scene_mgr_.get_active_scene());
+            }
             CpuTimer t(prof, CpuScope::Render);
             pipeline_->render(ctx_.renderer(), scene_mgr_.get_active_scene(), dt);
         }
 
         return !ctx_.should_close();
+    }
+
+    /**
+     * @brief Hands the renderer this frame's particle batches: every ParticleSystem whose
+     *        bounds the main camera can see gets its instances built (sorted back to front,
+     *        on the job workers) and its batch queued. The bridge between toyengine/particles/
+     *        and render/, which only share the plain data in render/particle_types.h.
+     */
+    void sync_particle_render_state_(coopa::scene::Scene& scene) {
+        particle_frame_.quads.clear();
+        particle_frame_.meshes.clear();
+        if (auto* sys = dynamic_cast<particles::ParticleSimulationSystem*>(scene.find_system("Particles"))) {
+            using coopa::gfx::engine::components::CameraComponent;
+            const CameraComponent* cam = CameraComponent::main();
+            particles::ParticleView view;
+            render::Frustum frustum{};
+            if (cam) {
+                view.camera_pos = cam->get_world_position();
+                const float aspect = static_cast<float>(pipeline_->render_width()) /
+                                     static_cast<float>(std::max(1u, pipeline_->render_height()));
+                frustum = render::Frustum::from_matrix(cam->get_projection_matrix(aspect) * cam->get_view_matrix());
+            }
+            sys->collect_render(scene, view, [&](const glm::vec3& lo, const glm::vec3& hi) {
+                if (!cam) return true;
+                render::WorldBounds b;
+                b.center = 0.5f * (lo + hi);
+                b.extent = 0.5f * (hi - lo);
+                return frustum.intersects(b);
+            }, particle_frame_);
+        }
+        pipeline_->set_particle_state(particle_frame_);
     }
 
     /** @brief render::RenderQuality (config.yaml's water_quality) as the water module's tier. */
@@ -1875,6 +1934,8 @@ private:
     FrameHooks            hooks_;
     std::vector<std::function<void(coopa::input::Input&)>> input_queue_;
     coopa::scene::Scene*  overlay_scene_ = nullptr;
+    /// This frame's particle batches (see sync_particle_render_state_()); kept to reuse capacity.
+    render::ParticleFrameState particle_frame_;
 };
 
 

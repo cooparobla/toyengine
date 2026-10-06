@@ -56,7 +56,24 @@ def vertex_normals(verts, faces):
     return out
 
 
-def write_mesh(path, verts, faces, uvs, normals=None):
+def perpendicular_tangents(normals):
+    """One unit tangent per normal: +X made perpendicular to it (Gram-Schmidt), or +Y where the
+    normal is (anti)parallel to +X -- a tangent parallel to its normal is a zero vector once
+    the G-buffer orthogonalises it, and normalising that is a NaN.
+    """
+    out = []
+    for n in normals:
+        for axis in ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]):
+            d = sum(axis[i] * n[i] for i in range(3))
+            t = [axis[i] - n[i] * d for i in range(3)]
+            length = math.sqrt(sum(c * c for c in t))
+            if length > 0.2:
+                out.append([c / length for c in t] + [1.0])
+                break
+    return out
+
+
+def write_mesh(path, verts, faces, uvs, normals=None, tangents=None):
     """Writes one mesh YAML in the repo's standard schema.
 
     Tangents are +X with handedness +1 throughout: these meshes are parameterised so that U
@@ -71,6 +88,9 @@ def write_mesh(path, verts, faces, uvs, normals=None):
         uvs (list): One UV per vertex, spanning the cell's [0,1] footprint.
         normals (list): Optional explicit per-vertex normals; area-weighted vertex normals
             (vertex_normals()) when omitted.
+        tangents (list): Optional per-vertex (x, y, z, w) tangents; +X throughout when omitted
+            (see above). A mesh whose normals can point along +X must pass its own --
+            perpendicular_tangents() makes them.
     """
     if normals is None:
         normals = vertex_normals(verts, faces)
@@ -87,7 +107,10 @@ def write_mesh(path, verts, faces, uvs, normals=None):
     lines.append("weights:")
     lines += ["  - {  }" for _ in verts]
     lines.append("tangents:")
-    lines += [f"  - {fmt_vec([1.0, 0.0, 0.0, 1.0])}" for _ in verts]
+    if tangents is None:
+        lines += [f"  - {fmt_vec([1.0, 0.0, 0.0, 1.0])}" for _ in verts]
+    else:
+        lines += [f"  - {fmt_vec(t)}" for t in tangents]
 
     path.write_text("\n".join(lines) + "\n")
     print(f"wrote {len(verts)} vertices, {len(faces)} faces to {path}")

@@ -14,6 +14,7 @@ whatever is switched on.
 | [`pixel_math.h`](pixel_math.h) | Pure-CPU, Vulkan-free math: render extent, letterbox/fit rects, pixel-snap density, SDF clip rects, view-space depth, exponential smoothing, and the directional-shadow frustum fit. Exercised directly by `toyengine_tests` with no device needed. |
 | [`instance_stream.h`](instance_stream.h) | `InstanceStream` — per-frame-in-flight instance transform buffer. |
 | [`forward_globals.h`](forward_globals.h) | `ForwardGlobalsData` — per-frame-in-flight UBO for the forward transparent pass's lighting/indirect/SSR/refraction tuning. |
+| [`particle_types.h`](particle_types.h) | The plain-data contract with `toyengine/particles/`: `ParticleInstance` (the 80-byte GPU instance), `ParticleLook`, and the per-frame quad and mesh batches handed over by `set_particle_state()`. |
 | [`passes/`](passes/) | The passes toyengine defines itself; everything else is reused from gfxcoopa. |
 
 ## Startup-fixed vs runtime toggles
@@ -67,9 +68,11 @@ three groups below.
    single normal-offset mip tap the composite falls back to.
 10. Refraction's own scene-colour chain, when refraction is on and a BLEND mesh is in view
    (`refraction_this_frame_`; nothing else samples it, so a frame without one skips the build).
-11. Forward transparent pass: BLEND meshes and BLEND SDFs merged into one back-to-front list,
-   drawn in place into the SSR composite. BLEND *meshes* additionally refract; BLEND SDFs
-   never do.
+11. Forward transparent pass: BLEND meshes, BLEND SDFs and particle batches merged into one
+   back-to-front list, drawn in place into the SSR composite. BLEND *meshes* additionally
+   refract; BLEND SDFs never do. Each particle batch is one instanced draw through
+   `ParticlePass` (see `passes/particle_pass.h` and `toyengine/particles/`). Mesh-mode particles
+   are not here: they join step 2's G-buffer batches and the shadow views as instanced meshes.
 
 **Post** (`record_post_chain_()`):
 

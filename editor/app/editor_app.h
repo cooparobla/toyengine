@@ -62,6 +62,7 @@
 #include <toyengine/core/branding.h>
 #include <toyengine/core/engine.h>
 #include <toyengine/render/passes/debug_line_pass.h>
+#include <toyengine/particles/particle_system.h>
 
 #include <gfxcoopa/engine/components/mesh_renderer.h>
 #include <gfxcoopa/engine/components/register.h>
@@ -1186,6 +1187,96 @@ private:
         // modes look through the surface they paint on, so they stay opaque).
         engine_.render_config().editor_xray_alpha = xray_surfaces_() ? xray_alpha_ : 1.0f;
         if (grid_wanted_) push_grid_lines_();
+        if (!playing()) push_particle_gizmos_();
+    }
+
+    /**
+     * @brief The emission shape of every selected ParticleSystem, as X-ray lines -- Unity's cone
+     *        gizmo: a cone's base and spread, a sphere's three great circles, a box, a circle, an
+     *        edge. A mesh emitter needs none (its mesh is the shape); every system also shows the
+     *        bounds of its live particles, dimmer.
+     */
+    void push_particle_gizmos_() {
+        using toy::particles::EmitShape;
+        std::vector<render::DebugLine>& out = engine_.pipeline().debug_lines();
+        const uint32_t shape_col = 0xE0'40'B0'FFu;   // ABGR bytes: warm orange, mostly opaque
+        const uint32_t bounds_col = 0x60'40'B0'FFu;
+        for (ObjectId id : doc_.selection()) {
+            auto it = sync_.live_objects().find(id);
+            if (it == sync_.live_objects().end() || !it->second) continue;
+            auto* ps = it->second->get_component<toy::particles::ParticleSystem>();
+            auto* tc = it->second->get_transform();
+            if (!ps || !tc) continue;
+            const glm::mat4 m = tc->transform().get_world_matrix();
+            auto line = [&](glm::vec3 a, glm::vec3 b, uint32_t c) {
+                out.push_back(render::DebugLine{glm::vec3(m * glm::vec4(a, 1.0f)), glm::vec3(m * glm::vec4(b, 1.0f)), c, false});
+            };
+            auto circle = [&](glm::vec3 centre, glm::vec3 u, glm::vec3 v, float r, float arc_deg) {
+                const int seg = 32;
+                const float arc = glm::radians(std::clamp(arc_deg, 0.0f, 360.0f));
+                for (int i = 0; i < seg; ++i) {
+                    const float a0 = arc * i / seg, a1 = arc * (i + 1) / seg;
+                    line(centre + (u * std::cos(a0) + v * std::sin(a0)) * r, centre + (u * std::cos(a1) + v * std::sin(a1)) * r, shape_col);
+                }
+            };
+            const auto& sh = ps->settings.shape;
+            const glm::vec3 o = sh.offset, X(1, 0, 0), Y(0, 1, 0), Z(0, 0, 1);
+            switch (sh.type) {
+                case EmitShape::Cone: {
+                    const float spread = std::tan(glm::radians(std::clamp(sh.angle_deg, 0.0f, 89.0f)));
+                    const float h = 1.0f;
+                    circle(o, X, Y, sh.radius, sh.arc_deg);
+                    circle(o + Z * h, X, Y, sh.radius + spread * h, sh.arc_deg);
+                    for (int k = 0; k < 4; ++k) {
+                        const float a = glm::radians(90.0f * k);
+                        const glm::vec3 d(std::cos(a), std::sin(a), 0.0f);
+                        line(o + d * sh.radius, o + d * (sh.radius + spread * h) + Z * h, shape_col);
+                    }
+                    break;
+                }
+                case EmitShape::Sphere:
+                case EmitShape::Hemisphere:
+                    circle(o, X, Y, sh.radius, 360.0f);
+                    circle(o, X, Z, sh.radius, sh.type == EmitShape::Hemisphere ? 180.0f : 360.0f);
+                    circle(o, Y, Z, sh.radius, sh.type == EmitShape::Hemisphere ? 180.0f : 360.0f);
+                    break;
+                case EmitShape::Circle:
+                    circle(o, X, Y, sh.radius, sh.arc_deg);
+                    break;
+                case EmitShape::Box: {
+                    const glm::vec3 h = sh.box * 0.5f;
+                    for (int e = 0; e < 12; ++e) {
+                        const int axis = e / 4, a = (e & 1) ? 1 : -1, b = (e & 2) ? 1 : -1;
+                        glm::vec3 p0(0.0f), p1(0.0f);
+                        p0[axis] = -h[axis]; p1[axis] = h[axis];
+                        p0[(axis + 1) % 3] = p1[(axis + 1) % 3] = a * h[(axis + 1) % 3];
+                        p0[(axis + 2) % 3] = p1[(axis + 2) % 3] = b * h[(axis + 2) % 3];
+                        line(o + p0, o + p1, shape_col);
+                    }
+                    break;
+                }
+                case EmitShape::Edge:
+                    line(o - X * (0.5f * sh.length), o + X * (0.5f * sh.length), shape_col);
+                    break;
+                case EmitShape::Point:
+                    for (const glm::vec3& d : {X, Y, Z}) line(o - d * 0.1f, o + d * 0.1f, shape_col);
+                    break;
+                case EmitShape::Mesh:
+                    break;
+            }
+            if (ps->particle_count() > 0) {
+                const glm::vec3 lo = ps->bounds_min(), hi = ps->bounds_max();
+                for (int e = 0; e < 12; ++e) {
+                    const int axis = e / 4;
+                    glm::vec3 p0((e & 1) ? hi.x : lo.x, (e & 2) ? hi.y : lo.y, lo.z);
+                    if (axis == 0) p0 = glm::vec3(lo.x, (e & 1) ? hi.y : lo.y, (e & 2) ? hi.z : lo.z);
+                    if (axis == 1) p0 = glm::vec3((e & 1) ? hi.x : lo.x, lo.y, (e & 2) ? hi.z : lo.z);
+                    glm::vec3 p1 = p0;
+                    p1[axis] = hi[axis];
+                    out.push_back(render::DebugLine{p0, p1, bounds_col, false});
+                }
+            }
+        }
     }
 
     /**
@@ -2245,6 +2336,7 @@ private:
                 ctx.end_menu();
             }
             if (ctx.menu_item("Camera")) create_with_component("Camera", "Camera");
+            if (ctx.menu_item("Particle System")) create_with_component("ParticleSystem", "Particle System");
             if (ctx.menu_item("Empty")) create_empty();
             if (ctx.menu_item("Reflection Probe")) create_with_component("ReflectionProbe", "Reflection Probe");
             if (ctx.menu_item("Terrain")) create_with_component("Terrain", "Terrain");

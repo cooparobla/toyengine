@@ -12,7 +12,9 @@
  * buffer. Batching happens in the caller: PixelRenderPipeline sorts each view's visible
  * renderers and appends every batch's transforms contiguously (add_range), so one instanced
  * draw covers a whole run of identical mesh + material. Transforms repeat once per view an
- * object is visible in (camera, each shadow cascade/face) -- 64 bytes each.
+ * object is visible in (camera, each shadow cascade/face) -- 128 bytes each: this frame's
+ * world matrix and last frame's (data::InstanceData), the latter for the G-buffer's
+ * per-object motion vectors.
  *
  * The buffer GROWS instead of dropping instances: a slot is only rewritten after render()
  * has waited on that slot's fence, so replacing its buffer there races nothing.
@@ -29,6 +31,7 @@
 #include <vector>
 
 #include <gfxcoopa/core/device.h>
+#include <gfxcoopa/engine/data/mesh.h>
 #include <gfxcoopa/memory/allocator.h>
 #include <gfxcoopa/memory/buffer.h>
 #include <gfxcoopa/presentation/renderer.h>
@@ -39,8 +42,9 @@ namespace render {
 
 /**
  * @class InstanceStream
- * @brief Uploads one glm::mat4 per renderable into a per-frame-in-flight
- *        vertex buffer, bound at the G-buffer pipeline's instance slot (1).
+ * @brief Uploads one data::InstanceData (current + previous world matrix) per renderable
+ *        into a per-frame-in-flight vertex buffer, bound at the G-buffer pipeline's
+ *        instance slot (1).
  */
 class InstanceStream {
 public:
@@ -73,14 +77,20 @@ public:
     }
 
     /**
-     * @brief Appends one instance transform.
+     * @brief Appends one instance transform together with the one it had last frame.
      * @return Its index -- pass as `first_instance` to an instanced draw.
      */
-    uint32_t add(const glm::mat4& model) {
+    uint32_t add(const glm::mat4& model, const glm::mat4& prev_model) {
         uint32_t idx = static_cast<uint32_t>(pending_.size());
-        pending_.push_back(model);
+        coopa::gfx::engine::data::InstanceData inst;
+        inst.model      = model;
+        inst.prev_model = prev_model;
+        pending_.push_back(inst);
         return idx;
     }
+
+    /** @brief Appends an instance with no previous pose (prev_model == model: zero object motion). */
+    uint32_t add(const glm::mat4& model) { return add(model, model); }
 
     /// @brief Number of transforms added since begin() -- the next add()'s index.
     uint32_t size() const { return static_cast<uint32_t>(pending_.size()); }
@@ -98,7 +108,8 @@ public:
             buffers_[frame_index_] = make_buffer_(cap);
             capacities_[frame_index_] = cap;
         }
-        buffers_[frame_index_]->upload(pending_.data(), sizeof(glm::mat4) * pending_.size());
+        buffers_[frame_index_]->upload(pending_.data(),
+                                       sizeof(coopa::gfx::engine::data::InstanceData) * pending_.size());
     }
 
     /** @brief The current frame slot's buffer -- bind at slot 1 before drawing. */
@@ -107,7 +118,8 @@ public:
 private:
     std::unique_ptr<coopa::gfx::memory::Buffer> make_buffer_(uint32_t capacity) {
         return std::make_unique<coopa::gfx::memory::Buffer>(
-            device_, allocator_, sizeof(glm::mat4) * std::max<uint32_t>(capacity, 1u),
+            device_, allocator_,
+            sizeof(coopa::gfx::engine::data::InstanceData) * std::max<uint32_t>(capacity, 1u),
             coopa::gfx::BufferUsage::Vertex, coopa::gfx::MemoryResidency::CpuToGpu);
     }
 
@@ -116,7 +128,7 @@ private:
     std::vector<uint32_t>                   capacities_;   ///< Per slot, in transforms.
     uint32_t                                frame_index_ = 0;
     std::vector<std::unique_ptr<coopa::gfx::memory::Buffer>> buffers_;
-    std::vector<glm::mat4>                  pending_;
+    std::vector<coopa::gfx::engine::data::InstanceData> pending_;
 };
 
 } // namespace render

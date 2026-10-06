@@ -52,6 +52,8 @@ layout(set = 3, binding = 2) uniform sampler2D u_depth;
 // when contact shadows were off at construction. Raw, unscaled by strength or per-light
 // darkness -- which is what lets the "contact_shadows" channel show the term as it is computed.
 layout(set = 3, binding = 3) uniform sampler2D u_contact_shadow;
+// G4, the G-buffer's velocity attachment (see gfx/surface/gbuffer_fs.glsl), for "velocity".
+layout(set = 3, binding = 4) uniform sampler2D u_velocity;
 
 // Set 4: G-Buffer textures + screen-space AO -- identical layout to pixel_lighting.frag's
 // (owned by the FullscreenStage this pass shares gfxcoopa's DeferredLightingPass with).
@@ -105,6 +107,7 @@ layout(location = 0) out vec4 out_color;
 #define DBG_SOLID           20
 #define DBG_WIREFRAME       21
 #define DBG_MATPREVIEW      22
+#define DBG_VELOCITY        23
 
 // band()/shade_light() -- byte-for-byte the same as pixel_lighting.frag's own (not a
 // shared body: they read `params` fields specific to each shader's own push-constant
@@ -364,6 +367,13 @@ void main() {
         case DBG_SSGI:
             result = texture(u_ssgi, in_uv).rgb;
             break;
+        case DBG_VELOCITY: {
+            // Mid-grey = no motion; 8x gain so a few pixels of motion per frame is visible.
+            // Blue marks a surface that was behind the eye last frame (no history, z = -1).
+            vec4 v = texture(u_velocity, in_uv);
+            result = vec3(0.5 + v.xy * 8.0, v.z < 0.0 ? 0.5 : 0.0);
+            break;
+        }
         default:
             result = vec3(0.0);
             break;

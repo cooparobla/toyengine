@@ -329,6 +329,8 @@ struct AppConfig {
 
                 if (r.contains("ssao_temporal_enabled")) config.render.ssao_temporal_enabled = r.at("ssao_temporal_enabled").get_value<bool>();
                 if (r.contains("ssao_temporal_frames"))  config.render.ssao_temporal_frames  = r.at("ssao_temporal_frames").get_value<int>();
+                if (r.contains("ssao_temporal_gamma"))   config.render.ssao_temporal_gamma   = r.at("ssao_temporal_gamma").get_value<float>();
+                if (r.contains("ssao_intensity"))        config.render.ssao_intensity        = r.at("ssao_intensity").get_value<float>();
 
                 // --- SSR + SSGI ---
                 if (r.contains("ssr_max_distance"))     config.render.ssr_max_distance     = r.at("ssr_max_distance").get_value<float>();

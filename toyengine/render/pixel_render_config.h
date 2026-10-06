@@ -87,6 +87,11 @@ enum class DebugView : int {
     /// Blender-style "material preview": the G-buffer material (albedo / metallic / roughness /
     /// emissive) lit by a fixed studio rig on a neutral backdrop, independent of scene lights.
     MaterialPreview,
+    // --- G-buffer, continued (appended so the editor's shading-mode values above stay put) ---
+    /// The G4 velocity attachment: per-object screen motion since last frame, shown as a
+    /// colour offset from mid-grey (red = +x, green = +y, scaled 8x), blue where the surface
+    /// was behind the eye last frame. Static geometry under a still camera is flat grey.
+    Velocity,
 };
 
 /**
@@ -121,9 +126,10 @@ inline DebugView parse_debug_view(const std::string& value) {
     if (value == "solid")           return DebugView::Solid;
     if (value == "wireframe")       return DebugView::Wireframe;
     if (value == "material_preview") return DebugView::MaterialPreview;
+    if (value == "velocity")        return DebugView::Velocity;
     std::cerr << "[toy::render] Unknown debug_view '" << value << "', expected one of: "
                  "off | albedo | normals | roughness | metallic | emissive | material_ao | "
-                 "world_pos | depth | direct | indirect | shadows | contact_shadows | ssao | "
+                 "world_pos | depth | velocity | direct | indirect | shadows | contact_shadows | ssao | "
                  "ssr | ssr_confidence | ssgi | dof | volumetrics | lines | solid | wireframe | material_preview. Using 'off'.\n";
     return DebugView::Off;
 }
@@ -328,10 +334,10 @@ struct PixelRenderConfig {
             case RenderQuality::Ultra:  shadow_map_resolution = 3072; cube_shadow_resolution = 1024; spot_shadow_resolution = 2048; shadow_pcf_samples = 32; shadow_pcss_taps = 16; contact_shadow_steps = 16; break;
         }
         switch (ssao_quality) {
-            case RenderQuality::Low:    ssao_slices = 1; ssao_steps = 6;  ssao_max_radius_px = 32.0f; ssao_temporal_frames = 16; break;
-            case RenderQuality::Medium: ssao_slices = 2; ssao_steps = 8;  ssao_max_radius_px = 40.0f; ssao_temporal_frames = 32; break;
-            case RenderQuality::High:   ssao_slices = 2; ssao_steps = 16; ssao_max_radius_px = 80.0f; ssao_temporal_frames = 32; break;
-            case RenderQuality::Ultra:  ssao_slices = 3; ssao_steps = 24; ssao_max_radius_px = 96.0f; ssao_temporal_frames = 64; break;
+            case RenderQuality::Low:    ssao_slices = 1; ssao_steps = 6;  ssao_max_radius_px = 32.0f; ssao_temporal_frames = 4;  break;
+            case RenderQuality::Medium: ssao_slices = 2; ssao_steps = 8;  ssao_max_radius_px = 40.0f; ssao_temporal_frames = 8;  break;
+            case RenderQuality::High:   ssao_slices = 2; ssao_steps = 16; ssao_max_radius_px = 80.0f; ssao_temporal_frames = 8;  break;
+            case RenderQuality::Ultra:  ssao_slices = 3; ssao_steps = 24; ssao_max_radius_px = 96.0f; ssao_temporal_frames = 12; break;
         }
         switch (ssr_quality) {
             case RenderQuality::Low:    ssr_max_iterations = 24;  break;
@@ -715,10 +721,25 @@ struct PixelRenderConfig {
     /**
      * Accumulation depth of the temporal resolve: each pixel averages this many frames of the
      * continuously-jittered estimate (blending frame N at 1/(N+1)) before switching to a
-     * fixed-rate running average. Deeper = smoother and more stable AO in motion, at the cost
-     * of slower response to genuine content changes.
+     * fixed-rate running average. 8 is Unreal's GTAO temporal filter (a ~0.1 history blend):
+     * with the G-buffer's per-object motion vectors reprojecting history exactly, a short
+     * window is enough for stability, and it keeps AO responding to moving objects within a
+     * handful of frames instead of trailing behind them.
      */
-    int   ssao_temporal_frames  = 32;
+    int   ssao_temporal_frames  = 8;
+    /**
+     * Variance-clip half-width of the AO temporal resolve, in standard deviations of the
+     * current 3x3 raw neighbourhood (same idea as ssr_temporal_gamma / taa_variance_gamma):
+     * reprojected history outside mean +- gamma*sigma is clamped to that band, which is what
+     * stops occlusion an object cast before it moved from lingering. Lower = less ghosting,
+     * more noise under motion. RUNTIME.
+     */
+    float ssao_temporal_gamma   = 1.0f;
+    /**
+     * Unreal's AO "Intensity": the lighting composite reads mix(1, ao, intensity), so 0
+     * disables the darkening entirely and 1 applies the resolved AO as is. RUNTIME.
+     */
+    float ssao_intensity        = 1.0f;
 
     // --- SSR + SSGI ---
     float ssr_max_distance     = 15.0f;

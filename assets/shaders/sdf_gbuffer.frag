@@ -11,11 +11,15 @@
 layout(location = 0) in flat uint frag_renderer_index;
 layout(location = 1) in vec2 frag_ndc; // see sdf_quad.vert's doc
 
-// Set 0: Camera UBO -- same layout gbuffer.vert/.frag already bind.
+// Set 0: Camera UBO -- same layout gbuffer.vert/.frag already bind, including the trailing
+// reprojection members (data::CameraData) the velocity attachment needs.
 layout(set = 0, binding = 0) uniform CameraUBO {
     mat4 view;
     mat4 proj;
     vec3 camera_pos;
+    mat4 prev_view;
+    mat4 prev_proj;
+    vec4 jitter_ndc;
 } camera;
 
 // Set 1: SdfData -- globals UBO (only inv_view_proj is read here; the
@@ -40,6 +44,12 @@ layout(location = 0) out vec4 out_albedo_ao;          // RGB = Albedo, A = AO
 layout(location = 1) out vec4 out_normal_metallic;    // RGB = World Normal, A = Metallic
 layout(location = 2) out vec4 out_position_roughness; // RGB = World Pos, A = Roughness
 layout(location = 3) out vec4 out_emissive;           // RGB = emissive radiance (HDR), A = unused
+// G4 velocity -- same channels gfx/surface/gbuffer_fs.glsl documents. SDF renderers carry no
+// previous-frame pose, so this is the CAMERA's motion over a static surface; an animated SDF
+// relies on the consumers' depth rejection instead.
+layout(location = 4) out vec4 out_velocity;
+
+vec2 ndc_to_uv(vec2 ndc) { return vec2(ndc.x * 0.5 + 0.5, -ndc.y * 0.5 + 0.5); }
 
 void main() {
     SdfRendererGpu r = sdf_renderers[frag_renderer_index];
@@ -71,4 +81,16 @@ void main() {
     out_normal_metallic    = vec4(N, r.mr_ao_cutoff.x);
     out_position_roughness = vec4(hit.pos, r.mr_ao_cutoff.y);
     out_emissive            = vec4(r.emissive.rgb, 0.0);
+
+    {
+        vec4  prev_clip  = camera.prev_proj * camera.prev_view * vec4(hit.pos, 1.0);
+        vec2  cur_uv     = ndc_to_uv(clip.xy / clip.w - camera.jitter_ndc.xy);
+        float cur_depth  = -(camera.view      * vec4(hit.pos, 1.0)).z;
+        float prev_depth = -(camera.prev_view * vec4(hit.pos, 1.0)).z;
+        if (prev_clip.w <= 0.0) {
+            out_velocity = vec4(0.0, 0.0, -1.0, cur_depth);
+        } else {
+            out_velocity = vec4(cur_uv - ndc_to_uv(prev_clip.xy / prev_clip.w), prev_depth, cur_depth);
+        }
+    }
 }

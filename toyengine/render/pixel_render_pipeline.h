@@ -658,6 +658,17 @@ public:
         const auto gather_start = std::chrono::steady_clock::now();
         camera_frame_ = frame_slot;
         light_frame_ = frame_slot;
+        // The previous frame's matrices the G-buffer's velocity attachment reprojects with
+        // (gfx/surface/gbuffer_fs.glsl). prev_snapped_view_ is what the previous update()
+        // actually uploaded (pixel-snapped when snapping is on), read back from the UBO at the
+        // end of render(); the projection is the unjittered one, and the jitter apply_taa_jitter_
+        // put into THIS frame's proj is handed over so the velocity is measured unjittered-to-
+        // unjittered. On the first frame there is no previous pose: this frame's own stands in,
+        // which makes every velocity read as zero instead of a frame-wide spike.
+        camera_ubos_[frame_slot]->set_reprojection(
+            prev_view_proj_valid_ ? prev_snapped_view_   : view,
+            prev_view_proj_valid_ ? prev_unjittered_proj_ : unjittered_proj,
+            taa_jitter_ndc_);
         camera_ubos_[frame_slot]->update(view, proj, cam_pos, pixel_density);
 
         // One hierarchy walk for every component type this frame's gathers read -- see
@@ -845,6 +856,9 @@ public:
         // re-enabled without a resize/reconstruct in between.
         prev_view_proj_                = proj * view;
         prev_unjittered_view_proj_     = unjittered_proj * view;
+        // For the velocity attachment: the view as uploaded (snapped), and the unjittered proj.
+        prev_snapped_view_             = camera_ubos_[frame_slot]->data().view;
+        prev_unjittered_proj_          = unjittered_proj;
         prev_view_proj_valid_          = true;
         ++frame_index_;
 
@@ -886,6 +900,13 @@ private:
             return renderers[i]->material_for(part[i]);
         }
         std::vector<glm::mat4>   world_matrices;
+        /// Per item: the renderer's world matrix LAST frame (== world_matrices[i] when it has
+        /// none), streamed as InstanceData::prev_model for the G-buffer's motion vectors.
+        std::vector<glm::mat4>   prev_world_matrices;
+        /// Per item: its surface moved since last frame -- the world matrix changed, the mesh
+        /// is dynamic (cloth, CPU skinning: re-uploaded vertices under a fixed matrix), or it
+        /// is a particle batch. Drives scene_moved_, which keeps the temporal freeze off.
+        std::vector<uint8_t>     moved;
         std::vector<WorldBounds> bounds;
         std::vector<uint8_t>     valid;   ///< Ready, has a transform, not LOD-culled.
         /// Per item: a particle mesh batch's world matrices (ParticleMeshBatch), null for an
@@ -1235,7 +1256,10 @@ private:
                                            : gbuffer_target_.depth_view_typed(),
                                        gbuffer_target_.depth_view_typed(),
                                        ao_depth_pyramid_pass_->sampler(),
-                                       linear_sampler_);
+                                       linear_sampler_,
+                                       // Per-object motion vectors: the resolve follows moving
+                                       // objects instead of reprojecting camera-only.
+                                       gbuffer_target_.g4_view_typed());
 
         scene_color_mip_pass_ = std::make_unique<coopa::gfx::engine::passes::SceneColorMipPass>(
             device_, allocator_,
@@ -1629,6 +1653,7 @@ private:
                 .combined_sampler(1, coopa::gfx::ShaderStage::Fragment)
                 .combined_sampler(2, coopa::gfx::ShaderStage::Fragment)
                 .combined_sampler(3, coopa::gfx::ShaderStage::Fragment)
+                .combined_sampler(4, coopa::gfx::ShaderStage::Fragment)   // G4 velocity
                 .build(device_));
         debug_view_extra_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
             coopa::gfx::pipeline::DescriptorPoolBuilder().add_sets(*debug_view_extra_layout_, 1).build(device_));
@@ -1650,6 +1675,7 @@ private:
         debug_view_extra_set_->bind_image(2, gbuffer_target_.depth_view_typed(), nearest_sampler_);
         debug_view_extra_set_->bind_image(3, contact_shadow_pass_->output_view_typed(),
                                           contact_shadow_pass_->sampler());
+        debug_view_extra_set_->bind_image(4, gbuffer_target_.g4_view_typed(), nearest_sampler_);
 
         coopa::gfx::engine::passes::ExtraSets debug_view_extra;
         debug_view_extra.layouts = {debug_view_extra_layout_.get()};
@@ -1699,10 +1725,13 @@ private:
                 render_extent_.width, render_extent_.height,
                 config_.shaders("taa.vert"), config_.shaders("taa.frag"),
                 config_.shaders("taa_present.frag"));
-            // The depth buffer feeds the resolve's camera reprojection; like DoF's and the
-            // stylize pass's bindings above, it is the G-buffer depth at render_extent_.
+            // The depth buffer feeds the resolve's camera reprojection (the sky, and the
+            // fallback); like DoF's and the stylize pass's bindings above, it is the G-buffer
+            // depth at render_extent_. The velocity attachment gives every surface its own
+            // per-object motion vector, so moving objects stop ghosting.
             taa_pass_->set_source_images(post_target_.color_image_object()->view_typed(),
-                                         gbuffer_target_.depth_view_typed());
+                                         gbuffer_target_.depth_view_typed(),
+                                         gbuffer_target_.g4_view_typed());
         }
 
         // Single source of truth for everything downstream of post_target_/aa_target_ -- same
@@ -1931,7 +1960,10 @@ private:
                 ssao_motion_px_   = angle * ctx.proj[1][1] * 0.5f * static_cast<float>(render_extent_.height);
                 ssao_prev_view_   = ctx.view;
             }
-            camera_frames_still_  = moved ? 0u : camera_frames_still_ + 1u;
+            // The scene counts too: an object that moved (gather_meshes_()'s scene_moved_)
+            // has changed what every temporally accumulated pass sees, so a still camera
+            // watching it must keep resolving every frame rather than hold a stale image.
+            camera_frames_still_  = (moved || scene_moved_) ? 0u : camera_frames_still_ + 1u;
             temporal_frozen_      = camera_frames_still_ > kTemporalFreezeAfter;
             if (!temporal_frozen_) {
                 ++ssao_rotation_index_;
@@ -2035,10 +2067,9 @@ private:
             ssao_params.noise_rotation        = static_cast<int>(ssao_rotation_index_ & 0xFFu);
             ssao_params.temporal_enabled     = config_.ssao_temporal_enabled;
             ssao_params.temporal_frames      = config_.ssao_temporal_frames;
+            ssao_params.temporal_gamma       = config_.ssao_temporal_gamma;
             ssao_params.reproject        = temporal_reproject;
             ssao_params.reproject_valid  = prev_view_proj_valid_;
-            // The eye ssao_resolve.frag measures its stored distance channel against.
-            ssao_params.camera_pos           = ctx.cam_pos;
             ssao_params.frozen               = temporal_frozen_;
             ssao_params.motion_px            = ssao_motion_px_;
             ssao_pass_->execute(cmd, current_camera_set(), ssao_params);
@@ -2064,6 +2095,7 @@ private:
         lighting_pc.sky_intensity     = config_.indirect.sky_intensity;
         lighting_pc.soft_lighting     = config_.soft_lighting ? 1.0f : 0.0f;
         lighting_pc.ssao_direct_strength = config_.ssao_direct_lighting_strength;
+        lighting_pc.ssao_intensity       = config_.ssao_intensity;
         // The sky is drawn by this same pass at background pixels (see pixel_lighting.frag),
         // from the matrix SkyboxPass used to compute: identical sky, one fullscreen draw.
         lighting_pc.sky_inv_view_proj    = glm::inverse(ctx.proj * ctx.view);
@@ -2633,24 +2665,42 @@ private:
             out.multi_count[first_particle_item + k] = particle_items[k]->count;
         }
         out.world_matrices.assign(n, glm::mat4(1.0f));
+        out.prev_world_matrices.assign(n, glm::mat4(1.0f));
+        out.moved.assign(n, 0);
         out.bounds.assign(n, WorldBounds{});
         out.valid.assign(n, 0);
         out.lod.assign(n, 0);
         out.instance_idx.assign(n, InstanceStream::kInvalidIndex);
         instance_stream_.begin(frame_slot);
 
+        // A world matrix counts as changed past any float churn a transform resolve can
+        // produce for a resting object; a real move is orders of magnitude larger.
+        auto matrix_moved = [](const glm::mat4& a, const glm::mat4& b) {
+            for (int c = 0; c < 4; ++c) {
+                for (int r = 0; r < 4; ++r) {
+                    if (std::abs(a[c][r] - b[c][r]) > 1e-5f) return true;
+                }
+            }
+            return false;
+        };
+
         // world_matrix() is a pure read, safe for any number of concurrent readers (unlike
         // get_world_matrix()), because TransformSystem already resolved every dirty transform
-        // earlier this frame. Each index writes only its own slot.
+        // earlier this frame. Each index writes only its own slot. prev_world_ is only READ
+        // here (find on a map no one mutates until the serial section below), so that is
+        // parallel-safe too.
         auto gather_mesh = [&](size_t begin, size_t end) {
             for (size_t i = begin; i < end; ++i) {
                 MeshRenderer* mr = out.renderers[i];
                 if (out.multi[i]) {
                     // A particle batch: world-space matrices already, bounds from the system.
+                    // No previous poses exist for its instances, so each streams prev == cur;
+                    // its presence alone counts as scene motion.
                     const ParticleMeshBatch& pb = *particle_items[i - first_particle_item];
                     out.bounds[i].center = 0.5f * (pb.bounds_min + pb.bounds_max);
                     out.bounds[i].extent = 0.5f * (pb.bounds_max - pb.bounds_min);
                     out.valid[i] = 1;
+                    out.moved[i] = 1;
                     continue;
                 }
                 if (!mr->is_ready() || !mr->owner) continue;
@@ -2660,12 +2710,33 @@ private:
                 const auto& mesh = mr->get_mesh();
                 out.bounds[i] = world_aabb(out.world_matrices[i], mesh->bounds_min(), mesh->bounds_max());
                 out.valid[i] = 1;
+                const auto pit = prev_world_.find(mr);
+                out.prev_world_matrices[i] = (pit != prev_world_.end()) ? pit->second : out.world_matrices[i];
+                // A dynamic mesh re-uploads its vertices every frame under a fixed matrix
+                // (cloth, CPU skinning): its surface moves even though prev == cur.
+                out.moved[i] = (matrix_moved(out.prev_world_matrices[i], out.world_matrices[i]) || mesh->is_dynamic()) ? 1 : 0;
             }
         };
         if (should_parallelize_(n)) {
             jobs_->parallel_for_blocking(n, 0 /* auto grain */, gather_mesh);
         } else {
             gather_mesh(0, n);
+        }
+
+        // Rebuild last-frame poses for the next frame (serial: the map is written here only),
+        // and record whether anything in the scene moved -- the temporal freeze (see
+        // record_scene_()'s stillness block) must stay off while it did.
+        {
+            std::unordered_map<const MeshRenderer*, glm::mat4> next_prev_world;
+            next_prev_world.reserve(prev_world_.size() + 16);
+            bool any_moved = false;
+            for (size_t i = 0; i < n; ++i) {
+                if (!out.valid[i]) continue;
+                any_moved = any_moved || out.moved[i] != 0;
+                if (!out.multi[i]) next_prev_world[out.renderers[i]] = out.world_matrices[i];
+            }
+            prev_world_.swap(next_prev_world);
+            scene_moved_ = any_moved;
         }
 
         // --- LOD (camera), and keys. Serial: MaterialTextureCache::set_for() may allocate. ---
@@ -2770,7 +2841,7 @@ private:
                         for (uint32_t m = 0; m < out.multi_count[it]; ++m) instance_stream_.add(out.multi[it][m]);
                         added += out.multi_count[it];
                     } else {
-                        instance_stream_.add(out.world_matrices[it]);
+                        instance_stream_.add(out.world_matrices[it], out.prev_world_matrices[it]);
                         ++added;
                     }
                 }
@@ -2801,7 +2872,7 @@ private:
             const Frustum f = Frustum::from_matrix(camera_vp);
             for (size_t i = 0; i < n; ++i) {
                 if (out.valid[i] && blended(i) && f.intersects(out.bounds[i])) {
-                    out.instance_idx[i] = instance_stream_.add(out.world_matrices[i]);
+                    out.instance_idx[i] = instance_stream_.add(out.world_matrices[i], out.prev_world_matrices[i]);
                     out.has_blend_mesh  = true;
                 }
             }
@@ -4179,6 +4250,11 @@ private:
     /// Each LOD-switching renderer's level last frame, for select_lod()'s hysteresis. Rebuilt
     /// every frame from the renderers still present, so destroyed ones drop out.
     std::unordered_map<const coopa::gfx::engine::components::MeshRenderer*, int> lod_state_;
+    /// Last frame's world matrix per renderer drawn last frame (same keying and per-frame
+    /// rebuild as lod_state_): streamed as data::InstanceData::prev_model so the G-buffer
+    /// writes per-object motion vectors. A renderer absent here (new, or not drawn last
+    /// frame) streams prev == current, i.e. zero object motion.
+    std::unordered_map<const coopa::gfx::engine::components::MeshRenderer*, glm::mat4> prev_world_;
 
     MeshDrawStats frame_stats_;     ///< This frame's mesh draw counts (see mesh_draw_stats_summary()).
     MeshDrawStats stats_total_;     ///< Summed over stats_frames_ frames.
@@ -5398,15 +5474,12 @@ private:
     // apply_taa_jitter_() each frame (zero when aa_mode != "taa"). The TAA resolve subtracts
     // it so its velocity is measured between UNjittered positions.
     glm::vec2 taa_jitter_ndc_ = glm::vec2(0.0f);
-    // SSAO kernel-rotation phase, advanced only on frames where the camera's UNJITTERED
-    // view-projection changed -- see record_scene_()'s SSAO block. Separate from frame_index_
-    // for the same reason taa_jitter_index_ is: that counter must keep advancing every frame
-    // because SSR and gfx_time depend on it, while this one must be able to stand still.
-    //
-    // Standing still is what lets ssao_resolve.frag's exponential history blend converge. With a
-    // constant raw input the blend is a geometric series onto a fixed point (byte-static well
-    // inside a second at 0.85); with an input that changes every frame it can only ever orbit,
-    // which reads as AO that never finishes settling.
+    // SSAO sample-pattern phase, advanced every frame the temporal resolve is accumulating and
+    // held while it is frozen -- see record_scene_()'s stillness block. Separate from
+    // frame_index_ for the same reason taa_jitter_index_ is: that counter must keep advancing
+    // every frame because SSR and gfx_time depend on it, while this one must be able to stand
+    // still. Holding it is what keeps a frozen image byte-static: ssao_resolve.frag then
+    // copies accepted history verbatim, and the raw pass under it redraws the same pattern.
     uint32_t  ssao_rotation_index_ = 0;
     /** The pose the stillness deadband measures against: reset to the current pose whenever
      *  visible motion exceeds the deadband, held while within it. Anchoring (rather than a
@@ -5428,10 +5501,15 @@ private:
      *  and the verbatim hold is what makes its output static. */
     uint32_t  camera_frames_still_ = 0;
     bool      temporal_frozen_     = false;
-    /** Still frames before freezing. Small enough that image_settles_after_camera_stops'
-     *  eight-frame budget is met with margin; the pre-freeze frames only add 1/(count+1)-scale
-     *  residuals, which that test's threshold tolerates. */
-    static constexpr uint32_t kTemporalFreezeAfter = 4;
+    /** Any drawn surface moved this frame (world matrix changed, dynamic mesh, particle
+     *  batch) -- set by gather_meshes_(), read by the stillness block. A frame in which the
+     *  scene moved resets camera_frames_still_ exactly as camera motion does. */
+    bool      scene_moved_         = false;
+    /** Still frames before freezing. Matches the AO resolve's accumulation cap (8 frames at
+     *  the High tier) so the held average has a full window of draws behind it; still inside
+     *  image_settles_after_camera_stops' eight-frame budget, since the pre-freeze frames only
+     *  add 1/(count+1)-scale residuals that its threshold tolerates. */
+    static constexpr uint32_t kTemporalFreezeAfter = 8;
     /** Rotation between consecutive views, as pixels swept at the screen centre -- drives the
      *  AO blur's velocity widening (SsaoPass::Params::motion_px). */
     float     ssao_motion_px_      = 0.0f;
@@ -5516,6 +5594,13 @@ private:
     // which must measure velocity between unjittered poses so a still camera measures exactly
     // zero (the current frame's jitter is removed separately, via taa_jitter_ndc_).
     glm::mat4 prev_unjittered_view_proj_ = glm::mat4(1.0f);
+    // Previous frame's view matrix exactly as the camera UBO uploaded it (pixel-snapped when
+    // snapping is on) and its UNjittered projection, handed to CameraUBO::set_reprojection()
+    // so the G-buffer's velocity attachment projects last frame's pose the way last frame did.
+    // Kept separate from the premultiplied prev_*_view_proj_ above: the velocity shader needs
+    // the view alone for a linear depth that is correct under orthographic cameras too.
+    glm::mat4 prev_snapped_view_         = glm::mat4(1.0f);
+    glm::mat4 prev_unjittered_proj_      = glm::mat4(1.0f);
     // Monotonic per-rendered-frame counter, incremented once at the end of render(). Shared
     // by SSAO's noise-tile rotation and SSR's stochastic ray jitter (see each pass's own
     // Params::*frame_index* doc) -- both are per-pixel noise sources that need decorrelating

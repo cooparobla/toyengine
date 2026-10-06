@@ -90,6 +90,8 @@ render:
   # material_ao      G0.a (baked/material AO, before SSAO)
   # world_pos        G2.rgb, fract()-wrapped per metre
   # depth            linear view depth, normalized over the camera's clip range
+  # velocity         G4 per-object motion vectors: mid-grey = still, red/green = screen motion
+  #                  since last frame (8x gain), blue = was behind the eye last frame
   # --- lighting terms ---
   # direct           direct light sum only (no ambient, no emissive)
   # indirect         sky-gradient ambient + indirect specular only
@@ -115,7 +117,7 @@ render:
   # shadow_pcf_samples) still overrides its preset.
   # =========================================================================
   shadow_quality:      high  # map resolutions + PCF taps + PCSS blocker taps + contact-shadow steps
-  ssao_quality:        high  # slices, march steps, pixel radius, temporal depth
+  ssao_quality:        high  # slices, march steps, pixel radius, temporal depth (4/8/8/12 frames)
   ssr_quality:         high  # specular raymarch iteration budget
   ssgi_quality:        high  # traced-bounce iteration budget (separate chain from ssr_quality)
   dof_quality:         high  # bokeh gather taps (ultra = high: shader cap)
@@ -196,6 +198,11 @@ render:
   ssao_bias: 0.025           # world-space normal lift before the horizon march; keep << ssao_radius
   ssao_power: 1.0            # exponent on visibility
   ssao_direct_lighting_strength: 0.25 # how much occlusion darkens DIRECT lighting; 0 = indirect only
+  ssao_intensity: 1.0        # Unreal's AO Intensity: lighting applies mix(1, ao, intensity)
+  ssao_temporal_gamma: 1.0   # history clip half-width (std devs of the 3x3 raw AO); lower = less
+                             # ghosting behind moving objects, more noise under motion
+  # ssao_temporal_frames: 8  # frames the AO averages over (Unreal's ~0.1 blend). Driven by
+                             # ssao_quality (4/8/8/12); uncomment only to override the tier.
 
   # --- SSR + SSGI ---
   ssr_max_distance: 30.0     # world-space trace cutoff

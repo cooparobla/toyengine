@@ -68,6 +68,8 @@ inline const std::vector<SettingsGroup>& render_settings_groups() {
             f_float("spec_threshold", 0.55f, 0.005f, 0.0f, 1.0f),
             f_float("rim_strength", 0.0f, 0.005f, 0.0f, 4.0f),
             f_float("ambient_intensity", 1.0f, 0.01f, 0.0f, 16.0f),
+            f_float("ssao_intensity", 1.0f, 0.01f, 0.0f, 1.0f),
+            f_float("ssao_temporal_gamma", 1.0f, 0.05f, 0.25f, 4.0f),
             f_float("sky_intensity", 1.0f, 0.01f, 0.0f, 16.0f),
             listed(f_color("sky_zenith", glm::vec3(0.05f, 0.18f, 0.55f))),
             listed(f_color("sky_horizon", glm::vec3(0.25f, 0.35f, 0.45f))),
@@ -120,7 +122,8 @@ inline const std::vector<SettingsGroup>& render_settings_groups() {
         g.push_back({"Debug", {
             f_enum("debug_view", {"off", "albedo", "normals", "roughness", "metallic", "emissive", "material_ao",
                                   "world_pos", "depth", "direct", "indirect", "shadows", "contact_shadows", "ssao",
-                                  "ssr", "ssr_confidence", "ssgi", "dof", "volumetrics", "lines", "solid", "wireframe", "material_preview"}),
+                                  "ssr", "ssr_confidence", "ssgi", "dof", "volumetrics", "lines", "solid", "wireframe", "material_preview",
+                                  "velocity"}),
         }});
         return g;
     }();

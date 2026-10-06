@@ -94,7 +94,7 @@ layout(push_constant) uniform PixelParams {
     float soft_lighting;     // != 0 -> smooth Cook-Torrance direct lighting; 0 -> banded/ramped cel look (default)
     float ssao_direct_strength; // how much occlusion darkens DIRECT lighting (HDRP's
                                 // Direct Lighting Strength): 0 = indirect only
-    float _pad0;
+    float ssao_intensity;       // Unreal's AO Intensity: ssao = mix(1, ssao, intensity)
     mat4  sky_inv_view_proj;     // inverse(proj * view), for the sky at background pixels
 } params;
 
@@ -162,7 +162,7 @@ void main() {
     vec4 g2 = texture(g_position_roughness, in_uv);
     // 1.0 (fully unoccluded) whenever SSAO is disabled -- PixelRenderPipeline binds
     // SsaoPass::neutral_view() in that case, so this read needs no separate flag.
-    float ssao = texture(g_ssao, in_uv).r;
+    float ssao = mix(1.0, texture(g_ssao, in_uv).r, params.ssao_intensity);
     vec3 emissive = texture(g_emissive, in_uv).rgb;
     N = normalize(N);
 

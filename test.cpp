@@ -1439,7 +1439,7 @@ void test_app_config_load_applies_quality_presets() {
     expect(config.render.ssao_slices == 1, "quality preset: low ssao_slices");
     expect(config.render.ssao_steps == 6, "quality preset: low ssao_steps");
     expect(config.render.ssao_max_radius_px == 32.0f, "quality preset: low ssao_max_radius_px");
-    expect(config.render.ssao_temporal_frames == 16, "quality preset: low ssao_temporal_frames");
+    expect(config.render.ssao_temporal_frames == 4, "quality preset: low ssao_temporal_frames");
 
     expect(config.render.volumetrics_quality == RenderQuality::Medium, "AppConfig::load: 'med' parses as Medium");
     expect(config.render.volumetrics_step_count == 32, "quality preset: medium volumetrics_step_count");
@@ -3263,7 +3263,7 @@ void test_debug_view_channels_render() {
 
         static const char* kChannels[] = {
             "albedo", "normals", "roughness", "metallic", "emissive", "material_ao",
-            "world_pos", "depth", "direct", "indirect", "shadows", "ssao",
+            "world_pos", "depth", "velocity", "direct", "indirect", "shadows", "ssao",
             "ssr", "ssr_confidence", "ssgi",
         };
         for (const char* name : kChannels) {
@@ -3671,6 +3671,166 @@ void test_cloth_scene_simulates_and_animates() {
             dump_frame(early, "cloth_early");
             dump_frame(late, "cloth_late");
         }
+    }
+}
+
+/**
+ * @brief Screen-space AO must follow a moving object: no trail where it was, darkening
+ *        where it is -- including when the camera has been still long enough to freeze.
+ *
+ * The regression test for AO that lagged or stuck behind moving objects. The temporal
+ * resolve used to reproject its history with the camera's motion alone and hold it verbatim
+ * once the CAMERA was still: the occlusion a ball casts on the ground reprojected "correctly"
+ * (the ground is static), passed the surface-identity test, and was either blended out over a
+ * 32-frame window (a half-second trail) or, under a still camera, held forever. Now the
+ * G-buffer carries per-object motion vectors (G4), the resolve reprojects through them,
+ * variance-clips history against the current neighbourhood, averages a short Unreal-style
+ * window, and the freeze also waits for the SCENE to be still (gather_meshes_'s scene_moved_).
+ *
+ * Scene: cloth_test with the cloth switched off (a dynamic mesh moves every frame, which would
+ * keep the freeze off and hide the stuck-history case) and the ball lowered onto the ground
+ * so its contact occlusion is strong. The camera's orbit tracker is detached so the camera
+ * stays put while the ball travels. `debug_view: ssao` captures the resolved occlusion the
+ * lighting consumes (raw, no TAA blend), and the ground just in front of the ball -- visible
+ * past its silhouette from this pitch -- is sampled at three world points: the ball's start,
+ * its destination, and a reference patch far from both.
+ */
+toy::core::AppConfig make_shipped_config(const std::string& scene, uint32_t rw, uint32_t rh); // defined with the render_terrain group
+
+void test_ssao_tracks_moving_object() {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
+    ScopedEnv no_input("NO_INPUT", "1");
+
+    toy::core::AppConfig config =
+        make_shipped_config("assets/scenes/cloth_test/scene.yaml", 640, 360);
+    // Eye adaptation would re-meter as the ball crosses the frame; the AO channel is what is
+    // measured here, not exposure. SSAO itself ships on; assert that rather than assume it.
+    config.render.auto_exposure_enabled = false;
+    expect(config.render.ssao_enabled && config.render.ssao_temporal_enabled,
+           "ssao tracks: the shipped config has SSAO and its temporal resolve on");
+    config.render.ssao_enabled          = true;
+    config.render.ssao_temporal_enabled = true;
+    toy::core::Engine engine(std::move(config));
+
+    auto* ball  = engine.scene().find_object("ball");
+    auto* cloth = engine.scene().find_object("cloth");
+    auto* cc    = engine.scene().find_first_component<toy::scene::CameraController>();
+    auto* cam   = coopa::gfx::engine::components::CameraComponent::main();
+    expect(ball != nullptr && cloth != nullptr && cc != nullptr && cam != nullptr,
+           "ssao tracks: the scene has the ball, the cloth, a CameraController and a main camera");
+    if (!ball || !cloth || !cc || !cam) return;
+
+    cloth->set_active(false);
+    // A fixed orbit over the ball's whole path: start at x=0, destination at x=4.
+    cc->tracker            = "";
+    cc->target             = glm::vec3(2.0f, 0.0f, 0.5f);
+    cc->target_offset      = glm::vec3(0.0f);
+    cc->distance           = 9.0f;
+    cc->pitch_deg          = 50.0f;
+    cc->follow_smoothing   = 0.0f;
+    cc->movement_smoothing = 0.0f;
+    // Rest the unit sphere on the ground (its scene pose hovers 1.6 above it, where the
+    // contact occlusion is too faint to measure).
+    const glm::vec3 start(0.0f, 0.0f, 1.02f);
+    const glm::vec3 dest (4.0f, 0.0f, 1.02f);
+    ball->get_transform()->transform().set_position(start);
+
+    engine.render_config().debug_view = "ssao";
+
+    // The ground just in front of a ball resting at `at`, around its contact ring -- the
+    // window below is wide enough to take in the whole band the sphere darkens there, which
+    // from a 50-degree pitch is not hidden behind its silhouette.
+    auto footprint = [](const glm::vec3& at) { return glm::vec3(at.x, at.y - 0.9f, 0.0f); };
+    const glm::vec3 ref_point(-3.5f, -0.9f, 0.0f);
+
+    // The occlusion at a world point: the mean of the darkest tenth of the red channel (the
+    // "ssao" view is a greyscale readout) over a 65x65 window around the point projected into
+    // the low-res capture with the engine's own NDC -> pixel convention (Engine::world_to_window,
+    // with the capture's full extent as the rectangle). The darkest tenth, not the mean: the
+    // contact band is a few pixels wide and its exact placement depends on the gather radius
+    // and the blur, while the statistic only has to find it somewhere in the window. On open
+    // ground the darkest tenth is simply the ground's own value.
+    auto contact_ao_at = [&](const Frame& f, const glm::vec3& world, const char* what) -> double {
+        const float aspect = static_cast<float>(f.width) / static_cast<float>(f.height);
+        const glm::vec4 clip = cam->get_projection_matrix(aspect) * cam->get_view_matrix() * glm::vec4(world, 1.0f);
+        expect(clip.w > 1e-6f, "ssao tracks: the sampled ground point is in front of the camera");
+        if (clip.w <= 1e-6f) return 0.0;
+        const glm::vec2 ndc = glm::vec2(clip) / clip.w;
+        const int cx = static_cast<int>((ndc.x * 0.5f + 0.5f) * static_cast<float>(f.width));
+        const int cy = static_cast<int>((0.5f - ndc.y * 0.5f) * static_cast<float>(f.height));
+        const int r = 32;
+        const bool inside = cx >= r && cy >= r && cx < static_cast<int>(f.width) - r && cy < static_cast<int>(f.height) - r;
+        expect(inside, std::string("ssao tracks: the ") + what + " sample window is on screen");
+        if (!inside) return 0.0;
+        std::vector<uint8_t> values;
+        values.reserve(static_cast<size_t>((2 * r + 1) * (2 * r + 1)));
+        for (int y = cy - r; y <= cy + r; ++y) {
+            for (int x = cx - r; x <= cx + r; ++x) {
+                values.push_back(f.pixels[(static_cast<size_t>(y) * f.width + static_cast<size_t>(x)) * f.channels]);
+            }
+        }
+        std::sort(values.begin(), values.end());
+        const size_t tenth = values.size() / 10;
+        double sum = 0.0;
+        for (size_t i = 0; i < tenth; ++i) sum += values[i];
+        return sum / (static_cast<double>(tenth) * 255.0);
+    };
+
+    // Settle: camera pose, AO convergence, and the freeze (camera and scene both still).
+    tick_frames(engine, 90);
+    const Frame before = engine.capture_image(/*low_res=*/true);
+    const double ref        = contact_ao_at(before, ref_point, "reference");
+    const double start_dark = contact_ao_at(before, footprint(start), "start footprint");
+    const double dest_open  = contact_ao_at(before, footprint(dest),  "destination footprint");
+    // The contact occlusion must be a measurable signal, or nothing below means anything.
+    const double margin = 0.05;
+    expect(start_dark < ref - margin, "ssao tracks: the resting ball darkens the ground in front of it");
+    expect(std::abs(dest_open - ref) < 0.03, "ssao tracks: the empty destination is as open as the reference patch");
+    if (!(start_dark < ref - margin)) {
+        std::cerr << "         ref " << ref << " start " << start_dark << " dest " << dest_open << "\n";
+        dump_frame(before, "ssao_tracks_before");
+    }
+    // "Recovered" means the vacated ground has lost at least half of that contact darkness.
+    // Not "equals the reference": ground the ball's silhouette just uncovered restarts its
+    // accumulation from a single draw, and the darkest tenth of a window that is still
+    // averaging its first frames reads a few levels low -- noise, not a trail. A stuck or
+    // trailing history keeps the whole band (the old failure), which this threshold catches.
+    const double recovered = ref - 0.5 * (ref - start_dark);
+
+    // Travel: 4 units in 60 ticks, the way cloth_scene_simulates_and_animates drives it.
+    for (int i = 0; i < 60; ++i) {
+        coopa::util::Transform& t = ball->get_transform()->transform();
+        t.set_position(t.position() + glm::vec3(4.0f / 60.0f, 0.0f, 0.0f));
+        engine.tick();
+    }
+    ball->get_transform()->transform().set_position(dest);
+    // Ten frames after the move stops: the 8-frame accumulation window has turned over.
+    tick_frames(engine, 10);
+    const Frame moved = engine.capture_image(true);
+    const double ref_m   = contact_ao_at(moved, ref_point, "reference");
+    const double start_m = contact_ao_at(moved, footprint(start), "start footprint");
+    const double dest_m  = contact_ao_at(moved, footprint(dest),  "destination footprint");
+    expect(start_m > recovered, "ssao tracks: no occlusion trails behind the ball where it used to rest");
+    expect(dest_m < ref_m - margin, "ssao tracks: the ball darkens the ground at its destination");
+    if (!(start_m > recovered) || !(dest_m < ref_m - margin)) {
+        std::cerr << "         after move: ref " << ref_m << " start " << start_m << " dest " << dest_m << "\n";
+        dump_frame(moved, "ssao_tracks_moved");
+    }
+
+    // Frozen case: camera and scene still long past the freeze threshold, then the ball jumps
+    // back in a single tick. A freeze that only watched the camera held the stale image here.
+    tick_frames(engine, 40);
+    ball->get_transform()->transform().set_position(start);
+    tick_frames(engine, 10);
+    const Frame jumped = engine.capture_image(true);
+    const double ref_j   = contact_ao_at(jumped, ref_point, "reference");
+    const double start_j = contact_ao_at(jumped, footprint(start), "start footprint");
+    const double dest_j  = contact_ao_at(jumped, footprint(dest),  "destination footprint");
+    expect(dest_j > recovered, "ssao tracks: a frozen resolve releases when only the object moves");
+    expect(start_j < ref_j - margin, "ssao tracks: the ball's occlusion reappears where it jumped to");
+    if (!(dest_j > recovered) || !(start_j < ref_j - margin)) {
+        std::cerr << "         after jump: ref " << ref_j << " start " << start_j << " dest " << dest_j << "\n";
+        dump_frame(jumped, "ssao_tracks_jumped");
     }
 }
 
@@ -7412,6 +7572,7 @@ const TestCase kTests[] = {
     {"ui_showcase_scene_runs",                     "render_ui",       test_ui_showcase_scene_runs},
     {"material_maps_change_output",                "render_material", test_material_maps_change_output},
     {"cloth_scene_simulates_and_animates",         "render_cloth",    test_cloth_scene_simulates_and_animates},
+    {"ssao_tracks_moving_object",                  "render_cloth",    test_ssao_tracks_moving_object},
     {"water_scene_renders_and_simulates",          "render_water",    test_water_scene_renders_and_simulates},
     {"underwater_scene_renders_and_toggles",       "render_water",    test_underwater_scene_renders_and_toggles},
     {"water_scene_quality_tiers_render",           "render_water",    test_water_scene_quality_tiers_render},

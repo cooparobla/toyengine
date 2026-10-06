@@ -49,7 +49,8 @@ volumetrics_enabled: true
 resolution_mode: fixed        # 1920x1080 internal == display, 1:1 pixels
 render_width: 1920
 render_height: 1080
-ssao_quality: high            # slices 2 / steps 16 / max_radius_px 80 / temporal_frames 32
+ssao_quality: high            # slices 2 / steps 16 / max_radius_px 80 / temporal_frames 32 (now 8:
+                              # the AO resolve reprojects with per-object motion vectors since 2026-10-06)
 ssao_radius: 2.0
 ssao_power: 1.0
 ssao_direct_lighting_strength: 0.25

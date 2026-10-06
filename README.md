@@ -58,7 +58,8 @@ diff and merge it. See [editor/README.md](editor/README.md) for the full tour.
 - **Shadows.** Cascaded directional and point/spot shadows, soft PCF, optional PCSS contact
   hardening and screen-space contact shadows.
 - **Screen-space effects.** Hi-Z SSR with temporal accumulation, traced SSGI colour bleed and
-  temporally stable SSAO.
+  GTAO-style SSAO with an Unreal-like temporal filter. The G-buffer carries per-object motion
+  vectors, so the AO resolve and TAA follow moving objects instead of trailing behind them.
 - **Transparency and refraction.** A forward pass for blended materials, with screen-space
   refraction and Fresnel.
 - **SDF raymarching.** Signed-distance-field shapes that cast shadows and mix freely with meshes.

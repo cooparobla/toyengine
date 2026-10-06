@@ -165,6 +165,7 @@ public:
         const std::string font_path = std::string(PROJ_DIR) + "/uicoopa/assets/fonts/Inter-Regular.ttf";
         default_font_ = current_font_ = font_path;
         canvas_->context().text.set_font(coopa::ui::UIResourceCache::instance().font_for_path(font_path));
+        sync_ui_scale_();   // before the first frame, or it lays out at 1x and then jumps
         {
             const Node prefs = Project::load_prefs();
             std::string id = default_theme_id();
@@ -916,10 +917,14 @@ public:
         glm::vec3 o, d;
         vp->ray(px, o, d);
         ObjectId best = 0, best_marker = 0;
-        float best_t = 1e30f, best_marker_px = 1e30f;
+        float best_t = 1e30f, best_marker_px = 1e30f, best_marker_t = 1e30f;
         for (const auto& [id, live] : sync_.live_objects()) {
             const Node* node = doc_.find(id);
             if (!node || !live || !live->get_transform()) continue;
+            // Not drawn, not clickable: hidden (H, isolation, `active: false`) here or above.
+            bool shown = true;
+            for (const auto* o = live; o && shown; o = o->parent()) shown = o->active();
+            if (!shown) continue;
             const glm::mat4 world = live->get_transform()->transform().get_world_matrix();
             if (const CachedMesh* cm = mesh_for_object_(*node)) {
                 const glm::mat4 inv = glm::inverse(world);
@@ -941,11 +946,13 @@ public:
                 if (p && glm::distance(*p, px) < 8.0f && glm::distance(*p, px) < best_marker_px) {
                     best_marker_px = glm::distance(*p, px);
                     best_marker = id;
+                    best_marker_t = glm::dot(glm::vec3(world[3]) - o, d);
                 }
             }
         }
-        // A marker clicked dead-on wins; otherwise surfaces take priority over markers.
-        if (best_marker && (best == 0 || best_marker_px < 4.0f)) return best_marker;
+        // A marker clicked dead-on wins unless a surface hides it; otherwise surfaces take
+        // priority over markers.
+        if (best_marker && (best == 0 || (best_marker_px < 4.0f && best_marker_t < best_t))) return best_marker;
         return best;
     }
 
@@ -1166,18 +1173,26 @@ private:
         if (asset_view_() && preview_scene_) update_preview_();
     }
 
-    void pre_render_(float dt) {
-        // Scale the UI to the display's points (2x framebuffer pixels on Retina).
+    /** @brief Scales the UI to the display's points (2x framebuffer pixels on Retina). */
+    void sync_ui_scale_() {
         ui_scale_ = std::max(1.0f, engine_.display_scale());
         if (auto* canvas = canvas_canvas_()) canvas->scaler.scale_factor = ui_scale_;
-        if (!viewport_box_.empty()) {
-            render::LetterboxRect r;
-            r.x = static_cast<int32_t>(viewport_box_.x * ui_scale_);
-            r.y = static_cast<int32_t>(viewport_box_.y * ui_scale_);
-            r.w = static_cast<uint32_t>(std::max(1.0f, viewport_box_.w * ui_scale_));
-            r.h = static_cast<uint32_t>(std::max(1.0f, viewport_box_.h * ui_scale_));
-            engine_.set_display_region(r);
-        }
+    }
+
+    /** @brief Places the scene image in viewport_box_ (framebuffer pixels). */
+    void sync_display_region_() {
+        if (viewport_box_.empty()) return;
+        render::LetterboxRect r;
+        r.x = static_cast<int32_t>(viewport_box_.x * ui_scale_);
+        r.y = static_cast<int32_t>(viewport_box_.y * ui_scale_);
+        r.w = static_cast<uint32_t>(std::max(1.0f, viewport_box_.w * ui_scale_));
+        r.h = static_cast<uint32_t>(std::max(1.0f, viewport_box_.h * ui_scale_));
+        engine_.set_display_region(r);
+    }
+
+    void pre_render_(float dt) {
+        sync_ui_scale_();
+        sync_display_region_();
         update_scene_ui_placement_();
         if (!playing() || asset_view_()) camera_.make_main();
         sculpt_frame_();
@@ -1895,9 +1910,12 @@ private:
         const imm::Box hb = area_header_(ctx, area);
         draw_viewport_header_(ctx, hb, mesh_edit);
         viewport_box_ = imm::Box{area.x, hb.bottom(), area.w, std::max(1.0f, area.h - hb.h)};
+        // Now, not only in pre_render_: the bars below (and picking) read the display rect, and
+        // one from last frame's box leaves a sliver of the black overlay clear uncovered.
+        sync_display_region_();
         ctx.push_clip(viewport_box_);
         // In fill mode the render matches the panel; bars only show while a resize waits out
-        // the pipeline-rebuild debounce (Engine::update_fill_extent_). Painted like Blender.s
+        // the pipeline-rebuild debounce (Engine::update_fill_extent_). Painted like Blender's
         // viewport background rather than leaving them black.
         if (auto vpr = view_proj_()) {
             const imm::Box r = vpr->rect.intersect(viewport_box_);

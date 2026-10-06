@@ -980,6 +980,10 @@ public:
             dt = frame_dt_();
             apply_cursor_pos_override_();
         }
+        // Before anything emits UI: drive_ui_canvases_() seeds every canvas's DrawList with the
+        // pipeline's white texture, and a rebuild later in the frame would free it under that
+        // frame's UI (drawn black). Uses the display region last frame's pre_render set.
+        if (scene_mgr_.has_scene()) update_fill_extent_();
         {
             CpuTimer t(prof, CpuScope::Assets);
             assets_.update(dt);
@@ -1023,11 +1027,10 @@ public:
                 gather_debug_lines_(scene_mgr_.get_active_scene());
             }
             if (hooks_.pre_render) hooks_.pre_render(dt);
-            update_fill_extent_();
             sync_water_render_state_(scene_mgr_.get_active_scene());
             {
-                // After the host's pre_render hook and a fill-mode pipeline rebuild, like the water
-                // sync: the batches point into the systems' buffers and go to THIS pipeline.
+                // After the host's pre_render hook, like the water sync: the batches point into
+                // the systems' buffers and go to THIS pipeline.
                 CpuTimer t(prof, CpuScope::DynamicMeshes);
                 sync_particle_render_state_(scene_mgr_.get_active_scene());
             }
@@ -1149,6 +1152,7 @@ public:
      *        of letterboxing. The pipeline's targets are sized at construction, so a new aspect
      *        means rebuilding it -- done once the wanted extent has held for a few frames (a
      *        splitter drag doesn't rebuild every frame; until then the old image is fitted).
+     *        Runs at the top of tick(), before any UI is emitted -- see the call site.
      */
     void update_fill_extent_() {
         const render::PixelRenderConfig& cfg = pipeline_->render_config();

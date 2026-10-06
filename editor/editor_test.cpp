@@ -2751,6 +2751,106 @@ void test_editor_viewport_fill() {
     }
 }
 
+/**
+ * @brief No frame goes black while a resize settles: the UI's DrawList holds the pipeline's
+ *        white texture from emit time, so a rebuild must not free it before that frame draws.
+ */
+void test_editor_resize_no_black_frame() {
+    using coopa::input::Key;
+    using coopa::input::Mods;
+    setenv("FIXED_DT", "0.016666", 1);
+    unsetenv("NO_INPUT");
+    setenv("HOME", tmp_root().c_str(), 1);
+    const fs::path root = fresh_dir("black_frame_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    InputDriver in{engine, std::max(1.0f, engine.display_scale())};
+    // Share of the presented frame (UI included) that is pure black.
+    auto black_share = [&]() {
+        const coopa::gfx::util::ImageData img = engine.capture_image(false);
+        size_t black = 0;
+        for (size_t i = 0; i + 3 < img.pixels.size(); i += img.channels) {
+            if (img.pixels[i] < 4 && img.pixels[i + 1] < 4 && img.pixels[i + 2] < 4) ++black;
+        }
+        return float(black) / float(std::max<size_t>(1, img.pixels.size() / img.channels));
+    };
+    auto settle_without_black = [&](const std::string& what) {
+        const uint32_t w0 = engine.pipeline().render_width();
+        float worst = 0.0f;
+        for (int i = 0; i < toy::core::Engine::kFillDebounceFrames + 4; ++i) {
+            engine.tick();
+            worst = std::max(worst, black_share());
+        }
+        expect(engine.pipeline().render_width() != w0, what + ": the pipeline was rebuilt");
+        expect(worst < 0.02f, what + ": no black frame during the rebuild (worst " +
+                             std::to_string(int(worst * 100)) + "% black)");
+    };
+    // Startup: the first rebuild, from the whole window to the viewport panel.
+    settle_without_black("startup");
+    in.move(glm::vec2(app.viewport_box().center()));
+    in.key(Key::Space, Mods::Control);   // maximize: a new viewport aspect
+    settle_without_black("maximize");
+    in.move(glm::vec2(app.viewport_box().center()));
+    in.key(Key::Space, Mods::Control);   // and back
+    settle_without_black("restore");
+}
+
+/** @brief A click picks the nearest visible surface: not a hidden occluder, nor a marker behind it. */
+void test_editor_pick_nearest() {
+    setenv("FIXED_DT", "0.016666", 1);
+    setenv("NO_INPUT", "1", 1);
+    setenv("HOME", tmp_root().c_str(), 1);
+    const fs::path root = fresh_dir("pick_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, toy::core::Engine::kFillDebounceFrames + 4);
+    auto* cam = coopa::gfx::engine::components::CameraComponent::main();
+    expect(cam != nullptr, "a main camera (the editor camera) exists");
+    if (!cam) return;
+    auto name_of = [&](ObjectId id) {
+        return id && app.document().find(id) ? get_string(*app.document().find(id), "name") : std::string("nothing");
+    };
+    auto place = [&](ObjectId id, glm::vec3 p) {
+        app.document().set_transform(id, p, {0, 0, 0}, glm::vec3(1), "Move");
+        app.sync().apply(engine, app.document(), {ChangeScope::Transform, id});
+    };
+    // Two spheres on one camera ray, the near one between the camera and the far one.
+    const glm::vec3 eye = cam->get_world_position();
+    const glm::vec3 far_pos(0, 0, 3);
+    const glm::vec3 to_eye = glm::normalize(eye - far_pos);
+    const ObjectId far_s = app.create_primitive("Sphere");
+    const ObjectId near_s = app.create_primitive("Sphere");
+    place(far_s, far_pos);
+    place(near_s, far_pos + to_eye * 4.0f);
+    tick(engine, 2);
+    glm::vec2 px;
+    expect(engine.world_to_window(far_pos, px), "the far sphere is on screen");
+    const float s = std::max(1.0f, engine.display_scale());
+    ObjectId got = app.pick_object(px / s);
+    expect(got == near_s, "the nearer of two spheres on the ray is picked (got " + name_of(got) + ")");
+
+    app.hide_objects({near_s});
+    tick(engine, 2);
+    got = app.pick_object(px / s);
+    expect(got == far_s, "a hidden sphere is not picked; the one behind it is (got " + name_of(got) + ")");
+
+    // A mesh-less object's marker exactly under the cursor but BEHIND the surface loses to it.
+    ObjectId sun = 0;
+    for (ObjectId id : app.document().all_ids()) if (name_of(id) == "sun") sun = id;
+    expect(sun != 0, "the default scene has a sun");
+    place(sun, far_pos - to_eye * 3.0f);
+    tick(engine, 2);
+    got = app.pick_object(px / s);
+    expect(got == far_s, "a marker hidden behind a surface does not steal the click (got " + name_of(got) + ")");
+    // In front of it, the marker still wins a dead-on click.
+    place(sun, far_pos + to_eye * 2.0f);
+    tick(engine, 2);
+    got = app.pick_object(px / s);
+    expect(got == sun, "a marker in front of the surface wins a dead-on click (got " + name_of(got) + ")");
+}
+
 ObjectId object_named(EditorApp& app, const std::string& name) {
     for (ObjectId id : app.document().all_ids()) if (get_string(*app.document().find(id), "name") == name) return id;
     return 0;
@@ -6579,6 +6679,8 @@ const TestCase kTests[] = {
     {"editor_themes",                        "editor_shell", test_editor_themes},
     {"editor_transparency_preview",          "editor_shell", test_editor_transparency_preview},
     {"editor_viewport_fill",                 "editor_shell", test_editor_viewport_fill},
+    {"editor_resize_no_black_frame",         "editor_shell", test_editor_resize_no_black_frame},
+    {"editor_pick_nearest",                  "editor_shell", test_editor_pick_nearest},
     {"editor_quad_modelling",                "editor_shell", test_editor_quad_modelling},
     {"editor_isolation",                     "editor_shell", test_editor_isolation},
     {"editor_sculpt",                        "editor_shell", test_editor_sculpt},

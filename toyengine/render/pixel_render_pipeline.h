@@ -3171,6 +3171,13 @@ private:
         // swapchain_pass, which Renderer::recreate_framebuffers() keeps compatible across a resize.
         const LetterboxRect letterbox = display_rect_for(swapchain_.extent().width, swapchain_.extent().height);
 
+        // Last resize's retired UI passes: the frame that drew with them was submitted, and is
+        // done once the device idles.
+        if (!retired_ui_.empty()) {
+            device_.wait_idle();
+            retired_ui_ = RetiredUi{};
+        }
+
         const VkExtent2D swapchain_extent = swapchain_.extent();
         const bool swapchain_changed = swapchain_extent.width  != overlay_extent_.width ||
                                        swapchain_extent.height != overlay_extent_.height;
@@ -3707,6 +3714,9 @@ private:
     void rebuild_overlay_chain_(uint32_t w, uint32_t h) {
         rebuild_display_layer_();
 
+        // Retired, not destroyed: this frame's DrawLists still hold screen_ui_pass_'s white view.
+        retired_ui_.screen_pass    = std::move(screen_ui_pass_);
+        retired_ui_.overlay_target = std::move(overlay_target_);
         overlay_target_ = std::make_unique<coopa::gfx::engine::targets::OffscreenTarget>(
             device_, allocator_, w, h, coopa::gfx::Format::RGBA8_Unorm);
         overlay_extent_ = VkExtent2D{w, h};
@@ -3736,10 +3746,12 @@ private:
      */
     void rebuild_display_layer_() {
         // --- The world-UI layer, at the DISPLAY rect ---
-        // Reset the pass BEFORE replacing the target it was built against: TexturedQuad2DPass
-        // stores the RenderPass& it was constructed from, and this closes the window in which
-        // that reference dangles. (device_.wait_idle() is the caller's job and has already run.)
-        world_ui_pass_.reset();
+        // The pass is retired together with the target it was built against (TexturedQuad2DPass
+        // stores that target's RenderPass&), so the reference never dangles -- and retired
+        // rather than destroyed because this frame's world canvases emitted against its white
+        // view. (device_.wait_idle() is the caller's job and has already run.)
+        retired_ui_.world_pass   = std::move(world_ui_pass_);
+        retired_ui_.world_target = std::move(ui_world_target_);
         ui_world_target_ = std::make_unique<coopa::gfx::engine::targets::OffscreenTarget>(
             device_, allocator_, upscaled_extent_.w, upscaled_extent_.h,
             coopa::gfx::Format::RGBA8_Unorm);
@@ -5336,6 +5348,20 @@ private:
     /// Screen-space UI (uicoopa's UiPass). Null when config_.screen_ui_enabled was false at
     /// construction -- startup-fixed, same reasoning as world_ui_pass_.
     std::unique_ptr<coopa::ui::UiPass>                           screen_ui_pass_;
+    /**
+     * UI passes (and the targets they were built against) replaced by a resize, kept alive
+     * for the one frame that still draws with them: canvases emitted their DrawLists -- and
+     * captured the old pass's white_view() -- before render() ran handle_resize_(). Freeing
+     * them there would draw that frame's UI from a destroyed texture (a black frame). Freed
+     * at the next handle_resize_(). Targets first, so the passes are destroyed before them.
+     */
+    struct RetiredUi {
+        std::unique_ptr<coopa::gfx::engine::targets::OffscreenTarget> world_target;
+        std::unique_ptr<coopa::gfx::engine::targets::OffscreenTarget> overlay_target;
+        std::unique_ptr<coopa::ui::UiWorldPass>                      world_pass;
+        std::unique_ptr<coopa::ui::UiPass>                           screen_pass;
+        bool empty() const { return !world_target && !overlay_target && !world_pass && !screen_pass; }
+    } retired_ui_;
     /// This frame's screen-space canvases, gathered in render() alongside world_canvases_.
     std::vector<coopa::ui::CanvasComponent*>                     screen_canvases_;
     /// The image ui_composite_pass_ reads when tilt shift is off (post_target_, or aa_target_

@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <vector>
 #include <cstdint>
 #include <limits>
 
@@ -300,6 +301,102 @@ inline CascadeSplits compute_cascade_splits(float near_clip, float shadow_distan
 }
 
 /**
+ * @brief Radii of the `"focus"` fit's nested cascades: geometric from `inner` to `outer`.
+ *
+ * Each cascade covers a sphere around the focus point, so equal growth ratios give every
+ * cascade the same texel-to-radius ratio -- the focus-fit counterpart of a logarithmic split.
+ *
+ * @param inner  Radius of the finest cascade (PixelRenderConfig::shadow_focus_radius).
+ * @param outer  Radius of the coarsest (PixelRenderConfig::shadow_distance); raised to `inner`
+ *               if smaller.
+ * @param count  Cascades, 1..MAX; a single cascade takes `outer`.
+ * @return One radius per cascade, finest first.
+ */
+inline std::vector<float> compute_focus_cascade_radii(float inner, float outer, uint32_t count) {
+    std::vector<float> radii;
+    const float r0 = std::max(inner, 0.01f);
+    const float r1 = std::max(outer, r0);
+    if (count <= 1) {
+        radii.push_back(r1);
+        return radii;
+    }
+    for (uint32_t i = 0; i < count; ++i) {
+        const float t = static_cast<float>(i) / static_cast<float>(count - 1);
+        radii.push_back(r0 * std::pow(r1 / r0, t));
+    }
+    return radii;
+}
+
+/**
+ * @brief Fits a texel-snapped orthographic light-space box around a world-space sphere.
+ *
+ * The shared core of every directional cascade fit. compute_dir_shadow_fit_slice() calls it
+ * with a sphere bounding one slice of the camera frustum; the `"focus"` fit calls it with
+ * spheres of fixed radius around the camera's focus point (see
+ * PixelRenderConfig::shadow_fit). The extent is quantized to 0.5 m steps and the centre
+ * snapped to whole texels, so a slowly changing radius does not rescale the texel grid every
+ * frame and a moving centre does not crawl sub-texel.
+ *
+ * @param light_direction Directional light's direction; normalized internally.
+ * @param centre          Sphere centre, world space.
+ * @param radius          Sphere radius, world units.
+ * @param caster_reach    Extra depth pulled in on the towards-light side, so a caster
+ *                        outside the sphere but between it and the light still shadows into it.
+ * @param tile_resolution Edge length of the cascade's atlas TILE in texels; drives the snap.
+ * @return The light-space matrix and this cascade's world-per-texel size.
+ */
+inline DirShadowFit compute_dir_shadow_fit_sphere(const glm::vec3& light_direction,
+                                                  const glm::vec3& centre, float radius,
+                                                  float caster_reach, uint32_t tile_resolution) {
+    const glm::vec3 light_dir = glm::normalize(light_direction);
+    const glm::vec3 up = (std::abs(light_dir.z) < 0.99f) ? glm::vec3(0.0f, 0.0f, 1.0f)
+                                                         : glm::vec3(0.0f, 1.0f, 0.0f);
+    const glm::mat4 light_rot = glm::lookAt(glm::vec3(0.0f), light_dir, up);
+    const float resolution = static_cast<float>(std::max(tile_resolution, 1u));
+    const glm::vec3 centroid = centre;
+
+    DirShadowFit fit;
+    glm::mat4 light_proj;
+    const glm::vec3 center_ls = glm::vec3(light_rot * glm::vec4(centroid, 1.0f));
+
+    // Quantize the extent too, so a slowly changing radius doesn't rescale the box (and
+    // with it the texel grid the centre snaps to) on every single frame.
+    const float pad = 1.0f;
+    const float extent_step = 0.5f;
+    const float extent = std::ceil((radius + pad) / extent_step) * extent_step;
+
+    fit.texel_world = (2.0f * extent) / resolution;
+    glm::vec2 center(center_ls.x, center_ls.y);
+    center.x = std::floor(center.x / fit.texel_world) * fit.texel_world;
+    center.y = std::floor(center.y / fit.texel_world) * fit.texel_world;
+
+    // `caster_reach`, not the slice's own depth: a cascade covering the nearest 5 metres
+    // must still catch a caster 30 metres up between the sun and that ground, so the
+    // towards-light pull stays sized off the whole shadowed range for every cascade.
+    const float far_plane  = -center_ls.z + radius + pad;
+    float near_plane = -center_ls.z - radius - pad - std::max(caster_reach, 0.0f);
+    const float depth = std::max(far_plane - near_plane, 0.01f);
+    fit.depth_range_world = depth;
+
+    light_proj = glm::orthoRH_ZO(center.x - extent, center.x + extent,
+                                 center.y - extent, center.y + extent,
+                                 near_plane, near_plane + depth);
+
+    // No Vulkan Y-flip, deliberately. The shadow passes render with a POSITIVE-height
+    // viewport (ShadowMapTarget::begin_directional_pass), so the plain RH_ZO matrix is
+    // already the orientation the shader's `proj_coords.xy * 0.5 + 0.5` assumes --
+    // the same convention ShadowMapTarget::get_spot_matrix() documents and uses.
+    //
+    // A flip applied as `light_proj[1][1] *= -1` would be wrong in any case: it negates
+    // the ortho's Y SCALE without its Y TRANSLATION ([3][1]), which mirrors the box's
+    // light-space centre about 0 instead of about itself. That is invisible near the
+    // world origin -- where the centre is ~0 and the mirror is the identity -- and
+    // pushes the box clean off the scene once the camera sits far out, as it does on
+    // assets/scenes/terrain_test (centre ~-185, box half-extent ~79).
+    fit.light_space_matrix = light_proj * light_rot;
+    return fit;
+}
+/**
  * @brief Fits an orthographic light-space box to a bounding sphere of one SLICE of the
  *        camera's view frustum, with texel-snapped centering.
  *
@@ -382,43 +479,10 @@ inline DirShadowFit compute_dir_shadow_fit_slice(const glm::vec3& light_directio
         float radius = 0.0f;
         for (const auto& c : corners) radius = std::max(radius, glm::length(c - centroid));
 
-        const glm::vec3 center_ls = glm::vec3(light_rot * glm::vec4(centroid, 1.0f));
-
-        // Quantize the extent too, so a slowly changing radius doesn't rescale the box (and
-        // with it the texel grid the centre snaps to) on every single frame.
-        const float pad = 1.0f;
-        const float extent_step = 0.5f;
-        const float extent = std::ceil((radius + pad) / extent_step) * extent_step;
-
-        fit.texel_world = (2.0f * extent) / resolution;
-        glm::vec2 center(center_ls.x, center_ls.y);
-        center.x = std::floor(center.x / fit.texel_world) * fit.texel_world;
-        center.y = std::floor(center.y / fit.texel_world) * fit.texel_world;
-
-        // `caster_reach`, not the slice's own depth: a cascade covering the nearest 5 metres
-        // must still catch a caster 30 metres up between the sun and that ground, so the
-        // towards-light pull stays sized off the whole shadowed range for every cascade.
-        const float far_plane  = -center_ls.z + radius + pad;
-        float near_plane = -center_ls.z - radius - pad - std::max(caster_reach, 0.0f);
-        const float depth = std::max(far_plane - near_plane, 0.01f);
-        fit.depth_range_world = depth;
-
-        light_proj = glm::orthoRH_ZO(center.x - extent, center.x + extent,
-                                     center.y - extent, center.y + extent,
-                                     near_plane, near_plane + depth);
+        return compute_dir_shadow_fit_sphere(light_direction, centroid, radius, caster_reach,
+                                             tile_resolution);
     }
 
-    // No Vulkan Y-flip, deliberately. The shadow passes render with a POSITIVE-height
-    // viewport (ShadowMapTarget::begin_directional_pass), so the plain RH_ZO matrix is
-    // already the orientation the shader's `proj_coords.xy * 0.5 + 0.5` assumes --
-    // the same convention ShadowMapTarget::get_spot_matrix() documents and uses.
-    //
-    // A flip applied as `light_proj[1][1] *= -1` would be wrong in any case: it negates
-    // the ortho's Y SCALE without its Y TRANSLATION ([3][1]), which mirrors the box's
-    // light-space centre about 0 instead of about itself. That is invisible near the
-    // world origin -- where the centre is ~0 and the mirror is the identity -- and
-    // pushes the box clean off the scene once the camera sits far out, as it does on
-    // assets/scenes/terrain_test (centre ~-185, box half-extent ~79).
     fit.light_space_matrix = light_proj * light_rot;
     return fit;
 }

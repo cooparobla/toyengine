@@ -959,6 +959,46 @@ void test_cascade_fit_near_slice_is_finer_than_far_slice() {
            "cascade_fit: the near cascade is at least 2x finer than one map over the whole range");
 }
 
+void test_focus_cascade_radii_are_geometric() {
+    // The "focus" fit (PixelRenderConfig::shadow_fit): nested spheres from the finest radius
+    // out to shadow_distance, with an equal growth ratio between neighbours.
+    const auto r = toy::render::compute_focus_cascade_radii(12.0f, 96.0f, 4);
+    expect(r.size() == 4, "focus_radii: one radius per cascade");
+    expect_near(r[0], 12.0f, 1e-4f, "focus_radii: the finest cascade takes shadow_focus_radius");
+    expect_near(r[3], 96.0f, 1e-3f, "focus_radii: the coarsest reaches shadow_distance");
+    expect_near(r[1] / r[0], r[2] / r[1], 1e-4f, "focus_radii: growth is geometric");
+    expect_near(r[2] / r[1], r[3] / r[2], 1e-4f, "focus_radii: ...all the way out");
+
+    const auto one = toy::render::compute_focus_cascade_radii(12.0f, 96.0f, 1);
+    expect(one.size() == 1 && std::abs(one[0] - 96.0f) < 1e-4f,
+           "focus_radii: a single cascade covers the whole shadow_distance");
+    const auto inverted = toy::render::compute_focus_cascade_radii(50.0f, 20.0f, 3);
+    expect(inverted.back() >= inverted.front(), "focus_radii: an outer radius below the inner one is raised");
+}
+
+void test_focus_cascade_fit_contains_its_sphere_and_is_stable() {
+    // A focus cascade must contain its whole sphere (containment-based selection), and its
+    // texel size must depend on the radius alone -- the property that keeps the shadows from
+    // swimming as the camera turns or the focus moves.
+    glm::vec3 dir(-0.45f, -0.35f, -0.82f);
+    const glm::vec3 focus(37.0f, -12.5f, 6.0f);
+    const float radius = 12.0f;
+    auto fit = toy::render::compute_dir_shadow_fit_sphere(dir, focus, radius, 96.0f, 2048);
+
+    bool inside = true;
+    for (int i = 0; i < 26; ++i) {
+        const glm::vec3 d = glm::normalize(glm::vec3((i % 3) - 1, ((i / 3) % 3) - 1, (i / 9) - 1) + glm::vec3(1e-3f));
+        const glm::vec4 clip = fit.light_space_matrix * glm::vec4(focus + d * radius, 1.0f);
+        inside = inside && std::abs(clip.x) <= 1.0f && std::abs(clip.y) <= 1.0f && clip.z >= 0.0f && clip.z <= 1.0f;
+    }
+    expect(inside, "focus_fit: the cascade box contains its whole sphere");
+
+    auto moved = toy::render::compute_dir_shadow_fit_sphere(dir, focus + glm::vec3(3.3f, -7.1f, 0.4f), radius, 96.0f, 2048);
+    expect_near(moved.texel_world, fit.texel_world, 1e-6f, "focus_fit: moving the focus keeps the texel size");
+    expect_near(fit.texel_world, 2.0f * 13.0f / 2048.0f, 1e-6f,
+                "focus_fit: texels are (radius + 1 m pad) * 2 / resolution across");
+}
+
 void test_cascade_fit_contains_its_own_slice() {
     // Containment-based cascade selection (gfx_csm_select) only works if a slice's frustum
     // corners really do project inside that slice's own box -- otherwise a shading point
@@ -1340,6 +1380,24 @@ void test_app_config_load_round_trips_cascade_settings() {
     expect(plain.render.shadow_cascades == 4u, "PixelRenderConfig: shadow_cascades defaults to 4");
     expect(plain.render.shadow_cascade_split_lambda == 0.75f,
            "PixelRenderConfig: shadow_cascade_split_lambda defaults to 0.75");
+    expect(plain.render.shadow_fit == "frustum" && !plain.render.shadow_receiver_plane_bias &&
+               plain.render.shadow_pcf_max_texels == 12.0f,
+           "PixelRenderConfig: the focus fit and receiver-plane bias are opt-in");
+
+    toy::core::AppConfig focus = load_config_text("test_focus_shadow_config.yaml",
+        "render:\n"
+        "  shadow_fit: focus\n"
+        "  shadow_focus_radius: 9.5\n"
+        "  shadow_focus_distance: 30.0\n"
+        "  shadow_pcf_max_texels: 20.0\n"
+        "  shadow_receiver_plane_bias: true\n"
+        "  shadow_receiver_max_slope: 3.0\n");
+    expect(focus.render.shadow_fit == "focus", "AppConfig::load: shadow_fit round-trips");
+    expect(focus.render.shadow_focus_radius == 9.5f && focus.render.shadow_focus_distance == 30.0f,
+           "AppConfig::load: shadow_focus_radius/distance round-trip");
+    expect(focus.render.shadow_pcf_max_texels == 20.0f, "AppConfig::load: shadow_pcf_max_texels round-trips");
+    expect(focus.render.shadow_receiver_plane_bias && focus.render.shadow_receiver_max_slope == 3.0f,
+           "AppConfig::load: the receiver-plane bias keys round-trip");
 }
 
 /**
@@ -2944,6 +3002,61 @@ void test_chunk_styled_surface_has_no_holes() {
     }
 }
 
+/**
+ * @brief The same hole check from GRAZING angles -- the view a player standing on the terrain
+ *        actually has, where a gap in a wall, corner or fillet shows and a top-down ray never
+ *        looks. Each ray aims at a point half a step under a column's top (inside solid terrain)
+ *        and must meet a front face before getting there; rays whose path leaves the chunk's
+ *        interior (where neighbouring chunks' geometry is missing) are not counted.
+ */
+void test_chunk_styled_surface_has_no_holes_at_grazing_angles() {
+    using namespace toy::world;
+    const TileMeshLibrary& library = styled_library();
+    TerrainParams params = make_test_params(32);
+    params.soil_depth_steps = 1;
+
+    const std::uint32_t seeds = std::getenv("STYLED_RAY_STRESS") ? 24u : 3u;
+    const int rays_per_seed   = std::getenv("STYLED_RAY_STRESS") ? 6000 : 600;
+    int failures = 0, counted = 0;
+    std::string first_failure;
+    std::mt19937 rng(11);
+    std::uniform_real_distribution<float> unit(0.0f, 1.0f);
+    for (std::uint32_t seed = 1; seed <= seeds; ++seed) {
+        const ColumnPad pad = make_busy_pad(32, seed);
+        ChunkMeshData mesh;
+        mesh_chunk_styled(pad, library, params, mesh);
+        for (int i = 0; i < rays_per_seed; ++i) {
+            const int tx = 3 + static_cast<int>(unit(rng) * 26.0f), ty = 3 + static_cast<int>(unit(rng) * 26.0f);
+            const glm::vec3 target(static_cast<float>(tx) + 0.2f + 0.6f * unit(rng),
+                                   static_cast<float>(ty) + 0.2f + 0.6f * unit(rng),
+                                   // Below the lip band: a rounded lip leaves the top few
+                                   // tenths of an edge tile as air, not solid.
+                                   (static_cast<float>(pad.at(tx, ty).steps) - 0.55f) * params.height_step);
+            const float tilt = glm::radians(30.0f + 50.0f * unit(rng)), az = glm::two_pi<float>() * unit(rng);
+            const glm::vec3 dir(std::sin(tilt) * std::cos(az), std::sin(tilt) * std::sin(az), -std::cos(tilt));
+            const float length = (6.0f - target.z) / std::cos(tilt);
+            const glm::vec3 origin = target - dir * length;
+            if (origin.x < 1.5f || origin.y < 1.5f || origin.x > 30.5f || origin.y > 30.5f) continue;
+            ++counted;
+            glm::vec3 normal;
+            const float hit = cast_chunk_ray(mesh, origin, dir, normal);
+            const bool ok = hit >= 0.0f && hit <= length + 1e-3f && glm::dot(normal, dir) < 0.0f;
+            if (!ok) {
+                ++failures;
+                if (first_failure.empty()) {
+                    first_failure = "seed " + std::to_string(seed) + " target (" + std::to_string(target.x) + ", " +
+                                    std::to_string(target.y) + ", " + std::to_string(target.z) + ") dir (" +
+                                    std::to_string(dir.x) + ", " + std::to_string(dir.y) + ", " + std::to_string(dir.z) +
+                                    (hit < 0.0f ? ") miss" : ") back face or past target");
+                }
+            }
+        }
+    }
+    expect(counted > 100, "styled chunk: enough grazing rays stay inside the chunk to mean something");
+    expect(failures == 0, "styled chunk: grazing rays find no holes in walls, corners or fillets");
+    if (failures > 0) std::cerr << "         " << failures << " of " << counted << "; first: " << first_failure << "\n";
+}
+
 void test_chunk_styled_meshing_is_deterministic() {
     using namespace toy::world;
     TerrainParams params = make_test_params(16);
@@ -3754,6 +3867,55 @@ void test_terrain_streams_chunks_around_the_camera() {
 }
 
 /**
+ * @brief The "focus" shadow fit finds what the camera is looking at when the scene names no
+ *        focus: the screen-centre G-buffer probe measures a real distance, and stays idle
+ *        while the scene's own focus_object answers instead.
+ */
+void test_shadow_focus_probe_follows_the_view() {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016");
+    ScopedEnv no_input("NO_INPUT", "1");
+
+    toy::core::AppConfig config =
+        make_test_config("assets/scenes/terrain_test/scene.yaml", 320, 180, 160, 90);
+    toy::core::Engine engine(std::move(config));
+    auto* camera = coopa::gfx::engine::components::CameraComponent::main();
+    expect(camera != nullptr && camera->scene != nullptr, "focus probe: the scene has a main camera");
+    if (camera == nullptr || camera->scene == nullptr) return;
+    auto* terrain = camera->scene->find_first_component<toy::world::TerrainComponent>();
+    if (terrain == nullptr) return;
+    terrain->grid_size                  = 32;
+    terrain->params.tiles_per_grid_unit = 2;
+    terrain->params.chunk_size          = 8;
+    terrain->params.view_radius         = 2;
+    expect(engine.pipeline().render_config_mut().shadow_fit == "focus",
+           "focus probe: terrain_test runs the focus shadow fit");
+
+    // Park the orbit pivot over the middle of the shrunken 64-tile world, so the camera frames
+    // terrain rather than the empty sky past its edge.
+    coopa::scene::SceneObject* marker = camera->scene->find_object_by_path(camera->focus_object);
+    if (marker == nullptr || marker->get_transform() == nullptr) return;
+    marker->get_transform()->transform().set_position(glm::vec3(32.0f, 32.0f, 20.0f));
+    if (auto* controller = camera->owner->get_component<toy::scene::CameraController>()) {
+        controller->distance           = 30.0f;
+        controller->follow_smoothing   = 0.0f;
+        controller->movement_smoothing = 0.0f;
+    }
+
+    // With the scene's focus_object the probe has nothing to do.
+    tick_until(engine, 600, [&] { return count_live_chunks(*terrain) >= 25; });
+    tick_frames(engine, 8);
+    expect(engine.pipeline().shadow_focus_probe_distance() == 0.0f,
+           "focus probe: idle while the camera names its own focus_object");
+
+    // Without one, it measures what the camera looks at: the ground around the orbit pivot.
+    camera->focus_object.clear();
+    tick_frames(engine, 30);
+    const float probed = engine.pipeline().shadow_focus_probe_distance();
+    expect(probed > 5.0f && probed < 150.0f, "focus probe: measures a real distance to the viewed surface");
+    if (!(probed > 5.0f && probed < 150.0f)) std::cerr << "         probed " << probed << "\n";
+}
+
+/**
  * @brief The styled scene end to end: assets/scenes/terrain_smooth_test parses its styles, bakes
  *        every piece, streams chunks through the styled mesher, and puts terrain on screen.
  *
@@ -3808,7 +3970,7 @@ void test_terrain_smooth_scene_streams_styled_chunks() {
             every_piece = every_piece && terrain->library().has_piece(s, static_cast<toy::world::TilePiece>(p));
         }
     }
-    expect(every_piece, "smooth terrain: every style resolved all nine of its pieces");
+    expect(every_piece, "smooth terrain: every style resolved all eleven of its pieces");
 
     int drawable = 0, styled_shader = 0;
     if (coopa::scene::SceneObject* terrain_object = scene.find_object("terrain")) {
@@ -6634,6 +6796,7 @@ const TestCase kTests[] = {
     {"chunk_styled_plateau_interior_stays_flat",   "world", test_chunk_styled_plateau_interior_stays_flat},
     {"chunk_styled_caps_only_at_style_changes",    "world", test_chunk_styled_section_caps_only_at_style_changes},
     {"chunk_styled_surface_has_no_holes",          "world", test_chunk_styled_surface_has_no_holes},
+    {"chunk_styled_no_holes_at_grazing_angles",    "world", test_chunk_styled_surface_has_no_holes_at_grazing_angles},
     {"chunk_styled_meshing_is_deterministic",      "world", test_chunk_styled_meshing_is_deterministic},
 
     // --- math: pure functions, no GPU ---
@@ -6670,6 +6833,8 @@ const TestCase kTests[] = {
     {"cascade_splits_lambda_selects_the_distribution",       "math", test_cascade_splits_lambda_selects_the_distribution},
     {"cascade_fit_near_slice_is_finer_than_far_slice",       "math", test_cascade_fit_near_slice_is_finer_than_far_slice},
     {"cascade_fit_contains_its_own_slice",                   "math", test_cascade_fit_contains_its_own_slice},
+    {"focus_cascade_radii_are_geometric",                    "math", test_focus_cascade_radii_are_geometric},
+    {"focus_cascade_fit_contains_sphere",                    "math", test_focus_cascade_fit_contains_its_sphere_and_is_stable},
     {"cascade_fit_reaches_casters_above_the_near_slice",     "math", test_cascade_fit_reaches_casters_above_the_near_slice},
     {"cascade_atlas_tiles_are_disjoint_and_in_bounds",       "math", test_cascade_atlas_tiles_are_disjoint_and_in_bounds},
     {"cascade_selection_inset_exceeds_the_pcf_reach",        "math", test_cascade_selection_inset_exceeds_the_pcf_reach},
@@ -6749,6 +6914,7 @@ const TestCase kTests[] = {
     // --- render_*: one Vulkan device each ---
     {"terrain_streams_chunks_around_camera",       "render_terrain",  test_terrain_streams_chunks_around_the_camera},
     {"terrain_smooth_scene_streams_styled_chunks", "render_terrain",  test_terrain_smooth_scene_streams_styled_chunks},
+    {"shadow_focus_probe_follows_the_view",        "render_terrain",  test_shadow_focus_probe_follows_the_view},
     {"static_camera_converges",                    "render_terrain",  test_static_camera_converges_to_a_static_image},
     {"image_settles_after_camera_stops",           "render_terrain",  test_image_settles_after_camera_stops},
     {"pixel_demo_render_and_live_toggles",         "render_pixel",    test_pixel_demo_render_and_live_toggles},

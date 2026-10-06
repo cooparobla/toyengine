@@ -19,6 +19,27 @@
 format: blender
 scene:
   scene_name: terrain_smooth_test
+  # Shadow tuning for a world viewed from 40-100 m away. The config.yaml defaults slice the
+  # camera frustum from the lens outward, which suits a diorama seen from ~12 m; from an orbit
+  # 40+ m out it spends the finest cascades on empty air and leaves the player's area in the
+  # coarsest one. "focus" instead nests the cascades around the point the camera looks at (its
+  # focus_object), and the receiver-plane bias keeps small casters' shadows at full size under
+  # a wide penumbra.
+  #
+  # Softness and AO are in WORLD units, and this camera sits ~4x farther out than pixel_demo's,
+  # so the same metres read ~4x smaller on screen. The penumbra is widened to 0.35 m to read
+  # soft from here -- not 4x (0.6+ m): that is wider than a 1 m terrace's own shadow, which
+  # then never reaches full darkness and washes out. The finest cascade widens to 16 m so that
+  # blur fits under the PCF ceiling (~1.7 cm texels -> ~21 texels). (ssao_quality: ultra would
+  # widen AO's on-screen reach too, but costs ~1.6 ms here for no visible gain.)
+  settings:
+    render:
+      shadow_fit: focus
+      shadow_focus_radius: 16.0         # the finest cascade: 16 m around the focus point
+      shadow_distance: 100.0            # the coarsest: 100 m around it
+      shadow_softness: 0.35             # world-unit penumbra: soft at 42 m, still under a step's shadow
+      shadow_pcf_max_texels: 32.0       # let the finest cascade actually reach that width
+      shadow_receiver_plane_bias: true  # wide penumbra without the matching normal offset
   root_objects:
     - name: terrain
       active: true
@@ -53,12 +74,13 @@ scene:
           max_chunk_jobs_per_frame: 4
 
           # --- Styled tiles ---
-          # Each style names a mesh prefix; its nine pieces load from meshes/<prefix>_<piece>.yaml.
+          # Each style names a tile-set object: its children are the pieces (see assets/objects/
+          # tileset_*.yaml -- open one in the editor to see them all; duplicate it for a new look).
           styles:
-            round: tile_round
-            soft: tile_soft
-            rock: tile_rock
-            flat: tile_flat
+            round: objects/tileset_round
+            soft: objects/tileset_soft
+            rock: objects/tileset_rock
+            flat: objects/tileset_flat
           # The style each surface kind is shaped with -- the column's top kind shapes the whole
           # column, cliff included.
           kind_styles:
@@ -137,13 +159,13 @@ scene:
           position: { x: 0.0, y: 0.0, z: 40.0 }
           rotation: { x: 0.0, y: 0.0, z: 0.0 }
           scale: { x: 1.0, y: 1.0, z: 1.0 }
-        # High-key but still off-axis, so terrace steps shade each other.
+        # High-key and lower than overhead, so terrace steps cast shadows long enough to read.
         - type: DirectionalLight
-          direction: { x: -0.35, y: -0.30, z: -0.88 }
+          direction: { x: -0.50, y: -0.45, z: -0.74 }   # ~48 deg up: a 1 m step casts ~0.9 m
           color: { r: 1.0, g: 0.97, b: 0.90 }
           intensity: 1.35
           cast_shadows: true
-          shadow_intensity: 0.85
+          shadow_intensity: 0.75                         # lighter than 0.85: soft, not inky
       children: []
 
     - name: sky

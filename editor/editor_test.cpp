@@ -6135,6 +6135,49 @@ void test_editor_build_refresh() {
     expect(app.build_task().cancelled(), "Cancel Build stops it");
 }
 
+void test_editor_tile_set_duplicate() {
+    // A terrain tile style is a tile-set object (assets/objects/tileset_*.yaml): toyengine's are
+    // listed among its Objects, open like any object, and duplicate into a NEW look that owns a
+    // copy of every piece mesh -- so reshaping a piece of the copy never touches the original.
+    setenv("FIXED_DT", "0", 1);
+    unsetenv("NO_INPUT");
+    const fs::path home = fresh_dir("tile_set_home");
+    setenv("HOME", home.c_str(), 1);
+    const fs::path root = fresh_dir("tile_set_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, 4);
+
+    const auto objects = app.engine_assets_listed(AssetType::Object);
+    expect(std::find(objects.begin(), objects.end(), "objects/tileset_round.yaml") != objects.end(),
+           "toyengine's tile sets are listed among its objects");
+
+    const std::string copy = app.duplicate_tile_set("objects/tileset_round.yaml");
+    expect(copy == "objects/tileset_round_copy.yaml", "the duplicate lands in the project under a new name");
+    const Node doc = coopa::yaml::load_document(project.assets() / "objects" / "tileset_round_copy.yaml");
+    const Node& obj = doc.at("object");
+    expect(obj.at("name").get_value<std::string>() == "tileset_round_copy", "the copy names itself");
+    int pieces = 0, own = 0;
+    for (const auto& child : obj.at("children")) {
+        for (const auto& comp : child.at("components")) {
+            if (!comp.contains("mesh_path")) continue;
+            ++pieces;
+            const std::string ref = comp.at("mesh_path").get_value<std::string>();
+            if (ref == "tileset_round_copy_" + child.at("name").get_value<std::string>() &&
+                fs::exists(project.assets() / "meshes" / (ref + ".yaml"))) ++own;
+        }
+    }
+    expect(pieces == static_cast<int>(toy::world::k_tile_piece_count) && own == pieces, "every piece of the copy points at its own new mesh file");
+    expect(fs::exists(Project::engine_assets() / "meshes" / "tile_round_top_outer.yaml"),
+           "toyengine's own pieces are left in place");
+
+    app.open_asset(AssetType::Object, copy);
+    tick(engine, 4);
+    expect(app.active_asset_type() == AssetType::Object, "the new tile set opens as an object, pieces and all");
+    unsetenv("FIXED_DT");
+}
+
 void test_editor_engine_assets() {
     // toyengine's assets/ is a read-only layer under a game project's: listed (toggle, on by
     // default), usable by drag and drop, never edited -- Copy to Project makes an editable copy.
@@ -6577,6 +6620,7 @@ const TestCase kTests[] = {
     {"package_renders_identically",          "package",  test_package_renders_identically},
     {"editor_build_refresh",                 "editor_shell", test_editor_build_refresh},
     {"editor_engine_assets",                 "editor_shell", test_editor_engine_assets},
+    {"editor_tile_set_duplicate",            "editor_shell", test_editor_tile_set_duplicate},
     {"hub_project_actions",                  "hub",      test_hub_project_actions},
     {"docs_overview", "docs", test_docs_overview},
     {"docs_menu_file", "docs", test_docs_menu_file},

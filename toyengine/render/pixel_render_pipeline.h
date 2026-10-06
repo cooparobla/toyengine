@@ -53,6 +53,8 @@
 
 #include <algorithm>
 #include <array>
+
+#include <glm/gtc/packing.hpp>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -637,6 +639,11 @@ public:
         // This slot's previous frame has finished on the GPU: read its timestamps back now,
         // before begin_frame() below reuses the slot (profiling mode only).
         if (gpu_profiler_) gpu_profiler_->collect(frame_slot);
+        // Same reasoning for the shadow focus probe: this slot's copy from its previous frame
+        // has landed, so reading it here never stalls.
+        read_focus_probe_(frame_slot, view, dt);
+        focus_probe_wanted_ = cam && config_.shadow_fit == "focus" &&
+                              config_.shadow_focus_distance <= 0.0f && !dof_focus.from_scene;
         const auto gather_start = std::chrono::steady_clock::now();
         camera_frame_ = frame_slot;
         light_frame_ = frame_slot;
@@ -662,7 +669,10 @@ public:
         auto* dir_light = frame_scene_.dir_light;
         bool cast_dir_shadow = config_.shadows_enabled && dir_light && dir_light->cast_shadows;
         if (dir_light) {
-            update_dir_shadow_matrix_(dir_light->direction, cam, cast_dir_shadow);
+            // The shadow focus: what the scene says the camera is looking at when it says so,
+            // else what the screen-centre probe found (0 until its first readback lands).
+            update_dir_shadow_matrix_(dir_light->direction, cam, cast_dir_shadow,
+                                      dof_focus.from_scene ? dof_focus.distance : probed_focus_distance_);
         }
 
         // Only the scene's first shadow-casting point light gets a real cube map
@@ -949,6 +959,11 @@ private:
             coopa::gfx::pipeline::DescriptorPoolBuilder().add_sets(*light_layout_, kCameraFrames).build(device_));
         light_datas_.reserve(kCameraFrames);
         light_sets_.reserve(kCameraFrames);
+        for (uint32_t i = 0; i < kCameraFrames; ++i) {
+            focus_probes_.push_back(std::make_unique<coopa::gfx::memory::Buffer>(
+                device_, allocator_, kFocusProbeSamples * 8u,
+                coopa::gfx::BufferUsage::TransferDst, coopa::gfx::MemoryResidency::GpuToCpu));
+        }
         for (uint32_t i = 0; i < kCameraFrames; ++i) {
             light_datas_.push_back(std::make_unique<coopa::gfx::engine::data::LightData>(device_, allocator_));
             light_sets_.push_back(std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device_, *light_pool_, *light_layout_));
@@ -1770,6 +1785,7 @@ private:
         gpu_mark_(cmd, GpuScope::ShadowSpot);
         record_gbuffer_(cmd, meshes, sdf_draws);
         gpu_mark_(cmd, GpuScope::GBuffer);
+        if (focus_probe_wanted_) record_focus_probe_(cmd);
 
         if (ctx.need_ssr_trace_inputs) {
             hiz_pass_->execute(cmd, gbuffer_target_.depth_image_handle(), gbuffer_target_.depth_view_typed());
@@ -3455,6 +3471,11 @@ private:
     struct DofFocus {
         float distance = 0.0f; ///< Metres from the eye to the focal plane.
         float range    = 0.0f; ///< Half-width in metres of the forced-sharp band; 0 = pure thin lens.
+        /// True when `distance` came from the scene -- a camera's focus_distance or
+        /// focus_object, or the orbit target -- rather than config_.dof_focus_distance's manual
+        /// fallback. The "focus" shadow fit trusts only these; otherwise it probes what the
+        /// camera is looking at (see read_focus_probe_()).
+        bool  from_scene = false;
     };
 
     /**
@@ -3507,6 +3528,7 @@ private:
         DofFocus out;
         out.distance = (cam && cam->focus_distance > 0.0f)
             ? cam->focus_distance : config_.dof_focus_distance;
+        out.from_scene = cam && cam->focus_distance > 0.0f;
 
         std::string_view path = (cam && !cam->focus_object.empty())
             ? std::string_view(cam->focus_object)
@@ -3545,6 +3567,7 @@ private:
                     float depth = view_space_depth(view, target);
                     if (depth > 0.0f) {
                         out.distance = depth;
+                        out.from_scene = true;
                         if (has_bounds && config_.dof_focus_cover_object) {
                             out.range = view_depth_half_extent(view, model, lo, hi);
                         }
@@ -3561,7 +3584,10 @@ private:
             // to the manual focus above rather than being trusted blindly.
             if (auto* controller = cam->owner->get_component<toy::scene::CameraController>()) {
                 float orbit_dist = controller->orbit_distance();
-                if (orbit_dist > 0.0f) out.distance = orbit_dist;
+                if (orbit_dist > 0.0f) {
+                    out.distance = orbit_dist;
+                    out.from_scene = true;
+                }
             }
         }
 
@@ -3810,7 +3836,7 @@ private:
      */
     void update_dir_shadow_matrix_(const glm::vec3& direction,
                                    const coopa::gfx::engine::components::CameraComponent* cam,
-                                   bool cast_dir_shadow) {
+                                   bool cast_dir_shadow, float focus_distance) {
         using coopa::gfx::engine::components::CameraType;
 
         ShadowFitCamera fit_cam;
@@ -3835,6 +3861,23 @@ private:
         const CascadeSplits splits = compute_cascade_splits(
             near_clip, config_.shadow_distance, cascades, config_.shadow_cascade_split_lambda);
 
+        // shadow_fit "focus": nested spheres around the point the camera is looking at,
+        // instead of slices of its frustum (see PixelRenderConfig::shadow_fit). The point is
+        // shadow_focus_distance along the view direction, else the DOF focal distance this
+        // frame resolved, else the finest cascade's own radius as a last resort.
+        const bool focus_fit = cam && config_.shadow_fit == "focus";
+        glm::vec3 focus_point(0.0f);
+        std::vector<float> focus_radii;
+        if (focus_fit) {
+            const glm::mat4 cam_to_world = glm::inverse(fit_cam.view);
+            float d = config_.shadow_focus_distance > 0.0f ? config_.shadow_focus_distance : focus_distance;
+            if (!(d > 0.0f)) d = config_.shadow_focus_radius;
+            focus_point = glm::vec3(cam_to_world[3]) - glm::vec3(cam_to_world[2]) * d;
+            focus_radii = compute_focus_cascade_radii(config_.shadow_focus_radius,
+                                                      config_.shadow_distance, cascades);
+        }
+        const float pcf_max = std::max(config_.shadow_pcf_max_texels, 1.0f);
+
         const bool pcss_on_config = config_.shadow_pcss_enabled;
         const float pcss_search = glm::clamp(config_.shadow_pcss_search_texels, 1.0f, 16.0f);
 
@@ -3848,18 +3891,21 @@ private:
             // if that bound were ever read wrong.
             const uint32_t i = std::min(c, cascades - 1u);
             const float slice_near = (i == 0) ? near_clip : splits.distance[i - 1];
-            const DirShadowFit fit = compute_dir_shadow_fit_slice(
-                direction, fit_cam_ptr, slice_near, splits.distance[i],
-                config_.shadow_distance, tile_res);
+            const DirShadowFit fit = focus_fit
+                ? compute_dir_shadow_fit_sphere(direction, focus_point, focus_radii[i],
+                                                config_.shadow_distance, tile_res)
+                : compute_dir_shadow_fit_slice(direction, fit_cam_ptr, slice_near,
+                                               splits.distance[i], config_.shadow_distance, tile_res);
 
             // The PCF radius in ATLAS texels (a tile texel and an atlas texel are the same
             // physical texel, so no per-tile correction), converted from the world-space
             // config_.shadow_softness against THIS cascade's texel size so the penumbra stays
-            // visually constant in world units. Clamped to 12: the radius is unbounded above
-            // (a fine cascade asks for tens) while the Vogel disk is tuned for single-digit
-            // radii. 0 (soft_shadows off) selects the single hard compare.
+            // visually constant in world units. Clamped to shadow_pcf_max_texels (12 by
+            // default): the radius is unbounded above (a fine cascade asks for tens) while the
+            // Vogel disk is tuned for single-digit radii. 0 (soft_shadows off) selects the
+            // single hard compare.
             const float pcf_texels = config_.soft_shadows
-                ? std::min(config_.shadow_softness / std::max(fit.texel_world, 1e-6f), 12.0f)
+                ? std::min(config_.shadow_softness / std::max(fit.texel_world, 1e-6f), pcf_max)
                 : 0.0f;
 
             ubo.dir_cascade_matrix[c]      = fit.light_space_matrix;
@@ -3868,8 +3914,11 @@ private:
             // the same conversion the PCF radius just did, and for the same reason: a
             // world-space constant means a different number of texels in every cascade. See
             // compute_shadow_normal_bias().
+            // With the receiver-plane bias on, the taps already follow the receiver, so the
+            // offset no longer has to clear the PCF disk -- only shadow_normal_bias texels.
+            const bool plane_bias = config_.shadow_receiver_plane_bias && !pcss_on_config;
             ubo.dir_cascade_normal_bias[c] = compute_shadow_normal_bias(
-                pcf_texels, config_.shadow_normal_bias, fit.texel_world);
+                plane_bias ? 0.0f : pcf_texels, config_.shadow_normal_bias, fit.texel_world);
             // PCSS contact hardening (gfx_shadow_dir_pcss): the whole penumbra conversion
             // folded into one factor. A stored-vs-receiver gap of `g` in [0,1] light-space
             // depth spans g * depth_range_world metres, and a sun of angular size
@@ -3897,6 +3946,9 @@ private:
         // radius above becomes PCSS's maximum, so shadow_softness keeps its role as the
         // artist's width dial.
         ubo.pcss_params.x = (pcss_on_config && any_soft) ? 1.0f : 0.0f;
+        ubo.dir_shadow_receiver = glm::vec4(
+            (config_.shadow_receiver_plane_bias && !pcss_on_config) ? 1.0f : 0.0f,
+            std::max(config_.shadow_receiver_max_slope, 0.0f), 0.0f, 0.0f);
 
         // .z is the cascade-SELECTION inset, in tile uv: a shading point is only accepted
         // into a cascade whose tile it sits at least this far inside, which is exactly what
@@ -3906,7 +3958,7 @@ private:
         // .w is the dithered transition band, the outer slice of that accepted region where
         // calc_dir_shadow() randomly promotes a pixel to the next cascade so TAA can resolve
         // the resolution step into a gradient instead of a seam.
-        const float inset = (12.0f + pcss_search) / static_cast<float>(std::max(tile_res, 1u));
+        const float inset = (pcf_max + pcss_search) / static_cast<float>(std::max(tile_res, 1u));
         ubo.dir_cascade_info = glm::vec4(
             static_cast<float>(cascades),
             static_cast<float>(coopa::gfx::engine::targets::ShadowMapTarget::grid_for(cascades).first),
@@ -4401,6 +4453,98 @@ private:
                              VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                              VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                              0, 0, nullptr, 0, nullptr, 1, &barrier);
+    }
+
+    /**
+     * @brief Copies a few G2 (world position) texels around the screen centre into this frame
+     *        slot's readback buffer -- what the camera is looking at, for the "focus" shadow fit
+     *        when the scene names no focus. read_focus_probe_() reads it back once the slot's
+     *        fence has passed, a frame or two later, so nothing ever waits on it.
+     */
+    void record_focus_probe_(coopa::gfx::command::CommandBuffer& cmd) {
+        VkImageMemoryBarrier barrier{};
+        barrier.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image               = gbuffer_target_.g2_image_handle();
+        barrier.subresourceRange    = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+        // The render pass left G2 in SHADER_READ_ONLY_OPTIMAL (its finalLayout).
+        barrier.oldLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.newLayout     = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        vkCmdPipelineBarrier(cmd.handle(), VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+        VkBufferImageCopy regions[kFocusProbeSamples]{};
+        for (uint32_t i = 0; i < kFocusProbeSamples; ++i) {
+            regions[i].bufferOffset     = static_cast<VkDeviceSize>(i) * 8u; // one RGBA16F texel
+            regions[i].imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            regions[i].imageOffset      = {
+                static_cast<int32_t>(render_extent_.width / 2),
+                static_cast<int32_t>(static_cast<float>(render_extent_.height - 1) * kFocusProbeRows[i]), 0};
+            regions[i].imageExtent      = {1, 1, 1};
+        }
+        vkCmdCopyImageToBuffer(cmd.handle(), gbuffer_target_.g2_image_handle(),
+                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               focus_probes_[camera_frame_]->handle(), kFocusProbeSamples, regions);
+
+        barrier.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        barrier.newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd.handle(), VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+        // Make the copy visible to the host read after this slot's fence.
+        VkMemoryBarrier host{};
+        host.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        host.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        vkCmdPipelineBarrier(cmd.handle(), VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+                             0, 1, &host, 0, nullptr, 0, nullptr);
+        focus_probe_pending_[camera_frame_] = true;
+    }
+
+public:
+    /**
+     * @brief The "focus" shadow fit's measured distance to what the camera is looking at
+     *        (smoothed view depth of the screen-centre G-buffer hit); 0 until a probe has
+     *        landed, and while the scene states its own focus (the probe then never runs).
+     */
+    float shadow_focus_probe_distance() const { return probed_focus_distance_; }
+
+private:
+    /**
+     * @brief Reads back this slot's focus probe, if it recorded one, and moves
+     *        probed_focus_distance_ toward the first sample that hit geometry.
+     *
+     * A sample hit geometry when its G2 alpha (roughness, floored at 0.045 by the G-buffer
+     * backbone) is non-zero; sky leaves the cleared 0. The distance is the hit's view-space
+     * depth from THIS frame's camera, smoothed at dof_focus_smoothing so the sharp shadow
+     * region glides rather than jumps as the centre ray crosses a cliff edge. No hit leaves
+     * the previous value in place.
+     */
+    void read_focus_probe_(uint32_t slot, const glm::mat4& view, float dt) {
+        if (slot >= focus_probes_.size() || !focus_probe_pending_[slot]) return;
+        focus_probe_pending_[slot] = false;
+        uint16_t texels[kFocusProbeSamples * 4] = {};
+        focus_probes_[slot]->download(texels, sizeof(texels));
+        for (uint32_t i = 0; i < kFocusProbeSamples; ++i) {
+            const float roughness = glm::unpackHalf1x16(texels[i * 4 + 3]);
+            if (!(roughness > 0.01f)) continue;
+            const glm::vec3 hit(glm::unpackHalf1x16(texels[i * 4 + 0]),
+                                glm::unpackHalf1x16(texels[i * 4 + 1]),
+                                glm::unpackHalf1x16(texels[i * 4 + 2]));
+            const float depth = view_space_depth(view, hit);
+            if (!(depth > 0.0f)) continue;
+            probed_focus_distance_ = probed_focus_distance_ > 0.0f
+                ? exp_smooth_toward(probed_focus_distance_, depth, config_.dof_focus_smoothing, dt)
+                : depth;
+            return;
+        }
     }
 
     void record_gbuffer_(coopa::gfx::command::CommandBuffer& cmd,
@@ -5016,6 +5160,16 @@ private:
     // <= 0 means "unseeded" -- the first object-focus frame snaps to the resolved
     // depth rather than racking up from zero.
     float smoothed_dof_focus_ = -1.0f;
+    // The "focus" shadow fit's screen-centre probe (record_focus_probe_/read_focus_probe_).
+    static constexpr uint32_t kFocusProbeSamples = 5;
+    /// Screen rows the probe samples (at the centre column), as fractions of the render
+    /// height: the centre first, then alternately below and above it, so a centre ray into the
+    /// sky still finds the ground the camera is framing.
+    static constexpr float kFocusProbeRows[kFocusProbeSamples] = {0.5f, 0.6f, 0.4f, 0.7f, 0.3f};
+    std::vector<std::unique_ptr<coopa::gfx::memory::Buffer>> focus_probes_; // one per frame slot
+    std::array<bool, kCameraFrames> focus_probe_pending_{};
+    bool  focus_probe_wanted_   = false;
+    float probed_focus_distance_ = 0.0f; ///< Smoothed view depth of the probe's hit; 0 = none yet.
     /** Smoothed forced-sharp half-width, metres. Negative = unseeded (0 is a legal value). */
     float smoothed_dof_range_ = -1.0f;
     bool  warned_missing_dof_object_ = false;

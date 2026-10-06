@@ -334,11 +334,16 @@ private:
         auto* renderer = object->add_component<MeshRenderer>();
         renderer->material = terrain.material;
         if (terrain.library().has_styles()) {
-            // Styled chunks carry one atlas cell per kind; terrain_styled.frag takes the kind's
-            // colour from it and adds world-space detail, which needs the atlas grid.
+            // Styled chunks carry blend codes (encode_surface_blend()); terrain_styled.frag picks
+            // each pixel's kind from them, takes its colour from the atlas and adds world-space
+            // detail -- it needs the atlas grid and the cell size.
             renderer->material.shader        = "terrain_styled";
             renderer->material.shader_params = glm::vec4(static_cast<float>(k_atlas_columns),
-                                                         static_cast<float>(k_atlas_rows), 0.0f, 0.0f);
+                                                         static_cast<float>(k_atlas_rows),
+                                                         terrain.params.height_step, terrain.params.tile_size);
+            // Its UVs are blend codes, not texture coordinates: probe / GI bakes, which draw with
+            // stock shaders only, would misread them.
+            renderer->affects_reflection_probes = false;
         } else if (terrain.params.greedy_merge) {
             // The greedy mesher writes tile-space UVs (TileMeshLibrary::encode_uv), which only
             // the `terrain` surface shader decodes; it reads the atlas grid from shader_params.

@@ -104,11 +104,21 @@ enum class TilePiece : std::uint8_t {
     WallCapConcave,  /**< @brief Top wall cell, filleting an inner corner (with its top fill). */
     WallContinue,    /**< @brief Lower wall cell, straight end. */
     WallConvex,      /**< @brief Lower wall cell, outer corner. */
-    WallConcave      /**< @brief Lower wall cell, inner corner. */
+    WallConcave,     /**< @brief Lower wall cell, inner corner. */
+    WallTaperConcave, /**< @brief The TALLER wall's half of an inner corner, at the cell where the
+                          lower wall's plateau ends: plain along its own face (the cliff keeps
+                          rising), lipped along the fillet arc -- the lip tapering from nothing at
+                          the face to full at the corner's midline, where it meets the lower
+                          wall's cap -- with the fillet's top fill. */
+    WallTaperContinue /**< @brief The LOWER wall's cap half where its straight run ends against a
+                           taller neighbour on the same face: the lip tapering from full at the
+                           half's start to nothing at its end, so it meets that neighbour's plain
+                           wall square instead of leaving the lip's cut-out as a step -- with the
+                           top fill over the strip the lip no longer covers. */
 };
 
 /** @brief Number of distinct `TilePiece` values. */
-inline constexpr std::size_t k_tile_piece_count = 9;
+inline constexpr std::size_t k_tile_piece_count = 11;
 
 /**
  * @brief The suffix a piece's mesh file carries: a style `tile_round` loads
@@ -121,7 +131,8 @@ inline const char* tile_piece_name(TilePiece piece) {
     static const char* const names[k_tile_piece_count] = {
         "top_inner", "top_edge", "top_outer",
         "wall_cap_continue", "wall_cap_convex", "wall_cap_concave",
-        "wall_continue", "wall_convex", "wall_concave"};
+        "wall_continue", "wall_convex", "wall_concave",
+        "wall_cap_concave_taper", "wall_cap_continue_taper"};
     return names[static_cast<std::size_t>(piece)];
 }
 
@@ -135,7 +146,7 @@ inline const char* tile_piece_name(TilePiece piece) {
  * |---|---|
  * | `a.steps <= cell`                  | `Convex`   -- the cliff wraps outward around our corner |
  * | `a.steps > cell`, `d.steps <= cell`| `Continue` -- the cliff runs straight on along `a` |
- * | `a.steps > cell`, `d.steps > cell` | `Concave`  -- the cliff turns inward along `d`'s side |
+ * | `a.steps > cell`, `d.steps > cell` | `Concave`  -- the cliff turns inward along `d`'s side, filleted |
  *
  * Classified per cell, not per column: a tall wall's ends genuinely change with depth.
  */
@@ -233,6 +244,50 @@ inline WallEnd classify_wall_end(const ColumnPad& pad, const glm::ivec2& column,
     const glm::ivec2 diag = a + face_step(face);
     if (pad.at(diag).steps <= cell) return WallEnd::Continue;
     return WallEnd::Concave;
+}
+
+/**
+ * @enum SurfaceBlend
+ * @brief How assets/shaders/terrain_styled.frag decides, per pixel, which surface kind a styled
+ *        triangle shows -- which is what lets the corners between two kinds be round instead of
+ *        the tile grid's right angles.
+ *
+ * Boundaries stay where the mesh puts them (tile edges, the lip); only their CORNERS change,
+ * so every rule is a pure function of the pixel's position in its tile and agrees on both
+ * sides of an edge.
+ */
+enum class SurfaceBlend : std::uint8_t {
+    Flat, /**< One kind, `k0`, everywhere (merged plateau interiors, walls, caps, feet). */
+    Top,  /**< A top quadrant: `k0` its own kind, `k1`/`k2` the level neighbours across its
+              world-x / world-y edges, `k3` the diagonal one, with `sx`/`sy` the quadrant's
+              world directions. Where both edge neighbours differ from `k0` this tile has a
+              convex corner there, and pixels outside a quarter circle take the neighbours'
+              kind -- the other kind's inner corner, seen from the other side. */
+    Lip   /**< A cap-tier wall piece: `k0` the top kind where the surface faces up past a
+              threshold, `k1` the wall kind below it -- a line that follows the round-over. */
+};
+
+/**
+ * @brief Packs a styled surface's per-vertex blend code into one float, exactly: four 4-bit
+ *        kinds, the 2-bit SurfaceBlend and two direction bits -- 20 bits, inside a float's
+ *        24-bit mantissa. Carried in uv.x; terrain_styled.frag unpacks it.
+ *
+ * @param type   How the shader decides.
+ * @param k0..k3 Kinds; their meaning depends on `type` (see SurfaceBlend).
+ * @param sx, sy Top only: the quadrant's world x / y direction, +1 or -1.
+ */
+inline float encode_surface_blend(SurfaceBlend type, TileKind k0, TileKind k1, TileKind k2, TileKind k3,
+                                  int sx = 1, int sy = 1) {
+    const std::uint32_t code =
+        static_cast<std::uint32_t>(k0) | (static_cast<std::uint32_t>(k1) << 4) |
+        (static_cast<std::uint32_t>(k2) << 8) | (static_cast<std::uint32_t>(k3) << 12) |
+        (static_cast<std::uint32_t>(type) << 16) | (sx > 0 ? 1u << 18 : 0u) | (sy > 0 ? 1u << 19 : 0u);
+    return static_cast<float>(code);
+}
+
+/** @brief encode_surface_blend() for a single kind everywhere. */
+inline float encode_surface_flat(TileKind kind) {
+    return encode_surface_blend(SurfaceBlend::Flat, kind, kind, kind, kind);
 }
 
 } // namespace world

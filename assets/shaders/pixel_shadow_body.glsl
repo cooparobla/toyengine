@@ -92,8 +92,32 @@ float calc_dir_shadow(vec3 world_pos, vec3 N, vec3 L) {
         // atlas texel are the same physical texel, so a radius in texels converts to uv
         // against the atlas without any per-tile correction.
         vec2 texel_size = radius_texels / textureSize(dir_shadow_map, 0);
-        shadow = gfx_shadow_dir_pcf_vogel(dir_shadow_map, proj_coords, bias, texel_size,
-                                          angle, int(lights.dir_shadow_extra.z));
+        if (lights.dir_shadow_receiver.x > 0.5) {
+            // Receiver-plane depth bias (PixelRenderConfig::shadow_receiver_plane_bias): the
+            // taps follow this surface's own plane, so the normal offset the CPU applied above
+            // only covers rasterisation error, not the whole kernel -- see
+            // gfx_shadow_dir_pcf_vogel_rpdb. The cascade transform is affine, so the plane's
+            // gradient needs only its linear part applied to directions: one matrix read and
+            // four 3x3 products. (Projecting offset POINTS through gfx_csm_atlas_coords()
+            // instead -- which takes the whole matrix array by value -- cost 4-5x the entire
+            // lighting pass in register pressure.)
+            mat3 J = mat3(lights.dir_cascade_matrix[cascade]);
+            float grid_x = max(lights.dir_cascade_info.y, 1.0);
+            float grid_y = ceil(max(lights.dir_cascade_info.x, 1.0) / grid_x);
+            vec2 uv_scale = 0.5 / vec2(grid_x, grid_y);
+            vec3 t1 = normalize(abs(N.z) < 0.9 ? cross(N, vec3(0.0, 0.0, 1.0)) : cross(N, vec3(1.0, 0.0, 0.0)));
+            vec3 t2 = cross(N, t1);
+            vec3 w  = normalize(abs(L.z) < 0.9 ? cross(L, vec3(0.0, 0.0, 1.0)) : cross(L, vec3(1.0, 0.0, 0.0)));
+            vec3 j1 = J * t1, j2 = J * t2, jw = J * w, jl = J * L;
+            vec2 gradient = gfx_shadow_receiver_gradient(
+                vec3(0.0), vec3(j1.xy * uv_scale, j1.z), vec3(j2.xy * uv_scale, j2.z),
+                vec3(jw.xy * uv_scale, jw.z), abs(jl.z), lights.dir_shadow_receiver.y);
+            shadow = gfx_shadow_dir_pcf_vogel_rpdb(dir_shadow_map, proj_coords, bias, texel_size,
+                                                   angle, int(lights.dir_shadow_extra.z), gradient);
+        } else {
+            shadow = gfx_shadow_dir_pcf_vogel(dir_shadow_map, proj_coords, bias, texel_size,
+                                              angle, int(lights.dir_shadow_extra.z));
+        }
     }
     // Per-light darkness (DirectionalLightComponent::shadow_intensity), applied HERE
     // rather than at each (1.0 - shadow) call site, so every shading path inherits it

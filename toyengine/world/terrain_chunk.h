@@ -301,16 +301,21 @@ inline void mesh_chunk_columns_greedy(const ColumnPad& pad, const TileMeshLibrar
  * as its right half then its left half, cells top-down), so equal pads produce byte-identical
  * buffers exactly like the voxel meshers:
  *
- * - **Top**: four classified quadrants where any cardinal is exposed; tiles with none (the
- *   overwhelmingly common plateau interior) are merged into flat rectangles of equal height and
- *   kind after the walk, like the voxel greedy mesher's tops.
+ * - **Top**: four classified quadrants where any cardinal is exposed or a quadrant is a convex
+ *   corner of its kind against level neighbours; every other tile (the overwhelmingly common
+ *   plateau interior) is merged into flat rectangles of equal height and kind after the walk,
+ *   like the voxel greedy mesher's tops.
+ * - **Surface blend codes** on every vertex (encode_surface_blend()): which kinds a surface may
+ *   show, so terrain_styled.frag can round the corners where two kinds meet and let turf
+ *   follow the curve of a lip.
  * - **Walls**: per exposed cell and half, the cap (top cell, with the lip) or plain piece for
  *   its end state. Straight halves are merged along each wall line into runs and stamped as
  *   one stretched strip per run -- most of a cliff is straight, and most of a lip's cost is
- *   its round-over rings.
+ *   its round-over rings. A cap run ending against a taller neighbour's wall ends in the
+ *   continue taper, its lip easing out so the two walls meet square.
  * - **Section caps** wherever the next piece across a boundary differs: the cell below where a
  *   wall's end state changes with depth, or the next wall along (a straight or concave end)
- *   where the neighbouring column has another style or ends its wall at a different height.
+ *   where the neighbouring column has another style.
  * - **Feet** under convex halves at a real floor, covering the corner the rounding carved out.
  */
 inline void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
@@ -329,23 +334,15 @@ inline void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& libra
         const std::int32_t depth = col.steps - 1 - cell;
         return (depth < params.soil_depth_steps || col.water) ? col.side_kind : TileKind::Stone;
     };
-    // Whether column `c` has a wall cell on `face` at `cell`, and whether that cell is its cap.
-    struct WallCell {
-        bool exists = false;
-        bool cap    = false;
-    };
+    // Whether column `c` has a wall cell on `face` at `cell`.
     auto wall_cell_at = [&](const glm::ivec2& c, TileFace face, std::int32_t cell) {
-        WallCell w;
         const TileColumn& col = pad.at(c);
         const TileColumn& nb  = pad.at(c + face_step(face));
-        if (cell >= col.steps || cell < nb.steps || cell < col.steps - params.max_wall_steps) return w;
-        w.exists = true;
-        w.cap    = cell == col.steps - 1;
-        return w;
+        return cell < col.steps && cell >= nb.steps && cell >= col.steps - params.max_wall_steps;
     };
-    auto stamp = [&](const TileMeshLibrary::SideGeometry& g, const glm::vec3& origin, TileKind top_kind,
-                     TileKind wall, bool anchored) {
-        library.append_styled(g, origin, scale, top_kind, wall, anchored, out.vertices, out.indices);
+    auto stamp = [&](const TileMeshLibrary::SideGeometry& g, const glm::vec3& origin, float code,
+                     bool anchored) {
+        library.append_styled(g, origin, scale, code, anchored, out.vertices, out.indices);
     };
 
     // Straight halves are not stamped where they are met: they are collected, then merged along
@@ -358,8 +355,7 @@ inline void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& libra
         std::int32_t slot;   // half-tile index along the face's axis
         std::uint8_t style;
         bool         cap;
-        TileKind     top_kind;
-        TileKind     wall_kind;
+        float        code;   // the cell's blend code (encode_surface_blend())
     };
     std::vector<StraightHalf> straights;
     // Tiles with no exposed edge, merged into rectangles after the walk like the voxel greedy
@@ -378,16 +374,36 @@ inline void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& libra
             const std::int32_t top_cell = col.steps - 1;
             const std::uint8_t style    = library.style_of(col.top_kind);
             auto exposed = [&](const glm::ivec2& dir) { return pad.at(c + dir).steps < col.steps; };
+            // A neighbour's kind as this top may blend into it: only across a level edge -- across
+            // a cliff the two surfaces never touch.
+            auto level_kind = [&](const glm::ivec2& dir) {
+                const TileColumn& n = pad.at(c + dir);
+                return n.steps == col.steps ? n.top_kind : col.top_kind;
+            };
 
             // --- Top ---
-            if (!exposed({0, 1}) && !exposed({0, -1}) && !exposed({1, 0}) && !exposed({-1, 0})) {
+            // terrain_styled.frag only acts where a quadrant is a convex corner of its own kind
+            // against level neighbours -- the corners it rounds. Anywhere else a top is one kind,
+            // so it merges and welds like any plateau interior.
+            const bool no_edge = !exposed({0, 1}) && !exposed({0, -1}) && !exposed({1, 0}) && !exposed({-1, 0});
+            bool any_corner = false;
+            for (std::uint8_t q = 0; q < 4; ++q) {
+                const glm::ivec2 sgn = rotate_ccw({1, 0}, q) + rotate_ccw({0, 1}, q);
+                any_corner = any_corner || (level_kind({sgn.x, 0}) != col.top_kind &&
+                                            level_kind({0, sgn.y}) != col.top_kind);
+            }
+            if (no_edge && !any_corner) {
                 full[static_cast<std::size_t>(ly * params.chunk_size + lx)] = 1;
             } else {
                 for (std::uint8_t q = 0; q < 4; ++q) {
-                    const PiecePlacement place = classify_quadrant(q, exposed(rotate_ccw({0, 1}, q)),
-                                                                   exposed(rotate_ccw({1, 0}, q)));
-                    stamp(library.piece(style, place.piece, place.orientation), origin_of(c, top_cell),
-                          col.top_kind, col.top_kind, false);
+                    const glm::ivec2 cy = rotate_ccw({0, 1}, q), cx = rotate_ccw({1, 0}, q);
+                    const PiecePlacement place = classify_quadrant(q, exposed(cy), exposed(cx));
+                    const glm::ivec2 sgn = cx + cy; // the quadrant's world directions, each +-1
+                    const TileKind kx = level_kind({sgn.x, 0}), ky = level_kind({0, sgn.y});
+                    const float code = (kx != col.top_kind && ky != col.top_kind)
+                        ? encode_surface_blend(SurfaceBlend::Top, col.top_kind, kx, ky, level_kind(sgn), sgn.x, sgn.y)
+                        : encode_surface_flat(col.top_kind);
+                    stamp(library.piece(style, place.piece, place.orientation), origin_of(c, top_cell), code, false);
                 }
             }
 
@@ -405,7 +421,7 @@ inline void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& libra
                     bool      have_above  = false;
                     WallEnd   above_end   = WallEnd::Continue;
                     TilePiece above_piece = TilePiece::WallContinue;
-                    TileKind  above_kind  = TileKind::Stone;
+                    float     above_code  = 0.0f;
                     bool      above_cap   = false;
                     WallEnd   end         = WallEnd::Continue;
 
@@ -413,43 +429,79 @@ inline void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& libra
                         end = classify_wall_end(pad, c, face, along, cell);
                         const bool      cap   = cell == top_cell;
                         const TileKind  wk    = wall_kind(col, cell);
-                        const TilePiece piece = wall_piece(cap, end);
+                        TilePiece       piece = wall_piece(cap, end);
                         const glm::vec3 o     = origin_of(c, cell);
+                        // One code per column and tier, so a wall's stamps weld into one surface.
+                        float code = cap ? encode_surface_blend(SurfaceBlend::Lip, col.top_kind, wk, wk, wk)
+                                         : encode_surface_flat(wk);
+                        // An inner corner's two halves belong to two walls. Where the OTHER wall's
+                        // plateau ends at this cell but this one keeps rising, this half takes the
+                        // taper piece: lipped along the fillet (in the other plateau's turf) to
+                        // meet that wall's cap, plain along its own still-rising face.
+                        bool lipped = cap;
+                        if (end == WallEnd::Concave && !cap) {
+                            const TileColumn& partner = pad.at(c + along + step);
+                            if (cell == partner.steps - 1) {
+                                piece  = TilePiece::WallTaperConcave;
+                                code   = encode_surface_blend(SurfaceBlend::Lip, partner.top_kind, wk, wk, wk);
+                                lipped = true;
+                            }
+                        }
 
-                        if (end == WallEnd::Continue) {
+                        // A straight cap run that ends against a TALLER neighbour on the same
+                        // face: that neighbour's wall is plain at this cell, so this half takes
+                        // the continue taper -- its lip easing out to meet that wall square.
+                        const bool taper_continue = cap && end == WallEnd::Continue &&
+                                                    pad.at(c + along).steps > col.steps;
+                        if (taper_continue) piece = TilePiece::WallTaperContinue;
+
+                        if (end == WallEnd::Continue && !taper_continue) {
                             const bool along_x = face == TileFace::North || face == TileFace::South;
                             const std::int32_t t = along_x ? c.x : c.y;
                             const bool upper = (along_x ? along.x : along.y) > 0;
                             straights.push_back({lateral_quarter_turns(face), cell, along_x ? c.y : c.x,
-                                                 2 * t + (upper ? 1 : 0), style, cap, col.top_kind, wk});
+                                                 2 * t + (upper ? 1 : 0), style, cap, code});
                         } else {
-                            stamp(library.piece(style, piece, orient), o, col.top_kind, wk, cap);
+                            stamp(library.piece(style, piece, orient), o, code, lipped);
                         }
 
                         if (have_above && above_end != end) {
-                            stamp(library.section(style, piece, Plane::Top, orient), o, wk, wk, false);
+                            // Where the end state changes with depth, the shape above is the
+                            // smaller one (a convex rounding, or a straight end over a fillet),
+                            // so this cell's top section shows as a shelf open to the sky. It is
+                            // flush with the neighbouring ground that changed the end -- the
+                            // along neighbour under a convex end, the diagonal one under a
+                            // fillet -- so it takes that ground's kind, not this wall's.
+                            const glm::ivec2 ground = above_end == WallEnd::Convex ? c + along : c + along + step;
+                            stamp(library.section(style, piece, Plane::Top, orient), o,
+                                  encode_surface_flat(pad.at(ground).top_kind), false);
                             stamp(library.section(style, above_piece, Plane::Bottom, orient),
-                                  origin_of(c, cell + 1), above_kind, above_kind, above_cap);
+                                  origin_of(c, cell + 1), above_code, above_cap);
                         }
 
                         if (end != WallEnd::Convex) {
                             const glm::ivec2 owner = end == WallEnd::Continue ? c + along : c + along + step;
                             const TileFace   owner_face = end == WallEnd::Continue ? face : face_of_step(-along);
-                            const WallCell   next = wall_cell_at(owner, owner_face, cell);
-                            if (next.exists && (library.style_of(pad.at(owner).top_kind) != style || next.cap != cap)) {
-                                stamp(library.section(style, piece, Plane::End, orient), o, col.top_kind, wk, cap);
+                            const bool       next = wall_cell_at(owner, owner_face, cell);
+                            // Halves meeting along a wall always agree on tier: a cap meets a cap
+                            // at equal heights, and a cap ending against a taller wall's plain cell
+                            // is the continue taper, square at that end. At an inner corner both
+                            // halves are lipped exactly at the lower plateau's top (cap or taper).
+                            // So only their styles can differ.
+                            if (next && library.style_of(pad.at(owner).top_kind) != style) {
+                                stamp(library.section(style, piece, Plane::End, orient), o, code, lipped);
                             }
                         }
 
                         have_above  = true;
                         above_end   = end;
                         above_piece = piece;
-                        above_kind  = wk;
-                        above_cap   = cap;
+                        above_code  = code;
+                        above_cap   = lipped;
                     }
 
                     if (lowest == nb.steps && end == WallEnd::Convex) {
-                        stamp(library.foot(orient), origin_of(c, lowest), nb.top_kind, nb.top_kind, false);
+                        stamp(library.foot(orient), origin_of(c, lowest), encode_surface_flat(nb.top_kind), false);
                     }
                 }
             }
@@ -483,7 +535,7 @@ inline void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& libra
                 const TileColumn& col = pad.at(lx, ly);
                 library.append_styled(library.full_top(), origin_of({lx, ly}, col.steps - 1),
                                       glm::vec3(scale.x * static_cast<float>(w), scale.y * static_cast<float>(h), scale.z),
-                                      col.top_kind, col.top_kind, false, out.vertices, out.indices);
+                                      encode_surface_flat(col.top_kind), false, out.vertices, out.indices);
             }
         }
     }
@@ -504,7 +556,7 @@ inline void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& libra
             const StraightHalf& h = straights[j];
             if (h.turns != first.turns || h.cell != first.cell || h.line != first.line ||
                 h.slot != first.slot + static_cast<std::int32_t>(j - i) || h.style != first.style ||
-                h.cap != first.cap || h.top_kind != first.top_kind || h.wall_kind != first.wall_kind) {
+                h.cap != first.cap || h.code != first.code) {
                 break;
             }
             ++j;
@@ -515,7 +567,7 @@ inline void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& libra
         const glm::vec3 origin(along_x ? start : across, along_x ? across : start,
                                static_cast<float>(first.cell) * params.height_step);
         library.append_styled(library.straight(first.style, first.cap, first.turns), origin, scale,
-                              first.top_kind, first.wall_kind, first.cap, out.vertices, out.indices,
+                              first.code, first.cap, out.vertices, out.indices,
                               along_x ? 0 : 1, 0.5f * static_cast<float>(j - i));
         i = j;
     }

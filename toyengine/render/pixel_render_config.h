@@ -461,6 +461,67 @@ struct PixelRenderConfig {
      * Ignored when `shadow_cascades` is 1.
      */
     float    shadow_cascade_split_lambda = 0.75f;
+    /**
+     * @brief How the directional cascades are placed: `"frustum"` or `"focus"`.
+     *
+     * `"frustum"` (default) slices the camera's own view frustum from the near plane out to
+     * `shadow_distance` (see `shadow_cascade_split_lambda`) -- right for a camera close to its
+     * subject, as on assets/scenes/pixel_demo.
+     *
+     * `"focus"` instead centres every cascade on the camera's FOCUS POINT, as nested boxes
+     * whose radii grow geometrically from `shadow_focus_radius` out to `shadow_distance`
+     * (compute_focus_cascade_radii()). The focus point lies along the view direction, at the
+     * first of:
+     *   1. `shadow_focus_distance`, when > 0;
+     *   2. a focus the scene states -- the camera's `focus_distance` or `focus_object`, or an
+     *      orbit camera's target under `dof_focus_mode: orbit_target`;
+     *   3. otherwise, what the camera is looking at: the G-buffer surface under the screen
+     *      centre, read back a frame later (PixelRenderPipeline::record_focus_probe_), so no
+     *      scene setup is needed at all. For a camera that orbits or follows a subject from
+     * tens of metres away, frustum slicing spends its finest cascades on the empty air in
+     * front of the lens; focus cascades put them where the player is looking, so the shadows
+     * there get the texel density a close-up camera gets. The box sizes are constant, so the
+     * shadows do not swim as the camera turns; only the texel-snapped centre moves.
+     */
+    std::string shadow_fit = "frustum";
+    /**
+     * @brief `"focus"` fit only: radius, in world units, of the finest cascade around the
+     *        focus point. Its texels are `2 * (radius + 1) / shadow_map_resolution` across.
+     */
+    float    shadow_focus_radius = 12.0f;
+    /**
+     * @brief `"focus"` fit only: distance from the eye to the focus point along the view
+     *        direction, in world units; 0 follows the scene's focus, else what the camera is
+     *        looking at (see `shadow_fit`).
+     */
+    float    shadow_focus_distance = 0.0f;
+    /**
+     * @brief Ceiling on the directional PCF radius, in shadow-map texels.
+     *
+     * `shadow_softness` is converted per cascade into texels and clamped to this. A fine
+     * cascade otherwise asks for more texels than the Vogel disk is tuned for. The clamp also
+     * sizes the cascade-selection inset, which keeps the widest kernel inside its own atlas
+     * tile. Raise it, with `shadow_quality` taps to match, when a fine cascade's penumbra is
+     * visibly narrower than `shadow_softness` asks for.
+     */
+    float    shadow_pcf_max_texels = 12.0f;
+    /**
+     * @brief Receiver-plane depth bias for the directional PCF.
+     *
+     * Off, every PCF tap compares against the shading point's own depth. A receiver that does
+     * not face the light then shadows itself across a wide kernel, so the normal offset has
+     * to clear the whole kernel (compute_shadow_normal_bias() adds the PCF radius). That shrinks
+     * every shadow by `shadow_softness` -- harmless at the default 0.15, visible on small
+     * casters once a large scene wants a wide penumbra.
+     *
+     * On, each tap's compare depth follows the receiver's own plane
+     * (gfx_shadow_dir_pcf_vogel_rpdb), and the normal offset drops to `shadow_normal_bias`
+     * texels alone. So `shadow_softness` widens the penumbra without eroding the shadow.
+     * Not applied on the PCSS path.
+     */
+    bool     shadow_receiver_plane_bias = false;
+    /** @brief Receiver-plane bias only: the steepest receiver slope it trusts, as a tangent. */
+    float    shadow_receiver_max_slope  = 4.0f;
     uint32_t cube_shadow_resolution = 512;
     uint32_t spot_shadow_resolution = 1024;
     float    shadow_bias            = 0.005f;

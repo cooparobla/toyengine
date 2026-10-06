@@ -64,6 +64,8 @@ layout(set = 1, binding = 0) uniform LightUBO {
     vec4 dir_cascade_pcss_scale;   // per-cascade PCSS texels per unit [0,1] depth gap
     vec4 dir_cascade_info;         // x=count, y=tiles per atlas row, z=selection inset (tile uv),
                                    // w=dither transition band (tile uv)
+    vec4 dir_shadow_receiver;      // x=1: receiver-plane depth bias on the directional PCF,
+                                   // y=steepest receiver slope honoured (tan). z/w reserved.
 } lights;
 
 #endif // TOY_LIGHT_UBO_BODY_GLSL

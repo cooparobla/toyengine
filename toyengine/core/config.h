@@ -265,6 +265,12 @@ struct AppConfig {
                 if (r.contains("shadow_map_resolution"))  config.render.shadow_map_resolution  = r.at("shadow_map_resolution").get_value<uint32_t>();
                 if (r.contains("shadow_cascades"))        config.render.shadow_cascades        = r.at("shadow_cascades").get_value<uint32_t>();
                 if (r.contains("shadow_cascade_split_lambda")) config.render.shadow_cascade_split_lambda = r.at("shadow_cascade_split_lambda").get_value<float>();
+                if (r.contains("shadow_fit"))             config.render.shadow_fit             = r.at("shadow_fit").get_value<std::string>();
+                if (r.contains("shadow_focus_radius"))    config.render.shadow_focus_radius    = r.at("shadow_focus_radius").get_value<float>();
+                if (r.contains("shadow_focus_distance"))  config.render.shadow_focus_distance  = r.at("shadow_focus_distance").get_value<float>();
+                if (r.contains("shadow_pcf_max_texels"))  config.render.shadow_pcf_max_texels  = r.at("shadow_pcf_max_texels").get_value<float>();
+                if (r.contains("shadow_receiver_plane_bias")) config.render.shadow_receiver_plane_bias = r.at("shadow_receiver_plane_bias").get_value<bool>();
+                if (r.contains("shadow_receiver_max_slope"))  config.render.shadow_receiver_max_slope  = r.at("shadow_receiver_max_slope").get_value<float>();
                 if (r.contains("cube_shadow_resolution")) config.render.cube_shadow_resolution = r.at("cube_shadow_resolution").get_value<uint32_t>();
                 if (r.contains("spot_shadow_resolution")) config.render.spot_shadow_resolution = r.at("spot_shadow_resolution").get_value<uint32_t>();
                 if (r.contains("shadow_bias"))            config.render.shadow_bias            = r.at("shadow_bias").get_value<float>();

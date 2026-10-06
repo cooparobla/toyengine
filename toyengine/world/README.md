@@ -97,17 +97,33 @@ A `styles:` key on the `Terrain` component switches every chunk from the voxel m
 `mesh_chunk_styled()` and the `terrain_styled` surface shader:
 
 ```yaml
-styles:            # name -> mesh prefix; pieces load from meshes/<prefix>_<piece>.yaml
-  round: tile_round
-  rock: tile_rock
+styles:            # name -> tile-set object (or, older form, a mesh prefix: meshes/<prefix>_<piece>.yaml)
+  round: objects/tileset_round
+  rock: objects/tileset_rock
 kind_styles:       # which style shapes each TileKind's columns (give `default` explicitly)
   default: round
   stone: rock
 ```
 
+### Tile sets: a style as one object
+
+Each style is a **tile-set object**, for example `assets/objects/tileset_round.yaml`. It is an
+object asset with one child per piece, each child named by its piece suffix and carrying a
+MeshRenderer for that piece. `tools/gen_tile_styles.py` writes the stock ones, marked
+`tile_set: true`. A Terrain's `styles:` names the object, and the terrain finds each piece by its
+child's name.
+
+In the editor, the tile sets appear in the Objects tab, under toyengine's read-only section in a
+game project:
+
+- **Open one** to see every piece laid out by tier, then Tab into a piece to reshape its mesh.
+- **Make a new look:** use *Duplicate as New Tile Set* on a built-in set, or *Duplicate* on a
+  project one. The copy gets its own copy of every piece mesh (`meshes/<copy>_<piece>.yaml`), so
+  reshaping it never touches the original. Then point a Terrain's `styles:` at the copy.
+
 ### Pieces
 
-A style is nine meshes, each authored once in one canonical frame of the unit cell `[0,1]^3`
+A style is eleven meshes, each authored once in one canonical frame of the unit cell `[0,1]^3`
 (Z up) and baked into all eight D4 orientations (`variant_transform()`: mirror across
 `x = 0.5`, then quarter turns about +Z):
 
@@ -116,11 +132,22 @@ A style is nine meshes, each authored once in one canonical frame of the unit ce
 | `top_inner`, `top_edge`, `top_outer` | the +X+Y quadrant of the top, `z = 1`; `top_edge` exposed on +Y | each quadrant of a top with an exposed edge, by whether its two cardinals are lower — three shapes cover all 47 blob cases |
 | `wall_cap_{continue,convex,concave}` | the right half (`x ∈ [0.5,1]`) of the +Y wall, with the lip's round-over | the topmost cell of a wall |
 | `wall_{continue,convex,concave}` | the same half, a vertical extrusion of the plan profile | every cell below |
+| `wall_cap_concave_taper` | the concave half: plain on its own face, lipped along the fillet arc | the taller wall's half of an inner corner, at the cell where the lower wall's plateau ends |
+| `wall_cap_continue_taper` | the straight cap half, its lip easing from full at `x = 0.5` to nothing at `x = 1`, with a top fill over the strip it uncovers | the lower wall's cap half where its straight run ends against a taller neighbour on the same face |
 
 A wall half's shape is its **end state** at that cell (`WallEnd`): the cliff continues straight
 onto the next column, wraps a convex corner, or fillets a concave one. A concave fillet is
 material added into the *lower* cell's corner, so each of the two walls meeting there owns a 45°
-half.
+half. Where the two walls have different heights, the lower one's half caps out with its lip at
+its plateau. The taller one's half at that same cell is the **taper** piece: its own face stays
+plain, because that cliff keeps rising. Its lip eases in along the fillet arc, from nothing at the
+face to full at the corner's midline, where it meets the lower cap. The inner corner stays one
+smooth curve, and no lip ever carves into the taller column.
+
+The same meeting along a straight face -- a lower plateau's cliff running on into a taller
+neighbour's, flush -- is the **continue taper**: the lower cap's last half eases its lip out to
+nothing, so it meets the taller column's plain wall square. A full lip there would leave its
+cut-out standing against the flat face as a hard wedge.
 
 **One style per column.** The column's top kind picks the style for its top and its whole cliff,
 lip to base. An ACNH cliff is one smooth shape all the way down. Its soil band and stone below are
@@ -150,15 +177,33 @@ Because caps are derived, a hand-authored piece gets them for free, as long as i
   `z = 0.5` at tile proportions, pinned to the cell top, and stretches only the band below, so
   `LIP_V ≤ 0.5`.
 
-`chunk_styled_surface_has_no_holes` ray-casts busy random pads with all four shipped styles and
-fails on any see-through hole or exposed back face. Run it with `STYLED_RAY_STRESS=1` (120k rays)
-after changing a piece, the classifier or the cap rules.
+`chunk_styled_surface_has_no_holes` ray-casts busy random pads with all four shipped styles from
+above, and `chunk_styled_no_holes_at_grazing_angles` from nearly side-on — the view a player on
+the ground has, where gaps in walls and corners show. Both fail on any see-through hole or
+exposed back face. Run them with `STYLED_RAY_STRESS=1` (about 230k rays) after changing a piece,
+the classifier or the cap rules.
 
 ### Surface: `terrain_styled.frag`
 
-Styled chunks carry no texture coordinates beyond their kind: every vertex's UV is the centre of
-its kind's atlas cell. The shader reads the kind's colour and roughness there, then draws the
-detail procedurally. It uses world-space value noise at a few frequencies, plus specks, strata on
+Styled chunks carry no texture coordinates. Every vertex's uv.x is a packed **blend code**
+(`encode_surface_blend()` in `tile_topology.h`): the kinds the surface may show and how to choose.
+Boundaries between kinds stay straight, where the mesh puts them. What the shader removes is
+their right-angle **corners**:
+
+- **Top** quadrants at a convex corner of their own kind (both edge neighbours, at the same
+  height, are other kinds) carry those neighbours' kinds. Pixels outside a quarter circle take
+  the neighbours' kind. The other kind's inner corner is the same curve seen from the other side.
+- **Checkerboards** round only the higher-indexed kind, so the other connects through a smooth
+  waist.
+- **Three-kind junctions** give the cut-off corner to the kind that also holds the diagonal,
+  forming a smooth T.
+- **Lips** (the cap tier) show turf where the surface faces up past a threshold, so the grass
+  line follows the round-over's curve.
+- **Everything else** is one kind, with no extra geometry: only corner quadrants stay unmerged,
+  and only they carry neighbour kinds, so everything else merges and welds.
+
+The shader then reads the chosen kind's colour and roughness from the centre of its atlas cell,
+and draws the detail procedurally. It uses world-space value noise at a few frequencies, plus specks, strata on
 stone and a slight bump from the noise's analytic gradient, with each octave faded out as it
 nears the pixel's footprint. In practice that is an analytic mip chain: sharp up close, calm at a
 distance, seamless across lips, corners and chunks, and independent of the engine's (absent)

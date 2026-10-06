@@ -79,11 +79,6 @@ public:
         std::vector<Vertex>        vertices;
         std::vector<std::uint32_t> indices;
 
-        /// Styled pieces only: per vertex, 1 when its triangle faces up (textured with the
-        /// column's top kind), 0 when it is wall (the cell's soil or stone kind). Empty
-        /// for the voxel sides, whose kind is chosen per side instead.
-        std::vector<std::uint8_t>  surface;
-
         bool empty() const { return vertices.empty() || indices.empty(); }
 
         /// True when this side is a flat, axis-aligned unit quad whose UVs are an affine
@@ -317,11 +312,15 @@ public:
             for (std::size_t q = 0; q < 4; ++q) set.straight[piece == TilePiece::WallCapContinue ? 1 : 0][q] = turned[q];
         }
 
-        const bool wall = piece >= TilePiece::WallCapContinue && piece <= TilePiece::WallConcave;
+        const bool taper = piece == TilePiece::WallTaperConcave;
+        const bool taper_continue = piece == TilePiece::WallTaperContinue;
+        const bool wall = taper || taper_continue ||
+                          (piece >= TilePiece::WallCapContinue && piece <= TilePiece::WallConcave);
         if (wall) {
-            const WallEnd end = static_cast<WallEnd>(
+            const WallEnd end = taper ? WallEnd::Concave : taper_continue ? WallEnd::Continue : static_cast<WallEnd>(
                 (static_cast<std::uint8_t>(piece) - static_cast<std::uint8_t>(TilePiece::WallCapContinue)) % 3u);
-            const bool cap = piece <= TilePiece::WallCapConcave;
+            // The taper pieces are cap-like: their tops are finished surface, nothing stacks on them.
+            const bool cap = taper || taper_continue || piece <= TilePiece::WallCapConcave;
             const bool concave = end == WallEnd::Concave;
             for (int top = 0; top < 2; ++top) {
                 if (top && cap) continue; // a cap is the top of its wall; nothing sits on it
@@ -332,6 +331,19 @@ public:
                                                glm::vec3(0.0f, 0.0f, top ? 1.0f : -1.0f),
                                                glm::vec3(0.5f, 0.5f, z), &start, concave ? &corner : nullptr),
                                set.sections[p][static_cast<std::size_t>(top ? SectionPlane::Top : SectionPlane::Bottom)]);
+            }
+            if (taper) {
+                // Its top is finished surface over the fillet, but where the taller wall above
+                // it changes shape (wraps a convex corner, say) its own footprint still needs a
+                // floor: the half-footprint triangle, kept clear of the fill.
+                Vertex v;
+                v.normal  = glm::vec3(0.0f, 0.0f, 1.0f);
+                v.tangent = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
+                std::vector<Vertex> tri(3, v);
+                tri[0].position = glm::vec3(0.5f, 0.5f, 1.0f);
+                tri[1].position = glm::vec3(1.0f, 1.0f, 1.0f);
+                tri[2].position = glm::vec3(0.5f, 1.0f, 1.0f);
+                bake_oriented_(tri, set.sections[p][static_cast<std::size_t>(SectionPlane::Top)]);
             }
             Oriented& end_section = set.sections[p][static_cast<std::size_t>(SectionPlane::End)];
             if (end == WallEnd::Continue) {
@@ -361,7 +373,9 @@ public:
             {TilePiece::TopEdge, TilePiece::TopInner},       {TilePiece::TopOuter, TilePiece::TopEdge},
             {TilePiece::WallConvex, TilePiece::WallContinue}, {TilePiece::WallConcave, TilePiece::WallContinue},
             {TilePiece::WallCapContinue, TilePiece::WallContinue}, {TilePiece::WallCapConvex, TilePiece::WallConvex},
-            {TilePiece::WallCapConcave, TilePiece::WallConcave}};
+            {TilePiece::WallCapConcave, TilePiece::WallConcave},
+            {TilePiece::WallTaperConcave, TilePiece::WallConcave},
+            {TilePiece::WallTaperContinue, TilePiece::WallCapContinue}};
         for (StyleSet& set : styles_) {
             for (const auto& [piece, from] : fallbacks) {
                 const std::size_t p = static_cast<std::size_t>(piece);
@@ -409,10 +423,13 @@ public:
      */
     const SideGeometry& foot(std::uint8_t orientation) const { return foot_[orientation & 7u]; }
 
+
+
     /**
      * @brief Stamps one styled piece (or section cap, or foot) into a chunk's buffers.
      *
-     * Each vertex takes `top_kind` or `wall_kind` by its baked surface class. A `top_anchored`
+     * Every vertex carries `blend_code` in uv.x (encode_surface_blend()): terrain_styled.frag
+     * reads which kinds the surface may show, and decides per pixel. A `top_anchored`
      * piece -- the cap tier -- keeps everything above its z = 0.5 at tile proportions, pinned
      * to the cell top, and stretches only the band below to fill the step: a lip authored for a
      * cubic cell therefore stays round on a tall step instead of turning into an ellipse.
@@ -421,8 +438,7 @@ public:
      * @param geometry     What to stamp.
      * @param origin       World position of the cell's minimum corner.
      * @param scale        `{tile_size, tile_size, height_step}`.
-     * @param top_kind     Atlas kind of up-facing triangles.
-     * @param wall_kind    Atlas kind of the rest.
+     * @param blend_code   The surface's packed kinds (encode_surface_blend()).
      * @param top_anchored Use the cap tier's anchored vertical mapping.
      * @param out_v        Vertex buffer to append to.
      * @param out_i        Index buffer to append to; rebased onto `out_v`'s current end.
@@ -431,13 +447,11 @@ public:
      *                     valid for geometry invariant along that axis.
      */
     void append_styled(const SideGeometry& geometry, const glm::vec3& origin, const glm::vec3& scale,
-                       TileKind top_kind, TileKind wall_kind, bool top_anchored,
+                       float blend_code, bool top_anchored,
                        std::vector<Vertex>& out_v, std::vector<std::uint32_t>& out_i,
                        int stretch_axis = 0, float stretch = 1.0f) const {
         if (geometry.empty()) return;
         const std::uint32_t base = static_cast<std::uint32_t>(out_v.size());
-        const glm::vec4 top_cell  = atlas_cell(top_kind);
-        const glm::vec4 wall_cell = atlas_cell(wall_kind);
         const float tile   = scale.x;
         const float height = scale.z;
         const bool anchored = top_anchored && height >= 0.5f * tile;
@@ -468,10 +482,8 @@ public:
             const glm::vec3 axis = std::abs(placed.normal.z) < 0.9f ? glm::vec3(0.0f, 0.0f, 1.0f)
                                                                     : glm::vec3(1.0f, 0.0f, 0.0f);
             placed.tangent = glm::vec4(glm::normalize(glm::cross(axis, placed.normal)), 1.0f);
-            // The kind's cell centre: terrain_styled.frag reads the kind from the cell and draws
-            // the detail procedurally, and a constant UV per kind lets corners weld.
-            const glm::vec4& cell = (i < geometry.surface.size() && geometry.surface[i]) ? top_cell : wall_cell;
-            placed.uv = glm::vec2(cell.x + 0.5f * cell.z, cell.y + 0.5f * cell.w);
+            // One code per stamp: corners weld, and terrain_styled.frag does the rest.
+            placed.uv = glm::vec2(blend_code, 0.0f);
             out_v.push_back(placed);
         }
         for (std::uint32_t index : geometry.indices) out_i.push_back(base + index);
@@ -490,10 +502,9 @@ private:
     }
 
     /**
-     * Orients a canonical triangle soup eight ways, classing each triangle as up-facing (top
-     * kind) or wall from its oriented geometric normal. Mirrored orientations reverse the
-     * winding. UVs and tangents are not baked: append_styled() writes the kind's cell centre and
-     * a normal-derived tangent, because terrain_styled.frag needs nothing else.
+     * Orients a canonical triangle soup eight ways. Mirrored orientations reverse the winding.
+     * UVs and tangents are not baked: append_styled() writes the surface's blend code and a
+     * normal-derived tangent, because terrain_styled.frag needs nothing else.
      */
     static void bake_oriented_(const std::vector<Vertex>& soup, Oriented& out) {
         for (std::uint8_t o = 0; o < k_tile_orientation_count; ++o) {
@@ -515,12 +526,8 @@ private:
                 const glm::vec3 cross = glm::cross(v[1].position - v[0].position, v[2].position - v[0].position);
                 const float area = glm::length(cross);
                 if (area < 1e-9f) continue;
-                const bool up = cross.z / area > 0.5f;
                 const std::uint32_t base = static_cast<std::uint32_t>(g.vertices.size());
-                for (const Vertex& vert : v) {
-                    g.vertices.push_back(vert);
-                    g.surface.push_back(up ? 1u : 0u);
-                }
+                for (const Vertex& vert : v) g.vertices.push_back(vert);
                 g.indices.push_back(base);
                 g.indices.push_back(base + 1);
                 g.indices.push_back(base + 2);
@@ -678,6 +685,7 @@ private:
         full_top_ = quads[0];
         const std::vector<Vertex> foot = {vertex({0.5f, 0.5f, 0}), vertex({1, 1, 0}), vertex({0.5f, 1, 0})};
         bake_oriented_(foot, foot_);
+
     }
 
     std::vector<StyleSet>                     styles_;

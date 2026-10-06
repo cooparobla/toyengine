@@ -666,6 +666,12 @@ private:
         ctx.menu_separator();
         if (engine) {
             // Using it is fine; changing it is toyengine's business. A copy is the project's own.
+            if (t == AssetType::Object && is_tile_set_(rel)) {
+                if (ctx.menu_item("Duplicate as New Tile Set", "", nullptr, true, I::Duplicate)) duplicate_tile_set(rel);
+                ctx.tooltip("Duplicate as New Tile Set\nCopies this terrain tile style into the project under a new "
+                            "name, with its own copy of every piece mesh: open it, Tab into a piece to reshape it, "
+                            "and point a Terrain's styles: at it.");
+            }
             if (ctx.menu_item("Copy to Project", "", nullptr, true, I::Duplicate)) copy_engine_asset_to_project(t, rel);
             ctx.tooltip("Copy to Project\nCopies it into this project's assets/" + std::string(asset_type_info_(t).dir) +
                         "/ under the same name. The copy is editable and replaces toyengine's everywhere it is used.");
@@ -761,10 +767,89 @@ private:
             dst = dir / (stem + "_copy" + src.extension().string());
             for (int i = 2; fs::exists(dst); ++i) dst = dir / (stem + "_copy" + std::to_string(i) + src.extension().string());
             fs::copy_file(src, dst, ec);
+            if (!ec && t == AssetType::Object) duplicate_tile_set_pieces_(dst);
         }
         project_.refresh();
         if (ec) log_error("Duplicate failed: " + ec.message());
         else log_info("Duplicated to " + project_.relative(dst));
+    }
+
+public:
+    /**
+     * @brief Copies a tile set -- the project's or a built-in toyengine one -- into the project
+     *        as a new, independent look: objects/<name>_copy.yaml plus its own copy of every
+     *        piece mesh (duplicate_tile_set_pieces_()).
+     * @return The copy's project-relative path, or "" if it could not be made.
+     */
+    std::string duplicate_tile_set(const std::string& rel) {
+        const fs::path src = project_.is_engine_asset(rel)
+            ? coopa::yaml::resolve_variant(Project::engine_assets() / rel)
+            : project_.absolute(rel);
+        const std::string n = unique_asset_name_("objects", src.stem().string() + "_copy");
+        const fs::path dst = project_.assets() / "objects" / (n + ".yaml");
+        std::error_code ec;
+        fs::create_directories(dst.parent_path(), ec);
+        fs::copy_file(src, dst, ec);
+        if (ec) { log_error("Duplicate tile set failed: " + ec.message()); return ""; }
+        duplicate_tile_set_pieces_(dst);
+        project_.refresh();
+        log_info("Duplicated tile set to " + project_.relative(dst));
+        return project_.relative(dst);
+    }
+
+private:
+    /** @brief True when the object asset `rel` is a tile set (`tile_set: true` on its object). */
+    bool is_tile_set_(const std::string& rel) const {
+        const fs::path path = project_.is_engine_asset(rel)
+            ? coopa::yaml::resolve_variant(Project::engine_assets() / rel)
+            : project_.absolute(rel);
+        try {
+            const Node doc = coopa::yaml::load_document(path);
+            return doc.contains("object") && doc.at("object").contains("tile_set") &&
+                   doc.at("object").at("tile_set").is_boolean() && doc.at("object").at("tile_set").get_value<bool>();
+        } catch (...) {
+            return false;
+        }
+    }
+
+    /**
+     * @brief If the object asset at `copy` is a TILE SET (`tile_set: true`, see
+     *        assets/objects/tileset_*.yaml), gives the copy its own piece meshes: each child's
+     *        mesh is copied to meshes/<copy stem>_<child name>.yaml and the child pointed at
+     *        it. Without this a duplicate would share -- and editing it would change -- the
+     *        original's pieces, which is the opposite of what duplicating a look is for.
+     *        Pieces come from the project, or from toyengine's own assets for a built-in set.
+     */
+    void duplicate_tile_set_pieces_(const fs::path& copy) {
+        Node doc;
+        try { doc = coopa::yaml::load_document(copy); } catch (...) { return; }
+        if (!doc.contains("object")) return;
+        Node& obj = doc["object"];
+        if (!obj.contains("tile_set") || !obj.at("tile_set").is_boolean() || !obj.at("tile_set").get_value<bool>()) return;
+        const std::string stem = copy.stem().string();
+        obj["name"] = Node(stem);
+        if (obj.contains("children") && obj.at("children").is_sequence()) {
+            for (auto& child : obj["children"].as_seq()) {
+                if (!child.contains("name") || !child.contains("components")) continue;
+                const std::string piece = child.at("name").get_value<std::string>();
+                for (auto& comp : child["components"].as_seq()) {
+                    if (component_type(comp) != "MeshRenderer" || !comp.contains("mesh_path")) continue;
+                    const std::string from_ref = comp.at("mesh_path").get_value<std::string>();
+                    fs::path from = coopa::yaml::resolve_variant(project_.assets() / "meshes" / (from_ref + ".yaml"));
+                    if (!fs::exists(from)) from = coopa::yaml::resolve_variant(Project::engine_assets() / "meshes" / (from_ref + ".yaml"));
+                    const std::string to_ref = stem + "_" + piece;
+                    const fs::path to = project_.assets() / "meshes" / (to_ref + ".yaml");
+                    std::error_code ec;
+                    fs::create_directories(to.parent_path(), ec);
+                    if (!fs::exists(from) || !fs::copy_file(from, to, fs::copy_options::skip_existing, ec)) {
+                        if (!fs::exists(to)) { log_error("Tile set piece " + from_ref + " could not be copied"); continue; }
+                    }
+                    comp["mesh_path"] = Node(to_ref);
+                }
+            }
+        }
+        try { coopa::yaml::save_document(copy, doc); }
+        catch (const std::exception& e) { log_error(std::string("Duplicate tile set failed: ") + e.what()); }
     }
 
     /** @brief Renames an asset and every reference to it; reloads open documents that changed. */

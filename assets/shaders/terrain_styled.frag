@@ -3,10 +3,22 @@
 // `terrain_styled` surface shader: the G-buffer fragment stage for styled terrain chunks
 // (toyengine/world/terrain_chunk.h's mesh_chunk_styled, toyengine/world/README.md).
 //
-// The surface kind rides in the UV: the styled mesher maps every triangle into its kind's atlas
-// cell (TileMeshLibrary::append_styled), so the cell index is recoverable from the UV alone. The
-// atlas supplies each kind's COLOUR and ROUGHNESS, sampled once at the cell centre; the detail
-// is procedural, in world space:
+// Which surface kind a pixel shows is decided HERE, per pixel, not per triangle. Every vertex
+// carries a packed blend code in uv.x (toy::world::encode_surface_blend(), tile_topology.h): the
+// kinds the surface may show and how to choose between them. Boundaries stay straight where the
+// mesh puts them; what this rounds off are their CORNERS, so two kinds meet in smooth lines
+// rather than the tile grid's right angles:
+//
+//   * Top    -- a quadrant of a tile top knows its level neighbours' kinds. Where both of its
+//               edge neighbours differ from it, the tile has a convex corner there: pixels
+//               outside a quarter circle take the neighbours' kind. The other kind's inner
+//               corner is the same curve seen from the other side, so it rounds too.
+//   * Lip    -- a cliff's rounded top edge shows turf where the surface faces up past a
+//               threshold, so the grass line follows the round-over's own curve.
+//   * Flat   -- one kind.
+//
+// The atlas supplies each kind's COLOUR and ROUGHNESS, sampled once at its cell centre; the
+// detail is procedural, in world space:
 //
 //   * Value noise at a few frequencies, evaluated on the world position -- so it runs seamlessly
 //     across quadrants, wall halves, rounded lips and chunk borders, which projected UVs cannot,
@@ -21,7 +33,8 @@
 // Per-kind character (blotchiness, grain, specks, strata, bump) is the table below, indexed by
 // toy::world::TileKind -- the atlas's own order, appended, never reordered.
 //
-// shader_params (filled in by TerrainSystem): x = atlas cell columns, y = atlas cell rows.
+// shader_params (filled in by TerrainSystem): x = atlas cell columns, y = atlas cell rows,
+// z = height_step, w = tile_size (world units).
 
 #define GFX_SURFACE_FRAGMENT
 vec4 styled_sample(sampler2D tex, vec2 uv);
@@ -67,10 +80,21 @@ const float k_freq_mid   = 1.7;
 const float k_freq_fine  = 6.5;
 const float k_freq_speck = 5.0;
 
-/// The colour/roughness of the kind whose atlas cell `uv` lies in: one tap at the cell centre.
+// Radius, in tiles, of the curve that replaces a kind boundary's corner. At most 0.5, the
+// quadrant's own size.
+const float k_corner_radius = 0.4;
+// Lip: turf where the surface normal's z exceeds this.
+const float k_lip_threshold = 0.55;
+
+int g_kind = -1;
+
+int styled_kind();
+
+/// The colour/roughness of this pixel's kind: one tap at the centre of its atlas cell.
 vec4 styled_sample(sampler2D tex, vec2 uv) {
     vec2 grid = max(gfx_params.xy, vec2(1.0));
-    vec2 cell = floor(clamp(uv, vec2(0.0), vec2(0.99999)) * grid);
+    int kind = styled_kind();
+    vec2 cell = vec2(float(kind % int(grid.x)), float(kind / int(grid.x)));
     return textureLod(tex, (cell + 0.5) / grid, 0.0);
 }
 
@@ -110,10 +134,47 @@ float octave_weight(float freq, float footprint) {
     return 1.0 - smoothstep(0.2, 0.5, freq * footprint);
 }
 
+/// The kind this pixel shows -- see the file doc. Decided once per pixel and cached: the
+/// backbone samples the atlas several times before calling the fragment hook.
+int styled_kind() {
+    if (g_kind >= 0) return g_kind;
+    uint code = uint(max(frag_uv.x, 0.0) + 0.5);
+    int k0 = int(code & 15u), k1 = int((code >> 4) & 15u), k2 = int((code >> 8) & 15u), k3 = int((code >> 12) & 15u);
+    uint type = (code >> 16) & 3u;
+    int kind = k0;
+
+    // A checkerboard corner -- this kind again on the diagonal, the other on both edges -- would
+    // round all four tiles into a pinwheel. Only the higher-indexed kind rounds there, so the
+    // other connects diagonally through a smooth waist.
+    bool checker = k3 == k0 && k1 == k2;
+    if (type == 1u && k1 != k0 && k2 != k0 && (!checker || k0 > k1)) {
+        // Top quadrant at a convex corner of its own kind. `e` is the pixel's distance, in
+        // tiles, from the quadrant's two outer edges; the corner sits at e = (0, 0). The tile is
+        // found from a point a quarter tile back toward its centre, which is robust right on an
+        // edge.
+        float tile = max(gfx_params.w, 1e-3);
+        vec2  s = vec2(((code >> 18) & 1u) != 0u ? 1.0 : -1.0, ((code >> 19) & 1u) != 0u ? 1.0 : -1.0);
+        vec2  p = frag_world_pos.xy;
+        vec2  centre = (floor((p - s * 0.25 * tile) / tile) + 0.5) * tile;
+        vec2  e = 0.5 - s * (p - centre) / tile;
+        if (e.x < k_corner_radius && e.y < k_corner_radius &&
+            length(vec2(k_corner_radius) - e) > k_corner_radius) {
+            // Two different neighbours: the one that also holds the diagonal owns the corner, so
+            // two rounded tiles bend into the same third kind (a smooth T, no sliver between
+            // them); with no such neighbour, they split it along its diagonal.
+            if (k1 == k2 || k3 == k1)  kind = k1;
+            else if (k3 == k2)         kind = k2;
+            else                       kind = e.x < e.y ? k1 : k2;
+        }
+    } else if (type == 2u) {
+        kind = normalize(frag_world_normal).z > k_lip_threshold ? k0 : k1;
+    }
+    g_kind = clamp(kind, 0, k_kind_count - 1);
+    return g_kind;
+}
+
 void gfx_surface_fragment(inout GfxSurface s) {
-    vec2 grid = max(gfx_params.xy, vec2(1.0));
-    vec2 cell = floor(clamp(s.uv, vec2(0.0), vec2(0.99999)) * grid);
-    int kind = clamp(int(cell.x + cell.y * grid.x), 0, k_kind_count - 1);
+    int kind = styled_kind();
     vec4 detail = k_detail[kind];
     vec4 extra  = k_extra[kind];
 

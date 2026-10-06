@@ -17,6 +17,7 @@
 #define TOYENGINE_SCENE_REGISTER_H
 
 #include <cctype>
+#include <iostream>
 #include <stdexcept>
 
 #include <coopa/scene/scene_loader.h>
@@ -32,6 +33,7 @@
 #include <toyengine/scene/skinned_mesh_renderer.h>
 
 #include <coopa/asset/asset_manager.h>
+#include <coopa/yaml/document.h>
 #include <gfxcoopa/core/device.h>
 #include <gfxcoopa/engine/components/register.h>
 #include <gfxcoopa/memory/allocator.h>
@@ -337,22 +339,58 @@ inline void register_scene_components(coopa::gfx::core::Device& device,
             }
 
             // --- Styled tiles (toyengine/world/tile_topology.h) ---
-            // `styles: {round: tile_round, rock: tile_rock}` names each style and the prefix its
-            // pieces load from (meshes/<prefix>_<piece>.yaml, piece names from
-            // tile_piece_name()); `kind_styles: {stone: rock, default: round}` shapes each
-            // surface kind with one of them. Give `default` explicitly: without it, unlisted
+            // `styles: {round: objects/tileset_round}` names each style and its tile set -- or, the
+            // older form `{round: tile_round}`, a mesh prefix its pieces load from
+            // (meshes/<prefix>_<piece>.yaml, piece names from tile_piece_name()).
+            // `kind_styles: {stone: rock, default: round}` shapes each surface kind with one of
+            // them. Give `default` explicitly: without it, unlisted
             // kinds take the first style in the parsed mapping's order, which need not be the
             // order written.
+            //
+            // A style value under objects/ names a TILE-SET OBJECT instead (objects/tileset_round,
+            // written by tools/gen_tile_styles.py; duplicated in the editor for new looks): its
+            // children are the pieces, each found by its NAME (tile_piece_name()) and taken from
+            // that child's MeshRenderer mesh_path. A piece with no child falls back like a
+            // missing file (TileMeshLibrary::finish_styles()).
             if (node.contains("styles") && node.at("styles").is_mapping()) {
                 for (auto item : node.at("styles").map_items()) {
                     world::TerrainComponent::StyleEntry entry;
                     entry.name   = item.key().get_value<std::string>();
                     entry.prefix = item.value().get_value<std::string>();
                     const std::size_t index = terrain->styles.size();
-                    for (std::size_t p = 0; p < world::k_tile_piece_count; ++p) {
-                        const auto piece = static_cast<world::TilePiece>(p);
-                        terrain->set_style_piece_source(
-                            index, piece, load_side(entry.prefix + "_" + world::tile_piece_name(piece)));
+                    if (entry.prefix.rfind("objects/", 0) == 0) {
+                        std::string rel = entry.prefix;
+                        if (rel.size() < 5 || rel.compare(rel.size() - 5, 5, ".yaml") != 0) rel += ".yaml";
+                        try {
+                            const fkyaml::node doc =
+                                coopa::yaml::load_document(assets.source().resolve(rel, ctx.base_dir()));
+                            const fkyaml::node& obj = doc.at("object");
+                            if (obj.contains("children") && obj.at("children").is_sequence()) {
+                                for (const auto& child : obj.at("children")) {
+                                    if (!child.contains("name") || !child.contains("components")) continue;
+                                    const std::string name = child.at("name").get_value<std::string>();
+                                    for (std::size_t p = 0; p < world::k_tile_piece_count; ++p) {
+                                        const auto piece = static_cast<world::TilePiece>(p);
+                                        if (name != world::tile_piece_name(piece)) continue;
+                                        for (const auto& comp : child.at("components")) {
+                                            if (!comp.contains("type") || !comp.contains("mesh_path") ||
+                                                comp.at("type").get_value<std::string>() != "MeshRenderer") continue;
+                                            terrain->set_style_piece_source(
+                                                index, piece, load_side(comp.at("mesh_path").get_value<std::string>()));
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (const std::exception& e) {
+                            std::cerr << "[Terrain] tile set '" << entry.prefix << "' could not be read: "
+                                      << e.what() << "\n";
+                        }
+                    } else {
+                        for (std::size_t p = 0; p < world::k_tile_piece_count; ++p) {
+                            const auto piece = static_cast<world::TilePiece>(p);
+                            terrain->set_style_piece_source(
+                                index, piece, load_side(entry.prefix + "_" + world::tile_piece_name(piece)));
+                        }
                     }
                     terrain->styles.push_back(std::move(entry));
                 }

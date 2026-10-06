@@ -162,6 +162,16 @@ render:
                              # driven by shadow_quality -- the atlas is up to 2x that per axis.
   shadow_cascade_split_lambda: 0.75 # where the cascade boundaries fall: 1 = logarithmic (equal
                              # world-per-texel across cascades), 0 = uniform. Ignored at 1 cascade.
+  # shadow_fit: frustum      # "frustum" slices the camera frustum from the lens out (close-up
+                             # cameras); "focus" nests the cascades around the camera's focus point:
+                             # its focus_object/focus_distance if set, else whatever is under the
+                             # screen centre -- for cameras viewing a world from tens of metres out.
+                             # See assets/scenes/terrain_test.
+  # shadow_focus_radius: 12.0   # focus fit: finest cascade's radius around the focus point
+  # shadow_focus_distance: 0.0  # focus fit: fixed eye-to-focus distance; 0 = automatic
+  # shadow_pcf_max_texels: 12.0 # ceiling on the directional PCF radius, in shadow texels
+  # shadow_receiver_plane_bias: false # PCF taps follow the receiver's plane, so a wide penumbra
+                             # no longer needs a matching normal offset (which erodes shadows)
   shadow_softness: 0.15      # directional penumbra radius, WORLD units
   point_shadow_softness: 3.0 # point-light penumbra radius, CUBE-MAP texels
   spot_shadow_softness: 0.15 # spot penumbra radius, WORLD units (converted per pixel from light distance)

@@ -218,17 +218,51 @@ components as you would in a scene. An object asset can't contain an instance of
 - Or right-click it and choose **Place in Scene**, or choose **Object Asset > <name>** from the
   Hierarchy's right-click menu.
 
-### Change one instance
+### Select an instance and its parts
 
-Instances have a link icon in the Hierarchy. When you select one, the **Components** tab shows
-an **Instance of <name>** bar with an **Open** button that opens the object asset.
+Click an instance in the viewport to select the whole instance. Click it again to select the
+part under the mouse, such as one child object. Box select always picks whole instances.
 
-1. Select the instance and open the **Components** tab.
-2. Change a setting.
+In the Hierarchy, an instance has a link icon and lists the children it gets from the object
+asset. Those rows are dimmed until you change something on them. Select one to edit it like
+any other object. Its name and place in the hierarchy come from the object asset, so you
+can't rename, move, copy or delete it in the scene.
 
-Only that instance changes, and the component's header reads **(override)**. To go back to the
-object asset's value, right-click the header and choose **Revert Override**. Child objects that
-come from the object asset are dimmed in the Hierarchy; open the object asset to change them.
+Right-click an instance, or any part of it, in the viewport or the Hierarchy for these
+commands. The **Object > Instance** menu has them too.
+
+| Command | What it does |
+| --- | --- |
+| **Open Object Asset** | Opens the object asset itself |
+| **Select Instance Root** | Selects the whole instance from one of its parts |
+| **Revert Overrides** | Puts back the object asset's values, here and on the parts below |
+| **Apply Overrides to Asset** | Writes your changes into the object asset, so every instance gets them |
+
+### Change one instance (overrides)
+
+Select an instance, or one of its parts, and change a setting in **Components**, or move it
+with the gizmo. Only this instance changes, and the object asset stays as it is. The change is
+an **override**:
+
+- The component's header reads **(override)**, or **(added)** for a component the object asset
+  doesn't have.
+- A bar beside a setting's name marks each value you changed.
+- An accent bar in the Hierarchy marks objects that have overrides.
+
+The scene saves only the values you changed. Every other value still comes from the object
+asset, so later changes to the object asset still reach this instance.
+
+To undo an override:
+
+- Right-click the marked setting and choose **Revert to Asset Value**.
+- Right-click the component's header and choose **Revert Override**.
+- Right-click the object and choose **Revert Overrides** for everything at once.
+
+To make an override part of the object asset, choose **Apply to Object Asset** from the same
+menus. The value moves into the object asset and every instance gets it.
+
+If you rename a child inside an object asset and save it, scenes that override that child are
+updated to the new name.
 
 ## Test the scene with Play
 
@@ -269,6 +303,6 @@ In Object Mode, mesh changes you made in Edit Mode can still be undone after you
 
 ---
 
-Sources: `editor/app/ui/properties.inl`, `editor/app/ui/outliner.inl`, `editor/app/ui/assets.inl`, `editor/app/ui/topbar.inl`, `editor/app/ui/viewport_chrome.inl`, `editor/schema/component_schema.h`, `editor/schema/inspector.h`, `editor/core/scene_document.h`, `editor/core/undo.h`, `editor/app/editor_app.h`
+Sources: `editor/app/ui/properties.inl`, `editor/app/ui/outliner.inl`, `editor/app/ui/assets.inl`, `editor/app/ui/instances.inl`, `editor/app/ui/topbar.inl`, `editor/app/ui/viewport_chrome.inl`, `editor/schema/component_schema.h`, `editor/schema/inspector.h`, `editor/core/scene_document.h`, `editor/core/undo.h`, `editor/app/editor_app.h`
 
 Previous: [Interface](interface.md) | Next: [Viewport](viewport.md)

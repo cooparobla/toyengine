@@ -52,7 +52,7 @@
         for (const auto& [id, live] : sync_.live_objects()) {
             const int ci = doc_.find_component(id, "MeshRenderer");
             if (ci < 0 || !live) continue;
-            const std::string key = object_mesh_key_(*doc_.find(id));   // a skinned mesh's too
+            const std::string key = object_mesh_key_(effective_(*doc_.find(id)));   // a skinned mesh's too
             const fs::path p = coopa::yaml::resolve_variant(engine_.assets().source().resolve("meshes/" + key + ".yaml", dir.string()));
             if (p != mesh_.path) continue;
             if (auto* mr = live->get_component<coopa::gfx::engine::components::MeshRenderer>()) mr->set_mesh(handle);

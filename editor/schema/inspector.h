@@ -32,6 +32,9 @@ struct InspectorEnv {
     std::function<std::vector<std::string>(const std::string& dir, const std::string& ext)> list_assets;
     /// Names a ChildRef field may pick (the edited object's descendants, then other objects).
     std::function<std::vector<std::string>()> object_names;
+    /// Called after each field is drawn, with its key and its label's box: the Components tab
+    /// marks a prefab instance's overridden fields there and gives them a right-click menu.
+    std::function<void(imm::Context&, const std::string& key, const imm::Box& label)> after_field;
 };
 
 struct EditResult {
@@ -438,6 +441,7 @@ inline EditResult draw_fields(imm::Context& ctx, const std::vector<FieldDesc>& f
         ctx.push_id(f.key);
         total.absorb(draw_field(ctx, f, block, env));
         ctx.pop_id();
+        if (env.after_field && f.kind != FieldKind::Padding) env.after_field(ctx, f.key, ctx.last_label_box());
     }
     if (show_unknown && block.is_mapping()) {
         for (const std::string& k : keys_of(block)) {
@@ -445,6 +449,7 @@ inline EditResult draw_fields(imm::Context& ctx, const std::vector<FieldDesc>& f
             ctx.push_id(k);
             total.absorb(draw_generic(ctx, k, block));
             ctx.pop_id();
+            if (env.after_field) env.after_field(ctx, k, ctx.last_label_box());
         }
     }
     return total;
@@ -629,7 +634,11 @@ inline EditResult draw_component(imm::Context& ctx, Node& comp, const InspectorE
     if (schema) {
         r.absorb(draw_fields(ctx, schema->fields, comp, env, true));
         for (const auto& f : schema->fields) {
-            if (f.kind == FieldKind::Material) r.absorb(draw_material_field(ctx, comp, env, open_material));
+            if (f.kind != FieldKind::Material) continue;
+            const float y = ctx.cursor().y;
+            r.absorb(draw_material_field(ctx, comp, env, open_material));
+            // The whole material block is one override value: its first row stands for it.
+            if (env.after_field) env.after_field(ctx, f.key, imm::Box{ctx.cursor().x, y, 120.0f, ctx.style.row_height});
         }
     } else {
         r.absorb(draw_fields(ctx, {}, comp, env, true));

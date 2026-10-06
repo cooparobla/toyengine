@@ -2851,6 +2851,242 @@ void test_editor_pick_nearest() {
     expect(got == sun, "a marker in front of the surface wins a dead-on click (got " + name_of(got) + ")");
 }
 
+/** @brief Object Mode's Shade Flat / Shade Smooth: the mesh file, the render and undo agree. */
+void test_editor_object_shade_smooth_flat() {
+    setenv("FIXED_DT", "0.016666", 1);
+    setenv("NO_INPUT", "1", 1);
+    setenv("HOME", tmp_root().c_str(), 1);
+    const fs::path root = fresh_dir("shade_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, toy::core::Engine::kFillDebounceFrames + 4);
+    const glm::vec3 centre(0, 0, 2);
+    const ObjectId sphere = app.create_primitive("Sphere");
+    app.document().set_transform(sphere, centre, {0, 0, 0}, glm::vec3(1.5f), "Move");
+    app.sync().apply(engine, app.document(), {ChangeScope::Transform, sphere});
+    tick(engine, 6);
+    const fs::path mesh_file = project.assets() / "meshes/sphere.yaml";
+    auto smooth_faces = [&]() {
+        const EditMesh m = mesh_from_node(coopa::yaml::load_document(mesh_file));
+        size_t n = 0;
+        for (const auto& f : m.faces) n += f.smooth ? 1 : 0;
+        return std::pair<size_t, size_t>{n, m.faces.size()};
+    };
+    // Facet edges: shading steps between neighbouring pixels inside the sphere's disc (the
+    // middle of it, clear of the silhouette). A whole-image diff would not do: exposure and
+    // the shadow fit drift between captures of the same scene by thousands of pixels.
+    auto facet_edges = [&]() {
+        app.document().clear_selection();   // the selection wireframe would cover the shading
+        tick(engine, 30);
+        glm::vec2 c, top;
+        if (!engine.world_to_window(centre, c) || !engine.world_to_window(centre + glm::vec3(0, 0, 0.75f), top)) return size_t(0);
+        const auto d = engine.display_rect();
+        const coopa::gfx::util::ImageData img = engine.capture_image(true);
+        const float sx = float(img.width) / float(d.w), sy = float(img.height) / float(d.h);
+        const int cx = int((c.x - d.x) * sx), cy = int((c.y - d.y) * sy);
+        const int r = int(glm::distance(c, top) * sy * 0.6f);
+        auto lum = [&](int x, int y) {
+            const size_t i = (size_t(y) * img.width + size_t(x)) * img.channels;
+            return int(img.pixels[i]) + int(img.pixels[i + 1]) + int(img.pixels[i + 2]);
+        };
+        size_t n = 0;
+        for (int y = std::max(0, cy - r); y < std::min(int(img.height) - 1, cy + r); ++y)
+            for (int x = std::max(0, cx - r); x < std::min(int(img.width) - 1, cx + r); ++x)
+                if (std::abs(lum(x + 1, y) - lum(x, y)) >= 24 || std::abs(lum(x, y + 1) - lum(x, y)) >= 24) ++n;
+        return n;
+    };
+    const auto [s0, total] = smooth_faces();
+    expect(total > 0 && s0 == total, "a new UV sphere is smooth-shaded");
+    const size_t smooth_edges = facet_edges();
+
+    app.document().select(sphere);
+    app.shade_selected(false);
+    expect(smooth_faces().first == 0, "Shade Flat marks every face of the mesh flat, in its file");
+    const size_t flat_edges = facet_edges();
+    expect(flat_edges > smooth_edges * 3 / 2 + 50, "the render shows the facets (" + std::to_string(smooth_edges) +
+                                                   " -> " + std::to_string(flat_edges) + " facet edges)");
+
+    app.undo();
+    expect(smooth_faces().first == total, "Ctrl+Z in Object Mode makes it smooth again");
+    const size_t undone_edges = facet_edges();
+    expect(undone_edges < (smooth_edges + flat_edges) / 2, "and the render is smooth again (" +
+                                                         std::to_string(undone_edges) + " facet edges)");
+
+    app.document().select(sphere);
+    app.shade_selected(false);
+    app.shade_selected(true);
+    expect(smooth_faces().first == total, "Shade Smooth marks every face smooth");
+    expect(facet_edges() < (smooth_edges + flat_edges) / 2, "and renders smooth");
+}
+
+/**
+ * @brief Overrides on an instance's inherited parts: they get nodes of their own, a click picks
+ *        the instance then the part, edits save as the smallest override (never touching the
+ *        asset), Revert / Apply to Object Asset, and renaming the part in the asset follows.
+ */
+void test_editor_instance_overrides() {
+    setenv("FIXED_DT", "0.016666", 1);
+    setenv("NO_INPUT", "1", 1);
+    setenv("HOME", tmp_root().c_str(), 1);
+    const fs::path root = fresh_dir("instance_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, toy::core::Engine::kFillDebounceFrames + 4);
+    auto& doc = app.document();
+    auto name_of = [&](ObjectId id) { return id && doc.find(id) ? get_string(*doc.find(id), "name") : std::string("nothing"); };
+
+    // An object asset whose mesh sits on a child: an empty with a raised sphere under it.
+    const ObjectId lamp = app.create_empty();
+    tick(engine, 2);
+    const ObjectId shade = app.create_primitive("Sphere", lamp);
+    tick(engine, 2);
+    const std::string part_name = name_of(shade);
+    doc.set_transform(shade, {0, 0, 1.5f}, {0, 0, 0}, glm::vec3(1), "Move");
+    doc.select(lamp);
+    expect(app.create_object_asset_from_selection(), "the empty and its sphere become an object asset");
+    tick(engine, 4);
+    expect(doc.is_instance(lamp), "...and an instance takes their place");
+    const std::string ref = get_string(*doc.find(lamp), "prefab");
+    const fs::path asset_file = project.assets() / (ref + ".yaml");
+    const std::string asset_before = coopa::yaml::emit(coopa::yaml::load_document(asset_file));
+
+    auto part_of = [&](ObjectId inst, const std::string& n) {
+        const Node* o = doc.find(inst);
+        if (o && o->contains("children")) for (const auto& c : o->at("children").as_seq()) if (get_string(c, "name") == n) return SceneDocument::id_of(c);
+        return ObjectId(0);
+    };
+    const ObjectId part = part_of(lamp, part_name);
+    expect(part != 0 && doc.is_inherited(part), "the sphere the instance inherits has a node of its own");
+    expect(app.sync().live(part) != nullptr, "...mapped to its live object");
+    auto saved_instance = [&]() {
+        app.save_scene();
+        const Node file = coopa::yaml::load_document(doc.path());
+        for (const auto& o : file.at("scene").at("root_objects").as_seq()) {
+            if (get_string(o, "name") == name_of(lamp)) return Node(o);
+        }
+        return Node::mapping();
+    };
+    expect(!saved_instance().contains("children"), "an inherited part with no overrides is not written to the scene");
+
+    // Picking: the part's mesh is hit; the first click selects the instance, the next the part.
+    auto* live_part = app.sync().live(part);
+    glm::vec2 px;
+    const float s = std::max(1.0f, engine.display_scale());
+    if (live_part && engine.world_to_window(glm::vec3(live_part->get_transform()->transform().get_world_matrix()[3]), px)) {
+        const ObjectId hit = app.pick_object(px / s);
+        expect(hit == part, "clicking the instance's sphere hits it (got " + name_of(hit) + ")");
+        doc.clear_selection();
+        expect(app.click_target(hit) == lamp, "the first click selects the whole instance");
+        doc.select(lamp);
+        expect(app.click_target(hit) == part, "a click on the selected instance selects the part");
+    } else {
+        expect(false, "the instance's sphere is on screen");
+    }
+
+    // A field override: only that key is saved, on the part, and the asset is untouched.
+    Node mr = app.shown_component(part, "MeshRenderer");
+    expect(mr.is_mapping() && mr.contains("mesh_path"), "the part shows the asset's MeshRenderer");
+    mr["lod_bias"] = make_float(3.0f);
+    ObjectId cube = 0;
+    for (ObjectId id : doc.all_ids()) if (name_of(id) == "cube") cube = id;
+    const auto* cube_live = app.sync().live(cube);
+    app.edit_component(part, mr);
+    tick(engine, 3);
+    expect(app.has_overrides(part), "the part now has an override");
+    expect(cube_live && app.sync().live(cube) == cube_live, "an override rebuilds only its instance (the cube's live object is untouched)");
+    {
+        auto* lp = app.sync().live(part);
+        auto* lmr = lp ? lp->get_component<coopa::gfx::engine::components::MeshRenderer>() : nullptr;
+        expect(lmr && std::abs(lmr->lod_bias - 3.0f) < 1e-4f, "...and the rebuilt part has the overridden value live");
+    }
+    expect(std::abs(get_float(app.shown_component(part, "MeshRenderer"), "lod_bias") - 3.0f) < 1e-4f, "...and shows the overridden value");
+    {
+        const Node inst = saved_instance();
+        bool ok = false;
+        if (inst.contains("children") && inst.at("children").size() == 1) {
+            const Node& c = inst.at("children")[0];
+            ok = get_string(c, "name") == part_name && c.at("components").size() == 1 &&
+                 component_type(c.at("components")[0]) == "MeshRenderer" && c.at("components")[0].size() == 2;   // type + lod_bias
+        }
+        expect(ok, "the scene saves just {type: MeshRenderer, lod_bias} under the part's name:\n" + coopa::yaml::emit(inst));
+    }
+    expect(coopa::yaml::emit(coopa::yaml::load_document(asset_file)) == asset_before, "the object asset itself is unchanged");
+    doc.select(part);
+    app.set_prop_tab(PropTab::Components);
+    tick(engine, 3);
+    dump(engine, "instance_part_override");   // the overridden field's marker (EDITOR_DUMP_DIR)
+
+    // Moving the part: a Transform override holding only what changed.
+    glm::vec3 p, r, sc;
+    expect(app.object_transform(part, p, r, sc) && glm::distance(p, glm::vec3(0, 0, 1.5f)) < 1e-4f, "the part's transform shows the asset's pose");
+    app.set_object_transform(part, p + glm::vec3(1, 0, 0), r, sc);
+    tick(engine, 2);
+    {
+        const Node inst = saved_instance();
+        Node t;
+        for (const auto& c : inst.at("children")[0].at("components").as_seq()) if (component_type(c) == "Transform") t = c;
+        expect(t.is_mapping() && t.contains("position") && !t.contains("rotation") && !t.contains("scale"),
+               "moving the part overrides its position only");
+    }
+    expect(glm::distance(glm::vec3(app.sync().live(part)->get_transform()->transform().position()), glm::vec3(1, 0, 1.5f)) < 1e-4f,
+           "...and moves the live part");
+
+    // Revert one field.
+    app.revert_override_field(part, "MeshRenderer", "lod_bias");
+    tick(engine, 2);
+    expect(std::abs(get_float(app.shown_component(part, "MeshRenderer"), "lod_bias", 1.0f) - 1.0f) < 1e-4f, "Revert brings back the asset's value");
+
+    // Apply to Object Asset: the asset changes, this instance drops the override, others follow.
+    mr = app.shown_component(part, "MeshRenderer");
+    mr["lod_bias"] = make_float(2.0f);
+    app.edit_component(part, mr);
+    app.apply_component_to_asset(part, "MeshRenderer");
+    tick(engine, 3);
+    {
+        const Node a = coopa::yaml::load_document(asset_file).at("object");
+        float bias = 0.0f;
+        for (const auto& c : a.at("children")[0].at("components").as_seq()) if (component_type(c) == "MeshRenderer") bias = get_float(c, "lod_bias", 1.0f);
+        expect(std::abs(bias - 2.0f) < 1e-4f, "Apply to Object Asset writes the value into the asset");
+    }
+    const ObjectId second = app.place_object_asset(ref + ".yaml");
+    tick(engine, 3);
+    expect(std::abs(get_float(app.shown_component(part_of(second, part_name), "MeshRenderer"), "lod_bias", 1.0f) - 2.0f) < 1e-4f,
+           "another instance shows the applied value");
+    expect(std::abs(get_float(app.shown_component(part, "MeshRenderer"), "lod_bias", 1.0f) - 2.0f) < 1e-4f &&
+           !app.shown_component(part, "MeshRenderer").is_null(), "this instance shows it from the asset");
+
+    // Revert everything on the instance.
+    app.revert_all_overrides(lamp);
+    tick(engine, 2);
+    expect(!app.has_overrides(part) && app.object_transform(part, p, r, sc) && glm::distance(p, glm::vec3(0, 0, 1.5f)) < 1e-4f,
+           "Revert Instance Overrides restores the asset's part");
+    expect(!saved_instance().contains("children"), "...and the scene holds no overrides for it");
+
+    // Renaming the part in the asset carries the scene's override along.
+    mr = app.shown_component(part, "MeshRenderer");
+    mr["lod_bias"] = make_float(5.0f);
+    app.edit_component(part, mr);
+    tick(engine, 2);
+    app.save_scene();
+    const fs::path scene_file = doc.path();
+    expect(app.open_object_asset(asset_file), "the object asset opens");
+    tick(engine, 2);
+    ObjectId asset_part = 0;
+    for (ObjectId id : doc.all_ids()) if (name_of(id) == part_name) asset_part = id;
+    expect(asset_part != 0, "the part is in the object asset");
+    app.sync().apply(engine, doc, doc.set_object_key(asset_part, "name", Node(std::string("globe")), "Rename"));
+    app.save_scene();
+    expect(app.open_scene(scene_file), "the scene reopens");
+    tick(engine, 3);
+    const ObjectId globe = part_of(lamp, "globe");
+    expect(globe != 0 && part_of(lamp, part_name) == 0, "the instance's part is now called globe");
+    expect(std::abs(get_float(app.shown_component(globe, "MeshRenderer"), "lod_bias", 1.0f) - 5.0f) < 1e-4f,
+           "...and still carries its override (the scene was rewritten)");
+}
+
+
 ObjectId object_named(EditorApp& app, const std::string& name) {
     for (ObjectId id : app.document().all_ids()) if (get_string(*app.document().find(id), "name") == name) return id;
     return 0;
@@ -6681,6 +6917,8 @@ const TestCase kTests[] = {
     {"editor_viewport_fill",                 "editor_shell", test_editor_viewport_fill},
     {"editor_resize_no_black_frame",         "editor_shell", test_editor_resize_no_black_frame},
     {"editor_pick_nearest",                  "editor_shell", test_editor_pick_nearest},
+    {"editor_object_shade_smooth_flat",      "editor_shell", test_editor_object_shade_smooth_flat},
+    {"editor_instance_overrides",            "editor_shell", test_editor_instance_overrides},
     {"editor_quad_modelling",                "editor_shell", test_editor_quad_modelling},
     {"editor_isolation",                     "editor_shell", test_editor_isolation},
     {"editor_sculpt",                        "editor_shell", test_editor_sculpt},

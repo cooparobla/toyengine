@@ -121,12 +121,33 @@ private:
     bool patch_transform_(const SceneDocument& doc, ObjectId id) {
         coopa::scene::SceneObject* obj = live(id);
         if (!obj || !obj->get_transform()) return false;
-        glm::vec3 p, r, s;
-        if (!doc.get_transform(id, p, r, s)) return false;
+        const int ci = doc.find_component(id, "Transform");
+        if (ci < 0) return false;
+        const Node& tn = doc.find(id)->at("components").as_seq()[static_cast<size_t>(ci)];
         auto& t = obj->get_transform()->transform();
-        t.set_position(p);
-        t.set_rotation(r);
-        t.set_scale(s);
+        // An inherited child's Transform is an override: only the keys it holds differ from
+        // the object asset's, and the live object already has the asset's for the rest.
+        const bool partial = doc.is_inherited(id);
+        if (!partial || tn.contains("position")) t.set_position(get_vec3(tn, "position"));
+        if (!partial || tn.contains("rotation")) t.set_rotation(get_vec3(tn, "rotation"));
+        if (!partial || tn.contains("scale")) t.set_scale(get_vec3(tn, "scale", glm::vec3(1.0f)));
+        return true;
+    }
+
+    /**
+     * @brief True if `id`'s subtree can be rebuilt on its own: a plain object outside any
+     *        instance, or an outermost instance root -- SceneLoader::build_object() resolves an
+     *        instance from its node. An inherited child's node holds only overrides, and a node
+     *        under an instance is merged into it, so those take their whole instance.
+     */
+    static bool rebuildable_(const SceneDocument& doc, ObjectId id) {
+        if (doc.node().at("scene").contains("inherit_from")) return false;
+        const Node* self = doc.find(id);
+        if (!self || self->contains(kInheritedKey)) return false;
+        for (std::optional<ObjectId> cur = doc.parent_of(id); cur && *cur != 0; cur = doc.parent_of(*cur)) {
+            const Node* n = doc.find(*cur);
+            if (!n || SceneDocument::is_instance_node(*n) || n->contains(kInheritedKey)) return false;
+        }
         return true;
     }
 
@@ -150,7 +171,7 @@ private:
     bool rebuild_object_(core::Engine& engine, const SceneDocument& doc, ObjectId id) {
         coopa::scene::SceneObject* old = live(id);
         const Node* node = doc.find(id);
-        if (!old || !node || inherits_(doc, id)) return false;
+        if (!old || !node || !rebuildable_(doc, id)) return false;
         const bool auto_transform = get_bool(doc.node().at("scene"), "auto_transform", true);
         coopa::scene::SceneObject* parent = old->parent();
         coopa::scene::TransformComponent* parent_tc = parent ? parent->get_transform() : nullptr;

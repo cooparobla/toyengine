@@ -31,6 +31,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <optional>
 #include <set>
 #include <string>
@@ -391,6 +392,7 @@ public:
             if (new_parent == 0) new_parent = object_root();
         }
         if (id == new_parent || (new_parent != 0 && is_ancestor(id, new_parent))) return {};
+        if (is_inherited(id)) return {};   // a part of an object asset stays where the asset puts it
         return edit("Reparent", [&](Node&) -> Change {
             const Node* src = find(id);
             if (!src) return {};
@@ -412,6 +414,7 @@ public:
 
     /** @brief Sets an object-level key (name, active). */
     Change set_object_key(ObjectId id, const std::string& key, Node value, const std::string& label) {
+        if (key == "name" && is_inherited(id)) return {};   // overrides match inherited children by name
         return edit(label, [&](Node&) -> Change {
             Node* obj = find(id);
             if (!obj) return {};
@@ -536,6 +539,85 @@ public:
         }, merge_key);
     }
 
+    // ---------------------------------------------------------------------------------
+    // Prefab instances
+    // ---------------------------------------------------------------------------------
+
+    /** @brief True for an instance root: a node with `prefab:` (or `inherit_from:`). */
+    static bool is_instance_node(const Node& n) { return n.is_mapping() && (n.contains("prefab") || n.contains("inherit_from")); }
+    bool is_instance(ObjectId id) const { const Node* n = find(id); return n && is_instance_node(*n); }
+
+    /** @brief True for a node standing for a child an instance inherits from its object asset. */
+    bool is_inherited(ObjectId id) const { const Node* n = find(id); return n && n->contains(kInheritedKey); }
+
+    /**
+     * @brief The instance `id` belongs to: itself when it is an instance root, the nearest
+     *        instance above it when it is an inherited child, else 0.
+     */
+    ObjectId instance_root_of(ObjectId id) const {
+        for (std::optional<ObjectId> cur = id; cur && *cur != 0; cur = parent_of(*cur)) {
+            const Node* n = find(*cur);
+            if (!n) return 0;
+            if (is_instance_node(*n)) return *cur;
+            if (!n->contains(kInheritedKey)) return 0;
+        }
+        return 0;
+    }
+
+    /**
+     * @brief The outermost instance `id` is part of (an instance placed under another
+     *        instance's inherited child belongs to that one too), or 0.
+     */
+    ObjectId outermost_instance_of(ObjectId id) const {
+        ObjectId root = instance_root_of(id);
+        while (root) {
+            const auto parent = parent_of(root);
+            const ObjectId up = parent && *parent ? instance_root_of(*parent) : 0;
+            if (!up) break;
+            root = up;
+        }
+        return root;
+    }
+
+    /** @brief Child names from instance root `root` down to `id` (empty for the root itself). */
+    std::vector<std::string> path_in_instance(ObjectId root, ObjectId id) const {
+        std::vector<std::string> path;
+        for (std::optional<ObjectId> cur = id; cur && *cur != 0 && *cur != root; cur = parent_of(*cur)) {
+            const Node* n = find(*cur);
+            if (!n) return {};
+            path.insert(path.begin(), get_string(*n, "name"));
+        }
+        return path;
+    }
+
+    /**
+     * @brief Gives every child an instance inherits from its object asset a node of its own --
+     *        a placeholder holding just the name and an id, marked kInheritedKey -- so it can be
+     *        selected, shown in the Hierarchy and given overrides like any object. SceneInheritance
+     *        merges a child override by name, so a placeholder changes nothing; one that still
+     *        overrides nothing is dropped on save (strip_private_keys()).
+     *
+     * Inherited children come first, in the asset's order; children the instance adds follow.
+     * A former inherited child the asset no longer has is dropped if empty, else kept as an
+     * added child (which is what the runtime makes of it). Not an undoable edit.
+     *
+     * @param asset_of The object asset an instance node resolves to (its children included),
+     *                 or nullopt if it can't be read.
+     */
+    void sync_placeholders(const std::function<std::optional<Node>(const Node& instance)>& asset_of) {
+        std::function<void(Node&)> walk = [&](Node& list) {
+            if (!list.is_sequence()) return;
+            for (auto& o : list.as_seq()) {
+                if (!o.is_mapping()) continue;
+                if (is_instance_node(o)) {
+                    if (auto asset = asset_of(o)) reconcile_placeholders_(o, *asset);
+                }
+                if (o.contains("children")) walk(o["children"]);
+            }
+        };
+        walk(root_objects());
+    }
+
     /** @brief Convenience: reads an object's Transform (position, rotation degrees, scale). */
     bool get_transform(ObjectId id, glm::vec3& pos, glm::vec3& rot, glm::vec3& scl) const {
         const int ci = find_component(id, "Transform");
@@ -570,6 +652,54 @@ public:
     }
 
 private:
+    /** @brief sync_placeholders() for one object against what its asset says it holds. */
+    void reconcile_placeholders_(Node& obj, const Node& asset) {
+        std::vector<const Node*> asset_kids;
+        if (asset.contains("children") && asset.at("children").is_sequence()) {
+            std::map<std::string, int> count;
+            for (const auto& c : asset.at("children").as_seq()) ++count[get_string(c, "name")];
+            // Overrides match by name: an unnamed or twice-used name can't be told apart.
+            for (const auto& c : asset.at("children").as_seq()) {
+                const std::string n = get_string(c, "name");
+                if (!n.empty() && count[n] == 1) asset_kids.push_back(&c);
+            }
+        }
+        const bool had = obj.contains("children") && obj.at("children").is_sequence();
+        if (asset_kids.empty() && !had) return;
+        std::vector<Node> old = had ? obj.at("children").as_seq() : std::vector<Node>{};
+        std::vector<bool> used(old.size(), false);
+        Node out = Node::sequence();
+        for (const Node* ac : asset_kids) {
+            const std::string n = get_string(*ac, "name");
+            Node child;
+            for (size_t i = 0; i < old.size(); ++i) {
+                if (!used[i] && old[i].is_mapping() && get_string(old[i], "name") == n) { child = old[i]; used[i] = true; break; }
+            }
+            if (!child.is_mapping()) {
+                child = Node::mapping();
+                child["name"] = Node(n);
+                child[kEidKey] = Node(static_cast<int64_t>(next_eid_++));
+            }
+            child[kInheritedKey] = Node(true);
+            // Every document object has both lists (much of the editor reads them); empty
+            // ones merge as nothing and are dropped on save.
+            ensure_seq(child, "components");
+            ensure_seq(child, "children");
+            if (!is_instance_node(child)) reconcile_placeholders_(child, *ac);
+            out.as_seq().push_back(child);
+        }
+        for (size_t i = 0; i < old.size(); ++i) {
+            if (used[i]) continue;
+            Node child = old[i];
+            if (child.is_mapping() && child.contains(kInheritedKey)) {
+                if (is_empty_placeholder(child)) continue;   // the asset dropped (or renamed) it
+                erase_key(child, kInheritedKey);             // an orphaned override: an added child now
+            }
+            out.as_seq().push_back(child);
+        }
+        obj["children"] = out;
+    }
+
     Node* find_in_(Node& list, ObjectId id) {
         if (!list.is_sequence()) return nullptr;
         for (auto& o : list.as_seq()) {

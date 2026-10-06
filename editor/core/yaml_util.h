@@ -12,6 +12,7 @@
 #define TOYEDITOR_CORE_YAML_UTIL_H
 
 #include <fkYAML/node.hpp>
+#include <algorithm>
 #include <glm/glm.hpp>
 
 #include <string>
@@ -134,9 +135,39 @@ inline Node& ensure_map(Node& map, const std::string& key) {
     return map[key];
 }
 
-/** @brief Removes every key starting with "__" (editor-private stamps) recursively. */
+/**
+ * @brief Marks an object node that stands for a child a prefab instance inherits from its
+ *        object asset (see SceneDocument::sync_placeholders()). Such a node holds only that
+ *        child's overrides, matched to it by name.
+ */
+inline constexpr const char* kInheritedKey = "__inherited";
+
+/**
+ * @brief True for an inherited-child node that overrides nothing: just its name, no
+ *        components, and no children besides such placeholders.
+ */
+inline bool is_empty_placeholder(const Node& n) {
+    if (!n.is_mapping() || !n.contains(kInheritedKey)) return false;
+    for (const auto& kv : n.as_map()) {
+        const std::string k = kv.first.is_string() ? kv.first.get_value<std::string>() : std::string();
+        if (k == "name" || k.rfind("__", 0) == 0) continue;
+        if (k == "components" && kv.second.is_sequence() && kv.second.size() == 0) continue;
+        if (k == "children" && kv.second.is_sequence() &&
+            std::all_of(kv.second.as_seq().begin(), kv.second.as_seq().end(), [](const Node& c) { return is_empty_placeholder(c); })) continue;
+        return false;
+    }
+    return true;
+}
+
+/**
+ * @brief Removes every key starting with "__" (editor-private stamps) recursively -- and the
+ *        inherited-child placeholders that override nothing, so files only ever hold real
+ *        overrides.
+ */
 inline void strip_private_keys(Node& n) {
     if (n.is_mapping()) {
+        const bool placeholder = n.contains(kInheritedKey);
+        const bool instance = n.contains("prefab") || n.contains("inherit_from");
         std::vector<std::string> drop;
         for (auto& kv : n.as_map()) {
             if (kv.first.is_string() && kv.first.get_value<std::string>().rfind("__", 0) == 0) {
@@ -145,8 +176,16 @@ inline void strip_private_keys(Node& n) {
         }
         for (const auto& k : drop) erase_key(n, k);
         for (auto& kv : n.as_map()) strip_private_keys(kv.second);
+        // What an override node left empty is noise in the file.
+        if (placeholder || instance) {
+            for (const char* k : {"children", "components"}) {
+                if (n.contains(k) && n.at(k).is_sequence() && n.at(k).size() == 0 && (placeholder || std::string(k) == "children")) erase_key(n, k);
+            }
+        }
     } else if (n.is_sequence()) {
-        for (auto& e : n.as_seq()) strip_private_keys(e);
+        auto& seq = n.as_seq();
+        seq.erase(std::remove_if(seq.begin(), seq.end(), [](const Node& e) { return is_empty_placeholder(e); }), seq.end());
+        for (auto& e : seq) strip_private_keys(e);
     }
 }
 

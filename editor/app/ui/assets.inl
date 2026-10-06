@@ -278,6 +278,7 @@ public:
         active_path_ = path;
         sync_.fallback_path = path;
         rebuild_scene_();
+        remember_asset_names_();   // renamed parts are followed into other files on save
         if (ObjectId root = doc_.object_root()) doc_.select(root);
         deferred_.push_back([this] { frame_all(); });
         log_info("Opened object " + project_.relative(path));
@@ -471,21 +472,6 @@ public:
     }
 
 private:
-    /** @brief Resolved node of a prefab instance (base merged with overrides), or the node. */
-    Node resolved_object_(const Node& obj) const {
-        if (!obj.contains("prefab") && !obj.contains("inherit_from")) return obj;
-        Node clean = obj;
-        strip_private_keys(clean);
-        try {
-            const std::string anchor = (doc_.path().empty() ? sync_.fallback_path : doc_.path()).string();
-            return coopa::scene::SceneInheritance::resolve_object(clean, anchor, [](const std::string& p) {
-                return coopa::yaml::load_document(coopa::yaml::resolve_variant(p));
-            });
-        } catch (const std::exception&) {
-            return obj;
-        }
-    }
-
     // =================================================================================
     // The Asset panel (left)
     // =================================================================================

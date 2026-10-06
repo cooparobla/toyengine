@@ -13,7 +13,8 @@
         properties_hovered_ = ctx.is_hovered(area);
         const ObjectId id = doc_.primary();
         const Node* obj = id ? doc_.find(id) : nullptr;
-        const bool is_mesh = obj && doc_.find_component(id, "MeshRenderer") >= 0;
+        Node shown_mr;
+        const bool is_mesh = obj && shown_component_(id, "MeshRenderer", shown_mr);   // an instance's asset counts
 
         struct TabDef { PropTab tab; I icon; const char* tip; };
         std::vector<TabDef> tabs;
@@ -122,63 +123,6 @@
             case PropTab::Material:   draw_material_props_(ctx, id); break;
         }
         ctx.end_region();
-    }
-
-    // --- prefab instance overrides ------------------------------------------------------
-
-    /** @brief Index of the instance's own component entry matching `comp`'s type / id, or -1. */
-    static int instance_override_index_(const Node& obj, const Node& comp) {
-        if (!obj.contains("components")) return -1;
-        const std::string t = component_type(comp);
-        const std::string cid = comp.contains("id") ? comp.at("id").get_value<std::string>() : "";
-        const auto& seq = obj.at("components").as_seq();
-        for (size_t k = 0; k < seq.size(); ++k) {
-            if (component_type(seq[k]) != t) continue;
-            const std::string oid = seq[k].contains("id") ? seq[k].at("id").get_value<std::string>() : "";
-            if (oid == cid) return static_cast<int>(k);
-        }
-        return -1;
-    }
-
-    /**
-     * @brief The smallest override that turns the object asset's component into `edited`:
-     *        `type` (+ `id`) and only the keys whose values differ from the asset's.
-     */
-    Node minimal_override_(const Node& instance_obj, const Node& edited) const {
-        Node bare = Node::mapping();
-        bare["name"] = instance_obj.contains("name") ? instance_obj.at("name") : Node(std::string("x"));
-        if (instance_obj.contains("prefab")) bare["prefab"] = instance_obj.at("prefab");
-        if (instance_obj.contains("inherit_from")) bare["inherit_from"] = instance_obj.at("inherit_from");
-        const Node base_obj = resolved_object_(bare);
-        Node base_comp;
-        const int bi = instance_override_index_(base_obj, edited);
-        if (bi >= 0) base_comp = base_obj.at("components").as_seq()[static_cast<size_t>(bi)];
-        Node ov = Node::mapping();
-        ov["type"] = Node(component_type(edited));
-        if (edited.contains("id")) ov["id"] = edited.at("id");
-        for (const auto& [k, v] : edited.as_map()) {
-            const std::string key = k.get_value<std::string>();
-            if (key == "type" || key == "id" || key.rfind("__", 0) == 0) continue;
-            if (bi >= 0 && base_comp.contains(key) && base_comp.at(key) == v) continue;
-            ov[key] = v;
-        }
-        return ov;
-    }
-
-    /** @brief Writes (or, when it overrides nothing, removes) an instance's override entry. */
-    void write_instance_override_(ObjectId id, const Node& match, const Node& ov, const std::string& merge = {}) {
-        apply_(doc_.edit("Override " + component_type(match), [&](Node&) -> Change {
-            Node* o = doc_.find(id);
-            if (!o) return {};
-            if (!o->contains("components")) (*o)["components"] = Node::sequence();
-            auto& seq = (*o)["components"].as_seq();
-            const int k = instance_override_index_(*o, match);
-            const bool empty = ov.size() <= (ov.contains("id") ? 2u : 1u);
-            if (empty) { if (k >= 0) seq.erase(seq.begin() + k); }
-            else if (k >= 0) seq[static_cast<size_t>(k)] = ov;
-            else seq.push_back(ov);
-            return {ChangeScope::Structure, id};
-        }, merge));
     }
 
     /** @brief "main (scene)", "crate (object)", "cube (mesh)"... for headers and the top bar. */
@@ -533,10 +477,15 @@
         // Name row with the object's icon.
         {
             imm::Box row = ctx.next_box(ctx.style.row_height + 2);
-            auto [icon, tint] = object_icon_(*obj, ctx.style);
+            auto [icon, tint] = object_icon_(effective_(*obj), ctx.style);
             ctx.icon(icon, {row.x + 2, row.y + 3, row.h - 6, row.h - 6}, tint);
             std::string name = get_string(*obj, "name", "Object");
-            if (editable && ctx.input_text_box("objname", {row.x + row.h + 2, row.y, row.w - row.h - 2, row.h}, &name) && !name.empty()) {
+            const imm::Box nb{row.x + row.h + 2, row.y, row.w - row.h - 2, row.h};
+            if (doc_.is_inherited(id)) {
+                // Overrides find an inherited child by its name: rename it in the object asset.
+                ctx.text_in(nb, name, ctx.style.text_dim, 0.0f);
+                ctx.tooltip(name + "\nFrom the object asset -- rename it there");
+            } else if (editable && ctx.input_text_box("objname", nb, &name) && !name.empty()) {
                 apply_(doc_.set_object_key(id, "name", Node(name), "Rename"));
             }
         }
@@ -595,7 +544,7 @@
             const ObjectId parent = doc_.parent_of(id).value_or(0);
             int idx = 0;
             for (size_t i = 0; i < ids.size(); ++i) if (ids[i] == parent) idx = static_cast<int>(i);
-            if (ctx.combo("Parent", &idx, names) && editable) {
+            if (ctx.combo("Parent", &idx, names) && editable && !doc_.is_inherited(id)) {
                 const glm::mat4 w = world_of_(id);
                 const ObjectId np = ids[static_cast<size_t>(idx)];
                 if (doc_.reparent(id, np).scope != ChangeScope::None) set_world_transform_(id, w, np ? world_of_(np) : glm::mat4(1.0f), "Keep Transform");
@@ -624,23 +573,26 @@
         InspectorEnv env = inspector_env_();
         const Node* obj = doc_.find(id);
         if (!obj) return;
-        // A prefab instance shows its RESOLVED components (the object asset + this instance's
-        // overrides); edits are saved as minimal overrides on the instance.
-        const bool instance = obj->contains("prefab") || obj->contains("inherit_from");
-        Node resolved;
+        // Inside a prefab instance (its root or a child it inherits) the list is the RESOLVED
+        // components -- the object asset merged with this instance's overrides -- and every edit
+        // is saved as the smallest override on the instance (ui/instances.inl).
+        const ObjectId inst_root = doc_.instance_root_of(id);
+        const bool instance = inst_root != 0;
+        const Node resolved = instance ? effective_(*obj) : Node();
         if (instance) {
-            resolved = resolved_object_(*obj);
-            const std::string ref = get_string(*obj, "prefab", get_string(*obj, "inherit_from"));
+            const std::string item = instance_asset_item_(inst_root);
             imm::Box row = ctx.next_box(ctx.style.row_height + 4);
             ctx.fill_rounded(row, imm::with_alpha(ctx.style.accent, 0.18f));
             ctx.icon(I::Link, {row.x + 4, row.y + 4, row.h - 8, row.h - 8}, ctx.style.accent);
-            ctx.text_in({row.x + row.h + 2, row.y, row.w - row.h - 70, row.h}, "Instance of " + ref, ctx.style.text, 0.0f);
+            const std::string what = (inst_root == id ? "Instance of " : "Part of ") + strip_yaml_ext(item);
+            ctx.text_in({row.x + row.h + 2, row.y, row.w - row.h - 70, row.h}, what, ctx.style.text, 0.0f);
             const imm::Box ob{row.right() - 64, row.y + 2, 60, row.h - 4};
             bool hov = false, held = false;
-            if (ctx.invisible_button("open_prefab", ob, &hov, &held)) open_asset(AssetType::Object, ref + (fs::path(ref).has_extension() ? "" : ".yaml"));
+            if (ctx.invisible_button("open_prefab", ob, &hov, &held)) open_asset(AssetType::Object, item);
             ctx.fill_rounded(ob, hov ? ctx.style.button_hover : ctx.style.button);
             ctx.text_in(ob, "Open", ctx.style.text, 0.0f, true);
             ctx.tooltip("Open\nEdit the object asset itself (every instance follows)");
+            ctx.label_dim("Marked values are overrides (right-click: revert / apply)");
         }
         const Node& src = instance ? resolved : *obj;
         if (!src.contains("components")) return;
@@ -662,23 +614,33 @@
             ctx.push_id(static_cast<int64_t>(i));
             bool remove = false;
             const bool removable = editable && (!schema || schema->removable);
-            const bool overridden = instance && instance_override_index_(*obj, comp) >= 0;
-            const bool open = ctx.collapsing_header((type.empty() ? std::string("(untyped)") : type) + (overridden ? "  (override)" : ""), true,
+            const Node* own = instance ? own_override_(id, comp) : nullptr;
+            const bool added = instance && own && !base_component_(id, comp);   // not in the asset at all
+            const bool overridden = own != nullptr;
+            const bool open = ctx.collapsing_header((type.empty() ? std::string("(untyped)") : type) +
+                                                    (added ? "  (added)" : overridden ? "  (override)" : ""), true,
                                                     removable ? &remove : nullptr, icon_for_component_(type));
             ctx.tooltip(type + "\nRight-click for more");
             if (editable) ctx.open_context_popup_on_last("comp_ctx");
-            if (ctx.begin_popup("comp_ctx", 220)) {
+            if (ctx.begin_popup("comp_ctx", 240)) {
                 if (instance) {
-                    if (ctx.menu_item("Revert Override", "", nullptr, overridden, I::Restart)) {
-                        const int oi = instance_override_index_(*obj, comp);
-                        if (oi >= 0) apply_(doc_.remove_component(id, oi));
+                    if (ctx.menu_item(added ? "Remove Added Component" : "Revert Override", "", nullptr, overridden, I::Restart)) {
+                        Node empty = Node::mapping();
+                        empty["type"] = Node(type);
+                        if (comp.contains("id")) empty["id"] = comp.at("id");
+                        write_override_(id, comp, empty);
                     }
+                    if (ctx.menu_item("Apply to Object Asset", "", nullptr, overridden, I::Save)) apply_component_to_asset_(id, comp);
+                    ctx.tooltip("Apply to Object Asset\nWrite this component's overrides into the object asset (every instance follows)");
                 } else {
                     if (ctx.menu_item("Move Up", "", nullptr, i > 0, I::ArrowRight)) apply_(doc_.move_component(id, static_cast<int>(i), -1));
                     if (ctx.menu_item("Move Down", "", nullptr, i + 1 < count, I::ArrowDown)) apply_(doc_.move_component(id, static_cast<int>(i), +1));
                 }
                 if (ctx.menu_item("Reset", "", nullptr, schema != nullptr, I::Restart)) {
-                    apply_(doc_.set_component(id, static_cast<int>(i), default_component(type), "Reset " + type));
+                    Node fresh = default_component(type);
+                    if (comp.contains("id")) fresh["id"] = comp.at("id");
+                    if (instance) write_override_(id, comp, minimal_override_(id, fresh));
+                    else apply_(doc_.set_component(id, static_cast<int>(i), fresh, "Reset " + type));
                 }
                 if (ctx.menu_item("Copy as YAML", "", nullptr, true, I::Duplicate)) {
                     Node c = comp;
@@ -690,12 +652,13 @@
             }
             if (remove) {
                 if (instance) {
-                    // Removing an inherited component is an override too: `remove: true`.
+                    // Removing a component the asset has is an override too: `remove: true`.
+                    // One the instance added just goes.
                     Node ov = Node::mapping();
                     ov["type"] = Node(type);
                     if (comp.contains("id")) ov["id"] = comp.at("id");
-                    ov["remove"] = Node(true);
-                    write_instance_override_(id, comp, ov);
+                    if (!added) ov["remove"] = Node(true);
+                    write_override_(id, comp, ov);
                 } else {
                     apply_(doc_.remove_component(id, static_cast<int>(i)));
                 }
@@ -705,6 +668,21 @@
             if (open) {
                 ctx.indent(6);
                 const Node before = comp;
+                if (instance) {
+                    // Overridden fields: a bar beside the label, and a right-click menu.
+                    env.after_field = [&, own_copy = own ? *own : Node()](imm::Context& c, const std::string& key, const imm::Box& label) {
+                        if (!own_copy.is_mapping() || !own_copy.contains(key) || added) return;
+                        c.fill({label.x, label.y + 3, 2, label.h - 6}, c.style.accent);
+                        c.push_id("ov_" + key);
+                        if (editable) c.open_context_popup_in("field_ov", label);
+                        if (c.begin_popup("field_ov", 220)) {
+                            if (c.menu_item("Revert to Asset Value", "", nullptr, true, I::Restart)) revert_override_field_(id, before, key);
+                            if (c.menu_item("Apply to Object Asset", "", nullptr, true, I::Save)) apply_field_to_asset_(id, before, key);
+                            c.end_popup();
+                        }
+                        c.pop_id();
+                    };
+                }
                 EditResult r;
                 if (type == "MeshRenderer") {
                     // The material lives on its own tab, as in Blender.
@@ -715,10 +693,11 @@
                 } else {
                     r = draw_component(ctx, comp, env, [this](const std::string& rel) { open_asset(AssetType::Material, rel); });
                 }
+                env.after_field = nullptr;
                 ctx.unindent(6);
                 if (r.changed && editable && !(comp == before)) {
                     const std::string key = "c" + std::to_string(id) + ":" + std::to_string(i) + ":" + r.key;
-                    if (instance) write_instance_override_(id, before, minimal_override_(*obj, comp), r.active ? key : std::string());
+                    if (instance) write_override_(id, before, minimal_override_(id, comp), r.active ? key : std::string());
                     else apply_(doc_.set_component(id, static_cast<int>(i), comp, "Edit " + type + "." + r.key, r.active ? key : std::string()));
                 }
                 if (r.finished) doc_.end_merge();
@@ -734,6 +713,11 @@
             add_component_filter_.clear();
             ctx.open_popup(physics ? "add_phys_comp" : "add_comp", glm::vec2(ctx.last_rect().x, ctx.last_rect().bottom() + 2));
         }
+        // What the object already has: an instance's asset components count too.
+        auto has_type = [&](const std::string& t) {
+            for (const auto& c : src.at("components").as_seq()) if (component_type(c) == t) return true;
+            return false;
+        };
         for (int which = 0; which < 2; ++which) {
             if (!ctx.begin_popup(which == 0 ? "add_comp" : "add_phys_comp", std::max(220.0f, ctx.last_rect().w))) continue;
             const bool phys_only = which == 1;
@@ -741,7 +725,7 @@
             ctx.input_text_box("comp_search", sb, &add_component_filter_, "Search...");
             std::map<std::string, std::vector<std::string>> by_cat;
             for (const auto& [t, sc] : schemas()) {
-                if (t == "Transform" || (sc.unique && doc_.find_component(id, t) >= 0)) continue;
+                if (t == "Transform" || (sc.unique && has_type(t))) continue;
                 if (phys_only && sc.category != "Physics") continue;
                 if (active_type_ == AssetType::UI && sc.category.rfind("UI", 0) != 0) continue;   // UI elements take UI components
                 if (!add_component_filter_.empty()) {
@@ -765,9 +749,8 @@
 
     void draw_data_props_(imm::Context& ctx, ObjectId id) {
         using I = imm::Icon;
-        const int ci = doc_.find_component(id, "MeshRenderer");
-        if (ci < 0) return;
-        Node comp = doc_.find(id)->at("components").as_seq()[static_cast<size_t>(ci)];
+        Node comp;
+        if (!shown_component_(id, "MeshRenderer", comp)) return;   // resolved inside an instance
         InspectorEnv env = inspector_env_();
         if (ctx.collapsing_header("Mesh", true, nullptr, I::Mesh)) {
             const ComponentSchema* sc = find_schema("MeshRenderer");
@@ -775,7 +758,7 @@
             for (const auto& f : sc->fields) if (f.key == "mesh_path") fields.push_back(f);
             const Node before = comp;
             EditResult r = draw_fields(ctx, fields, comp, env, false);
-            if (r.changed && !(comp == before) && !playing()) apply_(doc_.set_component(id, ci, comp, "Change Mesh"));
+            if (r.changed && !(comp == before) && !playing()) edit_component_(id, comp, "Change Mesh");
             if (const CachedMesh* cm = mesh_for_object_(*doc_.find(id))) {
                 ctx.label_dim(std::to_string(cm->mesh.positions.size()) + " vertices   " + std::to_string(cm->edges.size()) + " edges   " +
                               std::to_string(cm->mesh.faces.size()) + " faces   " + std::to_string(cm->mesh.triangle_count()) + " triangles");
@@ -792,16 +775,15 @@
             for (const auto& f : sc->fields) if (f.key == "lod_bias" || f.key == "lods_enabled" || f.key == "affects_reflection_probes") fields.push_back(f);
             const Node before = comp;
             EditResult r = draw_fields(ctx, fields, comp, env, false);
-            if (r.changed && !(comp == before) && !playing()) apply_(doc_.set_component(id, ci, comp, "Edit Mesh Renderer", r.active ? "lod" : std::string()));
+            if (r.changed && !(comp == before) && !playing()) edit_component_(id, comp, "Edit Mesh Renderer", r.active ? "lod" : std::string());
             if (r.finished) doc_.end_merge();
         }
     }
 
     void draw_material_props_(imm::Context& ctx, ObjectId id) {
         using I = imm::Icon;
-        const int ci = doc_.find_component(id, "MeshRenderer");
-        if (ci < 0) return;
-        Node comp = doc_.find(id)->at("components").as_seq()[static_cast<size_t>(ci)];
+        Node comp;
+        if (!shown_component_(id, "MeshRenderer", comp)) return;   // resolved inside an instance
         // Slot row with a shaded-ball preview, Blender-style.
         {
             imm::Box row = ctx.next_box(44);
@@ -820,29 +802,30 @@
             open_asset(AssetType::Material, rel);
         });
         if (r.changed && !(comp == before) && !playing()) {
-            apply_(doc_.set_component(id, ci, comp, "Edit Material." + r.key, r.active ? "mat:" + r.key : std::string()));
+            edit_component_(id, comp, "Edit Material." + r.key, r.active ? "mat:" + r.key : std::string());
         }
         if (r.finished) doc_.end_merge();
         ctx.spacing(6);
         if (comp.contains("material") && comp.at("material").is_mapping() && !comp.at("material").contains("base") && !playing()) {
-            if (ctx.button("Save as Material Asset", -1, true, I::Save)) extract_material_(id, ci, comp);
+            if (ctx.button("Save as Material Asset", -1, true, I::Save)) extract_material_(id, comp);
             ctx.tooltip("Save as Material Asset\nWrites materials/<name>.yaml and references it from this object");
         }
-        draw_slot_materials_(ctx, id, ci);
+        draw_slot_materials_(ctx, id);
     }
 
     /**
      * @brief One material per mesh slot (submesh): the MeshRenderer's `materials:` map, keyed
      *        by the mesh's slot names. Slot 0 uses `material:` above.
      */
-    void draw_slot_materials_(imm::Context& ctx, ObjectId id, int ci) {
+    void draw_slot_materials_(imm::Context& ctx, ObjectId id) {
         using I = imm::Icon;
         const Node* node = doc_.find(id);
         if (!node) return;
         const CachedMesh* cm = mesh_for_object_(*node);
         if (!cm || cm->mesh.slots.size() <= 1) return;
         if (!ctx.collapsing_header("Slot Materials", true, nullptr, I::Material)) return;
-        Node comp = node->at("components").as_seq()[static_cast<size_t>(ci)];
+        Node comp;
+        if (!shown_component_(id, "MeshRenderer", comp)) return;
         const auto mats = material_choices_();
         std::vector<std::string> names = {"(same as " + cm->mesh.slots[0] + ")"};
         for (const auto& m : mats) names.push_back(fs::path(m).stem().string());
@@ -864,7 +847,7 @@
                 else m[slot] = Node(mats[static_cast<size_t>(pick - 1)].substr(0, mats[static_cast<size_t>(pick - 1)].size() - 5));
                 if (m.size() == 0) erase_key(comp, "materials");
                 else comp["materials"] = m;
-                apply_(doc_.set_component(id, ci, comp, "Slot Material " + slot));
+                edit_component_(id, comp, "Slot Material " + slot);
             }
             ctx.pop_id();
         }

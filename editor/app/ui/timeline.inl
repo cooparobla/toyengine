@@ -254,6 +254,8 @@
                 return true;
             }
         }
+        // An inherited child's document node holds only its overrides: show the merged pose.
+        if (doc_.is_inherited(id)) return instance_transform_(id, p, r, s);
         return doc_.get_transform(id, p, r, s);
     }
 
@@ -285,6 +287,7 @@
             }
             return;
         }
+        if (doc_.is_inherited(id)) { set_inherited_transform_(id, p, r, s, label, merge_key); return; }
         apply_(doc_.set_transform(id, p, r, s, label, merge_key));
     }
 

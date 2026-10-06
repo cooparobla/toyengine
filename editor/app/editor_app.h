@@ -314,6 +314,25 @@ public:
     void mirror_mesh_selection(int axis, bool global) { mirror_mesh_selection_(axis, global); }
     /** @brief H on these objects (editor-only hide). */
     void hide_objects(const std::vector<ObjectId>& ids) { hide_(ids); }
+    // Prefab instances (ui/instances.inl).
+    /** @brief What a viewport click on `hit` selects: the whole instance first, then its part. */
+    ObjectId click_target(ObjectId hit) const { return click_target_(hit); }
+    /** @brief `id`'s `type` component as the Components tab shows it (resolved in an instance). */
+    Node shown_component(ObjectId id, const std::string& type) const { Node c; shown_component_(id, type, c); return c; }
+    /** @brief A Components tab edit: saved in place, or in an instance as its smallest override. */
+    void edit_component(ObjectId id, const Node& edited) { edit_component_(id, edited, "Edit " + component_type(edited)); }
+    void revert_override_field(ObjectId id, const std::string& type, const std::string& key) {
+        Node m = Node::mapping(); m["type"] = Node(type); revert_override_field_(id, m, key);
+    }
+    void apply_component_to_asset(ObjectId id, const std::string& type) {
+        Node m = Node::mapping(); m["type"] = Node(type); apply_component_to_asset_(id, m);
+    }
+    void apply_all_to_asset(ObjectId id) { apply_all_to_asset_(id); }
+    void revert_all_overrides(ObjectId id) { revert_all_overrides_(id); }
+    bool has_overrides(ObjectId id) const { return has_overrides_(id); }
+    bool object_transform(ObjectId id, glm::vec3& p, glm::vec3& r, glm::vec3& s) const { return get_object_transform_(id, p, r, s); }
+    /** @brief Object Mode's Shade Smooth / Shade Flat on the selected objects' meshes. */
+    void shade_selected(bool smooth) { shade_selected_(smooth); }
     /** @brief Sculpt / Edit Mode: Catmull-Clark the whole edited mesh `levels` times (one undo step). */
     void subdivide_smooth(int levels) { if (edit_object_ || mesh_edit_view_()) run_catmull_clark_(levels); }
     bool quit_requested() const { return quit_; }
@@ -396,6 +415,8 @@ public:
         try {
             doc_.save(path);
             sync_.fallback_path = path;
+            // Instances elsewhere override this asset's parts by name: follow any renames.
+            if (doc_.is_object_asset() && active_type_ == AssetType::Object) follow_asset_renames_(path);
             project_.refresh();
             log_info("Saved " + project_.relative(path));
             return true;
@@ -455,14 +476,24 @@ public:
         return id;
     }
 
+    /** @brief The selection minus inherited children (they come from an object asset: not deleted, moved or copied here). */
+    std::vector<ObjectId> own_selection_() {
+        std::vector<ObjectId> out;
+        for (ObjectId id : doc_.selection()) if (!doc_.is_inherited(id)) out.push_back(id);
+        if (out.size() != doc_.selection().size()) log_warn("Parts of an object asset stay: open the asset to delete or copy them (or Revert their overrides)");
+        return out;
+    }
+
     void delete_selected() {
         if (doc_.selection().empty()) return;
-        apply_(doc_.delete_objects(doc_.selection()));
+        apply_(doc_.delete_objects(own_selection_()));
     }
 
     void duplicate_selected() {
         if (doc_.selection().empty()) return;
-        auto ids = doc_.duplicate_objects(doc_.selection());
+        const auto own = own_selection_();
+        if (own.empty()) return;
+        auto ids = doc_.duplicate_objects(own);
         doc_.clear_selection();
         for (ObjectId id : ids) doc_.select(id, true);
         queue_rebuild_();
@@ -556,6 +587,28 @@ public:
         try { switch_mesh_doc_(path); } catch (const std::exception& e) { log_error(e.what()); return false; }
         mesh_.scene_owned = true;
         return true;
+    }
+
+    /**
+     * @brief Object Mode's Shade Smooth / Shade Flat (Blender's): every face of each selected
+     *        object's mesh. A mesh several selected objects share is changed once. Each mesh's
+     *        change is a step in its own history, so Object Mode's Ctrl+Z undoes it.
+     */
+    void shade_selected_(bool smooth) {
+        if (playing() || asset_view_() || edit_object_) return;
+        std::set<fs::path> done;
+        for (ObjectId id : doc_.selection()) {
+            const Node* obj = doc_.find(id);
+            const std::string key = obj ? object_mesh_key_(effective_(*obj)) : std::string();
+            if (key.empty()) continue;
+            const fs::path path = resolve_mesh_key_(key);
+            if (!done.insert(path).second || !coopa::yaml::document_exists(path) || refuse_engine_asset_(path)) continue;
+            if (!activate_scene_mesh_(path)) continue;
+            mesh_.edit(smooth ? "Shade Smooth" : "Shade Flat", [smooth](EditMesh& m, MeshSelection&) {
+                set_smooth(m, MeshSelection{}, smooth);   // the whole mesh, whatever Edit Mode had selected
+            });
+            commit_scene_mesh_();
+        }
     }
 
     /** @brief After an Object Mode undo/redo of a mesh step: save it and show it on every user. */
@@ -1046,6 +1099,10 @@ private:
         // them; reset it so one file's theme never leaks into the next.
         coopa::ui::ThemeLibrary::instance().set_active(coopa::ui::UITheme::builtin_dark());
         apply_theme_preview_();   // an open theme's unsaved edits shadow its file (ui/theme_editor.inl)
+        // Instances' inherited children get their nodes first (ui/instances.inl): the ids the
+        // live objects map to. Asset files may have changed, so the resolved view is stale too.
+        sync_instance_placeholders_();
+        ++scene_gen_;
         sync_.rebuild(engine_, doc_);
         if (!sync_.last_error.empty()) { log_error("Scene: " + sync_.last_error); sync_.last_error.clear(); }
         add_object_view_lights_();
@@ -1069,8 +1126,13 @@ private:
     }
 
     /** @brief Applies a document change to the live scene (deferred to a safe point). */
-    void apply_(const Change& c) {
+    void apply_(Change c) {
         if (c.scope == ChangeScope::None) return;
+        // A change inside a prefab instance (an override) rebuilds that instance, not the scene:
+        // SceneSync rebuilds an outermost instance root from its node alone.
+        if (c.scope == ChangeScope::Object && c.object) {
+            if (const ObjectId root = doc_.outermost_instance_of(c.object)) c.object = root;
+        }
         if (c.scope == ChangeScope::Settings) {   // config overrides: re-apply, rebuild nothing
             if (coopa::scene::Scene* s = sync_.scene()) engine_.set_scene_settings(*s, doc_.scene_settings());
             if (play_scene_) engine_.set_scene_settings(*play_scene_, doc_.scene_settings());   // render: live
@@ -1083,7 +1145,12 @@ private:
             sync_.apply(engine_, doc_, c);
             return;
         }
-        deferred_.push_back([this, c] { if (!rebuild_queued_) sync_.apply(engine_, doc_, c); });
+        deferred_.push_back([this, c] {
+            if (rebuild_queued_) return;
+            sync_.apply(engine_, doc_, c);
+            apply_hidden_();               // the rebuilt objects start visible
+            scene_uploaded_revision_ = 0;  // ...and from their files: re-show an unsaved edited mesh
+        });
     }
 
     void after_structure_change_(ObjectId select) {
@@ -1561,7 +1628,7 @@ private:
     const CachedMesh* mesh_for_object_(const Node& obj) {
         if (!obj.contains("components")) return nullptr;
         {
-            const std::string key = object_mesh_key_(obj);   // MeshRenderer's, else a WaterBody's
+            const std::string key = object_mesh_key_(effective_(obj));   // MeshRenderer's, else a WaterBody's (an instance's: its asset's)
             if (key.empty()) return nullptr;
             const fs::path dir = (doc_.path().empty() ? sync_.fallback_path : doc_.path()).parent_path();
             const std::string resolved = engine_.assets().source().resolve("meshes/" + key + ".yaml", dir.string());
@@ -1625,13 +1692,14 @@ private:
 #include "ui/paint.inl"
 #include "ui/timeline.inl"
 #include "ui/assets.inl"
+#include "ui/instances.inl"
 #include "ui/ui_canvas.inl"
 #include "ui/theme_editor.inl"
 #include "ui/build.inl"
 
     // --- helpers shared by the panels ---
 
-    void extract_material_(ObjectId id, int index, const Node& comp) {
+    void extract_material_(ObjectId id, const Node& comp) {
         const std::string base = get_string(*doc_.find(id), "name", "material");
         std::string name = base;
         std::transform(name.begin(), name.end(), name.begin(), ::tolower);
@@ -1649,7 +1717,7 @@ private:
         }
         Node c = comp;
         c["material"] = Node("materials/" + n);
-        apply_(doc_.set_component(id, index, c, "Extract Material"));
+        edit_component_(id, c, "Extract Material");
         log_info("Extracted material to materials/" + n + ".yaml");
     }
 
@@ -2156,7 +2224,7 @@ private:
             if (box_selecting_) box_select_(mesh_edit, select_press_, m, shift, ctrl);
             else if (mesh_edit) pick_mesh_element_(m, shift);
             else {
-                const ObjectId id = pick_object(m);
+                const ObjectId id = click_target_(pick_object(m));   // an instance as a whole first
                 if (id == 0) { if (!shift) doc_.clear_selection(); }
                 else if (shift) {
                     // Blender: shift-click makes an unselected object active-selected, and an
@@ -2369,13 +2437,17 @@ private:
             if (ctx.menu_item("Clear and Keep Transformation")) clear_parent_keep_transform_();
             ctx.end_popup();
         }
-        if (ctx.begin_popup("vp_obj_ctx", 200)) {
+        if (ctx.begin_popup("vp_obj_ctx", 230)) {
             const bool any = !doc_.selection().empty();
+            draw_instance_menu_items_(ctx, doc_.primary());   // Open Object Asset, Revert / Apply overrides
             if (ctx.menu_item("Edit Mode", "Tab", nullptr, any)) toggle_edit_mode_();
             ctx.menu_separator();
             if (ctx.menu_item("Duplicate", "Shift D", nullptr, any)) { duplicate_selected(); pending_modal_kind_ = ModalKind::Grab; }
             if (ctx.menu_item("Delete", "X", nullptr, any)) delete_selected();
-            if (ctx.menu_item("Rename", "F2", nullptr, any)) { rename_id_ = doc_.primary(); rename_frames_ = 0; }
+            if (ctx.menu_item("Rename", "F2", nullptr, any && !doc_.is_inherited(doc_.primary()))) { rename_id_ = doc_.primary(); rename_frames_ = 0; }
+            ctx.menu_separator();
+            if (ctx.menu_item("Shade Smooth", "", nullptr, any)) shade_selected_(true);
+            if (ctx.menu_item("Shade Flat", "", nullptr, any)) shade_selected_(false);
             ctx.menu_separator();
             if (ctx.menu_item("Parent to Active", "Ctrl P", nullptr, doc_.selection().size() > 1)) parent_selection_to_active_();
             if (ctx.menu_item("Clear Parent (keep transform)", "Alt P", nullptr, any)) clear_parent_keep_transform_();
@@ -2807,7 +2879,7 @@ private:
     /** @brief The active object's mesh file, or empty (logging why). */
     fs::path active_mesh_path_(ObjectId id) {
         const Node* obj = doc_.find(id);
-        std::string key = obj ? object_mesh_key_(*obj) : std::string();
+        std::string key = obj ? object_mesh_key_(effective_(*obj)) : std::string();
         if (key.empty()) {
             const int water_ci = doc_.find_component(id, "WaterBody");
             if (water_ci >= 0) {
@@ -2997,11 +3069,15 @@ private:
         for (const auto& [id, live] : sync_.live_objects()) {
             const Node* obj = doc_.find(id);
             if (!obj || !live) continue;
-            const std::string key = object_mesh_key_(*obj);
+            const std::string key = object_mesh_key_(effective_(*obj));
             if (key.empty() || resolve_mesh_key_(key) != mesh_.path) continue;
-            const int mr_ci = doc_.find_component(id, "MeshRenderer");
-            const bool via_renderer = mr_ci >= 0 &&
-                !get_string(obj->at("components").as_seq()[static_cast<size_t>(mr_ci)], "mesh_path").empty();
+            bool via_renderer = false;
+            const Node& eff = effective_(*obj);
+            if (eff.contains("components")) {
+                for (const auto& c : eff.at("components").as_seq()) {
+                    if (component_type(c) == "MeshRenderer" && !get_string(c, "mesh_path").empty()) via_renderer = true;
+                }
+            }
             if (via_renderer) {
                 if (auto* mr = live->get_component<coopa::gfx::engine::components::MeshRenderer>()) mr->set_mesh(handle);
                 continue;
@@ -3188,9 +3264,13 @@ private:
             return;
         }
         if (!additive && !subtract) doc_.clear_selection();
-        for (const auto& [id, live] : sync_.live_objects()) {
-            if (!live || !live->get_transform() || hidden_.count(id)) continue;
+        std::set<ObjectId> hits;
+        for (const auto& [lid, live] : sync_.live_objects()) {
+            if (!live || !live->get_transform() || hidden_.count(lid)) continue;
             if (!inside(glm::vec3(live->get_transform()->transform().get_world_matrix()[3]))) continue;
+            hits.insert(box_target_(lid));   // a part of an instance selects the instance
+        }
+        for (ObjectId id : hits) {
             if (subtract) { if (doc_.is_selected(id)) doc_.select(id, true); }
             else if (!doc_.is_selected(id)) doc_.select(id, true);
         }
@@ -3256,15 +3336,21 @@ private:
                     draw_object_glyph_(ctx, *vp, *node, live->get_transform()->transform().get_world_matrix(), col);
                 }
             }
-            // Selection outlines (the active object brighter, as in Blender).
+            // Selection outlines (the active object brighter, as in Blender). A selected instance
+            // is one thing: its inherited parts are outlined with it.
             for (ObjectId id : doc_.selection()) {
                 auto* live = sync_.live(id);
                 const Node* node = doc_.find(id);
                 if (!live || !node || !live->get_transform() || !live->active()) continue;
-                if (const CachedMesh* cm = mesh_for_object_(*node)) {
-                    draw_mesh_edges(cm->mesh, cm->edges, live->get_transform()->transform().get_world_matrix(),
-                                    doc_.primary() == id ? active_col : accent, 1.5f);
-                }
+                const glm::vec4 col = doc_.primary() == id ? active_col : accent;
+                std::function<void(ObjectId, const Node&)> outline = [&](ObjectId oid, const Node& n) {
+                    auto* l = sync_.live(oid);
+                    if (!l || !l->get_transform() || !l->active()) return;
+                    if (const CachedMesh* cm = mesh_for_object_(n)) draw_mesh_edges(cm->mesh, cm->edges, l->get_transform()->transform().get_world_matrix(), col, 1.5f);
+                    if (!doc_.is_instance(id) || !n.contains("children")) return;
+                    for (const auto& c : n.at("children").as_seq()) if (c.contains(kInheritedKey)) outline(SceneDocument::id_of(c), c);
+                };
+                outline(id, *node);
                 // Origin dot.
                 if (show_overlays_ && show_origins_) {
                     if (auto o = vp->project(glm::vec3(live->get_transform()->transform().get_world_matrix()[3]))) {
@@ -3561,14 +3647,14 @@ private:
         // Outliner keymap (mouse over the outliner).
         if (hierarchy_hovered_ && !asset_view_() && !playing()) {
             if (ctx.shortcut(Key::X) || ctx.shortcut(Key::Delete)) delete_selected();
-            if (ctx.shortcut(Key::F2) && doc_.primary()) { rename_id_ = doc_.primary(); rename_frames_ = 0; }
+            if (ctx.shortcut(Key::F2) && doc_.primary() && !doc_.is_inherited(doc_.primary())) { rename_id_ = doc_.primary(); rename_frames_ = 0; }
             if (ctx.shortcut(Key::A)) { doc_.clear_selection(); for (ObjectId id : visible_ids_()) doc_.select(id, true); }
             if (ctx.shortcut(Key::A, Mods::Alt)) doc_.clear_selection();
             if (ctx.shortcut(Key::H)) hide_(doc_.selection());
             if (ctx.shortcut(Key::H, Mods::Alt)) unhide_all_();
             if (ctx.shortcut(Key::KpDecimal) || ctx.shortcut(Key::Period) || ctx.shortcut(Key::F)) frame_selected();
         }
-        if (ctx.shortcut(Key::F2) && !asset_view_() && doc_.primary() && !playing()) { rename_id_ = doc_.primary(); rename_frames_ = 0; }
+        if (ctx.shortcut(Key::F2) && !asset_view_() && doc_.primary() && !playing() && !doc_.is_inherited(doc_.primary())) { rename_id_ = doc_.primary(); rename_frames_ = 0; }
     }
 
     // =================================================================================

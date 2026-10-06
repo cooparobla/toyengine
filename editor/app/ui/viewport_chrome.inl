@@ -266,6 +266,10 @@
             if (ctx.menu_item("Selection to Cursor", "", nullptr, any)) selection_to_cursor_();
             ctx.end_menu();
         }
+        if (ctx.begin_menu("Instance", any && in_instance_(doc_.primary()), I::Link)) {
+            draw_instance_menu_items_(ctx, doc_.primary());
+            ctx.end_menu();
+        }
         if (ctx.begin_menu("Parent", any, I::Link)) {
             if (ctx.menu_item("Object (keep transform)", "Ctrl P", nullptr, doc_.selection().size() > 1)) parent_selection_to_active_();
             if (ctx.menu_item("Clear Parent (keep transform)", "Alt P")) clear_parent_keep_transform_();
@@ -274,6 +278,11 @@
         ctx.menu_separator();
         if (ctx.menu_item("Duplicate Objects", "Shift D", nullptr, any, I::Duplicate)) { duplicate_selected(); pending_modal_kind_ = ModalKind::Grab; }
         if (ctx.menu_item("Delete", "X", nullptr, any, I::Trash)) delete_selected();
+        ctx.menu_separator();
+        if (ctx.menu_item("Shade Smooth", "", nullptr, any)) shade_selected_(true);
+        ctx.tooltip("Shade Smooth\nInterpolate normals across every face of the selected objects' meshes");
+        if (ctx.menu_item("Shade Flat", "", nullptr, any)) shade_selected_(false);
+        ctx.tooltip("Shade Flat\nOne normal per face: the faces' edges show");
         ctx.menu_separator();
         if (ctx.menu_item("Hide Selected", "H", nullptr, any, I::EyeClosed)) hide_(doc_.selection());
         if (ctx.menu_item("Show Hidden", "Alt H", nullptr, true, I::Eye)) unhide_all_();

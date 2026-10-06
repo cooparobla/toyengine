@@ -179,10 +179,16 @@ that opens when you right-click the mesh (or press **W**), or by key:
 | **Subdivide Smooth** | right-click menu | Splits every face and rounds off the whole mesh |
 | Delete | **X** or **Delete** | **Vertices**, **Edges** or **Faces**; or **Dissolve Vertices**, **Dissolve Edges**, **Dissolve Faces**, which remove them but keep the surface closed |
 | Merge | **M** | **At Center** joins the selected vertices into one; **By Distance** joins vertices that sit on top of each other |
-| Normals | **Alt+N** | **Flip** turns faces inside out; **Smooth** and **Flat** set smooth or faceted shading |
+| Normals | **Alt+N** | **Flip** turns faces inside out; **Smooth** and **Flat** set smooth or faceted shading on the selected faces |
 | Add Mesh | **Shift+A** | Adds a cube, plane, grid, cylinder or sphere into this mesh at the 3D cursor |
 
 If a dissolve would leave a hole, the editor skips that part and says so in the Console.
+
+To set the shading of whole objects without entering Edit Mode, select them in Object Mode,
+right-click in the viewport and choose **Shade Smooth** or **Shade Flat** (also under
+**Object** in the viewport header). **Smooth** blends the light across faces so a curved
+surface looks round; **Flat** lights each face on its own, so its edges show. The setting is
+saved in the mesh, so every object that uses that mesh changes, and **Ctrl+Z** undoes it.
 
 ## Mirror and symmetry
 

@@ -3,9 +3,10 @@
 // The Hierarchy: exactly what the open file holds. For a scene, the root row is the
 // file's `scene:` block (named by scene_name) and its rows are root_objects in file order,
 // nested children, then every component in order (Transform included). For an object asset
-// the root row is the object itself. Prefab instances (`prefab:`) show a link icon and their
-// inherited children dimmed. Rows have eye (viewport visibility) and monitor (enabled in
-// the game) toggles.
+// the root row is the object itself. Prefab instances (`prefab:`) show a link icon; the
+// children they inherit from the object asset are rows like any other (ui/instances.inl),
+// dimmed until they override something, and an accent bar marks a row with overrides. Rows
+// have eye (viewport visibility) and monitor (enabled in the game) toggles.
 
     void draw_outliner_(imm::Context& ctx, const imm::Box& area) {
         using I = imm::Icon;
@@ -61,7 +62,7 @@
             }
             if (ctx.open_context_popup_in("outliner_ctx", body)) context_target_ = 0;
         }
-        if (ctx.begin_popup("outliner_ctx", 200)) {
+        if (ctx.begin_popup("outliner_ctx", 240)) {
             draw_object_context_menu_(ctx, context_target_);
             ctx.end_popup();
         }
@@ -80,26 +81,18 @@
         const Node* o = doc_.find(id);
         if (!o) return;
         const std::string name = get_string(*o, "name", "Object");
-        const bool active = get_bool(*o, "active", true);
+        const bool instance = SceneDocument::is_instance_node(*o);
+        const bool inherited = o->contains(kInheritedKey);
+        const Node& shown = effective_(*o);   // inside an instance: the asset merged with the overrides
+        const bool overridden = (instance || inherited) && has_overrides_(id);
+        const bool active = get_bool(shown, "active", true);
         const bool isolated = isolated_.count(id) > 0;   // hidden by Edit / Sculpt Mode isolation
         const bool hidden = hidden_.count(id) > 0 || isolated;
-        const bool instance = o->contains("prefab") || o->contains("inherit_from");
-        const Node shown = instance ? resolved_object_(*o) : *o;   // a prefab instance shows its resolved type
         std::vector<std::string> comps;
-        if (o->contains("components")) {
-            for (const auto& c : o->at("components").as_seq()) comps.push_back(component_type(c));
+        if (shown.contains("components")) {
+            for (const auto& c : shown.at("components").as_seq()) comps.push_back(component_type(c));
         }
-        std::vector<std::string> inherited;   // children that come from the prefab, not this file
-        if (instance && !flat && shown.contains("children") && shown.at("children").is_sequence()) {
-            for (const auto& ch : shown.at("children").as_seq()) {
-                const std::string cn = get_string(ch, "name");
-                bool own = false;
-                if (o->contains("children")) for (const auto& oc : o->at("children").as_seq()) own |= get_string(oc, "name") == cn;
-                if (!own) inherited.push_back(cn);
-            }
-        }
-        const bool has_children = !flat && ((o->contains("children") && o->at("children").is_sequence() && o->at("children").size() > 0) ||
-                                            !inherited.empty());
+        const bool has_children = !flat && o->contains("children") && o->at("children").is_sequence() && o->at("children").size() > 0;
         const bool leaf = flat || (!has_children && comps.empty());
         ctx.push_id(static_cast<int64_t>(id));
 
@@ -118,6 +111,7 @@
         auto [icon, tint] = object_icon_(shown, ctx.style);
         if (instance) { icon = I::Link; tint = ctx.style.accent; }
         glm::vec4 text_col = ctx.style.text;
+        if (inherited && !overridden) text_col = ctx.style.text_dim;   // straight from the object asset
         if (!active || hidden) { text_col = ctx.style.text_disabled; tint = imm::with_alpha(tint, 0.45f); }
         const bool selected = doc_.is_selected(id);
         const bool is_active = doc_.primary() == id;
@@ -128,10 +122,11 @@
             const bool add = has(ctx.input().mods, Mods::Shift) || has(ctx.input().mods, imm::Context::command_mod());
             doc_.select(id, add);
         }
-        if (r.double_clicked && !playing()) { rename_id_ = id; rename_frames_ = 0; }
+        if (overridden) ctx.fill({r.rect.x, r.rect.y + 2, 2, r.rect.h - 4}, ctx.style.accent);   // has overrides
+        if (r.double_clicked && !playing() && !inherited) { rename_id_ = id; rename_frames_ = 0; }
         if (r.right_clicked) { context_target_ = id; if (!doc_.is_selected(id)) doc_.select(id); ctx.open_popup("outliner_row_ctx"); }
         if (!playing()) {
-            ctx.drag_source("object", std::to_string(id), name);
+            if (!inherited) ctx.drag_source("object", std::to_string(id), name);   // the asset places its parts
             if (auto dropped = ctx.drop_target("object", r.rect)) {
                 const ObjectId src = std::stoll(*dropped);
                 if (src != id) apply_(doc_.reparent(src, id));
@@ -158,21 +153,16 @@
                             false, s, imm::Context::kAll, mon) && !playing()) {
             apply_(doc_.set_object_key(id, "active", Node(!active), active ? "Disable Object" : "Enable Object"));
         }
-        if (ctx.begin_popup("outliner_row_ctx", 200)) {
+        if (ctx.begin_popup("outliner_row_ctx", 240)) {
             draw_object_context_menu_(ctx, context_target_);
             ctx.end_popup();
         }
         if (instance) ctx.tooltip(name + "\nInstance of " + get_string(*o, "prefab", get_string(*o, "inherit_from")) +
-                                  " -- edits here are saved as overrides");
+                                  " -- edits here are saved as overrides" + (overridden ? " (has overrides)" : ""));
+        else if (inherited) ctx.tooltip(name + "\nFrom the object asset -- edits here are saved as overrides on this instance" +
+                                        (overridden ? " (has overrides)" : ""));
         if (r.open) {
             if (o->contains("children")) draw_outliner_list_(ctx, o->at("children"));
-            for (size_t k = 0; k < inherited.size(); ++k) {
-                ctx.push_id(static_cast<int64_t>(1000 + k));
-                const glm::vec4 dim = ctx.style.text_disabled;
-                ctx.tree_node(ctx.get_id("inherited"), inherited[k], true, false, false, &dim, I::Link);
-                ctx.tooltip(inherited[k] + "\nFrom the object asset (open it to edit)");
-                ctx.pop_id();
-            }
             for (size_t i = 0; i < comps.size(); ++i) {
                 ctx.push_id(static_cast<int64_t>(i));
                 const glm::vec4 dim = ctx.style.text_dim;
@@ -194,6 +184,7 @@
     void draw_object_context_menu_(imm::Context& ctx, ObjectId target) {
         using I = imm::Icon;
         const bool ok = !playing();
+        draw_instance_menu_items_(ctx, target);   // Open Object Asset, Revert / Apply overrides
         if (ctx.begin_menu("Add Child", ok && target != 0, I::Plus)) {
             if (ctx.menu_item("Empty", "", nullptr, true, I::Empty)) create_empty(target);
             for (const auto& p : primitive_names()) if (ctx.menu_item(p, "", nullptr, true, I::Cube)) create_primitive(p, target);
@@ -218,7 +209,7 @@
         }
         ctx.tooltip("Create Object Asset\nSave this object as objects/<name>.yaml and replace it with an instance");
         ctx.menu_separator();
-        if (ctx.menu_item("Rename", "F2", nullptr, ok && target != 0)) { rename_id_ = target; rename_frames_ = 0; }
+        if (ctx.menu_item("Rename", "F2", nullptr, ok && target != 0 && !doc_.is_inherited(target))) { rename_id_ = target; rename_frames_ = 0; }
         if (ctx.menu_item("Duplicate", "Shift D", nullptr, ok && target != 0, I::Duplicate)) duplicate_selected();
         if (ctx.menu_item("Delete", "X", nullptr, ok && target != 0, I::Trash)) delete_selected();
         if (ctx.menu_item("Clear Parent", "Alt P", nullptr, ok && target != 0)) clear_parent_keep_transform_();

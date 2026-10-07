@@ -6148,11 +6148,12 @@ toy::core::AppConfig docs_config(const Project& p) {
     return cfg;
 }
 
-/** @brief A scratch project: a copy of this repo's assets/, plus the starter scenes/main. */
-Project docs_project(const std::string& shot) {
+/** @brief A scratch project: a copy of this repo's assets/ (unless `fresh`, which is exactly what
+ *         a new project starts with), plus the starter scenes/main. */
+Project docs_project(const std::string& shot, bool fresh = false) {
     const fs::path root = fresh_dir("docs_" + shot) / "my_game";
     fs::create_directories(root);
-    fs::copy(fs::path(ROOT_DIR) / "assets", root / "assets", fs::copy_options::recursive);
+    if (!fresh) fs::copy(fs::path(ROOT_DIR) / "assets", root / "assets", fs::copy_options::recursive);
     return Project::create(root);   // adds only what is missing: the starter scenes/main
 }
 
@@ -6165,8 +6166,9 @@ struct DocsEditor {
     std::unique_ptr<InputDriver> in;
     std::chrono::steady_clock::time_point cleared;
 
-    DocsEditor(const std::string& name, const std::string& scene_rel, const std::string& theme = {})
-        : shot(name), project(docs_project(name)) {
+    DocsEditor(const std::string& name, const std::string& scene_rel, const std::string& theme = {},
+               bool fresh_project = false)
+        : shot(name), project(docs_project(name, fresh_project)) {
         setenv("FIXED_DT", "0.016666", 1);
         unsetenv("NO_INPUT");
         setenv("HOME", tmp_root().c_str(), 1);   // preferences stay in the scratch dir
@@ -6278,6 +6280,38 @@ void test_docs_overview() {
     expect(boat != 0, "water_test has the boat");
     docs_pick_move_tool(d);
     d.a().document().select(boat);
+    d.a().set_prop_tab(PropTab::Object);
+    d.rest();
+    tick(d.e(), 60);
+    d.capture();
+}
+
+// The README's editor shot: fog_test in Full Render, a stage spotlight selected.
+void test_docs_readme_editor() {
+    if (!docs_shot_dir()) return;
+    DocsEditor d("readme_editor", "scenes/tests/rendering/fog_test/scene.yaml");
+    d.a().set_shading(Shading::Full);
+    docs_scene_camera(d);
+    const ObjectId spot = object_named(d.a(), "stage_spot_left");
+    expect(spot != 0, "fog_test has the stage spotlight");
+    docs_pick_move_tool(d);
+    d.a().document().select(spot);
+    d.a().set_prop_tab(PropTab::Object);
+    d.rest();
+    tick(d.e(), 90);
+    d.capture();
+}
+
+// The README's Getting started shot: a brand-new project's starter scene in Full Render.
+void test_docs_getting_started_editor() {
+    if (!docs_shot_dir()) return;
+    DocsEditor d("getting_started_editor", "scenes/main/scene.yaml", {}, /*fresh_project=*/true);
+    d.a().set_shading(Shading::Full);
+    docs_main_view(d, 9.0f);
+    const ObjectId cube = object_named(d.a(), "cube");
+    expect(cube != 0, "the starter scene has its cube");
+    docs_pick_move_tool(d);
+    d.a().document().select(cube);
     d.a().set_prop_tab(PropTab::Object);
     d.rest();
     tick(d.e(), 60);
@@ -7577,6 +7611,8 @@ const TestCase kTests[] = {
     {"editor_tile_set_duplicate",            "editor_shell", test_editor_tile_set_duplicate},
     {"hub_project_actions",                  "hub",      test_hub_project_actions},
     {"docs_overview", "docs", test_docs_overview},
+    {"docs_readme_editor", "docs", test_docs_readme_editor},
+    {"docs_getting_started_editor", "docs", test_docs_getting_started_editor},
     {"docs_menu_file", "docs", test_docs_menu_file},
     {"docs_hierarchy_inspector", "docs", test_docs_hierarchy_inspector},
     {"docs_add_component", "docs", test_docs_add_component},

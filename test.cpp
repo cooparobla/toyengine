@@ -641,7 +641,7 @@ void test_mesh_lod_simplifies_flat_shaded_mesh() {
     using coopa::gfx::engine::data::Mesh;
     // The shared sphere mesh is exported flat-shaded: every face has its own normals, so after
     // welding no two triangles share a vertex. LOD generation must still reduce it.
-    std::ifstream in(std::string(ROOT_DIR) + "/assets/meshes/sphere.yaml");
+    std::ifstream in(std::string(ROOT_DIR) + "/assets/meshes/primitives/sphere.yaml");
     expect(static_cast<bool>(in), "meshes/sphere.yaml opens");
     if (!in) return;
     const fkyaml::node node = fkyaml::node::deserialize(in);
@@ -2688,8 +2688,10 @@ void test_sampler_chunks_agree_across_their_shared_border() {
 
 /** @brief Loads one generated piece from the repo's assets/meshes, whatever the working directory. */
 coopa::gfx::engine::data::SkinnedMeshSource load_tile_piece(const std::string& name) {
+    // Found by name: the pieces live in tag folders (meshes/terrain/<style>/).
+    const auto path = coopa::asset::AssetIndex::find(std::filesystem::path(ROOT_DIR) / "assets", "meshes/" + name + ".yaml");
     return coopa::gfx::engine::data::SkinnedMeshSource::from_node(coopa::yaml::load_document(
-        std::filesystem::path(ROOT_DIR) / "assets" / "meshes" / (name + ".yaml")));
+        path.value_or(std::filesystem::path(ROOT_DIR) / "assets" / "meshes" / (name + ".yaml"))));
 }
 
 /**
@@ -3130,7 +3132,7 @@ void test_pixel_demo_render_and_live_toggles() {
     ScopedEnv no_input("NO_INPUT", "1");
 
     toy::core::AppConfig config =
-        make_test_config("assets/scenes/pixel_demo/scene.yaml", 640, 360, 160, 90);
+        make_test_config("assets/scenes/demos/pixel_demo/scene.yaml", 640, 360, 160, 90);
     config.render.palette_path    = "assets/palettes/pico8.png";
     config.render.dither_strength = 0.08f;
     toy::core::Engine engine(std::move(config));
@@ -3220,7 +3222,7 @@ void test_headless_render_with_all_toggles_off() {
     ScopedEnv no_input("NO_INPUT", "1");
 
     toy::core::AppConfig config =
-        make_test_config("assets/scenes/pixel_demo/scene.yaml", 640, 360, 160, 90);
+        make_test_config("assets/scenes/demos/pixel_demo/scene.yaml", 640, 360, 160, 90);
     config.render.outline_enabled   = false;
     config.render.palette_enabled   = false;
     config.render.dither_enabled    = false;
@@ -3261,7 +3263,7 @@ void test_local_light_shadows() {
     ScopedEnv no_input("NO_INPUT", "1");
 
     toy::core::AppConfig config =
-        make_test_config("assets/scenes/pixel_demo/scene.yaml", 640, 360, 320, 180);
+        make_test_config("assets/scenes/demos/pixel_demo/scene.yaml", 640, 360, 320, 180);
     toy::core::Engine engine(std::move(config));
     auto* point_obj = engine.scene().find_object("point");
     auto* spot_obj  = engine.scene().find_object("spot");
@@ -3354,7 +3356,7 @@ void test_debug_view_channels_render() {
 
     {
         toy::core::AppConfig config =
-            make_test_config("assets/scenes/pixel_demo/scene.yaml", 640, 360, 160, 90);
+            make_test_config("assets/scenes/demos/pixel_demo/scene.yaml", 640, 360, 160, 90);
         toy::core::Engine engine(std::move(config));
         tick_frames(engine, kNoiseCycle);
         const Frame off_frame = engine.capture_image(true);
@@ -3380,7 +3382,7 @@ void test_debug_view_channels_render() {
     // see pixel_lighting.frag's own doc on this combination.
     {
         toy::core::AppConfig config =
-            make_test_config("assets/scenes/pixel_demo/scene.yaml", 640, 360, 160, 90);
+            make_test_config("assets/scenes/demos/pixel_demo/scene.yaml", 640, 360, 160, 90);
         config.render.shadows_enabled         = false;
         config.render.contact_shadows_enabled = true;
         toy::core::Engine engine(std::move(config));
@@ -3440,7 +3442,7 @@ void test_debug_view_channels_render() {
     // needs its feature enabled at STARTUP, unlike the channels above.
     {
         toy::core::AppConfig config =
-            make_test_config("assets/scenes/pixel_demo/scene.yaml", 640, 360, 160, 90);
+            make_test_config("assets/scenes/demos/pixel_demo/scene.yaml", 640, 360, 160, 90);
         config.render.dof_enabled = true;
         toy::core::Engine engine(std::move(config));
         tick_frames(engine, kNoiseCycle);
@@ -3453,7 +3455,7 @@ void test_debug_view_channels_render() {
     }
     {
         toy::core::AppConfig config =
-            make_test_config("assets/scenes/pixel_demo/scene.yaml", 640, 360, 160, 90);
+            make_test_config("assets/scenes/demos/pixel_demo/scene.yaml", 640, 360, 160, 90);
         config.render.volumetrics_enabled = true;
         toy::core::Engine engine(std::move(config));
         tick_frames(engine, kNoiseCycle);
@@ -3469,7 +3471,7 @@ void test_debug_view_channels_render() {
     // must render fine even in a scene with no physics collider to draw a wireframe for.
     {
         toy::core::AppConfig config =
-            make_test_config("assets/scenes/pixel_demo/scene.yaml", 640, 360, 160, 90);
+            make_test_config("assets/scenes/demos/pixel_demo/scene.yaml", 640, 360, 160, 90);
         toy::core::Engine engine(std::move(config));
         tick_frames(engine, kNoiseCycle);
         engine.render_config().debug_view = "lines";
@@ -5312,7 +5314,7 @@ void test_caml_config_and_scene_load_identically() {
     expect(a.render.render_width == b.render.render_width && a.render.aa_mode == b.render.aa_mode,
            "config.caml: render settings match");
 
-    const std::filesystem::path scene_src = std::string(ROOT_DIR) + "/assets/scenes/physics_test";
+    const std::filesystem::path scene_src = std::string(ROOT_DIR) + "/assets/scenes/tests/physics/physics_test";
     package_tree_as_caml(scene_src, dir / "physics_test");
     coopa::scene::Scene plain  = coopa::scene::SceneLoader::load((scene_src / "scene.yaml").string());
     coopa::scene::Scene packed = coopa::scene::SceneLoader::load((dir / "physics_test" / "scene.yaml").string());
@@ -5341,7 +5343,7 @@ void test_caml_scene_renders_identically() {
     ScopedEnv no_input("NO_INPUT", "1");
 
     const std::filesystem::path packed = fresh_tmp_subdir("caml_render") / "pixel_demo";
-    package_tree_as_caml(std::string(ROOT_DIR) + "/assets/scenes/pixel_demo", packed);
+    package_tree_as_caml(std::string(ROOT_DIR) + "/assets/scenes/demos/pixel_demo", packed);
 
     auto render = [](const std::string& scene) {
         toy::core::Engine engine(make_test_config(scene, 320, 180, 160, 90));
@@ -5395,7 +5397,7 @@ void test_engine_applies_scene_settings() {
                "        - type: Camera\n"
                "          main: true\n";
     }
-    toy::core::Engine engine(make_test_config("assets/scenes/pixel_demo/scene.yaml", 320, 180, 160, 90));
+    toy::core::Engine engine(make_test_config("assets/scenes/demos/pixel_demo/scene.yaml", 320, 180, 160, 90));
     tick_frames(engine, 2);
     const float project_exposure = engine.render_config().exposure;
     const float project_fog = engine.render_config().fog_density;
@@ -5507,7 +5509,7 @@ void test_engine_push_scene_restores_edit_scene() {
     ScopedEnv no_input("NO_INPUT", "1");
     toy::core::EngineOptions opts;
     opts.edit_mode = true;
-    const std::string path = std::string(ROOT_DIR) + "/assets/scenes/physics_test/scene.yaml";
+    const std::string path = std::string(ROOT_DIR) + "/assets/scenes/tests/physics/physics_test/scene.yaml";
     toy::core::Engine engine(make_test_config(path, 320, 180, 160, 90), opts);
     coopa::scene::Scene* edit_scene = &engine.scene();
     const glm::vec3 start = object_position(*edit_scene, "bounce_clay");
@@ -5531,7 +5533,7 @@ void test_engine_push_scene_restores_edit_scene() {
 void test_engine_display_region_and_viewport_ray() {
     ScopedEnv fixed_dt("FIXED_DT", "0");
     ScopedEnv no_input("NO_INPUT", "1");
-    toy::core::Engine engine(make_test_config("assets/scenes/pixel_demo/scene.yaml", 640, 360, 160, 90));
+    toy::core::Engine engine(make_test_config("assets/scenes/demos/pixel_demo/scene.yaml", 640, 360, 160, 90));
     tick_frames(engine, kNoiseCycle);
     const Frame full = engine.capture_image(true);
     // This config (no palette quantization) carries some frame-to-frame temporal drift of its
@@ -6367,7 +6369,7 @@ void test_water_parallel_matches_serial() {
 void test_water_shader_shares_the_buoyancy_clock() {
     ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
     ScopedEnv no_input("NO_INPUT", "1");
-    toy::core::Engine engine(make_test_config("assets/scenes/pixel_demo/scene.yaml", 640, 360, 320, 180));
+    toy::core::Engine engine(make_test_config("assets/scenes/demos/pixel_demo/scene.yaml", 640, 360, 320, 180));
     tick_frames(engine, 30);   // the renderer's clock runs ahead of any later scene's
     engine.load_scene("assets/scenes/water_test/scene.yaml");
     tick_frames(engine, 20);

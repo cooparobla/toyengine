@@ -1,4 +1,4 @@
-"""Generates assets/textures/prototype_grid.png, the blockout grid behind materials/prototype_grid.yaml.
+"""Generates assets/textures/prototype/prototype_grid.png, the blockout grid behind materials/prototype_grid.yaml.
 
 Standalone generator, not part of the C++ build -- run it manually (`python3
 tools/gen_prototype_grid.py`) whenever the texture needs regenerating. Standard library only.
@@ -24,7 +24,7 @@ CELL_DARK = (124, 126, 130)
 MINOR_LINE = (104, 106, 110)
 MAJOR_LINE = (62, 64, 68)
 
-OUTPUT_PATH = pathlib.Path(__file__).resolve().parent.parent / "assets" / "textures" / "prototype_grid.png"
+OUTPUT_PATH = pathlib.Path(__file__).resolve().parent.parent / "assets" / "textures" / "prototype" / "prototype_grid.png"
 
 
 def texel(x: int, y: int) -> tuple:

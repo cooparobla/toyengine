@@ -40,6 +40,7 @@
 #include "../mesh/mesh_loops.h"
 #include "../mesh/mesh_mirror.h"
 #include "../mesh/mesh_ops.h"
+#include "../mesh/proportional.h"
 #include "../mesh/mesh_subdivide.h"
 #include "../mesh/mesh_topology.h"
 #include "../mesh/sculpt.h"
@@ -85,6 +86,7 @@
 #include <fstream>
 #include <functional>
 #include <map>
+#include <unordered_map>
 #include <memory>
 #include <optional>
 #include <set>
@@ -134,6 +136,11 @@ struct EditorState {
 
 class EditorApp {
 public:
+    /** @brief Asset panel orderings (ui/assets.inl). */
+    enum class AssetSort { Name, Modified, Tags, Size };
+    /** @brief An asset file's sort keys: last-modified (seconds) and size (bytes). */
+    struct AssetStat { int64_t modified = 0; uintmax_t size = 0; };
+
     // =================================================================================
     // Construction
     // =================================================================================
@@ -174,6 +181,12 @@ public:
             if (prefs.contains("viewport_ao") && prefs.at("viewport_ao").is_boolean()) viewport_ao_ = prefs.at("viewport_ao").get_value<bool>();
             if (prefs.contains("show_engine_assets") && prefs.at("show_engine_assets").is_boolean()) {
                 show_engine_assets_ = prefs.at("show_engine_assets").get_value<bool>();
+            }
+            if (prefs.contains("asset_sort") && prefs.at("asset_sort").is_string()) {
+                asset_sort_ = asset_sort_from_name_(prefs.at("asset_sort").get_value<std::string>());
+            }
+            if (prefs.contains("asset_sort_reverse") && prefs.at("asset_sort_reverse").is_boolean()) {
+                asset_sort_reverse_ = prefs.at("asset_sort_reverse").get_value<bool>();
             }
             if (prefs.contains("isolate_edit_mode") && prefs.at("isolate_edit_mode").is_boolean()) {
                 isolate_in_edit_ = prefs.at("isolate_edit_mode").get_value<bool>();
@@ -294,6 +307,8 @@ public:
     void step() { step_simulation_(); }
     /** @brief Where a named widget was last drawn ("asset_row:<rel>", "asset_delete", "asset_add",
      *         "asset_new:<item>"), for tests driving the UI with real input. */
+    /** @brief Tests: forget every recorded rect, so the next frame's are the only ones. */
+    void clear_test_rects() { test_rects_.clear(); }
     std::optional<imm::Box> test_rect(const std::string& name) const {
         auto it = test_rects_.find(name);
         if (it == test_rects_.end()) return std::nullopt;
@@ -310,6 +325,18 @@ public:
     /** @brief True while a scene object's mesh is in edit mode (Tab). */
     bool edit_mode_active() const { return in_edit_mode_(); }
     bool modal_active() const { return modal_.active(); }
+    /** @brief Proportional editing (Edit Mode, O): its settings. */
+    ProportionalSettings& proportional() { return proportional_; }
+    /** @brief O: proportional editing on / off. */
+    void toggle_proportional() {
+        proportional_.enabled = !proportional_.enabled;
+        log_info(std::string("Proportional Editing ") + (proportional_.enabled ? "on" : "off"));
+    }
+    /** @brief Shift O: the next falloff curve. */
+    void cycle_proportional_falloff() {
+        proportional_.falloff = static_cast<Falloff>((static_cast<int>(proportional_.falloff) + 1) % kFalloffCount);
+        log_info(std::string("Proportional Falloff: ") + falloff_name(proportional_.falloff));
+    }
     /** @brief Mesh > Mirror on the current Edit Mode selection (axis 0-2; world or mesh axes). */
     void mirror_mesh_selection(int axis, bool global) { mirror_mesh_selection_(axis, global); }
     /** @brief H on these objects (editor-only hide). */
@@ -806,7 +833,8 @@ public:
         for (char& c : key) if (c == ' ') c = '_';
         exit_mesh_mode_();
         park_mesh_doc_();
-        mesh_.reset(make_primitive(primitive), unique_asset_name_("meshes", key));
+        mesh_.reset(make_primitive(primitive), unique_asset_name_(new_asset_dir_("meshes"), key));
+        if (!creating_tags_.empty()) mesh_.path = project_.assets() / new_asset_dir_("meshes") / (mesh_.name + ".yaml");
         set_view_(AssetType::Mesh);
         active_path_.clear();
         uploaded_revision_ = 0;
@@ -815,8 +843,9 @@ public:
 
     bool save_mesh() {
         if (!mesh_.open()) return false;
-        if (mesh_.path.empty()) mesh_.path = project_.assets() / "meshes" / (mesh_.name + ".yaml");
+        if (mesh_.path.empty()) mesh_.path = project_.assets() / new_asset_dir_("meshes") / (mesh_.name + ".yaml");
         try {
+            fs::create_directories(mesh_.path.parent_path());
             mesh_.save();
             project_.refresh();
             // Every user of the file -- render meshes, MeshColliders, water sources -- re-reads
@@ -837,10 +866,8 @@ public:
     }
 
     bool open_material(const fs::path& path) {
-        std::string ref = project_.relative(path);
-        if (ref.size() > 5 && (ref.compare(ref.size() - 5, 5, ".yaml") == 0 || ref.compare(ref.size() - 5, 5, ".caml") == 0)) {
-            ref = ref.substr(0, ref.size() - 5);
-        }
+        // Referenced by its short form (no tag folders): found by name wherever it's tagged.
+        const std::string ref = strip_yaml_ext(short_ref(project_.relative(path)));
         try {
             material_.load(path, ref);
         } catch (const std::exception& e) {
@@ -857,8 +884,9 @@ public:
 
     /** @brief Creates materials/<name>.yaml (from `from` if given) and opens it. */
     bool create_material(const std::string& name, const Node& from = Node()) {
-        const std::string n = unique_asset_name_("materials", name);
-        const fs::path path = project_.assets() / "materials" / (n + ".yaml");
+        const std::string dir = new_asset_dir_("materials");
+        const std::string n = unique_asset_name_(dir, name);
+        const fs::path path = project_.assets() / dir / (n + ".yaml");
         Node m = from.is_mapping() ? from : Node::mapping();
         erase_key(m, "base");
         if (m.size() == 0) {
@@ -867,6 +895,7 @@ public:
             m["roughness"] = make_float(0.5);
         }
         try {
+            fs::create_directories(path.parent_path());
             coopa::yaml::save_document(path, m);
             project_.refresh();
         } catch (const std::exception& e) {
@@ -1023,11 +1052,18 @@ private:
         if (level >= 1) std::fprintf(stderr, "[editor] %s\n", s.c_str());
     }
 
-    /** @brief A free asset file name in assets/<dir>: `base` in snake_case, then base_01, base_02... */
+    /**
+     * @brief A free asset name for a new file in assets/<dir>: `base` in snake_case, then
+     *        base_01, base_02... Free means no asset of the same TYPE has the name, in any tag
+     *        folder -- references find assets by type and name (coopa::asset::AssetIndex).
+     */
     std::string unique_asset_name_(const std::string& dir, const std::string& raw_base) {
         std::string base = snake_case(raw_base);
         if (base.empty()) base = "untitled";
-        auto exists = [&](const std::string& n) { return coopa::yaml::document_exists(project_.assets() / dir / (n + ".yaml")); };
+        const std::string type = asset_type_dir(dir + "/x");
+        auto exists = [&](const std::string& n) {
+            return coopa::yaml::document_exists(project_.assets() / dir / (n + ".yaml")) || asset_name_taken_(type, n);
+        };
         if (!exists(base)) return base;
         for (int i = 1; i < 1000; ++i) {
             char buf[16];
@@ -1998,7 +2034,13 @@ private:
         handle_viewport_input_(ctx, mesh_edit);
         draw_viewport_overlay_(ctx, mesh_edit);
         if (modal_.active()) {
-            const std::string h = modal_.header();
+            std::string h = modal_.header();
+            if (proportional_live_()) {
+                char buf[96];
+                std::snprintf(buf, sizeof(buf), "   Proportional: %.3f (%s, wheel resizes)", proportional_.radius,
+                              falloff_name(proportional_.falloff));
+                h += buf;
+            }
             const imm::Box b{viewport_box_.x + (show_toolbar_ ? kToolSize + 20 : 10), viewport_box_.bottom() - 34, ctx.text_width(h) + 18, 24};
             ctx.fill_rounded(b, et_.viewport.modal_backdrop);
             ctx.text_in(b, h, ctx.style.text);
@@ -2199,6 +2241,9 @@ private:
                 if (g.active) {
                     const int kind = gizmo_.mode == GizmoMode::Translate ? 0 : gizmo_.mode == GizmoMode::Rotate ? 1 : 2;
                     apply_transform_(mesh_edit, kind, g.translate, g.rotate_axis, g.rotate_deg, g.scale, basis);
+                    if (mesh_edit && proportional_.enabled) {
+                        draw_proportional_circle_(ctx, *vp, prop_pivot_ + (kind == 0 ? g.translate : glm::vec3(0.0f)));
+                    }
                 }
                 if (g.finished) { if (mesh_edit) mesh_.undo.end_merge(); else doc_.end_merge(); }
             }
@@ -2304,6 +2349,8 @@ private:
             if (ctx.shortcut(Key::G)) start_modal_(ModalKind::Grab, vp, m, true);
             if (ctx.shortcut(Key::R)) start_modal_(ModalKind::Rotate, vp, m, true);
             if (ctx.shortcut(Key::S)) start_modal_(ModalKind::Scale, vp, m, true);
+            if (ctx.shortcut(Key::O)) toggle_proportional();
+            if (ctx.shortcut(Key::O, Mods::Shift)) cycle_proportional_falloff();
             if (ctx.shortcut(Key::E)) extrude_interactive_(vp, m);
             if (ctx.shortcut(Key::I)) start_modal_(ModalKind::Inset, vp, m, true);
             if (ctx.shortcut(Key::B, Mods::Control)) start_modal_(ModalKind::Bevel, vp, m, true);
@@ -2549,9 +2596,38 @@ private:
                      mesh && kind == ModalKind::Grab);
     }
 
+    /** @brief Is proportional editing driving the running mesh move / rotate / scale? */
+    bool proportional_live_() const {
+        const ModalKind k = modal_.kind();
+        return proportional_.enabled && modal_mesh_ && (k == ModalKind::Grab || k == ModalKind::Rotate || k == ModalKind::Scale);
+    }
+
+    /** @brief The proportional circle: the radius on screen, around the selection's current centre. */
+    void draw_proportional_circle_(imm::Context& ctx, const ViewProj& vp, const glm::vec3& centre) {
+        const auto c = vp.project(centre);
+        const float r = proportional_radius_px_(vp, centre);
+        if (!c || r < 1.0f) return;
+        ctx.ring(*c, r, 1.5f, imm::with_alpha(ctx.style.text, 0.85f), 96);
+        ctx.ring(*c, r + 1.5f, 1.0f, imm::with_alpha(glm::vec4(0, 0, 0, 1), 0.35f), 96);
+    }
+
     void run_modal_(imm::Context& ctx, const ViewProj& vp, bool ctrl, bool shift) {
         const auto& in = ctx.input();
         const ModalKind kind = modal_.kind();
+        // Proportional editing: the wheel / Page Up / Page Down resize the radius, as in Blender.
+        if (proportional_live_()) {
+            float factor = 1.0f;
+            if (in.scroll.y != 0.0f) factor *= std::exp(in.scroll.y * 0.1f);
+            for (const auto& e : in.keys) {
+                if (e.action == coopa::input::KeyAction::Release) continue;
+                if (e.key == coopa::input::Key::PageUp) factor *= 1.1f;
+                if (e.key == coopa::input::Key::PageDown) factor /= 1.1f;
+            }
+            if (factor != 1.0f) {
+                proportional_.set_radius(proportional_.radius * factor);
+                update_proportional_();
+            }
+        }
         modal_.snap_step = snap_adaptive_ ? grid_step_() : gizmo_.translate_snap;
         const auto outcome = modal_.update(vp, ctx.mouse(), in.keys, in.pressed[0], in.pressed[1], ctrl != snap_on_, shift,
                                            in.down[2], in.pressed[2]);
@@ -2576,6 +2652,9 @@ private:
         if (outcome == ModalTransform::Outcome::Confirmed) {
             if (modal_mesh_) mesh_.undo.end_merge(); else doc_.end_merge();
             note_slide_finished_(kind, modal_.result().amount);
+        }
+        if (outcome == ModalTransform::Outcome::Running && proportional_live_()) {
+            draw_proportional_circle_(ctx, vp, prop_pivot_ + (kind == ModalKind::Grab ? modal_.result().translate : glm::vec3(0.0f)));
         }
         // Guide lines: the constraint axis, or both axes of a constraint plane (dimmer).
         if (kind == ModalKind::EdgeSlide) return;
@@ -3172,12 +3251,44 @@ private:
         glm::vec3 world_pos;
     };
 
+    /** @brief The proportional radius in screen pixels at world point `at` (the circle's size). */
+    float proportional_radius_px_(const ViewProj& vp, const glm::vec3& at) const {
+        const glm::vec3 right = glm::normalize(glm::vec3(glm::inverse(vp.view)[0]));
+        const auto a = vp.project(at), b = vp.project(at + right * proportional_.radius);
+        return a && b ? glm::length(*b - *a) : 0.0f;
+    }
+
+    /**
+     * @brief For the transform about to run (or after the radius changes mid-way): which
+     *        unselected vertices proportional editing drags and how much, then the symmetry
+     *        partners of everything that moves -- all from the positions before the move.
+     */
+    void update_proportional_() {
+        const std::set<uint32_t> sel = mesh_.selection.affected_vertices(mesh_drag_base_);
+        const glm::mat4 w = mesh_world_();
+        prop_pivot_ = glm::vec3(w * glm::vec4(selection_center(mesh_drag_base_, mesh_.selection), 1.0f));
+        prop_weights_.clear();
+        prop_radius_px_ = 0.0f;
+        if (proportional_.enabled) {
+            const auto vp = view_proj_();
+            std::function<std::optional<glm::vec2>(const glm::vec3&)> project;
+            if (vp) {
+                prop_radius_px_ = proportional_radius_px_(*vp, prop_pivot_);
+                project = [v = *vp](const glm::vec3& p) { return v.project(p); };
+            }
+            prop_weights_ = proportional_weights(mesh_drag_base_, sel, proportional_, w, project, prop_radius_px_);
+        }
+        std::set<uint32_t> moved = sel;
+        for (const auto& [v, wt] : prop_weights_) moved.insert(v);
+        // Symmetry: who mirrors whom, from the positions before anything moves.
+        mirror_map_ = build_mirror_map(mesh_drag_base_, moved, edit_symmetry_, w);
+    }
+
     /** @brief Captures the values a gizmo drag / modal operator applies its deltas to. */
     void begin_transform_(bool mesh_edit) {
         if (mesh_edit) {
             mesh_drag_base_ = mesh_.mesh;
-            // Symmetry: who mirrors whom, from the positions before anything moves.
-            mirror_map_ = build_mirror_map(mesh_.mesh, mesh_.selection.affected_vertices(mesh_.mesh), edit_symmetry_, mesh_world_());
+            update_proportional_();
             return;
         }
         drag_starts_.clear();
@@ -3205,10 +3316,18 @@ private:
             const glm::mat4 xf_world = delta_matrix(kind == 0 ? translate : glm::vec3(0.0f), rot_axis, kind == 1 ? rot_deg : 0.0f,
                                                     kind == 2 ? scale : glm::vec3(1.0f), pivot, scale_basis);
             const glm::mat4 local = glm::inverse(w) * xf_world * w;
+            const glm::mat4 inv_w = glm::inverse(w);
             const EditMesh base = mesh_drag_base_;
             mesh_.edit(kind == 0 ? "Move" : kind == 1 ? "Rotate" : "Scale", [&](EditMesh& mm, MeshSelection& sel) {
                 mm = base;
                 transform_selection(mm, sel, local);
+                // Proportional editing: the same transform, every part scaled by the weight.
+                for (const auto& [v, wt] : prop_weights_) {
+                    const glm::mat4 xw = delta_matrix(kind == 0 ? translate * wt : glm::vec3(0.0f), rot_axis, kind == 1 ? rot_deg * wt : 0.0f,
+                                                      kind == 2 ? glm::vec3(1.0f) + (scale - glm::vec3(1.0f)) * wt : glm::vec3(1.0f),
+                                                      pivot, scale_basis);
+                    mm.positions[v] = glm::vec3(inv_w * xw * w * glm::vec4(base.positions[v], 1.0f));
+                }
                 apply_mirror_map(mm, mirror_map_);
             }, "transform");
             return;
@@ -3567,12 +3686,16 @@ private:
         if (config_.dirty()) save_config();
     }
 
-    void import_audio_dialog_() {
+    /** @brief Picks a sound file and imports it into assets/audio/<tags>/. */
+    void import_audio_dialog_(std::vector<std::string> tags = {}) {
         const char* home = std::getenv("HOME");
         file_dialog_.open(ui(), FileDialog::Mode::OpenFile, "Import Sound", home ? fs::path(home) : project_.root(), {".wav", ".mp3"},
-                          [this](const fs::path& p) {
-                              deferred_.push_back([this, p] {
-                                  if (import_audio({p}) > 0) open_asset(AssetType::Audio, project_.relative(project_.assets() / "audio" / p.filename()));
+                          [this, tags](const fs::path& p) {
+                              deferred_.push_back([this, p, tags] {
+                                  fs::path dir;
+                                  int n = 0;
+                                  with_tags_(tags, [&] { dir = project_.assets() / new_asset_dir_("audio"); n = import_audio({p}); });
+                                  if (n > 0) open_asset(AssetType::Audio, project_.relative(dir / p.filename()));
                               });
                           });
     }
@@ -3701,6 +3824,20 @@ private:
     // Asset panel (ui/assets.inl).
     AssetType asset_tab_ = AssetType::Scene;
     std::string asset_context_, asset_rename_, asset_rename_to_, asset_delete_;
+    // Asset panel ordering and tags (ui/assets.inl). Tags are the folders between an asset's
+    // type folder and the asset (project.h asset_tags()).
+    AssetSort asset_sort_ = AssetSort::Name;
+    bool asset_sort_reverse_ = false;
+    std::map<AssetType, std::vector<std::string>> asset_tag_filter_;   ///< per tab; empty = all
+    bool asset_tag_match_all_ = false;                                 ///< filter: every selected tag vs any
+    std::string asset_tags_target_;                    ///< Edit Tags: the asset (assets-relative)
+    AssetType asset_tags_type_ = AssetType::None;
+    std::vector<std::string> asset_tags_edit_;         ///< Edit Tags: the tags being edited
+    std::string asset_tag_input_;                      ///< Edit Tags / New: a tag being typed
+    std::vector<std::string> new_asset_tags_;          ///< + popup: the tags a new asset gets
+    std::vector<std::string> creating_tags_;           ///< set while a create runs (with_tags_())
+    std::unordered_map<std::string, AssetStat> asset_stats_;   ///< sort keys, dropped every few seconds
+    std::chrono::steady_clock::time_point asset_stats_time_{};
     Lookdev lookdev_;
     coopa::scene::SceneObject* preview_ground_ = nullptr;
     std::vector<std::string> slot_preview_materials_;   // mesh viewer: material asset per slot (preview only)
@@ -3803,6 +3940,11 @@ private:
     bool pause_after_start_ = false;
     MirrorSettings edit_symmetry_;   ///< Edit Mode's X / Y / Z mirror toggles (off by default, as in Blender).
     MirrorMap mirror_map_;           ///< The current transform's mirror partners (begin_transform_).
+    // Proportional editing (O): settings, and the current transform's weighted vertices.
+    ProportionalSettings proportional_;
+    std::vector<std::pair<uint32_t, float>> prop_weights_;   ///< unselected vertices it drags, with weights
+    glm::vec3 prop_pivot_{0.0f};                            ///< world-space selection centre at the start
+    float prop_radius_px_ = 0.0f;                           ///< the radius on screen at the pivot
     bool game_focused_ = false;   ///< Play mode: the game has the input (viewer clicked; Esc releases).
 
     void set_game_focus_(bool focused) {
@@ -3840,6 +3982,7 @@ private:
     int rename_frames_ = 0;
     int asset_cat_ = 1;
     std::string asset_filter_;
+    std::string render_settings_filter_;   ///< Render tab: settings search
     std::string selected_asset_;
     double asset_click_time_ = 0.0;
 

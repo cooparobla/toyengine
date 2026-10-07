@@ -10,7 +10,7 @@ Two separate systems:
 | System | What | Switch (assets/config.yaml, startup-fixed) |
 |---|---|---|
 | Local volumes | `Volume` components: bounded, marched, shadowed by the sun, lit by up to 4 point/spot lights | `volumetrics_enabled` (on) |
-| Global fog | analytic distance + height fog over everything, `fog_*` keys | `fog_enabled` (OFF by default) |
+| Global fog | analytic distance + height fog over everything, `fog_*` keys | `fog_enabled` (on by default) |
 
 A scene **cannot** turn either switch on (startup-fixed); it can tune their runtime keys in
 `scene.settings.render`. Parser for Volume: `libs/gfxcoopa/gfxcoopa/engine/components/register.h`
@@ -83,7 +83,7 @@ scene:
       fog_max_distance: 90.0
 ```
 
-Only takes effect when `fog_enabled: true` in config.yaml -- tell the user if the scene relies
+Only takes effect while `fog_enabled: true` in config.yaml (the default) -- tell the user if the scene relies
 on it.
 
 ## Verify

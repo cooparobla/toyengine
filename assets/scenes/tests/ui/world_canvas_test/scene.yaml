@@ -150,7 +150,7 @@ scene:
                   pivot: { x: 0.0, y: 1.0 }
                 - type: Text
                   text: "Crate"
-                  font: ../../fonts/inter_regular.ttf
+                  font: fonts/inter_regular.ttf
                   font_size: 11.0
                   color: { r: 0.90, g: 0.92, b: 0.95, a: 1.0 }
                   horizontal_align: Left
@@ -190,7 +190,7 @@ scene:
                       anchor_preset: StretchAll
                     - type: Text
                       text: "Heal"
-                      font: ../../fonts/inter_regular.ttf
+                      font: fonts/inter_regular.ttf
                       font_size: 9.0
                       color: { r: 0.92, g: 0.98, b: 0.94, a: 1.0 }
                       horizontal_align: Center
@@ -287,7 +287,7 @@ scene:
               size_delta: { x: 118.0, y: 32.0 }
             - type: Text
               text: "Transform"
-              font: ../../fonts/inter_regular.ttf
+              font: fonts/inter_regular.ttf
               font_size: 15.0
               color: { r: 0.72, g: 0.86, b: 0.98, a: 1.0 }
               horizontal_align: Center
@@ -326,7 +326,7 @@ scene:
                   anchor_preset: StretchAll
                 - type: Text
                   text: "screen-space HUD"
-                  font: ../../fonts/inter_regular.ttf
+                  font: fonts/inter_regular.ttf
                   font_size: 14.0
                   color: { r: 0.85, g: 0.92, b: 1.0, a: 1.0 }
                   horizontal_align: Center

@@ -74,6 +74,17 @@ inline std::string ref_to_path(const FieldDesc& f, const std::string& v) {
 /** @brief Project-relative path -> the value an AssetRef field stores. */
 inline std::string path_to_ref(const FieldDesc& f, const std::string& path) {
     std::string v = path;
+    // Tag folders between the type folder and the file are dropped (materials/metal/brick ->
+    // materials/brick): the engine finds assets by type and name, so the reference survives
+    // re-tagging (coopa::asset::AssetIndex). A theme keeps its ui/themes/ folder.
+    if (!f.asset_dir.empty() && v.rfind(f.asset_dir + "/", 0) == 0) {
+        const std::string rest = v.substr(f.asset_dir.size() + 1);
+        const size_t last = rest.rfind('/');
+        if (last != std::string::npos) {
+            const bool theme = f.asset_dir == "ui" && rest.rfind("themes/", 0) == 0;
+            v = f.asset_dir + "/" + (theme ? "themes/" : "") + rest.substr(last + 1);
+        }
+    }
     if (f.strip_dir && !f.asset_dir.empty() && v.rfind(f.asset_dir + "/", 0) == 0) v = v.substr(f.asset_dir.size() + 1);
     if (f.strip_ext && !f.asset_ext.empty() && v.size() > f.asset_ext.size() &&
         v.compare(v.size() - f.asset_ext.size(), f.asset_ext.size(), f.asset_ext) == 0) {

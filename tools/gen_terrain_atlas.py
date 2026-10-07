@@ -1,10 +1,10 @@
 """Generates the terrain tile atlas used by the terrain_test scene's chunk material.
 
 Standalone generator, not part of the C++ build -- run it manually (`python3
-tools/gen_terrain_atlas.py`) whenever assets/textures/terrain_atlas*.png need regenerating.
+tools/gen_terrain_atlas.py`) whenever assets/textures/terrain/terrain_atlas*.png need regenerating.
 Requires numpy and Pillow.
 
-These live in the SHARED assets/textures/ alongside assets/meshes/tile_side_*.yaml, for the
+These live in the SHARED assets/textures/terrain/ alongside assets/meshes/terrain/tile_side_*.yaml, for the
 reason that file's generator gives: the tile set is a primitive of the tile system, not demo
 content. A scene overrides it by putting a file of the same name in its own textures/, which
 AssetSource::resolve() tries before the registered search roots.
@@ -88,7 +88,7 @@ centre of its cell and adds the surface detail procedurally, in world space and 
 pixel footprint -- a texture cannot do that here (the engine has no mipmaps, and a styled piece's
 projected UVs seam across rounded lips). Same kinds in the same order as KINDS."""
 
-OUTPUT_DIR = pathlib.Path(__file__).resolve().parent.parent / "assets" / "textures"
+OUTPUT_DIR = pathlib.Path(__file__).resolve().parent.parent / "assets" / "textures" / "terrain"
 """Where the generated PNGs are written; resolved relative to this repo, not the caller's cwd."""
 
 

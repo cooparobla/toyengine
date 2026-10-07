@@ -8,8 +8,8 @@
 # changing them):
 #   volumetrics_enabled  local Volume components, marched with sun shadows and point/spot
 #                        light scattering (on by default). Everything below is one of these.
-#   fog_enabled          the GLOBAL analytic distance/height fog layer (off by default). Turn it
-#                        on to see it layered over the volumes; this scene's settings block tunes
+#   fog_enabled          the GLOBAL analytic distance/height fog layer (on by default). With it
+#                        on it layers over the volumes; this scene's settings block tunes
 #                        it for this scene.
 # Useful views (render.debug_view, runtime): off | volumetrics (accumulated density alone).
 #

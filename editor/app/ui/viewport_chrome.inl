@@ -141,6 +141,27 @@
                                 imm::Box{rx, hb.y + 3, s, s}, true)) {
                 snap_on_ = !snap_on_;
             }
+            // Proportional editing (Edit Mode): the toggle, and its options under the caret.
+            if (mesh_edit) {
+                rx -= s * 0.7f + 4;
+                const imm::Box pdd{rx, hb.y + 3, s * 0.7f, s};
+                if (ctx.icon_button("prop_opts_btn", I::ArrowDown, "Proportional Editing Options\nFalloff, connected only, projected, radius",
+                                    false, s * 0.7f, imm::Context::kRight, pdd)) {
+                    ctx.open_popup("prop_opts", glm::vec2(pdd.right() - 230, pdd.bottom() + 2));
+                }
+                test_rects_["prop_opts_btn"] = pdd;
+                if (ctx.begin_popup("prop_opts", 230)) draw_proportional_popover_(ctx);
+                rx -= s;
+                const imm::Box pb{rx, hb.y + 3, s, s};
+                if (ctx.icon_button("proportional", I::Proportional,
+                                    "Proportional Editing (O)\nMoves, rotations and scales also drag the unselected vertices "
+                                    "inside a radius, fading out toward its edge. While transforming, the mouse wheel "
+                                    "(or Page Up / Page Down) resizes the circle. Shift O cycles the falloff.",
+                                    proportional_.enabled, s, imm::Context::kLeft, pb, true)) {
+                    toggle_proportional();
+                }
+                test_rects_["proportional"] = pb;
+            }
             rx -= 92;
             const imm::Box ob{rx, hb.y + 3, 88, s};
             bool oh = false, oheld = false;
@@ -169,6 +190,45 @@
             if (sculpting || painting) draw_symmetry_buttons_(ctx, after_menus, hb, header_sym, sculpting ? "sc_sym" : "pt_sym", "strokes");
             else draw_symmetry_buttons_(ctx, after_menus, hb, edit_symmetry_, "ed_sym", "moves, rotations and scales");
         }
+    }
+
+    /** @brief The proportional editing popover: falloff curve, distance mode, radius. */
+    void draw_proportional_popover_(imm::Context& ctx) {
+        ctx.label_dim("Proportional Editing");
+        bool on = proportional_.enabled;
+        if (ctx.checkbox("Enabled  (O)", &on)) proportional_.enabled = on;
+        ctx.spacing(2);
+        ctx.label_dim("Falloff  (Shift O cycles)");
+        for (int i = 0; i < kFalloffCount; ++i) {
+            const Falloff f = static_cast<Falloff>(i);
+            ctx.push_id(i);
+            if (ctx.selectable(falloff_name(f), proportional_.falloff == f)) proportional_.falloff = f;
+            test_rects_[std::string("prop_falloff:") + falloff_name(f)] = ctx.last_rect();
+            // A small plot of the curve at the row's right.
+            const imm::Box r = ctx.last_rect();
+            const imm::Box plot{r.right() - 46, r.y + 4, 40, r.h - 8};
+            glm::vec2 prev{plot.x, plot.bottom() - falloff_weight(f, 0.0f) * plot.h};
+            for (int k = 1; k <= 16; ++k) {
+                const float t = k / 16.0f;
+                const glm::vec2 p{plot.x + t * plot.w, plot.bottom() - falloff_weight(f, std::min(t, 0.999f)) * plot.h};
+                ctx.line(prev, p, ctx.style.text_dim, 1.2f);
+                prev = p;
+            }
+            ctx.pop_id();
+        }
+        ctx.spacing(2);
+        bool connected = proportional_.connected, projected = proportional_.projected;
+        if (ctx.checkbox("Connected Only", &connected)) proportional_.connected = connected;
+        ctx.tooltip("Connected Only\nMeasure along the mesh's edges: vertices on separate pieces never move together");
+        if (ctx.checkbox("Projected from View", &projected)) proportional_.projected = projected;
+        ctx.tooltip("Projected from View\nMeasure on screen: what sits inside the circle moves, however far behind. "
+                    "Off: straight-line distance in 3D. (Connected Only overrides it.)");
+        float r = proportional_.radius;
+        if (ctx.drag_float("Radius", &r, 0.01f, ProportionalSettings::kMinRadius, ProportionalSettings::kMaxRadius)) {
+            proportional_.set_radius(r);
+        }
+        ctx.tooltip("Radius\nIn world units; the mouse wheel resizes it while transforming");
+        ctx.end_popup();
     }
 
     void draw_view_menu_(imm::Context& ctx) {

@@ -135,8 +135,11 @@ public:
      *        its whole folder (scene-local meshes and textures come along).
      */
     bool copy_engine_asset_to_project(AssetType t, const std::string& rel) {
-        const fs::path src = coopa::yaml::resolve_variant(Project::engine_assets() / rel);
+        fs::path src = coopa::yaml::resolve_variant(Project::engine_assets() / rel);
         std::error_code ec;
+        if (!fs::exists(src, ec)) {   // a short reference: toyengine keeps it in a tag folder
+            if (auto found = coopa::asset::AssetIndex::find(Project::engine_assets(), rel)) src = *found;
+        }
         if (!fs::exists(src, ec)) { log_error("Not a toyengine asset: " + rel); return false; }
         const fs::path dst = project_.assets() / fs::relative(src, Project::engine_assets(), ec);
         if (t == AssetType::Scene && src.filename().string().rfind("scene", 0) == 0) {
@@ -196,6 +199,293 @@ private:
         return p.stem().string();
     }
 
+    // =================================================================================
+    // Tags, ordering and filtering
+    // =================================================================================
+    //
+    // An asset's tags are the folders between its type folder and the file (project.h
+    // asset_tags()): assets/materials/metal/brick.yaml is the material `brick` tagged `metal`.
+    // References name only the type and the asset (`materials/brick`) and the engine finds it
+    // by name (coopa::asset::AssetIndex), so re-tagging -- moving the file -- breaks nothing;
+    // which is also why names are unique per type (asset_name_taken_()).
+
+    /** @brief The type folder an asset type lists from (`ui/themes` for themes). */
+    static std::string asset_type_folder_(AssetType t) { return asset_type_info_(t).dir; }
+
+    /** @brief True when an asset of type folder `type` (`materials`, `scenes`...) is named `name`. */
+    bool asset_name_taken_(const std::string& type, const std::string& name, const std::string& except_rel = {}) {
+        if (type == "scenes") {
+            for (const auto& rel : project_.scenes()) {
+                if (rel != except_rel && asset_display_name_(AssetType::Scene, rel) == name) return true;
+            }
+            return false;
+        }
+        for (const auto& rel : project_.list(type, "")) {
+            if (rel == except_rel) continue;
+            if (type == "ui" && rel.rfind("ui/themes/", 0) == 0) continue;
+            if (fs::path(rel).stem().string() == name) return true;
+        }
+        return false;
+    }
+
+    /** @brief The folder a new asset of type folder `dir` is created in: dir/<tags being created with>. */
+    std::string new_asset_dir_(const std::string& dir) const {
+        std::string d = dir;
+        for (const auto& t : creating_tags_) d += "/" + t;
+        return d;
+    }
+    /** @brief Runs a create (new_mesh(), create_material()...) with its file under `tags`. */
+    template <class F>
+    void with_tags_(const std::vector<std::string>& tags, F&& create) {
+        creating_tags_ = tags;
+        create();
+        creating_tags_.clear();
+    }
+
+    /** @brief A typed tag as a folder name (snake_case), or "" when it can't be one. */
+    static std::string clean_tag_(const std::string& raw) {
+        const std::string t = snake_case(raw);
+        // `meshes` would read as a scene's local mesh folder, `themes` as the theme folder.
+        if (t.empty() || t == "meshes" || t == "themes") return "";
+        return t;
+    }
+
+    /** @brief Every tag on `items`, with how many assets carry it (sorted by name). */
+    static std::map<std::string, int> tag_counts_(const std::vector<std::string>& items) {
+        std::map<std::string, int> out;
+        for (const auto& rel : items) {
+            for (const auto& t : asset_tags(rel)) ++out[t];
+        }
+        return out;
+    }
+
+    /** @brief Does `rel` pass the tab's tag filter (none selected: everything does)? */
+    bool passes_tag_filter_(const std::string& rel) const {
+        const auto it = asset_tag_filter_.find(asset_tab_);
+        if (it == asset_tag_filter_.end() || it->second.empty()) return true;
+        const auto tags = asset_tags(rel);
+        auto has = [&](const std::string& t) { return std::find(tags.begin(), tags.end(), t) != tags.end(); };
+        if (asset_tag_match_all_) return std::all_of(it->second.begin(), it->second.end(), has);
+        return std::any_of(it->second.begin(), it->second.end(), has);
+    }
+    std::vector<std::string>& tag_filter_() { return asset_tag_filter_[asset_tab_]; }
+    void toggle_tag_filter_(const std::string& tag) {
+        auto& f = tag_filter_();
+        const auto it = std::find(f.begin(), f.end(), tag);
+        if (it == f.end()) f.push_back(tag);
+        else f.erase(it);
+    }
+
+    /** @brief Last-modified time and size of an asset (a scene: its document), cached briefly. */
+    AssetStat asset_stat_(const std::string& rel) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now - asset_stats_time_ > std::chrono::seconds(2)) {
+            asset_stats_.clear();
+            asset_stats_time_ = now;
+        }
+        auto it = asset_stats_.find(rel);
+        if (it != asset_stats_.end()) return it->second;
+        AssetStat st;
+        std::error_code ec;
+        const fs::path p = coopa::yaml::resolve_variant(project_.absolute(rel));
+        const auto t = fs::last_write_time(p, ec);
+        if (!ec) st.modified = std::chrono::duration_cast<std::chrono::seconds>(t.time_since_epoch()).count();
+        const auto size = fs::file_size(p, ec);
+        if (!ec) st.size = size;
+        return asset_stats_[rel] = st;
+    }
+
+    static const char* asset_sort_name_(AssetSort s) {
+        switch (s) {
+            case AssetSort::Modified: return "modified";
+            case AssetSort::Tags: return "tags";
+            case AssetSort::Size: return "size";
+            default: return "name";
+        }
+    }
+    static AssetSort asset_sort_from_name_(const std::string& n) {
+        if (n == "modified") return AssetSort::Modified;
+        if (n == "tags") return AssetSort::Tags;
+        if (n == "size") return AssetSort::Size;
+        return AssetSort::Name;
+    }
+    void set_asset_sort_(AssetSort s, bool reverse) {
+        asset_sort_ = s;
+        asset_sort_reverse_ = reverse;
+        Node prefs = Project::load_prefs();
+        prefs["asset_sort"] = Node(std::string(asset_sort_name_(s)));
+        prefs["asset_sort_reverse"] = Node(reverse);
+        Project::save_prefs(prefs);
+    }
+
+    /**
+     * @brief Orders a tab's assets: by name (A-Z), last modified (newest first), tags (untagged
+     *        first, then by tag path) or size (largest first); Reverse flips any of them.
+     */
+    void sort_assets_(AssetType t, std::vector<std::string>& items) {
+        auto lower = [](std::string v) { std::transform(v.begin(), v.end(), v.begin(), ::tolower); return v; };
+        std::vector<std::pair<std::string, std::string>> keyed;   // (name key, rel)
+        keyed.reserve(items.size());
+        for (const auto& rel : items) keyed.push_back({lower(asset_display_name_(t, rel)), rel});
+        auto by_name = [](const auto& a, const auto& b) { return a.first != b.first ? a.first < b.first : a.second < b.second; };
+        switch (asset_sort_) {
+            case AssetSort::Modified:
+                for (const auto& k : keyed) asset_stat_(k.second);
+                std::stable_sort(keyed.begin(), keyed.end(), [&](const auto& a, const auto& b) {
+                    const int64_t ma = asset_stats_[a.second].modified, mb = asset_stats_[b.second].modified;
+                    return ma != mb ? ma > mb : by_name(a, b);
+                });
+                break;
+            case AssetSort::Size:
+                for (const auto& k : keyed) asset_stat_(k.second);
+                std::stable_sort(keyed.begin(), keyed.end(), [&](const auto& a, const auto& b) {
+                    const uintmax_t sa = asset_stats_[a.second].size, sb = asset_stats_[b.second].size;
+                    return sa != sb ? sa > sb : by_name(a, b);
+                });
+                break;
+            case AssetSort::Tags: {
+                auto tag_key = [](const std::string& rel) {
+                    std::string k;
+                    for (const auto& tg : asset_tags(rel)) k += tg + "/";
+                    return k;
+                };
+                std::stable_sort(keyed.begin(), keyed.end(), [&](const auto& a, const auto& b) {
+                    const std::string ta = tag_key(a.second), tb = tag_key(b.second);
+                    return ta != tb ? ta < tb : by_name(a, b);
+                });
+                break;
+            }
+            default: std::sort(keyed.begin(), keyed.end(), by_name); break;
+        }
+        if (asset_sort_reverse_) std::reverse(keyed.begin(), keyed.end());
+        for (size_t i = 0; i < keyed.size(); ++i) items[i] = keyed[i].second;
+    }
+
+    /** @brief A tag's chip colour: a muted hue picked from its name, so a tag looks the same everywhere. */
+    static glm::vec4 tag_color_(const std::string& tag) {
+        uint32_t h = 2166136261u;
+        for (unsigned char c : tag) h = (h ^ c) * 16777619u;
+        const float hue = static_cast<float>(h % 360u) / 60.0f;
+        const float c = 0.42f, x = c * (1.0f - std::fabs(std::fmod(hue, 2.0f) - 1.0f)), m = 0.22f;
+        glm::vec3 rgb = hue < 1 ? glm::vec3(c, x, 0) : hue < 2 ? glm::vec3(x, c, 0) : hue < 3 ? glm::vec3(0, c, x)
+                      : hue < 4 ? glm::vec3(0, x, c) : hue < 5 ? glm::vec3(x, 0, c) : glm::vec3(c, 0, x);
+        return glm::vec4(rgb + glm::vec3(m), 0.55f);
+    }
+
+    /**
+     * @brief Draws `tags` as chips right-aligned in `row`, never left of `min_x` (the rest
+     *        collapse into a "+N" chip). @return The tag whose chip was clicked this frame, or "".
+     */
+    std::string draw_tag_chips_(imm::Context& ctx, const imm::Box& row, const std::vector<std::string>& tags, float min_x, bool clicked) {
+        std::string hit;
+        float x = row.right() - 4;
+        const float h = row.h - 8;
+        auto chip = [&](const std::string& text, const glm::vec4& col) -> imm::Box {
+            const float w = ctx.text_width(text) + 10;
+            const imm::Box b{x - w, row.y + 4, w, h};
+            ctx.fill_rounded(b, col, h * 0.5f);
+            ctx.text_in(b, text, ctx.style.text, 0.0f, true);
+            x -= w + 3;
+            return b;
+        };
+        for (size_t i = tags.size(); i-- > 0;) {
+            const float need = ctx.text_width(tags[i]) + 13 + (i > 0 ? ctx.text_width("+" + std::to_string(i)) + 13 : 0);
+            if (x - need < min_x) {
+                const std::string more = "+" + std::to_string(i + 1);
+                if (x - ctx.text_width(more) - 10 >= min_x) chip(more, imm::with_alpha(ctx.style.text_dim, 0.35f));
+                break;
+            }
+            const imm::Box b = chip(tags[i], tag_color_(tags[i]));
+            if (clicked && b.contains(ctx.mouse())) hit = tags[i];
+        }
+        return hit;
+    }
+
+    /**
+     * @brief Edits a tag list in place: the tags it has (each removable), the tab's other known
+     *        tags to add, and a field for a new one. Tags are folders, nested in list order.
+     */
+    void draw_tag_editor_(imm::Context& ctx, std::vector<std::string>& tags, const std::vector<std::string>& known) {
+        using I = imm::Icon;
+        if (tags.empty()) ctx.label_dim("No tags");
+        for (size_t i = 0; i < tags.size(); ++i) {
+            ctx.push_id(static_cast<int64_t>(i));
+            const imm::Box r = ctx.next_box(ctx.style.row_height);
+            ctx.fill_rounded({r.x, r.y + 2, r.w, r.h - 4}, tag_color_(tags[i]), 4);
+            ctx.icon(I::Tag, {r.x + 4, r.y + 4, r.h - 8, r.h - 8}, ctx.style.text);
+            ctx.text_in({r.x + r.h, r.y, r.w - 2 * r.h, r.h}, tags[i], ctx.style.text, 0.0f);
+            const float s = r.h - 6;
+            if (ctx.icon_button("tag_remove", I::X, "Remove tag", false, s, imm::Context::kAll, imm::Box{r.right() - s - 3, r.y + 3, s, s})) {
+                tags.erase(tags.begin() + static_cast<std::ptrdiff_t>(i));
+                ctx.pop_id();
+                break;
+            }
+            test_rects_["tag_remove:" + tags[i]] = imm::Box{r.right() - s - 3, r.y + 3, s, s};
+            ctx.pop_id();
+        }
+        bool header = false;
+        for (const auto& k : known) {
+            if (std::find(tags.begin(), tags.end(), k) != tags.end()) continue;
+            if (!header) { ctx.spacing(2); ctx.label_dim("Add a tag"); header = true; }
+            ctx.push_id("known:" + k);
+            if (ctx.selectable(k, false, 0, I::Plus)) tags.push_back(k);
+            test_rects_["tag_add:" + k] = ctx.last_rect();
+            ctx.pop_id();
+        }
+        ctx.spacing(2);
+        const imm::Box row = ctx.next_box(22);
+        const float bw = 52;
+        const imm::Box field{row.x, row.y, row.w - bw - 4, row.h};
+        ctx.input_text_box("tag_new", field, &asset_tag_input_, "New tag");
+        test_rects_["tag_new_field"] = field;
+        const imm::Box add{field.right() + 4, row.y, bw, row.h};
+        bool hov = false, held = false;
+        const std::string clean = clean_tag_(asset_tag_input_);
+        if (ctx.invisible_button("tag_new_add", add, &hov, &held) && !clean.empty()) {
+            if (std::find(tags.begin(), tags.end(), clean) == tags.end()) tags.push_back(clean);
+            asset_tag_input_.clear();
+        }
+        ctx.fill_rounded(add, hov && !clean.empty() ? ctx.style.button_hover : ctx.style.button);
+        ctx.text_in(add, "Add", clean.empty() ? ctx.style.text_disabled : ctx.style.text, 0.0f, true);
+        test_rects_["tag_new_add"] = add;
+        if (!asset_tag_input_.empty() && clean.empty()) ctx.label_dim("Not a usable tag name");
+    }
+
+    /**
+     * @brief Re-tags an asset: moves it (a scene: its folder) under `tags`, rewriting any
+     *        full-path references to it; short references (`materials/brick`) need nothing.
+     *        Unsaved edits are settled first; an open asset reopens from its new place.
+     */
+    void retag_asset_(AssetType t, const std::string& rel, const std::vector<std::string>& tags) {
+        const std::string to = with_asset_tags(rel, tags);
+        if (to == rel) return;
+        const fs::path dst = project_.assets() / to;
+        if (fs::exists(is_scene_folder_file(rel) ? dst.parent_path() : dst)) { log_error(to + " already exists"); return; }
+        guarded_([this, t, rel, to] {
+            const bool was_open = asset_is_open_(t, rel);
+            rename_asset_(rel, to);
+            if (was_open && fs::exists(project_.assets() / to)) open_asset_now_(t, project_.assets() / to);
+        });
+    }
+
+public:
+    /** @brief Re-tags an asset (tests; the panel's Tags... dialog). */
+    void set_asset_tags(AssetType t, const std::string& rel, const std::vector<std::string>& tags) { retag_asset_(t, rel, tags); }
+    /** @brief Sets the panel's tag filter for the current tab (tests). */
+    void set_asset_tag_filter(const std::vector<std::string>& tags, bool match_all = false) {
+        tag_filter_() = tags;
+        asset_tag_match_all_ = match_all;
+    }
+    /** @brief The current tab's assets as the panel lists them: filtered by tags, sorted (tests). */
+    std::vector<std::string> assets_listed() {
+        std::vector<std::string> items;
+        for (const auto& rel : list_assets_(asset_tab_)) if (passes_tag_filter_(rel)) items.push_back(rel);
+        sort_assets_(asset_tab_, items);
+        return items;
+    }
+    void set_asset_sort(AssetSort s, bool reverse = false) { set_asset_sort_(s, reverse); }
+
+private:
     /** @brief Is this (assets-relative) asset the one that's open? */
     bool asset_is_open_(AssetType t, const std::string& rel) const {
         if (t == AssetType::Theme) return game_theme_.open() && project_.relative(game_theme_.path) == rel;   // open beside a UI
@@ -287,8 +577,9 @@ public:
 
     /** @brief Creates objects/<name>.yaml (an empty object) and opens it. */
     bool new_object_asset(const std::string& name) {
-        const std::string n = unique_asset_name_("objects", name);
-        const fs::path path = project_.assets() / "objects" / (n + ".yaml");
+        const std::string dir = new_asset_dir_("objects");
+        const std::string n = unique_asset_name_(dir, name);
+        const fs::path path = project_.assets() / dir / (n + ".yaml");
         doc_.reset_object(n);
         try {
             fs::create_directories(path.parent_path());
@@ -340,7 +631,7 @@ public:
     int import_audio(const std::vector<fs::path>& files) {
         int n = 0;
         std::error_code ec;
-        const fs::path dir = project_.assets() / "audio";
+        const fs::path dir = project_.assets() / new_asset_dir_("audio");
         fs::create_directories(dir, ec);
         for (const fs::path& f : files) {
             if (!is_audio_ext_(f.extension().string())) { log_warn("Not a .wav / .mp3: " + f.string()); continue; }
@@ -352,7 +643,7 @@ public:
             ++n;
         }
         project_.refresh();
-        if (n) log_info("Imported " + std::to_string(n) + " sound" + (n == 1 ? "" : "s") + " into assets/audio/");
+        if (n) log_info("Imported " + std::to_string(n) + " sound" + (n == 1 ? "" : "s") + " into " + project_.relative(dir) + "/");
         return n;
     }
 
@@ -455,8 +746,8 @@ public:
     ObjectId place_object_asset(const std::string& object_rel, std::optional<glm::vec3> at = std::nullopt) {
         if (playing() || asset_view_()) return 0;
         const std::string stem = fs::path(object_rel).stem().string();
-        const std::string ref = strip_yaml_ext(fs::path(object_rel).generic_string());   // objects/props/crate
-        if (doc_.is_object_asset() && strip_yaml_ext(project_.relative(active_path_)) == ref) { log_warn("An object asset can't contain itself"); return 0; }
+        const std::string ref = strip_yaml_ext(short_ref(fs::path(object_rel).generic_string()));   // objects/crate
+        if (doc_.is_object_asset() && strip_yaml_ext(short_ref(project_.relative(active_path_))) == ref) { log_warn("An object asset can't contain itself"); return 0; }
         Node obj = Node::mapping();
         obj["name"] = Node(doc_.unique_name(stem));
         obj["prefab"] = Node(ref);
@@ -506,42 +797,126 @@ private:
             }
             test_rects_["asset_engine_toggle"] = eb;
         }
-        const bool can_new = asset_tab_ != AssetType::Texture && asset_tab_ != AssetType::Audio;
-        if (asset_tab_ == AssetType::Audio) {
-            if (ctx.icon_button("asset_new", I::Plus, "Import Sounds\nCopy .wav / .mp3 files into assets/audio/", false, s,
-                                imm::Context::kAll, nb)) {
-                import_audio_dialog_();
-            }
-        } else if (ctx.icon_button("asset_new", I::Plus,
-                            can_new ? std::string("New ") + info.singular + "\nCreate one in assets/" + info.dir + "/"
-                                    : std::string("Import textures by copying image files into assets/textures/"),
+        const bool can_new = asset_tab_ != AssetType::Texture;
+        const auto items_all = list_assets_(asset_tab_);
+        const auto engine_all = list_engine_assets_(asset_tab_);
+        std::vector<std::string> known_tags;   // this tab's tags, the project's and toyengine's
+        std::map<std::string, int> tag_counts = tag_counts_(items_all);
+        for (const auto& [tg, n] : tag_counts_(engine_all)) tag_counts[tg] += n;
+        for (const auto& [tg, n] : tag_counts) known_tags.push_back(tg);
+        if (ctx.icon_button("asset_new", I::Plus,
+                            asset_tab_ == AssetType::Audio ? std::string("Import Sounds\nCopy .wav / .mp3 files into assets/audio/")
+                            : can_new ? std::string("New ") + info.singular + "\nCreate one in assets/" + info.dir + "/, with tags"
+                                      : std::string("Import textures by copying image files into assets/textures/"),
                             false, s, imm::Context::kAll, nb) && can_new) {
-            // A type with choices (mesh primitives, UI templates) opens them; the rest create directly.
-            if (asset_new_has_choices_(asset_tab_)) ctx.open_popup("asset_new", glm::vec2(nb.x, nb.bottom()));
-            else new_asset_(asset_tab_);
+            // The new asset starts with the tags being filtered on; the popup can change them.
+            new_asset_tags_ = tag_filter_();
+            asset_tag_input_.clear();
+            ctx.open_popup("asset_new", glm::vec2(nb.x, nb.bottom()));
         }
-        if (ctx.begin_popup("asset_new", 220)) {
-            ctx.label_dim(std::string("New ") + info.singular);
-            draw_new_asset_items_(ctx, asset_tab_);
+        test_rects_["asset_new_button"] = nb;
+        if (ctx.begin_popup("asset_new", 240)) {
+            ctx.label_dim(asset_tab_ == AssetType::Audio ? std::string("Import Sounds") : std::string("New ") + info.singular);
+            ctx.spacing(2);
+            ctx.label_dim("Tags");
+            draw_tag_editor_(ctx, new_asset_tags_, known_tags);
+            std::string where = std::string("assets/") + info.dir;
+            for (const auto& tg : new_asset_tags_) where += "/" + tg;
+            ctx.label_dim("In " + where + "/");
+            ctx.menu_separator();
+            if (asset_tab_ == AssetType::Audio) {
+                if (ctx.menu_item("Import Sounds...", "", nullptr, true, I::Play)) import_audio_dialog_(new_asset_tags_);
+            } else {
+                draw_new_asset_items_(ctx, asset_tab_);
+            }
             ctx.end_popup();
         }
-        // Title + search.
+        // Title + sort, search, tag filter.
         const imm::Box title{area.x + 8, hb.bottom() + 4, area.w - 16, 20};
-        const auto items = list_assets_(asset_tab_);
-        const auto engine_items = list_engine_assets_(asset_tab_);
-        ctx.text_in(title, std::string(info.label) + "  (" + std::to_string(items.size()) + ")" +
-                               (engine_items.empty() ? std::string() : "  + " + std::to_string(engine_items.size()) + " toyengine"),
+        std::vector<std::string> items, engine_items;
+        for (const auto& rel : items_all) if (passes_tag_filter_(rel)) items.push_back(rel);
+        for (const auto& rel : engine_all) if (passes_tag_filter_(rel)) engine_items.push_back(rel);
+        sort_assets_(asset_tab_, items);
+        sort_assets_(asset_tab_, engine_items);
+        ctx.text_in({title.x, title.y, title.w - 24, title.h},
+                    std::string(info.label) + "  (" + std::to_string(items.size()) + ")" +
+                        (engine_items.empty() ? std::string() : "  + " + std::to_string(engine_items.size()) + " toyengine"),
                     ctx.style.text, 0.0f);
+        const char* sort_labels[] = {"Name", "Last Modified", "Tags", "Size"};
+        const imm::Box sb{title.right() - 18, title.y + 1, 18, 18};
+        if (ctx.icon_button("asset_sort", I::Sort,
+                            std::string("Sort\nBy ") + sort_labels[static_cast<int>(asset_sort_)] + (asset_sort_reverse_ ? ", reversed" : ""),
+                            asset_sort_ != AssetSort::Name || asset_sort_reverse_, 18, imm::Context::kAll, sb)) {
+            ctx.open_popup("asset_sort_menu", glm::vec2(sb.x, sb.bottom()));
+        }
+        test_rects_["asset_sort"] = sb;
+        if (ctx.begin_popup("asset_sort_menu", 190)) {
+            ctx.label_dim("Sort by");
+            for (int i = 0; i < 4; ++i) {
+                const bool on = static_cast<int>(asset_sort_) == i;
+                if (ctx.menu_item(sort_labels[i], "", &on)) set_asset_sort_(static_cast<AssetSort>(i), asset_sort_reverse_);
+                test_rects_[std::string("asset_sort:") + sort_labels[i]] = ctx.last_rect();
+            }
+            ctx.menu_separator();
+            const bool rev = asset_sort_reverse_;
+            if (ctx.menu_item("Reverse Order", "", &rev)) set_asset_sort_(asset_sort_, !asset_sort_reverse_);
+            ctx.end_popup();
+        }
         const imm::Box search{area.x + 6, title.bottom() + 2, area.w - 12, 22};
         ctx.input_text_box("asset_filter", search, &asset_filter_, "    Search");
-        if (asset_filter_.empty()) ctx.icon(I::Search, {search.x + 4, search.y + 4, 14, 14}, ctx.style.text_disabled);
-        const imm::Box body{area.x, search.bottom() + 4, area.w, area.bottom() - search.bottom() - 4};
+        if (ctx.editing_text("asset_filter").value_or(asset_filter_).empty()) {
+            ctx.icon(I::Search, {search.x + 4, search.y + 4, 14, 14}, ctx.style.text_disabled);
+        }
+        float list_top = search.bottom() + 4;
+        // Tag filter: a dropdown of the tab's tags (several can be on; none = everything).
+        auto& filter = tag_filter_();
+        filter.erase(std::remove_if(filter.begin(), filter.end(), [&](const std::string& tg) { return !tag_counts.count(tg); }), filter.end());
+        if (!known_tags.empty()) {
+            const imm::Box tb{area.x + 6, search.bottom() + 3, area.w - 12, 22};
+            bool hov = false, held = false;
+            if (ctx.invisible_button("asset_tag_filter", tb, &hov, &held)) ctx.open_popup("asset_tag_menu", glm::vec2(tb.x, tb.bottom() + 1));
+            ctx.fill_rounded(tb, hov ? ctx.style.button_hover : ctx.style.button);
+            ctx.icon(I::Tag, {tb.x + 5, tb.y + 4, 14, 14}, filter.empty() ? ctx.style.text_dim : ctx.style.text);
+            std::string shown;
+            for (const auto& tg : filter) shown += (shown.empty() ? "" : asset_tag_match_all_ ? " + " : ", ") + tg;
+            ctx.text_in({tb.x + 22, tb.y, tb.w - 22 - tb.h, tb.h}, filter.empty() ? std::string("All tags") : shown,
+                        filter.empty() ? ctx.style.text_dim : ctx.style.text, 0.0f);
+            ctx.arrow({tb.right() - tb.h + 3, tb.y + 3, tb.h - 6, tb.h - 6}, true, ctx.style.text_dim);
+            ctx.tooltip("Tags\nShow only assets with these tags (their folders under assets/" + std::string(info.dir) +
+                        "/). None picked: everything.");
+            test_rects_["asset_tag_filter"] = tb;
+            if (ctx.begin_popup("asset_tag_menu", std::max(200.0f, tb.w))) {
+                for (const auto& [tg, n] : tag_counts) {
+                    bool on = std::find(filter.begin(), filter.end(), tg) != filter.end();
+                    ctx.push_id("tf:" + tg);
+                    if (ctx.checkbox(tg + "  (" + std::to_string(n) + ")", &on)) toggle_tag_filter_(tg);
+                    test_rects_["asset_tag:" + tg] = ctx.last_rect();
+                    ctx.pop_id();
+                }
+                ctx.menu_separator();
+                bool all = asset_tag_match_all_;
+                if (ctx.checkbox("Match all picked tags", &all)) asset_tag_match_all_ = all;
+                ctx.tooltip("Match all picked tags\nOn: an asset needs every picked tag. Off: any one of them.");
+                if (ctx.button("Clear", 80, !filter.empty())) filter.clear();
+                ctx.end_popup();
+            }
+            list_top = tb.bottom() + 4;
+        }
+        const imm::Box body{area.x, list_top, area.w, area.bottom() - list_top};
         ctx.begin_region("asset_list", body, true);
         std::string f = asset_filter_;
         std::transform(f.begin(), f.end(), f.begin(), ::tolower);
         size_t shown = 0;
         bool row_hovered = false;
-        std::string right_clicked;
+        std::string right_clicked, chip_clicked;
+        // Name, then the asset's tags as chips at the row's right (click one to filter by it).
+        auto row_chips = [&](const std::string& rel, const std::string& label) {
+            const imm::Box r = ctx.last_rect();
+            const float min_x = r.x + r.h + 4 + ctx.text_width(label) + 10;
+            const std::string hit = draw_tag_chips_(ctx, r, asset_tags(rel), min_x, ctx.last_clicked());
+            if (!hit.empty()) chip_clicked = hit;
+            return !hit.empty();
+        };
         for (const auto& rel : items) {
             const std::string name = asset_display_name_(asset_tab_, rel);
             std::string ln = rel;
@@ -552,16 +927,25 @@ private:
             const bool open = asset_is_open_(asset_tab_, rel);
             const bool dirty = asset_tab_ == AssetType::Theme ? game_theme_.dirty() : open_asset_dirty_();
             const std::string label = name + (open && dirty ? "  *" : "");
-            if (ctx.selectable(label, open, 0, info.icon)) {
+            const bool clicked = ctx.selectable(label, open, 0, info.icon);
+            if (clicked && !row_chips(rel, label)) {
                 if (!open) open_asset(asset_tab_, rel);
                 else if (asset_tab_ == AssetType::Theme) prop_tab_ = PropTab::Theme;
+            } else if (!clicked) {
+                row_chips(rel, label);
             }
-            ctx.tooltip(name + "\nassets/" + rel + (asset_tab_ == AssetType::Object ? "\nDrag into a scene to place an instance" :
-                                                    asset_tab_ == AssetType::Material ? "\nDrag onto an object or a mesh slot" :
-                                                    asset_tab_ == AssetType::Mesh ? "\nDrag into a scene to add it" :
-                                                    asset_tab_ == AssetType::UI ? "\nDrag into a scene (or another UI) to place it" :
-                                                    asset_tab_ == AssetType::Theme ? "\nOpens in the Theme tab, previewed on a UI" : ""));
-            ctx.drag_source("asset", rel, name);
+            const auto tags = asset_tags(rel);
+            std::string tag_line;
+            for (const auto& tg : tags) tag_line += (tag_line.empty() ? "\nTags: " : ", ") + tg;
+            ctx.tooltip(name + "\nassets/" + rel + tag_line +
+                        (asset_tab_ == AssetType::Object ? "\nDrag into a scene to place an instance" :
+                         asset_tab_ == AssetType::Material ? "\nDrag onto an object or a mesh slot" :
+                         asset_tab_ == AssetType::Mesh ? "\nDrag into a scene to add it" :
+                         asset_tab_ == AssetType::UI ? "\nDrag into a scene (or another UI) to place it" :
+                         asset_tab_ == AssetType::Theme ? "\nOpens in the Theme tab, previewed on a UI" : ""));
+            // Dragged as its short reference (no tag folders): what gets written into the
+            // scene keeps working when the asset is re-tagged.
+            ctx.drag_source("asset", short_ref(rel), name);
             row_hovered |= ctx.last_hovered();
             test_rects_["asset_row:" + rel] = ctx.last_rect();
             if (ctx.last_clicked(imm::Mouse::Right)) right_clicked = rel;
@@ -584,33 +968,38 @@ private:
             }
             ++shown;
             ctx.push_id("engine:" + rel);
-            if (ctx.selectable(name, false, 0, info.icon)) refuse_engine_asset_(project_.absolute(rel));
+            const bool clicked = ctx.selectable(name, false, 0, info.icon);
+            if (!row_chips(rel, name) && clicked) refuse_engine_asset_(project_.absolute(rel));
             ctx.tooltip(name + "\ntoyengine: assets/" + rel + "\nRead-only -- drag it into a scene to use it, or right-click > "
                         "Copy to Project to edit a copy");
-            ctx.drag_source("asset", rel, name);
+            ctx.drag_source("asset", short_ref(rel), name);
             row_hovered |= ctx.last_hovered();
             test_rects_["asset_row:engine:" + rel] = ctx.last_rect();
             if (ctx.last_clicked(imm::Mouse::Right)) right_clicked = rel;
             ctx.pop_id();
         }
+        if (!chip_clicked.empty()) toggle_tag_filter_(chip_clicked);
         // Opened OUTSIDE the row's push_id(): a popup's id is scoped like any widget's, so one
         // opened inside the row would never match the begin_popup("asset_ctx") below.
         if (!right_clicked.empty()) { asset_context_ = right_clicked; ctx.open_popup("asset_ctx"); }
         // Right-click on empty space in the list: Add (what + offers for this tab).
         else if (!row_hovered && ctx.is_hovered(body) && !ctx.popup_hovered() && ctx.input().released[1]) {
+            new_asset_tags_ = tag_filter_();   // Add creates under the tags being filtered on
             ctx.open_popup("asset_list_ctx");
         }
         if (shown == 0) {
-            ctx.label_dim(items.empty() && engine_items.empty() ? std::string("No ") + info.label + " yet -- press + to create one."
-                                                                : "Nothing matches.");
-            if (asset_tab_ == AssetType::Texture && items.empty()) ctx.label_dim("Copy .png files into assets/textures/.");
+            ctx.label_dim(items_all.empty() && engine_all.empty() ? std::string("No ") + info.label + " yet -- press + to create one."
+                                                                  : "Nothing matches.");
+            if (asset_tab_ == AssetType::Texture && items_all.empty()) ctx.label_dim("Copy .png files into assets/textures/.");
         }
         if (ctx.begin_popup("asset_ctx", 210)) {
             draw_asset_context_menu_(ctx, asset_tab_, asset_context_);
             ctx.end_popup();
         }
         if (ctx.begin_popup("asset_list_ctx", 200)) {
-            const bool can_add = asset_tab_ != AssetType::Texture;
+            const bool can_add = asset_tab_ != AssetType::Texture && asset_tab_ != AssetType::Audio;
+            std::string where = std::string("assets/") + info.dir;
+            for (const auto& tg : new_asset_tags_) where += "/" + tg;
             if (asset_new_has_choices_(asset_tab_)) {
                 if (ctx.begin_menu("Add", can_add, I::Plus)) {
                     test_rects_["asset_add"] = ctx.last_rect();
@@ -623,7 +1012,7 @@ private:
                 if (ctx.menu_item(std::string("Add ") + info.singular, "", nullptr, can_add, I::Plus)) new_asset_(asset_tab_);
                 test_rects_["asset_add"] = ctx.last_rect();
             }
-            ctx.tooltip(can_add ? std::string("Add\nCreate a new ") + info.singular + " in assets/" + info.dir + "/ (same as the + button)"
+            ctx.tooltip(can_add ? std::string("Add\nCreate a new ") + info.singular + " in " + where + "/ (+ also picks its tags)"
                                 : std::string("Add\nImport textures by copying image files into assets/textures/"));
             ctx.menu_separator();
             if (ctx.menu_item("Refresh", "", nullptr, true, I::Restart)) project_.refresh();
@@ -666,7 +1055,21 @@ private:
             return;
         }
         if (ctx.menu_item("Duplicate", "", nullptr, true, I::Duplicate)) duplicate_asset_(t, rel);
-        if (ctx.menu_item("Rename...", "", nullptr, !asset_is_open_(t, rel))) { asset_rename_ = rel; asset_rename_to_ = fs::path(rel).stem().string(); pending_modal_ = "Rename Asset"; }
+        if (ctx.menu_item("Tags...", "", nullptr, true, I::Tag)) {
+            asset_tags_target_ = rel;
+            asset_tags_type_ = t;
+            asset_tags_edit_ = asset_tags(rel);
+            asset_tag_input_.clear();
+            pending_modal_ = "Edit Tags";
+        }
+        ctx.tooltip("Tags\nAdd or remove this asset's tags -- the folders it sits in under assets/" +
+                    std::string(asset_type_info_(t).dir) + "/. References to it keep working.");
+        test_rects_["asset_tags"] = ctx.last_rect();
+        if (ctx.menu_item("Rename...", "", nullptr, !asset_is_open_(t, rel))) {
+            asset_rename_ = rel;
+            asset_rename_to_ = asset_display_name_(t, rel);
+            pending_modal_ = "Rename Asset";
+        }
         if (ctx.menu_item("Delete...", "", nullptr, !asset_is_open_(t, rel), I::Trash)) { asset_delete_ = rel; pending_modal_ = "Delete Asset"; }
         test_rects_["asset_delete"] = ctx.last_rect();
         if (asset_is_open_(t, rel)) ctx.tooltip("Delete\nClose it first: open another asset, then delete this one");
@@ -682,16 +1085,19 @@ private:
         using I = imm::Icon;
         if (t == AssetType::Mesh) {
             for (const auto& p : primitive_names()) {
-                if (ctx.menu_item(p, "", nullptr, true, I::Mesh)) guarded_([this, p] { new_mesh(p); save_mesh(); project_.refresh(); });
+                if (ctx.menu_item(p, "", nullptr, true, I::Mesh)) {
+                    guarded_([this, p, tags = new_asset_tags_] { with_tags_(tags, [&] { new_mesh(p); save_mesh(); project_.refresh(); }); });
+                }
                 test_rects_["asset_new:" + p] = ctx.last_rect();
             }
             return;
         }
         if (t == AssetType::UI) {
-            if (ctx.menu_item("Blank Canvas", "", nullptr, true, I::UiCanvas)) guarded_([this] { new_ui_asset("new_ui", "blank"); });
+            const auto tags = new_asset_tags_;
+            if (ctx.menu_item("Blank Canvas", "", nullptr, true, I::UiCanvas)) guarded_([this, tags] { with_tags_(tags, [&] { new_ui_asset("new_ui", "blank"); }); });
             ctx.tooltip("Blank Canvas\nA screen-space canvas (HUD, menu, screen) scaled from 1920 x 1080");
             test_rects_["asset_new:Blank Canvas"] = ctx.last_rect();
-            if (ctx.menu_item("Blank Widget", "", nullptr, true, I::UiWidget)) guarded_([this] { new_ui_asset("new_widget", "widget"); });
+            if (ctx.menu_item("Blank Widget", "", nullptr, true, I::UiWidget)) guarded_([this, tags] { with_tags_(tags, [&] { new_ui_asset("new_widget", "widget"); }); });
             ctx.tooltip("Blank Widget\nA reusable piece (an item slot, a quest entry) placed inside other UI");
             const auto templates = ui_templates();
             if (!templates.empty()) ctx.menu_separator();
@@ -699,7 +1105,7 @@ private:
                 std::string label = tpl;
                 for (char& c : label) if (c == '_') c = ' ';
                 if (!label.empty()) label[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(label[0])));
-                if (ctx.menu_item(label, "", nullptr, true, I::UiWidget)) guarded_([this, tpl] { new_ui_asset(tpl, tpl); });
+                if (ctx.menu_item(label, "", nullptr, true, I::UiWidget)) guarded_([this, tpl, tags] { with_tags_(tags, [&] { new_ui_asset(tpl, tpl); }); });
                 ctx.tooltip(label + "\nStart from the " + label + " template (editor/templates/ui/" + tpl + ".yaml)");
             }
             return;
@@ -709,13 +1115,15 @@ private:
         test_rects_["asset_new:" + std::string(info.singular)] = ctx.last_rect();
     }
 
+    /** @brief Creates a new asset of a type under the tags picked for it (new_asset_tags_). */
     void new_asset_(AssetType t) {
+        const auto tags = new_asset_tags_;
         switch (t) {
-            case AssetType::Scene: guarded_([this] { new_scene_asset_("scene"); }); break;
-            case AssetType::Object: guarded_([this] { new_object_asset("object"); }); break;
-            case AssetType::Material: guarded_([this] { create_material("material"); }); break;
-            case AssetType::UI: guarded_([this] { new_ui_asset("new_ui", "blank"); }); break;
-            case AssetType::Theme: guarded_([this] { create_theme("theme"); }); break;
+            case AssetType::Scene: guarded_([this, tags] { with_tags_(tags, [&] { new_scene_asset_("scene"); }); }); break;
+            case AssetType::Object: guarded_([this, tags] { with_tags_(tags, [&] { new_object_asset("object"); }); }); break;
+            case AssetType::Material: guarded_([this, tags] { with_tags_(tags, [&] { create_material("material"); }); }); break;
+            case AssetType::UI: guarded_([this, tags] { with_tags_(tags, [&] { new_ui_asset("new_ui", "blank"); }); }); break;
+            case AssetType::Theme: guarded_([this, tags] { with_tags_(tags, [&] { create_theme("theme"); }); }); break;
             default: break;
         }
     }
@@ -723,8 +1131,9 @@ private:
     /** @brief scenes/<name>/scene.yaml: the starter scene, saved, then opened. */
     void new_scene_asset_(const std::string& base) {
         std::string n = base;
-        for (int i = 1; fs::exists(project_.assets() / "scenes" / n); ++i) n = base + "_" + std::to_string(i);
-        const fs::path path = project_.assets() / "scenes" / n / "scene.yaml";
+        const std::string dir = new_asset_dir_("scenes");
+        for (int i = 1; fs::exists(project_.assets() / dir / n) || asset_name_taken_("scenes", n); ++i) n = base + "_" + std::to_string(i);
+        const fs::path path = project_.assets() / dir / n / "scene.yaml";
         new_scene();
         apply_(doc_.set_scene_key("scene_name", Node(n)));
         try {
@@ -744,14 +1153,18 @@ private:
         if (t == AssetType::Scene && src.filename().string().rfind("scene", 0) == 0) {
             const fs::path dir = src.parent_path();
             fs::path ndir = dir;
-            for (int i = 1; fs::exists(ndir); ++i) ndir = dir.parent_path() / (dir.filename().string() + "_" + std::to_string(i));
+            for (int i = 1; fs::exists(ndir) || asset_name_taken_("scenes", ndir.filename().string()); ++i) {
+                ndir = dir.parent_path() / (dir.filename().string() + "_" + std::to_string(i));
+            }
             fs::copy(dir, ndir, fs::copy_options::recursive, ec);
             dst = ndir / src.filename();
         } else {
             const std::string stem = src.stem().string();
             const fs::path dir = src.parent_path();
+            const std::string type = asset_type_dir(rel);
+            auto taken = [&](const fs::path& p) { return fs::exists(p) || asset_name_taken_(type, p.stem().string()); };
             dst = dir / (stem + "_copy" + src.extension().string());
-            for (int i = 2; fs::exists(dst); ++i) dst = dir / (stem + "_copy" + std::to_string(i) + src.extension().string());
+            for (int i = 2; taken(dst); ++i) dst = dir / (stem + "_copy" + std::to_string(i) + src.extension().string());
             fs::copy_file(src, dst, ec);
             if (!ec && t == AssetType::Object) duplicate_tile_set_pieces_(dst);
         }
@@ -768,9 +1181,8 @@ public:
      * @return The copy's project-relative path, or "" if it could not be made.
      */
     std::string duplicate_tile_set(const std::string& rel) {
-        const fs::path src = project_.is_engine_asset(rel)
-            ? coopa::yaml::resolve_variant(Project::engine_assets() / rel)
-            : project_.absolute(rel);
+        // absolute() already falls back to toyengine's copy (by path, then by name).
+        const fs::path src = coopa::yaml::resolve_variant(project_.absolute(rel));
         const std::string n = unique_asset_name_("objects", src.stem().string() + "_copy");
         const fs::path dst = project_.assets() / "objects" / (n + ".yaml");
         std::error_code ec;
@@ -786,9 +1198,8 @@ public:
 private:
     /** @brief True when the object asset `rel` is a tile set (`tile_set: true` on its object). */
     bool is_tile_set_(const std::string& rel) const {
-        const fs::path path = project_.is_engine_asset(rel)
-            ? coopa::yaml::resolve_variant(Project::engine_assets() / rel)
-            : project_.absolute(rel);
+        // absolute() already falls back to toyengine's copy (by path, then by name).
+        const fs::path path = coopa::yaml::resolve_variant(project_.absolute(rel));
         try {
             const Node doc = coopa::yaml::load_document(path);
             return doc.contains("object") && doc.at("object").contains("tile_set") &&
@@ -821,8 +1232,11 @@ private:
                 for (auto& comp : child["components"].as_seq()) {
                     if (component_type(comp) != "MeshRenderer" || !comp.contains("mesh_path")) continue;
                     const std::string from_ref = comp.at("mesh_path").get_value<std::string>();
-                    fs::path from = coopa::yaml::resolve_variant(project_.assets() / "meshes" / (from_ref + ".yaml"));
-                    if (!fs::exists(from)) from = coopa::yaml::resolve_variant(Project::engine_assets() / "meshes" / (from_ref + ".yaml"));
+                    // The project's piece, else toyengine's -- by name, in whatever tag folder.
+                    fs::path from = coopa::yaml::resolve_variant(project_.absolute("meshes/" + from_ref + ".yaml"));
+                    if (!fs::exists(from)) {
+                        if (auto e = coopa::asset::AssetIndex::find(Project::engine_assets(), "meshes/" + from_ref + ".yaml")) from = *e;
+                    }
                     const std::string to_ref = stem + "_" + piece;
                     const fs::path to = project_.assets() / "meshes" / (to_ref + ".yaml");
                     std::error_code ec;
@@ -866,10 +1280,40 @@ private:
             ctx.input_text("New name", &asset_rename_to_);
             if (ctx.button("Rename", 100) && !asset_rename_to_.empty()) {
                 const fs::path src = project_.absolute(asset_rename_);
-                const fs::path dst = src.parent_path() / (asset_rename_to_ + src.extension().string());
-                if (fs::exists(dst)) log_error(project_.relative(dst) + " already exists");
+                // A scene's name is its folder's; anything else's, its file's.
+                const bool scene_dir = is_scene_folder_file(asset_rename_);
+                const fs::path dst = scene_dir ? src.parent_path().parent_path() / asset_rename_to_ / src.filename()
+                                               : src.parent_path() / (asset_rename_to_ + src.extension().string());
+                const std::string type = asset_type_dir(asset_rename_);
+                if (fs::exists(scene_dir ? dst.parent_path() : dst)) log_error(project_.relative(dst) + " already exists");
+                else if (asset_name_taken_(type, asset_rename_to_, asset_rename_)) {
+                    log_error("Another " + type + " asset is already named " + asset_rename_to_ +
+                              " -- names are unique per type, whatever their tags");
+                }
                 // References are rewritten on disk, so unsaved edits are settled first.
                 else guarded_([this, from = asset_rename_, to = project_.relative(dst)] { rename_asset_(from, to); });
+                ctx.close_current_popup();
+            }
+            ctx.same_line();
+            if (ctx.button("Cancel", 80)) ctx.close_current_popup();
+            ctx.end_modal();
+        }
+        if (ctx.begin_modal("Edit Tags", {340, 0})) {
+            const AssetType t = asset_tags_type_;
+            ctx.label("Tags of " + asset_display_name_(t, asset_tags_target_));
+            ctx.spacing(2);
+            std::map<std::string, int> counts = tag_counts_(list_assets_(t));
+            for (const auto& [tg, n] : tag_counts_(list_engine_assets_(t))) counts[tg] += n;
+            std::vector<std::string> known;
+            for (const auto& [tg, n] : counts) known.push_back(tg);
+            draw_tag_editor_(ctx, asset_tags_edit_, known);
+            ctx.spacing(4);
+            const std::string to = with_asset_tags(asset_tags_target_, asset_tags_edit_);
+            ctx.label_dim(to == asset_tags_target_ ? std::string("No change") : "Moves to assets/" + to);
+            const bool apply = ctx.button("Apply", 100, to != asset_tags_target_);
+            test_rects_["asset_tags_apply"] = ctx.last_rect();
+            if (apply) {
+                retag_asset_(t, asset_tags_target_, asset_tags_edit_);
                 ctx.close_current_popup();
             }
             ctx.same_line();

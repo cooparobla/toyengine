@@ -154,6 +154,7 @@ Pointer over the viewport while editing a mesh. See [Modeling](modeling.md#start
 | **L** / **Ctrl+L** | Select linked under the pointer / to the selection |
 | **G** / **R** / **S** | Move / rotate / scale |
 | **G** then **G** | Edge Slide |
+| **O** / **Shift+O** | Proportional editing on / off; next falloff curve |
 | **E** | Extrude |
 | **I** | Inset |
 | **Ctrl+B** | Bevel |
@@ -171,6 +172,12 @@ Pointer over the viewport while editing a mesh. See [Modeling](modeling.md#start
 | **U** | UV menu |
 | **Alt+N** | Normals menu |
 | **Tab** | Back to Object Mode |
+
+While moving, rotating or scaling with proportional editing on:
+
+| Input | Action |
+|---|---|
+| Scroll wheel, **Page Up** / **Page Down** | Grow / shrink the proportional circle |
 
 During a loop cut (**Ctrl+R**):
 

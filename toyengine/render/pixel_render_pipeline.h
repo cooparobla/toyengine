@@ -3374,7 +3374,7 @@ private:
         auto& fog = fog_data_.data();
         // CAVEAT: fog_data_ is single-buffered, so this inv_view_proj carries the same hazard that
         // made camera_ubos_ per-slot (file doc, rule 2) -- a one-frame-stale camera matrix under
-        // fast motion. Unexercised today (assets/config.yaml ships fog_enabled: false), and
+        // fast motion (assets/config.yaml ships fog_enabled: true, so this is live), and
         // documented rather than fixed because FogPass owns its own descriptor set bound once at
         // construction, so making it per-slot needs an additive gfxcoopa API change.
         fog.inv_view_proj = glm::inverse(unjittered_proj * view);

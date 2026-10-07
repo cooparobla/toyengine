@@ -2,7 +2,7 @@
 
 Standalone generator, not part of the C++ build -- run it manually (`python3
 tools/gen_water_grid_mesh.py`) whenever
-assets/meshes/water_grid.yaml needs regenerating.
+assets/meshes/water/water_grid.yaml needs regenerating.
 
 water_surface.glsl's wave displacement moves each vertex independently; a flat single-quad
 mesh (like plane, 4 vertices) can only tilt as a rigid whole under that displacement,
@@ -23,7 +23,7 @@ before the object's own Transform.scale) resolve visible crests rather than alia
 jagged few-vertex fold. The pond's WaterBody loads this mesh CPU-side and bakes it (see
 toyengine/water/water_system.h); the MeshRenderer itself names no mesh."""
 
-OUTPUT_PATH = pathlib.Path(__file__).parent.parent / "assets/meshes/water_grid.yaml"
+OUTPUT_PATH = pathlib.Path(__file__).parent.parent / "assets/meshes/water/water_grid.yaml"
 
 
 def fmt_vec(v):

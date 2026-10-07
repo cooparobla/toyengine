@@ -1,7 +1,7 @@
 """Generates the brick albedo/normal/metallic-roughness texture set (materials/brick.yaml).
 
 Standalone generator, not part of the C++ build -- run it manually (`python3
-tools/gen_material_maps.py`) whenever the assets/textures/brick_*.png files
+tools/gen_material_maps.py`) whenever the assets/textures/brick/brick_*.png files
 need regenerating. Requires numpy and Pillow.
 
 Produces a simple running-bond brick pattern -- chosen because a brick's mortar grooves give the
@@ -42,7 +42,7 @@ BUMP_STRENGTH = 2.5
 tuning constant -- see _height_to_normal()'s central-difference gradient, which this scales.
 """
 
-OUTPUT_DIR = pathlib.Path(__file__).resolve().parent.parent / "assets" / "textures"
+OUTPUT_DIR = pathlib.Path(__file__).resolve().parent.parent / "assets" / "textures" / "brick"
 """Directory the three brick_*.png files are written into; resolved relative to this repo, not
 the caller's cwd.
 """

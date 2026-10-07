@@ -232,7 +232,7 @@ struct PixelRenderConfig {
      * matching pixel_stylize_pass_'s own binding -- see that call site's comment for why a
      * per-frame rebind isn't safe under this pipeline's frame-overlap model.
      */
-    bool fog_enabled = false;
+    bool fog_enabled = true;
 
     /**
      * The underwater look (toyengine/render/passes/underwater_pass.h): fog, absorption and

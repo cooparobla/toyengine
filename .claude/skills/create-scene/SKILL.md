@@ -5,16 +5,19 @@ description: Create or extend a toyengine scene -- assets/scenes/<name>/scene.ya
 
 # Create a scene
 
-A scene is `assets/scenes/<name>/scene.yaml`: a tree of named objects, each a list of
+A scene is `assets/scenes/<tags>/<name>/scene.yaml` (tags are folders: test scenes go in
+`scenes/tests/<feature>/`, showcases in `scenes/demos/`; see "Tags" in `assets/README.md`).
+`./build/toyengine <name>` and `SCENE=<name>` find it by name whatever its tags. It is a tree of named objects, each a list of
 components. **The loader is permissive**: unknown component types and unknown keys are
 silently skipped, and most enum parsers map an unknown value to the default. A typo renders as
 "nothing happened". Take every key from [reference/components.md](reference/components.md),
 never from memory.
 
 Read first: `assets/README.md` (naming, shared meshes and materials, scene settings).
-Good examples: `scenes/pixel_demo` (everything at once), `scenes/ssr_test` and
-`scenes/fog_test` (feature benches with a documented header), `scenes/physics_test`,
-`scenes/water_test`, `scenes/particles_test`, `scenes/terrain_test`.
+Good examples (under `scenes/demos/` and `scenes/tests/<feature>/`): `pixel_demo` (everything
+at once), `ssr_test` and `fog_test` (feature benches with a documented header), `physics_test`,
+`water_test`, `particles_test`, `terrain_test`. Reference other assets by type and name only
+(`materials/steel`, `mesh_path: cube`) -- never through their tag folders.
 
 ## Conventions
 

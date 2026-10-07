@@ -1,9 +1,9 @@
 """Generates the terrain tile SIDE meshes used by the terrain_test scene.
 
 Standalone generator, not part of the C++ build -- run it manually (`python3
-tools/gen_tile_side_meshes.py`) whenever assets/meshes/tile_side_*.yaml need regenerating.
+tools/gen_tile_side_meshes.py`) whenever assets/meshes/terrain/tile_side_*.yaml need regenerating.
 
-These live in the SHARED assets/meshes/, not inside any one scene, because a tile side is a
+These live in the SHARED assets/meshes/terrain/, not inside any one scene, because a tile side is a
 primitive of the tile system rather than demo content -- every terrain scene wants the same
 ones. A scene that wants its own set drops a file of the same name into its own meshes/ and
 wins automatically: AssetSource::resolve() tries the loading scene's directory before the
@@ -34,7 +34,7 @@ import pathlib
 
 from mesh_yaml import write_mesh
 
-OUTPUT_DIR = pathlib.Path(__file__).resolve().parent.parent / "assets" / "meshes"
+OUTPUT_DIR = pathlib.Path(__file__).resolve().parent.parent / "assets" / "meshes" / "terrain"
 """Where the generated YAML is written; resolved relative to this repo, not the caller's cwd."""
 
 BEVEL_INSET = 0.15

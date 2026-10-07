@@ -27,6 +27,7 @@
 #include "../mesh/edit_mesh.h"
 #include "../mesh/primitives.h"
 
+#include <coopa/asset/asset_index.h>
 #include <coopa/yaml/document.h>
 #include <coopa/yaml/writer.h>
 
@@ -54,50 +55,136 @@ inline std::string strip_yaml_ext(const std::string& rel) {
 }
 
 /**
- * @brief The `mesh_path` value naming a mesh file: its path under the `meshes/` folder it lives
- *        in, without the extension -- the engine loads `meshes/<value>.yaml` from the scene's
- *        directory, then the assets root. `meshes/props/rock.yaml` -> `props/rock`;
- *        `scenes/lake/meshes/basin.yaml` -> `basin`.
+ * @brief The type folder of an assets-relative path: `ui/themes` for a theme, else its first
+ *        folder (`materials/metal/brick.yaml` -> `materials`). Everything between the type
+ *        folder and the asset is TAGS (see asset_tags()).
  */
-inline std::string mesh_ref(const std::string& rel) {
-    const std::string g = strip_yaml_ext(fs::path(rel).generic_string());
-    if (g.rfind("meshes/", 0) == 0) return g.substr(7);
-    const size_t at = g.find("/meshes/");
-    if (at != std::string::npos) return g.substr(at + 8);
-    return fs::path(g).filename().string();
+inline std::string asset_type_dir(const std::string& rel) {
+    const std::string g = fs::path(rel).generic_string();
+    if (g.rfind("ui/themes/", 0) == 0) return "ui/themes";
+    const size_t slash = g.find('/');
+    return slash == std::string::npos ? std::string() : g.substr(0, slash);
+}
+
+/** @brief True for a scene document in its own folder (`scenes/<tags>/<name>/scene*.yaml`). */
+inline bool is_scene_folder_file(const std::string& rel) {
+    const fs::path p(rel);
+    const std::string g = p.generic_string();
+    return g.rfind("scenes/", 0) == 0 && p.filename().string().rfind("scene", 0) == 0 &&
+           p.parent_path().generic_string() != "scenes" && p.parent_path().filename() != "meshes";
+}
+
+/** @brief True for a scene-local file (`scenes/<scene>/meshes/x.yaml`): no tags, no short form. */
+inline bool is_scene_local_file(const std::string& rel) {
+    const std::string g = fs::path(rel).generic_string();
+    return g.rfind("scenes/", 0) == 0 && g.find("/meshes/") != std::string::npos;
 }
 
 /**
- * @brief How references to a renamed asset are rewritten. Paths that name their folder
- *        (`objects/x`, `materials/x`, `textures/x.png`, `ui/themes/x.yaml`) are unambiguous, so
- *        they are matched as whole string values under any key; a mesh is named by a bare
- *        `mesh_ref()`, so it is only matched under the keys that hold one.
+ * @brief An asset's tags: the folders between its type folder and the asset (a scene's own
+ *        folder is the asset, not a tag). `scenes/tests/water/water_test/scene.yaml` -> {tests,
+ *        water}; `materials/brick.yaml` -> {}.
+ */
+inline std::vector<std::string> asset_tags(const std::string& rel) {
+    std::vector<std::string> out;
+    if (is_scene_local_file(rel)) return out;
+    const std::string type = asset_type_dir(rel);
+    if (type.empty()) return out;
+    fs::path dir = fs::path(fs::path(rel).generic_string().substr(type.size() + 1)).parent_path();
+    if (is_scene_folder_file(rel)) dir = dir.parent_path();
+    for (const auto& part : dir) {
+        const std::string s = part.generic_string();
+        if (!s.empty() && s != ".") out.push_back(s);
+    }
+    return out;
+}
+
+/** @brief `rel` moved under the tag folders `tags` (same type folder, same asset name). */
+inline std::string with_asset_tags(const std::string& rel, const std::vector<std::string>& tags) {
+    const std::string type = asset_type_dir(rel);
+    if (type.empty() || is_scene_local_file(rel)) return rel;
+    const fs::path p(rel);
+    fs::path out(type);
+    for (const auto& t : tags) out /= t;
+    if (is_scene_folder_file(rel)) out /= p.parent_path().filename();
+    return (out / p.filename()).generic_string();
+}
+
+/**
+ * @brief The short reference to an asset: its type folder and name, without tag folders
+ *        (`materials/metal/brick.yaml` -> `materials/brick.yaml`; a scene keeps its folder).
+ *        The engine finds it by name wherever its tags put it (coopa::asset::AssetIndex), so
+ *        references written this way survive re-tagging. Scene-local files are unchanged.
+ */
+inline std::string short_ref(const std::string& rel) {
+    const std::string type = asset_type_dir(rel);
+    if (type.empty() || is_scene_local_file(rel)) return fs::path(rel).generic_string();
+    const fs::path p(rel);
+    if (is_scene_folder_file(rel)) return "scenes/" + p.parent_path().filename().generic_string() + "/" + p.filename().generic_string();
+    return type + "/" + p.filename().generic_string();
+}
+
+/**
+ * @brief The `mesh_path` value naming a mesh file: its name -- the engine loads
+ *        `meshes/<value>.yaml` from the scene's directory, then the assets roots, then finds it
+ *        by name in any tag folder. `meshes/props/rock.yaml` -> `rock`;
+ *        `scenes/lake/meshes/basin.yaml` -> `basin`.
+ */
+inline std::string mesh_ref(const std::string& rel) {
+    return fs::path(strip_yaml_ext(fs::path(rel).generic_string())).filename().generic_string();
+}
+
+/**
+ * @brief How references to a renamed / moved asset are rewritten. Paths that name their
+ *        folder (`objects/x`, `materials/x`, `textures/x.png`, `ui/themes/x.yaml`) are
+ *        unambiguous, so they are matched as whole string values under any key -- both the
+ *        full path and the short one (short_ref()); a mesh is named by a bare mesh_ref() (or,
+ *        written by older editors, its path under meshes/), so it is only matched under the
+ *        keys that hold one. A move that keeps the name (re-tagging) changes no short form,
+ *        so only full-path references need rewriting.
  */
 struct RefRename {
     std::vector<std::pair<std::string, std::string>> paths;   ///< old -> new, any key
     std::vector<std::string> mesh_keys;                       ///< keys holding a mesh_ref()
-    std::string mesh_old, mesh_new;
+    std::vector<std::pair<std::string, std::string>> meshes;  ///< old -> new mesh refs, under mesh_keys
 
     /** @brief The rewrite for renaming assets-relative `from` to `to` (empty if nothing refers to it by path). */
     static RefRename between(const std::string& from, const std::string& to) {
         RefRename r;
         const std::string f = fs::path(from).generic_string(), t = fs::path(to).generic_string();
+        // First rule for a value wins -- even a no-op one: the short form goes first, so moving an
+        // untagged asset (whose full path IS its short form) leaves its short references alone.
+        std::vector<std::string> seen;
+        auto add = [&seen](std::vector<std::pair<std::string, std::string>>& v, const std::string& a, const std::string& b) {
+            if (std::find(seen.begin(), seen.end(), a) != seen.end()) return;
+            seen.push_back(a);
+            if (a != b) v.push_back({a, b});
+        };
         if (f.find("meshes/") != std::string::npos) {
             r.mesh_keys = {"mesh_path", "side_mesh", "mesh"};
-            r.mesh_old = mesh_ref(f);
-            r.mesh_new = mesh_ref(t);
+            auto under_meshes = [](const std::string& g) {
+                const std::string s = strip_yaml_ext(g);
+                if (s.rfind("meshes/", 0) == 0) return s.substr(7);
+                const size_t at = s.find("/meshes/");
+                return at == std::string::npos ? fs::path(s).filename().string() : s.substr(at + 8);
+            };
+            add(r.meshes, mesh_ref(f), mesh_ref(t));
+            add(r.meshes, under_meshes(f), under_meshes(t));
             return r;
         }
-        r.paths.push_back({f, t});
-        r.paths.push_back({"assets/" + f, "assets/" + t});   // config.yaml's root-relative refs
-        if (strip_yaml_ext(f) != f) r.paths.push_back({strip_yaml_ext(f), strip_yaml_ext(t)});
+        for (const auto& [a, b] : {std::pair{short_ref(f), short_ref(t)}, std::pair{f, t}}) {
+            add(r.paths, a, b);
+            add(r.paths, "assets/" + a, "assets/" + b);   // config.yaml's root-relative refs
+            add(r.paths, strip_yaml_ext(a), strip_yaml_ext(b));
+        }
         return r;
     }
+    bool empty() const { return paths.empty() && meshes.empty(); }
     /** @brief Strings a file must contain to possibly refer to the asset (a cheap pre-check). */
     std::vector<std::string> needles() const {
         std::vector<std::string> out;
         for (const auto& p : paths) out.push_back(p.first);
-        if (!mesh_old.empty()) out.push_back(mesh_old);
+        for (const auto& m : meshes) out.push_back(m.first);
         return out;
     }
     /** @brief Rewrites matching references in `n`; returns how many changed. */
@@ -111,10 +198,10 @@ private:
             for (const auto& p : paths) {
                 if (v == p.first) { n = Node(p.second); return 1; }
             }
-            if (key && !mesh_old.empty() && v == mesh_old &&
-                std::find(mesh_keys.begin(), mesh_keys.end(), *key) != mesh_keys.end()) {
-                n = Node(mesh_new);
-                return 1;
+            if (key && std::find(mesh_keys.begin(), mesh_keys.end(), *key) != mesh_keys.end()) {
+                for (const auto& m : meshes) {
+                    if (v == m.first) { n = Node(m.second); return 1; }
+                }
             }
         } else if (n.is_mapping()) {
             for (auto& kv : n.as_map()) {
@@ -195,9 +282,13 @@ public:
         const fs::path p(rel);
         if (p.is_absolute()) return p;
         const fs::path mine = assets() / p;
-        if (is_engine() || exists_(mine)) return mine;
+        if (exists_(mine)) return mine;
         const fs::path theirs = engine_assets() / p;
-        return exists_(theirs) ? theirs : mine;
+        if (!is_engine() && exists_(theirs)) return theirs;
+        // By name, wherever its tag folders put it (`materials/brick` -> materials/metal/brick.yaml).
+        if (auto found = coopa::asset::AssetIndex::find(assets(), rel)) return *found;
+        if (!is_engine()) if (auto found = coopa::asset::AssetIndex::find(engine_assets(), rel)) return *found;
+        return mine;
     }
 
     // --- toyengine's own assets: the read-only layer under a game project's ---
@@ -229,10 +320,14 @@ public:
         const std::string key = "engine|" + dir + "|" + ext;
         auto it = cache_.find(key);
         if (it != cache_.end()) return it->second;
-        const auto& mine = list(dir, ext);
+        // Shadowed by NAME, not path: the project's materials/brick.yaml is what `materials/brick`
+        // resolves to even when toyengine's sits in a tag folder (materials/building/brick.yaml).
+        std::vector<std::string> mine;
+        for (const auto& rel : list(dir, ext)) mine.push_back(short_ref(rel));
+        std::sort(mine.begin(), mine.end());
         std::vector<std::string> out;
         for (const auto& rel : scan_(engine_assets(), dir, ext)) {
-            if (std::find(mine.begin(), mine.end(), rel) == mine.end()) out.push_back(rel);
+            if (!std::binary_search(mine.begin(), mine.end(), short_ref(rel))) out.push_back(rel);
         }
         return cache_[key] = out;
     }
@@ -249,41 +344,73 @@ public:
         if (it != cache_.end()) return it->second;
         return cache_[key] = scan_(assets(), dir, ext);
     }
-    void refresh() { cache_.clear(); }
+    void refresh() { cache_.clear(); coopa::asset::AssetIndex::invalidate(); }
 
     /**
-     * @brief Renames assets-relative `from` to `to` and rewrites every reference to it in the
-     *        project's YAML (scenes, object / UI assets, materials, config, LOD sidecars). A
-     *        mesh's `.lod.yaml` sidecar moves with it. Returns the files rewritten
-     *        (assets-relative); throws on a failed rename.
+     * @brief Renames / moves assets-relative `from` to `to` and rewrites every reference to it
+     *        in the project's YAML (scenes, object / UI assets, materials, config, LOD sidecars).
+     *        A mesh's `.lod.yaml` sidecar moves with it; a scene in its own folder
+     *        (is_scene_folder_file()) moves as the whole folder -- its scene-local files and
+     *        sibling scene documents along. Returns the files rewritten (assets-relative);
+     *        throws on a failed rename.
      */
     std::vector<std::string> rename_asset(const std::string& from, const std::string& to) {
-        const fs::path src = absolute(from), dst = absolute(to);
-        fs::create_directories(dst.parent_path());
-        fs::rename(src, dst);
+        const fs::path src = absolute(from), dst = assets() / to;
         std::error_code ec;
-        if (from.find("meshes/") != std::string::npos) {
-            const fs::path lod_src = src.parent_path() / (src.stem().string() + ".lod" + src.extension().string());
-            if (fs::exists(lod_src, ec)) {
-                fs::rename(lod_src, dst.parent_path() / (dst.stem().string() + ".lod" + dst.extension().string()), ec);
+        std::vector<RefRename> renames;
+        const bool scene_dir = is_scene_folder_file(from) && is_scene_folder_file(to) &&
+                               fs::path(from).parent_path() != fs::path(to).parent_path();
+        if (scene_dir) {
+            // The folder is the scene: move it, then (if the file name changed too) the file.
+            const fs::path sdir = src.parent_path(), ddir = dst.parent_path();
+            if (fs::exists(ddir, ec)) throw std::runtime_error(relative(ddir) + " already exists");
+            fs::create_directories(ddir.parent_path());
+            fs::rename(sdir, ddir);
+            if (src.filename() != dst.filename()) fs::rename(ddir / src.filename(), dst);
+            const std::string fdir = fs::path(from).parent_path().generic_string(), tdir = fs::path(to).parent_path().generic_string();
+            for (auto e = fs::recursive_directory_iterator(ddir, ec); !ec && e != fs::recursive_directory_iterator(); e.increment(ec)) {
+                if (!e->is_regular_file()) continue;
+                const std::string inner = fs::relative(e->path(), ddir, ec).generic_string();
+                if (inner.find("meshes/") != std::string::npos) continue;   // scene-local: found from the scene's folder
+                const std::string was = fdir + "/" + (e->path().filename() == dst.filename() ? src.filename().generic_string() : inner);
+                renames.push_back(RefRename::between(was, tdir + "/" + inner));
             }
+        } else {
+            if (fs::exists(dst, ec) && !fs::equivalent(src, dst, ec)) throw std::runtime_error(to + " already exists");
+            fs::create_directories(dst.parent_path());
+            fs::rename(src, dst);
+            if (from.find("meshes/") != std::string::npos) {
+                const fs::path lod_src = src.parent_path() / (src.stem().string() + ".lod" + src.extension().string());
+                if (fs::exists(lod_src, ec)) {
+                    fs::rename(lod_src, dst.parent_path() / (dst.stem().string() + ".lod" + dst.extension().string()), ec);
+                }
+            }
+            renames.push_back(RefRename::between(from, to));
         }
-        const RefRename r = RefRename::between(from, to);
-        const auto needles = r.needles();
-        const bool mesh = !r.mesh_old.empty();
+        coopa::asset::AssetIndex::invalidate();
+        renames.erase(std::remove_if(renames.begin(), renames.end(), [](const RefRename& r) { return r.empty(); }), renames.end());
+        std::vector<std::string> rewritten;
+        if (renames.empty()) { refresh(); return rewritten; }
+        std::vector<std::string> needles;
+        bool mesh = false;
+        for (const auto& r : renames) {
+            for (const auto& n : r.needles()) needles.push_back(n);
+            mesh |= !r.meshes.empty();
+        }
         // A scene-local mesh (scenes/<s>/meshes/x.yaml) is only visible to its own scene's files;
-        // a global one is shadowed in any directory that has its own meshes/<ref>.yaml.
+        // a global one is shadowed in any directory that has its own meshes/<name>.yaml.
         const std::string g = fs::path(from).generic_string();
         const bool local_mesh = mesh && g.rfind("meshes/", 0) != 0;
         const fs::path scan_root = local_mesh ? assets() / g.substr(0, g.find("/meshes/")) : assets();
-        std::vector<std::string> rewritten;
+        const std::string mesh_name = mesh ? mesh_ref(from) : std::string();
         for (auto e = fs::recursive_directory_iterator(scan_root, ec); e != fs::recursive_directory_iterator(); e.increment(ec)) {
             if (ec) break;
             if (!e->is_regular_file() || e->path().extension() != ".yaml") continue;   // .caml is a packaged copy
             if (mesh && !local_mesh && e->path().parent_path() != assets() &&
-                fs::exists(e->path().parent_path() / "meshes" / (r.mesh_old + ".yaml"), ec)) continue;
+                fs::exists(e->path().parent_path() / "meshes" / (mesh_name + ".yaml"), ec)) continue;
             // Mesh files are large and only refer to other meshes in `lods:`.
-            const bool in_meshes = e->path().parent_path().filename() == "meshes";
+            const bool in_meshes = fs::path(relative(e->path())).generic_string().rfind("meshes/", 0) == 0 ||
+                                   e->path().parent_path().filename() == "meshes";
             if (in_meshes && !mesh) continue;
             std::string text;
             {
@@ -294,7 +421,9 @@ public:
             if (std::none_of(needles.begin(), needles.end(), [&](const std::string& n) { return text.find(n) != std::string::npos; })) continue;
             try {
                 Node doc = coopa::yaml::load_document(e->path());
-                if (r.apply(doc) == 0) continue;
+                int changed = 0;
+                for (const auto& r : renames) changed += r.apply(doc);
+                if (changed == 0) continue;
                 coopa::yaml::save_document(e->path(), doc);
                 rewritten.push_back(relative(e->path()));
             } catch (...) {

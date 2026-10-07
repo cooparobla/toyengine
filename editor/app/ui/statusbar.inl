@@ -11,6 +11,7 @@
         if (modal_.active()) {
             hints = {{I::MouseLeft, "Confirm"}, {I::MouseRight, "Cancel"}, {I::Keyboard, "X Y Z  Axis"}, {I::Keyboard, "Ctrl  Snap"},
                      {I::Keyboard, "Shift  Precision"}};
+            if (proportional_live_()) hints.push_back({I::MouseMiddle, "Wheel  Proportional Size"});
         } else if (nav_active_) {
             hints = {{I::MouseMiddle, "Orbit"}, {I::Keyboard, "Shift  Pan"}, {I::Keyboard, "Ctrl  Zoom"}};
         } else if (timeline_hovered_ && bottom_view_ == 1 && anim_clip_.open()) {

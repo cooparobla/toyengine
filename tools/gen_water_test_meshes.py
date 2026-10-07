@@ -1,5 +1,5 @@
-"""Generates the meshes for the water_test scene (assets/scenes/water_test/meshes/), the
-underwater_test pool, and the shared water props (assets/meshes/sphere_low.yaml, barrel.yaml).
+"""Generates the meshes for the water_test scene (assets/scenes/tests/water/water_test/meshes/), the
+underwater_test pool, and the shared water props (assets/meshes/primitives/sphere_low.yaml, barrel.yaml).
 
 Standalone generator, not part of the C++ build -- run it manually
 (`python3 tools/gen_water_test_meshes.py`) whenever the scene's terrain or river needs
@@ -23,7 +23,7 @@ World convention: Z up, metres. The lake surface sits at z = 0.
 import math
 import pathlib
 
-OUT_DIR = pathlib.Path(__file__).parent.parent / "assets/scenes/water_test/meshes"
+OUT_DIR = pathlib.Path(__file__).parent.parent / "assets/scenes/tests/water/water_test/meshes"
 
 # --- Terrain grid ---
 EXTENT = 40.0          # terrain covers [-EXTENT, EXTENT]^2
@@ -270,8 +270,8 @@ def build_props(out_dir=None):
     write_lathe(out_dir / "barrel.yaml", cap, 20)
 
 
-POOL_DIR = pathlib.Path(__file__).parent.parent / "assets/scenes/underwater_test/meshes"
-PROPS_DIR = pathlib.Path(__file__).parent.parent / "assets/meshes"   # shared by both scenes
+POOL_DIR = pathlib.Path(__file__).parent.parent / "assets/scenes/tests/water/underwater_test/meshes"
+PROPS_DIR = pathlib.Path(__file__).parent.parent / "assets/meshes/primitives"   # shared by both scenes
 POOL_EXTENT = 16.0
 POOL_CELLS = 64
 

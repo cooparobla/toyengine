@@ -6,7 +6,7 @@ window:
   visible: true              # false = never-mapped window (headless); what the test suite uses
 
 scene:
-  default_scene: "assets/scenes/pixel_demo/scene.yaml"
+  default_scene: "assets/scenes/demos/pixel_demo/scene.yaml"
 
 render:
   # =========================================================================
@@ -21,7 +21,7 @@ render:
   refraction_enabled: true   # screen-space refraction for BLEND MESH objects (needs transparency_enabled)
   sdf_enabled: true          # signed-distance-field raymarching (SdfRenderer/SdfShape)
   bloom_enabled: true        # additive glow from bright HDR regions
-  fog_enabled: false         # GLOBAL analytic fog (the Fog block below is its only source)
+  fog_enabled: true          # GLOBAL analytic fog (the Fog block below is its only source)
   volumetrics_enabled: true  # raymarched LOCAL volumes (Volume components in the scene)
   dof_enabled: false         # physically-based depth of field, at render resolution before bloom
   tilt_shift_enabled: false  # diorama blur at DISPLAY resolution, after the upscale

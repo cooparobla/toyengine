@@ -12,20 +12,35 @@ Every file, folder, object, scene name and clip is **lowercase snake_case**: `gl
 Component types (`MeshRenderer`) and enum values (`Perspective`, `BLEND`) are engine identifiers,
 not names, and keep their own spelling.
 
+## Tags: folders under each type folder
+
+The folders between an asset's **type folder** and the asset are its **tags**:
+`materials/metal/steel.yaml` is the material `steel`, tagged `metal`;
+`scenes/tests/water/water_test/scene.yaml` is the scene `water_test`, tagged `tests` and
+`water`. The editor's Asset panel shows them as chips, filters by them, and moves an asset when
+its tags change (right-click > Tags...).
+
+**References name only the type and the asset**, never its tags: `material: materials/steel`,
+`mesh_path: cube`, `prefab: objects/campfire`, `texture_albedo: textures/brick_albedo.png`,
+`SCENE=water_test`. When the exact path doesn't exist, every resolver finds the asset by type
+and name in any tag folder (`coopa::asset::AssetIndex`; the project's assets before
+toyengine's). So re-tagging breaks nothing, and **a name is unique within its type** (a
+material and a mesh may both be `brick`; two materials may not).
+
 ## Layout
 
 | Folder | Holds |
 | --- | --- |
 | `config.yaml` | window / render / scene settings, a comment on every key |
-| `scenes/<name>/scene.yaml` | one folder per scene; scene-specific meshes in `scenes/<name>/meshes/` |
-| `meshes/` | shared meshes (plus `<mesh>.lod.yaml` LOD sidecars) |
-| `materials/` | shared PBR materials -- see below |
-| `textures/` | shared material maps |
-| `objects/` | object assets (prefabs): the animation test rigs |
+| `scenes/<tags>/<name>/scene.yaml` | one folder per scene; scene-specific meshes in its own `meshes/`. Tags: `tests/<feature>`, `demos` |
+| `meshes/` | shared meshes (plus `<mesh>.lod.yaml` LOD sidecars, kept beside their mesh). Tags: `primitives`, `props`, `terrain/<style>`, `water`, `animation` |
+| `materials/` | shared PBR materials -- see below. Tags: `basic`, `metal`, `transparent`, `natural`, `building`, `prototype` |
+| `textures/` | shared material maps. Tags: `brick`, `terrain`, `prototype`, `masks` |
+| `objects/` | object assets (prefabs). Tags: `animation` (test rigs), `terrain` (tile sets), `props` |
 | `animations/<rig>/` | clips, one folder per rig |
 | `physics_materials/` | friction / restitution sets for colliders |
 | `shaders/` | GLSL; surface shaders are named by a material's `shader:` |
-| `ui/` | UI assets -- HUD, menus, screens (open them in the editor's UI tab) |
+| `ui/` | UI assets -- HUD, menus, screens (open them in the editor's UI tab). Tags: `menus`, `hud` |
 | `ui/themes/` | UI themes: colours, fonts, sizes of the themed widgets |
 | `palettes/`, `fonts/` | colour palettes, UI fonts |
 

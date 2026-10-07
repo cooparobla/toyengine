@@ -128,8 +128,9 @@ public:
     bool new_ui_asset(const std::string& name, const std::string& template_id = "blank") {
         std::string base = name.empty() ? std::string("new_ui") : name;
         for (char& c : base) if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_') c = '_';
-        const std::string n = unique_asset_name_("ui", base);
-        const fs::path path = project_.assets() / "ui" / (n + ".yaml");
+        const std::string dir = new_asset_dir_("ui");
+        const std::string n = unique_asset_name_(dir, base);
+        const fs::path path = project_.assets() / dir / (n + ".yaml");
         Node doc;
         if (template_id == "blank" || template_id == "widget") {
             Node obj = Node::mapping();
@@ -180,7 +181,7 @@ public:
         if (playing() || asset_view_()) return 0;
         const std::string stem = fs::path(ui_rel).stem().string();
         if (doc_.is_object_asset() && active_path_.stem().string() == stem) { log_warn("A UI asset can't contain itself"); return 0; }
-        std::string ref = fs::path(ui_rel).replace_extension().generic_string();
+        std::string ref = strip_yaml_ext(short_ref(fs::path(ui_rel).generic_string()));
         Node obj = Node::mapping();
         obj["name"] = Node(doc_.unique_name(stem, parent));
         obj["prefab"] = Node(ref);

@@ -20,10 +20,7 @@
 public:
     /** @brief Opens a game UI theme in the Theme tab, previewed on a UI asset. */
     bool open_theme(const fs::path& path) {
-        std::string ref = project_.relative(path);
-        if (ref.size() > 5 && (ref.compare(ref.size() - 5, 5, ".yaml") == 0 || ref.compare(ref.size() - 5, 5, ".caml") == 0)) {
-            ref = ref.substr(0, ref.size() - 5);
-        }
+        const std::string ref = strip_yaml_ext(short_ref(project_.relative(path)));
         try {
             game_theme_.load(path, ref);
         } catch (const std::exception& e) {
@@ -49,8 +46,9 @@ public:
      */
     bool create_theme(const std::string& name) {
         ui_install_template_themes_();
-        const std::string n = unique_asset_name_("ui/themes", name);
-        const fs::path dst = project_.assets() / "ui" / "themes" / (n + ".yaml");
+        const std::string dir = new_asset_dir_("ui/themes");
+        const std::string n = unique_asset_name_(dir, name);
+        const fs::path dst = project_.assets() / dir / (n + ".yaml");
         Node t = Node::mapping();
         try {
             if (game_theme_.open()) t = game_theme_.node;
@@ -105,7 +103,7 @@ private:
         const auto uis = list_assets_(AssetType::UI);
         auto has = [&](const std::string& r) { return std::find(uis.begin(), uis.end(), r) != uis.end(); };
         if (!theme_preview_ui_.empty() && has(theme_preview_ui_)) return theme_preview_ui_;
-        if (has("ui/settings.yaml")) return "ui/settings.yaml";
+        for (const auto& r : uis) if (fs::path(r).stem() == "settings") return r;   // ui/<tags>/settings
         return uis.empty() ? std::string() : uis.front();
     }
 

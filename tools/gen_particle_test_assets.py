@@ -3,7 +3,7 @@
 
 Run from the repo root:  python3 tools/gen_particle_test_assets.py
 
-Writes assets/meshes/:
+Writes assets/meshes/props/:
   camp_log.yaml       a charred log: a slightly irregular 10-sided cylinder along +X, capped
   camp_stone.yaml     a flattened, lumpy low-poly rock (fire ring stones, pebbles)
   particle_ground.yaml a 40 m disc of gently rolling ground, z ~ 0 near the centre
@@ -21,7 +21,7 @@ import random
 from mesh_yaml import perpendicular_tangents, vertex_normals, write_mesh
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-MESHES = ROOT / "assets" / "meshes"
+MESHES = ROOT / "assets" / "meshes" / "props"
 
 
 def lathe(profile, segments, close_top=True, close_bottom=True, jitter=None, top_z=None):
@@ -108,6 +108,7 @@ def write(name, verts, faces, uvs, normals=None):
     def r5(rows):
         return [[round(c, 5) for c in row] for row in rows]
 
+    MESHES.mkdir(parents=True, exist_ok=True)
     write_mesh(MESHES / f"{name}.yaml", r5(verts), tris, r5(uvs), r5(normals), r5(perpendicular_tangents(normals)))
 
 

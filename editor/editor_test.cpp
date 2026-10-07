@@ -262,7 +262,7 @@ void test_scene_documents_save_load_stable() {
     const fs::path dir = fresh_dir("doc_roundtrip");
     int count = 0;
     for (const auto& p : asset_yaml_files()) {
-        if (p.parent_path().parent_path().filename() != "scenes") continue;
+        if (!is_scene_folder_file(fs::relative(p, fs::path(ROOT_DIR) / "assets").generic_string())) continue;
         SceneDocument doc;
         doc.load(p);
         const fs::path out = dir / (std::to_string(count++) + ".yaml");
@@ -305,7 +305,7 @@ void test_asset_fidelity_object_assets() {
 
 void test_scene_document_random_edits_undo() {
     SceneDocument doc;
-    doc.load(fs::path(ROOT_DIR) / "assets/scenes/pixel_demo/scene.yaml");
+    doc.load(fs::path(ROOT_DIR) / "assets/scenes/demos/pixel_demo/scene.yaml");
     const Node original = doc.node();
     std::mt19937 rng(1234);
     int edits = 0;
@@ -1606,6 +1606,61 @@ void test_shader_ball() {
     expect(hi.z - lo.z > 1.0f && hi.x - lo.x < 1.05f, "about a unit ball on a plinth");
 }
 
+/** @brief Proportional editing weights: falloff curves and the three ways of measuring distance. */
+void test_proportional_weights() {
+    for (int i = 0; i < kFalloffCount; ++i) {
+        const Falloff f = static_cast<Falloff>(i);
+        expect(std::abs(falloff_weight(f, 0.0f) - 1.0f) < 1e-5f && falloff_weight(f, 1.0f) == 0.0f && falloff_weight(f, 2.0f) == 0.0f,
+               std::string("falloff ") + falloff_name(f) + ": 1 at the selection, 0 at and past the radius");
+        for (float t = 0.0f; t < 0.95f; t += 0.05f) {
+            expect(falloff_weight(f, t) >= falloff_weight(f, t + 0.05f) - 1e-5f, std::string("falloff ") + falloff_name(f) + " never rises");
+        }
+    }
+    expect(std::abs(falloff_weight(Falloff::Linear, 0.25f) - 0.75f) < 1e-5f, "linear is 1 - t");
+
+    // A row of vertices 0..9 along X, 1 m apart (joined by edges); plus a separate pair at y = 5.
+    EditMesh m;
+    auto tri = [&](uint32_t a, uint32_t b) {
+        Face f;
+        for (uint32_t v : {a, b, a}) { Corner c; c.v = v; f.corners.push_back(c); }
+        m.faces.push_back(f);
+    };
+    for (int i = 0; i < 10; ++i) m.positions.push_back({float(i), 0.0f, 0.0f});
+    for (uint32_t i = 0; i + 1 < 10; ++i) tri(i, i + 1);
+    m.positions.push_back({2.0f, 5.0f, 0.0f});
+    m.positions.push_back({3.0f, 5.0f, 0.0f});
+    tri(10, 11);
+    ProportionalSettings ps;
+    ps.enabled = true;
+    ps.falloff = Falloff::Linear;
+    ps.radius = 4.0f;
+    ps.projected = false;
+    auto weight_of = [](const std::vector<std::pair<uint32_t, float>>& w, uint32_t v) {
+        for (const auto& [u, x] : w) if (u == v) return x;
+        return 0.0f;
+    };
+    const std::set<uint32_t> sel{0};
+    auto w = proportional_weights(m, sel, ps, glm::mat4(1.0f));
+    expect(weight_of(w, 0) == 0.0f, "the selection itself is not in the weighted list (it moves fully)");
+    expect(std::abs(weight_of(w, 1) - 0.75f) < 1e-4f && std::abs(weight_of(w, 2) - 0.5f) < 1e-4f && weight_of(w, 4) == 0.0f,
+           "3D: weights fall off linearly to 0 at the radius");
+    expect(weight_of(w, 10) == 0.0f, "3D: (2, 5) is 5.4 m away -- outside");
+    ps.radius = 6.0f;
+    w = proportional_weights(m, sel, ps, glm::mat4(1.0f));
+    expect(weight_of(w, 10) > 0.0f, "3D: a bigger radius reaches the separate pair");
+    ps.connected = true;
+    w = proportional_weights(m, sel, ps, glm::mat4(1.0f));
+    expect(weight_of(w, 10) == 0.0f && std::abs(weight_of(w, 3) - 0.5f) < 1e-4f, "connected: the separate pair stays; edge distance along the row");
+    ps.connected = false;
+    ps.projected = true;
+    // Looking along +Y at the row: screen x = world x * 100 px; y is depth.
+    auto project = [](const glm::vec3& p) { return std::optional<glm::vec2>(glm::vec2(p.x * 100.0f, -p.z * 100.0f)); };
+    w = proportional_weights(m, sel, ps, glm::mat4(1.0f), project, 250.0f);
+    expect(std::abs(weight_of(w, 2) - 0.2f) < 1e-4f && weight_of(w, 3) == 0.0f, "projected: pixel distance against the pixel radius");
+    expect(std::abs(weight_of(w, 10) - 0.2f) < 1e-4f, "projected: depth doesn't count -- the pair 5 m behind is at x = 200 px");
+}
+
+
 void test_mesh_mirror() {
     // Local X: moving the +X face's vertices moves their -X partners the mirrored way.
     EditMesh m = make_cube();
@@ -1947,6 +2002,302 @@ void test_config_untouched_and_minimal_edits() {
 }
 
 
+/** @brief An engine default, numeric (as a vec4) or a string, for comparing with a schema field. */
+struct EngineDefault {
+    glm::vec4 v{0.0f};
+    std::string s;
+    bool text = false;
+    EngineDefault(bool b) : v(b ? 1.0f : 0.0f) {}
+    EngineDefault(int i) : v(static_cast<float>(i)) {}
+    EngineDefault(uint32_t i) : v(static_cast<float>(i)) {}
+    EngineDefault(float f) : v(f) {}
+    EngineDefault(const glm::vec3& c) : v(c, 0.0f) {}
+    EngineDefault(const glm::vec4& c) : v(c) {}
+    EngineDefault(const std::string& t) : s(t), text(true) {}
+    EngineDefault(toy::render::RenderQuality q)
+        : s(q == toy::render::RenderQuality::Low ? "low" : q == toy::render::RenderQuality::Medium ? "medium"
+            : q == toy::render::RenderQuality::Ultra ? "ultra" : "high"), text(true) {}
+};
+
+/**
+ * @brief The Render tab covers every render key the engine parses, once, and every default it
+ *        shows is the engine's (AppConfig::from_node() of an empty file: High quality presets).
+ *        The table is every `render.` key AppConfig reads, with the field it lands in.
+ */
+void test_render_settings_cover_engine() {
+    using PR = toy::render::PixelRenderConfig;
+    const std::vector<std::pair<std::string, std::function<EngineDefault(const PR&)>>> engine_keys = {
+        {"shadow_quality", [](const PR& r) { return EngineDefault(r.shadow_quality); }},
+        {"ssao_quality", [](const PR& r) { return EngineDefault(r.ssao_quality); }},
+        {"ssr_quality", [](const PR& r) { return EngineDefault(r.ssr_quality); }},
+        {"ssgi_quality", [](const PR& r) { return EngineDefault(r.ssgi_quality); }},
+        {"dof_quality", [](const PR& r) { return EngineDefault(r.dof_quality); }},
+        {"volumetrics_quality", [](const PR& r) { return EngineDefault(r.volumetrics_quality); }},
+        {"sdf_quality", [](const PR& r) { return EngineDefault(r.sdf_quality); }},
+        {"water_quality", [](const PR& r) { return EngineDefault(r.water_quality); }},
+        {"outline_enabled", [](const PR& r) { return EngineDefault(r.outline_enabled); }},
+        {"palette_enabled", [](const PR& r) { return EngineDefault(r.palette_enabled); }},
+        {"dither_enabled", [](const PR& r) { return EngineDefault(r.dither_enabled); }},
+        {"camera_pixel_snap", [](const PR& r) { return EngineDefault(r.camera_pixel_snap); }},
+        {"soft_lighting", [](const PR& r) { return EngineDefault(r.soft_lighting); }},
+        {"ssao_enabled", [](const PR& r) { return EngineDefault(r.ssao_enabled); }},
+        {"ssr_enabled", [](const PR& r) { return EngineDefault(r.ssr_enabled); }},
+        {"transparency_enabled", [](const PR& r) { return EngineDefault(r.transparency_enabled); }},
+        {"refraction_enabled", [](const PR& r) { return EngineDefault(r.refraction_enabled); }},
+        {"fog_enabled", [](const PR& r) { return EngineDefault(r.fog_enabled); }},
+        {"underwater_enabled", [](const PR& r) { return EngineDefault(r.underwater_enabled); }},
+        {"volumetrics_enabled", [](const PR& r) { return EngineDefault(r.volumetrics_enabled); }},
+        {"sdf_enabled", [](const PR& r) { return EngineDefault(r.sdf_enabled); }},
+        {"sdf_shadows_enabled", [](const PR& r) { return EngineDefault(r.sdf_shadows_enabled); }},
+        {"bloom_enabled", [](const PR& r) { return EngineDefault(r.bloom_enabled); }},
+        {"tilt_shift_enabled", [](const PR& r) { return EngineDefault(r.tilt_shift_enabled); }},
+        {"dof_enabled", [](const PR& r) { return EngineDefault(r.dof_enabled); }},
+        {"debug_view", [](const PR& r) { return EngineDefault(r.debug_view); }},
+        {"world_ui_enabled", [](const PR& r) { return EngineDefault(r.world_ui_enabled); }},
+        {"screen_ui_enabled", [](const PR& r) { return EngineDefault(r.screen_ui_enabled); }},
+        {"resolution_mode", [](const PR& r) { return EngineDefault(r.resolution_mode); }},
+        {"render_width", [](const PR& r) { return EngineDefault(r.render_width); }},
+        {"render_height", [](const PR& r) { return EngineDefault(r.render_height); }},
+        {"scale_divisor", [](const PR& r) { return EngineDefault(r.scale_divisor); }},
+        {"upscale_mode", [](const PR& r) { return EngineDefault(r.upscale_mode); }},
+        {"exposure", [](const PR& r) { return EngineDefault(r.exposure); }},
+        {"auto_exposure_enabled", [](const PR& r) { return EngineDefault(r.auto_exposure_enabled); }},
+        {"auto_exposure_compensation", [](const PR& r) { return EngineDefault(r.auto_exposure_compensation); }},
+        {"auto_exposure_speed_up", [](const PR& r) { return EngineDefault(r.auto_exposure_speed_up); }},
+        {"auto_exposure_speed_down", [](const PR& r) { return EngineDefault(r.auto_exposure_speed_down); }},
+        {"auto_exposure_min", [](const PR& r) { return EngineDefault(r.auto_exposure_min); }},
+        {"auto_exposure_max", [](const PR& r) { return EngineDefault(r.auto_exposure_max); }},
+        {"grading_enabled", [](const PR& r) { return EngineDefault(r.grading_enabled); }},
+        {"light_bands", [](const PR& r) { return EngineDefault(r.light_bands); }},
+        {"spec_threshold", [](const PR& r) { return EngineDefault(r.spec_threshold); }},
+        {"rim_strength", [](const PR& r) { return EngineDefault(r.rim_strength); }},
+        {"ambient_intensity", [](const PR& r) { return EngineDefault(r.indirect.ambient_intensity); }},
+        {"sky_intensity", [](const PR& r) { return EngineDefault(r.indirect.sky_intensity); }},
+        {"sky_zenith", [](const PR& r) { return EngineDefault(r.indirect.sky_zenith); }},
+        {"sky_horizon", [](const PR& r) { return EngineDefault(r.indirect.sky_horizon); }},
+        {"sky_ground", [](const PR& r) { return EngineDefault(r.indirect.sky_ground); }},
+        {"shadows_enabled", [](const PR& r) { return EngineDefault(r.shadows_enabled); }},
+        {"shadow_map_resolution", [](const PR& r) { return EngineDefault(r.shadow_map_resolution); }},
+        {"shadow_cascades", [](const PR& r) { return EngineDefault(r.shadow_cascades); }},
+        {"shadow_cascade_split_lambda", [](const PR& r) { return EngineDefault(r.shadow_cascade_split_lambda); }},
+        {"shadow_fit", [](const PR& r) { return EngineDefault(r.shadow_fit); }},
+        {"shadow_focus_radius", [](const PR& r) { return EngineDefault(r.shadow_focus_radius); }},
+        {"shadow_focus_distance", [](const PR& r) { return EngineDefault(r.shadow_focus_distance); }},
+        {"shadow_pcf_max_texels", [](const PR& r) { return EngineDefault(r.shadow_pcf_max_texels); }},
+        {"shadow_receiver_plane_bias", [](const PR& r) { return EngineDefault(r.shadow_receiver_plane_bias); }},
+        {"shadow_receiver_max_slope", [](const PR& r) { return EngineDefault(r.shadow_receiver_max_slope); }},
+        {"cube_shadow_resolution", [](const PR& r) { return EngineDefault(r.cube_shadow_resolution); }},
+        {"spot_shadow_resolution", [](const PR& r) { return EngineDefault(r.spot_shadow_resolution); }},
+        {"local_shadow_atlas_resolution", [](const PR& r) { return EngineDefault(r.local_shadow_atlas_resolution); }},
+        {"max_shadowed_point_lights", [](const PR& r) { return EngineDefault(r.max_shadowed_point_lights); }},
+        {"max_shadowed_spot_lights", [](const PR& r) { return EngineDefault(r.max_shadowed_spot_lights); }},
+        {"shadow_cache_enabled", [](const PR& r) { return EngineDefault(r.shadow_cache_enabled); }},
+        {"shadow_bias", [](const PR& r) { return EngineDefault(r.shadow_bias); }},
+        {"shadow_depth_bias_texels", [](const PR& r) { return EngineDefault(r.shadow_depth_bias_texels); }},
+        {"shadow_slope_bias_texels", [](const PR& r) { return EngineDefault(r.shadow_slope_bias_texels); }},
+        {"shadow_slope_bias_max", [](const PR& r) { return EngineDefault(r.shadow_slope_bias_max); }},
+        {"shadow_fade_fraction", [](const PR& r) { return EngineDefault(r.shadow_fade_fraction); }},
+        {"shadow_normal_bias", [](const PR& r) { return EngineDefault(r.shadow_normal_bias); }},
+        {"shadow_distance", [](const PR& r) { return EngineDefault(r.shadow_distance); }},
+        {"soft_shadows", [](const PR& r) { return EngineDefault(r.soft_shadows); }},
+        {"shadow_softness", [](const PR& r) { return EngineDefault(r.shadow_softness); }},
+        {"point_shadow_softness", [](const PR& r) { return EngineDefault(r.point_shadow_softness); }},
+        {"spot_shadow_softness", [](const PR& r) { return EngineDefault(r.spot_shadow_softness); }},
+        {"shadow_pcf_samples", [](const PR& r) { return EngineDefault(r.shadow_pcf_samples); }},
+        {"shadow_pcss_enabled", [](const PR& r) { return EngineDefault(r.shadow_pcss_enabled); }},
+        {"shadow_pcss_light_size", [](const PR& r) { return EngineDefault(r.shadow_pcss_light_size); }},
+        {"shadow_pcss_search_texels", [](const PR& r) { return EngineDefault(r.shadow_pcss_search_texels); }},
+        {"shadow_pcss_taps", [](const PR& r) { return EngineDefault(r.shadow_pcss_taps); }},
+        {"contact_shadows_enabled", [](const PR& r) { return EngineDefault(r.contact_shadows_enabled); }},
+        {"contact_shadow_length", [](const PR& r) { return EngineDefault(r.contact_shadow_length); }},
+        {"contact_shadow_strength", [](const PR& r) { return EngineDefault(r.contact_shadow_strength); }},
+        {"contact_shadow_thickness", [](const PR& r) { return EngineDefault(r.contact_shadow_thickness); }},
+        {"contact_shadow_steps", [](const PR& r) { return EngineDefault(r.contact_shadow_steps); }},
+        {"contact_shadow_temporal_enabled", [](const PR& r) { return EngineDefault(r.contact_shadow_temporal_enabled); }},
+        {"contact_shadow_temporal_frames", [](const PR& r) { return EngineDefault(r.contact_shadow_temporal_frames); }},
+        {"outline_thickness", [](const PR& r) { return EngineDefault(r.outline_thickness); }},
+        {"outline_color", [](const PR& r) { return EngineDefault(r.outline_color); }},
+        {"depth_threshold", [](const PR& r) { return EngineDefault(r.depth_threshold); }},
+        {"normal_threshold", [](const PR& r) { return EngineDefault(r.normal_threshold); }},
+        {"palette", [](const PR& r) { return EngineDefault(r.palette_path); }},
+        {"grading_lut", [](const PR& r) { return EngineDefault(r.grading_lut_path); }},
+        {"dither_strength", [](const PR& r) { return EngineDefault(r.dither_strength); }},
+        {"texel_aa", [](const PR& r) { return EngineDefault(r.texel_aa); }},
+        {"ssao_radius", [](const PR& r) { return EngineDefault(r.ssao_radius); }},
+        {"ssao_bias", [](const PR& r) { return EngineDefault(r.ssao_bias); }},
+        {"ssao_power", [](const PR& r) { return EngineDefault(r.ssao_power); }},
+        {"ssao_slices", [](const PR& r) { return EngineDefault(r.ssao_slices); }},
+        {"ssao_steps", [](const PR& r) { return EngineDefault(r.ssao_steps); }},
+        {"ssao_max_radius_px", [](const PR& r) { return EngineDefault(r.ssao_max_radius_px); }},
+        {"ssao_blur_plane_sigma", [](const PR& r) { return EngineDefault(r.ssao_blur_plane_sigma); }},
+        {"ssao_half_res", [](const PR& r) { return EngineDefault(r.ssao_half_res); }},
+        {"ssao_blur_light", [](const PR& r) { return EngineDefault(r.ssao_blur_light); }},
+        {"ssao_direct_lighting_strength", [](const PR& r) { return EngineDefault(r.ssao_direct_lighting_strength); }},
+        {"ssao_temporal_enabled", [](const PR& r) { return EngineDefault(r.ssao_temporal_enabled); }},
+        {"ssao_temporal_frames", [](const PR& r) { return EngineDefault(r.ssao_temporal_frames); }},
+        {"ssao_temporal_gamma", [](const PR& r) { return EngineDefault(r.ssao_temporal_gamma); }},
+        {"ssao_intensity", [](const PR& r) { return EngineDefault(r.ssao_intensity); }},
+        {"ssr_max_distance", [](const PR& r) { return EngineDefault(r.ssr_max_distance); }},
+        {"ssr_max_iterations", [](const PR& r) { return EngineDefault(r.ssr_max_iterations); }},
+        {"ssr_thickness", [](const PR& r) { return EngineDefault(r.ssr_thickness); }},
+        {"ssr_thickness_scale", [](const PR& r) { return EngineDefault(r.ssr_thickness_scale); }},
+        {"ssr_bias_texels", [](const PR& r) { return EngineDefault(r.ssr_bias_texels); }},
+        {"ssr_roughness_cutoff", [](const PR& r) { return EngineDefault(r.ssr_roughness_cutoff); }},
+        {"ssr_start_mip", [](const PR& r) { return EngineDefault(r.ssr_start_mip); }},
+        {"ssr_min_mip0_steps", [](const PR& r) { return EngineDefault(r.ssr_min_mip0_steps); }},
+        {"ssr_temporal_enabled", [](const PR& r) { return EngineDefault(r.ssr_temporal_enabled); }},
+        {"ssr_temporal_frames", [](const PR& r) { return EngineDefault(r.ssr_temporal_frames); }},
+        {"ssgi_temporal_frames", [](const PR& r) { return EngineDefault(r.ssgi_temporal_frames); }},
+        {"ssr_temporal_blend", [](const PR& r) { return EngineDefault(r.ssr_temporal_blend); }},
+        {"ssr_blur_radius", [](const PR& r) { return EngineDefault(r.ssr_blur_radius); }},
+        {"ssr_blur_light", [](const PR& r) { return EngineDefault(r.ssr_blur_light); }},
+        {"ssr_blur_zero_skip", [](const PR& r) { return EngineDefault(r.ssr_blur_zero_skip); }},
+        {"ssr_jitter", [](const PR& r) { return EngineDefault(r.ssr_jitter); }},
+        {"ssr_rays_per_pixel", [](const PR& r) { return EngineDefault(r.ssr_rays_per_pixel); }},
+        {"ssr_cone_prefilter", [](const PR& r) { return EngineDefault(r.ssr_cone_prefilter); }},
+        {"ssr_skip_behind", [](const PR& r) { return EngineDefault(r.ssr_skip_behind); }},
+        {"ssr_half_res", [](const PR& r) { return EngineDefault(r.ssr_half_res); }},
+        {"ssgi_resolution_scale", [](const PR& r) { return EngineDefault(r.ssgi_resolution_scale); }},
+        {"ssr_skip_negligible", [](const PR& r) { return EngineDefault(r.ssr_skip_negligible); }},
+        {"ssr_skip_threshold", [](const PR& r) { return EngineDefault(r.ssr_skip_threshold); }},
+        {"ssr_temporal_gamma", [](const PR& r) { return EngineDefault(r.ssr_temporal_gamma); }},
+        {"ssgi_traced", [](const PR& r) { return EngineDefault(r.ssgi_traced); }},
+        {"ssgi_max_distance", [](const PR& r) { return EngineDefault(r.ssgi_max_distance); }},
+        {"ssgi_blur_radius", [](const PR& r) { return EngineDefault(r.ssgi_blur_radius); }},
+        {"ssgi_blur_light", [](const PR& r) { return EngineDefault(r.ssgi_blur_light); }},
+        {"ssgi_max_iterations", [](const PR& r) { return EngineDefault(r.ssgi_max_iterations); }},
+        {"ssgi_intensity", [](const PR& r) { return EngineDefault(r.indirect.ssgi_intensity); }},
+        {"ssgi_distance", [](const PR& r) { return EngineDefault(r.indirect.ssgi_distance); }},
+        {"refraction_ior", [](const PR& r) { return EngineDefault(r.refraction_ior); }},
+        {"refraction_thickness", [](const PR& r) { return EngineDefault(r.refraction_thickness); }},
+        {"refraction_strength", [](const PR& r) { return EngineDefault(r.refraction_strength); }},
+        {"refraction_max_offset", [](const PR& r) { return EngineDefault(r.refraction_max_offset); }},
+        {"refraction_chromatic", [](const PR& r) { return EngineDefault(r.refraction_chromatic); }},
+        {"refraction_blur", [](const PR& r) { return EngineDefault(r.refraction_blur); }},
+        {"refraction_density", [](const PR& r) { return EngineDefault(r.refraction_density); }},
+        {"refraction_fresnel", [](const PR& r) { return EngineDefault(r.refraction_fresnel); }},
+        {"refraction_tint", [](const PR& r) { return EngineDefault(r.refraction_tint); }},
+        {"refraction_include_reflections", [](const PR& r) { return EngineDefault(r.refraction_include_reflections); }},
+        {"fog_mode", [](const PR& r) { return EngineDefault(r.fog_mode); }},
+        {"fog_density", [](const PR& r) { return EngineDefault(r.fog_density); }},
+        {"fog_linear_start", [](const PR& r) { return EngineDefault(r.fog_linear_start); }},
+        {"fog_linear_end", [](const PR& r) { return EngineDefault(r.fog_linear_end); }},
+        {"fog_color", [](const PR& r) { return EngineDefault(r.fog_color); }},
+        {"fog_height_base", [](const PR& r) { return EngineDefault(r.fog_height_base); }},
+        {"fog_height_falloff", [](const PR& r) { return EngineDefault(r.fog_height_falloff); }},
+        {"fog_sky_blend", [](const PR& r) { return EngineDefault(r.fog_sky_blend); }},
+        {"fog_sun_amount", [](const PR& r) { return EngineDefault(r.fog_sun_amount); }},
+        {"fog_sun_anisotropy", [](const PR& r) { return EngineDefault(r.fog_sun_anisotropy); }},
+        {"fog_max_opacity", [](const PR& r) { return EngineDefault(r.fog_max_opacity); }},
+        {"fog_max_distance", [](const PR& r) { return EngineDefault(r.fog_max_distance); }},
+        {"volumetrics_step_count", [](const PR& r) { return EngineDefault(r.volumetrics_step_count); }},
+        {"volumetrics_max_distance", [](const PR& r) { return EngineDefault(r.volumetrics_max_distance); }},
+        {"volumetrics_resolution_scale", [](const PR& r) { return EngineDefault(r.volumetrics_resolution_scale); }},
+        {"volumetrics_mode", [](const PR& r) { return EngineDefault(r.volumetrics_mode); }},
+        {"volumetrics_froxel_tile", [](const PR& r) { return EngineDefault(r.volumetrics_froxel_tile); }},
+        {"volumetrics_froxel_slices", [](const PR& r) { return EngineDefault(r.volumetrics_froxel_slices); }},
+        {"volumetrics_froxel_history", [](const PR& r) { return EngineDefault(r.volumetrics_froxel_history); }},
+        {"volumetrics_froxel_miss_samples", [](const PR& r) { return EngineDefault(r.volumetrics_froxel_miss_samples); }},
+        {"volumetrics_froxel_lookup_jitter", [](const PR& r) { return EngineDefault(r.volumetrics_froxel_lookup_jitter); }},
+        {"volumetrics_max_opacity", [](const PR& r) { return EngineDefault(r.volumetrics_max_opacity); }},
+        {"volumetrics_sun_anisotropy", [](const PR& r) { return EngineDefault(r.volumetrics_sun_anisotropy); }},
+        {"volumetrics_shadows_enabled", [](const PR& r) { return EngineDefault(r.volumetrics_shadows_enabled); }},
+        {"volumetrics_light_scatter", [](const PR& r) { return EngineDefault(r.volumetrics_light_scatter); }},
+        {"volumetrics_max_scatter_lights", [](const PR& r) { return EngineDefault(r.volumetrics_max_scatter_lights); }},
+        {"mesh_lod_bias", [](const PR& r) { return EngineDefault(r.mesh_lod_bias); }},
+        {"shadow_min_caster_texels", [](const PR& r) { return EngineDefault(r.shadow_min_caster_texels); }},
+        {"bloom_threshold", [](const PR& r) { return EngineDefault(r.bloom_threshold); }},
+        {"bloom_soft_knee", [](const PR& r) { return EngineDefault(r.bloom_soft_knee); }},
+        {"bloom_intensity", [](const PR& r) { return EngineDefault(r.bloom_intensity); }},
+        {"bloom_scatter", [](const PR& r) { return EngineDefault(r.bloom_scatter); }},
+        {"bloom_radius", [](const PR& r) { return EngineDefault(r.bloom_radius); }},
+        {"bloom_clamp", [](const PR& r) { return EngineDefault(r.bloom_clamp); }},
+        {"tilt_shift_focus_center", [](const PR& r) { return EngineDefault(r.tilt_shift_focus_center); }},
+        {"tilt_shift_focus_width", [](const PR& r) { return EngineDefault(r.tilt_shift_focus_width); }},
+        {"tilt_shift_ramp_width", [](const PR& r) { return EngineDefault(r.tilt_shift_ramp_width); }},
+        {"tilt_shift_blur_top", [](const PR& r) { return EngineDefault(r.tilt_shift_blur_top); }},
+        {"tilt_shift_blur_bottom", [](const PR& r) { return EngineDefault(r.tilt_shift_blur_bottom); }},
+        {"tilt_shift_max_radius", [](const PR& r) { return EngineDefault(r.tilt_shift_max_radius); }},
+        {"tilt_shift_angle", [](const PR& r) { return EngineDefault(r.tilt_shift_angle); }},
+        {"dof_focus_mode", [](const PR& r) { return EngineDefault(r.dof_focus_mode); }},
+        {"dof_focus_object", [](const PR& r) { return EngineDefault(r.dof_focus_object); }},
+        {"dof_focus_smoothing", [](const PR& r) { return EngineDefault(r.dof_focus_smoothing); }},
+        {"dof_focus_distance", [](const PR& r) { return EngineDefault(r.dof_focus_distance); }},
+        {"dof_focus_range", [](const PR& r) { return EngineDefault(r.dof_focus_range); }},
+        {"dof_focus_cover_object", [](const PR& r) { return EngineDefault(r.dof_focus_cover_object); }},
+        {"dof_blur_scale", [](const PR& r) { return EngineDefault(r.dof_blur_scale); }},
+        {"dof_aperture", [](const PR& r) { return EngineDefault(r.dof_aperture); }},
+        {"dof_focal_length", [](const PR& r) { return EngineDefault(r.dof_focal_length); }},
+        {"dof_sensor_width", [](const PR& r) { return EngineDefault(r.dof_sensor_width); }},
+        {"dof_max_radius", [](const PR& r) { return EngineDefault(r.dof_max_radius); }},
+        {"dof_sample_count", [](const PR& r) { return EngineDefault(r.dof_sample_count); }},
+        {"dof_blade_count", [](const PR& r) { return EngineDefault(r.dof_blade_count); }},
+        {"dof_blade_rotation", [](const PR& r) { return EngineDefault(r.dof_blade_rotation); }},
+        {"aa_mode", [](const PR& r) { return EngineDefault(r.aa_mode); }},
+        {"fxaa_subpixel", [](const PR& r) { return EngineDefault(r.fxaa_subpixel); }},
+        {"fxaa_edge_threshold", [](const PR& r) { return EngineDefault(r.fxaa_edge_threshold); }},
+        {"fxaa_edge_threshold_min", [](const PR& r) { return EngineDefault(r.fxaa_edge_threshold_min); }},
+        {"smaa_threshold", [](const PR& r) { return EngineDefault(r.smaa_threshold); }},
+        {"smaa_max_search_steps", [](const PR& r) { return EngineDefault(r.smaa_max_search_steps); }},
+        {"taa_blending_weight", [](const PR& r) { return EngineDefault(r.taa_blending_weight); }},
+        {"taa_weight_scale", [](const PR& r) { return EngineDefault(r.taa_weight_scale); }},
+        {"taa_feedback_motion", [](const PR& r) { return EngineDefault(r.taa_feedback_motion); }},
+        {"taa_sharpness", [](const PR& r) { return EngineDefault(r.taa_sharpness); }},
+        {"taa_variance_gamma", [](const PR& r) { return EngineDefault(r.taa_variance_gamma); }},
+        {"sdf_max_steps", [](const PR& r) { return EngineDefault(r.sdf_max_steps); }},
+        {"sdf_shadow_max_steps", [](const PR& r) { return EngineDefault(r.sdf_shadow_max_steps); }},
+        {"sdf_max_renderers", [](const PR& r) { return EngineDefault(r.sdf_max_renderers); }},
+        {"sdf_max_shapes", [](const PR& r) { return EngineDefault(r.sdf_max_shapes); }},
+    };
+    std::map<std::string, int> seen;
+    std::map<std::string, FieldDesc> fields;
+    for (const auto& g : render_settings_groups()) {
+        for (const auto& f : g.all_fields()) { ++seen[f.key]; fields[f.key] = f; }
+        for (const auto& f : g.all_fields()) {
+            expect(!f.label.empty() && !f.tooltip.empty(), "render." + f.key + " has a label and a tooltip");
+        }
+        expect(!g.tip.empty() && !g.category.empty(), g.title + " has a category and a description");
+    }
+    for (const auto& [k, n] : seen) expect(n == 1, "render." + k + " appears once in the Render tab (" + std::to_string(n) + ")");
+    Node root = Node::mapping();
+    root["render"] = Node::mapping();
+    const PR defaults = toy::core::AppConfig::from_node(root).render;
+    for (const auto& [key, get] : engine_keys) {
+        auto it = fields.find(key);
+        expect(it != fields.end(), "render." + key + " (parsed by the engine) is in the Render tab");
+        if (it == fields.end()) continue;
+        const FieldDesc& f = it->second;
+        const EngineDefault d = get(defaults);
+        if (d.text) {
+            if (f.kind == FieldKind::AssetRef) {
+                expect(d.s.empty(), "render." + key + ": an asset path defaults to none (engine: '" + d.s + "')");
+                continue;
+            }
+            const std::string shown = !f.default_string.empty() ? f.default_string
+                                    : f.kind == FieldKind::Enum && !f.options.empty() ? f.options.front() : std::string();
+            expect(shown == d.s, "render." + key + " shows the engine default '" + d.s + "' (schema: '" + shown + "')");
+            if (f.kind == FieldKind::Enum) {
+                expect(std::find(f.options.begin(), f.options.end(), d.s) != f.options.end(), "render." + key + " offers its default");
+            }
+        } else {
+            const int n = f.kind == FieldKind::Color4 ? 4 : (f.kind == FieldKind::Color || f.kind == FieldKind::Vec3) ? 3 : 1;
+            bool same = true;
+            for (int i = 0; i < n; ++i) same &= std::abs(f.def[i] - d.v[i]) <= 1e-5f * std::max(1.0f, std::abs(d.v[i]));
+            char buf[160];
+            std::snprintf(buf, sizeof buf, " (engine %g %g %g %g, schema %g %g %g %g)", d.v.x, d.v.y, d.v.z, d.v.w, f.def.x, f.def.y, f.def.z, f.def.w);
+            expect(same, "render." + key + " shows the engine default" + buf);
+            if (n == 1 && f.kind != FieldKind::Bool) {
+                expect(d.v.x >= f.min - 1e-6f && d.v.x <= f.max + 1e-6f, "render." + key + "'s default is inside its range");
+            }
+        }
+    }
+    for (const auto& entry : seen) {
+        const std::string& k = entry.first;
+        const bool parsed = std::any_of(engine_keys.begin(), engine_keys.end(), [&](const auto& e) { return e.first == k; });
+        expect(parsed, "render." + k + " is a key the engine reads");
+    }
+}
+
 // The settings panel shows a field's schema default while its key is absent, so those defaults
 // must be what the engine actually runs with (PixelRenderConfig / WindowConfig / ...).
 void test_settings_defaults_match_engine() {
@@ -1965,7 +2316,7 @@ void test_settings_defaults_match_engine() {
         {"shadows_enabled", r.shadows_enabled}, {"ssao_enabled", r.ssao_enabled}, {"fog_enabled", r.fog_enabled},
     };
     for (const auto& g : render_settings_groups()) {
-        for (const auto& f : g.fields) {
+        for (const auto& f : g.all_fields()) {
             if (auto it = floats.find(f.key); it != floats.end()) {
                 expect(std::abs(f.def.x - it->second) < 1e-6f, f.key + " shows the engine default");
             }
@@ -1997,7 +2348,7 @@ void test_settings_defaults_match_engine() {
 
 void test_asset_refs_and_rename() {
     expect(mesh_ref("meshes/rock.yaml") == "rock", "mesh_ref: top-level mesh");
-    expect(mesh_ref("meshes/props/rock.yaml") == "props/rock", "mesh_ref keeps subfolders");
+    expect(mesh_ref("meshes/props/rock.yaml") == "rock", "mesh_ref drops tag folders (meshes are found by name)");
     expect(mesh_ref("scenes/lake/meshes/basin.yaml") == "basin", "mesh_ref: scene-local mesh");
     expect(strip_yaml_ext("objects/props/crate.yaml") == "objects/props/crate", "strip_yaml_ext");
 
@@ -3935,11 +4286,12 @@ void test_editor_animation_test_scene() {
     Project project = Project::create(root);
     const fs::path dst = project.assets() / "scenes" / "animation_test";
     fs::create_directories(dst.parent_path());
-    fs::copy(fs::path(ROOT_DIR) / "assets" / "scenes" / "animation_test", dst, fs::copy_options::recursive);
+    fs::copy(fs::path(ROOT_DIR) / "assets" / "scenes" / "tests" / "animation" / "animation_test", dst, fs::copy_options::recursive);
     // The rigs' shared clips and meshes (assets/animations, assets/meshes).
     fs::copy(fs::path(ROOT_DIR) / "assets" / "animations", project.assets() / "animations", fs::copy_options::recursive);
-    for (const char* m : {"tentacle.yaml", "ball.yaml"}) {
-        fs::copy_file(fs::path(ROOT_DIR) / "assets" / "meshes" / m, project.assets() / "meshes" / m, fs::copy_options::overwrite_existing);
+    for (const char* m : {"animation/tentacle.yaml", "primitives/ball.yaml"}) {
+        fs::copy_file(fs::path(ROOT_DIR) / "assets" / "meshes" / m, project.assets() / "meshes" / fs::path(m).filename(),
+                      fs::copy_options::overwrite_existing);
     }
     toy::core::Engine engine(shell_config(project), shell_options(project));
     EditorApp app(engine, project);
@@ -3980,6 +4332,21 @@ void test_editor_animation_test_scene() {
     }
 }
 
+/**
+ * @brief Copies toyengine's animation test rigs into a project, untagged: the rig object assets
+ *        (objects/animation/ -> objects/), their clips, and the meshes they use.
+ */
+void copy_rig_assets(const fs::path& src, const fs::path& dst) {
+    fs::create_directories(dst / "objects");
+    for (const auto& e : fs::directory_iterator(src / "objects" / "animation")) {
+        fs::copy_file(e.path(), dst / "objects" / e.path().filename(), fs::copy_options::overwrite_existing);
+    }
+    fs::copy(src / "animations", dst / "animations", fs::copy_options::recursive);
+    for (const char* m : {"animation/tentacle.yaml", "primitives/ball.yaml"}) {
+        fs::copy_file(src / "meshes" / m, dst / "meshes" / fs::path(m).filename(), fs::copy_options::overwrite_existing);
+    }
+}
+
 /** @brief The test rigs ship as object assets: the Objects tab lists them, opening one gives a
  *         working Timeline, and a copy placed in a scene plays its clips (paths resolve from the
  *         object asset to the shared assets/animations) -- and points back to the asset to edit. */
@@ -3991,9 +4358,7 @@ void test_editor_rig_object_assets() {
     const fs::path root = fresh_dir("rig_objects_project");
     Project project = Project::create(root);
     const fs::path src = fs::path(ROOT_DIR) / "assets";
-    fs::copy(src / "objects", project.assets() / "objects", fs::copy_options::recursive);
-    fs::copy(src / "animations", project.assets() / "animations", fs::copy_options::recursive);
-    for (const char* m : {"tentacle.yaml", "ball.yaml"}) fs::copy_file(src / "meshes" / m, project.assets() / "meshes" / m);
+    copy_rig_assets(src, project.assets());
     toy::core::Engine engine(shell_config(project), shell_options(project));
     EditorApp app(engine, project);
     tick(engine, 4);
@@ -4057,9 +4422,7 @@ void test_editor_object_asset_pick_and_edit() {
     const fs::path root = fresh_dir("object_pick_project");
     Project project = Project::create(root);
     const fs::path src = fs::path(ROOT_DIR) / "assets";
-    fs::copy(src / "objects", project.assets() / "objects", fs::copy_options::recursive);
-    fs::copy(src / "animations", project.assets() / "animations", fs::copy_options::recursive);
-    for (const char* m : {"tentacle.yaml", "ball.yaml"}) fs::copy_file(src / "meshes" / m, project.assets() / "meshes" / m);
+    copy_rig_assets(src, project.assets());
     toy::core::Engine engine(shell_config(project), shell_options(project));
     EditorApp app(engine, project);
     tick(engine, 4);
@@ -4123,9 +4486,7 @@ void test_editor_object_asset_click_and_tab() {
     const fs::path root = fresh_dir("object_click_project");
     Project project = Project::create(root);
     const fs::path src = fs::path(ROOT_DIR) / "assets";
-    fs::copy(src / "objects", project.assets() / "objects", fs::copy_options::recursive);
-    fs::copy(src / "animations", project.assets() / "animations", fs::copy_options::recursive);
-    for (const char* m : {"tentacle.yaml", "ball.yaml"}) fs::copy_file(src / "meshes" / m, project.assets() / "meshes" / m);
+    copy_rig_assets(src, project.assets());
     toy::core::Engine engine(shell_config(project), shell_options(project));
     EditorApp app(engine, project);
     tick(engine, toy::core::Engine::kFillDebounceFrames + 4);
@@ -4273,9 +4634,7 @@ void test_editor_grid_snap_and_frame() {
     const fs::path root = fresh_dir("grid_snap_project");
     Project project = Project::create(root);
     const fs::path src = fs::path(ROOT_DIR) / "assets";
-    fs::copy(src / "objects", project.assets() / "objects", fs::copy_options::recursive);
-    fs::copy(src / "animations", project.assets() / "animations", fs::copy_options::recursive);
-    for (const char* m : {"tentacle.yaml", "ball.yaml"}) fs::copy_file(src / "meshes" / m, project.assets() / "meshes" / m);
+    copy_rig_assets(src, project.assets());
     toy::core::Engine engine(shell_config(project), shell_options(project));
     EditorApp app(engine, project);
     tick(engine, toy::core::Engine::kFillDebounceFrames + 4);
@@ -4978,6 +5337,253 @@ void test_editor_text_pixel_aligned() {
 
 
 /**
+ * @brief Tags: the folders between an asset's type folder and the asset. References name the
+ *        type and the asset only, the engine finds it by name (coopa::asset::AssetIndex), and
+ *        re-tagging moves the file (a scene: its folder), rewriting only full-path references.
+ */
+void test_asset_tags_and_retag() {
+    expect(asset_tags("materials/metal/brick.yaml") == std::vector<std::string>{"metal"}, "a material's tag is its folder");
+    expect(asset_tags("scenes/tests/water/lake/scene.yaml") == std::vector<std::string>{"tests", "water"},
+           "a scene's own folder is the asset, not a tag");
+    expect(asset_tags("ui/themes/dark.yaml").empty() && asset_type_dir("ui/themes/dark.yaml") == "ui/themes",
+           "ui/themes is a type folder, not a tag");
+    expect(asset_tags("scenes/lake/meshes/basin.yaml").empty(), "scene-local files have no tags");
+    expect(with_asset_tags("materials/brick.yaml", {"stone", "wall"}) == "materials/stone/wall/brick.yaml", "tags nest in order");
+    expect(with_asset_tags("scenes/tests/lake/scene.yaml", {}) == "scenes/lake/scene.yaml", "untagging a scene moves its folder up");
+    expect(short_ref("materials/metal/brick.yaml") == "materials/brick.yaml" &&
+           short_ref("scenes/tests/lake/scene.yaml") == "scenes/lake/scene.yaml" &&
+           short_ref("ui/themes/dark.yaml") == "ui/themes/dark.yaml", "short refs drop tag folders");
+
+    const fs::path root = fresh_dir("asset_tags");
+    const fs::path a = root / "assets";
+    auto write = [&](const std::string& rel, const std::string& text) {
+        fs::create_directories((a / rel).parent_path());
+        std::ofstream(a / rel) << text;
+    };
+    write("config.yaml", "scene:\n  default_scene: \"assets/scenes/lake/scene.yaml\"\n");
+    write("materials/metal/brick.yaml", "albedo: {r: 1.0, g: 0.0, b: 0.0}\n");
+    write("materials/stone/brick_old.yaml", "albedo: {r: 0.0, g: 1.0, b: 0.0}\n");
+    write("meshes/props/rock.yaml", "vertices: []\nfaces: []\n");
+    write("scenes/lake/meshes/basin.yaml", "vertices: []\nfaces: []\n");
+    write("scenes/lake/scene.yaml",
+          "scene:\n  scene_name: lake\n  root_objects:\n"
+          "    - name: a\n      components:\n"
+          "        - type: MeshRenderer\n          mesh_path: rock\n          material: materials/brick\n"
+          "        - type: MeshRenderer\n          mesh_path: props/rock\n          material: materials/metal/brick\n");
+    Project project(root);
+
+    using coopa::asset::AssetIndex;
+    expect(AssetIndex::find(a, "materials/brick.yaml") == a / "materials/metal/brick.yaml", "the index finds a tagged asset by name");
+    expect(AssetIndex::find(a, "meshes/rock.yaml") == a / "meshes/props/rock.yaml", "...meshes too");
+    expect(AssetIndex::find(a, "scenes/lake/scene.yaml") == a / "scenes/lake/scene.yaml", "...and scenes by their folder");
+    expect(!AssetIndex::find(a, "materials/missing.yaml") && !AssetIndex::find(a, "objects/brick.yaml"),
+           "names are per type: a material is no object");
+    expect(project.absolute("materials/brick.yaml") == a / "materials/metal/brick.yaml", "Project::absolute finds it by name");
+
+    auto comps = [&](const std::string& scene_rel) {
+        return coopa::yaml::load_document(a / scene_rel).at("scene").at("root_objects")[0].at("components");
+    };
+    // Re-tag a material: short references stay, the full-path one follows.
+    project.rename_asset("materials/metal/brick.yaml", "materials/wall/red/brick.yaml");
+    expect(fs::exists(a / "materials/wall/red/brick.yaml") && !fs::exists(a / "materials/metal/brick.yaml"), "re-tagging moves the file");
+    expect(get_string(comps("scenes/lake/scene.yaml")[0], "material") == "materials/brick", "a short reference is left alone");
+    expect(get_string(comps("scenes/lake/scene.yaml")[1], "material") == "materials/wall/red/brick", "a full-path reference follows");
+    expect(AssetIndex::find(a, "materials/brick.yaml") == a / "materials/wall/red/brick.yaml", "the index sees the move");
+
+    // Re-tag a mesh: a bare name stays, an old subfolder ref follows.
+    project.rename_asset("meshes/props/rock.yaml", "meshes/nature/rock.yaml");
+    expect(get_string(comps("scenes/lake/scene.yaml")[0], "mesh_path") == "rock" &&
+           get_string(comps("scenes/lake/scene.yaml")[1], "mesh_path") == "nature/rock", "mesh refs: name kept, path followed");
+
+    // Re-tag a scene: the whole folder moves (scene-local meshes along) and config follows.
+    project.rename_asset("scenes/lake/scene.yaml", "scenes/tests/water/lake/scene.yaml");
+    expect(fs::exists(a / "scenes/tests/water/lake/scene.yaml") && fs::exists(a / "scenes/tests/water/lake/meshes/basin.yaml") &&
+           !fs::exists(a / "scenes/lake"), "a scene moves as its folder");
+    const std::string cfg = get_string(coopa::yaml::load_document(a / "config.yaml").at("scene"), "default_scene");
+    expect(cfg == "assets/scenes/lake/scene.yaml", "config's default_scene (the scene's short path) is left alone");
+    expect(project.scenes() == std::vector<std::string>{"scenes/tests/water/lake/scene.yaml"}, "the moved scene is listed");
+    expect(AssetIndex::find(a, "scenes/lake/scene.yaml") == a / "scenes/tests/water/lake/scene.yaml",
+           "the scene's old short path still finds it");
+
+    // Names are unique per type, whatever the tags.
+    setenv("FIXED_DT", "0", 1);
+    setenv("HOME", tmp_root().c_str(), 1);
+    Project made = Project::create(fresh_dir("asset_tags_editor"));
+    toy::core::Engine engine(shell_config(made), shell_options(made));
+    EditorApp app(engine, made);
+    app.set_show_engine_assets(false);
+    tick(engine, 2);
+    coopa::yaml::save_document(made.assets() / "materials" / "metal" / "material.yaml", Node::mapping());
+    app.project().refresh();
+    app.set_asset_tab(AssetType::Material);
+    app.set_asset_tag_filter({"metal"});
+    expect(app.assets_listed() == std::vector<std::string>{"materials/metal/material.yaml"}, "the tag filter keeps tagged assets");
+    app.set_asset_tag_filter({});
+    expect(app.assets_listed().size() == 2, "no tag picked: everything");
+    expect(app.create_material("material"), "creating a material");
+    tick(engine, 2);
+    expect(coopa::yaml::document_exists(made.assets() / "materials" / "material_01.yaml"),
+           "a new material avoids a name taken in another tag folder");
+    app.set_asset_tags(AssetType::Material, "materials/default.yaml", {"basic"});
+    tick(engine, 3);
+    expect(fs::exists(made.assets() / "materials/basic/default.yaml") && !fs::exists(made.assets() / "materials/default.yaml"),
+           "set_asset_tags moves the asset into its tag folder");
+    const Node scene = coopa::yaml::load_document(made.assets() / "scenes/main/scene.yaml");
+    bool short_kept = false;
+    for (const auto& o : scene.at("scene").at("root_objects").as_seq()) {
+        if (get_string(o, "name") != "ground") continue;
+        for (const auto& c : o.at("components").as_seq()) short_kept |= get_string(c, "material") == "materials/default";
+    }
+    expect(short_kept, "the starter scene's materials/default still names it (found by name)");
+    app.set_asset_sort(EditorApp::AssetSort::Tags);
+    const auto by_tags = app.assets_listed();
+    expect(!by_tags.empty() && by_tags.front().rfind("materials/material", 0) == 0 && by_tags.back() == "materials/metal/material.yaml",
+           "sort by tags: untagged first, then by tag");
+    app.set_asset_sort(EditorApp::AssetSort::Name);
+    // For a look (EDITOR_DUMP_DIR): the panel with tag chips, toyengine's tagged meshes below.
+    app.set_show_engine_assets(true);
+    tick(engine, 3);
+    dump(engine, "asset_tags_materials");
+    app.set_asset_tab(AssetType::Mesh);
+    app.set_asset_tag_filter({"terrain"});
+    tick(engine, 3);
+    dump(engine, "asset_tags_meshes_filtered");
+}
+
+/**
+ * @brief The Render tab, through real input: features are sections with their switch in the
+ *        header (clicking it writes config.yaml), opening one shows its rows, and the search box
+ *        narrows the tab to matching settings.
+ */
+void test_editor_render_settings_panel() {
+    using coopa::input::Key;
+    setenv("FIXED_DT", "0", 1);
+    unsetenv("NO_INPUT");
+    setenv("HOME", tmp_root().c_str(), 1);
+    const fs::path root = fresh_dir("render_settings_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    InputDriver in{engine, std::max(1.0f, engine.display_scale())};
+    tick(engine, 4);
+    app.set_prop_tab(PropTab::Render);   // in the scene: edits to live settings override config.yaml for this scene
+    app.clear_test_rects();
+    tick(engine, 2);
+    dump(engine, "render_settings_tab");
+    for (const char* g : {"Resolution & Detail", "Lighting & Sky", "Anti-Aliasing", "Shadows", "Ambient Occlusion", "Reflections", "Fog"}) {
+        expect(app.test_rect(std::string("setting_group:") + g).has_value(), std::string("the Render tab lists ") + g);
+    }
+    // The header's checkbox switches the feature (Shadows is on by default).
+    auto shadows = app.test_rect("setting_group:Shadows");
+    if (shadows) {
+        const glm::vec2 check{shadows->x + shadows->h + 6.0f, shadows->center().y};
+        in.click(check);
+        tick(engine, 2);
+        const Node* over = app.document().scene_setting("render", "shadows_enabled");
+        expect(over && !over->get_value<bool>(), "the Shadows header checkbox turns shadows off (a scene override)");
+        expect(!engine.render_config().shadows_enabled, "...live");
+        // Clicking the title opens the section without touching the switch.
+        shadows = app.test_rect("setting_group:Shadows");
+        if (shadows) in.click({shadows->x + shadows->w * 0.6f, shadows->center().y});
+        tick(engine, 2);
+        over = app.document().scene_setting("render", "shadows_enabled");
+        expect(over && !over->get_value<bool>(), "opening the section leaves the switch alone");
+        dump(engine, "render_settings_shadows_open");
+    }
+    // Search: only matching settings (and their groups) show.
+    const auto filter = app.test_rect("render_settings_filter");
+    expect(filter.has_value(), "the Render tab has a search box");
+    if (filter) {
+        in.click(filter->center());
+        for (char ch : std::string("bloom")) {
+            engine.queue_input([ch](coopa::input::Input& i) { i.push_char(static_cast<uint32_t>(ch)); });
+            tick(engine, 1);
+        }
+        app.clear_test_rects();
+        tick(engine, 2);
+        expect(app.test_rect("setting_group:Bloom").has_value() && !app.test_rect("setting_group:Shadows").has_value(),
+               "searching 'bloom' shows the Bloom section and hides Shadows");
+        dump(engine, "render_settings_search");
+    }
+}
+
+/**
+ * @brief Proportional editing through real input: O turns it on, G Z 1 Enter on one vertex of
+ *        a grid lifts its neighbours by the falloff, the wheel resizes the circle mid-grab.
+ */
+void test_editor_proportional_editing() {
+    using coopa::input::Key;
+    setenv("FIXED_DT", "0", 1);
+    unsetenv("NO_INPUT");
+    setenv("HOME", tmp_root().c_str(), 1);
+    const fs::path root = fresh_dir("proportional_project");
+    Project project = Project::create(root);
+    coopa::yaml::save_document(project.assets() / "meshes" / "grid.yaml", mesh_to_node(make_grid(10, 10, 10.0f)));
+    project.refresh();
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    InputDriver in{engine, std::max(1.0f, engine.display_scale())};
+    tick(engine, 4);
+    app.open_asset(AssetType::Mesh, "meshes/grid.yaml");
+    tick(engine, toy::core::Engine::kFillDebounceFrames + 2);
+    app.set_interaction_mode(InteractionMode::Edit);
+    tick(engine, 2);
+    expect(app.edit_mode_active(), "the grid is in Edit Mode");
+    auto& md = app.mesh_document();
+    uint32_t centre = 0, near = 0, far = 0;
+    for (uint32_t v = 0; v < md.mesh.positions.size(); ++v) {
+        const glm::vec3 p = md.mesh.positions[v];
+        if (glm::length(p) < 1e-4f) centre = v;
+        if (glm::length(p - glm::vec3(1, 0, 0)) < 1e-4f) near = v;
+        if (glm::length(p - glm::vec3(5, 0, 0)) < 1e-4f) far = v;
+    }
+    md.selection.clear();
+    md.selection.mode = SelectMode::Vertex;
+    md.selection.verts.insert(centre);
+    const glm::vec2 c = app.viewport_box().center();
+    in.move(c);
+    expect(!app.proportional().enabled, "proportional editing starts off");
+    in.key(Key::O);
+    expect(app.proportional().enabled, "O turns it on");
+    app.proportional().falloff = Falloff::Linear;
+    app.proportional().projected = false;
+    app.proportional().radius = 3.0f;
+    const EditMesh before = md.mesh;
+    in.key(Key::G);
+    in.key(Key::Z);
+    in.key(Key::Num1);
+    in.key(Key::Enter);
+    expect(std::abs(md.mesh.positions[centre].z - 1.0f) < 1e-4f, "the selected vertex moves the full 1");
+    expect(std::abs(md.mesh.positions[near].z - 2.0f / 3.0f) < 1e-3f,
+           "a vertex 1 m away moves 2/3 (linear falloff, radius 3) -- got " + std::to_string(md.mesh.positions[near].z));
+    expect(std::abs(md.mesh.positions[far].z) < 1e-6f, "a vertex outside the radius stays put");
+    in.key(Key::Z, coopa::input::Mods::Control);
+    tick(engine, 2);
+    expect(std::abs(md.mesh.positions[near].z) < 1e-6f && std::abs(md.mesh.positions[centre].z) < 1e-6f,
+           "one undo puts the neighbours back too");
+
+    // The wheel resizes the circle while grabbing (EDITOR_DUMP_DIR shows the circle).
+    app.proportional().projected = true;
+    app.proportional().falloff = Falloff::Smooth;
+    in.move(c);
+    in.key(Key::G);
+    in.move(c + glm::vec2(0, -60), 3);
+    const float r0 = app.proportional().radius;
+    engine.queue_input([](coopa::input::Input& i) { i.push_scroll(0.0, 3.0); });
+    tick(engine, 2);
+    expect(app.proportional().radius > r0 * 1.2f, "scrolling up during G grows the radius");
+    dump(engine, "proportional_grab");
+    in.key(Key::Escape);
+    bool restored = true;
+    for (size_t i = 0; i < before.positions.size(); ++i) restored &= glm::length(md.mesh.positions[i] - before.positions[i]) < 1e-5f;
+    expect(restored, "Esc puts every vertex back");
+    in.key(Key::O, coopa::input::Mods::Shift);
+    expect(app.proportional().falloff == Falloff::Sphere, "Shift O cycles the falloff");
+    in.key(Key::O);
+    expect(!app.proportional().enabled, "O again turns it off");
+}
+
+/**
  * @brief The Asset panel's right-click menus, through real input: right-clicking an asset
  *        offers Delete (and the confirmation deletes the file); right-clicking empty space in the
  *        list offers Add, with what the + button offers for that tab.
@@ -5073,7 +5679,9 @@ void test_editor_texture_preview_color_space() {
     const fs::path root = fresh_dir("texture_space_project");
     Project project = Project::create(root);
     for (const char* t : {"brick_normal.png", "brick_albedo.png", "noise_mask.png"}) {
-        fs::copy_file(fs::path(ROOT_DIR) / "assets" / "textures" / t, project.assets() / "textures" / t);
+        // toyengine keeps them in tag folders (textures/brick/, textures/masks/); found by name.
+        const auto from = coopa::asset::AssetIndex::find(fs::path(ROOT_DIR) / "assets", std::string("textures/") + t);
+        fs::copy_file(from.value_or(fs::path(ROOT_DIR) / "assets" / "textures" / t), project.assets() / "textures" / t);
     }
     Node mat = Node::mapping();
     mat["albedo"] = make_color({1, 1, 1});
@@ -6359,7 +6967,7 @@ void test_package_engine_fallback() {
     }
     expect(spv && !glsl, "engine shaders ship compiled only");
     expect(fs::is_directory(out / "assets" / "fonts"), "engine fonts ship");
-    expect(!fs::exists(out / "assets" / "scenes" / "pixel_demo"), "engine scenes never ship");
+    expect(!fs::exists(out / "assets" / "scenes" / "demos" / "pixel_demo"), "engine scenes never ship");
     expect(coopa::yaml::document_exists(out / "assets" / "scenes" / "main" / "scene.yaml"), "the project's own scene ships");
     expect(!fs::exists(out / "assets" / "materials" / "brick.caml"), "engine content outside the runtime dirs never ships");
 
@@ -6486,10 +7094,10 @@ void test_editor_tile_set_duplicate() {
     tick(engine, 4);
 
     const auto objects = app.engine_assets_listed(AssetType::Object);
-    expect(std::find(objects.begin(), objects.end(), "objects/tileset_round.yaml") != objects.end(),
+    expect(std::find(objects.begin(), objects.end(), "objects/terrain/tileset_round.yaml") != objects.end(),
            "toyengine's tile sets are listed among its objects");
 
-    const std::string copy = app.duplicate_tile_set("objects/tileset_round.yaml");
+    const std::string copy = app.duplicate_tile_set("objects/terrain/tileset_round.yaml");
     expect(copy == "objects/tileset_round_copy.yaml", "the duplicate lands in the project under a new name");
     const Node doc = coopa::yaml::load_document(project.assets() / "objects" / "tileset_round_copy.yaml");
     const Node& obj = doc.at("object");
@@ -6505,7 +7113,7 @@ void test_editor_tile_set_duplicate() {
         }
     }
     expect(pieces == static_cast<int>(toy::world::k_tile_piece_count) && own == pieces, "every piece of the copy points at its own new mesh file");
-    expect(fs::exists(Project::engine_assets() / "meshes" / "tile_round_top_outer.yaml"),
+    expect(fs::exists(Project::engine_assets() / "meshes" / "terrain" / "round" / "tile_round_top_outer.yaml"),
            "toyengine's own pieces are left in place");
 
     app.open_asset(AssetType::Object, copy);
@@ -6527,9 +7135,9 @@ void test_editor_engine_assets() {
     expect(!project.is_engine() && Project(fs::path(ROOT_DIR)).is_engine(), "a game project is not toyengine; the checkout is");
     expect(project.is_engine_asset("materials/brick.yaml") && !project.is_engine_asset("materials/default.yaml"),
            "a file only toyengine has resolves to toyengine's; one the project has stays the project's");
-    expect(project.absolute("materials/brick.yaml") == Project::engine_assets() / "materials/brick.yaml" &&
-           project.relative(project.absolute("materials/brick.yaml")) == "materials/brick.yaml",
-           "absolute() / relative() round-trip through toyengine's assets/");
+    expect(project.absolute("materials/brick.yaml") == Project::engine_assets() / "materials/building/brick.yaml" &&
+           project.relative(project.absolute("materials/brick.yaml")) == "materials/building/brick.yaml",
+           "absolute() finds toyengine's asset by name (in its tag folder); relative() round-trips");
     expect(Project(fs::path(ROOT_DIR)).list_engine("materials", ".yaml").empty(), "inside toyengine nothing is a separate layer");
 
     toy::core::Engine engine(shell_config(project), shell_options(project));
@@ -6539,7 +7147,7 @@ void test_editor_engine_assets() {
     expect(app.show_engine_assets(), "toyengine's assets are shown by default");
     auto has = [](const std::vector<std::string>& v, const std::string& x) { return std::find(v.begin(), v.end(), x) != v.end(); };
     const auto meshes = app.engine_assets_listed(AssetType::Mesh);
-    expect(has(meshes, "meshes/barrel.yaml") && !has(meshes, "meshes/cube.yaml"),
+    expect(has(meshes, "meshes/primitives/barrel.yaml") && !has(meshes, "meshes/primitives/cube.yaml"),
            "the Asset panel lists toyengine's meshes, minus those the project has its own copy of");
 
     // Not editable: opening is refused, so nothing can be saved back into toyengine.
@@ -6550,7 +7158,7 @@ void test_editor_engine_assets() {
     // Usable: drag a toyengine mesh from the panel into the viewport.
     app.set_asset_tab(AssetType::Mesh);
     tick(engine, 3);
-    const auto row = app.test_rect("asset_row:engine:meshes/barrel.yaml");
+    const auto row = app.test_rect("asset_row:engine:meshes/primitives/barrel.yaml");
     expect(row.has_value(), "the barrel row is drawn in the toyengine section");
     if (row) {
         const imm::Box vb = app.viewport_box();
@@ -6575,12 +7183,12 @@ void test_editor_engine_assets() {
     // Copy to Project: the project's own, editable copy now resolves instead.
     expect(app.copy_engine_asset_to_project(AssetType::Material, "materials/brick.yaml"), "Copy to Project");
     tick(engine, 4);
-    expect(fs::exists(root / "assets" / "materials" / "brick.yaml") && !app.project().is_engine_asset("materials/brick.yaml"),
+    expect(fs::exists(root / "assets" / "materials" / "building" / "brick.yaml") && !app.project().is_engine_asset("materials/brick.yaml"),
            "the copy is the project's");
     // It opens for editing -- after the usual save prompt, since the barrel left the scene unsaved.
     expect(app.active_asset_type() == AssetType::Material || app.ui().is_popup_open("Unsaved Changes"),
            "...and opens for editing (after the unsaved-changes prompt)");
-    expect(!has(app.engine_assets_listed(AssetType::Material), "materials/brick.yaml"), "...and leaves the toyengine section");
+    expect(!has(app.engine_assets_listed(AssetType::Material), "materials/building/brick.yaml"), "...and leaves the toyengine section");
 
     // The toggle hides the layer, and is remembered.
     app.set_show_engine_assets(false);
@@ -6868,12 +7476,16 @@ const TestCase kTests[] = {
     {"schema_defaults",                      "document", test_schema_defaults},
     {"snake_case_names",                     "document", test_snake_case_names},
     {"asset_refs_and_rename",                "document", test_asset_refs_and_rename},
+    {"asset_tags_and_retag",                 "editor_shell", test_asset_tags_and_retag},
+    {"editor_proportional_editing",          "editor_shell", test_editor_proportional_editing},
+    {"editor_render_settings_panel",         "editor_shell", test_editor_render_settings_panel},
     {"shader_ball",                          "mesh", test_shader_ball},
     {"mesh_io_preserves_blender_attributes", "mesh", test_mesh_io_preserves_blender_attributes},
     {"asset_fidelity_meshes",                "writer", test_asset_fidelity_meshes},
     {"paint_brushes",                        "mesh", test_paint_brushes},
     {"clip_model",                           "mesh", test_clip_model},
     {"mesh_mirror",                          "mesh", test_mesh_mirror},
+    {"proportional_weights",                 "mesh", test_proportional_weights},
     {"schema_int_enum_labels",               "document", test_schema_int_enum_labels},
     {"primitives_are_closed",                "mesh",     test_primitives_are_closed},
     {"extrude_inset_flip",                   "mesh",     test_extrude_inset_flip},
@@ -6905,6 +7517,7 @@ const TestCase kTests[] = {
     {"ui_palette_entries_load",              "document", test_ui_palette_entries_load},
     {"config_untouched_and_minimal_edits",   "config",   test_config_untouched_and_minimal_edits},
     {"settings_defaults_match_engine",       "config",   test_settings_defaults_match_engine},
+    {"render_settings_cover_engine",         "config",   test_render_settings_cover_engine},
     {"editor_shell_end_to_end",              "editor_shell", test_editor_shell_end_to_end},
     {"material_reference_forms",             "editor_shell", test_material_reference_forms},
     {"editor_real_input_blender_keymap",     "editor_shell", test_editor_real_input_blender_keymap},

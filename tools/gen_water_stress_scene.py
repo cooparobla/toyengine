@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Writes assets/scenes/water_stress/scene.yaml -- a large-world benchmark for toyengine/water.
+"""Writes assets/scenes/tests/water/water_stress/scene.yaml -- a large-world benchmark for toyengine/water.
 
   * a 1 km procedural ocean (512 quads a side) over a flat static seabed;
   * three lakes 650-860 m from the camera, each over its own bed;
@@ -16,7 +16,7 @@ import math
 import os
 import random
 
-OUT = os.path.join(os.path.dirname(__file__), "..", "assets", "scenes", "water_stress", "scene.yaml")
+OUT = os.path.join(os.path.dirname(__file__), "..", "assets", "scenes", "tests", "water", "water_stress", "scene.yaml")
 
 WATER_MATERIAL = """          material: materials/water"""
 

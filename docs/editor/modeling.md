@@ -190,6 +190,26 @@ right-click in the viewport and choose **Shade Smooth** or **Shade Flat** (also 
 surface looks round; **Flat** lights each face on its own, so its edges show. The setting is
 saved in the mesh, so every object that uses that mesh changes, and **Ctrl+Z** undoes it.
 
+## Proportional editing
+
+Press **O** in Edit Mode (or click the ring button beside **Snap** in the header) to turn
+proportional editing on. Every move, rotate and scale (**G** / **R** / **S**, or the gizmo) then
+also drags the unselected vertices near the selection, fading out to nothing at the edge of a
+circle drawn around it. Use it to pull a soft bump out of a flat surface, or to bend a whole
+region by rotating a few vertices.
+
+- **Resize the circle** while transforming: scroll the mouse wheel, or press **Page Up** /
+  **Page Down**. The header shows the radius.
+- **Falloff** (the caret beside the button, or **Shift+O** to cycle): **Smooth**, **Sphere**,
+  **Root**, **Inverse Square**, **Sharp**, **Linear** or **Constant** -- how quickly the effect
+  fades toward the edge.
+- **Projected from View** (on by default): whatever sits inside the circle on screen moves,
+  however far behind it is. Turn it off to measure straight-line distance in 3D.
+- **Connected Only**: measure along the mesh's edges, so a separate piece inside the circle
+  stays put.
+
+Symmetry applies to the dragged vertices too.
+
 ## Mirror and symmetry
 
 **Flip the selection once:**

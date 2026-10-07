@@ -5,7 +5,7 @@ the game window and the scene the game starts with. You change them on four tabs
 Properties, **Render**, **World**, **Output** and **Scene**, which appear while a scene is
 open. This page also shows how to package the project for shipping.
 
-![The Render tab in Properties, showing the Viewport & Resolution and Features groups](../images/editor/render_settings.jpg)
+![The Render tab in Properties, organized by feature](../images/editor/render_settings.jpg)
 
 *The **Render** tab. At the top are **Save config.yaml** and **Restart Renderer**, then a short
 reminder of how edits are stored, then the setting groups. A `*` after a setting's name means
@@ -63,21 +63,30 @@ stay as they were.
 
 ## Render tab
 
-| Group | What it controls |
+The Render tab is organized by feature. Every section starts closed, so the tab opens as a list:
+
+| Heading | Sections |
 |---|---|
-| **Viewport & Resolution** | The game's render size and how it is scaled to the window, and the anti-aliasing (smoothing of jagged edges) |
-| **Quality Tiers** | One **low** to **ultra** level each for shadows, ambient occlusion, reflections, indirect light, depth of field, volumetric light, SDF shapes and water |
-| **Features** | Switches for each effect: shadows, ambient occlusion, reflections, transparency, refraction, bloom, fog, volumetric light, depth of field, tilt-shift, auto exposure, colour grading, outlines and more |
-| **Shadows** | Shadow distance, number of cascades, bias, softness and contact shadows |
-| **Bloom & Exposure** | How bright things must be to glow, how strong and wide the glow is, and exposure compensation |
-| **Stylize** | Outline thickness and colour, edge detection, dithering, a colour palette image and a colour grading image |
-| **Debug** | **Debug view**, which shows one part of the image on its own, such as normals or shadows |
-| **Other Render Keys** | Any other render setting in the project, as a plain field |
+| **General** | **Resolution & Detail** (render size, upscaling, mesh detail), **Lighting & Sky** (exposure, shading style, sky colours), **Anti-Aliasing** (the method, and only that method's tuning) |
+| **Render Features** | **Shadows**, **Contact Shadows**, **Ambient Occlusion**, **Reflections**, **Global Illumination**, **Transparency & Refraction**, **Fog**, **Volumetrics**, **SDF Raymarching**, **Water**, **Bloom**, **Auto Exposure**, **Depth of Field**, **Tilt Shift**, **Color Grading**, **UI Canvases** |
+| **Stylize** | **Outline**, **Palette**, **Dither**, **Pixel Stability** |
+| **Debug** | **Debug View**: one part of the image on its own, such as normals or shadows |
 
-A quality tier sets several related values at once. A setting you change yourself always wins
-over the tier.
+- **Turn a feature on or off** with the checkbox in its section header. Click the name to open
+  the section without changing it. An open section that is off says so at the top.
+- **Everything about a feature is inside its section**: its quality tier, its tuning, and the
+  sizes that need a restart. Sub-headings group the rows (for Shadows: Sun Cascades, Softness,
+  Contact Hardening, Bias, Point & Spot Lights, Performance). Rows that belong to one mode show
+  only in that mode, such as FXAA's rows only while **Method** is **fxaa**.
+- **Hover any row** for what it does and its key in config.yaml.
+- **Search settings** at the top narrows the tab to matching settings as you type. It matches
+  names, keys and descriptions.
+- Rows marked **Set by ... Quality** in their description follow the section's **Quality** tier
+  until you change them. A value you set yourself always wins over the tier.
+- **Unrecognized Keys** appears only when config.yaml's `render:` holds a key the editor doesn't
+  know, such as a typo.
 
-The editor's viewport always fills its area, so **Viewport & Resolution** changes the running
+The editor's viewport always fills its area, so **Resolution & Detail** changes the running
 game's image, not the editor's view. In the same way, the viewport's shading buttons decide
 what the editor shows, not **Debug view** (see [Viewport](viewport.md#change-how-the-scene-is-drawn)).
 

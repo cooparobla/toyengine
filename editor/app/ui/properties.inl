@@ -361,25 +361,156 @@
         }
     }
 
-    /** @brief Draws settings groups (from settings_schema.h) against a config.yaml section. */
+    // --- settings groups (settings_schema.h) ------------------------------------------
+
+    /** @brief The render settings field for `key` (toggles included), or null. */
+    static const FieldDesc* render_field_(const std::string& key) {
+        for (const auto& g : render_settings_groups()) {
+            if (g.has_toggle() && g.toggle.key == key) return &g.toggle;
+            for (const auto& f : g.fields) if (f.key == key) return &f;
+        }
+        return nullptr;
+    }
+
+    /** @brief A setting's value as the renderer sees it: this scene's override, else config.yaml's; null = the default. */
+    const Node* setting_value_(Node& sec, const std::string& section, const FieldDesc& f) const {
+        if (scene_overridable_(section, f)) if (const Node* o = doc_.scene_setting(section, f.key)) return o;
+        return sec.contains(f.key) ? &sec.at(f.key) : nullptr;
+    }
+    bool setting_bool_(Node& sec, const std::string& section, const FieldDesc& f) const {
+        const Node* n = setting_value_(sec, section, f);
+        return n && n->is_boolean() ? n->get_value<bool>() : f.def.x != 0.0f;
+    }
+    std::string setting_string_(Node& sec, const std::string& section, const FieldDesc& f) const {
+        const Node* n = setting_value_(sec, section, f);
+        if (n && n->is_string()) return n->get_value<std::string>();
+        if (!f.default_string.empty()) return f.default_string;
+        return f.options.empty() ? std::string() : f.options.front();
+    }
+    /** @brief Writes a setting the way its row would: a scene override where allowed, else config.yaml. */
+    void set_setting_(Node& sec, const std::string& section, const FieldDesc& f, const Node& value) {
+        if (scene_overridable_(section, f)) {
+            settings_edit_was_scene_ = true;
+            apply_(doc_.set_scene_setting(section, f.key, &value, "Override " + section + "." + f.key));
+            return;
+        }
+        const Node before = config_.node;
+        sec[f.key] = value;
+        commit_setting_(before, section, f, false);
+    }
+
+    /** @brief Does `text` contain `needle` (lowercase), ignoring case? */
+    static bool contains_ci_(std::string text, const std::string& needle) {
+        std::transform(text.begin(), text.end(), text.begin(), ::tolower);
+        return text.find(needle) != std::string::npos;
+    }
+    static bool field_matches_(const FieldDesc& f, const std::string& needle) {
+        return contains_ci_(f.display() + " " + f.key + " " + f.tooltip, needle);
+    }
+    /** @brief Under a search: which of a group's rows match (all of them when its title does); none = hide the group. */
+    static std::vector<bool> group_matches_(const SettingsGroup& g, const std::string& needle, bool& any) {
+        std::vector<bool> m(g.fields.size(), true);
+        any = true;
+        if (needle.empty()) return m;
+        const bool whole = contains_ci_(g.title + " " + g.tip, needle) || (g.has_toggle() && field_matches_(g.toggle, needle));
+        any = whole;
+        for (size_t i = 0; i < g.fields.size(); ++i) {
+            m[i] = whole || field_matches_(g.fields[i], needle);
+            any |= m[i];
+        }
+        return m;
+    }
+
+    /**
+     * @brief One settings group as a collapsible section: the feature's switch in the header,
+     *        then its rows under their sub-headings (a mode's rows only while that mode is on).
+     *        Under a search (`needle`, lowercase) only matching rows show, and the group opens.
+     */
+    void draw_setting_group_(imm::Context& ctx, const SettingsGroup& g, const std::string& section, const InspectorEnv& env,
+                             const std::string& needle = {}) {
+        Node& sec = config_.section(section);
+        bool any = true;
+        const std::vector<bool> match = group_matches_(g, needle, any);
+        if (!any) return;
+        ctx.push_id(g.title);
+        const std::string title = g.title + (g.has_toggle() && g.toggle.startup_only ? "  *" : "");
+        bool open = false;
+        if (g.has_toggle()) {
+            bool on = setting_bool_(sec, section, g.toggle);
+            const bool was = on;
+            open = ctx.collapsing_header(title, g.open, nullptr, imm::Icon::None, &on);
+            const bool overridden = scene_overridable_(section, g.toggle) && doc_.scene_setting(section, g.toggle.key);
+            ctx.tooltip(g.title + "\n" + g.tip + "\nThe checkbox switches it " + (was ? "off" : "on") +
+                        (g.toggle.startup_only ? " (applies after Restart Renderer)" : "") +
+                        (overridden ? "\nOverridden by this scene" : "") + "\nconfig key: " + section + "." + g.toggle.key);
+            test_rects_["setting_group:" + g.title] = ctx.last_rect();
+            // A scene override of the switch is marked like an overridden row.
+            if (overridden) {
+                const imm::Box hb = ctx.last_rect();
+                ctx.fill({hb.x, hb.y + 2.0f, 2.0f, hb.h - 4.0f}, et_.chrome.setting_override_bar);
+            }
+            if (on != was) set_setting_(sec, section, g.toggle, Node(on));
+        } else {
+            open = ctx.collapsing_header(title, g.open);
+            ctx.tooltip(g.title + "\n" + g.tip);
+            test_rects_["setting_group:" + g.title] = ctx.last_rect();
+        }
+        if (!open && needle.empty()) { ctx.pop_id(); return; }
+        ctx.indent(6);
+        if (g.has_toggle() && !setting_bool_(sec, section, g.toggle)) ctx.label_dim("Off: these apply once " + g.title + " is on.");
+        if (!g.needs.empty()) {
+            if (const FieldDesc* need = render_field_(g.needs); need && !setting_bool_(sec, section, *need)) {
+                ctx.label_dim("Needs " + need->display() + " on.");
+            }
+        }
+        size_t sub = 0;
+        bool visible = true;
+        for (size_t i = 0; i < g.fields.size(); ++i) {
+            while (sub < g.subheads.size() && g.subheads[sub].index == i) {
+                const SettingsSubhead& s = g.subheads[sub++];
+                visible = true;
+                if (!s.show_key.empty()) {
+                    const FieldDesc* mode = render_field_(s.show_key);
+                    visible = mode && setting_string_(sec, section, *mode) == s.show_value;
+                }
+                size_t end = sub < g.subheads.size() ? g.subheads[sub].index : g.fields.size();
+                const bool has_rows = std::any_of(match.begin() + static_cast<std::ptrdiff_t>(i), match.begin() + static_cast<std::ptrdiff_t>(end),
+                                                  [](bool b) { return b; });
+                if (visible && has_rows) {
+                    ctx.spacing(3);
+                    const imm::Box hb = ctx.next_box(ctx.style.row_height - 4);
+                    ctx.text_in(hb, s.title, ctx.style.text_dim, 0.0f);
+                    const float tw = ctx.text_width(s.title) + 8;
+                    ctx.fill({hb.x + tw, hb.y + hb.h * 0.5f, std::max(0.0f, hb.w - tw), 1.0f}, ctx.style.separator);
+                }
+            }
+            if (!visible || !match[i]) continue;
+            FieldDesc f = g.fields[i];
+            if (f.startup_only) f.label = f.display() + " *";
+            f.tooltip += std::string(f.tooltip.empty() ? "" : "\n") + (f.startup_only ? "* Applies after Restart Renderer.\n" : "") +
+                         "config key: " + section + "." + f.key;
+            draw_setting_row_(ctx, f, sec, env, section);
+        }
+        ctx.unindent(6);
+        ctx.spacing(4);
+        ctx.pop_id();
+    }
+
+    /** @brief Draws the named settings groups (all when `only` is empty) against a config.yaml section. */
     void draw_setting_groups_(imm::Context& ctx, const std::vector<SettingsGroup>& groups, const std::string& section,
                               const std::vector<std::string>& only) {
-        InspectorEnv env = inspector_env_();
-        Node& sec = config_.section(section);
+        const InspectorEnv env = inspector_env_();
         for (const auto& g : groups) {
             if (!only.empty() && std::find(only.begin(), only.end(), g.title) == only.end()) continue;
-            if (!ctx.collapsing_header(g.title, g.title == "Features" || g.title == "Viewport & Resolution" || g.title == "Lighting & Sky")) continue;
-            ctx.indent(4);
-            for (const auto& f0 : g.fields) {
-                FieldDesc f = f0;
-                if (f.startup_only) f.label = f.display() + " *";
-                draw_setting_row_(ctx, f, sec, env, section);
-            }
-            ctx.unindent(4);
-            ctx.spacing(4);
+            draw_setting_group_(ctx, g, section, env);
         }
     }
 
+    /**
+     * @brief Render settings: a search box, then the groups under their category headings
+     *        (General, Render Features -- one section per feature, its switch in the header --
+     *        Stylize, Debug), and any config.yaml render keys the schema doesn't know.
+     */
     void draw_render_props_(imm::Context& ctx) {
         using I = imm::Icon;
         if (ctx.button(config_.dirty() ? "Save config.yaml *" : "Save config.yaml", 150, true, I::Save)) save_config();
@@ -388,18 +519,53 @@
         ctx.tooltip("Restart Renderer\nRebuilds the renderer so startup-only settings (marked *) apply. Open documents are kept.");
         ctx.label_dim(active_type_ == AssetType::Scene ? "Edits override config.yaml for this scene (tinted rows)."
                                                        : "Edits change config.yaml, the project's settings.");
-        ctx.label_dim("Right-click a row: revert / apply. * = project-wide.");
+        ctx.label_dim("Hover for help. Right-click a row: revert / apply. * = needs a restart.");
+        ctx.spacing(2);
+        const imm::Box sb = ctx.next_box(22);
+        ctx.input_text_box("render_settings_filter", sb, &render_settings_filter_, "    Search settings");
+        if (ctx.editing_text("render_settings_filter").value_or(render_settings_filter_).empty()) {
+            ctx.icon(I::Search, {sb.x + 4, sb.y + 4, 14, 14}, ctx.style.text_disabled);
+        }
+        test_rects_["render_settings_filter"] = sb;
         ctx.spacing(4);
-        draw_setting_groups_(ctx, render_settings_groups(), "render",
-                             {"Viewport & Resolution", "Quality Tiers", "Features", "Shadows", "Bloom & Exposure", "Stylize", "Debug"});
-        if (ctx.collapsing_header("Other Render Keys", false)) {
-            InspectorEnv env = inspector_env_();
-            const auto known = render_settings_keys();
-            const std::set<std::string> skip(known.begin(), known.end());
-            const Node before = config_.node;
-            EditResult r = draw_fields(ctx, {}, config_.section("render"), env, true, skip);
-            if (r.changed) { config_.commit("Edit render." + r.key, before, r.active ? "cfg:" + r.key : std::string()); apply_config_live(); }
-            if (r.finished) config_.undo.end_merge();
+        // Filter as you type: the field only commits on Enter, so read its live text.
+        std::string needle = ctx.editing_text("render_settings_filter").value_or(render_settings_filter_);
+        std::transform(needle.begin(), needle.end(), needle.begin(), ::tolower);
+        const InspectorEnv env = inspector_env_();
+        std::string category;
+        bool shown_any = false;
+        for (const auto& g : render_settings_groups()) {
+            bool any = true;
+            group_matches_(g, needle, any);
+            if (!any) continue;
+            if (g.category != category) {
+                category = g.category;
+                ctx.spacing(category == render_settings_groups().front().category ? 0 : 8);
+                ctx.heading(category);
+                const imm::Box line = ctx.last_rect();
+                ctx.fill({line.x, line.bottom() - 2, line.w, 1}, ctx.style.separator);
+                ctx.spacing(2);
+            }
+            draw_setting_group_(ctx, g, "render", env, needle);
+            shown_any = true;
+        }
+        if (!shown_any) ctx.label_dim("No setting matches that search.");
+        // Keys config.yaml has that the schema doesn't (a typo, or a key from a newer engine).
+        const auto known = render_settings_keys();
+        const std::set<std::string> skip(known.begin(), known.end());
+        bool unknown = false;
+        for (const auto& kv : config_.section("render").as_map()) {
+            if (kv.first.is_string() && !skip.count(kv.first.get_value<std::string>())) unknown = true;
+        }
+        if (unknown && needle.empty()) {
+            ctx.spacing(8);
+            if (ctx.collapsing_header("Unrecognized Keys", false)) {
+                ctx.label_dim("In config.yaml's render: but not a setting this editor knows.");
+                const Node before = config_.node;
+                EditResult r = draw_fields(ctx, {}, config_.section("render"), env, true, skip);
+                if (r.changed) { config_.commit("Edit render." + r.key, before, r.active ? "cfg:" + r.key : std::string()); apply_config_live(); }
+                if (r.finished) config_.undo.end_merge();
+            }
         }
     }
 

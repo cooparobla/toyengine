@@ -227,7 +227,7 @@ public:
         }
 
         if (options_.load_default_scene) {
-            load_scene(resolve_path_(scene_path_from_env_(config_.scene.default_scene)));
+            load_scene(scene_path_from_env_(config_.scene.default_scene));
         }
         read_cursor_pos_override_();
     }
@@ -244,7 +244,7 @@ public:
      */
     coopa::scene::Scene& load_scene(const std::string& path) {
         ctx_.wait_idle();
-        const std::string resolved = resolve_path_(path);
+        const std::string resolved = resolve_scene_path_(path);
         scene_mgr_.load_scene(resolved);
         scene_settings_[&scene_mgr_.get_active_scene()] = read_scene_settings_(resolved);
         prepare_scene_(scene_mgr_.get_active_scene());
@@ -1634,6 +1634,21 @@ private:
     /** @brief Resolves a config-relative asset path against the project root, unless already absolute. */
     std::string resolve_path_(const std::string& path) const {
         return resolve_against_(options_.project_root, path);
+    }
+
+    /**
+     * @brief resolve_path_() for a scene file, falling back to a lookup by name: a scene in tag
+     *        folders (assets/scenes/tests/fog_test/scene.yaml) still loads from the shorthand
+     *        assets/scenes/fog_test/scene.yaml (SCENE=fog_test, `toyengine fog_test`). See
+     *        coopa::asset::AssetIndex.
+     */
+    std::string resolve_scene_path_(const std::string& path) const {
+        const std::string resolved = resolve_path_(path);
+        if (path.empty() || coopa::yaml::document_exists(resolved)) return resolved;
+        std::string rel = std::filesystem::path(path).generic_string();
+        if (rel.rfind("assets/", 0) == 0) rel = rel.substr(7);
+        if (auto found = coopa::asset::AssetIndex::find_in(asset_roots(), rel)) return found->string();
+        return resolved;
     }
 
     static std::string resolve_against_(const std::filesystem::path& root, const std::string& path) {

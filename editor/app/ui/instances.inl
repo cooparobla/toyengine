@@ -575,7 +575,8 @@
         if (renames.empty()) return rewritten;
         // Shallow first: a deeper rename's parent path already uses the new names.
         std::sort(renames.begin(), renames.end(), [](const Rename& a, const Rename& b) { return a.parent.size() < b.parent.size(); });
-        const std::string ref = strip_yaml_ext(project_.relative(asset_file));
+        // Instances may name it by its full path or its short one (short_ref()).
+        const std::string ref = strip_yaml_ext(short_ref(project_.relative(asset_file)));
         auto rename_in = [&](Node& inst) {
             bool changed = false;
             for (const auto& r : renames) {
@@ -599,7 +600,7 @@
             bool changed = false;
             if (n.is_mapping()) {
                 for (const char* k : {"prefab", "inherit_from"}) {
-                    if (n.contains(k) && n.at(k).is_string() && strip_yaml_ext(n.at(k).get_value<std::string>()) == ref) changed |= rename_in(n);
+                    if (n.contains(k) && n.at(k).is_string() && strip_yaml_ext(short_ref(n.at(k).get_value<std::string>())) == ref) changed |= rename_in(n);
                 }
                 for (auto& kv : n.as_map()) changed |= walk(kv.second);
             } else if (n.is_sequence()) {

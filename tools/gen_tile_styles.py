@@ -1,4 +1,4 @@
-"""Generates the styled terrain tile pieces: assets/meshes/tile_<style>_<piece>.yaml.
+"""Generates the styled terrain tile pieces: assets/meshes/terrain/<style>/tile_<style>_<piece>.yaml.
 
 Standalone generator, not part of the C++ build -- run it manually (`python3
 tools/gen_tile_styles.py`) whenever the styled tile set needs regenerating. Deterministic:
@@ -55,10 +55,11 @@ import pathlib
 
 from mesh_yaml import face_normal, write_mesh
 
-OUTPUT_DIR = pathlib.Path(__file__).resolve().parent.parent / "assets" / "meshes"
+# Pieces go in assets/meshes/terrain/<style>/ (tags `terrain` and the style; referenced by name).
+OUTPUT_DIR = pathlib.Path(__file__).resolve().parent.parent / "assets" / "meshes" / "terrain"
 """Where the generated piece meshes are written; resolved relative to this repo, not the caller's cwd."""
 
-OBJECTS_DIR = OUTPUT_DIR.parent / "objects"
+OBJECTS_DIR = OUTPUT_DIR.parent.parent / "objects" / "terrain"
 """Where each style's tile-set object asset is written (see write_tile_set_object())."""
 
 # The tile-set object's layout: one row per tier, pieces in TilePiece order, spaced so each
@@ -459,14 +460,16 @@ def main():
         assert st["LIP_V"] <= 0.5, name
         prefix = f"tile_{name}"
         flat = st["FLAT_SHADED"]
+        out = OUTPUT_DIR / name
+        out.mkdir(parents=True, exist_ok=True)
         for piece in ("top_inner", "top_edge", "top_outer"):
-            build_top(piece, st).write(OUTPUT_DIR / f"{prefix}_{piece}.yaml", flat)
+            build_top(piece, st).write(out / f"{prefix}_{piece}.yaml", flat)
         for cap in (True, False):
             for end in ("continue", "convex", "concave"):
                 piece = f"wall_cap_{end}" if cap else f"wall_{end}"
-                build_wall(end, cap, st).write(OUTPUT_DIR / f"{prefix}_{piece}.yaml", flat)
-        build_wall_taper(st).write(OUTPUT_DIR / f"{prefix}_wall_cap_concave_taper.yaml", flat)
-        build_wall_continue_taper(st).write(OUTPUT_DIR / f"{prefix}_wall_cap_continue_taper.yaml", flat)
+                build_wall(end, cap, st).write(out / f"{prefix}_{piece}.yaml", flat)
+        build_wall_taper(st).write(out / f"{prefix}_wall_cap_concave_taper.yaml", flat)
+        build_wall_continue_taper(st).write(out / f"{prefix}_wall_cap_continue_taper.yaml", flat)
         write_tile_set_object(name, prefix)
 
 

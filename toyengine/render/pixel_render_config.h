@@ -315,8 +315,8 @@ struct PixelRenderConfig {
         switch (shadow_quality) {
             // shadow_map_resolution is PER CASCADE (see its doc): the directional atlas is up
             // to 2x this on each axis, so the VRAM column at the default 4 cascades is
-            // 4/16/64/144 MB. Medium is where a single 2048 map used to sit, and high spends
-            // 4x that to beat the old single map's world-per-texel at every distance.
+            // 4/16/64/144 MB. Medium matches the VRAM of one 2048 map, and high spends 4x that
+            // so every cascade beats a single 2048 map's world-per-texel at every distance.
             case RenderQuality::Low:    shadow_map_resolution = 512;  cube_shadow_resolution = 256;  spot_shadow_resolution = 512;  shadow_pcf_samples = 8;  shadow_pcss_taps = 4;  contact_shadow_steps = 4;  break;
             case RenderQuality::Medium: shadow_map_resolution = 1024; cube_shadow_resolution = 512;  spot_shadow_resolution = 1024; shadow_pcf_samples = 16; shadow_pcss_taps = 6;  contact_shadow_steps = 6;  break;
             case RenderQuality::High:   shadow_map_resolution = 2048; cube_shadow_resolution = 512;  spot_shadow_resolution = 1024; shadow_pcf_samples = 24; shadow_pcss_taps = 8;  contact_shadow_steps = 8;  break;
@@ -550,12 +550,12 @@ struct PixelRenderConfig {
      */
     bool     shadow_cache_enabled = true;
     /**
-     * @brief LEGACY: a constant depth bias in the directional map's [0,1] light depth.
+     * @brief A constant depth bias in the directional map's [0,1] light depth, written to
+     *        LightUBO::dir_shadow_params.x.
      *
-     * Only gfxcoopa's own pre-cascade shaders (pbr.frag / deferred_lighting.frag, which read
-     * LightUBO::dir_shadow_params.x) still use it. Every toyengine shading path biases by
-     * `shadow_depth_bias_texels` + `shadow_slope_bias_texels` instead, which scale with each
-     * map's own texel size.
+     * Surface shading ignores it (every shading path biases by `shadow_depth_bias_texels` +
+     * `shadow_slope_bias_texels`, which scale with each map's own texel size); its one reader is
+     * the volumetrics sun-shadow lookup, via VolumetricsUBO::shadow_params.z.
      */
     float    shadow_bias            = 0.005f;
     /**
@@ -850,7 +850,7 @@ struct PixelRenderConfig {
      * How much of the GGX cone the hit-colour lookup prefilters through the scene-colour mips,
      * on top of the ray footprint. With importance-sampled rays the lobe is already resolved by
      * the rays themselves and the temporal average, so the full cone would blur twice; 0.5 keeps
-     * just enough prefiltering to hide the per-frame noise. 1 = the old full-cone lookup. RUNTIME.
+     * just enough prefiltering to hide the per-frame noise. 1 = the full-cone lookup. RUNTIME.
      */
     float ssr_cone_prefilter   = 0.5f;
     /**
@@ -988,7 +988,7 @@ struct PixelRenderConfig {
     uint32_t volumetrics_froxel_miss_samples = 4;
     /** Per-pixel jitter of the composite's grid lookup, in froxels / slices (0 = off). Breaks
      *  up the froxel cell pattern for TAA to resolve; ignored unless aa_mode == "taa". Off by
-     *  default: with centre-reprojected history the cells no longer show in pixel_demo, and
+     *  default: with centre-reprojected history the cells do not show in pixel_demo, and
      *  the dither TAA leaves behind measured as slightly MORE flicker. RUNTIME. */
     float    volumetrics_froxel_lookup_jitter = 0.0f;
     float volumetrics_max_opacity    = 0.85f; /**< Ceiling on how much volumetrics can occlude the scene. */
@@ -1203,7 +1203,8 @@ struct PixelRenderConfig {
 
     std::string shader_dir;                   /**< Absolute path to assets/shaders. */
     // Ordered search path resolving a logical shader name (e.g. "gbuffer.vert") to a compiled
-    // .spv path -- this app's own directory first, then gfxcoopa's shared base library. Set
+    // .spv path -- the project's, the engine's, gfxcoopa's then uicoopa's shader directories
+    // (see RuntimeLayout::shader_roots). Set
     // alongside shader_dir (see engine.h's make_render_config_); shader_dir is kept for
     // logging/debugging, `shaders` is what every pass construction actually resolves through.
     coopa::gfx::pipeline::ShaderLibrary shaders;
@@ -1213,8 +1214,7 @@ struct PixelRenderConfig {
     // `shaders` in engine.h's make_render_config_(); empty by default, so a scene that never
     // references a custom shader behaves exactly as if this field didn't exist. Every entry's
     // logical shader names are resolved through `shaders` above at pass-construction time (see
-    // PixelRenderPipeline's ctor), the same two-tier app-over-base search every stock entry
-    // point already goes through.
+    // PixelRenderPipeline's ctor), the same search every stock entry point goes through.
     coopa::gfx::pipeline::SurfaceShaderRegistry surface_shaders;
 };
 

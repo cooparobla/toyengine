@@ -4,13 +4,9 @@
 // gfx/surface/shadow_vs.glsl -- directional-light shadow-depth vertex
 // backbone.
 //
-// Lives in toyengine, not gfxcoopa's base library: toyengine's
-// shadow_depth.vert/.frag already fork from gfxcoopa's base (they add the
-// CUTOUT alpha-mask sampler + uv attribute gfxcoopa's base shadow pass
-// doesn't have -- see MaterialTextureCache), so this backbone extracts
-// *that* fork, the one derived shaders actually build on. gfxcoopa's own
-// base shadow_depth.vert is untouched and still resolves for anyone (e.g.
-// blendy) who doesn't override it.
+// shadow_depth.vert/.frag are built on it; they carry the CUTOUT alpha-mask
+// sampler + uv attribute (see MaterialTextureCache) so masked casters cut
+// holes in their shadows.
 //
 // A derived shader MUST include this backbone (not just gbuffer_vs.glsl)
 // in its own shadow entry point and define the SAME gfx_surface_vertex()

@@ -14,7 +14,7 @@ set(TOYENGINE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 # ROOT_DIR_PARENT is "the directory the coopa repos live in" -- the pinned libs/
 # submodule tree, so the build never depends on what happens to be checked out
 # beside toyengine. configuration/root_directory.h.in exports it as PROJ_DIR,
-# which toyengine/core/engine.h uses to locate gfxcoopa's shared shader library.
+# which toyengine/core/runtime_paths.h uses to locate gfxcoopa's and uicoopa's shaders.
 set(ROOT_DIR_PARENT "${TOYENGINE_DIR}/libs")
 
 set(LIBCOOPA_DIR   "${ROOT_DIR_PARENT}/libcoopa")
@@ -27,7 +27,7 @@ set(MAPCOOPA_DIR   "${ROOT_DIR_PARENT}/mapcoopa")
 
 if(NOT EXISTS "${LIBCOOPA_DIR}/CMakeLists.txt")
     message(FATAL_ERROR
-        "libs/ is empty -- the coopa libraries are git submodules now. "
+        "libs/ is empty -- the coopa libraries are git submodules. "
         "Run: git submodule update --init --recursive")
 endif()
 
@@ -117,7 +117,7 @@ endif()
 # `CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR` guard its demos and ctest
 # registration sit behind: UiPass and UiWorldPass are constructed from .spv paths,
 # so this build needs them compiled too -- hence the add_dependencies() below, and
-# the uicoopa search root in toyengine/core/engine.h's make_render_config_().
+# the uicoopa search root in RuntimeLayout::shader_roots() (toyengine/core/runtime_paths.h).
 
 configure_file(configuration/root_directory.h.in configuration/root_directory.h)
 

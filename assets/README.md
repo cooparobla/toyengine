@@ -39,7 +39,7 @@ material and a mesh may both be `brick`; two materials may not).
 | `objects/` | object assets (prefabs). Tags: `animation` (test rigs), `terrain` (tile sets), `props` |
 | `animations/<rig>/` | clips, one folder per rig |
 | `physics_materials/` | friction / restitution sets for colliders |
-| `shaders/` | GLSL; surface shaders are named by a material's `shader:` |
+| `shaders/` | GLSL for every shader the engine loads (its own passes, the gfxcoopa passes it runs, surface shaders named by a material's `shader:`) and their `gfx/` headers. gfxcoopa supplies only the shared lighting headers (`gfx/brdf.glsl`, `ibl.glsl`, `sky.glsl`, `spot_light.glsl`) and SMAA's shaders. Search order: project, then here, then gfxcoopa, then uicoopa; no name exists in two places |
 | `ui/` | UI assets -- HUD, menus, screens (open them in the editor's UI tab). Tags: `menus`, `hud` |
 | `ui/themes/` | UI themes: colours, fonts, sizes of the themed widgets |
 | `palettes/`, `fonts/` | colour palettes, UI fonts |

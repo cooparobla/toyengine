@@ -1,9 +1,8 @@
 #ifndef TOY_PIXEL_FORWARD_SHADING_GLSL
 #define TOY_PIXEL_FORWARD_SHADING_GLSL
 
-// pixel_forward_shading.glsl -- the forward-shading body originally written
-// (and still used) by transparent.frag, extracted so sdf_forward.frag can
-// share it byte-for-byte -- a BLEND mesh and a BLEND SDF share ONE
+// pixel_forward_shading.glsl -- the forward-shading body shared by the
+// transparent backbone (gfx/surface/transparent_fs.glsl) and sdf_forward.frag -- a BLEND mesh and a BLEND SDF share ONE
 // implementation, so they can never silently diverge.
 //
 // A "body" file in the ssr_trace_body.glsl sense: the includer must, BEFORE
@@ -19,13 +18,13 @@
 //     <gfx/indirect_specular.glsl>, <gfx/sky.glsl>, <gfx/ssr_common.glsl>,
 //     <gfx/spot_light.glsl>, "indirect_hooks.glsl", <gfx/ssr_trace_body.glsl>
 //     (which itself needs `g_normal_metallic`/`g_position_roughness`/
-//     `u_velocity`/`u_hiz_map`/`u_scene_color` declared first -- see transparent.frag's
+//     `u_velocity`/`u_hiz_map`/`u_scene_color` declared first -- see gfx/surface/transparent_fs.glsl's
 //     own include order for the canonical sequence this file assumes was
 //     already followed).
 //
 // calc_dir_shadow()/calc_local_shadow() themselves come from
-// "pixel_shadow_body.glsl", included below -- this file used to carry its own
-// gfx_forward_calc_* copies, byte-identical to pixel_lighting.frag's; see that file's doc for why they were unified.
+// "pixel_shadow_body.glsl", included below -- the same copy pixel_lighting.frag uses, so
+// forward and deferred shadows cannot drift apart.
 
 /// Per-fragment material inputs to gfx_pixel_forward_shade() -- the subset
 /// of PBRMaterial a forward-shaded surface (mesh or SDF) needs, regardless
@@ -89,7 +88,7 @@ ivec2 gfx_forward_uv_to_px(vec2 uv) {
 /// outermost texel. In that sub-texel band the trace's hit data is garbage (see
 /// the miss-fallback comment in gfx_pixel_forward_shade() for the geometry) and
 /// Schlick's pow5 fresnel spike zeroes refracted transmission with no rendered
-/// reflection to compensate -- both of which used to render as near-black pixels
+/// reflection to compensate -- both of which would render as near-black pixels
 /// stippled along every BLEND silhouette. [0.05, 0.25] spans roughly the
 /// outermost texel of a small sphere and nothing more: wide enough to catch the
 /// sub-texel garbage, narrow enough that the look of everything past that first
@@ -278,7 +277,7 @@ vec4 gfx_pixel_forward_shade(vec3 world_pos, vec3 N, vec3 camera_pos, mat4 view,
         // the geometry visible right behind this surface -- a miss there is a marching
         // failure (the march barely moves in screen space, and hit-vs-miss flips on
         // sub-texel Hi-Z differences texel to texel), not a ray that cleared the scene.
-        // On this undenoised path those failures used to read as a dark dotted ring
+        // On this undenoised path those failures would read as a dark dotted ring
         // along every curved BLEND silhouette: one texel's hit carried the bright
         // floor reflection + SSGI bounce, its neighbour's miss fell back to the sky
         // term. Synthesizing the miss from the prefiltered scene colour at the
@@ -342,11 +341,11 @@ vec4 gfx_pixel_forward_shade(vec3 world_pos, vec3 N, vec3 camera_pos, mat4 view,
                 // `confidence` here is the unified weight from above -- a real hit's
                 // confidence, or the miss fallback's own weight in the grazing band.
                 // Weighting by raw hit confidence alone (the way ssr_composite_body.glsl
-                // does for the denoised opaque bounce) is what used to dot a dark broken
-                // ring along curved BLEND silhouettes: on this RAW path it was a
-                // per-texel binary, so one texel's ray hit (bounce added, visibly
-                // brighter) while its neighbour's missed (no bounce). The fallback
-                // filling misses in makes this weight smooth again.
+                // does for the denoised opaque bounce) would dot a dark broken ring along
+                // curved BLEND silhouettes: on this RAW path it is a per-texel binary, so
+                // one texel's ray hits (bounce added, visibly brighter) while its
+                // neighbour's misses (no bounce). The fallback filling misses in keeps
+                // this weight smooth.
                 ambient += kD_ind * albedo * bounce * (edge.x * edge.y) * confidence
                          * p.ssgi_intensity * ao_diffuse;
             }

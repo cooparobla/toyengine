@@ -21,7 +21,7 @@
 #
 # Shaders: <DIR>/assets/shaders/*.vert|*.frag compile with -I <project shaders>, -I <engine
 # shaders>, -I <gfxcoopa shaders> (the runtime ShaderLibrary search order, see
-# Engine::make_render_config_()), so a project shader can #include any engine/gfx header and a
+# RuntimeLayout::shader_roots()), so a project shader can #include any engine/gfx header and a
 # project file shadows the engine's of the same name.
 
 cmake_minimum_required(VERSION 3.21)

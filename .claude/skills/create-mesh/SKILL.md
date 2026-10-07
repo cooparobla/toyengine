@@ -62,19 +62,19 @@ lods:
 cull_screen_size: 0.004                      # 0/absent = never culled
 ```
 
-`screen_size` must decrease down the list. Example: `assets/meshes/sphere.lod.yaml`.
+`screen_size` must decrease down the list. Example: `assets/meshes/primitives/sphere.lod.yaml`.
 
 ## Skinning
 
 Vertex groups in `weights:` name the bone objects (the 4 strongest per corner are used,
 normalise them to 1). The rig object tree holds bones as ordinary child objects; the skin object
 has a MeshRenderer without `mesh_path` plus `SkinnedMeshRenderer { mesh_path: <name> }`. See
-`assets/meshes/tentacle.yaml` + `assets/objects/tentacle.yaml`, and create-animation.
+`assets/meshes/animation/tentacle.yaml` + `assets/objects/animation/tentacle.yaml`, and create-animation.
 
 ## Procedure
 
 1. **Simple shape (< ~30 corners)**: write the YAML by hand, mirroring `cube.yaml` /
-   `assets/scenes/pixel_demo/meshes/pillar.yaml`.
+   `assets/scenes/demos/pixel_demo/meshes/pillar.yaml`.
 2. **Anything procedural**: write a generator `tools/gen_<thing>.py` (standard library only --
    system python has no numpy) using `tools/mesh_yaml.py`:
    ```python
@@ -85,7 +85,8 @@ has a MeshRenderer without `mesh_path` plus `SkinnedMeshRenderer { mesh_path: <n
    # normal can point along +-X
    ```
    Commit the generator alongside the mesh so it can be regenerated.
-3. **Location**: shared -> `assets/meshes/<name>.yaml` and a row in `assets/README.md`'s Shared
+3. **Location**: shared -> `assets/meshes/<tag>/<name>.yaml` (tag folder such as `props`,
+   `primitives`; references use only the name, see `assets/README.md` "Tags") and a row in `assets/README.md`'s Shared
    meshes table (shape, size, origin); scene-only -> `assets/scenes/<scene>/meshes/<name>.yaml`
    (same-named scene mesh shadows the shared one).
 4. **Collision**: a separate `<name>_collider.yaml` (only `vertices`/`faces` are used) on a

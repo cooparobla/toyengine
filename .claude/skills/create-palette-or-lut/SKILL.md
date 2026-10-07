@@ -35,7 +35,7 @@ to right, red increases across each slice, green increases down (row 0 = g 0). I
     pixel(x, y) = ( r = (x mod N) / (N-1),  g = y / (N-1),  b = floor(x / N) / (N-1) )
 
 Sampled linearly with clamp. Loader: `libs/gfxcoopa/gfxcoopa/engine/data/grading_lut.h`;
-shader `libs/gfxcoopa/assets/shaders/gfx/grading.glsl`.
+shader `assets/shaders/gfx/grading.glsl`.
 
 ```yaml
 render:

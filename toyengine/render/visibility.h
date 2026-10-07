@@ -5,7 +5,7 @@
  *
  * Pure functions over glm types -- no Vulkan, no scene -- so every piece is unit-tested in
  * test.cpp's device-free math group. PixelRenderPipeline runs them once per renderer per view
- * (camera, each shadow cascade, each point-light cube face, the spot light) to decide what
+ * (camera, each shadow cascade, each view of every shadowed point/spot light) to decide what
  * each pass draws.
  *
  * Conventions match the rest of the renderer: right-handed view space looking down -Z, and

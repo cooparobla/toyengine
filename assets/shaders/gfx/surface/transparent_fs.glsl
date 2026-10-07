@@ -3,9 +3,8 @@
 
 // gfx/surface/transparent_fs.glsl -- forward BLEND transparent fragment backbone.
 //
-// Lives in toyengine (like transparent_vs.glsl): this is toyengine's own forward-shading
-// pipeline (SSR trace inputs, forward_globals_ UBO, refraction), not something gfxcoopa's
-// base library owns. See gbuffer_fs.glsl for the include-order contract this follows;
+// toyengine's own forward-shading pipeline (SSR trace inputs, forward_globals_ UBO,
+// refraction). See gbuffer_fs.glsl for the include-order contract this follows;
 // GFX_SURFACE_FRAGMENT gates gfx_surface_fragment() the same way GFX_SURFACE_VERTEX gates
 // gfx_surface_vertex() in the *_vs.glsl backbones. The hook may perturb the world-space
 // normal BEFORE lighting/SSR/refraction all consume it -- e.g. water's animated ripple
@@ -75,11 +74,10 @@ layout(set = 7, binding = 3) uniform sampler2D u_metallic_roughness_map;
 
 // Set 6: forward_globals_'s per-frame lighting/indirect/SSR/refraction UBO (see
 // forward_globals.h). Mesh-only -- sdf_forward.frag keeps reading its own SdfGlobals UBO
-// instead (see the refraction plan for why SDF glass is excluded). Replaces what used to
-// be a per-frame push constant here (TransparentLightingPushConstants) -- see
-// TransparentRefractionPushConstants' own doc (pixel_render_pipeline.h) for why: adding
-// per-object refraction fields to this file's push-constant block alongside that frame
-// block would have gone over the 128-byte guaranteed Vulkan minimum.
+// instead (see the refraction plan for why SDF glass is excluded). A UBO rather than push
+// constants -- see TransparentRefractionPushConstants' own doc (pixel_render_pipeline.h):
+// the frame block plus the per-object refraction fields would not fit in the 128-byte
+// guaranteed Vulkan push-constant minimum.
 #define WATER_MAX_RIPPLES 64 // == toy::render::kMaxWaterRipples (forward_globals.h)
 layout(set = 6, binding = 0) uniform ForwardGlobalsBlock {
     vec4  lighting0;  // x=light_bands, y=spec_threshold, z=soft_lighting, w=rim_strength
@@ -113,8 +111,8 @@ layout(set = 6, binding = 0) uniform ForwardGlobalsBlock {
 // draw by PixelRenderPipeline::record_transparent_() via TransparentPass's extra_pc_bytes
 // ctor param -- GLSL permits only one push_constant block per stage, so all three regions
 // live in this one struct despite coming from two separate push_constants() calls. The
-// frame-level lighting/indirect/SSR block that used to occupy this region moved to set 6's
-// UBO above (see TransparentRefractionPushConstants' doc for why).
+// frame-level lighting/indirect/SSR inputs are in set 6's UBO above (see
+// TransparentRefractionPushConstants' doc for why).
 layout(push_constant) uniform PushConstants {
     vec4  albedo;     // xyz = albedo, w = alpha
     float metallic;

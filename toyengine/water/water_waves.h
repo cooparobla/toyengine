@@ -7,8 +7,8 @@
  * has a 1:1 counterpart there; buoyancy only matches what is drawn as long as the two agree.
  *
  * A body's waves are authored as ONE base wave (amplitude, wavelength, direction, steepness --
- * WaveParams, packed into PBRMaterial::shader_params so it reaches both the forward and the
- * reflection-capture vertex stage). k_wave_count waves are derived from it deterministically:
+ * WaveParams, packed into PBRMaterial::shader_params so it reaches the forward-transparent
+ * vertex stage, water.vert). k_wave_count waves are derived from it deterministically:
  * shorter, smaller, fanned-out copies, which breaks up the obvious single-sine look without a
  * per-wave parameter list. Phase speed follows deep-water dispersion (omega = sqrt(g k)), so there is
  * no separate speed knob -- longer waves travel faster, as they physically do.

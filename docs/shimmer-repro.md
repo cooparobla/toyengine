@@ -1,5 +1,11 @@
 # Reproducing the terrain shimmer capture
 
+> **Status:** the dominant shimmer is fixed (texel-AA sampling, `texel_aa: true`,
+> see "Investigation state" below). The reference clip lives only in the local
+> `output/` folder of the machine that recorded it and is not in the repo. This
+> page is kept as the capture recipe (`CAPTURE_RING`) and the record of measured
+> non-causes, for whoever next chases a temporal artifact.
+
 `output/ring_capture_lossless.mp4` is the reference recording of the temporal
 shimmer artifact on `terrain_test` — Coopa's own live play, captured engine-side
 as lossless PNGs (no screen recorder, no video codec in the capture chain) and
@@ -12,7 +18,7 @@ it, and the state of the investigation so far.
 ```bash
 # 1. Config: assets/config.yaml must have the "crisp" settings below.
 # 2. Build.
-cbuild            # or: cmake -B build && cmake --build build
+cmake -B build && cmake --build build -j   # or cbuild on the Linux workspace
 
 # 3. Play with the rolling lossless capture armed (keeps the LAST 300 frames
 #    in RAM, ~2.5 GB; writes them to output/seq/ only when you quit):
@@ -57,7 +63,7 @@ ssao_direct_lighting_strength: 0.25
 ssr_temporal_blend: 0.85
 ```
 
-Window: 1920x1080, `vsync: true`, visible. Scene: `assets/scenes/terrain_test/`
+Window: 1920x1080, `vsync: true`, visible. Scene: `assets/scenes/tests/terrain/terrain_test/`
 (launch with `SCENE=terrain_test`; the config's `default_scene` is pixel_demo).
 
 Build-state caveat: the reference clip predates the converging SSR/SSGI

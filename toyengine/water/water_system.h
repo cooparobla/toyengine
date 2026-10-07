@@ -665,7 +665,7 @@ private:
                 verts[i].normal   = nrm;
                 verts[i].uv       = glm::vec2(depth[i], turbulence[i]);
                 // w == 2: baked (see file doc). Never exactly zero: stock vertex shaders (the editor's
-                // preview shading draws water with pbr.vert, not water.vert) normalize this slot as a
+                // preview shading draws water with transparent.vert, not water.vert) normalize this slot as a
                 // real tangent, and a zero vector would turn the whole surface NaN. 1e-4 m/s of
                 // "flow" is invisible to water.vert and buoyancy alike.
                 glm::vec3 t = to_local * flow_ws[i];

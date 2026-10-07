@@ -108,8 +108,8 @@ public:
 
     /**
      * @brief The hub's window and renderer: the engine's own assets/config.yaml (the defaults
-     *        everything else runs with -- the bare AppConfig{} code defaults still carry the
-     *        legacy pixel-art toggles), with the hub's window and the 3D work it never shows
+     *        everything else runs with -- the bare AppConfig{} code defaults carry the
+     *        pixel-art toggles), with the hub's window and the 3D work it never shows
      *        switched off.
      */
     static core::AppConfig engine_config(bool visible) {

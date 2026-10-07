@@ -1,14 +1,14 @@
 #version 450
 
 // contact_shadow_resolve.frag -- temporal accumulation of the contact-shadow march, the scalar
-// counterpart of gfxcoopa's ssr_resolve.frag.
+// counterpart of ssr_resolve.frag.
 //
 // Same push constants, same four bindings and the same converging 1/N schedule against the
-// shared TemporalHistoryPass count, so ContactShadowPass drives it exactly as it drove the
-// shared shader. What it drops is everything a single occlusion value does not need: the YCoCg
-// conversion and three-channel variance clip, and the nine-tap Catmull-Rom history resample
-// (one bilinear tap reprojects a smooth scalar mask just as well). Together with the R16F
-// targets this took the pass's fixed cost from ~1.9 ms to a fraction of that at 1080p.
+// shared TemporalHistoryPass count as ssr_resolve.frag, so ContactShadowPass drives it the same
+// way. It drops everything a single occlusion value does not need: the YCoCg conversion and
+// three-channel variance clip, and the nine-tap Catmull-Rom history resample (one bilinear tap
+// reprojects a smooth scalar mask just as well). With the R16F targets this keeps the pass's
+// fixed cost well under the ~1.9 ms the full colour resolve costs at 1080p.
 
 #include <gfx/ssr_common.glsl>
 

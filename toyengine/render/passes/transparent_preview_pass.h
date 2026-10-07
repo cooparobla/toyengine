@@ -14,7 +14,7 @@
  * target carries no scene depth, so occlusion by opaque geometry is a per-fragment compare
  * against the sampled G-buffer depth (set 1), as in debug_line.frag / ui_world_occlude.glsl.
  *
- * Vertex stage: pbr.vert, the forward-transparent backbone -- same vertex + per-instance
+ * Vertex stage: transparent.vert, the forward-transparent backbone -- same vertex + per-instance
  * streams, camera set 0 and the first 64 push-constant bytes as TransparentPass.
  */
 
@@ -44,13 +44,13 @@ namespace passes {
 
 class TransparentPreviewPass {
 public:
-    /** @brief transparent_preview.frag's push block; the first 64 bytes are pbr.vert's. */
+    /** @brief transparent_preview.frag's push block; the first 64 bytes are transparent.vert's. */
     struct PushConstants {
         glm::vec4 albedo{1.0f};      ///< rgb albedo, a = material alpha
         float metallic = 0.0f;
         float roughness = 0.5f;
         float ao = 1.0f;
-        float alpha_cutoff = 0.0f;   ///< unused (pbr.vert layout)
+        float alpha_cutoff = 0.0f;   ///< unused (transparent.vert layout)
         glm::vec4 gfx_time{0.0f};
         glm::vec4 gfx_params{0.0f};
         glm::vec4 view{0.0f};        ///< x: mode (1 solid, 2 material preview, 3 wireframe), yz: 1/target size

@@ -10,7 +10,7 @@ objects addressed **by path from the Animator's object**. Format reference:
 `libs/libcoopa/coopa/animation/README.md` ("YAML schema"); loader
 `animation_clip_loader.h`. Generator with helpers to copy: `tools/gen_animation_test_scene.py`
 (`quat_axis_angle`, `rot_keys` with hemisphere fix, `clip(...)`, skinned tube mesh).
-Examples: `assets/objects/robot_arm.yaml` + `assets/animations/robot_arm/*.yaml`,
+Examples: `assets/objects/animation/robot_arm.yaml` + `assets/animations/robot_arm/*.yaml`,
 `bouncing_ball`, `tentacle` (skinned). Scene: `./build/toyengine animation_test`.
 
 ## Clip file (one clip per file)

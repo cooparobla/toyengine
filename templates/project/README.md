@@ -8,7 +8,7 @@ A [toyengine](https://github.com/cooparobla/toyengine) project.
 ./build.sh            # fetches the engine into .libs/ on first run, builds game + editor
 ./editor.sh           # edit assets (the first open creates assets/)
 ./run.sh [scene]      # play; HEADLESS=1 MAX_FRAMES=600 ./run.sh for a windowless run
-./package.sh [dist]   # shippable folder: .caml assets + engine runtime files + game binary
+./package.sh [dev|ship|assets] [out]   # standalone, signed game in build/dist/ (assets: encoded assets/ only)
 ./clean.sh [--all]    # remove build/ (and .libs/)
 ./setup.sh            # re-sync .libs/toyengine with the .toy file's engine: block
 ```

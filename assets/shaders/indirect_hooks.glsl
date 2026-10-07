@@ -1,8 +1,7 @@
 // indirect_hooks.glsl -- toyengine's hooks for gfx/indirect_specular.glsl:
-// no reflection probes, no baked BRDF LUT (this engine has neither) -- must
-// match gfxcoopa's base ssr_composite.frag's own (inline) hooks exactly,
-// since toyengine ships no override of that shader and falls back to the
-// base copy at runtime (see assets/shaders/.glslc_flags / ShaderLibrary).
+// no reflection probes, no baked BRDF LUT (this engine has neither). Must
+// match ssr_composite.frag's own inline hooks exactly, so the deferred,
+// forward and SSR-composite paths all resolve indirect specular the same way.
 
 vec2 hook_env_brdf(float NdotV, float roughness) {
     return env_brdf_approx(NdotV, roughness);

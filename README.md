@@ -345,13 +345,16 @@ toyengine/
 ├── core/       Engine, AppConfig, caml codec, branding
 ├── render/     the render pipeline, its config, profiler, and passes/
 ├── scene/      gameplay components: camera controller, movers, cloth & skinned renderers
+├── particles/  ParticleSystem, LightFlicker, the particle simulation
+├── audio/      AudioSource / AudioListener components and the audio system
+├── ui/         UI asset helpers: open/close a screen, UiController widget bindings
 ├── world/      streamed procedural tile terrain
 └── water/      WaterBody, Buoyancy, WaterSystem
-editor/         toyengine_editor: app, documents & undo, schemas, mesh modelling, viewport, packager;
+editor/         toyengine_editor: app, documents & undo, schemas, mesh modelling, viewport, packager
 hub/            toyengine_hub: the project launcher (a GUI over tools/toyhub)
 templates/      project/: the files `toyhub new` / `toyhub add` create a project from
 cmake/          ToyProject.cmake: toyengine_add_project() (game + editor for a project dir)
-assets/         config.yaml, scenes, meshes, materials, textures, shaders, fonts
+assets/         config.yaml, scenes, meshes, materials, textures, shaders (every one the engine loads), fonts
 docs/           hand-written guides (e.g. ambient lighting); docs/images holds these screenshots
 libs/           pinned submodules: libcoopa (scene graph, assets, jobs), gfxcoopa (Vulkan),
                 physxcoopa (physics), sfxcoopa, uicoopa (UI), mapcoopa (world gen), caml
@@ -371,14 +374,16 @@ Each module has its own README with the details.
   a checkout.
 - **Working inside `libs/`.** Each library still builds standalone in place. Submodules check
   out a detached HEAD, so run `git submodule foreach git checkout main` before committing to
-  one. Building `uicoopa` in place touches three tracked depfiles;
-  `git -C libs/uicoopa checkout -- .` clears them.
+  one. Building touches uicoopa's tracked shader depfiles (`assets/shaders/*.spv.d`);
+  `git -C libs/uicoopa checkout -- 'assets/shaders/*.spv.d'` clears them.
 
 ## Documentation
 
 - Per-module READMEs: [core](toyengine/core/README.md), [render](toyengine/render/README.md),
-  [scene](toyengine/scene/README.md), [world](toyengine/world/README.md),
-  [water](toyengine/water/README.md), [editor](editor/README.md).
+  [scene](toyengine/scene/README.md), [particles](toyengine/particles/README.md),
+  [world](toyengine/world/README.md), [water](toyengine/water/README.md),
+  [editor](editor/README.md), [assets](assets/README.md).
+- [`docs/editor/`](docs/editor/README.md) is the editor's user manual.
 - [`docs/`](docs/) holds hand-written guides to specific engine behaviour.
 - `.docs/` is the generated HTML API reference, built from in-source docstrings with
   `coopadocs build`.

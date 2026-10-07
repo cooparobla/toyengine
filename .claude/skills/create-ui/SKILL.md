@@ -112,7 +112,7 @@ On an object (or a child of the object it labels), Z-up:
   source: ui/themes/default.yaml
 ```
 
-Examples: `assets/scenes/world_canvas_test` (header explains `text_supersample`) and the
+Examples: `assets/scenes/tests/ui/world_canvas_test` (header explains `text_supersample`) and the
 nameplate in `scenes/ui_showcase`. World UI needs `render.world_ui_enabled`.
 
 ## Verify

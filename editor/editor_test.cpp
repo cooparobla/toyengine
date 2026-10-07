@@ -5668,9 +5668,9 @@ void test_editor_asset_browser_context_menus() {
 
 /**
  * @brief Previewing a texture in the Textures tab declares the color space the project uses it
- *        in. It used to always declare sRGB (the preview shows it as albedo), and the loader keeps
- *        the first declaration -- so viewing a normal map mis-decoded it for every material
- *        using it ("declare_color_space ... conflicts" on the console).
+ *        in, not always sRGB (the preview shows it as albedo): the loader keeps the first
+ *        declaration, so an sRGB one from viewing a normal map would mis-decode it for every
+ *        material using it ("declare_color_space ... conflicts" on the console).
  */
 void test_editor_texture_preview_color_space() {
     setenv("FIXED_DT", "0", 1);
@@ -7361,7 +7361,7 @@ void test_build_staging_layers_and_shipping_config() {
     const PackageReport rep = package_project(project, opt);
     expect(rep.ok(), "staging succeeds");
     const fs::path sh = out / "assets" / "shaders";
-    // A gfxcoopa base shader the engine doesn't override, and a uicoopa UI shader, both merged in.
+    // A gfxcoopa shader (one the engine doesn't also ship) and a uicoopa UI shader, both merged in.
     bool gfx_only = false;
     for (const auto& e : fs::directory_iterator(fs::path(PROJ_DIR) / "gfxcoopa" / "assets" / "shaders")) {
         if (e.path().extension() != ".spv") continue;
@@ -7375,7 +7375,8 @@ void test_build_staging_layers_and_shipping_config() {
         if (e.path().extension() == ".spv") { ui = fs::exists(sh / e.path().filename()); break; }
     }
     expect(ui, "uicoopa's UI shaders are merged into the package");
-    // The engine overrides a gfxcoopa shader of the same name: the package must carry the engine's.
+    // Should the engine and gfxcoopa ever ship a same-named shader, the package must carry the
+    // engine's. The two directories normally share no names, so this usually only prints the note.
     bool precedence_checked = false;
     for (const auto& e : fs::directory_iterator(fs::path(ROOT_DIR) / "assets" / "shaders")) {
         if (e.path().extension() != ".spv") continue;

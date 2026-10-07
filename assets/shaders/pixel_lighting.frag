@@ -146,8 +146,8 @@ void main() {
     vec4 g1 = texture(g_normal_metallic, in_uv);
     vec3 N = g1.rgb;
     if (dot(N, N) < 0.001) {
-        // Background pixel: the procedural sky, exactly as skybox.frag computes it (same
-        // CPU-inverted matrix, same sky colours via LightUBO). Drawn here rather than by a
+        // Background pixel: the procedural sky (gfx/sky.glsl), from the CPU-inverted
+        // view-projection and LightUBO's sky colours. Drawn here rather than by a
         // second fullscreen pass that would re-read every pixel's normal just to discard
         // all the geometry ones.
         vec3 ndc   = vec3(in_uv.x * 2.0 - 1.0, 1.0 - in_uv.y * 2.0, 1.0);
@@ -192,9 +192,8 @@ void main() {
         // occlusion the shadow map's normal-offset bias necessarily recedes from (see
         // PixelRenderConfig::shadow_normal_bias's ~2% trade). Read here from the buffer
         // ContactShadowPass resolved this frame rather than marched inline --
-        // contact_shadow.frag runs the identical contact_shadow_body.glsl this shader
-        // used to include, followed by a temporal accumulation the inline version had
-        // nowhere to store. max()-combined with the
+        // contact_shadow.frag runs contact_shadow_body.glsl, followed by a temporal
+        // accumulation an inline march would have nowhere to store. max()-combined with the
         // map's result so each technique only ever ADDS occlusion the other missed;
         // scaled by the same per-light darkness calc_dir_shadow applies
         // (dir_shadow_extra.x). Independent of the shadow map: with shadows_enabled
@@ -220,25 +219,21 @@ void main() {
         if (dist > range || dist < 0.0001) continue;
 
         vec3 L = frag_to_light / dist;
-        // pl.attenuation.x -- formerly an unused classical "constant attenuation" term -- is
-        // repurposed as a per-light falloff sharpness exponent: ~1 gives a gradual, realistic
-        // fade to the light's range; ~4-8 gives a crisper, more cel-shaded-style cutoff (4
-        // reproduces this engine's original hardcoded curve exactly). Defaults to
+        // pl.attenuation.x (the classical "constant attenuation" slot) is used as a per-light
+        // falloff sharpness exponent: ~1 gives a gradual, realistic fade to the light's range;
+        // ~4-8 gives a crisper, more cel-shaded-style cutoff. Defaults to
         // PointLightComponent::attenuation_constant's own default (1.0, smooth) if a scene
         // doesn't set it.
         float sharpness = max(pl.attenuation.x, 0.1);
         // `factor` (dist normalized by range, 0 at the light itself, 1 at its boundary) drives
-        // BOTH the hard cutoff window (falloff, unchanged) AND the inverse-square-shaped
-        // softening below -- range is the light's actual visible-width control now, not just a
-        // late hard clamp. Previously the softening used raw world-space dist^2, which is
-        // range-independent: since a light's own intensity already decays it to
-        // imperceptibility well before typical range values, changing range had almost no
-        // visible effect except when set smaller than that natural falloff distance. Using
-        // `factor` here instead makes the whole curve self-similar and scaled by range, so
-        // growing/shrinking range visibly grows/shrinks the light's glow. The 4*PI divisor is
-        // kept (rather than dropped) so peak brightness at the light's center is unchanged from
-        // before -- only the curve's width changes, not its scale, so existing intensity tuning
-        // still holds.
+        // BOTH the hard cutoff window (falloff) AND the inverse-square-shaped softening below,
+        // so range is the light's visible-width control, not just a late hard clamp. Softening
+        // by raw world-space dist^2 would be range-independent: a light's own intensity decays
+        // it to imperceptibility well before typical range values, so changing range would have
+        // almost no visible effect. Using `factor` makes the whole curve self-similar and scaled
+        // by range, so growing/shrinking range visibly grows/shrinks the light's glow. The
+        // 4*PI divisor fixes peak brightness at the light's center (1 / 4*PI at factor 0)
+        // independently of range -- range changes the curve's width, not its scale.
         float factor = clamp(dist / range, 0.0, 1.0);
         float falloff = clamp(1.0 - pow(factor, sharpness), 0.0, 1.0);
         falloff *= falloff;

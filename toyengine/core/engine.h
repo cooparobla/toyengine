@@ -900,7 +900,7 @@ public:
      * @brief Reads the current offscreen buffer back into host memory, as tightly-packed
      *        row-major RGBA8.
      *
-     * The in-memory half of save_screenshot() (which is now this plus a PNG write), for a
+     * The in-memory half of save_screenshot() (which is this plus a PNG write), for a
      * caller that wants to look at the pixels rather than keep them: a headless test
      * comparing two frames, or measuring how many of them carry a given colour, pays neither
      * a PNG encode nor a decode nor a temporary file for the privilege.
@@ -1807,11 +1807,13 @@ private:
                                                          const std::filesystem::path& project_root) {
         render::PixelRenderConfig rc = config.render;
         // From source: a project's own assets/shaders in front of everything (first-match-wins,
-        // so a project shader shadows the engine's of the same name -- see cmake/ToyProject.cmake),
-        // then the engine's, gfxcoopa's shared base library, and uicoopa's UI shaders LAST so a
-        // uicoopa file can never shadow a gfxcoopa base shader -- the runtime mirror of the glslc
-        // -I search order (assets/shaders/.glslc_flags). Packaged: the one directory the
-        // packager merged those layers into, in that same precedence. See RuntimeLayout.
+        // so a project shader replaces the engine's of the same name -- see
+        // cmake/ToyProject.cmake), then the engine's, gfxcoopa's (SMAA + shared gfx/ headers)
+        // and uicoopa's UI shaders -- the runtime mirror of the glslc -I search order
+        // (assets/shaders/.glslc_flags). Those three library directories hold no same-named
+        // files, so their relative order only matters for a project override. Packaged: the
+        // one directory the packager merged those layers into, in that same precedence. See
+        // RuntimeLayout.
         const std::vector<std::string> shader_roots = RuntimeLayout::current().shader_roots(project_root);
         rc.shader_dir = RuntimeLayout::current().packaged()
             ? shader_roots.front()

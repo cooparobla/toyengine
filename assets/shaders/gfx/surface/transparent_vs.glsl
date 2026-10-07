@@ -3,12 +3,9 @@
 
 // gfx/surface/transparent_vs.glsl -- forward BLEND transparent vertex backbone.
 //
-// Lives in toyengine, not gfxcoopa's base library: this backbone's push-constant block
-// must match TransparentPass::PushConstants (64 bytes: material + gfx_time/gfx_params) --
-// gfxcoopa's own pbr.vert declares no push_constant block at all (nothing in the stock
-// forward path reads one in the vertex stage), so a derived shader's displacement hook
-// needs a version of pbr.vert that actually declares it. The math below is otherwise
-// identical to pbr.vert/gfx/surface/gbuffer_vs.glsl.
+// Its push-constant block must match TransparentPass::PushConstants (64 bytes: material +
+// gfx_time/gfx_params), so a derived shader's displacement hook can read them. The vertex
+// math is identical to gfx/surface/gbuffer_vs.glsl.
 //
 // Include-order contract identical to gfx/surface/gbuffer_vs.glsl:
 //   #version 450
@@ -52,7 +49,7 @@ layout(location = 3) out mat3 frag_TBN;
 // Opt-in generic varying (locations 3-5 are frag_TBN's three columns): a derived shader that
 // defines GFX_SURFACE_CUSTOM_VARYING in BOTH its vertex and fragment entry points gets a vec4
 // carried from GfxSurfaceVertex.custom to GfxTransparentSurface.custom -- e.g. water's
-// per-vertex flow/turbulence/depth. Opt-in rather than always-on so pbr.vert/transparent.frag
+// per-vertex flow/turbulence/depth. Opt-in rather than always-on so transparent.vert/transparent.frag
 // and every other stage pairing keep byte-identical interfaces (an unmatched fragment input
 // is an interface-mismatch validation error).
 #ifdef GFX_SURFACE_CUSTOM_VARYING

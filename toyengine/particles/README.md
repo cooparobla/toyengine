@@ -13,10 +13,10 @@ edges broken up by noise, and toon-banded cores. Every sprite is procedural, so 
 texture authoring. `sprite: texture` takes an albedo map or a flipbook atlas instead.
 
 Demo scene: `./build/toyengine particles_test`
-([assets/scenes/particles_test](../../assets/scenes/particles_test/scene.yaml), meshes from
+([assets/scenes/tests/effects/particles_test](../../assets/scenes/tests/effects/particles_test/scene.yaml), meshes from
 [`tools/gen_particle_test_assets.py`](../../tools/gen_particle_test_assets.py)). It shows:
 - a campfire (`prefab: objects/campfire`, see
-  [assets/objects/campfire.yaml](../../assets/objects/campfire.yaml)) with flames, glow, coals,
+  [assets/objects/props/campfire.yaml](../../assets/objects/props/campfire.yaml)) with flames, glow, coals,
   embers, smoke and a flickering light;
 - a torch whose world-space flames and smoke trail behind it as it circles;
 - mushrooms, pebbles and fallen leaves scattered over a mound;

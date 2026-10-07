@@ -1,9 +1,8 @@
 #version 450
 
 // Shared fullscreen-triangle generator, reused by every fullscreen pass
-// (pixel_lighting, pixel_post, upscale, debug_gradient) -- mirrors blendy's
-// idiom of reusing hiz_downsample.vert.spv across multiple post passes
-// instead of adding a dedicated .vert file per pass.
+// (lighting, fog, bloom, SSAO/SSR chains, stylize, upscale, ...) instead of a
+// dedicated .vert file per pass.
 
 layout(location = 0) out vec2 out_uv;
 

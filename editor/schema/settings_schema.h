@@ -219,7 +219,7 @@ inline const std::vector<SettingsGroup>& render_settings_groups() {
             .add(F(f_float("shadow_slope_bias_max", 5.0f, 0.05f, 0.0f, 100.0f), "Slope Bias Max", "Cap on the slope the slope bias responds to (tangent)"))
             .add(F(f_float("shadow_normal_bias", 1.0f, 0.01f, 0.0f, 16.0f), "Normal Bias",
                    "Pushes the lookup out along the surface normal, in texels beyond the filter radius"))
-            .add(F(f_float("shadow_bias", 0.005f, 0.0005f, 0.0f, 1.0f), "Legacy Bias", "Only read by older gfxcoopa shaders; the cascaded path ignores it"))
+            .add(F(f_float("shadow_bias", 0.005f, 0.0005f, 0.0f, 1.0f), "Legacy Bias", "Depth bias for the volumetric light-shaft shadow lookup; surface shadows ignore it"))
             .sub("Point & Spot Lights")
             .add(F(f_float("point_shadow_softness", 3.0f, 0.05f, 0.0f, 32.0f), "Point Softness", "Point-light penumbra radius, in cube-face texels"))
             .add(F(f_float("spot_shadow_softness", 0.15f, 0.005f, 0.0f, 4.0f), "Spot Softness", "Spot-light penumbra radius, in world units"))

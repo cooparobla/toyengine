@@ -9,13 +9,13 @@ rotated into place, and every side in a chunk merges into one GPU mesh built on 
 
 Two looks from the same machinery, chosen by data:
 
-- **Voxel** — every exposed side is one authored quad. Demo: `cplay terrain_test`
-  ([assets/scenes/terrain_test](../../assets/scenes/terrain_test)).
+- **Voxel** — every exposed side is one authored quad. Demo: `./build/toyengine terrain_test`
+  ([assets/scenes/tests/terrain/terrain_test](../../assets/scenes/tests/terrain/terrain_test)).
 - **Styled** — every tile is assembled from authored *pieces* chosen by its neighbourhood, with
   rounded lips, quarter-round corners and fillets, and each column shaped by its surface kind's
   style (soft rounded grass, firm stone). This is the Animal Crossing read, switched on by a `styles:`
-  key. Demo: `cplay terrain_smooth_test`
-  ([assets/scenes/terrain_smooth_test](../../assets/scenes/terrain_smooth_test)). See
+  key. Demo: `./build/toyengine terrain_smooth_test`
+  ([assets/scenes/tests/terrain/terrain_smooth_test](../../assets/scenes/tests/terrain/terrain_smooth_test)). See
   [Styled tiles](#styled-tiles).
 
 | File | Purpose |
@@ -97,7 +97,7 @@ A `styles:` key on the `Terrain` component switches every chunk from the voxel m
 `mesh_chunk_styled()` and the `terrain_styled` surface shader:
 
 ```yaml
-styles:            # name -> tile-set object (or, older form, a mesh prefix: meshes/<prefix>_<piece>.yaml)
+styles:            # name -> tile-set object (or a mesh prefix: meshes/<prefix>_<piece>.yaml)
   round: objects/tileset_round
   rock: objects/tileset_rock
 kind_styles:       # which style shapes each TileKind's columns (give `default` explicitly)
@@ -107,7 +107,7 @@ kind_styles:       # which style shapes each TileKind's columns (give `default` 
 
 ### Tile sets: a style as one object
 
-Each style is a **tile-set object**, for example `assets/objects/tileset_round.yaml`. It is an
+Each style is a **tile-set object**, for example `assets/objects/terrain/tileset_round.yaml`. It is an
 object asset with one child per piece, each child named by its piece suffix and carrying a
 MeshRenderer for that piece. `tools/gen_tile_styles.py` writes the stock ones, marked
 `tile_set: true`. A Terrain's `styles:` names the object, and the terrain finds each piece by its
@@ -230,11 +230,14 @@ and once made a chunk take 200 ms to mesh.
 The stock tile set is **shared**, not scene-local:
 
 ```
-assets/meshes/tile_side_flat.yaml     assets/textures/terrain_atlas.png
-assets/meshes/tile_side_bevel.yaml    assets/textures/terrain_atlas_mr.png
-assets/meshes/tile_<style>_<piece>.yaml   (round, soft, rock, flat -- nine pieces each)
-                                      assets/textures/terrain_atlas_smooth{,_mr}.png
+assets/meshes/terrain/tile_side_flat.yaml     assets/textures/terrain/terrain_atlas.png
+assets/meshes/terrain/tile_side_bevel.yaml    assets/textures/terrain/terrain_atlas_mr.png
+assets/meshes/terrain/<style>/tile_<style>_<piece>.yaml   (round, soft, rock, flat)
+assets/objects/terrain/tileset_<style>.yaml   assets/textures/terrain/terrain_atlas_smooth{,_mr}.png
 ```
+
+The folders under each type folder are tags (see [assets/README.md](../../assets/README.md));
+references name only the asset (`side_mesh: tile_side_flat`, `objects/tileset_round`).
 
 A tile side and a surface atlas are primitives of this system, not demo content the way
 `pixel_demo`'s `pillar.yaml` is — every terrain scene wants the same ones, and keeping them
@@ -243,22 +246,22 @@ inside one scene would mean the second terrain scene copies them.
 Nothing selects between shared and local. `coopa::asset::AssetSource::resolve()` tries the
 loading scene's own directory **first** and the registered search roots (`assets/`) second, so a
 scene that wants its own tile set just drops a file of the same name into its own `meshes/` or
-`textures/` and wins by precedence. `assets/scenes/terrain_test/` therefore holds nothing but
+`textures/` and wins by precedence. `assets/scenes/tests/terrain/terrain_test/` therefore holds nothing but
 its `scene.yaml`, and its `side_mesh: tile_side_flat` still resolves.
 
-One consequence worth knowing: `assets/textures/` is now a fallback namespace for *every* scene's
+One consequence worth knowing: `assets/textures/` is a fallback namespace for *every* scene's
 `textures/…` references. Nothing collides today — `pixel_demo` and `material_maps_test` carry
 their own `crate_*.png` / `noise_mask.png`, which win locally — but a scene that typos a local
-texture name can now resolve to a shared file instead of failing outright.
+texture name can resolve to a shared file instead of failing outright.
 
 ## Generating the assets
 
 Both are standalone tools, not part of the build:
 
 ```bash
-python3 tools/gen_tile_side_meshes.py   # assets/meshes/tile_side_{flat,bevel}.yaml
-python3 tools/gen_tile_styles.py        # assets/meshes/tile_<style>_<piece>.yaml
-python3 tools/gen_terrain_atlas.py      # assets/textures/terrain_atlas{,_smooth}{,_mr}.png (numpy, Pillow)
+python3 tools/gen_tile_side_meshes.py   # assets/meshes/terrain/tile_side_{flat,bevel}.yaml
+python3 tools/gen_tile_styles.py        # assets/meshes/terrain/<style>/tile_<style>_<piece>.yaml
+python3 tools/gen_terrain_atlas.py      # assets/textures/terrain/terrain_atlas{,_smooth}{,_mr}.png (numpy, Pillow)
 ```
 
 The two mesh generators share `tools/mesh_yaml.py`'s writer. All are deterministic: re-running

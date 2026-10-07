@@ -1,8 +1,6 @@
 # Ambient / global illumination
 
-toyengine has no baked GI probes, no reflection probes, and no IBL — that's a
-deliberate omission (see the root [README](../README.md)'s "Explicitly not
-included" list). Instead, an analytic sky gradient stands in for indirect
+toyengine has no baked GI probes, no reflection probes, and no IBL. Instead, an analytic sky gradient stands in for indirect
 light everywhere: it's both the diffuse irradiance and the specular base for
 every shading path, the visible sky background, SSR's env-specular subtraction,
 and (when enabled) fog's sky blend. This document covers the knobs that scale
@@ -11,8 +9,11 @@ and colour it, and what "GI" actually means in this engine.
 ## TL;DR
 
 Edit these in [`assets/config.yaml`](../assets/config.yaml) (under `render:`
-→ `# --- Lighting ---`), then restart the app — config is read once at
-startup, there's no hot-reload:
+→ `# --- Lighting & sky ---`), or per scene under `scene.settings.render` (see
+[assets/README.md](../assets/README.md)'s "Scene settings"). All five are
+runtime tunables: the editor's Render settings apply them live, and a scene's
+overrides apply when it becomes active. A running game reads `config.yaml`
+once at startup.
 
 ```yaml
 ambient_intensity: 1.0     # scales the sky gradient's contribution as indirect diffuse
@@ -25,8 +26,8 @@ sky_ground:  [0.05, 0.045, 0.04]  # straight down
 `ambient_intensity` is a plain brightness multiplier (`1.5`–`2.0` is a
 reasonable first step up). The three `sky_*` colours change hue — they're the
 actual colours the sky gradient mixes between, and moving them repaints the
-ambient light, the skybox, SSR's reflections, and fog's horizon blend all at
-once.
+ambient light, the sky background, SSR's reflections, and fog's horizon blend
+all at once.
 
 ## Which dial you actually want
 
@@ -49,26 +50,20 @@ brightness or hue than the others by accident:
 1. Parsed in `toyengine/core/config.h` into `PixelRenderConfig::indirect`
    (`toyengine/render/pixel_render_config.h`), a shared
    `coopa::gfx::engine::IndirectParams` (gfxcoopa's
-   `gfxcoopa/engine/render_features.h`). That struct is also handed directly
-   to `SsrPass::Params` and `SkyboxPass::draw()`, by design — see its doc
-   comment there — so the lighting pass, the SSR composite, and the skybox
+   `gfxcoopa/engine/render_features.h`). The same instance feeds the lighting
+   pass's push constants and `SsrPass::Params`, by design — see its doc
+   comment there — so the lighting pass, the SSR composite, and the sky
    background can never disagree.
 2. Fanned out to several transports, by shading path:
-   - deferred opaque (`pixel_lighting.frag`) — `LightUBO`'s trailing
+   - deferred opaque and the sky background (`pixel_lighting.frag`, which
+     draws the procedural sky at background pixels) — `LightUBO`'s
      `sky_zenith`/`sky_horizon`/`sky_ground` fields (gfxcoopa's
-     `light_data.h`), alongside push constants for `ambient_intensity`/
-     `sky_intensity`
-   - forward transparent mesh, SDF forward, SDF capture, transparent/water
-     capture — the same `LightUBO` trailing fields (all five bind `LightUBO`
-     as set 1 regardless of shading path)
-   - skybox background — `SkyboxPass::SkyboxPushConstants`
+     `light_data.h`, mirrored by `assets/shaders/light_ubo_body.glsl`),
+     alongside push constants for `ambient_intensity`/`sky_intensity`
+   - forward transparent meshes, SDF forward and particles — the same
+     `LightUBO` fields
    - SSR composite — `SsrPass::CompositePushConstants`
    - fog (when `fog_enabled`) — `FogUBO`'s trailing `sky_*` fields
-
-   Every carrier appends its new fields **after** existing ones (or, for
-   `LightUBO`, in place of the dead `dir_ambient` slot — see below), so no
-   existing struct offset moved and no shader needed anything but an additive
-   edit.
 
 The shading math itself (`assets/shaders/pixel_lighting.frag`, duplicated for
 the forward and SDF paths):
@@ -79,34 +74,24 @@ vec3 ind_diff = sky_gradient(N, lights.sky_zenith.rgb, lights.sky_horizon.rgb, l
 vec3 ambient  = (kD_ind * albedo * ind_diff + ind.value) * ao * ssao;
 ```
 
-`sky_gradient()` (gfxcoopa's `assets/shaders/gfx/sky.glsl`) blends three
-colours by the surface normal's (or view ray's) up-component. It still has a
-zero-argument-colour overload backed by hardcoded `SKY_ZENITH`/`SKY_HORIZON`/
-`SKY_GROUND` constants — those are the defaults every new config field above
-matches, and the overload is what every shader in gfxcoopa/blendy that never
-opted into configurable colour keeps calling unchanged.
+`sky_gradient()` (`gfx/sky.glsl`, one of the shared headers that stay in
+gfxcoopa's `assets/shaders/`) blends three colours by the surface normal's
+(or view ray's) up-component. It also has a direction-only overload backed by
+hardcoded `SKY_ZENITH`/`SKY_HORIZON`/`SKY_GROUND` constants — the same values
+as the config defaults above — for shaders (gfxcoopa's, blendy's) that don't
+take configurable colours.
 
 ## Gotchas
 
-**Config is startup-only.** There's no config-file watcher in
-`toyengine/core/`; each change needs an app restart to take effect.
+**No config-file watcher.** A running game reads `config.yaml` once at
+startup; only the editor (and scene overrides) change these values live.
 
-**Directional lights have no `ambient` field.** It used to (a per-light RGB
-"fill" colour), but that field was dead everywhere: it fed
-`LightUBO::dir_ambient`, which every relevant shader declared and none read —
-the only reader anywhere was gfxcoopa's legacy `pbr.frag`, inside a pipeline
-(`PbrPipeline`) that no consumer in any repo ever instantiates. It's been
-removed from `DirectionalLightComponent` and its scene-YAML parser. The UBO
-slot itself survives, renamed to `_reserved_was_dir_ambient`, purely so the
-~11 shader `LightUBO` blocks across gfxcoopa/toyengine/blendy that must
-byte-match its C++ layout didn't all need editing atomically to shift every
-later field's offset. Ambient/indirect light comes from the sky gradient
-above, engine-wide — not per directional light.
+**Directional lights have no `ambient` field.** Ambient/indirect light comes
+from the sky gradient above, engine-wide — not per directional light.
 
-**Ambient hue is engine-wide, not per-scene.** `sky_zenith`/`sky_horizon`/
-`sky_ground` are one set of values for the whole app, read once at startup —
-there's no per-scene override. If a specific scene wants a different sky,
-today that means shipping a different `config.yaml` for it.
+**Ambient hue is per config, optionally per scene.** `sky_zenith`/
+`sky_horizon`/`sky_ground` come from `config.yaml`, and a scene can override
+them under `scene.settings.render`.
 
 ## Is there GI in toyengine?
 
@@ -139,10 +124,6 @@ below.
 
 ## Extending it
 
-- **Per-scene sky/ambient.** Would mean moving `sky_zenith`/`sky_horizon`/
-  `sky_ground` (and `ambient_intensity`/`sky_intensity`) off `PixelRenderConfig`
-  and onto a scene-level component, uploaded per-scene-load instead of parsed
-  once from `config.yaml`.
 - **Real GI (baked probes / reflection probes / IBL).** Wire up gfxcoopa's
   `GiSystem` and `EnvironmentLightComponent` (currently blendy-only) — see
   `gfxcoopa/engine/gi/gi_system.h`.

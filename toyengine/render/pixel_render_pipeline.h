@@ -997,8 +997,8 @@ private:
             device_, allocator_, config_.local_shadow_atlas_resolution, config_.shadow_cache_enabled);
         shadow_set_->bind_image(0, shadow_target_.dir_shadow_view(), shadow_sampler_.handle());
         // Binding 1: every point and spot shadow (gfx/local_shadow.glsl's local_shadow_atlas).
-        // Binding 2 is no longer declared by any shader; it keeps the same image so the set
-        // layout -- shared by every pass that binds set 2 -- did not have to change.
+        // Binding 2 is not declared by any shader; it is still bound (to the same image) because
+        // the set layout -- shared by every pass that binds set 2 -- declares it.
         shadow_set_->bind_image(1, local_shadow_atlas_->view(), shadow_sampler_.handle());
         shadow_set_->bind_image(2, local_shadow_atlas_->view(), shadow_sampler_.handle());
         // Binding 3: the directional map AGAIN, through a plain nearest sampler --
@@ -1153,9 +1153,9 @@ private:
         const VkImageView ssao_view = ssao_source_view_();
 
         // No ExtraSets (toyengine has neither GI nor reflection probes to plumb through), so
-        // this collapses to the same {camera=0, light=1, shadow=2, gbuffer=3} layout the old
-        // fork hardcoded -- gbuffer_set_index_ is derived, not hardcoded, so this is correct
-        // whether or not extras are ever added later (see the fix in deferred_lighting_pass.h).
+        // this collapses to the {camera=0, light=1, shadow=2, gbuffer=3} layout --
+        // gbuffer_set_index_ is derived from the extras, not hardcoded, so this stays correct
+        // if extras are ever added (see gfxcoopa's deferred_lighting_pass.h).
         coopa::gfx::engine::passes::ExtraSets lighting_extra;
         lighting_extra.layouts = {contact_extra_layout_.get()};
         lighting_extra.bind = [this](coopa::gfx::command::CommandBuffer& cmd, uint32_t first_set) {
@@ -1331,15 +1331,13 @@ private:
             cmd.bind_descriptor_set(forward_globals_.current_set(), first_set + 3);
         };
 
-        // transparent.frag reuses pbr.vert (byte-identical to gbuffer.vert -- see gfx/), the
-        // same convention blendy uses for its own TransparentPass. extra_pc_bytes is now just
-        // TransparentRefractionPushConstants -- the frame-level lighting/SSR block that used
-        // to occupy this region moved to forward_globals_'s UBO (set 6 above); see that
-        // struct's own doc for why.
+        // transparent.vert is the forward-transparent vertex backbone
+        // (gfx/surface/transparent_vs.glsl). extra_pc_bytes is TransparentRefractionPushConstants;
+        // the frame-level lighting/SSR data lives in forward_globals_'s UBO (set 6 above).
         transparent_pass_ = std::make_unique<coopa::gfx::engine::passes::TransparentPass>(
             device_, VK_FORMAT_R16G16B16A16_SFLOAT, *camera_layout_, *light_layout_,
             *shadow_layout_,
-            config_.shaders("pbr.vert"),
+            config_.shaders("transparent.vert"),
             config_.shaders("transparent.frag"),
             transparent_extra,
             static_cast<uint32_t>(sizeof(TransparentRefractionPushConstants)),
@@ -1350,7 +1348,7 @@ private:
         // frame's final colour, so no separate capture variant is needed.)
         for (const auto& sd : config_.surface_shaders.all()) {
             if (sd.domain != coopa::gfx::pipeline::SurfaceShaderDomain::Transparent) continue;
-            const std::string vert_spv = config_.shaders(sd.vert.empty() ? "pbr.vert" : sd.vert);
+            const std::string vert_spv = config_.shaders(sd.vert.empty() ? "transparent.vert" : sd.vert);
             transparent_pass_->add_variant(
                 sd.name, vert_spv,
                 config_.shaders(sd.frag.empty() ? "transparent.frag" : sd.frag), sd.cull);
@@ -1724,7 +1722,7 @@ private:
         // Same guest arrangement, for BLEND meshes in the editor's viewport shading modes.
         transparent_preview_pass_ = std::make_unique<passes::TransparentPreviewPass>(
             device_, post_target_.render_pass_object(), *camera_layout_, material_cache_->layout_object(),
-            config_.shaders("pbr.vert"), config_.shaders("transparent_preview.frag"));
+            config_.shaders("transparent.vert"), config_.shaders("transparent_preview.frag"));
         transparent_preview_pass_->set_scene_depth(gbuffer_target_.depth_view_typed(), nearest_sampler_,
                                                    render_extent_.width, render_extent_.height);
     }
@@ -1993,8 +1991,8 @@ private:
         // this pipeline's frame-overlap model.
 
         // One fullscreen draw writes every pixel of offscreen_target_: lit surfaces, and the
-        // procedural sky at background pixels (pixel_lighting.frag -- formerly a second
-        // SkyboxPass draw that re-read every pixel's normal just to discard the lit ones).
+        // procedural sky at background pixels (pixel_lighting.frag -- rather than a second
+        // skybox draw that would re-read every pixel's normal just to discard the lit ones).
         offscreen_target_.begin(cmd);
 
         PixelLightingPushConstants lighting_pc;
@@ -2007,10 +2005,10 @@ private:
         lighting_pc.ssao_direct_strength = config_.ssao_direct_lighting_strength;
         lighting_pc.ssao_intensity       = config_.ssao_intensity;
         // The sky is drawn by this same pass at background pixels (see pixel_lighting.frag),
-        // from the matrix SkyboxPass used to compute: identical sky, one fullscreen draw.
+        // so sky and lighting share one fullscreen draw.
         lighting_pc.sky_inv_view_proj    = glm::inverse(ctx.proj * ctx.view);
-        // gfxcoopa's DeferredLightingPass::draw() pushes this internally now (the
-        // templated overload), after its own bind_pipeline() -- no separate push needed.
+        // gfxcoopa's DeferredLightingPass::draw() pushes this internally (the templated
+        // overload), after its own bind_pipeline() -- no separate push needed.
         pixel_lighting_pass_->draw(cmd, current_camera_set(), current_light_set(), *shadow_set_, lighting_pc,
                                   render_extent_.width, render_extent_.height);
 
@@ -2781,9 +2779,8 @@ private:
         };
 
         // A BLEND material only casts a shadow at full opacity -- the shadow passes have no
-        // per-fragment discard (single hard depth compare, no PCF to average a partial alpha
-        // into a partial shadow -- see gfx/shadow_dither.glsl's doc), so a translucent object
-        // is binary: caster or not.
+        // per-fragment alpha discard beyond the CUTOUT mask (gfx/surface/shadow_fs.glsl), so a
+        // translucent object is binary: caster or not.
         auto casts = [&](size_t i) {
             const auto& m = out.material(i);
             return !(m.is_blended() && m.alpha < 1.0f);
@@ -3540,7 +3537,7 @@ private:
                               return a.dist2 < b.dist2;
                           });
         // Every scatter light that holds a local-atlas shadow slot is shadowed in the fog too --
-        // point lights included (the cube map they used to have was never bound here).
+        // point lights included (their shadows live in the same local atlas as spots).
         const bool local_shadowed = config_.volumetrics_shadows_enabled;
         vol.local_shadows = lubo.local_shadows;
         for (uint32_t k = 0; k < scatter_count; ++k) {
@@ -3920,8 +3917,8 @@ private:
         // local lights still needs them filled. .x (directional shadow intensity) is meaningless
         // without a directional light and keeps its 1.0 default there.
         //
-        // .y used to carry the single point shadow's PCF radius; point penumbrae are now per
-        // light in LightUBO::local_shadows (see update_local_shadows_()), so it is left 0.
+        // .y is unused and left 0: point-light penumbrae are per light in
+        // LightUBO::local_shadows (see update_local_shadows_()).
         ubo.dir_shadow_extra = glm::vec4(
             dir ? glm::clamp(dir->shadow_intensity, 0.0f, 1.0f) : 1.0f,
             0.0f,
@@ -4079,7 +4076,7 @@ private:
             // world-space constant means a different number of texels in every cascade. See
             // compute_shadow_normal_bias().
             // With the receiver-plane bias on, the taps already follow the receiver, so the
-            // offset no longer has to clear the PCF disk -- only shadow_normal_bias texels.
+            // offset does not have to clear the PCF disk -- only shadow_normal_bias texels.
             const bool plane_bias = config_.shadow_receiver_plane_bias && !pcss_on_config;
             ubo.dir_cascade_normal_bias[c] = compute_shadow_normal_bias(
                 plane_bias ? 0.0f : pcf_texels, config_.shadow_normal_bias, fit.texel_world);
@@ -4099,9 +4096,9 @@ private:
             if (c < cascades && pcf_texels > 0.0f) any_soft = true;
 
             if (c == 0) {
-                // Cascade 0 mirrored into the pre-cascade fields, which gfxcoopa's own
-                // shaders (pbr.frag/deferred_lighting.frag/transparent.frag) still read
-                // through the shorter LightUBO prefix -- see light_data.h's cascade doc.
+                // Cascade 0 mirrored into the pre-cascade fields of the LightUBO prefix
+                // (dir_shadow_params.z gates the directional shadow in pixel_shadow_body.glsl)
+                // -- see light_data.h's cascade doc.
                 ubo.dir_light_space_matrix = fit.light_space_matrix;
                 ubo.dir_shadow_params = glm::vec4(
                     config_.shadow_bias, pcf_texels, cast_dir_shadow ? 1.0f : 0.0f,
@@ -4216,8 +4213,8 @@ private:
      * @brief Every component this frame's render() reads, gathered by ONE hierarchy walk.
      *
      * Scene::get_components<T>() / find_first_component<T>() each walk the whole tree with
-     * a dynamic_cast per component, and render() used to make about a dozen of them per
-     * frame (point and spot lights twice each). snapshot_scene_() makes one, with exactly
+     * a dynamic_cast per component, and render() needs about a dozen such lists per frame
+     * (point and spot lights twice each). snapshot_scene_() makes one walk, with exactly
      * get_components' semantics -- pre-order, inactive objects skipped (their children are
      * still visited), the first component of each type per object -- so every consumer
      * sees the same lists, in the same order, that its own walk would have produced.
@@ -4455,7 +4452,8 @@ private:
         LocalShadowBlock& blk = ubo.local_shadows;
         blk = LocalShadowBlock{};
         local_slots_.clear();
-        // The single-map fields only gfxcoopa's legacy shaders read: nothing renders them now.
+        // The single-spot-shadow fields: no shader reads them (spot shadows come from
+        // local_shadows), so they are written in their "no shadow" state.
         ubo.light_counts.w     = 0xFFFFFFFFu;
         ubo.spot_shadow_params = glm::vec4(0.0f);
 
@@ -5156,7 +5154,7 @@ private:
                 refract_pc.ior_flags      = glm::vec4(refract_ior, mr_mat.has_refraction() ? 1.0f : 0.0f, 0.0f, 0.0f);
                 refract_pc.shader_ext0    = mr_mat.shader_params_ext[0];
                 refract_pc.shader_ext1    = mr_mat.shader_params_ext[1];
-                // VERTEX|FRAGMENT, not FRAGMENT alone: TransparentPass's push-constant range now
+                // VERTEX|FRAGMENT, not FRAGMENT alone: TransparentPass's push-constant range
                 // covers both stages (see its PushConstants' gfx_time/gfx_params doc), and
                 // Vulkan requires a push call's stageFlags to match the declared range for
                 // every byte it touches, including this trailing per-object refraction block.

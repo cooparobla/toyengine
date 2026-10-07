@@ -180,7 +180,7 @@ void gfx_surface_fragment(inout GfxTransparentSurface s) {
 
     // Detail falls off with distance: past detail_distance the per-pixel ripples and foam noise
     // are below what a pixel resolves (they would only sparkle), so they are skipped and the
-    // surface turns rougher instead -- the filtered look of the ripples it no longer draws.
+    // surface turns rougher instead -- the filtered look of the ripples it skips.
     float view_dist = distance(camera.camera_pos, s.position_ws);
     float detail    = 1.0 - smoothstep(0.6 * detail_distance, detail_distance, view_dist);
 

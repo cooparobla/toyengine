@@ -43,8 +43,8 @@ layout(set = 1, binding = 0) uniform LightUBO {
 
     // Spot Lights -- appended after sky_ground; see light_data.h's LightUBO doc on why
     // nothing above this line may move.
-    mat4 spot_light_space_matrix; // LEGACY (gfxcoopa's own shaders): spot shadows now live in local_shadows
-    vec4 spot_shadow_params;      // LEGACY: zeroed; see local_shadows
+    mat4 spot_light_space_matrix; // unread: spot shadows come from local_shadows; kept for layout
+    vec4 spot_shadow_params;      // unread, zeroed on the CPU; see local_shadows
     SpotLight spot_lights[8];
 
     // Appended after spot_lights per light_data.h's append-only rule.

@@ -1,10 +1,11 @@
 # toyengine/render
 
-The low-resolution deferred pixel-art frame graph. One pipeline, not a choice between
-tracks: everything is an independent toggle on top of the same G-buffer/deferred base, and
-the frame always renders at a low internal resolution with a nearest-neighbour upscale
-(`upscale_mode`: `fit`, the default, or `integer`) — so the output stays pixelated
-whatever is switched on.
+The deferred frame graph. One pipeline, not a choice between tracks: everything is an
+independent toggle on top of the same G-buffer/deferred base. The frame renders at an
+internal resolution (`resolution_mode` / `render_width` / `render_height` /
+`scale_divisor`; this repo's `assets/config.yaml` uses 1920×1080, the struct defaults
+480×270 for a pixel-art look) and is nearest-neighbour upscaled to the window
+(`upscale_mode`: `fit`, the default, or `integer`).
 
 | File | Purpose |
 |---|---|
@@ -15,7 +16,10 @@ whatever is switched on.
 | [`instance_stream.h`](instance_stream.h) | `InstanceStream` — per-frame-in-flight instance transform buffer. |
 | [`forward_globals.h`](forward_globals.h) | `ForwardGlobalsData` — per-frame-in-flight UBO for the forward transparent pass's lighting/indirect/SSR/refraction tuning. |
 | [`particle_types.h`](particle_types.h) | The plain-data contract with `toyengine/particles/`: `ParticleInstance` (the 80-byte GPU instance), `ParticleLook`, and the per-frame quad and mesh batches handed over by `set_particle_state()`. |
-| [`passes/`](passes/) | The passes toyengine defines itself; everything else is reused from gfxcoopa. |
+| [`local_shadow_atlas.h`](local_shadow_atlas.h) | `LocalShadowAtlas` — the shared depth atlas for shadowed point and spot lights. |
+| [`visibility.h`](visibility.h) | CPU visibility math for the mesh draw path: frustum planes, world bounds, projected size and LOD selection. |
+| [`frame_profile.h`](frame_profile.h), [`gpu_profiler.h`](gpu_profiler.h) | The `PROFILE` mode's CPU phase timings and per-feature GPU timestamp scopes. |
+| [`passes/`](passes/) | The passes toyengine defines itself; everything else is a gfxcoopa pass class. Every shader any of them loads, apart from SMAA's, is in this repo's `assets/shaders/`. |
 
 ## Startup-fixed vs runtime toggles
 
@@ -41,14 +45,16 @@ three groups below.
 
 **Scene** (`record_scene_()`):
 
-1. Directional shadow depth, then the point-light cube map, 6 faces — first shadow-caster only.
+1. Directional shadow cascades, then the local-light shadow atlas: every `cast_shadows` point
+   and spot light competing for a slot by screen importance (point lights as six guard-banded
+   tiles), with static casters cached per light (`record_local_shadows_()`).
 2. G-buffer geometry, meshes and opaque/masked SDFs.
 3. Hi-Z pyramid, when SSR, transparency or SSAO is on. This also
    performs the G-buffer depth transition `pixel_stylize.frag`'s outline sampler needs; when
    it does not run, `transition_gbuffer_depth_to_shader_read_()` does it instead. Exactly one
    of the two must happen.
-4. (Removed: the transparent capture. Reflections see transparent geometry, fog and other
-   reflections through the previous frame's final colour instead -- see step 9.)
+4. There is no separate transparent capture: reflections see transparent geometry, fog and
+   other reflections through the previous frame's final colour (step 9).
 5. `TemporalHistoryPass` — the shared per-pixel accumulation count every temporally averaged
    screen-space effect reads (Unity HDRP's `_HistoryValidityBuffer`). One depth-based
    disocclusion answer per frame, reprojected clip-to-clip through a double-composed matrix,
@@ -59,10 +65,11 @@ three groups below.
 6. Contact shadows: the screen-space march into its own buffer, then its temporal resolve
    (`contact_shadow_pass.h`). Runs before lighting, which samples the result.
 7. SSAO, or `invalidate_history()` when it is off.
-8. Deferred lighting + skybox → `offscreen_target_` (HDR; the sky-based indirect term can
-   exceed 1.0 whatever the toggles say). Always drawn now — `debug_view`'s channel views
-   replace step 16's final draw instead, reading the G-buffer/lighting/SSAO/SSR sources
-   directly rather than swapping out this step.
+8. Deferred lighting (`pixel_lighting.frag`, which also draws the procedural sky at
+   background pixels) → `offscreen_target_` (HDR; the sky-based indirect term can exceed 1.0
+   whatever the toggles say). Always drawn — `debug_view`'s channel views replace step 16's
+   final draw instead, reading the G-buffer/lighting/SSAO/SSR sources directly rather than
+   swapping out this step.
 9. Scene-colour mip chain, then SSR — Hi-Z raymarch → temporal resolve → specular swap plus
    the SSGI diffuse bounce. As in Unreal, the chain's mip 0 is the PREVIOUS frame's final
    pre-DOF HDR image (copied at the end of the post chain, `GpuScope::SceneColorHistory`), and
@@ -188,7 +195,7 @@ Three things are specific to the world-space pass and worth knowing before touch
   handed to the pass as a sampled texture at set 1 through gfxcoopa's `ExtraSets`, and compared
   per fragment. The descriptor is bound **once** (`bind_image()` issues `vkUpdateDescriptorSets`
   immediately), against the startup-fixed `gbuffer_target_` — which is why `world_ui_enabled` is
-  startup-fixed even though the *pass* is now rebuilt on resize. Note that depth is at
+  startup-fixed even though the *pass* is rebuilt on resize. Note that depth is at
   `render_extent_` while the layer is at the letterbox rect, so an occluded edge stair-steps on the
   render grid while the canvas's own edges are crisp — the one thing the display-resolution layer
   trades away.

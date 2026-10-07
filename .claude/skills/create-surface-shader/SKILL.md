@@ -19,8 +19,9 @@ Study these first -- they are complete, small, and documented:
 | `terrain.frag` | Opaque | sample-macro-only shader, no hook |
 | `water.vert`, `water.frag`, `water_surface.glsl` | Transparent | one file for both stages, `GFX_SURFACE_CUSTOM_VARYING`, `shader_params_ext`, forward globals |
 
-All in `assets/shaders/`; backbones in `assets/shaders/gfx/surface/` (toyengine) and
-`libs/gfxcoopa/assets/shaders/gfx/surface/`.
+All in `assets/shaders/`; the backbones are in `assets/shaders/gfx/surface/`. Shared lighting
+headers (`gfx/brdf.glsl`, `gfx/ibl.glsl`, `gfx/sky.glsl`, `gfx/spot_light.glsl`) come from
+`libs/gfxcoopa/assets/shaders/gfx/`.
 
 ## The two domains
 
@@ -31,7 +32,7 @@ All in `assets/shaders/`; backbones in `assets/shaders/gfx/surface/` (toyengine)
 | Vertex hook | `void gfx_surface_vertex(inout GfxSurfaceVertex v)` -- edit `position_ws`, `normal_ws`, `tangent_ws` (also has `_os` inputs, `uv`, `model`, `normal_matrix`) | same, plus `vec4 v.custom` to pass to the fragment |
 | Fragment hook | `void gfx_surface_fragment(inout GfxSurface s)` -- `albedo, metallic, roughness, ao, emissive, normal_ws, position_ws, uv, tbn`; runs after map sampling and the cutout test | `void gfx_surface_fragment(inout GfxTransparentSurface s)` -- `normal_ws, position_ws, uv, custom, albedo, alpha, roughness, thickness, ior` |
 | Inputs | `gfx_params` (the 4 `shader_params`), `gfx_time` = (time, dt, frame, water clock) | also `gfx_params_ext0/1` (8 `shader_params_ext`), `forward_globals`, `camera`, `lights` |
-| Stock fallbacks | `gbuffer.vert`, `gbuffer.frag`, `shadow_depth.vert/.frag`, `shadow_cube.vert/.frag` | `pbr.vert`, `transparent.frag` |
+| Stock fallbacks | `gbuffer.vert`, `gbuffer.frag`, `shadow_depth.vert/.frag`, `shadow_cube.vert/.frag` | `transparent.vert`, `transparent.frag` |
 
 Optional fragment macros (define before the include): `GFX_SURFACE_SAMPLE(tex, uv)` wraps every
 material-map fetch, `GFX_SURFACE_SAMPLE_NORMAL(tex, uv)` the normal fetch. The stock

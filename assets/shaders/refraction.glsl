@@ -83,8 +83,7 @@ vec3 gfx_refraction_sample(vec2 uv, vec2 duv, float chromatic, float lod) {
 /// with the surface colour here, since the destination image already holds the
 /// background BEFORE this draw (relying on fixed-function src-alpha-over on top
 /// of that would double-count it). When refraction is inactive, returns `shaded`
-/// unchanged so the fixed-function blend behaves exactly as it did before this
-/// feature existed.
+/// unchanged so the fixed-function src-alpha-over blend applies as usual.
 ///
 /// @param shaded       gfx_pixel_forward_shade()'s result for this fragment.
 /// @param world_pos    Shaded surface point, world space (same as passed to

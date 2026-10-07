@@ -228,8 +228,9 @@ inline PackageReport package_project(const Project& project, const PackageOption
     }
 
     // 3. Library layers (gfxcoopa / uicoopa shaders, uicoopa's default sounds).
-    // gfxcoopa's base shaders are meant to be overridden by the engine's (the -I order), so only
-    // a LATER library's shader losing to an earlier layer is worth a warning (a real name clash).
+    // The first shader layer (gfxcoopa's) sits directly under the engine's, the runtime's -I
+    // order, and is copied without clash warnings; a LATER library's shader losing to an
+    // earlier layer is a real name clash and warns.
     bool first_shader_layer = true;
     for (const PackageLayer& layer : opt.library_layers) {
         const bool warn = layer.compiled_shaders && !first_shader_layer;

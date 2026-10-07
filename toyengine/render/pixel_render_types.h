@@ -84,8 +84,8 @@ struct PixelLightingPushConstants {
     /// the padding slot that aligns the mat4 below to 16 bytes (offset 32).
     float ssao_intensity = 1.0f;
     /// inverse(proj * view) -- the lighting draw also writes the SKY at background pixels
-    /// (formerly a separate SkyboxPass draw) and reconstructs their view ray from this,
-    /// computed on the CPU exactly as SkyboxPass did so the sky is bit-identical.
+    /// (no separate skybox draw) and reconstructs their view ray from this, computed on the
+    /// CPU.
     glm::mat4 sky_inv_view_proj = glm::mat4(1.0f);
 };
 static_assert(sizeof(PixelLightingPushConstants) == 96, "must match pixel_lighting.frag's PixelParams");

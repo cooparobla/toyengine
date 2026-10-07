@@ -6,7 +6,7 @@
 // pass buys two things an inline march in the lighting shader could not have:
 //
 //  1. A BUFFER to filter. The march is a short stochastic-ish trace over G-buffer texels, and
-//     inline it had nowhere to accumulate -- its only temporal filter was the whole-frame TAA,
+//     inline it would have nowhere to accumulate -- its only temporal filter would be the TAA,
 //     whose variance clip rejects history exactly on thin, high-contrast features under motion,
 //     which is what a contact shadow is. The pass writes an occlusion buffer that the shared
 //     temporal resolve then averages over contact_shadow_temporal_frames draws.

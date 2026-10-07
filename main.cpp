@@ -1,12 +1,13 @@
-// toyengine — a pixel-art 3D engine.
+// toyengine — a C++20 / Vulkan 3D game engine.
 //
-// Renders the active scene into a small offscreen buffer, then upscales it
-// to the window with nearest-neighbour filtering for a pixelated look.
+// Renders the active scene into an offscreen buffer at the configured internal
+// resolution (render.resolution_mode), then upscales it to the window with
+// nearest-neighbour filtering.
 //
-// Build:   cbuild --vulkan     (compiles shaders and cmake builds)
-// Run:     cplay               (runs ./build/toyengine on assets/config.yaml's
-//                               scene.default_scene -- pixel_demo)
-//          cplay physics_test  (runs a named scene under assets/scenes instead)
+// Build:   cmake --build build   (or cbuild --vulkan on Linux; compiles shaders too)
+// Run:     ./build/toyengine     (assets/config.yaml's scene.default_scene -- pixel_demo)
+//          ./build/toyengine physics_test
+//                                (a scene by name, found in assets/scenes' tag folders)
 // Headless: HEADLESS=1 MAX_FRAMES=600 ./build/toyengine
 //                               (no visible window, vsync off; prints the steady-state
 //                                frame time and still saves output.save_on_exit's PNG)

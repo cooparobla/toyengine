@@ -15,7 +15,7 @@
  * separate skeletal system). Bones are resolved against the RIG: the `rig:` path if given,
  * else the nearest ancestor (or the owner itself) carrying an Animator, else the owner's
  * topmost ancestor. A bone entry is a path below the rig root ("Hips/Spine") or a bare name
- * found anywhere under it; the old scene-wide path lookup remains as a fallback.
+ * found anywhere under it, with a scene-wide path lookup as the fallback.
  *
  * The palette comes from either source:
  *  - `bones:` in the mesh's `joints:` / `inverse_bind_matrices:` order (an exporter's), or

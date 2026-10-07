@@ -113,8 +113,8 @@ const char* g_current_test   = "";
 /**
  * @brief Records one assertion. Failures always print; passes only under -v.
  *
- * Quiet by default on purpose: the old suite printed an `[ OK ]` line per assertion, several
- * hundred of them, which buried the one line that mattered and hid which test was slow.
+ * Quiet by default on purpose: an `[ OK ]` line per assertion would print several hundred
+ * of them, burying the one line that matters and hiding which test was slow.
  */
 void expect(bool condition, const std::string& what) {
     ++g_assertions;
@@ -162,7 +162,7 @@ void expect_at_least(long long actual, long long minimum, const std::string& wha
 /**
  * @brief The one directory this suite is allowed to write to: `<tmp>/toyengine_tests`.
  *
- * Deliberately NOT the repo's output/ (where these tests used to drop PNGs and scratch YAML):
+ * Deliberately NOT the repo's output/:
  * output/ is where a real run's captures land, and a test that litters it makes those harder
  * to tell apart -- and a test killed halfway through leaves the litter behind.
  */
@@ -241,7 +241,7 @@ bool same_extent(const Frame& a, const Frame& b) {
 /**
  * @brief Pixels whose R, G or B differs by more than `tolerance`.
  *
- * Counts PIXELS, not bytes (the old byte counts made a 1-channel shift look like four), and
+ * Counts PIXELS, not bytes (a byte count makes a 1-channel shift look like four), and
  * ignores alpha, which is a constant 255 in every target this compares.
  */
 long long count_diff(const Frame& a, const Frame& b, int tolerance = 0) {
@@ -392,6 +392,9 @@ toy::core::AppConfig make_test_config(const std::string& scene,
     // noise seed to frame 0 whenever the temporal resolve is off (see its execute()), so the
     // jittered trace is deterministic frame to frame and this config still exercises the code
     // path that ships.
+    // Global fog is on by default; at a test camera's overview distances it washes out the
+    // colours the render tests check. A test that wants fog enables it in its scene settings.
+    config.render.fog_enabled = false;
 
     config.output.save_on_exit = false;
     return config;
@@ -1561,7 +1564,7 @@ void test_app_config_load_round_trips_atmosphere_settings() {
 /**
  * @brief Round-trips the SSR/SSGI block plus the two UI toggles and window.visible.
  *
- * window.visible is what the whole headless suite now depends on (see make_test_config()), so
+ * window.visible is what the whole headless suite depends on (see make_test_config()), so
  * it gets the same treatment as every other knob: set it to the non-default value and check.
  */
 void test_app_config_load_round_trips_ssr_and_window_settings() {
@@ -1866,7 +1869,7 @@ std::unique_ptr<Scene> make_controller_scene(toy::scene::KinematicController** o
     scene->add_root_object(std::move(obj));
     // The controller moves nothing without this: its motion lives in advance(), driven here at
     // order 50 so it lands ahead of the physics phase. Installing it makes these tests exercise
-    // the same path Engine uses, rather than a Behaviour-phase update() that no longer exists.
+    // the same path Engine uses (KinematicController's Behaviour-phase update() is a no-op).
     toy::scene::install_kinematic_control_system(*scene);
     return scene;
 }
@@ -3252,9 +3255,9 @@ void test_headless_render_with_all_toggles_off() {
  * post), comparing:
  *   - with vs without the lights' cast_shadows: the local shadows must change the image;
  *   - budgets of 0 point / 0 spot shadows vs cast_shadows off: identical images;
- *   - the old slot bug: the renderer used to render the cube map from the FIRST cast_shadows
- *     point light but flag point_lights[0] as its owner, so a non-casting light listed first stole
- *     the shadow and the real caster went unshadowed. Here the authored light stops casting and
+ *   - shadow-slot ownership: a non-casting light listed first must not take the shadow slot
+ *     from the real caster (a renderer that shadows the FIRST cast_shadows light but flags
+ *     point_lights[0] as its owner leaves the real caster unshadowed). Here the authored light stops casting and
  *     loses its intensity, and an identical casting light is appended AFTER it: the image must
  *     match the authored light's shadowed image again.
  */
@@ -3497,8 +3500,8 @@ void test_debug_view_channels_render() {
  * own headless tests cover the ray/plane maths exactly; only a real render can cover the rest
  * of that chain, because the letterbox and viewport conventions live in this repo.
  *
- * It also subsumes the "does world UI reach the image at all" question that used to need two
- * more Engines with world_ui_enabled on and off: a few hundred pixels of the button's
+ * It also answers the "does world UI reach the image at all" question without two more
+ * Engines with world_ui_enabled on and off: a few hundred pixels of the button's
  * HIGHLIGHT colour can only be there if the canvas laid out, emitted, drew as 3D geometry and
  * composited over the frame. The A/B is the same pointer logic either way, differing only in
  * WHERE it points, so a failure means the mapping is wrong rather than that the UI is missing.
@@ -3608,7 +3611,7 @@ void test_world_canvas_button_hover() {
  * sampling. Two Engines here are unavoidable -- the difference lives in two different scene
  * files, and a scene is loaded once at construction -- but FIXED_DT=0 means the two frames are
  * each reproducible, so the comparison can demand a real area of change rather than the single
- * differing byte the old "> 0" threshold accepted.
+ * differing byte a "> 0" threshold would accept.
  */
 void test_material_maps_change_output() {
     ScopedEnv fixed_dt("FIXED_DT", "0");
@@ -3778,11 +3781,11 @@ void test_cloth_scene_simulates_and_animates() {
  * @brief Screen-space AO must follow a moving object: no trail where it was, darkening
  *        where it is -- including when the camera has been still long enough to freeze.
  *
- * The regression test for AO that lagged or stuck behind moving objects. The temporal
- * resolve used to reproject its history with the camera's motion alone and hold it verbatim
- * once the CAMERA was still: the occlusion a ball casts on the ground reprojected "correctly"
- * (the ground is static), passed the surface-identity test, and was either blended out over a
- * 32-frame window (a half-second trail) or, under a still camera, held forever. Now the
+ * The regression test for AO that lags or sticks behind moving objects. A temporal resolve
+ * that reprojects its history with the camera's motion alone and holds it verbatim once the
+ * CAMERA is still fails it: the occlusion a ball casts on the ground reprojects "correctly"
+ * (the ground is static), passes the surface-identity test, and is either blended out over a
+ * 32-frame window (a half-second trail) or, under a still camera, held forever. The
  * G-buffer carries per-object motion vectors (G4), the resolve reprojects through them,
  * variance-clips history against the current neighbourhood, averages a short Unreal-style
  * window, and the freeze also waits for the SCENE to be still (gather_meshes_'s scene_moved_).
@@ -3894,7 +3897,7 @@ void test_ssao_tracks_moving_object() {
     // Not "equals the reference": ground the ball's silhouette just uncovered restarts its
     // accumulation from a single draw, and the darkest tenth of a window that is still
     // averaging its first frames reads a few levels low -- noise, not a trail. A stuck or
-    // trailing history keeps the whole band (the old failure), which this threshold catches.
+    // trailing history keeps the whole band, which this threshold catches.
     const double recovered = ref - 0.5 * (ref - start_dark);
 
     // Travel: 4 units in 60 ticks, the way cloth_scene_simulates_and_animates drives it.
@@ -5038,7 +5041,7 @@ void test_ssr_jitter_probe() {
  *        class of regression that changes how everything looks at once.
  *
  * Written after a descriptor-set-index mistake in `pixel_lighting.frag` drained 88% of the
- * scene's colour and several checks in a row missed it. Each miss is a rule this test now
+ * scene's colour and several checks in a row missed it. Each miss is a rule this test
  * encodes:
  *
  *  - **Measure saturation, not just tone.** The regression was luma-PRESERVING: mean 136 -> 139

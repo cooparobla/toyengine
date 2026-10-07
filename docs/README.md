@@ -5,20 +5,24 @@ correct in the code but not obvious from reading it (a config key that lands
 in a differently-named struct, a field that looks live but isn't, a value
 that's hardcoded where you'd expect a uniform). Cross-cutting explanations
 live here; a class or module's own usage notes stay in its subdirectory's
-README (see the root [README](../README.md)'s Layout section).
+README (see the root [README](../README.md)'s "Project layout" section).
 
 This is distinct from `.docs/`, the HTML API reference generated from
-in-source Doxygen-style comments by `coopadocs build` (see the root
-`CLAUDE.md` for that workflow) — `.docs/` is generated output and shouldn't
-be hand-edited; everything in this folder is.
+in-source Doxygen-style comments by `coopadocs build` (configured by the root
+`.coopadocs`) — `.docs/` is generated output and shouldn't be hand-edited;
+everything in this folder is.
+
+[`editor/`](editor/README.md) is the editor's user manual, for people using
+the editor rather than developing it.
 
 ## Guides
 
 - [ambient-lighting.md](ambient-lighting.md) — the global ambient/indirect
   light brightness and colour knobs (`ambient_intensity`, `sky_zenith`/
-  `sky_horizon`/`sky_ground`), how they reach the GPU, what GI exists in this
-  engine, and a look-alike setting that doesn't do what it appears to.
+  `sky_horizon`/`sky_ground`), how they reach the GPU, and what GI exists in
+  this engine.
 - [shimmer-repro.md](shimmer-repro.md) — recipe to regenerate the terrain_test
-  shimmer reference capture (`output/ring_capture_lossless.mp4`): config state,
+  shimmer reference capture (`output/ring_capture_lossless.mp4`; the shimmer
+  itself is fixed by texel-AA sampling): config state,
   the `CAPTURE_RING` workflow, the real-input gesture, lossless encoding, the
   per-frame analysis, and the investigation's confirmed non-causes.

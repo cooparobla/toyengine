@@ -12,14 +12,14 @@
 // shift is off, so sampling it NEAREST at destination UVs is where the scene's
 // pixel-art upscale happens. `ui` is built at the destination rect itself, so the
 // same sampler and UVs give an exact texel-for-texel fetch -- the UI is never
-// resampled. It used to share the base's render resolution, and the non-integer
-// upscale that implied is what made world-canvas text look stepped.
+// resampled; building it at render resolution would force a non-integer upscale
+// that makes world-canvas text look stepped.
 //
 // No sRGB decode/encode here, unlike upscale.frag: both sources are UNORM images
 // already holding the display-referred, sRGB-ENCODED bytes pixel_stylize.frag
-// produced, and the destination is UNORM too -- so this blend happens in the same
-// encoded space the blend inside post_target_ used to. upscale.frag's decode
-// still cancels the swapchain's implicit encode one stage later, unchanged.
+// produced, and the destination is UNORM too -- so this blend happens in that
+// encoded space. upscale.frag's decode cancels the swapchain's implicit encode
+// one stage later.
 
 layout(location = 0) in vec2 in_uv;
 

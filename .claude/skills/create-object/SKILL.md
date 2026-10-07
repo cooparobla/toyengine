@@ -10,7 +10,7 @@ An object asset is a single object tree in its own file that scenes instantiate 
 `libs/libcoopa/coopa/scene/scene_inherit.h` (merge rules, documented at the top of the file).
 Component keys: [../create-scene/reference/components.md](../create-scene/reference/components.md).
 
-Examples: `assets/objects/campfire.yaml` (particles + flickering light + props, inline
+Examples: `assets/objects/props/campfire.yaml` (particles + flickering light + props, inline
 materials), `robot_arm.yaml` (rig: empty joint objects with child `cube` visuals, Animator on
 the root), `tentacle.yaml` (skinned mesh rig).
 
@@ -39,7 +39,8 @@ object:
       children: []
 ```
 
-Shared assets go in `assets/objects/`; a scene-only one in `assets/scenes/<scene>/objects/`.
+Shared assets go in `assets/objects/<tag>/` (e.g. `props`; `prefab: objects/<name>` finds it in
+any tag folder); a scene-only one in `assets/scenes/<scene>/objects/`.
 Lowercase snake_case file and object names. `type: Foo` entries, never `!Foo` tags.
 
 ## Placing it

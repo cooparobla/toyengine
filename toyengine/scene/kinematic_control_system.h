@@ -29,7 +29,7 @@
  * supported use.
  *
  * The components keep their logic; they just expose it as `advance(dt)` instead of `update(dt)`, so
- * the Behaviour walk no longer double-applies it. A scene that never installs this system simply
+ * the Behaviour walk does not also apply it. A scene that never installs this system simply
  * does not move them at all, which is a loud failure rather than a subtly wrong one.
  */
 

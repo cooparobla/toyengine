@@ -283,7 +283,7 @@ public:
         if (!generator_ || sampler_.is_built() || !task_.done()) return false;
 
         sampler_.build(map_config_, std::move(generator_->graph()), params);
-        // The graph now lives in the sampler; the generator has nothing left to own, and
+        // The graph is moved into the sampler; the generator has nothing left to own, and
         // dropping it also releases the task's job handle through task_'s own destructor.
         task_ = coopa::maps::MapTask{};
         generator_.reset();

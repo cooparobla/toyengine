@@ -178,7 +178,7 @@ struct RuntimeLayout {
     /**
      * @brief ShaderLibrary roots, first match wins. Packaged: the one merged assets/shaders.
      *        Source: the project's own shaders (when it has a distinct directory), the engine's,
-     *        gfxcoopa's base library, then uicoopa's -- the runtime mirror of glslc's -I order.
+     *        gfxcoopa's, then uicoopa's -- the runtime mirror of glslc's -I order.
      */
     std::vector<std::string> shader_roots(const std::filesystem::path& project_root) const {
         const std::filesystem::path project_shaders = project_root / "assets" / "shaders";

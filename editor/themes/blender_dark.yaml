@@ -12,6 +12,7 @@ metrics:
   spacing: 3
   indent: 16
   label_ratio: 0.46
+  label_align: 1                  # property labels against the widget (0 = flush left)
   scrollbar: 7
   rounding: 4
 

@@ -236,8 +236,8 @@ set_tests_properties(toyengine_editor_editor_shell toyengine_editor_package toye
 # --- Vulkan/GLFW leak gate ---
 # OFF by default here, unlike uicoopa/pixengine which are clean:
 # render/pixel_render_pipeline.h still names raw Vulkan symbols, forced by the
-# gfxcoopa internals that have no sealed equivalent yet -- GBufferPipeline and
-# TransparentCapturePass's MRT render-pass construction, Renderer::begin_frame()'s
+# gfxcoopa internals that have no sealed equivalent yet -- GBufferPipeline's
+# MRT render-pass construction, Renderer::begin_frame()'s
 # raw VkClearColorValue, and SsaoPass's raw view accessors. Run
 # `${GFXCOOPA_DIR}/tools/check_no_vulkan.sh ${TOYENGINE_DIR}` for the current
 # count; flip ON once those gain wrappers.

@@ -48,9 +48,9 @@ struct alignas(16) ForwardGlobals {
     glm::vec4  lighting0 = glm::vec4(4.0f, 0.55f, 0.0f, 0.0f); /**< x=light_bands, y=spec_threshold, z=soft_lighting, w=rim_strength. */
     glm::vec4  lighting1 = glm::vec4(1.0f, 1.0f, 0.0f, 0.0f);  /**< x=ambient_intensity, y=sky_intensity, z=ssr_enabled, w=ssgi_intensity. */
     glm::vec4  ssr0       = glm::vec4(0.5f, 15.0f, 3.5f, 0.05f); /**< x=ssgi_distance, y=ssr_max_distance, z=ssr_bias_texels, w=ssr_thickness_min. */
-    glm::vec4  ssr1       = glm::vec4(0.01f, 1.0f, 0.0f, 0.0f);  /**< x=ssr_thickness_scale, y=ssr_roughness_cutoff, zw unused. */
+    glm::vec4  ssr1       = glm::vec4(0.01f, 1.0f, 0.0f, 0.0f);  /**< x=ssr_thickness_scale, y=ssr_roughness_cutoff, z=ssr_cone_prefilter, w unused. */
     glm::ivec4 ssr_steps  = glm::ivec4(64, 0, 0, 1);              /**< x=ssr_max_iterations, y=ssr_max_hiz_mip, z=ssr_start_mip, w=ssr_min_mip0_steps. */
-    glm::ivec4 ssr_mip    = glm::ivec4(0, 0, 0, 0);               /**< x=ssr_max_color_mip, yzw unused. */
+    glm::ivec4 ssr_mip    = glm::ivec4(0, 0, 0, 0);               /**< x=ssr_max_color_mip, y=1 when u_scene_color is the previous frame (reproject hits), zw unused. */
     glm::vec4  refract0   = glm::vec4(0.0f, 1.0f, 0.08f, 0.0f);   /**< x=enabled, y=strength, z=max_offset, w=chromatic. */
     glm::vec4  refract1   = glm::vec4(1.0f, 1.0f, 1.0f, 0.0f);    /**< x=blur, y=density, z=fresnel_enabled, w unused. */
     /// Water ripples (toy::water::WaterSystem's live rings, handed over by Engine as

@@ -295,8 +295,8 @@ scene:
     # A small pond, driven by the water system (toyengine/water/): a planar WaterBody whose
     # mesh WaterSystem bakes and publishes to the sibling MeshRenderer (which therefore names
     # no mesh_path of its own), with the "water" derived shader on the Transparent domain --
-    # Gerstner waves in the vertex hook, which TransparentCapturePass's variant shares (SSR
-    # must reflect the same displaced surface the visible draw shows), and depth-based colour
+    # Gerstner waves in the vertex hook (SSR reflects the displaced surface through the previous
+    # frame's colour), and depth-based colour
     # and contact foam in the fragment hook. Uses water_grid (tools/gen_water_grid_mesh.py)
     # rather than plane: a 4-vertex quad can only tilt as a whole, not ripple. Placed at
     # y=-3.2, past every other object's row, so it reads as its own "pond" on the open floor.

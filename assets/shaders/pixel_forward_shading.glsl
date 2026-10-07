@@ -3,12 +3,8 @@
 
 // pixel_forward_shading.glsl -- the forward-shading body originally written
 // (and still used) by transparent.frag, extracted so sdf_forward.frag can
-// share it byte-for-byte instead of hand-copying the formula the way
-// transparent_capture.frag's band()/shade_light() duplicate documents doing
-// (see that file's "KEEP IN SYNC" warning) -- with this extraction, a BLEND
-// mesh and a BLEND SDF now share ONE implementation, so they can never
-// silently diverge the way transparent.frag and transparent_capture.frag
-// already have to work around.
+// share it byte-for-byte -- a BLEND mesh and a BLEND SDF share ONE
+// implementation, so they can never silently diverge.
 //
 // A "body" file in the ssr_trace_body.glsl sense: the includer must, BEFORE
 // including this file, already have declared (with these exact names,
@@ -23,14 +19,13 @@
 //     <gfx/indirect_specular.glsl>, <gfx/sky.glsl>, <gfx/ssr_common.glsl>,
 //     <gfx/spot_light.glsl>, "indirect_hooks.glsl", <gfx/ssr_trace_body.glsl>
 //     (which itself needs `g_normal_metallic`/`g_position_roughness`/
-//     `u_hiz_map`/`u_scene_color` declared first -- see transparent.frag's
+//     `u_velocity`/`u_hiz_map`/`u_scene_color` declared first -- see transparent.frag's
 //     own include order for the canonical sequence this file assumes was
 //     already followed).
 //
 // calc_dir_shadow()/calc_local_shadow() themselves come from
 // "pixel_shadow_body.glsl", included below -- this file used to carry its own
-// gfx_forward_calc_* copies, byte-identical to pixel_lighting.frag's and
-// gfx/surface/capture_fs.glsl's; see that file's doc for why they were unified.
+// gfx_forward_calc_* copies, byte-identical to pixel_lighting.frag's; see that file's doc for why they were unified.
 
 /// Per-fragment material inputs to gfx_pixel_forward_shade() -- the subset
 /// of PBRMaterial a forward-shaded surface (mesh or SDF) needs, regardless
@@ -68,9 +63,17 @@ struct GfxForwardLightingParams {
     int   ssr_start_mip;
     int   ssr_min_mip0_steps;
     int   ssr_max_color_mip;
+    float ssr_cone_prefilter;   // lobe-cone share of the hit-colour mip footprint
+    int   ssr_prev_frame;       // 1: u_scene_color is the previous frame's final colour
 };
 
 #include "pixel_shadow_body.glsl"
+
+/// Full-resolution G-buffer texel under a screen uv, for gfx_ssr_hit_color()'s velocity fetch.
+ivec2 gfx_forward_uv_to_px(vec2 uv) {
+    ivec2 size = textureSize(u_velocity, 0);
+    return clamp(ivec2(uv * vec2(size)), ivec2(0), size - 1);
+}
 
 /// Limb fade for the sub-texel silhouette band of this RAW, undenoised forward
 /// path -- used by the SSR miss-fallback's weight and by refraction.glsl's
@@ -254,6 +257,10 @@ vec4 gfx_pixel_forward_shade(vec3 world_pos, vec3 N, vec3 camera_pos, mat4 view,
         // Jitter is opaque-surface-only -- see GfxSsrParams' own doc.
         sp.jitter_strength  = 0.0;
         sp.frame_index      = 0;
+        sp.prev_frame_color = p.ssr_prev_frame != 0;
+        sp.rays_per_pixel   = 1;
+        sp.cone_prefilter   = p.ssr_cone_prefilter;
+        sp.skip_behind      = false;
 
         float ssr_ndv = max(dot(N, V), 0.0);
         float silhouette_fade = gfx_forward_silhouette_fade(ssr_ndv);
@@ -296,7 +303,9 @@ vec4 gfx_pixel_forward_shade(vec3 world_pos, vec3 N, vec3 camera_pos, mat4 view,
                 if (fb_clip.w > 0.0) {
                     vec2 fb_uv = clamp(ssr_ndc_to_uv(fb_clip.xy / fb_clip.w), 0.0, 1.0);
                     float fb_lod = min(2.0, float(p.ssr_max_color_mip));
-                    ssr_color  = textureLod(u_scene_color, fb_uv, fb_lod).rgb * fallback_w;
+                    vec2 fb_color_uv;
+                    ssr_color  = gfx_ssr_hit_color(fb_uv, gfx_forward_uv_to_px(fb_uv),
+                                                   fb_lod, sp.prev_frame_color, fb_color_uv) * fallback_w;
                     confidence = fallback_w;
                 }
             }
@@ -326,8 +335,10 @@ vec4 gfx_pixel_forward_shade(vec3 world_pos, vec3 N, vec3 camera_pos, mat4 view,
                 vec2 bounce_uv = ssr_ndc_to_uv(bounce_clip.xy / bounce_clip.w);
                 vec2 edge = smoothstep(vec2(0.0), vec2(0.08), bounce_uv)
                           * smoothstep(vec2(1.0), vec2(0.92), bounce_uv);
-                vec3 bounce = textureLod(u_scene_color, clamp(bounce_uv, 0.0, 1.0),
-                                         float(p.ssr_max_color_mip)).rgb;
+                vec2 bounce_color_uv;
+                vec2 bounce_cl = clamp(bounce_uv, 0.0, 1.0);
+                vec3 bounce = gfx_ssr_hit_color(bounce_cl, gfx_forward_uv_to_px(bounce_cl),
+                                                float(p.ssr_max_color_mip), sp.prev_frame_color, bounce_color_uv);
                 // `confidence` here is the unified weight from above -- a real hit's
                 // confidence, or the miss fallback's own weight in the grazing band.
                 // Weighting by raw hit confidence alone (the way ssr_composite_body.glsl

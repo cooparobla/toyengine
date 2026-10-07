@@ -187,16 +187,6 @@ struct PixelRenderConfig {
      * this opacity over the backdrop (1 = opaque, off). Runtime-switchable, editor-only.
      */
     float editor_xray_alpha = 1.0f;
-    /**
-     * Opaque surfaces (e.g. the floor) also reflect transparent geometry, via a second forward
-     * capture of BLEND objects (depth/normal/position/shaded-color) and a second Hi-Z pyramid
-     * ssr.frag's raymarch tries alongside its primary opaque source -- see
-     * PixelRenderPipeline::record_transparent_capture_(). Meaningless without ssr_enabled AND
-     * transparency_enabled also true. Opt-in (default false), not implied by those two: this
-     * roughly doubles the opaque raymarch's per-pixel cost and adds an extra forward draw +
-     * Hi-Z build + scene-colour-mip build every frame it's on.
-     */
-    bool ssr_reflect_transparent = false;
 
     /**
      * Screen-space refraction for BLEND MESH objects only -- MeshRenderer, not SdfRenderer;
@@ -277,10 +267,9 @@ struct PixelRenderConfig {
 
     /**
      * Signed-distance-field raymarching system (see gfxcoopa's SdfRenderer/SdfShape
-     * components and toyengine's sdf_gbuffer.frag/sdf_forward.frag/sdf_shadow*.frag/
-     * sdf_capture.frag). sdf_enabled is the single per-frame gate: when false, the SDF
+     * components and toyengine's sdf_gbuffer.frag/sdf_forward.frag/sdf_shadow*.frag). sdf_enabled is the single per-frame gate: when false, the SDF
      * gather in PixelRenderPipeline::render() produces an empty draw list and every
-     * downstream recording site (G-buffer/shadow/capture/forward) is naturally a no-op --
+     * downstream recording site (G-buffer/shadow/forward) is naturally a no-op --
      * the five SDF passes themselves are always constructed (same always-on-but-gated
      * policy as SSR/fog/bloom above).
      */
@@ -348,20 +337,20 @@ struct PixelRenderConfig {
             case RenderQuality::Ultra:  ssao_slices = 3; ssao_steps = 24; ssao_max_radius_px = 96.0f; ssao_temporal_frames = 12; break;
         }
         switch (ssr_quality) {
-            case RenderQuality::Low:    ssr_max_iterations = 24;  break;
-            case RenderQuality::Medium: ssr_max_iterations = 48;  break;
-            case RenderQuality::High:   ssr_max_iterations = 64;  break;
-            case RenderQuality::Ultra:  ssr_max_iterations = 128; break;
+            case RenderQuality::Low:    ssr_max_iterations = 24;  ssr_rays_per_pixel = 1; break;
+            case RenderQuality::Medium: ssr_max_iterations = 48;  ssr_rays_per_pixel = 1; break;
+            case RenderQuality::High:   ssr_max_iterations = 64;  ssr_rays_per_pixel = 1; break;
+            case RenderQuality::Ultra:  ssr_max_iterations = 128; ssr_rays_per_pixel = 2; break;
         }
         // Lower across the board than ssr_quality's rows, and deliberately: the bounce ray is
         // short and lands in a coarse cone mip, so it converges in far fewer steps. This is
         // the single biggest cost dial the traced bounce has -- it is three full-resolution
         // passes (trace, resolve, denoise) when ssgi_traced is on.
         switch (ssgi_quality) {
-            case RenderQuality::Low:    ssgi_max_iterations = 12; break;
-            case RenderQuality::Medium: ssgi_max_iterations = 20; break;
-            case RenderQuality::High:   ssgi_max_iterations = 32; break;
-            case RenderQuality::Ultra:  ssgi_max_iterations = 48; break;
+            case RenderQuality::Low:    ssgi_max_iterations = 12; ssgi_resolution_scale = 2; break;
+            case RenderQuality::Medium: ssgi_max_iterations = 20; ssgi_resolution_scale = 2; break;
+            case RenderQuality::High:   ssgi_max_iterations = 32; ssgi_resolution_scale = 1; break;
+            case RenderQuality::Ultra:  ssgi_max_iterations = 48; ssgi_resolution_scale = 1; break;
         }
         switch (dof_quality) {
             case RenderQuality::Low:    dof_sample_count = 16; break;
@@ -796,10 +785,10 @@ struct PixelRenderConfig {
     float ssao_intensity        = 1.0f;
 
     // --- SSR + SSGI ---
-    float ssr_max_distance     = 15.0f;
+    float ssr_max_distance     = 30.0f;
     int   ssr_max_iterations   = 64;
-    float ssr_thickness        = 0.05f;
-    float ssr_thickness_scale  = 0.01f;
+    float ssr_thickness        = 0.08f;
+    float ssr_thickness_scale  = 0.02f;
     float ssr_bias_texels      = 3.5f;
     /**
      * Roughness above which a surface stops tracing. 1.0 = everything traces, so rough surfaces
@@ -844,8 +833,32 @@ struct PixelRenderConfig {
     float ssr_blur_radius      = 0.5f;  /**< World-space sigma for the spatial SSR denoise (ssr_blur.frag). */
     bool  ssr_blur_light       = true;  /**< 3x3 SSR denoise footprint instead of 5x5 (a third of the reads). */
     bool  ssr_blur_zero_skip   = true;  /**< Skip the SSR denoise kernel where its whole footprint is zero (exact). */
-    float ssr_jitter           = 0.0f;  /**< Stochastic ray jitter strength, as a fraction of the
-                                              GGX lobe cone; 0 reproduces the old single-ray trace. */
+    /**
+     * Scale on the GGX lobe the reflection rays are importance-sampled from (visible-normal
+     * sampling, Heitz 2018): 1 = the physical lobe for each pixel's roughness, smaller values
+     * narrow it toward the mirror direction. 0 traces the single deterministic mirror ray. RUNTIME.
+     */
+    float ssr_jitter           = 1.0f;
+    /**
+     * GGX-sampled rays traced per SSR pixel and averaged before the temporal resolve (Unreal's
+     * per-quality ray count). Each costs a full trace, so it scales ssr.trace linearly; the
+     * resolve's accumulation already averages one ray a frame, so 1 is the right default.
+     * Set by ssr_quality (Ultra 2). Clamped to [1, 8]. RUNTIME.
+     */
+    int   ssr_rays_per_pixel   = 1;
+    /**
+     * How much of the GGX cone the hit-colour lookup prefilters through the scene-colour mips,
+     * on top of the ray footprint. With importance-sampled rays the lobe is already resolved by
+     * the rays themselves and the temporal average, so the full cone would blur twice; 0.5 keeps
+     * just enough prefiltering to hide the per-frame noise. 1 = the old full-cone lookup. RUNTIME.
+     */
+    float ssr_cone_prefilter   = 0.5f;
+    /**
+     * Let a ray that has passed behind thin geometry at the finest Hi-Z level take growing
+     * strides (2, 4, ... 16 texels) instead of crawling one texel per iteration until its
+     * budget runs out. RUNTIME.
+     */
+    bool  ssr_skip_behind      = false;
     /**
      * Trace SSR and SSGI at half the render resolution per axis (a quarter of the rays); the
      * composite upsamples with a depth/normal-aware filter (gfx/ssr_composite_body.glsl), so
@@ -853,6 +866,14 @@ struct PixelRenderConfig {
      * trace, resolve and blur passes of both chains ~4x. Startup-fixed: it sizes targets.
      */
     bool  ssr_half_res         = true;
+    /**
+     * The traced-SSGI chain runs at the SSR trace resolution divided by this per axis (1 = the
+     * same resolution, 2 = a quarter of its pixels). The bounce is low-frequency, so the lower
+     * tiers trade a little edge definition in the bounce for a large cut in its trace, resolve
+     * and denoise. Set by ssgi_quality (Low/Medium 2, High/Ultra 1). Startup-fixed: it sizes
+     * targets.
+     */
+    int   ssgi_resolution_scale = 1;
     /**
      * Skip the SSR trace for pixels whose reflection could add almost nothing: the specular
      * weight the composite would apply (split-sum GGX, Fresnel) times the trace's own
@@ -862,7 +883,7 @@ struct PixelRenderConfig {
      */
     bool  ssr_skip_negligible  = true;
     float ssr_skip_threshold   = 0.02f; /**< Weight below which ssr_skip_negligible skips the trace. */
-    float ssr_temporal_gamma   = 1.0f;  /**< Variance-clipping width for the SSR temporal resolve,
+    float ssr_temporal_gamma   = 2.0f;  /**< Variance-clipping width for the SSR temporal resolve,
                                               in std deviations of the 3x3 neighbourhood. */
     /**
      * Traced SSGI: the composite's diffuse-bounce term reads a real cosine-hemisphere

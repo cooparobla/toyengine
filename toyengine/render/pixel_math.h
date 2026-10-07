@@ -619,7 +619,7 @@ struct PixelRect {
  * (y = 0 at the top). Every SDF pass that draws this rect shares the same
  * negative-viewport-height convention every other geometry target in this
  * engine already uses to reconcile the two (see gbuffer_target.h/
- * transparent_capture_target.h/transparent_pass.h's identical
+ * transparent_pass.h's identical
  * `set_viewport(0, height, width, -height)` calls) -- that flip happens to
  * vertex positions during rasterization, but a dynamic scissor rect is
  * specified directly in framebuffer pixel space and is NOT affected by the

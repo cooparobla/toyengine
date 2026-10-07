@@ -1817,7 +1817,6 @@ private:
             /* shadow_frag */ "", // reuses stock shadow_depth.frag
             /* shadow_cube_vert */ "foliage_shadow_cube.vert",
             /* shadow_cube_frag */ "", // reuses stock shadow_cube.frag
-            /* capture_frag */ "", // Opaque domain -- unused
             /* cull */ coopa::gfx::CullMode::None, // two-sided card, not a closed opaque solid
         });
         rc.surface_shaders.add({
@@ -1829,7 +1828,6 @@ private:
             /* shadow_frag */ "",
             /* shadow_cube_vert */ "",
             /* shadow_cube_frag */ "",
-            /* capture_frag */ "", // Opaque domain -- unused
             /* cull */ coopa::gfx::CullMode::Back, // closed columns, like any opaque solid
         });
         rc.surface_shaders.add({
@@ -1841,7 +1839,6 @@ private:
             /* shadow_frag */ "",
             /* shadow_cube_vert */ "",
             /* shadow_cube_frag */ "",
-            /* capture_frag */ "", // Opaque domain -- unused
             /* cull */ coopa::gfx::CullMode::Back,
         });
         rc.surface_shaders.add({
@@ -1853,7 +1850,6 @@ private:
             /* shadow_frag */ "",
             /* shadow_cube_vert */ "",
             /* shadow_cube_frag */ "",
-            /* capture_frag */ "", // Opaque domain -- unused
             /* cull */ coopa::gfx::CullMode::Back,
         });
         rc.surface_shaders.add({
@@ -1865,7 +1861,6 @@ private:
             /* shadow_frag */ "",
             /* shadow_cube_vert */ "",
             /* shadow_cube_frag */ "",
-            /* capture_frag */ "", // Opaque domain -- unused
             /* cull */ coopa::gfx::CullMode::Back,
         });
         rc.surface_shaders.add({
@@ -1877,12 +1872,9 @@ private:
             /* shadow_frag */ "", //   and this demo's water is always translucent -- see water_surface.glsl)
             /* shadow_cube_vert */ "",
             /* shadow_cube_frag */ "",
-            /* capture_frag */ "water_capture.frag", // same hook, over the capture backbone --
-                                                      // see TransparentCapturePass::add_variant()
             /* cull */ coopa::gfx::CullMode::None, // two-sided: a camera under the surface
                                                    // sees its underside (Snell's window) --
-                                                   // see water_surface.glsl. The SSR capture
-                                                   // keeps back-face culling regardless.
+                                                   // see water_surface.glsl.
         });
 
         return rc;

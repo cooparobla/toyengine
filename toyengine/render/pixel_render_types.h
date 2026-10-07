@@ -18,7 +18,6 @@
 
 #include <gfxcoopa/engine/components/sdf_renderer.h>
 #include <gfxcoopa/engine/passes/transparent_pass.h>
-#include <gfxcoopa/engine/passes/transparent_capture_pass.h>
 
 #include <toyengine/render/pixel_math.h>
 
@@ -147,34 +146,12 @@ static_assert(sizeof(coopa::gfx::engine::passes::TransparentPass::PushConstants)
              "maxPushConstantsSize (128 bytes).");
 
 /**
- * @struct TransparentCaptureLightingPushConstants
- * @brief Matches transparent_capture.frag's push-constant block over [32, 56) -- appended
- *        after TransparentCapturePass::PushConstants' own 32-byte material block.
- *
- * Smaller than ForwardGlobals on purpose: the capture never traces its own SSR, so none of
- * that struct's ssr_enabled/ssgi/GfxSsrParams/refraction fields apply here.
- */
-struct TransparentCaptureLightingPushConstants {
-    float light_bands       = 4.0f;
-    float spec_threshold    = 0.55f;
-    float soft_lighting     = 0.0f;
-    float rim_strength      = 0.0f;
-    float ambient_intensity = 1.0f;
-    float sky_intensity     = 1.0f;
-};
-// See TransparentRefractionPushConstants' identical assertion above.
-static_assert(sizeof(coopa::gfx::engine::passes::TransparentCapturePass::PushConstants) +
-             sizeof(TransparentCaptureLightingPushConstants) <= 128,
-             "TransparentCapturePass's combined push-constant range exceeds Vulkan's "
-             "guaranteed maxPushConstantsSize (128 bytes).");
-
-/**
  * @struct SdfDrawItem
  * @brief One SdfRenderer gathered this frame: its index into the SdfData SSBO, which draw
  *        list it belongs to, and the world/screen bounds every recording site needs.
  *
  * Built once per frame by the SDF gather and threaded through record_gbuffer_(),
- * record_directional_shadow_(), record_point_shadow_(), record_transparent_capture_() and
+ * record_directional_shadow_(), record_point_shadow_() and
  * record_transparent_() -- the role `renderers`/`world_matrices`/`instance_idx` play for
  * MeshRenderer.
  */

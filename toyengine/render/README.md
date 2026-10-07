@@ -43,18 +43,19 @@ three groups below.
 
 1. Directional shadow depth, then the point-light cube map, 6 faces — first shadow-caster only.
 2. G-buffer geometry, meshes and opaque/masked SDFs.
-3. Hi-Z pyramid, when any of SSR / transparency / `ssr_reflect_transparent` is on. This also
+3. Hi-Z pyramid, when SSR, transparency or SSAO is on. This also
    performs the G-buffer depth transition `pixel_stylize.frag`'s outline sampler needs; when
    it does not run, `transition_gbuffer_depth_to_shader_read_()` does it instead. Exactly one
    of the two must happen.
-4. `ssr_reflect_transparent`: capture transparent geometry into its own target and build a
-   second Hi-Z pyramid and scene-colour mip chain, so opaque surfaces can reflect it.
+4. (Removed: the transparent capture. Reflections see transparent geometry, fog and other
+   reflections through the previous frame's final colour instead -- see step 9.)
 5. `TemporalHistoryPass` — the shared per-pixel accumulation count every temporally averaged
    screen-space effect reads (Unity HDRP's `_HistoryValidityBuffer`). One depth-based
    disocclusion answer per frame, reprojected clip-to-clip through a double-composed matrix,
    published as a count that rises to the deepest cap any consumer asks for. What it buys the
    consumers is a *converging* running average (frame N at `1/N`) in place of a fixed-rate
    exponential blend, which cannot converge at all on a trace that re-jitters every frame.
+   Reprojection goes through the G-buffer velocity (G4), so a moving object keeps its history.
 6. Contact shadows: the screen-space march into its own buffer, then its temporal resolve
    (`contact_shadow_pass.h`). Runs before lighting, which samples the result.
 7. SSAO, or `invalidate_history()` when it is off.
@@ -63,9 +64,16 @@ three groups below.
    replace step 16's final draw instead, reading the G-buffer/lighting/SSAO/SSR sources
    directly rather than swapping out this step.
 9. Scene-colour mip chain, then SSR — Hi-Z raymarch → temporal resolve → specular swap plus
-   the SSGI diffuse bounce. Under `ssgi_traced` the bounce is its own cosine-hemisphere Hi-Z
+   the SSGI diffuse bounce. As in Unreal, the chain's mip 0 is the PREVIOUS frame's final
+   pre-DOF HDR image (copied at the end of the post chain, `GpuScope::SceneColorHistory`), and
+   each hit samples it at the hit's reprojected position (`hit_uv - G4.xy`); only frame 0 draws
+   mip 0 from this frame's lit opaque image. Rays are GGX visible-normal samples
+   (`ssr_jitter` scales the lobe, `ssr_rays_per_pixel` per tier), the trace writes a hit
+   distance alongside the colour, the resolve reprojects mirror-like surfaces by the reflected
+   image's virtual point, and the denoise is roughness-aware (mirrors stay sharp). Under `ssgi_traced` the bounce is its own cosine-hemisphere Hi-Z
    trace (`ssgi.frag`) through a second resolve+denoise chain inside `SsrPass`, rather than the
-   single normal-offset mip tap the composite falls back to.
+   single normal-offset mip tap the composite falls back to. It runs at the SSR trace
+   resolution divided by `ssgi_resolution_scale` (2 at Low/Medium `ssgi_quality`).
 10. Refraction's own scene-colour chain, when refraction is on and a BLEND mesh is in view
    (`refraction_this_frame_`; nothing else samples it, so a frame without one skips the build).
 11. Forward transparent pass: BLEND meshes, BLEND SDFs and particle batches merged into one

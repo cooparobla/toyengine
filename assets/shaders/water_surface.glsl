@@ -1,7 +1,7 @@
 // water_surface.glsl -- the "water" derived transparent shader: Gerstner waves, flow-advected
 // ripples, depth-based colour/opacity, shoreline and contact foam, whitewater on rapids and
-// behind obstacles. water.vert/water.frag/water_capture.frag are thin includers of this file
-// over the transparent vertex/fragment and capture backbones.
+// behind obstacles. water.vert/water.frag are thin includers of this file
+// over the transparent vertex/fragment backbones.
 //
 // Everything is driven by toy::water::WaterSystem (toyengine/water/water_system.h), which
 // bakes the mesh and writes the material:
@@ -32,10 +32,6 @@
 // reads forward_globals.water_ripple_info.yzw = (flow-ripple layers, detail distance, ring range):
 // past the detail distance the ripples and foam noise are skipped for a rougher surface, and
 // rings are only looped over within the ring range.
-//
-// WATER_CAPTURE (water_capture.frag) compiles the fragment hook for the SSR-secondary-source
-// capture backbone, which has no depth buffer and no extended push constants: ripples and
-// turbulence foam only, with default look parameters.
 //
 // No shadow entry points: water is BLEND, and BLEND materials only cast shadows at full
 // opacity (see record_directional_shadow_'s doc) -- water never reaches the shadow pass.
@@ -140,7 +136,6 @@ float water_flow_noise(vec2 pos, vec2 flow, float t, float scale) {
     return mix(n0, n1, abs(1.0 - 2.0 * ph0));
 }
 
-#ifndef WATER_CAPTURE
 // Expanding rings from moving and splashing bodies (toy::water::WaterSystem's ripples, handed
 // over per frame in forward_globals). Each ring is a short wave packet travelling outward from
 // its start radius, widening and decaying as it ages; young strong rings carry a foam crest.
@@ -164,7 +159,6 @@ void water_ripple_rings(vec2 pos, inout vec2 slope, inout float foam) {
         foam = max(foam, step(0.5, env * (0.6 + 0.4 * sin(WATER_RIPPLE_K * x))) * step(age, 1.2));
     }
 }
-#endif
 
 void gfx_surface_fragment(inout GfxTransparentSurface s) {
     float t     = gfx_time.w;
@@ -173,15 +167,6 @@ void gfx_surface_fragment(inout GfxTransparentSurface s) {
     float turb  = s.custom.z;
     float crest = s.custom.w;
 
-#ifdef WATER_CAPTURE
-    vec3  foam_color      = vec3(0.92, 0.96, 1.0);
-    float foam_amount     = 1.0;
-    float ripple_strength = 0.35;
-    float ripple_scale    = 1.2;
-    // The capture backbone has no forward globals: a fixed, cheap detail level.
-    int   ripple_layers   = 1;
-    float detail_distance = 150.0;
-#else
     vec3  foam_color      = gfx_params_ext0.rgb;
     float foam_amount     = gfx_params_ext0.a;
     float shore_depth     = max(gfx_params_ext1.x, 1e-3);
@@ -192,7 +177,6 @@ void gfx_surface_fragment(inout GfxTransparentSurface s) {
     int   ripple_layers   = int(forward_globals.water_ripple_info.y + 0.5);
     float detail_distance = max(forward_globals.water_ripple_info.z, 1.0);
     float ring_range      = forward_globals.water_ripple_info.w;
-#endif
 
     // Detail falls off with distance: past detail_distance the per-pixel ripples and foam noise
     // are below what a pixel resolves (they would only sparkle), so they are skipped and the
@@ -216,14 +200,11 @@ void gfx_surface_fragment(inout GfxTransparentSurface s) {
         }
         float strength = ripple_strength * (1.0 + turb * 1.5);
         slope *= strength * detail;
-#ifndef WATER_CAPTURE
         if (length(camera.camera_pos.xy - pos) <= ring_range) water_ripple_rings(pos, slope, ring_foam);
-#endif
     }
     s.normal_ws = normalize(s.normal_ws - vec3(slope, 0.0));
     s.roughness = mix(max(s.roughness, 0.2), s.roughness, detail);
 
-#ifndef WATER_CAPTURE
     // --- The underside, seen from below (water is two-sided; the backbone has already turned
     // the normal to face the viewer). Light leaving water refracts with the inverse IOR, so
     // inside Snell's window (~48.6 degrees from straight up) the world above shows through, bent;
@@ -243,7 +224,6 @@ void gfx_surface_fragment(inout GfxTransparentSurface s) {
         s.alpha  = mix(s.alpha, 1.0, f * 0.8);
         return;
     }
-#endif
 
     // --- Whitewater: rapids and obstacle wakes (turbulence), wave crests ---
     // Far away the broken foam patterns are replaced by their expected coverage (the fraction of
@@ -259,7 +239,6 @@ void gfx_surface_fragment(inout GfxTransparentSurface s) {
         foam = mix(foam, broken, detail);
     }
 
-#ifndef WATER_CAPTURE
     // --- Water depth under this pixel, from the opaque scene depth ---
     vec4  view_pos = camera.view * vec4(s.position_ws, 1.0);
     vec4  clip     = camera.proj * view_pos;
@@ -293,7 +272,6 @@ void gfx_surface_fragment(inout GfxTransparentSurface s) {
         shore = mix(shore, broken, detail);
     }
     foam = max(foam, shore * step(1e-3, band));
-#endif
 
     foam = max(foam, ring_foam);
     foam = clamp(foam * foam_amount, 0.0, 1.0);

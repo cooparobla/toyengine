@@ -115,13 +115,17 @@ Screen-space only — no baked or probe-based GI:
 - **Sky-gradient indirect diffuse + specular** — described above; this *is*
   the ambient term.
 - **SSGI** (`ssgi_intensity`, default `0.6`, gated by `ssr_enabled`) — a
-  single-bounce screen-space diffuse colour-bleed: offsets the shading point
-  along the surface normal, samples the blurred scene-colour mip at that
-  point, adds it as a Lambertian bounce weighted by the SSR trace's hit
-  confidence. Denoised for opaque geometry
-  (`gfxcoopa/assets/shaders/gfx/ssr_composite_body.glsl`), raw for
-  forward/SDF surfaces (`assets/shaders/pixel_forward_shading.glsl`).
-- **SSR** — Hi-Z raymarched specular reflections, temporally resolved.
+  single-bounce screen-space diffuse colour-bleed. On opaque geometry with
+  `ssgi_traced` (the shipped setting) it is one cosine-hemisphere Hi-Z ray per
+  pixel (`ssgi.frag`), temporally resolved and denoised in its own chain, at
+  the SSR trace resolution divided by `ssgi_resolution_scale` (2 at Low/Medium
+  `ssgi_quality`). Without it, and on forward/SDF surfaces
+  (`assets/shaders/pixel_forward_shading.glsl`), the bounce is a single tap of
+  the blurred scene-colour mip at a point offset along the normal.
+- **SSR** — Hi-Z raymarched specular reflections with GGX visible-normal ray
+  sampling, temporally resolved and roughness-aware denoised. Hits read the
+  previous frame's final HDR image, reprojected by the G-buffer velocity, so
+  reflections include transparent geometry, fog and other reflections.
 - **SSAO** — multiplies the whole indirect term (diffuse, specular, and the
   SSGI bounce).
 

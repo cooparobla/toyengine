@@ -48,9 +48,9 @@ layout(set = 3, binding = 0) uniform SdfGlobalsBlock {
     vec4  lighting0;   // x=light_bands, y=spec_threshold, z=soft_lighting, w=rim_strength
     vec4  lighting1;   // x=ambient_intensity, y=sky_intensity, z=ssr_enabled, w=ssgi_intensity
     vec4  ssr0;        // x=ssgi_distance, y=ssr_max_distance, z=ssr_bias_texels, w=ssr_thickness_min
-    vec4  ssr1;        // x=ssr_thickness_scale, y=ssr_roughness_cutoff
+    vec4  ssr1;        // x=ssr_thickness_scale, y=ssr_roughness_cutoff, z=ssr_cone_prefilter
     ivec4 ssr_steps;   // x=ssr_max_iterations, y=ssr_max_hiz_mip, z=ssr_start_mip, w=ssr_min_mip0_steps
-    ivec4 ssr_mip;     // x=ssr_max_color_mip
+    ivec4 ssr_mip;     // x=ssr_max_color_mip, y=previous-frame colour flag
 } sdf_globals;
 layout(std430, set = 3, binding = 1) readonly buffer SdfRendererBuffer { SdfRendererGpu sdf_renderers[]; };
 layout(std430, set = 3, binding = 2) readonly buffer SdfShapeBuffer   { SdfShapeGpu sdf_shapes[]; };
@@ -59,6 +59,7 @@ layout(std430, set = 3, binding = 2) readonly buffer SdfShapeBuffer   { SdfShape
 // higher index than transparent.frag's own 3/4/5, since this pass's own SdfData set occupies 3.
 layout(set = 4, binding = 1) uniform sampler2D g_normal_metallic;
 layout(set = 4, binding = 2) uniform sampler2D g_position_roughness;
+layout(set = 4, binding = 3) uniform sampler2D u_velocity; // G4: screen motion, for previous-frame hits
 layout(set = 5, binding = 0) uniform sampler2D u_hiz_map;
 layout(set = 6, binding = 0) uniform sampler2D u_scene_color;
 
@@ -120,6 +121,8 @@ void main() {
     p.ssr_start_mip        = sdf_globals.ssr_steps.z;
     p.ssr_min_mip0_steps   = sdf_globals.ssr_steps.w;
     p.ssr_max_color_mip    = sdf_globals.ssr_mip.x;
+    p.ssr_cone_prefilter   = sdf_globals.ssr1.z;
+    p.ssr_prev_frame       = sdf_globals.ssr_mip.y;
 
     out_color = gfx_pixel_forward_shade(hit.pos, N, camera.camera_pos, camera.view, camera.proj, mat, p);
 }

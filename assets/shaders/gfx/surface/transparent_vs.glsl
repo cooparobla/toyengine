@@ -10,11 +10,6 @@
 // needs a version of pbr.vert that actually declares it. The math below is otherwise
 // identical to pbr.vert/gfx/surface/gbuffer_vs.glsl.
 //
-// The SAME entry point compiled from this backbone is used by BOTH TransparentPass (the
-// visible draw) and TransparentCapturePass (the SSR-secondary-source capture) -- see
-// TransparentCapturePass::add_variant()'s doc for why: SSR must reflect the same displaced
-// geometry the visible draw shows.
-//
 // Include-order contract identical to gfx/surface/gbuffer_vs.glsl:
 //   #version 450
 //   #define GFX_SURFACE_VERTEX

@@ -78,7 +78,7 @@ PhysicsSystem::execute()               (order 100)
 └─ PhysicsWorld::step() -> per substep: on_substep -> WaterSystem::substep_()
                                           simulated: per pontoon: sample, buoyancy, drag
                                           frozen: asleep = nothing; awake = calm float, then sleep
-Renderer: transparent pass, "water" derived shader (water.vert / water.frag / water_capture.frag)
+Renderer: transparent pass, "water" derived shader (water.vert / water.frag)
 ```
 
 ### The baked vertex
@@ -265,7 +265,7 @@ take it optionally and run inline without it.
 
 Benchmark: `HEADLESS=1 NO_INPUT=1 PROFILE=out.csv MAX_FRAMES=600 CONFIG=<config with a tier>
 ./build/toyengine water_stress`, then `tools/plot_profile.py`. CPU water work lands in
-`SceneUpdate`, and the water draw is in `Transparent` / `TransparentCapture`.
+`SceneUpdate`, and the water draw is in `Transparent`.
 
 ## Things worth knowing before changing anything here
 

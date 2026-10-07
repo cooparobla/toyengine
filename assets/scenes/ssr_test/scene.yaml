@@ -1,0 +1,551 @@
+# ssr_test -- a bench for screen-space reflections (and the SSGI bounce that shares its trace).
+#
+# Run:   ./build/toyengine ssr_test        (or SCENE=ssr_test)
+# Views: set render.debug_view in assets/config.yaml (runtime, also switchable in the editor):
+#          off             the finished frame
+#          ssr             the resolved reflection colour on its own
+#          ssr_confidence  where reflection rays found geometry (white) vs fell back to the sky
+#          ssgi            the traced diffuse bounce
+#          velocity        the motion vectors the reflections are reprojected with
+#        Knobs worth sweeping: ssr_jitter (0 = mirror ray, 1 = full GGX lobe), ssr_quality
+#        (Ultra = 2 rays/pixel), ssr_cone_prefilter, ssr_temporal_enabled, ssr_half_res,
+#        ssr_roughness_cutoff, ssgi_quality (Low/Medium halve the bounce's resolution).
+#
+# Layout (Z up, metres; the camera orbits the middle -- drag to orbit, scroll to zoom):
+#   Four 6 m floor strips, left to right, with IDENTICAL props on each, so the same reflection
+#   can be compared across surface roughness:
+#     x = -9  MIRROR    metal, roughness 0.02 -- pixel-sharp reflections; virtual-point reprojection
+#     x = -3  POLISHED  black dielectric, roughness 0.08 -- Fresnel: strong only at grazing angles
+#     x = +3  GLOSSY    metal, roughness 0.3 -- GGX-sampled lobe, stretched highlights
+#     x = +9  ROUGH     metal, roughness 0.6 -- wide lobe, roughness-aware denoise at full strength
+#   Props on every strip:
+#     pillar      tall coloured block (each strip a different colour, so strips are easy to tell
+#                 apart in the reflection views)
+#     pole        a 10 cm post -- thin geometry: rays pass behind it, the classic SSR failure
+#     glass       a BLEND refractive sphere -- reflected through the previous frame's colour
+#     orb         small emissive sphere -- a bright point that shows lobe shape and blur
+#     runner      a ball sliding back and forth along Y -- a moving object in the reflections
+#                 (no trail, no lag behind it)
+#   Shared set pieces:
+#     backdrop    black/white striped wall at y = +7.5 -- reflection sharpness and distortion
+#     mirror_wall a vertical chrome panel at x = -12.4 facing the strips -- vertical and
+#                 grazing reflections, and mirror-in-mirror between it and the mirror floor
+#     spinner     a spinning chrome cube between the middle strips -- a MOVING REFLECTOR
+#     orbiter     a chrome sphere circling the centre -- moving reflector AND moving reflected
+#   Screen edges: orbit so a reflected object leaves the frame to see the edge fade.
+format: blender
+scene:
+  scene_name: ssr_test
+  root_objects:
+    # ---- MIRROR strip ----
+    - name: mirror_floor
+      active: true
+      components:
+        - type: Transform
+          position: { x: -9.0, y: 0.0, z: 0.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 3.0, y: 8.0, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material: { albedo: { r: 0.55, g: 0.57, b: 0.6 }, metallic: 1.0, roughness: 0.02, ao: 1.0 }
+      children: []
+    - name: mirror_pillar
+      active: true
+      components:
+        - type: Transform
+          position: { x: -10.6, y: 3.5, z: 1.5 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.8, y: 0.8, z: 3.0 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.85, g: 0.15, b: 0.12 }, metallic: 0.0, roughness: 0.5, ao: 1.0 }
+      children: []
+    - name: mirror_pole
+      active: true
+      components:
+        - type: Transform
+          position: { x: -7.1, y: 4.5, z: 1.25 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.1, y: 0.1, z: 2.5 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.9, g: 0.9, b: 0.9 }, metallic: 0.0, roughness: 0.4, ao: 1.0 }
+      children: []
+    - name: mirror_glass
+      active: true
+      components:
+        - type: Transform
+          position: { x: -8.7, y: 1.8, z: 0.65 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.65, y: 0.65, z: 0.65 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: materials/glass
+      children: []
+    - name: mirror_orb
+      active: true
+      components:
+        - type: Transform
+          position: { x: -9.9, y: -0.6, z: 0.25 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.25, y: 0.25, z: 0.25 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: materials/emissive
+      children: []
+    - name: mirror_runner
+      active: true
+      components:
+        - type: Transform
+          position: { x: -7.8, y: -1.0, z: 0.45 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.45, y: 0.45, z: 0.45 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.95, g: 0.45, b: 0.1 }, metallic: 0.0, roughness: 0.45, ao: 1.0 }
+        - type: KinematicMover
+          mode: pingpong
+          axis: { x: 0.0, y: 1.0, z: 0.0 }
+          distance: 6.0
+          speed: 0.12
+      children: []
+
+    # ---- POLISHED strip ----
+    - name: polished_floor
+      active: true
+      components:
+        - type: Transform
+          position: { x: -3.0, y: 0.0, z: 0.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 3.0, y: 8.0, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material: { albedo: { r: 0.08, g: 0.08, b: 0.09 }, metallic: 0.0, roughness: 0.08, ao: 1.0 }
+      children: []
+    - name: polished_pillar
+      active: true
+      components:
+        - type: Transform
+          position: { x: -4.6, y: 3.5, z: 1.5 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.8, y: 0.8, z: 3.0 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.15, g: 0.7, b: 0.2 }, metallic: 0.0, roughness: 0.5, ao: 1.0 }
+      children: []
+    - name: polished_pole
+      active: true
+      components:
+        - type: Transform
+          position: { x: -1.1, y: 4.5, z: 1.25 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.1, y: 0.1, z: 2.5 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.9, g: 0.9, b: 0.9 }, metallic: 0.0, roughness: 0.4, ao: 1.0 }
+      children: []
+    - name: polished_glass
+      active: true
+      components:
+        - type: Transform
+          position: { x: -2.7, y: 1.8, z: 0.65 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.65, y: 0.65, z: 0.65 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: materials/glass
+      children: []
+    - name: polished_orb
+      active: true
+      components:
+        - type: Transform
+          position: { x: -3.9, y: -0.6, z: 0.25 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.25, y: 0.25, z: 0.25 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: materials/emissive
+      children: []
+    - name: polished_runner
+      active: true
+      components:
+        - type: Transform
+          position: { x: -1.8, y: -1.0, z: 0.45 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.45, y: 0.45, z: 0.45 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.95, g: 0.45, b: 0.1 }, metallic: 0.0, roughness: 0.45, ao: 1.0 }
+        - type: KinematicMover
+          mode: pingpong
+          axis: { x: 0.0, y: 1.0, z: 0.0 }
+          distance: 6.0
+          speed: 0.12
+      children: []
+
+    # ---- GLOSSY strip ----
+    - name: glossy_floor
+      active: true
+      components:
+        - type: Transform
+          position: { x: 3.0, y: 0.0, z: 0.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 3.0, y: 8.0, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material: { albedo: { r: 0.55, g: 0.57, b: 0.6 }, metallic: 1.0, roughness: 0.3, ao: 1.0 }
+      children: []
+    - name: glossy_pillar
+      active: true
+      components:
+        - type: Transform
+          position: { x: 1.4, y: 3.5, z: 1.5 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.8, y: 0.8, z: 3.0 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.15, g: 0.3, b: 0.85 }, metallic: 0.0, roughness: 0.5, ao: 1.0 }
+      children: []
+    - name: glossy_pole
+      active: true
+      components:
+        - type: Transform
+          position: { x: 4.9, y: 4.5, z: 1.25 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.1, y: 0.1, z: 2.5 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.9, g: 0.9, b: 0.9 }, metallic: 0.0, roughness: 0.4, ao: 1.0 }
+      children: []
+    - name: glossy_glass
+      active: true
+      components:
+        - type: Transform
+          position: { x: 3.3, y: 1.8, z: 0.65 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.65, y: 0.65, z: 0.65 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: materials/glass
+      children: []
+    - name: glossy_orb
+      active: true
+      components:
+        - type: Transform
+          position: { x: 2.1, y: -0.6, z: 0.25 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.25, y: 0.25, z: 0.25 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: materials/emissive
+      children: []
+    - name: glossy_runner
+      active: true
+      components:
+        - type: Transform
+          position: { x: 4.2, y: -1.0, z: 0.45 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.45, y: 0.45, z: 0.45 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.95, g: 0.45, b: 0.1 }, metallic: 0.0, roughness: 0.45, ao: 1.0 }
+        - type: KinematicMover
+          mode: pingpong
+          axis: { x: 0.0, y: 1.0, z: 0.0 }
+          distance: 6.0
+          speed: 0.12
+      children: []
+
+    # ---- ROUGH strip ----
+    - name: rough_floor
+      active: true
+      components:
+        - type: Transform
+          position: { x: 9.0, y: 0.0, z: 0.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 3.0, y: 8.0, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material: { albedo: { r: 0.55, g: 0.57, b: 0.6 }, metallic: 1.0, roughness: 0.6, ao: 1.0 }
+      children: []
+    - name: rough_pillar
+      active: true
+      components:
+        - type: Transform
+          position: { x: 7.4, y: 3.5, z: 1.5 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.8, y: 0.8, z: 3.0 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.9, g: 0.75, b: 0.1 }, metallic: 0.0, roughness: 0.5, ao: 1.0 }
+      children: []
+    - name: rough_pole
+      active: true
+      components:
+        - type: Transform
+          position: { x: 10.9, y: 4.5, z: 1.25 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.1, y: 0.1, z: 2.5 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.9, g: 0.9, b: 0.9 }, metallic: 0.0, roughness: 0.4, ao: 1.0 }
+      children: []
+    - name: rough_glass
+      active: true
+      components:
+        - type: Transform
+          position: { x: 9.3, y: 1.8, z: 0.65 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.65, y: 0.65, z: 0.65 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: materials/glass
+      children: []
+    - name: rough_orb
+      active: true
+      components:
+        - type: Transform
+          position: { x: 8.1, y: -0.6, z: 0.25 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.25, y: 0.25, z: 0.25 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: materials/emissive
+      children: []
+    - name: rough_runner
+      active: true
+      components:
+        - type: Transform
+          position: { x: 10.2, y: -1.0, z: 0.45 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.45, y: 0.45, z: 0.45 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.95, g: 0.45, b: 0.1 }, metallic: 0.0, roughness: 0.45, ao: 1.0 }
+        - type: KinematicMover
+          mode: pingpong
+          axis: { x: 0.0, y: 1.0, z: 0.0 }
+          distance: 6.0
+          speed: 0.12
+      children: []
+
+    # ---- Shared set pieces ----
+    - name: backdrop_00
+      active: true
+      components:
+        - type: Transform
+          position: { x: -11.0, y: 7.5, z: 1.5 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 2.0, y: 0.3, z: 3.0 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.92, g: 0.92, b: 0.92 }, metallic: 0.0, roughness: 0.7, ao: 1.0 }
+      children: []
+    - name: backdrop_01
+      active: true
+      components:
+        - type: Transform
+          position: { x: -9.0, y: 7.5, z: 1.5 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 2.0, y: 0.3, z: 3.0 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.04, g: 0.04, b: 0.04 }, metallic: 0.0, roughness: 0.7, ao: 1.0 }
+      children: []
+    - name: backdrop_02
+      active: true
+      components:
+        - type: Transform
+          position: { x: -7.0, y: 7.5, z: 1.5 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 2.0, y: 0.3, z: 3.0 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.92, g: 0.92, b: 0.92 }, metallic: 0.0, roughness: 0.7, ao: 1.0 }
+      children: []
+    - name: backdrop_03
+      active: true
+      components:
+        - type: Transform
+          position: { x: -5.0, y: 7.5, z: 1.5 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 2.0, y: 0.3, z: 3.0 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.04, g: 0.04, b: 0.04 }, metallic: 0.0, roughness: 0.7, ao: 1.0 }
+      children: []
+    - name: backdrop_04
+      active: true
+      components:
+        - type: Transform
+          position: { x: -3.0, y: 7.5, z: 1.5 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 2.0, y: 0.3, z: 3.0 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.92, g: 0.92, b: 0.92 }, metallic: 0.0, roughness: 0.7, ao: 1.0 }
+      children: []
+    - name: backdrop_05
+      active: true
+      components:
+        - type: Transform
+          position: { x: -1.0, y: 7.5, z: 1.5 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 2.0, y: 0.3, z: 3.0 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.04, g: 0.04, b: 0.04 }, metallic: 0.0, roughness: 0.7, ao: 1.0 }
+      children: []
+    - name: backdrop_06
+      active: true
+      components:
+        - type: Transform
+          position: { x: 1.0, y: 7.5, z: 1.5 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 2.0, y: 0.3, z: 3.0 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.92, g: 0.92, b: 0.92 }, metallic: 0.0, roughness: 0.7, ao: 1.0 }
+      children: []
+    - name: backdrop_07
+      active: true
+      components:
+        - type: Transform
+          position: { x: 3.0, y: 7.5, z: 1.5 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 2.0, y: 0.3, z: 3.0 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.04, g: 0.04, b: 0.04 }, metallic: 0.0, roughness: 0.7, ao: 1.0 }
+      children: []
+    - name: backdrop_08
+      active: true
+      components:
+        - type: Transform
+          position: { x: 5.0, y: 7.5, z: 1.5 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 2.0, y: 0.3, z: 3.0 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.92, g: 0.92, b: 0.92 }, metallic: 0.0, roughness: 0.7, ao: 1.0 }
+      children: []
+    - name: backdrop_09
+      active: true
+      components:
+        - type: Transform
+          position: { x: 7.0, y: 7.5, z: 1.5 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 2.0, y: 0.3, z: 3.0 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.04, g: 0.04, b: 0.04 }, metallic: 0.0, roughness: 0.7, ao: 1.0 }
+      children: []
+    - name: backdrop_10
+      active: true
+      components:
+        - type: Transform
+          position: { x: 9.0, y: 7.5, z: 1.5 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 2.0, y: 0.3, z: 3.0 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.92, g: 0.92, b: 0.92 }, metallic: 0.0, roughness: 0.7, ao: 1.0 }
+      children: []
+    - name: backdrop_11
+      active: true
+      components:
+        - type: Transform
+          position: { x: 11.0, y: 7.5, z: 1.5 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 2.0, y: 0.3, z: 3.0 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.04, g: 0.04, b: 0.04 }, metallic: 0.0, roughness: 0.7, ao: 1.0 }
+      children: []
+    - name: mirror_wall
+      active: true
+      components:
+        - type: Transform
+          position: { x: -12.4, y: 0.0, z: 2.0 }
+          rotation: { x: 0.0, y: 90.0, z: 0.0 }
+          scale: { x: 2.0, y: 8.0, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material: materials/chrome
+      children: []
+    - name: spinner
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -2.5, z: 1.0 }
+          rotation: { x: 30.0, y: 20.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/chrome
+        - type: KinematicMover
+          mode: spin
+          spin_axis: { x: 0.2, y: 0.3, z: 1.0 }
+          spin_speed: 30.0
+      children: []
+    - name: orbiter
+      active: true
+      components:
+        - type: Transform
+          position: { x: 3.0, y: 0.0, z: 1.6 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.55, y: 0.55, z: 0.55 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: materials/chrome
+        - type: KinematicMover
+          mode: orbit
+          orbit_center: { x: 0.0, y: 0.0, z: 1.6 }
+          orbit_radius: 3.0
+          speed: 20.0
+      children: []
+
+    - name: camera
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -15.0, z: 5.0 }
+          rotation: { x: 72.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Camera
+          main: true
+          projection: Perspective
+          fov: 55.0
+          near_clip_plane: 0.1
+          far_clip_plane: 500.0
+        - type: CameraController
+          mode: orbit
+          target: { x: 0.0, y: 1.0, z: 0.8 }
+          follow_smoothing: 10.0
+          movement_smoothing: 0.8
+          mouse_sensitivity: 0.08
+          zoom_speed: 1.0
+          min_distance: 2.0
+          max_distance: 40.0
+          min_pitch_deg: 2.0     # low enough to sit almost on the floor: grazing reflections
+          max_pitch_deg: 85.0
+      children: []
+
+    - name: sun
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 30.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: DirectionalLight
+          direction: { x: -0.4, y: 0.35, z: -0.85 }
+          color: { r: 1.0, g: 0.96, b: 0.9 }
+          intensity: 1.1
+          cast_shadows: true
+          shadow_intensity: 0.7
+        - type: EnvironmentLight
+          sky_color: { r: 0.5, g: 0.64, b: 0.9 }
+          ground_color: { r: 0.2, g: 0.18, b: 0.16 }
+          sky_intensity: 1.0
+      children: []

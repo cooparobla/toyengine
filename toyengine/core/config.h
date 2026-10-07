@@ -203,7 +203,7 @@ struct AppConfig {
                 if (r.contains("ssao_enabled"))      config.render.ssao_enabled      = r.at("ssao_enabled").get_value<bool>();
                 if (r.contains("ssr_enabled"))       config.render.ssr_enabled       = r.at("ssr_enabled").get_value<bool>();
                 if (r.contains("transparency_enabled")) config.render.transparency_enabled = r.at("transparency_enabled").get_value<bool>();
-                if (r.contains("ssr_reflect_transparent")) config.render.ssr_reflect_transparent = r.at("ssr_reflect_transparent").get_value<bool>();
+                if (r.contains("ssr_reflect_transparent")) std::cerr << "[toy::core::AppConfig] Warning: ssr_reflect_transparent is deprecated and ignored -- SSR now reflects transparent geometry through the previous frame's colour.\n";
                 if (r.contains("refraction_enabled")) config.render.refraction_enabled = r.at("refraction_enabled").get_value<bool>();
                 if (r.contains("fog_enabled"))       config.render.fog_enabled       = r.at("fog_enabled").get_value<bool>();
                 if (r.contains("underwater_enabled")) config.render.underwater_enabled = r.at("underwater_enabled").get_value<bool>();
@@ -357,7 +357,11 @@ struct AppConfig {
                 if (r.contains("ssr_blur_light"))       config.render.ssr_blur_light       = r.at("ssr_blur_light").get_value<bool>();
                 if (r.contains("ssr_blur_zero_skip"))   config.render.ssr_blur_zero_skip   = r.at("ssr_blur_zero_skip").get_value<bool>();
                 if (r.contains("ssr_jitter"))           config.render.ssr_jitter           = r.at("ssr_jitter").get_value<float>();
+                if (r.contains("ssr_rays_per_pixel"))   config.render.ssr_rays_per_pixel   = r.at("ssr_rays_per_pixel").get_value<int>();
+                if (r.contains("ssr_cone_prefilter"))   config.render.ssr_cone_prefilter   = r.at("ssr_cone_prefilter").get_value<float>();
+                if (r.contains("ssr_skip_behind"))      config.render.ssr_skip_behind      = r.at("ssr_skip_behind").get_value<bool>();
                 if (r.contains("ssr_half_res"))         config.render.ssr_half_res         = r.at("ssr_half_res").get_value<bool>();
+                if (r.contains("ssgi_resolution_scale")) config.render.ssgi_resolution_scale = r.at("ssgi_resolution_scale").get_value<int>();
                 if (r.contains("ssr_skip_negligible"))  config.render.ssr_skip_negligible  = r.at("ssr_skip_negligible").get_value<bool>();
                 if (r.contains("ssr_skip_threshold"))   config.render.ssr_skip_threshold   = r.at("ssr_skip_threshold").get_value<float>();
                 if (r.contains("ssr_temporal_gamma"))   config.render.ssr_temporal_gamma   = r.at("ssr_temporal_gamma").get_value<float>();

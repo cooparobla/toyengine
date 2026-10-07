@@ -17,10 +17,9 @@
  * says so in PixelRenderConfig, and apply_live_config() refuses to change them.
  *
  * The one exception: HiZPass and SceneColorMipPass (gfxcoopa) bind their own descriptors inside
- * execute(), and ssr_pass_'s secondary source can only be bound once the transparent chain has
- * run. All of these bind lazily and only once -- the passes skip the write when the source view
- * is unchanged -- so only a frame that would actually write one (the first, or the first with
- * ssr_reflect_transparent on) pays a device_.wait_idle(); see trace_inputs_need_rebind_().
+ * execute(). Both bind lazily and only once -- the passes skip the write when the source view
+ * is unchanged -- so only a frame that would actually write one (the first) pays a
+ * device_.wait_idle(); see trace_inputs_need_rebind_().
  *
  * **2. Per-frame-in-flight data needs per-slot buffers.** gfxcoopa's CameraUBO, LightData,
  * SdfData and this engine's InstanceStream/ForwardGlobalsData each own one buffer, so a single
@@ -97,8 +96,6 @@
 #include <gfxcoopa/engine/components/point_light.h>
 #include <gfxcoopa/engine/components/spot_light.h>
 #include <gfxcoopa/engine/passes/transparent_pass.h>
-#include <gfxcoopa/engine/targets/transparent_capture_target.h>
-#include <gfxcoopa/engine/passes/transparent_capture_pass.h>
 #include <gfxcoopa/engine/passes/fog_pass.h>
 #include <gfxcoopa/engine/data/fog_data.h>
 #include <gfxcoopa/engine/passes/volumetrics_pass.h>
@@ -111,7 +108,6 @@
 #include <gfxcoopa/engine/passes/sdf_gbuffer_pass.h>
 #include <gfxcoopa/engine/passes/sdf_forward_pass.h>
 #include <gfxcoopa/engine/passes/sdf_shadow_pass.h>
-#include <gfxcoopa/engine/passes/sdf_capture_pass.h>
 
 #include <coopa/job/engine.h>
 #include <coopa/job/parallel_for.h>
@@ -191,7 +187,6 @@ public:
           offscreen_target_(device, allocator, render_extent_.width, render_extent_.height, coopa::gfx::Format::RGBA16_Sfloat,
                             coopa::gfx::engine::targets::kColorOnly),
           post_target_(device, allocator, render_extent_.width, render_extent_.height, coopa::gfx::Format::RGBA8_Unorm),
-          transparent_capture_target_(device, allocator, render_extent_.width, render_extent_.height),
           // Fog composite target -- HDR, same reasoning as offscreen_target_ above: fog belongs
           // in linear HDR (Unity applies it there too), ahead of pixel_stylize_pass_'s tonemap
           // step. A separate target is mandatory, not a style choice: pipeline::RenderPass
@@ -542,6 +537,7 @@ public:
         TOY_KEEP_STARTUP_FIXED(fill_aspect);
         TOY_KEEP_STARTUP_FIXED(scale_divisor);
         TOY_KEEP_STARTUP_FIXED(ssr_half_res);
+        TOY_KEEP_STARTUP_FIXED(ssgi_resolution_scale);
         TOY_KEEP_STARTUP_FIXED(ssao_half_res);
         TOY_KEEP_STARTUP_FIXED(volumetrics_resolution_scale);
         TOY_KEEP_STARTUP_FIXED(volumetrics_mode);
@@ -726,21 +722,10 @@ public:
                                         (!cam || cam->type != CameraType::Orthographic) ? 1.0f : 0.0f, 0.0f);
         }
 
-        // SSR's second trace source (ssr_reflect_transparent) only exists when something
-        // transparent is actually in view. Otherwise skip the capture pass and its pyramids AND
-        // the per-pixel second trace -- it could only ever miss.
-        secondary_this_frame_ = false;
-        if (config_.ssr_reflect_transparent) {
-            secondary_this_frame_ = !meshes.capture.empty();
-            for (const auto& d : sdf_draws) {
-                if (d.is_blend && d.px_rect.w > 0 && d.px_rect.h > 0) secondary_this_frame_ = true;
-            }
-        }
-
         // Refraction's scene-colour chain is only ever sampled by transparent.frag, i.e. by a
         // camera-visible BLEND mesh (BLEND SDFs read ssr_pass_'s chain instead). On a frame
         // with none in view -- every frame of a scene without transparency -- the seven-mip
-        // build would be pure bandwidth, so it is skipped the same way the SSR capture is.
+        // build would be pure bandwidth, so it is skipped.
         refraction_this_frame_ = config_.transparency_enabled && config_.refraction_enabled
                               && meshes.has_blend_mesh;
 
@@ -763,7 +748,6 @@ public:
         // independent pyramid with construction-fixed descriptors, so it needs neither this chain
         // nor the wait below.
         bool need_ssr_trace_inputs = config_.ssr_enabled || config_.transparency_enabled
-                                    || config_.ssr_reflect_transparent
                                     // ssao.frag marches its own prefiltered depth pyramid
                                     // (ao_depth_pyramid_pass_), whose per-frame descriptor
                                     // rebind needs the same wait as HiZPass's.
@@ -906,7 +890,6 @@ private:
         bool                     has_blend_mesh = false;
 
         std::vector<MeshBatch>                gbuffer;   ///< Camera; opaque + mask.
-        std::vector<MeshBatch>                capture;   ///< Camera; blend (SSR capture).
         std::array<std::vector<MeshBatch>, 4> cascade;   ///< Directional shadow, per cascade.
         /// Per local-shadow VIEW (LocalShadowSlot::first_view + v): the static casters drawn into
         /// the cache atlas -- filled only for views whose light re-renders its cache this frame.
@@ -1078,9 +1061,9 @@ private:
      */
     void build_sdf_passes_() {
         // --- SDF raymarching system ---
-        // Three of the four SDF passes need nothing this pipeline hasn't already built by this
-        // point (camera_layout_/shadow_target_/transparent_capture_target_/sdf_data_); the
-        // fourth (sdf_forward_pass_) needs transparent_pass_'s render pass and ssr_pass_'s trace
+        // Two of the three SDF passes need nothing this pipeline hasn't already built by this
+        // point (camera_layout_/shadow_target_/sdf_data_); the
+        // third (sdf_forward_pass_) needs transparent_pass_'s render pass and ssr_pass_'s trace
         // sets, both constructed later, so it's built further down alongside transparent_pass_
         // itself (see that call site).
         sdf_gbuffer_pass_ = std::make_unique<coopa::gfx::engine::passes::SdfGBufferPass>(
@@ -1096,11 +1079,6 @@ private:
             config_.shaders("sdf_shadow_cube.vert"),
             config_.shaders("sdf_shadow_cube.frag"));
 
-        sdf_capture_pass_ = std::make_unique<coopa::gfx::engine::passes::SdfCapturePass>(
-            device_, transparent_capture_target_.render_pass(),
-            *camera_layout_, *light_layout_, *shadow_layout_, sdf_data_.layout(),
-            config_.shaders("sdf_quad.vert"),
-            config_.shaders("sdf_capture.frag"));
     }
     /**
      * @brief Builds the SSAO, SSAO debug view and deferred lighting passes. (The sky is drawn
@@ -1132,6 +1110,7 @@ private:
             config_.shaders("temporal_history.frag"));
         temporal_history_pass_->recreate(render_extent_.width, render_extent_.height);
         temporal_history_pass_->set_depth_image(gbuffer_target_.depth_view_typed());
+        temporal_history_pass_->set_velocity_image(gbuffer_target_.g4_view_typed());
 
         // Contact shadows, as their own pass ahead of lighting. Always constructed:
         // contact_shadows_enabled is a RUNTIME toggle, so there is no construction-time answer to
@@ -1276,11 +1255,15 @@ private:
             // Traced-SSGI stage (see ssgi.frag / the ctor's ssgi_frag_spv doc):
             // startup-fixed on config_.ssgi_traced, since it constructs a pipeline and
             // binds the composite's u_ssgi_map descriptor.
-            config_.ssgi_traced ? config_.shaders("ssgi.frag") : std::string{});
+            config_.ssgi_traced ? config_.shaders("ssgi.frag") : std::string{},
+            // SSGI traces at the SSR trace resolution divided by this (startup-fixed: it sizes
+            // the SSGI chain's targets).
+            static_cast<uint32_t>(std::max(config_.ssgi_resolution_scale, 1)));
         ssr_pass_->update_descriptors(
             gbuffer_target_, hiz_pass_->full_hiz_view_typed(), hiz_pass_->sampler(),
             scene_color_mip_pass_->full_view_typed(), scene_color_mip_pass_->sampler(),
-            offscreen_target_.color_view_typed(), linear_sampler_);
+            offscreen_target_.color_view_typed(), linear_sampler_,
+            gbuffer_target_.g4_view_typed());
         ssr_pass_->set_ssao_image(ssao_source_view_(), ssao_pass_->sampler().handle());
         // The shared accumulation count both resolve chains average against, in place of the
         // fixed-rate blend that can never converge on a re-jittered trace. Bound once: that pass
@@ -1291,40 +1274,11 @@ private:
                                             temporal_history_pass_->sampler());
     }
     /**
-     * @brief Builds the transparent-capture chain, refraction's own scene-colour chain, and the forward
+     * @brief Builds refraction's own scene-colour chain, and the forward
      * transparent and SDF forward passes. Must follow build_ssr_passes_(), whose trace-input
      * layouts and sets these borrow.
      */
     void build_transparency_passes_() {
-        // --- ssr_reflect_transparent: opaque surfaces also reflect transparent geometry ---
-        // Always constructed (same always-on-but-runtime-gated policy as hiz_pass_/
-        // scene_color_mip_pass_/ssr_pass_ above); render() re-reads
-        // config_.ssr_reflect_transparent every frame.
-        transparent_capture_pass_ = std::make_unique<coopa::gfx::engine::passes::TransparentCapturePass>(
-            device_, transparent_capture_target_.render_pass(),
-            camera_layout_->handle(), light_layout_->handle(), shadow_layout_->handle(),
-            config_.shaders("pbr.vert"),
-            config_.shaders("transparent_capture.frag"),
-            static_cast<uint32_t>(sizeof(TransparentCaptureLightingPushConstants)),
-            material_cache_->layout());
-
-        // Second, independent HiZPass/SceneColorMipPass instances over transparent_capture_
-        // target_'s own depth/shaded-color images -- both classes are fully generic
-        // (execute() takes a plain depth/colour image+view, no GBufferTarget reference held),
-        // so this reuse needs no engine changes beyond what hiz_pass_/scene_color_mip_pass_
-        // already prove works.
-        transparent_hiz_pass_ = std::make_unique<coopa::gfx::engine::passes::HiZPass>(
-            device_, allocator_,
-            config_.shaders("fullscreen.vert"),
-            config_.shaders("hiz_downsample.frag"));
-        transparent_hiz_pass_->recreate(render_extent_.width, render_extent_.height);
-
-        transparent_scene_color_mip_pass_ = std::make_unique<coopa::gfx::engine::passes::SceneColorMipPass>(
-            device_, allocator_,
-            config_.shaders("fullscreen.vert"),
-            config_.shaders("scene_color_downsample.frag"));
-        transparent_scene_color_mip_pass_->recreate(render_extent_.width, render_extent_.height);
-
         // Refraction's own post-SSR scene-colour chain (see refraction_scene_color_mip_pass_'s
         // own doc for why this must be a separate instance/set, not a second execute() on
         // scene_color_mip_pass_ itself). Always constructed, matching this pipeline's usual
@@ -1348,14 +1302,6 @@ private:
             device_, *refraction_scene_color_pool_, *refraction_scene_color_layout_);
         refraction_scene_color_set_->bind_image(0, refraction_scene_color_mip_pass_->full_view(),
                                                 refraction_scene_color_mip_pass_->sampler().handle());
-
-        // set_secondary_source() is deliberately NOT called here. transparent_hiz_pass_ and
-        // transparent_scene_color_mip_pass_'s images are freshly recreate()'d
-        // (VK_IMAGE_LAYOUT_UNDEFINED) and stay that way until their first execute(), which only
-        // happens on a frame where ssr_reflect_transparent is set. Binding them now would aim
-        // ssr_pass_'s always-valid layout at descriptors that are not validly laid out on any
-        // frame before that. record_scene_() binds them instead, after that same frame's
-        // execute(), leaving sets 4-6 on SsrPass's own neutral fallback until then.
 
         // Sets 3/4/5 are ssr_pass_'s own trace-input sets (G-buffer, Hi-Z, scene-colour mips), so
         // transparent.frag can call gfx_ssr_trace() against the SAME descriptors ssr.frag traces
@@ -1400,19 +1346,14 @@ private:
             &material_cache_->layout_object());
 
         // Register every Transparent-domain derived shader (e.g. water) as a named pipeline
-        // variant on both the forward transparent pass and its SSR-secondary-source capture
-        // pass. The SAME vert entry point is registered on both -- see
-        // TransparentCapturePass::add_variant()'s doc on why: SSR must reflect the same
-        // displaced geometry the visible draw shows, not the undisplaced mesh.
+        // variant on the forward transparent pass. (SSR reflects these through the previous
+        // frame's final colour, so no separate capture variant is needed.)
         for (const auto& sd : config_.surface_shaders.all()) {
             if (sd.domain != coopa::gfx::pipeline::SurfaceShaderDomain::Transparent) continue;
             const std::string vert_spv = config_.shaders(sd.vert.empty() ? "pbr.vert" : sd.vert);
             transparent_pass_->add_variant(
                 sd.name, vert_spv,
                 config_.shaders(sd.frag.empty() ? "transparent.frag" : sd.frag), sd.cull);
-            transparent_capture_pass_->add_variant(
-                sd.name, vert_spv,
-                config_.shaders(sd.capture_frag.empty() ? "transparent_capture.frag" : sd.capture_frag));
         }
 
         // SdfForwardPass shares transparent_pass_'s render pass -- render passes only need to be
@@ -1549,6 +1490,19 @@ private:
         // geometry and fog into the defocus, and transitively into bloom.
         coopa::gfx::TextureView pre_dof_view =
             config_.volumetrics_enabled ? volumetrics_target_.color_view_typed() : pre_volumetrics_view;
+
+        // The image behind pre_dof_view, mirroring the selections above step for step: the final
+        // pre-lens HDR frame, which record_post_chain_() copies into the SSR scene-colour chain's
+        // mip 0 so the NEXT frame's reflections see transparents, fog and other reflections
+        // (Unreal's PrevSceneColor). Startup-fixed like the views it mirrors.
+        {
+            coopa::gfx::engine::targets::OffscreenTarget* hist =
+                config_.ssr_enabled ? &ssr_pass_->composite_target() : &offscreen_target_;
+            if (config_.underwater_enabled) hist = &underwater_target_;
+            if (config_.fog_enabled && !fog_merged_into_volumetrics_()) hist = &fog_target_;
+            if (config_.volumetrics_enabled) hist = &volumetrics_target_;
+            scene_color_history_src_ = hist->color_image_object()->handle();
+        }
 
         // Physically-based depth of field (thin-lens CoC -> half-res bokeh gather -> full-res
         // composite). Sized to render_extent_, not the display rect: depth only exists at
@@ -1826,7 +1780,7 @@ private:
     }
 
     /**
-     * @brief Records the scene: shadow maps, G-buffer, Hi-Z, the transparent capture, SSAO,
+     * @brief Records the scene: shadow maps, G-buffer, Hi-Z, SSAO,
      *        deferred lighting and sky, SSR, and the forward transparent pass.
      */
     void record_scene_(coopa::gfx::command::CommandBuffer& cmd, const FrameContext& ctx,
@@ -1860,36 +1814,6 @@ private:
             transition_gbuffer_depth_to_shader_read_(cmd);
         }
 
-        // Capture transparent geometry's own depth/normal/position/shaded colour and build its
-        // Hi-Z pyramid and scene-colour mip chain, so ssr_pass_ below can trace a SECOND source
-        // and let opaque surfaces reflect transparent ones. Placed right after the opaque Hi-Z
-        // block: it needs only the shadows recorded above and the light UBO, and it must finish
-        // before ssr_pass_->execute().
-        if (secondary_this_frame_) {
-            record_transparent_capture_(cmd, meshes, sdf_draws);
-            // TransparentCaptureTarget is out of scope for the Vulkan-sealing refactor
-            // (MRT, no sealed equivalent -- see gfxcoopa's plan), so its raw VkImageView
-            // accessors are wrapped here via detail::wrap() rather than gaining
-            // TextureView-returning siblings themselves.
-            transparent_hiz_pass_->execute(cmd, transparent_capture_target_.depth_image_handle(),
-                                           coopa::gfx::detail::wrap(transparent_capture_target_.depth_view()));
-            transparent_scene_color_mip_pass_->execute(
-                cmd, coopa::gfx::detail::wrap(transparent_capture_target_.shaded_color_view()));
-
-            // Bind ssr_pass_'s secondary source (sets 4-6) to these now-populated, correctly
-            // laid-out images -- deliberately not done at construction, see that call site. Once
-            // only: the views never change, and the first such frame is one
-            // trace_inputs_need_rebind_() made wait for the GPU before begin_frame().
-            if (!ssr_secondary_bound_) {
-                ssr_pass_->set_secondary_source(
-                    coopa::gfx::detail::wrap(transparent_capture_target_.normal_metallic_view()),
-                    coopa::gfx::detail::wrap(transparent_capture_target_.position_roughness_view()),
-                    transparent_hiz_pass_->full_hiz_view_typed(), transparent_hiz_pass_->sampler(),
-                    transparent_scene_color_mip_pass_->full_view_typed(), transparent_scene_color_mip_pass_->sampler());
-                ssr_secondary_bound_ = true;
-            }
-            gpu_mark_(cmd, GpuScope::TransparentCapture);
-        }
 
 
         // The AO sample jitter advances EVERY frame the accumulator is running, still or
@@ -1975,6 +1899,9 @@ private:
             coopa::gfx::engine::passes::TemporalHistoryPass::Params th_params{};
             th_params.reproject       = temporal_reproject;
             th_params.reproject_valid = prev_view_proj_valid_;
+            // Per-object motion: a moving object keeps its accumulated SSR/SSGI/contact-shadow
+            // history instead of resetting every frame along its path.
+            th_params.use_velocity    = true;
             th_params.max_accum       = std::max({config_.ssr_temporal_frames,
                                                   config_.ssgi_temporal_frames,
                                                   config_.contact_shadow_temporal_frames});
@@ -2095,7 +2022,11 @@ private:
             // Prefiltered scene-colour mip chain: also feeds transparent.frag's
             // gfx_ssr_trace() cone-LOD taps and SSGI bounce lookup, not just ssr.frag's
             // own -- see need_ssr_trace_inputs' own doc.
-            scene_color_mip_pass_->execute(cmd, offscreen_target_.color_view_typed());
+            // Once a previous frame has copied its final HDR into mip 0 (record_post_chain_()),
+            // only mips 1+ are rebuilt from it; the first frame draws mip 0 from this frame's
+            // lit opaque image instead.
+            scene_color_mip_pass_->execute(cmd, offscreen_target_.color_view_typed(),
+                                           scene_color_history_valid_);
             gpu_mark_(cmd, GpuScope::SceneColorMips);
         }
 
@@ -2158,14 +2089,12 @@ private:
             ssr_params.sky_horizon       = config_.indirect.sky_horizon;
             ssr_params.sky_ground        = config_.indirect.sky_ground;
 
-            // Secondary source -- see SsrPushConstants' own doc. max_hiz_mip_b/
-            // max_color_mip_b come from transparent_hiz_pass_/transparent_scene_
-            // color_mip_pass_'s OWN mip counts, not the primary pyramid's (they're
-            // independent instances, possibly over a differently-sized image chain).
-            ssr_params.has_secondary   = secondary_this_frame_;
             ssr_params.skip_threshold  = config_.ssr_skip_negligible ? config_.ssr_skip_threshold : 0.0f;
-            ssr_params.max_hiz_mip_b   = static_cast<int>(transparent_hiz_pass_->max_mip_level());
-            ssr_params.max_color_mip_b = static_cast<int>(transparent_scene_color_mip_pass_->max_mip_level());
+            // Hits read the previous frame's final colour at the hit's reprojected uv.
+            ssr_params.prev_frame_color = scene_color_history_valid_;
+            ssr_params.rays_per_pixel   = glm::clamp(config_.ssr_rays_per_pixel, 1, 8);
+            ssr_params.cone_prefilter   = config_.ssr_cone_prefilter;
+            ssr_params.skip_behind      = config_.ssr_skip_behind;
 
             ssr_pass_->execute(cmd, current_camera_set(), ssr_params);
             // GPU scopes for SsrPass come from its stage hook (see set_profiler()).
@@ -2273,6 +2202,15 @@ private:
             volumetrics_pass_->draw_composite(cmd, render_extent_.width, render_extent_.height);
             volumetrics_target_.end(cmd);
             gpu_mark_(cmd, GpuScope::Volumetrics);
+        }
+
+        // Previous-frame scene colour: copy the final pre-lens HDR into the SSR scene-colour
+        // chain's mip 0, where next frame's trace reads it (reprojected by the G-buffer
+        // velocity). After volumetrics -- the last pass that writes the image -- and before DOF.
+        if (ctx.need_ssr_trace_inputs && scene_color_history_src_ != VK_NULL_HANDLE) {
+            scene_color_mip_pass_->copy_level0_from(cmd, scene_color_history_src_);
+            scene_color_history_valid_ = true;
+            gpu_mark_(cmd, GpuScope::SceneColorHistory);
         }
 
         // Depth of field. After fog (so fogged geometry defocuses too) and before
@@ -2855,7 +2793,6 @@ private:
 
         const glm::mat4 camera_vp = unjittered_proj * view;
         build(camera_vp, false, 0.0f, opaque, out.gbuffer);
-        if (config_.ssr_reflect_transparent) build(camera_vp, false, 0.0f, blended, out.capture);
 
         // The forward BLEND pass draws one renderer at a time in back-to-front order, so its
         // transforms are added singly.
@@ -3252,11 +3189,15 @@ private:
                                     config_.ssr_enabled ? 1.0f : 0.0f, config_.indirect.ssgi_intensity);
             g.ssr0 = glm::vec4(config_.indirect.ssgi_distance, config_.ssr_max_distance,
                               config_.ssr_bias_texels, config_.ssr_thickness);
-            g.ssr1 = glm::vec4(config_.ssr_thickness_scale, config_.ssr_roughness_cutoff, 0.0f, 0.0f);
+            g.ssr1 = glm::vec4(config_.ssr_thickness_scale, config_.ssr_roughness_cutoff,
+                          config_.ssr_cone_prefilter, 0.0f);
             g.ssr_steps = glm::ivec4(config_.ssr_max_iterations,
                                      static_cast<int>(hiz_pass_->max_mip_level()),
                                      config_.ssr_start_mip, config_.ssr_min_mip0_steps);
-            g.ssr_mip = glm::ivec4(static_cast<int>(scene_color_mip_pass_->max_mip_level()), 0, 0, 0);
+            // y: the SSR scene-colour chain (which SDF forward always reads) holds the previous
+            // frame's final colour at mip 0 -- hits reproject by the G-buffer velocity.
+            g.ssr_mip = glm::ivec4(static_cast<int>(scene_color_mip_pass_->max_mip_level()),
+                                   scene_color_history_valid_ ? 1 : 0, 0, 0);
 
             sdf_data_.upload();
         }
@@ -4230,8 +4171,7 @@ private:
      */
     /**
      * @brief True when this frame's record_scene_() would write a descriptor set: a Hi-Z /
-     *        mip-chain pass whose sets don't yet hold the view it is about to be given, or
-     *        ssr_pass_'s secondary source on the first ssr_reflect_transparent frame. The
+     *        mip-chain pass whose sets don't yet hold the view it is about to be given. The
      *        views mirror the execute() calls in record_scene_() exactly; all are fixed for
      *        the pipeline's lifetime, so this is true on the first frame and then stays false.
      */
@@ -4242,13 +4182,6 @@ private:
             ao_depth_pyramid_pass_->needs_descriptor_update(depth)) return true;
         if (scene_color_mip_pass_ &&
             scene_color_mip_pass_->needs_descriptor_update(offscreen_target_.color_view_typed())) return true;
-        if (secondary_this_frame_) {
-            if (!ssr_secondary_bound_) return true;
-            if (transparent_hiz_pass_ && transparent_hiz_pass_->needs_descriptor_update(
-                    coopa::gfx::detail::wrap(transparent_capture_target_.depth_view()))) return true;
-            if (transparent_scene_color_mip_pass_ && transparent_scene_color_mip_pass_->needs_descriptor_update(
-                    coopa::gfx::detail::wrap(transparent_capture_target_.shaded_color_view()))) return true;
-        }
         // Gated on the per-frame flag, not the config pair: needs_descriptor_update() stays true
         // until the chain's first execute(), which never comes on a scene without BLEND meshes --
         // the config gate alone would wait_idle() every frame there.
@@ -4970,104 +4903,6 @@ private:
         gbuffer_target_.end(cmd);
     }
 
-    /// Draws every BLEND-material renderer's depth/normal/position/shaded colour into
-    /// transparent_capture_target_, feeding ssr_pass_'s secondary trace source -- NOT a visible
-    /// draw. No back-to-front sort is needed, unlike record_transparent_(): this is a normal
-    /// depth-tested pass, so the front-most transparent surface wins per pixel regardless of
-    /// order.
-    ///
-    /// Always begins and ends the render pass, even with nothing to draw: every attachment
-    /// declares initialLayout = UNDEFINED, so an empty frame transitions as safely as a populated
-    /// one, and transparent_hiz_pass_->execute() right afterwards unconditionally expects depth
-    /// in DEPTH_STENCIL_ATTACHMENT_OPTIMAL -- only this render pass's finalLayout guarantees that
-    /// every frame.
-    void record_transparent_capture_(coopa::gfx::command::CommandBuffer& cmd,
-                                     const MeshGather& meshes,
-                                     const std::vector<SdfDrawItem>& sdf_draws) {
-        transparent_capture_target_.begin(cmd);
-        transparent_capture_pass_->bind(cmd);
-        cmd.bind_descriptor_set(transparent_capture_pass_->layout(), current_camera_set(), 0);
-        cmd.bind_descriptor_set(transparent_capture_pass_->layout(), current_light_set(),  1);
-        cmd.bind_descriptor_set(transparent_capture_pass_->layout(), *shadow_set_, 2);
-        cmd.bind_vertex_buffer(instance_stream_.buffer(), 0, 1);
-
-        // Frame-level, not per-object -- same config_ sourcing as record_transparent_()'s own
-        // lighting_pc, minus the ssr_enabled/ssgi/GfxSsrParams fields that struct carries
-        // (this capture never traces its own reflection -- see transparent_capture.frag's doc).
-        TransparentCaptureLightingPushConstants lighting_pc;
-        lighting_pc.light_bands       = config_.light_bands;
-        lighting_pc.spec_threshold    = config_.spec_threshold;
-        lighting_pc.soft_lighting     = config_.soft_lighting ? 1.0f : 0.0f;
-        lighting_pc.rim_strength      = config_.rim_strength;
-        lighting_pc.ambient_intensity = config_.indirect.ambient_intensity;
-        lighting_pc.sky_intensity     = config_.indirect.sky_intensity;
-        // VERTEX|FRAGMENT, not FRAGMENT alone: TransparentCapturePass's push-constant range now
-        // covers both stages (see its PushConstants' gfx_time/gfx_params doc), and Vulkan
-        // requires a push call's stageFlags to match the declared range for every byte it
-        // touches, including this trailing per-frame lighting block.
-        cmd.push_constants(transparent_capture_pass_->layout(),
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                           sizeof(coopa::gfx::engine::passes::TransparentCapturePass::PushConstants),
-                           sizeof(TransparentCaptureLightingPushConstants), &lighting_pc);
-
-        // Same last-shader transition guard as record_gbuffer_() -- and the SAME variant
-        // name TransparentPass binds for this material, since SSR must reflect the same
-        // displaced geometry the visible draw shows (see TransparentCapturePass::
-        // add_variant()'s doc).
-        std::string last_shader;
-        bool have_bound = true; // stock, bound just above
-
-        for (const MeshBatch& batch : meshes.capture) {
-            auto* mr = meshes.renderers[batch.item];
-            const auto& mr_mat = meshes.material(batch.item);
-            if (!have_bound || mr_mat.shader != last_shader) {
-                transparent_capture_pass_->bind(cmd, mr_mat.shader);
-                last_shader = mr_mat.shader;
-                have_bound  = true;
-            }
-
-            coopa::gfx::engine::passes::TransparentCapturePass::PushConstants pc;
-            pc.albedo     = glm::vec4(mr_mat.albedo, mr_mat.alpha);
-            pc.metallic   = mr_mat.metallic;
-            pc.roughness  = mr_mat.roughness;
-            pc.ao         = mr_mat.ao;
-            pc.gfx_time   = surface_gfx_time_();
-            pc.gfx_params = mr_mat.shader_params;
-            transparent_capture_pass_->push(cmd, pc);
-            // Set 3: albedo/normal/metallic-roughness -- see gfx/surface/capture_fs.glsl and
-            // engine::util::MaterialTextureCache.
-            transparent_capture_pass_->bind_material(cmd, material_cache_->set_for(mr_mat));
-
-            const auto* mesh = mr->get_mesh().get();
-            mesh->bind(cmd);
-            mesh->draw_lod_part(cmd, batch.lod, meshes.part[batch.item], batch.instance_count, batch.first_instance);
-        }
-
-        // BLEND SdfRenderers -- feeds the exact same secondary reflection source, via
-        // SdfCapturePass (see that class's doc). Scissored per-object like every other
-        // main-camera SDF draw.
-        bool any_blend_sdf = false;
-        for (const auto& d : sdf_draws) {
-            if (!d.is_blend || d.px_rect.w == 0 || d.px_rect.h == 0) continue;
-            if (!any_blend_sdf) {
-                sdf_capture_pass_->bind(cmd);
-                cmd.bind_descriptor_set(current_camera_set(), 0);
-                cmd.bind_descriptor_set(current_light_set(),  1);
-                cmd.bind_descriptor_set(*shadow_set_, 2);
-                cmd.bind_descriptor_set(sdf_data_.current_set(), 3);
-                any_blend_sdf = true;
-            }
-            cmd.set_scissor(d.px_rect.x, d.px_rect.y, d.px_rect.w, d.px_rect.h);
-            sdf_capture_pass_->push(cmd, d.gpu_index);
-            cmd.draw(6);
-        }
-        if (any_blend_sdf) {
-            cmd.set_scissor(0, 0, render_extent_.width, render_extent_.height);
-        }
-
-        transparent_capture_target_.end(cmd);
-    }
-
     /**
      * @brief The editor shading modes' BLEND meshes, back-to-front, over the debug-view image
      *        (inside post_target_'s open bracket). BLEND SDFs are not drawn here.
@@ -5121,11 +4956,18 @@ private:
                                 config_.ssr_enabled ? 1.0f : 0.0f, config_.indirect.ssgi_intensity);
         g.ssr0 = glm::vec4(config_.indirect.ssgi_distance, config_.ssr_max_distance,
                           config_.ssr_bias_texels, config_.ssr_thickness);
-        g.ssr1 = glm::vec4(config_.ssr_thickness_scale, config_.ssr_roughness_cutoff, 0.0f, 0.0f);
+        g.ssr1 = glm::vec4(config_.ssr_thickness_scale, config_.ssr_roughness_cutoff,
+                          config_.ssr_cone_prefilter, 0.0f);
         g.ssr_steps = glm::ivec4(config_.ssr_max_iterations,
                                  static_cast<int>(hiz_pass_->max_mip_level()),
                                  config_.ssr_start_mip, config_.ssr_min_mip0_steps);
-        g.ssr_mip = glm::ivec4(static_cast<int>(scene_color_mip_pass_->max_mip_level()), 0, 0, 0);
+        // y: u_scene_color holds the previous frame's final colour. Only for the SSR chain: with
+        // refraction active the mesh forward pass binds refraction's own chain instead, built
+        // from THIS frame's post-SSR image, whose hits must not be reprojected.
+        const bool forward_prev_frame = scene_color_history_valid_ &&
+            !(config_.transparency_enabled && config_.refraction_enabled);
+        g.ssr_mip = glm::ivec4(static_cast<int>(scene_color_mip_pass_->max_mip_level()),
+                               forward_prev_frame ? 1 : 0, 0, 0);
         g.refract0 = glm::vec4(config_.refraction_enabled ? 1.0f : 0.0f, config_.refraction_strength,
                                config_.refraction_max_offset, config_.refraction_chromatic);
         g.refract1 = glm::vec4(config_.refraction_blur, config_.refraction_density,
@@ -5404,20 +5246,16 @@ private:
     std::unique_ptr<coopa::gfx::engine::targets::OffscreenTarget> ui_world_target_;
     /// ui_world_target_'s last write had no canvases, so it already holds transparent black.
     bool ui_world_layer_clear_ = false;
-    // Forward capture of transparent geometry -- a second reflection SOURCE for opaque
-    // reflectors' SSR (see record_transparent_capture_()), not a visible target. Always
-    // constructed (mirrors gbuffer_target_'s own always-on policy); render() checks
-    // config_.ssr_reflect_transparent per frame to decide whether to draw into/read from it.
-    coopa::gfx::engine::targets::TransparentCaptureTarget transparent_capture_target_;
     coopa::gfx::engine::targets::OffscreenTarget fog_target_; // fog composite, pre-post, HDR
     coopa::gfx::engine::targets::OffscreenTarget underwater_target_; // UnderwaterPass output, HDR
     coopa::gfx::engine::targets::OffscreenTarget volumetrics_target_; // wind composite, after fog, pre-post, HDR
     coopa::gfx::engine::targets::OffscreenTarget volumetrics_march_target_; // reduced-res march: in-scatter + transmittance
-    bool ssr_secondary_bound_ = false;
-    /// This frame has transparent geometry for SSR's second source (set after the gathers in
-    /// render()); false skips the transparent capture and the second trace.
-    bool secondary_this_frame_ = false; // ssr_pass_->set_secondary_source() done (once; see record_scene_)
     bool refraction_this_frame_ = false; // refraction's scene-colour chain is built + sampled this frame
+    /// The final pre-DOF HDR image (see build_post_chain_()), copied each frame into the SSR
+    /// scene-colour chain's mip 0 as the next frame's reflection colour.
+    VkImage scene_color_history_src_ = VK_NULL_HANDLE;
+    /// A previous frame's copy is in scene_color_mip_pass_'s mip 0.
+    bool scene_color_history_valid_ = false;
     coopa::gfx::engine::util::Sampler            nearest_sampler_;
     coopa::gfx::engine::util::Sampler            linear_sampler_;
     coopa::gfx::engine::util::Sampler            shadow_sampler_;
@@ -5722,15 +5560,6 @@ private:
     // Always constructed (same policy as hiz_pass_); executed only when ssao_enabled.
     std::unique_ptr<coopa::gfx::engine::passes::HiZPass>           ao_depth_pyramid_pass_;
 
-    // --- ssr_reflect_transparent: opaque surfaces also reflect transparent geometry ---
-    // Always constructed, gated per frame. transparent_hiz_pass_ and
-    // transparent_scene_color_mip_pass_ are second, independent instances of the same classes
-    // hiz_pass_/scene_color_mip_pass_ use -- both are generic over any depth/colour image and
-    // hold no GBufferTarget reference.
-    std::unique_ptr<coopa::gfx::engine::passes::TransparentCapturePass>  transparent_capture_pass_;
-    std::unique_ptr<coopa::gfx::engine::passes::HiZPass>                 transparent_hiz_pass_;
-    std::unique_ptr<coopa::gfx::engine::passes::SceneColorMipPass>       transparent_scene_color_mip_pass_;
-
     // --- Refraction: independent post-SSR scene-colour chain for the MESH forward pass's
     // u_scene_color, so a refracting object's background sample -- and its own
     // gfx_ssr_trace()/SSGI lookup -- sees SSR reflections rather than the pre-SSR image
@@ -5810,7 +5639,6 @@ private:
     std::unique_ptr<coopa::gfx::engine::passes::SdfGBufferPass> sdf_gbuffer_pass_;
     std::unique_ptr<coopa::gfx::engine::passes::SdfForwardPass> sdf_forward_pass_;
     std::unique_ptr<coopa::gfx::engine::passes::SdfShadowPass>  sdf_shadow_pass_;
-    std::unique_ptr<coopa::gfx::engine::passes::SdfCapturePass> sdf_capture_pass_;
 
     // --- Job dispatch for the per-frame gathers -- see should_parallelize_()'s doc ---
     coopa::job::JobEngine* jobs_ = nullptr;      // non-owning; nullptr = always serial

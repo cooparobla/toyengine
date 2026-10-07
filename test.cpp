@@ -1586,8 +1586,9 @@ void test_app_config_load_round_trips_ssr_and_window_settings() {
         "  ssr_temporal_blend: 0.5\n"
         "  ssr_blur_radius: 0.25\n"
         "  ssr_jitter: 0.4\n"
+        "  ssr_cone_prefilter: 0.75\n"
+        "  ssr_skip_behind: true\n"
         "  ssr_temporal_gamma: 1.5\n"
-        "  ssr_reflect_transparent: true\n"
         "  world_ui_enabled: false\n"
         "  screen_ui_enabled: false\n");
 
@@ -1610,8 +1611,9 @@ void test_app_config_load_round_trips_ssr_and_window_settings() {
     expect(config.render.ssr_temporal_blend == 0.5f, "AppConfig::load: ssr_temporal_blend round-trips");
     expect(config.render.ssr_blur_radius == 0.25f, "AppConfig::load: ssr_blur_radius round-trips");
     expect(config.render.ssr_jitter == 0.4f, "AppConfig::load: ssr_jitter round-trips");
+    expect(config.render.ssr_cone_prefilter == 0.75f, "AppConfig::load: ssr_cone_prefilter round-trips");
+    expect(config.render.ssr_skip_behind == true, "AppConfig::load: ssr_skip_behind round-trips");
     expect(config.render.ssr_temporal_gamma == 1.5f, "AppConfig::load: ssr_temporal_gamma round-trips");
-    expect(config.render.ssr_reflect_transparent == true, "AppConfig::load: ssr_reflect_transparent round-trips");
     expect(config.render.world_ui_enabled == false, "AppConfig::load: world_ui_enabled round-trips");
     expect(config.render.screen_ui_enabled == false, "AppConfig::load: screen_ui_enabled round-trips");
 }
@@ -3900,7 +3902,7 @@ void test_ssao_tracks_moving_object() {
         engine.tick();
     }
     ball->get_transform()->transform().set_position(dest);
-    // Ten frames after the move stops: the 8-frame accumulation window has turned over.
+    // Two frames after the move stops: the 8-frame accumulation window has turned over.
     tick_frames(engine, 10);
     const Frame moved = engine.capture_image(true);
     const double ref_m   = contact_ao_at(moved, ref_point, "reference");
@@ -3927,6 +3929,152 @@ void test_ssao_tracks_moving_object() {
     if (!(dest_j > recovered) || !(start_j < ref_j - margin)) {
         std::cerr << "         after jump: ref " << ref_j << " start " << start_j << " dest " << dest_j << "\n";
         dump_frame(jumped, "ssao_tracks_jumped");
+    }
+}
+
+/**
+ * @brief Screen-space reflections must follow a moving object: its reflection appears where
+ *        the object is and leaves no trail where it was -- including after the freeze.
+ *
+ * The SSR analogue of ssao_tracks_moving_object. The SSR temporal resolve reprojects through
+ * the G-buffer velocity and the shared history count (TemporalHistoryPass) also reprojects by
+ * velocity, so a moving object's reflection neither smears along its path nor sticks once the
+ * camera is still; the hit colour comes from the previous frame's final image, reprojected by
+ * the hit's own velocity.
+ *
+ * Scene: cloth_test with the cloth switched off, the ground turned into a near-mirror, and a
+ * low camera so the floor reflects faces of the ball the camera can see (screen-space rays
+ * cannot hit the hidden underside). `debug_view: ssr_confidence` shows where reflection rays
+ * found geometry: where the floor shows the ball's mirror image, and zero on open floor (rays
+ * to the sky). Sampled at the mirror image of the ball's start and destination, and a far
+ * reference patch.
+ */
+void test_ssr_tracks_moving_object() {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
+    ScopedEnv no_input("NO_INPUT", "1");
+
+    toy::core::AppConfig config =
+        make_shipped_config("assets/scenes/cloth_test/scene.yaml", 640, 360);
+    config.render.auto_exposure_enabled = false;
+    expect(config.render.ssr_enabled && config.render.ssr_temporal_enabled,
+           "ssr tracks: the shipped config has SSR and its temporal resolve on");
+    config.render.ssr_enabled          = true;
+    config.render.ssr_temporal_enabled = true;
+    toy::core::Engine engine(std::move(config));
+
+    auto* ball   = engine.scene().find_object("ball");
+    auto* cloth  = engine.scene().find_object("cloth");
+    auto* ground = engine.scene().find_object("ground");
+    auto* cc     = engine.scene().find_first_component<toy::scene::CameraController>();
+    auto* cam    = coopa::gfx::engine::components::CameraComponent::main();
+    expect(ball && cloth && ground && cc && cam,
+           "ssr tracks: the scene has the ball, the cloth, the ground, a CameraController and a main camera");
+    if (!ball || !cloth || !ground || !cc || !cam) return;
+    auto* ground_mr = ground->get_component<coopa::gfx::engine::components::MeshRenderer>();
+    expect(ground_mr != nullptr, "ssr tracks: the ground has a MeshRenderer");
+    if (!ground_mr) return;
+
+    cloth->set_active(false);
+    ground_mr->material.roughness = 0.02f;
+    ground_mr->material.metallic  = 1.0f;
+    cc->tracker            = "";
+    cc->target             = glm::vec3(2.0f, 0.0f, 0.5f);
+    cc->target_offset      = glm::vec3(0.0f);
+    cc->distance           = 9.0f;
+    cc->pitch_deg          = 20.0f;   // low enough that the floor reflects the faces of the ball the camera sees
+    cc->follow_smoothing   = 0.0f;
+    cc->movement_smoothing = 0.0f;
+    const glm::vec3 start(0.0f, 0.0f, 1.02f);
+    const glm::vec3 dest (4.0f, 0.0f, 1.02f);
+    ball->get_transform()->transform().set_position(start);
+
+    engine.render_config().debug_view = "ssr_confidence";
+
+    // Where the floor shows the ball's mirror image: the ball's centre reflected through the
+    // floor (z = 0). The ball's controller holds its own hover height, so that height is read
+    // back after the first tick rather than assumed from `start`.
+    float ball_z = start.z;
+    auto reflection = [&](const glm::vec3& at) { return glm::vec3(at.x, at.y, -ball_z); };
+
+    // Mean of the brightest tenth of the red channel over a 49x49 window around the projected
+    // world point -- finds the reflection's confident band wherever it lands in the window; on
+    // open ground it is the (zero) miss confidence.
+    auto confidence_at = [&](const Frame& f, const glm::vec3& world, const char* what) -> double {
+        const float aspect = static_cast<float>(f.width) / static_cast<float>(f.height);
+        const glm::vec4 clip = cam->get_projection_matrix(aspect) * cam->get_view_matrix() * glm::vec4(world, 1.0f);
+        expect(clip.w > 1e-6f, "ssr tracks: the sampled ground point is in front of the camera");
+        if (clip.w <= 1e-6f) return 0.0;
+        const glm::vec2 ndc = glm::vec2(clip) / clip.w;
+        const int cx = static_cast<int>((ndc.x * 0.5f + 0.5f) * static_cast<float>(f.width));
+        const int cy = static_cast<int>((0.5f - ndc.y * 0.5f) * static_cast<float>(f.height));
+        const int r = 24;
+        const bool inside = cx >= r && cy >= r && cx < static_cast<int>(f.width) - r && cy < static_cast<int>(f.height) - r;
+        expect(inside, std::string("ssr tracks: the ") + what + " sample window is on screen");
+        if (!inside) return 0.0;
+        std::vector<uint8_t> values;
+        values.reserve(static_cast<size_t>((2 * r + 1) * (2 * r + 1)));
+        for (int y = cy - r; y <= cy + r; ++y) {
+            for (int x = cx - r; x <= cx + r; ++x) {
+                values.push_back(f.pixels[(static_cast<size_t>(y) * f.width + static_cast<size_t>(x)) * f.channels]);
+            }
+        }
+        std::sort(values.begin(), values.end(), std::greater<uint8_t>());
+        const size_t tenth = values.size() / 10;
+        double sum = 0.0;
+        for (size_t i = 0; i < tenth; ++i) sum += values[i];
+        return sum / (static_cast<double>(tenth) * 255.0);
+    };
+
+    tick_frames(engine, 90);
+    ball_z = ball->get_transform()->transform().position().z;
+    // Open floor well away from both positions: its rays all miss into the sky.
+    const glm::vec3 ref_point(-3.5f, 0.0f, -ball_z);
+    const Frame before = engine.capture_image(/*low_res=*/true);
+    const double ref        = confidence_at(before, ref_point, "reference");
+    const double start_lit  = confidence_at(before, reflection(start), "start reflection");
+    const double dest_empty = confidence_at(before, reflection(dest),  "destination reflection");
+    const double margin = 0.15;
+    expect(start_lit > ref + margin, "ssr tracks: the mirror floor reflects the resting ball");
+    expect(std::abs(dest_empty - ref) < 0.05, "ssr tracks: the empty destination reflects nothing, like the reference");
+    if (!(start_lit > ref + margin) || !(std::abs(dest_empty - ref) < 0.05)) {
+        std::cerr << "         ref " << ref << " start " << start_lit << " dest " << dest_empty << "\n";
+        dump_frame(before, "ssr_tracks_before");
+    }
+    // A trail keeps most of the reflection's confidence where the ball was; the resolve must
+    // have dropped at least half of it.
+    const double recovered = ref + 0.5 * (start_lit - ref);
+
+    for (int i = 0; i < 60; ++i) {
+        coopa::util::Transform& t = ball->get_transform()->transform();
+        t.set_position(t.position() + glm::vec3(4.0f / 60.0f, 0.0f, 0.0f));
+        engine.tick();
+    }
+    ball->get_transform()->transform().set_position(dest);
+    tick_frames(engine, 2);
+    const Frame moved = engine.capture_image(true);
+    const double ref_m   = confidence_at(moved, ref_point, "reference");
+    const double start_m = confidence_at(moved, reflection(start), "start reflection");
+    const double dest_m  = confidence_at(moved, reflection(dest),  "destination reflection");
+    expect(start_m < recovered, "ssr tracks: no reflection trails behind the ball where it used to rest");
+    expect(dest_m > ref_m + margin, "ssr tracks: the ball's reflection appears at its destination");
+    if (!(start_m < recovered) || !(dest_m > ref_m + margin)) {
+        std::cerr << "         after move: ref " << ref_m << " start " << start_m << " dest " << dest_m << "\n";
+        dump_frame(moved, "ssr_tracks_moved");
+    }
+
+    // Frozen case: everything still past the freeze threshold, then the ball jumps back.
+    tick_frames(engine, 40);
+    ball->get_transform()->transform().set_position(start);
+    tick_frames(engine, 10);
+    const Frame jumped = engine.capture_image(true);
+    const double ref_j   = confidence_at(jumped, ref_point, "reference");
+    const double start_j = confidence_at(jumped, reflection(start), "start reflection");
+    const double dest_j  = confidence_at(jumped, reflection(dest),  "destination reflection");
+    expect(dest_j < recovered, "ssr tracks: a frozen resolve releases when only the object moves");
+    expect(start_j > ref_j + margin, "ssr tracks: the reflection reappears where the ball jumped to");
+    if (!(dest_j < recovered) || !(start_j > ref_j + margin)) {
+        std::cerr << "         after jump: ref " << ref_j << " start " << start_j << " dest " << dest_j << "\n";
+        dump_frame(jumped, "ssr_tracks_jumped");
     }
 }
 
@@ -4781,8 +4929,9 @@ void test_ssr_jitter_probe() {
         float jitter;       // ssr_jitter -- 0 reproduces the deterministic single mirror ray
     };
     const Variant variants[] = {
-        {"J0_shipped",     32, 48, 0.25f},
-        {"J1_accum_off",    1,  1, 0.25f},
+        {"J0_shipped",     32, 48, 1.00f},   // the physical GGX lobe (ssr_jitter is a lobe scale)
+        {"J0b_narrow_lobe", 32, 48, 0.25f},
+        {"J1_accum_off",    1,  1, 1.00f},
         {"J2_no_jitter",   32, 48, 0.00f},
         {"J3_accum_off_no_jitter", 1, 1, 0.00f},
     };
@@ -7670,6 +7819,7 @@ const TestCase kTests[] = {
     {"material_maps_change_output",                "render_material", test_material_maps_change_output},
     {"cloth_scene_simulates_and_animates",         "render_cloth",    test_cloth_scene_simulates_and_animates},
     {"ssao_tracks_moving_object",                  "render_cloth",    test_ssao_tracks_moving_object},
+    {"ssr_tracks_moving_object",                   "render_cloth",    test_ssr_tracks_moving_object},
     {"water_scene_renders_and_simulates",          "render_water",    test_water_scene_renders_and_simulates},
     {"underwater_scene_renders_and_toggles",       "render_water",    test_underwater_scene_renders_and_toggles},
     {"water_scene_quality_tiers_render",           "render_water",    test_water_scene_quality_tiers_render},

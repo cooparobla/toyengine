@@ -13,8 +13,8 @@
 //   - #include <gfx/spot_light.glsl>, for the SpotLight struct.
 //
 // The set index is fixed at 1 here rather than parameterised: every consumer binds toyengine's
-// light set at 1 (pixel_lighting.frag, debug_view.frag, contact_shadow.frag, sdf_capture.frag,
-// sdf_forward.frag, gfx/surface/capture_fs.glsl, gfx/surface/transparent_fs.glsl), and a shader
+// light set at 1 (pixel_lighting.frag, debug_view.frag, contact_shadow.frag,
+// sdf_forward.frag, gfx/surface/transparent_fs.glsl), and a shader
 // that needed it elsewhere would be diverging from the descriptor contract they all share.
 
 #include <gfx/local_shadow_types.glsl>

@@ -55,7 +55,6 @@ render:
                              # widened by shadow_pcss_light_size; off = a hard single-ray edge.
   sdf_shadows_enabled: true  # SDFs cast shadows; independent of sdf_enabled
   # SSR / SSGI (need ssr_enabled)
-  ssr_reflect_transparent: true # opaque surfaces also reflect transparent geometry (~2x SSR cost; needs transparency_enabled too)
   ssr_temporal_enabled: true # accumulate the reflection across frames
   ssgi_traced: true          # traced cosine-hemisphere bounce instead of the single normal-offset
                              # mip tap -- directional colour bleed rather than a uniform lift
@@ -120,8 +119,8 @@ render:
   shadow_quality:      high  # map resolutions + PCF taps + PCSS blocker taps + contact-shadow steps
                              # + local-light atlas size and how many point/spot lights cast shadows
   ssao_quality:        high  # slices, march steps, pixel radius, temporal depth (4/8/8/12 frames)
-  ssr_quality:         high  # specular raymarch iteration budget
-  ssgi_quality:        high  # traced-bounce iteration budget (separate chain from ssr_quality)
+  ssr_quality:         high  # specular raymarch iteration budget; Ultra traces 2 rays per pixel
+  ssgi_quality:        high  # traced-bounce iteration budget and resolution (separate chain from ssr_quality)
   dof_quality:         high  # bokeh gather taps (ultra = high: shader cap)
   volumetrics_quality: high  # raymarch step count + how many lights in-scatter (they multiply)
   sdf_quality:         high  # SDF march + SDF shadow-march step budgets
@@ -235,8 +234,12 @@ render:
   ssr_blur_radius: 0.5       # world-space sigma of the spatial denoise
   ssr_blur_light: true       # 3x3 denoise footprint instead of 5x5 (a third of the reads)
   ssr_blur_zero_skip: true   # skip the denoise where the reflection buffer is all zero (exact, pure saving)
-  ssr_jitter: 0.25           # stochastic ray jitter as a fraction of the GGX lobe cone
+  ssr_jitter: 1.0            # GGX lobe scale for importance-sampled rays (1 = physical lobe, 0 = mirror ray)
+  ssr_cone_prefilter: 0.5    # fraction of the GGX cone the hit colour is prefiltered through the scene-colour mips
+  ssr_skip_behind: false     # stride past thin occluders at mip 0 instead of crawling one texel per step
   ssr_half_res: true         # trace SSR/SSGI at half res per axis (~4x cheaper; depth-aware upsample). Startup-fixed
+  # ssgi_resolution_scale: 1 # SSGI traces at the SSR trace res / this. Driven by ssgi_quality
+                             # (Low/Medium 2, High/Ultra 1); uncomment only to override. Startup-fixed
   ssr_skip_negligible: true  # skip SSR rays whose specular weight can't exceed ssr_skip_threshold (rough dielectrics)
   ssr_skip_threshold: 0.02   # weight below which ssr_skip_negligible skips the trace
   ssgi_intensity: 0.6        # diffuse colour-bleed strength; 0 = specular-only SSR

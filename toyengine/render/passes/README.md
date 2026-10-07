@@ -29,10 +29,10 @@ Constructed **unconditionally** and gated per frame at their record site:
 `GBufferPipeline`, `ShadowPipeline`, `DeferredLightingPass` (with this
 engine's banded-cel `pixel_lighting.frag`, which also draws the procedural sky at background
 pixels -- gfxcoopa's `SkyboxPass` is not used), `SsaoPass`, `HiZPass`, `SceneColorMipPass`,
-`SsrPass`, `TemporalHistoryPass`, `TransparentPass`, `TransparentCapturePass`, `FogPass`, `VolumetricsPass` /
+`SsrPass`, `TemporalHistoryPass`, `TransparentPass`, `FogPass`, `VolumetricsPass` /
 `FroxelVolumetricsPass` (per `volumetrics_mode`),
-`DofPass`, `BloomPass`, `TiltShiftPass`, `PixelStylizePass`, and the four SDF passes
-(`SdfGBufferPass`, `SdfForwardPass`, `SdfShadowPass`, `SdfCapturePass`).
+`DofPass`, `BloomPass`, `TiltShiftPass`, `PixelStylizePass`, and the three SDF passes
+(`SdfGBufferPass`, `SdfForwardPass`, `SdfShadowPass`).
 
 `FxaaPass`, `SmaaPass` and `TaaPass` are the exception: all three are built together only
 when `aa_mode != "off"`, because that toggle changes which descriptor downstream passes
@@ -44,7 +44,7 @@ fullscreen shader, always run the same way; each stage no-ops when its config di
 
 ## The one synchronization caveat
 
-`HiZPass`, `SceneColorMipPass` and `TransparentCapturePass` rebind their own descriptors
+`HiZPass` and `SceneColorMipPass` rebind their own descriptors
 inside every `execute()`. That is safe only under a per-frame wait, which this pipeline
 otherwise avoids — so a frame that runs any of them pays for a single `device_.wait_idle()`
 before recording. See `FrameContext::need_ssr_trace_inputs`.

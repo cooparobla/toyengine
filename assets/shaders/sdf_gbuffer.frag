@@ -23,7 +23,7 @@ layout(set = 0, binding = 0) uniform CameraUBO {
 } camera;
 
 // Set 1: SdfData -- globals UBO (only inv_view_proj is read here; the
-// lighting/SSR fields belong to the forward/capture passes) + renderer/shape
+// lighting/SSR fields belong to the forward pass) + renderer/shape
 // SSBOs. See gfxcoopa/engine/data/sdf_data.h for the CPU-side layout.
 layout(set = 1, binding = 0) uniform SdfGlobalsBlock {
     mat4  inv_view_proj;

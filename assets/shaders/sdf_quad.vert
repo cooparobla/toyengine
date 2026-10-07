@@ -1,7 +1,7 @@
 #version 450
 
 // Vertex-buffer-less full-NDC quad, shared by every main-camera SDF pass
-// (sdf_gbuffer.frag, sdf_forward.frag, sdf_capture.frag): 6 vertices from
+// (sdf_gbuffer.frag, sdf_forward.frag): 6 vertices from
 // gl_VertexIndex alone (VertexLayout::none() on the pipeline side -- see
 // SdfGBufferPass/SdfForwardPass/SdfCapturePass), covering the full [-1,1]^2
 // clip rectangle. The object's actual screen-space bounds are enforced by a

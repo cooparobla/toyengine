@@ -56,7 +56,6 @@ enum class GpuScope : uint32_t {
     ShadowLocal,         ///< Every point and spot shadow (the local-light atlas, cache copy included).
     GBuffer,
     HiZ,                 ///< Hi-Z + SSAO depth pyramids.
-    TransparentCapture,  ///< SSR's second source: capture + its Hi-Z and colour mips.
     TemporalHistory,
     ContactShadows,
     Ssao,
@@ -76,6 +75,7 @@ enum class GpuScope : uint32_t {
     VolumetricsInject,     ///< froxel mode only: density + lighting into the grid
     VolumetricsIntegrate,  ///< froxel mode only: per-column accumulation
     Volumetrics,           ///< raymarch mode: march + composite; froxel mode: the apply
+    SceneColorHistory,     ///< pre-DOF HDR copied into the SSR colour chain's mip 0 for next frame
     Dof,
     Bloom,
     Exposure,
@@ -100,10 +100,10 @@ inline const char* scope_name(CpuScope s) {
 
 inline const char* scope_name(GpuScope s) {
     static const char* names[kGpuScopeCount] = {
-        "shadow.directional", "shadow.local", "gbuffer", "hiz", "transparent_capture",
+        "shadow.directional", "shadow.local", "gbuffer", "hiz",
         "temporal_history", "contact_shadows", "ssao", "lighting+sky", "scene_color_mips",
         "ssr.trace", "ssr.resolve", "ssr.blur", "ssgi.trace", "ssgi.resolve", "ssgi.blur", "ssr.composite",
-        "refraction_mips", "transparent", "underwater", "fog", "volumetrics.inject", "volumetrics.integrate", "volumetrics", "dof", "bloom", "exposure",
+        "refraction_mips", "transparent", "underwater", "fog", "volumetrics.inject", "volumetrics.integrate", "volumetrics", "scene_color_history", "dof", "bloom", "exposure",
         "stylize", "world_ui", "aa", "tilt_shift", "overlay", "present"};
     return names[static_cast<size_t>(s)];
 }

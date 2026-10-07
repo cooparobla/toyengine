@@ -2,8 +2,8 @@
 #define TOY_PIXEL_SHADOW_BODY_GLSL
 
 // pixel_shadow_body.glsl -- shared calc_dir_shadow()/calc_local_shadow() body, used by every
-// toyengine shading path (pixel_lighting.frag, pixel_forward_shading.glsl, gfx/surface/
-// capture_fs.glsl, sdf_capture.frag, debug_view.frag) so opaque, forward/BLEND, capture and SDF
+// toyengine shading path (pixel_lighting.frag, pixel_forward_shading.glsl,
+// debug_view.frag) so opaque, forward/BLEND and SDF
 // surfaces can never silently diverge on shadow behaviour.
 //
 // A "body" file in the pixel_forward_shading.glsl/ssr_trace_body.glsl sense: the includer must,

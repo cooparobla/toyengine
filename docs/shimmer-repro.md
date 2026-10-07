@@ -60,12 +60,12 @@ ssr_temporal_blend: 0.85
 Window: 1920x1080, `vsync: true`, visible. Scene: `assets/scenes/terrain_test/`
 (launch with `SCENE=terrain_test`; the config's `default_scene` is pixel_demo).
 
-Build-state caveat: the reference clip predates `kFrozenSsrBlend`
-(`pixel_render_pipeline.h`, added 2026-09-23), which shortens the post-stop
-SSR/SSGI convergence wash from ~1 s to ~0.2 s. A regeneration on a current build
-reproduces the rest of the clip's behaviour but with that one component
-shortened; to reproduce the reference exactly, set `kFrozenSsrBlend = 0.85f`
-temporarily (making the frozen path equal to `ssr_temporal_blend` again).
+Build-state caveat: the reference clip predates the converging SSR/SSGI
+accumulation (TemporalHistoryPass's shared count plus the resolve's verbatim
+frozen hold), which replaced the 2026-09-23 `kFrozenSsrBlend` constant and no
+longer exists. A regeneration on a current build reproduces the rest of the
+clip's behaviour but without the old ~1 s post-stop SSR/SSGI wash; the reference
+cannot be reproduced exactly on a current build.
 
 ## The gesture
 
@@ -105,8 +105,8 @@ for i in range(300):
   artifacts of the recording chain).
 - The settle tail decomposes (measured by subsystem ablation at the same pose,
   `ssao_blip_probe` in test.cpp): SSAO reaches byte-zero within ~9 frames;
-  the ~1 s remainder is the SSR/SSGI temporal EMA converging (now shortened by
-  `kFrozenSsrBlend`); with `ssr_enabled: false` the tail vanishes entirely.
+  the ~1 s remainder was the SSR/SSGI temporal EMA converging (since replaced by
+  the converging average and its frozen hold); with `ssr_enabled: false` the tail vanishes entirely.
 
 ## Investigation state (2026-09-23)
 
@@ -144,5 +144,5 @@ ending at rest; regenerate with
 
 Remaining smaller temporal terms, in order: geometric silhouette aliasing
 (re-enable `aa_mode: smaa` if wanted — texel-AA does not touch mesh edges),
-the SSR/SSGI post-stop wash (already shortened by `kFrozenSsrBlend`), and the
+the SSR/SSGI post-stop wash (since replaced by the converging average), and the
 round-7 AO parity floor.

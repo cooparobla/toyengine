@@ -59,6 +59,7 @@ layout(set = 2, binding = 3) uniform sampler2D dir_shadow_map_raw;
 // bindings in its pipeline layout undeclared as long as it never samples them).
 layout(set = 3, binding = 1) uniform sampler2D g_normal_metallic;
 layout(set = 3, binding = 2) uniform sampler2D g_position_roughness;
+layout(set = 3, binding = 3) uniform sampler2D u_velocity; // G4: screen motion, for previous-frame hits
 layout(set = 4, binding = 0) uniform sampler2D u_hiz_map;
 layout(set = 5, binding = 0) uniform sampler2D u_scene_color;
 
@@ -84,9 +85,9 @@ layout(set = 6, binding = 0) uniform ForwardGlobalsBlock {
     vec4  lighting0;  // x=light_bands, y=spec_threshold, z=soft_lighting, w=rim_strength
     vec4  lighting1;  // x=ambient_intensity, y=sky_intensity, z=ssr_enabled, w=ssgi_intensity
     vec4  ssr0;       // x=ssgi_distance, y=ssr_max_distance, z=ssr_bias_texels, w=ssr_thickness_min
-    vec4  ssr1;       // x=ssr_thickness_scale, y=ssr_roughness_cutoff, zw unused
+    vec4  ssr1;       // x=ssr_thickness_scale, y=ssr_roughness_cutoff, z=ssr_cone_prefilter
     ivec4 ssr_steps;  // x=ssr_max_iterations, y=ssr_max_hiz_mip, z=ssr_start_mip, w=ssr_min_mip0_steps
-    ivec4 ssr_mip;    // x=ssr_max_color_mip, yzw unused
+    ivec4 ssr_mip;    // x=ssr_max_color_mip, y=previous-frame colour flag
     vec4  refract0;   // x=enabled, y=strength, z=max_offset, w=chromatic
     vec4  refract1;   // x=blur, y=density, z=fresnel_enabled, w unused
     // Water ripple rings (toy::render::kMaxWaterRipples): info.x = count, .y = flow-ripple
@@ -156,7 +157,7 @@ struct GfxTransparentSurface {
     vec3  albedo;
     float alpha;
     float roughness;
-    float thickness;  // refraction/Beer-Lambert path length; unused by the capture backbone
+    float thickness;  // refraction/Beer-Lambert path length
     float ior;        // refraction IOR (outside / inside); water's underside inverts it. Capture: unused
 };
 
@@ -222,6 +223,8 @@ void main() {
     p.ssr_start_mip        = forward_globals.ssr_steps.z;
     p.ssr_min_mip0_steps   = forward_globals.ssr_steps.w;
     p.ssr_max_color_mip    = forward_globals.ssr_mip.x;
+    p.ssr_cone_prefilter   = forward_globals.ssr1.z;
+    p.ssr_prev_frame       = forward_globals.ssr_mip.y;
 
     vec4 shaded = gfx_pixel_forward_shade(frag_world_pos, N, camera.camera_pos, camera.view, camera.proj, mat, p);
 

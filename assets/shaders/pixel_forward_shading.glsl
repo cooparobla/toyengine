@@ -18,8 +18,7 @@
 //                             dir_light_space_matrix/light_counts/point_lights[16]/
 //                             spot_shadow_params/spot_light_space_matrix/spot_lights[8]).
 //   - `dir_shadow_map`    -- sampler2DShadow.
-//   - `point_shadow_map`  -- samplerCubeShadow.
-//   - `spot_shadow_map`   -- sampler2DShadow.
+//   - `local_shadow_atlas` -- sampler2DShadow (the point/spot shadow atlas).
 //   - #include <gfx/brdf.glsl>, <gfx/shadow_sampling.glsl>,
 //     <gfx/indirect_specular.glsl>, <gfx/sky.glsl>, <gfx/ssr_common.glsl>,
 //     <gfx/spot_light.glsl>, "indirect_hooks.glsl", <gfx/ssr_trace_body.glsl>
@@ -28,7 +27,7 @@
 //     own include order for the canonical sequence this file assumes was
 //     already followed).
 //
-// calc_dir_shadow()/calc_point_shadow()/calc_spot_shadow() themselves come from
+// calc_dir_shadow()/calc_local_shadow() themselves come from
 // "pixel_shadow_body.glsl", included below -- this file used to carry its own
 // gfx_forward_calc_* copies, byte-identical to pixel_lighting.frag's and
 // gfx/surface/capture_fs.glsl's; see that file's doc for why they were unified.
@@ -184,9 +183,10 @@ vec4 gfx_pixel_forward_shade(vec3 world_pos, vec3 N, vec3 camera_pos, mat4 view,
         float attenuation = falloff / (4.0 * BRDF_PI * (factor * factor + 1.0));
         vec3 radiance = pl.color_intensity.rgb * (pl.color_intensity.w * 0.08) * attenuation;
 
-        vec3 shadow_bias_pos = world_pos + N * 0.02;
-        float shadow = (i == 0u && pl.attenuation.w > 0.5)
-            ? calc_point_shadow(pl.position_range.xyz - shadow_bias_pos, range) : 0.0;
+        // Point shadow from the local-light atlas, when this light holds a slot there
+        // (attenuation.w, 1-based) -- see calc_local_shadow().
+        float shadow = (pl.attenuation.w > 0.5 && dot(N, L) > 0.0)
+            ? calc_local_shadow(pl.attenuation.w, world_pos, N, L) : 0.0;
 
         Lo += gfx_forward_shade_light(N, V, L, radiance, albedo, metallic, roughness, F0, shadow, p);
     }
@@ -212,12 +212,9 @@ vec4 gfx_pixel_forward_shade(vec3 world_pos, vec3 N, vec3 camera_pos, mat4 view,
         float attenuation = falloff / (4.0 * BRDF_PI * (factor * factor + 1.0));
         vec3 radiance = sl.color_intensity.rgb * (sl.color_intensity.w * 0.08) * attenuation * cone;
 
-        float shadow = 0.0;
-        if (i == lights.light_counts.w && sl.params.z > 0.5) {
-            float normal_bias_scale = clamp(1.0 - dot(N, L), 0.0, 1.0);
-            vec3 biased_pos = world_pos + N * (lights.spot_shadow_params.w * (0.5 + 0.5 * normal_bias_scale));
-            shadow = calc_spot_shadow(lights.spot_light_space_matrix * vec4(biased_pos, 1.0), N, L);
-        }
+        // Spot shadow from the local-light atlas (params.z = 1-based slot) -- see calc_local_shadow().
+        float shadow = (sl.params.z > 0.5 && dot(N, L) > 0.0)
+            ? calc_local_shadow(sl.params.z, world_pos, N, L) : 0.0;
 
         Lo += gfx_forward_shade_light(N, V, L, radiance, albedo, metallic, roughness, F0, shadow, p);
     }

@@ -40,13 +40,12 @@ namespace passes {
  * features under motion, which is exactly what a contact shadow is.
  *
  * Three stages, mirroring SsaoPass's raw → resolve shape:
- *  - **March** (`contact_shadow.frag`) writes raw occlusion, using the same
- *    `contact_shadow_body.glsl` the lighting shader used to include, so the value cannot drift
- *    from what shipped.
- *  - **Resolve** reuses gfxcoopa's `ssr_resolve.frag` verbatim. That shader accumulates a vec4
- *    against the shared per-pixel count (TemporalHistoryPass) on a converging `1/N` schedule; a
- *    scalar occlusion in `.r` is just a vec4 whose other channels are zero, so no third copy of
- *    the accumulation logic exists.
+ *  - **March** (`contact_shadow.frag`) writes raw occlusion: one ray toward the sun per pixel,
+ *    one scene-depth fetch per step (`contact_shadow_body.glsl`, Unreal's screen-space contact
+ *    shadow shape).
+ *  - **Resolve** (`contact_shadow_resolve.frag`) is the scalar counterpart of gfxcoopa's
+ *    `ssr_resolve.frag`: same push constants and bindings, same converging `1/N` schedule against
+ *    the shared per-pixel count (TemporalHistoryPass), minus the vec4/YCoCg machinery.
  *  - **History copy**: one resolve target plus one history image, copied at the end of every
  *    execute(). SsrPass and TemporalHistoryPass ping-pong instead (one consumer set per
  *    parity, selected per frame); this pass's lone consumer, the lighting draw, binds its
@@ -58,9 +57,11 @@ namespace passes {
  */
 class ContactShadowPass {
 public:
-    /// Format of the march and resolve targets. RGBA16F rather than R16F so the shared
-    /// ssr_resolve.frag — written for a premultiplied-radiance vec4 — can be reused unchanged.
-    static constexpr coopa::gfx::Format kFormat = coopa::gfx::Format::RGBA16_Sfloat;
+    /// Format of the march and resolve targets: one occlusion scalar per pixel. The dedicated
+    /// scalar resolve (contact_shadow_resolve.frag) is what lets this be R16F rather than the
+    /// RGBA16F the shared vec4 SSR resolve required -- a quarter of the bandwidth for the march
+    /// write, the resolve and the history copy alike.
+    static constexpr coopa::gfx::Format kFormat = coopa::gfx::Format::R16_Sfloat;
 
     /// Per-frame parameters. Mirrors the temporal half of SsrPass::Params, since the resolve is
     /// literally the same shader.
@@ -90,7 +91,7 @@ public:
      * @param height        Render height in pixels.
      * @param vert_spv      Fullscreen-triangle vertex shader (fullscreen.vert).
      * @param march_spv     contact_shadow.frag.spv.
-     * @param resolve_spv   ssr_resolve.frag.spv — reused, see the class doc.
+     * @param resolve_spv   contact_shadow_resolve.frag.spv (SsrPass::ResolvePushConstants layout).
      */
     ContactShadowPass(coopa::gfx::core::Device& device,
                       coopa::gfx::memory::Allocator& allocator,
@@ -123,7 +124,7 @@ public:
         resolved_target_ = std::make_unique<engine::targets::OffscreenTarget>(
             device, allocator, width, height, kFormat, engine::targets::kColorOnly);
         history_image_ = std::make_unique<memory::Image>(
-            device, allocator, width, height, VK_FORMAT_R16G16B16A16_SFLOAT,
+            device, allocator, width, height, VK_FORMAT_R16_SFLOAT,
             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
             VK_IMAGE_ASPECT_COLOR_BIT, VMA_MEMORY_USAGE_AUTO);
 
@@ -131,14 +132,16 @@ public:
         march_shader_   = std::make_unique<pipeline::Shader>(device, march_spv, ShaderStage::Fragment);
         resolve_shader_ = std::make_unique<pipeline::Shader>(device, resolve_spv, ShaderStage::Fragment);
 
-        // Set 2 of the march: the same three-binding G-buffer shape every other consumer uses.
+        // Set 2 of the march: the three-binding G-buffer shape every other consumer uses, plus
+        // the scene depth buffer the march compares its ray against (binding 3).
         gbuf_layout_ = std::make_unique<pipeline::DescriptorSetLayout>(
             pipeline::DescriptorLayoutBuilder()
                 .combined_sampler(0, ShaderStage::Fragment)
                 .combined_sampler(1, ShaderStage::Fragment)
                 .combined_sampler(2, ShaderStage::Fragment)
+                .combined_sampler(3, ShaderStage::Fragment)
                 .build(device));
-        // Set 0 of the resolve: current, history, depth, shared count -- ssr_resolve.frag's own.
+        // Set 0 of the resolve: current, history, depth, shared count (ssr_resolve.frag's shape).
         resolve_layout_ = std::make_unique<pipeline::DescriptorSetLayout>(
             pipeline::DescriptorLayoutBuilder()
                 .combined_sampler(0, ShaderStage::Fragment)
@@ -198,6 +201,8 @@ public:
         gbuf_set_->bind_image(0, g0, *nearest_sampler_);
         gbuf_set_->bind_image(1, g1, *nearest_sampler_);
         gbuf_set_->bind_image(2, g2, *nearest_sampler_);
+        // The march's per-step occluder test: one depth texel per step (D32_SFLOAT, NEAREST).
+        gbuf_set_->bind_image(3, depth, *nearest_sampler_);
 
         for (uint32_t c = 0; c < 2; ++c) {
             resolve_sets_[c]->bind_image(0, march_target_->color_view_typed(), *nearest_sampler_);

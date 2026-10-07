@@ -37,11 +37,11 @@
  * independently. Optional passes are constructed unconditionally and gated per frame at their
  * record site, so a toggle that only changes push-constant contents can flip at runtime.
  *
- * Only one point light casts a shadow: ShadowMapTarget holds exactly one cube map. Every other
- * point light still lights the scene, without occlusion. Spot lights work the same way, via
- * their own single dedicated 2D shadow map: exactly one shadow-casting spot light gets a real
- * shadow (see find_first_shadow_casting_spot_light_()), every other spot still lights the
- * scene unshadowed.
+ * Point and spot shadows share one depth atlas (LocalShadowAtlas): every cast_shadows light
+ * competes for a slot by screen importance, up to max_shadowed_point_lights /
+ * max_shadowed_spot_lights, and a point light's six cube faces are guard-banded tiles rendered in
+ * the same pass as every spot. Static casters are cached per light and copied in each frame
+ * (shadow_cache_enabled). See update_local_shadows_() / record_local_shadows_().
  */
 
 #ifndef TOYENGINE_RENDER_PIXEL_RENDER_PIPELINE_H
@@ -128,6 +128,8 @@
 #include <toyengine/render/pixel_render_types.h>
 #include <toyengine/render/passes/ui_composite_pass.h>
 #include <toyengine/render/instance_stream.h>
+#include <toyengine/render/local_shadow_atlas.h>
+#include <unordered_set>
 #include <toyengine/render/visibility.h>
 #include <toyengine/render/frame_profile.h>
 #include <toyengine/render/gpu_profiler.h>
@@ -221,8 +223,10 @@ public:
           shadow_sampler_(coopa::gfx::engine::util::Sampler::shadow(device)),
           fog_data_(device, allocator),
           volumetrics_data_(device, allocator),
-          shadow_target_(device, allocator, config_.shadow_map_resolution, config_.cube_shadow_resolution,
-                        config_.spot_shadow_resolution, config_.shadow_cascades),
+          // Only the directional cascade atlas is used: point and spot shadows live in
+          // local_shadow_atlas_, so the target's cube and spot maps are allocated at a token size.
+          shadow_target_(device, allocator, config_.shadow_map_resolution, 16u, 16u,
+                        config_.shadow_cascades),
           palette_lut_(coopa::gfx::engine::data::PaletteLut::load(device, allocator, cmd_pool, config_.palette_path)),
           grading_lut_(coopa::gfx::engine::data::GradingLut::load(device, allocator, cmd_pool, config_.grading_lut_path)),
           instance_stream_(device, allocator),
@@ -547,6 +551,8 @@ public:
         TOY_KEEP_STARTUP_FIXED(shadow_cascades);
         TOY_KEEP_STARTUP_FIXED(cube_shadow_resolution);
         TOY_KEEP_STARTUP_FIXED(spot_shadow_resolution);
+        TOY_KEEP_STARTUP_FIXED(local_shadow_atlas_resolution);
+        TOY_KEEP_STARTUP_FIXED(shadow_cache_enabled);
         TOY_KEEP_STARTUP_FIXED(sdf_max_renderers);
         TOY_KEEP_STARTUP_FIXED(sdf_max_shapes);
         TOY_KEEP_STARTUP_FIXED(palette_path);
@@ -697,36 +703,13 @@ public:
                                       dof_focus.from_scene ? dof_focus.distance : probed_focus_distance_);
         }
 
-        // Only the scene's first shadow-casting point light gets a real cube map
-        // (see the class doc for why). Marks current_light_data().point_lights[0]'s
-        // cast_shadows flag so pixel_lighting.frag knows to sample it.
-        auto* shadow_point = find_first_shadow_casting_point_light_(scene);
-        bool cast_point_shadow = config_.shadows_enabled && shadow_point != nullptr;
-        if (cast_point_shadow) {
-            auto& gpu0 = current_light_data().point_lights[0];
-            gpu0.attenuation.w = 1.0f;
-        }
-
-        // Same one-shadow-casting-light rule as the point light above, but via an explicit
-        // index (light_counts.w) rather than a hardcoded slot 0 -- see
-        // find_first_shadow_casting_spot_light_()'s doc for why. update_spot_shadow_matrix_()
-        // must run even when there is no caster, same as update_dir_shadow_matrix_() is only
-        // skipped (not the shadow_params write) when there's no directional light: it still
-        // needs to clear spot_shadow_params.z to 0 so calc_spot_shadow() bails cleanly.
-        auto spot_caster = find_first_shadow_casting_spot_light_(scene);
-        bool cast_spot_shadow = config_.shadows_enabled && spot_caster.light != nullptr;
-        if (cast_spot_shadow) {
-            current_light_data().spot_lights[spot_caster.index].params.z = 1.0f;
-            current_light_data().light_counts.w = spot_caster.index;
-        } else {
-            current_light_data().light_counts.w = 0xFFFFFFFFu;
-        }
-        update_spot_shadow_matrix_(spot_caster.light, cast_spot_shadow);
+        // Point and spot shadows: the most important cast_shadows lights get slots in the
+        // local-light shadow atlas, up to the per-type budgets (see update_local_shadows_()).
+        update_local_shadows_(cam_pos, unjittered_proj * view);
 
         // After both shadow fits: every view's frustum is now known, so the gather can cull
         // and batch each view's draw list (see gather_meshes_()).
-        const MeshGather meshes = gather_meshes_(frame_slot, view, unjittered_proj, cast_dir_shadow,
-                                                 shadow_point, cast_point_shadow, cast_spot_shadow);
+        const MeshGather meshes = gather_meshes_(frame_slot, view, unjittered_proj, cast_dir_shadow);
 
         // Particle quads: every batch's instances into this slot's buffer in one go. They only
         // draw inside the forward transparent pass, so nothing uploads when that is off -- said
@@ -806,9 +789,6 @@ public:
         ctx.dof_focus_range       = dof_focus.range;
         ctx.need_ssr_trace_inputs = need_ssr_trace_inputs;
         ctx.cast_dir_shadow       = cast_dir_shadow;
-        ctx.cast_point_shadow     = cast_point_shadow;
-        ctx.shadow_point          = shadow_point;
-        ctx.cast_spot_shadow      = cast_spot_shadow;
 
         if (profile_) {
             profile_->add_cpu(CpuScope::Gather, std::chrono::duration<double, std::milli>(
@@ -928,8 +908,11 @@ private:
         std::vector<MeshBatch>                gbuffer;   ///< Camera; opaque + mask.
         std::vector<MeshBatch>                capture;   ///< Camera; blend (SSR capture).
         std::array<std::vector<MeshBatch>, 4> cascade;   ///< Directional shadow, per cascade.
-        std::array<std::vector<MeshBatch>, 6> cube;      ///< Point shadow, per cube face.
-        std::vector<MeshBatch>                spot;      ///< Spot shadow.
+        /// Per local-shadow VIEW (LocalShadowSlot::first_view + v): the static casters drawn into
+        /// the cache atlas -- filled only for views whose light re-renders its cache this frame.
+        std::vector<std::vector<MeshBatch>>   local_static;
+        /// Per local-shadow view: the casters drawn live (every caster when caching is off).
+        std::vector<std::vector<MeshBatch>>   local_dynamic;
     };
 
     /**
@@ -966,14 +949,6 @@ private:
          *  the frames trace_inputs_need_rebind_() reports. */
         bool need_ssr_trace_inputs = false;
         bool cast_dir_shadow   = false;
-        bool cast_point_shadow = false;
-        coopa::gfx::engine::components::PointLightComponent* shadow_point = nullptr;
-        /** Unlike shadow_point, record_spot_shadow_() needs no SpotLightComponent* -- its
-         *  light-space matrix is already resolved into current_light_data() by
-         *  update_spot_shadow_matrix_() before record_scene_() runs (a spot map, like the
-         *  directional map, needs no per-face light_pos_range the way the cube map's
-         *  per-face record_point_shadow_() loop does). */
-        bool cast_spot_shadow  = false;
     };
 
     /**
@@ -1033,9 +1008,16 @@ private:
         shadow_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
             coopa::gfx::pipeline::DescriptorPoolBuilder().add_sets(*shadow_layout_, 1).build(device_));
         shadow_set_ = std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device_, *shadow_pool_, *shadow_layout_);
+        // The point/spot shadow atlas (see LocalShadowAtlas) -- built here because its view is
+        // bound from frame 0 whether or not any light casts.
+        local_shadow_atlas_ = std::make_unique<LocalShadowAtlas>(
+            device_, allocator_, config_.local_shadow_atlas_resolution, config_.shadow_cache_enabled);
         shadow_set_->bind_image(0, shadow_target_.dir_shadow_view(), shadow_sampler_.handle());
-        shadow_set_->bind_image(1, shadow_target_.cube_shadow_view(), shadow_sampler_.handle());
-        shadow_set_->bind_image(2, shadow_target_.spot_shadow_view(), shadow_sampler_.handle());
+        // Binding 1: every point and spot shadow (gfx/local_shadow.glsl's local_shadow_atlas).
+        // Binding 2 is no longer declared by any shader; it keeps the same image so the set
+        // layout -- shared by every pass that binds set 2 -- did not have to change.
+        shadow_set_->bind_image(1, local_shadow_atlas_->view(), shadow_sampler_.handle());
+        shadow_set_->bind_image(2, local_shadow_atlas_->view(), shadow_sampler_.handle());
         // Binding 3: the directional map AGAIN, through a plain nearest sampler --
         // PCSS's blocker search reads stored depths, which the compare sampler at
         // binding 0 cannot return (see gfx_shadow_dir_pcss).
@@ -1072,6 +1054,9 @@ private:
         // a real shadow entry point, or its shadow silently stops moving with it.
         for (const auto& sd : config_.surface_shaders.all()) {
             if (sd.domain != coopa::gfx::pipeline::SurfaceShaderDomain::Opaque) continue;
+            // A shader with its own shadow vertex stage may displace over time (foliage wind):
+            // its shadow can never be cached as static (see gather_meshes_()'s static_ok).
+            if (!sd.shadow_vert.empty()) animated_shadow_shaders_.insert(sd.name);
             gbuffer_pipeline_->add_variant(
                 sd.name,
                 config_.shaders(sd.vert.empty() ? "gbuffer.vert" : sd.vert),
@@ -1160,7 +1145,7 @@ private:
             config_.shaders("fullscreen.vert"),
             config_.shaders("contact_shadow.frag"),
             // The SSR chain's temporal resolve, reused verbatim -- see ContactShadowPass's doc.
-            config_.shaders("ssr_resolve.frag"));
+            config_.shaders("contact_shadow_resolve.frag"));
         contact_shadow_pass_->update_descriptors(
             gbuffer_target_.g0_view_typed(), gbuffer_target_.g1_view_typed(),
             gbuffer_target_.g2_view_typed(), gbuffer_target_.depth_view_typed(),
@@ -1538,7 +1523,7 @@ private:
             froxel_volumetrics_pass_->set_source_images(pre_volumetrics_view, gbuffer_target_.g1_view_typed(),
                                                         gbuffer_target_.g2_view_typed(), linear_sampler_);
             froxel_volumetrics_pass_->set_shadow_images(shadow_target_.dir_shadow_view_typed(),
-                                                        shadow_target_.spot_shadow_view_typed(), shadow_sampler_);
+                                                        local_shadow_atlas_->view_typed(), shadow_sampler_);
         } else {
         volumetrics_pass_ = std::make_unique<coopa::gfx::engine::passes::VolumetricsPass>(
             device_, volumetrics_march_target_.render_pass_object(),
@@ -1556,7 +1541,7 @@ private:
         // RUNTIME volumetrics_shadows_enabled flag, routed through the volumetrics UBO's
         // shadow_params (see update_volumetrics_data_).
         volumetrics_pass_->set_shadow_images(shadow_target_.dir_shadow_view_typed(),
-                                             shadow_target_.spot_shadow_view_typed(), shadow_sampler_);
+                                             local_shadow_atlas_->view_typed(), shadow_sampler_);
         }
 
         // What DOF reads: the final pre-tonemap HDR frame, before any lens effect. Sourcing the
@@ -1848,10 +1833,8 @@ private:
                        const MeshGather& meshes, const std::vector<SdfDrawItem>& sdf_draws) {
         record_directional_shadow_(cmd, meshes, sdf_draws, ctx.cast_dir_shadow);
         gpu_mark_(cmd, GpuScope::ShadowDirectional);
-        record_point_shadow_(cmd, meshes, sdf_draws, ctx.shadow_point, ctx.cast_point_shadow);
-        gpu_mark_(cmd, GpuScope::ShadowPoint);
-        record_spot_shadow_(cmd, meshes, sdf_draws, ctx.cast_spot_shadow);
-        gpu_mark_(cmd, GpuScope::ShadowSpot);
+        record_local_shadows_(cmd, meshes, sdf_draws);
+        gpu_mark_(cmd, GpuScope::ShadowLocal);
         record_gbuffer_(cmd, meshes, sdf_draws);
         gpu_mark_(cmd, GpuScope::GBuffer);
         if (focus_probe_wanted_) record_focus_probe_(cmd);
@@ -2620,8 +2603,8 @@ private:
      * @brief Resolves every MeshRenderer's transform, bounds and LOD, then frustum-culls and
      *        batches it into each view's draw list, uploading all transforms in batch order.
      *
-     * Must run after update_dir_shadow_matrix_()/update_spot_shadow_matrix_(): the cascade
-     * and spot frusta come from the matrices those write.
+     * Must run after update_dir_shadow_matrix_()/update_local_shadows_(): the cascade and
+     * local-light view frusta come from the matrices those write.
      *
      * Per view: frustum test on the world AABB; for shadow views also the small-caster test
      * (config shadow_min_caster_texels); then a sort on MeshBatchKey so identical
@@ -2629,9 +2612,7 @@ private:
      * contiguously. A transform is therefore uploaded once per view that sees it.
      */
     MeshGather gather_meshes_(uint32_t frame_slot, const glm::mat4& view, const glm::mat4& unjittered_proj,
-                              bool cast_dir_shadow,
-                              coopa::gfx::engine::components::PointLightComponent* shadow_point,
-                              bool cast_point_shadow, bool cast_spot_shadow) {
+                              bool cast_dir_shadow) {
         using coopa::gfx::engine::components::MeshRenderer;
         MeshGather out;
         // One draw item per (renderer, material part).
@@ -2728,14 +2709,24 @@ private:
         // record_scene_()'s stillness block) must stay off while it did.
         {
             std::unordered_map<const MeshRenderer*, glm::mat4> next_prev_world;
+            std::unordered_map<const MeshRenderer*, uint32_t>  next_still;
             next_prev_world.reserve(prev_world_.size() + 16);
+            next_still.reserve(still_frames_.size() + 16);
             bool any_moved = false;
             for (size_t i = 0; i < n; ++i) {
                 if (!out.valid[i]) continue;
                 any_moved = any_moved || out.moved[i] != 0;
-                if (!out.multi[i]) next_prev_world[out.renderers[i]] = out.world_matrices[i];
+                if (out.multi[i]) continue;
+                MeshRenderer* mr = out.renderers[i];
+                next_prev_world[mr] = out.world_matrices[i];
+                // Frames without moving -- what makes a caster eligible for the local-shadow
+                // static cache (see the local views below).
+                const auto it = still_frames_.find(mr);
+                const uint32_t prev = (it != still_frames_.end()) ? it->second : 0u;
+                next_still[mr] = out.moved[i] ? 0u : std::min(prev + 1u, 1u << 20);
             }
             prev_world_.swap(next_prev_world);
+            still_frames_.swap(next_still);
             scene_moved_ = any_moved;
         }
 
@@ -2885,18 +2876,91 @@ private:
                 build(current_light_data().dir_cascade_matrix[c], true, tile_res, casts, out.cascade[c]);
             }
         }
-        if (cast_point_shadow && shadow_point) {
-            const glm::vec3 light_pos = shadow_point->get_world_position();
-            const float     range     = shadow_point->range;
-            const float     res       = static_cast<float>(config_.cube_shadow_resolution);
-            for (uint32_t face = 0; face < 6; ++face) {
-                build(coopa::gfx::engine::targets::ShadowMapTarget::get_cube_face_matrix(face, light_pos, range),
-                      true, res, casts, out.cube[face]);
+        // Point/spot shadows: every view of every local light update_local_shadows_() chose.
+        // A caster must reach into the light's influence sphere as well as its view frustum
+        // (light-bounds culling: a face frustum alone extends to the corners of the range cube).
+        {
+            uint32_t total_views = 0;
+            for (const LocalShadowSlot& slot : local_slots_) total_views = std::max(total_views, slot.first_view + slot.view_count);
+            out.local_static.assign(total_views, {});
+            out.local_dynamic.assign(total_views, {});
+            const bool caching = local_shadow_atlas_->caching();
+            const auto& blk = current_light_data().local_shadows;
+
+            // Static-cache eligibility: still for kStaticCasterFrames, not a dynamic mesh or a
+            // particle batch, and not drawn with a shadow shader that may animate.
+            auto static_ok = [&](size_t i) {
+                if (out.multi[i]) return false;
+                MeshRenderer* mr = out.renderers[i];
+                if (mr->get_mesh()->is_dynamic()) return false;
+                const auto it = still_frames_.find(mr);
+                if (it == still_frames_.end() || it->second < kStaticCasterFrames) return false;
+                return animated_shadow_shaders_.count(out.material(i).shader) == 0;
+            };
+            // FNV-1a over raw bytes, for the static-content hash.
+            auto mix = [](uint64_t h, const void* data, size_t len) {
+                const auto* b = static_cast<const unsigned char*>(data);
+                for (size_t k = 0; k < len; ++k) { h ^= b[k]; h *= 1099511628211ull; }
+                return h;
+            };
+
+            for (LocalShadowSlot& slot : local_slots_) {
+                const glm::vec3 c = slot.pos;
+                const float     r = slot.range;
+                auto in_light = [&](size_t i) {
+                    const WorldBounds& b = out.bounds[i];
+                    const glm::vec3 d = glm::max(glm::abs(c - b.center) - b.extent, glm::vec3(0.0f));
+                    return glm::dot(d, d) <= r * r;
+                };
+                const float res = static_cast<float>(slot.tile_res);
+                if (!caching) {
+                    for (uint32_t v = 0; v < slot.view_count; ++v) {
+                        build(blk.view_proj[slot.first_view + v], true, res,
+                              [&](size_t i) { return casts(i) && in_light(i); },
+                              out.local_dynamic[slot.first_view + v]);
+                    }
+                    slot.rerender_static = false;
+                    continue;
+                }
+
+                // What the cache tiles must hold: every static caster any of this light's views
+                // sees, at its current pose and material, plus the views and the tile block. Any
+                // change re-renders the light's cache once; otherwise the copy is enough.
+                uint64_t h = 1469598103934665603ull;
+                h = mix(h, &slot.block, sizeof(slot.block));
+                for (uint32_t v = 0; v < slot.view_count; ++v) {
+                    const glm::mat4& vp = blk.view_proj[slot.first_view + v];
+                    h = mix(h, &vp, sizeof(vp));
+                    const Frustum f = Frustum::from_matrix(vp);
+                    for (size_t i = 0; i < n; ++i) {
+                        if (!out.valid[i] || !casts(i) || !static_ok(i) || !in_light(i)) continue;
+                        if (!f.intersects(out.bounds[i])) continue;
+                        const MeshBatchKey& k = keys[i];
+                        const void* id = out.renderers[i];
+                        h = mix(h, &id, sizeof(id));
+                        h = mix(h, &out.world_matrices[i], sizeof(glm::mat4));
+                        h = mix(h, &out.lod[i], sizeof(out.lod[i]));
+                        h = mix(h, &out.part[i], sizeof(out.part[i]));
+                        h = mix(h, &k.shader_hash, sizeof(k.shader_hash));
+                        h = mix(h, &k.mesh, sizeof(k.mesh));
+                        h = mix(h, &k.shadow, sizeof(k.shadow));
+                    }
+                }
+                const auto it = local_cache_.find(slot.light);
+                slot.rerender_static = (it == local_cache_.end() || it->second.hash != h ||
+                                        !(it->second.block == slot.block));
+                local_cache_[slot.light] = LocalCacheEntry{h, slot.block};
+
+                for (uint32_t v = 0; v < slot.view_count; ++v) {
+                    const glm::mat4& vp = blk.view_proj[slot.first_view + v];
+                    if (slot.rerender_static) {
+                        build(vp, true, res, [&](size_t i) { return casts(i) && in_light(i) && static_ok(i); },
+                              out.local_static[slot.first_view + v]);
+                    }
+                    build(vp, true, res, [&](size_t i) { return casts(i) && in_light(i) && !static_ok(i); },
+                          out.local_dynamic[slot.first_view + v]);
+                }
             }
-        }
-        if (cast_spot_shadow) {
-            build(current_light_data().spot_light_space_matrix, true,
-                  static_cast<float>(config_.spot_shadow_resolution), casts, out.spot);
         }
 
         instance_stream_.upload();
@@ -3481,7 +3545,7 @@ private:
         // already-populated LightUBO slot rather than re-gathered from the scene, so the
         // march's lights and shadow matrices byte-match the surface lighting's -- render()
         // calls this after update_lights_()/update_dir_shadow_matrix_()/
-        // update_spot_shadow_matrix_() have all written the current slot.
+        // update_local_shadows_() have all written the current slot.
         const auto& lubo = current_light_data();
         vol.dir_light_space_matrix  = lubo.dir_light_space_matrix;
         vol.spot_light_space_matrix = lubo.spot_light_space_matrix;
@@ -3534,8 +3598,10 @@ private:
                           [](const ScatterCandidate& a, const ScatterCandidate& b) {
                               return a.dist2 < b.dist2;
                           });
-        const bool spot_shadowed = config_.volumetrics_shadows_enabled &&
-                                   lubo.spot_shadow_params.z > 0.5f;
+        // Every scatter light that holds a local-atlas shadow slot is shadowed in the fog too --
+        // point lights included (the cube map they used to have was never bound here).
+        const bool local_shadowed = config_.volumetrics_shadows_enabled;
+        vol.local_shadows = lubo.local_shadows;
         for (uint32_t k = 0; k < scatter_count; ++k) {
             auto& dst = vol.scatter_lights[k];
             if (cands[k].spot) {
@@ -3544,14 +3610,14 @@ private:
                 dst.color_intensity = sl.color_intensity;
                 dst.direction_cone  = sl.direction_cone;
                 dst.params = glm::vec4(sl.params.x, sl.params.y, 1.0f,
-                                       (spot_shadowed && cands[k].index == lubo.light_counts.w)
-                                           ? 1.0f : 0.0f);
+                                       local_shadowed ? sl.params.z : 0.0f);
             } else {
                 const auto& pl = lubo.point_lights[cands[k].index];
                 dst.position_range  = pl.position_range;
                 dst.color_intensity = pl.color_intensity;
                 dst.direction_cone  = glm::vec4(0.0f);
-                dst.params = glm::vec4(pl.attenuation.x, 0.0f, 0.0f, 0.0f);
+                dst.params = glm::vec4(pl.attenuation.x, 0.0f, 0.0f,
+                                       local_shadowed ? pl.attenuation.w : 0.0f);
             }
         }
         vol.counts.y = static_cast<float>(scatter_count);
@@ -3907,23 +3973,17 @@ private:
             ubo.dir_direction = glm::vec4(dir->direction, dir->intensity);
             ubo.dir_color     = glm::vec4(dir->color, 0.0f);
         }
-        // Soft-shadow tuning shared by every calc_dir_shadow()/calc_point_shadow() call site.
-        // Written UNCONDITIONALLY, not only when a directional light exists: .y is the POINT-light
-        // PCF radius and .w the shared rotation offset, so a point-light-only scene still needs
-        // them filled or its shadows silently fall back to the hard path. .x (directional shadow
-        // intensity) is meaningless without a directional light and keeps its 1.0 default there.
+        // Soft-shadow tuning shared by every calc_dir_shadow()/calc_local_shadow() call site.
+        // Written UNCONDITIONALLY, not only when a directional light exists: .z (PCF taps) and
+        // .w (the shared rotation offset) drive the point/spot kernels too, so a scene with only
+        // local lights still needs them filled. .x (directional shadow intensity) is meaningless
+        // without a directional light and keeps its 1.0 default there.
         //
-        // .y converts point_shadow_softness from cube-map TEXELS into a tangent-space offset on a
-        // unit sample direction, the unit calc_point_shadow wants. Clamped to 8 texels so a
-        // too-large config value degrades to "slightly over-soft" rather than washing every point
-        // shadow out to uniform grey.
-        float point_pcf_radius = config_.soft_shadows
-            ? std::min(config_.point_shadow_softness, 8.0f) *
-              (2.0f / static_cast<float>(std::max(config_.cube_shadow_resolution, 1u)))
-            : 0.0f;
+        // .y used to carry the single point shadow's PCF radius; point penumbrae are now per
+        // light in LightUBO::local_shadows (see update_local_shadows_()), so it is left 0.
         ubo.dir_shadow_extra = glm::vec4(
             dir ? glm::clamp(dir->shadow_intensity, 0.0f, 1.0f) : 1.0f,
-            point_pcf_radius,
+            0.0f,
             static_cast<float>(std::clamp<uint32_t>(config_.shadow_pcf_samples, 1u, 32u)),
             static_cast<float>(frame_index_ & 0xFFu));
 
@@ -3940,9 +4000,13 @@ private:
         // the shadow map's PCSS growth dial (shadow_pcss_light_size), gated by soft_shadows.
         // 0 selects the hard single-ray march. Written unconditionally, same policy as the
         // rows above.
+        // .y is the march's per-frame step rotation: the frame index while the contact resolve
+        // accumulates (it integrates the rotating comb), 0 when it does not (nothing would
+        // average it, so a still image would shimmer).
         ubo.contact_soft_params = glm::vec4(
             config_.soft_shadows ? std::max(config_.shadow_pcss_light_size, 0.0f) : 0.0f,
-            0.0f, 0.0f, 0.0f);
+            config_.contact_shadow_temporal_enabled ? static_cast<float>(frame_index_ & 0xFFu) : 0.0f,
+            0.0f, 0.0f);
 
         const auto& points = frame_scene_.point_lights;
         uint32_t count = std::min<uint32_t>(static_cast<uint32_t>(points.size()), coopa::gfx::engine::data::MAX_POINT_LIGHTS);
@@ -3953,13 +4017,11 @@ private:
             gpu.position_range  = glm::vec4(pl->get_world_position(), pl->range);
             gpu.color_intensity = glm::vec4(pl->color, pl->intensity);
             gpu.attenuation     = glm::vec4(pl->attenuation_constant, pl->attenuation_linear,
-                                            pl->attenuation_quadratic, 0.0f); // cast_shadows set below, light 0 only
+                                            pl->attenuation_quadratic, 0.0f); // .w: shadow slot, set by update_local_shadows_()
         }
 
-        // spot_shadow_params (including .y, the PCF penumbra scale) is written entirely by
-        // render()'s update_spot_shadow_matrix_() afterward -- unlike dir_shadow_extra.y
-        // above, the spot radius needs the shadow-casting spot's cone angle for its
-        // world-to-texel conversion, and only that function has the caster in hand.
+        // Point and spot shadow slots (attenuation.w / params.z) are written afterward by
+        // update_local_shadows_(), which picks the shadowed lights.
 
         const auto& spots = frame_scene_.spot_lights;
         uint32_t spot_count = std::min<uint32_t>(static_cast<uint32_t>(spots.size()), coopa::gfx::engine::data::MAX_SPOT_LIGHTS);
@@ -3973,7 +4035,7 @@ private:
             gpu.color_intensity = glm::vec4(sl->color, sl->intensity);
             gpu.params = glm::vec4(sl->attenuation_constant,
                                    std::cos(glm::radians(sl->clamped_inner_angle())),
-                                   0.0f, 0.0f); // cast_shadows set below, shadow-owning slot only
+                                   0.0f, 0.0f); // .z: shadow slot, set by update_local_shadows_()
         }
     }
 
@@ -4087,6 +4149,11 @@ private:
             // divided by texel_world to land in the texels gfx_shadow_dir_pcf_vogel wants.
             ubo.dir_cascade_pcss_scale[c]  = fit.depth_range_world *
                 config_.shadow_pcss_light_size / std::max(fit.texel_world, 1e-6f);
+            // One texel of THIS cascade in its [0,1] light depth: the shader multiplies its
+            // constant + slope bias (counted in texels) by this, so the bias tracks each
+            // cascade's resolution instead of being a fixed fraction of a depth range that
+            // always spans the whole shadow distance toward the sun.
+            ubo.dir_cascade_depth_bias[c]  = fit.texel_world / std::max(fit.depth_range_world, 1e-6f);
 
             if (c < cascades && pcf_texels > 0.0f) any_soft = true;
 
@@ -4119,11 +4186,33 @@ private:
         // .w is the dithered transition band, the outer slice of that accepted region where
         // calc_dir_shadow() randomly promotes a pixel to the next cascade so TAA can resolve
         // the resolution step into a gradient instead of a seam.
-        const float inset = (pcf_max + pcss_search) / static_cast<float>(std::max(tile_res, 1u));
+        // The PCSS blocker search only reaches past the PCF disk when PCSS is actually on;
+        // reserving its radius otherwise just wastes the outer ring of every tile.
+        const float inset_texels = (config_.soft_shadows ? pcf_max : 1.0f) +
+                                   (ubo.pcss_params.x > 0.5f ? pcss_search : 0.0f) + 1.0f;
+        const float inset = inset_texels / static_cast<float>(std::max(tile_res, 1u));
         ubo.dir_cascade_info = glm::vec4(
             static_cast<float>(cascades),
             static_cast<float>(coopa::gfx::engine::targets::ShadowMapTarget::grid_for(cascades).first),
             inset, 0.06f);
+
+        // Depth bias (texels; see toy_shadow_bias_texels in pixel_shadow_body.glsl) -- shared
+        // with the local-light maps, which convert it per pixel.
+        ubo.dir_shadow_bias_texels = glm::vec4(std::max(config_.shadow_depth_bias_texels, 0.0f),
+                                               std::max(config_.shadow_slope_bias_texels, 0.0f),
+                                               std::max(config_.shadow_slope_bias_max, 0.0f), 0.0f);
+        // Far fade. Measured from the point the cascades are centred on: the camera for the
+        // frustum fit (whose last slice ends at shadow_distance), the focus point for the focus
+        // fit (whose last sphere has radius shadow_distance around it -- the camera itself may
+        // sit further away than that).
+        const float fade = std::clamp(config_.shadow_fade_fraction, 0.0f, 1.0f);
+        const glm::vec3 fade_origin = focus_fit ? focus_point
+                                    : (cam ? glm::vec3(glm::inverse(fit_cam.view)[3]) : glm::vec3(0.0f));
+        ubo.dir_shadow_fade = glm::vec4(fade_origin, (cam && fade > 0.0f) ? config_.shadow_distance : 0.0f);
+        // Without TAA nothing averages a dithered cascade switch, so blend the two cascades
+        // across the band instead (two evaluations there, one everywhere else).
+        ubo.dir_shadow_fade_params = glm::vec4(config_.shadow_distance * (1.0f - fade), fade,
+                                               config_.aa_mode == "taa" ? 0.0f : 1.0f, 0.0f);
     }
 
     /**
@@ -4260,36 +4349,6 @@ private:
     MeshDrawStats stats_total_;     ///< Summed over stats_frames_ frames.
     uint64_t      stats_frames_ = 0;
 
-    /** @brief The first PointLightComponent with cast_shadows set, or nullptr. */
-    coopa::gfx::engine::components::PointLightComponent* find_first_shadow_casting_point_light_(coopa::scene::Scene& scene) {
-        for (auto* pl : frame_scene_.point_lights) {
-            if (pl->cast_shadows) return pl;
-        }
-        return nullptr;
-    }
-
-    /** @brief A shadow-casting SpotLightComponent plus its index into update_lights_()'s
-     *         spots array (get_components<SpotLightComponent>() order), or {nullptr, 0}. The
-     *         index is what light_counts.w names so the shader knows which spot_lights[] slot
-     *         owns spot_light_space_matrix -- unlike the point-light path, which hardcodes
-     *         slot 0, a spot doesn't get that shortcut since find_first_shadow_casting_point_light_'s
-     *         "first casting light" and "slot 0" already silently disagree whenever a
-     *         non-shadow-casting point light is authored before the shadow-casting one; this
-     *         spot path is deliberately exact instead of repeating that bug. */
-    struct SpotShadowCaster {
-        coopa::gfx::engine::components::SpotLightComponent* light = nullptr;
-        uint32_t index = 0;
-    };
-    SpotShadowCaster find_first_shadow_casting_spot_light_(coopa::scene::Scene& scene) {
-        const auto& spots = frame_scene_.spot_lights;
-        uint32_t count = std::min<uint32_t>(static_cast<uint32_t>(spots.size()),
-                                            coopa::gfx::engine::data::MAX_SPOT_LIGHTS);
-        for (uint32_t i = 0; i < count; ++i) {
-            if (spots[i]->cast_shadows) return {spots[i], i};
-        }
-        return {};
-    }
-
     /**
      * @brief Draws the SDF shadow casters one shadow view can see, each scissored to its
      *        bounds' footprint in that view.
@@ -4387,53 +4446,6 @@ private:
         }
     }
 
-    /**
-     * @brief Writes this frame's spot shadow matrix and shadow parameters into the current
-     *        slot's LightUBO.
-     *
-     * Mirrors update_dir_shadow_matrix_(), but the spot map needs no camera-fit: its
-     * frustum is entirely a function of the light itself (position/direction/cone/range),
-     * via ShadowMapTarget::get_spot_matrix(). Fills ALL of spot_shadow_params (x/y/z/w) --
-     * the penumbra scale in .y needs the casting spot's cone angle, which only this
-     * function has. Must run after render() has set light_frame_ to this frame's slot,
-     * same ordering requirement update_dir_shadow_matrix_() has.
-     */
-    void update_spot_shadow_matrix_(const coopa::gfx::engine::components::SpotLightComponent* spot,
-                                    bool cast_spot_shadow) {
-        auto& ubo = current_light_data();
-        // .y is the PCF penumbra as a distance-scaled texel factor: the spot map is a
-        // PERSPECTIVE projection, so its texel world size grows linearly with distance d
-        // from the light -- texel_world(d) = 2*d*tan(outer_half)/resolution -- and there is
-        // no single per-frame texel count the way update_dir_shadow_matrix_()'s ortho fit
-        // has. Instead the CPU stores K = softness_world * resolution / (2*tan(outer_half))
-        // and calc_spot_shadow() divides by the fragment's own light-space depth
-        // (light_space_pos.w, the forward distance d for perspectiveRH_ZO * lookAt), giving
-        // radius_texels = K / d -- i.e. config_.spot_shadow_softness WORLD units of
-        // penumbra at every receiver distance, matching shadow_softness's behavior on the
-        // directional map. The 12-texel practical clamp is applied per-pixel in the shader.
-        // 0 (no caster, or soft_shadows off) selects the single hard compare.
-        if (spot) {
-            ubo.spot_light_space_matrix = coopa::gfx::engine::targets::ShadowMapTarget::get_spot_matrix(
-                spot->get_world_position(), spot->get_world_direction(),
-                spot->clamped_outer_angle(), spot->range);
-            ubo.spot_shadow_params.y = config_.soft_shadows
-                ? config_.spot_shadow_softness *
-                      static_cast<float>(config_.spot_shadow_resolution) /
-                      (2.0f * std::tan(glm::radians(spot->clamped_outer_angle())))
-                : 0.0f;
-        } else {
-            ubo.spot_shadow_params.y = 0.0f;
-        }
-        ubo.spot_shadow_params.x = config_.shadow_bias;
-        ubo.spot_shadow_params.z = cast_spot_shadow ? 1.0f : 0.0f;
-        // The normal-offset bias stays a world-space constant, unlike the directional .w: the
-        // per-pixel texel size the penumbra conversion above derives in-shader is not available
-        // HERE, and the callers apply this offset before they have a light-space position to
-        // derive it from. A constant is honest, and no scene in this repo lights blocky terrain
-        // with a shadow-casting spot.
-        ubo.spot_shadow_params.w = 0.05f;
-    }
-
     void record_directional_shadow_(coopa::gfx::command::CommandBuffer& cmd,
                                     const MeshGather& meshes,
                                     const std::vector<SdfDrawItem>& sdf_draws,
@@ -4484,99 +4496,248 @@ private:
         shadow_target_.transition_dir_to_shader_read(cmd);
     }
 
-    void record_point_shadow_(coopa::gfx::command::CommandBuffer& cmd,
-                              const MeshGather& meshes,
-                              const std::vector<SdfDrawItem>& sdf_draws,
-                              coopa::gfx::engine::components::PointLightComponent* shadow_point,
-                              bool cast_point_shadow) {
-        if (!cast_point_shadow) {
-            shadow_target_.transition_cube_to_shader_read(cmd);
-            return;
-        }
+    /**
+     * @brief Chooses this frame's shadowed point and spot lights, packs them into the local
+     *        shadow atlas, and writes their records (LightUBO::local_shadows) plus each light's
+     *        1-based slot (PointLightGPU::attenuation.w / SpotLightGPU::params.z).
+     *
+     * Any number of lights may set cast_shadows; the ones that get a shadow are those with the
+     * highest screen importance -- the influence sphere's size over its distance from the camera,
+     * times the square root of brightness, culled to the camera frustum, with a 25% bonus for
+     * last frame's choices so the selection does not flicker between near-equal lights (Unreal
+     * ranks shadowed local lights the same way, by screen-space size). Up to
+     * max_shadowed_point_lights / max_shadowed_spot_lights of each win; those that do not fit
+     * the atlas are left unshadowed, least important first.
+     *
+     * Packing order is by scene index, not importance, so a light keeps its tile -- and its
+     * static-cache content -- while the set of shadowed lights is unchanged.
+     *
+     * Each point light gets six views with a guard-banded field of view: tan(half fov) =
+     * res / (res - 2 * guard), which puts a cube edge `guard` texels inside its tile so a PCF
+     * kernel of up to `guard - 1.5` texels never crosses into the next face.
+     */
+    void update_local_shadows_(const glm::vec3& cam_pos, const glm::mat4& camera_vp) {
+        using namespace coopa::gfx::engine::data;
+        auto& ubo = current_light_data();
+        LocalShadowBlock& blk = ubo.local_shadows;
+        blk = LocalShadowBlock{};
+        local_slots_.clear();
+        // The single-map fields only gfxcoopa's legacy shaders read: nothing renders them now.
+        ubo.light_counts.w     = 0xFFFFFFFFu;
+        ubo.spot_shadow_params = glm::vec4(0.0f);
 
-        glm::vec3 light_pos = shadow_point->get_world_position();
-        float range = shadow_point->range;
-
-        for (uint32_t face = 0; face < 6; ++face) {
-            shadow_target_.begin_cube_face_pass(cmd, face);
-            shadow_pipeline_->bind_cube(cmd);
-            cmd.bind_vertex_buffer(instance_stream_.buffer(), 0, 1);
-
-            coopa::gfx::engine::passes::CubeShadowPushConstants pc{};
-            pc.light_space_matrix = coopa::gfx::engine::targets::ShadowMapTarget::get_cube_face_matrix(face, light_pos, range);
-            pc.light_pos_range    = glm::vec4(light_pos, range);
-            pc.gfx_time = surface_gfx_time_();
-
-            draw_shadow_batches_(cmd, meshes, meshes.cube[face], pc,
-                [&](const std::string& shader, bool cull) { shadow_pipeline_->bind_cube(cmd, shader, cull); },
-                [&](const auto& p) { shadow_pipeline_->push_cube(cmd, p); });
-
-            if (!sdf_draws.empty()) {
-                sdf_shadow_pass_->bind_cube(cmd);
-                cmd.bind_descriptor_set(sdf_data_.current_set(), 0);
-
-                coopa::gfx::engine::passes::SdfCubeShadowPushConstants sdf_pc{};
-                sdf_pc.light_space_matrix = pc.light_space_matrix;
-                sdf_pc.light_pos_range    = pc.light_pos_range;
-                sdf_pc.shadow_max_steps   = config_.sdf_shadow_max_steps;
-                draw_sdf_shadow_casters_(cmd, sdf_draws, sdf_pc.light_space_matrix, 0, 0,
-                                         config_.cube_shadow_resolution,
-                                         [&](uint32_t gpu_index) {
-                                             sdf_pc.renderer_index = gpu_index;
-                                             sdf_shadow_pass_->push_cube(cmd, sdf_pc);
-                                         });
+        std::unordered_set<const void*> selected;
+        if (config_.shadows_enabled) {
+            const Frustum frustum = Frustum::from_matrix(camera_vp);
+            struct Cand { uint32_t kind, index; const void* light; glm::vec3 pos; float range, score; };
+            std::vector<Cand> points, spots;
+            auto score_of = [&](const glm::vec3& pos, float range, const glm::vec3& color,
+                                float intensity, const void* light) {
+                WorldBounds b;
+                b.center = pos;
+                b.extent = glm::vec3(range);
+                if (!frustum.intersects(b)) return -1.0f;
+                const float d = glm::length(pos - cam_pos);
+                float score = range / std::max(d - range, 0.25f * range);
+                const float lum = glm::dot(color, glm::vec3(0.2126f, 0.7152f, 0.0722f)) * intensity;
+                score *= std::sqrt(std::max(lum, 1e-3f));
+                if (local_selected_prev_.count(light)) score *= 1.25f;
+                return score;
+            };
+            const auto& pls = frame_scene_.point_lights;
+            const uint32_t np = std::min<uint32_t>(static_cast<uint32_t>(pls.size()), MAX_POINT_LIGHTS);
+            for (uint32_t i = 0; i < np; ++i) {
+                auto* pl = pls[i];
+                if (!pl->cast_shadows || pl->range <= 0.0f || pl->intensity <= 0.0f) continue;
+                const glm::vec3 pos = pl->get_world_position();
+                const float sc = score_of(pos, pl->range, pl->color, pl->intensity, pl);
+                if (sc >= 0.0f) points.push_back({2u, i, pl, pos, pl->range, sc});
             }
-            shadow_target_.end_cube_face_pass(cmd);
+            const auto& sls = frame_scene_.spot_lights;
+            const uint32_t ns = std::min<uint32_t>(static_cast<uint32_t>(sls.size()), MAX_SPOT_LIGHTS);
+            for (uint32_t i = 0; i < ns; ++i) {
+                auto* sl = sls[i];
+                if (!sl->cast_shadows || sl->range <= 0.0f || sl->intensity <= 0.0f) continue;
+                const glm::vec3 pos = sl->get_world_position();
+                const float sc = score_of(pos, sl->range, sl->color, sl->intensity, sl);
+                if (sc >= 0.0f) spots.push_back({1u, i, sl, pos, sl->range, sc});
+            }
+            auto keep_best = [](std::vector<Cand>& v, uint32_t budget) {
+                std::sort(v.begin(), v.end(), [](const Cand& a, const Cand& b) { return a.score > b.score; });
+                if (v.size() > budget) v.resize(budget);
+                // Stable placement: pack in scene order, so tiles do not shuffle with the ranking.
+                std::sort(v.begin(), v.end(), [](const Cand& a, const Cand& b) { return a.index < b.index; });
+            };
+            keep_best(points, config_.max_shadowed_point_lights);
+            keep_best(spots,  config_.max_shadowed_spot_lights);
+
+            std::vector<Cand> chosen = points;
+            chosen.insert(chosen.end(), spots.begin(), spots.end());
+            const uint32_t atlas = local_shadow_atlas_->size();
+            const uint32_t cube_res = std::max(config_.cube_shadow_resolution, 16u);
+            const uint32_t spot_res = std::max(config_.spot_shadow_resolution, 16u);
+            std::vector<std::pair<uint32_t, uint32_t>> sizes;
+            for (const Cand& c : chosen) {
+                sizes.push_back(c.kind == 2 ? std::make_pair(3u * cube_res, 2u * cube_res)
+                                            : std::make_pair(spot_res, spot_res));
+            }
+            const std::vector<AtlasRect> rects = pack_shadow_atlas(sizes, atlas);
+
+            const bool  soft    = config_.soft_shadows;
+            const float pcf_max = std::max(config_.shadow_pcf_max_texels, 1.0f);
+            uint32_t next_view = 0;
+            for (size_t k = 0; k < chosen.size(); ++k) {
+                const Cand& c = chosen[k];
+                const uint32_t views = (c.kind == 2) ? 6u : 1u;
+                if (rects[k].w == 0 || local_slots_.size() >= MAX_LOCAL_SHADOWS ||
+                    next_view + views > MAX_LOCAL_SHADOW_VIEWS) {
+                    if (!warned_local_atlas_full_) {
+                        std::cerr << "[toy::render] Local shadow atlas (" << atlas << "^2) is full: some "
+                                     "cast_shadows point/spot lights are unshadowed this frame. Raise "
+                                     "local_shadow_atlas_resolution or lower cube/spot_shadow_resolution.\n";
+                        warned_local_atlas_full_ = true;
+                    }
+                    continue;
+                }
+                const uint32_t slot = static_cast<uint32_t>(local_slots_.size());
+                LocalShadowSlot ls;
+                ls.kind       = c.kind;
+                ls.light      = c.light;
+                ls.gpu_index  = c.index;
+                ls.pos        = c.pos;
+                ls.range      = c.range;
+                ls.first_view = next_view;
+                ls.view_count = views;
+                ls.block      = rects[k];
+                ls.tile_res   = (c.kind == 2) ? cube_res : spot_res;
+
+                const float near_p = std::min(0.1f, c.range * 0.05f);
+                const float far_p  = std::max(c.range, near_p * 2.0f);
+                LocalShadowGPU& g = blk.shadows[slot];
+                float tan_half = 1.0f;
+                if (c.kind == 2) {
+                    const float softness = soft ? std::clamp(config_.point_shadow_softness, 0.0f, 8.0f) : 0.0f;
+                    const float guard    = std::ceil(softness) + 2.0f;
+                    tan_half = static_cast<float>(cube_res) / (static_cast<float>(cube_res) - 2.0f * guard);
+                    const glm::mat4 proj = glm::perspectiveRH_ZO(2.0f * std::atan(tan_half), 1.0f, near_p, far_p);
+                    for (uint32_t f = 0; f < 6; ++f) {
+                        blk.view_proj[next_view + f] = proj * local_shadow_point_face_view(f, c.pos);
+                    }
+                    g.pcf = glm::vec4(0.0f, std::min(softness, guard - 1.5f), guard - 1.5f, 1.0f);
+                    ubo.point_lights[c.index].attenuation.w = static_cast<float>(slot + 1);
+                } else {
+                    const auto* sl = static_cast<const coopa::gfx::engine::components::SpotLightComponent*>(c.light);
+                    const float outer = glm::radians(sl->clamped_outer_angle());
+                    tan_half = std::tan(outer);
+                    const glm::vec3 dir = sl->get_world_direction();
+                    // Z-up engine: a near-vertical aim needs another up axis for lookAt.
+                    const glm::vec3 up = (std::abs(dir.z) < 0.99f) ? glm::vec3(0.0f, 0.0f, 1.0f)
+                                                                    : glm::vec3(0.0f, 1.0f, 0.0f);
+                    blk.view_proj[next_view] = glm::perspectiveRH_ZO(2.0f * outer, 1.0f, near_p, far_p) *
+                                               glm::lookAt(c.pos, c.pos + dir, up);
+                    g.pcf = glm::vec4(soft ? std::max(config_.spot_shadow_softness, 0.0f) : 0.0f,
+                                         0.0f, pcf_max, 1.0f);
+                    ubo.spot_lights[c.index].params.z = static_cast<float>(slot + 1);
+                }
+                g.tile  = glm::vec4(static_cast<float>(rects[k].x) / static_cast<float>(atlas),
+                                    static_cast<float>(rects[k].y) / static_cast<float>(atlas),
+                                    static_cast<float>(ls.tile_res) / static_cast<float>(atlas),
+                                    static_cast<float>(c.kind));
+                g.light = glm::vec4(c.pos, far_p);
+                g.proj  = glm::vec4(near_p, tan_half, static_cast<float>(ls.tile_res),
+                                    static_cast<float>(next_view));
+                next_view += views;
+                local_slots_.push_back(ls);
+                selected.insert(c.light);
+            }
+            blk.info = glm::vec4(static_cast<float>(local_slots_.size()), static_cast<float>(atlas),
+                                 std::max(config_.shadow_normal_bias, 0.0f), 0.0f);
+            blk.bias = glm::vec4(std::max(config_.shadow_depth_bias_texels, 0.0f),
+                                 std::max(config_.shadow_slope_bias_texels, 0.0f),
+                                 std::max(config_.shadow_slope_bias_max, 0.0f), 0.0f);
+        }
+        local_selected_prev_ = std::move(selected);
+        // A light that lost its slot no longer owns its tiles: another light may be packed there
+        // now, so its cached static depth must not be trusted when it comes back.
+        for (auto it = local_cache_.begin(); it != local_cache_.end();) {
+            if (!local_selected_prev_.count(it->first)) it = local_cache_.erase(it); else ++it;
         }
     }
 
     /**
-     * @brief Records the spot shadow map: a single perspective depth pass, structurally a
-     *        copy of record_directional_shadow_() (same push-constant type, same per-material
-     *        shader-variant transition guard, same BLEND-at-full-opacity and CUTOUT rules,
-     *        same SDF loop) since a spot map, like the directional map, is one frustum -- only
-     *        light_space_matrix differs. Reuses shadow_pipeline_->bind_directional()/
-     *        push_directional() rather than adding a third named bind/push pair to
-     *        ShadowPipeline for that reason.
+     * @brief Records every point/spot shadow into the local-light atlas.
      *
-     *        Always begins/ends the pass, even with no caster -- exactly like
-     *        record_directional_shadow_() -- so the image is never left UNDEFINED on frame 0
-     *        and transition_spot_to_shader_read()'s oldLayout stays honest.
+     * With the static cache on (LocalShadowAtlas::caching()): lights whose static casters,
+     * light pose or tile changed re-render those casters into the cache atlas; every light's tiles
+     * are then copied cache -> live in one transfer; and only the casters that moved recently
+     * (plus SDF casters) draw live on top. With it off, every caster draws live into a cleared
+     * tile. Either way it is ONE live render pass for every view of every light -- point faces
+     * included -- at hardware depth, so no fragment writes gl_FragDepth and early-Z holds.
      */
-    void record_spot_shadow_(coopa::gfx::command::CommandBuffer& cmd,
-                             const MeshGather& meshes,
-                             const std::vector<SdfDrawItem>& sdf_draws,
-                             bool cast_spot_shadow) {
-        shadow_target_.begin_spot_pass(cmd);
-        if (cast_spot_shadow) {
+    void record_local_shadows_(coopa::gfx::command::CommandBuffer& cmd,
+                               const MeshGather& meshes,
+                               const std::vector<SdfDrawItem>& sdf_draws) {
+        local_shadow_atlas_->initialize(cmd);
+        if (local_slots_.empty()) return;   // nothing samples the atlas this frame
+        const bool caching = local_shadow_atlas_->caching();
+        const auto& blk = current_light_data().local_shadows;
+
+        auto draw_view = [&](uint32_t view, const std::vector<MeshBatch>& batches, bool with_sdf,
+                             const AtlasRect& rect) {
+            local_shadow_atlas_->set_tile(cmd, rect);
             shadow_pipeline_->bind_directional(cmd);
             cmd.bind_vertex_buffer(instance_stream_.buffer(), 0, 1);
-
             coopa::gfx::engine::passes::DirectionalShadowPushConstants pc{};
-            pc.light_space_matrix = current_light_data().spot_light_space_matrix;
+            pc.light_space_matrix = blk.view_proj[view];
             pc.gfx_time = surface_gfx_time_();
-
-            draw_shadow_batches_(cmd, meshes, meshes.spot, pc,
+            // Same per-material variant binding as the directional cascades, so a displaced
+            // caster's shadow moves exactly as its G-buffer draw does.
+            draw_shadow_batches_(cmd, meshes, batches, pc,
                 [&](const std::string& shader, bool cull) { shadow_pipeline_->bind_directional(cmd, shader, cull); },
                 [&](const auto& p) { shadow_pipeline_->push_directional(cmd, p); });
-
-            if (!sdf_draws.empty()) {
+            if (with_sdf && !sdf_draws.empty()) {
                 sdf_shadow_pass_->bind_directional(cmd);
                 cmd.bind_descriptor_set(sdf_data_.current_set(), 0);
-
                 coopa::gfx::engine::passes::SdfDirectionalShadowPushConstants sdf_pc{};
-                sdf_pc.light_space_matrix = current_light_data().spot_light_space_matrix;
+                sdf_pc.light_space_matrix = blk.view_proj[view];
                 sdf_pc.shadow_max_steps   = config_.sdf_shadow_max_steps;
-                draw_sdf_shadow_casters_(cmd, sdf_draws, sdf_pc.light_space_matrix, 0, 0,
-                                         config_.spot_shadow_resolution,
+                draw_sdf_shadow_casters_(cmd, sdf_draws, sdf_pc.light_space_matrix, rect.x, rect.y, rect.w,
                                          [&](uint32_t gpu_index) {
                                              sdf_pc.renderer_index = gpu_index;
                                              sdf_shadow_pass_->push_directional(cmd, sdf_pc);
                                          });
             }
+        };
+
+        local_shadow_atlas_->begin_frame(cmd);
+        if (caching) {
+            const bool any_static = std::any_of(local_slots_.begin(), local_slots_.end(),
+                                                [](const LocalShadowSlot& s) { return s.rerender_static; });
+            if (any_static) {
+                local_shadow_atlas_->begin_static_pass(cmd);
+                for (const LocalShadowSlot& slot : local_slots_) {
+                    if (!slot.rerender_static) continue;
+                    local_shadow_atlas_->clear_tile(cmd, slot.block);
+                    for (uint32_t v = 0; v < slot.view_count; ++v) {
+                        draw_view(slot.first_view + v, meshes.local_static[slot.first_view + v], false,
+                                  slot.view_rect(v));
+                    }
+                }
+                local_shadow_atlas_->end_static_pass(cmd);
+            }
+            std::vector<AtlasRect> blocks;
+            for (const LocalShadowSlot& slot : local_slots_) blocks.push_back(slot.block);
+            local_shadow_atlas_->copy_static(cmd, blocks);
         }
-        shadow_target_.end_spot_pass(cmd);
-        shadow_target_.transition_spot_to_shader_read(cmd);
+        local_shadow_atlas_->begin_dynamic_pass(cmd);
+        for (const LocalShadowSlot& slot : local_slots_) {
+            if (!caching) local_shadow_atlas_->clear_tile(cmd, slot.block);
+            for (uint32_t v = 0; v < slot.view_count; ++v) {
+                draw_view(slot.first_view + v, meshes.local_dynamic[slot.first_view + v], true,
+                          slot.view_rect(v));
+            }
+        }
+        local_shadow_atlas_->end_dynamic_pass(cmd);
     }
 
     /// Transitions the G-buffer depth image to SHADER_READ_ONLY_OPTIMAL for
@@ -5608,6 +5769,39 @@ private:
     uint32_t  frame_index_          = 0;
 
     InstanceStream instance_stream_;
+
+    // --- Point/spot shadows: the local-light shadow atlas -------------------------------------
+    /** One shadowed point or spot light this frame (update_local_shadows_()). */
+    struct LocalShadowSlot {
+        uint32_t    kind = 0;            ///< 1 = spot, 2 = point (LocalShadowGPU::tile.w).
+        const void* light = nullptr;     ///< The component -- the static-cache key.
+        uint32_t    gpu_index = 0;       ///< Index into LightUBO::point_lights / spot_lights.
+        glm::vec3   pos{0.0f};
+        float       range = 0.0f;
+        uint32_t    first_view = 0;      ///< Into LocalShadowBlock::view_proj / MeshGather::local_*.
+        uint32_t    view_count = 0;      ///< 6 for a point, 1 for a spot.
+        AtlasRect   block;               ///< The light's whole region of the atlas.
+        uint32_t    tile_res = 0;        ///< One view's tile edge.
+        bool        rerender_static = true; ///< Its static-cache tiles must be redrawn this frame.
+        /// Atlas rectangle of view `v` (0..view_count-1): face f at column f%3, row f/3.
+        AtlasRect view_rect(uint32_t v) const {
+            return {block.x + (v % 3u) * tile_res, block.y + (v / 3u) * tile_res, tile_res, tile_res};
+        }
+    };
+    std::unique_ptr<LocalShadowAtlas> local_shadow_atlas_;
+    std::vector<LocalShadowSlot>      local_slots_;
+    /** What each light's static-cache tiles hold: the static casters' hash and the block. */
+    struct LocalCacheEntry { uint64_t hash = 0; AtlasRect block; };
+    std::unordered_map<const void*, LocalCacheEntry> local_cache_;
+    /** Lights that held a shadow last frame -- a small score bonus keeps the choice stable. */
+    std::unordered_set<const void*> local_selected_prev_;
+    /** Consecutive frames each renderer has not moved; static-cache eligibility. */
+    std::unordered_map<const coopa::gfx::engine::components::MeshRenderer*, uint32_t> still_frames_;
+    /** Surface shaders with their own shadow vertex stage (possibly animated). */
+    std::unordered_set<std::string> animated_shadow_shaders_;
+    /** Still frames before a caster's depth may be cached as static. */
+    static constexpr uint32_t kStaticCasterFrames = 8;
+    bool warned_local_atlas_full_ = false;
     bool           warned_perspective_snap_ = false;
 
     // sdf_data_ must be constructed before the four passes below, which bind its layout;

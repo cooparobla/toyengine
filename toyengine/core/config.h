@@ -273,7 +273,15 @@ struct AppConfig {
                 if (r.contains("shadow_receiver_max_slope"))  config.render.shadow_receiver_max_slope  = r.at("shadow_receiver_max_slope").get_value<float>();
                 if (r.contains("cube_shadow_resolution")) config.render.cube_shadow_resolution = r.at("cube_shadow_resolution").get_value<uint32_t>();
                 if (r.contains("spot_shadow_resolution")) config.render.spot_shadow_resolution = r.at("spot_shadow_resolution").get_value<uint32_t>();
+                if (r.contains("local_shadow_atlas_resolution")) config.render.local_shadow_atlas_resolution = r.at("local_shadow_atlas_resolution").get_value<uint32_t>();
+                if (r.contains("max_shadowed_point_lights")) config.render.max_shadowed_point_lights = r.at("max_shadowed_point_lights").get_value<uint32_t>();
+                if (r.contains("max_shadowed_spot_lights"))  config.render.max_shadowed_spot_lights  = r.at("max_shadowed_spot_lights").get_value<uint32_t>();
+                if (r.contains("shadow_cache_enabled"))      config.render.shadow_cache_enabled      = r.at("shadow_cache_enabled").get_value<bool>();
                 if (r.contains("shadow_bias"))            config.render.shadow_bias            = r.at("shadow_bias").get_value<float>();
+                if (r.contains("shadow_depth_bias_texels")) config.render.shadow_depth_bias_texels = r.at("shadow_depth_bias_texels").get_value<float>();
+                if (r.contains("shadow_slope_bias_texels")) config.render.shadow_slope_bias_texels = r.at("shadow_slope_bias_texels").get_value<float>();
+                if (r.contains("shadow_slope_bias_max"))    config.render.shadow_slope_bias_max    = r.at("shadow_slope_bias_max").get_value<float>();
+                if (r.contains("shadow_fade_fraction"))     config.render.shadow_fade_fraction     = r.at("shadow_fade_fraction").get_value<float>();
                 if (r.contains("shadow_normal_bias"))     config.render.shadow_normal_bias     = r.at("shadow_normal_bias").get_value<float>();
                 if (r.contains("shadow_distance"))        config.render.shadow_distance        = r.at("shadow_distance").get_value<float>();
                 if (r.contains("soft_shadows"))            config.render.soft_shadows            = r.at("soft_shadows").get_value<bool>();

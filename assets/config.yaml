@@ -45,8 +45,9 @@ render:
   shadow_pcss_enabled: false # PCSS contact hardening: a blocker search drives the penumbra, sharp
                              # at contact and widening to shadow_softness with distance. Needs
                              # soft_shadows -- shadow_softness becomes the MAXIMUM width, not a fixed one.
-  contact_shadows_enabled: false # short screen-space march toward the sun, closing the normal-bias
-                             # gap at object bases (deferred/directional light only). The one
+  contact_shadows_enabled: true # short screen-space march toward the sun, closing the normal-bias
+                             # gap at object bases (deferred/directional light only). One ray,
+                             # one depth fetch per step (~0.7 ms at 1080p). The one
                              # exception to this block's needs-its-parent rule: works without
                              # shadows_enabled -- shadows_enabled: false + this true renders a
                              # contact-only view for isolating the effect. Follows soft_shadows:
@@ -117,6 +118,7 @@ render:
   # shadow_pcf_samples) still overrides its preset.
   # =========================================================================
   shadow_quality:      high  # map resolutions + PCF taps + PCSS blocker taps + contact-shadow steps
+                             # + local-light atlas size and how many point/spot lights cast shadows
   ssao_quality:        high  # slices, march steps, pixel radius, temporal depth (4/8/8/12 frames)
   ssr_quality:         high  # specular raymarch iteration budget
   ssgi_quality:        high  # traced-bounce iteration budget (separate chain from ssr_quality)
@@ -153,7 +155,10 @@ render:
   sky_ground:  [0.05, 0.045, 0.04]  # sky gradient: straight down
 
   # --- Shadows ---
-  shadow_bias: 0.005
+  shadow_bias: 0.005          # LEGACY: only gfxcoopa's pre-cascade shaders read this
+  shadow_depth_bias_texels: 1.0 # constant depth bias, in shadow-map texels (Unreal's Shadow Bias)
+  shadow_slope_bias_texels: 1.0 # slope depth bias, texels per tan(N,L), widened by the PCF radius
+  shadow_fade_fraction: 0.1  # directional shadows fade over the last 10% of shadow_distance
   shadow_normal_bias: 1.0    # normal-offset bias in shadow-map texels beyond the PCF disk
   shadow_distance: 60.0      # how far from the camera the directional shadow frustum reaches
   shadow_cascades: 4         # directional cascades, 1..4. Each gets its own ortho fit to one
@@ -175,8 +180,14 @@ render:
   # shadow_receiver_plane_bias: false # PCF taps follow the receiver's plane, so a wide penumbra
                              # no longer needs a matching normal offset (which erodes shadows)
   shadow_softness: 0.15      # directional penumbra radius, WORLD units
-  point_shadow_softness: 3.0 # point-light penumbra radius, CUBE-MAP texels
+  point_shadow_softness: 3.0 # point-light penumbra radius, cube-face texels (also sizes each face's guard band)
   spot_shadow_softness: 0.15 # spot penumbra radius, WORLD units (converted per pixel from light distance)
+  # Point and spot shadows share one atlas. Every cast_shadows light competes for a slot by
+  # screen importance; budgets and atlas size come from shadow_quality (High: 4 + 4 in 4096^2).
+  # max_shadowed_point_lights: 4
+  # max_shadowed_spot_lights: 4
+  # local_shadow_atlas_resolution: 4096 # startup-fixed
+  shadow_cache_enabled: true # cache static casters per light; only moving ones redraw (startup-fixed)
   shadow_pcss_light_size: 0.02 # tan of the sun's angular radius; penumbra growth per metre of gap.
                              # Also drives the soft contact-shadow penumbra (when soft_shadows is on);
                              # contact shadows are short-range, so they scale it up internally to stay visible.

@@ -53,8 +53,7 @@ enum class CpuScope : uint32_t {
 /// so together they sum to the whole GPU frame.
 enum class GpuScope : uint32_t {
     ShadowDirectional,
-    ShadowPoint,
-    ShadowSpot,
+    ShadowLocal,         ///< Every point and spot shadow (the local-light atlas, cache copy included).
     GBuffer,
     HiZ,                 ///< Hi-Z + SSAO depth pyramids.
     TransparentCapture,  ///< SSR's second source: capture + its Hi-Z and colour mips.
@@ -101,7 +100,7 @@ inline const char* scope_name(CpuScope s) {
 
 inline const char* scope_name(GpuScope s) {
     static const char* names[kGpuScopeCount] = {
-        "shadow.directional", "shadow.point", "shadow.spot", "gbuffer", "hiz", "transparent_capture",
+        "shadow.directional", "shadow.local", "gbuffer", "hiz", "transparent_capture",
         "temporal_history", "contact_shadows", "ssao", "lighting+sky", "scene_color_mips",
         "ssr.trace", "ssr.resolve", "ssr.blur", "ssgi.trace", "ssgi.resolve", "ssgi.blur", "ssr.composite",
         "refraction_mips", "transparent", "underwater", "fog", "volumetrics.inject", "volumetrics.integrate", "volumetrics", "dof", "bloom", "exposure",

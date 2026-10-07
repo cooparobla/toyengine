@@ -333,6 +333,14 @@ struct PixelRenderConfig {
             case RenderQuality::High:   shadow_map_resolution = 2048; cube_shadow_resolution = 512;  spot_shadow_resolution = 1024; shadow_pcf_samples = 24; shadow_pcss_taps = 8;  contact_shadow_steps = 8;  break;
             case RenderQuality::Ultra:  shadow_map_resolution = 3072; cube_shadow_resolution = 1024; spot_shadow_resolution = 2048; shadow_pcf_samples = 32; shadow_pcss_taps = 16; contact_shadow_steps = 16; break;
         }
+        // The local-light atlas and budgets per tier, sized so the budget packs: a point light is
+        // a 3x2 block of cube tiles, a spot one spot tile (see pack_shadow_atlas()).
+        switch (shadow_quality) {
+            case RenderQuality::Low:    local_shadow_atlas_resolution = 1024; max_shadowed_point_lights = 1; max_shadowed_spot_lights = 1; break;
+            case RenderQuality::Medium: local_shadow_atlas_resolution = 2048; max_shadowed_point_lights = 1; max_shadowed_spot_lights = 2; break;
+            case RenderQuality::High:   local_shadow_atlas_resolution = 4096; max_shadowed_point_lights = 4; max_shadowed_spot_lights = 4; break;
+            case RenderQuality::Ultra:  local_shadow_atlas_resolution = 6144; max_shadowed_point_lights = 4; max_shadowed_spot_lights = 3; break;
+        }
         switch (ssao_quality) {
             case RenderQuality::Low:    ssao_slices = 1; ssao_steps = 6;  ssao_max_radius_px = 32.0f; ssao_temporal_frames = 4;  break;
             case RenderQuality::Medium: ssao_slices = 2; ssao_steps = 8;  ssao_max_radius_px = 40.0f; ssao_temporal_frames = 8;  break;
@@ -528,9 +536,61 @@ struct PixelRenderConfig {
     bool     shadow_receiver_plane_bias = false;
     /** @brief Receiver-plane bias only: the steepest receiver slope it trusts, as a tangent. */
     float    shadow_receiver_max_slope  = 4.0f;
-    uint32_t cube_shadow_resolution = 512;
-    uint32_t spot_shadow_resolution = 1024;
+    uint32_t cube_shadow_resolution = 512;   ///< One point-light cube FACE tile, texels (local atlas).
+    uint32_t spot_shadow_resolution = 1024;  ///< One spot-light tile, texels (local atlas).
+    /**
+     * @brief Edge of the local-light (point/spot) shadow atlas, texels. Every shadowed point
+     *        light takes a 3x2 block of `cube_shadow_resolution` tiles and every shadowed spot one
+     *        `spot_shadow_resolution` tile; lights that do not fit are left unshadowed (lowest
+     *        importance first). Startup-fixed (sizes the images); driven by `shadow_quality`.
+     */
+    uint32_t local_shadow_atlas_resolution = 4096;
+    /**
+     * @brief How many point / spot lights may cast shadows at once. The `cast_shadows` lights
+     *        with the highest screen importance (influence radius over distance from the camera,
+     *        times brightness, with a little hysteresis) win. RUNTIME; driven by `shadow_quality`.
+     */
+    uint32_t max_shadowed_point_lights = 4;
+    uint32_t max_shadowed_spot_lights  = 4;
+    /**
+     * @brief Cache static casters' depth per local light (Unreal's static shadow caching for
+     *        stationary/movable lights): a light's static geometry is rendered once into a cache
+     *        atlas and copied in each frame, and only casters that moved recently draw live.
+     *        Re-rendered when the light, its tile, or the static caster set changes. Costs a
+     *        second atlas image. Startup-fixed.
+     */
+    bool     shadow_cache_enabled = true;
+    /**
+     * @brief LEGACY: a constant depth bias in the directional map's [0,1] light depth.
+     *
+     * Only gfxcoopa's own pre-cascade shaders (pbr.frag / deferred_lighting.frag, which read
+     * LightUBO::dir_shadow_params.x) still use it. Every toyengine shading path biases by
+     * `shadow_depth_bias_texels` + `shadow_slope_bias_texels` instead, which scale with each
+     * map's own texel size.
+     */
     float    shadow_bias            = 0.005f;
+    /**
+     * @brief Constant shadow-map depth bias, in shadow-map TEXELS (Unreal's "Shadow Bias").
+     *
+     * Converted per cascade (and per local-light map, per pixel) into that map's own depth units,
+     * so it means the same thing at every resolution and distance. RUNTIME.
+     */
+    float    shadow_depth_bias_texels = 1.0f;
+    /**
+     * @brief Slope-scaled depth bias, in texels per unit tan(angle between surface normal and
+     *        light) -- Unreal's "Shadow Slope Bias". A receiver tilted away from the light
+     *        climbs this much depth across one texel; capped at `shadow_slope_bias_max` tan.
+     *        Multiplied by (1 + PCF radius in texels), since a soft kernel's outer taps compare
+     *        that far across the receiver's slope. RUNTIME.
+     */
+    float    shadow_slope_bias_texels = 1.0f;
+    float    shadow_slope_bias_max    = 5.0f;
+    /**
+     * @brief Fraction of `shadow_distance` over which directional shadows fade out at their far
+     *        end, plus the width (tile uv) of the last cascade's outer band that fades to
+     *        unshadowed -- so shadows end in a gradient rather than a line. 0 = hard cut. RUNTIME.
+     */
+    float    shadow_fade_fraction     = 0.1f;
     /**
      * @brief Normal-offset shadow bias, in shadow-map TEXELS BEYOND the PCF disk's own reach.
      *
@@ -568,14 +628,10 @@ struct PixelRenderConfig {
      */
     float    shadow_softness        = 0.15f;
     /**
-     * @brief Point-light cube-map PCF penumbra radius, in cube-map TEXELS (comparable in
-     *        spirit to shadow_softness above, though that one is world units since a
-     *        directional shadow map has a single, frame-varying world-per-texel scale while
-     *        a point light's cube faces do not). Converted to a tangent-space offset on a
-     *        unit sample direction every frame against cube_shadow_resolution (see
-     *        gfx_shadow_cube_pcf_vogel's doc for that unit) and clamped to 8 texels, the
-     *        kernel's own practical limit before the penumbra swallows the whole shadow.
-     *        Ignored when soft_shadows is false.
+     * @brief Point-light PCF penumbra radius, in cube-face TEXELS. Clamped to 8; also sizes
+     *        each face's guard band (radius + 2 texels widened field of view), so the kernel
+     *        never reads across into the next face of the local shadow atlas. Ignored when
+     *        soft_shadows is false.
      */
     float    point_shadow_softness  = 3.0f;
     /**
@@ -583,11 +639,9 @@ struct PixelRenderConfig {
      *        shadow_softness above. The spot map is a perspective projection, so its
      *        world-per-texel scale varies with each receiver's distance from the light;
      *        the conversion to a texel radius therefore happens PER PIXEL in
-     *        calc_spot_shadow() (pixel_shadow_body.glsl), dividing a CPU-precomputed
-     *        scale (softness * resolution / (2*tan(outer_half)), see
-     *        update_spot_shadow_matrix_()) by the fragment's light-space depth. Clamped
-     *        to 12 texels per pixel, matching the directional radius's own practical
-     *        limit. Ignored when soft_shadows is false.
+     *        gfx_local_shadow() (gfx/local_shadow.glsl) against the texel size at that
+     *        receiver's depth. Clamped to shadow_pcf_max_texels, matching the directional
+     *        radius. Ignored when soft_shadows is false.
      */
     float    spot_shadow_softness   = 0.15f;
     uint32_t shadow_pcf_samples     = 24;    /**< Vogel disk taps for directional soft shadows; clamped to 1..32, the kernel's own hard limit. */

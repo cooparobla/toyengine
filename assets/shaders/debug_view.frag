@@ -38,8 +38,7 @@ layout(set = 0, binding = 0) uniform CameraUBO {
 
 // Set 2: Shadow maps -- identical to pixel_lighting.frag's.
 layout(set = 2, binding = 0) uniform sampler2DShadow dir_shadow_map;
-layout(set = 2, binding = 1) uniform samplerCubeShadow point_shadow_map;
-layout(set = 2, binding = 2) uniform sampler2DShadow spot_shadow_map;
+layout(set = 2, binding = 1) uniform sampler2DShadow local_shadow_atlas; // point/spot shadows (gfx/local_shadow.glsl)
 layout(set = 2, binding = 3) uniform sampler2D dir_shadow_map_raw;
 
 // Set 3: this shader's own extras -- SsrPass's resolved reflection/SSGI buffers (bound
@@ -189,9 +188,10 @@ vec3 toy_debug_direct(vec3 N, vec3 V, vec3 world_pos, vec3 albedo, float metalli
         float attenuation = falloff / (4.0 * BRDF_PI * (factor * factor + 1.0));
         vec3 radiance = pl.color_intensity.rgb * (pl.color_intensity.w * 0.08) * attenuation;
 
-        vec3 shadow_bias_pos = world_pos + N * 0.02;
-        float shadow = (i == 0u && pl.attenuation.w > 0.5)
-            ? calc_point_shadow(pl.position_range.xyz - shadow_bias_pos, range) : 0.0;
+        // Point shadow from the local-light atlas, when this light holds a slot there
+        // (attenuation.w, 1-based) -- see calc_local_shadow().
+        float shadow = (pl.attenuation.w > 0.5 && dot(N, L) > 0.0)
+            ? calc_local_shadow(pl.attenuation.w, world_pos, N, L) : 0.0;
 
         Lo += shade_light(N, V, L, radiance, albedo, metallic, roughness, F0, shadow);
     }
@@ -215,12 +215,9 @@ vec3 toy_debug_direct(vec3 N, vec3 V, vec3 world_pos, vec3 albedo, float metalli
         float attenuation = falloff / (4.0 * BRDF_PI * (factor * factor + 1.0));
         vec3 radiance = sl.color_intensity.rgb * (sl.color_intensity.w * 0.08) * attenuation * cone;
 
-        float shadow = 0.0;
-        if (i == lights.light_counts.w && sl.params.z > 0.5) {
-            float normal_bias_scale = clamp(1.0 - dot(N, L), 0.0, 1.0);
-            vec3 biased_pos = world_pos + N * (lights.spot_shadow_params.w * (0.5 + 0.5 * normal_bias_scale));
-            shadow = calc_spot_shadow(lights.spot_light_space_matrix * vec4(biased_pos, 1.0), N, L);
-        }
+        // Spot shadow from the local-light atlas (params.z = 1-based slot) -- see calc_local_shadow().
+        float shadow = (sl.params.z > 0.5 && dot(N, L) > 0.0)
+            ? calc_local_shadow(sl.params.z, world_pos, N, L) : 0.0;
 
         Lo += shade_light(N, V, L, radiance, albedo, metallic, roughness, F0, shadow);
     }

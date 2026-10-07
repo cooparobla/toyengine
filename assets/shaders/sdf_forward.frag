@@ -34,8 +34,7 @@ layout(set = 0, binding = 0) uniform CameraUBO {
 
 // Set 2: Shadow maps
 layout(set = 2, binding = 0) uniform sampler2DShadow dir_shadow_map;
-layout(set = 2, binding = 1) uniform samplerCubeShadow point_shadow_map;
-layout(set = 2, binding = 2) uniform sampler2DShadow spot_shadow_map;
+layout(set = 2, binding = 1) uniform sampler2DShadow local_shadow_atlas; // point/spot shadows (gfx/local_shadow.glsl)
 // The directional map AGAIN, through a plain nearest sampler: PCSS's blocker
 // search needs stored depths, which a compare sampler cannot return.
 layout(set = 2, binding = 3) uniform sampler2D dir_shadow_map_raw;

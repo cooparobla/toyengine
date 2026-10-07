@@ -55,8 +55,10 @@ diff and merge it. See [editor/README.md](editor/README.md) for the full tour.
 ### Rendering
 - **Deferred PBR pipeline.** G-buffer plus Cook-Torrance lighting with directional, point and
   spot lights, an environment and sky, and texture maps (albedo, normal, roughness, metallic, AO).
-- **Shadows.** Cascaded directional and point/spot shadows, soft PCF, optional PCSS contact
-  hardening and screen-space contact shadows.
+- **Shadows.** Cascaded directional shadows with texel-scaled bias, cascade blending and a far
+  fade; many shadowed point and spot lights in one atlas, chosen by screen importance, with
+  static casters cached per light; soft PCF, optional PCSS and single-ray screen-space contact
+  shadows.
 - **Screen-space effects.** Hi-Z SSR with temporal accumulation, traced SSGI colour bleed and
   GTAO-style SSAO with an Unreal-like temporal filter. The G-buffer carries per-object motion
   vectors, so the AO resolve and TAA follow moving objects instead of trailing behind them.

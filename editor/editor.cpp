@@ -132,7 +132,7 @@ int main(int argc, char** argv) {
         toy::editor::PackageOptions opt;
         opt.out_dir = fs::absolute(package_dir);
         opt.engine_assets = fs::path(ROOT_DIR) / "assets";
-        opt.library_layers = toy::editor::default_library_layers();
+        opt.library_layers = toy::editor::default_library_layers(project.root());
 #ifdef TOY_GAME_BINARY
         if (fs::exists(TOY_GAME_BINARY)) opt.game_binary = TOY_GAME_BINARY;
 #endif

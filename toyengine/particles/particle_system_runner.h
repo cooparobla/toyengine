@@ -98,7 +98,7 @@ public:
                 auto q = [](float v) { return static_cast<uint64_t>(static_cast<int64_t>(std::llround(v * 1000.0f))); };
                 Rng rng(q(ev.pos.x) ^ (q(ev.pos.y) << 21) ^ (q(ev.pos.z) << 42), 3);
                 const int count = static_cast<int>(std::round(sub.count.sample(rng)));
-                for (int c = 0; c < count; ++c) target->emit_at(ev.pos, ev.vel * sub.inherit_velocity);
+                for (int c = 0; c < count; ++c) target->emit_at(ev.pos, ev.vel * sub.inherit_velocity, ev.normal);
             }
         }
     }

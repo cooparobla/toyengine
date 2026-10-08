@@ -262,6 +262,11 @@ inline void parse_particle_settings(const fkyaml::node& node, ParticleSettings& 
     f("bounce", s.bounce);
     f("collision_friction", s.collision_friction);
     b("kill_on_collide", s.kill_on_collide);
+    b("on_death_collision_only", s.on_death_collision_only);
+
+    // --- Wrap ---
+    if (node.contains("wrap_box")) s.wrap_box = vec3(node.at("wrap_box"), s.wrap_box);
+    f("wrap_fade", s.wrap_fade);
 
     // --- Sub emitters ---
     if (node.contains("on_death") && node.at("on_death").is_sequence()) {
@@ -303,6 +308,10 @@ inline void parse_particle_settings(const fkyaml::node& node, ParticleSettings& 
     f("softness", look.softness);
     f("soft_distance", look.soft_distance);
     f("camera_fade", look.camera_fade);
+    b("receive_shadows", look.receive_shadows);
+    f("scatter", look.scatter);
+    f("scatter_anisotropy", look.scatter_anisotropy);
+    f("reactive", look.reactive);
     f("aspect", look.aspect);
     f("stretch_speed", look.stretch_speed);
     f("stretch_length", look.stretch_length);

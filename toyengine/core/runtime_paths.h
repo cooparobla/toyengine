@@ -179,6 +179,12 @@ struct RuntimeLayout {
      * @brief ShaderLibrary roots, first match wins. Packaged: the one merged assets/shaders.
      *        Source: the project's own shaders (when it has a distinct directory), the engine's,
      *        gfxcoopa's, then uicoopa's -- the runtime mirror of glslc's -I order.
+     *
+     * From source, the .spv files live in the BUILD tree this binary was compiled in
+     * (TOY_SHADER_BUILD_DIR, see CMakeLists.txt), one directory per shader target -- never next
+     * to the GLSL, so a game project linked to an engine checkout never writes into it. A
+     * project's shaders are also looked for in its own build/ (an editor from another build
+     * tree opening it).
      */
     std::vector<std::string> shader_roots(const std::filesystem::path& project_root) const {
         const std::filesystem::path project_shaders = project_root / "assets" / "shaders";
@@ -186,14 +192,34 @@ struct RuntimeLayout {
         const std::filesystem::path engine_shaders = engine_assets / "shaders";
         std::vector<std::string> roots;
         std::error_code ec;
-        if (std::filesystem::is_directory(project_shaders, ec) &&
-            !std::filesystem::equivalent(project_shaders, engine_shaders, ec)) {
-            roots.push_back(project_shaders.string());
+        const bool own_shaders = std::filesystem::is_directory(project_shaders, ec) &&
+                                 !std::filesystem::equivalent(project_shaders, engine_shaders, ec);
+        const std::filesystem::path built = compiled_shader_dir();
+        if (built.empty()) {   // a build without the define: shaders compiled next to their sources
+            if (own_shaders) roots.push_back(project_shaders.string());
+            roots.push_back(engine_shaders.string());
+            roots.push_back(std::string(PROJ_DIR) + "/gfxcoopa/assets/shaders");
+            roots.push_back(std::string(PROJ_DIR) + "/uicoopa/assets/shaders");
+            return roots;
         }
-        roots.push_back(engine_shaders.string());
-        roots.push_back(std::string(PROJ_DIR) + "/gfxcoopa/assets/shaders");
-        roots.push_back(std::string(PROJ_DIR) + "/uicoopa/assets/shaders");
+        if (own_shaders) {
+            roots.push_back((built / "project_shaders").string());
+            const std::filesystem::path theirs = project_root / "build" / "shaders" / "project_shaders";
+            if (!std::filesystem::equivalent(theirs, built / "project_shaders", ec)) roots.push_back(theirs.string());
+        }
+        roots.push_back((built / "toyengine_shaders").string());
+        roots.push_back((built / "shaders").string());           // gfxcoopa's target is plain "shaders"
+        roots.push_back((built / "uicoopa_shaders").string());
         return roots;
+    }
+
+    /** @brief Where this binary's build compiled every .spv (empty: next to the sources). */
+    static std::filesystem::path compiled_shader_dir() {
+#ifdef TOY_SHADER_BUILD_DIR
+        return std::filesystem::path(TOY_SHADER_BUILD_DIR);
+#else
+        return {};
+#endif
     }
 
     /**

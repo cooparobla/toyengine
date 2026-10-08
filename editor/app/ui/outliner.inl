@@ -54,6 +54,8 @@
             }
             if (!object_file) ctx.tree_pop();
         }
+        // Objects systems created at runtime (weather effects...): locked, after the file's own.
+        if (!object_file && outliner_filter_.empty() && active_type_ == AssetType::Scene) draw_outliner_runtime_(ctx);
         // Drop on empty space: un-parent to the root.
         if (!playing()) {
             const float y = ctx.cursor().y;

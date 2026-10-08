@@ -25,6 +25,18 @@ set(SFXCOOPA_DIR   "${ROOT_DIR_PARENT}/sfxcoopa")
 set(UICOOPA_DIR    "${ROOT_DIR_PARENT}/uicoopa")
 set(MAPCOOPA_DIR   "${ROOT_DIR_PARENT}/mapcoopa")
 
+# --- Compiled shaders go in the BUILD tree, never the checkout ---
+# gfx_add_shader_target() (gfxcoopa's cmake/GfxShaders.cmake) writes each target's .spv to
+# <GFX_SHADER_OUTPUT_ROOT>/<target>/ when this is set -- here before any library is added, so
+# gfxcoopa's and uicoopa's shader targets follow it too. A game project linked to this
+# checkout (.libs/toyengine -> here) therefore compiles every shader, the engine's included,
+# into its OWN build/shaders/, and neither it nor this checkout's build/ ever writes into the
+# other's tree. The runtime finds them through TOY_SHADER_BUILD_DIR (toyengine::engine below,
+# RuntimeLayout::shader_roots()). CACHE INTERNAL so toyengine_add_project(), called from a
+# project's own scope, sees it for the project's shaders.
+set(TOY_SHADER_BUILD_DIR "${CMAKE_BINARY_DIR}/shaders" CACHE INTERNAL "Where every compiled .spv goes")
+set(GFX_SHADER_OUTPUT_ROOT "${TOY_SHADER_BUILD_DIR}")
+
 if(NOT EXISTS "${LIBCOOPA_DIR}/CMakeLists.txt")
     message(FATAL_ERROR
         "libs/ is empty -- the coopa libraries are git submodules. "
@@ -165,6 +177,9 @@ target_include_directories(toyengine_engine INTERFACE
     ${CMAKE_CURRENT_BINARY_DIR}/configuration)
 target_link_libraries(toyengine_engine INTERFACE coopa::gfx coopa::physx coopa::sfx coopa::maps coopa::ui)
 target_link_libraries(toyengine_engine INTERFACE coopa::caml)
+# The compiled shaders' root (see TOY_SHADER_BUILD_DIR above): <dir>/toyengine_shaders,
+# /shaders (gfxcoopa's), /uicoopa_shaders and /project_shaders.
+target_compile_definitions(toyengine_engine INTERFACE TOY_SHADER_BUILD_DIR="${TOY_SHADER_BUILD_DIR}")
 
 # toyengine_add_project(): the game + editor executables for a project directory. This repo is
 # itself the project "toyengine" (its assets/ holds the test scenes), which is what keeps the
@@ -190,7 +205,7 @@ target_link_libraries(toyengine_tests PRIVATE toyengine::engine)
 # roughly the time of its slowest group. It also means `ctest -R toyengine_math` is an
 # instant, device-free check a dev can run on every save. See test.cpp's file doc for
 # the argument forms the binary accepts.
-foreach(_toy_test_group math config scene ui world water particles rig yaml_io runtime audio render_pixel render_ui render_material render_cloth render_terrain render_water render_particles render_rig editor_host)
+foreach(_toy_test_group math config scene ui world water particles weather rig yaml_io runtime audio render_pixel render_ui render_material render_cloth render_terrain render_water render_particles render_weather render_rig editor_host)
     add_test(NAME toyengine_${_toy_test_group}
              COMMAND toyengine_tests --group ${_toy_test_group})
 endforeach()
@@ -198,10 +213,10 @@ endforeach()
 # The device-free groups have no business taking seconds; the render groups get a ceiling
 # generous enough for a cold shader cache on a slow GPU but short enough that a hung
 # frame fails instead of hanging the run.
-set_tests_properties(toyengine_math toyengine_config toyengine_scene toyengine_ui toyengine_world toyengine_particles toyengine_yaml_io
+set_tests_properties(toyengine_math toyengine_config toyengine_scene toyengine_ui toyengine_world toyengine_particles toyengine_weather toyengine_yaml_io
                      toyengine_runtime toyengine_audio PROPERTIES TIMEOUT 60)
 set_tests_properties(toyengine_render_pixel toyengine_render_ui toyengine_render_material
-                     toyengine_render_cloth toyengine_render_terrain toyengine_render_particles toyengine_editor_host PROPERTIES TIMEOUT 300)
+                     toyengine_render_cloth toyengine_render_terrain toyengine_render_particles toyengine_render_weather toyengine_editor_host PROPERTIES TIMEOUT 300)
 
 # --- Editor ---
 # toyengine_editor (defined by toyengine_add_project() above) embeds the same Engine, so its

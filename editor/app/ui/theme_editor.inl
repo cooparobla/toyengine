@@ -141,13 +141,15 @@ private:
     /**
      * @brief Before every rebuild: while a theme is open beside a UI, shadow its file (and the
      *        UI's own theme file) with the edited theme -- see this file's header. Otherwise
-     *        the scene loader searches assets/ alone.
+     *        the scene loader searches the Engine's asset roots (the project's assets/, then
+     *        the engine checkout's -- where engine-shipped object assets such as the weather
+     *        effects live), exactly as the game does.
      */
     void apply_theme_preview_() {
         std::error_code ec;
         const fs::path root = theme_preview_root();
         fs::remove_all(root, ec);
-        std::vector<std::string> roots = {project_.assets().string()};
+        std::vector<std::string> roots = engine_.asset_roots();
         if (game_theme_.open() && active_type_ == AssetType::UI) {
             theme_preview_ui_ = project_.relative(active_path_);
             const Node t = theme_preview_node_();

@@ -23,7 +23,8 @@ layout(push_constant) uniform ParticlePC {
     vec4 stretch;  // x stretch speed, y stretch length, z distortion, w time
     vec4 misc;     // x opacity, y has texture, z pivot (sizes), w is perspective
     vec4 depth;    // x near, y far, zw 1 / render extent
-    vec4 ambient;  // x sky/ambient scale
+    vec4 ambient;  // x sky/ambient scale, y receive shadows
+    vec4 extra;    // x pass, y reactive, z scatter, w scatter anisotropy (fragment only)
 } pc;
 
 layout(location = 0) out vec2 v_uv;        // quad coordinates, [-1, 1]^2 (x right, y up)

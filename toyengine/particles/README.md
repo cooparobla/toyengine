@@ -82,11 +82,29 @@ Every key, by module:
   `angular_velocity`, `noise_strength`, `noise_frequency`, `noise_scroll`, `noise_octaves`.
 - **Over life:** `color_over_life`, `size_over_life`, `alpha_over_life`.
 - **Collision:** `collide` (a world-Z ground plane), `ground_height`, `bounce`,
-  `collision_friction`, `kill_on_collide`.
+  `collision_friction`, `kill_on_collide`. From code, `ParticleSystem::ground_field` (a
+  `GroundField` height map) replaces the plane; the weather's rain and snow land on roofs and
+  terrain this way. A particle born below the field never spawns.
+- **Wrap:** `wrap_box` (full extents of a box centred on the emitter; world space) and `wrap_fade`.
+  A particle that leaves the box comes back in on the opposite side, so a volume that follows the
+  camera is always full -- precipitation that keeps up however fast the camera moves or turns.
+  Alpha fades toward the box's sides (`wrap_fade` of its half width) so a wrap is never seen.
 - **Sub emitters:** `on_death` (a list of `{target: <object name>, count, inherit_velocity}`).
+  `count` is rounded per death, so `[0, 1.2]` fires on about 60% of them.
+  `on_death_collision_only` fires them only for deaths by collision (splashes where rain lands,
+  none when a drop simply ages out in mid-air).
 - **Renderer:**
   - Mode and look: `render_mode`, `sprite`, `blend` / `additive`, `lit`, `toon_bands`, `emissive`,
     `softness` (0 = crisp cel edge, 1 = feathered), `distortion`, `opacity`.
+  - Light (`lit` > 0): sky ambient, the sun, and every point and spot light, each with a
+    half-Lambert wrap. `receive_shadows` (default on): one hard tap of the sun's cascade atlas,
+    and the local-light atlas for shadowed lamps. `scatter` / `scatter_anisotropy`:
+    Henyey-Greenstein forward scattering of every light toward the eye, so rain glints around a
+    street lamp or against a low sun, and backlit smoke glows.
+  - TAA: `reactive` (0..1). A particle has no motion vector, so TAA's history smears a fast thin
+    one into a dashed streak. Reactive batches draw their coverage again into an R8 mask, and
+    the resolve trusts the current frame there and restarts the pixel's accumulation. Use 1 for
+    rain, snow and sparks. The rest of the image keeps full TAA.
   - Fades: `soft_distance` (fade where the particle meets geometry), `camera_fade`.
   - Shape of the quad: `aspect` (width / height), `pivot`, `stretch_speed`, `stretch_length`.
   - Texture: `texture`, `flipbook: {x: cols, y: rows}`, `flipbook_mode` (lifetime, random, fps),
@@ -219,7 +237,10 @@ The render prep column includes back-to-front sorting, which is a linear-time ra
 - **GPU.** One draw per system. Cost is fill-rate: big, overlapping smoke quads are the expensive
   part, as in any engine.
   - Unlit sprites (`lit: 0`) skip the lighting loop entirely.
-  - Lit ones loop over the sun and up to 16 point lights per pixel.
+  - Lit ones loop over the sun, up to 16 point lights and 8 spot lights per pixel. Shadows add one
+    sun tap, plus a PCF lookup per shadowed lamp in range.
+  - A `reactive` batch draws a second time into the TAA mask. That pass is coverage only, with no
+    lighting, and runs only with `aa_mode: taa`.
 - **Culling.** Systems outside the camera frustum, or past `max_draw_distance`, are not prepared or
   drawn. They still simulate, so they are in the right state when they come back into view.
 
@@ -231,8 +252,9 @@ The render prep column includes back-to-front sorting, which is a linear-time ra
 2. **Emitter meshes are read straight from the file.** They do not go through the AssetManager,
    which caches one asset type per path, and the same mesh is usually also a MeshRenderer's GPU
    mesh. Systems that use the same mesh share one `MeshSurface`.
-3. **Ground collision is a plane at `ground_height`, for world-space systems only.** Colliding
-   with the physics world or terrain would need raycasts per particle; that is not here yet.
+3. **Ground collision is a plane at `ground_height` (or a `ground_field` height map), for
+   world-space systems only.** Particles never raycast themselves; a height map probed once per
+   cell (as the weather does, toyengine/weather/ground_probe.h) is what lets many land on roofs.
 4. **The editor previews live.** The system runs in edit mode. Selecting an object with a
    ParticleSystem draws its emission shape and particle bounds as gizmos. **Add > Particle
    System** creates one.
@@ -247,5 +269,6 @@ The render prep column includes back-to-front sorting, which is a linear-time ra
 - Collision with physics colliders, terrain and water surfaces.
 - GPU simulation (compute) for 100k+ particle effects. The CPU path targets the
   hundreds-to-tens-of-thousands range most game effects use.
-- Particles casting shadows or writing motion vectors. TAA reprojects them by camera motion only.
+- Particles casting shadows or writing motion vectors. TAA reprojects them by camera motion only;
+  `reactive` is the remedy for fast ones.
 - Particle-specific quality tiers in `config.yaml`.

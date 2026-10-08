@@ -11,8 +11,10 @@ This file is the developer tour. For how to *use* the editor, see the
 
 **Layout.** Left: the Asset panel -- a tab per asset type, listing the project's assets.
 Clicking one opens it (one asset at a time; unsaved changes prompt first). Middle: the viewer
-(Console under it). Right: the Hierarchy (scenes / object assets; it mirrors the file) above
-Properties (tabs depend on the asset type).
+(Console under it). Right: the Hierarchy (scenes / object assets; it mirrors the file, then -- greyed, locked, under
+"Runtime" -- objects systems create while it runs, such as weather effects) above Properties (tabs
+depend on the asset type). World > Weather & Time of Day edits the scene's weather
+(`app/ui/weather.inl`, see toyengine/weather/README.md).
 
 | Open asset | Viewer | Properties |
 |---|---|---|

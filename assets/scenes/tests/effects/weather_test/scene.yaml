@@ -1,0 +1,702 @@
+# weather_test -- the scene-global weather and time of day (toyengine/weather/).
+#
+# Run: ./build/toyengine weather_test        (or SCENE=weather_test)
+#
+# A small hamlet on a meadow, lit only by the weather: the clock runs a whole day in 4 minutes,
+# and the random schedule moves through the stock conditions (clear, cloudy, overcast, fog, rain,
+# storm) every minute or two, blending sky, fog, sun and effects as it goes. Its `weather` block
+# lists no `conditions`, so the engine's defaults apply (open the editor's World tab to see and
+# edit them; Preview there forces any condition, including snow / blizzard / sandstorm).
+#
+#   centre      the houses and the well; rain streaks, splashes, ground mist and snow fall here
+#   lamps       four street lamps: WeatherReactor phases [dusk, night, dawn] fade their lights in
+#               and switch their glowing glass on
+#   campfire    the campfire prefab under a WeatherReactor (invert, rain / storm / snow /
+#               blizzard): it goes out while it rains and relights after
+#   trees       blockout trees for the wind and fog to read against
+#   ground      the only surface with a WeatherSurface: rain splashes and snow settles on it alone
+#               (roofs, the well and the awning take drops silently), out to 45 m from the camera
+#   awning      a market awning beside the path: rain stops on it, the ground beneath stays dry
+#               (roofs, trees and the awning carry colliders -- what the precipitation height map
+#               probes while the scene runs; in the editor it uses their mesh bounds)
+#
+# Needs render transparency_enabled (particles) and volumetrics_enabled (ground mist), both on in
+# assets/config.yaml. Worth sweeping: time_of_day (0..24) and condition; debug_view=volumetrics.
+format: blender
+scene:
+  scene_name: weather_test
+  settings:
+    weather:
+      enabled: true
+      time_of_day: 16.5
+      day_length_minutes: 4
+      latitude: 40
+      north_offset: 20
+      drive_sun: true
+      sun_intensity: 1.3
+      condition: rain
+      schedule: random
+      ground_height: 0.0
+  root_objects:
+    - name: ground
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0, y: 0, z: 0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 60, y: 60, z: 1 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material: { albedo: { r: 0.24, g: 0.34, b: 0.17 }, roughness: 0.95, metallic: 0.0 }
+        - type: BoxCollider
+          size: { x: 2.0, y: 2.0, z: 0.2 }
+          center: { x: 0.0, y: 0.0, z: -0.1 }
+        - type: WeatherSurface
+          splashes: true
+      children: []
+    - name: path
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0, y: 0, z: 0.01 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1.4, y: 22, z: 1 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material: { albedo: { r: 0.42, g: 0.36, b: 0.27 }, roughness: 0.9, metallic: 0.0 }
+      children: []
+    - name: house_a
+      active: true
+      components:
+        - type: Transform
+          position: { x: -6, y: 4, z: 1.5 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 4, y: 5, z: 3 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.62, g: 0.55, b: 0.45 }, roughness: 0.9, metallic: 0.0 }
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+      children: []
+    - name: house_a_roof
+      active: true
+      components:
+        - type: Transform
+          position: { x: -6, y: 4, z: 3.0 }
+          rotation: { x: 0, y: 45, z: 0 }
+          scale: { x: 2.9, y: 5.2, z: 2.9 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.45, g: 0.18, b: 0.12 }, roughness: 0.7, metallic: 0.0 }
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+      children: []
+    - name: house_b
+      active: true
+      components:
+        - type: Transform
+          position: { x: 6, y: 5, z: 1.5 }
+          rotation: { x: 0, y: 0, z: 90 }
+          scale: { x: 4, y: 5, z: 3 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.62, g: 0.55, b: 0.45 }, roughness: 0.9, metallic: 0.0 }
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+      children: []
+    - name: house_b_roof
+      active: true
+      components:
+        - type: Transform
+          position: { x: 6, y: 5, z: 3.0 }
+          rotation: { x: 45, y: 0, z: 0 }
+          scale: { x: 5.2, y: 2.9, z: 2.9 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.45, g: 0.18, b: 0.12 }, roughness: 0.7, metallic: 0.0 }
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+      children: []
+    - name: house_c
+      active: true
+      components:
+        - type: Transform
+          position: { x: -5, y: -6, z: 1.5 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 4, y: 5, z: 3 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.62, g: 0.55, b: 0.45 }, roughness: 0.9, metallic: 0.0 }
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+      children: []
+    - name: house_c_roof
+      active: true
+      components:
+        - type: Transform
+          position: { x: -5, y: -6, z: 3.0 }
+          rotation: { x: 0, y: 45, z: 0 }
+          scale: { x: 2.9, y: 5.2, z: 2.9 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.45, g: 0.18, b: 0.12 }, roughness: 0.7, metallic: 0.0 }
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+      children: []
+    - name: house_d
+      active: true
+      components:
+        - type: Transform
+          position: { x: 7, y: -5, z: 1.5 }
+          rotation: { x: 0, y: 0, z: 90 }
+          scale: { x: 4, y: 5, z: 3 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.62, g: 0.55, b: 0.45 }, roughness: 0.9, metallic: 0.0 }
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+      children: []
+    - name: house_d_roof
+      active: true
+      components:
+        - type: Transform
+          position: { x: 7, y: -5, z: 3.0 }
+          rotation: { x: 45, y: 0, z: 0 }
+          scale: { x: 5.2, y: 2.9, z: 2.9 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.45, g: 0.18, b: 0.12 }, roughness: 0.7, metallic: 0.0 }
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+      children: []
+    - name: well
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0, y: 0, z: 0.45 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1.6, y: 1.6, z: 0.9 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/stone
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+      children: []
+    - name: awning
+      active: true
+      components:
+        - type: Transform
+          position: { x: 3.2, y: -1.0, z: 2.4 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 3.0, y: 4.0, z: 0.12 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.55, g: 0.22, b: 0.16 }, roughness: 0.8, metallic: 0.0 }
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+      children: []
+    - name: awning_post_0
+      active: true
+      components:
+        - type: Transform
+          position: { x: 1.9, y: -2.8, z: 1.2 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.12, y: 0.12, z: 2.4 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/wood
+      children: []
+    - name: awning_post_1
+      active: true
+      components:
+        - type: Transform
+          position: { x: 4.5, y: -2.8, z: 1.2 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.12, y: 0.12, z: 2.4 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/wood
+      children: []
+    - name: awning_post_2
+      active: true
+      components:
+        - type: Transform
+          position: { x: 1.9, y: 0.8, z: 1.2 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.12, y: 0.12, z: 2.4 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/wood
+      children: []
+    - name: awning_post_3
+      active: true
+      components:
+        - type: Transform
+          position: { x: 4.5, y: 0.8, z: 1.2 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.12, y: 0.12, z: 2.4 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/wood
+      children: []
+    - name: tree_0
+      active: true
+      components:
+        - type: Transform
+          position: { x: -14, y: 10, z: 1.2 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.35, y: 0.35, z: 2.4 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/wood
+      children: []
+    - name: tree_0_crown
+      active: true
+      components:
+        - type: Transform
+          position: { x: -14, y: 10, z: 3.8 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1.9, y: 1.9, z: 2.2 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.16, g: 0.32, b: 0.12 }, roughness: 0.9, metallic: 0.0 }
+        - type: SphereCollider
+          radius: 1.0
+      children: []
+    - name: tree_1
+      active: true
+      components:
+        - type: Transform
+          position: { x: -16, y: -2, z: 1.2 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.35, y: 0.35, z: 2.4 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/wood
+      children: []
+    - name: tree_1_crown
+      active: true
+      components:
+        - type: Transform
+          position: { x: -16, y: -2, z: 3.8 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1.9, y: 1.9, z: 2.2 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.16, g: 0.32, b: 0.12 }, roughness: 0.9, metallic: 0.0 }
+        - type: SphereCollider
+          radius: 1.0
+      children: []
+    - name: tree_2
+      active: true
+      components:
+        - type: Transform
+          position: { x: -12, y: -14, z: 1.2 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.35, y: 0.35, z: 2.4 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/wood
+      children: []
+    - name: tree_2_crown
+      active: true
+      components:
+        - type: Transform
+          position: { x: -12, y: -14, z: 3.8 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1.9, y: 1.9, z: 2.2 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.16, g: 0.32, b: 0.12 }, roughness: 0.9, metallic: 0.0 }
+        - type: SphereCollider
+          radius: 1.0
+      children: []
+    - name: tree_3
+      active: true
+      components:
+        - type: Transform
+          position: { x: 14, y: 12, z: 1.2 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.35, y: 0.35, z: 2.4 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/wood
+      children: []
+    - name: tree_3_crown
+      active: true
+      components:
+        - type: Transform
+          position: { x: 14, y: 12, z: 3.8 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1.9, y: 1.9, z: 2.2 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.16, g: 0.32, b: 0.12 }, roughness: 0.9, metallic: 0.0 }
+        - type: SphereCollider
+          radius: 1.0
+      children: []
+    - name: tree_4
+      active: true
+      components:
+        - type: Transform
+          position: { x: 16, y: 0, z: 1.2 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.35, y: 0.35, z: 2.4 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/wood
+      children: []
+    - name: tree_4_crown
+      active: true
+      components:
+        - type: Transform
+          position: { x: 16, y: 0, z: 3.8 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1.9, y: 1.9, z: 2.2 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.16, g: 0.32, b: 0.12 }, roughness: 0.9, metallic: 0.0 }
+        - type: SphereCollider
+          radius: 1.0
+      children: []
+    - name: tree_5
+      active: true
+      components:
+        - type: Transform
+          position: { x: 13, y: -13, z: 1.2 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.35, y: 0.35, z: 2.4 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/wood
+      children: []
+    - name: tree_5_crown
+      active: true
+      components:
+        - type: Transform
+          position: { x: 13, y: -13, z: 3.8 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1.9, y: 1.9, z: 2.2 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.16, g: 0.32, b: 0.12 }, roughness: 0.9, metallic: 0.0 }
+        - type: SphereCollider
+          radius: 1.0
+      children: []
+    - name: tree_6
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0, y: 16, z: 1.2 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.35, y: 0.35, z: 2.4 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/wood
+      children: []
+    - name: tree_6_crown
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0, y: 16, z: 3.8 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1.9, y: 1.9, z: 2.2 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.16, g: 0.32, b: 0.12 }, roughness: 0.9, metallic: 0.0 }
+        - type: SphereCollider
+          radius: 1.0
+      children: []
+    - name: tree_7
+      active: true
+      components:
+        - type: Transform
+          position: { x: -3, y: -17, z: 1.2 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.35, y: 0.35, z: 2.4 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/wood
+      children: []
+    - name: tree_7_crown
+      active: true
+      components:
+        - type: Transform
+          position: { x: -3, y: -17, z: 3.8 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1.9, y: 1.9, z: 2.2 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.16, g: 0.32, b: 0.12 }, roughness: 0.9, metallic: 0.0 }
+        - type: SphereCollider
+          radius: 1.0
+      children: []
+    - name: tree_8
+      active: true
+      components:
+        - type: Transform
+          position: { x: 4, y: -16, z: 1.2 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.35, y: 0.35, z: 2.4 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/wood
+      children: []
+    - name: tree_8_crown
+      active: true
+      components:
+        - type: Transform
+          position: { x: 4, y: -16, z: 3.8 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1.9, y: 1.9, z: 2.2 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.16, g: 0.32, b: 0.12 }, roughness: 0.9, metallic: 0.0 }
+        - type: SphereCollider
+          radius: 1.0
+      children: []
+    - name: lamp_0
+      active: true
+      components:
+        - type: Transform
+          position: { x: 1.6, y: 8, z: 0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1, y: 1, z: 1 }
+      children:
+        - name: lamp_0_post
+          active: true
+          components:
+            - type: Transform
+              position: { x: 0, y: 0, z: 1.5 }
+              rotation: { x: 0, y: 0, z: 0 }
+              scale: { x: 0.15, y: 0.15, z: 3.0 }
+            - type: MeshRenderer
+              mesh_path: cube
+              material: materials/steel
+          children: []
+        - name: lamp_0_light
+          active: true
+          components:
+            - type: Transform
+              position: { x: 0, y: 0, z: 3.3 }
+              rotation: { x: 0, y: 0, z: 0 }
+              scale: { x: 1, y: 1, z: 1 }
+            - type: PointLight
+              color: { r: 1.0, g: 0.72, b: 0.38 }
+              intensity: 70.0
+              range: 10.0
+              cast_shadows: false
+              attenuation_constant: 2.0
+            - type: WeatherReactor
+              phases: [dusk, night, dawn]
+              target: [lights, children]
+              fade: 2.0
+          children:
+            - name: lamp_0_glass
+              active: true
+              components:
+                - type: Transform
+                  position: { x: 0, y: 0, z: 0 }
+                  rotation: { x: 0, y: 0, z: 0 }
+                  scale: { x: 0.35, y: 0.35, z: 0.45 }
+                - type: MeshRenderer
+                  mesh_path: cube
+                  material: materials/emissive
+              children: []
+    - name: lamp_1
+      active: true
+      components:
+        - type: Transform
+          position: { x: -1.6, y: 2.5, z: 0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1, y: 1, z: 1 }
+      children:
+        - name: lamp_1_post
+          active: true
+          components:
+            - type: Transform
+              position: { x: 0, y: 0, z: 1.5 }
+              rotation: { x: 0, y: 0, z: 0 }
+              scale: { x: 0.15, y: 0.15, z: 3.0 }
+            - type: MeshRenderer
+              mesh_path: cube
+              material: materials/steel
+          children: []
+        - name: lamp_1_light
+          active: true
+          components:
+            - type: Transform
+              position: { x: 0, y: 0, z: 3.3 }
+              rotation: { x: 0, y: 0, z: 0 }
+              scale: { x: 1, y: 1, z: 1 }
+            - type: PointLight
+              color: { r: 1.0, g: 0.72, b: 0.38 }
+              intensity: 70.0
+              range: 10.0
+              cast_shadows: false
+              attenuation_constant: 2.0
+            - type: WeatherReactor
+              phases: [dusk, night, dawn]
+              target: [lights, children]
+              fade: 2.0
+          children:
+            - name: lamp_1_glass
+              active: true
+              components:
+                - type: Transform
+                  position: { x: 0, y: 0, z: 0 }
+                  rotation: { x: 0, y: 0, z: 0 }
+                  scale: { x: 0.35, y: 0.35, z: 0.45 }
+                - type: MeshRenderer
+                  mesh_path: cube
+                  material: materials/emissive
+              children: []
+    - name: lamp_2
+      active: true
+      components:
+        - type: Transform
+          position: { x: 1.6, y: -3, z: 0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1, y: 1, z: 1 }
+      children:
+        - name: lamp_2_post
+          active: true
+          components:
+            - type: Transform
+              position: { x: 0, y: 0, z: 1.5 }
+              rotation: { x: 0, y: 0, z: 0 }
+              scale: { x: 0.15, y: 0.15, z: 3.0 }
+            - type: MeshRenderer
+              mesh_path: cube
+              material: materials/steel
+          children: []
+        - name: lamp_2_light
+          active: true
+          components:
+            - type: Transform
+              position: { x: 0, y: 0, z: 3.3 }
+              rotation: { x: 0, y: 0, z: 0 }
+              scale: { x: 1, y: 1, z: 1 }
+            - type: PointLight
+              color: { r: 1.0, g: 0.72, b: 0.38 }
+              intensity: 70.0
+              range: 10.0
+              cast_shadows: false
+              attenuation_constant: 2.0
+            - type: WeatherReactor
+              phases: [dusk, night, dawn]
+              target: [lights, children]
+              fade: 2.0
+          children:
+            - name: lamp_2_glass
+              active: true
+              components:
+                - type: Transform
+                  position: { x: 0, y: 0, z: 0 }
+                  rotation: { x: 0, y: 0, z: 0 }
+                  scale: { x: 0.35, y: 0.35, z: 0.45 }
+                - type: MeshRenderer
+                  mesh_path: cube
+                  material: materials/emissive
+              children: []
+    - name: lamp_3
+      active: true
+      components:
+        - type: Transform
+          position: { x: -1.6, y: -8.5, z: 0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1, y: 1, z: 1 }
+      children:
+        - name: lamp_3_post
+          active: true
+          components:
+            - type: Transform
+              position: { x: 0, y: 0, z: 1.5 }
+              rotation: { x: 0, y: 0, z: 0 }
+              scale: { x: 0.15, y: 0.15, z: 3.0 }
+            - type: MeshRenderer
+              mesh_path: cube
+              material: materials/steel
+          children: []
+        - name: lamp_3_light
+          active: true
+          components:
+            - type: Transform
+              position: { x: 0, y: 0, z: 3.3 }
+              rotation: { x: 0, y: 0, z: 0 }
+              scale: { x: 1, y: 1, z: 1 }
+            - type: PointLight
+              color: { r: 1.0, g: 0.72, b: 0.38 }
+              intensity: 70.0
+              range: 10.0
+              cast_shadows: false
+              attenuation_constant: 2.0
+            - type: WeatherReactor
+              phases: [dusk, night, dawn]
+              target: [lights, children]
+              fade: 2.0
+          children:
+            - name: lamp_3_glass
+              active: true
+              components:
+                - type: Transform
+                  position: { x: 0, y: 0, z: 0 }
+                  rotation: { x: 0, y: 0, z: 0 }
+                  scale: { x: 0.35, y: 0.35, z: 0.45 }
+                - type: MeshRenderer
+                  mesh_path: cube
+                  material: materials/emissive
+              children: []
+    - name: campfire_site
+      active: true
+      components:
+        - type: Transform
+          position: { x: -3.5, y: -1.5, z: 0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: WeatherReactor
+          conditions: [rain, storm, snow, blizzard]
+          invert: true
+          target: [lights, effects]
+          fade: 3.0
+      children:
+        - name: campfire
+          prefab: objects/campfire
+          components:
+            - type: Transform
+              position: { x: 0.0, y: 0.0, z: 0.0 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 1.0, y: 1.0, z: 1.0 }
+    - name: camera
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0, y: -26, z: 9 }
+          rotation: { x: 72, y: 0, z: 0 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: Camera
+          main: true
+          projection: Perspective
+          fov: 55.0
+          near_clip_plane: 0.1
+          far_clip_plane: 400.0
+        - type: CameraController
+          mode: orbit
+          target: { x: 0.0, y: 0.0, z: 1.5 }
+          min_distance: 4.0
+          max_distance: 60.0
+          auto_rotate_deg_per_sec: 4.0
+      children: []
+    - name: sun
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0, y: 0, z: 30 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: DirectionalLight
+          direction: { x: -0.4, y: 0.35, z: -0.85 }
+          color: { r: 1.0, g: 0.96, b: 0.9 }
+          intensity: 1.3
+          cast_shadows: true
+      children: []

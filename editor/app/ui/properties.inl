@@ -13,6 +13,8 @@
         properties_hovered_ = ctx.is_hovered(area);
         const ObjectId id = doc_.primary();
         const Node* obj = id ? doc_.find(id) : nullptr;
+        if (id) runtime_sel_.clear();   // a document selection replaces a runtime one
+        coopa::scene::SceneObject* runtime_obj = !obj && active_type_ == AssetType::Scene ? runtime_selected_() : nullptr;
         Node shown_mr;
         const bool is_mesh = obj && shown_component_(id, "MeshRenderer", shown_mr);   // an instance's asset counts
 
@@ -47,6 +49,10 @@
                 tabs.push_back({PropTab::Object, I::UiAnchor, "Element\nName, Rect Transform (anchors, position, size), visibility"});
                 tabs.push_back({PropTab::Components, I::Component, "Components\nThe element's widgets and composites, Add Component"});
             }
+        }
+        if (runtime_obj) {
+            object_start = static_cast<int>(tabs.size());
+            tabs.push_back({PropTab::Object, I::Lock, "Runtime Object\nCreated at runtime by a system -- read-only"});
         }
         if (scene_like && obj) {
             object_start = static_cast<int>(tabs.size());
@@ -87,6 +93,8 @@
         std::string crumb = active_asset_label_();
         if ((scene_like || active_type_ == AssetType::UI) && (prop_tab_ == PropTab::Object || prop_tab_ == PropTab::Components) && obj) {
             crumb += "  >  " + get_string(*obj, "name");
+        } else if (runtime_obj && prop_tab_ == PropTab::Object) {
+            crumb += "  >  " + runtime_obj->name() + " (runtime)";
         }
         ctx.icon(cur.icon, {hb.x + 8, hb.y + 6, hb.h - 12, hb.h - 12}, ctx.style.text);
         const float title_x = hb.x + hb.h + 4;
@@ -116,7 +124,7 @@
             case PropTab::Output:     draw_output_props_(ctx); break;
             case PropTab::Scene:      draw_scene_props_(ctx); break;
             case PropTab::World:      draw_world_props_(ctx); break;
-            case PropTab::Object:     draw_object_props_(ctx, id); break;
+            case PropTab::Object:     if (runtime_obj) draw_runtime_object_props_(ctx, *runtime_obj); else draw_object_props_(ctx, id); break;
             case PropTab::Components: draw_component_list_(ctx, id, false); break;
             case PropTab::Physics:    draw_component_list_(ctx, id, true); break;
             case PropTab::Data:       draw_data_props_(ctx, id); break;
@@ -570,7 +578,9 @@
     }
 
     void draw_world_props_(imm::Context& ctx) {
+        draw_weather_section_(ctx);   // ui/weather.inl
         ctx.label_dim("Project-wide in config.yaml; edits in a scene override them for that scene.");
+        if (weather_on_()) ctx.label_dim("Locked rows are driven by the weather while it is on.");
         ctx.spacing(4);
         draw_setting_groups_(ctx, render_settings_groups(), "render", {"Lighting & Sky", "Fog"});
     }
@@ -833,6 +843,14 @@
             }
             if (open) {
                 ctx.indent(6);
+                if (type == "DirectionalLight" && weather_drives_sun_()) {
+                    // The weather aims, colours and dims the scene's first directional light.
+                    const imm::Box nb = ctx.next_box(ctx.style.row_height);
+                    ctx.icon(I::Lock, {nb.x + 2, nb.y + 3, nb.h - 6, nb.h - 6}, ctx.style.text_dim);
+                    ctx.text_in({nb.x + nb.h + 2, nb.y, nb.w - nb.h - 2, nb.h}, "Driven by Weather: direction, colour, intensity", ctx.style.text_dim, 0.0f);
+                    ctx.tooltip("Driven by Weather\nWhile the scene's weather is on with Drive Sun, the clock aims this light at the sun "
+                                "(the moon at night) and sets its colour and intensity every frame. These values come back when it is off.");
+                }
                 const Node before = comp;
                 if (instance) {
                     // Overridden fields: a bar beside the label, and a right-click menu.

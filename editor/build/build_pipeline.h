@@ -161,7 +161,7 @@ inline BuildResult run_build(const Project& project, const BuildSettings& settin
     opt.shipping = shipping;
     opt.passphrase = shipping ? settings.caml_key : std::string();
     opt.engine_assets = fs::path(ROOT_DIR) / "assets";
-    opt.library_layers = default_library_layers();
+    opt.library_layers = default_library_layers(project.root());
     const PackageReport rep = package_project(project, opt);
     for (const std::string& w : rep.warnings) res.warnings.push_back(w);
     if (!rep.ok()) {

@@ -1,0 +1,117 @@
+# weather_rain: rain around the viewer -- falling streaks, splash rings and spray where drops land.
+# Spawned by the weather system (toyengine/weather/) for the `rain` and `storm` conditions.
+#
+# Keeping up with the camera: the drops live in a WRAP VOLUME (`wrap_box`) centred on the emitter,
+# which the weather keeps on the camera -- a drop leaving one side comes back in on the other, so
+# the box is always full of rain wherever the camera moves or turns (no waiting for new drops to
+# fall from above), and alpha fades toward its sides so the wrap is never seen.
+#
+# Landing: the weather hands every colliding system its precipitation height map (roofs,
+# terrain, water surfaces -- toyengine/weather/ground_probe.h), so drops stop on what is above the
+# ground and never fall indoors; `on_death_collision_only` makes splashes only where a drop lands.
+# Splash and spray are the drops' sub emitters (the weather's `ground_effects` switch), fired only
+# on surfaces that opt in with a WeatherSurface component (a ground plane, a street); they lie in /
+# kick off the surface each drop hit (`align_to_normal`, the map's surface normal). Past the drops'
+# own box, WeatherDistantLandings keeps splash rings appearing out to 45 m at the same rate.
+#
+# Light: every system is lit (sky, sun and lamps, shadowed) and the drops scatter light forward
+# (`scatter`), so rain catches a low sun or glints around a street lamp at night and goes dark in
+# the shade. `reactive` keeps TAA from smearing the fast drops into streaks.
+#
+# The weather scales `rate` by the condition's effect intensity and adds the wind to `velocity`.
+# Authored values here are the intensity-1 look.
+format: toyengine-object
+object:
+  name: weather_rain
+  components:
+    - type: Transform
+      position: {x: 0, y: 0, z: 0}
+  children:
+    - name: weather_rain_drops
+      components:
+        - type: Transform
+          position: {x: 0, y: 0, z: 0}
+        - type: WeatherDistantLandings
+          radius: 45
+          targets: [weather_rain_splash]
+        - type: ParticleSystem
+          shape: box
+          box: {x: 36, y: 36, z: 26}
+          wrap_box: {x: 36, y: 36, z: 26}
+          wrap_fade: 0.2
+          rate: 3400
+          max_particles: 12000
+          prewarm: true
+          start_lifetime: 3.0
+          start_speed: 0.0
+          velocity: {x: 0, y: 0, z: -15}
+          start_size: [0.035, 0.05]
+          start_color: {r: 0.72, g: 0.78, b: 0.86, a: 0.55}
+          collide: true
+          ground_height: 0.0
+          kill_on_collide: true
+          on_death_collision_only: true
+          on_death:
+            - {target: weather_rain_splash, count: [0, 1.2]}     # rounded: ~60% of landings ring
+            - {target: weather_rain_spray, count: [0, 1.6], inherit_velocity: -0.06}   # 0-2 droplets
+          render_mode: stretched
+          sprite: circle
+          stretch_speed: 0.05
+          lit: 1.0
+          scatter: 1.8
+          scatter_anisotropy: 0.8
+          reactive: 1.0     # TAA: never smear into streaks
+          emissive: 1.0
+          softness: 0.3
+          soft_distance: 0.0
+          camera_fade: 0.6
+          sort: none
+      children: []
+    - name: weather_rain_splash
+      components:
+        - type: Transform
+          position: {x: 0, y: 0, z: 0}
+        - type: ParticleSystem
+          rate: 0
+          max_particles: 12000
+          start_lifetime: [0.3, 0.5]
+          start_speed: 0.0
+          start_size: [0.22, 0.38]
+          start_color: {r: 0.58, g: 0.63, b: 0.7, a: 0.85}   # clear water: a muted, lit rim
+          size_over_life: [{t: 0.0, value: 0.15}, {t: 1.0, value: 1.0}]
+          alpha_over_life: [{t: 0.0, value: 1.0}, {t: 0.6, value: 0.6}, {t: 1.0, value: 0.0}]
+          align_to_normal: true      # lies in the surface it landed on (a sloped roof too)
+          render_mode: aligned
+          sprite: ring
+          lit: 1.0                   # fully lit: dark at night, bright in a lamp's pool of light
+          scatter: 0.0               # a ring on the ground is lit like the ground; it does not glint
+          reactive: 1.0
+          emissive: 1.0
+          soft_distance: 0.0
+          sort: none
+      children: []
+    - name: weather_rain_spray
+      components:
+        - type: Transform
+          position: {x: 0, y: 0, z: 0}
+        - type: ParticleSystem
+          rate: 0
+          max_particles: 4000
+          start_lifetime: [0.18, 0.32]
+          start_speed: [0.8, 1.8]
+          start_size: [0.022, 0.035]
+          start_color: {r: 0.82, g: 0.88, b: 0.96, a: 0.85}
+          gravity: 1.0
+          align_to_normal: true      # kicked up off the surface, not into it
+          alpha_over_life: [{t: 0.0, value: 1.0}, {t: 1.0, value: 0.0}]
+          render_mode: stretched
+          sprite: circle
+          stretch_speed: 0.02
+          lit: 1.0
+          scatter: 0.6
+          scatter_anisotropy: 0.8
+          reactive: 1.0
+          emissive: 1.0
+          soft_distance: 0.0
+          sort: none
+      children: []

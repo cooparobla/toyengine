@@ -70,6 +70,8 @@
 #include <toyengine/water/water_system.h>
 #include <toyengine/particles/particle_system_runner.h>
 #include <toyengine/particles/particle_yaml.h>
+#include <toyengine/weather/weather_reactor.h>
+#include <toyengine/weather/weather_system.h>
 #include <toyengine/render/visibility.h>
 #include <toyengine/core/module.h>
 
@@ -209,6 +211,8 @@ public:
         // "ParticleSystem" + "LightFlicker" (toyengine/particles/): emitter meshes load CPU-side,
         // mesh-mode render meshes and sprite textures through the same loaders as MeshRenderer.
         particles::register_particle_components(assets_);
+        // "WeatherReactor" (toyengine/weather/): objects switching with the time of day / weather.
+        weather::register_weather_components();
         // The GPU overload, so font/sprite paths in scene YAML load on demand and
         // FontDefaults::resolve_font is wired for themes. Must precede load_scene(), like
         // every other parser registration above. Its captured device/allocator references
@@ -324,11 +328,19 @@ public:
         if (scene_mgr_.has_scene()) apply_scene_settings_(scene_mgr_.get_active_scene());
     }
 
-    /** @brief Sets a managed scene's overrides (its `scene.settings`), applying them if it is active. */
+    /**
+     * @brief Sets a managed scene's overrides (its `scene.settings`), applying them if it is
+     *        active. Its `weather` block goes to the scene's WeatherSystem live (the clock and
+     *        the active condition keep running -- see WeatherSystem::set_settings()).
+     */
     void set_scene_settings(coopa::scene::Scene& scene, const fkyaml::node& settings) {
         scene_settings_[&scene] = settings;
         if (scene_mgr_.has_scene() && &scene_mgr_.get_active_scene() == &scene) apply_scene_settings_(scene);
+        if (weather::WeatherSystem* w = weather::find(scene)) w->set_settings(weather::parse_settings(weather_node_(settings)));
     }
+
+    /// The active scene's weather and time of day (toyengine/weather/), or null without a scene.
+    weather::WeatherSystem* weather() { return scene_mgr_.has_scene() ? weather::find(scene_mgr_.get_active_scene()) : nullptr; }
 
     /** @brief The config `scene` runs with: config.yaml plus its overrides. */
     AppConfig scene_config(const coopa::scene::Scene& scene) const {
@@ -654,6 +666,9 @@ private:
      * debug_view and the resolved shader/palette state are always kept.
      */
     AppConfig apply_scene_settings_(const coopa::scene::Scene& scene) {
+        // The weather's writes are not config: put the config's own values back first, so they
+        // are what gets layered or kept (the weather re-captures and re-applies next frame).
+        restore_weather_atmosphere_();
         const AppConfig eff = scene_config(scene);
         auto it = scene_settings_.find(&scene);
         const bool overrides = it != scene_settings_.end() && AppConfig::has_scene_overrides(it->second);
@@ -697,6 +712,13 @@ private:
         // runs in edit mode too, so effects preview live in the editor -- see
         // particle_system_runner.h.
         particles::install_particle_system(scene);
+        // Order 40: the clock, the active weather condition, sky / fog / sun and the runtime
+        // weather effects -- ahead of the Behaviour walk, so gameplay reads this frame's weather.
+        // Runs in edit mode too (clock held), so the editor previews it.
+        {
+            auto it = scene_settings_.find(&scene);
+            weather::install_weather_system(scene, weather_node_(it != scene_settings_.end() ? it->second : fkyaml::node()));
+        }
 
         // Activate TransformSystem before the first drain or render, so the world_matrix()
         // reads below are never asked to resolve a still-dirty transform; then block until
@@ -1028,6 +1050,7 @@ public:
             }
             if (hooks_.pre_render) hooks_.pre_render(dt);
             sync_water_render_state_(scene_mgr_.get_active_scene());
+            sync_weather_render_state_(scene_mgr_.get_active_scene());
             {
                 // After the host's pre_render hook, like the water sync: the batches point into
                 // the systems' buffers and go to THIS pipeline.
@@ -1070,6 +1093,69 @@ public:
             }, particle_frame_);
         }
         pipeline_->set_particle_state(particle_frame_);
+    }
+
+    /** @brief A scene settings block's `weather` mapping (null if it has none). */
+    static fkyaml::node weather_node_(const fkyaml::node& settings) {
+        if (settings.is_mapping() && settings.contains("weather")) return settings.at("weather");
+        return fkyaml::node();
+    }
+
+    /** @brief The render-config values the weather overwrites (weather::controlled_render_keys()). */
+    struct WeatherRenderBase {
+        glm::vec3 zenith{0.0f}, horizon{0.0f}, ground{0.0f};
+        float ambient = 1.0f, sky = 1.0f, exposure = 1.0f;
+        int fog_mode = 2;
+        float fog_density = 0.0f, fog_linear_start = 0.0f, fog_linear_end = 0.0f;
+        glm::vec3 fog_color{0.0f};
+        float fog_sky_blend = 0.0f, fog_max_opacity = 1.0f, fog_height_falloff = 0.0f, fog_sun_amount = 0.0f;
+
+        void capture(const render::PixelRenderConfig& c) {
+            zenith = c.indirect.sky_zenith; horizon = c.indirect.sky_horizon; ground = c.indirect.sky_ground;
+            ambient = c.indirect.ambient_intensity; sky = c.indirect.sky_intensity; exposure = c.exposure;
+            fog_mode = c.fog_mode; fog_density = c.fog_density; fog_linear_start = c.fog_linear_start;
+            fog_linear_end = c.fog_linear_end; fog_color = c.fog_color; fog_sky_blend = c.fog_sky_blend;
+            fog_max_opacity = c.fog_max_opacity; fog_height_falloff = c.fog_height_falloff; fog_sun_amount = c.fog_sun_amount;
+        }
+        void restore(render::PixelRenderConfig& c) const {
+            c.indirect.sky_zenith = zenith; c.indirect.sky_horizon = horizon; c.indirect.sky_ground = ground;
+            c.indirect.ambient_intensity = ambient; c.indirect.sky_intensity = sky; c.exposure = exposure;
+            c.fog_mode = fog_mode; c.fog_density = fog_density; c.fog_linear_start = fog_linear_start;
+            c.fog_linear_end = fog_linear_end; c.fog_color = fog_color; c.fog_sky_blend = fog_sky_blend;
+            c.fog_max_opacity = fog_max_opacity; c.fog_height_falloff = fog_height_falloff; c.fog_sun_amount = fog_sun_amount;
+        }
+    };
+
+    /**
+     * @brief Writes the active scene's weather atmosphere (sky, ambient, fog) into the live
+     *        render config. The first frame it drives, the config's own values are saved; when
+     *        the weather stops (disabled, or a scene without it) they are put back.
+     */
+    void sync_weather_render_state_(coopa::scene::Scene& scene) {
+        weather::WeatherSystem* w = weather::find(scene);
+        if (!w || !w->enabled() || !w->state().enabled) { restore_weather_atmosphere_(); return; }
+        render::PixelRenderConfig& c = pipeline_->render_config_mut();
+        if (!weather_applied_) { weather_base_.capture(c); weather_applied_ = true; }
+        const weather::Atmosphere& a = w->atmosphere();
+        c.indirect.sky_zenith = a.sky_zenith;
+        c.indirect.sky_horizon = a.sky_horizon;
+        c.indirect.sky_ground = a.sky_ground;
+        c.indirect.ambient_intensity = a.ambient_intensity;
+        c.indirect.sky_intensity = a.sky_intensity;
+        c.fog_mode = 2;   // exponential squared: clear up close, closing in with distance
+        c.fog_density = a.fog_density;
+        c.fog_color = a.fog_color;
+        c.fog_sky_blend = a.fog_sky_blend;
+        c.fog_max_opacity = a.fog_max_opacity;
+        c.fog_height_falloff = a.fog_height_falloff;
+        c.fog_sun_amount = a.fog_sun_amount;
+        c.exposure = weather_base_.exposure * a.exposure_scale;   // scaled, not owned: the row stays editable
+    }
+
+    void restore_weather_atmosphere_() {
+        if (!weather_applied_) return;
+        weather_base_.restore(pipeline_->render_config_mut());
+        weather_applied_ = false;
     }
 
     /** @brief render::RenderQuality (config.yaml's water_quality) as the water module's tier. */
@@ -1902,6 +1988,8 @@ private:
     /// Each managed scene's `scene.settings` overrides (null: none) -- see scene_config().
     std::unordered_map<const coopa::scene::Scene*, fkyaml::node> scene_settings_;
     bool overrides_applied_ = false;   ///< The live render config carries some scene's overrides.
+    bool weather_applied_ = false;     ///< The live render config carries the weather's atmosphere.
+    WeatherRenderBase weather_base_;   ///< The config's own values under it (see sync_weather_render_state_()).
     bool source_driven_ = false;       ///< set_config_source() was called (the editor).
     std::function<void(AppConfig&)> config_adjust_;   ///< set_config_source()'s adjust hook.
 

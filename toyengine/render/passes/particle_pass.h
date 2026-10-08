@@ -19,7 +19,13 @@
  * - **Descriptor sets** (bound by the caller after bind()): 0 camera UBO, 1 lights, 2 the Hi-Z
  *   pyramid (mip 0 is a copy of the opaque depth -- soft particles read it, never the depth
  *   attachment itself, which is attached to this very render pass), 3 the material set
- *   (albedo slot = the sprite texture; white when untextured).
+ *   (albedo slot = the sprite texture; white when untextured), 4 the shadow maps (sun cascade
+ *   atlas and local-light atlas -- lit particles receive shadows).
+ * - **TAA reactive mask** (optional, build_reactive()): a second pipeline over the same shaders
+ *   and sets, into an R8 colour-only target, additive (UNORM clamps the sum at 1), no depth
+ *   attachment -- the fragment depth-tests itself against the Hi-Z copy. Each `reactive` batch is
+ *   drawn again into it (PushConstants::extra.x = 1), and taa.frag trusts the current frame where
+ *   it is set, so fast thin particles never smear into streaks.
  * - **Per-frame-in-flight instance buffer**, grown by doubling and refilled whole each frame,
  *   for the same reason as DebugLinePass's: the pipeline never waits per frame.
  */
@@ -67,7 +73,8 @@ public:
         glm::vec4 stretch{0.0f};  ///< x stretch speed, y stretch length, z distortion, w time (s)
         glm::vec4 misc{0.0f};     ///< x opacity, y has texture, z pivot (sizes), w is perspective
         glm::vec4 depth{0.0f};    ///< x near, y far, zw 1 / render extent
-        glm::vec4 ambient{0.0f};  ///< rgb ambient scale (sky intensity), w unused
+        glm::vec4 ambient{0.0f};  ///< x ambient scale (sky intensity), y receive shadows
+        glm::vec4 extra{0.0f};    ///< x pass (0 colour, 1 reactive mask), y reactive, z scatter, w scatter anisotropy
     };
     static_assert(sizeof(PushConstants) <= 128, "particle push block must fit Vulkan's guaranteed 128 bytes");
 
@@ -77,6 +84,7 @@ public:
                  const coopa::gfx::pipeline::DescriptorSetLayout& light_layout,
                  const coopa::gfx::pipeline::DescriptorSetLayout& hiz_layout,
                  const coopa::gfx::pipeline::DescriptorSetLayout& material_layout,
+                 const coopa::gfx::pipeline::DescriptorSetLayout& shadow_layout,
                  const std::string& vert_spv, const std::string& frag_spv,
                  uint32_t initial_capacity = 1024)
         : device_(device), allocator_(allocator)
@@ -100,9 +108,10 @@ public:
         desc.depth.compare = CompareOp::Less;
         desc.blend.mode = pipeline::BlendMode::PremultipliedAlpha;
         desc.blend.color_attachment_count = 1;
-        desc.descriptor_layouts = {&camera_layout, &light_layout, &hiz_layout, &material_layout};
+        desc.descriptor_layouts = {&camera_layout, &light_layout, &hiz_layout, &material_layout, &shadow_layout};
         desc.push_constants = {{ShaderStage::Vertex | ShaderStage::Fragment, 0, sizeof(PushConstants)}};
         pipeline_ = std::make_unique<pipeline::Pipeline>(device, detail::RawRenderPass{shared_render_pass}, desc);
+        desc_ = desc;
 
         for (uint32_t i = 0; i < kFrames; ++i) {
             capacity_[i] = std::max(1u, initial_capacity);
@@ -142,8 +151,24 @@ public:
 
     uint32_t total_instances() const { return total_; }
 
-    /** @brief Binds the pipeline -- before the caller binds sets 0-3. */
+    /** @brief Binds the pipeline -- before the caller binds sets 0-4. */
     void bind(coopa::gfx::command::CommandBuffer& cmd) const { cmd.bind_pipeline(*pipeline_); }
+
+    /**
+     * @brief Builds the reactive-mask pipeline against `mask_render_pass` (an R8 colour-only
+     *        target): the same shaders, layouts and instance buffers; additive; no depth.
+     */
+    void build_reactive(VkRenderPass mask_render_pass) {
+        coopa::gfx::pipeline::PipelineDesc d = desc_;
+        d.depth.test = false;
+        d.depth.write = false;
+        d.blend.mode = coopa::gfx::pipeline::BlendMode::Additive;
+        reactive_pipeline_ = std::make_unique<coopa::gfx::pipeline::Pipeline>(
+            device_, coopa::gfx::detail::RawRenderPass{mask_render_pass}, d);
+    }
+    bool has_reactive() const { return reactive_pipeline_ != nullptr; }
+    /** @brief Binds the reactive-mask pipeline -- before the caller binds sets 0-4. */
+    void bind_reactive(coopa::gfx::command::CommandBuffer& cmd) const { cmd.bind_pipeline(*reactive_pipeline_); }
 
     /** @brief One batch: its slice of the instance buffer, its look, six vertices per instance. */
     void draw(coopa::gfx::command::CommandBuffer& cmd, size_t batch, uint32_t count, const PushConstants& pc) const {
@@ -165,6 +190,8 @@ private:
     std::unique_ptr<coopa::gfx::pipeline::Shader> vert_;
     std::unique_ptr<coopa::gfx::pipeline::Shader> frag_;
     std::unique_ptr<coopa::gfx::pipeline::Pipeline> pipeline_;
+    std::unique_ptr<coopa::gfx::pipeline::Pipeline> reactive_pipeline_;
+    coopa::gfx::pipeline::PipelineDesc desc_;
     std::array<std::unique_ptr<coopa::gfx::memory::Buffer>, kFrames> buffers_;
     std::array<uint32_t, kFrames> capacity_{};
     std::vector<uint32_t> firsts_;

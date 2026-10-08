@@ -1,0 +1,36 @@
+# weather_ground_mist: a slow haze bank hugging the ground under the viewer. Spawned by the weather system
+# for `fog` (and thinly for `storm`), anchored on the ground: it follows the camera across, its
+# height base is the weather's ground height + height_base here, its density scales with the
+# effect intensity, its colour darkens with the time of day and it drifts with the wind.
+# Needs render volumetrics_enabled.
+format: toyengine-object
+object:
+  name: weather_ground_mist
+  components:
+    - type: Transform
+      position: {x: 0, y: 0, z: 0}
+  children:
+    - name: weather_mist_volume
+      components:
+        - type: Transform
+          position: {x: 0, y: 0, z: 2.5}
+        - type: Volume
+          kind: haze
+          shape: box
+          extent: {x: 42, y: 42, z: 3.5}
+          falloff: 0.25
+          density: 0.09
+          noise_scale: 0.12
+          coverage: 0.0
+          gate_scale: 0.0
+          flow_warp: 3.0
+          flow_scale: 0.03
+          octaves: 3
+          speed: 0.4
+          direction: {x: 1, y: 0.3, z: 0}
+          height_base: 0.0
+          height_falloff: 2.0
+          occlusion: 0.55
+          sun_amount: 0.8
+          color: {r: 0.80, g: 0.83, b: 0.88}
+      children: []

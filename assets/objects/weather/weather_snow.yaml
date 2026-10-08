@@ -1,0 +1,78 @@
+# weather_snow: soft flakes drifting down around the viewer, swirled by curl noise, settling where
+# they land. Spawned by the weather system for `snow` (and, denser, `blizzard`).
+#
+# Like weather_rain, the flakes live in a wrap volume (`wrap_box`) the weather keeps on the camera,
+# so the snowfall is always all around the viewer, and they stop on roofs, terrain and water (the
+# weather's precipitation height map). Each landing flake may leave a settled flake on the surface
+# that lingers and fades (the sub emitter; the weather's `ground_effects` switch).
+format: toyengine-object
+object:
+  name: weather_snow
+  components:
+    - type: Transform
+      position: {x: 0, y: 0, z: 0}
+  children:
+    - name: weather_snow_flakes
+      components:
+        - type: Transform
+          position: {x: 0, y: 0, z: 0}
+        - type: WeatherDistantLandings
+          radius: 35
+          targets: [weather_snow_settled]
+        - type: ParticleSystem
+          shape: box
+          box: {x: 40, y: 40, z: 20}
+          wrap_box: {x: 40, y: 40, z: 20}
+          wrap_fade: 0.2
+          rate: 650
+          max_particles: 10000
+          prewarm: true
+          start_lifetime: [12, 15]
+          start_speed: 0.0
+          velocity: {x: 0, y: 0, z: -1.3}
+          start_size: [0.04, 0.09]
+          start_color: {r: 0.95, g: 0.97, b: 1.0, a: 0.9}
+          noise_strength: 0.7
+          noise_frequency: 0.35
+          noise_scroll: 0.4
+          collide: true
+          ground_height: 0.0
+          kill_on_collide: true
+          on_death_collision_only: true
+          on_death:
+            - {target: weather_snow_settled, count: [0, 1.2]}   # rounded: ~60% of flakes settle
+          alpha_over_life: [{t: 0.0, value: 0.0}, {t: 0.04, value: 1.0}, {t: 1.0, value: 1.0}]
+          render_mode: billboard
+          sprite: soft
+          lit: 1.0
+          scatter: 0.8
+          scatter_anisotropy: 0.5
+          reactive: 1.0     # TAA: never smear into streaks
+          emissive: 1.05
+          softness: 0.6
+          camera_fade: 0.5
+          sort: none
+      children: []
+    - name: weather_snow_settled
+      components:
+        - type: Transform
+          position: {x: 0, y: 0, z: 0}
+        - type: ParticleSystem
+          rate: 0
+          max_particles: 9000
+          start_lifetime: [2.5, 4.5]
+          start_speed: 0.0
+          start_size: [0.06, 0.11]
+          start_rotation: [0, 360]
+          start_color: {r: 0.96, g: 0.98, b: 1.0, a: 0.9}
+          alpha_over_life: [{t: 0.0, value: 1.0}, {t: 0.7, value: 0.8}, {t: 1.0, value: 0.0}]
+          size_over_life: [{t: 0.0, value: 1.0}, {t: 1.0, value: 0.6}]
+          align_to_normal: true      # lies on the surface it landed on
+          render_mode: aligned
+          sprite: soft
+          lit: 1.0
+          emissive: 1.0
+          softness: 0.5
+          soft_distance: 0.0
+          sort: none
+      children: []

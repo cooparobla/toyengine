@@ -22,7 +22,8 @@
 # Shaders: <DIR>/assets/shaders/*.vert|*.frag compile with -I <project shaders>, -I <engine
 # shaders>, -I <gfxcoopa shaders> (the runtime ShaderLibrary search order, see
 # RuntimeLayout::shader_roots()), so a project shader can #include any engine/gfx header and a
-# project file shadows the engine's of the same name.
+# project file shadows the engine's of the same name. The .spv go to
+# <build>/shaders/project_shaders/ (TOY_SHADER_BUILD_DIR), like the engine's own.
 
 cmake_minimum_required(VERSION 3.21)
 
@@ -110,21 +111,25 @@ function(_toyengine_project_shaders TARGET_NAME SHADER_DIR ENGINE_DIR)
         return()
     endif()
     file(GLOB _srcs CONFIGURE_DEPENDS "${SHADER_DIR}/*.vert" "${SHADER_DIR}/*.frag")
+    set(_out_dir "${TOY_SHADER_BUILD_DIR}/project_shaders")
+    file(MAKE_DIRECTORY "${_out_dir}")
     set(_outs "")
     foreach(_s ${_srcs})
+        get_filename_component(_name "${_s}" NAME)
+        set(_spv "${_out_dir}/${_name}.spv")
         add_custom_command(
-            OUTPUT  "${_s}.spv"
+            OUTPUT  "${_spv}"
             COMMAND ${GLSLC}
                     -I "${SHADER_DIR}"
                     -I "${ENGINE_DIR}/assets/shaders"
                     -I "${ENGINE_DIR}/libs/gfxcoopa/assets/shaders"
-                    -MD -MF "${_s}.spv.d" -MT "${_s}.spv"
-                    "${_s}" -o "${_s}.spv"
+                    -MD -MF "${_spv}.d" -MT "${_spv}"
+                    "${_s}" -o "${_spv}"
             DEPENDS "${_s}"
-            DEPFILE "${_s}.spv.d"
+            DEPFILE "${_spv}.d"
             COMMENT "glslc ${_s}"
             VERBATIM)
-        list(APPEND _outs "${_s}.spv")
+        list(APPEND _outs "${_spv}")
     endforeach()
     add_custom_target(${TARGET_NAME} ALL DEPENDS ${_outs})
 endfunction()

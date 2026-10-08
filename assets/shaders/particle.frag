@@ -10,11 +10,31 @@
 //
 // Output is PREMULTIPLIED: rgb * a, with alpha scaled by (1 - additive), so a single
 // premultiplied-blend pipeline covers alpha-blended smoke and additive fire alike.
+//
+// Light, for `lit` particles: the sky gradient (ambient), the sun with a half-Lambert wrap and
+// the point and spot lights the same way, each shadowed (`receive_shadows`: one hard tap of the
+// sun's cascade atlas, the local-light atlas for shadowed lamps), plus Henyey-Greenstein
+// FORWARD scattering of every light toward the eye (`scatter`, `scatter_anisotropy`) -- what
+// makes rain glint against a street lamp or a low sun and backlit smoke glow.
+//
+// The same shader also draws the TAA REACTIVE MASK (extra.x == 1): ParticlePass's second
+// pipeline renders each `reactive` batch again into an R8 target, writing coverage * reactive
+// and depth-testing by hand against the Hi-Z copy of the scene depth (that pass has no depth
+// attachment); taa.frag then trusts the current frame wherever the mask is set, so fast thin
+// particles never smear into streaks.
 
 #include <gfx/spot_light.glsl>
 #include <light_ubo_body.glsl>
 #include <gfx/sky.glsl>
 #include <gfx/depth.glsl>
+#include <gfx/shadow_sampling.glsl>
+
+// Set 4: the shadow maps -- the same set (and names) the forward transparent shading binds at 2;
+// pixel_shadow_body.glsl reads them through these exact names.
+layout(set = 4, binding = 0) uniform sampler2DShadow dir_shadow_map;
+layout(set = 4, binding = 1) uniform sampler2DShadow local_shadow_atlas;
+layout(set = 4, binding = 3) uniform sampler2D dir_shadow_map_raw;
+#include "pixel_shadow_body.glsl"
 
 layout(location = 0) in vec2 v_uv;
 layout(location = 1) in vec4 v_color;
@@ -43,7 +63,8 @@ layout(push_constant) uniform ParticlePC {
     vec4 stretch;  // x stretch speed, y stretch length, z distortion, w time
     vec4 misc;     // x opacity, y has texture, z pivot, w is perspective
     vec4 depth;    // x near, y far, zw 1 / render extent
-    vec4 ambient;  // x sky/ambient scale
+    vec4 ambient;  // x sky/ambient scale, y receive shadows
+    vec4 extra;    // x pass (0 colour, 1 TAA reactive mask), y reactive, z scatter, w scatter anisotropy
 } pc;
 
 layout(location = 0) out vec4 out_color;
@@ -100,6 +121,26 @@ float smin(float a, float b, float k) {
 float toon(float x, float bands) {
     if (bands < 1.5) return x;
     return floor(x * bands + 0.5) / bands;
+}
+
+// The sun's shadow at a particle: ONE hard tap of the cascade atlas (no PCF: a particle is not a
+// surface, and fill-rate is the cost that matters here), on the first cascade holding the point.
+float particle_dir_shadow(vec3 world_pos) {
+    int count = int(lights.dir_cascade_info.x);
+    vec2 uv;
+    for (int c = 0; c < 4; ++c) {
+        if (c >= count) break;
+        if (!toy_csm_contains(c, world_pos, 0.0, uv)) continue;
+        vec3 coords = toy_csm_atlas_coords(c, world_pos);
+        float bias = 2.0 * lights.dir_cascade_depth_bias[c];
+        float fade = 1.0;
+        if (lights.dir_shadow_fade.w > 0.0) {
+            float d = length(world_pos - lights.dir_shadow_fade.xyz);
+            fade = 1.0 - smoothstep(lights.dir_shadow_fade_params.x, lights.dir_shadow_fade.w, d);
+        }
+        return gfx_shadow_dir_hard(dir_shadow_map, coords, bias) * fade * lights.dir_shadow_extra.x;
+    }
+    return 0.0;
 }
 
 void main() {
@@ -202,6 +243,28 @@ void main() {
         albedo = mix(albedo, hot, h * h * 0.85) * (1.0 + h * 1.6);
     }
 
+    // --- fades ------------------------------------------------------------------------------
+    float view_depth = v_misc.w;
+    float fade = 1.0;
+    float scene_depth = 1e30;
+    bool mask_pass = pc.extra.x > 0.5;
+    if (pc.shape.y > 0.0 || mask_pass) {
+        float scene_raw = texelFetch(u_hiz_map, ivec2(gl_FragCoord.xy), 0).r;
+        scene_depth = gfx_linear_depth(scene_raw, pc.depth.x, pc.depth.y, pc.misc.w);
+    }
+    if (pc.shape.y > 0.0) fade *= clamp((scene_depth - view_depth) / pc.shape.y, 0.0, 1.0);
+    if (pc.shape.z > 0.0) fade *= clamp((view_depth - pc.depth.x) / pc.shape.z, 0.0, 1.0);
+
+    a *= v_color.a * pc.misc.x * fade;
+    if (a < 0.002) discard;
+
+    // The TAA reactive mask: coverage only, hidden behind opaque geometry by hand.
+    if (mask_pass) {
+        if (view_depth > scene_depth + 0.02) discard;
+        out_color = vec4(clamp(a * pc.extra.y, 0.0, 1.0), 0.0, 0.0, 1.0);
+        return;
+    }
+
     // --- lighting --------------------------------------------------------------------------
     float lit = pc.shading.x;
     vec3 color = albedo;
@@ -212,6 +275,12 @@ void main() {
             N = normalize(v_right * uv.x * 0.9 + v_up * uv.y * 0.9 + v_normal * z);
         }
         vec3 V = normalize(camera.camera_pos - v_world);
+        bool shadows = pc.ambient.y > 0.5;
+        float scatter_k = pc.extra.z;
+        float g = clamp(pc.extra.w, -0.95, 0.95);
+        // Henyey-Greenstein, scaled so isotropic scattering is 1: `cos_t` between the eye's view
+        // ray (eye -> particle) and the light's direction toward the particle's far side.
+        #define HG(cos_t) ((1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * (cos_t), 1e-4), 1.5))
         vec3 light = sky_gradient(N, lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb)
                    * pc.ambient.x;
         if (lights.light_counts.x > 0u) {
@@ -219,9 +288,11 @@ void main() {
             // Half-Lambert: a volume is lit through, never pitch black on its shadow side.
             float wrap = clamp(dot(N, L) * 0.5 + 0.5, 0.0, 1.0);
             wrap = toon(wrap * wrap, bands);
-            // Forward scatter: smoke glows when the sun is behind it.
-            float scatter = pow(clamp(dot(-V, L), 0.0, 1.0), 6.0) * 0.6;
-            light += lights.dir_color.rgb * lights.dir_direction.w * (wrap + scatter);
+            // The original soft forward lobe (smoke glows with the sun behind it), plus `scatter`.
+            float glow = pow(clamp(dot(-V, L), 0.0, 1.0), 6.0) * 0.6 + scatter_k * HG(dot(-V, L)) * 0.25;
+            float vis = 1.0;
+            if (shadows && lights.dir_shadow_params.z > 0.5) vis = 1.0 - particle_dir_shadow(v_world);
+            light += lights.dir_color.rgb * lights.dir_direction.w * (wrap + glow) * vis;
         }
         uint num_points = min(lights.light_counts.y, 16u);
         for (uint i = 0u; i < num_points; ++i) {
@@ -230,31 +301,42 @@ void main() {
             float dist = length(to_l);
             float range = pl.position_range.w;
             if (dist > range || dist < 1e-4) continue;
+            vec3 L = to_l / dist;
             // Same distance curve as the forward / deferred point lights (pixel_forward_shading.glsl).
             float sharpness = max(pl.attenuation.x, 0.1);
             float factor = clamp(dist / range, 0.0, 1.0);
             float falloff = clamp(1.0 - pow(factor, sharpness), 0.0, 1.0);
             falloff *= falloff;
             float atten = falloff / (4.0 * 3.14159265 * (factor * factor + 1.0));
-            float wrap = clamp(dot(N, to_l / dist) * 0.5 + 0.5, 0.0, 1.0);
-            light += pl.color_intensity.rgb * (pl.color_intensity.w * 0.08) * atten * toon(wrap, bands);
+            float wrap = clamp(dot(N, L) * 0.5 + 0.5, 0.0, 1.0);
+            float vis = (shadows && pl.attenuation.w > 0.5) ? 1.0 - calc_local_shadow(pl.attenuation.w, v_world, L, L) : 1.0;
+            light += pl.color_intensity.rgb * (pl.color_intensity.w * 0.08) * atten * vis *
+                     (toon(wrap, bands) + scatter_k * HG(dot(-V, L)));
         }
+        uint num_spots = min(lights.light_counts.z, 8u);
+        for (uint i = 0u; i < num_spots; ++i) {
+            SpotLight sl = lights.spot_lights[i];
+            vec3 to_l = sl.position_range.xyz - v_world;
+            float dist = length(to_l);
+            float range = sl.position_range.w;
+            if (dist > range || dist < 1e-4) continue;
+            vec3 L = to_l / dist;
+            float cone = gfx_spot_cone(L, sl.direction_cone.xyz, sl.direction_cone.w, sl.params.y);
+            if (cone <= 0.0) continue;
+            float sharpness = max(sl.params.x, 0.1);
+            float factor = clamp(dist / range, 0.0, 1.0);
+            float falloff = clamp(1.0 - pow(factor, sharpness), 0.0, 1.0);
+            falloff *= falloff;
+            float atten = falloff / (4.0 * 3.14159265 * (factor * factor + 1.0)) * cone;
+            float wrap = clamp(dot(N, L) * 0.5 + 0.5, 0.0, 1.0);
+            float vis = (shadows && sl.params.z > 0.5) ? 1.0 - calc_local_shadow(sl.params.z, v_world, L, L) : 1.0;
+            light += sl.color_intensity.rgb * (sl.color_intensity.w * 0.08) * atten * vis *
+                     (toon(wrap, bands) + scatter_k * HG(dot(-V, L)));
+        }
+        #undef HG
         color = mix(albedo, albedo * light, lit);
     }
     color *= pc.shading.z;   // emissive / HDR multiplier
-
-    // --- fades -----------------------------------------------------------------------------
-    float view_depth = v_misc.w;
-    float fade = 1.0;
-    if (pc.shape.y > 0.0) {
-        float scene_raw = texelFetch(u_hiz_map, ivec2(gl_FragCoord.xy), 0).r;
-        float scene_depth = gfx_linear_depth(scene_raw, pc.depth.x, pc.depth.y, pc.misc.w);
-        fade *= clamp((scene_depth - view_depth) / pc.shape.y, 0.0, 1.0);
-    }
-    if (pc.shape.z > 0.0) fade *= clamp((view_depth - pc.depth.x) / pc.shape.z, 0.0, 1.0);
-
-    a *= v_color.a * pc.misc.x * fade;
-    if (a < 0.002) discard;
 
     out_color = vec4(color * a, a * (1.0 - pc.shading.w));
 }

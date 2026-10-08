@@ -61,6 +61,9 @@ on a component or child deletes it.
 | Terrain | see create-terrain |
 | WaterBody, Buoyancy | see create-water-body |
 | ParticleSystem, LightFlicker | see create-particle-effect |
+| WeatherSurface | `splashes` (true). Rain splashes / sprays and snow settles on this object and its children; unmarked surfaces take the drops silently (they still keep the rain off what is below). Usually on the ground plane / streets |
+| WeatherDistantLandings | `radius` (45), `targets` (sub emitter names; empty = all). On a precipitation ParticleSystem's object: the weather shows its landings past its wrap box, out to `radius` |
+| WeatherReactor | `hours` ([from, to], wraps), `phases` (night / dawn / day / dusk), `conditions` (weather names), `min_precipitation`, `invert`, `target` ([lights, effects] default; also `children`), `fade` (1.5 s). Switches lamps, fires and effects with the time of day / weather -- see toyengine/weather/README.md |
 | Animator | see create-animation |
 | ClothRenderer | no keys; needs sibling Cloth + MeshRenderer |
 

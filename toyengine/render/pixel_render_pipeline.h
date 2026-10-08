@@ -1378,11 +1378,12 @@ private:
 
         // Particle quads share the same render pass for the same reason SDFs do: one bracket,
         // one back-to-front list. Set 2 is the Hi-Z pyramid (mip 0 = opaque depth, for soft
-        // particles), set 3 the material set (the sprite texture in its albedo slot).
+        // particles), set 3 the material set (the sprite texture in its albedo slot), set 4 the
+        // shadow maps (lit particles receive shadows).
         particle_pass_ = std::make_unique<passes::ParticlePass>(
             device_, allocator_, transparent_pass_->render_pass(),
             *camera_layout_, *light_layout_, ssr_pass_->hiz_layout(), material_cache_->layout_object(),
-            config_.shaders("particle.vert"), config_.shaders("particle.frag"));
+            *shadow_layout_, config_.shaders("particle.vert"), config_.shaders("particle.frag"));
     }
     /**
      * @brief Builds the post-process chain in frame-graph order -- fog, volumetrics, DOF, bloom,
@@ -1666,9 +1667,18 @@ private:
             // fallback); like DoF's and the stylize pass's bindings above, it is the G-buffer
             // depth at render_extent_. The velocity attachment gives every surface its own
             // per-object motion vector, so moving objects stop ghosting.
+            // The TAA reactive mask: `reactive` particles (rain, snow, sparks) draw their coverage
+            // into it right before the resolve (record_reactive_mask_()), and the resolve trusts
+            // the current frame there -- a fast particle has no motion vector, so history would
+            // otherwise smear it into streaks across the screen.
+            reactive_target_ = std::make_unique<coopa::gfx::engine::targets::OffscreenTarget>(
+                device_, allocator_, render_extent_.width, render_extent_.height,
+                coopa::gfx::Format::R8_Unorm, coopa::gfx::engine::targets::kColorOnly);
+            if (particle_pass_) particle_pass_->build_reactive(reactive_target_->render_pass());
             taa_pass_->set_source_images(post_target_.color_image_object()->view_typed(),
                                          gbuffer_target_.depth_view_typed(),
-                                         gbuffer_target_.g4_view_typed());
+                                         gbuffer_target_.g4_view_typed(),
+                                         reactive_target_->color_view_typed());
         }
 
         // Single source of truth for everything downstream of post_target_/aa_target_ -- same
@@ -2410,6 +2420,7 @@ private:
                                  config_.smaa_threshold, config_.smaa_max_search_steps,
                                  render_extent_.width, render_extent_.height);
             } else if (config_.aa_mode == "taa") {
+                record_reactive_mask_(cmd);
                 taa_pass_->prepare_history(cmd);
                 coopa::gfx::engine::passes::TaaPass::Params taa_params{};
                 // Maps current jittered clip space to LAST frame's unjittered clip space:
@@ -4996,8 +5007,42 @@ private:
         pc.depth   = glm::vec4(particle_depth_.x, particle_depth_.y,
                                1.0f / static_cast<float>(std::max(1u, render_extent_.width)),
                                1.0f / static_cast<float>(std::max(1u, render_extent_.height)));
-        pc.ambient = glm::vec4(config_.indirect.ambient_intensity, 0.0f, 0.0f, 0.0f);
+        pc.ambient = glm::vec4(config_.indirect.ambient_intensity,
+                               (l.receive_shadows && config_.shadows_enabled) ? 1.0f : 0.0f, 0.0f, 0.0f);
+        pc.extra   = glm::vec4(0.0f, glm::clamp(l.reactive, 0.0f, 1.0f), std::max(l.scatter, 0.0f), l.scatter_anisotropy);
         return pc;
+    }
+
+    /**
+     * @brief The TAA reactive mask for this frame: cleared, then every batch with `reactive` > 0
+     *        drawn again into it as coverage (ParticlePass's reactive pipeline; the fragment
+     *        depth-tests itself against the Hi-Z copy). Recorded right before the resolve that
+     *        reads it, every TAA frame, so it is never stale.
+     */
+    void record_reactive_mask_(coopa::gfx::command::CommandBuffer& cmd) {
+        if (!reactive_target_) return;
+        reactive_target_->begin(cmd, VkClearColorValue{{0.0f, 0.0f, 0.0f, 0.0f}});
+        if (particle_pass_ && particle_pass_->has_reactive() && particle_pass_->total_instances() > 0) {
+            bool bound = false;
+            for (size_t i = 0; i < particle_state_.quads.size(); ++i) {
+                const ParticleDrawBatch& pb = particle_state_.quads[i];
+                if (pb.count == 0 || pb.look.reactive <= 0.0f) continue;
+                if (!bound) {
+                    particle_pass_->bind_reactive(cmd);
+                    cmd.bind_descriptor_set(current_camera_set(), 0);
+                    cmd.bind_descriptor_set(current_light_set(), 1);
+                    cmd.bind_descriptor_set(ssr_pass_->hiz_set(), 2);
+                    cmd.bind_descriptor_set(*shadow_set_, 4);
+                    bound = true;
+                }
+                cmd.bind_descriptor_set(material_cache_->set_for(pb.texture_material ? *pb.texture_material
+                                                                                      : particle_default_material_), 3);
+                passes::ParticlePass::PushConstants pc = particle_push_constants_(pb);
+                pc.extra.x = 1.0f;
+                particle_pass_->draw(cmd, i, pb.count, pc);
+            }
+        }
+        reactive_target_->end(cmd);
     }
 
     /// Draws every BLEND-material renderer AND every BLEND SdfRenderer, back-to-front by squared
@@ -5087,6 +5132,7 @@ private:
                     cmd.bind_descriptor_set(current_camera_set(), 0);
                     cmd.bind_descriptor_set(current_light_set(), 1);
                     cmd.bind_descriptor_set(ssr_pass_->hiz_set(), 2);
+                    cmd.bind_descriptor_set(*shadow_set_, 4);
                     last_kind = 2;
                 }
                 const ParticleDrawBatch& pb = particle_state_.quads[item.index];
@@ -5462,6 +5508,12 @@ private:
     // shared RGBA8 aa_target_ cannot hold the history) and writes aa_target_ through a
     // passthrough present draw.
     std::unique_ptr<coopa::gfx::engine::passes::TaaPass> taa_pass_;
+    /// TAA reactive mask (R8, render extent): see record_reactive_mask_(). Null unless aa_mode is taa.
+    std::unique_ptr<coopa::gfx::engine::targets::OffscreenTarget> reactive_target_;
+public:
+    /** @brief True when TAA runs with the particles' reactive mask (aa_mode taa). */
+    bool has_reactive_mask() const { return reactive_target_ != nullptr && particle_pass_ && particle_pass_->has_reactive(); }
+private:
     // Halton(2,3) jitter phase for "taa" mode, ADVANCED ONLY when config_.aa_mode == "taa" --
     // deliberately separate from frame_index_ below, which must keep advancing every frame
     // regardless of aa_mode (SSAO/SSR/gfx_time all depend on it). Mirrors blendy's own

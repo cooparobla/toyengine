@@ -88,8 +88,9 @@ mesh (the shadow backbones give real position/uv only; normals are zero there).
    `editor/schema/component_schema.h`. The editor test `editor_material_shader_catalogue`
    fails if the engine and editor lists disagree.
 3. Compilation is automatic: CMake globs top-level `assets/shaders/*.vert|*.frag` into `.spv`
-   next to the source (includes resolve `assets/shaders` then `libs/gfxcoopa/assets/shaders`).
-   No CMake edit; `.glsl` files are only included.
+   in the build tree, `build/shaders/toyengine_shaders/` (a project's own shaders:
+   `build/shaders/project_shaders/`); includes resolve `assets/shaders` then
+   `libs/gfxcoopa/assets/shaders`. No CMake edit; `.glsl` files are only included.
 
 ## Procedure
 
@@ -108,7 +109,7 @@ params (push-constant budget).
 
 ```sh
 cmake --build build -j10 2>&1 | grep -iE "error|glslc"          # shader compile errors show here
-ls -la assets/shaders/<name>*.spv                                 # each entry point compiled now
+ls -la build/shaders/toyengine_shaders/<name>*.spv               # each entry point compiled now
 .claude/skills/create-scene/scripts/render_scene.sh <scene>
 ./build/toyengine_tests caml_roundtrips_every_asset
 ./build/toyengine_editor_tests editor_material_shader_catalogue

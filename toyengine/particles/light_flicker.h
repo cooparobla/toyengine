@@ -46,6 +46,9 @@ public:
     float wobble = 0.0f;          ///< Positional jitter (m) of the light around its authored spot.
     glm::vec3 color_shift{0.0f};  ///< Added to the light colour at the bright peaks (e.g. toward yellow).
     uint32_t seed = 0;
+    /// 0..1 multiplier on the flickered intensity, for something else to fade the light without
+    /// fighting the flicker (WeatherReactor puts a campfire out this way). Not authored.
+    float dimmer = 1.0f;
 
     void start() override {
         if (!owner) return;
@@ -69,7 +72,7 @@ public:
         auto* pl = owner->get_component<coopa::gfx::engine::components::PointLightComponent>();
         if (!pl) return;
         const float n = flicker_(t_ * speed + phase_);
-        pl->intensity = base_intensity_ * std::max(0.0f, 1.0f + amount * n);
+        pl->intensity = base_intensity_ * std::max(0.0f, 1.0f + amount * n) * dimmer;
         pl->color = base_color_ + color_shift * std::max(0.0f, n);
         if (wobble > 0.0f) {
             if (auto* tc = owner->get_transform()) {

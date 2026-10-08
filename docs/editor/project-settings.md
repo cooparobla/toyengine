@@ -112,6 +112,41 @@ The **World** tab holds the sky, ambient light and fog.
 To see fog at all, turn on **Fog enabled** in **Features** on the **Render** tab and restart
 the renderer.
 
+### Weather & Time of Day
+
+The first section of the World tab gives the open scene a clock and changing weather. It is
+saved in the scene, so each scene can have its own.
+
+1. Tick the checkbox in the **Weather & Time of Day** header. The first time, it fills in a day
+   and night sky based on how the scene looks now, and a set of standard weather conditions:
+   clear, cloudy, overcast, fog, rain, storm, snow, blizzard and sandstorm.
+2. Set the clock under **Clock**: **Start Time**, **Day Length (min)** (real minutes per game
+   day; 0 stops time) and how bright the sun and moon are.
+3. Choose how the weather changes under **Schedule**: **fixed** stays on the **Start
+   Condition**, **random** moves on when a condition's time is up, and **cycle** goes down the
+   list.
+4. Under **Conditions**, select a condition to edit what it does: how cloudy and dark the sky
+   is, the fog, the wind, lightning, and the **Effects** it adds (rain, snow, mist). The buttons
+   under the list add, duplicate, remove and reorder conditions, or reset them to the standard
+   set.
+
+**Preview** shows the time and weather right now, and lets you try things without changing the
+scene. Drag **Time** to see another time of day. Pick a **Condition** to watch the weather blend
+into it. To skip waiting for the blend, set **Transition Speed** to 4x, 16x or Instant, or click
+**Finish Transition**. Tick **Run Clock & Schedule** to let time pass while you edit. Use **Full Render**
+shading in the viewport to see it.
+
+While the weather is on, it controls the sky colours, ambient light and fog. Those settings show
+**Set by Weather** with a lock, on this tab and on the Render tab, and come back when you switch
+the weather off. The scene's sun shows **Driven by Weather** in its components.
+
+Rain splashes, and snow settles, only on objects you choose. Select the ground (or a street)
+and **Add Component > Effects > WeatherSurface**. Rain still stops on every other surface,
+such as a roof or an awning, but lands there without splashing.
+
+The rain, snow and mist the weather creates appear in the Hierarchy under **Runtime**, greyed
+out with a lock. You can select them to look at them, but not change them. They are never saved.
+
 ## Output tab
 
 The **Output** tab has **Save config.yaml** and **Package Project...** at the top, then:

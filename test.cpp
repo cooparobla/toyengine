@@ -86,6 +86,8 @@
 #include <toyengine/water/water_system.h>
 #include <toyengine/particles/particle_system_runner.h>
 #include <toyengine/particles/particle_yaml.h>
+#include <toyengine/weather/weather_reactor.h>
+#include <toyengine/weather/weather_system.h>
 #include <toyengine/world/terrain_component.h>
 #include <toyengine/world/terrain_sampler.h>
 #include <toyengine/scene/cloth_renderer.h>
@@ -6900,6 +6902,325 @@ void test_ui_showcase_scene_runs() {
 }
 
 // -------------------------------------------------------------------------------------------
+// Group "weather" -- toyengine/weather/: the sky model, the YAML block, condition blending, the
+// schedule, clock signals and WeatherReactor's rule. Device-free (a bare Scene, execute() by hand).
+// Group "render_weather" -- the weather_test scene end to end.
+// -------------------------------------------------------------------------------------------
+
+namespace {
+/** @brief A weather block for the device-free tests: two simple conditions, no effects. */
+fkyaml::node weather_test_block(const std::string& extra = "") {
+    fkyaml::node n = fkyaml::node::deserialize(std::string(
+        "enabled: true\n"
+        "time_of_day: 11.5\n"
+        "day_length_minutes: 24\n"
+        "condition: sunny\n"
+        "drive_sun: true\n"
+        "seed: 3\n"
+        "conditions:\n"
+        "  - {name: sunny, cloud_cover: 0.0, sun: 1.0, fog_density: 0.0, wind_strength: 0, transition: 10, duration: [0.1, 0.1], next: [wet]}\n"
+        "  - {name: wet, cloud_cover: 1.0, sun: 0.2, fog_density: 0.04, precipitation: 1.0, wind_strength: 6, transition: 10, duration: [0.1, 0.1], next: [sunny]}\n"
+        "  - {name: never, weight: 0, duration: [0.1, 0.1]}\n"));
+    if (!extra.empty()) {   // overrides win over the base keys
+        const fkyaml::node over = fkyaml::node::deserialize(extra);
+        for (auto item : over.map_items()) n[item.key().get_value<std::string>()] = item.value();
+    }
+    return n;
+}
+void weather_step(toy::weather::WeatherSystem& w, coopa::scene::Scene& scene, float seconds, float dt = 0.1f) {
+    for (float t = 0.0f; t < seconds - 1e-4f; t += dt) {
+        coopa::scene::FrameContext ctx;
+        ctx.delta_time = dt;
+        w.execute(scene, ctx);
+    }
+}
+} // namespace
+
+void test_weather_sky_model_follows_the_sun() {
+    using namespace toy::weather;
+    Settings st;
+    st.latitude = 40.0f;
+    st.north_offset = 0.0f;
+    const glm::vec3 dawn = sun_direction(6.0f, st.latitude, 0.0f);
+    expect_near(dawn.z, 0.0f, 1e-4f, "sky: the sun is on the horizon at 06:00");
+    expect(dawn.x > 0.99f, "sky: ...rising toward +X (east)");
+    const glm::vec3 noon = sun_direction(12.0f, st.latitude, 0.0f);
+    expect_near(glm::degrees(std::asin(noon.z)), 50.0f, 0.01f, "sky: noon elevation is 90 - latitude");
+    expect(noon.y < 0.0f, "sky: the noon sun is to the south at a northern latitude");
+    expect(sun_direction(18.0f, st.latitude, 0.0f).x < -0.99f, "sky: it sets toward -X");
+    const glm::vec3 turned = sun_direction(6.0f, st.latitude, 90.0f);
+    expect(turned.y > 0.99f, "sky: north_offset turns the path about Z");
+
+    const SkyFrame day = evaluate_sky(st, 12.0f), night = evaluate_sky(st, 0.0f);
+    expect(!day.moon_light && night.moon_light, "sky: the light is the sun by day, the moon by night");
+    expect(day.daylight > 0.99f && night.daylight < 0.01f, "sky: daylight runs 1 at noon to 0 at midnight");
+    expect(glm::length(day.zenith - st.day_zenith) < 1e-3f, "sky: noon shows the day palette");
+    expect(glm::length(night.zenith - st.night_zenith) < 1e-3f, "sky: midnight shows the night palette");
+    expect(evaluate_sky(st, 18.1f).twilight > 0.5f, "sky: twilight peaks around sunset");
+    expect_near(day.light_intensity, st.sun_intensity, 1e-3f, "sky: full sun intensity at noon");
+    // The hand-over from sun to moon happens at zero intensity: no visible pop.
+    float worst = 0.0f;
+    for (float h = 17.5f; h < 19.5f; h += 0.002f) {
+        worst = std::max(worst, std::abs(evaluate_sky(st, h + 0.002f).light_intensity - evaluate_sky(st, h).light_intensity));
+    }
+    expect(worst < 0.01f, "sky: the light's intensity is continuous through dusk (max step " + std::to_string(worst) + ")");
+}
+
+void test_weather_yaml_round_trips_and_defaults() {
+    using namespace toy::weather;
+    const Settings none = parse_settings(fkyaml::node());
+    expect(!none.enabled, "weather yaml: no block = disabled");
+    expect(none.conditions.size() == default_conditions().size(), "weather yaml: no conditions = the stock catalogue");
+    for (const char* n : {"clear", "cloudy", "overcast", "fog", "rain", "storm", "snow", "blizzard", "sandstorm"}) {
+        expect(none.find(n) != nullptr, std::string("weather yaml: stock condition '") + n + "'");
+    }
+    const Settings st = parse_settings(weather_test_block("schedule: random\nlatitude: 12\n"));
+    expect(st.enabled && st.schedule == Schedule::Random && st.conditions.size() == 3, "weather yaml: block parsed");
+    const Condition* wet = st.find("wet");
+    expect(wet && wet->min_minutes == 0.1f && wet->next.size() == 1 && wet->next[0] == "sunny", "weather yaml: duration and next");
+    const Settings back = parse_settings(to_node(st));
+    expect(back.schedule == st.schedule && back.latitude == st.latitude && back.conditions.size() == st.conditions.size() &&
+           back.find("wet") && back.find("wet")->fog_density == wet->fog_density && back.find("wet")->precipitation == 1.0f,
+           "weather yaml: to_node() -> parse_settings() round-trips");
+    const Settings stock_back = parse_settings(to_node(none));
+    const Condition* storm = stock_back.find("storm");
+    expect(storm && storm->effects.size() == 2 && storm->effects[0].prefab == "objects/weather_rain" &&
+           storm->effects[1].follow == EffectAnchor::Ground && storm->lightning > 0.0f, "weather yaml: effects round-trip");
+    const Settings bad = parse_settings(fkyaml::node::deserialize(std::string("enabled: true\ncondition: nope\ntime_of_day: 27\n")));
+    expect(bad.condition == bad.conditions.front().name, "weather yaml: an unknown start condition falls back to the first");
+    expect_near(bad.time_of_day, 3.0f, 1e-4f, "weather yaml: time_of_day wraps into [0, 24)");
+    expect(controls_render_key("fog_density") && controls_render_key("sky_zenith") && !controls_render_key("exposure") &&
+           !controls_render_key("fog_enabled"), "weather: the render keys it locks");
+}
+
+void test_weather_transitions_blend_smoothly() {
+    coopa::scene::Scene scene("weather");
+    toy::weather::WeatherSystem* w = toy::weather::install_weather_system(scene, weather_test_block());
+    weather_step(*w, scene, 0.5f);
+    expect(w->state().enabled && w->state().condition == "sunny" && w->state().transition == 1.0f, "weather: starts in its condition");
+    expect_near(w->atmosphere().fog_density, 0.0f, 1e-6f, "weather: sunny has no fog");
+
+    std::string from, to;
+    auto conn = w->on_condition_changed.connect_scoped([&](const std::string& a, const std::string& b) { from = a; to = b; });
+    expect(w->set_condition("wet"), "weather: set_condition() accepts a known name");
+    expect(!w->set_condition("nope"), "weather: ...and refuses an unknown one");
+    expect(from == "sunny" && to == "wet", "weather: on_condition_changed(from, to)");
+    weather_step(*w, scene, 5.0f);
+    const float mid = w->atmosphere().fog_density;
+    expect(mid > 0.005f && mid < 0.035f, "weather: half way through the transition the fog is part way (" + std::to_string(mid) + ")");
+    expect(w->state().transition > 0.4f && w->state().transition < 0.6f, "weather: state().transition reports progress");
+    // Interrupting goes back from where it is: no jump.
+    w->set_condition("sunny");
+    weather_step(*w, scene, 0.1f);
+    expect(std::abs(w->atmosphere().fog_density - mid) < 0.004f, "weather: an interrupted transition starts from what was showing");
+    weather_step(*w, scene, 10.5f);
+    expect_near(w->atmosphere().fog_density, 0.0f, 1e-5f, "weather: ...and lands on the new condition");
+    w->set_condition("wet", 0.0f);
+    weather_step(*w, scene, 0.1f);
+    expect_near(w->atmosphere().fog_density, 0.04f, 1e-5f, "weather: a 0 s transition snaps");
+    expect_near(w->state().precipitation, 1.0f, 1e-5f, "weather: the state carries the profile");
+    expect(w->state().wind_speed() > 1.0f, "weather: wind blows");
+
+    // The sun: no authored light, so a runtime Sun under the locked Weather root.
+    coopa::scene::SceneObject* root = w->root();
+    expect(root && toy::scene::is_runtime_object(*root) && root->name() == "Weather", "weather: a marked runtime root");
+    auto* sun = root ? root->find_child("Sun") : nullptr;
+    auto* light = sun ? sun->get_component<coopa::gfx::engine::components::DirectionalLightComponent>() : nullptr;
+    expect(light && toy::scene::is_runtime_object(*sun), "weather: a runtime Sun inherits the marker");
+    if (light) expect(light->direction.z < 0.0f && light->intensity > 0.0f, "weather: the sun shines down at 11:30");
+
+    // Disabled: everything it made goes away.
+    toy::weather::Settings off = w->settings();
+    off.enabled = false;
+    w->set_settings(off);
+    weather_step(*w, scene, 0.1f);
+    expect(!w->state().enabled && w->root() == nullptr && scene.root_objects().empty(), "weather: disabling removes its runtime objects");
+}
+
+void test_weather_transition_fast_forward() {
+    coopa::scene::Scene scene("weather");
+    toy::weather::WeatherSystem* w = toy::weather::install_weather_system(scene, weather_test_block());
+    weather_step(*w, scene, 0.2f);
+    w->set_condition("wet");                        // a 10 s transition
+    w->set_transition_speed(4.0f);
+    weather_step(*w, scene, 1.3f);
+    expect(w->transitioning() && w->state().transition > 0.45f && w->state().transition < 0.6f,
+           "transition speed: 4x covers half of a 10 s blend in 1.25 s");
+    w->finish_transition();
+    weather_step(*w, scene, 0.1f);
+    expect(!w->transitioning() && std::abs(w->atmosphere().fog_density - 0.04f) < 1e-5f, "finish_transition lands on the target");
+    w->set_transition_speed(0.0f);
+    w->set_condition("sunny");
+    weather_step(*w, scene, 0.1f);
+    expect(!w->transitioning() && w->atmosphere().fog_density < 1e-5f, "transition speed 0 is instant");
+}
+
+void test_weather_drives_and_restores_an_authored_sun() {
+    coopa::scene::Scene scene("weather");
+    auto obj = std::make_unique<coopa::scene::SceneObject>("sun");
+    auto* light = obj->add_component<coopa::gfx::engine::components::DirectionalLightComponent>();
+    light->direction = glm::vec3(0.0f, 0.0f, -1.0f);
+    light->intensity = 2.5f;
+    scene.add_root_object(std::move(obj));
+    toy::weather::WeatherSystem* w = toy::weather::install_weather_system(scene, weather_test_block("time_of_day: 0.5\n"));
+    weather_step(*w, scene, 0.2f);
+    expect(w->root() == nullptr, "weather: an authored sun is driven, no runtime one made");
+    expect(light->direction.z > 0.0f || light->intensity < 0.5f, "weather: at night the light is the dim moon");
+    toy::weather::Settings s = w->settings();
+    s.drive_sun = false;
+    w->set_settings(s);
+    weather_step(*w, scene, 0.1f);
+    expect(light->direction == glm::vec3(0.0f, 0.0f, -1.0f) && light->intensity == 2.5f, "weather: letting go restores the authored light");
+}
+
+void test_weather_schedule_and_clock_signals() {
+    coopa::scene::Scene scene("weather");
+    // Day length 0.24 min: one game hour per 0.6 s.
+    toy::weather::WeatherSystem* w = toy::weather::install_weather_system(
+        scene, weather_test_block("schedule: random\nday_length_minutes: 0.24\ntime_of_day: 23.5\n"));
+    int hours = 0, days = 0, changes = 0;
+    bool saw_never = false;
+    auto c1 = w->on_hour.connect_scoped([&](int) { ++hours; });
+    auto c2 = w->on_new_day.connect_scoped([&](int) { ++days; });
+    auto c3 = w->on_condition_changed.connect_scoped([&](const std::string&, const std::string& to) { ++changes; saw_never |= to == "never"; });
+    // Durations are 6 s, transitions 10 s: a change every ~16 s.
+    weather_step(*w, scene, 60.0f);
+    expect(days == 5 && w->state().day == 5, "weather clock: 100 game hours from 23:30 cross midnight five times (" + std::to_string(days) + ")");
+    expect(hours >= 99 && hours <= 101, "weather clock: on_hour fires once per game hour (" + std::to_string(hours) + ")");
+    expect(changes >= 2, "weather schedule: random moves on when a duration runs out (" + std::to_string(changes) + ")");
+    expect(!saw_never, "weather schedule: weight 0 is never picked");
+
+    // Edit mode holds the clock unless the editor previews.
+    scene.set_simulating(false);
+    const float held = w->time_of_day();
+    weather_step(*w, scene, 3.0f);
+    expect_near(w->time_of_day(), held, 1e-5f, "weather clock: stands still in edit mode");
+    w->set_editor_preview(true);
+    weather_step(*w, scene, 3.0f);
+    expect(std::abs(w->time_of_day() - held) > 1.0f, "weather clock: runs in edit mode with the editor preview on");
+
+    // Cycle goes down the list.
+    coopa::scene::Scene s2("cycle");
+    toy::weather::WeatherSystem* c = toy::weather::install_weather_system(s2, weather_test_block("schedule: cycle\n"));
+    std::vector<std::string> seen;
+    auto c4 = c->on_condition_changed.connect_scoped([&](const std::string&, const std::string& to) { seen.push_back(to); });
+    weather_step(*c, s2, 40.0f);
+    expect(seen.size() >= 2 && seen[0] == "wet" && seen[1] == "never", "weather schedule: cycle follows the list order");
+}
+
+void test_weather_reactor_rules() {
+    using namespace toy::weather;
+    WeatherReactor r;
+    WeatherState w;
+    w.hour = 20.0f; w.phase = DayPhase::Night; w.condition = "rain"; w.precipitation = 0.6f;
+    r.use_hours = true; r.from_hour = 18.0f; r.to_hour = 6.0f;
+    expect(r.matches(w), "reactor: hours wrap past midnight (20:00 in 18-6)");
+    w.hour = 12.0f;
+    expect(!r.matches(w), "reactor: ...noon is outside");
+    r.use_hours = false;
+    r.phases = {"night"};
+    expect(!r.matches([&] { WeatherState d = w; d.phase = DayPhase::Day; return d; }()), "reactor: phase rule");
+    r.conditions = {"rain", "storm"};
+    expect(r.matches(w), "reactor: condition rule");
+    r.min_precipitation = 0.8f;
+    expect(!r.matches(w), "reactor: precipitation rule");
+}
+
+void test_weather_scene_renders() {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
+    ScopedEnv no_input("NO_INPUT", "1");
+    toy::core::AppConfig config = make_test_config("assets/scenes/tests/effects/weather_test/scene.yaml", 640, 360, 640, 360);
+    config.render.transparency_enabled = true;
+    config.render.aa_mode = "taa";              // the reactive mask is TAA's
+    config.render.volumetrics_enabled = true;
+    toy::core::Engine engine(std::move(config));
+    // Orbit close by the market awning, so it is inside the precipitation map around the camera.
+    if (auto* cc = engine.scene().find_first_component<toy::scene::CameraController>()) {
+        cc->target = glm::vec3(3.2f, -1.0f, 1.0f);
+        cc->distance = 8.0f;
+    }
+    tick_frames(engine, 90);
+
+    toy::weather::WeatherSystem* w = engine.weather();
+    expect(w && w->enabled() && w->state().enabled, "weather_test: the scene's weather is on");
+    if (!w) return;
+    expect(w->state().condition == "rain", "weather_test: starts in rain");
+    expect(engine.pipeline().has_reactive_mask(), "weather_test: TAA runs with the particles' reactive mask");
+    const auto& cfg = engine.pipeline().render_config();
+    expect_near(cfg.fog_density, w->atmosphere().fog_density, 1e-6f, "weather_test: the atmosphere reaches the render config");
+    expect(glm::length(cfg.indirect.sky_zenith - w->atmosphere().sky_zenith) < 1e-5f, "weather_test: ...sky included");
+
+    coopa::scene::SceneObject* root = engine.scene().find_object("Weather");
+    expect(root && toy::scene::is_runtime_object(*root), "weather_test: the effects hang under a runtime root");
+    coopa::scene::SceneObject* drops = engine.scene().find_object("weather_rain_drops");
+    auto* ps = drops ? drops->get_component<toy::particles::ParticleSystem>() : nullptr;
+    expect(ps && ps->particle_count() > 500u, "weather_test: it is raining (" + std::to_string(ps ? ps->particle_count() : 0) + " drops)");
+    expect(drops && toy::scene::is_runtime_object(*drops), "weather_test: the rain is a runtime object");
+    // Ground interaction: splashes where drops land, the precipitation map sees the awning
+    // (2.4 m up over x 1.7..4.7, y -3..1), and no drop is under it.
+    coopa::scene::SceneObject* splash_obj = engine.scene().find_object("weather_rain_splash");
+    auto* splash = splash_obj ? splash_obj->get_component<toy::particles::ParticleSystem>() : nullptr;
+    expect(splash && splash->particle_count() > 20u, "weather_test: rain splashes where it lands (" +
+                                                        std::to_string(splash ? splash->particle_count() : 0) + ")");
+    const auto& field = w->ground_probe().field();
+    expect(field && std::abs(field->sample(3.2f, -1.0f) - 2.46f) < 0.1f, "weather_test: the precipitation map finds the awning (" +
+                                                                         std::to_string(field ? field->sample(3.2f, -1.0f) : -1.0f) + ")");
+    expect(field && std::abs(field->sample(-12.0f, 3.0f)) < 0.05f, "weather_test: ...and the ground beside it");
+    // Only the ground takes splashes (its WeatherSurface): none on roofs, the well or the awning;
+    // and they reach past the drops' own box (WeatherDistantLandings).
+    if (splash) {
+        bool ground_only = true, far = false;
+        glm::vec3 eye(0.0f);
+        if (auto* cam = coopa::gfx::engine::components::CameraComponent::main(); cam && cam->owner && cam->owner->get_transform())
+            eye = glm::vec3(cam->owner->get_transform()->transform().get_world_matrix()[3]);
+        for (const auto& p : splash->pool().pos) {
+            ground_only &= p.z < 0.3f;
+            far |= glm::length(glm::vec2(p) - glm::vec2(eye)) > 25.0f;
+        }
+        expect(ground_only, "weather_test: splashes only on the ground (WeatherSurface), never on roofs");
+        expect(far, "weather_test: distant landings splash past the drops' box (> 25 m)");
+    }
+    if (ps) {
+        bool dry = true;
+        for (const auto& p : ps->pool().pos) dry &= !(p.x > 2.2f && p.x < 4.2f && p.y > -2.5f && p.y < 0.5f && p.z < 2.3f);
+        expect(dry, "weather_test: no rain under the awning");
+    }
+
+    // The campfire is out in the rain; the lamps are off at 16:30.
+    coopa::scene::SceneObject* fire = engine.scene().find_object("campfire_site");
+    auto* reactor = fire ? fire->get_component<toy::weather::WeatherReactor>() : nullptr;
+    expect(reactor && !reactor->on(), "weather_test: the campfire's reactor is off in the rain");
+    auto* lamp = engine.scene().find_object("lamp_0_light");
+    auto* lamp_r = lamp ? lamp->get_component<toy::weather::WeatherReactor>() : nullptr;
+    expect(lamp_r && !lamp_r->on(), "weather_test: lamps are off in the afternoon");
+
+    // Night, clear: lamps on, fire lit, rain fading out.
+    w->set_time(22.0f);
+    w->set_condition("clear", 0.0f);
+    tick_frames(engine, 150);
+    expect(lamp_r && lamp_r->on() && lamp_r->level() > 0.6f, "weather_test: lamps fade in at night");
+    expect(reactor && reactor->on(), "weather_test: the campfire relights when the rain stops");
+    expect(w->state().is_night(), "weather_test: 22:00 is night");
+
+    // Switching the weather off puts the config's own values back.
+    fkyaml::node settings = fkyaml::node::mapping();
+    settings["weather"] = fkyaml::node::deserialize(std::string("enabled: false\n"));
+    engine.set_scene_settings(engine.scene(), settings);
+    tick_frames(engine, 2);
+    expect(engine.scene().find_object("Weather") == nullptr, "weather_test: disabled, the runtime objects are gone");
+    expect(engine.pipeline().render_config().fog_density != w->atmosphere().fog_density ||
+           engine.pipeline().render_config().fog_density == engine.scene_config(engine.scene()).render.fog_density,
+           "weather_test: disabled, the render config is the config's again");
+    const Frame f = engine.capture_image(true);
+    long long black = 0;
+    for (size_t i = 0; i < static_cast<size_t>(f.width) * f.height; ++i) {
+        const uint8_t* px = &f.pixels[i * f.channels];
+        if (px[0] < 2 && px[1] < 2 && px[2] < 2) ++black;
+    }
+    expect(black < static_cast<long long>(f.width) * f.height / 200, "weather_test: no NaN black blocks");
+}
+
+// -------------------------------------------------------------------------------------------
 // Group "particles" -- toyengine/particles/: curves, emission, the mesh emitter, scatter,
 // collision + sub emitters, YAML, render prep, and the job split. Device-free.
 // Group "render_particles" -- the particles_test scene end to end.
@@ -7110,6 +7431,161 @@ void test_particles_scatter_aligned_to_normals() {
 }
 
 /** @brief Ground collision kills droplets, and each death spawns into a sub emitter by name. */
+/**
+ * @brief Precipitation: a wrap box keeps particles around a moving emitter (rain that keeps up
+ *        with the camera), a GroundField stops them on a roof instead of the ground -- none born
+ *        or wrapped in under it, the splash sits on the roof -- and on_death_collision_only
+ *        splashes landings only, never lifetime deaths in mid-air.
+ */
+void test_particles_wrap_and_ground_field() {
+    using namespace particle_test_util;
+    using namespace toy::particles;
+    // A 4 x 4 m roof at z = 5 over [0, 4] x [0, 4]; everything else falls to the plane at 0.
+    auto field = std::make_shared<GroundField>();
+    field->origin = glm::vec2(-20.0f);
+    field->cell = 1.0f;
+    field->nx = field->ny = 40;
+    field->heights.assign(40 * 40, std::numeric_limits<float>::quiet_NaN());
+    for (int j = 20; j < 24; ++j) for (int i = 20; i < 24; ++i) field->heights[static_cast<size_t>(j) * 40 + i] = 5.0f;
+    field->fallback = 0.0f;
+    auto in_roof = [](const glm::vec3& p) { return p.x >= 0.0f && p.x < 4.0f && p.y >= 0.0f && p.y < 4.0f; };
+
+    PScene ps;
+    auto* rain = add_system(ps, "rain", glm::vec3(0, 0, 8), [&](ParticleSystem& s) {
+        s.settings.shape.type = EmitShape::Box;
+        s.settings.shape.box = glm::vec3(20.0f, 20.0f, 16.0f);
+        s.settings.wrap_box = glm::vec3(20.0f, 20.0f, 16.0f);
+        s.settings.start_speed = 0.0f;
+        s.settings.velocity = glm::vec3(0.0f, 0.0f, -10.0f);
+        s.settings.rate = 3000.0f;
+        s.settings.max_particles = 20000;
+        s.settings.start_lifetime = 50.0f;
+        s.settings.collide = true;
+        s.settings.kill_on_collide = true;
+        s.settings.on_death_collision_only = true;
+        s.settings.on_death.push_back({"splash", Range(1.0f), 0.0f});
+        s.ground_field = field;
+    });
+    auto* splash = add_system(ps, "splash", glm::vec3(0), [](ParticleSystem& s) {
+        s.settings.rate = 0.0f;
+        s.settings.start_speed = 0.0f;
+        s.settings.start_lifetime = 100.0f;
+        s.settings.max_particles = 100000;
+    });
+    // High above anything: lifetime deaths only -- which must not splash.
+    auto* air = add_system(ps, "air", glm::vec3(0, 0, 200), [](ParticleSystem& s) {
+        s.settings.shape.type = EmitShape::Point;
+        s.settings.start_speed = 0.0f;
+        s.settings.rate = 200.0f;
+        s.settings.start_lifetime = 0.1f;
+        s.settings.collide = true;
+        s.settings.kill_on_collide = true;
+        s.settings.on_death_collision_only = true;
+        s.settings.on_death.push_back({"air_splash", Range(1.0f), 0.0f});
+    });
+    auto* air_splash = add_system(ps, "air_splash", glm::vec3(0), [](ParticleSystem& s) {
+        s.settings.rate = 0.0f;
+        s.settings.start_lifetime = 100.0f;
+    });
+    start(ps);
+    run(ps, 1.5f);
+    (void)air;
+    expect(rain->particle_count() > 1000u, "wrap: the box is full of rain (" + std::to_string(rain->particle_count()) + ")");
+    bool dry = true, roof_splash = false, ground_splash = false, under_roof_splash = false;
+    for (const auto& p : rain->pool().pos) dry &= !(in_roof(p) && p.z < 5.0f);
+    for (const auto& p : splash->pool().pos) {
+        if (in_roof(p) && std::abs(p.z - 5.0f) < 0.1f) roof_splash = true;
+        if (!in_roof(p) && std::abs(p.z) < 0.1f) ground_splash = true;
+        if (in_roof(p) && p.z < 4.0f) under_roof_splash = true;
+    }
+    expect(dry, "ground field: nothing under the roof (none born there, none fall through)");
+    expect(roof_splash && ground_splash, "ground field: drops splash on the roof and on the ground around it");
+    expect(!under_roof_splash, "ground field: no splash under the roof");
+    // Surfaces opt in: with the roof marked as taking no splashes, drops still stop on it, silently.
+    {
+        auto quiet = std::make_shared<GroundField>(*field);
+        quiet->splash.assign(40 * 40, 1);
+        for (int j = 20; j < 24; ++j) for (int i = 20; i < 24; ++i) quiet->splash[static_cast<size_t>(j) * 40 + i] = 0;
+        rain->ground_field = quiet;
+        run(ps, 2.0f / 60.0f);   // sub-emitter spawns land a frame late: let the old field's drain
+        const size_t before = splash->particle_count();
+        run(ps, 0.5f);
+        bool roof_quiet = true, ground_more = splash->particle_count() > before;
+        for (size_t k = before; k < splash->pool().pos.size(); ++k) {
+            const glm::vec3& p = splash->pool().pos[k];
+            roof_quiet &= !(in_roof(p) && std::abs(p.z - 5.0f) < 0.1f);
+        }
+        bool dry2 = true;
+        for (const auto& p : rain->pool().pos) dry2 &= !(in_roof(p) && p.z < 5.0f);
+        expect(roof_quiet && ground_more && dry2, "splash flags: no splash on a quiet roof, which still keeps the rain off below");
+        rain->ground_field = field;
+    }
+    expect(air_splash->particle_count() == 0u, "on_death_collision_only: lifetime deaths in mid-air never splash");
+
+    // The emitter jumps 100 m (the camera teleports, or moves fast): the very next frames, the
+    // rain is all around its new position, not left behind.
+    rain->owner->get_transform()->transform().set_position(glm::vec3(100.0f, 0.0f, 8.0f));
+    run(ps, 3.0f / 60.0f);
+    bool around = rain->particle_count() > 1000u;
+    for (const auto& p : rain->pool().pos) around &= std::abs(p.x - 100.0f) <= 10.0f + 1e-3f && std::abs(p.y) <= 10.0f + 1e-3f;
+    expect(around, "wrap: after a 100 m jump every drop is inside the box around the emitter");
+
+    // Toward the box's sides the drops fade out (the wrap is never seen).
+    rain->prepare_render(ParticleView{glm::vec3(100.0f, 0.0f, 8.0f)});
+    float centre_a = 0.0f, edge_a = 1.0f;
+    for (const auto& q : rain->instances()) {
+        const float d = std::max(std::abs(q.pos_size.x - 100.0f), std::abs(q.pos_size.y));
+        if (d < 5.0f) centre_a = std::max(centre_a, q.color.a);
+        if (d > 9.8f) edge_a = std::min(edge_a, q.color.a);
+    }
+    expect(centre_a > 0.9f && edge_a < 0.15f, "wrap_fade: drops near the box's sides fade out");
+
+    // Landings carry the surface normal: a 45-degree roof's splash lies in the roof and its
+    // spray kicks up off it, not into it.
+    field->normals.assign(40 * 40, glm::vec3(0.0f, 0.0f, 1.0f));
+    const glm::vec3 slope = glm::normalize(glm::vec3(1.0f, 0.0f, 1.0f));
+    for (int j = 20; j < 24; ++j) for (int i = 20; i < 24; ++i) field->normals[static_cast<size_t>(j) * 40 + i] = slope;
+    PScene ps2;
+    auto* drop = add_system(ps2, "drop", glm::vec3(2, 2, 7), [&](ParticleSystem& s) {
+        s.settings.shape.type = EmitShape::Point;
+        s.settings.start_speed = 0.0f;
+        s.settings.velocity = glm::vec3(0.0f, 0.0f, -10.0f);
+        s.settings.rate = 0.0f;
+        s.settings.start_lifetime = 10.0f;
+        s.settings.collide = true;
+        s.settings.kill_on_collide = true;
+        s.settings.on_death.push_back({"ring", Range(1.0f), 0.0f});
+        s.settings.on_death.push_back({"spray", Range(4.0f), 0.0f});
+        s.settings.bursts.push_back({0.0f, Range(1.0f), 1, 1.0f, 1.0f});
+        s.ground_field = field;
+    });
+    auto* ring = add_system(ps2, "ring", glm::vec3(0), [](ParticleSystem& s) {
+        s.settings.rate = 0.0f;
+        s.settings.start_speed = 0.0f;
+        s.settings.start_lifetime = 100.0f;
+        s.settings.align_to_normal = true;
+        s.settings.random_spin = true;
+    });
+    auto* spray = add_system(ps2, "spray", glm::vec3(0), [](ParticleSystem& s) {
+        s.settings.rate = 0.0f;
+        s.settings.start_speed = 2.0f;
+        s.settings.start_lifetime = 100.0f;
+        s.settings.align_to_normal = true;
+    });
+    start(ps2);
+    run(ps2, 0.5f);
+    (void)drop;
+    expect(ring->particle_count() == 1u, "aligned landing: the splash spawned");
+    if (ring->particle_count() == 1u) {
+        const glm::quat q = ring->pool().orient[0];
+        const glm::vec3 up = q * glm::vec3(0.0f, 0.0f, 1.0f);
+        expect(glm::dot(up, slope) > 0.99f, "aligned landing: the splash lies in the sloped roof");
+    }
+    bool off_surface = spray->particle_count() == 4u;
+    for (const auto& v : spray->pool().vel) off_surface &= glm::dot(v, slope) > 0.0f;
+    expect(off_surface, "aligned landing: spray leaves the surface along its normal");
+}
+
 void test_particles_collision_and_sub_emitters() {
     using namespace particle_test_util;
     using namespace toy::particles;
@@ -7447,8 +7923,22 @@ void test_runtime_layout_source_without_marker() {
     expect(!l.packaged(), "no marker: running from source");
     expect(l.engine_assets == fs::path(ROOT_DIR) / "assets", "from source the engine checkout is the fallback layer");
     const auto roots = l.shader_roots(fs::path(ROOT_DIR));
-    expect(roots.size() == 3 && roots[1].find("gfxcoopa") != std::string::npos && roots[2].find("uicoopa") != std::string::npos,
-           "from source: engine, gfxcoopa, uicoopa shader roots in -I order");
+    const fs::path built = toy::core::RuntimeLayout::compiled_shader_dir();
+    expect(!built.empty(), "the build compiles shaders into its own tree (TOY_SHADER_BUILD_DIR)");
+    expect(roots.size() == 3 && roots[0] == (built / "toyengine_shaders").string() && roots[1] == (built / "shaders").string() &&
+           roots[2] == (built / "uicoopa_shaders").string(), "from source: engine, gfxcoopa, uicoopa compiled shaders in -I order");
+    for (const auto& r : roots) {
+        expect(r.rfind((fs::path(ROOT_DIR) / "assets").string(), 0) != 0 && r.rfind(std::string(PROJ_DIR), 0) != 0,
+               "no shader root is a source directory (" + r + ")");
+        expect(fs::exists(fs::path(r)), "the compiled shader directory exists (" + r + ")");
+    }
+    expect(fs::exists(built / "toyengine_shaders" / "gbuffer.vert.spv"), "the engine's shaders are compiled there");
+    // A project with shaders of its own: its compiled ones first, then its own build tree's.
+    const fs::path proj = fresh_tmp_subdir("layout_project");
+    fs::create_directories(proj / "assets" / "shaders");
+    const auto proots = l.shader_roots(proj);
+    expect(proots.size() == 5 && proots[0] == (built / "project_shaders").string() &&
+           proots[1] == (proj / "build" / "shaders" / "project_shaders").string(), "a project's own shaders come first");
 }
 
 void test_runtime_user_dirs_follow_home() {
@@ -7801,8 +8291,16 @@ const TestCase kTests[] = {
     {"water_tiles_cover_surface",                  "water", test_water_tiles_cover_surface},
     {"particles_curves_and_gradients",             "particles", test_particles_curves_and_gradients},
     {"particles_emission_rate_bursts_lifetime",    "particles", test_particles_emission_rate_bursts_lifetime},
+    {"weather_sky_model_follows_the_sun",          "weather",   test_weather_sky_model_follows_the_sun},
+    {"weather_yaml_round_trips_and_defaults",      "weather",   test_weather_yaml_round_trips_and_defaults},
+    {"weather_transitions_blend_smoothly",         "weather",   test_weather_transitions_blend_smoothly},
+    {"weather_drives_and_restores_an_authored_sun","weather",   test_weather_drives_and_restores_an_authored_sun},
+    {"weather_transition_fast_forward",            "weather",   test_weather_transition_fast_forward},
+    {"weather_schedule_and_clock_signals",         "weather",   test_weather_schedule_and_clock_signals},
+    {"weather_reactor_rules",                      "weather",   test_weather_reactor_rules},
     {"particles_mesh_surface_area_weighted",       "particles", test_particles_mesh_surface_area_weighted},
     {"particles_scatter_aligned_to_normals",       "particles", test_particles_scatter_aligned_to_normals},
+    {"particles_wrap_and_ground_field",            "particles", test_particles_wrap_and_ground_field},
     {"particles_collision_and_sub_emitters",       "particles", test_particles_collision_and_sub_emitters},
     {"particles_simulation_space",                 "particles", test_particles_simulation_space},
     {"particles_yaml_parses",                      "particles", test_particles_yaml_parses},
@@ -7831,6 +8329,7 @@ const TestCase kTests[] = {
     {"water_shader_shares_the_buoyancy_clock",     "render_water",    test_water_shader_shares_the_buoyancy_clock},
     {"water_parallel_matches_serial",              "render_water",    test_water_parallel_matches_serial},
     {"particles_scene_renders",                    "render_particles", test_particles_scene_renders},
+    {"weather_scene_renders",                      "render_weather",  test_weather_scene_renders},
     {"rig_clip_drives_hierarchy",                  "rig",             test_rig_clip_drives_hierarchy},
     {"rig_vertex_group_skinning",                  "rig",             test_rig_vertex_group_skinning},
     {"rig_skinned_mesh_follows_animated_bone",     "render_rig",      test_rig_skinned_mesh_follows_animated_bone},
@@ -7857,9 +8356,9 @@ bool matches_filters(const char* name, const std::vector<std::string>& filters) 
 void print_usage() {
     std::cout << "usage: toyengine_tests [-v] [--list] [--group <name>] [name-substring ...]\n"
                  "  --list           print every test and its group, run nothing\n"
-                 "  --group <name>   run one group: math, config, scene, ui, world, water, particles,\n"
+                 "  --group <name>   run one group: math, config, scene, ui, world, water, particles, weather,\n"
                  "                   render_pixel, render_ui, render_material, render_cloth, render_water,\n"
-                 "                   render_particles\n"
+                 "                   render_particles, render_weather\n"
                  "  -v, --verbose    print every assertion, not just failures\n"
                  "  <substring>      run the tests whose name contains it\n";
 }

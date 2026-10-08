@@ -117,6 +117,17 @@ diff and merge it. See [editor/README.md](editor/README.md) for the full tour.
     with soft depth fades and HDR glow.
   - Procedural sprites with a stylized look: flame, smoke puff, spark, ring, star and leaf.
 
+- **Weather and time of day** ([toyengine/weather](toyengine/weather/README.md)):
+  - A clock moves the sun and moon, and the sky blends through day, twilight and night palettes.
+  - Weather conditions (clear, rain, storm, fog, snow, sandstorm...) blend smoothly into each
+    other on a fixed, random or cycling schedule. Each condition drives the sky, ambient light,
+    fog, the sun, wind and lightning.
+  - Runtime rain, snow, mist and dust effects follow the camera, drift with the wind and fade
+    with the blend.
+  - Any component can read the weather (`toy::weather::current()`) or subscribe to its signals.
+    `WeatherReactor` switches lamps, fires and effects with no code.
+  - The whole thing is edited per scene in the editor's World tab.
+
 ### UI and scenes
 - **UI toolkit** ([uicoopa](libs/uicoopa)). Panels, text, buttons, sliders, progress bars,
   layouts and masks. Use it as a crisp screen-space HUD, or on world-space canvases that
@@ -229,6 +240,7 @@ The engine repository runs on its own, with demo and test scenes in [`assets/`](
 |---|---|
 | `pixel_demo` | Materials showcase: PBR, glass and refraction, SDFs, emissive bloom, water |
 | `particles_test` | A campfire at dusk: flames, lit smoke, embers, a torch trail, mesh scatter |
+| `weather_test` | A hamlet through a fast day and changing weather: rain, fog, storms, lamps at night |
 | `fog_test` | Global fog, local fog volumes, volumetric spot and point lights; look toward the sun |
 | `ssr_test` | Screen-space reflections (and SSGI) across mirror, glossy and rough surfaces |
 | `water_test` | Lake, river, foam, ripples, buoyant crates, a raft and a circling boat |
@@ -326,7 +338,9 @@ A project contains:
 | `build_settings.yaml` | Build Settings: product name, version, bundle id, signing. Written by the editor; never shipped. |
 
 A **linked** project builds against this working tree directly, uncommitted edits in the engine
-and `libs/` included. This is how to work on the engine and a game together. A **pinned**
+and `libs/` included. This is how to work on the engine and a game together. Everything it
+builds goes into the project's own `build/`, compiled shaders included (`build/shaders/`), so
+building a linked project never writes into the engine checkout or its `build/`. A **pinned**
 project clones the engine at a pushed commit, which makes it reproducible on any machine.
 `toyhub link|unlink <dir>` switches between the two, and `toyhub upgrade <dir> [--ref R]`
 re-pins. When a project's build is broken and it won't open, `toyhub rebuild <dir>` (the hub's
@@ -452,8 +466,9 @@ Each module has its own README with the details.
   a checkout.
 - **Working inside `libs/`.** Each library still builds standalone in place. Submodules check
   out a detached HEAD, so run `git submodule foreach git checkout main` before committing to
-  one. Building touches uicoopa's tracked shader depfiles (`assets/shaders/*.spv.d`);
-  `git -C libs/uicoopa checkout -- 'assets/shaders/*.spv.d'` clears them.
+  one. A toyengine build compiles every shader -- the libraries' too -- into its own
+  `build/shaders/<target>/`, never next to the sources; a library's standalone build still
+  compiles in place (and uicoopa's commits its `.spv`).
 
 ## Documentation
 

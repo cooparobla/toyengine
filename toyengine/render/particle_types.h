@@ -86,6 +86,13 @@ struct ParticleLook {
     float opacity        = 1.0f;   ///< Final alpha multiplier.
     float pivot_z        = 0.0f;   ///< Shift the quad along its up axis, in sizes (0.5: base at the particle).
     glm::vec2 flipbook{1.0f, 1.0f};///< Atlas columns / rows for `Texture`.
+    // --- Light and TAA (see particle.frag) ---
+    bool  receive_shadows = true;  ///< Lit particles darken in the sun's / shadowed local lights' shadows.
+    float scatter        = 0.0f;   ///< Forward scattering of the sun and point / spot lights toward the eye
+                                   ///< (rain glinting against a lamp or the low sun); 0 off.
+    float scatter_anisotropy = 0.75f; ///< Henyey-Greenstein g of that scattering: 0 even .. ~0.9 a tight forward lobe.
+    float reactive       = 0.0f;   ///< TAA: how much it cuts the temporal history under it (0..1) -- fast,
+                                   ///< thin particles (rain, snow, sparks) that would otherwise smear.
 };
 
 /**

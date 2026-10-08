@@ -11,12 +11,14 @@
  * needs the same value at run time.
  *
  * The output is self-contained, in layers, first file wins (a higher layer shadows a lower):
- *   1. the project's own assets/
- *   2. the engine checkout's runtime directories (compiled shaders, fonts, palettes, UI themes)
+ *   1. the project's own assets/ (minus shaders/: its GLSL never ships, its .spv come in 3.)
+ *   2. the engine checkout's runtime directories (fonts, palettes, UI themes, sounds)
  *      -- never the engine's scenes or other content
- *   3. library layers: gfxcoopa's and uicoopa's compiled shaders merged into assets/shaders
- *      (the same first-match order the runtime's ShaderLibrary uses from source, so the one
- *      merged directory resolves every name to the same file), and uicoopa's default UI sounds
+ *   3. library layers: the compiled shaders -- the project's, the engine's, gfxcoopa's and
+ *      uicoopa's, from the BUILD tree they were compiled into (RuntimeLayout::shader_roots(),
+ *      the same first-match order the runtime's ShaderLibrary uses from source, so the one
+ *      merged assets/shaders resolves every name to the same file) -- and uicoopa's default
+ *      UI sounds
  * A packaged build reads only this folder (toyengine/core/runtime_paths.h).
  */
 
@@ -24,6 +26,8 @@
 #define TOYEDITOR_BUILD_PACKAGER_H
 
 #include "../app/project.h"
+
+#include <toyengine/core/runtime_paths.h>
 
 #include <toyengine/core/caml_codec.h>
 
@@ -46,6 +50,7 @@ struct PackageLayer {
     std::filesystem::path src;
     std::string dest;            ///< e.g. "shaders"
     bool compiled_shaders = false;   ///< Only .spv files (GLSL sources and depfiles stay behind).
+    bool warn_shadowed = false;      ///< A file a higher layer already staged is a real clash: warn.
 };
 
 struct PackageOptions {
@@ -62,22 +67,26 @@ struct PackageOptions {
     std::vector<PackageLayer> library_layers;
 };
 
-/** @brief Engine assets/ subdirectories a packaged game needs at runtime. */
+/** @brief Engine assets/ subdirectories a packaged game needs at runtime (shaders come compiled, as layers). */
 inline const std::vector<std::string>& engine_runtime_dirs() {
-    static const std::vector<std::string> dirs = {"shaders", "fonts", "palettes", "ui", "sounds"};
+    static const std::vector<std::string> dirs = {"fonts", "palettes", "ui", "sounds"};
     return dirs;
 }
 
 /**
- * @brief The coopa libraries' runtime files from this checkout: gfxcoopa's and uicoopa's
- *        compiled shaders (in the runtime's search order) and uicoopa's default UI sounds.
+ * @brief The compiled shaders `project` runs with, from the build tree (in the runtime's search
+ *        order: the project's own, the engine's, gfxcoopa's, uicoopa's), then uicoopa's default
+ *        UI sounds. A uicoopa shader losing to an earlier layer is a real name clash and warns.
  */
-inline std::vector<PackageLayer> default_library_layers(const std::filesystem::path& libs_dir = PROJ_DIR) {
-    return {
-        {libs_dir / "gfxcoopa" / "assets" / "shaders", "shaders", true},
-        {libs_dir / "uicoopa" / "assets" / "shaders", "shaders", true},
-        {libs_dir / "uicoopa" / "assets" / "sounds", "sounds", false},
-    };
+inline std::vector<PackageLayer> default_library_layers(const std::filesystem::path& project_root,
+                                                        const std::filesystem::path& libs_dir = PROJ_DIR) {
+    std::vector<PackageLayer> layers;
+    const std::vector<std::string> roots = core::RuntimeLayout::current().shader_roots(project_root);
+    for (size_t i = 0; i < roots.size(); ++i) {
+        layers.push_back({roots[i], "shaders", true, /*warn_shadowed=*/i + 1 == roots.size()});
+    }
+    layers.push_back({libs_dir / "uicoopa" / "assets" / "sounds", "sounds", false, false});
+    return layers;
 }
 
 struct PackageReport {
@@ -209,8 +218,9 @@ inline PackageReport package_project(const Project& project, const PackageOption
         const std::string fname = it->path().filename().string();
         if (fname.size() > 5 && fname.compare(fname.size() - 5, 5, ".tmp~") == 0) continue;
         if (fname == ".DS_Store") continue;
+        // shaders/: the compiled .spv come from the build tree (library layers); GLSL never ships.
         const bool in_shaders = rel.begin() != rel.end() && *rel.begin() == "shaders";
-        if (in_shaders && ext != ".spv") continue;
+        if (in_shaders) continue;
         try {
             detail::stage_file_(it->path(), out, rel == fs::path("config.yaml"), opt, rep);
         } catch (const std::exception& e) {
@@ -223,20 +233,16 @@ inline PackageReport package_project(const Project& project, const PackageOption
     if (!opt.engine_assets.empty() && fs::is_directory(opt.engine_assets, ec) &&
         !fs::equivalent(opt.engine_assets, src, eq_ec)) {
         for (const std::string& d : engine_runtime_dirs()) {
-            detail::copy_layer_(opt.engine_assets / d, dst / d, "engine", d == "shaders", false, opt, rep);
+            detail::copy_layer_(opt.engine_assets / d, dst / d, "engine", false, false, opt, rep);
         }
     }
 
-    // 3. Library layers (gfxcoopa / uicoopa shaders, uicoopa's default sounds).
-    // The first shader layer (gfxcoopa's) sits directly under the engine's, the runtime's -I
-    // order, and is copied without clash warnings; a LATER library's shader losing to an
-    // earlier layer is a real name clash and warns.
-    bool first_shader_layer = true;
+    // 3. Library layers: compiled shaders in the runtime's order (a project shader overriding
+    // the engine's is intended; see default_library_layers() for which clashes warn), uicoopa's
+    // default sounds.
     for (const PackageLayer& layer : opt.library_layers) {
-        const bool warn = layer.compiled_shaders && !first_shader_layer;
-        if (layer.compiled_shaders) first_shader_layer = false;
-        detail::copy_layer_(layer.src, dst / layer.dest, layer.src.parent_path().parent_path().filename().string(),
-                            layer.compiled_shaders, warn, opt, rep);
+        detail::copy_layer_(layer.src, dst / layer.dest, layer.src.filename().string(),
+                            layer.compiled_shaders, layer.warn_shadowed, opt, rep);
     }
 
     if (!opt.game_binary.empty()) {

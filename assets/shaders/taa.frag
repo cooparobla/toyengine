@@ -27,6 +27,10 @@ layout(set = 0, binding = 2) uniform sampler2D tex_depth;    // NEAREST; scene d
 // surface's uv motion since last frame, unjittered-to-unjittered. A placeholder when
 // pc.use_velocity is 0.
 layout(set = 0, binding = 3) uniform sampler2D tex_velocity;
+// LINEAR; the REACTIVE mask (r = 0..1): how much to trust this frame over history -- particles
+// (rain, snow, sparks) write it, since nothing describes their motion to the reprojection. A
+// placeholder when pc.use_reactive is 0.
+layout(set = 0, binding = 4) uniform sampler2D tex_reactive;
 
 layout(push_constant) uniform PushConstants {
     mat4  reproject;        // prev UNjittered view-proj * inverse(current JITTERED view-proj)
@@ -39,6 +43,7 @@ layout(push_constant) uniform PushConstants {
     float variance_gamma;   // clip box half-width in standard deviations, under motion
     int   history_valid;    // 0 until both a history image and a previous matrix exist
     int   use_velocity;     // 1: tex_velocity carries per-object motion vectors (see above)
+    int   use_reactive;     // 1: tex_reactive holds this frame's reactive mask
 } pc;
 
 layout(location = 0) out vec4 out_color;
@@ -255,6 +260,20 @@ void main() {
 
     float alpha = 1.0 / (1.0 + age);
 
+    // Reactive pixels (a particle here now): take the current frame by that much, and restart
+    // the age so the next frames do not lean straight back on a history that held the particle
+    // -- its old positions are then clipped away as ordinary disocclusion instead of fading out
+    // over dozens of frames as a streak. Max over a cross, so the jitter never lets an edge pixel
+    // of a thin streak slip outside its own mask.
+    float reactive = 0.0;
+    if (pc.use_reactive != 0) {
+        reactive = max(texture(tex_reactive, frag_uv).r,
+                       max(max(textureOffset(tex_reactive, frag_uv, ivec2(1, 0)).r, textureOffset(tex_reactive, frag_uv, ivec2(-1, 0)).r),
+                           max(textureOffset(tex_reactive, frag_uv, ivec2(0, 1)).r, textureOffset(tex_reactive, frag_uv, ivec2(0, -1)).r)));
+        alpha = mix(alpha, 1.0, clamp(reactive, 0.0, 1.0));
+        age *= 1.0 - clamp(reactive, 0.0, 1.0);
+    }
+
     // Inverse-luma weighting (Karis): a bright outlier on either side of the blend gets less
     // say, which converts firefly flicker into a stable slightly-dimmer average.
     float w_cur  = alpha         / (1.0 + y4.x);
@@ -271,5 +290,8 @@ void main() {
     }
 
     float next_age = min(age + 1.0 + kRestAgeBoost * (1.0 - motion), min(age_cap + 1.0, kMaxAge));
+    // Reactive: the next frame starts over (age 0 -> it takes that frame outright), so whatever
+    // this pixel holds now -- the particle -- is gone the moment the particle moves on.
+    next_age = mix(next_age, 0.0, clamp(reactive, 0.0, 1.0));
     out_color = vec4(clamp(result, 0.0, 1.0), next_age);
 }

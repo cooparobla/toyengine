@@ -970,7 +970,7 @@ public:
         opt.out_dir = out_dir;
         opt.keep_yaml = keep_yaml;
         opt.engine_assets = fs::path(ROOT_DIR) / "assets";
-        opt.library_layers = default_library_layers();
+        opt.library_layers = default_library_layers(project_.root());
 #ifdef TOY_GAME_BINARY
         // This editor's own game executable (cmake/ToyProject.cmake). toyengine's own is the
         // generic player any assets-only project runs on; a game project's binary carries that
@@ -1732,6 +1732,7 @@ private:
 #include "ui/ui_canvas.inl"
 #include "ui/theme_editor.inl"
 #include "ui/build.inl"
+#include "ui/weather.inl"
 
     // --- helpers shared by the panels ---
 
@@ -1896,6 +1897,12 @@ private:
      */
     void draw_setting_row_(imm::Context& ctx, const FieldDesc& f, Node& section, const InspectorEnv& env, const std::string& section_name) {
         using I = imm::Icon;
+        if (weather_locks_(section_name, f.key)) {   // the scene's weather drives it (ui/weather.inl)
+            ctx.push_id(f.key);
+            draw_weather_locked_row_(ctx, f, section_name);
+            ctx.pop_id();
+            return;
+        }
         ctx.push_id(f.key);
         const bool layered = scene_overridable_(section_name, f);
         const Node* over = layered ? doc_.scene_setting(section_name, f.key) : nullptr;
@@ -3980,6 +3987,9 @@ private:
     ObjectId context_target_ = 0;
     ObjectId rename_id_ = 0;
     int rename_frames_ = 0;
+    int weather_sel_ = 0;              ///< World > Weather: the condition being edited.
+    int weather_preview_speed_ = 0;    ///< World > Weather > Preview: transition fast-forward (0 = 1x .. 3 = instant).
+    std::string runtime_sel_;          ///< The selected runtime object's ':' path (ui/weather.inl); empty = none.
     int asset_cat_ = 1;
     std::string asset_filter_;
     std::string render_settings_filter_;   ///< Render tab: settings search

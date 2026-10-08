@@ -519,6 +519,11 @@ inline std::map<std::string, ComponentSchema>& schema_table_() {
                 f_float("bounce", 0.3f, 0.01f, 0.0f, 1.0f),
                 f_float("collision_friction", 0.2f, 0.01f, 0.0f, 1.0f),
                 f_bool("kill_on_collide", false),
+                with_tip(f_bool("on_death_collision_only", false), "Sub emitters fire only when a particle dies by hitting the ground"),
+                with_tip(f_vec3("wrap_box", glm::vec3(0.0f), 0.1f), "World space: particles leaving this box (full extents, centred on the "
+                                                                    "emitter) wrap back in on the other side -- precipitation that keeps up with a "
+                                                                    "moving camera. 0 on an axis: no wrap"),
+                with_tip(f_float("wrap_fade", 0.15f, 0.01f, 0.0f, 1.0f), "Alpha fades over this fraction of the wrap box's half width at its sides"),
                 with_tip(f_items("on_death", {f_string("target"), f_vec2("count", glm::vec2(1.0f, 1.0f), 0.1f),
                                               f_float("inherit_velocity", 0.0f, 0.01f, -10.0f, 10.0f)}),
                          "Sub emitters: each death spawns into the named object's ParticleSystem"),
@@ -530,6 +535,12 @@ inline std::map<std::string, ComponentSchema>& schema_table_() {
                 with_tip(f_float("lit", 0.0f, 0.01f, 0.0f, 1.0f), "How much sun / sky / point lights shade it (smoke 1, fire 0)"),
                 with_tip(f_float("toon_bands", 0.0f, 0.1f, 0.0f, 16.0f), "> 1: lighting and flame cores in this many bands"),
                 with_tip(f_float("emissive", 1.0f, 0.01f, 0.0f, 100.0f), "HDR multiplier; > ~1.4 blooms"),
+                with_tip(f_bool("receive_shadows", true), "Lit particles darken in the sun's and shadowed lamps' shadows"),
+                with_tip(f_float("scatter", 0.0f, 0.01f, 0.0f, 16.0f), "Light scattered forward toward the eye -- rain glinting against a "
+                                                                    "lamp or a low sun, backlit smoke; 0 off"),
+                with_tip(f_float("scatter_anisotropy", 0.75f, 0.01f, -0.95f, 0.95f), "How forward the scattering is: 0 even, ~0.9 a tight glow toward lights"),
+                with_tip(f_float("reactive", 0.0f, 0.01f, 0.0f, 1.0f), "TAA: trust this particle's frame over the history under it, so fast thin "
+                                                                     "particles (rain, snow, sparks) never smear into streaks. 1 for precipitation"),
                 with_tip(f_float("softness", 0.5f, 0.01f, 0.0f, 1.0f), "Sprite edge: 0 crisp cel edge .. 1 feathered"),
                 with_tip(f_float("soft_distance", 0.4f, 0.01f, 0.0f, 100.0f), "Fade where it meets opaque geometry (m)"),
                 f_float("camera_fade", 0.3f, 0.01f, 0.0f, 100.0f),
@@ -555,6 +566,28 @@ inline std::map<std::string, ComponentSchema>& schema_table_() {
                 with_tip(f_color("color_shift", glm::vec3(0.0f)), "Added to the light colour at bright peaks"),
             }});
         }
+        // toyengine/weather/: which surfaces rain splashes on, and landings shown far off.
+        add({"WeatherSurface", "Effects", {
+            with_tip(f_bool("splashes", true, true), "Rain splashes / sprays and snow settles on this object and its children "
+                                                    "(rain still stops on every surface; unmarked ones take it silently)"),
+        }});
+        add({"WeatherDistantLandings", "Effects", {
+            with_tip(f_float("radius", 45.0f, 0.5f, 0.0f, 500.0f, true), "Landings (splashes) are shown out to this distance from the camera, "
+                                                                        "past the drops' own wrap box"),
+            with_tip(f_strings("targets"), "Which of the sibling ParticleSystem's on_death targets fire far off; empty = all"),
+        }});
+        // toyengine/weather/: switches lights, effects or children with the time of day / weather.
+        add({"WeatherReactor", "Effects", {
+            with_tip(f_vec2("hours", glm::vec2(18.0f, 6.0f), 0.05f), "On between these hours (x from, y to; wraps past midnight). "
+                                                                       "Unset: any hour"),
+            with_tip(f_strings("phases"), "On in these parts of the day: night, dawn, day, dusk. Empty: any"),
+            with_tip(f_strings("conditions"), "On while the weather is (moving to) one of these conditions. Empty: any"),
+            with_tip(f_float("min_precipitation", 0.0f, 0.01f, 0.0f, 1.0f), "On only with at least this much rain / snow"),
+            with_tip(f_bool("invert", false), "On when the rule is NOT met (a fire that is out in the rain)"),
+            with_tip(f_strings("target", {"lights", "effects"}, true), "What switches: lights (fade point / spot lights here and below), "
+                                                                       "effects (stop / play particle systems here and below), children (set active)"),
+            with_tip(f_float("fade", 1.5f, 0.05f, 0.0f, 60.0f, true), "Seconds lights take to fade"),
+        }});
         // sfxcoopa (toyengine/audio/): a positioned or 2D sound, the ears (else the main camera
         // hears), and a settings-menu slider bound to a mixer bus.
         add({"AudioSource", "Audio", {

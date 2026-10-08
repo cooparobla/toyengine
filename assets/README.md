@@ -36,7 +36,7 @@ material and a mesh may both be `brick`; two materials may not).
 | `meshes/` | shared meshes (plus `<mesh>.lod.yaml` LOD sidecars, kept beside their mesh). Tags: `primitives`, `props`, `terrain/<style>`, `water`, `animation` |
 | `materials/` | shared PBR materials -- see below. Tags: `basic`, `metal`, `transparent`, `natural`, `building`, `prototype` |
 | `textures/` | shared material maps. Tags: `brick`, `terrain`, `prototype`, `masks` |
-| `objects/` | object assets (prefabs). Tags: `animation` (test rigs), `terrain` (tile sets), `props` |
+| `objects/` | object assets (prefabs). Tags: `animation` (test rigs), `terrain` (tile sets), `props`, `weather` (the effects the weather spawns: `weather_rain`, `weather_snow`, `weather_ground_mist`, `weather_dust`) |
 | `animations/<rig>/` | clips, one folder per rig |
 | `physics_materials/` | friction / restitution sets for colliders |
 | `shaders/` | GLSL for every shader the engine loads (its own passes, the gfxcoopa passes it runs, surface shaders named by a material's `shader:`) and their `gfx/` headers. gfxcoopa supplies only the shared lighting headers (`gfx/brdf.glsl`, `ibl.glsl`, `sky.glsl`, `spot_light.glsl`) and SMAA's shaders. Search order: project, then here, then gfxcoopa, then uicoopa; no name exists in two places |
@@ -131,6 +131,10 @@ layering is done on the documents, so quality presets resolve as if the keys wer
 config.yaml. Startup-only render keys (resolution, shadow-map sizes...) can't vary per scene.
 In the editor, editing a Render / World / Physics setting while a scene is open writes such an
 override -- the row is tinted -- and right-click reverts it or applies it to config.yaml.
+
+`settings.weather` is the scene's weather and time of day (not a config.yaml section): see
+[toyengine/weather](../toyengine/weather/README.md). While it is enabled it drives the sky,
+ambient and fog render keys, which the editor then shows locked.
 
 ## UI assets
 

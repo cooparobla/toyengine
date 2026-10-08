@@ -4591,6 +4591,123 @@ void test_editor_scene_settings_override() {
     dump(engine, "21_scene_setting_override");
 }
 
+/**
+ * @brief The scene's weather in the World tab: the header switch writes the block and starts it
+ *        live, the render rows it drives lock, its runtime objects show (locked) in the
+ *        Hierarchy, Play runs it, disabling gives the render settings back, and it saves.
+ */
+void test_editor_weather_world_tab() {
+    setenv("FIXED_DT", "0.016666", 1);
+    unsetenv("NO_INPUT");
+    setenv("HOME", tmp_root().c_str(), 1);
+    fs::remove(Project::prefs_path());
+    const fs::path root = fresh_dir("weather_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    InputDriver in{engine, std::max(1.0f, engine.display_scale())};
+    tick(engine, 4);
+    const float project_fog = engine.render_config().fog_density;
+
+    app.set_prop_tab(PropTab::World);
+    app.clear_test_rects();
+    tick(engine, 2);
+    auto header = app.test_rect("weather_header");
+    expect(header.has_value(), "the World tab has a Weather & Time of Day section");
+    if (!header) return;
+    in.click({header->x + header->h + 6.0f, header->center().y});   // its checkbox
+    tick(engine, 4);
+    const Node* enabled = app.document().scene_setting("weather", "enabled");
+    expect(enabled && enabled->get_value<bool>(), "the header switch turns the scene's weather on");
+    expect(app.document().scene_setting("weather", "conditions") != nullptr, "...writing out the stock conditions to edit");
+    toy::weather::WeatherSystem* w = engine.weather();
+    expect(w && w->enabled() && w->state().enabled, "the live scene's weather runs");
+    if (!w) return;
+    expect(std::abs(engine.render_config().fog_density - w->atmosphere().fog_density) < 1e-6f, "it drives the render fog");
+    dump(engine, "weather_world_tab");
+    expect(app.test_rect("weather_transition_speed").has_value(), "Preview has a transition fast-forward");
+
+    app.set_prop_tab(PropTab::Render);
+    app.clear_test_rects();
+    tick(engine, 2);
+    // A search opens the matching sections, so their rows draw.
+    if (const auto filter = app.test_rect("render_settings_filter")) {
+        in.click(filter->center());
+        for (char ch : std::string("density")) {
+            engine.queue_input([ch](coopa::input::Input& i) { i.push_char(static_cast<uint32_t>(ch)); });
+            tick(engine, 1);
+        }
+    }
+    app.clear_test_rects();
+    tick(engine, 2);
+    expect(app.test_rect("locked:fog_density").has_value(), "the render rows the weather drives are locked");
+    expect(!app.test_rect("locked:volumetrics_max_opacity").has_value() && !app.test_rect("locked:exposure").has_value(),
+           "...and only those");
+    dump(engine, "weather_locked_rows");
+
+    // A condition with effects makes runtime objects: listed, locked, in the Hierarchy.
+    w->set_condition("rain", 0.0f);
+    app.clear_test_rects();
+    tick(engine, 4);
+    expect(engine.scene().find_object("Weather") != nullptr, "rain spawns the runtime Weather root");
+    expect(app.test_rect("outliner_runtime").has_value(), "the Hierarchy lists runtime objects under a locked row");
+    expect(engine.scene().find_object("weather_rain_drops") != nullptr, "...the rain among them");
+    {   // In edit mode (no physics running) the precipitation map comes from mesh bounds: the cube.
+        const auto& probe = engine.weather()->ground_probe();
+        const auto& field = probe.field();
+        expect(probe.source() == toy::weather::GroundProbe::Source::Bounds && field, "edit mode: rain lands on mesh bounds");
+        if (field) expect(std::abs(field->sample(0.0f, 0.0f) - 1.0f) < 0.05f,
+                          "edit mode: rain stops on the starter cube (" + std::to_string(field->sample(0.0f, 0.0f)) + ")");
+    }
+    if (auto row = app.test_rect("runtime:Weather")) in.click({row->x + 60.0f, row->center().y});
+    app.clear_test_rects();
+    tick(engine, 2);
+    expect(app.document().selection().empty() && app.test_rect("runtime_props").has_value(),
+           "clicking a runtime row shows it read-only in Properties");
+    dump(engine, "weather_runtime_outliner");
+    app.set_prop_tab(PropTab::World);
+    tick(engine, 2);
+    dump(engine, "weather_world_tab_rain");
+
+    // Live edits reach the running system without a rebuild.
+    {
+        Node v = make_float(7.0);
+        app.set_scene_setting("weather", "time_of_day", &v);
+        tick(engine, 2);
+        expect(std::abs(engine.weather()->time_of_day() - 7.0f) < 0.01f, "editing the start time moves the live clock");
+        expect(engine.scene().find_object("Weather") != nullptr, "...without rebuilding the scene (the rain is still there)");
+    }
+
+    app.play();
+    tick(engine, 4);
+    expect(app.playing() && engine.weather() && engine.weather()->state().enabled, "Play runs the scene's weather");
+    app.stop();
+    tick(engine, 3);
+
+    const Node off(false);
+    app.set_scene_setting("weather", "enabled", &off);
+    tick(engine, 3);
+    expect(engine.scene().find_object("Weather") == nullptr, "switched off, its runtime objects go");
+    expect(std::abs(engine.render_config().fog_density - project_fog) < 1e-6f, "...and the render fog is the project's again");
+    app.set_prop_tab(PropTab::Render);
+    app.clear_test_rects();
+    tick(engine, 2);
+    expect(app.test_rect("setting_group:Fog").has_value() && !app.test_rect("locked:fog_density").has_value(), "...and its rows unlock");
+    app.undo();
+    tick(engine, 3);
+    expect(engine.weather() && engine.weather()->enabled(), "undo switches it back on");
+
+    expect(app.save_scene(), "the scene saves");
+    const Node saved = coopa::yaml::load_document(project.assets() / "scenes" / "main" / "scene.yaml");
+    const Node& sc = saved.at("scene");
+    expect(sc.contains("settings") && sc.at("settings").contains("weather") &&
+           sc.at("settings").at("weather").contains("conditions") &&
+           sc.at("settings").at("weather").at("conditions").size() >= 6, "the weather is saved in the scene");
+    bool runtime_saved = false;
+    for (const auto& o : sc.at("root_objects").as_seq()) runtime_saved |= get_string(o, "name") == "Weather";
+    expect(!runtime_saved, "runtime objects are never saved");
+}
+
 /** @brief The material editor's Shader dropdown only offers shaders the engine registers, in
  *         the pass (domain) the catalogue claims -- a mismatch would silently render stock PBR. */
 void test_editor_material_shader_catalogue() {
@@ -7034,6 +7151,7 @@ void test_package_engine_fallback() {
     PackageOptions opt;
     opt.out_dir = out;
     opt.engine_assets = fs::path(ROOT_DIR) / "assets";
+    opt.library_layers = default_library_layers(project.root());   // the compiled shaders (build tree)
     const PackageReport rep = package_project(project, opt);
     expect(rep.ok(), "packaging with the engine fallback succeeds");
     bool spv = false, glsl = false;
@@ -7444,30 +7562,37 @@ void test_build_staging_layers_and_shipping_config() {
     opt.encode_yaml = false;
     opt.shipping = true;
     opt.engine_assets = fs::path(ROOT_DIR) / "assets";
-    opt.library_layers = default_library_layers();
+    opt.library_layers = default_library_layers(project.root());
     const PackageReport rep = package_project(project, opt);
     expect(rep.ok(), "staging succeeds");
     const fs::path sh = out / "assets" / "shaders";
+    // Compiled shaders come from the build tree (toyengine/core/runtime_paths.h), never the checkout.
+    const fs::path built = toy::core::RuntimeLayout::compiled_shader_dir();
+    const fs::path engine_spv = built / "toyengine_shaders", gfx_spv = built / "shaders", ui_spv = built / "uicoopa_shaders";
+    expect(fs::exists(sh / "gbuffer.vert.spv"), "the engine's compiled shaders are in the package");
     // A gfxcoopa shader (one the engine doesn't also ship) and a uicoopa UI shader, both merged in.
     bool gfx_only = false;
-    for (const auto& e : fs::directory_iterator(fs::path(PROJ_DIR) / "gfxcoopa" / "assets" / "shaders")) {
+    for (const auto& e : fs::directory_iterator(gfx_spv)) {
         if (e.path().extension() != ".spv") continue;
-        if (fs::exists(fs::path(ROOT_DIR) / "assets" / "shaders" / e.path().filename())) continue;
+        if (fs::exists(engine_spv / e.path().filename())) continue;
         gfx_only = fs::exists(sh / e.path().filename());
         break;
     }
     expect(gfx_only, "gfxcoopa's base shaders are merged into the package");
     bool ui = false;
-    for (const auto& e : fs::directory_iterator(fs::path(PROJ_DIR) / "uicoopa" / "assets" / "shaders")) {
+    for (const auto& e : fs::directory_iterator(ui_spv)) {
         if (e.path().extension() == ".spv") { ui = fs::exists(sh / e.path().filename()); break; }
     }
     expect(ui, "uicoopa's UI shaders are merged into the package");
+    bool glsl = false;
+    for (const auto& e : fs::directory_iterator(sh)) glsl |= e.path().extension() != ".spv";
+    expect(!glsl, "only compiled shaders ship (no GLSL, no depfiles)");
     // Should the engine and gfxcoopa ever ship a same-named shader, the package must carry the
     // engine's. The two directories normally share no names, so this usually only prints the note.
     bool precedence_checked = false;
-    for (const auto& e : fs::directory_iterator(fs::path(ROOT_DIR) / "assets" / "shaders")) {
+    for (const auto& e : fs::directory_iterator(engine_spv)) {
         if (e.path().extension() != ".spv") continue;
-        const fs::path gfx = fs::path(PROJ_DIR) / "gfxcoopa" / "assets" / "shaders" / e.path().filename();
+        const fs::path gfx = gfx_spv / e.path().filename();
         if (!fs::exists(gfx) || fs::file_size(gfx) == fs::file_size(e.path())) continue;
         expect(fs::file_size(sh / e.path().filename()) == fs::file_size(e.path()),
                "the engine's " + e.path().filename().string() + " wins over gfxcoopa's (first match, like the runtime)");
@@ -7646,6 +7771,7 @@ const TestCase kTests[] = {
     {"editor_object_asset_click_and_tab", "editor_shell", test_editor_object_asset_click_and_tab},
     {"editor_material_shader_catalogue", "editor_shell", test_editor_material_shader_catalogue},
     {"editor_scene_settings_override", "editor_shell", test_editor_scene_settings_override},
+    {"editor_weather_world_tab", "editor_shell", test_editor_weather_world_tab},
     {"editor_grid_snap_and_frame", "editor_shell", test_editor_grid_snap_and_frame},
     {"editor_xray_edit_mode", "editor_shell", test_editor_xray_edit_mode},
     {"editor_nav_axis_and_trackpad", "editor_shell", test_editor_nav_axis_and_trackpad},

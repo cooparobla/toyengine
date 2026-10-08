@@ -104,6 +104,51 @@ struct SubEmitter {
 };
 
 /**
+ * @struct GroundField
+ * @brief A height map particles collide with instead of the flat `ground_height` plane: the
+ *        top surface under each cell (roofs, terrain, props), e.g. probed by raycasts straight
+ *        down. Set at runtime (ParticleSystem::ground_field), never authored; cells outside it,
+ *        or holding NaN (nothing below), use `fallback`.
+ */
+struct GroundField {
+    glm::vec2 origin{0.0f};           ///< World XY of cell (0, 0)'s corner.
+    float cell = 1.0f;                ///< Cell edge (m).
+    int nx = 0, ny = 0;
+    std::vector<float> heights;       ///< nx * ny, row-major in y.
+    std::vector<glm::vec3> normals;   ///< Optional, nx * ny: the surface's normal (empty = straight up).
+    /// Optional, nx * ny: 1 where a landing may fire its sub emitters (splashes), 0 where it
+    /// lands silently. Empty: everywhere.
+    std::vector<uint8_t> splash;
+    float fallback = 0.0f;
+    bool fallback_splash = true;      ///< Sub emitters where the fallback plane is the surface.
+
+    /** @brief May a landing at (x, y) splash? */
+    bool splashes(float x, float y) const {
+        if (splash.empty()) return true;
+        const int i = static_cast<int>(std::floor((x - origin.x) / cell));
+        const int j = static_cast<int>(std::floor((y - origin.y) / cell));
+        if (i < 0 || j < 0 || i >= nx || j >= ny) return fallback_splash;
+        return splash[static_cast<size_t>(j) * static_cast<size_t>(nx) + static_cast<size_t>(i)] != 0;
+    }
+
+    /** @brief The surface normal under (x, y); up where unknown. */
+    glm::vec3 normal(float x, float y) const {
+        const int i = static_cast<int>(std::floor((x - origin.x) / cell));
+        const int j = static_cast<int>(std::floor((y - origin.y) / cell));
+        if (normals.empty() || i < 0 || j < 0 || i >= nx || j >= ny) return glm::vec3(0.0f, 0.0f, 1.0f);
+        return normals[static_cast<size_t>(j) * static_cast<size_t>(nx) + static_cast<size_t>(i)];
+    }
+
+    float sample(float x, float y) const {
+        const int i = static_cast<int>(std::floor((x - origin.x) / cell));
+        const int j = static_cast<int>(std::floor((y - origin.y) / cell));
+        if (i < 0 || j < 0 || i >= nx || j >= ny) return fallback;
+        const float h = heights[static_cast<size_t>(j) * static_cast<size_t>(nx) + static_cast<size_t>(i)];
+        return std::isnan(h) ? fallback : h;
+    }
+};
+
+/**
  * @struct ParticleSettings
  * @brief Everything authored on a ParticleSystem. Grouped like Unity's modules; YAML keys are
  *        the field names (see particle_yaml.h).
@@ -167,8 +212,16 @@ struct ParticleSettings {
     float collision_friction = 0.2f; ///< Fraction of horizontal speed lost per bounce.
     bool  kill_on_collide = false;
 
+    // --- Wrap (world space systems: precipitation around a moving camera) ---
+    /// Full extents of a box centred on the emitter; > 0 on an axis wraps particles that leave
+    /// it back in on the opposite side, so the volume is always full wherever the emitter goes
+    /// (rain that keeps up with the camera). 0 = no wrap on that axis.
+    glm::vec3 wrap_box{0.0f};
+    float wrap_fade = 0.15f;         ///< Fraction of the box's half extents (x, y) over which alpha fades to 0 at its edge.
+
     // --- Sub emitters ---
     std::vector<SubEmitter> on_death;
+    bool on_death_collision_only = false;   ///< Sub emitters fire only for deaths by collision (rain: splashes on landing, none mid-air).
 
     // --- Renderer ---
     render::ParticleLook look;
@@ -195,6 +248,8 @@ public:
     std::string type_name() const override { return "ParticleSystem"; }
 
     ParticleSettings settings;
+    /// Runtime collision surface replacing the ground_height plane (see GroundField); null = the plane.
+    std::shared_ptr<const GroundField> ground_field;
 
     /// Builds (or fetches from the shared cache) the sampling surface of meshes/<key>.yaml --
     /// installed by the YAML parser, which knows the asset roots and the scene's directory. Used
@@ -297,7 +352,14 @@ public:
     /** @brief Spawns `n` particles from the shape right now (next step), regardless of rate. */
     void emit(uint32_t n) { pending_emit_ += n; }
     /** @brief Spawns one particle at a WORLD position with a world velocity (sub emitters). */
-    void emit_at(const glm::vec3& world_pos, const glm::vec3& world_vel) { pending_at_.push_back({world_pos, world_vel}); }
+    /**
+     * @brief Spawns one particle at a world position next step (what sub emitters use). `normal`
+     *        is the surface it came from: with align_to_normal the particle lies in that surface
+     *        (a splash ring flat on a sloped roof) and its start speed points off it.
+     */
+    void emit_at(const glm::vec3& world_pos, const glm::vec3& world_vel, const glm::vec3& normal = glm::vec3(0.0f, 0.0f, 1.0f)) {
+        pending_at_.push_back({world_pos, world_vel, normal});
+    }
 
     bool is_playing() const { return playing_; }
     bool is_emitting() const { return playing_ && emitting_; }
@@ -338,7 +400,8 @@ public:
     glm::vec3 bounds_max() const { return bounds_max_; }
 
     /** @brief Deaths this step that feed a sub emitter: (index into settings.on_death, pos, vel). */
-    struct DeathEvent { uint32_t sub = 0; glm::vec3 pos{0.0f}; glm::vec3 vel{0.0f}; };
+    /// `normal`: of the surface it landed on (a collision death), else straight up.
+    struct DeathEvent { uint32_t sub = 0; glm::vec3 pos{0.0f}; glm::vec3 vel{0.0f}; glm::vec3 normal{0.0f, 0.0f, 1.0f}; };
     const std::vector<DeathEvent>& death_events() const { return dead_events_; }
 
     /// Sub emitter targets, resolved by ParticleSimulationSystem (parallel to settings.on_death).
@@ -367,6 +430,9 @@ public:
         const glm::mat3 rot_world = local ? glm::mat3(world_) : glm::mat3(1.0f);
         const glm::quat emitter_rot = local ? glm::quat_cast(orthonormal_(rot_world)) : glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
         const float scale_world = local ? std::cbrt(std::abs(glm::determinant(rot_world))) : 1.0f;
+        const glm::vec2 half_wrap = local ? glm::vec2(0.0f) : glm::vec2(settings.wrap_box) * 0.5f;
+        const float fade_frac = std::clamp(settings.wrap_fade, 1e-3f, 1.0f);
+        const bool wrap_fade = settings.wrap_fade > 0.0f && (half_wrap.x > 0.0f || half_wrap.y > 0.0f);
 
         // Draw order. Sorting needs the world position, so compute keys first.
         order_.resize(n);
@@ -402,6 +468,16 @@ public:
                 glm::vec4 color = pool_.color0[i] * settings.color_over_life.evaluate(t);
                 color.a *= settings.alpha_over_life.evaluate(t);
                 const glm::vec3 wp = glm::vec3(to_world * glm::vec4(pool_.pos[i], 1.0f));
+                if (wrap_fade) {   // fade toward the wrap box's sides, so a wrap is never seen
+                    const glm::vec2 d = glm::abs(glm::vec2(wp) - glm::vec2(world_[3]));
+                    float f = 1.0f;
+                    for (int a = 0; a < 2; ++a) {
+                        if (half_wrap[a] <= 0.0f) continue;
+                        const float edge = (half_wrap[a] - d[a]) / (half_wrap[a] * fade_frac);
+                        f *= std::clamp(edge, 0.0f, 1.0f);
+                    }
+                    color.a *= f;
+                }
                 glm::quat q = emitter_rot * pool_.orient[i];
                 if (tumble != 0.0f) {
                     const uint32_t s = pool_.seed[i];
@@ -420,7 +496,8 @@ public:
                 render::ParticleInstance& inst = instances_[k];
                 inst.pos_size = glm::vec4(wp, size);
                 inst.color = color;
-                inst.velocity_rot = glm::vec4(rot_world * pool_.vel[i], pool_.rot[i]);
+                // The visible motion (step()'s dp) includes the constant `velocity`, so stretching does too.
+                inst.velocity_rot = glm::vec4(rot_world * (pool_.vel[i] + settings.velocity), pool_.rot[i]);
                 inst.orient = glm::vec4(q.x, q.y, q.z, q.w);
                 const float rnd = hash01(pool_.seed[i]);
                 float frame = 0.0f;
@@ -478,7 +555,7 @@ public:
     const Pool& pool() const { return pool_; }
 
 private:
-    struct PendingAt { glm::vec3 pos; glm::vec3 vel; };
+    struct PendingAt { glm::vec3 pos; glm::vec3 vel; glm::vec3 normal; };
 
     uint32_t effective_seed_() const {
         if (settings.seed != 0) return settings.seed;
@@ -598,6 +675,8 @@ private:
             }
         }
         if (forced_vel) vel = *forced_vel;
+        // Born under cover (inside a house, below terrain): never spawned at all.
+        if (!local && settings.collide && ground_field && pos.z < ground_field->sample(pos.x, pos.y)) return;
 
         const uint32_t seed = rng_.next_u32();
         const float life = std::max(settings.start_lifetime.sample(rng_), 1e-3f);
@@ -688,11 +767,21 @@ private:
         // 2. Deaths, compacted serially. Feed sub emitters first.
         for (size_t i = pool_.size(); i-- > 0;) {
             if (pool_.age[i] < pool_.life[i]) continue;
-            for (uint32_t s = 0; s < settings.on_death.size(); ++s) {
+            // A silent death (born or wrapped under cover, see update_()) feeds no sub emitter.
+            const bool silent = pool_.age[i] == k_silent_death_ ||
+                                (settings.on_death_collision_only && pool_.age[i] != k_collide_death_) ||
+                                // Landed on a surface that takes no splashes (GroundField::splash).
+                                (pool_.age[i] == k_collide_death_ && ground_field &&
+                                 !ground_field->splashes(pool_.pos[i].x, pool_.pos[i].y));
+            const uint32_t subs = silent ? 0u : static_cast<uint32_t>(settings.on_death.size());
+            // A landing passes on the surface it hit (the height map's normal, else the flat ground).
+            const glm::vec3 n = (subs > 0 && pool_.age[i] == k_collide_death_ && ground_field)
+                ? ground_field->normal(pool_.pos[i].x, pool_.pos[i].y) : glm::vec3(0.0f, 0.0f, 1.0f);
+            for (uint32_t s = 0; s < subs; ++s) {
                 const bool local = simulates_locally_();
                 const glm::vec3 wp = local ? glm::vec3(world_ * glm::vec4(pool_.pos[i], 1.0f)) : pool_.pos[i];
                 const glm::vec3 wv = local ? glm::mat3(world_) * pool_.vel[i] : pool_.vel[i];
-                dead_events_.push_back({s, wp, wv});
+                dead_events_.push_back({s, wp, wv, n});
             }
             pool_.swap_remove(i);
         }
@@ -716,9 +805,20 @@ private:
                 EmitSample e;
                 e.position = simulates_locally_() ? glm::vec3(glm::inverse(world_) * glm::vec4(p.pos, 1.0f)) : p.pos;
                 const glm::vec3 v = simulates_locally_() ? glm::inverse(glm::mat3(world_)) * p.vel : p.vel;
-                // A sub-emitter spawn: forced position, its own start speed added along a random direction.
+                // The surface it came from: the particle's orientation (align_to_normal) and, then,
+                // the hemisphere its start speed points into.
+                e.normal = glm::normalize(simulates_locally_() ? glm::inverse(glm::mat3(world_)) * p.normal : p.normal);
+                e.tangent = glm::normalize(std::abs(e.normal.z) < 0.9f ? glm::cross(e.normal, glm::vec3(0.0f, 0.0f, 1.0f))
+                                                                        : glm::cross(e.normal, glm::vec3(1.0f, 0.0f, 0.0f)));
+                // A sub-emitter spawn: forced position, its own start speed added along a random
+                // direction -- off the surface when aligned to it.
                 const float sp = settings.start_speed.sample(rng_);
-                const glm::vec3 vel = v + rng_.unit_vector() * sp;
+                glm::vec3 dir = rng_.unit_vector();
+                if (settings.align_to_normal) {
+                    if (glm::dot(dir, e.normal) < 0.0f) dir = -dir;
+                    dir = glm::normalize(dir + e.normal * 0.6f);
+                }
+                const glm::vec3 vel = v + dir * sp;
                 spawn_(dt, 0.0f, &e, &vel);
             }
             pending_at_.clear();
@@ -762,6 +862,9 @@ private:
         const float ground = settings.ground_height;
         const float bounce = settings.bounce;
         const float keep_h = 1.0f - std::clamp(settings.collision_friction, 0.0f, 1.0f);
+        const std::shared_ptr<const GroundField> field = ground_field;   // swapped between frames only
+        const glm::vec3 wrap = local ? glm::vec3(0.0f) : glm::max(settings.wrap_box, glm::vec3(0.0f));
+        const bool wrapping = wrap.x > 0.0f || wrap.y > 0.0f || wrap.z > 0.0f;
 
         run_range(par, n, [&](size_t b, size_t e) {
             for (size_t i = b; i < e; ++i) {
@@ -780,12 +883,28 @@ private:
                 }
                 p += dp;
                 float age = pool_.age[i] + dt;
+                // Landing is tested before wrapping, so a drop crossing the box's floor where the
+                // ground is lands rather than wrapping back up; only a drop that hit nothing wraps.
+                const float g0 = collide && !local ? (field ? field->sample(p.x, p.y) : ground) : -1e30f;
+                bool wrapped = false;
+                if (wrapping && p.z >= g0) {
+                    for (int k = 0; k < 3; ++k) {
+                        if (wrap[k] <= 0.0f) continue;
+                        const float d = p[k] - center[k];
+                        const float w = d - wrap[k] * std::floor(d / wrap[k] + 0.5f);
+                        if (w != d) { p[k] = center[k] + w; wrapped = true; }
+                    }
+                }
                 if (collide && !local) {
-                    if (p.z < ground) {
+                    const float g = wrapped ? (field ? field->sample(p.x, p.y) : ground) : g0;
+                    if (p.z < g && wrapped) {
+                        age = k_silent_death_;   // wrapped in under cover: gone, no splash
+                    } else if (p.z < g) {
                         if (settings.kill_on_collide) {
-                            age = pool_.life[i];
+                            age = k_collide_death_;
+                            p.z = g + 0.02f;     // its death (and any splash) sits just on the surface
                         } else {
-                            p.z = ground + (ground - p.z) * bounce;
+                            p.z = g + (g - p.z) * bounce;
                             v.z = std::abs(v.z) * bounce;
                             v.x *= keep_h;
                             v.y *= keep_h;
@@ -871,6 +990,9 @@ private:
     std::vector<DeathEvent> dead_events_;
 
     bool playing_ = false;
+    /// Death markers in pool_.age (>= any life): killed by a collision, or silently (no sub emitters).
+    static constexpr float k_collide_death_ = std::numeric_limits<float>::max() * 0.5f;
+    static constexpr float k_silent_death_ = std::numeric_limits<float>::max();
     bool emitting_ = false;
     bool paused_ = false;
     bool started_ = false;

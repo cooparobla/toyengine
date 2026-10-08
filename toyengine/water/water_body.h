@@ -33,6 +33,7 @@
 #include <coopa/scene/scene_object.h>
 
 #include <gfxcoopa/engine/data/mesh.h>
+#include <gfxcoopa/engine/components/mesh_renderer.h>
 #include <gfxcoopa/engine/data/skinned_mesh_source.h>
 
 #include <toyengine/water/water_surface_query.h>
@@ -125,6 +126,10 @@ public:
     };
     std::vector<TileSlot> tiles;   ///< Empty for a single-tile body (its mesh is on the owner).
     std::string single_asset_id;   ///< Asset id of the owner-published mesh, if any.
+
+    /// Whether the quality tier allows tessellation (WaterSettings::tessellate). Off, the
+    /// owner's `tessellation:` is overridden off at runtime (never in the saved scene).
+    bool tier_tessellates = true;
 
     /** @brief Marks the bake stale (e.g. after editing a field at runtime). */
     void mark_dirty() {

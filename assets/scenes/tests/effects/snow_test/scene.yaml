@@ -1,0 +1,241 @@
+# snow_test -- lying snow (weather snow_cover), the deep `snow` surface shader and snow trails.
+#
+# Run: ./build/toyengine assets/scenes/tests/effects/snow_test/scene.yaml
+#
+# The weather snows and starts with full cover (a snowy starting condition does), so:
+#
+#   snowfield   the ground: `shader: snow` + tessellation -- 30 cm of deep snow raised over brown
+#               earth, its normal from the snow's own height field
+#   shelter     four posts and a roof (colliders: the precipitation map probes them): the snow
+#               stops at the roof's edge and the earth beneath stays bare; the roof itself is
+#               covered by the general cover layer
+#   crates      plain materials gathering snow on their tops only (up-facing, open to the sky);
+#               `crate_bare` opts out with `snow: false`
+#   sled        a kinematic box circling the field with a SnowDeformer: it ploughs a trench that
+#               the falling snow slowly fills back in
+#   ball        a Rigidbody dropped into the snow: `snow_auto_deformers` presses its footprint in
+#               without a SnowDeformer
+#
+# Worth sweeping: snow_cover_override (0..1 in the render config), condition (clear melts it --
+# warm conditions only), debug_view=normals.
+format: blender
+scene:
+  scene_name: snow_test
+  settings:
+    weather:
+      enabled: true
+      time_of_day: 11.0
+      day_length_minutes: 0
+      condition: snow
+      schedule: fixed
+      ground_height: 0.0
+      snow_max_depth: 0.3
+      snow_accumulate_time: 120
+      snow_auto_deformers: true
+  root_objects:
+    - name: snowfield
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 14.0, y: 14.0, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: snow_ground
+          material:
+            shader: snow
+            albedo: { r: 0.32, g: 0.24, b: 0.16 }
+            metallic: 0.0
+            roughness: 0.95
+            ao: 1.0
+          tessellation: true
+          tess_edge_pixels: 5      # target on-screen edge length (px)
+          tess_max_factor: 32       # cap on splits per edge
+          tess_max_distance: 40     # m; beyond, drawn as authored
+        - type: BoxCollider
+          size: { x: 2.0, y: 2.0, z: 0.2 }
+          center: { x: 0.0, y: 0.0, z: -0.1 }
+        - type: WeatherSurface
+          splashes: true
+      children: []
+
+    # ============================================================================
+    # SHELTER -- the roof keeps the earth under it bare.
+    # ============================================================================
+    - name: shelter
+      active: true
+      components:
+        - type: Transform
+          position: { x: 4.0, y: 3.0, z: 0.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+      children:
+        - name: roof
+          active: true
+          components:
+            - type: Transform
+              position: { x: 0.0, y: 0.0, z: 2.4 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 2.0, y: 1.6, z: 0.1 }
+            - type: MeshRenderer
+              mesh_path: cube
+              material: materials/wood
+            - type: BoxCollider
+              size: { x: 1.0, y: 1.0, z: 1.0 }
+          children: []
+        - name: post_a
+          active: true
+          components:
+            - type: Transform
+              position: { x: -0.9, y: -0.7, z: 1.2 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 0.12, y: 0.12, z: 2.4 }
+            - type: MeshRenderer
+              mesh_path: cube
+              material: materials/wood
+          children: []
+        - name: post_b
+          active: true
+          components:
+            - type: Transform
+              position: { x: 0.9, y: -0.7, z: 1.2 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 0.12, y: 0.12, z: 2.4 }
+            - type: MeshRenderer
+              mesh_path: cube
+              material: materials/wood
+          children: []
+        - name: post_c
+          active: true
+          components:
+            - type: Transform
+              position: { x: -0.9, y: 0.7, z: 1.2 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 0.12, y: 0.12, z: 2.4 }
+            - type: MeshRenderer
+              mesh_path: cube
+              material: materials/wood
+          children: []
+        - name: post_d
+          active: true
+          components:
+            - type: Transform
+              position: { x: 0.9, y: 0.7, z: 1.2 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 0.12, y: 0.12, z: 2.4 }
+            - type: MeshRenderer
+              mesh_path: cube
+              material: materials/wood
+          children: []
+
+    # ============================================================================
+    # CRATES -- the cover layer on up-facing tops; one opted out.
+    # ============================================================================
+    - name: crate
+      active: true
+      components:
+        - type: Transform
+          position: { x: -4.0, y: 3.5, z: 0.5 }
+          rotation: { x: 0.0, y: 0.0, z: 20.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/wood_crate
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+      children: []
+    - name: crate_bare
+      active: true
+      components:
+        - type: Transform
+          position: { x: -2.2, y: 4.0, z: 0.5 }
+          rotation: { x: 0.0, y: 0.0, z: -15.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material:
+            base: materials/wood_crate
+            snow: false
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+      children: []
+
+    # ============================================================================
+    # SLED -- a SnowDeformer circling the field.
+    # ============================================================================
+    - name: sled
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.5, y: -2.0, z: 0.25 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 0.5, y: 0.9, z: 0.5 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/copper
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Rigidbody
+          mass: 30.0
+          is_kinematic: true
+          use_gravity: false
+        - type: KinematicMover
+          mode: orbit
+          orbit_center: { x: -2.0, y: -2.0, z: 0.25 }
+          orbit_radius: 2.5
+          speed: 40.0
+        - type: SnowDeformer
+          radius: 0.35
+          depth: -1
+          falloff: 0.4
+      children: []
+
+    - name: ball
+      active: true
+      components:
+        - type: Transform
+          position: { x: 2.5, y: -2.5, z: 2.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 0.5, y: 0.5, z: 0.5 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: materials/plastic
+        - type: SphereCollider
+          radius: 1.0
+        - type: Rigidbody
+          mass: 5.0
+      children: []
+
+    - name: camera
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -11.0, z: 5.5 }
+          rotation: { x: 66.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Camera
+          main: true
+          projection: Perspective
+          fov: 55.0
+          near_clip_plane: 0.1
+          far_clip_plane: 300.0
+        - type: CameraController
+          mode: orbit
+          target: { x: 0.0, y: 0.5, z: 0.0 }
+          min_distance: 2.0
+          max_distance: 40.0
+      children: []
+
+    - name: sun
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 20.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: DirectionalLight
+          direction: { x: -0.4, y: 0.35, z: -0.85 }
+          color: { r: 1.0, g: 0.96, b: 0.9 }
+          intensity: 1.0
+          cast_shadows: true
+      children: []

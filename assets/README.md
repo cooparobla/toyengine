@@ -50,7 +50,7 @@ material and a mesh may both be `brick`; two materials may not).
 | --- | --- | --- |
 | `cube` | unit cube, [-0.5, 0.5]^3 | centre |
 | `cube_corner` | unit cube, [0, 1]^3 | corner -- older scenes place boxes by their corner |
-| `plane` | 2x2 quad in XY, normal +Z | centre |
+| `plane` | 2x2 quad in XY, normal +Z (its UVs run along one diagonal: no texture or displacement map maps on it) | centre |
 | `sphere` | radius-1 UV sphere, with an LOD sidecar | centre |
 | `sphere_low` | radius-1 low-poly lathe sphere (water props) | centre |
 | `ball` | radius-0.5 smooth sphere (animation rigs) | centre |
@@ -112,6 +112,45 @@ shader_params: [tiling, sharpness, space, normal_strength]
 It is for OPAQUE materials: shadow passes use the stock shaders, so a CUTOUT triplanar material
 would cast its mesh-UV silhouette. `scenes/pixel_demo` shows both spaces side by side
 (`triplanar_world`, `triplanar_local`).
+
+## Tessellation and displacement
+
+Any `MeshRenderer` can subdivide on the GPU near the camera (Unity's tessellation option): each
+triangle splits until its edges are about `tess_edge_pixels` on screen, up to `tess_max_factor`
+times per edge, and is drawn as authored past `tess_max_distance` metres.
+
+```yaml
+- type: MeshRenderer
+  mesh_path: my_grid
+  material: { base: materials/sand, texture_displacement: textures/dunes_height.png, displacement_scale: 0.9 }
+  tessellation: true
+  tess_edge_pixels: 6
+  tess_max_factor: 16
+  tess_max_distance: 60
+```
+
+What moves the new vertices: the material's displacement map (along the normal) and its surface
+shader's vertex hook (water's waves, foliage's sway, deep snow). Shadows tessellate the same way.
+Start from a mesh with some density of its own (the cap is 64 splits per edge) and real 0..1 UVs.
+Water too: set it on the WaterBody's MeshRenderer (`water_quality` low / medium gate it off, see
+`toyengine/water/water_settings.h`). `scenes/tests/rendering/tess_test` and
+`scenes/demos/ocean_demo` show it; `tools/gen_displacement_maps.py` makes height maps.
+
+## Snow
+
+With the weather snowing below freezing, `snow_cover` builds up (and melts when it warms; see
+[toyengine/weather](../toyengine/weather/README.md)). Two looks follow it:
+
+- **Cover layer** -- every opaque material gathers snow on its open, up-facing surfaces (nothing
+  under a roof: the precipitation map decides). `snow: false` on a material opts it out.
+  `render.snow_cover_override` forces the amount (scenes without weather, tests).
+- **Deep snow** -- `shader: snow` on a ground mesh raises it by up to the weather's
+  `snow_max_depth`, and objects carve trenches in it: a `SnowDeformer` component (radius, depth,
+  falloff), or every Rigidbody with the weather's `snow_auto_deformers: true`. Falling snow fills
+  trenches back in. Give that renderer tessellation so the 10 cm trench cells have vertices.
+  Gameplay reads the same snow through `toy::world::find_snow(scene)->depth_at(xy, ground_z)`.
+
+`scenes/tests/effects/snow_test` shows both.
 
 ## Scene settings
 

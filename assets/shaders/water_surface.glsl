@@ -86,9 +86,12 @@ void gfx_surface_vertex(inout GfxSurfaceVertex v) {
     float turbulence = baked ? v.uv.y : 0.0;
     vec3  flow_ws    = baked ? mat3(v.model) * v.tangent_os.xyz : vec3(0.0);
 
+    // Tessellated, the waves the mesh is too coarse to hold at this distance are left out
+    // (gfx_tess_lod; the fragment stage shades their slope back in) -- so the hand-over from the
+    // tessellated band to the baked grid is a gradient, not an aliased edge.
     WaterWave w = water_gerstner(gfx_params, v.position_ws.xy, gfx_time.w,
                                  water_depth_attenuation(depth, gfx_params.y),
-                                 distance(camera.camera_pos, v.position_ws));
+                                 distance(camera.camera_pos, v.position_ws), gfx_tess_lod);
     v.position_ws += w.displacement;
 
     // Tilt the mesh's own normal (not +Z: a river surface slopes) by the wave slope.
@@ -202,6 +205,14 @@ void gfx_surface_fragment(inout GfxTransparentSurface s) {
         slope *= strength * detail;
         if (length(camera.camera_pos.xy - pos) <= ring_range) water_ripple_rings(pos, slope, ring_foam);
     }
+    // Tessellated draws (packed params in refraction_ior_flags.zw): the slope of the waves the
+    // vertex stage left out of the mesh (water_wave_mesh_fade), per pixel.
+    uvec2 tess_bits = floatBitsToUint(material.refraction_ior_flags.zw);
+    if (tess_bits.x != 0u) {
+        vec2 tess_lod = vec2(max(unpackHalf2x16(tess_bits.x).x, 0.5) / max(camera.jitter_ndc.z, 1.0),
+                             unpackHalf2x16(tess_bits.y).x);
+        slope += water_gerstner_residual_slope(gfx_params, pos, gfx_time.w, view_dist, tess_lod);
+    }
     s.normal_ws = normalize(s.normal_ws - vec3(slope, 0.0));
     s.roughness = mix(max(s.roughness, 0.2), s.roughness, detail);
 
@@ -211,7 +222,10 @@ void gfx_surface_fragment(inout GfxTransparentSurface s) {
     // outside it, total internal reflection turns the surface into a dark mirror of the water
     // below. The depth-based shore/contact terms are meaningless from this side (what lies
     // "behind" is above the water) -- UnderwaterPass fogs this surface by its in-water distance.
-    if (!gl_FrontFacing) {
+    // Only from BELOW, though: seen from above, a back face is a steep crest folding over on
+    // itself (tessellated water resolves those), which should read as more water, not as a dark
+    // underside mirror.
+    if (!gl_FrontFacing && camera.camera_pos.z < s.position_ws.z) {
         vec3  Vu     = normalize(camera.camera_pos - s.position_ws);
         float cos_v  = dot(Vu, s.normal_ws);
         float window = smoothstep(0.6, 0.72, cos_v);       // critical angle: cos = 0.66

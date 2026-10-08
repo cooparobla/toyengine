@@ -53,6 +53,7 @@ layout(push_constant) uniform PushConstants {
     vec4  emissive;
     vec4  gfx_time;    // x=time, y=delta_time, z=frame_index, w=spare
     vec4  gfx_params;  // four author-defined floats; see the surface shader's own doc
+    uvec4 surface_ext; // x/y packed tessellation params, z flags (bit 0: no snow), w reserved
 } material;
 
 // Plain-named aliases so a surface file's gfx_surface_vertex()/gfx_surface_fragment() can
@@ -64,6 +65,11 @@ layout(push_constant) uniform PushConstants {
 // correctly reads each draw's own push-constant values rather than some shared/stale copy.
 vec4 gfx_time   = material.gfx_time;
 vec4 gfx_params = material.gfx_params;
+
+// Set 2: the surface world (camera tessellation view, snow, the precipitation occlusion map and
+// the snow trench field) -- see gfx/surface/world.glsl. A hook may read it (the deep-snow shader).
+#define GFX_WORLD_SET 2
+#include <gfx/surface/world.glsl>
 
 // Outputs to G-Buffer fragment shader
 layout(location = 0) out vec3 frag_world_pos;

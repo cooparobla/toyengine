@@ -276,6 +276,9 @@ render:
   fog_max_opacity: 1.0       # ceiling on how much fog can occlude
   fog_max_distance: 60.0     # distance the fog term (and sky-pixel evaluation) saturates at
 
+  # --- Lying snow (gfx/surface/snow.glsl) ---
+  snow_cover_override: -1.0  # < 0: the scene's weather decides (none without weather); 0..1 forces the cover. Runtime
+
   # --- Volumetrics (shared march settings; per-volume look lives on the Volume component) ---
   volumetrics_max_distance: 40.0  # distance the march stops at
   volumetrics_mode: froxel        # froxel (grid, Unreal/HDRP-style; fast) | raymarch (per-pixel march; sharper). Startup-fixed

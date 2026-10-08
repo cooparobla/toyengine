@@ -14,6 +14,11 @@
  *    sinks. The physics-aware (stage 2) bake of a water body also waits until it is in range.
  *  - `ripple_range`: only bodies this close ring the water, and only rings this close are drawn.
  *  - `detail_distance`: past it the shader drops ripples and foam noise for a rougher surface.
+ *
+ * Tessellation. A body tessellates when its MeshRenderer enables `tessellation:` (with that
+ * renderer's values), so near the camera the Gerstner waves keep their shape where the baked grid
+ * is too coarse to carry them. The tier only gates it: Low and Medium draw the baked grid
+ * whatever the renderer asks (`tessellate`). Devices without tessellation draw it as baked too.
  * Wave LOD needs no setting: every derived wave fades with distance on its own (water_waves.h).
  */
 
@@ -54,6 +59,9 @@ struct WaterSettings {
     float detail_distance = 150.0f;    ///< Ripples/foam noise fade out toward this distance.
     int   ripple_layers = 2;           ///< Flow-ripple layers in the fragment shader (1 or 2).
 
+    // --- Tessellation (see the file doc) ---
+    bool  tessellate = true;           ///< Allow bodies whose MeshRenderer asks for it to tessellate.
+
     static WaterSettings from_quality(WaterQuality q) {
         WaterSettings s;
         s.quality = q;
@@ -63,12 +71,14 @@ struct WaterSettings {
                 s.ripple_range = 30.0f;  s.max_ripples = 8;
                 s.grid_density = 0.25f; s.lod_bias = 2.0f;
                 s.detail_distance = 40.0f;  s.ripple_layers = 1;
+                s.tessellate = false;
                 break;
             case WaterQuality::Medium:
                 s.sim_radius = 80.0f;  s.wave_iterations = 2; s.max_box_subdivisions = 2;
                 s.ripple_range = 50.0f;  s.max_ripples = 16;
                 s.grid_density = 0.5f;  s.lod_bias = 1.5f;
                 s.detail_distance = 80.0f;  s.ripple_layers = 1;
+                s.tessellate = false;
                 break;
             case WaterQuality::High:
                 break; // the defaults above

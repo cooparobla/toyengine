@@ -149,6 +149,9 @@
 #include <toyengine/render/passes/underwater_pass.h>
 #include <toyengine/render/passes/particle_pass.h>
 #include <toyengine/render/particle_types.h>
+#include <toyengine/render/surface_world.h>
+#include <set>
+#include <glm/gtc/packing.hpp>
 #include <toyengine/scene/camera_controller.h>
 
 namespace toy {
@@ -358,6 +361,17 @@ public:
      *        render() from toy::water::WaterSystem; keeping it a plain struct means render/ never
      *        depends on toyengine/water/.
      */
+    /**
+     * @brief This frame's surface world state -- snow, wetness, wind, the precipitation occlusion
+     *        map and the snow trench field (see surface_world.h). Engine sets it every frame.
+     */
+    void set_surface_state(SurfaceFrameState state) { surface_state_ = std::move(state); }
+    /** @brief Whether this device runs tessellation (MeshRenderer::tessellation; otherwise drawn as authored). */
+    bool supports_tessellation() const { return device_.supports_tessellation(); }
+    const SurfaceFrameState& surface_state() const { return surface_state_; }
+    /** @brief What the surface world UBO held at the last render() (tests / diagnostics). */
+    const SurfaceWorldUBO& surface_world_ubo() const { return surface_world_->last(); }
+
     void set_water_state(WaterFrameState state) { water_state_ = std::move(state); }
 
     /**
@@ -467,7 +481,12 @@ public:
                       stats_total_.camera_triangles / f / 1000.0,
                       stats_total_.shadow_draws / f, stats_total_.shadow_instances / f,
                       stats_total_.shadow_triangles / f / 1000.0);
-        return buf;
+        std::string out(buf);
+        if (stats_total_.tess_draws > 0) {
+            std::snprintf(buf, sizeof(buf), " | tessellated: %.0f draws", stats_total_.tess_draws / f);
+            out += buf;
+        }
+        return out;
     }
 
     /**
@@ -671,7 +690,14 @@ public:
             prev_view_proj_valid_ ? prev_snapped_view_   : view,
             prev_view_proj_valid_ ? prev_unjittered_proj_ : unjittered_proj,
             taa_jitter_ndc_);
+        // Tessellation stages size edges in render pixels: pixels per metre at 1 m.
+        camera_ubos_[frame_slot]->set_pixel_scale(0.5f * static_cast<float>(render_extent_.height) * std::abs(unjittered_proj[1][1]));
         camera_ubos_[frame_slot]->update(view, proj, cam_pos, pixel_density);
+        // The surface world set for this slot: the tessellation view (main camera position and
+        // its pixel scale -- render pixels per metre at 1 m), snow, occlusion and trenches.
+        surface_world_->upload(frame_slot, surface_state_, cam_pos,
+                               0.5f * static_cast<float>(render_extent_.height) * std::abs(unjittered_proj[1][1]),
+                               elapsed_time_);
 
         // One hierarchy walk for every component type this frame's gathers read -- see
         // FrameScene. Everything below reads frame_scene_ instead of walking the scene again.
@@ -880,6 +906,9 @@ private:
         std::vector<const glm::mat4*> multi;
         std::vector<uint32_t>         multi_count;
         std::vector<uint32_t>    lod;     ///< Chosen against the camera; shadow views reuse it.
+        /// Per item: the surface push extension -- x/y packed tessellation params (0: drawn
+        /// untessellated), z flags (bit 0: no snow cover). See GBufferPipeline::PushConstants.
+        std::vector<glm::uvec4>  ext;
         /// Single-instance index for each camera-visible BLEND renderer -- the forward pass
         /// draws those one at a time, back to front, so they are never batched. Otherwise
         /// InstanceStream::kInvalidIndex.
@@ -907,7 +936,14 @@ private:
         uint64_t camera_draws = 0, camera_instances = 0, camera_triangles = 0;
         uint64_t shadow_draws = 0, shadow_instances = 0, shadow_triangles = 0;
         uint64_t renderers = 0, camera_visible = 0;
+        uint64_t tess_draws = 0;   ///< Camera draws (G-buffer + transparent) that ran tessellated.
     };
+
+public:
+    /** @brief Mesh draw statistics of the last frame (tests / diagnostics). */
+    const MeshDrawStats& last_frame_stats() const { return frame_stats_; }
+
+private:
 
     /**
      * @struct FrameContext
@@ -941,7 +977,10 @@ private:
     void build_frame_descriptors_() {
         camera_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
             coopa::gfx::pipeline::DescriptorLayoutBuilder()
-                .uniform_buffer(0, coopa::gfx::ShaderStage::Vertex | coopa::gfx::ShaderStage::Fragment)
+                .uniform_buffer(0, device_.supports_tessellation()
+                                       ? coopa::gfx::ShaderStage::Vertex | coopa::gfx::ShaderStage::Fragment |
+                                         coopa::gfx::ShaderStage::TessControl | coopa::gfx::ShaderStage::TessEval
+                                       : coopa::gfx::ShaderStage::Vertex | coopa::gfx::ShaderStage::Fragment)
                 .build(device_));
 
         // One CameraUBO and one descriptor set per frame-in-flight slot (file doc, rule 2); the
@@ -1016,6 +1055,9 @@ private:
         // MaterialTextureCache's own doc for why lazily allocating sets from it later (once a
         // scene's masked materials finish loading) is safe under overlapped command buffers.
         material_cache_ = std::make_unique<coopa::gfx::engine::util::MaterialTextureCache>(device_, allocator_, cmd_pool_);
+        // The surface world set (tessellation view, snow, precipitation occlusion, trench field):
+        // set 2 of every G-buffer pipeline, set 1 of every shadow pipeline -- see surface_world.h.
+        surface_world_ = std::make_unique<SurfaceWorldData>(device_, allocator_);
 
         shadow_pipeline_ = std::make_unique<coopa::gfx::engine::passes::ShadowPipeline>(
             device_, shadow_target_.dir_render_pass(), shadow_target_.cube_render_pass(),
@@ -1023,12 +1065,26 @@ private:
             config_.shaders("shadow_depth.frag"),
             config_.shaders("shadow_cube.vert"),
             config_.shaders("shadow_cube.frag"),
-            &material_cache_->layout_object());
+            &material_cache_->layout_object(),
+            std::vector<const coopa::gfx::pipeline::DescriptorSetLayout*>{&surface_world_->layout()});
 
         gbuffer_pipeline_ = std::make_unique<coopa::gfx::engine::passes::GBufferPipeline>(
             device_, gbuffer_target_.render_pass(), camera_layout_->handle(), material_cache_->layout(),
             config_.shaders("gbuffer.vert"),
-            config_.shaders("gbuffer.frag"));
+            config_.shaders("gbuffer.frag"),
+            std::vector<VkDescriptorSetLayout>{surface_world_->layout().handle()});
+
+        // Tessellation (MeshRenderer::tessellation): the stock tessellated pipelines, and the
+        // shared pass-through vertex / default control stages every variant's twin uses. A
+        // device without tessellation builds none, and tessellated renderers draw as authored.
+        if (device_.supports_tessellation()) {
+            gbuffer_pipeline_->enable_tessellation(config_.shaders("surface_tess.vert"),
+                                                   config_.shaders("gbuffer.tesc"), config_.shaders("gbuffer.tese"));
+            shadow_pipeline_->enable_tessellation(config_.shaders("surface_tess.vert"),
+                                                  config_.shaders("shadow_depth.tesc"), config_.shaders("shadow_depth.tese"),
+                                                  config_.shaders("shadow_cube.tesc"), config_.shaders("shadow_cube.tese"));
+        }
+        auto opt = [&](const std::string& n) { return n.empty() ? std::string() : config_.shaders(n); };
 
         // Register every Opaque-domain derived shader (e.g. foliage) as a named pipeline
         // variant on both the G-buffer and shadow passes -- see SurfaceShaderDesc's doc on
@@ -1040,18 +1096,25 @@ private:
             // A shader with its own shadow vertex stage may displace over time (foliage wind):
             // its shadow can never be cached as static (see gather_meshes_()'s static_ok).
             if (!sd.shadow_vert.empty()) animated_shadow_shaders_.insert(sd.name);
+            // Tessellated twins: a shader with the stock vertex stage uses the stock evaluation
+            // stages; one with its own vertex stage needs its own `tese` (its hook compiled
+            // against the evaluation backbone) or draws untessellated -- see SurfaceShaderDesc.
+            const std::string tese = !sd.tese.empty() ? sd.tese : (sd.vert.empty() ? "gbuffer.tese" : "");
+            const std::string dir_tese = !sd.shadow_tese.empty() ? sd.shadow_tese : (sd.shadow_vert.empty() ? "shadow_depth.tese" : "");
+            const std::string cube_tese = !sd.shadow_cube_tese.empty() ? sd.shadow_cube_tese
+                                                                       : (sd.shadow_cube_vert.empty() ? "shadow_cube.tese" : "");
             gbuffer_pipeline_->add_variant(
                 sd.name,
                 config_.shaders(sd.vert.empty() ? "gbuffer.vert" : sd.vert),
                 config_.shaders(sd.frag.empty() ? "gbuffer.frag" : sd.frag),
-                sd.cull);
+                sd.cull, opt(sd.tesc), opt(tese));
             shadow_pipeline_->add_variant(
                 sd.name,
                 config_.shaders(sd.shadow_vert.empty() ? "shadow_depth.vert" : sd.shadow_vert),
                 config_.shaders(sd.shadow_frag.empty() ? "shadow_depth.frag" : sd.shadow_frag),
                 config_.shaders(sd.shadow_cube_vert.empty() ? "shadow_cube.vert" : sd.shadow_cube_vert),
                 config_.shaders(sd.shadow_cube_frag.empty() ? "shadow_cube.frag" : sd.shadow_cube_frag),
-                sd.cull);
+                sd.cull, opt(dir_tese), opt(cube_tese));
         }
     }
     /**
@@ -1346,12 +1409,20 @@ private:
         // Register every Transparent-domain derived shader (e.g. water) as a named pipeline
         // variant on the forward transparent pass. (SSR reflects these through the previous
         // frame's final colour, so no separate capture variant is needed.)
+        if (device_.supports_tessellation()) {
+            transparent_pass_->enable_tessellation(config_.shaders("surface_tess.vert"),
+                                                   config_.shaders("transparent.tesc"), config_.shaders("transparent.tese"));
+        }
         for (const auto& sd : config_.surface_shaders.all()) {
             if (sd.domain != coopa::gfx::pipeline::SurfaceShaderDomain::Transparent) continue;
             const std::string vert_spv = config_.shaders(sd.vert.empty() ? "transparent.vert" : sd.vert);
+            // Tessellated twin: see the opaque registration's rule (build_geometry_passes_).
+            const std::string tese = !sd.tese.empty() ? sd.tese : (sd.vert.empty() ? "transparent.tese" : "");
             transparent_pass_->add_variant(
                 sd.name, vert_spv,
-                config_.shaders(sd.frag.empty() ? "transparent.frag" : sd.frag), sd.cull);
+                config_.shaders(sd.frag.empty() ? "transparent.frag" : sd.frag), sd.cull,
+                sd.tesc.empty() ? std::string() : config_.shaders(sd.tesc),
+                tese.empty() ? std::string() : config_.shaders(tese));
         }
 
         // SdfForwardPass shares transparent_pass_'s render pass -- render passes only need to be
@@ -2536,13 +2607,15 @@ private:
             glm::vec4 mra_cutoff;   // metallic, roughness, ao, alpha cutoff
             glm::vec4 emissive;
             glm::vec4 params;       // shader_params
+            glm::uvec4 ext;         // tessellation params + surface flags (MeshGather::ext)
         } camera{};
         /// The subset the shadow passes push -- so casters that differ only in colour still
         /// share one instanced shadow draw.
         struct Shadow {
             glm::vec4 params;
             float     alpha_cutoff;
-            float     pad[3];
+            uint32_t  tess_a, tess_b;   // a tessellated caster batches only with identical settings
+            float     pad;
         } shadow{};
     };
 
@@ -2598,6 +2671,7 @@ private:
         out.bounds.assign(n, WorldBounds{});
         out.valid.assign(n, 0);
         out.lod.assign(n, 0);
+        out.ext.assign(n, glm::uvec4(0u));
         out.instance_idx.assign(n, InstanceStream::kInvalidIndex);
         instance_stream_.begin(frame_slot);
 
@@ -2720,6 +2794,10 @@ private:
             k.camera.params       = m.shader_params;
             k.shadow.params       = m.shader_params;
             k.shadow.alpha_cutoff = m.gpu_alpha_cutoff();
+            out.ext[i]            = surface_ext_(*mr, m);
+            k.camera.ext          = out.ext[i];
+            k.shadow.tess_a       = out.ext[i].x;
+            k.shadow.tess_b       = out.ext[i].y;
         }
         lod_state_.swap(next_lod_state);
 
@@ -2840,6 +2918,9 @@ private:
                 if (mr->get_mesh()->is_dynamic()) return false;
                 const auto it = still_frames_.find(mr);
                 if (it == still_frames_.end() || it->second < kStaticCasterFrames) return false;
+                // A tessellated caster's shape follows the CAMERA (its edge factors), so it is
+                // never the same twice: never cached.
+                if (out.ext[i].x != 0u) return false;
                 return animated_shadow_shaders_.count(out.material(i).shader) == 0;
             };
             // FNV-1a over raw bytes, for the static-content hash.
@@ -2920,6 +3001,7 @@ private:
             stats_total_.shadow_triangles += frame_stats_.shadow_triangles;
             stats_total_.renderers        += frame_stats_.renderers;
             stats_total_.camera_visible   += frame_stats_.camera_visible;
+            stats_total_.tess_draws       += frame_stats_.tess_draws;
             ++stats_frames_;
         }
         frame_stats_ = MeshDrawStats{};
@@ -3624,6 +3706,45 @@ private:
         return *camera_sets_[camera_frame_];
     }
 
+    /** @brief The frame-in-flight slot render() most recently selected (camera_frame_). */
+    uint32_t current_frame_slot_() const { return camera_frame_; }
+
+    /**
+     * @brief A draw item's surface push extension (MeshGather::ext): its renderer's
+     *        tessellation packed into x/y when it is on, the device has tessellation and the
+     *        material's shader has a tessellated pipeline in its pass -- else 0 (drawn as
+     *        authored; each missing case warns once) -- and the snow opt-out in z.
+     */
+    glm::uvec4 surface_ext_(const coopa::gfx::engine::components::MeshRenderer& mr,
+                            const coopa::gfx::engine::components::PBRMaterial& m) {
+        glm::uvec4 ext(0u);
+        if (!m.snow) ext.z |= 1u;
+        const auto& t = mr.effective_tessellation();
+        if (!t.enabled) return ext;
+        if (!device_.supports_tessellation()) {
+            if (!tess_warned_unsupported_) {
+                std::cerr << "[toy::render] tessellation requested but this device has no tessellation stages; drawing untessellated\n";
+                tess_warned_unsupported_ = true;
+            }
+            return ext;
+        }
+        const bool has = m.is_blended() ? (transparent_pass_ && transparent_pass_->has_tessellated(m.shader))
+                                        : gbuffer_pipeline_->has_tessellated(m.shader);
+        if (!has) {
+            if (tess_warned_shaders_.insert(m.shader).second) {
+                std::cerr << "[toy::render] surface shader '" << (m.shader.empty() ? "(stock)" : m.shader)
+                          << "' has no tessellated variant (SurfaceShaderDesc::tese); drawing untessellated\n";
+            }
+            return ext;
+        }
+        const float max_factor = std::clamp(t.max_factor, 1.0f, static_cast<float>(std::max(1u, device_.max_tessellation_level())));
+        ext.x = glm::packHalf2x16(glm::vec2(std::max(t.edge_pixels, 0.5f), max_factor));
+        ext.y = glm::packHalf2x16(glm::vec2(std::max(t.max_distance, 0.0f),
+                                            m.has_displacement_map() ? m.displacement_scale : 0.0f));
+        if (ext.x == 0u) ext.x = 1u;   // never collide with "untessellated"
+        return ext;
+    }
+
     /** @brief Light descriptor set for the slot render() most recently selected -- see
      *  light_datas_'s own doc for why this is per-slot. Mirrors current_camera_set(). */
     const coopa::gfx::pipeline::DescriptorSet& current_light_set() const {
@@ -4249,8 +4370,9 @@ private:
         fs.mesh_renderers.clear();
         fs.sdf_renderers.clear();
         fs.volumes.clear();
-        for (const auto& root : scene.root_objects()) {
-            root->for_each_recursive([&fs](coopa::scene::SceneObject& obj) {
+        // Depth-first, pruning at an inactive object: disabling a parent hides everything under
+        // it (runtime children included -- a water body's tiles, the weather's effects).
+        std::function<void(coopa::scene::SceneObject&)> visit = [&fs, &visit](coopa::scene::SceneObject& obj) {
                 if (!obj.active()) return;
                 bool dir = false, point = false, spot = false, mesh = false, sdf = false, vol = false;
                 for (const auto& comp : obj.components()) {
@@ -4262,8 +4384,9 @@ private:
                     if (!sdf)   if (auto* x = dynamic_cast<SdfRenderer*>(c))         { sdf = true;   fs.sdf_renderers.push_back(x); }
                     if (!vol)   if (auto* x = dynamic_cast<VolumeComponent*>(c))     { vol = true;   fs.volumes.push_back(x); }
                 }
-            });
-        }
+                for (const auto& child : obj.children()) visit(*child);
+        };
+        for (const auto& root : scene.root_objects()) visit(*root);
     }
 
     FrameScene frame_scene_;
@@ -4353,17 +4476,24 @@ private:
                               BindFn&& bind, PushFn&& push) {
         const std::string* last_shader = nullptr;
         bool last_cull = false;
+        bool last_tess = false;
         const void* last_set = nullptr;
         const coopa::gfx::engine::data::Mesh* last_mesh = nullptr;
         for (const MeshBatch& b : batches) {
             const auto* mr = meshes.renderers[b.item];
             const auto& m  = meshes.material(b.item);
-            if (!last_shader || m.shader != *last_shader || m.cull_backfaces != last_cull) {
-                bind(m.shader, m.cull_backfaces);
+            const bool tess = meshes.ext[b.item].x != 0u;
+            if (!last_shader || m.shader != *last_shader || m.cull_backfaces != last_cull || tess != last_tess) {
+                bind(m.shader, m.cull_backfaces, tess);
                 last_shader = &m.shader;
                 last_cull   = m.cull_backfaces;
+                last_tess   = tess;
                 last_set    = nullptr;   // a variant owns its own pipeline layout
+                // Set 1: the surface world (a displacement hook / the tessellation view reads it).
+                cmd.bind_descriptor_set(surface_world_->set(current_frame_slot_()), 1);
             }
+            pc.tess_a = meshes.ext[b.item].x;
+            pc.tess_b = meshes.ext[b.item].y;
             // CUTOUT (AlphaMode::Mask): the mask texture punches through the shadow too, via
             // the same set/cutoff shadow_depth.frag tests against.
             pc.alpha_cutoff = m.gpu_alpha_cutoff();
@@ -4412,7 +4542,7 @@ private:
                 // shadow must displace identically to its G-buffer draw (see
                 // gfx/surface/shadow_vs.glsl's doc), so it binds the SAME named variant.
                 draw_shadow_batches_(cmd, meshes, meshes.cascade[std::min(c, 3u)], pc,
-                    [&](const std::string& shader, bool cull) { shadow_pipeline_->bind_directional(cmd, shader, cull); },
+                    [&](const std::string& shader, bool cull, bool tess) { shadow_pipeline_->bind_directional(cmd, shader, cull, tess); },
                     [&](const auto& p) { shadow_pipeline_->push_directional(cmd, p); });
 
                 if (!sdf_draws.empty()) {
@@ -4635,7 +4765,7 @@ private:
             // Same per-material variant binding as the directional cascades, so a displaced
             // caster's shadow moves exactly as its G-buffer draw does.
             draw_shadow_batches_(cmd, meshes, batches, pc,
-                [&](const std::string& shader, bool cull) { shadow_pipeline_->bind_directional(cmd, shader, cull); },
+                [&](const std::string& shader, bool cull, bool tess) { shadow_pipeline_->bind_directional(cmd, shader, cull, tess); },
                 [&](const auto& p) { shadow_pipeline_->push_directional(cmd, p); });
             if (with_sdf && !sdf_draws.empty()) {
                 sdf_shadow_pass_->bind_directional(cmd);
@@ -4824,6 +4954,9 @@ private:
         // common case) pays for exactly one bind, as before this pass gained variants.
         gbuffer_pipeline_->bind(cmd);
         cmd.bind_descriptor_set(gbuffer_pipeline_->layout(), current_camera_set(), 0);
+        // Set 2: the surface world (snow, occlusion, trenches, tessellation view) -- every
+        // G-buffer variant shares this layout, so one bind serves the whole pass.
+        cmd.bind_descriptor_set(gbuffer_pipeline_->layout(), surface_world_->set(current_frame_slot_()), 2);
         cmd.bind_vertex_buffer(instance_stream_.buffer(), 0, 1);
 
         // Tracks which named variant ("" for stock) is bound, so a run of same-shader batches only
@@ -4837,6 +4970,7 @@ private:
         const bool untextured_view = gview == DebugView::Solid || gview == DebugView::Wireframe;
         std::string last_shader;
         bool last_cull_backfaces = true; // matches the initial pipeline_ bind above (Back)
+        bool last_tess = false;
         bool have_bound = true; // stock, bound just above
 
         const void* last_set = nullptr;
@@ -4848,11 +4982,13 @@ private:
             auto* mr = meshes.renderers[batch.item];
             const auto& mr_mat = meshes.material(batch.item);
 
+            const bool tess = meshes.ext[batch.item].x != 0u;
             if (!have_bound || mr_mat.shader != last_shader ||
-                mr_mat.cull_backfaces != last_cull_backfaces) {
-                gbuffer_pipeline_->bind(cmd, mr_mat.shader, mr_mat.cull_backfaces);
+                mr_mat.cull_backfaces != last_cull_backfaces || tess != last_tess) {
+                gbuffer_pipeline_->bind(cmd, mr_mat.shader, mr_mat.cull_backfaces, tess);
                 last_shader         = mr_mat.shader;
                 last_cull_backfaces = mr_mat.cull_backfaces;
+                last_tess           = tess;
                 have_bound          = true;
                 last_set            = nullptr;
             }
@@ -4866,11 +5002,13 @@ private:
             pc.emissive     = mr_mat.gpu_emissive();
             pc.gfx_time     = surface_gfx_time_();
             pc.gfx_params   = mr_mat.shader_params;
+            pc.surface_ext  = meshes.ext[batch.item];
             gbuffer_pipeline_->push(cmd, pc);
+            if (tess) frame_stats_.tess_draws += 1;
             // Set 1: alpha-mask sampler (white 1x1 fallback unless this is a CUTOUT material
             // with a loaded texture_alpha_mask) -- see MaterialTextureCache.
             // The editor's Solid / Wireframe shading shows material colours, not textures.
-            const auto& set = untextured_view ? material_cache_->untextured_set() : material_cache_->set_for(mr_mat);
+            const auto& set = untextured_view ? material_cache_->untextured_set_for(mr_mat) : material_cache_->set_for(mr_mat);
             if (&set != last_set) {
                 cmd.bind_descriptor_set(gbuffer_pipeline_->layout(), set, 1);
                 last_set = &set;
@@ -5121,6 +5259,7 @@ private:
         // does not change. Switching pipelines mid-run is safe without rebinding sets 0-2 or the
         // extras, since every variant shares the same descriptor set layouts.
         std::string last_mesh_shader;
+        bool last_mesh_tess = false;
 
         for (const auto& item : order) {
             if (item.is_particle) {
@@ -5154,9 +5293,13 @@ private:
                 // transparent_pass_'s layout. Binding descriptor sets first and the pipeline
                 // second, even briefly, resolves set 0 against the wrong layout and is a
                 // real validation error (descriptor type mismatch), not just a style issue.
-                if (last_kind != 0 || mr_mat.shader != last_mesh_shader) {
-                    transparent_pass_->bind(cmd, mr_mat.shader);
+                const glm::uvec4 ext = meshes.ext[item.index];
+                const bool tess = ext.x != 0u;
+                if (tess) frame_stats_.tess_draws += 1;
+                if (last_kind != 0 || mr_mat.shader != last_mesh_shader || tess != last_mesh_tess) {
+                    transparent_pass_->bind(cmd, mr_mat.shader, tess);
                     last_mesh_shader = mr_mat.shader;
+                    last_mesh_tess   = tess;
                 }
 
                 if (last_kind != 0) {
@@ -5197,7 +5340,11 @@ private:
                 glm::vec3 refract_tint  = mr_mat.refraction_tint.r >= 0.0f
                                               ? mr_mat.refraction_tint : config_.refraction_tint;
                 refract_pc.tint_thickness = glm::vec4(refract_tint, refract_thickness);
+                // zw: the packed tessellation params, as raw bits (gfx/surface/transparent_tes.glsl
+                // reads them back with floatBitsToUint) -- never arithmetic on them on the way.
                 refract_pc.ior_flags      = glm::vec4(refract_ior, mr_mat.has_refraction() ? 1.0f : 0.0f, 0.0f, 0.0f);
+                std::memcpy(&refract_pc.ior_flags.z, &ext.x, sizeof(uint32_t));
+                std::memcpy(&refract_pc.ior_flags.w, &ext.y, sizeof(uint32_t));
                 refract_pc.shader_ext0    = mr_mat.shader_params_ext[0];
                 refract_pc.shader_ext1    = mr_mat.shader_params_ext[1];
                 // VERTEX|FRAGMENT, not FRAGMENT alone: TransparentPass's push-constant range
@@ -5205,7 +5352,7 @@ private:
                 // Vulkan requires a push call's stageFlags to match the declared range for
                 // every byte it touches, including this trailing per-object refraction block.
                 cmd.push_constants(transparent_pass_->layout(),
-                                   VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                   coopa::gfx::detail::to_vk(transparent_pass_->push_stages()),
                                    sizeof(coopa::gfx::engine::passes::TransparentPass::PushConstants),
                                    sizeof(TransparentRefractionPushConstants), &refract_pc);
 
@@ -5314,6 +5461,11 @@ private:
     std::unique_ptr<coopa::gfx::pipeline::DescriptorPool>      camera_pool_;
     std::vector<std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>> camera_sets_;
     uint32_t camera_frame_ = 0;
+    /// The surface world set (surface_world.h) and what the engine handed in for it this frame.
+    std::unique_ptr<SurfaceWorldData> surface_world_;
+    SurfaceFrameState surface_state_;
+    bool tess_warned_unsupported_ = false;
+    std::set<std::string> tess_warned_shaders_;
 
     // Per-frame-in-flight, same policy and reason as camera_ubos_/camera_sets_ (file doc, rule
     // 2). This one matters most for dir_light_space_matrix, which update_dir_shadow_matrix_()

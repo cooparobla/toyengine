@@ -130,6 +130,8 @@ struct WeatherState {
     float precipitation = 0.0f;
     float temperature = 18.0f;
     float wetness = 0.0f;             ///< Creeps toward the condition's (wets faster than it dries).
+    float snow_cover = 0.0f;          ///< 0..1 lying snow: builds while it snows below freezing, melts above it.
+    float snow_depth = 0.0f;          ///< Metres of deep snow now (snow_cover * Settings::snow_max_depth).
     glm::vec3 wind{0.0f};             ///< m/s, horizontal, gusts included.
     float fog_density = 0.0f;
     float lightning_flash = 0.0f;     ///< 0..1 while a flash lights the scene.
@@ -221,6 +223,27 @@ public:
 
     // --- Configuration ---
 
+    /** @brief Whether precipitation at this temperature falls (and settles) as snow. */
+    static bool snows(float precipitation, float temperature) { return precipitation > 0.01f && temperature < 1.0f; }
+
+    /**
+     * @brief One step of the lying-snow model: below freezing, snowfall builds cover at
+     *        precipitation / accumulate_time per second; above +1 C it melts at
+     *        1 / melt_time per second at +5 C, scaled with the warmth (rain on snow melts it
+     *        faster still). Between, cover stays as it is.
+     */
+    static float advance_snow_cover(float cover, float precipitation, float temperature, float dt,
+                                    float accumulate_time, float melt_time) {
+        if (dt <= 0.0f) return cover;
+        if (snows(precipitation, temperature)) {
+            cover += dt * precipitation / std::max(accumulate_time, 1e-3f);
+        } else if (temperature > 1.0f) {
+            const float warmth = std::clamp((temperature - 1.0f) / 4.0f, 0.25f, 4.0f) * (1.0f + precipitation);
+            cover -= dt * warmth / std::max(melt_time, 1e-3f);
+        }
+        return std::clamp(cover, 0.0f, 1.0f);
+    }
+
     /**
      * @brief Applies a scene's weather settings. The first call starts the clock at
      *        time_of_day and snaps to `condition`; later calls (live edits) keep the running
@@ -233,12 +256,15 @@ public:
         configured_ = true;
         if (first || old.seed != s.seed) rng_.reseed(s.seed ? s.seed : 0x5eed5u, 7);
         if (first || std::abs(old.time_of_day - s.time_of_day) > 1e-5f) set_time(s.time_of_day);
+        if (first || old.initial_snow_cover != s.initial_snow_cover) snow_cover_ = s.initial_snow_cover;
         if (first || old.condition != s.condition || !settings_.find(target_)) {
             snap_to_(settings_.find(s.condition) ? s.condition : settings_.conditions.front().name);
         }
         if (!s.enabled) state_.enabled = false;
     }
     const Settings& settings() const { return settings_; }
+    /** @brief Sets the lying snow directly (editor preview, gameplay); the weather carries on from it. */
+    void set_snow_cover(float cover) { snow_cover_ = std::clamp(cover, 0.0f, 1.0f); state_.snow_cover = snow_cover_; }
     bool enabled() const { return configured_ && settings_.enabled; }
 
     // --- Control ---
@@ -293,6 +319,13 @@ public:
     /** @brief Edit mode only: lets the clock and the schedule run as they would in play. */
     void set_editor_preview(bool run) { editor_preview_ = run; }
     bool editor_preview() const { return editor_preview_; }
+    /**
+     * @brief Edit mode only: shows the weather's effects (rain, snow, mist...). Off by default --
+     *        in the editor the effects wait for Play, while the sky, sun, fog and lying snow
+     *        still preview. Not saved.
+     */
+    void set_preview_effects(bool show) { preview_effects_ = show; }
+    bool preview_effects() const { return preview_effects_; }
 
     // --- Results ---
 
@@ -324,7 +357,7 @@ public:
         advance_lightning_(dt);
         compute_state_(dt);
         drive_sun_(scene);
-        update_effects_(scene, dt);
+        update_effects_(scene, dt, scene.is_simulating() || preview_effects_);
     }
 
 private:
@@ -399,6 +432,7 @@ private:
         transition_s_ = 0.0f;
         condition_time_ = 0.0f;
         wetness_ = c->wetness;
+        if (snows(c->precipitation, c->temperature)) snow_cover_ = 1.0f;
         pick_duration_(*c);
         if (!was.empty() && was != name) {
             state_.previous = was;
@@ -449,6 +483,8 @@ private:
         // Wetness: soaks in over ~40 s, dries over ~3 min.
         const float tau = m.wetness > wetness_ ? 40.0f : 180.0f;
         wetness_ += (m.wetness - wetness_) * (1.0f - std::exp(-dt / tau));
+        snow_cover_ = advance_snow_cover(snow_cover_, m.precipitation, m.temperature, dt,
+                                         settings_.snow_accumulate_time, settings_.snow_melt_time);
         const float flash = flash_();
 
         WeatherState& s = state_;
@@ -467,6 +503,8 @@ private:
         s.precipitation = m.precipitation;
         s.temperature = m.temperature;
         s.wetness = wetness_;
+        s.snow_cover = snow_cover_;
+        s.snow_depth = snow_cover_ * settings_.snow_max_depth;
         s.wind = glm::vec3(wind, 0.0f);
         s.fog_density = m.fog_density;
         s.lightning_flash = flash;
@@ -624,11 +662,18 @@ private:
         return true;
     }
 
-    void update_effects_(coopa::scene::Scene& scene, float dt) {
-        // Spawn what the blend asks for.
-        for (const auto& [prefab, w] : current_.effects) {
-            if (w > 1e-3f && !effects_.count(prefab)) {
-                if (const EffectSpec* spec = spec_for_(prefab)) spawn_effect_(scene, prefab, *spec);
+    /** @param show False (edit mode without the Preview's effects): no effect exists -- the
+     *         ones there go at once -- but the precipitation map still runs for lying snow. */
+    void update_effects_(coopa::scene::Scene& scene, float dt, bool show) {
+        if (!show) {
+            for (auto& [k, inst] : effects_) if (root_) root_->detach_child(inst.object);
+            effects_.clear();
+        } else {
+            // Spawn what the blend asks for.
+            for (const auto& [prefab, w] : current_.effects) {
+                if (w > 1e-3f && !effects_.count(prefab)) {
+                    if (const EffectSpec* spec = spec_for_(prefab)) spawn_effect_(scene, prefab, *spec);
+                }
             }
         }
         const glm::vec3 eye = viewer_position_();
@@ -641,7 +686,11 @@ private:
         // the drops' own boxes.
         float reach = 24.0f;
         for (const auto& [k, inst] : effects_) for (const auto& d : inst.distant) reach = std::max(reach, d.comp->radius + 1.0f);
-        if (colliding && settings_.surface_collision) {
+        // Lying snow needs the map too: it is what tells the renderer where the sky is open
+        // (snow settles on a roof, not under it -- see render/surface_world.h).
+        const bool snow = snow_cover_ > 0.0f;
+        if (snow) reach = std::max(reach, 32.0f);
+        if ((colliding || snow) && settings_.surface_collision) {
             probe_.update(scene, eye, settings_.ground_height, dt, reach, settings_.ground_height_splashes);
         }
         else if (probe_.field()) probe_.reset();
@@ -763,6 +812,7 @@ private:
     bool phase_known_ = false;
     bool clock_paused_ = false;
     bool editor_preview_ = false;
+    bool preview_effects_ = false;
     SkyFrame sky_;
 
     std::string target_;
@@ -776,6 +826,7 @@ private:
     toy::particles::Rng rng_{0x5eed5u, 7};
     float gust_clock_ = 0.0f;
     float wetness_ = 0.0f;
+    float snow_cover_ = 0.0f;
     float flash_t_ = -1.0f;
     float light_level_ = 1.0f;
 

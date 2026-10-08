@@ -2705,6 +2705,33 @@ struct InputDriver {
 };
 
 /** @brief Play mode: the game runs unfocused until the viewer is clicked; Esc releases, play continues. */
+/** @brief Play mode shows the game: a selection made before Play draws no outline in it. */
+void test_editor_play_hides_selection_outline() {
+    setenv("FIXED_DT", "0", 1);
+    setenv("HOME", tmp_root().c_str(), 1);
+    const fs::path root = fresh_dir("play_outline_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, 4);
+    ObjectId mesh = 0;
+    for (const auto& [id, live] : app.sync().live_objects()) {
+        if (live && live->get_component<coopa::gfx::engine::components::MeshRenderer>()) { mesh = id; break; }
+    }
+    expect(mesh != 0, "play outline: the default project has a mesh object");
+    if (!mesh) return;
+    app.document().select(mesh, false);
+    tick(engine, 2);
+    expect(app.selection_outlines_drawn() == 1, "play outline: the selected object is outlined in the editor");
+    app.play();
+    tick(engine, 3);
+    expect(app.playing() && app.selection_outlines_drawn() == 0, "play outline: none while playing");
+    app.stop();
+    tick(engine, 2);
+    expect(!app.playing() && app.document().is_selected(mesh) && app.selection_outlines_drawn() == 1,
+           "play outline: the selection is kept and outlined again after Stop");
+}
+
 void test_editor_play_input_focus() {
     using coopa::input::Key;
     setenv("FIXED_DT", "0", 1);
@@ -4645,13 +4672,23 @@ void test_editor_weather_world_tab() {
            "...and only those");
     dump(engine, "weather_locked_rows");
 
-    // A condition with effects makes runtime objects: listed, locked, in the Hierarchy.
+    // Effects wait for Play: rain in edit mode spawns nothing...
     w->set_condition("rain", 0.0f);
+    tick(engine, 4);
+    expect(engine.scene().find_object("weather_rain_drops") == nullptr, "edit mode: weather effects wait for Play");
+    // ...until Preview > Show Effects, when they make runtime objects: listed, locked, in the Hierarchy.
+    app.set_weather_preview_effects(true);
     app.clear_test_rects();
     tick(engine, 4);
     expect(engine.scene().find_object("Weather") != nullptr, "rain spawns the runtime Weather root");
     expect(app.test_rect("outliner_runtime").has_value(), "the Hierarchy lists runtime objects under a locked row");
     expect(engine.scene().find_object("weather_rain_drops") != nullptr, "...the rain among them");
+    app.set_weather_preview_effects(false);
+    tick(engine, 2);
+    expect(engine.scene().find_object("weather_rain_drops") == nullptr, "Show Effects off: the effects go at once");
+    app.set_weather_preview_effects(true);
+    app.clear_test_rects();
+    tick(engine, 4);
     {   // In edit mode (no physics running) the precipitation map comes from mesh bounds: the cube.
         const auto& probe = engine.weather()->ground_probe();
         const auto& field = probe.field();
@@ -7737,6 +7774,7 @@ const TestCase kTests[] = {
     {"editor_about_and_logo",                "editor_shell", test_editor_about_and_logo},
     {"editor_mesh_rotate",                   "editor_shell", test_editor_mesh_rotate},
     {"editor_play_input_focus",              "editor_shell", test_editor_play_input_focus},
+    {"editor_play_hides_selection_outline",  "editor_shell", test_editor_play_hides_selection_outline},
     {"editor_blender_chrome",                "editor_shell", test_editor_blender_chrome},
     {"editor_themes",                        "editor_shell", test_editor_themes},
     {"editor_transparency_preview",          "editor_shell", test_editor_transparency_preview},

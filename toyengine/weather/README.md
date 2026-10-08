@@ -62,6 +62,12 @@ scene:
       surface_collision: true   # rain / snow stop on roofs, terrain, water (the precipitation map)
       ground_effects: true      # splashes and spray where rain lands, snow settling (on WeatherSurface objects)
       ground_height_splashes: false # the fallback plane splashes too (scenes without colliders)
+      # Lying snow (see "Snow" below)
+      initial_snow_cover: 0.0   # 0..1 the scene starts with (a snowy start condition starts at 1)
+      snow_accumulate_time: 180 # s of full snowfall below freezing to full cover
+      snow_melt_time: 240       # s full cover takes to melt at +5 C (faster warmer / in rain)
+      snow_max_depth: 0.3       # m of deep snow (`shader: snow` surfaces) at full cover
+      snow_auto_deformers: false # every Rigidbody leaves tracks in deep snow, not only SnowDeformers
       conditions:               # omitted: default_conditions()
         - name: rain
           weight: 1.2           # random schedule: relative chance (0 = only on request)
@@ -204,6 +210,7 @@ const toy::weather::WeatherState& w = toy::weather::current();
 w.hour; w.day; w.phase; w.is_night(); w.daylight; w.sun_direction;
 w.condition; w.previous; w.transition;          // "rain", "overcast", 0..1
 w.cloud_cover; w.precipitation; w.temperature; w.wetness; w.wind; w.lightning_flash;
+w.snow_cover; w.snow_depth;                     // lying snow 0..1, deep-snow metres
 
 // Control and events, through the scene's system.
 toy::weather::WeatherSystem* sys = toy::weather::find(scene);   // or engine.weather()
@@ -211,6 +218,10 @@ sys->set_condition("storm");          // blends over storm's own transition
 sys->set_condition("clear", 5.0f);    // ...or over 5 s (0 = at once)
 sys->set_time(21.5f);                 // jump the clock
 sys->set_clock_paused(true);
+sys->set_snow_cover(1.0f);            // lay snow now (it builds / melts from there)
+
+// How deep the drawn snow is where a character stands (trenches included) -- toyengine/world/snow_system.h.
+if (auto* snow = toy::world::find_snow(scene)) float d = snow->depth_at({x, y}, ground_z);
 coopa::event::ScopedConnection c1 = sys->on_condition_changed.connect_scoped(
     [](const std::string& from, const std::string& to) { /* music, NPC schedules... */ });
 coopa::event::ScopedConnection c2 = sys->on_phase.connect_scoped([](toy::weather::DayPhase p) { /* shops close */ });
@@ -248,6 +259,28 @@ target's profile, over the target's `transition` seconds, eased:
 
 Surface wetness creeps toward the condition's value (about 40 s to soak, 3 min to dry).
 
+## Snow
+
+`WeatherState::snow_cover` (0..1) builds while precipitation falls below +1 C, at
+`precipitation / snow_accumulate_time` per second, holds in a dry frost, and melts above +1 C
+(`snow_melt_time` at +5 C, faster when warmer or raining). Switching to a snowy condition at
+start (or with **Preview**'s instant snap) lays full cover; **Preview > Snow Cover** sets it live.
+
+The renderer reads it through the surface world set (`toyengine/render/surface_world.h`), every
+frame from `Engine::sync_surface_state_()`:
+
+- **Cover layer** (`assets/shaders/gfx/surface/snow.glsl`): every opaque material shows snow on
+  geometry facing up (steeper faces as the cover deepens), with patchy edges, where the sky is
+  open -- the precipitation map's "sky layer", which looks through Rigidbodies, so a passing crate
+  does not leave a bare patch. Materials opt out with `snow: false`.
+- **Deep snow** (`shader: snow`, `assets/shaders/snow_surface.glsl`): raised by
+  `cover * snow_max_depth * open sky`, less the trench field (`toyengine/world/snow_field.h`),
+  which `SnowDeformer` objects -- and with `snow_auto_deformers` every Rigidbody -- press into, and
+  falling snow refills. Gameplay queries mirror the shader on the CPU (`SnowSystem::depth_at()`).
+
+The precipitation map (GroundProbe) keeps running while any snow lies, not only while it falls,
+reaching at least 32 m around the camera; past it, everything counts as open sky.
+
 ## Editor
 
 **Properties > World > Weather & Time of Day:**
@@ -260,7 +293,9 @@ Surface wetness creeps toward the condition's value (about 40 s to soak, 3 min t
   - blend to any condition;
   - fast-forward transitions (**Transition Speed** 1x / 4x / 16x / Instant, or **Finish
     Transition** for the running one);
-  - run the clock and schedule in edit mode, where they otherwise stand still.
+  - run the clock and schedule in edit mode, where they otherwise stand still;
+  - **Show Effects**: rain, snow, mist and the rest in edit mode. Off by default, so the
+    effects wait for Play; the sky, sun, fog and lying snow preview either way.
 - **Clock, Sky, Schedule.** The scene's settings.
 - **Conditions.** The list: add, duplicate, remove, reorder, or reset to stock. Below it is the
   selected condition's profile: schedule, sky and light, fog, atmosphere and effects. Renaming a
@@ -273,8 +308,8 @@ and drags merge into one.
 
 - **The sky.** It is the renderer's three-colour gradient: no sun disc, clouds, stars or moon
   sprite.
-- **Weather on surfaces.** Rain does not darken or wet materials, and snow does not build up on
-  surfaces. `WeatherState::wetness` is there for a surface shader to use.
+- **Wet surfaces.** Rain does not darken or wet materials. `WeatherState::wetness` (and the
+  surface world UBO's `snow.z`) is there for a surface shader to use.
 - **Rain on water.** Rain splashes on a lake's surface, but makes no water ripples (the water's
   ripple rings are few and kept for gameplay wakes).
 - **Precipitation in the distance.** Beyond the wrap box (about 18 m) rain and snow are suggested

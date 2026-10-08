@@ -66,6 +66,7 @@
 #include <toyengine/scene/free_mover.h>
 #include <toyengine/scene/kinematic_control_system.h>
 #include <toyengine/scene/register.h>
+#include <toyengine/world/snow_system.h>
 #include <toyengine/world/terrain_system.h>
 #include <toyengine/water/water_system.h>
 #include <toyengine/particles/particle_system_runner.h>
@@ -213,6 +214,8 @@ public:
         particles::register_particle_components(assets_);
         // "WeatherReactor" (toyengine/weather/): objects switching with the time of day / weather.
         weather::register_weather_components();
+        // "SnowDeformer" (toyengine/world/snow_system.h): objects pressing trails into deep snow.
+        world::register_snow_components();
         // The GPU overload, so font/sprite paths in scene YAML load on demand and
         // FontDefaults::resolve_font is wired for themes. Must precede load_scene(), like
         // every other parser registration above. Its captured device/allocator references
@@ -719,6 +722,9 @@ private:
             auto it = scene_settings_.find(&scene);
             weather::install_weather_system(scene, weather_node_(it != scene_settings_.end() ? it->second : fkyaml::node()));
         }
+        // Order 370: after TransformResolve, so deformers stamp where they are drawn; reads the
+        // weather (40) for the cover and the precipitation map -- see world/snow_system.h.
+        world::install_snow_system(scene);
 
         // Activate TransformSystem before the first drain or render, so the world_matrix()
         // reads below are never asked to resolve a still-dirty transform; then block until
@@ -1051,6 +1057,7 @@ public:
             if (hooks_.pre_render) hooks_.pre_render(dt);
             sync_water_render_state_(scene_mgr_.get_active_scene());
             sync_weather_render_state_(scene_mgr_.get_active_scene());
+            sync_surface_state_(scene_mgr_.get_active_scene());
             {
                 // After the host's pre_render hook, like the water sync: the batches point into
                 // the systems' buffers and go to THIS pipeline.
@@ -1150,6 +1157,50 @@ public:
         c.fog_height_falloff = a.fog_height_falloff;
         c.fog_sun_amount = a.fog_sun_amount;
         c.exposure = weather_base_.exposure * a.exposure_scale;   // scaled, not owned: the row stays editable
+    }
+
+    /**
+     * @brief Hands the renderer this frame's surface world (render/surface_world.h): the lying
+     *        snow, wetness and wind from the weather (or render snow_cover_override), the
+     *        weather's precipitation map as the "open to the sky" test, and the snow trench
+     *        field objects press into.
+     */
+    void sync_surface_state_(coopa::scene::Scene& scene) {
+        render::SurfaceFrameState st;
+        const render::PixelRenderConfig& c = pipeline_->render_config();
+        weather::WeatherSystem* w = weather::find(scene);
+        const bool live = w && w->enabled() && w->state().enabled;
+        if (live) {
+            const weather::WeatherState& ws = w->state();
+            st.snow_cover = ws.snow_cover;
+            st.snow_depth = w->settings().snow_max_depth;
+            st.wetness = ws.wetness;
+            st.wind = ws.wind;
+            if (const auto& field = w->ground_probe().field()) {
+                // Aliasing pointer: the heights live as long as the field the renderer holds.
+                // The sky layer (moving bodies looked through) where the probe made one.
+                st.occl_heights = std::shared_ptr<const std::vector<float>>(
+                    field, field->sky_heights.size() == field->heights.size() ? &field->sky_heights : &field->heights);
+                st.occl_origin = field->origin;
+                st.occl_cell = field->cell;
+                st.occl_nx = field->nx;
+                st.occl_ny = field->ny;
+                st.occl_fallback = field->fallback;
+            }
+        }
+        if (c.snow_cover_override >= 0.0f) st.snow_cover = std::min(c.snow_cover_override, 1.0f);
+        if (const world::SnowSystem* snow = world::find_snow(scene); snow && st.snow_cover > 0.0f) {
+            const world::SnowField& f = snow->field();
+            if (f.focused()) {
+                st.trench_words = f.words().data();
+                st.trench_n = f.n();
+                st.trench_cell = f.cell();
+                st.trench_window = f.window();
+                st.trench_scale = f.scale();
+                st.trench_version = f.version();
+            }
+        }
+        pipeline_->set_surface_state(std::move(st));
     }
 
     void restore_weather_atmosphere_() {
@@ -1921,6 +1972,10 @@ private:
             /* shadow_cube_vert */ "foliage_shadow_cube.vert",
             /* shadow_cube_frag */ "", // reuses stock shadow_cube.frag
             /* cull */ coopa::gfx::CullMode::None, // two-sided card, not a closed opaque solid
+            /* tesc */ "",
+            /* tese */ "foliage.tese",
+            /* shadow_tese */ "foliage_shadow.tese",
+            /* shadow_cube_tese */ "foliage_shadow_cube.tese",
         });
         rc.surface_shaders.add({
             /* name  */ "terrain",
@@ -1954,6 +2009,8 @@ private:
             /* shadow_cube_vert */ "",
             /* shadow_cube_frag */ "",
             /* cull */ coopa::gfx::CullMode::Back,
+            /* tesc */ "",
+            /* tese */ "triplanar.tese",
         });
         rc.surface_shaders.add({
             /* name  */ "editor_paint",   // the toyeditor's Vertex / Weight Paint display -- see
@@ -1967,6 +2024,21 @@ private:
             /* cull */ coopa::gfx::CullMode::Back,
         });
         rc.surface_shaders.add({
+            /* name  */ "snow",   // deep snow: raised by the weather's cover, carved by SnowDeformers
+            /* domain */ coopa::gfx::pipeline::SurfaceShaderDomain::Opaque,   // -- see snow_surface.glsl
+            /* vert  */ "snow.vert",
+            /* frag  */ "snow.frag",
+            /* shadow_vert */ "snow_shadow.vert",   // the raised snow casts the shadow it is drawn with
+            /* shadow_frag */ "",
+            /* shadow_cube_vert */ "snow_shadow_cube.vert",
+            /* shadow_cube_frag */ "",
+            /* cull */ coopa::gfx::CullMode::Back,
+            /* tesc */ "",
+            /* tese */ "snow.tese",
+            /* shadow_tese */ "snow_shadow.tese",
+            /* shadow_cube_tese */ "snow_shadow_cube.tese",
+        });
+        rc.surface_shaders.add({
             /* name  */ "water",
             /* domain */ coopa::gfx::pipeline::SurfaceShaderDomain::Transparent,
             /* vert  */ "water.vert",
@@ -1978,6 +2050,8 @@ private:
             /* cull */ coopa::gfx::CullMode::None, // two-sided: a camera under the surface
                                                    // sees its underside (Snell's window) --
                                                    // see water_surface.glsl.
+            /* tesc */ "water.tesc", // wider cull margin for the waves' reach
+            /* tese */ "water.tese",
         });
 
         return rc;

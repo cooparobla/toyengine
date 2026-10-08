@@ -79,6 +79,8 @@
 #include <toyengine/render/visibility.h>
 #include <toyengine/scene/free_mover.h>
 #include <coopa/yaml/document.h>
+#include <toyengine/world/snow_field.h>
+#include <toyengine/world/snow_system.h>
 #include <toyengine/world/terrain_chunk.h>
 #include <toyengine/water/buoyancy.h>
 #include <toyengine/water/water_body.h>
@@ -8126,6 +8128,214 @@ void test_engine_owns_audio() {
     tick_frames(engine, 3);
 }
 
+
+// -------------------------------------------------------------------------------------------
+// Snow and tessellation. Device-free: the lying-snow model (group "weather"), the trench field
+// and the CPU open-sky mirror (group "world"). Group "render_surface": tess_test and snow_test
+// end to end.
+// -------------------------------------------------------------------------------------------
+
+/** @brief Snow builds while it snows below freezing, holds in the cold, melts in the warmth. */
+void test_snow_cover_accumulates_and_melts() {
+    using toy::weather::WeatherSystem;
+    expect(WeatherSystem::snows(0.5f, -4.0f) && !WeatherSystem::snows(0.5f, 6.0f) && !WeatherSystem::snows(0.0f, -4.0f),
+           "snow: falls as snow only with precipitation below freezing");
+    float c = 0.0f;
+    for (int i = 0; i < 300; ++i) c = WeatherSystem::advance_snow_cover(c, 1.0f, -5.0f, 0.1f, 60.0f, 120.0f);
+    expect_near(c, 0.5f, 1e-3f, "snow: 30 s of full snowfall at a 60 s accumulate_time -> half cover");
+    for (int i = 0; i < 600; ++i) c = WeatherSystem::advance_snow_cover(c, 1.0f, -5.0f, 0.1f, 60.0f, 120.0f);
+    expect_near(c, 1.0f, 1e-6f, "snow: ...and caps at full cover");
+    const float held = WeatherSystem::advance_snow_cover(c, 0.0f, -2.0f, 30.0f, 60.0f, 120.0f);
+    expect_near(held, 1.0f, 1e-6f, "snow: a dry frost keeps it");
+    for (int i = 0; i < 600; ++i) c = WeatherSystem::advance_snow_cover(c, 0.0f, 5.0f, 0.1f, 60.0f, 120.0f);
+    expect_near(c, 0.5f, 1e-3f, "snow: 60 s at +5 C melts half of a 120 s melt_time");
+    const float rain = WeatherSystem::advance_snow_cover(0.5f, 1.0f, 5.0f, 10.0f, 60.0f, 120.0f);
+    const float dry  = WeatherSystem::advance_snow_cover(0.5f, 0.0f, 5.0f, 10.0f, 60.0f, 120.0f);
+    expect(rain < dry, "snow: rain on snow melts it faster");
+
+    // The system: a snowy starting condition starts covered; settings round-trip.
+    coopa::scene::Scene scene("weather");
+    toy::weather::Settings st = toy::weather::parse_settings(weather_test_block(
+        "condition: snowing\nsnow_max_depth: 0.4\nsnow_auto_deformers: true\n"
+        "conditions:\n"
+        "  - {name: snowing, precipitation: 0.8, temperature: -6, transition: 10, duration: [5, 5]}\n"
+        "  - {name: thaw, precipitation: 0.0, temperature: 9, transition: 1, duration: [5, 5]}\n"));
+    expect(st.snow_auto_deformers && std::abs(st.snow_max_depth - 0.4f) < 1e-6f, "snow: settings parse");
+    const toy::weather::Settings back = toy::weather::parse_settings(toy::weather::to_node(st));
+    expect(back.snow_auto_deformers && std::abs(back.snow_max_depth - 0.4f) < 1e-6f &&
+           std::abs(back.snow_accumulate_time - st.snow_accumulate_time) < 1e-4f, "snow: settings round-trip");
+    toy::weather::WeatherSystem w;
+    w.set_settings(st);
+    weather_step(w, scene, 1.0f);
+    expect_near(w.state().snow_cover, 1.0f, 1e-6f, "snow: a snowy starting condition starts covered");
+    expect_near(w.state().snow_depth, 0.4f, 1e-5f, "snow: depth = cover * snow_max_depth");
+    w.set_condition("thaw", 0.0f);
+    weather_step(w, scene, 60.0f, 0.5f);
+    expect(w.state().snow_cover < 0.9f, "snow: it melts in the thaw (" + std::to_string(w.state().snow_cover) + ")");
+    w.set_snow_cover(0.25f);
+    expect_near(w.state().snow_cover, 0.25f, 1e-6f, "snow: set_snow_cover() sets it directly");
+}
+
+/** @brief SnowField: stamping (max-combine, falloff), refill, toroidal scrolling. */
+void test_snow_field_stamp_refill_scroll() {
+    toy::world::SnowField f(64, 0.1f, 1.0f);   // a 6.4 m window
+    expect(f.trench_at({0.0f, 0.0f}) == 0.0f, "snow field: nothing before the first focus");
+    f.set_focus({0.0f, 0.0f});
+    const uint64_t v0 = f.version();
+    f.stamp({1.0f, 1.0f}, 0.4f, 0.2f, 0.5f);
+    expect(f.version() != v0, "snow field: a stamp bumps the version");
+    expect_near(f.trench_at({1.0f, 1.0f}), 0.2f, 0.01f, "snow field: full depth at the centre");
+    expect(f.trench_at({1.0f, 1.3f}) > 0.0f && f.trench_at({1.0f, 1.3f}) < 0.2f, "snow field: eased toward the rim");
+    expect(f.trench_at({1.0f, 1.6f}) == 0.0f, "snow field: nothing past the radius");
+    f.stamp({1.0f, 1.0f}, 0.4f, 0.1f, 0.5f);
+    expect_near(f.trench_at({1.0f, 1.0f}), 0.2f, 0.01f, "snow field: a shallower stamp does not dig deeper (max)");
+    f.refill(0.05f);
+    expect_near(f.trench_at({1.0f, 1.0f}), 0.15f, 0.01f, "snow field: refill fills trenches in");
+    // Scroll 2 m along +x: the trench (still inside) stays; cells that scrolled in are clean.
+    f.set_focus({2.0f, 0.0f});
+    expect_near(f.trench_at({1.0f, 1.0f}), 0.15f, 0.01f, "snow field: a trench still in the window survives a scroll");
+    f.stamp({4.5f, 0.0f}, 0.3f, 0.25f, 0.0f);
+    expect_near(f.trench_at({4.5f, 0.0f}), 0.25f, 0.01f, "snow field: stamps land in scrolled-in cells");
+    // Back again: (4.5, 0) leaves the window (and its cells are reused for x < -1.2).
+    f.set_focus({-2.0f, 0.0f});
+    expect(f.trench_at({4.5f, 0.0f}) == 0.0f, "snow field: outside the window reads 0");
+    expect(f.trench_at({-1.9f, 0.0f}) == 0.0f, "snow field: re-entered cells start clean (no toroidal ghost)");
+    f.set_focus({500.0f, 0.0f});
+    expect(f.trench_at({1.0f, 1.0f}) == 0.0f, "snow field: a jump past the window clears it");
+}
+
+/** @brief The CPU open-sky / deep-snow mirror against a synthetic precipitation map with a roof. */
+void test_snow_open_sky_cpu_mirror() {
+    toy::particles::GroundField g;
+    g.origin = {-8.0f, -8.0f};
+    g.cell = 1.0f;
+    g.nx = g.ny = 16;
+    g.fallback = 0.0f;
+    g.heights.assign(256, 0.0f);
+    for (int j = 9; j < 12; ++j) for (int i = 9; i < 12; ++i) g.heights[static_cast<size_t>(j * 16 + i)] = 2.5f;   // roof over x,y in [1, 4)
+    g.sky_heights = g.heights;
+    g.heights[static_cast<size_t>(4 * 16 + 4)] = 1.0f;   // a crate passing over (-3.5, -3.5): heights only
+    using toy::world::snow_open_sky;
+    expect(snow_open_sky(&g, {-5.0f, -5.0f, 0.0f}, 0.5f) > 0.99f, "snow sky: open ground is open");
+    expect(snow_open_sky(&g, {2.5f, 2.5f, 0.0f}, 0.5f) < 0.01f, "snow sky: ground under the roof is not");
+    expect(snow_open_sky(&g, {2.5f, 2.5f, 2.5f}, 0.5f) > 0.99f, "snow sky: the roof's top is");
+    expect(snow_open_sky(&g, {-3.5f, -3.5f, 0.0f}, 0.5f) > 0.99f, "snow sky: a moving body (heights, not sky_heights) does not shelter");
+    expect(snow_open_sky(nullptr, {2.5f, 2.5f, 0.0f}, 0.5f) == 1.0f, "snow sky: no map = everything open");
+    toy::world::SnowField trench(64, 0.1f, 1.0f);
+    trench.set_focus({0.0f, 0.0f});
+    trench.stamp({-2.0f, 0.0f}, 0.3f, 0.2f, 0.0f);
+    using toy::world::deep_snow_depth;
+    expect_near(deep_snow_depth({-5.0f, 0.0f, 0.0f}, 0.3f, 1.0f, &g, &trench), 0.3f, 1e-4f, "deep snow: full depth in the open");
+    expect_near(deep_snow_depth({-5.0f, 0.0f, 0.0f}, 0.3f, 0.5f, &g, &trench), 0.15f, 1e-4f, "deep snow: scales with cover");
+    expect_near(deep_snow_depth({-2.0f, 0.0f, 0.0f}, 0.3f, 1.0f, &g, &trench), 0.1f, 0.01f, "deep snow: less the trench");
+    expect(deep_snow_depth({2.5f, 2.5f, 0.0f}, 0.3f, 1.0f, &g, &trench) < 1e-3f, "deep snow: none under the roof");
+}
+
+/** @brief tess_test: the tessellated dunes displace (vs. the same renderer untessellated). */
+void test_tessellation_scene_renders() {
+    ScopedEnv fixed_dt("FIXED_DT", "0");
+    ScopedEnv no_input("NO_INPUT", "1");
+    toy::core::AppConfig config = make_test_config("assets/scenes/tests/rendering/tess_test/scene.yaml", 640, 360, 640, 360);
+    config.render.transparency_enabled = true;
+    toy::core::Engine engine(std::move(config));
+    tick_frames(engine, 6);
+    auto* dunes = engine.scene().find_object("dunes_tess");
+    auto* mr = dunes ? dunes->get_component<coopa::gfx::engine::components::MeshRenderer>() : nullptr;
+    expect(mr && mr->tessellation.enabled, "tess_test: dunes_tess is tessellated");
+    if (!mr) return;
+    if (!engine.pipeline().supports_tessellation()) {
+        std::cout << "         (device has no tessellation; skipping the image checks)\n";
+        return;
+    }
+    expect(engine.pipeline().last_frame_stats().tess_draws >= 2u,
+           "tess_test: the dunes and the sea draw tessellated (" + std::to_string(engine.pipeline().last_frame_stats().tess_draws) + ")");
+    const Frame tess = engine.capture_image(true);
+    tick_frames(engine, 1);
+    const long long tess_noise = count_diff(tess, engine.capture_image(true));
+    // The same two-frame check untessellated: the scene's own frame-to-frame noise (temporal
+    // effects run in this config), which tessellation must not add to -- no crack or popping.
+    mr->tessellation.enabled = false;
+    tick_frames(engine, 2);
+    const Frame flat = engine.capture_image(true);
+    tick_frames(engine, 1);
+    const long long flat_noise = count_diff(flat, engine.capture_image(true));
+    expect(tess_noise <= flat_noise + flat_noise / 2 + 200,
+           "tess_test: tessellation adds no flicker (" + std::to_string(tess_noise) + " vs " + std::to_string(flat_noise) + " px)");
+    const long long changed = count_diff(tess, flat, 8);
+    expect_at_least(changed, tess.width * tess.height / 50, "tess_test: tessellation + the displacement map change the dunes");
+    if (changed < tess.width * tess.height / 50) { dump_frame(tess, "tess_on"); dump_frame(flat, "tess_off"); }
+
+    // The sea: its MeshRenderer's checkbox is what tessellates its tiles; the tier only gates.
+    auto* sea = engine.scene().find_object("sea");
+    auto* sea_mr = sea ? sea->get_component<coopa::gfx::engine::components::MeshRenderer>() : nullptr;
+    expect(sea_mr != nullptr, "tess_test: the sea has a MeshRenderer");
+    if (!sea_mr) return;
+    tick_frames(engine, 1);
+    expect(engine.pipeline().last_frame_stats().tess_draws >= 1u, "tess_test: the sea's tiles tessellate (its checkbox is on)");
+    sea_mr->tessellation.enabled = false;
+    tick_frames(engine, 2);
+    expect(engine.pipeline().last_frame_stats().tess_draws == 0u,
+           "tess_test: unchecking the sea's tessellation stops it (" + std::to_string(engine.pipeline().last_frame_stats().tess_draws) + ")");
+    sea_mr->tessellation.enabled = true;
+    engine.render_config().water_quality = toy::render::RenderQuality::Low;
+    tick_frames(engine, 3);
+    expect(engine.pipeline().last_frame_stats().tess_draws == 0u, "tess_test: water_quality low gates the sea's tessellation off");
+    expect(sea_mr->tessellation.enabled, "tess_test: ...without touching its authored checkbox");
+    engine.render_config().water_quality = toy::render::RenderQuality::High;
+    tick_frames(engine, 3);
+
+    // Disabling the sea object hides its tiles (runtime children) with it.
+    const Frame with_sea = engine.capture_image(true);
+    sea->set_active(false);
+    tick_frames(engine, 2);
+    const Frame without_sea = engine.capture_image(true);
+    expect_at_least(count_diff(with_sea, without_sea, 8), with_sea.width * with_sea.height / 40,   // the sea is ~5% of the frame
+                    "tess_test: disabling the sea hides the water");
+    const long long renderers_off = engine.pipeline().last_frame_stats().renderers;
+    sea->set_active(true);
+    tick_frames(engine, 2);
+    expect(engine.pipeline().last_frame_stats().renderers > renderers_off, "tess_test: ...and enabling it shows it again");
+}
+
+/** @brief snow_test: cover, the sheltered ground, trenches from the sled and the dropped ball. */
+void test_snow_scene_renders() {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
+    ScopedEnv no_input("NO_INPUT", "1");
+    toy::core::AppConfig config = make_test_config("assets/scenes/tests/effects/snow_test/scene.yaml", 640, 360, 640, 360);
+    config.render.transparency_enabled = true;
+    toy::core::Engine engine(std::move(config));
+    tick_frames(engine, 180);
+    toy::weather::WeatherSystem* w = engine.weather();
+    expect(w && w->state().enabled && w->state().snow_cover > 0.99f, "snow_test: it lies at full cover");
+    expect_near(engine.pipeline().surface_world_ubo().snow.x, w ? w->state().snow_cover : 0.0f, 1e-5f,
+                "snow_test: the cover reaches the surface world UBO");
+    expect(engine.pipeline().surface_world_ubo().occl.w > 0.5f, "snow_test: ...with the precipitation map");
+    const toy::world::SnowSystem* snow = toy::world::find_snow(engine.scene());
+    expect(snow != nullptr, "snow_test: the snow system is installed");
+    if (!snow || !w) return;
+    expect(engine.pipeline().surface_world_ubo().field.w > 0.5f, "snow_test: ...and the trench field");
+    expect(snow->depth_at({-6.0f, -6.0f}, 0.0f) > 0.25f, "snow_test: deep snow in the open");
+    expect(snow->depth_at({4.0f, 3.0f}, 0.0f) < 0.05f, "snow_test: bare earth under the shelter");
+    // The sled circles (-2, -2) at 2.5 m: some point of that circle is trenched.
+    float deepest = 0.0f;
+    for (int k = 0; k < 64; ++k) {
+        const float a = static_cast<float>(k) / 64.0f * 6.2831853f;
+        deepest = std::max(deepest, snow->trench_at(glm::vec2(-2.0f, -2.0f) + 2.5f * glm::vec2(std::cos(a), std::sin(a))));
+    }
+    expect(deepest > 0.15f, "snow_test: the sled ploughs a trench (" + std::to_string(deepest) + " m)");
+    expect(snow->trench_at({2.5f, -2.5f}) > 0.05f, "snow_test: the dropped ball presses in (auto deformer)");
+    expect(snow->trench_at({-6.0f, 5.0f}) == 0.0f, "snow_test: untouched snow stays untouched");
+
+    // The cover layer on: forcing it off changes the frame a lot.
+    const Frame snowy = engine.capture_image(true);
+    engine.render_config().snow_cover_override = 0.0f;
+    tick_frames(engine, 2);
+    const Frame bare = engine.capture_image(true);
+    expect_at_least(count_diff(snowy, bare, 12), snowy.width * snowy.height / 4, "snow_test: snow_cover_override 0 clears the snow");
+    expect(engine.pipeline().surface_world_ubo().snow.x == 0.0f, "snow_test: ...through the UBO");
+    engine.render_config().snow_cover_override = -1.0f;
+}
+
 const TestCase kTests[] = {
     // --- runtime: packaged-layout detection, user directories and settings (no GPU) ---
     {"runtime_layout_folder_package",              "runtime", test_runtime_layout_folder_package},
@@ -8298,6 +8508,9 @@ const TestCase kTests[] = {
     {"weather_transition_fast_forward",            "weather",   test_weather_transition_fast_forward},
     {"weather_schedule_and_clock_signals",         "weather",   test_weather_schedule_and_clock_signals},
     {"weather_reactor_rules",                      "weather",   test_weather_reactor_rules},
+    {"snow_cover_accumulates_and_melts",           "weather",   test_snow_cover_accumulates_and_melts},
+    {"snow_field_stamp_refill_scroll",             "world",     test_snow_field_stamp_refill_scroll},
+    {"snow_open_sky_cpu_mirror",                   "world",     test_snow_open_sky_cpu_mirror},
     {"particles_mesh_surface_area_weighted",       "particles", test_particles_mesh_surface_area_weighted},
     {"particles_scatter_aligned_to_normals",       "particles", test_particles_scatter_aligned_to_normals},
     {"particles_wrap_and_ground_field",            "particles", test_particles_wrap_and_ground_field},
@@ -8330,6 +8543,8 @@ const TestCase kTests[] = {
     {"water_parallel_matches_serial",              "render_water",    test_water_parallel_matches_serial},
     {"particles_scene_renders",                    "render_particles", test_particles_scene_renders},
     {"weather_scene_renders",                      "render_weather",  test_weather_scene_renders},
+    {"tessellation_scene_renders",                 "render_surface",  test_tessellation_scene_renders},
+    {"snow_scene_renders",                         "render_surface",  test_snow_scene_renders},
     {"rig_clip_drives_hierarchy",                  "rig",             test_rig_clip_drives_hierarchy},
     {"rig_vertex_group_skinning",                  "rig",             test_rig_vertex_group_skinning},
     {"rig_skinned_mesh_follows_animated_bone",     "render_rig",      test_rig_skinned_mesh_follows_animated_bone},
@@ -8358,7 +8573,7 @@ void print_usage() {
                  "  --list           print every test and its group, run nothing\n"
                  "  --group <name>   run one group: math, config, scene, ui, world, water, particles, weather,\n"
                  "                   render_pixel, render_ui, render_material, render_cloth, render_water,\n"
-                 "                   render_particles, render_weather\n"
+                 "                   render_particles, render_weather, render_surface\n"
                  "  -v, --verbose    print every assertion, not just failures\n"
                  "  <substring>      run the tests whose name contains it\n";
 }

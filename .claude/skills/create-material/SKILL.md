@@ -46,8 +46,11 @@ Names are lowercase snake_case. `.yaml` is appended automatically; a missing fil
 | `texture_normal` | path | linear, tangent-space, OpenGL green-up |
 | `texture_metallic_roughness` | path | linear; G = roughness, B = metallic (glTF). MULTIPLIES the scalars, so set the scalars to the maximum you want |
 | `texture_alpha_mask` | path | linear, `.a` only, CUTOUT only |
+| `texture_displacement` | path | linear height map (red, 0..1): the tessellator moves vertices along their normal by it. Only on a renderer with `tessellation: true` (an untessellated mesh has no new vertices to move); the mesh needs real 0..1 UVs (the shared `plane` primitive's UVs are degenerate) |
+| `displacement_scale` | float / 0.05 | metres a white displacement texel moves |
+| `snow` | bool / true | `false` opts the material out of the weather's lying-snow cover layer |
 | `texture_color_space` | `{ <path>: srgb \| linear }` | per-file override when two materials disagree |
-| `shader` | name | a registered surface shader (`triplanar`, `foliage`, `water`, `terrain`, `terrain_styled`, ...) -- see the create-surface-shader skill |
+| `shader` | name | a registered surface shader (`triplanar`, `foliage`, `snow`, `water`, `terrain`, `terrain_styled`, ...) -- see the create-surface-shader skill |
 | `shader_params` | up to 4 floats | the shader's `gfx_params`; meaning is per shader (documented in its .glsl header) |
 | `shader_params_ext` | up to 8 floats | BLEND surface shaders only (`gfx_params_ext0/1`) |
 | `base` | material path | inline maps only: load that file first, then apply this map on top |

@@ -69,6 +69,9 @@ struct GfxSurfaceVertex {
     vec4 custom;   // -> frag_custom (GFX_SURFACE_CUSTOM_VARYING only); starts at vec4(0)
 };
 
+// Untessellated: no mesh level of detail (see transparent_tes.glsl's gfx_tess_lod).
+const vec2 gfx_tess_lod = vec2(0.0);
+
 #ifdef GFX_SURFACE_VERTEX
 void gfx_surface_vertex(inout GfxSurfaceVertex v);
 #else

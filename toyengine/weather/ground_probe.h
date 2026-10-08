@@ -37,6 +37,7 @@
 
 #include <coopa/scene/scene.h>
 #include <gfxcoopa/engine/components/mesh_renderer.h>
+#include <physxcoopa/components/rigidbody.h>
 #include <physxcoopa/system/physics_system.h>
 
 #include <toyengine/particles/particle_system.h>
@@ -93,6 +94,7 @@ public:
             source_ = src;
             fallback_ = fallback;
             heights_.assign(static_cast<size_t>(n) * n, std::numeric_limits<float>::quiet_NaN());
+            sky_.assign(static_cast<size_t>(n) * n, std::numeric_limits<float>::quiet_NaN());
             normals_.assign(static_cast<size_t>(n) * n, glm::vec3(0.0f, 0.0f, 1.0f));
             splash_.assign(static_cast<size_t>(n) * n, 0);
             known_.assign(static_cast<size_t>(n) * n, 0);
@@ -114,6 +116,7 @@ public:
         f->nx = f->ny = n;
         f->fallback = fallback;
         f->heights = heights_;
+        f->sky_heights = sky_;
         f->normals = normals_;
         f->splash = splash_;
         f->fallback_splash = fallback_splash;
@@ -137,6 +140,8 @@ public:
                 f->normals[k] = water_normals_[k];
                 f->splash[k] = water_splash_[k];
             }
+            float& sh = f->sky_heights[k];
+            if (water_[k] > (std::isnan(sh) ? fallback : sh)) sh = water_[k];
         }
         field_ = std::move(f);
     }
@@ -144,6 +149,7 @@ public:
 private:
     void scroll_(const glm::ivec2& origin, int n) {
         std::vector<float> h(static_cast<size_t>(n) * n, std::numeric_limits<float>::quiet_NaN());
+        std::vector<float> sk(static_cast<size_t>(n) * n, std::numeric_limits<float>::quiet_NaN());
         std::vector<glm::vec3> nm(static_cast<size_t>(n) * n, glm::vec3(0.0f, 0.0f, 1.0f));
         std::vector<uint8_t> sp(static_cast<size_t>(n) * n, 0);
         std::vector<char> k(static_cast<size_t>(n) * n, 0);
@@ -153,12 +159,14 @@ private:
                 const int oi = i + d.x, oj = j + d.y;
                 if (oi < 0 || oj < 0 || oi >= n || oj >= n) continue;
                 h[static_cast<size_t>(j) * n + i] = heights_[static_cast<size_t>(oj) * n + oi];
+                sk[static_cast<size_t>(j) * n + i] = sky_[static_cast<size_t>(oj) * n + oi];
                 nm[static_cast<size_t>(j) * n + i] = normals_[static_cast<size_t>(oj) * n + oi];
                 sp[static_cast<size_t>(j) * n + i] = splash_[static_cast<size_t>(oj) * n + oi];
                 k[static_cast<size_t>(j) * n + i] = known_[static_cast<size_t>(oj) * n + oi];
             }
         }
         heights_.swap(h);
+        sky_.swap(sk);
         normals_.swap(nm);
         splash_.swap(sp);
         known_.swap(k);
@@ -177,6 +185,19 @@ private:
             coopa::physx::system::PhysicsSystem::RaycastHit hit;
             const bool found = physics.raycast(ray, hit, ~0u, /*include_triggers=*/false);
             heights_[idx] = found ? hit.point.z : std::numeric_limits<float>::quiet_NaN();
+            // The sky layer looks through moving bodies (a sled, a crate in flight) to the first
+            // surface without a Rigidbody: lying snow must not vanish under whatever passes over it.
+            {
+                bool sky_found = found;
+                coopa::physx::system::PhysicsSystem::RaycastHit sky_hit = hit;
+                for (int pass = 0; pass < 3 && sky_found && moving_(sky_hit.object); ++pass) {
+                    coopa::physx::geometry::Ray below = ray;
+                    below.origin.z = sky_hit.point.z - 0.02f;
+                    below.max_distance = std::max(0.0f, ray.max_distance - (ray.origin.z - below.origin.z));
+                    sky_found = physics.raycast(below, sky_hit, ~0u, /*include_triggers=*/false);
+                }
+                sky_[idx] = sky_found ? sky_hit.point.z : std::numeric_limits<float>::quiet_NaN();
+            }
             normals_[idx] = found && hit.normal.z > 0.05f ? glm::normalize(hit.normal) : glm::vec3(0.0f, 0.0f, 1.0f);
             splash_[idx] = found && takes_splashes(hit.object) ? 1 : 0;
             known_[idx] = 1;
@@ -204,6 +225,7 @@ private:
     void probe_bounds_(coopa::scene::Scene& scene, int n) {
         using coopa::gfx::engine::components::MeshRenderer;
         std::fill(heights_.begin(), heights_.end(), std::numeric_limits<float>::quiet_NaN());
+        std::fill(sky_.begin(), sky_.end(), std::numeric_limits<float>::quiet_NaN());
         std::fill(normals_.begin(), normals_.end(), glm::vec3(0.0f, 0.0f, 1.0f));   // bounds: flat tops
         std::fill(splash_.begin(), splash_.end(), uint8_t(0));
         const float size = static_cast<float>(n) * cell_size;
@@ -215,6 +237,7 @@ private:
             if (!mesh || !tc) continue;
             const render::WorldBounds b = render::world_aabb(tc->transform().get_world_matrix(), mesh->bounds_min(), mesh->bounds_max());
             const bool splashes = takes_splashes(mr->owner);
+            const bool moving = moving_(mr->owner);
             const float top = b.center.z + b.extent.z;
             const int i0 = std::max(0, static_cast<int>(std::floor((b.center.x - b.extent.x - lo.x) / cell_size)));
             const int i1 = std::min(n - 1, static_cast<int>(std::floor((b.center.x + b.extent.x - lo.x) / cell_size)));
@@ -229,6 +252,8 @@ private:
                     if (huge) { if (splashes && std::isnan(heights_[k])) splash_[k] = 1; continue; }
                     float& h = heights_[k];
                     if (std::isnan(h) || top > h) { h = top; splash_[k] = splashes ? 1 : 0; }
+                    float& sh = sky_[k];
+                    if (!moving && (std::isnan(sh) || top > sh)) sh = top;
                 }
             }
         }
@@ -248,7 +273,16 @@ private:
         }
     }
 
+    /** @brief True if `obj` moves (a Rigidbody on it or an ancestor): the sky layer ignores it. */
+    static bool moving_(const coopa::scene::SceneObject* obj) {
+        for (const coopa::scene::SceneObject* o = obj; o; o = o->parent()) {
+            if (const_cast<coopa::scene::SceneObject*>(o)->get_component<coopa::physx::components::RigidbodyComponent>()) return true;
+        }
+        return false;
+    }
+
     std::vector<float> heights_;
+    std::vector<float> sky_;   ///< Like heights_, ignoring moving bodies (see moving_()).
     std::vector<glm::vec3> normals_;
     std::vector<glm::vec3> water_normals_;
     std::vector<uint8_t> splash_, water_splash_;

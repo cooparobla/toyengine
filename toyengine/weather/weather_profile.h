@@ -144,6 +144,13 @@ struct Settings {
     bool ground_height_splashes = false; ///< The ground_height plane takes splashes where no object is below
                                          ///< (objects opt in with a WeatherSurface component).
 
+    // --- Snow cover (WeatherState::snow_cover; drawn by gfx/surface/snow.glsl) ---
+    float snow_accumulate_time = 180.0f; ///< Seconds of full snowfall (precipitation 1, below freezing) to full cover.
+    float snow_melt_time = 240.0f;       ///< Seconds full cover takes to melt at +5 C (faster when warmer).
+    float snow_max_depth = 0.3f;         ///< Metres of deep snow (the `snow` surface shader) at full cover.
+    float initial_snow_cover = 0.0f;     ///< Cover the scene starts with (0..1); a snowy starting condition starts at 1.
+    bool snow_auto_deformers = false;    ///< Every Rigidbody leaves tracks in deep snow, not only SnowDeformer objects (world/snow_system.h).
+
     std::vector<Condition> conditions;   ///< Empty in YAML: default_conditions().
 
     /** @brief The condition named `n`, or null. */
@@ -442,6 +449,11 @@ inline Settings parse_settings(const fkyaml::node& n) {
         st.surface_collision = b(n, "surface_collision", st.surface_collision);
         st.ground_effects = b(n, "ground_effects", st.ground_effects);
         st.ground_height_splashes = b(n, "ground_height_splashes", st.ground_height_splashes);
+        st.snow_accumulate_time = std::max(1.0f, f(n, "snow_accumulate_time", st.snow_accumulate_time));
+        st.snow_melt_time = std::max(1.0f, f(n, "snow_melt_time", st.snow_melt_time));
+        st.snow_max_depth = std::max(0.0f, f(n, "snow_max_depth", st.snow_max_depth));
+        st.initial_snow_cover = std::clamp(f(n, "initial_snow_cover", st.initial_snow_cover), 0.0f, 1.0f);
+        st.snow_auto_deformers = b(n, "snow_auto_deformers", st.snow_auto_deformers);
         if (n.contains("conditions") && n.at("conditions").is_sequence()) {
             for (const auto& c : n.at("conditions")) {
                 Condition cond = parse_condition(c);
@@ -534,6 +546,11 @@ inline fkyaml::node to_node(const Settings& st) {
     n["surface_collision"] = st.surface_collision;
     n["ground_effects"] = st.ground_effects;
     n["ground_height_splashes"] = st.ground_height_splashes;
+    n["snow_accumulate_time"] = out_f(st.snow_accumulate_time);
+    n["snow_melt_time"] = out_f(st.snow_melt_time);
+    n["snow_max_depth"] = out_f(st.snow_max_depth);
+    n["initial_snow_cover"] = out_f(st.initial_snow_cover);
+    n["snow_auto_deformers"] = st.snow_auto_deformers;
     fkyaml::node cs = fkyaml::node::sequence();
     for (const auto& c : st.conditions) cs.get_value_ref<fkyaml::node::sequence_type&>().push_back(to_node(c));
     n["conditions"] = cs;

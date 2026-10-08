@@ -164,6 +164,16 @@
                                                                 "WeatherSurface component (and their children)"), "Ground Effects"),
             with_label(with_tip(f_bool("ground_height_splashes", false), "The Ground Height plane also takes splashes, where no object is below "
                                                                          "(scenes without colliders)"), "Plane Splashes"),
+            with_label(with_tip(f_float("initial_snow_cover", 0.0f, 0.01f, 0.0f, 1.0f), "Lying snow the scene starts with (0..1). A snowy "
+                                                                                        "Start Condition starts fully covered anyway"), "Starting Snow"),
+            with_label(with_tip(f_float("snow_accumulate_time", 180.0f, 1.0f, 1.0f, 100000.0f), "Seconds of full snowfall (below freezing) to full "
+                                                                                                  "cover on open, up-facing surfaces"), "Snow Builds (s)"),
+            with_label(with_tip(f_float("snow_melt_time", 240.0f, 1.0f, 1.0f, 100000.0f), "Seconds full cover takes to melt at +5 C (faster when "
+                                                                                            "warmer or raining)"), "Snow Melts (s)"),
+            with_label(with_tip(f_float("snow_max_depth", 0.3f, 0.01f, 0.0f, 5.0f), "Metres of deep snow at full cover, on `snow`-shader surfaces"),
+                       "Deep Snow (m)"),
+            with_label(with_tip(f_bool("snow_auto_deformers", false), "Every Rigidbody leaves tracks in deep snow, not only objects with a "
+                                                                      "SnowDeformer"), "Auto Snow Tracks"),
         };
     }
     static const std::vector<FieldDesc>& weather_condition_fields_(int part) {
@@ -278,9 +288,9 @@
         if (s.transition < 1.0f) cond = (s.previous.empty() ? std::string("?") : s.previous) + " -> " + s.condition + "  " +
                                        std::to_string(static_cast<int>(s.transition * 100.0f)) + "%";
         ctx.label(std::string(clock) + "   " + cond);
-        char air[96];
-        std::snprintf(air, sizeof(air), "wind %.1f m/s  %.0f C  rain %.0f%%  wet %.0f%%  cloud %.0f%%", s.wind_speed(), s.temperature,
-                      s.precipitation * 100.0f, s.wetness * 100.0f, s.cloud_cover * 100.0f);
+        char air[128];
+        std::snprintf(air, sizeof(air), "wind %.1f m/s  %.0f C  rain %.0f%%  wet %.0f%%  cloud %.0f%%  snow %.0f%%", s.wind_speed(), s.temperature,
+                      s.precipitation * 100.0f, s.wetness * 100.0f, s.cloud_cover * 100.0f, s.snow_cover * 100.0f);
         ctx.label_dim(air);
 
         float hour = w->time_of_day();
@@ -292,6 +302,9 @@
             w->set_condition(names[static_cast<size_t>(idx)]);
         }
         ctx.tooltip("Condition\nBlend the live weather into this condition over its transition (not saved)");
+        float cover = s.snow_cover;
+        if (ctx.slider_float("Snow Cover##wpreview", &cover, 0.0f, 1.0f, "%.2f")) w->set_snow_cover(cover);
+        ctx.tooltip("Snow Cover\nSet the lying snow now; the weather builds or melts it from here (not saved)");
         // Fast-forward: transitions are tens of seconds, which is a long wait to judge a blend.
         static const std::vector<std::string> speeds = {"1x (as authored)", "4x", "16x", "Instant"};
         static const float speed_values[] = {1.0f, 4.0f, 16.0f, 0.0f};
@@ -307,6 +320,9 @@
         bool run = w->editor_preview();
         if (ctx.property_bool("Run Clock & Schedule##wpreview", &run)) w->set_editor_preview(run);
         ctx.tooltip("Run Clock & Schedule\nIn edit mode the clock and the schedule stand still; this runs them as Play would");
+        if (ctx.property_bool("Show Effects##wpreview", &weather_preview_effects_)) w->set_preview_effects(weather_preview_effects_);
+        ctx.tooltip("Show Effects\nRain, snow, mist and the rest in the editor. Off, they wait for Play "
+                    "(the sky, sun, fog and lying snow still show)");
         if (ctx.button("Reset to Scene Start", -1, true, I::Restart)) {
             const toy::weather::Settings st = toy::weather::parse_settings(weather_block_());
             w->set_time(st.time_of_day);

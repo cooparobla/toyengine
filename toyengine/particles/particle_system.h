@@ -115,6 +115,9 @@ struct GroundField {
     float cell = 1.0f;                ///< Cell edge (m).
     int nx = 0, ny = 0;
     std::vector<float> heights;       ///< nx * ny, row-major in y.
+    /// Optional, nx * ny: like `heights` but looking through moving bodies (Rigidbodies) -- what
+    /// the renderer's "open to the sky" test for lying snow uses. Empty = same as heights.
+    std::vector<float> sky_heights;
     std::vector<glm::vec3> normals;   ///< Optional, nx * ny: the surface's normal (empty = straight up).
     /// Optional, nx * ny: 1 where a landing may fire its sub emitters (splashes), 0 where it
     /// lands silently. Empty: everywhere.

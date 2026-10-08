@@ -410,6 +410,11 @@ struct AppConfig {
                 if (r.contains("fog_sun_anisotropy")) config.render.fog_sun_anisotropy = r.at("fog_sun_anisotropy").get_value<float>();
                 if (r.contains("fog_max_opacity"))    config.render.fog_max_opacity    = r.at("fog_max_opacity").get_value<float>();
                 if (r.contains("fog_max_distance"))   config.render.fog_max_distance   = r.at("fog_max_distance").get_value<float>();
+                if (r.contains("snow_cover_override")) {
+                    const auto& v = r.at("snow_cover_override");
+                    if (v.is_float_number()) config.render.snow_cover_override = static_cast<float>(v.get_value<double>());
+                    else if (v.is_integer()) config.render.snow_cover_override = static_cast<float>(v.get_value<int64_t>());
+                }
 
                 // --- Volumetrics (shared march settings; per-volume look lives on VolumeComponent) ---
                 if (r.contains("volumetrics_step_count"))     config.render.volumetrics_step_count     = r.at("volumetrics_step_count").get_value<int>();

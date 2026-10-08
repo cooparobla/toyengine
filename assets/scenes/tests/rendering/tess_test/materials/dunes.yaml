@@ -1,0 +1,7 @@
+# Sand with a dune height map: displaced only where its renderer tessellates (see tess_test).
+albedo: { r: 0.78, g: 0.66, b: 0.45 }
+metallic: 0.0
+roughness: 0.95
+ao: 1.0
+texture_displacement: textures/dunes_height.png
+displacement_scale: 0.9

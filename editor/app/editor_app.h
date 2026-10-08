@@ -285,6 +285,10 @@ public:
     const fs::path& active_asset_path() const { return active_path_; }
     Shading shading() const { return shading_; }
     bool playing() const { return play_scene_ != nullptr; }
+    /** @brief Selection outlines the viewport overlay drew last frame (tests / diagnostics). */
+    int selection_outlines_drawn() const { return selection_outlines_drawn_; }
+    /** @brief World > Weather > Preview's "Show Effects" (edit mode only; not saved). */
+    void set_weather_preview_effects(bool show) { weather_preview_effects_ = show; }
     PropTab prop_tab() const { return prop_tab_; }
     void set_prop_tab(PropTab t) { prop_tab_ = t; }
     /** @brief The navigation gizmo's on-screen rect (canvas pixels), for tests. */
@@ -1306,6 +1310,9 @@ private:
         engine_.render_config().editor_xray_alpha = xray_surfaces_() ? xray_alpha_ : 1.0f;
         if (grid_wanted_) push_grid_lines_();
         if (!playing()) push_particle_gizmos_();
+        // Weather effects wait for Play unless the World tab's Preview shows them -- held here,
+        // not on the system, because a scene rebuild makes a fresh WeatherSystem.
+        if (toy::weather::WeatherSystem* w = live_weather_()) w->set_preview_effects(weather_preview_effects_);
     }
 
     /**
@@ -3419,6 +3426,7 @@ private:
 
     void draw_viewport_overlay_body_(imm::Context& ctx, bool mesh_edit, const ViewProj& vp_ref) {
         const ViewProj* vp = &vp_ref;
+        selection_outlines_drawn_ = 0;
         grid_wanted_ = show_overlays_ && show_grid_ && !(playing() && !mesh_edit) &&
                        active_type_ != AssetType::Material && active_type_ != AssetType::Texture;
         const glm::vec4 accent = ctx.style.object_selected;
@@ -3438,6 +3446,10 @@ private:
             else draw_paint_overlay_(ctx, *vp);
         } else if (asset_view_() && !mesh_edit) {
             // Asset previews (mesh in Object Mode, material lookdev, texture): no scene overlays.
+        } else if (playing() && !mesh_edit) {
+            // Play mode shows the game: no selection outlines, origins, glyphs or wires (like the
+            // grid and the gizmo). The selection is kept and reappears on Stop. (They would also
+            // be wrong: they follow the edit scene's objects, not the running game's.)
         } else if (!mesh_edit) {
             // Wireframe shading: every mesh object's edges. (Not X-Ray: as in Blender, it makes
             // surfaces translucent and draws no wires -- they read as outlines on everything.)
@@ -3477,6 +3489,7 @@ private:
                     for (const auto& c : n.at("children").as_seq()) if (c.contains(kInheritedKey)) outline(SceneDocument::id_of(c), c);
                 };
                 outline(id, *node);
+                ++selection_outlines_drawn_;
                 // Origin dot.
                 if (show_overlays_ && show_origins_) {
                     if (auto o = vp->project(glm::vec3(live->get_transform()->transform().get_world_matrix()[3]))) {
@@ -3962,6 +3975,7 @@ private:
     std::map<std::string, imm::Box> test_rects_;           // Where named widgets were last drawn (tests)
     bool open_add_menu_ = false;
     float outliner_h_ = 260;
+    int selection_outlines_drawn_ = 0;
     std::string outliner_filter_, add_component_filter_, browser_dir_;
     std::vector<std::string> asset_dirs_cache_;
     bool console_show_[3] = {true, true, true};
@@ -3988,6 +4002,7 @@ private:
     ObjectId rename_id_ = 0;
     int rename_frames_ = 0;
     int weather_sel_ = 0;              ///< World > Weather: the condition being edited.
+    bool weather_preview_effects_ = false;   ///< World > Weather > Preview: show effects in edit mode.
     int weather_preview_speed_ = 0;    ///< World > Weather > Preview: transition fast-forward (0 = 1x .. 3 = instant).
     std::string runtime_sel_;          ///< The selected runtime object's ':' path (ui/weather.inl); empty = none.
     int asset_cat_ = 1;

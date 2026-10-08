@@ -1,0 +1,162 @@
+# ocean_demo -- open sea on a deliberately coarse grid, given its wave detail by tessellation.
+#
+# Run: ./build/toyengine assets/scenes/demos/ocean_demo/scene.yaml
+#
+# A 400 m planar WaterBody baked at resolution 48 (~8 m cells): far too coarse to carry 9 m
+# swell on its own. The sea's MeshRenderer turns tessellation on, so near the camera its tiles
+# subdivide and the Gerstner waves keep their crests; the grid falls back to as-baked in the
+# distance. Uncheck it (or run water_quality low / medium, which gate it off) to compare.
+#
+#   sea        the WaterBody, tessellated (sea floor 12 m down: deep blue water, no shore foam)
+#   rock       a rock stack the swell breaks around (contact foam)
+#   buoys      three floaters riding the swell (Buoyancy)
+#
+# Worth sweeping: water_quality=low vs high (the grid as baked vs tessellated), debug_view=normals.
+# Disabling `sea` hides the water and everything floating on it stops floating.
+format: blender
+scene:
+  scene_name: ocean_demo
+  settings:
+    weather:
+      enabled: true
+      time_of_day: 15.5
+      day_length_minutes: 0
+      condition: cloudy
+      schedule: fixed
+  root_objects:
+    - name: sea
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: MeshRenderer
+          affects_reflection_probes: false
+          material: materials/water
+          tessellation: true
+          tess_edge_pixels: 8       # target on-screen edge length (px)
+          tess_max_factor: 16       # cap on splits per grid edge
+          tess_max_distance: 90     # m; beyond, the baked grid
+        - type: WaterBody
+          mode: planar
+          size: { x: 400.0, y: 400.0 }
+          resolution: 48
+          wave_amplitude: 0.45
+          wave_length: 9.0
+          wave_direction: 25.0
+          wave_steepness: 0.35
+          clarity: 4.0
+          max_depth: 20.0
+      children: []
+
+    - name: sea_floor
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: -12.5 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 400.0, y: 400.0, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/sand
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+      children: []
+
+    - name: rock
+      active: true
+      components:
+        - type: Transform
+          position: { x: 14.0, y: 22.0, z: -4.0 }
+          rotation: { x: 8.0, y: -6.0, z: 30.0 }
+          scale: { x: 6.0, y: 4.5, z: 18.0 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/stone
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+      children: []
+
+    - name: buoy_a
+      active: true
+      components:
+        - type: Transform
+          position: { x: -4.0, y: 10.0, z: 0.5 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 0.6, y: 0.6, z: 0.6 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.85, g: 0.25, b: 0.1 }, metallic: 0.0, roughness: 0.5, ao: 1.0 }
+        - type: SphereCollider
+          radius: 1.0
+        - type: Rigidbody
+          mass: 60.0
+        - type: Buoyancy
+      children: []
+    - name: buoy_b
+      active: true
+      components:
+        - type: Transform
+          position: { x: 3.0, y: 16.0, z: 0.5 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 0.6, y: 0.6, z: 0.6 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.95, g: 0.8, b: 0.15 }, metallic: 0.0, roughness: 0.5, ao: 1.0 }
+        - type: SphereCollider
+          radius: 1.0
+        - type: Rigidbody
+          mass: 60.0
+        - type: Buoyancy
+      children: []
+    - name: buoy_c
+      active: true
+      components:
+        - type: Transform
+          position: { x: -10.0, y: 24.0, z: 0.5 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 0.6, y: 0.6, z: 0.6 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.85, g: 0.25, b: 0.1 }, metallic: 0.0, roughness: 0.5, ao: 1.0 }
+        - type: SphereCollider
+          radius: 1.0
+        - type: Rigidbody
+          mass: 60.0
+        - type: Buoyancy
+      children: []
+
+    - name: camera
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -6.0, z: 4.0 }
+          rotation: { x: 78.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Camera
+          main: true
+          projection: Perspective
+          fov: 60.0
+          near_clip_plane: 0.1
+          far_clip_plane: 800.0
+        - type: CameraController
+          mode: orbit
+          target: { x: 0.0, y: 12.0, z: 0.0 }
+          min_distance: 3.0
+          max_distance: 120.0
+      children: []
+
+    - name: sun
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 20.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: DirectionalLight
+          direction: { x: -0.4, y: 0.6, z: -0.5 }
+          color: { r: 1.0, g: 0.95, b: 0.88 }
+          intensity: 1.0
+          cast_shadows: true
+      children: []

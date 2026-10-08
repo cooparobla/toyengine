@@ -32,6 +32,9 @@ layout(set = 0, binding = 0) uniform CameraUBO {
     mat4 view;
     mat4 proj;
     vec3 camera_pos;
+    mat4 prev_view;
+    mat4 prev_proj;
+    vec4 jitter_ndc;   // z: pixel scale (0.5 * render height * proj[1][1]), for tessellation LOD
 } camera;
 
 // Set 1: Light UBO.

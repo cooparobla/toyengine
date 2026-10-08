@@ -5,6 +5,7 @@
 // albedo -- the paint, not the material, is what is being looked at.
 
 #define GFX_SURFACE_FRAGMENT
+#define GFX_SURFACE_NO_SNOW   // the paint, not the weather, is what is being looked at
 #include <gfx/surface/gbuffer_fs.glsl>
 
 void gfx_surface_fragment(inout GfxSurface s) {

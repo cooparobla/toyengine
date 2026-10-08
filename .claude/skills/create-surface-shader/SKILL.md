@@ -63,6 +63,25 @@ Put the hook(s) in `<name>_surface.glsl`, guarded with `#ifdef GFX_SURFACE_VERTE
 `<name>_shadow_cube.vert`** including the same surface file, or shadows stay on the undisplaced
 mesh (the shadow backbones give real position/uv only; normals are zero there).
 
+**Tessellation.** A renderer with `tessellation: true` draws through the tessellated twin of its
+shader, whose vertex hook runs per GENERATED vertex in an evaluation-stage backbone. A shader with
+its own vertex stage needs `.tese` entry points too, or it draws untessellated (warning once):
+
+```glsl
+#version 450
+// <name>.tese -- <name>'s G-buffer evaluation stage.
+#define GFX_SURFACE_VERTEX
+#include <gfx/surface/gbuffer_tes.glsl>     // or shadow_tes (+ #define GFX_SHADOW_CUBE) / transparent_tes
+#include "<name>_surface.glsl"
+```
+
+The hook must be a function of POSITION only (world xy, time, the world set) for anything it adds
+along a direction -- two patches share an edge's vertices but not their normals, so normal-based
+displacement cracks. The surface world set (`gfx/surface/world.glsl`: snow, the precipitation
+"open sky" map, the trench field) is readable in every opaque stage; shadow vertex entry points
+include it themselves (`#define GFX_WORLD_SET 1` before the include). Opaque fragment shaders get
+the snow cover layer automatically; define `GFX_SURFACE_NO_SNOW` before the backbone to opt out.
+
 ## Registration (C++)
 
 1. `toyengine/core/engine.h`, `make_render_config_()`: add an entry next to the others
@@ -78,6 +97,10 @@ mesh (the shadow backbones give real position/uv only; normals are zero there).
        /* shadow_cube_vert */ "<name>_shadow_cube.vert",
        /* shadow_cube_frag */ "",
        /* cull */ coopa::gfx::CullMode::Back,
+       /* tesc */ "",                              // "" = stock control stage
+       /* tese */ "<name>.tese",                   // "" = untessellated (unless vert is stock)
+       /* shadow_tese */ "<name>_shadow.tese",
+       /* shadow_cube_tese */ "<name>_shadow_cube.tese",
    });
    ```
    Logical file names, no `.spv`, no directory. A non-empty `shadow_vert` marks its shadows as
@@ -87,7 +110,7 @@ mesh (the shadow backbones give real position/uv only; normals are zero there).
    `surface_shaders()` and the name to the `f_enum("shader", {...})` list in
    `editor/schema/component_schema.h`. The editor test `editor_material_shader_catalogue`
    fails if the engine and editor lists disagree.
-3. Compilation is automatic: CMake globs top-level `assets/shaders/*.vert|*.frag` into `.spv`
+3. Compilation is automatic: CMake globs top-level `assets/shaders/*.vert|*.frag|*.tesc|*.tese` into `.spv`
    in the build tree, `build/shaders/toyengine_shaders/` (a project's own shaders:
    `build/shaders/project_shaders/`); includes resolve `assets/shaders` then
    `libs/gfxcoopa/assets/shaders`. No CMake edit; `.glsl` files are only included.

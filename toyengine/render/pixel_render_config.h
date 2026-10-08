@@ -954,6 +954,14 @@ struct PixelRenderConfig {
                                             evaluated at -- prevents a hard seam where a grazing near-horizon ray's apparent
                                             distance blows up against an otherwise-unfogged sky. */
 
+    /**
+     * Lying snow (0..1) every opaque surface shows on its open, up-facing parts -- see
+     * gfx/surface/snow.glsl. Negative (the default): the scene's weather decides
+     * (WeatherState::snow_cover, none without weather). 0..1 forces it, for scenes without
+     * weather and for tests. Runtime.
+     */
+    float     snow_cover_override = -1.0f;
+
     // --- Volumetrics (raymarched LOCAL volumes; see gfxcoopa's VolumetricsPass) ---
     // Only genuinely SHARED march settings live here. Everything about how a volume
     // looks -- density, noise, advection, colour -- is per-volume and lives on

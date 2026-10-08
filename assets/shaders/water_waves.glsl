@@ -46,9 +46,22 @@ float water_wave_distance_fade(float lambda, float distance) {
     return 1.0 - t * t * (3.0 - 2.0 * t);
 }
 
+/// TESSELLATED water only -- a visual LOD with no C++ counterpart (buoyancy keeps every wave;
+/// the difference lives where the camera is too far to judge it). How much of a wave of
+/// wavelength `lambda` the tessellated mesh at `distance` can carry: the tessellator aims at a
+/// vertex spacing of lod.x metres per metre of distance, and a wave needs ~3-6 vertices a period
+/// to keep its shape; past ~0.55-0.8 of the tessellation range (lod.y) the mesh hands back to the
+/// baked grid, so every wave is gone by then. A function of the position alone, so tiles and
+/// patches that share an edge displace it identically. lod.y <= 0: no mesh fade.
+float water_wave_mesh_fade(float lambda, float distance, vec2 lod) {
+    if (lod.y <= 0.0) return 1.0;
+    float s = lod.x * max(distance, 0.05);
+    return smoothstep(3.0 * s, 6.0 * s, lambda) * (1.0 - smoothstep(0.55 * lod.y, 0.8 * lod.y, distance));
+}
+
 /// Sum of the derived Gerstner waves at undisplaced world XY `p`, seen from `distance` metres
-/// (0 = no fade). C++: evaluate(const WaveSet&, ...).
-WaterWave water_gerstner(vec4 base, vec2 p, float t, float atten, float distance) {
+/// (0 = no fade). `lod`: see water_wave_mesh_fade() (vec2(0) = none). C++: evaluate(const WaveSet&, ...).
+WaterWave water_gerstner(vec4 base, vec2 p, float t, float atten, float distance, vec2 lod) {
     WaterWave w;
     w.displacement = vec3(0.0);
     w.normal = vec3(0.0, 0.0, 1.0);
@@ -60,7 +73,7 @@ WaterWave water_gerstner(vec4 base, vec2 p, float t, float atten, float distance
     float crest = 0.0;
     for (int i = 0; i < WATER_WAVE_COUNT; ++i) {
         float lambda = wavelength * WATER_WAVE_LENGTH_RATIO[i];
-        float fade   = water_wave_distance_fade(lambda, distance);
+        float fade   = water_wave_distance_fade(lambda, distance) * water_wave_mesh_fade(lambda, distance, lod);
         if (fade <= 0.0) continue;
         float amp    = amplitude * WATER_WAVE_AMP_RATIO[i] * atten * fade;
         float angle  = direction + WATER_WAVE_ANGLE_OFFSET[i];
@@ -84,6 +97,30 @@ WaterWave water_gerstner(vec4 base, vec2 p, float t, float atten, float distance
     w.normal = normalize(vec3(-n_acc.x, -n_acc.y, 1.0 - n_acc.z));
     w.crest  = clamp(crest, 0.0, 1.0);
     return w;
+}
+WaterWave water_gerstner(vec4 base, vec2 p, float t, float atten, float distance) {
+    return water_gerstner(base, p, t, atten, distance, vec2(0.0));
+}
+
+/// The slope (dz/dx, dz/dy) of what water_wave_mesh_fade() took OUT of the tessellated mesh at
+/// world XY `p`: the fragment stage shades it back in, so the waves the far mesh cannot hold
+/// still read in the lighting. Zero where the mesh carries everything.
+vec2 water_gerstner_residual_slope(vec4 base, vec2 p, float t, float distance, vec2 lod) {
+    vec2 slope = vec2(0.0);
+    float amplitude = base.x, wavelength = base.y, direction = base.z;
+    if (lod.y <= 0.0 || amplitude <= 1e-5 || wavelength <= 1e-3) return slope;
+    for (int i = 0; i < WATER_WAVE_COUNT; ++i) {
+        float lambda = wavelength * WATER_WAVE_LENGTH_RATIO[i];
+        float keep   = water_wave_distance_fade(lambda, distance) * (1.0 - water_wave_mesh_fade(lambda, distance, lod));
+        if (keep <= 0.0) continue;
+        float amp    = amplitude * WATER_WAVE_AMP_RATIO[i] * keep;
+        float angle  = direction + WATER_WAVE_ANGLE_OFFSET[i];
+        vec2  d      = vec2(cos(angle), sin(angle));
+        float k      = WATER_TWO_PI / lambda;
+        float f      = k * dot(d, p) - sqrt(WATER_GRAVITY * k) * t + WATER_WAVE_PHASE_OFFSET[i];
+        slope += d * (k * amp * cos(f));
+    }
+    return slope;
 }
 
 #endif // TOY_WATER_WAVES_GLSL

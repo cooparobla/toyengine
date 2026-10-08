@@ -206,9 +206,14 @@ inline const std::vector<FieldDesc>& material_fields() {
         with_label(f_asset("texture_normal", "textures", ".png"), "Normal map"),
         with_label(f_asset("texture_metallic_roughness", "textures", ".png"), "Metal/rough map"),
         with_label(f_asset("texture_alpha_mask", "textures", ".png"), "Alpha mask"),
+        with_tip(with_label(f_asset("texture_displacement", "textures", ".png"), "Displacement map"),
+                 "Height map (red channel) the tessellator moves vertices along their normal by; only on a "
+                 "renderer with tessellation"),
+        with_tip(f_float("displacement_scale", 0.05f, 0.005f, -10.0f, 10.0f), "Metres a white displacement texel moves"),
+        with_tip(f_bool("snow", true), "Lying snow settles on this material's open, up-facing surfaces when the weather has it"),
         // Drawn by draw_material_block()'s Shader section (named per-shader params), not as
         // plain fields -- listed here so they count as known material keys and overrides.
-        f_enum("shader", {"", "triplanar", "foliage", "water"}),
+        f_enum("shader", {"", "triplanar", "foliage", "snow", "water"}),
         [] { FieldDesc f; f.key = "shader_params"; f.kind = FieldKind::Vec4; f.speed = 0.01f; return f; }(),
     };
     return fields;
@@ -251,6 +256,7 @@ inline const std::vector<SurfaceShaderInfo>& surface_shaders() {
             {"Wind dir X", 1.0f, -1.0f, 1.0f, 0.01f, {}},
             {"Wind dir Y", 0.35f, -1.0f, 1.0f, 0.01f, {}},
         }},
+        {"snow", "Deep snow", false, "Raised by the weather's lying snow, carved by SnowDeformers. Give the renderer tessellation.", false, {}},
         {"water", "Water", true, "Waves, depth colour and foam. Needs a WaterBody on the object.", true, {}},
     };
     return shaders;
@@ -285,6 +291,11 @@ inline std::map<std::string, ComponentSchema>& schema_table_() {
             with_tip(f_float("lod_bias", 1.0f, 0.01f, 0.0f, 100.0f), "Multiplier on the LOD switch distances (1 = as authored)"),
             f_bool("lods_enabled", true),
             f_bool("affects_reflection_probes", true),
+            with_tip(f_bool("tessellation", false), "Subdivide near the camera on the GPU (ocean planes, terrain, deep snow): the "
+                                                     "material's displacement map and surface shader act on the new vertices"),
+            with_tip(f_float("tess_edge_pixels", 6.0f, 0.1f, 0.5f, 256.0f), "Tessellation: target edge length on screen (px); smaller = denser"),
+            with_tip(f_float("tess_max_factor", 16.0f, 0.1f, 1.0f, 64.0f), "Tessellation: most splits per edge"),
+            with_tip(f_float("tess_max_distance", 60.0f, 0.5f, 0.0f, 10000.0f), "Tessellation: beyond this (m) the mesh is drawn as authored"),
         }});
         add({"Camera", "Rendering", {
             f_bool("main", true, true),
@@ -570,6 +581,12 @@ inline std::map<std::string, ComponentSchema>& schema_table_() {
         add({"WeatherSurface", "Effects", {
             with_tip(f_bool("splashes", true, true), "Rain splashes / sprays and snow settles on this object and its children "
                                                     "(rain still stops on every surface; unmarked ones take it silently)"),
+        }});
+        // toyengine/world/snow_system.h: presses trails into deep snow.
+        add({"SnowDeformer", "Effects", {
+            with_tip(f_float("radius", 0.35f, 0.01f, 0.0f, 20.0f, true), "Radius of the disc pressed into the snow (m)"),
+            with_tip(f_float("depth", -1.0f, 0.01f, -1.0f, 10.0f, true), "Metres pressed in; -1: down to the object's base"),
+            with_tip(f_float("falloff", 0.5f, 0.01f, 0.0f, 1.0f), "0 hard-edged .. 1 a soft bowl"),
         }});
         add({"WeatherDistantLandings", "Effects", {
             with_tip(f_float("radius", 45.0f, 0.5f, 0.0f, 500.0f, true), "Landings (splashes) are shown out to this distance from the camera, "

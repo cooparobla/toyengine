@@ -39,6 +39,7 @@ layout(push_constant) uniform PushConstants {
     vec4  emissive;     // xyz = pre-multiplied emissive radiance, w reserved
     vec4  gfx_time;     // x=time, y=delta_time, z=frame_index, w=spare
     vec4  gfx_params;   // four author-defined floats; see the surface shader's own doc
+    uvec4 surface_ext; // x/y packed tessellation params, z flags (bit 0: no snow), w reserved
 } material;
 
 // See gbuffer_vs.glsl's identical aliases for why these exist: a surface file's
@@ -46,6 +47,11 @@ layout(push_constant) uniform PushConstants {
 // block is named `material` rather than `pc` (shadow_fs.glsl/shadow_cube_fs.glsl's name).
 vec4 gfx_time   = material.gfx_time;
 vec4 gfx_params = material.gfx_params;
+
+// Set 2: the surface world -- see gfx/surface/world.glsl. The snow cover layer below reads it.
+#define GFX_WORLD_SET 2
+#include <gfx/surface/world.glsl>
+#include <gfx/surface/snow.glsl>
 
 // Set 1: material textures. A consumer that passes GBufferPipeline a non-null material_layout
 // must bind all four combined samplers here (see engine::util::MaterialTextureCache, which
@@ -153,6 +159,15 @@ void main() {
     s.uv          = frag_uv;
 
     gfx_surface_fragment(s);
+
+    // Lying snow on the open, up-facing parts (gfx/surface/snow.glsl), over whatever the hook
+    // made -- unless the material (surface_ext.z bit 0) or the shader opts out.
+#ifndef GFX_SURFACE_NO_SNOW
+    if ((material.surface_ext.z & 1u) == 0u && gfx_world.snow.x > 0.0) {
+        vec3 geo_n = normalize(gl_FrontFacing ? frag_world_normal : -frag_world_normal);
+        gfx_snow_apply(s, geo_n);
+    }
+#endif
 
     out_albedo_ao          = vec4(s.albedo, s.ao);
     out_normal_metallic    = vec4(s.normal_ws, s.metallic);

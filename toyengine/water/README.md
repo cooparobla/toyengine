@@ -181,7 +181,21 @@ and the water re-bakes on the next frame. Engine maps the tier to a `WaterSettin
 | Tile LOD bias (> 1 coarsens sooner) | 2 | 1.5 | 1 | 0.5 |
 | Shader detail distance | 40 m | 80 m | 150 m | 300 m |
 | Flow-ripple layers | 1 | 1 | 2 | 2 |
+| Tessellation (where the body's MeshRenderer enables it) | gated off | gated off | allowed | allowed |
 | Physics-aware (stage 2) bakes per frame | 1 | 1 | 2 | 2 |
+
+Tessellation subdivides the render tiles on the GPU so the waves keep their shape where the baked
+grid is too coarse (`scenes/demos/ocean_demo` is a 400 m sea on an 8 m grid). It is the body's own
+choice: `tessellation: true` and the `tess_*` values on its MeshRenderer, copied to every tile.
+Low and Medium switch it off at runtime (`MeshRenderer::tessellation_override`, never saved).
+
+Tessellated water fades each wave out of the mesh once it is shorter than a few of the vertex
+spacings the tessellator aims for at that distance, and fades every wave out before the
+tessellated band hands back to the baked grid (`water_wave_mesh_fade()` in
+`assets/shaders/water_waves.glsl`). The fragment stage shades the left-out waves' slope back in
+per pixel, so the far sea keeps its wave texture with no aliased edge where tessellation ends.
+This is a visual LOD only: buoyancy still floats on every wave, which differs only past roughly
+half the tessellation range.
 
 What is range-limited, and what happens out of range:
 - **Floaters.** Inside `sim_radius` (left only past 1.15× it), a floater gets full pontoon

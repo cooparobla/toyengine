@@ -157,7 +157,7 @@ public:
         // edit mode. Until then bodies bake without them (stage 1) and are re-baked once.
         const bool physics_ready = physics_ != nullptr && simulating && physics_->bound_count() > 0;
 
-        bodies_ = scene.get_components<WaterBody>();
+        refresh_bodies(scene);
         // Stage 1 for anything new, moved, or baked at another grid density: needed to be seen
         // at all, and cheap (no raycasts).
         for (WaterBody* body : bodies_) {
@@ -208,6 +208,10 @@ public:
     void set_settings(const WaterSettings& settings) {
         settings_ = settings;
         while (ripples_.size() > settings_.max_ripples) ripples_.erase(ripples_.begin());
+        for (WaterBody* body : bodies_) {
+            body->tier_tessellates = settings_.tessellate;
+            sync_material(*body);
+        }
     }
     const WaterSettings& settings() const { return settings_; }
 
@@ -239,18 +243,25 @@ public:
         return true;
     }
 
-    /** @brief Copies the owner MeshRenderer's material (and look flags) to every render tile. */
+    /** @brief Copies the owner MeshRenderer's material, look flags and tessellation to every render tile. */
     static void sync_material(WaterBody& body) {
         using coopa::gfx::engine::components::MeshRenderer;
-        if (body.tiles.empty() || !body.owner) return;
+        if (!body.owner) return;
         auto* src = body.owner->get_component<MeshRenderer>();
         if (!src) return;
+        // Tessellation is the owner's (its MeshRenderer checkbox and values); a tier that does
+        // not allow it overrides it off at runtime, leaving the authored block untouched.
+        src->tessellation_override = MeshRenderer::Tessellation{};   // enabled = false
+        src->has_tessellation_override = src->tessellation.enabled && !body.tier_tessellates;
         for (auto& t : body.tiles) {
             auto* mr = t.object ? t.object->get_component<MeshRenderer>() : nullptr;
             if (!mr) continue;
             mr->material = src->material;
             mr->affects_reflection_probes = src->affects_reflection_probes;
             mr->lod_bias = src->lod_bias;
+            mr->tessellation = src->tessellation;
+            mr->tessellation_override = src->tessellation_override;
+            mr->has_tessellation_override = src->has_tessellation_override;
         }
     }
 
@@ -260,7 +271,14 @@ public:
      *        and a query (the editor applies its edits after Scene::update()) must refresh first,
      *        or the query would read a destroyed component. Engine does, before every render.
      */
-    void refresh_bodies(coopa::scene::Scene& scene) { bodies_ = scene.get_components<WaterBody>(); }
+    void refresh_bodies(coopa::scene::Scene& scene) {
+        // A body under a disabled object (its own, or a parent's) is gone: not drawn, not
+        // floating anything, not sampled by rain or queries.
+        bodies_.clear();
+        for (WaterBody* b : scene.get_components<WaterBody>()) {
+            if (b->owner && active_in_hierarchy_(*b->owner)) bodies_.push_back(b);
+        }
+    }
 
     /** @brief Water clock (seconds) -- the time every wave on the CPU is evaluated at. */
     float time() const { return time_; }
@@ -631,6 +649,7 @@ private:
         body.query.build(std::move(wv), indices, &par_verts);
 
         publish_gpu_mesh_(scene, body, world, local_pos, indices, flow, depth, turbulence, grid_res);
+        body.tier_tessellates = settings_.tessellate;
         apply_material_(body);
 
         body.baked_world = world;
@@ -795,6 +814,9 @@ private:
                 auto* mr = object->add_component<MeshRenderer>();
                 mr->material = renderer->material;
                 mr->affects_reflection_probes = renderer->affects_reflection_probes;
+                mr->tessellation = renderer->tessellation;
+                mr->tessellation_override = renderer->tessellation_override;
+                mr->has_tessellation_override = renderer->has_tessellation_override;
                 slot.object = body.owner->add_child(std::move(object));
                 // Stamps the Scene back-pointer onto the new components, as TerrainSystem does.
                 scene.adopt(*slot.object);
@@ -814,6 +836,14 @@ private:
             if (assets_) assets_->unload(coopa::asset::AssetId::from_path(old.asset_id));
         }
         body.tiles = std::move(keep);
+    }
+
+
+    static bool active_in_hierarchy_(const coopa::scene::SceneObject& obj) {
+        for (const coopa::scene::SceneObject* o = &obj; o; o = o->parent()) {
+            if (!o->active()) return false;
+        }
+        return true;
     }
 
     static coopa::gfx::engine::components::MeshRenderer* add_default_renderer_(WaterBody& body) {

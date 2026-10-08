@@ -256,6 +256,77 @@ void test_asset_fidelity_meshes() {
 
 // =====================================================================================
 // Group "document" -- SceneDocument, undo, schemas
+
+/**
+ * @brief SceneDocument's id index (find / parent_of / is_ancestor in O(1)) agrees with a plain
+ *        walk of the tree after every kind of structural change: add (nested), reparent,
+ *        duplicate, delete, undo, redo, a copy of the document, and a save + load.
+ */
+void test_scene_document_id_index_matches_tree() {
+    SceneDocument doc;
+    doc.reset("index");
+    // Expected (id -> parent) from a fresh walk of the document.
+    auto walk = [](const SceneDocument& d) {
+        std::map<ObjectId, ObjectId> parents;
+        std::function<void(const Node&, ObjectId)> rec = [&](const Node& list, ObjectId parent) {
+            if (!list.is_sequence()) return;
+            for (const auto& o : list.as_seq()) {
+                const ObjectId id = SceneDocument::id_of(o);
+                parents[id] = parent;
+                if (o.is_mapping() && o.contains("children")) rec(o.at("children"), id);
+            }
+        };
+        rec(d.root_objects(), 0);
+        return parents;
+    };
+    auto check = [&](const SceneDocument& d, const std::string& when) {
+        const auto parents = walk(d);
+        bool ok = true;
+        for (const auto& [id, parent] : parents) {
+            const Node* n = d.find(id);
+            ok &= n != nullptr && SceneDocument::id_of(*n) == id;
+            ok &= d.parent_of(id).value_or(-1) == parent;
+            for (ObjectId a = parent; a != 0; a = parents.at(a)) ok &= d.is_ancestor(a, id);
+            ok &= d.is_ancestor(id, id);
+        }
+        ok &= d.find(987654321) == nullptr && !d.parent_of(987654321).has_value();
+        expect(ok, "the id index matches the tree " + when);
+    };
+
+    std::vector<ObjectId> roots;
+    for (int i = 0; i < 6; ++i) roots.push_back(doc.add_object(doc.make_object("r" + std::to_string(i))));
+    const ObjectId kid = doc.add_object(doc.make_object("kid"), roots[1]);
+    const ObjectId grandkid = doc.add_object(doc.make_object("grandkid"), kid);
+    check(doc, "after nested adds");
+    doc.reparent(kid, roots[4]);
+    check(doc, "after a reparent");
+    expect(doc.is_ancestor(roots[4], grandkid) && !doc.is_ancestor(roots[1], grandkid), "ancestry follows the reparent");
+    const auto copies = doc.duplicate_objects({roots[4], roots[0]});
+    check(doc, "after a duplicate");
+    expect(copies.size() == 2 && doc.find(copies[0]) && doc.find(copies[1]), "duplicates are findable");
+    doc.delete_objects({roots[2], kid});
+    check(doc, "after a delete");
+    expect(!doc.find(kid) && !doc.find(grandkid), "deleted subtrees are gone from the index");
+    doc.undo();
+    check(doc, "after undo");
+    expect(doc.find(grandkid) && doc.parent_of(grandkid).value_or(0) == kid, "undo brings the subtree back");
+    doc.redo();
+    check(doc, "after redo");
+    // A copy carries no index into the original's tree.
+    SceneDocument copy = doc;
+    copy.delete_objects({roots[0]});
+    check(copy, "in a copy after its own edit");
+    check(doc, "in the original after the copy's edit");
+    expect(doc.find(roots[0]) && !copy.find(roots[0]), "copy and original are independent");
+    // Save + load.
+    const fs::path file = fresh_dir("id_index") / "scene.yaml";
+    doc.save(file);
+    SceneDocument loaded;
+    loaded.load(file);
+    check(loaded, "after a load");
+    expect(loaded.all_ids().size() == doc.all_ids().size(), "a reload keeps every object");
+}
+
 // =====================================================================================
 
 void test_scene_documents_save_load_stable() {
@@ -2437,6 +2508,76 @@ void tick(toy::core::Engine& e, int n) { for (int i = 0; i < n; ++i) e.tick(); }
 ObjectId sphere_id_for_restart(EditorApp& app) {
     for (ObjectId id : app.document().all_ids()) if (get_string(*app.document().find(id), "name") == "Renamed") return id;
     return 0;
+}
+
+/**
+ * @brief Editor frame cost on a large flat scene: nav_open_world's 758 root objects (500 rocks,
+ *        246 agents). Per-frame editor work must stay linear in object count -- O(1) document
+ *        lookups, cached mesh resolution, a virtualized outliner -- or the editor stops being
+ *        usable on real levels long before the renderer cares.
+ */
+void test_editor_large_scene_frame_cost() {
+    setenv("FIXED_DT", "0", 1);
+    setenv("NO_INPUT", "1", 1);
+    setenv("HOME", tmp_root().c_str(), 1);
+    const fs::path root = fresh_dir("large_scene_project");
+    Project project = Project::create(root);
+    const fs::path src = fs::path(ROOT_DIR) / "assets/scenes/tests/navigation/nav_open_world/scene.yaml";
+    const fs::path dst = project.assets() / "scenes/nav_open_world/scene.yaml";
+    fs::create_directories(dst.parent_path());
+    fs::copy_file(src, dst, fs::copy_options::overwrite_existing);
+
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    using clock = std::chrono::steady_clock;
+    auto ms_since = [](clock::time_point t) { return std::chrono::duration<double, std::milli>(clock::now() - t).count(); };
+    auto t_open = clock::now();
+    EditorApp app(engine, project, dst);
+    tick(engine, 1);
+    const double open_ms = ms_since(t_open);
+    expect(app.document().all_ids().size() >= 758, "the large scene opened in the editor");
+    tick(engine, 30);   // past the first frames' asset uploads
+
+    const int frames = 30;
+    auto t_idle = clock::now();
+    tick(engine, frames);
+    const double idle_ms = ms_since(t_idle) / frames;
+
+    // With an object selected the Inspector (Relations, transform, components) is live too.
+    const std::vector<ObjectId> ids = app.document().all_ids();
+    app.document().select(ids[ids.size() / 2]);
+    tick(engine, 2);
+    auto t_sel = clock::now();
+    tick(engine, frames);
+    const double selected_ms = ms_since(t_sel) / frames;
+
+    // Idle again, after the selection: steady state.
+    app.document().clear_selection();
+    tick(engine, 2);
+    auto t_idle2 = clock::now();
+    tick(engine, frames);
+    const double idle2_ms = ms_since(t_idle2) / frames;
+
+    // Play mode: the game (physics, 246 nav agents on two flow fields) under the editor.
+    auto t_play = clock::now();
+    app.play();
+    tick(engine, 1);
+    const double play_start_ms = ms_since(t_play);
+    expect(app.playing(), "the large scene enters play mode");
+    tick(engine, 30);   // the navmesh build and first flow fields
+    auto t_run = clock::now();
+    tick(engine, frames * 2);
+    const double play_ms = ms_since(t_run) / (frames * 2);
+    app.stop();
+    tick(engine, 2);
+
+    std::printf("  large scene (%zu objects): open %.0f ms, idle frame %.2f ms (again %.2f), selected frame %.2f ms, "
+                "play start %.0f ms, play frame %.2f ms\n",
+                ids.size(), open_ms, idle_ms, idle2_ms, selected_ms, play_start_ms, play_ms);
+    expect(play_ms < 40.0, "the large scene plays at an interactive frame rate in the editor");
+    // Generous ceilings: headless frames include the render (~10 ms here); the point is to catch
+    // per-frame work going quadratic in object count again (that was ~800 ms per frame).
+    expect(idle_ms < 25.0 && idle2_ms < 25.0, "an idle editor frame on a 758-object scene stays interactive");
+    expect(selected_ms < 25.0, "an editor frame with a selection stays interactive");
 }
 
 void test_editor_shell_end_to_end() {
@@ -7723,6 +7864,7 @@ const TestCase kTests[] = {
     {"scene_document_random_edits_undo",     "document", test_scene_document_random_edits_undo},
     {"undo_stack_sequence_and_budget",       "document", test_undo_stack_sequence_and_budget},
     {"scene_document_reparent_rules",        "document", test_scene_document_reparent_rules},
+    {"scene_document_id_index",              "document", test_scene_document_id_index_matches_tree},
     {"schema_defaults",                      "document", test_schema_defaults},
     {"snake_case_names",                     "document", test_snake_case_names},
     {"asset_refs_and_rename",                "document", test_asset_refs_and_rename},
@@ -7769,6 +7911,7 @@ const TestCase kTests[] = {
     {"settings_defaults_match_engine",       "config",   test_settings_defaults_match_engine},
     {"render_settings_cover_engine",         "config",   test_render_settings_cover_engine},
     {"editor_shell_end_to_end",              "editor_shell", test_editor_shell_end_to_end},
+    {"editor_large_scene_frame_cost",        "editor_shell", test_editor_large_scene_frame_cost},
     {"material_reference_forms",             "editor_shell", test_material_reference_forms},
     {"editor_real_input_blender_keymap",     "editor_shell", test_editor_real_input_blender_keymap},
     {"editor_about_and_logo",                "editor_shell", test_editor_about_and_logo},

@@ -86,6 +86,7 @@
 #include <fstream>
 #include <functional>
 #include <map>
+#include <tuple>
 #include <unordered_map>
 #include <memory>
 #include <optional>
@@ -647,6 +648,8 @@ public:
         if (!edit_object_) save_mesh();
         force_scene_push_ = true;
         mesh_cache_.clear();
+        mesh_resolve_cache_.clear();
+        stats_cache_.clear();   // mesh totals may have changed
     }
 
     // --- mesh histories ------------------------------------------------------------------
@@ -862,6 +865,8 @@ public:
                          "but hand-authored LOD meshes may be stale.");
             }
             mesh_cache_.clear();
+        mesh_resolve_cache_.clear();
+        stats_cache_.clear();   // mesh totals may have changed
             return true;
         } catch (const std::exception& e) {
             log_error(std::string("Save mesh failed: ") + e.what());
@@ -1135,6 +1140,8 @@ private:
     void rebuild_scene_() {
         stop();   // set_scene() below replaces every engine scene, a playing one included
         mesh_cache_.clear();
+        mesh_resolve_cache_.clear();
+        stats_cache_.clear();   // mesh totals may have changed
         // Composites fall back to the library's active theme when no Theme component is above
         // them; reset it so one file's theme never leaks into the next.
         coopa::ui::ThemeLibrary::instance().set_active(coopa::ui::UITheme::builtin_dark());
@@ -1674,7 +1681,19 @@ private:
             const std::string key = object_mesh_key_(effective_(obj));   // MeshRenderer's, else a WaterBody's (an instance's: its asset's)
             if (key.empty()) return nullptr;
             const fs::path dir = (doc_.path().empty() ? sync_.fallback_path : doc_.path()).parent_path();
-            const std::string resolved = engine_.assets().source().resolve("meshes/" + key + ".yaml", dir.string());
+            // Resolving walks the asset roots with several stat() calls; this runs per object per
+            // frame (overlays, status bar), so remember each (dir, key) -> path that resolved to a
+            // real file. Misses aren't cached, so a mesh created later is still found.
+            std::string resolve_key = dir.string();
+            resolve_key += '\n';
+            resolve_key += key;
+            std::string resolved;
+            if (auto rc = mesh_resolve_cache_.find(resolve_key); rc != mesh_resolve_cache_.end()) {
+                resolved = rc->second;
+            } else {
+                resolved = engine_.assets().source().resolve("meshes/" + key + ".yaml", dir.string());
+                if (coopa::yaml::document_exists(resolved)) mesh_resolve_cache_[resolve_key] = resolved;
+            }
             auto it = mesh_cache_.find(resolved);
             if (it != mesh_cache_.end()) return it->second.mesh.faces.empty() ? nullptr : &it->second;
             CachedMesh cm;
@@ -2965,6 +2984,8 @@ private:
         comp["mesh_path"] = Node(key);
         apply_(doc_.set_component(id, water_ci, comp, "Water grid to mesh", "water_mesh"));
         mesh_cache_.clear();
+        mesh_resolve_cache_.clear();
+        stats_cache_.clear();   // mesh totals may have changed
         log_info("Water grid written to meshes/" + key + ".yaml -- the WaterBody now uses it");
         return key;
     }
@@ -3208,6 +3229,8 @@ private:
             if (!water_idx.empty()) water->set_geometry(water_pos, water_uv, water_idx);
         }
         mesh_cache_.clear();
+        mesh_resolve_cache_.clear();
+        stats_cache_.clear();   // mesh totals may have changed
     }
 
     /**
@@ -3467,7 +3490,10 @@ private:
             if (show_overlays_ && show_glyphs_) {
                 for (const auto& [id, live] : sync_.live_objects()) {
                     const Node* node = doc_.find(id);
-                    if (!node || !live || !live->active() || !live->get_transform() || mesh_for_object_(*node)) continue;
+                    if (!node || !live || !live->active() || !live->get_transform()) continue;
+                    // Mesh objects draw no glyph: tell by their mesh key (pure YAML) before
+                    // paying for the mesh lookup, which only a key-bearing object needs.
+                    if (!object_mesh_key_(effective_(*node)).empty() && mesh_for_object_(*node)) continue;
                     glm::vec4 col(0.02f, 0.02f, 0.02f, 0.9f);
                     if (shading_ == Shading::Wireframe) col = et_.viewport.wire;
                     if (doc_.is_selected(id)) col = doc_.primary() == id ? active_col : accent;
@@ -3996,6 +4022,12 @@ private:
     std::map<ObjectId, DragStart> drag_starts_;
     EditMesh mesh_drag_base_;
     std::map<std::string, CachedMesh> mesh_cache_;
+    std::pair<ObjectId, uint64_t> parent_choices_key_{0, ~0ull};         // Relations > Parent list cache (properties.inl)
+    std::vector<std::string> parent_choice_names_;
+    std::vector<ObjectId> parent_choice_ids_;
+    std::unordered_map<std::string, std::string> mesh_resolve_cache_;   // (dir, mesh key) -> resolved path; see mesh_for_object_()
+    std::string stats_cache_;                                           // see scene_stats_()
+    std::tuple<uint64_t, uint64_t, size_t, size_t> stats_key_{~0ull, 0, 0, 0};
 
     // Hierarchy / browser.
     ObjectId context_target_ = 0;

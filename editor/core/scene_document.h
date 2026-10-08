@@ -33,6 +33,7 @@
 #include <functional>
 #include <map>
 #include <optional>
+#include <unordered_map>
 #include <set>
 #include <string>
 #include <vector>
@@ -72,6 +73,7 @@ public:
         object_asset_ = true;
         Node obj = make_object(name);
         root_objects().as_seq().push_back(obj);
+        ++generation_;
         undo_.clear();
         saved_revision_ = undo_.revision() - 1;   // unsaved: dirty from the start
     }
@@ -86,6 +88,7 @@ public:
         scene["scene_name"] = Node(name);
         scene["root_objects"] = Node::sequence();
         doc_["scene"] = scene;
+        ++generation_;
         path_.clear();
         next_eid_ = 1;
         undo_.clear();
@@ -128,6 +131,7 @@ public:
         path_ = path;
         next_eid_ = 1;
         stamp_ids_(doc_["scene"]["root_objects"]);
+        ++generation_;
         undo_.clear();
         saved_revision_ = undo_.revision();
         selection_.clear();
@@ -189,7 +193,21 @@ public:
     const Node& root_objects() const { return doc_.at("scene").at("root_objects"); }
 
     /** @brief The object node with editor id `id`, or null. */
-    Node* find(ObjectId id) { return find_in_(root_objects(), id); }
+    Node* find(ObjectId id) {
+        // O(1) through the id index outside an edit; inside one the tree is being rearranged,
+        // so walk it (see IdIndex).
+        if (edit_depth_ == 0) {
+            refresh_index_();
+            auto it = index_.nodes.find(id);
+            if (it != index_.nodes.end() && id_of(*it->second) == id) return it->second;
+            // A miss (or a stale entry) falls through to the walk: rare in the per-frame paths
+            // (they look up ids that exist), and a node added behind the index's back is still
+            // found -- the next lookup then rebuilds it.
+        }
+        Node* n = find_in_(root_objects(), id);
+        if (n && edit_depth_ == 0) index_.gen = ~0ull;
+        return n;
+    }
     const Node* find(ObjectId id) const { return const_cast<SceneDocument*>(this)->find(id); }
 
     /** @brief The id of an object node (0 if unstamped). */
@@ -199,6 +217,12 @@ public:
 
     /** @brief The parent object's id (0 for a root object), or nullopt if `id` is unknown. */
     std::optional<ObjectId> parent_of(ObjectId id) const {
+        if (edit_depth_ == 0) {
+            auto* self = const_cast<SceneDocument*>(this);
+            self->refresh_index_();
+            auto it = index_.parents.find(id);
+            if (it != index_.parents.end()) return it->second;
+        }
         ObjectId parent = 0;
         if (find_parent_(root_objects(), id, 0, parent)) return parent;
         return std::nullopt;
@@ -258,7 +282,18 @@ public:
      */
     Change edit(const std::string& label, const std::function<Change(Node& doc)>& fn, const std::string& merge_key = {}) {
         Node before = doc_;
-        Change c = fn(doc_);
+        ++generation_;
+        ++edit_depth_;
+        Change c;
+        try {
+            c = fn(doc_);
+        } catch (...) {
+            --edit_depth_;
+            ++generation_;
+            throw;
+        }
+        --edit_depth_;
+        ++generation_;
         if (c.scope == ChangeScope::None) return c;
         undo_.push(label, std::move(before), doc_, merge_key);
         return c;
@@ -268,11 +303,11 @@ public:
     void end_merge() { undo_.end_merge(); }
 
     Change undo() {
-        if (const Node* prev = undo_.undo()) { doc_ = *prev; prune_selection(); return {ChangeScope::Structure, 0}; }
+        if (const Node* prev = undo_.undo()) { doc_ = *prev; ++generation_; prune_selection(); return {ChangeScope::Structure, 0}; }
         return {};
     }
     Change redo() {
-        if (const Node* next = undo_.redo()) { doc_ = *next; prune_selection(); return {ChangeScope::Structure, 0}; }
+        if (const Node* next = undo_.redo()) { doc_ = *next; ++generation_; prune_selection(); return {ChangeScope::Structure, 0}; }
         return {};
     }
 
@@ -616,6 +651,7 @@ public:
             }
         };
         walk(root_objects());
+        ++generation_;   // rewrote instance children outside edit(): the id index is stale
     }
 
     /** @brief Convenience: reads an object's Transform (position, rotation degrees, scale). */
@@ -700,6 +736,53 @@ private:
         obj["children"] = out;
     }
 
+    /**
+     * @brief id -> object node and id -> parent id, so find()/parent_of()/is_ancestor() don't walk
+     *        the tree: the editor calls them per object per frame (outliner rows, overlays), which
+     *        made every such pass quadratic in object count.
+     *
+     * Valid while `gen == generation_`. generation_ is bumped by everything that can move object
+     * nodes -- edit() (before and after its callback), undo/redo, load, reset -- and the index is
+     * rebuilt lazily by one walk. Inside an edit the tree is being rearranged under the callback,
+     * so lookups walk instead (edit_depth_). A copy of the document never inherits the index (its
+     * pointers would point into the source's tree).
+     */
+    struct IdIndex {
+        std::unordered_map<ObjectId, Node*> nodes;
+        std::unordered_map<ObjectId, ObjectId> parents;
+        uint64_t gen = ~0ull;
+        IdIndex() = default;
+        IdIndex(const IdIndex&) {}
+        IdIndex(IdIndex&&) noexcept {}
+        IdIndex& operator=(const IdIndex&) { invalidate(); return *this; }
+        IdIndex& operator=(IdIndex&&) noexcept { invalidate(); return *this; }
+        void invalidate() {
+            nodes.clear();
+            parents.clear();
+            gen = ~0ull;
+        }
+    };
+
+    void refresh_index_() {
+        if (index_.gen == generation_) return;
+        index_.nodes.clear();
+        index_.parents.clear();
+        index_rec_(root_objects(), 0);
+        index_.gen = generation_;
+    }
+
+    void index_rec_(Node& list, ObjectId parent) {
+        if (!list.is_sequence()) return;
+        for (auto& o : list.as_seq()) {
+            const ObjectId id = id_of(o);
+            if (id != 0) {
+                index_.nodes[id] = &o;
+                index_.parents[id] = parent;
+            }
+            if (o.is_mapping() && o.contains("children")) index_rec_(o["children"], id);
+        }
+    }
+
     Node* find_in_(Node& list, ObjectId id) {
         if (!list.is_sequence()) return nullptr;
         for (auto& o : list.as_seq()) {
@@ -781,6 +864,9 @@ private:
     }
 
     Node doc_ = Node::mapping();
+    IdIndex index_;
+    uint64_t generation_ = 0;
+    int edit_depth_ = 0;
     std::filesystem::path path_;
     ObjectId next_eid_ = 1;
     bool object_asset_ = false;

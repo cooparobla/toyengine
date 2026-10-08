@@ -10,7 +10,8 @@ Parsers: `libs/libcoopa/coopa/scene/scene_loader.h` (Transform, objects),
 `libs/gfxcoopa/gfxcoopa/engine/components/register.h` (rendering),
 `toyengine/scene/register.h` (engine components), `libs/physxcoopa/physxcoopa/physx_yaml.h`
 (physics), `toyengine/particles/particle_yaml.h`, `libs/libcoopa/coopa/animation/animation_yaml.h`,
-`libs/uicoopa/uicoopa/ui_yaml.h` and `builder/ui_composites_yaml.h`, `libs/sfxcoopa/sfxcoopa/sfx_yaml.h`.
+`libs/uicoopa/uicoopa/ui_yaml.h` and `builder/ui_composites_yaml.h`, `libs/sfxcoopa/sfxcoopa/sfx_yaml.h`,
+`libs/physxcoopa/physxcoopa/nav_yaml.h` (navigation).
 When in doubt, open the parser -- it is short and authoritative.
 
 ## Objects
@@ -82,6 +83,29 @@ see create-physics-material).
 | Rigidbody | `mass` (1), `drag` (0), `angular_drag` (0.05), `use_gravity` (true), `is_kinematic` (false), `interpolation` (`Interpolate` / `None`), `freeze_position`/`freeze_rotation` `{x,y,z: bool}`, `velocity`, `angular_velocity` |
 | HingeJoint | `connected_object`, `anchor`, `axis` (0,0,1), `limits { min, max }` (degrees) |
 | Cloth | `resolution {x,y}`, `size {x,y}`, `mass`, `stretch_compliance`, `bend_compliance`, `damping`, `thickness`, `friction`, `gravity_scale`, `wind`, `self_collision`, `anchors [{ object, point, radius }]` and more -- see physx_yaml.h |
+
+## Navigation
+
+Navmesh is built from the scene's colliders (static and kinematic; triggers and dynamic bodies
+skipped) once the scene has a NavAgent. Configure it under `scene.settings.navigation` (or
+config.yaml `navigation:`): `cell_size` (0.25), `cell_height` (0.1), `tile_size` (32),
+`max_slope` (45), `bounds { min, max }` (default: fit colliders), `layers` (physics layers that
+contribute), `agents: [{ name, radius, height, max_climb }]`, `areas: [{ name, cost, id }]`,
+`rebuild_delay`, `max_path_requests_per_frame`, `repath_interval`, `repath_distance`,
+`flow { rebuild_distance, max_distance, wall_penalty, bound_to_followers, mode (auto / exact /
+hierarchical), exact_tile_budget, near_radius, lookahead_tiles, rebuild_interval }`,
+`source_scan_interval`, `build_without_agents`, `debug_draw` (`Mesh`, `Grid`, `Tiles`, `Links`,
+`Paths`, `Flow`, `FlowTiles`, `Agents`, `All`; shows in every debug_view), `debug_flow_stride`.
+For big levels use `cell_size: 0.5`; flow mode `auto` goes hierarchical by itself. Full docs:
+`libs/physxcoopa/physxcoopa/nav/README.md`; example scenes: `nav_test` (A* + flow, small),
+`nav_open_world` (hierarchical flow fields, 400 m).
+
+| Component | Keys (default) |
+|---|---|
+| NavAgent | `agent_type` (first profile), `speed` (3.5), `acceleration` (12), `angular_speed` (720 deg/s), `stopping_distance` (0.15), `slowdown_distance` (1), `radius` (profile's), `separation_weight` (2; 0 = no avoidance), `base_offset` (0; origin height above the floor -- half the body for a centred mesh), `update_rotation` (true), `forward` (`Y` / `-Y` / `X` / `-X`), `avoid_areas` ([names]), `heuristic_weight` (1.1), and ONE target: `destination` (A* to a point), `destination_object` (A*, chasing an object), `flow_target` (object name: shared flow field -- use for crowds). Drives its Transform; don't give it a dynamic Rigidbody |
+| NavModifier | `area` (name/id), `walkable` (true; false = obstacle only), `ignore` (false), `carve` (false; a dynamic body carves while asleep), `apply_to_children` (true) |
+| NavVolume | `size` (1,1,1 full, local), `center`, `area` (`NotWalkable` cuts a hole) |
+| NavLink | `start`, `end` (local space), `bidirectional` (true), `cost` (1), `area`, `snap_radius` (1) |
 
 ## Audio
 

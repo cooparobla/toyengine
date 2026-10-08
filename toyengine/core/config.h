@@ -27,6 +27,7 @@
 
 #include <coopa/scene/config.h>
 #include <physxcoopa/util/physics_settings.h>
+#include <physxcoopa/nav/nav_settings.h>
 #include <toyengine/render/pixel_render_config.h>
 
 namespace toy {
@@ -126,6 +127,9 @@ struct AppConfig {
     AudioConfig                       audio;
     JobsConfig                        jobs;
     coopa::physx::util::PhysicsSettings physics;
+    /// Navigation build + runtime settings (physxcoopa/nav/nav_settings.h). `navigation.enabled`
+    /// false skips the system entirely; a scene with no colliders builds nothing either way.
+    coopa::physx::nav::NavSettings navigation;
 
     /// The document this config was parsed from (config.yaml), kept so a scene's `settings:`
     /// overrides can be layered on at the YAML level -- see with_scene_settings(). Empty for a
@@ -502,6 +506,10 @@ struct AppConfig {
             if (root.contains("physics")) {
                 config.physics = coopa::physx::util::parse_physics_settings(root.at("physics"));
             }
+            // Also physxcoopa-owned. After physics: `layers:` may name physics layers.
+            if (root.contains("navigation")) {
+                config.navigation = coopa::physx::nav::parse_nav_settings(root.at("navigation"), config.physics.layer_names);
+            }
 
             if (root.contains("audio")) {
                 const auto& a = root.at("audio");
@@ -536,7 +544,8 @@ struct AppConfig {
      * @brief This config with a scene's `settings:` overrides applied -- the config a scene
      *        actually runs with.
      *
-     * Scenes may override the `render` and `physics` sections of config.yaml key by key:
+     * Scenes may override the `render`, `physics` and `navigation` sections of config.yaml key
+     * by key:
      * @code
      * scene:
      *   settings:
@@ -546,7 +555,7 @@ struct AppConfig {
      * The merge happens on the documents (config.yaml + overrides, then parsed), not on the
      * parsed structs, so quality presets resolve exactly as if the keys were in config.yaml:
      * a scene overriding `shadow_quality` re-runs that preset beneath config.yaml's own
-     * explicit keys. Only render and physics are taken from the merge; every other section,
+     * explicit keys. Only render, physics and navigation are taken from the merge; every other section,
      * and anything set on this config in code rather than in its source document, is kept.
      * With no overrides this config is returned unchanged.
      */
@@ -564,11 +573,12 @@ struct AppConfig {
         AppConfig out = *this;
         out.render = parsed.render;
         out.physics = parsed.physics;
+        out.navigation = parsed.navigation;
         return out;
     }
 
     /// The config.yaml sections a scene's `settings:` may override.
-    static constexpr const char* kSceneSettingsSections[] = {"render", "physics"};
+    static constexpr const char* kSceneSettingsSections[] = {"render", "physics", "navigation"};
 
     /** @brief True if `settings` overrides at least one key of an overridable section. */
     static bool has_scene_overrides(const fkyaml::node& settings) {

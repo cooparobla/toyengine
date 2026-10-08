@@ -2089,6 +2089,153 @@ void test_kinematic_control_runs_before_physics() {
     }
 }
 
+// --- Navigation ---------------------------------------------------------------------------
+
+/**
+ * @brief The nav_test scene, headless: loads the real scene file (with its own
+ *        `scene.settings.navigation`), runs kinematic movers, physics and navigation for 25 s, and
+ *        checks every station -- A* up stairs/ramp to the deck around the costly mud, a chaser
+ *        re-planning after a moving beacon, a one-way drop link, and 144 mobs on one flow field
+ *        converging on a circling target.
+ */
+void test_nav_test_scene_agents_reach_their_goals() {
+    // Parser lambdas capture the AssetManager by reference, so it must outlive the process's
+    // registrations (later tests in this group may load scenes too).
+    static coopa::asset::AssetManager assets;
+    coopa::physx::register_physics_components(assets);
+    toy::scene::register_scene_components();
+
+    const std::string path = std::string(ROOT_DIR) + "/assets/scenes/tests/navigation/nav_test/scene.yaml";
+    std::ifstream in(path);
+    fkyaml::node root = fkyaml::node::deserialize(in);
+    coopa::physx::nav::NavSettings nav_settings =
+        coopa::physx::nav::parse_nav_settings(root["scene"]["settings"]["navigation"]);
+    coopa::scene::Scene scene = coopa::scene::SceneLoader::load(path);
+    scene.start();
+    toy::scene::install_kinematic_control_system(scene);
+    coopa::physx::system::install_physics_system(scene);
+    auto* nav = coopa::physx::system::install_nav_system(scene, nav_settings);
+    coopa::scene::install_transform_system(scene);
+
+    auto pos = [&](const char* name) {
+        coopa::scene::SceneObject* o = scene.find_object(name);
+        return o ? glm::vec3(o->get_transform()->get_world_matrix()[3]) : glm::vec3(1e9f);
+    };
+    using coopa::physx::components::NavAgentComponent;
+    auto agent = [&](const char* name) { return scene.find_object(name)->get_component<NavAgentComponent>(); };
+
+    const float dt = 1.0f / 60.0f;
+    bool c_used_link = false;
+    bool a_avoided_mud = true;
+    for (int i = 0; i < 60 * 25; ++i) {
+        scene.update(dt);
+        scene.late_update(dt);
+        const auto& pc = agent("courier_c")->path();
+        for (uint8_t f : pc.flags) c_used_link |= (f & coopa::physx::nav::k_path_point_link_start) != 0;
+        glm::vec3 a = pos("courier_a");
+        // The mud is x -6..-1, y 6..16; half a metre in from its edges, so a body brushing the
+        // edge while its path skirts it doesn't count.
+        if (a.x > -5.5f && a.x < -1.5f && a.y > 6.5f && a.y < 15.5f) a_avoided_mud = false;
+    }
+
+    expect(nav->agent_count() == 147, "nav_test: 3 couriers + 144 mobs bound");
+    expect(nav->mesh() != nullptr, "nav_test: the navmesh built from the scene's colliders");
+
+    // courier_a: ground -> deck (z = 3 + base_offset 0.78), never through the mud.
+    expect(agent("courier_a")->arrived(), "nav_test: courier_a arrived");
+    expect(glm::distance(pos("courier_a"), glm::vec3(7.5f, 14.5f, 3.78f)) < 0.4f, "nav_test: courier_a is on the deck at its goal");
+    expect(a_avoided_mud, "nav_test: courier_a detoured around the cost-8 mud");
+    // courier_b: chasing the circling beacon -- it must be up on the deck and close behind it.
+    expect(pos("courier_b").z > 3.5f, "nav_test: courier_b climbed to the deck");
+    expect(glm::distance(glm::vec2(pos("courier_b")), glm::vec2(pos("beacon"))) < 2.5f, "nav_test: courier_b keeps up with the beacon");
+    // courier_c: deck -> ground east, via the one-way drop.
+    expect(c_used_link, "nav_test: courier_c planned through the drop link");
+    expect(agent("courier_c")->arrived() && glm::distance(pos("courier_c"), glm::vec3(19.0f, 13.0f, 0.78f)) < 0.4f,
+           "nav_test: courier_c arrived on the ground east of the deck");
+
+    // Mobs: crowd around the moving target.
+    glm::vec2 t(pos("target"));
+    int near = 0;
+    for (int i = 0; i < 144; ++i) {
+        char name[16];
+        std::snprintf(name, sizeof(name), "mob_%03d", i);
+        glm::vec3 p = pos(name);
+        if (glm::distance(glm::vec2(p), t) < 9.0f) ++near;
+        expect(p.z > 0.5f && p.z < 0.8f, "nav_test: every mob stays on the ground surface");
+    }
+    expect(near >= 120, "nav_test: the mob crowd converged on the circling target");
+    expect(nav->flow_field("target") != nullptr, "nav_test: one shared flow field serves the mobs");
+}
+
+/**
+ * @brief nav_open_world, headless: 246 mobs over a 400 x 400 m world on two hierarchical flow
+ *        fields. The player field must stay hierarchical and integrate only a small fraction of
+ *        the world's tiles while every pack closes on its target -- through the wall's gaps, down
+ *        the mesa's ramps, across the whole map for the scouts.
+ */
+void test_nav_open_world_scene_packs_converge_on_hierarchical_fields() {
+    static coopa::asset::AssetManager assets;
+    coopa::physx::register_physics_components(assets);
+    toy::scene::register_scene_components();
+
+    const std::string path = std::string(ROOT_DIR) + "/assets/scenes/tests/navigation/nav_open_world/scene.yaml";
+    std::ifstream in(path);
+    fkyaml::node root = fkyaml::node::deserialize(in);
+    coopa::physx::nav::NavSettings ns = coopa::physx::nav::parse_nav_settings(root["scene"]["settings"]["navigation"]);
+    coopa::job::JobEngine jobs;
+    coopa::scene::Scene scene = coopa::scene::SceneLoader::load(path);
+    scene.set_job_engine(&jobs);
+    scene.start();
+    toy::scene::install_kinematic_control_system(scene);
+    coopa::physx::system::install_physics_system(scene);
+    auto* nav = coopa::physx::system::install_nav_system(scene, ns);
+    coopa::scene::install_transform_system(scene);
+
+    using coopa::physx::components::NavAgentComponent;
+    struct Mob { coopa::scene::SceneObject* obj; std::string target; float start; glm::vec3 start_pos; };
+    std::vector<Mob> mobs;
+    auto pos = [](coopa::scene::SceneObject* o) { return glm::vec3(o->get_transform()->get_world_matrix()[3]); };
+    for (auto* a : scene.get_components<NavAgentComponent>()) mobs.push_back({a->owner, a->flow_target, 0.0f, pos(a->owner)});
+    expect(mobs.size() == 246, "nav_open_world: 246 mobs");
+
+    const float dt = 1.0f / 60.0f;
+    std::size_t max_active = 0, hier_samples = 0;
+    for (int i = 0; i < 60 * 40; ++i) {
+        scene.update(dt);
+        scene.late_update(dt);
+        if (i == 0) {
+            for (auto& m : mobs) m.start = glm::distance(glm::vec2(pos(m.obj)), glm::vec2(pos(scene.find_object(m.target))));
+        }
+        if (i % 60 == 0) {
+            if (auto f = nav->flow_field("player"); f && f->hierarchical()) {
+                ++hier_samples;
+                max_active = std::max(max_active, f->active_tile_count());
+            }
+        }
+    }
+    const uint32_t tiles = nav->mesh()->params.tile_count();
+    expect(hier_samples >= 30, "nav_open_world: the player field is hierarchical");
+    expect(max_active * 4 < tiles, "nav_open_world: it integrates well under a quarter of the world's tiles");
+    expect(nav->flow_field("outpost") != nullptr, "nav_open_world: the scouts' field exists");
+
+    // Every pack closes on its target.
+    double player_start = 0, player_now = 0, scout_start = 0, scout_now = 0;
+    int on_mesa_start = 0, on_mesa_now = 0, player_n = 0, scout_n = 0;
+    for (auto& m : mobs) {
+        float now = glm::distance(glm::vec2(pos(m.obj)), glm::vec2(pos(scene.find_object(m.target))));
+        if (m.target == "player") { player_start += m.start; player_now += now; ++player_n; }
+        else { scout_start += m.start; scout_now += now; ++scout_n; }
+        if (m.start_pos.z > 3.0f) { ++on_mesa_start; on_mesa_now += pos(m.obj).z > 3.0f; }
+    }
+    std::printf("  open world: player mean dist %.1f -> %.1f m, scouts %.1f -> %.1f m, mesa %d -> %d, max active tiles %zu/%u\n",
+                player_start / player_n, player_now / player_n, scout_start / scout_n, scout_now / scout_n,
+                on_mesa_start, on_mesa_now, max_active, tiles);
+    expect(player_now < 0.4 * player_start, "nav_open_world: the player's packs closed most of the distance");
+    // 40 s at 4 m/s is 160 m of walking; the scouts' route is ~460 m.
+    expect((scout_start - scout_now) / scout_n > 110.0, "nav_open_world: the scouts crossed a good part of the map");
+    expect(on_mesa_start > 0 && on_mesa_now * 2 < on_mesa_start, "nav_open_world: the mesa pack came down its ramps");
+}
+
 // --- KinematicMover -----------------------------------------------------------------------
 
 /** @brief Builds a one-object scene with a KinematicMover seeded at `seed_pos`, un-started. */
@@ -8466,6 +8613,8 @@ const TestCase kTests[] = {
     {"free_mover_travels_on_all_three_axes",       "scene", test_free_mover_travels_on_all_three_axes},
     {"free_mover_smoothing_frame_rate_independent","scene", test_free_mover_smoothing_is_frame_rate_independent},
     {"kinematic_control_runs_before_physics",      "scene", test_kinematic_control_runs_before_physics},
+    {"nav_test_scene_agents_reach_goals",          "scene", test_nav_test_scene_agents_reach_their_goals},
+    {"nav_open_world_packs_converge",              "scene", test_nav_open_world_scene_packs_converge_on_hierarchical_fields},
     {"kinematic_mover_pingpong",                   "scene", test_kinematic_mover_pingpong_oscillates_about_origin},
     {"kinematic_mover_orbit",                      "scene", test_kinematic_mover_orbit_holds_radius_and_height},
     {"kinematic_mover_spin",                       "scene", test_kinematic_mover_spin_rotates_in_place},

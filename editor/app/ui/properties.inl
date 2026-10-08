@@ -710,13 +710,21 @@
             if (finished) doc_.end_merge();
         }
         if (ctx.collapsing_header("Relations", true, nullptr, I::Link)) {
-            std::vector<std::string> names = {"(none)"};
-            std::vector<ObjectId> ids = {0};
-            for (ObjectId other : doc_.all_ids()) {
-                if (other == id || doc_.is_ancestor(id, other)) continue;
-                names.push_back(get_string(*doc_.find(other), "name"));
-                ids.push_back(other);
+            // Every object but this one and its descendants: built once per (object, revision),
+            // not every frame -- it lists the whole scene.
+            const auto key = std::make_pair(id, doc_.undo_revision());
+            if (key != parent_choices_key_) {
+                parent_choices_key_ = key;
+                parent_choice_names_ = {"(none)"};
+                parent_choice_ids_ = {0};
+                for (ObjectId other : doc_.all_ids()) {
+                    if (other == id || doc_.is_ancestor(id, other)) continue;
+                    parent_choice_names_.push_back(get_string(*doc_.find(other), "name"));
+                    parent_choice_ids_.push_back(other);
+                }
             }
+            const std::vector<std::string>& names = parent_choice_names_;
+            const std::vector<ObjectId>& ids = parent_choice_ids_;
             const ObjectId parent = doc_.parent_of(id).value_or(0);
             int idx = 0;
             for (size_t i = 0; i < ids.size(); ++i) if (ids[i] == parent) idx = static_cast<int>(i);

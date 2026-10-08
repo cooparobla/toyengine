@@ -49,7 +49,10 @@
                     std::string n = get_string(o, "name");
                     std::string ln = n;
                     std::transform(ln.begin(), ln.end(), ln.begin(), ::tolower);
-                    if (ln.find(f) != std::string::npos) draw_outliner_row_(ctx, SceneDocument::id_of(o), true);
+                    if (ln.find(f) == std::string::npos) return;
+                    const ObjectId id = SceneDocument::id_of(o);
+                    if (outliner_row_skippable_(ctx, id, true)) ctx.next_box(ctx.style.row_height);
+                    else draw_outliner_row_(ctx, id, true);
                 });
             }
             if (!object_file) ctx.tree_pop();
@@ -75,7 +78,27 @@
         if (!list.is_sequence()) return;
         std::vector<ObjectId> ids;
         for (const auto& o : list.as_seq()) ids.push_back(SceneDocument::id_of(o));
-        for (ObjectId id : ids) draw_outliner_row_(ctx, id, false);
+        for (ObjectId id : ids) {
+            if (outliner_row_skippable_(ctx, id, false)) ctx.next_box(ctx.style.row_height);
+            else draw_outliner_row_(ctx, id, false);
+        }
+    }
+
+    /**
+     * @brief True for a row that is off screen and collapsed: the caller reserves its height
+     *        instead of drawing it. A 1000-object scene then pays for the rows in view, not for
+     *        every row's widgets, icons and strings each frame -- while scrolling, the content
+     *        height and drop targets stay exactly as if every row were drawn. An open row is
+     *        always drawn (its children's height isn't known without walking them), and so is
+     *        the row being renamed.
+     */
+    bool outliner_row_skippable_(imm::Context& ctx, ObjectId id, bool flat) {
+        if (rename_id_ == id || !ctx.next_row_clipped(ctx.style.row_height)) return false;
+        if (flat) return true;   // filter results are flat rows: never open
+        ctx.push_id(static_cast<int64_t>(id));
+        const bool open = ctx.tree_is_open(ctx.get_id("row"));
+        ctx.pop_id();
+        return !open;
     }
 
     void draw_outliner_row_(imm::Context& ctx, ObjectId id, bool flat) {

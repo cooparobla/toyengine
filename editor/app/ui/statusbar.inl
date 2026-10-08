@@ -91,6 +91,11 @@
                           m.positions.size(), fs_.size(), m.faces.size(), m.triangle_count());
             return buf;
         }
+        // The totals only change with the document, the live scene or the selection: recount
+        // then, not every frame (the count walks every object's mesh).
+        const auto key = std::make_tuple(doc_.undo_revision(), static_cast<uint64_t>(scene_gen_), doc_.selection().size(),
+                                         sync_.live_objects().size());
+        if (key == stats_key_ && !stats_cache_.empty()) return stats_cache_;
         size_t verts = 0, faces = 0, tris = 0, objects = 0;
         for (const auto& [id, live] : sync_.live_objects()) {
             ++objects;
@@ -104,5 +109,7 @@
         }
         std::snprintf(buf, sizeof(buf), "%s  |  Objects %zu/%zu  |  Verts %zu  |  Faces %zu  |  Tris %zu", doc_.scene_name().c_str(),
                       doc_.selection().size(), objects, verts, faces, tris);
+        stats_key_ = key;
+        stats_cache_ = buf;
         return buf;
     }

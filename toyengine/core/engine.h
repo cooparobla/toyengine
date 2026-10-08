@@ -46,6 +46,7 @@
 #include <coopa/scene/systems/transform_system.h>
 
 #include <physxcoopa/physx_yaml.h>
+#include <physxcoopa/system/nav_system.h>
 #include <physxcoopa/debug/debug_draw.h>
 
 #include <toyengine/core/branding.h>
@@ -357,6 +358,7 @@ public:
         AppConfig out = config_;
         out.render = derived.render;
         out.physics = derived.physics;
+        out.navigation = derived.navigation;
         return out;
     }
 
@@ -711,6 +713,9 @@ private:
         water::install_water_system(scene, &ctx_.device(), &ctx_.allocator(), &assets_)
             ->set_settings(water_settings_for_(pipeline_->render_config().water_quality));
         coopa::physx::system::install_physics_system(scene, scene_cfg.physics);
+        // Order 150: reads the physics world (100) for its colliders, and moves NavAgents before
+        // the Behaviour walk (200) -- see physxcoopa/system/nav_system.h.
+        if (scene_cfg.navigation.enabled) coopa::physx::system::install_nav_system(scene, scene_cfg.navigation);
         // Order 360: after TransformResolve (350), so every emitter's world matrix is current;
         // runs in edit mode too, so effects preview live in the editor -- see
         // particle_system_runner.h.
@@ -1558,22 +1563,25 @@ private:
      *        pack_gpu_color() know nothing about physics, so this is the one place a
      *        coopa::physx::debug::DebugLine gets translated into one.
      *
-     * No-op (and clears any stale lines) when a different debug_view is active or when no
-     * "Physics" system is installed, so switching debug_view at runtime never leaves last
-     * frame's overlay stuck.
+     * Physics lines need debug_view "lines"; navigation lines (the scene's NavSystem, when its
+     * `navigation.debug_draw` is set) show in every view. Always clears first, so switching
+     * either off at runtime never leaves last frame's overlay stuck.
      */
     void gather_debug_lines_(coopa::scene::Scene& scene) {
         std::vector<render::DebugLine>& out = pipeline_->debug_lines();
         out.clear();
         // An embedding host (the editor's grid, gizmos, wireframe) appends after this, from
         // FrameHooks::pre_render -- which runs after this clear, so it always wins the frame.
-        if (render::parse_debug_view(config_.render.debug_view) != render::DebugView::Lines) return;
-
-        auto* sys = dynamic_cast<coopa::physx::system::PhysicsSystem*>(scene.find_system("Physics"));
-        if (!sys) return;
-
         coopa::physx::debug::DebugDraw draw;
-        sys->world().debug_draw(draw, config_.physics.debug_draw);
+        // Navigation's overlay is opt-in per scene (`navigation.debug_draw`) and shows in every
+        // debug_view: it is how a nav scene is read at all (walkable outline, paths, flow arrows).
+        if (auto* nav = coopa::physx::system::find_nav_system(scene)) {
+            nav->debug_draw(draw, nav->settings().debug_draw);
+        }
+        auto* sys = dynamic_cast<coopa::physx::system::PhysicsSystem*>(scene.find_system("Physics"));
+        if (sys && render::parse_debug_view(config_.render.debug_view) == render::DebugView::Lines) {
+            sys->world().debug_draw(draw, config_.physics.debug_draw);
+        }
         out.reserve(draw.lines.size());
         for (const auto& line : draw.lines) {
             out.push_back(render::DebugLine{line.a, line.b, render::pack_gpu_color(line.color)});

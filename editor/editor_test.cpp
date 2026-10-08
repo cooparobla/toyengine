@@ -5667,6 +5667,48 @@ void test_editor_asset_browser_context_menus() {
 
 
 /**
+ * @brief Deleting a scene from the Asset panel in a project: the confirmation removes the
+ *        scene's folder (scenes/<name>/), not just its scene.yaml.
+ */
+void test_editor_asset_browser_delete_scene() {
+    using coopa::input::MouseButton;
+    setenv("FIXED_DT", "0", 1);
+    unsetenv("NO_INPUT");
+    setenv("HOME", tmp_root().c_str(), 1);
+    const fs::path root = fresh_dir("asset_delete_scene_project");
+    Project project = Project::create(root);
+    const char* kRel = getenv("DEL_REL") ? getenv("DEL_REL") : "scenes/extra/scene.yaml";
+    coopa::yaml::save_document(project.assets() / kRel, Project::default_scene_node("extra"));
+    project.refresh();
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    app.set_show_engine_assets(getenv("DEL_ENGINE") != nullptr);
+    app.project().refresh();
+    tick(engine, 4);
+    InputDriver in{engine, std::max(1.0f, engine.display_scale())};
+    app.set_asset_tab(AssetType::Scene);
+    tick(engine, 3);
+
+    auto row = app.test_rect(std::string("asset_row:") + kRel);
+    expect(row.has_value(), "the extra scene is listed");
+    if (!row) return;
+    in.click(row->center(), MouseButton::Right);
+    expect(app.ui().any_popup_open(), "right-clicking a scene opens its context menu");
+    auto del = app.test_rect("asset_delete");
+    expect(del.has_value(), "the menu has Delete...");
+    if (!del) return;
+    in.click(del->center());
+    tick(engine, 2);
+    auto confirm = app.test_rect("asset_delete_confirm");
+    expect(confirm.has_value(), "Delete... asks for confirmation");
+    if (!confirm) return;
+    in.click(confirm->center());
+    tick(engine, 2);
+    expect(!fs::exists(project.assets() / fs::path(kRel).parent_path()), "confirming deletes the scene's folder");
+    expect(fs::exists(project.assets() / "scenes" / "main" / "scene.yaml"), "the other scene is untouched");
+}
+
+/**
  * @brief Previewing a texture in the Textures tab declares the color space the project uses it
  *        in, not always sRGB (the preview shows it as albedo): the loader keeps the first
  *        declaration, so an sRGB one from viewing a normal map would mis-decode it for every
@@ -7271,6 +7313,17 @@ void test_hub_project_actions() {
     for (int i = 0; i < 200 && !fs::exists(a / "opened"); ++i) { std::this_thread::sleep_for(std::chrono::milliseconds(10)); tick(engine, 1); }
     expect(fs::exists(a / "opened"), "Open launches the project's editor");
 
+    // Rebuild (clean): stale build output goes, then build.sh runs (here: leaves a marker).
+    write_text(a / "build.sh", "#!/bin/sh\ntouch \"$(dirname \"$0\")/rebuilt\"\n");
+    fs::permissions(a / "build.sh", fs::perms::owner_all);
+    write_text(a / "build" / "stale", "");
+    app.rebuild_project(app.projects()[0]);
+    for (int i = 0; i < 500 && app.task().running(); ++i) { std::this_thread::sleep_for(std::chrono::milliseconds(10)); tick(engine, 1); }
+    tick(engine, 2);
+    expect(!fs::exists(a / "build" / "stale") && fs::exists(a / "rebuilt"), "Rebuild clears build/ and re-runs build.sh");
+    expect(app.status().find("done") != std::string::npos, "...and reports success");
+    write_text(a / "build" / "game_editor", "");   // "built" again for the steps below
+
     // Add: a bare folder gets the options dialog; an existing project is listed straight away.
     const fs::path bare = base / "Bare";
     fs::create_directories(bare);
@@ -7577,6 +7630,7 @@ const TestCase kTests[] = {
     {"editor_ui_theme_shapes",               "editor_shell", test_editor_ui_theme_shapes},
     {"editor_text_pixel_aligned",            "editor_shell", test_editor_text_pixel_aligned},
     {"editor_asset_browser_context_menus",   "editor_shell", test_editor_asset_browser_context_menus},
+    {"editor_asset_browser_delete_scene",    "editor_shell", test_editor_asset_browser_delete_scene},
     {"editor_texture_preview_color_space",   "editor_shell", test_editor_texture_preview_color_space},
     {"editor_game_ui_themes",                "editor_shell", test_editor_game_ui_themes},
     {"editor_submesh_materials",             "editor_shell", test_editor_submesh_materials},

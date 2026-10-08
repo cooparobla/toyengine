@@ -329,7 +329,8 @@ A **linked** project builds against this working tree directly, uncommitted edit
 and `libs/` included. This is how to work on the engine and a game together. A **pinned**
 project clones the engine at a pushed commit, which makes it reproducible on any machine.
 `toyhub link|unlink <dir>` switches between the two, and `toyhub upgrade <dir> [--ref R]`
-re-pins. The CMake side is [`cmake/ToyProject.cmake`](cmake/ToyProject.cmake)
+re-pins. When a project's build is broken and it won't open, `toyhub rebuild <dir>` (the hub's
+**...** > **Rebuild (clean)**) removes its build output and builds it again. The CMake side is [`cmake/ToyProject.cmake`](cmake/ToyProject.cmake)
 (`toyengine_add_project()`). When `.libs/toyengine` is not the top-level build, it adds only the
 engine; its own tests and tools are skipped.
 

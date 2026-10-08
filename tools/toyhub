@@ -12,6 +12,7 @@
 #   toyhub build|run|editor|package <dir> [args...]   run that project's script
 #                                      (package <dir> [dev|ship|assets] [out]: Build for this platform)
 #   toyhub open <dir>                  build if needed, then launch the editor detached
+#   toyhub rebuild <dir>               clean rebuild: remove build output, then build.sh
 #   toyhub upgrade <dir> [--ref R]     re-pin the engine (default: this checkout's HEAD)
 #   toyhub link <dir> [ENGINE_DIR]     build against a local engine checkout (default: this one)
 #   toyhub unlink <dir>                back to the pinned clone
@@ -302,6 +303,14 @@ cmd_open() {
     echo "[toyhub] editor started for $dir (log: .toyeditor/editor.log)"
 }
 
+cmd_rebuild() {   # for a broken build (stale CMake cache, moved engine): start from scratch
+    local dir; dir="$(project_dir "${1:-.}")"
+    register "$dir"
+    echo "[toyhub] removing $dir/build and $dir/build-*"
+    rm -rf "$dir/build" "$dir"/build-*
+    "$dir/build.sh"
+}
+
 cmd_upgrade() {
     local dir="" ref=""
     while (( $# )); do
@@ -391,6 +400,7 @@ case "$cmd" in
     delete)   cmd_delete "$@" ;;
     build|run|editor|package|setup|clean) cmd_script "$cmd" "$@" ;;
     open)     cmd_open "$@" ;;
+    rebuild)  cmd_rebuild "$@" ;;
     upgrade)  cmd_upgrade "$@" ;;
     link)     cmd_link "$@" ;;
     unlink)   cmd_unlink "$@" ;;

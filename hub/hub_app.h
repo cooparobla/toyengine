@@ -3,13 +3,13 @@
  * @brief toyengine Hub: a small Unity-Hub-style launcher for toyengine projects, drawn with the
  *        editor's immediate-mode UI, themes and file dialog so it looks like the editor.
  *
- * Pages: Projects (the list: open in the editor, reveal, re-pin / link the engine, remove;
+ * Pages: Projects (the list: open in the editor, reveal, clean rebuild, re-pin / link the engine, remove;
  * New / Add with their options), Engine (this checkout, CLI install, macOS app), Settings (the
  * hub's own theme, ~/.toyengine/settings.yaml, blender_dark by default). Every project operation
  * runs tools/toyhub as a Task (editor/core/process.h) whose output streams into the log drawer at
  * the bottom; the hub itself never builds, clones or writes a project. Building is the editor's
  * job (Build > Refresh) -- the hub only builds a project the first time it is opened, since the
- * editor it opens is part of that build.
+ * editor it opens is part of that build, or on "Rebuild (clean)" when that build is broken.
  *
  * Embeds a toy::core::Engine only for its window, device and UI rendering -- no scene is
  * loaded; the UI is an overlay scene, as in the editor.
@@ -184,6 +184,14 @@ public:
             return;
         }
         run_toyhub("First build of " + p.name + " (then opening the editor)", {"open", p.root.string()});
+    }
+
+    /**
+     * @brief Clean rebuild of the game and its editor (toyhub rebuild: build output removed, then
+     *        build.sh), for a build that is broken -- e.g. a stale CMake cache -- and won't open.
+     */
+    void rebuild_project(const HubProject& p) {
+        run_toyhub("Rebuild " + p.name, {"rebuild", p.root.string()});
     }
 
     /** @brief The New / Add options: where, and which engine the project builds against. */
@@ -455,6 +463,7 @@ private:
             const std::string dir = p.root.string();
             if (ctx.menu_item("Open in Editor", "", nullptr, idle, imm::Icon::Play)) open_project(p);
             if (ctx.menu_item("Reveal in Finder", "", nullptr, true, imm::Icon::Folder)) reveal_in_file_browser(p.root);
+            if (ctx.menu_item("Rebuild (clean)", "", nullptr, idle, imm::Icon::Tool)) rebuild_project(p);
             ctx.menu_separator();
             if (!p.linked() && ctx.menu_item("Re-pin engine to this checkout's HEAD", "", nullptr, idle, imm::Icon::Restart)) {
                 run_toyhub("Re-pin " + p.name, {"upgrade", dir});

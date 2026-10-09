@@ -47,6 +47,8 @@ struct SurfaceFrameState {
     // --- Snow / wetness (0 = none) ---
     float snow_cover = 0.0f;       ///< 0..1: how much snow lies on open, up-facing surfaces.
     float snow_depth = 0.3f;       ///< Metres of deep snow at full cover (the `snow` surface shader).
+    bool snow_patch_hard = false;  ///< Round, crisp-edged patches instead of the soft noisy cover.
+    float snow_patch_size = 1.5f;  ///< Hard patches: typical diameter (m).
     float wetness = 0.0f;
     glm::vec3 wind{0.0f};
 
@@ -78,8 +80,9 @@ struct alignas(16) SurfaceWorldUBO {
     glm::vec4  occl_fallback{0.0f};   ///< x fallback height
     glm::vec4  field{0.0f};           ///< z cell, w 1 = trench field valid
     glm::ivec4 field_dims{0};         ///< x n, yz window min cell index
+    glm::vec4  snow_style{0.0f};      ///< x 1 = hard-edged patches, y patch size (m)
 };
-static_assert(sizeof(SurfaceWorldUBO) == 128, "SurfaceWorldUBO must match world.glsl's std140 block");
+static_assert(sizeof(SurfaceWorldUBO) == 144, "SurfaceWorldUBO must match world.glsl's std140 block");
 
 class SurfaceWorldData {
 public:
@@ -154,6 +157,7 @@ public:
             u.occl_dims = glm::ivec4(s.occl_nx, s.occl_ny, 0, 0);
         }
         u.occl_fallback = glm::vec4(s.occl_fallback, 0.0f, 0.0f, 0.0f);
+        u.snow_style = glm::vec4(s.snow_patch_hard ? 1.0f : 0.0f, std::max(s.snow_patch_size, 0.1f), 0.0f, 0.0f);
         const bool trench_ok = s.trench_words && s.trench_n > 0 &&
                                static_cast<uint32_t>(s.trench_n) * static_cast<uint32_t>(s.trench_n) / 2u <= kMaxTrenchWords;
         if (trench_ok) {

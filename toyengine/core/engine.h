@@ -1860,6 +1860,8 @@ public:
             const weather::WeatherState& ws = w->state();
             st.snow_cover = ws.snow_cover;
             st.snow_depth = w->settings().snow_max_depth;
+            st.snow_patch_hard = w->settings().snow_patch_hard;
+            st.snow_patch_size = w->settings().snow_patch_size;
             st.wetness = ws.wetness;
             st.wind = ws.wind;
             if (const auto& field = w->ground_probe().field()) {

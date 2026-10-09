@@ -21,6 +21,7 @@ layout(set = GFX_WORLD_SET, binding = 0) uniform SurfaceWorldUBO {
     vec4  occl_fallback;  // x fallback height
     vec4  field;          // z cell, w 1 = trench field valid
     ivec4 field_dims;     // x n, yz window min cell index
+    vec4  snow_style;     // x 1 = hard-edged patches, y patch size (m)
 } gfx_world;
 
 layout(std430, set = GFX_WORLD_SET, binding = 1) readonly buffer GfxOcclusionHeights { float gfx_occl_heights[]; };
@@ -76,7 +77,12 @@ float gfx_world_trench(vec2 xy) {
     float b = gfx_world_trench_cell_(i0 + ivec2(1, 0));
     float c = gfx_world_trench_cell_(i0 + ivec2(0, 1));
     float d = gfx_world_trench_cell_(i0 + ivec2(1, 1));
-    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+    // Fades out over the outer fifth of the window, so a track leaving it (the window follows
+    // the view) eases away instead of vanishing. As toy::world::SnowField::edge_fade().
+    float half_n = 0.5 * float(gfx_world.field_dims.x);
+    vec2  rel    = abs(g + 0.5 - (vec2(gfx_world.field_dims.yz) + half_n)) / half_n;
+    float fade   = 1.0 - smoothstep(0.8, 1.0, max(rel.x, rel.y));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y) * fade;
 }
 
 #endif // GFX_SURFACE_WORLD_GLSL

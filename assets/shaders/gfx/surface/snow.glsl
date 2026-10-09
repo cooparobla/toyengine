@@ -16,7 +16,13 @@
 // shader defining GFX_SURFACE_NO_SNOW before including the backbone (editor_paint, the deep
 // `snow` shader that draws snow itself).
 //
+// Two looks, the weather's `snow_patch_style` (gfx_world.snow_style.x): soft (the default) --
+// value-noise drifts with a soft edge -- or hard -- round, crisp-edged patches that grow and merge
+// (gfx/surface/snow_patches.glsl), a stylized / toon look.
+//
 // Needs world.glsl (the backbone includes it).
+
+#include <gfx/surface/snow_patches.glsl>
 
 const vec3 GFX_SNOW_ALBEDO = vec3(0.86, 0.89, 0.93);
 
@@ -43,6 +49,18 @@ float gfx_snow_patches(vec2 xy) {
  */
 float gfx_snow_amount(vec3 p, vec3 geo_n, float cover) {
     if (cover <= 0.0) return 0.0;
+    if (gfx_world.snow_style.x > 0.5) {
+        // Hard patches. The field and its screen derivative are taken before any per-pixel
+        // branch, so fwidth() sees all four quad lanes.
+        float field = gfx_snow_blobs(p.xy, gfx_world.snow_style.y);
+        float w = max(fwidth(field), 1e-4);
+        float up = smoothstep(mix(0.85, 0.45, cover), mix(0.95, 0.65, cover), geo_n.z);
+        float open = gfx_world_open_sky(p + vec3(0.0, 0.0, 0.35 + 0.35 * gfx_world.occl.z), 0.5);
+        float receptive = up * open;
+        if (receptive <= 0.0) return 0.0;
+        float v = field - (1.05 - 1.15 * cover) - (1.0 - receptive) * 1.5;   // gfx_snow_patch_value()
+        return clamp(v / w + 0.5, 0.0, 1.0);
+    }
     // Up-facing: flat ground takes it first; steeper faces as the cover deepens.
     float up = smoothstep(mix(0.85, 0.45, cover), mix(0.95, 0.65, cover), geo_n.z);
     if (up <= 0.0) return 0.0;

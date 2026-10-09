@@ -141,7 +141,20 @@ public:
         };
         const float a = at(i0.x, i0.y), b = at(i0.x + 1, i0.y);
         const float c = at(i0.x, i0.y + 1), d = at(i0.x + 1, i0.y + 1);
-        return glm::mix(glm::mix(a, b, f.x), glm::mix(c, d, f.x), f.y);
+        return glm::mix(glm::mix(a, b, f.x), glm::mix(c, d, f.x), f.y) * edge_fade(xy);
+    }
+
+    /**
+     * @brief 1 inside the window, easing to 0 over its outer fifth (Chebyshev distance from the
+     *        centre), so a track the window leaves behind fades instead of popping. The shader's
+     *        gfx_world_trench() applies the same fade.
+     */
+    float edge_fade(const glm::vec2& xy) const {
+        if (!focused_) return 0.0f;
+        const float half_n = 0.5f * static_cast<float>(n_);
+        const glm::vec2 rel = glm::abs(xy / cell_ - (glm::vec2(window_) + half_n)) / half_n;
+        const float t = std::clamp((std::max(rel.x, rel.y) - 0.8f) / 0.2f, 0.0f, 1.0f);
+        return 1.0f - t * t * (3.0f - 2.0f * t);
     }
 
 private:
@@ -216,17 +229,73 @@ inline float snow_open_sky(const particles::GroundField* f, const glm::vec3& p, 
     return t * t * (3.0f - 2.0f * t);
 }
 
+// --- Hard-edged patches: CPU mirror of gfx/surface/snow_patches.glsl (keep identical) ---
+
+/** @brief How the lying snow's edge is drawn: the weather's snow_patch_style / snow_patch_size. */
+struct SnowStyle {
+    bool hard = false;    ///< Round, crisp-edged patches; false: the soft noisy cover.
+    float size = 1.5f;    ///< Hard patches: metres per pattern cell (typical patch diameter).
+};
+
+namespace detail {
+inline float snow_fract(float x) { return x - std::floor(x); }
+/** @brief gfx_snow_hash3_(): three hashes in [0,1) per integer cell. */
+inline glm::vec3 snow_hash3(const glm::vec2& c) {
+    glm::vec3 p(snow_fract(c.x * 0.1031f), snow_fract(c.y * 0.1030f), snow_fract(c.x * 0.0973f));
+    p += glm::dot(p, glm::vec3(p.y, p.z, p.x) + 33.33f);
+    const glm::vec3 a(p.x, p.x, p.y), b(p.y, p.z, p.z), m(p.z, p.y, p.x);
+    const glm::vec3 r = (a + b) * m;
+    return glm::vec3(snow_fract(r.x), snow_fract(r.y), snow_fract(r.z));
+}
+/** @brief gfx_snow_blob_layer_(). */
+inline float snow_blob_layer(const glm::vec2& xy, float size) {
+    const glm::vec2 g = xy / size;
+    const glm::vec2 c(std::floor(g.x), std::floor(g.y));
+    float sum = 0.0f;
+    for (int j = -1; j <= 1; ++j) {
+        for (int i = -1; i <= 1; ++i) {
+            const glm::vec2 cell = c + glm::vec2(static_cast<float>(i), static_cast<float>(j));
+            const glm::vec3 h = snow_hash3(cell);
+            const glm::vec2 centre = cell + 0.15f + 0.7f * glm::vec2(h.x, h.y);
+            const float r = glm::mix(0.35f, 1.0f, h.z);
+            const float d = glm::length(g - centre) / r;
+            const float q = std::max(1.0f - d * d, 0.0f);
+            sum += q * q;
+        }
+    }
+    return sum;
+}
+} // namespace detail
+
+/** @brief gfx_snow_blobs(): the metaball field of the hard-patch pattern. */
+inline float snow_blobs(const glm::vec2& xy, float size) {
+    return detail::snow_blob_layer(xy, size) + 0.5f * detail::snow_blob_layer(xy + glm::vec2(17.3f, 41.9f), size * 0.45f);
+}
+
+/** @brief gfx_snow_patch_value(): > 0 inside a hard patch. `receptive` = up-facing x open sky. */
+inline float snow_patch_value(const glm::vec2& xy, float cover, float receptive, float size) {
+    return snow_blobs(xy, size) - (1.05f - 1.15f * cover) - (1.0f - receptive) * 1.5f;
+}
+
+/** @brief gfx_snow_patch_ramp(): the patch mask with its short ramp (what the deep snow lies in). */
+inline float snow_patch_mask(const glm::vec2& xy, float cover, float receptive, float size) {
+    const float t = std::clamp(snow_patch_value(xy, cover, receptive, size) / 0.15f, 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
 /**
  * @brief The deep-snow height above a `snow`-shaded surface at world p (the `snow` surface
- *        shader's displacement, gfx/surface/snow_height.glsl): depth * cover * open sky, less
- *        the trench, never negative.
+ *        shader's displacement, gfx/surface/snow_height.glsl): depth * cover * open sky (times
+ *        the patch mask under the hard style), less the trench, never negative.
  */
 inline float deep_snow_depth(const glm::vec3& p, float max_depth, float cover,
-                             const particles::GroundField* occlusion, const SnowField* trenches) {
+                             const particles::GroundField* occlusion, const SnowField* trenches,
+                             const SnowStyle& style = {}) {
     if (max_depth <= 0.0f || cover <= 0.0f) return 0.0f;
     const float open = snow_open_sky(occlusion, p + glm::vec3(0.0f, 0.0f, 0.35f + 0.35f * (occlusion ? occlusion->cell : 1.0f)), 0.5f);
+    const float patch_mask = style.hard ? snow_patch_mask(glm::vec2(p), cover, open, std::max(style.size, 0.1f)) : 1.0f;
     const float trench = trenches ? trenches->trench_at(glm::vec2(p)) : 0.0f;
-    return std::max(0.0f, max_depth * cover * open - trench);
+    return std::max(0.0f, max_depth * cover * open * patch_mask - trench);
 }
 
 } // namespace world

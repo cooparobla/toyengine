@@ -23,6 +23,15 @@ void gfx_surface_vertex(inout GfxSurfaceVertex v) {
 #ifdef GFX_SURFACE_FRAGMENT
 void gfx_surface_fragment(inout GfxSurface s) {
     if (gfx_world.snow.x <= 0.0 || gfx_world.snow.y <= 0.0) return;
+    // Hard patches: the crisp, antialiased patch edge for the albedo, taken before any per-pixel
+    // branch (fwidth needs the whole quad). The height field itself ramps over a few centimetres
+    // so the mound has a wall; the colour edge stays sharp on top of it.
+    float hard_edge = -1.0;
+    if (gfx_world.snow_style.x > 0.5) {
+        float open_e = gfx_world_open_sky(s.position_ws + vec3(0.0, 0.0, 0.35 + 0.35 * gfx_world.occl.z), 0.5);
+        float v = gfx_snow_patch_value(s.position_ws.xy, gfx_world.snow.x, open_e, gfx_world.snow_style.y);
+        hard_edge = clamp(v / max(fwidth(v), 1e-4) + 0.5, 0.0, 1.0);
+    }
     // The height field at this fragment's xy (the displacement is +Z only). Its z enters only
     // through the soft open-sky test, which a few centimetres either way does not move.
     vec3 base = s.position_ws;
@@ -38,6 +47,7 @@ void gfx_surface_fragment(inout GfxSurface s) {
     // of a trench is compacted, greyer snow, and bare where pressed to the ground.
     float lying = gfx_snow_lying_height(base);
     float amount = smoothstep(0.0, 0.03, h) + (1.0 - smoothstep(0.0, 0.03, h)) * smoothstep(0.0, 0.02, lying) * 0.6;
+    if (hard_edge >= 0.0) amount *= hard_edge;
     float pressed = clamp(1.0 - h / max(lying, 1e-3), 0.0, 1.0) * step(1e-3, lying);
     vec3 snow_albedo = mix(GFX_SNOW_ALBEDO, GFX_SNOW_ALBEDO * vec3(0.78, 0.82, 0.88), pressed * 0.8);
     float sparkle = gfx_snow_hash_(floor(base.xy * 40.0)) * 0.06 * (1.0 - pressed);

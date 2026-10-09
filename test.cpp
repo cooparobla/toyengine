@@ -62,6 +62,8 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include <gfxcoopa/util/image_readback.h>
+#include <gfxcoopa/pipeline/compute_pipeline.h>
+#include <gfxcoopa/memory/storage_buffer.h>
 
 #include <coopa/debug/logger.h>
 #include <coopa/maps/map_generator.h>
@@ -76,6 +78,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/constants.hpp>
 #include <toyengine/render/pixel_math.h>
+#include <toyengine/render/fog_math.h>
 #include <toyengine/render/visibility.h>
 #include <toyengine/scene/free_mover.h>
 #include <coopa/yaml/document.h>
@@ -97,6 +100,15 @@
 #include <toyengine/ui/ui_assets.h>
 #include <uicoopa/ui_yaml.h>
 #include <toyengine/scene/kinematic_control_system.h>
+#include <toyengine/scene/camera_controller.h>
+#include <toyengine/scene/character_controller.h>
+#include <toyengine/save/register.h>
+#include <toyengine/save/save_system.h>
+#include <toyengine/scene/foot_ik.h>
+#include <toyengine/scene/ragdoll.h>
+#include <coopa/animation/ik_system.h>
+#include <physxcoopa/components/box_collider.h>
+#include <physxcoopa/components/capsule_collider.h>
 #include <toyengine/scene/kinematic_controller.h>
 #include <toyengine/scene/kinematic_mover.h>
 
@@ -1487,6 +1499,71 @@ void test_app_config_load_applies_quality_presets() {
 }
 
 /**
+ * @brief The global height fog's transmittance (fog_math.h, the CPU mirror of gfx/fog.glsl):
+ *        uniform fog is Beer-Lambert, the height integral matches a numeric march, density is
+ *        finite below the base, and an underwater eye skips the in-water part of the ray.
+ */
+void test_fog_height_transmittance() {
+    using toy::render::fog_height_tau;
+    using toy::render::fog_transmittance;
+    toy::render::PixelRenderConfig c;
+    c.fog_enabled = true;
+    c.fog_mode = 1;
+    c.fog_density = 0.02f;
+    c.fog_height_falloff = 0.0f;
+    c.fog_max_opacity = 1.0f;
+
+    // Uniform: T = exp(-sigma * d).
+    const float T_flat = fog_transmittance(c, {0, 0, 2}, {50, 0, 2});
+    expect(std::abs(T_flat - std::exp(-0.02f * 50.0f)) < 1e-5f, "fog: uniform fog is exp(-density * distance)");
+
+    // Height fog: the closed form matches a fine numeric march, for rays crossing the base.
+    const float base = 1.0f, falloff = 8.0f, sigma = 0.05f;
+    const glm::vec3 pairs[][2] = {{{0, 0, -5}, {40, 3, 20}}, {{0, 0, 30}, {-20, 10, 0.5f}},
+                                  {{0, 0, 4}, {60, 0, 4.0005f}}, {{0, 0, -3}, {10, 0, -6}}};
+    for (const auto& pr : pairs) {
+        const glm::vec3 A = pr[0], B = pr[1];
+        double march = 0.0;
+        const int n = 20000;
+        for (int i = 0; i < n; ++i) {
+            const glm::vec3 p = glm::mix(A, B, (i + 0.5f) / n);
+            const double d = p.z < base ? sigma : sigma * std::exp(-(p.z - base) / falloff);
+            march += d * glm::length(B - A) / n;
+        }
+        const float tau = fog_height_tau(A, B, sigma, base, falloff);
+        expect(std::abs(tau - march) < 1e-3 * std::max(1.0, march), "fog: height integral matches a numeric march");
+    }
+
+    // Far below the base the density is constant, not exponentially exploding.
+    const float deep = fog_height_tau({0, 0, -200}, {10, 0, -200}, sigma, base, falloff);
+    expect(std::isfinite(deep) && std::abs(deep - sigma * 10.0f) < 1e-4f, "fog: density is constant below the base");
+
+    // Thinner upward: looking up fogs less than looking along the ground.
+    c.fog_height_falloff = falloff; c.fog_height_base = base; c.fog_density = sigma;
+    expect(fog_transmittance(c, {0, 0, 1}, {0, 0, 101}) > fog_transmittance(c, {0, 0, 1}, {100, 0, 1}),
+           "fog: height fog thins with altitude");
+
+    // Start distance and max opacity.
+    c.fog_start_distance = 10.0f;
+    expect(fog_transmittance(c, {0, 0, 1}, {9, 0, 1}) == 1.0f, "fog: nothing nearer than the start distance");
+    c.fog_start_distance = 0.0f;
+    c.fog_max_opacity = 0.6f;
+    expect(fog_transmittance(c, {0, 0, 1}, {5000, 0, 1}) >= 0.4f - 1e-6f, "fog: max opacity floors transmittance");
+    c.fog_max_opacity = 1.0f;
+
+    // Under water: a ray that never leaves the water carries no air fog; one that does is fogged
+    // only from where it crosses the surface.
+    const float level = 0.0f;
+    expect(fog_transmittance(c, {0, 0, -3}, {40, 0, -5}, true, level) == 1.0f,
+           "fog: an underwater ray that stays under water gets no air fog");
+    const glm::vec3 eye{0, 0, -2}, target{0, 30, 10};
+    const glm::vec3 exit = eye + (target - eye) * ((level - eye.z) / (target.z - eye.z));
+    const float T_uw = fog_transmittance(c, eye, target, true, level);
+    expect(std::abs(T_uw - std::exp(-fog_height_tau(exit, target, sigma, base, falloff))) < 1e-5f,
+           "fog: an underwater ray is fogged only above the surface");
+}
+
+/**
  * @brief Round-trips the fog, volumetrics, bloom and tilt-shift blocks -- every one of them
  * parsed by AppConfig::load() and, until now, by nothing that checks.
  */
@@ -1504,7 +1581,10 @@ void test_app_config_load_round_trips_atmosphere_settings() {
         "  fog_sun_amount: 0.4\n"
         "  fog_sun_anisotropy: 0.55\n"
         "  fog_max_opacity: 0.9\n"
-        "  fog_max_distance: 123.0\n"
+        "  fog_sun_start_distance: 7.0\n"
+        "  fog_start_distance: 2.5\n"
+        "  fog_cutoff_distance: 300.0\n"
+        "  fog_sky_distance: 800.0\n"
         "  volumetrics_enabled: true\n"
         "  volumetrics_step_count: 12\n"
         "  volumetrics_max_distance: 22.0\n"
@@ -1538,7 +1618,15 @@ void test_app_config_load_round_trips_atmosphere_settings() {
     expect(config.render.fog_sun_amount == 0.4f, "AppConfig::load: fog_sun_amount round-trips");
     expect(config.render.fog_sun_anisotropy == 0.55f, "AppConfig::load: fog_sun_anisotropy round-trips");
     expect(config.render.fog_max_opacity == 0.9f, "AppConfig::load: fog_max_opacity round-trips");
-    expect(config.render.fog_max_distance == 123.0f, "AppConfig::load: fog_max_distance round-trips");
+    expect(config.render.fog_sun_start_distance == 7.0f, "AppConfig::load: fog_sun_start_distance round-trips");
+    expect(config.render.fog_start_distance == 2.5f, "AppConfig::load: fog_start_distance round-trips");
+    expect(config.render.fog_cutoff_distance == 300.0f, "AppConfig::load: fog_cutoff_distance round-trips");
+    expect(config.render.fog_sky_distance == 800.0f, "AppConfig::load: fog_sky_distance round-trips");
+
+    // The retired Exp2 mode loads as Exponential (squaring a height-integrated depth is unphysical).
+    toy::core::AppConfig legacy = load_config_text("test_fog_legacy_config.yaml",
+        "render:\n  fog_mode: 2\n  fog_max_distance: 60.0\n");
+    expect(legacy.render.fog_mode == 1, "AppConfig::load: legacy fog_mode 2 (Exp2) loads as 1");
 
     expect(config.render.volumetrics_enabled == true, "AppConfig::load: volumetrics_enabled round-trips");
     expect(config.render.volumetrics_step_count == 12, "AppConfig::load: volumetrics_step_count round-trips");
@@ -2087,6 +2175,401 @@ void test_kinematic_control_runs_before_physics() {
         expect_near(body->position.x, transform_x, 1e-4f,
                     "kinematic order: physics saw the pose written this frame, not the previous one");
     }
+}
+
+// --- CharacterController -----------------------------------------------------------------------
+
+/**
+ * @brief A physics scene for character tests: static/kinematic/dynamic boxes added with box(),
+ *        one CharacterController ("player"), then start() installs the order-50 control system
+ *        and physics, the way Engine::prepare_scene_() does.
+ */
+struct CharacterRig {
+    Scene scene{"character_test"};
+    toy::scene::CharacterController* cc = nullptr;
+    SceneObject* player = nullptr;
+    coopa::physx::system::PhysicsSystem* physics = nullptr;
+
+    SceneObject* box(const std::string& name, const glm::vec3& pos, const glm::vec3& size,
+                     const glm::vec3& rot_deg = glm::vec3(0.0f), int kind = 0 /* 0 static, 1 kinematic, 2 dynamic */,
+                     float mass = 10.0f) {
+        auto obj = std::make_unique<SceneObject>(name);
+        auto& t = obj->add_component<TransformComponent>()->transform();
+        t.set_position(pos);
+        t.set_rotation(rot_deg);
+        obj->add_component<coopa::physx::components::BoxCollider>()->set_size(size);
+        if (kind != 0) {
+            auto* rb = obj->add_component<coopa::physx::components::RigidbodyComponent>();
+            rb->is_kinematic = kind == 1;
+            rb->use_gravity = kind == 2;
+            rb->mass = mass;
+        }
+        SceneObject* raw = obj.get();
+        scene.add_root_object(std::move(obj));
+        return raw;
+    }
+
+    void spawn(const glm::vec3& feet) {
+        auto obj = std::make_unique<SceneObject>("player");
+        obj->add_component<TransformComponent>()->transform().set_position(feet);
+        cc = obj->add_component<toy::scene::CharacterController>();
+        player = obj.get();
+        scene.add_root_object(std::move(obj));
+    }
+
+    void start() {
+        scene.start();
+        toy::scene::install_kinematic_control_system(scene);
+        physics = coopa::physx::system::install_physics_system(scene);
+    }
+
+    void step(int frames, const glm::vec2& move = glm::vec2(0.0f)) {
+        for (int i = 0; i < frames; ++i) {
+            cc->move_input = move;
+            scene.update(1.0f / 60.0f);
+            scene.late_update(1.0f / 60.0f);
+        }
+    }
+
+    glm::vec3 feet() const { return player->get_transform()->transform().position(); }
+
+    /** @brief Deepest overlap of the character's capsule with anything but itself. */
+    float penetration() const {
+        coopa::physx::query::QueryFilter f;
+        f.include_triggers = false;
+        f.ignore = player->get_component<coopa::physx::components::RigidbodyComponent>()->body_id();
+        const glm::vec3 centre = feet() + glm::vec3(0.0f, 0.0f, 0.5f * cc->height);
+        float deepest = 0.0f;
+        for (const auto& p : physics->world().compute_penetration(coopa::physx::character::motor_capsule(cc->motor_settings()),
+                                                                  centre, glm::quat(1.0f, 0.0f, 0.0f, 0.0f), f))
+            deepest = std::max(deepest, p.depth);
+        return deepest;
+    }
+};
+
+/** @brief The default ground for character tests: a 60 m slab, top at z = 0. */
+void character_ground(CharacterRig& rig) { rig.box("ground", glm::vec3(0.0f, 0.0f, -0.5f), glm::vec3(60.0f, 60.0f, 1.0f)); }
+
+/**
+ * @brief Stairs with 0.3 m risers (under step_height 0.35) are walked up to the top; a single
+ *        0.5 m block stops the character at its face, on the ground.
+ */
+void test_character_climbs_stairs_and_is_blocked_by_tall_step() {
+    {
+        CharacterRig rig;
+        character_ground(rig);
+        for (int i = 0; i < 5; ++i) {
+            const float h = 0.3f * (i + 1);
+            rig.box("stair", glm::vec3(0.0f, 2.0f + 0.5f * i + 0.25f, 0.5f * h), glm::vec3(2.0f, 0.5f, h));
+        }
+        rig.box("deck", glm::vec3(0.0f, 2.0f + 2.5f + 2.0f, 0.75f), glm::vec3(2.0f, 4.0f, 1.5f));
+        rig.spawn(glm::vec3(0.0f));
+        rig.start();
+        rig.step(30);
+        expect(rig.cc->is_grounded(), "stairs: grounded at the start");
+        rig.step(100, glm::vec2(0.0f, 1.0f)); // ~3.5 m of stairs at up to 4 m/s, stopping on the 4 m deck
+        expect(rig.feet().y > 5.0f, "stairs: walked to the deck (y = " + std::to_string(rig.feet().y) + ")");
+        expect_near(rig.feet().z, 1.5f + rig.cc->skin, 0.02f, "stairs: standing on the deck at 1.5 m");
+        expect(rig.cc->is_grounded(), "stairs: grounded on the deck");
+    }
+    {
+        CharacterRig rig;
+        character_ground(rig);
+        rig.box("tall_step", glm::vec3(0.0f, 3.0f, 0.25f), glm::vec3(2.0f, 2.0f, 0.5f));
+        rig.spawn(glm::vec3(0.0f));
+        rig.start();
+        rig.step(150, glm::vec2(0.0f, 1.0f));
+        expect_near(rig.feet().y, 2.0f - rig.cc->radius - rig.cc->skin, 0.02f, "tall step: stopped at its face");
+        expect_near(rig.feet().z, rig.cc->skin, 0.01f, "tall step: still on the ground");
+        expect(rig.cc->is_grounded(), "tall step: grounded");
+    }
+}
+
+/**
+ * @brief A 60 degree slope (over slope_limit 45): a character dropped onto it is never grounded
+ *        on it and slides down to the floor; walking into it gains no more than a step's height.
+ */
+void test_character_slides_on_steep_slope() {
+    CharacterRig rig;
+    character_ground(rig);
+    // Slab rising toward +Y at 60 degrees; its top surface passes through (0, 0, 0) at y = 0.
+    const float a = glm::radians(60.0f);
+    rig.box("steep", glm::vec3(0.0f, 2.5f * std::cos(a) + 0.5f * std::sin(a), 2.5f * std::sin(a) - 0.5f * std::cos(a)),
+            glm::vec3(3.0f, 5.0f, 1.0f), glm::vec3(60.0f, 0.0f, 0.0f));
+    // Over the slope at y = 2 (surface z = 3.46), clear of it.
+    rig.spawn(glm::vec3(0.0f, 2.0f, 4.0f));
+    rig.start();
+    bool grounded_on_slope = false;
+    for (int i = 0; i < 20; ++i) {
+        rig.step(1);
+        if (rig.cc->is_grounded() && rig.feet().z > 0.5f) grounded_on_slope = true;
+    }
+    rig.step(160);
+    expect(!grounded_on_slope, "steep slope: never grounded on it");
+    expect(rig.feet().y < 0.0f, "steep slope: slid down off it (y = " + std::to_string(rig.feet().y) + ")");
+    expect_near(rig.feet().z, rig.cc->skin, 0.02f, "steep slope: ended on the floor");
+    expect(rig.cc->is_grounded(), "steep slope: grounded on the floor");
+
+    // Walking into it from the floor stays at floor level (plus at most a step onto the toe).
+    rig.step(120, glm::vec2(0.0f, 1.0f));
+    expect(rig.feet().z < rig.cc->step_height + 0.05f, "steep slope: can't be walked up (z = " + std::to_string(rig.feet().z) + ")");
+}
+
+/**
+ * @brief Walking down a 25 degree ramp, ground snap keeps the character grounded on every frame
+ *        (no hopping) until it reaches the floor.
+ */
+void test_character_stays_grounded_down_ramp() {
+    CharacterRig rig;
+    character_ground(rig);
+    // A deck at 2 m with a 25-degree ramp down toward +Y from its edge at y = 2.
+    rig.box("deck", glm::vec3(0.0f, 0.0f, 1.0f), glm::vec3(3.0f, 4.0f, 2.0f));
+    const float a = glm::radians(25.0f);
+    const float len = 2.0f / std::sin(a);
+    // Rotation -25 about X: rises toward -Y. Its top passes through (y = 2, z = 2).
+    rig.box("ramp", glm::vec3(0.0f, 2.0f + 0.5f * len * std::cos(a) - 0.1f * std::sin(a), 2.0f - 0.5f * len * std::sin(a) - 0.1f * std::cos(a)),
+            glm::vec3(3.0f, len, 0.2f), glm::vec3(-25.0f, 0.0f, 0.0f));
+    rig.spawn(glm::vec3(0.0f, 0.0f, 2.0f));
+    rig.cc->move_speed = 5.0f;
+    rig.start();
+    rig.step(30);
+    expect(rig.cc->is_grounded(), "ramp: grounded on the deck");
+    int airborne = 0;
+    for (int i = 0; i < 150 && rig.feet().y < 2.0f + len * std::cos(a) + 1.0f; ++i) {
+        rig.step(1, glm::vec2(0.0f, 1.0f));
+        if (!rig.cc->is_grounded()) ++airborne;
+    }
+    expect(rig.feet().y > 2.0f + len * std::cos(a), "ramp: walked off the bottom");
+    expect(airborne == 0, "ramp: grounded every frame walking down (" + std::to_string(airborne) + " airborne frames)");
+}
+
+/**
+ * @brief A kinematic platform moving along X at 1.5 m/s carries a character standing still on
+ *        it: the character keeps its offset from the platform centre and stays grounded.
+ */
+void test_character_rides_moving_platform() {
+    CharacterRig rig;
+    character_ground(rig);
+    SceneObject* deck = rig.box("platform", glm::vec3(0.0f, 0.0f, 0.15f), glm::vec3(3.0f, 3.0f, 0.3f), glm::vec3(0.0f), 1);
+    auto* mover = deck->add_component<toy::scene::KinematicMover>();
+    mover->mode = toy::scene::KinematicMoverMode::PingPong;
+    mover->axis = glm::vec3(1.0f, 0.0f, 0.0f);
+    mover->distance = 6.0f;
+    mover->speed = 0.08f; // peak speed = pi * distance * speed ~ 1.5 m/s
+    rig.spawn(glm::vec3(0.5f, 0.0f, 0.35f));
+    rig.start();
+    rig.step(20);
+    expect(rig.cc->is_grounded(), "platform: grounded on it");
+    const float offset0 = rig.feet().x - deck->get_transform()->transform().position().x;
+    float worst = 0.0f;
+    bool always_grounded = true;
+    for (int i = 0; i < 240; ++i) {
+        rig.step(1);
+        worst = std::max(worst, std::abs(rig.feet().x - deck->get_transform()->transform().position().x - offset0));
+        always_grounded = always_grounded && rig.cc->is_grounded();
+    }
+    expect(std::abs(deck->get_transform()->transform().position().x) > 1.0f, "platform: the platform moved");
+    expect(worst < 0.01f, "platform: rode along (worst drift " + std::to_string(worst) + " m)");
+    expect(always_grounded, "platform: stayed grounded while riding");
+    expect(rig.penetration() < 0.01f, "platform: not sunk into it");
+
+    // A lift: up and down 2 m at up to ~1 m/s. Physics still holds last frame's lift pose when
+    // the character moves, so allow a frame of travel (~1.7 cm) between feet and deck top.
+    CharacterRig lift_rig;
+    character_ground(lift_rig);
+    SceneObject* lift = lift_rig.box("lift", glm::vec3(0.0f, 0.0f, 1.5f), glm::vec3(3.0f, 3.0f, 0.3f), glm::vec3(0.0f), 1);
+    auto* lift_mover = lift->add_component<toy::scene::KinematicMover>();
+    lift_mover->axis = glm::vec3(0.0f, 0.0f, 1.0f);
+    lift_mover->distance = 2.0f;
+    lift_mover->speed = 0.15f;
+    lift_rig.spawn(glm::vec3(0.0f, 0.0f, 1.7f));
+    lift_rig.start();
+    lift_rig.step(10);
+    float worst_gap = 0.0f;
+    bool lift_grounded = true;
+    for (int i = 0; i < 400; ++i) {
+        lift_rig.step(1);
+        const float top = lift->get_transform()->transform().position().z + 0.15f;
+        worst_gap = std::max(worst_gap, std::abs(lift_rig.feet().z - top - lift_rig.cc->skin));
+        lift_grounded = lift_grounded && lift_rig.cc->is_grounded();
+    }
+    expect(worst_gap < 0.03f, "lift: feet follow the deck up and down (worst gap " + std::to_string(worst_gap) + " m)");
+    expect(lift_grounded, "lift: stayed grounded riding up and down");
+}
+
+/** @brief Walking into a 20 kg crate pushes it along; the character follows it. */
+void test_character_pushes_crate() {
+    CharacterRig rig;
+    character_ground(rig);
+    SceneObject* crate = rig.box("crate", glm::vec3(0.0f, 2.0f, 0.4f), glm::vec3(0.8f), glm::vec3(0.0f), 2, 20.0f);
+    rig.spawn(glm::vec3(0.0f));
+    rig.start();
+    rig.step(30);
+    const float y0 = crate->get_transform()->transform().position().y;
+    rig.step(180, glm::vec2(0.0f, 1.0f));
+    const float y1 = crate->get_transform()->transform().position().y;
+    expect(y1 - y0 > 2.0f, "crate: pushed " + std::to_string(y1 - y0) + " m");
+    expect(rig.feet().y > 2.0f, "crate: the character followed it");
+    expect(rig.penetration() < 0.03f, "crate: the character isn't inside it");
+
+    // ...and with pushing off, the crate is just a wall.
+    CharacterRig still;
+    character_ground(still);
+    SceneObject* crate2 = still.box("crate", glm::vec3(0.0f, 2.0f, 0.4f), glm::vec3(0.8f), glm::vec3(0.0f), 2, 20.0f);
+    still.spawn(glm::vec3(0.0f));
+    still.cc->push_dynamic_bodies = false;
+    still.start();
+    still.step(30);
+    const float z0 = crate2->get_transform()->transform().position().y;
+    still.step(120, glm::vec2(0.0f, 1.0f));
+    expect(crate2->get_transform()->transform().position().y - z0 < 0.3f, "crate: not pushed with push_dynamic_bodies off");
+}
+
+/**
+ * @brief A jump from flat ground peaks at jump_height (velocity-Verlet integration is exact for
+ *        constant gravity), fires on_jumped once, and lands with on_landed reporting the
+ *        take-off speed; a press 0.1 s before landing (jump_buffer) jumps again on touch-down.
+ */
+void test_character_jump_reaches_jump_height() {
+    CharacterRig rig;
+    character_ground(rig);
+    rig.spawn(glm::vec3(0.0f));
+    rig.cc->jump_height = 1.5f;
+    rig.start();
+    int jumps = 0;
+    float landed_speed = -1.0f;
+    rig.cc->on_jumped.connect([&] { ++jumps; });
+    rig.cc->on_landed.connect([&](float v) { landed_speed = v; });
+    rig.step(20);
+    const float z0 = rig.feet().z;
+    rig.cc->jump = true;
+    float apex = z0;
+    int frames = 0;
+    do {
+        rig.step(1);
+        apex = std::max(apex, rig.feet().z);
+        ++frames;
+    } while (!rig.cc->is_grounded() && frames < 200);
+    expect(jumps == 1, "jump: on_jumped fired once");
+    expect_near(apex - z0, 1.5f, 0.02f, "jump: apex at jump_height");
+    expect(rig.cc->is_grounded() && frames < 200, "jump: landed");
+    expect_near(landed_speed, std::sqrt(2.0f * 9.81f * 1.5f), 0.4f, "jump: on_landed reports the impact speed");
+
+    // Buffered: press while still falling, a few frames before touch-down.
+    rig.cc->jump = true;
+    rig.step(1);
+    expect(jumps == 2, "jump: grounded press jumps");
+    int f = 0;
+    while (rig.feet().z > z0 + 0.15f || rig.cc->velocity().z > 0.0f) { rig.step(1); if (++f > 200) break; }
+    rig.cc->jump = true; // ~0.15 m above the ground, falling: inside the buffer window
+    rig.step(30);
+    expect(jumps == 3, "jump: a press just before landing is buffered into a jump");
+}
+
+/**
+ * @brief 600 frames of random walking, sprinting and jumping across stairs, a tall block, a
+ *        steep slope, a walkable ramp and a wall corner: the capsule never ends a frame
+ *        overlapping anything.
+ */
+void test_character_never_penetrates_under_random_input() {
+    CharacterRig rig;
+    character_ground(rig);
+    for (int i = 0; i < 4; ++i) {
+        const float h = 0.25f * (i + 1);
+        rig.box("stair", glm::vec3(-3.0f, 1.5f + 0.4f * i, 0.5f * h), glm::vec3(2.0f, 0.4f, h));
+    }
+    rig.box("block", glm::vec3(3.0f, 2.0f, 0.4f), glm::vec3(1.5f, 1.5f, 0.8f));
+    rig.box("steep", glm::vec3(0.0f, 4.5f, 0.8f), glm::vec3(3.0f, 3.0f, 0.4f), glm::vec3(55.0f, 0.0f, 0.0f));
+    rig.box("ramp", glm::vec3(-4.0f, -3.0f, 0.4f), glm::vec3(3.0f, 4.0f, 0.2f), glm::vec3(-20.0f, 0.0f, 0.0f));
+    rig.box("wall_a", glm::vec3(5.0f, -2.0f, 1.0f), glm::vec3(0.4f, 6.0f, 2.0f));
+    rig.box("wall_b", glm::vec3(2.0f, -5.0f, 1.0f), glm::vec3(6.0f, 0.4f, 2.0f), glm::vec3(0.0f, 0.0f, 20.0f));
+    rig.box("ceiling", glm::vec3(0.0f, -2.5f, 2.4f), glm::vec3(2.0f, 2.0f, 0.2f));
+    rig.spawn(glm::vec3(0.0f));
+    rig.start();
+
+    std::mt19937 rng(1234);
+    std::uniform_real_distribution<float> u(-1.0f, 1.0f);
+    glm::vec2 move(0.0f);
+    float worst = 0.0f;
+    for (int i = 0; i < 600; ++i) {
+        if (i % 20 == 0) move = glm::vec2(u(rng), u(rng));
+        rig.cc->sprint = u(rng) > 0.3f;
+        if (u(rng) > 0.93f) rig.cc->jump = true;
+        rig.cc->move_basis_yaw_deg = 30.0f * u(rng);
+        rig.step(1, move);
+        worst = std::max(worst, rig.penetration());
+        const glm::vec3 p = rig.feet();
+        if (std::abs(p.x) > 8.0f || std::abs(p.y) > 8.0f) {  // keep it in the obstacle course
+            rig.cc->teleport(glm::vec3(0.0f));
+        }
+    }
+    expect(worst < 0.005f, "random input: never penetrating (worst " + std::to_string(worst) + " m)");
+    expect(rig.feet().z > -0.01f, "random input: never fell through the floor");
+}
+
+/**
+ * @brief A tracking orbit camera collides: a wall between the tracked object and the camera
+ *        pulls it in to the wall; with collide off it stays at its distance.
+ */
+void test_camera_controller_collides_with_walls() {
+    for (bool collide : {true, false}) {
+        CharacterRig rig;
+        character_ground(rig);
+        rig.box("wall", glm::vec3(0.0f, -3.0f, 2.0f), glm::vec3(6.0f, 0.4f, 4.0f));
+        rig.spawn(glm::vec3(0.0f));
+        auto cam_obj = std::make_unique<SceneObject>("camera");
+        cam_obj->add_component<TransformComponent>()->transform().set_position(glm::vec3(0.0f, -8.0f, 1.0f));
+        auto* cam = cam_obj->add_component<toy::scene::CameraController>();
+        cam->tracker = "player";
+        cam->target_offset = glm::vec3(0.0f, 0.0f, 1.0f);
+        cam->distance = 8.0f;
+        cam->yaw_deg = 0.0f;
+        cam->pitch_deg = 5.0f;
+        cam->collide = collide;
+        cam->collision_radius = 0.2f;
+        SceneObject* cam_raw = cam_obj.get();
+        rig.scene.add_root_object(std::move(cam_obj));
+        rig.start();
+        rig.step(60);
+        const float d = glm::length(cam_raw->get_transform()->transform().position() - glm::vec3(0.0f, 0.0f, 1.0f));
+        if (collide) {
+            // The wall's near face is at y = -2.8; the sphere stops radius short of it.
+            expect(d < 2.9f && d > 2.4f, "camera collision: pulled in to the wall (distance " + std::to_string(d) + ")");
+        } else {
+            expect_near(d, 8.0f, 0.01f, "camera collision: collide off keeps the distance");
+        }
+    }
+}
+
+/** @brief FirstPerson: the camera sits at eye height on the tracked character, and mouse yaw
+ *         turns the character; W then walks the way the camera faces. */
+void test_camera_controller_first_person_turns_character() {
+    CharacterRig rig;
+    character_ground(rig);
+    rig.spawn(glm::vec3(0.0f));
+    auto cam_obj = std::make_unique<SceneObject>("camera");
+    cam_obj->add_component<TransformComponent>();
+    auto* cam = cam_obj->add_component<toy::scene::CameraController>();
+    cam->mode = toy::scene::CameraControlMode::FirstPerson;
+    cam->tracker = "player";
+    cam->eye_height = 1.6f;
+    cam->mouse_sensitivity = 1.0f;
+    SceneObject* cam_raw = cam_obj.get();
+    rig.scene.add_root_object(std::move(cam_obj));
+    rig.start();
+    rig.step(10);
+    cam->mouse_delta = glm::vec2(90.0f, 0.0f); // +90 degrees of yaw in one frame
+    rig.step(1);
+    cam->mouse_delta = glm::vec2(0.0f);
+    rig.step(2);
+    expect_near(rig.cc->yaw_deg(), 90.0f, 0.5f, "first person: mouse yaw turned the character");
+    const glm::vec3 eye = cam_raw->get_transform()->transform().position();
+    expect_near(eye.z, rig.feet().z + 1.6f, 0.01f, "first person: camera at eye height");
+    rig.cc->move_basis_yaw_deg = rig.cc->yaw_deg(); // what the engine driver derives from the camera
+    rig.cc->face_movement = false;
+    rig.step(60, glm::vec2(0.0f, 1.0f));
+    // Yaw 90 faces -X (forward(yaw) = (-sin, cos)).
+    expect(rig.feet().x < -1.0f && std::abs(rig.feet().y) < 0.1f, "first person: W walks where the camera faces");
 }
 
 // --- Navigation ---------------------------------------------------------------------------
@@ -3494,6 +3977,118 @@ void test_local_light_shadows() {
 }
 
 /**
+ * @brief Motion blur (toyengine/render/passes/motion_blur_pass.h), two claims on one Engine over
+ *        assets/scenes/tests/rendering/motion_blur_test with its scripted movers removed, so every
+ *        motion below is driven by hand under FIXED_DT=0:
+ *   - off is free: with `motion_blur` false nothing is recorded, and toggling it on and back off
+ *     leaves the capture byte-identical (SSR off, and the two captures 256 frames apart, the
+ *     period of the frame-indexed shadow noise);
+ *   - a block sliding along X smears beside itself and nowhere above or below.
+ * Every capture comes kNoiseCycle ticks after a reset, so on/off pairs see identical poses.
+ */
+void test_motion_blur_render() {
+    ScopedEnv fixed_dt("FIXED_DT", "0");
+    ScopedEnv no_input("NO_INPUT", "1");
+
+    toy::core::AppConfig config =
+        make_test_config("assets/scenes/tests/rendering/motion_blur_test/scene.yaml", 640, 360, 320, 180);
+    config.render.ssr_enabled = false;   // its frame-indexed trace dither would differ between captures
+    toy::core::Engine engine(std::move(config));
+    auto& rc = engine.render_config();
+    auto& scene = engine.scene();
+    auto* mover   = scene.find_object("mover");
+    auto* spinner = scene.find_object("spinner");
+    auto* camera  = scene.find_object("camera");
+    expect(mover && spinner && camera, "motion blur: the test scene has its mover, spinner and camera");
+    if (!mover || !spinner || !camera) return;
+    mover->remove_component<toy::scene::KinematicMover>();
+    spinner->set_active(false);
+    if (auto* orbit = camera->get_component<toy::scene::CameraController>()) orbit->auto_rotate_deg_per_sec = 0.0f;
+
+    rc.outline_enabled = rc.palette_enabled = rc.dither_enabled = false;   // the plain HDR image
+    rc.motion_blur_intensity  = 1.0f;     // a full-frame shutter: the strongest signal
+    const glm::vec3 start(-2.5f, 3.0f, 1.2f);
+    auto run = [&](bool blur, float step_m) {
+        rc.motion_blur = blur;
+        for (int i = 0; i < kNoiseCycle; ++i) {
+            mover->get_transform()->transform().set_position(start + glm::vec3(step_m * float(i), 0.0f, 0.0f));
+            engine.tick();
+        }
+        return engine.capture_image(true);
+    };
+
+    // --- Off is free ---
+    rc.motion_blur = false;
+    tick_frames(engine, kNoiseCycle);
+    run(false, 0.0f);   // settle after moving the block to its start
+    const uint64_t recorded0 = engine.pipeline().motion_blur_frames();
+    const Frame static_off = run(false, 0.0f);
+    expect(engine.pipeline().motion_blur_frames() == recorded0, "motion blur off: no pass is recorded");
+    run(true, 0.0f);
+    expect(engine.pipeline().motion_blur_frames() >= recorded0 + kNoiseCycle, "motion blur on: the pass records every frame");
+    rc.motion_blur = false;
+    const uint64_t recorded1 = engine.pipeline().motion_blur_frames();
+    // The shadow PCF kernel rotates with frame_index_ & 0xFF, so the comparison capture lands
+    // exactly 256 frames after the first one.
+    tick_frames(engine, 256 - 2 * kNoiseCycle);
+    const Frame static_off_again = run(false, 0.0f);
+    expect(engine.pipeline().motion_blur_frames() == recorded1, "motion blur switched off at runtime: no pass is recorded");
+    const long long off_diff = count_diff(static_off_again, static_off);
+    expect(off_diff == 0, "motion blur switched back off: the capture is byte-identical to before");
+    if (off_diff != 0) {
+        std::cerr << "         off/off diff " << off_diff << " px\n";
+        dump_frame(static_off, "motion_blur_off_a");
+        dump_frame(static_off_again, "motion_blur_off_b");
+    }
+
+    // --- A block sliding along +X: blur beside it, none above or below ---
+    const float step = 0.8f;   // m per frame: ~10 px at this distance and resolution
+    const Frame moving_off = run(false, step);
+    const Frame moving_on  = run(true, step);
+    // Where the block is: the same frame without it.
+    mover->set_active(false);
+    const Frame no_block = run(false, 0.0f);
+    mover->set_active(true);
+    uint32_t bx0 = moving_off.width, by0 = moving_off.height, bx1 = 0, by1 = 0;
+    for (uint32_t y = 0; y < moving_off.height; ++y)
+        for (uint32_t x = 0; x < moving_off.width; ++x) {
+            const size_t i = (static_cast<size_t>(y) * moving_off.width + x) * moving_off.channels;
+            bool d = false;
+            for (int ch = 0; ch < 3; ++ch) d |= std::abs(int(moving_off.pixels[i + ch]) - int(no_block.pixels[i + ch])) > 24;
+            // The block's own pixels only, not its shadow on the floor below it.
+            if (d && moving_off.pixels[i] > 150) { bx0 = std::min(bx0, x); by0 = std::min(by0, y); bx1 = std::max(bx1, x); by1 = std::max(by1, y); }
+        }
+    expect(bx1 > bx0 + 4 && by1 > by0 + 4, "motion blur: the block is on screen");
+    if (bx1 <= bx0 + 4 || by1 <= by0 + 4) { dump_frame(moving_off, "motion_blur_moving_off"); return; }
+    long long beside = 0, above_below = 0;
+    const int margin = 12;
+    for (uint32_t y = 0; y < moving_off.height; ++y)
+        for (uint32_t x = 0; x < moving_off.width; ++x) {
+            const size_t i = (static_cast<size_t>(y) * moving_off.width + x) * moving_off.channels;
+            bool d = false;
+            for (int ch = 0; ch < 3; ++ch) d |= std::abs(int(moving_on.pixels[i + ch]) - int(moving_off.pixels[i + ch])) > 8;
+            if (!d) continue;
+            const bool in_rows = y >= by0 && y <= by1;
+            const bool in_cols = x >= bx0 && x <= bx1;
+            const bool near_rows = int(y) >= int(by0) - margin && int(y) <= int(by1) + margin;
+            const bool near_cols = int(x) >= int(bx0) - margin && int(x) <= int(bx1) + margin;
+            if (in_rows && near_cols && !in_cols) ++beside;
+            if (in_cols && near_rows && !in_rows) ++above_below;
+        }
+    const long long block_rows = static_cast<long long>(by1 - by0 + 1);
+    expect_at_least(beside, block_rows, "motion blur: a block moving along X smears beside itself");
+    expect(above_below <= block_rows / 4, "motion blur: ...and not above or below it");
+    if (beside < block_rows || above_below > block_rows / 4) {
+        std::cerr << "         block [" << bx0 << "," << by0 << "]-[" << bx1 << "," << by1 << "]: " << beside
+                  << " px changed beside it, " << above_below << " above/below\n";
+        dump_frame(moving_off, "motion_blur_moving_off");
+        dump_frame(moving_on, "motion_blur_moving_on");
+    }
+
+    mover->set_active(true);
+}
+
+/**
  * @brief Every debug_view channel renders something -- not a uniformly black frame (the
  * [[ssao-debug-view-broken]] failure mode this pass replaces, where a debug view came out
  * fully black because the post chain silently ate it) -- and differs from debug_view: off.
@@ -3788,6 +4383,59 @@ void test_material_maps_change_output() {
         dump_frame(flat, "material_maps_flat");
         dump_frame(mapped, "material_maps_mapped");
     }
+}
+
+/**
+ * @brief Compute through a live Engine's device (gfxcoopa's compute API, Phase 9 smoke test):
+ * the device reports compute on its graphics queue, a dispatch of gfxcoopa's test fill kernel
+ * (resolved through the engine's shader roots, like any engine shader) writes a storage buffer
+ * that reads back exactly, and the engine keeps rendering afterwards. The fuller coverage --
+ * dispatch_indirect(), compute-written vertex buffers -- is gfxcoopa's own test suite.
+ */
+void test_compute_dispatch_through_engine_device() {
+    ScopedEnv fixed_dt("FIXED_DT", "0");
+    ScopedEnv no_input("NO_INPUT", "1");
+    using namespace coopa::gfx;
+
+    toy::core::Engine engine(make_test_config("assets/scenes/material_maps_test/scene_flat.yaml", 320, 180, 160, 90));
+    tick_frames(engine, 1);
+    core::Device& device = engine.device();
+    expect(device.supports_compute(), "compute: the engine's device reports compute on its graphics queue");
+    if (!device.supports_compute()) return;
+    expect(device.compute_caps().max_storage_buffer_range >= (1u << 27), "compute: storage-buffer range is queried");
+
+    const auto& layout_paths = toy::core::RuntimeLayout::current();
+    pipeline::ShaderLibrary shaders(layout_paths.shader_roots(layout_paths.project_root()));
+    expect(shaders.has("test_compute_fill.comp"), "compute: .comp shaders compile into the engine's shader roots");
+    if (!shaders.has("test_compute_fill.comp")) return;
+
+    auto set_layout = pipeline::DescriptorLayoutBuilder().storage_buffer(0, ShaderStage::Compute).build(device);
+    auto pool       = pipeline::DescriptorPoolBuilder().add_sets(set_layout, 1).build(device);
+    pipeline::ComputePipeline fill(device, shaders.resolve("test_compute_fill.comp"), {&set_layout},
+                                   {{ShaderStage::Compute, 0, 2 * sizeof(uint32_t)}});
+    const uint32_t count = 4096;
+    auto out = memory::make_storage_buffer(device, engine.allocator(), count * sizeof(uint32_t),
+                                           BufferUsage::None, MemoryResidency::GpuToCpu);
+    pipeline::DescriptorSet set(device, pool, set_layout);
+    set.bind_storage_buffer(0, out);
+
+    engine.command_pool().submit_once([&](command::CommandBuffer& cmd) {
+        const uint32_t push[2] = {count, 11u};
+        cmd.bind_pipeline(fill);
+        cmd.bind_descriptor_set(set);
+        cmd.push_constants(ShaderStage::Compute, 0, sizeof(push), push);
+        cmd.dispatch(pipeline::ComputePipeline::groups_for(count, 64));
+        cmd.buffer_barrier(BufferAccess::ComputeWrite, BufferAccess::HostRead);
+    });
+    std::vector<uint32_t> got(count);
+    out.download(got.data(), count * sizeof(uint32_t));
+    int bad = 0;
+    for (uint32_t i = 0; i < count; ++i) bad += got[i] != i * 3u + 11u;
+    expect(bad == 0, "compute: a dispatch on the engine's device writes the storage buffer it reads back");
+
+    tick_frames(engine, 2);
+    const Frame frame = engine.capture_image(/*low_res=*/true);
+    expect(!frame.pixels.empty(), "compute: the engine keeps rendering after a compute submit");
 }
 
 // =====================================================================================
@@ -5535,13 +6183,18 @@ void test_engine_applies_scene_settings() {
     ScopedEnv fixed_dt("FIXED_DT", "0");
     ScopedEnv no_input("NO_INPUT", "1");
     const std::filesystem::path dir = fresh_tmp_subdir("scene_settings");
+    toy::core::Engine engine(make_test_config("assets/scenes/demos/pixel_demo/scene.yaml", 320, 180, 160, 90));
+    tick_frames(engine, 2);
+    // A switch fixed at pipeline construction: the scene flips it, so the renderer rebuilds.
+    const bool project_ssr = engine.pipeline().render_config().ssr_enabled;
+    const int rebuilds = engine.pipeline_rebuild_count();
     {
         std::ofstream out(dir / "scene.yaml");
         out << "format: blender\n"
                "scene:\n"
                "  scene_name: settings_test\n"
                "  settings:\n"
-               "    render: { exposure: 2.5, fog_density: 0.09 }\n"
+               "    render: { exposure: 2.5, fog_density: 0.09, ssr_enabled: " << (project_ssr ? "false" : "true") << " }\n"
                "    physics: { gravity: { x: 0.0, y: 0.0, z: -2.0 } }\n"
                "  root_objects:\n"
                "    - name: camera\n"
@@ -5551,8 +6204,6 @@ void test_engine_applies_scene_settings() {
                "        - type: Camera\n"
                "          main: true\n";
     }
-    toy::core::Engine engine(make_test_config("assets/scenes/demos/pixel_demo/scene.yaml", 320, 180, 160, 90));
-    tick_frames(engine, 2);
     const float project_exposure = engine.render_config().exposure;
     const float project_fog = engine.render_config().fog_density;
     expect(std::abs(project_exposure - 2.5f) > 1e-3f, "scene settings: the project's exposure differs from the override");
@@ -5565,12 +6216,17 @@ void test_engine_applies_scene_settings() {
     auto* physics = dynamic_cast<coopa::physx::system::PhysicsSystem*>(engine.scene().find_system("Physics"));
     expect(physics && std::abs(physics->world().gravity().z + 2.0f) < 1e-5f,
            "scene settings: the scene's physics overrides configure its physics");
+    expect(engine.pipeline().render_config().ssr_enabled == !project_ssr && engine.pipeline_rebuild_count() == rebuilds + 1,
+           "scene settings: a startup-fixed override rebuilds the renderer in place (" +
+               std::to_string(engine.pipeline_rebuild_count() - rebuilds) + " rebuilds)");
 
     engine.load_scene("assets/scenes/pixel_demo/scene.yaml");
     tick_frames(engine, 2);
     expect(std::abs(engine.render_config().exposure - project_exposure) < 1e-5f &&
            std::abs(engine.render_config().fog_density - project_fog) < 1e-5f,
            "scene settings: a scene without overrides runs with the project's settings again");
+    expect(engine.pipeline().render_config().ssr_enabled == project_ssr && engine.pipeline_rebuild_count() == rebuilds + 2,
+           "scene settings: ...rebuilding back to the project's switch");
     std::filesystem::remove_all(dir);
 }
 
@@ -6642,6 +7298,148 @@ void test_rig_clip_drives_hierarchy() {
     (void)root_raw;
 }
 
+/** @brief A mannequin-proportioned pair of legs under a pelvis (bones as in the mannequin rig:
+ *         pelvis 0.95 m up, thigh 0.43, shin 0.41 -- ankles 0.06 m above the feet origin). */
+SceneObject* build_leg_rig(CharacterRig& rig, const glm::vec3& at) {
+    auto root = std::make_unique<SceneObject>("legs");
+    root->add_component<TransformComponent>()->transform().set_position(at);
+    SceneObject* r = rig.scene.add_root_object(std::move(root));
+    auto bone = [](SceneObject* parent, const std::string& name, const glm::vec3& pos) {
+        auto obj = std::make_unique<SceneObject>(name);
+        auto* tc = obj->add_component<TransformComponent>();
+        tc->transform().set_position(pos);
+        tc->set_parent_transform(&parent->get_transform()->transform());
+        return parent->add_child(std::move(obj));
+    };
+    SceneObject* pelvis = bone(r, "pelvis", glm::vec3(0.0f, 0.0f, 0.95f));
+    for (const char* side : {"l", "r"}) {
+        const float sx = std::string(side) == "l" ? -0.1f : 0.1f;
+        SceneObject* thigh = bone(pelvis, std::string("thigh_") + side, glm::vec3(sx, 0.0f, -0.05f));
+        // A slight animated-looking bend, so the knee has a direction even before IK.
+        thigh->get_transform()->transform().set_rotation(glm::vec3(10.0f, 0.0f, 0.0f));
+        SceneObject* shin = bone(thigh, std::string("shin_") + side, glm::vec3(0.0f, 0.0f, -0.43f));
+        shin->get_transform()->transform().set_rotation(glm::vec3(-25.0f, 0.0f, 0.0f));
+        bone(shin, std::string("foot_") + side, glm::vec3(0.0f, 0.0f, -0.41f));
+    }
+    // The character's own capsule body, which the foot rays start inside and must ignore.
+    auto* rb = r->add_component<coopa::physx::components::RigidbodyComponent>();
+    rb->is_kinematic = true;
+    rb->use_gravity = false;
+    auto* cap = r->add_component<coopa::physx::components::CapsuleCollider>();
+    cap->set_radius(0.3f);
+    cap->set_height(1.8f);
+    cap->set_direction(2);
+    cap->set_center(glm::vec3(0.0f, 0.0f, 0.9f));
+    r->add_component<toy::scene::FootIK>()->blend_speed = 0.0f;
+    return r;
+}
+
+/** @brief FootIK on a step: a foot over a 0.15 m block is raised onto it and the other stays on
+ *         the ground; over a 0.2 m dip the pelvis drops so the low foot reaches down, the other
+ *         knee bends; weight 0 returns the animated (input) pose. */
+void test_rig_foot_ik_on_step() {
+    auto world_z = [](SceneObject* root, const std::string& path) {
+        SceneObject* o = coopa::anim::resolve_ik_path(root, nullptr, path);
+        return o ? glm::vec3(o->get_transform()->get_world_matrix()[3]) : glm::vec3(-99.0f);
+    };
+    const std::string foot_l = "pelvis/thigh_l/shin_l/foot_l", foot_r = "pelvis/thigh_r/shin_r/foot_r";
+    {
+        CharacterRig rig;
+        character_ground(rig);
+        rig.box("step", glm::vec3(0.4f, 0.0f, 0.075f), glm::vec3(0.5f, 0.8f, 0.15f));   // x 0.15 .. 0.65
+        SceneObject* legs = build_leg_rig(rig, glm::vec3(0.1f, 0.0f, 0.0f));   // right foot at x 0.2 (on it), left at 0.0
+        rig.scene.start();
+        rig.physics = coopa::physx::system::install_physics_system(rig.scene);
+        coopa::anim::install_ik_system(rig.scene);
+        const float rest_z = world_z(legs, foot_l).z;
+        for (int i = 0; i < 3; ++i) { rig.scene.update(1.0f / 60.0f); rig.scene.late_update(1.0f / 60.0f); }
+        auto* ik = legs->get_component<toy::scene::FootIK>();
+        expect_near(ik->foot_offset(1), 0.15f, 1e-3f, "foot ik: the right ray found the step top (not the own capsule)");
+        expect_near(ik->foot_offset(0), 0.0f, 1e-3f, "foot ik: the left ray found the ground");
+        expect_near(ik->pelvis_offset(), 0.0f, 1e-5f, "foot ik: nothing below the base plane, so the pelvis stays");
+        expect_near(world_z(legs, foot_r).z, rest_z + 0.15f, 0.01f, "foot ik: the right foot is raised onto the step");
+        expect_near(world_z(legs, foot_l).z, rest_z, 0.01f, "foot ik: the left foot stays on the ground");
+        const glm::vec3 knee_r = world_z(legs, "pelvis/thigh_r/shin_r");
+        expect(knee_r.y > 0.03f, "foot ik: the raised leg's knee bends forward (y " + std::to_string(knee_r.y) + ")");
+
+        // Weight 0: back to the input pose exactly (no IK left baked into the bones).
+        ik->weight = 0.0f;
+        rig.scene.update(1.0f / 60.0f);
+        rig.scene.late_update(1.0f / 60.0f);
+        expect_near(world_z(legs, foot_r).z, rest_z, 1e-4f, "foot ik: weight 0 restores the animated pose");
+    }
+    {
+        CharacterRig rig;
+        // Ground at z = 0 on the right (x > 0), a 0.2 m dip on the left.
+        rig.box("ground_r", glm::vec3(15.0f, 0.0f, -0.5f), glm::vec3(30.0f, 30.0f, 1.0f));
+        rig.box("ground_l", glm::vec3(-15.0f, 0.0f, -0.7f), glm::vec3(30.0f, 30.0f, 1.0f));
+        SceneObject* legs = build_leg_rig(rig, glm::vec3(0.0f));
+        rig.scene.start();
+        rig.physics = coopa::physx::system::install_physics_system(rig.scene);
+        coopa::anim::install_ik_system(rig.scene);
+        const float rest_z = world_z(legs, foot_r).z;
+        for (int i = 0; i < 3; ++i) { rig.scene.update(1.0f / 60.0f); rig.scene.late_update(1.0f / 60.0f); }
+        auto* ik = legs->get_component<toy::scene::FootIK>();
+        expect_near(ik->pelvis_offset(), -0.2f, 1e-3f, "foot ik: the pelvis drops by the lower foot's offset");
+        expect_near(world_z(legs, "pelvis").z, 0.75f, 1e-3f, "foot ik: ...which moves the pelvis bone down");
+        expect_near(world_z(legs, foot_l).z, rest_z - 0.2f, 0.01f, "foot ik: the left foot reaches down into the dip");
+        expect_near(world_z(legs, foot_r).z, rest_z, 0.01f, "foot ik: the right foot stays on its ground (knee bent)");
+        // Several frames on: stable, and the pelvis offset is not compounded on the bone.
+        for (int i = 0; i < 10; ++i) { rig.scene.update(1.0f / 60.0f); rig.scene.late_update(1.0f / 60.0f); }
+        expect_near(world_z(legs, "pelvis").z, 0.75f, 1e-3f, "foot ik: the pelvis drop does not accumulate");
+    }
+}
+
+/** @brief A root-motion walk drives a CharacterController: the Animator hands the clip's pelvis
+ *         travel to the controller (use_root_motion), which moves by it (colliding), while the
+ *         pelvis bone stays over the feet. Without use_root_motion the Animator moves the Transform. */
+void test_rig_root_motion_moves_character() {
+    CharacterRig rig;
+    character_ground(rig);
+    rig.spawn(glm::vec3(0.0f));
+    SceneObject* pelvis = nullptr;
+    {
+        auto obj = std::make_unique<SceneObject>("pelvis");
+        auto* tc = obj->add_component<TransformComponent>();
+        tc->transform().set_position(glm::vec3(0.0f, 0.0f, 0.95f));
+        tc->set_parent_transform(&rig.player->get_transform()->transform());
+        pelvis = rig.player->add_child(std::move(obj));
+    }
+    auto* animator = rig.player->add_component<coopa::anim::Animator>();
+    animator->apply_root_motion = true;
+    const fkyaml::node clip_yaml = fkyaml::node::deserialize(std::string(
+        "clip:\n"
+        "  name: walk\n"
+        "  wrap: loop\n"
+        "  length: 1.0\n"
+        "  root_motion: {object: pelvis, translation: xy}\n"
+        "  tracks:\n"
+        "    - object: pelvis\n"
+        "      property: position.y\n"
+        "      keys:\n"
+        "        - {time: 0.0, value: 0}\n"
+        "        - {time: 1.0, value: 1.5}\n"));
+    animator->add_state("walk", std::make_shared<coopa::anim::AnimationClip>(coopa::anim::parse_clip(clip_yaml)));
+    animator->auto_play = "walk";
+    rig.cc->use_root_motion = true;
+    rig.box("wall", glm::vec3(0.0f, 4.0f, 1.0f), glm::vec3(4.0f, 0.4f, 2.0f));   // face at y 3.8
+    rig.start();
+    coopa::anim::install_animation_system(rig.scene);
+    rig.step(120);   // 2 s of walking at 1.5 m/s (one frame of lag: the controller runs before animation)
+    expect_near(rig.feet().y, 1.5f * (2.0f - 1.0f / 60.0f), 0.02f, "root motion: the controller walked the clip's travel");
+    expect(rig.cc->is_grounded(), "root motion: ...on the ground");
+    expect_near(pelvis->get_transform()->transform().position().y, 0.0f, 1e-5f, "root motion: the pelvis bone is held over the feet");
+
+    // On into the wall: the controller still collides.
+    rig.step(180);
+    expect(rig.feet().y < 3.8f - rig.cc->radius + 0.05f, "root motion: a wall stops the root-motion walk (y " + std::to_string(rig.feet().y) + ")");
+
+    // Root motion off on the controller: it declines, and the delta is still extracted.
+    rig.cc->use_root_motion = false;
+    rig.step(1);
+    expect(animator->root_motion_delta().translation.y > 0.0f, "root motion: still extracted with the controller declining");
+}
+
 /** @brief A mesh whose vertex groups name the bones skins with no joints: the palette comes
  *         from the groups (strongest four per vertex), and a vertex follows its groups' blend. */
 void test_rig_vertex_group_skinning() {
@@ -6761,6 +7559,148 @@ void test_animation_test_scene_runs() {
     expect(max_turn > 0.05f, "animation_test: the arm's elbow bends");
     expect(smr->is_ready() && smr->bones().size() == 4 && max_tip_x > 0.4f,
            "animation_test: the tentacle's skin follows its bones (tip x " + std::to_string(max_tip_x) + ")");
+
+    // IK: the watcher's head follows its orbiting target (LookAtIK), the reacher's hand stays on
+    // its drifting target (TwoBoneIK).
+    auto* head = scene.find_object("head");
+    auto* look_target = scene.find_object("look_target");
+    auto* hand = scene.find_object("reach_hand");
+    auto* reach_target = scene.find_object("reach_target");
+    expect(head && look_target && hand && reach_target, "animation_test: the IK rigs loaded");
+    if (!head || !look_target || !hand || !reach_target) return;
+    auto pos = [](SceneObject* o) { return glm::vec3(o->get_transform()->get_world_matrix()[3]); };
+    float max_gaze_err = 0.0f, max_reach_err = 0.0f, max_head_turn = 0.0f;
+    const glm::vec3 fwd0 = coopa::anim::ik::rotation_of(head->get_transform()->get_world_matrix()) * glm::vec3(0, -1, 0);
+    for (int i = 0; i < 120; ++i) {
+        tick_frames(engine, 1);
+        const glm::vec3 fwd = coopa::anim::ik::rotation_of(head->get_transform()->get_world_matrix()) * glm::vec3(0, -1, 0);
+        const glm::vec3 to = glm::normalize(pos(look_target) - pos(head));
+        max_gaze_err = std::max(max_gaze_err, glm::degrees(std::acos(std::clamp(glm::dot(fwd, to), -1.0f, 1.0f))));
+        max_head_turn = std::max(max_head_turn, glm::degrees(std::acos(std::clamp(glm::dot(fwd, fwd0), -1.0f, 1.0f))));
+        max_reach_err = std::max(max_reach_err, glm::length(pos(hand) - pos(reach_target)));
+    }
+    expect(max_head_turn > 30.0f, "animation_test: the watcher's head turns (" + std::to_string(max_head_turn) + " deg)");
+    expect(max_gaze_err < 25.0f, "animation_test: ...toward its target (worst lag " + std::to_string(max_gaze_err) + " deg)");
+    expect(max_reach_err < 0.02f, "animation_test: the reacher's hand stays on its target (worst " + std::to_string(max_reach_err) + " m)");
+}
+
+/** @brief The skinning palette maths (shared by the CPU and GPU paths): at the rest pose every
+ *         skin matrix is the identity whatever the owner's transform, a moved bone's matrix moves
+ *         its vertices in the owner's object space, and the palette-only culling bounds contain
+ *         every skinned vertex. */
+void test_rig_skinning_palette_math() {
+    using SMR = toy::scene::SkinnedMeshRenderer;
+    const glm::mat4 owner = glm::translate(glm::mat4(1.0f), glm::vec3(3, -2, 1)) *
+                            glm::rotate(glm::mat4(1.0f), 0.7f, glm::vec3(0, 0, 1));
+    const std::vector<glm::mat4> bone_rest = {
+        owner * glm::translate(glm::mat4(1.0f), glm::vec3(0, 0, 0)),
+        owner * glm::translate(glm::mat4(1.0f), glm::vec3(0, 0, 1)) * glm::rotate(glm::mat4(1.0f), 0.3f, glm::vec3(1, 0, 0))};
+    // Rest-pose inverse binds, as resolve_bones_() builds them: bone_rest^-1 * owner_rest.
+    std::vector<glm::mat4> inv_bind;
+    for (const glm::mat4& b : bone_rest) inv_bind.push_back(glm::inverse(b) * owner);
+    const std::vector<uint8_t> valid = {1, 1};
+    std::vector<glm::mat4> pal;
+    SMR::compute_palette(owner, bone_rest, valid, inv_bind, pal);
+    float err = 0.0f;
+    for (const glm::mat4& m : pal)
+        for (int c = 0; c < 4; ++c) err = std::max(err, glm::length(m[c] - glm::mat4(1.0f)[c]));
+    expect(pal.size() == 2 && err < 1e-5f, "palette: identity at the rest pose under a moved, rotated owner");
+
+    // Bone 1 lifts 0.5 m along the owner's z: its skin matrix is a pure object-space +z.
+    std::vector<glm::mat4> posed = bone_rest;
+    posed[1] = owner * glm::translate(glm::mat4(1.0f), glm::vec3(0, 0, 0.5f)) * glm::inverse(owner) * bone_rest[1];
+    SMR::compute_palette(owner, posed, valid, inv_bind, pal);
+    const glm::vec3 moved = glm::vec3(pal[1] * glm::vec4(0.2f, 0.1f, 1.0f, 1.0f));
+    expect(glm::length(moved - glm::vec3(0.2f, 0.1f, 1.5f)) < 1e-5f, "palette: a moved bone moves its vertices in owner space");
+    // An unresolved bone stays identity.
+    SMR::compute_palette(owner, posed, {1, 0}, inv_bind, pal);
+    expect(pal[1] == glm::mat4(1.0f), "palette: an unresolved bone is the identity");
+
+    // Bounds from bone boxes contain every skinned vertex.
+    const fkyaml::node mesh = fkyaml::node::deserialize(std::string(
+        "vertices: [[0, 0, 0], [1, 0, 0], [0, 1, 2], [1, 1, 2], [5, 5, 5]]\n"
+        "normals: [[0, 0, 1], [0, 0, 1], [0, 0, 1], [0, 0, 1], [0, 0, 1]]\n"
+        "uvs: [[0, 0], [1, 0], [0, 1], [1, 1], [0, 0]]\n"
+        "faces: [[0, 1, 2], [1, 3, 2], [2, 3, 4]]\n"
+        "weights:\n  - {A: 1.0}\n  - {A: 0.5, B: 0.5}\n  - {B: 1.0}\n  - {B: 0.7, A: 0.3}\n  - {}\n"));
+    const auto src = coopa::gfx::engine::data::SkinnedMeshSource::from_node(mesh);
+    const glm::vec3 lo0(std::numeric_limits<float>::max()), hi0(std::numeric_limits<float>::lowest());
+    std::vector<glm::vec3> bmin(2, lo0), bmax(2, hi0);
+    glm::vec3 smin = lo0, smax = hi0;
+    for (size_t i = 0; i < src.vertices.size(); ++i) {
+        bool any = false;
+        for (int c = 0; c < 4; ++c) {
+            const int j = src.joints[i][c];
+            if (j < 0 || src.weights[i][c] <= 0.0f) continue;
+            bmin[j] = glm::min(bmin[j], src.vertices[i].position);
+            bmax[j] = glm::max(bmax[j], src.vertices[i].position);
+            any = true;
+        }
+        if (!any) { smin = glm::min(smin, src.vertices[i].position); smax = glm::max(smax, src.vertices[i].position); }
+    }
+    const std::vector<glm::mat4> mats = {
+        glm::rotate(glm::mat4(1.0f), 0.9f, glm::vec3(0, 1, 0)),
+        glm::translate(glm::mat4(1.0f), glm::vec3(-2, 1, 3)) * glm::rotate(glm::mat4(1.0f), -1.2f, glm::vec3(1, 1, 0))};
+    std::vector<coopa::gfx::engine::data::Vertex> out;
+    SMR::skin(src, mats, out);
+    glm::vec3 lo, hi;
+    SMR::palette_bounds(bmin, bmax, smin, smax, mats, lo, hi);
+    bool inside = true;
+    for (const auto& v : out)
+        inside = inside && glm::all(glm::greaterThanEqual(v.position, lo - 1e-4f)) && glm::all(glm::lessThanEqual(v.position, hi + 1e-4f));
+    expect(inside, "palette: culling bounds grown from the bone boxes contain every skinned vertex");
+}
+
+/** @brief GPU skinning (the compute pre-pass) against the CPU fallback: the same animated frame
+ *         of animation_test renders the same with `skinning: gpu` and `skinning: cpu`, and the
+ *         vertices the dispatch wrote match the CPU skin of the same palette. */
+void test_rig_gpu_skinning_matches_cpu() {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
+    ScopedEnv no_input("NO_INPUT", "1");
+    struct Run { Frame frame; bool gpu = false; float max_err = -1.0f; float moved = 0.0f; size_t verts = 0; };
+    auto run = [](const std::string& mode) {
+        Run r;
+        toy::core::AppConfig cfg = make_test_config("assets/scenes/animation_test/scene.yaml", 640, 360, 320, 180);
+        cfg.render.skinning = mode;
+        toy::core::Engine engine(std::move(cfg));
+        tick_frames(engine, 2);
+        auto* skin = engine.scene().find_object("tentacle_skin");
+        auto* smr = skin ? skin->get_component<toy::scene::SkinnedMeshRenderer>() : nullptr;
+        std::vector<coopa::gfx::engine::data::Vertex> early;
+        if (smr && smr->is_ready()) early = smr->skinned_vertices();
+        tick_frames(engine, 38);
+        if (smr && smr->is_ready()) {
+            r.gpu = smr->gpu_skinned();
+            engine.device().wait_idle();
+            const auto& mesh = smr->mesh();
+            const auto& cpu = smr->skinned_vertices();
+            r.verts = cpu.size();
+            std::vector<coopa::gfx::engine::data::Vertex> gpu(cpu.size());
+            mesh->vertex_buffer(mesh->active_slot()).download(gpu.data(), sizeof(gpu[0]) * gpu.size());
+            r.max_err = 0.0f;
+            for (size_t i = 0; i < cpu.size(); ++i) {
+                r.max_err = std::max(r.max_err, glm::length(gpu[i].position - cpu[i].position));
+                r.max_err = std::max(r.max_err, glm::length(gpu[i].normal - cpu[i].normal));
+                r.max_err = std::max(r.max_err, std::abs(gpu[i].uv.x - cpu[i].uv.x) + std::abs(gpu[i].uv.y - cpu[i].uv.y));
+                if (i < early.size()) r.moved = std::max(r.moved, glm::length(gpu[i].position - early[i].position));
+            }
+        }
+        r.frame = engine.capture_image(/*low_res=*/true);
+        return r;
+    };
+    const Run g = run("gpu");
+    const Run c = run("cpu");
+    expect(g.gpu, "gpu skinning: skinning: gpu dispatches on a compute device");
+    expect(!c.gpu, "gpu skinning: skinning: cpu keeps the CPU fallback");
+    expect(g.verts > 0 && g.max_err >= 0.0f && g.max_err < 1e-4f,
+           "gpu skinning: the dispatch's vertices match the CPU skin of the same palette (max err " + std::to_string(g.max_err) + ")");
+    expect(g.moved > 0.05f, "gpu skinning: ...and they are animated, not the bind pose (moved " + std::to_string(g.moved) + " m)");
+    expect(same_extent(g.frame, c.frame), "gpu skinning: both captures share one extent");
+    if (!same_extent(g.frame, c.frame)) return;
+    const long long diff = count_diff(g.frame, c.frame, 6);
+    const long long budget = static_cast<long long>(g.frame.width) * g.frame.height / 200;   // 0.5%
+    expect(diff <= budget, "gpu skinning: GPU and CPU captures of the same frame agree (" + std::to_string(diff) + " px differ)");
+    if (diff > budget) { dump_frame(g.frame, "skinning_gpu"); dump_frame(c.frame, "skinning_cpu"); }
 }
 
 // =====================================================================================
@@ -7048,6 +7988,88 @@ void test_ui_showcase_scene_runs() {
            "ui_showcase: the hero carries a world-space nameplate");
     const Frame f = engine.capture_image(false);
     expect(count_near_color(f, 209, 51, 56, 30) > 50, "ui_showcase: the health bar's red is on screen");
+}
+
+/**
+ * @brief The debug overlay end to end: fps mode draws its panel and text over the frame as an
+ *        engine overlay layer, full mode runs a live profile and shows the game's watch() lines,
+ *        and turning it off costs nothing -- the layer and the profiler are gone, and the frame
+ *        is byte-identical to the same frame of an engine that never showed it.
+ *
+ * pixel_demo's image moves a little from frame to frame even at FIXED_DT 0 (frame-indexed
+ * noise), so "off" is compared against a second Engine at the same frame count rather than
+ * against this one's earlier frames. Within one frame index, everything that differs is the
+ * overlay's.
+ */
+void test_debug_overlay_draws_and_off_is_free() {
+    ScopedEnv fixed_dt("FIXED_DT", "0");
+    ScopedEnv no_input("NO_INPUT", "1");
+    const toy::core::AppConfig config = make_test_config("assets/scenes/demos/pixel_demo/scene.yaml", 640, 360, 160, 90);
+    // Frames: 3 off, 3 fps, 20 full, 3 off.
+    const int kTotalFrames = 29;
+
+    // The reference: an Engine that never shows the overlay, at each frame count compared.
+    Frame ref_fps;
+    Frame ref_off;
+    {
+        toy::core::Engine engine(config);
+        tick_frames(engine, 6);
+        ref_fps = engine.capture_image(/*low_res=*/false);
+        tick_frames(engine, kTotalFrames - 6);
+        ref_off = engine.capture_image(false);
+        expect(engine.overlay_layers().empty() && !engine.frame_profile(), "debug overlay: off by default (no layer, no profiler)");
+    }
+
+    toy::core::Engine engine(config);
+    toy::core::FrameHooks hooks;
+    hooks.pre_scene_update = [](float) { toy::debug::watch("probe", 42); };
+    engine.set_frame_hooks(std::move(hooks));
+    tick_frames(engine, 3);
+
+    engine.debug_overlay().set_mode(toy::debug::OverlayMode::Fps);
+    tick_frames(engine, 3);
+    const Frame fps = engine.capture_image(false);
+    expect(engine.overlay_layers().size() == 1, "debug overlay: fps mode registers one overlay layer");
+    expect(same_extent(fps, ref_fps), "debug overlay: captures share one extent");
+    if (!same_extent(fps, ref_fps)) return;
+    const long long fps_px = count_diff(fps, ref_fps);
+    expect_at_least(fps_px, 500, "debug overlay: fps mode draws its panel over the frame");
+    // Text: the panel darkens everything under it, so a pixel BRIGHTER than the same pixel of
+    // the reference can only be a glyph (or one of the sparkline's few bars).
+    long long text_px = 0;
+    for (size_t i = 0; i < static_cast<size_t>(fps.width) * fps.height; ++i) {
+        for (int ch = 0; ch < 3; ++ch) {
+            if (int(fps.pixels[i * fps.channels + ch]) > int(ref_fps.pixels[i * ref_fps.channels + ch]) + 30) { ++text_px; break; }
+        }
+    }
+    expect_at_least(text_px, 100, "debug overlay: fps mode draws text");
+    const long long pixels = static_cast<long long>(fps.width) * fps.height;
+    expect(fps_px < pixels / 3, "debug overlay: the panel covers a corner, not the frame");
+
+    engine.debug_overlay().set_mode(toy::debug::OverlayMode::Full);
+    tick_frames(engine, 20);
+    const Frame full = engine.capture_image(false);
+    expect(engine.frame_profile() && engine.frame_profile()->live(), "debug overlay: full mode runs a live profile");
+    expect(engine.frame_profile() && engine.frame_profile()->latest(), "debug overlay: the live profile completes frames");
+    const auto lines = engine.debug_overlay().compose_lines();
+    expect(std::any_of(lines.begin(), lines.end(), [](const auto& l) { return l.label == "Render"; }),
+           "debug overlay: full mode has its Render block");
+    expect(count_diff(full, ref_off) > fps_px, "debug overlay: full mode shows more than fps mode");
+
+    engine.debug_overlay().set_mode(toy::debug::OverlayMode::Off);
+    tick_frames(engine, kTotalFrames - 26);
+    const Frame off = engine.capture_image(false);
+    expect(engine.overlay_layers().empty() && !engine.frame_profile(), "debug overlay: off removes the layer and the profiler");
+    const long long off_px = count_diff(off, ref_off);
+    expect(off_px == 0, "debug overlay: off is byte-identical to never having shown it (" + std::to_string(off_px) + " px differ)");
+
+    if (g_test_failures > 0) {
+        dump_frame(ref_fps, "debug_overlay_ref_fps");
+        dump_frame(fps, "debug_overlay_fps");
+        dump_frame(full, "debug_overlay_full");
+        dump_frame(ref_off, "debug_overlay_ref_off");
+        dump_frame(off, "debug_overlay_off");
+    }
 }
 
 // -------------------------------------------------------------------------------------------
@@ -7367,6 +8389,224 @@ void test_weather_scene_renders() {
         if (px[0] < 2 && px[1] < 2 && px[2] < 2) ++black;
     }
     expect(black < static_cast<long long>(f.width) * f.height / 200, "weather_test: no NaN black blocks");
+}
+
+// -------------------------------------------------------------------------------------------
+// The physical sky (render sky_model: physical) -- weather/atmosphere_model.h on the CPU
+// (device-free, group "weather") and the sky_test scene end to end (group "render_weather").
+// -------------------------------------------------------------------------------------------
+
+void test_atmosphere_model_sky_colours() {
+    using toy::weather::AtmosphereModel;
+    AtmosphereModel m;
+    expect(m.builds() == 1, "atmosphere: the tables are built once at construction");
+    m.set_media(toy::render::SkyAtmosphereMedia{});
+    expect(m.builds() == 1, "atmosphere: unchanged media do not rebuild the tables");
+    const float vr = m.view_radius(2.0f);
+    const glm::vec3 noon = glm::normalize(glm::vec3(0.3f, -0.5f, 0.8f));
+    const auto day = m.gradient(noon, 0.025f, vr);
+    expect(day.zenith.b > day.zenith.g && day.zenith.g > day.zenith.r, "atmosphere: the noon zenith is blue");
+    const glm::vec3 sunset = glm::normalize(glm::vec3(-1.0f, 0.0f, 0.03f));
+    const glm::vec3 toward = m.radiance(glm::normalize(glm::vec3(-1.0f, 0.0f, 0.04f)), sunset, 0.025f, vr);
+    expect(toward.r > toward.b * 1.5f, "atmosphere: the horizon under a setting sun is red / orange");
+    const glm::vec3 t_low = m.transmittance_toward(vr, sunset), t_up = m.transmittance(vr, 1.0f);
+    expect(t_low.r / t_up.r > 2.0f * (t_low.b / t_up.b), "atmosphere: a low sun's light is reddened");
+    expect(glm::length(m.transmittance_toward(vr, glm::vec3(0, 0, -1))) == 0.0f, "atmosphere: no light through the planet");
+    const auto night = m.gradient(-noon, 0.025f, vr);
+    expect(night.zenith.b < day.zenith.b * 0.1f && night.zenith.b > 0.0f, "atmosphere: the moonlit night is dim, not black");
+    m.set_media(toy::render::SkyAtmosphereMedia::earth(4.0f, 1.0f));
+    expect(m.builds() == 2, "atmosphere: new media rebuild the tables");
+    const auto hazy = m.gradient(noon, 0.025f, vr);
+    const auto sat = [](glm::vec3 c) { return (glm::max(c.r, glm::max(c.g, c.b)) - glm::min(c.r, glm::min(c.g, c.b))) / glm::max(c.r, glm::max(c.g, c.b)); };
+    expect(sat(hazy.horizon) < sat(day.horizon), "atmosphere: haze whitens the horizon");
+}
+
+namespace sky_test_util {
+/** @brief Mean RGB (0..255) of the rows [y0, y1) and columns [x0, x1) of a frame (fractions). */
+glm::vec3 band_mean(const Frame& f, float y0, float y1, float x0 = 0.0f, float x1 = 1.0f) {
+    glm::dvec3 sum(0.0);
+    long long n = 0;
+    for (uint32_t y = uint32_t(y0 * f.height); y < uint32_t(y1 * f.height); ++y) {
+        for (uint32_t x = uint32_t(x0 * f.width); x < uint32_t(x1 * f.width); ++x) {
+            const uint8_t* p = &f.pixels[(size_t(y) * f.width + x) * f.channels];
+            sum += glm::dvec3(p[0], p[1], p[2]);
+            ++n;
+        }
+    }
+    return n ? glm::vec3(sum / double(n)) : glm::vec3(0.0f);
+}
+/** @brief Pixels inside 8 x 8 blocks that are entirely near-black -- the NaN / unwritten signature. */
+long long black_block_pixels(const Frame& f) {
+    long long n = 0;
+    for (uint32_t by = 0; by + 8 <= f.height; by += 8) {
+        for (uint32_t bx = 0; bx + 8 <= f.width; bx += 8) {
+            bool black = true;
+            for (uint32_t y = by; y < by + 8 && black; ++y)
+                for (uint32_t x = bx; x < bx + 8 && black; ++x) {
+                    const uint8_t* p = &f.pixels[(size_t(y) * f.width + x) * f.channels];
+                    black = p[0] < 2 && p[1] < 2 && p[2] < 2;
+                }
+            if (black) n += 64;
+        }
+    }
+    return n;
+}
+} // namespace sky_test_util
+
+/**
+ * @brief sky_test end to end: the physical sky renders, follows the clock (blue noon, red sunset,
+ *        stars only at night), the clouds follow the coverage and dim the sun, the CPU's gradient
+ *        colours match the GPU's sky, and the gradient sky is untouched by any of it.
+ */
+void test_physical_sky_renders() {
+    using namespace sky_test_util;
+    // FIXED_DT=0: nothing animates (water, the mannequins' idle, cloud drift), so A/B captures
+    // differ only by what each step changes. The weather's state is set directly.
+    ScopedEnv fixed_dt("FIXED_DT", "0");
+    ScopedEnv no_input("NO_INPUT", "1");
+    toy::core::AppConfig config = make_test_config("assets/scenes/tests/rendering/sky_test/scene.yaml", 480, 270, 480, 270);
+    config.render.aa_mode = "off";
+    config.render.auto_exposure_enabled = false;   // A/B colours through one fixed exposure
+    config.render.bloom_enabled = false;
+    config.render.outline_enabled = false;
+    // The shadow filter's per-frame rotation would make captures at different frames differ.
+    config.render.shadows_enabled = false;
+    toy::core::Engine engine(std::move(config));
+    toy::weather::WeatherSystem* w = engine.weather();
+    expect(w && w->enabled(), "sky_test: the scene's weather is on");
+    if (!w) return;
+    auto& pl = engine.pipeline();
+    auto& cfg = pl.render_config_mut();
+    // The scene's render overrides re-apply config.yaml's runtime keys over the test config, so
+    // these are set live (a scene-settings change below re-applies them too -- see there).
+    cfg.shadows_enabled = false;
+    cfg.outline_enabled = false;
+
+    // Noon, clear, clouds on: renders clean, and the weather drives the coverage.
+    w->set_time(12.0f);
+    w->set_condition("clear", 0.0f);
+    tick_frames(engine, 4);
+    expect(pl.physical_sky_active(), "sky_test: the physical sky is on (scene render sky_model: physical)");
+    expect(pl.render_config().clouds, "sky_test: ...with clouds");
+    expect_near(pl.render_config().cloud_coverage, w->state().cloud_cover, 1e-5f, "sky_test: the weather drives cloud_coverage");
+    const Frame noon_clouds = engine.capture_image(true);
+    expect(black_block_pixels(noon_clouds) == 0, "sky_test: noon with clouds has no black (NaN) blocks");
+    expect(pl.sky_atmosphere_pass().lut_renders() == 1, "sky_test: the atmosphere tables render once");
+
+    // The sky's own colour, clouds off: blue at noon, red at sunset (the camera faces west).
+    cfg.clouds = false;
+    tick_frames(engine, 2);
+    const Frame noon = engine.capture_image(true);
+    const glm::vec3 noon_h = band_mean(noon, 0.3f, 0.5f);
+    if (!(noon_h.b > noon_h.r + 10.0f)) dump_frame(noon, "sky_test_noon");
+    expect(noon_h.b > noon_h.r + 10.0f, "sky_test: the noon horizon is blue (r " + std::to_string(noon_h.r) + ", b " + std::to_string(noon_h.b) + ")");
+    w->set_time(17.85f);
+    tick_frames(engine, 2);
+    const Frame dusk = engine.capture_image(true);
+    const glm::vec3 dusk_h = band_mean(dusk, 0.45f, 0.53f);
+    if (!(dusk_h.r > dusk_h.b + 10.0f)) dump_frame(dusk, "sky_test_dusk");
+    expect(dusk_h.r > dusk_h.b + 10.0f, "sky_test: the sunset horizon is red (r " + std::to_string(dusk_h.r) + ", b " + std::to_string(dusk_h.b) + ")");
+    const glm::vec3 dusk_tint = pl.sky_state().light_tint;
+    expect(dusk_tint.r > dusk_tint.b * 2.0f, "sky_test: the setting sun's light is reddened by the air");
+    expect(pl.sky_atmosphere_pass().lut_renders() == 1, "sky_test: the tables do not re-render when only the sun moves");
+
+    // Stars: only at night.
+    w->set_time(0.5f);
+    tick_frames(engine, 2);
+    const Frame night_stars = engine.capture_image(true);
+    expect(band_mean(night_stars, 0.0f, 0.4f).b > 0.5f, "sky_test: the night sky is dark, not black");
+    cfg.sky_stars = false;
+    tick_frames(engine, 2);
+    const Frame night_plain = engine.capture_image(true);
+    const long long star_px = count_diff(night_stars, night_plain, 1);
+    expect(star_px > 30, "sky_test: stars show at night (" + std::to_string(star_px) + " px)");
+    // Enough frames for SSR's previous-frame colour (what reflections sample) to settle.
+    w->set_time(12.0f);
+    tick_frames(engine, 10);
+    const Frame day_plain = engine.capture_image(true);
+    cfg.sky_stars = true;
+    tick_frames(engine, 10);
+    const Frame day_stars = engine.capture_image(true);
+    const long long day_star_px = count_diff(day_plain, day_stars, 0);
+    if (day_star_px) { dump_frame(day_plain, "sky_day_plain"); dump_frame(day_stars, "sky_day_stars"); }
+    expect(day_star_px == 0, "sky_test: ...and none by day (" + std::to_string(day_star_px) + " px)");
+
+    // Coverage without the weather: 0 vs 1 changes the sky and dims the sun.
+    fkyaml::node settings = fkyaml::node::mapping();
+    settings["weather"] = fkyaml::node::deserialize(std::string("enabled: false\n"));
+    engine.set_scene_settings(engine.scene(), settings);
+    tick_frames(engine, 2);
+    cfg.shadows_enabled = false;
+    cfg.outline_enabled = false;
+    cfg.sky_model = "physical";
+    cfg.clouds = true;
+    cfg.cloud_coverage = 0.0f;
+    tick_frames(engine, 2);
+    const Frame clear = engine.capture_image(true);
+    const glm::vec3 clear_tint = pl.sky_state().light_tint;
+    cfg.cloud_coverage = 1.0f;
+    tick_frames(engine, 2);
+    const Frame overcast = engine.capture_image(true);
+    const long long cover_px = count_diff(clear, overcast, 8);
+    if (cover_px <= long(clear.width * clear.height) / 5) { dump_frame(clear, "sky_test_clear"); dump_frame(overcast, "sky_test_overcast"); }
+    expect(cover_px > long(clear.width * clear.height) / 5, "sky_test: full coverage changes the sky (" + std::to_string(cover_px) + " px)");
+    expect(pl.sky_state().light_tint.g < clear_tint.g * 0.5f, "sky_test: ...and dims the sun");
+    expect(black_block_pixels(overcast) == 0, "sky_test: overcast has no black (NaN) blocks");
+
+    // CPU zenith == GPU zenith: look straight up at a clear sky (no clouds, no sun in view), then
+    // draw the gradient sky with the CPU's zenith colour through the same post chain.
+    cfg.clouds = false;
+    coopa::scene::SceneObject* cam = engine.scene().find_object("camera");
+    if (cam && cam->get_transform()) cam->get_transform()->transform().set_rotation(glm::vec3(180.0f, 0.0f, 0.0f));
+    tick_frames(engine, 2);
+    const Frame up_phys = engine.capture_image(true);
+    const glm::vec3 cpu_zenith = pl.render_config().indirect.sky_zenith;
+    cfg.sky_model = "gradient";
+    tick_frames(engine, 1);
+    cfg.indirect.sky_zenith = cpu_zenith;
+    tick_frames(engine, 2);
+    const Frame up_grad = engine.capture_image(true);
+    // The centre only: the gradient's colour changes away from straight up.
+    const glm::vec3 a = band_mean(up_phys, 0.47f, 0.53f, 0.47f, 0.53f), b = band_mean(up_grad, 0.47f, 0.53f, 0.47f, 0.53f);
+    expect(glm::all(glm::lessThan(glm::abs(a - b), glm::vec3(6.0f))),
+           "sky_test: the CPU zenith colour matches the GPU sky (gpu " + std::to_string(a.r) + " " + std::to_string(a.g) + " " +
+               std::to_string(a.b) + ", cpu " + std::to_string(b.r) + " " + std::to_string(b.g) + " " + std::to_string(b.b) + ")");
+}
+
+/**
+ * @brief The gradient sky costs nothing: with sky_model gradient no sky pass records (the
+ *        tables never render) and toggling the physical sky on and back off returns the exact
+ *        same image.
+ */
+void test_physical_sky_off_costs_nothing() {
+    ScopedEnv fixed_dt("FIXED_DT", "0");
+    ScopedEnv no_input("NO_INPUT", "1");
+    toy::core::AppConfig config = make_test_config("assets/scenes/tests/effects/weather_test/scene.yaml", 480, 270, 480, 270);
+    config.render.aa_mode = "off";
+    config.render.auto_exposure_enabled = false;
+    config.render.shadows_enabled = false;   // its per-frame filter rotation: see test_physical_sky_renders
+    toy::core::Engine engine(std::move(config));
+    auto& pl = engine.pipeline();
+    tick_frames(engine, 6);
+    expect(!pl.physical_sky_active() && pl.render_config().sky_model == "gradient", "sky: the gradient sky is the default");
+    const Frame before = engine.capture_image(true);
+    auto& cfg = pl.render_config_mut();
+    cfg.clouds = true;            // no effect without the physical sky
+    tick_frames(engine, 2);
+    expect(count_diff(before, engine.capture_image(true), 0) == 0, "sky: clouds without the physical sky change nothing");
+    expect(pl.sky_atmosphere_pass().lut_renders() == 0, "sky: the gradient sky records no sky pass");
+    cfg.sky_model = "physical";
+    tick_frames(engine, 3);
+    const Frame phys = engine.capture_image(true);
+    expect(count_diff(before, phys, 4) > long(phys.width * phys.height) / 10, "sky: the physical sky differs from the gradient");
+    expect(sky_test_util::black_block_pixels(phys) == 0, "sky: the physical sky has no black blocks");
+    cfg.sky_model = "gradient";
+    cfg.clouds = false;
+    tick_frames(engine, 12);   // SSR reflects the previous frame's colour: let it settle
+    const Frame after = engine.capture_image(true);
+    const long long back_px = count_diff(before, after, 0);
+    if (back_px != 0) { dump_frame(before, "sky_off_before"); dump_frame(after, "sky_off_after"); }
+    expect(back_px == 0, "sky: switching back restores the gradient sky exactly (" + std::to_string(back_px) + " px)");
 }
 
 // -------------------------------------------------------------------------------------------
@@ -8001,6 +9241,499 @@ void test_particles_scene_renders() {
     expect(engine.pipeline().particle_state().total_quads() == 0u, "particles scene: stopped and cleared, nothing is drawn");
 }
 
+// --- GPU particles (simulation: gpu, render/passes/gpu_particle_pass.h) -----------------------
+
+namespace gpu_particles_test {
+
+/** @brief A camera looking at one sphere of static red dots (and `extra` systems), written to a
+ *         scratch scene. `sim` is the ParticleSystem's simulation value. */
+std::string write_scene(const std::string& name, const std::string& sim, const std::string& extra = "") {
+    namespace fs = std::filesystem;
+    const fs::path dir = tmp_dir() / ("gpu_particles_" + name);
+    fs::create_directories(dir);
+    std::ofstream(dir / "scene.yaml") <<
+        "format: blender\nscene:\n  scene_name: " << name << "\n  root_objects:\n"
+        "    - name: Camera\n      components:\n        - type: Transform\n          position: {x: 0, y: -8, z: 0}\n"
+        "          rotation: {x: 90, y: 0, z: 0}\n        - type: Camera\n          main: true\n"
+        "    - name: Dots\n      components:\n        - type: Transform\n"
+        "        - type: ParticleSystem\n          simulation: " << sim << "\n"
+        "          max_particles: 4000\n          shape: sphere\n          radius: 1.6\n          rate: 200\n"
+        "          start_lifetime: [3.0, 5.0]\n          start_speed: 0.0\n          start_size: 0.12\n"
+        "          start_color: {r: 1.0, g: 0.0, b: 0.0, a: 1.0}\n          sprite: circle\n          softness: 0.0\n"
+        "          emissive: 2.0\n          sort: distance\n" << extra;
+    return (dir / "scene.yaml").string();
+}
+
+toy::core::AppConfig config_for(const std::string& scene, bool gpu_enabled) {
+    toy::core::AppConfig config = make_test_config(scene, 320, 180, 320, 180);
+    config.render.transparency_enabled = true;
+    config.particles.gpu_enabled = gpu_enabled;
+    return config;
+}
+
+toy::particles::ParticleSystem* system(toy::core::Engine& engine, const char* name) {
+    auto* o = engine.scene().find_object(name);
+    return o ? o->get_component<toy::particles::ParticleSystem>() : nullptr;
+}
+
+/** @brief Pixels where the red dots are (red-dominant over the neutral sky). */
+long long red_coverage(const Frame& f) {
+    long long n = 0;
+    const size_t pixels = static_cast<size_t>(f.width) * f.height;
+    for (size_t i = 0; i < pixels; ++i) {
+        const uint8_t* px = &f.pixels[i * f.channels];
+        if (px[0] > 120 && px[0] > px[1] + 60 && px[0] > px[2] + 60) ++n;
+    }
+    return n;
+}
+
+} // namespace gpu_particles_test
+
+/** @brief A `simulation: gpu` system runs in compute: it is drawn, its read-back alive count
+ *         settles at rate x mean lifetime, and every particle stays inside the CPU's bounds. */
+void test_particles_gpu_renders_steady_state_in_bounds() {
+    using namespace gpu_particles_test;
+    ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
+    ScopedEnv no_input("NO_INPUT", "1");
+    toy::core::Engine engine(config_for(write_scene("steady", "gpu"), true));
+    if (!engine.pipeline().gpu_particle_pass()) {
+        expect(true, "gpu particles: no compute on this device (CPU fallback covers it)");
+        return;
+    }
+    tick_frames(engine, 330);   // 5.5 s: past the longest lifetime
+    auto* ps = system(engine, "Dots");
+    expect(ps && ps->gpu_active(), "gpu particles: the system simulates on the GPU");
+    if (!ps || !ps->gpu_active()) return;
+    const uint32_t alive = ps->particle_count();
+    expect(alive > 680 && alive < 920, "gpu particles: steady-state alive count ~ rate x lifetime = 800 (" +
+                                       std::to_string(alive) + ")");
+    const auto& st = engine.pipeline().particle_state();
+    expect(st.gpu.size() == 1 && st.quads.size() == 1 && st.quads[0].gpu_id == ps->gpu_id(),
+           "gpu particles: one job and one indirect batch reach the renderer");
+
+    auto* gpu = engine.pipeline().gpu_particle_pass();
+    gpu->request_debug_readback(ps->gpu_id());
+    std::vector<toy::render::ParticleInstance> inst;
+    bool got = false;
+    for (int i = 0; i < 6 && !got; ++i) {
+        tick_frames(engine, 1);
+        got = gpu->debug_instances(ps->gpu_id(), inst);
+    }
+    expect(got && inst.size() > 600, "gpu particles: the alive list reads back (" + std::to_string(inst.size()) + ")");
+    const glm::vec3 lo = ps->bounds_min(), hi = ps->bounds_max();
+    size_t outside = 0, bad = 0;
+    for (const auto& p : inst) {
+        const glm::vec3 q(p.pos_size);
+        if (!std::isfinite(q.x) || !std::isfinite(q.y) || !std::isfinite(q.z) || !(p.pos_size.w > 0.0f)) ++bad;
+        if (glm::any(glm::lessThan(q, lo)) || glm::any(glm::greaterThan(q, hi))) ++outside;
+        if (glm::length(q) > 1.61f) ++outside;   // born in the sphere, never moving
+    }
+    expect(bad == 0, "gpu particles: every instance is finite with a positive size");
+    expect(outside == 0, "gpu particles: every particle stays in the shape and the system bounds (" +
+                         std::to_string(outside) + " outside)");
+
+    const Frame f = engine.capture_image(/*low_res=*/true);
+    const long long cov = red_coverage(f);
+    expect(cov > 500, "gpu particles: the dots are on screen (" + std::to_string(cov) + " px)");
+    if (cov <= 500) dump_frame(f, "gpu_particles_steady");
+}
+
+/** @brief The same emitter on the CPU (particles.gpu_enabled: false, the kill switch) and the
+ *         GPU covers a similar area of the screen. */
+void test_particles_gpu_matches_cpu_coverage() {
+    using namespace gpu_particles_test;
+    ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
+    ScopedEnv no_input("NO_INPUT", "1");
+    const std::string scene = write_scene("coverage", "gpu");
+    long long cov[2] = {0, 0};
+    for (int g = 0; g < 2; ++g) {
+        toy::core::Engine engine(config_for(scene, g == 1));
+        tick_frames(engine, 300);
+        auto* ps = system(engine, "Dots");
+        const bool want_gpu = g == 1 && engine.pipeline().gpu_particle_pass() != nullptr;
+        expect(ps && ps->gpu_active() == want_gpu, std::string("gpu particles: gpu_enabled ") +
+                                                       (g ? "true runs on the GPU" : "false runs on the CPU"));
+        cov[g] = red_coverage(engine.capture_image(/*low_res=*/true));
+    }
+    const double ratio = cov[0] > 0 ? static_cast<double>(cov[1]) / static_cast<double>(cov[0]) : 0.0;
+    expect(cov[0] > 500 && ratio > 0.75 && ratio < 1.33,
+           "gpu particles: CPU and GPU coverage agree (cpu " + std::to_string(cov[0]) + " px, gpu " +
+               std::to_string(cov[1]) + " px)");
+}
+
+/** @brief Sub emitters are CPU-only: a gpu system with on_death, and its target, fall back to the
+ *         CPU and still splash. */
+void test_particles_gpu_sub_emitter_falls_back() {
+    using namespace gpu_particles_test;
+    ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
+    ScopedEnv no_input("NO_INPUT", "1");
+    const std::string extra =
+        "    - name: Drops\n      components:\n        - type: Transform\n          position: {x: 0, y: 0, z: 0.5}\n"
+        "        - type: ParticleSystem\n          simulation: gpu\n          rate: 40\n          start_speed: 3.0\n"
+        "          start_lifetime: 4.0\n          gravity: 1.0\n          collide: true\n          ground_height: 0.0\n"
+        "          kill_on_collide: true\n          on_death:\n            - {target: Splash, count: 2}\n"
+        "    - name: Splash\n      components:\n        - type: Transform\n"
+        "        - type: ParticleSystem\n          simulation: gpu\n          rate: 0\n          start_lifetime: 1.0\n";
+    toy::core::Engine engine(config_for(write_scene("subemit", "gpu", extra), true));
+    tick_frames(engine, 120);
+    auto* drops = system(engine, "Drops");
+    auto* splash = system(engine, "Splash");
+    expect(drops && !drops->gpu_active() && drops->gpu_fallback_warned,
+           "gpu particles: a system with sub emitters falls back to the CPU, warned once");
+    expect(splash && !splash->gpu_active(), "gpu particles: a sub-emitter target falls back to the CPU too");
+    expect(drops && drops->particle_count() > 0 && splash && splash->particle_count() > 0,
+           "gpu particles: the fallback still simulates and splashes");
+}
+
+/** @brief Two runs of the same GPU scene under FIXED_DT capture the same frame (alive-list order
+ *         varies with atomics, so allow blend-rounding noise on a handful of pixels). */
+void test_particles_gpu_capture_deterministic() {
+    using namespace gpu_particles_test;
+    ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
+    ScopedEnv no_input("NO_INPUT", "1");
+    const std::string scene = write_scene("determinism", "gpu");
+    Frame f[2];
+    for (int r = 0; r < 2; ++r) {
+        toy::core::Engine engine(config_for(scene, true));
+        tick_frames(engine, 150);
+        f[r] = engine.capture_image(/*low_res=*/true);
+    }
+    expect(f[0].pixels.size() == f[1].pixels.size(), "gpu particles: same capture size");
+    if (f[0].pixels.size() != f[1].pixels.size()) return;
+    size_t differ = 0;
+    for (size_t i = 0; i < f[0].pixels.size(); ++i) {
+        if (std::abs(static_cast<int>(f[0].pixels[i]) - static_cast<int>(f[1].pixels[i])) > 2) ++differ;
+    }
+    expect(differ <= f[0].pixels.size() / 1000, "gpu particles: deterministic under FIXED_DT (" +
+                                                    std::to_string(differ) + " channel values differ)");
+    if (differ > f[0].pixels.size() / 1000) { dump_frame(f[0], "gpu_particles_det_a"); dump_frame(f[1], "gpu_particles_det_b"); }
+}
+
+// --- Ragdoll -----------------------------------------------------------------------------------
+
+namespace ragdoll_test {
+
+/** @brief `obj` (an object-asset node) without its render parts and Animator: only Transforms,
+ *         the Ragdoll and whatever else headless parsers know. */
+fkyaml::node strip_rig(const fkyaml::node& obj) {
+    fkyaml::node out = fkyaml::node::mapping();
+    out["name"] = obj["name"];
+    fkyaml::node comps = fkyaml::node::sequence();
+    for (const auto& c : obj["components"]) {
+        const std::string type = c["type"].get_value<std::string>();
+        if (type == "Animator" || type == "MeshRenderer") continue;
+        comps.get_value_ref<fkyaml::node::sequence_type&>().push_back(c);
+    }
+    out["components"] = comps;
+    fkyaml::node kids = fkyaml::node::sequence();
+    if (obj.contains("children") && obj["children"].is_sequence()) {
+        for (const auto& child : obj["children"]) {
+            bool render_part = false;
+            for (const auto& c : child["components"]) render_part = render_part || c["type"].get_value<std::string>() == "MeshRenderer";
+            if (!render_part) kids.get_value_ref<fkyaml::node::sequence_type&>().push_back(strip_rig(child));
+        }
+    }
+    out["children"] = kids;
+    return out;
+}
+
+/**
+ * @brief The generated mannequin_ragdoll prefab (its real Ragdoll config, parsed by the real
+ *        "Ragdoll" parser) on a ground slab, with the idle clip on an Animator, an optional
+ *        CharacterController, and every system the engine installs around a ragdoll.
+ */
+struct Rig {
+    coopa::scene::Scene scene{"ragdoll_test"};
+    SceneObject* root = nullptr;
+    toy::scene::Ragdoll* ragdoll = nullptr;
+    coopa::anim::Animator* animator = nullptr;
+    toy::scene::CharacterController* cc = nullptr;
+    coopa::physx::system::PhysicsSystem* physics = nullptr;
+
+    explicit Rig(bool with_character, const glm::vec3& at = glm::vec3(0.0f)) {
+        static coopa::asset::AssetManager assets;   // parsers capture it; must outlive them
+        coopa::physx::register_physics_components(assets);
+        toy::scene::register_scene_components();
+        const std::string root_dir = ROOT_DIR;
+        std::ifstream in(root_dir + "/assets/objects/characters/mannequin_ragdoll.yaml");
+        fkyaml::node prefab = fkyaml::node::deserialize(in);
+        fkyaml::node rig = strip_rig(prefab["object"]);
+        rig["components"][0]["position"]["x"] = fkyaml::node(at.x);
+        rig["components"][0]["position"]["y"] = fkyaml::node(at.y);
+        rig["components"][0]["position"]["z"] = fkyaml::node(at.z);
+        fkyaml::node ground = fkyaml::node::deserialize(std::string(
+            "name: ground\n"
+            "components:\n"
+            "  - {type: Transform, position: {x: 0, y: 0, z: -0.5}}\n"
+            "  - {type: BoxCollider, size: {x: 40, y: 40, z: 1}}\n"));
+        fkyaml::node doc = fkyaml::node::mapping();
+        doc["scene"] = fkyaml::node::mapping();
+        doc["scene"]["scene_name"] = fkyaml::node(std::string("ragdoll_test"));
+        doc["scene"]["root_objects"] = fkyaml::node::sequence();
+        doc["scene"]["root_objects"].get_value_ref<fkyaml::node::sequence_type&>().push_back(ground);
+        doc["scene"]["root_objects"].get_value_ref<fkyaml::node::sequence_type&>().push_back(rig);
+        scene = coopa::scene::SceneLoader::load_from_node(doc, (tmp_dir() / "ragdoll_test.yaml").string());
+
+        root = scene.find_object("mannequin_ragdoll");
+        if (!root) return;
+        ragdoll = root->get_component<toy::scene::Ragdoll>();
+        std::ifstream clip_in(root_dir + "/assets/animations/mannequin/idle.yaml");
+        animator = root->add_component<coopa::anim::Animator>();
+        animator->add_state("idle", std::make_shared<coopa::anim::AnimationClip>(
+                                        coopa::anim::parse_clip(fkyaml::node::deserialize(clip_in))));
+        animator->auto_play = "idle";
+        if (with_character) cc = root->add_component<toy::scene::CharacterController>();
+
+        scene.start();
+        toy::scene::install_kinematic_control_system(scene);
+        physics = coopa::physx::system::install_physics_system(scene);
+        coopa::anim::install_animation_system(scene);
+        coopa::anim::install_ik_system(scene);
+        toy::scene::install_ragdoll_system(scene);
+        coopa::scene::install_transform_system(scene);
+    }
+
+    void step(int frames) {
+        for (int i = 0; i < frames; ++i) {
+            scene.update(1.0f / 60.0f);
+            scene.late_update(1.0f / 60.0f);
+        }
+    }
+
+    glm::vec3 world(size_t bone) const {
+        return glm::vec3(ragdoll->bone_object(bone)->get_transform()->transform().get_world_matrix()[3]);
+    }
+
+    const coopa::physx::dynamics::Body* body(size_t bone) const {
+        return physics->world().get_body(ragdoll->bone_body(bone));
+    }
+
+    /** @brief Total kinetic energy (J) of the bone bodies. */
+    float kinetic_energy() const {
+        float e = 0.0f;
+        for (size_t i = 0; i < ragdoll->bone_count(); ++i) {
+            const auto* b = body(i);
+            if (!b || b->type != coopa::physx::dynamics::BodyType::Dynamic) continue;
+            e += 0.5f * b->mass * glm::dot(b->linear_velocity, b->linear_velocity);
+            const glm::vec3 L = glm::inverse(b->inv_inertia_world) * b->angular_velocity;
+            e += 0.5f * glm::dot(b->angular_velocity, L);
+        }
+        return e;
+    }
+
+    /** @brief Largest gap between a joint's two anchors (m) -- 0 when every joint holds. */
+    float max_joint_gap() const {
+        float gap = 0.0f;
+        for (size_t i = 0; i < ragdoll->bone_count(); ++i) {
+            const coopa::physx::dynamics::Joint* j = physics->world().get_joint(ragdoll->bone_joint(i));
+            if (!j) continue;
+            const auto* a = physics->world().get_body(j->a);
+            const auto* b = physics->world().get_body(j->b);
+            gap = std::max(gap, glm::length((a->position + a->orientation * j->local_anchor_a) -
+                                            (b->position + b->orientation * j->local_anchor_b)));
+        }
+        return gap;
+    }
+
+    int find_bone(const std::string& name) const {
+        for (size_t i = 0; i < ragdoll->bone_count(); ++i)
+            if (ragdoll->bone_object(i)->name() == name) return static_cast<int>(i);
+        return -1;
+    }
+};
+
+} // namespace ragdoll_test
+
+/**
+ * @brief A mannequin dropped limp from standing height settles on the ground without exploding:
+ *        every body stays finite and slower than a real fall could make it, and after 300
+ *        frames (5 s) the total kinetic energy is tiny and the body lies near where it fell.
+ */
+void test_ragdoll_settles_without_exploding() {
+    ragdoll_test::Rig rig(false, glm::vec3(0.0f, 0.0f, 0.5f));   // feet half a metre up
+    expect(rig.ragdoll != nullptr && rig.ragdoll->bone_count() == 14, "ragdoll: the mannequin prefab's 14 bones resolve");
+    if (!rig.ragdoll || rig.ragdoll->bone_count() == 0) return;
+    rig.step(2);
+    expect(rig.ragdoll->ready(), "ragdoll: joints exist once the bodies are bound");
+    rig.ragdoll->activate();
+    float max_speed = 0.0f;
+    bool finite = true;
+    for (int f = 0; f < 300; ++f) {
+        rig.step(1);
+        for (size_t i = 0; i < rig.ragdoll->bone_count(); ++i) {
+            const auto* b = rig.body(i);
+            if (!b) continue;
+            max_speed = std::max(max_speed, glm::length(b->linear_velocity));
+            finite = finite && std::isfinite(b->position.x) && std::isfinite(b->position.z) && std::isfinite(b->angular_velocity.x);
+        }
+    }
+    expect(rig.ragdoll->is_ragdoll(), "ragdoll: activate() went limp");
+    expect(finite, "ragdoll: every body stays finite");
+    // A free fall from 1.9 m tops out near 6 m/s; anything far beyond is the solver injecting energy.
+    expect(max_speed < 9.0f, "ragdoll: no body is flung (max speed " + std::to_string(max_speed) + " m/s)");
+    const float ke = rig.kinetic_energy();
+    expect(ke < 2.0f, "ragdoll: settled after 300 frames (kinetic energy " + std::to_string(ke) + " J)");
+    const glm::vec3 pelvis = rig.world(0);
+    expect(pelvis.z > 0.0f && pelvis.z < 0.45f, "ragdoll: the pelvis lies on the ground (z " + std::to_string(pelvis.z) + ")");
+    expect(glm::length(glm::vec2(pelvis)) < 1.5f, "ragdoll: the body crumpled where it fell");
+    for (size_t i = 0; i < rig.ragdoll->bone_count(); ++i) {
+        expect(rig.world(i).z > -0.05f, "ragdoll: no bone sank through the ground (" + rig.ragdoll->bone_object(i)->name() + ")");
+    }
+}
+
+/**
+ * @brief Jointed bones stay jointed: shoved hard sideways at the chest, the falling body's joint
+ *        anchors stay together and every bone's pivot keeps its distance to its parent bone's
+ *        pivot (read from the written-back Transforms, which also checks the hierarchical
+ *        write-back: a child bone lands at its body's pose relative to the MOVED parent).
+ */
+void test_ragdoll_joint_distances_preserved() {
+    ragdoll_test::Rig rig(false);
+    if (!rig.ragdoll || rig.ragdoll->bone_count() == 0) { expect(false, "ragdoll distances: rig built"); return; }
+    rig.step(2);
+    const size_t n = rig.ragdoll->bone_count();
+    std::vector<float> rest(n, 0.0f);
+    for (size_t i = 0; i < n; ++i) {
+        const int p = rig.ragdoll->bone_parent(i);
+        if (p >= 0) rest[i] = glm::length(rig.world(i) - rig.world(static_cast<size_t>(p)));
+    }
+    const int chest = rig.find_bone("chest");
+    rig.ragdoll->activate(glm::vec3(60.0f, 20.0f, 0.0f), rig.world(static_cast<size_t>(std::max(chest, 0))));
+    float max_gap = 0.0f, max_stretch = 0.0f, max_body_vs_transform = 0.0f;
+    for (int f = 0; f < 180; ++f) {
+        rig.step(1);
+        max_gap = std::max(max_gap, rig.max_joint_gap());
+        for (size_t i = 0; i < n; ++i) {
+            const int p = rig.ragdoll->bone_parent(i);
+            if (p >= 0) max_stretch = std::max(max_stretch, std::abs(glm::length(rig.world(i) - rig.world(static_cast<size_t>(p))) - rest[i]));
+            const auto* b = rig.body(i);
+            // The Transform pivot + the body's own centre offset lands on the written body centre.
+            const glm::mat4 m = rig.ragdoll->bone_object(i)->get_transform()->transform().get_world_matrix();
+            const glm::vec3 com = rig.ragdoll->bone_object(i)->get_component<coopa::physx::components::RigidbodyComponent>()->local_center_of_mass();
+            max_body_vs_transform = std::max(max_body_vs_transform,
+                                             glm::length(glm::vec3(m * glm::vec4(com, 1.0f)) - b->last_written_position));
+        }
+    }
+    expect(rig.ragdoll->is_ragdoll(), "ragdoll distances: limp");
+    expect(glm::length(glm::vec2(rig.world(0))) > 0.2f, "ragdoll distances: the shove moved the body");
+    expect(max_gap < 0.03f, "ragdoll distances: joint anchors stay together (max gap " + std::to_string(max_gap) + " m)");
+    expect(max_stretch < 0.03f, "ragdoll distances: bone-to-parent distances hold (max " + std::to_string(max_stretch) + " m)");
+    expect(max_body_vs_transform < 0.005f,
+           "ragdoll distances: every bone Transform matches its body (max " + std::to_string(max_body_vs_transform) + " m)");
+}
+
+/**
+ * @brief A settled (asleep) ragdoll shoved by a kinematic ram is pushed along, not blown apart:
+ *        the ram wakes the bone it touches and the joints wake the rest of the body with it (a
+ *        lone woken bone pinned between the ram and still-sleeping neighbours used to explode).
+ */
+void test_ragdoll_pushed_by_kinematic_ram() {
+    ragdoll_test::Rig rig(false);
+    if (!rig.ragdoll || rig.ragdoll->bone_count() == 0) { expect(false, "ragdoll ram: rig built"); return; }
+    rig.step(2);
+    rig.ragdoll->activate();
+    rig.step(300);   // collapse and fall asleep (Ragdoll's rest assist)
+    bool asleep = true;
+    for (size_t i = 0; i < rig.ragdoll->bone_count(); ++i) asleep = asleep && !rig.body(i)->awake;
+    expect(asleep, "ragdoll ram: the collapsed body fell asleep");
+    const glm::vec3 lying = rig.world(0);
+
+    // The ram: a kinematic slab sweeping +X through where the body lies, 3 m/s.
+    auto ram_obj = std::make_unique<SceneObject>("ram");
+    auto& rt = ram_obj->add_component<TransformComponent>()->transform();
+    rt.set_position(glm::vec3(lying.x - 2.0f, lying.y, 0.45f));
+    ram_obj->add_component<coopa::physx::components::BoxCollider>()->set_size(glm::vec3(0.6f, 3.0f, 0.9f));
+    auto* rb = ram_obj->add_component<coopa::physx::components::RigidbodyComponent>();
+    rb->is_kinematic = true;
+    rb->use_gravity = false;
+    SceneObject* ram = rig.scene.add_root_object(std::move(ram_obj));
+    rig.physics->refresh();
+    float max_speed = 0.0f;
+    for (int f = 0; f < 90; ++f) {
+        ram->get_transform()->transform().set_position(glm::vec3(lying.x - 2.0f + 3.0f * (f + 1) / 60.0f, lying.y, 0.45f));
+        rig.step(1);
+        for (size_t i = 0; i < rig.ragdoll->bone_count(); ++i) max_speed = std::max(max_speed, glm::length(rig.body(i)->linear_velocity));
+    }
+    const glm::vec3 after = rig.world(0);
+    expect(after.x > lying.x + 0.5f, "ragdoll ram: the body was pushed along +X (" + std::to_string(after.x - lying.x) + " m)");
+    expect(max_speed < 8.0f, "ragdoll ram: nothing flung (max speed " + std::to_string(max_speed) + " m/s)");
+    expect(rig.max_joint_gap() < 0.03f, "ragdoll ram: the joints held (gap " + std::to_string(rig.max_joint_gap()) + " m)");
+    expect(after.z > -0.05f && after.z < 1.0f, "ragdoll ram: still on the ground");
+}
+
+/**
+ * @brief Animated -> Ragdoll -> Animated with a CharacterController: animated bones are kinematic
+ *        and hittable, activate() goes limp (Animator cleared, controller suspended, capsule off),
+ *        deactivate() holds the fallen pose without a pop, stands the character up under where
+ *        the pelvis lay, blends into idle, and ends kinematic and animated again.
+ */
+void test_ragdoll_animated_round_trip() {
+    using coopa::physx::dynamics::BodyType;
+    ragdoll_test::Rig rig(true);
+    if (!rig.ragdoll || rig.ragdoll->bone_count() == 0 || !rig.cc) { expect(false, "ragdoll round trip: rig built"); return; }
+    rig.step(30);
+    auto* cap = rig.root->get_component<coopa::physx::components::CapsuleCollider>();
+    bool all_kinematic = true;
+    for (size_t i = 0; i < rig.ragdoll->bone_count(); ++i) all_kinematic = all_kinematic && rig.body(i)->type == BodyType::Kinematic;
+    expect(rig.ragdoll->mode() == toy::scene::Ragdoll::Mode::Animated && all_kinematic, "ragdoll round trip: animated bones are kinematic");
+    expect_near(rig.world(0).z, 0.95f, 0.02f, "ragdoll round trip: the animated pelvis stands at hip height");
+    {
+        // Hits register: a ray at the head finds the head bone's collider (not the capsule's
+        // object -- the ray's filter skips the root's own body).
+        coopa::physx::system::PhysicsSystem::QueryFilter filter;
+        filter.ignore_rigidbody = rig.root->get_component<coopa::physx::components::RigidbodyComponent>();
+        coopa::physx::geometry::Ray ray;
+        ray.origin = glm::vec3(0.0f, -2.0f, rig.world(static_cast<size_t>(rig.find_bone("head"))).z + 0.11f);
+        ray.direction = glm::vec3(0.0f, 1.0f, 0.0f);
+        ray.max_distance = 4.0f;
+        coopa::physx::system::PhysicsSystem::RaycastHit hit;
+        const bool got = rig.physics->raycast(ray, hit, filter);
+        expect(got && hit.collider && hit.collider->owner->name() == "head", "ragdoll round trip: a ray hits the animated head");
+    }
+
+    rig.ragdoll->activate(glm::vec3(0.0f, 150.0f, 0.0f));
+    rig.step(1);
+    all_kinematic = true;
+    bool all_dynamic = true;
+    for (size_t i = 0; i < rig.ragdoll->bone_count(); ++i) all_dynamic = all_dynamic && rig.body(i)->type == BodyType::Dynamic;
+    expect(rig.ragdoll->is_ragdoll() && all_dynamic, "ragdoll round trip: activate() makes every bone dynamic");
+    expect(!rig.animator->is_playing() && rig.animator->current_state().empty(), "ragdoll round trip: the Animator is cleared");
+    expect(rig.cc->is_suspended() && cap && !cap->is_enabled(), "ragdoll round trip: the controller is suspended, its capsule off");
+    const glm::vec3 root_before = rig.root->get_transform()->transform().position();
+    rig.step(150);
+    const glm::vec3 lying = rig.world(0);
+    expect(lying.z < 0.5f, "ragdoll round trip: the shoved body fell (pelvis z " + std::to_string(lying.z) + ")");
+    expect(glm::length(glm::vec2(lying - root_before)) > 0.3f, "ragdoll round trip: ...away from where it stood");
+
+    std::vector<glm::vec3> before(rig.ragdoll->bone_count());
+    for (size_t i = 0; i < before.size(); ++i) before[i] = rig.world(i);
+    rig.ragdoll->deactivate(0.5f, "idle");
+    rig.step(1);
+    float pop = 0.0f;
+    for (size_t i = 0; i < before.size(); ++i) pop = std::max(pop, glm::length(rig.world(i) - before[i]));
+    expect(rig.ragdoll->mode() == toy::scene::Ragdoll::Mode::Blending, "ragdoll round trip: deactivate() starts the blend");
+    expect(pop < 0.05f, "ragdoll round trip: the first blend frame holds the fallen pose (moved " + std::to_string(pop) + " m)");
+    const glm::vec3 root_after = rig.root->get_transform()->transform().position();
+    expect(glm::length(glm::vec2(root_after - lying)) < 0.05f && std::abs(root_after.z) < 0.05f,
+           "ragdoll round trip: the character stands up under where the pelvis lay");
+    expect(!rig.cc->is_suspended() && cap && cap->is_enabled(), "ragdoll round trip: the controller is back, capsule on");
+
+    rig.step(40);   // past the 0.5 s blend
+    all_kinematic = true;
+    for (size_t i = 0; i < rig.ragdoll->bone_count(); ++i) all_kinematic = all_kinematic && rig.body(i)->type == BodyType::Kinematic;
+    expect(rig.ragdoll->mode() == toy::scene::Ragdoll::Mode::Animated && all_kinematic,
+           "ragdoll round trip: the blend ends animated, bones kinematic");
+    expect(rig.animator->is_playing() && rig.animator->current_state() == "idle", "ragdoll round trip: the Animator plays idle");
+    const glm::vec3 pelvis = rig.world(0);
+    expect_near(pelvis.z, root_after.z + 0.95f, 0.03f, "ragdoll round trip: the pelvis is back at hip height");
+    expect(glm::length(glm::vec2(pelvis - root_after)) < 0.05f, "ragdoll round trip: ...over the new root");
+
+    // And again: a second activation works from the recovered state.
+    rig.ragdoll->activate();
+    rig.step(2);
+    expect(rig.ragdoll->is_ragdoll(), "ragdoll round trip: it can go limp again");
+}
+
 /** @brief One registered test: its name (also its filter key), its group, and its body. */
 struct TestCase {
     const char* name;
@@ -8116,6 +9849,394 @@ void test_runtime_user_settings_roundtrip() {
     toy::core::UserSettings again;
     again.load(file);
     expect_near(again.get_float("audio.music", 0.0f), 0.5f, 1e-6f, "the value survives a reload");
+}
+
+// --- Saves (toyengine/save/) -------------------------------------------------------------------
+
+namespace save_test {
+
+/** @brief A SaveSystem writing to a fresh directory, plain YAML, with no host (no scene). */
+std::unique_ptr<toy::save::SaveSystem> make_saves(const std::string& dir_name) {
+    auto saves = std::make_unique<toy::save::SaveSystem>();
+    saves->set_root(fresh_tmp_subdir(dir_name) / "saves");
+    saves->set_encoding(toy::save::SaveEncoding::Yaml);
+    return saves;
+}
+
+/** @brief A file's raw bytes (no decoding). */
+std::string raw_bytes(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+/** @brief A test ISaveable: one counter. */
+class Counter : public coopa::scene::Component, public toy::save::ISaveable {
+public:
+    int value = 0;
+    std::string type_name() const override { return "TestSaveCounter"; }
+    std::string save_key() const override { return "counter"; }
+    void save(toy::save::SaveNode& out) override { out.set("value", value); }
+    void load(const toy::save::SaveNode& in) override { value = in.get("value", -1); }
+};
+
+} // namespace save_test
+
+/**
+ * @brief A slot round-trip: on_save writes global state of every supported kind, the slot is
+ *        written (directories created), on_load reads it all back; a bad slot name and a
+ *        missing slot fail cleanly; delete_slot removes it.
+ */
+void test_runtime_save_slot_roundtrip() {
+    auto saves = save_test::make_saves("save_roundtrip");
+    auto save_conn = saves->on_save.connect_scoped([](toy::save::SaveGame& g) {
+        toy::save::SaveNode s = g.global();
+        s.set("gold", 120);
+        s.set("name", "Ada");
+        s.set("alive", true);
+        s.set("ratio", 0.25f);
+        s.set("home", glm::vec3(1.0f, -2.0f, 3.5f));
+        s.set("rot", glm::angleAxis(glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f)));
+        s.section("quests").set("done", std::vector<std::string>{"intro", "bridge"});
+    });
+    expect(saves->save("slot_1"), "save: writes slot_1 (" + saves->last_error() + ")");
+    expect(saves->has_slot("slot_1") && std::filesystem::exists(saves->meta_path("slot_1")), "save: .save and .meta exist");
+
+    bool loaded = false;
+    std::string finished;
+    auto load_conn = saves->on_load.connect_scoped([&](const toy::save::SaveGame& g) {
+        const toy::save::SaveNode s = g.global();
+        loaded = true;
+        expect(s.get("gold", 0) == 120, "save: int round-trips");
+        expect(s.get("name", "") == "Ada", "save: string round-trips");
+        expect(s.get("alive", false), "save: bool round-trips");
+        expect_near(s.get("ratio", 0.0f), 0.25f, 1e-6f, "save: float round-trips");
+        const glm::vec3 home = s.get("home", glm::vec3(0.0f));
+        expect(home == glm::vec3(1.0f, -2.0f, 3.5f), "save: vec3 round-trips");
+        const glm::quat rot = s.get("rot", glm::quat(1.0f, 0.0f, 0.0f, 0.0f));
+        expect(std::abs(glm::dot(rot, glm::angleAxis(glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f)))) > 0.9999f, "save: quat round-trips");
+        const auto done = s.section("quests").get("done", std::vector<std::string>{});
+        expect(done == std::vector<std::string>({"intro", "bridge"}), "save: a string list in a sub-section round-trips");
+        expect(s.get("missing", 7) == 7 && s.get("name", 3) == 3, "save: a missing or mistyped value reads as the fallback");
+        expect(!s.section("nope").valid() && s.section("nope").get("x", 1) == 1, "save: a missing section reads as empty");
+        bool threw = false;
+        try { toy::save::SaveNode copy = s; copy.set("x", 1); } catch (const std::logic_error&) { threw = true; }
+        expect(threw, "save: a loaded document is read-only to on_load");
+    });
+    auto done_conn = saves->on_loaded.connect_scoped([&](const std::string& slot) { finished = slot; });
+    expect(saves->load("slot_1") && loaded && finished == "slot_1", "save: load applies the slot and reports it");
+
+    expect(!saves->save("../escape") && !saves->save("") && !saves->save("a/b"), "save: slot names cannot leave the save directory");
+    expect(!saves->load("never_saved"), "save: loading a missing slot fails");
+    expect(saves->delete_slot("slot_1") && !saves->has_slot("slot_1") && !std::filesystem::exists(saves->meta_path("slot_1")),
+           "save: delete_slot removes the save and its sidecar");
+    expect(!saves->delete_slot("slot_1"), "save: deleting a missing slot reports false");
+}
+
+/**
+ * @brief Slot listing reads the .meta sidecars: slot, scene (from the host), play time, version
+ *        and the game's summary; a slot that lost its sidecar is still listed from its .save.
+ */
+void test_runtime_save_meta_listing() {
+    auto saves = save_test::make_saves("save_listing");
+    toy::save::SaveSystem::Host host;
+    host.scene_path = [] { return std::string("assets/scenes/tests/gameplay/character_test/scene.yaml"); };
+    saves->set_host(host);
+    saves->set_version(3);
+    int level = 0;
+    auto conn = saves->on_save.connect_scoped([&](toy::save::SaveGame& g) { g.summary().set("level", level); });
+    expect(saves->list_slots().empty(), "listing: no directory yet lists nothing");
+    level = 4;
+    saves->set_play_time(125.0);
+    expect(saves->save("alpha"), "listing: save alpha");
+    level = 9;
+    saves->tick(5.0f);
+    expect(saves->save("beta"), "listing: save beta");
+
+    const auto slots = saves->list_slots();
+    expect(slots.size() == 2, "listing: two slots (got " + std::to_string(slots.size()) + ")");
+    for (const auto& info : slots) {
+        expect(info.scene == "assets/scenes/tests/gameplay/character_test/scene.yaml", "listing: the saved scene is in the meta");
+        expect(info.version == 3 && info.timestamp > 0 && info.saved_at.size() == 20, "listing: version and time are in the meta");
+        const int want_level = info.slot == "alpha" ? 4 : 9;
+        expect(info.summary_node().get("level", -1) == want_level, "listing: the game's summary is in the meta (" + info.slot + ")");
+        expect_near(static_cast<float>(info.play_time), info.slot == "alpha" ? 125.0f : 130.0f, 1e-3f, "listing: play time");
+    }
+    std::filesystem::remove(saves->meta_path("beta"));
+    const auto info = saves->slot_info("beta");
+    expect(info && info->summary_node().get("level", -1) == 9 && info->version == 3,
+           "listing: a slot without its sidecar is described from the .save");
+    expect(saves->list_slots().size() == 2, "listing: still two slots");
+}
+
+/**
+ * @brief Atomic writes: a temp file left by a write that died midway is neither listed nor read,
+ *        the previous save stays loadable, and the next save replaces it cleanly.
+ */
+void test_runtime_save_atomic_write_survives_interrupted_temp() {
+    namespace fs = std::filesystem;
+    auto saves = save_test::make_saves("save_atomic");
+    int gold = 10;
+    auto c1 = saves->on_save.connect_scoped([&](toy::save::SaveGame& g) { g.global().set("gold", gold); });
+    int read_gold = -1;
+    auto c2 = saves->on_load.connect_scoped([&](const toy::save::SaveGame& g) { read_gold = g.global().get("gold", -1); });
+    expect(saves->save("slot"), "atomic: first save");
+
+    // A crash mid-write: the temp sibling holds a truncated document; the real file is untouched.
+    fs::path tmp = saves->slot_path("slot");
+    tmp += ".tmp~";
+    write_text_file(tmp, "version: 1\nglobal: { gold: 99");
+    expect(saves->list_slots().size() == 1, "atomic: the stray temp file is not a slot");
+    expect(saves->load("slot") && read_gold == 10, "atomic: the previous save still loads intact");
+
+    gold = 20;
+    expect(saves->save("slot") && !fs::exists(tmp), "atomic: the next save replaces the temp file");
+    expect(saves->load("slot") && read_gold == 20, "atomic: the new save loads");
+    for (const auto& e : fs::directory_iterator(saves->root())) {
+        expect(e.path().extension() == ".save" || e.path().extension() == ".meta",
+               "atomic: only .save/.meta files remain (" + e.path().filename().string() + ")");
+    }
+}
+
+/**
+ * @brief Caml saves: written encoded (CAML magic, no readable keys), read back without a
+ *        registered codec, and a plain YAML slot written earlier still loads after switching.
+ */
+void test_runtime_save_caml_roundtrip() {
+    auto saves = save_test::make_saves("save_caml");
+    std::string secret = "plain";
+    auto c1 = saves->on_save.connect_scoped([&](toy::save::SaveGame& g) { g.global().set("secret", secret); });
+    std::string got;
+    auto c2 = saves->on_load.connect_scoped([&](const toy::save::SaveGame& g) { got = g.global().get("secret", ""); });
+    expect(saves->save("old_yaml"), "caml: a yaml slot");
+
+    saves->set_encoding(toy::save::SaveEncoding::Caml);
+    secret = "the_hidden_value";
+    expect(saves->save("encoded"), "caml: an encoded slot (" + saves->last_error() + ")");
+    const std::string bytes = save_test::raw_bytes(saves->slot_path("encoded"));
+    expect(bytes.rfind("CAML", 0) == 0, "caml: the .save starts with the CAML magic");
+    expect(bytes.find("the_hidden_value") == std::string::npos, "caml: the value is not readable in the file");
+    expect(save_test::raw_bytes(saves->meta_path("encoded")).rfind("CAML", 0) == 0, "caml: the sidecar is encoded too");
+    expect(saves->load("encoded") && got == "the_hidden_value", "caml: an encoded slot loads");
+    expect(saves->load("old_yaml") && got == "plain", "caml: a yaml slot still loads after switching to caml");
+    expect(saves->list_slots().size() == 2, "caml: both slots list");
+    expect(toy::save::parse_save_encoding("auto") == (toy::core::k_shipping ? toy::save::SaveEncoding::Caml : toy::save::SaveEncoding::Yaml) &&
+           !toy::save::parse_save_encoding("binary"), "caml: save.encode parsing");
+}
+
+/**
+ * @brief Migrations run in version order (registered out of order), each once, before on_load,
+ *        and leave the document at the current version; a document already current runs none.
+ */
+void test_runtime_save_migrations_run_in_order() {
+    auto saves = save_test::make_saves("save_migrations");
+    saves->set_version(1);
+    auto c1 = saves->on_save.connect_scoped([](toy::save::SaveGame& g) { g.global().set("coins", 5); });
+    expect(saves->save("v1"), "migration: a version-1 save");
+    c1.disconnect();
+
+    saves->set_version(4);
+    std::vector<int> ran;
+    saves->register_migration(3, [&](toy::save::SaveGame& g) { ran.push_back(3); g.global().set("gold", g.global().get("gold", 0) * 2); });
+    saves->register_migration(1, [&](toy::save::SaveGame& g) { ran.push_back(1); g.global().set("gold", g.global().get("coins", 0)); g.global().erase("coins"); });
+    saves->register_migration(2, [&](toy::save::SaveGame& g) { ran.push_back(2); g.global().set("gold", g.global().get("gold", 0) + 1); });
+    int gold = -1, version = -1;
+    bool has_coins = true;
+    auto c2 = saves->on_load.connect_scoped([&](const toy::save::SaveGame& g) {
+        gold = g.global().get("gold", -1);
+        has_coins = g.global().has("coins");
+        version = g.version();
+    });
+    expect(saves->load("v1"), "migration: load the old save");
+    expect(ran == std::vector<int>({1, 2, 3}), "migration: 1 -> 2 -> 3 -> 4 in order");
+    expect(gold == 12 && !has_coins, "migration: each step saw the previous one's result (gold " + std::to_string(gold) + ")");
+    expect(version == 4, "migration: on_load sees the current version");
+
+    ran.clear();
+    auto c3 = saves->on_save.connect_scoped([](toy::save::SaveGame& g) { g.global().set("gold", 1); });
+    expect(saves->save("v4") && saves->load("v4") && ran.empty(), "migration: a current save runs none");
+}
+
+/**
+ * @brief ISaveable through a scene by SaveId: a scene file with SaveIds (explicit, empty -> the
+ *        name path, on an inactive object) and ISaveable components (a CharacterController and a
+ *        test counter) is saved, a fresh copy of the same scene is loaded from the save, and every
+ *        component gets its own state back; objects without a SaveId are untouched.
+ */
+void test_runtime_save_saveable_by_save_id() {
+    toy::scene::register_scene_components();
+    toy::save::register_save_components();
+    coopa::scene::SceneLoader::register_component_parser("TestSaveCounter",
+        [](const fkyaml::node&, coopa::scene::SceneObject& obj, const coopa::scene::SceneLoader::ParseContext&) {
+            obj.add_component<save_test::Counter>();
+        });
+    const std::string yaml = R"(scene:
+  scene_name: save_scene
+  root_objects:
+    - name: hero
+      components:
+        - type: Transform
+          position: { x: 0, y: 0, z: 0 }
+        - type: CharacterController
+        - type: SaveId
+          id: player
+    - name: group
+      components:
+        - type: Transform
+      children:
+        - name: chest
+          components:
+            - type: Transform
+            - type: TestSaveCounter
+            - type: SaveId
+    - name: sleeping
+      active: false
+      components:
+        - type: Transform
+        - type: TestSaveCounter
+        - type: SaveId
+          id: sleeper
+    - name: untracked
+      components:
+        - type: Transform
+        - type: TestSaveCounter
+)";
+    const std::string anchor = (tmp_dir() / "save_scene.yaml").string();
+    auto build = [&] { return coopa::scene::SceneLoader::load_from_node(fkyaml::node::deserialize(yaml), anchor); };
+    auto counter = [](coopa::scene::Scene& s, const char* path) {
+        coopa::scene::SceneObject* o = s.find_object_by_path(path);
+        return o ? o->get_component<save_test::Counter>() : nullptr;
+    };
+
+    coopa::scene::Scene first = build();
+    coopa::scene::Scene* current = &first;
+    auto saves = save_test::make_saves("save_scene_objects");
+    toy::save::SaveSystem::Host host;
+    host.scene = [&] { return current; };
+    saves->set_host(host);
+
+    auto* cc = first.find_object("hero")->get_component<toy::scene::CharacterController>();
+    expect(cc != nullptr, "saveable: the hero has its CharacterController");
+    if (!cc) return;
+    cc->teleport(glm::vec3(4.0f, -2.5f, 1.25f));
+    cc->load(toy::save::SaveGame().global());   // an empty section leaves the pose alone
+    {
+        // Facing comes from the controller's yaw: set it through a save section, as a load would.
+        toy::save::SaveGame g;
+        toy::save::SaveNode n = g.global();
+        n.set("yaw", 135.0f);
+        cc->load(n);
+    }
+    counter(first, "group:chest")->value = 7;
+    counter(first, "sleeping")->value = 3;
+    counter(first, "untracked")->value = 11;
+    expect(saves->save("objects"), "saveable: save the scene");
+
+    const auto game = saves->read("objects");
+    expect(game && game->has_object("player") && game->has_object("group:chest") && game->has_object("sleeper"),
+           "saveable: one section per SaveId (an empty id is the name path; inactive objects too)");
+    expect(game && game->object_ids().size() == 3, "saveable: objects without a SaveId are not saved");
+    expect(game && game->object("group:chest").section("counter").get("value", 0) == 7, "saveable: objects/<id>/<save_key>");
+
+    coopa::scene::Scene second = build();
+    current = &second;
+    expect(saves->load("objects"), "saveable: load into a fresh copy of the scene");
+    const glm::vec3 pos = second.find_object("hero")->get_transform()->transform().position();
+    expect(glm::length(pos - glm::vec3(4.0f, -2.5f, 1.25f)) < 1e-4f, "saveable: the CharacterController's position is restored");
+    auto* cc2 = second.find_object("hero")->get_component<toy::scene::CharacterController>();
+    expect_near(cc2->yaw_deg(), 135.0f, 1e-3f, "saveable: the CharacterController's facing is restored");
+    expect(counter(second, "group:chest")->value == 7, "saveable: a nested object's state is restored by its path id");
+    expect(counter(second, "sleeping")->value == 3, "saveable: an inactive object's state is restored");
+    expect(counter(second, "untracked")->value == 0, "saveable: an object without a SaveId is left as built");
+    expect(toy::save::find_by_save_id(second, "sleeper") == second.find_object("sleeping") &&
+           toy::save::find_by_save_id(second, "group:chest") == second.find_object_by_path("group:chest") &&
+           !toy::save::find_by_save_id(second, "nobody"), "saveable: find_by_save_id (explicit ids, path ids, inactive objects)");
+}
+
+/**
+ * @brief The debug overlay's CPU half (toyengine/debug/debug_overlay.h): the frame-time ring's
+ *        statistics across a wrap, the mode names, and the toy::debug::watch()/text() lines --
+ *        ignored while the overlay is off, replaced in place on a repeat, shown in the Game block.
+ */
+void test_runtime_debug_overlay_ring_and_watch() {
+    using namespace toy::debug;
+    FrameTimeRing ring;
+    expect(ring.empty() && ring.average() == 0.0f && ring.low_1pct_fps() == 0.0f, "an empty ring reads 0");
+    ring.push(10.0f);
+    ring.push(20.0f);
+    ring.push(30.0f);
+    expect_near(ring.average(), 20.0f, 1e-4f, "ring average");
+    expect_near(ring.min(), 10.0f, 1e-4f, "ring min");
+    expect_near(ring.max(), 30.0f, 1e-4f, "ring max");
+    expect_near(ring.low_1pct_fps(), 1000.0f / 30.0f, 1e-3f, "the 1% low of a short ring is its slowest frame");
+
+    ring.clear();
+    for (int i = 0; i < 300; ++i) ring.push(static_cast<float>(i));
+    expect(ring.size() == FrameTimeRing::kCapacity, "the ring keeps only the last 240 frames");
+    expect_near(ring.at(0), 60.0f, 1e-4f, "oldest sample after a wrap");
+    expect_near(ring.at(FrameTimeRing::kCapacity - 1), 299.0f, 1e-4f, "newest sample after a wrap");
+
+    ring.clear();
+    for (int i = 0; i < 238; ++i) ring.push(10.0f);
+    ring.push(50.0f);
+    ring.push(30.0f);
+    expect_near(ring.low_1pct_fps(), 25.0f, 1e-3f, "the 1% low averages the slowest 1% (2 of 240) frames");
+
+    expect(parse_overlay_mode("full") == OverlayMode::Full && parse_overlay_mode("fps") == OverlayMode::Fps &&
+           parse_overlay_mode("off") == OverlayMode::Off && !parse_overlay_mode("loud"), "overlay mode names parse");
+    expect(next_overlay_mode(OverlayMode::Off) == OverlayMode::Fps && next_overlay_mode(OverlayMode::Fps) == OverlayMode::Full &&
+           next_overlay_mode(OverlayMode::Full) == OverlayMode::Off, "F3 cycles off -> fps -> full -> off");
+
+    GameLines& lines = GameLines::instance();
+    {
+        DebugOverlay off;
+        watch("ignored", 1);
+        text("ignored");
+        expect(lines.empty(), "watch()/text() publish nothing while the overlay is off");
+        expect(off.compose_lines().empty(), "an off overlay has no lines");
+    }
+    {
+        DebugOverlay overlay(OverlayMode::Fps);
+        overlay.record_frame(500.0f);   // the hitch that showed it: dropped
+        overlay.record_frame(20.0f);
+        expect(overlay.ring().size() == 1, "the first frame after showing the overlay is not recorded");
+        watch("speed", 1.5f);
+        watch("grounded", true);
+        watch("speed", 2);
+        watch("pos", glm::vec3(1.0f, 2.0f, 3.0f));
+        text("state: %s %d", "run", 3);
+        expect(lines.watches().size() == 3 && lines.watches()[0].name == "speed" && lines.watches()[0].value == "2",
+               "a repeated watch() replaces its value in place");
+        expect(lines.watches()[1].value == "true" && lines.watches()[2].value == "(1.000, 2.000, 3.000)",
+               "watch() formats bools and vectors");
+        const auto composed = overlay.compose_lines();
+        auto has = [&](const std::string& label, const std::string& value) {
+            return std::any_of(composed.begin(), composed.end(), [&](const DebugOverlay::Line& l) {
+                return l.label == label && (value.empty() || l.value == value);
+            });
+        };
+        expect(has("FPS", "50") && has("Game", "") && has("speed", "2") && has("state: run 3", ""),
+               "fps mode shows the frame rate and the Game block");
+        expect(!has("Render", ""), "fps mode leaves out the full-mode blocks");
+
+        overlay.set_mode(OverlayMode::Full);
+        overlay.stats().has_physics = true;
+        overlay.stats().bodies = 12;
+        overlay.stats().bodies_awake = 3;
+        const auto full = overlay.compose_lines();
+        auto has_full = [&](const std::string& label, const std::string& value) {
+            return std::any_of(full.begin(), full.end(), [&](const DebugOverlay::Line& l) {
+                return l.label == label && (value.empty() || l.value == value);
+            });
+        };
+        expect(has_full("Render", "") && has_full("Scene", "") && has_full("bodies awake / all", "3 / 12") &&
+               !has_full("Navigation", ""), "full mode adds the render, scene and physics blocks (nav only with a NavSystem)");
+
+        lines.clear();
+        expect(lines.empty(), "the per-frame clear empties the Game block");
+        overlay.set_mode(OverlayMode::Off);
+        watch("after", 1);
+        expect(lines.empty() && !lines.accepting(), "turning the overlay off stops accepting lines");
+    }
 }
 
 // =====================================================================================
@@ -8483,6 +10604,318 @@ void test_snow_scene_renders() {
     engine.render_config().snow_cover_override = -1.0f;
 }
 
+// =====================================================================================
+// Group "render_scene" -- async scene loading (Engine::load_scene_async), transitions and
+// SceneLink. Each test builds a GPU engine.
+// =====================================================================================
+
+namespace scene_load_test {
+
+/** @brief Counts constructions and start() calls, to see when an async load starts its scene. */
+class StartProbe : public coopa::scene::Component {
+public:
+    static inline int constructed = 0;
+    static inline int started = 0;
+    StartProbe() { ++constructed; }
+    std::string type_name() const override { return "StartProbe"; }
+    void start() override { ++started; }
+};
+
+void register_probe() {
+    coopa::scene::SceneLoader::register_component_parser("StartProbe",
+        [](const fkyaml::node&, coopa::scene::SceneObject& obj, const coopa::scene::SceneLoader::ParseContext&) {
+            obj.add_component<StartProbe>();
+        });
+}
+
+/** @brief A scene of `count` probed cubes plus a camera and a sun, written under tmp_dir(). */
+std::string write_probe_scene(int count) {
+    const std::filesystem::path dir = tmp_dir() / "async_probe_scene";
+    std::filesystem::create_directories(dir);
+    std::string y =
+        "scene:\n"
+        "  scene_name: AsyncProbe\n"
+        "  root_objects:\n"
+        "    - name: camera\n"
+        "      components:\n"
+        "        - type: Transform\n"
+        "          position: { x: 0, y: -14, z: 7 }\n"
+        "          rotation: { x: 62, y: 0, z: 0 }\n"
+        "        - type: Camera\n"
+        "          main: true\n"
+        "          fov: 60.0\n"
+        "    - name: sun\n"
+        "      components:\n"
+        "        - type: DirectionalLight\n"
+        "          direction: { x: -0.4, y: 0.5, z: -0.75 }\n"
+        "          intensity: 1.0\n";
+    for (int i = 0; i < count; ++i) {
+        const int gx = i % 8, gy = i / 8;
+        y += "    - name: probe_" + std::to_string(i) + "\n"
+             "      components:\n"
+             "        - type: Transform\n"
+             "          position: { x: " + std::to_string(gx * 1.5f - 5.25f) + ", y: " + std::to_string(gy * 1.5f) + ", z: 0.5 }\n"
+             "        - type: MeshRenderer\n"
+             "          mesh_path: cube\n"
+             "          material: { albedo: { r: 0.9, g: 0.5, b: 0.2 } }\n"
+             "        - type: StartProbe\n";
+    }
+    const std::filesystem::path path = dir / "scene.yaml";
+    write_text_file(path, y);
+    return path.string();
+}
+
+/** @brief Pixels whose RGB sum is under `dark`. */
+long long count_dark(const Frame& f, int dark = 30) {
+    long long n = 0;
+    for (size_t i = 0; i < static_cast<size_t>(f.width) * f.height; ++i) {
+        const uint8_t* px = &f.pixels[i * f.channels];
+        if (int(px[0]) + int(px[1]) + int(px[2]) < dark) ++n;
+    }
+    return n;
+}
+
+}  // namespace scene_load_test
+
+/**
+ * @brief load_scene_async() builds the next scene over many frames while the current one keeps
+ *        ticking untouched, never starts it before activation, reports monotonic progress,
+ *        fades out -> swaps -> fades in, and a failed load leaves the current scene running.
+ */
+void test_async_scene_load_ticks_and_swaps() {
+    using namespace scene_load_test;
+    ScopedEnv fixed_dt("FIXED_DT", "0.016666");
+    ScopedEnv no_input("NO_INPUT", "1");
+    toy::core::Engine engine(make_test_config("assets/scenes/demos/pixel_demo/scene.yaml", 320, 180, 160, 90));
+    register_probe();
+    const int kProbes = 24;
+    const std::string path = write_probe_scene(kProbes);
+    tick_frames(engine, 2);
+
+    coopa::scene::Scene* old = &engine.scene_manager().get_active_scene();
+    const size_t old_roots = old->root_objects().size();
+    StartProbe::constructed = StartProbe::started = 0;
+
+    toy::core::SceneLoadOptions opts;
+    opts.transition = toy::core::SceneTransition::fade(0.1f, glm::vec3(0.0f));
+    opts.build_budget_ms = 0.0f;   // one root object per frame: the build must span frames
+    toy::core::SceneLoadHandle load = engine.load_scene_async(path, opts);
+    expect(load.valid() && !load.is_ready(), "async load: the request returns at once, not ready");
+    expect(engine.overlay_layers().size() == 1, "async load: the fade is an engine overlay layer");
+    int completes = 0;
+    int started_at_complete = -1;
+    load.on_complete([&](coopa::scene::Scene& s) {
+        ++completes;
+        started_at_complete = StartProbe::started;
+        expect(s.name() == "AsyncProbe", "async load: on_complete gets the new scene");
+    });
+
+    int frames = 0;
+    float last_progress = 0.0f;
+    bool monotonic = true, intact = true, unstarted = true, covered = false, ticked = true;
+    while (!load.is_ready() && frames < 1000) {
+        const uint64_t before = old->frame_index();
+        engine.tick();
+        ++frames;
+        if (load.progress() < last_progress) monotonic = false;
+        last_progress = load.progress();
+        if (load.transition_alpha() >= 1.0f) covered = true;
+        if (load.is_ready()) break;
+        if (&engine.scene_manager().get_active_scene() != old || engine.scene_manager().scenes().size() != 1 ||
+            old->root_objects().size() != old_roots) {
+            intact = false;
+        }
+        if (old->frame_index() == before) ticked = false;
+        if (StartProbe::started != 0) unstarted = false;
+    }
+    expect(load.is_ready(), "async load: the scene activates (" + std::to_string(frames) + " frames)");
+    expect_at_least(frames, kProbes, "async load: frames keep ticking between the request and activation");
+    expect(ticked, "async load: the current scene keeps updating while the next one builds");
+    expect(intact, "async load: the current scene stays intact (and active) until activation");
+    expect(unstarted && StartProbe::constructed == kProbes, "async load: objects are built but not started before activation");
+    expect(monotonic, "async load: progress never goes back");
+    expect(covered, "async load: the fade covers the screen before the swap");
+    expect(completes == 1 && started_at_complete == kProbes, "async load: on_complete fires once, after start()");
+    expect(engine.scene_manager().scenes().size() == 1 && engine.scene_manager().get_active_scene().name() == "AsyncProbe",
+           "async load: the new scene replaced the old one");
+    expect(load.progress() == 1.0f, "async load: progress is 1 once ready");
+
+    int more = 0;
+    while (!load.is_done() && more < 300) { engine.tick(); ++more; }
+    expect(load.is_done() && !load.failed() && load.stage() == toy::core::SceneLoadStage::Done,
+           "async load: the fade-in completes");
+    expect(engine.overlay_layers().empty() && load.transition_alpha() == 0.0f, "async load: the transition layer is gone");
+    int late = 0;
+    load.on_complete([&](coopa::scene::Scene&) { ++late; });
+    expect(late == 1, "async load: on_complete after activation runs immediately");
+    tick_frames(engine, 2);
+    const Frame f = engine.capture_image(true);
+    expect(count_dark(f) < static_cast<long long>(f.width) * f.height / 2, "async load: the new scene renders, uncovered");
+
+    // A load that fails leaves the running scene alone and reports why.
+    coopa::scene::Scene* current = &engine.scene_manager().get_active_scene();
+    std::string why;
+    toy::core::SceneLoadOptions fade_opts;
+    fade_opts.transition = toy::core::SceneTransition::fade(0.1f);
+    toy::core::SceneLoadHandle bad = engine.load_scene_async(tmp_path("async_probe_scene/missing.yaml"), fade_opts);
+    bad.on_failed([&](const std::string& e) { why = e; });
+    for (int i = 0; i < 200 && !bad.is_done(); ++i) engine.tick();
+    expect(bad.failed() && !why.empty(), "async load: a missing file fails with an error (" + why + ")");
+    expect(&engine.scene_manager().get_active_scene() == current, "async load: a failed load keeps the current scene");
+    for (int i = 0; i < 60 && !engine.overlay_layers().empty(); ++i) engine.tick();
+    expect(engine.overlay_layers().empty() && bad.transition_alpha() == 0.0f, "async load: a failed load's fade clears");
+
+    // load_scene() cancels an async load still in flight.
+    toy::core::SceneLoadHandle cancelled = engine.load_scene_async(path, opts);
+    engine.tick();
+    engine.load_scene("assets/scenes/demos/pixel_demo/scene.yaml");
+    expect(cancelled.failed() && engine.overlay_layers().empty(), "async load: load_scene() cancels an unfinished async load");
+    tick_frames(engine, 2);
+}
+
+/**
+ * @brief Saves through the Engine, on the character_test demo: the player walks onto a coin
+ *        (SaveDemo picks it up), the clock is set, and the slot is saved; after switching to
+ *        another scene, load() brings character_test back through load_scene_async() and
+ *        restores the player's pose (SaveId + CharacterController), the collected coin and the
+ *        clock before the scene's first update. A load in the same scene applies at once.
+ */
+void test_save_load_crosses_scenes() {
+    using namespace scene_load_test;
+    ScopedEnv fixed_dt("FIXED_DT", "0.016666");
+    ScopedEnv no_input("NO_INPUT", "1");
+    toy::core::Engine engine(make_test_config("assets/scenes/tests/gameplay/character_test/scene.yaml", 320, 180, 160, 90));
+    engine.saves().set_root(fresh_tmp_subdir("engine_saves"));
+    tick_frames(engine, 3);
+    auto player_of = [&]() { return engine.scene().find_first_component<toy::scene::CharacterController>(); };
+    auto coin_active = [&](const char* name) {
+        coopa::scene::SceneObject* o = engine.scene().find_object(name);
+        return o && o->active();
+    };
+    auto* cc = player_of();
+    expect(cc != nullptr && engine.weather() != nullptr, "save e2e: character_test has a player and a weather clock");
+    if (!cc || !engine.weather()) return;
+    cc->teleport(glm::vec3(3.0f, -4.0f, 0.0f));   // onto coin_4
+    tick_frames(engine, 3);
+    expect(!coin_active("coin_4") && coin_active("coin_3"), "save e2e: the player picked up coin_4");
+    const glm::vec3 saved_pos = cc->owner->get_transform()->transform().position();
+    engine.weather()->set_time(15.0f);
+    expect(engine.saves().save("e2e"), "save e2e: saved (" + engine.saves().last_error() + ")");
+    const auto info = engine.saves().slot_info("e2e");
+    expect(info && info->scene == "assets/scenes/tests/gameplay/character_test/scene.yaml",
+           "save e2e: the slot names the scene relative to the project (" + (info ? info->scene : std::string("-")) + ")");
+    expect(info && info->summary_node().get("coins", 0) == 1, "save e2e: SaveDemo put the coin count in the summary");
+
+    // Same scene: applied at once.
+    cc->teleport(glm::vec3(-8.0f, 2.0f, 0.0f));
+    expect(engine.saves().load("e2e") && !engine.saves().loading(), "save e2e: a same-scene load applies immediately");
+    expect(glm::length(cc->owner->get_transform()->transform().position() - saved_pos) < 1e-3f, "save e2e: same-scene load restores the pose");
+
+    // Another scene, then back.
+    toy::core::SceneLoadOptions none;
+    none.transition = toy::core::SceneTransition::none();
+    toy::core::SceneLoadHandle away = engine.load_scene_async(write_probe_scene(4), none);
+    for (int i = 0; i < 600 && !away.is_ready(); ++i) engine.tick();
+    expect(away.is_ready() && engine.scene().name() == "AsyncProbe", "save e2e: switched to another scene");
+    int loaded_signals = 0;
+    auto conn = engine.saves().on_loaded.connect_scoped([&](const std::string&) { ++loaded_signals; });
+    expect(engine.saves().load("e2e") && engine.saves().loading(), "save e2e: a load from another scene starts a scene load");
+    int frames = 0;
+    while (engine.saves().loading() && frames < 1200) { engine.tick(); ++frames; }
+    expect(!engine.saves().loading() && loaded_signals == 1, "save e2e: the load finished (" + std::to_string(frames) + " frames)");
+    expect(engine.scene().name() == "character_test", "save e2e: character_test is back");
+    cc = player_of();
+    expect(cc != nullptr, "save e2e: the reloaded scene has its player");
+    if (!cc) return;
+    expect(glm::length(cc->owner->get_transform()->transform().position() - saved_pos) < 0.05f,
+           "save e2e: the player's position is restored");
+    expect(!coin_active("coin_4") && coin_active("coin_1"), "save e2e: the collected coin stays collected");
+    expect(engine.weather() && std::abs(engine.weather()->time_of_day() - 15.0f) < 0.1f, "save e2e: the clock is restored");
+}
+
+/**
+ * @brief loading_test end to end: walking into the hub's SceneLink shows the loading screen,
+ *        the heavy scene's animators run without a refresh, and the way back lands the player
+ *        on its spawn point.
+ */
+void test_scene_link_loading_screen_and_spawn_point() {
+    using namespace scene_load_test;
+    ScopedEnv fixed_dt("FIXED_DT", "0.016666");
+    ScopedEnv no_input("NO_INPUT", "1");
+    toy::core::Engine engine(make_test_config("assets/scenes/tests/gameplay/loading_test/scene.yaml", 640, 360, 320, 180));
+    tick_frames(engine, 3);
+    coopa::scene::Scene& hub = engine.scene_manager().get_active_scene();
+    auto* player = hub.find_first_component<toy::scene::CharacterController>();
+    expect(player != nullptr, "scene link: the hub has a player");
+    if (!player) return;
+    const Frame before = engine.capture_image(false);
+
+    // Walk in: the north door's link fires on entry (a physics overlap, not a trigger pair).
+    player->teleport(glm::vec3(0.0f, 8.0f, 0.0f));
+    for (int i = 0; i < 5 && !engine.scene_loading(); ++i) engine.tick();
+    expect(engine.scene_loading(), "scene link: entering the door starts an async load");
+    toy::core::SceneLoadHandle load = engine.scene_load();
+    for (int i = 0; i < 120 && load.transition_alpha() < 1.0f && !load.is_ready(); ++i) engine.tick();
+    tick_frames(engine, 3);   // the loading screen spawns once covered, and lays out
+    expect(!load.is_ready(), "scene link: min_display_time keeps the loading screen up");
+    const Frame mid = engine.capture_image(false);
+    coopa::gfx::util::save_image_png(mid, tmp_path("loading_screen_mid.png"));
+    const long long pixels = static_cast<long long>(mid.width) * mid.height;
+    expect(count_dark(mid) > pixels / 2, "scene link: the loading screen covers the frame in the fade colour");
+    expect_at_least(count_diff(mid, before, 40), pixels / 2, "scene link: the loading screen hides the hub");
+    long long bright = 0;
+    for (size_t i = 0; i < static_cast<size_t>(pixels); ++i) {
+        const uint8_t* px = &mid.pixels[i * mid.channels];
+        if (int(px[0]) + int(px[1]) + int(px[2]) > 200) ++bright;
+    }
+    expect_at_least(bright, 200, "scene link: the loading screen draws its title, bar and status");
+
+    for (int i = 0; i < 2000 && !load.is_done(); ++i) engine.tick();
+    expect(load.is_done() && !load.failed(), "scene link: the heavy scene loads (" + load.error() + ")");
+    coopa::scene::Scene& heavy = engine.scene_manager().get_active_scene();
+    expect(heavy.name() == "loading_test_heavy" && engine.scene_manager().scenes().size() == 1,
+           "scene link: the heavy scene replaced the hub");
+
+    // Animators in a scene activated later run with no manual refresh: a dancer's pose changes.
+    auto* anim = dynamic_cast<coopa::anim::AnimationSystem*>(heavy.find_system("Animation"));
+    expect(anim && anim->animator_count() >= 13, "scene link: the heavy scene's animators are gathered (" +
+           std::to_string(anim ? anim->animator_count() : 0) + ")");
+    auto pose = [&]() {
+        std::vector<glm::vec3> out;
+        if (auto* d = heavy.find_object("dancer_0")) {
+            d->for_each_recursive([&](coopa::scene::SceneObject& o) {
+                if (auto* tc = o.get_transform()) out.push_back(tc->transform().rotation_degrees());
+            });
+        }
+        return out;
+    };
+    const auto p0 = pose();
+    tick_frames(engine, 20);
+    expect(!p0.empty() && p0 != pose(), "scene link: an animated mannequin in the loaded scene moves");
+
+    // Back through the heavy scene's door (fired from code): a fade, and the hub's spawn point.
+    auto* back = heavy.find_object("back_door_link");
+    auto* link = back ? back->get_component<toy::scene::SceneLink>() : nullptr;
+    expect(link != nullptr, "scene link: the heavy scene has a door back");
+    if (!link) return;
+    link->trigger();
+    engine.tick();
+    toy::core::SceneLoadHandle back_load = engine.scene_load();
+    glm::vec3 arrived(-100.0f);
+    back_load.on_complete([&](coopa::scene::Scene& s) {
+        if (auto* cc = s.find_first_component<toy::scene::CharacterController>()) {
+            arrived = cc->owner->get_transform()->transform().position();
+        }
+    });
+    for (int i = 0; i < 2000 && !back_load.is_done(); ++i) engine.tick();
+    expect(back_load.is_done() && engine.scene_manager().get_active_scene().name() == "loading_test",
+           "scene link: the door back loads the hub");
+    expect(glm::length(arrived - glm::vec3(0.0f, 5.5f, 0.0f)) < 0.01f,
+           "scene link: the player arrives on spawn_point (" + std::to_string(arrived.x) + ", " +
+           std::to_string(arrived.y) + ")");
+    tick_frames(engine, 2);
+}
+
 const TestCase kTests[] = {
     // --- runtime: packaged-layout detection, user directories and settings (no GPU) ---
     {"runtime_layout_folder_package",              "runtime", test_runtime_layout_folder_package},
@@ -8490,6 +10923,13 @@ const TestCase kTests[] = {
     {"runtime_layout_source_without_marker",       "runtime", test_runtime_layout_source_without_marker},
     {"runtime_user_dirs_follow_home",              "runtime", test_runtime_user_dirs_follow_home},
     {"runtime_user_settings_roundtrip",            "runtime", test_runtime_user_settings_roundtrip},
+    {"runtime_debug_overlay_ring_and_watch",       "runtime", test_runtime_debug_overlay_ring_and_watch},
+    {"runtime_save_slot_roundtrip",                "runtime", test_runtime_save_slot_roundtrip},
+    {"runtime_save_meta_listing",                  "runtime", test_runtime_save_meta_listing},
+    {"runtime_save_atomic_write",                  "runtime", test_runtime_save_atomic_write_survives_interrupted_temp},
+    {"runtime_save_caml_roundtrip",                "runtime", test_runtime_save_caml_roundtrip},
+    {"runtime_save_migrations_in_order",           "runtime", test_runtime_save_migrations_run_in_order},
+    {"runtime_save_saveable_by_save_id",           "runtime", test_runtime_save_saveable_by_save_id},
 
     // --- audio: AudioSystem + sfxcoopa components, rendered offline (no sound card) ---
     {"audio_source_plays_through_sfx_bus",         "audio", test_audio_source_plays_through_sfx_bus},
@@ -8595,6 +11035,7 @@ const TestCase kTests[] = {
     {"config_cascade_round_trip",                  "config", test_app_config_load_round_trips_cascade_settings},
     {"config_quality_presets",                     "config", test_app_config_load_applies_quality_presets},
     {"config_atmosphere_round_trip",               "config", test_app_config_load_round_trips_atmosphere_settings},
+    {"fog_height_transmittance",                   "render", test_fog_height_transmittance},
     {"config_ssr_and_window_round_trip",           "config", test_app_config_load_round_trips_ssr_and_window_settings},
     {"config_tolerates_unknown_keys",              "config", test_app_config_load_tolerates_unknown_and_commented_keys},
     {"directional_light_shadow_intensity_default", "config", test_directional_light_shadow_intensity_default},
@@ -8613,6 +11054,19 @@ const TestCase kTests[] = {
     {"free_mover_travels_on_all_three_axes",       "scene", test_free_mover_travels_on_all_three_axes},
     {"free_mover_smoothing_frame_rate_independent","scene", test_free_mover_smoothing_is_frame_rate_independent},
     {"kinematic_control_runs_before_physics",      "scene", test_kinematic_control_runs_before_physics},
+    {"ragdoll_settles_without_exploding",          "scene", test_ragdoll_settles_without_exploding},
+    {"ragdoll_joint_distances_preserved",          "scene", test_ragdoll_joint_distances_preserved},
+    {"ragdoll_animated_round_trip",                "scene", test_ragdoll_animated_round_trip},
+    {"ragdoll_pushed_by_kinematic_ram",            "scene", test_ragdoll_pushed_by_kinematic_ram},
+    {"character_climbs_stairs_and_is_blocked_by_tall_step", "scene", test_character_climbs_stairs_and_is_blocked_by_tall_step},
+    {"character_slides_on_steep_slope",            "scene", test_character_slides_on_steep_slope},
+    {"character_stays_grounded_down_ramp",         "scene", test_character_stays_grounded_down_ramp},
+    {"character_rides_moving_platform",            "scene", test_character_rides_moving_platform},
+    {"character_pushes_crate",                     "scene", test_character_pushes_crate},
+    {"character_jump_reaches_jump_height",         "scene", test_character_jump_reaches_jump_height},
+    {"character_never_penetrates_under_random_input", "scene", test_character_never_penetrates_under_random_input},
+    {"camera_controller_collides_with_walls",      "scene", test_camera_controller_collides_with_walls},
+    {"camera_controller_first_person_turns_character", "scene", test_camera_controller_first_person_turns_character},
     {"nav_test_scene_agents_reach_goals",          "scene", test_nav_test_scene_agents_reach_their_goals},
     {"nav_open_world_packs_converge",              "scene", test_nav_open_world_scene_packs_converge_on_hierarchical_fields},
     {"kinematic_mover_pingpong",                   "scene", test_kinematic_mover_pingpong_oscillates_about_origin},
@@ -8651,6 +11105,7 @@ const TestCase kTests[] = {
     {"particles_curves_and_gradients",             "particles", test_particles_curves_and_gradients},
     {"particles_emission_rate_bursts_lifetime",    "particles", test_particles_emission_rate_bursts_lifetime},
     {"weather_sky_model_follows_the_sun",          "weather",   test_weather_sky_model_follows_the_sun},
+    {"atmosphere_model_sky_colours",               "weather",   test_atmosphere_model_sky_colours},
     {"weather_yaml_round_trips_and_defaults",      "weather",   test_weather_yaml_round_trips_and_defaults},
     {"weather_transitions_blend_smoothly",         "weather",   test_weather_transitions_blend_smoothly},
     {"weather_drives_and_restores_an_authored_sun","weather",   test_weather_drives_and_restores_an_authored_sun},
@@ -8678,10 +11133,13 @@ const TestCase kTests[] = {
     {"pixel_demo_render_and_live_toggles",         "render_pixel",    test_pixel_demo_render_and_live_toggles},
     {"headless_render_with_all_toggles_off",       "render_pixel",    test_headless_render_with_all_toggles_off},
     {"debug_view_channels_render",                 "render_pixel",    test_debug_view_channels_render},
+    {"motion_blur_render",                         "render_pixel",    test_motion_blur_render},
     {"local_light_shadows",                        "render_pixel",    test_local_light_shadows},
     {"world_canvas_button_hover",                  "render_ui",       test_world_canvas_button_hover},
     {"ui_showcase_scene_runs",                     "render_ui",       test_ui_showcase_scene_runs},
+    {"debug_overlay_draws_and_off_is_free",        "render_ui",       test_debug_overlay_draws_and_off_is_free},
     {"material_maps_change_output",                "render_material", test_material_maps_change_output},
+    {"compute_dispatch_through_engine_device",     "render_material", test_compute_dispatch_through_engine_device},
     {"cloth_scene_simulates_and_animates",         "render_cloth",    test_cloth_scene_simulates_and_animates},
     {"ssao_tracks_moving_object",                  "render_cloth",    test_ssao_tracks_moving_object},
     {"ssr_tracks_moving_object",                   "render_cloth",    test_ssr_tracks_moving_object},
@@ -8691,13 +11149,26 @@ const TestCase kTests[] = {
     {"water_shader_shares_the_buoyancy_clock",     "render_water",    test_water_shader_shares_the_buoyancy_clock},
     {"water_parallel_matches_serial",              "render_water",    test_water_parallel_matches_serial},
     {"particles_scene_renders",                    "render_particles", test_particles_scene_renders},
+    {"particles_gpu_renders_steady_state_in_bounds", "render_particles", test_particles_gpu_renders_steady_state_in_bounds},
+    {"particles_gpu_matches_cpu_coverage",         "render_particles", test_particles_gpu_matches_cpu_coverage},
+    {"particles_gpu_sub_emitter_falls_back",       "render_particles", test_particles_gpu_sub_emitter_falls_back},
+    {"particles_gpu_capture_deterministic",        "render_particles", test_particles_gpu_capture_deterministic},
     {"weather_scene_renders",                      "render_weather",  test_weather_scene_renders},
+    {"physical_sky_renders",                       "render_weather",  test_physical_sky_renders},
+    {"physical_sky_off_costs_nothing",             "render_weather",  test_physical_sky_off_costs_nothing},
     {"tessellation_scene_renders",                 "render_surface",  test_tessellation_scene_renders},
     {"snow_scene_renders",                         "render_surface",  test_snow_scene_renders},
     {"rig_clip_drives_hierarchy",                  "rig",             test_rig_clip_drives_hierarchy},
     {"rig_vertex_group_skinning",                  "rig",             test_rig_vertex_group_skinning},
+    {"rig_foot_ik_on_step",                        "rig",             test_rig_foot_ik_on_step},
+    {"rig_root_motion_moves_character",            "rig",             test_rig_root_motion_moves_character},
     {"rig_skinned_mesh_follows_animated_bone",     "render_rig",      test_rig_skinned_mesh_follows_animated_bone},
     {"animation_test_scene_runs",                  "render_rig",      test_animation_test_scene_runs},
+    {"rig_skinning_palette_math",                  "rig",             test_rig_skinning_palette_math},
+    {"rig_gpu_skinning_matches_cpu",               "render_rig",      test_rig_gpu_skinning_matches_cpu},
+    {"async_scene_load_ticks_and_swaps",           "render_scene",    test_async_scene_load_ticks_and_swaps},
+    {"scene_link_loading_screen_and_spawn_point",  "render_scene",    test_scene_link_loading_screen_and_spawn_point},
+    {"save_load_crosses_scenes",                   "render_scene",    test_save_load_crosses_scenes},
     // TEMPORARY (round-8b shimmer diagnosis) -- run via `toyengine_tests ssao_travel_probe`,
     // removed once the cause is pinned. Not in any ctest group.
     {"ssao_travel_probe",                          "probe",           test_ssao_travel_probe},

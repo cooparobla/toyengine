@@ -1,10 +1,16 @@
 /**
  * @file skinned_mesh_renderer.h
- * @brief CPU-skins a bind-pose SkinnedMeshSource against animated bone SceneObjects every
- *        frame, uploading the result into a sibling MeshRenderer's dynamic GPU mesh.
+ * @brief Skins a bind-pose SkinnedMeshSource against animated bone SceneObjects every frame
+ *        into a sibling MeshRenderer's dynamic GPU mesh -- on the GPU (a compute pre-skin pass,
+ *        render/passes/skinning_pass.h) or, as the fallback, on the CPU.
  *
- * toyengine has no GPU vertex skinning -- no bone-matrix vertex attributes, no shader
- * skinning pass (see gfxcoopa/engine/data/skinned_mesh_source.h's file doc). Instead this
+ * `render.skinning: gpu` (the default, when the device has compute): upload() builds this
+ * frame's bone palette and enqueues one dispatch that writes the skinned vertices into the
+ * mesh's per-slot vertex buffer; nothing is uploaded per vertex. `skinning: cpu` (or no
+ * compute): skin() runs here and update_vertices() uploads the result. Either way the draws
+ * bind the same buffer, so no consumer knows which path wrote it.
+ *
+ * There are no bone-matrix vertex attributes: skinning is a pre-pass, and the result
  * mirrors ClothRenderer's already-proven pattern exactly: a sibling MeshRenderer supplies
  * the material and the draw, this component supplies the mesh, and Engine::upload_dynamic_meshes_()
  * calls upload() once per frame, after Scene::late_update() (so animated bone Transforms are
@@ -32,6 +38,8 @@
 
 #include <glm/glm.hpp>
 
+#include <algorithm>
+#include <limits>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -49,6 +57,10 @@
 #include <gfxcoopa/engine/data/mesh.h>
 #include <gfxcoopa/engine/data/skinned_mesh_source.h>
 #include <gfxcoopa/memory/allocator.h>
+#include <gfxcoopa/memory/storage_buffer.h>
+#include <gfxcoopa/pipeline/descriptor.h>
+
+#include "toyengine/render/passes/skinning_pass.h"
 
 namespace toy {
 namespace scene {
@@ -84,6 +96,12 @@ public:
                         uint32_t frames_in_flight)
         : device_(device), allocator_(allocator), assets_(assets),
           frames_in_flight_(frames_in_flight < 1u ? 1u : frames_in_flight) {}
+
+    /** @brief The compute path's buffers may still be read by an in-flight frame: drain first
+     *         (editor edits and destroying a skinned object -- rare, so a stall is acceptable). */
+    ~SkinnedMeshRenderer() override {
+        if (gpu_) device_.wait_idle();
+    }
 
     std::string type_name() const override { return "SkinnedMeshRenderer"; }
 
@@ -156,17 +174,77 @@ public:
     }
 
     /**
-     * @brief Builds the mesh if needed, re-skins this frame's vertices, and uploads them.
+     * @brief Per bone: inverse(owner_world) * bone_world * inverse_bind -- the skin matrix that
+     *        takes a bind-pose vertex (owner object space) to its posed position, again in the
+     *        owner's object space. A null bone stays identity. Pure (tests).
+     */
+    static void compute_palette(const glm::mat4& owner_world, const std::vector<glm::mat4>& bone_worlds,
+                                const std::vector<uint8_t>& bone_valid, const std::vector<glm::mat4>& inverse_bind,
+                                std::vector<glm::mat4>& out) {
+        const glm::mat4 inv_owner = glm::inverse(owner_world);
+        out.assign(bone_worlds.size(), glm::mat4(1.0f));
+        for (size_t i = 0; i < bone_worlds.size(); ++i) {
+            if (i < bone_valid.size() && !bone_valid[i]) continue;
+            out[i] = inv_owner * bone_worlds[i] * (i < inverse_bind.size() ? inverse_bind[i] : glm::mat4(1.0f));
+        }
+    }
+
+    /**
+     * @brief Conservative object-space bounds of the skinned mesh from the palette alone: each
+     *        bone's bind-pose box (the vertices it influences) through its skin matrix, unioned,
+     *        plus the box of vertices no bone moves. A skinned vertex is a convex blend of its
+     *        bones' transforms of it, so it always lies inside the union. Pure (tests).
+     */
+    static void palette_bounds(const std::vector<glm::vec3>& bone_min, const std::vector<glm::vec3>& bone_max,
+                               const glm::vec3& static_min, const glm::vec3& static_max,
+                               const std::vector<glm::mat4>& skin_matrices, glm::vec3& out_min, glm::vec3& out_max) {
+        out_min = static_min;
+        out_max = static_max;
+        for (size_t b = 0; b < bone_min.size() && b < skin_matrices.size(); ++b) {
+            if (bone_min[b].x > bone_max[b].x) continue;   // influences no vertex
+            for (int c = 0; c < 8; ++c) {
+                const glm::vec3 corner((c & 1) ? bone_max[b].x : bone_min[b].x,
+                                       (c & 2) ? bone_max[b].y : bone_min[b].y,
+                                       (c & 4) ? bone_max[b].z : bone_min[b].z);
+                const glm::vec3 p = glm::vec3(skin_matrices[b] * glm::vec4(corner, 1.0f));
+                out_min = glm::min(out_min, p);
+                out_max = glm::max(out_max, p);
+            }
+        }
+    }
+
+    /**
+     * @brief Builds the mesh if needed and skins this frame's vertices: with `gpu`, enqueues a
+     *        compute dispatch into the mesh's `frame_slot` vertex buffer (palette and bounds are
+     *        the only CPU work); without, skins on the CPU and uploads.
      *
      * No-op until `source_` finishes loading (async), matching ClothRenderer's own
      * "starts drawing one frame later" contract for a dependency not ready at start().
      *
      * @param frame_slot The renderer's current in-flight frame index.
+     * @param gpu        The pipeline's skinning pass, or null for the CPU path.
      */
-    void upload(uint32_t frame_slot) {
-        if (!mesh_ && !ensure_mesh_()) return;
-        rebuild_vertices_();
-        mesh_->update_vertices(vertices_.data(), vertices_.size(), frame_slot);
+    void upload(uint32_t frame_slot, toy::render::passes::SkinningPass* gpu = nullptr) {
+        if (!mesh_ && !ensure_mesh_(gpu)) return;
+        update_palette_();
+        if (gpu_) {
+            glm::vec3 lo, hi;
+            palette_bounds(bone_min_, bone_max_, static_min_, static_max_, skin_matrices_, lo, hi);
+            toy::render::passes::SkinningPass::Job job;
+            job.set          = &gpu_->sets[frame_slot % gpu_->sets.size()];
+            job.palette      = &gpu_->palette;
+            job.matrices     = skin_matrices_.empty() ? nullptr : skin_matrices_.data();
+            job.bone_count   = static_cast<uint32_t>(skin_matrices_.size());
+            job.vertex_count = static_cast<uint32_t>(source_->vertices.size());
+            job.frame_slot   = frame_slot;
+            gpu->enqueue(job);
+            mesh_->mark_gpu_written(frame_slot, lo, hi);
+            cpu_vertices_dirty_ = true;
+        } else {
+            skin(*source_, skin_matrices_, vertices_);
+            cpu_vertices_dirty_ = false;
+            mesh_->update_vertices(vertices_.data(), vertices_.size(), frame_slot);
+        }
     }
 
     /**
@@ -175,29 +253,49 @@ public:
      *        the rest pose captured in start(), never the current animated one.
      */
     void rebuild() {
+        if (gpu_) device_.wait_idle();   // an in-flight dispatch may still read its buffers
+        gpu_.reset();
         mesh_.reset();
         vertices_.clear();
     }
 
     /** @brief True once the GPU mesh exists and is bound to the sibling MeshRenderer. */
     bool is_ready() const { return mesh_ != nullptr; }
-    /** @brief The last skinned vertices uploaded (object space; tests and tools). */
-    const std::vector<Vertex>& skinned_vertices() const { return vertices_; }
+    /** @brief True when the compute pass skins this mesh (false: the CPU fallback). */
+    bool gpu_skinned() const { return gpu_ != nullptr; }
+    /** @brief The dynamic GPU mesh (null until ready). */
+    const std::shared_ptr<Mesh>& mesh() const { return mesh_; }
+    /** @brief This frame's skin matrices (palette order). */
+    const std::vector<glm::mat4>& skin_matrices() const { return skin_matrices_; }
+    /**
+     * @brief The last skinned vertices (object space; tests and tools). On the GPU path they
+     *        are CPU-skinned on demand from the same palette the dispatch used.
+     */
+    const std::vector<Vertex>& skinned_vertices() const {
+        if (cpu_vertices_dirty_ && source_.is_loaded()) {
+            skin(*source_, skin_matrices_, vertices_);
+            cpu_vertices_dirty_ = false;
+        }
+        return vertices_;
+    }
 
 private:
     /**
      * @brief Allocates the dynamic GPU mesh from the loaded source's bind pose and binds it
      *        to the sibling MeshRenderer. Idempotent; returns false until `source_` is loaded.
      */
-    bool ensure_mesh_() {
+    bool ensure_mesh_(toy::render::passes::SkinningPass* gpu) {
         if (!source_.is_loaded() || !renderer_) return false;
         const SkinnedMeshSource& src = *source_;
         if (src.vertices.empty() || src.indices.empty()) return false;
         resolve_bones_(src);
+        build_bone_boxes_(src);
 
-        vertices_ = src.vertices; // bind pose; rebuild_vertices_() below re-skins in place
+        vertices_ = src.vertices; // bind pose; upload() re-skins
         mesh_ = std::make_shared<Mesh>(
-            Mesh::from_arrays(device_, allocator_, vertices_, src.indices, frames_in_flight_));
+            Mesh::from_arrays(device_, allocator_, vertices_, src.indices, frames_in_flight_,
+                              /*compute_writable=*/gpu != nullptr));
+        if (gpu) build_gpu_(*gpu, src);
 
         // Synthetic id, prefixed out of the real-path namespace -- see
         // AssetManager::create()'s doc and ClothRenderer::ensure_mesh_()'s identical use.
@@ -223,17 +321,73 @@ private:
      * identities reproduces the authored bind-pose vertex unchanged, which is the standard
      * skinning correctness check.
      */
-    void rebuild_vertices_() {
+    void update_palette_() {
         auto* tc = owner ? owner->get_transform() : nullptr;
-        const glm::mat4 inv_owner_world = tc ? glm::inverse(tc->get_world_matrix()) : glm::mat4(1.0f);
-        skin_matrices_.assign(bones_.size(), glm::mat4(1.0f));
+        const glm::mat4 owner_world = tc ? tc->get_world_matrix() : glm::mat4(1.0f);
+        bone_worlds_.assign(bones_.size(), glm::mat4(1.0f));
+        bone_valid_.assign(bones_.size(), 0);
         for (size_t i = 0; i < bones_.size(); ++i) {
             if (!bones_[i]) continue; // unresolved bone -- stays identity, see resolve_bones_()
             auto* bone_tc = bones_[i]->get_transform();
             if (!bone_tc) continue;
-            skin_matrices_[i] = inv_owner_world * bone_tc->get_world_matrix() * inverse_bind_[i];
+            bone_worlds_[i] = bone_tc->get_world_matrix();
+            bone_valid_[i] = 1;
         }
-        skin(*source_, skin_matrices_, vertices_);
+        compute_palette(owner_world, bone_worlds_, bone_valid_, inverse_bind_, skin_matrices_);
+    }
+
+    /** @brief Per-bone bind-pose boxes of the vertices each bone influences (for palette_bounds()). */
+    void build_bone_boxes_(const SkinnedMeshSource& src) {
+        const glm::vec3 empty_min(std::numeric_limits<float>::max()), empty_max(std::numeric_limits<float>::lowest());
+        bone_min_.assign(bones_.size(), empty_min);
+        bone_max_.assign(bones_.size(), empty_max);
+        static_min_ = empty_min;
+        static_max_ = empty_max;
+        for (size_t i = 0; i < src.vertices.size(); ++i) {
+            const glm::ivec4 j = (i < src.joints.size())  ? src.joints[i]  : glm::ivec4(-1);
+            const glm::vec4  w = (i < src.weights.size()) ? src.weights[i] : glm::vec4(0.0f);
+            const glm::vec3& p = src.vertices[i].position;
+            bool any = false;
+            for (int c = 0; c < 4; ++c) {
+                if (j[c] < 0 || w[c] <= 0.0f || static_cast<size_t>(j[c]) >= bones_.size()) continue;
+                bone_min_[j[c]] = glm::min(bone_min_[j[c]], p);
+                bone_max_[j[c]] = glm::max(bone_max_[j[c]], p);
+                any = true;
+            }
+            if (!any) { static_min_ = glm::min(static_min_, p); static_max_ = glm::max(static_max_, p); }
+        }
+    }
+
+    /** @brief The compute path's per-mesh data: bind-pose SSBO, palette ring, one set per slot. */
+    void build_gpu_(toy::render::passes::SkinningPass& pass, const SkinnedMeshSource& src) {
+        using namespace coopa::gfx;
+        using BindVertex = toy::render::passes::SkinningPass::BindVertex;
+        std::vector<BindVertex> bind(src.vertices.size());
+        for (size_t i = 0; i < src.vertices.size(); ++i) {
+            const Vertex& v = src.vertices[i];
+            bind[i].pos_u   = glm::vec4(v.position, v.uv.x);
+            bind[i].nrm_v   = glm::vec4(v.normal, v.uv.y);
+            bind[i].tangent = v.tangent;
+            bind[i].joints  = (i < src.joints.size())  ? src.joints[i]  : glm::ivec4(-1);
+            bind[i].weights = (i < src.weights.size()) ? src.weights[i] : glm::vec4(0.0f);
+        }
+        const uint64_t bind_bytes = sizeof(BindVertex) * bind.size();
+        const uint64_t pal_bytes  = sizeof(glm::mat4) * std::max<size_t>(bones_.size(), 1);
+        auto g = std::make_unique<GpuSkin>(
+            memory::make_storage_buffer(device_, allocator_, bind_bytes, BufferUsage::None, MemoryResidency::CpuToGpu),
+            memory::StorageBufferRing(device_, allocator_, pal_bytes, frames_in_flight_, BufferUsage::None,
+                                      MemoryResidency::CpuToGpu),
+            pipeline::DescriptorPoolBuilder().add_sets(pass.layout(), frames_in_flight_).build(device_));
+        g->bind_pose.upload(bind.data(), bind_bytes);
+        const std::vector<glm::mat4> identity(std::max<size_t>(bones_.size(), 1), glm::mat4(1.0f));
+        for (uint32_t s = 0; s < frames_in_flight_; ++s) {
+            g->palette.upload(s, identity.data(), pal_bytes);
+            g->sets.emplace_back(device_, g->pool, pass.layout());
+            g->sets.back().bind_storage_buffer(0, g->bind_pose);
+            g->sets.back().bind_storage_buffer(1, g->palette.current(s));
+            g->sets.back().bind_storage_buffer(2, mesh_->vertex_buffer(s));
+        }
+        gpu_ = std::move(g);
     }
 
     /** @brief The rig root: `rig:`, else the nearest Animator up the hierarchy, else the topmost ancestor. */
@@ -310,10 +464,27 @@ private:
     std::unordered_map<const coopa::scene::SceneObject*, glm::mat4> rest_world_;   // start()'s snapshot
     glm::mat4 owner_rest_world_{1.0f};
 
+    struct GpuSkin {
+        coopa::gfx::memory::Buffer                      bind_pose;
+        coopa::gfx::memory::StorageBufferRing           palette;
+        coopa::gfx::pipeline::DescriptorPool            pool;
+        std::vector<coopa::gfx::pipeline::DescriptorSet> sets;   // per frame slot
+        GpuSkin(coopa::gfx::memory::Buffer b, coopa::gfx::memory::StorageBufferRing p,
+                coopa::gfx::pipeline::DescriptorPool dp)
+            : bind_pose(std::move(b)), palette(std::move(p)), pool(std::move(dp)) {}
+        ~GpuSkin() { sets.clear(); }                             // sets free into pool first
+    };
+
     MeshRenderer*             renderer_ = nullptr;
     std::shared_ptr<Mesh>     mesh_;
-    std::vector<Vertex>       vertices_;
+    std::unique_ptr<GpuSkin>  gpu_;           // declared after mesh_: destroyed first
+    mutable std::vector<Vertex> vertices_;
+    mutable bool              cpu_vertices_dirty_ = false;
     std::vector<glm::mat4>    skin_matrices_;
+    std::vector<glm::mat4>    bone_worlds_;
+    std::vector<uint8_t>      bone_valid_;
+    std::vector<glm::vec3>    bone_min_, bone_max_;   // bind-pose box per bone (palette_bounds)
+    glm::vec3                 static_min_{0.0f}, static_max_{0.0f};
 };
 
 } // namespace scene

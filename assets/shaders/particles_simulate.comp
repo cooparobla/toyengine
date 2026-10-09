@@ -1,0 +1,78 @@
+#version 450
+
+// GPU particles: one thread per slot. A live particle integrates exactly as
+// ParticleSystem::update_() does (gravity + force + curl-noise turbulence, drag, constant
+// velocity, orbital / radial, ground-plane collision with bounce or kill, the wrap box), then
+// either dies -- its slot pushed back onto the free list -- or is appended to the alive list
+// (the draw's instances, see append_instance()). Runs before this frame's emit pass, matching
+// the CPU's update -> deaths -> births order. See toyengine/render/passes/gpu_particle_pass.h.
+
+layout(local_size_x = 64) in;
+
+#include "particles_gpu_common.glsl"
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= uint(P.config.x)) return;
+    Particle p = particles[i];
+    if (p.vel_life.w <= 0.0) return;
+
+    float dt = P.frame.x;
+    bool local = P.config.z > 0.5;
+    vec3 pos = p.pos_age.xyz;
+    vec3 v = p.vel_life.xyz;
+    float age = p.pos_age.w;
+    bool dead = false;
+
+    if (dt > 0.0) {
+        vec3 a = P.accel.xyz;
+        if (P.noise.x != 0.0) a += turbulence(local ? (P.world * vec4(pos, 1.0)).xyz : pos, P.frame.y) * P.noise.x;
+        v = (v + a * dt) * (1.0 / (1.0 + max(P.accel.w, 0.0) * dt));
+        vec3 dp = (v + P.velocity.xyz) * dt;
+        if (P.velocity.w != 0.0 || P.center.w != 0.0) {
+            vec3 ax = P.axis.xyz;
+            vec3 r = pos - P.center.xyz;
+            r -= ax * dot(r, ax);
+            float rl = length(r);
+            dp += cross(ax, r) * (P.velocity.w * dt);
+            if (rl > 1e-5) dp += (r / rl) * (P.center.w * dt);
+        }
+        pos += dp;
+        age += dt;
+
+        bool collide = P.collision.x > 0.5 && !local;
+        float g = collide ? P.collision.y : -1e30;
+        vec3 wrap = local ? vec3(0.0) : max(P.wrap.xyz, vec3(0.0));
+        bool wrapped = false;
+        if ((wrap.x > 0.0 || wrap.y > 0.0 || wrap.z > 0.0) && pos.z >= g) {
+            vec3 c = P.world[3].xyz;
+            for (int k = 0; k < 3; ++k) {
+                if (wrap[k] <= 0.0) continue;
+                float d = pos[k] - c[k];
+                float w = d - wrap[k] * floor(d / wrap[k] + 0.5);
+                if (w != d) { pos[k] = c[k] + w; wrapped = true; }
+            }
+        }
+        if (collide && pos.z < g) {
+            if (wrapped || P.noise.y > 0.5) {
+                dead = true;   // wrapped in under cover, or kill_on_collide
+            } else {
+                pos.z = g + (g - pos.z) * P.collision.z;
+                v.z = abs(v.z) * P.collision.z;
+                v.xy *= P.collision.w;
+            }
+        }
+        p.misc.y += p.misc.z * dt;
+    }
+
+    if (dead || age >= p.vel_life.w) {
+        particles[i].vel_life.w = 0.0;
+        int idx = atomicAdd(free_count, 1);
+        free_list[idx] = i;
+        return;
+    }
+    p.pos_age = vec4(pos, age);
+    p.vel_life.xyz = v;
+    particles[i] = p;
+    append_instance(p);
+}

@@ -7,6 +7,8 @@
  * the rig root ("" the root, "A/B" walking down, a bare name at any depth), its property through
  * coopa::anim::AnimatedPropertyRegistry (channel suffixes like position.x included), sampled
  * with AnimationCurve::sample(). Procedural tracks are skipped: they need the runtime's inputs.
+ * A clip's root-motion channels (AnimationClip::root_motion) are held at their clip-start value,
+ * as the Animator holds them, so a walk previews in place.
  */
 
 #ifndef TOYEDITOR_ANIM_CLIP_POSE_H
@@ -61,6 +63,10 @@ inline float wrap_clip_time(const coopa::anim::AnimationClip& clip, float t) {
 inline int apply_clip_pose(const coopa::anim::AnimationClip& clip, float t, coopa::scene::SceneObject* root) {
     auto& reg = coopa::anim::AnimatedPropertyRegistry::instance();
     int applied = 0;
+    coopa::scene::SceneObject* root_motion_obj =
+        clip.root_motion.enabled() ? resolve_rig_path(root, clip.root_motion.object) : nullptr;
+    const uint8_t root_channels = clip.root_motion.translation == coopa::anim::RootMotionTranslation::XYZ ? 0x07
+                                : clip.root_motion.translation == coopa::anim::RootMotionTranslation::XY  ? 0x03 : 0x00;
     for (const auto& track : clip.tracks) {
         if (track.kind != coopa::anim::TrackKind::Keyframed || track.curve.empty()) continue;
         coopa::scene::SceneObject* obj = resolve_rig_path(root, track.object_path);
@@ -75,14 +81,26 @@ inline int apply_clip_pose(const coopa::anim::AnimationClip& clip, float t, coop
         float cur[4] = {0, 0, 0, 1}, val[4] = {0, 0, 0, 1};
         prop->get(target, cur);
         mask &= static_cast<uint8_t>((1u << prop->component_count) - 1u);
+        const uint8_t held = (obj == root_motion_obj && track.component_type == "Transform" && prop->name == "position")
+                                 ? static_cast<uint8_t>(mask & root_channels) : uint8_t{0};
         if (mask == static_cast<uint8_t>((1u << prop->component_count) - 1u)) {
             track.curve.sample(t, prop->component_count, val);
+            if (held) {
+                float start[4] = {0, 0, 0, 1};
+                track.curve.sample(0.0f, prop->component_count, start);
+                for (int c = 0; c < prop->component_count; ++c) if ((held >> c) & 1) val[c] = start[c];
+            }
         } else {
             // A channel suffix: the curve's channels map onto the masked ones, in order.
-            float sampled[4] = {0, 0, 0, 0};
+            float sampled[4] = {0, 0, 0, 0}, start[4] = {0, 0, 0, 0};
             track.curve.sample(t, 4, sampled);
+            if (held) track.curve.sample(0.0f, 4, start);
             int k = 0;
-            for (int c = 0; c < prop->component_count; ++c) val[c] = (mask >> c) & 1 ? sampled[k++] : cur[c];
+            for (int c = 0; c < prop->component_count; ++c) {
+                if (!((mask >> c) & 1)) { val[c] = cur[c]; continue; }
+                val[c] = (held >> c) & 1 ? start[k] : sampled[k];
+                ++k;
+            }
         }
         prop->set(target, val);
         ++applied;

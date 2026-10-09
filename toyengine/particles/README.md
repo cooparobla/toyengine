@@ -244,6 +244,47 @@ The render prep column includes back-to-front sorting, which is a linear-time ra
 - **Culling.** Systems outside the camera frustum, or past `max_draw_distance`, are not prepared or
   drawn. They still simulate, so they are in the right state when they come back into view.
 
+## GPU simulation (`simulation: gpu`)
+
+For 100k+ particle effects (spark showers, dust fields), a system can opt in with
+`simulation: gpu`. The default `cpu` path is unchanged. Emission timing (rate, distance, bursts)
+stays on the CPU; birth, simulation, compaction and sorting run in compute shaders
+(`assets/shaders/particles_*.comp`, recorded by
+[gpu_particle_pass.h](../render/passes/gpu_particle_pass.h) before the shadow pass).
+
+- **Same look.** The compute passes port `spawn_()`, `update_()` and `prepare_render()`: every
+  analytic shape and mesh faces (an area-CDF triangle buffer), gravity and force, drag, the same
+  curl-noise field, orbital and radial motion, the ground plane (bounce or kill), the wrap box,
+  and colour, size and alpha over life (64-sample LUTs baked from the curves). Quads are drawn by
+  the normal particle pipeline from the GPU buffer through `draw_indirect`, so soft fade, HDR glow,
+  lighting, shadows, the atlas and the TAA reactive mask all work unchanged.
+- **Buffers.** `max_particles` sets a fixed pool per system, which uses 164 bytes per particle
+  (about 250 when sorted). Dead slots go back to a free list. Live particles are appended to an alive list, and
+  its atomic counter is the indirect draw's instance count.
+- **Sorting.** Blended systems are bitonic-sorted on the GPU (by distance, or oldest/youngest
+  first). Additive systems (`additive: 1`) and `sort: none` systems skip the sort.
+- **Fallback.** A system that asks for `gpu` but uses something the GPU path lacks falls back to
+  the CPU and logs one warning. That covers sub emitters (either end), scatter mode, mesh render
+  mode, `prewarm`, a runtime `ground_field`, and mesh emission from vertices or edges.
+  `particles.gpu_enabled: false` in `config.yaml`, or a device without compute, runs every
+  system on the CPU.
+- **What the CPU sees.** `particle_count()` is the alive count read back from the GPU, a couple of
+  frames late. Culling bounds are a conservative estimate made from the settings: the fastest
+  start speed, acceleration and noise over one lifetime, around the shape and the emitter's
+  recent path.
+- **Determinism.** Births use per-particle hashes, so the set of particles is the same every run
+  under `FIXED_DT`. The alive-list order comes from atomics, though, so unsorted additive systems
+  can differ by blend rounding.
+
+`particles_gpu_stress` (three 60k-spark fountains and a 40k sorted dust field) compares the two
+paths with `PROFILE=1` (flip `particles.gpu_enabled`). On an 8-worker Apple Silicon machine at
+1920x1080, ~150k live particles:
+
+| Path | CPU `scene_update` | CPU `dynamic_meshes` (render prep) | GPU `particles.sim` | GPU `transparent` |
+|---|---|---|---|---|
+| CPU | 12.8 ms | 5.0 ms | n/a | 1.67 ms |
+| GPU | 0.15 ms | 0.04 ms | 1.33 ms | 1.76 ms |
+
 ## Things worth knowing
 
 1. **Quads need `transparency_enabled`.** They draw in the forward transparent pass. It is on in
@@ -267,8 +308,7 @@ The render prep column includes back-to-front sorting, which is a linear-time ra
 
 - Trails and ribbons, and sub emitters on birth or collision (only on death).
 - Collision with physics colliders, terrain and water surfaces.
-- GPU simulation (compute) for 100k+ particle effects. The CPU path targets the
-  hundreds-to-tens-of-thousands range most game effects use.
+- GPU depth-buffer collision, and the GPU features listed under "GPU simulation" as falling back.
 - Particles casting shadows or writing motion vectors. TAA reprojects them by camera motion only;
   `reactive` is the remedy for fast ones.
 - Particle-specific quality tiers in `config.yaml`.

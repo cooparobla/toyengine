@@ -87,13 +87,23 @@ diff and merge it. See [editor/README.md](editor/README.md) for the full tour.
   field, tilt-shift, and anti-aliasing (TAA, SMAA or FXAA).
 - **Quality presets.** Per-feature tiers in `assets/config.yaml`. Every feature has a master
   switch, and "off" really costs nothing.
-- **GPU and CPU profiler.** `PROFILE=1` writes per-feature timings to CSV.
+- **GPU and CPU profiler.** `PROFILE=1` writes per-feature timings to CSV, and an on-screen
+  stats overlay (F3, or `debug.overlay` in `config.yaml`) shows FPS, pass timings, draw,
+  physics and memory stats live.
 - **Optional stylisation.** Banded cel lighting, outlines, ordered dithering and palette
   quantisation are available when a project wants them.
 
 ### Simulation
 - **Rigid-body physics** ([physxcoopa](libs/physxcoopa)). Box, sphere, capsule and mesh
-  colliders, physics materials, hinge joints, triggers, collision layers, and kinematic movers and controllers.
+  colliders, physics materials, hinge, ball and cone-twist joints, triggers, collision layers,
+  and kinematic movers and controllers. Raycasts, shape sweeps, overlaps and penetration
+  queries take one `QueryFilter` (layer mask, triggers, an ignored body, a predicate).
+- **Characters** ([toyengine/scene](toyengine/scene/README.md)). `CharacterController` walks a
+  capsule with collide-and-slide, steps, slope limits, jumps, moving platforms and pushing, and
+  can move by animation root motion. The camera follows it in a colliding third-person orbit or
+  in first person.
+- **Ragdolls.** `Ragdoll` turns an animated rig into jointed physics bones that go limp on demand
+  and blend back into animation.
 - **Cloth.** XPBD cloth that collides with the world and renders as a shaded, shadow-casting
   mesh.
 - **Water** ([toyengine/water](toyengine/water/README.md)):
@@ -134,8 +144,18 @@ diff and merge it. See [editor/README.md](editor/README.md) for the full tour.
   billboard or sit in 3D and stay clickable.
 - **Data-driven scenes.** YAML scenes, object assets and shared material assets. Every loader
   also reads binary `.caml`, so a packaged project needs no path rewriting.
-- **Components.** Cameras (orbit, fly, tracking), movers, skinned meshes, a multithreaded job
-  system and named input actions.
+- **Components.** Cameras (orbit, fly, tracking, first person), movers, skinned meshes, a
+  multithreaded job system and named input actions.
+- **Animation** ([coopa/animation](libs/libcoopa/coopa/animation/README.md)). Keyframed and
+  procedural clips with crossfades, timeline events (footsteps), root motion, and two-bone,
+  look-at and foot-placement IK.
+- **Async scene loading** ([toyengine/core](toyengine/core/README.md)). The next scene builds
+  in the background behind a fade or a loading screen with a progress bar; `SceneLink` doors
+  change levels with no code.
+- **Save games** ([toyengine/save](toyengine/save/README.md)). Named slots in the player's data
+  folder with a sidecar for slot menus, atomic writes, encoded in shipping builds. The engine
+  decides where saves go; the game decides what is in them, through save/load signals, per-object
+  `ISaveable` components keyed by `SaveId`, and version migrations. F5 / F9 quick-save and load.
 
 ### Audio
 - **Mixer and 3D sound** ([sfxcoopa](libs/sfxcoopa)). WAV and MP3 clips, buses
@@ -250,7 +270,10 @@ The engine repository runs on its own, with demo and test scenes in [`assets/`](
 | `terrain_smooth_test` | The same streamed world with styled, smooth tiles |
 | `physics_test` | Restitution, friction, stacking, joints, triggers, kinematic platforms |
 | `cloth_test` | XPBD cloth draped over a moving ball |
-| `animation_test` | Clip-driven rigs: an object-hierarchy robot arm, a skinned tentacle, a bouncing ball |
+| `ragdoll_test` | Ragdolls tumbling down stairs, shoved by a ram; R toggles the player's ragdoll |
+| `animation_test` | Clip-driven rigs: an object-hierarchy robot arm, a skinned tentacle, a bouncing ball, two-bone and look-at IK |
+| `character_test` | A third-person mannequin (WASD, Space, Shift) on stairs, ramps, platforms and crates; foot IK; F5 / F9 save and load |
+| `loading_test` | Doors that load a heavy scene in the background behind a loading screen or a fade |
 | `ui_showcase` | A game HUD over a small scene, with a world-space nameplate |
 | `world_canvas_test` | World-space and screen-space UI, with a clickable health bar |
 | `material_maps_test` | Texture-mapped vs. flat materials (`scene_mapped.yaml` / `scene_flat.yaml`) |

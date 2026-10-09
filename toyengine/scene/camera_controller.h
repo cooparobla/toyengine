@@ -20,6 +20,16 @@
  * Fly mode moves along the CURRENT world matrix's own basis columns (convention-free), and
  * its look handling assumes local Z is forward (Blender's convention, matching every camera
  * authored elsewhere in this workspace).
+ *
+ * A tracking Orbit camera COLLIDES (`collide`, on by default): each frame a sphere of
+ * `collision_radius` is cast from the target toward the desired camera position through the
+ * scene's physics world, ignoring the tracked object (and everything under it), and the camera
+ * is pulled in to the first hit -- quickly (`collision_in_speed`), then eased back out
+ * (`collision_out_speed`) once the view clears. Cameras with a static `target` don't collide.
+ *
+ * FirstPerson mode sits at the tracked object's origin plus `eye_height`, the mouse turning
+ * yaw and pitch; the yaw also turns the tracked object (CharacterController::set_facing_yaw()
+ * when it has one, else its Transform's Z rotation), the pitch stays on the camera.
  */
 
 #ifndef TOYENGINE_SCENE_CAMERA_CONTROLLER_H
@@ -37,6 +47,11 @@
 #include <coopa/scene/components/transform_component.h>
 #include <coopa/util/transform.h>
 
+#include <physxcoopa/components/rigidbody.h>
+#include <physxcoopa/system/physics_system.h>
+
+#include <toyengine/scene/character_controller.h>
+
 namespace toy {
 namespace scene {
 
@@ -45,8 +60,9 @@ namespace scene {
  * @brief Which control scheme CameraController applies each update().
  */
 enum class CameraControlMode {
-    Orbit, /**< Spherical orbit around a fixed point or tracked GameObject. */
-    Fly    /**< Free WASD + look movement, no target. */
+    Orbit,       /**< Spherical orbit around a fixed point or tracked GameObject. */
+    Fly,         /**< Free WASD + look movement, no target. */
+    FirstPerson  /**< At the tracked GameObject's eye height; mouse yaw turns the object too. */
 };
 
 /**
@@ -121,6 +137,16 @@ public:
      */
     float movement_smoothing = 0.0f;
 
+    // --- Orbit collision (tracking cameras only) ---
+    bool  collide             = true;  /**< Pull in when geometry blocks the view of the tracked object. */
+    float collision_radius    = 0.2f;  /**< Radius of the sphere cast from the target toward the camera. */
+    float collision_in_speed  = 25.0f; /**< Pull-in rate (1/s, exponential); <= 0 snaps. */
+    float collision_out_speed = 4.0f;  /**< Recovery rate (1/s, exponential); <= 0 snaps. */
+
+    // --- FirstPerson ---
+    float eye_height               = 1.6f;  /**< Camera height above the tracked object's origin. */
+    float first_person_pitch_limit = 85.0f; /**< Look up/down clamp, degrees either side of level. */
+
     // --- Fly parameters ---
     float move_speed             = 5.0f;
     float look_speed_deg_per_sec = 90.0f;
@@ -144,6 +170,19 @@ public:
         if (!owner) return;
         auto* tc = owner->get_transform();
         if (!tc) return;
+
+        if (mode == CameraControlMode::FirstPerson) {
+            // Facing the tracked object's heading, looking level -- unless set in YAML.
+            if (yaw_deg == kUnset) {
+                coopa::scene::SceneObject* tracked = tracked_object_();
+                yaw_deg = tracked && tracked->get_transform() ? tracked->get_transform()->transform().rotation_degrees().z
+                                                              : tc->transform().rotation_degrees().z;
+            }
+            if (pitch_deg == kUnset) pitch_deg = 0.0f;
+            smoothed_yaw_deg_ = yaw_deg;
+            smoothed_pitch_deg_ = pitch_deg;
+            return;
+        }
 
         smoothed_target_ = resolve_target_();
         glm::vec3 offset = tc->transform().position() - smoothed_target_;
@@ -173,10 +212,15 @@ public:
 
         if (mode == CameraControlMode::Orbit) {
             update_orbit_(t, dt);
+        } else if (mode == CameraControlMode::FirstPerson) {
+            update_first_person_(t, dt);
         } else {
             update_fly_(t, dt);
         }
     }
+
+    /** @brief The orbit radius actually applied after collision (== orbit_distance() when clear). */
+    float collided_distance() const { return collision_distance_ < 0.0f ? smoothed_distance_ : collision_distance_; }
 
     /**
      * @brief Current smoothed camera-to-target orbit radius, in world units.
@@ -186,7 +230,7 @@ public:
      * PixelRenderPipeline::render()): the orbit rig already IS a camera-to-subject
      * distance, so autofocus reads this directly rather than re-deriving it.
      */
-    float orbit_distance() const { return mode == CameraControlMode::Orbit ? smoothed_distance_ : 0.0f; }
+    float orbit_distance() const { return mode == CameraControlMode::Orbit ? collided_distance() : 0.0f; }
 
 private:
     /** @brief Sentinel meaning "not set in YAML, derive from the seed transform in start()". */
@@ -210,6 +254,11 @@ private:
      * pipeline already performs every frame, and it sidesteps a dangling
      * pointer if the tracked object is ever destroyed or the scene reloaded.
      */
+    /** @brief The `tracker` object, or nullptr (no tracker, or not found). */
+    coopa::scene::SceneObject* tracked_object_() const {
+        return (!tracker.empty() && scene) ? scene->find_object(tracker) : nullptr;
+    }
+
     glm::vec3 resolve_target_() const {
         if (!tracker.empty() && scene) {
             if (auto* found = scene->find_object(tracker)) {
@@ -283,8 +332,81 @@ private:
             -smoothed_distance_ * std::cos(e) * std::cos(phi),
             smoothed_distance_ * std::sin(e));
 
+        float applied = smoothed_distance_;
+        if (collide && !tracker.empty() && smoothed_distance_ > 1e-4f) {
+            const float allowed = collision_limit_(smoothed_target_, offset / smoothed_distance_, smoothed_distance_);
+            if (collision_distance_ < 0.0f) {
+                collision_distance_ = allowed; // first frame: no easing in from a clipped view
+            } else {
+                const float rate = allowed < collision_distance_ ? collision_in_speed : collision_out_speed;
+                if (rate <= 0.0f) {
+                    collision_distance_ = allowed;
+                } else {
+                    collision_distance_ += (allowed - collision_distance_) * (1.0f - std::exp(-rate * dt));
+                    if (std::abs(allowed - collision_distance_) < 1e-4f) collision_distance_ = allowed;
+                }
+            }
+            applied = collision_distance_;
+        } else {
+            collision_distance_ = -1.0f;
+        }
+        if (smoothed_distance_ > 1e-4f) offset *= applied / smoothed_distance_;
+
         t.set_position(smoothed_target_ + offset);
         t.set_rotation(glm::vec3(90.0f - smoothed_pitch_deg_, 0.0f, smoothed_yaw_deg_));
+    }
+
+    /**
+     * @brief How far from `target` along `dir` the camera can sit: the distance a
+     *        `collision_radius` sphere travels before touching anything that isn't the tracked
+     *        object (or under it), or `distance` when nothing is in the way. No physics system:
+     *        `distance`.
+     */
+    float collision_limit_(const glm::vec3& target, const glm::vec3& dir, float distance) const {
+        if (!scene) return distance;
+        auto* physics = dynamic_cast<coopa::physx::system::PhysicsSystem*>(scene->find_system("Physics"));
+        if (!physics) return distance;
+        coopa::scene::SceneObject* tracked = tracked_object_();
+        coopa::physx::system::PhysicsSystem::QueryFilter filter;
+        filter.include_triggers = false;
+        if (tracked) {
+            filter.ignore_rigidbody = tracked->get_component<coopa::physx::components::RigidbodyComponent>();
+            filter.predicate = [tracked](const coopa::physx::components::Collider& c) {
+                for (const coopa::scene::SceneObject* o = c.owner; o; o = o->parent())
+                    if (o == tracked) return false;
+                return true;
+            };
+        }
+        coopa::physx::system::PhysicsSystem::RaycastHit hit;
+        if (!physics->sphere_cast(target, collision_radius, dir, distance, hit, filter)) return distance;
+        return std::clamp(hit.distance, 0.0f, distance);
+    }
+
+    void update_first_person_(coopa::util::Transform& t, float dt) {
+        (void)dt;
+        yaw_deg += mouse_delta.x * mouse_sensitivity * (invert_x ? -1.0f : 1.0f);
+        pitch_deg += mouse_delta.y * mouse_sensitivity * (invert_y ? -1.0f : 1.0f);
+        const float limit = std::clamp(first_person_pitch_limit, 0.0f, 89.0f);
+        pitch_deg = glm::clamp(pitch_deg, -limit, limit);
+        // No movement_smoothing here: first-person look lag reads as input latency.
+        smoothed_yaw_deg_ = yaw_deg;
+        smoothed_pitch_deg_ = pitch_deg;
+
+        glm::vec3 eye = target;
+        if (coopa::scene::SceneObject* tracked = tracked_object_()) {
+            if (auto* ttc = tracked->get_transform()) {
+                eye = glm::vec3(ttc->get_world_matrix()[3]);
+                if (auto* character = tracked->get_component<CharacterController>()) {
+                    character->set_facing_yaw(yaw_deg);
+                } else {
+                    glm::vec3 r = ttc->transform().rotation_degrees();
+                    r.z = yaw_deg;
+                    ttc->transform().set_rotation(r);
+                }
+            }
+        }
+        t.set_position(eye + glm::vec3(0.0f, 0.0f, eye_height) + target_offset);
+        t.set_rotation(glm::vec3(90.0f - pitch_deg, 0.0f, yaw_deg));
     }
 
     void update_fly_(coopa::util::Transform& t, float dt) {
@@ -310,6 +432,7 @@ private:
     float smoothed_yaw_deg_    = 0.0f; /**< Applied yaw; chases yaw_deg at a rate set by movement_smoothing. */
     float smoothed_pitch_deg_  = 0.0f; /**< Applied pitch; chases pitch_deg at a rate set by movement_smoothing. */
     float smoothed_distance_   = 0.0f; /**< Applied distance; chases distance at a rate set by movement_smoothing. */
+    float collision_distance_  = -1.0f; /**< Orbit radius after collision; < 0 until the first collided frame. */
     mutable bool warned_missing_tracker_ = false;
 };
 

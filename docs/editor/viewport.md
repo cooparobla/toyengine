@@ -152,6 +152,14 @@ The grid lies on the ground. Its spacing changes as you zoom, so the lines never
 or too sparse. In the front, back and side views it turns to face you. The red and green lines
 are the X and Y axes.
 
+### Show performance stats
+
+Choose **View > Stats Overlay** in the viewport header to show the engine's stats overlay in a
+corner of the viewport: frame rate, frame times, render pass timings, draw counts, physics and
+memory use. Choose it again to hide it. With the pointer over the viewport, **F3** steps
+through off, frame rate only, and the full overlay. The overlay always starts hidden in the
+editor, whatever the project's `debug.overlay` setting says; that setting only affects the game.
+
 ## Show the toolbar and sidebar
 
 - Press **T** to show or hide the toolbar on the left edge.

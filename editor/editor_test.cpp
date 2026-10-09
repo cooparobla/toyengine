@@ -258,6 +258,61 @@ void test_asset_fidelity_meshes() {
 // Group "document" -- SceneDocument, undo, schemas
 
 /**
+ * @brief SaveId identities stay unique in the editor: adding a SaveId fills in a fresh id (and
+ *        replaces one already taken), duplicating an object -- or a parent of one -- gives every
+ *        copy's SaveId a new id, and the ids survive a save + reload.
+ */
+void test_scene_document_save_ids_unique() {
+    SceneDocument doc;
+    doc.reset("save_ids");
+    auto save_id_of = [&](ObjectId id) {
+        const int idx = doc.find_component(id, "SaveId");
+        return idx < 0 ? std::string() : get_string(doc.find(id)->at("components").as_seq()[static_cast<size_t>(idx)], "id");
+    };
+    const ObjectId chest = doc.add_object(doc.make_object("Old Chest"));
+    doc.add_component(chest, default_component("SaveId"));
+    const std::string first = save_id_of(chest);
+    expect(first.rfind("old_chest_", 0) == 0 && first.size() == 16, "adding a SaveId fills in a readable unique id (" + first + ")");
+
+    const ObjectId other = doc.add_object(doc.make_object("door"));
+    Node taken = default_component("SaveId");
+    taken["id"] = Node(first);
+    doc.add_component(other, taken);
+    expect(!save_id_of(other).empty() && save_id_of(other) != first, "adding a SaveId with a taken id gets a fresh one");
+    const ObjectId kept = doc.add_object(doc.make_object("gate"));
+    Node mine = default_component("SaveId");
+    mine["id"] = Node(std::string("main_gate"));
+    doc.add_component(kept, mine);
+    expect(save_id_of(kept) == "main_gate", "an unused authored id is kept");
+
+    const ObjectId kid = doc.add_object(doc.make_object("coin"), kept);
+    doc.add_component(kid, default_component("SaveId"));
+    const auto copies = doc.duplicate_objects({chest, kept});
+    expect(copies.size() == 2, "duplicated two objects");
+    std::set<std::string> ids;
+    int count = 0;
+    doc.for_each_object([&](const Node& o, int) {
+        if (!o.contains("components")) return;
+        for (const auto& c : o.at("components").as_seq()) {
+            if (component_type(c) == "SaveId") { ids.insert(get_string(c, "id")); ++count; }
+        }
+    });
+    expect(count == 7 && ids.size() == 7, "every SaveId is unique after duplicating (children too): " + std::to_string(ids.size()) + "/" + std::to_string(count));
+    expect(save_id_of(chest) == first && save_id_of(kept) == "main_gate", "the originals keep their ids");
+
+    const fs::path file = fresh_dir("save_ids") / "scene.yaml";
+    doc.save(file);
+    SceneDocument loaded;
+    loaded.load(file);
+    std::set<std::string> reloaded;
+    loaded.for_each_object([&](const Node& o, int) {
+        if (!o.contains("components")) return;
+        for (const auto& c : o.at("components").as_seq()) if (component_type(c) == "SaveId") reloaded.insert(get_string(c, "id"));
+    });
+    expect(reloaded == ids, "SaveIds survive a save + reload");
+}
+
+/**
  * @brief SceneDocument's id index (find / parent_of / is_ancestor in O(1)) agrees with a plain
  *        walk of the tree after every kind of structural change: add (nested), reparent,
  *        duplicate, delete, undo, redo, a copy of the document, and a save + load.
@@ -984,8 +1039,21 @@ void test_clip_model() {
     expect(m.find_track("Arm", "position")->keys.size() == 2 && m.find_track("Arm", "position")->keys[1].value.x == 5.0f,
            "keying an existing time replaces the key");
 
+    // Events: first-class, kept in time order, payloads round-trip.
+    expect(m.add_event(0.5f, "footstep") == 0 && m.add_event(0.25f, "whoosh") == 0 && m.add_event(0.5f, "clang") == 2,
+           "events: inserted in time order (after equal times)");
+    m.events[1].string_value = "left";
+    m.events[2].float_value = 0.75f;
+    expect(m.move_event(0, 1.5f) == 2 && m.events[2].name == "whoosh", "events: a moved event re-sorts");
+    expect(m.delete_event(1) && m.events.size() == 2 && !m.delete_event(5), "events: delete by index");
+    m.add_event(0.1f, "spare");
+
     const Node n = Node::deserialize(coopa::yaml::emit(m.to_node()));
-    expect(ClipModel::from_node(n) == m, "the clip round-trips through YAML");
+    expect(ClipModel::from_node(n) == m, "the clip round-trips through YAML (events included)");
+    const auto rt_ev = coopa::anim::parse_clip(n);
+    expect(rt_ev.events.size() == 3 && rt_ev.events[0].name == "spare" && rt_ev.events[1].name == "footstep" &&
+               rt_ev.events[1].string_value == "left" && rt_ev.events[2].name == "whoosh",
+           "events: the runtime reads the editor's events (name, time order, payload)");
     // Keys the model does not know -- at clip, track and key level, and a procedural track --
     // come back verbatim.
     const Node odd = Node::deserialize(std::string(
@@ -1277,6 +1345,51 @@ void test_imm_drag_float_and_popup_blocking() {
 }
 
 
+void test_imm_tooltip_delay() {
+    ImmHarness h;
+    // Two rows with the SAME id (a loop without push_id), plus a plain button.
+    auto ui = [&](coopa::ui::imm::Context& c) {
+        c.begin_region("r", {0, 0, 300, 300}, false);
+        c.button("same");
+        c.tooltip("first");
+        c.button("same");
+        c.tooltip("second");
+        c.end_region();
+    };
+    const float delay = h.ctx.style.tooltip_delay;
+    expect(delay >= 0.3f, "tooltips wait a real hover delay (" + std::to_string(delay) + " s)");
+    auto frames_until_tip = [&](glm::vec2 at, int max_frames) {
+        h.mouse = at;
+        for (int i = 1; i <= max_frames; ++i) {
+            h.frame(ui);
+            if (!h.ctx.tooltip_text().empty()) return i;
+        }
+        return -1;
+    };
+    const glm::vec2 first{20, 8}, second{20, 8 + h.ctx.style.row_height + h.ctx.style.spacing};
+    const int wait = static_cast<int>(delay * 60.0f);
+    const int n = frames_until_tip(first, wait * 3);
+    expect(n >= wait, "the first hover waits the delay (" + std::to_string(n) + " frames)");
+    // Leave, then come back: the delay applies again (it used to show instantly).
+    h.mouse = {250, 250};
+    h.frame(ui);
+    expect(h.ctx.tooltip_text().empty(), "moving away hides the tip");
+    const int again = frames_until_tip(first, wait * 3);
+    expect(again >= wait, "returning to the item waits again (" + std::to_string(again) + " frames)");
+    // Straight onto another item with the same id: still waits.
+    const int other = frames_until_tip(second, wait * 3);
+    expect(other >= wait, "a same-id neighbour waits again (" + std::to_string(other) + " frames)");
+    expect(h.ctx.tooltip_text() == "second", "and shows its own text");
+    // A press hides it until the mouse rests again.
+    h.down = true;
+    h.frame(ui);
+    expect(h.ctx.tooltip_text().empty(), "a press hides the tip");
+    h.down = false;
+    h.frame(ui);
+    expect(h.ctx.tooltip_text().empty(), "and it does not come straight back");
+}
+
+
 void test_imm_icon_button_and_tooltip() {
     using coopa::ui::imm::Icon;
     ImmHarness h;
@@ -1297,7 +1410,7 @@ void test_imm_icon_button_and_tooltip() {
     expect(h.dl.vertices().size() > verts, "a toggled-on icon button gets its highlighted rounded frame");
     std::string tip;
     h.mouse = {12, 12};
-    for (int i = 0; i < 40; ++i) { h.frame(ui); if (!h.ctx.tooltip_text().empty()) tip = h.ctx.tooltip_text(); }
+    for (int i = 0; i < 90; ++i) { h.frame(ui); if (!h.ctx.tooltip_text().empty()) tip = h.ctx.tooltip_text(); }
     expect(tip == "Play\nStart the game", "hovering shows the rich tooltip (got '" + tip + "')");
     h.mouse = {250, 250};
     h.frame(ui);
@@ -1361,13 +1474,13 @@ viewport:
 void test_schema_int_enum_labels() {
     const FieldDesc* fog = nullptr;
     for (const auto& g : render_settings_groups()) for (const auto& f : g.fields) if (f.key == "fog_mode") fog = &f;
-    expect(fog && fog->kind == FieldKind::Int && fog->options.size() == 3 && fog->option_tips.size() == 3,
+    expect(fog && fog->kind == FieldKind::Int && fog->options.size() == 2 && fog->option_tips.size() == 2,
            "fog_mode is a labelled int enum");
-    expect(fog && fog->options[2] == "Exponential Squared", "fog_mode 2 reads as Exponential Squared");
+    expect(fog && fog->options[1] == "Exponential", "fog_mode 1 reads as Exponential");
 
     ImmHarness h;
     Node block = Node::mapping();
-    block["fog_mode"] = Node(static_cast<int64_t>(2));
+    block["fog_mode"] = Node(static_cast<int64_t>(1));
     InspectorEnv env;
     auto ui = [&](coopa::ui::imm::Context& c) {
         c.begin_region("r", {0, 0, 400, 300}, false);
@@ -1375,7 +1488,7 @@ void test_schema_int_enum_labels() {
         c.end_region();
     };
     h.frame(ui);
-    expect(get_int(block, "fog_mode") == 2, "drawing does not change the value");
+    expect(get_int(block, "fog_mode") == 1, "drawing does not change the value");
     float row_y = -1.0f;
     for (float y = 2.0f; y < 60.0f && row_y < 0.0f; y += 4.0f) {
         h.click({330, y}, ui);
@@ -1384,12 +1497,12 @@ void test_schema_int_enum_labels() {
     }
     expect(row_y >= 0.0f, "the fog mode row is a dropdown");
     // The list opens below the row with "Linear" first; pick it.
-    for (float y = row_y + 4.0f; y < row_y + 120.0f && get_int(block, "fog_mode") == 2; y += 4.0f) {
+    for (float y = row_y + 4.0f; y < row_y + 120.0f && get_int(block, "fog_mode") == 1; y += 4.0f) {
         if (!h.ctx.any_popup_open()) { h.click({330, row_y}, ui); h.frame(ui); }
         h.click({330, y}, ui);
         h.frame(ui);
     }
-    expect(block.at("fog_mode").is_scalar() && get_int(block, "fog_mode") != 2, "picking a mode writes its index");
+    expect(block.at("fog_mode").is_scalar() && get_int(block, "fog_mode") == 0, "picking a mode writes its index");
     expect(get_string(block, "fog_mode") != "Linear", "the file still stores an int, not the label");
 }
 
@@ -2123,6 +2236,8 @@ void test_render_settings_cover_engine() {
         {"bloom_enabled", [](const PR& r) { return EngineDefault(r.bloom_enabled); }},
         {"tilt_shift_enabled", [](const PR& r) { return EngineDefault(r.tilt_shift_enabled); }},
         {"dof_enabled", [](const PR& r) { return EngineDefault(r.dof_enabled); }},
+        {"motion_blur", [](const PR& r) { return EngineDefault(r.motion_blur); }},
+        {"motion_blur_intensity", [](const PR& r) { return EngineDefault(r.motion_blur_intensity); }},
         {"debug_view", [](const PR& r) { return EngineDefault(r.debug_view); }},
         {"world_ui_enabled", [](const PR& r) { return EngineDefault(r.world_ui_enabled); }},
         {"screen_ui_enabled", [](const PR& r) { return EngineDefault(r.screen_ui_enabled); }},
@@ -2147,6 +2262,19 @@ void test_render_settings_cover_engine() {
         {"sky_zenith", [](const PR& r) { return EngineDefault(r.indirect.sky_zenith); }},
         {"sky_horizon", [](const PR& r) { return EngineDefault(r.indirect.sky_horizon); }},
         {"sky_ground", [](const PR& r) { return EngineDefault(r.indirect.sky_ground); }},
+        {"sky_model", [](const PR& r) { return EngineDefault(r.sky_model); }},
+        {"sky_quality", [](const PR& r) { return EngineDefault(r.sky_quality); }},
+        {"atmosphere_density", [](const PR& r) { return EngineDefault(r.atmosphere_density); }},
+        {"ozone", [](const PR& r) { return EngineDefault(r.ozone); }},
+        {"sun_disc_size", [](const PR& r) { return EngineDefault(r.sun_disc_size); }},
+        {"moon_disc_size", [](const PR& r) { return EngineDefault(r.moon_disc_size); }},
+        {"sky_stars", [](const PR& r) { return EngineDefault(r.sky_stars); }},
+        {"clouds", [](const PR& r) { return EngineDefault(r.clouds); }},
+        {"cloud_coverage", [](const PR& r) { return EngineDefault(r.cloud_coverage); }},
+        {"cloud_altitude", [](const PR& r) { return EngineDefault(r.cloud_altitude); }},
+        {"cloud_thickness", [](const PR& r) { return EngineDefault(r.cloud_thickness); }},
+        {"cloud_density", [](const PR& r) { return EngineDefault(r.cloud_density); }},
+        {"cloud_wind_speed", [](const PR& r) { return EngineDefault(r.cloud_wind_speed); }},
         {"shadows_enabled", [](const PR& r) { return EngineDefault(r.shadows_enabled); }},
         {"shadow_map_resolution", [](const PR& r) { return EngineDefault(r.shadow_map_resolution); }},
         {"shadow_cascades", [](const PR& r) { return EngineDefault(r.shadow_cascades); }},
@@ -2260,7 +2388,10 @@ void test_render_settings_cover_engine() {
         {"fog_sun_amount", [](const PR& r) { return EngineDefault(r.fog_sun_amount); }},
         {"fog_sun_anisotropy", [](const PR& r) { return EngineDefault(r.fog_sun_anisotropy); }},
         {"fog_max_opacity", [](const PR& r) { return EngineDefault(r.fog_max_opacity); }},
-        {"fog_max_distance", [](const PR& r) { return EngineDefault(r.fog_max_distance); }},
+        {"fog_sun_start_distance", [](const PR& r) { return EngineDefault(r.fog_sun_start_distance); }},
+        {"fog_start_distance", [](const PR& r) { return EngineDefault(r.fog_start_distance); }},
+        {"fog_cutoff_distance", [](const PR& r) { return EngineDefault(r.fog_cutoff_distance); }},
+        {"fog_sky_distance", [](const PR& r) { return EngineDefault(r.fog_sky_distance); }},
         {"volumetrics_step_count", [](const PR& r) { return EngineDefault(r.volumetrics_step_count); }},
         {"volumetrics_max_distance", [](const PR& r) { return EngineDefault(r.volumetrics_max_distance); }},
         {"volumetrics_resolution_scale", [](const PR& r) { return EngineDefault(r.volumetrics_resolution_scale); }},
@@ -2376,7 +2507,7 @@ void test_settings_defaults_match_engine() {
     const auto& r = eng.render;
     const std::map<std::string, float> floats = {
         {"fog_density", r.fog_density}, {"fog_height_base", r.fog_height_base}, {"fog_height_falloff", r.fog_height_falloff},
-        {"fog_sky_blend", r.fog_sky_blend}, {"fog_max_distance", r.fog_max_distance}, {"bloom_intensity", r.bloom_intensity},
+        {"fog_sky_blend", r.fog_sky_blend}, {"fog_sky_distance", r.fog_sky_distance}, {"bloom_intensity", r.bloom_intensity},
         {"auto_exposure_compensation", r.auto_exposure_compensation}, {"depth_threshold", r.depth_threshold},
         {"normal_threshold", r.normal_threshold}, {"dither_strength", r.dither_strength}, {"exposure", r.exposure},
         {"shadow_distance", r.shadow_distance}, {"outline_thickness", r.outline_thickness},
@@ -2715,12 +2846,22 @@ void test_editor_shell_end_to_end() {
         expect(app.save_scene(), "the scene saves");
         scene_path = app.document().path();
 
-        // Renderer restart: a startup-only setting takes effect, documents survive.
+        // Rebuild Renderer: a startup-only setting takes effect in place -- same Engine and
+        // window, documents untouched.
         const Node cb = app.config_document().node;
         app.config_document().section("render")["render_width"] = Node(int64_t(320));
         app.config_document().section("render")["render_height"] = Node(int64_t(180));
         app.config_document().commit("res", cb, {});
         app.document().set_object_key(sphere, "name", Node(std::string("Renamed")), "Rename");
+        const int rebuilds = engine.pipeline_rebuild_count();
+        app.rebuild_renderer();
+        tick(engine, 3);
+        expect(engine.pipeline().render_height() == 180 && engine.pipeline_rebuild_count() > rebuilds,
+               "Rebuild Renderer applies startup-only render settings in place");
+        expect(app.document().dirty() && app.document().find(sphere) && get_string(*app.document().find(sphere), "name") == "Renamed",
+               "...with the open document untouched");
+
+        // Restart Editor Engine (the full restart, for settings baked in at engine start-up).
         restart_config = app.config_for_restart();
         restart_state = app.take_state();
     }
@@ -2732,7 +2873,7 @@ void test_editor_shell_end_to_end() {
         toy::core::Engine engine(cfg, shell_options(project));
         EditorApp app(engine, project, {}, std::move(restart_state));
         tick(engine, 3);
-        expect(engine.pipeline().render_height() == 180, "a restart applies startup-only render settings");
+        expect(engine.pipeline().render_height() == 180, "a full engine restart keeps the edited render settings");
         expect(app.document().dirty() && app.document().find_component(sphere_id_for_restart(app), "MeshRenderer") >= 0,
                "unsaved scene edits survive the restart");
         app.show_document_view();
@@ -2871,6 +3012,47 @@ void test_editor_play_hides_selection_outline() {
     tick(engine, 2);
     expect(!app.playing() && app.document().is_selected(mesh) && app.selection_outlines_drawn() == 1,
            "play outline: the selection is kept and outlined again after Stop");
+}
+
+/**
+ * @brief View > Stats Overlay: F3 over the viewport steps the engine's debug HUD, the menu
+ *        toggles it off and on (full), and the HUD's canvas sits inside the viewport's display
+ *        rect rather than over the editor chrome.
+ */
+void test_editor_stats_overlay() {
+    using coopa::input::Key;
+    setenv("FIXED_DT", "0", 1);
+    setenv("HOME", tmp_root().c_str(), 1);
+    const fs::path root = fresh_dir("stats_overlay_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, 4);
+    InputDriver in{engine, std::max(1.0f, engine.display_scale())};
+    expect(!engine.debug_overlay().visible() && engine.overlay_layers().empty(), "stats overlay: off when the editor opens");
+
+    in.move(app.viewport_box().center(), 2);
+    in.key(Key::F3);
+    tick(engine, 2);
+    expect(engine.debug_overlay().mode() == toy::debug::OverlayMode::Fps, "stats overlay: F3 in the viewport shows fps mode");
+    expect(engine.overlay_layers().size() == 1, "stats overlay: drawn as an engine overlay layer");
+
+    app.toggle_stats_overlay();
+    tick(engine, 2);
+    expect(!engine.debug_overlay().visible() && engine.overlay_layers().empty(), "stats overlay: the menu toggle turns it off");
+    app.toggle_stats_overlay();
+    tick(engine, 3);
+    expect(engine.debug_overlay().full(), "stats overlay: the menu toggle turns it back on in full mode");
+    const auto canvases = coopa::ui::collect_canvases(engine.debug_overlay().scene());
+    const toy::render::LetterboxRect rect = engine.display_rect();
+    expect(canvases.size() == 1 && rect.w > 0, "stats overlay: one HUD canvas, and a display rect");
+    if (canvases.size() == 1) {
+        const glm::vec2 origin = canvases[0]->screen_origin();
+        expect(std::abs(origin.x - static_cast<float>(rect.x)) < 0.5f && std::abs(origin.y - static_cast<float>(rect.y)) < 0.5f,
+               "stats overlay: the HUD is placed at the viewport's display rect");
+    }
+    app.toggle_stats_overlay();
+    tick(engine, 2);
 }
 
 void test_editor_play_input_focus() {
@@ -4193,6 +4375,43 @@ void test_editor_animation_timeline() {
     app.redo();
     tick(engine, 1);
 
+    // The Events lane: add, drag (snapped to frames), rename, delete -- each one undo step, and
+    // the file (and so the runtime clip) follows.
+    app.add_animation_event(0.5f, "footstep");
+    app.add_animation_event(0.2f, "whoosh");
+    tick(engine, 1);
+    expect(app.animation_clip()->events.size() == 2 && app.animation_clip()->events[0].name == "whoosh" &&
+               app.selected_animation_event() == 0,
+           "events: added in time order, the new one selected");
+    dump(engine, "17b_timeline_events");
+    app.select_animation_event(1);
+    app.move_selected_animation_event(0.71f);   // snaps to frame 21 (0.7 s)
+    app.rename_selected_animation_event("step_left");
+    tick(engine, 1);
+    const ClipModel with_events = ClipModel::from_node(coopa::yaml::load_document(scene_dir / "animations" / "cube" / "Wave.yaml"));
+    expect(with_events.events.size() == 2 && with_events.events[1].name == "step_left" &&
+               std::abs(with_events.events[1].time - 0.7f) < 1e-4f,
+           "events: dragged (snapped) and renamed, saved to the clip file");
+    const auto rt = coopa::anim::parse_clip(coopa::yaml::load_document(scene_dir / "animations" / "cube" / "Wave.yaml"));
+    expect(rt.events.size() == 2 && rt.events[1].name == "step_left", "events: the runtime parses the editor's events");
+    app.delete_selected_animation_event();
+    tick(engine, 1);
+    expect(app.animation_clip()->events.size() == 1, "events: deleted");
+    app.undo();   // the delete
+    app.undo();   // the rename
+    tick(engine, 1);
+    expect(app.animation_clip()->events.size() == 2 && app.animation_clip()->events[1].name == "footstep",
+           "events: undo restores the deleted event, then its old name");
+    app.undo();   // the move
+    app.undo();   // the second add
+    tick(engine, 1);
+    expect(app.animation_clip()->events.size() == 1 && app.animation_clip()->events[0].name == "footstep" &&
+               std::abs(app.animation_clip()->events[0].time - 0.5f) < 1e-4f,
+           "events: ...the move and the add undo too");
+    app.undo();
+    tick(engine, 1);
+    expect(app.animation_clip()->events.empty(), "events: back to none");
+
     // The rest pose returns when the clip is not shown.
     app.set_animation_record(false);
     app.set_timeline_rest_pose(true);
@@ -4757,6 +4976,78 @@ void test_editor_scene_settings_override() {
     tick(engine, 2);
     expect(!engine.render_config().shadows_enabled, "a bool override applies");
     dump(engine, "21_scene_setting_override");
+}
+
+/**
+ * @brief A scene can override a feature switch fixed at pipeline construction (SSAO): the
+ *        header checkbox writes the override, the renderer rebuilds in place once the edit
+ *        settles, config.yaml is untouched, Revert All undoes it, and the Project Settings
+ *        modal edits config.yaml instead.
+ */
+void test_editor_scene_feature_override() {
+    setenv("FIXED_DT", "0", 1);
+    unsetenv("NO_INPUT");
+    setenv("HOME", tmp_root().c_str(), 1);
+    const fs::path root = fresh_dir("scene_feature_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    InputDriver in{engine, std::max(1.0f, engine.display_scale())};
+    tick(engine, 4);
+    const bool project_ssao = engine.pipeline().render_config().ssao_enabled;
+    const Node config_before = app.config_document().node;
+    const int rebuilds = engine.pipeline_rebuild_count();
+
+    app.set_prop_tab(PropTab::Render);
+    app.clear_test_rects();
+    tick(engine, 2);
+    auto ao = app.test_rect("setting_group:Ambient Occlusion");
+    expect(ao.has_value(), "the Render tab lists Ambient Occlusion");
+    if (ao) {
+        in.click({ao->x + ao->h + 6.0f, ao->center().y});
+        tick(engine, 2);
+    }
+    const Node* over = app.document().scene_setting("render", "ssao_enabled");
+    expect(over && over->get_value<bool>() == !project_ssao, "the header checkbox writes a scene override of a startup-only switch");
+    expect(app.config_document().node == config_before && !app.config_document().dirty(), "config.yaml is untouched");
+    tick(engine, toy::core::Engine::kLiveRebuildDebounceFrames + 3);
+    expect(engine.pipeline().render_config().ssao_enabled == !project_ssao, "the renderer rebuilt with the scene's switch");
+    expect(engine.pipeline_rebuild_count() == rebuilds + 1, "exactly one rebuild (" + std::to_string(engine.pipeline_rebuild_count() - rebuilds) + ")");
+    dump(engine, "scene_feature_override");
+
+    // A live (non-startup) override does not rebuild.
+    const Node three = make_float(3.0);
+    app.set_scene_setting("render", "exposure", &three);
+    tick(engine, toy::core::Engine::kLiveRebuildDebounceFrames + 3);
+    expect(engine.pipeline_rebuild_count() == rebuilds + 1, "a live setting applies without a rebuild");
+
+    // Revert All: one undoable step back to the project's values.
+    app.clear_test_rects();
+    tick(engine, 2);
+    const auto revert = app.test_rect("revert_all:render");
+    expect(revert.has_value(), "the Render tab offers Revert All while the scene overrides settings");
+    if (revert) in.click(revert->center());
+    tick(engine, toy::core::Engine::kLiveRebuildDebounceFrames + 3);
+    expect(app.document().scene_setting_count("render") == 0, "Revert All drops every render override");
+    expect(engine.pipeline().render_config().ssao_enabled == project_ssao, "...and the renderer rebuilds back");
+    app.undo();
+    tick(engine, toy::core::Engine::kLiveRebuildDebounceFrames + 3);
+    expect(app.document().scene_setting_count("render") == 2, "undo restores both overrides");
+
+    // Project Settings: rows write config.yaml, not the scene.
+    app.open_project_settings("Render Features");
+    app.clear_test_rects();
+    tick(engine, 3);
+    dump(engine, "project_settings_modal");
+    auto bloom = app.test_rect("setting_group:Bloom");
+    expect(bloom.has_value() && app.test_rect("project_settings:Output").has_value(), "the Project Settings modal lists its categories and groups");
+    if (bloom) {
+        in.click({bloom->x + bloom->h + 6.0f, bloom->center().y});
+        tick(engine, 2);
+    }
+    expect(app.config_document().dirty() && app.config_document().section("render").contains("bloom_enabled"),
+           "a modal edit writes config.yaml");
+    expect(app.document().scene_setting("render", "bloom_enabled") == nullptr, "...not a scene override");
 }
 
 /**
@@ -5784,6 +6075,22 @@ void test_editor_render_settings_panel() {
         over = app.document().scene_setting("render", "shadows_enabled");
         expect(over && !over->get_value<bool>(), "opening the section leaves the switch alone");
         dump(engine, "render_settings_shadows_open");
+        // Switching it back to the project's value drops the override (and its tint).
+        shadows = app.test_rect("setting_group:Shadows");
+        if (shadows) in.click({shadows->x + shadows->h + 6.0f, shadows->center().y});
+        tick(engine, 2);
+        expect(app.document().scene_setting("render", "shadows_enabled") == nullptr && engine.render_config().shadows_enabled,
+               "setting the switch back to the project's value removes the override");
+        // Same for a row: override exposure, then type the project's value back in.
+        const float project_exposure = engine.render_config().exposure;
+        const Node two = make_float(project_exposure + 1.0);
+        app.set_scene_setting("render", "exposure", &two);
+        tick(engine, 2);
+        expect(app.document().scene_setting("render", "exposure") != nullptr, "an exposure override exists");
+        const Node back = make_float(project_exposure);
+        app.set_scene_setting("render", "exposure", &back);
+        tick(engine, 2);
+        expect(app.document().scene_setting("render", "exposure") == nullptr, "setting a row back to the project's value removes the override");
     }
     // Search: only matching settings (and their groups) show.
     const auto filter = app.test_rect("render_settings_filter");
@@ -7865,6 +8172,7 @@ const TestCase kTests[] = {
     {"undo_stack_sequence_and_budget",       "document", test_undo_stack_sequence_and_budget},
     {"scene_document_reparent_rules",        "document", test_scene_document_reparent_rules},
     {"scene_document_id_index",              "document", test_scene_document_id_index_matches_tree},
+    {"scene_document_save_ids_unique",       "document", test_scene_document_save_ids_unique},
     {"schema_defaults",                      "document", test_schema_defaults},
     {"snake_case_names",                     "document", test_snake_case_names},
     {"asset_refs_and_rename",                "document", test_asset_refs_and_rename},
@@ -7897,6 +8205,7 @@ const TestCase kTests[] = {
     {"imm_log_view_follows_output",          "imm",      test_imm_log_view_follows_output},
     {"imm_menubar_and_tree",                 "imm",      test_imm_menubar_and_tree},
     {"imm_icon_button_and_tooltip",          "imm",      test_imm_icon_button_and_tooltip},
+    {"imm_tooltip_delay",                    "imm",      test_imm_tooltip_delay},
     {"imm_theme_files",                      "imm",      test_imm_theme_files},
     {"imm_dropdown_toggles",                 "imm",      test_imm_dropdown_toggles},
     {"imm_material_shader_drawn_once",       "imm",      test_imm_material_shader_drawn_once},
@@ -7917,6 +8226,7 @@ const TestCase kTests[] = {
     {"editor_about_and_logo",                "editor_shell", test_editor_about_and_logo},
     {"editor_mesh_rotate",                   "editor_shell", test_editor_mesh_rotate},
     {"editor_play_input_focus",              "editor_shell", test_editor_play_input_focus},
+    {"editor_stats_overlay",                 "editor_shell", test_editor_stats_overlay},
     {"editor_play_hides_selection_outline",  "editor_shell", test_editor_play_hides_selection_outline},
     {"editor_blender_chrome",                "editor_shell", test_editor_blender_chrome},
     {"editor_themes",                        "editor_shell", test_editor_themes},
@@ -7952,6 +8262,7 @@ const TestCase kTests[] = {
     {"editor_object_asset_click_and_tab", "editor_shell", test_editor_object_asset_click_and_tab},
     {"editor_material_shader_catalogue", "editor_shell", test_editor_material_shader_catalogue},
     {"editor_scene_settings_override", "editor_shell", test_editor_scene_settings_override},
+    {"editor_scene_feature_override", "editor_shell", test_editor_scene_feature_override},
     {"editor_weather_world_tab", "editor_shell", test_editor_weather_world_tab},
     {"editor_grid_snap_and_frame", "editor_shell", test_editor_grid_snap_and_frame},
     {"editor_xray_edit_mode", "editor_shell", test_editor_xray_edit_mode},

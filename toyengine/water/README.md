@@ -128,6 +128,10 @@ carries its own underwater look: `underwater_color`, `underwater_visibility`,
   where it leaves through the surface. Red is absorbed first, and the in-scatter is brighter
   looking up than looking down.
 - **Caustics:** on submerged, upward-facing surfaces, fading with depth.
+- **Global fog:** the air fog never touches the in-water part of a ray. With the camera under
+  water it fogs only beyond the point a ray leaves through the surface (`gfx_fog_eval`). Seen
+  from above, the water surface is fogged at its own distance and what shows through it was
+  fogged before it was drawn, so water reads with the same haze as the shore around it.
 - **Shimmer:** a slight screen distortion.
 
 The surface itself is two-sided. From below, light leaving the water refracts with the inverse

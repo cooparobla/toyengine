@@ -15,6 +15,8 @@
 
 #include <glm/glm.hpp>
 
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -38,6 +40,7 @@
 
 #include <coopa/animation/animation_system.h>
 #include <coopa/animation/animation_yaml.h>
+#include <coopa/animation/ik_system.h>
 #include <coopa/asset/asset_manager.h>
 #include <coopa/input/input_map.h>
 #include <coopa/job/engine.h>
@@ -52,6 +55,7 @@
 #include <toyengine/core/branding.h>
 #include <toyengine/core/config.h>
 #include <toyengine/core/runtime_paths.h>
+#include <toyengine/core/scene_loading.h>
 #include <toyengine/core/user_settings.h>
 #include <toyengine/audio/audio_components.h>
 #include <toyengine/audio/audio_system.h>
@@ -67,6 +71,7 @@
 #include <toyengine/scene/free_mover.h>
 #include <toyengine/scene/kinematic_control_system.h>
 #include <toyengine/scene/register.h>
+#include <toyengine/scene/scene_link.h>
 #include <toyengine/world/snow_system.h>
 #include <toyengine/world/terrain_system.h>
 #include <toyengine/water/water_system.h>
@@ -74,8 +79,12 @@
 #include <toyengine/particles/particle_yaml.h>
 #include <toyengine/weather/weather_reactor.h>
 #include <toyengine/weather/weather_system.h>
+#include <toyengine/weather/atmosphere_model.h>
 #include <toyengine/render/visibility.h>
 #include <toyengine/core/module.h>
+#include <toyengine/debug/debug_overlay.h>
+#include <toyengine/save/register.h>
+#include <toyengine/save/save_system.h>
 
 #include <root_directory.h>
 
@@ -178,6 +187,14 @@ public:
             }
         }
 
+        // The stats overlay's startup mode (config.yaml `debug.overlay`); F3 cycles it later.
+        if (const auto mode = debug::parse_overlay_mode(config_.debug.overlay)) {
+            debug_overlay_.set_mode(*mode);
+        } else {
+            std::cerr << "[toyengine] Unknown debug.overlay '" << config_.debug.overlay
+                      << "' (expected off, fps or full); the overlay starts off\n";
+        }
+
         edit_mode_ = options_.edit_mode;
         if (options_.set_app_icon) apply_app_icon_();
         // The project's assets first, then the engine checkout's as the fallback layer (shared
@@ -217,6 +234,8 @@ public:
         weather::register_weather_components();
         // "SnowDeformer" (toyengine/world/snow_system.h): objects pressing trails into deep snow.
         world::register_snow_components();
+        // "SaveId" (a stable identity in saves) and the demo "SaveDemo" (toyengine/save/).
+        save::register_save_components();
         // The GPU overload, so font/sprite paths in scene YAML load on demand and
         // FontDefaults::resolve_font is wired for themes. Must precede load_scene(), like
         // every other parser registration above. Its captured device/allocator references
@@ -228,6 +247,7 @@ public:
         // Must precede load_scene(), like every other parser registration above.
         coopa::anim::register_animation_components(assets_);
         init_audio_();
+        init_saves_();
         // Project modules (TOY_MODULE in a project's src/, see module.h) last, so they can
         // build on -- or replace -- any parser registered above.
         for (const Module& m : modules()) {
@@ -252,12 +272,59 @@ public:
      */
     coopa::scene::Scene& load_scene(const std::string& path) {
         ctx_.wait_idle();
+        cancel_scene_load_("superseded by load_scene()");
         const std::string resolved = resolve_scene_path_(path);
         scene_mgr_.load_scene(resolved);
         scene_settings_[&scene_mgr_.get_active_scene()] = read_scene_settings_(resolved);
+        scene_paths_[&scene_mgr_.get_active_scene()] = resolved;
         prepare_scene_(scene_mgr_.get_active_scene());
         return scene_mgr_.get_active_scene();
     }
+
+    /**
+     * @brief Loads the scene at `path` in the background while the current one keeps running,
+     *        then swaps it in behind `options.transition` (see scene_loading.h).
+     *
+     * The document is read on a worker; objects are built a batch per frame
+     * (options.build_budget_ms) and asset uploads finalized within options.finalize_budget_ms
+     * per frame, so frames keep presenting throughout. The current scene is untouched until
+     * activation: one GPU wait, the old scenes are destroyed (unless options.additive), the new
+     * one is started, its systems installed, and it begins simulating (subject to edit mode).
+     * Unlike load_scene() there is no blocking asset drain -- anything a system starts loading
+     * at activation streams in over the next frames.
+     *
+     * One load at a time: while one is in flight a second request returns the in-flight
+     * handle unchanged. load_scene() / set_scene() cancel it.
+     *
+     * @param path    Scene file (.yaml/.caml), resolved like load_scene()'s.
+     * @param options Transition, additive, min_display_time, spawn_point, budgets.
+     * @return A handle reporting progress(), is_ready() and the on_complete hook.
+     */
+    SceneLoadHandle load_scene_async(const std::string& path, SceneLoadOptions options = {}) {
+        if (scene_load_ && scene_load_->pending()) {
+            std::cerr << "[toyengine] load_scene_async('" << path << "'): '" << scene_load_->path
+                      << "' is still loading; ignoring the new request\n";
+            return SceneLoadHandle(scene_load_);
+        }
+        if (scene_load_ && !scene_load_->finished()) finish_transition_();   // a previous fade-in still running
+        auto st = std::make_shared<detail::SceneLoadState>();
+        st->path = resolve_scene_path_(path);
+        st->options = std::move(options);
+        st->peak_pending = assets_.pending_load_count();
+        st->read = coopa::scene::SceneLoader::read_document_async(st->path, &jobs_);
+        scene_load_ = st;
+        if (st->options.transition.kind != SceneTransition::Kind::None) {
+            transition_.set_fade(st->options.transition.color, 0.0f);
+            // Over the game and the host's UI inside the display rect; under the stats HUD (100).
+            add_overlay_layer(&transition_.scene(), 50, /*in_display_rect=*/true);
+        }
+        return SceneLoadHandle(st);
+    }
+
+    /** @brief The current (or last) async load's handle; empty if there never was one. */
+    SceneLoadHandle scene_load() const { return SceneLoadHandle(scene_load_); }
+    /** @brief True while an async load has not yet activated its scene. */
+    bool scene_loading() const { return scene_load_ && scene_load_->pending(); }
 
     /**
      * @brief Replaces every managed scene with an already-built one (e.g. from
@@ -267,6 +334,7 @@ public:
      */
     coopa::scene::Scene& set_scene(coopa::scene::Scene&& scene, const fkyaml::node& settings = fkyaml::node()) {
         ctx_.wait_idle();
+        cancel_scene_load_("superseded by set_scene()");
         clear_scenes_();
         coopa::scene::Scene* raw = scene_mgr_.add_scene(std::make_unique<coopa::scene::Scene>(std::move(scene)));
         scene_settings_[raw] = settings;
@@ -299,6 +367,7 @@ public:
         ctx_.wait_idle();
         scene_mgr_.remove_scene(scene);
         scene_settings_.erase(scene);
+        scene_paths_.erase(scene);
         if (scene_mgr_.has_scene()) apply_scene_settings_(scene_mgr_.get_active_scene());
     }
 
@@ -329,7 +398,7 @@ public:
         config_.source = config_yaml.is_mapping() ? config_yaml : fkyaml::node::mapping();
         config_adjust_ = std::move(adjust);
         source_driven_ = true;
-        if (scene_mgr_.has_scene()) apply_scene_settings_(scene_mgr_.get_active_scene());
+        if (scene_mgr_.has_scene()) apply_scene_settings_(scene_mgr_.get_active_scene(), kLiveRebuildDebounceFrames);
     }
 
     /**
@@ -339,12 +408,25 @@ public:
      */
     void set_scene_settings(coopa::scene::Scene& scene, const fkyaml::node& settings) {
         scene_settings_[&scene] = settings;
-        if (scene_mgr_.has_scene() && &scene_mgr_.get_active_scene() == &scene) apply_scene_settings_(scene);
+        if (scene_mgr_.has_scene() && &scene_mgr_.get_active_scene() == &scene)
+            apply_scene_settings_(scene, kLiveRebuildDebounceFrames);
         if (weather::WeatherSystem* w = weather::find(scene)) w->set_settings(weather::parse_settings(weather_node_(settings)));
     }
 
     /// The active scene's weather and time of day (toyengine/weather/), or null without a scene.
     weather::WeatherSystem* weather() { return scene_mgr_.has_scene() ? weather::find(scene_mgr_.get_active_scene()) : nullptr; }
+
+    /// Save slots and the hooks that fill them (toyengine/save/save_system.h).
+    save::SaveSystem& saves() { return saves_; }
+
+    /**
+     * @brief The file a managed scene was loaded from (resolved, as load_scene() /
+     *        load_scene_async() opened it); "" for one built in memory (set_scene, push_scene).
+     */
+    std::string scene_path(const coopa::scene::Scene& scene) const {
+        auto it = scene_paths_.find(&scene);
+        return it != scene_paths_.end() ? it->second : std::string();
+    }
 
     /** @brief The config `scene` runs with: config.yaml plus its overrides. */
     AppConfig scene_config(const coopa::scene::Scene& scene) const {
@@ -415,6 +497,57 @@ public:
         overlay_scene_ = scene;
         pipeline_->set_overlay_scene(scene);
     }
+
+    /**
+     * @brief Adds an engine overlay layer: a scene ticked like the overlay scene and drawn
+     *        over everything else -- the game, its HUD and the overlay scene (the editor UI).
+     *
+     * For the engine's own screens (the debug stats HUD, scene transitions). Layers draw in
+     * ascending `order`, equal orders in the order they were added. `in_display_rect` places
+     * the layer's screen canvases inside the scene's display rect (display_rect(): the
+     * letterboxed game image, or the editor's viewport) at the display's scale, without input;
+     * otherwise they cover the window like the overlay scene's. Re-adding a scene updates it.
+     * Non-owning: remove_overlay_layer() before destroying the scene.
+     */
+    /// One add_overlay_layer() entry.
+    struct OverlayLayer {
+        coopa::scene::Scene* scene = nullptr;
+        int  order = 0;
+        bool in_display_rect = false;
+    };
+    void add_overlay_layer(coopa::scene::Scene* scene, int order = 0, bool in_display_rect = false) {
+        if (!scene) return;
+        std::erase_if(overlay_layers_, [scene](const OverlayLayer& l) { return l.scene == scene; });
+        auto at = std::find_if(overlay_layers_.begin(), overlay_layers_.end(),
+                               [order](const OverlayLayer& l) { return l.order > order; });
+        overlay_layers_.insert(at, OverlayLayer{scene, order, in_display_rect});
+        sync_overlay_layers_();
+    }
+    void remove_overlay_layer(coopa::scene::Scene* scene) {
+        if (std::erase_if(overlay_layers_, [scene](const OverlayLayer& l) { return l.scene == scene; })) {
+            sync_overlay_layers_();
+        }
+    }
+    /** @brief The current overlay layers' scenes, in draw order. */
+    std::vector<coopa::scene::Scene*> overlay_layers() const {
+        std::vector<coopa::scene::Scene*> out;
+        for (const OverlayLayer& l : overlay_layers_) out.push_back(l.scene);
+        return out;
+    }
+
+    /**
+     * @brief The on-screen stats HUD (toyengine/debug/debug_overlay.h): set_mode() / cycle()
+     *        switch it (F3 does in a running game), and toy::debug::watch()/text() feed its
+     *        Game block. Off by default (config.yaml `debug.overlay`).
+     */
+    debug::DebugOverlay& debug_overlay() { return debug_overlay_; }
+
+    /**
+     * @brief The profile the frame is being timed into: PROFILE mode's, or the live one the
+     *        overlay's full mode runs (FrameProfile::latest() holds the last complete frame).
+     *        Null when neither is on.
+     */
+    const render::FrameProfile* frame_profile() const { return active_profile_(); }
 
     /**
      * @brief Confines the rendered scene to a window-pixel rect (an editor viewport panel),
@@ -619,6 +752,54 @@ private:
         for (const auto& [bus, def] : buses) audio_->set_bus_volume(bus, us.get_float(audio::volume_setting_key(bus), def));
     }
 
+    /**
+     * @brief The save system: config.yaml's `save:` keys, and the host hooks it takes the
+     *        scene from and loads saved scenes through (load_scene_async(), never in an engine
+     *        embedded by a tool -- the editor's play mode applies saves in place).
+     */
+    void init_saves_() {
+        if (const auto enc = save::parse_save_encoding(config_.save.encode)) {
+            saves_.set_encoding(*enc);
+        } else {
+            std::cerr << "[toyengine] Unknown save.encode '" << config_.save.encode << "' (expected auto, yaml or caml)\n";
+        }
+        save::SaveSystem::Host host;
+        host.scene = [this]() -> coopa::scene::Scene* { return scene_mgr_.has_scene() ? &scene_mgr_.get_active_scene() : nullptr; };
+        host.scene_path = [this]() { return scene_mgr_.has_scene() ? save_scene_ref_(scene_path(scene_mgr_.get_active_scene())) : std::string(); };
+        host.load_scene = [this](const std::string& scene, std::function<void(coopa::scene::Scene&)> ready,
+                                 std::function<void(const std::string&)> failed) {
+            if (options_.edit_mode || scene_loading()) return false;
+            SceneLoadHandle h = load_scene_async(scene);
+            h.on_complete(std::move(ready));
+            h.on_failed(std::move(failed));
+            return true;
+        };
+        saves_.set_host(std::move(host));
+        save::SaveSystem::set_active(&saves_);
+    }
+
+    /** @brief A scene file as saves store it: relative to the project root when inside it. */
+    std::string save_scene_ref_(const std::string& path) const {
+        if (path.empty()) return path;
+        std::error_code ec;
+        const std::filesystem::path rel = std::filesystem::relative(path, options_.project_root, ec);
+        if (ec || rel.empty() || *rel.begin() == "..") return path;
+        return rel.generic_string();
+    }
+
+    /** @brief Per frame: play time while the game runs, and the quick-save / quick-load keys. */
+    void update_saves_(float dt) {
+        if (edit_mode_ || !scene_mgr_.has_scene()) return;
+        saves_.tick(dt);
+        const std::string& slot = config_.save.quick_slot;
+        if (slot.empty() || options_.edit_mode || input_blocked_() || scene_loading()) return;
+        if (input_.is_pressed("quick_save", ctx_.input())) {
+            if (saves_.save(slot)) std::cout << "[toyengine] Saved '" << slot << "' (" << saves_.slot_path(slot).string() << ")\n";
+        } else if (input_.is_pressed("quick_load", ctx_.input()) && saves_.has_slot(slot)) {
+            if (saves_.load(slot)) std::cout << "[toyengine] Loading '" << slot << "'\n";
+        }
+    }
+
     void shutdown_audio_() {
         if (!audio_) return;
         UserSettings::instance().flush();
@@ -650,6 +831,7 @@ private:
         if (audio_) audio_->stop_all();
         for (coopa::scene::Scene* s : scene_mgr_.scenes()) scene_mgr_.remove_scene(s);
         scene_settings_.clear();
+        scene_paths_.clear();
     }
 
     /** @brief A scene file's `scene.settings` block (null if it has none or can't be read). */
@@ -669,11 +851,17 @@ private:
      * overrides to undo, or the editor drives the config document -- so code that tweaks
      * render_config() at runtime keeps its changes across plain scene loads. The live
      * debug_view and the resolved shader/palette state are always kept.
+     *
+     * A change to a field fixed at pipeline construction (TOY_STARTUP_FIXED_FIELDS: most
+     * feature switches, render size, shadow map sizes...) queues an in-place pipeline rebuild
+     * (queue_rebuild_()), run at the top of a tick after `rebuild_delay` frames -- so a scene
+     * can turn SSR or bloom on or off, and a dragged editor slider rebuilds once, not per frame.
      */
-    AppConfig apply_scene_settings_(const coopa::scene::Scene& scene) {
+    AppConfig apply_scene_settings_(const coopa::scene::Scene& scene, int rebuild_delay = 0) {
         // The weather's writes are not config: put the config's own values back first, so they
         // are what gets layered or kept (the weather re-captures and re-applies next frame).
         restore_weather_atmosphere_();
+        restore_sky_colours_();
         const AppConfig eff = scene_config(scene);
         auto it = scene_settings_.find(&scene);
         const bool overrides = it != scene_settings_.end() && AppConfig::has_scene_overrides(it->second);
@@ -684,7 +872,15 @@ private:
             next.surface_shaders = live.surface_shaders;
             next.debug_view = live.debug_view;
             next.fill_aspect = live.fill_aspect;   // the engine's, from the display region -- see update_fill_extent_()
-            pipeline_->apply_live_config(next);
+            // Fields fixed at construction (a feature switch, a target size) need a new
+            // pipeline: queue one for the top of the next tick. Everything else applies now.
+            // Compared with what the config asked for last time, not with the live pipeline:
+            // only fields the config / scene actually changed rebuild, and a runtime tweak of
+            // render_config() (a test, game code) is never undone.
+            if (!derived_render_) derived_render_ = source_render_config_();
+            if (render::PixelRenderPipeline::needs_rebuild(*derived_render_, next)) queue_rebuild_(*derived_render_, next, rebuild_delay);
+            derived_render_ = next;
+            pipeline_->apply_live_config(next, /*warn_ignored=*/false);
         }
         overrides_applied_ = overrides;
         return eff;
@@ -694,7 +890,7 @@ private:
      * @brief Everything a freshly loaded scene needs before its first frame: per-scene
      *        systems, drained asset loads, shader validation, edit-mode and cursor state.
      */
-    void prepare_scene_(coopa::scene::Scene& scene) {
+    void prepare_scene_(coopa::scene::Scene& scene, bool drain_assets = true) {
         // The scene's own settings first: render (live) before the water system reads
         // water_quality below, physics for install_physics_system().
         const AppConfig scene_cfg = apply_scene_settings_(scene);
@@ -719,7 +915,13 @@ private:
         // Order 360: after TransformResolve (350), so every emitter's world matrix is current;
         // runs in edit mode too, so effects preview live in the editor -- see
         // particle_system_runner.h.
-        particles::install_particle_system(scene);
+        // `simulation: gpu` systems run in compute when particles.gpu_enabled and the device has
+        // it; their alive counts come back from the renderer's readback.
+        particles::install_particle_system(scene)->set_gpu(
+            config_.particles.gpu_enabled && ctx_.device().supports_compute(),
+            [this](uint64_t id, uint32_t& count, uint32_t& generation) {
+                return pipeline_ && pipeline_->gpu_particle_alive(id, count, generation);
+            });
         // Order 40: the clock, the active weather condition, sky / fog / sun and the runtime
         // weather effects -- ahead of the Behaviour walk, so gameplay reads this frame's weather.
         // Runs in edit mode too (clock held), so the editor previews it.
@@ -739,7 +941,15 @@ private:
         // orders installed systems by phase regardless of install call order, so this only needs
         // to exist before the scene starts ticking, same as install_transform_system() above.
         coopa::anim::install_animation_system(scene);
-        drain_pending_assets_();
+        // Order 320: TwoBoneIK / LookAtIK / FootIK over the animated pose, before TransformResolve
+        // (350) -- see coopa/animation/ik_system.h. A scene with no IK pays one component sweep.
+        coopa::anim::install_ik_system(scene);
+        // Orders 90 / 290 / 330: Ragdoll mode changes before Physics, and the recovery blend
+        // around the Animator and IK -- see toyengine/scene/ragdoll.h.
+        scene::install_ragdoll_system(scene);
+        // An async load skips the drain: its build already waited for the scene's own assets,
+        // and whatever a system starts loading here streams in over the next frames.
+        if (drain_assets) drain_pending_assets_();
 
         // Fail fast on a typo'd/unregistered PBRMaterial::shader -- see
         // PixelRenderPipeline::validate_material_shaders()'s doc for why this can't happen
@@ -755,6 +965,7 @@ public:
     ~Engine() {
         ctx_.wait_idle();
         shutdown_audio_();
+        if (save::SaveSystem::active() == &saves_) save::SaveSystem::set_active(nullptr);
         // Scenes before assets_.shutdown() below: every MeshRenderer (and texture, font, clip...)
         // holds an AssetHandle whose destructor releases its slot in the AssetManager. Left to
         // member destruction, the scenes went AFTER shutdown() had already freed those slots --
@@ -762,6 +973,15 @@ public:
         // slot freed by AssetManager::shutdown()), which corrupted the heap for whatever a
         // process did next (the editor tests' "random" segfaults).
         clear_scenes_();
+        // An unfinished async load holds a built scene (asset handles) and the transition layer
+        // a loading-screen UI (UIResourceCache fonts): both go before the caches below.
+        cancel_scene_load_("engine shutting down");
+        finish_transition_();
+        transition_.release();
+        // The debug overlay's scene draws with a UIResourceCache font, cleared below.
+        remove_overlay_layer(debug_overlay_.has_scene() ? &debug_overlay_.scene() : nullptr);
+        debug_overlay_.release_scene();
+        debug::GameLines::instance().set_accepting(false);
         // register_render_components()'s parser lambdas capture ctx_'s device/allocator/
         // cmd_pool by reference in SceneLoader's function-local static registry, which
         // would otherwise only be destroyed at program exit -- after ctx_ goes out of
@@ -993,11 +1213,13 @@ public:
     bool tick() {
         using render::CpuScope;
         using render::CpuTimer;
-        if (profile_) {
-            profile_->begin_frame(profile_frame_++);
-            profile_->prune();
+        // Before `prof` is taken: this may create or destroy the live profile.
+        sync_live_profile_();
+        render::FrameProfile* prof = active_profile_();
+        if (prof) {
+            prof->begin_frame(profile_frame_++);
+            prof->prune();
         }
-        render::FrameProfile* prof = profile_.get();
 
         float dt = 0.0f;
         {
@@ -1012,15 +1234,22 @@ public:
 
             dt = frame_dt_();
             apply_cursor_pos_override_();
+            update_debug_overlay_();
         }
         // Before anything emits UI: drive_ui_canvases_() seeds every canvas's DrawList with the
         // pipeline's white texture, and a rebuild later in the frame would free it under that
         // frame's UI (drawn black). Uses the display region last frame's pre_render set.
+        run_pending_rebuild_();
         if (scene_mgr_.has_scene()) update_fill_extent_();
         {
             CpuTimer t(prof, CpuScope::Assets);
-            assets_.update(dt);
+            // While a scene loads in the background its uploads are spread over frames.
+            assets_.update(dt, scene_loading() ? scene_load_->options.finalize_budget_ms : -1.0f);
+            consume_scene_link_requests_();
+            // Also after a failure, while the cover fades back off the running scene.
+            if (scene_load_ && (!scene_load_->finished() || scene_load_->alpha > 0.0f)) update_scene_load_(dt);
         }
+        update_saves_(dt);
         if (hooks_.pre_scene_update) hooks_.pre_scene_update(dt);
 
         {
@@ -1029,9 +1258,12 @@ public:
                 drive_camera_controller_(scene_mgr_.get_active_scene());
                 drive_kinematic_controllers_(scene_mgr_.get_active_scene());
                 drive_free_movers_(scene_mgr_.get_active_scene());
+                drive_character_controllers_(scene_mgr_.get_active_scene());
+                drive_ragdolls_(scene_mgr_.get_active_scene());
             }
             scene_mgr_.update(dt);
             if (overlay_scene_) overlay_scene_->update(dt);
+            for (const OverlayLayer& l : overlay_layers_) l.scene->update(dt);
         }
         {
             CpuTimer t(prof, CpuScope::LateUpdate);
@@ -1043,12 +1275,17 @@ public:
                 drive_ui_canvases_(scene_mgr_.get_active_scene(), scene_ui_placement_);
             }
             if (overlay_scene_) drive_ui_canvases_(*overlay_scene_, std::nullopt);
+            for (const OverlayLayer& l : overlay_layers_) drive_ui_canvases_(*l.scene, overlay_layer_placement_(l));
             // late_update() runs LateBehaviourSystem, flushes each worker's deferred
             // SceneCommandBuffer and advances Scene::frame_index(). Must precede render() so a
             // same-frame deferred spawn or destroy is reflected in what is drawn, matching
             // Unity's Update -> LateUpdate -> render order.
             scene_mgr_.late_update(dt);
             if (overlay_scene_) overlay_scene_->late_update(dt);
+            // After every other scene's late_update(): the stats and the game's watch() lines
+            // for this frame are all in.
+            if (debug_overlay_.full() && debug_overlay_.refresh_due()) collect_debug_stats_();
+            for (const OverlayLayer& l : overlay_layers_) l.scene->late_update(dt);
         }
         update_audio_(dt);
         if (hooks_.post_late_update) hooks_.post_late_update(dt);
@@ -1062,6 +1299,7 @@ public:
             if (hooks_.pre_render) hooks_.pre_render(dt);
             sync_water_render_state_(scene_mgr_.get_active_scene());
             sync_weather_render_state_(scene_mgr_.get_active_scene());
+            sync_sky_render_state_(scene_mgr_.get_active_scene(), dt);
             sync_surface_state_(scene_mgr_.get_active_scene());
             {
                 // After the host's pre_render hook, like the water sync: the batches point into
@@ -1072,8 +1310,334 @@ public:
             CpuTimer t(prof, CpuScope::Render);
             pipeline_->render(ctx_.renderer(), scene_mgr_.get_active_scene(), dt);
         }
+        // toy::debug::watch()/text() lines last one frame.
+        debug::GameLines::instance().clear();
 
         return !ctx_.should_close();
+    }
+
+    /**
+     * @brief Advances the async load one frame: polls the document, builds a batch of objects,
+     *        tracks the asset loads, drives the transition and activates when everything is in.
+     */
+    void update_scene_load_(float dt) {
+        detail::SceneLoadState& st = *scene_load_;
+        ++st.frames;
+        st.elapsed += dt;
+        const SceneTransition& tr = st.options.transition;
+        const bool covered_kind = tr.kind != SceneTransition::Kind::None;
+        st.peak_pending = std::max(st.peak_pending, assets_.pending_load_count());
+
+        try {
+            if (st.stage == SceneLoadStage::ReadingDocument && st.read && st.read->ready()) {
+                if (st.read->failed()) throw std::runtime_error(st.read->error());
+                const fkyaml::node& doc = st.read->document();
+                if (doc.contains("scene") && doc.at("scene").contains("settings")) st.settings = doc.at("scene").at("settings");
+                st.builder = std::make_unique<coopa::scene::SceneLoader::Builder>(doc, st.path, coopa::scene::SceneLoader::LoadOptions{.start = false});
+                st.read.reset();
+                st.stage = SceneLoadStage::Building;
+            } else if (st.stage == SceneLoadStage::Building) {
+                if (st.builder->step(st.options.build_budget_ms)) st.stage = SceneLoadStage::LoadingAssets;
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "[toyengine] Async load of '" << st.path << "' failed: " << e.what() << "\n";
+            st.fail(e.what());
+            transition_.hide_loading_screen();   // fade back in over the old scene
+        }
+        if (st.stage == SceneLoadStage::LoadingAssets && assets_.pending_load_count() == 0) {
+            st.stage = SceneLoadStage::WaitingToSwap;
+        }
+
+        // Progress: the document 5%, the build 65%, the assets 30%.
+        switch (st.stage) {
+            case SceneLoadStage::ReadingDocument: break;
+            case SceneLoadStage::Building:
+                st.raise_progress(0.05f + 0.65f * st.builder->progress());
+                break;
+            case SceneLoadStage::LoadingAssets: {
+                const float peak = static_cast<float>(std::max<size_t>(st.peak_pending, 1));
+                st.raise_progress(0.70f + 0.30f * (1.0f - static_cast<float>(assets_.pending_load_count()) / peak));
+                break;
+            }
+            default: st.raise_progress(st.stage == SceneLoadStage::Failed ? st.progress : 1.0f); break;
+        }
+
+        // The cover: up over fade_out before activation, down over fade_in after (or after a failure).
+        if (st.stage == SceneLoadStage::FadingIn || st.stage == SceneLoadStage::Failed) {
+            st.alpha = tr.fade_in > 0.0f ? std::max(0.0f, st.alpha - dt / tr.fade_in) : 0.0f;
+        } else if (covered_kind) {
+            st.alpha = tr.fade_out > 0.0f ? std::min(1.0f, st.elapsed / tr.fade_out) : 1.0f;
+        }
+        const bool covered = !covered_kind || st.alpha >= 1.0f;
+
+        if (tr.kind == SceneTransition::Kind::LoadingScreen && st.pending()) {
+            if (covered && !st.loading_screen_shown) {
+                st.loading_screen_shown = true;
+                if (!tr.loading_screen.empty() && !transition_.show_loading_screen(tr.loading_screen)) {
+                    std::cerr << "[toyengine] Loading screen '" << tr.loading_screen << "' could not be shown\n";
+                }
+            }
+            transition_.update_loading_screen(st.progress, scene_load_status_text(st.stage));
+        }
+
+        if (st.stage == SceneLoadStage::WaitingToSwap && covered && st.elapsed >= st.options.min_display_time) {
+            activate_scene_load_(st);
+        }
+
+        if (covered_kind) transition_.set_fade(tr.color, st.alpha);
+        if (st.stage == SceneLoadStage::FadingIn && st.alpha <= 0.0f) st.stage = SceneLoadStage::Done;
+        if (st.finished() && st.alpha <= 0.0f) finish_transition_();
+    }
+
+    /**
+     * @brief The swap: one GPU wait, the old scenes out (unless additive), the built scene in,
+     *        started, systems installed, simulating -- then on_complete.
+     */
+    void activate_scene_load_(detail::SceneLoadState& st) {
+        ctx_.wait_idle();
+        transition_.hide_loading_screen();
+        std::unique_ptr<coopa::scene::Scene> built = st.builder->take();   // unstarted
+        st.builder.reset();
+        apply_spawn_point_(*built, st.options.spawn_point);
+        coopa::scene::Scene* previous_active = scene_mgr_.has_scene() ? &scene_mgr_.get_active_scene() : nullptr;
+        if (!st.options.additive) {
+            clear_scenes_();
+            previous_active = nullptr;
+        }
+        coopa::scene::Scene* raw = scene_mgr_.add_scene(std::move(built));
+        scene_settings_[raw] = st.settings;
+        scene_paths_[raw] = st.path;
+        // The same order as load_scene(): start (SceneLoader::load() starts while building),
+        // then the per-scene systems, so components that add bodies in start() are seen by them.
+        raw->start();
+        prepare_scene_(*raw, /*drain_assets=*/false);
+        // Additive: the previously active scene stays the active one, with its own settings.
+        if (previous_active) {
+            scene_mgr_.set_active_scene(previous_active);
+            apply_scene_settings_(*previous_active);
+        }
+        st.stage = st.options.transition.kind == SceneTransition::Kind::None ? SceneLoadStage::Done : SceneLoadStage::FadingIn;
+        st.complete(*raw);
+    }
+
+    /** @brief Moves the new scene's player (first CharacterController) onto its `spawn_point` object. */
+    static void apply_spawn_point_(coopa::scene::Scene& scene, const std::string& spawn_point) {
+        if (spawn_point.empty()) return;
+        coopa::scene::SceneObject* spawn = scene.find_object(spawn_point);
+        auto* player = scene.find_first_component<scene::CharacterController>();
+        if (!spawn || !player || !player->owner) {
+            std::cerr << "[toyengine] spawn_point '" << spawn_point << "': "
+                      << (spawn ? "no CharacterController in the scene" : "no such object") << "\n";
+            return;
+        }
+        auto* stc = spawn->get_transform();
+        auto* ptc = player->owner->get_transform();
+        if (!stc || !ptc) return;
+        const glm::mat4 world = stc->get_world_matrix();
+        coopa::util::Transform& t = ptc->transform();
+        glm::mat4 parent_inv(1.0f);
+        if (player->owner->parent() && player->owner->parent()->get_transform()) {
+            parent_inv = glm::inverse(player->owner->parent()->get_transform()->get_world_matrix());
+        }
+        t.set_position(glm::vec3(parent_inv * world[3]));
+        // Facing: the spawn point's yaw (the controller turns about +Z).
+        const glm::vec3 fwd = glm::vec3(world[1]);
+        if (glm::length(glm::vec2(fwd)) > 1e-4f) {
+            glm::vec3 euler = t.rotation_degrees();
+            euler.z = glm::degrees(std::atan2(-fwd.x, fwd.y));
+            t.set_rotation(euler);
+        }
+    }
+
+    /** @brief Drops an unactivated async load (its built objects too) and its transition. */
+    void cancel_scene_load_(const std::string& why) {
+        if (!scene_load_ || !scene_load_->pending()) return;
+        scene_load_->fail("cancelled: " + why);
+        finish_transition_();
+    }
+
+    /** @brief Takes the transition layer down (fade fully gone, loading screen destroyed). */
+    void finish_transition_() {
+        if (scene_load_ && !scene_load_->finished()) scene_load_->stage = SceneLoadStage::Done;
+        if (transition_.has_scene()) {
+            transition_.hide_loading_screen();
+            transition_.set_fade(glm::vec3(0.0f), 0.0f);
+            remove_overlay_layer(&transition_.scene());
+        }
+        if (scene_load_) scene_load_->alpha = 0.0f;
+    }
+
+    /**
+     * @brief Turns this frame's SceneLink requests into load_scene_async() calls -- for scenes
+     *        this engine runs, and never in an engine embedded by a tool (the editor's play mode
+     *        stays in the scene being edited).
+     */
+    void consume_scene_link_requests_() {
+        std::vector<scene::SceneLinkRequest> requests = scene::SceneLinkRequests::instance().take();
+        for (const scene::SceneLinkRequest& r : requests) {
+            const auto managed = scene_mgr_.scenes();
+            if (std::find(managed.begin(), managed.end(), r.origin) == managed.end()) continue;
+            if (options_.edit_mode) {
+                std::cout << "[toyengine] SceneLink to '" << r.target_scene << "' ignored in an embedded engine (editor play mode)\n";
+                continue;
+            }
+            SceneLoadOptions o;
+            const auto kind = SceneTransition::parse_kind(r.transition);
+            if (!kind) std::cerr << "[toyengine] SceneLink: unknown transition '" << r.transition << "' (fade, loading_screen, none); fading\n";
+            switch (kind.value_or(SceneTransition::Kind::Fade)) {
+                case SceneTransition::Kind::None: o.transition = SceneTransition::none(); break;
+                case SceneTransition::Kind::Fade: o.transition = SceneTransition::fade(r.fade_time, r.color); break;
+                case SceneTransition::Kind::LoadingScreen:
+                    o.transition = SceneTransition::loading_screen_ui(r.loading_screen, r.fade_time, r.color);
+                    break;
+            }
+            o.min_display_time = r.min_display_time;
+            o.spawn_point = r.spawn_point;
+            load_scene_async(r.target_scene, std::move(o));
+        }
+    }
+
+    /** @brief Hands the pipeline overlay_layers_' scenes, in draw order. */
+    void sync_overlay_layers_() {
+        std::vector<coopa::scene::Scene*> scenes;
+        scenes.reserve(overlay_layers_.size());
+        for (const OverlayLayer& l : overlay_layers_) scenes.push_back(l.scene);
+        pipeline_->set_overlay_layers(std::move(scenes));
+    }
+
+    /** @brief Where a layer's screen canvases go: the display rect, or (nullopt) the window. */
+    std::optional<ScreenUiPlacement> overlay_layer_placement_(const OverlayLayer& layer) {
+        if (!layer.in_display_rect) return std::nullopt;
+        const render::LetterboxRect rect = display_rect();
+        if (rect.w == 0 || rect.h == 0) return std::nullopt;
+        // At the display's scale, so the HUD keeps a physical size (and crisp text) on HiDPI.
+        return ScreenUiPlacement{rect, /*input=*/false, std::max(1.0f, display_scale())};
+    }
+
+    /** @brief PROFILE mode's profile, else the overlay's live one, else null. */
+    render::FrameProfile* active_profile_() const {
+        return profile_ ? profile_.get() : live_profile_.get();
+    }
+
+    /**
+     * @brief Runs a live FrameProfile (and with it the pipeline's GPU timestamps) exactly
+     *        while the overlay is in full mode -- unless PROFILE already runs one, which the
+     *        overlay then reads instead. Top of tick() only: CPU timers hold the pointer for
+     *        the rest of the frame.
+     */
+    void sync_live_profile_() {
+        const bool want = debug_overlay_.full() && !profile_;
+        if (want == (live_profile_ != nullptr)) return;
+        if (want) {
+            live_profile_ = std::make_unique<render::FrameProfile>();
+            pipeline_->set_profiler(live_profile_.get());
+        } else {
+            pipeline_->set_profiler(nullptr);   // waits for the GPU, then drops its queries
+            live_profile_.reset();
+        }
+    }
+
+    /**
+     * @brief The overlay's per-frame upkeep, after input polling: F3, its layer (registered
+     *        exactly while it is visible, so "off" ticks and draws nothing), and the frame time.
+     *
+     * F3 belongs to the running game: an editor in edit mode, or a game without input focus
+     * (NO_INPUT, the editor's unfocused play mode), leaves it to the host.
+     */
+    void update_debug_overlay_() {
+        if constexpr (!debug::k_overlay_compiled) return;
+        if (!edit_mode_ && !input_blocked_() && input_.is_pressed("debug_overlay", ctx_.input())) {
+            debug_overlay_.cycle();
+        }
+        if (!debug_overlay_.visible()) {
+            if (debug_overlay_.has_scene() && !overlay_layers_.empty()) remove_overlay_layer(&debug_overlay_.scene());
+            return;
+        }
+        coopa::scene::Scene& layer = debug_overlay_.scene(debug_overlay_font_());
+        const bool registered = std::any_of(overlay_layers_.begin(), overlay_layers_.end(),
+                                            [&layer](const OverlayLayer& l) { return l.scene == &layer; });
+        // Order 100: over any later engine layer of lower order (a scene transition fades
+        // beneath the stats).
+        if (!registered) add_overlay_layer(&layer, 100, /*in_display_rect=*/true);
+        // Wall-clock, not FIXED_DT: the HUD reports how fast frames really are.
+        debug_overlay_.record_frame(ctx_.delta_time() * 1000.0f);
+    }
+
+    /**
+     * @brief The overlay font, loaded on first use: JetBrains Mono from the checkout (even
+     *        digit widths), else the shipped Inter. Never left as uicoopa's default font --
+     *        font_for_path() would otherwise make the first font it loads every unthemed
+     *        game Text's fallback.
+     */
+    coopa::ui::Font* debug_overlay_font_() {
+        if (debug_overlay_font_path_.empty()) {
+            const std::string mono = std::string(PROJ_DIR) + "/uicoopa/assets/fonts/JetBrainsMono-Regular.ttf";
+            if (std::filesystem::exists(mono)) debug_overlay_font_path_ = mono;
+            for (const std::string& root : asset_roots()) {
+                if (!debug_overlay_font_path_.empty()) break;
+                const std::filesystem::path p = std::filesystem::path(root) / "fonts" / "inter_regular.ttf";
+                if (std::filesystem::exists(p)) debug_overlay_font_path_ = p.string();
+            }
+            if (debug_overlay_font_path_.empty()) return nullptr;
+        }
+        coopa::ui::Font* const before = coopa::ui::FontDefaults::font;
+        coopa::ui::Font* font = coopa::ui::UIResourceCache::instance().font_for_path(debug_overlay_font_path_);
+        if (!before && coopa::ui::FontDefaults::font == font) coopa::ui::FontDefaults::font = nullptr;
+        return font;
+    }
+
+    /**
+     * @brief Fills the overlay's full-mode numbers. Runs only in full mode, every
+     *        DebugOverlay::kRefreshFrames frames; the object walk is linear in the scene.
+     */
+    void collect_debug_stats_() {
+        debug::OverlayStats& st = debug_overlay_.stats();
+        st = debug::OverlayStats{};
+        if (const render::FrameProfile* prof = active_profile_()) {
+            if (const render::FrameProfile::Row* row = prof->latest()) st.profile = *row;
+        }
+        st.render_width  = pipeline_->render_width();
+        st.render_height = pipeline_->render_height();
+        const auto& draws = pipeline_->last_frame_stats();
+        st.draws             = draws.camera_draws;
+        st.instances         = draws.camera_instances;
+        st.triangles         = draws.camera_triangles;
+        st.shadow_draws      = draws.shadow_draws;
+        st.shadow_triangles  = draws.shadow_triangles;
+        st.renderers         = draws.renderers;
+        st.renderers_visible = draws.camera_visible;
+        st.pending_assets    = assets_.pending_load_count();
+        for (const auto& heap : ctx_.allocator().heap_budgets()) {
+            st.heaps.push_back(debug::OverlayStats::Heap{heap.usage, heap.budget, heap.device_local});
+        }
+        if (!scene_mgr_.has_scene()) return;
+        coopa::scene::Scene& scene = scene_mgr_.get_active_scene();
+
+        std::function<void(const coopa::scene::SceneObject&)> count = [&](const coopa::scene::SceneObject& o) {
+            ++st.objects;
+            st.components += o.components().size();
+            for (const auto& c : o.children()) count(*c);
+        };
+        for (const auto& root : scene.root_objects()) count(*root);
+        if (auto* ps = dynamic_cast<particles::ParticleSimulationSystem*>(scene.find_system("Particles"))) {
+            st.particles = ps->total_particles();
+        }
+        if (auto* phys = dynamic_cast<coopa::physx::system::PhysicsSystem*>(scene.find_system("Physics"))) {
+            st.has_physics = true;
+            const auto& world = phys->world();
+            world.for_each_body([&](coopa::physx::dynamics::BodyId, const coopa::physx::dynamics::Body& b) {
+                ++st.bodies;
+                if (b.awake && b.type == coopa::physx::dynamics::BodyType::Dynamic) ++st.bodies_awake;
+            });
+            st.contacts   = world.manifolds().size();
+            st.physics_ms = phys->last_step_ms();
+        }
+        if (auto* nav = coopa::physx::system::find_nav_system(scene)) {
+            st.has_nav    = true;
+            st.nav_agents = nav->agent_count();
+            st.nav_ms     = nav->stats().total_ms;
+            st.nav_paths  = nav->stats().paths_planned;
+        }
     }
 
     /**
@@ -1117,12 +1681,14 @@ public:
     struct WeatherRenderBase {
         glm::vec3 zenith{0.0f}, horizon{0.0f}, ground{0.0f};
         float ambient = 1.0f, sky = 1.0f, exposure = 1.0f;
-        int fog_mode = 2;
+        int fog_mode = 1;
         float fog_density = 0.0f, fog_linear_start = 0.0f, fog_linear_end = 0.0f;
         glm::vec3 fog_color{0.0f};
         float fog_sky_blend = 0.0f, fog_max_opacity = 1.0f, fog_height_falloff = 0.0f, fog_sun_amount = 0.0f;
+        float cloud_coverage = 0.0f;
 
         void capture(const render::PixelRenderConfig& c) {
+            cloud_coverage = c.cloud_coverage;
             zenith = c.indirect.sky_zenith; horizon = c.indirect.sky_horizon; ground = c.indirect.sky_ground;
             ambient = c.indirect.ambient_intensity; sky = c.indirect.sky_intensity; exposure = c.exposure;
             fog_mode = c.fog_mode; fog_density = c.fog_density; fog_linear_start = c.fog_linear_start;
@@ -1130,6 +1696,7 @@ public:
             fog_max_opacity = c.fog_max_opacity; fog_height_falloff = c.fog_height_falloff; fog_sun_amount = c.fog_sun_amount;
         }
         void restore(render::PixelRenderConfig& c) const {
+            c.cloud_coverage = cloud_coverage;
             c.indirect.sky_zenith = zenith; c.indirect.sky_horizon = horizon; c.indirect.sky_ground = ground;
             c.indirect.ambient_intensity = ambient; c.indirect.sky_intensity = sky; c.exposure = exposure;
             c.fog_mode = fog_mode; c.fog_density = fog_density; c.fog_linear_start = fog_linear_start;
@@ -1154,7 +1721,7 @@ public:
         c.indirect.sky_ground = a.sky_ground;
         c.indirect.ambient_intensity = a.ambient_intensity;
         c.indirect.sky_intensity = a.sky_intensity;
-        c.fog_mode = 2;   // exponential squared: clear up close, closing in with distance
+        c.fog_mode = 1;   // exponential height fog (the condition's falloff thins it upward)
         c.fog_density = a.fog_density;
         c.fog_color = a.fog_color;
         c.fog_sky_blend = a.fog_sky_blend;
@@ -1162,6 +1729,120 @@ public:
         c.fog_height_falloff = a.fog_height_falloff;
         c.fog_sun_amount = a.fog_sun_amount;
         c.exposure = weather_base_.exposure * a.exposure_scale;   // scaled, not owned: the row stays editable
+        c.cloud_coverage = std::clamp(w->state().cloud_cover, 0.0f, 1.0f);
+    }
+
+    /**
+     * @brief The physical sky (render sky_model: physical): evaluates the atmosphere on the CPU
+     *        (weather/atmosphere_model.h) for this frame's sun and hands the renderer its
+     *        SkyFrameState. Runs after the weather sync and writes over the gradient colours
+     *        (sky_zenith / horizon / ground) with the physical sky's own, so every consumer of the
+     *        gradient agrees with the sky drawn. The sun is the weather's while it runs, else the
+     *        scene's directional light (the sky follows wherever it points).
+     *
+     * The colours are not config: without the weather they are captured once (sky_base_) and put
+     * back when the physical sky stops; with the weather, its own base (weather_base_) holds them.
+     */
+    void sync_sky_render_state_(coopa::scene::Scene& scene, float dt) {
+        using coopa::gfx::engine::components::DirectionalLightComponent;
+        render::PixelRenderConfig& c = pipeline_->render_config_mut();
+        weather::WeatherSystem* w = weather::find(scene);
+        const bool physical = c.sky_model == "physical";
+        if (w) w->set_physical_sky(physical);
+        render::SkyFrameState st;
+        if (!physical) { restore_sky_colours_(); pipeline_->set_sky_state(st); return; }
+        const bool weather_live = w && w->enabled() && w->state().enabled;
+        if (weather_live && sky_applied_) {
+            // The weather started over our colours and captured them as "the config's": hand it
+            // the real ones, and let its base own them from here on.
+            weather_base_.zenith = sky_base_[0]; weather_base_.horizon = sky_base_[1]; weather_base_.ground = sky_base_[2];
+            sky_applied_ = false;
+        } else if (!weather_live && !sky_applied_) {
+            sky_base_ = {c.indirect.sky_zenith, c.indirect.sky_horizon, c.indirect.sky_ground};
+            sky_applied_ = true;
+        }
+
+        // The scene's sun: the same light the renderer picks (the first active one).
+        DirectionalLightComponent* light = nullptr;
+        for (DirectionalLightComponent* l : scene.get_components<DirectionalLightComponent>()) {
+            if (l->owner && l->owner->active()) { light = l; break; }
+        }
+        glm::vec3 sun_to = glm::normalize(glm::vec3(0.4f, 0.3f, 0.85f));
+        if (weather_live) sun_to = w->state().sun_direction;
+        else if (light && glm::length(light->direction) > 1e-6f) sun_to = -glm::normalize(light->direction);
+        const float coverage = std::clamp(c.cloud_coverage, 0.0f, 1.0f);
+        // Sun illuminance the sky is scaled by: the clear-sky sun (the weather's, else the light's own).
+        const float sun_ref = weather_live ? w->settings().sun_intensity : (light ? std::max(light->intensity, 0.0f) : 1.2f);
+
+        sky_atmosphere_.set_media(render::SkyAtmosphereMedia::earth(c.atmosphere_density, c.ozone));
+        glm::vec3 cam_pos(0.0f);
+        if (auto* cam = coopa::gfx::engine::components::CameraComponent::main()) cam_pos = cam->get_world_position();
+        const float view_r = sky_atmosphere_.view_radius(cam_pos.z);
+        const float K = k_sky_gain * sun_ref;
+        const weather::SkyGradient g = sky_atmosphere_.gradient(sun_to, k_moon_ratio, view_r);
+        const glm::vec3 floor_col = glm::vec3(0.55f, 0.75f, 1.3f) * 1e-3f * K * 0.3f;
+        glm::vec3 zenith = g.zenith * K + floor_col, horizon = g.horizon * K + floor_col, ground = g.ground * K + floor_col * 0.5f;
+        if (c.clouds && coverage > 0.0f) {
+            // Cloud cover greys the dome toward the overcast's flat light, a little darker.
+            auto overcast = [&](glm::vec3 col) {
+                const float lum = glm::dot(col, glm::vec3(0.2126f, 0.7152f, 0.0722f));
+                return glm::mix(col, glm::vec3(lum * (1.0f - 0.45f * coverage)), coverage * 0.85f);
+            };
+            const glm::vec3 mean = (zenith + horizon) * 0.5f;
+            zenith = overcast(glm::mix(zenith, mean, coverage * 0.6f));
+            horizon = overcast(glm::mix(horizon, mean, coverage * 0.6f));
+            ground = overcast(ground);
+        }
+        c.indirect.sky_zenith = zenith;
+        c.indirect.sky_horizon = horizon;
+        c.indirect.sky_ground = ground;
+
+        // The light's colour through the air: transmittance toward it, relative to straight up
+        // (so a high sun stays as authored and a low one reddens and fades).
+        const glm::vec3 light_to = light && glm::length(light->direction) > 1e-6f ? -glm::normalize(light->direction) : sun_to;
+        const glm::vec3 t_up = glm::max(sky_atmosphere_.transmittance(view_r, 1.0f), glm::vec3(1e-4f));
+        glm::vec3 tint = sky_atmosphere_.transmittance_toward(view_r, light_to) / t_up;
+        if (c.clouds && !weather_live) tint *= glm::mix(1.0f, 0.3f, coverage * coverage);   // the weather's condition dims its own
+        st.light_tint = glm::min(tint, glm::vec3(1.0f));
+
+        st.active = true;
+        st.clouds = c.clouds;
+        st.media = sky_atmosphere_.media();
+        st.sun_to = sun_to;
+        st.moon_to = -sun_to;
+        st.sky_illuminance = K;
+        st.moon_ratio = k_moon_ratio;
+        st.sun_disc_radiance = c.sun_disc_size > 0.0f ? K * 40.0f : 0.0f;
+        st.moon_disc_radiance = c.moon_disc_size > 0.0f ? K * k_moon_ratio * 60.0f : 0.0f;
+        st.sun_disc_cos = std::cos(glm::radians(std::max(c.sun_disc_size, 0.0f) * 0.5f));
+        st.moon_disc_cos = std::cos(glm::radians(std::max(c.moon_disc_size, 0.0f) * 0.5f));
+        const float dark = std::clamp((-0.02f - sun_to.z) / 0.16f, 0.0f, 1.0f);
+        st.star_visibility = c.sky_stars ? dark * dark * (3.0f - 2.0f * dark) * (c.clouds ? 1.0f - 0.5f * coverage : 1.0f) : 0.0f;
+        st.night_floor = K * 0.3f;
+
+        st.cloud_coverage = coverage;
+        st.cloud_altitude = c.cloud_altitude;
+        st.cloud_thickness = c.cloud_thickness;
+        st.cloud_density = c.cloud_density;
+        glm::vec2 wind_dir(1.0f, 0.0f);
+        if (weather_live && glm::length(glm::vec2(w->state().wind)) > 0.05f) wind_dir = glm::normalize(glm::vec2(w->state().wind));
+        sky_cloud_offset_ += wind_dir * c.cloud_wind_speed * std::max(dt, 0.0f);
+        sky_cloud_offset_ = glm::mod(sky_cloud_offset_, glm::vec2(13000.0f * 53.0f));   // whole periods of both shape-map reads (sky_clouds.frag)
+        st.cloud_offset = sky_cloud_offset_;
+        sky_time_ += std::max(dt, 0.0f);
+        st.time = std::fmod(sky_time_, 3600.0f);
+        // Clouds are lit by the sun until it is well below the horizon, then by the moon.
+        if (sun_to.z > -0.12f) {
+            st.cloud_light_to = sun_to;
+            // A little softer while the sun is low, so a sunset's lit cloud deck does not drive
+            // the exposure meter so hard that the ground (lit at a grazing angle) goes black.
+            const float low = std::clamp(sun_to.z / 0.3f, 0.0f, 1.0f);
+            st.cloud_light_color = glm::vec3(K * (0.6f + 0.4f * low));
+        } else {
+            st.cloud_light_to = -sun_to;
+            st.cloud_light_color = glm::vec3(0.75f, 0.85f, 1.0f) * K * k_moon_ratio * 0.5f;
+        }
+        pipeline_->set_sky_state(st);
     }
 
     /**
@@ -1206,6 +1887,14 @@ public:
             }
         }
         pipeline_->set_surface_state(std::move(st));
+    }
+
+    /** @brief Puts back the gradient colours the physical sky overwrote without the weather. */
+    void restore_sky_colours_() {
+        if (!sky_applied_) return;
+        render::PixelRenderConfig& c = pipeline_->render_config_mut();
+        c.indirect.sky_zenith = sky_base_[0]; c.indirect.sky_horizon = sky_base_[1]; c.indirect.sky_ground = sky_base_[2];
+        sky_applied_ = false;
     }
 
     void restore_weather_atmosphere_() {
@@ -1325,6 +2014,65 @@ public:
     static constexpr int kFillDebounceFrames = 8;
 
     /**
+     * @brief The render config the config's source document alone asks for -- parsed the way
+     *        scene_config() parses a scene's overrides, so the first comparison is like for
+     *        like: render fields set on the AppConfig in code (not in its document) never look
+     *        like a change to rebuild for.
+     */
+    render::PixelRenderConfig source_render_config_() const {
+        AppConfig d = config_;
+        d.render = AppConfig::from_node(config_.source).render;
+        if (source_driven_ && config_adjust_) config_adjust_(d);
+        return make_render_config_(d, options_.project_root);
+    }
+
+    /// Frames a live (editor) change to a construction-fixed render field waits before the
+    /// pipeline is rebuilt for it, so a dragged slider rebuilds once it settles.
+    static constexpr int kLiveRebuildDebounceFrames = 6;
+
+    /**
+     * @brief Queues a pipeline rebuild taking `cfg`'s construction-fixed fields, run by
+     *        run_pending_rebuild_() once `delay` more ticks have passed (a newer request
+     *        replaces it and restarts the wait). Never rebuilt in place here: this can be
+     *        called mid-frame (a script switching scenes, an editor button) and the frame's
+     *        UI already holds the pipeline's textures.
+     */
+    void queue_rebuild_(const render::PixelRenderConfig& from, const render::PixelRenderConfig& to, int delay, bool force = false) {
+        if (!pending_rebuild_) rebuild_from_ = from;   // a newer request keeps the first baseline
+        pending_rebuild_ = to;
+        rebuild_wait_ = delay;
+        rebuild_forced_ = rebuild_forced_ || force;
+    }
+
+    /**
+     * @brief Runs a queued rebuild once its wait is over. The new pipeline takes the live
+     *        config (so runtime tweaks and the carried shader/debug state survive) with the
+     *        construction-fixed fields the request changed on top -- all of them when forced
+     *        (restart_renderer()). A request that ended up changing nothing (switched back
+     *        within the debounce) doesn't rebuild.
+     */
+    void run_pending_rebuild_() {
+        if (!pending_rebuild_) return;
+        if (rebuild_wait_-- > 0) return;
+        render::PixelRenderConfig cfg = pipeline_->render_config();
+        const float fill_aspect = cfg.fill_aspect;
+        bool changed = rebuild_forced_;
+#define TOY_TAKE_QUEUED(field)                                                              \
+        if (rebuild_forced_ || rebuild_from_.field != pending_rebuild_->field) {            \
+            changed = changed || cfg.field != pending_rebuild_->field;                       \
+            cfg.field = pending_rebuild_->field;                                             \
+        }
+        TOY_STARTUP_FIXED_FIELDS(TOY_TAKE_QUEUED)
+#undef TOY_TAKE_QUEUED
+        cfg.fill_aspect = fill_aspect;   // the engine's, from the display region
+        pending_rebuild_.reset();
+        rebuild_forced_ = false;
+        if (!changed) return;
+        rebuild_pipeline(cfg);
+        ++pipeline_rebuilds_;
+    }
+
+    /**
      * @brief Rebuilds the render pipeline with `cfg` (e.g. a new render size), carrying over
      *        everything the Engine configured on the old one. Temporal history restarts.
      */
@@ -1336,11 +2084,31 @@ public:
                                                                   ctx_.render_pass(), ctx_.command_pool(), cfg);
         pipeline_->set_job_engine(&jobs_);
         pipeline_->set_parallel_threshold(config_.jobs.parallel_threshold);
-        if (profile_) pipeline_->set_profiler(profile_.get());
+        if (render::FrameProfile* prof = active_profile_()) pipeline_->set_profiler(prof);
         pipeline_->set_overlay_scene(overlay_scene_);
+        sync_overlay_layers_();
         pipeline_->set_display_region(region);
         if (scene_mgr_.has_scene()) pipeline_->validate_material_shaders(scene_mgr_.get_active_scene());
     }
+
+    /**
+     * @brief Rebuilds the renderer in place from the active scene's effective config
+     *        (config.yaml plus its overrides) -- every construction-fixed setting takes effect
+     *        without closing the window or touching the device, scenes or assets. Runs at the
+     *        top of the next tick; safe to call from UI code mid-frame.
+     */
+    void restart_renderer() {
+        const AppConfig eff = scene_mgr_.has_scene() ? scene_config(scene_mgr_.get_active_scene()) : config_;
+        render::PixelRenderConfig to = make_render_config_(eff, options_.project_root);
+        queue_rebuild_(derived_render_ ? *derived_render_ : to, to, 0, /*force=*/true);
+        derived_render_ = to;
+    }
+
+    /// True while a renderer rebuild is queued (see restart_renderer(), apply_scene_settings_()).
+    bool renderer_rebuild_pending() const { return pending_rebuild_.has_value(); }
+
+    /// How many queued renderer rebuilds have run (tests and diagnostics).
+    int pipeline_rebuild_count() const { return pipeline_rebuilds_; }
 
     /**
      * @brief Delta time for this tick's asset/scene updates: FIXED_DT override if set, else
@@ -1428,6 +2196,10 @@ private:
     void bind_default_input_() {
         using coopa::input::Key;
         input_.bind("quit", Key::Escape);
+        // Cycles the debug stats overlay off -> fps -> full (see update_debug_overlay_()).
+        input_.bind("debug_overlay", Key::F3);
+        input_.bind("quick_save", Key::F5);   // save.quick_slot (toyengine/save/)
+        input_.bind("quick_load", Key::F9);
 
         input_.bind_axis("fly_x", Key::D, Key::A); // strafe: +right/-left
         input_.bind_axis("fly_y", Key::W, Key::S); // forward/back
@@ -1443,6 +2215,14 @@ private:
         // Tab/Shift rather than the more usual Space/Shift because Space is left free for a jump
         // action, which is the binding a character controller will want first.
         input_.bind_axis("move_z", Key::Tab, Key::LeftShift); // world +Z (up) / -Z (down)
+
+        // CharacterController: WASD as one camera-relative vector, Space to jump, LeftShift to
+        // sprint. `sprint` is its own action so move_z's binding above is untouched.
+        input_.bind_vector("move", Key::D, Key::A, Key::W, Key::S);
+        input_.bind("jump", Key::Space);
+        input_.bind("sprint", Key::LeftShift);
+        // Ragdoll (input_toggle): R goes limp / recovers.
+        input_.bind("ragdoll", Key::R);
     }
 
     /**
@@ -1532,6 +2312,48 @@ private:
     }
 
     /**
+     * @brief Pushes this frame's move/jump/sprint input into every CharacterController in the
+     *        active scene, before Scene::update() consumes it.
+     *
+     * The move vector is made CAMERA-relative by handing the main camera's yaw over as the
+     * controller's move basis: W walks the way the camera looks (flattened onto the ground).
+     * `jump` is OR-ed in, not overwritten -- the controller consumes (clears) a press in its
+     * next advance(), so a press is never lost to a frame that didn't advance. Same push-model and
+     * NO_INPUT=1 contract as the other drivers.
+     */
+    void drive_character_controllers_(coopa::scene::Scene& scene) {
+        std::vector<scene::CharacterController*> characters = scene.get_components<scene::CharacterController>();
+        if (characters.empty()) return;
+
+        float yaw = 0.0f;
+        if (auto* cam = coopa::gfx::engine::components::CameraComponent::main()) {
+            const glm::mat4 world = glm::inverse(cam->get_view_matrix());
+            glm::vec3 fwd = -glm::vec3(world[2]);            // cameras look down local -Z
+            if (std::abs(fwd.z) > 0.99f) fwd = glm::vec3(world[1]); // looking straight down: screen-up
+            if (glm::length(glm::vec2(fwd.x, fwd.y)) > 1e-4f) yaw = glm::degrees(std::atan2(-fwd.x, fwd.y));
+        }
+        const bool blocked = input_blocked_();
+        const glm::vec2 move = blocked ? glm::vec2(0.0f) : input_.vector("move", ctx_.input());
+        const bool jump = !blocked && input_.is_pressed("jump", ctx_.input());
+        const bool sprint = !blocked && input_.is_down("sprint", ctx_.input());
+        for (scene::CharacterController* cc : characters) {
+            cc->move_input = move;
+            cc->move_basis_yaw_deg = yaw;
+            cc->jump = cc->jump || jump;
+            cc->sprint = sprint;
+        }
+    }
+
+    /** @brief Pushes the "ragdoll" press (R) into every Ragdoll with `input_toggle` -- same
+     *         push model and NO_INPUT=1 contract as the drivers above. */
+    void drive_ragdolls_(coopa::scene::Scene& scene) {
+        if (input_blocked_() || !input_.is_pressed("ragdoll", ctx_.input())) return;
+        for (scene::Ragdoll* r : scene.get_components<scene::Ragdoll>()) {
+            if (r->input_toggle) r->toggle();
+        }
+    }
+
+    /**
      * @brief Refreshes and uploads every CPU-simulated mesh in the scene (today: cloth).
      *
      * Called between Scene::late_update() and PixelRenderPipeline::render(), which is the only
@@ -1549,10 +2371,13 @@ private:
         for (scene::ClothRenderer* cr : scene.get_components<scene::ClothRenderer>()) {
             cr->upload(ctx_.current_frame());
         }
-        // Same per-frame-in-flight re-upload contract as ClothRenderer above, driving a
-        // CPU skin instead of a cloth solver -- see skinned_mesh_renderer.h's file doc.
+        // Same per-frame-in-flight contract as ClothRenderer above. With GPU skinning each
+        // upload() only builds its palette and queues a dispatch that the pipeline records at
+        // the top of this frame's command buffer; otherwise it CPU-skins and uploads.
+        render::passes::SkinningPass* gpu_skin = pipeline_ ? pipeline_->skinning_pass() : nullptr;
+        if (gpu_skin) gpu_skin->begin_frame();
         for (scene::SkinnedMeshRenderer* smr : scene.get_components<scene::SkinnedMeshRenderer>()) {
-            smr->upload(ctx_.current_frame());
+            smr->upload(ctx_.current_frame(), gpu_skin);
         }
     }
 
@@ -2070,7 +2895,17 @@ private:
     /// Each managed scene's `scene.settings` overrides (null: none) -- see scene_config().
     std::unordered_map<const coopa::scene::Scene*, fkyaml::node> scene_settings_;
     bool overrides_applied_ = false;   ///< The live render config carries some scene's overrides.
-    bool weather_applied_ = false;     ///< The live render config carries the weather's atmosphere.
+    bool weather_applied_ = false;     ///< The live render config carries the weather's (or the physical sky's) atmosphere.
+    weather::AtmosphereModel sky_atmosphere_;   ///< The physical sky on the CPU (sync_sky_render_state_()).
+    bool sky_applied_ = false;                  ///< sky_base_ holds the gradient colours the physical sky overwrote.
+    std::array<glm::vec3, 3> sky_base_{};       ///< The config's zenith / horizon / ground under the physical sky.
+    glm::vec2 sky_cloud_offset_{0.0f};          ///< Accumulated cloud drift, metres.
+    float sky_time_ = 0.0f;                     ///< Seconds the physical sky has run.
+    /// Sky illuminance per unit of sun light intensity. Brighter than a real sky (about 1) to keep
+    /// the engine's ambient-rich look; the sun disc, stars and the CPU gradient all scale with it.
+    static constexpr float k_sky_gain = 3.0f;
+    /// Moon illuminance / sun illuminance for the moonlit sky (artistic: real is ~1/400000).
+    static constexpr float k_moon_ratio = 0.025f;
     WeatherRenderBase weather_base_;   ///< The config's own values under it (see sync_weather_render_state_()).
     bool source_driven_ = false;       ///< set_config_source() was called (the editor).
     std::function<void(AppConfig&)> config_adjust_;   ///< set_config_source()'s adjust hook.
@@ -2089,6 +2924,14 @@ private:
     std::unique_ptr<render::PixelRenderPipeline> pipeline_;
     render::RenderExtent fill_pending_{};      ///< fill mode: the extent waiting out the debounce
     int                  fill_stable_frames_ = 0;
+    std::optional<render::PixelRenderConfig> pending_rebuild_;   ///< see queue_rebuild_()
+    render::PixelRenderConfig rebuild_from_;    ///< the queued rebuild's baseline: only fields changed from it apply
+    /// The render config the config document (+ scene overrides) last asked for; the baseline a
+    /// change is measured against (unset until the first apply -- see source_render_config_()).
+    std::optional<render::PixelRenderConfig> derived_render_;
+    int                  rebuild_wait_ = 0;
+    bool                 rebuild_forced_ = false;   ///< restart_renderer(): rebuild even if nothing differs
+    int                  pipeline_rebuilds_ = 0;
 
     coopa::asset::AssetManager assets_;
     /// Declared before scene_mgr_ so it outlives every scene (an AudioSource stops its voice
@@ -2110,13 +2953,29 @@ private:
     /// Profiling mode's sink (PROFILE env var); null when off. Declared last so it outlives
     /// nothing that records into it -- pipeline_'s GpuProfiler is reset in the destructor.
     std::unique_ptr<render::FrameProfile> profile_;
+    /// The debug overlay's full mode times frames into this live (CSV-less) profile when
+    /// PROFILE is not already on; null otherwise. See sync_live_profile_().
+    std::unique_ptr<render::FrameProfile> live_profile_;
     uint64_t profile_frame_ = 0;
+
+    std::vector<OverlayLayer> overlay_layers_;   ///< See add_overlay_layer(); in draw order.
+    /// See debug_overlay(). Its scene is one of overlay_layers_ while it is visible.
+    debug::DebugOverlay debug_overlay_;
+    std::string         debug_overlay_font_path_;   ///< Resolved once, on first show.
 
     bool                  edit_mode_     = false;
     std::optional<ScreenUiPlacement> scene_ui_placement_;   ///< See set_scene_ui_placement().
     FrameHooks            hooks_;
     std::vector<std::function<void(coopa::input::Input&)>> input_queue_;
     coopa::scene::Scene*  overlay_scene_ = nullptr;
+    /// The current (or last) load_scene_async() request; see update_scene_load_().
+    std::shared_ptr<detail::SceneLoadState> scene_load_;
+    /// The async load's fade / loading screen; an overlay layer while a transition shows.
+    SceneTransitionLayer  transition_;
+    /// Every managed scene's file (see scene_path()); kept beside scene_settings_.
+    std::unordered_map<const coopa::scene::Scene*, std::string> scene_paths_;
+    /// Save slots (see saves()); SaveSystem::active() while this engine lives.
+    save::SaveSystem saves_;
     /// This frame's particle batches (see sync_particle_render_state_()); kept to reuse capacity.
     render::ParticleFrameState particle_frame_;
 };

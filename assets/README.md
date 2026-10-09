@@ -33,10 +33,10 @@ material and a mesh may both be `brick`; two materials may not).
 | --- | --- |
 | `config.yaml` | window / render / scene settings, a comment on every key |
 | `scenes/<tags>/<name>/scene.yaml` | one folder per scene; scene-specific meshes in its own `meshes/`. Tags: `tests/<feature>`, `demos` |
-| `meshes/` | shared meshes (plus `<mesh>.lod.yaml` LOD sidecars, kept beside their mesh). Tags: `primitives`, `props`, `terrain/<style>`, `water`, `animation` |
+| `meshes/` | shared meshes (plus `<mesh>.lod.yaml` LOD sidecars, kept beside their mesh). Tags: `primitives`, `props`, `terrain/<style>`, `water`, `animation`, `characters` |
 | `materials/` | shared PBR materials -- see below. Tags: `basic`, `metal`, `transparent`, `natural`, `building`, `prototype` |
 | `textures/` | shared material maps. Tags: `brick`, `terrain`, `prototype`, `masks` |
-| `objects/` | object assets (prefabs). Tags: `animation` (test rigs), `terrain` (tile sets), `props`, `weather` (the effects the weather spawns: `weather_rain`, `weather_snow`, `weather_ground_mist`, `weather_dust`) |
+| `objects/` | object assets (prefabs). Tags: `animation` (test rigs), `characters` (`mannequin`: the humanoid rig with idle/walk/run/jump; `mannequin_ragdoll`: the same with a Ragdoll), `terrain` (tile sets), `props`, `weather` (the effects the weather spawns: `weather_rain`, `weather_snow`, `weather_ground_mist`, `weather_dust`) |
 | `animations/<rig>/` | clips, one folder per rig |
 | `physics_materials/` | friction / restitution sets for colliders |
 | `shaders/` | GLSL for every shader the engine loads (its own passes, the gfxcoopa passes it runs, surface shaders named by a material's `shader:`) and their `gfx/` headers. gfxcoopa supplies only the shared lighting headers (`gfx/brdf.glsl`, `ibl.glsl`, `sky.glsl`, `spot_light.glsl`) and SMAA's shaders. Search order: project, then here, then gfxcoopa, then uicoopa; no name exists in two places |
@@ -57,10 +57,33 @@ material and a mesh may both be `brick`; two materials may not).
 | `barrel` | capsule, radius 0.35, height 1.3, along Z | centre |
 | `water_grid` | 2x2 plane subdivided 12x12, for wave displacement | centre |
 | `tentacle` | skinned tube, vertex groups `seg_0..seg_3` | base |
+| `mannequin_*` | the mannequin's capsule body parts (tag `characters`) | centre |
 | `tile_side_flat`, `tile_side_bevel` | terrain tile sides (see toyengine/world) | -- |
 
 Generators in `tools/` rebuild the generated ones (`gen_water_test_meshes.py`,
-`gen_water_grid_mesh.py`, `gen_animation_test_scene.py`, `gen_tile_side_meshes.py`).
+`gen_water_grid_mesh.py`, `gen_animation_test_scene.py`, `gen_tile_side_meshes.py`, `gen_mannequin.py`, `gen_ragdoll_test_scene.py`).
+
+## Importing from Blender
+
+`tools/blender_to_toy.py` converts `.blend` files into an assets folder (Blender must be installed;
+the script runs it in background mode):
+
+```
+python3 tools/blender_to_toy.py --out assets level.blend props.blend
+```
+
+Everything lands under the `blender` tag: `meshes/blender/`, `materials/blender/`,
+`textures/blender/`, `objects/blender/` (one prefab per instanced collection) and
+`scenes/blender/<blend name>/scene.yaml`. Converted files overwrite any file at the same path;
+nothing else in `--out` is touched. Assets keep their Blender names, so when two `.blend` files
+both have e.g. a mesh `Cube`, the file listed last wins.
+
+It converts the object hierarchy, meshes (modifiers applied unless `--no-modifiers`; n-gons
+triangulated), Principled BSDF materials (base colour / roughness / metallic / normal / alpha
+image chains, emission, transmission), suns, point/spot/area lights and cameras. Armatures,
+skinning and animation are not converted yet. Blender watts have no exact equivalent in the
+engine's unitless light intensity: tune with `--light-scale` (default 0.5) and `--sun-scale`
+(default 1.0). Engine textures clamp rather than tile, so tiled UVs and Mapping nodes warn.
 
 ## Materials
 

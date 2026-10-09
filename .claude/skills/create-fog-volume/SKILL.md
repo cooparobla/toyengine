@@ -74,17 +74,34 @@ scene:
   settings:
     render:
       volumetrics_max_distance: 70.0   # march as deep as the scene
-      fog_mode: 2                      # 0 linear, 1 exp, 2 exp2
-      fog_density: 0.018
+      fog_mode: 1                      # 1 exponential height fog (0 = legacy linear ramp)
+      fog_density: 0.015               # extinction per metre at/below the base
       fog_color: [0.62, 0.66, 0.74]
-      fog_height_base: 0.0
-      fog_height_falloff: 6.0
-      fog_sun_amount: 0.5
-      fog_max_distance: 90.0
+      fog_height_base: 0.0             # full density at/below this Z (constant below it)
+      fog_height_falloff: 6.0          # metres over which it thins by e above the base; <= 0 = uniform
+      fog_sun_amount: 0.5              # directional sun in-scatter (HG lobe)
+      fog_start_distance: 0.0          # no fog nearer than this
+      fog_cutoff_distance: 0.0         # stop accumulating past this distance (0 = none)
 ```
+
+The global fog is Unreal-style exponential height fog: transmittance is exp(-optical depth), with
+the depth integrated in closed form along each view ray. It is applied per medium -- the opaque
+scene and the sky by the fog pass, and every translucent surface (water, glass, particles, SDF
+glass) by its own shader at its own distance. Sky pixels integrate to `fog_sky_distance`
+(1000 m): with a height falloff the horizon fogs and the zenith stays clear, and with uniform fog
+(`fog_height_falloff: 0`) the whole sky turns fog-coloured, so keep a falloff unless that is the
+look you want. With the camera under water, only the part of a ray above the surface is fogged.
+`fog_mode: 2` (Exp2) and `fog_max_distance` are retired: they load as exponential and are ignored, respectively.
 
 Only takes effect while `fog_enabled: true` in config.yaml (the default) -- tell the user if the scene relies
 on it.
+
+`fog_sky_blend` blends the fog toward the sky's gradient colours. Under the physical sky
+(`sky_model: physical`) those colours are computed from the atmosphere every frame, so fog picks
+up sunset and night tints by itself; the physical sky's haze is its own key,
+`atmosphere_density` (1 clear .. 4+ hazy), and a cloud layer is `clouds: true` with
+`cloud_coverage` / `cloud_altitude` / `cloud_thickness` / `cloud_density` / `cloud_wind_speed`
+(the weather drives `cloud_coverage` while it is on).
 
 ## Verify
 

@@ -274,6 +274,15 @@ public:
         return v * norm_;
     }
 
+    /** @brief The waves as the GPU path evaluates them: k_omega[i] = (k, omega), c_phase[i] =
+     *         ((k x a) * norm, phase) -- sample() is sum c * cos(k.p + omega t + phase). */
+    void export_waves(glm::vec4* k_omega, glm::vec4* c_phase) const {
+        for (int i = 0; i < kWaves; ++i) {
+            k_omega[i] = glm::vec4(waves_[i].k, waves_[i].omega);
+            c_phase[i] = glm::vec4(glm::cross(waves_[i].k, waves_[i].a) * norm_, waves_[i].phase);
+        }
+    }
+
 private:
     struct Wave {
         glm::vec3 k{0.0f};

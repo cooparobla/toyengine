@@ -174,6 +174,12 @@
                        "Deep Snow (m)"),
             with_label(with_tip(f_bool("snow_auto_deformers", false), "Every Rigidbody leaves tracks in deep snow, not only objects with a "
                                                                       "SnowDeformer"), "Auto Snow Tracks"),
+            with_label(with_tip(f_float("snow_trench_recover_time", 6.0f, 0.1f, 0.0f, 100000.0f), "Seconds a full-depth track takes to fill back "
+                                                                                                   "in. 0 = tracks only fill while it snows"), "Tracks Refill (s)"),
+            with_label(with_tip(f_enum("snow_patch_style", {"soft", "hard"}, true), "soft: snow gathers with a soft, noisy edge. hard: round, "
+                                                                                  "crisp-edged patches (a stylized look) that grow and merge"),
+                       "Snow Patches"),
+            with_label(with_tip(f_float("snow_patch_size", 1.5f, 0.05f, 0.1f, 100.0f), "Hard patches: typical patch diameter (m)"), "Patch Size (m)"),
         };
     }
     static const std::vector<FieldDesc>& weather_condition_fields_(int part) {

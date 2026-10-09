@@ -12,12 +12,6 @@
 // centres with a nearest sampler, so reading G2 at those same UVs here reproduces the
 // exact distance each sample was marched to.
 //
-// It also applies the GLOBAL fog term whenever the caller sets the merged flag --
-// because with both effects on, fog.frag's only job would be to write a
-// full-resolution HDR image this pass immediately reads back. The order matches what
-// the two separate passes produce: fog over the scene first, then the local medium
-// over that. See PixelRenderPipeline::fog_merged_into_volumetrics_().
-//
 // Vertex stage is the shared fullscreen triangle (fullscreen.vert). Writes into its
 // own HDR target -- pipeline::RenderPass hardcodes LOAD_OP_CLEAR, so this cannot
 // composite in place onto the image it reads from.

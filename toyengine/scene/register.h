@@ -25,11 +25,16 @@
 #include <fkYAML/node.hpp>
 
 #include <toyengine/scene/camera_controller.h>
+#include <toyengine/scene/character_anim_driver.h>
+#include <toyengine/scene/character_controller.h>
 #include <toyengine/scene/cloth_renderer.h>
+#include <toyengine/scene/foot_ik.h>
 #include <toyengine/scene/free_mover.h>
 #include <toyengine/scene/health_driver.h>
 #include <toyengine/scene/kinematic_controller.h>
 #include <toyengine/scene/kinematic_mover.h>
+#include <toyengine/scene/ragdoll.h>
+#include <toyengine/scene/scene_link.h>
 #include <toyengine/scene/skinned_mesh_renderer.h>
 
 #include <coopa/asset/asset_manager.h>
@@ -64,7 +69,8 @@ inline glm::vec3 parse_rgb(const fkyaml::node& n, const glm::vec3& fallback) {
 }
 
 /**
- * @brief Registers the "CameraController", "KinematicMover" and "HealthDriver" parsers.
+ * @brief Registers the "CameraController", "CharacterController", "SceneLink", "CharacterAnimDriver", "FootIK",
+ *        "KinematicMover", "HealthDriver", "FreeMover", "KinematicController" and "Buoyancy" parsers.
  *
  * Call once at startup, before the first SceneLoader::load() that uses them.
  */
@@ -78,7 +84,9 @@ inline void register_scene_components() {
 
             if (node.contains("mode")) {
                 std::string m = node.at("mode").get_value<std::string>();
-                cc->mode = (m == "fly" || m == "Fly") ? CameraControlMode::Fly : CameraControlMode::Orbit;
+                if (m == "fly" || m == "Fly") cc->mode = CameraControlMode::Fly;
+                else if (m == "first_person" || m == "FirstPerson") cc->mode = CameraControlMode::FirstPerson;
+                else cc->mode = CameraControlMode::Orbit;
             }
 
             if (node.contains("tracker")) {
@@ -125,6 +133,106 @@ inline void register_scene_components() {
             if (node.contains("look_speed_deg_per_sec")) {
                 cc->look_speed_deg_per_sec = node.at("look_speed_deg_per_sec").get_value<float>();
             }
+            if (node.contains("collide")) cc->collide = node.at("collide").get_value<bool>();
+            if (node.contains("collision_radius")) cc->collision_radius = node.at("collision_radius").get_value<float>();
+            if (node.contains("collision_in_speed")) cc->collision_in_speed = node.at("collision_in_speed").get_value<float>();
+            if (node.contains("collision_out_speed")) cc->collision_out_speed = node.at("collision_out_speed").get_value<float>();
+            if (node.contains("eye_height")) cc->eye_height = node.at("eye_height").get_value<float>();
+            if (node.contains("first_person_pitch_limit"))
+                cc->first_person_pitch_limit = node.at("first_person_pitch_limit").get_value<float>();
+        });
+
+    // A walking capsule character (toyengine/scene/character_controller.h). Input is pushed in by
+    // Engine::drive_character_controllers_(); it adds its own kinematic Rigidbody + CapsuleCollider.
+    SceneLoader::register_component_parser("CharacterController",
+        [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
+            auto* cc = obj.add_component<CharacterController>();
+            auto f = [&](const char* key, float& out) {
+                if (node.contains(key)) out = node.at(key).get_value<float>();
+            };
+            auto b = [&](const char* key, bool& out) {
+                if (node.contains(key)) out = node.at(key).get_value<bool>();
+            };
+            f("radius", cc->radius);
+            f("height", cc->height);
+            f("step_height", cc->step_height);
+            f("slope_limit", cc->slope_limit);
+            f("skin", cc->skin);
+            f("snap_distance", cc->snap_distance);
+            f("move_speed", cc->move_speed);
+            f("sprint_multiplier", cc->sprint_multiplier);
+            f("acceleration", cc->acceleration);
+            f("air_control", cc->air_control);
+            f("gravity_scale", cc->gravity_scale);
+            f("jump_height", cc->jump_height);
+            f("coyote_time", cc->coyote_time);
+            f("jump_buffer", cc->jump_buffer);
+            b("face_movement", cc->face_movement);
+            f("turn_speed", cc->turn_speed);
+            b("push_dynamic_bodies", cc->push_dynamic_bodies);
+            f("push_strength", cc->push_strength);
+            b("use_root_motion", cc->use_root_motion);
+        });
+
+    // A trigger box that loads another scene when the player walks in (toyengine/scene/scene_link.h).
+    // A relative target_scene resolves against the declaring file first (a sibling scene), then
+    // the asset roots; anything still unresolved goes to the engine's scene lookup by name.
+    SceneLoader::register_component_parser("SceneLink",
+        [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext& ctx) {
+            auto* link = obj.add_component<SceneLink>();
+            auto str = [&](const char* key, std::string& out) {
+                if (node.contains(key)) out = node.at(key).get_value<std::string>();
+            };
+            str("target_scene", link->target_scene);
+            if (!link->target_scene.empty()) link->target_scene = ctx.resolve(link->target_scene);
+            str("transition", link->transition);
+            str("loading_screen", link->loading_screen);
+            str("spawn_point", link->spawn_point);
+            if (node.contains("color")) link->color = parse_rgb(node.at("color"), link->color);
+            if (node.contains("fade_time")) link->fade_time = node.at("fade_time").get_value<float>();
+            if (node.contains("min_display_time")) link->min_display_time = node.at("min_display_time").get_value<float>();
+            if (node.contains("size")) link->size = parse_vec3(node.at("size"), link->size);
+        });
+
+    // Demo: crossfades the Animator between idle/walk/run/jump from the CharacterController.
+    SceneLoader::register_component_parser("CharacterAnimDriver",
+        [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
+            auto* d = obj.add_component<CharacterAnimDriver>();
+            if (node.contains("idle_state")) d->idle_state = node.at("idle_state").get_value<std::string>();
+            if (node.contains("walk_state")) d->walk_state = node.at("walk_state").get_value<std::string>();
+            if (node.contains("run_state")) d->run_state = node.at("run_state").get_value<std::string>();
+            if (node.contains("jump_state")) d->jump_state = node.at("jump_state").get_value<std::string>();
+            if (node.contains("walk_speed")) d->walk_speed = node.at("walk_speed").get_value<float>();
+            if (node.contains("run_speed")) d->run_speed = node.at("run_speed").get_value<float>();
+            if (node.contains("crossfade")) d->crossfade = node.at("crossfade").get_value<float>();
+            if (node.contains("air_delay")) d->air_delay = node.at("air_delay").get_value<float>();
+        });
+
+    // Ground-adapting legs (toyengine/scene/foot_ik.h), solved by coopa::anim::IkSystem.
+    SceneLoader::register_component_parser("FootIK",
+        [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
+            auto* ik = obj.add_component<FootIK>();
+            auto f = [&](const char* key, float& out) {
+                if (node.contains(key)) out = node.at(key).get_value<float>();
+            };
+            auto leg = [&](const char* key, FootIK::Leg& out) {
+                if (!node.contains(key) || !node.at(key).is_sequence()) return;
+                const auto& seq = node.at(key);
+                if (seq.size() > 0) out.thigh = seq[0].get_value<std::string>();
+                if (seq.size() > 1) out.shin = seq[1].get_value<std::string>();
+                if (seq.size() > 2) out.foot = seq[2].get_value<std::string>();
+            };
+            if (node.contains("pelvis")) ik->pelvis = node.at("pelvis").get_value<std::string>();
+            leg("left", ik->left);
+            leg("right", ik->right);
+            f("ray_up", ik->ray_up);
+            f("ray_down", ik->ray_down);
+            f("max_pelvis_drop", ik->max_pelvis_drop);
+            if (node.contains("align_feet")) ik->align_feet = node.at("align_feet").get_value<bool>();
+            f("max_foot_angle", ik->max_foot_angle);
+            f("blend_speed", ik->blend_speed);
+            f("weight", ik->weight);
+            if (node.contains("layer_mask")) ik->layer_mask = static_cast<uint32_t>(node.at("layer_mask").get_value<int64_t>());
         });
 
     SceneLoader::register_component_parser("KinematicMover",
@@ -199,6 +307,72 @@ inline void register_scene_components() {
                     if (p.contains("radius")) d.radius = p.at("radius").get_value<float>();
                     b->pontoons.push_back(d);
                 }
+            }
+        });
+
+    // Jointed physics bones on a rig root (toyengine/scene/ragdoll.h). Each `bones:` entry is flat
+    // (so the editor's item list can show it): {bone, shape: capsule|box|sphere, radius, height,
+    // direction: x|y|z, size, center, mass, joint: cone_twist|hinge|ball, anchor, axis, swing,
+    // twist_min, twist_max, limit_min, limit_max} -- angles in degrees.
+    SceneLoader::register_component_parser("Ragdoll",
+        [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
+            auto* r = obj.add_component<Ragdoll>();
+            auto f = [&](const fkyaml::node& n, const char* key, float& out) {
+                if (n.contains(key)) out = n.at(key).get_value<float>();
+            };
+            auto b = [&](const char* key, bool& out) {
+                if (node.contains(key)) out = node.at(key).get_value<bool>();
+            };
+            auto axis_index = [](const std::string& s) {
+                return (s == "x" || s == "X") ? 0 : (s == "y" || s == "Y") ? 1 : 2;
+            };
+            if (node.contains("mode")) r->start_ragdoll = node.at("mode").get_value<std::string>() == "ragdoll";
+            b("auto_generate", r->auto_generate);
+            b("collide_connected", r->collide_connected);
+            b("link_character", r->link_character);
+            b("reposition_root", r->reposition_root);
+            b("input_toggle", r->input_toggle);
+            f(node, "mass", r->mass);
+            f(node, "drag", r->drag);
+            f(node, "angular_drag", r->angular_drag);
+            f(node, "blend_time", r->blend_time);
+            f(node, "rest_speed", r->rest_speed);
+            f(node, "rest_spin", r->rest_spin);
+            f(node, "rest_time", r->rest_time);
+            if (node.contains("layer")) r->layer = static_cast<uint32_t>(node.at("layer").get_value<int64_t>());
+            if (node.contains("recover_state")) r->recover_state = node.at("recover_state").get_value<std::string>();
+            if (node.contains("start_impulse")) r->start_impulse = parse_vec3(node.at("start_impulse"), r->start_impulse);
+            if (node.contains("toggle_impulse")) r->toggle_impulse = parse_vec3(node.at("toggle_impulse"), r->toggle_impulse);
+            if (!node.contains("bones") || !node.at("bones").is_sequence()) return;
+            for (const auto& bn : node.at("bones")) {
+                RagdollBone bone;
+                if (bn.contains("bone")) bone.bone = bn.at("bone").get_value<std::string>();
+                if (bn.contains("shape")) {
+                    const std::string shape = bn.at("shape").get_value<std::string>();
+                    bone.shape = shape == "box" ? RagdollBone::Shape::Box
+                               : shape == "sphere" ? RagdollBone::Shape::Sphere
+                                                   : RagdollBone::Shape::Capsule;
+                }
+                f(bn, "radius", bone.radius);
+                f(bn, "height", bone.height);
+                f(bn, "mass", bone.mass);
+                if (bn.contains("direction")) bone.direction = axis_index(bn.at("direction").get_value<std::string>());
+                if (bn.contains("size")) bone.size = parse_vec3(bn.at("size"), bone.size);
+                if (bn.contains("center")) bone.center = parse_vec3(bn.at("center"), bone.center);
+                if (bn.contains("joint")) {
+                    const std::string type = bn.at("joint").get_value<std::string>();
+                    bone.joint = type == "hinge" ? RagdollBone::Joint::Hinge
+                               : type == "ball" ? RagdollBone::Joint::Ball
+                                                : RagdollBone::Joint::ConeTwist;
+                }
+                if (bn.contains("anchor")) bone.anchor = parse_vec3(bn.at("anchor"), bone.anchor);
+                if (bn.contains("axis")) bone.axis = parse_vec3(bn.at("axis"), bone.axis);
+                f(bn, "swing", bone.swing_deg);
+                f(bn, "twist_min", bone.twist_min_deg);
+                f(bn, "twist_max", bone.twist_max_deg);
+                f(bn, "limit_min", bone.hinge_min_deg);
+                f(bn, "limit_max", bone.hinge_max_deg);
+                r->bones.push_back(bone);
             }
         });
 }

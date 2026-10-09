@@ -102,6 +102,7 @@ layout(set = 6, binding = 0) uniform ForwardGlobalsBlock {
 #include "indirect_hooks.glsl"
 #include "pixel_forward_shading.glsl"
 #include "refraction.glsl"
+#include <gfx/fog.glsl>
 
 // Push constants: [0, 32) is the per-object material block, byte-identical to
 // GBufferPipeline::PushConstants (model/normal_matrix moved to the per-instance vertex
@@ -246,6 +247,21 @@ void main() {
     rp.blur            = forward_globals.refract1.x;
     rp.density         = forward_globals.refract1.y;
     rp.fresnel_enabled = forward_globals.refract1.z != 0.0;
+
+    // Global fog at THIS surface's distance (gfx/fog.glsl). Only the surface's own radiance is
+    // fogged: the opaque scene behind it -- what the alpha blend shows through, and what
+    // refraction samples -- was already fogged over its full distance by FogPass. Fogging
+    // `shaded` before the composite covers both: gfx_refraction_apply() mixes it with the
+    // transmitted background by alpha, exactly as the fixed-function blend does without
+    // refraction. With the camera under water the in-water part of the ray is skipped (that is
+    // UnderwaterPass's), so the surface seen from below stays unfogged.
+    {
+        float dist = length(frag_world_pos - camera.camera_pos);
+        vec4  fog  = gfx_fog_eval(camera.camera_pos, (frag_world_pos - camera.camera_pos) / max(dist, 1e-6),
+                                  dist, false, lights.fog,
+                                  lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb);
+        shaded.rgb = gfx_fog_composite(shaded.rgb, fog);
+    }
 
     out_color = gfx_refraction_apply(shaded, frag_world_pos, N, V, mat.roughness, F0,
                                      camera.view, camera.proj, inverse(camera.proj), rmat, rp,

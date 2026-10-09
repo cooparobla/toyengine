@@ -1,0 +1,59 @@
+#version 450
+
+// GPU particles: bitonic sort of the (key, index) pairs, ascending, padded to a power of two
+// >= 1024 with (~0, ~0). Three modes (push constant `mode`):
+//   0  every stage with k <= 1024, in shared memory, one 1024-element block per work group;
+//   1  one global compare-exchange step (k, j), j >= 1024: one thread per pair;
+//   2  the tail of stage k (j = 512 .. 1) in shared memory.
+// So a sort of n = 2^m keys is 1 + sum over k > 1024 of (log2(k) - 10 + 1) dispatches rather
+// than m(m+1)/2. See gpu_particle_pass.h.
+
+layout(local_size_x = 512) in;
+
+#include "particles_gpu_common.glsl"
+
+shared uvec2 s_keys[1024];
+
+bool greater(uvec2 a, uvec2 b) { return a.x > b.x || (a.x == b.x && a.y > b.y); }
+
+void local_step(uint base, uint t, uint kk, uint jj) {
+    uint i = ((t & ~(jj - 1u)) << 1u) | (t & (jj - 1u));
+    uint l = i + jj;
+    bool ascending = ((base + i) & kk) == 0u;
+    uvec2 a = s_keys[i];
+    uvec2 b = s_keys[l];
+    if (greater(a, b) == ascending) { s_keys[i] = b; s_keys[l] = a; }
+}
+
+void main() {
+    uint t = gl_LocalInvocationID.x;
+    if (pc.mode == 1u) {
+        uint g = gl_GlobalInvocationID.x;
+        uint i = ((g & ~(pc.j - 1u)) << 1u) | (g & (pc.j - 1u));
+        uint l = i + pc.j;
+        bool ascending = (i & pc.k) == 0u;
+        uvec2 a = keys[i];
+        uvec2 b = keys[l];
+        if (greater(a, b) == ascending) { keys[i] = b; keys[l] = a; }
+        return;
+    }
+    uint base = gl_WorkGroupID.x * 1024u;
+    s_keys[t] = keys[base + t];
+    s_keys[t + 512u] = keys[base + t + 512u];
+    barrier();
+    if (pc.mode == 0u) {
+        for (uint kk = 2u; kk <= 1024u; kk <<= 1u) {
+            for (uint jj = kk >> 1u; jj > 0u; jj >>= 1u) {
+                local_step(base, t, kk, jj);
+                barrier();
+            }
+        }
+    } else {
+        for (uint jj = 512u; jj > 0u; jj >>= 1u) {
+            local_step(base, t, pc.k, jj);
+            barrier();
+        }
+    }
+    keys[base + t] = s_keys[t];
+    keys[base + t + 512u] = s_keys[t + 512u];
+}

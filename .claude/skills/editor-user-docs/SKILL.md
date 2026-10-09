@@ -37,7 +37,7 @@ editor area doesn't fit any of these, and add it to the index and this table.
 | `materials-and-textures.md` | Material editor, the preview scene, assigning materials, textures | `app/asset_documents.h`, `app/ui/properties.inl`, `mesh/shader_ball.h` | `material_editor` |
 | `animation.md` | Rigs, clips, Record and auto-key, keys on the dope sheet, playback | `anim/*.h`, `app/ui/timeline.inl` | `timeline`, `record_autokey` |
 | `ui-designer.md` | UI assets and templates, preview sizes, selecting / moving / anchoring elements, widgets, Element / Canvas / Bindings tabs, UI themes, Interact mode | `app/ui/ui_canvas.inl`, `ui/*.h`, `viewport/rect_gizmo.h`, `schema/ui_schema.h`, `schema/ui_theme_schema.h` | `ui_designer`, `ui_new_menu`, `ui_bindings`, `ui_interact` |
-| `project-settings.md` | Render / World / Output / Scene tabs, Restart Renderer, Package Project | `schema/settings_schema.h`, `app/ui/properties.inl`, `build/packager.h` | `render_settings`, `world_settings`, `package_dialog` |
+| `project-settings.md` | Project Settings modal, scene overrides (Render / World / Scene tabs), Rebuild Renderer, Package Project | `schema/settings_schema.h`, `app/ui/properties.inl`, `app/ui/project_settings.inl`, `build/packager.h` | `render_settings`, `world_settings`, `package_dialog` |
 | `shortcuts.md` | Every shortcut, grouped by where you are | the Controls modal in `app/editor_app.h` (`begin_modal("Controls"`), menu shortcut strings, every key handler | `controls_modal` |
 
 Primary source paths are relative to `editor/` unless they start with `editor/`.

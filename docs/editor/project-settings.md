@@ -1,65 +1,96 @@
 [Editor manual](README.md) > Project settings
 
 Project settings control how your game looks and runs: render quality, sky and fog, physics,
-the game window and the scene the game starts with. You change them on four tabs of
-Properties, **Render**, **World**, **Output** and **Scene**, which appear while a scene is
-open. This page also shows how to package the project for shipping.
+the game window and the scene the game starts with. They live in two places:
+
+- **Edit > Project Settings...** holds the **project's** values (saved in `assets/config.yaml`).
+  Every scene starts from them.
+- The **Render**, **World** and **Scene** tabs of Properties hold the **open scene's**
+  overrides of those values. Anything you change there applies to that scene only.
+
+This page also shows how to package the project for shipping.
 
 ![The Render tab in Properties, organized by feature](../images/editor/render_settings.jpg)
 
-*The **Render** tab. At the top are **Save config.yaml** and **Restart Renderer**, then a short
-reminder of how edits are stored, then the setting groups. A `*` after a setting's name means
-it takes effect only after a restart.*
+*The scene's **Render** tab. At the top are **Project Settings...** and **Rebuild Renderer**,
+then how many settings this scene overrides, then the setting groups.*
 
-## Open the settings tabs
+## Change the project's settings
 
-1. Open a scene.
-2. In Properties, click the **Render**, **Output**, **Scene** or **World** tab icon (the second
-   to fifth icons). Hover over an icon to see its name.
+1. Choose **Edit > Project Settings...** (or **Render > Project Settings...**, or click
+   **Project Settings...** at the top of the **Render** tab).
+2. Pick a category on the left: **General**, **Render Features**, **Stylize**, **Debug**,
+   **Output** or **Physics**. Typing in **Search settings** searches every render category.
+3. Change settings as on any tab. Most changes show in the viewport at once.
+4. Click **Save config.yaml** at the bottom. The button shows a `*` while there are unsaved
+   changes.
 
-You can also choose **Render > Render Settings** or **Render > World Settings** in the top bar.
+A scene that overrides a setting keeps its own value. Every other scene picks up the new
+project value.
+
+## Change a setting for one scene
+
+1. Open the scene.
+2. In Properties, click the **Render**, **World** or **Scene** tab icon. Hover over an icon to
+   see its name. You can also choose **Render > Scene Render Settings** or
+   **Render > World Settings**.
+3. Change the setting. Every row shows the value the scene renders with, which is the project's
+   value until you change it.
 
 Click a group's header to fold or unfold it. Drag a number left or right, or click it and
-type. Most changes show in the viewport at once.
+type.
 
-## Change a setting for one scene or for the whole project
+An overridden setting is easy to spot:
 
-Settings belong to the project, so every scene uses the same values. A scene can **override**
-some of them for itself, for example to give one level thicker fog.
+- Its row is tinted, with a coloured bar at its left edge. This applies to a feature's on/off
+  checkbox in its section header too.
+- A section that contains overrides shows **(N overridden)** in its header and the bar at its
+  left edge, even while it is folded. Category headings show the same count.
+- A dot appears on the **Render** tab icon (and on the **Scene** tab icon for physics) while the
+  scene has overrides there.
+- Hovering an overridden row shows both values: the scene's and the project's.
 
-> [!NOTE]
-> While a scene is open, a change on the **Render** or **World** tab, or in **Physics** on the
-> **Scene** tab, applies only to that scene. The row turns tinted, with a coloured bar at its
-> left edge, to show it is overridden. Settings marked `*` are the exception: they always apply
-> to the whole project.
-
-To manage an override, right-click the row:
+To manage an override, right-click the row or the section header:
 
 | Item | What it does |
 |---|---|
 | **Revert to Project Setting** | Drops this scene's override, so the scene uses the project's value again |
 | **Apply to Project Settings** | Makes this scene's value the project's value, for every scene |
-| **Reset to Default** | Clears the project's value, so the built-in default applies |
+
+Setting a value back to the project's value, by hand or by ticking a feature back, also removes
+the override and its tint.
+
+In **Project Settings**, right-clicking a row offers **Reset to Default** instead. It clears the
+project's value, so the built-in default applies.
+
+To drop every override at once, click **Revert All Scene Overrides** under the summary at the
+top of the tab. One **Ctrl+Z** brings them all back.
+
+> [!NOTE]
+> **Texel AA** is fixed when the editor starts, so it is project-only. A scene shows it greyed
+> out with **(project)**. Change it in Project Settings, then choose
+> **Render > Restart Editor Engine...**.
 
 ## Save your settings
 
 - Overrides are saved with the scene, when you save the scene.
-- Project-wide values are saved when you click **Save config.yaml** on the **Render** or
-  **Output** tab. The button shows a `*` while there are unsaved changes.
+- Project values are saved when you click **Save config.yaml** in Project Settings.
 - **File > Save** (**Ctrl+S**) saves both.
 
 To undo a settings change, point at Properties and press **Ctrl+Z**.
 
-## Apply settings that need a restart
+## Settings that rebuild the renderer
 
-Settings with a `*` after their name can't change while the renderer is running. When you
-change one, the Console says the change applies on restart. To apply it:
+Some settings, such as turning a feature on or off, the render size and shadow map sizes, are
+built into the renderer. Changing one rebuilds the renderer in place, about a tenth of a second
+after you stop changing it. The window stays open and the scene, your view and any unsaved
+changes stay as they were. The setting's tooltip says **Changing it rebuilds the renderer**.
 
-1. Click **Restart Renderer** at the top of the **Render** tab, or choose
-   **Render > Restart Renderer**.
+A game does the same when it loads a scene that overrides one of these settings.
 
-The renderer starts again with your changes. The open scene, your view and any unsaved changes
-stay as they were.
+To force a rebuild, click **Rebuild Renderer** at the top of the **Render** tab or in Project
+Settings, or choose **Render > Rebuild Renderer**. **Render > Restart Editor Engine...**
+recreates the whole engine and window, which is only needed for **Texel AA**.
 
 ## Render tab
 
@@ -83,8 +114,8 @@ The Render tab is organized by feature. Every section starts closed, so the tab 
   names, keys and descriptions.
 - Rows marked **Set by ... Quality** in their description follow the section's **Quality** tier
   until you change them. A value you set yourself always wins over the tier.
-- **Unrecognized Keys** appears only when config.yaml's `render:` holds a key the editor doesn't
-  know, such as a typo.
+- **Unrecognized** appears as a category in Project Settings only when config.yaml's `render:`
+  holds a key the editor doesn't know, such as a typo.
 
 The editor's viewport always fills its area, so **Resolution & Detail** changes the running
 game's image, not the editor's view. In the same way, the viewport's shading buttons decide
@@ -99,18 +130,22 @@ The **World** tab holds the sky, ambient light and fog.
 - **Lighting & Sky**: **Exposure**, **Ambient intensity**, **Sky intensity**, and the three sky
   colours **Sky zenith** (overhead), **Sky horizon** and **Sky ground**. Click a colour swatch
   to pick a colour, or edit its red, green and blue numbers.
-- **Fog**: the fog's mode, density, colour, height and distance limits.
+- **Fog**: the fog's mode, density, colour, height, sun glow and distance limits.
 
-**Fog mode** has three choices:
+The fog is height fog: it is thickest at and below **Height Base** and thins out over
+**Height Falloff** metres above it, so valleys fill with mist while hilltops and the sky
+overhead stay clear. **Start Distance** keeps the fog off nearby objects, and **Cutoff Distance**
+stops it from thickening past a point. Water, glass and particles are fogged at their own
+distance. Under water, only what you see above the surface is fogged.
+
+**Fog mode** has two choices:
 
 | Mode | How the fog builds up |
 |---|---|
 | **Linear** | Evenly, from none at **Fog linear start** to full at **Fog linear end**. **Fog density** is ignored. |
-| **Exponential** | Starts right away and fades out softly |
-| **Exponential Squared** | Clear up close, then closes in quickly. This is the default. |
+| **Exponential** | Builds with distance the way real haze does, and thins with height. This is the default. |
 
-To see fog at all, turn on **Fog enabled** in **Features** on the **Render** tab and restart
-the renderer.
+To see fog at all, turn on **Fog** in **Render Features** on the **Render** tab.
 
 ### Weather & Time of Day
 
@@ -147,9 +182,9 @@ such as a roof or an awning, but lands there without splashing.
 The rain, snow and mist the weather creates appear in the Hierarchy under **Runtime**, greyed
 out with a lock. You can select them to look at them, but not change them. They are never saved.
 
-## Output tab
+## Output settings
 
-The **Output** tab has **Save config.yaml** and **Package Project...** at the top, then:
+**Edit > Project Settings... > Output** holds:
 
 - **Window**: the game window's **Title**, **Width**, **Height** and **Vsync**.
 - **Jobs**: **Worker threads** (how many CPU threads the game uses; `0` uses them all) and
@@ -158,7 +193,8 @@ The **Output** tab has **Save config.yaml** and **Package Project...** at the to
   **Filepath** to where it goes. **Save low res** saves the image at the render size instead of
   the window size.
 
-Window and jobs settings apply the next time the game starts.
+Window and jobs settings apply the next time the game starts. The **Output** tab in Properties
+has **Package Project...** and a shortcut to these settings.
 
 ## Scene tab
 
@@ -170,8 +206,9 @@ Open it from the tab icon, or click the scene's name at the top of the Hierarchy
 - **Startup**: **Default Scene** is the scene the game opens first, and the one the editor
   opens when it starts. Click **Use This Scene at Startup** to pick the open scene.
 - **Physics**: **Gravity** (in metres per second squared, straight down is negative Z) and
-  **Fixed timestep** (how often physics updates, in seconds). A scene's own values apply when
-  it starts or plays.
+  **Fixed timestep** (how often physics updates, in seconds). Changes here override the
+  project's physics for this scene (tinted, like render overrides). They apply when the scene
+  starts or plays. The project's values are in **Project Settings > Physics**.
 
 ## Build the game
 
@@ -237,6 +274,6 @@ holds a copy of your assets and, if the game program has been built, the game it
 
 ---
 
-Sources: `editor/schema/settings_schema.h`, `editor/app/ui/properties.inl`, `editor/app/ui/topbar.inl`, `editor/app/editor_app.h`, `editor/core/scene_document.h`, `editor/build/packager.h`, `editor/build/build_pipeline.h`, `editor/build/build_settings.h`, `editor/app/ui/build.inl`, `editor/app/project.h`
+Sources: `editor/schema/settings_schema.h`, `editor/app/ui/properties.inl`, `editor/app/ui/project_settings.inl`, `editor/app/ui/topbar.inl`, `editor/app/editor_app.h`, `editor/core/scene_document.h`, `editor/build/packager.h`, `editor/build/build_pipeline.h`, `editor/build/build_settings.h`, `editor/app/ui/build.inl`, `editor/app/project.h`
 
 Previous: [UI designer](ui-designer.md) | Next: [Shortcuts](shortcuts.md)

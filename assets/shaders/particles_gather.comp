@@ -1,0 +1,14 @@
+#version 450
+
+// GPU particles: after the bitonic sort, copies the alive instances into the drawn buffer in
+// key order (back to front for `sort: distance`). See gpu_particle_pass.h.
+
+layout(local_size_x = 64) in;
+
+#include "particles_gpu_common.glsl"
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= instance_count) return;
+    out_inst[i] = unsorted_inst[keys[i].y];
+}

@@ -1,0 +1,145 @@
+#version 450
+
+// GPU particles: one thread per particle born this frame. Pops a slot off the free list (none
+// left: the birth is dropped, like the CPU's max_particles cap), samples the emission shape
+// (particle_shape.h's sample_analytic_shape() / MeshSurface faces), applies spawn_()'s
+// randomness, world transform, sub-frame position and pre-aging, and appends it to the alive
+// list. See toyengine/render/passes/gpu_particle_pass.h.
+
+layout(local_size_x = 64) in;
+
+#include "particles_gpu_common.glsl"
+
+const int SHAPE_POINT = 0, SHAPE_SPHERE = 1, SHAPE_HEMISPHERE = 2, SHAPE_CONE = 3, SHAPE_BOX = 4,
+          SHAPE_CIRCLE = 5, SHAPE_EDGE = 6, SHAPE_MESH = 7;
+
+float shell_radius(inout uint s, float r, float dims) {
+    float inner = clamp(1.0 - P.shape0.z, 0.0, 1.0);
+    float lo = pow(inner, dims);
+    return r * pow(lo + (1.0 - lo) * rng01(s), 1.0 / dims);
+}
+
+// position, direction, normal, tangent (emitter-local)
+void sample_shape(inout uint s, out vec3 pos, out vec3 dir, out vec3 nrm, out vec3 tan) {
+    pos = vec3(0.0);
+    dir = vec3(0.0, 0.0, 1.0);
+    nrm = vec3(0.0, 0.0, 1.0);
+    tan = vec3(1.0, 0.0, 0.0);
+    int type = int(P.shape0.x + 0.5);
+    float radius = P.shape0.y;
+    float arc = radians(clamp(P.shape1.x, 0.0, 360.0));
+    if (type == SHAPE_SPHERE || type == SHAPE_HEMISPHERE) {
+        vec3 d = rng_unit(s);
+        if (type == SHAPE_HEMISPHERE) d.z = abs(d.z);
+        if (arc < 6.2831) {
+            float a = rng01(s) * arc;
+            float r = sqrt(max(0.0, 1.0 - d.z * d.z));
+            d = vec3(r * cos(a), r * sin(a), d.z);
+        }
+        pos = d * shell_radius(s, radius, 3.0);
+        dir = d;
+        nrm = d;
+    } else if (type == SHAPE_CONE) {
+        float a = rng01(s) * arc;
+        float rr = shell_radius(s, 1.0, 2.0);
+        vec2 radial = vec2(cos(a), sin(a));
+        pos = vec3(radial * rr * radius, 0.0);
+        float tilt = radians(clamp(P.shape0.w, 0.0, 89.0)) * rr;
+        dir = vec3(radial * sin(tilt), cos(tilt));
+        if (radius <= 1e-4) {
+            float cos_max = cos(radians(clamp(P.shape0.w, 0.0, 179.0)));
+            float z = cos_max + (1.0 - cos_max) * rng01(s);
+            float r = sqrt(max(0.0, 1.0 - z * z));
+            dir = vec3(radial * r, z);
+        }
+    } else if (type == SHAPE_BOX) {
+        pos = vec3(rng_signed(s), rng_signed(s), rng_signed(s)) * (P.shape_box.xyz * 0.5);
+    } else if (type == SHAPE_CIRCLE) {
+        float a = rng01(s) * arc;
+        vec2 radial = vec2(cos(a), sin(a));
+        pos = vec3(radial * shell_radius(s, radius, 2.0), 0.0);
+        dir = vec3(radial, 0.0);
+        tan = vec3(-radial.y, radial.x, 0.0);
+    } else if (type == SHAPE_EDGE) {
+        pos = vec3(rng_signed(s) * 0.5 * P.shape1.w, 0.0, 0.0);
+    } else if (type == SHAPE_MESH) {
+        // Faces, area-weighted: binary search the cumulative area (tris[8i].w), then a
+        // uniform point in the triangle (the sqrt-barycentric map).
+        int n = int(P.shape_box.w + 0.5);
+        if (n > 0) {
+            float x = rng01(s) * P.shape_offset.w;
+            int lo = 0, hi = n - 1;
+            while (lo < hi) {
+                int mid = (lo + hi) >> 1;
+                if (tris[mid * 8].w > x) hi = mid; else lo = mid + 1;
+            }
+            int b = lo * 8;
+            float r1 = sqrt(rng01(s));
+            float r2 = rng01(s);
+            float b0 = 1.0 - r1, b1 = r1 * (1.0 - r2), b2 = r1 * r2;
+            pos = tris[b].xyz * b0 + tris[b + 1].xyz * b1 + tris[b + 2].xyz * b2;
+            vec3 nn = tris[b + 3].xyz * b0 + tris[b + 4].xyz * b1 + tris[b + 5].xyz * b2;
+            float len = length(nn);
+            nrm = len > 1e-6 ? nn / len : tris[b + 6].xyz;
+            tan = tris[b + 7].xyz;
+            dir = nrm;
+            pos += nrm * P.shape1.z;
+        }
+    }
+    pos += P.shape_offset.xyz;
+    if (P.shape1.y > 0.0) {
+        vec3 d = mix(dir, rng_unit(s), clamp(P.shape1.y, 0.0, 1.0));
+        float len = length(d);
+        dir = len > 1e-5 ? d / len : dir;
+    }
+}
+
+void main() {
+    uint t = gl_GlobalInvocationID.x;
+    uint n = uint(P.frame.z);
+    if (t >= n) return;
+    int idx = atomicAdd(free_count, -1) - 1;
+    if (idx < 0) {
+        atomicAdd(free_count, 1);   // pool full: this birth is dropped
+        return;
+    }
+    uint slot = free_list[idx];
+
+    uint s = hash_u32(floatBitsToUint(P.frame.w) ^ hash_u32(t * 0x9e3779b9u + 0x85ebca6bu));
+    vec3 pos, dir, nrm, tan;
+    sample_shape(s, pos, dir, nrm, tan);
+
+    float speed = rng_range(s, P.life_speed.zw);
+    vec3 vel = dir * speed;
+    vec4 q = vec4(0.0, 0.0, 0.0, 1.0);
+    if (P.spin.z > 0.5) {
+        q = quat_from_normal_tangent(nrm, tan);
+        if (P.spin.w > 0.5) q = quat_mul(q, quat_axis_angle(vec3(0.0, 0.0, 1.0), rng01(s) * PI2));
+    }
+    float frac = n > 1u ? 1.0 - (float(t) + 0.5) / float(n) : 0.0;
+    bool local = P.config.z > 0.5;
+    if (!local) {
+        vec3 p_now = (P.world * vec4(pos, 1.0)).xyz;
+        vec3 p_then = (P.prev_world * vec4(pos, 1.0)).xyz;
+        pos = mix(p_now, p_then, frac);
+        vel = mat3(P.world) * vel;
+        float len = length(vel);
+        if (len > 1e-6) vel *= speed / len;
+        q = quat_mul(P.emitter_rot, q);
+        vel += P.misc.yzw;
+    }
+
+    uint seed = rng_u32(s);
+    float life = max(rng_range(s, P.life_speed.xy), 1e-3);
+    float c = rng01(s);
+    Particle p;
+    p.color0 = mix(P.color_a, P.color_b, c);
+    p.orient = q;
+    p.misc = vec3(max(0.0, rng_range(s, P.size_rot.xy)), rng_range(s, P.size_rot.zw), rng_range(s, P.spin.xy));
+    p.seed = seed;
+    float pre = frac * P.frame.x;
+    p.pos_age = vec4(pos + vel * pre, pre);
+    p.vel_life = vec4(vel, life);
+    particles[slot] = p;
+    append_instance(p);
+}

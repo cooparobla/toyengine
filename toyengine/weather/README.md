@@ -78,9 +78,9 @@ scene:
           sun: 0.3              # x the clock's sun
           ambient: 0.75
           sky_tint: {r: 0.85, g: 0.88, b: 0.92}
-          fog_density: 0.015    # global fog, exponential squared
+          fog_density: 0.0127   # global exponential height fog, extinction per metre
           fog_color: {r: 0.5, g: 0.54, b: 0.58}   # the daylight colour; darkened at night
-          fog_height_falloff: 0
+          fog_height_falloff: 40  # metres it thins by e above the base (0 = uniform, fogs the whole sky)
           fog_sky_blend: 0.4
           fog_max_opacity: 1.0
           fog_sun_amount: 0.05
@@ -178,13 +178,13 @@ including your own: a wind-blown leaves effect, ash, fireflies.
 
 While the weather is on, it **owns** these render keys (`controlled_render_keys()`) and writes
 them every frame: `ambient_intensity`, `sky_intensity`, `sky_zenith/horizon/ground`, `fog_mode`
-(set to exponential squared), `fog_density`, `fog_color`, `fog_sky_blend`, `fog_max_opacity`,
+(set to exponential height fog), `fog_density`, `fog_color`, `fog_sky_blend`, `fog_max_opacity`,
 `fog_height_falloff`, `fog_sun_amount`, plus the unused linear-fog distances. The editor
 locks these rows ("Set by Weather"). Their own values come back the moment the weather is
 switched off.
 
 It **scales** `exposure` toward `night_exposure` at night. This is a multiplier on the
-configured value, so the row stays editable. It does not touch startup switches: `fog_enabled`,
+configured value, so the row stays editable. It does not touch `fog_enabled` or the startup switches
 `volumetrics_enabled` (mist and dust haze need it) and `transparency_enabled` (particles need it)
 are still config.yaml's.
 
@@ -306,8 +306,16 @@ and drags merge into one.
 
 ## Not here yet
 
-- **The sky.** It is the renderer's three-colour gradient: no sun disc, clouds, stars or moon
-  sprite.
+- **The sky, unless it is physical.** With render `sky_model: gradient` (the default) the sky
+  is the renderer's three-colour gradient, which the weather colours by the clock. With
+  `sky_model: physical` (World tab, Lighting & Sky) the renderer draws a physically based
+  atmosphere with a sun disc, a full moon (always opposite the sun: no lunar phases), stars, and
+  with `clouds` a raymarched cloud layer; the weather then drives the sun, the moon and
+  `cloud_coverage` from the condition's `cloud_cover`, and the gradient colours and the sun's
+  colour come from the atmosphere instead of the day / twilight / night palettes. The cloud
+  layer is one slab type (cumulus-like); there are no separate cirrus or anvil shapes, clouds
+  cast no shadows on the ground, and water reflects the sky's gradient colours rather than the
+  clouds.
 - **Wet surfaces.** Rain does not darken or wet materials. `WeatherState::wetness` (and the
   surface world UBO's `snow.z`) is there for a surface shader to use.
 - **Rain on water.** Rain splashes on a lake's surface, but makes no water ripples (the water's

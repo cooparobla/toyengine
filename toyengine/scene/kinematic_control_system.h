@@ -42,6 +42,9 @@
 #include <coopa/scene/scene.h>
 #include <coopa/scene/scene_system.h>
 
+#include <physxcoopa/system/physics_system.h>
+
+#include <toyengine/scene/character_controller.h>
 #include <toyengine/scene/kinematic_controller.h>
 #include <toyengine/scene/kinematic_mover.h>
 
@@ -53,8 +56,8 @@ inline constexpr int k_kinematic_control_order = 50;
 
 /**
  * @class KinematicControlSystem
- * @brief Advances every KinematicController and KinematicMover in the scene, before physics reads
- *        their Transforms.
+ * @brief Advances every KinematicController, KinematicMover and CharacterController in the scene,
+ *        before physics reads their Transforms.
  */
 class KinematicControlSystem : public coopa::scene::ISceneSystem {
 public:
@@ -69,6 +72,13 @@ public:
         }
         for (KinematicMover* km : scene.get_components<KinematicMover>()) {
             km->advance(ctx.delta_time);
+        }
+        // Characters last: the platforms above have already moved this frame. They query the
+        // physics world, which still holds every body's pose from the previous step.
+        std::vector<CharacterController*> characters = scene.get_components<CharacterController>();
+        if (!characters.empty()) {
+            auto* physics = dynamic_cast<coopa::physx::system::PhysicsSystem*>(scene.find_system("Physics"));
+            for (CharacterController* cc : characters) cc->advance(ctx.delta_time, physics);
         }
     }
 };

@@ -53,7 +53,9 @@ struct FieldDesc {
     bool        in_default = false;    ///< Written into a freshly added component.
     std::string ref_prefix;            ///< AssetRef: prepended to the stored value ("assets/" for config paths).
     bool        as_list = false;       ///< Vec3/Color stored as [a, b, c] (config.yaml) not a map.
-    bool        startup_only = false;  ///< Render settings: needs a renderer restart to apply.
+    bool        startup_only = false;  ///< Render settings: fixed at pipeline construction; a change rebuilds the renderer.
+    bool        tier_driven = false;   ///< Render settings: a quality tier sets it when config.yaml doesn't (no fixed default).
+    bool        project_only = false;  ///< Render settings: baked in at engine start-up, so config.yaml only (no scene override).
     std::string default_string;
     std::string tooltip;
     Node def_node;                     ///< Default for list kinds (StringList / ItemList); null: empty.
@@ -182,6 +184,7 @@ inline FieldDesc with_label(FieldDesc f, std::string l) { f.label = std::move(l)
 inline FieldDesc listed(FieldDesc f) { f.as_list = true; return f; }
 inline FieldDesc root_relative(FieldDesc f) { f.ref_prefix = "assets/"; return f; }
 inline FieldDesc startup(FieldDesc f) { f.startup_only = true; return f; }
+inline FieldDesc project_only(FieldDesc f) { f.project_only = true; return f; }
 /** @brief An enum whose engine default is not its first option. */
 inline FieldDesc with_default(FieldDesc f, std::string def) { f.default_string = std::move(def); return f; }
 
@@ -308,6 +311,7 @@ inline std::map<std::string, ComponentSchema>& schema_table_() {
             with_tip(f_float("aperture", 0.0f, 0.05f, 0.0f, 64.0f), "f-stop; 0 uses the render settings' dof_aperture"),
             with_tip(f_float("focus_distance", 0.0f, 0.05f, 0.0f, 10000.0f), "Metres; 0 uses the render settings' dof_focus_distance"),
             f_string("focus_object"),
+            with_tip(f_bool("motion_blur", true), "Off keeps this camera's image free of motion blur when the render settings turn it on"),
         }});
         add({"DirectionalLight", "Lighting", {
             f_vec3("direction", glm::vec3(-0.35f, -0.45f, -0.82f), 0.01f, true),
@@ -391,6 +395,71 @@ inline std::map<std::string, ComponentSchema>& schema_table_() {
             f_bool("use_gravity", true, true),
             f_bool("is_kinematic", false, true),
             f_enum("interpolation", {"Interpolate", "None"}),   // physx_yaml.h reads a string: "None" or anything else
+        }});
+        // physxcoopa joints (components/hinge_joint.h, ball_joint.h, cone_twist_joint.h): anchor and
+        // axis in THIS object's local frame; the other side is `connected_object`, and both need a
+        // Collider. Angles in degrees, relative to the pose the joint binds in.
+        add({"HingeJoint", "Physics", {
+            with_tip(f_string("connected_object", "", true), "Object (by name) this hinges to"),
+            with_tip(f_vec3("anchor", glm::vec3(0.0f), 0.01f, true), "Hinge point, in this object's local frame"),
+            with_tip(f_vec3("axis", glm::vec3(0.0f, 0.0f, 1.0f), 0.01f, true), "Hinge axis, in this object's local frame"),
+            f_bool("use_limits", false),
+            f_float("min_angle", 0.0f, 0.5f, -360.0f, 360.0f),
+            f_float("max_angle", 0.0f, 0.5f, -360.0f, 360.0f),
+            with_tip(f_bool("enable_collision", false), "The two bodies still collide with each other"),
+        }});
+        add({"BallJoint", "Physics", {
+            with_tip(f_string("connected_object", "", true), "Object (by name) this is pinned to"),
+            with_tip(f_vec3("anchor", glm::vec3(0.0f), 0.01f, true), "Pivot, in this object's local frame"),
+            with_tip(f_bool("enable_collision", false), "The two bodies still collide with each other"),
+        }});
+        add({"ConeTwistJoint", "Physics", {
+            with_tip(f_string("connected_object", "", true), "Object (by name) this is jointed to"),
+            with_tip(f_vec3("anchor", glm::vec3(0.0f), 0.01f, true), "Pivot, in this object's local frame"),
+            with_tip(f_vec3("axis", glm::vec3(0.0f, 0.0f, 1.0f), 0.01f, true), "Twist axis (along the limb), in this object's local frame"),
+            with_tip(f_float("swing_limit", 45.0f, 0.5f, -1.0f, 180.0f, true), "Cone half-angle; negative = free swing"),
+            with_tip(f_float("twist_min", -30.0f, 0.5f, -180.0f, 180.0f), "Twist range; min > max = free twist"),
+            f_float("twist_max", 30.0f, 0.5f, -180.0f, 180.0f),
+            with_tip(f_bool("enable_collision", false), "The two bodies still collide with each other"),
+        }});
+        // toyengine/scene/ragdoll.h, on a rig root. Each bone's joint keys describe the joint to
+        // its nearest ancestor bone (the first bone has none).
+        add({"Ragdoll", "Physics", {
+            with_tip(f_enum("mode", {"animated", "ragdoll"}, true), "animated: bones follow the Animator; ragdoll: limp from the start"),
+            with_tip(f_vec3("start_impulse", glm::vec3(0.0f), 1.0f), "mode ragdoll: the impulse (N s) it starts with"),
+            with_tip(f_bool("auto_generate", false), "With no bones listed: fit capsules to the rig's empties"),
+            with_tip(f_float("mass", 70.0f, 0.1f, 0.0f, 100000.0f), "Total, shared by volume over bones with mass 0"),
+            with_tip(f_float("blend_time", 0.5f, 0.01f, 0.0f, 10.0f), "Seconds to blend back into animation on recovery"),
+            with_tip(f_string("recover_state", ""), "Animator state recovered into (empty: auto_play)"),
+            with_tip(f_bool("collide_connected", false), "Jointed bone pairs collide with each other"),
+            f_float("drag", 0.05f, 0.005f, 0.0f, 100.0f),
+            f_float("angular_drag", 0.8f, 0.005f, 0.0f, 100.0f),
+            f_int("layer", 0, 0, 31),
+            with_tip(f_float("rest_time", 1.0f, 0.05f, 0.0f, 60.0f), "Seconds calm before a limp body is put to sleep; 0 = off"),
+            with_tip(f_float("rest_speed", 0.08f, 0.005f, 0.0f, 10.0f), "Calm: every bone slower than this (m/s)"),
+            with_tip(f_float("rest_spin", 0.2f, 0.005f, 0.0f, 10.0f), "...and spinning slower than this (rad/s)"),
+            with_tip(f_bool("link_character", true), "Suspend this object's CharacterController while limp"),
+            with_tip(f_bool("reposition_root", true), "Without a controller: stand up where the body fell"),
+            with_tip(f_bool("input_toggle", false), "R goes limp / recovers"),
+            with_tip(f_vec3("toggle_impulse", glm::vec3(0.0f), 1.0f), "Impulse (N s) applied when R goes limp"),
+            with_tip(f_items("bones", {
+                f_string("bone", "pelvis"),
+                f_enum("shape", {"capsule", "box", "sphere"}),
+                f_float("radius", 0.08f, 0.005f, 0.0f, 10.0f),
+                f_float("height", 0.3f, 0.005f, 0.0f, 10.0f),
+                f_enum("direction", {"z", "x", "y"}),
+                f_vec3("size", glm::vec3(0.2f), 0.005f),
+                f_vec3("center", glm::vec3(0.0f), 0.005f),
+                f_float("mass", 0.0f, 0.05f, 0.0f, 10000.0f),
+                f_enum("joint", {"cone_twist", "hinge", "ball"}),
+                f_vec3("anchor", glm::vec3(0.0f), 0.005f),
+                f_vec3("axis", glm::vec3(0.0f), 0.01f),
+                f_float("swing", 45.0f, 0.5f, -1.0f, 180.0f),
+                f_float("twist_min", -30.0f, 0.5f, -180.0f, 180.0f),
+                f_float("twist_max", 30.0f, 0.5f, -180.0f, 180.0f),
+                f_float("limit_min", -90.0f, 0.5f, -360.0f, 360.0f),
+                f_float("limit_max", 90.0f, 0.5f, -360.0f, 360.0f),
+            }), "Bone path, shape, mass, and the joint to the parent bone (degrees)"),
         }});
         // toyengine/water/: a body of water (baked by WaterSystem onto the sibling MeshRenderer)
         // and a floating Rigidbody. `size` uses x/y only (the procedural grid's extent).
@@ -477,7 +546,8 @@ inline std::map<std::string, ComponentSchema>& schema_table_() {
                 with_tip(f_color4("start_color_b", glm::vec4(1.0f)), "Each particle takes a random mix of start_color and this"),
                 with_tip(f_float("gravity", 0.0f, 0.01f, -100.0f, 100.0f), "Multiplier on 9.81 m/s^2 down; negative rises (hot air)"),
                 with_tip(f_enum("simulation_space", {"world", "local"}), "world: particles stay where born (trails); local: they move with the object"),
-                f_int("max_particles", 1000, 0, 1000000),
+                with_tip(f_int("max_particles", 1000, 0, 1000000), "Pool cap; a GPU system's fixed buffer size"),
+                with_tip(f_enum("simulation", {"cpu", "gpu"}), "gpu: emit / simulate / sort in compute shaders (100k+ particles); sub emitters, scatter and mesh mode fall back to cpu"),
                 with_tip(f_int("seed", 0, 0, 2147483647), "0: derived from the object's name"),
                 f_float("time_scale", 1.0f, 0.01f, 0.0f, 100.0f),
                 // Emission
@@ -628,7 +698,8 @@ inline std::map<std::string, ComponentSchema>& schema_table_() {
                      "The mixer bus a Slider on this element (e.g. a SettingRow's) controls; remembered per player"),
         }});
         add({"CameraController", "Gameplay", {
-            f_enum("mode", {"Orbit", "Fly"}, true),
+            f_enum("mode", {"Orbit", "Fly", "FirstPerson"}, true),
+            with_tip(f_string("tracker"), "Name of an object to follow (Orbit) or ride (FirstPerson); empty uses Target"),
             f_vec3("target", glm::vec3(0.0f), 0.02f),
             with_tip(f_float("distance", -1.0f, 0.05f, -1.0f, 10000.0f), "-1: from the camera's placement relative to the target"),
             with_tip(f_float("yaw_deg", 0.0f, 0.5f), "Unset: from the camera's placement relative to the target"),
@@ -641,6 +712,66 @@ inline std::map<std::string, ComponentSchema>& schema_table_() {
             f_float("auto_rotate_deg_per_sec", 0.0f, 0.1f),
             f_float("move_speed", 5.0f, 0.05f, 0.0f, 1000.0f),
             f_float("movement_smoothing", 0.0f, 0.005f, 0.0f, 1.0f),
+            with_tip(f_bool("collide", true), "Orbit with a tracker: pull in when geometry blocks the view"),
+            f_float("collision_radius", 0.2f, 0.005f, 0.0f, 10.0f),
+            with_tip(f_float("collision_in_speed", 25.0f, 0.1f, 0.0f, 1000.0f), "Pull-in rate (1/s); 0 snaps"),
+            with_tip(f_float("collision_out_speed", 4.0f, 0.1f, 0.0f, 1000.0f), "Recovery rate (1/s); 0 snaps"),
+            with_tip(f_float("eye_height", 1.6f, 0.01f, -100.0f, 100.0f), "FirstPerson: camera height above the tracked object's origin"),
+            f_float("first_person_pitch_limit", 85.0f, 0.5f, 0.0f, 89.0f),
+        }});
+        // Defaults mirror toyengine/scene/character_controller.h.
+        add({"CharacterController", "Gameplay", {
+            f_float("radius", 0.3f, 0.005f, 0.01f, 10.0f, true),
+            with_tip(f_float("height", 1.8f, 0.01f, 0.02f, 20.0f, true), "Total capsule height; the origin is at the feet"),
+            with_tip(f_float("step_height", 0.35f, 0.005f, 0.0f, 5.0f), "Tallest ledge walked up without jumping"),
+            with_tip(f_float("slope_limit", 45.0f, 0.5f, 0.0f, 89.0f), "Degrees; steeper slopes are walls"),
+            f_float("skin", 0.02f, 0.001f, 0.001f, 0.5f),
+            with_tip(f_float("snap_distance", 0.3f, 0.005f, 0.0f, 5.0f), "Keeps the character on the ground walking down ramps and steps"),
+            f_float("move_speed", 4.0f, 0.05f, 0.0f, 1000.0f, true),
+            f_float("sprint_multiplier", 1.8f, 0.01f, 0.0f, 100.0f),
+            with_tip(f_float("acceleration", 30.0f, 0.1f, 0.0f, 10000.0f), "m/s^2 toward the target speed"),
+            with_tip(f_float("air_control", 0.3f, 0.005f, 0.0f, 1.0f), "Fraction of the acceleration available in the air"),
+            f_float("gravity_scale", 1.0f, 0.01f, 0.0f, 100.0f),
+            with_tip(f_float("jump_height", 1.2f, 0.01f, 0.0f, 100.0f), "Apex height of a jump (m); 0 disables jumping"),
+            f_float("coyote_time", 0.12f, 0.005f, 0.0f, 5.0f),
+            f_float("jump_buffer", 0.12f, 0.005f, 0.0f, 5.0f),
+            f_bool("face_movement", true),
+            f_float("turn_speed", 720.0f, 1.0f, 0.0f, 100000.0f),
+            f_bool("push_dynamic_bodies", true),
+            with_tip(f_float("push_strength", 80.0f, 0.5f, 0.0f, 100000.0f), "Pushing mass (kg)"),
+            with_tip(f_bool("use_root_motion", false), "Move by the Animator's root motion instead of input"),
+        }});
+        // Defaults mirror toyengine/scene/scene_link.h.
+        add({"SceneLink", "Gameplay", {
+            with_tip(f_asset("target_scene", "scenes", ".yaml", false, false, "", true),
+                     "Scene to load when the player walks in (relative to this scene, or an asset path)"),
+            with_tip(f_enum("transition", {"fade", "loading_screen", "none"}, true), "What covers the scene change"),
+            with_tip(f_asset("loading_screen", "ui", ".yaml", true, false, "ui/loading_screen"),
+                     "UI asset shown while loading (transition: loading_screen); a 'progress' bar and 'status' text are filled in"),
+            with_tip(f_string("spawn_point", ""), "Object in the target scene the player is moved to"),
+            f_color("color", glm::vec3(0.0f)),
+            with_tip(f_float("fade_time", 0.35f, 0.01f, 0.0f, 10.0f), "Seconds to fade out, and again to fade in"),
+            with_tip(f_float("min_display_time", 0.0f, 0.01f, 0.0f, 60.0f), "The transition stays up at least this long"),
+            with_tip(f_vec3("size", glm::vec3(2.0f), 0.01f, true), "Trigger box, in the object's local space"),
+        }});
+        // toyengine/save/saveable.h. Adding one (or duplicating its object) fills in a fresh
+        // unique id -- SceneDocument::add_component() / duplicate_objects().
+        add({"SaveId", "Gameplay", {
+            with_tip(f_string("id", "", true), "Stable identity in saves; unique per scene (empty: the object's name path)"),
+        }});
+        add({"SaveDemo", "Gameplay", {
+            with_tip(f_string("coin_prefix", "coin_", true), "Root objects whose names start with this are coins"),
+            with_tip(f_float("pickup_radius", 1.0f, 0.01f, 0.0f, 100.0f), "Metres from the player's chest"),
+        }});
+        add({"CharacterAnimDriver", "Gameplay", {
+            f_string("idle_state", "idle", true),
+            f_string("walk_state", "walk", true),
+            f_string("run_state", "run", true),
+            f_string("jump_state", "jump", true),
+            with_tip(f_float("walk_speed", 0.2f, 0.01f, 0.0f, 100.0f), "Speed (m/s) above which walk plays"),
+            with_tip(f_float("run_speed", 5.0f, 0.01f, 0.0f, 100.0f), "Speed (m/s) above which run plays"),
+            f_float("crossfade", 0.2f, 0.005f, 0.0f, 10.0f),
+            f_float("air_delay", 0.15f, 0.005f, 0.0f, 10.0f),
         }});
         add({"KinematicMover", "Gameplay", {
             f_enum("mode", {"PingPong", "Orbit", "Spin"}, true),
@@ -690,7 +821,44 @@ inline std::map<std::string, ComponentSchema>& schema_table_() {
         // A rig root: its clips are `states` (managed in the Timeline -- one file each under
         // animations/<object>/), `auto_play` names the state played on start.
         add({"Animator", "Animation", {f_string("auto_play", "", true), f_float("speed", 1.0f, 0.01f, 0.0f, 100.0f),
-                                       f_float("default_crossfade", 0.0f, 0.005f, 0.0f, 10.0f)}});
+                                       f_float("default_crossfade", 0.0f, 0.005f, 0.0f, 10.0f),
+                                       with_tip(f_bool("apply_root_motion", false),
+                                                "Move this object by the clips' root motion (a CharacterController with "
+                                                "Use Root Motion takes it instead)")}});
+        // IK over the animated pose (coopa/animation/ik_components.h, toyengine/scene/foot_ik.h).
+        // Bone and target fields are paths from this object, like an animation track's object.
+        add({"TwoBoneIK", "Animation", {
+            with_tip(f_string("upper", "", true), "Hip / shoulder bone path"),
+            with_tip(f_string("lower", "", true), "Knee / elbow bone path"),
+            with_tip(f_string("end", "", true), "Ankle / wrist bone path (its origin reaches the target)"),
+            with_tip(f_string("target", "", true), "Object to reach for"),
+            with_tip(f_string("pole", ""), "Object the knee / elbow bends toward; empty keeps the animated bend"),
+            f_float("weight", 1.0f, 0.01f, 0.0f, 1.0f, true),
+            with_tip(f_float("soft_limit", 0.02f, 0.001f, 0.0f, 0.5f), "Fraction of the reach eased near full extension"),
+        }});
+        add({"LookAtIK", "Animation", {
+            with_tip(f_string("bone", "", true), "Bone path; empty turns this object"),
+            with_tip(f_string("target", "", true), "Object to look at"),
+            with_tip(f_vec3("forward_axis", glm::vec3(0.0f, 1.0f, 0.0f), 0.01f), "The bone's local looking axis"),
+            with_tip(f_vec3("up_axis", glm::vec3(0.0f, 0.0f, 1.0f), 0.01f), "The bone's local up, kept from rolling"),
+            with_tip(f_float("max_angle", 70.0f, 0.5f, 0.0f, 180.0f, true), "Degrees from the animated facing"),
+            f_float("weight", 1.0f, 0.01f, 0.0f, 1.0f, true),
+            with_tip(f_float("smoothing", 0.0f, 0.005f, 0.0f, 10.0f), "Seconds; 0 snaps"),
+        }});
+        add({"FootIK", "Animation", {
+            f_string("pelvis", "pelvis", true),
+            with_tip(f_strings("left", {"pelvis/thigh_l", "pelvis/thigh_l/shin_l", "pelvis/thigh_l/shin_l/foot_l"}, true),
+                     "Left leg: thigh, shin, foot bone paths"),
+            with_tip(f_strings("right", {"pelvis/thigh_r", "pelvis/thigh_r/shin_r", "pelvis/thigh_r/shin_r/foot_r"}, true),
+                     "Right leg: thigh, shin, foot bone paths"),
+            with_tip(f_float("ray_up", 0.5f, 0.005f, 0.0f, 10.0f), "Highest step a foot rises onto (m)"),
+            with_tip(f_float("ray_down", 0.5f, 0.005f, 0.0f, 10.0f), "Deepest dip a foot follows (m)"),
+            f_float("max_pelvis_drop", 0.35f, 0.005f, 0.0f, 5.0f),
+            f_bool("align_feet", true),
+            f_float("max_foot_angle", 30.0f, 0.5f, 0.0f, 89.0f),
+            with_tip(f_float("blend_speed", 12.0f, 0.1f, 0.0f, 1000.0f), "Ease rate (1/s); 0 snaps"),
+            f_float("weight", 1.0f, 0.01f, 0.0f, 1.0f, true),
+        }});
         // A mesh deformed by a rig's bones: `bones:` (or, omitted, the mesh's vertex groups)
         // resolved under `rig:` (default: the nearest Animator up the hierarchy).
         add({"SkinnedMeshRenderer", "Rendering", {f_asset("mesh_path", "meshes", ".yaml", true, true, "", true), f_string("rig", "")}});

@@ -186,6 +186,9 @@ inline void parse_particle_settings(const fkyaml::node& node, ParticleSettings& 
         s.space = enum_of<SimulationSpace>(str("simulation_space"),
                                            {{"world", SimulationSpace::World}, {"local", SimulationSpace::Local}}, "simulation_space");
     }
+    if (node.contains("simulation")) {
+        s.simulation = enum_of<SimulationMode>(str("simulation"), {{"cpu", SimulationMode::Cpu}, {"gpu", SimulationMode::Gpu}}, "simulation");
+    }
     if (node.contains("max_particles")) s.max_particles = static_cast<uint32_t>(std::max<int64_t>(0, node.at("max_particles").get_value<int64_t>()));
     if (node.contains("seed")) s.seed = static_cast<uint32_t>(node.at("seed").get_value<int64_t>());
     f("time_scale", s.time_scale);

@@ -76,6 +76,12 @@ layout(set = 2, binding = 3) uniform sampler2D dir_shadow_map_raw;
 // reason; getting it backwards binds the G-buffer set to a one-binding sampler and silently
 // renders a plausible-looking but unlit frame rather than failing.
 layout(set = 3, binding = 0) uniform sampler2D u_contact_shadow;
+// The physical sky's inputs (render sky_model: physical -- see sky_physical.glsl), on the same
+// extra set: the transmittance and sky-view LUTs and the half-resolution cloud layer. Bound
+// whether or not the physical sky is on; the gradient branch below never reads them.
+layout(set = 3, binding = 1) uniform sampler2D u_sky_transmittance;
+layout(set = 3, binding = 2) uniform sampler2D u_sky_view;
+layout(set = 3, binding = 3) uniform sampler2D u_sky_clouds;
 
 // Set 4: G-Buffer textures + screen-space AO -- LAST, after the extra above.
 layout(set = 4, binding = 0) uniform sampler2D g_albedo_ao;          // RGB = Albedo, A = AO
@@ -101,6 +107,7 @@ layout(location = 0) out vec4 out_color;
 
 #include "indirect_hooks.glsl"
 #include "pixel_shadow_body.glsl"
+#include "sky_physical.glsl"
 
 // Quantizes N.L into `params.light_bands` discrete steps -- the core of the
 // cel-shaded look. Bypassed entirely when soft_lighting is on (smooth N.L
@@ -153,6 +160,11 @@ void main() {
         vec3 ndc   = vec3(in_uv.x * 2.0 - 1.0, 1.0 - in_uv.y * 2.0, 1.0);
         vec4 world = params.sky_inv_view_proj * vec4(ndc, 1.0);
         vec3 dir   = normalize(world.xyz / world.w - camera.camera_pos);
+        // sky_params.x selects the physical sky (sky_physical.glsl); 0 keeps the gradient.
+        if (lights.sky_params.x > 0.5) {
+            out_color = vec4(sky_physical(dir, in_uv), 1.0);
+            return;
+        }
         out_color = vec4(sky_gradient(dir, lights.sky_zenith.rgb, lights.sky_horizon.rgb,
                                       lights.sky_ground.rgb), 1.0);
         return;

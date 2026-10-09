@@ -19,6 +19,10 @@ Outputs (all under assets/):
     `sway`.
   * ball: an object animating ITSELF (track object ""): a bounce with squash and stretch, using
     step and ease keys. Clip `bounce`.
+  * ik_watcher: IK -- a head on a post with a LookAtIK (clamped to 75 degrees, smoothed) following
+    a glowing target its own clip `orbit` flies around in front of it.
+  * ik_reacher: IK -- a two-bone arm (shoulder > elbow > hand) with a TwoBoneIK reaching for a
+    target its clip `drift` moves through the arm's reach, the elbow bending toward a pole object.
 
 Run:  python3 tools/gen_animation_test_scene.py   then   ./build/toyengine animation_test
 Open it in the toyeditor and select a rig object: the Timeline (bottom panel) shows its clips.
@@ -176,6 +180,19 @@ def write_clips():
         keys[1] = (1.0 + 0.15 * b, keys[1][1], "ease_in_out")
         tracks.append((path, "rotation_quat", keys))
     clip(os.path.join(tent, "sway.yaml"), "sway", "loop", 2.0, tracks)
+    # IK targets: plain position loops; the IK components do the rest.
+    ik = os.path.join(ASSETS, "animations", "ik_demo")
+    orbit = []
+    for i in range(9):
+        a = 2 * math.pi * i / 8
+        orbit.append((4.0 * i / 8, [1.3 * math.cos(a), -1.4 + 0.5 * math.sin(2 * a), 1.6 + 0.9 * math.sin(a)]))
+    clip(os.path.join(ik, "orbit.yaml"), "orbit", "loop", 4.0, [("look_target", "position", orbit)])
+    drift = []
+    for i in range(9):
+        a = 2 * math.pi * i / 8
+        drift.append((3.0 * i / 8, [0.45 * math.cos(a), -0.75 + 0.25 * math.sin(a), 1.15 + 0.5 * math.sin(a)]))
+    clip(os.path.join(ik, "drift.yaml"), "drift", "loop", 3.0, [("reach_target", "position", drift)])
+
     ball = os.path.join(ASSETS, "animations", "bouncing_ball")
     # The ball (a child) bounces relative to its rig, so a placed copy bounces where it stands.
     clip(os.path.join(ball, "bounce.yaml"), "bounce", "loop", 1.0, [
@@ -288,14 +305,85 @@ def rigs(at):
           mesh_path: ball
           material: {{albedo: {{r: 0.85, g: 0.15, b: 0.2}}, metallic: 0.0, roughness: 0.35}}
       children: []"""
-    return {"robot_arm": robot, "tentacle": tentacle, "bouncing_ball": ball}
+    glow = "{albedo: {r: 1.0, g: 0.85, b: 0.3}, roughness: 0.4, emissive: {r: 1.6, g: 1.1, b: 0.25}}"
+    blue = "{albedo: {r: 0.3, g: 0.75, b: 1.0}, roughness: 0.4, emissive: {r: 0.25, g: 0.8, b: 1.6}}"
+
+    def sphere(name, pos, size, material):
+        return f"""- name: {name}
+  components:
+    - type: Transform
+      position: {{x: {pos[0]}, y: {pos[1]}, z: {pos[2]}}}
+      scale: {{x: {size}, y: {size}, z: {size}}}
+    - type: MeshRenderer
+      mesh_path: ball
+      material: {material}
+  children: []"""
+
+    # The watcher's head faces -Y (toward the scene camera); its visor marks the front.
+    head = empty("head", (0, 0, 0.12), indent(cube("head_shape", (0, 0, 0.18), (0.42, 0.38, 0.36), steel), 4) + "\n" +
+                 indent(cube("visor", (0, -0.2, 0.22), (0.32, 0.06, 0.1), orange), 4))
+    neck = empty("neck", (0, 0, 1.45), indent(cube("neck_shape", (0, 0, 0.05), (0.14, 0.14, 0.16), dark), 4) + "\n" + indent(head, 4))
+    watcher = f"""- name: ik_watcher
+  components:
+    - type: Transform
+      position: {{x: {at['ik_watcher'][0]}, y: {at['ik_watcher'][1]}, z: {at['ik_watcher'][2]}}}
+    - type: Animator
+      auto_play: orbit
+      states:
+        - {{name: orbit, clip: animations/ik_demo/orbit.yaml}}
+    - type: LookAtIK
+      bone: neck/head
+      target: look_target
+      forward_axis: {{x: 0, y: -1, z: 0}}
+      up_axis: {{x: 0, y: 0, z: 1}}
+      max_angle: 75
+      smoothing: 0.12
+  children:
+{indent(cube("post", (0, 0, 0.72), (0.18, 0.18, 1.44), dark), 4)}
+{indent(neck, 4)}
+{indent(sphere("look_target", (1.3, -1.4, 1.6), 0.22, glow), 4)}"""
+
+    # The reacher: a straight arm at rest (shoulder > elbow > hand, 1.0 + 0.9 m), bent by IK.
+    hand_r = empty("reach_hand", (0, 0, 0.9), indent(cube("reach_palm", (0, 0, 0.08), (0.24, 0.12, 0.18), orange), 4))
+    forearm_r = empty("reach_elbow", (0, 0, 1.0), indent(cube("reach_elbow_joint", (0, 0, 0), (0.22, 0.22, 0.22), orange), 4) + "\n" +
+                      indent(cube("reach_forearm_shape", (0, 0, 0.45), (0.15, 0.15, 0.9), steel), 4) + "\n" + indent(hand_r, 4))
+    shoulder_r = empty("reach_shoulder", (0, 0, 0.3), indent(cube("reach_shoulder_joint", (0, 0, 0), (0.28, 0.28, 0.28), orange), 4) + "\n" +
+                       indent(cube("reach_upper_shape", (0, 0, 0.5), (0.2, 0.2, 1.0), steel), 4) + "\n" + indent(forearm_r, 4))
+    reacher = f"""- name: ik_reacher
+  components:
+    - type: Transform
+      position: {{x: {at['ik_reacher'][0]}, y: {at['ik_reacher'][1]}, z: {at['ik_reacher'][2]}}}
+    - type: Animator
+      auto_play: drift
+      states:
+        - {{name: drift, clip: animations/ik_demo/drift.yaml}}
+    - type: TwoBoneIK
+      upper: reach_shoulder
+      lower: reach_shoulder/reach_elbow
+      end: reach_shoulder/reach_elbow/reach_hand
+      target: reach_target
+      pole: elbow_pole
+      soft_limit: 0.03
+  children:
+{indent(cube("reacher_base", (0, 0, 0.15), (0.6, 0.6, 0.3), dark), 4)}
+{indent(shoulder_r, 4)}
+{indent(sphere("reach_target", (0.45, -0.75, 1.15), 0.18, blue), 4)}
+    - name: elbow_pole
+      components:
+        - type: Transform
+          position: {{x: 0, y: 1.2, z: 1.6}}
+      children: []"""
+    return {"robot_arm": robot, "tentacle": tentacle, "bouncing_ball": ball, "ik_watcher": watcher, "ik_reacher": reacher}
 
 
-OBJECT_FILES = {"robot_arm": "robot_arm", "tentacle": "tentacle", "bouncing_ball": "bouncing_ball"}
+OBJECT_FILES = {"robot_arm": "robot_arm", "tentacle": "tentacle", "bouncing_ball": "bouncing_ball",
+                "ik_watcher": "ik_watcher", "ik_reacher": "ik_reacher"}
 OBJECT_NOTES = {
     "robot_arm": "an object-hierarchy rig (joints are empties, shapes are child cubes); clips wave + idle",
     "tentacle": "a skinned rig: vertex groups seg_0..seg_3 bind the tube to its chain of bones; clip sway",
     "bouncing_ball": "a squash-and-stretch bounce of the child ball, relative to where the rig is placed; clip bounce",
+    "ik_watcher": "LookAtIK: a head on a post following a target its clip orbit flies around it",
+    "ik_reacher": "TwoBoneIK: a two-bone arm reaching for a target its clip drift moves, elbow toward a pole",
 }
 
 
@@ -314,8 +402,10 @@ def write_objects():
 
 
 def scene():
-    r = rigs({"robot_arm": (-2.2, 0.0, 0.0), "tentacle": (0.8, 0.6, 0.0), "bouncing_ball": (3.2, -1.2, 0.0)})
+    r = rigs({"robot_arm": (-2.2, 0.0, 0.0), "tentacle": (0.8, 0.6, 0.0), "bouncing_ball": (3.2, -1.2, 0.0),
+              "ik_watcher": (-4.4, 2.2, 0.0), "ik_reacher": (4.6, 2.0, 0.0)})
     robot, tentacle, ball = r["robot_arm"], r["tentacle"], r["bouncing_ball"]
+    watcher, reacher = r["ik_watcher"], r["ik_reacher"]
 
 
     text = f"""# animation_test -- rigs as object hierarchies, animated by clip files (toyengine + toyeditor).
@@ -324,6 +414,8 @@ def scene():
 #   * robot_arm: an object-hierarchy rig, clips `wave` (auto-played) and `idle`.
 #   * tentacle: a skinned rig -- vertex groups bind the tube mesh to its chain of bones.
 #   * bouncing_ball: a squash-and-stretch bounce.
+#   * ik_watcher: LookAtIK -- a head tracking a glowing target (clamped, smoothed).
+#   * ik_reacher: TwoBoneIK -- an arm reaching for a moving target, its elbow toward a pole.
 # Clips and meshes are shared with the object assets (assets/objects/): assets/animations/,
 # assets/meshes/ -- paths resolve next to this scene first, then from assets/.
 #
@@ -346,6 +438,8 @@ scene:
 {indent(robot, 4)}
 {indent(tentacle, 4)}
 {indent(ball, 4)}
+{indent(watcher, 4)}
+{indent(reacher, 4)}
     - name: camera
       components:
         - type: Transform

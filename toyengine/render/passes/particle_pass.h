@@ -56,6 +56,7 @@
 #include <gfxcoopa/types/vertex_layout.h>
 
 #include <toyengine/render/particle_types.h>
+#include <toyengine/render/passes/gpu_particle_pass.h>
 
 namespace toy {
 namespace render {
@@ -129,9 +130,16 @@ public:
     void upload(uint32_t frame_slot, const std::vector<ParticleDrawBatch>& batches) {
         frame_slot_ = frame_slot;
         firsts_.assign(batches.size(), 0);
+        gpu_ids_.assign(batches.size(), 0);
+        gpu_batches_ = 0;
         uint32_t total = 0;
         for (size_t i = 0; i < batches.size(); ++i) {
             firsts_[i] = total;
+            if (batches[i].gpu_id) {   // GPU-simulated: drawn from GpuParticlePass's buffers
+                gpu_ids_[i] = batches[i].gpu_id;
+                ++gpu_batches_;
+                continue;
+            }
             total += batches[i].count;
         }
         total_ = total;
@@ -143,13 +151,17 @@ public:
             capacity_[frame_slot] = cap;
         }
         for (size_t i = 0; i < batches.size(); ++i) {
-            if (batches[i].count == 0) continue;
+            if (batches[i].count == 0 || batches[i].gpu_id) continue;
             buffers_[frame_slot]->upload(batches[i].instances, sizeof(ParticleInstance) * batches[i].count,
                                          sizeof(ParticleInstance) * firsts_[i]);
         }
     }
 
-    uint32_t total_instances() const { return total_; }
+    /** @brief CPU instances uploaded this frame, plus one per GPU batch (whose count is unknown here). */
+    uint32_t total_instances() const { return total_ + gpu_batches_; }
+
+    /** @brief The GPU particle simulation whose buffers `gpu_id` batches draw from (null: none). */
+    void set_gpu(const GpuParticlePass* gpu) { gpu_ = gpu; }
 
     /** @brief Binds the pipeline -- before the caller binds sets 0-4. */
     void bind(coopa::gfx::command::CommandBuffer& cmd) const { cmd.bind_pipeline(*pipeline_); }
@@ -173,6 +185,12 @@ public:
     /** @brief One batch: its slice of the instance buffer, its look, six vertices per instance. */
     void draw(coopa::gfx::command::CommandBuffer& cmd, size_t batch, uint32_t count, const PushConstants& pc) const {
         if (count == 0 || batch >= firsts_.size()) return;
+        if (gpu_ids_[batch]) {
+            if (!gpu_) return;
+            cmd.push_constants(coopa::gfx::ShaderStage::Vertex | coopa::gfx::ShaderStage::Fragment, pc);
+            gpu_->draw(cmd, gpu_ids_[batch]);
+            return;
+        }
         cmd.bind_vertex_buffer(*buffers_[frame_slot_], sizeof(ParticleInstance) * static_cast<VkDeviceSize>(firsts_[batch]), 0);
         cmd.push_constants(coopa::gfx::ShaderStage::Vertex | coopa::gfx::ShaderStage::Fragment, pc);
         cmd.draw(6, 0, count);
@@ -195,6 +213,9 @@ private:
     std::array<std::unique_ptr<coopa::gfx::memory::Buffer>, kFrames> buffers_;
     std::array<uint32_t, kFrames> capacity_{};
     std::vector<uint32_t> firsts_;
+    std::vector<uint64_t> gpu_ids_;
+    uint32_t gpu_batches_ = 0;
+    const GpuParticlePass* gpu_ = nullptr;
     uint32_t frame_slot_ = 0;
     uint32_t total_ = 0;
 };

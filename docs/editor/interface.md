@@ -67,6 +67,7 @@ or while the game is playing.
 | **Delete** | **X** | Deletes the selected objects |
 | **Rename Active Item** | **F2** | Starts renaming the selected object in the Hierarchy |
 | **Theme** | | Changes the editor's colours. See [Change the editor's colours](#change-the-editors-colours). |
+| **Project Settings...** | | The project's render, output and physics settings (`assets/config.yaml`). See [Project settings](project-settings.md#change-the-projects-settings). |
 | **Preferences...** | | Opens the **Controls** window. A separate preferences window is not yet available. |
 
 ### Render
@@ -74,8 +75,10 @@ or while the game is playing.
 | Item | What it does |
 |---|---|
 | **Render Image** | Saves the current view as a PNG image in the project's `renders` folder. The **F12** key shown next to it is not yet available. |
-| **Restart Renderer** | Applies settings that only take effect on a restart. See [Project settings](project-settings.md#apply-settings-that-need-a-restart). |
-| **Render Settings** | Opens the **Render** tab in Properties |
+| **Rebuild Renderer** | Rebuilds the renderer in place from the current settings. The window stays open. See [Project settings](project-settings.md#settings-that-rebuild-the-renderer). |
+| **Restart Editor Engine...** | Recreates the whole engine and window. Only needed for settings fixed at start-up, such as **Texel AA**. |
+| **Project Settings...** | Opens Project Settings, the same as **Edit > Project Settings...** |
+| **Scene Render Settings** | Opens the **Render** tab in Properties, the open scene's overrides |
 | **World Settings** | Opens the **World** tab in Properties |
 
 ### Build
@@ -286,6 +289,10 @@ To make your own theme, choose **Edit > Theme > Export Full Theme**. This saves 
 of the current theme, which then appears in the same menu with **(full)** after its name. The
 Console shows where the file was saved. **Reload Theme** reads the theme's file again after it
 has been changed outside the editor.
+
+Tooltips appear once the pointer rests on an item for about 0.6 seconds. Moving the pointer or
+clicking hides them until it rests again. A theme file can change the wait with
+`tooltip_delay` (in seconds) under `metrics:`.
 
 These colours are for the editor only. The colours of your game's own UI are set in a game UI
 theme, see [UI designer](ui-designer.md#style-the-ui-with-a-theme).

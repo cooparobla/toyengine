@@ -1,0 +1,25 @@
+#version 450
+
+// GPU particles: resets one system's state -- every slot free (the free list holds them all,
+// highest index first so slot 0 pops first), every particle dead, the draw args' header set.
+// See toyengine/render/passes/gpu_particle_pass.h.
+
+layout(local_size_x = 64) in;
+
+#include "particles_gpu_common.glsl"
+
+void main() {
+    uint cap = uint(P.config.x);
+    uint i = gl_GlobalInvocationID.x;
+    if (i == 0u) {
+        vertex_count = 6u;
+        instance_count = 0u;
+        first_vertex = 0u;
+        first_instance = 0u;
+        free_count = int(cap);
+    }
+    if (i >= cap) return;
+    free_list[i] = cap - 1u - i;
+    particles[i].vel_life = vec4(0.0);
+    particles[i].pos_age = vec4(0.0);
+}

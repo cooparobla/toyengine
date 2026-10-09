@@ -43,6 +43,11 @@ mesh), `size`, `resolution`, `tile_size`; waves `wave_amplitude`, `wave_length`,
 `edge_fade_depth`, `ripple_strength`, `ripple_scale`, `clarity`; underwater `underwater_color`,
 `underwater_visibility`, `underwater_absorption`, `caustics`; physics `density`, `max_depth`.
 
+The global fog (render `fog_*`) and water cooperate: the water surface is fogged at its own
+distance, so it hazes exactly like the shore beside it, and with the camera under water the air
+fog applies only beyond where a view ray leaves the surface. The underwater look is the
+`underwater_*` keys alone; there is no need to turn the global fog down for underwater shots.
+
 The WaterBody itself sets the material's `shader: water`, its `shader_params` (waves) and
 `shader_params_ext` (foam, ripples) from the WaterBody keys -- don't set those on the material;
 tune the WaterBody instead. The material must be **BLEND** (`materials/water` is the shared

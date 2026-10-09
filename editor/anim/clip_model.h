@@ -13,6 +13,10 @@
  * resolves it. Rotations are keyed as `rotation_quat` (see coopa's AnimatedPropertyRegistry):
  * set_key() flips a quaternion to the hemisphere of its neighbouring key so the runtime's
  * per-channel interpolation (nlerp) takes the short way round.
+ *
+ * Clip events (`events:`, coopa::anim::AnimationEvent) are first-class: the Timeline's Events
+ * lane adds, drags, renames and deletes them. They stay sorted by time (stable), as the runtime
+ * sorts them. A clip's `root_motion:` block is carried through as an unknown key (extra).
  */
 
 #ifndef TOYEDITOR_ANIM_CLIP_MODEL_H
@@ -53,6 +57,18 @@ struct ClipTrack {
     }
 };
 
+/** @brief One clip event: a named marker the Animator fires when its playhead crosses `time`. */
+struct ClipEvent {
+    float time = 0.0f;
+    std::string name = "event";
+    std::string string_value;       ///< `string:` (omitted when empty).
+    float float_value = 0.0f;       ///< `float:` (omitted when 0).
+    Node extra = Node::mapping();   ///< Unknown event keys, written back verbatim.
+    bool operator==(const ClipEvent& o) const {
+        return time == o.time && name == o.name && string_value == o.string_value && float_value == o.float_value && extra == o.extra;
+    }
+};
+
 /** @brief Values a property carries (position: 3, rotation_quat: 4, ...); suffixes count their channels. */
 inline int clip_property_components(const std::string& property) {
     const size_t dot = property.find('.');
@@ -67,10 +83,11 @@ struct ClipModel {
     std::string wrap = "loop";    ///< loop / once / pingpong
     float length = 1.0f;          ///< Seconds (always written: the runtime needs it to wrap).
     std::vector<ClipTrack> tracks;
+    std::vector<ClipEvent> events;  ///< Sorted by time (stable).
     Node extra = Node::mapping();   ///< Unknown `clip:` keys (and other top-level keys under `__root`), written back verbatim.
 
     bool operator==(const ClipModel& o) const {
-        return name == o.name && wrap == o.wrap && length == o.length && tracks == o.tracks && extra == o.extra;
+        return name == o.name && wrap == o.wrap && length == o.length && tracks == o.tracks && events == o.events && extra == o.extra;
     }
 
     /** @brief The keys of `n` not in `known`, as a mapping. */
@@ -97,7 +114,20 @@ struct ClipModel {
         ClipModel m;
         if (!root.is_mapping() || !root.contains("clip")) return m;
         const Node& c = root.at("clip");
-        m.extra = extras_of(c, {"name", "wrap", "length", "tracks"});
+        m.extra = extras_of(c, {"name", "wrap", "length", "tracks", "events"});
+        if (c.contains("events") && c.at("events").is_sequence()) {
+            for (const auto& en : c.at("events").as_seq()) {
+                if (!en.is_mapping()) continue;
+                ClipEvent e;
+                e.time = get_float(en, "time", 0.0f);
+                e.name = get_string(en, "name", "");
+                e.string_value = get_string(en, "string", "");
+                e.float_value = get_float(en, "float", 0.0f);
+                e.extra = extras_of(en, {"time", "name", "string", "float"});
+                m.events.push_back(std::move(e));
+            }
+            m.sort_events_();
+        }
         m.name = get_string(c, "name", m.name);
         m.wrap = get_string(c, "wrap", m.wrap);
         float max_t = 0.0f;
@@ -172,6 +202,19 @@ struct ClipModel {
             ts.as_seq().push_back(tn);
         }
         c["tracks"] = ts;
+        if (!events.empty()) {
+            Node es = Node::sequence();
+            for (const auto& e : events) {
+                Node en = Node::mapping();
+                en["time"] = make_float(e.time);
+                en["name"] = Node(e.name);
+                if (!e.string_value.empty()) en["string"] = Node(e.string_value);
+                if (e.float_value != 0.0f) en["float"] = make_float(e.float_value);
+                put_extras(en, e.extra);
+                es.as_seq().push_back(en);
+            }
+            c["events"] = es;
+        }
         put_extras(c, extra);
         Node root = Node::mapping();
         root["clip"] = c;
@@ -346,6 +389,43 @@ struct ClipModel {
             t.keys = std::move(keep);
         }
         return moved;
+    }
+
+    // --- events ---
+
+    void sort_events_() {
+        std::stable_sort(events.begin(), events.end(), [](const ClipEvent& a, const ClipEvent& b) { return a.time < b.time; });
+    }
+
+    /** @brief Adds an event at `time` (clamped at 0), after any already there; returns its index. */
+    size_t add_event(float time, const std::string& event_name) {
+        ClipEvent e;
+        e.time = std::max(0.0f, time);
+        e.name = event_name;
+        size_t at = 0;
+        while (at < events.size() && events[at].time <= e.time) ++at;
+        events.insert(events.begin() + static_cast<std::ptrdiff_t>(at), std::move(e));
+        return at;
+    }
+
+    /** @brief Moves event `index` to `time` (clamped at 0); returns its new index (-1 if none). */
+    int move_event(size_t index, float time) {
+        if (index >= events.size()) return -1;
+        ClipEvent e = events[index];
+        events.erase(events.begin() + static_cast<std::ptrdiff_t>(index));
+        e.time = std::max(0.0f, time);
+        // Insert after every event at or before the new time (stable relative order).
+        size_t at = 0;
+        while (at < events.size() && events[at].time <= e.time) ++at;
+        events.insert(events.begin() + static_cast<std::ptrdiff_t>(at), e);
+        return static_cast<int>(at);
+    }
+
+    /** @brief Removes event `index`; false if out of range. */
+    bool delete_event(size_t index) {
+        if (index >= events.size()) return false;
+        events.erase(events.begin() + static_cast<std::ptrdiff_t>(index));
+        return true;
     }
 
     /** @brief Renames a track object path (an object renamed or moved in the rig), including its descendants'. */

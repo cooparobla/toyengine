@@ -82,6 +82,9 @@ inline void run_range(const ParallelFor* par, std::size_t n, const RangeFn& fn) 
 
 enum class ParticleMode { Emitter, Scatter };
 enum class SimulationSpace { World, Local };
+/// Where the particles are simulated: `cpu` (the default) here on the job workers, `gpu` in
+/// compute shaders (toyengine/render/passes/gpu_particle_pass.h) -- see ParticleSystem.
+enum class SimulationMode { Cpu, Gpu };
 enum class SortMode { None, Distance, OldestFirst, YoungestFirst };
 enum class FlipbookMode { Lifetime, Random, Fps };
 
@@ -172,7 +175,11 @@ struct ParticleSettings {
     glm::vec4       start_color_b{1.0f};  ///< A random mix between start_color and this.
     float           gravity = 0.0f;       ///< Multiplier on 9.81 m/s^2 toward -Z.
     SimulationSpace space = SimulationSpace::World;
-    uint32_t        max_particles = 1000;
+    uint32_t        max_particles = 1000;  ///< Pool cap; a GPU system's fixed buffer size.
+    /// `gpu`: emit / simulate / sort in compute shaders (high counts: 100k sparks). Falls back to
+    /// the CPU, with one warning, for what the GPU path lacks (see gpu_fallback_reason()) or when
+    /// `particles.gpu_enabled` is off / the device has no compute.
+    SimulationMode  simulation = SimulationMode::Cpu;
     uint32_t        seed = 0;             ///< 0: derived from the object's name.
     float           time_scale = 1.0f;
 
@@ -338,6 +345,11 @@ public:
     void pause(bool paused) { paused_ = paused; }
     bool paused() const { return paused_; }
     void clear() {
+        // A GPU system resets its buffers on the next job (new generation).
+        ++gpu_generation_;
+        gpu_alive_ = 0;
+        gpu_spawn_ = 0;
+        gpu_dt_ = 0.0f;
         pool_.clear();
         pending_at_.clear();
         pending_emit_ = 0;
@@ -367,8 +379,13 @@ public:
     bool is_playing() const { return playing_; }
     bool is_emitting() const { return playing_ && emitting_; }
     /** @brief Still has something to do: emitting, or particles alive. */
-    bool is_alive() const { return is_emitting() || !pool_.empty() || !pending_at_.empty() || pending_emit_ > 0; }
-    uint32_t particle_count() const { return static_cast<uint32_t>(pool_.size()); }
+    bool is_alive() const {
+        return is_emitting() || !pool_.empty() || !pending_at_.empty() || pending_emit_ > 0 ||
+               (gpu_active_ && (gpu_alive_ > 0 || gpu_spawn_ > 0));
+    }
+    /** @brief Live particles: the pool's size, or for a GPU system the last read-back alive
+     *         count (a couple of frames old). */
+    uint32_t particle_count() const { return gpu_active_ ? gpu_alive_ : static_cast<uint32_t>(pool_.size()); }
     float time() const { return time_; }
 
     // ------------------------------------------------------------------ simulation
@@ -389,6 +406,11 @@ public:
             const float step_dt = 1.0f / 30.0f;
             const int steps = static_cast<int>(std::ceil(std::max(settings.duration, 0.0f) / step_dt));
             for (int i = 0; i < steps; ++i) step_once_(step_dt, par, true);
+        }
+        if (gpu_active_) {
+            step_gpu_(paused_ ? 0.0f : dt * std::max(settings.time_scale, 0.0f));
+            prev_world_ = world_;
+            return;
         }
         if (paused_ || dt <= 0.0f) {
             prev_world_ = world_;
@@ -525,6 +547,123 @@ public:
 
     /** @brief Emitter world position (for culling by distance). */
     glm::vec3 emitter_position() const { return glm::vec3(world_[3]); }
+
+    // ------------------------------------------------------------------ GPU simulation
+
+    /**
+     * @brief Why this system cannot simulate on the GPU, or empty when it can. The GPU path
+     *        covers emitters with every analytic shape and mesh faces, forces, drag, noise,
+     *        orbital / radial, the over-life curves, ground-plane collision, wrap and sorting;
+     *        not sub emitters (either end), scatter, mesh render mode, prewarm, a runtime
+     *        GroundField or mesh vertex / edge emission.
+     */
+    std::string gpu_fallback_reason(bool is_sub_target) const {
+        if (settings.mode == ParticleMode::Scatter) return "scatter mode";
+        if (settings.look.mode == render::ParticleRenderMode::Mesh) return "mesh render mode";
+        if (!settings.on_death.empty()) return "sub emitters (on_death)";
+        if (is_sub_target) return "it is another system's sub emitter";
+        if (settings.prewarm) return "prewarm";
+        if (ground_field) return "a runtime ground field";
+        if (settings.shape.type == EmitShape::Mesh && settings.shape.emit_from != MeshEmitFrom::Faces)
+            return "mesh emit_from vertices / edges";
+        return {};
+    }
+    /** @brief Set by ParticleSimulationSystem each step; switching either way clears the pool. */
+    void set_gpu_active(bool on) {
+        if (on == gpu_active_) return;
+        clear();
+        gpu_active_ = on;
+    }
+    bool gpu_active() const { return gpu_active_; }
+    /// The runner's once-per-system fallback warning has been printed.
+    bool gpu_fallback_warned = false;
+    /** @brief The renderer's read-back alive count; ignored unless it is of this generation. */
+    void set_gpu_alive(uint32_t count, uint32_t generation) {
+        if (gpu_active_ && generation == gpu_generation_) gpu_alive_ = count;
+    }
+    uint64_t gpu_id() const { return gpu_id_; }
+
+    /**
+     * @brief This frame's GPU job: the births and time accumulated since the last job, and every
+     *        setting as GpuParticleParams. False when idle (stopped with nothing alive).
+     */
+    bool make_gpu_job(const ParticleView& view, render::GpuParticleJob& job) {
+        if (!gpu_active_ || !started_) return false;
+        if (!playing_ && gpu_alive_ == 0 && gpu_spawn_ == 0) {
+            gpu_dt_ = 0.0f;
+            return false;
+        }
+        static std::atomic<uint64_t> next_id{1};
+        if (gpu_id_ == 0) gpu_id_ = next_id.fetch_add(1);
+        const ParticleSettings& s = settings;
+        const bool local = simulates_locally_();
+        if (!has_job_world_) { job_prev_world_ = world_; has_job_world_ = true; }
+        job.id = gpu_id_;
+        job.generation = gpu_generation_;
+        job.capacity = std::max(1u, s.max_particles);
+        job.sort = s.sort != SortMode::None && s.look.additive < 0.999f;
+        job.triangles.reset();
+        render::GpuParticleParams& P = job.params;
+        const float dt = gpu_dt_;
+        P.world = world_;
+        P.prev_world = job_prev_world_;
+        P.to_world = local ? world_ : glm::mat4(1.0f);
+        // A float in [1, 2): 23 random mantissa bits the shader hashes, never a NaN pattern.
+        const uint32_t seed_bits = (rng_.next_u32() & 0x007FFFFFu) | 0x3F800000u;
+        float seed_f;
+        std::memcpy(&seed_f, &seed_bits, sizeof(seed_f));
+        P.frame = glm::vec4(dt, sim_clock_ * s.noise_scroll, static_cast<float>(std::min(gpu_spawn_, job.capacity)), seed_f);
+        const float sort_mode = !job.sort ? 0.0f : s.sort == SortMode::Distance ? 1.0f : s.sort == SortMode::OldestFirst ? 2.0f : 3.0f;
+        const float scale_world = local ? std::cbrt(std::abs(glm::determinant(glm::mat3(world_)))) : 1.0f;
+        P.config = glm::vec4(static_cast<float>(job.capacity), sort_mode, local ? 1.0f : 0.0f, scale_world);
+        P.eye = glm::vec4(view.camera_pos, std::max(1.0f, s.look.flipbook.x * s.look.flipbook.y));
+        const ShapeSettings& sh = s.shape;
+        P.shape0 = glm::vec4(static_cast<float>(sh.type), sh.radius, sh.radius_thickness, sh.angle_deg);
+        P.shape1 = glm::vec4(sh.arc_deg, sh.random_direction, sh.normal_offset, sh.length);
+        P.shape_box = glm::vec4(sh.box, 0.0f);
+        P.shape_offset = glm::vec4(sh.offset, 0.0f);
+        if (sh.type == EmitShape::Mesh && surface_ready_) {
+            if (gpu_tris_src_ != surface_.get()) {
+                gpu_tris_ = std::make_shared<const std::vector<glm::vec4>>(surface_->export_faces());
+                gpu_tris_src_ = surface_.get();
+            }
+            job.triangles = gpu_tris_;
+            P.shape_box.w = static_cast<float>(surface_->triangle_count());
+            P.shape_offset.w = surface_->area();
+        }
+        P.life_speed = glm::vec4(s.start_lifetime.min, s.start_lifetime.max, s.start_speed.min, s.start_speed.max);
+        P.size_rot = glm::vec4(s.start_size.min, s.start_size.max, glm::radians(s.start_rotation.min), glm::radians(s.start_rotation.max));
+        P.spin = glm::vec4(glm::radians(s.angular_velocity.min), glm::radians(s.angular_velocity.max),
+                           s.align_to_normal ? 1.0f : 0.0f, s.random_spin ? 1.0f : 0.0f);
+        P.color_a = s.start_color;
+        P.color_b = s.start_color_b;
+        const glm::mat3 inv_rot = local ? glm::inverse(glm::mat3(world_)) : glm::mat3(1.0f);
+        P.accel = glm::vec4(inv_rot * (glm::vec3(0.0f, 0.0f, -9.81f * s.gravity) + s.force), s.drag);
+        P.velocity = glm::vec4(s.velocity, s.orbital);
+        P.center = glm::vec4(local ? glm::vec3(0.0f) : glm::vec3(world_[3]), s.radial);
+        P.axis = glm::vec4(local ? glm::vec3(0.0f, 0.0f, 1.0f) : glm::normalize(glm::mat3(world_)[2] + glm::vec3(0.0f, 0.0f, 1e-8f)),
+                           glm::radians(s.tumble));
+        P.collision = glm::vec4(s.collide ? 1.0f : 0.0f, s.ground_height, s.bounce, 1.0f - std::clamp(s.collision_friction, 0.0f, 1.0f));
+        P.wrap = glm::vec4(local ? glm::vec3(0.0f) : glm::max(s.wrap_box, glm::vec3(0.0f)), std::max(s.wrap_fade, 0.0f));
+        P.noise = glm::vec4(s.noise_strength, s.kill_on_collide ? 1.0f : 0.0f, static_cast<float>(s.flipbook_mode), s.flipbook_fps);
+        glm::vec3 inherit(0.0f);
+        if (!local && s.inherit_velocity != 0.0f && dt > 0.0f) {
+            inherit = (glm::vec3(world_[3]) - glm::vec3(job_prev_world_[3])) / dt * s.inherit_velocity;
+        }
+        P.misc = glm::vec4(s.flipbook_cycles, inherit);
+        const glm::quat er = glm::quat_cast(orthonormal_(glm::mat3(world_)));
+        P.emitter_rot = glm::vec4(er.x, er.y, er.z, er.w);
+        turbulence_.export_waves(P.noise_k, P.noise_c);
+        for (int i = 0; i < 64; ++i) {
+            const float t = static_cast<float>(i) / 63.0f;
+            P.color_lut[i] = s.color_over_life.evaluate(t);
+            P.curve_lut[i] = glm::vec4(s.size_over_life.evaluate(t), s.alpha_over_life.evaluate(t), 0.0f, 0.0f);
+        }
+        gpu_spawn_ = 0;
+        gpu_dt_ = 0.0f;
+        job_prev_world_ = world_;
+        return true;
+    }
 
     /// Raw pool access for tests and tools.
     struct Pool {
@@ -842,6 +981,99 @@ private:
         compute_bounds_(par);
     }
 
+    /** @brief A GPU system's CPU half: the clock, the emission count (rate, distance, bursts --
+     *         the same emission_count_() as the CPU path) and conservative bounds. */
+    void step_gpu_(float dt) {
+        if (dt > 0.0f) {
+            const float t0 = time_;
+            time_ += dt;
+            sim_clock_ += dt;
+            pending_at_.clear();
+            if (can_spawn_()) {
+                const uint64_t n = static_cast<uint64_t>(emission_count_(t0, time_)) + pending_emit_;
+                pending_emit_ = 0;
+                gpu_spawn_ = static_cast<uint32_t>(std::min<uint64_t>(gpu_spawn_ + n, std::max(1u, settings.max_particles)));
+            }
+            if (!settings.looping && time_ - settings.start_delay >= settings.duration) emitting_ = false;
+            gpu_dt_ += dt;
+        }
+        compute_gpu_bounds_();
+    }
+
+    /**
+     * @brief Bounds a GPU system's particles cannot leave, from the settings alone (nothing is
+     *        read back): per axis, the extremes of v0 t + a t^2 / 2 over a lifetime with the
+     *        fastest start speed, gravity + force and the noise strength, around the shape and
+     *        the emitter's path over the last lifetime; clamped by the ground and the wrap box.
+     */
+    void compute_gpu_bounds_() {
+        const ParticleSettings& s = settings;
+        const float L = std::max({s.start_lifetime.min, s.start_lifetime.max, 0.0f});
+        const float vmax = std::max(std::abs(s.start_speed.min), std::abs(s.start_speed.max));
+        const glm::vec3 acc = glm::vec3(0.0f, 0.0f, -9.81f * s.gravity) + s.force;
+        const float nz = std::abs(s.noise_strength);
+        auto extreme = [L](float v0, float a, bool upper) {
+            auto f = [&](float t) { return v0 * t + 0.5f * a * t * t; };
+            float best = upper ? std::max(0.0f, f(L)) : std::min(0.0f, f(L));
+            if (a != 0.0f) {
+                const float ts = -v0 / a;
+                if (ts > 0.0f && ts < L) best = upper ? std::max(best, f(ts)) : std::min(best, f(ts));
+            }
+            return best;
+        };
+        glm::vec3 lo(0.0f), hi(0.0f);
+        float far = 0.0f;
+        for (int k = 0; k < 3; ++k) {
+            hi[k] = extreme(vmax + s.velocity[k], acc[k] + nz, true);
+            lo[k] = extreme(-vmax + s.velocity[k], acc[k] - nz, false);
+            far = std::max({far, std::abs(hi[k]), std::abs(lo[k])});
+        }
+        const ShapeSettings& sh = s.shape;
+        float R = 0.0f;
+        switch (sh.type) {
+            case EmitShape::Point: break;
+            case EmitShape::Box:   R = 0.5f * glm::length(sh.box); break;
+            case EmitShape::Edge:  R = 0.5f * sh.length; break;
+            case EmitShape::Mesh:
+                if (surface_ready_) R = std::max(glm::length(surface_->bounds_min()), glm::length(surface_->bounds_max()));
+                break;
+            default: R = sh.radius; break;
+        }
+        R += glm::length(sh.offset) + std::abs(sh.normal_offset);
+        const float swirl = std::abs(s.orbital) * (R + far) * L + std::abs(s.radial) * L;
+        const float sc = std::cbrt(std::abs(glm::determinant(glm::mat3(world_))));
+        const glm::vec3 ep(world_[3]);
+
+        float peak = 1.0f;
+        for (const auto& k : s.size_over_life.keys()) peak = std::max(peak, k.y);
+        float reach = std::max(1.0f, s.look.aspect) * (0.75f + std::abs(s.look.pivot_z));
+        if (s.look.mode == render::ParticleRenderMode::Stretched) reach += s.look.stretch_length;
+        const float pad = s.start_size.largest() * peak * reach + 0.05f;
+
+        if (simulates_locally_()) {
+            const float e = (R + far + swirl + pad) * sc;
+            bounds_min_ = ep - glm::vec3(e);
+            bounds_max_ = ep + glm::vec3(e);
+            return;
+        }
+        // The emitter's path over the last lifetime (a sample every L / 8 s).
+        if (!gpu_trail_.empty() && gpu_trail_.back().first > time_) gpu_trail_.clear();
+        if (gpu_trail_.empty() || time_ - gpu_trail_.back().first >= L * 0.125f) gpu_trail_.push_back({time_, ep});
+        while (gpu_trail_.size() > 1 && gpu_trail_.front().first < time_ - L - 1e-3f) gpu_trail_.erase(gpu_trail_.begin());
+        glm::vec3 pmin = ep, pmax = ep;
+        for (const auto& t : gpu_trail_) { pmin = glm::min(pmin, t.second); pmax = glm::max(pmax, t.second); }
+        const glm::vec3 r(R * sc + swirl + pad);
+        bounds_min_ = pmin + lo - r;
+        bounds_max_ = pmax + hi + r;
+        if (s.collide) bounds_min_.z = std::max(bounds_min_.z, s.ground_height - pad);
+        for (int k = 0; k < 3; ++k) {
+            if (s.wrap_box[k] <= 0.0f) continue;
+            bounds_min_[k] = std::max(bounds_min_[k], ep[k] - 0.5f * s.wrap_box[k] - pad);
+            bounds_max_[k] = std::min(bounds_max_[k], ep[k] + 0.5f * s.wrap_box[k] + pad);
+        }
+        bounds_max_ = glm::max(bounds_max_, bounds_min_);
+    }
+
     void update_(float dt, const ParallelFor* par) {
         const size_t n = pool_.size();
         if (n == 0 || settings.mode == ParticleMode::Scatter) {
@@ -1002,6 +1234,19 @@ private:
     bool prewarm_pending_ = false;
     bool scattered_ = false;
     bool settings_applied_ = false;
+
+    // GPU simulation (simulation: gpu): the CPU keeps only the clock, emission and bounds.
+    bool gpu_active_ = false;
+    uint64_t gpu_id_ = 0;
+    uint32_t gpu_generation_ = 0;
+    uint32_t gpu_alive_ = 0;       ///< Last read-back alive count.
+    uint32_t gpu_spawn_ = 0;       ///< Births owed to the next job.
+    float gpu_dt_ = 0.0f;          ///< Time owed to the next job.
+    glm::mat4 job_prev_world_{1.0f};
+    bool has_job_world_ = false;
+    std::shared_ptr<const std::vector<glm::vec4>> gpu_tris_;
+    const MeshSurface* gpu_tris_src_ = nullptr;
+    std::vector<std::pair<float, glm::vec3>> gpu_trail_;
 
     glm::vec3 bounds_min_{0.0f}, bounds_max_{0.0f};
 

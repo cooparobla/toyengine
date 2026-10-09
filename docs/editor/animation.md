@@ -17,7 +17,8 @@ What you see in the Timeline, from top to bottom:
   **Insert Keyframe** (**+**), **Rest Pose**, **All Objects**, **Length** and the repeat mode
   (here **loop**). Hover any of them for a tooltip.
 - **The ruler.** Frame numbers. The Timeline runs at 30 frames a second.
-- **The dope sheet.** A **Summary** row, then one row per object, with a diamond for every key.
+- **The dope sheet.** A **Summary** row, an **Events** lane, then one row per object, with a
+  diamond for every key.
 
 Two words used on this page:
 
@@ -166,6 +167,24 @@ By default an object moves at a steady speed from one key to the next. To change
 | **Ease In-Out** | Starts and ends slowly. |
 
 A tick in the menu shows the option that all the selected keys already share.
+
+## Mark moments with events
+
+The **Events** lane, right under **Summary**, holds a clip's *events*: named markers such as a
+footstep or a hit frame. Each one shows as a flag. When the game plays the clip and the playhead
+crosses a flag, the Animator announces the event, and game code (or another component) can react
+to it, for example by playing a footstep sound.
+
+| To | Do this |
+|---|---|
+| Add an event | Right-click the **Events** lane at a frame and choose **Add Event Here**. |
+| See an event's name | Hover its flag. |
+| Move an event | Drag its flag left or right. It snaps to whole frames. |
+| Rename it or give it a value | Right-click its flag. Edit **Name** (what game code listens for), **String** (an optional text value, such as `left` or `right` for a footstep) and **Float** (an optional number). |
+| Move the playhead to an event | Right-click its flag and choose **Jump to Event**. |
+| Delete an event | Click its flag and press **X** or **Delete**, or right-click it and choose **Delete Event**. |
+
+Undo works on events like it does on keys.
 
 ## Play and scrub through a clip
 

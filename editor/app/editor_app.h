@@ -201,6 +201,9 @@ public:
         camera_.apply();
 
         engine_.set_overlay_scene(ui_scene_.get());
+        // The stats HUD is the editor's to show (View > Stats Overlay), whatever the project's
+        // config.yaml starts its game with.
+        engine_.debug_overlay().set_mode(toy::debug::OverlayMode::Off);
         engine_.set_edit_mode(true);
         engine_.assets().set_hot_reload(true);
         engine_.assets().set_poll_interval(0.5f);
@@ -369,6 +372,10 @@ public:
     void subdivide_smooth(int levels) { if (edit_object_ || mesh_edit_view_()) run_catmull_clark_(levels); }
     bool quit_requested() const { return quit_; }
     bool restart_requested() const { return restart_; }
+    /** @brief Render > Rebuild Renderer: settings fixed at pipeline construction apply in place (ui/project_settings.inl). */
+    void rebuild_renderer() { rebuild_renderer_(); }
+    /** @brief Edit > Project Settings, on `category` (ui/project_settings.inl). */
+    void open_project_settings(const std::string& category) { open_project_settings_(category); }
     /** @brief A project switch was requested: the main loop rebuilds everything for it. */
     const std::optional<fs::path>& switch_project_requested() const { return switch_project_; }
     const std::deque<std::pair<int, std::string>>& log() const { return log_; }
@@ -553,7 +560,7 @@ public:
             case UndoTarget::Config: config_.do_undo(); apply_config_live(); break;
             case UndoTarget::Scene: scene_undo_(); break;
             case UndoTarget::Clip:
-                if (const ClipModel* m = anim_clip_.undo.undo()) { anim_clip_.model = *m; anim_save_clip_(); anim_sel_keys_.clear(); }
+                if (const ClipModel* m = anim_clip_.undo.undo()) { anim_clip_.model = *m; anim_save_clip_(); anim_sel_keys_.clear(); anim_sel_event_ = -1; }
                 break;
         }
     }
@@ -565,7 +572,7 @@ public:
             case UndoTarget::Config: config_.do_redo(); apply_config_live(); break;
             case UndoTarget::Scene: scene_redo_(); break;
             case UndoTarget::Clip:
-                if (const ClipModel* m = anim_clip_.undo.redo()) { anim_clip_.model = *m; anim_save_clip_(); anim_sel_keys_.clear(); }
+                if (const ClipModel* m = anim_clip_.undo.redo()) { anim_clip_.model = *m; anim_save_clip_(); anim_sel_keys_.clear(); anim_sel_event_ = -1; }
                 break;
         }
     }
@@ -937,6 +944,17 @@ public:
      *        the project's setting) and applies it -- what editing a tinted settings row does.
      */
     void set_scene_setting(const std::string& section, const std::string& key, const Node* value) {
+        if (value && (section == "render" || section == "physics")) {
+            // Back to the project's value: no override left (as a row edit does).
+            for (const auto& groups : {render_settings_groups(), project_settings_groups()}) {
+                for (const auto& g : groups) {
+                    if (g.has_toggle() && g.toggle.key == key && equals_project_value_(g.toggle, config_.section(section), *value)) value = nullptr;
+                    for (const auto& f : g.fields) {
+                        if (value && f.key == key && equals_project_value_(f, config_.section(section), *value)) value = nullptr;
+                    }
+                }
+            }
+        }
         settings_edit_was_scene_ = true;
         apply_(doc_.set_scene_setting(section, key, value, (value ? "Override " : "Revert ") + section + "." + key));
     }
@@ -1631,6 +1649,13 @@ public:
     }
     bool viewport_ao() const { return viewport_ao_; }
 
+    /** @brief View > Stats Overlay: the engine's debug HUD in the viewport, off <-> full (F3
+     *         in the viewport steps through fps as well). */
+    void toggle_stats_overlay() {
+        auto& overlay = engine_.debug_overlay();
+        overlay.set_mode(overlay.visible() ? toy::debug::OverlayMode::Off : toy::debug::OverlayMode::Full);
+    }
+
     /** @brief Local-space bounds of the geometry an object's outline is drawn from (see
      *        mesh_for_object_()); false for an object with no mesh. */
     bool outline_bounds(ObjectId id, glm::vec3& lo, glm::vec3& hi) {
@@ -1759,6 +1784,7 @@ private:
 #include "ui/theme_editor.inl"
 #include "ui/build.inl"
 #include "ui/weather.inl"
+#include "ui/project_settings.inl"
 
     // --- helpers shared by the panels ---
 
@@ -1902,13 +1928,120 @@ private:
     }
 
     /**
-     * @brief True if `f` (a key of config.yaml's `section`) can be overridden by the open scene:
-     *        render and physics keys that apply live, while a scene (not an object asset) is open.
-     *        Startup-only keys and every other section stay project-wide.
+     * @brief True while the settings UI edits the open scene's overrides (the Properties
+     *        Render / World / Scene tabs with a scene open) rather than config.yaml (the
+     *        Project Settings modal, ui/project_settings.inl, sets project_settings_mode_).
+     */
+    bool scene_settings_layer_() const {
+        return !project_settings_mode_ && active_type_ == AssetType::Scene && !doc_.is_object_asset();
+    }
+
+    /**
+     * @brief True if `f` (a key of config.yaml's `section`) is edited as a scene override: render
+     *        and physics keys in the scene layer. Keys fixed at pipeline construction count --
+     *        the engine rebuilds the renderer for them (Engine::apply_scene_settings_()); only
+     *        project_only keys (baked in at engine start-up) and other sections stay project-wide.
      */
     bool scene_overridable_(const std::string& section, const FieldDesc& f) const {
-        return (section == "render" || section == "physics") && !f.startup_only &&
-               active_type_ == AssetType::Scene && !doc_.is_object_asset();
+        return (section == "render" || section == "physics") && !f.project_only && scene_settings_layer_();
+    }
+
+    /** @brief A setting's value as short text ("On", "0.5", "high"; `fallback` when unset). */
+    static std::string setting_text_(const Node* n, const std::string& fallback = "default") {
+        if (!n || n->is_null()) return fallback;
+        if (n->is_boolean()) return n->get_value<bool>() ? "On" : "Off";
+        if (n->is_string()) return n->get_value<std::string>();
+        if (n->is_integer()) return std::to_string(n->get_value<int64_t>());
+        if (n->is_float_number()) {
+            char buf[32];
+            std::snprintf(buf, sizeof buf, "%g", n->get_value<double>());
+            return buf;
+        }
+        if (n->is_sequence()) {
+            std::string out = "[";
+            for (const auto& e : n->as_seq()) out += (out.size() > 1 ? ", " : "") + setting_text_(&e, "?");
+            return out + "]";
+        }
+        return "...";
+    }
+
+    /** @brief A scalar / vector setting value as numbers (bool 0/1; [a, b, c] or {x, y, z} / {r, g, b}); empty if not numeric. */
+    static std::vector<double> setting_numbers_(const Node& n) {
+        if (n.is_boolean()) return {n.get_value<bool>() ? 1.0 : 0.0};
+        if (n.is_integer()) return {static_cast<double>(n.get_value<int64_t>())};
+        if (n.is_float_number()) return {n.get_value<double>()};
+        std::vector<double> out;
+        auto push = [&](const Node& e) {
+            const std::vector<double> v = setting_numbers_(e);
+            if (v.size() != 1) return false;
+            out.push_back(v[0]);
+            return true;
+        };
+        if (n.is_sequence()) {
+            for (const auto& e : n.as_seq()) if (!push(e)) return {};
+            return out;
+        }
+        if (n.is_mapping()) {
+            for (const char* keys : {"xyzw", "rgba"}) {
+                out.clear();
+                for (const char* k = keys; *k; ++k) {
+                    const std::string key(1, *k);
+                    if (!n.contains(key)) break;
+                    if (!push(n.at(key))) return {};
+                }
+                if (!out.empty() && out.size() == n.size()) return out;
+            }
+        }
+        return {};
+    }
+
+    /**
+     * @brief True if `value` is what the project already uses for `f`: config.yaml's explicit
+     *        value, else the schema default. A tier-driven key without an explicit value has no
+     *        fixed project value, so it never matches (its override is kept).
+     */
+    static bool equals_project_value_(const FieldDesc& f, const Node& section, const Node& value) {
+        Node project;
+        if (section.contains(f.key)) {
+            project = section.at(f.key);
+        } else if (f.tier_driven) {
+            return false;
+        } else {
+            switch (f.kind) {
+                case FieldKind::Bool:  project = Node(f.def.x != 0.0f); break;
+                case FieldKind::Int:   project = Node(static_cast<int64_t>(std::lround(f.def.x))); break;
+                case FieldKind::Float: project = Node(static_cast<double>(f.def.x)); break;
+                case FieldKind::Vec3:
+                case FieldKind::Color: {
+                    project = Node::sequence();
+                    for (int i = 0; i < 3; ++i) project.as_seq().push_back(Node(static_cast<double>(f.def[i])));
+                    break;
+                }
+                case FieldKind::Enum:
+                    if (!f.default_string.empty()) project = Node(f.default_string);
+                    else if (!f.options.empty()) project = Node(f.options.front());
+                    else return false;
+                    break;
+                default: return false;
+            }
+        }
+        if (project.is_string() || value.is_string()) {
+            return project.is_string() && value.is_string() && project.get_value<std::string>() == value.get_value<std::string>();
+        }
+        const std::vector<double> a = setting_numbers_(project), b = setting_numbers_(value);
+        if (a.empty() || a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i) {
+            if (std::abs(a[i] - b[i]) > 1e-6 * std::max(1.0, std::abs(a[i]))) return false;
+        }
+        return true;
+    }
+
+    /** @brief How many of a settings group's keys (its switch and rows) the open scene overrides. */
+    int group_override_count_(const SettingsGroup& g, const std::string& section) const {
+        if (!scene_settings_layer_()) return 0;
+        int n = g.has_toggle() && doc_.scene_setting(section, g.toggle.key) ? 1 : 0;
+        for (const auto& f : g.fields) n += doc_.scene_setting(section, f.key) ? 1 : 0;
+        return n;
     }
 
     /**
@@ -1930,6 +2063,15 @@ private:
             return;
         }
         ctx.push_id(f.key);
+        if (f.project_only && scene_settings_layer_() && (section_name == "render" || section_name == "physics")) {
+            // Baked in at engine start-up: no scene override, shown read-only.
+            const imm::Box rb = ctx.next_box(ctx.style.row_height);
+            ctx.text_in(rb, f.display() + ":  " + setting_text_(section.contains(f.key) ? &section.at(f.key) : nullptr, f.def.x != 0.0f ? "On" : "Off") +
+                                "   (project)", ctx.style.text_disabled, 0.0f);
+            ctx.tooltip(f.display() + "\n" + f.tooltip + "\nProject-wide only: change it in Edit > Project Settings");
+            ctx.pop_id();
+            return;
+        }
         const bool layered = scene_overridable_(section_name, f);
         const Node* over = layered ? doc_.scene_setting(section_name, f.key) : nullptr;
         const bool in_config = section.contains(f.key);
@@ -1946,10 +2088,13 @@ private:
             Node view = section;
             if (over) view[f.key] = *over;
             const EditResult r = draw_field(ctx, f, view, env);
-            if (over) ctx.tooltip(f.display() + "\nOverridden by this scene" + (in_config ? "" : " (the project uses the default)") +
+            if (over) ctx.tooltip(f.display() + "\nOverridden by this scene -- Scene: " + setting_text_(over) +
+                                  "   Project: " + setting_text_(in_config ? &section.at(f.key) : nullptr) +
                                   "\nRight-click to revert or apply to the project");
             if (r.changed) {
                 const Node* value = view.contains(f.key) ? &view.at(f.key) : nullptr;
+                // Back to the project's value: no override left (the tint goes with it).
+                if (value && equals_project_value_(f, section, *value)) value = nullptr;
                 settings_edit_was_scene_ = true;
                 apply_(doc_.set_scene_setting(section_name, f.key, value, "Override " + section_name + "." + f.key,
                                               r.active ? "set:" + section_name + "." + f.key : std::string()));
@@ -1963,6 +2108,20 @@ private:
         }
 
         const imm::Box row{band.x, band.y, band.w, std::max(band.h, ctx.cursor().y - top.y)};
+        setting_context_menu_(ctx, row, f, section, section_name);
+        ctx.pop_id();
+    }
+
+    /**
+     * @brief A settings row's right-click menu over `row`: Revert to Project Setting, Apply to
+     *        Project Settings (scene layer), Reset to Default (config.yaml). Shared by rows and
+     *        group header switches.
+     */
+    void setting_context_menu_(imm::Context& ctx, const imm::Box& row, const FieldDesc& f, Node& section, const std::string& section_name) {
+        using I = imm::Icon;
+        const bool layered = scene_overridable_(section_name, f);
+        const Node* over = layered ? doc_.scene_setting(section_name, f.key) : nullptr;
+        const bool in_config = section.contains(f.key);
         if (ctx.is_hovered(row) && ctx.input().released[1]) ctx.open_popup("setting_ctx");
         if (ctx.begin_popup("setting_ctx", 230)) {
             if (layered) {
@@ -1979,7 +2138,10 @@ private:
                     settings_edit_was_scene_ = true;
                     apply_(doc_.set_scene_setting(section_name, f.key, nullptr, "Apply " + section_name + "." + f.key + " to project"));
                 }
-                ctx.separator();
+                // No Reset to Default here: resetting config.yaml is a project action (Project
+                // Settings), and from a scene it would leave this scene's override -- and its tint.
+                ctx.end_popup();
+                return;
             }
             if (ctx.menu_item("Reset to Default", "", nullptr, in_config, I::Restart)) {
                 const Node before = config_.node;
@@ -1989,7 +2151,6 @@ private:
             ctx.tooltip("Reset to Default\nRemoves the key from config.yaml so its quality preset / engine default applies");
             ctx.end_popup();
         }
-        ctx.pop_id();
     }
 
     /** @brief Records a config.yaml edit of `section_name.f.key` and applies it live. */
@@ -1997,7 +2158,7 @@ private:
         settings_edit_was_scene_ = false;
         config_.commit("Edit " + section_name + "." + f.key, before, merging ? "cfg:" + f.key : std::string());
         if (section_name == "render" || section_name == "physics") apply_config_live();
-        if (f.startup_only) log_info(f.key + " changes on renderer restart");
+        if (f.project_only) log_info(f.key + " applies after Render > Restart Editor Engine");
     }
 
     // =================================================================================
@@ -2359,6 +2520,7 @@ private:
         if (ctx.shortcut(Key::Z, Mods::Shift)) set_shading(shading_ == Shading::Wireframe ? Shading::Solid : Shading::Wireframe);
         if (ctx.shortcut(Key::N)) show_sidebar_ = !show_sidebar_;
         if (ctx.shortcut(Key::T)) show_toolbar_ = !show_toolbar_;
+        if (ctx.shortcut(Key::F3)) engine_.debug_overlay().cycle();
         if (ctx.shortcut(Key::B)) tool_ = Tool::Select;
         if (ctx.shortcut(Key::Space, Mods::Control)) maximized_ = !maximized_;
         if (ctx.shortcut(Key::S, Mods::Shift)) ctx.open_popup("vp_snap_menu", m);
@@ -3689,7 +3851,7 @@ private:
                 "Edit mode:  1/2/3 vert/edge/face, E extrude, I inset, Ctrl+B bevel, F fill, M merge, X delete,",
                 "            L / Ctrl+L linked, Shift+D duplicate, U UV menu, Alt+N normals",
                 "Viewport:   Z shading menu, Shift+Z wireframe, Shift+S snap, Shift+RMB 3D cursor, N / T panels,",
-                "            Ctrl+Space maximize, Shift+Space tools",
+                "            Ctrl+Space maximize, Shift+Space tools, F3 stats overlay",
                 "General:    Ctrl+S save all, Ctrl+Z / Ctrl+Shift+Z undo / redo, F5 play / stop, F2 rename",
             };
             for (const char* l : lines) ctx.label(l);
@@ -3698,6 +3860,7 @@ private:
             ctx.end_modal();
         }
         draw_about_modal_(ctx);
+        draw_project_settings_modal_(ctx);
         if (!pending_modal_.empty()) { ctx.open_modal(pending_modal_); pending_modal_.clear(); }
     }
 
@@ -3950,6 +4113,8 @@ private:
     float anim_pose_time_ = -1.0f;
     std::set<ClipModel::KeyRef> anim_sel_keys_;
     KeyDrag anim_drag_;
+    int anim_sel_event_ = -1;   ///< Timeline Events lane: the selected clip event (index), -1 none
+    KeyDrag anim_event_drag_;
     int bottom_view_ = 0;   ///< Bottom area: 0 Console, 1 Timeline
     bool anim_clip_dirty_ = false;
     std::set<std::string> anim_expanded_;   ///< Timeline rows opened into channels (track paths)
@@ -4063,6 +4228,9 @@ private:
     bool quit_ = false;
     bool force_quit_ = false;
     bool restart_ = false;
+    bool project_settings_mode_ = false;          ///< drawing the Project Settings modal: rows edit config.yaml
+    std::string project_settings_category_ = "General";
+    std::string project_settings_filter_;
     std::optional<fs::path> switch_project_;
 };
 

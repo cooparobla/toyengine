@@ -4,7 +4,8 @@
 // gfx/volumetrics_composite_body.glsl -- shared by volumetrics_composite.frag (raymarch
 // mode: joint-bilateral upsample of the low-res march) and volumetrics_froxel_apply.frag
 // (froxel mode, VOL_FROXEL_APPLY: lookup into the integrated froxel grid). Everything else --
-// merged global fog, max-opacity, debug view, the final colour * T + scatter -- is one body.
+// max-opacity, debug view, the final colour * T + scatter -- is one body. The GLOBAL fog is
+// not applied here: FogPass fogs the opaque scene before translucency (see fog.frag).
 
 layout(location = 0) in  vec2 in_uv;
 layout(location = 0) out vec4 out_color;
@@ -17,25 +18,6 @@ layout(set = 0, binding = 2) uniform sampler2D g_position_roughness;
 layout(set = 0, binding = 3) uniform sampler2D march_result;
 
 #include <gfx/volumetrics_ubo.glsl>
-
-// Set 2: the GLOBAL fog description (FogUBO's layout, field for field -- see fog.frag),
-// read only on the merged path (counts.w). Always declared and always bound, so the
-// pipeline layout never depends on the runtime flag.
-layout(set = 2, binding = 0) uniform FogUBO {
-    mat4 inv_view_proj;
-    vec4 camera_pos;
-    vec4 fog_color;
-    vec4 sun_direction;
-    vec4 sun_color;
-    vec4 mode_density;
-    vec4 height_params;
-    vec4 misc_params;
-    vec4 sky_zenith;
-    vec4 sky_horizon;
-    vec4 sky_ground;
-} u_fog;
-
-#include <gfx/fog.glsl>
 
 // Distance a march ray at `uv` was clipped to. Clamped to the march's max distance:
 // past it every ray stops at the same t, so sky and far geometry carry the same march
@@ -93,33 +75,14 @@ void main() {
     vec3 color = texture(scene_color, in_uv).rgb;
 
     int  volume_count = int(u_vol.counts.x);
-    bool merged_fog   = u_vol.counts.w > 0.5;
     bool debug_view   = u_vol.camera_pos.w > 0.5;
 
-    if (volume_count <= 0 && !merged_fog) {
+    if (volume_count <= 0) {
         out_color = vec4(color, 1.0);   // nothing placed -- costs one fetch
         return;
     }
 
     vec3 cam_pos = u_vol.camera_pos.xyz;
-
-    if (merged_fog) {
-        vec3 N      = texture(g_normal_metallic, in_uv).rgb;
-        bool is_sky = dot(N, N) < 0.001;
-        vec3 ndc      = vec3(in_uv.x * 2.0 - 1.0, 1.0 - in_uv.y * 2.0, 1.0);
-        vec4 world    = u_vol.inv_view_proj * vec4(ndc, 1.0);
-        vec3 view_dir = normalize(world.xyz / world.w - cam_pos);
-        float d_geo   = is_sky ? 1e6 : distance(cam_pos, texture(g_position_roughness, in_uv).rgb);
-        color = gfx_fog_apply(color, cam_pos, view_dir, d_geo, is_sky,
-                              u_fog.mode_density, u_fog.height_params, u_fog.misc_params,
-                              u_fog.fog_color.rgb, u_fog.sun_direction.xyz, u_fog.sun_color.rgb,
-                              u_fog.sky_zenith.rgb, u_fog.sky_horizon.rgb, u_fog.sky_ground.rgb);
-    }
-
-    if (volume_count <= 0) {
-        out_color = vec4(color, 1.0);
-        return;
-    }
 
 #ifdef VOL_FROXEL_APPLY
     // Froxel mode: one filtered lookup into the integrated grid at this pixel's ray distance

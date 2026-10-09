@@ -19,7 +19,7 @@
 # src/toyengine/<path>.h replaces the engine's -- the engine is header-only, so that is a real
 # per-file override. An override must keep the API of the file it replaces.
 #
-# Shaders: <DIR>/assets/shaders/*.vert|*.frag compile with -I <project shaders>, -I <engine
+# Shaders: <DIR>/assets/shaders/*.vert|*.frag|*.comp (and *.tesc|*.tese) compile with -I <project shaders>, -I <engine
 # shaders>, -I <gfxcoopa shaders> (the runtime ShaderLibrary search order, see
 # RuntimeLayout::shader_roots()), so a project shader can #include any engine/gfx header and a
 # project file shadows the engine's of the same name. The .spv go to
@@ -36,6 +36,9 @@ set(TOYENGINE_CMAKE_DIR "${CMAKE_CURRENT_LIST_DIR}" CACHE INTERNAL "toyengine's 
 # these for a Shipping build: Release, no debug env hooks / validation / exit screenshots
 # (toyengine/core/runtime_paths.h's k_shipping), and optionally the .caml passphrase compiled in.
 option(TOY_SHIPPING "Build the game for players (no debug hooks; see runtime_paths.h)" OFF)
+# The debug stats overlay (toyengine/debug/debug_overlay.h) is compiled out of a Shipping build;
+# this keeps it in (still off unless config.yaml's debug.overlay or F3 turns it on).
+option(TOY_SHIPPING_DEBUG_OVERLAY "Keep the debug stats overlay in a TOY_SHIPPING build" OFF)
 set(TOY_CAML_KEY_BAKED "" CACHE STRING "Passphrase compiled into the game for .caml assets (empty: TOY_CAML_KEY / default)")
 
 function(toyengine_add_project)
@@ -85,6 +88,9 @@ function(toyengine_add_project)
 
     if(TOY_SHIPPING)
         target_compile_definitions(${TP_NAME} PRIVATE TOY_SHIPPING=1)
+        if(TOY_SHIPPING_DEBUG_OVERLAY)
+            target_compile_definitions(${TP_NAME} PRIVATE TOY_DEBUG_OVERLAY=1)
+        endif()
     endif()
     if(TOY_CAML_KEY_BAKED)
         target_compile_definitions(${TP_NAME} PRIVATE TOY_CAML_KEY_BAKED="${TOY_CAML_KEY_BAKED}")
@@ -110,7 +116,7 @@ function(_toyengine_project_shaders TARGET_NAME SHADER_DIR ENGINE_DIR)
         message(WARNING "glslc not found; project shaders must be compiled manually")
         return()
     endif()
-    file(GLOB _srcs CONFIGURE_DEPENDS "${SHADER_DIR}/*.vert" "${SHADER_DIR}/*.frag" "${SHADER_DIR}/*.tesc" "${SHADER_DIR}/*.tese")
+    file(GLOB _srcs CONFIGURE_DEPENDS "${SHADER_DIR}/*.vert" "${SHADER_DIR}/*.frag" "${SHADER_DIR}/*.tesc" "${SHADER_DIR}/*.tese" "${SHADER_DIR}/*.comp")
     set(_out_dir "${TOY_SHADER_BUILD_DIR}/project_shaders")
     file(MAKE_DIRECTORY "${_out_dir}")
     set(_outs "")

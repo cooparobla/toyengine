@@ -222,22 +222,20 @@ struct PixelRenderConfig {
     bool      refraction_include_reflections = true;
 
     /**
-     * Unity-style GLOBAL fog (Linear/Exponential/Exp2), analytic and config-driven. There
-     * is no fog component and no local fog volume: anything bounded is a VolumeComponent
-     * on the volumetrics pass instead. Drawn after the transparent pass (so BLEND geometry
-     * is fogged too) and before pixel_stylize_pass_ (so fog sits in linear HDR, ahead of tonemap/
-     * outline/dither/palette -- see gfxcoopa's FogPass and PixelRenderPipeline's
-     * pre_fog_view_typed_). Always constructed; render() checks this per frame. The pass's
-     * SOURCE image is chosen once at construction from config_.ssr_enabled's startup value,
-     * matching pixel_stylize_pass_'s own binding -- see that call site's comment for why a
-     * per-frame rebind isn't safe under this pipeline's frame-overlap model.
+     * GLOBAL exponential height fog (Unreal's Exponential Height Fog / HDRP's fog model),
+     * analytic and config-driven -- see the fog_* fields below and gfx/fog.glsl. There is no fog
+     * component and no local fog volume: anything bounded is a VolumeComponent on the
+     * volumetrics pass instead. Applied per medium: gfxcoopa's FogPass fogs the opaque scene and
+     * sky before translucency, and every forward shader (BLEND meshes, water, particles, SDF
+     * glass) fogs its own fragment at its own distance. With the camera under water only the
+     * part of each ray above the surface is fogged. Runtime: switches on the next frame.
      */
     bool fog_enabled = true;
 
     /**
      * The underwater look (toyengine/render/passes/underwater_pass.h): fog, absorption and
      * caustics when the camera is below a water surface, driven per frame by set_water_state().
-     * Startup-fixed like fog_enabled -- it sits in the post chain's source path -- and costs one
+     * Startup-fixed -- it sits in the post chain's source path -- and costs one
      * full-resolution HDR copy per frame while the camera is above water.
      */
     bool underwater_enabled = true;
@@ -245,7 +243,7 @@ struct PixelRenderConfig {
     /**
      * Raymarched LOCAL volumes -- scene-placed VolumeComponents, each `kind: fog` (a
      * static pocket), `wind` (advected ribbons) or `haze` (drifting billows). Runs in
-     * linear HDR immediately after fog and before DOF/bloom, so volumes defocus and
+     * linear HDR after fog, translucency and the underwater look, and before DOF/bloom, so volumes defocus and
      * sun-lit ones glow (see gfxcoopa's VolumetricsPass / gfx/volumetrics.glsl).
      *
      * A separate pass from fog rather than more fog parameters, because fog is an
@@ -254,12 +252,7 @@ struct PixelRenderConfig {
      * toggle independently. The march clips to the union of the volumes' bounds, so a
      * view with no volume in it skips the march entirely.
      *
-     * With fog_enabled ALSO set, the two run as one pass: this shader applies the
-     * global fog term itself rather than reading an image FogPass wrote it into, which
-     * is where the second full-resolution HDR pass would otherwise go. See
-     * PixelRenderPipeline::fog_merged_into_volumetrics_(); the result is identical.
-     *
-     * Startup-fixed, same policy as fog_enabled/bloom_enabled/dof_enabled above: the
+     * Startup-fixed, same policy as bloom_enabled/dof_enabled: the
      * pass's source image and DOF's source image are both chosen once at construction
      * from this flag's value.
      */
@@ -301,6 +294,9 @@ struct PixelRenderConfig {
      *  Engine maps it to toy::water::WaterSettings (toyengine/water/water_settings.h) every
      *  frame, so it is live-switchable. */
     RenderQuality water_quality       = RenderQuality::High;
+    /** Physical sky: the sky-view table's integration steps and the cloud march's view / shadow
+     *  steps. Not expanded here -- read by the pipeline every frame, so it switches live. */
+    RenderQuality sky_quality         = RenderQuality::High;
 
     /**
      * @brief Overwrites every preset-covered field from the `*_quality` tiers above.
@@ -917,8 +913,8 @@ struct PixelRenderConfig {
     /**
      * Additive glow from a dedicated BloomPass pyramid (bright-pass threshold -> multi-tap
      * downsample -> tent-filter upsample+combine -- see gfxcoopa's bloom_pass.h), sourced
-     * from the FINAL pre-tonemap HDR image (fog output when fog is on, else
-     * pre_fog_view_typed_) -- the same image pixel_stylize_pass_ itself reads, so SSR
+     * from the FINAL pre-tonemap HDR image (after fog, translucency, underwater and
+     * volumetrics) -- the same image pixel_stylize_pass_ itself reads, so SSR
      * reflections, transparent geometry and fog all bloom too.
      *
      * An independent pyramid with its own construction-fixed descriptors, deliberately not a
@@ -938,21 +934,27 @@ struct PixelRenderConfig {
     float bloom_radius    = 1.0f;   /**< Tent-filter width multiplier on the upsample; > 1 widens further at a small cost in sharpness. */
     float bloom_clamp     = 20.0f;  /**< Per-tap HDR ceiling applied before thresholding; suppresses single-texel fireflies. */
 
-    // --- Fog (see gfxcoopa's FogPass / gfx/fog.glsl) ---
-    int       fog_mode           = 2;      /**< 0 Linear, 1 Exponential, 2 Exp2 (Unity's default). */
-    float     fog_density        = 0.02f;
-    float     fog_linear_start   = 5.0f;
-    float     fog_linear_end     = 60.0f;
-    glm::vec3 fog_color          = glm::vec3(0.55f, 0.62f, 0.72f);
-    float     fog_height_base    = 0.0f;   /**< World Z (engine is Z-up); fog_height_falloff <= 0 disables height fog. */
-    float     fog_height_falloff = 0.0f;
-    float     fog_sky_blend      = 0.0f;   /**< 0 = flat fog_color, 1 = fully blended toward the sky gradient. */
-    float     fog_sun_amount     = 0.0f;   /**< Additive Henyey-Greenstein sun in-scatter tint strength; 0 disables. */
-    float     fog_sun_anisotropy = 0.7f;   /**< HG g; 0 isotropic, close to 1 = tight forward scatter toward the sun. */
-    float     fog_max_opacity    = 1.0f;   /**< Ceiling on how much fog can occlude the scene (1 = fully opaque at max density). */
-    float     fog_max_distance   = 150.0f; /**< Distance the global fog term saturates at, and the distance sky pixels are
-                                            evaluated at -- prevents a hard seam where a grazing near-horizon ray's apparent
-                                            distance blows up against an otherwise-unfogged sky. */
+    // --- Fog (gfx/fog.glsl; gfxcoopa's FogPass for the opaque scene) ---
+    // Exponential height fog: `fog_density` extinction per metre at and below fog_height_base,
+    // thinning as exp(-(z - base) / fog_height_falloff) above it (falloff <= 0: uniform fog).
+    // Transmittance over a view ray is exp(-optical depth), integrated in closed form.
+    int       fog_mode             = 1;      /**< 1 Exponential (height fog), 0 Linear (legacy distance ramp). A legacy
+                                                  2 (Exp2) loads as 1. */
+    float     fog_density          = 0.02f;  /**< Extinction per metre at/below the height base. */
+    float     fog_linear_start     = 5.0f;   /**< Linear mode only: distance fog starts. */
+    float     fog_linear_end       = 60.0f;  /**< Linear mode only: distance fog reaches max_opacity. */
+    glm::vec3 fog_color            = glm::vec3(0.55f, 0.62f, 0.72f); /**< In-scatter colour. */
+    float     fog_height_base      = 0.0f;   /**< World Z (engine is Z-up) of full density; constant below it. */
+    float     fog_height_falloff   = 0.0f;   /**< Metres over which density drops by e above the base; <= 0 = uniform. */
+    float     fog_sky_blend        = 0.0f;   /**< 0 = flat fog_color, 1 = fully blended toward the sky gradient. */
+    float     fog_sun_amount       = 0.0f;   /**< Directional (Henyey-Greenstein) sun in-scatter strength; 0 disables. */
+    float     fog_sun_anisotropy   = 0.7f;   /**< HG g; 0 isotropic, close to 1 = tight forward scatter toward the sun. */
+    float     fog_sun_start_distance = 0.0f; /**< Distance the directional sun in-scatter starts at. */
+    float     fog_max_opacity      = 1.0f;   /**< Ceiling on how much fog can occlude the scene (1 = fully opaque). */
+    float     fog_start_distance   = 0.0f;   /**< No fog nearer than this. */
+    float     fog_cutoff_distance  = 0.0f;   /**< Fog stops accumulating past this distance; 0 = no cutoff. */
+    float     fog_sky_distance     = 1000.0f;/**< Distance sky pixels integrate to. With height fog the horizon fogs
+                                                  and the zenith stays clear on its own. */
 
     /**
      * Lying snow (0..1) every opaque surface shows on its open, up-facing parts -- see
@@ -1127,6 +1129,20 @@ struct PixelRenderConfig {
     float       dof_blade_rotation  = 0.0f;      /**< Iris rotation, degrees. */
 
     /**
+     * Velocity-buffer motion blur -- see toyengine/render/passes/motion_blur_pass.h. Runs on the
+     * linear HDR image after fog/volumetrics and before DoF and bloom, so blurred highlights still
+     * bloom; camera and object motion both come from the G-buffer velocity (G4), the sky's from the
+     * camera alone. A camera opts out with CameraComponent::motion_blur = false (the editor's
+     * viewport camera does).
+     *
+     * RUNTIME, every field: the pass is always built and blurs in place into the image downstream
+     * passes already read, so `motion_blur` only decides whether it is recorded. Off records
+     * nothing -- zero cost and a byte-identical frame.
+     */
+    bool  motion_blur           = false;
+    float motion_blur_intensity = 0.5f;   /**< Shutter fraction of the frame interval (0.5 = a 180-degree shutter); 0 disables. */
+
+    /**
      * Anti-aliasing. Three modes; MSAA is deliberately absent, since every target here is
      * SampleCount::X1.
      *
@@ -1175,6 +1191,13 @@ struct PixelRenderConfig {
     std::string debug_view = "off";
 
     /**
+     * @brief Where SkinnedMeshRenderer skins: "gpu" (a compute pre-pass, passes/skinning_pass.h)
+     *        or "cpu" (the per-vertex CPU loop + upload). "gpu" falls back to "cpu" on a device
+     *        without compute. STARTUP-FIXED.
+     */
+    std::string skinning = "gpu";
+
+    /**
      * @brief Draws every WorldSpace uicoopa CanvasComponent in the scene (UiWorldPass) as a
      *        guest inside post_target_'s bracket -- see uicoopa/render/ui_world_pass.h and
      *        CanvasRenderMode.
@@ -1208,6 +1231,30 @@ struct PixelRenderConfig {
     // can never disagree. ssgi_intensity defaults to 0.6 here (nonzero -- SSGI on by default),
     // overriding IndirectParams' own 0.0 "no consumer has this concept" default.
     coopa::gfx::engine::IndirectParams indirect{1.0f, 1.0f, 0.6f, 0.5f};
+
+    // --- Sky model ---
+    /**
+     * "gradient" (default): the three-colour sky gradient above (indirect.sky_*), drawn as is.
+     * "physical": a physically based atmosphere (Hillaire 2020 -- transmittance, multiple
+     * scattering and sky-view tables, see passes/sky_atmosphere_pass.h) with a sun disc, a moon,
+     * stars at night and, with `clouds`, a raymarched cloud layer. The sky follows the scene's
+     * directional light (or the weather's sun), and the engine derives sky_zenith / horizon /
+     * ground and the sun's colour from the same atmosphere, so ambient light, reflections, fog
+     * and water agree with the sky drawn. Runtime: switches live.
+     */
+    std::string sky_model = "gradient";
+    float atmosphere_density = 1.0f;   /**< Haze (aerosol amount): 1 = a clear day, higher = hazier, whiter, redder sunsets. */
+    float ozone = 1.0f;                /**< Ozone layer amount: deepens the blue of twilight skies. */
+    float sun_disc_size = 0.53f;       /**< The sun disc's angular diameter, degrees (0 hides it). */
+    float moon_disc_size = 0.6f;       /**< The moon disc's angular diameter, degrees (0 hides it). */
+    bool  sky_stars = true;            /**< Stars fade in as the sky darkens (physical sky only). */
+    /** A raymarched cloud layer over the physical sky (needs sky_model: physical). Runtime. */
+    bool  clouds = false;
+    float cloud_coverage = 0.4f;       /**< 0 = clear .. 1 = overcast. The weather drives it while it is on. */
+    float cloud_altitude = 1500.0f;    /**< Height of the layer's base, metres. */
+    float cloud_thickness = 1500.0f;   /**< The layer's depth, metres. */
+    float cloud_density = 1.0f;        /**< Extinction multiplier: higher = darker, more solid clouds. */
+    float cloud_wind_speed = 8.0f;     /**< m/s the clouds drift (along the weather's wind when it is on, else along +X). */
 
     std::string shader_dir;                   /**< Absolute path to assets/shaders. */
     // Ordered search path resolving a logical shader name (e.g. "gbuffer.vert") to a compiled

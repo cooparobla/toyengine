@@ -21,6 +21,10 @@
 //  - Keys: click / Shift-click diamonds (Summary row: every object at that frame), drag to move
 //    (snapped to frames), X / Delete removes them, right-click for interpolation (Linear, Step,
 //    Ease In / Out / In-Out). Expand an object (its arrow) for one row per channel.
+//  - Events (the lane under Summary): clip events the Animator fires as the playhead crosses them
+//    (footsteps, sounds, hit frames -- Animator::on_event / the scene's "anim_event" signal).
+//    Right-click the lane to add one, drag a flag to move it (snapped to frames), right-click it
+//    to rename it, set its string / float payload or delete it; X / Delete removes the selected one.
 //  - Space plays, Left / Right step a frame, Up / Down jump to the previous / next key, Home goes
 //    to the start; the wheel zooms the frame range, Shift-wheel or a middle-drag pans it.
 
@@ -690,8 +694,8 @@
         ctx.pop_clip();
 
         // Rows: Summary, each rig object, and an expanded object's channels.
-        struct Row { std::string label; std::string path; std::string property; bool summary; ObjectId id; int depth; };
-        std::vector<Row> rows{{"Summary", "", "", true, 0, 0}};
+        struct Row { std::string label; std::string path; std::string property; bool summary; ObjectId id; int depth; bool events = false; };
+        std::vector<Row> rows{{"Summary", "", "", true, 0, 0}, {"Events", "", "", false, 0, 0, true}};
         // Blender's dope sheet: the rig root, what is animated and what is selected -- unless
         // "All objects" (the header's list button) shows every object of the rig.
         std::set<std::string> animated;
@@ -708,6 +712,7 @@
             for (const auto& prop : props) rows.push_back({anim_channel_label_(prop), path, prop, false, id, depth + 1});
         }
         auto row_times = [&](const Row& r) {
+            if (r.events) return std::vector<float>{};
             if (r.summary) return anim_clip_.model.key_times();
             if (!r.property.empty()) return anim_clip_.model.key_times(r.path, r.property);
             return anim_clip_.model.key_times(&r.path);
@@ -717,7 +722,7 @@
             std::set<ClipModel::KeyRef> cells;
             if (r.summary) {
                 for (const auto& rw : rows) {
-                    if (rw.summary || !rw.property.empty()) continue;
+                    if (rw.summary || rw.events || !rw.property.empty()) continue;
                     for (float kt : anim_clip_.model.key_times(&rw.path)) if (std::abs(kt - t) <= ClipModel::kTimeEps) cells.insert({rw.path, kt, ""});
                 }
             } else {
@@ -734,13 +739,14 @@
             return false;
         };
         const bool in_track = ctx.is_hovered(track) && m.y > ruler.bottom();
-        // Scrolling: Summary stays pinned; the rest start at anim_row_scroll_.
-        const int visible = std::max(1, static_cast<int>((body.h - ruler_h) / row_h) - 1);
-        anim_row_scroll_ = std::clamp(anim_row_scroll_, 0, std::max(0, static_cast<int>(rows.size()) - 1 - visible));
-        if (anim_row_scroll_ > 0) rows.erase(rows.begin() + 1, rows.begin() + 1 + anim_row_scroll_);
-        if (static_cast<int>(rows.size()) - 1 > visible || anim_row_scroll_ > 0) {
+        // Scrolling: Summary and Events stay pinned; the rest start at anim_row_scroll_.
+        constexpr int kPinned = 2;
+        const int visible = std::max(1, static_cast<int>((body.h - ruler_h) / row_h) - kPinned);
+        anim_row_scroll_ = std::clamp(anim_row_scroll_, 0, std::max(0, static_cast<int>(rows.size()) - kPinned - visible));
+        if (anim_row_scroll_ > 0) rows.erase(rows.begin() + kPinned, rows.begin() + kPinned + anim_row_scroll_);
+        if (static_cast<int>(rows.size()) - kPinned > visible || anim_row_scroll_ > 0) {
             // A thin scrollbar on the names column's right edge.
-            const float total = static_cast<float>(rows.size() - 1 + anim_row_scroll_);
+            const float total = static_cast<float>(rows.size() - kPinned + anim_row_scroll_);
             const float h = body.h - ruler_h;
             ctx.fill_rounded({names.right() - 4, body.y + ruler_h + h * anim_row_scroll_ / total, 3, h * visible / total},
                              imm::with_alpha(ctx.style.text_dim, 0.5f), 1.5f);
@@ -770,8 +776,12 @@
                 }
                 tx += 14;
             }
-            const glm::vec4 label_col = row.summary ? ctx.style.text_dim : !row.property.empty() ? ctx.style.text_dim : ctx.style.text;
+            const glm::vec4 label_col = row.summary || row.events ? ctx.style.text_dim : !row.property.empty() ? ctx.style.text_dim : ctx.style.text;
             ctx.text_in({tx, y, names.right() - tx - 4, row_h}, row.label, label_col, 0.0f);
+            if (row.events) {
+                draw_events_lane_(ctx, track, y, row_h, x_of, t_of, pps, in_track, on_key);
+                continue;
+            }
             // Clicking a name selects the object (Shift adds).
             if (!row.summary && row.property.empty() && ctx.is_hovered({tx, y, names.right() - tx, row_h}) && in.pressed[0]) {
                 doc_.select(row.id, has(in.mods, Mods::Shift));
@@ -788,6 +798,7 @@
                 if (!in_track || on_key || glm::distance(m, c) > rr + 2.0f) continue;
                 if (in.pressed[0]) {
                     on_key = true;
+                    anim_sel_event_ = -1;
                     const auto cells = cells_of(row, t);
                     if (has(in.mods, Mods::Shift)) {
                         for (const auto& c2 : cells) {
@@ -824,14 +835,60 @@
                 }
             }
         } else if (in_track && !on_key) {
-            if (in.pressed[0]) anim_sel_keys_.clear();   // empty space
+            if (in.pressed[0]) { anim_sel_keys_.clear(); anim_sel_event_ = -1; }   // empty space
             if (in.pressed[1]) {
                 anim_menu_time_ = anim_snap_(t_of(m.x));
                 ctx.open_popup("track_menu", m);
             }
         }
 
+        // Dragging an event flag: snapped to frames, one edit on release.
+        if (anim_event_drag_.active) {
+            if (in.down[0]) {
+                anim_event_drag_.dt = std::round((m.x - anim_event_drag_.start_x) / pps * kAnimFps) / kAnimFps;
+            } else {
+                const float d = anim_event_drag_.dt;
+                anim_event_drag_.active = false;
+                if (std::abs(d) > 1e-6f && anim_sel_event_ >= 0 && anim_sel_event_ < static_cast<int>(anim_clip_.model.events.size())) {
+                    const size_t idx = static_cast<size_t>(anim_sel_event_);
+                    const float to = anim_snap_(anim_clip_.model.events[idx].time + d);
+                    int moved = anim_sel_event_;
+                    anim_clip_edit_("Move Event", [&](ClipModel& mm) { moved = mm.move_event(idx, to); });
+                    anim_sel_event_ = moved;
+                }
+            }
+        }
+
         // Right-click menus.
+        if (ctx.begin_popup("events_lane_menu", 190)) {
+            if (ctx.menu_item("Add Event Here", "", nullptr, true, imm::Icon::Plus)) anim_add_event_(anim_menu_time_, "event");
+            ctx.end_popup();
+        }
+        if (ctx.begin_popup("event_menu", 230)) {
+            if (anim_sel_event_ >= 0 && anim_sel_event_ < static_cast<int>(anim_clip_.model.events.size())) {
+                const size_t idx = static_cast<size_t>(anim_sel_event_);
+                const ClipEvent ev = anim_clip_.model.events[idx];
+                ctx.label_dim("Event at frame " + std::to_string(static_cast<int>(std::round(ev.time * kAnimFps))));
+                std::string nm = ev.name;
+                if (ctx.input_text("Name", &nm) && !nm.empty()) {
+                    anim_clip_edit_("Rename Event", [&](ClipModel& mm) { mm.events[idx].name = nm; });
+                }
+                ctx.tooltip("Name\nWhat listeners match on (Animator::on_event, the \"anim_event\" signal's name)");
+                std::string sv = ev.string_value;
+                if (ctx.input_text("String", &sv)) {
+                    anim_clip_edit_("Event String", [&](ClipModel& mm) { mm.events[idx].string_value = sv; });
+                }
+                ctx.tooltip("String\nAn optional text payload (e.g. left / right for a footstep)");
+                float fv = ev.float_value;
+                if (ctx.drag_float("Float", &fv, 0.01f)) {
+                    anim_clip_edit_("Event Float", [&](ClipModel& mm) { mm.events[idx].float_value = fv; }, "event_float");
+                }
+                ctx.menu_separator();
+                if (ctx.menu_item("Jump to Event", "")) anim_time_ = ev.time;
+                if (ctx.menu_item("Delete Event", "X", nullptr, true, imm::Icon::Trash)) anim_delete_selected_event_();
+            }
+            ctx.end_popup();
+        }
         if (ctx.begin_popup("key_menu", 190)) {
             const std::string cur = anim_clip_.model.easing_of(anim_sel_keys_);
             ctx.label_dim("Interpolation");
@@ -876,7 +933,10 @@
         if (timeline_hovered_ && !ctx.wants_keyboard() && !ctx.any_popup_open()) {
             if (ctx.shortcut(Key::Space)) anim_playing_ = !anim_playing_;
             if (ctx.shortcut(Key::I)) anim_insert_keys_();
-            if (ctx.shortcut(Key::X) || ctx.shortcut(Key::Delete)) anim_delete_selected_keys_();
+            if (ctx.shortcut(Key::X) || ctx.shortcut(Key::Delete)) {
+                if (anim_sel_event_ >= 0) anim_delete_selected_event_();
+                else anim_delete_selected_keys_();
+            }
             if (ctx.shortcut(Key::A)) anim_select_all_keys_();
             if (ctx.shortcut(Key::Right)) anim_time_ = anim_snap_(anim_time_ + 1.0f / kAnimFps);
             if (ctx.shortcut(Key::Left)) anim_time_ = anim_snap_(anim_time_ - 1.0f / kAnimFps);
@@ -886,8 +946,74 @@
         }
     }
 
+    /**
+     * @brief The Events lane: one flag per clip event (selected: orange), hover for its name.
+     *        Click selects and starts a drag, right-click opens its menu; right-click empty lane
+     *        space to add one there.
+     */
+    template<typename XOf, typename TOf>
+    void draw_events_lane_(imm::Context& ctx, const imm::Box& track, float y, float row_h, const XOf& x_of, const TOf& t_of,
+                           float pps, bool in_track, bool& on_key) {
+        const auto& in = ctx.input();
+        const glm::vec2 m = ctx.mouse();
+        const auto& evs = anim_clip_.model.events;
+        if (anim_sel_event_ >= static_cast<int>(evs.size())) anim_sel_event_ = -1;
+        ctx.push_clip(track);
+        for (size_t i = 0; i < evs.size(); ++i) {
+            const bool sel = static_cast<int>(i) == anim_sel_event_;
+            const float ex = x_of(evs[i].time) + (anim_event_drag_.active && sel ? anim_event_drag_.dt * pps : 0.0f);
+            const glm::vec4 col = sel ? glm::vec4(1.0f, 0.62f, 0.18f, 1) : glm::vec4(0.55f, 0.8f, 0.95f, 1);
+            ctx.line({ex, y + 3}, {ex, y + row_h - 3}, col, 1.5f);
+            ctx.triangle({ex, y + 3}, {ex + 9, y + 6.5f}, {ex, y + 10}, col);
+            const imm::Box hit{ex - 4, y, 15, row_h};
+            if (!ctx.is_hovered(hit) || on_key) continue;
+            ctx.text_in({ex + 11, y, 160, row_h}, evs[i].name + (evs[i].string_value.empty() ? "" : " (" + evs[i].string_value + ")"),
+                        ctx.style.text, 0.0f);
+            if (in.pressed[0]) {
+                on_key = true;
+                anim_sel_event_ = static_cast<int>(i);
+                anim_sel_keys_.clear();
+                anim_event_drag_ = {true, m.x, 0.0f};
+            } else if (in.pressed[1]) {
+                on_key = true;
+                anim_sel_event_ = static_cast<int>(i);
+                ctx.open_popup("event_menu", m);
+            }
+        }
+        ctx.pop_clip();
+        const imm::Box lane{track.x, y, track.w, row_h};
+        if (in_track && !on_key && ctx.is_hovered(lane)) {
+            if (in.pressed[0]) { anim_sel_event_ = -1; anim_sel_keys_.clear(); on_key = true; }   // empty lane: deselect
+            if (in.pressed[1]) {
+                on_key = true;
+                anim_menu_time_ = anim_snap_(t_of(m.x));
+                ctx.open_popup("events_lane_menu", m);
+            }
+        }
+    }
+
+    /** @brief Adds a clip event (undoable) and selects it. */
+    void anim_add_event_(float time, const std::string& name) {
+        if (!anim_clip_.open()) return;
+        size_t at = 0;
+        anim_clip_edit_("Add Event", [&](ClipModel& m) {
+            at = m.add_event(time, name);
+            if (time > m.length) m.length = time;
+        });
+        anim_sel_event_ = static_cast<int>(at);
+        anim_sel_keys_.clear();
+    }
+
+    void anim_delete_selected_event_() {
+        if (anim_sel_event_ < 0) return;
+        const size_t idx = static_cast<size_t>(anim_sel_event_);
+        anim_clip_edit_("Delete Event", [&](ClipModel& m) { m.delete_event(idx); });
+        anim_sel_event_ = -1;
+    }
+
     void anim_select_all_keys_() {
         anim_sel_keys_.clear();
+        anim_sel_event_ = -1;
         for (const auto& t : anim_clip_.model.tracks) for (const auto& k : t.keys) anim_sel_keys_.insert({t.object, k.time, ""});
     }
 
@@ -917,6 +1043,23 @@ public:
     void add_animator(ObjectId id) { anim_add_animator_(id); }
     void new_animation_clip(const std::string& name = "clip") { anim_new_clip_(name); }
     void insert_keyframes() { anim_insert_keys_(); }
+    /** @brief The Events lane's operations, as its mouse actions perform them (all undoable). */
+    void add_animation_event(float time, const std::string& name) { anim_add_event_(time, name); }
+    int selected_animation_event() const { return anim_sel_event_; }
+    void select_animation_event(int index) { anim_sel_event_ = index; }
+    void move_selected_animation_event(float to_time) {
+        if (anim_sel_event_ < 0 || anim_sel_event_ >= static_cast<int>(anim_clip_.model.events.size())) return;
+        const size_t idx = static_cast<size_t>(anim_sel_event_);
+        int moved = anim_sel_event_;
+        anim_clip_edit_("Move Event", [&](ClipModel& m) { moved = m.move_event(idx, anim_snap_(to_time)); });
+        anim_sel_event_ = moved;
+    }
+    void rename_selected_animation_event(const std::string& name) {
+        if (anim_sel_event_ < 0 || anim_sel_event_ >= static_cast<int>(anim_clip_.model.events.size()) || name.empty()) return;
+        const size_t idx = static_cast<size_t>(anim_sel_event_);
+        anim_clip_edit_("Rename Event", [&](ClipModel& m) { m.events[idx].name = name; });
+    }
+    void delete_selected_animation_event() { anim_delete_selected_event_(); }
     /** @brief Moves an object the way the gizmo does (the live pose while recording a rig object). */
     void set_object_transform(ObjectId id, const glm::vec3& p, const glm::vec3& r, const glm::vec3& s) {
         set_object_transform_(id, p, r, s, "Move");

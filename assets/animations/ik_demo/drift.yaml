@@ -1,0 +1,17 @@
+clip:
+  name: drift
+  wrap: loop
+  length: 3.0
+  tracks:
+    - object: reach_target
+      property: position
+      keys:
+        - {time: 0, value: [0.45, -0.75, 1.15]}
+        - {time: 0.375, value: [0.318198, -0.573223, 1.50355]}
+        - {time: 0.75, value: [2.75546e-17, -0.5, 1.65]}
+        - {time: 1.125, value: [-0.318198, -0.573223, 1.50355]}
+        - {time: 1.5, value: [-0.45, -0.75, 1.15]}
+        - {time: 1.875, value: [-0.318198, -0.926777, 0.796447]}
+        - {time: 2.25, value: [-8.26637e-17, -1, 0.65]}
+        - {time: 2.625, value: [0.318198, -0.926777, 0.796447]}
+        - {time: 3, value: [0.45, -0.75, 1.15]}

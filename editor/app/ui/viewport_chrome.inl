@@ -256,6 +256,10 @@
         if (ctx.menu_item("Align Active Camera to View", "Ctrl Alt Num 0", nullptr, !asset_view_(), I::Camera)) align_scene_camera_to_view_();
         ctx.menu_separator();
         if (ctx.menu_item("Toggle Maximize Area", "Ctrl Space")) maximized_ = !maximized_;
+        ctx.menu_separator();
+        // The engine's debug HUD, drawn inside the viewport (F3 there cycles off / fps / full).
+        bool stats = engine_.debug_overlay().visible();
+        if (ctx.menu_item("Stats Overlay", "F3", &stats)) toggle_stats_overlay();
         ctx.end_menu();
     }
 

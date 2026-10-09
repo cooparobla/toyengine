@@ -28,6 +28,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <cstdio>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -399,6 +401,7 @@ public:
     std::vector<ObjectId> duplicate_objects(const std::vector<ObjectId>& ids) {
         std::vector<ObjectId> out;
         edit("Duplicate", [&](Node&) -> Change {
+            std::set<std::string> save_ids = save_ids_();   // a copy's SaveIds get fresh ids
             for (ObjectId id : ids) {
                 const Node* src = find(id);
                 const auto parent = parent_of(id);
@@ -406,6 +409,7 @@ public:
                 Node copy = *src;
                 restamp_all_(copy);
                 copy["name"] = Node(unique_name(get_string(*src, "name", "Object"), *parent));
+                fresh_save_ids_(copy, save_ids);
                 Node* list = children_list_(*parent);
                 auto& seq = list->as_seq();
                 int idx = index_in_(*list, id);
@@ -493,6 +497,14 @@ public:
         return edit("Add " + type, [&](Node&) -> Change {
             Node* list = components(id);
             if (!list) return {};
+            if (type == "SaveId") {   // a new SaveId gets an id no other object uses
+                std::set<std::string> used = save_ids_();
+                const std::string cur = get_string(comp, "id");
+                if (cur.empty() || used.count(cur)) {
+                    const Node* obj = find(id);
+                    comp["id"] = Node(unique_save_id_(obj ? get_string(*obj, "name", "object") : "object", used));
+                }
+            }
             list->as_seq().push_back(comp);
             return {ChangeScope::Object, id};
         });
@@ -572,6 +584,28 @@ public:
             else erase_key(sc, "settings");
             return {ChangeScope::Settings, 0};
         }, merge_key);
+    }
+
+    /** @brief Number of overrides in `scene.settings.<section>`. */
+    size_t scene_setting_count(const std::string& section) const {
+        const Node s = scene_settings();
+        return s.contains(section) && s.at(section).is_mapping() ? s.at(section).size() : 0;
+    }
+
+    /**
+     * @brief Drops every override in `scene.settings.<section>` as one undoable change (the
+     *        scene goes back to the project's values there). Other sections are kept.
+     */
+    Change clear_scene_settings(const std::string& section, const std::string& label) {
+        if (is_object_asset() || scene_setting_count(section) == 0) return {};
+        return edit(label, [&](Node& d) -> Change {
+            Node& sc = d["scene"];
+            Node settings = sc.at("settings");
+            erase_key(settings, section);
+            if (settings.size() > 0) sc["settings"] = settings;
+            else erase_key(sc, "settings");
+            return {ChangeScope::Settings, 0};
+        });
     }
 
     // ---------------------------------------------------------------------------------
@@ -855,6 +889,50 @@ private:
             if (o.contains("children")) for (auto& c : o["children"].as_seq()) fix(c);
         };
         fix(obj);
+    }
+
+    /** @brief Every SaveId component's `id` in the document. */
+    std::set<std::string> save_ids_() const {
+        std::set<std::string> used;
+        for_each_object([&](const Node& o, int) {
+            if (!o.contains("components") || !o.at("components").is_sequence()) return;
+            for (const auto& c : o.at("components").as_seq()) {
+                if (component_type(c) == "SaveId") used.insert(get_string(c, "id"));
+            }
+        });
+        return used;
+    }
+
+    /** @brief "<name>_<6 hex>" (name sanitized), unused in `used`; recorded there. */
+    static std::string unique_save_id_(const std::string& name, std::set<std::string>& used) {
+        std::string base;
+        for (char ch : name) {
+            const unsigned char u = static_cast<unsigned char>(ch);
+            base += std::isalnum(u) ? static_cast<char>(std::tolower(u)) : '_';
+        }
+        if (base.empty()) base = "object";
+        static uint64_t counter = 0;
+        std::string id;
+        do {
+            uint64_t h = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count()) ^ (++counter * 0x9E3779B97F4A7C15ull);
+            h ^= h >> 33; h *= 0xff51afd7ed558ccdull; h ^= h >> 33;
+            char hex[8];
+            std::snprintf(hex, sizeof(hex), "%06x", static_cast<unsigned>(h & 0xFFFFFFu));
+            id = base + "_" + hex;
+        } while (used.count(id));
+        used.insert(id);
+        return id;
+    }
+
+    /** @brief Gives every SaveId in `obj`'s subtree a fresh id (a duplicated object is a new one). */
+    void fresh_save_ids_(Node& obj, std::set<std::string>& used) {
+        if (!obj.is_mapping()) return;
+        if (obj.contains("components") && obj["components"].is_sequence()) {
+            for (auto& c : obj["components"].as_seq()) {
+                if (component_type(c) == "SaveId") c["id"] = Node(unique_save_id_(get_string(obj, "name", "object"), used));
+            }
+        }
+        if (obj.contains("children")) for (auto& c : obj["children"].as_seq()) fresh_save_ids_(c, used);
     }
 
     void restamp_all_(Node& obj) {

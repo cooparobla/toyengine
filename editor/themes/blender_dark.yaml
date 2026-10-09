@@ -15,6 +15,7 @@ metrics:
   label_align: 1                  # property labels against the widget (0 = flush left)
   scrollbar: 7
   rounding: 4
+  tooltip_delay: 0.6
 
 colors:
   window_bg: "#1d1d1d"            # gaps between areas

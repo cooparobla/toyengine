@@ -17,7 +17,7 @@
  * just the water between, rather than vanishing into fog as the sky behind it would.
  *
  * Every parameter rides in one 128-byte push-constant block (exactly Vulkan's guaranteed
- * minimum), so there is no per-frame UBO and none of the single-buffer staleness FogData carries.
+ * minimum), so there is no per-frame UBO to go stale.
  */
 
 #ifndef TOYENGINE_RENDER_PASSES_UNDERWATER_PASS_H

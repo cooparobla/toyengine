@@ -88,6 +88,7 @@ inline FieldDesc F(FieldDesc f, std::string label, std::string tip) {
 /** @brief A field a quality tier sets: the tooltip says which, and that editing it overrides the tier. */
 inline FieldDesc tier(FieldDesc f, const std::string& tier_name) {
     f.tooltip += "\nSet by " + tier_name + " Quality (shown: High); editing it overrides the tier.";
+    f.tier_driven = true;
     return f;
 }
 /** @brief A feature's quality tier. */
@@ -136,13 +137,41 @@ inline const std::vector<SettingsGroup>& render_settings_groups() {
                    "Banded shading: brightness a specular highlight must reach to show (hard cutoff)"))
             .add(F(f_float("rim_strength", 0.0f, 0.005f, 0.0f, 4.0f), "Rim Light", "Strength of a rim highlight on silhouettes; 0 disables it"))
             .sub("Sky")
+            .add(with_default(F(f_enum("sky_model", {"gradient", "physical"}), "Sky Model",
+                                "gradient: the three colours below, drawn as is (cheap, stylised). physical: a physically "
+                                "based atmosphere -- sunsets, a sun and moon, stars at night, optional clouds -- that follows "
+                                "the scene's sun (or the weather's clock) and sets the sky colours, ambient and the sun's "
+                                "colour to match"), "gradient"))
             .add(F(f_float("ambient_intensity", 1.0f, 0.01f, 0.0f, 16.0f), "Ambient Intensity",
                    "How strongly the sky gradient lights surfaces as indirect diffuse light"))
             .add(F(f_float("sky_intensity", 1.0f, 0.01f, 0.0f, 16.0f), "Sky Reflection Intensity",
                    "Strength of the sky gradient as indirect specular (what surfaces reflect where nothing else is)"))
+            .sub("Sky Gradient", "sky_model", "gradient")
             .add(F(listed(f_color("sky_zenith", glm::vec3(0.05f, 0.18f, 0.55f))), "Zenith Colour", "Sky gradient colour straight up"))
             .add(F(listed(f_color("sky_horizon", glm::vec3(0.25f, 0.35f, 0.45f))), "Horizon Colour", "Sky gradient colour at the horizon"))
             .add(F(listed(f_color("sky_ground", glm::vec3(0.05f, 0.045f, 0.04f))), "Ground Colour", "Sky gradient colour straight down"))
+            .sub("Physical Sky", "sky_model", "physical")
+            .add(quality("sky_quality", "the sky's integration steps and the cloud march's view and shadow steps"))
+            .add(F(f_float("atmosphere_density", 1.0f, 0.01f, 0.0f, 20.0f), "Haze",
+                   "Aerosols in the air: 1 = a clear day; higher = a hazier, whiter sky, a wider glow around the sun "
+                   "and redder sunsets"))
+            .add(F(f_float("ozone", 1.0f, 0.01f, 0.0f, 10.0f), "Ozone", "The ozone layer: deepens the blue of the sky at dawn and dusk"))
+            .add(F(f_float("sun_disc_size", 0.53f, 0.01f, 0.0f, 20.0f), "Sun Size", "The sun disc's angular diameter in degrees (0.53 is real; 0 hides it)"))
+            .add(F(f_float("moon_disc_size", 0.6f, 0.01f, 0.0f, 20.0f), "Moon Size", "The moon disc's angular diameter in degrees (0 hides it)"))
+            .add(F(f_bool("sky_stars", true), "Stars", "Stars fade in as the sky darkens, behind any clouds"))
+            .done());
+
+        g.push_back(GroupBuilder(general, "Clouds", "A raymarched cloud layer lit by the sun and moon, drawn over the "
+                                 "physical sky (sky_model: physical) at half resolution. The scene's weather drives its "
+                                 "coverage while it is on")
+            .toggle(F(f_bool("clouds", false), "Clouds", "The cloud layer (needs Sky Model: physical)"))
+            .add(F(f_float("cloud_coverage", 0.4f, 0.005f, 0.0f, 1.0f), "Coverage",
+                   "0 = a clear sky, 1 = overcast. Clouds also dim the sun and the ambient light"))
+            .add(F(f_float("cloud_altitude", 1500.0f, 10.0f, 0.0f, 20000.0f), "Altitude", "Height of the layer's base, metres"))
+            .add(F(f_float("cloud_thickness", 1500.0f, 10.0f, 10.0f, 10000.0f), "Thickness", "The layer's depth, metres"))
+            .add(F(f_float("cloud_density", 1.0f, 0.01f, 0.0f, 10.0f), "Density", "Higher = darker, more solid clouds; lower = wispy"))
+            .add(F(f_float("cloud_wind_speed", 8.0f, 0.1f, 0.0f, 200.0f), "Wind Speed",
+                   "How fast the clouds drift, m/s (along the weather's wind while it is on)"))
             .done());
 
         g.push_back(GroupBuilder(general, "Anti-Aliasing", "Smooths jagged edges. One method at a time; its tuning is listed under it")
@@ -345,28 +374,33 @@ inline const std::vector<SettingsGroup>& render_settings_groups() {
             .add(F(f_bool("refraction_include_reflections", true), "See Reflections", "Refraction samples the image after reflections, so reflections show through"))
             .done());
 
-        g.push_back(GroupBuilder(features, "Fog", "Global analytic fog over the whole scene. Local fog pockets are Volume components "
-                                 "(see Volumetrics)")
-            .toggle(startup(F(f_bool("fog_enabled", true), "Fog", "Global distance / height fog")))
-            .add(F(f_int_enum("fog_mode", {"Linear", "Exponential", "Exponential Squared"}, 2, {
+        g.push_back(GroupBuilder(features, "Fog", "Global exponential height fog over the whole scene, thinning with "
+                                 "altitude. Local fog pockets are Volume components (see Volumetrics)")
+            .toggle(F(f_bool("fog_enabled", true), "Fog", "Global height fog"))
+            .add(F(f_int_enum("fog_mode", {"Linear", "Exponential"}, 1, {
                        "Fog ramps evenly from none at Linear Start to full at Linear End (density is ignored)",
-                       "Fog thickens as exp(-density * distance): starts building right away, soft tail",
-                       "Fog follows exp(-(density * distance)^2): clear up close, then closes in quickly (Unity's default)",
+                       "Physically based: fog thickens as exp(-density * distance), thinning with height above the base",
                    }), "Mode", "How fog builds with distance"))
-            .add(F(f_float("fog_density", 0.02f, 0.001f, 0.0f, 10.0f), "Density", "Fog per world unit at the height base (exponential modes)"))
+            .add(F(f_float("fog_density", 0.02f, 0.001f, 0.0f, 10.0f), "Density", "Fog per metre at and below the height base"))
             .add(F(f_float("fog_linear_start", 5.0f, 0.1f, 0.0f, 100000.0f), "Linear Start", "Linear mode: distance fog begins"))
             .add(F(f_float("fog_linear_end", 60.0f, 0.1f, 0.0f, 100000.0f), "Linear End", "Linear mode: distance fog is at full strength"))
             .add(F(listed(f_color("fog_color", glm::vec3(0.55f, 0.62f, 0.72f))), "Colour", "The fog's colour"))
             .add(F(f_float("fog_sky_blend", 0.0f, 0.01f, 0.0f, 1.0f), "Sky Blend", "0 = flat fog colour, 1 = blend toward the sky gradient"))
             .add(F(f_float("fog_max_opacity", 1.0f, 0.01f, 0.0f, 1.0f), "Max Opacity", "Ceiling on how much fog can hide"))
-            .add(F(f_float("fog_max_distance", 150.0f, 0.5f, 0.0f, 100000.0f), "Max Distance", "Distance at which fog (and the sky behind it) saturates"))
+            .sub("Distance")
+            .add(F(f_float("fog_start_distance", 0.0f, 0.1f, 0.0f, 100000.0f), "Start Distance", "No fog nearer than this"))
+            .add(F(f_float("fog_cutoff_distance", 0.0f, 0.5f, 0.0f, 100000.0f), "Cutoff Distance",
+                   "Fog stops thickening past this distance; 0 = no cutoff"))
+            .add(F(f_float("fog_sky_distance", 1000.0f, 1.0f, 1.0f, 100000.0f), "Sky Distance",
+                   "How far away the sky counts as for fog; with height fog the zenith stays clear"))
             .sub("Height")
-            .add(F(f_float("fog_height_base", 0.0f, 0.05f), "Height Base", "World Z where fog is at full density (Z is up)"))
+            .add(F(f_float("fog_height_base", 0.0f, 0.05f), "Height Base", "World Z where fog is at full density (Z is up); constant below"))
             .add(F(f_float("fog_height_falloff", 0.0f, 0.05f, -1000.0f, 1000.0f), "Height Falloff",
-                   "Distance over which fog thins above the base; 0 or less disables height fog"))
+                   "Metres over which fog thins above the base; 0 or less = uniform fog"))
             .sub("Sun")
             .add(F(f_float("fog_sun_amount", 0.0f, 0.01f, 0.0f, 16.0f), "Sun Glow", "Brightening toward the sun as light scatters forward; 0 disables"))
             .add(F(f_float("fog_sun_anisotropy", 0.7f, 0.01f, -0.99f, 0.99f), "Sun Glow Tightness", "0 = even glow, near 1 = tight halo around the sun"))
+            .add(F(f_float("fog_sun_start_distance", 0.0f, 0.1f, 0.0f, 100000.0f), "Sun Glow Start", "The sun glow builds only beyond this distance"))
             .done());
 
         g.push_back(GroupBuilder(features, "Volumetrics", "Raymarched local volumes (Volume components): fog pockets, haze, light "
@@ -454,6 +488,12 @@ inline const std::vector<SettingsGroup>& render_settings_groups() {
             .add(F(f_float("dof_blade_rotation", 0.0f, 0.5f, -360.0f, 360.0f), "Blade Rotation", "Rotates the polygonal iris, in degrees"))
             .done());
 
+        g.push_back(GroupBuilder(features, "Motion Blur", "Smears moving objects and camera motion along their screen velocity")
+            .toggle(F(f_bool("motion_blur", false), "Motion Blur", "Velocity-based blur of camera and object motion (the editor viewport camera never blurs)"))
+            .add(F(f_float("motion_blur_intensity", 0.5f, 0.01f, 0.0f, 2.0f), "Shutter",
+                   "Fraction of the frame the shutter is open (0.5 = a 180-degree shutter); 0 disables the blur"))
+            .done());
+
         g.push_back(GroupBuilder(features, "Tilt Shift", "A miniature / diorama look: a sharp horizontal band, blurred above and below")
             .toggle(startup(F(f_bool("tilt_shift_enabled", false), "Tilt Shift", "Diorama blur, after upscaling")))
             .add(F(f_float("tilt_shift_focus_center", 0.55f, 0.005f, 0.0f, 1.0f), "Band Centre", "Screen height of the sharp band's centre (0 = top)"))
@@ -499,8 +539,9 @@ inline const std::vector<SettingsGroup>& render_settings_groups() {
 
         g.push_back(GroupBuilder(stylize, "Pixel Stability", "Keeps low-resolution renders steady under camera motion")
             .add(F(f_bool("camera_pixel_snap", true), "Camera Pixel Snap", "Snap orthographic cameras to whole pixels so edges don't shimmer"))
-            .add(F(f_bool("texel_aa", true), "Texel AA",
-                   "Texture texels stay hard at rest but their edges blend over one screen pixel, so magnified textures don't crawl; off = raw nearest sampling"))
+            .add(project_only(F(f_bool("texel_aa", true), "Texel AA",
+                   "Texture texels stay hard at rest but their edges blend over one screen pixel, so magnified textures don't crawl; off = raw nearest sampling. "
+                   "Baked into the texture sampler at start-up: project-wide, applies after Restart Editor Engine")))
             .done());
 
         // =====================================================================================
@@ -532,6 +573,7 @@ inline const std::vector<SettingsGroup>& project_settings_groups() {
         {"Physics", {f_vec3("gravity", glm::vec3(0.0f, 0.0f, -9.81f), 0.05f), f_float("fixed_timestep", 1.0f / 60.0f, 0.0005f, 0.0001f, 1.0f)}},
         {"Jobs", {f_int("worker_threads", 0, 0, 256), f_int("parallel_threshold", 4, 1, 1 << 20)}},
         {"Output", {f_bool("save_on_exit", true), f_string("filepath", "./output/frame.png"), f_bool("save_low_res", true)}},
+        {"Debug", {f_enum("overlay", {"off", "fps", "full"})}},
     };
     return groups;
 }
@@ -541,6 +583,7 @@ inline std::string project_section_key(const std::string& group_title) {
     if (group_title == "Window") return "window";
     if (group_title == "Physics") return "physics";
     if (group_title == "Jobs") return "jobs";
+    if (group_title == "Debug") return "debug";
     return "output";
 }
 

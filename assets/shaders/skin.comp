@@ -1,0 +1,62 @@
+#version 450
+// GPU skinning pre-pass (toyengine/render/passes/skinning_pass.h): one invocation per vertex of
+// one skinned mesh. Reads the static bind pose and this frame's bone palette, writes the skinned
+// vertex straight into the mesh's per-frame-slot vertex buffer -- the same buffer every draw
+// (G-buffer, shadows, local-shadow atlas, surface vertex hooks) binds.
+//
+// Matches SkinnedMeshRenderer::skin() exactly: a weighted blend normalised by the weight sum,
+// normal/tangent renormalised, and a vertex with no usable influence keeping its bind pose.
+layout(local_size_x = 64) in;
+
+struct BindVertex {
+    vec4  pos_u;     // position.xyz, uv.x
+    vec4  nrm_v;     // normal.xyz,   uv.y
+    vec4  tangent;   // tangent.xyz, handedness
+    ivec4 joints;    // palette indices, -1 = unused
+    vec4  weights;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer BindPose { BindVertex bind_pose[]; };
+layout(std430, set = 0, binding = 1) readonly buffer Palette  { mat4 palette[]; };
+// data::Vertex, tightly packed: position3, normal3, uv2, tangent4 = 12 floats.
+layout(std430, set = 0, binding = 2) writeonly buffer Out     { float out_v[]; };
+
+layout(push_constant) uniform Push {
+    uint vertex_count;
+    uint bone_count;
+} pc;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.vertex_count) return;
+    BindVertex b = bind_pose[i];
+
+    vec3 pos = vec3(0.0), nrm = vec3(0.0), tan = vec3(0.0);
+    float wsum = 0.0;
+    for (int c = 0; c < 4; ++c) {
+        int j = b.joints[c];
+        float w = b.weights[c];
+        if (j < 0 || w <= 0.0 || uint(j) >= pc.bone_count) continue;
+        mat4 m = palette[j];
+        pos += w * (m * vec4(b.pos_u.xyz, 1.0)).xyz;
+        nrm += w * (m * vec4(b.nrm_v.xyz, 0.0)).xyz;
+        tan += w * (m * vec4(b.tangent.xyz, 0.0)).xyz;
+        wsum += w;
+    }
+
+    vec3 p = b.pos_u.xyz, n = b.nrm_v.xyz, t = b.tangent.xyz;
+    if (wsum > 1e-6) {
+        p = pos / wsum;
+        float nl = length(nrm);
+        if (nl > 1e-6) n = nrm / nl;
+        float tl = length(tan);
+        if (tl > 1e-6) t = tan / tl;
+    }
+
+    uint o = i * 12u;
+    out_v[o + 0u]  = p.x;  out_v[o + 1u]  = p.y;  out_v[o + 2u]  = p.z;
+    out_v[o + 3u]  = n.x;  out_v[o + 4u]  = n.y;  out_v[o + 5u]  = n.z;
+    out_v[o + 6u]  = b.pos_u.w;  out_v[o + 7u] = b.nrm_v.w;
+    out_v[o + 8u]  = t.x;  out_v[o + 9u]  = t.y;  out_v[o + 10u] = t.z;
+    out_v[o + 11u] = b.tangent.w;
+}

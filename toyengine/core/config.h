@@ -99,6 +99,41 @@ struct JobsConfig {
 };
 
 /**
+ * @struct DebugConfig
+ * @brief The `debug:` section: developer aids that ship off.
+ */
+struct DebugConfig {
+    /// The on-screen stats overlay at startup: "off", "fps" or "full" (F3 cycles it at runtime).
+    /// See toyengine/debug/debug_overlay.h; a TOY_SHIPPING build ignores it unless compiled
+    /// with TOY_DEBUG_OVERLAY.
+    std::string overlay = "off";
+};
+
+/**
+ * @struct ParticlesConfig
+ * @brief The `particles:` section (toyengine/particles/).
+ */
+struct ParticlesConfig {
+    /// Global kill switch for `simulation: gpu` ParticleSystems: false (or a device without
+    /// compute) simulates every system on the CPU.
+    bool gpu_enabled = true;
+};
+
+/**
+ * @struct SaveConfig
+ * @brief The `save:` section (toyengine/save/save_system.h). Slots live in the per-user data
+ *        directory (<user_data_dir>/saves); what goes in them is the game's.
+ */
+struct SaveConfig {
+    /// How slot files are written: "auto" (caml in a TOY_SHIPPING build, plain YAML otherwise),
+    /// "yaml" or "caml". Reading accepts either.
+    std::string encode = "auto";
+    /// The slot F5 saves to and F9 loads (the quick_save / quick_load input actions); empty
+    /// turns the keys off.
+    std::string quick_slot = "quicksave";
+};
+
+/**
  * @brief Parses one quality-tier string from config.yaml.
  *
  * Accepts `low`, `med`, `medium`, `high` and `ultra`; anything else falls back to
@@ -126,6 +161,9 @@ struct AppConfig {
     OutputConfig                      output;
     AudioConfig                       audio;
     JobsConfig                        jobs;
+    DebugConfig                       debug;
+    SaveConfig                        save;
+    ParticlesConfig                   particles;
     coopa::physx::util::PhysicsSettings physics;
     /// Navigation build + runtime settings (physxcoopa/nav/nav_settings.h). `navigation.enabled`
     /// false skips the system entirely; a scene with no colliders builds nothing either way.
@@ -196,6 +234,7 @@ struct AppConfig {
                 if (r.contains("volumetrics_quality")) config.render.volumetrics_quality = parse_render_quality(r.at("volumetrics_quality").get_value<std::string>());
                 if (r.contains("sdf_quality"))         config.render.sdf_quality         = parse_render_quality(r.at("sdf_quality").get_value<std::string>());
                 if (r.contains("water_quality"))       config.render.water_quality       = parse_render_quality(r.at("water_quality").get_value<std::string>());
+                if (r.contains("sky_quality"))         config.render.sky_quality         = parse_render_quality(r.at("sky_quality").get_value<std::string>());
                 config.render.apply_quality_presets();
 
                 // --- Feature toggles ---
@@ -218,6 +257,11 @@ struct AppConfig {
                 if (r.contains("tilt_shift_enabled")) config.render.tilt_shift_enabled = r.at("tilt_shift_enabled").get_value<bool>();
                 if (r.contains("dof_enabled"))        config.render.dof_enabled        = r.at("dof_enabled").get_value<bool>();
                 if (r.contains("debug_view"))          config.render.debug_view          = r.at("debug_view").get_value<std::string>();
+                if (r.contains("skinning")) {
+                    const std::string v = r.at("skinning").get_value<std::string>();
+                    if (v == "cpu" || v == "gpu") config.render.skinning = v;
+                    else std::cerr << "[toy::core::AppConfig] Unknown render.skinning '" << v << "', expected cpu | gpu; using gpu.\n";
+                }
                 if (r.contains("world_ui_enabled"))   config.render.world_ui_enabled   = r.at("world_ui_enabled").get_value<bool>();
                 if (r.contains("screen_ui_enabled"))  config.render.screen_ui_enabled  = r.at("screen_ui_enabled").get_value<bool>();
 
@@ -263,6 +307,24 @@ struct AppConfig {
                             c.at(0).get_value<float>(), c.at(1).get_value<float>(), c.at(2).get_value<float>());
                     }
                 }
+
+                // --- Sky model (physical sky + clouds) ---
+                // Numbers may be written as integers (cloud_altitude: 1500).
+                auto sky_num = [](const fkyaml::node& v) {
+                    return v.is_integer() ? static_cast<float>(v.get_value<int64_t>()) : v.get_value<float>();
+                };
+                if (r.contains("sky_model"))          config.render.sky_model          = r.at("sky_model").get_value<std::string>();
+                if (r.contains("atmosphere_density")) config.render.atmosphere_density = sky_num(r.at("atmosphere_density"));
+                if (r.contains("ozone"))              config.render.ozone              = sky_num(r.at("ozone"));
+                if (r.contains("sun_disc_size"))      config.render.sun_disc_size      = sky_num(r.at("sun_disc_size"));
+                if (r.contains("moon_disc_size"))     config.render.moon_disc_size     = sky_num(r.at("moon_disc_size"));
+                if (r.contains("sky_stars"))          config.render.sky_stars          = r.at("sky_stars").get_value<bool>();
+                if (r.contains("clouds"))             config.render.clouds             = r.at("clouds").get_value<bool>();
+                if (r.contains("cloud_coverage"))     config.render.cloud_coverage     = sky_num(r.at("cloud_coverage"));
+                if (r.contains("cloud_altitude"))     config.render.cloud_altitude     = sky_num(r.at("cloud_altitude"));
+                if (r.contains("cloud_thickness"))    config.render.cloud_thickness    = sky_num(r.at("cloud_thickness"));
+                if (r.contains("cloud_density"))      config.render.cloud_density      = sky_num(r.at("cloud_density"));
+                if (r.contains("cloud_wind_speed"))   config.render.cloud_wind_speed   = sky_num(r.at("cloud_wind_speed"));
 
                 // --- Shadows ---
                 if (r.contains("shadows_enabled"))        config.render.shadows_enabled        = r.at("shadows_enabled").get_value<bool>();
@@ -396,7 +458,17 @@ struct AppConfig {
                 if (r.contains("refraction_include_reflections")) config.render.refraction_include_reflections = r.at("refraction_include_reflections").get_value<bool>();
 
                 // --- Fog ---
-                if (r.contains("fog_mode"))           config.render.fog_mode           = r.at("fog_mode").get_value<int>();
+                if (r.contains("fog_mode")) {
+                    // Exp2 (2) is gone: squaring a height-integrated optical depth has no physical
+                    // meaning. It loads as Exponential, which needs a somewhat lower density for
+                    // the same look at mid distances.
+                    int mode = r.at("fog_mode").get_value<int>();
+                    if (mode == 2) {
+                        std::cerr << "[toy::core::AppConfig] fog_mode 2 (Exp2) is deprecated; using 1 (Exponential height fog).\n";
+                        mode = 1;
+                    }
+                    config.render.fog_mode = mode == 0 ? 0 : 1;
+                }
                 if (r.contains("fog_density"))        config.render.fog_density        = r.at("fog_density").get_value<float>();
                 if (r.contains("fog_linear_start"))   config.render.fog_linear_start   = r.at("fog_linear_start").get_value<float>();
                 if (r.contains("fog_linear_end"))     config.render.fog_linear_end     = r.at("fog_linear_end").get_value<float>();
@@ -413,7 +485,12 @@ struct AppConfig {
                 if (r.contains("fog_sun_amount"))     config.render.fog_sun_amount     = r.at("fog_sun_amount").get_value<float>();
                 if (r.contains("fog_sun_anisotropy")) config.render.fog_sun_anisotropy = r.at("fog_sun_anisotropy").get_value<float>();
                 if (r.contains("fog_max_opacity"))    config.render.fog_max_opacity    = r.at("fog_max_opacity").get_value<float>();
-                if (r.contains("fog_max_distance"))   config.render.fog_max_distance   = r.at("fog_max_distance").get_value<float>();
+                if (r.contains("fog_sun_start_distance")) config.render.fog_sun_start_distance = r.at("fog_sun_start_distance").get_value<float>();
+                if (r.contains("fog_start_distance"))  config.render.fog_start_distance  = r.at("fog_start_distance").get_value<float>();
+                if (r.contains("fog_cutoff_distance")) config.render.fog_cutoff_distance = r.at("fog_cutoff_distance").get_value<float>();
+                if (r.contains("fog_sky_distance"))    config.render.fog_sky_distance    = r.at("fog_sky_distance").get_value<float>();
+                if (r.contains("fog_max_distance"))
+                    std::cerr << "[toy::core::AppConfig] fog_max_distance is deprecated and ignored -- use fog_cutoff_distance / fog_sky_distance.\n";
                 if (r.contains("snow_cover_override")) {
                     const auto& v = r.at("snow_cover_override");
                     if (v.is_float_number()) config.render.snow_cover_override = static_cast<float>(v.get_value<double>());
@@ -472,6 +549,10 @@ struct AppConfig {
                 if (r.contains("dof_blade_count"))    config.render.dof_blade_count    = r.at("dof_blade_count").get_value<int>();
                 if (r.contains("dof_blade_rotation")) config.render.dof_blade_rotation = r.at("dof_blade_rotation").get_value<float>();
 
+                // --- Motion blur ---
+                if (r.contains("motion_blur"))           config.render.motion_blur           = r.at("motion_blur").get_value<bool>();
+                if (r.contains("motion_blur_intensity")) config.render.motion_blur_intensity = r.at("motion_blur_intensity").get_value<float>();
+
                 // --- Anti-aliasing ---
                 if (r.contains("aa_mode"))                  config.render.aa_mode                  = r.at("aa_mode").get_value<std::string>();
                 if (r.contains("fxaa_subpixel"))             config.render.fxaa_subpixel             = r.at("fxaa_subpixel").get_value<float>();
@@ -496,6 +577,30 @@ struct AppConfig {
                 const auto& j = root.at("jobs");
                 if (j.contains("worker_threads"))    config.jobs.worker_threads    = j.at("worker_threads").get_value<unsigned int>();
                 if (j.contains("parallel_threshold")) config.jobs.parallel_threshold = j.at("parallel_threshold").get_value<std::size_t>();
+            }
+
+            if (root.contains("debug")) {
+                const auto& d = root.at("debug");
+                if (d.contains("overlay")) {
+                    // A YAML 1.1 reader takes a bare `off` for a boolean; accept either spelling.
+                    const auto& o = d.at("overlay");
+                    config.debug.overlay = o.is_boolean() ? (o.get_value<bool>() ? "fps" : "off")
+                                                          : o.get_value<std::string>();
+                }
+            }
+
+            if (root.contains("particles")) {
+                const auto& pn = root.at("particles");
+                if (pn.contains("gpu_enabled")) config.particles.gpu_enabled = pn.at("gpu_enabled").get_value<bool>();
+            }
+
+            if (root.contains("save")) {
+                const auto& sv = root.at("save");
+                if (sv.contains("encode")) config.save.encode = sv.at("encode").get_value<std::string>();
+                if (sv.contains("quick_slot")) {
+                    const auto& q = sv.at("quick_slot");
+                    config.save.quick_slot = q.is_null() ? std::string() : q.get_value<std::string>();
+                }
             }
 
             // Schema owned by physxcoopa itself (see util/physics_settings.h's doc) rather than

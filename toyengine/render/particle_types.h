@@ -13,6 +13,7 @@
 #define TOYENGINE_RENDER_PARTICLE_TYPES_H
 
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -111,6 +112,10 @@ struct ParticleDrawBatch {
     /// Its albedo (and flipbook) texture comes from this material's albedo slot; null or
     /// untextured draws the procedural `sprite` (the material cache binds white).
     const coopa::gfx::engine::components::PBRMaterial* texture_material = nullptr;
+    /// Non-zero: a GPU-simulated system (`simulation: gpu`). `instances` is unused; the quads are
+    /// GpuParticlePass's buffer for this id, drawn with draw_indirect(), and `count` is only the
+    /// last read-back alive count (an estimate, >= 1) for stats and sorting.
+    uint64_t gpu_id = 0;
 };
 
 /**
@@ -127,10 +132,64 @@ struct ParticleMeshBatch {
     glm::vec3 bounds_max{0.0f};
 };
 
+/**
+ * @struct GpuParticleParams
+ * @brief One GPU-simulated system's per-frame parameters, uploaded whole into its params buffer.
+ *        std430 layout, every member a vec4 / mat4: must match `Params` in
+ *        assets/shaders/particles_gpu_common.glsl exactly.
+ */
+struct GpuParticleParams {
+    glm::mat4 world{1.0f};        ///< Emitter now (spawn space -> world).
+    glm::mat4 prev_world{1.0f};   ///< Emitter at the previous job (sub-frame spawn positions).
+    glm::mat4 to_world{1.0f};     ///< Simulation space -> world (local: the emitter, else identity).
+    glm::vec4 frame{0.0f};        ///< x dt, y noise time, z spawn count, w spawn seed (uint bits).
+    glm::vec4 config{0.0f};       ///< x capacity, y sort mode (0 none, 1 distance, 2 oldest, 3 youngest), z local, w world scale.
+    glm::vec4 eye{0.0f};          ///< xyz camera position, w flipbook frames.
+    glm::vec4 shape0{0.0f};       ///< x shape type (EmitShape), y radius, z radius thickness, w cone angle (deg).
+    glm::vec4 shape1{0.0f};       ///< x arc (deg), y random direction, z mesh normal offset, w edge length.
+    glm::vec4 shape_box{0.0f};    ///< xyz box extents, w mesh triangle count.
+    glm::vec4 shape_offset{0.0f}; ///< xyz offset, w mesh total area.
+    glm::vec4 life_speed{0.0f};   ///< xy lifetime range, zw start speed range.
+    glm::vec4 size_rot{0.0f};     ///< xy start size range, zw start rotation range (rad).
+    glm::vec4 spin{0.0f};         ///< xy angular velocity range (rad/s), z align to normal, w random spin.
+    glm::vec4 color_a{1.0f};
+    glm::vec4 color_b{1.0f};
+    glm::vec4 accel{0.0f};        ///< xyz gravity + force (simulation space), w drag.
+    glm::vec4 velocity{0.0f};     ///< xyz constant velocity, w orbital (rad/s).
+    glm::vec4 center{0.0f};       ///< xyz orbit centre (simulation space), w radial (m/s).
+    glm::vec4 axis{0.0f};         ///< xyz orbit axis, w tumble (rad/s).
+    glm::vec4 collision{0.0f};    ///< x collide, y ground height, z bounce, w horizontal speed kept.
+    glm::vec4 wrap{0.0f};         ///< xyz wrap box (world), w wrap fade fraction (0 off).
+    glm::vec4 noise{0.0f};        ///< x strength, y kill on collide, z flipbook mode, w flipbook fps.
+    glm::vec4 misc{0.0f};         ///< x flipbook cycles, yzw inherited emitter velocity (world m/s).
+    glm::vec4 emitter_rot{0.0f, 0.0f, 0.0f, 1.0f}; ///< Emitter rotation quaternion (xyzw).
+    glm::vec4 noise_k[6]{};       ///< Turbulence waves: xyz wave vector, w omega.
+    glm::vec4 noise_c[6]{};       ///< xyz curl amplitude (normalized k x a), w phase.
+    glm::vec4 color_lut[64]{};    ///< colour_over_life, baked (64 samples over t in [0, 1]).
+    glm::vec4 curve_lut[64]{};    ///< x size_over_life, y alpha_over_life, baked.
+};
+static_assert(sizeof(GpuParticleParams) == 3 * 64 + 21 * 16 + 12 * 16 + 128 * 16, "GpuParticleParams must stay vec4-packed (std430)");
+
+/**
+ * @struct GpuParticleJob
+ * @brief One GPU-simulated system's work this frame: GpuParticlePass simulates every job (seen
+ *        or not), and draws the ones that also have a ParticleDrawBatch with the same id.
+ */
+struct GpuParticleJob {
+    uint64_t id = 0;              ///< Stable per ParticleSystem.
+    uint32_t generation = 0;      ///< Bumped by clear()/restart(): the GPU state resets.
+    uint32_t capacity = 0;        ///< max_particles: the buffers' fixed size.
+    bool     sort = false;        ///< Bitonic sort (blended systems); additive ones skip it.
+    GpuParticleParams params;
+    /// Mesh emitter triangles (8 vec4 per triangle, see MeshSurface::export_faces()); null: none.
+    std::shared_ptr<const std::vector<glm::vec4>> triangles;
+};
+
 /** @brief Everything the particle module hands the renderer for one frame. */
 struct ParticleFrameState {
     std::vector<ParticleDrawBatch> quads;
     std::vector<ParticleMeshBatch> meshes;
+    std::vector<GpuParticleJob>    gpu;     ///< `simulation: gpu` systems, simulated on the GPU.
     uint32_t total_quads() const {
         uint32_t n = 0;
         for (const auto& b : quads) n += b.count;

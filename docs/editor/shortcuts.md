@@ -90,6 +90,7 @@ Works in every mode. See [The 3D viewport](viewport.md#change-how-the-scene-is-d
 | **B** | Select Box tool |
 | **Shift+Space** | Tool menu |
 | **Ctrl+Space** | Maximize the viewport |
+| **F3** | Stats overlay: off, frame rate, full |
 | **Ctrl+Tab** | Mode menu |
 | **Shift+S** | Snap menu |
 | **Shift+C** | 3D cursor to the world centre, frame everything |
@@ -229,7 +230,7 @@ Pointer over the Timeline. See [Animation](animation.md#edit-keys-on-the-dope-sh
 |---|---|
 | **Space** | Play / pause |
 | **I** | Insert keys at the playhead |
-| **X** or **Delete** | Delete the selected keys |
+| **X** or **Delete** | Delete the selected keys, or the selected event |
 | **A** | Select all keys |
 | **Left** / **Right** | Previous / next frame |
 | **Down** / **Up** | Previous / next key |

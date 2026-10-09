@@ -18,6 +18,7 @@
 // that needed it elsewhere would be diverging from the descriptor contract they all share.
 
 #include <gfx/local_shadow_types.glsl>
+#include <gfx/fog_types.glsl>
 
 struct PointLight {
     vec4 position_range;  // xyz = pos, w = range
@@ -78,6 +79,17 @@ layout(set = 1, binding = 0) uniform LightUBO {
 
     // Point/spot shadows in the local-light atlas -- gfx/local_shadow.glsl samples these.
     GfxLocalShadowBlock local_shadows;
+
+    // The physical sky (render sky_model: physical) -- see light_data.h. All zero (gradient sky)
+    // unless the pipeline's SkyAtmospherePass is drawing it.
+    vec4 sky_sun;      // xyz = unit direction TO the sun, w = cos(disc angular radius)
+    vec4 sky_moon;     // xyz = unit direction TO the moon, w = cos(disc angular radius)
+    vec4 sky_params;   // x = 1 physical sky, y = cloud march scale (0 = no clouds composited), z = star visibility, w = sky illuminance
+    vec4 sky_extra;    // x = sun disc radiance, y = moon disc radiance, z = night floor, w = time (s)
+
+    // Global exponential height fog -- see gfx/fog.glsl. Read by fog.frag (the opaque scene)
+    // and by every forward shader, which fogs its own fragment at its own distance.
+    GfxFogBlock fog;
 } lights;
 
 #endif // TOY_LIGHT_UBO_BODY_GLSL

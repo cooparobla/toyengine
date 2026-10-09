@@ -75,15 +75,18 @@ struct Condition {
     std::vector<std::string> next;    ///< Conditions that may follow it; empty = any.
 
     // --- Sky and light ---
-    float cloud_cover = 0.0f;         ///< 0..1: greys and darkens the sky.
+    float cloud_cover = 0.0f;         ///< 0..1: greys and darkens the sky; drives render cloud_coverage (physical sky clouds).
     float sun = 1.0f;                 ///< Multiplier on the clock's sun / moon light.
     float ambient = 1.0f;             ///< Multiplier on the sky's ambient light.
     glm::vec3 sky_tint{1.0f};         ///< Multiplies the sky gradient.
 
     // --- Fog (global, render fog_*; colours are daylight colours, the clock darkens them) ---
-    float fog_density = 0.004f;
+    float fog_density = 0.0034f;
     glm::vec3 fog_color{0.68f, 0.75f, 0.84f};
-    float fog_height_falloff = 0.0f;  ///< > 0: fog thins above the ground over this many metres.
+    /// Metres over which the fog thins by e above the render config's fog_height_base; 0 = uniform
+    /// fog. Uniform fog also fills the sky at every elevation (sky pixels integrate to
+    /// fog_sky_distance), so a condition keeps a falloff unless it means to white out the sky.
+    float fog_height_falloff = 40.0f;
     float fog_sky_blend = 0.6f;
     float fog_max_opacity = 1.0f;
     float fog_sun_amount = 0.4f;
@@ -150,6 +153,10 @@ struct Settings {
     float snow_max_depth = 0.3f;         ///< Metres of deep snow (the `snow` surface shader) at full cover.
     float initial_snow_cover = 0.0f;     ///< Cover the scene starts with (0..1); a snowy starting condition starts at 1.
     bool snow_auto_deformers = false;    ///< Every Rigidbody leaves tracks in deep snow, not only SnowDeformer objects (world/snow_system.h).
+    float snow_trench_recover_time = 6.0f; ///< Seconds a full-depth track takes to fill back in (0: only while it snows).
+    bool snow_patch_hard = false;        ///< `snow_patch_style: hard` -- round, crisp-edged (toon) patches that grow and
+                                         ///< merge; `soft` (default) -- the soft noise-edged cover.
+    float snow_patch_size = 1.5f;        ///< Hard patches: typical patch diameter (m).
 
     std::vector<Condition> conditions;   ///< Empty in YAML: default_conditions().
 
@@ -172,7 +179,7 @@ inline const std::vector<std::string>& controlled_render_keys() {
     static const std::vector<std::string> keys = {
         "ambient_intensity", "sky_intensity", "sky_zenith", "sky_horizon", "sky_ground",
         "fog_mode", "fog_density", "fog_linear_start", "fog_linear_end", "fog_color", "fog_sky_blend",
-        "fog_max_opacity", "fog_height_falloff", "fog_sun_amount",
+        "fog_max_opacity", "fog_height_falloff", "fog_sun_amount", "cloud_coverage",
     };
     return keys;
 }
@@ -209,7 +216,7 @@ inline std::vector<Condition> default_conditions() {
         Condition c; c.name = "clear";
         c.weight = 3.0f; c.min_minutes = 5; c.max_minutes = 12; c.transition = 30;
         c.cloud_cover = 0.05f; c.sun = 1.0f; c.ambient = 1.0f;
-        c.fog_density = 0.003f; c.fog_color = {0.70f, 0.78f, 0.88f}; c.fog_sky_blend = 0.7f; c.fog_sun_amount = 0.5f;
+        c.fog_density = 0.0026f; c.fog_color = {0.70f, 0.78f, 0.88f}; c.fog_sky_blend = 0.7f; c.fog_sun_amount = 0.5f;
         c.wind_strength = 1.5f; c.wind_gust = 0.2f; c.temperature = 21;
         out.push_back(c);
     }
@@ -217,7 +224,7 @@ inline std::vector<Condition> default_conditions() {
         Condition c; c.name = "cloudy";
         c.weight = 2.0f; c.min_minutes = 4; c.max_minutes = 9; c.transition = 30;
         c.cloud_cover = 0.4f; c.sun = 0.8f; c.ambient = 0.95f;
-        c.fog_density = 0.005f; c.fog_color = {0.68f, 0.73f, 0.80f}; c.fog_sky_blend = 0.6f; c.fog_sun_amount = 0.35f;
+        c.fog_density = 0.0043f; c.fog_color = {0.68f, 0.73f, 0.80f}; c.fog_sky_blend = 0.6f; c.fog_sun_amount = 0.35f;
         c.wind_strength = 3.0f; c.wind_gust = 0.3f; c.temperature = 17;
         out.push_back(c);
     }
@@ -226,7 +233,7 @@ inline std::vector<Condition> default_conditions() {
         c.weight = 1.5f; c.min_minutes = 3; c.max_minutes = 8; c.transition = 35;
         c.next = {"cloudy", "rain", "fog", "overcast"};
         c.cloud_cover = 0.85f; c.sun = 0.35f; c.ambient = 0.85f; c.sky_tint = {0.92f, 0.94f, 0.97f};
-        c.fog_density = 0.008f; c.fog_color = {0.60f, 0.63f, 0.67f}; c.fog_sky_blend = 0.5f; c.fog_sun_amount = 0.1f;
+        c.fog_density = 0.0068f; c.fog_color = {0.60f, 0.63f, 0.67f}; c.fog_sky_blend = 0.5f; c.fog_sun_amount = 0.1f;
         c.wind_strength = 4.0f; c.wind_gust = 0.35f; c.temperature = 14; c.wetness = 0.05f;
         out.push_back(c);
     }
@@ -235,7 +242,7 @@ inline std::vector<Condition> default_conditions() {
         c.weight = 0.8f; c.min_minutes = 3; c.max_minutes = 6; c.transition = 45;
         c.next = {"overcast", "cloudy", "clear"};
         c.cloud_cover = 0.7f; c.sun = 0.45f; c.ambient = 0.9f; c.sky_tint = {0.95f, 0.96f, 0.98f};
-        c.fog_density = 0.045f; c.fog_color = {0.70f, 0.72f, 0.75f}; c.fog_height_falloff = 12.0f;
+        c.fog_density = 0.0382f; c.fog_color = {0.70f, 0.72f, 0.75f}; c.fog_height_falloff = 12.0f;
         c.fog_sky_blend = 0.2f; c.fog_sun_amount = 0.6f;
         c.wind_strength = 0.6f; c.wind_gust = 0.1f; c.temperature = 10; c.wetness = 0.25f;
         c.effects.push_back(effect("objects/weather_ground_mist", 1.0f, EffectAnchor::Ground, {0, 0, 0}, 0.5f));
@@ -246,7 +253,7 @@ inline std::vector<Condition> default_conditions() {
         c.weight = 1.2f; c.min_minutes = 3; c.max_minutes = 7; c.transition = 25;
         c.next = {"overcast", "storm", "cloudy", "rain"};
         c.cloud_cover = 0.9f; c.sun = 0.3f; c.ambient = 0.75f; c.sky_tint = {0.85f, 0.88f, 0.92f};
-        c.fog_density = 0.015f; c.fog_color = {0.50f, 0.54f, 0.58f}; c.fog_sky_blend = 0.4f; c.fog_sun_amount = 0.05f;
+        c.fog_density = 0.0127f; c.fog_color = {0.50f, 0.54f, 0.58f}; c.fog_sky_blend = 0.4f; c.fog_sun_amount = 0.05f;
         c.wind_strength = 5.0f; c.wind_gust = 0.4f; c.temperature = 12; c.precipitation = 0.6f; c.wetness = 0.8f;
         c.effects.push_back(effect("objects/weather_rain", 1.0f, EffectAnchor::Camera, {0, 0, 4}, 0.6f));
         out.push_back(c);
@@ -256,7 +263,7 @@ inline std::vector<Condition> default_conditions() {
         c.weight = 0.5f; c.min_minutes = 2; c.max_minutes = 5; c.transition = 20;
         c.next = {"rain", "overcast"};
         c.cloud_cover = 1.0f; c.sun = 0.15f; c.ambient = 0.55f; c.sky_tint = {0.70f, 0.73f, 0.80f};
-        c.fog_density = 0.022f; c.fog_color = {0.36f, 0.39f, 0.44f}; c.fog_sky_blend = 0.3f; c.fog_sun_amount = 0.0f;
+        c.fog_density = 0.0187f; c.fog_color = {0.36f, 0.39f, 0.44f}; c.fog_sky_blend = 0.3f; c.fog_sun_amount = 0.0f;
         c.wind_strength = 11.0f; c.wind_gust = 0.6f; c.temperature = 11; c.precipitation = 1.0f; c.wetness = 1.0f;
         c.lightning = 6.0f;
         c.effects.push_back(effect("objects/weather_rain", 2.4f, EffectAnchor::Camera, {0, 0, 4}, 0.8f));
@@ -268,7 +275,7 @@ inline std::vector<Condition> default_conditions() {
         c.weight = 0.0f; c.min_minutes = 4; c.max_minutes = 10; c.transition = 40;
         c.next = {"snow", "overcast", "blizzard"};
         c.cloud_cover = 0.85f; c.sun = 0.4f; c.ambient = 0.95f; c.sky_tint = {0.95f, 0.97f, 1.02f};
-        c.fog_density = 0.012f; c.fog_color = {0.82f, 0.85f, 0.90f}; c.fog_sky_blend = 0.5f; c.fog_sun_amount = 0.2f;
+        c.fog_density = 0.0102f; c.fog_color = {0.82f, 0.85f, 0.90f}; c.fog_sky_blend = 0.5f; c.fog_sun_amount = 0.2f;
         c.wind_strength = 2.0f; c.wind_gust = 0.3f; c.temperature = -4; c.precipitation = 0.5f; c.wetness = 0.2f;
         c.effects.push_back(effect("objects/weather_snow", 1.0f, EffectAnchor::Camera, {0, 0, 3}, 0.8f));
         out.push_back(c);
@@ -278,7 +285,7 @@ inline std::vector<Condition> default_conditions() {
         c.weight = 0.0f; c.min_minutes = 2; c.max_minutes = 4; c.transition = 25;
         c.next = {"snow"};
         c.cloud_cover = 1.0f; c.sun = 0.2f; c.ambient = 0.75f; c.sky_tint = {0.90f, 0.93f, 0.98f};
-        c.fog_density = 0.05f; c.fog_color = {0.80f, 0.83f, 0.88f}; c.fog_sky_blend = 0.2f; c.fog_sun_amount = 0.1f;
+        c.fog_density = 0.0425f; c.fog_color = {0.80f, 0.83f, 0.88f}; c.fog_sky_blend = 0.2f; c.fog_sun_amount = 0.1f;
         c.wind_strength = 14.0f; c.wind_gust = 0.5f; c.temperature = -15; c.precipitation = 1.0f; c.wetness = 0.3f;
         c.effects.push_back(effect("objects/weather_snow", 2.5f, EffectAnchor::Camera, {0, 0, 3}, 1.0f));
         out.push_back(c);
@@ -288,7 +295,7 @@ inline std::vector<Condition> default_conditions() {
         c.weight = 0.0f; c.min_minutes = 2; c.max_minutes = 5; c.transition = 30;
         c.next = {"clear", "cloudy"};
         c.cloud_cover = 0.5f; c.sun = 0.5f; c.ambient = 0.85f; c.sky_tint = {1.10f, 0.92f, 0.70f};
-        c.fog_density = 0.04f; c.fog_color = {0.72f, 0.58f, 0.40f}; c.fog_sky_blend = 0.15f; c.fog_sun_amount = 0.5f;
+        c.fog_density = 0.034f; c.fog_color = {0.72f, 0.58f, 0.40f}; c.fog_sky_blend = 0.15f; c.fog_sun_amount = 0.5f;
         c.wind_strength = 12.0f; c.wind_gust = 0.5f; c.temperature = 34;
         c.effects.push_back(effect("objects/weather_dust", 1.0f, EffectAnchor::Camera, {0, 0, 1}, 1.0f));
         out.push_back(c);
@@ -454,6 +461,9 @@ inline Settings parse_settings(const fkyaml::node& n) {
         st.snow_max_depth = std::max(0.0f, f(n, "snow_max_depth", st.snow_max_depth));
         st.initial_snow_cover = std::clamp(f(n, "initial_snow_cover", st.initial_snow_cover), 0.0f, 1.0f);
         st.snow_auto_deformers = b(n, "snow_auto_deformers", st.snow_auto_deformers);
+        st.snow_trench_recover_time = std::max(0.0f, f(n, "snow_trench_recover_time", st.snow_trench_recover_time));
+        st.snow_patch_hard = s(n, "snow_patch_style", st.snow_patch_hard ? "hard" : "soft") == "hard";
+        st.snow_patch_size = std::max(0.1f, f(n, "snow_patch_size", st.snow_patch_size));
         if (n.contains("conditions") && n.at("conditions").is_sequence()) {
             for (const auto& c : n.at("conditions")) {
                 Condition cond = parse_condition(c);
@@ -551,6 +561,9 @@ inline fkyaml::node to_node(const Settings& st) {
     n["snow_max_depth"] = out_f(st.snow_max_depth);
     n["initial_snow_cover"] = out_f(st.initial_snow_cover);
     n["snow_auto_deformers"] = st.snow_auto_deformers;
+    n["snow_trench_recover_time"] = out_f(st.snow_trench_recover_time);
+    n["snow_patch_style"] = std::string(st.snow_patch_hard ? "hard" : "soft");
+    n["snow_patch_size"] = out_f(st.snow_patch_size);
     fkyaml::node cs = fkyaml::node::sequence();
     for (const auto& c : st.conditions) cs.get_value_ref<fkyaml::node::sequence_type&>().push_back(to_node(c));
     n["conditions"] = cs;

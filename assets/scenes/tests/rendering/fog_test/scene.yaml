@@ -46,14 +46,13 @@ scene:
   settings:
     render:
       volumetrics_max_distance: 70.0   # the scene is ~50 m deep; march all of it
-      fog_mode: 2                      # global fog (only when fog_enabled): Exp2
-      fog_density: 0.018
+      fog_mode: 1                      # global height fog (only when fog_enabled)
+      fog_density: 0.015
       fog_color: [0.62, 0.66, 0.74]
       fog_height_base: 0.0
       fog_height_falloff: 6.0
       fog_sun_amount: 0.5
       fog_sun_anisotropy: 0.75
-      fog_max_distance: 90.0
   root_objects:
     - name: ground
       active: true

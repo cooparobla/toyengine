@@ -51,6 +51,9 @@ public:
         obj->add_component<coopa::scene::TransformComponent>();
         camera_ = obj->add_component<coopa::gfx::engine::components::CameraComponent>();
         camera_->set_perspective(fov, 0.05f, 2000.0f);
+        // The scene view never motion-blurs (orbiting/flying would smear the whole viewport); Play
+        // hands main to the game's camera, which follows the render settings.
+        camera_->motion_blur = false;
         object_ = scene.add_root_object(std::move(obj));
         scene.adopt(*object_);
         apply();

@@ -1,79 +1,76 @@
 #ifndef GFX_FOG_GLSL
 #define GFX_FOG_GLSL
 
-// gfx/fog.glsl -- shared Unity-style global fog + local box/sphere fog volume
-// math, used by fog.frag (see engine/passes/fog_pass.h).
+// gfx/fog.glsl -- the GLOBAL exponential height fog (Unreal's Exponential Height Fog / HDRP's
+// fog model) plus the local box/sphere volume helpers the volumetrics passes share.
 //
-// Declares no uniforms, samplers, or blocks -- same rule as gfx/ssr_common.glsl
-// and gfx/ibl.glsl: every input is a function parameter, since different
-// passes bind their camera/fog sets at different indices.
+// The global medium: extinction `density` per metre at and below `base` (constant there, the
+// way HDRP's base height works -- so a camera far below it, e.g. underwater, sees a finite
+// density instead of an exponential blow-up), decaying as exp(-(z - base) / falloff) above.
+// Its optical depth along any segment has a closed form (gfx_fog_height_tau), so the fog is
+// one evaluation per pixel, never a march. Transmittance is always exp(-tau): Unity's old
+// Exp2 curve (exp(-tau^2)) has no physical meaning once height enters the integral.
+//
+// Applied PER MEDIUM, as Unreal and HDRP do: FogPass fogs the opaque scene and sky at the
+// G-buffer distance before translucency is drawn, and every forward shader (BLEND meshes,
+// water, particles, SDF glass) fogs its own fragment at its own distance with
+// gfx_fog_eval() -- so a translucent surface is never fogged at the distance of whatever lies
+// behind it. With the camera under water (GfxFogBlock::water.y), only the part of each ray
+// above the water surface is air: the in-water part belongs to the underwater pass.
+//
+// Declares no uniforms, samplers, or blocks -- every input is a function parameter, since
+// different passes bind their sets at different indices.
 
 #include <gfx/sky.glsl>
+#include <gfx/fog_types.glsl>
 
-/// Fog falloff modes, matching Unity's built-in fog (and FogUBO::mode_density.x).
+/// Fog modes (GfxFogBlock::density.x). LINEAR is the legacy distance ramp.
 #define GFX_FOG_MODE_LINEAR 0.0
 #define GFX_FOG_MODE_EXP    1.0
-#define GFX_FOG_MODE_EXP2   2.0
 
-/// Unity's three global fog falloff curves, flat (no height decay) case.
-/// `mode_density` = FogUBO::mode_density (x=mode, y=density, z=linear_start, w=linear_end).
-float gfx_fog_flat_transmittance(float d, vec4 mode_density) {
-    float mode    = mode_density.x;
-    float density = mode_density.y;
-
-    if (mode == GFX_FOG_MODE_LINEAR) {
-        float start = mode_density.z;
-        float end   = mode_density.w;
-        return clamp((end - d) / max(end - start, 1e-4), 0.0, 1.0);
-    }
-
-    float tau = density * d;
-    if (mode == GFX_FOG_MODE_EXP2) {
-        tau *= tau;
-    }
-    return exp(-tau);
-}
-
-/// Closed-form optical depth of an exponential height-density profile
-/// (engine is Z-up) along the world-space segment A -> B, for `density`
-/// per world unit at height `base` decaying over `falloff` world units.
-/// Degenerates to a flat-slab approximation as |B.z - A.z| -> 0, avoiding
-/// the 0/0 the closed form hits for a horizontal ray.
-float gfx_fog_height_tau(vec3 A, vec3 B, float density, float base, float falloff) {
+/// Closed-form optical depth of the exponential part along A -> B, for a segment with BOTH
+/// ends at or above the base (so every exponent is <= 0 and nothing can overflow).
+float gfx_fog_height_tau_above(vec3 A, vec3 B, float density, float base, float falloff) {
     float seg_len = length(B - A);
-    if (seg_len < 1e-5 || falloff <= 0.0) {
-        return 0.0;
-    }
     float dz = B.z - A.z;
     if (abs(dz) < 1e-3) {
-        return density * seg_len * exp(-(A.z - base) / falloff);
+        return density * seg_len * exp(-(0.5 * (A.z + B.z) - base) / falloff);
     }
     float k = falloff / dz;
     return density * seg_len * k * (exp(-(A.z - base) / falloff) - exp(-(B.z - base) / falloff));
 }
 
-/// Global fog transmittance along the world-space segment A -> B, combining
-/// Unity's flat mode curve with an optional exponential height falloff
-/// (`height_params` = FogUBO::height_params, x=base, y=falloff <= 0 disables).
-/// Linear mode keeps its own ramp and multiplies by the height term; Exp/Exp2
-/// substitute the height-integrated optical depth for their flat `density * d`.
-float gfx_fog_transmittance(vec3 A, vec3 B, vec4 mode_density, vec4 height_params) {
-    float height_falloff = height_params.y;
-    if (height_falloff <= 0.0) {
-        return gfx_fog_flat_transmittance(distance(A, B), mode_density);
-    }
+/// Optical depth of the height-fog medium along the world-space segment A -> B (engine is
+/// Z-up): `density` per metre at/below `base`, exp(-(z - base) / falloff) above it, or a flat
+/// medium when falloff <= 0. Exact for a straight segment: the part below the base is a
+/// constant-density length, the part above the closed form of the exponential.
+float gfx_fog_height_tau(vec3 A, vec3 B, float density, float base, float falloff) {
+    float seg_len = length(B - A);
+    if (seg_len < 1e-5) return 0.0;
+    if (falloff <= 0.0) return density * seg_len;
 
-    float tau_h = gfx_fog_height_tau(A, B, mode_density.y, height_params.x, height_falloff);
-    float mode  = mode_density.x;
-    if (mode == GFX_FOG_MODE_LINEAR) {
-        float d = distance(A, B);
-        float flat_t = clamp((mode_density.w - d) / max(mode_density.w - mode_density.z, 1e-4), 0.0, 1.0);
-        return flat_t * exp(-tau_h);
+    bool a_below = A.z < base;
+    bool b_below = B.z < base;
+    if (a_below && b_below) return density * seg_len;
+    if (!a_below && !b_below) return gfx_fog_height_tau_above(A, B, density, base, falloff);
+
+    // The segment crosses the base plane at P: constant density on the below side.
+    vec3 P  = mix(A, B, (base - A.z) / (B.z - A.z));
+    vec3 lo = a_below ? A : B;
+    vec3 hi = a_below ? B : A;
+    return density * length(P - lo) + gfx_fog_height_tau_above(P, hi, density, base, falloff);
+}
+
+/// Transmittance of the segment A -> B. `ramp_dist` is the distance the LINEAR mode's ramp is
+/// evaluated at (its start/end are camera distances); Exponential ignores it.
+float gfx_fog_transmittance(vec3 A, vec3 B, float ramp_dist, GfxFogBlock f) {
+    float tau = gfx_fog_height_tau(A, B, f.density.y, f.height.x, f.height.y);
+    if (f.density.x == GFX_FOG_MODE_LINEAR) {
+        float ramp = clamp((f.density.w - ramp_dist) / max(f.density.w - f.density.z, 1e-4), 0.0, 1.0);
+        // Linear has no extinction of its own; the height term (when on) still thins it upward.
+        return f.height.y > 0.0 ? ramp * exp(-tau) : ramp;
     }
-    if (mode == GFX_FOG_MODE_EXP2) {
-        return exp(-tau_h * tau_h);
-    }
-    return exp(-tau_h);
+    return exp(-tau);
 }
 
 /// Ray/AABB slab test against a box centered at the origin with half-extent
@@ -191,57 +188,57 @@ float gfx_fog_hg(float cos_theta, float g) {
     return (1.0 - g2) / (4.0 * 3.14159265 * pow(max(denom, 1e-4), 1.5));
 }
 
-/// Explicit-colour overload (see gfx/sky.glsl's own overload for why this is a
-/// second function, not a signature change, on the existing 6-arg one below).
-vec3 gfx_fog_base_color(vec3 fog_color, vec3 view_dir, vec3 sun_dir, vec3 sun_color,
-                        vec4 height_params, vec4 misc_params,
-                        vec3 sky_zenith, vec3 sky_horizon, vec3 sky_ground) {
-    vec3 color = mix(fog_color, sky_gradient(view_dir, sky_zenith, sky_horizon, sky_ground), height_params.z);
-    float sun_amount = height_params.w;
-    if (sun_amount > 0.0) {
-        float cos_theta = dot(view_dir, -sun_dir);
-        color += sun_color * gfx_fog_hg(cos_theta, misc_params.x) * sun_amount;
-    }
-    return color;
-}
 
-/// Base fog colour: config colour, optionally blended toward the shared sky
-/// gradient, plus an additive Henyey-Greenstein sun tint. `height_params` =
-/// FogUBO::height_params (z=sky_blend, w=sun_amount), `misc_params.x` = HG g.
-vec3 gfx_fog_base_color(vec3 fog_color, vec3 view_dir, vec3 sun_dir, vec3 sun_color,
-                        vec4 height_params, vec4 misc_params) {
-    return gfx_fog_base_color(fog_color, view_dir, sun_dir, sun_color, height_params, misc_params,
-                              SKY_ZENITH, SKY_HORIZON, SKY_GROUND);
-}
-
-/// The whole GLOBAL fog composite for one pixel: transmittance along the view
-/// ray, blended toward the base colour. Shared by fog.frag (which is nothing but
-/// this call) and volumetrics_composite.frag (which applies fog itself when the two passes
-/// are merged into one, so the frame pays for one fullscreen HDR pass instead of
-/// two) -- one definition, so the merged path cannot drift from the separate one.
+/// The global fog along one view ray, for one pixel or fragment:
+///   returns vec4(in-scatter rgb, transmittance T); composite as `color * T + rgb`
+///   (or, in place, a premultiplied blend of vec4(rgb, 1 - T)).
 ///
-/// `d_geo` is the distance to the geometry this pixel sees; pass any value for a
-/// sky pixel and set `is_sky`. Both sides are evaluated at a distance capped to
-/// `misc_params.w`: a narrow-FOV camera grazing a large flat surface has its
-/// apparent per-pixel distance blow up near the vanishing point, which would fog
-/// the last rows of geometry far more than anything else in view, right against
-/// an unfogged sky -- a hard seam at the horizon. Capping both sides at the SAME
-/// distance makes them converge to the same transmittance instead.
-vec3 gfx_fog_apply(vec3 color, vec3 camera_pos, vec3 view_dir, float d_geo, bool is_sky,
-                   vec4 mode_density, vec4 height_params, vec4 misc_params,
-                   vec3 fog_color, vec3 sun_dir, vec3 sun_color,
-                   vec3 sky_zenith, vec3 sky_horizon, vec3 sky_ground) {
-    float max_distance = max(misc_params.w, 1.0);
-    float d_fog = is_sky ? max_distance : min(d_geo, max_distance);
-    float T_global = gfx_fog_transmittance(camera_pos, camera_pos + view_dir * d_fog,
-                                           mode_density, height_params);
+/// `cam` is the camera position, `dir` the unit view direction, `dist` the distance to the
+/// surface along it. A sky pixel passes is_sky and integrates to the sky distance instead.
+/// The segment starts at the start distance (and, with the camera under water, at the point
+/// the ray leaves the water -- if it never does, it is all water and T = 1), and ends at the
+/// surface or the cutoff distance, whichever is nearer.
+///
+/// In-scatter is Unreal's split: the base colour (fog colour blended toward the sky gradient
+/// seen along `dir`) over the whole segment, plus a directional sun lobe (Henyey-Greenstein)
+/// over the part beyond the directional start distance. Max opacity floors both
+/// transmittances so a scene never fogs out entirely when it is < 1.
+vec4 gfx_fog_eval(vec3 cam, vec3 dir, float dist, bool is_sky, GfxFogBlock f,
+                  vec3 sky_zenith, vec3 sky_horizon, vec3 sky_ground) {
+    if (f.color.w < 0.5) return vec4(0.0, 0.0, 0.0, 1.0);
 
-    vec3 base_color = gfx_fog_base_color(fog_color, view_dir, sun_dir, sun_color,
-                                         height_params, misc_params,
-                                         sky_zenith, sky_horizon, sky_ground);
+    float t_end = is_sky ? f.range.z : dist;
+    if (f.range.y > 0.0) t_end = min(t_end, f.range.y);
 
-    float T = clamp(T_global, 1.0 - misc_params.y, 1.0);
-    return mix(base_color, color, T);
+    float t0 = max(f.range.x, 0.0);
+    if (f.water.y > 0.5) {
+        // Camera under water: air begins where the ray crosses the surface plane going up.
+        if (dir.z <= 1e-4) return vec4(0.0, 0.0, 0.0, 1.0);
+        t0 = max(t0, (f.water.x - cam.z) / dir.z);
+    }
+    if (t_end <= t0) return vec4(0.0, 0.0, 0.0, 1.0);
+
+    vec3  A = cam + dir * t0;
+    vec3  B = cam + dir * t_end;
+    float min_T = 1.0 - clamp(f.height.w, 0.0, 1.0);
+    float T = max(gfx_fog_transmittance(A, B, t_end - t0, f), min_T);
+
+    vec3 base = mix(f.color.rgb, sky_gradient(dir, sky_zenith, sky_horizon, sky_ground), f.height.z);
+    vec3 inscatter = base * (1.0 - T);
+
+    if (dot(f.sun.rgb, f.sun.rgb) > 0.0) {
+        float ts = max(t0, f.sun_dir.w);
+        if (t_end > ts) {
+            float Ts = max(gfx_fog_transmittance(cam + dir * ts, B, t_end - ts, f), min_T);
+            inscatter += f.sun.rgb * gfx_fog_hg(dot(dir, -f.sun_dir.xyz), f.sun.w) * (1.0 - Ts);
+        }
+    }
+    return vec4(inscatter, T);
+}
+
+/// Applies gfx_fog_eval()'s result to a straight (non-premultiplied) colour.
+vec3 gfx_fog_composite(vec3 color, vec4 fog) {
+    return color * fog.a + fog.rgb;
 }
 
 #endif // GFX_FOG_GLSL

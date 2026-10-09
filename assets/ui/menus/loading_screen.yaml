@@ -1,0 +1,51 @@
+# The loading screen an async scene load shows (Engine::load_scene_async with
+# SceneTransition::loading_screen_ui, or a SceneLink with `transition: loading_screen`).
+#
+# A UI asset (open it in the editor's UI tab). Authored at 1920 x 1080. The engine fills in two
+# widgets by name while the scene loads: `progress` (a StatBar / ProgressBar, 0..1) and `status`
+# (a Text: "Building scene...", "Loading assets..."). Both are optional; rename or drop them to
+# opt out. It draws over a fade to the transition colour, so the backdrop may be transparent.
+format: toyengine-object
+object:
+  name: loading_screen
+  components:
+    - type: RectTransform
+      anchor_min: {x: 0, y: 0}
+      anchor_max: {x: 1, y: 1}
+      pivot: {x: 0.5, y: 0.5}
+      anchored_position: {x: 0, y: 0}
+      size_delta: {x: 0, y: 0}
+    - type: Canvas
+      mode: ScaleWithScreenSize
+      reference_resolution: {x: 1920, y: 1080}
+      match_width_or_height: 0.5
+      sort_order: 0
+    - {type: Theme, source: ui/themes/default.yaml}
+  children:
+    - name: Title
+      components:
+        - type: RectTransform
+          anchor_min: {x: 0.5, y: 0.5}
+          anchor_max: {x: 0.5, y: 0.5}
+          pivot: {x: 0.5, y: 0.5}
+          anchored_position: {x: 0, y: 90}
+          size_delta: {x: 1200, y: 90}
+        - {type: ThemedText, text: Loading, font_role: Title, size: 64, text_role: Accent, align: Center}
+    - name: progress
+      components:
+        - type: RectTransform
+          anchor_min: {x: 0.5, y: 0.5}
+          anchor_max: {x: 0.5, y: 0.5}
+          pivot: {x: 0.5, y: 0.5}
+          anchored_position: {x: 0, y: -10}
+          size_delta: {x: 760, y: 30}
+        - {type: StatBar, role: neutral, min: 0, max: 1, value: 0, bar_height: 22, show_label: false}
+    - name: status
+      components:
+        - type: RectTransform
+          anchor_min: {x: 0.5, y: 0.5}
+          anchor_max: {x: 0.5, y: 0.5}
+          pivot: {x: 0.5, y: 0.5}
+          anchored_position: {x: 0, y: -70}
+          size_delta: {x: 760, y: 40}
+        - {type: ThemedText, text: "Reading scene...", font_role: Body, size: 30, text_role: Secondary, align: Center}

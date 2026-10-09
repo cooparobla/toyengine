@@ -26,6 +26,7 @@
 #include <gfx/spot_light.glsl>
 #include <light_ubo_body.glsl>
 #include <gfx/sky.glsl>
+#include <gfx/fog.glsl>
 #include <gfx/depth.glsl>
 #include <gfx/shadow_sampling.glsl>
 
@@ -337,6 +338,17 @@ void main() {
         color = mix(albedo, albedo * light, lit);
     }
     color *= pc.shading.z;   // emissive / HDR multiplier
+
+    // Global fog at the particle's own distance (gfx/fog.glsl) -- the opaque scene behind it is
+    // already fogged. An additive particle adds light, so it fogs toward black (its in-scatter
+    // is scaled away with its blend weight), as Unreal does for additive translucency.
+    {
+        vec3  to_p = v_world - camera.camera_pos;
+        float dist = length(to_p);
+        vec4  fog  = gfx_fog_eval(camera.camera_pos, to_p / max(dist, 1e-6), dist, false, lights.fog,
+                                  lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb);
+        color = color * fog.a + fog.rgb * (1.0 - pc.shading.w);
+    }
 
     out_color = vec4(color * a, a * (1.0 - pc.shading.w));
 }

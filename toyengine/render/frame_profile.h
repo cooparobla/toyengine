@@ -4,7 +4,9 @@
  *        CSV for graphing (tools/plot_profile.py) and summarised on exit.
  *
  * Enabled by the PROFILE env var (see main.cpp); without it nothing here is constructed and
- * the frame loop pays nothing.
+ * the frame loop pays nothing. The debug overlay's full mode (toyengine/debug/debug_overlay.h)
+ * constructs one in LIVE mode instead: no CSV and no summary, only the last completed row,
+ * read through latest().
  *
  * The scope sets are FIXED enums, not free-form strings: every CSV row then has the same
  * columns whether or not a feature ran that frame (a disabled feature's column reads 0),
@@ -52,6 +54,8 @@ enum class CpuScope : uint32_t {
 /// GPU scopes, in record order. Contiguous: each covers the time since the previous one,
 /// so together they sum to the whole GPU frame.
 enum class GpuScope : uint32_t {
+    Skinning,            ///< Compute pre-pass: GPU skinning dispatches (before any pass reads vertices).
+    ParticlesSim,        ///< Compute pre-pass: GPU particle emit / simulate / compact / sort.
     ShadowDirectional,
     ShadowLocal,         ///< Every point and spot shadow (the local-light atlas, cache copy included).
     GBuffer,
@@ -59,6 +63,8 @@ enum class GpuScope : uint32_t {
     TemporalHistory,
     ContactShadows,
     Ssao,
+    Sky,                 ///< Physical sky: the atmosphere tables (when changed) + the sky-view table.
+    Clouds,              ///< Physical sky: the half-resolution cloud march.
     LightingSky,
     SceneColorMips,
     SsrTrace,            ///< SsrPass sub-passes, via SsrPass::set_stage_hook():
@@ -76,6 +82,7 @@ enum class GpuScope : uint32_t {
     VolumetricsIntegrate,  ///< froxel mode only: per-column accumulation
     Volumetrics,           ///< raymarch mode: march + composite; froxel mode: the apply
     SceneColorHistory,     ///< pre-DOF HDR copied into the SSR colour chain's mip 0 for next frame
+    MotionBlur,            ///< tile max + neighbour max + copy + gather (only when motion_blur records)
     Dof,
     Bloom,
     Exposure,
@@ -100,10 +107,10 @@ inline const char* scope_name(CpuScope s) {
 
 inline const char* scope_name(GpuScope s) {
     static const char* names[kGpuScopeCount] = {
-        "shadow.directional", "shadow.local", "gbuffer", "hiz",
-        "temporal_history", "contact_shadows", "ssao", "lighting+sky", "scene_color_mips",
+        "skinning", "particles.sim", "shadow.directional", "shadow.local", "gbuffer", "hiz",
+        "temporal_history", "contact_shadows", "ssao", "sky", "clouds", "lighting+sky", "scene_color_mips",
         "ssr.trace", "ssr.resolve", "ssr.blur", "ssgi.trace", "ssgi.resolve", "ssgi.blur", "ssr.composite",
-        "refraction_mips", "transparent", "underwater", "fog", "volumetrics.inject", "volumetrics.integrate", "volumetrics", "scene_color_history", "dof", "bloom", "exposure",
+        "refraction_mips", "transparent", "underwater", "fog", "volumetrics.inject", "volumetrics.integrate", "volumetrics", "scene_color_history", "motion_blur", "dof", "bloom", "exposure",
         "stylize", "world_ui", "aa", "tilt_shift", "overlay", "present"};
     return names[static_cast<size_t>(s)];
 }
@@ -118,6 +125,9 @@ public:
     /// matches Engine::run()'s frame-time warm-up. The CSV keeps every frame.
     static constexpr uint64_t kWarmupFrames = 30;
 
+    /// Live mode: no file, no summary -- only latest() is kept (the debug overlay's source).
+    FrameProfile() : live_(true) {}
+
     explicit FrameProfile(std::string csv_path) : path_(std::move(csv_path)) {
         const std::filesystem::path p(path_);
         if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path());
@@ -129,10 +139,11 @@ public:
         csv_ << "\n";
     }
 
-    ~FrameProfile() { csv_.flush(); }
+    ~FrameProfile() { if (!live_) csv_.flush(); }
 
     const std::string& path() const { return path_; }
-    bool ok() const { return static_cast<bool>(csv_); }
+    bool ok() const { return live_ || static_cast<bool>(csv_); }
+    bool live() const { return live_; }
 
     /// Starts frame `frame` (call at the top of each tick). Closes the previous frame's CPU half,
     /// whose cpu.frame is the time between the two calls.
@@ -169,11 +180,21 @@ public:
     }
 
     /// Drops rows that never got their GPU half (a skipped/resized frame) once they are well
-    /// behind the current frame, so the pending map cannot grow without bound.
+    /// behind the current frame, so the pending map cannot grow without bound. In live mode a
+    /// dropped row with its CPU half still becomes latest() (GPU columns 0) -- on a device
+    /// without timestamps no row ever completes, and the CPU timings are still worth showing.
     void prune() {
         for (auto it = rows_.begin(); it != rows_.end();) {
-            if (it->first + 8 < current_) it = rows_.erase(it);
-            else ++it;
+            if (it->first + 8 < current_) {
+                if (live_ && it->second.cpu_done && (!has_latest_ || latest_.frame < it->first)) {
+                    latest_ = it->second;
+                    latest_.frame = it->first;
+                    has_latest_ = true;
+                }
+                it = rows_.erase(it);
+            } else {
+                ++it;
+            }
         }
     }
 
@@ -246,7 +267,7 @@ public:
         std::printf("\n");
     }
 
-private:
+    /// One frame's timings, milliseconds. A scope that did not run reads 0.
     struct Row {
         uint64_t frame = 0;
         std::array<double, kCpuScopeCount> cpu{};
@@ -255,11 +276,22 @@ private:
         bool   cpu_done = false, gpu_done = false;
     };
 
+    /// The most recently completed frame (both halves in -- GPU timings land two frames after
+    /// the CPU ones), or null before the first one. Kept in both modes.
+    const Row* latest() const { return has_latest_ ? &latest_ : nullptr; }
+
+private:
     void try_emit_(uint64_t frame) {
         auto it = rows_.find(frame);
         if (it == rows_.end() || !it->second.cpu_done || !it->second.gpu_done) return;
         Row& r = it->second;
         r.frame = frame;
+        latest_     = r;
+        has_latest_ = true;
+        if (live_) {
+            rows_.erase(it);
+            return;
+        }
         csv_ << frame;
         char buf[32];
         for (double v : r.cpu) { std::snprintf(buf, sizeof(buf), ",%.4f", v); csv_ << buf; }
@@ -275,8 +307,11 @@ private:
         rows_.erase(it);
     }
 
+    bool          live_ = false;
     std::string   path_;
     std::ofstream csv_;
+    Row           latest_{};
+    bool          has_latest_ = false;
     std::map<uint64_t, Row> rows_;   ///< Frames still waiting for their CPU or GPU half.
     std::vector<Row>        done_;   ///< Completed frames, for the summary.
     uint64_t current_ = 0;

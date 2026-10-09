@@ -21,9 +21,10 @@ render:
   refraction_enabled: true   # screen-space refraction for BLEND MESH objects (needs transparency_enabled)
   sdf_enabled: true          # signed-distance-field raymarching (SdfRenderer/SdfShape)
   bloom_enabled: true        # additive glow from bright HDR regions
-  fog_enabled: true          # GLOBAL analytic fog (the Fog block below is its only source)
+  fog_enabled: true          # GLOBAL height fog (the Fog block below is its only source). Runtime
   volumetrics_enabled: true  # raymarched LOCAL volumes (Volume components in the scene)
   dof_enabled: false         # physically-based depth of field, at render resolution before bloom
+  motion_blur: false         # velocity-buffer motion blur (camera + objects), HDR, before DoF/bloom (live)
   tilt_shift_enabled: false  # diorama blur at DISPLAY resolution, after the upscale
   auto_exposure_enabled: true # eye adaptation: meter the frame and scale `exposure` by it
   grading_enabled: true      # colour-grading LUT (no-op until `grading_lut` names a file)
@@ -73,6 +74,8 @@ render:
                              # faces stop crawling under camera motion; false = raw NEAREST
   soft_lighting: true        # true = smooth Cook-Torrance; false = banded cel-shaded look
   camera_pixel_snap: false   # orthographic cameras only
+  skinning: gpu              # SkinnedMeshRenderer: gpu = compute pre-skin pass (falls back to
+                             # cpu without compute); cpu = per-vertex CPU loop + upload. Startup-fixed.
 
   # =========================================================================
   # 3. DEBUG VIEW -- one field, one intermediate channel, raw (no tonemap, no
@@ -125,6 +128,7 @@ render:
   volumetrics_quality: high  # raymarch step count + how many lights in-scatter (they multiply)
   sdf_quality:         high  # SDF march + SDF shadow-march step budgets
   water_quality:       high  # buoyancy/ripple range, water mesh density + LOD, shader detail (live)
+  sky_quality:         high  # physical sky: sky-view integration steps + cloud march view/shadow steps (live)
 
   # =========================================================================
   # Per-feature settings
@@ -152,6 +156,22 @@ render:
   sky_zenith:  [0.05, 0.18, 0.55]   # sky gradient: straight up
   sky_horizon: [0.25, 0.35, 0.45]   # sky gradient: at the horizon
   sky_ground:  [0.05, 0.045, 0.04]  # sky gradient: straight down
+  # Sky model: gradient = the three colours above, drawn as is. physical = a physically based
+  # atmosphere (sun / moon discs, stars, sunsets) that follows the scene's sun or the weather's
+  # clock; the engine then derives sky_zenith/horizon/ground and the sun's colour from it, so
+  # ambient, reflections and fog match the sky. All of these switch live.
+  sky_model: gradient        # gradient | physical
+  atmosphere_density: 1.0    # physical: haze -- 1 = a clear day; higher = hazier, whiter, redder sunsets
+  ozone: 1.0                 # physical: ozone layer amount (deep blue twilight)
+  sun_disc_size: 0.53        # physical: sun disc angular diameter, degrees (0 hides it)
+  moon_disc_size: 0.6        # physical: moon disc angular diameter, degrees (0 hides it)
+  sky_stars: true            # physical: stars fade in at night
+  clouds: false              # physical: raymarched cloud layer (half resolution)
+  cloud_coverage: 0.4        # 0 clear .. 1 overcast (the scene's weather drives it while on)
+  cloud_altitude: 1500       # metres to the layer's base
+  cloud_thickness: 1500      # metres
+  cloud_density: 1.0         # higher = darker, more solid clouds
+  cloud_wind_speed: 8.0      # m/s drift (along the weather's wind when it is on)
 
   # --- Shadows ---
   shadow_bias: 0.005          # LEGACY: only gfxcoopa's pre-cascade shaders read this
@@ -262,19 +282,22 @@ render:
   refraction_density: 1.0    # Beer-Lambert absorption strength through refraction_tint
   refraction_tint: [1.0, 1.0, 1.0]
 
-  # --- Fog (GLOBAL; local volumes are Volume components in the scene) ---
-  fog_mode: 2                # 0 Linear, 1 Exponential, 2 Exp2
-  fog_density: 0.03          # extinction per world unit at the height falloff base
+  # --- Fog (GLOBAL exponential height fog; local volumes are Volume components in the scene) ---
+  fog_mode: 1                # 1 Exponential height fog, 0 Linear (legacy distance ramp)
+  fog_density: 0.008         # extinction per metre at and below fog_height_base
   fog_linear_start: 3.0      # Linear mode: distance fog starts
   fog_linear_end: 25.0       # Linear mode: distance fog reaches max_opacity
   fog_color: [0.6, 0.66, 0.75]
-  fog_height_base: -0.5      # world Z of full density (engine is Z-up)
-  fog_height_falloff: 2.0    # exponential height falloff distance; <= 0 disables height fog
+  fog_height_base: 0.0       # world Z of full density (engine is Z-up); constant below it
+  fog_height_falloff: 25.0   # metres over which density drops by e above the base; <= 0 = uniform fog
   fog_sky_blend: 0.5         # 0 = flat fog_color, 1 = blended toward the sky gradient
-  fog_sun_amount: 0.3        # Henyey-Greenstein sun in-scatter strength; 0 disables
+  fog_sun_amount: 0.3        # directional (Henyey-Greenstein) sun in-scatter strength; 0 disables
   fog_sun_anisotropy: 0.7    # HG g; 0 isotropic, ~1 tight forward scatter
+  fog_sun_start_distance: 0.0 # directional in-scatter starts this far out
   fog_max_opacity: 1.0       # ceiling on how much fog can occlude
-  fog_max_distance: 60.0     # distance the fog term (and sky-pixel evaluation) saturates at
+  fog_start_distance: 0.0    # no fog nearer than this
+  fog_cutoff_distance: 0.0   # fog stops accumulating past this distance; 0 = none
+  fog_sky_distance: 1000.0   # distance sky pixels integrate to (height fog keeps the zenith clear)
 
   # --- Lying snow (gfx/surface/snow.glsl) ---
   snow_cover_override: -1.0  # < 0: the scene's weather decides (none without weather); 0..1 forces the cover. Runtime
@@ -312,6 +335,9 @@ render:
   dof_max_radius: 16.0       # |CoC| safety ceiling in render-resolution pixels (not a strength dial)
   dof_blade_count: 0         # < 3 = perfect disc bokeh; else N-sided polygonal iris
   dof_blade_rotation: 0.0    # degrees; rotates the polygonal iris
+
+  # --- Motion blur (needs motion_blur; live) ---
+  motion_blur_intensity: 0.5 # shutter fraction of the frame interval (0.5 = 180-degree shutter); 0 disables
 
   # --- Tilt shift ---
   tilt_shift_focus_center: 0.55 # 0..1 screen position of the sharp band's centre (0 = top)
@@ -361,6 +387,19 @@ render:
 jobs:
   worker_threads: 0          # 0 = std::thread::hardware_concurrency()
   parallel_threshold: 4      # low on purpose: exercises the parallel path on the pixel demo
+
+# Developer aids. Ignored by a TOY_SHIPPING build unless it is compiled with TOY_DEBUG_OVERLAY.
+debug:
+  overlay: off               # stats HUD at startup: off | fps | full (F3 cycles it at runtime)
+
+# Particles (toyengine/particles/).
+particles:
+  gpu_enabled: true          # false: `simulation: gpu` systems simulate on the CPU too (kill switch)
+
+# Save slots (toyengine/save/): <user data dir>/saves/<slot>.save + a <slot>.meta sidecar.
+save:
+  encode: auto               # auto (caml in a shipping build, else yaml) | yaml | caml
+  quick_slot: quicksave      # the slot F5 saves to and F9 loads; "" turns the keys off
 
 # Project-wide physics settings (coopa::physx::util::PhysicsSettings) -- see
 # physxcoopa/util/physics_settings.h for the full schema; every key here is optional.

@@ -123,14 +123,29 @@ scene:
    only feeds an unused GI system). Point/spot lights: intensity in the tens to low hundreds
    reads in shade; next to full sun they need high hundreds to over a thousand. Limits: 16 point,
    8 spot, about 4 + 4 with shadows at High.
-5. **Per-scene settings.** `settings.render` overrides any `render:` key of `assets/config.yaml`
-   at runtime -- except startup-fixed switches (`fog_enabled`, `volumetrics_enabled`,
-   `ssr_enabled`, `transparency_enabled`, `aa_mode`, resolutions, shadow-map sizes...), which a
-   scene cannot turn on. If the scene needs one, say so in its header comment and tell the user.
+   **Sky.** `sky_model: gradient` (default) draws the three `sky_*` colours. `sky_model: physical`
+   (scene `settings.render`) draws a physically based sky that follows the DirectionalLight's
+   direction (or the weather's clock) -- sunsets, sun / moon discs, stars (`sky_stars`) -- and
+   overwrites `sky_*` and the light's colour to match; add `clouds: true` (+ `cloud_coverage`,
+   `cloud_altitude`, `cloud_thickness`, `cloud_density`, `cloud_wind_speed`) for a cloud layer,
+   and `atmosphere_density` / `ozone` / `sun_disc_size` / `moon_disc_size` / `sky_quality` to
+   tune it. Example: `assets/scenes/tests/rendering/sky_test`.
+5. **Per-scene settings.** `settings.render` overrides any `render:` key of `assets/config.yaml`,
+   including the startup-fixed switches (`ssr_enabled`, `volumetrics_enabled`,
+   `transparency_enabled`, `bloom_enabled`, `aa_mode`, resolutions, shadow-map sizes...). The
+   engine rebuilds the renderer in place when the scene loads (`TOY_STARTUP_FIXED_FIELDS` in
+   `pixel_render_pipeline.h`). Only `texel_aa` is project-only. Prefer overriding in the scene
+   to editing config.yaml for a feature only one scene needs.
 6. **Feature components.** Fog volumes, water, terrain, particles, UI and animation have their
    own skills (create-fog-volume, create-water-body, create-terrain, create-particle-effect,
    create-ui, create-animation). Collider `material:` is a bare physics-material name
    (`concrete`), unlike a renderer's `materials/<name>` path.
+7. **Playable characters and levels.** A player is a root object with a CharacterController
+   (WASD / Space / Shift; it adds its own capsule) and usually the `objects/mannequin`
+   rig; the camera's CameraController sets `tracker:` to it (`mode: orbit` collides with
+   geometry, or `mode: first_person`). Doors to other scenes are SceneLink boxes; objects whose
+   state belongs in a save get a SaveId. Ragdolls: `objects/mannequin_ragdoll`.
+   Examples: `character_test`, `loading_test`, `ragdoll_test`.
 
 ## Verify (always)
 
@@ -148,4 +163,4 @@ cmake --build build -j10                       # once, if the build is stale
   there. A missing object usually means a misspelt component type or key, not an error.
 - The round-trip test walks every YAML under `assets/`; a new scene must pass it.
 - Never open a visible window; the script runs headless. Don't run lldb/gdb.
-- Mention to the user any startup-fixed config switch the scene needs.
+- Prefer a scene `settings.render` override over a config.yaml change for a feature one scene needs.

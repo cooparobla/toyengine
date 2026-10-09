@@ -25,8 +25,8 @@
         if (active_type_ == AssetType::Scene) {
             tabs = {
                 {PropTab::Tool, I::Tool, "Tool\nActive tool settings"},
-                {PropTab::Render, I::Render, "Render\nRenderer settings (config.yaml render)"},
-                {PropTab::Output, I::Output, "Output\nWindow, jobs, packaging (config.yaml)"},
+                {PropTab::Render, I::Render, "Render\nThis scene's render settings: overrides of the project's (Edit > Project Settings)"},
+                {PropTab::Output, I::Output, "Output\nPackaging; window and jobs are in Project Settings"},
                 {PropTab::Scene, I::Scene, "Scene\nThe scene block: name, transforms, startup scene, physics"},
                 {PropTab::World, I::World, "World\nSky, ambient light and fog"},
             };
@@ -83,6 +83,20 @@
         std::vector<int> separators;
         if (object_start > 0) separators.push_back(object_start);
         if (ctx.vertical_tabs("prop_tabs", strip, items, &active, separators)) prop_tab_ = tabs[static_cast<size_t>(active)].tab;
+        // A dot on the Render / World / Scene tabs while this scene overrides settings there
+        // (the tab layout mirrors imm::Context::vertical_tabs()).
+        if (scene_settings_layer_()) {
+            const float s = std::min(strip.w - 6, ctx.style.row_height + 5);
+            float y = strip.y + 5;
+            for (size_t i = 0; i < tabs.size(); ++i) {
+                if (std::find(separators.begin(), separators.end(), static_cast<int>(i)) != separators.end()) y += 8;
+                const PropTab t = tabs[i].tab;
+                const bool dot = (t == PropTab::Render && doc_.scene_setting_count("render") > 0) ||
+                                 (t == PropTab::Scene && doc_.scene_setting_count("physics") > 0);
+                if (dot) ctx.fill_rounded({strip.x + (strip.w + s) * 0.5f - 7, y + 1, 6, 6}, et_.chrome.setting_override_bar, 3);
+                y += s + 2;
+            }
+        }
 
         // Title row: which tab this is (its icon and name, from the tab's tooltip), then -- dimmed
         // -- what it is showing: the open asset, then the selected object.
@@ -399,7 +413,8 @@
     void set_setting_(Node& sec, const std::string& section, const FieldDesc& f, const Node& value) {
         if (scene_overridable_(section, f)) {
             settings_edit_was_scene_ = true;
-            apply_(doc_.set_scene_setting(section, f.key, &value, "Override " + section + "." + f.key));
+            const bool back = equals_project_value_(f, sec, value);   // back to the project's value: drop the override
+            apply_(doc_.set_scene_setting(section, f.key, back ? nullptr : &value, (back ? "Revert " : "Override ") + section + "." + f.key));
             return;
         }
         const Node before = config_.node;
@@ -441,27 +456,36 @@
         const std::vector<bool> match = group_matches_(g, needle, any);
         if (!any) return;
         ctx.push_id(g.title);
-        const std::string title = g.title + (g.has_toggle() && g.toggle.startup_only ? "  *" : "");
+        // Overrides inside the group are counted on its header, so they show while it is closed.
+        const bool toggle_over = g.has_toggle() && scene_overridable_(section, g.toggle) && doc_.scene_setting(section, g.toggle.key);
+        const int row_overrides = group_override_count_(g, section) - (toggle_over ? 1 : 0);
+        const std::string title = g.title + (row_overrides > 0 ? "   (" + std::to_string(row_overrides) + " overridden)" : "");
         bool open = false;
         if (g.has_toggle()) {
             bool on = setting_bool_(sec, section, g.toggle);
             const bool was = on;
             open = ctx.collapsing_header(title, g.open, nullptr, imm::Icon::None, &on);
-            const bool overridden = scene_overridable_(section, g.toggle) && doc_.scene_setting(section, g.toggle.key);
-            ctx.tooltip(g.title + "\n" + g.tip + "\nThe checkbox switches it " + (was ? "off" : "on") +
-                        (g.toggle.startup_only ? " (applies after Restart Renderer)" : "") +
-                        (overridden ? "\nOverridden by this scene" : "") + "\nconfig key: " + section + "." + g.toggle.key);
-            test_rects_["setting_group:" + g.title] = ctx.last_rect();
-            // A scene override of the switch is marked like an overridden row.
-            if (overridden) {
-                const imm::Box hb = ctx.last_rect();
-                ctx.fill({hb.x, hb.y + 2.0f, 2.0f, hb.h - 4.0f}, et_.chrome.setting_override_bar);
+            const imm::Box hb = ctx.last_rect();
+            std::string tip = g.title + "\n" + g.tip + "\nThe checkbox switches it " + (was ? "off" : "on");
+            if (g.toggle.startup_only) tip += " (rebuilds the renderer)";
+            if (toggle_over) {
+                const Node* proj = sec.contains(g.toggle.key) ? &sec.at(g.toggle.key) : nullptr;
+                tip += "\nOverridden by this scene -- Scene: " + std::string(was ? "On" : "Off") + "   Project: " +
+                       setting_text_(proj, g.toggle.def.x != 0.0f ? "On" : "Off") + "\nRight-click to revert or apply to the project";
             }
+            ctx.tooltip(tip + "\nconfig key: " + section + "." + g.toggle.key);
+            test_rects_["setting_group:" + g.title] = hb;
+            // A scene override of the switch is marked like an overridden row (band + edge bar).
+            if (toggle_over) ctx.fill(hb, et_.chrome.setting_override);
+            if (toggle_over || row_overrides > 0) ctx.fill({hb.x, hb.y + 2.0f, 2.0f, hb.h - 4.0f}, et_.chrome.setting_override_bar);
             if (on != was) set_setting_(sec, section, g.toggle, Node(on));
+            setting_context_menu_(ctx, hb, g.toggle, sec, section);
         } else {
             open = ctx.collapsing_header(title, g.open);
+            const imm::Box hb = ctx.last_rect();
             ctx.tooltip(g.title + "\n" + g.tip);
-            test_rects_["setting_group:" + g.title] = ctx.last_rect();
+            test_rects_["setting_group:" + g.title] = hb;
+            if (row_overrides > 0) ctx.fill({hb.x, hb.y + 2.0f, 2.0f, hb.h - 4.0f}, et_.chrome.setting_override_bar);
         }
         if (!open && needle.empty()) { ctx.pop_id(); return; }
         ctx.indent(6);
@@ -494,8 +518,7 @@
             }
             if (!visible || !match[i]) continue;
             FieldDesc f = g.fields[i];
-            if (f.startup_only) f.label = f.display() + " *";
-            f.tooltip += std::string(f.tooltip.empty() ? "" : "\n") + (f.startup_only ? "* Applies after Restart Renderer.\n" : "") +
+            f.tooltip += std::string(f.tooltip.empty() ? "" : "\n") + (f.startup_only ? "Changing it rebuilds the renderer.\n" : "") +
                          "config key: " + section + "." + f.key;
             draw_setting_row_(ctx, f, sec, env, section);
         }
@@ -515,93 +538,117 @@
     }
 
     /**
-     * @brief Render settings: a search box, then the groups under their category headings
-     *        (General, Render Features -- one section per feature, its switch in the header --
-     *        Stylize, Debug), and any config.yaml render keys the schema doesn't know.
+     * @brief The render settings groups under their category headings (General, Render
+     *        Features -- one section per feature, its switch in the header -- Stylize, Debug),
+     *        filtered by `needle` (lowercase) and, when set, to one `category_only`. Drawn by the
+     *        scene's Render tab (overrides) and the Project Settings modal (config.yaml).
+     * @return False if no group matched.
      */
-    void draw_render_props_(imm::Context& ctx) {
-        using I = imm::Icon;
-        if (ctx.button(config_.dirty() ? "Save config.yaml *" : "Save config.yaml", 150, true, I::Save)) save_config();
-        ctx.same_line();
-        if (ctx.button("Restart Renderer", 150, true, I::Restart)) restart_ = true;
-        ctx.tooltip("Restart Renderer\nRebuilds the renderer so startup-only settings (marked *) apply. Open documents are kept.");
-        ctx.label_dim(active_type_ == AssetType::Scene ? "Edits override config.yaml for this scene (tinted rows)."
-                                                       : "Edits change config.yaml, the project's settings.");
-        ctx.label_dim("Hover for help. Right-click a row: revert / apply. * = needs a restart.");
-        ctx.spacing(2);
-        const imm::Box sb = ctx.next_box(22);
-        ctx.input_text_box("render_settings_filter", sb, &render_settings_filter_, "    Search settings");
-        if (ctx.editing_text("render_settings_filter").value_or(render_settings_filter_).empty()) {
-            ctx.icon(I::Search, {sb.x + 4, sb.y + 4, 14, 14}, ctx.style.text_disabled);
-        }
-        test_rects_["render_settings_filter"] = sb;
-        ctx.spacing(4);
-        // Filter as you type: the field only commits on Enter, so read its live text.
-        std::string needle = ctx.editing_text("render_settings_filter").value_or(render_settings_filter_);
-        std::transform(needle.begin(), needle.end(), needle.begin(), ::tolower);
+    bool draw_render_groups_(imm::Context& ctx, const std::string& needle, const std::string& category_only = {}) {
         const InspectorEnv env = inspector_env_();
         std::string category;
         bool shown_any = false;
         for (const auto& g : render_settings_groups()) {
+            if (!category_only.empty() && g.category != category_only) continue;
             bool any = true;
             group_matches_(g, needle, any);
             if (!any) continue;
-            if (g.category != category) {
+            if (g.category != category && category_only.empty()) {
                 category = g.category;
-                ctx.spacing(category == render_settings_groups().front().category ? 0 : 8);
-                ctx.heading(category);
+                int n = 0;
+                for (const auto& o : render_settings_groups()) if (o.category == category) n += group_override_count_(o, "render");
+                ctx.spacing(shown_any ? 8 : 0);
+                ctx.heading(n > 0 ? category + "   (" + std::to_string(n) + " overridden)" : category);
                 const imm::Box line = ctx.last_rect();
-                ctx.fill({line.x, line.bottom() - 2, line.w, 1}, ctx.style.separator);
+                ctx.fill({line.x, line.bottom() - 2, line.w, 1}, n > 0 ? et_.chrome.setting_override_bar : ctx.style.separator);
                 ctx.spacing(2);
             }
             draw_setting_group_(ctx, g, "render", env, needle);
             shown_any = true;
         }
-        if (!shown_any) ctx.label_dim("No setting matches that search.");
-        // Keys config.yaml has that the schema doesn't (a typo, or a key from a newer engine).
-        const auto known = render_settings_keys();
-        const std::set<std::string> skip(known.begin(), known.end());
-        bool unknown = false;
-        for (const auto& kv : config_.section("render").as_map()) {
-            if (kv.first.is_string() && !skip.count(kv.first.get_value<std::string>())) unknown = true;
+        return shown_any;
+    }
+
+    /** @brief A search box bound to `filter`; returns its live text, lowercase (it only commits on Enter). */
+    std::string settings_search_box_(imm::Context& ctx, const char* id, std::string& filter) {
+        const imm::Box sb = ctx.next_box(22);
+        ctx.input_text_box(id, sb, &filter, "    Search settings");
+        if (ctx.editing_text(id).value_or(filter).empty()) ctx.icon(imm::Icon::Search, {sb.x + 4, sb.y + 4, 14, 14}, ctx.style.text_disabled);
+        test_rects_[id] = sb;
+        std::string needle = ctx.editing_text(id).value_or(filter);
+        std::transform(needle.begin(), needle.end(), needle.begin(), ::tolower);
+        return needle;
+    }
+
+    /** @brief The Rebuild Renderer button: applies settings fixed at pipeline construction in place. */
+    void rebuild_renderer_button_(imm::Context& ctx, float w) {
+        if (ctx.button("Rebuild Renderer", w, true, imm::Icon::Restart)) rebuild_renderer_();
+        ctx.tooltip("Rebuild Renderer\nRecreates the render pipeline in place from the current settings. "
+                    "Settings that need it rebuild on their own; this forces one. The window stays open.");
+    }
+
+    /**
+     * @brief The scene's Render tab: this scene's overrides of config.yaml's render settings.
+     *        Every row shows the value the scene renders with; editing one overrides it for this
+     *        scene only (tinted). The project's own values live in Edit > Project Settings.
+     */
+    void draw_render_props_(imm::Context& ctx) {
+        using I = imm::Icon;
+        if (ctx.button("Project Settings...", 150, true, I::Gear)) open_project_settings_("General");
+        ctx.tooltip("Project Settings\nThe project's default render, output and physics settings (config.yaml)");
+        ctx.same_line();
+        rebuild_renderer_button_(ctx, 150);
+        if (!scene_settings_layer_()) {
+            ctx.label_dim("Render settings are per project (config.yaml), overridable per scene.");
+            ctx.label_dim("Open a scene to override them, or use Project Settings.");
+            return;
         }
-        if (unknown && needle.empty()) {
-            ctx.spacing(8);
-            if (ctx.collapsing_header("Unrecognized Keys", false)) {
-                ctx.label_dim("In config.yaml's render: but not a setting this editor knows.");
-                const Node before = config_.node;
-                EditResult r = draw_fields(ctx, {}, config_.section("render"), env, true, skip);
-                if (r.changed) { config_.commit("Edit render." + r.key, before, r.active ? "cfg:" + r.key : std::string()); apply_config_live(); }
-                if (r.finished) config_.undo.end_merge();
-            }
+        draw_scene_override_summary_(ctx, "render", "render settings");
+        ctx.spacing(2);
+        const std::string needle = settings_search_box_(ctx, "render_settings_filter", render_settings_filter_);
+        ctx.spacing(4);
+        if (!draw_render_groups_(ctx, needle)) ctx.label_dim("No setting matches that search.");
+    }
+
+    /**
+     * @brief The "this scene overrides N settings" line with Revert All, or the hint that edits
+     *        here override the project's values.
+     */
+    void draw_scene_override_summary_(imm::Context& ctx, const std::string& section, const std::string& what) {
+        const size_t n = doc_.scene_setting_count(section);
+        if (n == 0) {
+            ctx.label_dim("Showing the project's " + what + ". An edit here overrides it for this scene only.");
+            return;
         }
+        const imm::Box b = ctx.next_box(ctx.style.row_height);
+        ctx.fill(b, et_.chrome.setting_override);
+        ctx.fill({b.x, b.y + 1.0f, 2.0f, b.h - 2.0f}, et_.chrome.setting_override_bar);
+        ctx.text_in({b.x + 8, b.y, b.w - 8, b.h}, "This scene overrides " + std::to_string(n) + " " + (n == 1 ? what.substr(0, what.size() - 1) : what), ctx.style.text, 0.0f);
+        if (ctx.button("Revert All Scene Overrides", -1, true, imm::Icon::Restart)) {
+            settings_edit_was_scene_ = true;
+            apply_(doc_.clear_scene_settings(section, "Revert all scene " + section + " overrides"));
+        }
+        ctx.tooltip("Revert All\nDrops every " + section + " override, so this scene uses the project's values");
+        test_rects_["revert_all:" + section] = ctx.last_rect();
     }
 
     void draw_world_props_(imm::Context& ctx) {
         draw_weather_section_(ctx);   // ui/weather.inl
-        ctx.label_dim("Project-wide in config.yaml; edits in a scene override them for that scene.");
+        if (scene_settings_layer_()) ctx.label_dim("Edits override the project's values for this scene (tinted).");
         if (weather_on_()) ctx.label_dim("Locked rows are driven by the weather while it is on.");
         ctx.spacing(4);
-        draw_setting_groups_(ctx, render_settings_groups(), "render", {"Lighting & Sky", "Fog"});
+        draw_setting_groups_(ctx, render_settings_groups(), "render", {"Lighting & Sky", "Clouds", "Fog"});
     }
 
     void draw_output_props_(imm::Context& ctx) {
         using I = imm::Icon;
-        if (ctx.button(config_.dirty() ? "Save config.yaml *" : "Save config.yaml", 150, true, I::Save)) save_config();
-        ctx.same_line();
         if (ctx.button("Package Project...", 150, true, I::Package)) open_package_dialog_();
         ctx.tooltip("Package Project\nCopies assets/ with every YAML file encoded to .caml, ready to ship.");
+        ctx.same_line();
+        if (ctx.button("Project Settings...", 150, true, I::Gear)) open_project_settings_("Output");
+        ctx.tooltip("Project Settings\nWindow, jobs and debug settings (config.yaml)");
         ctx.spacing(4);
-        InspectorEnv env = inspector_env_();
-        for (const auto& g : project_settings_groups()) {
-            if (g.title == "Physics") continue;   // Scene tab
-            if (!ctx.collapsing_header(g.title, g.title == "Window")) continue;
-            Node& section = config_.section(project_section_key(g.title));
-            ctx.indent(4);
-            for (const auto& f : g.fields) draw_setting_row_(ctx, f, section, env, project_section_key(g.title));
-            ctx.unindent(4);
-        }
-        ctx.label_dim("Window and jobs settings apply the next time the game starts.");
+        ctx.label_dim("Window, jobs and debug settings are project-wide: Edit > Project Settings > Output.");
     }
 
     void draw_scene_props_(imm::Context& ctx) {
@@ -635,7 +682,7 @@
         if (ctx.collapsing_header("Physics", true, nullptr, I::Physics)) {
             InspectorEnv env = inspector_env_();
             Node& section = config_.section("physics");
-            ctx.label_dim("Scene overrides (tinted) apply when the scene starts or plays.");
+            draw_scene_override_summary_(ctx, "physics", "physics settings");
             for (const auto& g : project_settings_groups()) {
                 if (g.title != "Physics") continue;
                 for (const auto& f : g.fields) draw_setting_row_(ctx, f, section, env, "physics");

@@ -87,6 +87,7 @@
 #include <gfxcoopa/engine/passes/ssao_pass.h>
 #include <gfxcoopa/engine/passes/temporal_history_pass.h>
 #include "toyengine/render/passes/contact_shadow_pass.h"
+#include "toyengine/render/passes/motion_blur_pass.h"
 #include <gfxcoopa/engine/util/sampler.h>
 #include <gfxcoopa/engine/data/camera_ubo.h>
 #include <gfxcoopa/engine/data/light_data.h>
@@ -97,7 +98,6 @@
 #include <gfxcoopa/engine/components/spot_light.h>
 #include <gfxcoopa/engine/passes/transparent_pass.h>
 #include <gfxcoopa/engine/passes/fog_pass.h>
-#include <gfxcoopa/engine/data/fog_data.h>
 #include <gfxcoopa/engine/passes/volumetrics_pass.h>
 #include <gfxcoopa/engine/passes/froxel_volumetrics_pass.h>
 #include <gfxcoopa/engine/data/volumetrics_data.h>
@@ -148,11 +148,60 @@
 #include <toyengine/render/passes/transparent_preview_pass.h>
 #include <toyengine/render/passes/underwater_pass.h>
 #include <toyengine/render/passes/particle_pass.h>
+#include <toyengine/render/passes/sky_atmosphere_pass.h>
+#include <toyengine/render/passes/sky_cloud_pass.h>
+#include <toyengine/render/passes/skinning_pass.h>
+#include <toyengine/render/sky_state.h>
 #include <toyengine/render/particle_types.h>
 #include <toyengine/render/surface_world.h>
 #include <set>
 #include <glm/gtc/packing.hpp>
 #include <toyengine/scene/camera_controller.h>
+
+/**
+ * @brief The PixelRenderConfig fields fixed at pipeline construction: toggles that fix a
+ *        descriptor binding or a source view, and sizes baked into targets, SSBOs and the
+ *        palette LUT. apply_live_config() keeps them; changing one means a rebuild (see
+ *        PixelRenderPipeline::needs_rebuild() and Engine::rebuild_pipeline()). sdf_enabled
+ *        and shadows_enabled are deliberately absent: both are read fresh every frame.
+ */
+#define TOY_STARTUP_FIXED_FIELDS(X) \
+    X(volumetrics_enabled) \
+    X(bloom_enabled) \
+    X(dof_enabled) \
+    X(tilt_shift_enabled) \
+    X(ssr_enabled) \
+    X(ssgi_traced) \
+    X(ssao_enabled) \
+    X(transparency_enabled) \
+    X(refraction_enabled) \
+    X(aa_mode) \
+    X(skinning) \
+    X(world_ui_enabled) \
+    X(screen_ui_enabled) \
+    X(resolution_mode) \
+    X(render_width) \
+    X(render_height) \
+    X(fill_aspect) \
+    X(scale_divisor) \
+    X(ssr_half_res) \
+    X(ssgi_resolution_scale) \
+    X(ssao_half_res) \
+    X(volumetrics_resolution_scale) \
+    X(volumetrics_mode) \
+    X(volumetrics_froxel_tile) \
+    X(volumetrics_froxel_slices) \
+    X(shadow_map_resolution) \
+    X(shadow_cascades) \
+    X(cube_shadow_resolution) \
+    X(spot_shadow_resolution) \
+    X(local_shadow_atlas_resolution) \
+    X(shadow_cache_enabled) \
+    X(sdf_max_renderers) \
+    X(sdf_max_shapes) \
+    X(palette_path) \
+    X(grading_lut_path) \
+    X(auto_exposure_enabled)
 
 namespace toy {
 namespace render {
@@ -190,19 +239,12 @@ public:
           offscreen_target_(device, allocator, render_extent_.width, render_extent_.height, coopa::gfx::Format::RGBA16_Sfloat,
                             coopa::gfx::engine::targets::kColorOnly),
           post_target_(device, allocator, render_extent_.width, render_extent_.height, coopa::gfx::Format::RGBA8_Unorm),
-          // Fog composite target -- HDR, same reasoning as offscreen_target_ above: fog belongs
-          // in linear HDR (Unity applies it there too), ahead of pixel_stylize_pass_'s tonemap
-          // step. A separate target is mandatory, not a style choice: pipeline::RenderPass
-          // hardcodes LOAD_OP_CLEAR, so FogPass can't reopen and composite in place onto the
-          // image it reads from.
-          fog_target_(device, allocator, render_extent_.width, render_extent_.height, coopa::gfx::Format::RGBA16_Sfloat,
-                              coopa::gfx::engine::targets::kColorOnly),
-          // Underwater composite target -- the same HDR format and LOAD_OP_CLEAR-forced
-          // separation as fog_target_ (see UnderwaterPass's file doc).
+          // Underwater composite target -- HDR like offscreen_target_, and separate because
+          // pipeline::RenderPass hardcodes LOAD_OP_CLEAR (see UnderwaterPass's file doc).
           underwater_target_(device, allocator, render_extent_.width, render_extent_.height,
                              coopa::gfx::Format::RGBA16_Sfloat, coopa::gfx::engine::targets::kColorOnly),
-          // Wind composite target -- same HDR format and the same LOAD_OP_CLEAR-forced
-          // separation as fog_target_ above. Wind reads fog's output and writes its own.
+          // Volumetrics composite target -- same HDR format and the same LOAD_OP_CLEAR-forced
+          // separation as underwater_target_ above.
           volumetrics_target_(device, allocator, render_extent_.width, render_extent_.height, coopa::gfx::Format::RGBA16_Sfloat,
                               coopa::gfx::engine::targets::kColorOnly),
           // The march half of VolumetricsPass, at 1/volumetrics_resolution_scale per axis:
@@ -219,7 +261,6 @@ public:
           // *Shadow-family doc (pixel_lighting.frag/transparent.frag's dir_shadow_map and
           // point_shadow_map are sampler2DShadow/samplerCubeShadow to match).
           shadow_sampler_(coopa::gfx::engine::util::Sampler::shadow(device)),
-          fog_data_(device, allocator),
           volumetrics_data_(device, allocator),
           // Only the directional cascade atlas is used: point and spot shadows live in
           // local_shadow_atlas_, so the target's cube and spot maps are allocated at a token size.
@@ -310,6 +351,13 @@ public:
     void set_overlay_scene(coopa::scene::Scene* scene) { overlay_scene_ = scene; }
 
     /**
+     * @brief The engine's own overlay scenes (debug HUD, scene transition), in draw order:
+     *        their screen-space canvases draw after -- over -- the overlay scene's. Needs
+     *        screen_ui_enabled; an empty list draws nothing extra.
+     */
+    void set_overlay_layers(std::vector<coopa::scene::Scene*> layers) { overlay_layers_ = std::move(layers); }
+
+    /**
      * @brief world_ui_pass_'s 1x1 white texture view, for seeding a world canvas's
      *        DrawList::set_default_texture() -- or a default-constructed (null) view when
      *        config_.world_ui_enabled is off.
@@ -323,6 +371,9 @@ public:
     coopa::gfx::TextureView world_ui_white_view() const {
         return world_ui_pass_ ? world_ui_pass_->white_view() : coopa::gfx::TextureView{};
     }
+
+    /** @brief How many frames have recorded the motion blur pass (0 while motion_blur is off). */
+    uint64_t motion_blur_frames() const { return motion_blur_frames_; }
 
     /** @brief Low-resolution render width in pixels. */
     uint32_t render_width() const { return render_extent_.width; }
@@ -375,6 +426,21 @@ public:
     void set_water_state(WaterFrameState state) { water_state_ = std::move(state); }
 
     /**
+     * @brief This frame's physical sky (render sky_model: physical): the sun and moon, the
+     *        atmosphere's media and the light levels the CPU atmosphere model worked out (see
+     *        sky_state.h). Engine sets it every frame; an inactive state draws the gradient sky.
+     */
+    void set_sky_state(const SkyFrameState& state) { sky_state_ = state; }
+    const SkyFrameState& sky_state() const { return sky_state_; }
+    /** @brief The GPU skinning pre-pass (render.skinning: gpu with compute), else null --
+     *         SkinnedMeshRenderer::upload() then skins on the CPU. */
+    passes::SkinningPass* skinning_pass() { return skinning_pass_.get(); }
+    /** @brief True when this frame draws the physical sky. */
+    bool physical_sky_active() const { return config_.sky_model == "physical" && sky_state_.active; }
+    /** @brief The physical sky's LUT pass (tests: how often its tables were re-rendered). */
+    const passes::SkyAtmospherePass& sky_atmosphere_pass() const { return *sky_atmosphere_pass_; }
+
+    /**
      * @brief gfx_time for every surface-shader push: x = renderer clock, y = frame dt,
      *        z = frame index, w = the water clock (WaterFrameState::time) -- the wave phase the
      *        water shader must share with the CPU's buoyancy queries. The renderer clock runs
@@ -395,6 +461,12 @@ public:
      */
     void set_particle_state(ParticleFrameState state) { particle_state_ = std::move(state); }
     const ParticleFrameState& particle_state() const { return particle_state_; }
+    /** @brief `simulation: gpu` particles (null without compute support). */
+    passes::GpuParticlePass* gpu_particle_pass() { return gpu_particle_pass_.get(); }
+    /** @brief A GPU particle system's last read-back alive count and its generation. */
+    bool gpu_particle_alive(uint64_t id, uint32_t& count, uint32_t& generation) const {
+        return gpu_particle_pass_ && gpu_particle_pass_->alive(id, count, generation);
+    }
 
     /** @brief True when UnderwaterPass exists and is applying the underwater look this frame. */
     bool underwater_active() const { return underwater_pass_ != nullptr && water_state_.underwater; }
@@ -510,6 +582,21 @@ public:
     PixelRenderConfig& render_config_mut() { return config_; }
 
     /**
+     * @brief True if `next` differs from `live` in a field fixed at construction
+     *        (TOY_STARTUP_FIXED_FIELDS), so applying it needs a new pipeline rather than
+     *        apply_live_config(). fill_aspect is left out: the engine owns it and rebuilds for
+     *        it itself (Engine::update_fill_extent_()).
+     */
+    static bool needs_rebuild(const PixelRenderConfig& live, PixelRenderConfig next) {
+        next.fill_aspect = live.fill_aspect;
+        bool differs = false;
+#define TOY_STARTUP_DIFFERS(field) differs = differs || live.field != next.field;
+        TOY_STARTUP_FIXED_FIELDS(TOY_STARTUP_DIFFERS)
+#undef TOY_STARTUP_DIFFERS
+        return differs;
+    }
+
+    /**
      * @brief Applies a whole config to the live pipeline, skipping startup-fixed fields.
      *
      * The bulk counterpart to render_config_mut(): use it when replacing many values at once and
@@ -520,68 +607,27 @@ public:
      * Call between frames, never mid-record.
      *
      * @param next The config to apply.
+     * @param warn_ignored Log the startup-fixed fields it kept (off when the caller rebuilds for them).
      */
-    void apply_live_config(const PixelRenderConfig& next) {
+    void apply_live_config(const PixelRenderConfig& next, bool warn_ignored = true) {
         PixelRenderConfig merged = next;
         std::vector<const char*> ignored;
 
         // Restore a startup-fixed field from the live config, remembering it if the
-        // file tried to change it.
+        // file tried to change it. The list is TOY_STARTUP_FIXED_FIELDS (top of this file).
 #define TOY_KEEP_STARTUP_FIXED(field)                             \
         do {                                                      \
             if (merged.field != config_.field) {                  \
                 ignored.push_back(#field);                        \
             }                                                     \
             merged.field = config_.field;                         \
-        } while (0)
-
-        // Toggles that fixed a descriptor binding or a source view at construction.
-        TOY_KEEP_STARTUP_FIXED(fog_enabled);
-        TOY_KEEP_STARTUP_FIXED(volumetrics_enabled);
-        TOY_KEEP_STARTUP_FIXED(bloom_enabled);
-        TOY_KEEP_STARTUP_FIXED(dof_enabled);
-        TOY_KEEP_STARTUP_FIXED(tilt_shift_enabled);
-        TOY_KEEP_STARTUP_FIXED(ssr_enabled);
-        TOY_KEEP_STARTUP_FIXED(ssgi_traced);
-        TOY_KEEP_STARTUP_FIXED(ssao_enabled);
-        TOY_KEEP_STARTUP_FIXED(transparency_enabled);
-        TOY_KEEP_STARTUP_FIXED(refraction_enabled);
-        TOY_KEEP_STARTUP_FIXED(aa_mode);
-        TOY_KEEP_STARTUP_FIXED(world_ui_enabled);
-        TOY_KEEP_STARTUP_FIXED(screen_ui_enabled);
-        // Sizes baked into targets, SSBOs and the palette LUT at construction.
-        TOY_KEEP_STARTUP_FIXED(resolution_mode);
-        TOY_KEEP_STARTUP_FIXED(render_width);
-        TOY_KEEP_STARTUP_FIXED(render_height);
-        TOY_KEEP_STARTUP_FIXED(fill_aspect);
-        TOY_KEEP_STARTUP_FIXED(scale_divisor);
-        TOY_KEEP_STARTUP_FIXED(ssr_half_res);
-        TOY_KEEP_STARTUP_FIXED(ssgi_resolution_scale);
-        TOY_KEEP_STARTUP_FIXED(ssao_half_res);
-        TOY_KEEP_STARTUP_FIXED(volumetrics_resolution_scale);
-        TOY_KEEP_STARTUP_FIXED(volumetrics_mode);
-        TOY_KEEP_STARTUP_FIXED(volumetrics_froxel_tile);
-        TOY_KEEP_STARTUP_FIXED(volumetrics_froxel_slices);
-        TOY_KEEP_STARTUP_FIXED(shadow_map_resolution);
-        TOY_KEEP_STARTUP_FIXED(shadow_cascades);
-        TOY_KEEP_STARTUP_FIXED(cube_shadow_resolution);
-        TOY_KEEP_STARTUP_FIXED(spot_shadow_resolution);
-        TOY_KEEP_STARTUP_FIXED(local_shadow_atlas_resolution);
-        TOY_KEEP_STARTUP_FIXED(shadow_cache_enabled);
-        TOY_KEEP_STARTUP_FIXED(sdf_max_renderers);
-        TOY_KEEP_STARTUP_FIXED(sdf_max_shapes);
-        TOY_KEEP_STARTUP_FIXED(palette_path);
-        TOY_KEEP_STARTUP_FIXED(grading_lut_path);
-        TOY_KEEP_STARTUP_FIXED(auto_exposure_enabled);
-        // sdf_enabled and shadows_enabled are deliberately absent: both are read fresh
-        // every frame (the SDF gather, and the two cast_*_shadow flags), so they apply
-        // at runtime like any other tunable.
-
+        } while (0);
+        TOY_STARTUP_FIXED_FIELDS(TOY_KEEP_STARTUP_FIXED)
 #undef TOY_KEEP_STARTUP_FIXED
 
         config_ = merged;
 
-        if (!ignored.empty()) {
+        if (warn_ignored && !ignored.empty()) {
             std::cerr << "[toy::render] Config reloaded, but these are startup-fixed and were "
                          "IGNORED (restart to apply):";
             for (const char* name : ignored) {
@@ -757,9 +803,6 @@ public:
 
         light_datas_[light_frame_]->upload();
 
-        if (config_.fog_enabled) {
-            update_fog_data_(unjittered_proj, view, cam_pos, dir_light);
-        }
         update_underwater_params_(unjittered_proj, view, cam_pos, dir_light);
 
         if (config_.volumetrics_enabled) {
@@ -822,6 +865,9 @@ public:
             [&](coopa::gfx::command::CommandBuffer& cmd) {
                 const auto record_start = std::chrono::steady_clock::now();
                 if (gpu_profiler_) gpu_profiler_->begin_frame(cmd, frame_slot, profile_->current_frame());
+                // GPU skinning first: every pass below (shadows, G-buffer...) draws its output.
+                if (skinning_pass_) skinning_pass_->record(cmd);
+                gpu_mark_(cmd, GpuScope::Skinning);
                 record_scene_(cmd, ctx, meshes, sdf_draws);
                 frame_meshes_ = &meshes;
                 record_post_chain_(cmd, ctx);
@@ -1198,9 +1244,29 @@ private:
         // directional term max()-combines in. An ExtraSets rather than a sixth binding on
         // gfxcoopa's own G-buffer set, so DeferredLightingPass's layout -- shared with every
         // other consumer of that library -- is untouched.
+        // The physical sky's tables and cloud layer (render sky_model / clouds). Always
+        // constructed and bound below, so both switch live; nothing records while they are off.
+        // GPU skinning (render.skinning). Startup-fixed; the CPU path needs nothing here.
+        if (config_.skinning == "gpu" && device_.supports_compute()) {
+            skinning_pass_ = std::make_unique<passes::SkinningPass>(device_, config_.shaders("skin.comp"));
+        }
+        sky_atmosphere_pass_ = std::make_unique<passes::SkyAtmospherePass>(
+            device_, allocator_, config_.shaders("fullscreen.vert"), config_.shaders("sky_transmittance.frag"),
+            config_.shaders("sky_multiscatter.frag"), config_.shaders("sky_view.frag"));
+        sky_cloud_pass_ = std::make_unique<passes::SkyCloudPass>(
+            device_, allocator_, render_extent_.width, render_extent_.height, *camera_layout_, *light_layout_,
+            config_.shaders("fullscreen.vert"), config_.shaders("sky_cloud_noise.frag"),
+            config_.shaders("sky_cloud_noise3d.frag"), config_.shaders("sky_clouds.frag"));
+        sky_cloud_pass_->set_inputs(sky_atmosphere_pass_->transmittance_view(), sky_atmosphere_pass_->sky_view_view(),
+                                    gbuffer_target_.g1_view_typed());
+
+        // Bindings 1-3 are the physical sky's inputs (pixel_lighting.frag's sky branch).
         contact_extra_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
             coopa::gfx::pipeline::DescriptorLayoutBuilder()
                 .combined_sampler(0, coopa::gfx::ShaderStage::Fragment)
+                .combined_sampler(1, coopa::gfx::ShaderStage::Fragment)
+                .combined_sampler(2, coopa::gfx::ShaderStage::Fragment)
+                .combined_sampler(3, coopa::gfx::ShaderStage::Fragment)
                 .build(device_));
         contact_extra_pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
             coopa::gfx::pipeline::DescriptorPoolBuilder()
@@ -1209,6 +1275,9 @@ private:
             device_, *contact_extra_pool_, *contact_extra_layout_);
         contact_extra_set_->bind_image(0, contact_shadow_pass_->output_view_typed(),
                                        contact_shadow_pass_->sampler());
+        contact_extra_set_->bind_image(1, sky_atmosphere_pass_->transmittance_view(), sky_atmosphere_pass_->sampler());
+        contact_extra_set_->bind_image(2, sky_atmosphere_pass_->sky_view_view(), sky_atmosphere_pass_->sampler());
+        contact_extra_set_->bind_image(3, sky_cloud_pass_->output_view(), sky_cloud_pass_->sampler());
 
         // ssao_enabled is a load-time config value (no live reload), so which image to bind is
         // decided once here rather than every frame -- see the update_descriptors comment above
@@ -1425,6 +1494,14 @@ private:
                 tese.empty() ? std::string() : config_.shaders(tese));
         }
 
+        // Global fog over the opaque scene -- drawn in place inside transparent_pass_'s render
+        // pass (LOAD on the HDR image), before translucency; see record_fog_(). Always built,
+        // gated per frame on fog_enabled.
+        fog_pass_ = std::make_unique<coopa::gfx::engine::passes::FogPass>(
+            device_, transparent_pass_->render_pass(), *light_layout_,
+            config_.shaders("fullscreen.vert"), config_.shaders("fog.frag"));
+        fog_pass_->set_source_images(gbuffer_target_.g1_view_typed(), gbuffer_target_.g2_view_typed());
+
         // SdfForwardPass shares transparent_pass_'s render pass -- render passes only need to be
         // attachment-compatible to back a second pipeline, and sharing lets record_transparent_()
         // draw BLEND meshes and BLEND SDFs inside ONE begin()/end(), switching pipelines per item
@@ -1455,6 +1532,18 @@ private:
             device_, allocator_, transparent_pass_->render_pass(),
             *camera_layout_, *light_layout_, ssr_pass_->hiz_layout(), material_cache_->layout_object(),
             *shadow_layout_, config_.shaders("particle.vert"), config_.shaders("particle.frag"));
+        // `simulation: gpu` particle systems: compute emit / simulate / sort, drawn by the pass
+        // above with draw_indirect() (see passes/gpu_particle_pass.h).
+        if (device_.supports_compute()) {
+            try {
+                gpu_particle_pass_ = std::make_unique<passes::GpuParticlePass>(
+                    device_, allocator_, [this](const char* name) { return config_.shaders(name); });
+                particle_pass_->set_gpu(gpu_particle_pass_.get());
+            } catch (const std::exception& e) {
+                std::cerr << "[toy::render] GPU particles unavailable: " << e.what() << "\n";
+                gpu_particle_pass_.reset();
+            }
+        }
     }
     /**
      * @brief Builds the post-process chain in frame-graph order -- fog, volumetrics, DOF, bloom,
@@ -1467,48 +1556,27 @@ private:
         // Without SSR, post reads the deferred-lit+sky target; with it, ssr_pass_'s composite
         // output. Chosen once from ssr_enabled's STARTUP value -- rebinding it per frame would
         // need either a wait or a shader-side selector between two permanently-bound views (file
-        // doc, rule 1). fog_pass_ reads this same fixed source.
-        pre_fog_view_typed_ =
+        // doc, rule 1). Fog and translucency are composited into this image in place.
+        pre_volumetrics_view_typed_ =
             config_.ssr_enabled ? ssr_pass_->output_view_typed() : offscreen_target_.color_view_typed();
 
         // Underwater: first in the chain, right after the transparent pass drew into the source
-        // (so the water's underside is fogged by its in-water distance like everything else),
-        // and ahead of global fog. Everything downstream then reads its output instead.
+        // (so the water's underside is fogged by its in-water distance like everything else).
+        // The global fog has already run by then, over the air part of each ray only (see
+        // gfx_fog_eval), so it never washes out the underwater look. Everything downstream
+        // reads this output instead.
         if (config_.underwater_enabled) {
             underwater_pass_ = std::make_unique<passes::UnderwaterPass>(
                 device_, underwater_target_.render_pass_object(),
                 config_.shaders("fullscreen.vert"), config_.shaders("underwater.frag"));
-            underwater_pass_->set_source_images(pre_fog_view_typed_, gbuffer_target_.g1_view_typed(),
+            underwater_pass_->set_source_images(pre_volumetrics_view_typed_, gbuffer_target_.g1_view_typed(),
                                                 gbuffer_target_.g2_view_typed(), linear_sampler_);
-            pre_fog_view_typed_ = underwater_target_.color_view_typed();
+            pre_volumetrics_view_typed_ = underwater_target_.color_view_typed();
         }
 
-        // Fog composite -- always constructed, gated per frame on fog_enabled. Reads
-        // pre_fog_view_typed_, so transparent geometry (drawn in place into that same image) is
-        // fogged too.
-        fog_pass_ = std::make_unique<coopa::gfx::engine::passes::FogPass>(
-            device_, fog_target_.render_pass_object(), fog_data_.buffer(),
-            config_.shaders("fullscreen.vert"),
-            config_.shaders("fog.frag"));
-        fog_pass_->set_source_images(pre_fog_view_typed_, gbuffer_target_.g1_view_typed(),
-                                     gbuffer_target_.g2_view_typed(), linear_sampler_);
+        coopa::gfx::TextureView pre_volumetrics_view = pre_volumetrics_view_typed_;
 
-        // What wind reads: fog's output if fog ran this build, otherwise straight through
-        // to the pre-fog source. A separate link rather than folding wind into the
-        // expression below, so wind works with fog DISABLED -- the two effects are
-        // independent toggles. Startup-fixed, exactly like pre_fog_view_typed_ above.
-        // MERGED fog+volumetrics: when both are on, volumetrics_pass_ applies the global
-        // fog term itself (gfx_fog_apply, the same call fog.frag makes) over the pre-fog
-        // image, and fog_pass_ never draws -- saving one full-resolution HDR pass and its
-        // target's worth of bandwidth every frame. Startup-fixed like the views it feeds,
-        // since both toggles already are; record_post_chain_() and
-        // update_volumetrics_data_() both re-derive it from the same two flags.
-        coopa::gfx::TextureView pre_volumetrics_view =
-            (config_.fog_enabled && !fog_merged_into_volumetrics_())
-                ? fog_target_.color_view_typed() : pre_fog_view_typed_;
-
-        // Volumetric wind -- always constructed (same always-on-but-runtime-gated policy as
-        // fog_pass_ above); render() checks config_.volumetrics_enabled per frame. Where fog
+        // Local volumes -- render() checks config_.volumetrics_enabled per frame. Where fog
         // integrates an analytic everywhere-medium in one sample, this raymarches a sparse
         // noise field advected along a wind vector, which is what makes it read as moving
         // air rather than haze (see gfx/volumetrics.glsl's header for the three ideas involved).
@@ -1530,7 +1598,7 @@ private:
             fd.apply_frag_spv     = config_.shaders("volumetrics_froxel_apply.frag");
             froxel_volumetrics_pass_ = std::make_unique<coopa::gfx::engine::passes::FroxelVolumetricsPass>(
                 device_, allocator_, fd, volumetrics_target_.render_pass_object(),
-                volumetrics_data_.buffer(), fog_data_.buffer());
+                volumetrics_data_.buffer());
             froxel_volumetrics_pass_->set_source_images(pre_volumetrics_view, gbuffer_target_.g1_view_typed(),
                                                         gbuffer_target_.g2_view_typed(), linear_sampler_);
             froxel_volumetrics_pass_->set_shadow_images(shadow_target_.dir_shadow_view_typed(),
@@ -1539,7 +1607,6 @@ private:
         volumetrics_pass_ = std::make_unique<coopa::gfx::engine::passes::VolumetricsPass>(
             device_, volumetrics_march_target_.render_pass_object(),
             volumetrics_target_.render_pass_object(), volumetrics_data_.buffer(),
-            fog_data_.buffer(),
             config_.shaders("fullscreen.vert"),
             config_.shaders("volumetrics_march.frag"),
             config_.shaders("volumetrics_composite.frag"));
@@ -1569,9 +1636,16 @@ private:
             coopa::gfx::engine::targets::OffscreenTarget* hist =
                 config_.ssr_enabled ? &ssr_pass_->composite_target() : &offscreen_target_;
             if (config_.underwater_enabled) hist = &underwater_target_;
-            if (config_.fog_enabled && !fog_merged_into_volumetrics_()) hist = &fog_target_;
             if (config_.volumetrics_enabled) hist = &volumetrics_target_;
             scene_color_history_src_ = hist->color_image_object()->handle();
+
+            // Motion blur works IN PLACE on that same image -- the one DoF, bloom, exposure and
+            // stylize are about to bind below -- so motion_blur stays a runtime toggle: off records
+            // nothing and every downstream binding is the image the scene chain left. Always built
+            // (both tile targets and the colour copy it gathers from), never rebound.
+            motion_blur_pass_ = std::make_unique<passes::MotionBlurPass>(
+                device_, allocator_, render_extent_.width, render_extent_.height, *hist,
+                gbuffer_target_.g4_view_typed(), config_.shaders);
         }
 
         // Physically-based depth of field (thin-lens CoC -> half-res bokeh gather -> full-res
@@ -1645,7 +1719,7 @@ private:
         // see PixelRenderConfig::debug_view / the DebugView enum for the full option list, and
         // record_post_chain_() for how the choice among this / pixel_stylize_pass_ / DOF-CoC /
         // volumetrics-density is made every frame. Always constructed (same always-built,
-        // runtime-gated policy as fog_pass_/volumetrics_pass_ above), so debug_view stays a
+        // runtime-gated policy as volumetrics_pass_ above), so debug_view stays a
         // runtime field.
         //
         // Shares gfxcoopa's DeferredLightingPass with pixel_lighting_pass_ above -- same 3
@@ -1753,7 +1827,7 @@ private:
         }
 
         // Single source of truth for everything downstream of post_target_/aa_target_ -- same
-        // pattern as post_source_view/pre_fog_view_typed_ above. aa_target_ is null whenever
+        // pattern as post_source_view/pre_volumetrics_view_typed_ above. aa_target_ is null whenever
         // aa_mode == "off", so this collapses to post_target_ exactly as before AA existed.
         coopa::gfx::TextureView display_source_view =
             aa_target_ ? aa_target_->color_view_typed()
@@ -1859,11 +1933,74 @@ private:
     }
 
     /**
+     * @brief The physical sky's per-frame work, ahead of the lighting pass that draws it: the
+     *        atmosphere tables when the atmosphere changed, the sky-view table, and the cloud
+     *        layer. Records nothing but a one-time clear of the bound images while the gradient
+     *        sky is on (so `sky_model: gradient` costs nothing).
+     */
+    void record_physical_sky_(coopa::gfx::command::CommandBuffer& cmd, const FrameContext& ctx) {
+        sky_atmosphere_pass_->initialize(cmd);
+        sky_cloud_pass_->initialize(cmd);
+        if (!physical_sky_active()) return;
+        const SkyFrameState& st = sky_state_;
+        const SkyQualitySteps q = sky_quality_steps_();
+
+        sky_atmosphere_pass_->update_luts(cmd, st.media);
+        passes::SkyAtmospherePass::ViewParams vp;
+        vp.atmo = passes::SkyAtmospherePass::AtmosphereGpu::of(st.media);
+        vp.sun = glm::vec4(st.sun_to, st.moon_ratio);
+        vp.view = glm::vec4(st.media.bottom_radius + std::max(ctx.cam_pos.z, 0.0f) * 0.001f + 0.01f,
+                            static_cast<float>(q.sky_steps), 0.0f, 0.0f);
+        sky_atmosphere_pass_->render_view(cmd, vp);
+        gpu_mark_(cmd, GpuScope::Sky);
+
+        if (st.clouds) {
+            passes::SkyCloudPass::Params cp;
+            cp.inv_view_proj = glm::inverse(ctx.proj * ctx.view);
+            cp.slab = glm::vec4(std::max(st.cloud_altitude, 0.0f), std::max(st.cloud_thickness, 10.0f),
+                                glm::clamp(st.cloud_coverage, 0.0f, 1.0f), std::max(st.cloud_density, 0.0f));
+            // The march's start offset rotates per frame only when TAA is there to average it.
+            cp.wind = glm::vec4(st.cloud_offset, st.time,
+                                config_.aa_mode == "taa" ? static_cast<float>(frame_index_ & 0xFFu) : -1.0f);
+            cp.light_dir = glm::vec4(st.cloud_light_to, static_cast<float>(q.cloud_steps));
+            cp.light_color = glm::vec4(st.cloud_light_color, static_cast<float>(q.cloud_light_steps));
+            sky_cloud_pass_->execute(cmd, current_camera_set(), current_light_set(), cp, q.cloud_scale);
+            gpu_mark_(cmd, GpuScope::Clouds);
+        }
+    }
+
+    /** @brief render sky_quality as step counts and the cloud march's resolution (live):
+     *         cloud_scale is the fraction (per axis) of the half-resolution cloud target marched. */
+    struct SkyQualitySteps { int sky_steps, cloud_steps, cloud_light_steps; float cloud_scale; };
+    SkyQualitySteps sky_quality_steps_() const {
+        switch (config_.sky_quality) {
+            case RenderQuality::Low:    return {16, 8, 1, 0.4f};
+            case RenderQuality::Medium: return {24, 12, 2, 0.5f};
+            case RenderQuality::High:   break;
+            case RenderQuality::Ultra:  return {40, 24, 3, 1.0f};
+        }
+        return {30, 16, 2, 0.5f};
+    }
+
+    /**
+     * @brief The directional light's colour as every pass sees it: the component's, times the
+     *        physical sky's tint (the air's transmittance toward it and the cloud cover's
+     *        dimming) while that sky is on.
+     */
+    glm::vec3 dir_light_color_(const coopa::gfx::engine::components::DirectionalLightComponent& l) const {
+        return physical_sky_active() ? l.color * sky_state_.light_tint : l.color;
+    }
+
+    /**
      * @brief Records the scene: shadow maps, G-buffer, Hi-Z, SSAO,
      *        deferred lighting and sky, SSR, and the forward transparent pass.
      */
     void record_scene_(coopa::gfx::command::CommandBuffer& cmd, const FrameContext& ctx,
                        const MeshGather& meshes, const std::vector<SdfDrawItem>& sdf_draws) {
+        if (gpu_particle_pass_ && !particle_state_.gpu.empty()) {
+            gpu_particle_pass_->record(cmd, ctx.frame_slot, particle_state_.gpu);
+            gpu_mark_(cmd, GpuScope::ParticlesSim);
+        }
         record_directional_shadow_(cmd, meshes, sdf_draws, ctx.cast_dir_shadow);
         gpu_mark_(cmd, GpuScope::ShadowDirectional);
         record_local_shadows_(cmd, meshes, sdf_draws);
@@ -2071,6 +2208,8 @@ private:
         // here -- see the constructor's comment on why a per-frame rebind would violate
         // this pipeline's frame-overlap model.
 
+        record_physical_sky_(cmd, ctx);
+
         // One fullscreen draw writes every pixel of offscreen_target_: lit surfaces, and the
         // procedural sky at background pixels (pixel_lighting.frag -- rather than a second
         // skybox draw that would re-read every pixel's normal just to discard the lit ones).
@@ -2110,7 +2249,7 @@ private:
         }
 
         // Runs on debug_view frames too: with ssr_enabled, the whole post chain reads
-        // ssr_pass_'s composite output (see pre_fog_view_typed_ in build_post_chain_), so
+        // ssr_pass_'s composite output (see pre_volumetrics_view_typed_ in build_post_chain_), so
         // skipping the composite would leave that image never written this frame. The
         // "ssr"/"ssr_confidence"/"ssgi" channels also read this pass's own resolved buffers
         // directly (see debug_view_pass_'s extra set), so it must run whenever a channel
@@ -2179,6 +2318,9 @@ private:
             // GPU scopes for SsrPass come from its stage hook (see set_profiler()).
         }
 
+        // Global fog over the opaque scene, before refraction's chain and translucency.
+        if (config_.fog_enabled) record_fog_(cmd, ctx);
+
         if (refraction_this_frame_) {
             // Builds refraction's own scene-colour chain -- the dedicated instance transparent.frag's
             // u_scene_color reads whenever refraction is active and a BLEND mesh is in view (see
@@ -2240,12 +2382,7 @@ private:
         // so every branch below that reads it must see the SAME frame's value.
         const DebugView active_view = parse_debug_view(config_.debug_view);
 
-        // Fog composite. After the transparent pass, so BLEND geometry is fogged too (it was drawn
-        // in place into the same image), and before pixel_stylize_pass_, so fog sits in linear HDR
-        // ahead of tonemap/outline/dither/palette. Gated on the startup-fixed flag both this pass's
-        // source and pixel_stylize_pass_'s were chosen from.
-        // Skipped entirely on the merged path, where volumetrics_pass_ applies the same
-        // global fog term itself -- see fog_merged_into_volumetrics_().
+        // Global fog already ran in record_scene_() (record_fog_(), before translucency).
         // Underwater -- every frame once built (see UnderwaterPass's file doc); a copy unless the
         // camera is below a water surface.
         if (underwater_pass_) {
@@ -2255,14 +2392,7 @@ private:
             gpu_mark_(cmd, GpuScope::Underwater);
         }
 
-        if (config_.fog_enabled && !fog_merged_into_volumetrics_()) {
-            fog_target_.begin(cmd);
-            fog_pass_->draw(cmd, render_extent_.width, render_extent_.height);
-            fog_target_.end(cmd);
-            gpu_mark_(cmd, GpuScope::Fog);
-        }
-
-        // Volumetric wind. After fog, so wisps layer over fogged geometry, and before DOF and
+        // Local volumes. After fog, so wisps layer over fogged geometry, and before DOF and
         // bloom, so they defocus with everything else and sun-lit ones glow. Gated on the same
         // startup-fixed flag its source view was chosen from.
         if (config_.volumetrics_enabled && froxel_volumetrics_pass_) {
@@ -2290,6 +2420,28 @@ private:
             scene_color_mip_pass_->copy_level0_from(cmd, scene_color_history_src_);
             scene_color_history_valid_ = true;
             gpu_mark_(cmd, GpuScope::SceneColorHistory);
+        }
+
+        // Motion blur, in place on the final pre-lens HDR image. After the history copy above, so
+        // next frame's reflections see an unblurred scene (Unreal's PrevSceneColor is pre-blur
+        // too), and before DoF and bloom, so blurred highlights still defocus and glow. TAA here
+        // is a display-space resolve after tonemap (step 18), so it necessarily comes after this;
+        // the velocity it reads is unjittered, so the jittered input blurs the same way. Nothing
+        // is recorded when off, for this camera, or under a raw debug channel.
+        if (motion_blur_active_(ctx, active_view)) {
+            passes::MotionBlurPass::Params mb{};
+            // Double precision for the same reason TAA's reprojection uses it (see below).
+            mb.sky_reproject = glm::mat4(glm::dmat4(prev_unjittered_view_proj_) *
+                                         glm::inverse(glm::dmat4(ctx.unjittered_proj * ctx.view)));
+            mb.sky_valid   = prev_view_proj_valid_;
+            mb.shutter     = config_.motion_blur_intensity;
+            mb.max_radius  = kMotionBlurMaxRadius1080 * static_cast<float>(render_extent_.height) / 1080.0f;
+            mb.samples     = kMotionBlurSamples;
+            // TAA averages a per-frame jitter away; without it a fixed pattern reads as grain, not crawl.
+            mb.noise_frame = config_.aa_mode == "taa" ? static_cast<uint32_t>(frame_index_) : 0u;
+            motion_blur_pass_->execute(cmd, mb);
+            ++motion_blur_frames_;
+            gpu_mark_(cmd, GpuScope::MotionBlur);
         }
 
         // Depth of field. After fog (so fogged geometry defocuses too) and before
@@ -3035,6 +3187,13 @@ private:
                 if (!c->is_world_space()) all_canvases.push_back(c);
             }
         }
+        // The engine's overlay layers (Engine::add_overlay_layer()) after that, so they draw
+        // over the editor UI as well as the game's.
+        for (coopa::scene::Scene* layer : overlay_layers_) {
+            for (coopa::ui::CanvasComponent* c : coopa::ui::collect_canvases(*layer)) {
+                if (!c->is_world_space()) all_canvases.push_back(c);
+            }
+        }
 
         world_canvases_.clear();
         if (world_ui_pass_) {
@@ -3426,15 +3585,6 @@ private:
         }
     }
 
-    /**
-     * @brief Fills the global fog UBO from config_. Only called when fog_enabled.
-     *
-     * Fog is GLOBAL and config-sourced only: there is no fog component and no local fog
-     * volume, because anything bounded is a VolumeComponent on the volumetrics pass instead.
-     *
-     * Takes the UNJITTERED projection -- fog reprojects world-space samples, so TAA jitter
-     * here would make it swim independently of the visible pixel grid.
-     */
     /** @brief Fills UnderwaterPass's push constants from water_state_ (see set_water_state()). */
     void update_underwater_params_(const glm::mat4& unjittered_proj, const glm::mat4& view, const glm::vec3& cam_pos,
                                    const coopa::gfx::engine::components::DirectionalLightComponent* dir_light) {
@@ -3451,47 +3601,64 @@ private:
         p.absorption    = glm::vec4(w.absorption, light);
     }
 
-    void update_fog_data_(const glm::mat4& unjittered_proj, const glm::mat4& view,
-                          const glm::vec3& cam_pos,
-                          const coopa::gfx::engine::components::DirectionalLightComponent* dir_light) {
-        // Fog UBO. Gated on fog_enabled -- when fog is off, record() skips fog_pass_'s draw
-        // entirely (see that call site), so this upload would otherwise be wasted work.
-        //
-        // Fog is GLOBAL ONLY and sourced entirely from config_: there is no scene component
-        // and no local volume array. Local volumes of every kind -- including static fog
-        // pockets -- are raymarched by volumetrics_pass_ instead (see VolumeComponent).
-
-        auto& fog = fog_data_.data();
-        // CAVEAT: fog_data_ is single-buffered, so this inv_view_proj carries the same hazard that
-        // made camera_ubos_ per-slot (file doc, rule 2) -- a one-frame-stale camera matrix under
-        // fast motion (assets/config.yaml ships fog_enabled: true, so this is live), and
-        // documented rather than fixed because FogPass owns its own descriptor set bound once at
-        // construction, so making it per-slot needs an additive gfxcoopa API change.
-        fog.inv_view_proj = glm::inverse(unjittered_proj * view);
-        fog.camera_pos    = glm::vec4(cam_pos, 1.0f);
-        fog.fog_color     = glm::vec4(config_.fog_color, 1.0f);
-        if (dir_light) {
-            fog.sun_direction = glm::vec4(glm::normalize(dir_light->direction), 0.0f);
-            fog.sun_color     = glm::vec4(dir_light->color * dir_light->intensity, 1.0f);
+    /**
+     * @brief Writes the global fog parameters into this frame's LightUBO (its fog block).
+     *
+     * One source for every fog consumer: FogPass (opaque scene and sky) and each forward shader
+     * (BLEND meshes, water, particles, SDF glass), which all read `lights.fog` -- see
+     * gfx/fog.glsl. Per frame-in-flight like the rest of the light UBO. Fog is GLOBAL ONLY and
+     * comes from config_ (which the weather system drives); bounded fog is a VolumeComponent.
+     *
+     * The water fields come from the WaterSystem's frame state: with the camera under a water
+     * surface, fog integrates only the part of each ray above it, so the in-water part is left
+     * to UnderwaterPass instead of being washed over with air fog.
+     */
+    void fill_fog_block_(coopa::gfx::engine::data::LightUBO& ubo) const {
+        const bool on = config_.fog_enabled;
+        ubo.fog_color   = glm::vec4(config_.fog_color, on ? 1.0f : 0.0f);
+        ubo.fog_density = glm::vec4(config_.fog_mode == 0 ? 0.0f : 1.0f, std::max(config_.fog_density, 0.0f),
+                                    config_.fog_linear_start, config_.fog_linear_end);
+        ubo.fog_height  = glm::vec4(config_.fog_height_base, config_.fog_height_falloff,
+                                    glm::clamp(config_.fog_sky_blend, 0.0f, 1.0f),
+                                    glm::clamp(config_.fog_max_opacity, 0.0f, 1.0f));
+        ubo.fog_range   = glm::vec4(std::max(config_.fog_start_distance, 0.0f),
+                                    std::max(config_.fog_cutoff_distance, 0.0f),
+                                    std::max(config_.fog_sky_distance, 1.0f), 0.0f);
+        const auto* dir = frame_scene_.dir_light;
+        if (dir && config_.fog_sun_amount > 0.0f) {
+            ubo.fog_sun     = glm::vec4(dir_light_color_(*dir) * dir->intensity * config_.fog_sun_amount,
+                                        glm::clamp(config_.fog_sun_anisotropy, -0.95f, 0.95f));
+            ubo.fog_sun_dir = glm::vec4(glm::normalize(dir->direction), std::max(config_.fog_sun_start_distance, 0.0f));
         } else {
-            fog.sun_direction = glm::vec4(0.0f, 0.0f, -1.0f, 0.0f);
-            fog.sun_color     = glm::vec4(0.0f);
+            ubo.fog_sun     = glm::vec4(0.0f);
+            ubo.fog_sun_dir = glm::vec4(0.0f, 0.0f, -1.0f, 0.0f);
         }
-        fog.mode_density  = glm::vec4(static_cast<float>(config_.fog_mode), config_.fog_density,
-                                      config_.fog_linear_start, config_.fog_linear_end);
-        fog.height_params = glm::vec4(config_.fog_height_base, config_.fog_height_falloff,
-                                      config_.fog_sky_blend, config_.fog_sun_amount);
-        // Same config_.indirect instance the lighting pass and SSR composite read --
-        // see IndirectParams' doc (render_features.h).
-        fog.sky_zenith  = glm::vec4(config_.indirect.sky_zenith, 0.0f);
-        fog.sky_horizon = glm::vec4(config_.indirect.sky_horizon, 0.0f);
-        fog.sky_ground  = glm::vec4(config_.indirect.sky_ground, 0.0f);
+        ubo.fog_water = glm::vec4(water_state_.surface_level, water_state_.underwater ? 1.0f : 0.0f, 0.0f, 0.0f);
+    }
 
-        fog.misc_params = glm::vec4(config_.fog_sun_anisotropy, config_.fog_max_opacity,
-                                    0.0f, config_.fog_max_distance);
-
-        fog_data_.upload();
-
+    /**
+     * @brief Global fog over the opaque scene and sky, composited in place (FogPass).
+     *
+     * Runs after lighting/SSR and BEFORE refraction's scene-colour chain and the translucent
+     * draws -- the Unreal/HDRP order: refraction and alpha blending then see an already-fogged
+     * background, and each translucent fragment fogs only its own radiance at its own distance.
+     * Reopens the live HDR image through transparent_pass_'s render pass (LOAD on colour and
+     * depth); FogPass blends premultiplied, so nothing samples the image being written.
+     */
+    void record_fog_(coopa::gfx::command::CommandBuffer& cmd, const FrameContext& ctx) {
+        VkImageView hdr = config_.ssr_enabled ? ssr_pass_->output_view() : offscreen_target_.color_view();
+        transparent_pass_->set_targets(hdr, gbuffer_target_.depth_view(), render_extent_.width, render_extent_.height);
+        transparent_pass_->begin(cmd, gbuffer_target_.depth_image_handle(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        coopa::gfx::engine::passes::FogPass::PushConstants pc;
+        // Unjittered: the fog reprojects nothing, and a jittered ray would swim against the
+        // world-space fog (the same rule the volumetrics UBO follows).
+        pc.inv_view_proj = glm::inverse(ctx.unjittered_proj * ctx.view);
+        pc.camera_pos    = glm::vec4(ctx.cam_pos, 1.0f);
+        fog_pass_->draw(cmd, current_light_set(), pc, render_extent_.width, render_extent_.height);
+        transparent_pass_->end(cmd);
+        // TransparentPass leaves depth read-only-attachment; everything after expects shader-read.
+        transition_gbuffer_depth_to_shader_read_(cmd, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+        gpu_mark_(cmd, GpuScope::Fog);
     }
 
     /**
@@ -3510,8 +3677,8 @@ private:
         //
         // There is NO global term here: fog above is the global atmosphere, and
         // everything in this buffer is a bounded, scene-placed VolumeComponent that
-        // carries its own complete field description. Inherits fog_data_'s
-        // single-buffered caveat (see VolumetricsData's doc).
+        // carries its own complete field description. Single-buffered (see VolumetricsData's
+        // doc).
 
         using coopa::gfx::engine::components::VolumeComponent;
         using coopa::gfx::engine::components::VolumeKind;
@@ -3527,7 +3694,7 @@ private:
             parse_debug_view(config_.debug_view) == DebugView::Volumetrics ? 1.0f : 0.0f);
         if (dir_light) {
             vol.sun_direction = glm::vec4(glm::normalize(dir_light->direction), 0.0f);
-            vol.sun_color     = glm::vec4(dir_light->color * dir_light->intensity, 1.0f);
+            vol.sun_color     = glm::vec4(dir_light_color_(*dir_light) * dir_light->intensity, 1.0f);
         } else {
             vol.sun_direction = glm::vec4(0.0f, 0.0f, -1.0f, 0.0f);
             vol.sun_color     = glm::vec4(0.0f);
@@ -3653,11 +3820,7 @@ private:
         }
         vol.counts.y = static_cast<float>(scatter_count);
         vol.counts.z = glm::max(config_.volumetrics_light_scatter, 0.0f);
-        // Merged path: the march applies the global fog term itself and fog_pass_ never
-        // draws (see fog_merged_into_volumetrics_()). update_fog_data_() has already run
-        // this frame -- render() calls it whenever fog_enabled, which the merge requires --
-        // so the fog UBO this flag sends the shader to read is current.
-        vol.counts.w = fog_merged_into_volumetrics_() ? 1.0f : 0.0f;
+        vol.counts.w = 0.0f;
 
         // Froxel mode's grid description and temporal history inputs (ignored by the march).
         if (froxel_volumetrics_pass_) {
@@ -3968,7 +4131,7 @@ private:
 
     /** @brief Points ui_composite_pass_ at the current scene image and world-UI layer. */
     void bind_composite_inputs_() {
-        // Startup-fixed source selection, the same caveat post_source_view/pre_fog_view_typed_
+        // Startup-fixed source selection, the same caveat post_source_view/pre_volumetrics_view_typed_
         // carry: flipping config_.tilt_shift_enabled without a pipeline rebuild would leave
         // this reading a target tilt_shift_pass_ never wrote this frame.
         ui_composite_pass_->set_base_image(
@@ -4036,12 +4199,25 @@ private:
         ubo.sky_zenith  = glm::vec4(config_.indirect.sky_zenith, 0.0f);
         ubo.sky_horizon = glm::vec4(config_.indirect.sky_horizon, 0.0f);
         ubo.sky_ground  = glm::vec4(config_.indirect.sky_ground, 0.0f);
+        fill_fog_block_(ubo);
 
         auto* dir = frame_scene_.dir_light;
         ubo.light_counts.x = dir ? 1 : 0;
         if (dir) {
             ubo.dir_direction = glm::vec4(dir->direction, dir->intensity);
-            ubo.dir_color     = glm::vec4(dir->color, 0.0f);
+            ubo.dir_color     = glm::vec4(dir_light_color_(*dir), 0.0f);
+        }
+
+        // The physical sky (sky_physical.glsl); all zero selects the gradient.
+        if (physical_sky_active()) {
+            const SkyFrameState& st = sky_state_;
+            ubo.sky_sun    = glm::vec4(st.sun_to, st.sun_disc_cos);
+            ubo.sky_moon   = glm::vec4(st.moon_to, st.moon_disc_cos);
+            // y: the fraction of the cloud target the march filled (0 = no clouds composited).
+            ubo.sky_params = glm::vec4(1.0f, st.clouds ? sky_quality_steps_().cloud_scale : 0.0f, st.star_visibility, st.sky_illuminance);
+            ubo.sky_extra  = glm::vec4(st.sun_disc_radiance, st.moon_disc_radiance, st.night_floor, st.time);
+        } else {
+            ubo.sky_params = glm::vec4(0.0f);
         }
         // Soft-shadow tuning shared by every calc_dir_shadow()/calc_local_shadow() call site.
         // Written UNCONDITIONALLY, not only when a directional light exists: .z (PCF taps) and
@@ -4286,19 +4462,6 @@ private:
     }
 
     /**
-     * @brief True when the global fog term is applied by volumetrics_pass_'s march
-     *        rather than by a separate fog_pass_ draw.
-     *
-     * Both effects are fullscreen passes over the whole HDR frame, and the second reads
-     * exactly what the first wrote -- so with both enabled the pair costs two full-resolution
-     * HDR passes to produce a result one pass can compute. The composite applies fog to its
-     * scene-colour sample before laying the march over it, which is arithmetically identical
-     * to the two-pass order, through the same gfx_fog_apply() call fog.frag makes (see its doc).
-     *
-     * Derived, not stored: both inputs are startup-fixed, so every caller re-deriving it
-     * agrees by construction, and there is no second copy to keep in sync.
-     */
-    /**
      * @brief True when this frame's record_scene_() would write a descriptor set: a Hi-Z /
      *        mip-chain pass whose sets don't yet hold the view it is about to be given. The
      *        views mirror the execute() calls in record_scene_() exactly; all are fixed for
@@ -4323,8 +4486,11 @@ private:
         return false;
     }
 
-    bool fog_merged_into_volumetrics_() const {
-        return config_.fog_enabled && config_.volumetrics_enabled;
+    /** @brief Whether this frame records motion blur: the runtime toggle, a non-zero shutter and
+     *         radius, a camera that has not opted out, and the normal image (or "lines" over it). */
+    bool motion_blur_active_(const FrameContext& ctx, DebugView view) const {
+        return config_.motion_blur && config_.motion_blur_intensity > 0.0f &&
+               (!ctx.cam || ctx.cam->motion_blur) && (view == DebugView::Off || view == DebugView::Lines);
     }
 
     /**
@@ -5418,6 +5584,8 @@ private:
     std::optional<LetterboxRect>   display_region_;
     /// See set_overlay_scene(); non-owning.
     coopa::scene::Scene*           overlay_scene_ = nullptr;
+    /// See set_overlay_layers(); non-owning, in draw order.
+    std::vector<coopa::scene::Scene*> overlay_layers_;
 
     coopa::gfx::engine::targets::GBufferTarget   gbuffer_target_;
     coopa::gfx::engine::targets::OffscreenTarget offscreen_target_; // lit + sky, pre-post, HDR
@@ -5437,7 +5605,6 @@ private:
     std::unique_ptr<coopa::gfx::engine::targets::OffscreenTarget> ui_world_target_;
     /// ui_world_target_'s last write had no canvases, so it already holds transparent black.
     bool ui_world_layer_clear_ = false;
-    coopa::gfx::engine::targets::OffscreenTarget fog_target_; // fog composite, pre-post, HDR
     coopa::gfx::engine::targets::OffscreenTarget underwater_target_; // UnderwaterPass output, HDR
     coopa::gfx::engine::targets::OffscreenTarget volumetrics_target_; // wind composite, after fog, pre-post, HDR
     coopa::gfx::engine::targets::OffscreenTarget volumetrics_march_target_; // reduced-res march: in-scatter + transmittance
@@ -5478,27 +5645,31 @@ private:
     std::vector<std::unique_ptr<coopa::gfx::pipeline::DescriptorSet>> light_sets_;
     uint32_t light_frame_ = 0;
 
-    coopa::gfx::engine::data::FogData fog_data_;
+    // Global fog over the opaque scene, drawn in place inside transparent_pass_'s render pass
+    // before translucency (see record_fog_()); forward shaders fog themselves. Its parameters
+    // ride in the light UBO (fill_fog_block_()).
     std::unique_ptr<coopa::gfx::engine::passes::FogPass> fog_pass_;
     std::unique_ptr<passes::UnderwaterPass> underwater_pass_;   // null when !underwater_enabled
     passes::UnderwaterPass::Params underwater_params_;           // filled in render()
     WaterFrameState water_state_;                                // set_water_state(), per frame
+    SkyFrameState sky_state_;                                    // set_sky_state(), per frame
     ParticleFrameState particle_state_;                          // set_particle_state(), per frame
     glm::vec4 particle_depth_{0.1f, 1000.0f, 1.0f, 0.0f};         ///< near, far, is_perspective -- render()
     bool warned_particles_need_transparency_ = false;
     /// Quads drawn inside transparent_pass_'s bracket (see record_transparent_()). Built with it.
     std::unique_ptr<passes::ParticlePass> particle_pass_;
+    std::unique_ptr<passes::GpuParticlePass> gpu_particle_pass_;   ///< `simulation: gpu` systems; null without compute.
     /// The white-texture material set untextured particle batches bind at set 3.
     coopa::gfx::engine::components::PBRMaterial particle_default_material_;
-    // Fixed source view fog_pass_ reads from -- chosen once from config_.ssr_enabled's startup
-    // value, same policy as pixel_stylize_pass_'s own binding (see that construction-time
-    // comment). Kept as a member (not a local) so pixel_stylize_pass_'s own construction, later
-    // in the ctor body, can fall back to it when fog is disabled.
-    coopa::gfx::TextureView pre_fog_view_typed_;
+    // The lit scene with fog and translucency composited in place (and the underwater look,
+    // when built) -- the first image the post chain reads. Chosen once from the startup toggles,
+    // same policy as pixel_stylize_pass_'s own binding. A member so later constructions in the
+    // ctor body can fall back to it when volumetrics is disabled.
+    coopa::gfx::TextureView pre_volumetrics_view_typed_;
 
-    // Volumetric wind -- the raymarched, moving, sparse counterpart to fog_pass_'s
-    // analytic everywhere-medium (see gfxcoopa's VolumetricsPass / gfx/volumetrics.glsl). Always
-    // constructed, runtime-gated on config_.volumetrics_enabled, same policy as fog_pass_.
+    // Local volumes -- the raymarched/froxel, bounded counterpart to the global fog's analytic
+    // everywhere-medium (see gfxcoopa's VolumetricsPass / gfx/volumetrics.glsl). Constructed
+    // when built, runtime-gated on config_.volumetrics_enabled.
     coopa::gfx::engine::data::VolumetricsData volumetrics_data_;
     std::unique_ptr<coopa::gfx::engine::passes::VolumetricsPass> volumetrics_pass_;
     std::unique_ptr<coopa::gfx::engine::passes::FroxelVolumetricsPass> froxel_volumetrics_pass_;
@@ -5549,6 +5720,11 @@ private:
     ContactShadowKnobs                                           contact_shadow_knobs_{};
     /// contact_shadow_pass_'s output already holds the disabled-state clear (see record_scene_).
     bool                                                         contact_output_cleared_ = false;
+    /// The physical sky (render sky_model: physical): its LUTs and the cloud layer. Declared
+    /// before the extra set below, which binds their images.
+    std::unique_ptr<passes::SkyAtmospherePass>                   sky_atmosphere_pass_;
+    std::unique_ptr<passes::SkinningPass>                        skinning_pass_;   ///< null: CPU skinning
+    std::unique_ptr<passes::SkyCloudPass>                        sky_cloud_pass_;
     /// pixel_lighting_pass_'s extra set (set 4): contact_shadow_pass_'s resolved occlusion.
     /// Declared BEFORE pixel_lighting_pass_ so it outlives the pass holding it in its ExtraSets.
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout>   contact_extra_layout_;
@@ -5569,6 +5745,10 @@ private:
     // it is sized to the startup-fixed render_extent_, and a window resize only moves the
     // letterbox rect downstream.
     std::unique_ptr<coopa::gfx::engine::passes::DofPass> dof_pass_;
+    std::unique_ptr<passes::MotionBlurPass> motion_blur_pass_;
+    static constexpr float kMotionBlurMaxRadius1080 = 32.0f;   ///< Blur half-length ceiling, px at 1080p (scaled).
+    static constexpr int   kMotionBlurSamples       = 16;      ///< Gather samples per pixel.
+    uint64_t motion_blur_frames_ = 0;   ///< Frames motion_blur_pass_ was recorded in (motion_blur_frames()).
     // resolve_dof_focus_()'s object-focus smoothing state (see that method's own doc).
     // <= 0 means "unseeded" -- the first object-focus frame snaps to the resolved
     // depth rather than racking up from zero.

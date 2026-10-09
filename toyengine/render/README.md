@@ -30,11 +30,21 @@ changes push-constant contents is free to flip every frame.
 
 | Startup-fixed | Runtime |
 |---|---|
-| `ssr_enabled`, `ssgi_traced`, `ssao_enabled`, `transparency_enabled`, `refraction_enabled`, `fog_enabled`, `volumetrics_enabled`, `bloom_enabled`, `dof_enabled`, `tilt_shift_enabled`, `auto_exposure_enabled`, `grading_lut_path`, `aa_mode`, `world_ui_enabled`, `screen_ui_enabled`, and every resolution/capacity field | `sdf_enabled`, `shadows_enabled`, `sdf_shadows_enabled`, `shadow_pcss_enabled`, `contact_shadows_enabled`, `volumetrics_shadows_enabled`, `grading_enabled`, `ssr_reflect_transparent`, `debug_view`, and every numeric tunable |
+| `ssr_enabled`, `ssgi_traced`, `ssao_enabled`, `transparency_enabled`, `refraction_enabled`, `fog_enabled`, `volumetrics_enabled`, `bloom_enabled`, `dof_enabled`, `tilt_shift_enabled`, `auto_exposure_enabled`, `grading_lut_path`, `aa_mode`, `skinning`, `world_ui_enabled`, `screen_ui_enabled`, and every resolution/capacity field | `sdf_enabled`, `shadows_enabled`, `sdf_shadows_enabled`, `shadow_pcss_enabled`, `contact_shadows_enabled`, `volumetrics_shadows_enabled`, `grading_enabled`, `ssr_reflect_transparent`, `debug_view`, and every numeric tunable |
 
-`apply_live_config()` enforces the split: it restores any startup-fixed field the caller
-tried to change and names it in a warning, rather than accepting an edit that would
-silently do nothing.
+The list lives in one place, the `TOY_STARTUP_FIXED_FIELDS` X-macro at the top of
+`pixel_render_pipeline.h`. `apply_live_config()` enforces the split: it restores any
+startup-fixed field the caller tried to change and names it in a warning, rather than
+accepting an edit that would silently do nothing.
+
+Startup-fixed does not mean "needs an app restart". `PixelRenderPipeline::needs_rebuild()`
+detects a change to one of these fields, and the Engine then rebuilds the pipeline in place
+on the same device and swapchain (`Engine::rebuild_pipeline()`). It does this when a scene's
+`settings.render` or an editor edit changes one: `apply_scene_settings_()` queues the rebuild,
+and it runs at the top of the next tick, or after a short debounce for live editor edits.
+`Engine::restart_renderer()` forces a rebuild. A rebuild only applies the fields whose
+config-derived value changed, so code that sets `render_config()` at runtime keeps its
+values.
 
 ## Frame graph
 
@@ -42,6 +52,20 @@ Recorded in this order inside `Renderer::begin_frame()`'s `pre_pass_fn`; the `re
 is only the final 1:1 blit into the swapchain. `render()` delegates to three stages —
 `record_scene_()`, `record_post_chain_()` and `record_overlay_()` — which map onto the
 three groups below.
+
+**Compute pre-pass** (top of the command buffer, before `record_scene_()`):
+
+0. GPU skinning (`passes/skinning_pass.h`, GPU scope `skinning`), when `skinning: gpu` (the
+   default) and the device has compute. Each `SkinnedMeshRenderer` keeps a static bind-pose
+   SSBO (position, normal, tangent, UV, 4 joints, 4 weights) and a per-slot palette ring of
+   `inverse(owner_world) * bone_world * inverse_bind`; `Engine::upload_dynamic_meshes_()`
+   queues one `skin.comp` dispatch per mesh, and the pass uploads the palettes (after the slot's
+   fence wait) and records every dispatch behind one `compute_to_draw_barrier()`. The output is
+   the mesh's own per-slot dynamic vertex buffer, so shadows, the G-buffer, the local-shadow
+   atlas and surface vertex hooks draw it unchanged. Culling bounds come from the palette: each
+   bone's bind-pose box of its influenced vertices, transformed and unioned. Motion vectors stay
+   per object (a skinned mesh's surface motion counts as scene motion, but limbs get no
+   per-vertex velocity). `skinning: cpu` (or no compute) keeps the CPU loop + `update_vertices()`.
 
 **Scene** (`record_scene_()`):
 
@@ -65,8 +89,21 @@ three groups below.
 6. Contact shadows: the screen-space march into its own buffer, then its temporal resolve
    (`contact_shadow_pass.h`). Runs before lighting, which samples the result.
 7. SSAO, or `invalidate_history()` when it is off.
-8. Deferred lighting (`pixel_lighting.frag`, which also draws the procedural sky at
-   background pixels) → `offscreen_target_` (HDR; the sky-based indirect term can exceed 1.0
+7b. Physical sky, only while `sky_model: physical` (`record_physical_sky_()`, GPU scopes `sky`
+   and `clouds`): the transmittance (256×64) and multiple-scattering (32×32) tables when the
+   atmosphere's media changed, the sky-view table (192×108) every frame from the sun and moon
+   (Hillaire 2020, `passes/sky_atmosphere_pass.h`), and with `clouds` the low-resolution
+   cloud-layer raymarch (`passes/sky_cloud_pass.h`: ~1/5 res on low, 1/4 on medium and high,
+   1/2 on ultra, the fraction carried to the upsample in `LightUBO::sky_params.y`; its 2D shape
+   map and 64³ tiling 3D noise atlas are baked once at startup). Every target is built and bound at
+   construction, so both toggles are live; with the gradient sky nothing records. The engine's
+   CPU twin of the atmosphere (`toyengine/weather/atmosphere_model.h`) writes `sky_zenith` /
+   `sky_horizon` / `sky_ground` and tints the directional light (`SkyFrameState::light_tint`,
+   applied wherever the renderer reads the light's colour), so every gradient consumer —
+   ambient, SSR fallback, fog, forward-shaded water and glass, particles — matches the drawn sky.
+8. Deferred lighting (`pixel_lighting.frag`, which also draws the sky at background pixels:
+   the gradient, or with the physical sky `sky_physical.glsl`'s sky-view lookup, sun and moon
+   discs, stars and the upsampled clouds) → `offscreen_target_` (HDR; the sky-based indirect term can exceed 1.0
    whatever the toggles say). Always drawn — `debug_view`'s channel views replace step 16's
    final draw instead, reading the G-buffer/lighting/SSAO/SSR sources directly rather than
    swapping out this step.
@@ -81,9 +118,16 @@ three groups below.
    trace (`ssgi.frag`) through a second resolve+denoise chain inside `SsrPass`, rather than the
    single normal-offset mip tap the composite falls back to. It runs at the SSR trace
    resolution divided by `ssgi_resolution_scale` (2 at Low/Medium `ssgi_quality`).
-10. Refraction's own scene-colour chain, when refraction is on and a BLEND mesh is in view
+10. Global fog over the opaque scene and sky (`record_fog_()`): gfxcoopa's `FogPass` blends
+   premultiplied fog in place, drawn inside `TransparentPass`'s render pass (it loads the HDR
+   image). Exponential height fog (`gfx/fog.glsl`), its parameters in the light UBO's fog block.
+   Translucency is fogged by the forward shaders themselves at their own distance (step 12), the
+   Unreal/HDRP split, so water, glass and particles are never fogged at the distance of whatever
+   lies behind them. With the camera under water only the part of each ray above the surface is
+   fogged; the in-water part belongs to the underwater pass.
+11. Refraction's own scene-colour chain, when refraction is on and a BLEND mesh is in view
    (`refraction_this_frame_`; nothing else samples it, so a frame without one skips the build).
-11. Forward transparent pass: BLEND meshes, BLEND SDFs and particle batches merged into one
+12. Forward transparent pass: BLEND meshes, BLEND SDFs and particle batches merged into one
    back-to-front list, drawn in place into the SSR composite. BLEND *meshes* additionally
    refract; BLEND SDFs never do. Each particle batch is one instanced draw through
    `ParticlePass` (see `passes/particle_pass.h` and `toyengine/particles/`). Mesh-mode particles
@@ -91,12 +135,9 @@ three groups below.
 
 **Post** (`record_post_chain_()`):
 
-12. Fog (analytic, global) → `fog_target_`. **Skipped when volumetrics is also on**: the two
-    are both fullscreen passes over the whole HDR frame and the second reads exactly what the
-    first wrote, so `volumetrics_composite.frag` applies the global fog term itself through the same
-    `gfx_fog_apply()` call `fog.frag` makes — one pass instead of two, bit-identical bar the
-    half-float round-trip it skips. See `fog_merged_into_volumetrics_()`.
-13. Volumetrics (raymarched local `VolumeComponent`s) → `volumetrics_target_`. The march
+13. The underwater look (`UnderwaterPass` → `underwater_target_`, a copy unless the camera is
+    below a water surface), then volumetrics (raymarched local `VolumeComponent`s) →
+    `volumetrics_target_`. The march
     shadows its sun in-scatter against the directional map (light shafts) and scatters the
     nearest point/spot lights into each volume.
 14. Depth of field, at render resolution. `debug_view: dof` swaps its composite to the signed

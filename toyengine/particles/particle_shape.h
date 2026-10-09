@@ -208,6 +208,25 @@ public:
         return s;
     }
 
+    /**
+     * @brief The faces for the GPU emitter (particles_emit.comp): 8 vec4 per triangle -- p0
+     *        (w = cumulative area, the CDF), p1, p2, n0, n1, n2, face normal, tangent.
+     */
+    std::vector<glm::vec4> export_faces() const {
+        std::vector<glm::vec4> out;
+        out.reserve(tris_.size() * 8);
+        for (size_t i = 0; i < tris_.size(); ++i) {
+            const Tri& t = tris_[i];
+            out.emplace_back(t.p[0], face_cdf_[i]);
+            out.emplace_back(t.p[1], 0.0f);
+            out.emplace_back(t.p[2], 0.0f);
+            for (int k = 0; k < 3; ++k) out.emplace_back(t.n[k], 0.0f);
+            out.emplace_back(t.face_n, 0.0f);
+            out.emplace_back(t.tangent, 0.0f);
+        }
+        return out;
+    }
+
 private:
     struct Tri {
         glm::vec3 p[3];

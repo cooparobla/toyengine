@@ -125,6 +125,8 @@
         ctx.menu_separator();
         if (ctx.menu_item("Rename Active Item", "F2", nullptr, ok && doc_.primary() != 0)) { rename_id_ = doc_.primary(); rename_frames_ = 0; }
         draw_theme_menu_(ctx);
+        if (ctx.menu_item("Project Settings...", "", nullptr, true, I::Gear)) open_project_settings_("General");
+        ctx.tooltip("Project Settings\nThe project's default render, output and physics settings (assets/config.yaml)");
         if (ctx.menu_item("Preferences...", "", nullptr, true, I::Gear)) pending_modal_ = "Controls";
         ctx.end_menu();
     }
@@ -163,9 +165,14 @@
         using I = imm::Icon;
         if (!ctx.begin_menu("Render")) return;
         if (ctx.menu_item("Render Image", "F12", nullptr, true, I::Render)) render_image_();
-        if (ctx.menu_item("Restart Renderer", "", nullptr, true, I::Restart)) restart_ = true;
+        if (ctx.menu_item("Rebuild Renderer", "", nullptr, true, I::Restart)) rebuild_renderer_();
+        ctx.tooltip("Rebuild Renderer\nRecreates the render pipeline in place from the current settings; the window stays open");
+        if (ctx.menu_item("Restart Editor Engine...", "", nullptr, true, I::Restart)) restart_ = true;
+        ctx.tooltip("Restart Editor Engine\nRecreates the whole engine and window (open documents are kept). "
+                    "Only needed for settings baked in at start-up, such as Texel AA");
         ctx.menu_separator();
-        if (ctx.menu_item("Render Settings", "", nullptr, true, I::Render)) prop_tab_ = PropTab::Render;
+        if (ctx.menu_item("Project Settings...", "", nullptr, true, I::Gear)) open_project_settings_("General");
+        if (ctx.menu_item("Scene Render Settings", "", nullptr, true, I::Render)) prop_tab_ = PropTab::Render;
         if (ctx.menu_item("World Settings", "", nullptr, true, I::World)) prop_tab_ = PropTab::World;
         ctx.end_menu();
     }

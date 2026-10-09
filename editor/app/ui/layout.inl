@@ -143,7 +143,7 @@
         if (type == "SpotLight") return I::SpotLight;
         if (type == "EnvironmentLight" || type == "ReflectionProbe" || type == "GiProbeVolume") return I::EnvLight;
         if (type == "Rigidbody") return I::Rigidbody;
-        if (type.find("Collider") != std::string::npos || type == "HingeJoint") return I::Collider;
+        if (type.find("Collider") != std::string::npos || type.find("Joint") != std::string::npos || type == "Ragdoll") return I::Collider;
         if (type == "Cloth") return I::Physics;
         if (type == "Terrain") return I::Terrain;
         if (type == "SdfRenderer" || type == "SdfShape") return I::Sphere;

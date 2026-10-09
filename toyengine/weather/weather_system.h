@@ -316,6 +316,14 @@ public:
     /** @brief True while blending toward condition(). */
     bool transitioning() const { return t_ < 1.0f; }
 
+    /**
+     * @brief The renderer draws the physical sky (render sky_model: physical; Engine sets it each
+     *        frame). The sun then shines white from above the atmosphere and the renderer colours
+     *        it by the air it crosses (atmosphere_model.h), instead of the hand-tuned sunrise ramp.
+     */
+    void set_physical_sky(bool on) { physical_sky_ = on; }
+    bool physical_sky() const { return physical_sky_; }
+
     /** @brief Edit mode only: lets the clock and the schedule run as they would in play. */
     void set_editor_preview(bool run) { editor_preview_ = run; }
     bool editor_preview() const { return editor_preview_; }
@@ -560,7 +568,7 @@ private:
         }
         const ProfileMix& m = current_;
         driven_sun_->direction = sky_.light_dir;
-        driven_sun_->color = sky_.light_color;
+        driven_sun_->color = (physical_sky_ && !sky_.moon_light) ? glm::vec3(1.0f) : sky_.light_color;
         // Clouds take the edge off direct light on top of the condition's own multiplier.
         driven_sun_->intensity = sky_.light_intensity * std::max(0.0f, m.sun) * (1.0f + 1.5f * state_.lightning_flash);
     }
@@ -813,6 +821,7 @@ private:
     bool clock_paused_ = false;
     bool editor_preview_ = false;
     bool preview_effects_ = false;
+    bool physical_sky_ = false;   ///< See set_physical_sky().
     SkyFrame sky_;
 
     std::string target_;

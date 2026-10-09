@@ -205,7 +205,7 @@ target_link_libraries(toyengine_tests PRIVATE toyengine::engine)
 # roughly the time of its slowest group. It also means `ctest -R toyengine_math` is an
 # instant, device-free check a dev can run on every save. See test.cpp's file doc for
 # the argument forms the binary accepts.
-foreach(_toy_test_group math config scene ui world water particles weather rig yaml_io runtime audio render_pixel render_ui render_material render_cloth render_terrain render_water render_particles render_weather render_surface render_rig editor_host)
+foreach(_toy_test_group math config scene ui world water particles weather rig yaml_io runtime audio render_pixel render_ui render_material render_cloth render_terrain render_water render_particles render_weather render_surface render_rig render_scene editor_host)
     add_test(NAME toyengine_${_toy_test_group}
              COMMAND toyengine_tests --group ${_toy_test_group})
 endforeach()
@@ -216,7 +216,7 @@ endforeach()
 set_tests_properties(toyengine_math toyengine_config toyengine_scene toyengine_ui toyengine_world toyengine_particles toyengine_weather toyengine_yaml_io
                      toyengine_runtime toyengine_audio PROPERTIES TIMEOUT 60)
 set_tests_properties(toyengine_render_pixel toyengine_render_ui toyengine_render_material
-                     toyengine_render_cloth toyengine_render_terrain toyengine_render_particles toyengine_render_weather toyengine_render_surface toyengine_editor_host PROPERTIES TIMEOUT 300)
+                     toyengine_render_cloth toyengine_render_terrain toyengine_render_particles toyengine_render_weather toyengine_render_surface toyengine_render_scene toyengine_editor_host PROPERTIES TIMEOUT 300)
 
 # --- Editor ---
 # toyengine_editor (defined by toyengine_add_project() above) embeds the same Engine, so its

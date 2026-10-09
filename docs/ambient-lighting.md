@@ -63,7 +63,7 @@ brightness or hue than the others by accident:
    - forward transparent meshes, SDF forward and particles — the same
      `LightUBO` fields
    - SSR composite — `SsrPass::CompositePushConstants`
-   - fog (when `fog_enabled`) — `FogUBO`'s trailing `sky_*` fields
+   - fog (when `fog_enabled`) — the same `LightUBO` `sky_*` fields (its fog block sits beside them)
 
 The shading math itself (`assets/shaders/pixel_lighting.frag`, duplicated for
 the forward and SDF paths):

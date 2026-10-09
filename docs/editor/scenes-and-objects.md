@@ -147,8 +147,8 @@ Some notes on the fields:
 - A MeshRenderer's material is set on the **Materials** tab. The **Material...** button takes
   you there (see [Materials and textures](materials-and-textures.md#assign-a-material-to-an-object)).
 
-Physics components (Rigidbody and the colliders) have their own **Physics** tab, which works
-the same way with an **Add Physics Component** button.
+Physics components (Rigidbody, the colliders, the joints and Ragdoll) have their own
+**Physics** tab, which works the same way with an **Add Physics Component** button.
 
 ### Components you can add
 
@@ -156,16 +156,22 @@ the same way with an **Add Physics Component** button.
 |---|---|
 | Rendering | MeshRenderer, SkinnedMeshRenderer, Camera, SdfRenderer, SdfShape |
 | Lighting | DirectionalLight, PointLight, SpotLight, EnvironmentLight, ReflectionProbe |
-| Physics | Rigidbody, BoxCollider, SphereCollider, CapsuleCollider, MeshCollider |
+| Physics | Rigidbody, BoxCollider, SphereCollider, CapsuleCollider, MeshCollider, HingeJoint, BallJoint, ConeTwistJoint, Ragdoll |
 | Water | WaterBody, Buoyancy |
 | Audio | AudioSource, AudioListener, VolumeBinding (see [Sounds](#add-sound)) |
-| Gameplay | CameraController, KinematicMover, FreeMover, KinematicController |
+| Gameplay | CameraController, CharacterController, CharacterAnimDriver, SceneLink, SaveId, KinematicMover, FreeMover, KinematicController |
 | World | Terrain |
-| Animation | Animator (see [Animation](animation.md#make-an-object-animatable)) |
+| Animation | Animator, TwoBoneIK, LookAtIK, FootIK (see [Animation](animation.md#make-an-object-animatable)) |
 | UI groups | The game UI components (see [UI designer](ui-designer.md#element-settings)) |
 
 An object can have more than one PointLight, SpotLight, ReflectionProbe, SdfShape or collider,
 but only one of each other component.
+
+A **SaveId** marks an object whose state the game keeps in its save files. Each one needs an
+**Id** no other object in the scene uses, so the editor fills one in for you when you add the
+component (the object's name plus a short random code, such as `chest_3f9a1c`), and gives
+every copy a new one when you duplicate the object. You can type your own id instead, such as
+`player`; leaving it empty uses the object's place in the Hierarchy.
 
 ## Add sound
 

@@ -67,6 +67,7 @@ layout(set = 6, binding = 0) uniform sampler2D u_scene_color;
 #include "indirect_hooks.glsl"
 #include "pixel_forward_shading.glsl"
 #include <gfx/sdf_scene_body.glsl>
+#include <gfx/fog.glsl>
 
 layout(location = 0) out vec4 out_color;
 
@@ -125,4 +126,10 @@ void main() {
     p.ssr_prev_frame       = sdf_globals.ssr_mip.y;
 
     out_color = gfx_pixel_forward_shade(hit.pos, N, camera.camera_pos, camera.view, camera.proj, mat, p);
+
+    // Global fog at the hit's own distance; the opaque scene behind was fogged by FogPass.
+    float dist = length(hit.pos - camera.camera_pos);
+    vec4  fog  = gfx_fog_eval(camera.camera_pos, (hit.pos - camera.camera_pos) / max(dist, 1e-6), dist, false,
+                              lights.fog, lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb);
+    out_color.rgb = gfx_fog_composite(out_color.rgb, fog);
 }

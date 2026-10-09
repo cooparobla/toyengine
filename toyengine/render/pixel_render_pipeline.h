@@ -939,6 +939,9 @@ private:
         /// Per item: the renderer's world matrix LAST frame (== world_matrices[i] when it has
         /// none), streamed as InstanceData::prev_model for the G-buffer's motion vectors.
         std::vector<glm::mat4>   prev_world_matrices;
+        /// Per item: the pose its snow pattern is laid out in (data::InstanceData::snow_anchor):
+        /// world_matrices[i] until the renderer first moves, then frozen (see snow_anchor_).
+        std::vector<glm::mat4>   snow_anchors;
         /// Per item: its surface moved since last frame -- the world matrix changed, the mesh
         /// is dynamic (cloth, CPU skinning: re-uploaded vertices under a fixed matrix), or it
         /// is a particle batch. Drives scene_moved_, which keeps the temporal freeze off.
@@ -2819,6 +2822,7 @@ private:
         }
         out.world_matrices.assign(n, glm::mat4(1.0f));
         out.prev_world_matrices.assign(n, glm::mat4(1.0f));
+        out.snow_anchors.assign(n, glm::mat4(1.0f));
         out.moved.assign(n, 0);
         out.bounds.assign(n, WorldBounds{});
         out.valid.assign(n, 0);
@@ -2868,7 +2872,14 @@ private:
                 out.prev_world_matrices[i] = (pit != prev_world_.end()) ? pit->second : out.world_matrices[i];
                 // A dynamic mesh re-uploads its vertices every frame under a fixed matrix
                 // (cloth, CPU skinning): its surface moves even though prev == cur.
-                out.moved[i] = (matrix_moved(out.prev_world_matrices[i], out.world_matrices[i]) || mesh->is_dynamic()) ? 1 : 0;
+                const bool transform_moved = matrix_moved(out.prev_world_matrices[i], out.world_matrices[i]);
+                out.moved[i] = (transform_moved || mesh->is_dynamic()) ? 1 : 0;
+                // Snow anchor: frozen once the transform has moved (the pose from just before it
+                // first did, so the pattern it showed at rest carries on with it).
+                const auto ait = snow_anchor_.find(mr);
+                out.snow_anchors[i] = ait != snow_anchor_.end() ? ait->second
+                                    : transform_moved           ? out.prev_world_matrices[i]
+                                                                : out.world_matrices[i];
             }
         };
         if (should_parallelize_(n)) {
@@ -2882,6 +2893,7 @@ private:
         // record_scene_()'s stillness block) must stay off while it did.
         {
             std::unordered_map<const MeshRenderer*, glm::mat4> next_prev_world;
+            std::unordered_map<const MeshRenderer*, glm::mat4> next_snow_anchor;
             std::unordered_map<const MeshRenderer*, uint32_t>  next_still;
             next_prev_world.reserve(prev_world_.size() + 16);
             next_still.reserve(still_frames_.size() + 16);
@@ -2892,6 +2904,10 @@ private:
                 if (out.multi[i]) continue;
                 MeshRenderer* mr = out.renderers[i];
                 next_prev_world[mr] = out.world_matrices[i];
+                // Keep a frozen anchor; freeze one the frame the transform first moves.
+                if (snow_anchor_.count(mr) || matrix_moved(out.prev_world_matrices[i], out.world_matrices[i])) {
+                    next_snow_anchor[mr] = out.snow_anchors[i];
+                }
                 // Frames without moving -- what makes a caster eligible for the local-shadow
                 // static cache (see the local views below).
                 const auto it = still_frames_.find(mr);
@@ -2899,6 +2915,7 @@ private:
                 next_still[mr] = out.moved[i] ? 0u : std::min(prev + 1u, 1u << 20);
             }
             prev_world_.swap(next_prev_world);
+            snow_anchor_.swap(next_snow_anchor);
             still_frames_.swap(next_still);
             scene_moved_ = any_moved;
         }
@@ -3009,7 +3026,7 @@ private:
                         for (uint32_t m = 0; m < out.multi_count[it]; ++m) instance_stream_.add(out.multi[it][m]);
                         added += out.multi_count[it];
                     } else {
-                        instance_stream_.add(out.world_matrices[it], out.prev_world_matrices[it]);
+                        instance_stream_.add(out.world_matrices[it], out.prev_world_matrices[it], out.snow_anchors[it]);
                         ++added;
                     }
                 }
@@ -3038,7 +3055,7 @@ private:
             const Frustum f = Frustum::from_matrix(camera_vp);
             for (size_t i = 0; i < n; ++i) {
                 if (out.valid[i] && blended(i) && f.intersects(out.bounds[i])) {
-                    out.instance_idx[i] = instance_stream_.add(out.world_matrices[i], out.prev_world_matrices[i]);
+                    out.instance_idx[i] = instance_stream_.add(out.world_matrices[i], out.prev_world_matrices[i], out.snow_anchors[i]);
                     out.has_blend_mesh  = true;
                 }
             }
@@ -4574,6 +4591,12 @@ private:
     /// writes per-object motion vectors. A renderer absent here (new, or not drawn last
     /// frame) streams prev == current, i.e. zero object motion.
     std::unordered_map<const coopa::gfx::engine::components::MeshRenderer*, glm::mat4> prev_world_;
+    /// Frozen snow anchors (data::InstanceData::snow_anchor): one per renderer whose transform
+    /// has moved since it appeared -- its pose from just before it first moved, kept while the
+    /// renderer exists, so its lying-snow pattern travels with it rather than sliding under a
+    /// world-fixed one (which TAA smears into trails). A renderer absent here has never moved and
+    /// anchors at its current pose, keeping the world's snow one continuous pattern.
+    std::unordered_map<const coopa::gfx::engine::components::MeshRenderer*, glm::mat4> snow_anchor_;
 
     MeshDrawStats frame_stats_;     ///< This frame's mesh draw counts (see mesh_draw_stats_summary()).
     MeshDrawStats stats_total_;     ///< Summed over stats_frames_ frames.

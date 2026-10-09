@@ -35,6 +35,7 @@ layout(location = 3) in vec4 tv_tangent_os[];
 layout(location = 4) in vec3 tv_position_ws[];
 layout(location = 5) in mat4 tv_model[];
 layout(location = 9) in mat4 tv_prev_model[];
+layout(location = 13) in mat4 tv_snow_anchor[];
 
 layout(location = 0) out vec3 tc_position_os[];
 layout(location = 1) out vec3 tc_normal_os[];
@@ -42,6 +43,7 @@ layout(location = 2) out vec2 tc_uv[];
 layout(location = 3) out vec4 tc_tangent_os[];
 layout(location = 4) patch out mat4 tc_model;        // 4-7
 layout(location = 8) patch out mat4 tc_prev_model;   // 8-11
+layout(location = 12) patch out mat4 tc_snow_anchor; // 12-15
 
 #ifdef GFX_TESS_CLIP
 // True if the sphere (c, r) lies wholly outside one of the view-projection's frustum planes
@@ -65,6 +67,7 @@ void main() {
     if (gl_InvocationID == 0) {
         tc_model      = tv_model[0];
         tc_prev_model = tv_prev_model[0];
+        tc_snow_anchor = tv_snow_anchor[0];
 
         uvec2 packed_params = GFX_TESS_PACKED;
         GfxTessParams t = gfx_unpack_tess(packed_params.x, packed_params.y);

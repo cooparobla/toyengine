@@ -34,6 +34,7 @@ scene:
       north_offset: 20
       drive_sun: true
       sun_intensity: 1.3
+      snow_patch_style: hard     # snow settles in round, crisp-edged (toon) patches
       condition: rain
       schedule: random
       ground_height: 0.0

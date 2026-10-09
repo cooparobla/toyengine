@@ -44,22 +44,41 @@ float gfx_snow_patches(vec2 xy) {
 }
 
 /**
- * How much snow lies at world point p with geometric (unbent, front-facing) normal geo_n: 0..1.
- * `cover` is the weather's lying snow.
+ * The 2D coordinates the patch pattern is looked up at, from the G-buffer's snow-pattern space
+ * (a point in the instance's snow anchor pose and the world's up direction there -- see
+ * gfx/surface/gbuffer_vs.glsl): the anchor-space position projected onto the plane facing that
+ * up, picking the two axes most across it. For anything that has not moved, up is +Z and this is
+ * plain world xy -- one continuous pattern over the whole world. For a moved object it is fixed
+ * to the object, so its snow rides along with it (a pattern fixed in the world would slide over
+ * it, which TAA smears into a trail); tipped onto a side, its new top uses the matching axes.
  */
-float gfx_snow_amount(vec3 p, vec3 geo_n, float cover) {
+vec2 gfx_snow_pattern_xy(vec3 anchor_pos, vec3 anchor_up) {
+    vec3 a = abs(anchor_up);
+    if (a.z >= a.x && a.z >= a.y) return anchor_pos.xy;
+    return a.x >= a.y ? anchor_pos.yz : anchor_pos.xz;
+}
+
+/**
+ * How much snow lies at world point p with geometric (unbent, front-facing) normal geo_n: 0..1.
+ * `cover` is the weather's lying snow. Facing up and open sky are tested in WORLD space (p,
+ * geo_n); the patch pattern is looked up at `pattern_xy` (gfx_snow_pattern_xy()).
+ */
+float gfx_snow_amount(vec3 p, vec2 pattern_xy, vec3 geo_n, float cover) {
     if (cover <= 0.0) return 0.0;
     if (gfx_world.snow_style.x > 0.5) {
-        // Hard patches. The field and its screen derivative are taken before any per-pixel
-        // branch, so fwidth() sees all four quad lanes.
-        float field = gfx_snow_blobs(p.xy, gfx_world.snow_style.y);
-        float w = max(fwidth(field), 1e-4);
+        // Hard patches. The world-xy screen derivatives are taken before any per-pixel branch;
+        // the edge width then comes from the field's analytic gradient (gfx_snow_patch_edge), so
+        // the pattern is only evaluated where it can matter.
+        vec2 dpdx = dFdx(pattern_xy), dpdy = dFdy(pattern_xy);
         float up = smoothstep(mix(0.85, 0.45, cover), mix(0.95, 0.65, cover), geo_n.z);
+        if (up <= 0.0) return 0.0;
         float open = gfx_world_open_sky(p + vec3(0.0, 0.0, 0.35 + 0.35 * gfx_world.occl.z), 0.5);
         float receptive = up * open;
         if (receptive <= 0.0) return 0.0;
-        float v = field - (1.05 - 1.15 * cover) - (1.0 - receptive) * 1.5;   // gfx_snow_patch_value()
-        return clamp(v / w + 0.5, 0.0, 1.0);
+        if (gfx_snow_patch_saturated(cover, receptive)) return 1.0;
+        vec3 field = gfx_snow_blobs_grad(pattern_xy, gfx_world.snow_style.y);
+        float v = gfx_snow_patch_value_from_field(field.x, cover, receptive);
+        return gfx_snow_patch_edge(v, field.yz, dpdx, dpdy);
     }
     // Up-facing: flat ground takes it first; steeper faces as the cover deepens.
     float up = smoothstep(mix(0.85, 0.45, cover), mix(0.95, 0.65, cover), geo_n.z);
@@ -69,18 +88,18 @@ float gfx_snow_amount(vec3 p, vec3 geo_n, float cover) {
     float receptive = up * open;
     if (receptive <= 0.0) return 0.0;
     // Patches: the noise threshold drops with cover, so drifts appear, then join up.
-    float n = gfx_snow_patches(p.xy);
+    float n = gfx_snow_patches(pattern_xy);
     float edge = 1.0 - cover * 1.25;
     float patches = smoothstep(edge - 0.06, edge + 0.06, n * mix(0.85, 1.0, receptive));
     return patches * receptive;
 }
 
 /// Lays the snow on a finished surface. geo_n: the geometric world normal (front-facing).
-#define gfx_snow_apply(s, geo_n)                                                                  \
+#define gfx_snow_apply(s, geo_n, pattern_xy)                                                      \
     {                                                                                              \
-        float gfx_snow_a_ = gfx_snow_amount((s).position_ws, (geo_n), gfx_world.snow.x);           \
+        float gfx_snow_a_ = gfx_snow_amount((s).position_ws, (pattern_xy), (geo_n), gfx_world.snow.x); \
         if (gfx_snow_a_ > 0.0) {                                                                   \
-            float gfx_snow_sparkle_ = gfx_snow_hash_(floor((s).position_ws.xy * 40.0)) * 0.06;       \
+            float gfx_snow_sparkle_ = gfx_snow_hash_(floor((pattern_xy) * 40.0)) * 0.06;             \
             (s).albedo    = mix((s).albedo, GFX_SNOW_ALBEDO + gfx_snow_sparkle_, gfx_snow_a_);      \
             (s).roughness = mix((s).roughness, 0.8, gfx_snow_a_);                                  \
             (s).metallic  = mix((s).metallic, 0.0, gfx_snow_a_);                                   \

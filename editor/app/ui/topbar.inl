@@ -127,7 +127,8 @@
         draw_theme_menu_(ctx);
         if (ctx.menu_item("Project Settings...", "", nullptr, true, I::Gear)) open_project_settings_("General");
         ctx.tooltip("Project Settings\nThe project's default render, output and physics settings (assets/config.yaml)");
-        if (ctx.menu_item("Preferences...", "", nullptr, true, I::Gear)) pending_modal_ = "Controls";
+        if (ctx.menu_item("Preferences...", "", nullptr, true, I::Gear)) open_preferences();
+        ctx.tooltip("Preferences\nYour editor settings: theme, interface scale, navigation, snapping, keymap");
         ctx.end_menu();
     }
 

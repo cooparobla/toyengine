@@ -2987,6 +2987,92 @@ struct InputDriver {
 };
 
 /** @brief Play mode: the game runs unfocused until the viewer is clicked; Esc releases, play continues. */
+/**
+ * @brief The viewport header's Colliders toggle: off by default; on, it draws every collider
+ *        (edit and play); "Selected + Children" draws just the selection's and its children's.
+ */
+ObjectId object_named(EditorApp& app, const std::string& name);   // defined with the scene tests
+
+void test_editor_collider_display() {
+    setenv("FIXED_DT", "0", 1);
+    setenv("HOME", tmp_root().c_str(), 1);
+    const fs::path root = fresh_dir("collider_display_project");
+    Project project = Project::create(root);
+    const fs::path scene_file = project.assets() / "scenes" / "colliders" / "scene.yaml";
+    fs::create_directories(scene_file.parent_path());
+    write_text(scene_file,
+        "format: blender\n"
+        "scene:\n"
+        "  scene_name: colliders\n"
+        "  root_objects:\n"
+        "    - name: crate\n"
+        "      active: true\n"
+        "      components:\n"
+        "        - {type: Transform, position: {x: 0.0, y: 0.0, z: 1.0}}\n"
+        "        - {type: BoxCollider, size: {x: 1.0, y: 2.0, z: 1.0}}\n"
+        "      children:\n"
+        "        - name: ball\n"
+        "          active: true\n"
+        "          components:\n"
+        "            - {type: Transform, position: {x: 2.0, y: 0.0, z: 0.0}}\n"
+        "            - {type: SphereCollider, radius: 0.5}\n"
+        "          children: []\n"
+        "    - name: trigger_pill\n"
+        "      active: true\n"
+        "      components:\n"
+        "        - {type: Transform, position: {x: -3.0, y: 0.0, z: 1.0}}\n"
+        "        - {type: CapsuleCollider, radius: 0.3, height: 1.5, is_trigger: true}\n"
+        "      children: []\n");
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    tick(engine, 4);
+    expect(app.open_scene(scene_file), "colliders: the scene opens");
+    tick(engine, 3);
+    expect(!app.show_colliders() && app.collider_lines_drawn() == 0, "colliders: off by default");
+
+    // The header toggle, clicked where it is drawn.
+    InputDriver in{engine, std::max(1.0f, engine.display_scale())};
+    const auto btn = app.test_rect("colliders");
+    expect(btn.has_value(), "colliders: the toggle is in the viewport header");
+    if (!btn) return;
+    in.click(btn->center());
+    tick(engine, 2);
+    const size_t all = app.collider_lines_drawn();
+    expect(app.show_colliders() && all > 0, "colliders: the toggle draws them (" + std::to_string(all) + " lines)");
+
+    // Selected + children: the crate brings its child ball; the trigger pill alone is the rest.
+    app.set_colliders_selected_only(true);
+    const ObjectId crate = object_named(app, "crate"), pill = object_named(app, "trigger_pill");
+    expect(crate && pill, "colliders: the objects are in the scene");
+    app.document().select(crate, false);
+    tick(engine, 2);
+    const size_t crate_and_child = app.collider_lines_drawn();
+    app.document().select(pill, false);
+    tick(engine, 2);
+    const size_t pill_only = app.collider_lines_drawn();
+    expect(crate_and_child > 0 && pill_only > 0 && crate_and_child + pill_only == all,
+           "colliders: the selection's and its children's only (" + std::to_string(crate_and_child) + " + " +
+               std::to_string(pill_only) + " of " + std::to_string(all) + ")");
+    app.document().clear_selection();
+    tick(engine, 2);
+    expect(app.collider_lines_drawn() == 0, "colliders: nothing selected, nothing drawn");
+
+    // While playing: the play scene's colliders, the selection found in it.
+    app.document().select(crate, false);
+    app.play();
+    tick(engine, 4);
+    expect(app.playing() && app.collider_lines_drawn() == crate_and_child, "colliders: the selection's in play too");
+    app.set_colliders_selected_only(false);
+    tick(engine, 2);
+    expect(app.collider_lines_drawn() == all, "colliders: every collider of the play scene");
+    app.stop();
+    tick(engine, 2);
+
+    in.click(btn->center());
+    tick(engine, 2);
+    expect(!app.show_colliders() && app.collider_lines_drawn() == 0, "colliders: the toggle turns them off again");
+}
+
 /** @brief Play mode shows the game: a selection made before Play draws no outline in it. */
 void test_editor_play_hides_selection_outline() {
     setenv("FIXED_DT", "0", 1);
@@ -5051,6 +5137,78 @@ void test_editor_scene_feature_override() {
 }
 
 /**
+ * @brief Edit > Preferences: a real settings window. Rows apply at once (the camera's orbit
+ *        speed, the wheel direction) and land in ~/.toyengine_editor.yaml; Help > Controls
+ *        shows the keymap table.
+ */
+void test_editor_preferences() {
+    setenv("FIXED_DT", "0.016666", 1);
+    unsetenv("NO_INPUT");
+    setenv("HOME", tmp_root().c_str(), 1);
+    fs::remove(Project::prefs_path());
+    const fs::path root = fresh_dir("prefs_project");
+    Project project = Project::create(root);
+    toy::core::Engine engine(shell_config(project), shell_options(project));
+    EditorApp app(engine, project);
+    InputDriver in{engine, std::max(1.0f, engine.display_scale())};
+    tick(engine, 4);
+
+    app.open_preferences();
+    app.clear_test_rects();
+    tick(engine, 3);
+    expect(app.ui().is_popup_open("Preferences"), "Edit > Preferences opens its window");
+    expect(app.test_rect("prefs:Navigation").has_value() && app.test_rect("pref_theme:blender_light").has_value(),
+           "...with categories and the theme tiles");
+    dump(engine, "prefs_interface");
+    if (auto tile = app.test_rect("pref_theme:blender_light")) in.click(tile->center());
+    tick(engine, 2);
+    expect(app.theme_id() == "blender_light", "clicking a theme tile switches the theme");
+    expect(Project::load_prefs().contains("theme"), "...and remembers it");
+    app.set_theme("blender_dark");
+
+    if (auto nav = app.test_rect("prefs:Navigation")) in.click(nav->center());
+    app.clear_test_rects();
+    tick(engine, 2);
+    expect(app.test_rect("pref:orbit_speed").has_value(), "Navigation lists the orbit speed");
+    dump(engine, "prefs_navigation");
+
+    auto& cam = app.camera();
+    float yaw = cam.yaw_deg;
+    cam.orbit({10.0f, 0.0f});
+    const float base = yaw - cam.yaw_deg;
+    expect(app.set_preference("orbit_speed", make_float(2.0)), "orbit_speed is a preference");
+    yaw = cam.yaw_deg;
+    cam.orbit({10.0f, 0.0f});
+    expect(std::abs((yaw - cam.yaw_deg) - 2.0f * base) < 1e-3f, "Orbit Speed scales a drag");
+    yaw = cam.yaw_deg;
+    cam.turn(15.0f, 0.0f);
+    expect(std::abs(cam.yaw_deg - yaw - 15.0f) < 1e-3f, "...but not the numpad's exact 15 deg steps");
+    const Node prefs = Project::load_prefs();
+    expect(prefs.contains("orbit_speed") && std::abs(get_float(prefs, "orbit_speed", 0.0f) - 2.0f) < 1e-4f, "it is saved");
+
+    // A slider drag in the window: the gizmo size follows and is written once released.
+    if (auto vp = app.test_rect("prefs:Viewport")) in.click(vp->center());
+    app.clear_test_rects();
+    tick(engine, 2);
+    if (auto g = app.test_rect("pref:gizmo_size")) {
+        in.move({g->x + 2.0f, g->center().y});
+        in.drag({g->right() - 2.0f, g->center().y}, coopa::input::MouseButton::Left);
+        tick(engine, 2);
+        expect(app.gizmo().size_px > 190.0f, "dragging the Gizmo Size slider changes the gizmo (" + std::to_string(app.gizmo().size_px) + ")");
+        expect(get_float(Project::load_prefs(), "gizmo_size", 0.0f) > 190.0f, "...and saves it on release");
+    } else {
+        expect(false, "Viewport lists the gizmo size");
+    }
+    if (auto km = app.test_rect("prefs:Keymap")) in.click(km->center());
+    tick(engine, 3);
+    dump(engine, "prefs_keymap");
+    app.ui().close_all_popups();
+    tick(engine, 2);
+
+    fs::remove(Project::prefs_path());
+}
+
+/**
  * @brief The scene's weather in the World tab: the header switch writes the block and starts it
  *        live, the render rows it drives lock, its runtime objects show (locked) in the
  *        Hierarchy, Play runs it, disabling gives the render settings back, and it saves.
@@ -5085,6 +5243,27 @@ void test_editor_weather_world_tab() {
     expect(std::abs(engine.render_config().fog_density - w->atmosphere().fog_density) < 1e-6f, "it drives the render fog");
     dump(engine, "weather_world_tab");
     expect(app.test_rect("weather_transition_speed").has_value(), "Preview has a transition fast-forward");
+    expect(app.test_rect("weather_group:Time & Sun").has_value() && app.test_rect("weather_group:Sky Colours").has_value() &&
+           app.test_rect("weather_group:Conditions").has_value(), "the settings are grouped into foldouts");
+    if (auto strip = app.test_rect("weather_day_strip")) {   // dragging the 24-hour strip scrubs the live clock
+        in.move({strip->x + strip->w * 0.25f, strip->center().y});
+        in.drag({strip->x + strip->w * 0.75f, strip->center().y}, coopa::input::MouseButton::Left);
+        expect(std::abs(w->time_of_day() - 18.0f) < 0.5f, "the day strip scrubs the clock (" + std::to_string(w->time_of_day()) + ")");
+        expect(std::abs(as_float(*app.document().scene_setting("weather", "time_of_day"), 0.0f) - 10.0f) < 1e-3f, "...without saving it");
+    } else {
+        expect(false, "the Weather section has a 24-hour strip");
+    }
+    dump(engine, "weather_world_tab_groups");
+    if (const char* dir = std::getenv("EDITOR_DUMP_DIR")) {   // the lower groups, for review
+        (void)dir;
+        if (auto h = app.test_rect("weather_header")) in.move({h->center().x, h->y + 300.0f});
+        for (int k = 1; k <= 7; ++k) {
+            for (int n = 0; n < 6; ++n) { engine.queue_input([](coopa::input::Input& i) { i.push_scroll(0.0, -1.0); }); tick(engine, 1); }
+            tick(engine, 2);
+            dump(engine, "weather_world_tab_scroll" + std::to_string(k));
+        }
+        for (int n = 0; n < 60; ++n) { engine.queue_input([](coopa::input::Input& i) { i.push_scroll(0.0, 1.0); }); tick(engine, 1); }
+    }
 
     app.set_prop_tab(PropTab::Render);
     app.clear_test_rects();
@@ -7087,6 +7266,22 @@ void test_docs_xray_edit() {
     d.capture();
 }
 
+// The Colliders toggle on: snow_test's colliders as green wireframes, the crate selected.
+void test_docs_viewport_colliders() {
+    if (!docs_shot_dir()) return;
+    DocsEditor d("viewport_colliders", "scenes/tests/effects/snow_test/scene.yaml");
+    d.a().set_shading(Shading::Full);
+    docs_scene_camera(d);
+    const ObjectId crate = object_named(d.a(), "crate");
+    expect(crate != 0, "snow_test has its crate");
+    d.a().document().select(crate);
+    d.a().set_show_colliders(true);
+    d.rest();
+    tick(d.e(), 60);
+    expect(d.a().collider_lines_drawn() > 0, "the colliders draw");
+    d.capture();
+}
+
 /** @brief Edit Mode on the starter cube, face select, a loop cut and an extruded top face. */
 void docs_stage_edit_mode(DocsEditor& d) {
     using coopa::input::Key;
@@ -7509,15 +7704,21 @@ void test_project_toy_file() {
     const std::string after = [&] { std::ifstream in(root / "fancy.toy"); return std::string(std::istreambuf_iterator<char>(in), {}); }();
     expect(before == after, "create() leaves an existing .toy byte-identical");
 
-    // config.yaml starts as the engine's own: same settings and comments, only the title and
-    // default scene are the project's -- and a game doesn't save a screenshot on exit.
-    auto read = [](const fs::path& f) { std::ifstream in(f); std::vector<std::string> l; for (std::string x; std::getline(in, x);) l.push_back(x); return l; };
-    const auto engine_cfg = read(fs::path(ROOT_DIR) / "assets" / "config.yaml");
-    const auto project_cfg = read(p.config_path());
-    std::vector<std::string> changed;
-    for (size_t i = 0; i < std::min(engine_cfg.size(), project_cfg.size()); ++i) if (engine_cfg[i] != project_cfg[i]) changed.push_back(project_cfg[i]);
-    expect(engine_cfg.size() == project_cfg.size() && changed.size() == 3 && changed[0] == "  title: \"Fancy Game\"" &&
-               changed[1] == "  default_scene: \"assets/scenes/main/scene.yaml\"" && changed[2] == "  save_on_exit: false",
+    // config.yaml starts as the engine's own: the same settings, only the title and default scene
+    // are the project's -- and a game doesn't save a screenshot on exit. Compared as documents, so
+    // the engine's file may be in any layout (as written by hand, or as the editor saves it).
+    Node engine_cfg = coopa::yaml::load_document(fs::path(ROOT_DIR) / "assets" / "config.yaml");
+    const Node project_cfg = coopa::yaml::load_document(p.config_path());
+    const bool project_values = project_cfg.contains("window") && get_string(project_cfg["window"], "title") == "Fancy Game" &&
+                                project_cfg.contains("scene") &&
+                                get_string(project_cfg["scene"], "default_scene") == "assets/scenes/main/scene.yaml" &&
+                                project_cfg.contains("output") && project_cfg["output"].contains("save_on_exit") &&
+                                project_cfg["output"]["save_on_exit"].is_boolean() &&
+                                !project_cfg["output"]["save_on_exit"].get_value<bool>();
+    engine_cfg["window"]["title"] = Node(std::string("Fancy Game"));
+    engine_cfg["scene"]["default_scene"] = Node(std::string("assets/scenes/main/scene.yaml"));
+    engine_cfg["output"]["save_on_exit"] = Node(false);
+    expect(project_values && engine_cfg == project_cfg,
            "a new project's config.yaml is the engine's, with only the title, default scene and save_on_exit changed");
     int toys = 0;
     for (const auto& e : fs::directory_iterator(root)) toys += e.path().extension() == ".toy";
@@ -8228,6 +8429,7 @@ const TestCase kTests[] = {
     {"editor_play_input_focus",              "editor_shell", test_editor_play_input_focus},
     {"editor_stats_overlay",                 "editor_shell", test_editor_stats_overlay},
     {"editor_play_hides_selection_outline",  "editor_shell", test_editor_play_hides_selection_outline},
+    {"editor_collider_display",              "editor_shell", test_editor_collider_display},
     {"editor_blender_chrome",                "editor_shell", test_editor_blender_chrome},
     {"editor_themes",                        "editor_shell", test_editor_themes},
     {"editor_transparency_preview",          "editor_shell", test_editor_transparency_preview},
@@ -8264,6 +8466,7 @@ const TestCase kTests[] = {
     {"editor_scene_settings_override", "editor_shell", test_editor_scene_settings_override},
     {"editor_scene_feature_override", "editor_shell", test_editor_scene_feature_override},
     {"editor_weather_world_tab", "editor_shell", test_editor_weather_world_tab},
+    {"editor_preferences", "editor_shell", test_editor_preferences},
     {"editor_grid_snap_and_frame", "editor_shell", test_editor_grid_snap_and_frame},
     {"editor_xray_edit_mode", "editor_shell", test_editor_xray_edit_mode},
     {"editor_nav_axis_and_trackpad", "editor_shell", test_editor_nav_axis_and_trackpad},
@@ -8291,6 +8494,7 @@ const TestCase kTests[] = {
     {"docs_viewport_solid", "docs", test_docs_viewport_solid},
     {"docs_gizmo_move", "docs", test_docs_gizmo_move},
     {"docs_xray_edit", "docs", test_docs_xray_edit},
+    {"docs_viewport_colliders", "docs", test_docs_viewport_colliders},
     {"docs_edit_mode", "docs", test_docs_edit_mode},
     {"docs_adjust_last_operation", "docs", test_docs_adjust_last_operation},
     {"docs_sculpt", "docs", test_docs_sculpt},

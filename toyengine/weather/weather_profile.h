@@ -153,7 +153,7 @@ struct Settings {
     float snow_max_depth = 0.3f;         ///< Metres of deep snow (the `snow` surface shader) at full cover.
     float initial_snow_cover = 0.0f;     ///< Cover the scene starts with (0..1); a snowy starting condition starts at 1.
     bool snow_auto_deformers = false;    ///< Every Rigidbody leaves tracks in deep snow, not only SnowDeformer objects (world/snow_system.h).
-    float snow_trench_recover_time = 6.0f; ///< Seconds a full-depth track takes to fill back in (0: only while it snows).
+    float snow_trench_recover_time = 2.0f; ///< Seconds a full-depth track takes to fill back in (0: only while it snows).
     bool snow_patch_hard = false;        ///< `snow_patch_style: hard` -- round, crisp-edged (toon) patches that grow and
                                          ///< merge; `soft` (default) -- the soft noise-edged cover.
     float snow_patch_size = 1.5f;        ///< Hard patches: typical patch diameter (m).

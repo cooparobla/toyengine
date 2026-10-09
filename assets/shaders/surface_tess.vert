@@ -13,6 +13,7 @@ layout(location = 2) in vec2 in_uv;
 layout(location = 3) in vec4 in_tangent;
 layout(location = 4) in mat4 in_model;       // per-instance (locations 4-7)
 layout(location = 8) in mat4 in_prev_model;  // per-instance (locations 8-11)
+layout(location = 12) in mat4 in_snow_anchor; // per-instance (locations 12-15)
 
 layout(location = 0) out vec3 tv_position_os;
 layout(location = 1) out vec3 tv_normal_os;
@@ -21,6 +22,7 @@ layout(location = 3) out vec4 tv_tangent_os;
 layout(location = 4) out vec3 tv_position_ws;
 layout(location = 5) out mat4 tv_model;       // 5-8
 layout(location = 9) out mat4 tv_prev_model;  // 9-12
+layout(location = 13) out mat4 tv_snow_anchor; // 13-16
 
 void main() {
     tv_position_os = in_position;
@@ -30,5 +32,6 @@ void main() {
     tv_position_ws = (in_model * vec4(in_position, 1.0)).xyz;
     tv_model       = in_model;
     tv_prev_model  = in_prev_model;
+    tv_snow_anchor = in_snow_anchor;
     gl_Position    = vec4(tv_position_ws, 1.0);
 }

@@ -14,7 +14,7 @@ What you see:
 
 1. **The header**, the bar along the top. From the left: the mode menu (**Object Mode**), the
    **View**, **Select**, **Add** and **Object** menus, and on the right the **Transform
-   Orientation** dropdown (**Global**), the **Snap** button, **Overlays**, **Toggle X-Ray** and
+   Orientation** dropdown (**Global**), the **Snap** button, **Colliders**, **Overlays**, **Toggle X-Ray** and
    the four shading buttons.
 2. **The toolbar**, down the left edge: **Select Box**, **Cursor**, **Move**, **Rotate** and
    **Scale**.
@@ -151,6 +151,21 @@ next to it to pick which ones show:
 The grid lies on the ground. Its spacing changes as you zoom, so the lines never get too dense
 or too sparse. In the front, back and side views it turns to face you. The red and green lines
 are the X and Y axes.
+
+### Show physics colliders
+
+The **Colliders** button in the header (left of **Overlays**) draws the scene's physics
+colliders as wireframes, the way Unity shows them: solid colliders in green, triggers in yellow.
+They draw on top of everything, so you can see colliders hidden inside or behind meshes. Click the
+arrow next to the button to choose which ones show:
+
+| Choice | Shows |
+|---|---|
+| **All Colliders** | Every collider in the scene |
+| **Selected + Children** | Only the selected objects' colliders, and their children's |
+
+The wireframes come straight from the collider components and their objects' transforms, so
+they show while you edit as well as during Play, and they follow objects as they move.
 
 ### Show performance stats
 

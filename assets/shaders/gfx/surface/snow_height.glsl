@@ -23,7 +23,7 @@ float gfx_snow_lying_height(vec3 p) {
     if (cover <= 0.0 || depth <= 0.0) return 0.0;
     float open = gfx_world_open_sky(p + vec3(0.0, 0.0, 0.35 + 0.35 * gfx_world.occl.z), 0.5);
     float patch_mask = 1.0;
-    if (gfx_world.snow_style.x > 0.5) {
+    if (gfx_world.snow_style.x > 0.5 && !gfx_snow_patch_saturated(cover, open)) {
         patch_mask = gfx_snow_patch_ramp(gfx_snow_patch_value(p.xy, cover, open, gfx_world.snow_style.y));
     }
     return depth * cover * open * patch_mask;

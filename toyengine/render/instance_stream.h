@@ -80,17 +80,24 @@ public:
      * @brief Appends one instance transform together with the one it had last frame.
      * @return Its index -- pass as `first_instance` to an instanced draw.
      */
-    uint32_t add(const glm::mat4& model, const glm::mat4& prev_model) {
+    uint32_t add(const glm::mat4& model, const glm::mat4& prev_model) { return add(model, prev_model, model); }
+
+    /**
+     * @brief As above, with the instance's snow anchor -- the pose its snow pattern is laid out
+     *        in (data::InstanceData::snow_anchor): its current one unless it has moved.
+     */
+    uint32_t add(const glm::mat4& model, const glm::mat4& prev_model, const glm::mat4& snow_anchor) {
         uint32_t idx = static_cast<uint32_t>(pending_.size());
         coopa::gfx::engine::data::InstanceData inst;
-        inst.model      = model;
-        inst.prev_model = prev_model;
+        inst.model       = model;
+        inst.prev_model  = prev_model;
+        inst.snow_anchor = snow_anchor;
         pending_.push_back(inst);
         return idx;
     }
 
     /** @brief Appends an instance with no previous pose (prev_model == model: zero object motion). */
-    uint32_t add(const glm::mat4& model) { return add(model, model); }
+    uint32_t add(const glm::mat4& model) { return add(model, model, model); }
 
     /// @brief Number of transforms added since begin() -- the next add()'s index.
     uint32_t size() const { return static_cast<uint32_t>(pending_.size()); }

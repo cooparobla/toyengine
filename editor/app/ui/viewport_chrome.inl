@@ -134,6 +134,24 @@
                             imm::Context::kLeft, imm::Box{rx, hb.y + 3, s, s}, true)) {
             show_overlays_ = !show_overlays_;
         }
+        // Physics colliders: the toggle plus its popover (caret) -- all of them, or the selection's.
+        rx -= s * 0.7f + 10;
+        const imm::Box cdd{rx, hb.y + 3, s * 0.7f, s};
+        if (ctx.icon_button("collider_opts_btn", I::ArrowDown, "Collider Display\nAll colliders, or only the selection's", false,
+                            s * 0.7f, imm::Context::kRight, cdd)) {
+            ctx.open_popup("collider_opts", glm::vec2(cdd.right() - 220, cdd.bottom() + 2));
+        }
+        if (ctx.begin_popup("collider_opts", 220)) draw_colliders_popover_(ctx);
+        test_rects_["collider_opts_btn"] = cdd;
+        rx -= s;
+        test_rects_["colliders"] = imm::Box{rx, hb.y + 3, s, s};
+        if (ctx.icon_button("colliders", I::Collider,
+                            collider_view_ == ColliderView::All
+                                ? "Physics Colliders\nDraw every collider in the scene (caret: only the selection's)"
+                                : "Physics Colliders\nDraw the selected objects' colliders and their children's (caret: all)",
+                            show_colliders_, s, imm::Context::kLeft, imm::Box{rx, hb.y + 3, s, s}, true)) {
+            show_colliders_ = !show_colliders_;
+        }
         // Snap and orientation only steer transforms: the brush modes have none, so they make room there.
         if (!in_brush_mode_()) {
             rx -= s + 10;
@@ -771,6 +789,18 @@
         fixed("Fog", rc.fog_enabled);
         fixed("Volumetrics", rc.volumetrics_enabled);
         fixed("Depth of Field", rc.dof_enabled);
+        ctx.end_popup();
+    }
+
+    /** @brief Collider Display popover: which colliders the Colliders toggle draws. */
+    void draw_colliders_popover_(imm::Context& ctx) {
+        ctx.label_dim("Physics Colliders");
+        ctx.checkbox("Show Colliders", &show_colliders_);
+        ctx.tooltip("Show Colliders\nWireframes of the physics colliders: green solid, yellow triggers");
+        if (ctx.selectable("All Colliders", collider_view_ == ColliderView::All)) collider_view_ = ColliderView::All;
+        ctx.tooltip("All Colliders\nEvery collider in the scene");
+        if (ctx.selectable("Selected + Children", collider_view_ == ColliderView::Selected)) collider_view_ = ColliderView::Selected;
+        ctx.tooltip("Selected + Children\nOnly the selected objects' colliders, and their children's");
         ctx.end_popup();
     }
 

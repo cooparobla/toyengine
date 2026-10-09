@@ -18,6 +18,8 @@ layout(location = 1) in vec3 frag_world_normal;
 layout(location = 2) in vec2 frag_uv;
 layout(location = 3) in mat3 frag_TBN;            // locations 3-5
 layout(location = 11) in vec3 frag_prev_world_pos; // see gbuffer_vs.glsl
+layout(location = 12) in vec3 frag_snow_pos;       // the snow pattern's space -- see gbuffer_vs.glsl
+layout(location = 13) flat in vec3 frag_snow_up;
 
 // Set 0: Camera UBO, with the trailing reprojection members (data::CameraData) the velocity
 // attachment below needs. Same binding every other pass reads its three-member block from.
@@ -165,7 +167,7 @@ void main() {
 #ifndef GFX_SURFACE_NO_SNOW
     if ((material.surface_ext.z & 1u) == 0u && gfx_world.snow.x > 0.0) {
         vec3 geo_n = normalize(gl_FrontFacing ? frag_world_normal : -frag_world_normal);
-        gfx_snow_apply(s, geo_n);
+        gfx_snow_apply(s, geo_n, gfx_snow_pattern_xy(frag_snow_pos, frag_snow_up));
     }
 #endif
 

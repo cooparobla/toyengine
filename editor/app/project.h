@@ -491,11 +491,11 @@ public:
         auto write_if_missing = [&](const fs::path& path, const Node& node) {
             if (!fs::exists(path, ec)) coopa::yaml::save_document(path, node);
         };
-        // config.yaml: the engine's own (ROOT_DIR/assets/config.yaml), copied as text so its
-        // comments come along -- only the window title and the default scene are this project's.
-        // Paths it names that the project lacks (the palette) resolve to the engine's assets/.
+        // config.yaml: the engine's own (ROOT_DIR/assets/config.yaml) -- only the window title and
+        // the default scene are this project's. Paths it names that the project lacks (the palette)
+        // resolve to the engine's assets/.
         if (!fs::exists(p.config_path(), ec)) {
-            std::ofstream(p.config_path()) << default_config_text(p.name().empty() ? std::string("toyengine") : p.name());
+            coopa::yaml::save_document(p.config_path(), default_config(p.name().empty() ? std::string("toyengine") : p.name()));
         }
 
         write_if_missing(p.assets() / "meshes" / "cube.yaml", mesh_to_node(make_cube()));
@@ -519,31 +519,27 @@ public:
     }
 
     /**
-     * @brief The engine's assets/config.yaml text with `window.title` set to `title` and
-     *        `scene.default_scene` pointing at the new project's main scene; every other line
-     *        (settings and comments) verbatim.
+     * @brief The engine's assets/config.yaml with `window.title` set to `title`,
+     *        `scene.default_scene` pointing at the new project's main scene and screenshots on
+     *        exit off; every other setting as the engine ships it. Read and written as a YAML
+     *        document -- the same load / save the editor's config panel uses -- so any layout of
+     *        the engine's file (hand-written, or as the editor saves it) works.
      */
-    static std::string default_config_text(const std::string& title) {
-        std::ifstream in(fs::path(ROOT_DIR) / "assets" / "config.yaml", std::ios::binary);
-        std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-        auto set_line = [&](const std::string& section, const std::string& key, const std::string& value) {
-            const size_t sec = text.find("\n" + section + ":");
-            const size_t from = text.rfind(section + ":", 0) == 0 ? 0 : sec;
-            if (from == std::string::npos) { text += "\n" + section + ":\n  " + key + ": " + value + "\n"; return; }
-            const size_t at = text.find("\n  " + key + ":", from);
-            if (at == std::string::npos) return;
-            const size_t eol = text.find('\n', at + 1);
-            text.replace(at + 1, (eol == std::string::npos ? text.size() : eol) - at - 1, "  " + key + ": " + value);
+    static Node default_config(const std::string& title) {
+        Node cfg = Node::mapping();
+        try {
+            if (auto n = coopa::yaml::try_load_document(fs::path(ROOT_DIR) / "assets" / "config.yaml"); n && n->is_mapping()) cfg = *n;
+        } catch (...) {}
+        auto section = [&](const char* name) -> Node& {
+            if (!cfg.contains(name) || !cfg[name].is_mapping()) cfg[name] = Node::mapping();
+            return cfg[name];
         };
-        std::string quoted = "\"";
-        for (char c : title) { if (c == '"' || c == '\\') quoted += '\\'; quoted += c; }
-        quoted += "\"";
-        set_line("window", "title", quoted);
-        set_line("scene", "default_scene", "\"assets/scenes/main/scene.yaml\"");
+        section("window")["title"] = Node(title);
+        section("scene")["default_scene"] = Node(std::string("assets/scenes/main/scene.yaml"));
         // A game should not write a screenshot every time it quits (the engine repo's own config
         // keeps it on: its tests and capture workflow rely on it).
-        set_line("output", "save_on_exit", "false");
-        return text;
+        section("output")["save_on_exit"] = Node(false);
+        return cfg;
     }
 
     /** @brief A starter scene document: camera, sun, ground plane, a cube -- named in snake_case,

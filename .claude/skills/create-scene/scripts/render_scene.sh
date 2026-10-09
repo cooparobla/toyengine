@@ -7,7 +7,8 @@
 #   <scene>      a scene name under assets/scenes (e.g. fog_test) or a path to a scene.yaml
 #   out.png      where to write the frame (default: $TMPDIR/toyengine_render/<scene>.png)
 #   key=value    config overrides applied to a scratch copy of assets/config.yaml, matched
-#                against the `  key:` line of the file, e.g.
+#                by key name in whatever layout the file is in (block, or the editor's flow
+#                style); keys are unique across its sections in practice, e.g.
 #                  debug_view=volumetrics   fog_enabled=true   ssr_jitter=0.0
 #                  save_low_res=true        (the internal-resolution buffer, no UI)
 #
@@ -27,6 +28,13 @@ if [ $# -lt 1 ]; then
     exit 2
 fi
 scene="$1"; shift
+# A bare name is found anywhere under assets/scenes (test scenes live in subfolders, e.g.
+# tests/effects/snow_test), then passed on as a path.
+if [[ "$scene" != *.yaml && "$scene" != *.caml ]]; then
+    found="$(find assets/scenes -type d -name "$scene" -exec test -f {}/scene.yaml \; -print 2>/dev/null | head -1)"
+    if [ -z "$found" ]; then echo "no scene named '$scene' under assets/scenes" >&2; exit 1; fi
+    scene="$found/scene.yaml"
+fi
 
 out=""
 if [ $# -gt 0 ] && [[ "$1" == *.png ]]; then out="$1"; shift; fi
@@ -43,18 +51,26 @@ if [ ! -x build/toyengine ]; then
 fi
 
 cfg="$scratch/config_$base.yaml"
-# Every `  key:` line is replaced -- keys are unique across config.yaml's sections in practice.
-args=(-e 's/^  visible: true /  visible: false /'
-      -e "s|^  filepath: \"[^\"]*\"|  filepath: \"$out\"|")
-for kv in "$@"; do
-    key="${kv%%=*}"; val="${kv#*=}"
-    args+=(-e "s|^  $key:[^#]*|  $key: $val |")
-done
-sed "${args[@]}" assets/config.yaml > "$cfg"
-for kv in "$@"; do
-    key="${kv%%=*}"
-    grep -q "^  $key:" "$cfg" || echo "warning: '$key' is not a top-level key in assets/config.yaml (it may be commented out) -- override ignored" >&2
-done
+# Overrides by key name, in either layout the file may be in: block (`  key: value  # note`) or
+# the editor's flow style (`section: { key: value, ... }`). A value runs to the next `,` `}` `#`
+# or end of line, or is a whole [list]. Window hidden and the output path always set.
+python3 - "$cfg" "$out" "$@" <<'PY'
+import re, sys
+cfg, out, overrides = sys.argv[1], sys.argv[2], sys.argv[3:]
+text = open("assets/config.yaml").read()
+def put(text, key, val):
+    pat = re.compile(r'(?<![\w])(' + re.escape(key) + r':[ \t]*)(\[[^\]]*\]|"[^"\n]*"|[^,}#\n]*?)(?=[ \t]*(?:[,}#\n]|$))')
+    new, n = pat.subn(lambda m: m.group(1) + val, text, count=1)
+    return new, n > 0
+text, _ = put(text, "visible", "false")
+text, _ = put(text, "filepath", '"' + out + '"')
+for kv in overrides:
+    key, _, val = kv.partition("=")
+    text, ok = put(text, key, val)
+    if not ok:
+        print("warning: '%s' is not a key in assets/config.yaml -- override ignored" % key, file=sys.stderr)
+open(cfg, "w").write(text)
+PY
 
 rm -f "$out"
 log="${out%.png}.log"

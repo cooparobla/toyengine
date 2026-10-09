@@ -63,6 +63,9 @@
 #include <toyengine/core/branding.h>
 #include <toyengine/core/engine.h>
 #include <toyengine/render/passes/debug_line_pass.h>
+#include <physxcoopa/components/collider.h>
+#include <physxcoopa/debug/shape_draw.h>
+#include <physxcoopa/util/transform_bridge.h>
 #include <toyengine/particles/particle_system.h>
 
 #include <gfxcoopa/engine/components/mesh_renderer.h>
@@ -192,6 +195,7 @@ public:
             if (prefs.contains("isolate_edit_mode") && prefs.at("isolate_edit_mode").is_boolean()) {
                 isolate_in_edit_ = prefs.at("isolate_edit_mode").get_value<bool>();
             }
+            prefs_load_(prefs);   // ui/preferences.inl
         }
         camera_.create(*ui_scene_);
         camera_.focus = state.cam_focus;
@@ -291,6 +295,14 @@ public:
     bool playing() const { return play_scene_ != nullptr; }
     /** @brief Selection outlines the viewport overlay drew last frame (tests / diagnostics). */
     int selection_outlines_drawn() const { return selection_outlines_drawn_; }
+    /** @brief Collider wireframe lines drawn last frame (0 with the Colliders toggle off). */
+    size_t collider_lines_drawn() const { return collider_lines_drawn_; }
+    bool show_colliders() const { return show_colliders_; }
+    void set_show_colliders(bool on) { show_colliders_ = on; }
+    /** @brief The Colliders popover's choice: every collider (false) or the selection's (true). */
+    void set_colliders_selected_only(bool selected_only) {
+        collider_view_ = selected_only ? ColliderView::Selected : ColliderView::All;
+    }
     /** @brief World > Weather > Preview's "Show Effects" (edit mode only; not saved). */
     void set_weather_preview_effects(bool show) { weather_preview_effects_ = show; }
     PropTab prop_tab() const { return prop_tab_; }
@@ -1307,7 +1319,7 @@ private:
 
     /** @brief Scales the UI to the display's points (2x framebuffer pixels on Retina). */
     void sync_ui_scale_() {
-        ui_scale_ = std::max(1.0f, engine_.display_scale());
+        ui_scale_ = std::max(0.5f, std::max(1.0f, engine_.display_scale()) * ui_scale_pref_);
         if (auto* canvas = canvas_canvas_()) canvas->scaler.scale_factor = ui_scale_;
     }
 
@@ -1335,9 +1347,90 @@ private:
         engine_.render_config().editor_xray_alpha = xray_surfaces_() ? xray_alpha_ : 1.0f;
         if (grid_wanted_) push_grid_lines_();
         if (!playing()) push_particle_gizmos_();
+        if (show_colliders_) push_collider_lines_();
+        else collider_lines_drawn_ = 0;
         // Weather effects wait for Play unless the World tab's Preview shows them -- held here,
         // not on the system, because a scene rebuild makes a fresh WeatherSystem.
         if (toy::weather::WeatherSystem* w = live_weather_()) w->set_preview_effects(weather_preview_effects_);
+    }
+
+    /// What the viewport header's Colliders toggle draws (see push_collider_lines_()).
+    enum class ColliderView { All, Selected };
+
+    /**
+     * @brief Physics collider wireframes, Unity-style: every Box/Sphere/Capsule/Mesh collider
+     *        component of the viewed scene (the play scene while playing), or only those of the
+     *        selection and its children (ColliderView::Selected). Drawn from the components and
+     *        their transforms -- the shape PhysicsSystem builds from them (make_shape() at the
+     *        object's world pose and scale) -- so it works with or without a simulation running.
+     *        X-ray lines (always on top): green solid colliders, yellow triggers.
+     */
+    void push_collider_lines_() {
+        using coopa::physx::components::Collider;
+        coopa::scene::Scene* scene = viewed_live_scene_();
+        if (!scene) return;
+        coopa::physx::debug::DebugDraw draw;
+        constexpr uint32_t kSolid   = 0x66FF88FFu;   // RRGGBBAA: Unity-ish collider green
+        constexpr uint32_t kTrigger = 0xFFE066FFu;   // triggers: yellow
+        auto draw_object = [&](const coopa::scene::SceneObject& obj) {
+            if (!obj.active() || !obj.get_transform()) return;
+            const coopa::physx::util::Trs trs = coopa::physx::util::world_trs(obj.get_transform()->transform());
+            for (const auto& comp : obj.components()) {
+                const auto* col = dynamic_cast<const Collider*>(comp.get());
+                if (!col) continue;
+                coopa::physx::debug::add_shape(draw, col->make_shape(trs.scale), trs.position, trs.rotation,
+                                                col->is_trigger() ? kTrigger : kSolid);
+            }
+        };
+        if (collider_view_ == ColliderView::All) {
+            for (const auto& root : scene->root_objects()) root->for_each_recursive(draw_object);
+        } else {
+            for (ObjectId id : doc_.selection()) {
+                if (coopa::scene::SceneObject* obj = viewed_live_object_(id)) obj->for_each_recursive(draw_object);
+            }
+        }
+        std::vector<render::DebugLine>& out = engine_.pipeline().debug_lines();
+        out.reserve(out.size() + draw.lines.size());
+        for (const auto& l : draw.lines) out.push_back(render::DebugLine{l.a, l.b, render::pack_gpu_color(l.color), false});
+        collider_lines_drawn_ = draw.lines.size();
+    }
+
+    /**
+     * @brief The live object a document object shows as in the viewed scene: its synced object
+     *        while editing; while playing, the object at the same place in the play scene (found
+     *        by its index path from the root, each step checked by name -- the play scene is
+     *        loaded from the document, so the authored hierarchy matches; null if it doesn't).
+     */
+    coopa::scene::SceneObject* viewed_live_object_(ObjectId id) const {
+        if (!playing()) return sync_.live(id);
+        std::vector<const Node*> chain;   // root .. id
+        for (ObjectId cur = id; cur != 0;) {
+            const Node* n = doc_.find(cur);
+            if (!n) return nullptr;
+            chain.push_back(n);
+            const std::optional<ObjectId> parent = doc_.parent_of(cur);
+            if (!parent) return nullptr;
+            cur = *parent;
+        }
+        std::reverse(chain.begin(), chain.end());
+        const Node* siblings = &doc_.root_objects();
+        const std::vector<std::unique_ptr<coopa::scene::SceneObject>>* live = &play_scene_->root_objects();
+        coopa::scene::SceneObject* found = nullptr;
+        for (const Node* n : chain) {
+            if (!siblings || !siblings->is_sequence()) return nullptr;
+            size_t index = 0;
+            bool hit = false;
+            for (const auto& s : siblings->as_seq()) {
+                if (SceneDocument::id_of(s) == SceneDocument::id_of(*n)) { hit = true; break; }
+                ++index;
+            }
+            if (!hit || index >= live->size()) return nullptr;
+            found = (*live)[index].get();
+            if (!found || found->name() != get_string(*n, "name")) return nullptr;
+            siblings = n->contains("children") ? &n->at("children") : nullptr;
+            live = &found->children();
+        }
+        return found;
     }
 
     /**
@@ -1489,6 +1582,7 @@ private:
         et_ = editor_theme_from(theme_);
         imm::Context& ctx = canvas_->context();
         ctx.style = theme_.style;
+        ctx.style.tooltip_delay = tooltip_delay_pref_;   // a preference, not the theme's
         const std::string font = theme_.font.empty() ? default_font_ : theme_.font;
         if (font != current_font_) {
             if (auto* f = coopa::ui::UIResourceCache::instance().font_for_path(font)) { ctx.text.set_font(f); current_font_ = font; }
@@ -1527,17 +1621,18 @@ private:
         const bool trackpad = trackpad_override_ ? *trackpad_override_ : tp.scroll_is_trackpad;
         if (pinch != 0.0) camera_.dolly(static_cast<float>(pinch) * 7.5f);   // +10% spread ~ one notch closer
         if (in.scroll == glm::vec2(0.0f)) return;
+        const float zoom_dir = invert_zoom_ ? -1.0f : 1.0f;
         if (trackpad) {
             if (tp.momentum && !trackpad_override_) return;
-            if (shift) camera_.pan(in.scroll * glm::vec2(-20.0f, -20.0f), viewport_box_.h);
-            else if (ctrl) camera_.dolly(in.scroll.y);
+            if (shift != trackpad_swipe_pans_) camera_.pan(in.scroll * glm::vec2(-20.0f, -20.0f), viewport_box_.h);
+            else if (ctrl) camera_.dolly(in.scroll.y * zoom_dir);
             else camera_.orbit(in.scroll * -6.0f);
             return;
         }
         if (in.scroll.y != 0.0f) {
             if (shift) camera_.pan(glm::vec2(0.0f, in.scroll.y * -20.0f), viewport_box_.h);
             else if (ctrl) camera_.pan(glm::vec2(in.scroll.y * -20.0f, 0.0f), viewport_box_.h);
-            else camera_.dolly(in.scroll.y);
+            else camera_.dolly(in.scroll.y * zoom_dir);
         }
         if (in.scroll.x != 0.0f && !shift && !ctrl) camera_.orbit(glm::vec2(in.scroll.x * -6.0f, 0.0f));
     }
@@ -1785,6 +1880,7 @@ private:
 #include "ui/build.inl"
 #include "ui/weather.inl"
 #include "ui/project_settings.inl"
+#include "ui/preferences.inl"
 
     // --- helpers shared by the panels ---
 
@@ -2500,10 +2596,10 @@ private:
         if (ctx.shortcut(Key::Kp5)) camera_.set_ortho(!camera_.ortho);
         if (ctx.shortcut(Key::Kp0)) view_through_scene_camera_();
         if (ctx.shortcut(Key::Kp0, Mods::Control | Mods::Alt)) align_scene_camera_to_view_();
-        if (ctx.shortcut(Key::Kp4)) camera_.orbit(glm::vec2(15.0f / 0.35f, 0));
-        if (ctx.shortcut(Key::Kp6)) camera_.orbit(glm::vec2(-15.0f / 0.35f, 0));
-        if (ctx.shortcut(Key::Kp8)) camera_.orbit(glm::vec2(0, -15.0f / 0.35f));
-        if (ctx.shortcut(Key::Kp2)) camera_.orbit(glm::vec2(0, 15.0f / 0.35f));
+        if (ctx.shortcut(Key::Kp4)) camera_.turn(-15.0f, 0.0f);
+        if (ctx.shortcut(Key::Kp6)) camera_.turn(15.0f, 0.0f);
+        if (ctx.shortcut(Key::Kp8)) camera_.turn(0.0f, -15.0f);
+        if (ctx.shortcut(Key::Kp2)) camera_.turn(0.0f, 15.0f);
         if (ctx.shortcut(Key::KpAdd) || ctx.shortcut(Key::Equal)) camera_.dolly(1.0f);
         if (ctx.shortcut(Key::KpSubtract) || ctx.shortcut(Key::Minus)) camera_.dolly(-1.0f);
         // Frame Selected: numpad . (Blender), . on the main keyboard (no numpad needed) in every
@@ -3836,29 +3932,22 @@ private:
             ctx.end_modal();
         }
 
-        if (ctx.begin_modal("Controls", {720, 0})) {   // height fits the content
-            static const char* lines[] = {
-                "Navigate:   MMB orbit, Shift+MMB pan, Ctrl+MMB / wheel zoom; Alt+LMB = MMB (no middle button)",
-                "            Shift+wheel / Ctrl+wheel pan vertically / horizontally, sideways scroll orbits",
-                "Trackpad:   two-finger swipe orbits, Shift+swipe pans, pinch / Ctrl+swipe zooms",
-                "Views:      numpad 1/3/7 front/right/top (Ctrl opposite), 5 ortho, 0 camera, 2/4/6/8 orbit,",
-                "            F or . frame selected (F: Object Mode), Home frame all, ` view menu, Ctrl+Alt+Num0 camera to view",
-                "Select:     LMB, Shift+LMB toggle, drag box (Shift add, Ctrl subtract), A all, Alt+A none, Ctrl+I invert",
-                "Transform:  G move, R rotate, S scale -- then X/Y/Z axis (twice: local), Shift+X plane,",
-                "            type a value, Ctrl snap, Shift precise, LMB/Enter confirm, RMB/Esc cancel",
-                "Objects:    Shift+A add, Shift+D duplicate, X / Del delete, H hide, Alt+H unhide, Shift+H isolate,",
-                "            Ctrl+P parent, Alt+P clear parent, Alt+G/R/S clear, Tab edit mode, RMB context menu",
-                "Edit mode:  1/2/3 vert/edge/face, E extrude, I inset, Ctrl+B bevel, F fill, M merge, X delete,",
-                "            L / Ctrl+L linked, Shift+D duplicate, U UV menu, Alt+N normals",
-                "Viewport:   Z shading menu, Shift+Z wireframe, Shift+S snap, Shift+RMB 3D cursor, N / T panels,",
-                "            Ctrl+Space maximize, Shift+Space tools, F3 stats overlay",
-                "General:    Ctrl+S save all, Ctrl+Z / Ctrl+Shift+Z undo / redo, F5 play / stop, F2 rename",
-            };
-            for (const char* l : lines) ctx.label(l);
-            ctx.spacing();
+        const glm::vec2 controls_size{std::min(640.0f, ctx.canvas_size().x - 40.0f), std::min(640.0f, ctx.canvas_size().y - 40.0f)};
+        if (ctx.begin_modal("Controls", controls_size)) {
+            const glm::vec2 top = ctx.cursor();
+            const float box_bottom = std::floor((ctx.canvas_size().y - controls_size.y) * 0.5f) + controls_size.y;   // begin_modal() centres the box
+            const float body_h = std::max(100.0f, box_bottom - ctx.style.padding - ctx.style.row_height - 8 - top.y);
+            ctx.begin_region("controls_body", {top.x, top.y, ctx.available_width(), body_h}, true);
+            draw_keymap_table_(ctx, prefs_keymap_filter_);   // ui/preferences.inl
+            ctx.end_region();
+            ctx.set_cursor_y(top.y + body_h + 6);
+            if (ctx.button("Preferences...", 130, true, imm::Icon::Gear)) { ctx.close_modal(); open_preferences("Navigation"); }
+            ctx.tooltip("Preferences\nOrbit / zoom speeds, trackpad and snapping");
+            ctx.same_line();
             if (ctx.button("Close", 100)) ctx.close_modal();
             ctx.end_modal();
         }
+        draw_preferences_modal_(ctx);
         draw_about_modal_(ctx);
         draw_project_settings_modal_(ctx);
         if (!pending_modal_.empty()) { ctx.open_modal(pending_modal_); pending_modal_.clear(); }
@@ -4052,6 +4141,9 @@ private:
     std::vector<std::string> slot_preview_materials_;   // mesh viewer: material asset per slot (preview only)
     imm::Box viewport_box_;
     bool show_grid_ = true;
+    bool show_colliders_ = false;                         ///< Viewport header: draw physics colliders.
+    ColliderView collider_view_ = ColliderView::All;      ///< ...all of them, or the selection's.
+    size_t collider_lines_drawn_ = 0;                     ///< Last frame's collider line count (tests).
     bool grid_wanted_ = false;
     coopa::input::CursorShape applied_cursor_ = coopa::input::CursorShape::Arrow;
     bool viewport_ao_ = true;    // Viewport Shading > Ambient Occlusion
@@ -4201,6 +4293,16 @@ private:
     int weather_sel_ = 0;              ///< World > Weather: the condition being edited.
     bool weather_preview_effects_ = false;   ///< World > Weather > Preview: show effects in edit mode.
     int weather_preview_speed_ = 0;    ///< World > Weather > Preview: transition fast-forward (0 = 1x .. 3 = instant).
+    int weather_palette_ = 0;          ///< World > Weather > Sky Colours: the palette being edited (0 day, 1 twilight, 2 night).
+    // Edit > Preferences (ui/preferences.inl); saved in ~/.toyengine_editor.yaml.
+    float ui_scale_pref_ = 1.0f;          ///< Interface Scale, on top of the display's scale.
+    float tooltip_delay_pref_ = 0.6f;
+    bool invert_zoom_ = false;            ///< Wheel up zooms out.
+    bool trackpad_swipe_pans_ = false;    ///< A two-finger swipe pans (Shift+swipe orbits).
+    bool prefs_dirty_ = false;            ///< A preference changed; written when the mouse lets go.
+    std::string prefs_category_ = "Interface";
+    std::string prefs_keymap_filter_;
+    std::vector<ThemeSwatch> prefs_themes_;   ///< Theme tiles, read while the window is open.
     std::string runtime_sel_;          ///< The selected runtime object's ':' path (ui/weather.inl); empty = none.
     int asset_cat_ = 1;
     std::string asset_filter_;

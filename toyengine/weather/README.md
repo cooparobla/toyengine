@@ -68,6 +68,9 @@ scene:
       snow_melt_time: 240       # s full cover takes to melt at +5 C (faster warmer / in rain)
       snow_max_depth: 0.3       # m of deep snow (`shader: snow` surfaces) at full cover
       snow_auto_deformers: false # every Rigidbody leaves tracks in deep snow, not only SnowDeformers
+      snow_trench_recover_time: 2 # s for a full-depth track to fill back in (0: only while it snows)
+      snow_patch_style: soft    # soft (noisy drifts) | hard (round, crisp-edged toon patches)
+      snow_patch_size: 1.5      # m, hard patches' typical diameter
       conditions:               # omitted: default_conditions()
         - name: rain
           weight: 1.2           # random schedule: relative chance (0 = only on request)
@@ -272,11 +275,18 @@ frame from `Engine::sync_surface_state_()`:
 - **Cover layer** (`assets/shaders/gfx/surface/snow.glsl`): every opaque material shows snow on
   geometry facing up (steeper faces as the cover deepens), with patchy edges, where the sky is
   open -- the precipitation map's "sky layer", which looks through Rigidbodies, so a passing crate
-  does not leave a bare patch. Materials opt out with `snow: false`.
+  does not leave a bare patch. Materials opt out with `snow: false`. `snow_patch_style: hard`
+  swaps the soft noise edge for round patches with a crisp, antialiased edge
+  (`gfx/surface/snow_patches.glsl`): dots at light cover that grow, merge, and close up at full
+  cover; they shrink crisply toward roof edges and steep faces rather than fading.
 - **Deep snow** (`shader: snow`, `assets/shaders/snow_surface.glsl`): raised by
-  `cover * snow_max_depth * open sky`, less the trench field (`toyengine/world/snow_field.h`),
-  which `SnowDeformer` objects -- and with `snow_auto_deformers` every Rigidbody -- press into, and
-  falling snow refills. Gameplay queries mirror the shader on the CPU (`SnowSystem::depth_at()`).
+  `cover * snow_max_depth * open sky` (times the patch mask under hard patches, so it lies in
+  rounded mounds), less the trench field (`toyengine/world/snow_field.h`), which `SnowDeformer`
+  objects -- and with `snow_auto_deformers` every Rigidbody -- press into. Tracks settle back over
+  `snow_trench_recover_time`, faster while it snows. The field (51.2 m a side) centres on the
+  ground point the camera looks at, so zooming out does not drop the tracks under the target, and
+  tracks fade out over its outer fifth instead of vanishing at its edge. Gameplay queries mirror
+  the shader on the CPU (`SnowSystem::depth_at()`).
 
 The precipitation map (GroundProbe) keeps running while any snow lies, not only while it falls,
 reaching at least 32 m around the camera; past it, everything counts as open sky.

@@ -23,31 +23,54 @@ void gfx_surface_vertex(inout GfxSurfaceVertex v) {
 #ifdef GFX_SURFACE_FRAGMENT
 void gfx_surface_fragment(inout GfxSurface s) {
     if (gfx_world.snow.x <= 0.0 || gfx_world.snow.y <= 0.0) return;
-    // Hard patches: the crisp, antialiased patch edge for the albedo, taken before any per-pixel
-    // branch (fwidth needs the whole quad). The height field itself ramps over a few centimetres
-    // so the mound has a wall; the colour edge stays sharp on top of it.
-    float hard_edge = -1.0;
-    if (gfx_world.snow_style.x > 0.5) {
-        float open_e = gfx_world_open_sky(s.position_ws + vec3(0.0, 0.0, 0.35 + 0.35 * gfx_world.occl.z), 0.5);
-        float v = gfx_snow_patch_value(s.position_ws.xy, gfx_world.snow.x, open_e, gfx_world.snow_style.y);
-        hard_edge = clamp(v / max(fwidth(v), 1e-4) + 0.5, 0.0, 1.0);
-    }
     // The height field at this fragment's xy (the displacement is +Z only). Its z enters only
     // through the soft open-sky test, which a few centimetres either way does not move.
     vec3 base = s.position_ws;
-    float h = gfx_snow_height(base);
-
-    // Normal from the height gradient (central differences, 5 cm apart).
-    const float e = 0.05;
-    float hx = gfx_snow_height(base + vec3(e, 0.0, 0.0)) - gfx_snow_height(base - vec3(e, 0.0, 0.0));
-    float hy = gfx_snow_height(base + vec3(0.0, e, 0.0)) - gfx_snow_height(base - vec3(0.0, e, 0.0));
-    vec3 n_snow = normalize(vec3(-hx / (2.0 * e), -hy / (2.0 * e), 1.0));
+    const float e = 0.05;   // finite-difference step for the cheap terms (5 cm)
+    float h, lying, edge = 1.0;
+    vec2 grad;
+    if (gfx_world.snow_style.x > 0.5) {
+        // Hard patches: h = A * M - T, with A = depth * cover * open (cheap), M the patch mask
+        // (the expensive pattern) and T the trench (cheap). The pattern is evaluated ONCE, with
+        // its analytic gradient, for the mask, the normal and the crisp colour edge -- not once
+        // per finite-difference tap -- and not at all where the mask is saturated (full cover).
+        vec2 dpdx = dFdx(base.xy), dpdy = dFdy(base.xy);
+        float cover = gfx_world.snow.x, depth = gfx_world.snow.y;
+        vec3 lift = vec3(0.0, 0.0, 0.35 + 0.35 * gfx_world.occl.z);
+        float open = gfx_world_open_sky(base + lift, 0.5);
+        float A = depth * cover * open;
+        vec2 dA = depth * cover / (2.0 * e) *
+                  vec2(gfx_world_open_sky(base + lift + vec3(e, 0.0, 0.0), 0.5) - gfx_world_open_sky(base + lift - vec3(e, 0.0, 0.0), 0.5),
+                       gfx_world_open_sky(base + lift + vec3(0.0, e, 0.0), 0.5) - gfx_world_open_sky(base + lift - vec3(0.0, e, 0.0), 0.5));
+        float M = 1.0;
+        vec2 dM = vec2(0.0);
+        if (!gfx_snow_patch_saturated(cover, open)) {
+            vec3 field = gfx_snow_blobs_grad(base.xy, gfx_world.snow_style.y);
+            float v = gfx_snow_patch_value_from_field(field.x, cover, open);
+            M = gfx_snow_patch_ramp(v);
+            dM = gfx_snow_patch_ramp_slope(v) * field.yz;
+            // The colour edge is crisp on top of the ramped mound wall.
+            edge = gfx_snow_patch_edge(v, field.yz, dpdx, dpdy);
+        }
+        float T = gfx_world_trench(base.xy);
+        vec2 dT = vec2(gfx_world_trench(base.xy + vec2(e, 0.0)) - gfx_world_trench(base.xy - vec2(e, 0.0)),
+                       gfx_world_trench(base.xy + vec2(0.0, e)) - gfx_world_trench(base.xy - vec2(0.0, e))) / (2.0 * e);
+        lying = A * M;
+        h = lying > 0.0 ? max(0.0, lying - T) : 0.0;
+        grad = h > 0.0 ? dA * M + A * dM - dT : vec2(0.0);
+    } else {
+        h = gfx_snow_height(base);
+        // Normal from the height gradient (central differences, 5 cm apart).
+        grad = vec2(gfx_snow_height(base + vec3(e, 0.0, 0.0)) - gfx_snow_height(base - vec3(e, 0.0, 0.0)),
+                    gfx_snow_height(base + vec3(0.0, e, 0.0)) - gfx_snow_height(base - vec3(0.0, e, 0.0))) / (2.0 * e);
+        lying = gfx_snow_lying_height(base);
+    }
+    vec3 n_snow = normalize(vec3(-grad, 1.0));
 
     // How much the snow hides the material: full past a few centimetres; the pressed-down floor
     // of a trench is compacted, greyer snow, and bare where pressed to the ground.
-    float lying = gfx_snow_lying_height(base);
     float amount = smoothstep(0.0, 0.03, h) + (1.0 - smoothstep(0.0, 0.03, h)) * smoothstep(0.0, 0.02, lying) * 0.6;
-    if (hard_edge >= 0.0) amount *= hard_edge;
+    amount *= edge;
     float pressed = clamp(1.0 - h / max(lying, 1e-3), 0.0, 1.0) * step(1e-3, lying);
     vec3 snow_albedo = mix(GFX_SNOW_ALBEDO, GFX_SNOW_ALBEDO * vec3(0.78, 0.82, 0.88), pressed * 0.8);
     float sparkle = gfx_snow_hash_(floor(base.xy * 40.0)) * 0.06 * (1.0 - pressed);

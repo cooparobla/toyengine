@@ -12,9 +12,13 @@
 #   crates      plain materials gathering snow on their tops only (up-facing, open to the sky);
 #               `crate_bare` opts out with `snow: false`
 #   sled        a kinematic box circling the field with a SnowDeformer: it ploughs a trench that
-#               the falling snow slowly fills back in
+#               settles back level within snow_trench_recover_time (1.5 s here), so it trails the
+#               sled rather than closing into a ring
 #   ball        a Rigidbody dropped into the snow: `snow_auto_deformers` presses its footprint in
 #               without a SnowDeformer
+#
+# The weather's snow_patch_style is `hard`: below full cover the snow lies in round, crisp-edged
+# patches (and mounds on the snowfield) -- sweep snow_cover_override to see them grow and merge.
 #
 # Worth sweeping: snow_cover_override (0..1 in the render config), condition (clear melts it --
 # warm conditions only), debug_view=normals.
@@ -32,6 +36,8 @@ scene:
       snow_max_depth: 0.3
       snow_accumulate_time: 120
       snow_auto_deformers: true
+      snow_trench_recover_time: 1.5   # tracks settle back quickly: the sled's trench trails it, not a ring
+      snow_patch_style: hard          # round, crisp-edged (toon) patches -- see the weather README
   root_objects:
     - name: snowfield
       active: true

@@ -23,6 +23,7 @@ layout(location = 2) in vec2 tc_uv[];
 layout(location = 3) in vec4 tc_tangent_os[];
 layout(location = 4) patch in mat4 tc_model;
 layout(location = 8) patch in mat4 tc_prev_model;
+layout(location = 12) patch in mat4 tc_snow_anchor;
 
 layout(set = 0, binding = 0) uniform CameraUBO {
     mat4 view;
@@ -60,6 +61,8 @@ layout(location = 1) out vec3 frag_world_normal;
 layout(location = 2) out vec2 frag_uv;
 layout(location = 3) out mat3 frag_TBN;
 layout(location = 11) out vec3 frag_prev_world_pos;
+layout(location = 12) out vec3 frag_snow_pos;        // see gfx/surface/gbuffer_vs.glsl
+layout(location = 13) flat out vec3 frag_snow_up;
 
 struct GfxSurfaceVertex {
     vec3 position_os;
@@ -140,6 +143,8 @@ void main() {
 
     vec3 disp = v.position_ws - world_pos.xyz;
     frag_prev_world_pos = (tc_prev_model * vec4(pos_os, 1.0)).xyz + disp;
+    frag_snow_pos = (tc_snow_anchor * vec4(pos_os, 1.0)).xyz + disp;
+    frag_snow_up  = mat3(tc_snow_anchor) * (transpose(v.normal_matrix) * vec3(0.0, 0.0, 1.0));
 
     vec3 T = normalize(v.tangent_ws - dot(v.tangent_ws, v.normal_ws) * v.normal_ws);
     vec3 B = cross(v.normal_ws, T) * v.tangent_os.w;

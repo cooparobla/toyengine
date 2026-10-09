@@ -269,17 +269,24 @@ inline float snow_blob_layer(const glm::vec2& xy, float size) {
 
 /** @brief gfx_snow_blobs(): the metaball field of the hard-patch pattern. */
 inline float snow_blobs(const glm::vec2& xy, float size) {
-    return detail::snow_blob_layer(xy, size) + 0.5f * detail::snow_blob_layer(xy + glm::vec2(17.3f, 41.9f), size * 0.45f);
+    return detail::snow_blob_layer(xy, size) + 0.3f * detail::snow_blob_layer(xy + glm::vec2(17.3f, 41.9f), size * 0.45f);
+}
+
+/** @brief gfx_snow_patch_threshold(): the field level a patch starts at for a cover 0..1. */
+inline float snow_patch_threshold(float cover) {
+    return 1.25f - 1.7f * cover + 1.4f * std::pow(1.0f - cover, 12.0f);
 }
 
 /** @brief gfx_snow_patch_value(): > 0 inside a hard patch. `receptive` = up-facing x open sky. */
 inline float snow_patch_value(const glm::vec2& xy, float cover, float receptive, float size) {
-    return snow_blobs(xy, size) - (1.05f - 1.15f * cover) - (1.0f - receptive) * 1.5f;
+    return snow_blobs(xy, size) - snow_patch_threshold(cover) - (1.0f - receptive) * 1.5f;
 }
 
 /** @brief gfx_snow_patch_ramp(): the patch mask with its short ramp (what the deep snow lies in). */
 inline float snow_patch_mask(const glm::vec2& xy, float cover, float receptive, float size) {
-    const float t = std::clamp(snow_patch_value(xy, cover, receptive, size) / 0.15f, 0.0f, 1.0f);
+    // gfx_snow_patch_saturated(): deep inside a patch everywhere -- skip the pattern.
+    if (-snow_patch_threshold(cover) - (1.0f - receptive) * 1.5f >= 0.35f) return 1.0f;
+    const float t = std::clamp(snow_patch_value(xy, cover, receptive, size) / 0.35f, 0.0f, 1.0f);
     return t * t * (3.0f - 2.0f * t);
 }
 

@@ -25,6 +25,7 @@ layout(location = 2) in vec2 in_uv;
 layout(location = 3) in vec4 in_tangent; // xyz = tangent, w = handedness
 layout(location = 4) in mat4 in_model;       // per-instance (locations 4-7)
 layout(location = 8) in mat4 in_prev_model;  // per-instance (locations 8-11): last frame's model
+layout(location = 12) in mat4 in_snow_anchor; // per-instance (locations 12-15): the snow pattern's pose
 
 // Set 0: Camera UBO. The trailing reprojection members (data::CameraData) are declared here
 // and in gbuffer_fs.glsl only; every other shader keeps the three-member block.
@@ -82,6 +83,11 @@ layout(location = 3) out mat3 frag_TBN;          // occupies locations 3-5
 // built on them matches -- an unmatched extra varying is the MoltenVK instability
 // editor_paint.vert records.
 layout(location = 11) out vec3 frag_prev_world_pos;
+// The snow cover's pattern space (gfx/surface/snow.glsl): this point as it sits in the instance's
+// snow anchor pose (data::InstanceData::snow_anchor), and the world's up direction in that pose.
+// For anything that has not moved both are just world space; a moved object carries its snow.
+layout(location = 12) out vec3 frag_snow_pos;
+layout(location = 13) flat out vec3 frag_snow_up;
 
 /// What a vertex-displacement hook receives and may edit. The _os fields are
 /// as-authored (pre-model-matrix); everything else is already in world
@@ -133,6 +139,10 @@ void main() {
     // and reads as sub-pixel noise the consumers' dead-zone and variance clip absorb.
     vec3 disp = v.position_ws - world_pos.xyz;
     frag_prev_world_pos = (in_prev_model * vec4(in_position, 1.0)).xyz + disp;
+    // inverse(mat3(model)) == transpose(normal_matrix): world up into the object, then out into
+    // the anchor pose.
+    frag_snow_pos = (in_snow_anchor * vec4(in_position, 1.0)).xyz + disp;
+    frag_snow_up  = mat3(in_snow_anchor) * (transpose(v.normal_matrix) * vec3(0.0, 0.0, 1.0));
 
     vec3 T = normalize(v.tangent_ws - dot(v.tangent_ws, v.normal_ws) * v.normal_ws);
     vec3 B = cross(v.normal_ws, T) * in_tangent.w;

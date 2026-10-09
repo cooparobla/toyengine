@@ -4612,6 +4612,9 @@ void test_ssao_tracks_moving_object() {
            "ssao tracks: the shipped config has SSAO and its temporal resolve on");
     config.render.ssao_enabled          = true;
     config.render.ssao_temporal_enabled = true;
+    // The contact band's strength and width follow the gather radius, and the thresholds below
+    // are set for a 2 m gather -- pinned, so retuning the shipped radius does not move them.
+    config.render.ssao_radius           = 2.0f;
     toy::core::Engine engine(std::move(config));
 
     auto* ball  = engine.scene().find_object("ball");
@@ -10425,6 +10428,7 @@ void test_snow_cover_accumulates_and_melts() {
     coopa::scene::Scene scene("weather");
     toy::weather::Settings st = toy::weather::parse_settings(weather_test_block(
         "condition: snowing\nsnow_max_depth: 0.4\nsnow_auto_deformers: true\n"
+        "snow_trench_recover_time: 9\nsnow_patch_style: hard\nsnow_patch_size: 2.5\n"
         "conditions:\n"
         "  - {name: snowing, precipitation: 0.8, temperature: -6, transition: 10, duration: [5, 5]}\n"
         "  - {name: thaw, precipitation: 0.0, temperature: 9, transition: 1, duration: [5, 5]}\n"));
@@ -10432,6 +10436,11 @@ void test_snow_cover_accumulates_and_melts() {
     const toy::weather::Settings back = toy::weather::parse_settings(toy::weather::to_node(st));
     expect(back.snow_auto_deformers && std::abs(back.snow_max_depth - 0.4f) < 1e-6f &&
            std::abs(back.snow_accumulate_time - st.snow_accumulate_time) < 1e-4f, "snow: settings round-trip");
+    expect(st.snow_patch_hard && std::abs(st.snow_patch_size - 2.5f) < 1e-6f && std::abs(st.snow_trench_recover_time - 9.0f) < 1e-6f,
+           "snow: patch style, size and track recovery parse");
+    expect(back.snow_patch_hard && std::abs(back.snow_patch_size - 2.5f) < 1e-6f && std::abs(back.snow_trench_recover_time - 9.0f) < 1e-6f,
+           "snow: ...and round-trip");
+    expect(!toy::weather::parse_settings(weather_test_block()).snow_patch_hard, "snow: soft patches by default");
     toy::weather::WeatherSystem w;
     w.set_settings(st);
     weather_step(w, scene, 1.0f);
@@ -10472,6 +10481,104 @@ void test_snow_field_stamp_refill_scroll() {
     expect(f.trench_at({1.0f, 1.0f}) == 0.0f, "snow field: a jump past the window clears it");
 }
 
+/** @brief Tracks settle back over snow_trench_recover_time (no snowfall needed); the window
+ *         follows where the camera looks; tracks fade out at the window's edge. */
+void test_snow_trenches_recover_and_follow_view() {
+    coopa::scene::Scene scene("snow");
+    toy::weather::WeatherSystem* w = toy::weather::install_weather_system(scene, weather_test_block(
+        "snow_max_depth: 0.3\nsnow_trench_recover_time: 4\n"));
+    w->set_snow_cover(1.0f);
+    weather_step(*w, scene, 0.2f);
+    toy::world::SnowSystem* snow = toy::world::install_snow_system(scene);
+    auto step = [&](float seconds) {
+        for (float t = 0.0f; t < seconds - 1e-4f; t += 0.01f) {
+            coopa::scene::FrameContext ctx;
+            ctx.delta_time = 0.01f;
+            snow->execute(scene, ctx);
+        }
+    };
+    toy::world::SnowField& f = snow->field();
+    f.set_focus({0.0f, 0.0f});
+    f.stamp({1.0f, 1.0f}, 0.4f, 0.3f, 0.0f);
+    expect_near(f.trench_at({1.0f, 1.0f}), 0.3f, 0.01f, "snow recover: a full-depth track");
+    step(2.0f);
+    expect_near(f.trench_at({1.0f, 1.0f}), 0.15f, 0.02f, "snow recover: half filled at half the recover time (no snowfall)");
+    step(2.2f);
+    expect(f.trench_at({1.0f, 1.0f}) < 1e-3f, "snow recover: level again after the recover time");
+
+    // The window centres on the ground point the camera looks at, within reach of the camera.
+    using toy::world::SnowSystem;
+    const glm::vec3 cam(0.0f, -20.0f, 20.0f);
+    const glm::vec2 look = SnowSystem::focus_point(cam, glm::normalize(glm::vec3(0.0f, 1.0f, -1.0f)), 0.0f, 21.6f);
+    expect(glm::distance(look, glm::vec2(0.0f, 0.0f)) < 1e-3f, "snow focus: where the view ray meets the ground");
+    const glm::vec2 far = SnowSystem::focus_point(glm::vec3(0.0f, -40.0f, 5.0f), glm::normalize(glm::vec3(0.0f, 1.0f, -0.1f)), 0.0f, 21.6f);
+    expect_near(glm::distance(far, glm::vec2(0.0f, -40.0f)), 21.6f, 1e-3f, "snow focus: kept within reach of the camera");
+    const glm::vec2 level = SnowSystem::focus_point(cam, glm::vec3(0.0f, 1.0f, 0.0f), 0.0f, 21.6f);
+    expect(glm::distance(level, glm::vec2(cam)) < 1e-6f, "snow focus: the camera itself when it looks level");
+    // Zooming an orbit camera out along its view keeps the target -- and its tracks -- in the window.
+    toy::world::SnowField z(512, 0.1f, 1.0f);
+    z.set_focus(SnowSystem::focus_point(glm::vec3(0.0f, -3.0f, 3.0f), glm::normalize(glm::vec3(0.0f, 1.0f, -1.0f)), 0.0f, 21.6f));
+    z.stamp({0.0f, 0.0f}, 0.4f, 0.2f, 0.0f);
+    z.set_focus(SnowSystem::focus_point(glm::vec3(0.0f, -28.0f, 28.0f), glm::normalize(glm::vec3(0.0f, 1.0f, -1.0f)), 0.0f, 21.6f));
+    expect_near(z.trench_at({0.0f, 0.0f}), 0.2f, 0.01f, "snow focus: a track under the target survives zooming out to 40 m");
+
+    // Edge fade: full inside, easing to nothing at the window edge (no step).
+    toy::world::SnowField e(64, 0.1f, 1.0f);   // 3.2 m half-size
+    e.set_focus({0.0f, 0.0f});
+    for (float x = -3.1f; x <= 3.1f; x += 0.2f) e.stamp({x, 0.0f}, 0.15f, 0.2f, 0.0f);
+    expect_near(e.trench_at({1.0f, 0.0f}), 0.2f, 0.01f, "snow edge: full depth well inside the window");
+    const float near_edge = e.trench_at({3.0f, 0.0f});
+    expect(near_edge > 0.0f && near_edge < 0.1f, "snow edge: faded near the window edge (" + std::to_string(near_edge) + ")");
+    float prev = e.trench_at({2.4f, 0.0f}), worst = 0.0f;
+    for (float x = 2.42f; x < 3.15f; x += 0.02f) { const float v = e.trench_at({x, 0.0f}); worst = std::max(worst, prev - v); prev = v; }
+    expect(worst < 0.02f, "snow edge: the fade has no step (" + std::to_string(worst) + ")");
+}
+
+/** @brief Hard-edged patches (CPU mirror of gfx/surface/snow_patches.glsl) and deep snow in them. */
+void test_snow_hard_patches() {
+    using toy::world::snow_patch_mask;
+    const float size = 1.5f;
+    auto coverage = [&](float cover, float receptive, int* soft_px = nullptr) {
+        int in = 0, ramp = 0, n = 0;
+        for (int j = 0; j < 120; ++j) for (int i = 0; i < 120; ++i, ++n) {
+            const float m = snow_patch_mask({i * 0.17f - 10.0f, j * 0.17f + 3.0f}, cover, receptive, size);
+            if (m > 0.5f) ++in;
+            if (m > 0.0f && m < 1.0f) ++ramp;
+        }
+        if (soft_px) *soft_px = ramp;
+        return static_cast<float>(in) / static_cast<float>(n);
+    };
+    expect(coverage(0.0f, 1.0f) < 0.02f, "snow patches: (almost) none at cover 0");
+    expect(coverage(1.0f, 1.0f) > 0.999f, "snow patches: everything at full cover");
+    float last = -1.0f;
+    bool rising = true;
+    for (float c = 0.1f; c <= 0.91f; c += 0.2f) { const float v = coverage(c, 1.0f); rising = rising && v >= last; last = v; }
+    expect(rising, "snow patches: coverage grows with the cover");
+    int ramp_px = 0;
+    const float mid = coverage(0.45f, 1.0f, &ramp_px);
+    expect(mid > 0.1f && mid < 0.9f, "snow patches: separate patches at middling cover (" + std::to_string(mid) + ")");
+    // The ramp is the deep-snow mound's wall (the drawn colour edge is pixel-crisp on top of it):
+    // a short slope, not a broad fade.
+    expect(ramp_px < 120 * 120 * 35 / 100, "snow patches: a short edge ramp (" + std::to_string(ramp_px) + ")");
+    expect(coverage(0.45f, 0.4f) < mid, "snow patches: shrink where less receptive (slopes, roof edges)");
+
+    using toy::world::deep_snow_depth;
+    const toy::world::SnowStyle hard{true, size};
+    float inside = 0.0f, between = 0.0f;
+    int n_in = 0, n_out = 0;
+    for (int i = 0; i < 400; ++i) {
+        const glm::vec3 p(i * 0.13f, 0.7f, 0.0f);
+        const float m = snow_patch_mask(glm::vec2(p), 0.45f, 1.0f, size);
+        const float d = deep_snow_depth(p, 0.3f, 0.45f, nullptr, nullptr, hard);
+        if (m >= 1.0f) { inside = std::max(inside, d); ++n_in; }
+        if (m <= 0.0f) { between = std::max(between, d); ++n_out; }
+    }
+    expect(n_in > 0 && n_out > 0, "deep snow (hard): the sample line crosses patches and gaps");
+    expect_near(inside, 0.3f * 0.45f, 1e-4f, "deep snow (hard): full depth inside a patch");
+    expect(between == 0.0f, "deep snow (hard): none between patches");
+    expect_near(deep_snow_depth({3.3f, 0.7f, 0.0f}, 0.3f, 0.45f, nullptr, nullptr), 0.3f * 0.45f, 1e-4f, "deep snow (soft): even everywhere");
+}
+
 /** @brief The CPU open-sky / deep-snow mirror against a synthetic precipitation map with a roof. */
 void test_snow_open_sky_cpu_mirror() {
     toy::particles::GroundField g;
@@ -10497,6 +10604,79 @@ void test_snow_open_sky_cpu_mirror() {
     expect_near(deep_snow_depth({-5.0f, 0.0f, 0.0f}, 0.3f, 0.5f, &g, &trench), 0.15f, 1e-4f, "deep snow: scales with cover");
     expect_near(deep_snow_depth({-2.0f, 0.0f, 0.0f}, 0.3f, 1.0f, &g, &trench), 0.1f, 0.01f, "deep snow: less the trench");
     expect(deep_snow_depth({2.5f, 2.5f, 0.0f}, 0.3f, 1.0f, &g, &trench) < 1e-3f, "deep snow: none under the roof");
+}
+
+/**
+ * @brief The snow cover's pattern rides with a moving object (data::InstanceData::snow_anchor):
+ *        move snow_test's crate and the camera together, and the crate's lid looks the same --
+ *        where a pattern fixed in the world would have changed (and TAA would smear it).
+ */
+void test_snow_pattern_rides_with_moving_object() {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
+    ScopedEnv no_input("NO_INPUT", "1");
+    toy::core::AppConfig config = make_test_config("assets/scenes/tests/effects/snow_test/scene.yaml", 640, 360, 640, 360);
+    config.render.transparency_enabled = true;
+    config.render.snow_cover_override = 0.45f;   // partial cover: hard patches with edges on the lid
+    toy::core::Engine engine(std::move(config));
+    auto* crate = engine.scene().find_object("crate");
+    auto* cc = engine.scene().find_first_component<toy::scene::CameraController>();
+    toy::weather::WeatherSystem* w = engine.weather();
+    expect(crate && cc && w && w->settings().snow_patch_hard, "snow ride: snow_test has the crate, a camera controller, hard patches");
+    if (!crate || !cc || !w) return;
+
+    const glm::vec3 start = crate->get_transform()->transform().position();
+    // A move far enough that a WORLD-fixed pattern would put different snow on the lid: the CPU
+    // mirror of the pattern, sampled over the lid at both places, must disagree substantially.
+    const float size = w->settings().snow_patch_size;
+    auto lid_mask = [&](const glm::vec3& centre) {
+        std::vector<float> m;
+        for (int j = -3; j <= 3; ++j) for (int i = -3; i <= 3; ++i)
+            m.push_back(toy::world::snow_patch_mask(glm::vec2(centre) + glm::vec2(i, j) * 0.12f, 0.45f, 1.0f, size));
+        return m;
+    };
+    glm::vec3 delta(0.0f);
+    float best = 0.0f;
+    for (float dx = 0.5f; dx <= 3.0f; dx += 0.25f) {
+        const auto a = lid_mask(start), b = lid_mask(start + glm::vec3(dx, 0.0f, 0.0f));
+        float d = 0.0f;
+        for (size_t k = 0; k < a.size(); ++k) d += std::abs(a[k] - b[k]);
+        d /= static_cast<float>(a.size());
+        if (d > best) { best = d; delta = glm::vec3(dx, 0.0f, 0.0f); }
+    }
+    expect(best > 0.3f, "snow ride: a world-fixed pattern would change the lid's snow (" + std::to_string(best) + ")");
+
+    cc->tracker            = "";
+    cc->target             = start + glm::vec3(0.0f, 0.0f, 0.5f);
+    cc->target_offset      = glm::vec3(0.0f);
+    cc->distance           = 3.0f;
+    cc->pitch_deg          = 60.0f;
+    cc->follow_smoothing   = 0.0f;
+    cc->movement_smoothing = 0.0f;
+    tick_frames(engine, 30);
+    const Frame before = engine.capture_image(true);
+
+    crate->get_transform()->transform().set_position(start + delta);
+    cc->target += delta;
+    tick_frames(engine, 30);
+    const Frame after = engine.capture_image(true);
+
+    // The lid, around the image centre -- the orbit camera looks straight at it, and moved with
+    // it, so these are the same lid pixels in both frames.
+    const int cx = static_cast<int>(before.width / 2), cy = static_cast<int>(before.height / 2), r = 20;
+    long long differ = 0, total = 0;
+    for (int y = cy - r; y <= cy + r; ++y) {
+        for (int x = cx - r; x <= cx + r; ++x) {
+            if (x < 0 || y < 0 || x >= static_cast<int>(before.width) || y >= static_cast<int>(before.height)) continue;
+            const size_t k = (static_cast<size_t>(y) * before.width + static_cast<size_t>(x)) * before.channels;
+            ++total;
+            for (int ch = 0; ch < 3; ++ch) {
+                if (std::abs(static_cast<int>(before.pixels[k + ch]) - static_cast<int>(after.pixels[k + ch])) > 24) { ++differ; break; }
+            }
+        }
+    }
+    expect(total > 0 && differ * 20 < total,
+           "snow ride: the lid's snow moved with the crate (" + std::to_string(differ) + "/" + std::to_string(total) + " px changed)");
+    if (total == 0 || differ * 20 >= total) { dump_frame(before, "snow_ride_before"); dump_frame(after, "snow_ride_after"); }
 }
 
 /** @brief tess_test: the tessellated dunes displace (vs. the same renderer untessellated). */
@@ -10591,6 +10771,16 @@ void test_snow_scene_renders() {
         deepest = std::max(deepest, snow->trench_at(glm::vec2(-2.0f, -2.0f) + 2.5f * glm::vec2(std::cos(a), std::sin(a))));
     }
     expect(deepest > 0.15f, "snow_test: the sled ploughs a trench (" + std::to_string(deepest) + " m)");
+    // ...that settles back behind it: the sled laps every 9 s and the scene's tracks recover in
+    // 1.5 s, so the trench is a short trail, not a ring.
+    int trenched = 0;
+    for (int k = 0; k < 64; ++k) {
+        const float a = static_cast<float>(k) / 64.0f * 6.2831853f;
+        if (snow->trench_at(glm::vec2(-2.0f, -2.0f) + 2.5f * glm::vec2(std::cos(a), std::sin(a))) > 0.03f) ++trenched;
+    }
+    expect(trenched < 64 / 3, "snow_test: the trench fills back in behind the sled (" + std::to_string(trenched) + "/64 of the loop)");
+    expect(w->settings().snow_patch_hard && engine.pipeline().surface_world_ubo().snow_style.x > 0.5f,
+           "snow_test: hard-edged patches reach the surface world UBO");
     expect(snow->trench_at({2.5f, -2.5f}) > 0.05f, "snow_test: the dropped ball presses in (auto deformer)");
     expect(snow->trench_at({-6.0f, 5.0f}) == 0.0f, "snow_test: untouched snow stays untouched");
 
@@ -11115,6 +11305,8 @@ const TestCase kTests[] = {
     {"snow_cover_accumulates_and_melts",           "weather",   test_snow_cover_accumulates_and_melts},
     {"snow_field_stamp_refill_scroll",             "world",     test_snow_field_stamp_refill_scroll},
     {"snow_open_sky_cpu_mirror",                   "world",     test_snow_open_sky_cpu_mirror},
+    {"snow_trenches_recover_and_follow_view",      "world",     test_snow_trenches_recover_and_follow_view},
+    {"snow_hard_patches",                          "world",     test_snow_hard_patches},
     {"particles_mesh_surface_area_weighted",       "particles", test_particles_mesh_surface_area_weighted},
     {"particles_scatter_aligned_to_normals",       "particles", test_particles_scatter_aligned_to_normals},
     {"particles_wrap_and_ground_field",            "particles", test_particles_wrap_and_ground_field},
@@ -11158,6 +11350,7 @@ const TestCase kTests[] = {
     {"physical_sky_off_costs_nothing",             "render_weather",  test_physical_sky_off_costs_nothing},
     {"tessellation_scene_renders",                 "render_surface",  test_tessellation_scene_renders},
     {"snow_scene_renders",                         "render_surface",  test_snow_scene_renders},
+    {"snow_pattern_rides_with_moving_object",      "render_surface",  test_snow_pattern_rides_with_moving_object},
     {"rig_clip_drives_hierarchy",                  "rig",             test_rig_clip_drives_hierarchy},
     {"rig_vertex_group_skinning",                  "rig",             test_rig_vertex_group_skinning},
     {"rig_foot_ik_on_step",                        "rig",             test_rig_foot_ik_on_step},

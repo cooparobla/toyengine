@@ -44,6 +44,10 @@ public:
     /// of it returns to perspective. Cleared by an explicit projection toggle.
     bool  auto_ortho = false;
     float fov = 50.0f;
+    // Edit > Preferences > Navigation.
+    float orbit_speed = 1.0f;   ///< Degrees per pixel of drag, x 0.35.
+    float zoom_speed = 1.0f;    ///< Scales every dolly step.
+    float fly_speed = 1.0f;
 
     /** @brief Creates the camera object as a root of `scene` (the editor UI scene). */
     void create(coopa::scene::Scene& scene) {
@@ -86,10 +90,13 @@ public:
     glm::vec3 right() const { return glm::normalize(glm::cross(forward(), glm::vec3(0, 0, 1))); }
     glm::vec3 up() const { return glm::normalize(glm::cross(right(), forward())); }
 
-    void orbit(glm::vec2 mouse_delta) {
-        if (auto_ortho && mouse_delta != glm::vec2(0.0f)) { ortho = false; auto_ortho = false; }
-        yaw_deg -= mouse_delta.x * 0.35f;
-        pitch_deg += mouse_delta.y * 0.35f;
+    void orbit(glm::vec2 mouse_delta) { turn(-mouse_delta.x * 0.35f * orbit_speed, mouse_delta.y * 0.35f * orbit_speed); }
+
+    /** @brief Turns the view by exact angles (numpad 2/4/6/8), whatever the orbit speed. */
+    void turn(float yaw_delta_deg, float pitch_delta_deg) {
+        if (auto_ortho && (yaw_delta_deg != 0.0f || pitch_delta_deg != 0.0f)) { ortho = false; auto_ortho = false; }
+        yaw_deg += yaw_delta_deg;
+        pitch_deg += pitch_delta_deg;
         apply();
     }
 
@@ -101,13 +108,13 @@ public:
     }
 
     void dolly(float wheel) {
-        distance *= std::pow(0.88f, wheel);
+        distance *= std::pow(0.88f, wheel * zoom_speed);
         apply();
     }
 
     /** @brief Flies the focus with WASD/QE: `move` is (right, forward, up) in -1..1. */
     void fly(glm::vec3 move, float dt) {
-        const float speed = std::max(2.0f, distance) * 1.2f;
+        const float speed = std::max(2.0f, distance) * 1.2f * fly_speed;
         focus += (right() * move.x + forward() * move.y + glm::vec3(0, 0, 1) * move.z) * speed * dt;
         apply();
     }

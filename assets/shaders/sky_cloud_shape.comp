@@ -1,0 +1,25 @@
+#version 450
+
+// The cloud march's base-shape volume (128^3, tiling, mip 0; SkyCloudPass bakes it once):
+//   r = Perlin-Worley: low-frequency Perlin fbm pushed up inside inverted Worley cells -- rounded,
+//       billowing cloud masses instead of fbm's stringy wisps (Schneider, "The real-time
+//       volumetric cloudscapes of Horizon Zero Dawn")
+//   g, b, a = inverted Worley fbm at 2x, 4x and 8x that frequency: the march folds them into a
+//       low-frequency fbm that erodes r (cloud_density() in sky_clouds.frag)
+
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+layout(set = 0, binding = 0, rgba8) uniform writeonly image3D u_out;
+layout(push_constant) uniform Gen { uint size; } gen;
+
+#include "sky_cloud_noise_common.glsl"
+
+void main() {
+    ivec3 id = ivec3(gl_GlobalInvocationID);
+    if (any(greaterThanEqual(id, ivec3(gen.size)))) return;
+    vec3 uvw = (vec3(id) + 0.5) / float(gen.size);
+    float perlin = cn_perlin_fbm(uvw, 4, 4, 3u);
+    float worley = cn_worley_fbm(uvw, 4, 17u);
+    float pw = clamp(cn_remap(perlin, 0.0, 1.0, worley, 1.0), 0.0, 1.0);
+    vec4 v = vec4(pw, cn_worley_fbm(uvw, 8, 29u), cn_worley_fbm(uvw, 16, 43u), cn_worley_fbm(uvw, 32, 59u));
+    imageStore(u_out, id, v);
+}

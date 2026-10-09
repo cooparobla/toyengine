@@ -130,6 +130,12 @@ scene:
    `cloud_altitude`, `cloud_thickness`, `cloud_density`, `cloud_wind_speed`) for a cloud layer,
    and `atmosphere_density` / `ozone` / `sun_disc_size` / `moon_disc_size` / `sky_quality` to
    tune it. Example: `assets/scenes/tests/rendering/sky_test`.
+   **Topdown games.** `topdown_mode: true` adds a toon cloud layer between a zoomed-out camera
+   and the ground (any sky model): `topdown_cloud_height` / `_size` / `_thickness` /
+   `_opacity`, `topdown_fade_start` / `_end` (camera height above the layer where it fades in),
+   `topdown_shadow_strength`, `topdown_light_bands`, `topdown_outline`; coverage and drift come
+   from `cloud_coverage` (weather-driven) and `cloud_wind_speed`. Example:
+   `assets/scenes/tests/rendering/topdown_sky_test`.
 5. **Per-scene settings.** `settings.render` overrides any `render:` key of `assets/config.yaml`,
    including the startup-fixed switches (`ssr_enabled`, `volumetrics_enabled`,
    `transparency_enabled`, `bloom_enabled`, `aa_mode`, resolutions, shadow-map sizes...). The

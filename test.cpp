@@ -8612,6 +8612,148 @@ void test_physical_sky_off_costs_nothing() {
     expect(back_px == 0, "sky: switching back restores the gradient sky exactly (" + std::to_string(back_px) + " px)");
 }
 
+/**
+ * @brief The cloud layer is temporally stable: a still camera over still clouds (FIXED_DT=0, no
+ *        drift) under TAA gives consecutive frames that agree. The clouds' own reconstruction
+ *        (SkyCloudPass) converges the march's per-frame jitter; the old per-frame march left
+ *        rotating dither noise TAA could not settle -- the "shimmering" sky.
+ */
+void test_sky_clouds_temporally_stable() {
+    using namespace sky_test_util;
+    ScopedEnv fixed_dt("FIXED_DT", "0");
+    ScopedEnv no_input("NO_INPUT", "1");
+    toy::core::AppConfig config = make_test_config("assets/scenes/tests/rendering/sky_test/scene.yaml", 480, 270, 480, 270);
+    config.render.aa_mode = "taa";
+    config.render.auto_exposure_enabled = false;
+    config.render.bloom_enabled = false;
+    config.render.shadows_enabled = false;
+    toy::core::Engine engine(std::move(config));
+    toy::weather::WeatherSystem* w = engine.weather();
+    expect(w != nullptr, "cloud stability: sky_test has its weather");
+    if (!w) return;
+    auto& pl = engine.pipeline();
+    auto& cfg = pl.render_config_mut();
+    cfg.shadows_enabled = false;
+    cfg.outline_enabled = false;
+    w->set_time(15.0f);
+    w->set_condition("cloudy", 0.0f);
+    // Look up into the clouds, so most of the frame is cloud layer.
+    coopa::scene::SceneObject* cam = engine.scene().find_object("camera");
+    if (cam && cam->get_transform()) cam->get_transform()->transform().set_rotation(glm::vec3(130.0f, 0.0f, 90.0f));
+    tick_frames(engine, 90);
+    expect(pl.render_config().clouds && pl.physical_sky_active(), "cloud stability: the clouds are on");
+    const Frame a = engine.capture_image(true);
+    tick_frames(engine, 1);
+    const Frame b = engine.capture_image(true);
+    expect(black_block_pixels(a) == 0, "cloud stability: no black (NaN) blocks");
+    const long long flicker = count_diff(a, b, 3);
+    const long long limit = long(a.width * a.height) / 200;   // 0.5% of the frame
+    if (flicker > limit) { dump_frame(a, "cloud_stable_a"); dump_frame(b, "cloud_stable_b"); }
+    expect(flicker <= limit, "cloud stability: consecutive frames agree (" + std::to_string(flicker) +
+                                 " px differ by more than 3 levels, limit " + std::to_string(limit) + ")");
+
+    // Without TAA (FXAA, the shipped default) and at the lowest tier, nothing smooths the
+    // clouds after their own reconstruction: its anti-flicker cap alone must hold them still.
+    // (aa_mode is startup-fixed: a second engine.)
+    toy::core::AppConfig low_config = make_test_config("assets/scenes/tests/rendering/sky_test/scene.yaml", 480, 270, 480, 270);
+    low_config.render.aa_mode = "fxaa";
+    low_config.render.sky_quality = toy::render::RenderQuality::Low;
+    low_config.render.auto_exposure_enabled = false;
+    low_config.render.bloom_enabled = false;
+    low_config.render.shadows_enabled = false;
+    toy::core::Engine low(std::move(low_config));
+    if (toy::weather::WeatherSystem* lw = low.weather()) {
+        lw->set_time(15.0f);
+        lw->set_condition("cloudy", 0.0f);
+    }
+    low.pipeline().render_config_mut().shadows_enabled = false;
+    low.pipeline().render_config_mut().sky_quality = toy::render::RenderQuality::Low;
+    if (coopa::scene::SceneObject* lc = low.scene().find_object("camera"); lc && lc->get_transform())
+        lc->get_transform()->transform().set_rotation(glm::vec3(130.0f, 0.0f, 90.0f));
+    tick_frames(low, 120);
+    expect(low.pipeline().render_config().aa_mode == "fxaa", "cloud stability: the second engine runs without TAA");
+    const Frame c = low.capture_image(true);
+    tick_frames(low, 1);
+    const Frame d = low.capture_image(true);
+    const long long flicker_low = count_diff(c, d, 2);
+    const long long limit_low = long(c.width * c.height) / 1000;   // 0.1% of the frame
+    if (flicker_low > limit_low) { dump_frame(c, "cloud_stable_low_a"); dump_frame(d, "cloud_stable_low_b"); }
+    expect(flicker_low <= limit_low, "cloud stability: no TAA, low tier, frames agree (" + std::to_string(flicker_low) +
+                                         " px differ by more than 2 levels, limit " + std::to_string(limit_low) + ")");
+}
+
+/**
+ * @brief Topdown mode (topdown_sky_test): the toon clouds show from a zoomed-out camera, fade
+ *        away as it comes down (their shadows stay), and need no physical sky.
+ */
+void test_topdown_clouds() {
+    using namespace sky_test_util;
+    ScopedEnv fixed_dt("FIXED_DT", "0");
+    ScopedEnv no_input("NO_INPUT", "1");
+    toy::core::AppConfig config = make_test_config("assets/scenes/tests/rendering/topdown_sky_test/scene.yaml", 480, 270, 480, 270);
+    config.render.aa_mode = "off";
+    config.render.auto_exposure_enabled = false;
+    config.render.bloom_enabled = false;
+    config.render.shadows_enabled = false;
+    toy::core::Engine engine(std::move(config));
+    toy::weather::WeatherSystem* w = engine.weather();
+    expect(w != nullptr, "topdown: the scene has its weather");
+    if (!w) return;
+    auto& pl = engine.pipeline();
+    auto& cfg = pl.render_config_mut();
+    cfg.shadows_enabled = false;
+    cfg.outline_enabled = false;
+    w->set_time(11.0f);
+    w->set_condition("cloudy", 0.0f);
+    tick_frames(engine, 4);
+    expect(cfg.topdown_mode, "topdown: the scene turns topdown_mode on");
+    const long long px = long(480 * 270);
+
+    // Zoomed out: clouds and shadows over the village.
+    const Frame on = engine.capture_image(true);
+    cfg.topdown_mode = false;
+    tick_frames(engine, 2);
+    const Frame off = engine.capture_image(true);
+    const long long cloud_px = count_diff(on, off, 8);
+    if (cloud_px < px / 20) { dump_frame(on, "topdown_on"); dump_frame(off, "topdown_off"); }
+    expect(cloud_px > px / 20, "topdown: the cloud layer shows zoomed out (" + std::to_string(cloud_px) + " px)");
+    expect(black_block_pixels(on) == 0, "topdown: no black (NaN) blocks");
+
+    // The shadows alone (invisible clouds) darken the ground.
+    cfg.topdown_mode = true;
+    cfg.topdown_cloud_opacity = 0.0f;
+    tick_frames(engine, 2);
+    const Frame shadows = engine.capture_image(true);
+    const float lum_off = glm::dot(band_mean(off, 0.0f, 1.0f), glm::vec3(1.0f / 3.0f));
+    const float lum_sh = glm::dot(band_mean(shadows, 0.0f, 1.0f), glm::vec3(1.0f / 3.0f));
+    expect(lum_sh < lum_off - 1.0f, "topdown: cloud shadows darken the ground (" + std::to_string(lum_sh) + " vs " +
+                                        std::to_string(lum_off) + ")");
+
+    // Zoomed in, below the fade: with shadows off, the layer changes nothing. (The orbit rig
+    // owns the camera's position, so the fade heights move up past the camera instead.)
+    cfg.topdown_cloud_opacity = 0.92f;
+    cfg.topdown_shadow_strength = 0.0f;
+    cfg.topdown_fade_start = 500.0f;
+    cfg.topdown_fade_end = 600.0f;
+    tick_frames(engine, 3);
+    const Frame near_on = engine.capture_image(true);
+    cfg.topdown_mode = false;
+    tick_frames(engine, 2);
+    const Frame near_off = engine.capture_image(true);
+    expect(count_diff(near_on, near_off, 0) == 0, "topdown: zoomed in, the clouds have faded away");
+
+    // Back out, gradient sky: the layer needs no physical sky.
+    cfg.topdown_fade_start = 15.0f;
+    cfg.topdown_fade_end = 60.0f;
+    cfg.sky_model = "gradient";
+    tick_frames(engine, 3);
+    const Frame grad_off = engine.capture_image(true);
+    cfg.topdown_mode = true;
+    tick_frames(engine, 2);
+    const Frame grad_on = engine.capture_image(true);
+    expect(count_diff(grad_on, grad_off, 8) > px / 20, "topdown: the clouds draw with the gradient sky too");
+}
+
 // -------------------------------------------------------------------------------------------
 // Group "particles" -- toyengine/particles/: curves, emission, the mesh emitter, scatter,
 // collision + sub emitters, YAML, render prep, and the job split. Device-free.
@@ -11348,6 +11490,8 @@ const TestCase kTests[] = {
     {"weather_scene_renders",                      "render_weather",  test_weather_scene_renders},
     {"physical_sky_renders",                       "render_weather",  test_physical_sky_renders},
     {"physical_sky_off_costs_nothing",             "render_weather",  test_physical_sky_off_costs_nothing},
+    {"sky_clouds_temporally_stable",               "render_weather",  test_sky_clouds_temporally_stable},
+    {"topdown_clouds",                             "render_weather",  test_topdown_clouds},
     {"tessellation_scene_renders",                 "render_surface",  test_tessellation_scene_renders},
     {"snow_scene_renders",                         "render_surface",  test_snow_scene_renders},
     {"snow_pattern_rides_with_moving_object",      "render_surface",  test_snow_pattern_rides_with_moving_object},

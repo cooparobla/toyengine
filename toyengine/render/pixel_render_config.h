@@ -1256,6 +1256,24 @@ struct PixelRenderConfig {
     float cloud_density = 1.0f;        /**< Extinction multiplier: higher = darker, more solid clouds. */
     float cloud_wind_speed = 8.0f;     /**< m/s the clouds drift (along the weather's wind when it is on, else along +X). */
 
+    // --- Topdown mode ---
+    /**
+     * A toon cloud layer for topdown games: flat-shaded puffy clouds floating at a fixed world
+     * height between a zoomed-out camera and the ground, fading in as the camera rises, with
+     * their shadows drifting over the ground. Works with either sky model; the weather drives
+     * its coverage (cloud_coverage) and drift (cloud_wind_speed). Runtime.
+     */
+    bool  topdown_mode = false;
+    float topdown_cloud_height = 60.0f;       /**< World height (z) of the layer, metres. */
+    float topdown_cloud_size = 30.0f;         /**< Typical diameter of one puff, metres. */
+    float topdown_cloud_thickness = 8.0f;     /**< How tall the puffs stand, metres. */
+    float topdown_cloud_opacity = 0.92f;      /**< 0..1. */
+    float topdown_fade_start = 15.0f;         /**< Camera height above the layer where the clouds start to show, metres. */
+    float topdown_fade_end = 60.0f;           /**< Camera height above the layer where they are fully shown, metres. */
+    float topdown_shadow_strength = 0.45f;    /**< How much a cloud's shadow darkens the ground (0 = no shadows). */
+    float topdown_light_bands = 3.0f;         /**< Toon shading steps (0 = smooth shading). */
+    float topdown_outline = 0.5f;             /**< Darkening of each cloud's rim, 0..1. */
+
     std::string shader_dir;                   /**< Absolute path to assets/shaders. */
     // Ordered search path resolving a logical shader name (e.g. "gbuffer.vert") to a compiled
     // .spv path -- the project's, the engine's, gfxcoopa's then uicoopa's shader directories

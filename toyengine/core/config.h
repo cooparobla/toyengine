@@ -325,6 +325,16 @@ struct AppConfig {
                 if (r.contains("cloud_thickness"))    config.render.cloud_thickness    = sky_num(r.at("cloud_thickness"));
                 if (r.contains("cloud_density"))      config.render.cloud_density      = sky_num(r.at("cloud_density"));
                 if (r.contains("cloud_wind_speed"))   config.render.cloud_wind_speed   = sky_num(r.at("cloud_wind_speed"));
+                if (r.contains("topdown_mode"))            config.render.topdown_mode            = r.at("topdown_mode").get_value<bool>();
+                if (r.contains("topdown_cloud_height"))    config.render.topdown_cloud_height    = sky_num(r.at("topdown_cloud_height"));
+                if (r.contains("topdown_cloud_size"))      config.render.topdown_cloud_size      = sky_num(r.at("topdown_cloud_size"));
+                if (r.contains("topdown_cloud_thickness")) config.render.topdown_cloud_thickness = sky_num(r.at("topdown_cloud_thickness"));
+                if (r.contains("topdown_cloud_opacity"))   config.render.topdown_cloud_opacity   = sky_num(r.at("topdown_cloud_opacity"));
+                if (r.contains("topdown_fade_start"))      config.render.topdown_fade_start      = sky_num(r.at("topdown_fade_start"));
+                if (r.contains("topdown_fade_end"))        config.render.topdown_fade_end        = sky_num(r.at("topdown_fade_end"));
+                if (r.contains("topdown_shadow_strength")) config.render.topdown_shadow_strength = sky_num(r.at("topdown_shadow_strength"));
+                if (r.contains("topdown_light_bands"))     config.render.topdown_light_bands     = sky_num(r.at("topdown_light_bands"));
+                if (r.contains("topdown_outline"))         config.render.topdown_outline         = sky_num(r.at("topdown_outline"));
 
                 // --- Shadows ---
                 if (r.contains("shadows_enabled"))        config.render.shadows_enabled        = r.at("shadows_enabled").get_value<bool>();

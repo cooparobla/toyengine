@@ -1749,9 +1749,18 @@ public:
         weather::WeatherSystem* w = weather::find(scene);
         const bool physical = c.sky_model == "physical";
         if (w) w->set_physical_sky(physical);
+        const bool weather_live = w && w->enabled() && w->state().enabled;
+
+        // Cloud drift and evolution, shared by the physical sky's clouds and the topdown layer.
+        glm::vec2 wind_dir(1.0f, 0.0f);
+        if (weather_live && glm::length(glm::vec2(w->state().wind)) > 0.05f) wind_dir = glm::normalize(glm::vec2(w->state().wind));
+        sky_cloud_offset_ += wind_dir * c.cloud_wind_speed * std::max(dt, 0.0f);
+        sky_cloud_offset_ = glm::mod(sky_cloud_offset_, glm::vec2(13000.0f * 53.0f));   // whole periods of both shape-map reads (sky_clouds.frag)
+        sky_time_ += std::max(dt, 0.0f);
+        sync_topdown_cloud_state_(c);
+
         render::SkyFrameState st;
         if (!physical) { restore_sky_colours_(); pipeline_->set_sky_state(st); return; }
-        const bool weather_live = w && w->enabled() && w->state().enabled;
         if (weather_live && sky_applied_) {
             // The weather started over our colours and captured them as "the config's": hand it
             // the real ones, and let its base own them from here on.
@@ -1824,12 +1833,7 @@ public:
         st.cloud_altitude = c.cloud_altitude;
         st.cloud_thickness = c.cloud_thickness;
         st.cloud_density = c.cloud_density;
-        glm::vec2 wind_dir(1.0f, 0.0f);
-        if (weather_live && glm::length(glm::vec2(w->state().wind)) > 0.05f) wind_dir = glm::normalize(glm::vec2(w->state().wind));
-        sky_cloud_offset_ += wind_dir * c.cloud_wind_speed * std::max(dt, 0.0f);
-        sky_cloud_offset_ = glm::mod(sky_cloud_offset_, glm::vec2(13000.0f * 53.0f));   // whole periods of both shape-map reads (sky_clouds.frag)
         st.cloud_offset = sky_cloud_offset_;
-        sky_time_ += std::max(dt, 0.0f);
         st.time = std::fmod(sky_time_, 3600.0f);
         // Clouds are lit by the sun until it is well below the horizon, then by the moon.
         if (sun_to.z > -0.12f) {
@@ -1843,6 +1847,30 @@ public:
             st.cloud_light_color = glm::vec3(0.75f, 0.85f, 1.0f) * K * k_moon_ratio * 0.5f;
         }
         pipeline_->set_sky_state(st);
+    }
+
+    /**
+     * @brief The topdown toon cloud layer (render topdown_mode) for this frame: the config's
+     *        look, the weather-driven coverage and the shared wind drift. Lit by the scene's own
+     *        directional light and sky colours in the shader, so it needs no sky model.
+     */
+    void sync_topdown_cloud_state_(const render::PixelRenderConfig& c) {
+        render::TopdownCloudState td;
+        td.active = c.topdown_mode;
+        td.height = c.topdown_cloud_height;
+        td.size = std::max(c.topdown_cloud_size, 1.0f);
+        td.thickness = std::max(c.topdown_cloud_thickness, 0.1f);
+        // A topdown game must stay playable under a storm: full cover still leaves gaps.
+        td.coverage = std::clamp(c.cloud_coverage, 0.0f, 1.0f) * 0.6f;
+        td.opacity = std::clamp(c.topdown_cloud_opacity, 0.0f, 1.0f);
+        td.fade_start = c.topdown_fade_start;
+        td.fade_end = std::max(c.topdown_fade_end, c.topdown_fade_start + 0.01f);
+        td.shadow_strength = std::clamp(c.topdown_shadow_strength, 0.0f, 1.0f);
+        td.light_bands = std::max(c.topdown_light_bands, 0.0f);
+        td.outline = std::clamp(c.topdown_outline, 0.0f, 1.0f);
+        td.offset = sky_cloud_offset_;
+        td.time = std::fmod(sky_time_, 3600.0f);
+        pipeline_->set_topdown_cloud_state(td);
     }
 
     /**

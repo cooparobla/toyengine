@@ -57,7 +57,8 @@ vec3 sky_star_layer(vec3 dir, float cells, float density, float t) {
 }
 
 // The cloud layer's colour (rgb) and transmittance (a) at a full-resolution uv: a bilinear
-// upsample of the march that drops taps the march skipped as geometry (a < 0). The march fills
+// upsample of the reconstructed layer (sky_cloud_resolve.frag) that drops taps skipped as
+// geometry (a < 0). The layer fills
 // the top-left `scale` fraction of its half-resolution target (sky_quality; the same rounding
 // as SkyCloudPass::scaled_extent).
 vec4 sky_clouds_upsample(vec2 uv, float scale) {

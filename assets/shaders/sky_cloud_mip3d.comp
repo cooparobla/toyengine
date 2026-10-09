@@ -1,0 +1,16 @@
+#version 450
+
+// One mip of a cloud noise volume (CloudNoiseTexture): the box average of the 2x2x2 texels above.
+
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+layout(set = 0, binding = 0, rgba8) uniform readonly image3D u_src;
+layout(set = 0, binding = 1, rgba8) uniform writeonly image3D u_dst;
+
+void main() {
+    ivec3 id = ivec3(gl_GlobalInvocationID);
+    if (any(greaterThanEqual(id, imageSize(u_dst)))) return;
+    ivec3 s = id * 2;
+    vec4 sum = vec4(0.0);
+    for (int k = 0; k < 8; ++k) sum += imageLoad(u_src, s + ivec3(k & 1, (k >> 1) & 1, (k >> 2) & 1));
+    imageStore(u_dst, id, sum * 0.125);
+}

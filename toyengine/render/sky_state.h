@@ -94,6 +94,27 @@ struct SkyFrameState {
     float time = 0.0f;                ///< Seconds; cloud evolution and star twinkle.
 };
 
+/**
+ * @brief One frame of the topdown toon cloud layer (render topdown_mode): flat-shaded puffy
+ *        clouds at a fixed world height, drawn over the scene for zoomed-out topdown cameras,
+ *        with their shadows on the ground. Independent of the sky model.
+ */
+struct TopdownCloudState {
+    bool active = false;              ///< Draw the layer (and its shadows) this frame.
+    float height = 60.0f;             ///< m, world z of the layer's middle.
+    float size = 30.0f;               ///< m, typical diameter of one puff.
+    float thickness = 8.0f;           ///< m, how tall the puffs stand.
+    float coverage = 0.4f;            ///< 0..1, the share of the ground the clouds cover.
+    float opacity = 0.92f;
+    float fade_start = 15.0f;         ///< m of camera height above the layer where clouds start to show.
+    float fade_end = 60.0f;           ///< ... and where they are fully shown.
+    float shadow_strength = 0.45f;    ///< How much a cloud's shadow darkens the ground (0 = none).
+    float light_bands = 3.0f;         ///< Toon shading steps (0 = smooth).
+    float outline = 0.5f;             ///< Darkening of each cloud's rim, 0..1.
+    glm::vec2 offset{0.0f};           ///< Accumulated wind drift (m).
+    float time = 0.0f;                ///< Seconds; the puffs slowly morph.
+};
+
 } // namespace render
 } // namespace toy
 

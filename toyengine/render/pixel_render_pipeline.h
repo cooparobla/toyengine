@@ -150,6 +150,7 @@
 #include <toyengine/render/passes/particle_pass.h>
 #include <toyengine/render/passes/sky_atmosphere_pass.h>
 #include <toyengine/render/passes/sky_cloud_pass.h>
+#include <toyengine/render/passes/topdown_cloud_pass.h>
 #include <toyengine/render/passes/skinning_pass.h>
 #include <toyengine/render/sky_state.h>
 #include <toyengine/render/particle_types.h>
@@ -431,6 +432,8 @@ public:
      *        sky_state.h). Engine sets it every frame; an inactive state draws the gradient sky.
      */
     void set_sky_state(const SkyFrameState& state) { sky_state_ = state; }
+    /** @brief This frame's topdown toon cloud layer (render topdown_mode). */
+    void set_topdown_cloud_state(const TopdownCloudState& state) { topdown_state_ = state; }
     const SkyFrameState& sky_state() const { return sky_state_; }
     /** @brief The GPU skinning pre-pass (render.skinning: gpu with compute), else null --
      *         SkinnedMeshRenderer::upload() then skins on the CPU. */
@@ -1257,11 +1260,12 @@ private:
             device_, allocator_, config_.shaders("fullscreen.vert"), config_.shaders("sky_transmittance.frag"),
             config_.shaders("sky_multiscatter.frag"), config_.shaders("sky_view.frag"));
         sky_cloud_pass_ = std::make_unique<passes::SkyCloudPass>(
-            device_, allocator_, render_extent_.width, render_extent_.height, *camera_layout_, *light_layout_,
-            config_.shaders("fullscreen.vert"), config_.shaders("sky_cloud_noise.frag"),
-            config_.shaders("sky_cloud_noise3d.frag"), config_.shaders("sky_clouds.frag"));
-        sky_cloud_pass_->set_inputs(sky_atmosphere_pass_->transmittance_view(), sky_atmosphere_pass_->sky_view_view(),
-                                    gbuffer_target_.g1_view_typed());
+            device_, allocator_, render_extent_.width, render_extent_.height, kCameraFrames, *camera_layout_, *light_layout_,
+            config_.shaders("fullscreen.vert"), config_.shaders("sky_clouds.frag"), config_.shaders("sky_cloud_resolve.frag"),
+            config_.shaders("sky_cloud_copy.frag"), config_.shaders("sky_cloud_weather.comp"),
+            config_.shaders("sky_cloud_shape.comp"), config_.shaders("sky_cloud_detail.comp"),
+            config_.shaders("sky_cloud_mip2d.comp"), config_.shaders("sky_cloud_mip3d.comp"));
+        sky_cloud_pass_->set_inputs(sky_atmosphere_pass_->transmittance_view(), gbuffer_target_.g1_view_typed());
 
         // Bindings 1-3 are the physical sky's inputs (pixel_lighting.frag's sky branch).
         contact_extra_layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
@@ -1504,6 +1508,14 @@ private:
             device_, transparent_pass_->render_pass(), *light_layout_,
             config_.shaders("fullscreen.vert"), config_.shaders("fog.frag"));
         fog_pass_->set_source_images(gbuffer_target_.g1_view_typed(), gbuffer_target_.g2_view_typed());
+
+        // Topdown mode's toon clouds: drawn after the translucent pass, inside its render pass.
+        topdown_cloud_pass_ = std::make_unique<passes::TopdownCloudPass>(
+            device_, transparent_pass_->render_pass(), *camera_layout_, *light_layout_,
+            config_.shaders("fullscreen.vert"), config_.shaders("topdown_clouds.frag"));
+        topdown_cloud_pass_->set_inputs(gbuffer_target_.g1_view_typed(), gbuffer_target_.g2_view_typed(),
+                                        sky_cloud_pass_->weather_view(), sky_cloud_pass_->shape_view(),
+                                        sky_cloud_pass_->noise_sampler());
 
         // SdfForwardPass shares transparent_pass_'s render pass -- render passes only need to be
         // attachment-compatible to back a second pipeline, and sharing lets record_transparent_()
@@ -1959,15 +1971,43 @@ private:
 
         if (st.clouds) {
             passes::SkyCloudPass::Params cp;
-            cp.inv_view_proj = glm::inverse(ctx.proj * ctx.view);
+            // Unjittered: the clouds reconstruct temporally on their own (sky_cloud_resolve.frag),
+            // and a jittered ray would swim against the history it reprojects.
+            cp.view_proj = ctx.unjittered_proj * ctx.view;
+            cp.prev_view_proj = prev_view_proj_valid_ ? prev_unjittered_view_proj_ : cp.view_proj;
+            cp.camera_pos = ctx.cam_pos;
+            cp.proj_y = std::abs(ctx.unjittered_proj[1][1]);
             cp.slab = glm::vec4(std::max(st.cloud_altitude, 0.0f), std::max(st.cloud_thickness, 10.0f),
                                 glm::clamp(st.cloud_coverage, 0.0f, 1.0f), std::max(st.cloud_density, 0.0f));
-            // The march's start offset rotates per frame only when TAA is there to average it.
-            cp.wind = glm::vec4(st.cloud_offset, st.time,
-                                config_.aa_mode == "taa" ? static_cast<float>(frame_index_ & 0xFFu) : -1.0f);
-            cp.light_dir = glm::vec4(st.cloud_light_to, static_cast<float>(q.cloud_steps));
-            cp.light_color = glm::vec4(st.cloud_light_color, static_cast<float>(q.cloud_light_steps));
-            sky_cloud_pass_->execute(cmd, current_camera_set(), current_light_set(), cp, q.cloud_scale);
+            cp.wind_offset = st.cloud_offset;
+            // The offset wraps every few hundred km (Engine::sync_sky_render_state_); a wrap reads
+            // as a jump, so treat anything faster than 1 km per frame as no drift.
+            const glm::vec2 drift = st.cloud_offset - cloud_prev_offset_;
+            cp.drift = glm::length(drift) < 1000.0f ? drift : glm::vec2(0.0f);
+            cloud_prev_offset_ = st.cloud_offset;
+            cp.time = st.time;
+            cp.frame = frame_index_;
+            cp.light_dir = st.cloud_light_to;
+            cp.light_color = st.cloud_light_color;
+            cp.view_steps = q.cloud_steps;
+            cp.shadow_steps = q.cloud_light_steps;
+            // History is valid only if the clouds ran last frame too.
+            cp.history_valid = prev_view_proj_valid_ && cloud_last_frame_ + 1 == frame_index_;
+            cloud_last_frame_ = frame_index_;
+            // How much the clouds' light changed since last frame (relative): the resolve's
+            // anti-flicker cap lets a real lighting change through at its own pace.
+            const auto lum = [](glm::vec3 c) { return glm::dot(c, glm::vec3(0.2126f, 0.7152f, 0.0722f)); };
+            const glm::vec2 light_now(lum(st.cloud_light_color), lum(config_.indirect.sky_zenith));
+            const glm::vec2 rel = glm::abs(light_now - cloud_prev_light_) / glm::max(glm::max(light_now, cloud_prev_light_), glm::vec2(1e-6f));
+            // An edit to the layer itself (coverage, density, altitude, thickness) counts too, so
+            // dragging a slider updates the clouds at once instead of easing in.
+            const glm::vec4 dslab = glm::abs(cp.slab - cloud_prev_slab_) /
+                                    glm::max(glm::abs(cloud_prev_slab_), glm::vec4(100.0f, 100.0f, 0.05f, 0.05f));
+            const float layer_change = std::max(std::max(dslab.x, dslab.y), std::max(dslab.z, dslab.w));
+            cp.light_change = cp.history_valid ? std::max(std::max(rel.x, rel.y), layer_change) : 0.0f;
+            cloud_prev_light_ = light_now;
+            cloud_prev_slab_ = cp.slab;
+            sky_cloud_pass_->execute(cmd, ctx.frame_slot, current_camera_set(), current_light_set(), cp, q.cloud_scale);
             gpu_mark_(cmd, GpuScope::Clouds);
         }
     }
@@ -1976,13 +2016,15 @@ private:
      *         cloud_scale is the fraction (per axis) of the half-resolution cloud target marched. */
     struct SkyQualitySteps { int sky_steps, cloud_steps, cloud_light_steps; float cloud_scale; };
     SkyQualitySteps sky_quality_steps_() const {
+        // The cloud march traces a quarter of the region's pixels per frame (checkerboarded,
+        // SkyCloudPass), so these step counts cost what a quarter of them would per pixel.
         switch (config_.sky_quality) {
-            case RenderQuality::Low:    return {16, 8, 1, 0.4f};
-            case RenderQuality::Medium: return {24, 12, 2, 0.5f};
+            case RenderQuality::Low:    return {16, 24, 4, 0.5f};
+            case RenderQuality::Medium: return {24, 32, 5, 0.75f};
             case RenderQuality::High:   break;
-            case RenderQuality::Ultra:  return {40, 24, 3, 1.0f};
+            case RenderQuality::Ultra:  return {40, 64, 6, 1.0f};
         }
-        return {30, 16, 2, 0.5f};
+        return {30, 40, 4, 1.0f};
     }
 
     /**
@@ -2369,6 +2411,27 @@ private:
             gpu_mark_(cmd, GpuScope::Transparent);
         }
 
+        if (topdown_state_.active) record_topdown_clouds_(cmd, ctx);
+    }
+
+    /**
+     * @brief Topdown mode's toon cloud layer and its shadows, over the finished HDR scene
+     *        (after the translucent pass, so clouds cover water below them too). Reopens the live
+     *        HDR image through transparent_pass_'s render pass like record_fog_() does; depth
+     *        arrives and leaves SHADER_READ_ONLY_OPTIMAL.
+     */
+    void record_topdown_clouds_(coopa::gfx::command::CommandBuffer& cmd, const FrameContext& ctx) {
+        sky_cloud_pass_->ensure_noise(cmd);
+        VkImageView hdr = config_.ssr_enabled ? ssr_pass_->output_view() : offscreen_target_.color_view();
+        transparent_pass_->set_targets(hdr, gbuffer_target_.depth_view(), render_extent_.width, render_extent_.height);
+        transparent_pass_->begin(cmd, gbuffer_target_.depth_image_handle(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        // Jittered, like every surface: TAA then resolves the clouds' silhouettes with the scene's.
+        const auto p = passes::TopdownCloudPass::params_of(topdown_state_, glm::inverse(ctx.proj * ctx.view));
+        topdown_cloud_pass_->draw(cmd, current_camera_set(), current_light_set(), p, render_extent_.width,
+                                  render_extent_.height);
+        transparent_pass_->end(cmd);
+        transition_gbuffer_depth_to_shader_read_(cmd, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+        gpu_mark_(cmd, GpuScope::Clouds);
     }
 
     /**
@@ -5748,6 +5811,12 @@ private:
     std::unique_ptr<passes::SkyAtmospherePass>                   sky_atmosphere_pass_;
     std::unique_ptr<passes::SkinningPass>                        skinning_pass_;   ///< null: CPU skinning
     std::unique_ptr<passes::SkyCloudPass>                        sky_cloud_pass_;
+    std::unique_ptr<passes::TopdownCloudPass>                    topdown_cloud_pass_;   ///< render topdown_mode
+    TopdownCloudState                                            topdown_state_;        // set_topdown_cloud_state(), per frame
+    glm::vec2 cloud_prev_offset_{0.0f};     ///< Last frame's cloud wind offset (the drift the reconstruction follows).
+    glm::vec4 cloud_prev_slab_{0.0f};       ///< Last frame's layer parameters (an edit lifts the anti-flicker cap too).
+    glm::vec2 cloud_prev_light_{0.0f};      ///< Last frame's cloud light / zenith luminance (SkyCloudPass::Params::light_change).
+    uint32_t  cloud_last_frame_ = ~0u - 1;   ///< frame_index_ the clouds last ran (history valid only if it was the previous one).
     /// pixel_lighting_pass_'s extra set (set 4): contact_shadow_pass_'s resolved occlusion.
     /// Declared BEFORE pixel_lighting_pass_ so it outlives the pass holding it in its ExtraSets.
     std::unique_ptr<coopa::gfx::pipeline::DescriptorSetLayout>   contact_extra_layout_;

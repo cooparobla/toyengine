@@ -161,8 +161,9 @@ inline const std::vector<SettingsGroup>& render_settings_groups() {
             .add(F(f_bool("sky_stars", true), "Stars", "Stars fade in as the sky darkens, behind any clouds"))
             .done());
 
-        g.push_back(GroupBuilder(general, "Clouds", "A raymarched cloud layer lit by the sun and moon, drawn over the "
-                                 "physical sky (sky_model: physical) at half resolution. The scene's weather drives its "
+        g.push_back(GroupBuilder(general, "Clouds", "Volumetric clouds lit by the sun and moon, drawn over the physical "
+                                 "sky (sky_model: physical): raymarched a quarter of the pixels per frame and reconstructed "
+                                 "temporally (Sky Quality sets the steps and resolution). The scene's weather drives its "
                                  "coverage while it is on")
             .toggle(F(f_bool("clouds", false), "Clouds", "The cloud layer (needs Sky Model: physical)"))
             .add(F(f_float("cloud_coverage", 0.4f, 0.005f, 0.0f, 1.0f), "Coverage",
@@ -172,6 +173,27 @@ inline const std::vector<SettingsGroup>& render_settings_groups() {
             .add(F(f_float("cloud_density", 1.0f, 0.01f, 0.0f, 10.0f), "Density", "Higher = darker, more solid clouds; lower = wispy"))
             .add(F(f_float("cloud_wind_speed", 8.0f, 0.1f, 0.0f, 200.0f), "Wind Speed",
                    "How fast the clouds drift, m/s (along the weather's wind while it is on)"))
+            .done());
+
+        g.push_back(GroupBuilder(general, "Topdown Mode", "A toon cloud layer for topdown games: puffy, cel-shaded clouds "
+                                 "floating between a zoomed-out camera and the ground, fading in as the camera rises, with "
+                                 "their shadows drifting over the ground. Works with either sky model; the weather drives "
+                                 "its coverage (Clouds > Coverage) and drift (Clouds > Wind Speed)")
+            .toggle(F(f_bool("topdown_mode", false), "Topdown Mode", "The toon cloud layer and its ground shadows"))
+            .add(F(f_float("topdown_cloud_height", 60.0f, 0.5f, -1000.0f, 10000.0f), "Cloud Height",
+                   "World height (z) of the layer, metres"))
+            .add(F(f_float("topdown_cloud_size", 30.0f, 0.5f, 1.0f, 1000.0f), "Cloud Size", "Typical diameter of one puff, metres"))
+            .add(F(f_float("topdown_cloud_thickness", 8.0f, 0.1f, 0.1f, 200.0f), "Cloud Thickness",
+                   "How tall the puffs stand, metres (more = rounder, more shading)"))
+            .add(F(f_float("topdown_cloud_opacity", 0.92f, 0.01f, 0.0f, 1.0f), "Opacity", "0 = invisible clouds (shadows only), 1 = solid"))
+            .add(F(f_float("topdown_fade_start", 15.0f, 0.5f, 0.0f, 10000.0f), "Fade In From",
+                   "Camera height above the layer where the clouds start to show, metres"))
+            .add(F(f_float("topdown_fade_end", 60.0f, 0.5f, 0.0f, 10000.0f), "Fully Shown At",
+                   "Camera height above the layer where the clouds are fully shown, metres"))
+            .add(F(f_float("topdown_shadow_strength", 0.45f, 0.01f, 0.0f, 1.0f), "Shadow Strength",
+                   "How much a cloud's shadow darkens the ground (0 = no shadows). Shown at every zoom"))
+            .add(F(f_float("topdown_light_bands", 3.0f, 0.1f, 0.0f, 16.0f), "Light Bands", "Toon shading steps (0 = smooth shading)"))
+            .add(F(f_float("topdown_outline", 0.5f, 0.01f, 0.0f, 1.0f), "Outline", "Darkening of each cloud's rim"))
             .done());
 
         g.push_back(GroupBuilder(general, "Anti-Aliasing", "Smooths jagged edges. One method at a time; its tuning is listed under it")

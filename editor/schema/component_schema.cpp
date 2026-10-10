@@ -614,6 +614,44 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             with_tip(f_enum("bus", {"Master", "Music", "SFX", "UI"}, true),
                      "The mixer bus a Slider on this element (e.g. a SettingRow's) controls; remembered per player"),
         }});
+        // toyengine/audio/music_player.h: background music through AudioSystem::music().
+        add({"MusicPlaylist", "Audio", {
+            with_tip(f_items("tracks", {
+                f_string("name"),
+                f_asset("clip", "audio", ".wav", false, false, "", true),
+                f_float("volume", 1.0f, 0.01f, 0.0f, 4.0f),
+            }), "Played in order, crossfading track to track; a track already playing carries on"),
+            f_float("crossfade", 3.0f, 0.05f, 0.0f, 60.0f, true),
+            f_bool("shuffle", false),
+            with_tip(f_bool("repeat", true), "Wrap after the last track (else the music ends)"),
+            with_tip(f_int("start", -1, -1, 1000), "First track index; -1: the first (random when shuffled)"),
+            f_bool("play_on_start", true),
+            with_tip(f_bool("stop_on_destroy", false), "Fade the music out when this object goes (else it plays into the next scene)"),
+        }});
+        add({"MusicZone", "Audio", {
+            with_tip(f_string("track", "", true), "Track name or clip path played over the scene music while the listener is inside"),
+            with_tip(f_vec3("size", glm::vec3(10.0f, 10.0f, 6.0f), 0.05f, true), "Box extents, centred on the object (times its scale)"),
+            with_tip(f_float("radius", 0.0f, 0.05f, 0.0f, 100000.0f), "> 0: a sphere instead of the box"),
+            f_float("fade", 2.0f, 0.05f, 0.0f, 60.0f, true),
+        }});
+        add({"MusicStatusText", "Audio", {
+            with_tip(f_string("prefix"), "Written before the status in this object's Text"),
+        }});
+        add({"MusicOnSignal", "Audio", {
+            f_string("listen_object", "", true),
+            f_string("listen_signal", "click", true),
+            f_enum("action", {"play", "push", "pop", "next", "previous", "stop", "pause", "resume", "toggle_pause", "playlist"}, true),
+            with_tip(f_string("track"), "For play / push: a track name or clip path"),
+            with_tip(f_string("target"), "For playlist: the object whose MusicPlaylist restarts"),
+            with_tip(f_float("fade", -1.0f, 0.05f, -1.0f, 60.0f), "Seconds; -1: the default"),
+        }});
+        add({"AudioSourceOnSignal", "Audio", {
+            f_string("listen_object", "", true),
+            f_string("listen_signal", "click", true),
+            with_tip(f_enum("action", {"play", "stop", "toggle", "pause", "resume", "follow"}, true),
+                     "follow: play while a Toggle's value is on"),
+            with_tip(f_string("target"), "Object with the AudioSource; empty: this one"),
+        }});
         add({"CameraController", "Gameplay", {
             f_enum("mode", {"Orbit", "Fly", "FirstPerson"}, true),
             with_tip(f_string("tracker"), "Name of an object to follow (Orbit) or ride (FirstPerson); empty uses Target"),

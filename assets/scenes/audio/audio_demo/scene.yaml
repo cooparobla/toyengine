@@ -1,0 +1,998 @@
+# audio_demo -- toyengine's audio end to end: background music with crossfades, 3D spatial sound,
+# and UI sounds. Headphones make the 3D part obvious.
+#
+# You stand in the middle of a ring of stations (fly camera: WASD move, Q/E down/up, arrow keys
+# turn; the mouse is free for the panel on the left).
+#
+#   * MUSIC (object `music`, a MusicPlaylist): meadow -> expedition, 4 s crossfades, repeating.
+#     Each track hands off to the next on its own a few seconds before it ends -- the "natural"
+#     transition. The panel's Music tab drives it from code paths (MusicOnSignal): previous /
+#     next, pause (fades), stop, play a track directly (a 2.5 s crossfade), push a "boss" track
+#     over it and pop back, restart the playlist. The status line (MusicStatusText) shows the
+#     track, its clock and when a crossfade is running.
+#   * MUSIC ZONE (south-west, violet floor): a MusicZone. Walk in and `nocturne` is pushed over
+#     the playlist, which fades out and PAUSES; walk out and it fades back in where it stopped.
+#   * COMPASS BEACONS (N/E/S/W, 10 m): a blip loop at a different pitch each, toggled from the
+#     Spatial tab -- turn on one at a time and turn your head; it moves between the ears.
+#   * DRONE: a buzzing sphere orbiting you at 6 m, 120 deg/s -- direction sweeps around your head
+#     and doppler bends its pitch as it comes and goes.
+#   * CRICKETS (north-west grass), CHIMES (north-east post): ambience with inverse rolloff.
+#   * CAMPFIRE (south-east): crackle with LINEAR rolloff to 16 m -- walk away and it fades to
+#     silence, unlike the inverse-curve sources.
+#   * MUSIC BOX (far north, 28 m): too far to hear from the start; walk up to it.
+#   * PINGS: five one-shot sources parented to the camera (left / right / front / behind /
+#     above), fired from the Spatial tab -- they always come from that side of your head.
+#   * UI: every widget plays the canvas' UiSoundPlayer cues (hover tick, press click, slider
+#     ticks, tab switch); the UI Sounds tab's buttons each add a PlaySoundOnSignal sound on
+#     release. The Mixer tab's sliders are VolumeBindings on the Master / Music / SFX / UI buses.
+#
+# Clips: tools/gen_audio_demo_assets.py. This file: tools/gen_audio_demo_scene.py.
+#
+# Run: ./build/toyengine audio_demo        (or SCENE=audio_demo)
+
+scene:
+  scene_name: audio_demo
+  settings:
+    render:
+      sky_zenith:  [0.06, 0.1, 0.24]
+      sky_horizon: [0.55, 0.42, 0.38]
+      sky_ground:  [0.05, 0.05, 0.05]
+      ambient_intensity: 0.9
+      world_ui_enabled: true
+  root_objects:
+    - name: ground
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 32.0, y: 32.0, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material: materials/concrete
+      children: []
+
+    - name: centre_marker
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.01 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 0.6, y: 0.6, z: 0.02 }
+        - type: MeshRenderer
+          mesh_path: barrel
+          material:
+            albedo: { r: 0.08, g: 0.08, b: 0.1 }
+            metallic: 0.0
+            roughness: 0.7
+            ao: 1.0
+            emissive: { r: 0.35, g: 0.5, b: 0.9 }
+            emissive_strength: 0.35
+      children: []
+
+    # ==========================================================================================
+    # MUSIC: the playlist, and the named tracks the panel and the zone play.
+    # ==========================================================================================
+    - name: music
+      active: true
+      components:
+        - type: MusicPlaylist
+          crossfade: 4.0
+          repeat: true
+          tracks:
+            - { name: meadow, clip: audio/music/meadow.wav, volume: 0.9 }
+            - { name: expedition, clip: audio/music/expedition.wav, volume: 0.8 }
+      children:
+        # Registers `nocturne` by name for the zone and the panel (not part of the playlist).
+        - name: night_track
+          components:
+            - type: MusicPlaylist
+              play_on_start: false
+              tracks:
+                - { name: nocturne, clip: audio/music/nocturne.wav, volume: 0.9 }
+
+    - name: music_zone
+      active: true
+      components:
+        - type: Transform
+          position: { x: -14.0, y: -12.0, z: 0.02 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: MusicZone
+          track: nocturne
+          size: { x: 8.0, y: 8.0, z: 8.0 }
+          fade: 2.5
+      children:
+        - name: zone_floor
+          components:
+            - type: Transform
+              position: { x: 0.0, y: 0.0, z: 0.0 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 4.0, y: 4.0, z: 1.0 }
+            - type: MeshRenderer
+              mesh_path: plane
+              material:
+                albedo: { r: 0.05, g: 0.02, b: 0.08 }
+                metallic: 0.0
+                roughness: 0.7
+                ao: 1.0
+                emissive: { r: 0.55, g: 0.25, b: 1.0 }
+                emissive_strength: 0.6
+        - name: zone_post_0
+          components:
+            - type: Transform
+              position: { x: -4.0, y: -4.0, z: 1.0 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 0.12, y: 0.12, z: 2.0 }
+            - type: MeshRenderer
+              mesh_path: cube
+              material:
+                albedo: { r: 0.05, g: 0.02, b: 0.08 }
+                metallic: 0.0
+                roughness: 0.7
+                ao: 1.0
+                emissive: { r: 0.6, g: 0.3, b: 1.0 }
+                emissive_strength: 2.5
+        - name: zone_post_1
+          components:
+            - type: Transform
+              position: { x: 4.0, y: -4.0, z: 1.0 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 0.12, y: 0.12, z: 2.0 }
+            - type: MeshRenderer
+              mesh_path: cube
+              material:
+                albedo: { r: 0.05, g: 0.02, b: 0.08 }
+                metallic: 0.0
+                roughness: 0.7
+                ao: 1.0
+                emissive: { r: 0.6, g: 0.3, b: 1.0 }
+                emissive_strength: 2.5
+        - name: zone_post_2
+          components:
+            - type: Transform
+              position: { x: -4.0, y: 4.0, z: 1.0 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 0.12, y: 0.12, z: 2.0 }
+            - type: MeshRenderer
+              mesh_path: cube
+              material:
+                albedo: { r: 0.05, g: 0.02, b: 0.08 }
+                metallic: 0.0
+                roughness: 0.7
+                ao: 1.0
+                emissive: { r: 0.6, g: 0.3, b: 1.0 }
+                emissive_strength: 2.5
+        - name: zone_post_3
+          components:
+            - type: Transform
+              position: { x: 4.0, y: 4.0, z: 1.0 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 0.12, y: 0.12, z: 2.0 }
+            - type: MeshRenderer
+              mesh_path: cube
+              material:
+                albedo: { r: 0.05, g: 0.02, b: 0.08 }
+                metallic: 0.0
+                roughness: 0.7
+                ao: 1.0
+                emissive: { r: 0.6, g: 0.3, b: 1.0 }
+                emissive_strength: 2.5
+        - name: zone_light
+          components:
+            - type: Transform
+              position: { x: 0.0, y: 0.0, z: 3.0 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 1.0, y: 1.0, z: 1.0 }
+            - type: PointLight
+              color: { r: 0.6, g: 0.35, b: 1.0 }
+              intensity: 40.0
+              range: 9.0
+              cast_shadows: false
+        - name: label
+          components:
+            - type: Transform
+              position: { x: 0.0, y: 0.0, z: 3.2 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 1.0, y: 1.0, z: 1.0 }
+            - type: RectTransform
+              anchor_preset: StretchAll
+            - type: Canvas
+              render_mode: WorldSpace
+              billboard: CameraFacing
+              world_size: { x: 520, y: 60 }
+              pixels_per_unit: 70
+              text_supersample: 2
+              occlude: true
+            - type: Theme
+              source: ui/themes/default.yaml
+          children:
+            - name: text
+              components:
+                - type: RectTransform
+                  anchor_preset: StretchAll
+                - {type: ThemedText, text: "Music zone: nocturne", font_role: Heading, align: Center}
+
+    # ==========================================================================================
+    # COMPASS BEACONS (toggled from the panel's Spatial tab; start off)
+    # ==========================================================================================
+    - name: beacon_north
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 10.0, z: 0.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: AudioSource
+          clip: audio/sfx/beacon.wav
+          bus: SFX
+          volume: 0.8
+          pitch: 1.0
+          loop: true
+          play_on_start: false
+          spatialize: true
+          min_distance: 2.0
+          max_distance: 60.0
+          curve: Inverse
+          doppler: 1.0
+      children:
+        - name: post
+          components:
+            - type: Transform
+              position: { x: 0.0, y: 0.0, z: 0.75 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 0.25, y: 0.25, z: 0.75 }
+            - type: MeshRenderer
+              mesh_path: barrel
+              material:
+                albedo: { r: 0.15, g: 0.15, b: 0.17 }
+                metallic: 0.6
+                roughness: 0.5
+                ao: 1.0
+        - name: lamp
+          components:
+            - type: Transform
+              position: { x: 0.0, y: 0.0, z: 1.75 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 0.3, y: 0.3, z: 0.3 }
+            - type: MeshRenderer
+              mesh_path: sphere
+              material:
+                albedo: { r: 0.1, g: 0.025, b: 0.020000000000000004 }
+                metallic: 0.0
+                roughness: 0.7
+                ao: 1.0
+                emissive: { r: 1.0, g: 0.25, b: 0.2 }
+                emissive_strength: 3.0
+            - type: PointLight
+              color: { r: 1.0, g: 0.25, b: 0.2 }
+              intensity: 30.0
+              range: 6.0
+              cast_shadows: false
+        - name: label
+          components:
+            - type: Transform
+              position: { x: 0.0, y: 0.0, z: 2.6 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 1.0, y: 1.0, z: 1.0 }
+            - type: RectTransform
+              anchor_preset: StretchAll
+            - type: Canvas
+              render_mode: WorldSpace
+              billboard: CameraFacing
+              world_size: { x: 420, y: 60 }
+              pixels_per_unit: 70
+              text_supersample: 2
+              occlude: true
+            - type: Theme
+              source: ui/themes/default.yaml
+          children:
+            - name: text
+              components:
+                - type: RectTransform
+                  anchor_preset: StretchAll
+                - {type: ThemedText, text: "North beacon (x1.0)", font_role: Heading, align: Center}
+
+    - name: beacon_east
+      active: true
+      components:
+        - type: Transform
+          position: { x: 10.0, y: 0.0, z: 0.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: AudioSource
+          clip: audio/sfx/beacon.wav
+          bus: SFX
+          volume: 0.8
+          pitch: 1.26
+          loop: true
+          play_on_start: false
+          spatialize: true
+          min_distance: 2.0
+          max_distance: 60.0
+          curve: Inverse
+          doppler: 1.0
+      children:
+        - name: post
+          components:
+            - type: Transform
+              position: { x: 0.0, y: 0.0, z: 0.75 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 0.25, y: 0.25, z: 0.75 }
+            - type: MeshRenderer
+              mesh_path: barrel
+              material:
+                albedo: { r: 0.15, g: 0.15, b: 0.17 }
+                metallic: 0.6
+                roughness: 0.5
+                ao: 1.0
+        - name: lamp
+          components:
+            - type: Transform
+              position: { x: 0.0, y: 0.0, z: 1.75 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 0.3, y: 0.3, z: 0.3 }
+            - type: MeshRenderer
+              mesh_path: sphere
+              material:
+                albedo: { r: 0.03, g: 0.1, b: 0.034999999999999996 }
+                metallic: 0.0
+                roughness: 0.7
+                ao: 1.0
+                emissive: { r: 0.3, g: 1.0, b: 0.35 }
+                emissive_strength: 3.0
+            - type: PointLight
+              color: { r: 0.3, g: 1.0, b: 0.35 }
+              intensity: 30.0
+              range: 6.0
+              cast_shadows: false
+        - name: label
+          components:
+            - type: Transform
+              position: { x: 0.0, y: 0.0, z: 2.6 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 1.0, y: 1.0, z: 1.0 }
+            - type: RectTransform
+              anchor_preset: StretchAll
+            - type: Canvas
+              render_mode: WorldSpace
+              billboard: CameraFacing
+              world_size: { x: 420, y: 60 }
+              pixels_per_unit: 70
+              text_supersample: 2
+              occlude: true
+            - type: Theme
+              source: ui/themes/default.yaml
+          children:
+            - name: text
+              components:
+                - type: RectTransform
+                  anchor_preset: StretchAll
+                - {type: ThemedText, text: "East beacon (x1.26)", font_role: Heading, align: Center}
+
+    - name: beacon_south
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -10.0, z: 0.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: AudioSource
+          clip: audio/sfx/beacon.wav
+          bus: SFX
+          volume: 0.8
+          pitch: 0.75
+          loop: true
+          play_on_start: false
+          spatialize: true
+          min_distance: 2.0
+          max_distance: 60.0
+          curve: Inverse
+          doppler: 1.0
+      children:
+        - name: post
+          components:
+            - type: Transform
+              position: { x: 0.0, y: 0.0, z: 0.75 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 0.25, y: 0.25, z: 0.75 }
+            - type: MeshRenderer
+              mesh_path: barrel
+              material:
+                albedo: { r: 0.15, g: 0.15, b: 0.17 }
+                metallic: 0.6
+                roughness: 0.5
+                ao: 1.0
+        - name: lamp
+          components:
+            - type: Transform
+              position: { x: 0.0, y: 0.0, z: 1.75 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 0.3, y: 0.3, z: 0.3 }
+            - type: MeshRenderer
+              mesh_path: sphere
+              material:
+                albedo: { r: 0.03, g: 0.05500000000000001, b: 0.1 }
+                metallic: 0.0
+                roughness: 0.7
+                ao: 1.0
+                emissive: { r: 0.3, g: 0.55, b: 1.0 }
+                emissive_strength: 3.0
+            - type: PointLight
+              color: { r: 0.3, g: 0.55, b: 1.0 }
+              intensity: 30.0
+              range: 6.0
+              cast_shadows: false
+        - name: label
+          components:
+            - type: Transform
+              position: { x: 0.0, y: 0.0, z: 2.6 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 1.0, y: 1.0, z: 1.0 }
+            - type: RectTransform
+              anchor_preset: StretchAll
+            - type: Canvas
+              render_mode: WorldSpace
+              billboard: CameraFacing
+              world_size: { x: 420, y: 60 }
+              pixels_per_unit: 70
+              text_supersample: 2
+              occlude: true
+            - type: Theme
+              source: ui/themes/default.yaml
+          children:
+            - name: text
+              components:
+                - type: RectTransform
+                  anchor_preset: StretchAll
+                - {type: ThemedText, text: "South beacon (x0.75)", font_role: Heading, align: Center}
+
+    - name: beacon_west
+      active: true
+      components:
+        - type: Transform
+          position: { x: -10.0, y: 0.0, z: 0.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: AudioSource
+          clip: audio/sfx/beacon.wav
+          bus: SFX
+          volume: 0.8
+          pitch: 1.5
+          loop: true
+          play_on_start: false
+          spatialize: true
+          min_distance: 2.0
+          max_distance: 60.0
+          curve: Inverse
+          doppler: 1.0
+      children:
+        - name: post
+          components:
+            - type: Transform
+              position: { x: 0.0, y: 0.0, z: 0.75 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 0.25, y: 0.25, z: 0.75 }
+            - type: MeshRenderer
+              mesh_path: barrel
+              material:
+                albedo: { r: 0.15, g: 0.15, b: 0.17 }
+                metallic: 0.6
+                roughness: 0.5
+                ao: 1.0
+        - name: lamp
+          components:
+            - type: Transform
+              position: { x: 0.0, y: 0.0, z: 1.75 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 0.3, y: 0.3, z: 0.3 }
+            - type: MeshRenderer
+              mesh_path: sphere
+              material:
+                albedo: { r: 0.1, g: 0.085, b: 0.020000000000000004 }
+                metallic: 0.0
+                roughness: 0.7
+                ao: 1.0
+                emissive: { r: 1.0, g: 0.85, b: 0.2 }
+                emissive_strength: 3.0
+            - type: PointLight
+              color: { r: 1.0, g: 0.85, b: 0.2 }
+              intensity: 30.0
+              range: 6.0
+              cast_shadows: false
+        - name: label
+          components:
+            - type: Transform
+              position: { x: 0.0, y: 0.0, z: 2.6 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 1.0, y: 1.0, z: 1.0 }
+            - type: RectTransform
+              anchor_preset: StretchAll
+            - type: Canvas
+              render_mode: WorldSpace
+              billboard: CameraFacing
+              world_size: { x: 420, y: 60 }
+              pixels_per_unit: 70
+              text_supersample: 2
+              occlude: true
+            - type: Theme
+              source: ui/themes/default.yaml
+          children:
+            - name: text
+              components:
+                - type: RectTransform
+                  anchor_preset: StretchAll
+                - {type: ThemedText, text: "West beacon (x1.5)", font_role: Heading, align: Center}
+
+    # ==========================================================================================
+    # DRONE: orbits the listener -- direction sweeps, doppler bends the pitch
+    # ==========================================================================================
+    - name: drone
+      active: true
+      components:
+        - type: Transform
+          position: { x: 6.0, y: 0.0, z: 2.2 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 0.35, y: 0.35, z: 0.35 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material:
+            albedo: { r: 0.1, g: 0.05, b: 0.02 }
+            metallic: 0.0
+            roughness: 0.7
+            ao: 1.0
+            emissive: { r: 1.0, g: 0.5, b: 0.15 }
+            emissive_strength: 3.0
+        - type: PointLight
+          color: { r: 1.0, g: 0.55, b: 0.2 }
+          intensity: 25.0
+          range: 5.0
+          cast_shadows: false
+        - type: AudioSource
+          clip: audio/sfx/drone.wav
+          bus: SFX
+          volume: 0.45
+          pitch: 1.0
+          loop: true
+          play_on_start: true
+          spatialize: true
+          min_distance: 1.5
+          max_distance: 50.0
+          curve: Inverse
+          doppler: 1.5
+        - type: KinematicMover
+          mode: orbit
+          orbit_center: { x: 0.0, y: 0.0, z: 0.0 }
+          orbit_radius: 6.0
+          speed: 120.0
+      children: []
+
+    # ==========================================================================================
+    # AMBIENCE: crickets (north-west), chimes (north-east), campfire (south-east, linear rolloff)
+    # ==========================================================================================
+    - name: crickets
+      active: true
+      components:
+        - type: Transform
+          position: { x: -13.0, y: 12.0, z: 0.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: AudioSource
+          clip: audio/sfx/crickets.wav
+          bus: SFX
+          volume: 0.5
+          pitch: 1.0
+          loop: true
+          play_on_start: true
+          spatialize: true
+          min_distance: 2.0
+          max_distance: 40.0
+          curve: Inverse
+          doppler: 1.0
+      children:
+        - name: grass_0
+          components:
+            - type: Transform
+              position: { x: 0.0, y: 0.0, z: 0.0 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 2.0, y: 2.0, z: 1.2 }
+            - type: MeshRenderer
+              mesh_path: mossy_mound
+              material: materials/foliage
+        - name: grass_1
+          components:
+            - type: Transform
+              position: { x: 1.4, y: 0.6, z: 0.0 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 1.4, y: 1.4, z: 0.84 }
+            - type: MeshRenderer
+              mesh_path: mossy_mound
+              material: materials/foliage
+        - name: grass_2
+          components:
+            - type: Transform
+              position: { x: -1.1, y: 0.9, z: 0.0 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 1.6, y: 1.6, z: 0.96 }
+            - type: MeshRenderer
+              mesh_path: mossy_mound
+              material: materials/foliage
+        - name: grass_3
+          components:
+            - type: Transform
+              position: { x: 0.4, y: -1.3, z: 0.0 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 1.2, y: 1.2, z: 0.72 }
+            - type: MeshRenderer
+              mesh_path: mossy_mound
+              material: materials/foliage
+        - name: label
+          components:
+            - type: Transform
+              position: { x: 0.0, y: 0.0, z: 2.4 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 1.0, y: 1.0, z: 1.0 }
+            - type: RectTransform
+              anchor_preset: StretchAll
+            - type: Canvas
+              render_mode: WorldSpace
+              billboard: CameraFacing
+              world_size: { x: 420, y: 60 }
+              pixels_per_unit: 70
+              text_supersample: 2
+              occlude: true
+            - type: Theme
+              source: ui/themes/default.yaml
+          children:
+            - name: text
+              components:
+                - type: RectTransform
+                  anchor_preset: StretchAll
+                - {type: ThemedText, text: "Crickets", font_role: Heading, align: Center}
+
+    - name: chimes
+      active: true
+      components:
+        - type: Transform
+          position: { x: 12.0, y: 12.0, z: 0.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: AudioSource
+          clip: audio/sfx/chimes.wav
+          bus: SFX
+          volume: 0.55
+          pitch: 1.0
+          loop: true
+          play_on_start: true
+          spatialize: true
+          min_distance: 2.0
+          max_distance: 40.0
+          curve: Inverse
+          doppler: 1.0
+      children:
+        - name: chime_post
+          components:
+            - type: Transform
+              position: { x: 0.0, y: 0.0, z: 1.5 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 0.08, y: 0.08, z: 1.5 }
+            - type: MeshRenderer
+              mesh_path: barrel
+              material: materials/wood
+        - name: chime_0
+          components:
+            - type: Transform
+              position: { x: -0.4, y: 0.3, z: 2.3 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 0.03, y: 0.03, z: 0.35 }
+            - type: MeshRenderer
+              mesh_path: barrel
+              material: materials/copper
+        - name: chime_1
+          components:
+            - type: Transform
+              position: { x: -0.2, y: 0.3, z: 2.2199999999999998 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 0.03, y: 0.03, z: 0.41 }
+            - type: MeshRenderer
+              mesh_path: barrel
+              material: materials/copper
+        - name: chime_2
+          components:
+            - type: Transform
+              position: { x: 0.0, y: 0.3, z: 2.1399999999999997 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 0.03, y: 0.03, z: 0.47 }
+            - type: MeshRenderer
+              mesh_path: barrel
+              material: materials/copper
+        - name: chime_3
+          components:
+            - type: Transform
+              position: { x: 0.20000000000000007, y: 0.3, z: 2.0599999999999996 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 0.03, y: 0.03, z: 0.53 }
+            - type: MeshRenderer
+              mesh_path: barrel
+              material: materials/copper
+        - name: chime_4
+          components:
+            - type: Transform
+              position: { x: 0.4, y: 0.3, z: 1.9799999999999998 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 0.03, y: 0.03, z: 0.59 }
+            - type: MeshRenderer
+              mesh_path: barrel
+              material: materials/copper
+        - name: label
+          components:
+            - type: Transform
+              position: { x: 0.0, y: 0.0, z: 3.6 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 1.0, y: 1.0, z: 1.0 }
+            - type: RectTransform
+              anchor_preset: StretchAll
+            - type: Canvas
+              render_mode: WorldSpace
+              billboard: CameraFacing
+              world_size: { x: 420, y: 60 }
+              pixels_per_unit: 70
+              text_supersample: 2
+              occlude: true
+            - type: Theme
+              source: ui/themes/default.yaml
+          children:
+            - name: text
+              components:
+                - type: RectTransform
+                  anchor_preset: StretchAll
+                - {type: ThemedText, text: "Wind chimes", font_role: Heading, align: Center}
+
+    - name: campfire
+      prefab: objects/campfire
+      components:
+        - type: Transform
+          position: { x: 12.0, y: -10.0, z: 0.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: AudioSource
+          clip: audio/sfx/fire.wav
+          bus: SFX
+          volume: 0.9
+          pitch: 1.0
+          loop: true
+          play_on_start: true
+          spatialize: true
+          min_distance: 1.0
+          max_distance: 16.0
+          curve: Linear
+          doppler: 1.0
+
+    - name: campfire_label
+      active: true
+      components:
+        - type: Transform
+          position: { x: 12.0, y: -10.0, z: 0.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+      children:
+        - name: label
+          components:
+            - type: Transform
+              position: { x: 0.0, y: 0.0, z: 2.6 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 1.0, y: 1.0, z: 1.0 }
+            - type: RectTransform
+              anchor_preset: StretchAll
+            - type: Canvas
+              render_mode: WorldSpace
+              billboard: CameraFacing
+              world_size: { x: 560, y: 60 }
+              pixels_per_unit: 70
+              text_supersample: 2
+              occlude: true
+            - type: Theme
+              source: ui/themes/default.yaml
+          children:
+            - name: text
+              components:
+                - type: RectTransform
+                  anchor_preset: StretchAll
+                - {type: ThemedText, text: "Campfire (linear rolloff, 16 m)", font_role: Heading, align: Center}
+
+    # ==========================================================================================
+    # MUSIC BOX: 28 m north, out of earshot until you walk to it
+    # ==========================================================================================
+    - name: music_box
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 28.0, z: 0.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: AudioSource
+          clip: audio/sfx/music_box.wav
+          bus: SFX
+          volume: 0.9
+          pitch: 1.0
+          loop: true
+          play_on_start: true
+          spatialize: true
+          min_distance: 1.0
+          max_distance: 14.0
+          curve: Linear
+          doppler: 1.0
+      children:
+        - name: box
+          components:
+            - type: Transform
+              position: { x: 0.0, y: 0.0, z: 0.5 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 0.6, y: 0.45, z: 0.5 }
+            - type: MeshRenderer
+              mesh_path: cube
+              material: materials/wood
+        - name: box_light
+          components:
+            - type: Transform
+              position: { x: 0.0, y: 0.0, z: 1.6 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 1.0, y: 1.0, z: 1.0 }
+            - type: PointLight
+              color: { r: 1.0, g: 0.8, b: 0.5 }
+              intensity: 30.0
+              range: 5.0
+              cast_shadows: false
+        - name: label
+          components:
+            - type: Transform
+              position: { x: 0.0, y: 0.0, z: 1.8 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 1.0, y: 1.0, z: 1.0 }
+            - type: RectTransform
+              anchor_preset: StretchAll
+            - type: Canvas
+              render_mode: WorldSpace
+              billboard: CameraFacing
+              world_size: { x: 420, y: 60 }
+              pixels_per_unit: 70
+              text_supersample: 2
+              occlude: true
+            - type: Theme
+              source: ui/themes/default.yaml
+          children:
+            - name: text
+              components:
+                - type: RectTransform
+                  anchor_preset: StretchAll
+                - {type: ThemedText, text: "Music box", font_role: Heading, align: Center}
+
+    - name: sun
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 20.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: DirectionalLight
+          direction: { x: -0.5, y: 0.3, z: -0.55 }
+          color: { r: 1.0, g: 0.78, b: 0.6 }
+          intensity: 0.8
+          cast_shadows: true
+      children: []
+
+    # The listener: AudioSystem hears from the main camera. Fly mode, mouse look off so the
+    # cursor is free for the panel.
+    - name: camera
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -3.0, z: 1.8 }
+          rotation: { x: 84.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Camera
+          main: true
+          projection: Perspective
+          fov: 60.0
+          near_clip_plane: 0.1
+          far_clip_plane: 300.0
+        - type: CameraController
+          mode: fly
+          move_speed: 5.0
+          mouse_sensitivity: 0.0
+          capture_cursor: false
+      children:
+        - name: ping_left
+          components:
+            - type: Transform
+              position: { x: -4.0, y: 0.0, z: 0.0 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 1.0, y: 1.0, z: 1.0 }
+            - type: AudioSource
+              clip: audio/sfx/ping.wav
+              bus: SFX
+              volume: 0.8
+              pitch: 1.0
+              loop: false
+              play_on_start: false
+              spatialize: true
+              min_distance: 4.0
+              max_distance: 40.0
+              curve: Inverse
+              doppler: 0.0
+        - name: ping_right
+          components:
+            - type: Transform
+              position: { x: 4.0, y: 0.0, z: 0.0 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 1.0, y: 1.0, z: 1.0 }
+            - type: AudioSource
+              clip: audio/sfx/ping.wav
+              bus: SFX
+              volume: 0.8
+              pitch: 1.0
+              loop: false
+              play_on_start: false
+              spatialize: true
+              min_distance: 4.0
+              max_distance: 40.0
+              curve: Inverse
+              doppler: 0.0
+        - name: ping_front
+          components:
+            - type: Transform
+              position: { x: 0.0, y: 0.0, z: -4.0 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 1.0, y: 1.0, z: 1.0 }
+            - type: AudioSource
+              clip: audio/sfx/ping.wav
+              bus: SFX
+              volume: 0.8
+              pitch: 1.0
+              loop: false
+              play_on_start: false
+              spatialize: true
+              min_distance: 4.0
+              max_distance: 40.0
+              curve: Inverse
+              doppler: 0.0
+        - name: ping_behind
+          components:
+            - type: Transform
+              position: { x: 0.0, y: 0.0, z: 4.0 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 1.0, y: 1.0, z: 1.0 }
+            - type: AudioSource
+              clip: audio/sfx/ping.wav
+              bus: SFX
+              volume: 0.8
+              pitch: 1.0
+              loop: false
+              play_on_start: false
+              spatialize: true
+              min_distance: 4.0
+              max_distance: 40.0
+              curve: Inverse
+              doppler: 0.0
+        - name: ping_above
+          components:
+            - type: Transform
+              position: { x: 0.0, y: 4.0, z: 0.0 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 1.0, y: 1.0, z: 1.0 }
+            - type: AudioSource
+              clip: audio/sfx/ping.wav
+              bus: SFX
+              volume: 0.8
+              pitch: 1.0
+              loop: false
+              play_on_start: false
+              spatialize: true
+              min_distance: 4.0
+              max_distance: 40.0
+              curve: Inverse
+              doppler: 0.0
+
+    # The panel (ui/audio_panel, in this folder): music transport, spatial toggles, UI sounds, mixer.
+    - name: audio_panel
+      prefab: ui/audio_panel

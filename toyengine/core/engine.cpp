@@ -441,7 +441,8 @@ void Engine::update_audio_(float dt) {
 }
 
 void Engine::clear_scenes_() {
-    if (audio_) audio_->stop_all();
+    // Music carries over a scene change (the next scene's MusicPlaylist picks it up or replaces it).
+    if (audio_) audio_->stop_oneshots();
     for (coopa::scene::Scene* s : scene_mgr_.scenes()) scene_mgr_.remove_scene(s);
     scene_settings_.clear();
     scene_paths_.clear();

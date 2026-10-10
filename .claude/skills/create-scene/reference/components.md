@@ -125,8 +125,14 @@ For big levels use `cell_size: 0.5`; flow mode `auto` goes hierarchical by itsel
 |---|---|
 | AudioSource | `clip`, `bus` (SFX), `volume`, `pitch`, `loop`, `play_on_start` (false), `spatialize` (mono only), `priority`, `min_distance`, `max_distance`, `curve` (`Inverse` / `Linear` / `Logarithmic`), `rolloff`, `spatial_blend`, `spread`, `doppler`, cone angles |
 | AudioListener | `track_velocity` |
+| MusicPlaylist | `tracks` (list of clip paths or `{name, clip, volume}`), `crossfade` (3 s), `shuffle`, `repeat` (true), `start` (-1), `play_on_start` (true; false only registers the tracks by name), `stop_on_destroy` (false: music plays on into the next scene) |
+| MusicZone | `track` (name or clip), `size` (10,10,6 full box, world axes x scale) or `radius` (> 0: sphere), `fade` (2 s). Pushes the track while the listener is inside |
+| MusicOnSignal | `listen_object`, `listen_signal`, `action` (`play` / `push` / `pop` / `next` / `previous` / `stop` / `pause` / `resume` / `toggle_pause` / `playlist`), `track`, `fade` (-1 = default), `target` (playlist: the MusicPlaylist object) |
+| AudioSourceOnSignal | `listen_object`, `listen_signal`, `action` (`play` / `stop` / `toggle` / `pause` / `resume` / `follow` = play while a Toggle is on), `target` (object with the AudioSource; empty = self) |
+| MusicStatusText | `prefix`; writes the music state into the Text on its object |
 
-There is no `assets/audio/` folder yet; clips resolve against the scene folder, then `assets/`.
+Clips live in `assets/audio/` (`music/`, `sfx/`) and resolve against the scene folder, then
+`assets/`. Spatialized clips must be mono. Example: `assets/scenes/audio/audio_demo`.
 
 ## UI
 

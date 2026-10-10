@@ -3,7 +3,7 @@
  * @brief The engine's audio: one sfxcoopa AudioEngine, its buses, and the sound card.
  *
  *   Master
- *    ├─ Music
+ *    ├─ Music   (MusicPlayer: background tracks, crossfades, playlists -- music())
  *    ├─ SFX     (AudioSource's default bus, play_oneshot())
  *    └─ UI      (uicoopa's UiAudio: button clicks and other named UI sounds)
  *
@@ -35,6 +35,8 @@
 
 namespace toy::audio {
 
+class MusicPlayer;
+
 /** @brief How the AudioSystem opens its output. */
 struct AudioSystemOptions {
     uint32_t sample_rate = 48000;
@@ -60,6 +62,9 @@ public:
     AudioSystem& operator=(const AudioSystem&) = delete;
 
     coopa::sfx::core::AudioEngine& engine() { return engine_; }
+
+    /** @brief Background music on the Music bus (see music_player.h). */
+    MusicPlayer& music() { return *music_player_; }
 
     /** @brief The running Engine's audio (set by toy::core::Engine), for components like VolumeBinding. */
     static AudioSystem* active() { return active_ptr_(); }
@@ -93,8 +98,14 @@ public:
     void resume_all() { paused_ = false; }
     bool paused() const { return paused_; }
 
-    /** @brief Stops every one-shot this system started (AudioSources stop with their objects). */
+    /** @brief Stops every one-shot this system started and the music (AudioSources stop with their objects). */
     void stop_all();
+
+    /** @brief Stops the one-shots only: a scene change, where the music carries on. */
+    void stop_oneshots();
+
+    /** @brief Where the listener was put last update() (the camera's position when it drove it). */
+    const glm::vec3& listener_position() const { return listener_position_; }
 
     /**
      * @brief Per frame, after the scene updated: the listener follows an AudioListener if one
@@ -113,6 +124,8 @@ private:
     coopa::sfx::mixer::MixerBus* music_ = nullptr;
     coopa::sfx::mixer::MixerBus* sfx_ = nullptr;
     coopa::sfx::mixer::MixerBus* ui_bus_ = nullptr;
+    std::unique_ptr<MusicPlayer> music_player_;
+    glm::vec3 listener_position_{0.0f};
 #ifdef UICOOPA_HAS_AUDIO
     std::unique_ptr<coopa::ui::UiAudio> ui_;
 #endif

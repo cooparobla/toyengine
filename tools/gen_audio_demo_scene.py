@@ -316,6 +316,7 @@ scene:
     # The panel (ui/audio_panel, in this folder): music transport, spatial toggles, UI sounds, mixer.
     - name: audio_panel
       prefab: ui/audio_panel
+      components: []
 """
     return s
 

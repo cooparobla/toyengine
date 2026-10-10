@@ -633,6 +633,7 @@ void EditorApp::draw_object_glyph_(imm::Context& ctx, const ViewProj& vp, const 
     const glm::vec3 X = glm::normalize(glm::vec3(w[0])), Y = glm::normalize(glm::vec3(w[1])), Z = glm::normalize(glm::vec3(w[2]));
     std::string kind;
     const Node* comp = nullptr;
+    if (!node.contains("components") || !node.at("components").is_sequence()) return;   // a bare prefab instance
     for (const auto& c : node.at("components").as_seq()) {
         const std::string t = component_type(c);
         if (t == "Camera" || t == "DirectionalLight" || t == "PointLight" || t == "SpotLight") { kind = t; comp = &c; break; }

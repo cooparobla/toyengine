@@ -2,10 +2,14 @@
  * @file viewport_test.cpp
  * @brief The viewport: the render fills its panel (no bars) and no frame goes black while a resize
  * settles, BLEND materials show in every shading mode, each material slot renders its material,
- * the grid follows zoom and view, F frames the selection, and the nav gizmo / trackpad navigate.
+ * the grid follows zoom and view, F frames the selection, the nav gizmo / trackpad navigate, and a
+ * prefab instance with no `components:` key draws without throwing.
  */
 
 #include <coopa/testing/test.h>
+
+#include <fstream>
+#include <iterator>
 
 #include <gfxcoopa/util/image_readback.h>
 
@@ -279,6 +283,36 @@ COOPA_TEST(nav_axes_go_orthographic_and_trackpad_gestures_navigate) {
     scroll({2.0f, 0.0f});
     expect(cam.ortho, "a chosen orthographic view stays orthographic when orbited");
     app.set_trackpad_for_test(std::nullopt);
+}
+
+/**
+ * @brief The audio_demo opens and draws, and so does a prefab instance written with no
+ *        `components:` key at all (the viewport's object glyphs read it on every object; it threw
+ *        and aborted the editor when the audio_demo's panel instance had none).
+ */
+COOPA_TEST(audio_demo_and_bare_prefab_instances_open) {
+    EditorSession session({.prepare = [](Project& project) {
+        const fs::path dst = project.assets() / "scenes" / "audio_demo";
+        fs::create_directories(dst.parent_path());
+        fs::copy(fs::path(ROOT_DIR) / "assets" / "scenes" / "audio" / "audio_demo", dst, fs::copy_options::recursive);
+    }});
+    auto& app = session.app;
+    const fs::path dir = session.project.assets() / "scenes" / "audio_demo";
+    expect(app.open_scene(dir / "scene.yaml"), "the audio_demo opens");
+    tick(session.engine, 4);
+    expect(object_named(app, "audio_panel") != 0 && object_named(app, "drone") != 0, "with its panel and stations");
+
+    std::ifstream in(dir / "scene.yaml");
+    std::string yaml((std::istreambuf_iterator<char>(in)), {});
+    const std::string line = "      prefab: ui/audio_panel\n      components: []\n";
+    const size_t at = yaml.find(line);
+    expect(at != std::string::npos, "the panel instance is in the scene");
+    if (at == std::string::npos) return;
+    yaml.replace(at, line.size(), "      prefab: ui/audio_panel\n");
+    std::ofstream(dir / "bare_prefab.yaml") << yaml;
+    expect(app.open_scene(dir / "bare_prefab.yaml"), "a scene with a bare prefab instance opens");
+    tick(session.engine, 4);
+    expect(object_named(app, "audio_panel") != 0, "and draws (no throw from the viewport glyphs)");
 }
 
 } // namespace toy::editor::testing

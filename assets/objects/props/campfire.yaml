@@ -11,7 +11,6 @@
 #              periodic pops (a burst every few seconds)
 #   smoke   -- lit `puff` sprites, alpha-blended, growing and drifting downwind
 #   light   -- a PointLight whose intensity LightFlicker modulates in step with the flames
-format: toyengine-object
 object:
   name: campfire
   components:

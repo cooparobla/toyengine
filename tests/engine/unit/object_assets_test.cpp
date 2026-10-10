@@ -26,8 +26,7 @@ COOPA_TEST(prefab_instance_overrides_and_runtime_spawn) {
     fs::create_directories(root / "scenes" / "level");
     {
         std::ofstream o(root / "objects" / "crate.yaml");
-        o << "format: toyengine-object\n"
-             "object:\n"
+        o << "object:\n"
              "  name: Crate\n"
              "  components:\n"
              "    - { type: Transform, position: { x: 5, y: 5, z: 5 }, scale: { x: 2, y: 2, z: 2 } }\n"
@@ -39,8 +38,7 @@ COOPA_TEST(prefab_instance_overrides_and_runtime_spawn) {
     }
     {
         std::ofstream o(root / "scenes" / "level" / "scene.yaml");
-        o << "format: toyengine\n"
-             "scene:\n"
+        o << "scene:\n"
              "  scene_name: Level\n"
              "  root_objects:\n"
              "    - name: Crate.001\n"

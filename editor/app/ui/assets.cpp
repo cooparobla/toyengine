@@ -568,7 +568,6 @@ Node EditorApp::object_asset_node_(Node obj) {
 
 bool EditorApp::write_object_asset_(const fs::path& path, const Node& obj) {
     Node doc = Node::mapping();
-    doc["format"] = Node(std::string("toyengine-object"));
     doc["object"] = obj;
     try {
         fs::create_directories(path.parent_path());

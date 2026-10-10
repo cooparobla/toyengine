@@ -12,9 +12,9 @@ nearby point lights, and soft intersections with geometry. Sprite shapes are sty
 edges broken up by noise, and toon-banded cores. Every sprite is procedural, so an effect needs no
 texture authoring. `sprite: texture` takes an albedo map or a flipbook atlas instead.
 
-Demo scene: `./build/toyengine particles_test`
-([assets/scenes/tests/effects/particles_test](../../assets/scenes/tests/effects/particles_test/scene.yaml), meshes from
-[`tools/gen_particle_test_assets.py`](../../tools/gen_particle_test_assets.py)). It shows:
+Demo scene: `./build/toyengine particles_demo`
+([assets/scenes/tests/effects/particles_demo](../../assets/scenes/effects/particles_demo/scene.yaml), meshes from
+[`tools/gen_particle_demo_assets.py`](../../tools/gen_particle_demo_assets.py)). It shows:
 - a campfire (`prefab: objects/campfire`, see
   [assets/objects/props/campfire.yaml](../../assets/objects/props/campfire.yaml)) with flames, glow, coals,
   embers, smoke and a flickering light;
@@ -222,7 +222,7 @@ steady-state frames):
 
 | Scene | Simulation (`scene_update`, with everything else) | Render prep | GPU draw (`transparent`) |
 |---|---|---|---|
-| `particles_test` (16 systems, ~1k live particles) | 0.33 ms | 0.14 ms | 0.46 ms |
+| `particles_demo` (16 systems, ~1k live particles) | 0.33 ms | 0.14 ms | 0.46 ms |
 | One 20k-particle system, 1 worker | 1.75 ms | 0.59 ms | 0.34 ms |
 | One 20k-particle system, 8 workers | 0.82 ms | 0.60 ms | 0.35 ms |
 
@@ -276,9 +276,10 @@ stays on the CPU; birth, simulation, compaction and sorting run in compute shade
   under `FIXED_DT`. The alive-list order comes from atomics, though, so unsorted additive systems
   can differ by blend rounding.
 
-`particles_gpu_stress` (three 60k-spark fountains and a 40k sorted dust field) compares the two
-paths with `PROFILE=1` (flip `particles.gpu_enabled`). On an 8-worker Apple Silicon machine at
-1920x1080, ~150k live particles:
+`particles_demo` (its 100k-spark fountain and sorted dust field) compares the two paths with
+`PROFILE=1` (flip `particles.gpu_enabled`; the recipe is in its header). Measured on a heavier
+setup -- three 60k-spark fountains and a 40k sorted dust field, ~150k live particles -- on an
+8-worker Apple Silicon machine at 1920x1080:
 
 | Path | CPU `scene_update` | CPU `dynamic_meshes` (render prep) | GPU `particles.sim` | GPU `transparent` |
 |---|---|---|---|---|

@@ -783,6 +783,9 @@ bool Engine::tick() {
             gather_debug_lines_(scene_mgr_.get_active_scene());
         }
         if (hooks_.pre_render) hooks_.pre_render(dt);
+        // Lens blur (depth of field, tilt shift) is a play-time look: an editor's edit mode
+        // draws sharp. Every frame, so it also holds across renderer rebuilds.
+        pipeline_->set_lens_blur_suppressed(edit_mode_);
         sync_water_render_state_(scene_mgr_.get_active_scene());
         sync_weather_render_state_(scene_mgr_.get_active_scene());
         sync_sky_render_state_(scene_mgr_.get_active_scene(), dt);

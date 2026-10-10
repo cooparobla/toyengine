@@ -5,7 +5,7 @@ in, the objects that fill them, their shapes, materials and animations, and the 
 drawn on screen. What you see in the editor's viewport is drawn by the game's own renderer, so
 it looks the way it will in the game.
 
-![The editor with the water_test scene open: the asset list on the left, the 3D viewport in
+![The editor with the water_demo scene open: the asset list on the left, the 3D viewport in
 the middle, the Hierarchy and Properties on the right](../images/editor/overview.jpg)
 
 If you have used Blender, the viewport, its keys and its modes will feel familiar. If you have

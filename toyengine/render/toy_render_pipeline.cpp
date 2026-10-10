@@ -2000,7 +2000,7 @@ void ToyRenderPipeline::record_post_chain_(coopa::gfx::command::CommandBuffer& c
         // resolve_dof_focus_()'s own doc for why (dt-driven smoothing state).
         dof_params.focus_distance = glm::max(ctx.dof_focus_distance, 0.01f);
         dof_params.focus_range    = ctx.dof_focus_range;
-        dof_params.blur_scale     = config_.dof_blur_scale;
+        dof_params.blur_scale     = lens_blur_suppressed_ ? 0.0f : config_.dof_blur_scale;   // 0: exact bypass
 
         dof_params.max_radius        = config_.dof_max_radius;
         dof_params.sample_count      = config_.dof_sample_count;
@@ -2229,8 +2229,9 @@ void ToyRenderPipeline::record_post_chain_(coopa::gfx::command::CommandBuffer& c
         ts_params.focus_width   = config_.tilt_shift_focus_width;
         ts_params.ramp_width    = config_.tilt_shift_ramp_width;
         ts_params.max_radius    = config_.tilt_shift_max_radius;
-        ts_params.blur_top      = config_.tilt_shift_blur_top;
-        ts_params.blur_bottom   = config_.tilt_shift_blur_bottom;
+        // Suppressed: zero strength, so every CoC is 0 -- the pass's exact passthrough.
+        ts_params.blur_top      = lens_blur_suppressed_ ? 0.0f : config_.tilt_shift_blur_top;
+        ts_params.blur_bottom   = lens_blur_suppressed_ ? 0.0f : config_.tilt_shift_blur_bottom;
         ts_params.angle_degrees = config_.tilt_shift_angle;
         tilt_shift_pass_->execute(cmd, ts_params);
         gpu_mark_(cmd, GpuScope::TiltShift);

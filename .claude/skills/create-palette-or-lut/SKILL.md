@@ -57,8 +57,8 @@ render:
 ## Verify
 
 ```sh
-.claude/skills/create-scene/scripts/render_scene.sh pixel_demo "$TMPDIR/grade_off.png" grading_enabled=false
-.claude/skills/create-scene/scripts/render_scene.sh pixel_demo "$TMPDIR/grade_on.png"  grading_enabled=true grading_lut='"assets/luts/<name>.png"'
+.claude/skills/create-scene/scripts/render_scene.sh fog_demo "$TMPDIR/grade_off.png" grading_enabled=false
+.claude/skills/create-scene/scripts/render_scene.sh fog_demo "$TMPDIR/grade_on.png"  grading_enabled=true grading_lut='"assets/luts/<name>.png"'
 ```
 
 Compare the two frames; check the `.log` for a rejected-LUT warning (wrong dimensions).

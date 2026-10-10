@@ -460,7 +460,7 @@ const std::vector<SettingsGroup>& render_settings_groups() {
             .done());
 
         g.push_back(GroupBuilder(features, "Depth of Field", "Physically-based camera blur in front of and behind the focus")
-            .toggle(startup(F(f_bool("dof_enabled", false), "Depth of Field", "Camera focus blur")))
+            .toggle(startup(F(f_bool("dof_enabled", false), "Depth of Field", "Camera focus blur (shown while playing; edit mode draws sharp)")))
             .add(quality("dof_quality", "bokeh gather taps"))
             .sub("Focus")
             .add(with_default(F(f_enum("dof_focus_mode", {"manual", "orbit_target", "object"}), "Focus Mode",
@@ -489,7 +489,7 @@ const std::vector<SettingsGroup>& render_settings_groups() {
             .done());
 
         g.push_back(GroupBuilder(features, "Tilt Shift", "A miniature / diorama look: a sharp horizontal band, blurred above and below")
-            .toggle(startup(F(f_bool("tilt_shift_enabled", false), "Tilt Shift", "Diorama blur, after upscaling")))
+            .toggle(startup(F(f_bool("tilt_shift_enabled", false), "Tilt Shift", "Diorama blur, after upscaling (shown while playing; edit mode draws sharp)")))
             .add(F(f_float("tilt_shift_focus_center", 0.55f, 0.005f, 0.0f, 1.0f), "Band Centre", "Screen height of the sharp band's centre (0 = top)"))
             .add(F(f_float("tilt_shift_focus_width", 0.18f, 0.005f, 0.0f, 1.0f), "Band Width", "Half-height of the fully sharp band (screen fraction)"))
             .add(F(f_float("tilt_shift_ramp_width", 0.22f, 0.005f, 0.0f, 1.0f), "Ramp Width", "Distance the blur fades in over"))

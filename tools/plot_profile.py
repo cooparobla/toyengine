@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Graph a toyengine profiling-mode CSV (see main.cpp: PROFILE=1).
 
-    HEADLESS=1 PROFILE=1 MAX_FRAMES=600 ./build/toyengine terrain_test
+    HEADLESS=1 PROFILE=1 MAX_FRAMES=600 ./build/toyengine terrain_demo
     python3 tools/plot_profile.py output/profile.csv            # -> output/profile.png
     python3 tools/plot_profile.py output/profile.csv --show     # also open a window
     python3 tools/plot_profile.py output/profile.csv --summary  # text table only (no matplotlib)

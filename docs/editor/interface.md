@@ -9,10 +9,10 @@ material, a texture or a UI). Whatever you pick in the Asset panel fills the res
 The window has seven areas:
 
 1. **Top bar** (top edge). The logo, the **File**, **Edit**, **Render**, **Window** and **Help**
-   menus, the name of the open asset (here **Scene water_test**), the **Play**, **Pause** and
+   menus, the name of the open asset (here **Scene water_demo**), the **Play**, **Pause** and
    **Step** buttons in the centre, and the project name (**my_game**) on the right.
 2. **Asset panel** (left). A row of icon tabs, one per asset type, and the list of the project's
-   assets of that type. Here the **Scenes** tab is open and **water_test** is highlighted.
+   assets of that type. Here the **Scenes** tab is open and **water_demo** is highlighted.
 3. **Viewport** (centre). The 3D view of the open asset, with its header (**Object Mode**,
    **View**, **Select**, **Add**, **Object** and the display buttons) and the tool strip on its
    left edge. See [Viewport](viewport.md).
@@ -225,7 +225,7 @@ Selecting, renaming and parenting objects are covered in
 
 The icons down the left edge of Properties are tabs. Hover over one to see its name, and click
 it to open it. The line at the top of the tab names the tab and what it is showing, such as
-**Object water_test > boat**.
+**Object water_demo > boat**.
 
 Which tabs you get depends on what is open:
 

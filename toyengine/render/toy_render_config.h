@@ -363,7 +363,7 @@ struct ToyRenderConfig {
      *
      * `"frustum"` (default) slices the camera's own view frustum from the near plane out to
      * `shadow_distance` (see `shadow_cascade_split_lambda`) -- right for a camera close to its
-     * subject, as on assets/scenes/pixel_demo.
+     * subject, as on the kitchen_sink test scene (tests/fixtures/scenes/).
      *
      * `"focus"` instead centres every cascade on the camera's FOCUS POINT, as nested boxes
      * whose radii grow geometrically from `shadow_focus_radius` out to `shadow_distance`
@@ -484,7 +484,7 @@ struct ToyRenderConfig {
      * Trades acne against peter-panning in the usual way: too small and grazing faces speckle
      * and crawl as the camera moves, too large and a shadow visibly detaches from its caster at
      * the contact point. At 1.0 the offset clears the PCF disk by a texel, which on
-     * assets/scenes/pixel_demo costs about 2% of the shadowed area -- a measurable but
+     * the kitchen_sink test scene (tests/fixtures/scenes/) costs about 2% of the shadowed area -- a measurable but
      * visually negligible recession.
      */
     float    shadow_normal_bias     = 1.0f;
@@ -694,7 +694,7 @@ struct ToyRenderConfig {
      * `gfx/ssr_composite_body.glsl`. Roughness past the cutoff fades confidence to 0, which skips
      * that subtraction and leaves the analytic sky term standing, and this engine has no
      * reflection probes to hand those surfaces to (`indirect_hooks.glsl`'s
-     * `hook_env_specular()` returns the sky gradient unmodified). Measured on terrain_test,
+     * `hook_env_specular()` returns the sky gradient unmodified). Measured on terrain_demo,
      * though, 1.0 vs 0.6 moves whole-frame saturation by 0.002 -- the handover is not the visible
      * lever it looks like on paper.
      */
@@ -896,7 +896,7 @@ struct ToyRenderConfig {
     uint32_t volumetrics_froxel_miss_samples = 4;
     /** Per-pixel jitter of the composite's grid lookup, in froxels / slices (0 = off). Breaks
      *  up the froxel cell pattern for TAA to resolve; ignored unless aa_mode == "taa". Off by
-     *  default: with centre-reprojected history the cells do not show in pixel_demo, and
+     *  default: with centre-reprojected history the cells do not show in the kitchen_sink test scene, and
      *  the dither TAA leaves behind measured as slightly MORE flicker. RUNTIME. */
     float    volumetrics_froxel_lookup_jitter = 0.0f;
     float volumetrics_max_opacity    = 0.85f; /**< Ceiling on how much volumetrics can occlude the scene. */

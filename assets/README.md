@@ -8,7 +8,7 @@ copy only for something that really is its own.
 ## Naming
 
 Every file, folder, object, scene name and clip is **lowercase snake_case**: `glass_sphere`,
-`robot_arm/wave.yaml`, `scene_name: pixel_demo`. No Blender-style `.000` suffixes, no PascalCase.
+`robot_arm/wave.yaml`, `scene_name: water_demo`. No Blender-style `.000` suffixes, no PascalCase.
 Component types (`MeshRenderer`) and enum values (`Perspective`, `BLEND`) are engine identifiers,
 not names, and keep their own spelling.
 
@@ -16,13 +16,13 @@ not names, and keep their own spelling.
 
 The folders between an asset's **type folder** and the asset are its **tags**:
 `materials/metal/steel.yaml` is the material `steel`, tagged `metal`;
-`scenes/tests/water/water_test/scene.yaml` is the scene `water_test`, tagged `tests` and
+`scenes/water/water_demo/scene.yaml` is the scene `water_demo`, tagged
 `water`. The editor's Asset panel shows them as chips, filters by them, and moves an asset when
 its tags change (right-click > Tags...).
 
 **References name only the type and the asset**, never its tags: `material: materials/steel`,
 `mesh_path: cube`, `prefab: objects/campfire`, `texture_albedo: textures/brick_albedo.png`,
-`SCENE=water_test`. When the exact path doesn't exist, every resolver finds the asset by type
+`SCENE=water_demo`. When the exact path doesn't exist, every resolver finds the asset by type
 and name in any tag folder (`coopa::asset::AssetIndex`; the project's assets before
 toyengine's). So re-tagging breaks nothing, and **a name is unique within its type** (a
 material and a mesh may both be `brick`; two materials may not).
@@ -32,7 +32,7 @@ material and a mesh may both be `brick`; two materials may not).
 | Folder | Holds |
 | --- | --- |
 | `config.yaml` | window / render / scene settings, a comment on every key |
-| `scenes/<tags>/<name>/scene.yaml` | one folder per scene; scene-specific meshes in its own `meshes/`. Tags: `tests/<feature>`, `demos` |
+| `scenes/<area>/<name>_demo/scene.yaml` | one demo per area (`rendering`, `water`, `effects`, `gameplay`, `physics`, `animation`, `terrain`, `navigation`, `ui`); scene-specific meshes in its own `meshes/` |
 | `meshes/` | shared meshes (plus `<mesh>.lod.yaml` LOD sidecars, kept beside their mesh). Tags: `primitives`, `props`, `terrain/<style>`, `water`, `animation`, `characters` |
 | `materials/` | shared PBR materials -- see below. Tags: `basic`, `metal`, `transparent`, `natural`, `building`, `prototype` |
 | `textures/` | shared material maps. Tags: `brick`, `terrain`, `prototype`, `masks` |
@@ -60,8 +60,8 @@ material and a mesh may both be `brick`; two materials may not).
 | `mannequin_*` | the mannequin's capsule body parts (tag `characters`) | centre |
 | `tile_side_flat`, `tile_side_bevel` | terrain tile sides (see toyengine/world) | -- |
 
-Generators in `tools/` rebuild the generated ones (`gen_water_test_meshes.py`,
-`gen_water_grid_mesh.py`, `gen_animation_test_scene.py`, `gen_tile_side_meshes.py`, `gen_mannequin.py`, `gen_ragdoll_test_scene.py`).
+Generators in `tools/` rebuild the generated ones (`gen_water_demo_meshes.py`,
+`gen_water_grid_mesh.py`, `gen_animation_demo_scene.py`, `gen_tile_side_meshes.py`, `gen_mannequin.py`).
 
 ## Importing from Blender
 
@@ -134,7 +134,7 @@ shader_params: [tiling, sharpness, space, normal_strength]
 - `normal_strength` -- scales the normal map's tilt (default 1).
 
 It is for OPAQUE materials: shadow passes use the stock shaders, so a CUTOUT triplanar material
-would cast its mesh-UV silhouette. `scenes/pixel_demo` shows both spaces side by side
+would cast its mesh-UV silhouette. The kitchen_sink test scene (`tests/fixtures/scenes/kitchen_sink`) shows both spaces side by side
 (`triplanar_world`, `triplanar_local`).
 
 ## Tessellation and displacement
@@ -157,8 +157,7 @@ What moves the new vertices: the material's displacement map (along the normal) 
 shader's vertex hook (water's waves, foliage's sway, deep snow). Shadows tessellate the same way.
 Start from a mesh with some density of its own (the cap is 64 splits per edge) and real 0..1 UVs.
 Water too: set it on the WaterBody's MeshRenderer (`water_quality` low / medium gate it off, see
-`toyengine/water/water_settings.h`). `scenes/tests/rendering/tess_test` and
-`scenes/demos/ocean_demo` show it; `tools/gen_displacement_maps.py` makes height maps.
+`toyengine/water/water_settings.h`). `scenes/rendering/tess_demo` shows both; `tools/gen_displacement_maps.py` makes height maps.
 
 ## Snow
 
@@ -174,7 +173,7 @@ With the weather snowing below freezing, `snow_cover` builds up (and melts when 
   trenches back in. Give that renderer tessellation so the 10 cm trench cells have vertices.
   Gameplay reads the same snow through `toy::world::find_snow(scene)->depth_at(xy, ground_z)`.
 
-`scenes/tests/effects/snow_test` shows both.
+`scenes/effects/weather_demo`'s snow field (x = 80; Preview snow) shows both.
 
 ## Scene settings
 
@@ -231,6 +230,6 @@ Edit them in the editor's **Themes** tab: a theme opens in the Properties editor
 previewed live on a UI asset (with its unsaved edits, in place of that UI's own theme) until
 Save Theme. These are game assets; the editor's own chrome themes live in `editor/themes/`.
 
-`scenes/ui_showcase` places the HUD over a small scene with a world-space nameplate; its
+`scenes/ui/ui_demo` places the HUD over a small scene with a world-space nameplate; its
 `HealthDriver` drives the HUD's `Health` bar by name. `tools/gen_ui_templates.py` regenerates
 these files (and the editor's New UI templates, `editor/templates/ui/`).

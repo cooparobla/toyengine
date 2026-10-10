@@ -49,7 +49,7 @@ Font paths resolve **relative to the theme file** (default.yaml uses
 ## Verify
 
 Render a scene showing several widget kinds with the theme -- e.g. a scratch copy of
-`scenes/ui_showcase` whose UI roots point at the new theme:
+`scenes/ui/ui_demo` whose UI roots point at the new theme:
 
 ```sh
 .claude/skills/create-scene/scripts/render_scene.sh <scene>

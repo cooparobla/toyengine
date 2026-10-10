@@ -20,7 +20,7 @@
  * Everything physics computed that frame -- contacts, and in particular a cloth draped over the
  * body -- is therefore positioned around P(f-1), while the renderer draws the body at P(f). For a
  * rigid contact that is invisible. For cloth it is not: the measured mismatch on
- * `assets/scenes/cloth_test` at `move_speed: 4.0` is ~1 cm, against a 3 cm collision standoff, and
+ * `assets/scenes/physics/cloth_demo` at `move_speed: 4.0` is ~1 cm, against a 3 cm collision standoff, and
  * shows up as the ball poking through the sheet on its leading side.
  *
  * Running these components at order 50 -- ahead of Physics (100), and still inside `Scene::update()`

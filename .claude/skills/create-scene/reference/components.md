@@ -109,8 +109,8 @@ hierarchical), exact_tile_budget, near_radius, lookahead_tiles, rebuild_interval
 `source_scan_interval`, `build_without_agents`, `debug_draw` (`Mesh`, `Grid`, `Tiles`, `Links`,
 `Paths`, `Flow`, `FlowTiles`, `Agents`, `All`; shows in every debug_view), `debug_flow_stride`.
 For big levels use `cell_size: 0.5`; flow mode `auto` goes hierarchical by itself. Full docs:
-`libs/physxcoopa/physxcoopa/nav/README.md`; example scenes: `nav_test` (A* + flow, small),
-`nav_open_world` (hierarchical flow fields, 400 m).
+`libs/physxcoopa/physxcoopa/nav/README.md`; example scenes: `nav_demo` (A* + flow, small),
+`nav_stress_demo` (hierarchical flow fields, 400 m).
 
 | Component | Keys (default) |
 |---|---|

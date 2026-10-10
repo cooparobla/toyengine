@@ -1,4 +1,4 @@
-scene: { default_scene: assets/scenes/demos/pixel_demo/scene.yaml }
+scene: { default_scene: assets/scenes/gameplay/character_demo/scene.yaml }
 debug: { overlay: "off" }
 jobs: { parallel_threshold: 4, worker_threads: 0 }
 output: { filepath: ./output/frame.png, save_low_res: false, save_on_exit: true }
@@ -14,7 +14,7 @@ physics:
   parallel_threshold: 16
   solver: { position_iterations: 4, relax_iterations: 2, velocity_iterations: 16 }
 render:
-  aa_mode: fxaa
+  aa_mode: taa
   ambient_intensity: 1.0
   atmosphere_density: 1.0
   auto_exposure_compensation: 1.0

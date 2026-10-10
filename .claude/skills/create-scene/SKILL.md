@@ -1,12 +1,16 @@
 ---
 name: create-scene
-description: Create or extend a toyengine scene -- assets/scenes/<name>/scene.yaml with objects, components, lights, camera, prefab instances and per-scene render/physics settings -- including test/showcase scenes for a feature (SSR, fog, physics, water...). Use when asked to make, build, lay out, add objects to, or fix a scene or level, or to set up a scene that demonstrates or tests something. Also holds the full component key reference and the headless render script the other create-* skills use to verify their work.
+description: Create or extend a toyengine scene -- assets/scenes/<area>/<name>_demo/scene.yaml with objects, components, lights, camera, prefab instances and per-scene render/physics settings -- including test/showcase scenes for a feature (SSR, fog, physics, water...). Use when asked to make, build, lay out, add objects to, or fix a scene or level, or to set up a scene that demonstrates or tests something. Also holds the full component key reference and the headless render script the other create-* skills use to verify their work.
 ---
 
 # Create a scene
 
-A scene is `assets/scenes/<tags>/<name>/scene.yaml` (tags are folders: test scenes go in
-`scenes/tests/<feature>/`, showcases in `scenes/demos/`; see "Tags" in `assets/README.md`).
+A scene is `assets/scenes/<area>/<name>_demo/scene.yaml` -- the repo keeps ONE demo per area
+(`rendering/`, `water/`, `effects/`, `gameplay/`, `physics/`, `animation/`, `terrain/`,
+`navigation/`, `ui/`), so extend the area's demo with a new station before adding a scene. A
+test that needs a scene-level variant (another cloud type, weather, camera pose) patches a copy
+of the demo with `tests/engine/support/scene_variant.h`; scenes that exist only for tests live in
+`tests/fixtures/scenes/`.
 `./build/toyengine <name>` and `SCENE=<name>` find it by name whatever its tags. It is a tree of named objects, each a list of
 components. **The loader is permissive**: unknown component types and unknown keys are
 silently skipped, and most enum parsers map an unknown value to the default. A typo renders as
@@ -14,24 +18,23 @@ silently skipped, and most enum parsers map an unknown value to the default. A t
 never from memory.
 
 Read first: `assets/README.md` (naming, shared meshes and materials, scene settings).
-Good examples (under `scenes/demos/` and `scenes/tests/<feature>/`): `pixel_demo` (everything
-at once), `ssr_test` and `fog_test` (feature benches with a documented header), `physics_test`,
-`water_test`, `particles_test`, `terrain_test`. Reference other assets by type and name only
+Good examples: `ssr_demo` and `fog_demo` (feature benches with a documented header),
+`character_demo` (stations around a player), `physics_demo`, `water_demo`, `particles_demo`,
+`terrain_demo`. Reference other assets by type and name only
 (`materials/steel`, `mesh_path: cube`) -- never through their tag folders.
 
 ## Conventions
 
 - **Z-up, metres.** Ground is the XY plane at z = 0. Gravity is -Z.
 - Lowercase snake_case for the folder, `scene_name`, and every object name.
-- `format: blender` at the top (informational; most scenes use it).
 - Transform rotation is Euler **degrees**, applied X then Y then Z. **Always write all three
   axes** of `position`/`rotation`/`scale`: a missing axis reads as 0, so `scale: { x: 2 }` is a
   flat (2, 0, 0) scale.
 - Cameras look down their local -Z: `rotation: { x: 90 }` looks along +Y, `x: 70` looks 20
   degrees below horizontal, `z` sets the heading.
 - Start the file with a `#` comment block: what the scene is for, how to run it, and a short
-  map of what is where. A test scene also lists which `debug_view`s and config keys are worth
-  sweeping (see `ssr_test`/`fog_test`).
+  map of what is where. A demo also lists which `debug_view`s and config keys are worth
+  sweeping (see `ssr_demo`/`fog_demo`).
 
 ## Skeleton
 
@@ -39,7 +42,6 @@ at once), `ssr_test` and `fog_test` (feature benches with a documented header), 
 # <name> -- <one line: what this scene shows or tests>.
 #
 # Run: ./build/toyengine <name>        (or SCENE=<name>)
-format: blender
 scene:
   scene_name: <name>
   settings:                      # optional: overrides of config.yaml for this scene only
@@ -112,7 +114,7 @@ scene:
    frames all of them.
 2. **Reuse before creating.** Shared meshes (`cube` is centred unit, `plane` is a 2x2 quad,
    `sphere` radius 1...), materials and object assets are listed in `assets/README.md`. New
-   meshes/materials/prefabs that only this scene uses go in `assets/scenes/<name>/meshes/`,
+   meshes/materials/prefabs that only this scene uses go in `assets/scenes/<area>/<name>_demo/meshes/`,
    `.../materials/`; paths resolve against the scene folder first, then `assets/`.
 3. **Write the YAML** using `type: Foo` entries (not `!Foo` tags; the YAML parser mishandles
    block tags after the first list item). Prefer generating large regular layouts (rows of
@@ -128,7 +130,7 @@ scene:
    direction (or the weather's clock) -- sunsets, sun / moon discs, stars (`sky_stars`) -- and
    overwrites `sky_*` and the light's colour to match; tune it with `atmosphere_density` /
    `ozone` / `sun_disc_size` / `moon_disc_size` / `sky_quality`. Example:
-   `assets/scenes/tests/rendering/sky_test`.
+   `assets/scenes/rendering/sky_demo`.
    **Clouds** work with either sky model (over the gradient they take its colours and the
    scene's sun): `clouds: true`, `cloud_type: volumetric | flat`, `cloud_coverage`
    (weather-driven), `cloud_wind_speed`, `cloud_altitude` (base, world z), `cloud_thickness`.
@@ -140,8 +142,8 @@ scene:
    square around the camera; smaller = sharper) shadows surfaces, water, particles and
    volumetric fog. `cloud_camera_fade: true` + `cloud_fade_start` / `_end` (camera height above
    the layer's top) hides the clouds for a zoomed-in topdown camera; shadows stay. Examples:
-   `topdown_sky_test` (low volumetric), `topdown_flat_clouds_test` (flat), both under
-   `assets/scenes/tests/rendering/`.
+   `assets/scenes/rendering/clouds_demo` (low volumetric; its `flat_cloud_*` keys are tuned for
+   switching it to `cloud_type: flat`).
 5. **Per-scene settings.** `settings.render` overrides any `render:` key of `assets/config.yaml`,
    including the startup-fixed switches (`ssr_enabled`, `volumetrics_enabled`,
    `transparency_enabled`, `bloom_enabled`, `aa_mode`, resolutions, shadow-map sizes...). The
@@ -157,7 +159,7 @@ scene:
    rig; the camera's CameraController sets `tracker:` to it (`mode: orbit` collides with
    geometry, or `mode: first_person`). Doors to other scenes are SceneLink boxes; objects whose
    state belongs in a save get a SaveId. Ragdolls: `objects/mannequin_ragdoll`.
-   Examples: `character_test`, `loading_test`, `ragdoll_test`.
+   Examples: `character_demo` (its ragdoll station too), `loading_demo`.
 
 ## Verify (always)
 

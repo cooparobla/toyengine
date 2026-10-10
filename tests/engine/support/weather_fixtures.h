@@ -13,6 +13,10 @@
 #include <coopa/yaml/document.h>
 #include <toyengine/weather/weather_system.h>
 
+#include <glm/glm.hpp>
+
+#include "engine/support/scene_variant.h"
+
 namespace toy::test {
 
 /** @brief A weather block for the device-free tests: two simple conditions, no effects. */
@@ -40,6 +44,39 @@ inline void weather_step(toy::weather::WeatherSystem& w, coopa::scene::Scene& sc
         ctx.delta_time = dt;
         w.execute(scene, ctx);
     }
+}
+
+/// Where weather_demo's snow field is centred (its objects are laid out around this point).
+inline const glm::vec2 k_snow_field{80.0f, 0.0f};
+
+/**
+ * @brief weather_demo set up for its snow field: snowing on a fixed schedule with the clock
+ *        stopped at 11:00, and the orbit camera (auto-rotate off) looking at the field -- the
+ *        snow trench window centres on the camera's look point.
+ */
+inline std::string snow_field_demo() {
+    return scene_variant("assets/scenes/effects/weather_demo/scene.yaml", "snow_field", [](fkyaml::node& doc) {
+        fkyaml::node& w = doc["scene"]["settings"]["weather"];
+        w["condition"] = fkyaml::node(std::string("snow"));
+        w["schedule"] = fkyaml::node(std::string("fixed"));
+        w["day_length_minutes"] = fkyaml::node(0);
+        w["time_of_day"] = fkyaml::node(11.0);
+        auto v3 = [](float x, float y, float z) {
+            fkyaml::node n = fkyaml::node::mapping();
+            n["x"] = fkyaml::node(x);
+            n["y"] = fkyaml::node(y);
+            n["z"] = fkyaml::node(z);
+            return n;
+        };
+        if (fkyaml::node* tf = scene_component(doc, "camera", "Transform")) {
+            (*tf)["position"] = v3(k_snow_field.x, k_snow_field.y - 11.0f, 5.5f);
+            (*tf)["rotation"] = v3(66.0f, 0.0f, 0.0f);
+        }
+        if (fkyaml::node* cc = scene_component(doc, "camera", "CameraController")) {
+            (*cc)["target"] = v3(k_snow_field.x, k_snow_field.y + 0.5f, 0.0f);
+            (*cc)["auto_rotate_deg_per_sec"] = fkyaml::node(0.0);
+        }
+    });
 }
 
 } // namespace toy::test

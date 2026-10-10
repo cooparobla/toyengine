@@ -64,7 +64,7 @@ COOPA_TEST(box_centre_snaps_to_whole_texels) {
 COOPA_TEST(fit_covers_a_camera_far_from_the_origin) {
     // The fit is built around the camera's own frustum, so the camera position must land
     // inside the box's clip volume no matter where in the world that camera is. Checked at
-    // a terrain_test-scale offset AND at the origin, in BOTH light-space axes: a projection
+    // a terrain_demo-scale offset AND at the origin, in BOTH light-space axes: a projection
     // whose Y scale is negated without its Y translation passes at the origin (where the
     // centre is 0 and the mirror is the identity) and misses the scene entirely out here.
     glm::vec3 dir(-0.45f, -0.35f, -0.82f);

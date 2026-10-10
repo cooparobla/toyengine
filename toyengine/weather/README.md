@@ -5,8 +5,8 @@ weather **conditions** (clear, rain, storm, snow...) blends from one to the next
 drive the sky gradient, ambient light, global fog, the scene's directional light and runtime
 effects (rain, snow, mist, dust). Every component can read the result.
 
-Demo scene: `./build/toyengine weather_test`
-([assets/scenes/tests/effects/weather_test](../../assets/scenes/tests/effects/weather_test/scene.yaml)).
+Demo scene: `./build/toyengine weather_demo`
+([assets/scenes/tests/effects/weather_demo](../../assets/scenes/effects/weather_demo/scene.yaml)).
 It is a small hamlet. The clock runs a day in 4 minutes and the random schedule moves through the
 stock conditions. Street lamps light up at dusk, and a campfire goes out in the rain and relights
 afterwards. Both use `WeatherReactor`, with no code.

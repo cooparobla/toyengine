@@ -1,6 +1,6 @@
 /**
  * @file particles_scene_test.cpp
- * @brief particles_test end to end: every system simulates, quads and mesh scatters reach the
+ * @brief particles_demo end to end: every system simulates, quads and mesh scatters reach the
  *        renderer, the campfire is warm on screen with no blowout or NaN blocks, and an emptied
  *        frame draws nothing.
  */
@@ -26,12 +26,12 @@ COOPA_TEST_SUITE("particles_scene");
 
 using namespace toy::test;
 
-/** @brief particles_test end to end: every system simulates, quads and mesh scatters reach the
+/** @brief particles_demo end to end: every system simulates, quads and mesh scatters reach the
  *         renderer, and the fire is on screen -- warm, bright, and free of NaN blowouts. */
 COOPA_TEST(particles_scene_simulates_and_renders) {
     ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
     ScopedEnv no_input("NO_INPUT", "1");
-    toy::core::AppConfig config = make_test_config("assets/scenes/particles_test/scene.yaml", 640, 360, 640, 360);
+    toy::core::AppConfig config = make_test_config("assets/scenes/effects/particles_demo/scene.yaml", 640, 360, 640, 360);
     config.render.transparency_enabled = true;   // particle quads draw in the forward transparent pass
     config.render.bloom_enabled = true;
     toy::core::Engine engine(std::move(config));

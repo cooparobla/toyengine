@@ -37,7 +37,7 @@ using namespace toy::test;
  * The regression test for a flicker that shipped unnoticed: with `aa_mode: taa`, the 8-frame
  * Halton jitter makes the whole render exactly 8-periodic, and any resolve that filters it
  * with a plain exponential blend converges that periodic input to a periodic ORBIT rather than
- * a fixed point -- on terrain_test's block faces the surviving orbit reads as boiling. TAA's
+ * a fixed point -- on terrain_demo's block faces the surviving orbit reads as boiling. TAA's
  * age-weighted accumulation (a true running average at rest, with a quantisation floor on the
  * variance clip so flat regions keep their age) is what this test holds to the contract; the
  * threshold below fails on any re-introduced orbit.
@@ -55,7 +55,7 @@ COOPA_TEST(static_camera_converges_to_a_static_image) {
     ScopedEnv fixed_dt("FIXED_DT", "0.016");
     ScopedEnv no_input("NO_INPUT", "1");
 
-    toy::core::Engine engine(make_shipped_config("assets/scenes/terrain_test/scene.yaml", 320, 180));
+    toy::core::Engine engine(make_shipped_config(voxel_terrain_demo(), 320, 180));
 
     auto* camera = coopa::gfx::engine::components::CameraComponent::main();
     expect(camera != nullptr && camera->scene != nullptr, "converge: the scene has a main camera");
@@ -134,7 +134,7 @@ COOPA_TEST(image_settles_after_camera_stops) {
     ScopedEnv no_input("NO_INPUT", "1");
 
     toy::core::AppConfig config =
-        make_shipped_config("assets/scenes/terrain_test/scene.yaml", 1920, 1080);
+        make_shipped_config(voxel_terrain_demo(), 1920, 1080);
     // Eye adaptation is deliberately excluded. It re-meters after the rotation and then eases
     // exposure toward the new target at auto_exposure_speed_up/down -- a slow, intended,
     // global brightness glide, not a renderer failing to settle. Left on (config.yaml ships it
@@ -205,14 +205,14 @@ COOPA_TEST(image_settles_after_camera_stops) {
 COOPA_TEST(sky_clouds_are_temporally_stable) {
     ScopedEnv fixed_dt("FIXED_DT", "0");
     ScopedEnv no_input("NO_INPUT", "1");
-    toy::core::AppConfig config = make_test_config("assets/scenes/tests/rendering/sky_test/scene.yaml", 480, 270, 480, 270);
+    toy::core::AppConfig config = make_test_config("assets/scenes/rendering/sky_demo/scene.yaml", 480, 270, 480, 270);
     config.render.aa_mode = "taa";
     config.render.auto_exposure_enabled = false;
     config.render.bloom_enabled = false;
     config.render.shadows_enabled = false;
     toy::core::Engine engine(std::move(config));
     toy::weather::WeatherSystem* w = engine.weather();
-    expect(w != nullptr, "cloud stability: sky_test has its weather");
+    expect(w != nullptr, "cloud stability: sky_demo has its weather");
     if (!w) return;
     auto& pl = engine.pipeline();
     auto& cfg = pl.render_config_mut();
@@ -238,7 +238,7 @@ COOPA_TEST(sky_clouds_are_temporally_stable) {
     // Without TAA (FXAA, the shipped default) and at the lowest tier, nothing smooths the
     // clouds after their own reconstruction: its anti-flicker cap alone must hold them still.
     // (aa_mode is startup-fixed: a second engine.)
-    toy::core::AppConfig low_config = make_test_config("assets/scenes/tests/rendering/sky_test/scene.yaml", 480, 270, 480, 270);
+    toy::core::AppConfig low_config = make_test_config("assets/scenes/rendering/sky_demo/scene.yaml", 480, 270, 480, 270);
     low_config.render.aa_mode = "fxaa";
     low_config.render.cloud_quality = toy::render::RenderQuality::Low;
     low_config.render.auto_exposure_enabled = false;
@@ -266,7 +266,7 @@ COOPA_TEST(sky_clouds_are_temporally_stable) {
 }
 
 /**
- * @brief Low volumetric clouds seen from above (topdown_sky_test) are as stable as the sky's: a
+ * @brief Low volumetric clouds seen from above (clouds_demo) are as stable as the sky's: a
  *        still orbit camera over still clouds gives consecutive frames that agree, with TAA and,
  *        at the lowest tier, without it. Their march now ends at the ground and their layer is
  *        composited over geometry (cloud_composite.frag), so this is a different path from the
@@ -277,7 +277,7 @@ COOPA_TEST(topdown_clouds_are_temporally_stable) {
     ScopedEnv fixed_dt("FIXED_DT", "0");
     ScopedEnv no_input("NO_INPUT", "1");
     for (const bool taa : {true, false}) {
-        toy::core::AppConfig config = make_test_config("assets/scenes/tests/rendering/topdown_sky_test/scene.yaml", 480, 270, 480, 270);
+        toy::core::AppConfig config = make_test_config("assets/scenes/rendering/clouds_demo/scene.yaml", 480, 270, 480, 270);
         config.render.aa_mode = taa ? "taa" : "fxaa";
         config.render.cloud_quality = taa ? toy::render::RenderQuality::High : toy::render::RenderQuality::Low;
         config.render.auto_exposure_enabled = false;

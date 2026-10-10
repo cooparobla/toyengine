@@ -7,46 +7,46 @@ dynamic water, streamed procedural terrain, an interactive UI toolkit, and a nat
 that writes exactly the files the game loads. It runs on Linux and macOS (Apple Silicon,
 via MoltenVK).
 
-![A campfire at dusk: flames, lit smoke, embers, a torch trail and scattered mushrooms](docs/images/particles_test.jpg)
+![A campfire at dusk: flames, lit smoke, embers, a torch trail and scattered mushrooms](docs/images/particles_demo.jpg)
 
 <table>
   <tr>
-    <td><img src="docs/images/water_test.jpg" alt="Lake with Gerstner waves, shoreline foam, a flowing river and buoyant crates"></td>
-    <td><img src="docs/images/fog_test.jpg" alt="Volumetric spotlights in stage haze, a lantern halo and drifting ground mist"></td>
+    <td><img src="docs/images/water_demo.jpg" alt="Lake with Gerstner waves, shoreline foam, a flowing river and buoyant crates"></td>
+    <td><img src="docs/images/fog_demo.jpg" alt="Volumetric spotlights in stage haze, a lantern halo and drifting ground mist"></td>
   </tr>
   <tr>
-    <td align="center"><sub><b>water_test</b>: waves, foam, a flowing river, buoyant crates</sub></td>
-    <td align="center"><sub><b>fog_test</b>: global fog, local volumes, volumetric light</sub></td>
+    <td align="center"><sub><b>water_demo</b>: waves, foam, a flowing river, buoyant crates</sub></td>
+    <td align="center"><sub><b>fog_demo</b>: global fog, local volumes, volumetric light</sub></td>
   </tr>
   <tr>
-    <td><img src="docs/images/ssr_test.jpg" alt="Screen-space reflections across mirror, glossy and rough floor strips"></td>
-    <td><img src="docs/images/pixel_demo.jpg" alt="PBR materials, glass, emissive and water"></td>
+    <td><img src="docs/images/ssr_demo.jpg" alt="Screen-space reflections across mirror, glossy and rough floor strips"></td>
+    <td><img src="docs/images/water_demo_underwater.jpg" alt="Underwater fog, caustics and Snell's window"></td>
   </tr>
   <tr>
-    <td align="center"><sub><b>ssr_test</b>: Hi-Z screen-space reflections from mirror to rough</sub></td>
-    <td align="center"><sub><b>pixel_demo</b>: PBR, refraction, SDFs, bloom</sub></td>
+    <td align="center"><sub><b>ssr_demo</b>: Hi-Z screen-space reflections from mirror to rough</sub></td>
+    <td align="center"><sub><b>water_demo</b>'s deep pool from below: absorption, caustics, Snell's window</sub></td>
   </tr>
   <tr>
-    <td><img src="docs/images/terrain_test.jpg" alt="Streamed procedural tile terrain"></td>
-    <td><img src="docs/images/underwater_test.jpg" alt="Underwater fog, caustics and Snell's window"></td>
+    <td><img src="docs/images/terrain_demo.jpg" alt="Streamed procedural tile terrain"></td>
+    <td><img src="docs/images/physics_demo.jpg" alt="Rigid-body physics arena"></td>
   </tr>
   <tr>
-    <td align="center"><sub><b>terrain_test</b>: procedural world streamed in chunks around the camera</sub></td>
-    <td align="center"><sub><b>underwater_test</b>: absorption, caustics, the surface seen from below</sub></td>
+    <td align="center"><sub><b>terrain_demo</b>: a procedural world streamed in chunks around the camera</sub></td>
+    <td align="center"><sub><b>physics_demo</b>: bounciness, friction, stacking, hinges, triggers</sub></td>
   </tr>
   <tr>
-    <td><img src="docs/images/physics_test.jpg" alt="Rigid-body physics arena"></td>
-    <td><img src="docs/images/cloth_test.jpg" alt="XPBD cloth draped over a moving ball"></td>
+    <td><img src="docs/images/cloth_demo.jpg" alt="XPBD cloth draped over a moving ball"></td>
+    <td></td>
   </tr>
   <tr>
-    <td align="center"><sub><b>physics_test</b>: bounciness, friction, stacking, hinges, triggers</sub></td>
-    <td align="center"><sub><b>cloth_test</b>: XPBD cloth draped over a moving ball</sub></td>
+    <td align="center"><sub><b>cloth_demo</b>: XPBD cloth draped over a moving ball</sub></td>
+    <td></td>
   </tr>
 </table>
 
 ## The editor
 
-![toyengine_editor with fog_test in Full Render and a stage spotlight selected](docs/images/editor/readme_editor.jpg)
+![toyengine_editor with fog_demo in Full Render and a stage spotlight selected](docs/images/editor/readme_editor.jpg)
 
 `toyengine_editor` embeds the real engine, so its **Full Render** viewport *is* the game's
 renderer. It looks and feels like Blender (keymaps, gizmos, modes, outliner) and uses a
@@ -246,37 +246,38 @@ editor. [Projects](#projects) describes the project layout, and
 
 ## Exploring the engine repo
 
-The engine repository runs on its own, with demo and test scenes in [`assets/`](assets/).
+The engine repository runs on its own, with one demo scene per area in [`assets/scenes/`](assets/scenes/)
+(`<area>/<name>_demo/`).
 
 ### Run a demo
 
 ```bash
-./build/toyengine                  # the default scene from assets/config.yaml (pixel_demo)
-./build/toyengine particles_test   # or any scene under assets/scenes/ by name
+./build/toyengine                  # the default scene from assets/config.yaml (character_demo)
+./build/toyengine particles_demo   # or any scene under assets/scenes/ by name
 ./build/toyengine path/to/scene.yaml
 ```
 
 | Scene | What it shows |
 |---|---|
-| `pixel_demo` | Materials showcase: PBR, glass and refraction, SDFs, emissive bloom, water |
-| `particles_test` | A campfire at dusk: flames, lit smoke, embers, a torch trail, mesh scatter |
-| `weather_test` | A hamlet through a fast day and changing weather: rain, fog, storms, lamps at night |
-| `fog_test` | Global fog, local fog volumes, volumetric spot and point lights; look toward the sun |
-| `ssr_test` | Screen-space reflections (and SSGI) across mirror, glossy and rough surfaces |
-| `water_test` | Lake, river, foam, ripples, buoyant crates, a raft and a circling boat |
-| `underwater_test` | Underwater fog, caustics, Snell's window; scroll out to break the surface |
-| `water_stress` | Benchmark: a 1 km ocean, distant lakes and 200 buoyant crates |
-| `terrain_test` | Streamed procedural world. WASD moves the focus, Tab/Shift change height |
-| `terrain_smooth_test` | The same streamed world with styled, smooth tiles |
-| `physics_test` | Restitution, friction, stacking, joints, triggers, kinematic platforms |
-| `cloth_test` | XPBD cloth draped over a moving ball |
-| `ragdoll_test` | Ragdolls tumbling down stairs, shoved by a ram; R toggles the player's ragdoll |
-| `animation_test` | Clip-driven rigs: an object-hierarchy robot arm, a skinned tentacle, a bouncing ball, two-bone and look-at IK |
-| `character_test` | A third-person mannequin (WASD, Space, Shift) on stairs, ramps, platforms and crates; foot IK; F5 / F9 save and load |
-| `loading_test` | Doors that load a heavy scene in the background behind a loading screen or a fade |
-| `ui_showcase` | A game HUD over a small scene, with a world-space nameplate |
-| `world_canvas_test` | World-space and screen-space UI, with a clickable health bar |
-| `material_maps_test` | Texture-mapped vs. flat materials (`scene_mapped.yaml` / `scene_flat.yaml`) |
+| `character_demo` | The default: a third-person mannequin (WASD, Space, Shift) on stairs, ramps, platforms and crates; foot IK; F5 / F9 save and load; ragdolls tumbling down stairs, and R to ragdoll the player |
+| `loading_demo` | Doors that load a heavy scene in the background behind a loading screen or a fade |
+| `animation_demo` | Clip-driven rigs: an object-hierarchy robot arm, a skinned tentacle, a bouncing ball, two-bone and look-at IK; a field of 50 skinned tentacles behind them |
+| `particles_demo` | A campfire at dusk: flames, lit smoke, embers, a torch trail, mesh scatter, 100k GPU sparks |
+| `weather_demo` | A hamlet through a fast day and changing weather: rain, fog, storms, lamps at night; a snow field to the east |
+| `fog_demo` | Global fog, local fog volumes, volumetric spot and point lights; look toward the sun |
+| `ssr_demo` | Screen-space reflections (and SSGI) across mirror, glossy and rough surfaces |
+| `sky_demo` | The physical sky and a cloud layer through a full day, moon and stars |
+| `clouds_demo` | Low volumetric clouds over a village from a high camera; switch `cloud_type` to flat for toon clouds |
+| `motion_blur_demo` | Velocity-buffer motion blur on moving and spinning objects |
+| `tess_demo` | Camera-adaptive tessellation: displaced dunes, and a coarse sea that keeps its waves, with buoys |
+| `water_demo` | Lake, river, foam, ripples, buoyant crates, a raft and a circling boat; a deep pool for the underwater look |
+| `water_stress_demo` | Benchmark: a 1 km ocean, distant lakes and 200 buoyant crates |
+| `terrain_demo` | Streamed procedural world in styled, smooth tiles. WASD moves the focus, Tab/Shift change height |
+| `physics_demo` | Restitution, friction, stacking, joints, triggers, kinematic platforms |
+| `cloth_demo` | XPBD cloth draped over a moving ball |
+| `nav_demo` | Navigation: A* over two floors and a 144-mob flow-field crowd |
+| `nav_stress_demo` | Benchmark: 246 agents over a 400 m world on hierarchical flow fields |
+| `ui_demo` | World-space canvases (a clickable Heal button), a themed nameplate and the game HUD |
 
 Default controls: the mouse orbits the camera (the cursor is captured), the scroll wheel zooms,
 and Esc quits.
@@ -294,7 +295,6 @@ and Esc quits.
 Scenes are a tree of objects with components. The engine is **Z-up**, in metres.
 
 ```yaml
-format: blender
 scene:
   scene_name: hello
   root_objects:
@@ -446,7 +446,7 @@ Render tests use a never-mapped window, so a full run is invisible on your deskt
 also script the engine:
 
 ```bash
-HEADLESS=1 MAX_FRAMES=600 ./build/toyengine terrain_test   # benchmark, then save output/frame.png
+HEADLESS=1 MAX_FRAMES=600 ./build/toyengine terrain_demo   # benchmark, then save output/frame.png
 ONESHOT=1 ./build/toyengine                                # render one frame and exit
 HEADLESS=1 PROFILE=1 MAX_FRAMES=600 ./build/toyengine      # per-feature timings -> output/profile.csv
 ```

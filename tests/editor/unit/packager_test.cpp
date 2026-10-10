@@ -39,7 +39,7 @@ COOPA_TEST(engine_fallback_ships_runtime_files_only) {
     }
     expect(spv && !glsl, "engine shaders ship compiled only");
     expect(fs::is_directory(out / "assets" / "fonts"), "engine fonts ship");
-    expect(!fs::exists(out / "assets" / "scenes" / "demos" / "pixel_demo"), "engine scenes never ship");
+    expect(!fs::exists(out / "assets" / "scenes" / "rendering" / "fog_demo"), "engine scenes never ship");
     expect(coopa::yaml::document_exists(out / "assets" / "scenes" / "main" / "scene.yaml"), "the project's own scene ships");
     expect(!fs::exists(out / "assets" / "materials" / "brick.caml"), "engine content outside the runtime dirs never ships");
 

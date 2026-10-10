@@ -8,9 +8,9 @@ description: Create a toyengine mesh asset -- assets/meshes/<name>.yaml (vertice
 Mesh files are per-corner vertex arrays plus polygon index lists, in Blender's export style.
 Parser: `libs/gfxcoopa/gfxcoopa/engine/data/mesh.h` (`parse_unwelded_`, fan triangulation,
 tangent generation, slots, LODs). Helper library: `tools/mesh_yaml.py`. Generators to copy
-from: `tools/gen_tile_side_meshes.py` (uses `mesh_yaml`), `tools/gen_particle_test_assets.py`
+from: `tools/gen_tile_side_meshes.py` (uses `mesh_yaml`), `tools/gen_particle_demo_assets.py`
 (lathe, flat shading, triangulating writer), `tools/gen_water_grid_mesh.py` (grid),
-`tools/gen_animation_test_scene.py` (skinned tube with weights).
+`tools/gen_animation_demo_scene.py` (skinned tube with weights).
 
 Check `assets/README.md` "Shared meshes" first: `cube`, `plane`, `sphere`... and a scaled
 Transform often beat a new mesh.
@@ -34,13 +34,13 @@ Rules (each one has caused a real bug here):
 - **All per-corner arrays have the same length** as `vertices`.
 - **Winding is counter-clockwise viewed from outside**; the right-hand-rule normal points out.
   Clockwise faces are back-face culled away (inside-out mesh).
-- **No duplicate or overlapping faces.** A stray coplanar face with zero UVs made pixel_demo's
+- **No duplicate or overlapping faces.** A stray coplanar face with zero UVs made the kitchen_sink test scene's
   pillar top render untextured.
 - **Hard edges and UV seams = duplicated corners** with different normals/UVs (`cube.yaml`: 24
   corners, 4 per face). Corners weld at load only when position, normal, UV and tangent are all
   identical, so a smooth surface shares values.
 - **Wrap-around seams** (cylinders, lathes, tubes) need a duplicated column at u = 1. Don't copy
-  the `(s + 1) % segments` pattern in `gen_particle_test_assets.lathe()` for textured meshes --
+  the `(s + 1) % segments` pattern in `gen_particle_demo_assets.lathe()` for textured meshes --
   its last strip's UVs run backwards.
 - n-gons are fan-triangulated from their first index: concave or non-planar n-gons break; write
   triangles for anything tricky.
@@ -74,14 +74,14 @@ has a MeshRenderer without `mesh_path` plus `SkinnedMeshRenderer { mesh_path: <n
 ## Procedure
 
 1. **Simple shape (< ~30 corners)**: write the YAML by hand, mirroring `cube.yaml` /
-   `assets/scenes/demos/pixel_demo/meshes/pillar.yaml`.
+   `tests/fixtures/scenes/kitchen_sink/meshes/pillar.yaml`.
 2. **Anything procedural**: write a generator `tools/gen_<thing>.py` (standard library only --
    system python has no numpy) using `tools/mesh_yaml.py`:
    ```python
    import mesh_yaml
    mesh_yaml.write_mesh(path, verts, faces, uvs, normals=None, tangents=None)
    # smooth normals by default; for flat shading unweld first (see flat_shaded() in
-   # gen_particle_test_assets.py); pass mesh_yaml.perpendicular_tangents(normals) if any
+   # gen_particle_demo_assets.py); pass mesh_yaml.perpendicular_tangents(normals) if any
    # normal can point along +-X
    ```
    Commit the generator alongside the mesh so it can be regenerated.

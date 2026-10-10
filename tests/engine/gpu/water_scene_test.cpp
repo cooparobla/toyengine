@@ -1,6 +1,6 @@
 /**
  * @file water_scene_test.cpp
- * @brief water_test and underwater_test end to end: lake and river bake with physics, floaters
+ * @brief water_demo end to end (its deep pool for the underwater camera): lake and river bake with physics, floaters
  *        float and sink, the river delivers its crate, ripples reach the renderer, every quality tier
  *        re-bakes and draws, the underwater pass engages and disengages, and the shader animates on
  *        the buoyancy clock (a past out-of-phase bug).
@@ -24,6 +24,7 @@
 
 #include "engine/support/checks.h"
 #include "engine/support/render_fixture.h"
+#include "engine/support/scene_variant.h"
 #include "engine/support/water_fixtures.h"
 
 COOPA_TEST_SUITE("water_scene");
@@ -50,14 +51,19 @@ glm::vec3 mean_rgb(const Frame& f) {
 COOPA_TEST(water_scene_simulates_renders_and_switches_quality_tiers) {
     ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
     ScopedEnv no_input("NO_INPUT", "1");
-    toy::core::AppConfig config = make_test_config("assets/scenes/water_test/scene.yaml", 640, 360, 320, 180);
+    toy::core::AppConfig config = make_test_config("assets/scenes/water/water_demo/scene.yaml", 640, 360, 320, 180);
     toy::core::Engine engine(std::move(config));
 
     tick_frames(engine, 3);
     auto* water = dynamic_cast<toy::water::WaterSystem*>(engine.scene().find_system("Water"));
     expect(water != nullptr, "water scene: Engine installed the WaterSystem");
+    // Physics bakes stream in nearest-first within sim_radius: the lake and river around the
+    // camera; the deep pool 65 m north waits until a camera comes near.
     std::size_t baked = 0;
-    for (auto* b : engine.scene().get_components<toy::water::WaterBody>()) baked += b->bake_stage == 2 ? 1 : 0;
+    for (auto* b : engine.scene().get_components<toy::water::WaterBody>()) {
+        const std::string name = b->owner ? b->owner->name() : std::string();
+        if ((name == "lake_water" || name == "river_water") && b->bake_stage == 2) ++baked;
+    }
     expect(baked == 2u, "water scene: lake and river both baked with physics (depth + obstacles)");
 
     auto river_s = [&]() {
@@ -144,7 +150,27 @@ COOPA_TEST(water_scene_simulates_renders_and_switches_quality_tiers) {
 COOPA_TEST(underwater_pass_engages_below_the_surface) {
     ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
     ScopedEnv no_input("NO_INPUT", "1");
-    toy::core::AppConfig config = make_test_config("assets/scenes/underwater_test/scene.yaml", 640, 360, 320, 180);
+    // water_demo with its orbit camera moved under the deep pool's surface (the pool sits at y = 65).
+    const std::string pool = scene_variant("assets/scenes/water/water_demo/scene.yaml", "underwater", [](fkyaml::node& doc) {
+        fkyaml::node* cc = scene_component(doc, "camera", "CameraController");
+        fkyaml::node* tf = scene_component(doc, "camera", "Transform");
+        if (cc == nullptr || tf == nullptr) return;
+        fkyaml::node pos = fkyaml::node::mapping();   // ~1.5 m under the surface, looking across the floor
+        pos["x"] = fkyaml::node(0.0);
+        pos["y"] = fkyaml::node(56.0);
+        pos["z"] = fkyaml::node(-1.5);
+        (*tf)["position"] = pos;
+        (*tf)["rotation"]["x"] = fkyaml::node(85.0);
+        fkyaml::node target = fkyaml::node::mapping();
+        target["x"] = fkyaml::node(0.0);
+        target["y"] = fkyaml::node(65.0);
+        target["z"] = fkyaml::node(-3.0);
+        (*cc)["target"] = target;
+        (*cc)["distance"] = fkyaml::node(9.0);
+        (*cc)["pitch_deg"] = fkyaml::node(10.0);
+        (*cc)["min_pitch_deg"] = fkyaml::node(-60.0);
+    });
+    toy::core::AppConfig config = make_test_config(pool, 640, 360, 320, 180);
     toy::core::Engine engine(std::move(config));
     tick_frames(engine, 60);
 
@@ -184,12 +210,12 @@ COOPA_TEST(underwater_pass_engages_below_the_surface) {
 COOPA_TEST(shader_shares_the_buoyancy_clock) {
     ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
     ScopedEnv no_input("NO_INPUT", "1");
-    toy::core::Engine engine(make_test_config("assets/scenes/demos/pixel_demo/scene.yaml", 640, 360, 320, 180));
+    toy::core::Engine engine(make_test_config("tests/fixtures/scenes/kitchen_sink/scene.yaml", 640, 360, 320, 180));
     tick_frames(engine, 30);   // the renderer's clock runs ahead of any later scene's
-    engine.load_scene("assets/scenes/water_test/scene.yaml");
+    engine.load_scene("assets/scenes/water/water_demo/scene.yaml");
     tick_frames(engine, 20);
     auto* water = dynamic_cast<toy::water::WaterSystem*>(engine.scene().find_system("Water"));
-    expect(water != nullptr, "water clock: water_test has a water system");
+    expect(water != nullptr, "water clock: water_demo has a water system");
     if (!water) return;
     const float handed = engine.pipeline().water_state().time;
     expect(handed >= 0.0f && handed <= water->time() && water->time() - handed <= 1.0f / 60.0f + 1e-4f,

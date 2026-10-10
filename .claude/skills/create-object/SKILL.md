@@ -18,7 +18,6 @@ the root), `tentacle.yaml` (skinned mesh rig).
 
 ```yaml
 # <name> -- <what it is, how big, where its origin is>.
-format: toyengine-object
 object:
   name: <name>
   components:

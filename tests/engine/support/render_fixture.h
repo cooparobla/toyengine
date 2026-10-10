@@ -16,7 +16,7 @@
  *
  * **2. FIXED_DT=0 makes A/B comparisons exact.** With no time advancing and the temporal
  * SSAO/SSR resolves off, two captures of an unchanged config are byte-identical -- which
- * render_pipeline's pixel_demo test asserts outright before trusting any of its diffs. That is
+ * render_pipeline's kitchen_sink test asserts outright before trusting any of its diffs. That is
  * what lets these suites compare frames with `== 0` and real area thresholds instead of the
  * invented noise tolerance a wall-clock-driven capture needs. A test that needs time to actually
  * pass (cloth, water, particles, physics) pins FIXED_DT to a real step (1/60) instead -- never
@@ -65,7 +65,7 @@ using Frame = coopa::gfx::util::ImageData;
  * `frame_index_ & 0xFF` -- see ssao_params.noise_rotation and ssr_params.frame_index in
  * ToyRenderPipeline::render(). So "identical" has a period of 256 frames, not 1.
  *
- * Measured on pixel_demo at 160x90: captures 5 frames apart differ by 2 pixels, 8 apart (SSAO's
+ * Measured on kitchen_sink at 160x90: captures 5 frames apart differ by 2 pixels, 8 apart (SSAO's
  * period, which kills the larger source) by 1, and 256 apart by 0 -- but 256 ticks per comparison
  * costs ~20x a whole suite, for one pixel. So captures are spaced by SSAO's cycle and allowed
  * kDriftBudget pixels of SSR dither, a floor 30x below the smallest real signal any toggle

@@ -40,7 +40,6 @@ Scene load_ui_scene(const std::string& yaml, const std::string& anchor = "ui_tes
 }
 
 const char* kCompositeScene = R"(
-format: toyengine
 scene:
   scene_name: ui_test
   root_objects:
@@ -172,7 +171,6 @@ COOPA_TEST(composites_take_the_nearest_theme) {
         f << "name: red\npanel:\n  panel: { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }\n";
     }
     const std::string yaml = std::string(R"(
-format: toyengine
 scene:
   scene_name: theme_test
   root_objects:
@@ -260,7 +258,7 @@ COOPA_TEST(prefab_instance_rect_transform_replaces_the_assets) {
     std::filesystem::create_directories(dir / "ui");
     {
         std::ofstream f(dir / "ui" / "badge.yaml");
-        f << "format: toyengine-object\nobject:\n  name: badge\n  components:\n"
+        f << "object:\n  name: badge\n  components:\n"
              "    - {type: RectTransform, anchor_preset: TopRight, anchored_position: {x: -10, y: -10}, size_delta: {x: 64, y: 64}}\n"
              "    - {type: ThemedPanel}\n";
     }

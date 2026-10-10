@@ -100,7 +100,7 @@ inline constexpr float k_default_tile_size = 32.0f;
 /**
  * @brief Auto tile size never cuts a body into more than this many tiles a side. Every tile is a
  *        renderer the CPU gathers, culls, LOD-selects and sorts each frame, plus a transform to
- *        resolve: measured on the water_stress ocean (1 km), ~1000 tiles of 32 m cost ~3 ms of
+ *        resolve: measured on the water_stress_demo ocean (1 km), ~1000 tiles of 32 m cost ~3 ms of
  *        CPU a frame over one mesh for no GPU gain, while 64 tiles cost a fraction of that.
  */
 inline constexpr int k_max_tiles_per_side = 8;

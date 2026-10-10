@@ -42,7 +42,7 @@ COOPA_TEST(every_debug_view_channel_renders) {
 
     {
         toy::core::AppConfig config =
-            make_test_config("assets/scenes/demos/pixel_demo/scene.yaml", 640, 360, 160, 90);
+            make_test_config("tests/fixtures/scenes/kitchen_sink/scene.yaml", 640, 360, 160, 90);
         toy::core::Engine engine(std::move(config));
         tick_frames(engine, kNoiseCycle);
         const Frame off_frame = engine.capture_image(true);
@@ -74,7 +74,7 @@ COOPA_TEST(every_debug_view_channel_renders) {
     // see toy_lighting.frag's own doc on this combination.
     {
         toy::core::AppConfig config =
-            make_test_config("assets/scenes/demos/pixel_demo/scene.yaml", 640, 360, 160, 90);
+            make_test_config("tests/fixtures/scenes/kitchen_sink/scene.yaml", 640, 360, 160, 90);
         config.render.shadows_enabled         = false;
         config.render.contact_shadows_enabled = true;
         toy::core::Engine engine(std::move(config));
@@ -134,7 +134,7 @@ COOPA_TEST(every_debug_view_channel_renders) {
     // needs its feature enabled at STARTUP, unlike the channels above. One Engine carries both.
     {
         toy::core::AppConfig config =
-            make_test_config("assets/scenes/demos/pixel_demo/scene.yaml", 640, 360, 160, 90);
+            make_test_config("tests/fixtures/scenes/kitchen_sink/scene.yaml", 640, 360, 160, 90);
         config.render.dof_enabled         = true;
         config.render.volumetrics_enabled = true;
         toy::core::Engine engine(std::move(config));

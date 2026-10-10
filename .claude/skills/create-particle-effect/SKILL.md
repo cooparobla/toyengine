@@ -9,9 +9,9 @@ Parser: `toyengine/particles/particle_yaml.h` (keys, value forms); defaults:
 `toyengine/particles/particle_system.h`; module-by-module guide:
 **`toyengine/particles/README.md`** (accurate -- read it). Examples:
 `assets/objects/props/campfire.yaml` (glow, flames, scattered coals, ember bursts, smoke, flickering
-light) and `assets/scenes/tests/effects/particles_test/scene.yaml` (world-space torch trail, mesh scatter on a
+light) and `assets/scenes/effects/particles_demo/scene.yaml` (world-space torch trail, mesh scatter on a
 mound, orbiting mesh emission, fountain with collision + on-death sub-emitters). Run
-`./build/toyengine particles_test`.
+`./build/toyengine particles_demo`.
 
 **Unlike most components, an unknown enum value THROWS** at scene load -- spell them exactly.
 

@@ -10,7 +10,7 @@
  * that descends visibly flows the right way, faster through rapids. Where a stretch is (nearly)
  * flat the downhill direction is noise, so the bake falls back to the direction in which the
  * mesh's UV `u` increases: a spline-generated river (u along its length, as
- * tools/gen_water_test_meshes.py writes) keeps flowing through pools and level reaches.
+ * tools/gen_water_demo_meshes.py writes) keeps flowing through pools and level reaches.
  *
  * Static obstacles (rocks, posts, piers -- anything with a near-vertical face) then bend the
  * field: a short ray along the current that hits something removes the into-obstacle component

@@ -53,15 +53,14 @@ COOPA_TEST(scene_settings_apply_per_scene_and_rebuild_the_renderer) {
     ScopedEnv fixed_dt("FIXED_DT", "0");
     ScopedEnv no_input("NO_INPUT", "1");
     const std::filesystem::path dir = coopa::test::scratch_dir("scene_settings");
-    toy::core::Engine engine(make_test_config("assets/scenes/demos/pixel_demo/scene.yaml", 320, 180, 160, 90));
+    toy::core::Engine engine(make_test_config("tests/fixtures/scenes/kitchen_sink/scene.yaml", 320, 180, 160, 90));
     tick_frames(engine, 2);
     // A switch fixed at pipeline construction: the scene flips it, so the renderer rebuilds.
     const bool project_ssr = engine.pipeline().render_config().ssr_enabled;
     const int rebuilds = engine.pipeline_rebuild_count();
     {
         std::ofstream out(dir / "scene.yaml");
-        out << "format: blender\n"
-               "scene:\n"
+        out << "scene:\n"
                "  scene_name: settings_test\n"
                "  settings:\n"
                "    render: { exposure: 2.5, fog_density: 0.09, ssr_enabled: " << (project_ssr ? "false" : "true") << " }\n"
@@ -90,7 +89,7 @@ COOPA_TEST(scene_settings_apply_per_scene_and_rebuild_the_renderer) {
            "scene settings: a startup-fixed override rebuilds the renderer in place (" +
                std::to_string(engine.pipeline_rebuild_count() - rebuilds) + " rebuilds)");
 
-    engine.load_scene("assets/scenes/pixel_demo/scene.yaml");
+    engine.load_scene("tests/fixtures/scenes/kitchen_sink/scene.yaml");
     tick_frames(engine, 2);
     expect(std::abs(engine.render_config().exposure - project_exposure) < 1e-5f &&
            std::abs(engine.render_config().fog_density - project_fog) < 1e-5f,
@@ -108,7 +107,7 @@ COOPA_TEST(edit_mode_freezes_simulation_and_reloads_cleanly) {
     ScopedEnv home("HOME", (coopa::test::scratch_dir() / "home").string());   // user settings land here
     toy::core::EngineOptions opts;
     opts.edit_mode = true;
-    toy::core::AppConfig cfg = make_test_config("assets/scenes/physics_test/scene.yaml", 320, 180, 160, 90);
+    toy::core::AppConfig cfg = make_test_config("assets/scenes/physics/physics_demo/scene.yaml", 320, 180, 160, 90);
     cfg.audio.music = 0.3f;
     toy::core::Engine engine(cfg, opts);
 
@@ -132,11 +131,65 @@ COOPA_TEST(edit_mode_freezes_simulation_and_reloads_cleanly) {
 
     // Re-entrant load: same scene again, nothing accumulates.
     engine.set_edit_mode(true);
-    engine.load_scene("assets/scenes/physics_test/scene.yaml");
+    engine.load_scene("assets/scenes/physics/physics_demo/scene.yaml");
     expect(engine.scene_manager().scenes().size() == 1, "load_scene() replaces, never accumulates, scenes");
     expect(engine.scene().find_system("Physics") != nullptr, "load_scene() installs the per-scene systems");
     expect(glm::distance(object_position(engine.scene(), "bounce_clay"), start) < 1e-5f,
            "a reloaded scene starts from its authored state");
+}
+
+/** @brief Lens blur is a play-time look: with depth of field and tilt shift on, an edit-mode
+ *         frame is drawn sharp; Play turns the blur on and Stop turns it back off -- live,
+ *         without rebuilding the renderer. */
+COOPA_TEST(edit_mode_draws_without_lens_blur) {
+    ScopedEnv fixed_dt("FIXED_DT", "0");   // nothing moves: frames differ only by the blur
+    ScopedEnv no_input("NO_INPUT", "1");
+    toy::core::EngineOptions opts;
+    opts.edit_mode = true;
+    toy::core::AppConfig cfg = make_test_config("assets/scenes/physics/physics_demo/scene.yaml", 640, 360, 320, 180);
+    cfg.render.dof_enabled = true;
+    cfg.render.dof_focus_mode = "manual";
+    cfg.render.dof_focus_distance = 0.5f;          // everything far past the focal plane: blurred
+    cfg.render.tilt_shift_enabled = true;
+    cfg.render.tilt_shift_focus_width = 0.0f;      // no sharp band
+    toy::core::Engine engine(cfg, opts);
+    const int rebuilds = engine.pipeline_rebuild_count();
+    tick_frames(engine, 8);
+    const Frame editing = engine.capture_image(false);
+    expect(engine.pipeline().lens_blur_suppressed(), "lens blur: suppressed in edit mode");
+
+    engine.set_edit_mode(false);
+    tick_frames(engine, 8);
+    const Frame playing = engine.capture_image(false);
+    expect(!engine.pipeline().lens_blur_suppressed(), "lens blur: on while playing");
+
+    engine.set_edit_mode(true);
+    tick_frames(engine, 8);
+    const Frame stopped = engine.capture_image(false);
+
+    // Sharpness, not a pixel diff: the orbit camera settles while playing, so the frames after
+    // Stop are framed a touch differently -- but both edit-mode frames keep their edges.
+    auto sharpness = [](const Frame& f) {
+        double sum = 0.0;
+        long long n = 0;
+        for (uint32_t y = 0; y < f.height; ++y) {
+            for (uint32_t x = 1; x < f.width; ++x) {
+                const size_t a = (static_cast<size_t>(y) * f.width + x) * f.channels, b = a - f.channels;
+                for (int c = 0; c < 3; ++c) sum += std::abs(int(f.pixels[a + c]) - int(f.pixels[b + c]));
+                ++n;
+            }
+        }
+        return n ? sum / static_cast<double>(n) : 0.0;
+    };
+    const double s_edit = sharpness(editing), s_play = sharpness(playing), s_stop = sharpness(stopped);
+    expect(s_edit > s_play * 1.5, "lens blur: Play blurs the frame (edges " + std::to_string(s_edit) + " -> " + std::to_string(s_play) + ")");
+    expect(s_stop > s_play * 1.5, "lens blur: Stop draws it sharp again (edges " + std::to_string(s_stop) + ")");
+    expect(engine.pipeline_rebuild_count() == rebuilds, "lens blur: toggled live, no renderer rebuild");
+    if (!(s_edit > s_play * 1.5 && s_stop > s_play * 1.5)) {
+        dump_frame(editing, "lens_editing");
+        dump_frame(playing, "lens_playing");
+        dump_frame(stopped, "lens_stopped");
+    }
 }
 
 /** @brief Water is visible in the editor: bodies bake (and publish their mesh) in edit mode
@@ -147,11 +200,11 @@ COOPA_TEST(edit_mode_bakes_and_shows_water) {
     ScopedEnv no_input("NO_INPUT", "1");
     toy::core::EngineOptions opts;
     opts.edit_mode = true;
-    toy::core::Engine engine(make_test_config("assets/scenes/water_test/scene.yaml", 640, 360, 320, 180), opts);
+    toy::core::Engine engine(make_test_config("assets/scenes/water/water_demo/scene.yaml", 640, 360, 320, 180), opts);
     tick_frames(engine, 5);
 
     auto bodies = engine.scene().get_components<toy::water::WaterBody>();
-    expect(bodies.size() == 2u, "editor water: both water bodies loaded");
+    expect(bodies.size() == 3u, "editor water: every water body loaded (lake, river, pool)");
     bool all_visible = !bodies.empty();
     for (auto* b : bodies) {
         // On the owner's MeshRenderer, or (a body larger than one render tile) on its tiles.
@@ -188,8 +241,11 @@ COOPA_TEST(edit_mode_bakes_and_shows_water) {
 
     engine.set_edit_mode(false);
     tick_frames(engine, 3);
-    bool stage2 = true;
-    for (auto* b : engine.scene().get_components<toy::water::WaterBody>()) stage2 = stage2 && b->bake_stage == 2;
+    bool stage2 = true;   // the bodies near the camera (the deep pool 65 m north streams in later)
+    for (auto* b : engine.scene().get_components<toy::water::WaterBody>()) {
+        const std::string name = b->owner ? b->owner->name() : std::string();
+        if (name == "lake_water" || name == "river_water") stage2 = stage2 && b->bake_stage == 2;
+    }
     expect(stage2, "editor water: entering play mode re-bakes with physics (depth, obstacles)");
 }
 
@@ -199,7 +255,7 @@ COOPA_TEST(pushed_play_scene_leaves_the_edit_scene_untouched) {
     ScopedEnv no_input("NO_INPUT", "1");
     toy::core::EngineOptions opts;
     opts.edit_mode = true;
-    const std::string path = std::string(ROOT_DIR) + "/assets/scenes/tests/physics/physics_test/scene.yaml";
+    const std::string path = std::string(ROOT_DIR) + "/assets/scenes/physics/physics_demo/scene.yaml";
     toy::core::Engine engine(make_test_config(path, 320, 180, 160, 90), opts);
     coopa::scene::Scene* edit_scene = &engine.scene();
     const glm::vec3 start = object_position(*edit_scene, "bounce_clay");
@@ -223,7 +279,7 @@ COOPA_TEST(pushed_play_scene_leaves_the_edit_scene_untouched) {
 COOPA_TEST(display_region_moves_the_image_and_viewport_rays) {
     ScopedEnv fixed_dt("FIXED_DT", "0");
     ScopedEnv no_input("NO_INPUT", "1");
-    toy::core::Engine engine(make_test_config("assets/scenes/demos/pixel_demo/scene.yaml", 640, 360, 160, 90));
+    toy::core::Engine engine(make_test_config("tests/fixtures/scenes/kitchen_sink/scene.yaml", 640, 360, 160, 90));
     tick_frames(engine, kNoiseCycle);
     const Frame full = engine.capture_image(true);
     // This config (no palette quantization) carries some frame-to-frame temporal drift of its

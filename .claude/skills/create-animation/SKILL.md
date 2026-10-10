@@ -8,10 +8,10 @@ description: Create toyengine animations -- keyframed or procedural clips in ass
 Clips animate properties (Transform position/rotation/scale, and a few UI/graphic properties) of
 objects addressed **by path from the Animator's object**. Format reference:
 `libs/libcoopa/coopa/animation/README.md` ("YAML schema"); loader
-`animation_clip_loader.h`. Generator with helpers to copy: `tools/gen_animation_test_scene.py`
+`animation_clip_loader.h`. Generator with helpers to copy: `tools/gen_animation_demo_scene.py`
 (`quat_axis_angle`, `rot_keys` with hemisphere fix, `clip(...)`, skinned tube mesh).
 Examples: `assets/objects/animation/robot_arm.yaml` + `assets/animations/robot_arm/*.yaml`,
-`bouncing_ball`, `tentacle` (skinned). Scene: `./build/toyengine animation_test`.
+`bouncing_ball`, `tentacle` (skinned). Scene: `./build/toyengine animation_demo`.
 
 ## Clip file (one clip per file)
 
@@ -128,7 +128,7 @@ Bone and target fields are paths from the component's object, like a track's `ob
 Order each frame: Animator, then FootIK's probes, every TwoBoneIK, every LookAtIK. A
 target is usually an empty object a clip or gameplay moves. FootIK fades out while a sibling
 CharacterController is airborne. Examples: `assets/objects/animation/ik_reacher.yaml`,
-`ik_watcher.yaml` (in `animation_test`), and the mannequin in `character_test`.
+`ik_watcher.yaml` (in `animation_demo`), and the mannequin in `character_demo`.
 
 ## Rigs
 
@@ -145,7 +145,7 @@ CharacterController is airborne. Examples: `assets/objects/animation/ik_reacher.
 ## Procedure
 
 1. Sketch the rig hierarchy and pivots; build/extend the object asset.
-2. Write clips by hand for a few keys, or extend/copy `gen_animation_test_scene.py`'s helpers
+2. Write clips by hand for a few keys, or extend/copy `gen_animation_demo_scene.py`'s helpers
    for anything with many rotation keys (it handles quaternion sign flips). Store clips in
    `assets/animations/<rig>/` (scene-only: `assets/scenes/<scene>/animations/<rig>/`).
 3. Add the Animator with states; set `auto_play` so a scene shows it without code.
@@ -164,4 +164,4 @@ FRAMES=75  .claude/skills/create-scene/scripts/render_scene.sh <scene> "$TMPDIR/
 The poses must differ (and match intent). A rig that never moves usually means a track path
 doesn't match the object names, or `auto_play` names no state. A joint that whips around the
 long way means a quaternion hemisphere flip. Run the `animation` tests if you changed
-`tools/gen_animation_test_scene.py` outputs (`./build/toyengine_tests --list | grep -i anim`).
+`tools/gen_animation_demo_scene.py` outputs (`./build/toyengine_tests --list | grep -i anim`).

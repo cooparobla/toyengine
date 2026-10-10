@@ -29,7 +29,7 @@ using namespace toy::test;
  *        and turning it off costs nothing -- the layer and the profiler are gone, and the frame
  *        is byte-identical to the same frame of an engine that never showed it.
  *
- * pixel_demo's image moves a little from frame to frame even at FIXED_DT 0 (frame-indexed
+ * kitchen_sink's image moves a little from frame to frame even at FIXED_DT 0 (frame-indexed
  * noise), so "off" is compared against a second Engine at the same frame count rather than
  * against this one's earlier frames. Within one frame index, everything that differs is the
  * overlay's.
@@ -37,7 +37,7 @@ using namespace toy::test;
 COOPA_TEST(fps_and_full_modes_draw_and_off_is_free) {
     ScopedEnv fixed_dt("FIXED_DT", "0");
     ScopedEnv no_input("NO_INPUT", "1");
-    const toy::core::AppConfig config = make_test_config("assets/scenes/demos/pixel_demo/scene.yaml", 640, 360, 160, 90);
+    const toy::core::AppConfig config = make_test_config("tests/fixtures/scenes/kitchen_sink/scene.yaml", 640, 360, 160, 90);
     // Frames: 3 off, 3 fps, 20 full, 3 off.
     const int kTotalFrames = 29;
 

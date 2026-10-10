@@ -376,8 +376,7 @@ class Exporter:
             self.warn(f"scene '{scene.name}' has {self.counts['SPOT']} spot lights; the engine uses {MAX_SPOT_LIGHTS}")
 
         scene_name = self.claim("scenes", scene_name, scene.name)
-        data = {"format": "blender",
-                "scene": {"scene_name": scene_name, "root_objects": root_objects}}
+        data = {"scene": {"scene_name": scene_name, "root_objects": root_objects}}
         header = self.header(f"Scene '{scene.name}'") + f"# Run: ./build/toyengine {scene_name}\n"
         self.write_text(os.path.join("scenes", TAG, scene_name, "scene.yaml"), to_yaml(data, header))
 
@@ -476,8 +475,7 @@ class Exporter:
         frame = Matrix.Translation(coll.instance_offset)  # the prefab root sits at the instance offset
         children = [self.export_object(o, None, members, parent_matrix=frame) for o in roots]
         name = self.claim("objects", sanitize(coll.name), coll.name)
-        data = {"format": "toyengine-object",
-                "object": {"name": coll.name,
+        data = {"object": {"name": coll.name,
                            "components": [self.identity_transform()],
                            "children": children}}
         self.write_text(os.path.join("objects", TAG, name + ".yaml"),
@@ -530,8 +528,7 @@ class Exporter:
         states, auto_play = self.export_clips(arm, name)
         if states:
             components.append({"type": "Animator", "auto_play": auto_play, "states": states})
-        data = {"format": "toyengine-object",
-                "object": {"name": arm.name, "components": components, "children": children}}
+        data = {"object": {"name": arm.name, "components": components, "children": children}}
         self.write_text(os.path.join("objects", TAG, name + ".yaml"),
                         to_yaml(data, self.header(f"Armature '{arm.name}' as a rig")))
         return ref

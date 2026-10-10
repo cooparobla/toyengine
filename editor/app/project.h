@@ -66,7 +66,7 @@ bool is_scene_local_file(const std::string& rel);
 
 /**
  * @brief An asset's tags: the folders between its type folder and the asset (a scene's own
- *        folder is the asset, not a tag). `scenes/tests/water/water_test/scene.yaml` -> {tests,
+ *        folder is the asset, not a tag). `scenes/water/water_demo/scene.yaml` -> {tests,
  *        water}; `materials/brick.yaml` -> {}.
  */
 std::vector<std::string> asset_tags(const std::string& rel);

@@ -1,6 +1,6 @@
 /**
  * @file navigation_test.cpp
- * @brief Navigation as the engine installs it, on the shipped nav_test scene: A* around costly
+ * @brief Navigation as the engine installs it, on the shipped nav_demo scene: A* around costly
  *        mud and up to the deck, a chaser re-planning after a moving beacon, a one-way drop link,
  *        and 144 mobs on one flow field. The 246-mob open-world run is extended/navigation_open_world;
  *        the planners themselves are physxcoopa's own suite.
@@ -28,7 +28,7 @@
 COOPA_TEST_SUITE("navigation");
 
 /**
- * @brief The nav_test scene, headless: loads the real scene file (with its own
+ * @brief The nav_demo scene, headless: loads the real scene file (with its own
  *        `scene.settings.navigation`), runs kinematic movers, physics and navigation for 25 s, and
  *        checks every station -- A* up stairs/ramp to the deck around the costly mud, a chaser
  *        re-planning after a moving beacon, a one-way drop link, and 144 mobs on one flow field
@@ -41,7 +41,7 @@ COOPA_TEST(nav_test_agents_reach_their_goals) {
     coopa::physx::register_physics_components(assets);
     toy::scene::register_scene_components();
 
-    const std::string path = std::string(ROOT_DIR) + "/assets/scenes/tests/navigation/nav_test/scene.yaml";
+    const std::string path = std::string(ROOT_DIR) + "/assets/scenes/navigation/nav_demo/scene.yaml";
     std::ifstream in(path);
     fkyaml::node root = fkyaml::node::deserialize(in);
     coopa::physx::nav::NavSettings nav_settings =
@@ -74,20 +74,20 @@ COOPA_TEST(nav_test_agents_reach_their_goals) {
         if (a.x > -5.5f && a.x < -1.5f && a.y > 6.5f && a.y < 15.5f) a_avoided_mud = false;
     }
 
-    expect(nav->agent_count() == 147, "nav_test: 3 couriers + 144 mobs bound");
-    expect(nav->mesh() != nullptr, "nav_test: the navmesh built from the scene's colliders");
+    expect(nav->agent_count() == 147, "nav_demo: 3 couriers + 144 mobs bound");
+    expect(nav->mesh() != nullptr, "nav_demo: the navmesh built from the scene's colliders");
 
     // courier_a: ground -> deck (z = 3 + base_offset 0.78), never through the mud.
-    expect(agent("courier_a")->arrived(), "nav_test: courier_a arrived");
-    expect(glm::distance(pos("courier_a"), glm::vec3(7.5f, 14.5f, 3.78f)) < 0.4f, "nav_test: courier_a is on the deck at its goal");
-    expect(a_avoided_mud, "nav_test: courier_a detoured around the cost-8 mud");
+    expect(agent("courier_a")->arrived(), "nav_demo: courier_a arrived");
+    expect(glm::distance(pos("courier_a"), glm::vec3(7.5f, 14.5f, 3.78f)) < 0.4f, "nav_demo: courier_a is on the deck at its goal");
+    expect(a_avoided_mud, "nav_demo: courier_a detoured around the cost-8 mud");
     // courier_b: chasing the circling beacon -- it must be up on the deck and close behind it.
-    expect(pos("courier_b").z > 3.5f, "nav_test: courier_b climbed to the deck");
-    expect(glm::distance(glm::vec2(pos("courier_b")), glm::vec2(pos("beacon"))) < 2.5f, "nav_test: courier_b keeps up with the beacon");
+    expect(pos("courier_b").z > 3.5f, "nav_demo: courier_b climbed to the deck");
+    expect(glm::distance(glm::vec2(pos("courier_b")), glm::vec2(pos("beacon"))) < 2.5f, "nav_demo: courier_b keeps up with the beacon");
     // courier_c: deck -> ground east, via the one-way drop.
-    expect(c_used_link, "nav_test: courier_c planned through the drop link");
+    expect(c_used_link, "nav_demo: courier_c planned through the drop link");
     expect(agent("courier_c")->arrived() && glm::distance(pos("courier_c"), glm::vec3(19.0f, 13.0f, 0.78f)) < 0.4f,
-           "nav_test: courier_c arrived on the ground east of the deck");
+           "nav_demo: courier_c arrived on the ground east of the deck");
 
     // Mobs: crowd around the moving target.
     glm::vec2 t(pos("target"));
@@ -97,8 +97,8 @@ COOPA_TEST(nav_test_agents_reach_their_goals) {
         std::snprintf(name, sizeof(name), "mob_%03d", i);
         glm::vec3 p = pos(name);
         if (glm::distance(glm::vec2(p), t) < 9.0f) ++near;
-        expect(p.z > 0.5f && p.z < 0.8f, "nav_test: every mob stays on the ground surface");
+        expect(p.z > 0.5f && p.z < 0.8f, "nav_demo: every mob stays on the ground surface");
     }
-    expect(near >= 120, "nav_test: the mob crowd converged on the circling target");
-    expect(nav->flow_field("target") != nullptr, "nav_test: one shared flow field serves the mobs");
+    expect(near >= 120, "nav_demo: the mob crowd converged on the circling target");
+    expect(nav->flow_field("target") != nullptr, "nav_demo: one shared flow field serves the mobs");
 }

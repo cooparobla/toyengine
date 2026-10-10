@@ -102,7 +102,7 @@ COOPA_TEST(smoothing_ramps_then_converges_and_decays) {
  * returns, the body's position must equal the Transform the controller just wrote. If the
  * controller ever drifts back to the Behaviour phase (200), physics spends each frame solving
  * against the PREVIOUS pose while the renderer draws the new one -- invisible for rigid contacts,
- * but it is exactly what made the ball clip through the cloth in cloth_test.
+ * but it is exactly what made the ball clip through the cloth in cloth_demo.
  */
 COOPA_TEST(control_runs_before_physics_in_the_same_frame) {
     using coopa::physx::components::SphereCollider;

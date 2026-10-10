@@ -1,0 +1,934 @@
+# clouds_demo -- a cloud layer over a blockout village, seen from a high orbit camera (15-400 m):
+# low volumetric clouds (45 m up, 25 m thick) that fade out as the camera comes down while their
+# shadows stay, over the gradient sky, with a weather cycle that brings a rain storm through.
+#
+# Run: ./build/toyengine clouds_demo        (or SCENE=clouds_demo)
+# Flat (toon) clouds: set cloud_type to flat in the World tab -- the flat_cloud_* keys below are
+# tuned for this view (pair them with cloud_altitude ~55, cloud_thickness ~8, shadow strength 0.6).
+scene:
+  scene_name: clouds_demo
+  settings:
+    render:
+      cloud_altitude: 45
+      cloud_camera_fade: true
+      cloud_coverage: 0.45
+      cloud_density: 1.0
+      cloud_fade_end: 60
+      cloud_fade_start: 15
+      cloud_scale: 0.02
+      cloud_shadow_distance: 450
+      cloud_shadow_strength: 0.85
+      cloud_shadows: true
+      cloud_thickness: 25
+      cloud_type: volumetric
+      cloud_wind_speed: 6.0
+      clouds: true
+      flat_cloud_evolve: 4.0
+      flat_cloud_light_bands: 3
+      flat_cloud_opacity: 0.92
+      flat_cloud_outline: 0.5
+      flat_cloud_size: 30
+      flat_cloud_turbulence: 0.6
+      sky_model: gradient
+    weather:
+      condition: clear
+      conditions:
+        - name: clear
+          ambient: 1.0
+          cloud_cover: 0.2
+          duration: [0.6, 0.6]
+          fog_color: { b: 0.9, g: 0.8, r: 0.72 }
+          fog_density: 0.002
+          fog_sky_blend: 0.8
+          fog_sun_amount: 0.5
+          sun: 1.0
+          temperature: 20
+          transition: 12
+          wind_heading: 20
+          wind_strength: 2.0
+        - name: cloudy
+          ambient: 0.95
+          cloud_cover: 0.55
+          duration: [0.5, 0.5]
+          fog_color: { b: 0.8, g: 0.73, r: 0.68 }
+          fog_density: 0.004
+          fog_sky_blend: 0.7
+          fog_sun_amount: 0.35
+          sun: 0.75
+          temperature: 16
+          transition: 12
+          wind_heading: 30
+          wind_strength: 4.0
+        - name: storm
+          ambient: 0.6
+          cloud_cover: 0.8
+          duration: [0.4, 0.4]
+          effects:
+            - prefab: objects/weather_rain
+              follow: camera
+              intensity: 1.6
+              offset: { x: 0, y: 0, z: 4 }
+              wind_influence: 0.8
+          fog_color: { b: 0.48, g: 0.43, r: 0.4 }
+          fog_density: 0.016
+          fog_sky_blend: 0.5
+          fog_sun_amount: 0.0
+          lightning: 4.0
+          precipitation: 1.0
+          sky_tint: { b: 0.9, g: 0.83, r: 0.8 }
+          sun: 0.2
+          temperature: 11
+          transition: 12
+          wetness: 1.0
+          wind_heading: 40
+          wind_strength: 1.0e+01
+      day_length_minutes: 4
+      drive_sun: true
+      enabled: true
+      ground_height: 0.0
+      latitude: 40
+      moon_intensity: 0.12
+      north_offset: 0
+      schedule: cycle
+      sun_intensity: 1.3
+      time_of_day: 10.5
+  root_objects:
+    - name: ground_west
+      active: true
+      components:
+        - type: Transform
+          position: { x: -111, y: 0, z: 0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 89, y: 200, z: 1 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.16, g: 0.33, r: 0.25 }
+            metallic: 0.0
+            roughness: 0.95
+          mesh_path: plane
+        - type: BoxCollider
+          center: { x: 0.0, y: 0.0, z: -0.1 }
+          size: { x: 2.0, y: 2.0, z: 0.2 }
+      children: []
+    - name: ground_east
+      active: true
+      components:
+        - type: Transform
+          position: { x: 96, y: 0, z: 0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 104, y: 200, z: 1 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.16, g: 0.33, r: 0.25 }
+            metallic: 0.0
+            roughness: 0.95
+          mesh_path: plane
+        - type: BoxCollider
+          center: { x: 0.0, y: 0.0, z: -0.1 }
+          size: { x: 2.0, y: 2.0, z: 0.2 }
+      children: []
+    - name: ground_north
+      active: true
+      components:
+        - type: Transform
+          position: { x: -15, y: 103, z: 0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 7, y: 97, z: 1 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.16, g: 0.33, r: 0.25 }
+            metallic: 0.0
+            roughness: 0.95
+          mesh_path: plane
+      children: []
+    - name: ground_south
+      active: true
+      components:
+        - type: Transform
+          position: { x: -15, y: -103, z: 0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 7, y: 97, z: 1 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.16, g: 0.33, r: 0.25 }
+            metallic: 0.0
+            roughness: 0.95
+          mesh_path: plane
+      children: []
+    - name: path
+      active: true
+      components:
+        - type: Transform
+          position: { x: 2, y: 0, z: 0.01 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 6, y: 1.2, z: 1 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.3, g: 0.4, r: 0.46 }
+            metallic: 0.0
+            roughness: 0.9
+          mesh_path: plane
+      children: []
+    - name: pond_floor
+      active: true
+      components:
+        - type: Transform
+          position: { x: -15, y: 0, z: -1.4 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 7, y: 6, z: 1 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.2, g: 0.27, r: 0.3 }
+            metallic: 0.0
+            roughness: 0.95
+          mesh_path: plane
+      children: []
+    - name: pond_bank_s
+      active: true
+      components:
+        - type: Transform
+          position: { x: -15, y: -6.1, z: -0.7 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 14.4, y: 0.2, z: 1.4 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.22, g: 0.29, r: 0.33 }
+            metallic: 0.0
+            roughness: 0.95
+          mesh_path: cube
+      children: []
+    - name: pond_bank_n
+      active: true
+      components:
+        - type: Transform
+          position: { x: -15, y: 6.1, z: -0.7 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 14.4, y: 0.2, z: 1.4 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.22, g: 0.29, r: 0.33 }
+            metallic: 0.0
+            roughness: 0.95
+          mesh_path: cube
+      children: []
+    - name: pond_bank_w
+      active: true
+      components:
+        - type: Transform
+          position: { x: -22.1, y: 0, z: -0.7 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.2, y: 12.4, z: 1.4 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.22, g: 0.29, r: 0.33 }
+            metallic: 0.0
+            roughness: 0.95
+          mesh_path: cube
+      children: []
+    - name: pond_bank_e
+      active: true
+      components:
+        - type: Transform
+          position: { x: -7.9, y: 0, z: -0.7 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.2, y: 12.4, z: 1.4 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.22, g: 0.29, r: 0.33 }
+            metallic: 0.0
+            roughness: 0.95
+          mesh_path: cube
+      children: []
+    - name: pond_water
+      active: true
+      components:
+        - type: Transform
+          position: { x: -15, y: 0, z: -0.15 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: MeshRenderer
+          affects_reflection_probes: false
+          material:
+            albedo: { b: 0.2, g: 0.14, r: 0.03 }
+            alpha: 0.45
+            alpha_mode: BLEND
+            ao: 1.0
+            ior: 1.33
+            metallic: 0.0
+            refraction: true
+            refraction_tint: { b: 0.8, g: 0.75, r: 0.45 }
+            roughness: 0.04
+        - type: WaterBody
+          clarity: 1.5
+          mode: planar
+          resolution: 48
+          ripple_strength: 0.2
+          shore_foam_depth: 0.2
+          size: { x: 14.0, y: 12.0 }
+          wave_amplitude: 0.03
+          wave_direction: 3.0e+01
+          wave_length: 2.5
+          wave_steepness: 0.4
+      children: []
+    - name: block_01
+      active: true
+      components:
+        - type: Transform
+          position: { x: -93.1, y: -43.6, z: 4.0 }
+          rotation: { x: 0, y: 0, z: 3 }
+          scale: { x: 5.8, y: 4.3, z: 8.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.48, g: 0.55, r: 0.62 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_02
+      active: true
+      components:
+        - type: Transform
+          position: { x: -92.5, y: 62.7, z: 4.0 }
+          rotation: { x: 0, y: 0, z: 36 }
+          scale: { x: 7.1, y: 8.7, z: 8.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.58, g: 0.5, r: 0.45 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_03
+      active: true
+      components:
+        - type: Transform
+          position: { x: -93.4, y: 92.3, z: 1.5 }
+          rotation: { x: 0, y: 0, z: 28 }
+          scale: { x: 5.4, y: 4.7, z: 3.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.58, g: 0.5, r: 0.45 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_04
+      active: true
+      components:
+        - type: Transform
+          position: { x: -69.8, y: -87.0, z: 4.0 }
+          rotation: { x: 0, y: 0, z: 51 }
+          scale: { x: 7.2, y: 5.9, z: 8.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.66, g: 0.74, r: 0.78 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_05
+      active: true
+      components:
+        - type: Transform
+          position: { x: -66.0, y: -65.6, z: 3.0 }
+          rotation: { x: 0, y: 0, z: 27 }
+          scale: { x: 7.9, y: 6.3, z: 6.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.28, g: 0.36, r: 0.7 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_06
+      active: true
+      components:
+        - type: Transform
+          position: { x: -63.6, y: -47.1, z: 2.5 }
+          rotation: { x: 0, y: 0, z: 26 }
+          scale: { x: 6.9, y: 6.6, z: 5.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.78, g: 0.83, r: 0.85 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_07
+      active: true
+      components:
+        - type: Transform
+          position: { x: -70.6, y: -23.0, z: 3.0 }
+          rotation: { x: 0, y: 0, z: 4 }
+          scale: { x: 7.8, y: 4.8, z: 6.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.78, g: 0.83, r: 0.85 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_08
+      active: true
+      components:
+        - type: Transform
+          position: { x: -62.8, y: 0.9, z: 6.0 }
+          rotation: { x: 0, y: 0, z: 53 }
+          scale: { x: 8.4, y: 5.6, z: 12.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.28, g: 0.36, r: 0.7 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_09
+      active: true
+      components:
+        - type: Transform
+          position: { x: -66.5, y: 26.1, z: 6.0 }
+          rotation: { x: 0, y: 0, z: 5 }
+          scale: { x: 8.7, y: 6.4, z: 12.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.66, g: 0.74, r: 0.78 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_10
+      active: true
+      components:
+        - type: Transform
+          position: { x: -64.2, y: 49.9, z: 3.0 }
+          rotation: { x: 0, y: 0, z: 2 }
+          scale: { x: 8.1, y: 5.4, z: 6.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.28, g: 0.36, r: 0.7 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_11
+      active: true
+      components:
+        - type: Transform
+          position: { x: -7.0e+01, y: 61.4, z: 2.0 }
+          rotation: { x: 0, y: 0, z: 36 }
+          scale: { x: 4.3, y: 7.8, z: 4.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.48, g: 0.55, r: 0.62 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_12
+      active: true
+      components:
+        - type: Transform
+          position: { x: -66.0, y: 84.0, z: 2.0 }
+          rotation: { x: 0, y: 0, z: 78 }
+          scale: { x: 6.0, y: 5.4, z: 4.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.78, g: 0.83, r: 0.85 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_13
+      active: true
+      components:
+        - type: Transform
+          position: { x: -38.5, y: -26.2, z: 2.0 }
+          rotation: { x: 0, y: 0, z: 44 }
+          scale: { x: 4.9, y: 5.2, z: 4.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.66, g: 0.74, r: 0.78 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_14
+      active: true
+      components:
+        - type: Transform
+          position: { x: -46.8, y: -6.0, z: 4.0 }
+          rotation: { x: 0, y: 0, z: 86 }
+          scale: { x: 6.1, y: 5.8, z: 8.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.28, g: 0.36, r: 0.7 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_15
+      active: true
+      components:
+        - type: Transform
+          position: { x: -43.8, y: 23.4, z: 9.0 }
+          rotation: { x: 0, y: 0, z: 35 }
+          scale: { x: 7.4, y: 4.3, z: 18.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.58, g: 0.5, r: 0.45 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_16
+      active: true
+      components:
+        - type: Transform
+          position: { x: -49.3, y: 82.8, z: 2.5 }
+          rotation: { x: 0, y: 0, z: 5 }
+          scale: { x: 5.0, y: 4.8, z: 5.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.58, g: 0.5, r: 0.45 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_17
+      active: true
+      components:
+        - type: Transform
+          position: { x: -20.6, y: 17.8, z: 2.5 }
+          rotation: { x: 0, y: 0, z: 11 }
+          scale: { x: 5.3, y: 5.7, z: 5.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.78, g: 0.83, r: 0.85 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_18
+      active: true
+      components:
+        - type: Transform
+          position: { x: -16.1, y: 43.6, z: 1.5 }
+          rotation: { x: 0, y: 0, z: 67 }
+          scale: { x: 6.4, y: 4.4, z: 3.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.28, g: 0.36, r: 0.7 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_19
+      active: true
+      components:
+        - type: Transform
+          position: { x: -19.7, y: 66.2, z: 2.5 }
+          rotation: { x: 0, y: 0, z: 62 }
+          scale: { x: 5.0, y: 8.8, z: 5.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.48, g: 0.55, r: 0.62 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_20
+      active: true
+      components:
+        - type: Transform
+          position: { x: -18.9, y: 85.6, z: 9.0 }
+          rotation: { x: 0, y: 0, z: 47 }
+          scale: { x: 7.2, y: 4.5, z: 18.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.28, g: 0.36, r: 0.7 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_21
+      active: true
+      components:
+        - type: Transform
+          position: { x: -1.7, y: -91.3, z: 6.0 }
+          rotation: { x: 0, y: 0, z: 55 }
+          scale: { x: 6.7, y: 6.5, z: 12.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.48, g: 0.55, r: 0.62 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_22
+      active: true
+      components:
+        - type: Transform
+          position: { x: 3.1, y: -69.7, z: 9.0 }
+          rotation: { x: 0, y: 0, z: 18 }
+          scale: { x: 5.2, y: 6.0, z: 18.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.48, g: 0.55, r: 0.62 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_23
+      active: true
+      components:
+        - type: Transform
+          position: { x: 2.8, y: -38.1, z: 2.0 }
+          rotation: { x: 0, y: 0, z: 86 }
+          scale: { x: 8.0, y: 6.4, z: 4.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.58, g: 0.5, r: 0.45 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_24
+      active: true
+      components:
+        - type: Transform
+          position: { x: 5.9, y: 5.5, z: 2.0 }
+          rotation: { x: 0, y: 0, z: 18 }
+          scale: { x: 5.8, y: 5.1, z: 4.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.78, g: 0.83, r: 0.85 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_25
+      active: true
+      components:
+        - type: Transform
+          position: { x: 4.8, y: 48.1, z: 9.0 }
+          rotation: { x: 0, y: 0, z: 75 }
+          scale: { x: 6.4, y: 7.3, z: 18.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.66, g: 0.74, r: 0.78 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_26
+      active: true
+      components:
+        - type: Transform
+          position: { x: 18.4, y: -83.3, z: 1.5 }
+          rotation: { x: 0, y: 0, z: 42 }
+          scale: { x: 6.2, y: 7.2, z: 3.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.78, g: 0.83, r: 0.85 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_27
+      active: true
+      components:
+        - type: Transform
+          position: { x: 17.0, y: -70.1, z: 4.0 }
+          rotation: { x: 0, y: 0, z: 73 }
+          scale: { x: 9.0, y: 4.1, z: 8.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.78, g: 0.83, r: 0.85 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_28
+      active: true
+      components:
+        - type: Transform
+          position: { x: 27.8, y: -20.1, z: 2.0 }
+          rotation: { x: 0, y: 0, z: 1 }
+          scale: { x: 5.8, y: 6.7, z: 4.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.66, g: 0.74, r: 0.78 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_29
+      active: true
+      components:
+        - type: Transform
+          position: { x: 23.8, y: 0.3, z: 9.0 }
+          rotation: { x: 0, y: 0, z: 74 }
+          scale: { x: 8.7, y: 6.2, z: 18.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.48, g: 0.55, r: 0.62 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_30
+      active: true
+      components:
+        - type: Transform
+          position: { x: 41.1, y: -89.0, z: 2.5 }
+          rotation: { x: 0, y: 0, z: 60 }
+          scale: { x: 4.7, y: 8.6, z: 5.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.78, g: 0.83, r: 0.85 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_31
+      active: true
+      components:
+        - type: Transform
+          position: { x: 44.2, y: -62.1, z: 2.0 }
+          rotation: { x: 0, y: 0, z: 46 }
+          scale: { x: 8.4, y: 4.7, z: 4.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.58, g: 0.5, r: 0.45 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_32
+      active: true
+      components:
+        - type: Transform
+          position: { x: 47.3, y: -42.7, z: 2.0 }
+          rotation: { x: 0, y: 0, z: 56 }
+          scale: { x: 7.9, y: 4.7, z: 4.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.78, g: 0.83, r: 0.85 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_33
+      active: true
+      components:
+        - type: Transform
+          position: { x: 44.4, y: 21.8, z: 1.5 }
+          rotation: { x: 0, y: 0, z: 17 }
+          scale: { x: 7.9, y: 8.4, z: 3.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.48, g: 0.55, r: 0.62 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_34
+      active: true
+      components:
+        - type: Transform
+          position: { x: 38.3, y: 92.7, z: 4.0 }
+          rotation: { x: 0, y: 0, z: 46 }
+          scale: { x: 4.3, y: 5.6, z: 8.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.58, g: 0.5, r: 0.45 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_35
+      active: true
+      components:
+        - type: Transform
+          position: { x: 65.4, y: -87.6, z: 6.0 }
+          rotation: { x: 0, y: 0, z: 79 }
+          scale: { x: 6.4, y: 8.7, z: 12.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.58, g: 0.5, r: 0.45 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_36
+      active: true
+      components:
+        - type: Transform
+          position: { x: 63.1, y: -65.3, z: 2.0 }
+          rotation: { x: 0, y: 0, z: 11 }
+          scale: { x: 8.7, y: 8.2, z: 4.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.78, g: 0.83, r: 0.85 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_37
+      active: true
+      components:
+        - type: Transform
+          position: { x: 69.4, y: 48.8, z: 6.0 }
+          rotation: { x: 0, y: 0, z: 13 }
+          scale: { x: 4.8, y: 7.6, z: 12.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.28, g: 0.36, r: 0.7 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_38
+      active: true
+      components:
+        - type: Transform
+          position: { x: 71.6, y: 62.6, z: 3.0 }
+          rotation: { x: 0, y: 0, z: 89 }
+          scale: { x: 8.8, y: 6.0, z: 6.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.48, g: 0.55, r: 0.62 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_39
+      active: true
+      components:
+        - type: Transform
+          position: { x: 61.9, y: 87.2, z: 2.0 }
+          rotation: { x: 0, y: 0, z: 29 }
+          scale: { x: 6.6, y: 5.7, z: 4.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.28, g: 0.36, r: 0.7 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_40
+      active: true
+      components:
+        - type: Transform
+          position: { x: 82.2, y: -87.4, z: 2.5 }
+          rotation: { x: 0, y: 0, z: 56 }
+          scale: { x: 6.2, y: 4.1, z: 5.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.58, g: 0.5, r: 0.45 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_41
+      active: true
+      components:
+        - type: Transform
+          position: { x: 82.8, y: -60.2, z: 1.5 }
+          rotation: { x: 0, y: 0, z: 24 }
+          scale: { x: 7.9, y: 8.9, z: 3.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.66, g: 0.74, r: 0.78 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_42
+      active: true
+      components:
+        - type: Transform
+          position: { x: 85.2, y: -26.4, z: 9.0 }
+          rotation: { x: 0, y: 0, z: 37 }
+          scale: { x: 6.1, y: 8.6, z: 18.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.28, g: 0.36, r: 0.7 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_43
+      active: true
+      components:
+        - type: Transform
+          position: { x: 88.2, y: -0.1, z: 9.0 }
+          rotation: { x: 0, y: 0, z: 38 }
+          scale: { x: 5.6, y: 5.4, z: 18.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.48, g: 0.55, r: 0.62 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_44
+      active: true
+      components:
+        - type: Transform
+          position: { x: 89.6, y: 47.6, z: 1.5 }
+          rotation: { x: 0, y: 0, z: 78 }
+          scale: { x: 4.4, y: 8.3, z: 3.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.28, g: 0.36, r: 0.7 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: block_45
+      active: true
+      components:
+        - type: Transform
+          position: { x: 86.1, y: 66.6, z: 2.0 }
+          rotation: { x: 0, y: 0, z: 47 }
+          scale: { x: 8.6, y: 5.3, z: 4.0 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.66, g: 0.74, r: 0.78 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+      children: []
+    - name: camera
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -95.0, z: 135.0 }
+          rotation: { x: 35.0, y: 0.0, z: 0.0 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: Camera
+          far_clip_plane: 2.0e+03
+          fov: 5.0e+01
+          main: true
+          near_clip_plane: 0.5
+          projection: Perspective
+        - type: CameraController
+          max_distance: 4.0e+02
+          min_distance: 15.0
+          mode: orbit
+          target: { x: 0.0, y: 0.0, z: 0.0 }
+      children: []
+    - name: sun
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0, y: 0, z: 30 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: DirectionalLight
+          cast_shadows: true
+          color: { b: 1.0, g: 1.0, r: 1.0 }
+          direction: { x: -0.4, y: 0.35, z: -0.85 }
+          intensity: 1.3
+      children: []

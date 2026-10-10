@@ -5,7 +5,6 @@
 # so the snowfall is always all around the viewer, and they stop on roofs, terrain and water (the
 # weather's precipitation height map). Each landing flake may leave a settled flake on the surface
 # that lingers and fades (the sub emitter; the weather's `ground_effects` switch).
-format: toyengine-object
 object:
   name: weather_snow
   components:

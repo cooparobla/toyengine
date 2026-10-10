@@ -1,0 +1,882 @@
+# fog_demo -- global fog, local volumes and volumetric lighting, one station per use.
+#
+# Run:   ./build/toyengine fog_demo        (or SCENE=fog_demo)
+#        Orbit the camera (drag, scroll) -- look TOWARD the sun (it sits beyond the far side
+#        of the scene) to see forward scattering at its strongest.
+#
+# Two systems, two switches in assets/config.yaml (both startup-fixed, so restart after
+# changing them):
+#   volumetrics_enabled  local Volume components, marched with sun shadows and point/spot
+#                        light scattering (on by default). Everything below is one of these.
+#   fog_enabled          the GLOBAL analytic distance/height fog layer (on by default). With it
+#                        on it layers over the volumes; this scene's settings block tunes
+#                        it for this scene.
+# Useful views (render.debug_view, runtime): off | volumetrics (accumulated density alone).
+#
+# Authoring note: a volume's `color` is a FLAT glow added wherever it has density, lit or
+# not; `sun_amount` weights the sun AND point/spot in-scatter (shadowed). A volume meant to
+# show light (the stage, the lantern) wants a dark `color` and a high `sun_amount`; a volume
+# meant to read as mist on its own (the courtyard, the statue) wants the opposite.
+# Knobs worth sweeping: volumetrics_mode (froxel = Unreal-style grid, raymarch = per-pixel),
+# volumetrics_quality, volumetrics_shadows_enabled, volumetrics_light_scatter,
+# volumetrics_sun_anisotropy, volumetrics_froxel_history.
+#
+# Stations (Z up, metres; the camera starts looking +Y across the middle of the scene):
+#   ground_mist   (whole scene) uniform `fog` volume with an exponential height falloff:
+#                 knee-deep mist everywhere -- the medium every other station's light shows in.
+#   PERGOLA       (x -12)  slatted roof between the sun and the mist: sun shafts / god rays
+#                 (needs volumetrics_shadows_enabled).
+#   STAGE         (x -4)   roofed, dark-walled stage filled with uniform `fog` that sits in the
+#                 sun's shadow, lit by two coloured spotlights: light cones made visible by
+#                 point/spot in-scatter (volumetrics_light_scatter). Uniform rather than `haze`:
+#                 haze's noise leaves thin patches at this scale, which can hide a whole cone.
+#   LANTERN       (x +4)   warm point light inside a SPHERE `fog` pocket, and a ball orbiting
+#                 through it: halo, soft spherical bounds, and temporal stability around a
+#                 moving occluder (froxel history ghosting shows here first).
+#   WIND FIELD    (x +12)  `wind` volume -- thin advected ribbons streaming past a fence, in
+#                 front of a dark wall so the bright streaks read.
+#   COURTYARD     (x +9, y -6)  walled pit filled with a hard-topped `fog` box: a pool of fog
+#                 with a crisp surface (low `falloff`).
+#   STATUE        (x -10, y -6) column wrapped in a soft SPHERE `fog` pocket (high `falloff`).
+#   HAZE BANK     (y +18)  large drifting `haze` behind towers at increasing depth: aerial
+#                 perspective and slow billowing.
+scene:
+  scene_name: fog_demo
+  settings:
+    render:
+      volumetrics_max_distance: 70.0   # the scene is ~50 m deep; march all of it
+      fog_mode: 1                      # global height fog (only when fog_enabled)
+      fog_density: 0.015
+      fog_color: [0.62, 0.66, 0.74]
+      fog_height_base: 0.0
+      fog_height_falloff: 6.0
+      fog_sun_amount: 0.5
+      fog_sun_anisotropy: 0.75
+  root_objects:
+    - name: ground
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0, y: 4, z: 0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 26, y: 26, z: 1 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material: { albedo: { r: 0.36, g: 0.37, b: 0.35 }, metallic: 0.0, roughness: 0.85, ao: 1.0 }
+      children: []
+
+    - name: ground_mist
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0, y: 4, z: 2.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: Volume
+          kind: fog
+          shape: box
+          extent: { x: 26.0, y: 26.0, z: 2.0 }
+          density: 0.015
+          falloff: 0.05
+          height_base: 0.0
+          height_falloff: 0.7
+          occlusion: 0.5
+          sun_amount: 0.7
+          color: { r: 0.78, g: 0.82, b: 0.88 }
+      children: []
+
+    # ---- PERGOLA: slatted roof, sun shafts through the mist ----
+    - name: pergola_post_0
+      active: true
+      components:
+        - type: Transform
+          position: { x: -15, y: 1, z: 2.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.35, y: 0.35, z: 4.0 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.42, g: 0.3, b: 0.2 }, metallic: 0.0, roughness: 0.8, ao: 1.0 }
+      children: []
+
+    - name: pergola_post_1
+      active: true
+      components:
+        - type: Transform
+          position: { x: -9, y: 1, z: 2.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.35, y: 0.35, z: 4.0 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.42, g: 0.3, b: 0.2 }, metallic: 0.0, roughness: 0.8, ao: 1.0 }
+      children: []
+
+    - name: pergola_post_2
+      active: true
+      components:
+        - type: Transform
+          position: { x: -15, y: 7, z: 2.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.35, y: 0.35, z: 4.0 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.42, g: 0.3, b: 0.2 }, metallic: 0.0, roughness: 0.8, ao: 1.0 }
+      children: []
+
+    - name: pergola_post_3
+      active: true
+      components:
+        - type: Transform
+          position: { x: -9, y: 7, z: 2.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.35, y: 0.35, z: 4.0 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.42, g: 0.3, b: 0.2 }, metallic: 0.0, roughness: 0.8, ao: 1.0 }
+      children: []
+
+    - name: pergola_slat_0
+      active: true
+      components:
+        - type: Transform
+          position: { x: -12, y: 1.0, z: 4.1 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 6.8, y: 0.32, z: 0.18 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.42, g: 0.3, b: 0.2 }, metallic: 0.0, roughness: 0.8, ao: 1.0 }
+      children: []
+
+    - name: pergola_slat_1
+      active: true
+      components:
+        - type: Transform
+          position: { x: -12, y: 1.75, z: 4.1 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 6.8, y: 0.32, z: 0.18 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.42, g: 0.3, b: 0.2 }, metallic: 0.0, roughness: 0.8, ao: 1.0 }
+      children: []
+
+    - name: pergola_slat_2
+      active: true
+      components:
+        - type: Transform
+          position: { x: -12, y: 2.5, z: 4.1 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 6.8, y: 0.32, z: 0.18 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.42, g: 0.3, b: 0.2 }, metallic: 0.0, roughness: 0.8, ao: 1.0 }
+      children: []
+
+    - name: pergola_slat_3
+      active: true
+      components:
+        - type: Transform
+          position: { x: -12, y: 3.25, z: 4.1 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 6.8, y: 0.32, z: 0.18 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.42, g: 0.3, b: 0.2 }, metallic: 0.0, roughness: 0.8, ao: 1.0 }
+      children: []
+
+    - name: pergola_slat_4
+      active: true
+      components:
+        - type: Transform
+          position: { x: -12, y: 4.0, z: 4.1 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 6.8, y: 0.32, z: 0.18 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.42, g: 0.3, b: 0.2 }, metallic: 0.0, roughness: 0.8, ao: 1.0 }
+      children: []
+
+    - name: pergola_slat_5
+      active: true
+      components:
+        - type: Transform
+          position: { x: -12, y: 4.75, z: 4.1 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 6.8, y: 0.32, z: 0.18 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.42, g: 0.3, b: 0.2 }, metallic: 0.0, roughness: 0.8, ao: 1.0 }
+      children: []
+
+    - name: pergola_slat_6
+      active: true
+      components:
+        - type: Transform
+          position: { x: -12, y: 5.5, z: 4.1 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 6.8, y: 0.32, z: 0.18 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.42, g: 0.3, b: 0.2 }, metallic: 0.0, roughness: 0.8, ao: 1.0 }
+      children: []
+
+    - name: pergola_slat_7
+      active: true
+      components:
+        - type: Transform
+          position: { x: -12, y: 6.25, z: 4.1 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 6.8, y: 0.32, z: 0.18 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.42, g: 0.3, b: 0.2 }, metallic: 0.0, roughness: 0.8, ao: 1.0 }
+      children: []
+
+    - name: pergola_slat_8
+      active: true
+      components:
+        - type: Transform
+          position: { x: -12, y: 7.0, z: 4.1 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 6.8, y: 0.32, z: 0.18 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.42, g: 0.3, b: 0.2 }, metallic: 0.0, roughness: 0.8, ao: 1.0 }
+      children: []
+
+    # ---- STAGE: coloured spotlights in uniform fog ----
+    - name: stage_roof
+      active: true
+      components:
+        - type: Transform
+          position: { x: -4, y: 6.5, z: 6.7 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 8.6, y: 13.0, z: 0.3 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.12, g: 0.12, b: 0.13 }, metallic: 0.0, roughness: 0.9, ao: 1.0 }
+      children: []
+
+    - name: stage_wall_right
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.2, y: 6.5, z: 3.3 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.3, y: 13.0, z: 6.6 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.12, g: 0.12, b: 0.13 }, metallic: 0.0, roughness: 0.9, ao: 1.0 }
+      children: []
+
+    # The roof and walls run well past the backdrop toward the sun so the stage's haze sits in
+    # the sun's shadow -- spotlight cones only read against dark, unlit haze.
+    - name: stage_wall_left
+      active: true
+      components:
+        - type: Transform
+          position: { x: -8.2, y: 6.5, z: 3.3 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.3, y: 13.0, z: 6.6 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.12, g: 0.12, b: 0.13 }, metallic: 0.0, roughness: 0.9, ao: 1.0 }
+      children: []
+
+    - name: stage_backdrop
+      active: true
+      components:
+        - type: Transform
+          position: { x: -4, y: 7.5, z: 2.5 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 7.0, y: 0.4, z: 5.0 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.12, g: 0.12, b: 0.13 }, metallic: 0.0, roughness: 0.9, ao: 1.0 }
+      children: []
+
+    - name: stage_floor
+      active: true
+      components:
+        - type: Transform
+          position: { x: -4, y: 4.5, z: 0.1 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 7.0, y: 6.0, z: 0.2 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.12, g: 0.12, b: 0.13 }, metallic: 0.0, roughness: 0.6, ao: 1.0 }
+      children: []
+
+    - name: stage_spot_left
+      active: true
+      components:
+        - type: Transform
+          position: { x: -6.0, y: 3.0, z: 6.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: SpotLight
+          direction: { x: 0.25, y: 0.25, z: -1.0 }
+          color: { r: 1.0, g: 0.25, b: 0.6 }
+          intensity: 1200.0
+          range: 14.0
+          inner_angle: 12.0
+          outer_angle: 20.0
+          cast_shadows: true
+          attenuation_constant: 2.0
+      children: []
+
+    - name: stage_spot_right
+      active: true
+      components:
+        - type: Transform
+          position: { x: -2.0, y: 3.0, z: 6.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: SpotLight
+          direction: { x: -0.25, y: 0.25, z: -1.0 }
+          color: { r: 0.2, g: 0.75, b: 1.0 }
+          intensity: 1200.0
+          range: 14.0
+          inner_angle: 12.0
+          outer_angle: 20.0
+          cast_shadows: true
+          attenuation_constant: 2.0
+      children: []
+
+    - name: stage_prop
+      active: true
+      components:
+        - type: Transform
+          position: { x: -4, y: 4.5, z: 0.9 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.6, y: 0.6, z: 0.6 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.9, g: 0.9, b: 0.9 }, metallic: 0.0, roughness: 0.3, ao: 1.0 }
+      children: []
+
+    - name: stage_haze
+      active: true
+      components:
+        - type: Transform
+          position: { x: -4, y: 4.5, z: 3.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: Volume
+          kind: fog
+          shape: box
+          extent: { x: 3.8, y: 3.2, z: 3.0 }
+          density: 0.3
+          falloff: 0.3
+          occlusion: 0.25
+          sun_amount: 3.0                       # light weight: the cones are all you see
+          color: { r: 0.03, g: 0.03, b: 0.035 } # near-black base glow (see the note above)
+      children: []
+
+    # ---- LANTERN: point light in a sphere fog pocket, with a moving occluder ----
+    - name: lantern_post
+      active: true
+      components:
+        - type: Transform
+          position: { x: 4, y: 3, z: 1.1 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.15, y: 0.15, z: 2.2 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.12, g: 0.12, b: 0.13 }, metallic: 0.0, roughness: 0.7, ao: 1.0 }
+      children: []
+
+    - name: lantern_orb
+      active: true
+      components:
+        - type: Transform
+          position: { x: 4, y: 3, z: 2.35 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.18, y: 0.18, z: 0.18 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: materials/emissive
+      children: []
+
+    - name: lantern_light
+      active: true
+      components:
+        - type: Transform
+          position: { x: 4, y: 3, z: 2.35 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: PointLight
+          color: { r: 1.0, g: 0.6, b: 0.25 }
+          intensity: 600.0
+          range: 12.0
+          cast_shadows: true
+          attenuation_constant: 3.0
+      children: []
+
+    - name: lantern_pocket
+      active: true
+      components:
+        - type: Transform
+          position: { x: 4, y: 3, z: 2.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: Volume
+          kind: fog
+          shape: sphere
+          extent: { x: 3.0, y: 3.0, z: 3.0 }
+          density: 0.35
+          falloff: 0.6
+          occlusion: 0.4
+          sun_amount: 1.5
+          color: { r: 0.2, g: 0.2, b: 0.22 }
+      children: []
+
+    - name: lantern_orbiter
+      active: true
+      components:
+        - type: Transform
+          position: { x: 5.8, y: 3, z: 1.4 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.35, y: 0.35, z: 0.35 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.85, g: 0.55, b: 0.15 }, metallic: 0.0, roughness: 0.4, ao: 1.0 }
+        - type: KinematicMover
+          mode: orbit
+          orbit_center: { x: 4.0, y: 3.0, z: 1.4 }
+          orbit_radius: 1.8
+          speed: 45.0
+      children: []
+
+    # ---- WIND FIELD: advected ribbons past a fence ----
+    - name: fence_post_00
+      active: true
+      components:
+        - type: Transform
+          position: { x: 9.0, y: 4.0, z: 0.7 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.12, y: 0.12, z: 1.4 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.42, g: 0.3, b: 0.2 }, metallic: 0.0, roughness: 0.8, ao: 1.0 }
+      children: []
+
+    - name: fence_post_01
+      active: true
+      components:
+        - type: Transform
+          position: { x: 9.8, y: 4.0, z: 0.7 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.12, y: 0.12, z: 1.4 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.42, g: 0.3, b: 0.2 }, metallic: 0.0, roughness: 0.8, ao: 1.0 }
+      children: []
+
+    - name: fence_post_02
+      active: true
+      components:
+        - type: Transform
+          position: { x: 10.6, y: 4.0, z: 0.7 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.12, y: 0.12, z: 1.4 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.42, g: 0.3, b: 0.2 }, metallic: 0.0, roughness: 0.8, ao: 1.0 }
+      children: []
+
+    - name: fence_post_03
+      active: true
+      components:
+        - type: Transform
+          position: { x: 11.4, y: 4.0, z: 0.7 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.12, y: 0.12, z: 1.4 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.42, g: 0.3, b: 0.2 }, metallic: 0.0, roughness: 0.8, ao: 1.0 }
+      children: []
+
+    - name: fence_post_04
+      active: true
+      components:
+        - type: Transform
+          position: { x: 12.2, y: 4.0, z: 0.7 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.12, y: 0.12, z: 1.4 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.42, g: 0.3, b: 0.2 }, metallic: 0.0, roughness: 0.8, ao: 1.0 }
+      children: []
+
+    - name: fence_post_05
+      active: true
+      components:
+        - type: Transform
+          position: { x: 13.0, y: 4.0, z: 0.7 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.12, y: 0.12, z: 1.4 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.42, g: 0.3, b: 0.2 }, metallic: 0.0, roughness: 0.8, ao: 1.0 }
+      children: []
+
+    - name: fence_post_06
+      active: true
+      components:
+        - type: Transform
+          position: { x: 13.8, y: 4.0, z: 0.7 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.12, y: 0.12, z: 1.4 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.42, g: 0.3, b: 0.2 }, metallic: 0.0, roughness: 0.8, ao: 1.0 }
+      children: []
+
+    - name: fence_post_07
+      active: true
+      components:
+        - type: Transform
+          position: { x: 14.600000000000001, y: 4.0, z: 0.7 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.12, y: 0.12, z: 1.4 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.42, g: 0.3, b: 0.2 }, metallic: 0.0, roughness: 0.8, ao: 1.0 }
+      children: []
+
+    - name: fence_post_08
+      active: true
+      components:
+        - type: Transform
+          position: { x: 15.4, y: 4.0, z: 0.7 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.12, y: 0.12, z: 1.4 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.42, g: 0.3, b: 0.2 }, metallic: 0.0, roughness: 0.8, ao: 1.0 }
+      children: []
+
+    - name: fence_rail
+      active: true
+      components:
+        - type: Transform
+          position: { x: 12.2, y: 4.0, z: 1.2 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 7.0, y: 0.1, z: 0.12 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.42, g: 0.3, b: 0.2 }, metallic: 0.0, roughness: 0.8, ao: 1.0 }
+      children: []
+
+    # Dark backing wall: bright ribbons only read against something darker than the mist.
+    - name: wind_backdrop
+      active: true
+      components:
+        - type: Transform
+          position: { x: 12.5, y: 8.5, z: 2.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 10.0, y: 0.3, z: 4.0 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.1, g: 0.1, b: 0.11 }, metallic: 0.0, roughness: 0.9, ao: 1.0 }
+      children: []
+
+    - name: wind_ribbons
+      active: true
+      components:
+        - type: Transform
+          position: { x: 12.5, y: 4.0, z: 2.2 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: Volume
+          kind: wind
+          shape: box
+          extent: { x: 5.0, y: 4.0, z: 2.2 }
+          direction: { x: 1.0, y: 0.25, z: 0.0 }
+          speed: 3.0
+          density: 2.5
+          coverage: 0.72                    # more ribbons than the sparse default (0.86)
+          sun_amount: 1.2
+          color: { r: 0.95, g: 0.95, b: 1.0 }
+      children: []
+
+    # ---- COURTYARD: a walled pit holding a crisp-topped fog pool ----
+    - name: courtyard_wall_n
+      active: true
+      components:
+        - type: Transform
+          position: { x: 9.0, y: -3.0, z: 0.75 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 6.3, y: 0.3, z: 1.5 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.55, g: 0.52, b: 0.48 }, metallic: 0.0, roughness: 0.9, ao: 1.0 }
+      children: []
+
+    - name: courtyard_wall_s
+      active: true
+      components:
+        - type: Transform
+          position: { x: 9.0, y: -9.0, z: 0.75 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 6.3, y: 0.3, z: 1.5 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.55, g: 0.52, b: 0.48 }, metallic: 0.0, roughness: 0.9, ao: 1.0 }
+      children: []
+
+    - name: courtyard_wall_e
+      active: true
+      components:
+        - type: Transform
+          position: { x: 12.0, y: -6.0, z: 0.75 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.3, y: 6.0, z: 1.5 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.55, g: 0.52, b: 0.48 }, metallic: 0.0, roughness: 0.9, ao: 1.0 }
+      children: []
+
+    - name: courtyard_wall_w
+      active: true
+      components:
+        - type: Transform
+          position: { x: 6.0, y: -6.0, z: 0.75 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.3, y: 6.0, z: 1.5 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.55, g: 0.52, b: 0.48 }, metallic: 0.0, roughness: 0.9, ao: 1.0 }
+      children: []
+
+    - name: courtyard_urn
+      active: true
+      components:
+        - type: Transform
+          position: { x: 9.0, y: -6.0, z: 0.5 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.5, y: 0.5, z: 0.5 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.6, g: 0.35, b: 0.2 }, metallic: 0.0, roughness: 0.6, ao: 1.0 }
+      children: []
+
+    - name: courtyard_fog
+      active: true
+      components:
+        - type: Transform
+          position: { x: 9.0, y: -6.0, z: 0.55 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: Volume
+          kind: fog
+          shape: box
+          extent: { x: 2.85, y: 2.85, z: 0.55 }
+          density: 1.2
+          falloff: 0.08
+          occlusion: 0.9
+          sun_amount: 0.3
+          color: { r: 0.85, g: 0.88, b: 0.92 }
+      children: []
+
+    # ---- STATUE: soft spherical fog pocket ----
+    - name: statue_base
+      active: true
+      components:
+        - type: Transform
+          position: { x: -10, y: -6, z: 0.4 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1.2, y: 1.2, z: 0.8 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.55, g: 0.52, b: 0.48 }, metallic: 0.0, roughness: 0.9, ao: 1.0 }
+      children: []
+
+    - name: statue_column
+      active: true
+      components:
+        - type: Transform
+          position: { x: -10, y: -6, z: 2.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.6, y: 0.6, z: 2.4 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.55, g: 0.52, b: 0.48 }, metallic: 0.0, roughness: 0.9, ao: 1.0 }
+      children: []
+
+    - name: statue_head
+      active: true
+      components:
+        - type: Transform
+          position: { x: -10, y: -6, z: 3.6 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.5, y: 0.5, z: 0.5 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.55, g: 0.52, b: 0.48 }, metallic: 0.0, roughness: 0.9, ao: 1.0 }
+      children: []
+
+    - name: statue_pocket
+      active: true
+      components:
+        - type: Transform
+          position: { x: -10, y: -6, z: 2.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: Volume
+          kind: fog
+          shape: sphere
+          extent: { x: 2.4, y: 2.4, z: 2.4 }
+          density: 0.6
+          falloff: 0.9
+          occlusion: 0.7
+          sun_amount: 0.4
+          color: { r: 0.75, g: 0.8, b: 0.9 }
+      children: []
+
+    # ---- HAZE BANK: towers at increasing depth behind drifting haze ----
+    - name: tower_0
+      active: true
+      components:
+        - type: Transform
+          position: { x: -14, y: 14, z: 4.5 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 2.0, y: 2.0, z: 9 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.5, g: 0.5, b: 0.52 }, metallic: 0.0, roughness: 0.9, ao: 1.0 }
+      children: []
+
+    - name: tower_1
+      active: true
+      components:
+        - type: Transform
+          position: { x: -7, y: 18, z: 6.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 2.0, y: 2.0, z: 12 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.5, g: 0.5, b: 0.52 }, metallic: 0.0, roughness: 0.9, ao: 1.0 }
+      children: []
+
+    - name: tower_2
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0, y: 22, z: 7.5 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 2.0, y: 2.0, z: 15 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.5, g: 0.5, b: 0.52 }, metallic: 0.0, roughness: 0.9, ao: 1.0 }
+      children: []
+
+    - name: tower_3
+      active: true
+      components:
+        - type: Transform
+          position: { x: 7, y: 18, z: 5.5 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 2.0, y: 2.0, z: 11 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.5, g: 0.5, b: 0.52 }, metallic: 0.0, roughness: 0.9, ao: 1.0 }
+      children: []
+
+    - name: tower_4
+      active: true
+      components:
+        - type: Transform
+          position: { x: 14, y: 14, z: 4.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 2.0, y: 2.0, z: 8 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.5, g: 0.5, b: 0.52 }, metallic: 0.0, roughness: 0.9, ao: 1.0 }
+      children: []
+
+    - name: tower_5
+      active: true
+      components:
+        - type: Transform
+          position: { x: -3, y: 26, z: 9.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 2.0, y: 2.0, z: 18 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.5, g: 0.5, b: 0.52 }, metallic: 0.0, roughness: 0.9, ao: 1.0 }
+      children: []
+
+    - name: tower_6
+      active: true
+      components:
+        - type: Transform
+          position: { x: 10, y: 26, z: 7.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 2.0, y: 2.0, z: 14 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.5, g: 0.5, b: 0.52 }, metallic: 0.0, roughness: 0.9, ao: 1.0 }
+      children: []
+
+    - name: haze_bank
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0, y: 20, z: 5.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: Volume
+          kind: haze
+          shape: box
+          extent: { x: 18.0, y: 8.0, z: 5.0 }
+          density: 0.12
+          falloff: 0.25
+          speed: 0.8
+      children: []
+
+    - name: camera
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -18.0, z: 6.0 }
+          rotation: { x: 75.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Camera
+          main: true
+          projection: Perspective
+          fov: 55.0
+          near_clip_plane: 0.1
+          far_clip_plane: 500.0
+        - type: CameraController
+          mode: orbit
+          target: { x: 0.0, y: 2.0, z: 1.5 }
+          follow_smoothing: 10.0
+          movement_smoothing: 0.8
+          mouse_sensitivity: 0.08
+          zoom_speed: 1.0
+          min_distance: 2.0
+          max_distance: 50.0
+          min_pitch_deg: 2.0
+          max_pitch_deg: 85.0
+      children: []
+
+    # Low sun BEYOND the far side of the scene, shining back toward the default camera: the
+    # strongest forward-scattering view of the shafts and the mist.
+    - name: sun
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 30.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: DirectionalLight
+          direction: { x: 0.25, y: -0.45, z: -0.85 }
+          color: { r: 1.0, g: 0.9, b: 0.75 }
+          intensity: 1.0
+          cast_shadows: true
+          shadow_intensity: 0.75
+        - type: EnvironmentLight
+          sky_color: { r: 0.48, g: 0.58, b: 0.78 }
+          ground_color: { r: 0.18, g: 0.17, b: 0.16 }
+          sky_intensity: 0.8
+      children: []

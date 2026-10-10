@@ -1,0 +1,506 @@
+# kitchen_sink -- a TEST FIXTURE, not a demo: one small scene with a bit of everything the render
+# pipeline tests need -- PBR brick maps, triplanar (world vs local), an SDF raymarch CSG blob and SDF
+# glass, BLEND glass, cutout, emissive, a foliage card, a water plane, a Volume haze bank, an
+# inactive shadow-casting point and spot light, and a second (non-main) ortho camera.
+# Loaded by tests/engine/gpu/*_test.cpp from tests/fixtures/scenes/; asset names resolve through
+# the project's asset roots like any scene.
+scene:
+  scene_name: kitchen_sink
+  root_objects:
+    - name: plane
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: -0.5 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 4.0, y: 4.0, z: 4.0 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material:
+            albedo: { r: 0.35, g: 0.4, b: 0.3 }
+            metallic: 0.0
+            roughness: 0.8
+            ao: 1.0
+      children: []
+
+    - name: pillar
+      active: true
+      components:
+        - type: Transform
+          position: { x: -0.5, y: -0.5, z: -0.5 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: pillar
+          # The shared brick material (albedo/normal/metallic-roughness maps -- see
+          # tools/gen_material_maps.py) with per-object overrides: albedo tints the brick
+          # texels (the asset's own {1,1,1} leaves them unmodified).
+          material:
+            base: materials/brick
+            albedo: { r: 0.8, g: 0.35, b: 0.25 }
+            roughness: 0.6
+      children: []
+
+    # Triplanar test: the same stretched, rotated box twice, with the `triplanar` surface
+    # shader (shaders/triplanar.frag) projecting the brick maps instead of reading mesh UVs.
+    # triplanar_world projects in WORLD space -- bricks keep their real-world size on every
+    # face despite the non-uniform scale, and would stay put if the box moved. triplanar_local
+    # overrides shader_params.z to 1 (OBJECT space) -- the bricks ride with the box, so they
+    # stretch with its scale and follow its rotation. Back row (y = 1.4), clear of the pillar.
+    - name: triplanar_world
+      active: true
+      components:
+        - type: Transform
+          position: { x: -2.0, y: 1.4, z: -0.1 }
+          rotation: { x: 0.0, y: 0.0, z: 30.0 }
+          scale: { x: 1.6, y: 0.6, z: 0.8 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/triplanar_test
+      children: []
+
+    - name: triplanar_local
+      active: true
+      components:
+        - type: Transform
+          position: { x: 2.0, y: 1.4, z: -0.1 }
+          rotation: { x: 0.0, y: 0.0, z: 30.0 }
+          scale: { x: 1.6, y: 0.6, z: 0.8 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material:
+            base: materials/triplanar_test
+            shader_params: [1.0, 4.0, 1.0, 1.0]   # tiling, sharpness, space (1 = object), normal strength
+      children: []
+
+    # SDF raymarching test: an opaque smooth-union CSG blob (a sphere unioned with a
+    # rounded box, via the two SdfShape children below) raymarched into the G-buffer --
+    # it therefore gets SSAO, the outline, deferred lighting, SSR and fog exactly like an
+    # opaque mesh does (see SdfGBufferPass). smoothing on the SdfRenderer blends the two
+    # child shapes' seam (child SdfShape.blend, when left at 0, falls back to this). Each
+    # SdfShape's OWN TransformComponent places it relative to sdf_blob's transform, via the
+    # engine's ordinary parent-child transform composition -- the same mechanism a nested
+    # mesh child would use, just not otherwise exercised by this demo scene.
+    - name: sdf_blob
+      active: true
+      components:
+        - type: Transform
+          position: { x: -2.2, y: -0.5, z: 0.3 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: SdfRenderer
+          bounds_center: { x: 0.05, y: 0.0, z: 0.0 }
+          bounds_extent: { x: 1.1, y: 0.9, z: 0.9 }
+          smoothing: 0.25
+          material:
+            albedo: { r: 0.75, g: 0.55, b: 0.2 }
+            metallic: 0.6
+            roughness: 0.3
+            ao: 1.0
+      children:
+        - name: sdf_blob_sphere
+          active: true
+          components:
+            - type: Transform
+              position: { x: -0.25, y: 0.0, z: 0.0 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 1.0, y: 1.0, z: 1.0 }
+            - type: SdfShape
+              shape: Sphere
+              params: { x: 0.5, y: 0.5, z: 0.5 }
+              op: Union
+          children: []
+        - name: sdf_blob_box
+          active: true
+          components:
+            - type: Transform
+              position: { x: 0.35, y: 0.0, z: 0.0 }
+              rotation: { x: 0.0, y: 20.0, z: 0.0 }
+              scale: { x: 1.0, y: 1.0, z: 1.0 }
+            - type: SdfShape
+              shape: Box
+              params: { x: 0.4, y: 0.35, z: 0.35 }
+              rounding: 0.08
+              op: Union
+          children: []
+
+    # Transparency test: a static BLEND glass sphere (materials/glass), resting on the plane
+    # beside the pillar. alpha < 1 means it does NOT cast a shadow (see ToyRenderPipeline's
+    # record_directional_shadow_/record_point_shadow_: a BLEND material only casts a
+    # shadow at alpha == 1.0, since this engine's single-hard-compare shadow pass has
+    # no way to draw a partial shadow for a partially transparent occluder).
+    - name: glass_sphere
+      active: true
+      components:
+        - type: Transform
+          position: { x: 1.0, y: -0.5, z: -0.05 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 0.45, y: 0.45, z: 0.45 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: materials/glass
+      children: []
+
+    # SDF forward-blend test: a BLEND SdfRenderer placed apart from glass_sphere in
+    # world space, but close enough that the orbiting camera repeatedly crosses the two in
+    # screen space over a revolution. Proves ToyRenderPipeline::record_transparent_()'s
+    # merged back-to-front draw list: at each crossing, whichever of the mesh sphere or
+    # this SDF sphere is actually farther from the camera should composite BEHIND the
+    # other, with no popping -- if the two kinds were drawn in two separate passes instead
+    # of one sorted list, one would always render on top of the other regardless of true
+    # depth. Also exercises the SDF forward pass's own SSR trace: this sphere should
+    # reflect the floor the same way glass_sphere does.
+    - name: sdf_glass
+      active: true
+      components:
+        - type: Transform
+          position: { x: 1.35, y: -1.5, z: -0.1 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: SdfRenderer
+          bounds_center: { x: 0.0, y: 0.0, z: 0.0 }
+          bounds_extent: { x: 0.5, y: 0.5, z: 0.5 }
+          material:
+            albedo: { r: 0.7, g: 0.85, b: 0.95 }
+            metallic: 0.0
+            roughness: 0.05
+            ao: 1.0
+            alpha: 0.5
+            alpha_mode: BLEND
+      children:
+        - name: sdf_glass_sphere
+          active: true
+          components:
+            - type: Transform
+              position: { x: 0.0, y: 0.0, z: 0.0 }
+              rotation: { x: 0.0, y: 0.0, z: 0.0 }
+              scale: { x: 1.0, y: 1.0, z: 1.0 }
+            - type: SdfShape
+              shape: Sphere
+              params: { x: 0.4, y: 0.4, z: 0.4 }
+              op: Union
+          children: []
+
+    # Opaque control sphere, for comparing against glass_sphere's shading -- offset far
+    # enough in x that it's clear of glass_sphere's own directional-shadow cylinder given
+    # the sun direction above (perp_offset ~1.4 vs the two spheres' combined radius 0.9, so
+    # neither casts onto the other; at the previous x=2.0 spacing perp_offset was ~0.94, just
+    # 4% past the combined radius -- well within shadow_normal_bias's 0.05, so glass_sphere
+    # really was being shadowed by this sphere, not showing an ambient/shader-pass artifact).
+    - name: opaque_sphere
+      active: true
+      components:
+        - type: Transform
+          position: { x: 2.5, y: -0.5, z: -0.05 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 0.45, y: 0.45, z: 0.45 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material:
+            albedo: { r: 0.6, g: 0.8, b: 0.9 }
+            # metallic: 0.9, not the original 0.0 -- a dielectric's F0 is a flat 0.04, so any
+            # reflection (SSR or otherwise) is a sub-5% tint, effectively invisible against a
+            # directly-lit diffuse response of similar magnitude. Full metallic makes F0 =
+            # albedo, the mirror-sphere-reflects-its-neighbour effect SSR is actually built to
+            # show (see emissive_sphere's placement comment below).
+            metallic: 0.5
+            roughness: 0.05
+            ao: 1.0
+      children: []
+
+    # Layered-shader test: a wind-swayed CUTOUT foliage card, proving the derived-shader
+    # architecture end to end (see foliage_surface.glsl and the "foliage" SurfaceShaderDesc
+    # in engine.h). Reuses plane (a 2x2 quad, local Y from -1 at the root to +1 at the
+    # tip) rotated 90 deg about X so it stands upright, and the same noise_mask.png already
+    # used by cutout_sphere as a stand-in leafy silhouette -- the point here is the
+    # displacement mechanism, not new art. cull: None isn't a material field (no such
+    # per-material override exists), it's baked into the "foliage" shader's
+    # SurfaceShaderDesc::cull, since every foliage card needs it, not just this one.
+    # Positioned at x=-3.0, clear of every other object's x=-2.5..3.35 range, so its own
+    # directional shadow falls on open floor.
+    - name: foliage_card
+      active: true
+      components:
+        - type: Transform
+          position: { x: -3.0, y: -1.0, z: 0.1 }
+          rotation: { x: 90.0, y: 0.0, z: 0.0 }
+          scale: { x: 0.6, y: 0.6, z: 0.6 }
+        - type: MeshRenderer
+          mesh_path: plane
+          # materials/foliage: CUTOUT over noise_mask.png, `shader: foliage`, shader_params
+          # x=wind_strength (world units), y=wind_frequency (rad/s), zw=wind_dir.xy -- see
+          # foliage_surface.glsl's own doc for what each slot means.
+          material: materials/foliage
+      children: []
+
+    # CUTOUT test: alpha_mode CUTOUT is AlphaMode::Mask (see gfxcoopa's parse_alpha_mode_() --
+    # "CUTOUT"/"MASK"/"CLIP" are all the same mode) with a real texture_alpha_mask, instead of
+    # Mask's degenerate constant-albedo.a test. gbuffer.frag samples the mask's alpha at this
+    # sphere's UV and multiplies it into albedo.a before testing against alpha_cutoff, so the
+    # noise texture punches a per-texel silhouette straight through the sphere -- and, since
+    # ShadowPipeline also binds this material's mask (see record_directional_shadow_'s doc),
+    # the sun-cast shadow on the floor shows the same holes rather than a solid disc. Placed on
+    # its own row (y=-1.6, clear of every x=-2.2..3.35 front-row object above) so its shadow
+    # falls on open floor, not across another object.
+    - name: cutout_sphere
+      active: true
+      components:
+        - type: Transform
+          position: { x: -1.0, y: -1.6, z: -0.05 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 0.45, y: 0.45, z: 0.45 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material:
+            albedo: { r: 0.85, g: 0.35, b: 0.25 }
+            metallic: 0.0
+            roughness: 0.6
+            ao: 1.0
+            alpha_mode: CUTOUT
+            alpha_cutoff: 0.5
+            texture_alpha_mask: textures/noise_mask.png
+            # cull_backfaces test: PBRMaterial::cull_backfaces (default true, matching every
+            # other material in this scene) is now a real per-material field -- see
+            # foliage_card's comment above, which used to note no such field existed.
+            # false here means both winding orders render, so the CUTOUT alpha holes this
+            # material already punches (via texture_alpha_mask above) reveal the sphere's
+            # own interior back wall instead of just showing the floor behind it.
+            cull_backfaces: false
+      children: []
+
+    # Emissive test: a small glowing orb resting beside opaque_sphere, at the same height --
+    # NOT above it. SSR can only reflect a surface whose CAMERA-FACING side is visible in the
+    # G-buffer; an object directly above a sphere, viewed from this scene's overhead camera,
+    # would need to reflect off the sphere's top and hit the orb's UNDERSIDE, a backface that
+    # was never rendered and that SSR's screen-space ray march therefore cannot find (nor would
+    # the hit survive its depth/thickness test, sized for near-camera-depth surfaces). Placed
+    # beside the sphere instead, the orb's own camera-facing side is exactly what the reflection
+    # ray needs, which is the ordinary "mirror ball reflects its neighbour" case SSR is built
+    # for. Albedo is near-black deliberately -- direct and indirect lighting then contribute
+    # almost nothing, so what's on screen is the emissive term alone. Note the engine has no
+    # emissive-as-a-light-source concept: this orb does NOT illuminate the sphere directly, it
+    # only bleeds onto it via the screen-space SSR/SSGI terms (and, separately, via the bloom
+    # composite in stylize.frag, which is a screen-space glow, not a lighting effect
+    # either) -- and, being OPAQUE, it still casts a normal directional shadow (the shadow pass
+    # only reads material.gpu_alpha_cutoff(), for CUTOUT's masked-shadow support -- see
+    # cutout_sphere above -- and material.alpha/is_blended() for the BLEND-caster rule; an
+    # OPAQUE material like this one always casts its full silhouette).
+    - name: emissive_sphere
+      active: true
+      components:
+        - type: Transform
+          position: { x: 3.35, y: -0.5, z: -0.2 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 0.3, y: 0.3, z: 0.3 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: materials/emissive
+      children: []
+
+    # A small pond, driven by the water system (toyengine/water/): a planar WaterBody whose
+    # mesh WaterSystem bakes and publishes to the sibling MeshRenderer (which therefore names
+    # no mesh_path of its own), with the "water" derived shader on the Transparent domain --
+    # Gerstner waves in the vertex hook (SSR reflects the displaced surface through the previous
+    # frame's colour), and depth-based colour
+    # and contact foam in the fragment hook. Uses water_grid (tools/gen_water_grid_mesh.py)
+    # rather than plane: a 4-vertex quad can only tilt as a whole, not ripple. Placed at
+    # y=-3.2, past every other object's row, so it reads as its own "pond" on the open floor.
+    # See assets/scenes/water/water_demo for the full system (lake, river, buoyancy).
+    - name: water_plane
+      active: true
+      components:
+        - type: Transform
+          # The floor's top is at z = -0.5, so the pond is only 0.2 deep: the waves stay small
+          # (all four derived waves together crest at ~2x the base amplitude, 0.1 here), and
+          # the foam/edge depths are scaled down to match, or the whole pond would read as
+          # shoreline.
+          position: { x: 0.0, y: -3.2, z: -0.30 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.2, y: 1.2, z: 1.2 }
+        - type: MeshRenderer
+          material:
+            albedo: { r: 0.05, g: 0.25, b: 0.35 }
+            metallic: 0.0
+            roughness: 0.05
+            ao: 1.0
+            alpha: 0.55
+            alpha_mode: BLEND
+            refraction: true
+            ior: 1.33
+            refraction_tint: { r: 0.6, g: 0.85, b: 0.9 }
+        - type: WaterBody
+          mode: planar
+          mesh_path: water_grid
+          wave_amplitude: 0.05
+          wave_length: 1.6
+          wave_direction: 22.0
+          wave_steepness: 0.4
+          clarity: 0.6
+          shore_foam_depth: 0.06
+          edge_fade_depth: 0.03
+          ripple_strength: 0.25
+          ripple_scale: 2.0
+      children: []
+
+    # Local volumes -- the single local-volume concept. Fog is GLOBAL only and lives in
+    # assets/config.yaml; everything bounded is a Volume raymarched by VolumetricsPass.
+    # `kind` picks the density function and brings its own defaults, so these stay short.
+    # - name: wind_gust
+    #   active: true
+    #   components:
+    #     - type: Transform
+    #       position: { x: 3.0, y: 0.0, z: 1.0 }
+    #       rotation: { x: 0.0, y: 0.0, z: 0.0 }
+    #       scale: { x: 1.0, y: 1.0, z: 1.0 }
+    #     - type: Volume
+    #       kind: wind
+    #       shape: box
+    #       extent: { x: 5.0, y: 5.0, z: 2.5 }
+    #   children: []
+
+    - name: haze_bank
+      active: true
+      components:
+        - type: Transform
+          position: { x: -3.0, y: 0.0, z: 1.5 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Volume
+          kind: haze
+          shape: box
+          extent: { x: 6.0, y: 6.0, z: 3.0 }
+      children: []
+
+    # Static pocket: kind: fog is uniform density inside its bounds. NOTE the density is
+    # far lower than the old analytic fog volume used -- that fed a closed-form segment
+    # integral, this feeds a per-sample march, so the same number reads much denser.
+    # - name: fog_pocket
+    #   active: true
+    #   components:
+    #     - type: Transform
+    #       position: { x: 1.7, y: -0.5, z: 0.2 }
+    #       rotation: { x: 0.0, y: 0.0, z: 0.3 }
+    #       scale: { x: 1.0, y: 1.0, z: 1.0 }
+    #     - type: Volume
+    #       kind: fog
+    #       shape: box
+    #       extent: { x: 10.0, y: 10.0, z: 0.8 }
+    #       density: 0.12
+    #       falloff: 0.25
+    #   children: []
+
+    - name: camera
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -10.0, z: 6.0 }
+          rotation: { x: 68.3269, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Camera
+          main: true
+          projection: Perspective
+          fov: 50.0
+          near_clip_plane: 0.1
+          far_clip_plane: 1000.0
+          lens: 85.0       # mm; per-camera override for DofPass's thin-lens CoC (see
+                            # render.dof_focal_length in config.yaml, which is <= 0 here so
+                            # this value is the one actually used)
+          aperture: 4.0     # f-stop; per-camera override for render.dof_aperture. The sharp
+                            # half-band this buys is Delta = c * N * F(F-f)/f^2 metres, where
+                            # c = sensor_width/render_width (1 full-res px, DofPass's sharp
+                            # cutoff) -- at this scene's ~11.46 m focus and 1920 px render
+                            # width that is 0.338 * N, so f/4 gives +-1.35 m sharp and full
+                            # blur past +-2.71 m. f/2.0 (the previous value) gave only
+                            # +-0.68 m, which is exactly the pillar's OWN depth extent: since
+                            # focus tracks the pillar's transform ORIGIN and pillar.yaml
+                            # spans [0,1]x[0,1] in plan from it (i.e. the origin is a corner,
+                            # 0.2 m in front of the centre), its far half fell outside the
+                            # sharp band and visibly defocused. Worst case over a full orbit
+                            # is a 1.24 m offset from that origin, which f/4 covers.
+                            # Shortening `lens` above is the other dial, but it shrinks the
+                            # background blur at the same time (CoC at infinity is
+                            # (f^2/N)/(F-f) / c px) -- raising N here keeps the 85 mm look
+                            # and still leaves 8.4 px of blur at infinity.
+          focus_object: pillar  # ':'-separated scene path (e.g. sdf_blob:sdf_blob_sphere);
+                                    # a non-empty value puts THIS camera in object-focus mode,
+                                    # tracking the pillar's own depth every frame regardless of
+                                    # render.dof_focus_mode below
+        - type: CameraController
+          mode: orbit
+          target: { x: 0.0, y: 0.0, z: 0.5 }
+          follow_smoothing: 10.0
+          movement_smoothing: 0.8
+          mouse_sensitivity: 0.08
+          zoom_speed: 1.0
+          min_distance: 2.0
+          max_distance: 30.0
+          min_pitch_deg: 0.0
+          max_pitch_deg: 85.0
+      children: []
+
+    # Second, non-main camera -- proves CameraComponent::main() picks the
+    # `main: true` camera above rather than "whichever camera is found
+    # first in root_objects". A static overhead view like this is exactly
+    # the kind of second camera a real scene would carry (minimap, cutscene),
+    # never intended to render by default.
+    - name: overview_camera
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 12.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Camera
+          projection: Orthographic
+          orthographic_size: 6.0
+          near_clip_plane: 0.1
+          far_clip_plane: 100.0
+      children: []
+
+    - name: sun
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: DirectionalLight
+          direction: { x: -0.35, y: -0.45, z: -0.82 }
+          color: { r: 1.0, g: 0.97, b: 0.9 }
+          intensity: 1.0
+          cast_shadows: true
+          shadow_intensity: 0.6
+      children: []
+
+    - name: point
+      active: false
+      components:
+        - type: Transform
+          position: { x: 1.5, y: 3.0, z: 1.3 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: PointLight
+          color: { r: 0.5, g: 0.7, b: 1.0 }
+          intensity: 100.0
+          range: 100.0  # scaled to this scene's ~8-unit floor -- range now directly controls the light's visible glow width (see toy_lighting.frag); much larger than the scene itself (this was briefly 100) hides the effect entirely
+          cast_shadows: true
+          attenuation_constant: 4.0  # falloff sharpness -- 4.0 keeps this engine's crisp, cel-shaded cutoff
+      children: []
+
+    - name: spot
+      active: false
+      components:
+        - type: Transform
+          position: { x: -3.0, y: 1.5, z: 6.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: SpotLight
+          direction: { x: 0.4, y: -0.2, z: -1.0 }  # world-space aim (rotated by this object's world rotation); lands the cone on the floor near the pillar
+          color: { r: 1.0, g: 0.85, b: 0.55 }
+          intensity: 140.0
+          range: 20.0
+          inner_angle: 14.0   # degrees, half-angle of the full-brightness core
+          outer_angle: 26.0   # degrees, half-angle where the cone reaches zero
+          cast_shadows: true
+          attenuation_constant: 2.0  # falloff sharpness, same meaning as PointLight's
+      children: []

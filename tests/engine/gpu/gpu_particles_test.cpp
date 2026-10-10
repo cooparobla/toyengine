@@ -37,7 +37,7 @@ std::string write_scene(const std::string& name, const std::string& sim, const s
     const fs::path dir = coopa::test::scratch_dir() / ("gpu_particles_" + name);
     fs::create_directories(dir);
     std::ofstream(dir / "scene.yaml") <<
-        "format: blender\nscene:\n  scene_name: " << name << "\n  root_objects:\n"
+        "scene:\n  scene_name: " << name << "\n  root_objects:\n"
         "    - name: Camera\n      components:\n        - type: Transform\n          position: {x: 0, y: -8, z: 0}\n"
         "          rotation: {x: 90, y: 0, z: 0}\n        - type: Camera\n          main: true\n"
         "    - name: Dots\n      components:\n        - type: Transform\n"

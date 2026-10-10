@@ -33,7 +33,7 @@ using namespace toy::test;
  * @brief Generates a small world, builds its chunks, then flies the camera and watches the
  *        loaded region follow it.
  *
- * The scene file is the shipped demo (assets/scenes/terrain_test), but its world is shrunk
+ * The scene is the shipped demo in its voxel read (voxel_terrain_demo()), but its world is shrunk
  * here before the first tick -- generation does not start until TerrainSystem's first
  * execute(), so the component is still unconfigured at this point. That keeps this test to a
  * 32-cell map and nine 8x8 chunks instead of the demo's ~10k cells and forty-nine 32x32 ones,
@@ -56,7 +56,7 @@ COOPA_TEST(chunks_stream_around_the_camera) {
     ScopedEnv no_input("NO_INPUT", "1");
 
     toy::core::AppConfig config =
-        make_test_config("assets/scenes/terrain_test/scene.yaml", 320, 180, 160, 90);
+        make_test_config(voxel_terrain_demo(), 320, 180, 160, 90);
     toy::core::Engine engine(std::move(config));
 
     auto* camera = coopa::gfx::engine::components::CameraComponent::main();
@@ -96,7 +96,7 @@ COOPA_TEST(chunks_stream_around_the_camera) {
     if (marker_transform == nullptr) return;
 
     // Collapse the orbit arm so the camera rides along with the marker: the streamer centres on
-    // the CAMERA, and the shipped 60-unit arm would put it seven chunks away from the marker at
+    // the CAMERA, and the shipped 42-unit arm would put it several chunks away from the marker at
     // this test's 8-unit chunk size. Zeroing both smoothing rates makes the follow instant, so a
     // move converges in ticks rather than in however long an exponential chase takes.
     if (auto* controller = camera->owner->get_component<toy::scene::CameraController>()) {
@@ -194,7 +194,7 @@ COOPA_TEST(chunks_stream_around_the_camera) {
 }
 
 /**
- * @brief The styled scene end to end: assets/scenes/terrain_smooth_test parses its styles, bakes
+ * @brief The styled scene end to end: assets/scenes/terrain/terrain_demo parses its styles, bakes
  *        every piece, streams chunks through the styled mesher, and puts terrain on screen.
  *
  * World shrunk before the first tick exactly as test_terrain_streams_chunks_around_the_camera
@@ -207,7 +207,7 @@ COOPA_TEST(styled_scene_streams_styled_chunks) {
     ScopedEnv no_input("NO_INPUT", "1");
 
     toy::core::AppConfig config =
-        make_test_config("assets/scenes/terrain_smooth_test/scene.yaml", 320, 180, 160, 90);
+        make_test_config("assets/scenes/terrain/terrain_demo/scene.yaml", 320, 180, 160, 90);
     toy::core::Engine engine(std::move(config));
 
     auto* camera = coopa::gfx::engine::components::CameraComponent::main();
@@ -287,7 +287,7 @@ COOPA_TEST(focus_shadow_probe_measures_the_viewed_surface) {
     ScopedEnv no_input("NO_INPUT", "1");
 
     toy::core::AppConfig config =
-        make_test_config("assets/scenes/terrain_test/scene.yaml", 320, 180, 160, 90);
+        make_test_config(voxel_terrain_demo(), 320, 180, 160, 90);
     toy::core::Engine engine(std::move(config));
     auto* camera = coopa::gfx::engine::components::CameraComponent::main();
     expect(camera != nullptr && camera->scene != nullptr, "focus probe: the scene has a main camera");
@@ -299,13 +299,14 @@ COOPA_TEST(focus_shadow_probe_measures_the_viewed_surface) {
     terrain->params.chunk_size          = 8;
     terrain->params.view_radius         = 2;
     expect(engine.pipeline().render_config_mut().shadow_fit == "focus",
-           "focus probe: terrain_test runs the focus shadow fit");
+           "focus probe: terrain_demo runs the focus shadow fit");
 
-    // Park the orbit pivot over the middle of the shrunken 64-tile world, so the camera frames
-    // terrain rather than the empty sky past its edge.
+    // Park the orbit pivot over the middle of the shrunken 64-tile island, at about its plateau
+    // height (the demo's height_scale is 10 m), so the camera frames terrain rather than the
+    // empty sky past its edge.
     coopa::scene::SceneObject* marker = camera->scene->find_object_by_path(camera->focus_object);
     if (marker == nullptr || marker->get_transform() == nullptr) return;
-    marker->get_transform()->transform().set_position(glm::vec3(32.0f, 32.0f, 20.0f));
+    marker->get_transform()->transform().set_position(glm::vec3(32.0f, 32.0f, 6.0f));
     if (auto* controller = camera->owner->get_component<toy::scene::CameraController>()) {
         controller->distance           = 30.0f;
         controller->follow_smoothing   = 0.0f;
@@ -324,4 +325,5 @@ COOPA_TEST(focus_shadow_probe_measures_the_viewed_surface) {
     const float probed = engine.pipeline().shadow_focus_probe_distance();
     expect(probed > 5.0f && probed < 150.0f, "focus probe: measures a real distance to the viewed surface");
     if (!(probed > 5.0f && probed < 150.0f)) std::cerr << "         probed " << probed << "\n";
+
 }

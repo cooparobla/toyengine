@@ -592,7 +592,11 @@ void EditorApp::draw_dope_sheet_(imm::Context& ctx, const imm::Box& body) {
         const bool major = f % label_every == 0;
         if (!major && pps / kAnimFps < 5.0f) continue;
         ctx.line({x, ruler.bottom() - (major ? 7.0f : 3.0f)}, {x, ruler.bottom()}, ctx.style.text_dim, 1.0f);
-        if (major) ctx.draw_text({x + 2, ruler.y + 2}, std::to_string(f), ctx.style.text_dim, 10.0f);
+        if (major) {
+            // Centred on its tick, like the playhead's tag, so a key on this frame sits under its number.
+            const std::string label = std::to_string(f);
+            ctx.draw_text({x - ctx.text.width(label, 10.0f) * 0.5f, ruler.y + 2}, label, ctx.style.text_dim, 10.0f);
+        }
         if (major) ctx.line({x, ruler.bottom()}, {x, track.bottom()}, imm::with_alpha(ctx.style.text_dim, 0.12f), 1.0f);
     }
     // Outside the clip's range is shaded; its end is a line.

@@ -28,7 +28,7 @@ using namespace toy::test;
  * @brief Point and spot shadows come from the local-light atlas: they reach the image, obey the
  *        per-type budgets, and belong to the light that casts them.
  *
- * pixel_demo authors one point and one spot light, both cast_shadows and both inactive; this
+ * kitchen_sink authors one point and one spot light, both cast_shadows and both inactive; this
  * switches them on and reads the `direct` channel (direct light only, shadows applied, no fog or
  * post), comparing:
  *   - with vs without the lights' cast_shadows: the local shadows must change the image;
@@ -44,11 +44,11 @@ COOPA_TEST(shadows_reach_the_image_obey_budgets_and_keep_their_owner) {
     ScopedEnv no_input("NO_INPUT", "1");
 
     toy::core::AppConfig config =
-        make_test_config("assets/scenes/demos/pixel_demo/scene.yaml", 640, 360, 320, 180);
+        make_test_config("tests/fixtures/scenes/kitchen_sink/scene.yaml", 640, 360, 320, 180);
     toy::core::Engine engine(std::move(config));
     auto* point_obj = engine.scene().find_object("point");
     auto* spot_obj  = engine.scene().find_object("spot");
-    expect(point_obj != nullptr && spot_obj != nullptr, "local shadows: pixel_demo has its point and spot light");
+    expect(point_obj != nullptr && spot_obj != nullptr, "local shadows: kitchen_sink has its point and spot light");
     if (!point_obj || !spot_obj) return;
     point_obj->set_active(true);
     spot_obj->set_active(true);
@@ -57,7 +57,7 @@ COOPA_TEST(shadows_reach_the_image_obey_budgets_and_keep_their_owner) {
     expect(pl != nullptr && sl != nullptr && pl->cast_shadows && sl->cast_shadows,
            "local shadows: both authored lights cast shadows");
     if (!pl || !sl) return;
-    // pixel_demo's point light reaches 100 units (a glow effect); bring it in so its shadows
+    // kitchen_sink's point light reaches 100 units (a glow effect); bring it in so its shadows
     // land on the floor around it with real contrast.
     pl->range = 12.0f;
     engine.render_config().debug_view = "direct";

@@ -1,9 +1,9 @@
 /**
  * @file save_demo.h
- * @brief SaveDemo: the character_test save/load demo -- coin pickups and the clock kept in a
+ * @brief SaveDemo: the character_demo save/load demo -- coin pickups and the clock kept in a
  *        save through the SaveSystem's global hooks. Demo code, written the way a game would.
  *
- * In character_test, F5 quick-saves and F9 quick-loads (config.yaml `save.quick_slot`). The
+ * In character_demo, F5 quick-saves and F9 quick-loads (config.yaml `save.quick_slot`). The
  * save then holds all three hook styles:
  *  - the player's position and facing: CharacterController is an ISaveable, and the player
  *    object carries a SaveId (`objects/player/character`);

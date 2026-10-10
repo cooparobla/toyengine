@@ -94,7 +94,7 @@ COOPA_TEST(id_index_matches_the_tree_after_every_structural_edit) {
 
 COOPA_TEST(undoing_and_redoing_random_edits_is_exact) {
     SceneDocument doc;
-    doc.load(fs::path(ROOT_DIR) / "assets/scenes/demos/pixel_demo/scene.yaml");
+    doc.load(fs::path(ROOT_DIR) / "tests/fixtures/scenes/kitchen_sink/scene.yaml");
     const Node original = doc.node();
     std::mt19937 rng(1234);
     int edits = 0;

@@ -3,7 +3,6 @@
 # height base is the weather's ground height + height_base here, its density scales with the
 # effect intensity, its colour darkens with the time of day and it drifts with the wind.
 # Needs render volumetrics_enabled.
-format: toyengine-object
 object:
   name: weather_ground_mist
   components:

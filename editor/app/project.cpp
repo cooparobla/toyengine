@@ -443,7 +443,6 @@ Node Project::default_scene_node(const std::string& name) {
     scene["scene_name"] = Node(name);
     scene["root_objects"] = roots;
     Node doc = Node::mapping();
-    doc["format"] = Node(std::string("toyengine"));
     doc["scene"] = scene;
     return doc;
 }

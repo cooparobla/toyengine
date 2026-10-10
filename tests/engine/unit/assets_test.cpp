@@ -71,10 +71,10 @@ COOPA_TEST(shipped_config_and_scene_load_identically_from_caml) {
     expect(a.render.render_width == b.render.render_width && a.render.aa_mode == b.render.aa_mode,
            "config.caml: render settings match");
 
-    const std::filesystem::path scene_src = std::string(ROOT_DIR) + "/assets/scenes/tests/physics/physics_test";
-    package_tree_as_caml(scene_src, dir / "physics_test");
+    const std::filesystem::path scene_src = std::string(ROOT_DIR) + "/assets/scenes/physics/physics_demo";
+    package_tree_as_caml(scene_src, dir / "physics_demo");
     coopa::scene::Scene plain  = coopa::scene::SceneLoader::load((scene_src / "scene.yaml").string());
-    coopa::scene::Scene packed = coopa::scene::SceneLoader::load((dir / "physics_test" / "scene.yaml").string());
+    coopa::scene::Scene packed = coopa::scene::SceneLoader::load((dir / "physics_demo" / "scene.yaml").string());
     std::vector<std::string> plain_names, packed_names;
     for (const auto& o : plain.root_objects())  plain_names.push_back(o->name());
     for (const auto& o : packed.root_objects()) packed_names.push_back(o->name());

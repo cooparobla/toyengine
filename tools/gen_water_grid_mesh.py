@@ -1,4 +1,4 @@
-"""Generates the subdivided grid mesh used by the pixel_demo scene's water plane.
+"""Generates the subdivided grid mesh used by the kitchen_sink test scene's water plane (tests/fixtures/scenes/).
 
 Standalone generator, not part of the C++ build -- run it manually (`python3
 tools/gen_water_grid_mesh.py`) whenever

@@ -1,7 +1,7 @@
 /**
  * @file rig_render_test.cpp
  * @brief Rigs in the engine: a vertex-group skinned mesh follows an animated bone from a clip file,
- *        animation_test's bones, skin and IK (look-at, two-bone) all move, and GPU skinning matches
+ *        animation_demo's bones, skin and IK (look-at, two-bone) all move, and GPU skinning matches
  *        the CPU path vertex for vertex and pixel for pixel.
  */
 
@@ -49,7 +49,7 @@ COOPA_TEST(skinned_mesh_follows_an_animated_bone) {
             "    - object: Lower/Upper\n      property: position\n      keys:\n"
             "        - {time: 0.0, value: [0, 0, 1]}\n        - {time: 0.5, value: [1, 0, 1]}\n";
         std::ofstream(dir / "scene.yaml") <<
-            "format: blender\nscene:\n  scene_name: RigTest\n  root_objects:\n"
+            "scene:\n  scene_name: RigTest\n  root_objects:\n"
             "    - name: Camera\n      components:\n        - type: Transform\n          position: {x: 0, y: -6, z: 1}\n"
             "          rotation: {x: 90, y: 0, z: 0}\n        - type: Camera\n          main: true\n"
             "    - name: Rig\n      components:\n        - type: Transform\n"
@@ -90,19 +90,19 @@ COOPA_TEST(skinned_mesh_follows_an_animated_bone) {
     fs::remove_all(dir);
 }
 
-/** @brief The animation_test scene runs: the arm's joints, the skinned tentacle and the
+/** @brief The animation_demo scene runs: the arm's joints, the skinned tentacle and the
  *         self-animating ball all move, from their clip files. */
 COOPA_TEST(animation_test_bones_skin_and_ik_move) {
     ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
     ScopedEnv no_input("NO_INPUT", "1");
-    toy::core::Engine engine(make_test_config("assets/scenes/animation_test/scene.yaml", 640, 360, 320, 180));
+    toy::core::Engine engine(make_test_config("assets/scenes/animation/animation_demo/scene.yaml", 640, 360, 320, 180));
     tick_frames(engine, 2);
     auto& scene = engine.scene();
     auto* elbow = scene.find_object("elbow");
     auto* ball = scene.find_object("ball");
     auto* skin = scene.find_object("tentacle_skin");
     auto* smr = skin ? skin->get_component<toy::scene::SkinnedMeshRenderer>() : nullptr;
-    expect(elbow && ball && smr, "animation_test: the rigs loaded");
+    expect(elbow && ball && smr, "animation_demo: the rigs loaded");
     if (!elbow || !ball || !smr) return;
     float min_z = 1e9f, max_z = -1e9f, min_scale_z = 1e9f;
     glm::quat q0 = elbow->get_transform()->transform().rotation_quat();
@@ -116,11 +116,11 @@ COOPA_TEST(animation_test_bones_skin_and_ik_move) {
         max_turn = std::max(max_turn, 1.0f - std::abs(glm::dot(q0, elbow->get_transform()->transform().rotation_quat())));
         for (const auto& v : smr->skinned_vertices()) if (v.position.z > 2.0f) max_tip_x = std::max(max_tip_x, std::abs(v.position.x));
     }
-    expect(max_z - min_z > 1.2f, "animation_test: the ball bounces (z " + std::to_string(min_z) + " .. " + std::to_string(max_z) + ")");
-    expect(min_scale_z < 0.45f, "animation_test: ...and squashes on landing (scale z " + std::to_string(min_scale_z) + ")");
-    expect(max_turn > 0.05f, "animation_test: the arm's elbow bends");
+    expect(max_z - min_z > 1.2f, "animation_demo: the ball bounces (z " + std::to_string(min_z) + " .. " + std::to_string(max_z) + ")");
+    expect(min_scale_z < 0.45f, "animation_demo: ...and squashes on landing (scale z " + std::to_string(min_scale_z) + ")");
+    expect(max_turn > 0.05f, "animation_demo: the arm's elbow bends");
     expect(smr->is_ready() && smr->bones().size() == 4 && max_tip_x > 0.4f,
-           "animation_test: the tentacle's skin follows its bones (tip x " + std::to_string(max_tip_x) + ")");
+           "animation_demo: the tentacle's skin follows its bones (tip x " + std::to_string(max_tip_x) + ")");
 
     // IK: the watcher's head follows its orbiting target (LookAtIK), the reacher's hand stays on
     // its drifting target (TwoBoneIK).
@@ -128,7 +128,7 @@ COOPA_TEST(animation_test_bones_skin_and_ik_move) {
     auto* look_target = scene.find_object("look_target");
     auto* hand = scene.find_object("reach_hand");
     auto* reach_target = scene.find_object("reach_target");
-    expect(head && look_target && hand && reach_target, "animation_test: the IK rigs loaded");
+    expect(head && look_target && hand && reach_target, "animation_demo: the IK rigs loaded");
     if (!head || !look_target || !hand || !reach_target) return;
     auto pos = [](coopa::scene::SceneObject* o) { return glm::vec3(o->get_transform()->get_world_matrix()[3]); };
     float max_gaze_err = 0.0f, max_reach_err = 0.0f, max_head_turn = 0.0f;
@@ -141,13 +141,13 @@ COOPA_TEST(animation_test_bones_skin_and_ik_move) {
         max_head_turn = std::max(max_head_turn, glm::degrees(std::acos(std::clamp(glm::dot(fwd, fwd0), -1.0f, 1.0f))));
         max_reach_err = std::max(max_reach_err, glm::length(pos(hand) - pos(reach_target)));
     }
-    expect(max_head_turn > 30.0f, "animation_test: the watcher's head turns (" + std::to_string(max_head_turn) + " deg)");
-    expect(max_gaze_err < 25.0f, "animation_test: ...toward its target (worst lag " + std::to_string(max_gaze_err) + " deg)");
-    expect(max_reach_err < 0.02f, "animation_test: the reacher's hand stays on its target (worst " + std::to_string(max_reach_err) + " m)");
+    expect(max_head_turn > 30.0f, "animation_demo: the watcher's head turns (" + std::to_string(max_head_turn) + " deg)");
+    expect(max_gaze_err < 25.0f, "animation_demo: ...toward its target (worst lag " + std::to_string(max_gaze_err) + " deg)");
+    expect(max_reach_err < 0.02f, "animation_demo: the reacher's hand stays on its target (worst " + std::to_string(max_reach_err) + " m)");
 }
 
 /** @brief GPU skinning (the compute pre-pass) against the CPU fallback: the same animated frame
- *         of animation_test renders the same with `skinning: gpu` and `skinning: cpu`, and the
+ *         of animation_demo renders the same with `skinning: gpu` and `skinning: cpu`, and the
  *         vertices the dispatch wrote match the CPU skin of the same palette. */
 COOPA_TEST(gpu_skinning_matches_cpu) {
     ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
@@ -155,7 +155,7 @@ COOPA_TEST(gpu_skinning_matches_cpu) {
     struct Run { Frame frame; bool gpu = false; float max_err = -1.0f; float moved = 0.0f; size_t verts = 0; };
     auto run = [](const std::string& mode) {
         Run r;
-        toy::core::AppConfig cfg = make_test_config("assets/scenes/animation_test/scene.yaml", 640, 360, 320, 180);
+        toy::core::AppConfig cfg = make_test_config("assets/scenes/animation/animation_demo/scene.yaml", 640, 360, 320, 180);
         cfg.render.skinning = mode;
         toy::core::Engine engine(std::move(cfg));
         tick_frames(engine, 2);

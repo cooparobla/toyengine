@@ -30,7 +30,6 @@ COOPA_TEST(every_palette_entry_loads_under_a_canvas) {
         }
         Node canvas = ui::palette_detail::object("Canvas", {ui::palette_detail::stretch(), ui::palette_detail::comp("Canvas")}, {obj});
         Node doc = Node::mapping();
-        doc["format"] = Node(std::string("toyengine"));
         Node sc = Node::mapping();
         sc["scene_name"] = Node(std::string("PaletteProbe"));
         Node roots = Node::sequence();

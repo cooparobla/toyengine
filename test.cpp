@@ -6193,7 +6193,7 @@ void test_engine_applies_scene_settings() {
     const int rebuilds = engine.pipeline_rebuild_count();
     {
         std::ofstream out(dir / "scene.yaml");
-        out << "format: blender\n"
+        out << "format: toyengine\n"
                "scene:\n"
                "  scene_name: settings_test\n"
                "  settings:\n"
@@ -7490,7 +7490,7 @@ void test_rig_skinned_mesh_follows_animated_bone() {
             "    - object: Lower/Upper\n      property: position\n      keys:\n"
             "        - {time: 0.0, value: [0, 0, 1]}\n        - {time: 0.5, value: [1, 0, 1]}\n";
         std::ofstream(dir / "scene.yaml") <<
-            "format: blender\nscene:\n  scene_name: RigTest\n  root_objects:\n"
+            "format: toyengine\nscene:\n  scene_name: RigTest\n  root_objects:\n"
             "    - name: Camera\n      components:\n        - type: Transform\n          position: {x: 0, y: -6, z: 1}\n"
             "          rotation: {x: 90, y: 0, z: 0}\n        - type: Camera\n          main: true\n"
             "    - name: Rig\n      components:\n        - type: Transform\n"
@@ -9397,7 +9397,7 @@ std::string write_scene(const std::string& name, const std::string& sim, const s
     const fs::path dir = tmp_dir() / ("gpu_particles_" + name);
     fs::create_directories(dir);
     std::ofstream(dir / "scene.yaml") <<
-        "format: blender\nscene:\n  scene_name: " << name << "\n  root_objects:\n"
+        "format: toyengine\nscene:\n  scene_name: " << name << "\n  root_objects:\n"
         "    - name: Camera\n      components:\n        - type: Transform\n          position: {x: 0, y: -8, z: 0}\n"
         "          rotation: {x: 90, y: 0, z: 0}\n        - type: Camera\n          main: true\n"
         "    - name: Dots\n      components:\n        - type: Transform\n"

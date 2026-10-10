@@ -2,7 +2,7 @@
  * @file editor_frame_cost_test.cpp
  * @brief Extended (perf budget): the editor's per-frame cost on a large flat scene stays linear in
  * object count. Guards a known regression -- per-frame editor work went quadratic (~800 ms a
- * frame on nav_open_world) before the O(1) document index, cached mesh resolution and the
+ * frame on nav_stress_demo) before the O(1) document index, cached mesh resolution and the
  * virtualized outliner.
  */
 
@@ -18,7 +18,7 @@ COOPA_TEST_SUITE("editor_frame_cost");
 namespace toy::editor::testing {
 
 /**
- * @brief Editor frame cost on a large flat scene: nav_open_world's 758 root objects (500 rocks,
+ * @brief Editor frame cost on a large flat scene: nav_stress_demo's 758 root objects (500 rocks,
  *        246 agents). Per-frame editor work must stay linear in object count -- O(1) document
  *        lookups, cached mesh resolution, a virtualized outliner -- or the editor stops being
  *        usable on real levels long before the renderer cares.
@@ -29,8 +29,8 @@ COOPA_TEST(large_scene_frames_stay_interactive) {
     use_scratch_home();
     const fs::path root = coopa::test::scratch_dir("large_scene_project");
     Project project = Project::create(root);
-    const fs::path src = fs::path(ROOT_DIR) / "assets/scenes/tests/navigation/nav_open_world/scene.yaml";
-    const fs::path dst = project.assets() / "scenes/nav_open_world/scene.yaml";
+    const fs::path src = fs::path(ROOT_DIR) / "assets/scenes/navigation/nav_stress_demo/scene.yaml";
+    const fs::path dst = project.assets() / "scenes/navigation/nav_stress_demo/scene.yaml";
     fs::create_directories(dst.parent_path());
     fs::copy_file(src, dst, fs::copy_options::overwrite_existing);
 

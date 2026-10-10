@@ -27,7 +27,7 @@ using namespace toy::test;
 
 /**
  * @brief Motion blur (toyengine/render/passes/motion_blur_pass.h), two claims on one Engine over
- *        assets/scenes/tests/rendering/motion_blur_test with its scripted movers removed, so every
+ *        assets/scenes/rendering/motion_blur_demo with its scripted movers removed, so every
  *        motion below is driven by hand under FIXED_DT=0:
  *   - off is free: with `motion_blur` false nothing is recorded, and toggling it on and back off
  *     leaves the capture byte-identical (SSR off, and the two captures 256 frames apart, the
@@ -40,7 +40,7 @@ COOPA_TEST(off_is_free_and_a_moving_block_smears_sideways) {
     ScopedEnv no_input("NO_INPUT", "1");
 
     toy::core::AppConfig config =
-        make_test_config("assets/scenes/tests/rendering/motion_blur_test/scene.yaml", 640, 360, 320, 180);
+        make_test_config("assets/scenes/rendering/motion_blur_demo/scene.yaml", 640, 360, 320, 180);
     config.render.ssr_enabled = false;   // its frame-indexed trace dither would differ between captures
     toy::core::Engine engine(std::move(config));
     auto& rc = engine.render_config();

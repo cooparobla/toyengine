@@ -18,6 +18,8 @@
 #include <toyengine/world/terrain_component.h>
 #include <toyengine/world/tile_mesh_library.h>
 
+#include "engine/support/scene_variant.h"
+
 namespace toy::test {
 
 /**
@@ -126,6 +128,23 @@ inline glm::vec3 shrink_terrain_and_centre(toy::world::TerrainComponent& terrain
         if (auto* tc = marker->get_transform()) tc->transform().set_position(centre);
     }
     return centre;
+}
+
+/**
+ * @brief terrain_demo in the voxel read: its `styles:` / `kind_styles:` removed and the flat side
+ *        mesh and atlas set, so chunks go through the flat mesher (one quad per exposed side).
+ *        The demo itself is styled; this is the variant its header describes.
+ */
+inline std::string voxel_terrain_demo() {
+    return scene_variant("assets/scenes/terrain/terrain_demo/scene.yaml", "voxel_terrain", [](fkyaml::node& doc) {
+        fkyaml::node* t = scene_component(doc, "terrain", "Terrain");
+        if (t == nullptr) return;
+        t->as_map().erase(fkyaml::node(std::string("styles")));
+        t->as_map().erase(fkyaml::node(std::string("kind_styles")));
+        (*t)["side_mesh"] = fkyaml::node(std::string("tile_side_flat"));
+        (*t)["material"]["texture_albedo"] = fkyaml::node(std::string("textures/terrain_atlas.png"));
+        (*t)["material"]["texture_metallic_roughness"] = fkyaml::node(std::string("textures/terrain_atlas_mr.png"));
+    });
 }
 
 } // namespace toy::test

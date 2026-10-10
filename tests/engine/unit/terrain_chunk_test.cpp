@@ -252,7 +252,7 @@ COOPA_TEST(greedy_merge_preserves_surface_area) {
     }
     expect(same, "greedy: every (direction, kind) covers exactly the per-tile area");
     // This pad scatters sand tiles at random, so it merges far less than real terrain (which
-    // drops ~60% in terrain_test); the invariant is only that merging never adds triangles.
+    // drops ~60% in terrain_demo); the invariant is only that merging never adds triangles.
     expect(greedy.indices.size() < per_tile.indices.size(),
            "greedy: fewer triangles than the per-tile mesher");
     if (coopa::test::verbose()) std::cout << "    triangles per-tile " << per_tile.indices.size() / 3 << " -> greedy "

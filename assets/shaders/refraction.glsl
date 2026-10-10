@@ -129,7 +129,7 @@ vec4 gfx_refraction_apply(vec4 shaded, vec3 world_pos, vec3 N, vec3 V, float rou
     }
     // Screen-space refraction can only show what u_scene_color already holds at the offset
     // texel -- and nothing stops that texel belonging to geometry NEARER the camera than
-    // this surface. It did: the pixel_demo water plane sampled ~22 screen texels "into"
+    // this surface. It did: the kitchen_sink test scene's water plane sampled ~22 screen texels "into"
     // the brick pillar, which stands well in front of it, and drew a ghost of its top face
     // inside the pond. Halving the offset until the tap lands on something actually behind
     // this fragment degrades smoothly to zero offset near a foreground occluder, instead of

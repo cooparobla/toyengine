@@ -1,6 +1,5 @@
 # weather_dust: wind-blown sand for `sandstorm` -- streaks of grit racing past the viewer plus a tan haze.
 # The wind (strong in a sandstorm) is added to the particles' velocity and drives the haze.
-format: toyengine-object
 object:
   name: weather_dust
   components:

@@ -289,7 +289,6 @@ COOPA_TEST(edit_mode_isolates_the_mesh_and_tab_restores_the_view) {
 COOPA_TEST(the_collider_overlay_follows_toggle_selection_and_play) {
     EditorSession session({.fixed_dt = "0", .prepare = [](Project& project) {
         write_text(project.assets() / "scenes" / "colliders" / "scene.yaml",
-            "format: blender\n"
             "scene:\n"
             "  scene_name: colliders\n"
             "  root_objects:\n"

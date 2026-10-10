@@ -1,6 +1,6 @@
 /**
  * @file material_maps_test.cpp
- * @brief The material texture path end to end: material_maps_test's two scenes -- byte-identical
+ * @brief The material texture path end to end: the material_maps fixture's two scenes -- byte-identical
  *        but for the albedo/normal/metallic-roughness maps -- render measurably differently.
  */
 
@@ -23,7 +23,7 @@ COOPA_TEST_SUITE("material_maps");
 using namespace toy::test;
 
 /**
- * @brief Renders assets/scenes/material_maps_test's two scenes -- the SAME lit cube,
+ * @brief Renders tests/fixtures/scenes/material_maps's two scenes -- the SAME lit cube,
  * byte-identical YAML but for scene_mapped's three texture_albedo/texture_normal/
  * texture_metallic_roughness keys (see those files' own comments) -- and asserts the frames
  * differ.
@@ -46,8 +46,8 @@ COOPA_TEST(texture_maps_change_the_rendered_frame) {
         return engine.capture_image(/*low_res=*/true);
     };
 
-    const Frame flat   = render_scene("assets/scenes/material_maps_test/scene_flat.yaml");
-    const Frame mapped = render_scene("assets/scenes/material_maps_test/scene_mapped.yaml");
+    const Frame flat   = render_scene("tests/fixtures/scenes/material_maps/scene_flat.yaml");
+    const Frame mapped = render_scene("tests/fixtures/scenes/material_maps/scene_mapped.yaml");
 
     expect(same_extent(flat, mapped), "material maps: both captures share one extent");
     if (!same_extent(flat, mapped)) return;

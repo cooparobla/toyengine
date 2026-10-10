@@ -13,7 +13,7 @@ clip:
       property: rotation_quat
       keys:
         - {time: 0, value: [-0, -0.173648, -0, 0.984808], easing: ease_in_out}
-        - {time: 1.15, value: [0, 0.173648, 0, 0.984808], easing: ease_in_out}
+        - {time: 1.13333, value: [0, 0.173648, 0, 0.984808], easing: ease_in_out}
         - {time: 2, value: [-0, -0.173648, -0, 0.984808], easing: ease_in_out}
     - object: seg_0/seg_1/seg_2
       property: rotation_quat
@@ -25,5 +25,5 @@ clip:
       property: rotation_quat
       keys:
         - {time: 0, value: [-0, -0.275637, -0, 0.961262], easing: ease_in_out}
-        - {time: 1.45, value: [0, 0.275637, 0, 0.961262], easing: ease_in_out}
+        - {time: 1.46667, value: [0, 0.275637, 0, 0.961262], easing: ease_in_out}
         - {time: 2, value: [-0, -0.275637, -0, 0.961262], easing: ease_in_out}

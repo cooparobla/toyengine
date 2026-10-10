@@ -45,7 +45,7 @@ std::unique_ptr<Scene> make_mover_scene(toy::scene::KinematicMover** out_km,
  * @brief PingPong oscillates about the seed position and comes back to it.
  *
  * The scripted counterpart to KinematicController, driven by the same order-50 system and used
- * by assets/scenes/physics_test/scene.yaml's moving platforms. The sinusoid is the point: a
+ * by assets/scenes/physics/physics_demo/scene.yaml's moving platforms. The sinusoid is the point: a
  * linear back-and-forth would reverse instantaneously, and PhysicsSystem derives the body's
  * velocity from this Transform delta, so the discontinuity would kick anything standing on it.
  */

@@ -1,6 +1,6 @@
 /**
  * @file render_pipeline_test.cpp
- * @brief The render pipeline end to end on assets/scenes/demos/pixel_demo: the frame has the
+ * @brief The render pipeline end to end on tests/fixtures/scenes/kitchen_sink: the frame has the
  *        configured size, is reproducible under FIXED_DT=0 (which every diff threshold in the GPU
  *        suites leans on), every live toggle reaches the image, every STARTUP-FIXED toggle's "off"
  *        construction branch still renders, and the scene packaged as .caml renders byte-identically.
@@ -30,7 +30,7 @@ using namespace toy::test;
 
 namespace {
 
-/// The eight pico-8 entries assets/scenes/pixel_demo actually resolves to.
+/// The eight pico-8 entries tests/fixtures/scenes/kitchen_sink actually resolves to.
 const uint8_t kPico8Subset[8][3] = {
     {0, 0, 0}, {29, 43, 83}, {126, 37, 83}, {0, 135, 81},
     {171, 82, 54}, {95, 87, 79}, {194, 195, 199}, {255, 241, 232},
@@ -63,7 +63,7 @@ COOPA_TEST(frame_is_reproducible_and_live_toggles_reach_it) {
     ScopedEnv no_input("NO_INPUT", "1");
 
     toy::core::AppConfig config =
-        make_test_config("assets/scenes/demos/pixel_demo/scene.yaml", 640, 360, 160, 90);
+        make_test_config("tests/fixtures/scenes/kitchen_sink/scene.yaml", 640, 360, 160, 90);
     config.render.palette_path    = "assets/palettes/pico8.png";
     config.render.dither_strength = 0.08f;
     toy::core::Engine engine(std::move(config));
@@ -82,7 +82,7 @@ COOPA_TEST(frame_is_reproducible_and_live_toggles_reach_it) {
         std::cerr << "         first off-palette pixel " << off_palette << " = ("
                   << int(palette_frame.pixels[i]) << ", " << int(palette_frame.pixels[i + 1])
                   << ", " << int(palette_frame.pixels[i + 2]) << ")\n";
-        dump_frame(palette_frame, "pixel_demo_off_palette");
+        dump_frame(palette_frame, "kitchen_sink_off_palette");
     }
 
     // The load-bearing assertion for every diff below it.
@@ -95,8 +95,8 @@ COOPA_TEST(frame_is_reproducible_and_live_toggles_reach_it) {
     if (drift > kDriftBudget) {
         std::cerr << "         " << drift << " pixels drifted with nothing changed -- every"
                      " threshold below is unreliable until this passes\n";
-        dump_frame(palette_frame, "pixel_demo_frame_a");
-        dump_frame(repeat, "pixel_demo_frame_b");
+        dump_frame(palette_frame, "kitchen_sink_frame_a");
+        dump_frame(repeat, "kitchen_sink_frame_b");
     }
 
     // --- palette_enabled / dither_enabled ---
@@ -116,8 +116,8 @@ COOPA_TEST(frame_is_reproducible_and_live_toggles_reach_it) {
     const long long sdf_diff = count_diff(no_sdf, unquantized);
     expect_at_least(sdf_diff, 200, "sdf_enabled toggle measurably changes the rendered frame");
     if (sdf_diff < 200) {
-        dump_frame(unquantized, "pixel_demo_sdf_on");
-        dump_frame(no_sdf, "pixel_demo_sdf_off");
+        dump_frame(unquantized, "kitchen_sink_sdf_on");
+        dump_frame(no_sdf, "kitchen_sink_sdf_off");
     }
 
     // --- outline_enabled: edge detect over the G-buffer, so it changes silhouettes only ---
@@ -127,8 +127,8 @@ COOPA_TEST(frame_is_reproducible_and_live_toggles_reach_it) {
     const long long outline_diff = count_diff(no_outline, no_sdf);
     expect_at_least(outline_diff, 100, "outline_enabled toggle measurably changes the rendered frame");
     if (outline_diff < 100) {
-        dump_frame(no_sdf, "pixel_demo_outline_on");
-        dump_frame(no_outline, "pixel_demo_outline_off");
+        dump_frame(no_sdf, "kitchen_sink_outline_on");
+        dump_frame(no_outline, "kitchen_sink_outline_off");
     }
 }
 
@@ -153,7 +153,7 @@ COOPA_TEST(startup_toggles_off_still_render) {
     ScopedEnv no_input("NO_INPUT", "1");
 
     toy::core::AppConfig config =
-        make_test_config("assets/scenes/demos/pixel_demo/scene.yaml", 640, 360, 160, 90);
+        make_test_config("tests/fixtures/scenes/kitchen_sink/scene.yaml", 640, 360, 160, 90);
     config.render.outline_enabled   = false;
     config.render.palette_enabled   = false;
     config.render.dither_enabled    = false;
@@ -175,7 +175,7 @@ COOPA_TEST(startup_toggles_off_still_render) {
 }
 
 /**
- * @brief pixel_demo packaged to .caml (scene, meshes, LOD sidecars) renders byte-identically to
+ * @brief kitchen_sink packaged to .caml (scene, meshes, LOD sidecars) renders byte-identically to
  *        the YAML original -- the end-to-end claim behind Build > Package.
  */
 COOPA_TEST(caml_packaged_scene_renders_identically) {
@@ -183,18 +183,18 @@ COOPA_TEST(caml_packaged_scene_renders_identically) {
     ScopedEnv fixed_dt("FIXED_DT", "0");
     ScopedEnv no_input("NO_INPUT", "1");
 
-    const std::filesystem::path packed = coopa::test::scratch_dir("caml_render") / "pixel_demo";
-    package_tree_as_caml(std::string(ROOT_DIR) + "/assets/scenes/demos/pixel_demo", packed);
+    const std::filesystem::path packed = coopa::test::scratch_dir("caml_render") / "kitchen_sink";
+    package_tree_as_caml(std::string(ROOT_DIR) + "/tests/fixtures/scenes/kitchen_sink", packed);
 
     auto render = [](const std::string& scene) {
         toy::core::Engine engine(make_test_config(scene, 320, 180, 160, 90));
         tick_frames(engine, kNoiseCycle);
         return engine.capture_image(/*low_res=*/true);
     };
-    const Frame yaml_frame = render("assets/scenes/pixel_demo/scene.yaml");
+    const Frame yaml_frame = render("tests/fixtures/scenes/kitchen_sink/scene.yaml");
     const Frame caml_frame = render((packed / "scene.yaml").string());
     const long long diff = count_diff(yaml_frame, caml_frame);
-    expect(diff == 0, "pixel_demo from .caml renders identically to .yaml (" + std::to_string(diff) + " px differ)");
+    expect(diff == 0, "kitchen_sink from .caml renders identically to .yaml (" + std::to_string(diff) + " px differ)");
     if (diff != 0) {
         dump_frame(yaml_frame, "caml_render_yaml");
         dump_frame(caml_frame, "caml_render_caml");

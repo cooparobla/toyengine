@@ -57,7 +57,7 @@ Remember BoxCollider `size` is the FULL size, and MeshCollider needs its own
 ## Verify
 
 Drop a dynamic object onto a surface using it in a scene and check behaviour over time.
-`scenes/physics_test` already compares materials side by side (`bounce_*` drops,
+`scenes/physics/physics_demo` already compares materials side by side (`bounce_*` drops,
 `lane_*`/`slider_*` friction lanes) -- borrow that layout:
 
 ```sh

@@ -1046,8 +1046,8 @@ private:
 
     /**
      * @brief resolve_path_() for a scene file, falling back to a lookup by name: a scene in tag
-     *        folders (assets/scenes/tests/fog_test/scene.yaml) still loads from the shorthand
-     *        assets/scenes/fog_test/scene.yaml (SCENE=fog_test, `toyengine fog_test`). See
+     *        folders (assets/scenes/rendering/fog_demo/scene.yaml) still loads from the shorthand
+     *        assets/scenes/fog_demo/scene.yaml (SCENE=fog_demo, `toyengine fog_demo`). See
      *        coopa::asset::AssetIndex.
      */
     std::string resolve_scene_path_(const std::string& path) const;
@@ -1110,8 +1110,8 @@ private:
     /**
      * @brief SCENE env override for the scene loaded at startup.
      *
-     * Accepts either a bare scene NAME under assets/scenes (`SCENE=world_canvas_test`, which
-     * expands to assets/scenes/<name>/scene.yaml, the layout every scene in this repo uses)
+     * Accepts either a bare scene NAME under assets/scenes (`SCENE=ui_demo`, which
+     * is found by folder name anywhere under assets/scenes -- e.g. assets/scenes/ui/ui_demo/scene.yaml)
      * or an explicit path to a .yaml/.caml. Matches the ONESHOT/MAX_FRAMES/FIXED_DT/CAPTURE_FRAMES/
      * NO_INPUT family: a scripted or one-off run should not have to edit assets/config.yaml,
      * which is version-controlled and describes the DEFAULT scene.

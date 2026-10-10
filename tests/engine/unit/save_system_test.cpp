@@ -122,7 +122,7 @@ COOPA_TEST(slot_round_trips_every_value_kind) {
 COOPA_TEST(listing_reads_the_meta_sidecars) {
     auto saves = save_test::make_saves("save_listing");
     toy::save::SaveSystem::Host host;
-    host.scene_path = [] { return std::string("assets/scenes/tests/gameplay/character_test/scene.yaml"); };
+    host.scene_path = [] { return std::string("assets/scenes/gameplay/character_demo/scene.yaml"); };
     saves->set_host(host);
     saves->set_version(3);
     int level = 0;
@@ -138,7 +138,7 @@ COOPA_TEST(listing_reads_the_meta_sidecars) {
     const auto slots = saves->list_slots();
     expect(slots.size() == 2, "listing: two slots (got " + std::to_string(slots.size()) + ")");
     for (const auto& info : slots) {
-        expect(info.scene == "assets/scenes/tests/gameplay/character_test/scene.yaml", "listing: the saved scene is in the meta");
+        expect(info.scene == "assets/scenes/gameplay/character_demo/scene.yaml", "listing: the saved scene is in the meta");
         expect(info.version == 3 && info.timestamp > 0 && info.saved_at.size() == 20, "listing: version and time are in the meta");
         const int want_level = info.slot == "alpha" ? 4 : 9;
         expect(info.summary_node().get("level", -1) == want_level, "listing: the game's summary is in the meta (" + info.slot + ")");

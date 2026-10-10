@@ -15,7 +15,7 @@ Two separate systems:
 A scene **cannot** turn either switch on (startup-fixed); it can tune their runtime keys in
 `scene.settings.render`. Parser for Volume: `libs/gfxcoopa/gfxcoopa/engine/components/register.h`
 ("Volume"); struct docs: `libs/gfxcoopa/gfxcoopa/engine/components/volume.h`. Worked example of
-every use: **`assets/scenes/tests/rendering/fog_test/scene.yaml`** (header explains each station).
+every use: **`assets/scenes/rendering/fog_demo/scene.yaml`** (header explains each station).
 
 ## Volume
 

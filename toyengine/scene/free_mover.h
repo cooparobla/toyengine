@@ -26,7 +26,7 @@
  * resolve_dof_focus_()), and CameraController's orbit `tracker` follows any named object. So
  * one of these plus a `Transform` is a drivable point in space that the camera can circle and
  * the lens can focus on, with nothing drawn for it -- which is exactly how
- * assets/scenes/terrain_test uses it.
+ * assets/scenes/terrain/terrain_demo uses it.
  */
 
 #ifndef TOYENGINE_SCENE_FREE_MOVER_H

@@ -31,7 +31,7 @@ using coopa::scene::SceneObject;
 using coopa::scene::TransformComponent;
 
 struct CharacterRig {
-    Scene scene{"character_test"};
+    Scene scene{"character_demo"};
     toy::scene::CharacterController* cc = nullptr;
     SceneObject* player = nullptr;
     coopa::physx::system::PhysicsSystem* physics = nullptr;

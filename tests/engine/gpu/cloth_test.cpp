@@ -47,7 +47,7 @@ COOPA_TEST(cloth_drapes_follows_the_ball_and_reaches_the_screen) {
     ScopedEnv no_input("NO_INPUT", "1");
 
     toy::core::AppConfig config =
-        make_test_config("assets/scenes/cloth_test/scene.yaml", 640, 360, 320, 180);
+        make_test_config("assets/scenes/physics/cloth_demo/scene.yaml", 640, 360, 320, 180);
 
     toy::core::Engine engine(std::move(config));
 

@@ -1,0 +1,329 @@
+# sky_demo -- the physical sky and its cloud layer (render sky_model: physical, clouds: true).
+#
+# Run: ./build/toyengine sky_demo        (or SCENE=sky_demo)
+#
+# An open meadow facing west, lit only by the weather's clock: the day runs in 3 minutes
+# (dawn, noon, the sunset straight ahead, a starry night with the moon), and the cycle schedule
+# moves through clear -> cloudy -> storm and back every half minute or so. The weather drives
+# the sun, the moon and the cloud coverage; the physical sky sets the sky colours, the ambient
+# light and the sun's colour (sunset light is orange because the air in front of the sun is).
+#
+#   mannequins   two mannequins (idle) in the foreground: skin-tone and shadow reference
+#   props        a grey cube stack, a white pillar and a mirror-metal sphere (sky reflection)
+#   lake         a small pond to the north-west reflecting the sky (forward-shaded water)
+#   ground       a 400 m meadow out to the horizon, so the haze reads against it
+#
+# Worth sweeping in the editor's World tab: time of day, the condition (Preview), sky_model
+# gradient vs physical, clouds on/off, cloud_coverage, atmosphere_density (haze), sun_disc_size.
+# The camera is a fly camera (WASD + mouse) so you can look up at the clouds.
+scene:
+  scene_name: sky_demo
+  settings:
+    render:
+      sky_model: physical
+      clouds: true
+      cloud_coverage: 0.45
+      cloud_shadows: true
+    weather:
+      enabled: true
+      time_of_day: 16.8
+      day_length_minutes: 3
+      latitude: 40
+      north_offset: 0
+      drive_sun: true
+      sun_intensity: 1.3
+      moon_intensity: 0.12
+      condition: clear
+      schedule: cycle
+      ground_height: 0.0
+      conditions:
+        - name: clear
+          duration: [0.6, 0.6]
+          transition: 12
+          cloud_cover: 0.2
+          sun: 1.0
+          ambient: 1.0
+          fog_density: 0.002
+          fog_color: { r: 0.72, g: 0.8, b: 0.9 }
+          fog_sky_blend: 0.8
+          fog_sun_amount: 0.5
+          wind_strength: 2.0
+          wind_heading: 20
+          temperature: 20
+        - name: cloudy
+          duration: [0.5, 0.5]
+          transition: 12
+          cloud_cover: 0.55
+          sun: 0.75
+          ambient: 0.95
+          fog_density: 0.004
+          fog_color: { r: 0.68, g: 0.73, b: 0.8 }
+          fog_sky_blend: 0.7
+          fog_sun_amount: 0.35
+          wind_strength: 4.0
+          wind_heading: 30
+          temperature: 16
+        - name: storm
+          duration: [0.4, 0.4]
+          transition: 12
+          cloud_cover: 1.0
+          sun: 0.2
+          ambient: 0.6
+          sky_tint: { r: 0.8, g: 0.83, b: 0.9 }
+          fog_density: 0.016
+          fog_color: { r: 0.4, g: 0.43, b: 0.48 }
+          fog_sky_blend: 0.5
+          fog_sun_amount: 0.0
+          wind_strength: 10.0
+          wind_heading: 40
+          temperature: 11
+          precipitation: 1.0
+          wetness: 1.0
+          lightning: 4.0
+          effects:
+            - { prefab: objects/weather_rain, intensity: 1.6, follow: camera, offset: { x: 0, y: 0, z: 4 }, wind_influence: 0.8 }
+  root_objects:
+    # --- Ground: a 400 m meadow with a hole for the pond (x -22..-8, y -6..6) ---
+    - name: ground_west
+      active: true
+      components:
+        - type: Transform
+          position: { x: -111, y: 0, z: 0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 89, y: 200, z: 1 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material: { albedo: { r: 0.25, g: 0.33, b: 0.16 }, roughness: 0.95, metallic: 0.0 }
+        - type: BoxCollider
+          size: { x: 2.0, y: 2.0, z: 0.2 }
+          center: { x: 0.0, y: 0.0, z: -0.1 }
+      children: []
+    - name: ground_east
+      active: true
+      components:
+        - type: Transform
+          position: { x: 96, y: 0, z: 0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 104, y: 200, z: 1 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material: { albedo: { r: 0.25, g: 0.33, b: 0.16 }, roughness: 0.95, metallic: 0.0 }
+        - type: BoxCollider
+          size: { x: 2.0, y: 2.0, z: 0.2 }
+          center: { x: 0.0, y: 0.0, z: -0.1 }
+      children: []
+    - name: ground_north
+      active: true
+      components:
+        - type: Transform
+          position: { x: -15, y: 103, z: 0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 7, y: 97, z: 1 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material: { albedo: { r: 0.25, g: 0.33, b: 0.16 }, roughness: 0.95, metallic: 0.0 }
+      children: []
+    - name: ground_south
+      active: true
+      components:
+        - type: Transform
+          position: { x: -15, y: -103, z: 0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 7, y: 97, z: 1 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material: { albedo: { r: 0.25, g: 0.33, b: 0.16 }, roughness: 0.95, metallic: 0.0 }
+      children: []
+    - name: path
+      active: true
+      components:
+        - type: Transform
+          position: { x: 2, y: 0, z: 0.01 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 6, y: 1.2, z: 1 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material: { albedo: { r: 0.46, g: 0.4, b: 0.3 }, roughness: 0.9, metallic: 0.0 }
+      children: []
+
+    # --- Pond: a sunken floor, banks, and a planar WaterBody ---
+    - name: pond_floor
+      active: true
+      components:
+        - type: Transform
+          position: { x: -15, y: 0, z: -1.4 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 7, y: 6, z: 1 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material: { albedo: { r: 0.3, g: 0.27, b: 0.2 }, roughness: 0.95, metallic: 0.0 }
+      children: []
+    - name: pond_bank_s
+      active: true
+      components:
+        - type: Transform
+          position: { x: -15, y: -6.1, z: -0.7 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 14.4, y: 0.2, z: 1.4 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.33, g: 0.29, b: 0.22 }, roughness: 0.95, metallic: 0.0 }
+      children: []
+    - name: pond_bank_n
+      active: true
+      components:
+        - type: Transform
+          position: { x: -15, y: 6.1, z: -0.7 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 14.4, y: 0.2, z: 1.4 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.33, g: 0.29, b: 0.22 }, roughness: 0.95, metallic: 0.0 }
+      children: []
+    - name: pond_bank_w
+      active: true
+      components:
+        - type: Transform
+          position: { x: -22.1, y: 0, z: -0.7 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.2, y: 12.4, z: 1.4 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.33, g: 0.29, b: 0.22 }, roughness: 0.95, metallic: 0.0 }
+      children: []
+    - name: pond_bank_e
+      active: true
+      components:
+        - type: Transform
+          position: { x: -7.9, y: 0, z: -0.7 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.2, y: 12.4, z: 1.4 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.33, g: 0.29, b: 0.22 }, roughness: 0.95, metallic: 0.0 }
+      children: []
+    - name: pond_water
+      active: true
+      components:
+        - type: Transform
+          position: { x: -15, y: 0, z: -0.15 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: MeshRenderer
+          affects_reflection_probes: false
+          material:
+            albedo: { r: 0.03, g: 0.14, b: 0.2 }
+            metallic: 0.0
+            roughness: 0.04
+            ao: 1.0
+            alpha: 0.45
+            alpha_mode: BLEND
+            refraction: true
+            ior: 1.33
+            refraction_tint: { r: 0.45, g: 0.75, b: 0.8 }
+        - type: WaterBody
+          mode: planar
+          size: { x: 14.0, y: 12.0 }
+          resolution: 48
+          wave_amplitude: 0.03
+          wave_length: 2.5
+          wave_direction: 30.0
+          wave_steepness: 0.4
+          clarity: 1.5
+          shore_foam_depth: 0.2
+          ripple_strength: 0.2
+      children: []
+
+    # --- Reference figures and props ---
+    - name: mannequin_a
+      prefab: objects/characters/mannequin
+      components:
+        - type: Transform
+          position: { x: -3.5, y: -1.6, z: 0 }
+          rotation: { x: 0, y: 0, z: -70 }
+          scale: { x: 1, y: 1, z: 1 }
+    - name: mannequin_b
+      prefab: objects/characters/mannequin
+      components:
+        - type: Transform
+          position: { x: -5.0, y: 2.2, z: 0 }
+          rotation: { x: 0, y: 0, z: -120 }
+          scale: { x: 1, y: 1, z: 1 }
+    - name: cube_stack_low
+      active: true
+      components:
+        - type: Transform
+          position: { x: -6.5, y: -5.0, z: 0.6 }
+          rotation: { x: 0, y: 0, z: 20 }
+          scale: { x: 1.2, y: 1.2, z: 1.2 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.6, g: 0.6, b: 0.6 }, roughness: 0.8, metallic: 0.0 }
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+      children: []
+    - name: cube_stack_top
+      active: true
+      components:
+        - type: Transform
+          position: { x: -6.4, y: -5.1, z: 1.6 }
+          rotation: { x: 0, y: 0, z: 45 }
+          scale: { x: 0.8, y: 0.8, z: 0.8 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.75, g: 0.75, b: 0.75 }, roughness: 0.6, metallic: 0.0 }
+      children: []
+    - name: pillar
+      active: true
+      components:
+        - type: Transform
+          position: { x: -9.5, y: 8.5, z: 2.5 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.8, y: 0.8, z: 5.0 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.85, g: 0.84, b: 0.8 }, roughness: 0.7, metallic: 0.0 }
+      children: []
+    - name: mirror_sphere
+      active: true
+      components:
+        - type: Transform
+          position: { x: -2.5, y: 3.6, z: 0.9 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1.8, y: 1.8, z: 1.8 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.95, g: 0.95, b: 0.95 }, roughness: 0.08, metallic: 1.0 }
+      children: []
+
+    # --- Camera: a fly camera at eye height looking west, a little above the horizon ---
+    - name: camera
+      active: true
+      components:
+        - type: Transform
+          position: { x: 5.0, y: 0.0, z: 1.8 }
+          rotation: { x: 94, y: 0, z: 90 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: Camera
+          main: true
+          projection: Perspective
+          fov: 62.0
+          near_clip_plane: 0.1
+          far_clip_plane: 1000.0
+        - type: CameraController
+          mode: fly
+      children: []
+    # The sun -- the weather aims and colours it (sun by day, moon by night).
+    - name: sun
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0, y: 0, z: 30 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: DirectionalLight
+          direction: { x: -0.4, y: 0.35, z: -0.85 }
+          color: { r: 1.0, g: 1.0, b: 1.0 }
+          intensity: 1.3
+          cast_shadows: true
+      children: []

@@ -7,7 +7,7 @@
 > non-causes, for whoever next chases a temporal artifact.
 
 `output/ring_capture_lossless.mp4` is the reference recording of the temporal
-shimmer artifact on `terrain_test` — Coopa's own live play, captured engine-side
+shimmer artifact on `terrain_demo` — Coopa's own live play, captured engine-side
 as lossless PNGs (no screen recorder, no video codec in the capture chain) and
 encoded losslessly afterward. **That clip shows the issue**; this document is the
 recipe to regenerate an equivalent capture, the measurements that characterise
@@ -22,7 +22,7 @@ cmake -B build && cmake --build build -j   # or cbuild on the Linux workspace
 
 # 3. Play with the rolling lossless capture armed (keeps the LAST 300 frames
 #    in RAM, ~2.5 GB; writes them to output/seq/ only when you quit):
-SCENE=terrain_test CAPTURE_RING=300 ./build/toyengine
+SCENE=terrain_demo CAPTURE_RING=300 ./build/toyengine
 
 # 4. Reproduce the gesture (below), QUIT RIGHT AFTER the shimmer was visible —
 #    the ring holds the final ~5 s. Confirm output/seq/ has 300 fresh PNGs
@@ -63,8 +63,8 @@ ssao_direct_lighting_strength: 0.25
 ssr_temporal_blend: 0.85
 ```
 
-Window: 1920x1080, `vsync: true`, visible. Scene: `assets/scenes/tests/terrain/terrain_test/`
-(launch with `SCENE=terrain_test`; the config's `default_scene` is pixel_demo).
+Window: 1920x1080, `vsync: true`, visible. Scene: `assets/scenes/terrain/terrain_demo/`
+(launch with `SCENE=terrain_demo`; the config's `default_scene` is character_demo).
 
 Build-state caveat: the reference clip predates the converging SSR/SSGI
 accumulation (TemporalHistoryPass's shared count plus the resolve's verbatim

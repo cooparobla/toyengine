@@ -1,6 +1,6 @@
 /**
  * @file navigation_open_world_test.cpp
- * @brief nav_open_world, headless: 246 mobs over a 400 x 400 m world on two hierarchical flow
+ * @brief nav_stress_demo, headless: 246 mobs over a 400 x 400 m world on two hierarchical flow
  *        fields for 40 simulated seconds. The player field must stay hierarchical and integrate only
  *        a small fraction of the world's tiles while every pack closes on its target. Extended tier:
  *        ~8 s of CPU; the hierarchical field itself is unit-tested in physxcoopa.
@@ -31,7 +31,7 @@
 COOPA_TEST_SUITE("navigation_open_world");
 
 /**
- * @brief nav_open_world, headless: 246 mobs over a 400 x 400 m world on two hierarchical flow
+ * @brief nav_stress_demo, headless: 246 mobs over a 400 x 400 m world on two hierarchical flow
  *        fields. The player field must stay hierarchical and integrate only a small fraction of
  *        the world's tiles while every pack closes on its target -- through the wall's gaps, down
  *        the mesa's ramps, across the whole map for the scouts.
@@ -41,7 +41,7 @@ COOPA_TEST(open_world_packs_converge_on_hierarchical_fields) {
     coopa::physx::register_physics_components(assets);
     toy::scene::register_scene_components();
 
-    const std::string path = std::string(ROOT_DIR) + "/assets/scenes/tests/navigation/nav_open_world/scene.yaml";
+    const std::string path = std::string(ROOT_DIR) + "/assets/scenes/navigation/nav_stress_demo/scene.yaml";
     std::ifstream in(path);
     fkyaml::node root = fkyaml::node::deserialize(in);
     coopa::physx::nav::NavSettings ns = coopa::physx::nav::parse_nav_settings(root["scene"]["settings"]["navigation"]);
@@ -59,7 +59,7 @@ COOPA_TEST(open_world_packs_converge_on_hierarchical_fields) {
     std::vector<Mob> mobs;
     auto pos = [](coopa::scene::SceneObject* o) { return glm::vec3(o->get_transform()->get_world_matrix()[3]); };
     for (auto* a : scene.get_components<NavAgentComponent>()) mobs.push_back({a->owner, a->flow_target, 0.0f, pos(a->owner)});
-    expect(mobs.size() == 246, "nav_open_world: 246 mobs");
+    expect(mobs.size() == 246, "nav_stress_demo: 246 mobs");
 
     const float dt = 1.0f / 60.0f;
     std::size_t max_active = 0, hier_samples = 0;
@@ -77,9 +77,9 @@ COOPA_TEST(open_world_packs_converge_on_hierarchical_fields) {
         }
     }
     const uint32_t tiles = nav->mesh()->params.tile_count();
-    expect(hier_samples >= 30, "nav_open_world: the player field is hierarchical");
-    expect(max_active * 4 < tiles, "nav_open_world: it integrates well under a quarter of the world's tiles");
-    expect(nav->flow_field("outpost") != nullptr, "nav_open_world: the scouts' field exists");
+    expect(hier_samples >= 30, "nav_stress_demo: the player field is hierarchical");
+    expect(max_active * 4 < tiles, "nav_stress_demo: it integrates well under a quarter of the world's tiles");
+    expect(nav->flow_field("outpost") != nullptr, "nav_stress_demo: the scouts' field exists");
 
     // Every pack closes on its target.
     double player_start = 0, player_now = 0, scout_start = 0, scout_now = 0;
@@ -93,8 +93,8 @@ COOPA_TEST(open_world_packs_converge_on_hierarchical_fields) {
     if (coopa::test::verbose()) std::printf("  open world: player mean dist %.1f -> %.1f m, scouts %.1f -> %.1f m, mesa %d -> %d, max active tiles %zu/%u\n",
                 player_start / player_n, player_now / player_n, scout_start / scout_n, scout_now / scout_n,
                 on_mesa_start, on_mesa_now, max_active, tiles);
-    expect(player_now < 0.4 * player_start, "nav_open_world: the player's packs closed most of the distance");
+    expect(player_now < 0.4 * player_start, "nav_stress_demo: the player's packs closed most of the distance");
     // 40 s at 4 m/s is 160 m of walking; the scouts' route is ~460 m.
-    expect((scout_start - scout_now) / scout_n > 110.0, "nav_open_world: the scouts crossed a good part of the map");
-    expect(on_mesa_start > 0 && on_mesa_now * 2 < on_mesa_start, "nav_open_world: the mesa pack came down its ramps");
+    expect((scout_start - scout_now) / scout_n > 110.0, "nav_stress_demo: the scouts crossed a good part of the map");
+    expect(on_mesa_start > 0 && on_mesa_now * 2 < on_mesa_start, "nav_stress_demo: the mesa pack came down its ramps");
 }

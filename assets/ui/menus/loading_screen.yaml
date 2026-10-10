@@ -5,7 +5,6 @@
 # widgets by name while the scene loads: `progress` (a StatBar / ProgressBar, 0..1) and `status`
 # (a Text: "Building scene...", "Loading assets..."). Both are optional; rename or drop them to
 # opt out. It draws over a fade to the transition colour, so the backdrop may be transparent.
-format: toyengine-object
 object:
   name: loading_screen
   components:

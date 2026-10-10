@@ -20,7 +20,6 @@
 #
 # The weather scales `rate` by the condition's effect intensity and adds the wind to `velocity`.
 # Authored values here are the intensity-1 look.
-format: toyengine-object
 object:
   name: weather_rain
   components:

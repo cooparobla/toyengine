@@ -1,4 +1,4 @@
-"""Generates the terrain tile atlas used by the terrain_test scene's chunk material.
+"""Generates the terrain tile atlas used by the terrain_demo scene's chunk material.
 
 Standalone generator, not part of the C++ build -- run it manually (`python3
 tools/gen_terrain_atlas.py`) whenever assets/textures/terrain/terrain_atlas*.png need regenerating.

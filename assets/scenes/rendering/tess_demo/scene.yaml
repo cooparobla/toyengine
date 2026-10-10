@@ -1,0 +1,201 @@
+# tess_demo -- camera-adaptive tessellation (MeshRenderer `tessellation:`) side by side with the
+# same geometry drawn as authored.
+#
+# Run: ./build/toyengine assets/scenes/rendering/tess_demo/scene.yaml
+#
+#   * WEST  dunes_tess  -- a coarse 8x8 grid (meshes/dunes_plane), tessellated, displaced by textures/dunes_height.png
+#                          (material texture_displacement / displacement_scale): sand dunes with
+#                          ripples, self-shadowing, the sphere's shadow lying across them.
+#   * EAST  dunes_flat  -- the identical plane and material WITHOUT tessellation: a displacement
+#                          map has no vertices to move, so it stays flat (the reference).
+#   * NORTH sea         -- a coarse planar WaterBody (resolution 6) whose MeshRenderer turns
+#                          tessellation on, so the waves keep their shape although the baked grid
+#                          is ~2.7 m a cell (water_quality low / medium gate it off). Three buoys
+#                          ride the swell (Buoyancy) and a rock stack breaks it (contact foam);
+#                          disable `sea` and they stop floating.
+#
+# Worth sweeping: water_quality=Low (water untessellated), debug_view=normal, and orbiting in to
+# see the subdivision follow the camera (edge_pixels sets how dense; past max_distance the plane
+# is drawn as authored).
+scene:
+  scene_name: tess_demo
+  root_objects:
+    - name: floor
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 4.0, z: -1.5 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 30.0, y: 30.0, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material: materials/concrete
+      children: []
+
+    # ============================================================================
+    # DUNES -- tessellated + displaced vs. as authored.
+    # ============================================================================
+    - name: dunes_tess
+      active: true
+      components:
+        - type: Transform
+          position: { x: -5.0, y: 0.0, z: 0.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 4.5, y: 4.5, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: dunes_plane
+          material: materials/dunes
+          tessellation: true
+          tess_edge_pixels: 4      # target on-screen edge length (px)
+          tess_max_factor: 32       # cap on splits per edge
+          tess_max_distance: 60     # m; beyond, drawn as authored
+      children: []
+
+    - name: dunes_flat
+      active: true
+      components:
+        - type: Transform
+          position: { x: 5.0, y: 0.0, z: 0.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 4.5, y: 4.5, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: dunes_plane
+          material: materials/dunes
+      children: []
+
+    - name: ball
+      active: true
+      components:
+        - type: Transform
+          position: { x: -6.5, y: 1.5, z: 2.2 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 0.8, y: 0.8, z: 0.8 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: materials/steel
+      children: []
+
+    # ============================================================================
+    # SEA -- a coarse water grid; the tier tessellates it.
+    # ============================================================================
+    - name: sea
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 13.0, z: 0.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: MeshRenderer
+          affects_reflection_probes: false
+          material: materials/water
+          tessellation: true
+          tess_edge_pixels: 8
+          tess_max_factor: 16
+          tess_max_distance: 60
+        - type: WaterBody
+          mode: planar
+          size: { x: 22.0, y: 12.0 }
+          resolution: 6
+          wave_amplitude: 0.25
+          wave_length: 6.0
+          wave_direction: 70.0
+          wave_steepness: 0.45
+          clarity: 3.0
+      children: []
+
+    # Floaters on the tessellated sea: three buoys riding the swell, and a rock stack it breaks around.
+    - name: rock
+      active: true
+      components:
+        - type: Transform
+          position: { x: 7.5, y: 16.0, z: -1.0 }
+          rotation: { x: 8.0, y: -6.0, z: 30.0 }
+          scale: { x: 2.0, y: 1.5, z: 5.0 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/stone
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+      children: []
+    - name: buoy_a
+      active: true
+      components:
+        - type: Transform
+          position: { x: -5.0, y: 10.0, z: 0.5 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 0.45, y: 0.45, z: 0.45 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.85, g: 0.25, b: 0.1 }, metallic: 0.0, roughness: 0.5, ao: 1.0 }
+        - type: SphereCollider
+          radius: 1.0
+        - type: Rigidbody
+          mass: 25.0
+        - type: Buoyancy
+      children: []
+    - name: buoy_b
+      active: true
+      components:
+        - type: Transform
+          position: { x: 2.0, y: 14.5, z: 0.5 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 0.45, y: 0.45, z: 0.45 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.95, g: 0.8, b: 0.15 }, metallic: 0.0, roughness: 0.5, ao: 1.0 }
+        - type: SphereCollider
+          radius: 1.0
+        - type: Rigidbody
+          mass: 25.0
+        - type: Buoyancy
+      children: []
+    - name: buoy_c
+      active: true
+      components:
+        - type: Transform
+          position: { x: -8.0, y: 17.0, z: 0.5 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 0.45, y: 0.45, z: 0.45 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.85, g: 0.25, b: 0.1 }, metallic: 0.0, roughness: 0.5, ao: 1.0 }
+        - type: SphereCollider
+          radius: 1.0
+        - type: Rigidbody
+          mass: 25.0
+        - type: Buoyancy
+      children: []
+
+    - name: camera
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -15.0, z: 8.0 }
+          rotation: { x: 63.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Camera
+          main: true
+          projection: Perspective
+          fov: 55.0
+          near_clip_plane: 0.1
+          far_clip_plane: 400.0
+        - type: CameraController
+          mode: orbit
+          target: { x: 0.0, y: 3.0, z: 0.0 }
+          min_distance: 2.0
+          max_distance: 60.0
+      children: []
+
+    - name: sun
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 20.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: DirectionalLight
+          direction: { x: -0.75, y: 0.35, z: -0.45 }
+          color: { r: 1.0, g: 0.95, b: 0.86 }
+          intensity: 1.0
+          cast_shadows: true
+      children: []

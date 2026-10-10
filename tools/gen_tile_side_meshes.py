@@ -1,4 +1,4 @@
-"""Generates the terrain tile SIDE meshes used by the terrain_test scene.
+"""Generates the terrain tile SIDE meshes used by the terrain_demo scene.
 
 Standalone generator, not part of the C++ build -- run it manually (`python3
 tools/gen_tile_side_meshes.py`) whenever assets/meshes/terrain/tile_side_*.yaml need regenerating.

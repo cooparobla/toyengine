@@ -21,9 +21,9 @@ clip:
       property: rotation_quat
       keys:
         - {time: 0, value: [0, 0, 0, 1], easing: ease_in_out}
-        - {time: 0.25, value: [0, 0.300706, 0, 0.953717], easing: ease_in_out}
+        - {time: 0.266667, value: [0, 0.300706, 0, 0.953717], easing: ease_in_out}
         - {time: 0.5, value: [-0, -0.300706, -0, 0.953717], easing: ease_in_out}
-        - {time: 0.75, value: [0, 0.300706, 0, 0.953717], easing: ease_in_out}
+        - {time: 0.733333, value: [0, 0.300706, 0, 0.953717], easing: ease_in_out}
         - {time: 1, value: [0, 0, 0, 1], easing: ease_in_out}
         - {time: 2, value: [0, 0, 0, 1], easing: ease_in_out}
     - object: base/shoulder/upper_arm/elbow/forearm/wrist/hand/finger_l

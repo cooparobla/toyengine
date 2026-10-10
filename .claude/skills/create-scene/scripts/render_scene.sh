@@ -4,7 +4,7 @@
 # Usage:
 #   .claude/skills/create-scene/scripts/render_scene.sh <scene> [out.png] [key=value ...]
 #
-#   <scene>      a scene name under assets/scenes (e.g. fog_test) or a path to a scene.yaml
+#   <scene>      a scene name under assets/scenes (e.g. fog_demo) or a path to a scene.yaml
 #   out.png      where to write the frame (default: $TMPDIR/toyengine_render/<scene>.png)
 #   key=value    config overrides applied to a scratch copy of assets/config.yaml, matched
 #                by key name in whatever layout the file is in (block, or the editor's flow
@@ -28,8 +28,8 @@ if [ $# -lt 1 ]; then
     exit 2
 fi
 scene="$1"; shift
-# A bare name is found anywhere under assets/scenes (test scenes live in subfolders, e.g.
-# tests/effects/snow_test), then passed on as a path.
+# A bare name is found anywhere under assets/scenes (demos live in area folders, e.g.
+# effects/weather_demo), then passed on as a path.
 if [[ "$scene" != *.yaml && "$scene" != *.caml ]]; then
     found="$(find assets/scenes -type d -name "$scene" -exec test -f {}/scene.yaml \; -print 2>/dev/null | head -1)"
     if [ -z "$found" ]; then echo "no scene named '$scene' under assets/scenes" >&2; exit 1; fi

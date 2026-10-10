@@ -30,7 +30,7 @@ COOPA_TEST(ssao_follows_a_moving_object) {
     ScopedEnv no_input("NO_INPUT", "1");
 
     toy::core::AppConfig config =
-        make_shipped_config("assets/scenes/cloth_test/scene.yaml", 640, 360);
+        make_shipped_config("assets/scenes/physics/cloth_demo/scene.yaml", 640, 360);
     // Eye adaptation would re-meter as the ball crosses the frame; the AO channel is what is
     // measured here, not exposure. SSAO itself ships on; assert that rather than assume it.
     config.render.auto_exposure_enabled = false;
@@ -175,7 +175,7 @@ COOPA_TEST(ssao_follows_a_moving_object) {
  * camera is still; the hit colour comes from the previous frame's final image, reprojected by
  * the hit's own velocity.
  *
- * Scene: cloth_test with the cloth switched off, the ground turned into a near-mirror, and a
+ * Scene: cloth_demo with the cloth switched off, the ground turned into a near-mirror, and a
  * low camera so the floor reflects faces of the ball the camera can see (screen-space rays
  * cannot hit the hidden underside). `debug_view: ssr_confidence` shows where reflection rays
  * found geometry: where the floor shows the ball's mirror image, and zero on open floor (rays
@@ -187,7 +187,7 @@ COOPA_TEST(ssr_follows_a_moving_object) {
     ScopedEnv no_input("NO_INPUT", "1");
 
     toy::core::AppConfig config =
-        make_shipped_config("assets/scenes/cloth_test/scene.yaml", 640, 360);
+        make_shipped_config("assets/scenes/physics/cloth_demo/scene.yaml", 640, 360);
     config.render.auto_exposure_enabled = false;
     expect(config.render.ssr_enabled && config.render.ssr_temporal_enabled,
            "ssr tracks: the shipped config has SSR and its temporal resolve on");

@@ -9,14 +9,14 @@ rotated into place, and every side in a chunk merges into one GPU mesh built on 
 
 Two looks from the same machinery, chosen by data:
 
-- **Voxel** — every exposed side is one authored quad. Demo: `./build/toyengine terrain_test`
-  ([assets/scenes/tests/terrain/terrain_test](../../assets/scenes/tests/terrain/terrain_test)).
+- **Voxel** — every exposed side is one authored quad (`side_mesh: tile_side_flat`, no `styles:`).
 - **Styled** — every tile is assembled from authored *pieces* chosen by its neighbourhood, with
   rounded lips, quarter-round corners and fillets, and each column shaped by its surface kind's
   style (soft rounded grass, firm stone). This is the Animal Crossing read, switched on by a `styles:`
-  key. Demo: `./build/toyengine terrain_smooth_test`
-  ([assets/scenes/tests/terrain/terrain_smooth_test](../../assets/scenes/tests/terrain/terrain_smooth_test)). See
-  [Styled tiles](#styled-tiles).
+  key. See [Styled tiles](#styled-tiles).
+
+Demo: `./build/toyengine terrain_demo` ([assets/scenes/terrain/terrain_demo](../../assets/scenes/terrain/terrain_demo)),
+styled; its header says how to switch it to the voxel look.
 
 | File | Purpose |
 |---|---|
@@ -85,7 +85,7 @@ cost of a coarser streaming granularity.
 
 `greedy_merge` (on by default) merges coplanar faces: equal-height, same-kind tops into rectangles,
 and each wall's same-kind cells into tall strips spanning neighbouring columns — about 60% fewer
-triangles on `terrain_test`. Merged quads carry tile-space UVs, so a greedy chunk renders with the
+triangles on `terrain_demo`. Merged quads carry tile-space UVs, so a greedy chunk renders with the
 `terrain` surface shader (`assets/shaders/terrain.frag`), which repeats the atlas cell per tile.
 Only flat unit-quad sides merge; a bevelled side keeps the per-tile path.
 
@@ -214,7 +214,7 @@ atlas (`terrain_atlas_smooth.png`) is therefore just a palette.
 
 ### Cost
 
-On `terrain_smooth_test` a styled 32×32 chunk averages about 11k triangles and 9k vertices. That
+On `terrain_demo` a styled 32×32 chunk averages about 11k triangles and 9k vertices. That
 compares with about 2.8k triangles voxel per tile and 0.7k greedy. A chunk builds in about 2 ms on
 a worker (0.1 ms sampling, 0.4 ms meshing, 1.4 ms weld and optimize). Two merges keep it there:
 - Straight halves, most of any cliff and most of a lip's rings, are collected and stamped as one
@@ -242,17 +242,17 @@ The folders under each type folder are tags (see [assets/README.md](../../assets
 references name only the asset (`side_mesh: tile_side_flat`, `objects/tileset_round`).
 
 A tile side and a surface atlas are primitives of this system, not demo content the way
-`pixel_demo`'s `pillar.yaml` is — every terrain scene wants the same ones, and keeping them
+the kitchen_sink test scene's `pillar.yaml` is — every terrain scene wants the same ones, and keeping them
 inside one scene would mean the second terrain scene copies them.
 
 Nothing selects between shared and local. `coopa::asset::AssetSource::resolve()` tries the
 loading scene's own directory **first** and the registered search roots (`assets/`) second, so a
 scene that wants its own tile set just drops a file of the same name into its own `meshes/` or
-`textures/` and wins by precedence. `assets/scenes/tests/terrain/terrain_test/` therefore holds nothing but
+`textures/` and wins by precedence. `assets/scenes/terrain/terrain_demo/` therefore holds nothing but
 its `scene.yaml`, and its `side_mesh: tile_side_flat` still resolves.
 
 One consequence worth knowing: `assets/textures/` is a fallback namespace for *every* scene's
-`textures/…` references. Nothing collides today — `pixel_demo` and `material_maps_test` carry
+`textures/…` references. Nothing collides today — the test fixtures (`tests/fixtures/scenes/kitchen_sink`, `material_maps`) carry
 their own `crate_*.png` / `noise_mask.png`, which win locally — but a scene that typos a local
 texture name can resolve to a shared file instead of failing outright.
 

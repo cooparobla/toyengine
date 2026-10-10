@@ -5,13 +5,13 @@
 // nearest-neighbour filtering.
 //
 // Build:   cmake --build build   (or cbuild --vulkan on Linux; compiles shaders too)
-// Run:     ./build/toyengine     (assets/config.yaml's scene.default_scene -- pixel_demo)
-//          ./build/toyengine physics_test
+// Run:     ./build/toyengine     (assets/config.yaml's scene.default_scene -- character_demo)
+//          ./build/toyengine physics_demo
 //                                (a scene by name, found in assets/scenes' tag folders)
 // Headless: HEADLESS=1 MAX_FRAMES=600 ./build/toyengine
 //                               (no visible window, vsync off; prints the steady-state
 //                                frame time and still saves output.save_on_exit's PNG)
-// Profile:  HEADLESS=1 PROFILE=1 MAX_FRAMES=600 ./build/toyengine terrain_test
+// Profile:  HEADLESS=1 PROFILE=1 MAX_FRAMES=600 ./build/toyengine terrain_demo
 //                               (per-frame CPU/GPU timings -> output/profile.csv, or
 //                                PROFILE=path.csv; per-feature averages printed on exit;
 //                                graph with: python3 tools/plot_profile.py output/profile.csv)
@@ -33,13 +33,13 @@ namespace {
 /**
  * @brief Expands a command-line scene argument into a scene.yaml path.
  *
- * Accepts either a bare scene NAME under assets/scenes (`physics_test`, which expands to
+ * Accepts either a bare scene NAME under assets/scenes (`physics_demo`, which expands to
  * assets/scenes/<name>/scene.yaml -- the layout every scene in this repo uses) or an
  * explicit path to a .yaml/.caml, matching the SCENE env override's rules exactly (see
  * Engine::scene_path_from_env_()). The returned path is project-relative; Engine resolves
  * it against the project root.
  *
- * @param scene The argument as typed, e.g. "world_canvas_test" or "assets/scenes/x/scene.yaml".
+ * @param scene The argument as typed, e.g. "ui_demo" or "assets/scenes/x/scene.yaml".
  * @return std::string A path to a scene.yaml, relative to the project root.
  */
 std::string resolve_scene_arg(const std::string& scene) {

@@ -34,7 +34,7 @@ float calc_cloud_visibility(vec3 world_pos) {
 //
 // gfx/shadow_sampling.glsl's gfx_csm_select()/gfx_csm_atlas_coords() take the cascade matrices as
 // a `mat4[4]` PARAMETER. GLSL passes arrays by value, so every call copies all four matrices into
-// registers, and the lighting shader's occupancy collapses: measured on terrain_test at 1080p the
+// registers, and the lighting shader's occupancy collapses: measured on terrain_demo at 1080p the
 // lighting pass cost 3.7 ms through those helpers and 1.5 ms through these, with pixel-identical
 // output. The volumetrics march keeps the gfx_ versions (its loop is not register-bound); every
 // toyengine shading path goes through calc_dir_shadow() below and so through these.

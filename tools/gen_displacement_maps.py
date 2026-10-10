@@ -10,7 +10,7 @@ normal by that times the material's displacement_scale. It is only meaningful on
 `tessellation:` enabled -- an untessellated mesh has no vertices between its authored ones to move.
 
   dunes_height.png -- 256x256, tileable: broad wind-blown dunes (fbm value noise) with fine
-      ripples on top, for tess_test's sand station. Smooth on purpose: the map is sampled LINEAR,
+      ripples on top, for tess_demo's sand station. Smooth on purpose: the map is sampled LINEAR,
       and a smooth height gives the tessellator something it can follow without stair-stepping.
 """
 

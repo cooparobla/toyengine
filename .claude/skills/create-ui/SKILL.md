@@ -5,21 +5,20 @@ description: Create a toyengine UI asset -- a screen-space HUD, menu, dialog, in
 
 # Create a UI
 
-A UI asset is an object asset (`format: toyengine-object`) whose root carries a `Canvas` and a
+A UI asset is an object asset (a top-level `object:`) whose root carries a `Canvas` and a
 `Theme`; its children are widgets. Parsers: `libs/uicoopa/uicoopa/ui_yaml.h` (core components)
 and `libs/uicoopa/uicoopa/builder/ui_composites_yaml.h` (themed composites, list near the
 bottom). Read `assets/README.md` "UI assets" and the shipped screens in `assets/ui/` (hud,
 main_menu, pause_menu, dialog_box, inventory, settings) before writing a new one.
 
 **Those shipped files are generated** by `tools/gen_ui_templates.py`, which overwrites them (and
-`assets/ui/themes/*`, `editor/templates/ui/*`, `scenes/ui_showcase`). Give a new UI a new name,
+`assets/ui/themes/*`, `editor/templates/ui/*`, `scenes/ui/ui_demo`). Give a new UI a new name,
 or add it to that script's `SCREENS` list if it should be a template.
 
 ## Skeleton (screen space)
 
 ```yaml
 # <name> -- <what the screen is>. Bindings: <the widget names game code uses>.
-format: toyengine-object
 object:
   name: <name>
   components:
@@ -112,8 +111,8 @@ On an object (or a child of the object it labels), Z-up:
   source: ui/themes/default.yaml
 ```
 
-Examples: `assets/scenes/tests/ui/world_canvas_test` (header explains `text_supersample`) and the
-nameplate in `scenes/ui_showcase`. World UI needs `render.world_ui_enabled`.
+Examples: `assets/scenes/ui/ui_demo` -- its health/wall canvases (CameraFacing vs Transform
+billboards, a clickable Heal button) and the hero's themed nameplate. World UI needs `render.world_ui_enabled`.
 
 ## Verify
 

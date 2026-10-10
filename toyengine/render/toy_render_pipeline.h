@@ -213,6 +213,15 @@ public:
     void set_parallel_threshold(std::size_t n) { parallel_threshold_ = n; }
 
     /**
+     * @brief Lens blur off while set: depth of field and tilt shift draw sharp (their passes
+     *        still run, as exact passthroughs -- blur_scale 0 and zero strength -- since the
+     *        passes downstream read their outputs). Runtime, no rebuild: Engine sets it every
+     *        frame from edit mode, so an editor shows them only while a scene is playing.
+     */
+    void set_lens_blur_suppressed(bool suppressed) { lens_blur_suppressed_ = suppressed; }
+    bool lens_blur_suppressed() const { return lens_blur_suppressed_; }
+
+    /**
      * @brief This frame's physics debug-draw lines -- fill it (typically from
      *        PhysicsWorld::debug_draw(), see debug_line_pass.h's file doc) between
      *        Scene::update()/late_update() and render(); drawn when config_.debug_view ==
@@ -914,7 +923,7 @@ private:
      * The target point is the object's world BOUNDS CENTRE where bounds are available
      * (MeshRenderer via Mesh::bounds_min()/bounds_max(), SdfRenderer via its own
      * bounds_center/bounds_extent), not its Transform origin. A mesh origin is not generally
-     * its centre -- pixel_demo's pillar spans [0,1] in plan, so its origin is a CORNER, 0.2 m in
+     * its centre -- the kitchen_sink test scene's pillar spans [0,1] in plan, so its origin is a CORNER, 0.2 m in
      * front of the centre -- and focusing there spends half the depth of field on empty space
      * in front of the subject.
      *
@@ -1797,6 +1806,7 @@ private:
     // --- Job dispatch for the per-frame gathers -- see should_parallelize_()'s doc ---
     coopa::job::JobEngine* jobs_ = nullptr;      // non-owning; nullptr = always serial
     std::size_t            parallel_threshold_ = 256;
+    bool                   lens_blur_suppressed_ = false;   ///< see set_lens_blur_suppressed()
 };
 
 } // namespace render

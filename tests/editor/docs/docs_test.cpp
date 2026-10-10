@@ -177,14 +177,14 @@ void docs_pick_move_tool(DocsEditor& d) {
 
 } // namespace
 
-// 1. The water_test scene in Rendered shading, an object selected with its gizmo, Object tab.
+// 1. The water_demo scene in Rendered shading, an object selected with its gizmo, Object tab.
 COOPA_TEST(overview) {
     require_shot_dir();
-    DocsEditor d("overview", "scenes/water_test/scene.yaml");
+    DocsEditor d("overview", "scenes/water/water_demo/scene.yaml");
     d.a().set_shading(Shading::Full);
     docs_scene_camera(d);
     const ObjectId boat = object_named(d.a(), "boat");
-    expect(boat != 0, "water_test has the boat");
+    expect(boat != 0, "water_demo has the boat");
     docs_pick_move_tool(d);
     d.a().document().select(boat);
     d.a().set_prop_tab(PropTab::Object);
@@ -193,14 +193,14 @@ COOPA_TEST(overview) {
     d.capture();
 }
 
-// The README's editor shot: fog_test in Full Render, a stage spotlight selected.
+// The README's editor shot: fog_demo in Full Render, a stage spotlight selected.
 COOPA_TEST(readme_editor) {
     require_shot_dir();
-    DocsEditor d("readme_editor", "scenes/tests/rendering/fog_test/scene.yaml");
+    DocsEditor d("readme_editor", "scenes/rendering/fog_demo/scene.yaml");
     d.a().set_shading(Shading::Full);
     docs_scene_camera(d);
     const ObjectId spot = object_named(d.a(), "stage_spot_left");
-    expect(spot != 0, "fog_test has the stage spotlight");
+    expect(spot != 0, "fog_demo has the stage spotlight");
     docs_pick_move_tool(d);
     d.a().document().select(spot);
     d.a().set_prop_tab(PropTab::Object);
@@ -228,7 +228,7 @@ COOPA_TEST(getting_started_editor) {
 // 2. File menu open.
 COOPA_TEST(menu_file) {
     require_shot_dir();
-    DocsEditor d("menu_file", "scenes/water_test/scene.yaml");
+    DocsEditor d("menu_file", "scenes/water/water_demo/scene.yaml");
     d.a().set_shading(Shading::Full);
     docs_scene_camera(d);
     tick(d.e(), 40);
@@ -241,7 +241,7 @@ COOPA_TEST(menu_file) {
 // 3. An object with several components selected; its components in Properties.
 COOPA_TEST(hierarchy_inspector) {
     require_shot_dir();
-    DocsEditor d("hierarchy_inspector", "scenes/water_test/scene.yaml");
+    DocsEditor d("hierarchy_inspector", "scenes/water/water_demo/scene.yaml");
     d.a().set_shading(Shading::Full);
     docs_scene_camera(d);
     // Click lake_water's Hierarchy row, then its arrow to list its components.
@@ -350,15 +350,15 @@ COOPA_TEST(xray_edit) {
     d.capture();
 }
 
-// The Colliders toggle on: snow_test's colliders as green wireframes, the crate selected.
+// The Colliders toggle on: weather_demo's colliders (houses, roofs, trees) as green wireframes, the well selected.
 COOPA_TEST(viewport_colliders) {
     require_shot_dir();
-    DocsEditor d("viewport_colliders", "scenes/tests/effects/snow_test/scene.yaml");
+    DocsEditor d("viewport_colliders", "scenes/effects/weather_demo/scene.yaml");
     d.a().set_shading(Shading::Full);
     docs_scene_camera(d);
-    const ObjectId crate = object_named(d.a(), "crate");
-    expect(crate != 0, "snow_test has its crate");
-    d.a().document().select(crate);
+    const ObjectId well = object_named(d.a(), "well");
+    expect(well != 0, "weather_demo has its well");
+    d.a().document().select(well);
     d.a().set_show_colliders(true);
     d.rest();
     tick(d.e(), 60);
@@ -667,7 +667,7 @@ COOPA_TEST(ui_bindings) {
 
 // 21 / 22. Render and World properties.
 void docs_settings_tab(const std::string& shot, PropTab tab) {
-    DocsEditor d(shot, "scenes/water_test/scene.yaml");
+    DocsEditor d(shot, "scenes/water/water_demo/scene.yaml");
     d.a().set_shading(Shading::Full);
     docs_scene_camera(d);
     d.a().document().clear_selection();
@@ -688,7 +688,7 @@ COOPA_TEST(world_settings) {
 // 23. File > Package Project (.caml)... open.
 COOPA_TEST(package_dialog) {
     require_shot_dir();
-    DocsEditor d("package_dialog", "scenes/water_test/scene.yaml");
+    DocsEditor d("package_dialog", "scenes/water/water_demo/scene.yaml");
     d.a().set_shading(Shading::Full);
     docs_scene_camera(d);
     tick(d.e(), 40);
@@ -711,7 +711,7 @@ COOPA_TEST(package_dialog) {
 // 24. Blender Light theme, overview-like.
 COOPA_TEST(theme_light) {
     require_shot_dir();
-    DocsEditor d("theme_light", "scenes/water_test/scene.yaml", "blender_light");
+    DocsEditor d("theme_light", "scenes/water/water_demo/scene.yaml", "blender_light");
     expect(d.a().theme_id() == "blender_light", "Blender Light is active");
     d.a().set_shading(Shading::Full);
     docs_scene_camera(d);
@@ -726,7 +726,7 @@ COOPA_TEST(theme_light) {
 // 25. Help > Controls... open.
 COOPA_TEST(controls_modal) {
     require_shot_dir();
-    DocsEditor d("controls_modal", "scenes/water_test/scene.yaml");
+    DocsEditor d("controls_modal", "scenes/water/water_demo/scene.yaml");
     d.a().set_shading(Shading::Full);
     docs_scene_camera(d);
     tick(d.e(), 40);

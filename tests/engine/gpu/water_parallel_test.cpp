@@ -1,7 +1,7 @@
 /**
  * @file water_parallel_test.cpp
  * @brief The water system's job-parallel paths (buoyancy per floater, bake, query, tiles) give
- *        bit-identical results to running on one worker, on water_stress.
+ *        bit-identical results to running on one worker, on water_stress_demo.
  */
 
 #include <coopa/testing/test.h>
@@ -27,7 +27,7 @@ using namespace toy::test;
 
 /**
  * @brief The water system's job-parallel paths (buoyancy per floater, bake geometry, query and
- *        tiles) give bit-identical results to running inline: water_stress (200 floaters, a
+ *        tiles) give bit-identical results to running inline: water_stress_demo (200 floaters, a
  *        1000 m ocean -- every parallel path engages) simulated on one worker and on many ends
  *        with every floater in exactly the same pose, and the lake surfaces sample identically.
  */
@@ -41,7 +41,7 @@ COOPA_TEST(one_and_eight_workers_give_identical_water) {
         int active = 0;
     };
     auto run = [](unsigned int workers) {
-        toy::core::AppConfig config = make_test_config("assets/scenes/water_stress/scene.yaml", 320, 180, 160, 90);
+        toy::core::AppConfig config = make_test_config("assets/scenes/water/water_stress_demo/scene.yaml", 320, 180, 160, 90);
         config.jobs.worker_threads = workers;
         toy::core::Engine engine(std::move(config));
         tick_frames(engine, 90);

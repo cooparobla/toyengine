@@ -1,6 +1,6 @@
 /**
  * @file snow_render_test.cpp
- * @brief snow_test end to end: cover, the precipitation map and the trench field reach the surface
+ * @brief weather_demo's snow field end to end: cover, the precipitation map and the trench field reach the surface
  *        UBO, the shelter stays bare, the sled and the dropped ball dig tracks that refill, and the
  *        snow pattern rides with a moving object instead of staying world-fixed.
  */
@@ -23,76 +23,77 @@
 
 #include "engine/support/checks.h"
 #include "engine/support/render_fixture.h"
+#include "engine/support/weather_fixtures.h"
 
 COOPA_TEST_SUITE("snow_render");
 
 using namespace toy::test;
 
-/** @brief snow_test: cover, the sheltered ground, trenches from the sled and the dropped ball. */
+/** @brief The snow field (weather_demo, snowing): cover, the sheltered ground, trenches from the sled and the dropped ball. */
 COOPA_TEST(snow_cover_trenches_and_shelter_reach_the_scene) {
     ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
     ScopedEnv no_input("NO_INPUT", "1");
-    toy::core::AppConfig config = make_test_config("assets/scenes/tests/effects/snow_test/scene.yaml", 640, 360, 640, 360);
+    toy::core::AppConfig config = make_test_config(snow_field_demo(), 640, 360, 640, 360);
     config.render.transparency_enabled = true;
     toy::core::Engine engine(std::move(config));
     tick_frames(engine, 180);
     toy::weather::WeatherSystem* w = engine.weather();
-    expect(w && w->state().enabled && w->state().snow_cover > 0.99f, "snow_test: it lies at full cover");
+    expect(w && w->state().enabled && w->state().snow_cover > 0.99f, "snow field: it lies at full cover");
     expect_near(engine.pipeline().surface_world_ubo().snow.x, w ? w->state().snow_cover : 0.0f, 1e-5f,
-                "snow_test: the cover reaches the surface world UBO");
-    expect(engine.pipeline().surface_world_ubo().occl.w > 0.5f, "snow_test: ...with the precipitation map");
+                "snow field: the cover reaches the surface world UBO");
+    expect(engine.pipeline().surface_world_ubo().occl.w > 0.5f, "snow field: ...with the precipitation map");
     const toy::world::SnowSystem* snow = toy::world::find_snow(engine.scene());
-    expect(snow != nullptr, "snow_test: the snow system is installed");
+    expect(snow != nullptr, "snow field: the snow system is installed");
     if (!snow || !w) return;
-    expect(engine.pipeline().surface_world_ubo().field.w > 0.5f, "snow_test: ...and the trench field");
-    expect(snow->depth_at({-6.0f, -6.0f}, 0.0f) > 0.25f, "snow_test: deep snow in the open");
-    expect(snow->depth_at({4.0f, 3.0f}, 0.0f) < 0.05f, "snow_test: bare earth under the shelter");
-    // The sled circles (-2, -2) at 2.5 m: some point of that circle is trenched.
+    expect(engine.pipeline().surface_world_ubo().field.w > 0.5f, "snow field: ...and the trench field");
+    expect(snow->depth_at(k_snow_field + glm::vec2(-6.0f, -6.0f), 0.0f) > 0.25f, "snow field: deep snow in the open");
+    expect(snow->depth_at(k_snow_field + glm::vec2(4.0f, 3.0f), 0.0f) < 0.05f, "snow field: bare earth under the shelter");
+    // The sled circles (-2, -2) on the field at 2.5 m: some point of that circle is trenched.
     float deepest = 0.0f;
     for (int k = 0; k < 64; ++k) {
         const float a = static_cast<float>(k) / 64.0f * 6.2831853f;
-        deepest = std::max(deepest, snow->trench_at(glm::vec2(-2.0f, -2.0f) + 2.5f * glm::vec2(std::cos(a), std::sin(a))));
+        deepest = std::max(deepest, snow->trench_at(k_snow_field + glm::vec2(-2.0f, -2.0f) + 2.5f * glm::vec2(std::cos(a), std::sin(a))));
     }
-    expect(deepest > 0.15f, "snow_test: the sled ploughs a trench (" + std::to_string(deepest) + " m)");
+    expect(deepest > 0.15f, "snow field: the sled ploughs a trench (" + std::to_string(deepest) + " m)");
     // ...that settles back behind it: the sled laps every 9 s and the scene's tracks recover in
     // 3 s, so the trench trails about a third of the loop -- a trail, not a ring.
     int trenched = 0;
     for (int k = 0; k < 64; ++k) {
         const float a = static_cast<float>(k) / 64.0f * 6.2831853f;
-        if (snow->trench_at(glm::vec2(-2.0f, -2.0f) + 2.5f * glm::vec2(std::cos(a), std::sin(a))) > 0.03f) ++trenched;
+        if (snow->trench_at(k_snow_field + glm::vec2(-2.0f, -2.0f) + 2.5f * glm::vec2(std::cos(a), std::sin(a))) > 0.03f) ++trenched;
     }
-    expect(trenched < 64 / 2, "snow_test: the trench fills back in behind the sled (" + std::to_string(trenched) + "/64 of the loop)");
+    expect(trenched < 64 / 2, "snow field: the trench fills back in behind the sled (" + std::to_string(trenched) + "/64 of the loop)");
     expect(w->settings().snow_patch_hard && engine.pipeline().surface_world_ubo().snow_style.x > 0.5f,
-           "snow_test: hard-edged patches reach the surface world UBO");
-    expect(snow->trench_at({2.5f, -2.5f}) > 0.05f, "snow_test: the dropped ball presses in (auto deformer)");
-    expect(snow->trench_at({-6.0f, 5.0f}) == 0.0f, "snow_test: untouched snow stays untouched");
+           "snow field: hard-edged patches reach the surface world UBO");
+    expect(snow->trench_at(k_snow_field + glm::vec2(2.5f, -2.5f)) > 0.05f, "snow field: the dropped ball presses in (auto deformer)");
+    expect(snow->trench_at(k_snow_field + glm::vec2(-6.0f, 5.0f)) == 0.0f, "snow field: untouched snow stays untouched");
 
     // The cover layer on: forcing it off changes the frame a lot.
     const Frame snowy = engine.capture_image(true);
     engine.render_config().snow_cover_override = 0.0f;
     tick_frames(engine, 2);
     const Frame bare = engine.capture_image(true);
-    expect_at_least(count_diff(snowy, bare, 12), snowy.width * snowy.height / 4, "snow_test: snow_cover_override 0 clears the snow");
-    expect(engine.pipeline().surface_world_ubo().snow.x == 0.0f, "snow_test: ...through the UBO");
+    expect_at_least(count_diff(snowy, bare, 12), snowy.width * snowy.height / 4, "snow field: snow_cover_override 0 clears the snow");
+    expect(engine.pipeline().surface_world_ubo().snow.x == 0.0f, "snow field: ...through the UBO");
     engine.render_config().snow_cover_override = -1.0f;
 }
 
 /**
  * @brief The snow cover's pattern rides with a moving object (data::InstanceData::snow_anchor):
- *        move snow_test's crate and the camera together, and the crate's lid looks the same --
+ *        move the snow field's crate and the camera together, and the crate's lid looks the same --
  *        where a pattern fixed in the world would have changed (and TAA would smear it).
  */
 COOPA_TEST(snow_pattern_rides_with_a_moving_object) {
     ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
     ScopedEnv no_input("NO_INPUT", "1");
-    toy::core::AppConfig config = make_test_config("assets/scenes/tests/effects/snow_test/scene.yaml", 640, 360, 640, 360);
+    toy::core::AppConfig config = make_test_config(snow_field_demo(), 640, 360, 640, 360);
     config.render.transparency_enabled = true;
     config.render.snow_cover_override = 0.45f;   // partial cover: hard patches with edges on the lid
     toy::core::Engine engine(std::move(config));
     auto* crate = engine.scene().find_object("crate");
     auto* cc = engine.scene().find_first_component<toy::scene::CameraController>();
     toy::weather::WeatherSystem* w = engine.weather();
-    expect(crate && cc && w && w->settings().snow_patch_hard, "snow ride: snow_test has the crate, a camera controller, hard patches");
+    expect(crate && cc && w && w->settings().snow_patch_hard, "snow ride: the snow field has the crate, a camera controller, hard patches");
     if (!crate || !cc || !w) return;
 
     const glm::vec3 start = crate->get_transform()->transform().position();

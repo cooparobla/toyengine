@@ -106,7 +106,7 @@ COOPA_TEST(async_load_builds_over_frames_and_swaps) {
     using namespace scene_load_test;
     ScopedEnv fixed_dt("FIXED_DT", "0.016666");
     ScopedEnv no_input("NO_INPUT", "1");
-    toy::core::Engine engine(make_test_config("assets/scenes/demos/pixel_demo/scene.yaml", 320, 180, 160, 90));
+    toy::core::Engine engine(make_test_config("tests/fixtures/scenes/kitchen_sink/scene.yaml", 320, 180, 160, 90));
     register_probe();
     const int kProbes = 24;
     const std::string path = write_probe_scene(kProbes);
@@ -188,15 +188,15 @@ COOPA_TEST(async_load_builds_over_frames_and_swaps) {
     // load_scene() cancels an async load still in flight.
     toy::core::SceneLoadHandle cancelled = engine.load_scene_async(path, opts);
     engine.tick();
-    engine.load_scene("assets/scenes/demos/pixel_demo/scene.yaml");
+    engine.load_scene("tests/fixtures/scenes/kitchen_sink/scene.yaml");
     expect(cancelled.failed() && engine.overlay_layers().empty(), "async load: load_scene() cancels an unfinished async load");
     tick_frames(engine, 2);
 }
 
 /**
- * @brief Saves through the Engine, on the character_test demo: the player walks onto a coin
+ * @brief Saves through the Engine, on the character_demo demo: the player walks onto a coin
  *        (SaveDemo picks it up), the clock is set, and the slot is saved; after switching to
- *        another scene, load() brings character_test back through load_scene_async() and
+ *        another scene, load() brings character_demo back through load_scene_async() and
  *        restores the player's pose (SaveId + CharacterController), the collected coin and the
  *        clock before the scene's first update. A load in the same scene applies at once.
  */
@@ -204,7 +204,7 @@ COOPA_TEST(save_load_crosses_scenes) {
     using namespace scene_load_test;
     ScopedEnv fixed_dt("FIXED_DT", "0.016666");
     ScopedEnv no_input("NO_INPUT", "1");
-    toy::core::Engine engine(make_test_config("assets/scenes/tests/gameplay/character_test/scene.yaml", 320, 180, 160, 90));
+    toy::core::Engine engine(make_test_config("assets/scenes/gameplay/character_demo/scene.yaml", 320, 180, 160, 90));
     engine.saves().set_root(coopa::test::scratch_dir("engine_saves"));
     tick_frames(engine, 3);
     auto player_of = [&]() { return engine.scene().find_first_component<toy::scene::CharacterController>(); };
@@ -213,7 +213,7 @@ COOPA_TEST(save_load_crosses_scenes) {
         return o && o->active();
     };
     auto* cc = player_of();
-    expect(cc != nullptr && engine.weather() != nullptr, "save e2e: character_test has a player and a weather clock");
+    expect(cc != nullptr && engine.weather() != nullptr, "save e2e: character_demo has a player and a weather clock");
     if (!cc || !engine.weather()) return;
     cc->teleport(glm::vec3(3.0f, -4.0f, 0.0f));   // onto coin_4
     tick_frames(engine, 3);
@@ -222,7 +222,7 @@ COOPA_TEST(save_load_crosses_scenes) {
     engine.weather()->set_time(15.0f);
     expect(engine.saves().save("e2e"), "save e2e: saved (" + engine.saves().last_error() + ")");
     const auto info = engine.saves().slot_info("e2e");
-    expect(info && info->scene == "assets/scenes/tests/gameplay/character_test/scene.yaml",
+    expect(info && info->scene == "assets/scenes/gameplay/character_demo/scene.yaml",
            "save e2e: the slot names the scene relative to the project (" + (info ? info->scene : std::string("-")) + ")");
     expect(info && info->summary_node().get("coins", 0) == 1, "save e2e: SaveDemo put the coin count in the summary");
 
@@ -243,7 +243,7 @@ COOPA_TEST(save_load_crosses_scenes) {
     int frames = 0;
     while (engine.saves().loading() && frames < 1200) { engine.tick(); ++frames; }
     expect(!engine.saves().loading() && loaded_signals == 1, "save e2e: the load finished (" + std::to_string(frames) + " frames)");
-    expect(engine.scene().name() == "character_test", "save e2e: character_test is back");
+    expect(engine.scene().name() == "character_demo", "save e2e: character_demo is back");
     cc = player_of();
     expect(cc != nullptr, "save e2e: the reloaded scene has its player");
     if (!cc) return;
@@ -254,7 +254,7 @@ COOPA_TEST(save_load_crosses_scenes) {
 }
 
 /**
- * @brief loading_test end to end: walking into the hub's SceneLink shows the loading screen,
+ * @brief loading_demo end to end: walking into the hub's SceneLink shows the loading screen,
  *        the heavy scene's animators run without a refresh, and the way back lands the player
  *        on its spawn point.
  */
@@ -262,7 +262,7 @@ COOPA_TEST(scene_link_shows_loading_screen_and_lands_on_spawn) {
     using namespace scene_load_test;
     ScopedEnv fixed_dt("FIXED_DT", "0.016666");
     ScopedEnv no_input("NO_INPUT", "1");
-    toy::core::Engine engine(make_test_config("assets/scenes/tests/gameplay/loading_test/scene.yaml", 640, 360, 320, 180));
+    toy::core::Engine engine(make_test_config("assets/scenes/gameplay/loading_demo/scene.yaml", 640, 360, 320, 180));
     tick_frames(engine, 3);
     coopa::scene::Scene& hub = engine.scene_manager().get_active_scene();
     auto* player = hub.find_first_component<toy::scene::CharacterController>();
@@ -292,7 +292,7 @@ COOPA_TEST(scene_link_shows_loading_screen_and_lands_on_spawn) {
     for (int i = 0; i < 2000 && !load.is_done(); ++i) engine.tick();
     expect(load.is_done() && !load.failed(), "scene link: the heavy scene loads (" + load.error() + ")");
     coopa::scene::Scene& heavy = engine.scene_manager().get_active_scene();
-    expect(heavy.name() == "loading_test_heavy" && engine.scene_manager().scenes().size() == 1,
+    expect(heavy.name() == "loading_demo_heavy" && engine.scene_manager().scenes().size() == 1,
            "scene link: the heavy scene replaced the hub");
 
     // Animators in a scene activated later run with no manual refresh: a dancer's pose changes.
@@ -327,7 +327,7 @@ COOPA_TEST(scene_link_shows_loading_screen_and_lands_on_spawn) {
         }
     });
     for (int i = 0; i < 2000 && !back_load.is_done(); ++i) engine.tick();
-    expect(back_load.is_done() && engine.scene_manager().get_active_scene().name() == "loading_test",
+    expect(back_load.is_done() && engine.scene_manager().get_active_scene().name() == "loading_demo",
            "scene link: the door back loads the hub");
     expect(glm::length(arrived - glm::vec3(0.0f, 5.5f, 0.0f)) < 0.01f,
            "scene link: the player arrives on spawn_point (" + std::to_string(arrived.x) + ", " +

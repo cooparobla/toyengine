@@ -17,7 +17,6 @@ void SceneDocument::reset(const std::string& name) {
     object_asset_ = false;
     object_extras_ = Node::mapping();
     doc_ = Node::mapping();
-    doc_["format"] = Node(std::string("toyengine"));
     Node scene = Node::mapping();
     scene["scene_name"] = Node(name);
     scene["root_objects"] = Node::sequence();
@@ -48,7 +47,6 @@ void SceneDocument::load(const std::filesystem::path& path) {
         if (!obj.is_mapping()) obj = Node::mapping();
         if (!obj.contains("name")) obj["name"] = Node(path.stem().string());
         Node wrapped = Node::mapping();
-        wrapped["format"] = Node(std::string("toyengine"));
         Node scene = Node::mapping();
         scene["scene_name"] = obj.at("name");
         Node roots = Node::sequence();
@@ -75,7 +73,6 @@ Node SceneDocument::clean_copy() const {
     strip_private_keys(out);
     if (!object_asset_) return out;
     Node obj_doc = Node::mapping();
-    obj_doc["format"] = Node(std::string("toyengine-object"));
     if (object_extras_.is_mapping()) for (const auto& kv : object_extras_.as_map()) obj_doc[kv.first.get_value<std::string>()] = kv.second;
     const Node& roots = out.at("scene").at("root_objects");
     obj_doc["object"] = roots.is_sequence() && roots.size() > 0 ? roots.as_seq()[0] : Node::mapping();

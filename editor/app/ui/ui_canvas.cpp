@@ -79,7 +79,6 @@ bool EditorApp::new_ui_asset(const std::string& name, const std::string& templat
         obj["components"] = comps;
         obj["children"] = Node::sequence();
         doc = Node::mapping();
-        doc["format"] = Node(std::string("toyengine-object"));
         doc["object"] = obj;
     } else {
         try {

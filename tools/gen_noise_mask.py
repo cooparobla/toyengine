@@ -1,4 +1,4 @@
-"""Generates the blobby value-noise alpha mask (pixel_demo's CUTOUT sphere, materials/foliage.yaml).
+"""Generates the blobby value-noise alpha mask (the kitchen_sink test scene's CUTOUT sphere, materials/foliage.yaml).
 
 Standalone generator, not part of the C++ build -- run it manually (`python3
 tools/gen_noise_mask.py`) whenever assets/textures/masks/noise_mask.png needs

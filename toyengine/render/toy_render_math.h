@@ -222,7 +222,7 @@ struct DirShadowFit {
  * The offset is therefore measured in TEXELS and converted to world units per frame, for exactly
  * the reason `shadow_softness` is (see ToyRenderConfig): the ortho box refits to the camera
  * every frame, so a world-space constant means a different number of texels in every scene and
- * at every fit. As a concrete scale: on assets/scenes/terrain_test one texel is ~0.076 world
+ * at every fit. As a concrete scale: on assets/scenes/terrain/terrain_demo one texel is ~0.076 world
  * units, so 0.05 world units would be ~0.66 texels -- less than the PCF disk's own 2.0-texel
  * reach, leaving every tap past 0.66 texels landing back on the surface's own depth.
  *
@@ -392,7 +392,7 @@ inline DirShadowFit compute_dir_shadow_fit_sphere(const glm::vec3& light_directi
     // light-space centre about 0 instead of about itself. That is invisible near the
     // world origin -- where the centre is ~0 and the mirror is the identity -- and
     // pushes the box clean off the scene once the camera sits far out, as it does on
-    // assets/scenes/terrain_test (centre ~-185, box half-extent ~79).
+    // assets/scenes/terrain/terrain_demo (centre ~-185, box half-extent ~79).
     fit.light_space_matrix = light_proj * light_rot;
     return fit;
 }

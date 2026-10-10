@@ -3,8 +3,8 @@
 Save games. The engine decides where saves are stored and how they are written and read; the
 game decides what goes in them. Nothing is saved unless the game (or a component) asks for it.
 
-Demo: `./build/toyengine character_test`
-([assets/scenes/tests/gameplay/character_test](../../assets/scenes/tests/gameplay/character_test/scene.yaml)).
+Demo: `./build/toyengine character_demo`
+([assets/scenes/tests/gameplay/character_demo](../../assets/scenes/gameplay/character_demo/scene.yaml)).
 Pick up a coin or two, press **F5**, walk somewhere else, press **F9**: the player, the coins and
 the clock come back.
 
@@ -13,7 +13,7 @@ the clock come back.
 | [`save_system.h`](save_system.h) | `SaveSystem` (`engine.saves()`): slots on disk, `save` / `load` / `list_slots` / `delete_slot` / `has_slot`, the `on_save` / `on_load` / `on_loaded` signals, migrations, and the scene-crossing load. |
 | [`save_game.h`](save_game.h) | `SaveGame`, the document, and `SaveNode`, a typed handle onto one section of it (`get` / `set` / `section`). |
 | [`saveable.h`](saveable.h) | The `ISaveable` interface, the `SaveId` component and `find_by_save_id()`. |
-| [`save_demo.h`](save_demo.h) | `SaveDemo`, the character_test demo component (coins and clock through the global hooks). |
+| [`save_demo.h`](save_demo.h) | `SaveDemo`, the character_demo demo component (coins and clock through the global hooks). |
 | [`register.h`](register.h) | The `SaveId` and `SaveDemo` scene parsers. |
 
 Outside this directory:

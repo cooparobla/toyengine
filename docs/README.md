@@ -21,7 +21,7 @@ the editor rather than developing it.
   light brightness and colour knobs (`ambient_intensity`, `sky_zenith`/
   `sky_horizon`/`sky_ground`), how they reach the GPU, and what GI exists in
   this engine.
-- [shimmer-repro.md](shimmer-repro.md) — recipe to regenerate the terrain_test
+- [shimmer-repro.md](shimmer-repro.md) — recipe to regenerate the terrain_demo
   shimmer reference capture (`output/ring_capture_lossless.mp4`; the shimmer
   itself is fixed by texel-AA sampling): config state,
   the `CAPTURE_RING` workflow, the real-input gesture, lossless encoding, the

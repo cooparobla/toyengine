@@ -216,7 +216,7 @@ COOPA_TEST(autokey_channels_interpolation_and_rename) {
 }
 
 /**
- * @brief The shipped rigs in the editor. In the animation_test scene each rig's Timeline offers
+ * @brief The shipped rigs in the editor. In the animation_demo scene each rig's Timeline offers
  *        exactly that object's clips (from any object inside it) and previews them, leaving the
  *        clip files untouched. As object assets, the Objects tab lists them, opening one gives a
  *        working Timeline, and a copy placed in a scene plays its clips (paths resolve from the
@@ -225,14 +225,14 @@ COOPA_TEST(autokey_channels_interpolation_and_rename) {
 COOPA_TEST(rigs_preview_their_own_clips_and_play_when_placed) {
     EditorSession session({.prepare = [](Project& project) {
         copy_rig_assets(project.assets());   // the rig object assets, their clips and meshes
-        const fs::path dst = project.assets() / "scenes" / "animation_test";
+        const fs::path dst = project.assets() / "scenes" / "animation_demo";
         fs::create_directories(dst.parent_path());
-        fs::copy(fs::path(ROOT_DIR) / "assets" / "scenes" / "tests" / "animation" / "animation_test", dst, fs::copy_options::recursive);
+        fs::copy(fs::path(ROOT_DIR) / "assets" / "scenes" / "animation" / "animation_demo", dst, fs::copy_options::recursive);
     }});
     auto& engine = session.engine;
     auto& app = session.app;
     auto& project = session.project;
-    const fs::path dst = project.assets() / "scenes" / "animation_test";
+    const fs::path dst = project.assets() / "scenes" / "animation_demo";
     expect(app.open_scene(dst / "scene.yaml"), "the animation test scene opens");
     tick(engine, 4);
     app.show_timeline();

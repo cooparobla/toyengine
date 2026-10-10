@@ -1,7 +1,7 @@
 /**
  * @file ui_render_test.cpp
  * @brief UI reaching the screen: a world-space canvas button lights up under the pointer (window
- *        pixel -> letterbox -> NDC -> ray -> canvas -> EventSystem -> Button), and the ui_showcase
+ *        pixel -> letterbox -> NDC -> ray -> canvas -> EventSystem -> Button), and the ui_demo
  *        HUD prefab expands, binds its Health bar by name and draws over the frame.
  */
 
@@ -20,13 +20,14 @@
 
 #include "engine/support/checks.h"
 #include "engine/support/render_fixture.h"
+#include "engine/support/scene_variant.h"
 
 COOPA_TEST_SUITE("ui_render");
 
 using namespace toy::test;
 
 /**
- * @brief Parks the pointer on the world-space "Heal" Button in world_canvas_test, then moves it
+ * @brief Parks the pointer on the world-space "Heal" Button in ui_demo, then moves it
  * off, and checks the button lights up and goes out -- the end-to-end proof that world-space UI
  * is both DRAWN and INTERACTIVE.
  *
@@ -63,8 +64,17 @@ COOPA_TEST(world_canvas_button_lights_up_under_the_pointer) {
     ScopedEnv fixed_dt("FIXED_DT", "0.0005");
     ScopedEnv no_input("NO_INPUT", "1");
 
-    toy::core::AppConfig config =
-        make_test_config("assets/scenes/world_canvas_test/scene.yaml", 1920, 1080, 1440, 960);
+    // ui_demo's world canvases alone: the HUD prefab and the hero (whose nameplate can orbit into
+    // view) are removed, so nothing but the Heal button can match its highlight colour.
+    const std::string scene = scene_variant("assets/scenes/ui/ui_demo/scene.yaml", "world_canvas", [](fkyaml::node& doc) {
+        auto& roots = doc["scene"]["root_objects"].as_seq();
+        std::erase_if(roots, [](const fkyaml::node& o) {
+            if (!o.contains("name")) return false;
+            const std::string name = o["name"].get_value<std::string>();
+            return name == "hud" || name == "Hero";
+        });
+    });
+    toy::core::AppConfig config = make_test_config(scene, 1920, 1080, 1440, 960);
 
     toy::core::Engine engine(std::move(config));
 
@@ -141,21 +151,21 @@ COOPA_TEST(world_canvas_button_lights_up_under_the_pointer) {
 COOPA_TEST(ui_showcase_hud_binds_by_name_and_draws) {
     ScopedEnv fixed_dt("FIXED_DT", "0.05");
     ScopedEnv no_input("NO_INPUT", "1");
-    toy::core::AppConfig config = make_test_config("assets/scenes/ui_showcase/scene.yaml", 1280, 720, 1280, 720);
+    toy::core::AppConfig config = make_test_config("assets/scenes/ui/ui_demo/scene.yaml", 1280, 720, 1280, 720);
     toy::core::Engine engine(std::move(config));
     for (int i = 0; i < 3; ++i) engine.tick();
     coopa::ui::UiHandle hud(engine.scene().find_object("hud"));
-    expect(hud && hud.find<coopa::ui::CanvasComponent>("") != nullptr, "ui_showcase: the HUD prefab is in the scene with its canvas");
+    expect(hud && hud.find<coopa::ui::CanvasComponent>("") != nullptr, "ui_demo: the HUD prefab is in the scene with its canvas");
     expect(hud.find<coopa::ui::ProgressBar>("Health") && hud.find<coopa::ui::InventoryGrid>("Hotbar") && hud.has("QuestTitle"),
-           "ui_showcase: its composites expanded (Health bar, Hotbar, quest text)");
+           "ui_demo: its composites expanded (Health bar, Hotbar, quest text)");
     const float before = hud.get<float>("Health", -1.0f);
     for (int i = 0; i < 40; ++i) engine.tick();
     const float after = hud.get<float>("Health", -1.0f);
-    expect(before > 0.0f && after < before, "ui_showcase: HealthDriver drives the authored bar by name (" +
+    expect(before > 0.0f && after < before, "ui_demo: HealthDriver drives the authored bar by name (" +
            std::to_string(before) + " -> " + std::to_string(after) + ")");
     auto* plate = engine.scene().find_object("Nameplate");
     expect(plate && plate->get_component<coopa::ui::CanvasComponent>() && plate->get_component<coopa::ui::CanvasComponent>()->is_world_space(),
-           "ui_showcase: the hero carries a world-space nameplate");
+           "ui_demo: the hero carries a world-space nameplate");
     const Frame f = engine.capture_image(false);
-    expect(count_near_color(f, 209, 51, 56, 30) > 50, "ui_showcase: the health bar's red is on screen");
+    expect(count_near_color(f, 209, 51, 56, 30) > 50, "ui_demo: the health bar's red is on screen");
 }

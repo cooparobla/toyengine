@@ -28,7 +28,7 @@ cat <<'EOF'
 Dependencies installed. Build and run with:
 
     cmake -B build && cmake --build build -j
-    ./build/toyengine [scene]            # e.g. ./build/toyengine terrain_test
+    ./build/toyengine [scene]            # e.g. ./build/toyengine terrain_demo
     ctest --test-dir build -j4
 
 For a debug build with Vulkan validation enabled:

@@ -4,7 +4,7 @@
 Outputs (all under assets/):
   * objects/characters/mannequin.yaml -- the rig as an OBJECT ASSET (prefab). Place it with
     `prefab: objects/mannequin`; add a CharacterController (+ CharacterAnimDriver) to the
-    instance to make it a player (see scenes/tests/gameplay/character_test).
+    instance to make it a player (see scenes/gameplay/character_demo).
   * objects/characters/mannequin_ragdoll.yaml -- the same rig plus a Ragdoll (capsule/box bones,
     cone-twist hips/shoulders/spine/neck, hinge knees/elbows/ankles; see RAGDOLL below and
     toyengine/scene/ragdoll.h). A separate prefab, so plain mannequins carry no bone bodies.
@@ -285,7 +285,6 @@ def write_object(path=OBJECT_PATH, extra_components=(), header_note=None):
         lines.append(f"# {header_note}")
     lines += [
         f"# {GENERATED}",
-        "format: toyengine-object",
         "object:",
         f"  name: {os.path.splitext(os.path.basename(path))[0]}",
         "  components:",
@@ -361,8 +360,18 @@ def pos_track(joint_name, channel, samples, easing="linear"):
     return (PATHS[joint_name], f"position.{channel}", [(t, num(v)) for t, v in samples], easing)
 
 
+FPS = 30  # the editor Timeline's frame grid (editor/app/ui/timeline.inl, kAnimFps): keys land on it
+
+
+def on_frame(t):
+    """`t` snapped to the nearest frame of the Timeline's grid, so every key sits on a tick."""
+    return round(t * FPS) / FPS
+
+
 def write_clip(name, length, tracks, wrap="loop", events=(), root_motion=None):
-    """events: [(time, name, string)]; root_motion: (object, translation, rotation) or None."""
+    """events: [(time, name, string)]; root_motion: (object, translation, rotation) or None.
+    Key and event times are snapped to whole frames (on_frame); `length` must already be one."""
+    assert abs(length * FPS - round(length * FPS)) < 1e-6, f"{name}: length {length} is not a whole frame"
     lines = [f"# mannequin {name}. {GENERATED}", "clip:", f"  name: {name}", f"  wrap: {wrap}",
              f"  length: {num(length)}"]
     if root_motion:
@@ -371,15 +380,17 @@ def write_clip(name, length, tracks, wrap="loop", events=(), root_motion=None):
     if events:
         lines.append("  events:")
         for t, ev_name, ev_str in events:
-            lines.append(f"    - {{time: {num(round(t, 4))}, name: {ev_name}, string: {ev_str}}}")
+            lines.append(f"    - {{time: {num(round(on_frame(t), 4))}, name: {ev_name}, string: {ev_str}}}")
     lines.append("  tracks:")
     for path, prop, keys, easing in tracks:
         lines.append(f"    - object: {path}")
         lines.append(f"      property: {prop}")
         lines.append("      keys:")
+        frames = [round(t * FPS) for t, _ in keys]
+        assert len(set(frames)) == len(frames), f"{name}: two {path} keys snap to one frame"
         for t, v in keys:
             ease = "" if easing == "linear" else f", easing: {easing}"
-            lines.append(f"        - {{time: {num(round(t, 4))}, value: {v}{ease}}}")
+            lines.append(f"        - {{time: {num(round(on_frame(t), 4))}, value: {v}{ease}}}")
     os.makedirs(ANIM_DIR, exist_ok=True)
     with open(os.path.join(ANIM_DIR, f"{name}.yaml"), "w") as fh:
         fh.write("\n".join(lines) + "\n")
@@ -474,7 +485,7 @@ def main():
     idle()
     # Travel per cycle ~ two foot strides (2 x 2 x leg 0.84 x sin(stride)): walk ~1.6 m/s, run ~5.3 m/s.
     gait("walk", 0.9, stride=26, knee=55, arm_swing=22, elbow=15, lean=3, bob=0.02, pelvis_z=0.94, travel=1.45)
-    gait("run", 0.62, stride=44, knee=95, arm_swing=45, elbow=70, lean=12, bob=0.04, pelvis_z=0.9, travel=3.3)
+    gait("run", 0.6, stride=44, knee=95, arm_swing=45, elbow=70, lean=12, bob=0.04, pelvis_z=0.9, travel=3.2)
     jump()
     print("wrote", OBJECT_PATH, "+", RAGDOLL_OBJECT_PATH, "+", len(PART_MESHES), "meshes + 4 clips")
 

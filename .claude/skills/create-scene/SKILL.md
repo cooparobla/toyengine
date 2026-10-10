@@ -7,7 +7,7 @@ description: Create or extend a toyengine scene -- assets/scenes/<area>/<name>_d
 
 A scene is `assets/scenes/<area>/<name>_demo/scene.yaml` -- the repo keeps ONE demo per area
 (`rendering/`, `water/`, `effects/`, `gameplay/`, `physics/`, `animation/`, `terrain/`,
-`navigation/`, `ui/`), so extend the area's demo with a new station before adding a scene. A
+`navigation/`, `ui/`, `audio/`), so extend the area's demo with a new station before adding a scene. A
 test that needs a scene-level variant (another cloud type, weather, camera pose) patches a copy
 of the demo with `tests/engine/support/scene_variant.h`; scenes that exist only for tests live in
 `tests/fixtures/scenes/`.

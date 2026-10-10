@@ -163,6 +163,13 @@ diff and merge it. See [editor/README.md](editor/README.md) for the full tour.
 - **Scene components.** `AudioSource` (2D or positioned, `play_on_start`, loop) and
   `AudioListener`. Without a listener, the main camera hears. `VolumeBinding` connects a
   settings-menu slider to a bus and remembers the player's choice.
+- **Music** ([music_player.h](toyengine/audio/music_player.h)). Equal-power crossfades between
+  tracks, playlists that hand off on their own as a track ends, pause/resume fades, and a
+  push/pop stack for temporary tracks (zones, boss fights) that resumes the music underneath
+  where it stopped. Music carries over scene changes. Scene side: `MusicPlaylist`, `MusicZone`,
+  `MusicOnSignal`, `MusicStatusText`; code side: `engine.audio().music().play("battle", 1.5f)`.
+- **Demo.** `audio_demo`: the music system, 3D sources around the listener (compass beacons, an
+  orbiting doppler drone, distance rolloff, head-locked pings) and UI sounds.
 - **From code.** `engine.audio().play_oneshot("audio/hit.wav")`, `set_bus_volume()` and
   `pause_all()`. UI sounds (`UiSoundPlayer`) share the same mixer.
 - Headless runs and tests use a null device, so they never take over the sound card.

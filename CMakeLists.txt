@@ -196,27 +196,8 @@ endif()
 toyengine_add_project(NAME toyengine DIR "${TOYENGINE_DIR}" EDITOR_NAME toyengine_editor)
 
 enable_testing()
-add_executable(toyengine_tests test.cpp)
-add_dependencies(toyengine_tests toyengine_shaders uicoopa_shaders)
-target_link_libraries(toyengine_tests PRIVATE toyengine::engine)
-# One ctest entry per test GROUP, not one for the whole binary: each render_* group
-# constructs its own Vulkan device, pipelines and scene, and that cost is CPU-bound
-# setup rather than GPU work -- so `ctest -j4` overlaps them and the suite finishes in
-# roughly the time of its slowest group. It also means `ctest -R toyengine_math` is an
-# instant, device-free check a dev can run on every save. See test.cpp's file doc for
-# the argument forms the binary accepts.
-foreach(_toy_test_group math config scene ui world water particles weather rig yaml_io runtime audio render_pixel render_ui render_material render_cloth render_terrain render_water render_particles render_weather render_surface render_rig render_scene editor_host)
-    add_test(NAME toyengine_${_toy_test_group}
-             COMMAND toyengine_tests --group ${_toy_test_group})
-endforeach()
-
-# The device-free groups have no business taking seconds; the render groups get a ceiling
-# generous enough for a cold shader cache on a slow GPU but short enough that a hung
-# frame fails instead of hanging the run.
-set_tests_properties(toyengine_math toyengine_config toyengine_scene toyengine_ui toyengine_world toyengine_particles toyengine_weather toyengine_yaml_io
-                     toyengine_runtime toyengine_audio PROPERTIES TIMEOUT 60)
-set_tests_properties(toyengine_render_pixel toyengine_render_ui toyengine_render_material
-                     toyengine_render_cloth toyengine_render_terrain toyengine_render_particles toyengine_render_weather toyengine_render_surface toyengine_render_scene toyengine_editor_host PROPERTIES TIMEOUT 300)
+# Tests: tests/CMakeLists.txt (one suite per file, tiered unit / gpu / extended).
+add_subdirectory(tests)
 
 # --- Editor ---
 # toyengine_editor (defined by toyengine_add_project() above) embeds the same Engine, so its
@@ -235,19 +216,6 @@ add_executable(toyengine_icon tools/icon/export_icon.cpp)
 target_include_directories(toyengine_icon PRIVATE ${TOYENGINE_DIR})
 target_link_libraries(toyengine_icon PRIVATE coopa::gfx)
 
-add_executable(toyengine_editor_tests editor/editor_test.cpp)
-# toyengine: the game binary the build group packages and runs relocated.
-add_dependencies(toyengine_editor_tests toyengine_shaders uicoopa_shaders toyengine)
-target_link_libraries(toyengine_editor_tests PRIVATE toyengine::engine)
-# Device-free groups first (instant), then the ones that build an Engine.
-foreach(_ed_group writer document mesh imm viewport config project editor_shell package hub build)
-    add_test(NAME toyengine_editor_${_ed_group}
-             COMMAND toyengine_editor_tests --group ${_ed_group})
-endforeach()
-set_tests_properties(toyengine_editor_writer toyengine_editor_document toyengine_editor_mesh
-                     toyengine_editor_imm toyengine_editor_viewport toyengine_editor_config toyengine_editor_project PROPERTIES TIMEOUT 60)
-set_tests_properties(toyengine_editor_editor_shell toyengine_editor_package toyengine_editor_hub toyengine_editor_build PROPERTIES TIMEOUT 300)
-
 # --- Vulkan/GLFW leak gate ---
 # OFF by default here, unlike uicoopa/pixengine which are clean:
 # render/pixel_render_pipeline.h still names raw Vulkan symbols, forced by the
@@ -261,6 +229,8 @@ if(GFX_LEAK_CHECK)
     add_custom_target(toyengine_leak_check ALL
         COMMAND ${GFXCOOPA_DIR}/tools/check_no_vulkan.sh ${TOYENGINE_DIR})
     add_dependencies(toyengine toyengine_leak_check)
-    add_dependencies(toyengine_tests toyengine_leak_check)
+    if(TARGET toyengine_tests)
+        add_dependencies(toyengine_tests toyengine_leak_check)
+    endif()
     add_test(NAME toyengine_no_vulkan COMMAND ${GFXCOOPA_DIR}/tools/check_no_vulkan.sh ${TOYENGINE_DIR})
 endif()

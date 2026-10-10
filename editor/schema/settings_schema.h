@@ -161,25 +161,24 @@ inline const std::vector<SettingsGroup>& render_settings_groups() {
             .add(F(f_bool("sky_stars", true), "Stars", "Stars fade in as the sky darkens, behind any clouds"))
             .done());
 
-        g.push_back(GroupBuilder(general, "Clouds", "Volumetric clouds lit by the sun and moon, drawn over the physical "
-                                 "sky (sky_model: physical): raymarched a quarter of the pixels per frame and reconstructed "
-                                 "temporally (Sky Quality sets the steps and resolution). The scene's weather drives its "
-                                 "coverage while it is on")
-            .toggle(F(f_bool("clouds", false), "Clouds", "The cloud layer (needs Sky Model: physical)"))
+        g.push_back(GroupBuilder(general, "Clouds", "The sky's cloud layers. Volumetric: clouds lit by the sun and moon, "
+                                 "drawn over the physical sky (sky_model: physical), raymarched a quarter of the pixels per "
+                                 "frame and reconstructed temporally (Sky Quality sets the steps and resolution). Topdown: a "
+                                 "toon layer for topdown games -- puffy, cel-shaded clouds floating between a zoomed-out "
+                                 "camera and the ground, fading in as the camera rises, their shadows drifting over the "
+                                 "ground; works with either sky model. The scene's weather drives coverage and drift while "
+                                 "it is on")
             .add(F(f_float("cloud_coverage", 0.4f, 0.005f, 0.0f, 1.0f), "Coverage",
-                   "0 = a clear sky, 1 = overcast. Clouds also dim the sun and the ambient light"))
+                   "0 = a clear sky, 1 = overcast. Clouds also dim the sun and the ambient light. Drives both layers"))
+            .add(F(f_float("cloud_wind_speed", 8.0f, 0.1f, 0.0f, 200.0f), "Wind Speed",
+                   "How fast the clouds drift, m/s (along the weather's wind while it is on). Drives both layers"))
+            .sub("Volumetric")
+            .add(F(f_bool("clouds", false), "Volumetric Clouds", "The volumetric cloud layer (needs Sky Model: physical)"))
             .add(F(f_float("cloud_altitude", 1500.0f, 10.0f, 0.0f, 20000.0f), "Altitude", "Height of the layer's base, metres"))
             .add(F(f_float("cloud_thickness", 1500.0f, 10.0f, 10.0f, 10000.0f), "Thickness", "The layer's depth, metres"))
             .add(F(f_float("cloud_density", 1.0f, 0.01f, 0.0f, 10.0f), "Density", "Higher = darker, more solid clouds; lower = wispy"))
-            .add(F(f_float("cloud_wind_speed", 8.0f, 0.1f, 0.0f, 200.0f), "Wind Speed",
-                   "How fast the clouds drift, m/s (along the weather's wind while it is on)"))
-            .done());
-
-        g.push_back(GroupBuilder(general, "Topdown Mode", "A toon cloud layer for topdown games: puffy, cel-shaded clouds "
-                                 "floating between a zoomed-out camera and the ground, fading in as the camera rises, with "
-                                 "their shadows drifting over the ground. Works with either sky model; the weather drives "
-                                 "its coverage (Clouds > Coverage) and drift (Clouds > Wind Speed)")
-            .toggle(F(f_bool("topdown_mode", false), "Topdown Mode", "The toon cloud layer and its ground shadows"))
+            .sub("Topdown")
+            .add(F(f_bool("topdown_mode", false), "Topdown Clouds", "The toon cloud layer and its ground shadows"))
             .add(F(f_float("topdown_cloud_height", 60.0f, 0.5f, -1000.0f, 10000.0f), "Cloud Height",
                    "World height (z) of the layer, metres"))
             .add(F(f_float("topdown_cloud_size", 30.0f, 0.5f, 1.0f, 1000.0f), "Cloud Size", "Typical diameter of one puff, metres"))

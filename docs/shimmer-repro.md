@@ -110,15 +110,16 @@ for i in range(300):
   screencasts of the same play do NOT exist in engine-side frames and are
   artifacts of the recording chain).
 - The settle tail decomposes (measured by subsystem ablation at the same pose,
-  `ssao_blip_probe` in test.cpp): SSAO reaches byte-zero within ~9 frames;
+  the former `ssao_blip_probe` diagnostic, since removed): SSAO reaches byte-zero within ~9 frames;
   the ~1 s remainder was the SSR/SSGI temporal EMA converging (since replaced by
   the converging average and its frozen hold); with `ssr_enabled: false` the tail vanishes entirely.
 
 ## Investigation state (2026-09-23)
 
-Confirmed NOT the cause (all measured, see the memory ledger and
-`test.cpp`'s gated probes `ssao_travel_probe` / `ssao_blip_probe`,
-run via `SSAO_PROBE_DUMP=1 ./build/toyengine_tests <name>`):
+Confirmed NOT the cause (all measured, see the memory ledger and the
+former gated probes `ssao_travel_probe` / `ssao_blip_probe` -- temporary diagnostics, removed
+in the 2026-10 test restructure; the surviving settle/convergence contracts are
+`tests/engine/extended/temporal_stability_test.cpp`, built with `-DTOY_EXTENDED_TESTS=ON`):
 estimator sample counts, blur plane-sigma, AO temporal depth, direct-lighting
 AO, integer blur-spacing snaps (fixed anyway), freeze entry/exit transitions,
 stillness-deadband semantics (fixed anyway), shadow PCF rotation at rest,
@@ -138,11 +139,11 @@ confines the bilinear blend to a one-screen-pixel band at each texel boundary.
 Texel interiors stay flat and hard (the pixel-art look is preserved at rest);
 boundaries glide sub-pixel in motion instead of snapping. Toggle:
 `texel_aa: true|false` in config.yaml (startup-fixed; false = raw NEAREST for
-A/B). Evidence, on THIS document's reproduction (the `texel_aa_ring_repro` probe in
-test.cpp scripts the reference gesture: same framing -- close blocks, camera pitched
+A/B). Evidence, on THIS document's reproduction (the former `texel_aa_ring_repro` probe
+scripted the reference gesture: same framing -- close blocks, camera pitched
 steeply down -- five quick-flick-then-hold cycles over five seconds, 300 frames,
-ending at rest; regenerate with
-`SSAO_PROBE_DUMP=1 ./build/toyengine_tests texel_aa_ring_repro`):
+ending at rest; it was a temporary diagnostic and was removed in the 2026-10 test
+restructure -- recover it from git history (test.cpp, before that change) to regenerate):
 - `output/ring_repro_texelaa_off_lossless.mp4` -- the fix off (the reference look)
 - `output/ring_repro_texelaa_on_lossless.mp4`  -- the fix on
 - `output/ring_repro_texelaa_sbs_lossless.mp4` -- centre crops side by side (left off,

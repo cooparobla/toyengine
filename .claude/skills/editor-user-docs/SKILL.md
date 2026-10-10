@@ -44,15 +44,18 @@ Primary source paths are relative to `editor/` unless they start with `editor/`.
 
 ## Screenshots
 
-Shots come from the `docs` group of the editor test suite (`editor/editor_test.cpp`, tests
-named `docs_<shot>`): each test copies `assets/` to a scratch project, stages one editor state
-through real input, and saves the window. Nothing opens on screen and the repo's assets are
-never written. Capture with:
+Shots come from the `toyengine_editor_docs` tool (`tests/editor/docs/docs_test.cpp`, one
+test per shot in its `docs` suite, named `<shot>`; built on the editor tests' fixtures in
+`tests/editor/support/`, never registered with ctest): each shot copies `assets/` to a scratch
+project, stages one editor state through real input, and saves the window. Nothing opens on
+screen and the repo's assets are never written. Capture with:
 
 ```sh
-.claude/skills/editor-user-docs/scripts/capture_screenshots.sh            # every shot
-.claude/skills/editor-user-docs/scripts/capture_screenshots.sh docs_sculpt # just some
+.claude/skills/editor-user-docs/scripts/capture_screenshots.sh              # every shot
+.claude/skills/editor-user-docs/scripts/capture_screenshots.sh sculpt timeline   # just some
 ```
+
+(By hand: `DOCS_SHOT_DIR=<out> build/tests/toyengine_editor_docs --suite docs docs/<shot>`.)
 
 It builds the tests, runs each shot on its own with retries (the headless UI tests have a
 known flaky MoltenVK segfault), and writes `docs/images/editor/<shot>.jpg`.
@@ -60,8 +63,9 @@ known flaky MoltenVK segfault), and writes `docs/images/editor/<shot>.jpg`.
 - **Look at every image** (Read tool) before using it. Reject a shot whose menu isn't open,
   that is mid-transition, shows scratch / temp paths in the Console, or doesn't show what the
   page says. Fix its test and recapture.
-- **New shot needed** (a new feature, a page without one): add a `docs_<shot>` test modelled
-  on its neighbours, add it to the Screenshots column above, capture it.
+- **New shot needed** (a new feature, a page without one): add a `COOPA_TEST(<shot>)` to
+  `tests/editor/docs/docs_test.cpp` modelled on its neighbours, add it to the Screenshots column
+  above, capture it.
 - Never show the pixel-art post effects (outline / palette / dither); the engine is presented
   at full resolution.
 - Never open a visible window, and never attach a debugger.

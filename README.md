@@ -436,9 +436,10 @@ tools/toyhub list       # listed projects (~/.toyengine/projects.yaml)
 
 ```bash
 ctest --test-dir build -j4                         # engine + editor suites
-./build/toyengine_tests --list                     # tests and groups
-./build/toyengine_tests --group scene              # one group
-./build/toyengine_editor_tests                     # editor suite
+ctest --test-dir build -L unit -j4                 # the fast tier (also: -L gpu, -R <suite>)
+./build/tests/toyengine_tests --list               # suites and their tests
+./build/tests/toyengine_tests --suite water_waves  # one suite
+./build/tests/toyengine_editor_tests --suite undo_stack
 ```
 
 Render tests use a never-mapped window, so a full run is invisible on your desktop. You can

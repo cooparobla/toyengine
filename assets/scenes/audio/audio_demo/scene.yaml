@@ -226,7 +226,7 @@ scene:
         - type: AudioSource
           clip: audio/sfx/beacon.wav
           bus: SFX
-          volume: 0.8
+          volume: 0.6
           pitch: 1.0
           loop: true
           play_on_start: false
@@ -303,7 +303,7 @@ scene:
         - type: AudioSource
           clip: audio/sfx/beacon.wav
           bus: SFX
-          volume: 0.8
+          volume: 0.6
           pitch: 1.26
           loop: true
           play_on_start: false
@@ -380,7 +380,7 @@ scene:
         - type: AudioSource
           clip: audio/sfx/beacon.wav
           bus: SFX
-          volume: 0.8
+          volume: 0.6
           pitch: 0.75
           loop: true
           play_on_start: false
@@ -457,7 +457,7 @@ scene:
         - type: AudioSource
           clip: audio/sfx/beacon.wav
           bus: SFX
-          volume: 0.8
+          volume: 0.6
           pitch: 1.5
           loop: true
           play_on_start: false
@@ -554,7 +554,7 @@ scene:
           volume: 0.45
           pitch: 1.0
           loop: true
-          play_on_start: true
+          play_on_start: false
           spatialize: true
           min_distance: 1.5
           max_distance: 50.0
@@ -758,7 +758,7 @@ scene:
         - type: AudioSource
           clip: audio/sfx/fire.wav
           bus: SFX
-          volume: 0.9
+          volume: 0.5
           pitch: 1.0
           loop: true
           play_on_start: true
@@ -813,7 +813,7 @@ scene:
         - type: AudioSource
           clip: audio/sfx/music_box.wav
           bus: SFX
-          volume: 0.9
+          volume: 0.75
           pitch: 1.0
           loop: true
           play_on_start: true
@@ -911,7 +911,7 @@ scene:
             - type: AudioSource
               clip: audio/sfx/ping.wav
               bus: SFX
-              volume: 0.8
+              volume: 0.6
               pitch: 1.0
               loop: false
               play_on_start: false
@@ -929,7 +929,7 @@ scene:
             - type: AudioSource
               clip: audio/sfx/ping.wav
               bus: SFX
-              volume: 0.8
+              volume: 0.6
               pitch: 1.0
               loop: false
               play_on_start: false
@@ -947,7 +947,7 @@ scene:
             - type: AudioSource
               clip: audio/sfx/ping.wav
               bus: SFX
-              volume: 0.8
+              volume: 0.6
               pitch: 1.0
               loop: false
               play_on_start: false
@@ -965,7 +965,7 @@ scene:
             - type: AudioSource
               clip: audio/sfx/ping.wav
               bus: SFX
-              volume: 0.8
+              volume: 0.6
               pitch: 1.0
               loop: false
               play_on_start: false
@@ -983,7 +983,7 @@ scene:
             - type: AudioSource
               clip: audio/sfx/ping.wav
               bus: SFX
-              volume: 0.8
+              volume: 0.6
               pitch: 1.0
               loop: false
               play_on_start: false

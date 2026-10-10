@@ -2,6 +2,9 @@
 
 #include <toyengine/audio/music_player.h>
 
+#include <algorithm>
+#include <cmath>
+
 #include <sfxcoopa/components/audio_listener.h>
 #include <sfxcoopa/components/sfx_resources.h>
 #include <sfxcoopa/core/device.h>
@@ -15,6 +18,7 @@ AudioSystem::AudioSystem(const AudioSystemOptions& opt)
     music_ = &engine_.create_bus(k_bus_music, engine_.master());
     sfx_ = &engine_.create_bus(k_bus_sfx, engine_.master());
     ui_bus_ = &engine_.create_bus(k_bus_ui, engine_.master());
+    limiter_release_ = std::exp(-1.0f / (0.15f * static_cast<float>(opt.sample_rate)));
     music_player_ = std::make_unique<MusicPlayer>(engine_, k_bus_music);
     music_player_->resolve = [](const std::string& p) { return coopa::sfx::SfxResources::instance().resolve(p); };
 #ifdef UICOOPA_HAS_AUDIO
@@ -24,13 +28,7 @@ AudioSystem::AudioSystem(const AudioSystemOptions& opt)
     coopa::sfx::core::DeviceConfig dc = coopa::sfx::core::DeviceConfig::from_env();
     dc.sample_rate = opt.sample_rate;
     if (opt.null_backend) dc.null_backend = true;
-    auto callback = [this](float* out, uint32_t frames) {
-        if (paused_.load(std::memory_order_relaxed)) {
-            std::memset(out, 0, sizeof(float) * frames * format_.channels);
-            return;
-        }
-        engine_.render_offline(out, frames);
-    };
+    auto callback = [this](float* out, uint32_t frames) { render(out, frames); };
     try {
         device_ = std::make_unique<coopa::sfx::core::AudioDevice>(dc, callback);
         null_device_ = dc.null_backend;
@@ -44,6 +42,27 @@ AudioSystem::AudioSystem(const AudioSystemOptions& opt)
             } catch (const std::exception&) {}
         }
     }
+}
+
+void AudioSystem::render(float* out, uint32_t frames) {
+    const uint32_t ch = format_.channels;
+    if (paused_.load(std::memory_order_relaxed)) {
+        std::memset(out, 0, sizeof(float) * frames * ch);
+        return;
+    }
+    engine_.render_offline(out, frames);
+    // Stereo-linked peak limiter: clamp down at once on an over, recover smoothly. Below the
+    // ceiling with the gain back at 1 it leaves the signal untouched.
+    float g = limiter_gain_;
+    for (uint32_t i = 0; i < frames; ++i) {
+        float* f = out + static_cast<size_t>(i) * ch;
+        float peak = 0.0f;
+        for (uint32_t c = 0; c < ch; ++c) peak = std::max(peak, std::fabs(f[c]));
+        const float need = peak > k_limiter_ceiling ? k_limiter_ceiling / peak : 1.0f;
+        g = need < g ? need : need + (g - need) * limiter_release_;
+        for (uint32_t c = 0; c < ch; ++c) f[c] = std::clamp(f[c] * g, -1.0f, 1.0f);
+    }
+    limiter_gain_ = g;
 }
 
 AudioSystem::~AudioSystem() {

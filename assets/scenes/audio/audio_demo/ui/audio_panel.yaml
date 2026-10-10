@@ -234,7 +234,7 @@ object:
                               pivot: {x: 0.5, y: 0.5}
                               anchored_position: {x: 0, y: 0}
                               size_delta: {x: 520, y: 36}
-                            - {type: SettingRow, kind: toggle, label: "Orbiting drone (doppler)", is_on: true, label_width: 300}
+                            - {type: SettingRow, kind: toggle, label: "Orbiting drone (doppler)", is_on: false, label_width: 300}
                         - name: Crickets
                           components:
                             - type: RectTransform

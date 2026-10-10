@@ -9,7 +9,9 @@
  *
  * Owned by toy::core::Engine, which registers it with sfxcoopa's scene bridge (SfxResources) so
  * AudioSource / AudioListener components in scene YAML play through it, and with UiAudio so the
- * UI sound components share the same engine and device. Never fatal: when no sound card opens
+ * UI sound components share the same engine and device. The device plays render(): the mix
+ * through a peak limiter (ceiling -1 dBFS), so stacked sounds or volumes above 1 never hard-clip
+ * at the sound card. Never fatal: when no sound card opens
  * (or a headless run asks for none) it falls back to miniaudio's null backend, and everything
  * plays silently.
  *
@@ -72,6 +74,18 @@ public:
 #ifdef UICOOPA_HAS_AUDIO
     coopa::ui::UiAudio* ui() { return ui_.get(); }
 #endif
+    /**
+     * @brief What the device plays: renders `frames` of the mix into `out` (interleaved stereo),
+     *        then limits it -- instant gain reduction for any sample over k_limiter_ceiling, a
+     *        ~150 ms recovery, and a final clamp to [-1, 1]. Silence while paused.
+     */
+    void render(float* out, uint32_t frames);
+
+    /** @brief Output ceiling of render()'s limiter (-1 dBFS). */
+    static constexpr float k_limiter_ceiling = 0.891f;
+    /** @brief The limiter's current gain (1 = not limiting). */
+    float limiter_gain() const { return limiter_gain_; }
+
     /** @brief True when a real (non-null) sound card is open. */
     bool has_output() const { return device_ && !null_device_; }
 
@@ -126,6 +140,8 @@ private:
     coopa::sfx::mixer::MixerBus* ui_bus_ = nullptr;
     std::unique_ptr<MusicPlayer> music_player_;
     glm::vec3 listener_position_{0.0f};
+    float limiter_gain_ = 1.0f;     // audio thread only
+    float limiter_release_ = 0.0f;  // per-frame recovery coefficient
 #ifdef UICOOPA_HAS_AUDIO
     std::unique_ptr<coopa::ui::UiAudio> ui_;
 #endif

@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -371,4 +372,77 @@ COOPA_TEST(audio_demo_scene_wires_up) {
     for (const std::string& t : values(panel, "target: ")) {
         expect(scene.find("- name: " + t + "\n") != std::string::npos, "the scene has the object a reactor targets: " + t);
     }
+}
+
+COOPA_TEST(audio_demo_mix_keeps_headroom) {
+    // The demo at the bus volumes config.yaml ships, in its loudest spots: the raw mix (before
+    // AudioSystem::render's limiter) stays under the limiter's ceiling, so the limiter never has
+    // to act at default volumes.
+    using namespace music_test;
+    Rig rig;
+    const std::filesystem::path assets = std::filesystem::path(PROJ_DIR) / ".." / "assets";
+    coopa::sfx::SfxResources::instance().set_search_roots({assets.string()});
+    coopa::scene::SceneLoader::set_search_roots({assets.string()});
+    rig.audio.set_bus_volume(toy::audio::k_bus_music, 0.8f);
+    rig.audio.set_bus_volume(toy::audio::k_bus_ui, 0.8f);
+    coopa::scene::Scene scene = coopa::scene::SceneLoader::load((assets / "scenes/audio/audio_demo/scene.yaml").string());
+    auto cam_at = [](glm::vec3 p) {
+        return glm::translate(glm::mat4(1.0f), p) * glm::rotate(glm::mat4(1.0f), glm::radians(84.0f), glm::vec3(1, 0, 0));
+    };
+    auto peak_over = [&](float seconds, const std::function<void(int)>& each) {
+        float peak = 0.0f;
+        for (int i = 0; i < static_cast<int>(seconds * 60.0f); ++i) {
+            if (each) each(i);
+            for (float v : rig.step(1.0f / 60.0f, &scene)) peak = std::max(peak, std::fabs(v));
+        }
+        return peak;
+    };
+    auto check = [&](const char* where, float peak) {
+        expect(peak < toy::audio::AudioSystem::k_limiter_ceiling,
+               std::string(where) + ": mix peak " + std::to_string(peak) + " under the limiter ceiling");
+    };
+    rig.camera = cam_at({0.0f, -3.0f, 1.8f});
+    check("start", peak_over(4.0f, nullptr));
+    rig.camera = cam_at({12.0f, -11.2f, 1.6f});
+    check("at the campfire", peak_over(3.0f, nullptr));
+    rig.camera = cam_at({0.0f, 26.8f, 1.6f});
+    check("at the music box", peak_over(3.0f, nullptr));
+    rig.camera = cam_at({0.0f, 0.0f, 1.8f});
+    for (const char* b : {"beacon_north", "beacon_east", "beacon_south", "beacon_west", "drone"})
+        scene.find_object(b)->get_component<coopa::sfx::components::AudioSource>()->play();
+    const char* pings[] = {"ping_left", "ping_right", "ping_front", "ping_behind", "ping_above"};
+    check("every beacon and the drone on while pinging", peak_over(4.0f, [&](int i) {
+        if (i % 10 == 0) scene.find_object(pings[(i / 10) % 5])->get_component<coopa::sfx::components::AudioSource>()->play();
+    }));
+    coopa::sfx::SfxResources::instance().clear_search_roots();
+    coopa::scene::SceneLoader::set_search_roots({});
+}
+
+COOPA_TEST(output_limiter_catches_overs_and_leaves_quiet_audio_alone) {
+    using namespace music_test;
+    Rig rig;
+    const std::string clip = sine_wav("lim", 420.0f, 3.0f);   // peak 0.366
+    auto render_peak = [&](float seconds) {
+        float peak = 0.0f;
+        std::vector<float> buf(800 * 2);
+        for (int i = 0; i < static_cast<int>(seconds * 60.0f); ++i) {
+            rig.audio.update(1.0f / 60.0f, &rig.camera);
+            rig.audio.render(buf.data(), 800);
+            for (float v : buf) peak = std::max(peak, std::fabs(v));
+        }
+        return peak;
+    };
+    const auto quiet = rig.audio.play_oneshot(clip, toy::audio::k_bus_sfx, 1.0f);
+    expect_near(render_peak(0.3f), 0.366f, 0.01f, "a signal under the ceiling passes untouched");
+    expect_near(rig.audio.limiter_gain(), 1.0f, 1e-4f, "and the limiter stays at unity");
+    rig.audio.engine().stop(quiet);
+    rig.audio.play_oneshot(clip, toy::audio::k_bus_sfx, 6.0f);   // ~2.2: a hard over
+    rig.audio.play_oneshot(clip, toy::audio::k_bus_sfx, 6.0f);
+    const float limited = render_peak(0.5f);
+    expect(limited <= toy::audio::AudioSystem::k_limiter_ceiling + 1e-4f,
+           "overs are held at the ceiling (" + std::to_string(limited) + ")");
+    expect(rig.audio.limiter_gain() < 0.5f, "by turning the gain down");
+    rig.audio.stop_all();
+    render_peak(1.0f);
+    expect(rig.audio.limiter_gain() > 0.99f, "and it recovers once the overs stop");
 }

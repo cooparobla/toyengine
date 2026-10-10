@@ -194,7 +194,7 @@ scene:
     for name, (x, y), pitch, col, caption in BEACONS:
         s += f"    - name: {name}\n      active: true\n      components:\n"
         s += transform((x, y, 0.0))
-        s += source("audio/sfx/beacon.wav", volume=0.8, pitch=pitch, play=False, min_d=2.0, max_d=60.0)
+        s += source("audio/sfx/beacon.wav", volume=0.6, pitch=pitch, play=False, min_d=2.0, max_d=60.0)
         s += "      children:\n"
         s += "        - name: post\n          components:\n"
         s += transform((0.0, 0.0, 0.75), scale=(0.25, 0.25, 0.75), ind=12)
@@ -217,7 +217,7 @@ scene:
     s += transform((6.0, 0.0, 2.2), scale=(0.35, 0.35, 0.35))
     s += mesh("sphere", (0.1, 0.05, 0.02), emissive=(1.0, 0.5, 0.15), strength=3.0)
     s += light((1.0, 0.55, 0.2), 25.0, 5.0)
-    s += source("audio/sfx/drone.wav", volume=0.45, min_d=1.5, max_d=50.0, doppler=1.5)
+    s += source("audio/sfx/drone.wav", volume=0.45, play=False, min_d=1.5, max_d=50.0, doppler=1.5)
     s += ("        - type: KinematicMover\n          mode: orbit\n          orbit_center: { x: 0.0, y: 0.0, z: 0.0 }\n"
           "          orbit_radius: 6.0\n          speed: 120.0\n")
     s += "      children: []\n\n"
@@ -252,7 +252,7 @@ scene:
     s += label("Wind chimes", 3.6, ind=8)
     s += "\n    - name: campfire\n      prefab: objects/campfire\n      components:\n"
     s += transform((12.0, -10.0, 0.0))
-    s += source("audio/sfx/fire.wav", volume=0.9, min_d=1.0, max_d=16.0, curve="Linear")
+    s += source("audio/sfx/fire.wav", volume=0.5, min_d=1.0, max_d=16.0, curve="Linear")
     s += "\n    - name: campfire_label\n      active: true\n      components:\n"
     s += transform((12.0, -10.0, 0.0))
     s += "      children:\n" + label("Campfire (linear rolloff, 16 m)", 2.6, width=560, ind=8)
@@ -267,7 +267,7 @@ scene:
       components:
 """
     s += transform((0.0, 28.0, 0.0))
-    s += source("audio/sfx/music_box.wav", volume=0.9, min_d=1.0, max_d=14.0, curve="Linear")
+    s += source("audio/sfx/music_box.wav", volume=0.75, min_d=1.0, max_d=14.0, curve="Linear")
     s += "      children:\n"
     s += "        - name: box\n          components:\n"
     s += transform((0.0, 0.0, 0.5), scale=(0.6, 0.45, 0.5), ind=12)
@@ -310,7 +310,7 @@ scene:
     for name, pos, pitch in PINGS:
         s += f"        - name: {name}\n          components:\n"
         s += transform(pos, ind=12)
-        s += source("audio/sfx/ping.wav", ind=12, volume=0.8, pitch=pitch, play=False, loop=False, min_d=4.0,
+        s += source("audio/sfx/ping.wav", ind=12, volume=0.6, pitch=pitch, play=False, loop=False, min_d=4.0,
                     max_d=40.0, doppler=0.0)
     s += """
     # The panel (ui/audio_panel, in this folder): music transport, spatial toggles, UI sounds, mixer.
@@ -364,7 +364,7 @@ SPATIAL_TOGGLES = [  # toggle name, label, target, starts on
     ("BeaconEast", "East beacon (right)", "beacon_east", False),
     ("BeaconSouth", "South beacon (behind)", "beacon_south", False),
     ("BeaconWest", "West beacon (left)", "beacon_west", False),
-    ("Drone", "Orbiting drone (doppler)", "drone", True),
+    ("Drone", "Orbiting drone (doppler)", "drone", False),
     ("Crickets", "Crickets", "crickets", True),
     ("Chimes", "Wind chimes", "chimes", True),
     ("Campfire", "Campfire", "campfire", True),

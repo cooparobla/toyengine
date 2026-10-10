@@ -12,11 +12,13 @@ Writes assets/audio/:
   sfx/drone.wav         2 s loop: a buzzing motor, for the orbiting (doppler) source
   sfx/crickets.wav      3 s loop: high chirps -- easy to localize
   sfx/chimes.wav        4 s loop: wind chimes
-  sfx/fire.wav          3 s loop: campfire crackle
+  sfx/fire.wav          6 s loop: campfire -- soft roar, hiss, band-limited crackles
   sfx/music_box.wav     4.2 s loop: a little melody, for the directional (cone) speaker
   sfx/ping.wav          one-shot sonar ping, for the "ping from a direction" buttons
 
-Music is stereo IMA-ADPCM at 32 kHz (a quarter of 16-bit PCM's size; miniaudio decodes it);
+Everything is mixed for small speakers too: bass lines sit at or above ~65 Hz and every loop is
+highpassed at 75 Hz (laptop speakers distort on sub-bass they can't reproduce). Music is stereo
+IMA-ADPCM at 32 kHz (a quarter of 16-bit PCM's size; miniaudio decodes it);
 effects are mono 16-bit PCM at 48 kHz (mono, so they can be spatialized). Every loop is
 seamless: note tails past the loop point are wrapped to its start, and reverb runs over two
 passes so the second pass (the one kept) starts already reverberating.
@@ -147,7 +149,7 @@ def one_pole_lp(x, cutoff, sr):
 def kick(sr):
     length = int(0.45 * sr)
     t = np.arange(length) / sr
-    f = 45 + 95 * np.exp(-t / 0.045)
+    f = 60 + 100 * np.exp(-t / 0.04)
     phase = 2 * np.pi * np.cumsum(f) / sr
     return np.sin(phase) * np.exp(-t / 0.16) + 0.3 * np.exp(-t / 0.004)
 
@@ -167,6 +169,16 @@ def hat(sr, rng, open_=False):
     noise = rng.standard_normal(length)
     noise = noise - one_pole_lp(noise, 6000, sr)
     return 0.35 * noise * np.exp(-t / (0.09 if open_ else 0.018))
+
+
+def highpass_loop(x, sr, cutoff, order=4):
+    """Zero-phase Butterworth-shaped highpass applied in the frequency domain. Treats `x` as one
+    period of a loop, so the result still loops seamlessly. Works on (n,) or (channels, n)."""
+    f = np.fft.rfftfreq(x.shape[-1], 1.0 / sr)
+    with np.errstate(divide="ignore"):
+        h = 1.0 / np.sqrt(1.0 + (cutoff / np.maximum(f, 1e-9)) ** (2 * order))
+    h[0] = 0.0
+    return np.fft.irfft(np.fft.rfft(x, axis=-1) * h, n=x.shape[-1], axis=-1)
 
 
 def comb_block(x, delay, g):
@@ -249,6 +261,7 @@ class Track:
             # Reverb over two passes; keep the second so the loop start is already reverberant.
             wet = reverb(np.concatenate([send, send]), self.sr, decay=decay, seed_offset=ch * 23)[L:]
             out[ch] = dry + wet * 0.9
+        out = highpass_loop(out, self.sr, 75.0)    # nothing laptop speakers can't play
         out /= max(np.abs(out).max(), 1e-9)
         self.audio = out * peak
         return self
@@ -283,8 +296,8 @@ def meadow():
         tones = chord_tones(r + 12, q)
         for i, m in enumerate(tones):
             tr.add(pad(midi_hz(m), tr.bar * 0.98, sr, attack=0.5, brightness=1800), tr.at(bar), 0.10, pan=-0.5 + i * 0.33, rev=0.5)
-        tr.add(bass(midi_hz(r - 12 if r > n("E2") else r), tr.beat * 1.8, sr, drive=1.2), tr.at(bar), 0.32, rev=0.05)
-        tr.add(bass(midi_hz(r - 12 if r > n("E2") else r), tr.beat * 1.5, sr, drive=1.2), tr.at(bar, 2.5), 0.22, rev=0.05)
+        tr.add(bass(midi_hz(r), tr.beat * 1.8, sr, drive=1.6), tr.at(bar), 0.30, rev=0.05)
+        tr.add(bass(midi_hz(r), tr.beat * 1.5, sr, drive=1.6), tr.at(bar, 2.5), 0.20, rev=0.05)
         # Eighth-note arpeggio, up then down through the chord, an octave up.
         arp = tones + [tones[0] + 12] + tones[::-1][1:3]
         for k in range(8):
@@ -315,7 +328,7 @@ def expedition():
         for i, m in enumerate(tones):
             tr.add(pad(midi_hz(m), tr.bar * 0.95, sr, attack=0.15, release=0.4, brightness=3000), tr.at(bar), 0.07, pan=-0.6 + i * 0.6, rev=0.35)
         for k in range(8):      # driving eighth-note bass, octave jump on the off-beats
-            m = r + (12 if k % 2 else 0)
+            m = (r + 12 if r < n("D2") else r) + (12 if k % 2 else 0)
             tr.add(bass(midi_hz(m), tr.beat * 0.45, sr, drive=2.2), tr.at(bar, k * 0.5), 0.26 if k % 2 == 0 else 0.18, rev=0.03)
         for k in range(16):     # 16th pluck ostinato
             m = tones[[0, 1, 2, 1][k % 4]] + 12
@@ -346,7 +359,7 @@ def nocturne():
         r = n(root)
         for i, m in enumerate(chord_tones(r + 12, q)):
             tr.add(pad(midi_hz(m), tr.bar, sr, attack=1.4, release=2.5, brightness=1200), tr.at(bar), 0.11, pan=-0.6 + i * 0.4, rev=0.7)
-        tr.add(pad(midi_hz(r - 12), tr.bar, sr, attack=0.8, release=1.5, brightness=300), tr.at(bar), 0.22, rev=0.2)
+        tr.add(pad(midi_hz(r), tr.bar, sr, attack=0.8, release=1.5, brightness=700), tr.at(bar), 0.16, rev=0.2)
     melody = [("E5", 0, 2), ("C5", 2, 1), ("B4", 3, 1), ("A4", 4, 3), ("C5", 7, 1), ("D5", 8, 2), ("E5", 10, 2),
               ("G5", 12, 1.5), ("F5", 13.5, 0.5), ("E5", 14, 2), ("E5", 16, 2), ("A5", 18, 2), ("G5", 20, 1),
               ("E5", 21, 1), ("D5", 22, 2), ("C5", 24, 1), ("B4", 25, 1), ("C5", 26, 1), ("D5", 27, 1), ("B4", 28, 4)]
@@ -390,7 +403,7 @@ def beacon():
 def drone():
     sr = SFX_SR
     t = np.arange(2 * sr) / sr
-    tone = saw_partials(110.0, t, 6000, detune_cents=(0.0,)) + 0.5 * saw_partials(220.0, t, 6000, detune_cents=(0.0,))
+    tone = saw_partials(165.0, t, 6000, detune_cents=(0.0,)) + 0.5 * saw_partials(330.0, t, 6000, detune_cents=(0.0,))
     tone *= 0.75 + 0.25 * np.sin(2 * np.pi * 4.0 * t)       # 8 wobbles per loop
     return norm(np.tanh(tone * 1.5), 0.7)
 
@@ -424,18 +437,62 @@ def chimes():
     return norm(wrap_loop(out, L), 0.6)
 
 
+def periodic_noise(n, rng, sr, shape):
+    """White noise shaped in the frequency domain by `shape(f)`: one period of a seamless loop."""
+    f = np.fft.rfftfreq(n, 1.0 / sr)
+    x = np.fft.irfft(np.fft.rfft(rng.standard_normal(n)) * shape(f), n=n)
+    return x / max(np.std(x), 1e-12)
+
+
+def band(f, lo, hi, order=2):
+    with np.errstate(divide="ignore"):
+        return 1.0 / np.sqrt((1.0 + (lo / np.maximum(f, 1e-9)) ** (2 * order)) * (1.0 + (f / hi) ** (2 * order)))
+
+
 def fire():
+    """A burning campfire: a soft, breathing roar, a faint hiss, and crackles that are short
+    band-limited pops (1-5 kHz, ~1 ms attack) rather than full-band clicks. The crackles cluster
+    into bursts, most are quiet and a few are louder snaps, so the result sounds like burning wood
+    without hard transients that small speakers rattle on."""
     sr = SFX_SR
-    L = 3 * sr
+    L = 6 * sr
     rng = np.random.default_rng(6)
-    bed = one_pole_lp_fast(rng.standard_normal(L), 900, sr) * 0.35
-    out = bed.copy()
-    for _ in range(70):
-        s = int(rng.integers(0, L - 2000))
-        k = int(rng.integers(80, 900))
-        click = rng.standard_normal(k) * np.exp(-np.arange(k) / (k / 5.0))
-        out[s:s + k] += click * rng.uniform(0.3, 1.2)
-    return norm(out, 0.7)
+    t = np.arange(L) / sr
+    # Slow, loop-periodic envelopes (flames breathing, ~0.3-2 Hz) and a faster flutter (~6-12 Hz).
+    breath = periodic_noise(L, rng, sr, lambda f: band(f, 0.2, 1.5))
+    flutter = periodic_noise(L, rng, sr, lambda f: band(f, 5.0, 12.0))
+    roar = periodic_noise(L, rng, sr, lambda f: band(f, 120.0, 450.0)) * (1.0 + 0.25 * np.tanh(breath))
+    hiss = periodic_noise(L, rng, sr, lambda f: band(f, 2500.0, 7000.0)) * (1.0 + 0.4 * np.tanh(flutter + 0.5 * breath))
+    bed = 0.32 * roar + 0.05 * hiss
+
+    crackle = np.zeros(L + sr)
+    # Bursts: clusters of pops, denser where the flames swell.
+    starts = np.sort(rng.uniform(0, L / sr, 26))
+    for st in starts:
+        for _ in range(int(rng.integers(2, 9))):
+            s = int((st + abs(rng.normal(0, 0.12))) * sr)
+            dur = rng.uniform(0.003, 0.018)
+            k = int(dur * sr)
+            kt = np.arange(k) / sr
+            env = np.minimum(kt / 0.0008, 1.0) * np.exp(-kt / (dur / 4.0))
+            fc = rng.uniform(1200, 4500)
+            snippet = rng.standard_normal(k)
+            spec = np.fft.rfft(snippet, 4 * k)
+            spec *= band(np.fft.rfftfreq(4 * k, 1.0 / sr), fc * 0.6, fc * 1.6)
+            pop = np.fft.irfft(spec, 4 * k)[:k]
+            pop = pop / max(np.abs(pop).max(), 1e-9) * env
+            amp = 0.06 * np.exp(rng.normal(0, 0.6))          # mostly small, occasionally bigger
+            crackle[s:s + k] += pop * min(amp, 0.25)
+    # A few woody snaps: a short damped resonance with a soft attack.
+    for _ in range(5):
+        s = int(rng.uniform(0, L / sr) * sr)
+        k = int(0.05 * sr)
+        kt = np.arange(k) / sr
+        f0 = rng.uniform(700, 1400)
+        snap = np.sin(2 * np.pi * f0 * kt) * np.minimum(kt / 0.0015, 1.0) * np.exp(-kt / 0.012)
+        crackle[s:s + k] += snap * rng.uniform(0.12, 0.2)
+    out = bed + wrap_loop(crackle, L)
+    return norm(highpass_loop(out, sr, 100.0), 0.55)
 
 
 def music_box():

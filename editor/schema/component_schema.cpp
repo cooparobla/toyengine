@@ -752,6 +752,18 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             with_tip(f_string("pole", ""), "Object the knee / elbow bends toward; empty keeps the animated bend"),
             f_float("weight", 1.0f, 0.01f, 0.0f, 1.0f, true),
             with_tip(f_float("soft_limit", 0.02f, 0.001f, 0.0f, 0.5f), "Fraction of the reach eased near full extension"),
+            with_tip(f_bool("match_target_rotation", false), "The end bone also takes the target's rotation"),
+            with_tip(f_int("priority", 0, -1000, 1000), "Solve order: lower first (ties: chains, two-bone, look-at)"),
+        }});
+        add({"ChainIK", "Animation", {
+            with_tip(f_string("root", "", true), "First bone of the chain (it pivots in place)"),
+            with_tip(f_string("tip", "", true), "Last bone, under root: its origin reaches the target"),
+            with_tip(f_string("target", "", true), "Object to reach for"),
+            f_float("weight", 1.0f, 0.01f, 0.0f, 1.0f, true),
+            with_tip(f_int("iterations", 10, 1, 100), "FABRIK passes at most"),
+            with_tip(f_float("tolerance", 0.001f, 0.0001f, 0.0f, 1.0f), "Close enough to stop (m)"),
+            with_tip(f_bool("match_target_rotation", false), "The tip also takes the target's rotation"),
+            with_tip(f_int("priority", 0, -1000, 1000), "Solve order: lower first (ties: chains, two-bone, look-at)"),
         }});
         add({"LookAtIK", "Animation", {
             with_tip(f_string("bone", "", true), "Bone path; empty turns this object"),
@@ -761,6 +773,7 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             with_tip(f_float("max_angle", 70.0f, 0.5f, 0.0f, 180.0f, true), "Degrees from the animated facing"),
             f_float("weight", 1.0f, 0.01f, 0.0f, 1.0f, true),
             with_tip(f_float("smoothing", 0.0f, 0.005f, 0.0f, 10.0f), "Seconds; 0 snaps"),
+            with_tip(f_int("priority", 0, -1000, 1000), "Solve order: lower first (ties: chains, two-bone, look-at)"),
         }});
         add({"FootIK", "Animation", {
             f_string("pelvis", "pelvis", true),
@@ -775,6 +788,8 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             f_float("max_foot_angle", 30.0f, 0.5f, 0.0f, 89.0f),
             with_tip(f_float("blend_speed", 12.0f, 0.1f, 0.0f, 1000.0f), "Ease rate (1/s); 0 snaps"),
             f_float("weight", 1.0f, 0.01f, 0.0f, 1.0f, true),
+            with_tip(f_enum("mode", {"auto", "solve", "targets"}),
+                     "solve: FootIK bends the legs; targets: it lifts the rig's own leg IK targets; auto picks"),
         }});
         // A mesh deformed by a rig's bones: `bones:` (or, omitted, the mesh's vertex groups)
         // resolved under `rig:` (default: the nearest Animator up the hierarchy).

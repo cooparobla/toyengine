@@ -260,6 +260,7 @@ The engine repository runs on its own, with one demo scene per area in [`assets/
 | Scene | What it shows |
 |---|---|
 | `character_demo` | The default: a third-person mannequin (WASD, Space, Shift) on stairs, ramps, platforms and crates; foot IK; F5 / F9 save and load; ragdolls tumbling down stairs, and R to ragdoll the player |
+| `ik_character_demo` | The same bench with a fully IK player: clips key only IK targets; a chain spine, two-bone limbs and a look-at head pose every bone |
 | `loading_demo` | Doors that load a heavy scene in the background behind a loading screen or a fade |
 | `animation_demo` | Clip-driven rigs: an object-hierarchy robot arm, a skinned tentacle, a bouncing ball, two-bone and look-at IK; a field of 50 skinned tentacles behind them |
 | `particles_demo` | A campfire at dusk: flames, lit smoke, embers, a torch trail, mesh scatter, 100k GPU sparks |

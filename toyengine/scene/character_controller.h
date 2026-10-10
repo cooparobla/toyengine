@@ -103,7 +103,13 @@ public:
 
     /** @brief Move by the displacement fed through add_root_motion() (an Animator's root motion,
      *         see consume_root_motion()) instead of `move_input` -- collisions, gravity and jumps
-     *         still apply, and `move_input` still turns the character (face_movement). */
+     *         still apply, and `move_input` still turns the character (face_movement).
+     *
+     *         Grounded only: in the air the character keeps the velocity it left the ground with,
+     *         steered by `move_input` (`air_control`) and slid by steep slopes, as without root
+     *         motion -- an airborne clip (a jump/fall pose) carries no travel, and following it
+     *         would leave a character resting on something it can't stand on (wedged against a
+     *         steep slope's foot) with no way to move, falling forever. */
     bool use_root_motion = false;
 
     // --- Per-frame input, pushed by Engine::drive_character_controllers_() ---

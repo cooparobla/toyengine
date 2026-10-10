@@ -112,8 +112,11 @@ COOPA_TEST(root_motion_moves_the_character_controller) {
     rig.box("wall", glm::vec3(0.0f, 4.0f, 1.0f), glm::vec3(4.0f, 0.4f, 2.0f));   // face at y 3.8
     rig.start();
     coopa::anim::install_animation_system(rig.scene);
-    rig.step(120);   // 2 s of walking at 1.5 m/s (one frame of lag: the controller runs before animation)
-    expect_near(rig.feet().y, 1.5f * (2.0f - 1.0f / 60.0f), 0.02f, "root motion: the controller walked the clip's travel");
+    // 2 s of walking at 1.5 m/s, less two frames: the controller runs before animation (one frame
+    // of lag), and the freshly spawned controller is airborne until its first ground probe --
+    // root motion only moves a grounded character.
+    rig.step(120);
+    expect_near(rig.feet().y, 1.5f * (2.0f - 2.0f / 60.0f), 0.02f, "root motion: the controller walked the clip's travel");
     expect(rig.cc->is_grounded(), "root motion: ...on the ground");
     expect_near(pelvis->get_transform()->transform().position().y, 0.0f, 1e-5f, "root motion: the pelvis bone is held over the feet");
 

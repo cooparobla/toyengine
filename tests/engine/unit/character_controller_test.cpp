@@ -278,3 +278,25 @@ COOPA_TEST(never_penetrates_under_random_input) {
     expect(worst < 0.005f, "random input: never penetrating (worst " + std::to_string(worst) + " m)");
     expect(rig.feet().z > -0.01f, "random input: never fell through the floor");
 }
+
+/**
+ * @brief A root-motion character in the air moves physically: dropped against the foot of a
+ *        55 degree slope -- the V between it and the floor, where the ground probe finds only the
+ *        steep face -- it slides out and lands, though its (airborne) clip hands it no travel.
+ *        Following root motion in the air left it wedged there, ungrounded forever.
+ */
+COOPA_TEST(root_motion_character_slides_off_a_steep_slopes_foot) {
+    for (float y : {4.1f, 4.3f, 4.6f}) {
+        CharacterRig rig;
+        character_ground(rig);
+        // character_demo's steep ramp: a 0.2 m slab at 55 degrees, its foot at y = 4.
+        rig.box("ramp_steep", glm::vec3(2.0f, 5.22907f, 1.58095f), glm::vec3(2.4f, 4.0f, 0.2f), glm::vec3(55.0f, 0.0f, 0.0f));
+        rig.spawn(glm::vec3(2.0f, y, 0.6f));
+        rig.cc->use_root_motion = true;   // and no Animator: the jump clip's travel, i.e. none
+        rig.start();
+        rig.step(60);
+        expect(rig.cc->is_grounded(), "root motion: dropped at y " + std::to_string(y) + " against the steep foot, it lands (pos " +
+                                          std::to_string(rig.feet().y) + ", " + std::to_string(rig.feet().z) + ")");
+        expect(rig.feet().z < 0.05f, "root motion: ...on the floor, not perched on the slope");
+    }
+}

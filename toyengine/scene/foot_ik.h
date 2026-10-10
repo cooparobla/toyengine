@@ -8,6 +8,15 @@
  * ik_pre_solve() probes and solves the legs, ik_post_solve() tilts the feet. It lives in
  * toyengine rather than libcoopa because it queries the physics world.
  *
+ * Two ways to bend the legs, picked by `mode`:
+ *   - solve: FootIK owns the leg solves -- two TwoBoneIKs of its own aimed at the ANIMATED feet
+ *     moved onto the ground (a keyframed rig, the plain mannequin).
+ *   - targets: the legs are already IK-driven by TwoBoneIK components on the rig (a fully IK
+ *     rig, objects/characters/mannequin_ik): FootIK probes under each leg's target instead and
+ *     overrides that target's position, raised/lowered onto the ground; the legs' own solvers do
+ *     the bending.
+ *   - auto (default): targets when a TwoBoneIK on this rig drives each foot, else solve.
+ *
  * The rays start `ray_up` above the character's base plane (its origin -- the feet) at each
  * foot's animated XY and reach `ray_down` below it, ignoring the character's own body (the
  * Rigidbody on this object, e.g. a CharacterController's). A foot's ground offset is the hit's
@@ -26,6 +35,7 @@
  *   align_feet: true
  *   max_foot_angle: 30
  *   blend_speed: 12
+ *   mode: auto                  # auto | solve | targets
  * @endcode
  */
 
@@ -71,6 +81,10 @@ public:
     float blend_speed = 12.0f;    ///< Rate (1/s) offsets and the grounded fade ease at; 0 snaps.
     float weight = 1.0f;
     uint32_t layer_mask = ~0u;
+    std::string mode = "auto";    ///< auto | solve | targets (see the file doc).
+
+    /** @brief Whether the legs are driven through the rig's own TwoBoneIK targets (after binding). */
+    bool drives_targets() const { return targets_mode_; }
 
     /** @brief The pelvis drop applied last frame (m, <= 0). */
     float pelvis_offset() const { return pelvis_offset_; }
@@ -93,7 +107,8 @@ public:
 
 private:
     struct LegState {
-        coopa::anim::TwoBoneIK solver;          ///< Not a scene component: owned and solved here.
+        coopa::anim::TwoBoneIK solver;          ///< Not a scene component: owned and solved here (solve mode).
+        coopa::anim::TwoBoneIK* rig_ik = nullptr; ///< The rig's own leg solver (targets mode).
         coopa::scene::SceneObject* shin_obj = nullptr;
         coopa::scene::SceneObject* foot_obj = nullptr;
         coopa::anim::IkPoseGuard foot_guard;
@@ -105,6 +120,7 @@ private:
     void bind_();
 
     bool bound_ = false;
+    bool targets_mode_ = false;
     bool suspended_ = false;
     bool first_frame_ = true;
     coopa::scene::SceneObject* pelvis_obj_ = nullptr;

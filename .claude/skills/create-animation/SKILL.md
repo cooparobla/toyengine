@@ -104,6 +104,15 @@ Bone and target fields are paths from the component's object, like a track's `ob
   pole: elbow_pole           # optional: the elbow/knee bends toward it (empty keeps the animated bend)
   weight: 1.0                # 0..1
   soft_limit: 0.02           # fraction of reach eased near full extension
+  match_target_rotation: false   # true: the end bone (hand/foot) also takes the target's rotation
+  priority: 0                # any solver: lower solves first
+- type: ChainIK              # a chain of any length (spine, neck, tail) reaching for a target (FABRIK)
+  root: pelvis/spine         # the chain: root and its descendants down to tip
+  tip: pelvis/spine/chest    # its origin is put on the target
+  target: chest_target
+  iterations: 10
+  tolerance: 0.001
+  match_target_rotation: true
 - type: LookAtIK             # a bone turning to face a target
   bone: neck/head            # empty = this object
   target: look_target
@@ -123,12 +132,20 @@ Bone and target fields are paths from the component's object, like a track's `ob
   blend_speed: 12            # 1/s; 0 snaps
   weight: 1.0
   layer_mask: -1             # physics layers the rays hit (default all)
+  mode: auto                 # solve: FootIK bends the legs; targets: lifts the rig's own leg IK targets
 ```
 
-Order each frame: Animator, then FootIK's probes, every TwoBoneIK, every LookAtIK. A
+Order each frame: Animator, then FootIK's probes, then every solver by `priority` -- at equal
+priority every ChainIK, every TwoBoneIK, every LookAtIK (spine before arms before head). A
 target is usually an empty object a clip or gameplay moves. FootIK fades out while a sibling
 CharacterController is airborne. Examples: `assets/objects/animation/ik_reacher.yaml`,
 `ik_watcher.yaml` (in `animation_demo`), and the mannequin in `character_demo`.
+
+**Fully IK rigs** (every bone solved, clips key only targets): copy
+`assets/objects/characters/mannequin_ik.yaml` (in `ik_character_demo`). Foot targets and knee
+poles hang from the rig root; hand, elbow, chest and look targets from the pelvis; limbs and the
+chest use `match_target_rotation`. FootIK on such a rig switches to `targets` mode by itself.
+`tools/gen_mannequin.py` shows how to bake target clips from keyframed ones (forward kinematics).
 
 ## Rigs
 

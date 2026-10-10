@@ -31,8 +31,9 @@ void FootIK::ik_pre_solve(float dt) {
     const float k = blend_speed > 0.0f ? 1.0f - std::exp(-blend_speed * std::max(dt, 0.0f)) : 1.0f;
 
     // Restore an un-animated rig (legs, pelvis) before reading any position: this frame's
-    // targets come from the animated pose, never from last frame's IK output.
-    for (LegState& leg : legs_) leg.solver.restore_input();
+    // targets come from the animated pose, never from last frame's IK output. (Targets mode:
+    // the rig's solvers restore their own legs when they run.)
+    if (!targets_mode_) for (LegState& leg : legs_) leg.solver.restore_input();
     coopa::util::Transform* pelvis_t = pelvis_obj_ && pelvis_obj_->get_transform() ? &pelvis_obj_->get_transform()->transform() : nullptr;
     if (pelvis_t) {
         if (pelvis_written_valid_ && pelvis_t->position() == pelvis_written_) pelvis_t->set_position(pelvis_input_);
@@ -60,7 +61,13 @@ void FootIK::ik_pre_solve(float dt) {
     };
 
     for (LegState& leg : legs_) {
-        leg.foot_pos = coopa::anim::ik_world_position(leg.foot_obj);
+        // Where the foot is going this frame: the animated foot, or (targets mode) its target.
+        if (targets_mode_) {
+            coopa::scene::SceneObject* t = leg.rig_ik ? leg.rig_ik->target_object() : nullptr;
+            leg.foot_pos = t ? coopa::anim::ik_world_position(t) : coopa::anim::ik_world_position(leg.foot_obj);
+        } else {
+            leg.foot_pos = coopa::anim::ik_world_position(leg.foot_obj);
+        }
         float target_offset = 0.0f;
         glm::vec3 target_normal = up;
         if (physics && leg.foot_obj && blend_ > 0.0f) {
@@ -89,6 +96,14 @@ void FootIK::ik_pre_solve(float dt) {
         }
         pelvis_written_ = pelvis_t->position();
         pelvis_written_valid_ = true;
+    }
+
+    if (targets_mode_) {
+        // The rig's own leg solvers bend the legs (they run after this): move their targets.
+        for (LegState& leg : legs_) {
+            if (leg.rig_ik) leg.rig_ik->set_target_position(leg.foot_pos + up * leg.offset);
+        }
+        return;
     }
 
     const glm::vec3 forward = glm::normalize(glm::vec3(own_world[1]));
@@ -133,6 +148,21 @@ void FootIK::bind_() {
         leg.shin_obj = coopa::anim::resolve_ik_path(owner, scene, defs[i]->shin);
         leg.foot_obj = coopa::anim::resolve_ik_path(owner, scene, defs[i]->foot);
     }
+    // Targets mode: a TwoBoneIK on this rig whose end bone is the leg's foot.
+    for (LegState& leg : legs_) leg.rig_ik = nullptr;
+    if (mode != "solve") {
+        owner->for_each_recursive([this](const coopa::scene::SceneObject& o) {
+            for (const auto& comp : o.components()) {
+                auto* ik = dynamic_cast<coopa::anim::TwoBoneIK*>(comp.get());
+                if (!ik) continue;
+                ik->bind();
+                for (LegState& leg : legs_) {
+                    if (leg.foot_obj && ik->end_bone() == leg.foot_obj) leg.rig_ik = ik;
+                }
+            }
+        });
+    }
+    targets_mode_ = mode != "solve" && legs_[0].rig_ik && legs_[1].rig_ik;
     controller_ = owner->get_component<CharacterController>();
     rigidbody_ = owner->get_component<coopa::physx::components::RigidbodyComponent>();
     bound_ = true;

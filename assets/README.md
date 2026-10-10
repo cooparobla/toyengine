@@ -36,7 +36,7 @@ material and a mesh may both be `brick`; two materials may not).
 | `meshes/` | shared meshes (plus `<mesh>.lod.yaml` LOD sidecars, kept beside their mesh). Tags: `primitives`, `props`, `terrain/<style>`, `water`, `animation`, `characters` |
 | `materials/` | shared PBR materials -- see below. Tags: `basic`, `metal`, `transparent`, `natural`, `building`, `prototype` |
 | `textures/` | shared material maps. Tags: `brick`, `terrain`, `prototype`, `masks` |
-| `objects/` | object assets (prefabs). Tags: `animation` (test rigs), `characters` (`mannequin`: the humanoid rig with idle/walk/run/jump; `mannequin_ragdoll`: the same with a Ragdoll), `terrain` (tile sets), `props`, `weather` (the effects the weather spawns: `weather_rain`, `weather_snow`, `weather_ground_mist`, `weather_dust`) |
+| `objects/` | object assets (prefabs). Tags: `animation` (test rigs), `characters` (`mannequin`: the humanoid rig with idle/walk/run/jump; `mannequin_ragdoll`: the same with a Ragdoll; `mannequin_ik`: the same fully IK-driven -- its clips in `animations/mannequin_ik/` key only IK targets), `terrain` (tile sets), `props`, `weather` (the effects the weather spawns: `weather_rain`, `weather_snow`, `weather_ground_mist`, `weather_dust`) |
 | `animations/<rig>/` | clips, one folder per rig |
 | `physics_materials/` | friction / restitution sets for colliders |
 | `shaders/` | GLSL for every shader the engine loads (its own passes, the gfxcoopa passes it runs, surface shaders named by a material's `shader:`) and their `gfx/` headers. gfxcoopa supplies only the shared lighting headers (`gfx/brdf.glsl`, `ibl.glsl`, `sky.glsl`, `spot_light.glsl`) and SMAA's shaders. Search order: project, then here, then gfxcoopa, then uicoopa; no name exists in two places |

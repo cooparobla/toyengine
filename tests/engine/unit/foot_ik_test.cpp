@@ -116,3 +116,45 @@ COOPA_TEST(feet_meet_steps_and_dips_and_weight_zero_restores_the_pose) {
         expect_near(world_z(legs, "pelvis").z, 0.75f, 1e-3f, "foot ik: the pelvis drop does not accumulate");
     }
 }
+
+/** @brief FootIK on an IK-driven rig (mode auto -> targets): the legs' own TwoBoneIKs reach for
+ *         target empties, and FootIK raises a target over a step onto it instead of solving the
+ *         legs itself -- the foot follows, the other stays on the ground. */
+COOPA_TEST(targets_mode_lifts_the_rigs_own_leg_targets) {
+    auto world = [](SceneObject* root, const std::string& path) {
+        SceneObject* o = coopa::anim::resolve_ik_path(root, nullptr, path);
+        return o ? glm::vec3(o->get_transform()->get_world_matrix()[3]) : glm::vec3(-99.0f);
+    };
+    CharacterRig rig;
+    character_ground(rig);
+    rig.box("step", glm::vec3(0.4f, 0.0f, 0.075f), glm::vec3(0.5f, 0.8f, 0.15f));   // x 0.15 .. 0.65
+    SceneObject* legs = build_leg_rig(rig, glm::vec3(0.1f, 0.0f, 0.0f));
+    // The rig's own leg IK: target empties (children of the root) where the animated feet are.
+    for (const char* side : {"l", "r"}) {
+        const std::string s = side;
+        const glm::vec3 foot = world(legs, "pelvis/thigh_" + s + "/shin_" + s + "/foot_" + s) - glm::vec3(0.1f, 0.0f, 0.0f);
+        auto target = std::make_unique<SceneObject>("foot_target_" + s);
+        auto* tc = target->add_component<TransformComponent>();
+        tc->transform().set_position(foot);
+        tc->set_parent_transform(&legs->get_transform()->transform());
+        legs->add_child(std::move(target));
+        auto* ik = legs->add_component<coopa::anim::TwoBoneIK>();
+        ik->upper = "pelvis/thigh_" + s;
+        ik->lower = "pelvis/thigh_" + s + "/shin_" + s;
+        ik->end = "pelvis/thigh_" + s + "/shin_" + s + "/foot_" + s;
+        ik->target = "foot_target_" + s;
+        ik->soft_limit = 0.0f;
+    }
+    rig.scene.start();
+    rig.physics = coopa::physx::system::install_physics_system(rig.scene);
+    coopa::anim::install_ik_system(rig.scene);
+    const float ground_z = world(legs, "foot_target_l").z;
+    for (int i = 0; i < 3; ++i) { rig.scene.update(1.0f / 60.0f); rig.scene.late_update(1.0f / 60.0f); }
+    auto* foot_ik = legs->get_component<toy::scene::FootIK>();
+    expect(foot_ik->drives_targets(), "targets mode: auto picked the rig's own leg IK");
+    expect_near(foot_ik->foot_offset(1), 0.15f, 1e-3f, "targets mode: the right target's ray found the step top");
+    expect_near(world(legs, "pelvis/thigh_r/shin_r/foot_r").z, ground_z + 0.15f, 0.01f,
+                "targets mode: the right foot stands on the step (its target raised)");
+    expect_near(world(legs, "pelvis/thigh_l/shin_l/foot_l").z, ground_z, 0.01f, "targets mode: the left foot stays on the ground");
+    expect_near(world(legs, "foot_target_r").z, ground_z, 1e-5f, "targets mode: the target empty itself is untouched (an override)");
+}

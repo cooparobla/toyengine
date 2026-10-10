@@ -124,7 +124,9 @@ void CharacterController::advance(float dt, coopa::physx::system::PhysicsSystem*
 
     // --- Displacement: own motion (or root motion), gravity, platform carry ---
     glm::vec3 disp(0.0f);
-    if (use_root_motion) {
+    // Root motion drives grounded locomotion; airborne (a jump's takeoff frame included), the
+    // physical velocity carries on -- see use_root_motion's doc.
+    if (use_root_motion && grounded_ && !jumped_now) {
         const float fy = glm::radians(yaw_deg_);
         const glm::vec2 fx(std::cos(fy), std::sin(fy)), ff(-std::sin(fy), std::cos(fy));
         const glm::vec2 rm = fx * root_motion_.x + ff * root_motion_.y;

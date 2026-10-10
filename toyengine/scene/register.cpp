@@ -200,6 +200,7 @@ void register_scene_components() {
             f("blend_speed", ik->blend_speed);
             f("weight", ik->weight);
             if (node.contains("layer_mask")) ik->layer_mask = static_cast<uint32_t>(node.at("layer_mask").get_value<int64_t>());
+            if (node.contains("mode")) ik->mode = node.at("mode").get_value<std::string>();
         });
 
     SceneLoader::register_component_parser("KinematicMover",

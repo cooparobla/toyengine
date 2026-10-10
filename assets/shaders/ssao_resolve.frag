@@ -18,7 +18,7 @@
 // Once the caller reports that the camera AND the scene have been still long enough
 // (pc.frozen), accepted-history pixels are held verbatim, which is what makes a resting image
 // byte-static without converging onto a single noisy draw. A frame in which anything moved
-// never freezes (PixelRenderPipeline's scene_moved_), so a still camera watching a moving
+// never freezes (ToyRenderPipeline's scene_moved_), so a still camera watching a moving
 // object keeps resolving every frame, the way Unreal does.
 
 layout(location = 0) in  vec2 in_uv;

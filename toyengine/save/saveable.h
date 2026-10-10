@@ -32,8 +32,6 @@
 #include <string>
 
 #include <coopa/scene/component.h>
-#include <coopa/scene/scene.h>
-#include <coopa/scene/scene_object.h>
 
 #include <toyengine/save/save_game.h>
 
@@ -57,11 +55,7 @@ public:
 };
 
 /** @brief "parent:child:object" -- the Scene::find_object_by_path() spelling. */
-inline std::string object_path(const coopa::scene::SceneObject& obj) {
-    std::string path = obj.name();
-    for (const coopa::scene::SceneObject* p = obj.parent(); p; p = p->parent()) path = p->name() + ":" + path;
-    return path;
-}
+std::string object_path(const coopa::scene::SceneObject& obj);
 
 /**
  * @class SaveId
@@ -74,24 +68,11 @@ public:
     std::string type_name() const override { return "SaveId"; }
 
     /** @brief The identity used in the save: `id`, else the object's name path. */
-    std::string key() const {
-        if (!id.empty() || !owner) return id;
-        return object_path(*owner);
-    }
+    std::string key() const;
 };
 
 /** @brief The object whose SaveId key is `id` (active or not), or null. */
-inline coopa::scene::SceneObject* find_by_save_id(const coopa::scene::Scene& scene, const std::string& id) {
-    coopa::scene::SceneObject* found = nullptr;
-    for (const auto& root : scene.root_objects()) {
-        root->for_each_recursive([&](coopa::scene::SceneObject& obj) {
-            if (found) return;
-            if (auto* sid = obj.get_component<SaveId>(); sid && sid->key() == id) found = &obj;
-        });
-        if (found) break;
-    }
-    return found;
-}
+coopa::scene::SceneObject* find_by_save_id(const coopa::scene::Scene& scene, const std::string& id);
 
 }  // namespace save
 }  // namespace toy

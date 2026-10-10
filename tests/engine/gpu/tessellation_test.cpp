@@ -15,6 +15,7 @@
 
 #include <glm/glm.hpp>
 #include <toyengine/core/engine.h>
+#include <toyengine/render/toy_render_pipeline.h>
 
 #include "engine/support/checks.h"
 #include "engine/support/render_fixture.h"

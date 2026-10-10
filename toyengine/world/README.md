@@ -76,7 +76,7 @@ touching the scene tree are all single-owner operations, so they stay on the own
    `chunk_styled_plateau_interior_stays_flat` in the `world` group is the tripwire.
 ## Cost model
 
-The pipeline frustum-culls every chunk per view (see `PixelRenderPipeline::gather_meshes_()`): the
+The pipeline frustum-culls every chunk per view (see `ToyRenderPipeline::gather_meshes_()`): the
 camera draws only the chunks it can see, and each shadow cascade/face draws only the chunks inside
 its own frustum. `view_radius` still sets the resident set — `(2 * view_radius + 1)²` chunks meshed
 and held in memory — and chunks behind the camera can still cast shadows into view. Prefer raising

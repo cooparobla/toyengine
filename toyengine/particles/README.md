@@ -186,9 +186,9 @@ ParticleSimulationSystem::execute()         (order 360: after TransformResolve, 
 Engine::sync_particle_render_state_()       (after late_update, before render)
 └─ collect_render(): frustum-cull each system's bounds, prepare_render() the visible ones
      (sort back to front, build ParticleInstance / mesh matrices; parallel like the step)
-     -> PixelRenderPipeline::set_particle_state()
+     -> ToyRenderPipeline::set_particle_state()
 
-PixelRenderPipeline::render()
+ToyRenderPipeline::render()
 ├─ gather_meshes_(): each mesh-mode batch joins the opaque G-buffer and shadow batching
 │                    (one item, N instances)
 ├─ ParticlePass::upload(): every quad batch into this frame slot's instance buffer

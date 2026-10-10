@@ -46,14 +46,15 @@ layout(set = 0, binding = 0) uniform CameraUBO {
 // Set 2: Shadow maps -- one directional map, one point cube map, one spot map
 // (see shadow_map_target.h). *Shadow: hardware compareEnable sampler
 // (util::Sampler::shadow()) -- see gfx/shadow_sampling.glsl and
-// pixel_lighting.frag's identical binding for why.
+// toy_lighting.frag's identical binding for why.
 layout(set = 2, binding = 0) uniform sampler2DShadow dir_shadow_map;
 layout(set = 2, binding = 1) uniform sampler2DShadow local_shadow_atlas; // point/spot shadows (gfx/local_shadow.glsl)
 // The directional map AGAIN, through a plain nearest sampler: PCSS's blocker
 // search needs stored depths, which a compare sampler cannot return.
 layout(set = 2, binding = 3) uniform sampler2D dir_shadow_map_raw;
+layout(set = 2, binding = 4) uniform sampler2D cloud_shadow_map;   // cloud_shadow.glsl
 
-// Sets 3/4/5: ssr_pass_'s own trace-input sets (see pixel_render_pipeline.h's
+// Sets 3/4/5: ssr_pass_'s own trace-input sets (see toy_render_pipeline.h's
 // transparent_extra ExtraSets), the same three sets ssr.frag itself binds at 1/2/3 --
 // bound here at 3/4/5 since sets 0-2 above are this pass's own. Only the two bindings
 // gfx/ssr_trace_body.glsl actually reads are declared (binding 0 of set 3, g_albedo_ao,
@@ -78,7 +79,7 @@ layout(set = 7, binding = 3) uniform sampler2D u_metallic_roughness_map;
 // Set 6: forward_globals_'s per-frame lighting/indirect/SSR/refraction UBO (see
 // forward_globals.h). Mesh-only -- sdf_forward.frag keeps reading its own SdfGlobals UBO
 // instead (see the refraction plan for why SDF glass is excluded). A UBO rather than push
-// constants -- see TransparentRefractionPushConstants' own doc (pixel_render_pipeline.h):
+// constants -- see TransparentRefractionPushConstants' own doc (toy_render_pipeline.h):
 // the frame block plus the per-object refraction fields would not fit in the 128-byte
 // guaranteed Vulkan push-constant minimum.
 #define WATER_MAX_RIPPLES 64 // == toy::render::kMaxWaterRipples (forward_globals.h)
@@ -100,7 +101,7 @@ layout(set = 6, binding = 0) uniform ForwardGlobalsBlock {
 
 #include <gfx/ssr_trace_body.glsl>
 #include "indirect_hooks.glsl"
-#include "pixel_forward_shading.glsl"
+#include "toy_forward_shading.glsl"
 #include "refraction.glsl"
 #include <gfx/fog.glsl>
 
@@ -112,7 +113,7 @@ layout(set = 6, binding = 0) uniform ForwardGlobalsBlock {
 // GBufferPipeline::PushConstants' doc; a derived transparent shader's fragment hook, e.g.
 // water's rippled normals, reads gfx_params here), also part of TransparentPass::push().
 // [64, 96) is a per-object refraction block (ior/thickness/tint/enabled) pushed once per
-// draw by PixelRenderPipeline::record_transparent_() via TransparentPass's extra_pc_bytes
+// draw by ToyRenderPipeline::record_transparent_() via TransparentPass's extra_pc_bytes
 // ctor param -- GLSL permits only one push_constant block per stage, so all three regions
 // live in this one struct despite coming from two separate push_constants() calls. The
 // frame-level lighting/indirect/SSR inputs are in set 6's UBO above (see
@@ -228,7 +229,7 @@ void main() {
     p.ssr_cone_prefilter   = forward_globals.ssr1.z;
     p.ssr_prev_frame       = forward_globals.ssr_mip.y;
 
-    vec4 shaded = gfx_pixel_forward_shade(frag_world_pos, N, camera.camera_pos, camera.view, camera.proj, mat, p);
+    vec4 shaded = toy_forward_shade(frag_world_pos, N, camera.camera_pos, camera.view, camera.proj, mat, p);
 
     vec3 V = normalize(camera.camera_pos - frag_world_pos);
     vec3 F0 = mix(vec3(0.04), mat.albedo, mat.metallic);

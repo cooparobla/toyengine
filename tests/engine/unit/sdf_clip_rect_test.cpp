@@ -1,6 +1,6 @@
 /**
  * @file sdf_clip_rect_test.cpp
- * @brief The SDF pass's screen-space clip rect (pixel_math.h): projected bounds for visible
+ * @brief The SDF pass's screen-space clip rect (toy_render_math.h): projected bounds for visible
  *        boxes, culling of off-screen ones, the full-screen fallback when a box straddles the
  *        near plane, and the NDC -> pixel mapping with its Y flip.
  */
@@ -8,7 +8,7 @@
 #include <coopa/testing/test.h>
 
 #include <glm/gtc/matrix_transform.hpp>
-#include <toyengine/render/pixel_math.h>
+#include <toyengine/render/toy_render_math.h>
 
 #include "engine/support/checks.h"
 

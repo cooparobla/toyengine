@@ -277,7 +277,7 @@ float gfx_shadow_dir_pcf(sampler2DShadow map, vec3 proj_coords, float bias,
 /// stratified by construction -- consecutive taps never cluster the way a
 /// fixed Poisson set can when undersampled -- so it degrades gracefully as
 /// `sample_count` is lowered to fit a large penumbra into a fixed budget
-/// (see pixel_render_pipeline.h's dir_pcf_radius_texels: the pattern this
+/// (see toy_render_pipeline.h's dir_pcf_radius_texels: the pattern this
 /// exists to replace, GFX_POISSON_DISK_16, was tuned for a ~2-3 texel radius
 /// and thins out badly once shadow_softness pushes the radius into the tens
 /// of texels). `sample_count` must not exceed 32.

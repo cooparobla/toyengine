@@ -1,13 +1,13 @@
 #version 450
 
 // debug_view.frag -- replaces the image with one intermediate render buffer, RAW: no
-// tonemap, no bloom, no palette/dither/outline, and (see PixelRenderPipeline's
+// tonemap, no bloom, no palette/dither/outline, and (see ToyRenderPipeline's
 // record_post_chain_) TAA feedback forced to 0 for this frame, so what lands on screen
 // is exactly the number the renderer computed, not a temporally-blended or exposure-
-// rescaled view of it. See PixelRenderConfig::debug_view / the DebugView enum for the
+// rescaled view of it. See ToyRenderConfig::debug_view / the DebugView enum for the
 // full option list.
 //
-// Shares the exact same descriptor contract as pixel_lighting.frag (sets 0-3: camera,
+// Shares the exact same descriptor contract as toy_lighting.frag (sets 0-3: camera,
 // light, shadow, G-buffer+SSAO -- here shifted to set 4, after this shader's own extra
 // set 3) so the "direct" / "indirect" / "shadows" / "contact_shadows" / "ssao" channels
 // are computed from the SAME inputs by the SAME functions the shipped lighting term
@@ -25,7 +25,7 @@
 
 layout(location = 0) in vec2 in_uv;
 
-// Set 0: Camera UBO -- identical layout to pixel_lighting.frag's.
+// Set 0: Camera UBO -- identical layout to toy_lighting.frag's.
 layout(set = 0, binding = 0) uniform CameraUBO {
     mat4 view;
     mat4 proj;
@@ -36,10 +36,11 @@ layout(set = 0, binding = 0) uniform CameraUBO {
 #include "light_ubo_body.glsl"
 
 
-// Set 2: Shadow maps -- identical to pixel_lighting.frag's.
+// Set 2: Shadow maps -- identical to toy_lighting.frag's.
 layout(set = 2, binding = 0) uniform sampler2DShadow dir_shadow_map;
 layout(set = 2, binding = 1) uniform sampler2DShadow local_shadow_atlas; // point/spot shadows (gfx/local_shadow.glsl)
 layout(set = 2, binding = 3) uniform sampler2D dir_shadow_map_raw;
+layout(set = 2, binding = 4) uniform sampler2D cloud_shadow_map;   // cloud_shadow.glsl
 
 // Set 3: this shader's own extras -- SsrPass's resolved reflection/SSGI buffers (bound
 // to their neutral zero textures when ssr_enabled/ssgi_traced were off at construction,
@@ -54,7 +55,7 @@ layout(set = 3, binding = 3) uniform sampler2D u_contact_shadow;
 // G4, the G-buffer's velocity attachment (see gfx/surface/gbuffer_fs.glsl), for "velocity".
 layout(set = 3, binding = 4) uniform sampler2D u_velocity;
 
-// Set 4: G-Buffer textures + screen-space AO -- identical layout to pixel_lighting.frag's
+// Set 4: G-Buffer textures + screen-space AO -- identical layout to toy_lighting.frag's
 // (owned by the FullscreenStage this pass shares gfxcoopa's DeferredLightingPass with).
 layout(set = 4, binding = 0) uniform sampler2D g_albedo_ao;
 layout(set = 4, binding = 1) uniform sampler2D g_normal_metallic;
@@ -64,14 +65,14 @@ layout(set = 4, binding = 4) uniform sampler2D g_emissive;
 
 layout(push_constant) uniform DebugViewParams {
     int   channel;              // DebugView enum value -- see DBG_* constants below.
-    float light_bands;          // for DBG_DIRECT (band()); matches pixel_lighting.frag's field.
-    float spec_threshold;       // for DBG_DIRECT (shade_light()); matches pixel_lighting.frag's field.
-    float ambient_intensity;    // for DBG_INDIRECT; matches pixel_lighting.frag's field.
-    float sky_intensity;        // for DBG_INDIRECT; matches pixel_lighting.frag's field.
-    float soft_lighting;        // for DBG_DIRECT; matches pixel_lighting.frag's field.
-    float ssao_direct_strength; // for DBG_DIRECT; matches pixel_lighting.frag's field.
+    float light_bands;          // for DBG_DIRECT (band()); matches toy_lighting.frag's field.
+    float spec_threshold;       // for DBG_DIRECT (shade_light()); matches toy_lighting.frag's field.
+    float ambient_intensity;    // for DBG_INDIRECT; matches toy_lighting.frag's field.
+    float sky_intensity;        // for DBG_INDIRECT; matches toy_lighting.frag's field.
+    float soft_lighting;        // for DBG_DIRECT; matches toy_lighting.frag's field.
+    float ssao_direct_strength; // for DBG_DIRECT; matches toy_lighting.frag's field.
     float camera_near;          // for DBG_DEPTH; same three-field idiom as
-    float camera_far;           // pixel_stylize.frag / DofPass's own linearization.
+    float camera_far;           // stylize.frag / DofPass's own linearization.
     float camera_is_perspective;
     float editor_ao;            // editor shading (solid / material preview): 1 = apply SSAO, 0 = off
     float editor_xray_alpha;    // editor shading: surface opacity over the backdrop (X-Ray), 1 = opaque
@@ -80,10 +81,10 @@ layout(push_constant) uniform DebugViewParams {
 layout(location = 0) out vec4 out_color;
 
 #include "indirect_hooks.glsl"
-#include "pixel_shadow_body.glsl"
+#include "toy_shadow_body.glsl"
 #include "editor_shading.glsl"
 
-// DebugView enum values (pixel_render_config.h) this push constant's `channel` carries --
+// DebugView enum values (toy_render_config.h) this push constant's `channel` carries --
 // MUST match that enum member-for-member.
 #define DBG_OFF             0
 #define DBG_ALBEDO          1
@@ -108,7 +109,7 @@ layout(location = 0) out vec4 out_color;
 #define DBG_MATPREVIEW      22
 #define DBG_VELOCITY        23
 
-// band()/shade_light() -- byte-for-byte the same as pixel_lighting.frag's own (not a
+// band()/shade_light() -- byte-for-byte the same as toy_lighting.frag's own (not a
 // shared body: they read `params` fields specific to each shader's own push-constant
 // block, so a header would need to abstract that away for no real gain here).
 float band(float ndl) {
@@ -141,7 +142,7 @@ vec3 shade_light(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo, float metal
     return (kD * albedo / BRDF_PI + specular) * radiance * ndl * (1.0 - shadow);
 }
 
-// Same formula as pixel_stylize.frag's linear_depth(): true view-space distance from
+// Same formula as stylize.frag's linear_depth(): true view-space distance from
 // the camera, from raw Vulkan [0,1] post-projection depth.
 float linear_depth(float d) {
     if (params.camera_is_perspective < 0.5) {
@@ -152,7 +153,7 @@ float linear_depth(float d) {
 }
 
 // Direct-light sum only (dir + point + spot, shadowed) -- no ambient, no emissive.
-// Same shade_light()/calc_*_shadow() calls and the same contact-shadow buffer read pixel_lighting.frag's
+// Same shade_light()/calc_*_shadow() calls and the same contact-shadow buffer read toy_lighting.frag's
 // main() makes, so DBG_DIRECT can never show a different number than what actually
 // reaches the final image's direct term.
 vec3 toy_debug_direct(vec3 N, vec3 V, vec3 world_pos, vec3 albedo, float metallic,
@@ -163,7 +164,7 @@ vec3 toy_debug_direct(vec3 N, vec3 V, vec3 world_pos, vec3 albedo, float metalli
         vec3 L = normalize(-lights.dir_direction.xyz);
         vec3 radiance = lights.dir_color.rgb * lights.dir_direction.w;
 
-        // See pixel_lighting.frag's identical call: the raw point, biased per cascade inside.
+        // See toy_lighting.frag's identical call: the raw point, biased per cascade inside.
         float shadow = calc_dir_shadow(world_pos, N, L);
         if (lights.contact_params.x > 0.0 && shadow < lights.dir_shadow_extra.x) {
             shadow = max(shadow, texture(u_contact_shadow, in_uv).r
@@ -317,7 +318,7 @@ void main() {
             break;
         case DBG_DIRECT: {
             vec3 Lo = toy_debug_direct(N, V, world_pos, albedo, metallic, roughness, F0);
-            // Same occlusion scaling pixel_lighting.frag applies to its own Lo -- so this
+            // Same occlusion scaling toy_lighting.frag applies to its own Lo -- so this
             // channel shows exactly the direct-light number that reaches the final image,
             // not the unoccluded term.
             float ssao = texture(g_ssao, in_uv).r;
@@ -325,7 +326,7 @@ void main() {
             break;
         }
         case DBG_INDIRECT: {
-            // Same expression as pixel_lighting.frag's ambient term -- see
+            // Same expression as toy_lighting.frag's ambient term -- see
             // gfx/ao_composite.glsl's own doc for the HDRP-style occlusion split.
             float ssao = texture(g_ssao, in_uv).r;
             vec3 ind_diff = sky_gradient(N, lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb)

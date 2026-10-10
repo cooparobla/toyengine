@@ -1,7 +1,7 @@
 /**
  * @file visibility_test.cpp
  * @brief toyengine/render/visibility.h: frustum culling, world AABBs, screen-size estimates and
- *        LOD selection -- the CPU half PixelRenderPipeline runs once per renderer per view.
+ *        LOD selection -- the CPU half ToyRenderPipeline runs once per renderer per view.
  *        Pure math against hand-computed answers; no device.
  */
 

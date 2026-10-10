@@ -11,7 +11,7 @@
 // linear to sRGB -- correct for a physically-lit HDR pipeline (blendy's
 // case), wrong here: post_target_ (VK_FORMAT_R8G8B8A8_UNORM, sampled below)
 // already holds the exact display-referred, sRGB-ENCODED bytes
-// pixel_stylize.frag computed (see that shader's srgb_encode() call, right
+// stylize.frag computed (see that shader's srgb_encode() call, right
 // after its tonemap), including palette-quantized colors that must reach the
 // screen unchanged. Left alone, the implicit encode would re-encode already-
 // encoded bytes and brighten every pixel relative to them. srgb_decode()

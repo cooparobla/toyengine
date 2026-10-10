@@ -7,9 +7,5 @@
 #define ROOT_DIR "@TOYENGINE_DIR@"
 #define PROJ_DIR "@ROOT_DIR_PARENT@"
 
-// The project directory whose assets/ the game and editor load. toyengine_add_project()
-// (cmake/ToyProject.cmake) defines it per executable; anything else (the engine's own tests)
-// is building toyengine itself, whose project is the checkout.
-#ifndef TOY_PROJECT_ROOT
-#define TOY_PROJECT_ROOT ROOT_DIR
-#endif
+// The project directory an executable was built for is not here: toyengine_add_project()
+// registers it at startup (toy::core::build_project_root(), core/runtime_paths.h).

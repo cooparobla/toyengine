@@ -28,9 +28,6 @@
 #include <utility>
 
 #include <coopa/scene/component.h>
-#include <coopa/scene/components/transform_component.h>
-#include <coopa/scene/scene.h>
-#include <coopa/scene/scene_object.h>
 
 namespace toy {
 namespace scene {
@@ -51,12 +48,7 @@ public:
 };
 
 /** @brief The RuntimeObject marker on `obj` or its nearest marked ancestor, or null. */
-inline const RuntimeObject* runtime_marker(const coopa::scene::SceneObject& obj) {
-    for (const coopa::scene::SceneObject* o = &obj; o; o = o->parent()) {
-        if (auto* m = const_cast<coopa::scene::SceneObject*>(o)->get_component<RuntimeObject>()) return m;
-    }
-    return nullptr;
-}
+const RuntimeObject* runtime_marker(const coopa::scene::SceneObject& obj);
 
 /** @brief True if `obj` is, or sits under, an object a system created at runtime. */
 inline bool is_runtime_object(const coopa::scene::SceneObject& obj) { return runtime_marker(obj) != nullptr; }
@@ -66,16 +58,8 @@ inline bool is_runtime_object(const coopa::scene::SceneObject& obj) { return run
  *        started so its components see the scene at once. Children added later must be adopted
  *        too (Scene::adopt()), as for any object added at runtime.
  */
-inline coopa::scene::SceneObject* spawn_runtime_root(coopa::scene::Scene& scene, std::string name,
-                                                     std::string owner_system, std::string note) {
-    auto obj = std::make_unique<coopa::scene::SceneObject>(std::move(name));
-    obj->add_component<coopa::scene::TransformComponent>();
-    obj->add_component<RuntimeObject>(std::move(owner_system), std::move(note));
-    coopa::scene::SceneObject* raw = scene.add_root_object(std::move(obj));
-    scene.adopt(*raw);
-    raw->start();
-    return raw;
-}
+coopa::scene::SceneObject* spawn_runtime_root(coopa::scene::Scene& scene, std::string name,
+                                                     std::string owner_system, std::string note);
 
 } // namespace scene
 } // namespace toy

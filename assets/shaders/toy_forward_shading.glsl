@@ -1,0 +1,358 @@
+#ifndef TOY_FORWARD_SHADING_GLSL
+#define TOY_FORWARD_SHADING_GLSL
+
+// toy_forward_shading.glsl -- the forward-shading body shared by the
+// transparent backbone (gfx/surface/transparent_fs.glsl) and sdf_forward.frag -- a BLEND mesh and a BLEND SDF share ONE
+// implementation, so they can never silently diverge.
+//
+// A "body" file in the ssr_trace_body.glsl sense: the includer must, BEFORE
+// including this file, already have declared (with these exact names,
+// whatever their own set/binding indices are):
+//   - `lights`            -- the LightUBO block (dir_direction/dir_color/
+//                             dir_shadow_params/dir_shadow_extra/
+//                             dir_light_space_matrix/light_counts/point_lights[16]/
+//                             spot_shadow_params/spot_light_space_matrix/spot_lights[8]).
+//   - `dir_shadow_map`    -- sampler2DShadow.
+//   - `local_shadow_atlas` -- sampler2DShadow (the point/spot shadow atlas).
+//   - #include <gfx/brdf.glsl>, <gfx/shadow_sampling.glsl>,
+//     <gfx/indirect_specular.glsl>, <gfx/sky.glsl>, <gfx/ssr_common.glsl>,
+//     <gfx/spot_light.glsl>, "indirect_hooks.glsl", <gfx/ssr_trace_body.glsl>
+//     (which itself needs `g_normal_metallic`/`g_position_roughness`/
+//     `u_velocity`/`u_hiz_map`/`u_scene_color` declared first -- see gfx/surface/transparent_fs.glsl's
+//     own include order for the canonical sequence this file assumes was
+//     already followed).
+//
+// calc_dir_shadow()/calc_local_shadow() themselves come from
+// "toy_shadow_body.glsl", included below -- the same copy toy_lighting.frag uses, so
+// forward and deferred shadows cannot drift apart.
+
+/// Per-fragment material inputs to toy_forward_shade() -- the subset
+/// of PBRMaterial a forward-shaded surface (mesh or SDF) needs, regardless
+/// of where it came from (a push constant for a BLEND mesh, an SSBO record
+/// for a BLEND SdfRenderer).
+struct GfxForwardMaterial {
+    vec3  albedo;
+    float alpha;
+    float metallic;
+    float roughness;
+    float ao;
+};
+
+/// Per-frame lighting/indirect/SSR tuning -- byte-for-byte the same fields
+/// ForwardGlobals carries (toyengine's forward_globals.h), wherever the
+/// includer sources them from (a ForwardGlobals UBO for the mesh forward
+/// pass, an SdfData UBO for the SDF forward pass).
+struct GfxForwardLightingParams {
+    float light_bands;
+    float spec_threshold;
+    float soft_lighting;
+    float rim_strength;
+    float ambient_intensity;
+    float sky_intensity;
+    float ssr_enabled;
+    float ssgi_intensity;
+    float ssgi_distance;
+    float ssr_max_distance;
+    float ssr_bias_texels;
+    float ssr_thickness_min;
+    float ssr_thickness_scale;
+    float ssr_roughness_cutoff;
+    int   ssr_max_iterations;
+    int   ssr_max_hiz_mip;
+    int   ssr_start_mip;
+    int   ssr_min_mip0_steps;
+    int   ssr_max_color_mip;
+    float ssr_cone_prefilter;   // lobe-cone share of the hit-colour mip footprint
+    int   ssr_prev_frame;       // 1: u_scene_color is the previous frame's final colour
+};
+
+#include "toy_shadow_body.glsl"
+
+/// Full-resolution G-buffer texel under a screen uv, for gfx_ssr_hit_color()'s velocity fetch.
+ivec2 gfx_forward_uv_to_px(vec2 uv) {
+    ivec2 size = textureSize(u_velocity, 0);
+    return clamp(ivec2(uv * vec2(size)), ivec2(0), size - 1);
+}
+
+/// Limb fade for the sub-texel silhouette band of this RAW, undenoised forward
+/// path -- used by the SSR miss-fallback's weight and by refraction.glsl's
+/// fresnel dimming (keep both on THIS one curve so their energy ledgers stay in
+/// step; the trace's own hits are instead guarded by the asymmetric dark_trust
+/// clamp in toy_forward_shade(), which deliberately does NOT fade bright
+/// hits).
+///
+/// gfx_ssr_trace()'s own grazing_fade spans NdotV [0, 0.05], but at this engine's
+/// low internal resolution that band is far thinner than one texel of a curved
+/// silhouette: NdotV rises like sqrt(texels-from-limb / radius), so a BLEND
+/// sphere ~12 render-texels in radius is already past 0.05 well inside its
+/// outermost texel. In that sub-texel band the trace's hit data is garbage (see
+/// the miss-fallback comment in toy_forward_shade() for the geometry) and
+/// Schlick's pow5 fresnel spike zeroes refracted transmission with no rendered
+/// reflection to compensate -- both of which would render as near-black pixels
+/// stippled along every BLEND silhouette. [0.05, 0.25] spans roughly the
+/// outermost texel of a small sphere and nothing more: wide enough to catch the
+/// sub-texel garbage, narrow enough that the look of everything past that first
+/// texel is untouched.
+float gfx_forward_silhouette_fade(float ndv) {
+    return smoothstep(0.05, 0.25, ndv);
+}
+
+// Banded diffuse + hard-thresholded specular, or smooth Cook-Torrance -- see
+// toy_lighting.frag's identical formula/toggle for why this engine has
+// exactly one direct-lighting look, shared by every forward-shaded surface.
+float gfx_forward_band(float ndl, GfxForwardLightingParams p) {
+    if (p.soft_lighting != 0.0) return ndl;
+    if (p.light_bands <= 1.0) return ndl;
+    return floor(ndl * p.light_bands) / p.light_bands;
+}
+
+vec3 gfx_forward_shade_light(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo, float metallic,
+                             float roughness, vec3 F0, float shadow, GfxForwardLightingParams p) {
+    vec3 H = normalize(V + L);
+    float ndl_raw = max(dot(N, L), 0.0);
+    if (ndl_raw <= 0.0) return vec3(0.0);
+    float ndl = gfx_forward_band(ndl_raw, p);
+
+    float NDF = distribution_ggx(N, H, roughness);
+    float G   = geometry_smith(N, V, L, roughness);
+    vec3  F   = fresnel_schlick(max(dot(H, V), 0.0), F0);
+
+    vec3 specular;
+    if (p.soft_lighting != 0.0) {
+        float denom = 4.0 * max(dot(N, V), 0.0) * ndl_raw + 0.0001;
+        specular = (NDF * G * F) / denom;
+    } else {
+        float spec_mask = step(p.spec_threshold, NDF * G);
+        specular = F * spec_mask;
+    }
+
+    vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
+    return (kD * albedo / BRDF_PI + specular) * radiance * ndl * (1.0 - shadow);
+}
+
+/// Full forward shading of one surface point: direct lighting (directional +
+/// up to 16 point lights, with shadows), rim accent, base indirect term, and
+/// -- when `p.ssr_enabled != 0` -- the same screen-space reflection +
+/// SSGI-bounce delta ssr_composite_body.glsl applies to opaque geometry,
+/// traced against the caller's already-bound Hi-Z/scene-colour chain.
+///
+/// @param world_pos    Shaded surface point, world space.
+/// @param N            Shading normal, world space, already facing the viewer.
+/// @param camera_pos   World-space camera position (V = normalize(camera_pos - world_pos)).
+/// @param view, proj   Camera view/projection -- proj is inverted for the SSR trace's ray
+///                     reconstruction, and view*proj position the SSGI bounce sample.
+/// @param mat          Material inputs (see GfxForwardMaterial).
+/// @param p            Per-frame lighting/indirect/SSR tuning (see GfxForwardLightingParams).
+/// @return vec4(shaded RGB, mat.alpha).
+vec4 toy_forward_shade(vec3 world_pos, vec3 N, vec3 camera_pos, mat4 view, mat4 proj,
+                             GfxForwardMaterial mat, GfxForwardLightingParams p) {
+    vec3 albedo     = mat.albedo;
+    float alpha     = clamp(mat.alpha, 0.0, 1.0);
+    float metallic  = mat.metallic;
+    float roughness = mat.roughness;
+    float ao        = mat.ao;
+    // No screen-space AO for any forward-shaded surface (matching HDRP, whose SSAO
+    // buffer only applies to opaques) -- material AO alone feeds the occlusion terms.
+
+    vec3 V = normalize(camera_pos - world_pos);
+    vec3 F0 = mix(vec3(0.04), albedo, metallic);
+
+    vec3 Lo = vec3(0.0);
+
+    if (lights.light_counts.x > 0) {
+        vec3 L = normalize(-lights.dir_direction.xyz);
+        vec3 radiance = lights.dir_color.rgb * lights.dir_direction.w;
+
+        // See toy_lighting.frag's identical call: the raw point, biased per cascade inside.
+        float shadow = calc_dir_shadow(world_pos, N, L);
+
+        Lo += gfx_forward_shade_light(N, V, L, radiance, albedo, metallic, roughness, F0, shadow, p);
+    }
+
+    uint num_points = min(lights.light_counts.y, 16u);
+    for (uint i = 0u; i < num_points; ++i) {
+        PointLight pl = lights.point_lights[i];
+        vec3 frag_to_light = pl.position_range.xyz - world_pos;
+        float dist = length(frag_to_light);
+        float range = pl.position_range.w;
+        if (dist > range || dist < 0.0001) continue;
+
+        vec3 L = frag_to_light / dist;
+        float sharpness = max(pl.attenuation.x, 0.1);
+        float factor = clamp(dist / range, 0.0, 1.0);
+        float falloff = clamp(1.0 - pow(factor, sharpness), 0.0, 1.0);
+        falloff *= falloff;
+        float attenuation = falloff / (4.0 * BRDF_PI * (factor * factor + 1.0));
+        vec3 radiance = pl.color_intensity.rgb * (pl.color_intensity.w * 0.08) * attenuation;
+
+        // Point shadow from the local-light atlas, when this light holds a slot there
+        // (attenuation.w, 1-based) -- see calc_local_shadow().
+        float shadow = (pl.attenuation.w > 0.5 && dot(N, L) > 0.0)
+            ? calc_local_shadow(pl.attenuation.w, world_pos, N, L) : 0.0;
+
+        Lo += gfx_forward_shade_light(N, V, L, radiance, albedo, metallic, roughness, F0, shadow, p);
+    }
+
+    uint num_spots = min(lights.light_counts.z, 8u);
+    for (uint i = 0u; i < num_spots; ++i) {
+        SpotLight sl = lights.spot_lights[i];
+        vec3 frag_to_light = sl.position_range.xyz - world_pos;
+        float dist = length(frag_to_light);
+        float range = sl.position_range.w;
+        if (dist > range || dist < 0.0001) continue;
+
+        vec3 L = frag_to_light / dist;
+        float cone = gfx_spot_cone(L, sl.direction_cone.xyz, sl.direction_cone.w, sl.params.y);
+        if (cone <= 0.0) continue;
+
+        // Identical distance curve to the point loop directly above -- see
+        // gfx/spot_light.glsl's file doc on why that curve isn't shared here.
+        float sharpness = max(sl.params.x, 0.1);
+        float factor = clamp(dist / range, 0.0, 1.0);
+        float falloff = clamp(1.0 - pow(factor, sharpness), 0.0, 1.0);
+        falloff *= falloff;
+        float attenuation = falloff / (4.0 * BRDF_PI * (factor * factor + 1.0));
+        vec3 radiance = sl.color_intensity.rgb * (sl.color_intensity.w * 0.08) * attenuation * cone;
+
+        // Spot shadow from the local-light atlas (params.z = 1-based slot) -- see calc_local_shadow().
+        float shadow = (sl.params.z > 0.5 && dot(N, L) > 0.0)
+            ? calc_local_shadow(sl.params.z, world_pos, N, L) : 0.0;
+
+        Lo += gfx_forward_shade_light(N, V, L, radiance, albedo, metallic, roughness, F0, shadow, p);
+    }
+
+    if (p.rim_strength > 0.0) {
+        float rim = 1.0 - max(dot(N, V), 0.0);
+        rim = pow(rim, 3.0) * p.rim_strength;
+        Lo += albedo * rim;
+    }
+
+    vec3 ind_diff = sky_gradient(N, lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb)
+                  * p.ambient_intensity;
+    GfxIndirectSpecular ind = gfx_indirect_specular(world_pos, N, V, F0, roughness, p.sky_intensity,
+                                                    lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb);
+    vec3 kD_ind = (vec3(1.0) - ind.F) * (1.0 - metallic);
+    // Same HDRP-style occlusion composite as toy_lighting.frag (gfx/ao_composite.glsl):
+    // multi-bounce diffuse occlusion, F0-tinted specular occlusion cone. ao_spec also
+    // scales the SSR delta below, mirroring ssr_composite_body.glsl's opaque path.
+    // No screen-space AO on forward surfaces (ssao = 1), and no direct-light AO (strength 0).
+    const GfxAoTerms aot = gfx_ao_terms(ao, 1.0, albedo, F0, max(dot(N, V), 0.0), roughness, 0.0);
+    const vec3 ao_diffuse = aot.diffuse;
+    const vec3 ao_spec    = aot.specular;
+    vec3 ambient = kD_ind * albedo * ind_diff * ao_diffuse + ind.value * ao_spec;
+
+    if (p.ssr_enabled != 0.0) {
+        GfxSsrParams sp;
+        sp.max_distance     = p.ssr_max_distance;
+        sp.bias_texels      = p.ssr_bias_texels;
+        sp.thickness_min    = p.ssr_thickness_min;
+        sp.thickness_scale  = p.ssr_thickness_scale;
+        sp.roughness_cutoff = p.ssr_roughness_cutoff;
+        sp.max_iterations   = p.ssr_max_iterations;
+        sp.max_hiz_mip      = p.ssr_max_hiz_mip;
+        sp.start_mip        = p.ssr_start_mip;
+        sp.min_mip0_steps   = p.ssr_min_mip0_steps;
+        sp.max_color_mip    = p.ssr_max_color_mip;
+        // Jitter is opaque-surface-only -- see GfxSsrParams' own doc.
+        sp.jitter_strength  = 0.0;
+        sp.frame_index      = 0;
+        sp.prev_frame_color = p.ssr_prev_frame != 0;
+        sp.rays_per_pixel   = 1;
+        sp.cone_prefilter   = p.ssr_cone_prefilter;
+        sp.skip_behind      = false;
+
+        float ssr_ndv = max(dot(N, V), 0.0);
+        float silhouette_fade = gfx_forward_silhouette_fade(ssr_ndv);
+
+        vec3 ssr_R = reflect(-V, N);
+        GfxSsrHit ssr_hit = (roughness < p.ssr_roughness_cutoff && dot(ssr_R, N) > 0.0)
+            ? gfx_ssr_trace(world_pos, N, roughness, inverse(proj), sp)
+            : GfxSsrHit(vec3(0.0), 0.0, 0.0, false);
+        vec3 ssr_color   = ssr_hit.color;
+        float confidence = ssr_hit.confidence;
+
+        // Miss fallback for the grazing band. Where NdotV is low the reflected ray
+        // is nearly the view ray's own continuation (dot(-V,R) = 2*NdotV^2 - 1 ~ -1):
+        // it recedes into the depth buffer at almost its own pixel, so it MUST end on
+        // the geometry visible right behind this surface -- a miss there is a marching
+        // failure (the march barely moves in screen space, and hit-vs-miss flips on
+        // sub-texel Hi-Z differences texel to texel), not a ray that cleared the scene.
+        // On this undenoised path those failures would read as a dark dotted ring
+        // along every curved BLEND silhouette: one texel's hit carried the bright
+        // floor reflection + SSGI bounce, its neighbour's miss fell back to the sky
+        // term. Synthesizing the miss from the prefiltered scene colour at the
+        // fragment's own UV (a couple of mips up -- the real hits land within texels
+        // of it) makes miss texels agree with their hit neighbours instead; the
+        // [0.45, 0.65] rolloff hands back to the plain sky fallback where rays point
+        // far enough off-axis that missing the whole depth buffer is legitimate.
+        if (!ssr_hit.hit) {
+            float fallback_w = silhouette_fade * (1.0 - smoothstep(0.45, 0.65, ssr_ndv));
+            // (silhouette_fade keeps the sub-texel limb band, where even the one-step
+            // estimate below reads garbage geometry, at the plain sky fallback.)
+            if (fallback_w > 0.0) {
+                // One-step ray estimate, not the fragment's own UV: neighbouring texels'
+                // REAL hits land a few texels along the projected ray (past e.g. the
+                // sphere's own contact shadow, onto the lit floor beyond it), so sampling
+                // in place would fill the miss with the wrong side of exactly the kind of
+                // high-contrast boundary that made the dots visible in the first place.
+                // The step length is a small fixed fraction of the trace's own reach so it
+                // scales with the same knob that scales every real hit's travel.
+                vec3 fb_point = world_pos + ssr_R * (p.ssr_max_distance * 0.03);
+                vec4 fb_clip  = proj * view * vec4(fb_point, 1.0);
+                if (fb_clip.w > 0.0) {
+                    vec2 fb_uv = clamp(ssr_ndc_to_uv(fb_clip.xy / fb_clip.w), 0.0, 1.0);
+                    float fb_lod = min(2.0, float(p.ssr_max_color_mip));
+                    vec2 fb_color_uv;
+                    ssr_color  = gfx_ssr_hit_color(fb_uv, gfx_forward_uv_to_px(fb_uv),
+                                                   fb_lod, sp.prev_frame_color, fb_color_uv) * fallback_w;
+                    confidence = fallback_w;
+                }
+            }
+        }
+
+        vec3 ssr_specular = ssr_color * (ind.F * ind.brdf.x + ind.brdf.y);
+
+        // Asymmetric silhouette guard: BRIGHTENING deltas pass at full strength
+        // everywhere (they are what give a BLEND surface its lit reflection band, and
+        // symmetric fading here provably changes the look), but a delta that would
+        // DARKEN the pixel below its sky/indirect base is scaled down toward the limb.
+        // Near the limb the trace is a per-texel coin flip on sub-texel Hi-Z detail
+        // (see the miss-fallback comment above), and only its dark outcomes ever read
+        // as artifacts: a darker-than-sky hit swaps the bright sky term for e.g. the
+        // surface's own contact shadow, stippling near-black texels along the
+        // silhouette between bright-sky neighbours. dark_trust reaches 1 by NdotV
+        // 0.45 -- past the coin-flip ring -- so legitimately dark interior reflections
+        // are untouched.
+        vec3 delta = ssr_specular - confidence * ind.value;
+        float dark_trust = smoothstep(0.05, 0.45, ssr_ndv);
+        delta = mix(max(delta, vec3(0.0)), delta, dark_trust);
+        ambient = max(ambient + delta * ao_spec, 0.0);
+
+        if (p.ssgi_intensity > 0.0) {
+            vec4 bounce_clip = proj * view * vec4(world_pos + N * p.ssgi_distance, 1.0);
+            if (bounce_clip.w > 0.0) {
+                vec2 bounce_uv = ssr_ndc_to_uv(bounce_clip.xy / bounce_clip.w);
+                vec2 edge = smoothstep(vec2(0.0), vec2(0.08), bounce_uv)
+                          * smoothstep(vec2(1.0), vec2(0.92), bounce_uv);
+                vec2 bounce_color_uv;
+                vec2 bounce_cl = clamp(bounce_uv, 0.0, 1.0);
+                vec3 bounce = gfx_ssr_hit_color(bounce_cl, gfx_forward_uv_to_px(bounce_cl),
+                                                float(p.ssr_max_color_mip), sp.prev_frame_color, bounce_color_uv);
+                // `confidence` here is the unified weight from above -- a real hit's
+                // confidence, or the miss fallback's own weight in the grazing band.
+                // Weighting by raw hit confidence alone (the way ssr_composite_body.glsl
+                // does for the denoised opaque bounce) would dot a dark broken ring along
+                // curved BLEND silhouettes: on this RAW path it is a per-texel binary, so
+                // one texel's ray hits (bounce added, visibly brighter) while its
+                // neighbour's misses (no bounce). The fallback filling misses in keeps
+                // this weight smooth.
+                ambient += kD_ind * albedo * bounce * (edge.x * edge.y) * confidence
+                         * p.ssgi_intensity * ao_diffuse;
+            }
+        }
+    }
+
+    return vec4(ambient + Lo, alpha);
+}
+
+#endif // TOY_FORWARD_SHADING_GLSL

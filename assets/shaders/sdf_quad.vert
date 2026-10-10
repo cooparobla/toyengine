@@ -6,7 +6,7 @@
 // SdfGBufferPass/SdfForwardPass/SdfCapturePass), covering the full [-1,1]^2
 // clip rectangle. The object's actual screen-space bounds are enforced by a
 // dynamic scissor the CPU sets from SdfRendererGPU::clip_rect BEFORE this
-// draw (see PixelRenderPipeline's record_gbuffer_()/record_transparent_())
+// draw (see ToyRenderPipeline's record_gbuffer_()/record_transparent_())
 // -- not by shaping this quad's geometry -- so every fragment shader can
 // reconstruct its view ray from gl_FragCoord without also needing to know
 // the quad's own extent.

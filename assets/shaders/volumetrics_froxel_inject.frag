@@ -27,12 +27,15 @@ layout(set = 0, binding = 0) uniform sampler2D history_grid;
 layout(set = 2, binding = 0) uniform sampler2DShadow dir_shadow_map;
 // The local-light (point/spot) shadow atlas -- see gfx/local_shadow.glsl.
 layout(set = 2, binding = 1) uniform sampler2DShadow local_shadow_atlas;
+// The cloud layer's shadow map (cloud_shadow.glsl): light shafts through the gaps in the clouds.
+layout(set = 2, binding = 4) uniform sampler2D cloud_shadow_map;
 #define GFX_LOCAL_SHADOWS u_vol.local_shadows
 #include <gfx/local_shadow.glsl>
 
 #include <gfx/volumetrics.glsl>
 #include <gfx/fog.glsl>        // gfx_fog_hg + the box/sphere containment weights
 #include <gfx/spot_light.glsl> // gfx_spot_cone
+#include "cloud_shadow.glsl"     // the clouds' shadow on the sun's in-scatter
 #include <gfx/volumetrics_lighting.glsl>
 #include <gfx/volumetrics_froxel.glsl>
 
@@ -109,6 +112,10 @@ vec4 vol_froxel_evaluate(vec3 p, vec3 view_dir, float dt) {
                 }
             }
         }
+        vec2  cloud_uv;
+        float cloud_w;
+        cloud_shadow_lookup(u_vol.cloud_shadow, u_vol.cloud_shadow_layer, -u_vol.sun_direction.xyz, p, cloud_uv, cloud_w);
+        if (cloud_w > 0.0) sun_vis *= mix(1.0, textureLod(cloud_shadow_map, cloud_uv, 0.0).r, cloud_w);
         vec3 in_scatter = u_vol.sun_color.rgb * phase * sun_vis;
 
         float light_strength = u_vol.counts.z;

@@ -11,6 +11,8 @@
 
 #include <toyengine/core/runtime_paths.h>
 
+#include <iostream>
+
 #include "editor/app/project.h"
 #include "editor/build/packager.h"
 #include "editor/support/fixtures.h"

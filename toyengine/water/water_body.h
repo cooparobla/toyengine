@@ -30,14 +30,10 @@
 
 #include <coopa/asset/asset_handle.h>
 #include <coopa/scene/component.h>
-#include <coopa/scene/scene_object.h>
 
-#include <gfxcoopa/engine/data/mesh.h>
-#include <gfxcoopa/engine/components/mesh_renderer.h>
 #include <gfxcoopa/engine/data/skinned_mesh_source.h>
 
 #include <toyengine/water/water_surface_query.h>
-#include <toyengine/water/water_waves.h>
 
 namespace toy {
 namespace water {
@@ -98,12 +94,7 @@ public:
      *        built by code (gameplay, tools, tests). `uvs` may be empty; for flowing water, UV u
      *        should increase downstream (see water_flow_bake.h). Re-bakes on the next frame.
      */
-    void set_geometry(std::vector<glm::vec3> positions, std::vector<glm::vec2> uvs, std::vector<uint32_t> indices) {
-        geometry_positions = std::move(positions);
-        geometry_uvs       = std::move(uvs);
-        geometry_indices   = std::move(indices);
-        mark_dirty();
-    }
+    void set_geometry(std::vector<glm::vec3> positions, std::vector<glm::vec2> uvs, std::vector<uint32_t> indices);
     std::vector<glm::vec3> geometry_positions;
     std::vector<glm::vec2> geometry_uvs;
     std::vector<uint32_t>  geometry_indices;
@@ -132,10 +123,7 @@ public:
     bool tier_tessellates = true;
 
     /** @brief Marks the bake stale (e.g. after editing a field at runtime). */
-    void mark_dirty() {
-        baked = false;
-        bake_stage = 0;
-    }
+    void mark_dirty();
 
     /**
      * @brief Samples this body's surface above world XY `p` at water time `t`.
@@ -146,10 +134,7 @@ public:
     }
 
     /** @brief `waves` with its per-wave constants precomputed; rebuilt whenever `waves` changes. */
-    const WaveSet& wave_set() const {
-        if (!wave_set_.matches(waves)) wave_set_ = WaveSet::from(waves);
-        return wave_set_;
-    }
+    const WaveSet& wave_set() const;
 
 private:
     mutable WaveSet wave_set_;

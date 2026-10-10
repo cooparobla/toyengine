@@ -135,7 +135,7 @@ vec2 gfx_sdf_aabb_intersect(vec3 ro, vec3 rd, vec3 bmin, vec3 bmax) {
 /// points through `inv_view_proj`. Works unmodified under both perspective
 /// and orthographic projections -- there is no perspective-specific term
 /// here, only two unprojections and a subtract, so this is what lets the
-/// same SDF shaders run under the pixel-art pipeline's orthographic camera
+/// same SDF shaders run under the toyengine pipeline's orthographic camera
 /// and a perspective one with no branch.
 void gfx_sdf_ray_from_clip(mat4 inv_view_proj, vec2 ndc, out vec3 ro, out vec3 rd) {
     vec4 near_h = inv_view_proj * vec4(ndc, 0.0, 1.0);

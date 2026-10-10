@@ -54,7 +54,7 @@ void main() {
     int mode = int(pc.view.x + 0.5);
     vec3 col;
     // Forward surfaces get no screen-space AO and no direct-light AO -- same as the renderer's
-    // forward path (pixel_forward_shading.glsl).
+    // forward path (toy_forward_shading.glsl).
     const float ndotv = max(dot(N, normalize(camera.camera_pos - frag_world_pos)), 0.0);
     if (mode == 3) {
         col = vec3(0.12);                 // wireframe: a faint film, the edges come from overlays

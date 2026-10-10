@@ -5,7 +5,7 @@
  *        atmosphere model (toyengine/weather/atmosphere_model.h) worked out for them.
  *
  * Plain data, like WaterFrameState / SurfaceFrameState: Engine fills it every frame
- * (Engine::sync_sky_render_state_()) and hands it over with PixelRenderPipeline::set_sky_state(),
+ * (Engine::sync_sky_render_state_()) and hands it over with ToyRenderPipeline::set_sky_state(),
  * so render/ never depends on the weather module.
  */
 
@@ -65,7 +65,6 @@ struct SkyAtmosphereMedia {
  */
 struct SkyFrameState {
     bool active = false;              ///< The physical sky is on and these values are this frame's.
-    bool clouds = false;              ///< Draw and composite the cloud layer.
     SkyAtmosphereMedia media;
 
     glm::vec3 sun_to{0.0f, 0.0f, 1.0f};    ///< Unit direction TO the sun.
@@ -83,36 +82,46 @@ struct SkyFrameState {
     /// volumetrics, water): the air's transmittance toward the light, and the cloud cover's dimming.
     glm::vec3 light_tint{1.0f};
 
-    // --- Cloud layer ---
-    float cloud_coverage = 0.0f;      ///< 0..1.
-    float cloud_altitude = 1500.0f;   ///< m, base of the layer.
-    float cloud_thickness = 1200.0f;  ///< m.
-    float cloud_density = 1.0f;
-    glm::vec2 cloud_offset{0.0f};     ///< Accumulated wind drift (m).
-    glm::vec3 cloud_light_to{0.0f, 0.0f, 1.0f};  ///< The light the clouds are lit by (sun, or the moon at night).
-    glm::vec3 cloud_light_color{0.0f};           ///< Its illuminance above the atmosphere (engine units).
-    float time = 0.0f;                ///< Seconds; cloud evolution and star twinkle.
+    float time = 0.0f;                ///< Seconds; star twinkle.
 };
 
+/// The cloud layer's two looks (render cloud_type).
+enum class CloudType { Volumetric, Flat };
+
 /**
- * @brief One frame of the topdown toon cloud layer (render topdown_mode): flat-shaded puffy
- *        clouds at a fixed world height, drawn over the scene for zoomed-out topdown cameras,
- *        with their shadows on the ground. Independent of the sky model.
+ * @brief One frame of the cloud layer (render clouds), with either sky model: the engine fills
+ *        it from the render config, the weather and the scene's light every frame.
  */
-struct TopdownCloudState {
+struct CloudFrameState {
     bool active = false;              ///< Draw the layer (and its shadows) this frame.
-    float height = 60.0f;             ///< m, world z of the layer's middle.
-    float size = 30.0f;               ///< m, typical diameter of one puff.
-    float thickness = 8.0f;           ///< m, how tall the puffs stand.
-    float coverage = 0.4f;            ///< 0..1, the share of the ground the clouds cover.
-    float opacity = 0.92f;
-    float fade_start = 15.0f;         ///< m of camera height above the layer where clouds start to show.
-    float fade_end = 60.0f;           ///< ... and where they are fully shown.
-    float shadow_strength = 0.45f;    ///< How much a cloud's shadow darkens the ground (0 = none).
-    float light_bands = 3.0f;         ///< Toon shading steps (0 = smooth).
-    float outline = 0.5f;             ///< Darkening of each cloud's rim, 0..1.
-    glm::vec2 offset{0.0f};           ///< Accumulated wind drift (m).
-    float time = 0.0f;                ///< Seconds; the puffs slowly morph.
+    CloudType type = CloudType::Volumetric;
+    float coverage = 0.0f;            ///< 0..1.
+    float altitude = 1500.0f;         ///< m, world z of the layer's base.
+    float thickness = 1500.0f;        ///< m.
+    float density = 1.0f;             ///< Volumetric extinction multiplier.
+    float scale = 1.0f;               ///< Volumetric: the cloud field's size relative to a real sky's.
+    glm::dvec2 offset{0.0};           ///< Accumulated wind drift (m), unwrapped: each use wraps it to its own periods.
+    float time = 0.0f;                ///< Seconds; the clouds' evolution.
+    glm::vec3 light_to{0.0f, 0.0f, 1.0f};  ///< The light the clouds are lit by (sun, or the moon at night).
+    glm::vec3 light_color{0.0f};           ///< Its illuminance at the layer (engine units).
+    /// The physical sky's transmittance table colours light_color by the air below the layer
+    /// (light_color is then the light above the atmosphere); false: light_color is used as is.
+    bool atmosphere_lut = false;
+    float fade = 1.0f;                ///< Camera fade (render cloud_camera_fade): 0 hidden .. 1 shown. Shadows ignore it.
+
+    // Shadows (render cloud_shadows).
+    bool shadows = false;
+    float shadow_strength = 1.0f;
+    float shadow_distance = 4000.0f;  ///< m, the shadow map's side, centred on the camera.
+
+    // Flat look.
+    float flat_size = 30.0f;
+    float flat_opacity = 0.92f;
+    float flat_light_bands = 3.0f;
+    float flat_outline = 0.5f;
+    float flat_turbulence = 0.5f;
+    float flat_evolve = 1.0f;
+    float flat_phase = 0.0f;          ///< The puffs' evolution, 0..1 (wraps seamlessly): time * flat_evolve, accumulated.
 };
 
 } // namespace render

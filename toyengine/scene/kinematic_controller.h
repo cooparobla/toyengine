@@ -23,9 +23,6 @@
 #include <string>
 
 #include <coopa/scene/component.h>
-#include <coopa/scene/scene_object.h>
-#include <coopa/scene/components/transform_component.h>
-#include <coopa/util/transform.h>
 
 namespace toy {
 namespace scene {
@@ -72,12 +69,7 @@ public:
     glm::vec2 move_input{0.0f};
 
     /** @brief Captures the authored height every subsequent frame holds. */
-    void start() override {
-        if (!owner) return;
-        auto* tc = owner->get_transform();
-        if (!tc) return;
-        height_ = tc->transform().position().z;
-    }
+    void start() override;
 
     /**
      * @brief Intentionally empty -- the motion lives in advance(), driven by
@@ -94,31 +86,7 @@ public:
      * @brief Advances the owner along the world XY plane by one frame of smoothed `move_input`.
      * @param dt Frame delta time in seconds.
      */
-    void advance(float dt) {
-        if (!owner || dt <= 0.0f) return;
-        auto* tc = owner->get_transform();
-        if (!tc) return;
-
-        glm::vec2 input = move_input;
-        const float len = glm::length(input);
-        if (len > 1.0f) input /= len; // clamp, don't normalize: partial deflection stays partial
-
-        const glm::vec2 target = input * move_speed;
-        if (smoothing > 0.0f) {
-            // 1 - exp(-k*dt) is the frame-rate-independent form of a lerp toward `target`: the
-            // fraction covered over a given wall-clock interval is the same whatever dt is.
-            velocity_ += (target - velocity_) * (1.0f - std::exp(-smoothing * dt));
-        } else {
-            velocity_ = target;
-        }
-
-        coopa::util::Transform& t = tc->transform();
-        glm::vec3 p = t.position();
-        p.x += velocity_.x * dt;
-        p.y += velocity_.y * dt;
-        if (lock_height) p.z = height_;
-        t.set_position(p);
-    }
+    void advance(float dt);
 
     /** @brief Current smoothed planar velocity in m/s -- for tests and gameplay readback. */
     const glm::vec2& velocity() const { return velocity_; }

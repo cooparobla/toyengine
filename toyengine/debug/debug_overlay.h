@@ -69,28 +69,11 @@ inline constexpr bool k_overlay_compiled = true;
 enum class OverlayMode { Off, Fps, Full };
 
 /** @brief `off` / `fps` / `full`; anything else is nullopt (the caller warns). */
-inline std::optional<OverlayMode> parse_overlay_mode(std::string_view s) {
-    if (s == "off" || s == "false" || s.empty()) return OverlayMode::Off;
-    if (s == "fps") return OverlayMode::Fps;
-    if (s == "full") return OverlayMode::Full;
-    return std::nullopt;
-}
+std::optional<OverlayMode> parse_overlay_mode(std::string_view s);
 
-inline const char* overlay_mode_name(OverlayMode m) {
-    switch (m) {
-        case OverlayMode::Fps:  return "fps";
-        case OverlayMode::Full: return "full";
-        default:                return "off";
-    }
-}
+const char* overlay_mode_name(OverlayMode m);
 
-inline OverlayMode next_overlay_mode(OverlayMode m) {
-    switch (m) {
-        case OverlayMode::Off: return OverlayMode::Fps;
-        case OverlayMode::Fps: return OverlayMode::Full;
-        default:               return OverlayMode::Off;
-    }
-}
+OverlayMode next_overlay_mode(OverlayMode m);
 
 // =====================================================================================
 // Frame-time ring
@@ -104,11 +87,7 @@ class FrameTimeRing {
 public:
     static constexpr size_t kCapacity = 240;
 
-    void push(float ms) {
-        values_[head_] = ms;
-        head_ = (head_ + 1) % kCapacity;
-        count_ = std::min(count_ + 1, kCapacity);
-    }
+    void push(float ms);
     void clear() { head_ = count_ = 0; }
 
     size_t size() const { return count_; }
@@ -116,38 +95,15 @@ public:
     /** @brief The i-th sample, oldest first. */
     float at(size_t i) const { return values_[(head_ + kCapacity - count_ + i) % kCapacity]; }
 
-    float average() const {
-        if (empty()) return 0.0f;
-        double sum = 0.0;
-        for (size_t i = 0; i < count_; ++i) sum += at(i);
-        return static_cast<float>(sum / static_cast<double>(count_));
-    }
-    float min() const {
-        float m = empty() ? 0.0f : at(0);
-        for (size_t i = 1; i < count_; ++i) m = std::min(m, at(i));
-        return m;
-    }
-    float max() const {
-        float m = empty() ? 0.0f : at(0);
-        for (size_t i = 1; i < count_; ++i) m = std::max(m, at(i));
-        return m;
-    }
+    float average() const;
+    float min() const;
+    float max() const;
 
     /**
      * @brief The "1% low": the frame rate of the slowest 1% of frames (at least one) -- the
      *        mean of the longest frame times, as FPS. 0 when empty.
      */
-    float low_1pct_fps() const {
-        if (empty()) return 0.0f;
-        std::array<float, kCapacity> sorted{};
-        for (size_t i = 0; i < count_; ++i) sorted[i] = at(i);
-        const size_t n = std::max<size_t>(1, count_ / 100);
-        std::partial_sort(sorted.begin(), sorted.begin() + n, sorted.begin() + count_, std::greater<float>());
-        double sum = 0.0;
-        for (size_t i = 0; i < n; ++i) sum += sorted[i];
-        const double ms = sum / static_cast<double>(n);
-        return ms > 0.0 ? static_cast<float>(1000.0 / ms) : 0.0f;
-    }
+    float low_1pct_fps() const;
 
 private:
     std::array<float, kCapacity> values_{};
@@ -174,25 +130,13 @@ struct WatchLine {
  */
 class GameLines {
 public:
-    static GameLines& instance() {
-        static GameLines lines;
-        return lines;
-    }
+    static GameLines& instance();
 
     bool accepting() const { return accepting_; }
-    void set_accepting(bool on) {
-        accepting_ = on;
-        if (!on) clear();
-    }
+    void set_accepting(bool on);
 
     /** @brief Sets `name`'s value for this frame; a repeat replaces it in place. */
-    void watch(std::string_view name, std::string value) {
-        if (!accepting_) return;
-        for (WatchLine& w : watches_) {
-            if (w.name == name) { w.value = std::move(value); return; }
-        }
-        watches_.push_back(WatchLine{std::string(name), std::move(value)});
-    }
+    void watch(std::string_view name, std::string value);
     void text(std::string line) {
         if (accepting_) texts_.push_back(std::move(line));
     }
@@ -200,10 +144,7 @@ public:
     const std::vector<WatchLine>& watches() const { return watches_; }
     const std::vector<std::string>& texts() const { return texts_; }
     bool empty() const { return watches_.empty() && texts_.empty(); }
-    void clear() {
-        watches_.clear();
-        texts_.clear();
-    }
+    void clear();
 
 private:
     bool accepting_ = false;
@@ -216,30 +157,14 @@ inline std::string format_watch(bool v) { return v ? "true" : "false"; }
 inline std::string format_watch(std::string_view v) { return std::string(v); }
 inline std::string format_watch(const char* v) { return v ? std::string(v) : std::string(); }
 inline std::string format_watch(const std::string& v) { return v; }
-inline std::string format_watch(double v) {
-    char buf[32];
-    std::snprintf(buf, sizeof(buf), "%.3f", v);
-    return buf;
-}
+std::string format_watch(double v);
 inline std::string format_watch(float v) { return format_watch(static_cast<double>(v)); }
 template <typename T>
     requires(std::is_integral_v<T> && !std::is_same_v<T, bool>)
 inline std::string format_watch(T v) { return std::to_string(v); }
-inline std::string format_watch(const glm::vec2& v) {
-    char buf[64];
-    std::snprintf(buf, sizeof(buf), "(%.3f, %.3f)", v.x, v.y);
-    return buf;
-}
-inline std::string format_watch(const glm::vec3& v) {
-    char buf[96];
-    std::snprintf(buf, sizeof(buf), "(%.3f, %.3f, %.3f)", v.x, v.y, v.z);
-    return buf;
-}
-inline std::string format_watch(const glm::vec4& v) {
-    char buf[128];
-    std::snprintf(buf, sizeof(buf), "(%.3f, %.3f, %.3f, %.3f)", v.x, v.y, v.z, v.w);
-    return buf;
-}
+std::string format_watch(const glm::vec2& v);
+std::string format_watch(const glm::vec3& v);
+std::string format_watch(const glm::vec4& v);
 
 /**
  * @brief Shows `name: value` in the overlay's Game block this frame. Values: bool, integers,

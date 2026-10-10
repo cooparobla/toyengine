@@ -2,11 +2,11 @@
  * @file particle_types.h
  * @brief The plain-data contract between toyengine/particles/ (which simulates) and the
  *        renderer (which draws): one GPU instance per particle, and the per-system draw
- *        batches Engine hands to PixelRenderPipeline::set_particle_state() each frame.
+ *        batches Engine hands to ToyRenderPipeline::set_particle_state() each frame.
  *
  * glm only -- no Vulkan, no scene types beyond an opaque MeshRenderer pointer -- so the
  * particle module can fill these directly with no copy, and the render layer never includes
- * the particle module (the same split as WaterFrameState; see pixel_render_types.h).
+ * the particle module (the same split as WaterFrameState; see toy_render_types.h).
  */
 
 #ifndef TOYENGINE_RENDER_PARTICLE_TYPES_H

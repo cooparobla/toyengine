@@ -11,6 +11,7 @@
 #include <gfxcoopa/util/image_readback.h>
 
 #include "editor/support/editor_session.h"
+#include <toyengine/render/toy_render_pipeline.h>
 
 COOPA_TEST_SUITE("editor_end_to_end");
 
@@ -31,6 +32,7 @@ COOPA_TEST(create_edit_save_restart_and_load_in_the_game) {
     fs::path scene_path;
     toy::core::AppConfig restart_config;
     EditorState restart_state;
+    ObjectId restart_sphere{};   // the sphere's id, carried across the restart with the document
     {
         toy::core::Engine engine(shell_config(project), shell_options(project));
         EditorApp app(engine, project);
@@ -173,6 +175,7 @@ COOPA_TEST(create_edit_save_restart_and_load_in_the_game) {
         // Restart Editor Engine (the full restart, for settings baked in at engine start-up).
         restart_config = app.config_for_restart();
         restart_state = app.take_state();
+        restart_sphere = sphere;
     }
     {
         toy::core::AppConfig cfg = restart_config;
@@ -183,7 +186,7 @@ COOPA_TEST(create_edit_save_restart_and_load_in_the_game) {
         EditorApp app(engine, project, {}, std::move(restart_state));
         tick(engine, 3);
         expect(engine.pipeline().render_height() == 180, "a full engine restart keeps the edited render settings");
-        expect(app.document().dirty() && app.document().find_component(sphere_id_for_restart(app), "MeshRenderer") >= 0,
+        expect(app.document().dirty() && app.document().find_component(restart_sphere, "MeshRenderer") >= 0,
                "unsaved scene edits survive the restart");
         app.show_document_view();
         tick(engine, 1);

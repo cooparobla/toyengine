@@ -2,14 +2,16 @@
 #define TOY_SKY_PHYSICAL_GLSL
 
 // sky_physical.glsl -- the physical sky as the lighting pass draws it at background pixels
-// (render sky_model: physical): the sky-view LUT, the stars, the sun's and the moon's discs, and
-// the half-resolution cloud layer upsampled over them.
+// (render sky_model: physical): the sky-view LUT, the stars, the sun's and the moon's discs. Also
+// the half-resolution volumetric cloud layer's upsample (sky_with_clouds), which composites it
+// over either sky model.
 //
 // REQUIRED BEFORE INCLUDE: the `camera` block (camera_pos), the `lights` block
 // (light_ubo_body.glsl: sky_sun / sky_moon / sky_params / sky_extra), and the samplers
 // u_sky_transmittance, u_sky_view and u_sky_clouds.
 
 #include "sky_atmosphere.glsl"
+#include "sky_cloud_common.glsl"
 
 float sky_hash13(vec3 p) {
     p = fract(p * 0.1031);
@@ -56,11 +58,11 @@ vec3 sky_star_layer(vec3 dir, float cells, float density, float t) {
     return tint * b * (0.15 + 3.0 * mag) * twinkle;
 }
 
-// The cloud layer's colour (rgb) and transmittance (a) at a full-resolution uv: a bilinear
-// upsample of the reconstructed layer (sky_cloud_resolve.frag) that drops taps skipped as
-// geometry (a < 0). The layer fills
-// the top-left `scale` fraction of its half-resolution target (sky_quality; the same rounding
-// as SkyCloudPass::scaled_extent).
+// The cloud layer's colour (rgb) and transmittance (a) at a full-resolution sky pixel: a bilinear
+// upsample of the reconstructed layer (sky_cloud_resolve.frag) over the texels whose block holds
+// sky (a texel marched only to geometry has clipped clouds). The layer fills the top-left
+// `scale` fraction of its half-resolution target (cloud_quality; the same rounding as
+// SkyCloudPass::scaled_extent).
 vec4 sky_clouds_upsample(vec2 uv, float scale) {
     ivec2 size = clamp(ivec2(floor(vec2(textureSize(u_sky_clouds, 0)) * scale + 0.5)), ivec2(1), textureSize(u_sky_clouds, 0));
     vec2 p = uv * vec2(size) - 0.5;
@@ -73,8 +75,8 @@ vec4 sky_clouds_upsample(vec2 uv, float scale) {
             ivec2 q = clamp(i + ivec2(x, y), ivec2(0), size - 1);
             vec4 s = texelFetch(u_sky_clouds, q, 0);
             float w = (x == 1 ? f.x : 1.0 - f.x) * (y == 1 ? f.y : 1.0 - f.y);
-            if (s.a < 0.0) continue;
-            sum += s * w;
+            if (s.a < 0.0 || !cloud_sky(s.a)) continue;
+            sum += vec4(s.rgb, cloud_trans(s.a)) * w;
             wsum += w;
         }
     }
@@ -125,6 +127,12 @@ vec3 sky_physical(vec3 dir, vec2 uv) {
             sky += t_view * lights.sky_extra.y * edge * mix(1.0, 0.62, maria) * vec3(0.95, 0.96, 1.0);
         }
     }
+    return sky;
+}
+
+// A sky pixel's colour with the volumetric cloud layer over it (sky_params.y > 0: the fraction
+// of the cloud target the march filled), whichever sky model drew `sky`.
+vec3 sky_with_clouds(vec3 sky, vec2 uv) {
     if (lights.sky_params.y > 0.0) {
         vec4 c = sky_clouds_upsample(uv, lights.sky_params.y);
         sky = sky * c.a + c.rgb;

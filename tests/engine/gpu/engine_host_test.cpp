@@ -19,6 +19,7 @@
 
 #include <glm/glm.hpp>
 #include <toyengine/core/engine.h>
+#include <toyengine/render/toy_render_pipeline.h>
 #include <coopa/scene/scene_loader.h>
 #include <coopa/yaml/document.h>
 #include <physxcoopa/system/physics_system.h>

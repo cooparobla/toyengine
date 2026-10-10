@@ -24,6 +24,7 @@ scene:
       sky_model: physical
       clouds: true
       cloud_coverage: 0.45
+      cloud_shadows: true
     weather:
       enabled: true
       time_of_day: 16.8

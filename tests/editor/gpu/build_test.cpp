@@ -76,7 +76,7 @@ COOPA_TEST(a_development_build_runs_relocated) {
     for (const fs::path& dir : {current_executable().parent_path(), current_executable().parent_path().parent_path()}) {
         if (game.empty() && fs::exists(dir / "toyengine")) game = dir / "toyengine";
     }
-    require(!game.empty(), "the toyengine game binary is built beside the tests (it is a dependency of the test target)");
+    coopa::test::require(!game.empty(), "the toyengine game binary is built beside the tests (it is a dependency of the test target)");
     const fs::path root = coopa::test::scratch_dir("build_reloc_src");
     Project project = Project::create(root);
     const fs::path out = coopa::test::scratch_dir("build_reloc_out");

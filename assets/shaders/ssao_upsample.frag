@@ -3,7 +3,7 @@
 // Half-resolution SSAO's last stage (ssao_half_res): the blurred half-res AO upsampled to the
 // G-buffer's resolution with the shared depth/normal-aware 2x2 filter
 // (gfx/bilateral_upsample.glsl -- the same one the SSR composite uses), so the AO consumers
-// (pixel_lighting.frag, the SSR composite) keep reading one full-resolution texture and an
+// (toy_lighting.frag, the SSR composite) keep reading one full-resolution texture and an
 // AO crease never bleeds across a silhouette into the surface behind it.
 
 layout(location = 0) in  vec2 in_uv;

@@ -126,21 +126,27 @@ scene:
    **Sky.** `sky_model: gradient` (default) draws the three `sky_*` colours. `sky_model: physical`
    (scene `settings.render`) draws a physically based sky that follows the DirectionalLight's
    direction (or the weather's clock) -- sunsets, sun / moon discs, stars (`sky_stars`) -- and
-   overwrites `sky_*` and the light's colour to match; add `clouds: true` (+ `cloud_coverage`,
-   `cloud_altitude`, `cloud_thickness`, `cloud_density`, `cloud_wind_speed`) for a cloud layer,
-   and `atmosphere_density` / `ozone` / `sun_disc_size` / `moon_disc_size` / `sky_quality` to
-   tune it. Example: `assets/scenes/tests/rendering/sky_test`.
-   **Topdown games.** `topdown_mode: true` adds a toon cloud layer between a zoomed-out camera
-   and the ground (any sky model): `topdown_cloud_height` / `_size` / `_thickness` /
-   `_opacity`, `topdown_fade_start` / `_end` (camera height above the layer where it fades in),
-   `topdown_shadow_strength`, `topdown_light_bands`, `topdown_outline`; coverage and drift come
-   from `cloud_coverage` (weather-driven) and `cloud_wind_speed`. Example:
-   `assets/scenes/tests/rendering/topdown_sky_test`.
+   overwrites `sky_*` and the light's colour to match; tune it with `atmosphere_density` /
+   `ozone` / `sun_disc_size` / `moon_disc_size` / `sky_quality`. Example:
+   `assets/scenes/tests/rendering/sky_test`.
+   **Clouds** work with either sky model (over the gradient they take its colours and the
+   scene's sun): `clouds: true`, `cloud_type: volumetric | flat`, `cloud_coverage`
+   (weather-driven), `cloud_wind_speed`, `cloud_altitude` (base, world z), `cloud_thickness`.
+   Volumetric: `cloud_density`, `cloud_scale` (1 = a real sky's km-sized clouds; ~0.02 at a
+   ~45 m altitude = topdown-sized clouds between a high camera and the ground), `cloud_quality`.
+   Flat (cel-shaded toon puffs, a heightfield from above and a deck from below):
+   `flat_cloud_size` / `_opacity` / `_light_bands` / `_outline` / `_turbulence` / `_evolve`.
+   `cloud_shadows: true` (+ `cloud_shadow_strength`, `cloud_shadow_distance` -- the shadowed
+   square around the camera; smaller = sharper) shadows surfaces, water, particles and
+   volumetric fog. `cloud_camera_fade: true` + `cloud_fade_start` / `_end` (camera height above
+   the layer's top) hides the clouds for a zoomed-in topdown camera; shadows stay. Examples:
+   `topdown_sky_test` (low volumetric), `topdown_flat_clouds_test` (flat), both under
+   `assets/scenes/tests/rendering/`.
 5. **Per-scene settings.** `settings.render` overrides any `render:` key of `assets/config.yaml`,
    including the startup-fixed switches (`ssr_enabled`, `volumetrics_enabled`,
    `transparency_enabled`, `bloom_enabled`, `aa_mode`, resolutions, shadow-map sizes...). The
    engine rebuilds the renderer in place when the scene loads (`TOY_STARTUP_FIXED_FIELDS` in
-   `pixel_render_pipeline.h`). Only `texel_aa` is project-only. Prefer overriding in the scene
+   `toy_render_pipeline.h`). Only `texel_aa` is project-only. Prefer overriding in the scene
    to editing config.yaml for a feature only one scene needs.
 6. **Feature components.** Fog volumes, water, terrain, particles, UI and animation have their
    own skills (create-fog-volume, create-water-body, create-terrain, create-particle-effect,

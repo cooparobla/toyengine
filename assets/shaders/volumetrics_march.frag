@@ -37,12 +37,15 @@ layout(set = 0, binding = 1) uniform sampler2D g_position_roughness;
 layout(set = 2, binding = 0) uniform sampler2DShadow dir_shadow_map;
 // The local-light (point/spot) shadow atlas -- see gfx/local_shadow.glsl.
 layout(set = 2, binding = 1) uniform sampler2DShadow local_shadow_atlas;
+// The cloud layer's shadow map (cloud_shadow.glsl): light shafts through the gaps in the clouds.
+layout(set = 2, binding = 4) uniform sampler2D cloud_shadow_map;
 #define GFX_LOCAL_SHADOWS u_vol.local_shadows
 #include <gfx/local_shadow.glsl>
 
 #include <gfx/volumetrics.glsl>
 #include <gfx/fog.glsl>        // gfx_fog_hg + the box/sphere containment weights
 #include <gfx/spot_light.glsl> // gfx_spot_cone for the scatter-light loop
+#include "cloud_shadow.glsl"     // the clouds' shadow on the sun's in-scatter
 
 #define VOL_MAX_VOLUMES  8
 #define VOL_MAX_CASCADES 4
@@ -215,6 +218,10 @@ void main() {
                 float v;   // an out param is undefined on a false return -- never pass sun_vis itself
                 if (vol_sun_cascade_vis(c, cso[c] + csd[c] * t, v)) { sun_vis = v; break; }
             }
+            vec2  cloud_uv;
+            float cloud_w;
+            cloud_shadow_lookup(u_vol.cloud_shadow, u_vol.cloud_shadow_layer, -u_vol.sun_direction.xyz, p, cloud_uv, cloud_w);
+            if (cloud_w > 0.0) sun_vis *= mix(1.0, textureLod(cloud_shadow_map, cloud_uv, 0.0).r, cloud_w);
             vec3 in_scatter = sun_base * sun_vis;
 
             for (int li = 0; li < VOL_MAX_LIGHTS; ++li) {

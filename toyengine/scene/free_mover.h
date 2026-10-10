@@ -22,7 +22,7 @@
  *
  * A FreeMover on an object with no renderer is an *invisible* marker, which is a genuinely
  * useful thing to be: toy::render's DOF autofocus resolves `focus_object` against the
- * transform origin when the target carries no bounds (see PixelRenderPipeline::
+ * transform origin when the target carries no bounds (see ToyRenderPipeline::
  * resolve_dof_focus_()), and CameraController's orbit `tracker` follows any named object. So
  * one of these plus a `Transform` is a drivable point in space that the camera can circle and
  * the lens can focus on, with nothing drawn for it -- which is exactly how
@@ -38,9 +38,6 @@
 #include <string>
 
 #include <coopa/scene/component.h>
-#include <coopa/scene/components/transform_component.h>
-#include <coopa/scene/scene_object.h>
-#include <coopa/util/transform.h>
 
 namespace toy {
 namespace scene {
@@ -91,28 +88,7 @@ public:
      * @brief Advances the owner along the world axes by one frame of smoothed `move_input`.
      * @param delta_time Frame delta time in seconds; a non-positive value is a no-op.
      */
-    void update(float delta_time) override {
-        if (!owner || delta_time <= 0.0f) return;
-        auto* tc = owner->get_transform();
-        if (!tc) return;
-
-        glm::vec3 input = move_input;
-        const float length = glm::length(input);
-        if (length > 1.0f) input /= length; // clamp, don't normalize: partial stays partial
-
-        const glm::vec3 target = input * move_speed;
-        if (smoothing > 0.0f) {
-            // 1 - exp(-k*dt) is the frame-rate-independent form of a lerp toward `target`: the
-            // fraction of the gap closed over a given wall-clock interval is the same whatever
-            // dt happens to be.
-            velocity_ += (target - velocity_) * (1.0f - std::exp(-smoothing * delta_time));
-        } else {
-            velocity_ = target;
-        }
-
-        coopa::util::Transform& t = tc->transform();
-        t.set_position(t.position() + velocity_ * delta_time);
-    }
+    void update(float delta_time) override;
 
     /** @brief Current smoothed velocity in world units per second -- for tests and readback. */
     const glm::vec3& velocity() const { return velocity_; }

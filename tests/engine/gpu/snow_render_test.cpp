@@ -15,6 +15,7 @@
 
 #include <glm/glm.hpp>
 #include <toyengine/core/engine.h>
+#include <toyengine/render/toy_render_pipeline.h>
 #include <toyengine/scene/camera_controller.h>
 #include <toyengine/weather/weather_system.h>
 #include <toyengine/world/snow_field.h>
@@ -54,13 +55,13 @@ COOPA_TEST(snow_cover_trenches_and_shelter_reach_the_scene) {
     }
     expect(deepest > 0.15f, "snow_test: the sled ploughs a trench (" + std::to_string(deepest) + " m)");
     // ...that settles back behind it: the sled laps every 9 s and the scene's tracks recover in
-    // 1.5 s, so the trench is a short trail, not a ring.
+    // 3 s, so the trench trails about a third of the loop -- a trail, not a ring.
     int trenched = 0;
     for (int k = 0; k < 64; ++k) {
         const float a = static_cast<float>(k) / 64.0f * 6.2831853f;
         if (snow->trench_at(glm::vec2(-2.0f, -2.0f) + 2.5f * glm::vec2(std::cos(a), std::sin(a))) > 0.03f) ++trenched;
     }
-    expect(trenched < 64 / 3, "snow_test: the trench fills back in behind the sled (" + std::to_string(trenched) + "/64 of the loop)");
+    expect(trenched < 64 / 2, "snow_test: the trench fills back in behind the sled (" + std::to_string(trenched) + "/64 of the loop)");
     expect(w->settings().snow_patch_hard && engine.pipeline().surface_world_ubo().snow_style.x > 0.5f,
            "snow_test: hard-edged patches reach the surface world UBO");
     expect(snow->trench_at({2.5f, -2.5f}) > 0.05f, "snow_test: the dropped ball presses in (auto deformer)");

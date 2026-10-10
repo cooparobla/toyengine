@@ -79,7 +79,7 @@ void main() {
     // (u_ssr_map.rgb) is premultiplied by confidence (ssr.frag); ind.value (env/sky specular)
     // is not, so the confidence weight applies only to the delta, not to scene_color itself.
     vec3 ssr_specular = ssr_color * (ind.F * ind.brdf.x + ind.brdf.y);
-    // Occlusion factors mirror pixel_lighting.frag's composite exactly (gfx/ao_composite.glsl):
+    // Occlusion factors mirror toy_lighting.frag's composite exactly (gfx/ao_composite.glsl):
     // min-combined material/screen AO, a specular occlusion cone tinted by F0 for the ind.value
     // subtraction, and multi-bounce diffuse occlusion for the SSGI bounce below. The
     // subtraction cancels the ind.value term lighting added, so any drift between the two

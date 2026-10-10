@@ -17,7 +17,7 @@
 // darkness: the consumer max()-combines and scales, exactly as before, so shadows_enabled: false
 // plus contact_shadows_enabled: true still renders a contact-only view.
 //
-// Set layout matches pixel_lighting.frag's first two sets plus its G-buffer set, so the march
+// Set layout matches toy_lighting.frag's first two sets plus its G-buffer set, so the march
 // resolves the identical `camera` / `lights` / `g_*` names its include contract requires.
 
 #include <gfx/spot_light.glsl>
@@ -26,7 +26,7 @@
 layout(location = 0) in  vec2 in_uv;
 layout(location = 0) out vec4 out_occlusion;
 
-// Set 0: Camera UBO -- identical layout to pixel_lighting.frag's.
+// Set 0: Camera UBO -- identical layout to toy_lighting.frag's.
 layout(set = 0, binding = 0) uniform CameraUBO {
     mat4 view;
     mat4 proj;

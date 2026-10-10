@@ -4,7 +4,7 @@
 // gfx/ssr_trace_body.glsl -- shared Hi-Z screen-space reflection raymarch.
 //
 // Shared by ssr.frag and the forward transparent path (gfx/surface/transparent_fs.glsl
-// via pixel_forward_shading.glsl), so a BLEND surface can trace the same reflection an opaque G-buffer pixel
+// via toy_forward_shading.glsl), so a BLEND surface can trace the same reflection an opaque G-buffer pixel
 // would get, from an origin that never appears in the G-buffer itself. Only
 // the ORIGIN surface (P, N, roughness) is taken as a parameter -- every other
 // G-buffer read below happens at the ray's HIT point, which by construction

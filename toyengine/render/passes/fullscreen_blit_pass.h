@@ -7,7 +7,7 @@
  * beyond a single already-computed texture to show. The fragment shader is supplied by
  * the caller, so the same pass can back any "show me this one texture" view; toyengine's
  * own `debug_view` channels currently need the camera/light/shadow sets this pass
- * doesn't declare (see `PixelRenderPipeline::debug_view_pass_`, a gfxcoopa
+ * doesn't declare (see `ToyRenderPipeline::debug_view_pass_`, a gfxcoopa
  * `DeferredLightingPass` instance instead), so nothing in this repo instantiates it yet.
  */
 
@@ -17,15 +17,7 @@
 #include <memory>
 #include <string>
 
-#include <gfxcoopa/core/device.h>
-#include <gfxcoopa/pipeline/pipeline.h>
-#include <gfxcoopa/pipeline/render_pass.h>
-#include <gfxcoopa/pipeline/descriptor.h>
-#include <gfxcoopa/pipeline/shader.h>
 #include <gfxcoopa/command/command_buffer.h>
-#include <gfxcoopa/engine/util/sampler.h>
-#include <gfxcoopa/types/enums.h>
-#include <gfxcoopa/types/texture_view.h>
 
 namespace toy {
 namespace render {
@@ -46,30 +38,7 @@ public:
     FullscreenBlitPass(coopa::gfx::core::Device& device,
                        coopa::gfx::pipeline::RenderPass& target_pass,
                        const std::string& vert_spv,
-                       const std::string& frag_spv)
-    {
-        using namespace coopa::gfx;
-
-        vert_shader_ = std::make_unique<pipeline::Shader>(device, vert_spv, ShaderStage::Vertex);
-        frag_shader_ = std::make_unique<pipeline::Shader>(device, frag_spv, ShaderStage::Fragment);
-
-        desc_layout_ = std::make_unique<pipeline::DescriptorSetLayout>(
-            pipeline::DescriptorLayoutBuilder()
-                .combined_sampler(0, ShaderStage::Fragment)
-                .build(device));
-        desc_pool_ = std::make_unique<pipeline::DescriptorPool>(
-            pipeline::DescriptorPoolBuilder().add_sets(*desc_layout_, 1).build(device));
-        desc_set_ = std::make_unique<pipeline::DescriptorSet>(device, *desc_pool_, *desc_layout_);
-
-        pipeline::PipelineDesc desc;
-        desc.shaders = { vert_shader_.get(), frag_shader_.get() };
-        desc.descriptor_layouts = { desc_layout_.get() };
-        desc.raster.cull = CullMode::None;
-        desc.depth.test  = false;
-        desc.depth.write = false;
-
-        pipeline_ = std::make_unique<pipeline::Pipeline>(device, target_pass, desc);
-    }
+                       const std::string& frag_spv);
 
     FullscreenBlitPass(const FullscreenBlitPass&) = delete;
     FullscreenBlitPass& operator=(const FullscreenBlitPass&) = delete;
@@ -85,13 +54,7 @@ public:
     }
 
     /** @brief Draws the fullscreen triangle over a viewport of the given size. */
-    void draw(coopa::gfx::command::CommandBuffer& cmd, uint32_t viewport_w, uint32_t viewport_h) const {
-        cmd.bind_pipeline(*pipeline_);
-        cmd.set_viewport(0.0f, 0.0f, static_cast<float>(viewport_w), static_cast<float>(viewport_h));
-        cmd.set_scissor(0, 0, viewport_w, viewport_h);
-        cmd.bind_descriptor_set(*desc_set_);
-        cmd.draw(3);
-    }
+    void draw(coopa::gfx::command::CommandBuffer& cmd, uint32_t viewport_w, uint32_t viewport_h) const;
 
 private:
     std::unique_ptr<coopa::gfx::pipeline::Shader>              vert_shader_;

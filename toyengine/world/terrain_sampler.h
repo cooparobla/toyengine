@@ -87,7 +87,7 @@ struct TerrainParams {
      * @brief Chunks of terrain kept loaded in every direction from the camera's chunk.
      *
      * The live region is a square of side `2 * view_radius + 1`. It sets how much geometry is
-     * resident and meshed; what is DRAWN is narrower -- toy::render::PixelRenderPipeline
+     * resident and meshed; what is DRAWN is narrower -- toy::render::ToyRenderPipeline
      * frustum-culls every chunk against the camera and each shadow view separately.
      */
     std::int32_t view_radius = 3;

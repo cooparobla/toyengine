@@ -60,6 +60,10 @@ layout(set = 1, binding = 0) uniform VolumetricsUBO {
                            // y = composite lookup jitter (froxels / slices; 0 = off)
     // Point/spot shadows -- LightUBO::local_shadows' copy (gfx/local_shadow.glsl).
     GfxLocalShadowBlock local_shadows;
+    // The cloud layer's shadow map over the sun's in-scatter (toyengine's cloud_shadow.glsl;
+    // the sampler is binding 4 of the shadow set). cloud_shadow.w = 0: off.
+    vec4 cloud_shadow;
+    vec4 cloud_shadow_layer;
 } u_vol;
 
 #endif // GFX_VOLUMETRICS_UBO_GLSL

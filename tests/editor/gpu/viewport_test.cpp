@@ -10,6 +10,7 @@
 #include <gfxcoopa/util/image_readback.h>
 
 #include "editor/support/editor_session.h"
+#include <toyengine/render/toy_render_pipeline.h>
 
 COOPA_TEST_SUITE("viewport");
 

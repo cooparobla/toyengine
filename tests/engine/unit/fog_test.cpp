@@ -11,7 +11,7 @@
 
 #include <glm/glm.hpp>
 #include <toyengine/render/fog_math.h>
-#include <toyengine/render/pixel_render_config.h>
+#include <toyengine/render/toy_render_config.h>
 
 #include "engine/support/checks.h"
 
@@ -25,7 +25,7 @@ COOPA_TEST_SUITE("fog");
 COOPA_TEST(height_fog_transmittance_matches_a_numeric_integral) {
     using toy::render::fog_height_tau;
     using toy::render::fog_transmittance;
-    toy::render::PixelRenderConfig c;
+    toy::render::ToyRenderConfig c;
     c.fog_enabled = true;
     c.fog_mode = 1;
     c.fog_density = 0.02f;

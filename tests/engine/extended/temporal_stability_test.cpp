@@ -18,6 +18,7 @@
 
 #include <glm/glm.hpp>
 #include <toyengine/core/engine.h>
+#include <toyengine/render/toy_render_pipeline.h>
 #include <toyengine/scene/camera_controller.h>
 #include <toyengine/weather/weather_system.h>
 #include <toyengine/world/terrain_component.h>
@@ -239,7 +240,7 @@ COOPA_TEST(sky_clouds_are_temporally_stable) {
     // (aa_mode is startup-fixed: a second engine.)
     toy::core::AppConfig low_config = make_test_config("assets/scenes/tests/rendering/sky_test/scene.yaml", 480, 270, 480, 270);
     low_config.render.aa_mode = "fxaa";
-    low_config.render.sky_quality = toy::render::RenderQuality::Low;
+    low_config.render.cloud_quality = toy::render::RenderQuality::Low;
     low_config.render.auto_exposure_enabled = false;
     low_config.render.bloom_enabled = false;
     low_config.render.shadows_enabled = false;
@@ -249,7 +250,7 @@ COOPA_TEST(sky_clouds_are_temporally_stable) {
         lw->set_condition("cloudy", 0.0f);
     }
     low.pipeline().render_config_mut().shadows_enabled = false;
-    low.pipeline().render_config_mut().sky_quality = toy::render::RenderQuality::Low;
+    low.pipeline().render_config_mut().cloud_quality = toy::render::RenderQuality::Low;
     if (coopa::scene::SceneObject* lc = low.scene().find_object("camera"); lc && lc->get_transform())
         lc->get_transform()->transform().set_rotation(glm::vec3(130.0f, 0.0f, 90.0f));
     tick_frames(low, 120);
@@ -262,4 +263,47 @@ COOPA_TEST(sky_clouds_are_temporally_stable) {
     if (flicker_low > limit_low) { dump_frame(c, "cloud_stable_low_a"); dump_frame(d, "cloud_stable_low_b"); }
     expect(flicker_low <= limit_low, "cloud stability: no TAA, low tier, frames agree (" + std::to_string(flicker_low) +
                                          " px differ by more than 2 levels, limit " + std::to_string(limit_low) + ")");
+}
+
+/**
+ * @brief Low volumetric clouds seen from above (topdown_sky_test) are as stable as the sky's: a
+ *        still orbit camera over still clouds gives consecutive frames that agree, with TAA and,
+ *        at the lowest tier, without it. Their march now ends at the ground and their layer is
+ *        composited over geometry (cloud_composite.frag), so this is a different path from the
+ *        sky's -- and their shadows come from a map rebuilt every frame, which must not shimmer
+ *        either.
+ */
+COOPA_TEST(topdown_clouds_are_temporally_stable) {
+    ScopedEnv fixed_dt("FIXED_DT", "0");
+    ScopedEnv no_input("NO_INPUT", "1");
+    for (const bool taa : {true, false}) {
+        toy::core::AppConfig config = make_test_config("assets/scenes/tests/rendering/topdown_sky_test/scene.yaml", 480, 270, 480, 270);
+        config.render.aa_mode = taa ? "taa" : "fxaa";
+        config.render.cloud_quality = taa ? toy::render::RenderQuality::High : toy::render::RenderQuality::Low;
+        config.render.auto_exposure_enabled = false;
+        config.render.bloom_enabled = false;
+        config.render.shadows_enabled = false;
+        toy::core::Engine engine(std::move(config));
+        auto& cfg = engine.pipeline().render_config_mut();
+        cfg.shadows_enabled = false;
+        cfg.outline_enabled = false;
+        cfg.cloud_quality = taa ? toy::render::RenderQuality::High : toy::render::RenderQuality::Low;
+        if (toy::weather::WeatherSystem* w = engine.weather()) {
+            w->set_time(11.0f);
+            w->set_condition("cloudy", 0.0f);
+        }
+        tick_frames(engine, 120);
+        const std::string tag = taa ? "taa" : "no taa, low tier";
+        expect(engine.pipeline().volumetric_clouds_traced() && engine.pipeline().cloud_shadows_active(),
+               "topdown stability (" + tag + "): the low clouds and their shadows are on");
+        const Frame a = engine.capture_image(true);
+        tick_frames(engine, 1);
+        const Frame b = engine.capture_image(true);
+        expect(black_block_pixels(a) == 0, "topdown stability (" + tag + "): no black (NaN) blocks");
+        const long long flicker = count_diff(a, b, taa ? 3 : 2);
+        const long long limit = long(a.width * a.height) / (taa ? 200 : 1000);
+        if (flicker > limit) { dump_frame(a, "topdown_stable_a"); dump_frame(b, "topdown_stable_b"); }
+        expect(flicker <= limit, "topdown stability (" + tag + "): consecutive frames agree (" + std::to_string(flicker) +
+                                     " px differ, limit " + std::to_string(limit) + ")");
+    }
 }

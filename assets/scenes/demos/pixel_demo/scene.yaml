@@ -120,7 +120,7 @@ scene:
           children: []
 
     # Transparency test: a static BLEND glass sphere (materials/glass), resting on the plane
-    # beside the pillar. alpha < 1 means it does NOT cast a shadow (see PixelRenderPipeline's
+    # beside the pillar. alpha < 1 means it does NOT cast a shadow (see ToyRenderPipeline's
     # record_directional_shadow_/record_point_shadow_: a BLEND material only casts a
     # shadow at alpha == 1.0, since this engine's single-hard-compare shadow pass has
     # no way to draw a partial shadow for a partially transparent occluder).
@@ -138,7 +138,7 @@ scene:
 
     # SDF forward-blend test: a BLEND SdfRenderer placed apart from glass_sphere in
     # world space, but close enough that the orbiting camera repeatedly crosses the two in
-    # screen space over a revolution. Proves PixelRenderPipeline::record_transparent_()'s
+    # screen space over a revolution. Proves ToyRenderPipeline::record_transparent_()'s
     # merged back-to-front draw list: at each crossing, whichever of the mesh sphere or
     # this SDF sphere is actually farther from the camera should composite BEHIND the
     # other, with no popping -- if the two kinds were drawn in two separate passes instead
@@ -275,7 +275,7 @@ scene:
     # almost nothing, so what's on screen is the emissive term alone. Note the engine has no
     # emissive-as-a-light-source concept: this orb does NOT illuminate the sphere directly, it
     # only bleeds onto it via the screen-space SSR/SSGI terms (and, separately, via the bloom
-    # composite in pixel_stylize.frag, which is a screen-space glow, not a lighting effect
+    # composite in stylize.frag, which is a screen-space glow, not a lighting effect
     # either) -- and, being OPAQUE, it still casts a normal directional shadow (the shadow pass
     # only reads material.gpu_alpha_cutoff(), for CUTOUT's masked-shadow support -- see
     # cutout_sphere above -- and material.alpha/is_blended() for the BLEND-caster rule; an
@@ -477,7 +477,7 @@ scene:
         - type: PointLight
           color: { r: 0.5, g: 0.7, b: 1.0 }
           intensity: 100.0
-          range: 100.0  # scaled to this scene's ~8-unit floor -- range now directly controls the light's visible glow width (see pixel_lighting.frag); much larger than the scene itself (this was briefly 100) hides the effect entirely
+          range: 100.0  # scaled to this scene's ~8-unit floor -- range now directly controls the light's visible glow width (see toy_lighting.frag); much larger than the scene itself (this was briefly 100) hides the effect entirely
           cast_shadows: true
           attenuation_constant: 4.0  # falloff sharpness -- 4.0 keeps this engine's crisp, cel-shaded cutoff
       children: []

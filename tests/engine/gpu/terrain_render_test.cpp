@@ -16,6 +16,7 @@
 
 #include <glm/glm.hpp>
 #include <toyengine/core/engine.h>
+#include <toyengine/render/toy_render_pipeline.h>
 #include <toyengine/scene/camera_controller.h>
 #include <toyengine/scene/free_mover.h>
 #include <toyengine/world/terrain_component.h>

@@ -21,10 +21,6 @@
 
 #include <uicoopa/binding/ui_handle.h>
 
-#include <coopa/event/signal.h>
-#include <coopa/scene/component.h>
-#include <coopa/scene/scene.h>
-#include <coopa/scene/scene_loader.h>
 
 #include <iostream>
 #include <string>
@@ -37,15 +33,8 @@ namespace toy::ui {
  *        `parent`, or as a root object -- started and ready.
  * @return The UI's root object, or null (logged) if the asset could not be loaded.
  */
-inline coopa::scene::SceneObject* spawn(coopa::scene::Scene& scene, const std::string& ref,
-                                        coopa::scene::SceneObject* parent = nullptr) {
-    try {
-        return coopa::scene::SceneLoader::spawn(scene, ref, parent);
-    } catch (const std::exception& e) {
-        std::cerr << "[toyengine] ui::spawn('" << ref << "') failed: " << e.what() << "\n";
-        return nullptr;
-    }
-}
+coopa::scene::SceneObject* spawn(coopa::scene::Scene& scene, const std::string& ref,
+                                        coopa::scene::SceneObject* parent = nullptr);
 
 /** @brief spawn(), wrapped in a UiHandle (empty if it failed). */
 inline coopa::ui::UiHandle open(coopa::scene::Scene& scene, const std::string& ref,
@@ -57,10 +46,7 @@ inline coopa::ui::UiHandle open(coopa::scene::Scene& scene, const std::string& r
 inline void close(coopa::scene::Scene& scene, coopa::scene::SceneObject* root) {
     if (root) scene.commands_for(coopa::job::k_main_thread_index).destroy_object(root);
 }
-inline void close(coopa::scene::Scene& scene, coopa::ui::UiHandle& ui) {
-    close(scene, ui.root());
-    ui = coopa::ui::UiHandle();
-}
+void close(coopa::scene::Scene& scene, coopa::ui::UiHandle& ui);
 
 /** @brief The first object named `name` in the scene, as a UiHandle (empty if none). */
 inline coopa::ui::UiHandle find(coopa::scene::Scene& scene, const std::string& name) {
@@ -90,12 +76,7 @@ public:
 
     std::string type_name() const override { return "UiController"; }
 
-    void start() override {
-        coopa::scene::SceneObject* root = owner;
-        if (!ui_object.empty() && scene) root = scene->find_object(ui_object);
-        handle_ = coopa::ui::UiHandle(root);
-        if (handle_) bind(handle_);
-    }
+    void start() override;
 
     coopa::ui::UiHandle& ui() { return handle_; }
 

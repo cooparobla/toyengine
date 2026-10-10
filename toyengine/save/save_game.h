@@ -48,27 +48,11 @@ namespace detail {
 template<typename T> struct is_vector : std::false_type {};
 template<typename T, typename A> struct is_vector<std::vector<T, A>> : std::true_type {};
 
-inline fkyaml::node vec_node(const float* v, int n) {
-    static const char* const k[] = {"x", "y", "z", "w"};
-    fkyaml::node out = fkyaml::node::mapping();
-    for (int i = 0; i < n; ++i) out[k[i]] = fkyaml::node(static_cast<double>(v[i]));
-    return out;
-}
+fkyaml::node vec_node(const float* v, int n);
 
-inline bool read_float(const fkyaml::node& n, float& out) {
-    if (n.is_float_number()) { out = static_cast<float>(n.get_value<double>()); return true; }
-    if (n.is_integer())      { out = static_cast<float>(n.get_value<int64_t>()); return true; }
-    return false;
-}
+bool read_float(const fkyaml::node& n, float& out);
 
-inline bool read_vec(const fkyaml::node& n, float* v, int n_comp) {
-    static const char* const k[] = {"x", "y", "z", "w"};
-    if (!n.is_mapping()) return false;
-    for (int i = 0; i < n_comp; ++i) {
-        if (!n.contains(k[i]) || !read_float(n.at(k[i]), v[i])) return false;
-    }
-    return true;
-}
+bool read_vec(const fkyaml::node& n, float* v, int n_comp);
 
 /** @brief A value as a YAML node. */
 template<typename T>
@@ -202,44 +186,21 @@ public:
 
     /** @brief The child mapping `key`, created (replacing a non-mapping value) if needed;
      *         on a read-only handle, the read-only lookup below. */
-    SaveNode section(const std::string& key) {
-        if (!writable_) return std::as_const(*this).section(key);
-        fkyaml::node& n = mutable_node_();
-        if (!n.contains(key) || !n[key].is_mapping()) n[key] = fkyaml::node::mapping();
-        return SaveNode(&n[key], true);
-    }
+    SaveNode section(const std::string& key);
     /** @brief The child mapping `key`, read-only; invalid (reads as empty) if missing. */
-    SaveNode section(const std::string& key) const {
-        if (!has(key) || !node_->at(key).is_mapping()) return SaveNode();
-        return SaveNode(&(*node_)[key], false);
-    }
+    SaveNode section(const std::string& key) const;
 
     /** @brief The keys of this mapping, in document order. */
-    std::vector<std::string> keys() const {
-        std::vector<std::string> out;
-        if (!valid()) return out;
-        for (const auto& [k, v] : node_->as_map()) {
-            (void)v;
-            if (k.is_string()) out.push_back(k.get_value<std::string>());
-        }
-        return out;
-    }
+    std::vector<std::string> keys() const;
 
     /** @brief The underlying mapping (null node for an invalid handle). */
-    const fkyaml::node& node() const {
-        static const fkyaml::node none;
-        return node_ ? *node_ : none;
-    }
+    const fkyaml::node& node() const;
 
 private:
     fkyaml::node* node_ = nullptr;
     bool writable_ = false;
 
-    fkyaml::node& mutable_node_() {
-        if (!writable_ || !node_) throw std::logic_error("SaveNode: writing through a read-only save section");
-        if (!node_->is_mapping()) *node_ = fkyaml::node::mapping();
-        return *node_;
-    }
+    fkyaml::node& mutable_node_();
 };
 
 /**
@@ -252,10 +213,7 @@ public:
     explicit SaveGame(fkyaml::node root) : root_(std::move(root)) { normalize_(); }
 
     /** @brief The save format version the document was written with (0 when it has none). */
-    int version() const {
-        return root_.contains("version") && root_.at("version").is_integer()
-                   ? static_cast<int>(root_.at("version").get_value<int64_t>()) : 0;
-    }
+    int version() const;
     void set_version(int v) { root_["version"] = fkyaml::node(static_cast<int64_t>(v)); }
 
     /** @brief Engine-written facts (slot, scene, time, play_time); read-only to most games. */
@@ -289,13 +247,7 @@ private:
     SaveNode objects_() { return SaveNode(&root_["objects"], true); }
     SaveNode objects_() const { return SaveNode(&root_["objects"], false); }
 
-    void normalize_() {
-        if (!root_.is_mapping()) root_ = fkyaml::node::mapping();
-        for (const char* k : {"meta", "global", "objects"}) {
-            if (!root_.contains(k) || !root_[k].is_mapping()) root_[k] = fkyaml::node::mapping();
-        }
-        if (!root_.contains("version")) set_version(0);
-    }
+    void normalize_();
 };
 
 }  // namespace save

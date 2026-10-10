@@ -3,7 +3,7 @@
  * @brief GPU skinning pre-pass: one compute dispatch per skinned mesh, all sharing one barrier,
  *        writing straight into each mesh's per-frame-slot dynamic vertex buffer.
  *
- * Owned by PixelRenderPipeline (created only when `render.skinning` is "gpu" and the device has
+ * Owned by ToyRenderPipeline (created only when `render.skinning` is "gpu" and the device has
  * compute). Each SkinnedMeshRenderer owns its own GPU data -- the static bind-pose buffer, a
  * per-slot palette ring and one descriptor set per slot against layout() -- and enqueue()s a
  * Job from Engine::upload_dynamic_meshes_(). record() runs at the very start of the frame's
@@ -25,11 +25,7 @@
 #include <vector>
 
 #include <gfxcoopa/command/command_buffer.h>
-#include <gfxcoopa/core/device.h>
 #include <gfxcoopa/memory/storage_buffer.h>
-#include <gfxcoopa/pipeline/compute_pipeline.h>
-#include <gfxcoopa/pipeline/descriptor.h>
-#include <gfxcoopa/types/enums.h>
 
 namespace toy {
 namespace render {
@@ -82,23 +78,7 @@ public:
      * @brief Uploads every queued palette, records one dispatch per mesh and a single
      *        compute_to_draw_barrier(). Outside any render pass. Returns the dispatch count.
      */
-    uint32_t record(coopa::gfx::command::CommandBuffer& cmd) {
-        if (jobs_.empty()) return 0;
-        cmd.bind_pipeline(pipeline_);
-        for (const Job& j : jobs_) {
-            if (j.palette && j.matrices && j.bone_count) {
-                j.palette->upload(j.frame_slot, j.matrices, sizeof(glm::mat4) * j.bone_count);
-            }
-            const uint32_t push[2] = {j.vertex_count, j.bone_count};
-            cmd.bind_descriptor_set(*j.set);
-            cmd.push_constants(coopa::gfx::ShaderStage::Compute, 0, sizeof(push), push);
-            cmd.dispatch(coopa::gfx::pipeline::ComputePipeline::groups_for(j.vertex_count, 64));
-        }
-        cmd.compute_to_draw_barrier();
-        const uint32_t n = static_cast<uint32_t>(jobs_.size());
-        jobs_.clear();
-        return n;
-    }
+    uint32_t record(coopa::gfx::command::CommandBuffer& cmd);
 
 private:
     coopa::gfx::core::Device&                 device_;

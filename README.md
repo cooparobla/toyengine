@@ -355,7 +355,7 @@ A project contains:
 |---|---|
 | `<target>.toy` | The project file (YAML): `target` (the executable name) and `engine:`, which holds `source` (`git@github.com:cooparobla/toyengine.git`), `ref` (the pinned commit) and optionally `link` (a local engine checkout). |
 | `assets/` | The project's content. It sits over this repo's `assets/`, which is the fallback for shaders, fonts, shared meshes and materials. `assets/shaders/*` compile with the engine and gfxcoopa shader headers on the include path. |
-| `src/` | C++ compiled into both the game and the editor, so the editor's Play runs it. Register components with `TOY_MODULE` ([`toyengine/core/module.h`](toyengine/core/module.h)). Describe them to the inspector with `register_component_schema()` under `#if TOY_EDITOR`. `src/main.cpp` replaces the game's `main`. `src/toyengine/<path>.h` replaces that engine header, and must keep its API. |
+| `src/` | C++ compiled into both the game and the editor, so the editor's Play runs it. Register components with `TOY_MODULE` ([`toyengine/core/module.h`](toyengine/core/module.h)). Describe them to the inspector with `register_component_schema()` under `#if TOY_EDITOR`. `src/main.cpp` replaces the game's `main`. Engine code is a compiled library, so changing it means editing (or forking) the engine checkout. |
 | `.libs/toyengine` | The engine and its submodules. `setup.sh` clones it at `engine.ref`, or symlinks it to `engine.link`. Git-ignored. |
 | `setup.sh build.sh run.sh editor.sh package.sh clean.sh` | The project's scripts (from [`templates/project/`](templates/project/)). |
 | `build_settings.yaml` | Build Settings: product name, version, bundle id, signing. Written by the editor; never shipped. |
@@ -476,6 +476,13 @@ libs/           pinned submodules: libcoopa (scene graph, assets, jobs), gfxcoop
 ```
 
 Each module has its own README with the details.
+
+`toyengine/` and `editor/` are compiled once, as the static libraries `toyengine::engine` and
+`toyengine::editor`. Each header declares, and its `.cpp` beside it holds the function bodies and
+the includes only those bodies need. Templates, constexpr code and the small hot math headers
+(`toy_render_math.h`, `particle_math.h`, `water_waves.h`, `tile_topology.h`, ...) stay inline. A
+game, editor or test source then compiles only its own code, so editing an engine `.cpp`
+rebuilds that one file and relinks. The `libs/` submodules are still header-only.
 
 ## Platform notes
 

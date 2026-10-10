@@ -55,7 +55,7 @@ layout(push_constant) uniform SsaoPushConstants {
     // this EVERY frame the accumulator is running -- the resolve keeps a per-pixel running
     // average over the rotating draws, so still and moving views show the same estimate --
     // and holds it only once the camera has been still long enough for the resolve to
-    // freeze the accumulated image (PixelRenderPipeline's ssao_frozen_).
+    // freeze the accumulated image (ToyRenderPipeline's ssao_frozen_).
     int   noise_rotation;
     int   max_mip;          // top usable Hi-Z mip for the march
     float max_radius_px;    // upper clamp on the march extent in render-target pixels

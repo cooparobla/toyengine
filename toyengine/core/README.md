@@ -4,7 +4,7 @@ Application lifetime and configuration.
 
 | File | Purpose |
 |---|---|
-| [`engine.h`](engine.h) | `Engine` — owns a `coopa::job::JobEngine`, then a `gfx::app::Context` (Window → Instance → Surface → Device → Allocator → Swapchain → CommandPool → RenderPass → Renderer, plus frame timing and resize handling), then `PixelRenderPipeline`, `AssetManager` and `SceneManager` on top. `run()`/`tick()` drive the loop. |
+| [`engine.h`](engine.h) | `Engine` — owns a `coopa::job::JobEngine`, then a `gfx::app::Context` (Window → Instance → Surface → Device → Allocator → Swapchain → CommandPool → RenderPass → Renderer, plus frame timing and resize handling), then `ToyRenderPipeline`, `AssetManager` and `SceneManager` on top. `run()`/`tick()` drive the loop. |
 | [`config.h`](config.h) | `AppConfig::load(path)` — parses `assets/config.yaml` via fkYAML directly. Every field has an in-class default; missing or malformed keys fall back silently. Also layers a scene's `settings:` overrides (`with_scene_settings()`). |
 | [`scene_loading.h`](scene_loading.h) | Async scene loading: `SceneLoadOptions`, `SceneTransition`, `SceneLoadHandle` (what `Engine::load_scene_async()` takes and returns) and the transition layer it draws. |
 | [`runtime_paths.h`](runtime_paths.h) | Where a running game finds its files — the source checkout or a relocated package — including the shader search roots (project → toyengine → gfxcoopa → uicoopa) and the per-user data directory. |

@@ -29,7 +29,7 @@ COOPA_TEST(play_takes_input_on_click_and_hides_the_selection_outline) {
     for (const auto& [id, live] : app.sync().live_objects()) {
         if (live && live->get_component<coopa::gfx::engine::components::MeshRenderer>()) { mesh = id; break; }
     }
-    require(mesh != 0, "the default project has a mesh object");
+    coopa::test::require(mesh != 0, "the default project has a mesh object");
     app.document().select(mesh, false);
     tick(engine, 2);
     expect(app.selection_outlines_drawn() == 1, "the selected object is outlined in the editor");

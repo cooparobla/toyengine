@@ -2,10 +2,10 @@
 
 // Raymarches one BLEND SdfRenderer, lit and SSR-tracing, into the live HDR
 // colour image -- the SDF analogue of transparent.frag, sharing its exact
-// shading formula via pixel_forward_shading.glsl's gfx_pixel_forward_shade()
+// shading formula via toy_forward_shading.glsl's toy_forward_shade()
 // (see that file's doc). Runs inside TransparentPass's own render pass (see
 // SdfForwardPass), interleaved with BLEND meshes in one back-to-front sorted
-// draw list (PixelRenderPipeline::record_transparent_()).
+// draw list (ToyRenderPipeline::record_transparent_()).
 
 #include <gfx/sky.glsl>
 #include <gfx/brdf.glsl>
@@ -38,6 +38,7 @@ layout(set = 2, binding = 1) uniform sampler2DShadow local_shadow_atlas; // poin
 // The directional map AGAIN, through a plain nearest sampler: PCSS's blocker
 // search needs stored depths, which a compare sampler cannot return.
 layout(set = 2, binding = 3) uniform sampler2D dir_shadow_map_raw;
+layout(set = 2, binding = 4) uniform sampler2D cloud_shadow_map;   // cloud_shadow.glsl
 
 // Set 3: SdfData -- globals UBO + renderer/shape SSBOs (see
 // gfxcoopa/engine/data/sdf_data.h). Field order in `SdfGlobalsBlock` matches
@@ -65,7 +66,7 @@ layout(set = 6, binding = 0) uniform sampler2D u_scene_color;
 
 #include <gfx/ssr_trace_body.glsl>
 #include "indirect_hooks.glsl"
-#include "pixel_forward_shading.glsl"
+#include "toy_forward_shading.glsl"
 #include <gfx/sdf_scene_body.glsl>
 #include <gfx/fog.glsl>
 
@@ -125,7 +126,7 @@ void main() {
     p.ssr_cone_prefilter   = sdf_globals.ssr1.z;
     p.ssr_prev_frame       = sdf_globals.ssr_mip.y;
 
-    out_color = gfx_pixel_forward_shade(hit.pos, N, camera.camera_pos, camera.view, camera.proj, mat, p);
+    out_color = toy_forward_shade(hit.pos, N, camera.camera_pos, camera.view, camera.proj, mat, p);
 
     // Global fog at the hit's own distance; the opaque scene behind was fogged by FogPass.
     float dist = length(hit.pos - camera.camera_pos);

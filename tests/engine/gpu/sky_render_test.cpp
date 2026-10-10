@@ -1,9 +1,11 @@
 /**
  * @file sky_render_test.cpp
- * @brief The skies on the GPU: the physical sky follows the clock (blue noon, red sunset, stars
- *        only at night), clouds follow coverage and dim the sun, CPU and GPU zenith agree; the
- *        gradient sky costs nothing and round-trips exactly; topdown toon clouds show, fade and
- *        cast shadows. Cloud temporal stability is extended/temporal_stability.
+ * @brief The skies and clouds on the GPU: the physical sky follows the clock (blue noon, red
+ *        sunset, stars only at night), clouds follow coverage and dim the sun, CPU and GPU zenith
+ *        agree; the gradient sky costs nothing, takes clouds too and round-trips exactly; low
+ *        volumetric clouds cover the ground under a topdown camera, fade by height and cast
+ *        shadows; the flat toon clouds draw from above and below and cast shadows. Cloud temporal
+ *        stability is extended/temporal_stability.
  */
 
 #include <coopa/testing/test.h>
@@ -11,11 +13,13 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include <glm/glm.hpp>
 #include <toyengine/core/engine.h>
+#include <toyengine/render/toy_render_pipeline.h>
 #include <toyengine/weather/weather_system.h>
 
 #include "engine/support/checks.h"
@@ -111,6 +115,7 @@ COOPA_TEST(physical_sky_follows_the_clock_and_coverage) {
     cfg.outline_enabled = false;
     cfg.sky_model = "physical";
     cfg.clouds = true;
+    cfg.cloud_shadows = false;   // without shadows, the cover dims the sun uniformly
     cfg.cloud_coverage = 0.0f;
     tick_frames(engine, 2);
     const Frame clear = engine.capture_image(true);
@@ -122,6 +127,11 @@ COOPA_TEST(physical_sky_follows_the_clock_and_coverage) {
     if (cover_px <= long(clear.width * clear.height) / 5) { dump_frame(clear, "sky_test_clear"); dump_frame(overcast, "sky_test_overcast"); }
     expect(cover_px > long(clear.width * clear.height) / 5, "sky_test: full coverage changes the sky (" + std::to_string(cover_px) + " px)");
     expect(pl.sky_state().light_tint.g < clear_tint.g * 0.5f, "sky_test: ...and dims the sun");
+    cfg.cloud_shadows = true;
+    tick_frames(engine, 2);
+    expect(pl.sky_state().light_tint.g > clear_tint.g * 0.95f,
+           "sky_test: with cloud shadows the cover no longer dims the sun uniformly (the shadows do)");
+    cfg.cloud_shadows = false;
     expect(black_block_pixels(overcast) == 0, "sky_test: overcast has no black (NaN) blocks");
 
     // CPU zenith == GPU zenith: look straight up at a clear sky (no clouds, no sun in view), then
@@ -162,9 +172,17 @@ COOPA_TEST(gradient_sky_costs_nothing_and_round_trips) {
     expect(!pl.physical_sky_active() && pl.render_config().sky_model == "gradient", "sky: the gradient sky is the default");
     const Frame before = engine.capture_image(true);
     auto& cfg = pl.render_config_mut();
-    cfg.clouds = true;            // no effect without the physical sky
-    tick_frames(engine, 2);
-    expect(count_diff(before, engine.capture_image(true), 0) == 0, "sky: clouds without the physical sky change nothing");
+    // Clouds need no physical sky: over the gradient they draw too, still with no sky pass.
+    cfg.clouds = true;
+    cfg.cloud_type = "volumetric";
+    cfg.cloud_coverage = 0.6f;
+    tick_frames(engine, 4);
+    const Frame grad_clouds = engine.capture_image(true);
+    const long long grad_cloud_px = count_diff(before, grad_clouds, 4);
+    if (grad_cloud_px <= long(before.width * before.height) / 50) { dump_frame(before, "sky_grad_before"); dump_frame(grad_clouds, "sky_grad_clouds"); }
+    expect(grad_cloud_px > long(before.width * before.height) / 50,
+           "sky: volumetric clouds draw over the gradient sky (" + std::to_string(grad_cloud_px) + " px)");
+    expect(black_block_pixels(grad_clouds) == 0, "sky: gradient-sky clouds have no black (NaN) blocks");
     expect(pl.sky_atmosphere_pass().lut_renders() == 0, "sky: the gradient sky records no sky pass");
     cfg.sky_model = "physical";
     tick_frames(engine, 3);
@@ -180,73 +198,149 @@ COOPA_TEST(gradient_sky_costs_nothing_and_round_trips) {
     expect(back_px == 0, "sky: switching back restores the gradient sky exactly (" + std::to_string(back_px) + " px)");
 }
 
-/**
- * @brief Topdown mode (topdown_sky_test): the toon clouds show from a zoomed-out camera, fade
- *        away as it comes down (their shadows stay), and need no physical sky.
- */
-COOPA_TEST(topdown_clouds_show_fade_and_cast_shadows) {
-    ScopedEnv fixed_dt("FIXED_DT", "0");
-    ScopedEnv no_input("NO_INPUT", "1");
-    toy::core::AppConfig config = make_test_config("assets/scenes/tests/rendering/topdown_sky_test/scene.yaml", 480, 270, 480, 270);
+namespace {
+/// A topdown test scene's engine: noon, cloudy, every per-frame filter that would make A/B
+/// captures differ switched off.
+std::unique_ptr<toy::core::Engine> topdown_engine(const char* scene) {
+    toy::core::AppConfig config = make_test_config(scene, 480, 270, 480, 270);
     config.render.aa_mode = "off";
     config.render.auto_exposure_enabled = false;
     config.render.bloom_enabled = false;
     config.render.shadows_enabled = false;
-    toy::core::Engine engine(std::move(config));
-    toy::weather::WeatherSystem* w = engine.weather();
-    expect(w != nullptr, "topdown: the scene has its weather");
-    if (!w) return;
-    auto& pl = engine.pipeline();
-    auto& cfg = pl.render_config_mut();
+    auto engine = std::make_unique<toy::core::Engine>(std::move(config));
+    auto& cfg = engine->pipeline().render_config_mut();
     cfg.shadows_enabled = false;
     cfg.outline_enabled = false;
-    w->set_time(11.0f);
-    w->set_condition("cloudy", 0.0f);
-    tick_frames(engine, 4);
-    expect(cfg.topdown_mode, "topdown: the scene turns topdown_mode on");
+    if (toy::weather::WeatherSystem* w = engine->weather()) {
+        w->set_time(11.0f);
+        w->set_condition("cloudy", 0.0f);
+    }
+    tick_frames(*engine, 6);
+    return engine;
+}
+float mean_luma(const Frame& f) { return glm::dot(band_mean(f, 0.0f, 1.0f), glm::vec3(1.0f / 3.0f)); }
+}  // namespace
+
+/**
+ * @brief Low volumetric clouds under a topdown camera (topdown_sky_test: the gradient sky, a
+ *        small cloud_scale at 45 m): they cover the ground zoomed out, fade away as the camera
+ *        comes down (their shadows stay), cast shadows as dark as they are thick, and draw with
+ *        the physical sky too.
+ */
+COOPA_TEST(low_volumetric_clouds_cover_fade_and_shadow) {
+    ScopedEnv fixed_dt("FIXED_DT", "0");
+    ScopedEnv no_input("NO_INPUT", "1");
+    auto engine = topdown_engine("assets/scenes/tests/rendering/topdown_sky_test/scene.yaml");
+    auto& pl = engine->pipeline();
+    auto& cfg = pl.render_config_mut();
+    expect(cfg.clouds && cfg.cloud_type == "volumetric" && cfg.cloud_shadows && cfg.cloud_camera_fade,
+           "topdown: the scene has shadow-casting, height-faded volumetric clouds");
+    expect(!pl.physical_sky_active(), "topdown: ...over the gradient sky");
     const long long px = long(480 * 270);
 
-    // Zoomed out: clouds and shadows over the village.
-    const Frame on = engine.capture_image(true);
-    cfg.topdown_mode = false;
-    tick_frames(engine, 2);
-    const Frame off = engine.capture_image(true);
+    // Zoomed out: the clouds (and their shadows) over the village.
+    const Frame on = engine->capture_image(true);
+    cfg.clouds = false;
+    tick_frames(*engine, 12);   // the pond's SSR reflects the previous frame: let it settle
+    const Frame off = engine->capture_image(true);
     const long long cloud_px = count_diff(on, off, 8);
-    if (cloud_px < px / 20) { dump_frame(on, "topdown_on"); dump_frame(off, "topdown_off"); }
-    expect(cloud_px > px / 20, "topdown: the cloud layer shows zoomed out (" + std::to_string(cloud_px) + " px)");
+    if (cloud_px < px / 20) { dump_frame(on, "topdown_vol_on"); dump_frame(off, "topdown_vol_off"); }
+    expect(cloud_px > px / 20, "topdown: the low clouds show over the ground (" + std::to_string(cloud_px) + " px)");
     expect(black_block_pixels(on) == 0, "topdown: no black (NaN) blocks");
 
-    // The shadows alone (invisible clouds) darken the ground.
-    cfg.topdown_mode = true;
-    cfg.topdown_cloud_opacity = 0.0f;
-    tick_frames(engine, 2);
-    const Frame shadows = engine.capture_image(true);
-    const float lum_off = glm::dot(band_mean(off, 0.0f, 1.0f), glm::vec3(1.0f / 3.0f));
-    const float lum_sh = glm::dot(band_mean(shadows, 0.0f, 1.0f), glm::vec3(1.0f / 3.0f));
-    expect(lum_sh < lum_off - 1.0f, "topdown: cloud shadows darken the ground (" + std::to_string(lum_sh) + " vs " +
-                                        std::to_string(lum_off) + ")");
+    // Faded out (the fade heights moved above the orbit camera, which owns its position): the
+    // layer is gone and its march skipped, but the shadows stay and darken the ground.
+    cfg.clouds = true;
+    cfg.cloud_fade_start = 500.0f;
+    cfg.cloud_fade_end = 600.0f;
+    const uint64_t shadow_renders = pl.cloud_shadow_pass().renders();
+    tick_frames(*engine, 3);
+    expect(!pl.volumetric_clouds_traced(), "topdown: faded out, the march is skipped");
+    expect(pl.cloud_shadow_pass().renders() > shadow_renders, "topdown: ...but the shadow map still renders");
+    const Frame shadows = engine->capture_image(true);
+    if (!(mean_luma(shadows) < mean_luma(off) - 1.0f)) { dump_frame(shadows, "topdown_vol_shadows"); dump_frame(off, "topdown_vol_off"); }
+    expect(mean_luma(shadows) < mean_luma(off) - 1.0f, "topdown: cloud shadows darken the ground (" +
+                                                           std::to_string(mean_luma(shadows)) + " vs " + std::to_string(mean_luma(off)) + ")");
 
-    // Zoomed in, below the fade: with shadows off, the layer changes nothing. (The orbit rig
-    // owns the camera's position, so the fade heights move up past the camera instead.)
-    cfg.topdown_cloud_opacity = 0.92f;
-    cfg.topdown_shadow_strength = 0.0f;
-    cfg.topdown_fade_start = 500.0f;
-    cfg.topdown_fade_end = 600.0f;
-    tick_frames(engine, 3);
-    const Frame near_on = engine.capture_image(true);
-    cfg.topdown_mode = false;
-    tick_frames(engine, 2);
-    const Frame near_off = engine.capture_image(true);
-    expect(count_diff(near_on, near_off, 0) == 0, "topdown: zoomed in, the clouds have faded away");
+    // Faded out with shadows off: the layer changes nothing at all. (12 frames: the pond's SSR
+    // reflects the previous frame's colour, shadows and all, so let it settle.)
+    cfg.cloud_shadows = false;
+    tick_frames(*engine, 12);
+    const long long faded_px = count_diff(engine->capture_image(true), off, 0);
+    expect(faded_px == 0, "topdown: faded out and shadowless, the clouds change nothing (" + std::to_string(faded_px) + " px)");
 
-    // Back out, gradient sky: the layer needs no physical sky.
-    cfg.topdown_fade_start = 15.0f;
-    cfg.topdown_fade_end = 60.0f;
-    cfg.sky_model = "gradient";
-    tick_frames(engine, 3);
-    const Frame grad_off = engine.capture_image(true);
-    cfg.topdown_mode = true;
-    tick_frames(engine, 2);
-    const Frame grad_on = engine.capture_image(true);
-    expect(count_diff(grad_on, grad_off, 8) > px / 20, "topdown: the clouds draw with the gradient sky too");
+    // Back out, physical sky: the same clouds draw there too.
+    cfg.cloud_fade_start = 15.0f;
+    cfg.cloud_fade_end = 60.0f;
+    cfg.cloud_shadows = true;
+    cfg.sky_model = "physical";
+    tick_frames(*engine, 3);
+    const Frame phys_on = engine->capture_image(true);
+    cfg.clouds = false;
+    tick_frames(*engine, 2);
+    const Frame phys_off = engine->capture_image(true);
+    expect(count_diff(phys_on, phys_off, 8) > px / 20, "topdown: the low clouds draw under the physical sky too");
+    expect(black_block_pixels(phys_on) == 0, "topdown: physical sky, no black (NaN) blocks");
+}
+
+/**
+ * @brief The flat (toon) clouds: from above (topdown_flat_clouds_test) they show zoomed out and
+ *        cast shadows -- at opacity 0 the shadows alone remain -- and from below (sky_test, the
+ *        layer raised over a ground camera) they draw as a deck across the sky.
+ */
+COOPA_TEST(flat_clouds_draw_from_above_and_below_and_shadow) {
+    ScopedEnv fixed_dt("FIXED_DT", "0");
+    ScopedEnv no_input("NO_INPUT", "1");
+    const long long px = long(480 * 270);
+    {
+        auto engine = topdown_engine("assets/scenes/tests/rendering/topdown_flat_clouds_test/scene.yaml");
+        auto& pl = engine->pipeline();
+        auto& cfg = pl.render_config_mut();
+        expect(cfg.clouds && cfg.cloud_type == "flat" && cfg.cloud_shadows, "flat: the scene has shadow-casting flat clouds");
+        const Frame on = engine->capture_image(true);
+        cfg.clouds = false;
+        tick_frames(*engine, 2);
+        const Frame off = engine->capture_image(true);
+        const long long cloud_px = count_diff(on, off, 8);
+        if (cloud_px < px / 20) { dump_frame(on, "flat_on"); dump_frame(off, "flat_off"); }
+        expect(cloud_px > px / 20, "flat: the toon clouds show zoomed out (" + std::to_string(cloud_px) + " px)");
+        expect(black_block_pixels(on) == 0, "flat: no black (NaN) blocks");
+
+        cfg.clouds = true;
+        cfg.flat_cloud_opacity = 0.0f;
+        tick_frames(*engine, 2);
+        const Frame shadows = engine->capture_image(true);
+        expect(mean_luma(shadows) < mean_luma(off) - 1.0f, "flat: invisible clouds still shadow the ground (" +
+                                                               std::to_string(mean_luma(shadows)) + " vs " + std::to_string(mean_luma(off)) + ")");
+    }
+    {
+        toy::core::AppConfig config = make_test_config("assets/scenes/tests/rendering/sky_test/scene.yaml", 480, 270, 480, 270);
+        config.render.aa_mode = "off";
+        config.render.auto_exposure_enabled = false;
+        config.render.bloom_enabled = false;
+        config.render.shadows_enabled = false;
+        toy::core::Engine engine(std::move(config));
+        auto& cfg = engine.pipeline().render_config_mut();
+        cfg.shadows_enabled = false;
+        cfg.outline_enabled = false;
+        cfg.sky_model = "gradient";
+        cfg.cloud_type = "flat";
+        cfg.cloud_altitude = 250.0f;
+        cfg.cloud_thickness = 40.0f;
+        cfg.flat_cloud_size = 150.0f;
+        cfg.cloud_shadows = false;
+        if (toy::weather::WeatherSystem* w = engine.weather()) {
+            w->set_time(13.0f);
+            w->set_condition("cloudy", 0.0f);
+        }
+        tick_frames(engine, 4);
+        const Frame on = engine.capture_image(true);
+        cfg.clouds = false;
+        tick_frames(engine, 2);
+        const Frame off = engine.capture_image(true);
+        const long long deck_px = count_diff(on, off, 8);
+        if (deck_px < px / 50) { dump_frame(on, "flat_below_on"); dump_frame(off, "flat_below_off"); }
+        expect(deck_px > px / 50, "flat: seen from below, the deck draws across the sky (" + std::to_string(deck_px) + " px)");
+        expect(black_block_pixels(on) == 0, "flat: from below, no black (NaN) blocks");
+    }
 }

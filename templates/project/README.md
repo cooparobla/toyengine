@@ -17,7 +17,7 @@ A [toyengine](https://github.com/cooparobla/toyengine) project.
 |---|---|
 | `@TARGET@.toy` | Project file: build target and the engine pin (`engine.source` + `engine.ref`, or `engine.link` to build against a local toyengine checkout). |
 | `assets/` | Scenes, meshes, materials, textures, UI, `config.yaml`. Shadows the engine's own `assets/`, which stays the fallback (shaders, fonts, shared meshes/materials). `assets/shaders/*.vert/.frag` compile with the engine's and gfxcoopa's shader headers on the include path. |
-| `src/` | C++ compiled into the game and the editor. Register components with `TOY_MODULE` (see `src/game_module.cpp`). `src/main.cpp` replaces the engine's game `main`; `src/toyengine/<path>.h` replaces that engine header (keep its API). |
+| `src/` | C++ compiled into the game and the editor. Register components with `TOY_MODULE` (see `src/game_module.cpp`). `src/main.cpp` replaces the engine's game `main`. To change engine code, edit (or fork) `.libs/toyengine`. |
 | `.libs/toyengine` | The engine + its libraries (git-ignored; `./setup.sh` recreates it). |
 
 Change the engine pin with `toyhub upgrade . [--ref <ref>]`, or switch to a local checkout with `toyhub link . <engine dir>` (and back with `toyhub unlink .`).

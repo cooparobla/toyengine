@@ -4,7 +4,7 @@
  *        swapchain -- the nearest-neighbour upscale that gives the engine
  *        its pixel-art look.
  *
- * The destination rect (pixel_math::LetterboxRect, from compute_display_rect())
+ * The destination rect (toy_render_math::LetterboxRect, from compute_display_rect())
  * is either integer-scaled (config.upscale_mode == "integer": crisp NxN texel
  * blocks, letterboxed on every mismatched axis) or a fractional aspect-preserving
  * best fit (the default, "fit": fills the window as closely as the render aspect
@@ -14,7 +14,7 @@
  * Modeled directly on gfxcoopa's PresentPass (gfxcoopa/engine/passes/present_pass.h),
  * but PresentPass::draw() always fills the full swapchain extent with no x/y
  * offset, so it cannot letterbox. UpscalePass adds that offset via
- * pixel_math::LetterboxRect; everything else (single combined-image-sampler
+ * toy_render_math::LetterboxRect; everything else (single combined-image-sampler
  * descriptor, fullscreen triangle, no depth) is unchanged.
  */
 
@@ -24,17 +24,9 @@
 #include <memory>
 #include <string>
 
-#include <gfxcoopa/core/device.h>
-#include <gfxcoopa/pipeline/pipeline.h>
-#include <gfxcoopa/pipeline/render_pass.h>
-#include <gfxcoopa/pipeline/descriptor.h>
-#include <gfxcoopa/pipeline/shader.h>
 #include <gfxcoopa/command/command_buffer.h>
-#include <gfxcoopa/engine/util/sampler.h>
-#include <gfxcoopa/types/enums.h>
-#include <gfxcoopa/types/texture_view.h>
 
-#include <toyengine/render/pixel_math.h>
+#include <toyengine/render/toy_render_math.h>
 
 namespace toy {
 namespace render {
@@ -51,32 +43,7 @@ public:
     UpscalePass(coopa::gfx::core::Device& device,
                coopa::gfx::pipeline::RenderPass& swapchain_pass,
                const std::string& vert_spv,
-               const std::string& frag_spv)
-    {
-        using namespace coopa::gfx;
-
-        vert_shader_ = std::make_unique<pipeline::Shader>(device, vert_spv, ShaderStage::Vertex);
-        frag_shader_ = std::make_unique<pipeline::Shader>(device, frag_spv, ShaderStage::Fragment);
-
-        desc_layout_ = std::make_unique<pipeline::DescriptorSetLayout>(
-            pipeline::DescriptorLayoutBuilder()
-                .combined_sampler(0, ShaderStage::Fragment)
-                .build(device));
-
-        desc_pool_ = std::make_unique<pipeline::DescriptorPool>(
-            pipeline::DescriptorPoolBuilder().add_sets(*desc_layout_, 1).build(device));
-
-        desc_set_ = std::make_unique<pipeline::DescriptorSet>(device, *desc_pool_, *desc_layout_);
-
-        pipeline::PipelineDesc desc;
-        desc.shaders = { vert_shader_.get(), frag_shader_.get() };
-        desc.descriptor_layouts = { desc_layout_.get() };
-        desc.raster.cull = CullMode::None;
-        desc.depth.test  = false;
-        desc.depth.write = false;
-
-        pipeline_ = std::make_unique<pipeline::Pipeline>(device, swapchain_pass, desc);
-    }
+               const std::string& frag_spv);
 
     UpscalePass(const UpscalePass&) = delete;
     UpscalePass& operator=(const UpscalePass&) = delete;
@@ -97,14 +64,7 @@ public:
      * The swapchain pass's clear (black, by convention) fills the bars
      * outside `rect` -- this call only needs to draw inside it.
      */
-    void draw(coopa::gfx::command::CommandBuffer& cmd, const LetterboxRect& rect) const {
-        cmd.bind_pipeline(*pipeline_);
-        cmd.set_viewport(static_cast<float>(rect.x), static_cast<float>(rect.y),
-                         static_cast<float>(rect.w), static_cast<float>(rect.h));
-        cmd.set_scissor(rect.x, rect.y, rect.w, rect.h);
-        cmd.bind_descriptor_set(*desc_set_);
-        cmd.draw(3); // Fullscreen triangle
-    }
+    void draw(coopa::gfx::command::CommandBuffer& cmd, const LetterboxRect& rect) const;
 
 private:
     std::unique_ptr<coopa::gfx::pipeline::Shader>              vert_shader_;

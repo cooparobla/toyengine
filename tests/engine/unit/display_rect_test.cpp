@@ -1,13 +1,13 @@
 /**
  * @file display_rect_test.cpp
- * @brief toyengine/render/pixel_math.h's presentation maths: how the internal render extent is
+ * @brief toyengine/render/toy_render_math.h's presentation maths: how the internal render extent is
  *        chosen (fixed / divisor) and how it is fitted into the window (integer letterbox vs
  *        fractional fit). Exact integer answers.
  */
 
 #include <coopa/testing/test.h>
 
-#include <toyengine/render/pixel_math.h>
+#include <toyengine/render/toy_render_math.h>
 
 #include "engine/support/checks.h"
 
@@ -65,13 +65,13 @@ COOPA_TEST(fit_uses_a_fractional_scale_and_bars_one_axis_only) {
 }
 
 COOPA_TEST(display_rect_dispatches_on_upscale_mode) {
-    toy::render::PixelRenderConfig integer_cfg;
+    toy::render::ToyRenderConfig integer_cfg;
     integer_cfg.upscale_mode = "integer";
     auto integer_rect = toy::render::compute_display_rect(integer_cfg, 1920, 1080, 720, 480);
     expect(integer_rect.w == 1440 && integer_rect.h == 960,
           "display_rect: upscale_mode=integer dispatches to compute_letterbox");
 
-    toy::render::PixelRenderConfig fit_cfg;
+    toy::render::ToyRenderConfig fit_cfg;
     fit_cfg.upscale_mode = "fit";
     auto fit_rect = toy::render::compute_display_rect(fit_cfg, 1920, 1080, 720, 480);
     expect(fit_rect.w == 1620 && fit_rect.h == 1080,
@@ -80,7 +80,7 @@ COOPA_TEST(display_rect_dispatches_on_upscale_mode) {
 
 COOPA_TEST(render_extent_follows_fixed_and_divisor_modes) {
     {
-        toy::render::PixelRenderConfig cfg;
+        toy::render::ToyRenderConfig cfg;
         cfg.resolution_mode = "fixed";
         cfg.render_width = 480;
         cfg.render_height = 270;
@@ -88,7 +88,7 @@ COOPA_TEST(render_extent_follows_fixed_and_divisor_modes) {
         expect(e.width == 480 && e.height == 270, "render_resolution: fixed mode ignores swapchain size");
     }
     {
-        toy::render::PixelRenderConfig cfg;
+        toy::render::ToyRenderConfig cfg;
         cfg.resolution_mode = "divisor";
         cfg.scale_divisor = 4;
         toy::render::RenderExtent e = toy::render::compute_render_extent(cfg, 1920, 1080);

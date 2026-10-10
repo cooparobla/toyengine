@@ -3,11 +3,11 @@
 
 // refraction.glsl -- screen-space refraction for BLEND MESH objects only.
 //
-// Deliberately NOT part of pixel_forward_shading.glsl: that file's
-// gfx_pixel_forward_shade() is shared byte-for-byte with sdf_forward.frag, and
+// Deliberately NOT part of toy_forward_shading.glsl: that file's
+// toy_forward_shade() is shared byte-for-byte with sdf_forward.frag, and
 // SDF glass is excluded from refraction (see the refraction plan's "Scope"
 // section for why). This file is included by transparent.frag alone, and
-// operates on the vec4 gfx_pixel_forward_shade() already returned rather than
+// operates on the vec4 toy_forward_shade() already returned rather than
 // reaching into its internals -- so the shared shading body needs no changes
 // and the SDF forward path is untouched.
 //
@@ -21,12 +21,12 @@
 //                         for gfx_refraction_apply()'s occluder-validity walk.
 //   - #include <gfx/brdf.glsl> (fresnel_schlick), <gfx/ssr_common.glsl>
 //     (ssr_ndc_to_uv, ssr_texel_world_size), <gfx/ssr_trace_body.glsl>
-//     (gfx_ssr_get_view_z), and "pixel_forward_shading.glsl"
+//     (gfx_ssr_get_view_z), and "toy_forward_shading.glsl"
 //     (gfx_forward_silhouette_fade) -- all already included by
 //     transparent.frag ahead of this file.
 
 /// Per-object refraction inputs -- see TransparentRefractionPushConstants
-/// (pixel_render_pipeline.h) for the exact push-constant bytes this is filled
+/// (toy_render_pipeline.h) for the exact push-constant bytes this is filled
 /// from.
 struct GfxRefractionMaterial {
     bool  enabled;
@@ -77,7 +77,7 @@ vec3 gfx_refraction_sample(vec2 uv, vec2 duv, float chromatic, float lod) {
     return vec3(r, g, b);
 }
 
-/// Composites screen-space refraction onto `shaded` (gfx_pixel_forward_shade()'s
+/// Composites screen-space refraction onto `shaded` (toy_forward_shade()'s
 /// return value: rgb = surface colour, a = material alpha) and returns the final
 /// pixel colour with alpha forced to 1.0 -- the shader itself blends transmission
 /// with the surface colour here, since the destination image already holds the
@@ -85,9 +85,9 @@ vec3 gfx_refraction_sample(vec2 uv, vec2 duv, float chromatic, float lod) {
 /// of that would double-count it). When refraction is inactive, returns `shaded`
 /// unchanged so the fixed-function src-alpha-over blend applies as usual.
 ///
-/// @param shaded       gfx_pixel_forward_shade()'s result for this fragment.
+/// @param shaded       toy_forward_shade()'s result for this fragment.
 /// @param world_pos    Shaded surface point, world space (same as passed to
-///                     gfx_pixel_forward_shade()).
+///                     toy_forward_shade()).
 /// @param N            Shading normal, world space, already facing the viewer.
 /// @param V             normalize(camera_pos - world_pos).
 /// @param roughness    Surface roughness, drives the blur LOD.
@@ -155,7 +155,7 @@ vec4 gfx_refraction_apply(vec4 shaded, vec3 world_pos, vec3 N, vec3 V, float rou
 
     if (p.fresnel_enabled) {
         // Dimming transmission by (1-F) keeps this from double-counting the reflected
-        // energy already present in `shaded` via the SSR/sky term gfx_pixel_forward_shade()
+        // energy already present in `shaded` via the SSR/sky term toy_forward_shade()
         // computed -- but that bookkeeping is only honest where the reflection term is
         // actually live. Toward the silhouette it is not: the forward SSR/SSGI terms fade
         // themselves out over gfx_forward_silhouette_fade()'s NdotV band (see that

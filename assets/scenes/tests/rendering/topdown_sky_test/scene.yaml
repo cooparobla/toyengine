@@ -3,18 +3,21 @@ scene:
   scene_name: topdown_sky_test
   settings:
     render:
+      cloud_altitude: 45
+      cloud_camera_fade: true
       cloud_coverage: 0.45
+      cloud_density: 1.0
+      cloud_fade_end: 60
+      cloud_fade_start: 15
+      cloud_scale: 0.02
+      cloud_shadow_distance: 450
+      cloud_shadow_strength: 0.85
+      cloud_shadows: true
+      cloud_thickness: 25
+      cloud_type: volumetric
       cloud_wind_speed: 6.0
-      clouds: false
-      sky_model: physical
-      topdown_cloud_size: 30
-      topdown_cloud_thickness: 8
-      topdown_fade_end: 60
-      topdown_fade_start: 15
-      topdown_light_bands: 3
-      topdown_mode: true
-      topdown_outline: 0.5
-      topdown_shadow_strength: 0.45
+      clouds: true
+      sky_model: gradient
     weather:
       condition: clear
       conditions:
@@ -46,7 +49,7 @@ scene:
           wind_strength: 4.0
         - name: storm
           ambient: 0.6
-          cloud_cover: 1.0
+          cloud_cover: 0.8
           duration: [0.4, 0.4]
           effects:
             - prefab: objects/weather_rain

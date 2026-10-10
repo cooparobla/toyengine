@@ -22,13 +22,11 @@
 #include <string>
 
 #include <fkYAML/node.hpp>
-#include <coopa/yaml/document.h>
 #include <glm/glm.hpp>
 
 #include <coopa/scene/config.h>
-#include <physxcoopa/util/physics_settings.h>
 #include <physxcoopa/nav/nav_settings.h>
-#include <toyengine/render/pixel_render_config.h>
+#include <toyengine/render/toy_render_config.h>
 
 namespace toy {
 namespace core {
@@ -143,12 +141,7 @@ struct SaveConfig {
  * @param value The YAML string value of a `*_quality` key.
  * @return The corresponding render::RenderQuality tier.
  */
-inline render::RenderQuality parse_render_quality(const std::string& value) {
-    if (value == "low")                        return render::RenderQuality::Low;
-    if (value == "med" || value == "medium")   return render::RenderQuality::Medium;
-    if (value == "ultra")                      return render::RenderQuality::Ultra;
-    return render::RenderQuality::High;
-}
+render::RenderQuality parse_render_quality(const std::string& value);
 
 /**
  * @struct AppConfig
@@ -157,7 +150,7 @@ inline render::RenderQuality parse_render_quality(const std::string& value) {
 struct AppConfig {
     coopa::scene::SceneConfig         scene;
     WindowConfig                      window;
-    render::PixelRenderConfig         render;
+    render::ToyRenderConfig         render;
     OutputConfig                      output;
     AudioConfig                       audio;
     JobsConfig                        jobs;
@@ -179,481 +172,13 @@ struct AppConfig {
      * @param path Path to the configuration file (e.g. assets/config.yaml).
      * @return Loaded AppConfig, with any missing/malformed fields left at default.
      */
-    static AppConfig load(const std::string& path) {
-        AppConfig config;
-        try {
-            const std::filesystem::path resolved = coopa::yaml::resolve_variant(path);
-            if (!std::filesystem::exists(resolved)) {
-                std::cerr << "[toy::core::AppConfig] Config file not found at " << path << ", using defaults.\n";
-                return config;
-            }
-
-            return from_node(coopa::yaml::load_document(resolved));
-        } catch (const std::exception& e) {
-            std::cerr << "[toy::core::AppConfig] Warning: Failed to parse config file (" << e.what() << "), using defaults.\n";
-        }
-        return config;
-    }
+    static AppConfig load(const std::string& path);
 
     /**
      * @brief Parses an already-loaded config document -- AppConfig::load() minus the file read.
      *        The editor uses this to apply an edited, unsaved config.yaml to a live Engine.
      */
-    static AppConfig from_node(const fkyaml::node& root) {
-        AppConfig config;
-        if (root.is_mapping()) config.source = root;
-        try {
-            if (root.contains("scene")) {
-                const auto& s = root.at("scene");
-                if (s.contains("default_scene")) {
-                    config.scene.default_scene = s.at("default_scene").get_value<std::string>();
-                }
-            }
-
-            if (root.contains("window")) {
-                const auto& w = root.at("window");
-                if (w.contains("title"))  config.window.title  = w.at("title").get_value<std::string>();
-                if (w.contains("width"))  config.window.width  = w.at("width").get_value<uint32_t>();
-                if (w.contains("height")) config.window.height = w.at("height").get_value<uint32_t>();
-                if (w.contains("vsync"))  config.window.vsync  = w.at("vsync").get_value<bool>();
-                if (w.contains("visible")) config.window.visible = w.at("visible").get_value<bool>();
-            }
-
-            if (root.contains("render")) {
-                const auto& r = root.at("render");
-
-                // --- Quality presets ---
-                // Parsed and applied BEFORE every other render key, so the per-key
-                // parsing below overrides preset-covered fields whenever a key is
-                // written explicitly: defaults < quality preset < explicit key.
-                if (r.contains("shadow_quality"))      config.render.shadow_quality      = parse_render_quality(r.at("shadow_quality").get_value<std::string>());
-                if (r.contains("ssao_quality"))        config.render.ssao_quality        = parse_render_quality(r.at("ssao_quality").get_value<std::string>());
-                if (r.contains("ssr_quality"))         config.render.ssr_quality         = parse_render_quality(r.at("ssr_quality").get_value<std::string>());
-                if (r.contains("ssgi_quality"))        config.render.ssgi_quality        = parse_render_quality(r.at("ssgi_quality").get_value<std::string>());
-                if (r.contains("dof_quality"))         config.render.dof_quality         = parse_render_quality(r.at("dof_quality").get_value<std::string>());
-                if (r.contains("volumetrics_quality")) config.render.volumetrics_quality = parse_render_quality(r.at("volumetrics_quality").get_value<std::string>());
-                if (r.contains("sdf_quality"))         config.render.sdf_quality         = parse_render_quality(r.at("sdf_quality").get_value<std::string>());
-                if (r.contains("water_quality"))       config.render.water_quality       = parse_render_quality(r.at("water_quality").get_value<std::string>());
-                if (r.contains("sky_quality"))         config.render.sky_quality         = parse_render_quality(r.at("sky_quality").get_value<std::string>());
-                config.render.apply_quality_presets();
-
-                // --- Feature toggles ---
-                if (r.contains("outline_enabled"))   config.render.outline_enabled   = r.at("outline_enabled").get_value<bool>();
-                if (r.contains("palette_enabled"))   config.render.palette_enabled   = r.at("palette_enabled").get_value<bool>();
-                if (r.contains("dither_enabled"))    config.render.dither_enabled    = r.at("dither_enabled").get_value<bool>();
-                if (r.contains("camera_pixel_snap")) config.render.camera_pixel_snap = r.at("camera_pixel_snap").get_value<bool>();
-                if (r.contains("soft_lighting"))     config.render.soft_lighting     = r.at("soft_lighting").get_value<bool>();
-                if (r.contains("ssao_enabled"))      config.render.ssao_enabled      = r.at("ssao_enabled").get_value<bool>();
-                if (r.contains("ssr_enabled"))       config.render.ssr_enabled       = r.at("ssr_enabled").get_value<bool>();
-                if (r.contains("transparency_enabled")) config.render.transparency_enabled = r.at("transparency_enabled").get_value<bool>();
-                if (r.contains("ssr_reflect_transparent")) std::cerr << "[toy::core::AppConfig] Warning: ssr_reflect_transparent is deprecated and ignored -- SSR now reflects transparent geometry through the previous frame's colour.\n";
-                if (r.contains("refraction_enabled")) config.render.refraction_enabled = r.at("refraction_enabled").get_value<bool>();
-                if (r.contains("fog_enabled"))       config.render.fog_enabled       = r.at("fog_enabled").get_value<bool>();
-                if (r.contains("underwater_enabled")) config.render.underwater_enabled = r.at("underwater_enabled").get_value<bool>();
-                if (r.contains("volumetrics_enabled")) config.render.volumetrics_enabled = r.at("volumetrics_enabled").get_value<bool>();
-                if (r.contains("sdf_enabled"))         config.render.sdf_enabled         = r.at("sdf_enabled").get_value<bool>();
-                if (r.contains("sdf_shadows_enabled")) config.render.sdf_shadows_enabled = r.at("sdf_shadows_enabled").get_value<bool>();
-                if (r.contains("bloom_enabled"))     config.render.bloom_enabled     = r.at("bloom_enabled").get_value<bool>();
-                if (r.contains("tilt_shift_enabled")) config.render.tilt_shift_enabled = r.at("tilt_shift_enabled").get_value<bool>();
-                if (r.contains("dof_enabled"))        config.render.dof_enabled        = r.at("dof_enabled").get_value<bool>();
-                if (r.contains("debug_view"))          config.render.debug_view          = r.at("debug_view").get_value<std::string>();
-                if (r.contains("skinning")) {
-                    const std::string v = r.at("skinning").get_value<std::string>();
-                    if (v == "cpu" || v == "gpu") config.render.skinning = v;
-                    else std::cerr << "[toy::core::AppConfig] Unknown render.skinning '" << v << "', expected cpu | gpu; using gpu.\n";
-                }
-                if (r.contains("world_ui_enabled"))   config.render.world_ui_enabled   = r.at("world_ui_enabled").get_value<bool>();
-                if (r.contains("screen_ui_enabled"))  config.render.screen_ui_enabled  = r.at("screen_ui_enabled").get_value<bool>();
-
-                // --- Internal resolution ---
-                if (r.contains("resolution_mode"))        config.render.resolution_mode = r.at("resolution_mode").get_value<std::string>();
-                if (r.contains("render_width"))            config.render.render_width    = r.at("render_width").get_value<uint32_t>();
-                if (r.contains("render_height"))           config.render.render_height   = r.at("render_height").get_value<uint32_t>();
-                if (r.contains("scale_divisor"))           config.render.scale_divisor   = r.at("scale_divisor").get_value<uint32_t>();
-                if (r.contains("upscale_mode"))            config.render.upscale_mode    = r.at("upscale_mode").get_value<std::string>();
-
-                // --- Lighting ---
-                if (r.contains("exposure"))          config.render.exposure          = r.at("exposure").get_value<float>();
-                if (r.contains("auto_exposure_enabled"))      config.render.auto_exposure_enabled      = r.at("auto_exposure_enabled").get_value<bool>();
-                if (r.contains("auto_exposure_compensation")) config.render.auto_exposure_compensation = r.at("auto_exposure_compensation").get_value<float>();
-                if (r.contains("auto_exposure_speed_up"))     config.render.auto_exposure_speed_up     = r.at("auto_exposure_speed_up").get_value<float>();
-                if (r.contains("auto_exposure_speed_down"))   config.render.auto_exposure_speed_down   = r.at("auto_exposure_speed_down").get_value<float>();
-                if (r.contains("auto_exposure_min"))          config.render.auto_exposure_min          = r.at("auto_exposure_min").get_value<float>();
-                if (r.contains("auto_exposure_max"))          config.render.auto_exposure_max          = r.at("auto_exposure_max").get_value<float>();
-                if (r.contains("grading_enabled"))            config.render.grading_enabled            = r.at("grading_enabled").get_value<bool>();
-                if (r.contains("light_bands"))       config.render.light_bands       = r.at("light_bands").get_value<float>();
-                if (r.contains("spec_threshold"))    config.render.spec_threshold    = r.at("spec_threshold").get_value<float>();
-                if (r.contains("rim_strength"))      config.render.rim_strength      = r.at("rim_strength").get_value<float>();
-                if (r.contains("ambient_intensity")) config.render.indirect.ambient_intensity = r.at("ambient_intensity").get_value<float>();
-                if (r.contains("sky_intensity"))     config.render.indirect.sky_intensity     = r.at("sky_intensity").get_value<float>();
-                if (r.contains("sky_zenith")) {
-                    const auto& c = r.at("sky_zenith");
-                    if (c.size() >= 3) {
-                        config.render.indirect.sky_zenith = glm::vec3(
-                            c.at(0).get_value<float>(), c.at(1).get_value<float>(), c.at(2).get_value<float>());
-                    }
-                }
-                if (r.contains("sky_horizon")) {
-                    const auto& c = r.at("sky_horizon");
-                    if (c.size() >= 3) {
-                        config.render.indirect.sky_horizon = glm::vec3(
-                            c.at(0).get_value<float>(), c.at(1).get_value<float>(), c.at(2).get_value<float>());
-                    }
-                }
-                if (r.contains("sky_ground")) {
-                    const auto& c = r.at("sky_ground");
-                    if (c.size() >= 3) {
-                        config.render.indirect.sky_ground = glm::vec3(
-                            c.at(0).get_value<float>(), c.at(1).get_value<float>(), c.at(2).get_value<float>());
-                    }
-                }
-
-                // --- Sky model (physical sky + clouds) ---
-                // Numbers may be written as integers (cloud_altitude: 1500).
-                auto sky_num = [](const fkyaml::node& v) {
-                    return v.is_integer() ? static_cast<float>(v.get_value<int64_t>()) : v.get_value<float>();
-                };
-                if (r.contains("sky_model"))          config.render.sky_model          = r.at("sky_model").get_value<std::string>();
-                if (r.contains("atmosphere_density")) config.render.atmosphere_density = sky_num(r.at("atmosphere_density"));
-                if (r.contains("ozone"))              config.render.ozone              = sky_num(r.at("ozone"));
-                if (r.contains("sun_disc_size"))      config.render.sun_disc_size      = sky_num(r.at("sun_disc_size"));
-                if (r.contains("moon_disc_size"))     config.render.moon_disc_size     = sky_num(r.at("moon_disc_size"));
-                if (r.contains("sky_stars"))          config.render.sky_stars          = r.at("sky_stars").get_value<bool>();
-                if (r.contains("clouds"))             config.render.clouds             = r.at("clouds").get_value<bool>();
-                if (r.contains("cloud_coverage"))     config.render.cloud_coverage     = sky_num(r.at("cloud_coverage"));
-                if (r.contains("cloud_altitude"))     config.render.cloud_altitude     = sky_num(r.at("cloud_altitude"));
-                if (r.contains("cloud_thickness"))    config.render.cloud_thickness    = sky_num(r.at("cloud_thickness"));
-                if (r.contains("cloud_density"))      config.render.cloud_density      = sky_num(r.at("cloud_density"));
-                if (r.contains("cloud_wind_speed"))   config.render.cloud_wind_speed   = sky_num(r.at("cloud_wind_speed"));
-                if (r.contains("topdown_mode"))            config.render.topdown_mode            = r.at("topdown_mode").get_value<bool>();
-                if (r.contains("topdown_cloud_height"))    config.render.topdown_cloud_height    = sky_num(r.at("topdown_cloud_height"));
-                if (r.contains("topdown_cloud_size"))      config.render.topdown_cloud_size      = sky_num(r.at("topdown_cloud_size"));
-                if (r.contains("topdown_cloud_thickness")) config.render.topdown_cloud_thickness = sky_num(r.at("topdown_cloud_thickness"));
-                if (r.contains("topdown_cloud_opacity"))   config.render.topdown_cloud_opacity   = sky_num(r.at("topdown_cloud_opacity"));
-                if (r.contains("topdown_fade_start"))      config.render.topdown_fade_start      = sky_num(r.at("topdown_fade_start"));
-                if (r.contains("topdown_fade_end"))        config.render.topdown_fade_end        = sky_num(r.at("topdown_fade_end"));
-                if (r.contains("topdown_shadow_strength")) config.render.topdown_shadow_strength = sky_num(r.at("topdown_shadow_strength"));
-                if (r.contains("topdown_light_bands"))     config.render.topdown_light_bands     = sky_num(r.at("topdown_light_bands"));
-                if (r.contains("topdown_outline"))         config.render.topdown_outline         = sky_num(r.at("topdown_outline"));
-
-                // --- Shadows ---
-                if (r.contains("shadows_enabled"))        config.render.shadows_enabled        = r.at("shadows_enabled").get_value<bool>();
-                if (r.contains("shadow_map_resolution"))  config.render.shadow_map_resolution  = r.at("shadow_map_resolution").get_value<uint32_t>();
-                if (r.contains("shadow_cascades"))        config.render.shadow_cascades        = r.at("shadow_cascades").get_value<uint32_t>();
-                if (r.contains("shadow_cascade_split_lambda")) config.render.shadow_cascade_split_lambda = r.at("shadow_cascade_split_lambda").get_value<float>();
-                if (r.contains("shadow_fit"))             config.render.shadow_fit             = r.at("shadow_fit").get_value<std::string>();
-                if (r.contains("shadow_focus_radius"))    config.render.shadow_focus_radius    = r.at("shadow_focus_radius").get_value<float>();
-                if (r.contains("shadow_focus_distance"))  config.render.shadow_focus_distance  = r.at("shadow_focus_distance").get_value<float>();
-                if (r.contains("shadow_pcf_max_texels"))  config.render.shadow_pcf_max_texels  = r.at("shadow_pcf_max_texels").get_value<float>();
-                if (r.contains("shadow_receiver_plane_bias")) config.render.shadow_receiver_plane_bias = r.at("shadow_receiver_plane_bias").get_value<bool>();
-                if (r.contains("shadow_receiver_max_slope"))  config.render.shadow_receiver_max_slope  = r.at("shadow_receiver_max_slope").get_value<float>();
-                if (r.contains("cube_shadow_resolution")) config.render.cube_shadow_resolution = r.at("cube_shadow_resolution").get_value<uint32_t>();
-                if (r.contains("spot_shadow_resolution")) config.render.spot_shadow_resolution = r.at("spot_shadow_resolution").get_value<uint32_t>();
-                if (r.contains("local_shadow_atlas_resolution")) config.render.local_shadow_atlas_resolution = r.at("local_shadow_atlas_resolution").get_value<uint32_t>();
-                if (r.contains("max_shadowed_point_lights")) config.render.max_shadowed_point_lights = r.at("max_shadowed_point_lights").get_value<uint32_t>();
-                if (r.contains("max_shadowed_spot_lights"))  config.render.max_shadowed_spot_lights  = r.at("max_shadowed_spot_lights").get_value<uint32_t>();
-                if (r.contains("shadow_cache_enabled"))      config.render.shadow_cache_enabled      = r.at("shadow_cache_enabled").get_value<bool>();
-                if (r.contains("shadow_bias"))            config.render.shadow_bias            = r.at("shadow_bias").get_value<float>();
-                if (r.contains("shadow_depth_bias_texels")) config.render.shadow_depth_bias_texels = r.at("shadow_depth_bias_texels").get_value<float>();
-                if (r.contains("shadow_slope_bias_texels")) config.render.shadow_slope_bias_texels = r.at("shadow_slope_bias_texels").get_value<float>();
-                if (r.contains("shadow_slope_bias_max"))    config.render.shadow_slope_bias_max    = r.at("shadow_slope_bias_max").get_value<float>();
-                if (r.contains("shadow_fade_fraction"))     config.render.shadow_fade_fraction     = r.at("shadow_fade_fraction").get_value<float>();
-                if (r.contains("shadow_normal_bias"))     config.render.shadow_normal_bias     = r.at("shadow_normal_bias").get_value<float>();
-                if (r.contains("shadow_distance"))        config.render.shadow_distance        = r.at("shadow_distance").get_value<float>();
-                if (r.contains("soft_shadows"))            config.render.soft_shadows            = r.at("soft_shadows").get_value<bool>();
-                if (r.contains("shadow_softness"))         config.render.shadow_softness         = r.at("shadow_softness").get_value<float>();
-                if (r.contains("point_shadow_softness"))   config.render.point_shadow_softness   = r.at("point_shadow_softness").get_value<float>();
-                if (r.contains("spot_shadow_softness"))    config.render.spot_shadow_softness    = r.at("spot_shadow_softness").get_value<float>();
-                if (r.contains("shadow_pcf_samples"))      config.render.shadow_pcf_samples      = r.at("shadow_pcf_samples").get_value<uint32_t>();
-                if (r.contains("shadow_pcss_enabled"))       config.render.shadow_pcss_enabled       = r.at("shadow_pcss_enabled").get_value<bool>();
-                if (r.contains("shadow_pcss_light_size"))    config.render.shadow_pcss_light_size    = r.at("shadow_pcss_light_size").get_value<float>();
-                if (r.contains("shadow_pcss_search_texels")) config.render.shadow_pcss_search_texels = r.at("shadow_pcss_search_texels").get_value<float>();
-                if (r.contains("shadow_pcss_taps"))          config.render.shadow_pcss_taps          = r.at("shadow_pcss_taps").get_value<uint32_t>();
-                if (r.contains("contact_shadows_enabled"))   config.render.contact_shadows_enabled   = r.at("contact_shadows_enabled").get_value<bool>();
-                if (r.contains("contact_shadow_length"))     config.render.contact_shadow_length     = r.at("contact_shadow_length").get_value<float>();
-                if (r.contains("contact_shadow_strength"))   config.render.contact_shadow_strength   = r.at("contact_shadow_strength").get_value<float>();
-                if (r.contains("contact_shadow_thickness"))  config.render.contact_shadow_thickness  = r.at("contact_shadow_thickness").get_value<float>();
-                if (r.contains("contact_shadow_steps"))      config.render.contact_shadow_steps      = r.at("contact_shadow_steps").get_value<int>();
-                if (r.contains("contact_shadow_temporal_enabled")) config.render.contact_shadow_temporal_enabled = r.at("contact_shadow_temporal_enabled").get_value<bool>();
-                if (r.contains("contact_shadow_temporal_frames")) config.render.contact_shadow_temporal_frames = r.at("contact_shadow_temporal_frames").get_value<int>();
-
-                // --- Outline ---
-                if (r.contains("outline_thickness")) config.render.outline_thickness = r.at("outline_thickness").get_value<float>();
-                if (r.contains("outline_color")) {
-                    const auto& c = r.at("outline_color");
-                    if (c.size() >= 3) {   // [r, g, b] or [r, g, b, a]; alpha defaults to opaque
-                        config.render.outline_color = glm::vec4(
-                            c.at(0).get_value<float>(), c.at(1).get_value<float>(),
-                            c.at(2).get_value<float>(), c.size() >= 4 ? c.at(3).get_value<float>() : 1.0f);
-                    }
-                }
-                if (r.contains("depth_threshold"))   config.render.depth_threshold   = r.at("depth_threshold").get_value<float>();
-                if (r.contains("normal_threshold"))  config.render.normal_threshold  = r.at("normal_threshold").get_value<float>();
-
-                // --- Palette ---
-                if (r.contains("palette")) config.render.palette_path = r.at("palette").get_value<std::string>();
-                if (r.contains("grading_lut")) config.render.grading_lut_path = r.at("grading_lut").get_value<std::string>();
-
-                // --- Dither ---
-                if (r.contains("dither_strength")) config.render.dither_strength = r.at("dither_strength").get_value<float>();
-                if (r.contains("texel_aa"))        config.render.texel_aa        = r.at("texel_aa").get_value<bool>();
-
-                // --- SSAO ---
-                if (r.contains("ssao_radius"))           config.render.ssao_radius           = r.at("ssao_radius").get_value<float>();
-                if (r.contains("ssao_bias"))             config.render.ssao_bias             = r.at("ssao_bias").get_value<float>();
-                if (r.contains("ssao_power"))            config.render.ssao_power            = r.at("ssao_power").get_value<float>();
-                if (r.contains("ssao_slices"))           config.render.ssao_slices           = r.at("ssao_slices").get_value<int>();
-                if (r.contains("ssao_steps"))            config.render.ssao_steps            = r.at("ssao_steps").get_value<int>();
-                if (r.contains("ssao_max_radius_px"))    config.render.ssao_max_radius_px    = r.at("ssao_max_radius_px").get_value<float>();
-                if (r.contains("ssao_blur_plane_sigma")) config.render.ssao_blur_plane_sigma = r.at("ssao_blur_plane_sigma").get_value<float>();
-                if (r.contains("ssao_half_res"))         config.render.ssao_half_res         = r.at("ssao_half_res").get_value<bool>();
-                if (r.contains("ssao_blur_light"))       config.render.ssao_blur_light       = r.at("ssao_blur_light").get_value<bool>();
-                if (r.contains("ssao_direct_lighting_strength"))
-                    config.render.ssao_direct_lighting_strength = r.at("ssao_direct_lighting_strength").get_value<float>();
-
-                if (r.contains("ssao_temporal_enabled")) config.render.ssao_temporal_enabled = r.at("ssao_temporal_enabled").get_value<bool>();
-                if (r.contains("ssao_temporal_frames"))  config.render.ssao_temporal_frames  = r.at("ssao_temporal_frames").get_value<int>();
-                if (r.contains("ssao_temporal_gamma"))   config.render.ssao_temporal_gamma   = r.at("ssao_temporal_gamma").get_value<float>();
-                if (r.contains("ssao_intensity"))        config.render.ssao_intensity        = r.at("ssao_intensity").get_value<float>();
-
-                // --- SSR + SSGI ---
-                if (r.contains("ssr_max_distance"))     config.render.ssr_max_distance     = r.at("ssr_max_distance").get_value<float>();
-                if (r.contains("ssr_max_iterations"))   config.render.ssr_max_iterations   = r.at("ssr_max_iterations").get_value<int>();
-                if (r.contains("ssr_thickness"))        config.render.ssr_thickness        = r.at("ssr_thickness").get_value<float>();
-                if (r.contains("ssr_thickness_scale"))  config.render.ssr_thickness_scale  = r.at("ssr_thickness_scale").get_value<float>();
-                if (r.contains("ssr_bias_texels"))      config.render.ssr_bias_texels      = r.at("ssr_bias_texels").get_value<float>();
-                if (r.contains("ssr_roughness_cutoff")) config.render.ssr_roughness_cutoff = r.at("ssr_roughness_cutoff").get_value<float>();
-                if (r.contains("ssr_start_mip"))        config.render.ssr_start_mip        = r.at("ssr_start_mip").get_value<int>();
-                if (r.contains("ssr_min_mip0_steps"))   config.render.ssr_min_mip0_steps   = r.at("ssr_min_mip0_steps").get_value<int>();
-                if (r.contains("ssr_temporal_enabled")) config.render.ssr_temporal_enabled = r.at("ssr_temporal_enabled").get_value<bool>();
-                if (r.contains("ssr_temporal_frames"))  config.render.ssr_temporal_frames  = r.at("ssr_temporal_frames").get_value<int>();
-                if (r.contains("ssgi_temporal_frames")) config.render.ssgi_temporal_frames = r.at("ssgi_temporal_frames").get_value<int>();
-                if (r.contains("ssr_temporal_blend"))   config.render.ssr_temporal_blend   = r.at("ssr_temporal_blend").get_value<float>();
-                if (r.contains("ssr_blur_radius"))      config.render.ssr_blur_radius      = r.at("ssr_blur_radius").get_value<float>();
-                if (r.contains("ssr_blur_light"))       config.render.ssr_blur_light       = r.at("ssr_blur_light").get_value<bool>();
-                if (r.contains("ssr_blur_zero_skip"))   config.render.ssr_blur_zero_skip   = r.at("ssr_blur_zero_skip").get_value<bool>();
-                if (r.contains("ssr_jitter"))           config.render.ssr_jitter           = r.at("ssr_jitter").get_value<float>();
-                if (r.contains("ssr_rays_per_pixel"))   config.render.ssr_rays_per_pixel   = r.at("ssr_rays_per_pixel").get_value<int>();
-                if (r.contains("ssr_cone_prefilter"))   config.render.ssr_cone_prefilter   = r.at("ssr_cone_prefilter").get_value<float>();
-                if (r.contains("ssr_skip_behind"))      config.render.ssr_skip_behind      = r.at("ssr_skip_behind").get_value<bool>();
-                if (r.contains("ssr_half_res"))         config.render.ssr_half_res         = r.at("ssr_half_res").get_value<bool>();
-                if (r.contains("ssgi_resolution_scale")) config.render.ssgi_resolution_scale = r.at("ssgi_resolution_scale").get_value<int>();
-                if (r.contains("ssr_skip_negligible"))  config.render.ssr_skip_negligible  = r.at("ssr_skip_negligible").get_value<bool>();
-                if (r.contains("ssr_skip_threshold"))   config.render.ssr_skip_threshold   = r.at("ssr_skip_threshold").get_value<float>();
-                if (r.contains("ssr_temporal_gamma"))   config.render.ssr_temporal_gamma   = r.at("ssr_temporal_gamma").get_value<float>();
-                if (r.contains("ssgi_traced"))          config.render.ssgi_traced          = r.at("ssgi_traced").get_value<bool>();
-                if (r.contains("ssgi_max_distance"))    config.render.ssgi_max_distance    = r.at("ssgi_max_distance").get_value<float>();
-                if (r.contains("ssgi_blur_radius"))     config.render.ssgi_blur_radius     = r.at("ssgi_blur_radius").get_value<float>();
-                if (r.contains("ssgi_blur_light"))      config.render.ssgi_blur_light      = r.at("ssgi_blur_light").get_value<bool>();
-                if (r.contains("ssgi_max_iterations"))  config.render.ssgi_max_iterations  = r.at("ssgi_max_iterations").get_value<int>();
-                if (r.contains("ssgi_intensity"))       config.render.indirect.ssgi_intensity = r.at("ssgi_intensity").get_value<float>();
-                if (r.contains("ssgi_distance"))        config.render.indirect.ssgi_distance  = r.at("ssgi_distance").get_value<float>();
-
-                // --- Refraction (transparent/BLEND MESH objects only) ---
-                if (r.contains("refraction_ior"))              config.render.refraction_ior           = r.at("refraction_ior").get_value<float>();
-                if (r.contains("refraction_thickness"))        config.render.refraction_thickness     = r.at("refraction_thickness").get_value<float>();
-                if (r.contains("refraction_strength"))         config.render.refraction_strength      = r.at("refraction_strength").get_value<float>();
-                if (r.contains("refraction_max_offset"))       config.render.refraction_max_offset    = r.at("refraction_max_offset").get_value<float>();
-                if (r.contains("refraction_chromatic"))        config.render.refraction_chromatic     = r.at("refraction_chromatic").get_value<float>();
-                if (r.contains("refraction_blur"))             config.render.refraction_blur          = r.at("refraction_blur").get_value<float>();
-                if (r.contains("refraction_density"))          config.render.refraction_density       = r.at("refraction_density").get_value<float>();
-                if (r.contains("refraction_fresnel"))          config.render.refraction_fresnel       = r.at("refraction_fresnel").get_value<bool>();
-                if (r.contains("refraction_tint")) {
-                    const auto& c = r.at("refraction_tint");
-                    if (c.size() >= 3) {
-                        config.render.refraction_tint = glm::vec3(
-                            c.at(0).get_value<float>(), c.at(1).get_value<float>(), c.at(2).get_value<float>());
-                    }
-                }
-                if (r.contains("refraction_include_reflections")) config.render.refraction_include_reflections = r.at("refraction_include_reflections").get_value<bool>();
-
-                // --- Fog ---
-                if (r.contains("fog_mode")) {
-                    // Exp2 (2) is gone: squaring a height-integrated optical depth has no physical
-                    // meaning. It loads as Exponential, which needs a somewhat lower density for
-                    // the same look at mid distances.
-                    int mode = r.at("fog_mode").get_value<int>();
-                    if (mode == 2) {
-                        std::cerr << "[toy::core::AppConfig] fog_mode 2 (Exp2) is deprecated; using 1 (Exponential height fog).\n";
-                        mode = 1;
-                    }
-                    config.render.fog_mode = mode == 0 ? 0 : 1;
-                }
-                if (r.contains("fog_density"))        config.render.fog_density        = r.at("fog_density").get_value<float>();
-                if (r.contains("fog_linear_start"))   config.render.fog_linear_start   = r.at("fog_linear_start").get_value<float>();
-                if (r.contains("fog_linear_end"))     config.render.fog_linear_end     = r.at("fog_linear_end").get_value<float>();
-                if (r.contains("fog_color")) {
-                    const auto& c = r.at("fog_color");
-                    if (c.size() >= 3) {
-                        config.render.fog_color = glm::vec3(
-                            c.at(0).get_value<float>(), c.at(1).get_value<float>(), c.at(2).get_value<float>());
-                    }
-                }
-                if (r.contains("fog_height_base"))    config.render.fog_height_base    = r.at("fog_height_base").get_value<float>();
-                if (r.contains("fog_height_falloff")) config.render.fog_height_falloff = r.at("fog_height_falloff").get_value<float>();
-                if (r.contains("fog_sky_blend"))      config.render.fog_sky_blend      = r.at("fog_sky_blend").get_value<float>();
-                if (r.contains("fog_sun_amount"))     config.render.fog_sun_amount     = r.at("fog_sun_amount").get_value<float>();
-                if (r.contains("fog_sun_anisotropy")) config.render.fog_sun_anisotropy = r.at("fog_sun_anisotropy").get_value<float>();
-                if (r.contains("fog_max_opacity"))    config.render.fog_max_opacity    = r.at("fog_max_opacity").get_value<float>();
-                if (r.contains("fog_sun_start_distance")) config.render.fog_sun_start_distance = r.at("fog_sun_start_distance").get_value<float>();
-                if (r.contains("fog_start_distance"))  config.render.fog_start_distance  = r.at("fog_start_distance").get_value<float>();
-                if (r.contains("fog_cutoff_distance")) config.render.fog_cutoff_distance = r.at("fog_cutoff_distance").get_value<float>();
-                if (r.contains("fog_sky_distance"))    config.render.fog_sky_distance    = r.at("fog_sky_distance").get_value<float>();
-                if (r.contains("fog_max_distance"))
-                    std::cerr << "[toy::core::AppConfig] fog_max_distance is deprecated and ignored -- use fog_cutoff_distance / fog_sky_distance.\n";
-                if (r.contains("snow_cover_override")) {
-                    const auto& v = r.at("snow_cover_override");
-                    if (v.is_float_number()) config.render.snow_cover_override = static_cast<float>(v.get_value<double>());
-                    else if (v.is_integer()) config.render.snow_cover_override = static_cast<float>(v.get_value<int64_t>());
-                }
-
-                // --- Volumetrics (shared march settings; per-volume look lives on VolumeComponent) ---
-                if (r.contains("volumetrics_step_count"))     config.render.volumetrics_step_count     = r.at("volumetrics_step_count").get_value<int>();
-                if (r.contains("volumetrics_max_distance"))   config.render.volumetrics_max_distance   = r.at("volumetrics_max_distance").get_value<float>();
-                if (r.contains("volumetrics_resolution_scale")) config.render.volumetrics_resolution_scale = r.at("volumetrics_resolution_scale").get_value<uint32_t>();
-                if (r.contains("volumetrics_mode"))           config.render.volumetrics_mode           = r.at("volumetrics_mode").get_value<std::string>();
-                if (r.contains("volumetrics_froxel_tile"))    config.render.volumetrics_froxel_tile    = r.at("volumetrics_froxel_tile").get_value<uint32_t>();
-                if (r.contains("volumetrics_froxel_slices"))  config.render.volumetrics_froxel_slices  = r.at("volumetrics_froxel_slices").get_value<uint32_t>();
-                if (r.contains("volumetrics_froxel_history")) config.render.volumetrics_froxel_history = r.at("volumetrics_froxel_history").get_value<float>();
-                if (r.contains("volumetrics_froxel_miss_samples")) config.render.volumetrics_froxel_miss_samples = r.at("volumetrics_froxel_miss_samples").get_value<uint32_t>();
-                if (r.contains("volumetrics_froxel_lookup_jitter")) config.render.volumetrics_froxel_lookup_jitter = r.at("volumetrics_froxel_lookup_jitter").get_value<float>();
-                if (r.contains("volumetrics_max_opacity"))    config.render.volumetrics_max_opacity    = r.at("volumetrics_max_opacity").get_value<float>();
-                if (r.contains("volumetrics_sun_anisotropy")) config.render.volumetrics_sun_anisotropy = r.at("volumetrics_sun_anisotropy").get_value<float>();
-                if (r.contains("volumetrics_shadows_enabled")) config.render.volumetrics_shadows_enabled = r.at("volumetrics_shadows_enabled").get_value<bool>();
-                if (r.contains("volumetrics_light_scatter"))  config.render.volumetrics_light_scatter  = r.at("volumetrics_light_scatter").get_value<float>();
-                if (r.contains("volumetrics_max_scatter_lights")) config.render.volumetrics_max_scatter_lights = r.at("volumetrics_max_scatter_lights").get_value<int>();
-
-                // --- Mesh visibility ---
-                if (r.contains("mesh_lod_bias"))            config.render.mesh_lod_bias            = r.at("mesh_lod_bias").get_value<float>();
-                if (r.contains("shadow_min_caster_texels")) config.render.shadow_min_caster_texels = r.at("shadow_min_caster_texels").get_value<float>();
-
-                if (r.contains("bloom_threshold")) config.render.bloom_threshold = r.at("bloom_threshold").get_value<float>();
-                if (r.contains("bloom_soft_knee")) config.render.bloom_soft_knee = r.at("bloom_soft_knee").get_value<float>();
-                if (r.contains("bloom_intensity")) config.render.bloom_intensity = r.at("bloom_intensity").get_value<float>();
-                if (r.contains("bloom_scatter"))   config.render.bloom_scatter   = r.at("bloom_scatter").get_value<float>();
-                if (r.contains("bloom_radius"))    config.render.bloom_radius    = r.at("bloom_radius").get_value<float>();
-                if (r.contains("bloom_clamp"))     config.render.bloom_clamp     = r.at("bloom_clamp").get_value<float>();
-
-                // --- Tilt shift ---
-                if (r.contains("tilt_shift_focus_center")) config.render.tilt_shift_focus_center = r.at("tilt_shift_focus_center").get_value<float>();
-                if (r.contains("tilt_shift_focus_width"))  config.render.tilt_shift_focus_width  = r.at("tilt_shift_focus_width").get_value<float>();
-                if (r.contains("tilt_shift_ramp_width"))   config.render.tilt_shift_ramp_width   = r.at("tilt_shift_ramp_width").get_value<float>();
-                if (r.contains("tilt_shift_blur_top"))     config.render.tilt_shift_blur_top     = r.at("tilt_shift_blur_top").get_value<float>();
-                if (r.contains("tilt_shift_blur_bottom"))  config.render.tilt_shift_blur_bottom  = r.at("tilt_shift_blur_bottom").get_value<float>();
-                if (r.contains("tilt_shift_max_radius"))   config.render.tilt_shift_max_radius   = r.at("tilt_shift_max_radius").get_value<float>();
-                if (r.contains("tilt_shift_angle"))        config.render.tilt_shift_angle        = r.at("tilt_shift_angle").get_value<float>();
-
-                // --- Depth of field ---
-                if (r.contains("dof_focus_mode"))      config.render.dof_focus_mode      = r.at("dof_focus_mode").get_value<std::string>();
-                if (r.contains("dof_focus_object"))    config.render.dof_focus_object    = r.at("dof_focus_object").get_value<std::string>();
-                if (r.contains("dof_focus_smoothing")) config.render.dof_focus_smoothing = r.at("dof_focus_smoothing").get_value<float>();
-                if (r.contains("dof_focus_distance")) config.render.dof_focus_distance = r.at("dof_focus_distance").get_value<float>();
-                if (r.contains("dof_focus_range"))    config.render.dof_focus_range    = r.at("dof_focus_range").get_value<float>();
-                if (r.contains("dof_focus_cover_object")) config.render.dof_focus_cover_object = r.at("dof_focus_cover_object").get_value<bool>();
-                if (r.contains("dof_blur_scale"))     config.render.dof_blur_scale     = r.at("dof_blur_scale").get_value<float>();
-                if (r.contains("dof_aperture"))       config.render.dof_aperture       = r.at("dof_aperture").get_value<float>();
-                if (r.contains("dof_focal_length"))   config.render.dof_focal_length   = r.at("dof_focal_length").get_value<float>();
-                if (r.contains("dof_sensor_width"))   config.render.dof_sensor_width   = r.at("dof_sensor_width").get_value<float>();
-                if (r.contains("dof_max_radius"))     config.render.dof_max_radius     = r.at("dof_max_radius").get_value<float>();
-                if (r.contains("dof_sample_count"))   config.render.dof_sample_count   = r.at("dof_sample_count").get_value<int>();
-                if (r.contains("dof_blade_count"))    config.render.dof_blade_count    = r.at("dof_blade_count").get_value<int>();
-                if (r.contains("dof_blade_rotation")) config.render.dof_blade_rotation = r.at("dof_blade_rotation").get_value<float>();
-
-                // --- Motion blur ---
-                if (r.contains("motion_blur"))           config.render.motion_blur           = r.at("motion_blur").get_value<bool>();
-                if (r.contains("motion_blur_intensity")) config.render.motion_blur_intensity = r.at("motion_blur_intensity").get_value<float>();
-
-                // --- Anti-aliasing ---
-                if (r.contains("aa_mode"))                  config.render.aa_mode                  = r.at("aa_mode").get_value<std::string>();
-                if (r.contains("fxaa_subpixel"))             config.render.fxaa_subpixel             = r.at("fxaa_subpixel").get_value<float>();
-                if (r.contains("fxaa_edge_threshold"))       config.render.fxaa_edge_threshold       = r.at("fxaa_edge_threshold").get_value<float>();
-                if (r.contains("fxaa_edge_threshold_min"))   config.render.fxaa_edge_threshold_min   = r.at("fxaa_edge_threshold_min").get_value<float>();
-                if (r.contains("smaa_threshold"))            config.render.smaa_threshold            = r.at("smaa_threshold").get_value<float>();
-                if (r.contains("smaa_max_search_steps"))     config.render.smaa_max_search_steps     = r.at("smaa_max_search_steps").get_value<int>();
-                if (r.contains("taa_blending_weight"))       config.render.taa_blending_weight       = r.at("taa_blending_weight").get_value<float>();
-                if (r.contains("taa_weight_scale"))          config.render.taa_weight_scale          = r.at("taa_weight_scale").get_value<float>();
-                if (r.contains("taa_feedback_motion"))       config.render.taa_feedback_motion       = r.at("taa_feedback_motion").get_value<float>();
-                if (r.contains("taa_sharpness"))             config.render.taa_sharpness             = r.at("taa_sharpness").get_value<float>();
-                if (r.contains("taa_variance_gamma"))        config.render.taa_variance_gamma        = r.at("taa_variance_gamma").get_value<float>();
-
-                // --- SDF ---
-                if (r.contains("sdf_max_steps"))        config.render.sdf_max_steps        = r.at("sdf_max_steps").get_value<uint32_t>();
-                if (r.contains("sdf_shadow_max_steps")) config.render.sdf_shadow_max_steps = r.at("sdf_shadow_max_steps").get_value<uint32_t>();
-                if (r.contains("sdf_max_renderers"))    config.render.sdf_max_renderers    = r.at("sdf_max_renderers").get_value<uint32_t>();
-                if (r.contains("sdf_max_shapes"))       config.render.sdf_max_shapes       = r.at("sdf_max_shapes").get_value<uint32_t>();
-            }
-
-            if (root.contains("jobs")) {
-                const auto& j = root.at("jobs");
-                if (j.contains("worker_threads"))    config.jobs.worker_threads    = j.at("worker_threads").get_value<unsigned int>();
-                if (j.contains("parallel_threshold")) config.jobs.parallel_threshold = j.at("parallel_threshold").get_value<std::size_t>();
-            }
-
-            if (root.contains("debug")) {
-                const auto& d = root.at("debug");
-                if (d.contains("overlay")) {
-                    // A YAML 1.1 reader takes a bare `off` for a boolean; accept either spelling.
-                    const auto& o = d.at("overlay");
-                    config.debug.overlay = o.is_boolean() ? (o.get_value<bool>() ? "fps" : "off")
-                                                          : o.get_value<std::string>();
-                }
-            }
-
-            if (root.contains("particles")) {
-                const auto& pn = root.at("particles");
-                if (pn.contains("gpu_enabled")) config.particles.gpu_enabled = pn.at("gpu_enabled").get_value<bool>();
-            }
-
-            if (root.contains("save")) {
-                const auto& sv = root.at("save");
-                if (sv.contains("encode")) config.save.encode = sv.at("encode").get_value<std::string>();
-                if (sv.contains("quick_slot")) {
-                    const auto& q = sv.at("quick_slot");
-                    config.save.quick_slot = q.is_null() ? std::string() : q.get_value<std::string>();
-                }
-            }
-
-            // Schema owned by physxcoopa itself (see util/physics_settings.h's doc) rather than
-            // hand-parsed field-by-field here, unlike every other block above -- physics settings
-            // are physxcoopa's concept end to end (PhysicsWorld/PhysicsSystem consume the parsed
-            // struct directly), so duplicating its YAML shape in toyengine would just be a second
-            // place to keep in sync.
-            if (root.contains("physics")) {
-                config.physics = coopa::physx::util::parse_physics_settings(root.at("physics"));
-            }
-            // Also physxcoopa-owned. After physics: `layers:` may name physics layers.
-            if (root.contains("navigation")) {
-                config.navigation = coopa::physx::nav::parse_nav_settings(root.at("navigation"), config.physics.layer_names);
-            }
-
-            if (root.contains("audio")) {
-                const auto& a = root.at("audio");
-                auto num = [&](const char* k, float& out) {
-                    if (!a.contains(k)) return;
-                    const auto& v = a.at(k);
-                    if (v.is_float_number()) out = static_cast<float>(v.get_value<double>());
-                    else if (v.is_integer()) out = static_cast<float>(v.get_value<int64_t>());
-                };
-                if (a.contains("enabled")) config.audio.enabled = a.at("enabled").get_value<bool>();
-                if (a.contains("sample_rate")) config.audio.sample_rate = static_cast<uint32_t>(a.at("sample_rate").get_value<int64_t>());
-                if (a.contains("device")) config.audio.device = a.at("device").get_value<std::string>();
-                num("master", config.audio.master);
-                num("music", config.audio.music);
-                num("sfx", config.audio.sfx);
-                num("ui", config.audio.ui);
-            }
-
-            if (root.contains("output")) {
-                const auto& o = root.at("output");
-                if (o.contains("save_on_exit")) config.output.save_on_exit = o.at("save_on_exit").get_value<bool>();
-                if (o.contains("filepath"))     config.output.filepath     = o.at("filepath").get_value<std::string>();
-                if (o.contains("save_low_res")) config.output.save_low_res = o.at("save_low_res").get_value<bool>();
-            }
-        } catch (const std::exception& e) {
-            std::cerr << "[toy::core::AppConfig] Warning: Failed to parse config file (" << e.what() << "), using defaults.\n";
-        }
-        return config;
-    }
+    static AppConfig from_node(const fkyaml::node& root);
 
     /**
      * @brief This config with a scene's `settings:` overrides applied -- the config a scene
@@ -674,35 +199,13 @@ struct AppConfig {
      * and anything set on this config in code rather than in its source document, is kept.
      * With no overrides this config is returned unchanged.
      */
-    AppConfig with_scene_settings(const fkyaml::node& settings) const {
-        if (!has_scene_overrides(settings)) return *this;
-        fkyaml::node merged = source;
-        for (const char* section : kSceneSettingsSections) {
-            if (!settings.contains(section) || !settings.at(section).is_mapping()) continue;
-            if (!merged.contains(section) || !merged.at(section).is_mapping()) merged[section] = fkyaml::node::mapping();
-            for (auto item : settings.at(section).map_items()) {
-                merged[section][item.key().get_value<std::string>()] = item.value();
-            }
-        }
-        const AppConfig parsed = from_node(merged);
-        AppConfig out = *this;
-        out.render = parsed.render;
-        out.physics = parsed.physics;
-        out.navigation = parsed.navigation;
-        return out;
-    }
+    AppConfig with_scene_settings(const fkyaml::node& settings) const;
 
     /// The config.yaml sections a scene's `settings:` may override.
     static constexpr const char* kSceneSettingsSections[] = {"render", "physics", "navigation"};
 
     /** @brief True if `settings` overrides at least one key of an overridable section. */
-    static bool has_scene_overrides(const fkyaml::node& settings) {
-        if (!settings.is_mapping()) return false;
-        for (const char* section : kSceneSettingsSections) {
-            if (settings.contains(section) && settings.at(section).is_mapping() && settings.at(section).size() > 0) return true;
-        }
-        return false;
-    }
+    static bool has_scene_overrides(const fkyaml::node& settings);
 };
 
 } // namespace core

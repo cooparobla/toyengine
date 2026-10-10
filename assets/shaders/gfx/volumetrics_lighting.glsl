@@ -60,7 +60,7 @@ vec3 vol_scatter_light(int li, vec3 p, vec3 view_dir, float light_strength) {
         if (cone <= 0.0) return vec3(0.0);
     }
 
-    // Same distance curve as the lighting pass's point/spot loops (pixel_lighting.frag),
+    // Same distance curve as the lighting pass's point/spot loops (toy_lighting.frag),
     // so a light's glow in a volume matches its glow on the surfaces around it.
     float sharpness = max(u_vol.scatter_lights[li].params.x, 0.1);
     float factor    = clamp(dist / range, 0.0, 1.0);

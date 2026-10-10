@@ -6,7 +6,7 @@
  * Runs in linear HDR right after the transparent pass and ahead of global fog, reading the
  * post chain's source image and writing its own target (pipeline::RenderPass clears on load, so
  * it cannot composite in place). It runs EVERY frame once constructed -- the views downstream
- * read are bound once (PixelRenderPipeline's frame-overlap rule) -- and is a plain copy when the
+ * read are bound once (ToyRenderPipeline's frame-overlap rule) -- and is a plain copy when the
  * camera is above water (`enabled` = 0 in the push constants).
  *
  * Per pixel (see underwater.frag): the view ray starts at the near plane. If that point is above
@@ -27,12 +27,7 @@
 
 #include <glm/glm.hpp>
 
-#include <gfxcoopa/command/command_buffer.h>
-#include <gfxcoopa/core/device.h>
 #include <gfxcoopa/engine/passes/fullscreen_stage.h>
-#include <gfxcoopa/engine/util/sampler.h>
-#include <gfxcoopa/pipeline/render_pass.h>
-#include <gfxcoopa/types/texture_view.h>
 
 namespace toy {
 namespace render {
@@ -66,11 +61,7 @@ public:
      *         (nearest -- see FogPass on why filtered world positions are wrong at silhouettes). */
     void set_source_images(coopa::gfx::TextureView scene_color, coopa::gfx::TextureView g_normal,
                            coopa::gfx::TextureView g_position,
-                           const coopa::gfx::engine::util::Sampler& linear_sampler) {
-        stage_.set(0).bind_image(0, scene_color, linear_sampler);
-        stage_.set(0).bind_image(1, g_normal, nearest_sampler_);
-        stage_.set(0).bind_image(2, g_position, nearest_sampler_);
-    }
+                           const coopa::gfx::engine::util::Sampler& linear_sampler);
 
     void draw(coopa::gfx::command::CommandBuffer& cmd, uint32_t width, uint32_t height, const Params& params) const {
         stage_.draw(cmd, width, height, coopa::gfx::ShaderStage::Fragment, params);
@@ -78,20 +69,7 @@ public:
 
 private:
     static coopa::gfx::engine::passes::FullscreenStageDesc describe_(const std::string& vert_spv,
-                                                                     const std::string& frag_spv) {
-        using coopa::gfx::DescriptorType;
-        using coopa::gfx::ShaderStage;
-        coopa::gfx::engine::passes::FullscreenStageDesc d;
-        d.vert_spv = vert_spv;
-        d.frag_spv = frag_spv;
-        d.owned_sets = {
-            {{0, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},
-             {1, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1},
-             {2, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1}},
-        };
-        d.push_constants = {{ShaderStage::Fragment, 0, static_cast<uint32_t>(sizeof(Params))}};
-        return d;
-    }
+                                                                     const std::string& frag_spv);
 
     coopa::gfx::engine::util::Sampler           nearest_sampler_;
     coopa::gfx::engine::passes::FullscreenStage stage_;

@@ -16,7 +16,7 @@
 #include <algorithm>
 #include <cmath>
 
-#include <toyengine/render/pixel_render_config.h>
+#include <toyengine/render/toy_render_config.h>
 
 namespace toy {
 namespace render {
@@ -54,7 +54,7 @@ inline float fog_height_tau(const glm::vec3& A, const glm::vec3& B, float densit
  *        as the renderer draws it: start/cutoff distances, max opacity, Linear vs Exponential,
  *        and -- when `eye_under_water` -- only the part of the ray above `water_level`.
  */
-inline float fog_transmittance(const PixelRenderConfig& c, const glm::vec3& eye, const glm::vec3& target,
+inline float fog_transmittance(const ToyRenderConfig& c, const glm::vec3& eye, const glm::vec3& target,
                                bool eye_under_water = false, float water_level = 0.0f) {
     if (!c.fog_enabled) return 1.0f;
     const float dist = glm::length(target - eye);

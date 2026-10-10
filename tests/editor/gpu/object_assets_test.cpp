@@ -9,6 +9,7 @@
 #include <coopa/testing/test.h>
 
 #include "editor/support/editor_session.h"
+#include <toyengine/scene/skinned_mesh_renderer.h>
 
 COOPA_TEST_SUITE("object_assets");
 
@@ -275,6 +276,9 @@ COOPA_TEST(an_object_assets_meshes_pick_and_enter_edit_mode) {
     dump(engine, "21_object_click");
 
     // The skinned tentacle: its mesh (a SkinnedMeshRenderer's) picks, edits and weight-paints.
+    // At rest: the Timeline (still open from the arm) would otherwise pose the tentacle with its
+    // clip, bending it so a mesh-space lift no longer reads as a rise of its top.
+    app.set_timeline_rest_pose(true);
     expect(app.open_object_asset(project.assets() / "objects" / "tentacle.yaml"), "the tentacle opens");
     tick(engine, 6);
     const ObjectId skin = object_named(app, "tentacle_skin");

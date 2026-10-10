@@ -16,7 +16,7 @@
 #include <glm/glm.hpp>
 #include <toyengine/core/engine.h>
 #include <uicoopa/ui_yaml.h>
-#include <toyengine/render/pixel_math.h>
+#include <toyengine/render/toy_render_math.h>
 
 #include "engine/support/checks.h"
 #include "engine/support/render_fixture.h"
@@ -50,7 +50,7 @@ using namespace toy::test;
  * Captured at DISPLAY resolution (low_res = false). The world UI is not part of the low-res
  * image: it renders into its own layer and composites after AA and tilt shift, so
  * low_res_color_image() is scene-only by construction (see
- * PixelRenderPipeline::overlay_target_) and a low-res capture would compare two frames that
+ * ToyRenderPipeline::overlay_target_) and a low-res capture would compare two frames that
  * genuinely are identical.
  *
  * FIXED_DT is a tiny 0.5 ms rather than 0: the scene's camera auto-orbits (so this keeps the

@@ -10,8 +10,9 @@
 //   * a pixel with no usable history (first frame, off-screen last frame, uncovered by
 //     geometry) takes the estimate alone.
 // The result is a smooth, converged layer at the full region resolution for a quarter of the
-// rays per frame: rgb = in-scattered light, a = transmittance (-1: a block with no sky). The
-// lighting pass's upsample reads it (sky_physical.glsl).
+// rays per frame: rgb = in-scattered light, a = packed transmittance + cloud distance + whether
+// the pixel's full-resolution block holds sky (sky_cloud_common.glsl). The lighting pass's
+// upsample reads it at sky pixels (sky_physical.glsl), cloud_composite.frag over geometry.
 
 #define CLOUD_UBO_SET 0
 #define CLOUD_UBO_BINDING 3
@@ -42,12 +43,13 @@ void main() {
     ivec2 iregion = ivec2(region);
     vec2 uv = (vec2(hp) + 0.5) / region;
 
-    // A block the full-resolution G-buffer fills with geometry: no sky to composite.
+    // Whether the full-resolution block holds sky: the sky's upsample only reads such texels
+    // (one marched to a surface would show its clipped clouds along every silhouette).
     vec4 nx = textureGather(g_normal, uv, 0);
     vec4 ny = textureGather(g_normal, uv, 1);
     vec4 nz = textureGather(g_normal, uv, 2);
     vec4 n2 = nx * nx + ny * ny + nz * nz;
-    if (!any(lessThan(n2, vec4(0.001)))) { out_color = vec4(0.0, 0.0, 0.0, -1.0); return; }
+    bool sky_block = any(lessThan(n2, vec4(0.001)));
 
     // The fresh samples around this pixel: 3x3 trace texels (2 region pixels apart).
     ivec2 o = ivec2(cf.trace.xy);
@@ -77,12 +79,13 @@ void main() {
         }
     }
 
-    // Reproject: this pixel's ray at the clouds' distance, where the clouds were last frame.
+    // Reproject: this pixel's ray at the clouds' distance (cloud space -> world), where the
+    // clouds were last frame.
     vec3 ndc = vec3(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 1.0);
     vec4 wp = cf.inv_view_proj * vec4(ndc, 1.0);
     vec3 ro = cf.camera.xyz;
     vec3 rd = normalize(wp.xyz / wp.w - ro);
-    vec3 p = ro + rd * depth + vec3(cf.history.xy, 0.0);
+    vec3 p = ro + rd * (depth * cf.look.x) + vec3(cf.history.xy, 0.0);
     vec4 pc = cf.prev_view_proj * vec4(p, 1.0);
     bool hv = cf.history.z > 0.5 && pc.w > 1e-4;
     vec4 hist = vec4(0.0);
@@ -108,7 +111,7 @@ void main() {
                 vec4 s = texelFetch(u_history, qq, 0);
                 if (s.a < 0.0) continue;
                 float w = (d.x == 1 ? f.x : 1.0 - f.x) * (d.y == 1 ? f.y : 1.0 - f.y);
-                hist += to_tm(s) * w;
+                hist += to_tm(vec4(s.rgb, cloud_trans(s.a))) * w;
                 hw += w;
             }
             hv = hw > 0.05;
@@ -153,5 +156,5 @@ void main() {
         result = vec4(0.0, 0.0, 0.0, 1.0);
     }
     result = from_tm(result);
-    out_color = vec4(max(result.rgb, vec3(0.0)), clamp(result.a, 0.0, 1.0));
+    out_color = vec4(max(result.rgb, vec3(0.0)), cloud_pack_sky(depth, result.a, sky_block));
 }

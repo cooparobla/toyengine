@@ -2,9 +2,9 @@
 #define GFX_DEPTH_GLSL
 
 // gfx/depth.glsl -- shared depth-linearization helper (the same formula as
-// pixel_stylize.frag's local `linear_depth()`), so the DoF stages (via
+// stylize.frag's local `linear_depth()`), so the DoF stages (via
 // gfx/dof_common.glsl), particle.frag and temporal_history.frag use one copy
-// rather than carrying their own. See pixel_shadow_body.glsl
+// rather than carrying their own. See toy_shadow_body.glsl
 // doc for this codebase's general policy on de-duplicating shared shader bodies.
 
 // True view-space distance from the camera, from raw Vulkan [0,1] post-projection

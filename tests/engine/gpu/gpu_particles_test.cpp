@@ -17,6 +17,7 @@
 
 #include <glm/glm.hpp>
 #include <toyengine/core/engine.h>
+#include <toyengine/render/toy_render_pipeline.h>
 #include <toyengine/particles/particle_system.h>
 #include <toyengine/render/particle_types.h>
 

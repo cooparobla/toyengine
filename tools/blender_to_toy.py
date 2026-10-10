@@ -24,12 +24,22 @@ Output (everything under the `blender` tag folder; tags never appear in referenc
     materials/blender/<material>.yaml   Principled BSDF -> PBR material
     textures/blender/<image>.png        images used by those materials (+ packed _mr / _mask maps)
     objects/blender/<collection>.yaml   a prefab per instanced collection
+    objects/blender/<armature>.yaml     a rig per armature: bones, skinned meshes, Animator
+    animations/blender/<rig>/<action>.yaml   one clip per action that animates the rig's bones
     scenes/blender/<scene>/scene.yaml   one per Blender scene, named after the .blend file
 
 Blender and toyengine share conventions (Z-up, right-handed, metres, CCW front faces, cameras
 and spots looking down local -Z, XYZ Euler == the engine's Rz*Ry*Rx), so transforms copy
-straight across. Only static content is converted: armatures, skinning and actions are skipped
-with a warning, as is anything the engine has no equivalent for.
+straight across. Anything the engine has no equivalent for is skipped with a warning.
+
+Armatures become rigs (see the create-animation skill): each bone is an empty object at its head
+(the bone tree mirrors Blender's), meshes deformed by the armature become SkinnedMeshRenderers
+whose vertex groups name those bones (bind pose = the rest pose), and objects parented to a bone
+sit under its bone object. Every action that animates the armature's bones (assigned, in the NLA,
+or merely stored in the file) is baked frame by frame -- constraints and drivers included -- into
+a clip of bone position / rotation_quat / scale tracks, and the rig's Animator gets one state per
+clip (auto-playing the assigned action). In the scene the armature is an instance of its rig;
+everything it owns lives in the rig asset. Object-level animation is not converted.
 """
 
 import argparse
@@ -240,9 +250,41 @@ class Exporter:
         # Per-run caches: Blender datablock -> engine reference, and asset name -> owner key so
         # two different datablocks that sanitise to the same name don't silently overwrite.
         self.mesh_refs, self.material_refs, self.image_refs, self.prefab_refs = {}, {}, {}, {}
-        self.taken = {"meshes": {}, "materials": {}, "textures": {}, "objects": {}, "scenes": {}}
+        self.rig_refs = {}
+        self.taken = {"meshes": {}, "materials": {}, "textures": {}, "objects": {}, "scenes": {},
+                      "animations": {}}
         self.prefabs_in_progress = set()
+        self.rigs_in_progress = []  # stack of armatures whose rig is being written
         self.foreign = self._scan_foreign_assets()
+        self._find_rig_ownership()
+
+    def _find_rig_ownership(self):
+        """Maps each mesh deformed by an armature to it (skin_of), and each object a rig owns --
+        its skins and the armature's descendants -- to that armature (owner_rig)."""
+        self.skin_of, self.owner_rig = {}, {}
+        for obj in bpy.data.objects:
+            if obj.type != "MESH":
+                continue
+            arms = [m.object for m in obj.modifiers
+                    if m.type == "ARMATURE" and m.object and m.object.type == "ARMATURE"]
+            if arms:
+                if len(set(arms)) > 1:
+                    self.warn(f"'{obj.name}' is deformed by several armatures; only '{arms[0].name}' is used")
+                self.skin_of[obj] = arms[0]
+        for obj in bpy.data.objects:
+            p = obj.parent
+            while p is not None and p.type != "ARMATURE":
+                p = p.parent
+            if p is not None:
+                self.owner_rig[obj] = p  # the nearest armature ancestor owns it
+        for skin, arm in self.skin_of.items():
+            if skin not in self.owner_rig:
+                self.owner_rig[skin] = arm
+
+    def walkable(self, obj, members):
+        """False when obj belongs to a rig whose armature is also in `members` (it's in the rig asset)."""
+        arm = self.owner_rig.get(obj)
+        return arm is None or arm not in members
 
     # ---- logging / files ---------------------------------------------------------------------
 
@@ -321,7 +363,8 @@ class Exporter:
         # Objects in collections excluded from the view layer (typically the sources of
         # collection instances) are left out of the scene; they still export as prefabs.
         visible = set(view_layer.objects)
-        roots = [o for o in scene.objects if o in visible and (o.parent is None or o.parent not in visible)]
+        roots = [o for o in scene.objects if o in visible and (o.parent is None or o.parent not in visible)
+                 and self.walkable(o, visible)]
         roots.sort(key=lambda o: o.name)
         root_objects = [self.export_object(o, None, visible) for o in roots]
 
@@ -378,7 +421,9 @@ class Exporter:
         components = [self.transform(obj, parent_matrix)]
 
         t = obj.type
-        if t in ("MESH", "CURVE", "SURFACE", "META", "FONT"):
+        if t == "MESH" and self.skin_of.get(obj) in self.rigs_in_progress:
+            components.extend(self.export_skinned_renderer(obj, self.skin_of[obj]))
+        elif t in ("MESH", "CURVE", "SURFACE", "META", "FONT"):
             renderer = self.export_mesh_renderer(obj)
             if renderer:
                 components.append(renderer)
@@ -398,15 +443,22 @@ class Exporter:
             elif obj.instance_type != "NONE":
                 self.warn(f"'{obj.name}': {obj.instance_type} instancing is not supported; exported as an empty")
         elif t == "ARMATURE":
-            self.warn(f"'{obj.name}': armatures/skinning are not converted yet; exported as an empty")
+            ref = self.export_rig(obj)
+            if ref:
+                node["prefab"] = ref
         else:
             self.warn(f"'{obj.name}': object type {t} is not supported; exported as an empty")
 
-        if obj.animation_data and obj.animation_data.action:
-            self.warn(f"'{obj.name}': animation (action '{obj.animation_data.action.name}') is not converted")
+        action = obj.animation_data.action if obj.animation_data else None
+        if action and t != "ARMATURE":
+            self.warn(f"'{obj.name}': animation (action '{action.name}') is not converted")
+        elif action and any(not fc.data_path.startswith("pose.bones[") for fc in self.action_fcurves(action)):
+            self.warn(f"'{obj.name}': action '{action.name}' also animates the armature object itself; "
+                      f"only bone animation is converted")
 
         node["components"] = components
-        children = sorted((c for c in obj.children if c in members), key=lambda c: c.name)
+        children = sorted((c for c in obj.children if c in members and self.walkable(c, members)),
+                          key=lambda c: c.name)
         node["children"] = [self.export_object(c, obj, members) for c in children]
         return node
 
@@ -419,16 +471,14 @@ class Exporter:
             return None
         self.prefabs_in_progress.add(coll)
         members = set(coll.all_objects)
-        roots = sorted((o for o in members if o.parent is None or o.parent not in members), key=lambda o: o.name)
+        roots = sorted((o for o in members if (o.parent is None or o.parent not in members)
+                        and self.walkable(o, members)), key=lambda o: o.name)
         frame = Matrix.Translation(coll.instance_offset)  # the prefab root sits at the instance offset
         children = [self.export_object(o, None, members, parent_matrix=frame) for o in roots]
         name = self.claim("objects", sanitize(coll.name), coll.name)
         data = {"format": "toyengine-object",
                 "object": {"name": coll.name,
-                           "components": [{"type": "Transform",
-                                           "position": {"x": 0.0, "y": 0.0, "z": 0.0},
-                                           "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
-                                           "scale": {"x": 1.0, "y": 1.0, "z": 1.0}}],
+                           "components": [self.identity_transform()],
                            "children": children}}
         self.write_text(os.path.join("objects", TAG, name + ".yaml"),
                         to_yaml(data, self.header(f"Collection '{coll.name}' as a prefab")))
@@ -436,6 +486,280 @@ class Exporter:
         ref = f"objects/{name}"
         self.prefab_refs[coll] = ref
         return ref
+
+    # ---- rigs and animation ------------------------------------------------------------------
+
+    @staticmethod
+    def bone_name(bone):
+        """A bone's object name: its Blender name minus '/', which clip tracks use as the path separator."""
+        return bone.name.replace("/", "_")
+
+    def bone_local(self, bone):
+        """A rest bone's matrix relative to its parent bone (root bones: armature space)."""
+        return bone.matrix_local if bone.parent is None else bone.parent.matrix_local.inverted_safe() @ bone.matrix_local
+
+    def export_rig(self, arm):
+        """Writes the armature as objects/blender/<name>.yaml (once) plus its clips; returns its reference.
+
+        The rig root sits at the armature object's origin: bones and every object the rig owns
+        are placed in armature space, so a scene instance carries the armature's transform.
+        """
+        if arm in self.rig_refs:
+            return self.rig_refs[arm]
+        if arm in self.rigs_in_progress:
+            self.warn(f"armature '{arm.name}' contains itself; recursion cut")
+            return None
+        name = self.claim("objects", sanitize(arm.name), ("rig", arm.name))
+        ref = f"objects/{name}"
+        self.rig_refs[arm] = ref
+
+        # Rest pose while the tree is built: bone-parented children and skins are placed, and
+        # skins evaluated, undeformed -- the engine's bind pose is the rig's pose at start.
+        self.rigs_in_progress.append(arm)
+        pose_position = arm.data.pose_position
+        try:
+            arm.data.pose_position = "REST"
+            self.depsgraph.update()
+            children = self.rig_tree(arm)
+        finally:
+            arm.data.pose_position = pose_position
+            self.depsgraph.update()
+            self.rigs_in_progress.pop()
+
+        components = [self.identity_transform()]
+        states, auto_play = self.export_clips(arm, name)
+        if states:
+            components.append({"type": "Animator", "auto_play": auto_play, "states": states})
+        data = {"format": "toyengine-object",
+                "object": {"name": arm.name, "components": components, "children": children}}
+        self.write_text(os.path.join("objects", TAG, name + ".yaml"),
+                        to_yaml(data, self.header(f"Armature '{arm.name}' as a rig")))
+        return ref
+
+    @staticmethod
+    def identity_transform():
+        return {"type": "Transform", "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+                "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "scale": {"x": 1.0, "y": 1.0, "z": 1.0}}
+
+    def rig_tree(self, arm):
+        """The rig root's children: the bone tree, then the skins and other objects the rig owns."""
+        bones = arm.data.bones
+        bone_nodes = {}
+
+        def bone_node(b):
+            node = {"name": self.bone_name(b),
+                    "components": [self.transform_from_matrix(self.bone_local(b), f"{arm.name}: bone {b.name}")]}
+            bone_nodes[b.name] = node
+            node["children"] = [bone_node(c) for c in sorted(b.children, key=lambda c: c.name)]
+            return node
+
+        children = [bone_node(b) for b in sorted((b for b in bones if b.parent is None), key=lambda b: b.name)]
+        members = {o for o, a in self.owner_rig.items() if a is arm}
+        tops = sorted((o for o in members if o.parent is arm or o.parent not in members), key=lambda o: o.name)
+        for o in tops:
+            on_bone = (o.parent is arm and o.parent_type == "BONE" and o.parent_bone in bone_nodes
+                       and self.skin_of.get(o) is not arm)
+            if on_bone:
+                frame = arm.matrix_world @ bones[o.parent_bone].matrix_local
+                bone_nodes[o.parent_bone]["children"].append(self.export_object(o, None, members, parent_matrix=frame))
+            else:
+                children.append(self.export_object(o, None, members, parent_matrix=arm.matrix_world))
+        return children
+
+    def export_skinned_renderer(self, obj, arm):
+        """MeshRenderer (material only) + SkinnedMeshRenderer for a mesh the armature deforms."""
+        mesh_name = self.export_mesh(obj, skin_arm=arm)
+        if not mesh_name:
+            return []
+        mats = [s.material for s in obj.material_slots]
+        if len(mats) > 1:
+            self.warn(f"'{obj.name}': skinned meshes take one material; using the first of {len(mats)} slots")
+        material = self.export_material(mats[0]) if mats and mats[0] else "materials/default"
+        return [{"type": "MeshRenderer", "material": material},
+                {"type": "SkinnedMeshRenderer", "mesh_path": mesh_name}]
+
+    @staticmethod
+    def action_fcurves(action):
+        """Every F-curve of an action, layered (Blender 4.4+ slotted actions) or legacy."""
+        layers = getattr(action, "layers", None)
+        if layers:
+            return [fc for layer in layers for strip in layer.strips
+                    for bag in getattr(strip, "channelbags", ()) for fc in bag.fcurves]
+        return list(getattr(action, "fcurves", ()))
+
+    _BONE_PATH = re.compile(r'^pose\.bones\["((?:[^"\\]|\\.)*)"\]')
+
+    def action_bones(self, action):
+        """Names of the bones an action's F-curves animate."""
+        names = set()
+        for fc in self.action_fcurves(action):
+            m = self._BONE_PATH.match(fc.data_path)
+            if m:
+                names.add(re.sub(r"\\(.)", r"\1", m.group(1)))
+        return names
+
+    def rig_actions(self, arm):
+        """The armature's actions: its assigned one, its NLA strips', then any action in the file
+        that animates its bones and isn't assigned to some other object."""
+        found = []
+        ad = arm.animation_data
+        if ad:
+            if ad.action:
+                found.append(ad.action)
+            for track in ad.nla_tracks:
+                for strip in track.strips:
+                    if strip.action and strip.action not in found:
+                        found.append(strip.action)
+        claimed = set()
+        for o in bpy.data.objects:
+            if o is not arm and o.animation_data:
+                if o.animation_data.action:
+                    claimed.add(o.animation_data.action)
+                claimed.update(s.action for t in o.animation_data.nla_tracks for s in t.strips if s.action)
+        names = {b.name for b in arm.data.bones}
+        for action in sorted(bpy.data.actions, key=lambda a: a.name):
+            if action not in found and action not in claimed and self.action_bones(action) & names:
+                found.append(action)
+        return found
+
+    def bake_action(self, arm, action):
+        """Samples every pose bone's parent-relative (position, quat xyzw, scale) at each whole
+        frame of the action's range, with only that action playing. Returns a list of frames."""
+        scene = self.scene
+        had_anim = arm.animation_data is not None
+        ad = arm.animation_data_create()
+        saved_action, saved_slot = ad.action, getattr(ad, "action_slot", None)
+        saved_mutes = [t.mute for t in ad.nla_tracks]
+        saved_frame, saved_sub = scene.frame_current, scene.frame_subframe
+        saved_pose = arm.data.pose_position
+        start, end = action.frame_range
+        f0, f1 = int(math.floor(start + 1e-4)), int(math.ceil(end - 1e-4))
+        frames = []
+        try:
+            for t in ad.nla_tracks:
+                t.mute = True
+            ad.action = action
+            if hasattr(ad, "action_slot") and ad.action_slot is None and len(action.slots):
+                slots = [s for s in action.slots if s.target_id_type in ("OBJECT", "UNSPECIFIED")]
+                if slots:
+                    ad.action_slot = slots[0]
+            arm.data.pose_position = "POSE"
+            for f in range(f0, max(f1, f0) + 1):
+                scene.frame_set(f)
+                pose = arm.evaluated_get(self.depsgraph).pose
+                sample = {}
+                for pb in pose.bones:
+                    m = pb.matrix if pb.parent is None else pb.parent.matrix.inverted_safe() @ pb.matrix
+                    loc, rot, sca = m.decompose()
+                    sample[pb.name] = ((loc.x * self.unit, loc.y * self.unit, loc.z * self.unit),
+                                       (rot.x, rot.y, rot.z, rot.w), (sca.x, sca.y, sca.z))
+                frames.append(sample)
+        finally:
+            ad.action = saved_action
+            if saved_action is not None and saved_slot is not None:
+                ad.action_slot = saved_slot
+            for t, mute in zip(ad.nla_tracks, saved_mutes):
+                t.mute = mute
+            arm.data.pose_position = saved_pose
+            if not had_anim:
+                arm.animation_data_clear()
+            scene.frame_set(saved_frame, subframe=saved_sub)
+        return frames
+
+    def export_clips(self, arm, rig_name):
+        """Bakes and writes every action of the rig; returns (Animator states, auto_play state)."""
+        actions = self.rig_actions(arm)
+        if not actions:
+            return [], None
+        r = self.scene.render
+        fps = r.fps / (r.fps_base or 1.0)
+        bones = arm.data.bones
+        paths = {}
+        for b in bones:  # parents come before children in Blender's bone list
+            paths[b.name] = (paths[b.parent.name] + "/" if b.parent else "") + self.bone_name(b)
+        rest = {}
+        for b in bones:
+            loc, rot, sca = self.bone_local(b).decompose()
+            rest[b.name] = ((loc.x * self.unit, loc.y * self.unit, loc.z * self.unit),
+                            (rot.x, rot.y, rot.z, rot.w), (sca.x, sca.y, sca.z))
+
+        baked = [(a, self.bake_action(arm, a)) for a in actions]
+
+        # A channel that moves in any clip is keyed in every clip, so switching clips always
+        # drives it (a clip that leaves it alone would leave it wherever the last one put it).
+        def differs(ch, a, b):
+            if ch == 1:
+                return abs(sum(x * y for x, y in zip(a, b))) < 1.0 - 1e-6
+            return max(abs(x - y) for x, y in zip(a, b)) > 1e-5
+        moving = set()
+        for _, frames in baked:
+            for sample in frames:
+                for bname, vals in sample.items():
+                    for ch in range(3):
+                        if (bname, ch) not in moving and bname in rest and differs(ch, vals[ch], rest[bname][ch]):
+                            moving.add((bname, ch))
+        channels = sorted(moving, key=lambda k: (paths[k[0]], k[1]))
+
+        states, auto_play = [], None
+        assigned = arm.animation_data.action if arm.animation_data else None
+        for action, frames in baked:
+            if not frames:
+                continue
+            claimed = self.claim("animations", f"{rig_name}/{sanitize(action.name)}", (arm.name, action.name))
+            clip = claimed.split("/", 1)[1]
+            text = self.clip_yaml(clip, frames, fps, channels, paths)
+            self.write_text(os.path.join("animations", TAG, rig_name, clip + ".yaml"),
+                            self.header(f"Action '{action.name}' on armature '{arm.name}'") + text)
+            states.append({"name": clip, "clip": f"animations/{rig_name}/{clip}.yaml"})
+            if auto_play is None or action == assigned:
+                auto_play = clip
+        return states, auto_play
+
+    @staticmethod
+    def reduce_keys(values, tol):
+        """Indices of the keys to keep: a key is dropped when interpolating linearly between its
+        kept neighbours reproduces it (and every key in between) within tol."""
+        n = len(values)
+        if n <= 2:
+            return list(range(n))
+
+        def near(a, b):
+            return max(abs(x - y) for x, y in zip(a, b)) <= tol
+
+        if all(near(v, values[0]) for v in values):
+            return [0, n - 1]
+        keep, a, j = [0], 0, 2
+        while j < n:
+            va, vj = values[a], values[j]
+            ok = all(near(values[k], [x + (y - x) * (k - a) / (j - a) for x, y in zip(va, vj)])
+                     for k in range(a + 1, j))
+            if ok:
+                j += 1
+            else:
+                keep.append(j - 1)
+                a, j = j - 1, j + 1
+        keep.append(n - 1)
+        return keep
+
+    def clip_yaml(self, clip, frames, fps, channels, paths):
+        """One clip: a position / rotation_quat / scale track per moving bone channel, keyed per frame."""
+        props = ("position", "rotation_quat", "scale")
+        lines = ["clip:", f"  name: {_scalar(clip)}", "  wrap: loop"]
+        if len(frames) > 1:
+            lines.append(f"  length: {fmt_num((len(frames) - 1) / fps)}")
+        lines.append("  tracks:" if channels else "  tracks: []")
+        for bname, ch in channels:
+            values = [list(f[bname][ch]) for f in frames]
+            if ch == 1:  # nlerp takes the short way only between keys in the same hemisphere
+                for i in range(1, len(values)):
+                    if sum(x * y for x, y in zip(values[i], values[i - 1])) < 0.0:
+                        values[i] = [-x for x in values[i]]
+            lines.append(f"    - object: {_scalar(paths[bname])}")
+            lines.append(f"      property: {props[ch]}")
+            lines.append("      keys:")
+            for i in self.reduce_keys(values, 1e-4):
+                lines.append(f"        - {{ time: {fmt_num(i / fps)}, value: [{', '.join(fmt_num(x) for x in values[i])}] }}")
+        return "\n".join(lines) + "\n"
 
     # ---- lights and cameras ------------------------------------------------------------------
 
@@ -518,12 +842,29 @@ class Exporter:
             comp["materials"] = refs
         return comp
 
-    def export_mesh(self, obj):
-        """Writes the object's mesh (once per datablock) and returns its mesh_path key."""
+    def export_mesh(self, obj, skin_arm=None):
+        """Writes the object's mesh (once per datablock) and returns its mesh_path key.
+
+        With skin_arm, the mesh is that armature's skin: evaluated in the rest pose (the caller
+        has set it) and written with its vertex-group weights for the armature's deform bones.
+        """
         evaluated = obj.type != "MESH" or (self.apply_modifiers and any(m.show_render for m in obj.modifiers))
         key = ("obj", obj.name) if evaluated else ("mesh", obj.data.name)
+        groups = None
+        if skin_arm is not None:
+            evaluated, key = True, ("skin", obj.name)
+            deform = {b.name: b for b in skin_arm.data.bones if b.use_deform}
+            groups = {vg.index: self.bone_name(deform[vg.name]) for vg in obj.vertex_groups if vg.name in deform}
         if key in self.mesh_refs:
             return self.mesh_refs[key]
+        if skin_arm is not None:
+            if not groups:
+                self.warn(f"'{obj.name}': no vertex group names a deform bone of '{skin_arm.name}'; "
+                          f"the mesh won't follow the rig")
+            if any(m.type == "ARMATURE" and not m.use_vertex_groups for m in obj.modifiers):
+                self.warn(f"'{obj.name}': armature modifier deforms by envelopes; only vertex groups are converted")
+            if obj.data.shape_keys:
+                self.warn(f"'{obj.name}': shape keys are not converted; the skin uses its evaluated rest shape")
 
         src = obj.evaluated_get(self.depsgraph) if evaluated else obj
         me = bpy.data.meshes.new_from_object(src, preserve_all_data_layers=True, depsgraph=self.depsgraph)
@@ -535,15 +876,18 @@ class Exporter:
             name = self.claim("meshes", sanitize(key[1]), key)
             slot_names = [sanitize(s.material.name) if s.material else f"slot{i}"
                           for i, s in enumerate(obj.material_slots)]
-            text = self.mesh_yaml(me, slot_names, obj.name)
+            if skin_arm is not None:
+                slot_names = []  # skinned meshes draw with one material
+            text = self.mesh_yaml(me, slot_names, obj.name, groups)
         finally:
             bpy.data.meshes.remove(me)
         self.write_text(os.path.join("meshes", TAG, name + ".yaml"), text)
         self.mesh_refs[key] = name
         return name
 
-    def mesh_yaml(self, me, slot_names, label):
-        """One entry per face corner (loop): positions, corner normals, UVs, tangents."""
+    def mesh_yaml(self, me, slot_names, label, groups=None):
+        """One entry per face corner (loop): positions, corner normals, UVs, tangents, and with
+        `groups` (vertex-group index -> bone name) skin weights."""
         np = self.np
         # The engine fan-triangulates polygons, which breaks on concave n-gons, and
         # calc_tangents() rejects n-gons, so anything above a quad is triangulated first.
@@ -616,6 +960,21 @@ class Exporter:
         if len(slot_names) > 1:
             out.append("material_slots: [" + ", ".join(slot_names) + "]")
             out.append("face_materials: [" + ", ".join(str(min(i, len(slot_names) - 1)) for i in mat_idx.tolist()) + "]")
+        if groups:
+            # The engine skins with each vertex's 4 strongest groups; normalise those to 1.
+            per_vertex, unweighted = [], 0
+            for v in me.vertices:
+                infl = sorted(((g.weight, groups[g.group]) for g in v.groups
+                               if g.group in groups and g.weight > 0.0), reverse=True)[:4]
+                total = sum(w for w, _ in infl)
+                if total <= 0.0:
+                    per_vertex.append("{}")
+                    unweighted += 1
+                else:
+                    per_vertex.append("{ " + ", ".join(f"{_scalar(n)}: {fmt_num(w / total)}" for w, n in infl) + " }")
+            if unweighted:
+                self.warn(f"'{label}': {unweighted} vertices have no deform-bone weight; they won't move with the rig")
+            out.append("weights:\n" + "\n".join("  - " + per_vertex[i] for i in vidx.tolist()))
         return "\n".join(out) + "\n"
 
     # ---- materials ---------------------------------------------------------------------------

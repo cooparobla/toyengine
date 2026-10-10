@@ -73,8 +73,9 @@ python3 tools/blender_to_toy.py --out assets level.blend props.blend
 ```
 
 Everything lands under the `blender` tag: `meshes/blender/`, `materials/blender/`,
-`textures/blender/`, `objects/blender/` (one prefab per instanced collection) and
-`scenes/blender/<blend name>/scene.yaml`. Converted files overwrite any file at the same path;
+`textures/blender/`, `objects/blender/` (one prefab per instanced collection, and one rig per
+armature: bone objects, skinned meshes and an Animator), `animations/blender/<rig>/` (every
+action that animates the rig's bones, baked to a clip) and `scenes/blender/<blend name>/scene.yaml`. Converted files overwrite any file at the same path;
 nothing else in `--out` is touched. Assets keep their Blender names, so when two `.blend` files
 both have e.g. a mesh `Cube`, the file listed last wins.
 

@@ -71,7 +71,7 @@ COOPA_TEST(every_debug_view_channel_renders) {
     }
 
     // contact_shadows: shadows_enabled off isolates the march as the only occlusion term --
-    // see pixel_lighting.frag's own doc on this combination.
+    // see toy_lighting.frag's own doc on this combination.
     {
         toy::core::AppConfig config =
             make_test_config("assets/scenes/demos/pixel_demo/scene.yaml", 640, 360, 160, 90);

@@ -3,7 +3,7 @@
 
 // light_ubo_body.glsl -- the `lights` uniform block, at set 1 binding 0.
 //
-// A "body" file in the pixel_shadow_body.glsl / contact_shadow_body.glsl sense: every shader
+// A "body" file in the toy_shadow_body.glsl / contact_shadow_body.glsl sense: every shader
 // that shades from toyengine's light set includes this instead of restating the block. The
 // layout must match gfxcoopa's LightUBO (light_data.h) field for field, and the consequence of
 // two copies drifting is silent garbage -- a shader reading spot_shadow_params out of what the
@@ -13,7 +13,7 @@
 //   - #include <gfx/spot_light.glsl>, for the SpotLight struct.
 //
 // The set index is fixed at 1 here rather than parameterised: every consumer binds toyengine's
-// light set at 1 (pixel_lighting.frag, debug_view.frag, contact_shadow.frag,
+// light set at 1 (toy_lighting.frag, debug_view.frag, contact_shadow.frag,
 // sdf_forward.frag, gfx/surface/transparent_fs.glsl), and a shader
 // that needed it elsewhere would be diverging from the descriptor contract they all share.
 
@@ -90,6 +90,10 @@ layout(set = 1, binding = 0) uniform LightUBO {
     // Global exponential height fog -- see gfx/fog.glsl. Read by fog.frag (the opaque scene)
     // and by every forward shader, which fogs its own fragment at its own distance.
     GfxFogBlock fog;
+
+    // The cloud layer's shadow map (render cloud_shadows) -- see cloud_shadow.glsl.
+    vec4 cloud_shadow;        // xy = the map's corner (world), z = 1 / its side, w = strength (0 = off)
+    vec4 cloud_shadow_layer;  // x = the layer's base height (world z), y = its thickness, z = low-light fade
 } lights;
 
 #endif // TOY_LIGHT_UBO_BODY_GLSL

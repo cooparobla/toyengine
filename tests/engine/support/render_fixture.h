@@ -27,7 +27,7 @@
  * bool is the most expensive way to do it. `outline_enabled`, `palette_enabled`,
  * `dither_enabled`, `sdf_enabled`, `debug_view` and friends are re-read per frame, so
  * Engine::render_config() flips them on a live pipeline (see
- * PixelRenderPipeline::render_config_mut()). The STARTUP-FIXED toggles -- ssao/ssr/world_ui/
+ * ToyRenderPipeline::render_config_mut()). The STARTUP-FIXED toggles -- ssao/ssr/world_ui/
  * screen_ui and friends -- genuinely cannot be, so a test that covers their "off" construction
  * branch keeps its own Engine.
  *
@@ -63,7 +63,7 @@ using Frame = coopa::gfx::util::ImageData;
  * per-pixel noise frame to frame, and neither cares whether time passed): SSAO rotates its noise
  * tile by `frame_index_ & 0x7`, and SSR's interleaved-gradient dither runs on
  * `frame_index_ & 0xFF` -- see ssao_params.noise_rotation and ssr_params.frame_index in
- * PixelRenderPipeline::render(). So "identical" has a period of 256 frames, not 1.
+ * ToyRenderPipeline::render(). So "identical" has a period of 256 frames, not 1.
  *
  * Measured on pixel_demo at 160x90: captures 5 frames apart differ by 2 pixels, 8 apart (SSAO's
  * period, which kills the larger source) by 1, and 256 apart by 0 -- but 256 ticks per comparison
@@ -98,7 +98,7 @@ toy::core::AppConfig make_test_config(const std::string& scene, uint32_t win_w, 
  * @brief The shipped render config (assets/config.yaml), with only the window/scene/output bits
  *        a test must own.
  *
- * make_test_config() default-constructs an AppConfig, so it exercises PixelRenderConfig's own
+ * make_test_config() default-constructs an AppConfig, so it exercises ToyRenderConfig's own
  * defaults -- `aa_mode: "off"`, `dof_enabled: false` -- and NOT what the engine actually ships.
  * That is fine for tests asserting on toggles they set themselves, but it is exactly why a TAA
  * flicker once went unnoticed: nothing in the suite ever rendered with the configuration a user

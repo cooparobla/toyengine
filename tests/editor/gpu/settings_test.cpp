@@ -10,6 +10,7 @@
 #include <coopa/testing/test.h>
 
 #include "editor/support/editor_session.h"
+#include <toyengine/render/toy_render_pipeline.h>
 
 COOPA_TEST_SUITE("settings");
 
@@ -198,7 +199,9 @@ COOPA_TEST(render_tab_headers_rows_and_search_write_scene_overrides) {
     expect(app.config_document().dirty() && app.config_document().section("render").contains("bloom_enabled"),
            "a modal edit writes config.yaml");
     expect(app.document().scene_setting("render", "bloom_enabled") == nullptr, "...not a scene override");
-    app.ui().close_all_popups();
+    // The modal blocks everything under it (close_all_popups() leaves modals open by design).
+    app.close_project_settings();
+    tick(engine, 2);
     app.set_prop_tab(PropTab::Render);
     app.clear_test_rects();
     tick(engine, 2);
@@ -214,8 +217,8 @@ COOPA_TEST(render_tab_headers_rows_and_search_write_scene_overrides) {
         }
         app.clear_test_rects();
         tick(engine, 2);
-        expect(app.test_rect("setting_group:Bloom").has_value() && !app.test_rect("setting_group:Shadows").has_value(),
-               "searching 'bloom' shows the Bloom section and hides Shadows");
+        expect(app.test_rect("setting_group:Bloom").has_value(), "searching 'bloom' shows the Bloom section");
+        expect(!app.test_rect("setting_group:Shadows").has_value(), "...and hides Shadows");
         dump(engine, "render_settings_search");
     }
 }

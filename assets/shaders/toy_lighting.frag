@@ -1,0 +1,325 @@
+#version 450
+
+// Deferred lighting for the toyengine render pipeline. Direct lighting has two
+// looks, picked by soft_lighting -- see shade_light():
+//   - Ramped (soft_lighting == 0, this engine's default): N.L is quantized
+//     into discrete steps (band(), gated by light_bands) and specular is a
+//     hard step()-masked highlight (gated by spec_threshold), for the
+//     cel-shaded look.
+//   - Soft (soft_lighting != 0): N.L falls off continuously (band() is
+//     bypassed) and specular is a standard Cook-Torrance
+//     NDF*G*F/(4*NdotV*NdotL) term, same shape as blendy's smooth PBR.
+// Everything else is independently toggleable on top of whichever direct-
+// lighting look is active:
+//   - g_ssao: always bound (to SsaoPass::output_view() or its neutral
+//     fully-unoccluded texture, decided once at pipeline construction from
+//     ssao_enabled -- see ToyRenderPipeline), so ambient occlusion is
+//     just another multiplier here regardless of the toggle.
+//   - indirect ambient: sky-gradient-based diffuse + specular (see
+//     gfx/sky.glsl, gfx/brdf.glsl) rather than a flat ambient constant, so
+//     ssr.frag/ssr_composite.frag have a well-defined indirect specular
+//     term to swap reflections into when ssr_enabled is set -- and a
+//     nicer-looking ambient fallback when it isn't. The indirect-specular
+//     expression itself is shared with the composite via
+//     gfx/indirect_specular.glsl (indirect_hooks.glsl provides this
+//     engine's hooks) rather than duplicated, so the two structurally
+//     cannot drift apart.
+//
+// rim_strength stays independent of soft_lighting in both modes (0 disables
+// it either way) -- it's a common accent in both cel-shaded and painterly
+// soft-shaded styles, not exclusively a cel-shading technique.
+
+#include <gfx/sky.glsl>
+#include <gfx/brdf.glsl>
+#include <gfx/shadow_sampling.glsl>
+#include <gfx/indirect_specular.glsl>
+#include <gfx/ao_composite.glsl>
+#include <gfx/spot_light.glsl>
+// Pure-function header (declares no uniforms or samplers), for the contact-shadow
+// march below: ssr_texel_world_size() sizes its bias to a screen texel, and
+// ssr_ndc_to_uv() is the same NDC->G-buffer mapping the SSR trace uses.
+#include <gfx/ssr_common.glsl>
+
+layout(location = 0) in vec2 in_uv;
+
+// Set 0: Camera UBO
+layout(set = 0, binding = 0) uniform CameraUBO {
+    mat4 view;
+    mat4 proj;
+    vec3 camera_pos;
+} camera;
+
+// Set 1: Light UBO -- see light_ubo_body.glsl, the single copy of this block's layout.
+#include "light_ubo_body.glsl"
+
+
+// Set 2: Shadow maps -- toyengine has exactly one directional map, one point
+// cube map, and one spot map (see shadow_map_target.h), unlike blendy's four
+// cube slots.
+// *Shadow sampler types: the bound VkSampler has hardware compareEnable
+// (util::Sampler::shadow()), so the GPU compares depth before it filters --
+// see gfx/shadow_sampling.glsl's *Shadow-family doc for why that matters.
+layout(set = 2, binding = 0) uniform sampler2DShadow dir_shadow_map;
+layout(set = 2, binding = 1) uniform sampler2DShadow local_shadow_atlas; // point/spot shadows (gfx/local_shadow.glsl)
+// The directional map AGAIN, through a plain nearest sampler: PCSS's blocker
+// search needs stored depths, which a compare sampler cannot return.
+layout(set = 2, binding = 3) uniform sampler2D dir_shadow_map_raw;
+layout(set = 2, binding = 4) uniform sampler2D cloud_shadow_map;   // cloud_shadow.glsl
+
+// Set 3: this pass's app-supplied extra (DeferredLightingPass's ExtraSets) -- the resolved
+// contact-shadow occlusion (ContactShadowPass). R = the RAW geometric occlusion of the march;
+// strength and per-light darkness are applied at the use site below, not baked in.
+//
+// The extras come BEFORE the pass's own G-buffer set, which DeferredLightingPass deliberately
+// declares LAST (see its ctor: "camera, light, shadow, then any caller extras, then this pass's
+// own G-buffer/SSAO set LAST"). So adding an extra SHIFTS the G-buffer set index -- it is 4 here
+// and would be 3 with no extras. debug_view.frag has always been numbered this way for the same
+// reason; getting it backwards binds the G-buffer set to a one-binding sampler and silently
+// renders a plausible-looking but unlit frame rather than failing.
+layout(set = 3, binding = 0) uniform sampler2D u_contact_shadow;
+// The physical sky's inputs (render sky_model: physical -- see sky_physical.glsl), on the same
+// extra set: the transmittance and sky-view LUTs, and the half-resolution volumetric cloud layer
+// (composited over either sky model). Bound whether or not either is on.
+layout(set = 3, binding = 1) uniform sampler2D u_sky_transmittance;
+layout(set = 3, binding = 2) uniform sampler2D u_sky_view;
+layout(set = 3, binding = 3) uniform sampler2D u_sky_clouds;
+
+// Set 4: G-Buffer textures + screen-space AO -- LAST, after the extra above.
+layout(set = 4, binding = 0) uniform sampler2D g_albedo_ao;          // RGB = Albedo, A = AO
+layout(set = 4, binding = 1) uniform sampler2D g_normal_metallic;    // RGB = World Normal, A = Metallic
+layout(set = 4, binding = 2) uniform sampler2D g_position_roughness; // RGB = World Pos, A = Roughness
+layout(set = 4, binding = 3) uniform sampler2D g_ssao;                // R = SsaoPass output (or its neutral 1.0 texture)
+layout(set = 4, binding = 4) uniform sampler2D g_emissive;            // RGB = emissive radiance (HDR)
+
+layout(push_constant) uniform ToyLightingParams {
+    float light_bands;       // discrete N.L shading steps, e.g. 4.0; used when soft_lighting is off
+    float spec_threshold;    // hard specular highlight cutoff; used when soft_lighting is off
+    float rim_strength;      // 0 disables the rim term
+    float ambient_intensity; // scales sky_gradient(N) indirect diffuse
+    float sky_intensity;     // scales sky_gradient(reflect(-V,N)) indirect specular base
+    float soft_lighting;     // != 0 -> smooth Cook-Torrance direct lighting; 0 -> banded/ramped cel look (default)
+    float ssao_direct_strength; // how much occlusion darkens DIRECT lighting (HDRP's
+                                // Direct Lighting Strength): 0 = indirect only
+    float ssao_intensity;       // Unreal's AO Intensity: ssao = mix(1, ssao, intensity)
+    mat4  sky_inv_view_proj;     // inverse(proj * view), for the sky at background pixels
+} params;
+
+layout(location = 0) out vec4 out_color;
+
+#include "indirect_hooks.glsl"
+#include "toy_shadow_body.glsl"
+#include "sky_physical.glsl"
+
+// Quantizes N.L into `params.light_bands` discrete steps -- the core of the
+// cel-shaded look. Bypassed entirely when soft_lighting is on (smooth N.L
+// falloff), or when bands <= 1 (matching a config value of 0 or 1 being a
+// sensible "off" default even in ramped mode).
+float band(float ndl) {
+    if (params.soft_lighting != 0.0) return ndl;
+    if (params.light_bands <= 1.0) return ndl;
+    return floor(ndl * params.light_bands) / params.light_bands;
+}
+
+// Direct lighting for one light, multiplied by (1 - shadow). Two looks --
+// see the file doc and band() above: ramped (default) bands the diffuse
+// N.L and hard-masks the specular into a toon highlight; soft
+// (soft_lighting != 0) uses standard continuous Cook-Torrance for both.
+vec3 shade_light(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo, float metallic,
+                 float roughness, vec3 F0, float shadow) {
+    vec3 H = normalize(V + L);
+    float ndl_raw = max(dot(N, L), 0.0);
+    if (ndl_raw <= 0.0) return vec3(0.0);
+    float ndl = band(ndl_raw);
+
+    float NDF = distribution_ggx(N, H, roughness);
+    float G   = geometry_smith(N, V, L, roughness);
+    vec3  F   = fresnel_schlick(max(dot(H, V), 0.0), F0);
+
+    vec3 specular;
+    if (params.soft_lighting != 0.0) {
+        float denom = 4.0 * max(dot(N, V), 0.0) * ndl_raw + 0.0001;
+        specular = (NDF * G * F) / denom;
+    } else {
+        float spec_mask = step(params.spec_threshold, NDF * G);
+        specular = F * spec_mask;
+    }
+
+    vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
+    return (kD * albedo / BRDF_PI + specular) * radiance * ndl * (1.0 - shadow);
+}
+
+void main() {
+    // The normal alone decides sky vs surface, so it is read first: a sky pixel needs none
+    // of the other four G-buffer reads.
+    vec4 g1 = texture(g_normal_metallic, in_uv);
+    vec3 N = g1.rgb;
+    if (dot(N, N) < 0.001) {
+        // Background pixel: the procedural sky (gfx/sky.glsl), from the CPU-inverted
+        // view-projection and LightUBO's sky colours. Drawn here rather than by a
+        // second fullscreen pass that would re-read every pixel's normal just to discard
+        // all the geometry ones.
+        vec3 ndc   = vec3(in_uv.x * 2.0 - 1.0, 1.0 - in_uv.y * 2.0, 1.0);
+        vec4 world = params.sky_inv_view_proj * vec4(ndc, 1.0);
+        vec3 dir   = normalize(world.xyz / world.w - camera.camera_pos);
+        // sky_params.x selects the physical sky (sky_physical.glsl); 0 keeps the gradient.
+        vec3 sky = lights.sky_params.x > 0.5
+            ? sky_physical(dir, in_uv)
+            : sky_gradient(dir, lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb);
+        out_color = vec4(sky_with_clouds(sky, in_uv), 1.0);
+        return;
+    }
+    vec4 g0 = texture(g_albedo_ao, in_uv);
+    vec4 g2 = texture(g_position_roughness, in_uv);
+    // 1.0 (fully unoccluded) whenever SSAO is disabled -- ToyRenderPipeline binds
+    // SsaoPass::neutral_view() in that case, so this read needs no separate flag.
+    float ssao = mix(1.0, texture(g_ssao, in_uv).r, params.ssao_intensity);
+    vec3 emissive = texture(g_emissive, in_uv).rgb;
+    N = normalize(N);
+
+    vec3  albedo    = g0.rgb;
+    float ao        = g0.a;
+    float metallic  = g1.a;
+    vec3  world_pos = g2.rgb;
+    float roughness = g2.a;
+
+    vec3 V = normalize(camera.camera_pos - world_pos);
+    vec3 F0 = mix(vec3(0.04), albedo, metallic);
+
+    vec3 Lo = vec3(0.0);
+
+    if (lights.light_counts.x > 0) {
+        vec3 L = normalize(-lights.dir_direction.xyz);
+        vec3 radiance = lights.dir_color.rgb * lights.dir_direction.w;
+
+        // The raw shading point: calc_dir_shadow() picks the cascade from it and applies
+        // that cascade's own normal-offset bias, which the caller has no way to know.
+        // shade_light() returns 0 for N.L <= 0 whatever the shadow is, so only a surface
+        // facing the light pays for the shadow lookups (the PCF is most of this pass's cost).
+        bool  faces_light = dot(N, L) > 0.0;
+        float shadow = faces_light ? calc_dir_shadow(world_pos, N, L) : 0.0;
+
+        // Screen-space contact shadows (HDRP's own feature of that name): a short
+        // G-buffer march from the surface toward the light, catching the small-scale
+        // occlusion the shadow map's normal-offset bias necessarily recedes from (see
+        // ToyRenderConfig::shadow_normal_bias's ~2% trade). Read here from the buffer
+        // ContactShadowPass resolved this frame rather than marched inline --
+        // contact_shadow.frag runs contact_shadow_body.glsl, followed by a temporal
+        // accumulation an inline march would have nowhere to store. max()-combined with the
+        // map's result so each technique only ever ADDS occlusion the other missed;
+        // scaled by the same per-light darkness calc_dir_shadow applies
+        // (dir_shadow_extra.x). Independent of the shadow map: with shadows_enabled
+        // false calc_dir_shadow returns 0 and the march becomes the only directional
+        // occlusion term, so shadows_enabled: false + contact_shadows_enabled: true
+        // renders a contact-only view. Skipped once the map alone already exceeds the
+        // per-light darkness cap -- the march can only ADD occlusion, so it can never
+        // move the result past what max() with a term already at that cap would give.
+        if (faces_light && lights.contact_params.x > 0.0 && shadow < lights.dir_shadow_extra.x) {
+            shadow = max(shadow, texture(u_contact_shadow, in_uv).r
+                                * lights.contact_params.x * lights.dir_shadow_extra.x);
+        }
+
+        Lo += shade_light(N, V, L, radiance, albedo, metallic, roughness, F0, shadow);
+    }
+
+    uint num_points = min(lights.light_counts.y, 16u);
+    for (uint i = 0u; i < num_points; ++i) {
+        PointLight pl = lights.point_lights[i];
+        vec3 frag_to_light = pl.position_range.xyz - world_pos;
+        float dist = length(frag_to_light);
+        float range = pl.position_range.w;
+        if (dist > range || dist < 0.0001) continue;
+
+        vec3 L = frag_to_light / dist;
+        // pl.attenuation.x (the classical "constant attenuation" slot) is used as a per-light
+        // falloff sharpness exponent: ~1 gives a gradual, realistic fade to the light's range;
+        // ~4-8 gives a crisper, more cel-shaded-style cutoff. Defaults to
+        // PointLightComponent::attenuation_constant's own default (1.0, smooth) if a scene
+        // doesn't set it.
+        float sharpness = max(pl.attenuation.x, 0.1);
+        // `factor` (dist normalized by range, 0 at the light itself, 1 at its boundary) drives
+        // BOTH the hard cutoff window (falloff) AND the inverse-square-shaped softening below,
+        // so range is the light's visible-width control, not just a late hard clamp. Softening
+        // by raw world-space dist^2 would be range-independent: a light's own intensity decays
+        // it to imperceptibility well before typical range values, so changing range would have
+        // almost no visible effect. Using `factor` makes the whole curve self-similar and scaled
+        // by range, so growing/shrinking range visibly grows/shrinks the light's glow. The
+        // 4*PI divisor fixes peak brightness at the light's center (1 / 4*PI at factor 0)
+        // independently of range -- range changes the curve's width, not its scale.
+        float factor = clamp(dist / range, 0.0, 1.0);
+        float falloff = clamp(1.0 - pow(factor, sharpness), 0.0, 1.0);
+        falloff *= falloff;
+        float attenuation = falloff / (4.0 * BRDF_PI * (factor * factor + 1.0));
+        vec3 radiance = pl.color_intensity.rgb * (pl.color_intensity.w * 0.08) * attenuation;
+
+        // Point shadow from the local-light atlas, when this light holds a slot there
+        // (attenuation.w, 1-based) -- see calc_local_shadow().
+        float shadow = (pl.attenuation.w > 0.5 && dot(N, L) > 0.0)
+            ? calc_local_shadow(pl.attenuation.w, world_pos, N, L) : 0.0;
+
+        Lo += shade_light(N, V, L, radiance, albedo, metallic, roughness, F0, shadow);
+    }
+
+    uint num_spots = min(lights.light_counts.z, 8u);
+    for (uint i = 0u; i < num_spots; ++i) {
+        SpotLight sl = lights.spot_lights[i];
+        vec3 frag_to_light = sl.position_range.xyz - world_pos;
+        float dist = length(frag_to_light);
+        float range = sl.position_range.w;
+        if (dist > range || dist < 0.0001) continue;
+
+        vec3 L = frag_to_light / dist;
+        float cone = gfx_spot_cone(L, sl.direction_cone.xyz, sl.direction_cone.w, sl.params.y);
+        if (cone <= 0.0) continue;
+
+        // Identical distance curve to the point loop directly above -- see
+        // gfx/spot_light.glsl's file doc on why that curve isn't shared here.
+        float sharpness = max(sl.params.x, 0.1);
+        float factor = clamp(dist / range, 0.0, 1.0);
+        float falloff = clamp(1.0 - pow(factor, sharpness), 0.0, 1.0);
+        falloff *= falloff;
+        float attenuation = falloff / (4.0 * BRDF_PI * (factor * factor + 1.0));
+        vec3 radiance = sl.color_intensity.rgb * (sl.color_intensity.w * 0.08) * attenuation * cone;
+
+        // Spot shadow from the local-light atlas (params.z = 1-based slot) -- see calc_local_shadow().
+        float shadow = (sl.params.z > 0.5 && dot(N, L) > 0.0)
+            ? calc_local_shadow(sl.params.z, world_pos, N, L) : 0.0;
+
+        Lo += shade_light(N, V, L, radiance, albedo, metallic, roughness, F0, shadow);
+    }
+
+    // Rim light: brightens the silhouette edge, a common cel-shading accent.
+    if (params.rim_strength > 0.0) {
+        float rim = 1.0 - max(dot(N, V), 0.0);
+        rim = pow(rim, 3.0) * params.rim_strength;
+        Lo += albedo * rim;
+    }
+
+    // Indirect lighting: no baked GI probes and no reflection probes (this
+    // engine deliberately has neither), so the sky gradient is always both
+    // the diffuse irradiance and the specular base. The specular half is the
+    // one call shared with ssr_composite.frag (gfx/indirect_specular.glsl,
+    // indirect_hooks.glsl) so its confidence-weighted subtraction cancels
+    // what this pass added when ssr_enabled is set.
+    vec3 ind_diff = sky_gradient(N, lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb)
+                  * params.ambient_intensity;
+    GfxIndirectSpecular ind = gfx_indirect_specular(world_pos, N, V, F0, roughness, params.sky_intensity,
+                                                    lights.sky_zenith.rgb, lights.sky_horizon.rgb, lights.sky_ground.rgb);
+    vec3 kD_ind = (vec3(1.0) - ind.F) * (1.0 - metallic);
+
+    // Occlusion applied the way Unity HDRP applies its GTAO (gfx/ao_composite.glsl):
+    //  * material AO and screen-space AO combine by min() -- they estimate the same
+    //    quantity at different scales, so multiplying would double-darken overlaps;
+    //  * indirect diffuse gets multi-bounce AO (tints creases toward albedo);
+    //  * indirect specular gets its own NdotV/roughness occlusion cone, tinted by F0;
+    //  * direct lighting is scaled by the multi-bounce factor faded in with
+    //    params.ssao_direct_strength (0 = indirect only).
+    // ssr_composite.frag subtracts the same ind.value term this pass adds, so its
+    // occlusion factor must match this one exactly (see ssr_composite_body.glsl).
+    const GfxAoTerms aot = gfx_ao_terms(ao, ssao, albedo, F0, max(dot(N, V), 0.0), roughness, params.ssao_direct_strength);
+    vec3 ambient = kD_ind * albedo * ind_diff * aot.diffuse + ind.value * aot.specular;
+    Lo *= aot.direct;
+
+    // emissive is added last, after the occluded terms -- an emissive surface glows
+    // even in a fully occluded/dark crevice, unlike the lit terms above it.
+    out_color = vec4(ambient + Lo + emissive, 1.0);
+}

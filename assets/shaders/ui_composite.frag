@@ -16,7 +16,7 @@
 // that makes world-canvas text look stepped.
 //
 // No sRGB decode/encode here, unlike upscale.frag: both sources are UNORM images
-// already holding the display-referred, sRGB-ENCODED bytes pixel_stylize.frag
+// already holding the display-referred, sRGB-ENCODED bytes stylize.frag
 // produced, and the destination is UNORM too -- so this blend happens in that
 // encoded space. upscale.frag's decode cancels the swapchain's implicit encode
 // one stage later.

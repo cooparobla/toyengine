@@ -44,7 +44,7 @@ const uint8_t kPico8Subset[8][3] = {
  * toggle measurably changes the image.
  *
  * The palette assertion alone validates the render path, the outline/dither/quantize post pass
- * and the UNORM/gamma choice together -- see gfxcoopa's pixel_stylize_pass.h file doc. What is
+ * and the UNORM/gamma choice together -- see gfxcoopa's stylize_pass.h file doc. What is
  * new here is the SECOND assertion: two captures a noise cycle apart, with nothing
  * changed, must be byte-identical. That is not a property of the renderer being tested for its
  * own sake -- it is what earns the right to compare the toggle frames below with exact counts
@@ -53,7 +53,7 @@ const uint8_t kPico8Subset[8][3] = {
  *
  * The three toggles are then flipped on the LIVE pipeline (palette, then SDF, then outline),
  * which is the whole reason this is one test and not four Engines: each is re-read from the
- * config every frame (see PixelRenderPipeline::render_config_mut()), so a flip plus a
+ * config every frame (see ToyRenderPipeline::render_config_mut()), so a flip plus a
  * noise cycle of ticks costs milliseconds against the ~second a fresh device, pipeline set and scene load costs.
  * Thresholds are deliberately loose -- the claim is "this toggle reaches the screen", and the
  * actual counts print on failure so a real change in coverage is easy to re-baseline.
@@ -138,10 +138,10 @@ COOPA_TEST(frame_is_reproducible_and_live_toggles_reach_it) {
  *
  * This one keeps an Engine of its own on purpose. Unlike the live toggles above, these
  * decisions are baked into descriptors when the pipeline is built (see
- * pixel_render_pipeline.h's rule 1), so the code below only ever runs in a pipeline
+ * toy_render_pipeline.h's rule 1), so the code below only ever runs in a pipeline
  * constructed this way: SsaoPass::invalidate_history() instead of execute(), no
  * HiZPass/SceneColorMipPass/SsrPass construction at all, the manual gbuffer-depth transition
- * instead of HiZPass's, pixel_stylize_pass_ reading offscreen_target_ directly instead of
+ * instead of HiZPass's, stylize_pass_ reading offscreen_target_ directly instead of
  * ssr_pass_'s composite output, and neither UI pipeline nor the scene-depth descriptor built.
  *
  * A non-black frame of the right size is a low bar and deliberately so -- it is exactly what

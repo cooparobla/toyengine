@@ -9,10 +9,10 @@ internal resolution (`resolution_mode` / `render_width` / `render_height` /
 
 | File | Purpose |
 |---|---|
-| [`pixel_render_pipeline.h`](pixel_render_pipeline.h) | `PixelRenderPipeline` — owns every target, UBO, descriptor set and pass; `render()` records the whole frame into one `Renderer::begin_frame()` call. **Read its file doc first**: two rules (descriptors bound once at construction; per-frame-in-flight data needs per-slot buffers) explain most of the design. |
-| [`pixel_render_config.h`](pixel_render_config.h) | `PixelRenderConfig` — feature toggles first, then resolution, lighting, shadow, outline, palette, dither, SSAO, SSR/SSGI, refraction, fog, volumetrics, SDF, bloom, DOF, tilt-shift and AA tunables, grouped the same way as `assets/config.yaml`. |
-| [`pixel_render_types.h`](pixel_render_types.h) | The three push-constant blocks this engine appends to gfxcoopa's passes, and `SdfDrawItem`. |
-| [`pixel_math.h`](pixel_math.h) | Pure-CPU, Vulkan-free math: render extent, letterbox/fit rects, pixel-snap density, SDF clip rects, view-space depth, exponential smoothing, and the directional-shadow frustum fit. Exercised directly by `toyengine_tests` with no device needed. |
+| [`toy_render_pipeline.h`](toy_render_pipeline.h) | `ToyRenderPipeline` — owns every target, UBO, descriptor set and pass; `render()` records the whole frame into one `Renderer::begin_frame()` call. **Read its file doc first**: two rules (descriptors bound once at construction; per-frame-in-flight data needs per-slot buffers) explain most of the design. |
+| [`toy_render_config.h`](toy_render_config.h) | `ToyRenderConfig` — feature toggles first, then resolution, lighting, shadow, outline, palette, dither, SSAO, SSR/SSGI, refraction, fog, volumetrics, SDF, bloom, DOF, tilt-shift and AA tunables, grouped the same way as `assets/config.yaml`. |
+| [`toy_render_types.h`](toy_render_types.h) | The three push-constant blocks this engine appends to gfxcoopa's passes, and `SdfDrawItem`. |
+| [`toy_render_math.h`](toy_render_math.h) | Pure-CPU, Vulkan-free math: render extent, letterbox/fit rects, pixel-snap density, SDF clip rects, view-space depth, exponential smoothing, and the directional-shadow frustum fit. Exercised directly by `toyengine_tests` with no device needed. |
 | [`instance_stream.h`](instance_stream.h) | `InstanceStream` — per-frame-in-flight instance transform buffer. |
 | [`forward_globals.h`](forward_globals.h) | `ForwardGlobalsData` — per-frame-in-flight UBO for the forward transparent pass's lighting/indirect/SSR/refraction tuning. |
 | [`particle_types.h`](particle_types.h) | The plain-data contract with `toyengine/particles/`: `ParticleInstance` (the 80-byte GPU instance), `ParticleLook`, and the per-frame quad and mesh batches handed over by `set_particle_state()`. |
@@ -33,11 +33,11 @@ changes push-constant contents is free to flip every frame.
 | `ssr_enabled`, `ssgi_traced`, `ssao_enabled`, `transparency_enabled`, `refraction_enabled`, `fog_enabled`, `volumetrics_enabled`, `bloom_enabled`, `dof_enabled`, `tilt_shift_enabled`, `auto_exposure_enabled`, `grading_lut_path`, `aa_mode`, `skinning`, `world_ui_enabled`, `screen_ui_enabled`, and every resolution/capacity field | `sdf_enabled`, `shadows_enabled`, `sdf_shadows_enabled`, `shadow_pcss_enabled`, `contact_shadows_enabled`, `volumetrics_shadows_enabled`, `grading_enabled`, `ssr_reflect_transparent`, `debug_view`, and every numeric tunable |
 
 The list lives in one place, the `TOY_STARTUP_FIXED_FIELDS` X-macro at the top of
-`pixel_render_pipeline.h`. `apply_live_config()` enforces the split: it restores any
+`toy_render_pipeline.h`. `apply_live_config()` enforces the split: it restores any
 startup-fixed field the caller tried to change and names it in a warning, rather than
 accepting an edit that would silently do nothing.
 
-Startup-fixed does not mean "needs an app restart". `PixelRenderPipeline::needs_rebuild()`
+Startup-fixed does not mean "needs an app restart". `ToyRenderPipeline::needs_rebuild()`
 detects a change to one of these fields, and the Engine then rebuilds the pipeline in place
 on the same device and swapchain (`Engine::rebuild_pipeline()`). It does this when a scene's
 `settings.render` or an editor edit changes one: `apply_scene_settings_()` queues the rebuild,
@@ -74,7 +74,7 @@ three groups below.
    tiles), with static casters cached per light (`record_local_shadows_()`).
 2. G-buffer geometry, meshes and opaque/masked SDFs.
 3. Hi-Z pyramid, when SSR, transparency or SSAO is on. This also
-   performs the G-buffer depth transition `pixel_stylize.frag`'s outline sampler needs; when
+   performs the G-buffer depth transition `stylize.frag`'s outline sampler needs; when
    it does not run, `transition_gbuffer_depth_to_shader_read_()` does it instead. Exactly one
    of the two must happen.
 4. There is no separate transparent capture: reflections see transparent geometry, fog and
@@ -101,7 +101,7 @@ three groups below.
    `sky_horizon` / `sky_ground` and tints the directional light (`SkyFrameState::light_tint`,
    applied wherever the renderer reads the light's colour), so every gradient consumer —
    ambient, SSR fallback, fog, forward-shaded water and glass, particles — matches the drawn sky.
-8. Deferred lighting (`pixel_lighting.frag`, which also draws the sky at background pixels:
+8. Deferred lighting (`toy_lighting.frag`, which also draws the sky at background pixels:
    the gradient, or with the physical sky `sky_physical.glsl`'s sky-view lookup, sun and moon
    discs, stars and the upsampled clouds) → `offscreen_target_` (HDR; the sky-based indirect term can exceed 1.0
    whatever the toggles say). Always drawn — `debug_view`'s channel views replace step 16's
@@ -242,7 +242,7 @@ Three things are specific to the world-space pass and worth knowing before touch
   trades away.
 - **The viewport must be re-set to negative height.** These vertices go through a real
   `view_proj`, so a positive-height viewport mirrors the canvas vertically — and the viewport
-  in effect at this point is whatever `PixelStylizePass::draw()` last set, which is *positive*.
+  in effect at this point is whatever `StylizePass::draw()` last set, which is *positive*.
   Depending on inherited state here would make correctness hinge on unrelated feature flags.
   `UiWorldPass::draw()` sets it itself, exactly as `DebugLinePass::draw()` does.
 - **Canvases are depth-sorted, then appended into one buffer.** World UI composites with the

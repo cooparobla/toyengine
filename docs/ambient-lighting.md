@@ -47,15 +47,15 @@ single instance to every shading path, so one config edit is guaranteed
 consistent everywhere — there's no path that could end up a different
 brightness or hue than the others by accident:
 
-1. Parsed in `toyengine/core/config.h` into `PixelRenderConfig::indirect`
-   (`toyengine/render/pixel_render_config.h`), a shared
+1. Parsed in `toyengine/core/config.h` into `ToyRenderConfig::indirect`
+   (`toyengine/render/toy_render_config.h`), a shared
    `coopa::gfx::engine::IndirectParams` (gfxcoopa's
    `gfxcoopa/engine/render_features.h`). The same instance feeds the lighting
    pass's push constants and `SsrPass::Params`, by design — see its doc
    comment there — so the lighting pass, the SSR composite, and the sky
    background can never disagree.
 2. Fanned out to several transports, by shading path:
-   - deferred opaque and the sky background (`pixel_lighting.frag`, which
+   - deferred opaque and the sky background (`toy_lighting.frag`, which
      draws the procedural sky at background pixels) — `LightUBO`'s
      `sky_zenith`/`sky_horizon`/`sky_ground` fields (gfxcoopa's
      `light_data.h`, mirrored by `assets/shaders/light_ubo_body.glsl`),
@@ -65,7 +65,7 @@ brightness or hue than the others by accident:
    - SSR composite — `SsrPass::CompositePushConstants`
    - fog (when `fog_enabled`) — the same `LightUBO` `sky_*` fields (its fog block sits beside them)
 
-The shading math itself (`assets/shaders/pixel_lighting.frag`, duplicated for
+The shading math itself (`assets/shaders/toy_lighting.frag`, duplicated for
 the forward and SDF paths):
 
 ```glsl
@@ -105,7 +105,7 @@ Screen-space only — no baked or probe-based GI:
   pixel (`ssgi.frag`), temporally resolved and denoised in its own chain, at
   the SSR trace resolution divided by `ssgi_resolution_scale` (2 at Low/Medium
   `ssgi_quality`). Without it, and on forward/SDF surfaces
-  (`assets/shaders/pixel_forward_shading.glsl`), the bounce is a single tap of
+  (`assets/shaders/toy_forward_shading.glsl`), the bounce is a single tap of
   the blurred scene-colour mip at a point offset along the normal.
 - **SSR** — Hi-Z raymarched specular reflections with GGX visible-normal ray
   sampling, temporally resolved and roughness-aware denoised. Hits read the

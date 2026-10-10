@@ -4,7 +4,7 @@
  *        projected size, and LOD selection.
  *
  * Pure functions over glm types -- no Vulkan, no scene -- so every piece is unit-tested in
- * test.cpp's device-free math group. PixelRenderPipeline runs them once per renderer per view
+ * test.cpp's device-free math group. ToyRenderPipeline runs them once per renderer per view
  * (camera, each shadow cascade, each view of every shadowed point/spot light) to decide what
  * each pass draws.
  *

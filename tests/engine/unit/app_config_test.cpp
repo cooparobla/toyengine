@@ -5,7 +5,7 @@
  *        tiers expand beneath explicit keys, scene `settings:` layer on top, and a bad key never
  *        swallows its neighbours. Also the project-module registry and project-root override.
  *
- * Deliberately not here: PixelRenderConfig's default values themselves -- they are tuning, and a
+ * Deliberately not here: ToyRenderConfig's default values themselves -- they are tuning, and a
  * test that mirrors them only fails when someone retunes on purpose.
  */
 
@@ -385,7 +385,7 @@ COOPA_TEST(quality_tiers_expand_beneath_explicit_keys) {
 
     expect(config.render.shadow_quality == RenderQuality::Ultra, "AppConfig::load: shadow_quality parses ultra");
     // Per CASCADE, not the whole directional image: at the default 4 cascades the atlas is
-    // twice this on each axis, so ultra allocates 6144^2 (see PixelRenderConfig's doc).
+    // twice this on each axis, so ultra allocates 6144^2 (see ToyRenderConfig's doc).
     expect(config.render.shadow_map_resolution == 3072u, "quality preset: ultra shadow_map_resolution");
     expect(config.render.cube_shadow_resolution == 1024u, "quality preset: ultra cube_shadow_resolution");
     expect(config.render.spot_shadow_resolution == 2048u, "quality preset: ultra spot_shadow_resolution");
@@ -452,11 +452,11 @@ COOPA_TEST(unknown_and_commented_keys_leave_other_fields_alone) {
            "AppConfig::load: a key before an unknown one is still applied");
     expect(config.render.light_bands == 6.0f,
            "AppConfig::load: an unknown key does not stop the keys after it being read");
-    expect(config.render.dither_strength == toy::render::PixelRenderConfig{}.dither_strength,
+    expect(config.render.dither_strength == toy::render::ToyRenderConfig{}.dither_strength,
            "AppConfig::load: a commented-out key keeps its in-class default");
 
     // A missing file is a fall-back-to-defaults, not a startup failure (see AppConfig::load()).
     toy::core::AppConfig missing = toy::core::AppConfig::load((coopa::test::scratch_dir() / "does_not_exist.yaml").string());
-    expect(missing.render.exposure == toy::render::PixelRenderConfig{}.exposure,
+    expect(missing.render.exposure == toy::render::ToyRenderConfig{}.exposure,
            "AppConfig::load: a missing file falls back to defaults");
 }

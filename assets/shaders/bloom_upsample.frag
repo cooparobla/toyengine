@@ -8,7 +8,7 @@
 // (gfxcoopa/pipeline/render_pass.h), so no target can be reopened and composited
 // onto in place, and BlendMode::Additive would only help across multiple draws
 // inside ONE open pass -- which this pyramid never has. Same reasoning FogPass and
-// PixelStylizePass document for their own multi-input composites.
+// StylizePass document for their own multi-input composites.
 //
 // mix() with `scatter`, not a bare sum: the resulting per-level weights form the
 // geometric series (1-s), s(1-s), s^2(1-s), ... s^(N-1), which sums to exactly 1.

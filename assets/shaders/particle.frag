@@ -31,11 +31,12 @@
 #include <gfx/shadow_sampling.glsl>
 
 // Set 4: the shadow maps -- the same set (and names) the forward transparent shading binds at 2;
-// pixel_shadow_body.glsl reads them through these exact names.
+// toy_shadow_body.glsl reads them through these exact names.
 layout(set = 4, binding = 0) uniform sampler2DShadow dir_shadow_map;
 layout(set = 4, binding = 1) uniform sampler2DShadow local_shadow_atlas;
 layout(set = 4, binding = 3) uniform sampler2D dir_shadow_map_raw;
-#include "pixel_shadow_body.glsl"
+layout(set = 4, binding = 4) uniform sampler2D cloud_shadow_map;
+#include "toy_shadow_body.glsl"
 
 layout(location = 0) in vec2 v_uv;
 layout(location = 1) in vec4 v_color;
@@ -126,7 +127,7 @@ float toon(float x, float bands) {
 
 // The sun's shadow at a particle: ONE hard tap of the cascade atlas (no PCF: a particle is not a
 // surface, and fill-rate is the cost that matters here), on the first cascade holding the point.
-float particle_dir_shadow(vec3 world_pos) {
+float particle_dir_shadow_map(vec3 world_pos) {
     int count = int(lights.dir_cascade_info.x);
     vec2 uv;
     for (int c = 0; c < 4; ++c) {
@@ -142,6 +143,11 @@ float particle_dir_shadow(vec3 world_pos) {
         return gfx_shadow_dir_hard(dir_shadow_map, coords, bias) * fade * lights.dir_shadow_extra.x;
     }
     return 0.0;
+}
+// ... and the clouds' shadow over it (render cloud_shadows), which needs no shadow map.
+float particle_dir_shadow(vec3 world_pos) {
+    float map = lights.dir_shadow_params.z > 0.5 ? particle_dir_shadow_map(world_pos) : 0.0;
+    return 1.0 - (1.0 - map) * calc_cloud_visibility(world_pos);
 }
 
 void main() {
@@ -292,7 +298,7 @@ void main() {
             // The original soft forward lobe (smoke glows with the sun behind it), plus `scatter`.
             float glow = pow(clamp(dot(-V, L), 0.0, 1.0), 6.0) * 0.6 + scatter_k * HG(dot(-V, L)) * 0.25;
             float vis = 1.0;
-            if (shadows && lights.dir_shadow_params.z > 0.5) vis = 1.0 - particle_dir_shadow(v_world);
+            if (shadows) vis = 1.0 - particle_dir_shadow(v_world);
             light += lights.dir_color.rgb * lights.dir_direction.w * (wrap + glow) * vis;
         }
         uint num_points = min(lights.light_counts.y, 16u);
@@ -303,7 +309,7 @@ void main() {
             float range = pl.position_range.w;
             if (dist > range || dist < 1e-4) continue;
             vec3 L = to_l / dist;
-            // Same distance curve as the forward / deferred point lights (pixel_forward_shading.glsl).
+            // Same distance curve as the forward / deferred point lights (toy_forward_shading.glsl).
             float sharpness = max(pl.attenuation.x, 0.1);
             float factor = clamp(dist / range, 0.0, 1.0);
             float falloff = clamp(1.0 - pow(factor, sharpness), 0.0, 1.0);

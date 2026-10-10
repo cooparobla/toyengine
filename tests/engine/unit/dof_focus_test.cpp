@@ -1,6 +1,6 @@
 /**
  * @file dof_focus_test.cpp
- * @brief Depth of field's CPU half (pixel_math.h): the view-space depth the autofocus measures,
+ * @brief Depth of field's CPU half (toy_render_math.h): the view-space depth the autofocus measures,
  *        and the exponential focus chase (monotone, framerate-independent). The blur itself is a
  *        GPU pass, covered by render_debug_views' `dof` channel.
  */
@@ -10,7 +10,7 @@
 #include <cmath>
 
 #include <glm/gtc/matrix_transform.hpp>
-#include <toyengine/render/pixel_math.h>
+#include <toyengine/render/toy_render_math.h>
 
 #include "engine/support/checks.h"
 

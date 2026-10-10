@@ -119,7 +119,7 @@ scene:
               # minification through a sampler with no mipmaps aliases.
               #
               # DISPLAY height, not render_height: the world-UI layer is rasterized at the
-              # letterbox rect now (see PixelRenderPipeline::ui_world_target_), so this value
+              # letterbox rect now (see ToyRenderPipeline::ui_world_target_), so this value
               # tracks the WINDOW. That is a real if minor authoring wart -- the atlas is baked
               # once, so any figure here is exactly right at exactly one window size. 2.1 is
               # tuned for assets/config.yaml's 1920x1080.
@@ -351,7 +351,7 @@ scene:
           # the cube regardless of dof_focus_mode (see config.yaml's note), and stopping down
           # to f/11 keeps the CUBE legible while leaving DoF visibly on. The UI is unaffected
           # either way -- both canvas layers composite after DoF (and after AA and tilt shift);
-          # see PixelRenderPipeline::overlay_target_.
+          # see ToyRenderPipeline::overlay_target_.
           lens: 50.0
           aperture: 11.0
           focus_object: cube

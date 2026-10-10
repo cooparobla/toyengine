@@ -99,9 +99,10 @@ on it.
 `fog_sky_blend` blends the fog toward the sky's gradient colours. Under the physical sky
 (`sky_model: physical`) those colours are computed from the atmosphere every frame, so fog picks
 up sunset and night tints by itself; the physical sky's haze is its own key,
-`atmosphere_density` (1 clear .. 4+ hazy), and a cloud layer is `clouds: true` with
-`cloud_coverage` / `cloud_altitude` / `cloud_thickness` / `cloud_density` / `cloud_wind_speed`
-(the weather drives `cloud_coverage` while it is on).
+`atmosphere_density` (1 clear .. 4+ hazy). A cloud layer (either sky model) is `clouds: true`
+with `cloud_coverage` / `cloud_altitude` / `cloud_thickness` / `cloud_density` / `cloud_wind_speed`
+(the weather drives `cloud_coverage` while it is on); with `cloud_shadows: true` the clouds also
+shadow the volumetric fog's sunlight, so light shafts fall through the gaps between them.
 
 ## Verify
 

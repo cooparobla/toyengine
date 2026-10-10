@@ -26,10 +26,6 @@
 #include <memory>
 #include <vector>
 
-#include <gfxcoopa/core/device.h>
-#include <gfxcoopa/memory/allocator.h>
-#include <gfxcoopa/memory/buffer.h>
-#include <gfxcoopa/pipeline/descriptor.h>
 #include <gfxcoopa/presentation/renderer.h>
 
 namespace toy {
@@ -74,26 +70,7 @@ class ForwardGlobalsData {
 public:
     static constexpr uint32_t kFrames = coopa::gfx::presentation::MAX_FRAMES_IN_FLIGHT;
 
-    ForwardGlobalsData(coopa::gfx::core::Device& device, coopa::gfx::memory::Allocator& allocator) {
-        buffers_.reserve(kFrames);
-        for (uint32_t i = 0; i < kFrames; ++i) {
-            buffers_.push_back(coopa::gfx::memory::Buffer::uniform(device, allocator, sizeof(ForwardGlobals)));
-        }
-
-        layout_ = std::make_unique<coopa::gfx::pipeline::DescriptorSetLayout>(
-            coopa::gfx::pipeline::DescriptorLayoutBuilder()
-                .uniform_buffer(0, coopa::gfx::ShaderStage::Fragment)
-                .build(device));
-
-        pool_ = std::make_unique<coopa::gfx::pipeline::DescriptorPool>(
-            coopa::gfx::pipeline::DescriptorPoolBuilder().add_sets(*layout_, kFrames).build(device));
-
-        sets_.reserve(kFrames);
-        for (uint32_t i = 0; i < kFrames; ++i) {
-            sets_.push_back(std::make_unique<coopa::gfx::pipeline::DescriptorSet>(device, *pool_, *layout_));
-            sets_[i]->bind_buffer(0, buffers_[i]);
-        }
-    }
+    ForwardGlobalsData(coopa::gfx::core::Device& device, coopa::gfx::memory::Allocator& allocator);
 
     ForwardGlobalsData(const ForwardGlobalsData&) = delete;
     ForwardGlobalsData& operator=(const ForwardGlobalsData&) = delete;

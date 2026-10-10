@@ -2209,7 +2209,7 @@ struct EngineDefault {
  *        The table is every `render.` key AppConfig reads, with the field it lands in.
  */
 void test_render_settings_cover_engine() {
-    using PR = toy::render::PixelRenderConfig;
+    using PR = toy::render::ToyRenderConfig;
     const std::vector<std::pair<std::string, std::function<EngineDefault(const PR&)>>> engine_keys = {
         {"shadow_quality", [](const PR& r) { return EngineDefault(r.shadow_quality); }},
         {"ssao_quality", [](const PR& r) { return EngineDefault(r.ssao_quality); }},
@@ -2270,21 +2270,26 @@ void test_render_settings_cover_engine() {
         {"moon_disc_size", [](const PR& r) { return EngineDefault(r.moon_disc_size); }},
         {"sky_stars", [](const PR& r) { return EngineDefault(r.sky_stars); }},
         {"clouds", [](const PR& r) { return EngineDefault(r.clouds); }},
+        {"cloud_type", [](const PR& r) { return EngineDefault(r.cloud_type); }},
+        {"cloud_quality", [](const PR& r) { return EngineDefault(r.cloud_quality); }},
         {"cloud_coverage", [](const PR& r) { return EngineDefault(r.cloud_coverage); }},
+        {"cloud_wind_speed", [](const PR& r) { return EngineDefault(r.cloud_wind_speed); }},
         {"cloud_altitude", [](const PR& r) { return EngineDefault(r.cloud_altitude); }},
         {"cloud_thickness", [](const PR& r) { return EngineDefault(r.cloud_thickness); }},
         {"cloud_density", [](const PR& r) { return EngineDefault(r.cloud_density); }},
-        {"cloud_wind_speed", [](const PR& r) { return EngineDefault(r.cloud_wind_speed); }},
-        {"topdown_mode", [](const PR& r) { return EngineDefault(r.topdown_mode); }},
-        {"topdown_cloud_height", [](const PR& r) { return EngineDefault(r.topdown_cloud_height); }},
-        {"topdown_cloud_size", [](const PR& r) { return EngineDefault(r.topdown_cloud_size); }},
-        {"topdown_cloud_thickness", [](const PR& r) { return EngineDefault(r.topdown_cloud_thickness); }},
-        {"topdown_cloud_opacity", [](const PR& r) { return EngineDefault(r.topdown_cloud_opacity); }},
-        {"topdown_fade_start", [](const PR& r) { return EngineDefault(r.topdown_fade_start); }},
-        {"topdown_fade_end", [](const PR& r) { return EngineDefault(r.topdown_fade_end); }},
-        {"topdown_shadow_strength", [](const PR& r) { return EngineDefault(r.topdown_shadow_strength); }},
-        {"topdown_light_bands", [](const PR& r) { return EngineDefault(r.topdown_light_bands); }},
-        {"topdown_outline", [](const PR& r) { return EngineDefault(r.topdown_outline); }},
+        {"cloud_scale", [](const PR& r) { return EngineDefault(r.cloud_scale); }},
+        {"flat_cloud_size", [](const PR& r) { return EngineDefault(r.flat_cloud_size); }},
+        {"flat_cloud_opacity", [](const PR& r) { return EngineDefault(r.flat_cloud_opacity); }},
+        {"flat_cloud_light_bands", [](const PR& r) { return EngineDefault(r.flat_cloud_light_bands); }},
+        {"flat_cloud_outline", [](const PR& r) { return EngineDefault(r.flat_cloud_outline); }},
+        {"flat_cloud_turbulence", [](const PR& r) { return EngineDefault(r.flat_cloud_turbulence); }},
+        {"flat_cloud_evolve", [](const PR& r) { return EngineDefault(r.flat_cloud_evolve); }},
+        {"cloud_shadows", [](const PR& r) { return EngineDefault(r.cloud_shadows); }},
+        {"cloud_shadow_strength", [](const PR& r) { return EngineDefault(r.cloud_shadow_strength); }},
+        {"cloud_shadow_distance", [](const PR& r) { return EngineDefault(r.cloud_shadow_distance); }},
+        {"cloud_camera_fade", [](const PR& r) { return EngineDefault(r.cloud_camera_fade); }},
+        {"cloud_fade_start", [](const PR& r) { return EngineDefault(r.cloud_fade_start); }},
+        {"cloud_fade_end", [](const PR& r) { return EngineDefault(r.cloud_fade_end); }},
         {"shadows_enabled", [](const PR& r) { return EngineDefault(r.shadows_enabled); }},
         {"shadow_map_resolution", [](const PR& r) { return EngineDefault(r.shadow_map_resolution); }},
         {"shadow_cascades", [](const PR& r) { return EngineDefault(r.shadow_cascades); }},
@@ -2511,7 +2516,7 @@ void test_render_settings_cover_engine() {
 }
 
 // The settings panel shows a field's schema default while its key is absent, so those defaults
-// must be what the engine actually runs with (PixelRenderConfig / WindowConfig / ...).
+// must be what the engine actually runs with (ToyRenderConfig / WindowConfig / ...).
 void test_settings_defaults_match_engine() {
     const toy::core::AppConfig eng = toy::core::AppConfig::from_node(Node::mapping());
     const auto& r = eng.render;

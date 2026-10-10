@@ -32,7 +32,7 @@
  * every pipeline in the frame graph and a fully loaded scene; constructing one to change one
  * bool is the most expensive way to do it. `outline_enabled`, `palette_enabled`,
  * `dither_enabled` and `sdf_enabled` are all re-read per frame, so Engine::render_config()
- * flips them on a live pipeline (see PixelRenderPipeline::render_config_mut()). The
+ * flips them on a live pipeline (see ToyRenderPipeline::render_config_mut()). The
  * STARTUP-FIXED toggles -- ssao/ssr/world_ui/screen_ui and friends -- genuinely cannot be, so
  * test_headless_render_with_all_toggles_off() keeps its own Engine to cover their "off"
  * construction branch.
@@ -77,7 +77,7 @@
 #include <sfxcoopa/sfx_yaml.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/constants.hpp>
-#include <toyengine/render/pixel_math.h>
+#include <toyengine/render/toy_render_math.h>
 #include <toyengine/render/fog_math.h>
 #include <toyengine/render/visibility.h>
 #include <toyengine/scene/free_mover.h>
@@ -422,7 +422,7 @@ void tick_frames(toy::core::Engine& engine, int frames) {
 }
 
 // =====================================================================================
-// Group "math" -- pure functions from toyengine/render/pixel_math.h. No GPU, no window.
+// Group "math" -- pure functions from toyengine/render/toy_render_math.h. No GPU, no window.
 // =====================================================================================
 
 // --- toyengine/render/visibility.h ---
@@ -748,13 +748,13 @@ void test_fit_undersized_window() {
 }
 
 void test_display_rect_dispatches_on_upscale_mode() {
-    toy::render::PixelRenderConfig integer_cfg;
+    toy::render::ToyRenderConfig integer_cfg;
     integer_cfg.upscale_mode = "integer";
     auto integer_rect = toy::render::compute_display_rect(integer_cfg, 1920, 1080, 720, 480);
     expect(integer_rect.w == 1440 && integer_rect.h == 960,
           "display_rect: upscale_mode=integer dispatches to compute_letterbox");
 
-    toy::render::PixelRenderConfig fit_cfg;
+    toy::render::ToyRenderConfig fit_cfg;
     fit_cfg.upscale_mode = "fit";
     auto fit_rect = toy::render::compute_display_rect(fit_cfg, 1920, 1080, 720, 480);
     expect(fit_rect.w == 1620 && fit_rect.h == 1080,
@@ -762,7 +762,7 @@ void test_display_rect_dispatches_on_upscale_mode() {
 }
 
 void test_render_resolution_fixed_mode() {
-    toy::render::PixelRenderConfig cfg;
+    toy::render::ToyRenderConfig cfg;
     cfg.resolution_mode = "fixed";
     cfg.render_width = 480;
     cfg.render_height = 270;
@@ -771,7 +771,7 @@ void test_render_resolution_fixed_mode() {
 }
 
 void test_render_resolution_divisor_mode() {
-    toy::render::PixelRenderConfig cfg;
+    toy::render::ToyRenderConfig cfg;
     cfg.resolution_mode = "divisor";
     cfg.scale_divisor = 4;
     toy::render::RenderExtent e = toy::render::compute_render_extent(cfg, 1920, 1080);
@@ -832,7 +832,7 @@ void test_dof_focus_smoothing() {
                 "exp_smooth_toward: two dt steps match one 2*dt step (framerate-independent)");
 }
 
-// --- Directional shadow frustum fit (pixel_math.h's compute_dir_shadow_fit) ---
+// --- Directional shadow frustum fit (toy_render_math.h's compute_dir_shadow_fit) ---
 
 toy::render::ShadowFitCamera make_shadow_fit_camera(const glm::vec3& eye, const glm::vec3& at) {
     toy::render::ShadowFitCamera cam;
@@ -923,7 +923,7 @@ void test_dir_shadow_fit_degenerate_shadow_distance() {
            "dir_shadow_fit: degenerate shadow_distance keeps a finite depth range");
 }
 
-// --- Directional shadow cascades (pixel_math.h's compute_cascade_splits /
+// --- Directional shadow cascades (toy_render_math.h's compute_cascade_splits /
 //     compute_dir_shadow_fit_slice / cascade_atlas_tile) ---
 
 void test_cascade_splits_are_increasing_and_reach_the_distance() {
@@ -981,7 +981,7 @@ void test_cascade_fit_near_slice_is_finer_than_far_slice() {
 }
 
 void test_focus_cascade_radii_are_geometric() {
-    // The "focus" fit (PixelRenderConfig::shadow_fit): nested spheres from the finest radius
+    // The "focus" fit (ToyRenderConfig::shadow_fit): nested spheres from the finest radius
     // out to shadow_distance, with an equal growth ratio between neighbours.
     const auto r = toy::render::compute_focus_cascade_radii(12.0f, 96.0f, 4);
     expect(r.size() == 4, "focus_radii: one radius per cascade");
@@ -1175,7 +1175,7 @@ void test_sdf_clip_rect_to_pixels_flips_y() {
 }
 
 // =====================================================================================
-// Group "config" -- PixelRenderConfig defaults and AppConfig::load()'s YAML round-trips.
+// Group "config" -- ToyRenderConfig defaults and AppConfig::load()'s YAML round-trips.
 // =====================================================================================
 
 /**
@@ -1218,22 +1218,22 @@ void test_project_modules_and_root() {
     unsetenv("TOY_PROJECT_DIR");
 }
 
-void test_pixel_render_config_aa_defaults() {
+void test_toy_render_config_aa_defaults() {
     // FXAA/SMAA defaults mirror blendy's PbrRenderPipeline field-for-field (see
-    // PixelRenderConfig::aa_mode's own doc) except aa_mode itself, which defaults to "off"
+    // ToyRenderConfig::aa_mode's own doc) except aa_mode itself, which defaults to "off"
     // here so a scene that never opts in renders exactly as it did before AA existed. The
     // TAA defaults are this engine's own (its resolve is reprojecting/age-weighted, see
     // taa.frag): the still-camera feedback must sit high enough that the converged
     // accumulation's residual jitter orbit stays inside static_camera_converges's budget.
-    toy::render::PixelRenderConfig cfg;
-    expect(cfg.aa_mode == "off", "PixelRenderConfig: aa_mode defaults to off");
-    expect(cfg.fxaa_subpixel == 0.75f, "PixelRenderConfig: fxaa_subpixel defaults to 0.75");
-    expect(cfg.fxaa_edge_threshold == 0.166f, "PixelRenderConfig: fxaa_edge_threshold defaults to 0.166");
-    expect(cfg.fxaa_edge_threshold_min == 0.0312f, "PixelRenderConfig: fxaa_edge_threshold_min defaults to 0.0312");
-    expect(cfg.smaa_threshold == 0.1f, "PixelRenderConfig: smaa_threshold defaults to 0.1");
-    expect(cfg.smaa_max_search_steps == 16, "PixelRenderConfig: smaa_max_search_steps defaults to 16");
-    expect(cfg.taa_blending_weight == 0.99f, "PixelRenderConfig: taa_blending_weight defaults to 0.99");
-    expect(cfg.taa_weight_scale == 30.0f, "PixelRenderConfig: taa_weight_scale defaults to 30.0");
+    toy::render::ToyRenderConfig cfg;
+    expect(cfg.aa_mode == "off", "ToyRenderConfig: aa_mode defaults to off");
+    expect(cfg.fxaa_subpixel == 0.75f, "ToyRenderConfig: fxaa_subpixel defaults to 0.75");
+    expect(cfg.fxaa_edge_threshold == 0.166f, "ToyRenderConfig: fxaa_edge_threshold defaults to 0.166");
+    expect(cfg.fxaa_edge_threshold_min == 0.0312f, "ToyRenderConfig: fxaa_edge_threshold_min defaults to 0.0312");
+    expect(cfg.smaa_threshold == 0.1f, "ToyRenderConfig: smaa_threshold defaults to 0.1");
+    expect(cfg.smaa_max_search_steps == 16, "ToyRenderConfig: smaa_max_search_steps defaults to 16");
+    expect(cfg.taa_blending_weight == 0.99f, "ToyRenderConfig: taa_blending_weight defaults to 0.99");
+    expect(cfg.taa_weight_scale == 30.0f, "ToyRenderConfig: taa_weight_scale defaults to 30.0");
 }
 
 /**
@@ -1291,23 +1291,23 @@ void test_app_config_load_round_trips_aa_settings() {
     expect(config.render.taa_weight_scale == 12.5f, "AppConfig::load: taa_weight_scale round-trips");
 }
 
-void test_pixel_render_config_dof_defaults() {
+void test_toy_render_config_dof_defaults() {
     // A scene/config that never opts in must render exactly as it did before DOF existed --
-    // see PixelRenderConfig::dof_enabled's own doc.
-    toy::render::PixelRenderConfig cfg;
-    expect(cfg.dof_enabled == false, "PixelRenderConfig: dof_enabled defaults to false");
-    expect(cfg.dof_focus_mode == "manual", "PixelRenderConfig: dof_focus_mode defaults to manual");
-    expect(cfg.dof_focus_object == "", "PixelRenderConfig: dof_focus_object defaults to empty");
-    expect(cfg.dof_focus_smoothing == 8.0f, "PixelRenderConfig: dof_focus_smoothing defaults to 8.0");
-    expect(cfg.dof_focus_distance == 8.0f, "PixelRenderConfig: dof_focus_distance defaults to 8.0");
-    expect(cfg.dof_aperture == 2.8f, "PixelRenderConfig: dof_aperture defaults to 2.8");
-    expect(cfg.dof_focal_length == 0.0f, "PixelRenderConfig: dof_focal_length defaults to 0.0 (inherit camera lens)");
-    expect(cfg.dof_sensor_width == 0.0f, "PixelRenderConfig: dof_sensor_width defaults to 0.0 (inherit camera sensor_width)");
-    expect(cfg.dof_max_radius == 12.0f, "PixelRenderConfig: dof_max_radius defaults to 12.0");
-    expect(cfg.dof_sample_count == 32, "PixelRenderConfig: dof_sample_count defaults to 32");
-    expect(cfg.dof_blade_count == 0, "PixelRenderConfig: dof_blade_count defaults to 0 (perfect disc)");
-    expect(cfg.dof_blade_rotation == 0.0f, "PixelRenderConfig: dof_blade_rotation defaults to 0.0");
-    expect(cfg.debug_view == "off", "PixelRenderConfig: debug_view defaults to off");
+    // see ToyRenderConfig::dof_enabled's own doc.
+    toy::render::ToyRenderConfig cfg;
+    expect(cfg.dof_enabled == false, "ToyRenderConfig: dof_enabled defaults to false");
+    expect(cfg.dof_focus_mode == "manual", "ToyRenderConfig: dof_focus_mode defaults to manual");
+    expect(cfg.dof_focus_object == "", "ToyRenderConfig: dof_focus_object defaults to empty");
+    expect(cfg.dof_focus_smoothing == 8.0f, "ToyRenderConfig: dof_focus_smoothing defaults to 8.0");
+    expect(cfg.dof_focus_distance == 8.0f, "ToyRenderConfig: dof_focus_distance defaults to 8.0");
+    expect(cfg.dof_aperture == 2.8f, "ToyRenderConfig: dof_aperture defaults to 2.8");
+    expect(cfg.dof_focal_length == 0.0f, "ToyRenderConfig: dof_focal_length defaults to 0.0 (inherit camera lens)");
+    expect(cfg.dof_sensor_width == 0.0f, "ToyRenderConfig: dof_sensor_width defaults to 0.0 (inherit camera sensor_width)");
+    expect(cfg.dof_max_radius == 12.0f, "ToyRenderConfig: dof_max_radius defaults to 12.0");
+    expect(cfg.dof_sample_count == 32, "ToyRenderConfig: dof_sample_count defaults to 32");
+    expect(cfg.dof_blade_count == 0, "ToyRenderConfig: dof_blade_count defaults to 0 (perfect disc)");
+    expect(cfg.dof_blade_rotation == 0.0f, "ToyRenderConfig: dof_blade_rotation defaults to 0.0");
+    expect(cfg.debug_view == "off", "ToyRenderConfig: debug_view defaults to off");
 }
 
 void test_app_config_load_round_trips_dof_settings() {
@@ -1362,12 +1362,12 @@ void test_debug_view_parsing() {
            "parse_debug_view: an unrecognized name defaults to DebugView::Off");
 }
 
-void test_pixel_render_config_soft_shadow_defaults() {
-    toy::render::PixelRenderConfig cfg;
-    expect(cfg.soft_shadows == true, "PixelRenderConfig: soft_shadows defaults to true");
-    expect(cfg.shadow_softness == 0.15f, "PixelRenderConfig: shadow_softness defaults to 0.15");
-    expect(cfg.point_shadow_softness == 3.0f, "PixelRenderConfig: point_shadow_softness defaults to 3.0");
-    expect(cfg.shadow_pcf_samples == 24u, "PixelRenderConfig: shadow_pcf_samples defaults to 24");
+void test_toy_render_config_soft_shadow_defaults() {
+    toy::render::ToyRenderConfig cfg;
+    expect(cfg.soft_shadows == true, "ToyRenderConfig: soft_shadows defaults to true");
+    expect(cfg.shadow_softness == 0.15f, "ToyRenderConfig: shadow_softness defaults to 0.15");
+    expect(cfg.point_shadow_softness == 3.0f, "ToyRenderConfig: point_shadow_softness defaults to 3.0");
+    expect(cfg.shadow_pcf_samples == 24u, "ToyRenderConfig: shadow_pcf_samples defaults to 24");
 }
 
 void test_app_config_load_round_trips_soft_shadow_settings() {
@@ -1398,12 +1398,12 @@ void test_app_config_load_round_trips_cascade_settings() {
     toy::core::AppConfig plain = load_config_text("test_cascade_default_config.yaml",
         "render:\n"
         "  exposure: 1.0\n");
-    expect(plain.render.shadow_cascades == 4u, "PixelRenderConfig: shadow_cascades defaults to 4");
+    expect(plain.render.shadow_cascades == 4u, "ToyRenderConfig: shadow_cascades defaults to 4");
     expect(plain.render.shadow_cascade_split_lambda == 0.75f,
-           "PixelRenderConfig: shadow_cascade_split_lambda defaults to 0.75");
+           "ToyRenderConfig: shadow_cascade_split_lambda defaults to 0.75");
     expect(plain.render.shadow_fit == "frustum" && !plain.render.shadow_receiver_plane_bias &&
                plain.render.shadow_pcf_max_texels == 12.0f,
-           "PixelRenderConfig: the focus fit and receiver-plane bias are opt-in");
+           "ToyRenderConfig: the focus fit and receiver-plane bias are opt-in");
 
     toy::core::AppConfig focus = load_config_text("test_focus_shadow_config.yaml",
         "render:\n"
@@ -1443,7 +1443,7 @@ void test_app_config_load_applies_quality_presets() {
 
     expect(config.render.shadow_quality == RenderQuality::Ultra, "AppConfig::load: shadow_quality parses ultra");
     // Per CASCADE, not the whole directional image: at the default 4 cascades the atlas is
-    // twice this on each axis, so ultra allocates 6144^2 (see PixelRenderConfig's doc).
+    // twice this on each axis, so ultra allocates 6144^2 (see ToyRenderConfig's doc).
     expect(config.render.shadow_map_resolution == 3072u, "quality preset: ultra shadow_map_resolution");
     expect(config.render.cube_shadow_resolution == 1024u, "quality preset: ultra cube_shadow_resolution");
     expect(config.render.spot_shadow_resolution == 2048u, "quality preset: ultra spot_shadow_resolution");
@@ -1506,7 +1506,7 @@ void test_app_config_load_applies_quality_presets() {
 void test_fog_height_transmittance() {
     using toy::render::fog_height_tau;
     using toy::render::fog_transmittance;
-    toy::render::PixelRenderConfig c;
+    toy::render::ToyRenderConfig c;
     c.fog_enabled = true;
     c.fog_mode = 1;
     c.fog_density = 0.02f;
@@ -1734,12 +1734,12 @@ void test_app_config_load_tolerates_unknown_and_commented_keys() {
            "AppConfig::load: a key before an unknown one is still applied");
     expect(config.render.light_bands == 6.0f,
            "AppConfig::load: an unknown key does not stop the keys after it being read");
-    expect(config.render.dither_strength == toy::render::PixelRenderConfig{}.dither_strength,
+    expect(config.render.dither_strength == toy::render::ToyRenderConfig{}.dither_strength,
            "AppConfig::load: a commented-out key keeps its in-class default");
 
     // A missing file is a fall-back-to-defaults, not a startup failure (see AppConfig::load()).
     toy::core::AppConfig missing = toy::core::AppConfig::load(tmp_path("does_not_exist.yaml"));
-    expect(missing.render.exposure == toy::render::PixelRenderConfig{}.exposure,
+    expect(missing.render.exposure == toy::render::ToyRenderConfig{}.exposure,
            "AppConfig::load: a missing file falls back to defaults");
 }
 
@@ -3733,7 +3733,7 @@ const uint8_t kPico8Subset[8][3] = {
  * decorrelate per-pixel noise frame to frame, and neither cares whether time passed):
  * SSAO rotates its noise tile by `frame_index_ & 0x7`, and SSR's interleaved-gradient dither
  * runs on `frame_index_ & 0xFF` -- see ssao_params.noise_rotation and ssr_params.frame_index
- * in PixelRenderPipeline::render(). So "identical" has a period of 256 frames, not 1.
+ * in ToyRenderPipeline::render(). So "identical" has a period of 256 frames, not 1.
  *
  * Measured on this scene at 160x90: captures 5 frames apart differ by 2 pixels, 8 apart
  * (SSAO's period, which kills the larger source) by 1, and 256 apart by 0 -- but 256 ticks per
@@ -3750,7 +3750,7 @@ constexpr int kDriftBudget = 16; // 0.1% of a 160x90 frame
  * toggle measurably changes the image.
  *
  * The palette assertion alone validates the render path, the outline/dither/quantize post pass
- * and the UNORM/gamma choice together -- see gfxcoopa's pixel_stylize_pass.h file doc. What is
+ * and the UNORM/gamma choice together -- see gfxcoopa's stylize_pass.h file doc. What is
  * new here is the SECOND assertion: two captures a noise cycle apart, with nothing
  * changed, must be byte-identical. That is not a property of the renderer being tested for its
  * own sake -- it is what earns the right to compare the toggle frames below with exact counts
@@ -3759,7 +3759,7 @@ constexpr int kDriftBudget = 16; // 0.1% of a 160x90 frame
  *
  * The three toggles are then flipped on the LIVE pipeline (palette, then SDF, then outline),
  * which is the whole reason this is one test and not four Engines: each is re-read from the
- * config every frame (see PixelRenderPipeline::render_config_mut()), so a flip plus a
+ * config every frame (see ToyRenderPipeline::render_config_mut()), so a flip plus a
  * noise cycle of ticks costs milliseconds against the ~second a fresh device, pipeline set and scene load costs.
  * Thresholds are deliberately loose -- the claim is "this toggle reaches the screen", and the
  * actual counts print on failure so a real change in coverage is easy to re-baseline.
@@ -3844,10 +3844,10 @@ void test_pixel_demo_render_and_live_toggles() {
  *
  * This one keeps an Engine of its own on purpose. Unlike the live toggles above, these
  * decisions are baked into descriptors when the pipeline is built (see
- * pixel_render_pipeline.h's rule 1), so the code below only ever runs in a pipeline
+ * toy_render_pipeline.h's rule 1), so the code below only ever runs in a pipeline
  * constructed this way: SsaoPass::invalidate_history() instead of execute(), no
  * HiZPass/SceneColorMipPass/SsrPass construction at all, the manual gbuffer-depth transition
- * instead of HiZPass's, pixel_stylize_pass_ reading offscreen_target_ directly instead of
+ * instead of HiZPass's, stylize_pass_ reading offscreen_target_ directly instead of
  * ssr_pass_'s composite output, and neither UI pipeline nor the scene-depth descriptor built.
  *
  * A non-black frame of the right size is a low bar and deliberately so -- it is exactly what
@@ -4128,7 +4128,7 @@ void test_debug_view_channels_render() {
     }
 
     // contact_shadows: shadows_enabled off isolates the march as the only occlusion term --
-    // see pixel_lighting.frag's own doc on this combination.
+    // see toy_lighting.frag's own doc on this combination.
     {
         toy::core::AppConfig config =
             make_test_config("assets/scenes/demos/pixel_demo/scene.yaml", 640, 360, 160, 90);
@@ -4259,7 +4259,7 @@ void test_debug_view_channels_render() {
  * Captured at DISPLAY resolution (low_res = false). The world UI is not part of the low-res
  * image: it renders into its own layer and composites after AA and tilt shift, so
  * low_res_color_image() is scene-only by construction (see
- * PixelRenderPipeline::overlay_target_) and a low-res capture would compare two frames that
+ * ToyRenderPipeline::overlay_target_) and a low-res capture would compare two frames that
  * genuinely are identical.
  *
  * FIXED_DT is a tiny 0.5 ms rather than 0: the scene's camera auto-orbits (so this keeps the
@@ -5215,7 +5215,7 @@ void test_terrain_smooth_scene_streams_styled_chunks() {
 /**
  * @brief The shipped render config, with only the window/scene/output bits a test must own.
  *
- * make_test_config() default-constructs an AppConfig, so it exercises PixelRenderConfig's own
+ * make_test_config() default-constructs an AppConfig, so it exercises ToyRenderConfig's own
  * defaults -- `aa_mode: "off"`, `dof_enabled: false` -- and NOT what the engine actually ships.
  * That is fine for the pixel_demo groups, which assert on specific toggles they set themselves,
  * but it is exactly why the flicker below went unnoticed: nothing in the suite ever rendered
@@ -5842,7 +5842,7 @@ void test_ssr_jitter_probe() {
  * @brief Whole-frame look of the FINISHED image: mean luma, contrast, and **saturation**, for the
  *        class of regression that changes how everything looks at once.
  *
- * Written after a descriptor-set-index mistake in `pixel_lighting.frag` drained 88% of the
+ * Written after a descriptor-set-index mistake in `toy_lighting.frag` drained 88% of the
  * scene's colour and several checks in a row missed it. Each miss is a rule this test
  * encodes:
  *
@@ -11356,13 +11356,13 @@ const TestCase kTests[] = {
 
     // --- config: defaults and YAML round-trips ---
     {"config_project_modules_and_root",            "config", test_project_modules_and_root},
-    {"config_aa_defaults",                         "config", test_pixel_render_config_aa_defaults},
+    {"config_aa_defaults",                         "config", test_toy_render_config_aa_defaults},
     {"config_aa_round_trip",                       "config", test_app_config_load_round_trips_aa_settings},
     {"config_scene_settings_layer",                "config", test_app_config_scene_settings_layer},
-    {"config_dof_defaults",                        "config", test_pixel_render_config_dof_defaults},
+    {"config_dof_defaults",                        "config", test_toy_render_config_dof_defaults},
     {"config_dof_round_trip",                      "config", test_app_config_load_round_trips_dof_settings},
     {"config_debug_view_parsing",                  "config", test_debug_view_parsing},
-    {"config_soft_shadow_defaults",                "config", test_pixel_render_config_soft_shadow_defaults},
+    {"config_soft_shadow_defaults",                "config", test_toy_render_config_soft_shadow_defaults},
     {"config_soft_shadow_round_trip",              "config", test_app_config_load_round_trips_soft_shadow_settings},
     {"config_cascade_round_trip",                  "config", test_app_config_load_round_trips_cascade_settings},
     {"config_quality_presets",                     "config", test_app_config_load_applies_quality_presets},

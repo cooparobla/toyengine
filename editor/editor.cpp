@@ -13,7 +13,7 @@
 //          HEADLESS=1 MAX_FRAMES=60 EDITOR_SCREENSHOT=out.png ./build/toyengine_editor
 //
 // The editor embeds the real toy::core::Engine, so "Full Render" in its viewport is the
-// game's own PixelRenderPipeline. A renderer restart (startup-only render settings) or a
+// game's own ToyRenderPipeline. A renderer restart (startup-only render settings) or a
 // project switch tears the Engine down and builds a new one; open documents survive a
 // restart via EditorState.
 
@@ -94,9 +94,9 @@ int main(int argc, char** argv) {
             return 0;
         } else if (!a.empty() && a[0] != '-') project_dir = a;
     }
-    // A game project's editor (TOY_PROJECT_ROOT is its project, not this checkout) opens that
+    // A game project's editor (build_project_root() is its project, not this checkout) opens that
     // project; toyengine's own editor keeps the recent-projects behaviour.
-    if (project_dir.empty() && std::string(TOY_PROJECT_ROOT) != std::string(ROOT_DIR)) project_dir = TOY_PROJECT_ROOT;
+    if (project_dir.empty() && std::string(toy::core::build_project_root()) != std::string(ROOT_DIR)) project_dir = toy::core::build_project_root();
     if (project_dir.empty()) {
         for (const auto& r : toy::editor::Project::recent_projects()) {
             if (toy::editor::Project(r).valid()) { project_dir = r; break; }
@@ -133,9 +133,10 @@ int main(int argc, char** argv) {
         opt.out_dir = fs::absolute(package_dir);
         opt.engine_assets = fs::path(ROOT_DIR) / "assets";
         opt.library_layers = toy::editor::default_library_layers(project.root());
-#ifdef TOY_GAME_BINARY
-        if (fs::exists(TOY_GAME_BINARY)) opt.game_binary = TOY_GAME_BINARY;
-#endif
+        if (toy::editor::BuildEnvironment::compiled()) {
+            const fs::path game = toy::editor::BuildEnvironment::current().game_binary;
+            if (fs::exists(game)) opt.game_binary = game;
+        }
         const toy::editor::PackageReport rep = toy::editor::package_project(project, opt);
         for (const auto& e : rep.errors) std::cerr << "[package] " << e << "\n";
         std::cout << "[package] " << rep.files << " files (" << rep.encoded << " encoded) -> " << opt.out_dir.string() << "\n";

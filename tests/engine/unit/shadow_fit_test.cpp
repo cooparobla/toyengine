@@ -1,6 +1,6 @@
 /**
  * @file shadow_fit_test.cpp
- * @brief The directional shadow fit (pixel_math.h): the single-map fit, cascade splits, per-slice
+ * @brief The directional shadow fit (toy_render_math.h): the single-map fit, cascade splits, per-slice
  *        fits, the focus (sphere) fit and the cascade atlas layout. Each check is a geometric
  *        invariant the shader relies on -- containment, texel snapping, rotation invariance,
  *        disjoint tiles -- not a tuned constant.
@@ -11,7 +11,7 @@
 #include <cmath>
 
 #include <glm/gtc/matrix_transform.hpp>
-#include <toyengine/render/pixel_math.h>
+#include <toyengine/render/toy_render_math.h>
 
 #include "engine/support/checks.h"
 

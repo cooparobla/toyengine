@@ -30,7 +30,8 @@ it, so changing the form is one key:
 # tile_set: objects/terrain/tileset_voxel     # square blocks
   kind_tile_sets:                             # optional: some surfaces from another set
     stone: objects/terrain/tileset_rock
-    water: objects/terrain/tileset_voxel
+  generator: { seed: 7, sea_level: 0.3 }      # mapcoopa's own keys; the rest is its standard map
+  water: { clarity: 2.0 }                     # WaterBody keys for the sea, lakes and rivers
   collision: true                             # each chunk collides with what it draws
   material:                                   # separate from the tile set: the palette atlas
     texture_albedo: textures/terrain_atlas.png
@@ -57,7 +58,9 @@ rounded, with dynamic bodies dropped onto it. Its header says how to switch it t
 | [`terrain_sampler.h`](terrain_sampler.h) | `TerrainParams` (the whole tiling: tile size, height step, chunk size, view radius) and `TerrainSampler` — owns the generated `MapGraph` and answers `sample(tile_x, tile_y) -> TileColumn`. Adds the point-to-cell lookup mapcoopa has no need for: a nearest-site query over a uniform bucket index. Const after `build()`, hence concurrently readable. |
 | [`terrain_chunk.h`](terrain_chunk.h) | The mesher. `sample_chunk_columns()` reads a chunk plus a one-tile neighbour skirt; `mesh_chunk_styled()` assembles its columns into a `ChunkMeshData`; `build_chunk_collision()` turns that into a static collision mesh. Pure — no Vulkan, no Scene, no AssetManager — which is what lets it run on a worker and be tested with no device. `ChunkBuildJob` bundles one job's inputs and outputs into a single shared object. |
 | [`terrain_component.h`](terrain_component.h) | `TerrainComponent` — the scene-authored `TileTerrain` component (old name `Terrain`) (tile set, stored tiles, generator keys, tiling, collision, material) plus the long-lived state: the bake, the baked library and the chunk table, and gameplay queries (`tile_at`, `record_at`, `height_at`). Carries no per-frame logic. |
-| [`tile_map_data.h`](tile_map_data.h) | `TileRecord` (12 bytes per tile: height, surfaces, flags, biome, climate, water depth, region / country), `TileMapData` (the stored grid: edit journal, column raycast, `.tiles` files) and `TileMapStore` (every terrain's tiles, keyed by file, surviving re-parses). |
+| [`tile_map_data.h`](tile_map_data.h) | `TileRecord` (16 bytes per tile: ground height, surfaces, flags, biome, climate, water depth and flow, region / country), `TileMapData` (the stored grid: edit journal, column raycast, `.tiles` files) and `TileMapStore` (every terrain's tiles, keyed by file, surviving re-parses). |
+| [`tile_water.h`](tile_water.h) | Editing the water over the tiles: `flood_water`, `drain_water`, `settle_water` (after ground moves) and the bake's rounding rule -- all keeping water from standing over dry ground. |
+| [`terrain_generator.h`](terrain_generator.h) | The `generator:` block: mapcoopa's own config keys over its standard map (`coopa::maps::standard_config()`), only the differences written; older scenes' flat keys still load. |
 | [`snow_field.h`](snow_field.h) | `SnowField` — the snow trench field: a toroidal 512² grid of trench depths (unorm16, 10 cm cells) following the camera, with `stamp()` (max-combine), `refill()` and `trench_at()`. Also the CPU mirrors of the shaders' open-sky test and deep-snow height (`snow_open_sky()`, `deep_snow_depth()`). Not part of the tile world; it lives here as world-space ground state. |
 | [`snow_system.h`](snow_system.h) | The `SnowDeformer` component and `SnowSystem` (order **370**): stamps every deformer (and every Rigidbody with the weather's `snow_auto_deformers`) that stands in deep snow, refills trenches while it snows, and answers `depth_at()`. See [toyengine/weather](../weather/README.md#snow). |
 | [`terrain_system.h`](terrain_system.h) | `TerrainSystem` + `install_terrain_system()` — the streaming policy, at order **60**. Decides which chunks exist, submits their meshing jobs, uploads finished ones (with their colliders), and releases the ones the camera has left behind. |
@@ -113,23 +116,42 @@ stay on the owner thread.
 ## Stored tiles
 
 A TileTerrain's tiles live in a `TileMapData` ([`tile_map_data.h`](tile_map_data.h)), one
-12-byte `TileRecord` per tile:
+16-byte `TileRecord` per tile:
 
 | Field | Meaning |
 |---|---|
-| `steps` | Height in whole steps (the water surface on water) |
+| `steps` | Ground height in whole steps -- under water, the bed |
 | `kinds` | Top and side surface kinds (4 bits each) |
-| `flags` | Water, Ocean, Coast, River (Road, Town reserved) |
+| `flags` | Water, Ocean, Coast, River (a channel cuts it), Flowing (its water is a river's); Road, Town reserved |
 | `biome` | mapcoopa biome |
 | `temperature`, `moisture` | mapcoopa's 0..1 values (temperature is a static yearly mean: 0 polar, 1 equatorial), as bytes |
-| `water_depth` | Water only: steps from the surface down to the bed |
+| `water_depth` | Steps of water over the ground, filling to the terrace `water_level()`; 0 when dry |
 | `region`, `country` | mapcoopa ids (`0xFFFF` = none) |
+| `flow` | A river's downstream direction, an octant 1..8 |
 
 **Baking.** With no `.tiles` file (or on a Regenerate) the terrain generates the mapcoopa map from
-its generator keys (`seed`, `shape`, `sea_level`, `grid_size`, `tiles_per_grid_unit`,
-`height_scale`, …) and `TerrainSampler::bake()` fills every record: lakes at their own water level
-(the sea at sea level), river channels flagged. After that the generator keys only matter to the
-next Regenerate; `tile_size`, `height_step`, the tile sets, chunking and collision apply live.
+its `generator:` settings -- mapcoopa's standard map (`coopa::maps::standard_config()`, what a bare
+`mapcoopa` run makes) with whatever the block changes, through `derived_config()` as the CLI does,
+so the seed moves the coastline -- cut at `tiles_per_grid_unit` and `height_scale`, and
+`TerrainSampler::bake()` fills every record. After that the generator only matters to the next
+Regenerate; `tile_size`, `height_step`, `water_inset`, the tile sets, chunking and collision
+apply live. The editor's **World Generator** window edits the block with a live preview.
+
+**Water.** mapcoopa decides where water is and how high (`coopa/maps/water_field.h`): the sea at
+sea level; each lake at its spill level, just under the lowest point of its shore, over a bed at
+least `lake_depth_m` deep; each river at its banked surface, under both banks and only ever
+falling, with its channel cut to hold it and carried on past its mouth to where the body's water
+really starts, so every river runs into the sea or lake it feeds. The bake samples that per tile and rounds it to steps
+the ground's way, never the water's: a dry tile beside water rounds up to that water's terrace (a
+bank), a flooded tile's bed down to at least a step under it -- **so water never stands above dry
+ground beside it.** It is never drawn as blocks: every chunk builds a smooth surface over its
+flooded tiles (`build_chunk_water()`), `water_inset` under the terrace (`river_inset` for rivers,
+nearer the bank tops), its corners averaged so a
+river stepping down a terrace slopes, with a skirt tucked under the banks. Still water (sea, lakes)
+and flowing water (rivers, `u` downstream) become two `WaterBody` children of the chunk, so waves,
+depth colour, shore foam, refraction, buoyancy and caustics are the water system's. The shoreline
+is where that surface meets the bank -- the tile set's shape, rounded or square -- and the beds are
+ordinary ground (sand), so they collide and the water does not. `water:` takes WaterBody keys.
 
 **Files.** `tiles:` names the file (default `terrain/<object>.tiles` beside the scene). A header,
 a chunk index, then one deflated block per 32 × 32 storage chunk, fields stored plane by plane
@@ -144,9 +166,12 @@ editor writes them with the scene (Ctrl S).
 auto* terrain = scene.find_first_component<toy::world::TerrainComponent>();
 glm::ivec2 t;
 if (terrain->tile_at(world_pos, t)) {
-    terrain->tiles->at(t.x, t.y).steps -= 1;                     // dig
-    terrain->tiles->mark_dirty(toy::world::IRect{t.x, t.y, t.x + 1, t.y + 1});
+    const toy::world::IRect cell{t.x, t.y, t.x + 1, t.y + 1};
+    terrain->tiles->at(t.x, t.y).steps -= 1;                     // dig (on dry ground)
+    terrain->tiles->mark_dirty(cell);
+    toy::world::settle_water(*terrain->tiles, cell);             // water beside it runs in
 }
+toy::world::flood_water(*terrain->tiles, {t}, 6);                // fill a basin to terrace 6
 const toy::world::TileRecord* r = terrain->record_at(world_pos);   // biome, temperature...
 ```
 
@@ -414,7 +439,7 @@ by layer / slope / height, streamed around the camera, re-scattered where the te
 ## Not here yet
 
 Caves and overhangs (the height-column model has no room for them, though mapcoopa generates cave
-systems), water as its own blended pass rather than an opaque surface, chunk LOD,
+systems), waterfalls as their own effect (a river's step is a steep slope of its surface), chunk LOD,
 rivers/roads/towns as 3D geometry, loading only the `.tiles` chunks near the camera (the file
 format allows it; everything is loaded today), and a per-tile tile-set override. Each sits on top of this layer rather
 than requiring it to change shape.

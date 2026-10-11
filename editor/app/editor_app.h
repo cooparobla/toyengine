@@ -92,6 +92,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <map>
 #include <tuple>
 #include <unordered_map>
@@ -650,6 +651,7 @@ private:
 #include "ui/particle_panel.inl"
 #include "ui/tile_terrain_panel.inl"
 #include "ui/tile_mode.inl"
+#include "ui/world_generator.inl"
 #include "ui/project_settings.inl"
 #include "ui/preferences.inl"
 

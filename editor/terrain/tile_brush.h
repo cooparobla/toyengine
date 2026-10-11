@@ -37,25 +37,30 @@ struct TileBrushSettings {
     int target_height = 4;         ///< Set Height; Flatten takes the clicked tile's instead.
     toy::world::TileKind paint_kind = toy::world::TileKind::Grass;
     bool paint_side = true;        ///< Paint also sets the side kind (to the top kind's usual side).
-    int water_level = 3;           ///< Water: flood the brush area up to this surface.
+    int water_level = 5;           ///< Water: flood the brush's basin up to this terrace (steps).
     bool similar_by_kind = false;  ///< Select's double-click: same surface (true) or same height.
 };
 
 /** @brief The square of `size` tiles centred on `tile` (odd sizes centre exactly; even lean to +x/+y). */
 toy::world::IRect tile_brush_rect(const glm::ivec2& tile, int size);
 
-/** @brief Raises (delta > 0) or lowers every tile in `rect` by `delta` steps; never below 0. Water tiles move their bed. */
+/**
+ * @brief Raises (delta > 0) or lowers every tile's ground in `rect` by `delta` steps; never below
+ *        0. Under water the bed moves. The water then re-settles (tile_water.h's settle_water()):
+ *        a bed raised through its surface leaves land, ground lowered beside water floods -- so
+ *        the returned rect can reach past `rect`.
+ */
 toy::world::IRect tile_raise(toy::world::TileMapData& d, const toy::world::IRect& rect, int delta);
-/** @brief Sets every land tile in `rect` to `steps` (water stays water, its bed moved). */
+/** @brief Sets every tile's ground in `rect` to `steps` (under water, the bed), then re-settles the water. */
 toy::world::IRect tile_set_height(toy::world::TileMapData& d, const toy::world::IRect& rect, int steps);
-/** @brief Paints the top kind (and, with `side`, the matching side kind). */
+/** @brief Paints the top kind (and, with `side`, the matching side kind) -- beds under water included. */
 toy::world::IRect tile_paint(toy::world::TileMapData& d, const toy::world::IRect& rect, toy::world::TileKind kind, bool side);
-/** @brief Moves each tile one step toward the median of its 3 x 3 neighbourhood (terraces stay whole steps). */
+/** @brief Moves each tile one step toward the median of its 3 x 3 neighbourhood (terraces stay whole steps), then re-settles the water. */
 toy::world::IRect tile_smooth(toy::world::TileMapData& d, const toy::world::IRect& rect);
 /**
- * @brief Water: `fill` floods every tile in `rect` lower than `level` to a water surface at
- *        `level` (keeping the depth to its old ground); otherwise drains water tiles back down to
- *        their bed as sand.
+ * @brief Water: `fill` floods the basin the brush is in to terrace `level` -- every tile
+ *        connected to it whose ground is lower, as far as the ground holds the water; otherwise
+ *        drains the whole body the brush touches. The returned rect is the flood's, not the brush's.
  */
 toy::world::IRect tile_water(toy::world::TileMapData& d, const toy::world::IRect& rect, int level, bool fill);
 

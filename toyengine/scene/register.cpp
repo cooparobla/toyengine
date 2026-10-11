@@ -26,6 +26,7 @@
 #include <toyengine/water/water_body.h>
 #include <toyengine/world/heightmap_terrain.h>
 #include <toyengine/world/terrain_component.h>
+#include <toyengine/world/terrain_generator.h>
 #include <toyengine/world/tile_map_data.h>
 
 namespace toy {
@@ -45,6 +46,47 @@ glm::vec3 parse_rgb(const fkyaml::node& n, const glm::vec3& fallback) {
     if (n.contains("g")) v.g = n.at("g").get_value<float>();
     if (n.contains("b")) v.b = n.at("b").get_value<float>();
     return v;
+}
+
+/**
+ * @brief Reads a WaterBody's look and behaviour keys (waves, flow, foam, clarity, underwater,
+ *        physics) -- shared by the "WaterBody" parser and a TileTerrain's `water:` block.
+ */
+void parse_water_settings(const fkyaml::node& node, toy::water::WaterBody& w) {
+    auto f = [&node](const char* key, float& out) {
+        if (node.contains(key)) out = node.at(key).get_value<float>();
+    };
+    f("wave_amplitude", w.waves.amplitude);
+    f("wave_length", w.waves.wavelength);
+    f("wave_steepness", w.waves.steepness);
+    f("wind_response", w.wind_response);
+    if (node.contains("wave_direction")) {
+        w.waves.direction = glm::radians(node.at("wave_direction").get_value<float>());
+    }
+
+    f("flow_speed", w.flow_speed);
+    f("flow_min_speed", w.flow_min_speed);
+    f("flow_slope_gain", w.flow_slope_gain);
+    f("obstacle_radius", w.obstacle_radius);
+    f("wake_length", w.wake_length);
+
+    if (node.contains("foam_color")) w.foam_color = parse_rgb(node.at("foam_color"), w.foam_color);
+    f("foam_amount", w.foam_amount);
+    f("shore_foam_depth", w.shore_foam_depth);
+    f("edge_fade_depth", w.edge_fade_depth);
+    f("ripple_strength", w.ripple_strength);
+    f("ripple_scale", w.ripple_scale);
+    f("clarity", w.clarity);
+
+    if (node.contains("underwater_color")) w.underwater_color = parse_rgb(node.at("underwater_color"), w.underwater_color);
+    f("underwater_visibility", w.underwater_visibility);
+    if (node.contains("underwater_absorption")) {
+        w.underwater_absorption = parse_rgb(node.at("underwater_absorption"), w.underwater_absorption);
+    }
+    f("caustics", w.caustics);
+
+    f("density", w.density);
+    f("max_depth", w.max_depth);
 }
 
 void register_scene_components() {
@@ -456,28 +498,9 @@ void register_scene_components(coopa::gfx::core::Device& device,
             auto* terrain = obj.add_component<world::TerrainComponent>();
             world::TerrainParams& params = terrain->params;
 
-            // --- The world to generate ---
-            if (node.contains("seed"))      terrain->seed      = node.at("seed").get_value<int>();
-            if (node.contains("grid_size")) terrain->grid_size = node.at("grid_size").get_value<int>();
-            if (node.contains("sea_level")) terrain->sea_level = node.at("sea_level").get_value<double>();
-            if (node.contains("terrain_roughness")) {
-                terrain->terrain_roughness = node.at("terrain_roughness").get_value<double>();
-            }
-            if (node.contains("river_count")) {
-                terrain->river_count = node.at("river_count").get_value<int>();
-            }
-            if (node.contains("shape")) terrain->shape = node.at("shape").get_value<std::string>();
-            if (node.contains("continent_count")) {
-                terrain->continent_count = node.at("continent_count").get_value<int>();
-            }
-            if (node.contains("continent_size_m")) {
-                terrain->continent_size_m = node.at("continent_size_m").get_value<double>();
-            }
-            if (node.contains("irregularity")) terrain->irregularity = node.at("irregularity").get_value<double>();
-            if (node.contains("coast_detail")) terrain->coast_detail = node.at("coast_detail").get_value<double>();
-            if (node.contains("temperature_offset")) {
-                terrain->temperature_offset = node.at("temperature_offset").get_value<double>();
-            }
+            // --- The world to generate: mapcoopa's standard map, plus the `generator:` block
+            //     (and older scenes' flat keys) -- see terrain_generator.h. ---
+            terrain->generator = world::generator_config_from_node(node);
 
             // --- How it is tiled ---
             if (node.contains("tiles_per_grid_unit")) {
@@ -497,6 +520,12 @@ void register_scene_components(coopa::gfx::core::Device& device,
             }
             if (node.contains("soil_depth_steps")) {
                 params.soil_depth_steps = node.at("soil_depth_steps").get_value<std::int32_t>();
+            }
+            if (node.contains("water_inset")) params.water_inset = node.at("water_inset").get_value<float>();
+            if (node.contains("river_inset")) params.river_inset = node.at("river_inset").get_value<float>();
+            // The water's look: WaterBody's own keys, onto the terrain's stock look.
+            if (node.contains("water") && node.at("water").is_mapping()) {
+                parse_water_settings(node.at("water"), terrain->water_look);
             }
             if (node.contains("max_chunk_jobs_per_frame")) {
                 terrain->max_chunk_jobs_per_frame = node.at("max_chunk_jobs_per_frame").get_value<int>();
@@ -683,37 +712,7 @@ void register_scene_components(coopa::gfx::core::Device& device,
             if (node.contains("resolution")) w->resolution = node.at("resolution").get_value<int>();
             f("tile_size", w->tile_size);
 
-            f("wave_amplitude", w->waves.amplitude);
-            f("wave_length", w->waves.wavelength);
-            f("wave_steepness", w->waves.steepness);
-            f("wind_response", w->wind_response);
-            if (node.contains("wave_direction")) {
-                w->waves.direction = glm::radians(node.at("wave_direction").get_value<float>());
-            }
-
-            f("flow_speed", w->flow_speed);
-            f("flow_min_speed", w->flow_min_speed);
-            f("flow_slope_gain", w->flow_slope_gain);
-            f("obstacle_radius", w->obstacle_radius);
-            f("wake_length", w->wake_length);
-
-            if (node.contains("foam_color")) w->foam_color = parse_rgb(node.at("foam_color"), w->foam_color);
-            f("foam_amount", w->foam_amount);
-            f("shore_foam_depth", w->shore_foam_depth);
-            f("edge_fade_depth", w->edge_fade_depth);
-            f("ripple_strength", w->ripple_strength);
-            f("ripple_scale", w->ripple_scale);
-            f("clarity", w->clarity);
-
-            if (node.contains("underwater_color")) w->underwater_color = parse_rgb(node.at("underwater_color"), w->underwater_color);
-            f("underwater_visibility", w->underwater_visibility);
-            if (node.contains("underwater_absorption")) {
-                w->underwater_absorption = parse_rgb(node.at("underwater_absorption"), w->underwater_absorption);
-            }
-            f("caustics", w->caustics);
-
-            f("density", w->density);
-            f("max_depth", w->max_depth);
+            parse_water_settings(node, *w);
 
             if (!w->mesh_path.empty()) {
                 w->source = assets.load_async<coopa::gfx::engine::data::SkinnedMeshSource>(

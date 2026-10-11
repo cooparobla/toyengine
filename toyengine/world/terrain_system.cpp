@@ -1,5 +1,7 @@
 #include <toyengine/world/terrain_system.h>
 
+#include <toyengine/water/water_body.h>
+
 #include <cmath>
 
 #include <coopa/asset/asset_id.h>
@@ -190,7 +192,8 @@ void TerrainSystem::upload_finished_chunks_(TerrainComponent& terrain, coopa::sc
         // re-queued and never draws.
         // A rebuild replaces the chunk's object in this same frame, so it never shows a hole.
         destroy_chunk_object_(terrain, chunk);
-        if (chunk.build && !chunk.build->mesh.empty()) {
+        if (chunk.build && (!chunk.build->mesh.empty() || !chunk.build->water_still.empty() ||
+                            !chunk.build->water_flowing.empty())) {
             create_chunk_object_(terrain, scene, chunk);
         }
         chunk.build.reset();
@@ -251,18 +254,24 @@ void TerrainSystem::create_chunk_object_(TerrainComponent& terrain, coopa::scene
     if (terrain.owner == nullptr) return;
 
     const ChunkMeshData& data = chunk.build->mesh;
+    ++chunk.mesh_serial;
+    auto object = std::make_unique<coopa::scene::SceneObject>(chunk_object_name_(chunk.coord));
+    auto* transform = object->add_component<TransformComponent>();
+    transform->transform().set_position(chunk_origin(terrain.params, chunk.coord));
+    add_chunk_water_(terrain, *object, chunk.build->water_still, false);
+    add_chunk_water_(terrain, *object, chunk.build->water_flowing, true);
+    if (data.empty()) {
+        chunk.object = terrain.owner->add_child(std::move(object));
+        scene.adopt(*chunk.object);
+        return;
+    }
+
     // buffer_count 1: a chunk mesh is written once and never rewritten, unlike a cloth's
     // per-frame ring (see Mesh::from_arrays()'s doc on why that is a count, not a bool).
     chunk.mesh = std::make_shared<Mesh>(
         Mesh::from_arrays(device_, allocator_, data.vertices, data.indices, 1));
-
-    ++chunk.mesh_serial;
     const std::string id = chunk_asset_id_(terrain, chunk);
     auto handle = assets_.create<Mesh>(id, chunk.mesh);
-
-    auto object = std::make_unique<coopa::scene::SceneObject>(chunk_object_name_(chunk.coord));
-    auto* transform = object->add_component<TransformComponent>();
-    transform->transform().set_position(chunk_origin(terrain.params, chunk.coord));
 
     auto* renderer = object->add_component<MeshRenderer>();
     renderer->material = terrain.material;
@@ -293,6 +302,27 @@ void TerrainSystem::create_chunk_object_(TerrainComponent& terrain, coopa::scene
     // Stamps the Scene back-pointer onto the new components, exactly as
     // Scene::flush_commands() does for a deferred add -- see Scene::adopt().
     scene.adopt(*chunk.object);
+}
+
+void TerrainSystem::add_chunk_water_(const TerrainComponent& terrain, coopa::scene::SceneObject& chunk_object,
+                                     const ChunkWaterData& water, bool flowing) {
+    if (water.empty()) return;
+    // A child of the chunk: placed by the chunk's transform, and destroyed with it. The water
+    // system bakes it (depth from the beds below, flow from its slope and `u`) and draws it.
+    auto object = std::make_unique<coopa::scene::SceneObject>(flowing ? "river" : "water");
+    auto* tc = object->add_component<TransformComponent>();
+    // add_child() does not link transforms; the water is placed in the chunk's space.
+    if (auto* parent = chunk_object.get_transform()) tc->set_parent_transform(&parent->transform());
+    auto* body = object->add_component<water::WaterBody>();
+    water::copy_water_settings(terrain.water_look, *body);
+    body->mode = flowing ? water::WaterMode::Flowing : water::WaterMode::Planar;
+    if (flowing) {
+        // A river's surface is its current, not the sea's swell.
+        body->waves.amplitude *= 0.25f;
+        body->waves.wavelength *= 0.5f;
+    }
+    body->set_geometry(water.positions, water.uvs, water.indices);
+    chunk_object.add_child(std::move(object));
 }
 
 void TerrainSystem::destroy_chunk_object_(TerrainComponent& terrain, TerrainChunk& chunk) {

@@ -18,21 +18,15 @@ scene:
           scale: { x: 1.0, y: 1.0, z: 1.0 }
         - type: TileTerrain
           chunk_size: 32
-          coast_detail: 0.18
           collision: true
-          grid_size: 64
-          height_scale: 1.0e+01
           height_step: 1.0
-          irregularity: 0.42
           kind_tile_sets:
             ash: objects/terrain/tileset_soft
-            ice: objects/terrain/tileset_voxel
             rock: objects/terrain/tileset_rock
             salt: objects/terrain/tileset_soft
             sand: objects/terrain/tileset_soft
             snow: objects/terrain/tileset_soft
             stone: objects/terrain/tileset_rock
-            water: objects/terrain/tileset_voxel
           material:
             albedo: { b: 1.0, g: 1.0, r: 1.0 }
             ao: 1.0
@@ -42,12 +36,7 @@ scene:
             texture_metallic_roughness: textures/terrain_atlas_mr.png
           max_chunk_jobs_per_frame: 4
           max_wall_steps: 8
-          river_count: 20
-          sea_level: 0.28
-          seed: 251
-          shape: circle
           soil_depth_steps: 1
-          terrain_roughness: 0.0
           tile_set: objects/terrain/tileset_soft
           tile_size: 1.0
           tiles_per_grid_unit: 4
@@ -57,7 +46,7 @@ scene:
       active: true
       components:
         - type: Transform
-          position: { x: 128.0, y: 128.0, z: 1.0e+01 }
+          position: { x: 106.0, y: 178.0, z: 8.0 }
           rotation: { x: 0.0, y: 0.0, z: 0.0 }
           scale: { x: 1.0, y: 1.0, z: 1.0 }
         - { type: FreeMover, move_speed: 18.0, smoothing: 12.0 }
@@ -66,7 +55,7 @@ scene:
       active: true
       components:
         - type: Transform
-          position: { x: 126.0, y: 129.0, z: 16.0 }
+          position: { x: 104.0, y: 179.0, z: 16.0 }
           rotation: { x: 1.0e+01, y: 2.0e+01, z: 3.0e+01 }
           scale: { x: 1.2, y: 1.2, z: 1.2 }
         - type: MeshRenderer
@@ -84,7 +73,7 @@ scene:
       active: true
       components:
         - type: Transform
-          position: { x: 1.3e+02, y: 127.0, z: 18.0 }
+          position: { x: 108.0, y: 177.0, z: 18.0 }
           scale: { x: 0.6, y: 0.6, z: 0.6 }
         - type: MeshRenderer
           material:
@@ -99,7 +88,7 @@ scene:
       active: true
       components:
         - type: Transform
-          position: { x: 128.5, y: 132.0, z: 2.0e+01 }
+          position: { x: 106.5, y: 182.0, z: 2.0e+01 }
           scale: { x: 0.5, y: 0.5, z: 0.5 }
         - type: MeshRenderer
           material:
@@ -110,11 +99,30 @@ scene:
         - { type: SphereCollider, material: rubber, radius: 1.0 }
         - { type: Rigidbody, mass: 8.0 }
       children: []
+    - name: drop_float_crate
+      active: true
+      components:
+        - type: Transform
+          position: { x: 95.0, y: 178.0, z: 6.0 }
+          rotation: { x: 0.0, y: 0.0, z: 2.0e+01 }
+          scale: { x: 1.2, y: 1.2, z: 1.2 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.24, g: 0.42, r: 0.62 }
+            metallic: 0.0
+            roughness: 0.8
+          mesh_path: cube
+        - type: BoxCollider
+          material: wood
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+        - { type: Rigidbody, mass: 4.0e+01 }
+        - type: Buoyancy
+      children: []
     - name: camera
       active: true
       components:
         - type: Transform
-          position: { x: 128.0, y: 98.0, z: 38.0 }
+          position: { x: 106.0, y: 148.0, z: 38.0 }
           rotation: { x: 48.0, y: 0.0, z: 0.0 }
           scale: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Camera

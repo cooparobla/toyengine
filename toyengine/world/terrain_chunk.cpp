@@ -52,7 +52,7 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
     };
     auto wall_kind = [&](const TileColumn& col, std::int32_t cell) {
         const std::int32_t depth = col.steps - 1 - cell;
-        return (depth < params.soil_depth_steps || col.water) ? col.side_kind : TileKind::Stone;
+        return depth < params.soil_depth_steps ? col.side_kind : TileKind::Stone;
     };
     // Whether column `c` has a wall cell on `face` at `cell`.
     auto wall_cell_at = [&](const glm::ivec2& c, TileFace face, std::int32_t cell) {
@@ -296,6 +296,80 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
     }
 }
 
+void build_chunk_water(const ColumnPad& pad, const TerrainParams& params, ChunkWaterData& still,
+                       ChunkWaterData& flowing) {
+    still.clear();
+    flowing.clear();
+    const std::int32_t n = params.chunk_size;
+    const float ts = params.tile_size, hs = params.height_step;
+    auto surface_z = [&](const TileColumn& c) {
+        const float inset = c.water == k_water_flowing ? params.river_inset : params.water_inset;
+        return (static_cast<float>(c.water_level) - inset) * hs;
+    };
+    auto in_pad = [&](std::int32_t x, std::int32_t y) { return x >= -1 && y >= -1 && x <= n && y <= n; };
+
+    // Mean surface height at tile corner (cx, cy), over the flooded tiles sharing it.
+    auto corner_z = [&](std::int32_t cx, std::int32_t cy, float fallback) {
+        float sum = 0.0f;
+        int count = 0;
+        for (std::int32_t ty = cy - 1; ty <= cy; ++ty) {
+            for (std::int32_t tx = cx - 1; tx <= cx; ++tx) {
+                if (!in_pad(tx, ty)) continue;
+                const TileColumn& c = pad.at(tx, ty);
+                if (c.water == k_water_none) continue;
+                sum += surface_z(c);
+                ++count;
+            }
+        }
+        return count > 0 ? sum / static_cast<float>(count) : fallback;
+    };
+
+    for (std::int32_t y = 0; y < n; ++y) {
+        for (std::int32_t x = 0; x < n; ++x) {
+            const TileColumn& c = pad.at(x, y);
+            std::uint8_t kind = c.water;
+            std::uint8_t flow = c.flow;
+            float level = 0.0f;
+            if (kind != k_water_none) {
+                level = surface_z(c);
+            } else {
+                // A skirt under a bank: only beside water, at the highest water beside it.
+                bool any = false;
+                for (std::int32_t dy = -1; dy <= 1; ++dy) {
+                    for (std::int32_t dx = -1; dx <= 1; ++dx) {
+                        const TileColumn& o = pad.at(x + dx, y + dy);
+                        if (o.water == k_water_none) continue;
+                        const float z = surface_z(o);
+                        if (!any || z > level) level = z;
+                        if (!any || o.water == k_water_still) {
+                            kind = o.water;
+                            flow = o.flow;
+                        }
+                        any = true;
+                    }
+                }
+                if (!any) continue;
+            }
+            ChunkWaterData& out = kind == k_water_flowing ? flowing : still;
+            glm::vec2 down(1.0f, 0.0f);
+            if (kind == k_water_flowing && flow >= 1 && flow <= 8) down = flow_direction(flow);
+            const glm::vec2 across(-down.y, down.x);
+            const std::uint32_t base = static_cast<std::uint32_t>(out.positions.size());
+            const std::int32_t cxs[4] = {x, x + 1, x + 1, x};
+            const std::int32_t cys[4] = {y, y, y + 1, y + 1};
+            for (int k = 0; k < 4; ++k) {
+                const glm::vec3 p(static_cast<float>(cxs[k]) * ts, static_cast<float>(cys[k]) * ts,
+                                  corner_z(cxs[k], cys[k], level));
+                out.positions.push_back(p);
+                const glm::vec2 xy(p.x, p.y);
+                out.uvs.push_back(kind == k_water_flowing ? glm::vec2(glm::dot(xy, down), glm::dot(xy, across)) : xy);
+            }
+            const std::uint32_t quad[6] = {base, base + 1, base + 2, base, base + 2, base + 3};
+            out.indices.insert(out.indices.end(), quad, quad + 6);
+        }
+    }
+}
+
 std::shared_ptr<const coopa::physx::geometry::TriangleMesh> build_chunk_collision(const ChunkMeshData& mesh) {
     if (mesh.empty()) return nullptr;
     std::vector<glm::vec3> positions;
@@ -316,6 +390,7 @@ void ChunkBuildJob::run() {
     // The collider is the drawn surface itself, so it matches whatever tile set built it. Its
     // weld, adjacency and BVH are the expensive part -- hence here, on the worker.
     if (collision) collision_mesh = build_chunk_collision(mesh);
+    build_chunk_water(pad, params, water_still, water_flowing);
 }
 
 glm::vec3 chunk_origin(const TerrainParams& params, const ChunkCoord& coord) {

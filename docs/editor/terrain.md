@@ -120,17 +120,50 @@ or archipelago with rivers and biomes, and from then on you edit it tile by tile
   **tileset_rock** are softer and chunkier versions of round). **Open** shows the set's pieces.
   **Duplicate as New Tile Set** copies the set into your project, with its own piece meshes to
   reshape, and switches the terrain to the copy. **Per-Surface Tile Sets** builds chosen surfaces
-  from another set, for example stone from tileset_rock or water from tileset_voxel.
+  from another set, for example stone from tileset_rock.
 - **Material**: the colours. The atlas holds one colour per surface (grass, sand, stone...), and
   the terrain shader adds the detail.
-- **Generator**: the settings the world was generated from: **Seed** (or **New Random Seed**),
-  **Shape**, sea level, rivers, climate, size and height range. The world is generated once and
-  stored as tiles, so changing a setting here does nothing until you press **Regenerate World**.
-  Regenerating replaces every tile, your edits included, and can be undone.
+- **Generator**: a summary of the settings the world was generated from, **Open World
+  Generator...** and **Regenerate World**. The world is generated once and stored as tiles, so
+  changing a setting does nothing until you generate again. That replaces every tile, your edits
+  included, and can be undone.
 - **Size & Terraces**: how big each tile and each step is in the world.
 - **Streaming**: how many chunks stay loaded around the point the camera looks at. This is the
   main cost control.
 - **Collision**: on by default. Every chunk collides with exactly the surface it draws.
+
+### World Generator
+
+**Open World Generator...** (in the panel, or Tile Mode's **Generate** section) opens a window
+with every setting of the map generator (mapcoopa), by category on the left:
+
+- **World**: **Seed** (or **New Random Seed**), **Map Cells**, and the terrain's own **Tiles per
+  Cell** and **Height Range**, with the size they make.
+- **Shape**: rectangle, circle, triangle, one continent or many islands, their size, outline
+  and coast.
+- **Elevation**: sea level, relief, roughness and smoothing.
+- **Climate**: warmth, how height cools the air, and the frozen north and south.
+- **Water & Rivers**: rivers, their width and depth, valleys, lake depth, and how far the sea,
+  lakes and rivers sit under their banks (also in the panel's **Water** section, applied at once).
+- **Settlements**: towns, countries and regions, landmarks and caves.
+- **Advanced**: the noise fields, cell size and height range.
+
+The right side previews the map those settings make, and updates as you change them (**Show**
+switches between the map, biomes, elevation and water). **Generate World** writes the settings
+to the terrain and re-generates its tiles; undo takes back the tiles, then the settings. **Reset
+to mapcoopa Defaults** returns to the standard map, the one the mapcoopa tool makes on its own,
+which is also what a new Tile Terrain starts as.
+
+### Water
+
+The generator places the water: the sea, a lake at the lowest point of its shore, and rivers
+that stay under their banks, only ever run downhill, and run all the way into the sea or lake
+they feed. Water is never drawn as tiles. Each
+stretch is a smooth surface over a sandy bed, with waves, foam at the shore and refraction, and
+the shoreline is wherever it meets the bank, so it takes the tile set's shape, rounded or square.
+Bodies with a **Buoyancy** component float on it. Water never stands higher than the dry ground
+beside it, and it stays that way as you edit: dig beside water and it runs in, raise a bed
+through the surface and it becomes land.
 
 The tiles are saved in their own file (`terrain/<name>.tiles` beside the scene) when you save the
 scene (**Ctrl+S**).
@@ -148,15 +181,15 @@ Everything snaps to whole tiles and whole height steps:
 | Set Height | 4 | Sets tiles to the **Target Height**. **Ctrl**-click a tile to pick its height. |
 | Paint | 5 | Paints a surface (grass, sand, snow...) onto tile tops, and optionally the soil below. |
 | Smooth | 6 | Moves each tile one step toward its neighbours' height. |
-| Water | 7 | Floods tiles below the **Water Level**. **Ctrl** drains water back down to its bed. |
+| Water | 7 | Click a basin to flood it to the **Water Level**: the water runs as far as the ground holds it. **Ctrl** drains the whole body you click. |
 
 The brush is a square of **Size** tiles (**[** and **]** change it). With tiles selected, the
 **Selected Tiles** section of **Properties > Tool** edits all of them at once:
-- height (set it, or **+1** / **−1 Step**);
+- the ground's height (set it, or **+1** / **−1 Step**; under water it moves the bed);
 - the top and side surfaces;
 - the **Biome**;
 - **Temperature** and **Moisture** (0 to 1, from the generator);
-- **Water**;
+- the **Water Level** (raise it over the ground to flood the tiles, or **Drain**);
 - the region and country ids.
 
 Where the selected tiles differ, the field shows "mixed". **Tile Under Cursor** shows everything

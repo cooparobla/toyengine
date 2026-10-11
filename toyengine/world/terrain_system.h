@@ -159,6 +159,9 @@ private:
                               TerrainChunk& chunk);
 
     /** @brief Destroys a chunk's SceneObject and retires its published mesh. */
+    /** @brief Gives a chunk object one water child (still or flowing) for its water surface. */
+    void add_chunk_water_(const TerrainComponent& terrain, coopa::scene::SceneObject& chunk_object,
+                          const ChunkWaterData& water, bool flowing);
     void destroy_chunk_object_(TerrainComponent& terrain, TerrainChunk& chunk);
 
     /** @brief Synthetic asset id for a chunk's current mesh, prefixed to stay out of the real-path namespace. */

@@ -14,9 +14,11 @@ import, see the create-heightmap-terrain skill.
 The world is **stored**: mapcoopa bakes it once into a `.tiles` file (`tiles:`, default
 `terrain/<object>.tiles` beside the scene; baked automatically when missing), and from then on the
 tiles are edited -- in the editor's Tile Mode, or by gameplay (`TerrainComponent::tiles`, then
-`mark_dirty()`). The generator keys below only shape a bake; delete the `.tiles` file (or use
-Regenerate World) to bake again after changing them. Each tile stores height, surfaces, biome,
-temperature, moisture, water and river flags, and region / country ids.
+`mark_dirty()`; water edits through `toyengine/world/tile_water.h`). The `generator:` block only
+shapes a bake; delete the `.tiles` file (or use the editor's World Generator / Regenerate World)
+to bake again after changing it. Each tile stores ground height, surfaces, biome, temperature,
+moisture, water depth and river flow, and region / country ids. Water is drawn as smooth WaterBody
+surfaces over sand beds (never as tiles); `water:` takes WaterBody keys.
 
 Read **`toyengine/world/README.md`** (stored tiles, generation, tile sets, pieces, collision) and
 copy from `assets/scenes/terrain/terrain_demo/scene.yaml`. Parser: `toyengine/scene/register.cpp`
@@ -35,16 +37,18 @@ copy from `assets/scenes/terrain/terrain_demo/scene.yaml`. Parser: `toyengine/sc
     - type: TileTerrain
       tile_set: objects/terrain/tileset_round   # or tileset_voxel (blocks), tileset_soft, tileset_rock
       # tiles: terrain/terrain.tiles            # the stored tiles (default); baked when missing
-      seed: 251
-      grid_size: 64
-      shape: circle             # rectangle | circle | triangle | continent | archipelago
-      sea_level: 0.28
-      terrain_roughness: 0.0
-      river_count: 20
+      generator:                # mapcoopa's own config keys; omitted = its standard map
+        seed: 7                 # (what a bare `mapcoopa` run makes: 80 cells, continents)
+        grid_size: 64
+        sea_level: 0.28
+        shape: { shape: circle, diameter_m: 0 }   # rectangle | circle | triangle | continent | archipelago
       tiles_per_grid_unit: 4
       tile_size: 1.0
       height_step: 1.0          # = tile_size keeps the pieces cubic
-      height_scale: 10.0
+      height_scale: 16.0
+      water_inset: 0.5          # sea / lakes sit this many steps under the terrace they fill
+      river_inset: 0.2          # rivers, nearer their bank tops
+      water: { clarity: 2.5 }   # optional WaterBody look keys
       chunk_size: 32
       view_radius: 2            # chunks streamed around the main camera
       collision: true           # default; each chunk collides with what it draws
@@ -54,13 +58,13 @@ copy from `assets/scenes/terrain/terrain_demo/scene.yaml`. Parser: `toyengine/sc
 ```
 
 Key groups: stored tiles (`tiles`); tile set (`tile_set`, `kind_tile_sets { <kind>: objects/terrain/tileset_x }` with
-kinds grass, dirt, stone, sand, snow, rock, water, ice, moss, clay, ash, salt -- unlisted kinds
-use `tile_set`); generation (`seed`, `grid_size`, `sea_level`, `terrain_roughness`,
-`river_count`, `shape`, `continent_count`, `continent_size_m`, `irregularity`, `coast_detail`,
-`temperature_offset`, `tiles_per_grid_unit`, `height_scale` -- bake only); tiling (`tile_size`,
-`height_step`, `chunk_size`, `view_radius`, `max_wall_steps`, `soil_depth_steps`,
-`max_chunk_jobs_per_frame`);
-collision (`collision`, `physics_material`); look (`material`, separate from the tile set).
+kinds grass, dirt, stone, sand, snow, rock, ice, moss, clay, ash, salt -- unlisted kinds
+use `tile_set`); generation (`generator:` -- any mapcoopa config key, see
+`libs/mapcoopa/assets/config.yaml`; plus `tiles_per_grid_unit`, `height_scale` -- bake only; the
+old flat keys `seed`, `shape`, `sea_level`... still load); tiling (`tile_size`, `height_step`,
+`chunk_size`, `view_radius`, `max_wall_steps`, `soil_depth_steps`, `max_chunk_jobs_per_frame`);
+water (`water_inset`, `water:` WaterBody keys); collision (`collision`, `physics_material`); look
+(`material`, separate from the tile set).
 
 Old keys still load: `styles:` / `kind_styles:` (named sets per kind); `side_mesh:` / `sides:` /
 `greedy_merge:` / `emit_bottom:` are retired (they fall back to `tileset_voxel` with a warning).

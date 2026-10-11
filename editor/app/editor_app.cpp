@@ -3394,6 +3394,7 @@ void EditorApp::draw_modals_(imm::Context& ctx) {
     draw_preferences_modal_(ctx);
     draw_about_modal_(ctx);
     draw_project_settings_modal_(ctx);
+    draw_world_generator_modal_(ctx);
     if (!pending_modal_.empty()) { ctx.open_modal(pending_modal_); pending_modal_.clear(); }
 }
 

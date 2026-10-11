@@ -45,19 +45,10 @@ void TerrainComponent::begin_generation(coopa::job::JobEngine* jobs) {
     if (started_bake_request_ == tiles->bake_requests()) return;   // this request is done (or failed)
     started_bake_request_ = tiles->bake_requests();
 
-    coopa::maps::MapConfig config;
-    config.seed              = seed;
-    config.grid_size         = grid_size;
-    config.sea_level         = sea_level;
-    config.terrain_roughness = terrain_roughness;
-    config.river_count       = river_count;
-    config.shape.shape            = coopa::maps::map_shape_from_name(shape);
-    config.shape.continent_count  = continent_count;
-    config.shape.continent_size_m = continent_size_m;
-    config.shape.irregularity     = irregularity;
-    config.shape.coast_detail     = coast_detail;
-    config.temperature_offset     = temperature_offset;
-    map_config_              = config;
+    // The values the CLI derives after reading a config (noise seeds from the master seed, the
+    // island field scaled to the grid) -- or one seed would make the same coastline as another.
+    const coopa::maps::MapConfig config = coopa::maps::derived_config(generator);
+    map_config_ = config;
 
     generator_ = std::make_unique<coopa::maps::MapGenerator>(config, logger_);
     generator_->set_job_engine(jobs);
@@ -120,6 +111,21 @@ float TerrainComponent::height_at(const glm::vec3& world) const {
         if (auto* tc = owner->get_transform()) z += glm::vec3(tc->transform().get_world_matrix()[3]).z;
     }
     return z;
+}
+
+water::WaterBody TerrainComponent::default_water_look() {
+    water::WaterBody look;
+    // A world of one-metre tiles and water a few steps deep: small, short waves, and clear
+    // enough that the beds read through the shallows.
+    look.waves.amplitude = 0.06f;
+    look.waves.wavelength = 3.5f;
+    look.waves.steepness = 0.45f;
+    look.clarity = 2.5f;
+    look.shore_foam_depth = 0.35f;
+    look.edge_fade_depth = 0.1f;
+    look.ripple_strength = 0.3f;
+    look.max_depth = 20.0f;
+    return look;
 }
 
 void TerrainComponent::set_style_piece_source(std::size_t style, TilePiece piece,

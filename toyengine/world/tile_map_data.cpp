@@ -28,7 +28,10 @@ std::atomic<std::uint64_t> g_next_uid{1};
 constexpr std::size_t k_journal_cap = 256;
 
 constexpr char k_magic[4] = {'T', 'T', 'I', 'L'};
-constexpr std::uint32_t k_version = 1;
+/// v2: 16-byte records, `steps` is the ground and water a depth over it. v1 (12-byte records,
+/// water tiles standing at their surface) still loads, converted -- see TileMapData::load().
+constexpr std::uint32_t k_version = 2;
+constexpr std::size_t k_v1_record_bytes = 12;
 
 void put_u32(std::vector<std::uint8_t>& out, std::uint32_t v) {
     for (int i = 0; i < 4; ++i) out.push_back(static_cast<std::uint8_t>(v >> (8 * i)));
@@ -240,17 +243,17 @@ std::vector<std::uint8_t> TileMapData::pack_chunk_(int cx, int cy) const {
     return out;
 }
 
-bool TileMapData::unpack_chunk_(int cx, int cy, const std::vector<std::uint8_t>& blob) {
+bool TileMapData::unpack_chunk_(int cx, int cy, const std::vector<std::uint8_t>& blob, std::size_t record_bytes) {
     int raw_len = 0;
     char* raw = stbi_zlib_decode_malloc(reinterpret_cast<const char*>(blob.data()), static_cast<int>(blob.size()), &raw_len);
     if (raw == nullptr) return false;
     const int s = k_storage_chunk;
     const int x0 = cx * s, y0 = cy * s, x1 = std::min(width_, x0 + s), y1 = std::min(height_, y0 + s);
     const std::size_t n = static_cast<std::size_t>(x1 - x0) * static_cast<std::size_t>(y1 - y0);
-    bool ok = static_cast<std::size_t>(raw_len) == n * sizeof(TileRecord);
+    bool ok = static_cast<std::size_t>(raw_len) == n * record_bytes;
     if (ok) {
         const auto* bytes = reinterpret_cast<const std::uint8_t*>(raw);
-        for (int field = 0; field < static_cast<int>(sizeof(TileRecord)); ++field) {
+        for (int field = 0; field < static_cast<int>(record_bytes); ++field) {
             std::size_t i = 0;
             for (int y = y0; y < y1; ++y) {
                 for (int x = x0; x < x1; ++x, ++i) {
@@ -307,9 +310,11 @@ bool TileMapData::load(const std::string& path) {
     const std::vector<std::uint8_t> file((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     if (file.size() < 28 || std::memcmp(file.data(), k_magic, 4) != 0) return false;
     const std::uint8_t* p = file.data() + 4;
-    if (get_u32(p) != k_version) return false;
+    const std::uint32_t version = get_u32(p);
+    if (version != k_version && version != 1) return false;
+    const std::size_t record_bytes = version == 1 ? k_v1_record_bytes : sizeof(TileRecord);
     const int w = static_cast<int>(get_u32(p + 4)), h = static_cast<int>(get_u32(p + 8));
-    if (get_u32(p + 12) != static_cast<std::uint32_t>(k_storage_chunk) || get_u32(p + 16) != sizeof(TileRecord)) return false;
+    if (get_u32(p + 12) != static_cast<std::uint32_t>(k_storage_chunk) || get_u32(p + 16) != record_bytes) return false;
     const std::uint32_t count = get_u32(p + 20);
     if (w <= 0 || h <= 0 || w > 65536 || h > 65536) return false;
     const std::size_t table = 28, data_start = table + static_cast<std::size_t>(count) * 8;
@@ -328,7 +333,27 @@ bool TileMapData::load(const std::string& path) {
         loaded.compressed_[i].assign(file.begin() + static_cast<std::ptrdiff_t>(data_start + off),
                                      file.begin() + static_cast<std::ptrdiff_t>(data_start + off + size));
         const int cx = static_cast<int>(i) % loaded.chunks_x_(), cy = static_cast<int>(i) / loaded.chunks_x_();
-        if (!loaded.unpack_chunk_(cx, cy, loaded.compressed_[i])) return false;
+        if (!loaded.unpack_chunk_(cx, cy, loaded.compressed_[i], record_bytes)) return false;
+    }
+    const bool converted = version == 1;
+    if (converted) {
+        // v1 stood a water tile at its surface, with the bed `water_depth` below, and drew it as
+        // blocks of the Water kind. Now the ground is the bed and the water a depth over it; a
+        // bed is sand. The old blocks are re-packed on the next save.
+        for (TileRecord& r : loaded.records_) {
+            if (!r.has(TileRecord::Water)) {
+                r.water_depth = 0;
+                continue;
+            }
+            const int surface = r.steps;
+            const int depth = std::max<int>(1, r.water_depth);
+            r.steps = static_cast<std::int16_t>(std::max(0, surface - depth));
+            r.set_water(surface, r.has(TileRecord::Ocean));
+            r.set_top_kind(TileKind::Sand);
+            r.set_side_kind(TileKind::Sand);
+        }
+        for (auto& blob : loaded.compressed_) blob.clear();
+        std::fill(loaded.chunk_dirty_.begin(), loaded.chunk_dirty_.end(), 1);
     }
     width_ = w;
     height_ = h;
@@ -336,7 +361,7 @@ bool TileMapData::load(const std::string& path) {
     compressed_ = std::move(loaded.compressed_);
     chunk_dirty_ = std::move(loaded.chunk_dirty_);
     mark_all_dirty();
-    unsaved_ = false;
+    unsaved_ = converted;
     needs_bake_ = false;
     return true;
 }

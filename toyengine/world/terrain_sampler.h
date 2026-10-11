@@ -46,8 +46,10 @@
 #include <coopa/maps/map_config.h>
 #include <coopa/maps/map_data.h>
 #include <coopa/maps/noise.h>
+#include <coopa/maps/water_field.h>
 
 #include <toyengine/world/tile_map_data.h>
+#include <toyengine/world/tile_water.h>
 #include <toyengine/world/tile_types.h>
 
 namespace toy {
@@ -79,7 +81,7 @@ struct TerrainParams {
     float height_step = 1.0f;
 
     /** @brief World height of the full `[0, 1]` elevation range -- the vertical scale of the world. */
-    float height_scale = 10.0f;
+    float height_scale = 16.0f;
 
     /** @brief Tiles per chunk edge; a chunk is `chunk_size * chunk_size` columns. */
     std::int32_t chunk_size = 16;
@@ -105,6 +107,23 @@ struct TerrainParams {
 
     /** @brief Steps of `side_kind` under a top face before a wall switches to bare Stone. */
     std::int32_t soil_depth_steps = 3;
+
+    /**
+     * @brief How far the water surface sits under the top of the terrace it fills, in steps.
+     *
+     * Water fills a column to a whole terrace (TileRecord::water_level()), and its banks stand
+     * at least that high; drawn exactly at the terrace top, the surface would lie flush with
+     * every bank top and fight it. Half a step puts the shoreline halfway down the bank's wall,
+     * where whatever shape the tile set gives that wall -- rounded, square -- is the shoreline.
+     */
+    float water_inset = 0.5f;
+
+    /**
+     * @brief The same for rivers, in steps. A river runs in a channel one tile wide, its banks
+     *        the terrace it fills to; at the sea's half step it reads as sunk in a trench, so it
+     *        sits higher, just under the bank tops.
+     */
+    float river_inset = 0.2f;
 
     /** @brief World-space size of one chunk edge. */
     float chunk_world_size() const {
@@ -164,6 +183,9 @@ public:
         // Cut last, and indexed per cell, so a river bed survives the fractal displacement
         // rather than being filled back in by it -- see MapGraph::elevation_at()'s doc.
         channels_ = coopa::maps::make_river_channels(graph_, config_, detail_);
+        // mapcoopa's own answer to "where is the water, and how high" -- seas and lakes at their
+        // levels, rivers at their banked surfaces. Nothing about the water is decided here.
+        water_ = std::make_unique<coopa::maps::WaterField>(graph_, config_, detail_, channels_);
 
         build_site_index_();
         built_ = !graph_.centers.empty();
@@ -236,17 +258,26 @@ public:
         return sample_record(tile_x, tile_y).column();
     }
 
+    /** @brief mapcoopa's water at a tile's centre -- the continuous answer the bake rounds. */
+    coopa::maps::WaterSample water_at(std::int32_t tile_x, std::int32_t tile_y) const {
+        const double per_unit = static_cast<double>(params_.tiles_per_grid_unit);
+        const double gx = (static_cast<double>(tile_x) + 0.5) / per_unit;
+        const double gy = (static_cast<double>(tile_y) + 0.5) / per_unit;
+        return water_->at(cell_at(gx, gy), gx, gy, k_river_min_half_tiles / per_unit);
+    }
+
     /**
-     * @brief Samples everything a baked tile stores (tile_map_data.h's TileRecord).
+     * @brief Samples everything a baked tile stores (tile_map_data.h's TileRecord), before the
+     *        bake's rounding pass.
      *
      * Sampled at the tile's CENTRE, not its corner, so a column's material and height describe
      * the ground it actually covers; sampling at the corner would bias every column toward its
      * lower-left neighbour and shift the whole world half a tile.
      *
-     * Water is a surface, not a landform: a lake or sea column stands at its water's surface
-     * (each lake its own level, the sea at sea level), with the depth to its bed kept in
-     * `water_depth` -- which is what makes a coast read as a coast instead of as a hole, and lets
-     * a drained lake find its floor again.
+     * `steps` is the ground rounded to the nearest step. Under water (mapcoopa's WaterField says
+     * where, and how high) the record is flooded to the water's terrace; a frozen lake is ground
+     * of ice at that terrace instead. bake() then reconciles each tile with its neighbours --
+     * a lone tile cannot know that the water beside it needs a bank.
      */
     TileRecord sample_record(std::int32_t tile_x, std::int32_t tile_y) const {
         TileRecord r;
@@ -262,41 +293,53 @@ public:
         r.moisture    = TileRecord::quantise01(cell.moisture);
         r.region      = cell.region >= 0 && cell.region < 0xFFFF ? static_cast<std::uint16_t>(cell.region) : TileRecord::k_no_id;
         r.country     = cell.country >= 0 && cell.country < 0xFFFF ? static_cast<std::uint16_t>(cell.country) : TileRecord::k_no_id;
-        r.set(TileRecord::Ocean, cell.ocean);
         r.set(TileRecord::Coast, cell.coast);
+        r.set(TileRecord::River, graph_.channel_cut(cell, gx, gy, channels_) > 0.0);
 
-        if (cell.water) {
-            const double level = (cell.ocean || cell.water_level <= 0.0) ? config_.sea_level : cell.water_level;
-            const TileKind kind = cell.biome == coopa::maps::Biome::Ice ? TileKind::Ice : TileKind::Water;
-            const std::int32_t surface = steps_from_elevation_(level);
-            r.steps = static_cast<std::int16_t>(std::min<std::int32_t>(surface, 32767));
-            r.water_depth = static_cast<std::uint8_t>(std::clamp(surface - steps_from_elevation_(cell.elevation), 0, 255));
-            r.set_top_kind(kind);
-            r.set_side_kind(kind);
-            r.set(TileRecord::Water, true);
-            return r;
+        // A river narrower than a tile would land on a tile centre only here and there -- a dotted
+        // line of pits. Asked at the grid's own resolution, mapcoopa widens it to a continuous run.
+        const coopa::maps::WaterSample water = water_->at(cell, gx, gy, k_river_min_half_tiles / per_unit);
+        r.steps = static_cast<std::int16_t>(std::min<std::int32_t>(steps_from_elevation_(water.ground), 32767));
+        TileKind top = tile_kind_for_biome(cell.biome);
+        if (water.wet()) {
+            const std::int32_t level = std::max(1, steps_from_elevation_(water.surface));
+            if (cell.biome == coopa::maps::Biome::Ice && water.kind != coopa::maps::WaterKind::River) {
+                // Frozen: solid ice at the water's terrace.
+                r.steps = static_cast<std::int16_t>(level);
+                r.set_top_kind(TileKind::Ice);
+                r.set_side_kind(TileKind::Ice);
+                return r;
+            }
+            const bool flowing = water.kind == coopa::maps::WaterKind::River;
+            if (flowing) r.set(TileRecord::River, true);
+            // The bed rounds down: at least a step under the water, however shallow mapcoopa's.
+            r.steps = static_cast<std::int16_t>(std::min<std::int32_t>(r.steps, level - 1));
+            r.set_water(level, water.kind == coopa::maps::WaterKind::Sea, flowing);
+            if (flowing) r.flow = flow_octant(water.flow.x, water.flow.y);
+            top = TileKind::Sand;
         }
-
-        // The full surface -- control mesh, then fractal detail, then the river channel cut.
-        const double elevation = graph_.elevation_at(cell, gx, gy, detail_, channels_);
-        const std::int32_t steps = steps_from_elevation_(elevation);
-        r.steps = static_cast<std::int16_t>(std::min<std::int32_t>(steps, 32767));
-        // A river cuts its channel below the surface it would otherwise have.
-        if (!channels_.segments.empty() && steps < steps_from_elevation_(graph_.elevation_at(cell, gx, gy, detail_))) {
-            r.set(TileRecord::River, true);
-        }
-        const TileKind top = tile_kind_for_biome(cell.biome);
         r.set_top_kind(top);
         r.set_side_kind(side_kind_for(top));
         return r;
     }
 
-    /** @brief Fills `out` (resized to the whole world) with sample_record() for every tile. */
+    /**
+     * @brief Fills `out` (resized to the whole world) with every tile, then reconciles the
+     *        rounding so water never stands above dry ground.
+     *
+     * mapcoopa's water already never stands over its own ground; rounding both to whole steps
+     * independently could still put a bank a step under the terrace beside it. So the rounding
+     * gives way on the GROUND's side, never the water's:
+     *
+     * - a dry tile beside water rounds UP to at least that water's terrace -- the bank;
+     * - a flooded tile's bed rounds DOWN to at least one step under its terrace -- the bed.
+     */
     void bake(TileMapData& out) const {
         const std::int32_t n = tiles_per_axis();
         out.resize(n, n);
         for (std::int32_t y = 0; y < n; ++y)
             for (std::int32_t x = 0; x < n; ++x) out.at(x, y) = sample_record(x, y);
+        settle_water_rounding(out, IRect{0, 0, n, n});   // tile_water.h
     }
 
     /**
@@ -311,8 +354,8 @@ public:
      */
     static TileKind tile_kind_for_biome(coopa::maps::Biome biome) {
         static const std::array<TileKind, coopa::maps::k_biome_count> table = {
-            TileKind::Water, // Ocean
-            TileKind::Water, // Lake
+            TileKind::Sand,  // Ocean (a shore or sea bed: the water itself is drawn over it)
+            TileKind::Sand,  // Lake
             TileKind::Moss,  // Marsh
             TileKind::Ice,   // Ice
             TileKind::Sand,  // Beach
@@ -375,6 +418,9 @@ public:
     }
 
 private:
+    /** @brief Half-width rivers are sampled at, at the least, in tiles: a 4-connected run of tiles. */
+    static constexpr double k_river_min_half_tiles = 0.75;
+
     /** @brief Bucket edge in grid units. One grid unit is the nominal site spacing. */
     static constexpr double k_bucket_size = 1.0;
 
@@ -470,6 +516,7 @@ private:
     std::unique_ptr<coopa::maps::Noise> noise_;    /**< Borrowed by detail_; hence the unique_ptr. */
     coopa::maps::TerrainDetail          detail_;   /**< Fractal displacement over the control mesh. */
     coopa::maps::RiverChannels          channels_; /**< River beds cut after the displacement. */
+    std::unique_ptr<coopa::maps::WaterField> water_; /**< Borrows graph_, detail_, channels_. */
 
     std::vector<std::vector<std::int32_t>> buckets_;  /**< Site indices, bucketed by position. */
     double       origin_x_ = 0.0;

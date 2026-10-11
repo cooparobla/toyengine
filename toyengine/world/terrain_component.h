@@ -6,8 +6,8 @@
  *
  * One of these on a SceneObject turns that object into the root of a streamed tile world. The
  * world is STORED (`tiles`, a TileMapData in a `.tiles` file): mapcoopa bakes it once from the
- * generator keys below (seed, shape, sea level...), and from then on it is edited -- in the
- * editor's Tile Mode, or by gameplay -- and the generator keys only matter on a Regenerate. It
+ * `generator:` settings, and from then on it is edited -- in the editor's Tile Mode, or by
+ * gameplay -- and the generator only matters on a Regenerate. It
  * carries no per-frame logic of its own -- toy::world::TerrainSystem owns that (see
  * terrain_system.h for why the policy lives in a system rather than in update()). What lives
  * here is everything a scene author writes, plus the long-lived state that outlives any one
@@ -19,10 +19,10 @@
  *   tile_set: objects/terrain/tileset_round    # THE template: tileset_voxel for blocks
  *   tiles: terrain/terrain.tiles               # the stored tiles (default terrain/<object>.tiles)
  *   kind_tile_sets: { stone: objects/terrain/tileset_rock }   # optional, per surface kind
- *   seed: 251
- *   grid_size: 64
+ *   generator: { seed: 7, sea_level: 0.3 }    # mapcoopa keys; the rest is mapcoopa's standard map
  *   tiles_per_grid_unit: 4
- *   height_scale: 10.0
+ *   height_scale: 16.0
+ *   water: { clarity: 2.0, foam_amount: 0.8 } # WaterBody keys for the sea, lakes and rivers
  *   chunk_size: 32
  *   view_radius: 2
  *   collision: true
@@ -52,11 +52,13 @@
 #include <vector>
 
 #include <coopa/maps/map_generator.h>
+#include <coopa/maps/map_presets.h>
 
 #include <gfxcoopa/engine/components/mesh_renderer.h>
 
 #include <toyengine/world/terrain_chunk.h>
 #include <toyengine/world/tile_map_data.h>
+#include <toyengine/water/water_body.h>
 
 namespace toy {
 namespace world {
@@ -94,7 +96,8 @@ struct TerrainChunk {
     /** @brief The GPU mesh, kept alive here (an AssetHandle only ever hands out a const Mesh*). */
     std::shared_ptr<coopa::gfx::engine::data::Mesh> mesh;
 
-    /** @brief The SceneObject carrying this chunk's Transform + MeshRenderer (+ MeshCollider); null until Live. */
+    /** @brief The SceneObject carrying this chunk's Transform + MeshRenderer (+ MeshCollider), and its water
+     *         children; null until Live. */
     coopa::scene::SceneObject* object = nullptr;
 
     /**
@@ -145,45 +148,16 @@ public:
     /** @brief How the generated world is cut into tiles and chunks. */
     TerrainParams params;
 
-    /** @brief Master seed; the same seed always regenerates the same world. */
-    int seed = 251;
-
-    /** @brief Map cells per axis. The world is `grid_size * tiles_per_grid_unit` tiles square. */
-    int grid_size = 64;
-
-    /** @brief Waterline, as a fraction of the elevation range. Land occupies `[sea_level, 1]`. */
-    double sea_level = 0.28;
-
-    /** @brief Fractal displacement amplitude over the control mesh; 0 leaves the terrain faceted. */
-    double terrain_roughness = 0.0;
-
-    /** @brief River sources to attempt. Rivers cut visible channels into the tiled surface. */
-    int river_count = 25;
-
-    // --- The landmass outline (mapcoopa ShapeConfig) ---
-    // Distances are mapcoopa's physical metres (against its 60 m grid unit by default), NOT
-    // world units: they shape the map, and `height_scale`/`tile_size` then size the tiles.
-
-    /** @brief `rectangle` (fills the canvas), `circle`, `triangle`, `continent` or `archipelago`. */
-    std::string shape = "circle";
-
-    /** @brief Archipelago only: landmasses to place. */
-    int continent_count = 4;
-
-    /** @brief Continent/archipelago: mean landmass diameter in metres; 0 sizes it to the canvas. */
-    double continent_size_m = 0.0;
-
-    /** @brief How far a landmass outline wanders from a circle, `[0, 0.6]`. */
-    double irregularity = 0.35;
-
-    /** @brief Fine coastline noise amplitude. */
-    double coast_detail = 0.12;
-
     /**
-     * @brief Added to the whole map's temperature, roughly `[-0.5, 0.5]`: negative cools hot
-     *        deserts and savanna toward temperate grassland and forest.
+     * @brief The mapcoopa settings a bake generates the world with -- AUTHORED values (see
+     *        coopa::maps::derived_config(), applied at bake time).
+     *
+     * Starts as coopa::maps::standard_config(), the map a bare `mapcoopa` run makes, and the
+     * scene's `generator:` block holds mapcoopa's own config keys for whatever differs
+     * (map_yaml.h's names; older scenes' flat keys -- `seed`, `shape`, `sea_level`... -- still
+     * load into it). Only a bake reads it: the tiles are the world from then on.
      */
-    double temperature_offset = 0.0;
+    coopa::maps::MapConfig generator = coopa::maps::standard_config();
 
     // --- The tile set: the template every column is built from (see tile_topology.h) ---
 
@@ -229,6 +203,16 @@ public:
 
     /** @brief Material every chunk's MeshRenderer is given; the atlas lives here. */
     coopa::gfx::engine::components::PBRMaterial material;
+
+    /**
+     * @brief How the terrain's water looks and behaves -- the `water:` block, the same keys as a
+     *        WaterBody (waves, foam, clarity, flow...). Every chunk's water surfaces copy it
+     *        (water::copy_water_settings()); rivers take it with calmer waves.
+     */
+    water::WaterBody water_look = default_water_look();
+
+    /** @brief The terrain's stock water look: small waves for a world of one-metre tiles. */
+    static water::WaterBody default_water_look();
 
     /**
      * @brief Chunk meshing jobs submitted per frame.
@@ -289,7 +273,7 @@ public:
     bool tile_at(const glm::vec3& world, glm::ivec2& tile) const;
     /** @brief The stored record under a world position (biome, temperature...), or null. */
     const TileRecord* record_at(const glm::vec3& world) const;
-    /** @brief World height of the column top under a world position (the water surface on water). */
+    /** @brief World height of the ground under a world position (the bed, under water). */
     float height_at(const glm::vec3& world) const;
 
     /** @brief The tile revision TerrainSystem has applied to the chunk table. */

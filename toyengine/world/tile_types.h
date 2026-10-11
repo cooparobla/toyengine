@@ -19,6 +19,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -94,8 +95,37 @@ struct TileColumn {
     std::int32_t steps     = 0;                 /**< @brief Height in whole tile steps above z = 0. */
     TileKind     top_kind  = TileKind::Grass;   /**< @brief Surface of the top face. */
     TileKind     side_kind = TileKind::Dirt;    /**< @brief Surface of the lateral faces just under the top. */
-    bool         water     = false;             /**< @brief This column is ocean, lake or river surface. */
+    /** @brief The terrace the water over this column fills to, in steps; 0 when dry. */
+    std::int32_t water_level = 0;
+    /** @brief What the water is: 0 dry, 1 still (sea or lake), 2 flowing (river). */
+    std::uint8_t water = 0;
+    /** @brief Flowing water's downstream direction: an octant 1..8 (k_flow_directions), 0 none. */
+    std::uint8_t flow = 0;
 };
+
+/** @brief TileColumn::water values. */
+inline constexpr std::uint8_t k_water_none = 0;
+inline constexpr std::uint8_t k_water_still = 1;
+inline constexpr std::uint8_t k_water_flowing = 2;
+
+/** @brief The eight downstream directions TileColumn::flow / TileRecord::flow name, 1-based. */
+inline constexpr std::array<std::array<int, 2>, 8> k_flow_directions = {{
+    {1, 0}, {1, 1}, {0, 1}, {-1, 1}, {-1, 0}, {-1, -1}, {0, -1}, {1, -1}}};
+
+/** @brief The direction a flow octant (1..8) names; zero for 0. */
+inline glm::vec2 flow_direction(std::uint8_t octant) {
+    if (octant < 1 || octant > 8) return glm::vec2(0.0f);
+    const auto& d = k_flow_directions[octant - 1];
+    return glm::normalize(glm::vec2(static_cast<float>(d[0]), static_cast<float>(d[1])));
+}
+
+/** @brief The flow octant (1..8) nearest a direction; 0 for a zero vector. */
+inline std::uint8_t flow_octant(double dx, double dy) {
+    if (dx == 0.0 && dy == 0.0) return 0;
+    const double turns = std::atan2(dy, dx) / (2.0 * 3.14159265358979323846);
+    const int octant = static_cast<int>(std::lround(turns * 8.0)) & 7;
+    return static_cast<std::uint8_t>(octant + 1);
+}
 
 /**
  * @struct ChunkCoord

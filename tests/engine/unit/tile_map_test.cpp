@@ -1,9 +1,11 @@
 /**
  * @file tile_map_test.cpp
- * @brief A TileTerrain's stored tiles (toyengine/world/tile_map_data.h): the 12-byte record,
- *        the `.tiles` file round trip (including a resave after an edit), the change journal
- *        consumers re-mesh from, the column raycast the editor hovers with, and the bake from a
- *        generated mapcoopa world (climate fields, water surfaces and depths, river flags).
+ * @brief A TileTerrain's stored tiles (toyengine/world/tile_map_data.h): the 16-byte record,
+ *        the `.tiles` file round trip (including a resave after an edit, and a v1 file's
+ *        conversion), the change journal consumers re-mesh from, the column raycast the editor
+ *        hovers with, the bake from a generated mapcoopa world (climate fields, water that never
+ *        stands over dry ground, river flags), water editing (tile_water.h), and the
+ *        `generator:` block (terrain_generator.h).
  */
 
 #include <coopa/testing/test.h>
@@ -18,6 +20,12 @@
 #include <coopa/maps/map_generator.h>
 #include <toyengine/world/terrain_sampler.h>
 #include <toyengine/world/tile_map_data.h>
+#include <toyengine/world/tile_water.h>
+#include <toyengine/world/terrain_generator.h>
+#include <coopa/maps/map_presets.h>
+#include <coopa/maps/map_yaml.h>
+#include <cstdlib>
+#include <fstream>
 
 #include "engine/support/checks.h"
 #include "engine/support/terrain_fixtures.h"
@@ -29,6 +37,9 @@ using toy::world::IRect;
 using toy::world::TileKind;
 using toy::world::TileMapData;
 using toy::world::TileRecord;
+
+// Defined (with C linkage) by the stb_image_write implementation gfxcoopa compiles once.
+extern "C" unsigned char* stbi_zlib_compress(unsigned char* data, int data_len, int* out_len, int quality);
 
 namespace {
 
@@ -52,7 +63,7 @@ TileMapData make_grid(int w, int h) {
             r.temperature = static_cast<std::uint8_t>(x * 3);
             r.moisture = static_cast<std::uint8_t>(y * 5);
             r.region = static_cast<std::uint16_t>(x / 16);
-            r.set(TileRecord::Water, (x + y) % 11 == 0);
+            if ((x + y) % 11 == 0) r.set_water(r.steps + 2, (x + y) % 22 == 0);
         }
     }
     return d;
@@ -169,27 +180,139 @@ COOPA_TEST(bake_stores_climate_water_and_rivers) {
     sampler.bake(tiles);
     expect(tiles.width() == 72 && tiles.height() == 72, "the bake covers the whole world");
 
-    int water = 0, deep = 0, rivers = 0, ocean = 0;
+    int water = 0, rivers = 0, ocean = 0, flowing = 0, over = 0, shallow_bed = 0;
     std::set<int> temperatures, biomes;
-    bool columns_match = true;
     for (int y = 0; y < tiles.height(); ++y) {
         for (int x = 0; x < tiles.width(); ++x) {
             const TileRecord& r = tiles.at(x, y);
             temperatures.insert(r.temperature);
             biomes.insert(r.biome);
-            if (r.water()) {
-                ++water;
-                if (r.water_depth > 0) ++deep;
-                if (r.has(TileRecord::Ocean)) ++ocean;
-            }
             if (r.has(TileRecord::River)) ++rivers;
-            const TileColumn a = r.column(), b = sampler.sample(x, y);
-            columns_match = columns_match && a.steps == b.steps && a.top_kind == b.top_kind && a.water == b.water;
+            if (!r.water()) continue;
+            ++water;
+            if (r.has(TileRecord::Ocean)) ++ocean;
+            if (r.has(TileRecord::Flowing)) ++flowing;
+            if (r.water_level() - r.steps < 1) ++shallow_bed;
+            // No dry tile beside water stands lower than that water's terrace.
+            for (int dy = -1; dy <= 1; ++dy)
+                for (int dx = -1; dx <= 1; ++dx)
+                    if (tiles.contains(x + dx, y + dy) && !tiles.at(x + dx, y + dy).water() &&
+                        tiles.at(x + dx, y + dy).steps < r.water_level())
+                        ++over;
         }
     }
-    expect(columns_match, "the stored columns are exactly what the sampler builds");
     expect(water > 0 && ocean > 0, "the bake keeps water, and knows the ocean from lakes");
-    expect(deep > 0, "water remembers the depth to its bed");
+    expect(flowing > 0, "rivers carry water of their own (" + std::to_string(flowing) + " tiles)");
+    expect(over == 0, "no dry tile stands below the water beside it (" + std::to_string(over) + " do)");
+    expect(shallow_bed == 0, "every bed is at least a step under its water");
     expect(rivers > 0, "river channels are flagged");
     expect(temperatures.size() > 10 && biomes.size() > 3, "temperature and biome are stored per tile, and vary");
+}
+
+COOPA_TEST(a_v1_file_loads_as_ground_and_water) {
+    // A v1 file: 12-byte records, a water tile standing at its surface with the bed below.
+    TileMapData d;
+    d.resize(3, 2);
+    d.at(1, 0).steps = 6;
+    d.at(1, 0).set_water(9, true);   // ground 6, water to 9
+    d.at(2, 1).steps = 4;
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "toy_tile_map_v1";
+    std::filesystem::create_directories(dir);
+    const std::string v2 = (dir / "v2.tiles").string(), v1 = (dir / "v1.tiles").string();
+    expect(d.save(v2), "saves");
+    // Hand-write the v1 form of the same grid: version 1, record size 12, water at its surface.
+    {
+        TileMapData old;
+        old.resize(3, 2);
+        old.at(1, 0) = d.at(1, 0);
+        old.at(1, 0).steps = 9;          // v1: the column stood at the surface
+        old.at(1, 0).water_depth = 3;    // ...with the bed 3 below
+        old.at(2, 1).steps = 4;
+        std::vector<std::uint8_t> raw;
+        for (int field = 0; field < 12; ++field)
+            for (int y = 0; y < 2; ++y)
+                for (int x = 0; x < 3; ++x) raw.push_back(reinterpret_cast<const std::uint8_t*>(&old.at(x, y))[field]);
+        int len = 0;
+        unsigned char* z = stbi_zlib_compress(raw.data(), static_cast<int>(raw.size()), &len, 8);
+        std::vector<std::uint8_t> file = {'T', 'T', 'I', 'L'};
+        auto u32 = [&](std::uint32_t v) { for (int i = 0; i < 4; ++i) file.push_back(static_cast<std::uint8_t>(v >> (8 * i))); };
+        u32(1); u32(3); u32(2); u32(32); u32(12); u32(1); u32(0); u32(static_cast<std::uint32_t>(len));
+        file.insert(file.end(), z, z + len);
+        std::free(z);
+        std::ofstream out(v1, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(file.data()), static_cast<std::streamsize>(file.size()));
+    }
+    TileMapData loaded;
+    expect(loaded.load(v1), "a v1 file loads");
+    const TileRecord& w = loaded.at(1, 0);
+    expect(w.steps == 6 && w.water_level() == 9 && w.water() && w.has(TileRecord::Ocean),
+           "its water tile becomes a bed under water to the same surface");
+    expect(w.top_kind() == TileKind::Sand, "...with a sand bed");
+    expect(loaded.at(2, 1).steps == 4 && !loaded.at(2, 1).water(), "land stays land");
+    expect(loaded.dirty_on_disk(), "a converted file is unsaved until written as v2");
+    std::filesystem::remove_all(dir);
+}
+
+COOPA_TEST(water_floods_settles_and_drains) {
+    using namespace toy::world;
+    // A basin: ground 5 all round, a pit of 2 in the middle 3 x 3, one notch of 3 leading east.
+    TileMapData d;
+    d.resize(9, 9);
+    for (int y = 0; y < 9; ++y)
+        for (int x = 0; x < 9; ++x) d.at(x, y).steps = (x >= 3 && x <= 5 && y >= 3 && y <= 5) ? 2 : 5;
+    d.at(6, 4).steps = 3;
+    const IRect flooded = flood_water(d, {{4, 4}}, 4);
+    int wet = 0;
+    for (const TileRecord& r : d.records()) wet += r.water() ? 1 : 0;
+    expect(wet == 10 && d.at(6, 4).water() && d.at(6, 4).water_level() == 4, "a flood fills the basin and its notch, no further");
+    expect(flooded.x0 == 3 && flooded.x1 == 7, "...and reports the rect it changed");
+    // Lower a bank under the water: the water runs into it.
+    d.at(7, 4).steps = 1;
+    d.mark_dirty(IRect{7, 4, 8, 5});
+    settle_water(d, IRect{7, 4, 8, 5});
+    expect(d.at(7, 4).water() && d.at(7, 4).water_level() == 4, "ground dug beside water floods");
+    // Raise a bed through its surface (as the brushes move ground: the water keeps its level).
+    {
+        TileRecord& bed = d.at(4, 4);
+        const int level = bed.water_level();
+        bed.steps = 6;
+        bed.set_water(level);
+    }
+    settle_water(d, IRect{4, 4, 5, 5});
+    expect(!d.at(4, 4).water(), "a bed raised through the water is dry land");
+    expect(d.at(3, 4).water() && d.at(5, 4).water(), "...and the water around it stays");
+    drain_water(d, {{3, 3}});
+    wet = 0;
+    for (const TileRecord& r : d.records()) wet += r.water() ? 1 : 0;
+    expect(wet == 0, "drain takes the whole body");
+}
+
+COOPA_TEST(generator_block_holds_only_what_differs) {
+    using namespace toy::world;
+    fkyaml::node comp = fkyaml::node::mapping();
+    expect(generator_node(generator_config_from_node(comp)).get_value<fkyaml::node::mapping_type>().empty(),
+           "no keys: mapcoopa's standard map, and nothing to write");
+    const coopa::maps::MapConfig standard = coopa::maps::standard_config();
+    expect(generator_config_from_node(comp).seed == standard.seed && generator_config_from_node(comp).grid_size == 80,
+           "...which is the mapcoopa tool's own default world");
+
+    comp["seed"] = fkyaml::node(9);
+    comp["shape"] = fkyaml::node(std::string("circle"));
+    comp["sea_level"] = fkyaml::node(0.3);
+    comp["irregularity"] = fkyaml::node(0.4);
+    coopa::maps::MapConfig legacy = generator_config_from_node(comp);
+    expect(legacy.seed == 9 && legacy.shape.shape == coopa::maps::MapShape::Circle && legacy.sea_level == 0.3 &&
+               legacy.shape.irregularity == 0.4,
+           "older scenes' flat keys still load");
+
+    const fkyaml::node block = generator_node(legacy);
+    expect(block.contains("seed") && block.contains("sea_level") && block.contains("shape") && !block.contains("grid_size"),
+           "the block holds the changed keys only");
+    expect(block.at("shape").contains("shape") && !block.at("shape").contains("coast_detail"),
+           "...nested blocks too");
+    fkyaml::node again = fkyaml::node::mapping();
+    again["generator"] = block;
+    const coopa::maps::MapConfig back = generator_config_from_node(again);
+    expect(fkyaml::node::serialize(coopa::maps::config_to_node(back)) == fkyaml::node::serialize(coopa::maps::config_to_node(legacy)),
+           "the block round-trips to the same settings");
 }

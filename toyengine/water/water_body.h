@@ -152,6 +152,13 @@ private:
     mutable WaveSet wave_set_;
 };
 
+/**
+ * @brief Copies everything a scene authors about a body's look and behaviour -- waves, wind
+ *        response, flow, foam, clarity, underwater, density -- but not its geometry, mode or
+ *        baked state. For code that spawns bodies from a template (a TileTerrain's water).
+ */
+void copy_water_settings(const WaterBody& from, WaterBody& to);
+
 } // namespace water
 } // namespace toy
 

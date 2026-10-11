@@ -24,6 +24,10 @@
 #include <physxcoopa/components/mesh_collider.h>
 #include <physxcoopa/system/physics_system.h>
 #include <toyengine/world/terrain_component.h>
+#include <toyengine/water/buoyancy.h>
+#include <toyengine/water/water_body.h>
+#include <physxcoopa/components/box_collider.h>
+#include <physxcoopa/components/rigidbody.h>
 
 #include "engine/support/checks.h"
 #include "engine/support/render_fixture.h"
@@ -73,7 +77,9 @@ COOPA_TEST(chunks_stream_around_the_camera) {
     if (terrain == nullptr) return;
 
     // Shrink the world. 32 cells x 2 tiles = 64 tiles per axis, in 8 chunks of 8 tiles.
-    terrain->grid_size                  = 32;
+    terrain->generator.grid_size        = 32;
+    terrain->generator.shape.shape      = coopa::maps::MapShape::Circle;   // a centred island, as these frame it
+    terrain->generator.shape.diameter_m = 0.0;                             // ...fitted to the map
     terrain->params.tiles_per_grid_unit = 2;
     terrain->params.chunk_size          = 8;
     terrain->params.view_radius         = 1;
@@ -229,7 +235,9 @@ COOPA_TEST(styled_scene_streams_styled_chunks) {
                terrain->kind_styles[static_cast<std::size_t>(toy::world::TileKind::Grass)],
            "smooth terrain: stone and grass are shaped by different styles");
 
-    terrain->grid_size                  = 32;
+    terrain->generator.grid_size        = 32;
+    terrain->generator.shape.shape      = coopa::maps::MapShape::Circle;   // a centred island, as these frame it
+    terrain->generator.shape.diameter_m = 0.0;                             // ...fitted to the map
     terrain->params.tiles_per_grid_unit = 2;
     terrain->params.chunk_size          = 8;
     terrain->params.view_radius         = 1;
@@ -303,7 +311,9 @@ COOPA_TEST(focus_shadow_probe_measures_the_viewed_surface) {
     if (camera == nullptr || camera->scene == nullptr) return;
     auto* terrain = camera->scene->find_first_component<toy::world::TerrainComponent>();
     if (terrain == nullptr) return;
-    terrain->grid_size                  = 32;
+    terrain->generator.grid_size        = 32;
+    terrain->generator.shape.shape      = coopa::maps::MapShape::Circle;   // a centred island, as these frame it
+    terrain->generator.shape.diameter_m = 0.0;                             // ...fitted to the map
     terrain->params.tiles_per_grid_unit = 2;
     terrain->params.chunk_size          = 8;
     terrain->params.view_radius         = 2;
@@ -456,3 +466,114 @@ COOPA_TEST(editing_tiles_remeshes_only_their_chunks) {
     expect(terrain->tiles->at(tx, ty).steps == raised - 5, "regenerate: the edit is replaced by the generated tile");
 }
 
+
+/**
+ * @brief The water over a baked world: it never stands above the dry ground beside it, chunks
+ *        draw it as WaterBody surfaces over sand beds (not as blocks), and a buoyant crate dropped
+ *        into the sea floats at the surface rather than resting on it or sinking to the bed.
+ */
+COOPA_TEST(water_lies_over_the_beds_and_floats_a_crate) {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016");
+    ScopedEnv no_input("NO_INPUT", "1");
+
+    toy::core::Engine engine(make_test_config(voxel_terrain_demo(), 320, 180, 160, 90));
+    auto* camera = coopa::gfx::engine::components::CameraComponent::main();
+    require(camera != nullptr && camera->scene != nullptr, "water: the scene has a main camera");
+    coopa::scene::Scene& scene = *camera->scene;
+    auto* terrain = scene.find_first_component<toy::world::TerrainComponent>();
+    require(terrain != nullptr, "water: the scene carries a TileTerrain");
+    const glm::vec3 centre = shrink_terrain_and_centre(*terrain, scene);
+    tick_until(engine, 900, [&] { return terrain->tiles && !terrain->tiles->empty() && !terrain->baking(); });
+    require(terrain->tiles != nullptr && !terrain->tiles->empty(), "water: the world baked");
+    const toy::world::TileMapData& tiles = *terrain->tiles;
+    const toy::world::TerrainParams& p = terrain->params;
+
+    // The invariant the bake keeps: no dry tile beside water lies under that water's terrace.
+    int wet = 0, over = 0;
+    glm::ivec2 sea{-1};
+    float best = 1e9f;
+    for (int y = 0; y < tiles.height(); ++y) {
+        for (int x = 0; x < tiles.width(); ++x) {
+            const toy::world::TileRecord& r = tiles.at(x, y);
+            if (!r.water()) continue;
+            ++wet;
+            for (int dy = -1; dy <= 1; ++dy)
+                for (int dx = -1; dx <= 1; ++dx)
+                    if (tiles.contains(x + dx, y + dy) && !tiles.at(x + dx, y + dy).water() &&
+                        tiles.at(x + dx, y + dy).steps < r.water_level())
+                        ++over;
+            // Deep sea nearest the island's middle: where the crate goes.
+            const float d = glm::length(glm::vec2(x + 0.5f, y + 0.5f) * p.tile_size - glm::vec2(centre));
+            if (r.has(toy::world::TileRecord::Ocean) && r.water_depth >= 2 && d < best) {
+                bool open = true;   // with water all round, so the crate cannot ground on a bank
+                for (int dy = -1; dy <= 1 && open; ++dy)
+                    for (int dx = -1; dx <= 1 && open; ++dx)
+                        open = tiles.contains(x + dx, y + dy) && tiles.at(x + dx, y + dy).water();
+                if (open) { best = d; sea = {x, y}; }
+            }
+        }
+    }
+    expect(wet > 0, "water: the world has water");
+    expect(over == 0, "water: no dry tile lies under the water beside it (" + std::to_string(over) + ")");
+    if (sea.x < 0 && coopa::test::verbose()) {
+        int deepest = 0, ocean = 0, hist[8] = {0};
+        for (const auto& t : tiles.records()) {
+            deepest = std::max<int>(deepest, t.water_depth);
+            ocean += t.has(toy::world::TileRecord::Ocean) ? 1 : 0;
+            hist[std::min<int>(7, t.water_depth)]++;
+        }
+        std::cout << "    deepest water " << deepest << " steps, ocean " << ocean << ", depth histogram";
+        for (int h : hist) std::cout << " " << h;
+        std::cout << "\n";
+    }
+    require(sea.x >= 0, "water: there is open sea to drop the crate in");
+
+    const toy::world::TileRecord& r = tiles.at(sea.x, sea.y);
+    const float surface = (static_cast<float>(r.water_level()) - p.water_inset) * p.height_step;
+    const float bed = static_cast<float>(r.steps) * p.height_step;
+    const glm::vec3 above((sea.x + 0.5f) * p.tile_size, (sea.y + 0.5f) * p.tile_size, surface);
+    if (auto* marker = scene.find_object("focus_marker")) marker->get_transform()->transform().set_position(above);
+    const toy::world::ChunkCoord chunk = p.chunk_at(above);
+    tick_until(engine, 900, [&] { return chunk_is_live(*terrain, chunk); });
+    tick_frames(engine, 8);
+
+    // The sea is a WaterBody over the chunk's beds, not blocks in its mesh.
+    const auto it = terrain->chunks().find(chunk);
+    require(it != terrain->chunks().end() && it->second.object != nullptr, "water: the sea's chunk is live");
+    toy::water::WaterBody* sea_body = nullptr;
+    for (const auto& child : it->second.object->children()) {
+        if (auto* body = child->get_component<toy::water::WaterBody>(); body && body->mode == toy::water::WaterMode::Planar)
+            sea_body = body;
+    }
+    require(sea_body != nullptr, "water: the chunk carries a still WaterBody");
+    float lo = 1e9f, hi = -1e9f;
+    for (const glm::vec3& v : sea_body->geometry_positions) { lo = std::min(lo, v.z); hi = std::max(hi, v.z); }
+    expect(std::abs(lo - surface) < 0.01f && std::abs(hi - surface) < 0.01f,
+           "water: the sea is one flat surface at its level (" + std::to_string(lo) + ".." + std::to_string(hi) + ")");
+
+    auto* physics = dynamic_cast<coopa::physx::system::PhysicsSystem*>(scene.find_system("Physics"));
+    require(physics != nullptr, "water: the scene has physics");
+    coopa::physx::geometry::Ray ray;
+    ray.origin = glm::vec3(above.x, above.y, surface + 20.0f);
+    ray.direction = glm::vec3(0.0f, 0.0f, -1.0f);
+    ray.max_distance = 100.0f;
+    coopa::physx::system::PhysicsSystem::RaycastHit hit;
+    expect(physics->raycast(ray, hit) && std::abs(hit.point.z - bed) < 0.05f,
+           "water: things collide with the bed, not the water (" + std::to_string(hit.point.z) + ")");
+
+    // A buoyant crate, dropped in from above, floats.
+    auto crate = std::make_unique<coopa::scene::SceneObject>("float_crate");
+    crate->add_component<coopa::scene::TransformComponent>()->transform().set_position(above + glm::vec3(0.0f, 0.0f, 2.0f));
+    crate->add_component<coopa::physx::components::BoxCollider>()->set_size(glm::vec3(0.8f));
+    crate->add_component<coopa::physx::components::RigidbodyComponent>()->mass = 150.0f;
+    crate->add_component<toy::water::Buoyancy>();
+    coopa::scene::SceneObject* raw = crate.get();
+    scene.add_root_object(std::move(crate));
+    scene.adopt(*raw);
+    physics->refresh();
+    tick_frames(engine, 420);
+    const float z = raw->get_transform()->transform().get_world_matrix()[3].z;
+    expect(z > bed + 0.6f && std::abs(z - surface) < 0.6f,
+           "water: the crate floats at the surface (z " + std::to_string(z) + ", surface " + std::to_string(surface) +
+               ", bed " + std::to_string(bed) + ")");
+}

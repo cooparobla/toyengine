@@ -117,12 +117,14 @@ inline bool chunk_is_live(const toy::world::TerrainComponent& terrain, toy::worl
  */
 inline glm::vec3 shrink_terrain_and_centre(toy::world::TerrainComponent& terrain,
                                     coopa::scene::Scene& scene) {
-    terrain.grid_size                  = 48;
+    terrain.generator.grid_size        = 48;
+    terrain.generator.shape.shape      = coopa::maps::MapShape::Circle;   // a centred island
+    terrain.generator.shape.diameter_m = 0.0;                             // ...fitted to the map
     terrain.params.tiles_per_grid_unit = 4;
     terrain.params.chunk_size          = 16;
     terrain.params.view_radius         = 2;
 
-    const float tiles = float(terrain.grid_size * terrain.params.tiles_per_grid_unit);
+    const float tiles = float(terrain.generator.grid_size * terrain.params.tiles_per_grid_unit);
     const glm::vec3 centre(tiles * 0.5f * terrain.params.tile_size,
                            tiles * 0.5f * terrain.params.tile_size, 26.0f);
     if (auto* marker = scene.find_object("focus_marker")) {

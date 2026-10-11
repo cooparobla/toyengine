@@ -72,9 +72,13 @@
     /** @brief scene_undo_() / scene_redo_()'s tile half. */
     void tile_apply_undo_(bool redo);
 
-    /** @brief Applies `edit` to every selected tile, as one undo step (`merge`: a drag's frames join one step). */
+    /**
+     * @brief Applies `edit` to every selected tile, as one undo step (`merge`: a drag's frames
+     *        join one step). With `settle` (the edit moved ground or water), the water then
+     *        re-settles around the selection -- within a margin, so the undo step stays bounded.
+     */
     void tile_edit_selection_(const std::string& label, const std::function<void(toy::world::TileRecord&)>& edit,
-                              const std::string& merge = {});
+                              const std::string& merge = {}, bool settle = false);
 
     /** @brief Asks object `id`'s live terrain (0: the Tile Mode one) to re-bake its world from the generator settings (undoable once it lands). */
     void tile_regenerate_(ObjectId id = 0);

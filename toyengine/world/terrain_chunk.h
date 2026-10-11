@@ -62,6 +62,40 @@ struct ChunkMeshData {
 };
 
 /**
+ * @struct ChunkWaterData
+ * @brief One kind of a chunk's water surface (still or flowing), ready for
+ *        toy::water::WaterBody::set_geometry(): triangle triples, chunk-local.
+ */
+struct ChunkWaterData {
+    std::vector<glm::vec3>     positions;
+    std::vector<glm::vec2>     uvs;      /**< Flowing: `u` runs downstream (water_flow_bake.h). */
+    std::vector<std::uint32_t> indices;
+
+    bool empty() const { return indices.empty(); }
+    void clear() { positions.clear(); uvs.clear(); indices.clear(); }
+};
+
+/**
+ * @brief Builds a chunk's water surfaces from its columns: one quad per flooded tile, at
+ *        `water_inset` (`river_inset` for a river) under the terrace its water fills to, plus a skirt quad under every dry
+ *        tile beside water.
+ *
+ * Each quad corner takes the mean height of the flooded tiles sharing it, so a river stepping
+ * down a terrace becomes a slope and two chunks agree on their shared edge (both read it from
+ * the pad). The skirt reaches under the banks: the bank is solid to at least the water's
+ * terrace, so the skirt is hidden inside it, and the visible shoreline is wherever the flat
+ * surface meets the bank's wall -- the tile set's shape, rounded or square. Still water (sea,
+ * lake) and flowing water (river) are separate meshes, sharing their seam's vertices.
+ *
+ * @param pad     The chunk's columns plus skirt.
+ * @param params  The tiling and `water_inset`.
+ * @param still   Receives the sea and lakes.
+ * @param flowing Receives the rivers.
+ */
+void build_chunk_water(const ColumnPad& pad, const TerrainParams& params, ChunkWaterData& still,
+                       ChunkWaterData& flowing);
+
+/**
  * @brief Samples every column a chunk needs, including its one-tile neighbour skirt, from the
  *        generated map directly (tests; baking goes through TerrainSampler::bake()).
  *
@@ -142,6 +176,8 @@ struct ChunkBuildJob {
     ChunkMeshData          mesh; /**< The output; valid once the job's handle reports complete. */
     /** @brief The chunk's collider surface, when `collision`; null for an empty chunk. */
     std::shared_ptr<const coopa::physx::geometry::TriangleMesh> collision_mesh;
+    ChunkWaterData         water_still;   /**< Output: the sea and lakes over this chunk. */
+    ChunkWaterData         water_flowing; /**< Output: the rivers over this chunk. */
 
     /** @brief The job body. Touches nothing but this object and the borrowed, const library. */
     void run();

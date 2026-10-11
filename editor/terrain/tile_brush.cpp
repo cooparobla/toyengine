@@ -1,5 +1,7 @@
 #include "editor/terrain/tile_brush.h"
 
+#include <toyengine/world/tile_water.h>
+
 #include <algorithm>
 #include <array>
 #include <deque>
@@ -52,46 +54,46 @@ std::int16_t clamp_steps(int v) { return static_cast<std::int16_t>(std::clamp(v,
 } // namespace
 
 IRect tile_raise(TileMapData& d, const IRect& rect, int delta) {
-    return for_tiles(d, rect, [delta](TileRecord& r, int, int) {
-        if (r.water()) {
-            // The surface stays; the bed moves (raising a lake bed to the surface leaves land).
-            const int bed = r.steps - r.water_depth + delta;
-            if (bed >= r.steps) {
-                r.set(TileRecord::Water, false);
-                r.steps = clamp_steps(bed);
-                r.water_depth = 0;
-                r.set_top_kind(TileKind::Sand);
-                r.set_side_kind(TileKind::Sand);
-            } else {
-                r.water_depth = static_cast<std::uint8_t>(std::clamp(r.steps - bed, 0, 255));
-            }
-            return true;
-        }
+    // The ground moves -- under water, the bed -- and the water re-settles to it: a bed raised
+    // through its surface leaves land, ground lowered beside water floods.
+    IRect changed = for_tiles(d, rect, [delta](TileRecord& r, int, int) {
+        const int level = r.water_level();
+        const bool water = r.water(), ocean = r.has(TileRecord::Ocean), flowing = r.has(TileRecord::Flowing);
+        const std::uint8_t flow = r.flow;
         const std::int16_t before = r.steps;
         r.steps = clamp_steps(r.steps + delta);
+        if (water) {
+            r.set_water(level, ocean, flowing);
+            if (flowing) r.flow = flow;
+        }
         return r.steps != before;
     });
+    if (!changed.empty()) changed.include(toy::world::settle_water(d, changed));
+    return changed;
 }
 
 IRect tile_set_height(TileMapData& d, const IRect& rect, int steps) {
-    return for_tiles(d, rect, [steps](TileRecord& r, int, int) {
-        if (r.water()) {
-            const std::uint8_t depth = static_cast<std::uint8_t>(std::clamp(r.steps - steps, 0, 255));
-            if (depth == r.water_depth) return false;
-            r.water_depth = depth;
-            return true;
-        }
+    IRect changed = for_tiles(d, rect, [steps](TileRecord& r, int, int) {
         const std::int16_t v = clamp_steps(steps);
         if (v == r.steps) return false;
+        const int level = r.water_level();
+        const bool water = r.water(), ocean = r.has(TileRecord::Ocean), flowing = r.has(TileRecord::Flowing);
+        const std::uint8_t flow = r.flow;
         r.steps = v;
+        if (water) {
+            r.set_water(level, ocean, flowing);
+            if (flowing) r.flow = flow;
+        }
         return true;
     });
+    if (!changed.empty()) changed.include(toy::world::settle_water(d, changed));
+    return changed;
 }
 
 IRect tile_paint(TileMapData& d, const IRect& rect, TileKind kind, bool side) {
     const TileKind side_kind = toy::world::TerrainSampler::side_kind_for(kind);
+    // Under water too: a bed is ground like any other.
     return for_tiles(d, rect, [kind, side, side_kind](TileRecord& r, int, int) {
-        if (r.water()) return false;   // water keeps its own look: use the Water tool
         const TileRecord before = r;
         r.set_top_kind(kind);
         if (side) r.set_side_kind(side_kind);
@@ -117,34 +119,31 @@ IRect tile_smooth(TileMapData& d, const IRect& rect) {
         }
     }
     std::size_t i = 0;
-    return for_tiles(d, r, [&](TileRecord& t, int, int) {
+    IRect changed = for_tiles(d, r, [&](TileRecord& t, int, int) {
         const std::int16_t v = target[i++];
-        if (t.water() || v == t.steps) return false;
+        if (v == t.steps) return false;
+        const int level = t.water_level();
+        const bool water = t.water(), ocean = t.has(TileRecord::Ocean), flowing = t.has(TileRecord::Flowing);
+        const std::uint8_t flow = t.flow;
         t.steps = v;
+        if (water) {
+            t.set_water(level, ocean, flowing);
+            if (flowing) t.flow = flow;
+        }
         return true;
     });
+    if (!changed.empty()) changed.include(toy::world::settle_water(d, changed));
+    return changed;
 }
 
 IRect tile_water(TileMapData& d, const IRect& rect, int level, bool fill) {
-    return for_tiles(d, rect, [level, fill](TileRecord& r, int, int) {
-        if (fill) {
-            if (r.water() || r.steps >= level) return false;
-            r.water_depth = static_cast<std::uint8_t>(std::clamp(level - r.steps, 0, 255));
-            r.steps = clamp_steps(level);
-            r.set(TileRecord::Water, true);
-            r.set_top_kind(TileKind::Water);
-            r.set_side_kind(TileKind::Water);
-            return true;
-        }
-        if (!r.water()) return false;
-        r.steps = clamp_steps(r.steps - r.water_depth);
-        r.water_depth = 0;
-        r.set(TileRecord::Water, false);
-        r.set(TileRecord::Ocean, false);
-        r.set_top_kind(TileKind::Sand);
-        r.set_side_kind(TileKind::Sand);
-        return true;
-    });
+    const IRect r = rect.clipped(d.width(), d.height());
+    std::vector<glm::ivec2> seeds;
+    for (int y = r.y0; y < r.y1; ++y)
+        for (int x = r.x0; x < r.x1; ++x) seeds.push_back({x, y});
+    // Fill floods the basin the brush is in, to `level`, as far as the ground holds it; drain
+    // takes away the whole body the brush touches.
+    return fill ? toy::world::flood_water(d, seeds, level) : toy::world::drain_water(d, seeds);
 }
 
 // --- selection ---

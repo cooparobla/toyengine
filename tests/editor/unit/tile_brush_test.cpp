@@ -60,15 +60,25 @@ COOPA_TEST(raise_and_lower_move_whole_steps_inside_the_brush_only) {
 }
 
 COOPA_TEST(raise_on_water_moves_its_bed) {
-    auto d = flat(4, 4, 2);
+    auto d = flat(4, 4, 7);   // banks at 7
     TileRecord& lake = d->at(1, 1);
-    lake.steps = 6;
-    lake.water_depth = 3;
-    lake.set(TileRecord::Water, true);
+    lake.steps = 3;
+    lake.set_water(6);        // bed 3, water to 6
     tile_raise(*d, IRect{1, 1, 2, 2}, 1);
-    expect(lake.steps == 6 && lake.water_depth == 2 && lake.water(), "raising a lake raises its bed, not its surface");
+    expect(lake.steps == 4 && lake.water_level() == 6 && lake.water_depth == 2,
+           "raising a lake raises its bed, not its surface");
     tile_raise(*d, IRect{1, 1, 2, 2}, 5);
     expect(!lake.water() && lake.steps == 9, "raising the bed past the surface leaves land");
+}
+
+COOPA_TEST(lowering_beside_water_floods) {
+    auto d = flat(5, 1, 4);
+    d->at(0, 0).steps = 1;
+    d->at(0, 0).set_water(3);
+    const IRect changed = tile_raise(*d, IRect{1, 0, 2, 1}, -3);   // dig the bank beside it down to 1
+    expect(d->at(1, 0).water() && d->at(1, 0).water_level() == 3, "the dug tile floods from the water beside it");
+    expect(changed.x0 == 1 && changed.x1 == 2, "...as part of the same edit");
+    expect(!d->at(2, 0).water(), "and no further than the ground holds it");
 }
 
 COOPA_TEST(set_height_paint_and_smooth) {
@@ -76,11 +86,11 @@ COOPA_TEST(set_height_paint_and_smooth) {
     tile_set_height(*d, IRect{0, 0, 2, 2}, 7);
     expect(count_steps(*d, 7) == 4, "set height levels the brush to the target");
 
-    d->at(5, 5).set(TileRecord::Water, true);
+    d->at(5, 5).set_water(4);
     tile_paint(*d, IRect{4, 4, 7, 7}, TileKind::Sand, true);
     expect(d->at(4, 4).top_kind() == TileKind::Sand && d->at(4, 4).side_kind() == TileKind::Sand,
            "paint sets the top kind and its usual side");
-    expect(d->at(5, 5).top_kind() != TileKind::Sand, "paint leaves water alone");
+    expect(d->at(5, 5).top_kind() == TileKind::Sand && d->at(5, 5).water(), "a bed under water paints like any ground");
 
     auto spike = flat(5, 5, 2);
     spike->at(2, 2).steps = 9;
@@ -89,16 +99,19 @@ COOPA_TEST(set_height_paint_and_smooth) {
     expect(spike->at(1, 1).steps == 2, "...and leaves its level neighbours be");
 }
 
-COOPA_TEST(water_floods_to_a_level_and_drains_to_the_bed) {
+COOPA_TEST(water_floods_its_basin_and_drains_the_body) {
     auto d = flat(6, 6, 2);
     d->at(0, 0).steps = 8;   // high ground stays dry
-    tile_water(*d, IRect{0, 0, 3, 3}, 5, true);
+    for (int y = 0; y < 6; ++y) d->at(4, y).steps = 9;   // a ridge: the basin ends at x = 4
+    const IRect r = tile_water(*d, IRect{0, 0, 2, 2}, 5, true);   // the brush takes in the high tile
     const TileRecord& w = d->at(1, 1);
-    expect(w.water() && w.steps == 5 && w.water_depth == 3 && w.top_kind() == TileKind::Water,
-           "flooding raises the surface to the level and remembers the depth");
+    expect(w.water() && w.steps == 2 && w.water_level() == 5 && w.water_depth == 3,
+           "flooding fills over the ground, which stays the bed");
+    expect(d->at(3, 5).water() && !d->at(5, 5).water(), "the flood runs through the basin, not over the ridge");
+    expect(r.x1 == 4 && r.y1 == 6, "...and reports the whole basin it changed");
     expect(!d->at(0, 0).water(), "ground above the level stays dry");
-    tile_water(*d, IRect{0, 0, 3, 3}, 0, false);
-    expect(!d->at(1, 1).water() && d->at(1, 1).steps == 2, "draining drops back to the bed");
+    tile_water(*d, IRect{2, 2, 3, 3}, 0, false);
+    expect(!d->at(1, 1).water() && d->at(1, 1).steps == 2 && !d->at(3, 5).water(), "draining takes the whole body back to its bed");
 }
 
 COOPA_TEST(selections_rectangles_similar_and_edits) {

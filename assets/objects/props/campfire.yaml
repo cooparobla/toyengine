@@ -73,6 +73,7 @@ object:
           start_size: [0.45, 0.8]
           gravity: -0.25                 # hot air: a gentle upward pull
           drag: 1.2
+          wind_influence: 0.15
           noise_strength: 0.9
           noise_frequency: 1.2
           noise_scroll: 1.6
@@ -138,6 +139,7 @@ object:
           start_size: [0.03, 0.05]
           gravity: -0.15
           drag: 1.1
+          wind_influence: 0.8
           noise_strength: 3.0
           noise_frequency: 1.5
           noise_scroll: 1.0
@@ -176,6 +178,7 @@ object:
           start_color_b: {r: 0.36, g: 0.34, b: 0.32, a: 1.0}
           force: {x: 0.32, y: 0.12, z: 0.2}  # a light breeze, and the column's own buoyancy
           drag: 0.35
+          wind_influence: 0.6                # and the weather's wind bends the column
           noise_strength: 0.3
           noise_frequency: 0.35
           noise_scroll: 0.4

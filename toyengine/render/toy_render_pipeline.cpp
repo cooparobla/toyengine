@@ -333,6 +333,7 @@ bool ToyRenderPipeline::render(coopa::gfx::presentation::Renderer& renderer, coo
     terrain_gpu_->update(surface_state_.terrains);
     for (const auto* gone : terrain_gpu_->released()) material_cache_->release(gone);
     material_cache_->tick();
+    tick_static_instances_();
 
     // One hierarchy walk for every component type this frame's gathers read -- see
     // FrameScene. Everything below reads frame_scene_ instead of walking the scene again.
@@ -2315,9 +2316,12 @@ ToyRenderPipeline::MeshGather ToyRenderPipeline::gather_meshes_(uint32_t frame_s
     const size_t n = out.renderers.size();
     out.multi.assign(n, nullptr);
     out.multi_count.assign(n, 0u);
+    out.own_instances.assign(n, nullptr);
     for (size_t k = 0; k < particle_items.size(); ++k) {
         out.multi[first_particle_item + k]       = particle_items[k]->matrices;
         out.multi_count[first_particle_item + k] = particle_items[k]->count;
+        // Static batches (terrain scatter chunks): a persistent buffer, uploaded once.
+        if (particle_items[k]->static_key != 0) out.own_instances[first_particle_item + k] = static_instances_for_(*particle_items[k]);
     }
     out.world_matrices.assign(n, glm::mat4(1.0f));
     out.prev_world_matrices.assign(n, glm::mat4(1.0f));
@@ -2431,7 +2435,21 @@ ToyRenderPipeline::MeshGather ToyRenderPipeline::gather_meshes_(uint32_t frame_s
         const auto& mesh = *mr->get_mesh();
 
         const bool has_lods = mesh.lods().size() > 1 || mesh.cull_screen_size() > 0.0f;
-        if (auto done = next_lod_state.find(mr); has_lods && mr->lods_enabled && done != next_lod_state.end()) {
+        // Particle batches share one proxy renderer across many batches (a scatter's chunks),
+        // so each picks its own level, without the per-renderer sharing / hysteresis below.
+        if (out.multi[i] && has_lods && mr->lods_enabled) {
+            const WorldBounds& b = out.bounds[i];
+            const glm::vec3 eye = glm::vec3(glm::inverse(view)[3]);
+            const glm::vec3 nearest = glm::clamp(eye, b.center - b.extent, b.center + b.extent);
+            const float scale = out.multi_count[i] > 0 ? glm::length(glm::vec3(out.multi[i][0][0])) : 1.0f;
+            const float radius = 0.5f * glm::length(mesh.bounds_max() - mesh.bounds_min()) * scale;
+            const float size = screen_height_fraction(nearest, radius, view, unjittered_proj) * config_.mesh_lod_bias * mr->lod_bias;
+            thresholds.clear();
+            for (const auto& l : mesh.lods()) thresholds.push_back({l.screen_size});
+            const int level = select_lod(size, thresholds, mesh.cull_screen_size(), -2, 0.1f);
+            if (level < 0) { out.valid[i] = 0; continue; }
+            out.lod[i] = static_cast<uint32_t>(level);
+        } else if (auto done = next_lod_state.find(mr); has_lods && mr->lods_enabled && done != next_lod_state.end()) {
             // Another part of the same renderer chose already: every part shares its LOD.
             if (done->second < 0) { out.valid[i] = 0; continue; }
             out.lod[i] = static_cast<uint32_t>(done->second);
@@ -2504,6 +2522,7 @@ ToyRenderPipeline::MeshGather ToyRenderPipeline::gather_meshes_(uint32_t frame_s
         auto same_batch = [&](uint32_t a, uint32_t b) {
             const MeshBatchKey& ka = keys[a];
             const MeshBatchKey& kb = keys[b];
+            if (out.own_instances[a] || out.own_instances[b]) return false;   // its own buffer: its own batch
             return ka.shader_hash == kb.shader_hash && ka.flags == kb.flags && ka.set == kb.set &&
                    ka.mesh == kb.mesh && ka.part == kb.part && out.lod[a] == out.lod[b] &&
                    out.material(a).shader == out.material(b).shader &&
@@ -2517,6 +2536,14 @@ ToyRenderPipeline::MeshGather ToyRenderPipeline::gather_meshes_(uint32_t frame_s
             MeshBatch batch;
             batch.item           = visible[r];
             batch.lod            = out.lod[visible[r]];
+            if (const auto* own = out.own_instances[visible[r]]) {
+                batch.own_instances  = own;
+                batch.first_instance = 0;
+                batch.instance_count = out.multi_count[visible[r]];
+                list.push_back(batch);
+                r = e;
+                continue;
+            }
             batch.first_instance = instance_stream_.size();
             uint32_t added = 0;
             for (size_t j = r; j < e; ++j) {
@@ -2538,9 +2565,19 @@ ToyRenderPipeline::MeshGather ToyRenderPipeline::gather_meshes_(uint32_t frame_s
     // A BLEND material only casts a shadow at full opacity -- the shadow passes have no
     // per-fragment alpha discard beyond the CUTOUT mask (gfx/surface/shadow_fs.glsl), so a
     // translucent object is binary: caster or not.
+    const glm::vec3 eye = glm::vec3(glm::inverse(view)[3]);
     auto casts = [&](size_t i) {
         const auto& m = out.material(i);
-        return !(m.is_blended() && m.alpha < 1.0f);
+        if (m.is_blended() && m.alpha < 1.0f) return false;
+        const MeshRenderer* mr = out.renderers[i];
+        if (!mr->cast_shadows) return false;
+        if (mr->shadow_max_distance > 0.0f) {
+            // Distance from the eye to the item's box.
+            const WorldBounds& b = out.bounds[i];
+            const glm::vec3 d = glm::max(glm::abs(eye - b.center) - b.extent, glm::vec3(0.0f));
+            if (glm::dot(d, d) > mr->shadow_max_distance * mr->shadow_max_distance) return false;
+        }
+        return true;
     };
     auto opaque = [&](size_t i) { return !out.material(i).is_blended(); };
     auto blended = [&](size_t i) { return out.material(i).is_blended(); };
@@ -2674,6 +2711,7 @@ ToyRenderPipeline::MeshGather ToyRenderPipeline::gather_meshes_(uint32_t frame_s
     }
     frame_stats_ = MeshDrawStats{};
     frame_stats_.renderers = n;
+    frame_stats_.streamed_instances = instance_stream_.size();
     for (const MeshBatch& b : out.gbuffer) frame_stats_.camera_visible += b.instance_count;
     return out;
 }
@@ -3161,9 +3199,17 @@ void ToyRenderPipeline::update_volumetrics_data_(coopa::scene::Scene& scene, con
         // split at unit length. A zero vector (an easy authoring typo) would
         // collapse that decomposition, so fall back to +X.
         const float dir_len = glm::length(vc->direction);
-        const glm::vec3 dir = (dir_len > 1e-5f) ? vc->direction / dir_len
-                                                : glm::vec3(1.0f, 0.0f, 0.0f);
-        gpu.direction_speed = glm::vec4(dir, vc->speed);
+        glm::vec3 dir = (dir_len > 1e-5f) ? vc->direction / dir_len
+                                          : glm::vec3(1.0f, 0.0f, 0.0f);
+        float speed = vc->speed;
+        // The weather's wind joins the authored drift (VolumeComponent::wind_influence).
+        if (vc->wind_influence != 0.0f) {
+            const glm::vec3 drift = dir * speed + surface_state_.wind * vc->wind_influence;
+            const float dl = glm::length(drift);
+            if (dl > 1e-4f) { dir = drift / dl; speed = dl; }
+            else speed = 0.0f;
+        }
+        gpu.direction_speed = glm::vec4(dir, speed);
         gpu.field_params    = glm::vec4(vc->noise_scale, vc->streak,
                                         vc->coverage, vc->detail_gain);
         gpu.shape_params    = glm::vec4(vc->density, vc->height_base, vc->height_falloff,
@@ -4274,7 +4320,12 @@ void ToyRenderPipeline::record_gbuffer_(coopa::gfx::command::CommandBuffer& cmd,
             mesh->bind(cmd);
             last_mesh = mesh;
         }
+        if (batch.own_instances) cmd.bind_vertex_buffer(*batch.own_instances, 0, 1);
         mesh->draw_lod_part(cmd, batch.lod, meshes.part[batch.item], batch.instance_count, batch.first_instance);
+        if (batch.own_instances) {
+            cmd.bind_vertex_buffer(instance_stream_.buffer(), 0, 1);
+            frame_stats_.static_instances += batch.instance_count;
+        }
         frame_stats_.camera_draws     += 1;
         frame_stats_.camera_instances += batch.instance_count;
         frame_stats_.camera_triangles += static_cast<uint64_t>(batch.instance_count) *
@@ -4622,6 +4673,46 @@ bool ToyRenderPipeline::record_transparent_(coopa::gfx::command::CommandBuffer& 
 bool ToyRenderPipeline::ContactShadowKnobs::operator==(const ContactShadowKnobs& o) const {
     return length == o.length && strength == o.strength && thickness == o.thickness
         && steps == o.steps && enabled == o.enabled;
+}
+
+const coopa::gfx::memory::Buffer* ToyRenderPipeline::static_instances_for_(const ParticleMeshBatch& pb) {
+    StaticInstances& e = static_instances_[pb.static_key];
+    e.last_frame = static_frame_;
+    const uint32_t total = std::max(pb.static_total, pb.count);
+    if (e.buffer && e.version == pb.static_version && e.count == total) return e.buffer.get();
+    if (total == 0 || pb.matrices == nullptr) return nullptr;
+    // A changed batch gets a NEW buffer: the old one may still be read by frames in flight.
+    if (e.buffer) static_graveyard_.push_back({static_frame_, std::move(e.buffer)});
+    using coopa::gfx::engine::data::InstanceData;
+    std::vector<InstanceData> data(total);
+    for (uint32_t k = 0; k < total; ++k) {
+        data[k].model = pb.matrices[k];
+        data[k].prev_model = pb.matrices[k];   // static: no motion
+        data[k].snow_anchor = pb.matrices[k];
+    }
+    e.buffer = std::make_unique<coopa::gfx::memory::Buffer>(device_, allocator_, sizeof(InstanceData) * total,
+                                                             coopa::gfx::BufferUsage::Vertex, coopa::gfx::MemoryResidency::CpuToGpu);
+    e.buffer->upload(data.data(), sizeof(InstanceData) * total);
+    e.version = pb.static_version;
+    e.count = total;
+    return e.buffer.get();
+}
+
+void ToyRenderPipeline::tick_static_instances_() {
+    ++static_frame_;
+    constexpr uint64_t k_retire_frames = coopa::gfx::presentation::MAX_FRAMES_IN_FLIGHT + 2;
+    static_graveyard_.erase(std::remove_if(static_graveyard_.begin(), static_graveyard_.end(),
+                                           [&](const auto& g) { return static_frame_ - g.first > k_retire_frames; }),
+                            static_graveyard_.end());
+    // Batches not drawn for a while (out of range, removed): retire their buffers.
+    for (auto it = static_instances_.begin(); it != static_instances_.end();) {
+        if (static_frame_ - it->second.last_frame > 30) {
+            if (it->second.buffer) static_graveyard_.push_back({static_frame_, std::move(it->second.buffer)});
+            it = static_instances_.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 } // namespace render

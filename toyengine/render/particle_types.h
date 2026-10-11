@@ -128,6 +128,14 @@ struct ParticleMeshBatch {
     coopa::gfx::engine::components::MeshRenderer* proxy = nullptr;
     const glm::mat4* matrices = nullptr;
     uint32_t  count = 0;
+    /// Non-zero: the matrices are STATIC (a terrain scatter chunk) and identified by this key.
+    /// The renderer then keeps them in a persistent GPU instance buffer, uploaded only when
+    /// `static_version` changes, instead of copying them into the frame's instance stream for
+    /// every view every frame. `static_total` matrices are uploaded; the first `count` draw (a
+    /// prefix: distance thinning just draws fewer).
+    uint64_t  static_key = 0;
+    uint64_t  static_version = 0;
+    uint32_t  static_total = 0;
     glm::vec3 bounds_min{0.0f};
     glm::vec3 bounds_max{0.0f};
 };

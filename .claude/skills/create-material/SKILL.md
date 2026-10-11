@@ -51,6 +51,7 @@ Names are lowercase snake_case. `.yaml` is appended automatically; a missing fil
 | `snow` | bool / true | `false` opts the material out of the weather's lying-snow cover layer |
 | `texture_color_space` | `{ <path>: srgb \| linear }` | per-file override when two materials disagree |
 | `shader` | name | a registered surface shader (`triplanar`, `foliage`, `snow`, `water`, `terrain`, `terrain_styled`, ...) -- see the create-surface-shader skill |
+| `shader: foliage` params | `[flexibility, frequency, height, up]` | vegetation bending in the weather's wind (World tab): tip sway as a fraction of height at 10 m/s, about 0.4 of that in a light breeze (grass 0.35, bush 0.1, tree canopy 0.04), flutter rad/s, the plant's height in mesh units (sway grows root -> tip), up axis 0 = +Z (nature meshes) / 1 = +Y (a stood-up plane card). Two-sided, back faces keep the up normal |
 | `shader_params` | up to 4 floats | the shader's `gfx_params`; meaning is per shader (documented in its .glsl header) |
 | `shader_params_ext` | up to 8 floats | BLEND surface shaders only (`gfx_params_ext0/1`) |
 | `base` | material path | inline maps only: load that file first, then apply this map on top |

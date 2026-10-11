@@ -14,6 +14,7 @@
 #include <coopa/scene/scene_system.h>
 #include <gfxcoopa/command/command_pool.h>
 #include <gfxcoopa/core/device.h>
+#include <gfxcoopa/engine/components/camera_component.h>
 #include <gfxcoopa/engine/components/mesh_renderer.h>
 #include <gfxcoopa/memory/allocator.h>
 #include <physxcoopa/components/heightfield_collider.h>
@@ -191,13 +192,21 @@ void HeightmapTerrainSystem::tick_(HeightmapTerrain& terrain, coopa::scene::Scen
     }
     rt.slot = slot;
 
-    // 4. Chunks: rebuilt when the shape or patch changed, materials rewritten when what they
-    //    carry changed, boxes refitted where the grid was edited.
-    if (rt.chunks.empty() || rt.built_geometry != data.geometry() || rt.built_patch != terrain.patch_resolution) {
+    // 4. Chunks: reset when the shape or patch changed, streamed by distance, materials rewritten
+    //    when what they carry changed, boxes refitted where the grid was edited.
+    const ChunkSettings cs = resolve_settings(terrain, camera_far_(),
+                                              device_.supports_tessellation() ? static_cast<float>(device_.max_tessellation_level()) : 0.0f);
+    if (rt.chunks.empty() || rt.built_geometry != data.geometry() || rt.built_patch != cs.patch) {
         destroy_chunks_(terrain, rt);
-        build_chunks_(terrain, rt, scene);
+        rt.built_geometry = data.geometry();
+        rt.built_patch = cs.patch;
+        rt.chunk_count = data.geometry().chunk_count();
+        rt.chunks.assign(static_cast<std::size_t>(rt.chunk_count.x) * rt.chunk_count.y, nullptr);
+        rt.live_chunks = 0;
+        rt.bounds_revision = data.revision();
     }
-    write_materials_(terrain, rt);
+    write_materials_(terrain, rt, cs);
+    stream_chunks_(terrain, rt, scene, cs, camera_position_(terrain));
     fit_chunk_boxes_(terrain, rt);
 
     // 5. Collider.
@@ -316,39 +325,90 @@ void HeightmapTerrainSystem::layers_for_(HeightmapTerrain& terrain, HeightmapTer
     rt.normal = make(terrain.layer_normal_paths, false);
 }
 
-void HeightmapTerrainSystem::build_chunks_(HeightmapTerrain& terrain, HeightmapTerrainRuntime& rt, coopa::scene::Scene& scene) {
-    const HeightmapData& data = *terrain.data;
-    rt.built_geometry = data.geometry();
-    rt.built_patch = terrain.patch_resolution;
-    rt.chunk_count = data.geometry().chunk_count();
-    rt.material_signature.clear();
-    rt.bounds_revision = 0;
-    const auto patch = patch_mesh(terrain.patch_resolution);
+HeightmapTerrainSystem::ChunkSettings HeightmapTerrainSystem::resolve_settings(const HeightmapTerrain& t, float camera_far,
+                                                                               float max_tess) {
+    ChunkSettings s;
+    const bool tess = max_tess > 0.0f && t.tessellation.enabled;
+    // Tessellation adds the near detail, so the base patch only has to hold the far shape.
+    s.patch = t.patch_resolution > 0 ? t.patch_resolution : (tess ? 4 : 32);
+    s.view_distance = t.view_distance > 0.0f ? t.view_distance : std::max(camera_far, 1.0f);
+    s.detail_distance = t.tessellation.max_distance > 0.0f ? t.tessellation.max_distance : std::min(s.view_distance, 2000.0f);
+    s.shadow_distance = t.shadow_distance > 0.0f ? t.shadow_distance : (t.view_distance > 0.0f ? s.view_distance : 0.0f);
+    s.max_factor = tess ? std::min(t.tessellation.max_factor, max_tess) : 1.0f;
+    return s;
+}
 
-    rt.chunks.assign(static_cast<std::size_t>(rt.chunk_count.x) * rt.chunk_count.y, nullptr);
-    for (int cy = 0; cy < rt.chunk_count.y; ++cy) {
-        for (int cx = 0; cx < rt.chunk_count.x; ++cx) {
-            auto object = std::make_unique<SceneObject>("terrain_chunk_" + std::to_string(cx) + "_" + std::to_string(cy));
-            object->add_component<toy::scene::RuntimeObject>("HeightmapTerrain", "terrain chunk -- edit the HeightmapTerrain");
-            auto* tc = object->add_component<TransformComponent>();
-            glm::vec3 pos, scale;
-            chunk_box(data, cx, cy, pos, scale);
-            tc->transform().set_position(pos);
-            tc->transform().set_scale(scale);
-            auto* mr = object->add_component<MeshRenderer>();
-            mr->set_mesh(patch);
-            // Probe and GI bakes draw with stock shaders, which would see the flat patch.
-            mr->affects_reflection_probes = false;
-            // The chunk boxes already bound the surface; LOD selection has one level anyway.
-            mr->lods_enabled = false;
-            // add_child() links ownership only: the chunk's transform must follow the terrain's.
-            if (auto* parent = terrain.owner->get_transform()) tc->set_parent_transform(&parent->transform());
-            SceneObject* raw = terrain.owner->add_child(std::move(object));
-            scene.adopt(*raw);
-            rt.chunks[static_cast<std::size_t>(cy) * rt.chunk_count.x + cx] = raw;
+float HeightmapTerrainSystem::chunk_distance(const HeightmapGeometry& g, const glm::vec3& origin, int cx, int cy,
+                                             const glm::vec3& camera) {
+    const glm::vec2 lo = glm::vec2(origin) + glm::vec2(static_cast<float>(cx), static_cast<float>(cy)) * g.chunk_size;
+    const glm::vec2 hi = glm::min(lo + glm::vec2(g.chunk_size), glm::vec2(origin) + g.size);
+    const glm::vec2 p(camera);
+    const glm::vec2 d = glm::max(glm::max(lo - p, p - hi), glm::vec2(0.0f));
+    return glm::length(d);
+}
+
+glm::vec3 HeightmapTerrainSystem::camera_position_(const HeightmapTerrain& terrain) const {
+    if (auto* camera = coopa::gfx::engine::components::CameraComponent::main()) {
+        if (camera->owner != nullptr) {
+            if (auto* tc = camera->owner->get_transform()) return glm::vec3(tc->transform().get_world_matrix()[3]);
         }
     }
-    rt.bounds_revision = data.revision();
+    return terrain.origin() + glm::vec3(terrain.data->geometry().size * 0.5f, 0.0f);
+}
+
+float HeightmapTerrainSystem::camera_far_() const {
+    if (auto* camera = coopa::gfx::engine::components::CameraComponent::main()) return camera->clip_end;
+    return 2000.0f;
+}
+
+void HeightmapTerrainSystem::stream_chunks_(HeightmapTerrain& terrain, HeightmapTerrainRuntime& rt, coopa::scene::Scene& scene,
+                                            const ChunkSettings& s, const glm::vec3& camera) {
+    const HeightmapGeometry& g = terrain.data->geometry();
+    const glm::vec3 origin = terrain.origin();
+    // One chunk of slack before dropping, so a camera on the boundary does not flicker chunks.
+    const float keep = s.view_distance + g.chunk_size;
+    // Spawning is cheap (an object, a transform, a renderer on the shared patch), but a jump
+    // across a huge terrain should spread it over a few frames rather than hitch.
+    int budget = 512;
+    for (int cy = 0; cy < rt.chunk_count.y; ++cy) {
+        for (int cx = 0; cx < rt.chunk_count.x; ++cx) {
+            SceneObject*& slot = rt.chunks[static_cast<std::size_t>(cy) * rt.chunk_count.x + cx];
+            const float d = chunk_distance(g, origin, cx, cy, camera);
+            if (slot == nullptr && d <= s.view_distance && budget > 0) {
+                spawn_chunk_(terrain, rt, scene, s, cx, cy);
+                --budget;
+            } else if (slot != nullptr && d > keep) {
+                terrain.owner->detach_child(slot);
+                slot = nullptr;
+                --rt.live_chunks;
+            }
+        }
+    }
+}
+
+void HeightmapTerrainSystem::spawn_chunk_(HeightmapTerrain& terrain, HeightmapTerrainRuntime& rt, coopa::scene::Scene& scene,
+                                          const ChunkSettings& s, int cx, int cy) {
+    const HeightmapData& data = *terrain.data;
+    auto object = std::make_unique<SceneObject>("terrain_chunk_" + std::to_string(cx) + "_" + std::to_string(cy));
+    object->add_component<toy::scene::RuntimeObject>("HeightmapTerrain", "terrain chunk -- edit the HeightmapTerrain");
+    auto* tc = object->add_component<TransformComponent>();
+    glm::vec3 pos, scale;
+    chunk_box(data, cx, cy, pos, scale);
+    tc->transform().set_position(pos);
+    tc->transform().set_scale(scale);
+    auto* mr = object->add_component<MeshRenderer>();
+    mr->set_mesh(patch_mesh(s.patch));
+    // Probe and GI bakes draw with stock shaders, which would see the flat patch.
+    mr->affects_reflection_probes = false;
+    // Detail comes from tessellation (by screen size), not from mesh LODs.
+    mr->lods_enabled = false;
+    apply_material_(terrain, rt, s, *mr);
+    // add_child() links ownership only: the chunk's transform must follow the terrain's.
+    if (auto* parent = terrain.owner->get_transform()) tc->set_parent_transform(&parent->transform());
+    SceneObject* raw = terrain.owner->add_child(std::move(object));
+    scene.adopt(*raw);
+    rt.chunks[static_cast<std::size_t>(cy) * rt.chunk_count.x + cx] = raw;
+    ++rt.live_chunks;
 }
 
 void HeightmapTerrainSystem::destroy_chunks_(HeightmapTerrain& terrain, HeightmapTerrainRuntime& rt) {
@@ -358,33 +418,38 @@ void HeightmapTerrainSystem::destroy_chunks_(HeightmapTerrain& terrain, Heightma
         }
     }
     rt.chunks.clear();
+    rt.live_chunks = 0;
     rt.material_signature.clear();
 }
 
-void HeightmapTerrainSystem::write_materials_(HeightmapTerrain& terrain, HeightmapTerrainRuntime& rt) {
+void HeightmapTerrainSystem::apply_material_(const HeightmapTerrain& terrain, const HeightmapTerrainRuntime& rt,
+                                             const ChunkSettings& s, MeshRenderer& mr) const {
+    auto& m = mr.material;
+    m.shader = "heightmap_terrain";
+    m.shader_params = glm::vec4(static_cast<float>(rt.slot), 0.0f, 0.0f, 0.0f);
+    m.displacement_handle = rt.gpu->height_handle;
+    m.displacement_scale = 0.0f;   // the shader places vertices itself; no stock displacement
+    m.albedo = glm::vec3(1.0f);
+    // Deep snow is the terrain's snow: the cover layer on top would whiten trenches shut.
+    m.snow = !terrain.deep_snow;
+    mr.tessellation.enabled = terrain.tessellation.enabled && s.max_factor > 1.0f;
+    mr.tessellation.edge_pixels = terrain.tessellation.edge_pixels;
+    mr.tessellation.max_factor = s.max_factor;
+    mr.tessellation.max_distance = s.detail_distance;
+    mr.cast_shadows = terrain.cast_shadows;
+    mr.shadow_max_distance = s.shadow_distance;
+}
+
+void HeightmapTerrainSystem::write_materials_(HeightmapTerrain& terrain, HeightmapTerrainRuntime& rt, const ChunkSettings& s) {
     std::ostringstream sig;
     sig << rt.slot << "|" << rt.gpu->height_id << "|" << terrain.deep_snow << "|" << terrain.tessellation.enabled << "|"
-        << terrain.tessellation.edge_pixels << "|" << terrain.tessellation.max_factor << "|"
-        << terrain.tessellation.max_distance << "|" << terrain.cast_shadows;
+        << terrain.tessellation.edge_pixels << "|" << s.max_factor << "|" << s.detail_distance << "|" << terrain.cast_shadows
+        << "|" << s.shadow_distance;
     if (sig.str() == rt.material_signature) return;
     rt.material_signature = sig.str();
-
     for (SceneObject* c : rt.chunks) {
         if (c == nullptr) continue;
-        auto* mr = c->get_component<MeshRenderer>();
-        if (mr == nullptr) continue;
-        auto& m = mr->material;
-        m.shader = "heightmap_terrain";
-        m.shader_params = glm::vec4(static_cast<float>(rt.slot), 0.0f, 0.0f, 0.0f);
-        m.displacement_handle = rt.gpu->height_handle;
-        m.displacement_scale = 0.0f;   // the shader places vertices itself; no stock displacement
-        m.albedo = glm::vec3(1.0f);
-        // Deep snow is the terrain's snow: the cover layer on top would whiten trenches shut.
-        m.snow = !terrain.deep_snow;
-        mr->tessellation.enabled = terrain.tessellation.enabled;
-        mr->tessellation.edge_pixels = terrain.tessellation.edge_pixels;
-        mr->tessellation.max_factor = terrain.tessellation.max_factor;
-        mr->tessellation.max_distance = terrain.tessellation.max_distance;
+        if (auto* mr = c->get_component<MeshRenderer>()) apply_material_(terrain, rt, s, *mr);
     }
 }
 

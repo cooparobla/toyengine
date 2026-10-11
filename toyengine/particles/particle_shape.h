@@ -138,6 +138,10 @@ struct TerrainScatterShape {
     float jitter = 1.0f;                    ///< 0 = a regular grid, 1 = anywhere in each cell.
     glm::vec2 scale{0.8f, 1.2f};            ///< Random size multiplier range (on start_size).
     float sink = 0.05f;                     ///< Metres pushed into the ground (hides floating bases on slopes).
+    /// Thinning: past this fraction of the draw distance, chunks draw a shrinking share of their
+    /// instances (a stable random subset), reaching none at the draw distance -- no hard edge.
+    /// 1 = no thinning. Draw-time only: it never changes placement.
+    float fade_start = 0.6f;
 
     bool operator==(const TerrainScatterShape& o) const {
         return terrain == o.terrain && density == o.density && layer == o.layer && min_weight == o.min_weight &&

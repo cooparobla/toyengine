@@ -136,6 +136,7 @@ public:
 
         for (ParticleSystem* ps : visible_) {
             if (ps->settings.look.mode == render::ParticleRenderMode::Mesh) {
+                ps->mesh_proxy().cast_shadows = ps->settings.cast_shadows;
                 render::ParticleMeshBatch mb;
                 mb.proxy = &ps->mesh_proxy();
                 mb.matrices = ps->instance_matrices().data();

@@ -4,6 +4,7 @@
 #include <toyengine/render/toy_render_pipeline.h>
 #include <toyengine/scene/character_controller.h>
 #include <toyengine/scene/kinematic_controller.h>
+#include <toyengine/weather/wind_system.h>
 #include <toyengine/scene/ragdoll.h>
 #include <toyengine/scene/skinned_mesh_renderer.h>
 #include <toyengine/world/heightmap_terrain_system.h>
@@ -508,6 +509,9 @@ void Engine::prepare_scene_(coopa::scene::Scene& scene, bool drain_assets) {
     water::install_water_system(scene, &ctx_.device(), &ctx_.allocator(), &assets_)
         ->set_settings(water_settings_for_(pipeline_->render_config().water_quality));
     coopa::physx::system::install_physics_system(scene, scene_cfg.physics);
+    // Order 95: the weather's wind (40) on cloth and wind-influenced rigidbodies, right before
+    // Physics (100) steps -- see weather/wind_system.h.
+    weather::install_wind_system(scene);
     // Order 150: reads the physics world (100) for its colliders, and moves NavAgents before
     // the Behaviour walk (200) -- see physxcoopa/system/nav_system.h.
     if (scene_cfg.navigation.enabled) coopa::physx::system::install_nav_system(scene, scene_cfg.navigation);
@@ -1166,10 +1170,18 @@ void Engine::sync_sky_render_state_(coopa::scene::Scene& scene, float dt) {
     if (w) w->set_physical_sky(physical);
     const bool weather_live = w && w->enabled() && w->state().enabled;
 
-    // Cloud drift and evolution (either sky model).
+    // Cloud drift and evolution (either sky model). With a live weather the clouds go the
+    // wind's way, and cloud_wind_speed is their speed in a 5 m/s ground wind: a calm day
+    // barely moves them (a quarter), a gale races them (up to 4x -- winds aloft are stronger).
     glm::vec2 wind_dir(1.0f, 0.0f);
-    if (weather_live && glm::length(glm::vec2(w->state().wind)) > 0.05f) wind_dir = glm::normalize(glm::vec2(w->state().wind));
-    cloud_offset_ += glm::dvec2(wind_dir) * static_cast<double>(c.cloud_wind_speed * std::max(dt, 0.0f));
+    float cloud_speed = c.cloud_wind_speed;
+    if (weather_live) {
+        const glm::vec2 wind(w->state().wind);
+        const float ws = glm::length(wind);
+        if (ws > 0.05f) wind_dir = wind / ws;
+        cloud_speed *= std::clamp(ws / 5.0f, 0.25f, 4.0f);
+    }
+    cloud_offset_ += glm::dvec2(wind_dir) * static_cast<double>(cloud_speed * std::max(dt, 0.0f));
     // The flat clouds' morph: a phase through the shape volume's (repeating) depth, at the
     // layer's evolve rate -- accumulated, so changing the rate never jumps the shapes.
     cloud_flat_phase_ = std::fmod(cloud_flat_phase_ + 0.0015 * std::max(c.flat_cloud_evolve, 0.0f) * std::max(dt, 0.0f), 1.0);
@@ -1336,6 +1348,8 @@ void Engine::sync_surface_state_(coopa::scene::Scene& scene) {
         st.snow_patch_size = w->settings().snow_patch_size;
         st.wetness = ws.wetness;
         st.wind = ws.wind;
+        st.wind_gust = ws.wind_gust;
+        st.wind_time = ws.wind_time;
         if (const auto& field = w->ground_probe().field()) {
             // Aliasing pointer: the heights live as long as the field the renderer holds.
             // The sky layer (moving bodies looked through) where the probe made one.
@@ -1963,7 +1977,7 @@ render::ToyRenderConfig Engine::make_render_config_(const AppConfig& config,
         /* name  */ "foliage",
         /* domain */ coopa::gfx::pipeline::SurfaceShaderDomain::Opaque,
         /* vert  */ "foliage.vert",
-        /* frag  */ "",  // reuses stock gbuffer.frag -- CUTOUT needs no fragment override
+        /* frag  */ "foliage.frag",  // stock backbone, but back faces keep the (upward) normal
         /* shadow_vert */ "foliage_shadow.vert",
         /* shadow_frag */ "", // reuses stock shadow_depth.frag
         /* shadow_cube_vert */ "foliage_shadow_cube.vert",

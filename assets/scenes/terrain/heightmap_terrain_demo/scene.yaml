@@ -1,43 +1,20 @@
-# heightmap_terrain_demo -- the sculptable heightmap terrain (HeightmapTerrain, toyengine/world/
-# heightmap_terrain.h): a 1 km valley drawn from a 16-bit heightmap, painted with seven layers,
-# collided as a heightfield, dressed with streamed foliage, and lit by the weather.
-#
-# Run: ./build/toyengine heightmap_terrain_demo        (or SCENE=heightmap_terrain_demo)
-# Controls: WASD move, Space jump, LeftShift sprint, mouse orbits, scroll zooms.
-#
-#   terrain       1024 x 1024 m, 160 m tall, 64 m chunks, 1025 x 1025 heights
-#                 (terrain/height.png; terrain/splat0.png + splat1.png paint it). Every chunk is one
-#                 instance of the same flat patch, displaced on the GPU and tessellated near the
-#                 camera; the collider reads the same grid. Regenerate the files with
-#                 tools/gen_heightmap_terrain_demo.py, or sculpt / paint in the editor's Terrain mode.
-#     layers      grass, dirt, rock (triplanar), cliff (triplanar), sand, snow, forest floor.
-#     grass       tufts on the grass layer, streamed within 70 m of the camera
-#     pines       trunks + canopies on the forest floor (two systems, same seed: they line up)
-#     bushes      on grass and forest edges; boulders on the rock layer
-#   lake          a planar WaterBody filling the south-west basin (and its shore is sand)
-#   player        the mannequin with a CharacterController, walking on the heightfield
-#
-# Weather: clear by default. In the editor's World tab, Preview `snow` to see deep snow pile up
-# on flat ground (trenches follow the player) and `rain` to see the ground darken, gloss up and
-# puddle in the hollows. Needs render transparency_enabled (rain), on in assets/config.yaml.
 scene:
   scene_name: heightmap_terrain_demo
   settings:
     weather:
-      enabled: true
-      time_of_day: 9.5
-      day_length_minutes: 20
-      latitude: 45
-      drive_sun: true
-      sun_intensity: 1.2
       condition: clear
+      day_length_minutes: 20
+      drive_sun: true
+      enabled: true
+      ground_height: 0.0
+      latitude: 45
       schedule: fixed
       snow_accumulate_time: 60
-      snow_max_depth: 0.4
       snow_auto_deformers: true
-      ground_height: 0.0
+      snow_max_depth: 0.4
+      sun_intensity: 1.2
+      time_of_day: 9.5
   root_objects:
-    # The terrain's grid corner sits at its object's position: (-512, -512) centres it.
     - name: terrain
       components:
         - type: Transform
@@ -45,140 +22,174 @@ scene:
           rotation: { x: 0, y: 0, z: 0 }
           scale: { x: 1, y: 1, z: 1 }
         - type: HeightmapTerrain
-          size: { x: 1024, y: 1024 }
-          height: 160
           chunk_size: 64
-          resolution: 1025
-          splat_resolution: 1024
+          collision: true
+          deep_snow: true
+          height: 160
           heightmap: terrain/height.png
-          splat0: terrain/splat0.png
-          splat1: terrain/splat1.png
           layer_texture_size: 512
           layers:
-            - { name: grass, albedo: textures/terrain/layers/grass_albedo.png, normal: textures/terrain/layers/grass_normal.png, tiling: 4, roughness: 0.9 }
-            - { name: dirt, albedo: textures/terrain/layers/dirt_albedo.png, normal: textures/terrain/layers/dirt_normal.png, tiling: 5, roughness: 0.85 }
-            - { name: rock, albedo: textures/terrain/layers/rock_albedo.png, normal: textures/terrain/layers/rock_normal.png, tiling: 9, roughness: 0.75, triplanar: true }
-            - { name: cliff, albedo: textures/terrain/layers/cliff_albedo.png, normal: textures/terrain/layers/cliff_normal.png, tiling: 18, roughness: 0.7, triplanar: true, triplanar_sharpness: 6 }
-            - { name: sand, albedo: textures/terrain/layers/sand_albedo.png, normal: textures/terrain/layers/sand_normal.png, tiling: 6, roughness: 0.9 }
-            - { name: snow, albedo: textures/terrain/layers/snow_albedo.png, normal: textures/terrain/layers/snow_normal.png, tiling: 8, roughness: 0.6 }
-            - { name: forest_floor, albedo: textures/terrain/layers/forest_floor_albedo.png, normal: textures/terrain/layers/forest_floor_normal.png, tiling: 5, roughness: 0.95 }
-          tessellation: { edge_pixels: 8, max_factor: 32, max_distance: 350 }
-          deep_snow: true
+            - name: grass
+              albedo: textures/terrain/layers/grass_albedo.png
+              normal: textures/terrain/layers/grass_normal.png
+              roughness: 0.9
+              tiling: 4
+            - name: dirt
+              albedo: textures/terrain/layers/dirt_albedo.png
+              normal: textures/terrain/layers/dirt_normal.png
+              roughness: 0.85
+              tiling: 5
+            - name: rock
+              albedo: textures/terrain/layers/rock_albedo.png
+              normal: textures/terrain/layers/rock_normal.png
+              roughness: 0.75
+              tiling: 9
+              triplanar: true
+            - name: cliff
+              albedo: textures/terrain/layers/cliff_albedo.png
+              normal: textures/terrain/layers/cliff_normal.png
+              roughness: 0.7
+              tiling: 18
+              triplanar: true
+              triplanar_sharpness: 6
+            - name: sand
+              albedo: textures/terrain/layers/sand_albedo.png
+              normal: textures/terrain/layers/sand_normal.png
+              roughness: 0.9
+              tiling: 6
+            - name: snow
+              albedo: textures/terrain/layers/snow_albedo.png
+              normal: textures/terrain/layers/snow_normal.png
+              roughness: 0.6
+              tiling: 8
+            - name: forest_floor
+              albedo: textures/terrain/layers/forest_floor_albedo.png
+              normal: textures/terrain/layers/forest_floor_normal.png
+              roughness: 0.95
+              tiling: 5
           puddles: true
-          collision: true
-        # Rain splashes and settled flakes land on the terrain.
-        - type: WeatherSurface
+          resolution: 1025
+          size: { x: 1024, y: 1024 }
+          splat0: terrain/splat0.png
+          splat1: terrain/splat1.png
+          splat_resolution: 1024
+          tessellation: { edge_pixels: 8 }
+          view_distance: 0
+          shadow_distance: 600
+        - { type: WeatherSurface }
       children:
         - name: grass
           components:
             - type: Transform
               position: { x: 0, y: 0, z: 0 }
             - type: ParticleSystem
-              mode: scatter
-              shape: terrain
-              terrain: { layer: grass, density: 1.2, min_weight: 0.35, slope_max: 30, sink: 0.05 }
-              seed: 11
               align_to_normal: true
-              random_spin: true
-              start_size: [0.6, 1.1]
-              max_draw_distance: 70
-              render_mode: mesh
-              render_mesh: nature/grass_tuft
               material:
-                albedo: { r: 0.85, g: 1.0, b: 0.75 }
-                roughness: 0.8
-                alpha_mode: CUTOUT
+                albedo: { b: 0.75, g: 1.0, r: 0.85 }
                 alpha_cutoff: 0.4
+                alpha_mode: CUTOUT
+                roughness: 0.8
                 texture_albedo: textures/terrain/layers/grass_blades.png
                 texture_alpha_mask: textures/terrain/layers/grass_blades.png
-                # Stock shader, back faces culled: each card is two one-sided faces (one per side),
-                # both lit with an up normal like the ground they grow from.
+                shader: foliage                       # bends in the weather's wind
+                shader_params: [0.35, 2.5, 0.6, 0]    # flexibility, frequency, height (m), Z up
+              max_draw_distance: 80
+              cast_shadows: false
+              mode: scatter
+              random_spin: true
+              render_mesh: nature/grass_tuft
+              render_mode: mesh
+              seed: 11
+              shape: terrain
+              start_size: [0.6, 1.1]
+              terrain: { density: 2.0, fade_start: 0.5, layer: grass, min_weight: 0.35, sink: 0.05, slope_max: 30 }
         - name: pine_trunks
           components:
             - type: Transform
               position: { x: 0, y: 0, z: 0 }
             - type: ParticleSystem
+              material:
+                albedo: { b: 0.17, g: 0.24, r: 0.33 }
+                roughness: 0.9
               mode: scatter
-              shape: terrain
-              terrain: { layer: forest_floor, density: 0.012, min_weight: 0.3, slope_max: 24, sink: 0.3 }
-              seed: 77
               random_spin: true
-              start_size: [0.8, 1.3]
-              max_draw_distance: 600
-              render_mode: mesh
               render_mesh: nature/pine_trunk
-              material: { albedo: { r: 0.33, g: 0.24, b: 0.17 }, roughness: 0.9 }
+              render_mode: mesh
+              seed: 77
+              shape: terrain
+              start_size: [0.8, 1.3]
+              terrain: { density: 0.012, layer: forest_floor, min_weight: 0.3, sink: 0.3, slope_max: 24 }
         - name: pine_canopies
           components:
             - type: Transform
               position: { x: 0, y: 0, z: 0 }
-            # The trunks' placement exactly (same seed and terrain block): each canopy on its trunk.
             - type: ParticleSystem
+              material:
+                albedo: { b: 0.14, g: 0.3, r: 0.16 }
+                roughness: 0.85
+                shader: foliage                       # canopies sway gently; trunks stay rigid
+                shader_params: [0.04, 0.9, 8.4, 0]
               mode: scatter
-              shape: terrain
-              terrain: { layer: forest_floor, density: 0.012, min_weight: 0.3, slope_max: 24, sink: 0.3 }
-              seed: 77
               random_spin: true
-              start_size: [0.8, 1.3]
-              max_draw_distance: 600
-              render_mode: mesh
               render_mesh: nature/pine_canopy
-              material: { albedo: { r: 0.16, g: 0.3, b: 0.14 }, roughness: 0.85 }
+              render_mode: mesh
+              seed: 77
+              shape: terrain
+              start_size: [0.8, 1.3]
+              terrain: { density: 0.012, layer: forest_floor, min_weight: 0.3, sink: 0.3, slope_max: 24 }
         - name: bushes
           components:
             - type: Transform
               position: { x: 0, y: 0, z: 0 }
             - type: ParticleSystem
-              mode: scatter
-              shape: terrain
-              terrain: { layer: forest_floor, density: 0.03, min_weight: 0.1, slope_max: 30, sink: 0.1 }
-              seed: 31
               align_to_normal: true
+              material:
+                albedo: { b: 0.16, g: 0.38, r: 0.22 }
+                roughness: 0.85
+                shader: foliage
+                shader_params: [0.1, 1.4, 1.0, 0]
+              mode: scatter
               random_spin: true
-              start_size: [0.6, 1.4]
-              max_draw_distance: 220
-              render_mode: mesh
               render_mesh: nature/bush
-              material: { albedo: { r: 0.22, g: 0.38, b: 0.16 }, roughness: 0.85 }
+              render_mode: mesh
+              seed: 31
+              shape: terrain
+              start_size: [0.6, 1.4]
+              terrain: { density: 0.03, layer: forest_floor, min_weight: 0.1, sink: 0.1, slope_max: 30 }
         - name: boulders
           components:
             - type: Transform
               position: { x: 0, y: 0, z: 0 }
             - type: ParticleSystem
-              mode: scatter
-              shape: terrain
-              terrain: { layer: rock, density: 0.006, min_weight: 0.3, sink: 0.25 }
-              seed: 5
               align_to_normal: true
+              material:
+                albedo: { b: 0.43, g: 0.46, r: 0.48 }
+                roughness: 0.8
+              mode: scatter
               random_spin: true
-              start_size: [0.8, 2.6]
-              max_draw_distance: 350
-              render_mode: mesh
               render_mesh: nature/boulder
-              material: { albedo: { r: 0.48, g: 0.46, b: 0.43 }, roughness: 0.8 }
-
-    # The lake in the south-west basin (terrain local (330, 250)); the basin floor is ~7 m below.
+              render_mode: mesh
+              seed: 5
+              shape: terrain
+              start_size: [0.8, 2.6]
+              terrain: { density: 0.006, layer: rock, min_weight: 0.3, sink: 0.25 }
     - name: lake
       components:
         - type: Transform
           position: { x: -182, y: -262, z: 16.0 }
           rotation: { x: 0, y: 0, z: 0 }
           scale: { x: 1, y: 1, z: 1 }
-        - type: MeshRenderer
-          affects_reflection_probes: false
-          material: materials/water
+        - { type: MeshRenderer, affects_reflection_probes: false, material: materials/water }
         - type: WaterBody
-          mode: planar
-          size: { x: 250.0, y: 250.0 }
-          resolution: 4
-          wave_amplitude: 0.08
-          wave_length: 5.0
-          wave_direction: 40.0
-          wave_steepness: 0.3
           clarity: 4.0
+          mode: planar
+          resolution: 4
+          size: { x: 2.5e+02, y: 2.5e+02 }
+          wave_amplitude: 0.08
+          wave_direction: 4.0e+01
+          wave_length: 5.0
+          wave_steepness: 0.3
       children: []
-
-    # The player, dropped onto the valley floor (the controller settles it on the heightfield).
     - name: player
       prefab: objects/mannequin_ragdoll
       components:
@@ -187,27 +198,18 @@ scene:
           rotation: { x: 0, y: 0, z: 200 }
           scale: { x: 1, y: 1, z: 1 }
         - type: CharacterController
-          radius: 0.3
           height: 1.8
-          step_height: 0.35
-          slope_limit: 45.0
-          move_speed: 3.0
-          sprint_multiplier: 3.0
           jump_height: 1.2
+          move_speed: 3.0
+          radius: 0.3
+          slope_limit: 45.0
+          sprint_multiplier: 3.0
+          step_height: 0.35
           use_root_motion: true
-        - type: Animator
-          apply_root_motion: true
-        - type: CharacterAnimDriver
-          walk_speed: 0.2
-          run_speed: 4.0
-          crossfade: 0.2
-        - type: FootIK
-          ray_up: 0.45
-          ray_down: 0.4
-        # Presses trenches into deep snow.
-        - type: SnowDeformer
-          radius: 0.35
-
+        - { type: Animator, apply_root_motion: true }
+        - { type: CharacterAnimDriver, crossfade: 0.2, run_speed: 4.0, walk_speed: 0.2 }
+        - { type: FootIK, ray_down: 0.4, ray_up: 0.45 }
+        - { type: SnowDeformer, radius: 0.35 }
     - name: camera
       components:
         - type: Transform
@@ -215,29 +217,28 @@ scene:
           rotation: { x: 70, y: 0, z: 0 }
           scale: { x: 1, y: 1, z: 1 }
         - type: Camera
+          far_clip_plane: 2.0e+03
+          fov: 6.0e+01
           main: true
-          projection: Perspective
-          fov: 60.0
           near_clip_plane: 0.1
-          far_clip_plane: 2000.0
+          projection: Perspective
         - type: CameraController
-          mode: orbit
-          tracker: player
-          target_offset: { x: 0, y: 0, z: 1.4 }
-          follow_smoothing: 12.0
-          movement_smoothing: 0.2
-          mouse_sensitivity: 0.12
-          distance: 10.0
-          yaw_deg: 200.0
-          pitch_deg: 18.0
-          min_pitch_deg: -10.0
-          max_pitch_deg: 80.0
-          min_distance: 1.5
-          max_distance: 60.0
           collide: true
           collision_radius: 0.25
+          distance: 1.0e+01
+          follow_smoothing: 12.0
+          max_distance: 6.0e+01
+          max_pitch_deg: 8.0e+01
+          min_distance: 1.5
+          min_pitch_deg: -1.0e+01
+          mode: orbit
+          mouse_sensitivity: 0.12
+          movement_smoothing: 0.2
+          pitch_deg: 18.0
+          target_offset: { x: 0, y: 0, z: 1.4 }
+          tracker: player
+          yaw_deg: 2.0e+02
       children: []
-
     - name: sun
       components:
         - type: Transform
@@ -245,8 +246,8 @@ scene:
           rotation: { x: 0, y: 0, z: 0 }
           scale: { x: 1, y: 1, z: 1 }
         - type: DirectionalLight
-          direction: { x: -0.45, y: 0.55, z: -0.6 }
-          color: { r: 1.0, g: 0.96, b: 0.9 }
-          intensity: 1.0
           cast_shadows: true
+          color: { b: 0.9, g: 0.96, r: 1.0 }
+          direction: { x: -0.45, y: 0.55, z: -0.6 }
+          intensity: 1.0
       children: []

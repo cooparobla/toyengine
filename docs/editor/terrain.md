@@ -70,6 +70,21 @@ Change **Width**, **Depth**, **Height**, **Chunk Size** or the resolutions, then
 **Apply**. The current shape is kept: it is stretched to the new size, scaled to the new height,
 or resampled to the new resolution. Undo restores the previous shape exactly.
 
+### Performance
+
+The **Size & Performance** panel also holds the settings that decide what a terrain costs:
+
+- **Automatic View Distance** (on by default) draws every part of the terrain the camera can reach;
+  parts off screen are skipped automatically. Turn it off and set **View Distance** to load only
+  the ground near the camera, a hard limit for games with a close or top-down camera, or for very
+  large terrains.
+- **Shadow Distance** stops far parts of the terrain from casting shadows (0 uses the view
+  distance). **Cast Shadows** turns them off entirely.
+
+Distant ground automatically uses less detail. For grass and other details, keep the **Draw
+Distance** modest, use **Thin Out From** so they fade out instead of stopping at a hard edge, and
+turn **Cast Shadows** off for grass (Properties > Components on the detail object).
+
 ## Heightmap
 
 - **Import Heightmap** replaces the shape with a greyscale PNG from any tool (16-bit gives smooth

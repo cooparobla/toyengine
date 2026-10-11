@@ -113,13 +113,17 @@ struct WeatherState {
     float wetness = 0.0f;             ///< Creeps toward the condition's (wets faster than it dries).
     float snow_cover = 0.0f;          ///< 0..1 lying snow: builds while it snows below freezing, melts above it.
     float snow_depth = 0.0f;          ///< Metres of deep snow now (snow_cover * Settings::snow_max_depth).
-    glm::vec3 wind{0.0f};             ///< m/s, horizontal, gusts included.
+    glm::vec3 wind{0.0f};             ///< Mean wind, m/s, horizontal (gusts: wind_at() in wind.h).
+    float wind_gust = 0.0f;           ///< Gust strength (0 steady .. 1 calm-to-double).
+    float wind_time = 0.0f;           ///< The gust clock (s): wind_at(wind, wind_gust, wind_time, p).
     float fog_density = 0.0f;
     float lightning_flash = 0.0f;     ///< 0..1 while a flash lights the scene.
 
     bool is_night() const { return phase == DayPhase::Night; }
     bool is_day() const { return phase == DayPhase::Day; }
     float wind_speed() const { return glm::length(wind); }
+    /** @brief The wind (m/s) at world point p, gusts included -- see wind.h. Zero when disabled. */
+    glm::vec3 wind_at(glm::vec3 p) const;
 };
 
 /** @brief What the weather writes into the render config (see controlled_render_keys()). */
@@ -309,6 +313,7 @@ private:
         glm::vec3 velocity{0.0f};
         float ground_height = 0.0f;
         std::vector<toy::particles::SubEmitter> on_death;   ///< Its splashes; cleared while ground effects are off.
+        float wind_influence = 0.0f;   ///< As authored on the prefab (0: the effect's wind_influence applies).
     };
     struct VolumeBase {
         coopa::gfx::engine::components::VolumeComponent* vol = nullptr;

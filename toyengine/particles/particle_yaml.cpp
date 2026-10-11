@@ -174,6 +174,7 @@ void parse_particle_settings(const fkyaml::node& node, ParticleSettings& s) {
         tf("scale_min", t.scale.x);
         tf("scale_max", t.scale.y);
         tf("sink", t.sink);
+        tf("fade_start", t.fade_start);
     }
     f("radius", sh.radius);
     f("radius_thickness", sh.radius_thickness);
@@ -202,6 +203,7 @@ void parse_particle_settings(const fkyaml::node& node, ParticleSettings& s) {
     if (node.contains("velocity")) s.velocity = vec3(node.at("velocity"), s.velocity);
     if (node.contains("force")) s.force = vec3(node.at("force"), s.force);
     f("drag", s.drag);
+    f("wind_influence", s.wind_influence);
     f("orbital", s.orbital);
     f("radial", s.radial);
     f("tumble", s.tumble);
@@ -300,6 +302,7 @@ void parse_particle_settings(const fkyaml::node& node, ParticleSettings& s) {
                                                  {"youngest", SortMode::YoungestFirst}, {"youngest_first", SortMode::YoungestFirst}}, "sort");
     }
     f("max_draw_distance", s.max_draw_distance);
+    if (node.contains("cast_shadows")) s.cast_shadows = node.at("cast_shadows").get_value<bool>();
 }
 
 std::shared_ptr<const MeshSurface> load_mesh_surface(coopa::asset::AssetManager& assets, const std::string& key,

@@ -14,7 +14,7 @@ Study these first -- they are complete, small, and documented:
 
 | Example | Domain | Shows |
 |---|---|---|
-| `foliage.vert`, `foliage_shadow.vert`, `foliage_shadow_cube.vert`, `foliage_surface.glsl` | Opaque | vertex displacement with matching shadow entry points, `shader_params` layout doc |
+| `foliage.vert`, `foliage.frag`, `foliage_shadow.vert`, `foliage_shadow_cube.vert`, `foliage_surface.glsl` | Opaque | vertex displacement driven by the world wind (`gfx_world.wind`, so shadow entry points include world.glsl at set 1) with matching shadow entry points; `foliage.frag` shows `GFX_SURFACE_KEEP_BACKFACE_NORMAL`; `shader_params` layout doc |
 | `triplanar.vert`, `triplanar.frag` | Opaque | custom varyings (locations 6-10), redefined sample macros, replaced normal |
 | `terrain.frag` | Opaque | sample-macro-only shader, no hook |
 | `water.vert`, `water.frag`, `water_surface.glsl` | Transparent | one file for both stages, `GFX_SURFACE_CUSTOM_VARYING`, `shader_params_ext`, forward globals |

@@ -5,6 +5,7 @@
 #include <functional>
 
 #include <toyengine/particles/terrain_scatter.h>
+#include <toyengine/weather/weather_system.h>
 #include <toyengine/world/heightmap_terrain.h>
 
 namespace toy {
@@ -23,10 +24,20 @@ void ParticleSimulationSystem::execute(coopa::scene::Scene& scene, const coopa::
 void ParticleSimulationSystem::step(coopa::scene::Scene& scene, float dt) {
     gather_(scene);
 
+    // The weather's wind (wind_influence): calm without a live weather.
+    glm::vec3 wind(0.0f);
+    float gust = 0.0f, gust_time = 0.0f;
+    if (const weather::WeatherSystem* w = weather::find(scene); w && w->enabled() && w->state().enabled) {
+        wind = w->state().wind;
+        gust = w->state().wind_gust;
+        gust_time = w->state().wind_time;
+    }
+
     // Serial: init (seed, mesh source, sub-emitter targets) and world matrices.
     worlds_.resize(systems_.size());
     for (std::size_t i = 0; i < systems_.size(); ++i) {
         ParticleSystem* ps = systems_[i];
+        ps->set_wind(wind, gust, gust_time);
         if (!ps->initialized()) ps->init();
         resolve_sub_targets_(scene, *ps);
         auto* tc = ps->owner ? ps->owner->get_transform() : nullptr;
@@ -109,6 +120,7 @@ void ParticleSimulationSystem::collect_terrain_scatter_(coopa::scene::Scene& sce
     if (s.look.mode != render::ParticleRenderMode::Mesh) return;   // a scatter places meshes
     if (!ps.initialized()) ps.init();
     if (!ps.has_mesh_proxy() || !ps.mesh_proxy().is_ready()) return;
+    ps.mesh_proxy().cast_shadows = s.cast_shadows;
 
     // The terrain: named, else the nearest one above this object, else the scene's first.
     const world::HeightmapTerrain* terrain = nullptr;
@@ -141,21 +153,39 @@ void ParticleSimulationSystem::collect_terrain_scatter_(coopa::scene::Scene& sce
     p.align_to_normal = s.align_to_normal;
     p.random_spin = s.random_spin;
 
+    // Draw distance: authored, or automatic from how big the mesh is -- a 0.5 m grass tuft
+    // stops mattering long before an 8 m tree (about 150 instance heights), capped by the
+    // terrain's own view distance.
+    float draw_distance = s.max_draw_distance;
+    if (draw_distance <= 0.0f) {
+        const auto& mesh = *ps.mesh_proxy().get_mesh();
+        const float h = std::max(0.05f, (mesh.bounds_max().z - mesh.bounds_min().z) * std::max(s.start_size.min, s.start_size.max));
+        draw_distance = std::clamp(150.0f * h, 40.0f, 2000.0f);
+        if (terrain->view_distance > 0.0f) draw_distance = std::min(draw_distance, terrain->view_distance);
+    }
+
     TerrainScatterCache& cache = ps.terrain_scatter();
-    cache.update(terrain->view(), p, view.camera_pos, s.max_draw_distance, 2);
+    cache.update(terrain->view(), p, view.camera_pos, draw_distance, 2);
+    const uint64_t system_key = reinterpret_cast<std::uintptr_t>(&ps) * 0x9E3779B97F4A7C15ull;
     for (const auto& [key, c] : cache.chunks()) {
         if (c.matrices.empty()) continue;
-        if (s.max_draw_distance > 0.0f) {
-            const glm::vec3 d = glm::max(glm::max(c.bounds_min - view.camera_pos, view.camera_pos - c.bounds_max), glm::vec3(0.0f));
-            if (glm::length(d) > s.max_draw_distance) continue;
-        }
+        const glm::vec3 d = glm::max(glm::max(c.bounds_min - view.camera_pos, view.camera_pos - c.bounds_max), glm::vec3(0.0f));
+        const uint32_t drawn = TerrainScatterCache::thinned_count(static_cast<uint32_t>(c.matrices.size()), glm::length(d),
+                                                                  draw_distance, s.shape.terrain.fade_start);
+        if (drawn == 0) continue;
         if (!cull(c.bounds_min, c.bounds_max)) continue;
         render::ParticleMeshBatch mb;
         mb.proxy = &ps.mesh_proxy();
         mb.matrices = c.matrices.data();
-        mb.count = static_cast<uint32_t>(c.matrices.size());
+        mb.count = drawn;
         mb.bounds_min = c.bounds_min;
         mb.bounds_max = c.bounds_max;
+        // Static: the renderer keeps the chunk in its own GPU buffer, uploaded once per build.
+        mb.static_key = system_key ^ (static_cast<uint64_t>(static_cast<uint32_t>(key.first)) << 32 |
+                                      static_cast<uint32_t>(key.second)) * 0xC2B2AE3D27D4EB4Full;
+        if (mb.static_key == 0) mb.static_key = 1;
+        mb.static_version = c.build_id;
+        mb.static_total = static_cast<uint32_t>(c.matrices.size());
         out.meshes.push_back(mb);
     }
 }

@@ -483,6 +483,9 @@ private:
         uint32_t lod            = 0;
         uint32_t first_instance = 0;
         uint32_t instance_count = 0;
+        /// Non-null: the instances live in this persistent buffer (a static particle batch, see
+        /// ParticleMeshBatch::static_key), from `first_instance`, not in the frame's stream.
+        const coopa::gfx::memory::Buffer* own_instances = nullptr;
     };
 
     /**
@@ -522,6 +525,9 @@ private:
         /// the whole particle batch's.
         std::vector<const glm::mat4*> multi;
         std::vector<uint32_t>         multi_count;
+        /// Per item: a static particle batch's persistent instance buffer (null otherwise) --
+        /// such an item is always its own batch and adds nothing to the instance stream.
+        std::vector<const coopa::gfx::memory::Buffer*> own_instances;
         std::vector<uint32_t>    lod;     ///< Chosen against the camera; shadow views reuse it.
         /// Per item: the surface push extension -- x/y packed tessellation params (0: drawn
         /// untessellated), z flags (bit 0: no snow cover). See GBufferPipeline::PushConstants.
@@ -554,6 +560,8 @@ private:
         uint64_t shadow_draws = 0, shadow_instances = 0, shadow_triangles = 0;
         uint64_t renderers = 0, camera_visible = 0;
         uint64_t tess_draws = 0;   ///< Camera draws (G-buffer + transparent) that ran tessellated.
+        uint64_t streamed_instances = 0;   ///< InstanceData entries written to the frame's stream (all views).
+        uint64_t static_instances = 0;     ///< Instances drawn from persistent buffers (all views).
     };
 
 public:
@@ -1197,7 +1205,14 @@ private:
                 mesh->bind(cmd);
                 last_mesh = mesh;
             }
+            // A static particle batch draws from its own instance buffer (slot 1), then the
+            // frame's stream goes back for the next batch.
+            if (b.own_instances) cmd.bind_vertex_buffer(*b.own_instances, 0, 1);
             mesh->draw_lod_part(cmd, b.lod, meshes.part[b.item], b.instance_count, b.first_instance);
+            if (b.own_instances) {
+                cmd.bind_vertex_buffer(instance_stream_.buffer(), 0, 1);
+                frame_stats_.static_instances += b.instance_count;
+            }
             frame_stats_.shadow_draws     += 1;
             frame_stats_.shadow_instances += b.instance_count;
             frame_stats_.shadow_triangles += static_cast<uint64_t>(b.instance_count) *
@@ -1409,6 +1424,23 @@ private:
     SurfaceFrameState surface_state_;
     /// G-buffer set 3: heightmap terrains' splat maps and layer arrays (see terrain_gpu.h).
     std::unique_ptr<TerrainGpuRegistry> terrain_gpu_;
+
+    /// Persistent instance buffers of static particle batches (ParticleMeshBatch::static_key):
+    /// uploaded when a batch's version changes, dropped a few frames after it stops appearing.
+    struct StaticInstances {
+        std::unique_ptr<coopa::gfx::memory::Buffer> buffer;
+        uint64_t version = 0;
+        uint32_t count = 0;
+        uint64_t last_frame = 0;
+    };
+    std::unordered_map<uint64_t, StaticInstances> static_instances_;
+    /// Replaced / dropped buffers, kept until command buffers in flight are done with them.
+    std::vector<std::pair<uint64_t, std::unique_ptr<coopa::gfx::memory::Buffer>>> static_graveyard_;
+    uint64_t static_frame_ = 0;
+    /** @brief The persistent buffer for `pb` (uploading it if new or changed). */
+    const coopa::gfx::memory::Buffer* static_instances_for_(const ParticleMeshBatch& pb);
+    /** @brief Ages the graveyard and drops buffers unused for a while; once per frame. */
+    void tick_static_instances_();
     bool tess_warned_unsupported_ = false;
     std::set<std::string> tess_warned_shaders_;
 

@@ -60,7 +60,11 @@ public:
     float       tile_size = 0.0f;
 
     // --- Waves (see water_waves.h) ---
-    WaveParams waves;
+    WaveParams waves;   ///< As authored -- the sea in a ~6 m/s wind when wind_response > 0.
+    /// How much the weather's wind reshapes the waves and ripples (water_waves.h wind_waves()):
+    /// 1 = calm air flattens the water and a gale roughens it and turns it downwind; 0 = always
+    /// exactly as authored. No effect without a live weather.
+    float wind_response = 1.0f;
 
     // --- Flow (Flowing mode; see water_flow_bake.h) ---
     float flow_speed      = 1.0f;
@@ -133,8 +137,16 @@ public:
         return baked && query.sample(p, wave_set(), t, out, opt);
     }
 
-    /** @brief `waves` with its per-wave constants precomputed; rebuilt whenever `waves` changes. */
+    /** @brief The waves in play now: `waves` as the weather's wind reshapes them (WaterSystem sets it). */
+    const WaveParams& live_waves() const { return wind_applied ? wind_waves : waves; }
+    /** @brief live_waves() with its per-wave constants precomputed; rebuilt whenever they change. */
     const WaveSet& wave_set() const;
+
+    // --- Wind state (WaterSystem only) ---
+    bool       wind_applied = false;
+    WaveParams wind_waves;            ///< live_waves() while wind_applied.
+    float      wind_ripple = 1.0f;    ///< ripple_strength multiplier.
+    glm::vec2  wind_smoothed{0.0f};   ///< The mean wind, eased (a few seconds) so a change never jumps the sea.
 
 private:
     mutable WaveSet wave_set_;

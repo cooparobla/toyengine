@@ -66,7 +66,15 @@ public:
         std::vector<glm::mat4> matrices;
         glm::vec3 bounds_min{0.0f}, bounds_max{0.0f};
         std::uint64_t revision = 0;   ///< The terrain chunk revision it was built from.
+        std::uint64_t build_id = 0;   ///< Process-unique per build: the renderer's upload version.
     };
+
+    /**
+     * @brief How many of a chunk's instances to draw at `distance` from the camera: all of them
+     *        up to `fade_start * max_distance`, then smoothly fewer, none at `max_distance`.
+     *        Instances are stored shuffled, so drawing a prefix thins them evenly.
+     */
+    static std::uint32_t thinned_count(std::uint32_t total, float distance, float max_distance, float fade_start);
 
     /**
      * @brief Brings the cache in line with the terrain, the parameters and the camera: drops what

@@ -312,6 +312,8 @@ private:
     static coopa::gfx::engine::components::MeshRenderer* add_default_renderer_(WaterBody& body);
 
     static void apply_material_(WaterBody& body);
+    /** @brief Reshapes every body's live waves for the weather's wind (WaterBody::wind_response). */
+    void apply_wind_(coopa::scene::Scene& scene, float dt);
 
     // ------------------------------------------------------------------------------------
     // Buoyancy

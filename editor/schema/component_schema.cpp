@@ -177,11 +177,13 @@ const std::vector<SurfaceShaderInfo>& surface_shaders() {
             {"Space", 0.0f, 0.0f, 1.0f, 1.0f, {"World", "Object"}},
             {"Normal strength", 1.0f, 0.0f, 4.0f, 0.01f, {}},
         }},
-        {"foliage", "Foliage", false, "Wind-swayed two-sided card; pair with CUTOUT + an alpha mask.", false, {
-            {"Wind strength", 0.12f, 0.0f, 10.0f, 0.005f, {}},
-            {"Wind frequency", 1.6f, 0.0f, 50.0f, 0.01f, {}},
-            {"Wind dir X", 1.0f, -1.0f, 1.0f, 0.01f, {}},
-            {"Wind dir Y", 0.35f, -1.0f, 1.0f, 0.01f, {}},
+        {"foliage", "Foliage", false,
+         "Grass, bushes, canopies and leaf cards that bend in the World tab's wind (and its gusts). The material only says "
+         "how the plant responds; the wind itself is the weather's.", false, {
+            {"Flexibility", 0.12f, 0.0f, 2.0f, 0.005f, {}},   // tip sway / height at 10 m/s: grass ~0.35, bush ~0.1, canopy ~0.04
+            {"Flutter rate", 1.6f, 0.0f, 20.0f, 0.01f, {}},   // rad/s
+            {"Height", 1.0f, 0.0f, 100.0f, 0.01f, {}},        // the plant's height in mesh units; sway grows root -> this
+            {"Up axis", 0.0f, 0.0f, 1.0f, 1.0f, {"Z (meshes)", "Y (stood-up cards)"}},
         }},
         {"snow", "Deep snow", false, "Raised by the weather's lying snow, carved by SnowDeformers. Give the renderer tessellation.", false, {}},
         {"water", "Water", true, "Waves, depth colour and foam. Needs a WaterBody on the object.", true, {}},
@@ -309,6 +311,9 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             f_float("mass", 1.0f, 0.01f, 0.0f, 1e6f, true),
             f_float("drag", 0.0f, 0.005f, 0.0f, 100.0f),
             f_float("angular_drag", 0.05f, 0.005f, 0.0f, 100.0f),
+            with_tip(f_float("wind_influence", 0.0f, 0.01f, 0.0f, 100.0f),
+                     "How hard the weather's wind pushes this body: about 0.6 x the area it shows the wind (sq m). "
+                     "0 ignores the wind; light bodies blow about, heavy ones barely move"),
             f_bool("use_gravity", true, true),
             f_bool("is_kinematic", false, true),
             f_enum("interpolation", {"Interpolate", "None"}),   // physx_yaml.h reads a string: "None" or anything else
@@ -390,6 +395,9 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             f_float("wave_length", 8.0f, 0.05f, 0.1f, 500.0f, true),
             f_float("wave_direction", 0.0f, 0.5f, -360.0f, 360.0f),
             f_float("wave_steepness", 0.5f, 0.005f, 0.0f, 1.0f),
+            with_tip(f_float("wind_response", 1.0f, 0.01f, 0.0f, 1.0f),
+                     "How much the weather's wind reshapes the water: 1 = calm air flattens it, a gale roughens it and turns "
+                     "the waves downwind (the waves above are the sea at ~6 m/s); 0 = always exactly as authored"),
             f_float("flow_speed", 1.0f, 0.01f, 0.0f, 50.0f),
             f_float("flow_min_speed", 0.6f, 0.01f, 0.0f, 50.0f),
             f_float("flow_slope_gain", 4.0f, 0.05f, 0.0f, 100.0f),
@@ -476,7 +484,7 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                          "Timed bursts; cycles 0 repeats every interval forever"),
                 with_tip(f_int("count", 100, 0, 1000000), "Scatter mode: instances placed over the shape"),
                 // Shape
-                f_enum("shape", {"cone", "sphere", "hemisphere", "box", "circle", "edge", "point", "mesh"}, true),
+                f_enum("shape", {"cone", "sphere", "hemisphere", "box", "circle", "edge", "point", "mesh", "terrain"}, true),
                 f_float("radius", 0.5f, 0.005f, 0.0f, 1e4f),
                 with_tip(f_float("radius_thickness", 1.0f, 0.01f, 0.0f, 1.0f), "0: born on the shell only; 1: anywhere inside"),
                 with_tip(f_float("angle", 25.0f, 0.2f, 0.0f, 179.0f), "Cone half-angle (degrees)"),
@@ -496,6 +504,9 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                 f_vec3("velocity", glm::vec3(0.0f), 0.01f),
                 with_tip(f_vec3("force", glm::vec3(0.0f), 0.01f), "Constant acceleration, world space (wind, buoyancy)"),
                 with_tip(f_float("drag", 0.0f, 0.01f, 0.0f, 100.0f), "Linear damping (1/s)"),
+                with_tip(f_float("wind_influence", 0.0f, 0.01f, 0.0f, 4.0f),
+                         "How strongly the weather's wind carries the particles: they are pushed downwind until they move at this "
+                         "fraction of the wind (0 ignores it; smoke ~0.6, embers ~0.8, sparks ~0.3)"),
                 with_tip(f_float("orbital", 0.0f, 0.01f, -100.0f, 100.0f), "Swirl about the emitter's +Z axis (rad/s)"),
                 f_float("radial", 0.0f, 0.01f, -100.0f, 100.0f),
                 with_tip(f_float("tumble", 0.0f, 1.0f, -1e4f, 1e4f), "3D tumble about a random axis (deg/s)"),
@@ -553,7 +564,8 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                 f_enum("flipbook_mode", {"lifetime", "random", "fps"}),
                 f_float("flipbook_fps", 12.0f, 0.1f, 0.0f, 240.0f),
                 f_enum("sort", {"distance", "none", "oldest", "youngest"}),
-                with_tip(f_float("max_draw_distance", 0.0f, 0.5f, 0.0f, 1e6f), "Cull beyond this from the camera (m); 0 never"),
+                with_tip(f_float("max_draw_distance", 0.0f, 0.5f, 0.0f, 1e6f), "Cull beyond this from the camera (m); 0 never (terrain scatter: automatic)"),
+                with_tip(f_bool("cast_shadows", true), "Mesh mode: false keeps the instances out of the shadow passes (grass, clutter)"),
                 with_tip(f_asset("render_mesh", "meshes", ".yaml", true), "Render mode `mesh`: the instanced mesh"),
                 mesh_material,
             }, false});
@@ -814,7 +826,11 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                 f_bool("collision", true),
                 f_string("physics_material", ""),
                 f_bool("cast_shadows", true),
-                with_tip(f_int("patch_resolution", 16, 1, 64), "Quads per chunk side before tessellation"),
+                with_tip(f_float("view_distance", 0.0f, 1.0f, 0.0f, 100000.0f),
+                         "Chunks exist only within this distance of the camera (m). 0 = automatic: the camera's far clip, "
+                         "with frustum culling doing the rest. Set it to cap the cost for close / top-down cameras or huge terrains"),
+                with_tip(f_float("shadow_distance", 0.0f, 1.0f, 0.0f, 100000.0f), "Chunks farther than this cast no shadows (m); 0 = the view distance"),
+                with_tip(f_int("patch_resolution", 0, 0, 64), "Quads per chunk side before tessellation; 0 = automatic (4, or 32 without tessellation)"),
                 f_int("layer_texture_size", 1024, 4, 4096),
             }});
         }

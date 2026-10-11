@@ -142,7 +142,15 @@ void register_heightmap_terrain_component(coopa::asset::AssetManager& assets) {
                     t->tessellation.enabled = tn.get_value<bool>();
                 }
             }
-            t->patch_resolution = std::clamp(get_i(node, "patch_resolution", t->patch_resolution), 1, 64);
+            t->patch_resolution = std::clamp(get_i(node, "patch_resolution", t->patch_resolution), 0, 64);
+            // `view_distance: auto` (or absent): the main camera's far clip; a number caps it.
+            if (node.contains("view_distance")) {
+                const fkyaml::node& v = node.at("view_distance");
+                if (v.is_string()) t->view_distance = -1.0f;   // "auto"
+                else t->view_distance = get_f(node, "view_distance", -1.0f);
+                if (t->view_distance <= 0.0f) t->view_distance = -1.0f;
+            }
+            t->shadow_distance = std::max(0.0f, get_f(node, "shadow_distance", t->shadow_distance));
             t->layer_texture_size = std::clamp(get_i(node, "layer_texture_size", t->layer_texture_size), 4, 4096);
             t->collision = get_b(node, "collision", t->collision);
             t->physics_material = get_s(node, "physics_material");

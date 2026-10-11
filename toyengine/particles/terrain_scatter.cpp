@@ -1,6 +1,7 @@
 #include <toyengine/particles/terrain_scatter.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <limits>
 
@@ -12,6 +13,16 @@ namespace particles {
 bool TerrainScatterParams::operator==(const TerrainScatterParams& o) const {
     return shape == o.shape && layer == o.layer && seed == o.seed && size.min == o.size.min && size.max == o.size.max &&
            align_to_normal == o.align_to_normal && random_spin == o.random_spin;
+}
+
+std::uint32_t TerrainScatterCache::thinned_count(std::uint32_t total, float distance, float max_distance, float fade_start) {
+    if (max_distance <= 0.0f || fade_start >= 1.0f) return total;
+    const float start = std::clamp(fade_start, 0.0f, 1.0f) * max_distance;
+    if (distance <= start) return total;
+    if (distance >= max_distance) return 0;
+    const float t = (distance - start) / (max_distance - start);
+    const float keep = 1.0f - t * t * (3.0f - 2.0f * t);
+    return static_cast<std::uint32_t>(std::lround(static_cast<float>(total) * keep));
 }
 
 std::size_t TerrainScatterCache::instance_count() const {
@@ -90,6 +101,15 @@ TerrainScatterCache::Chunk TerrainScatterCache::build_chunk(const world::Heightm
         }
     }
     if (out.matrices.empty()) out.bounds_min = out.bounds_max = glm::vec3(0.0f);
+    // Shuffled (deterministically), so drawing any prefix -- distance thinning -- takes an even
+    // random subset rather than a band of rows.
+    Rng shuffle(hash_u32(p.seed * 2654435761u ^ static_cast<uint32_t>(cx) * 40503u ^ static_cast<uint32_t>(cy) * 9973u), 7u);
+    for (std::size_t k = out.matrices.size(); k > 1; --k) {
+        const std::size_t j = static_cast<std::size_t>(shuffle.next_u32() % static_cast<uint32_t>(k));
+        std::swap(out.matrices[k - 1], out.matrices[j]);
+    }
+    static std::atomic<std::uint64_t> next_build{1};
+    out.build_id = next_build.fetch_add(1);
     return out;
 }
 

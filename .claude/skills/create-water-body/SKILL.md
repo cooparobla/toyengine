@@ -38,7 +38,9 @@ A WaterBody bakes and publishes its mesh to a **sibling MeshRenderer that has no
 
 Keys: geometry `mode`, `mesh_path` (river: a CPU source mesh -- a separate file from any render
 mesh), `size`, `resolution`, `tile_size`; waves `wave_amplitude`, `wave_length`,
-`wave_steepness`, `wave_direction`; river `flow_speed`, `flow_min_speed`, `flow_slope_gain`,
+`wave_steepness`, `wave_direction`, `wind_response` (1: with a live weather the waves are this sea in
+~6 m/s wind -- calm air flattens them, a gale roughens them and turns them downwind; 0 = always as
+authored); river `flow_speed`, `flow_min_speed`, `flow_slope_gain`,
 `obstacle_radius`, `wake_length`; look `foam_color`, `foam_amount`, `shore_foam_depth`,
 `edge_fade_depth`, `ripple_strength`, `ripple_scale`, `clarity`; underwater `underwater_color`,
 `underwater_visibility`, `underwater_absorption`, `caustics`; physics `density`, `max_depth`.

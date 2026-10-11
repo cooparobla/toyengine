@@ -34,6 +34,7 @@
 #include <coopa/asset/asset_handle.h>
 #include <coopa/scene/scene.h>
 
+#include <gfxcoopa/engine/components/mesh_renderer.h>
 #include <gfxcoopa/engine/data/mesh.h>
 #include <gfxcoopa/engine/data/texture.h>
 
@@ -75,7 +76,8 @@ struct HeightmapGpu {
  * @brief What the system keeps on each component (HeightmapTerrain::runtime).
  */
 struct HeightmapTerrainRuntime {
-    std::vector<coopa::scene::SceneObject*> chunks;   ///< cy * count.x + cx; owned by the terrain's object
+    std::vector<coopa::scene::SceneObject*> chunks;   ///< cy * count.x + cx; owned by the terrain's object (null: not loaded)
+    int live_chunks = 0;                              ///< Non-null entries of `chunks`
     glm::ivec2 chunk_count{0};
     HeightmapGeometry built_geometry;
     int built_patch = 0;
@@ -119,6 +121,24 @@ public:
     /** @brief The culling box of chunk (cx, cy) as a local position + scale (see the file comment). */
     static void chunk_box(const HeightmapData& data, int cx, int cy, glm::vec3& position, glm::vec3& scale);
 
+    /**
+     * @struct ChunkSettings
+     * @brief A terrain's effective drawing settings, its `auto` values resolved.
+     */
+    struct ChunkSettings {
+        int   patch = 4;              ///< Quads per chunk side.
+        float view_distance = 0.0f;   ///< Chunks exist within this (m).
+        float detail_distance = 0.0f; ///< Tessellation reaches this far (m).
+        float shadow_distance = 0.0f; ///< Chunks cast within this (m); 0 = always.
+        float max_factor = 64.0f;     ///< Tessellation cap (device-limited).
+    };
+    /** @brief Resolves `terrain`'s auto settings: `camera_far` is the main camera's far clip,
+     *         `max_tess` the device's tessellation limit (0 = no tessellation). */
+    static ChunkSettings resolve_settings(const HeightmapTerrain& terrain, float camera_far, float max_tess);
+
+    /** @brief Distance (m) from `camera` to chunk (cx, cy)'s ground rectangle, in the xy plane. */
+    static float chunk_distance(const HeightmapGeometry& g, const glm::vec3& origin, int cx, int cy, const glm::vec3& camera);
+
     /** @brief The renderer-side numbers of `terrain` drawn at `slot` (exposed for tests). */
     static render::TerrainGpuParams gpu_params(const HeightmapTerrain& terrain, const HeightmapTerrainRuntime& rt);
 
@@ -127,9 +147,17 @@ private:
     std::shared_ptr<HeightmapGpu> gpu_for_(const HeightmapData& data);
     void upload_(HeightmapGpu& gpu, const HeightmapData& data);
     void layers_for_(HeightmapTerrain& terrain, HeightmapTerrainRuntime& rt);
-    void build_chunks_(HeightmapTerrain& terrain, HeightmapTerrainRuntime& rt, coopa::scene::Scene& scene);
+    /** @brief Spawns chunks that came within view distance, drops those well past it. */
+    void stream_chunks_(HeightmapTerrain& terrain, HeightmapTerrainRuntime& rt, coopa::scene::Scene& scene,
+                        const ChunkSettings& s, const glm::vec3& camera);
+    void spawn_chunk_(HeightmapTerrain& terrain, HeightmapTerrainRuntime& rt, coopa::scene::Scene& scene, const ChunkSettings& s,
+                      int cx, int cy);
+    void apply_material_(const HeightmapTerrain& terrain, const HeightmapTerrainRuntime& rt, const ChunkSettings& s,
+                         coopa::gfx::engine::components::MeshRenderer& mr) const;
+    glm::vec3 camera_position_(const HeightmapTerrain& terrain) const;
+    float camera_far_() const;
     void destroy_chunks_(HeightmapTerrain& terrain, HeightmapTerrainRuntime& rt);
-    void write_materials_(HeightmapTerrain& terrain, HeightmapTerrainRuntime& rt);
+    void write_materials_(HeightmapTerrain& terrain, HeightmapTerrainRuntime& rt, const ChunkSettings& s);
     void fit_chunk_boxes_(HeightmapTerrain& terrain, HeightmapTerrainRuntime& rt);
     void update_collider_(HeightmapTerrain& terrain, HeightmapTerrainRuntime& rt, coopa::scene::Scene& scene,
                           const coopa::scene::FrameContext& ctx);

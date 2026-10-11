@@ -6,4 +6,7 @@
 // entry point left at stock would give a caster that sways but a shadow that doesn't.
 #define GFX_SURFACE_VERTEX
 #include <gfx/surface/shadow_vs.glsl>
+// The sway reads the weather's wind (gfx_world.wind): the surface world at set 1.
+#define GFX_WORLD_SET 1
+#include <gfx/surface/world.glsl>
 #include "foliage_surface.glsl"

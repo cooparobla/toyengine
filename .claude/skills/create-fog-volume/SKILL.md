@@ -45,7 +45,8 @@ every use: **`assets/scenes/rendering/fog_demo/scene.yaml`** (header explains ea
 | `haze` | large soft drifting billows (fbm noise) | speed 0.6, density 0.1, noise_scale 0.05, coverage 0, height_falloff 12, occlusion 0.6 |
 | `wind` (default) | thin advected ribbons | density 0.3, coverage 0.86, streak 8, sharpness 3, occlusion 0.15 |
 
-Noise/motion keys: `direction`, `speed`, `noise_scale`, `streak`, `coverage`, `sharpness`
+Noise/motion keys: `direction`, `speed`, `wind_influence` (0; adds the weather's wind to the
+drift: direction * speed + wind * wind_influence), `noise_scale`, `streak`, `coverage`, `sharpness`
 (wind), `gate_scale`, `flow_warp`, `flow_scale`, `octaves`, `detail_gain`.
 
 ## The rules that decide whether it looks right

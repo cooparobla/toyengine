@@ -1164,7 +1164,7 @@ struct ToyRenderConfig {
     float cloud_coverage = 0.4f;       /**< 0 = clear .. 1 = overcast. The weather drives it while it is on. */
     float cloud_altitude = 1500.0f;    /**< World height (z) of the layer's base, metres. */
     float cloud_thickness = 1500.0f;   /**< The layer's depth, metres (flat: how tall the puffs stand). */
-    float cloud_wind_speed = 8.0f;     /**< m/s the clouds drift (along the weather's wind when it is on, else along +X). */
+    float cloud_wind_speed = 8.0f;     /**< m/s the clouds drift along +X; with the weather on, along its wind, at this speed in a 5 m/s wind (x0.25 .. x4). */
     float cloud_density = 1.0f;        /**< Volumetric: extinction multiplier; higher = darker, more solid clouds. */
     /** Volumetric: the clouds' size relative to a real sky's (1). Every length of the cloud
      *  field -- shapes, wisps, march steps -- scales with it; altitude and thickness do not. */

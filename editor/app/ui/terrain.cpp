@@ -6,6 +6,7 @@
 #include <random>
 
 #include <toyengine/world/heightmap_store.h>
+#include <toyengine/world/heightmap_terrain_system.h>
 #include <toyengine/world/png16.h>
 
 namespace toy {
@@ -470,7 +471,7 @@ void EditorApp::draw_terrain_layers_(imm::Context& ctx, HeightmapTerrain& t) {
 
 void EditorApp::draw_terrain_settings_(imm::Context& ctx, HeightmapTerrain& t) {
     using I = imm::Icon;
-    if (!ctx.collapsing_header("Terrain Size", false, nullptr, I::Scale)) return;
+    if (!ctx.collapsing_header("Size & Performance", false, nullptr, I::Scale)) return;
     const toy::world::HeightmapGeometry& g = t.data->geometry();
     TerrainStaged& s = terrain_staged_;
     if (s.id != terrain_object_) {
@@ -510,6 +511,44 @@ void EditorApp::draw_terrain_settings_(imm::Context& ctx, HeightmapTerrain& t) {
         s.id = 0;   // re-read from the resized data next frame
     }
     if (changed && ctx.button("Revert", -1, true, I::Undo)) s.id = 0;
+
+    // Performance: how far chunks exist, cast shadows and get detail. Ordinary component edits.
+    ctx.spacing(4);
+    ctx.label("Performance");
+    Node comp;
+    if (!shown_component_(terrain_object_, "HeightmapTerrain", comp)) return;
+    auto num = [&](const char* key) {
+        if (!comp.contains(key)) return 0.0f;
+        const Node& v = comp.at(key);
+        if (v.is_float_number()) return static_cast<float>(v.get_value<double>());
+        if (v.is_integer()) return static_cast<float>(v.get_value<int64_t>());
+        return 0.0f;   // `auto`
+    };
+    {
+        float view = num("view_distance");
+        bool automatic = view <= 0.0f;
+        if (ctx.checkbox("Automatic View Distance", &automatic)) {
+            terrain_edit_component_("Terrain View Distance", [&](Node& c) { c["view_distance"] = automatic ? 0.0f : 600.0f; });
+        }
+        ctx.tooltip("Automatic View Distance\nOn: every chunk the camera could draw (to its far clip) exists, and frustum culling skips "
+                    "the off-screen ones -- right for most games. Off: chunks exist only within a fixed distance, a hard cap on cost "
+                    "for a close or top-down camera, or a very large terrain.");
+        if (!automatic && ctx.drag_float("View Distance (m)", &view, 1.0f, 16.0f, 100000.0f)) {
+            terrain_edit_component_("Terrain View Distance", [&](Node& c) { c["view_distance"] = view; }, "terrain_view");
+        }
+        float shadow = num("shadow_distance");
+        if (ctx.drag_float("Shadow Distance (m)", &shadow, 1.0f, 0.0f, 100000.0f)) {
+            terrain_edit_component_("Terrain Shadow Distance", [&](Node& c) { c["shadow_distance"] = shadow; }, "terrain_shadow");
+        }
+        ctx.tooltip("Shadow Distance\nChunks farther than this cast no shadows; 0 = the view distance");
+        bool casts = !comp.contains("cast_shadows") || !comp.at("cast_shadows").is_boolean() || comp.at("cast_shadows").get_value<bool>();
+        if (ctx.checkbox("Cast Shadows", &casts)) terrain_edit_component_("Terrain Cast Shadows", [&](Node& c) { c["cast_shadows"] = casts; });
+        if (t.runtime) {
+            char buf[96];
+            std::snprintf(buf, sizeof(buf), "%d of %zu chunks loaded", t.runtime->live_chunks, t.runtime->chunks.size());
+            ctx.label_dim(buf);
+        }
+    }
 }
 
 void EditorApp::draw_terrain_heightmap_(imm::Context& ctx, HeightmapTerrain& t) {
@@ -613,11 +652,12 @@ void EditorApp::terrain_add_scatter_(const std::string& kind) {
                ", density: 1.0, min_weight: 0.35, slope_max: 30, sink: 0.05 }\nseed: 11\nalign_to_normal: true\nrandom_spin: true\n"
                "start_size: [0.6, 1.1]\nmax_draw_distance: 70\nrender_mode: mesh\nrender_mesh: nature/grass_tuft\n"
                "material: { albedo: { r: 0.85, g: 1.0, b: 0.75 }, roughness: 0.8, alpha_mode: CUTOUT, alpha_cutoff: 0.4, "
-               "texture_albedo: textures/terrain/layers/grass_blades.png, texture_alpha_mask: textures/terrain/layers/grass_blades.png }\n";
+               "texture_albedo: textures/terrain/layers/grass_blades.png, texture_alpha_mask: textures/terrain/layers/grass_blades.png, "
+               "shader: foliage, shader_params: [0.35, 2.5, 0.6, 0] }\ncast_shadows: false\n";
     } else if (kind == "tree") {
         yaml = "type: ParticleSystem\nmode: scatter\nshape: terrain\nterrain: { density: 0.01, slope_max: 24, sink: 0.3 }\nseed: 77\n"
                "random_spin: true\nstart_size: [0.8, 1.3]\nmax_draw_distance: 600\nrender_mode: mesh\nrender_mesh: nature/pine_canopy\n"
-               "material: { albedo: { r: 0.16, g: 0.3, b: 0.14 }, roughness: 0.85 }\n";
+               "material: { albedo: { r: 0.16, g: 0.3, b: 0.14 }, roughness: 0.85, shader: foliage, shader_params: [0.04, 0.9, 8.4, 0] }\n";
     } else {
         yaml = "type: ParticleSystem\nmode: scatter\nshape: terrain\nterrain: { density: 0.005, min_weight: 0.3, sink: 0.25 }\nseed: 5\n"
                "align_to_normal: true\nrandom_spin: true\nstart_size: [0.8, 2.6]\nmax_draw_distance: 350\nrender_mode: mesh\n"

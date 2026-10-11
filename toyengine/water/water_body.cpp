@@ -21,7 +21,7 @@ void WaterBody::mark_dirty() {
 }
 
 const WaveSet& WaterBody::wave_set() const {
-    if (!wave_set_.matches(waves)) wave_set_ = WaveSet::from(waves);
+    if (!wave_set_.matches(live_waves())) wave_set_ = WaveSet::from(live_waves());
     return wave_set_;
 }
 

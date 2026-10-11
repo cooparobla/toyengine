@@ -9,6 +9,7 @@
 #include <gfxcoopa/engine/components/camera_component.h>
 #include <toyengine/particles/particle_math.h>
 #include <toyengine/particles/particle_system.h>
+#include <toyengine/weather/wind.h>
 #include <toyengine/scene/runtime_object.h>
 #include <toyengine/weather/weather_profile.h>
 
@@ -53,6 +54,10 @@ ProfileMix ProfileMix::lerp(const ProfileMix& a, const ProfileMix& b, float t) {
     for (const auto& [k, v] : a.effects) m.effects[k] += v * (1.0f - t);
     for (const auto& [k, v] : b.effects) m.effects[k] += v * t;
     return m;
+}
+
+glm::vec3 WeatherState::wind_at(glm::vec3 p) const {
+    return enabled ? weather::wind_at(wind, wind_gust, wind_time, p) : glm::vec3(0.0f);
 }
 
 float WeatherSystem::advance_snow_cover(float cover, float precipitation, float temperature, float dt,
@@ -228,9 +233,9 @@ float WeatherSystem::flash_() const {
 
 void WeatherSystem::compute_state_(float dt) {
     const ProfileMix& m = current_;
+    // The mean wind; gusts are a field over space (wind.h), on the same clock everywhere.
     gust_clock_ += dt;
-    const float g = 0.6f * std::sin(gust_clock_ * 0.7f) + 0.4f * std::sin(gust_clock_ * 1.9f + 1.3f);
-    const glm::vec2 wind = m.wind * std::max(0.0f, 1.0f + m.wind_gust * g);
+    const glm::vec2 wind = m.wind;
     // Wetness: soaks in over ~40 s, dries over ~3 min.
     const float tau = m.wetness > wetness_ ? 40.0f : 180.0f;
     wetness_ += (m.wetness - wetness_) * (1.0f - std::exp(-dt / tau));
@@ -257,6 +262,8 @@ void WeatherSystem::compute_state_(float dt) {
     s.snow_cover = snow_cover_;
     s.snow_depth = snow_cover_ * settings_.snow_max_depth;
     s.wind = glm::vec3(wind, 0.0f);
+    s.wind_gust = std::max(0.0f, m.wind_gust);
+    s.wind_time = gust_clock_;
     s.fog_density = m.fog_density;
     s.lightning_flash = flash;
 
@@ -369,7 +376,8 @@ bool WeatherSystem::spawn_effect_(coopa::scene::Scene& scene, const std::string&
     inst.spec = spec;
     obj->for_each_recursive([&](coopa::scene::SceneObject& o) {
         if (auto* ps = o.get_component<toy::particles::ParticleSystem>()) {
-            inst.particles.push_back({ps, ps->settings.rate, ps->settings.velocity, ps->settings.ground_height, ps->settings.on_death});
+            inst.particles.push_back({ps, ps->settings.rate, ps->settings.velocity, ps->settings.ground_height, ps->settings.on_death,
+                                      ps->settings.wind_influence});
         }
         if (auto* v = o.get_component<coopa::gfx::engine::components::VolumeComponent>()) {
             inst.volumes.push_back({v, v->density, v->speed, v->height_base, v->color, v->direction});
@@ -433,8 +441,14 @@ void WeatherSystem::update_effects_(coopa::scene::Scene& scene, float dt, bool s
         uint32_t alive = 0;
         for (ParticleBase& p : inst.particles) {
             p.ps->settings.rate = p.rate * w;
-            // Sub-emitter targets (rate 0: splashes) stay where they land; emitters drift.
+            // Emitters drift with the mean wind from birth, and the gusting field (wind.h) keeps
+            // pushing them in flight (ParticleSettings::wind_influence). Sub-emitter targets
+            // (rate 0: splashes, spray) are not given the drift, but a little of the wind leans
+            // them downwind.
             if (p.rate > 0.0f) p.ps->settings.velocity = p.velocity + drift;
+            p.ps->settings.wind_influence = p.wind_influence > 0.0f ? p.wind_influence
+                                          : p.rate > 0.0f      ? inst.spec.wind_influence
+                                                               : 0.3f * std::min(inst.spec.wind_influence, 1.0f);
             p.ps->settings.ground_height = settings_.ground_height + p.ground_height;
             // Surfaces: the probed height map (roofs, terrain, water) or the flat plane.
             p.ps->ground_field = p.ps->settings.collide && settings_.surface_collision ? probe_.field() : nullptr;

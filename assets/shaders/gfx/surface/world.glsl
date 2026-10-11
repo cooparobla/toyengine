@@ -27,19 +27,38 @@ struct GfxTerrain {
 layout(set = GFX_WORLD_SET, binding = 0) uniform SurfaceWorldUBO {
     vec4  tess_view;      // xyz main camera position, w pixel scale (0.5 * render height * proj[1][1])
     vec4  snow;           // x cover 0..1, y deep-snow depth (m), z wetness, w time (s)
-    vec4  wind;           // xyz wind (m/s), w trench scale (m at unorm 1)
+    vec4  wind;           // xyz mean wind (m/s), w trench scale (m at unorm 1)
     vec4  occl;           // xy origin, z cell, w 1 = map valid
     ivec4 occl_dims;      // x nx, y ny
     vec4  occl_fallback;  // x fallback height
     vec4  field;          // z cell, w 1 = trench field valid
     ivec4 field_dims;     // x n, yz window min cell index
     vec4  snow_style;     // x 1 = hard-edged patches, y patch size (m)
+    vec4  wind_gust;      // x gust strength, y gust clock (s) -- gfx_world_wind_at()
     ivec4 terrain_count;  // x heightmap terrains in use
     GfxTerrain terrain[4];
 } gfx_world;
 
 layout(std430, set = GFX_WORLD_SET, binding = 1) readonly buffer GfxOcclusionHeights { float gfx_occl_heights[]; };
 layout(std430, set = GFX_WORLD_SET, binding = 2) readonly buffer GfxSnowTrench { uint gfx_snow_trench[]; };
+
+/// The wind (m/s, horizontal) at world point p: the mean wind plus gust fronts rolling
+/// downwind. The SAME formula as toyengine/weather/wind.h wind_at() -- keep the two in step.
+vec3 gfx_world_wind_at(vec3 p) {
+    vec3 wind = gfx_world.wind.xyz;
+    float speed = length(wind.xy);
+    float gust = gfx_world.wind_gust.x;
+    if (speed < 1e-4 || gust <= 0.0) return wind;
+    float t = gfx_world.wind_gust.y;
+    vec2 dir = wind.xy / speed;
+    float along = dot(p.xy, dir);
+    float cross_ = dot(p.xy, vec2(-dir.y, dir.x));
+    float a = along - speed * t;
+    float g = 0.45 * sin(0.05 * a + 1.5 * sin(0.021 * cross_))
+            + 0.25 * sin(0.13 * a + 0.09 * cross_ + 2.1)
+            + 0.30 * (0.6 * sin(0.7 * t) + 0.4 * sin(1.9 * t + 1.3));
+    return wind * max(0.0, 1.0 + gust * g);
+}
 
 /// The precipitation map's surface height at world xy (bilinear; outside the map: the fallback
 /// plane). A point is OPEN to the sky (rain / snow reach it) when it lies at or above this.

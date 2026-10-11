@@ -283,12 +283,8 @@ def grass_tuft():
         verts += [[-dx, -dy, 0.0], [dx, dy, 0.0], [dx, dy, 0.6], [-dx, -dy, 0.6]]
         uvs += [[0, 1], [1, 1], [1, 0], [0, 0]]
         faces.append([base, base + 1, base + 2, base + 3])
-        # The other side as its own face, so both sides are front faces with an up normal (a
-        # back face's normal is flipped by the G-buffer, which would shade the card from below).
-        b2 = len(verts)
-        verts += [[-dx, -dy, 0.0], [dx, dy, 0.0], [dx, dy, 0.6], [-dx, -dy, 0.6]]
-        uvs += [[0, 1], [1, 1], [1, 0], [0, 0]]
-        faces.append([b2 + 3, b2 + 2, b2 + 1, b2])
+    # One face per card: the `foliage` shader draws both sides and keeps this up normal on the
+    # back (it would otherwise be flipped to point down and shade black).
     # Up-facing normals light the cards like the ground they grow from.
     normals = [[0.0, 0.0, 1.0] for _ in verts]
     write_mesh(MESH_DIR / "grass_tuft.yaml", verts, faces, uvs, normals)
@@ -382,6 +378,26 @@ def lumpy(name, scale, flatten, seed, lift):
     write_mesh(MESH_DIR / f"{name}.yaml", out, f, uvs, normals, perpendicular_tangents(normals))
 
 
+def lod_sidecars():
+    """LOD setups for the scattered meshes (Mesh::build_cpu simplifies at load). Screen sizes
+    are a single instance's projected height; tiny far instances are culled outright."""
+    lods = {
+        "pine_canopy": [(0.5, 0.10), (0.2, 0.03)],
+        "bush": [(0.4, 0.06), (0.15, 0.02)],
+        "boulder": [(0.4, 0.06), (0.15, 0.02)],
+    }
+    cull = {"pine_canopy": 0.002, "pine_trunk": 0.004, "bush": 0.003, "boulder": 0.003, "grass_tuft": 0.004}
+    for name in sorted(set(lods) | set(cull)):
+        lines = [f"# LOD setup for {name} (written by tools/gen_heightmap_terrain_demo.py)."]
+        if name in lods:
+            lines.append("lods:")
+            for ratio, size in lods[name]:
+                lines.append(f"  - {{ ratio: {ratio}, screen_size: {size} }}")
+        lines.append(f"cull_screen_size: {cull[name]}")
+        (MESH_DIR / f"{name}.lod.yaml").write_text("\n".join(lines) + "\n")
+        print(f"wrote {name}.lod.yaml")
+
+
 def main():
     (SCENE / "terrain").mkdir(parents=True, exist_ok=True)
     MESH_DIR.mkdir(parents=True, exist_ok=True)
@@ -396,6 +412,7 @@ def main():
     pine()
     lumpy("boulder", (1.0, 0.85, 0.7), 0.8, 901, 0.25)
     lumpy("bush", (0.9, 0.9, 0.7), 0.9, 902, 0.45)
+    lod_sidecars()
 
 
 if __name__ == "__main__":

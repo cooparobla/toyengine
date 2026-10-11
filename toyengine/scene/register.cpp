@@ -579,6 +579,7 @@ void register_scene_components(coopa::gfx::core::Device& device,
             f("wave_amplitude", w->waves.amplitude);
             f("wave_length", w->waves.wavelength);
             f("wave_steepness", w->waves.steepness);
+            f("wind_response", w->wind_response);
             if (node.contains("wave_direction")) {
                 w->waves.direction = glm::radians(node.at("wave_direction").get_value<float>());
             }

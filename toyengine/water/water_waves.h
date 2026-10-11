@@ -64,6 +64,45 @@ struct WaveParams {
 };
 
 /** @brief Result of evaluating the wave field at an UNDISPLACED surface point. */
+/**
+ * @brief The base wave `authored` as the weather's wind `wind` (m/s, mean) reshapes it, with
+ *        `response` 0..1 (WaterBody::wind_response). At ~6 m/s the authored sea; calmer air
+ *        lowers it (to 15%), stronger wind raises it (up to 2.5x) and sharpens the crests; the
+ *        travel direction turns toward the wind's heading (fully from ~4 m/s). The wavelength
+ *        never changes (it would jump the waves' phase). response 0 or calm-authored water:
+ *        `authored` unchanged.
+ */
+inline WaveParams wind_waves(const WaveParams& authored, float response, glm::vec2 wind) {
+    const float r = glm::clamp(response, 0.0f, 1.0f);
+    if (r <= 0.0f || authored.calm()) return authored;
+    const float s = glm::length(wind);
+    WaveParams w = authored;
+    w.amplitude *= 1.0f + r * (glm::clamp(s / 6.0f, 0.15f, 2.5f) - 1.0f);
+    w.steepness = glm::clamp(authored.steepness + r * 0.25f * glm::clamp(s / 15.0f, 0.0f, 1.0f), 0.0f, 1.0f);
+    if (s > 1e-3f) {
+        const float heading = std::atan2(wind.y, wind.x);
+        float turn = heading - authored.direction;
+        turn = std::remainder(turn, 6.28318530718f);   // shortest way round
+        w.direction = authored.direction + turn * r * glm::clamp(s / 4.0f, 0.0f, 1.0f);
+    }
+    return w;
+}
+
+/** @brief The largest base wave wind_waves() can make from `authored` (for bounds). */
+inline WaveParams wind_waves_max(const WaveParams& authored, float response) {
+    const float r = glm::clamp(response, 0.0f, 1.0f);
+    WaveParams w = authored;
+    w.amplitude *= 1.0f + r * 1.5f;
+    w.steepness = glm::clamp(authored.steepness + r * 0.25f, 0.0f, 1.0f);
+    return w;
+}
+
+/** @brief How the wind scales a body's fine ripples (WaterBody::ripple_strength): 0.3x in calm air .. 2x in a gale. */
+inline float wind_ripple_scale(float response, glm::vec2 wind) {
+    const float r = glm::clamp(response, 0.0f, 1.0f);
+    return 1.0f + r * (glm::clamp(glm::length(wind) / 6.0f, 0.3f, 2.0f) - 1.0f);
+}
+
 struct WaveSample {
     glm::vec3 displacement{0.0f}; ///< Add to the undisplaced point.
     glm::vec3 normal{0.0f, 0.0f, 1.0f};

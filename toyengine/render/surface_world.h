@@ -88,7 +88,9 @@ struct SurfaceFrameState {
     bool snow_patch_hard = false;  ///< Round, crisp-edged patches instead of the soft noisy cover.
     float snow_patch_size = 1.5f;  ///< Hard patches: typical diameter (m).
     float wetness = 0.0f;
-    glm::vec3 wind{0.0f};
+    glm::vec3 wind{0.0f};          ///< Mean wind (m/s); gusts from wind_gust / wind_time (toyengine/weather/wind.h).
+    float wind_gust = 0.0f;
+    float wind_time = 0.0f;
 
     // --- Precipitation occlusion map (the weather's GroundProbe) ---
     /// Highest surface per cell, nx * ny, row-major in y; NaN = nothing (use `occl_fallback`).
@@ -122,10 +124,11 @@ struct alignas(16) SurfaceWorldUBO {
     glm::vec4  field{0.0f};           ///< z cell, w 1 = trench field valid
     glm::ivec4 field_dims{0};         ///< x n, yz window min cell index
     glm::vec4  snow_style{0.0f};      ///< x 1 = hard-edged patches, y patch size (m)
+    glm::vec4  wind_gust{0.0f};       ///< x gust strength, y gust clock (s) -- see toyengine/weather/wind.h
     glm::ivec4 terrain_count{0};      ///< x terrains in use
     TerrainGpuParams terrain[kMaxSurfaceTerrains]{};
 };
-static_assert(sizeof(SurfaceWorldUBO) == 160 + kMaxSurfaceTerrains * sizeof(TerrainGpuParams),
+static_assert(sizeof(SurfaceWorldUBO) == 176 + kMaxSurfaceTerrains * sizeof(TerrainGpuParams),
               "SurfaceWorldUBO must match world.glsl's std140 block");
 
 class SurfaceWorldData {

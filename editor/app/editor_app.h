@@ -645,6 +645,7 @@ private:
 #include "ui/build.inl"
 #include "ui/weather.inl"
 #include "ui/terrain.inl"
+#include "ui/particle_panel.inl"
 #include "ui/project_settings.inl"
 #include "ui/preferences.inl"
 

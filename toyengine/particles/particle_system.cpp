@@ -5,6 +5,7 @@
 #include <coopa/scene/components/transform_component.h>
 #include <coopa/scene/scene_object.h>
 #include <toyengine/particles/particle_math.h>
+#include <toyengine/weather/wind.h>
 
 namespace toy {
 namespace particles {
@@ -312,7 +313,11 @@ bool ParticleSystem::make_gpu_job(const ParticleView& view, render::GpuParticleJ
     P.color_b = s.start_color_b;
     const glm::mat3 inv_rot = local ? glm::inverse(glm::mat3(world_)) : glm::mat3(1.0f);
     P.accel = glm::vec4(inv_rot * (glm::vec3(0.0f, 0.0f, -9.81f * s.gravity) + s.force), s.drag);
-    P.velocity = glm::vec4(s.velocity, s.orbital);
+    // The weather's wind (at the emitter): a carried velocity, like Velocity over Lifetime --
+    // the CPU path's push toward the air, without per-particle state.
+    gpu_wind_vel_ = s.wind_influence > 0.0f ? s.wind_influence * weather::wind_at(wind_, wind_gust_, wind_time_, glm::vec3(world_[3]))
+                                            : glm::vec3(0.0f);
+    P.velocity = glm::vec4(s.velocity + inv_rot * gpu_wind_vel_, s.orbital);
     P.center = glm::vec4(local ? glm::vec3(0.0f) : glm::vec3(world_[3]), s.radial);
     P.axis = glm::vec4(local ? glm::vec3(0.0f, 0.0f, 1.0f) : glm::normalize(glm::mat3(world_)[2] + glm::vec3(0.0f, 0.0f, 1e-8f)),
                        glm::radians(s.tumble));
@@ -656,8 +661,9 @@ void ParticleSystem::compute_gpu_bounds_() {
     glm::vec3 lo(0.0f), hi(0.0f);
     float far = 0.0f;
     for (int k = 0; k < 3; ++k) {
-        hi[k] = extreme(vmax + s.velocity[k], acc[k] + nz, true);
-        lo[k] = extreme(-vmax + s.velocity[k], acc[k] - nz, false);
+        const float carried = s.velocity[k] + gpu_wind_vel_[k];
+        hi[k] = extreme(vmax + carried, acc[k] + nz, true);
+        lo[k] = extreme(-vmax + carried, acc[k] - nz, false);
         far = std::max({far, std::abs(hi[k]), std::abs(lo[k])});
     }
     const ShapeSettings& sh = s.shape;
@@ -732,6 +738,12 @@ void ParticleSystem::update_(float dt, const ParallelFor* par) {
     const std::shared_ptr<const GroundField> field = ground_field;   // swapped between frames only
     const glm::vec3 wrap = local ? glm::vec3(0.0f) : glm::max(settings.wrap_box, glm::vec3(0.0f));
     const bool wrapping = wrap.x > 0.0f || wrap.y > 0.0f || wrap.z > 0.0f;
+    // The weather's wind: a push downwind (rate kWindGrip /s) until the particle's downwind speed
+    // reaches wind_influence x the local wind. One-sided, so calm air changes nothing.
+    constexpr float kWindGrip = 1.5f;
+    const float wind_k = settings.wind_influence;
+    const bool windy = wind_k > 0.0f && glm::dot(wind_, wind_) > 1e-6f;
+    const glm::mat3 to_world_rot = local ? glm::mat3(world_) : glm::mat3(1.0f);
 
     run_range(par, n, [&](size_t b, size_t e) {
         for (size_t i = b; i < e; ++i) {
@@ -739,6 +751,17 @@ void ParticleSystem::update_(float dt, const ParallelFor* par) {
             glm::vec3 v = pool_.vel[i];
             glm::vec3 a = gravity + force;
             if (noise) a += turbulence_.sample(local ? glm::vec3(world_ * glm::vec4(p, 1.0f)) : p, noise_t) * settings.noise_strength;
+            if (windy) {
+                const glm::vec3 pw = local ? glm::vec3(world_ * glm::vec4(p, 1.0f)) : p;
+                const glm::vec3 w = weather::wind_at(wind_, wind_gust_, wind_time_, pw);
+                const float ws = glm::length(w);
+                if (ws > 1e-4f) {
+                    const glm::vec3 dir = w / ws;
+                    const float moving = glm::dot(to_world_rot * (v + settings.velocity), dir);
+                    const float lack = wind_k * ws - moving;
+                    if (lack > 0.0f) a += inv_rot * (dir * (lack * std::min(kWindGrip, 1.0f / std::max(dt, 1e-4f))));
+                }
+            }
             v = (v + a * dt) * drag_k;
             glm::vec3 dp = (v + settings.velocity) * dt;
             if (settings.orbital != 0.0f || settings.radial != 0.0f) {

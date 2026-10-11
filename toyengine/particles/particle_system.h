@@ -176,6 +176,11 @@ struct ParticleSettings {
     glm::vec3 velocity{0.0f};        ///< Constant extra velocity, simulation space (Velocity over Lifetime).
     glm::vec3 force{0.0f};           ///< Constant acceleration, world space (Force over Lifetime, wind).
     float     drag = 0.0f;           ///< Linear damping (1/s).
+    /// How strongly the WEATHER's wind (gusts included, toyengine/weather/wind.h) carries the
+    /// particles: they are pushed downwind until they move at wind_influence x the local wind
+    /// (0 = ignore it -- the default; smoke ~0.6, embers ~0.8, sparks ~0.3, rain 1). Pushes only,
+    /// never slows a particle, so a calm day leaves the effect exactly as authored.
+    float     wind_influence = 0.0f;
     float     orbital = 0.0f;        ///< Swirl about the emitter's +Z axis (rad/s).
     float     radial = 0.0f;         ///< Away from (+) / toward (-) the emitter's axis (m/s).
     float     tumble = 0.0f;         ///< 3D tumble about a per-particle random axis (deg/s).
@@ -216,7 +221,8 @@ struct ParticleSettings {
     FlipbookMode flipbook_mode = FlipbookMode::Lifetime;
     float        flipbook_fps = 12.0f;
     float        flipbook_cycles = 1.0f;
-    float        max_draw_distance = 0.0f;   ///< Cull beyond this from the camera (m); 0 = never.
+    float        max_draw_distance = 0.0f;   ///< Cull beyond this from the camera (m); 0 = never (terrain scatter: automatic).
+    bool         cast_shadows = true;        ///< Mesh mode: false keeps the instances out of the shadow passes (grass).
 };
 
 /** @brief What prepare_render() needs to know about the view. */
@@ -312,6 +318,13 @@ public:
      *        then the update split over `par`, then a serial compaction.
      */
     void step(float dt, const glm::mat4& world, const ParallelFor* par = nullptr);
+
+    /**
+     * @brief The weather's wind for the next step()s (the runner sets it every frame from the
+     *        scene's WeatherSystem): mean wind (m/s), gust strength and gust clock -- see
+     *        toyengine/weather/wind.h. Zero wind = calm.
+     */
+    void set_wind(const glm::vec3& mean, float gust, float time) { wind_ = mean; wind_gust_ = gust; wind_time_ = time; }
 
     /** @brief World-space AABB of the live particles after the last step (sizes included). */
     glm::vec3 bounds_min() const { return bounds_min_; }
@@ -468,6 +481,9 @@ private:
 
     float time_ = 0.0f;          ///< Since play() (drives duration, delay, bursts).
     float sim_clock_ = 0.0f;     ///< Monotonic (drives the noise field).
+    glm::vec3 wind_{0.0f};       ///< set_wind(): mean wind, gust strength, gust clock.
+    float wind_gust_ = 0.0f, wind_time_ = 0.0f;
+    glm::vec3 gpu_wind_vel_{0.0f}; ///< GPU path: the wind velocity folded into P.velocity (bounds use it).
     float emit_accum_ = 0.0f;
     uint32_t pending_emit_ = 0;
     std::vector<PendingAt> pending_at_;

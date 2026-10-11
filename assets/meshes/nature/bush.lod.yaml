@@ -1,0 +1,5 @@
+# LOD setup for bush (written by tools/gen_heightmap_terrain_demo.py).
+lods:
+  - { ratio: 0.4, screen_size: 0.06 }
+  - { ratio: 0.15, screen_size: 0.02 }
+cull_screen_size: 0.003

@@ -228,8 +228,8 @@ scene:
         - type: MeshRenderer
           mesh_path: plane
           # materials/foliage: CUTOUT over noise_mask.png, `shader: foliage`, shader_params
-          # x=wind_strength (world units), y=wind_frequency (rad/s), zw=wind_dir.xy -- see
-          # foliage_surface.glsl's own doc for what each slot means.
+          # [flexibility, frequency, height, up axis (1 = +Y)] -- it bends in the weather's
+          # wind (still without one); see foliage_surface.glsl's own doc.
           material: materials/foliage
       children: []
 

@@ -134,7 +134,8 @@ const std::vector<SettingsGroup>& render_settings_groups() {
             .add(F(f_float("cloud_coverage", 0.4f, 0.005f, 0.0f, 1.0f), "Coverage",
                    "0 = a clear sky, 1 = overcast"))
             .add(F(f_float("cloud_wind_speed", 8.0f, 0.1f, 0.0f, 200.0f), "Wind Speed",
-                   "How fast the clouds drift, m/s (along the weather's wind while it is on)"))
+                   "How fast the clouds drift, m/s. While the weather is on they follow its wind, and this is their speed in a "
+                   "5 m/s wind: slower in calm air, up to 4x faster in a gale"))
             .add(F(f_float("cloud_altitude", 1500.0f, 0.5f, -1000.0f, 20000.0f), "Altitude", "World height of the layer's base, metres"))
             .add(F(f_float("cloud_thickness", 1500.0f, 0.5f, 0.1f, 10000.0f), "Thickness",
                    "The layer's depth, metres (flat: how tall the puffs stand -- more = rounder, more shading)"))

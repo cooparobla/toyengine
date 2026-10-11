@@ -121,3 +121,30 @@ COOPA_TEST(streaming_and_rebuilds) {
     cache.update(v, params(), glm::vec3(120.0f, 120.0f, 0.0f), 40.0f, 2);
     expect(cache.chunks().count({0, 0}) == 0, "scatter: chunks far behind the camera are dropped");
 }
+
+/** @brief Thinning keeps everything near, nothing at the draw distance, and less in between. */
+COOPA_TEST(thinning_by_distance) {
+    using TS = TerrainScatterCache;
+    expect(TS::thinned_count(1000, 10.0f, 100.0f, 0.6f) == 1000, "scatter: inside the fade start, all of them");
+    expect(TS::thinned_count(1000, 100.0f, 100.0f, 0.6f) == 0, "scatter: none at the draw distance");
+    const auto mid = TS::thinned_count(1000, 80.0f, 100.0f, 0.6f);
+    expect(mid > 0 && mid < 1000, "scatter: part of them in the fade band (" + std::to_string(mid) + ")");
+    expect(TS::thinned_count(1000, 90.0f, 100.0f, 0.6f) < mid, "scatter: fewer further out");
+    expect(TS::thinned_count(1000, 99.0f, 100.0f, 1.0f) == 1000, "scatter: fade_start 1 never thins");
+    expect(TS::thinned_count(1000, 5000.0f, 0.0f, 0.6f) == 1000, "scatter: no draw distance, no thinning");
+}
+
+/** @brief A chunk's instances are a stable shuffle: rebuilds give new build ids, same order. */
+COOPA_TEST(shuffled_chunks_are_stable) {
+    const HeightmapData d = field();
+    const HeightmapView v{&d, glm::vec3(0.0f)};
+    const auto a = TerrainScatterCache::build_chunk(v, params(), 0, 0);
+    const auto b = TerrainScatterCache::build_chunk(v, params(), 0, 0);
+    expect(a.matrices == b.matrices, "scatter: the shuffle is deterministic");
+    expect(a.build_id != b.build_id, "scatter: every build gets a new upload version");
+    // A prefix is spread over the whole chunk, not one band of rows.
+    const std::size_t half = a.matrices.size() / 4;
+    float lo = 1e9f, hi = -1e9f;
+    for (std::size_t k = 0; k < half; ++k) { lo = std::min(lo, a.matrices[k][3].y); hi = std::max(hi, a.matrices[k][3].y); }
+    expect(hi - lo > 24.0f, "scatter: the first quarter covers the chunk (" + std::to_string(hi - lo) + " m of 32)");
+}

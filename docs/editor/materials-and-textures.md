@@ -76,7 +76,7 @@ use **Standard (PBR)**. The others suit special surfaces:
 |---|---|---|
 | **Standard (PBR)** | Almost everything | None |
 | **Triplanar** | Rock, cliffs and terrain: textures are projected from three sides, so they don't stretch and need no UVs. Solid surfaces only | **Tiling**, **Blend sharpness**, **Space** (**World** or **Object**), **Normal strength** |
-| **Foliage** | Leaves and grass cards that sway in the wind. Use it with an **Alpha mask** | **Wind strength**, **Wind frequency**, **Wind dir X**, **Wind dir Y** |
+| **Foliage** | Grass, bushes, tree canopies and leaf cards that bend in the World tab's wind and its gusts. Use it with an **Alpha mask** for cards | **Flexibility** (how far the tips sway: grass ~0.35, bushes ~0.1, canopies ~0.04), **Flutter rate**, **Height** (the plant's height in its mesh's units), **Up axis** |
 | **Water** | Water surfaces, with waves, depth colour and foam | None; the object's water settings control it |
 
 Switching shader resets the shader's own settings to their defaults. Choosing **Water** also

@@ -17,6 +17,7 @@
 #include <toyengine/water/water_surface_query.h>
 #include <toyengine/water/water_tiles.h>
 #include <toyengine/water/water_waves.h>
+#include <toyengine/weather/weather_system.h>
 
 namespace toy {
 namespace water {
@@ -63,6 +64,8 @@ void WaterSystem::execute(coopa::scene::Scene& scene, const coopa::scene::FrameC
             bake_(scene, body, body.owner->get_transform()->transform().get_world_matrix(), true);
         }
     }
+
+    apply_wind_(scene, ctx.delta_time);
 
     if (!simulating) {
         // Edit mode: the bodies are visible; nothing floats and nothing ripples. The editor
@@ -473,8 +476,9 @@ void WaterSystem::publish_gpu_mesh_(coopa::scene::Scene& scene, WaterBody& body,
     const auto verts = make_vertices_(world, local_pos, indices, flow_ws, depth, turbulence, &par_verts, grid_res >= 1);
 
     // Bounds inflation for what the vertex shader adds: the full wave sum, vertically and
-    // horizontally (local space; a scaled body is rare and the margin is generous).
-    const WaveSet& ws = body.wave_set();
+    // horizontally (local space; a scaled body is rare and the margin is generous) -- of the
+    // roughest sea the weather's wind can make, so tiles never cull a windy crest.
+    const WaveSet ws = WaveSet::from(wind_waves_max(body.waves, body.wind_response));
     glm::vec3 inflate(0.05f);
     if (!ws.calm) {
         for (const auto& w : ws.waves) {
@@ -619,16 +623,47 @@ coopa::gfx::engine::components::MeshRenderer* WaterSystem::add_default_renderer_
     return r;
 }
 
+void WaterSystem::apply_wind_(coopa::scene::Scene& scene, float dt) {
+    glm::vec2 wind(0.0f);
+    bool live = false;
+    if (const weather::WeatherSystem* w = weather::find(scene); w && w->enabled() && w->state().enabled) {
+        wind = glm::vec2(w->state().wind);
+        live = true;
+    }
+    // The MEAN wind, eased over a couple of seconds: gusts would make the sea breathe, and a
+    // condition change must never jump it.
+    const float ease = 1.0f - std::exp(-std::max(dt, 0.0f) / 2.0f);
+    for (WaterBody* body : bodies_) {
+        if (!body->owner || !body->baked) continue;
+        if (!live || body->wind_response <= 0.0f) {
+            if (body->wind_applied) {
+                body->wind_applied = false;
+                apply_material_(*body);
+            }
+            continue;
+        }
+        body->wind_smoothed = body->wind_applied ? body->wind_smoothed + (wind - body->wind_smoothed) * ease : wind;
+        const WaveParams wv = wind_waves(body->waves, body->wind_response, body->wind_smoothed);
+        const float rip = wind_ripple_scale(body->wind_response, body->wind_smoothed);
+        const glm::vec4 d = glm::abs(wv.pack() - body->wind_waves.pack());
+        if (body->wind_applied && std::max({d.x, d.y, d.z, d.w}) < 1e-4f && std::abs(rip - body->wind_ripple) < 1e-3f) continue;
+        body->wind_applied = true;
+        body->wind_waves = wv;
+        body->wind_ripple = rip;
+        apply_material_(*body);
+    }
+}
+
 void WaterSystem::apply_material_(WaterBody& body) {
     if (!body.owner) return;
     auto* renderer = body.owner->get_component<coopa::gfx::engine::components::MeshRenderer>();
     if (!renderer) return;
     auto& m = renderer->material;
     m.shader               = "water";
-    m.shader_params        = body.waves.pack();
+    m.shader_params        = body.live_waves().pack();
     m.shader_params_ext[0] = glm::vec4(body.foam_color, body.foam_amount);
     m.shader_params_ext[1] = glm::vec4(body.shore_foam_depth, body.edge_fade_depth,
-                                       body.ripple_strength, body.ripple_scale);
+                                       body.ripple_strength * (body.wind_applied ? body.wind_ripple : 1.0f), body.ripple_scale);
     m.refraction_thickness = std::max(body.clarity, 1e-3f);
     if (m.alpha_mode != coopa::gfx::engine::components::AlphaMode::Blend) {
         m.alpha_mode = coopa::gfx::engine::components::AlphaMode::Blend;
@@ -873,7 +908,7 @@ bool WaterSystem::floater_substep_(BuoyantEntry& e, coopa::physx::PhysicsWorld& 
     glm::vec2 hi = glm::vec2(body->position) + e.bound_radius;
     for (const WaterBody* wb : active_bodies_) {
         if (!wb->baked || !wb->query.overlaps_xy(lo, hi)) continue;
-        if (body->position.z - e.bound_radius > wb->query.bounds_max().z + wb->waves.amplitude * 2.0f) continue;
+        if (body->position.z - e.bound_radius > wb->query.bounds_max().z + wb->live_waves().amplitude * 2.0f) continue;
         if (cand_n < 4) cand[cand_n++] = wb;
     }
     if (cand_n == 0) {
@@ -887,7 +922,7 @@ bool WaterSystem::floater_substep_(BuoyantEntry& e, coopa::physx::PhysicsWorld& 
         bool moving = false;
         for (int c = 0; c < cand_n; ++c) {
             WaterSample s;
-            if (!cand[c]->waves.calm()) moving = true;
+            if (!cand[c]->live_waves().calm()) moving = true;
             else if (cand[c]->sample(glm::vec2(body->position), time_, s, opt) && glm::length(s.flow) > 0.05f)
                 moving = true;
         }

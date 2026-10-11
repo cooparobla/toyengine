@@ -120,9 +120,11 @@ it the start condition, or give it a weight.
 An effect is an **object asset** that is instanced while its condition has weight. Its strength
 follows the blend:
 
-- **ParticleSystem.** `rate` is scaled by the intensity. The wind (times `wind_influence`) is
-  added to `velocity`. The ground plane is the weather's `ground_height` plus the asset's own.
-  Sub-emitter targets (rate 0, such as splashes) are left alone.
+- **ParticleSystem.** `rate` is scaled by the intensity. The mean wind (times `wind_influence`) is
+  added to `velocity`, and the particles get the effect's `wind_influence` (unless the prefab set
+  its own), so gusts keep pushing them in flight. The ground plane is the weather's
+  `ground_height` plus the asset's own. Sub-emitter targets (rate 0, such as splashes) get no
+  drift, but lean downwind (a third of the effect's influence).
 - **Volume.** `density` is scaled by the intensity, `color` is darkened by the time of day, and the
   wind sets its drift. On a `ground` anchor, `height_base` is relative to `ground_height`.
 - **Anchors.** `camera` sits around the viewer plus `offset`. `ground` sits under the viewer at
@@ -195,6 +197,27 @@ With `drive_sun`, the scene's first directional light is aimed, coloured and dim
 Its authored values come back when the weather lets go. A scene with no directional light gets a
 runtime `Sun`.
 
+## Wind
+
+`WeatherState::wind` is the mean wind (m/s, horizontal); `wind_gust` and `wind_time` add gusts.
+The wind at a point is one field, `wind_at(p)` (wind.h; the same formula on the GPU as
+`gfx_world_wind_at()` in gfx/surface/world.glsl): wave fronts that roll downwind at the wind's
+speed, plus a slow pulse, so one gust crosses the grass, the smoke and a flag in turn. Over space
+and time it averages to the mean.
+
+| What | How it reads the wind | Key |
+|---|---|---|
+| Foliage (`shader: foliage`) | bends at the plant's root wind; the material sets how flexible the plant is (foliage_surface.glsl) | material `shader_params` |
+| Weather effects | rain, snow and mist drift with it; splashes lean downwind | the effect's `wind_influence` |
+| Scene particles | pushed downwind until they move at `wind_influence` x the wind (pushes only, never slows) | ParticleSystem `wind_influence` (0 default; smoke ~0.6) |
+| Fog Volumes | drift = `direction * speed + wind * wind_influence` | Volume `wind_influence` (0 default) |
+| Water | waves rise / flatten and turn downwind, ripples follow (eased over seconds; buoyancy rides the same sea). The authored waves are the sea in ~6 m/s | WaterBody `wind_response` (1 default; 0 = as authored) |
+| Clouds | drift along the wind; `cloud_wind_speed` is their speed in a 5 m/s wind (x0.25 .. x4) | render `cloud_wind_speed` |
+| Cloth | the live cloth wind = its own `wind` + the field x `weather_wind` (WindSystem, wind_system.h) | Cloth `weather_wind` (1 default) |
+| Rigidbodies | a drag force `influence * |rel| * rel` each substep (rel = wind minus the body's horizontal velocity); sleeping bodies wake only for a real push | Rigidbody `wind_influence` (0 default; ~0.6 x area) |
+
+Gameplay: `toy::weather::current().wind_at(position)`.
+
 ## Runtime objects
 
 Every object the weather creates hangs under one root, `Weather`, which carries the
@@ -213,6 +236,7 @@ const toy::weather::WeatherState& w = toy::weather::current();
 w.hour; w.day; w.phase; w.is_night(); w.daylight; w.sun_direction;
 w.condition; w.previous; w.transition;          // "rain", "overcast", 0..1
 w.cloud_cover; w.precipitation; w.temperature; w.wetness; w.wind; w.lightning_flash;
+w.wind_at(position);                            // the wind here, gusts included (wind.h)
 w.snow_cover; w.snow_depth;                     // lying snow 0..1, deep-snow metres
 
 // Control and events, through the scene's system.

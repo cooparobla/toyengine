@@ -881,6 +881,9 @@ void EditorApp::draw_component_list_(imm::Context& ctx, ObjectId id, bool physic
                 for (const auto& f : schema->fields) if (f.kind != FieldKind::Material) fields.push_back(f);
                 r = draw_fields(ctx, fields, comp, env, true, {"type", "id", "material"});
                 if (ctx.button("Material...", -1, true, I::Material)) prop_tab_ = PropTab::Material;
+            } else if (type == "ParticleSystem") {
+                // Grouped, explained and filtered to what applies -- see particle_panel.inl.
+                r = draw_particle_panel_(ctx, id, comp, env);
             } else {
                 r = draw_component(ctx, comp, env, [this](const std::string& rel) { open_asset(AssetType::Material, rel); });
             }

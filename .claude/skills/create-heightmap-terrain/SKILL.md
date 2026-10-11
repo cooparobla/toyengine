@@ -40,7 +40,8 @@ The other terrain kind, `TileTerrain` (mapcoopa tile worlds), is the create-terr
 | `heightmap`, `splat0`, `splat1` | PNG files (default `terrain/<object>_height.png` ...); splat0 RGBA = layers 0-3, splat1 = 4-7 |
 | `generate {seed, octaves, feature_size, ridges, base, amplitude, island}` | Procedural start when the heightmap file is missing |
 | `layers [{name, albedo, normal, tint, tiling, roughness, metallic, normal_strength, triplanar, triplanar_sharpness}]` | Up to 8 paint layers; `tiling` is metres per repeat; `triplanar` for cliffs |
-| `tessellation {enabled, edge_pixels, max_factor, max_distance}`, `patch_resolution` | Detail near the camera |
+| `tessellation {enabled, edge_pixels, max_factor, max_distance}`, `patch_resolution` | Detail by screen size: `patch_resolution` 0 = auto (4 quads, tessellation adds near detail); `max_distance` 0 = the view distance |
+| `view_distance`, `shadow_distance` | Chunks exist within `view_distance` m (0 / `auto` = the camera's far clip); beyond `shadow_distance` they cast no shadow |
 | `layer_texture_size` | Every layer texture is resized to this (mipmapped array) |
 | `collision`, `physics_material` | Heightfield collider (static) from the same grid |
 | `deep_snow`, `puddles`, `cast_shadows` | Weather and shadows |
@@ -69,7 +70,20 @@ A child object with a scatter ParticleSystem over the terrain (see create-partic
 
 Placement is deterministic per chunk (seed, chunk, cell): two systems with the same `terrain` block
 and seed line up (the demo's pine trunks and canopies). Painting or sculpting re-scatters the
-touched chunks live. Stock meshes: `meshes/nature/{grass_tuft, pine_trunk, pine_canopy, bush, boulder}`.
+touched chunks live. Stock meshes: `meshes/nature/{grass_tuft, pine_trunk, pine_canopy, bush, boulder}`. Give grass, bushes and canopies `shader: foliage` (see create-material for its params) so they bend in the World tab's wind.
+
+## Performance
+
+- **Terrain surface:** leave `view_distance` on auto. Every chunk shares one mesh, height texture and
+  material, frustum culling skips off-screen chunks, and screen-space tessellation makes far ground a
+  few triangles. Set a number only as a hard cap: a close / top-down camera that never sees far, or
+  a terrain so large that per-chunk bookkeeping shows up. `shadow_distance` (e.g. 600) keeps far
+  chunks out of the shadow cascades.
+- **Details are the real cost.** Each scatter chunk lives in a persistent GPU buffer (uploaded once
+  per rebuild, never re-copied per view); keep `max_draw_distance` modest for small things (or 0 =
+  automatic from mesh size), `fade_start` thins them out before the edge, `cast_shadows: false` for
+  grass, and give meshes LOD sidecars (`<mesh>.lod.yaml`, see `meshes/nature/`) -- each chunk
+  picks a level for one instance at its nearest point.
 
 ## Editing
 

@@ -95,12 +95,22 @@ public:
 
     struct Tessellation {
         bool  enabled = true;
-        float edge_pixels = 8.0f;
-        float max_factor = 32.0f;
-        float max_distance = 300.0f;
+        float edge_pixels = 8.0f;     ///< Target triangle edge on screen: detail falls off with distance by itself.
+        float max_factor = 64.0f;     ///< Cap on splits per patch edge (clamped to the device's limit).
+        float max_distance = 0.0f;    ///< "Detail distance": beyond, the base patch only. 0 = the view distance.
     } tessellation;
 
-    int  patch_resolution = 16;     ///< Quads per chunk side before tessellation.
+    /// Quads per chunk side before tessellation (the far-away shape). 0 = automatic: 4 with
+    /// tessellation (it adds the near detail), 32 on a device without.
+    int  patch_resolution = 0;
+
+    /// Chunks are kept only within this many metres of the camera. < 0 (`auto`, the default):
+    /// the main camera's far clip -- everything it could draw; frustum culling does the rest.
+    /// A number is a hard cap: a top-down or close-camera game where only nearby ground is ever
+    /// seen, or a very large terrain, never pays for far chunks (draws, shadows, gather).
+    float view_distance = -1.0f;
+    /// Chunks beyond this from the camera cast no shadows. 0 = the view distance.
+    float shadow_distance = 0.0f;
     int  layer_texture_size = 1024; ///< Texels per side every layer texture is resized to.
     bool collision = true;
     std::string physics_material;   ///< physics_materials/<name>.yaml for the collider (optional).

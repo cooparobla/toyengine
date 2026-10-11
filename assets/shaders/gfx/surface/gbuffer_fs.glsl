@@ -106,6 +106,11 @@ void gfx_surface_fragment(inout GfxSurface s);
 void gfx_surface_fragment(inout GfxSurface s) {}
 #endif
 
+// GFX_SURFACE_KEEP_BACKFACE_NORMAL (define before including): a two-sided surface keeps its
+// authored normal on BOTH sides instead of flipping it on the back face. For vegetation, whose
+// normals point up (lit like the ground it grows from), a flipped back face would point down and
+// shade black; a grass blade or leaf seen from behind should look the same as from the front.
+
 // Material-texture sample hook: an including shader may define
 // GFX_SURFACE_SAMPLE(tex, uv) BEFORE including this backbone to wrap every
 // material-map fetch -- e.g. toyengine's gbuffer.frag routes it through
@@ -151,7 +156,9 @@ void main() {
     // engine::util::MaterialTextureCache's doc, which makes the same call for the same reason.
     s.tbn         = frag_TBN;
     s.normal_ws   = normalize(s.tbn * (GFX_SURFACE_SAMPLE_NORMAL(u_normal_map, frag_uv).xyz * 2.0 - 1.0));
+#ifndef GFX_SURFACE_KEEP_BACKFACE_NORMAL
     if (!gl_FrontFacing) s.normal_ws = -s.normal_ws; // correct for double-sided materials
+#endif
                                                       // (PBRMaterial::cull_backfaces == false)
                                                       // and any CullMode::None shader variant
                                                       // (e.g. foliage) -- see gbuffer_fs.glsl's
@@ -166,7 +173,11 @@ void main() {
     // made -- unless the material (surface_ext.z bit 0) or the shader opts out.
 #ifndef GFX_SURFACE_NO_SNOW
     if ((material.surface_ext.z & 1u) == 0u && gfx_world.snow.x > 0.0) {
+#ifdef GFX_SURFACE_KEEP_BACKFACE_NORMAL
+        vec3 geo_n = normalize(frag_world_normal);
+#else
         vec3 geo_n = normalize(gl_FrontFacing ? frag_world_normal : -frag_world_normal);
+#endif
         gfx_snow_apply(s, geo_n, gfx_snow_pattern_xy(frag_snow_pos, frag_snow_up));
     }
 #endif

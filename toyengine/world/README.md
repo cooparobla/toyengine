@@ -306,6 +306,16 @@ from the placed points, so chunk borders never crack. A chunk's transform carrie
 and its height range (for culling). Splats and the layer arrays are G-buffer set 3
 ([`render/terrain_gpu.h`](../render/terrain_gpu.h)). Up to 4 heightmap terrains per scene.
 
+**Cost model.** There is nothing to load per chunk -- all chunks share one patch mesh, the height
+texture and the material -- so the surface relies on frustum culling plus screen-space tessellation
+(a 4-quad base patch, detail added near the camera). `view_distance` (default `auto` = the camera's
+far clip) is a hard cap for close / top-down cameras or huge terrains: chunk objects beyond it are
+not spawned (with one chunk of hysteresis). `shadow_distance` drops far chunks from the shadow
+passes (`MeshRenderer::shadow_max_distance`), `cast_shadows` from all of them. Details are the
+expensive part: scatter chunks draw from persistent instance buffers the renderer uploads once per
+build (`ParticleMeshBatch::static_key`), thin out toward their draw distance (`fade_start`) and pick
+mesh LODs per chunk for a single instance at the chunk's nearest point.
+
 **Physics.** A `HeightfieldCollider` (physxcoopa) on a runtime child: a `TriangleMesh` in
 height-grid mode -- no stored triangles, everything (contacts, raycasts, sweeps, the character
 motor, the navmesh bake) runs on triangles computed from the grid. Rebuilt when edits pause.

@@ -467,9 +467,10 @@ const std::vector<FieldDesc>& EditorApp::weather_condition_fields_(int part) {
         with_label(with_tip(f_float("fog_sun_amount", 0.4f, 0.01f, 0.0f, 16.0f), "Glow in the fog toward the sun"), "Sun Glow"),
     };
     static const std::vector<FieldDesc> wind = {
-        with_label(with_tip(f_float("wind_strength", 1.5f, 0.05f, 0.0f, 200.0f), "m/s; drifts rain, snow and mist, and is in WeatherState::wind for gameplay"), "Wind (m/s)"),
+        with_label(with_tip(f_float("wind_strength", 1.5f, 0.05f, 0.0f, 200.0f), "m/s, the mean wind. It bends grass and trees, drifts rain, snow, mist and clouds, roughens water, "
+                                    "and blows smoke, cloth and wind-influenced bodies; WeatherState::wind for gameplay"), "Wind (m/s)"),
         with_label(with_tip(f_float("wind_heading", 30.0f, 0.5f, -360.0f, 360.0f), "Degrees the wind blows toward, counter-clockwise from +X"), "Wind Heading"),
-        with_label(with_tip(f_float("wind_gust", 0.2f, 0.01f, 0.0f, 1.0f), "How much the wind varies"), "Gusts"),
+        with_label(with_tip(f_float("wind_gust", 0.2f, 0.01f, 0.0f, 1.0f), "How strong the gusts are: 0 a steady wind, 1 gusts from calm to double, rolling across the world downwind"), "Gusts"),
     };
     static const std::vector<FieldDesc> climate = {
         with_label(with_tip(f_float("temperature", 18.0f, 0.1f, -100.0f, 100.0f), "Degrees C. At or below 0 precipitation falls as snow and lies"), "Temperature (C)"),
@@ -604,13 +605,18 @@ void EditorApp::draw_weather_status_(imm::Context& ctx, const toy::weather::Sett
         ctx.fill(bar, ctx.style.field);
         ctx.fill({bar.x, bar.y, bar.w * std::clamp(s.transition, 0.0f, 1.0f), bar.h}, ctx.style.accent);
     }
-    char air[128];
-    std::snprintf(air, sizeof(air), "%.0f C  wind %.1f  cloud %.0f%%  precip %.0f%%  wet %.0f%%  snow %.0f%%", s.temperature,
-                  s.wind_speed(), s.cloud_cover * 100.0f, s.precipitation * 100.0f, s.wetness * 100.0f, s.snow_cover * 100.0f);
+    // Where the wind blows TOWARD, as a compass point (+X east, +Y north).
+    static const char* points[] = {"E", "NE", "N", "NW", "W", "SW", "S", "SE"};
+    const float heading = std::atan2(s.wind.y, s.wind.x);
+    const int octant = (static_cast<int>(std::lround(heading / 0.785398163f)) % 8 + 8) % 8;
+    const char* toward = s.wind_speed() > 0.05f ? points[octant] : "-";
+    char air[160];
+    std::snprintf(air, sizeof(air), "%.0f C  wind %.1f to %s  cloud %.0f%%  precip %.0f%%  wet %.0f%%  snow %.0f%%", s.temperature,
+                  s.wind_speed(), toward, s.cloud_cover * 100.0f, s.precipitation * 100.0f, s.wetness * 100.0f, s.snow_cover * 100.0f);
     ctx.spacing(2);
     const imm::Box ab = ctx.next_box(rh - 2);
     ctx.text_in(ab, air, ctx.style.text_disabled, 0.0f);
-    ctx.tooltip("Right now\nThe live weather: temperature (C), wind (m/s), cloud cover, precipitation (rain or snow), how wet surfaces are, lying snow");
+    ctx.tooltip("Right now\nThe live weather: temperature (C), mean wind (m/s) and the way it blows, cloud cover, precipitation (rain or snow), how wet surfaces are, lying snow");
     ctx.spacing(2);
     draw_weather_day_strip_(ctx, st, w);
 }
@@ -862,7 +868,7 @@ void EditorApp::draw_weather_conditions_(imm::Context& ctx, const InspectorEnv& 
         "How long it lasts and what may follow (random / cycle schedules)",
         "Clouds, light and the sky's tint while this condition shows",
         "The global fog it brings",
-        "Wind speed and direction: drifts rain, snow and mist",
+        "Wind speed, direction and gusts: bends foliage, drifts rain / snow / mist / clouds, roughens water, blows smoke and cloth",
         "Temperature, precipitation, wetness and lightning",
         "Runtime objects it spawns: rain, snow, mist...",
     };

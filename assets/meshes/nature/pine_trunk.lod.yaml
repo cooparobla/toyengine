@@ -1,0 +1,2 @@
+# LOD setup for pine_trunk (written by tools/gen_heightmap_terrain_demo.py).
+cull_screen_size: 0.004

@@ -1455,6 +1455,21 @@ bool EditorApp::object_bounds_(ObjectId id, glm::vec3& lo, glm::vec3& hi, bool m
         hi = glm::max(hi, o + glm::vec3(ht->data->geometry().size, range.y));
         return true;
     }
+    // A tile terrain: its tile grid's box, up to its tallest column.
+    if (const auto* tt = live->get_component<toy::world::TerrainComponent>(); tt && tt->tiles && !tt->tiles->empty()) {
+        int top = 1;
+        for (const auto& r : tt->tiles->records()) top = std::max<int>(top, r.steps);
+        const glm::vec3 extent(static_cast<float>(tt->tiles->width()) * tt->params.tile_size,
+                               static_cast<float>(tt->tiles->height()) * tt->params.tile_size,
+                               static_cast<float>(top) * tt->params.height_step);
+        for (int i = 0; i < 8; ++i) {
+            const glm::vec3 c((i & 1) ? extent.x : 0.0f, (i & 2) ? extent.y : 0.0f, (i & 4) ? extent.z : 0.0f);
+            const glm::vec3 w = glm::vec3(world * glm::vec4(c, 1.0f));
+            lo = glm::min(lo, w);
+            hi = glm::max(hi, w);
+        }
+        return true;
+    }
     if (meshes_only) return false;
     const glm::vec3 p(world[3]);
     lo = glm::min(lo, p - glm::vec3(0.5f));

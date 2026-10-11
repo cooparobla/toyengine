@@ -109,19 +109,18 @@ private:
                        const coopa::scene::FrameContext& ctx);
 
     /**
-     * @brief The position the loaded region is centred on.
-     *
-     * The main camera when there is one, falling back to the terrain object's own origin -- so a
-     * headless test, or a scene authored before its camera exists, still builds the chunk under
-     * the terrain rather than nothing at all.
+     * @brief The point the loaded region is centred on, in the terrain's local space: where the
+     *        main camera's view ray meets the tiles (or the terrain's base plane) within a few
+     *        view radii, else the camera's own position -- so an orbit or editor camera viewing
+     *        the terrain from afar still loads what it looks at. The terrain's origin without a
+     *        camera, so a headless test still builds the chunk under it.
      *
      * get_world_matrix(), not world_matrix(): this system runs at order 60, BEFORE
      * UpdatePhase::TransformResolve (350), so on the first frame no resolve pass has run yet and
      * the non-resolving read would trip its own debug assert. Resolving here is safe because
-     * this is the owner thread and nothing else is reading concurrently -- the restriction on
-     * get_world_matrix() is against concurrent readers, not against calling it at all.
+     * this is the owner thread and nothing else is reading concurrently.
      */
-    glm::vec3 camera_position_(const TerrainComponent& terrain) const;
+    glm::vec3 stream_centre_(const TerrainComponent& terrain) const;
 
     /** @brief True when any part of this chunk lies inside the generated map. */
     static bool chunk_in_world(const TerrainComponent& terrain, const ChunkCoord& coord);

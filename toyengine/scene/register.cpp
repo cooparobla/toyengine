@@ -523,18 +523,16 @@ void register_scene_components(coopa::gfx::core::Device& device,
 
             // --- The stored tiles ---
             // `tiles:` names the terrain's .tiles file, scene-relative, default terrain/<object>.tiles.
-            // Resolved for reading when it exists, else to where a save will create it; the store
-            // hands back the same live tiles on every re-parse (unsaved edits included), and an
-            // empty grid -- baked from the generator keys on first use -- when there is no file.
+            // The store hands back the same live tiles on every re-parse (unsaved edits included),
+            // and an empty grid -- baked from the generator keys on first use -- when there is no file.
             terrain->tiles_file = node.contains("tiles") ? node.at("tiles").get_value<std::string>()
                                                          : "terrain/" + obj.name() + ".tiles";
+            // Strictly beside the scene -- never through the asset search, whose by-name fallback
+            // would hand two scenes' same-named terrains one shared file.
             {
-                std::string path = assets.source().resolve(terrain->tiles_file, ctx.base_dir());
-                if (!std::filesystem::exists(path)) {
-                    path = std::filesystem::path(terrain->tiles_file).is_absolute()
-                               ? terrain->tiles_file
-                               : (std::filesystem::path(ctx.base_dir()) / terrain->tiles_file).string();
-                }
+                const std::string path = std::filesystem::path(terrain->tiles_file).is_absolute()
+                                             ? terrain->tiles_file
+                                             : (std::filesystem::path(ctx.base_dir()) / terrain->tiles_file).lexically_normal().string();
                 terrain->tiles = world::TileMapStore::instance().acquire(path);
             }
 

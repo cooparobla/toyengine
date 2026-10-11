@@ -242,7 +242,10 @@ COOPA_TEST(styled_scene_streams_styled_chunks) {
     expect(marker != nullptr && marker->get_transform() != nullptr, "smooth terrain: the focus marker exists");
     if (marker == nullptr || marker->get_transform() == nullptr) return;
     const float chunk_world = terrain->params.chunk_world_size();
-    marker->get_transform()->transform().set_position(glm::vec3(4.5f * chunk_world, 4.5f * chunk_world, 12.0f));
+    // The demo loads its stored tiles (the whole island): look at the island's middle.
+    (void)chunk_world;
+    const float mid = 0.5f * static_cast<float>(terrain->tiles ? terrain->tiles->width() : 64) * terrain->params.tile_size;
+    marker->get_transform()->transform().set_position(glm::vec3(mid, mid, 12.0f));
 
     tick_until(engine, 600, [&] { return count_live_chunks(*terrain) >= 9; });
     expect(count_live_chunks(*terrain) >= 9, "smooth terrain: every chunk in the view radius becomes live");
@@ -405,6 +408,7 @@ COOPA_TEST(editing_tiles_remeshes_only_their_chunks) {
     const glm::vec3 centre = shrink_terrain_and_centre(*terrain, scene);
     tick_until(engine, 900, [&] { return count_live_chunks(*terrain) >= 25; });
     require(terrain->tiles != nullptr && !terrain->tiles->empty(), "tile edit: the world baked into stored tiles");
+    if (coopa::test::verbose()) std::cout << "    tiles " << terrain->tiles->width() << " target chunk " << terrain->params.chunk_at(centre).x << "," << terrain->params.chunk_at(centre).y << "\n";
 
     // A 3 x 3 patch in the middle of the camera's chunk, clear of its borders.
     const int size = terrain->params.chunk_size;
@@ -428,6 +432,7 @@ COOPA_TEST(editing_tiles_remeshes_only_their_chunks) {
         const auto it = serials.find({coord.x, coord.y});
         if (it == serials.end() || it->second == chunk.mesh_serial) continue;
         if (coord.x == target.x && coord.y == target.y) ++rebuilt; else ++other_rebuilt;
+        if (coopa::test::verbose()) std::cout << "    rebuilt " << coord.x << "," << coord.y << " serial " << it->second << " -> " << chunk.mesh_serial << "\n";
     }
     expect(rebuilt == 1, "tile edit: the edited chunk re-meshed");
     expect(other_rebuilt == 0, "tile edit: ...and no other chunk did (" + std::to_string(other_rebuilt) + ")");
@@ -442,5 +447,12 @@ COOPA_TEST(editing_tiles_remeshes_only_their_chunks) {
     const bool found = physics->raycast(ray, hit);
     expect(found && std::abs(hit.point.z - raised * terrain->params.height_step) < 0.01f,
            "tile edit: the collider has the raised surface (" + std::to_string(found ? hit.point.z : -1.0f) + ")");
+
+    // Regenerate: the world is baked again from the generator settings, edits and all.
+    const std::uint64_t bakes = terrain->tiles->bakes_done();
+    terrain->tiles->request_bake();
+    tick_until(engine, 600, [&] { return terrain->tiles->bakes_done() > bakes; });
+    expect(terrain->tiles->bakes_done() > bakes, "regenerate: the world re-bakes on request");
+    expect(terrain->tiles->at(tx, ty).steps == raised - 5, "regenerate: the edit is replaced by the generated tile");
 }
 

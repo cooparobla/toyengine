@@ -137,9 +137,10 @@ inline glm::vec3 shrink_terrain_and_centre(toy::world::TerrainComponent& terrain
  *        The demo itself is rounded; this is the variant its header describes.
  */
 inline std::string voxel_terrain_demo() {
-    // A fresh bake per test: the tile store is process-wide, and tests shrink the world.
+    // A fresh bake per test: the tile store is process-wide, and tests shrink the world -- so
+    // neither a stored grid in the store nor the demo's own .tiles file (copied with its folder).
     toy::world::TileMapStore::instance().clear();
-    return scene_variant("assets/scenes/terrain/terrain_demo/scene.yaml", "voxel_terrain", [](fkyaml::node& doc) {
+    std::string path = scene_variant("assets/scenes/terrain/terrain_demo/scene.yaml", "voxel_terrain", [](fkyaml::node& doc) {
         fkyaml::node* t = scene_component(doc, "terrain", "TileTerrain");
         if (t == nullptr) return;
         t->as_map().erase(fkyaml::node(std::string("kind_tile_sets")));
@@ -152,6 +153,9 @@ inline std::string voxel_terrain_demo() {
                     }),
                     roots.end());
     });
+    std::error_code ec;
+    std::filesystem::remove(std::filesystem::path(path).parent_path() / "terrain" / "terrain.tiles", ec);
+    return path;
 }
 
 } // namespace toy::test

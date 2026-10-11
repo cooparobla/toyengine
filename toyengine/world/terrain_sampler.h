@@ -79,7 +79,7 @@ struct TerrainParams {
     float height_step = 1.0f;
 
     /** @brief World height of the full `[0, 1]` elevation range -- the vertical scale of the world. */
-    float height_scale = 40.0f;
+    float height_scale = 10.0f;
 
     /** @brief Tiles per chunk edge; a chunk is `chunk_size * chunk_size` columns. */
     std::int32_t chunk_size = 16;

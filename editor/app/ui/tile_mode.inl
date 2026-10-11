@@ -105,7 +105,8 @@
     ObjectId tile_object_ = 0;
     glm::ivec2 tile_hover_{-1};
     bool tile_hover_valid_ = false;
-    double tile_last_click_ = -1.0;        ///< For double-click (select similar).
+    double tile_last_click_ = -1.0;        ///< For double-click (select similar): the last Select click's time...
+    glm::ivec2 tile_last_click_tile_{-1};  ///< ...and tile.
     // Regenerate: the grid before, until the bake lands and the undo step can be recorded.
     std::shared_ptr<toy::world::TileMapData> tile_regen_data_;
     std::vector<toy::world::TileRecord> tile_regen_before_;

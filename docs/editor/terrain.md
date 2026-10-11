@@ -110,8 +110,8 @@ are saved with the scene. Opening the scene again without saving discards unsave
 
 ## Tile Terrain
 
-A **Tile Terrain** generates a whole terraced world from a seed: an island or continents, rivers
-and biomes, cut into columns of tiles and built in chunks around the camera. Add one with
+A **Tile Terrain** is a terraced world made of tiles. It starts as a generated island, continent
+or archipelago with rivers and biomes, and from then on you edit it tile by tile. Add one with
 **Add > Tile Terrain**. Its panel in **Properties > Components** has these sections:
 
 - **Tiles**: the **Tile Set**, the object every tile is built from. Its pieces shape every top,
@@ -123,12 +123,42 @@ and biomes, cut into columns of tiles and built in chunks around the camera. Add
   from another set, for example stone from tileset_rock or water from tileset_voxel.
 - **Material**: the colours. The atlas holds one colour per surface (grass, sand, stone...), and
   the terrain shader adds the detail.
-- **World**: what gets generated: **Seed** (or **New Random Seed**), **Shape**, sea level,
-  rivers and climate.
-- **Size & Terraces**: how big the world is and how tall its steps are, with the size in metres.
-- **Streaming**: how many chunks stay loaded around the camera, which is the main cost control.
+- **Generator**: the settings the world was generated from: **Seed** (or **New Random Seed**),
+  **Shape**, sea level, rivers, climate, size and height range. The world is generated once and
+  stored as tiles, so changing a setting here does nothing until you press **Regenerate World**.
+  Regenerating replaces every tile, your edits included, and can be undone.
+- **Size & Terraces**: how big each tile and each step is in the world.
+- **Streaming**: how many chunks stay loaded around the point the camera looks at. This is the
+  main cost control.
 - **Collision**: on by default. Every chunk collides with exactly the surface it draws.
 
-Scenes made before tile sets existed show a **Convert to Tile Set** button. It rewrites the old
-settings without changing how the terrain looks.
+The tiles are saved in their own file (`terrain/<name>.tiles` beside the scene) when you save the
+scene (**Ctrl+S**).
 
+### Tile Mode
+
+Press **Edit Tiles** in the panel, or choose **Tile Mode** from the mode menu, to edit the tiles.
+Everything snaps to whole tiles and whole height steps:
+
+| Tool | Key | What it does |
+|---|---|---|
+| Select | 1 | Drag a rectangle of tiles. **Shift** adds to the selection, **Ctrl** removes from it. Double-click selects the connected tiles of the same height (or the same surface, set in the panel). **A** selects everything, **Alt+A** or **Esc** clears. |
+| Raise / Lower | 2 | Each tile under the brush rises by **Steps per Tile**, once per stroke. **Ctrl** lowers. **Shift** smooths. |
+| Flatten | 3 | Levels the brush area to the height of the tile you start on. |
+| Set Height | 4 | Sets tiles to the **Target Height**. **Ctrl**-click a tile to pick its height. |
+| Paint | 5 | Paints a surface (grass, sand, snow...) onto tile tops, and optionally the soil below. |
+| Smooth | 6 | Moves each tile one step toward its neighbours' height. |
+| Water | 7 | Floods tiles below the **Water Level**. **Ctrl** drains water back down to its bed. |
+
+The brush is a square of **Size** tiles (**[** and **]** change it). With tiles selected, the
+**Selected Tiles** section of **Properties > Tool** edits all of them at once:
+- height (set it, or **+1** / **−1 Step**);
+- the top and side surfaces;
+- the **Biome**;
+- **Temperature** and **Moisture** (0 to 1, from the generator);
+- **Water**;
+- the region and country ids.
+
+Where the selected tiles differ, the field shows "mixed". **Tile Under Cursor** shows everything
+stored about the tile you hover. Every stroke and edit is one undo step (**Ctrl+Z**). **Tab**
+leaves Tile Mode.

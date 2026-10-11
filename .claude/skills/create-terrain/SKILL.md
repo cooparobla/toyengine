@@ -11,7 +11,14 @@ map data and builds every tile from a **tile set**: an object asset whose childr
 to change the terrain from rounded cliffs to square blocks. For a heightmap you sculpt, paint or
 import, see the create-heightmap-terrain skill.
 
-Read **`toyengine/world/README.md`** (generation, tile sets, pieces, collision, generators) and
+The world is **stored**: mapcoopa bakes it once into a `.tiles` file (`tiles:`, default
+`terrain/<object>.tiles` beside the scene; baked automatically when missing), and from then on the
+tiles are edited -- in the editor's Tile Mode, or by gameplay (`TerrainComponent::tiles`, then
+`mark_dirty()`). The generator keys below only shape a bake; delete the `.tiles` file (or use
+Regenerate World) to bake again after changing them. Each tile stores height, surfaces, biome,
+temperature, moisture, water and river flags, and region / country ids.
+
+Read **`toyengine/world/README.md`** (stored tiles, generation, tile sets, pieces, collision) and
 copy from `assets/scenes/terrain/terrain_demo/scene.yaml`. Parser: `toyengine/scene/register.cpp`
 ("TileTerrain", alias "Terrain"); defaults in `toyengine/world/terrain_component.h` and
 `terrain_sampler.h`.
@@ -27,6 +34,7 @@ copy from `assets/scenes/terrain/terrain_demo/scene.yaml`. Parser: `toyengine/sc
       scale: { x: 1.0, y: 1.0, z: 1.0 }
     - type: TileTerrain
       tile_set: objects/terrain/tileset_round   # or tileset_voxel (blocks), tileset_soft, tileset_rock
+      # tiles: terrain/terrain.tiles            # the stored tiles (default); baked when missing
       seed: 251
       grid_size: 64
       shape: circle             # rectangle | circle | triangle | continent | archipelago
@@ -45,12 +53,13 @@ copy from `assets/scenes/terrain/terrain_demo/scene.yaml`. Parser: `toyengine/sc
         texture_metallic_roughness: textures/terrain_atlas_mr.png
 ```
 
-Key groups: tile set (`tile_set`, `kind_tile_sets { <kind>: objects/terrain/tileset_x }` with
+Key groups: stored tiles (`tiles`); tile set (`tile_set`, `kind_tile_sets { <kind>: objects/terrain/tileset_x }` with
 kinds grass, dirt, stone, sand, snow, rock, water, ice, moss, clay, ash, salt -- unlisted kinds
 use `tile_set`); generation (`seed`, `grid_size`, `sea_level`, `terrain_roughness`,
 `river_count`, `shape`, `continent_count`, `continent_size_m`, `irregularity`, `coast_detail`,
-`temperature_offset`); tiling (`tiles_per_grid_unit`, `tile_size`, `height_step`, `height_scale`,
-`chunk_size`, `view_radius`, `max_wall_steps`, `soil_depth_steps`, `max_chunk_jobs_per_frame`);
+`temperature_offset`, `tiles_per_grid_unit`, `height_scale` -- bake only); tiling (`tile_size`,
+`height_step`, `chunk_size`, `view_radius`, `max_wall_steps`, `soil_depth_steps`,
+`max_chunk_jobs_per_frame`);
 collision (`collision`, `physics_material`); look (`material`, separate from the tile set).
 
 Old keys still load: `styles:` / `kind_styles:` (named sets per kind); `side_mesh:` / `sides:` /

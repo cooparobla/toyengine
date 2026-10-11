@@ -152,10 +152,10 @@ public:
     int grid_size = 64;
 
     /** @brief Waterline, as a fraction of the elevation range. Land occupies `[sea_level, 1]`. */
-    double sea_level = 0.25;
+    double sea_level = 0.28;
 
     /** @brief Fractal displacement amplitude over the control mesh; 0 leaves the terrain faceted. */
-    double terrain_roughness = 0.35;
+    double terrain_roughness = 0.0;
 
     /** @brief River sources to attempt. Rivers cut visible channels into the tiled surface. */
     int river_count = 25;
@@ -165,7 +165,7 @@ public:
     // world units: they shape the map, and `height_scale`/`tile_size` then size the tiles.
 
     /** @brief `rectangle` (fills the canvas), `circle`, `triangle`, `continent` or `archipelago`. */
-    std::string shape = "rectangle";
+    std::string shape = "circle";
 
     /** @brief Archipelago only: landmasses to place. */
     int continent_count = 4;

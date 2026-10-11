@@ -312,9 +312,12 @@ void EditorApp::handle_tile_input_(imm::Context& ctx, const ViewProj& vp, bool h
         return;
     }
     if (hovered && in.pressed[0] && !alt) {
+        // A double-click: two Select clicks on the same tile in quick succession.
         const double now = tile_now();
-        const bool dbl = now - tile_last_click_ < 0.35 && tile_hover_valid_;
-        tile_last_click_ = dbl ? -1.0 : now;
+        const bool select = tile_brush_.tool == TileTool::Select;
+        const bool dbl = select && tile_hover_valid_ && tile_hover_ == tile_last_click_tile_ && now - tile_last_click_ < 0.35;
+        tile_last_click_ = (dbl || !select) ? -1.0 : now;
+        tile_last_click_tile_ = tile_hover_;
         tile_begin_stroke_(vp, m, shift, ctrl, alt, dbl);
     }
     if (!hovered || ctx.wants_keyboard() || ctx.any_popup_open()) return;

@@ -74,6 +74,7 @@ COOPA_TEST(tile_mode_raises_selects_undoes_and_saves) {
         return screen_of(engine, app, id, glm::vec3((x + 0.5f) * ts, (y + 0.5f) * ts, tiles->at(x, y).steps * hs), in.scale);
     };
     const auto a = at_tile(land.x, land.y);
+    dump(engine, "tile_mode_framed");
     coopa::test::require(a.has_value(), "the tile is on screen");
 
     const std::vector<toy::world::TileRecord> before = tiles->records();
@@ -82,14 +83,17 @@ COOPA_TEST(tile_mode_raises_selects_undoes_and_saves) {
     in.drag(*a + glm::vec2(1.0f, 0.0f), MouseButton::Left, 4);
     tick(engine, 3);
     expect(app.tile_history().undo_count() == undo0 + 1, "the stroke is one undo step");
+    // The drag may cross into the next tiles (they are a few pixels wide here); every tile the
+    // brush covered rises by exactly its two steps -- once per stroke, never stacked.
     int raised = 0, wrong = 0;
     for (std::size_t i = 0; i < before.size(); ++i) {
         const int dz = tiles->records()[i].steps - before[i].steps;
         if (dz == 2) ++raised;
         else if (dz != 0 && !before[i].water()) ++wrong;
     }
-    expect(raised >= 1 && raised <= 9 && wrong == 0,
-           "Raise lifts the brush's tiles by exactly two steps (" + std::to_string(raised) + " raised)");
+    expect(raised >= 9 && wrong == 0,
+           "Raise lifts the brush's tiles by exactly two steps, once each (" + std::to_string(raised) + " raised, " +
+               std::to_string(wrong) + " otherwise)");
     dump(engine, "tile_mode_raise");
 
     app.undo();

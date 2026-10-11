@@ -12,10 +12,12 @@ World-scale ground. Two kinds of terrain live here, each its own component:
 A streamed 3D tile world, built from a [mapcoopa](../../libs/mapcoopa) `MapGraph`.
 
 The map generator produces a 2D world — elevation, biomes, rivers, roads, towns. This module
-turns the first three into geometry: the map is sampled into a grid of integer-height columns,
-and every column is assembled from a **tile set**'s authored pieces, chosen by its
-neighbourhood — a top always, walls only where a neighbour is lower. Every piece in a chunk
-merges into one GPU mesh (and one collision mesh) built on the job system.
+**bakes** it once into a stored grid of tiles (integer-height columns plus their climate — see
+[Stored tiles](#stored-tiles)), and from then on the tiles *are* the terrain: edited in the
+editor's Tile Mode or by gameplay, saved in a `.tiles` file. Every column is assembled from a
+**tile set**'s authored pieces, chosen by its neighbourhood — a top always, walls only where a
+neighbour is lower. Every piece in a chunk merges into one GPU mesh (and one collision mesh)
+built on the job system.
 
 **The tile set is the template.** A tile set is an object asset
 (`assets/objects/terrain/tileset_*.yaml`) with one child per piece: three top quadrants, wall
@@ -54,7 +56,8 @@ rounded, with dynamic bodies dropped onto it. Its header says how to switch it t
 | [`tile_mesh_library.h`](tile_mesh_library.h) | `TileMeshLibrary` — bakes each tile set's pieces into all eight orientations once, **derives** their section caps, and `append_styled()`s one into a chunk's buffers with a scale, a translate and an index rebase. Geometry is **copied** out of its asset handles, so a baked library is immutable and safe for concurrent readers. |
 | [`terrain_sampler.h`](terrain_sampler.h) | `TerrainParams` (the whole tiling: tile size, height step, chunk size, view radius) and `TerrainSampler` — owns the generated `MapGraph` and answers `sample(tile_x, tile_y) -> TileColumn`. Adds the point-to-cell lookup mapcoopa has no need for: a nearest-site query over a uniform bucket index. Const after `build()`, hence concurrently readable. |
 | [`terrain_chunk.h`](terrain_chunk.h) | The mesher. `sample_chunk_columns()` reads a chunk plus a one-tile neighbour skirt; `mesh_chunk_styled()` assembles its columns into a `ChunkMeshData`; `build_chunk_collision()` turns that into a static collision mesh. Pure — no Vulkan, no Scene, no AssetManager — which is what lets it run on a worker and be tested with no device. `ChunkBuildJob` bundles one job's inputs and outputs into a single shared object. |
-| [`terrain_component.h`](terrain_component.h) | `TerrainComponent` — the scene-authored `TileTerrain` component (old name `Terrain`) (tile set, seed, map knobs, tiling, collision, material) plus the long-lived state: the generator, the sampler, the baked library and the chunk table. Carries no per-frame logic. |
+| [`terrain_component.h`](terrain_component.h) | `TerrainComponent` — the scene-authored `TileTerrain` component (old name `Terrain`) (tile set, stored tiles, generator keys, tiling, collision, material) plus the long-lived state: the bake, the baked library and the chunk table, and gameplay queries (`tile_at`, `record_at`, `height_at`). Carries no per-frame logic. |
+| [`tile_map_data.h`](tile_map_data.h) | `TileRecord` (12 bytes per tile: height, surfaces, flags, biome, climate, water depth, region / country), `TileMapData` (the stored grid: edit journal, column raycast, `.tiles` files) and `TileMapStore` (every terrain's tiles, keyed by file, surviving re-parses). |
 | [`snow_field.h`](snow_field.h) | `SnowField` — the snow trench field: a toroidal 512² grid of trench depths (unorm16, 10 cm cells) following the camera, with `stamp()` (max-combine), `refill()` and `trench_at()`. Also the CPU mirrors of the shaders' open-sky test and deep-snow height (`snow_open_sky()`, `deep_snow_depth()`). Not part of the tile world; it lives here as world-space ground state. |
 | [`snow_system.h`](snow_system.h) | The `SnowDeformer` component and `SnowSystem` (order **370**): stamps every deformer (and every Rigidbody with the weather's `snow_auto_deformers`) that stands in deep snow, refills trenches while it snows, and answers `depth_at()`. See [toyengine/weather](../weather/README.md#snow). |
 | [`terrain_system.h`](terrain_system.h) | `TerrainSystem` + `install_terrain_system()` — the streaming policy, at order **60**. Decides which chunks exist, submits their meshing jobs, uploads finished ones (with their colliders), and releases the ones the camera has left behind. |
@@ -63,13 +66,14 @@ rounded, with dynamic bodies dropped onto it. Its header says how to switch it t
 
 ```
 TerrainSystem::execute()            (order 60, owner thread)
-├─ begin_generation()  ──────────►  MapGenerator::generate_async()   [job engine, once]
-├─ poll_generation()   ──────────►  TerrainSampler::build()          [owner thread, once]
+├─ begin_generation()  ──────────►  MapGenerator::generate_async()   [job engine; only to bake]
+├─ poll_generation()   ──────────►  TerrainSampler::build() + bake   [bake on the job engine]
 ├─ poll_tile_sets()    ──────────►  TileMeshLibrary::bake_*()        [owner thread, once]
-├─ want / release chunks around CameraComponent::main()
+├─ mark_edited_chunks_()            chunks whose tiles changed go stale
+├─ want / release chunks around where the main camera looks
 ├─ submit_queued_chunks()  ──────►  ChunkBuildJob::run()             [job engine, per chunk]
-│                                     └─ sample_chunk_columns() + mesh_chunk_styled()
-│                                        + weld + build_chunk_collision()
+│    sample_chunk_columns(tiles)      └─ mesh_chunk_styled() + weld + build_chunk_collision()
+│    [owner thread: a plain copy]
 ├─ upload_finished_chunks()  ────►  Mesh::from_arrays() + assets.create() + add_child()
 │                                     + MeshCollider                 [owner thread]
 └─ PhysicsSystem::refresh()   (once, if a chunk collider came or went)
@@ -105,6 +109,55 @@ stay on the owner thread.
    Each quadrant and wall half therefore takes a piece chosen from the neighbourhood
    (`tile_topology.h`), and a tile with no exposed edge is one flat quad.
    `plateau_interior_merges_flat` in `styled_tiles` is the tripwire.
+
+## Stored tiles
+
+A TileTerrain's tiles live in a `TileMapData` ([`tile_map_data.h`](tile_map_data.h)), one
+12-byte `TileRecord` per tile:
+
+| Field | Meaning |
+|---|---|
+| `steps` | Height in whole steps (the water surface on water) |
+| `kinds` | Top and side surface kinds (4 bits each) |
+| `flags` | Water, Ocean, Coast, River (Road, Town reserved) |
+| `biome` | mapcoopa biome |
+| `temperature`, `moisture` | mapcoopa's 0..1 values (temperature is a static yearly mean: 0 polar, 1 equatorial), as bytes |
+| `water_depth` | Water only: steps from the surface down to the bed |
+| `region`, `country` | mapcoopa ids (`0xFFFF` = none) |
+
+**Baking.** With no `.tiles` file (or on a Regenerate) the terrain generates the mapcoopa map from
+its generator keys (`seed`, `shape`, `sea_level`, `grid_size`, `tiles_per_grid_unit`,
+`height_scale`, …) and `TerrainSampler::bake()` fills every record: lakes at their own water level
+(the sea at sea level), river channels flagged. After that the generator keys only matter to the
+next Regenerate; `tile_size`, `height_step`, the tile sets, chunking and collision apply live.
+
+**Files.** `tiles:` names the file (default `terrain/<object>.tiles` beside the scene). A header,
+a chunk index, then one deflated block per 32 × 32 storage chunk, fields stored plane by plane
+so the terrain's coherence compresses (terrain_demo's 65k tiles: 127 KB). Saving recompresses
+only chunks edited since. `TileMapStore` owns every terrain's tiles keyed by file, so re-parsing
+the component (the editor does on every change) keeps the live — possibly unsaved — tiles; the
+editor writes them with the scene (Ctrl S).
+
+**Editing at runtime.** The same calls the editor's brushes use:
+
+```cpp
+auto* terrain = scene.find_first_component<toy::world::TerrainComponent>();
+glm::ivec2 t;
+if (terrain->tile_at(world_pos, t)) {
+    terrain->tiles->at(t.x, t.y).steps -= 1;                     // dig
+    terrain->tiles->mark_dirty(toy::world::IRect{t.x, t.y, t.x + 1, t.y + 1});
+}
+const toy::world::TileRecord* r = terrain->record_at(world_pos);   // biome, temperature...
+```
+
+`mark_dirty()` journals the rect; TerrainSystem re-meshes exactly the chunks it touches (and the
+neighbours whose skirt it is), each keeping its old mesh until the new one swaps in, and the chunk
+collider follows. Chunk jobs mesh a copy of their columns taken at submit, so edits never race a
+running job. Owner thread only.
+
+**Editing in the editor.** Tile Mode (`editor/app/ui/tile_mode.cpp`, tools in
+`editor/terrain/tile_brush.h`): square brushes, tile selection and selection edits, undo in the
+scene's timeline. See the editor manual's Terrain page.
 
 ## Collision
 
@@ -362,5 +415,6 @@ by layer / slope / height, streamed around the camera, re-scattered where the te
 
 Caves and overhangs (the height-column model has no room for them, though mapcoopa generates cave
 systems), water as its own blended pass rather than an opaque surface, chunk LOD,
-rivers/roads/towns as 3D geometry, and terrain colliders. Each sits on top of this layer rather
+rivers/roads/towns as 3D geometry, loading only the `.tiles` chunks near the camera (the file
+format allows it; everything is loaded today), and a per-tile tile-set override. Each sits on top of this layer rather
 than requiring it to change shape.

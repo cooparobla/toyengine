@@ -50,27 +50,40 @@ void TerrainSystem::tick_terrain_(TerrainComponent& terrain, coopa::scene::Scene
     if (!terrain.is_ready() || ctx.jobs == nullptr) return;
 
     mark_edited_chunks_(terrain);
-    const ChunkCoord centre = terrain.params.chunk_at(camera_position_(terrain));
+    const ChunkCoord centre = terrain.params.chunk_at(stream_centre_(terrain));
     want_chunks_(terrain, centre);
     release_distant_chunks_(terrain, centre, ctx);
     upload_finished_chunks_(terrain, scene);
     submit_queued_chunks_(terrain, centre, ctx);
 }
 
-glm::vec3 TerrainSystem::camera_position_(const TerrainComponent& terrain) const {
-    if (CameraComponent* camera = CameraComponent::main()) {
-        if (camera->owner != nullptr) {
-            if (auto* tc = camera->owner->get_transform()) {
-                return glm::vec3(tc->transform().get_world_matrix()[3]);
-            }
-        }
-    }
+glm::vec3 TerrainSystem::stream_centre_(const TerrainComponent& terrain) const {
+    glm::mat4 to_local(1.0f);
     if (terrain.owner != nullptr) {
-        if (auto* tc = terrain.owner->get_transform()) {
-            return glm::vec3(tc->transform().get_world_matrix()[3]);
-        }
+        if (auto* tc = terrain.owner->get_transform()) to_local = glm::inverse(tc->transform().get_world_matrix());
     }
-    return glm::vec3(0.0f);
+    CameraComponent* camera = CameraComponent::main();
+    if (camera == nullptr || camera->owner == nullptr || camera->owner->get_transform() == nullptr) {
+        return glm::vec3(0.0f);   // the terrain's own origin
+    }
+    const glm::mat4 cam = camera->owner->get_transform()->transform().get_world_matrix();
+    const glm::vec3 pos = glm::vec3(to_local * cam[3]);
+    // The camera looks down its own -Z.
+    const glm::vec3 fwd = glm::normalize(glm::vec3(to_local * glm::vec4(-glm::vec3(cam[2]), 0.0f)));
+
+    // Stream around what the camera looks at, not where it stands: an orbit or editor camera
+    // stands well off the ground (or off the map) looking at it. Only within reach -- a camera
+    // looking at the horizon keeps streaming around itself.
+    const float reach = 4.0f * static_cast<float>(terrain.params.view_radius + 1) * terrain.params.chunk_world_size();
+    if (terrain.tiles && !terrain.tiles->empty()) {
+        TileHit hit;
+        if (terrain.tiles->raycast(pos, fwd, terrain.params.tile_size, terrain.params.height_step, reach, hit)) return hit.point;
+    }
+    if (fwd.z < -1e-3f) {
+        const float t = -pos.z / fwd.z;   // the terrain's base plane
+        if (t > 0.0f && t < reach) return pos + fwd * t;
+    }
+    return pos;
 }
 
 bool TerrainSystem::chunk_in_world(const TerrainComponent& terrain, const ChunkCoord& coord) {

@@ -137,7 +137,7 @@ inline glm::vec3 shrink_terrain_and_centre(toy::world::TerrainComponent& terrain
  */
 inline std::string voxel_terrain_demo() {
     return scene_variant("assets/scenes/terrain/terrain_demo/scene.yaml", "voxel_terrain", [](fkyaml::node& doc) {
-        fkyaml::node* t = scene_component(doc, "terrain", "Terrain");
+        fkyaml::node* t = scene_component(doc, "terrain", "TileTerrain");
         if (t == nullptr) return;
         t->as_map().erase(fkyaml::node(std::string("styles")));
         t->as_map().erase(fkyaml::node(std::string("kind_styles")));

@@ -1,5 +1,14 @@
 # toyengine/world
 
+World-scale ground. Two kinds of terrain live here, each its own component:
+
+- **`TileTerrain`** (formerly `Terrain`; both names load) -- a streamed 3D tile world built from a
+  [mapcoopa](../../libs/mapcoopa) `MapGraph`. Most of this file.
+- **`HeightmapTerrain`** -- a sculptable, paintable heightmap for open worlds, drawn as
+  GPU-displaced tessellated chunks. See [Heightmap terrain](#heightmap-terrain).
+
+## TileTerrain
+
 A streamed 3D tile world, built from a [mapcoopa](../../libs/mapcoopa) `MapGraph`.
 
 The map generator produces a 2D world — elevation, biomes, rivers, roads, towns. This module
@@ -25,7 +34,7 @@ styled; its header says how to switch it to the voxel look.
 | [`tile_mesh_library.h`](tile_mesh_library.h) | `TileMeshLibrary` — bakes an authored side mesh into all six orientations once, then `append()`s one into a chunk's buffers with a scale, a translate, a UV remap and an index rebase. For styled tiles it also bakes each style's pieces into all eight orientations and **derives** their section caps (`append_styled()`). Geometry is **copied** out of its asset handles, so a baked library is immutable and safe for concurrent readers. |
 | [`terrain_sampler.h`](terrain_sampler.h) | `TerrainParams` (the whole tiling: tile size, height step, chunk size, view radius) and `TerrainSampler` — owns the generated `MapGraph` and answers `sample(tile_x, tile_y) -> TileColumn`. Adds the point-to-cell lookup mapcoopa has no need for: a nearest-site query over a uniform bucket index. Const after `build()`, hence concurrently readable. |
 | [`terrain_chunk.h`](terrain_chunk.h) | The mesher. `sample_chunk_columns()` reads a chunk plus a one-tile neighbour skirt; `mesh_chunk_columns()` merges every exposed side into a `ChunkMeshData`; `mesh_chunk_styled()` is the styled counterpart. Pure — no Vulkan, no Scene, no AssetManager — which is what lets it run on a worker and be tested with no device. `ChunkBuildJob` bundles one job's inputs and output into a single shared object. |
-| [`terrain_component.h`](terrain_component.h) | `TerrainComponent` — the scene-authored `Terrain` component (seed, map knobs, tiling, side meshes, material) plus the long-lived state: the generator, the sampler, the baked library and the chunk table. Carries no per-frame logic. |
+| [`terrain_component.h`](terrain_component.h) | `TerrainComponent` — the scene-authored `TileTerrain` component (old name `Terrain`) (seed, map knobs, tiling, side meshes, material) plus the long-lived state: the generator, the sampler, the baked library and the chunk table. Carries no per-frame logic. |
 | [`snow_field.h`](snow_field.h) | `SnowField` — the snow trench field: a toroidal 512² grid of trench depths (unorm16, 10 cm cells) following the camera, with `stamp()` (max-combine), `refill()` and `trench_at()`. Also the CPU mirrors of the shaders' open-sky test and deep-snow height (`snow_open_sky()`, `deep_snow_depth()`). Not part of the tile world; it lives here as world-space ground state. |
 | [`snow_system.h`](snow_system.h) | The `SnowDeformer` component and `SnowSystem` (order **370**): stamps every deformer (and every Rigidbody with the weather's `snow_auto_deformers`) that stands in deep snow, refills trenches while it snows, and answers `depth_at()`. See [toyengine/weather](../weather/README.md#snow). |
 | [`terrain_system.h`](terrain_system.h) | `TerrainSystem` + `install_terrain_system()` — the streaming policy, at order **60**. Decides which chunks exist, submits their meshing jobs, uploads finished ones, and releases the ones the camera has left behind. |
@@ -274,6 +283,44 @@ under the scene's `styles:`.
 
 `KINDS` in the atlas generator must stay in `TileKind` order — the C++ side derives a cell's UV
 rectangle from the enum value alone, so a kind is appended, never inserted.
+
+## Heightmap terrain
+
+`HeightmapTerrain` ([`heightmap_terrain.h`](heightmap_terrain.h)) is a plain height grid: a size and
+height in metres, a chunk size and a resolution, a 16-bit greyscale heightmap PNG and two RGBA8
+splat PNGs painting eight layers. Demo: `./build/toyengine heightmap_terrain_demo`.
+
+| File | Purpose |
+|---|---|
+| [`heightmap_data.h`](heightmap_data.h) | `HeightmapData` -- the CPU source of truth: the height grid (metres), the splats, bilinear sampling / normals / layer weights, a surface raycast, resample on a geometry change, and the **edit journal** (`height_dirty_since(revision)`) every consumer follows. `HeightmapView` is the world-space query handle. |
+| [`heightmap_store.h`](heightmap_store.h) | `HeightmapStore` -- the process-wide owner of every terrain's data, keyed by its heightmap file, so re-parsing a component (the editor does on every edit) keeps unsaved strokes. Saves the PNGs; restores an earlier shape exactly when a resize is undone. |
+| [`png16.h`](png16.h) | 16-bit greyscale PNG writer (stb's zlib, our chunks) and readers. |
+| [`heightmap_terrain_system.h`](heightmap_terrain_system.h) | `HeightmapTerrainSystem` (order **61**) -- chunk objects, the GPU height / splat textures (patched from the journal), the layer texture arrays, the heightfield collider, and the per-frame `TerrainFrameBinding`s the renderer reads. |
+
+**Drawing.** Every chunk is one instance of one shared flat patch mesh, so all chunks of a terrain
+batch into a single instanced draw. The `heightmap_terrain` surface shader
+([`heightmap_terrain_surface.glsl`](../../assets/shaders/heightmap_terrain_surface.glsl)) places each
+vertex on the grid -- the height texture is the chunks' material displacement map, the terrain's
+numbers a slot of the surface world UBO -- and its own tessellation control stages size edges
+from the placed points, so chunk borders never crack. A chunk's transform carries only its corner
+and its height range (for culling). Splats and the layer arrays are G-buffer set 3
+([`render/terrain_gpu.h`](../render/terrain_gpu.h)). Up to 4 heightmap terrains per scene.
+
+**Physics.** A `HeightfieldCollider` (physxcoopa) on a runtime child: a `TriangleMesh` in
+height-grid mode -- no stored triangles, everything (contacts, raycasts, sweeps, the character
+motor, the navmesh bake) runs on triangles computed from the grid. Rebuilt when edits pause.
+
+**Weather.** Snow cover as any surface; with `deep_snow`, deep snow and its trenches on flat
+ground (the cover layer is then off -- the deep snow is the snow); rain darkens and glosses the
+ground and fills puddles in hollows (`puddles`); GroundProbe reads the grid directly, so edit mode
+is right too.
+
+**Foliage.** ParticleSystem `mode: scatter` + `shape: terrain`
+([`particles/terrain_scatter.h`](../particles/terrain_scatter.h)): deterministic per chunk, masked
+by layer / slope / height, streamed around the camera, re-scattered where the terrain is edited.
+
+**Editing.** The editor's Terrain Mode (`editor/app/ui/terrain.cpp`, brushes in
+`editor/terrain/terrain_brush.h`).
 
 ## Not here yet
 

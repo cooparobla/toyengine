@@ -60,8 +60,10 @@ COOPA_TEST(every_component_schema_loads_in_the_engine) {
         try {
             coopa::scene::Scene scene = coopa::scene::SceneLoader::load_from_node(doc, (root / "assets" / "scenes" / "probe.yaml").string());
             auto* o = scene.find_object("Probe");
-            has = o && (type == "Transform" || o->get_component_by_type_name(type) != nullptr ||
-                        o->get_component_by_type_name(type + "Component") != nullptr);
+            // `Terrain` is TileTerrain's old name: its schema creates a TileTerrain.
+            const std::string created = type == "Terrain" ? std::string("TileTerrain") : type;
+            has = o && (type == "Transform" || o->get_component_by_type_name(created) != nullptr ||
+                        o->get_component_by_type_name(created + "Component") != nullptr);
             if (!has && o) {
                 for (const auto& c : o->components()) error += " " + c->type_name();
             }

@@ -327,6 +327,12 @@ bool ToyRenderPipeline::render(coopa::gfx::presentation::Renderer& renderer, coo
     surface_world_->upload(frame_slot, surface_state_, cam_pos,
                            0.5f * static_cast<float>(render_extent_.height) * std::abs(unjittered_proj[1][1]),
                            elapsed_time_);
+    // Heightmap terrains' set 3, and the material sets of height grids that went away (their
+    // textures are still alive -- the asset manager's grace period -- so the addresses cannot
+    // have been reused yet).
+    terrain_gpu_->update(surface_state_.terrains);
+    for (const auto* gone : terrain_gpu_->released()) material_cache_->release(gone);
+    material_cache_->tick();
 
     // One hierarchy walk for every component type this frame's gathers read -- see
     // FrameScene. Everything below reads frame_scene_ instead of walking the scene again.
@@ -576,6 +582,9 @@ void ToyRenderPipeline::build_geometry_passes_() {
     // The surface world set (tessellation view, snow, precipitation occlusion, trench field):
     // set 2 of every G-buffer pipeline, set 1 of every shadow pipeline -- see surface_world.h.
     surface_world_ = std::make_unique<SurfaceWorldData>(device_, allocator_);
+    // Set 3 of every G-buffer pipeline: heightmap terrains' splats and layer arrays. Stock
+    // shaders never declare it, so only `heightmap_terrain` draws bind it.
+    terrain_gpu_ = std::make_unique<TerrainGpuRegistry>(device_, allocator_, cmd_pool_);
 
     shadow_pipeline_ = std::make_unique<coopa::gfx::engine::passes::ShadowPipeline>(
         device_, shadow_target_.dir_render_pass(), shadow_target_.cube_render_pass(),
@@ -590,7 +599,7 @@ void ToyRenderPipeline::build_geometry_passes_() {
         device_, gbuffer_target_.render_pass(), camera_layout_->handle(), material_cache_->layout(),
         config_.shaders("gbuffer.vert"),
         config_.shaders("gbuffer.frag"),
-        std::vector<VkDescriptorSetLayout>{surface_world_->layout().handle()});
+        std::vector<VkDescriptorSetLayout>{surface_world_->layout().handle(), terrain_gpu_->layout().handle()});
 
     // Tessellation (MeshRenderer::tessellation): the stock tessellated pipelines, and the
     // shared pass-through vertex / default control stages every variant's twin uses. A
@@ -632,7 +641,7 @@ void ToyRenderPipeline::build_geometry_passes_() {
             config_.shaders(sd.shadow_frag.empty() ? "shadow_depth.frag" : sd.shadow_frag),
             config_.shaders(sd.shadow_cube_vert.empty() ? "shadow_cube.vert" : sd.shadow_cube_vert),
             config_.shaders(sd.shadow_cube_frag.empty() ? "shadow_cube.frag" : sd.shadow_cube_frag),
-            sd.cull, opt(dir_tese), opt(cube_tese));
+            sd.cull, opt(dir_tese), opt(cube_tese), opt(sd.shadow_tesc), opt(sd.shadow_cube_tesc));
     }
 }
 
@@ -4208,6 +4217,7 @@ void ToyRenderPipeline::record_gbuffer_(coopa::gfx::command::CommandBuffer& cmd,
     bool have_bound = true; // stock, bound just above
 
     const void* last_set = nullptr;
+    const void* last_terrain_set = nullptr;
     const coopa::gfx::engine::data::Mesh* last_mesh = nullptr;
     // Already frustum-culled and batched (see gather_meshes_): one instanced draw per run
     // of identical mesh + LOD + material. BLEND materials never appear here -- they are
@@ -4225,6 +4235,7 @@ void ToyRenderPipeline::record_gbuffer_(coopa::gfx::command::CommandBuffer& cmd,
             last_tess           = tess;
             have_bound          = true;
             last_set            = nullptr;
+            last_terrain_set    = nullptr;
         }
 
         coopa::gfx::engine::passes::GBufferPipeline::PushConstants pc;
@@ -4246,6 +4257,16 @@ void ToyRenderPipeline::record_gbuffer_(coopa::gfx::command::CommandBuffer& cmd,
         if (&set != last_set) {
             cmd.bind_descriptor_set(gbuffer_pipeline_->layout(), set, 1);
             last_set = &set;
+        }
+        // Set 3: a heightmap terrain chunk's splats and layer arrays, found by its height grid
+        // (the material's displacement map) -- see terrain_gpu.h.
+        if (mr_mat.shader == "heightmap_terrain") {
+            const auto& tset = terrain_gpu_->set_for(mr_mat.displacement_handle.is_loaded()
+                                                         ? mr_mat.displacement_handle.get() : nullptr);
+            if (&tset != last_terrain_set) {
+                cmd.bind_descriptor_set(gbuffer_pipeline_->layout(), tset, 3);
+                last_terrain_set = &tset;
+            }
         }
 
         const auto* mesh = mr->get_mesh().get();

@@ -63,7 +63,8 @@ on a component or child deletes it.
 | SceneLink | `target_scene` (relative to this scene file, an asset path, or a scene name), `transition` (`fade` / `loading_screen` / `none`), `loading_screen` (UI asset, `ui/loading_screen`), `spawn_point` (object in the target scene the player moves to), `color` (fade colour, black), `fade_time` (0.35), `min_display_time` (0), `size` (2,2,2; trigger box, local). Fires when a CharacterController enters (entry only) -- see toyengine/core/README.md |
 | SaveId | `id` (string or int; unique per scene; empty = the object's name path). Marks the object for save/load: its ISaveable components write `objects/<id>/...`. The editor fills in a fresh id when added or duplicated -- see toyengine/save/README.md |
 | HealthDriver | `bar_object`, `max_health`, `start_health`, `damage_per_second`, `regen_per_second`, `turnaround_fraction` |
-| Terrain | see create-terrain |
+| TileTerrain (old name Terrain) | see create-terrain |
+| HeightmapTerrain | see create-heightmap-terrain |
 | WaterBody, Buoyancy | see create-water-body |
 | ParticleSystem, LightFlicker | see create-particle-effect |
 | WeatherSurface | `splashes` (true). Rain splashes / sprays and snow settles on this object and its children; unmarked surfaces take the drops silently (they still keep the rain off what is below). Usually on the ground plane / streets |

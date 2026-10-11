@@ -86,6 +86,13 @@ public:
         visible_.clear();
         for (ParticleSystem* ps : systems_) {
             const auto& s = ps->settings;
+            if (ps->is_terrain_scatter()) {
+                // Streamed per terrain chunk (terrain_scatter.h): one mesh batch per built chunk
+                // in range and in view.
+                collect_terrain_scatter_(scene, *ps, view,
+                                         [&](const glm::vec3& lo, const glm::vec3& hi) { return cull(lo, hi); }, out);
+                continue;
+            }
             if (ps->gpu_active()) {
                 // Simulated every frame, seen or not; drawn (indirectly) only when visible.
                 render::GpuParticleJob job;
@@ -162,6 +169,12 @@ private:
     void assign_gpu_();
 
     void gather_(coopa::scene::Scene& scene);
+
+    /** @brief A `shape: terrain` scatter: updates its chunk cache around the camera and emits a
+     *         mesh batch per visible chunk. */
+    void collect_terrain_scatter_(coopa::scene::Scene& scene, ParticleSystem& ps, const ParticleView& view,
+                                  const std::function<bool(const glm::vec3&, const glm::vec3&)>& cull,
+                                  render::ParticleFrameState& out);
 
     static bool active_in_hierarchy_(const coopa::scene::SceneObject& obj);
 

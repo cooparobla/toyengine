@@ -12,16 +12,23 @@
 // The general cover layer (gfx/surface/snow.glsl) is turned off for this shader
 // (GFX_SURFACE_NO_SNOW in snow.frag): this IS the snow.
 
+//
+// Another shader can layer deep snow over its own surface (the heightmap terrain does): define
+// SNOW_SURFACE_NO_HOOKS before including this file, then call gfx_deep_snow_fragment(s) from its
+// own fragment hook and add gfx_snow_height() in its own vertex hook.
+
 #include <gfx/surface/snow_height.glsl>
 
-#ifdef GFX_SURFACE_VERTEX
+#if defined(GFX_SURFACE_VERTEX) && !defined(SNOW_SURFACE_NO_HOOKS)
 void gfx_surface_vertex(inout GfxSurfaceVertex v) {
     v.position_ws.z += gfx_snow_height(v.position_ws);
 }
 #endif // GFX_SURFACE_VERTEX
 
 #ifdef GFX_SURFACE_FRAGMENT
-void gfx_surface_fragment(inout GfxSurface s) {
+/// Deep snow's look over whatever `s` holds: snow where it lies deep, the surface showing through
+/// trenches and thin edges, normals from the snow height field.
+void gfx_deep_snow_fragment(inout GfxSurface s) {
     if (gfx_world.snow.x <= 0.0 || gfx_world.snow.y <= 0.0) return;
     // The height field at this fragment's xy (the displacement is +Z only). Its z enters only
     // through the soft open-sky test, which a few centimetres either way does not move.
@@ -81,4 +88,8 @@ void gfx_surface_fragment(inout GfxSurface s) {
     s.emissive  = mix(s.emissive, vec3(0.0), amount);
     s.normal_ws = normalize(mix(s.normal_ws, n_snow, amount));
 }
+
+#ifndef SNOW_SURFACE_NO_HOOKS
+void gfx_surface_fragment(inout GfxSurface s) { gfx_deep_snow_fragment(s); }
+#endif
 #endif // GFX_SURFACE_FRAGMENT

@@ -6,6 +6,7 @@
 #include <toyengine/scene/kinematic_controller.h>
 #include <toyengine/scene/ragdoll.h>
 #include <toyengine/scene/skinned_mesh_renderer.h>
+#include <toyengine/world/heightmap_terrain_system.h>
 
 namespace toy {
 namespace core {
@@ -499,6 +500,9 @@ void Engine::prepare_scene_(coopa::scene::Scene& scene, bool drain_assets) {
     // frame already has its world matrix resolved when the render gather reads it. A scene
     // with no Terrain component pays one empty get_components<>() sweep per frame.
     world::install_terrain_system(scene, ctx_.device(), ctx_.allocator(), assets_);
+    // Order 61: heightmap terrains -- their chunks, GPU grids and colliders, before Physics (100)
+    // steps against them. See heightmap_terrain_system.h.
+    world::install_heightmap_terrain_system(scene, ctx_.device(), ctx_.allocator(), ctx_.command_pool(), assets_);
     // Order 90: bakes water surfaces and refreshes the buoyant-body list right before
     // Physics (100) steps, whose substep callback it drives -- see water_system.h's file doc.
     water::install_water_system(scene, &ctx_.device(), &ctx_.allocator(), &assets_)
@@ -1356,6 +1360,10 @@ void Engine::sync_surface_state_(coopa::scene::Scene& scene) {
             st.trench_version = f.version();
         }
     }
+    // Heightmap terrains: their slots' numbers and textures (G-buffer set 3).
+    if (const world::HeightmapTerrainSystem* hts = world::find_heightmap_terrain_system(scene)) {
+        st.terrains = hts->frame_bindings();
+    }
     pipeline_->set_surface_state(std::move(st));
 }
 
@@ -2001,6 +2009,26 @@ render::ToyRenderConfig Engine::make_render_config_(const AppConfig& config,
         /* tesc */ "",
         /* tese */ "triplanar.tese",
     });
+    {
+        // The sculptable heightmap terrain (toyengine/world/heightmap_terrain.h): a shared flat
+        // patch placed on the height grid in every stage, its own control stages so edges are
+        // sized from the placed points -- see heightmap_terrain_surface.glsl.
+        coopa::gfx::pipeline::SurfaceShaderDesc d;
+        d.name = "heightmap_terrain";
+        d.domain = coopa::gfx::pipeline::SurfaceShaderDomain::Opaque;
+        d.vert = "heightmap_terrain.vert";
+        d.frag = "heightmap_terrain.frag";
+        d.shadow_vert = "heightmap_terrain_shadow.vert";
+        d.shadow_cube_vert = "heightmap_terrain_shadow_cube.vert";
+        d.cull = coopa::gfx::CullMode::Back;
+        d.tesc = "heightmap_terrain.tesc";
+        d.tese = "heightmap_terrain.tese";
+        d.shadow_tese = "heightmap_terrain_shadow.tese";
+        d.shadow_cube_tese = "heightmap_terrain_shadow_cube.tese";
+        d.shadow_tesc = "heightmap_terrain_shadow.tesc";
+        d.shadow_cube_tesc = "heightmap_terrain_shadow_cube.tesc";
+        rc.surface_shaders.add(std::move(d));
+    }
     rc.surface_shaders.add({
         /* name  */ "editor_paint",   // the toyeditor's Vertex / Weight Paint display -- see
         /* domain */ coopa::gfx::pipeline::SurfaceShaderDomain::Opaque,   // editor_paint.vert

@@ -20,6 +20,7 @@
 #include <toyengine/scene/skinned_mesh_renderer.h>
 #include <toyengine/water/buoyancy.h>
 #include <toyengine/water/water_body.h>
+#include <toyengine/world/heightmap_terrain.h>
 #include <toyengine/world/terrain_component.h>
 
 namespace toy {
@@ -361,11 +362,12 @@ void register_scene_components(coopa::gfx::core::Device& device,
             obj.add_component<ClothRenderer>(device, allocator, assets, frames_in_flight);
         });
 
-    // The streamed tile world (toyengine/world/). The component is configuration plus state;
+    // `TileTerrain`: the streamed mapcoopa tile world (toyengine/world/); its old name, `Terrain`,
+    // still loads (registered under both below). The component is configuration plus state;
     // every per-frame decision lives in toy::world::TerrainSystem, which toy::core::Engine
     // installs. Only `assets` is captured -- the chunk meshes this eventually builds are created
     // by that system, which holds the device and allocator itself.
-    SceneLoader::register_component_parser("Terrain",
+    auto parse_tile_terrain =
         [&assets](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext& ctx) {
             auto* terrain = obj.add_component<world::TerrainComponent>();
             world::TerrainParams& params = terrain->params;
@@ -539,7 +541,14 @@ void register_scene_components(coopa::gfx::core::Device& device,
                     }
                 }
             }
-        });
+        };
+    SceneLoader::register_component_parser("TileTerrain", parse_tile_terrain);
+    SceneLoader::register_component_parser("Terrain", parse_tile_terrain);
+
+
+    // The sculptable heightmap terrain -- see toyengine/world/heightmap_terrain.h. Drawn, collided
+    // and streamed by toy::world::HeightmapTerrainSystem, which Engine installs.
+    world::register_heightmap_terrain_component(assets);
 
     // A lake, ocean or river -- see toyengine/water/water_body.h. Baked and published (mesh +
     // material params on the sibling MeshRenderer) by toy::water::WaterSystem, which Engine

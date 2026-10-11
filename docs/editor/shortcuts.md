@@ -204,6 +204,21 @@ Pointer over the viewport. Moving the view and the display keys still work. See
 | Right-click | Mode menu |
 | **Tab** | Back to Object Mode |
 
+## Terrain Mode
+
+See [Terrain](terrain.md).
+
+| Shortcut | Action |
+|---|---|
+| Left-drag | Use the tool |
+| **Ctrl**+left-drag | Lower / carve / erase (Set Height: **Ctrl**+click picks the target height) |
+| **Shift**+left-drag | Smooth, whatever the tool |
+| **1** to **7** | Raise / Lower, Smooth, Flatten, Set Height, Noise, Erode, Paint |
+| **F** | Resize the brush |
+| **Shift+F** | Change the brush strength |
+| **[** / **]** | Smaller / larger brush |
+| **Tab** or **Esc** | Back to Object Mode |
+
 ## Vertex Paint and Weight Paint
 
 Pointer over the viewport. Moving the view and the display keys still work. See

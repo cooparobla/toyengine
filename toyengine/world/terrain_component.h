@@ -1,6 +1,7 @@
 /**
  * @file terrain_component.h
- * @brief The scene-authored `Terrain` component: what world to generate, how to tile it, and
+ * @brief The scene-authored `TileTerrain` component (formerly `Terrain`, still accepted): what
+ *        mapcoopa world to generate, how to tile it, and
  *        the runtime state the streaming system drives.
  *
  * One of these on a SceneObject turns that object into the root of a streamed tile world. It
@@ -11,7 +12,7 @@
  *
  * Example YAML:
  * @code
- * - type: Terrain
+ * - type: TileTerrain
  *   seed: 251
  *   grid_size: 64
  *   tiles_per_grid_unit: 4
@@ -118,7 +119,7 @@ public:
      */
     ~TerrainComponent() override;
 
-    std::string type_name() const override { return "Terrain"; }
+    std::string type_name() const override { return "TileTerrain"; }
 
     // ------------------------------------------------------------------
     // Authored configuration -- everything a scene YAML sets.

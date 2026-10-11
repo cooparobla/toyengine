@@ -33,10 +33,52 @@
 
 #include <glm/glm.hpp>
 
+#include <gfxcoopa/engine/data/texture.h>
 #include <gfxcoopa/presentation/renderer.h>
 
 namespace toy {
 namespace render {
+
+/** @brief Heightmap terrains a frame can draw at once (world.glsl's gfx_world.terrain[]). */
+inline constexpr int kMaxSurfaceTerrains = 4;
+/** @brief Paint layers per heightmap terrain (two RGBA8 splat maps). */
+inline constexpr int kSurfaceTerrainLayers = 8;
+
+/**
+ * @brief std140 mirror of world.glsl's GfxTerrain: one heightmap terrain's numbers -- where its
+ *        grid sits, how big a texel is, and each paint layer's look. Textures are not here: the
+ *        height grid is the chunks' material displacement map and the splats / layer arrays are
+ *        G-buffer set 3 (toy::render::TerrainGpuRegistry).
+ */
+struct alignas(16) TerrainGpuParams {
+    glm::vec4  origin{0.0f};   ///< xyz world position of the grid's (0, 0) corner at height 0, w chunk size (m)
+    glm::vec4  cell{1.0f};     ///< xy metres per height texel, zw terrain size (m)
+    glm::ivec4 dims{0};        ///< x nx, y ny, z layer count, w flags (TerrainGpuFlag)
+    glm::vec4  misc{0.0f};     ///< x height (m), y splat texels per side, zw reserved
+    glm::vec4  layer[kSurfaceTerrainLayers]{};      ///< x 1/tiling, y roughness, z metallic, w normal strength
+    glm::vec4  layer_tri[kSurfaceTerrainLayers]{};  ///< x 1 = triplanar, y sharpness, z 1 = has normal map
+    glm::vec4  tint[kSurfaceTerrainLayers]{};       ///< rgb albedo multiplier
+};
+static_assert(sizeof(TerrainGpuParams) == 28 * 16, "TerrainGpuParams must match world.glsl's GfxTerrain");
+
+/** @brief TerrainGpuParams::dims.w bits. */
+enum TerrainGpuFlag : int {
+    kTerrainDeepSnow = 1,  ///< Raise and carve deep snow (snow_height.glsl) on open, flat ground.
+    kTerrainPuddles  = 2,  ///< Rain gathers in hollows.
+};
+
+class TextureArray;
+
+/**
+ * @brief One terrain's textures for a frame -- what set 3 binds for chunks whose displacement map
+ *        is `height`. Shared ownership: the registry keeps them alive while its sets reference them.
+ */
+struct TerrainFrameBinding {
+    const coopa::gfx::engine::data::Texture* height = nullptr;   ///< Key: the chunks' displacement map.
+    std::shared_ptr<coopa::gfx::engine::data::Texture> splat0, splat1;
+    std::shared_ptr<TextureArray> albedo, normal;
+    TerrainGpuParams params;
+};
 
 /** @brief What the engine hands the renderer each frame for the surface world set. */
 struct SurfaceFrameState {
@@ -64,6 +106,9 @@ struct SurfaceFrameState {
     glm::ivec2 trench_window{0};               ///< World cell index of the window's min corner.
     float trench_scale = 1.0f;                 ///< Metres a full unorm16 (65535) trench is deep.
     uint64_t trench_version = 0;               ///< Bumped whenever the words change.
+
+    // --- Heightmap terrains (toy::world::HeightmapTerrainSystem); index = the chunks' slot ---
+    std::vector<TerrainFrameBinding> terrains;
 };
 
 /** @brief std140 mirror of world.glsl's SurfaceWorldUBO. */
@@ -77,8 +122,11 @@ struct alignas(16) SurfaceWorldUBO {
     glm::vec4  field{0.0f};           ///< z cell, w 1 = trench field valid
     glm::ivec4 field_dims{0};         ///< x n, yz window min cell index
     glm::vec4  snow_style{0.0f};      ///< x 1 = hard-edged patches, y patch size (m)
+    glm::ivec4 terrain_count{0};      ///< x terrains in use
+    TerrainGpuParams terrain[kMaxSurfaceTerrains]{};
 };
-static_assert(sizeof(SurfaceWorldUBO) == 144, "SurfaceWorldUBO must match world.glsl's std140 block");
+static_assert(sizeof(SurfaceWorldUBO) == 160 + kMaxSurfaceTerrains * sizeof(TerrainGpuParams),
+              "SurfaceWorldUBO must match world.glsl's std140 block");
 
 class SurfaceWorldData {
 public:

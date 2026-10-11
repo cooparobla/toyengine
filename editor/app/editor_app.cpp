@@ -1,4 +1,6 @@
 #include "editor/app/editor_app.h"
+
+#include <toyengine/world/heightmap_store.h>
 #include <toyengine/render/toy_render_pipeline.h>
 #include <toyengine/scene/skinned_mesh_renderer.h>
 
@@ -195,6 +197,11 @@ bool EditorApp::open_scene(const fs::path& path) {
         return false;
     }
     if (doc_.is_object_asset()) { return open_object_asset(path); }
+    // A scene opened fresh reads its terrains from disk (dropping any unsaved strokes of a
+    // previous visit), and their history goes with them.
+    exit_terrain_mode_();
+    terrain_undo_.clear();
+    toy::world::HeightmapStore::instance().clear();
     set_view_(AssetType::Scene);
     active_path_ = path;
     sync_.fallback_path = path;
@@ -213,6 +220,7 @@ bool EditorApp::save_scene_as(const fs::path& path) {
     if (active_type_ == AssetType::UI) ui_store_editor_extras_();
     try {
         doc_.save(path);
+        save_terrains_();   // heightmaps and paint layers live in their own files
         sync_.fallback_path = path;
         // Instances elsewhere override this asset's parts by name: follow any renames.
         if (doc_.is_object_asset() && active_type_ == AssetType::Object) follow_asset_renames_(path);
@@ -340,6 +348,8 @@ void EditorApp::scene_undo_() {
     for (const auto& [p, d] : parked_meshes_) {
         if (d.scene_owned && d.undo.top_undo_seq() > best) { best = d.undo.top_undo_seq(); mesh_path = p; }
     }
+    // Terrain strokes (Terrain Mode) are in the same timeline: undo theirs when it is the newest.
+    if (terrain_undo_.top_undo_seq() > best) { terrain_apply_undo_(false); return; }
     if (best == 0) return;
     if (mesh_path.empty()) { doc_.undo(); queue_rebuild_(); return; }
     if (!activate_scene_mesh_(mesh_path)) return;
@@ -360,6 +370,8 @@ void EditorApp::scene_redo_() {
     for (const auto& [p, d] : parked_meshes_) {
         if (d.scene_owned && d.undo.redo_fresh()) consider(d.undo.top_redo_seq(), false, p);
     }
+    // Terrain strokes redo in the same order: theirs when it is the oldest undone step.
+    if (terrain_undo_.redo_fresh() && (best == 0 || terrain_undo_.top_redo_seq() < best)) { terrain_apply_undo_(true); return; }
     if (best == 0) return;
     if (scene) { doc_.redo(); queue_rebuild_(); return; }
     if (!activate_scene_mesh_(mesh_path)) return;
@@ -744,6 +756,10 @@ ObjectId EditorApp::pick_object(glm::vec2 px) {
                     if (wt < best_t) { best_t = wt; best = id; }
                 }
             }
+        } else if (const auto* ht = live->get_component<toy::world::HeightmapTerrain>(); ht && ht->data) {
+            // A heightmap terrain has no edit mesh: ray-march its grid.
+            float ht_t = 0.0f;
+            if (ht->data->raycast(o - ht->origin(), d, 1e5f, ht_t) && ht_t < best_t) { best_t = ht_t; best = id; }
         } else {
             // No mesh: pick by its origin marker on screen.
             const auto p = vp->project(glm::vec3(world[3]));
@@ -993,6 +1009,7 @@ void EditorApp::pre_render_(float dt) {
     update_scene_ui_placement_();
     if (!playing() || asset_view_()) camera_.make_main();
     sculpt_frame_();
+    terrain_frame_();
     paint_frame_();
     timeline_frame_(dt);
     // X-Ray: surfaces turn translucent over the backdrop (Solid / Material Preview; paint
@@ -1415,6 +1432,14 @@ bool EditorApp::object_bounds_(ObjectId id, glm::vec3& lo, glm::vec3& hi, bool m
             lo = glm::min(lo, w);
             hi = glm::max(hi, w);
         }
+        return true;
+    }
+    // A heightmap terrain: its grid's box (it has no edit mesh).
+    if (const auto* ht = live->get_component<toy::world::HeightmapTerrain>(); ht && ht->data) {
+        const glm::vec3 o = ht->origin();
+        const glm::vec2 range = ht->data->height_range();
+        lo = glm::min(lo, o + glm::vec3(0.0f, 0.0f, range.x));
+        hi = glm::max(hi, o + glm::vec3(ht->data->geometry().size, range.y));
         return true;
     }
     if (meshes_only) return false;
@@ -1967,9 +1992,10 @@ void EditorApp::handle_viewport_input_(imm::Context& ctx, bool mesh_edit) {
     }
     if (in_brush_mode_()) {
         // Scroll navigation stays (below is skipped), so handle it here first.
-        if (hovered && !ctx.popup_hovered() && !stroke_.active && !paint_stroke_.active) scroll_navigate_(in, pinch, shift, ctrl);
+        if (hovered && !ctx.popup_hovered() && !stroke_.active && !paint_stroke_.active && !terrain_stroke_.active) scroll_navigate_(in, pinch, shift, ctrl);
         if (hovered && in.pressed[1]) ctx.open_popup("mode_menu_vp", m);
-        if (in_sculpt_mode_()) handle_sculpt_input_(ctx, *vp, hovered);
+        if (in_terrain_mode_()) handle_terrain_input_(ctx, *vp, hovered);
+        else if (in_sculpt_mode_()) handle_sculpt_input_(ctx, *vp, hovered);
         else handle_paint_input_(ctx, *vp, hovered);
         return;
     }
@@ -2221,7 +2247,8 @@ void EditorApp::draw_viewport_popups_(imm::Context& ctx, bool mesh_edit) {
         if (ctx.menu_item("Particle System")) create_with_component("ParticleSystem", "Particle System");
         if (ctx.menu_item("Empty")) create_empty();
         if (ctx.menu_item("Reflection Probe")) create_with_component("ReflectionProbe", "Reflection Probe");
-        if (ctx.menu_item("Terrain")) create_with_component("Terrain", "Terrain");
+        if (ctx.menu_item("Heightmap Terrain")) create_with_component("HeightmapTerrain", "Terrain");
+        if (ctx.menu_item("Tile Terrain")) create_with_component("TileTerrain", "Tile Terrain");
         ctx.end_popup();
     }
     if (ctx.begin_popup("vp_delete_confirm", 150)) {
@@ -2762,7 +2789,8 @@ bool EditorApp::isolate_candidate_(const Node& obj) {
     bool renders = false, lights = false;
     for (const auto& c : obj.at("components").as_seq()) {
         const std::string t = component_type(c);
-        if (t == "MeshRenderer" || t == "SkinnedMeshRenderer" || t == "Terrain" || t == "SdfRenderer" || t == "Cloth") renders = true;
+        if (t == "MeshRenderer" || t == "SkinnedMeshRenderer" || t == "Terrain" || t == "TileTerrain" || t == "HeightmapTerrain" ||
+            t == "SdfRenderer" || t == "Cloth") renders = true;
         if (t.find("Light") != std::string::npos || t == "ReflectionProbe" || t == "GiProbeVolume" || t == "Volume") lights = true;
     }
     return renders && !lights;
@@ -3112,7 +3140,8 @@ void EditorApp::draw_viewport_overlay_body_(imm::Context& ctx, bool mesh_edit, c
     };
     if (in_brush_mode_()) {
         // No selection outline or wire while sculpting or painting, as in Blender.
-        if (in_sculpt_mode_()) draw_sculpt_overlay_(ctx, *vp);
+        if (in_terrain_mode_()) draw_terrain_overlay_(ctx, *vp);
+        else if (in_sculpt_mode_()) draw_sculpt_overlay_(ctx, *vp);
         else draw_paint_overlay_(ctx, *vp);
     } else if (asset_view_() && !mesh_edit) {
         // Asset previews (mesh in Object Mode, material lookdev, texture): no scene overlays.
@@ -3360,6 +3389,7 @@ void EditorApp::discard_all_changes_() {
 
 void EditorApp::save_all_() {
     if (doc_.dirty()) save_scene();
+    else save_terrains_();
     if (mesh_.open() && mesh_.dirty()) save_mesh();
     if (material_.open() && material_.dirty()) save_material();
     if (game_theme_.open() && game_theme_.dirty()) save_theme();

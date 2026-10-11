@@ -128,7 +128,7 @@ imm::Icon EditorApp::icon_for_component_(const std::string& type) {
     if (type == "Rigidbody") return I::Rigidbody;
     if (type.find("Collider") != std::string::npos || type.find("Joint") != std::string::npos || type == "Ragdoll") return I::Collider;
     if (type == "Cloth") return I::Physics;
-    if (type == "Terrain") return I::Terrain;
+    if (type == "Terrain" || type == "TileTerrain" || type == "HeightmapTerrain") return I::Terrain;
     if (type == "SdfRenderer" || type == "SdfShape") return I::Sphere;
     if (type == "Animator") return I::Play;
     if (type == "Volume") return I::World;
@@ -168,7 +168,7 @@ std::pair<imm::Icon, glm::vec4> EditorApp::object_icon_(const Node& obj, const i
     for (const auto& c : obj.at("components").as_seq()) {
         const std::string t = component_type(c);
         if (t == "MeshRenderer" || t == "SkinnedMeshRenderer") return {I::Mesh, et_.outliner.mesh};
-        if (t == "Terrain") return {I::Terrain, et_.outliner.terrain};
+        if (t == "Terrain" || t == "TileTerrain" || t == "HeightmapTerrain") return {I::Terrain, et_.outliner.terrain};
         if (t == "SdfRenderer") return {I::Sphere, et_.outliner.mesh};
         if (t == "ReflectionProbe" || t == "EnvironmentLight") return {I::EnvLight, et_.outliner.light};
     }

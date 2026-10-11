@@ -64,6 +64,8 @@
 namespace toy {
 namespace particles {
 
+class TerrainScatterCache;
+
 /// One range body: handles indices [begin, end).
 using RangeFn = std::function<void(std::size_t begin, std::size_t end)>;
 /// Runs `fn` over [0, n), each index exactly once, possibly split across threads; returns when done.
@@ -368,6 +370,17 @@ public:
      */
     bool make_gpu_job(const ParticleView& view, render::GpuParticleJob& job);
 
+    // ------------------------------------------------------------------ terrain scatter
+
+    /** @brief True for `mode: scatter` + `shape: terrain` (instances streamed per terrain chunk;
+     *         the pool stays empty -- see terrain_scatter.h). */
+    bool is_terrain_scatter() const {
+        return settings.mode == ParticleMode::Scatter && settings.shape.type == EmitShape::Terrain;
+    }
+    /** @brief The streamed chunks (created on first use by ParticleSimulationSystem). */
+    TerrainScatterCache& terrain_scatter();
+    const TerrainScatterCache* terrain_scatter_if() const { return terrain_scatter_.get(); }
+
     /// Raw pool access for tests and tools.
     struct Pool {
         std::vector<glm::vec3> pos, vel;
@@ -446,6 +459,7 @@ private:
     TurbulenceField turbulence_;
     std::shared_ptr<const MeshSurface> surface_;
     bool surface_ready_ = false;
+    std::shared_ptr<TerrainScatterCache> terrain_scatter_;   // shared_ptr: the type is incomplete here
     std::unique_ptr<coopa::gfx::engine::components::MeshRenderer> proxy_;
 
     glm::mat4 world_{1.0f};

@@ -12,6 +12,11 @@
 //                          (by GFX_TESS_CULL_MARGIN plus the displacement scale) get factor 0
 //   GFX_TESS_CULL_MARGIN   (optional, metres; default 1) how far the shader's own displacement may
 //                          push a vertex -- water's waves want more
+//   GFX_TESS_POSITION_WS(i) (optional) control point i's world position for the edge factors and
+//                          the cull -- default tv_position_ws[i]. A shader that builds its whole
+//                          surface in the hook (the heightmap terrain: a flat patch displaced by
+//                          a height grid) gives the displaced point, so edges are sized by what
+//                          the camera actually sees and neighbouring patches agree exactly.
 //
 // Outer factor i is the edge OPPOSITE vertex i (Vulkan's triangle domain), computed from that
 // edge's two endpoints only (gfx_tess_edge_factor); the inner factor is the largest outer.
@@ -20,6 +25,9 @@
 
 #ifndef GFX_TESS_CULL_MARGIN
 #define GFX_TESS_CULL_MARGIN 1.0
+#endif
+#ifndef GFX_TESS_POSITION_WS
+#define GFX_TESS_POSITION_WS(i) tv_position_ws[i]
 #endif
 // Displacement the frame adds on top (the G-buffer passes the deep-snow depth).
 #ifndef GFX_TESS_EXTRA_MARGIN
@@ -72,7 +80,7 @@ void main() {
         uvec2 packed_params = GFX_TESS_PACKED;
         GfxTessParams t = gfx_unpack_tess(packed_params.x, packed_params.y);
         vec4 view = GFX_TESS_VIEW;
-        vec3 p0 = tv_position_ws[0], p1 = tv_position_ws[1], p2 = tv_position_ws[2];
+        vec3 p0 = GFX_TESS_POSITION_WS(0), p1 = GFX_TESS_POSITION_WS(1), p2 = GFX_TESS_POSITION_WS(2);
 
         bool culled = false;
 #ifdef GFX_TESS_CLIP

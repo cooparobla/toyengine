@@ -154,7 +154,26 @@ void parse_particle_settings(const fkyaml::node& node, ParticleSettings& s) {
         sh.type = enum_of<EmitShape>(str("shape"), {{"point", EmitShape::Point}, {"sphere", EmitShape::Sphere},
                                                    {"hemisphere", EmitShape::Hemisphere}, {"cone", EmitShape::Cone},
                                                    {"box", EmitShape::Box}, {"circle", EmitShape::Circle},
-                                                   {"edge", EmitShape::Edge}, {"mesh", EmitShape::Mesh}}, "shape");
+                                                   {"edge", EmitShape::Edge}, {"mesh", EmitShape::Mesh},
+                                                   {"terrain", EmitShape::Terrain}}, "shape");
+    }
+    // `shape: terrain` (scatter over a HeightmapTerrain -- see terrain_scatter.h).
+    if (node.contains("terrain") && node.at("terrain").is_mapping()) {
+        const fkyaml::node& tn = node.at("terrain");
+        TerrainScatterShape& t = sh.terrain;
+        auto tf = [&tn](const char* key, float& out) { if (tn.contains(key)) out = num(tn.at(key)); };
+        if (tn.contains("object")) t.terrain = tn.at("object").get_value<std::string>();
+        if (tn.contains("layer")) t.layer = tn.at("layer").get_value<std::string>();
+        tf("density", t.density);
+        tf("min_weight", t.min_weight);
+        tf("slope_min", t.slope_deg.x);
+        tf("slope_max", t.slope_deg.y);
+        tf("height_min", t.height.x);
+        tf("height_max", t.height.y);
+        tf("jitter", t.jitter);
+        tf("scale_min", t.scale.x);
+        tf("scale_max", t.scale.y);
+        tf("sink", t.sink);
     }
     f("radius", sh.radius);
     f("radius_thickness", sh.radius_thickness);

@@ -12,6 +12,18 @@
 #define GFX_WORLD_SET 2
 #endif
 
+// One heightmap terrain (toyengine/render/surface_world.h TerrainGpuParams; see
+// heightmap_terrain_common.glsl for how the terrain shader reads it).
+struct GfxTerrain {
+    vec4  origin;        // xyz grid corner at height 0, w chunk size (m)
+    vec4  cell;          // xy metres per height texel, zw terrain size (m)
+    ivec4 dims;          // x nx, y ny, z layer count, w flags (1 deep snow, 2 puddles)
+    vec4  misc;          // x height (m), y splat texels per side
+    vec4  layer[8];      // x 1/tiling, y roughness, z metallic, w normal strength
+    vec4  layer_tri[8];  // x triplanar, y sharpness, z has normal map
+    vec4  tint[8];       // rgb albedo multiplier
+};
+
 layout(set = GFX_WORLD_SET, binding = 0) uniform SurfaceWorldUBO {
     vec4  tess_view;      // xyz main camera position, w pixel scale (0.5 * render height * proj[1][1])
     vec4  snow;           // x cover 0..1, y deep-snow depth (m), z wetness, w time (s)
@@ -22,6 +34,8 @@ layout(set = GFX_WORLD_SET, binding = 0) uniform SurfaceWorldUBO {
     vec4  field;          // z cell, w 1 = trench field valid
     ivec4 field_dims;     // x n, yz window min cell index
     vec4  snow_style;     // x 1 = hard-edged patches, y patch size (m)
+    ivec4 terrain_count;  // x heightmap terrains in use
+    GfxTerrain terrain[4];
 } gfx_world;
 
 layout(std430, set = GFX_WORLD_SET, binding = 1) readonly buffer GfxOcclusionHeights { float gfx_occl_heights[]; };

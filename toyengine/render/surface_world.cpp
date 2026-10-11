@@ -75,6 +75,9 @@ void SurfaceWorldData::upload(uint32_t frame_slot, const SurfaceFrameState& s, c
         u.field = glm::vec4(0.0f, 0.0f, s.trench_cell, 1.0f);
         u.field_dims = glm::ivec4(s.trench_n, s.trench_window.x, s.trench_window.y, 0);
     }
+    const int terrains = std::min<int>(static_cast<int>(s.terrains.size()), kMaxSurfaceTerrains);
+    u.terrain_count = glm::ivec4(terrains, 0, 0, 0);
+    for (int i = 0; i < terrains; ++i) u.terrain[i] = s.terrains[static_cast<size_t>(i)].params;
     ubo_[k].upload(&u, sizeof(u));
     last_ = u;
 }

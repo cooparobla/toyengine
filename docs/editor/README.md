@@ -40,6 +40,7 @@ The tabs at the top of the left-hand panel list your project's assets, one tab p
 | **Scenes** | Levels and other places, filled with objects | [Scenes and objects](scenes-and-objects.md) |
 | **Objects** | Reusable objects (a crate, an enemy) you place in many scenes | [Scenes and objects](scenes-and-objects.md) |
 | **Meshes** | 3D shapes you model, sculpt and paint | [Modeling](modeling.md), [Sculpt and paint](sculpt-and-paint.md) |
+| **Terrain** | Landscapes you sculpt and paint with brushes | [Terrain](terrain.md) |
 | **Materials** | How surfaces look: colour, shine, glow, glass | [Materials and textures](materials-and-textures.md) |
 | **Textures** | Images used by materials | [Materials and textures](materials-and-textures.md) |
 | **UI** | Menus, HUDs and other screens | [UI designer](ui-designer.md) |
@@ -58,11 +59,12 @@ Click an asset to open it. One asset is open at a time.
 4. [Modeling](modeling.md): shaping meshes in Edit Mode.
 5. [Sculpt and paint](sculpt-and-paint.md): sculpting with brushes and painting colours and
    weights.
-6. [Materials and textures](materials-and-textures.md): making surfaces look right.
-7. [Animation](animation.md): recording movement on the Timeline.
-8. [UI designer](ui-designer.md): building menus and HUDs.
-9. [Project settings](project-settings.md): rendering, lighting and packaging the game.
-10. [Keyboard shortcuts](shortcuts.md): every shortcut in one place.
+6. [Terrain](terrain.md): sculpting and painting landscapes, and scattering grass and trees.
+7. [Materials and textures](materials-and-textures.md): making surfaces look right.
+8. [Animation](animation.md): recording movement on the Timeline.
+9. [UI designer](ui-designer.md): building menus and HUDs.
+10. [Project settings](project-settings.md): rendering, lighting and packaging the game.
+11. [Keyboard shortcuts](shortcuts.md): every shortcut in one place.
 
 ## Your first steps
 

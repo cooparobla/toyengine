@@ -38,6 +38,7 @@
 
 #include <toyengine/particles/particle_system.h>
 #include <toyengine/water/water_system.h>
+#include <toyengine/world/heightmap_data.h>
 
 namespace toy {
 namespace weather {
@@ -76,6 +77,8 @@ private:
     void probe_bounds_(coopa::scene::Scene& scene, int n);
 
     void sample_water_(const water::WaterSystem& water, const glm::vec2& origin, int n);
+    /** @brief The object carrying the heightmap terrain `view` reads (for its WeatherSurface). */
+    static const coopa::scene::SceneObject* terrain_owner_(coopa::scene::Scene& scene, const world::HeightmapView& view);
 
     /** @brief True if `obj` moves (a Rigidbody on it or an ancestor): the sky layer ignores it. */
     static bool moving_(const coopa::scene::SceneObject* obj);

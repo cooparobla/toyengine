@@ -746,33 +746,80 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             f_bool("lock_height", true)}});
         // Defaults mirror the runtime's (toyengine/world/terrain_component.h, terrain_sampler.h):
         // an absent key shows the value the terrain actually uses.
-        add({"Terrain", "World", {
-            f_int("seed", 251, 0, 1000000000, true),
-            f_int("grid_size", 64, 4, 4096, true),
-            f_float("sea_level", 0.25f, 0.005f, 0.0f, 1.0f),
-            f_float("terrain_roughness", 0.35f, 0.005f, 0.0f, 1.0f),
-            f_int("river_count", 25, 0, 1000),
-            f_enum("shape", {"rectangle", "circle", "triangle", "continent", "archipelago"}),
-            f_int("continent_count", 4, 1, 64),
-            f_float("continent_size_m", 0.0f, 10.0f, 0.0f, 1000000.0f),
-            f_float("irregularity", 0.35f, 0.005f, 0.0f, 0.6f),
-            f_float("coast_detail", 0.12f, 0.005f, 0.0f, 1.0f),
-            f_float("temperature_offset", 0.0f, 0.005f, -0.5f, 0.5f),
-            f_int("tiles_per_grid_unit", 4, 1, 64),
-            f_float("tile_size", 1.0f, 0.01f, 0.01f, 100.0f),
-            f_float("height_step", 1.0f, 0.005f, 0.01f, 100.0f),
-            f_float("height_scale", 40.0f, 0.05f, 0.0f, 1000.0f),
-            f_int("chunk_size", 16, 4, 512),
-            with_label(f_int("view_radius", 3, 0, 64), "View radius (chunks)"),
-            f_int("max_wall_steps", 24, 0, 1024),
-            f_int("soil_depth_steps", 3, 0, 1024),
-            f_bool("greedy_merge", true),
-            f_bool("emit_bottom", false),
-            // Styled tiles: `styles:` / `kind_styles:` are YAML-only maps, preserved on save.
-            f_int("max_chunk_jobs_per_frame", 4, 1, 64),
-            f_asset("side_mesh", "meshes", ".yaml", true, true, "tile_side_flat"),
-            f_material(),
-        }});
+        auto tile_terrain_fields = [] {
+            return std::vector<FieldDesc>{
+                f_int("seed", 251, 0, 1000000000, true),
+                f_int("grid_size", 64, 4, 4096, true),
+                f_float("sea_level", 0.25f, 0.005f, 0.0f, 1.0f),
+                f_float("terrain_roughness", 0.35f, 0.005f, 0.0f, 1.0f),
+                f_int("river_count", 25, 0, 1000),
+                f_enum("shape", {"rectangle", "circle", "triangle", "continent", "archipelago"}),
+                f_int("continent_count", 4, 1, 64),
+                f_float("continent_size_m", 0.0f, 10.0f, 0.0f, 1000000.0f),
+                f_float("irregularity", 0.35f, 0.005f, 0.0f, 0.6f),
+                f_float("coast_detail", 0.12f, 0.005f, 0.0f, 1.0f),
+                f_float("temperature_offset", 0.0f, 0.005f, -0.5f, 0.5f),
+                f_int("tiles_per_grid_unit", 4, 1, 64),
+                f_float("tile_size", 1.0f, 0.01f, 0.01f, 100.0f),
+                f_float("height_step", 1.0f, 0.005f, 0.01f, 100.0f),
+                f_float("height_scale", 40.0f, 0.05f, 0.0f, 1000.0f),
+                f_int("chunk_size", 16, 4, 512),
+                with_label(f_int("view_radius", 3, 0, 64), "View radius (chunks)"),
+                f_int("max_wall_steps", 24, 0, 1024),
+                f_int("soil_depth_steps", 3, 0, 1024),
+                f_bool("greedy_merge", true),
+                f_bool("emit_bottom", false),
+                // Styled tiles: `styles:` / `kind_styles:` are YAML-only maps, preserved on save.
+                f_int("max_chunk_jobs_per_frame", 4, 1, 64),
+                f_asset("side_mesh", "meshes", ".yaml", true, true, "tile_side_flat"),
+                f_material(),
+            };
+        };
+        // The sculptable heightmap terrain (toyengine/world/heightmap_terrain.h). Its shape and
+        // paint live in PNGs beside the scene; Terrain Mode (viewport mode menu) edits them.
+        // `tessellation:` and `generate:` are YAML-only maps, preserved on save.
+        {
+            Node grass_layer = Node::mapping();
+            grass_layer["name"] = std::string("grass");
+            grass_layer["tint"] = Node::mapping();
+            grass_layer["tint"]["r"] = 0.42f;
+            grass_layer["tint"]["g"] = 0.5f;
+            grass_layer["tint"]["b"] = 0.3f;
+            grass_layer["tiling"] = 6.0f;
+            Node layers_default = Node::sequence();
+            layers_default.as_seq().push_back(grass_layer);
+            add({"HeightmapTerrain", "World", {
+                with_tip(f_vec2("size", glm::vec2(256.0f), 1.0f, true), "Width (x) and depth (y) in metres"),
+                with_tip(f_float("height", 64.0f, 0.1f, 0.01f, 10000.0f, true), "Metres at the heightmap's full value"),
+                with_tip(f_float("chunk_size", 32.0f, 0.5f, 4.0f, 2048.0f, true), "Metres per chunk (draw / cull / collide / scatter unit)"),
+                with_tip(f_int("resolution", 257, 3, 8193, true), "Height samples per side (2^n + 1: 257, 513, 1025...)"),
+                f_int("splat_resolution", 512, 4, 8192),
+                with_tip(f_string("heightmap", ""), "16-bit greyscale PNG (scene-relative); default terrain/<object>_height.png"),
+                f_string("splat0", ""),
+                f_string("splat1", ""),
+                f_items("layers", {
+                    f_string("name", "layer"),
+                    f_asset("albedo", "textures", ".png"),
+                    f_asset("normal", "textures", ".png"),
+                    f_color("tint", glm::vec3(1.0f)),
+                    with_tip(f_float("tiling", 8.0f, 0.05f, 0.01f, 1000.0f), "Metres per texture repeat"),
+                    f_float("roughness", 0.85f, 0.005f, 0.0f, 1.0f),
+                    f_float("metallic", 0.0f, 0.005f, 0.0f, 1.0f),
+                    f_float("normal_strength", 1.0f, 0.01f, 0.0f, 4.0f),
+                    with_tip(f_bool("triplanar", false), "Project from the sides on steep slopes (cliffs)"),
+                    f_float("triplanar_sharpness", 4.0f, 0.05f, 1.0f, 16.0f),
+                }, layers_default, true),
+                with_tip(f_bool("deep_snow", false), "Deep snow (with trenches) piles on flat ground when it snows"),
+                with_tip(f_bool("puddles", true), "Rain gathers in hollows"),
+                f_bool("collision", true),
+                f_string("physics_material", ""),
+                f_bool("cast_shadows", true),
+                with_tip(f_int("patch_resolution", 16, 1, 64), "Quads per chunk side before tessellation"),
+                f_int("layer_texture_size", 1024, 4, 4096),
+            }});
+        }
+        add({"TileTerrain", "World", tile_terrain_fields()});
+        add({"Terrain", "World", tile_terrain_fields()});   // TileTerrain's old name, still loaded
         // A rig root: its clips are `states` (managed in the Timeline -- one file each under
         // animations/<object>/), `auto_play` names the state played on start.
         add({"Animator", "Animation", {f_string("auto_play", "", true), f_float("speed", 1.0f, 0.01f, 0.0f, 100.0f),

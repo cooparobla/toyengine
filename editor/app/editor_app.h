@@ -47,6 +47,7 @@
 #include "../mesh/shader_ball.h"
 #include "../mesh/primitives.h"
 #include "../schema/component_schema.h"
+#include "../terrain/terrain_brush.h"
 #include "../schema/inspector.h"
 #include "../schema/ui_theme_schema.h"
 #include "../schema/settings_schema.h"
@@ -67,6 +68,7 @@
 #include <physxcoopa/debug/shape_draw.h>
 #include <physxcoopa/util/transform_bridge.h>
 #include <toyengine/particles/particle_system.h>
+#include <toyengine/world/heightmap_terrain.h>
 
 #include <gfxcoopa/engine/components/mesh_renderer.h>
 #include <gfxcoopa/engine/components/register.h>
@@ -642,6 +644,7 @@ private:
 #include "ui/theme_editor.inl"
 #include "ui/build.inl"
 #include "ui/weather.inl"
+#include "ui/terrain.inl"
 #include "ui/project_settings.inl"
 #include "ui/preferences.inl"
 

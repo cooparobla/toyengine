@@ -211,6 +211,7 @@ EmitSample sample_analytic_shape(const ShapeSettings& s, Rng& rng) {
             out.direction = glm::vec3(0.0f, 0.0f, 1.0f);
             break;
         case EmitShape::Mesh:
+        case EmitShape::Terrain:   // placed by TerrainScatterCache, never sampled here
             break;
     }
     return out;

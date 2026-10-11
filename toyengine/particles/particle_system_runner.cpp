@@ -2,6 +2,11 @@
 
 #include <coopa/job/parallel_for.h>
 
+#include <functional>
+
+#include <toyengine/particles/terrain_scatter.h>
+#include <toyengine/world/heightmap_terrain.h>
+
 namespace toy {
 namespace particles {
 
@@ -94,6 +99,64 @@ void ParticleSimulationSystem::gather_(coopa::scene::Scene& scene) {
     for (ParticleSystem* ps : scene.get_components<ParticleSystem>()) {
         if (!ps->owner || !active_in_hierarchy_(*ps->owner)) continue;
         systems_.push_back(ps);
+    }
+}
+
+void ParticleSimulationSystem::collect_terrain_scatter_(coopa::scene::Scene& scene, ParticleSystem& ps, const ParticleView& view,
+                                                        const std::function<bool(const glm::vec3&, const glm::vec3&)>& cull,
+                                                        render::ParticleFrameState& out) {
+    const ParticleSettings& s = ps.settings;
+    if (s.look.mode != render::ParticleRenderMode::Mesh) return;   // a scatter places meshes
+    if (!ps.initialized()) ps.init();
+    if (!ps.has_mesh_proxy() || !ps.mesh_proxy().is_ready()) return;
+
+    // The terrain: named, else the nearest one above this object, else the scene's first.
+    const world::HeightmapTerrain* terrain = nullptr;
+    if (!s.shape.terrain.terrain.empty()) {
+        if (coopa::scene::SceneObject* o = scene.find_object(s.shape.terrain.terrain)) terrain = o->get_component<world::HeightmapTerrain>();
+    } else {
+        for (coopa::scene::SceneObject* o = ps.owner; o != nullptr && terrain == nullptr; o = o->parent()) {
+            terrain = o->get_component<world::HeightmapTerrain>();
+        }
+        if (terrain == nullptr) {
+            const auto all = scene.get_components<world::HeightmapTerrain>();
+            if (!all.empty()) terrain = all.front();
+        }
+    }
+    if (terrain == nullptr || terrain->data == nullptr) {
+        ps.terrain_scatter().clear();
+        return;
+    }
+
+    TerrainScatterParams p;
+    p.shape = s.shape.terrain;
+    if (!p.shape.layer.empty()) {
+        for (std::size_t i = 0; i < terrain->layers.size(); ++i) {
+            if (terrain->layers[i].name == p.shape.layer) p.layer = static_cast<int>(i);
+        }
+        if (p.layer < 0) return;   // a layer the terrain does not have grows nothing
+    }
+    p.seed = s.seed != 0 ? s.seed : static_cast<uint32_t>(std::hash<std::string>{}(ps.owner ? ps.owner->name() : std::string()));
+    p.size = s.start_size;
+    p.align_to_normal = s.align_to_normal;
+    p.random_spin = s.random_spin;
+
+    TerrainScatterCache& cache = ps.terrain_scatter();
+    cache.update(terrain->view(), p, view.camera_pos, s.max_draw_distance, 2);
+    for (const auto& [key, c] : cache.chunks()) {
+        if (c.matrices.empty()) continue;
+        if (s.max_draw_distance > 0.0f) {
+            const glm::vec3 d = glm::max(glm::max(c.bounds_min - view.camera_pos, view.camera_pos - c.bounds_max), glm::vec3(0.0f));
+            if (glm::length(d) > s.max_draw_distance) continue;
+        }
+        if (!cull(c.bounds_min, c.bounds_max)) continue;
+        render::ParticleMeshBatch mb;
+        mb.proxy = &ps.mesh_proxy();
+        mb.matrices = c.matrices.data();
+        mb.count = static_cast<uint32_t>(c.matrices.size());
+        mb.bounds_min = c.bounds_min;
+        mb.bounds_max = c.bounds_max;
+        out.meshes.push_back(mb);
     }
 }
 

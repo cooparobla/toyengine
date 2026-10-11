@@ -7,6 +7,8 @@
 #include <toyengine/render/visibility.h>
 #include <toyengine/scene/runtime_object.h>
 #include <toyengine/weather/weather_surface.h>
+#include <toyengine/world/heightmap_terrain.h>
+#include <toyengine/world/heightmap_terrain_system.h>
 
 namespace toy {
 namespace weather {
@@ -50,7 +52,32 @@ void GroundProbe::update(coopa::scene::Scene& scene, const glm::vec3& eye, float
     if (src == Source::Physics) probe_physics_(*physics, eye, n);
     else {
         bounds_timer_ -= dt;
-        if (bounds_timer_ <= 0.0f) { probe_bounds_(scene, n); bounds_timer_ = 0.25f; }
+        if (bounds_timer_ <= 0.0f) {
+            probe_bounds_(scene, n);
+            // Heightmap terrains: no physics in edit mode, and their chunk boxes are no surface
+            // (they are runtime objects, skipped above) -- read their grids directly instead.
+            const std::vector<world::HeightmapView> terrains = world::heightmap_views(scene);
+            for (const world::HeightmapView& t : terrains) {
+                const coopa::scene::SceneObject* owner = terrain_owner_(scene, t);
+                const bool splashes = owner != nullptr && takes_splashes(owner);
+                for (int j = 0; j < n; ++j) {
+                    for (int i = 0; i < n; ++i) {
+                        const glm::vec3 p((static_cast<float>(origin_.x + i) + 0.5f) * cell_size,
+                                          (static_cast<float>(origin_.y + j) + 0.5f) * cell_size, 0.0f);
+                        if (!t.contains(p)) continue;
+                        const size_t k = static_cast<size_t>(j) * n + i;
+                        const float h = t.height(p);
+                        if (std::isnan(heights_[k]) || h > heights_[k]) {
+                            heights_[k] = h;
+                            normals_[k] = t.normal(p);
+                            splash_[k] = splashes ? 1 : 0;
+                        }
+                        if (std::isnan(sky_[k]) || h > sky_[k]) sky_[k] = h;
+                    }
+                }
+            }
+            bounds_timer_ = 0.25f;
+        }
     }
 
     auto f = std::make_shared<particles::GroundField>();
@@ -213,6 +240,13 @@ void GroundProbe::sample_water_(const water::WaterSystem& water, const glm::vec2
             water_splash_[static_cast<size_t>(j) * n + i] = body && takes_splashes(body->owner) ? 1 : 0;
         }
     }
+}
+
+const coopa::scene::SceneObject* GroundProbe::terrain_owner_(coopa::scene::Scene& scene, const world::HeightmapView& view) {
+    for (const world::HeightmapTerrain* t : scene.get_components<world::HeightmapTerrain>()) {
+        if (t->data.get() == view.data) return t->owner;
+    }
+    return nullptr;
 }
 
 bool GroundProbe::moving_(const coopa::scene::SceneObject* obj) {

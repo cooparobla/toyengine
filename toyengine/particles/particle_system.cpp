@@ -1,4 +1,5 @@
 #include <toyengine/particles/particle_system.h>
+#include <toyengine/particles/terrain_scatter.h>
 
 #include <coopa/scene/component.h>
 #include <coopa/scene/components/transform_component.h>
@@ -568,7 +569,8 @@ void ParticleSystem::step_once_(float dt, const ParallelFor* par, bool emit) {
 
     // 3. Births.
     if (settings.mode == ParticleMode::Scatter) {
-        if (!scattered_ && can_spawn_() && playing_) {
+        // A terrain scatter's instances live in its TerrainScatterCache, chunk by chunk.
+        if (!scattered_ && can_spawn_() && playing_ && settings.shape.type != EmitShape::Terrain) {
             pool_.clear();
             rng_.reseed(effective_seed_());
             const uint32_t n = std::min(settings.count, settings.max_particles);
@@ -834,6 +836,11 @@ void ParticleSystem::compute_bounds_(const ParallelFor* par) {
         bounds_min_ = mn - glm::vec3(pad);
         bounds_max_ = mx + glm::vec3(pad);
     }
+}
+
+TerrainScatterCache& ParticleSystem::terrain_scatter() {
+    if (!terrain_scatter_) terrain_scatter_ = std::make_shared<TerrainScatterCache>();
+    return *terrain_scatter_;
 }
 
 } // namespace particles

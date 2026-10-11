@@ -49,7 +49,7 @@
 namespace toy {
 namespace particles {
 
-enum class EmitShape { Point, Sphere, Hemisphere, Cone, Box, Circle, Edge, Mesh };
+enum class EmitShape { Point, Sphere, Hemisphere, Cone, Box, Circle, Edge, Mesh, Terrain };
 enum class MeshEmitFrom { Faces, Vertices, Edges };
 enum class MeshDistribution { Random, Even };
 
@@ -125,6 +125,27 @@ private:
 };
 
 /**
+ * @struct TerrainScatterShape
+ * @brief `shape: terrain` (scatter mode): instances over a HeightmapTerrain -- see terrain_scatter.h.
+ */
+struct TerrainScatterShape {
+    std::string terrain;                    ///< Object name; empty = nearest HeightmapTerrain ancestor, else the scene's first.
+    float density = 1.0f;                   ///< Candidates per square metre.
+    std::string layer;                      ///< Paint layer name; empty = anywhere.
+    float min_weight = 0.3f;                ///< Paint weight where the first plants appear (full density at 1).
+    glm::vec2 slope_deg{0.0f, 35.0f};       ///< Allowed ground slope, degrees from flat.
+    glm::vec2 height{-1e9f, 1e9f};          ///< Allowed world heights (m).
+    float jitter = 1.0f;                    ///< 0 = a regular grid, 1 = anywhere in each cell.
+    glm::vec2 scale{0.8f, 1.2f};            ///< Random size multiplier range (on start_size).
+    float sink = 0.05f;                     ///< Metres pushed into the ground (hides floating bases on slopes).
+
+    bool operator==(const TerrainScatterShape& o) const {
+        return terrain == o.terrain && density == o.density && layer == o.layer && min_weight == o.min_weight &&
+               slope_deg == o.slope_deg && height == o.height && jitter == o.jitter && scale == o.scale && sink == o.sink;
+    }
+};
+
+/**
  * @struct ShapeSettings
  * @brief Unity's Shape module plus Blender's mesh emitter. Analytic shapes emit along their
  *        local +Z (up, in this engine's Z-up world), so a default cone is a fountain.
@@ -147,6 +168,9 @@ struct ShapeSettings {
     MeshEmitFrom     emit_from = MeshEmitFrom::Faces;
     MeshDistribution distribution = MeshDistribution::Random;
     float            normal_offset = 0.0f;   ///< Push the spawn point off the surface (m).
+
+    // --- terrain (HeightmapTerrain scatter) ---
+    TerrainScatterShape terrain;
 };
 
 /**

@@ -331,8 +331,16 @@ void EditorApp::draw_audio_properties_(imm::Context& ctx) {
 
 void EditorApp::draw_tool_tab_(imm::Context& ctx) {
     using I = imm::Icon;
+    if (in_terrain_mode_()) { draw_terrain_tool_panel_(ctx); return; }
     if (in_sculpt_mode_()) { draw_sculpt_tool_panel_(ctx); return; }
     if (in_paint_mode_()) { draw_paint_tool_panel_(ctx); return; }
+    // A terrain object selected: the way into Terrain Mode, up front.
+    if (!asset_view_() && !playing() && is_terrain_object_(doc_.primary()) && interaction_mode() == InteractionMode::Object) {
+        if (ctx.collapsing_header("Terrain", true, nullptr, I::Terrain)) {
+            if (ctx.button("Edit Terrain", -1, true, I::Terrain)) enter_terrain_mode_(doc_.primary());
+            ctx.tooltip("Terrain Mode\nSculpt the terrain's shape and paint its layers with brushes");
+        }
+    }
     static const char* tool_names[] = {"Select Box", "Move", "Rotate", "Scale", "Cursor"};
     static const I tool_icons[] = {I::SelectBox, I::Move, I::Rotate, I::Scale, I::Cursor};
     const int t = static_cast<int>(tool_);

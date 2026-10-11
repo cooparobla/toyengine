@@ -127,6 +127,7 @@
 #include <toyengine/render/passes/cloud_shadow_pass.h>
 #include <toyengine/render/passes/skinning_pass.h>
 #include <toyengine/render/surface_world.h>
+#include <toyengine/render/terrain_gpu.h>
 #include <set>
 #include <glm/gtc/packing.hpp>
 
@@ -1406,6 +1407,8 @@ private:
     /// The surface world set (surface_world.h) and what the engine handed in for it this frame.
     std::unique_ptr<SurfaceWorldData> surface_world_;
     SurfaceFrameState surface_state_;
+    /// G-buffer set 3: heightmap terrains' splat maps and layer arrays (see terrain_gpu.h).
+    std::unique_ptr<TerrainGpuRegistry> terrain_gpu_;
     bool tess_warned_unsupported_ = false;
     std::set<std::string> tess_warned_shaders_;
 

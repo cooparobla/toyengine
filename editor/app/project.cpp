@@ -71,7 +71,7 @@ RefRename RefRename::between(const std::string& from, const std::string& to) {
         if (a != b) v.push_back({a, b});
     };
     if (f.find("meshes/") != std::string::npos) {
-        r.mesh_keys = {"mesh_path", "side_mesh", "mesh"};
+        r.mesh_keys = {"mesh_path", "mesh"};
         auto under_meshes = [](const std::string& g) {
             const std::string s = strip_yaml_ext(g);
             if (s.rfind("meshes/", 0) == 0) return s.substr(7);

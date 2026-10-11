@@ -111,8 +111,7 @@ COOPA_TEST(neighbouring_chunks_agree_on_their_shared_border) {
 
     // And the pad is genuinely load-bearing: with the neighbour's real heights, an interior
     // border column emits a +X wall only where the terrain really does step down.
-    const TileMeshLibrary library = make_flat_library();
     ChunkMeshData mesh;
-    mesh_chunk_columns(left, library, params, mesh);
+    mesh_chunk_styled(left, voxel_library(), params, mesh);
     expect(!mesh.empty(), "sampler: a chunk of generated terrain meshes to something drawable");
 }

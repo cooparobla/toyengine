@@ -2,8 +2,9 @@
  * @file terrain_render_test.cpp
  * @brief The half of the terrain system the unit suites cannot reach: generation on the job engine,
  *        GPU upload and chunk objects, streaming around a moving camera (with release hysteresis),
- *        the styled scene's styles and shader, and the focus shadow fit's view probe. Worlds are
- *        shrunk before the first tick so generation takes a second, not a minute.
+ *        the demo's tile sets and shader, chunk colliders matching the drawn surface, editing the
+ *        stored tiles re-meshing only the chunks they touch, and the focus shadow fit's view probe. Worlds are shrunk before the first tick so generation
+ *        takes a second, not a minute.
  */
 
 #include <coopa/testing/test.h>
@@ -11,6 +12,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -19,6 +21,8 @@
 #include <toyengine/render/toy_render_pipeline.h>
 #include <toyengine/scene/camera_controller.h>
 #include <toyengine/scene/free_mover.h>
+#include <physxcoopa/components/mesh_collider.h>
+#include <physxcoopa/system/physics_system.h>
 #include <toyengine/world/terrain_component.h>
 
 #include "engine/support/checks.h"
@@ -198,14 +202,15 @@ COOPA_TEST(chunks_stream_around_the_camera) {
  *        every piece, streams chunks through the styled mesher, and puts terrain on screen.
  *
  * World shrunk before the first tick exactly as test_terrain_streams_chunks_around_the_camera
- * does; what this adds is the styled half -- that `styles:`/`kind_styles:` reach the library,
- * that every style resolved all nine of its piece files, and that styled chunks draw with the
+ * does; what this adds is the tile-set half -- that `tile_set:`/`kind_tile_sets:` reach the
+ * library, that every set resolved all eleven of its pieces, and that chunks draw with the
  * `terrain_styled` surface shader.
  */
 COOPA_TEST(styled_scene_streams_styled_chunks) {
     ScopedEnv fixed_dt("FIXED_DT", "0.016");
     ScopedEnv no_input("NO_INPUT", "1");
 
+    toy::world::TileMapStore::instance().clear();
     toy::core::AppConfig config =
         make_test_config("assets/scenes/terrain/terrain_demo/scene.yaml", 320, 180, 160, 90);
     toy::core::Engine engine(std::move(config));
@@ -218,7 +223,8 @@ COOPA_TEST(styled_scene_streams_styled_chunks) {
     expect(terrain != nullptr, "smooth terrain: the scene carries a Terrain component");
     if (terrain == nullptr) return;
 
-    expect(terrain->styles.size() == 4, "smooth terrain: all four styles parse");
+    expect(terrain->styles.size() >= 2, "smooth terrain: the main tile set and its per-kind sets parse (" +
+                                            std::to_string(terrain->styles.size()) + " distinct)");
     expect(terrain->kind_styles[static_cast<std::size_t>(toy::world::TileKind::Stone)] !=
                terrain->kind_styles[static_cast<std::size_t>(toy::world::TileKind::Grass)],
            "smooth terrain: stone and grass are shaped by different styles");
@@ -327,3 +333,114 @@ COOPA_TEST(focus_shadow_probe_measures_the_viewed_surface) {
     if (!(probed > 5.0f && probed < 150.0f)) std::cerr << "         probed " << probed << "\n";
 
 }
+
+/**
+ * @brief Every live chunk carries a static collider of the surface it draws: a physics ray
+ *        straight down lands exactly on the column top the sampler reports (the voxel set's tops
+ *        are flat at `steps * height_step`, so there is no rounding to allow for).
+ */
+COOPA_TEST(chunks_collide_with_what_they_draw) {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016");
+    ScopedEnv no_input("NO_INPUT", "1");
+
+    toy::core::Engine engine(make_test_config(voxel_terrain_demo(), 320, 180, 160, 90));
+    auto* camera = coopa::gfx::engine::components::CameraComponent::main();
+    require(camera != nullptr && camera->scene != nullptr, "terrain collision: the scene has a main camera");
+    coopa::scene::Scene& scene = *camera->scene;
+    auto* terrain = scene.find_first_component<toy::world::TerrainComponent>();
+    require(terrain != nullptr, "terrain collision: the scene carries a TileTerrain");
+    const glm::vec3 centre = shrink_terrain_and_centre(*terrain, scene);
+
+    tick_until(engine, 900, [&] { return count_live_chunks(*terrain) >= 25; });
+    tick_frames(engine, 4);   // the physics system picks the new colliders up on its next refresh
+
+    int live = 0, collidable = 0;
+    for (const auto& [coord, chunk] : terrain->chunks()) {
+        if (chunk.state != toy::world::ChunkState::Live || chunk.object == nullptr) continue;
+        ++live;
+        if (chunk.object->get_component<coopa::physx::components::MeshCollider>() != nullptr) ++collidable;
+    }
+    expect(live >= 25 && collidable == live, "terrain collision: every drawn chunk has a collider (" +
+           std::to_string(collidable) + " of " + std::to_string(live) + ")");
+
+    auto* physics = dynamic_cast<coopa::physx::system::PhysicsSystem*>(scene.find_system("Physics"));
+    require(physics != nullptr, "terrain collision: the scene has a physics system");
+    int hits = 0, exact = 0;
+    for (int dy = -12; dy <= 12; dy += 4) {
+        for (int dx = -12; dx <= 12; dx += 4) {
+            const int tx = static_cast<int>(centre.x / terrain->params.tile_size) + dx;
+            const int ty = static_cast<int>(centre.y / terrain->params.tile_size) + dy;
+            const toy::world::TileColumn col = terrain->tiles->get(tx, ty).column();
+            coopa::physx::geometry::Ray ray;
+            ray.origin = glm::vec3((static_cast<float>(tx) + 0.5f) * terrain->params.tile_size,
+                                   (static_cast<float>(ty) + 0.5f) * terrain->params.tile_size, 200.0f);
+            ray.direction = glm::vec3(0.0f, 0.0f, -1.0f);
+            ray.max_distance = 400.0f;
+            coopa::physx::system::PhysicsSystem::RaycastHit hit;
+            if (!physics->raycast(ray, hit)) continue;
+            ++hits;
+            if (std::abs(hit.point.z - static_cast<float>(col.steps) * terrain->params.height_step) < 0.01f) ++exact;
+        }
+    }
+    expect(hits == 49, "terrain collision: every ray down over the loaded area hits the terrain (" +
+           std::to_string(hits) + " of 49)");
+    expect(exact == hits, "terrain collision: ...exactly on the column top it draws (" + std::to_string(exact) + " of " +
+           std::to_string(hits) + ")");
+}
+
+/**
+ * @brief Editing the stored tiles re-meshes exactly the chunks they touch -- the rest keep their
+ *        meshes -- and the chunk's collider follows the new surface.
+ */
+COOPA_TEST(editing_tiles_remeshes_only_their_chunks) {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016");
+    ScopedEnv no_input("NO_INPUT", "1");
+
+    toy::core::Engine engine(make_test_config(voxel_terrain_demo(), 320, 180, 160, 90));
+    auto* camera = coopa::gfx::engine::components::CameraComponent::main();
+    require(camera != nullptr && camera->scene != nullptr, "tile edit: the scene has a main camera");
+    coopa::scene::Scene& scene = *camera->scene;
+    auto* terrain = scene.find_first_component<toy::world::TerrainComponent>();
+    require(terrain != nullptr, "tile edit: the scene carries a TileTerrain");
+    const glm::vec3 centre = shrink_terrain_and_centre(*terrain, scene);
+    tick_until(engine, 900, [&] { return count_live_chunks(*terrain) >= 25; });
+    require(terrain->tiles != nullptr && !terrain->tiles->empty(), "tile edit: the world baked into stored tiles");
+
+    // A 3 x 3 patch in the middle of the camera's chunk, clear of its borders.
+    const int size = terrain->params.chunk_size;
+    const toy::world::ChunkCoord target = terrain->params.chunk_at(centre);
+    const int tx = target.x * size + size / 2, ty = target.y * size + size / 2;
+    std::map<std::pair<int, int>, std::uint32_t> serials;
+    for (const auto& [coord, chunk] : terrain->chunks()) serials[{coord.x, coord.y}] = chunk.mesh_serial;
+    const int raised = terrain->tiles->at(tx, ty).steps + 5;
+    for (int y = ty - 1; y <= ty + 1; ++y)
+        for (int x = tx - 1; x <= tx + 1; ++x) terrain->tiles->at(x, y).steps = static_cast<std::int16_t>(raised);
+    terrain->tiles->mark_dirty(toy::world::IRect{tx - 1, ty - 1, tx + 2, ty + 2});
+
+    tick_until(engine, 120, [&] {
+        auto it = terrain->chunks().find(target);
+        return it != terrain->chunks().end() && it->second.state == toy::world::ChunkState::Live &&
+               it->second.mesh_serial != serials[{target.x, target.y}];
+    });
+    tick_frames(engine, 4);
+    int rebuilt = 0, other_rebuilt = 0;
+    for (const auto& [coord, chunk] : terrain->chunks()) {
+        const auto it = serials.find({coord.x, coord.y});
+        if (it == serials.end() || it->second == chunk.mesh_serial) continue;
+        if (coord.x == target.x && coord.y == target.y) ++rebuilt; else ++other_rebuilt;
+    }
+    expect(rebuilt == 1, "tile edit: the edited chunk re-meshed");
+    expect(other_rebuilt == 0, "tile edit: ...and no other chunk did (" + std::to_string(other_rebuilt) + ")");
+
+    auto* physics = dynamic_cast<coopa::physx::system::PhysicsSystem*>(scene.find_system("Physics"));
+    require(physics != nullptr, "tile edit: the scene has physics");
+    coopa::physx::geometry::Ray ray;
+    ray.origin = glm::vec3((tx + 0.5f) * terrain->params.tile_size, (ty + 0.5f) * terrain->params.tile_size, 300.0f);
+    ray.direction = glm::vec3(0.0f, 0.0f, -1.0f);
+    ray.max_distance = 600.0f;
+    coopa::physx::system::PhysicsSystem::RaycastHit hit;
+    const bool found = physics->raycast(ray, hit);
+    expect(found && std::abs(hit.point.z - raised * terrain->params.height_step) < 0.01f,
+           "tile edit: the collider has the raised surface (" + std::to_string(found ? hit.point.z : -1.0f) + ")");
+}
+

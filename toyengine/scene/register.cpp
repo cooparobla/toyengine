@@ -1,5 +1,7 @@
 #include <toyengine/scene/register.h>
 
+#include <filesystem>
+
 #include <coopa/asset/asset_manager.h>
 #include <coopa/scene/scene_loader.h>
 #include <coopa/scene/scene_object.h>
@@ -24,6 +26,7 @@
 #include <toyengine/water/water_body.h>
 #include <toyengine/world/heightmap_terrain.h>
 #include <toyengine/world/terrain_component.h>
+#include <toyengine/world/tile_map_data.h>
 
 namespace toy {
 namespace scene {
@@ -495,12 +498,6 @@ void register_scene_components(coopa::gfx::core::Device& device,
             if (node.contains("soil_depth_steps")) {
                 params.soil_depth_steps = node.at("soil_depth_steps").get_value<std::int32_t>();
             }
-            if (node.contains("greedy_merge")) {
-                params.greedy_merge = node.at("greedy_merge").get_value<bool>();
-            }
-            if (node.contains("emit_bottom")) {
-                params.emit_bottom = node.at("emit_bottom").get_value<bool>();
-            }
             if (node.contains("max_chunk_jobs_per_frame")) {
                 terrain->max_chunk_jobs_per_frame = node.at("max_chunk_jobs_per_frame").get_value<int>();
             }
@@ -508,116 +505,147 @@ void register_scene_components(coopa::gfx::core::Device& device,
             // Shared with the "MeshRenderer" parser rather than reimplemented, so a terrain's
             // atlas gets the same sRGB colour-space declaration and async load path every other
             // textured material in the engine gets -- see gfxcoopa's parse_pbr_material_().
-            if (node.contains("material")) {
-                coopa::gfx::engine::components::parse_material_value_(
-                    node.at("material"), terrain->material, assets, ctx);
+            //
+            // The chunks' shader reads each surface kind's colour from the palette atlas, so a
+            // material with no `texture_albedo` (a freshly added TileTerrain, say) gets the stock
+            // one rather than drawing the whole world white. A material asset reference is
+            // taken as written.
+            {
+                fkyaml::node material = node.contains("material") ? node.at("material") : fkyaml::node::mapping();
+                if (material.is_mapping() && !material.contains("texture_albedo")) {
+                    material["texture_albedo"] = fkyaml::node(std::string("textures/terrain_atlas.png"));
+                    if (!material.contains("texture_metallic_roughness")) {
+                        material["texture_metallic_roughness"] = fkyaml::node(std::string("textures/terrain_atlas_mr.png"));
+                    }
+                }
+                coopa::gfx::engine::components::parse_material_value_(material, terrain->material, assets, ctx);
             }
 
-            // --- The side meshes ---
-            // Resolved and load-kicked off here, like SkinnedMeshRenderer's `mesh_path` below,
-            // since only the parser has ctx.scene_dir. These are CPU-only SkinnedMeshSource
-            // loads (see tile_mesh_library.h for why that type); the component bakes them into
-            // its TileMeshLibrary once they land.
+            // --- The stored tiles ---
+            // `tiles:` names the terrain's .tiles file, scene-relative, default terrain/<object>.tiles.
+            // Resolved for reading when it exists, else to where a save will create it; the store
+            // hands back the same live tiles on every re-parse (unsaved edits included), and an
+            // empty grid -- baked from the generator keys on first use -- when there is no file.
+            terrain->tiles_file = node.contains("tiles") ? node.at("tiles").get_value<std::string>()
+                                                         : "terrain/" + obj.name() + ".tiles";
+            {
+                std::string path = assets.source().resolve(terrain->tiles_file, ctx.base_dir());
+                if (!std::filesystem::exists(path)) {
+                    path = std::filesystem::path(terrain->tiles_file).is_absolute()
+                               ? terrain->tiles_file
+                               : (std::filesystem::path(ctx.base_dir()) / terrain->tiles_file).string();
+                }
+                terrain->tiles = world::TileMapStore::instance().acquire(path);
+            }
+
+            if (node.contains("collision")) terrain->collision = node.at("collision").get_value<bool>();
+            if (node.contains("physics_material")) {
+                terrain->physics_material = node.at("physics_material").get_value<std::string>();
+            }
+
+            // --- The tile sets (toyengine/world/tile_topology.h) ---
+            // `tile_set: objects/terrain/tileset_round` is the template every column is built from;
+            // `kind_tile_sets: {stone: objects/terrain/tileset_rock}` overrides it per surface kind.
+            // A tile set is an object asset whose children are the pieces, each found by its NAME
+            // (tile_piece_name()) and taken from that child's MeshRenderer mesh_path; a piece with
+            // no child falls back like a missing file (TileMeshLibrary::finish_styles()).
             using coopa::gfx::engine::data::SkinnedMeshSource;
-            auto load_side = [&assets, &ctx](const std::string& key) {
+            auto load_piece = [&assets, &ctx](const std::string& key) {
                 return assets.load_async<SkinnedMeshSource>("meshes/" + key + ".yaml", ctx.base_dir());
             };
-
-            if (node.contains("side_mesh")) {
-                terrain->side_mesh = node.at("side_mesh").get_value<std::string>();
-            }
-            if (!terrain->side_mesh.empty()) terrain->set_side_source(load_side(terrain->side_mesh));
-
-            if (node.contains("sides")) {
-                // A face whose name is absent simply inherits the canonical mesh -- which is the
-                // point of the indirection: a smoother top is one key here, not a code change.
-                static const std::pair<const char*, world::TileFace> k_face_names[] = {
-                    {"top", world::TileFace::Top},     {"bottom", world::TileFace::Bottom},
-                    {"north", world::TileFace::North}, {"south", world::TileFace::South},
-                    {"east", world::TileFace::East},   {"west", world::TileFace::West}};
-
-                const fkyaml::node& sides = node.at("sides");
-                for (const auto& [name, face] : k_face_names) {
-                    if (!sides.contains(name)) continue;
-                    const std::string key = sides.at(name).get_value<std::string>();
-                    if (key.empty()) continue;
-                    terrain->face_meshes[static_cast<std::size_t>(face)] = key;
-                    terrain->set_face_source(face, load_side(key));
-                }
-            }
-
-            // --- Styled tiles (toyengine/world/tile_topology.h) ---
-            // `styles: {round: objects/tileset_round}` names each style and its tile set -- or, the
-            // older form `{round: tile_round}`, a mesh prefix its pieces load from
-            // (meshes/<prefix>_<piece>.yaml, piece names from tile_piece_name()).
-            // `kind_styles: {stone: rock, default: round}` shapes each surface kind with one of
-            // them. Give `default` explicitly: without it, unlisted
-            // kinds take the first style in the parsed mapping's order, which need not be the
-            // order written.
-            //
-            // A style value under objects/ names a TILE-SET OBJECT instead (objects/tileset_round,
-            // written by tools/gen_tile_styles.py; duplicated in the editor for new looks): its
-            // children are the pieces, each found by its NAME (tile_piece_name()) and taken from
-            // that child's MeshRenderer mesh_path. A piece with no child falls back like a
-            // missing file (TileMeshLibrary::finish_styles()).
-            if (node.contains("styles") && node.at("styles").is_mapping()) {
-                for (auto item : node.at("styles").map_items()) {
-                    world::TerrainComponent::StyleEntry entry;
-                    entry.name   = item.key().get_value<std::string>();
-                    entry.prefix = item.value().get_value<std::string>();
-                    const std::size_t index = terrain->styles.size();
-                    if (entry.prefix.rfind("objects/", 0) == 0) {
-                        std::string rel = entry.prefix;
-                        if (rel.size() < 5 || rel.compare(rel.size() - 5, 5, ".yaml") != 0) rel += ".yaml";
-                        try {
-                            const fkyaml::node doc =
-                                coopa::yaml::load_document(assets.source().resolve(rel, ctx.base_dir()));
-                            const fkyaml::node& obj = doc.at("object");
-                            if (obj.contains("children") && obj.at("children").is_sequence()) {
-                                for (const auto& child : obj.at("children")) {
-                                    if (!child.contains("name") || !child.contains("components")) continue;
-                                    const std::string name = child.at("name").get_value<std::string>();
-                                    for (std::size_t p = 0; p < world::k_tile_piece_count; ++p) {
-                                        const auto piece = static_cast<world::TilePiece>(p);
-                                        if (name != world::tile_piece_name(piece)) continue;
-                                        for (const auto& comp : child.at("components")) {
-                                            if (!comp.contains("type") || !comp.contains("mesh_path") ||
-                                                comp.at("type").get_value<std::string>() != "MeshRenderer") continue;
-                                            terrain->set_style_piece_source(
-                                                index, piece, load_side(comp.at("mesh_path").get_value<std::string>()));
-                                        }
+            // Adds one style (a distinct tile set) and kicks off its pieces' loads; returns its index.
+            // `value` is a tile-set object path, or -- the old `styles:` form -- a mesh prefix the
+            // pieces load from (meshes/<prefix>_<piece>.yaml).
+            auto add_style = [&](const std::string& name, const std::string& value) {
+                world::TerrainComponent::StyleEntry entry;
+                entry.name   = name;
+                entry.prefix = value;
+                const std::size_t index = terrain->styles.size();
+                if (value.rfind("objects/", 0) == 0) {
+                    std::string rel = value;
+                    if (rel.size() < 5 || rel.compare(rel.size() - 5, 5, ".yaml") != 0) rel += ".yaml";
+                    try {
+                        const fkyaml::node doc =
+                            coopa::yaml::load_document(assets.source().resolve(rel, ctx.base_dir()));
+                        const fkyaml::node& obj = doc.at("object");
+                        if (obj.contains("round_kind_corners")) {
+                            entry.round_kind_corners = obj.at("round_kind_corners").get_value<bool>();
+                        }
+                        if (obj.contains("children") && obj.at("children").is_sequence()) {
+                            for (const auto& child : obj.at("children")) {
+                                if (!child.contains("name") || !child.contains("components")) continue;
+                                const std::string child_name = child.at("name").get_value<std::string>();
+                                for (std::size_t p = 0; p < world::k_tile_piece_count; ++p) {
+                                    const auto piece = static_cast<world::TilePiece>(p);
+                                    if (child_name != world::tile_piece_name(piece)) continue;
+                                    for (const auto& comp : child.at("components")) {
+                                        if (!comp.contains("type") || !comp.contains("mesh_path") ||
+                                            comp.at("type").get_value<std::string>() != "MeshRenderer") continue;
+                                        terrain->set_style_piece_source(
+                                            index, piece, load_piece(comp.at("mesh_path").get_value<std::string>()));
                                     }
                                 }
                             }
-                        } catch (const std::exception& e) {
-                            std::cerr << "[Terrain] tile set '" << entry.prefix << "' could not be read: "
-                                      << e.what() << "\n";
                         }
-                    } else {
-                        for (std::size_t p = 0; p < world::k_tile_piece_count; ++p) {
-                            const auto piece = static_cast<world::TilePiece>(p);
-                            terrain->set_style_piece_source(
-                                index, piece, load_side(entry.prefix + "_" + world::tile_piece_name(piece)));
-                        }
+                    } catch (const std::exception& e) {
+                        std::cerr << "[TileTerrain] tile set '" << value << "' could not be read: " << e.what() << "\n";
                     }
-                    terrain->styles.push_back(std::move(entry));
+                } else {
+                    for (std::size_t p = 0; p < world::k_tile_piece_count; ++p) {
+                        const auto piece = static_cast<world::TilePiece>(p);
+                        terrain->set_style_piece_source(index, piece,
+                                                        load_piece(value + "_" + world::tile_piece_name(piece)));
+                    }
                 }
-            }
-            if (node.contains("kind_styles") && node.at("kind_styles").is_mapping()) {
-                auto style_index = [terrain](const std::string& name) {
-                    for (std::size_t i = 0; i < terrain->styles.size(); ++i) {
-                        if (terrain->styles[i].name == name) return static_cast<int>(i);
+                terrain->styles.push_back(std::move(entry));
+                return static_cast<int>(index);
+            };
+            auto style_named = [terrain](const std::string& name) {
+                for (std::size_t i = 0; i < terrain->styles.size(); ++i) {
+                    if (terrain->styles[i].name == name) return static_cast<int>(i);
+                }
+                return -1;
+            };
+
+            if (node.contains("styles") && node.at("styles").is_mapping() && !node.contains("tile_set")) {
+                // The older form: `styles: {round: objects/tileset_round}` names each set, and
+                // `kind_styles: {stone: rock, default: round}` picks one per kind. Without a
+                // `default`, unlisted kinds take the first style parsed.
+                for (auto item : node.at("styles").map_items()) {
+                    add_style(item.key().get_value<std::string>(), item.value().get_value<std::string>());
+                }
+                if (node.contains("kind_styles") && node.at("kind_styles").is_mapping()) {
+                    for (auto item : node.at("kind_styles").map_items()) {
+                        const std::string kind_name = item.key().get_value<std::string>();
+                        const int style = style_named(item.value().get_value<std::string>());
+                        if (style < 0) continue;
+                        world::TileKind kind;
+                        if (kind_name == "default") {
+                            terrain->default_style = style;
+                        } else if (world::tile_kind_from_name(kind_name.c_str(), kind)) {
+                            terrain->kind_styles[static_cast<std::size_t>(kind)] = style;
+                        }
                     }
-                    return -1;
-                };
-                for (auto item : node.at("kind_styles").map_items()) {
-                    const std::string kind_name = item.key().get_value<std::string>();
-                    const int style = style_index(item.value().get_value<std::string>());
-                    if (style < 0) continue;
-                    world::TileKind kind;
-                    if (kind_name == "default") {
-                        terrain->default_style = style;
-                    } else if (world::tile_kind_from_name(kind_name.c_str(), kind)) {
+                }
+            } else {
+                if (node.contains("tile_set")) {
+                    const std::string path = node.at("tile_set").get_value<std::string>();
+                    if (!path.empty()) terrain->tile_set = path;
+                } else if (node.contains("side_mesh") || node.contains("sides")) {
+                    // The retired voxel mesher's keys: the voxel look is now a tile set.
+                    std::cerr << "[TileTerrain] `side_mesh` / `sides` are no longer used -- building from '"
+                              << terrain->tile_set << "'; set `tile_set:` instead\n";
+                }
+                terrain->default_style = add_style(terrain->tile_set, terrain->tile_set);
+                if (node.contains("kind_tile_sets") && node.at("kind_tile_sets").is_mapping()) {
+                    for (auto item : node.at("kind_tile_sets").map_items()) {
+                        const std::string kind_name = item.key().get_value<std::string>();
+                        const std::string path = item.value().get_value<std::string>();
+                        world::TileKind kind;
+                        if (path.empty() || !world::tile_kind_from_name(kind_name.c_str(), kind)) continue;
+                        terrain->kind_tile_sets[static_cast<std::size_t>(kind)] = path;
+                        int style = style_named(path);
+                        if (style < 0) style = add_style(path, path);
                         terrain->kind_styles[static_cast<std::size_t>(kind)] = style;
                     }
                 }

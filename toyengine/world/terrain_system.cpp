@@ -1,5 +1,7 @@
 #include <toyengine/world/terrain_system.h>
 
+#include <cmath>
+
 #include <coopa/asset/asset_id.h>
 #include <coopa/asset/asset_manager.h>
 #include <coopa/job/engine.h>
@@ -10,15 +12,28 @@
 #include <gfxcoopa/engine/components/mesh_renderer.h>
 #include <gfxcoopa/engine/data/mesh.h>
 #include <gfxcoopa/memory/allocator.h>
+#include <physxcoopa/components/mesh_collider.h>
+#include <physxcoopa/dynamics/physics_material.h>
+#include <physxcoopa/geometry/triangle_mesh.h>
+#include <physxcoopa/system/physics_system.h>
 #include <toyengine/world/terrain_chunk.h>
+#include <toyengine/world/tile_map_data.h>
 #include <toyengine/world/tile_types.h>
 
 namespace toy {
 namespace world {
 
 void TerrainSystem::execute(coopa::scene::Scene& scene, const coopa::scene::FrameContext& ctx) {
+    ++frame_;
+    physics_dirty_ = false;
     for (TerrainComponent* terrain : scene.get_components<TerrainComponent>()) {
         tick_terrain_(*terrain, scene, ctx);
+    }
+    // One diff per frame however many chunk colliders came or went (PhysicsSystem::refresh()).
+    if (physics_dirty_) {
+        if (auto* physics = dynamic_cast<coopa::physx::system::PhysicsSystem*>(scene.find_system("Physics"))) {
+            physics->refresh();
+        }
     }
 }
 
@@ -26,13 +41,15 @@ void TerrainSystem::tick_terrain_(TerrainComponent& terrain, coopa::scene::Scene
                    const coopa::scene::FrameContext& ctx) {
     terrain.begin_generation(ctx.jobs);
     terrain.poll_generation();
-    terrain.poll_side_meshes();
+    terrain.poll_tile_sets();
+    terrain.release_retired_collision(frame_, k_collision_keep_frames);
 
     // Retiring chunks are advanced even before the terrain is ready: a scene torn down
     // mid-generation still has handles to close.
     advance_retiring_(terrain);
     if (!terrain.is_ready() || ctx.jobs == nullptr) return;
 
+    mark_edited_chunks_(terrain);
     const ChunkCoord centre = terrain.params.chunk_at(camera_position_(terrain));
     want_chunks_(terrain, centre);
     release_distant_chunks_(terrain, centre, ctx);
@@ -57,9 +74,28 @@ glm::vec3 TerrainSystem::camera_position_(const TerrainComponent& terrain) const
 }
 
 bool TerrainSystem::chunk_in_world(const TerrainComponent& terrain, const ChunkCoord& coord) {
-    const std::int32_t tiles = terrain.sampler().tiles_per_axis();
-    const std::int32_t size  = terrain.params.chunk_size;
-    return coord.x >= 0 && coord.y >= 0 && coord.x * size < tiles && coord.y * size < tiles;
+    if (!terrain.tiles) return false;
+    const std::int32_t size = terrain.params.chunk_size;
+    return coord.x >= 0 && coord.y >= 0 && coord.x * size < terrain.tiles->width() &&
+           coord.y * size < terrain.tiles->height();
+}
+
+void TerrainSystem::mark_edited_chunks_(TerrainComponent& terrain) {
+    const TileMapData& tiles = *terrain.tiles;
+    if (terrain.applied_tile_revision == tiles.revision()) return;
+    const std::int32_t size = std::max(1, terrain.params.chunk_size);
+    tiles.for_each_dirty_since(terrain.applied_tile_revision, [&](const IRect& rect) {
+        // One tile wider: a chunk's skirt reads its neighbours' border columns.
+        const std::int32_t cx0 = static_cast<std::int32_t>(std::floor((rect.x0 - 1) / static_cast<float>(size)));
+        const std::int32_t cy0 = static_cast<std::int32_t>(std::floor((rect.y0 - 1) / static_cast<float>(size)));
+        const std::int32_t cx1 = static_cast<std::int32_t>(std::floor(rect.x1 / static_cast<float>(size)));
+        const std::int32_t cy1 = static_cast<std::int32_t>(std::floor(rect.y1 / static_cast<float>(size)));
+        for (auto& [coord, chunk] : terrain.chunks()) {
+            if (chunk.state == ChunkState::Retiring || chunk.state == ChunkState::Queued) continue;
+            if (coord.x >= cx0 && coord.x <= cx1 && coord.y >= cy0 && coord.y <= cy1) chunk.stale = true;
+        }
+    });
+    terrain.applied_tile_revision = tiles.revision();
 }
 
 void TerrainSystem::want_chunks_(TerrainComponent& terrain, const ChunkCoord& centre) {
@@ -139,6 +175,8 @@ void TerrainSystem::upload_finished_chunks_(TerrainComponent& terrain, coopa::sc
         // An empty chunk is a real outcome, not a failure: a chunk of open ocean below the
         // waterline emits no faces at all. It stays Live with no object, so it is never
         // re-queued and never draws.
+        // A rebuild replaces the chunk's object in this same frame, so it never shows a hole.
+        destroy_chunk_object_(terrain, chunk);
         if (chunk.build && !chunk.build->mesh.empty()) {
             create_chunk_object_(terrain, scene, chunk);
         }
@@ -152,7 +190,8 @@ void TerrainSystem::submit_queued_chunks_(TerrainComponent& terrain, const Chunk
 
     pending_.clear();
     for (auto& entry : terrain.chunks()) {
-        if (entry.second.state == ChunkState::Queued) pending_.push_back(entry.first);
+        const TerrainChunk& c = entry.second;
+        if (c.state == ChunkState::Queued || (c.state == ChunkState::Live && c.stale)) pending_.push_back(entry.first);
     }
     if (pending_.empty()) return;
 
@@ -173,14 +212,18 @@ void TerrainSystem::submit_queued_chunks_(TerrainComponent& terrain, const Chunk
         TerrainChunk& chunk = terrain.chunks().at(pending_[static_cast<std::size_t>(i)]);
 
         auto build = std::make_shared<ChunkBuildJob>();
-        build->sampler = &terrain.sampler();
+        // Sampled here, on the owner thread: the job meshes its own copy, so the tiles may be
+        // edited while it runs.
+        sample_chunk_columns(*terrain.tiles, terrain.params, chunk.coord, build->pad);
         build->library = &terrain.library();
         build->params  = terrain.params;
         build->coord   = chunk.coord;
+        build->collision = terrain.collision;
 
         chunk.build = build;
         chunk.job   = ctx.jobs->create_handle();
         chunk.state = ChunkState::Meshing;
+        chunk.stale = false;
 
         // One job per chunk rather than one parallel_for over all of them: chunks finish and
         // appear individually, and a chunk that leaves view mid-flight can be cancelled on
@@ -200,7 +243,8 @@ void TerrainSystem::create_chunk_object_(TerrainComponent& terrain, coopa::scene
     chunk.mesh = std::make_shared<Mesh>(
         Mesh::from_arrays(device_, allocator_, data.vertices, data.indices, 1));
 
-    const std::string id = chunk_asset_id_(terrain, chunk.coord);
+    ++chunk.mesh_serial;
+    const std::string id = chunk_asset_id_(terrain, chunk);
     auto handle = assets_.create<Mesh>(id, chunk.mesh);
 
     auto object = std::make_unique<coopa::scene::SceneObject>(chunk_object_name_(chunk.coord));
@@ -209,28 +253,28 @@ void TerrainSystem::create_chunk_object_(TerrainComponent& terrain, coopa::scene
 
     auto* renderer = object->add_component<MeshRenderer>();
     renderer->material = terrain.material;
-    if (terrain.library().has_styles()) {
-        // Styled chunks carry blend codes (encode_surface_blend()); terrain_styled.frag picks
-        // each pixel's kind from them, takes its colour from the atlas and adds world-space
-        // detail -- it needs the atlas grid and the cell size.
-        renderer->material.shader        = "terrain_styled";
-        renderer->material.shader_params = glm::vec4(static_cast<float>(k_atlas_columns),
-                                                     static_cast<float>(k_atlas_rows),
-                                                     terrain.params.height_step, terrain.params.tile_size);
-        // Its UVs are blend codes, not texture coordinates: probe / GI bakes, which draw with
-        // stock shaders only, would misread them.
-        renderer->affects_reflection_probes = false;
-    } else if (terrain.params.greedy_merge) {
-        // The greedy mesher writes tile-space UVs (TileMeshLibrary::encode_uv), which only
-        // the `terrain` surface shader decodes; it reads the atlas grid from shader_params.
-        renderer->material.shader        = "terrain";
-        renderer->material.shader_params = glm::vec4(static_cast<float>(k_atlas_columns),
-                                                     static_cast<float>(k_atlas_rows),
-                                                     static_cast<float>(k_atlas_cell_texels), 0.0f);
-        // Probe / GI bakes draw with stock shaders only and would misread those UVs.
-        renderer->affects_reflection_probes = false;
-    }
+    // Chunks carry blend codes (encode_surface_blend()), not texture coordinates:
+    // terrain_styled.frag picks each pixel's kind from them, takes its colour from the atlas and
+    // adds world-space detail -- it needs the atlas grid and the cell size.
+    renderer->material.shader        = "terrain_styled";
+    renderer->material.shader_params = glm::vec4(static_cast<float>(k_atlas_columns),
+                                                 static_cast<float>(k_atlas_rows),
+                                                 terrain.params.height_step, terrain.params.tile_size);
+    // Probe / GI bakes draw with stock shaders only and would misread those codes.
+    renderer->affects_reflection_probes = false;
     renderer->set_mesh(std::move(handle));
+
+    if (chunk.build->collision_mesh) {
+        // Static: no Rigidbody, so the physics system makes it a fixed body. The mesh is the
+        // drawn surface (built on the worker), so it matches whatever tile set drew it.
+        auto* collider = object->add_component<coopa::physx::components::MeshCollider>();
+        collider->set_mesh(chunk.build->collision_mesh);
+        if (!terrain.physics_material.empty()) {
+            collider->set_material_asset(assets_.load<coopa::physx::dynamics::PhysicsMaterial>(
+                "physics_materials/" + terrain.physics_material + ".yaml"));
+        }
+        physics_dirty_ = true;
+    }
 
     chunk.object = terrain.owner->add_child(std::move(object));
     // Stamps the Scene back-pointer onto the new components, exactly as
@@ -240,6 +284,10 @@ void TerrainSystem::create_chunk_object_(TerrainComponent& terrain, coopa::scene
 
 void TerrainSystem::destroy_chunk_object_(TerrainComponent& terrain, TerrainChunk& chunk) {
     if (chunk.object != nullptr && terrain.owner != nullptr) {
+        if (auto* collider = chunk.object->get_component<coopa::physx::components::MeshCollider>()) {
+            terrain.retire_collision(collider->owned_mesh(), frame_);
+            physics_dirty_ = true;
+        }
         // The returned unique_ptr is destroyed immediately, which destroys the MeshRenderer
         // and with it the last AssetHandle on the chunk's mesh -- the refcount unload()
         // requires to have reached zero.
@@ -248,14 +296,14 @@ void TerrainSystem::destroy_chunk_object_(TerrainComponent& terrain, TerrainChun
     }
     if (chunk.mesh) {
         chunk.mesh.reset();
-        assets_.unload(coopa::asset::AssetId::from_path(chunk_asset_id_(terrain, chunk.coord)));
+        assets_.unload(coopa::asset::AssetId::from_path(chunk_asset_id_(terrain, chunk)));
     }
 }
 
-std::string TerrainSystem::chunk_asset_id_(const TerrainComponent& terrain, const ChunkCoord& coord) {
+std::string TerrainSystem::chunk_asset_id_(const TerrainComponent& terrain, const TerrainChunk& chunk) {
     const std::string owner = terrain.owner != nullptr ? terrain.owner->name() : "terrain";
-    return "runtime/terrain/" + owner + "/" + std::to_string(coord.x) + "_" +
-           std::to_string(coord.y);
+    return "runtime/terrain/" + owner + "/" + std::to_string(chunk.coord.x) + "_" +
+           std::to_string(chunk.coord.y) + "_" + std::to_string(chunk.mesh_serial);
 }
 
 TerrainSystem* install_terrain_system(coopa::scene::Scene& scene,

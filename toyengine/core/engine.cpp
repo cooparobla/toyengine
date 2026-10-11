@@ -2014,17 +2014,6 @@ render::ToyRenderConfig Engine::make_render_config_(const AppConfig& config,
         /* shadow_cube_tese */ "foliage_shadow_cube.tese",
     });
     rc.surface_shaders.add({
-        /* name  */ "terrain",
-        /* domain */ coopa::gfx::pipeline::SurfaceShaderDomain::Opaque,
-        /* vert  */ "",  // stock gbuffer.vert -- only the UV decode differs
-        /* frag  */ "terrain.frag", // tile-space UVs from the greedy chunk mesher
-        /* shadow_vert */ "", // stock: an opaque caster never reads UVs in the shadow pass
-        /* shadow_frag */ "",
-        /* shadow_cube_vert */ "",
-        /* shadow_cube_frag */ "",
-        /* cull */ coopa::gfx::CullMode::Back, // closed columns, like any opaque solid
-    });
-    rc.surface_shaders.add({
         /* name  */ "terrain_styled",
         /* domain */ coopa::gfx::pipeline::SurfaceShaderDomain::Opaque,
         /* vert  */ "",  // stock gbuffer.vert

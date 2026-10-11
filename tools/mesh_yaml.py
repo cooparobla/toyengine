@@ -1,7 +1,7 @@
 """Shared writer for the Blender-exported mesh YAML schema, used by the tile generators.
 
-Standalone helpers, not part of the C++ build. Imported by tools/gen_tile_side_meshes.py and
-tools/gen_tile_styles.py so both emit byte-for-byte the same schema: quads or n-gons (fan-
+Standalone helpers, not part of the C++ build. Imported by tools/gen_tile_styles.py (and other
+mesh generators) so they emit byte-for-byte the same schema: quads or n-gons (fan-
 triangulated on load -- see gfxcoopa's SkinnedMeshSource), one normal / UV / tangent per vertex.
 """
 

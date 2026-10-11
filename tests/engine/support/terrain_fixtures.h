@@ -2,63 +2,70 @@
 
 /**
  * @file terrain_fixtures.h
- * @brief Shared terrain inputs: a canonical unit quad and the flat side library baked from it,
- *        small test params and pads (terrain_chunk, terrain_sampler, styled_tiles), and the live
- *        chunk queries + world shrink the GPU terrain suites use to keep generation to a second.
+ * @brief Shared terrain inputs: tile libraries baked from the shipped tile sets, small test
+ *        params and pads (terrain_chunk, terrain_sampler, styled_tiles), and the live chunk
+ *        queries + world shrink + voxel variant the GPU terrain suites use.
  */
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
+#include <initializer_list>
+#include <string>
 
 #include <glm/glm.hpp>
 
+#include <root_directory.h>   // ROOT_DIR
+
+#include <coopa/asset/asset_index.h>
 #include <coopa/scene/scene.h>
+#include <coopa/yaml/document.h>
 #include <gfxcoopa/engine/data/skinned_mesh_source.h>
 #include <toyengine/world/terrain_chunk.h>
 #include <toyengine/world/terrain_component.h>
 #include <toyengine/world/tile_mesh_library.h>
+#include <toyengine/world/tile_topology.h>
 
 #include "engine/support/scene_variant.h"
 
 namespace toy::test {
 
-/**
- * @brief A welded unit quad in the canonical side orientation: the +Z face of `[0,1]^3`.
- *
- * Built directly rather than loaded from assets/meshes/tile_side_flat.yaml
- * so the counting assertions below rest on known numbers -- 4 vertices and 6 indices per
- * appended side -- instead of on however the YAML path happens to weld its corners.
- */
-inline coopa::gfx::engine::data::SkinnedMeshSource make_canonical_quad() {
-    using coopa::gfx::engine::data::Vertex;
-    coopa::gfx::engine::data::SkinnedMeshSource source;
-
-    const glm::vec3 positions[4] = {{0.0f, 0.0f, 1.0f}, {1.0f, 0.0f, 1.0f},
-                                    {1.0f, 1.0f, 1.0f}, {0.0f, 1.0f, 1.0f}};
-    const glm::vec2 uvs[4] = {{0.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 1.0f}};
-    for (int i = 0; i < 4; ++i) {
-        Vertex v{};
-        v.position = positions[i];
-        v.normal   = glm::vec3(0.0f, 0.0f, 1.0f);
-        v.uv       = uvs[i];
-        v.tangent  = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
-        source.vertices.push_back(v);
-    }
-    source.indices = {0, 1, 2, 0, 2, 3};
-    return source;
+/** @brief Loads one generated tile-set piece from the repo's assets, whatever the working directory. */
+inline coopa::gfx::engine::data::SkinnedMeshSource load_tile_piece(const std::string& name) {
+    // Found by name: the pieces live in tag folders (meshes/terrain/<set>/).
+    const auto path = coopa::asset::AssetIndex::find(std::filesystem::path(ROOT_DIR) / "assets", "meshes/" + name + ".yaml");
+    return coopa::gfx::engine::data::SkinnedMeshSource::from_node(coopa::yaml::load_document(
+        path.value_or(std::filesystem::path(ROOT_DIR) / "assets" / "meshes" / (name + ".yaml"))));
 }
 
-/** @brief Indices per appended side, for the quad above. Two triangles. */
-constexpr size_t kIndicesPerSide = 6;
+/**
+ * @brief A library baked from shipped tile sets, by name (`round`, `soft`, `rock`, `voxel`), in
+ *        that order as styles 0, 1, ...; every kind maps to style 0. The voxel set keeps kind
+ *        boundaries square, as its tile-set object says (round_kind_corners: false).
+ */
+inline toy::world::TileMeshLibrary make_tile_library(std::initializer_list<const char*> sets) {
+    using namespace toy::world;
+    TileMeshLibrary lib;
+    for (const char* set : sets) {
+        const std::uint8_t index = lib.add_style();
+        lib.set_round_kind_corners(index, std::string(set) != "voxel");
+        for (std::size_t p = 0; p < k_tile_piece_count; ++p) {
+            const auto piece = static_cast<TilePiece>(p);
+            lib.bake_style_piece(index, piece, load_tile_piece("tile_" + std::string(set) + "_" + tile_piece_name(piece)));
+        }
+    }
+    lib.finish_styles();
+    return lib;
+}
 
-/** @brief A library with the same flat quad baked onto all six faces. */
-inline toy::world::TileMeshLibrary make_flat_library() {
-    toy::world::TileMeshLibrary library;
-    library.bake_canonical(make_canonical_quad());
+/** @brief The shipped voxel (square block) tile set alone. Built once: it is immutable. */
+inline const toy::world::TileMeshLibrary& voxel_library() {
+    static const toy::world::TileMeshLibrary library = make_tile_library({"voxel"});
     return library;
 }
 
-/** @brief Test params: a small chunk, unit cells, no bottom faces, generous wall clamp. */
+/** @brief Test params: a small chunk, unit cells, generous wall clamp. */
 inline toy::world::TerrainParams make_test_params(std::int32_t chunk_size = 4) {
     toy::world::TerrainParams params;
     params.chunk_size       = chunk_size;
@@ -66,7 +73,6 @@ inline toy::world::TerrainParams make_test_params(std::int32_t chunk_size = 4) {
     params.height_step      = 1.0f;
     params.max_wall_steps   = 64;
     params.soil_depth_steps = 3;
-    params.emit_bottom      = false;
     return params;
 }
 
@@ -80,11 +86,6 @@ inline toy::world::ColumnPad make_flat_pad(std::int32_t chunk_size, std::int32_t
         }
     }
     return pad;
-}
-
-/** @brief Number of sides in a merged chunk, from its index count. */
-inline size_t side_count(const toy::world::ChunkMeshData& mesh) {
-    return mesh.indices.size() / kIndicesPerSide;
 }
 
 /** @brief Live (uploaded and drawing) chunks in a terrain. */
@@ -131,19 +132,25 @@ inline glm::vec3 shrink_terrain_and_centre(toy::world::TerrainComponent& terrain
 }
 
 /**
- * @brief terrain_demo in the voxel read: its `styles:` / `kind_styles:` removed and the flat side
- *        mesh and atlas set, so chunks go through the flat mesher (one quad per exposed side).
- *        The demo itself is styled; this is the variant its header describes.
+ * @brief terrain_demo built from the voxel tile set: `tile_set` pointed at tileset_voxel and the
+ *        per-kind overrides dropped -- the one change that turns the rounded world into blocks.
+ *        The demo itself is rounded; this is the variant its header describes.
  */
 inline std::string voxel_terrain_demo() {
+    // A fresh bake per test: the tile store is process-wide, and tests shrink the world.
+    toy::world::TileMapStore::instance().clear();
     return scene_variant("assets/scenes/terrain/terrain_demo/scene.yaml", "voxel_terrain", [](fkyaml::node& doc) {
         fkyaml::node* t = scene_component(doc, "terrain", "TileTerrain");
         if (t == nullptr) return;
-        t->as_map().erase(fkyaml::node(std::string("styles")));
-        t->as_map().erase(fkyaml::node(std::string("kind_styles")));
-        (*t)["side_mesh"] = fkyaml::node(std::string("tile_side_flat"));
-        (*t)["material"]["texture_albedo"] = fkyaml::node(std::string("textures/terrain_atlas.png"));
-        (*t)["material"]["texture_metallic_roughness"] = fkyaml::node(std::string("textures/terrain_atlas_mr.png"));
+        t->as_map().erase(fkyaml::node(std::string("kind_tile_sets")));
+        (*t)["tile_set"] = fkyaml::node(std::string("objects/terrain/tileset_voxel"));
+        // The demo's falling bodies (`drop_*`) would keep the scene in motion -- out of these
+        // rendering tests' view, but not out of the temporal passes' motion gate.
+        auto& roots = doc["scene"]["root_objects"].as_seq();
+        roots.erase(std::remove_if(roots.begin(), roots.end(), [](const fkyaml::node& o) {
+                        return o.contains("name") && o.at("name").get_value<std::string>().rfind("drop_", 0) == 0;
+                    }),
+                    roots.end());
     });
 }
 

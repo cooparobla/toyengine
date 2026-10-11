@@ -1,20 +1,12 @@
 /**
  * @file tile_types.h
  * @brief The vocabulary of the terrain tile system: faces, surface kinds, columns and chunk
- *        coordinates, plus the canonical-face-to-target-face transforms.
+ *        coordinates, plus the D4 orientations tile-set pieces are baked into.
  *
  * A terrain **tile** is one cell of the world grid, extruded from z = 0 up to its own height.
- * A tile's visible geometry is its **sides**: a top, a bottom, and four laterals. Each side is
- * an authored mesh (see tile_mesh_library.h), and a tile contributes a side only where that
- * side is **exposed** -- a top always, a lateral only against a lower neighbour. The chunk
- * mesher (terrain_chunk.h) merges every exposed side in a chunk into one GPU mesh.
- *
- * The key geometric convention lives here: every side mesh is authored ONCE, as the **+Z face
- * of a unit cube spanning [0,1]^3** (matching assets/meshes/cube_corner.yaml's
- * own [0,1]^3 convention), and every other face is that same mesh rotated about the cube's
- * centre by face_transform(). That is what lets a smoother tile -- a chamfered rim, a sloped
- * cap, a curved patch -- be dropped in as a data change: the mesher never learns what shape a
- * side is, only where it goes.
+ * Its visible geometry is assembled from a **tile set**'s authored pieces (tile_topology.h,
+ * tile_mesh_library.h): a top always, and walls only against a lower neighbour. The chunk
+ * mesher (terrain_chunk.h) merges every placed piece in a chunk into one GPU mesh.
  *
  * Z is up in this engine (see assets/config.yaml's `gravity: {0, 0, -9.81}`), so mapcoopa's
  * grid (x, y) maps straight onto world (x, y) and elevation onto world z.
@@ -38,13 +30,11 @@ namespace world {
  * @enum TileFace
  * @brief The six sides of a tile, named by the axis each one faces.
  *
- * The order is the order face_transform() indexes, and `Top` is deliberately first: it is the
- * canonical authoring orientation every other face is derived from, and the only side a
- * flat-ground tile ever emits.
+ * `Top` is first: it is the only side a flat-ground tile ever shows.
  */
 enum class TileFace : std::uint8_t {
     Top,    /**< @brief +Z, the canonical authoring orientation. */
-    Bottom, /**< @brief -Z; only emitted when TerrainParams::emit_bottom is set. */
+    Bottom, /**< @brief -Z; never exposed (a column rests on the ground). */
     North,  /**< @brief +Y. */
     South,  /**< @brief -Y. */
     East,   /**< @brief +X. */
@@ -66,8 +56,9 @@ inline constexpr std::array<TileFace, 4> k_lateral_faces = {
  * much smaller set, because what a face needs from a biome is only which patch of the atlas to
  * sample. TerrainSampler owns that collapse; nothing else in the tile system knows biomes exist.
  *
- * Appended, never reordered: a kind's position IS its atlas cell (see atlas_cell()), so
- * inserting above would silently re-texture the whole world.
+ * Appended, never reordered: a kind's position IS its atlas cell (row-major in a
+ * k_atlas_columns x k_atlas_rows grid; terrain_styled.frag reads each cell's centre), so
+ * inserting above would silently re-colour the whole world.
  */
 enum class TileKind : std::uint8_t {
     Grass,
@@ -91,39 +82,6 @@ inline constexpr std::size_t k_tile_kind_count = 12;
 inline constexpr std::uint32_t k_atlas_columns = 4;
 /** @brief Atlas cells per column. */
 inline constexpr std::uint32_t k_atlas_rows = 4;
-/** @brief Edge length of one atlas cell, in texels; see tools/gen_terrain_atlas.py. */
-inline constexpr std::uint32_t k_atlas_cell_texels = 16;
-
-/**
- * @brief The UV rectangle a `TileKind` occupies in the terrain atlas.
- *
- * Returned as `{u0, v0, du, dv}` -- an origin plus a size, so a caller maps a side mesh's own
- * `[0,1]` UV into it with one multiply-add.
- *
- * The rectangle is inset by half a texel on every edge. The atlas is NEAREST-sampled (this is a
- * pixel-art engine -- see toy::loaders::PixelTextureLoader), and without the inset a UV landing
- * exactly on a cell boundary can round into the neighbouring cell and paint a one-texel stripe
- * of the wrong surface along every tile edge.
- *
- * @param kind The surface to look up.
- * @return `{u0, v0, du, dv}` in normalised texture coordinates.
- */
-inline glm::vec4 atlas_cell(TileKind kind) {
-    const std::uint32_t index  = static_cast<std::uint32_t>(kind);
-    const std::uint32_t column = index % k_atlas_columns;
-    const std::uint32_t row    = index / k_atlas_columns;
-
-    const float cell_u = 1.0f / static_cast<float>(k_atlas_columns);
-    const float cell_v = 1.0f / static_cast<float>(k_atlas_rows);
-    const float inset_u = 0.5f / static_cast<float>(k_atlas_columns * k_atlas_cell_texels);
-    const float inset_v = 0.5f / static_cast<float>(k_atlas_rows * k_atlas_cell_texels);
-
-    return glm::vec4(static_cast<float>(column) * cell_u + inset_u,
-                     static_cast<float>(row) * cell_v + inset_v,
-                     cell_u - 2.0f * inset_u,
-                     cell_v - 2.0f * inset_v);
-}
-
 /**
  * @struct TileColumn
  * @brief One tile's sampled state: how tall it is and what it is made of.
@@ -169,45 +127,7 @@ inline std::int32_t chunk_distance(const ChunkCoord& a, const ChunkCoord& b) {
 }
 
 /**
- * @brief The rigid transform taking the canonical (+Z, `[0,1]^3` unit cube) side mesh onto `face`.
- *
- * A rotation about the cube's own centre `(0.5, 0.5, 0.5)`, so the result still spans `[0,1]^3`
- * and can be translated by a tile's origin directly. Built once into a function-local static
- * table: glm's matrix constructors are not constexpr, and this is read once per emitted face.
- *
- * @param face The face to orient onto.
- * @return The object-space transform; multiply a canonical position by it.
- */
-inline const glm::mat4& face_transform(TileFace face) {
-    static const std::array<glm::mat4, k_tile_face_count> table = [] {
-        const glm::vec3 centre(0.5f, 0.5f, 0.5f);
-        const glm::vec3 axis_x(1.0f, 0.0f, 0.0f);
-        const glm::vec3 axis_y(0.0f, 1.0f, 0.0f);
-
-        // Each entry is translate(centre) * rotate * translate(-centre): spin the canonical +Z
-        // quad about the cube's middle so it lands on the named face, still inside [0,1]^3.
-        auto about_centre = [&](float degrees, const glm::vec3& axis) {
-            return glm::translate(glm::mat4(1.0f), centre) *
-                   glm::rotate(glm::mat4(1.0f), glm::radians(degrees), axis) *
-                   glm::translate(glm::mat4(1.0f), -centre);
-        };
-
-        std::array<glm::mat4, k_tile_face_count> out{};
-        out[static_cast<std::size_t>(TileFace::Top)]    = glm::mat4(1.0f);
-        out[static_cast<std::size_t>(TileFace::Bottom)] = about_centre(180.0f, axis_x);
-        out[static_cast<std::size_t>(TileFace::North)]  = about_centre(-90.0f, axis_x);
-        out[static_cast<std::size_t>(TileFace::South)]  = about_centre(90.0f, axis_x);
-        out[static_cast<std::size_t>(TileFace::East)]   = about_centre(90.0f, axis_y);
-        out[static_cast<std::size_t>(TileFace::West)]   = about_centre(-90.0f, axis_y);
-        return out;
-    }();
-    return table[static_cast<std::size_t>(face)];
-}
-
-/**
  * @brief The unit outward normal of `face`, in tile space.
- *
- * Stated directly rather than derived from face_transform() so a test can check the two agree.
  *
  * @param face The face.
  * @return Its outward direction.

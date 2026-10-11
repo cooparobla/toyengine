@@ -48,6 +48,7 @@
 #include "../mesh/primitives.h"
 #include "../schema/component_schema.h"
 #include "../terrain/terrain_brush.h"
+#include "../terrain/tile_brush.h"
 #include "../schema/inspector.h"
 #include "../schema/ui_theme_schema.h"
 #include "../schema/settings_schema.h"
@@ -69,6 +70,7 @@
 #include <physxcoopa/util/transform_bridge.h>
 #include <toyengine/particles/particle_system.h>
 #include <toyengine/world/heightmap_terrain.h>
+#include <toyengine/world/terrain_component.h>
 
 #include <gfxcoopa/engine/components/mesh_renderer.h>
 #include <gfxcoopa/engine/components/register.h>
@@ -646,6 +648,8 @@ private:
 #include "ui/weather.inl"
 #include "ui/terrain.inl"
 #include "ui/particle_panel.inl"
+#include "ui/tile_terrain_panel.inl"
+#include "ui/tile_mode.inl"
 #include "ui/project_settings.inl"
 #include "ui/preferences.inl"
 

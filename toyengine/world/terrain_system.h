@@ -18,8 +18,12 @@
  *
  * ### The thread split
  *
- * Off-thread (any worker): sampling the map and merging sides into vertex/index buffers. That is
- * nearly all the cost, it is pure (see terrain_chunk.h), and chunks are independent.
+ * Off-thread (any worker): assembling tile-set pieces into vertex/index buffers and building the
+ * chunk's collision mesh (weld, adjacency, BVH). The chunk's columns are copied out of the
+ * terrain's tiles on the owner thread when the job is submitted (a plain copy), so the tiles can
+ * be edited at any time; an edit marks the chunks it touches stale, and each rebuilds while its
+ * old mesh keeps drawing, then swaps in. That is nearly all
+ * the cost, it is pure (see terrain_chunk.h), and chunks are independent.
  *
  * Owner thread only: creating GPU buffers, publishing assets, and touching the scene tree.
  * `Mesh::from_arrays()` allocates Vulkan memory, `AssetManager` is single-owner, and a Scene is
@@ -38,8 +42,11 @@
  *   - **A still-in-flight GPU read.** Handled by the AssetManager's own payload grace period
  *     (`k_payload_grace_frames`): destroying the chunk's SceneObject drops the last
  *     AssetHandle, `unload()` then retires the payload for three more `assets.update()` calls
- *     before it is actually destroyed. That is the same mechanism a hot reload uses, and it is
- *     why this file does no frame counting of its own.
+ *     before it is actually destroyed. That is the same mechanism a hot reload uses.
+ *   - **A still-referenced collision shape.** The physics world holds a raw pointer to a
+ *     chunk's TriangleMesh until its next refresh(), and an async navmesh bake may hold its
+ *     snapshot longer. A retired chunk's mesh is therefore parked on the component
+ *     (TerrainComponent::retire_collision()) for k_collision_keep_frames before it is freed.
  */
 
 #ifndef TOYENGINE_WORLD_TERRAIN_SYSTEM_H
@@ -148,15 +155,21 @@ private:
     void submit_queued_chunks_(TerrainComponent& terrain, const ChunkCoord& centre,
                                const coopa::scene::FrameContext& ctx);
 
-    /** @brief Creates the GPU mesh, publishes it, and hangs a drawable child off the terrain. */
+    /** @brief Creates the GPU mesh, publishes it, and hangs a drawable (and collidable) child off the terrain. */
     void create_chunk_object_(TerrainComponent& terrain, coopa::scene::Scene& scene,
                               TerrainChunk& chunk);
 
     /** @brief Destroys a chunk's SceneObject and retires its published mesh. */
     void destroy_chunk_object_(TerrainComponent& terrain, TerrainChunk& chunk);
 
-    /** @brief Synthetic asset id for a chunk mesh, prefixed to stay out of the real-path namespace. */
-    static std::string chunk_asset_id_(const TerrainComponent& terrain, const ChunkCoord& coord);
+    /** @brief Synthetic asset id for a chunk's current mesh, prefixed to stay out of the real-path namespace. */
+    static std::string chunk_asset_id_(const TerrainComponent& terrain, const TerrainChunk& chunk);
+
+    /**
+     * @brief Marks every chunk whose tiles (or skirt) were edited since the last frame stale, so
+     *        submit_queued_chunks_() rebuilds it -- nearest first, like new chunks.
+     */
+    void mark_edited_chunks_(TerrainComponent& terrain);
 
     /** @brief Scene-tree name of a chunk object, e.g. `chunk_3_-2`. */
     static std::string chunk_object_name_(const ChunkCoord& coord) {
@@ -169,6 +182,12 @@ private:
 
     /// @brief Scratch list of queued coordinates, reused across frames so sorting allocates once.
     std::vector<ChunkCoord> pending_;
+
+    /// Frames a retired chunk's collision mesh is kept alive (see the file doc).
+    static constexpr std::uint64_t k_collision_keep_frames = 600;
+
+    std::uint64_t frame_ = 0;          /**< execute() calls, for retiring collision meshes. */
+    bool          physics_dirty_ = false; /**< A chunk collider came or went this frame. */
 };
 
 /**

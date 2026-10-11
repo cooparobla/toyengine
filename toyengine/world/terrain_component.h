@@ -1,37 +1,42 @@
 /**
  * @file terrain_component.h
  * @brief The scene-authored `TileTerrain` component (formerly `Terrain`, still accepted): what
- *        mapcoopa world to generate, how to tile it, and
- *        the runtime state the streaming system drives.
+ *        mapcoopa world to generate, which tile set to build it from, how to tile it, and the
+ *        runtime state the streaming system drives.
  *
- * One of these on a SceneObject turns that object into the root of a streamed tile world. It
+ * One of these on a SceneObject turns that object into the root of a streamed tile world. The
+ * world is STORED (`tiles`, a TileMapData in a `.tiles` file): mapcoopa bakes it once from the
+ * generator keys below (seed, shape, sea level...), and from then on it is edited -- in the
+ * editor's Tile Mode, or by gameplay -- and the generator keys only matter on a Regenerate. It
  * carries no per-frame logic of its own -- toy::world::TerrainSystem owns that (see
  * terrain_system.h for why the policy lives in a system rather than in update()). What lives
  * here is everything a scene author writes, plus the long-lived state that outlives any one
- * frame: the generator, the sampler, the baked side library and the chunk table.
+ * frame: the generator, the sampler, the baked tile library and the chunk table.
  *
  * Example YAML:
  * @code
  * - type: TileTerrain
+ *   tile_set: objects/terrain/tileset_round    # THE template: tileset_voxel for blocks
+ *   tiles: terrain/terrain.tiles               # the stored tiles (default terrain/<object>.tiles)
+ *   kind_tile_sets: { stone: objects/terrain/tileset_rock }   # optional, per surface kind
  *   seed: 251
  *   grid_size: 64
  *   tiles_per_grid_unit: 4
- *   height_scale: 40.0
- *   chunk_size: 16
- *   view_radius: 3
- *   side_mesh: tile_side_flat            # the canonical +Z side, used for all six faces
- *   sides: { top: tile_side_bevel }      # ...optionally overriding individual faces
+ *   height_scale: 10.0
+ *   chunk_size: 32
+ *   view_radius: 2
+ *   collision: true
  *   material:
- *     albedo: { r: 1.0, g: 1.0, b: 1.0 }
- *     roughness: 0.9
  *     texture_albedo: textures/terrain_atlas.png
+ *     texture_metallic_roughness: textures/terrain_atlas_mr.png
  * @endcode
  *
- * Both `side_mesh`/`sides` and the material's `texture_*` paths resolve the ordinary way --
- * against the loading scene's own directory first, then the registered search roots (see
- * coopa::asset::AssetSource::resolve()). The stock tile set ships in the SHARED assets/meshes/
- * and assets/textures/ rather than inside any one scene, so a scene names it without copying it,
- * and overrides it by placing a file of the same name beside its own scene.yaml.
+ * A **tile set** is an object asset (`tile_set: true`, assets/objects/terrain/tileset_*.yaml)
+ * with one child per TilePiece, named by piece, each carrying the MeshRenderer for that piece
+ * (see tile_topology.h). It is the terrain's whole shape: a rounded set and the square voxel
+ * set go through the same mesher, so changing `tile_set` is all it takes to change the form.
+ * The material (palette atlas) is separate. Paths resolve the ordinary way -- against the
+ * loading scene's directory first, then the registered search roots.
  */
 
 #ifndef TOYENGINE_WORLD_TERRAIN_COMPONENT_H
@@ -40,6 +45,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -50,6 +56,7 @@
 #include <gfxcoopa/engine/components/mesh_renderer.h>
 
 #include <toyengine/world/terrain_chunk.h>
+#include <toyengine/world/tile_map_data.h>
 
 namespace toy {
 namespace world {
@@ -87,8 +94,18 @@ struct TerrainChunk {
     /** @brief The GPU mesh, kept alive here (an AssetHandle only ever hands out a const Mesh*). */
     std::shared_ptr<coopa::gfx::engine::data::Mesh> mesh;
 
-    /** @brief The SceneObject carrying this chunk's Transform + MeshRenderer; null until Live. */
+    /** @brief The SceneObject carrying this chunk's Transform + MeshRenderer (+ MeshCollider); null until Live. */
     coopa::scene::SceneObject* object = nullptr;
+
+    /**
+     * @brief Its tiles were edited since it was sampled: rebuild. A Live chunk keeps drawing
+     *        while the rebuild meshes (it goes to Meshing with its object kept), and the new mesh
+     *        replaces it in one frame -- no hole.
+     */
+    bool stale = false;
+
+    /** @brief Bumped per upload; part of the published mesh's asset id, so a rebuild's new mesh never collides with the old one still in its grace period. */
+    std::uint32_t mesh_serial = 0;
 };
 
 /**
@@ -105,7 +122,7 @@ public:
      * @brief Cancels and WAITS FOR every in-flight chunk job before letting anything go.
      *
      * Not optional, and not merely tidy. A ChunkBuildJob borrows raw pointers to this
-     * component's sampler and side library (see terrain_chunk.h), so a job still queued or
+     * component's sampler and tile library (see terrain_chunk.h), so a job still queued or
      * running when this object is destroyed would dereference freed memory -- the classic
      * shutdown-race that only ever reproduces on a fast machine. Waiting here is what makes
      * "the sampler outlives every job that reads it" true rather than aspirational.
@@ -168,22 +185,29 @@ public:
      */
     double temperature_offset = 0.0;
 
-    // --- Styled tiles (see tile_topology.h) ---
+    // --- The tile set: the template every column is built from (see tile_topology.h) ---
+
+    /** @brief The default tile set: an object asset path, e.g. `objects/terrain/tileset_round`. */
+    std::string tile_set = k_default_tile_set;
+
+    /** @brief Per-kind tile-set overrides, indexed by TileKind; empty = use `tile_set`. */
+    std::array<std::string, k_tile_kind_count> kind_tile_sets;
+
+    /** @brief The stock voxel (square block) tile set; also what a terrain without `tile_set` uses. */
+    static constexpr const char* k_default_tile_set = "objects/terrain/tileset_voxel";
 
     /**
      * @struct StyleEntry
-     * @brief One named tile style and the mesh prefix its pieces load from:
-     *        `meshes/<prefix>_<piece>.yaml`, one file per TilePiece.
+     * @brief One distinct tile set the terrain uses (the library's "style"), resolved by the
+     *        parser from `tile_set` + `kind_tile_sets` (or the legacy `styles:` map).
      */
     struct StyleEntry {
-        std::string name;
-        std::string prefix;
+        std::string name;                  /**< For log lines: the set's path or legacy style name. */
+        std::string prefix;                /**< The tile-set object path (or a legacy mesh prefix). */
+        bool        round_kind_corners = true; /**< The tile set's own `round_kind_corners`. */
     };
 
-    /**
-     * @brief The scene's tile styles. Empty keeps the voxel look; any entry switches every
-     *        chunk to the styled mesher.
-     */
+    /** @brief The distinct tile sets, in first-use order; style 0 is the default. */
     std::vector<StyleEntry> styles;
 
     /**
@@ -195,11 +219,13 @@ public:
     /** @brief The style for kinds `kind_styles` leaves unassigned (-1 entries). */
     int default_style = 0;
 
-    /** @brief Logical path of the canonical (+Z) side mesh, relative to the scene's meshes/ dir. */
-    std::string side_mesh = "tile_side_flat";
+    // --- Collision ---
 
-    /** @brief Optional per-face overrides of `side_mesh`, indexed by `TileFace`; empty = inherit. */
-    std::array<std::string, k_tile_face_count> face_meshes;
+    /** @brief Give every live chunk a static MeshCollider of its own drawn surface. */
+    bool collision = true;
+
+    /** @brief physics_materials/<name>.yaml for the chunk colliders (optional). */
+    std::string physics_material;
 
     /** @brief Material every chunk's MeshRenderer is given; the atlas lives here. */
     coopa::gfx::engine::components::PBRMaterial material;
@@ -217,31 +243,59 @@ public:
     // Runtime state -- driven by TerrainSystem, not by scene YAML.
     // ------------------------------------------------------------------
 
+    // ------------------------------------------------------------------
+    // The stored tiles (tile_map_data.h).
+    // ------------------------------------------------------------------
+
+    /** @brief The `.tiles` file, as authored (`tiles:`); default `terrain/<object>.tiles` beside the scene. */
+    std::string tiles_file;
+
     /**
-     * @brief Starts generating the world, off the calling thread when an engine is available.
+     * @brief The terrain's tiles: the terrain itself. Shared through TileMapStore, so re-parsing
+     *        the component keeps the live (possibly unsaved) tiles. Set by the parser.
+     *        Edit it -- write records, then mark_dirty() -- and the touched chunks re-mesh.
+     */
+    std::shared_ptr<TileMapData> tiles;
+
+    /**
+     * @brief Bakes the world when the tiles need it (first use with no file, or a Regenerate):
+     *        generates the mapcoopa map off the calling thread, then fills the tiles from it.
+     *        Idempotent; a terrain whose tiles loaded from a file never generates anything.
      *
-     * Idempotent: a second call while generation is in flight (or after it finished) does
-     * nothing. Generation is ~135 ms for a default map (see MapGenerator's own note), which is
-     * why it is not done inline in the component's constructor.
-     *
-     * @param jobs The shared JobEngine, or null to generate inline on the calling thread.
+     * @param jobs The shared JobEngine, or null to run inline on the calling thread.
      */
     void begin_generation(coopa::job::JobEngine* jobs);
 
     /**
-     * @brief Moves a finished generation into the sampler, once.
+     * @brief Advances a bake: builds the sampler from a finished map, runs the bake job, and
+     *        hands the result to the tiles.
      *
-     * @return True on the frame the sampler becomes usable; false otherwise.
+     * @return True on the frame the baked tiles land.
      */
     bool poll_generation();
 
-    /** @brief True once the world exists and the side meshes are baked -- i.e. chunks can build. */
-    bool is_ready() const { return sampler_.is_built() && library_.is_baked(); }
+    /** @brief True while a bake (map generation + fill) is in flight. */
+    bool baking() const { return generator_ != nullptr || bake_job_ != nullptr; }
 
-    /** @brief The built world sampler; read concurrently by chunk jobs once is_ready(). */
+    /** @brief True once there are tiles and the tile sets are baked -- i.e. chunks can build. */
+    bool is_ready() const { return tiles && !tiles->empty() && library_.is_baked(); }
+
+    /** @brief The map sampler from the last bake (built once a bake has run this session). */
     const TerrainSampler& sampler() const { return sampler_; }
 
-    /** @brief The baked side geometry; read concurrently by chunk jobs once is_ready(). */
+    // --- Gameplay queries (world space; owner thread) ---
+
+    /** @brief The tile under a world position, or false off the terrain. */
+    bool tile_at(const glm::vec3& world, glm::ivec2& tile) const;
+    /** @brief The stored record under a world position (biome, temperature...), or null. */
+    const TileRecord* record_at(const glm::vec3& world) const;
+    /** @brief World height of the column top under a world position (the water surface on water). */
+    float height_at(const glm::vec3& world) const;
+
+    /** @brief The tile revision TerrainSystem has applied to the chunk table. */
+    std::uint64_t applied_tile_revision = 0;
+
+    /** @brief The baked tile sets; read concurrently by chunk jobs once is_ready(). */
     const TileMeshLibrary& library() const { return library_; }
 
     /** @brief The chunk table, keyed by chunk coordinate. Owned by TerrainSystem. */
@@ -250,22 +304,12 @@ public:
     /** @brief The chunk table, for read-only inspection. */
     const std::unordered_map<ChunkCoord, TerrainChunk>& chunks() const { return chunks_; }
 
-    /** @brief The asset handle for the canonical side mesh; set by the "Terrain" scene parser. */
-    void set_side_source(coopa::asset::AssetHandle<SkinnedMeshSource> handle) {
-        side_source_ = std::move(handle);
-    }
-
-    /** @brief The asset handle for one face's override mesh; set by the "Terrain" scene parser. */
-    void set_face_source(TileFace face, coopa::asset::AssetHandle<SkinnedMeshSource> handle) {
-        face_sources_[static_cast<std::size_t>(face)] = std::move(handle);
-    }
-
-    /** @brief The asset handle for one styled piece; set by the "Terrain" scene parser. */
+    /** @brief The asset handle for one tile-set piece; set by the "TileTerrain" scene parser. */
     void set_style_piece_source(std::size_t style, TilePiece piece,
                                 coopa::asset::AssetHandle<SkinnedMeshSource> handle);
 
     /**
-     * @brief Bakes the loaded side meshes into the library, once they have finished loading.
+     * @brief Bakes the loaded tile-set pieces into the library, once every one has settled.
      *
      * Deliberately NOT done from a worker: an AssetHandle is a view onto a slot the
      * AssetManager mutates, so it is only safe to dereference on the owner thread. Everything
@@ -273,29 +317,48 @@ public:
      *
      * @return True on the frame the library becomes baked; false while still waiting.
      */
-    bool poll_side_meshes();
+    bool poll_tile_sets();
+
+    /**
+     * @brief Keeps a retired chunk's collision mesh alive a while: the physics world, or an
+     *        async navmesh bake, may still read the shape it snapshotted. Owned by TerrainSystem.
+     */
+    void retire_collision(std::shared_ptr<const coopa::physx::geometry::TriangleMesh> mesh, std::uint64_t frame);
+
+    /** @brief Drops retired collision meshes older than `frame - keep_frames`. */
+    void release_retired_collision(std::uint64_t frame, std::uint64_t keep_frames);
 
 private:
-    /// Bakes every loaded styled piece and maps kinds onto styles. A piece that failed to load
-    /// is reported once and left to TileMeshLibrary::finish_styles()'s fallbacks.
+    /// Bakes every loaded piece and maps kinds onto styles. A piece that failed to load is
+    /// reported once and left to TileMeshLibrary::finish_styles()'s fallbacks.
     void bake_styles_();
 
     coopa::debug::Logger logger_; /**< Named "terrain"; MapGenerator logs one line per stage. */
     coopa::job::JobEngine* jobs_ = nullptr; /**< Non-owning; only for draining jobs in the destructor. */
-    bool warned_side_mesh_ = false; /**< Latches the "side mesh failed" message to one line. */
+    bool warned_no_tile_set_ = false; /**< Latches the "tile set failed" message to one line. */
 
     coopa::maps::MapConfig                        map_config_;
     std::unique_ptr<coopa::maps::MapGenerator>    generator_; /**< Released once its graph is moved out. */
     coopa::maps::MapTask                          task_;      /**< Declared AFTER generator_ -- see begin_generation(). */
 
+    /// The bake request (TileMapData::bake_requests()) last started, so each is baked once.
+    std::uint64_t started_bake_request_ = ~std::uint64_t{0};
+    /// The in-flight fill: the job writes `baked`, poll_generation() hands it to `tiles`.
+    struct BakeJob {
+        TileMapData baked;
+    };
+    std::shared_ptr<BakeJob>  bake_job_;
+    coopa::job::JobHandle     bake_handle_;
+
     TerrainSampler  sampler_;
     TileMeshLibrary library_;
 
-    coopa::asset::AssetHandle<SkinnedMeshSource> side_source_;
-    std::array<coopa::asset::AssetHandle<SkinnedMeshSource>, k_tile_face_count> face_sources_;
     std::vector<std::array<coopa::asset::AssetHandle<SkinnedMeshSource>, k_tile_piece_count>> style_sources_;
 
     std::unordered_map<ChunkCoord, TerrainChunk> chunks_;
+
+    /// Collision meshes of retired chunks, with the frame they retired on (retire_collision()).
+    std::deque<std::pair<std::uint64_t, std::shared_ptr<const coopa::physx::geometry::TriangleMesh>>> retired_collision_;
 };
 
 } // namespace world

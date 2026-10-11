@@ -22,7 +22,7 @@
     bool in_paint_mode_() const { return mesh_mode_target_() && is_paint_mode_(mode_); }
     bool in_weight_paint_() const { return mesh_mode_target_() && mode_ == InteractionMode::WeightPaint; }
     /** @brief Sculpt or a paint mode: brush strokes, no selection or transforms. */
-    bool in_brush_mode_() const { return in_sculpt_mode_() || in_paint_mode_() || in_terrain_mode_(); }
+    bool in_brush_mode_() const { return in_sculpt_mode_() || in_paint_mode_() || in_terrain_mode_() || in_tile_mode_(); }
 
     /** @brief Starts / stops the per-mode machinery when the interaction mode changes. */
     void mode_begin_(InteractionMode m);

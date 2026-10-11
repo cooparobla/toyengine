@@ -47,6 +47,7 @@
 #include <coopa/maps/map_data.h>
 #include <coopa/maps/noise.h>
 
+#include <toyengine/world/tile_map_data.h>
 #include <toyengine/world/tile_types.h>
 
 namespace toy {
@@ -105,30 +106,12 @@ struct TerrainParams {
     /** @brief Steps of `side_kind` under a top face before a wall switches to bare Stone. */
     std::int32_t soil_depth_steps = 3;
 
-    /**
-     * @brief Emit the downward face of each column.
-     *
-     * Off by default: a height column rests on the ground plane and its underside is never
-     * visible, so emitting it is pure cost. Available for a flying/underside camera.
-     */
-    bool emit_bottom = false;
-
-    /**
-     * Merge coplanar neighbouring faces into larger quads: tops of equal height and surface
-     * kind into rectangles, and each wall's same-kind cells into tall strips spanning
-     * neighbouring columns. Only faces whose side mesh is a flat unit quad are merged (a
-     * bevelled side keeps the per-tile path), so the silhouette is unchanged. Merged quads
-     * still show one atlas cell per tile: the chunk material switches to the `terrain`
-     * surface shader, which repeats the cell across the quad (see terrain.frag).
-     */
-    bool greedy_merge = true;
-
     /** @brief World-space size of one chunk edge. */
     float chunk_world_size() const {
         return static_cast<float>(chunk_size) * tile_size;
     }
 
-    /** @brief The per-axis scale of one tile cell, for TileMeshLibrary::append(). */
+    /** @brief The per-axis scale of one tile cell, for TileMeshLibrary::append_styled(). */
     glm::vec3 cell_scale() const {
         return glm::vec3(tile_size, tile_size, height_step);
     }
@@ -247,41 +230,73 @@ public:
     /**
      * @brief Samples one tile column: how tall it is and what it is made of.
      *
+     * The column view of sample_record() -- what the mesher needs.
+     */
+    TileColumn sample(std::int32_t tile_x, std::int32_t tile_y) const {
+        return sample_record(tile_x, tile_y).column();
+    }
+
+    /**
+     * @brief Samples everything a baked tile stores (tile_map_data.h's TileRecord).
+     *
      * Sampled at the tile's CENTRE, not its corner, so a column's material and height describe
      * the ground it actually covers; sampling at the corner would bias every column toward its
      * lower-left neighbour and shift the whole world half a tile.
      *
-     * @param tile_x Tile index along +X.
-     * @param tile_y Tile index along +Y.
-     * @return The column's height in steps and its surfaces.
+     * Water is a surface, not a landform: a lake or sea column stands at its water's surface
+     * (each lake its own level, the sea at sea level), with the depth to its bed kept in
+     * `water_depth` -- which is what makes a coast read as a coast instead of as a hole, and lets
+     * a drained lake find its floor again.
      */
-    TileColumn sample(std::int32_t tile_x, std::int32_t tile_y) const {
-        TileColumn column;
-        if (!built_) return column;
+    TileRecord sample_record(std::int32_t tile_x, std::int32_t tile_y) const {
+        TileRecord r;
+        if (!built_) return r;
 
         const double per_unit = static_cast<double>(params_.tiles_per_grid_unit);
         const double gx = (static_cast<double>(tile_x) + 0.5) / per_unit;
         const double gy = (static_cast<double>(tile_y) + 0.5) / per_unit;
-
         const coopa::maps::MapCenter& cell = cell_at(gx, gy);
 
-        // Water is a surface, not a landform: a lake or sea column stops at the waterline
-        // regardless of how deep its floor runs, which is what makes a coast read as a coast
-        // instead of as a hole in the world.
+        r.biome       = static_cast<std::uint8_t>(cell.biome);
+        r.temperature = TileRecord::quantise01(cell.temperature);
+        r.moisture    = TileRecord::quantise01(cell.moisture);
+        r.region      = cell.region >= 0 && cell.region < 0xFFFF ? static_cast<std::uint16_t>(cell.region) : TileRecord::k_no_id;
+        r.country     = cell.country >= 0 && cell.country < 0xFFFF ? static_cast<std::uint16_t>(cell.country) : TileRecord::k_no_id;
+        r.set(TileRecord::Ocean, cell.ocean);
+        r.set(TileRecord::Coast, cell.coast);
+
         if (cell.water) {
-            column.steps     = sea_level_steps();
-            column.top_kind  = cell.biome == coopa::maps::Biome::Ice ? TileKind::Ice : TileKind::Water;
-            column.side_kind = column.top_kind;
-            column.water     = true;
-            return column;
+            const double level = (cell.ocean || cell.water_level <= 0.0) ? config_.sea_level : cell.water_level;
+            const TileKind kind = cell.biome == coopa::maps::Biome::Ice ? TileKind::Ice : TileKind::Water;
+            const std::int32_t surface = steps_from_elevation_(level);
+            r.steps = static_cast<std::int16_t>(std::min<std::int32_t>(surface, 32767));
+            r.water_depth = static_cast<std::uint8_t>(std::clamp(surface - steps_from_elevation_(cell.elevation), 0, 255));
+            r.set_top_kind(kind);
+            r.set_side_kind(kind);
+            r.set(TileRecord::Water, true);
+            return r;
         }
 
         // The full surface -- control mesh, then fractal detail, then the river channel cut.
         const double elevation = graph_.elevation_at(cell, gx, gy, detail_, channels_);
-        column.steps     = steps_from_elevation_(elevation);
-        column.top_kind  = tile_kind_for_biome(cell.biome);
-        column.side_kind = side_kind_for(column.top_kind);
-        return column;
+        const std::int32_t steps = steps_from_elevation_(elevation);
+        r.steps = static_cast<std::int16_t>(std::min<std::int32_t>(steps, 32767));
+        // A river cuts its channel below the surface it would otherwise have.
+        if (!channels_.segments.empty() && steps < steps_from_elevation_(graph_.elevation_at(cell, gx, gy, detail_))) {
+            r.set(TileRecord::River, true);
+        }
+        const TileKind top = tile_kind_for_biome(cell.biome);
+        r.set_top_kind(top);
+        r.set_side_kind(side_kind_for(top));
+        return r;
+    }
+
+    /** @brief Fills `out` (resized to the whole world) with sample_record() for every tile. */
+    void bake(TileMapData& out) const {
+        const std::int32_t n = tiles_per_axis();
+        out.resize(n, n);
+        for (std::int32_t y = 0; y < n; ++y)
+            for (std::int32_t x = 0; x < n; ++x) out.at(x, y) = sample_record(x, y);
     }
 
     /**

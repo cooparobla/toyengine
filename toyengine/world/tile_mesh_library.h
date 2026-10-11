@@ -1,21 +1,21 @@
 /**
  * @file tile_mesh_library.h
- * @brief The per-side tile geometry, baked into its six orientations, and the primitive that
- *        stamps one side into a chunk's merged vertex/index buffers.
+ * @brief A terrain's tile sets, baked: every piece of every set in its eight orientations, the
+ *        section caps derived from them, and the primitive that stamps one into a chunk's merged
+ *        vertex/index buffers.
  *
- * This is the file that makes "a tile side is a mesh" true rather than a figure of speech. A
- * side is authored once as an ordinary mesh YAML -- the same Blender-exported schema every
- * other mesh in this repo uses -- in the canonical orientation tile_types.h describes (the +Z
- * face of a unit cube spanning `[0,1]^3`). This class rotates it onto all six faces ONCE at
- * load, and from then on stamping a side into a chunk is a translate, a UV remap and an index
- * rebase. Nothing downstream knows whether that side is a flat quad, a chamfered rim or a
- * curved patch -- which is exactly the seam smoother tiles will arrive through.
+ * A tile set (assets/objects/terrain/tileset_*.yaml) is authored once as ordinary mesh YAMLs,
+ * one per TilePiece, in the canonical frames tile_topology.h describes. This class bakes each
+ * piece into its eight D4 orientations ONCE at load, and from then on stamping a piece into a
+ * chunk is a scale, a translate and an index rebase. Nothing downstream knows whether a set is
+ * rounded, chamfered or square -- which is what lets a TileTerrain change form by pointing at
+ * another tile set.
  *
  * ### Why the geometry is copied rather than referenced
  *
  * Chunk meshing runs on coopa::job worker threads while the main thread may still be
  * publishing assets. AssetHandle is a refcounted view onto a slot the AssetManager mutates, so
- * a worker dereferencing one races that. bake() therefore takes a plain `const
+ * a worker dereferencing one races that. bake_style_piece() therefore takes a plain `const
  * SkinnedMeshSource&` on the main thread and **copies** the vertices out; a baked library is
  * immutable, self-contained, and safe for unlimited concurrent readers. It also means a test
  * can build a library from hand-written triangles without an AssetManager, a Device, or a file.
@@ -25,7 +25,7 @@
  * coopa::gfx::engine::data::SkinnedMeshSource is gfxcoopa's CPU-only mesh payload (see its file
  * doc): its `joints`/`joint_weights` keys are optional, so it parses a plain mesh YAML verbatim
  * -- quads triangulated, tangents generated when absent -- and holds no GPU resources. Its
- * loader is already registered by toy::core::Engine, so authored side meshes need no new asset
+ * loader is already registered by toy::core::Engine, so authored pieces need no new asset
  * type and no new loader. A plain coopa::gfx::engine::data::Mesh would be the wrong tool: it
  * uploads to the GPU and does not retain the CPU arrays a merge needs.
  */
@@ -51,14 +51,14 @@ namespace world {
 
 /**
  * @class TileMeshLibrary
- * @brief Six baked side geometries, and append() to stamp one into a chunk buffer.
+ * @brief A terrain's baked tile sets ("styles"), and append_styled() to stamp a piece.
  *
  * @code
  * TileMeshLibrary lib;
- * lib.bake_canonical(*flat_quad_source);            // all six faces from one authored mesh
- * lib.bake_side(TileFace::Top, *bevelled_source);   // ...overriding just the top
- *
- * lib.append(TileFace::Top, origin, scale, TileKind::Grass, vertices, indices);
+ * const std::uint8_t round = lib.add_style();
+ * for (each piece) lib.bake_style_piece(round, piece, *source);
+ * lib.finish_styles();                       // fallbacks for missing pieces; now is_baked()
+ * lib.set_kind_style(TileKind::Stone, rock);  // optional per-kind sets
  * @endcode
  */
 class TileMeshLibrary {
@@ -68,94 +68,18 @@ public:
 
     /**
      * @struct SideGeometry
-     * @brief One face's geometry, already rotated out of canonical space onto that face.
-     *
-     * Positions still span the unit cube `[0,1]^3`; append() applies the tile's scale and
-     * origin. UVs are the authored `[0,1]` ones; append() maps them into an atlas cell.
+     * @brief One baked piece (or section cap, or foot) at one orientation, in the unit cell
+     *        `[0,1]^3`; append_styled() applies the cell's scale and origin.
      */
     struct SideGeometry {
         std::vector<Vertex>        vertices;
         std::vector<std::uint32_t> indices;
 
         bool empty() const { return vertices.empty() || indices.empty(); }
-
-        /// True when this side is a flat, axis-aligned unit quad whose UVs are an affine
-        /// function of position -- the only shape the greedy mesher may stretch over several
-        /// tiles (see mesh_chunk_columns_greedy()). Then uv = uv_origin + uv_du * p[axis_u] +
-        /// uv_dv * p[axis_v] for any point p on it, extended past [0,1] by append_span().
-        bool      mergeable = false;
-        int       axis_u    = 0;
-        int       axis_v    = 1;
-        glm::vec2 uv_origin{0.0f};
-        glm::vec2 uv_du{0.0f};
-        glm::vec2 uv_dv{0.0f};
     };
 
-    /// Encodes a tile-space UV for the `terrain` surface shader: the atlas cell index rides
-    /// in u's high part (cell * k_uv_cell_stride, re-centred by half the stride so a local u
-    /// may run negative), the position within the tile repeat in the rest. terrain.frag
-    /// decodes it and samples cell + fract(local), so one quad may span many tiles.
-    static constexpr float k_uv_cell_stride = 1024.0f;
-    static glm::vec2 encode_uv(TileKind kind, const glm::vec2& local);
-
-    /**
-     * @brief Bakes one authored mesh onto all six faces.
-     *
-     * The ordinary case: one `tile_side_flat.yaml` becomes a whole cube's worth of sides.
-     * Call bake_side() afterwards to override individual faces.
-     *
-     * @param canonical A side mesh authored in canonical orientation (+Z face of `[0,1]^3`).
-     */
-    void bake_canonical(const SkinnedMeshSource& canonical);
-
-    /**
-     * @brief Bakes one authored mesh onto a single face, replacing whatever was there.
-     *
-     * @param face      The face to orient onto.
-     * @param canonical A side mesh authored in canonical orientation (+Z face of `[0,1]^3`).
-     */
-    void bake_side(TileFace face, const SkinnedMeshSource& canonical);
-
-    /** @brief True once every face has geometry -- i.e. a chunk built from this can draw. */
-    bool is_baked() const;
-
-    /** @brief Read-only access to one face's baked geometry, for tests and diagnostics. */
-    const SideGeometry& side(TileFace face) const {
-        return sides_[static_cast<std::size_t>(face)];
-    }
-
-    /**
-     * @brief Stamps one side into a chunk's merged buffers.
-     *
-     * The inner loop of chunk meshing: everything expensive (rotation, tangent transport) was
-     * done once at bake time, leaving a scale, a translate, a UV remap and an index rebase.
-     *
-     * Non-uniform `scale` is supported because a tile's vertical step need not equal its
-     * horizontal size, and it is handled correctly rather than approximately: positions take
-     * the scale, normals and tangents take its component-wise INVERSE (the inverse transpose of
-     * a diagonal matrix), then renormalise. Skipping that would tilt the shading of every
-     * lateral face the moment height_step and tile_size diverged.
-     *
-     * @param face      Which baked side to stamp.
-     * @param origin    World position of the tile cell's minimum corner.
-     * @param scale     Per-axis size of one cell: `{tile_size, tile_size, height_step}`.
-     * @param kind      Surface to texture it with; selects the atlas cell.
-     * @param out_v     Vertex buffer to append to.
-     * @param out_i     Index buffer to append to; rebased onto `out_v`'s current end.
-     */
-    void append(TileFace face, const glm::vec3& origin, const glm::vec3& scale, TileKind kind,
-                std::vector<Vertex>& out_v, std::vector<std::uint32_t>& out_i,
-                bool encode_terrain_uv = false) const;
-
-    /**
-     * @brief Appends a mergeable side stretched over `span` tiles/cells (1 on the face's
-     *        normal axis), with tile-space UVs encoded for the `terrain` shader -- so the
-     *        atlas cell repeats once per tile across the whole quad.
-     * @pre side(face).mergeable.
-     */
-    void append_span(TileFace face, const glm::vec3& origin, const glm::vec3& scale,
-                     const glm::vec3& span, TileKind kind,
-                     std::vector<Vertex>& out_v, std::vector<std::uint32_t>& out_i) const;
+    /** @brief True once finish_styles() has run over at least one style -- chunks can build. */
+    bool is_baked() const { return finished_; }
 
     // ------------------------------------------------------------------
     // Styled tiles -- see tile_topology.h for the piece vocabulary and frames.
@@ -185,16 +109,29 @@ public:
         /// along-wall axis (x in [0,1] instead of [0.5,1]), turned onto each face -- so a run of
         /// straight halves can be stamped as ONE strip (see append_styled()'s `stretch`).
         std::array<std::array<SideGeometry, 4>, 2> straight;
+
+        /// The tile set's `round_kind_corners`: whether a top of this style blends into its
+        /// neighbours' kinds at a convex corner (terrain_styled.frag rounds it). False keeps
+        /// kind boundaries square -- what a blocky set wants.
+        bool round_kind_corners = true;
     };
 
     /** @brief Adds an empty style and returns its index. Kinds map to style 0 until told otherwise. */
     std::uint8_t add_style();
 
-    /** @brief Number of styles; zero means this library only draws voxel sides. */
+    /** @brief Number of styles (tile sets). */
     std::size_t style_count() const { return styles_.size(); }
 
-    /** @brief True once any style exists -- the gate the chunk mesher switches paths on. */
+    /** @brief True once any style exists. */
     bool has_styles() const { return !styles_.empty(); }
+
+    /** @brief Sets a style's `round_kind_corners` (see StyleSet). */
+    void set_round_kind_corners(std::uint8_t style, bool round) { styles_[style].round_kind_corners = round; }
+
+    /** @brief Whether tops of `style` round the corners where surface kinds meet. */
+    bool rounds_kind_corners(std::uint8_t style) const {
+        return style < styles_.size() && styles_[style].round_kind_corners;
+    }
 
     /** @brief Assigns the style a surface kind's cells are shaped with. */
     void set_kind_style(TileKind kind, std::uint8_t style) {
@@ -335,13 +272,7 @@ private:
     SideGeometry                              full_top_;
     Oriented                                  foot_;
 
-    /// Fills SideGeometry's mergeable fields: the side must lie in one plane perpendicular to
-    /// `face`'s normal axis, every vertex must sit on a corner of the unit square in the other
-    /// two axes, and the UVs must be the affine map fitted from three of those corners.
-    static void analyse_mergeable_(SideGeometry& side, TileFace face);
-
-    /** @brief One baked geometry per TileFace, indexed by `static_cast<std::size_t>(face)`. */
-    std::array<SideGeometry, k_tile_face_count> sides_;
+    bool finished_ = false; /**< finish_styles() ran; reset by add_style(). */
 };
 
 } // namespace world

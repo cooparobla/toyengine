@@ -122,7 +122,7 @@ void gfx_surface_fragment(inout GfxSurface s) {}
 #endif
 // The normal map has its own hook: GFX_SURFACE_SAMPLE above is commonly redefined for
 // albedo-style sampling (e.g. toyengine's texel-AA gbuffer.frag), which a normal map
-// should not inherit. A variant that remaps UVs (toyengine's terrain.frag) defines both.
+// should not inherit. A variant that remaps UVs defines both.
 #ifndef GFX_SURFACE_SAMPLE_NORMAL
 #define GFX_SURFACE_SAMPLE_NORMAL(tex, uv) texture(tex, uv)
 #endif

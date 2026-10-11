@@ -7,12 +7,16 @@
 #include <coopa/maps/map_task.h>
 #include <coopa/scene/component.h>
 #include <coopa/scene/scene_object.h>
+#include <coopa/scene/components/transform_component.h>
 #include <gfxcoopa/engine/data/mesh.h>
 #include <gfxcoopa/engine/data/skinned_mesh_source.h>
+#include <physxcoopa/geometry/triangle_mesh.h>
 #include <toyengine/world/terrain_sampler.h>
 #include <toyengine/world/tile_mesh_library.h>
 #include <toyengine/world/tile_topology.h>
 #include <toyengine/world/tile_types.h>
+
+#include <cmath>
 
 namespace toy {
 namespace world {
@@ -26,13 +30,20 @@ TerrainComponent::~TerrainComponent() {
         jobs_->wait_for(handle); // ...and blocks on whatever has
         handle.close();
     }
+    if (bake_handle_.is_valid()) {
+        // The bake job reads sampler_: it must finish before the sampler goes.
+        jobs_->wait_for(bake_handle_);
+        bake_handle_.close();
+    }
 }
 
 void TerrainComponent::begin_generation(coopa::job::JobEngine* jobs) {
     // Remembered even on the early-out path: the destructor needs it to drain chunk jobs,
     // and those outlive generation by the whole life of the scene.
     jobs_ = jobs;
-    if (generator_ || sampler_.is_built()) return;
+    if (!tiles || !tiles->needs_bake() || baking()) return;
+    if (started_bake_request_ == tiles->bake_requests()) return;   // this request is done (or failed)
+    started_bake_request_ = tiles->bake_requests();
 
     coopa::maps::MapConfig config;
     config.seed              = seed;
@@ -56,14 +67,59 @@ void TerrainComponent::begin_generation(coopa::job::JobEngine* jobs) {
 }
 
 bool TerrainComponent::poll_generation() {
-    if (!generator_ || sampler_.is_built() || !task_.done()) return false;
+    // 1. The map is done: index it, then fill the tiles from it -- on a worker, since a large
+    //    world is a million samples.
+    if (generator_ && !bake_job_ && task_.done()) {
+        sampler_.build(map_config_, std::move(generator_->graph()), params);
+        task_ = coopa::maps::MapTask{};
+        generator_.reset();
+        if (!sampler_.is_built()) return false;
+        bake_job_ = std::make_shared<BakeJob>();
+        auto job = bake_job_;
+        const TerrainSampler* sampler = &sampler_;
+        if (jobs_ != nullptr) {
+            bake_handle_ = jobs_->create_handle();
+            jobs_->submit([job, sampler]() { sampler->bake(job->baked); }, 0x7E44A101u, bake_handle_, nullptr, 0u,
+                          coopa::job::Priority::Normal);
+        } else {
+            sampler->bake(job->baked);
+        }
+    }
+    // 2. The fill is done: the tiles take it (and every chunk re-meshes from it).
+    if (bake_job_ && (!bake_handle_.is_valid() || bake_handle_.is_complete())) {
+        if (bake_handle_.is_valid()) {
+            bake_handle_.close();
+            bake_handle_ = coopa::job::JobHandle{};
+        }
+        if (tiles) tiles->assign_baked(std::move(bake_job_->baked));
+        bake_job_.reset();
+        return true;
+    }
+    return false;
+}
 
-    sampler_.build(map_config_, std::move(generator_->graph()), params);
-    // The graph is moved into the sampler; the generator has nothing left to own, and
-    // dropping it also releases the task's job handle through task_'s own destructor.
-    task_ = coopa::maps::MapTask{};
-    generator_.reset();
-    return sampler_.is_built();
+bool TerrainComponent::tile_at(const glm::vec3& world, glm::ivec2& tile) const {
+    if (!tiles || tiles->empty()) return false;
+    glm::vec3 local = world;
+    if (owner != nullptr) {
+        if (auto* tc = owner->get_transform()) local = glm::vec3(glm::inverse(tc->transform().get_world_matrix()) * glm::vec4(world, 1.0f));
+    }
+    tile = glm::ivec2(static_cast<int>(std::floor(local.x / params.tile_size)), static_cast<int>(std::floor(local.y / params.tile_size)));
+    return tiles->contains(tile.x, tile.y);
+}
+
+const TileRecord* TerrainComponent::record_at(const glm::vec3& world) const {
+    glm::ivec2 tile;
+    return tile_at(world, tile) ? &tiles->at(tile.x, tile.y) : nullptr;
+}
+
+float TerrainComponent::height_at(const glm::vec3& world) const {
+    const TileRecord* r = record_at(world);
+    float z = r ? static_cast<float>(std::max<int>(0, r->steps)) * params.height_step : 0.0f;
+    if (owner != nullptr) {
+        if (auto* tc = owner->get_transform()) z += glm::vec3(tc->transform().get_world_matrix()[3]).z;
+    }
+    return z;
 }
 
 void TerrainComponent::set_style_piece_source(std::size_t style, TilePiece piece,
@@ -72,48 +128,55 @@ void TerrainComponent::set_style_piece_source(std::size_t style, TilePiece piece
     style_sources_[style][static_cast<std::size_t>(piece)] = std::move(handle);
 }
 
-bool TerrainComponent::poll_side_meshes() {
+bool TerrainComponent::poll_tile_sets() {
     if (library_.is_baked()) return false;
-    if (!side_source_.is_loaded()) {
-        // A mistyped side_mesh path would otherwise produce a world that is simply never
-        // built, with nothing on screen and nothing in the log to say why -- the most
-        // expensive kind of silence. Said once, not once per frame.
-        if (side_source_.is_failed() && !warned_side_mesh_) {
-            warned_side_mesh_ = true;
-            logger_.error("side mesh '" + side_mesh + "' failed to load: " +
-                          side_source_.error() + " -- no terrain will be built.");
-        }
-        return false;
-    }
 
-    // Styled pieces must all have settled (loaded or failed) before anything bakes: chunk
-    // jobs start the moment is_baked() turns true, and a library must not change under them.
+    // Every piece must have settled (loaded or failed) before anything bakes: chunk jobs start
+    // the moment is_baked() turns true, and a library must not change under them.
+    bool any = false;
     for (const auto& pieces : style_sources_) {
         for (const auto& handle : pieces) {
-            if (handle.is_valid() && !handle.is_loaded() && !handle.is_failed()) return false;
+            if (!handle.is_valid()) continue;
+            if (!handle.is_loaded() && !handle.is_failed()) return false;
+            any = any || handle.is_loaded();
         }
     }
-
-    library_.bake_canonical(*side_source_.get());
-    for (std::size_t i = 0; i < k_tile_face_count; ++i) {
-        if (face_sources_[i].is_loaded()) {
-            library_.bake_side(static_cast<TileFace>(i), *face_sources_[i].get());
+    if (!any) {
+        // A mistyped tile_set path would otherwise produce a world that is simply never built,
+        // with nothing on screen and nothing in the log to say why. Said once.
+        if (!warned_no_tile_set_) {
+            warned_no_tile_set_ = true;
+            logger_.error("tile set '" + (styles.empty() ? tile_set : styles.front().prefix) +
+                          "' has no piece that loaded -- no terrain will be built.");
         }
+        return false;
     }
     bake_styles_();
     return library_.is_baked();
 }
 
+void TerrainComponent::retire_collision(std::shared_ptr<const coopa::physx::geometry::TriangleMesh> mesh,
+                                        std::uint64_t frame) {
+    if (mesh) retired_collision_.emplace_back(frame, std::move(mesh));
+}
+
+void TerrainComponent::release_retired_collision(std::uint64_t frame, std::uint64_t keep_frames) {
+    while (!retired_collision_.empty() && retired_collision_.front().first + keep_frames < frame) {
+        retired_collision_.pop_front();
+    }
+}
+
 void TerrainComponent::bake_styles_() {
     for (std::size_t s = 0; s < styles.size(); ++s) {
         const std::uint8_t index = library_.add_style();
+        library_.set_round_kind_corners(index, styles[s].round_kind_corners);
         if (s >= style_sources_.size()) continue;
         for (std::size_t p = 0; p < k_tile_piece_count; ++p) {
             const auto& handle = style_sources_[s][p];
             if (handle.is_loaded()) {
                 library_.bake_style_piece(index, static_cast<TilePiece>(p), *handle.get());
             } else if (handle.is_failed()) {
-                logger_.warn("tile style '" + styles[s].name + "': piece '" +
+                logger_.warn("tile set '" + styles[s].name + "': piece '" +
                              tile_piece_name(static_cast<TilePiece>(p)) + "' failed to load: " +
                              handle.error() + " -- falling back to a simpler piece.");
             }

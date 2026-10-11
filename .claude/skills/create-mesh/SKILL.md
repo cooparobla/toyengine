@@ -8,7 +8,7 @@ description: Create a toyengine mesh asset -- assets/meshes/<name>.yaml (vertice
 Mesh files are per-corner vertex arrays plus polygon index lists, in Blender's export style.
 Parser: `libs/gfxcoopa/gfxcoopa/engine/data/mesh.h` (`parse_unwelded_`, fan triangulation,
 tangent generation, slots, LODs). Helper library: `tools/mesh_yaml.py`. Generators to copy
-from: `tools/gen_tile_side_meshes.py` (uses `mesh_yaml`), `tools/gen_particle_demo_assets.py`
+from: `tools/gen_tile_styles.py` (uses `mesh_yaml`), `tools/gen_particle_demo_assets.py`
 (lathe, flat shading, triangulating writer), `tools/gen_water_grid_mesh.py` (grid),
 `tools/gen_animation_demo_scene.py` (skinned tube with weights).
 

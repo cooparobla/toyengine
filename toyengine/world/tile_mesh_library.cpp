@@ -6,94 +6,8 @@
 namespace toy {
 namespace world {
 
-glm::vec2 TileMeshLibrary::encode_uv(TileKind kind, const glm::vec2& local) {
-    return glm::vec2(static_cast<float>(kind) * k_uv_cell_stride + 0.5f * k_uv_cell_stride + local.x,
-                     local.y);
-}
-
-void TileMeshLibrary::bake_canonical(const SkinnedMeshSource& canonical) {
-    for (std::size_t i = 0; i < k_tile_face_count; ++i) {
-        bake_side(static_cast<TileFace>(i), canonical);
-    }
-}
-
-void TileMeshLibrary::bake_side(TileFace face, const SkinnedMeshSource& canonical) {
-    SideGeometry& out = sides_[static_cast<std::size_t>(face)];
-    out.vertices.clear();
-    out.indices = canonical.indices;
-
-    const glm::mat4 transform = face_transform(face);
-    // A pure rotation, so the inverse transpose is the rotation itself -- normals and
-    // tangents take the same matrix as positions, with no renormalisation needed.
-    const glm::mat3 rotation(transform);
-
-    out.vertices.reserve(canonical.vertices.size());
-    for (const Vertex& v : canonical.vertices) {
-        Vertex rotated = v;
-        rotated.position = glm::vec3(transform * glm::vec4(v.position, 1.0f));
-        rotated.normal   = rotation * v.normal;
-        rotated.tangent  = glm::vec4(rotation * glm::vec3(v.tangent), v.tangent.w);
-        out.vertices.push_back(rotated);
-    }
-    analyse_mergeable_(out, face);
-}
-
-bool TileMeshLibrary::is_baked() const {
-    for (const SideGeometry& side : sides_) {
-        if (side.empty()) return false;
-    }
-    return true;
-}
-
-void TileMeshLibrary::append(TileFace face, const glm::vec3& origin, const glm::vec3& scale, TileKind kind,
-            std::vector<Vertex>& out_v, std::vector<std::uint32_t>& out_i,
-            bool encode_terrain_uv) const {
-    const SideGeometry& side = sides_[static_cast<std::size_t>(face)];
-    if (side.empty()) return;
-
-    const std::uint32_t base = static_cast<std::uint32_t>(out_v.size());
-    const glm::vec4 cell = atlas_cell(kind);
-    const glm::vec3 normal_scale(1.0f / scale.x, 1.0f / scale.y, 1.0f / scale.z);
-
-    for (const Vertex& v : side.vertices) {
-        Vertex placed;
-        placed.position = origin + v.position * scale;
-        placed.normal   = glm::normalize(v.normal * normal_scale);
-
-        const glm::vec3 tangent = glm::vec3(v.tangent) * scale; // a tangent scales, unlike a normal
-        const float tangent_length = glm::length(tangent);
-        placed.tangent = glm::vec4(tangent_length > 1e-6f ? tangent / tangent_length
-                                                          : glm::vec3(1.0f, 0.0f, 0.0f),
-                                   v.tangent.w);
-
-        // encode_terrain_uv: tile-space UVs for a chunk drawn with the `terrain` shader
-        // (see encode_uv()) instead of the atlas cell baked into the UV.
-        placed.uv = encode_terrain_uv ? encode_uv(kind, v.uv)
-                                      : glm::vec2(cell.x + v.uv.x * cell.z, cell.y + v.uv.y * cell.w);
-        out_v.push_back(placed);
-    }
-
-    for (std::uint32_t index : side.indices) out_i.push_back(base + index);
-}
-
-void TileMeshLibrary::append_span(TileFace face, const glm::vec3& origin, const glm::vec3& scale,
-                 const glm::vec3& span, TileKind kind,
-                 std::vector<Vertex>& out_v, std::vector<std::uint32_t>& out_i) const {
-    const SideGeometry& side = sides_[static_cast<std::size_t>(face)];
-    const std::uint32_t base = static_cast<std::uint32_t>(out_v.size());
-    for (const Vertex& v : side.vertices) {
-        Vertex placed = v;   // flat and axis-aligned: normal and tangent carry over as is
-        placed.position = origin + v.position * scale * span;
-        const glm::vec2 local = side.uv_origin +
-                                side.uv_du * (v.position[side.axis_u] * span[side.axis_u]) +
-                                side.uv_dv * (v.position[side.axis_v] * span[side.axis_v]);
-        placed.uv = encode_uv(kind, local);
-        out_v.push_back(placed);
-    }
-    for (std::uint32_t index : side.indices) out_i.push_back(base + index);
-}
-
 std::uint8_t TileMeshLibrary::add_style() {
+    finished_ = false;
     styles_.emplace_back();
     bake_fixed_pieces_();
     return static_cast<std::uint8_t>(styles_.size() - 1);
@@ -189,6 +103,7 @@ void TileMeshLibrary::finish_styles() {
             if (piece == TilePiece::WallCapContinue) set.straight[1] = set.straight[0];
         }
     }
+    finished_ = !styles_.empty();
 }
 
 const TileMeshLibrary::SideGeometry& TileMeshLibrary::section(std::uint8_t style, TilePiece piece, SectionPlane plane,
@@ -408,39 +323,6 @@ void TileMeshLibrary::bake_fixed_pieces_() {
     const std::vector<Vertex> foot = {vertex({0.5f, 0.5f, 0}), vertex({1, 1, 0}), vertex({0.5f, 1, 0})};
     bake_oriented_(foot, foot_);
 
-}
-
-void TileMeshLibrary::analyse_mergeable_(SideGeometry& side, TileFace face) {
-    side.mergeable = false;
-    if (side.empty()) return;
-    const glm::vec3 n = face_normal(face);
-    const int axis_n = (std::abs(n.x) > 0.5f) ? 0 : (std::abs(n.y) > 0.5f) ? 1 : 2;
-    side.axis_u = (axis_n == 0) ? 1 : 0;
-    side.axis_v = (axis_n == 2) ? 1 : 2;
-    const float eps = 1e-4f;
-    auto snap = [eps](float x, int& out) {
-        if (std::abs(x) < eps)        { out = 0; return true; }
-        if (std::abs(x - 1.0f) < eps) { out = 1; return true; }
-        return false;
-    };
-    const Vertex* corner[2][2] = {{nullptr, nullptr}, {nullptr, nullptr}};
-    const float plane = side.vertices[0].position[axis_n];
-    for (const Vertex& v : side.vertices) {
-        int pu = 0, pv = 0;
-        if (std::abs(v.position[axis_n] - plane) > eps) return;
-        if (!snap(v.position[side.axis_u], pu) || !snap(v.position[side.axis_v], pv)) return;
-        corner[pu][pv] = &v;
-    }
-    if (!corner[0][0] || !corner[1][0] || !corner[0][1]) return;
-    side.uv_origin = corner[0][0]->uv;
-    side.uv_du     = corner[1][0]->uv - side.uv_origin;
-    side.uv_dv     = corner[0][1]->uv - side.uv_origin;
-    for (const Vertex& v : side.vertices) {
-        const glm::vec2 fit = side.uv_origin + side.uv_du * v.position[side.axis_u] +
-                              side.uv_dv * v.position[side.axis_v];
-        if (glm::length(fit - v.uv) > 1e-3f) return;
-    }
-    side.mergeable = true;
 }
 
 } // namespace world

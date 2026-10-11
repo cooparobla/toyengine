@@ -6,7 +6,7 @@ terrain can be kilometres across, and the engine draws it in chunks with more de
 camera.
 
 (The other terrain type, **Tile Terrain**, generates a stylised tile world on its own and is not
-sculpted by hand.)
+sculpted by hand -- see [Tile Terrain](#tile-terrain) at the end of this page.)
 
 ## Add a terrain
 
@@ -107,3 +107,28 @@ away it still draws. Painting and sculpting re-scatter the plants as you go.
 
 Every stroke is one step of the scene's undo history (**Ctrl+Z**). The terrain's shape and paint
 are saved with the scene. Opening the scene again without saving discards unsaved strokes.
+
+## Tile Terrain
+
+A **Tile Terrain** generates a whole terraced world from a seed: an island or continents, rivers
+and biomes, cut into columns of tiles and built in chunks around the camera. Add one with
+**Add > Tile Terrain**. Its panel in **Properties > Components** has these sections:
+
+- **Tiles**: the **Tile Set**, the object every tile is built from. Its pieces shape every top,
+  edge, corner and wall, so it decides the terrain's whole form: **tileset_round** gives soft,
+  rounded cliffs and **tileset_voxel** gives square blocks (**tileset_soft** and
+  **tileset_rock** are softer and chunkier versions of round). **Open** shows the set's pieces.
+  **Duplicate as New Tile Set** copies the set into your project, with its own piece meshes to
+  reshape, and switches the terrain to the copy. **Per-Surface Tile Sets** builds chosen surfaces
+  from another set, for example stone from tileset_rock or water from tileset_voxel.
+- **Material**: the colours. The atlas holds one colour per surface (grass, sand, stone...), and
+  the terrain shader adds the detail.
+- **World**: what gets generated: **Seed** (or **New Random Seed**), **Shape**, sea level,
+  rivers and climate.
+- **Size & Terraces**: how big the world is and how tall its steps are, with the size in metres.
+- **Streaming**: how many chunks stay loaded around the camera, which is the main cost control.
+- **Collision**: on by default. Every chunk collides with exactly the surface it draws.
+
+Scenes made before tile sets existed show a **Convert to Tile Set** button. It rewrites the old
+settings without changing how the terrain looks.
+

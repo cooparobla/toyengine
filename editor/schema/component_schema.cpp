@@ -801,32 +801,41 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             f_bool("lock_height", true)}});
         // Defaults mirror the runtime's (toyengine/world/terrain_component.h, terrain_sampler.h):
         // an absent key shows the value the terrain actually uses.
+        // The streamed tile world (toyengine/world/terrain_component.h). Laid out, labelled and
+        // filtered by the TileTerrain panel (editor/app/ui/tile_terrain_panel.inl); the tooltips
+        // here are what it shows. `kind_tile_sets:` is a map only the panel edits.
         auto tile_terrain_fields = [] {
             return std::vector<FieldDesc>{
-                f_int("seed", 251, 0, 1000000000, true),
-                f_int("grid_size", 64, 4, 4096, true),
-                f_float("sea_level", 0.25f, 0.005f, 0.0f, 1.0f),
-                f_float("terrain_roughness", 0.35f, 0.005f, 0.0f, 1.0f),
-                f_int("river_count", 25, 0, 1000),
-                f_enum("shape", {"rectangle", "circle", "triangle", "continent", "archipelago"}),
-                f_int("continent_count", 4, 1, 64),
-                f_float("continent_size_m", 0.0f, 10.0f, 0.0f, 1000000.0f),
-                f_float("irregularity", 0.35f, 0.005f, 0.0f, 0.6f),
-                f_float("coast_detail", 0.12f, 0.005f, 0.0f, 1.0f),
-                f_float("temperature_offset", 0.0f, 0.005f, -0.5f, 0.5f),
-                f_int("tiles_per_grid_unit", 4, 1, 64),
-                f_float("tile_size", 1.0f, 0.01f, 0.01f, 100.0f),
-                f_float("height_step", 1.0f, 0.005f, 0.01f, 100.0f),
-                f_float("height_scale", 40.0f, 0.05f, 0.0f, 1000.0f),
-                f_int("chunk_size", 16, 4, 512),
-                with_label(f_int("view_radius", 3, 0, 64), "View radius (chunks)"),
-                f_int("max_wall_steps", 24, 0, 1024),
-                f_int("soil_depth_steps", 3, 0, 1024),
-                f_bool("greedy_merge", true),
-                f_bool("emit_bottom", false),
-                // Styled tiles: `styles:` / `kind_styles:` are YAML-only maps, preserved on save.
-                f_int("max_chunk_jobs_per_frame", 4, 1, 64),
-                f_asset("side_mesh", "meshes", ".yaml", true, true, "tile_side_flat"),
+                with_tip(f_string("tile_set", "objects/terrain/tileset_round", true),
+                         "The tile-set object the terrain is built from -- its pieces shape every edge, corner and "
+                         "wall. tileset_voxel: square blocks"),
+                with_tip(f_int("seed", 251, 0, 1000000000, true), "Same seed, same world"),
+                with_tip(f_enum("shape", {"rectangle", "circle", "triangle", "continent", "archipelago"}, true),
+                         "The landmass outline"),
+                with_tip(f_int("continent_count", 4, 1, 64), "Archipelago: how many islands"),
+                with_tip(f_float("continent_size_m", 0.0f, 10.0f, 0.0f, 1000000.0f),
+                         "Mean landmass diameter in map metres (60 per map cell); 0 sizes it to the map"),
+                with_tip(f_float("irregularity", 0.35f, 0.005f, 0.0f, 0.6f), "How far the outline wanders from a clean shape"),
+                with_tip(f_float("coast_detail", 0.12f, 0.005f, 0.0f, 1.0f), "Fine coastline noise"),
+                with_tip(f_float("sea_level", 0.25f, 0.005f, 0.0f, 1.0f), "Waterline, as a fraction of the height range"),
+                with_tip(f_int("river_count", 25, 0, 1000), "River sources to try; rivers cut channels into the land"),
+                with_tip(f_float("terrain_roughness", 0.35f, 0.005f, 0.0f, 1.0f),
+                         "Bumpy noise over the land; 0 keeps plateaus smooth and flat"),
+                with_tip(f_float("temperature_offset", 0.0f, 0.005f, -0.5f, 0.5f),
+                         "Warmer (+) or colder (-): shifts deserts, grassland, forest and snow"),
+                with_tip(f_int("grid_size", 64, 4, 4096, true), "Map cells per side -- the world's size in map cells"),
+                with_tip(f_int("tiles_per_grid_unit", 4, 1, 64), "Tiles across one map cell: finer coastlines and rivers, at a squared cost"),
+                with_tip(f_float("tile_size", 1.0f, 0.01f, 0.01f, 100.0f), "Width of one tile (m)"),
+                with_tip(f_float("height_step", 1.0f, 0.005f, 0.01f, 100.0f), "Height of one terrace step (m); equal to Tile Size keeps pieces cubic"),
+                with_tip(f_float("height_scale", 40.0f, 0.05f, 0.0f, 1000.0f), "Height from sea floor to the highest peak (m)"),
+                with_tip(f_int("max_wall_steps", 24, 0, 1024), "Tallest wall drawn under a column, in steps (deep sea cliffs stop here)"),
+                with_tip(f_int("soil_depth_steps", 3, 0, 1024), "Steps of soil under the surface before bare stone"),
+                with_tip(f_int("chunk_size", 16, 4, 512), "Tiles per chunk side -- the streaming, drawing and collision unit"),
+                with_tip(with_label(f_int("view_radius", 3, 0, 64), "View radius (chunks)"),
+                         "Chunks kept loaded around the camera in each direction"),
+                with_tip(f_int("max_chunk_jobs_per_frame", 4, 1, 64), "Chunks built and uploaded per frame: spreads a camera jump over frames"),
+                with_tip(f_bool("collision", true), "Each chunk collides with exactly the surface it draws"),
+                with_tip(f_string("physics_material", ""), "physics_materials/<name>.yaml for the colliders (friction, bounce)"),
                 f_material(),
             };
         };

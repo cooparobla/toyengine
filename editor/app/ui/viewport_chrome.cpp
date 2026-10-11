@@ -31,15 +31,16 @@ void EditorApp::draw_viewport_header_(imm::Context& ctx, const imm::Box& hb, boo
     if (active_type_ == AssetType::Scene || active_type_ == AssetType::Object || active_type_ == AssetType::Mesh) {
         const bool sculpting = in_sculpt_mode_();
         const bool terrain = in_terrain_mode_();
+        const bool tiles = in_tile_mode_();
         const bool vpaint = in_paint_mode_() && !in_weight_paint_(), wpaint = in_weight_paint_();
-        const std::string mode = terrain ? "Terrain Mode" : sculpting ? "Sculpt Mode" : vpaint ? "Vertex Paint" : wpaint ? "Weight Paint"
+        const std::string mode = terrain ? "Terrain Mode" : tiles ? "Tile Mode" : sculpting ? "Sculpt Mode" : vpaint ? "Vertex Paint" : wpaint ? "Weight Paint"
                                : mesh_edit ? "Edit Mode" : "Object Mode";
         const float w = ctx.text_width(mode) + bh + 26;
         const imm::Box mb{x, hb.y + 3, w, bh};
         bool hov = false, held = false;
         if (ctx.invisible_button("mode_dd", mb, &hov, &held)) ctx.open_popup("mode_menu", glm::vec2(mb.x, mb.bottom() + 2));
         ctx.fill_rounded(mb, hov ? ctx.style.button_hover : ctx.style.button);
-        ctx.icon(terrain ? I::Terrain : sculpting ? I::SculptMode : vpaint ? I::VertexPaint : wpaint ? I::WeightPaint : mesh_edit ? I::EditMode : I::ObjectMode,
+        ctx.icon(terrain || tiles ? I::Terrain : sculpting ? I::SculptMode : vpaint ? I::VertexPaint : wpaint ? I::WeightPaint : mesh_edit ? I::EditMode : I::ObjectMode,
                  {mb.x + 4, mb.y + 2, bh - 4, bh - 4}, ctx.style.text);
         ctx.text_in({mb.x + bh + 2, mb.y, w - bh - 16, bh}, mode, ctx.style.text, 0.0f);
         ctx.arrow({mb.right() - 14, mb.y + 4, 10, bh - 8}, true, ctx.style.text_dim);
@@ -59,6 +60,7 @@ void EditorApp::draw_viewport_header_(imm::Context& ctx, const imm::Box& hb, boo
             x += bh + 8;
         }
         if (terrain) x = draw_terrain_header_(ctx, x, hb);
+        else if (tiles) x = draw_tile_header_(ctx, x, hb);
         else if (sculpting) x = draw_sculpt_header_(ctx, x, hb);
         else if (vpaint || wpaint) x = draw_paint_header_(ctx, x, hb);
     }
@@ -434,6 +436,7 @@ void EditorApp::draw_toolbar_(imm::Context& ctx, bool mesh_edit) {
         return ctx.icon_button(id, ic, tip, on, kToolSize, imm::Context::kAll, b);
     };
     if (in_terrain_mode_()) { draw_terrain_toolbar_(ctx, r); return; }
+    if (in_tile_mode_()) { draw_tile_toolbar_(ctx, r); return; }
     if (in_sculpt_mode_()) { draw_sculpt_toolbar_(ctx, r); return; }
     if (in_paint_mode_()) { draw_paint_toolbar_(ctx, r); return; }
     if (tool_btn("t_select", I::SelectBox, "Select Box\nClick or drag to select (Shift adds, Ctrl removes)", tool_ == Tool::Select)) tool_ = Tool::Select;
@@ -709,9 +712,11 @@ void EditorApp::draw_mode_menu_items_(imm::Context& ctx) {
     bool o = cur == InteractionMode::Object, e = cur == InteractionMode::Edit, sc = cur == InteractionMode::Sculpt;
     bool vp = cur == InteractionMode::VertexPaint, wp = cur == InteractionMode::WeightPaint;
     const bool terrain = in_terrain_mode_();
-    o = o && !terrain;
+    const bool tiles = in_tile_mode_();
+    o = o && !terrain && !tiles;
     if (ctx.menu_item("Object Mode", "Tab", &o, true, I::ObjectMode)) {
         if (terrain) exit_terrain_mode_();
+        if (tiles) exit_tile_mode_();
         set_interaction_mode(InteractionMode::Object);
     }
     if (ctx.menu_item("Edit Mode", "Tab", &e, mesh_obj && !playing(), I::EditMode)) set_interaction_mode(InteractionMode::Edit);
@@ -724,6 +729,13 @@ void EditorApp::draw_mode_menu_items_(imm::Context& ctx) {
     if (ctx.menu_item("Terrain Mode", "", &tm, !asset_view_() && is_terrain_object_(terrain_id) && !playing(), I::Terrain)) {
         if (terrain) exit_terrain_mode_();
         else enter_terrain_mode_(terrain_id);
+    }
+    // A TileTerrain object: edit its tiles.
+    bool tl = tiles;
+    const ObjectId tiles_id = tiles ? tile_object_ : doc_.primary();
+    if (ctx.menu_item("Tile Mode", "", &tl, !asset_view_() && is_tile_terrain_object_(tiles_id) && !playing(), I::Terrain)) {
+        if (tiles) exit_tile_mode_();
+        else enter_tile_mode_(tiles_id);
     }
 }
 

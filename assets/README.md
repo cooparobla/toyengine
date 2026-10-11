@@ -58,10 +58,9 @@ material and a mesh may both be `brick`; two materials may not).
 | `water_grid` | 2x2 plane subdivided 12x12, for wave displacement | centre |
 | `tentacle` | skinned tube, vertex groups `seg_0..seg_3` | base |
 | `mannequin_*` | the mannequin's capsule body parts (tag `characters`) | centre |
-| `tile_side_flat`, `tile_side_bevel` | terrain tile sides (see toyengine/world) | -- |
 
 Generators in `tools/` rebuild the generated ones (`gen_water_demo_meshes.py`,
-`gen_water_grid_mesh.py`, `gen_animation_demo_scene.py`, `gen_tile_side_meshes.py`, `gen_mannequin.py`).
+`gen_water_grid_mesh.py`, `gen_animation_demo_scene.py`, `gen_mannequin.py`; terrain tile sets: `gen_tile_styles.py`).
 
 ## Importing from Blender
 

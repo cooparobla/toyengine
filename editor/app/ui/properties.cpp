@@ -332,6 +332,7 @@ void EditorApp::draw_audio_properties_(imm::Context& ctx) {
 void EditorApp::draw_tool_tab_(imm::Context& ctx) {
     using I = imm::Icon;
     if (in_terrain_mode_()) { draw_terrain_tool_panel_(ctx); return; }
+    if (in_tile_mode_()) { draw_tile_tool_panel_(ctx); return; }
     if (in_sculpt_mode_()) { draw_sculpt_tool_panel_(ctx); return; }
     if (in_paint_mode_()) { draw_paint_tool_panel_(ctx); return; }
     // A terrain object selected: the way into Terrain Mode, up front.
@@ -339,6 +340,13 @@ void EditorApp::draw_tool_tab_(imm::Context& ctx) {
         if (ctx.collapsing_header("Terrain", true, nullptr, I::Terrain)) {
             if (ctx.button("Edit Terrain", -1, true, I::Terrain)) enter_terrain_mode_(doc_.primary());
             ctx.tooltip("Terrain Mode\nSculpt the terrain's shape and paint its layers with brushes");
+        }
+    }
+    // A tile terrain selected: the way into Tile Mode.
+    if (!asset_view_() && !playing() && is_tile_terrain_object_(doc_.primary()) && interaction_mode() == InteractionMode::Object) {
+        if (ctx.collapsing_header("Tile Terrain", true, nullptr, I::Terrain)) {
+            if (ctx.button("Edit Tiles", -1, true, I::Terrain)) enter_tile_mode_(doc_.primary());
+            ctx.tooltip("Tile Mode\nRaise, flatten, paint and flood tiles with square brushes; select tiles and edit them");
         }
     }
     static const char* tool_names[] = {"Select Box", "Move", "Rotate", "Scale", "Cursor"};
@@ -884,6 +892,9 @@ void EditorApp::draw_component_list_(imm::Context& ctx, ObjectId id, bool physic
             } else if (type == "ParticleSystem") {
                 // Grouped, explained and filtered to what applies -- see particle_panel.inl.
                 r = draw_particle_panel_(ctx, id, comp, env);
+            } else if (type == "TileTerrain" || type == "Terrain") {
+                // Tile set first, then grouped sections -- see tile_terrain_panel.inl.
+                r = draw_tile_terrain_panel_(ctx, id, comp, env);
             } else {
                 r = draw_component(ctx, comp, env, [this](const std::string& rel) { open_asset(AssetType::Material, rel); });
             }

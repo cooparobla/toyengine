@@ -34,34 +34,16 @@ using namespace toy::test;
 
 namespace {
 
-/** @brief Loads one generated piece from the repo's assets/meshes, whatever the working directory. */
-coopa::gfx::engine::data::SkinnedMeshSource load_tile_piece(const std::string& name) {
-    // Found by name: the pieces live in tag folders (meshes/terrain/<style>/).
-    const auto path = coopa::asset::AssetIndex::find(std::filesystem::path(ROOT_DIR) / "assets", "meshes/" + name + ".yaml");
-    return coopa::gfx::engine::data::SkinnedMeshSource::from_node(coopa::yaml::load_document(
-        path.value_or(std::filesystem::path(ROOT_DIR) / "assets" / "meshes" / (name + ".yaml"))));
-}
-
 /**
- * @brief A library with all four shipped styles: `round` (style 0, every kind not listed),
- *        `rock` (Stone, Rock), `soft` (Sand) and `flat` (Snow) -- so seams between every pair
- *        of styles get exercised.
- *        Built once: it is immutable, and loading twenty YAML files per test adds up.
+ * @brief A library with all four shipped tile sets: `round` (style 0, every kind not listed),
+ *        `rock` (Stone, Rock), `soft` (Sand) and `voxel` (Snow) -- so seams between every pair
+ *        of sets get exercised. Built once: it is immutable, and loading forty-four YAML files
+ *        per test adds up.
  */
 const toy::world::TileMeshLibrary& styled_library() {
     using namespace toy::world;
     static const TileMeshLibrary library = [] {
-        TileMeshLibrary lib;
-        lib.bake_canonical(make_canonical_quad());
-        for (const char* style : {"tile_round", "tile_rock", "tile_soft", "tile_flat"}) {
-            const std::uint8_t index = lib.add_style();
-            for (std::size_t p = 0; p < k_tile_piece_count; ++p) {
-                const auto piece = static_cast<TilePiece>(p);
-                lib.bake_style_piece(index, piece,
-                                     load_tile_piece(std::string(style) + "_" + tile_piece_name(piece)));
-            }
-        }
-        lib.finish_styles();
+        TileMeshLibrary lib = make_tile_library({"round", "rock", "soft", "voxel"});
         lib.set_kind_style(TileKind::Stone, 1);
         lib.set_kind_style(TileKind::Rock, 1);
         lib.set_kind_style(TileKind::Sand, 2);

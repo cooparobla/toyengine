@@ -19,7 +19,7 @@ void SaveDemo::start() {
 
 void SaveDemo::update(float) {
     if (!scene) return;
-    auto* player = scene->find_first_component<toy::scene::CharacterController>();
+    auto* player = toy::scene::find_player_controller(*scene);
     auto* ptc = player && player->owner ? player->owner->get_transform() : nullptr;
     if (!ptc) return;
     const glm::vec3 chest = glm::vec3(ptc->get_world_matrix()[3]) + glm::vec3(0.0f, 0.0f, 0.5f * player->height);

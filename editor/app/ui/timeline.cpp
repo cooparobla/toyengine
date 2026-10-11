@@ -479,7 +479,7 @@ void EditorApp::draw_timeline_(imm::Context& ctx, const imm::Box& hb, const imm:
         return r;
     };
     if (icon_btn("tl_start", I::Undo, "Jump to Start\nHome", false)) anim_time_ = 0.0f;
-    if (icon_btn("tl_play", anim_playing_ ? I::Pause : I::Play, "Play / Pause\nSpace (in the Timeline)", anim_playing_)) {
+    if (icon_btn("tl_play", anim_playing_ ? I::Pause : I::Play, "Play / Pause\nSpace (while the Timeline is open)", anim_playing_)) {
         anim_playing_ = !anim_playing_;
     }
     x += 4;
@@ -841,9 +841,13 @@ void EditorApp::draw_dope_sheet_(imm::Context& ctx, const imm::Box& body) {
     ctx.text_in(tag, std::to_string(static_cast<int>(std::round(anim_time_ * kAnimFps))), glm::vec4(1), 0.0f, true);
     ctx.pop_clip();
 
+    // Space plays/pauses whenever the Timeline is open -- except in play mode (the game owns the keys)
+    // and over the UI designer canvas (Space-drag pans it).
+    const bool space_pans = active_type_ == AssetType::UI && viewport_hovered_;
+    if (!ctx.wants_keyboard() && !ctx.any_popup_open() && !playing() && !space_pans && ctx.shortcut(Key::Space))
+        anim_playing_ = !anim_playing_;
     // Keys over the panel.
     if (timeline_hovered_ && !ctx.wants_keyboard() && !ctx.any_popup_open()) {
-        if (ctx.shortcut(Key::Space)) anim_playing_ = !anim_playing_;
         if (ctx.shortcut(Key::I)) anim_insert_keys_();
         if (ctx.shortcut(Key::X) || ctx.shortcut(Key::Delete)) {
             if (anim_sel_event_ >= 0) anim_delete_selected_event_();

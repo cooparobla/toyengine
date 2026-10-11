@@ -16,6 +16,7 @@ object:
         - {name: walk, clip: animations/mannequin_ik/walk.yaml}
         - {name: run, clip: animations/mannequin_ik/run.yaml}
         - {name: jump, clip: animations/mannequin_ik/jump.yaml, wrap: once}
+        - {name: ride, clip: animations/mannequin_ik/ride.yaml}
     # Spine first (a chain: spine > chest; the chest takes its target's rotation, twist and
     # all, and the neck rides on it), then the limbs hanging from it, then the head --
     # IkSystem's default order for equal priorities.

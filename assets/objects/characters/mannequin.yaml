@@ -15,6 +15,7 @@ object:
         - {name: walk, clip: animations/mannequin/walk.yaml}
         - {name: run, clip: animations/mannequin/run.yaml}
         - {name: jump, clip: animations/mannequin/jump.yaml, wrap: once}
+        - {name: ride, clip: animations/mannequin/ride.yaml}
   children:
     - name: pelvis
       components:

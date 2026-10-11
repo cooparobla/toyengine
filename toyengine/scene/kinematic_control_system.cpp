@@ -5,6 +5,7 @@
 #include <toyengine/scene/character_controller.h>
 #include <toyengine/scene/kinematic_controller.h>
 #include <toyengine/scene/kinematic_mover.h>
+#include <toyengine/scene/mount.h>
 
 namespace toy {
 namespace scene {
@@ -21,6 +22,8 @@ void KinematicControlSystem::execute(coopa::scene::Scene& scene, const coopa::sc
     }
     // Characters last: the platforms above have already moved this frame. They query the
     // physics world, which still holds every body's pose from the previous step.
+    // Mounts steer their own controllers (from the rider's input) just before those move.
+    for (Mount* m : scene.get_components<Mount>()) m->steer(ctx.delta_time);
     std::vector<CharacterController*> characters = scene.get_components<CharacterController>();
     if (!characters.empty()) {
         auto* physics = dynamic_cast<coopa::physx::system::PhysicsSystem*>(scene.find_system("Physics"));

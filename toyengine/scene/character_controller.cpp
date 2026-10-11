@@ -12,6 +12,12 @@
 namespace toy {
 namespace scene {
 
+CharacterController* find_player_controller(coopa::scene::Scene& scene) {
+    for (CharacterController* cc : scene.get_components<CharacterController>())
+        if (cc->player_input) return cc;
+    return nullptr;
+}
+
 void CharacterController::set_suspended(bool suspended) {
     if (suspended == suspended_) return;
     suspended_ = suspended;

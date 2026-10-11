@@ -23,6 +23,14 @@
  * height above the base plane; the animated lift of a swinging foot is kept on top of it. Only
  * while grounded: with a CharacterController on this object, IK fades out in the air.
  *
+ * Any number of legs: `legs` (a list of {thigh, shin, foot, pole, front}) replaces left/right --
+ * a quadruped's four. `pole` is each knee's bend direction in the character's own frame (a
+ * horse's forelegs bend their knees forward, its hind hocks back). With `body_pitch` on, the
+ * `pelvis` bone (a quadruped's body) is no longer just dropped: it moves by the average of the
+ * front and hind legs' ground offsets (up or down) and pitches by their difference over the
+ * wheelbase, so the hooves on a slope or a step reach the ground with the legs near their
+ * animated length.
+ *
  * Example YAML (the mannequin's default bone paths):
  * @code
  * - type: FootIK
@@ -37,6 +45,18 @@
  *   blend_speed: 12
  *   mode: auto                  # auto | solve | targets
  * @endcode
+ *
+ * A quadruped (objects/animals/horse):
+ * @code
+ * - type: FootIK
+ *   pelvis: body
+ *   mode: solve
+ *   body_pitch: true
+ *   max_body_pitch: 20
+ *   legs:
+ *     - {thigh: body/fore_upper_l, shin: body/fore_upper_l/fore_lower_l, foot: ..., front: true}
+ *     - {thigh: body/hind_upper_l, shin: ..., foot: ..., pole: {x: 0, y: -1, z: 0}}
+ * @endcode
  */
 
 #ifndef TOYENGINE_SCENE_FOOT_IK_H
@@ -47,7 +67,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <memory>
 #include <string>
+#include <vector>
 
 #include <coopa/animation/ik_components.h>
 
@@ -68,11 +90,16 @@ public:
     /** @brief One leg's bones, as paths from this object. */
     struct Leg {
         std::string thigh, shin, foot;
+        glm::vec3 pole{0.0f, 1.0f, 0.0f}; ///< Knee bend direction, character frame (solve mode).
+        bool front = false;               ///< A front leg (body_pitch).
     };
 
     std::string pelvis = "pelvis";
     Leg left{"pelvis/thigh_l", "pelvis/thigh_l/shin_l", "pelvis/thigh_l/shin_l/foot_l"};
     Leg right{"pelvis/thigh_r", "pelvis/thigh_r/shin_r", "pelvis/thigh_r/shin_r/foot_r"};
+    std::vector<Leg> legs;        ///< Non-empty: these legs instead of left/right.
+    bool body_pitch = false;      ///< Quadruped: raise/drop and pitch the pelvis bone (see the file doc).
+    float max_body_pitch = 20.0f; ///< Degrees.
     float ray_up = 0.5f;          ///< Ray start above the base plane (m): the highest step a foot rises onto.
     float ray_down = 0.5f;        ///< Ray reach below the base plane (m): the deepest dip a foot follows.
     float max_pelvis_drop = 0.35f;
@@ -88,8 +115,11 @@ public:
 
     /** @brief The pelvis drop applied last frame (m, <= 0). */
     float pelvis_offset() const { return pelvis_offset_; }
-    /** @brief Each foot's smoothed ground offset (m above the base plane); 0 = left, 1 = right. */
-    float foot_offset(int i) const { return legs_[i].offset; }
+    /** @brief Each foot's smoothed ground offset (m above the base plane); 0 = left, 1 = right
+     *         (or the `legs` order). */
+    float foot_offset(int i) const { return i >= 0 && i < static_cast<int>(legs_.size()) ? legs_[i]->offset : 0.0f; }
+    /** @brief The body pitch applied last frame (degrees, + = front up; body_pitch only). */
+    float body_pitch_deg() const { return body_pitch_deg_; }
     /** @brief The effective weight after the grounded fade. */
     float current_weight() const { return blend_; }
 
@@ -114,6 +144,8 @@ private:
         coopa::anim::IkPoseGuard foot_guard;
         glm::vec3 foot_pos{0.0f};
         glm::vec3 normal{0.0f, 0.0f, 1.0f};
+        glm::vec3 pole{0.0f, 1.0f, 0.0f};
+        bool front = false;
         float offset = 0.0f;
     };
 
@@ -126,9 +158,11 @@ private:
     coopa::scene::SceneObject* pelvis_obj_ = nullptr;
     CharacterController* controller_ = nullptr;
     coopa::physx::components::RigidbodyComponent* rigidbody_ = nullptr;
-    LegState legs_[2];
+    std::vector<std::unique_ptr<LegState>> legs_;
     float blend_ = 0.0f;
     float pelvis_offset_ = 0.0f;
+    float body_pitch_deg_ = 0.0f;
+    coopa::anim::IkPoseGuard pelvis_rot_guard_;
     glm::vec3 pelvis_input_{0.0f};
     glm::vec3 pelvis_written_{0.0f};
     bool pelvis_written_valid_ = false;

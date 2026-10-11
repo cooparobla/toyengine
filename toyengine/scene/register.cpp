@@ -15,7 +15,9 @@
 #include <toyengine/scene/health_driver.h>
 #include <toyengine/scene/kinematic_controller.h>
 #include <toyengine/scene/kinematic_mover.h>
+#include <toyengine/scene/mount.h>
 #include <toyengine/scene/ragdoll.h>
+#include <toyengine/scene/rider.h>
 #include <toyengine/scene/scene_link.h>
 #include <toyengine/scene/skinned_mesh_renderer.h>
 #include <toyengine/water/buoyancy.h>
@@ -140,6 +142,66 @@ void register_scene_components() {
             b("push_dynamic_bodies", cc->push_dynamic_bodies);
             f("push_strength", cc->push_strength);
             b("use_root_motion", cc->use_root_motion);
+            b("player_input", cc->player_input);
+        });
+
+    // A rideable animal (toyengine/scene/mount.h): steers its own CharacterController from the
+    // rider's input, plays its gait clips, and names the sockets a Rider sits on / reaches for.
+    SceneLoader::register_component_parser("Mount",
+        [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
+            auto* m = obj.add_component<Mount>();
+            auto f = [&](const char* key, float& out) {
+                if (node.contains(key)) out = node.at(key).get_value<float>();
+            };
+            auto str = [&](const char* key, std::string& out) {
+                if (node.contains(key)) out = node.at(key).get_value<std::string>();
+            };
+            f("walk_speed", m->walk_speed);
+            f("trot_speed", m->trot_speed);
+            f("gallop_speed", m->gallop_speed);
+            f("acceleration", m->acceleration);
+            f("braking", m->braking);
+            f("turn_rate", m->turn_rate);
+            f("gallop_turn_rate", m->gallop_turn_rate);
+            f("mount_max_speed", m->mount_max_speed);
+            str("idle_state", m->idle_state);
+            str("walk_state", m->walk_state);
+            str("trot_state", m->trot_state);
+            str("gallop_state", m->gallop_state);
+            f("crossfade", m->crossfade);
+            f("min_anim_speed", m->min_anim_speed);
+            f("max_anim_speed", m->max_anim_speed);
+            str("saddle", m->saddle);
+            str("stirrup_l", m->stirrup_l);
+            str("stirrup_r", m->stirrup_r);
+            str("rein_l", m->rein_l);
+            str("rein_r", m->rein_r);
+            str("mount_point_l", m->mount_point_l);
+            str("mount_point_r", m->mount_point_r);
+            f("camera_offset_z", m->camera_offset_z);
+            f("camera_distance", m->camera_distance);
+        });
+
+    // Gets the player on / off a Mount (toyengine/scene/rider.h); `interact` (F) is pushed by
+    // Engine::drive_character_controllers_().
+    SceneLoader::register_component_parser("Rider",
+        [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
+            auto* r = obj.add_component<Rider>();
+            auto f = [&](const char* key, float& out) {
+                if (node.contains(key)) out = node.at(key).get_value<float>();
+            };
+            f("mount_radius", r->mount_radius);
+            f("mount_time", r->mount_time);
+            f("dismount_time", r->dismount_time);
+            if (node.contains("ride_state")) r->ride_state = node.at("ride_state").get_value<std::string>();
+            f("crossfade", r->crossfade);
+            if (node.contains("seat_offset")) r->seat_offset = parse_vec3(node.at("seat_offset"), r->seat_offset);
+            f("knee_spread", r->knee_spread);
+            f("lean", r->lean);
+            f("leg_weight", r->leg_weight);
+            f("arm_weight", r->arm_weight);
+            if (node.contains("priority")) r->priority = node.at("priority").get_value<int>();
+            if (node.contains("mount_on_start")) r->mount_on_start = node.at("mount_on_start").get_value<std::string>();
         });
 
     // A trigger box that loads another scene when the player walks in (toyengine/scene/scene_link.h).
@@ -183,16 +245,35 @@ void register_scene_components() {
             auto f = [&](const char* key, float& out) {
                 if (node.contains(key)) out = node.at(key).get_value<float>();
             };
+            // A leg: [thigh, shin, foot] or {thigh, shin, foot, pole, front}.
+            auto parse_leg = [&](const fkyaml::node& n, FootIK::Leg& out) {
+                if (n.is_sequence()) {
+                    if (n.size() > 0) out.thigh = n[0].get_value<std::string>();
+                    if (n.size() > 1) out.shin = n[1].get_value<std::string>();
+                    if (n.size() > 2) out.foot = n[2].get_value<std::string>();
+                } else if (n.is_mapping()) {
+                    if (n.contains("thigh")) out.thigh = n.at("thigh").get_value<std::string>();
+                    if (n.contains("shin")) out.shin = n.at("shin").get_value<std::string>();
+                    if (n.contains("foot")) out.foot = n.at("foot").get_value<std::string>();
+                    if (n.contains("pole")) out.pole = parse_vec3(n.at("pole"), out.pole);
+                    if (n.contains("front")) out.front = n.at("front").get_value<bool>();
+                }
+            };
             auto leg = [&](const char* key, FootIK::Leg& out) {
-                if (!node.contains(key) || !node.at(key).is_sequence()) return;
-                const auto& seq = node.at(key);
-                if (seq.size() > 0) out.thigh = seq[0].get_value<std::string>();
-                if (seq.size() > 1) out.shin = seq[1].get_value<std::string>();
-                if (seq.size() > 2) out.foot = seq[2].get_value<std::string>();
+                if (node.contains(key)) parse_leg(node.at(key), out);
             };
             if (node.contains("pelvis")) ik->pelvis = node.at("pelvis").get_value<std::string>();
             leg("left", ik->left);
             leg("right", ik->right);
+            if (node.contains("legs") && node.at("legs").is_sequence()) {
+                for (const auto& n : node.at("legs")) {
+                    FootIK::Leg l;
+                    parse_leg(n, l);
+                    ik->legs.push_back(l);
+                }
+            }
+            if (node.contains("body_pitch")) ik->body_pitch = node.at("body_pitch").get_value<bool>();
+            f("max_body_pitch", ik->max_body_pitch);
             f("ray_up", ik->ray_up);
             f("ray_down", ik->ray_down);
             f("max_pelvis_drop", ik->max_pelvis_drop);

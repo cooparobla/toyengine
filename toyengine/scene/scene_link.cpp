@@ -4,6 +4,7 @@
 #include <coopa/scene/scene_object.h>
 #include <physxcoopa/system/physics_system.h>
 #include <toyengine/scene/character_controller.h>
+#include <toyengine/scene/mount.h>
 
 namespace toy {
 namespace scene {
@@ -62,7 +63,11 @@ bool SceneLink::character_inside_() const {
     box.half_extents = glm::abs(size) * scale * 0.5f;
     box.orientation = glm::quat_cast(glm::mat3(axis_x / scale.x, axis_y / scale.y, axis_z / scale.z));
     for (auto* col : physics->overlap_box(box, ~0u, /*include_triggers=*/false)) {
-        if (col && col->owner && col->owner->get_component<CharacterController>()) return true;
+        // The player's body, or a horse the player rides.
+        auto* cc = col && col->owner ? col->owner->get_component<CharacterController>() : nullptr;
+        if (!cc) continue;
+        if (cc->player_input) return true;
+        if (auto* m = col->owner->get_component<Mount>(); m && m->is_ridden()) return true;
     }
     return false;
 }

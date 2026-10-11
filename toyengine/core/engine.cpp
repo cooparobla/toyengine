@@ -4,8 +4,10 @@
 #include <toyengine/render/toy_render_pipeline.h>
 #include <toyengine/scene/character_controller.h>
 #include <toyengine/scene/kinematic_controller.h>
+#include <toyengine/scene/mount.h>
 #include <toyengine/weather/wind_system.h>
 #include <toyengine/scene/ragdoll.h>
+#include <toyengine/scene/rider.h>
 #include <toyengine/scene/skinned_mesh_renderer.h>
 #include <toyengine/world/heightmap_terrain_system.h>
 
@@ -913,7 +915,7 @@ void Engine::activate_scene_load_(detail::SceneLoadState& st) {
 void Engine::apply_spawn_point_(coopa::scene::Scene& scene, const std::string& spawn_point) {
     if (spawn_point.empty()) return;
     coopa::scene::SceneObject* spawn = scene.find_object(spawn_point);
-    auto* player = scene.find_first_component<scene::CharacterController>();
+    auto* player = scene::find_player_controller(scene);
     if (!spawn || !player || !player->owner) {
         std::cerr << "[toyengine] spawn_point '" << spawn_point << "': "
                   << (spawn ? "no CharacterController in the scene" : "no such object") << "\n";
@@ -1620,6 +1622,10 @@ void Engine::bind_default_input_() {
     input_.bind("sprint", Key::LeftShift);
     // Ragdoll (input_toggle): R goes limp / recovers.
     input_.bind("ragdoll", Key::R);
+    // Rider: F gets on a Mount in reach / off the one ridden (E/Q belong to fly_z). Riding,
+    // LeftControl holds the horse to a walk (Shift gallops, as `sprint`).
+    input_.bind("interact", Key::F);
+    input_.bind("walk", Key::LeftControl);
 }
 
 void Engine::drive_camera_controller_(coopa::scene::Scene& scene) {
@@ -1672,7 +1678,9 @@ void Engine::drive_free_movers_(coopa::scene::Scene& scene) {
 
 void Engine::drive_character_controllers_(coopa::scene::Scene& scene) {
     std::vector<scene::CharacterController*> characters = scene.get_components<scene::CharacterController>();
-    if (characters.empty()) return;
+    std::vector<scene::Mount*> mounts = scene.get_components<scene::Mount>();
+    std::vector<scene::Rider*> riders = scene.get_components<scene::Rider>();
+    if (characters.empty() && mounts.empty() && riders.empty()) return;
 
     float yaw = 0.0f;
     if (auto* cam = coopa::gfx::engine::components::CameraComponent::main()) {
@@ -1685,17 +1693,34 @@ void Engine::drive_character_controllers_(coopa::scene::Scene& scene) {
     const glm::vec2 move = blocked ? glm::vec2(0.0f) : input_.vector("move", ctx_.input());
     const bool jump = !blocked && input_.is_pressed("jump", ctx_.input());
     const bool sprint = !blocked && input_.is_down("sprint", ctx_.input());
+    const bool walk = !blocked && input_.is_down("walk", ctx_.input());
+    const bool interact = !blocked && input_.is_pressed("interact", ctx_.input());
+    // Only the player's own body: not a horse (player_input off -- its Mount takes the input
+    // below while ridden), nor a character handed over to a ragdoll or a saddle.
     for (scene::CharacterController* cc : characters) {
+        if (!cc->player_input || cc->is_suspended()) continue;
         cc->move_input = move;
         cc->move_basis_yaw_deg = yaw;
         cc->jump = cc->jump || jump;
         cc->sprint = sprint;
     }
+    for (scene::Mount* m : mounts) {
+        const bool ridden = m->is_ridden();
+        m->move_input = ridden ? move : glm::vec2(0.0f);
+        m->move_basis_yaw_deg = yaw;
+        m->sprint = ridden && sprint;
+        m->walk = ridden && walk;
+        m->jump = m->jump || (ridden && jump);
+    }
+    for (scene::Rider* r : riders) r->interact = r->interact || interact;
 }
 
 void Engine::drive_ragdolls_(coopa::scene::Scene& scene) {
     if (input_blocked_() || !input_.is_pressed("ragdoll", ctx_.input())) return;
     for (scene::Ragdoll* r : scene.get_components<scene::Ragdoll>()) {
+        // Not in the saddle: the Rider owns the body until it is back on foot.
+        auto* rider = r->owner ? r->owner->get_component<scene::Rider>() : nullptr;
+        if (rider && rider->is_mounted()) continue;
         if (r->input_toggle) r->toggle();
     }
 }

@@ -112,6 +112,11 @@ public:
      *         steep slope's foot) with no way to move, falling forever. */
     bool use_root_motion = false;
 
+    /** @brief Whether Engine::drive_character_controllers_() pushes the player's input into this
+     *         controller -- and whether it counts as "the player" (find_player_controller()). Off
+     *         for a body something else steers: a Mount's horse takes its input from its Mount. */
+    bool player_input = true;
+
     // --- Per-frame input, pushed by Engine::drive_character_controllers_() ---
     glm::vec2 move_input{0.0f};      ///< x = right, y = forward, in the move basis; length clamped to 1.
     float move_basis_yaw_deg = 0.0f; ///< Yaw of the move basis (the camera's); 0 = world axes (x -> +X, y -> +Y).
@@ -213,6 +218,10 @@ private:
     float root_yaw_ = 0.0f;
     coopa::physx::character::MoveResult last_move_;
 };
+
+/** @brief The player's controller: the first CharacterController with `player_input` on (a
+ *         ridden horse's controller is not the player), or null. */
+CharacterController* find_player_controller(coopa::scene::Scene& scene);
 
 } // namespace scene
 } // namespace toy

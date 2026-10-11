@@ -190,7 +190,7 @@ Undo works on events like it does on keys.
 
 | To | Do this |
 |---|---|
-| Play or pause | Click **Play / Pause**, or press **Space** with the mouse over the Timeline. |
+| Play or pause | Click **Play / Pause**, or press **Space** while the Timeline is open. |
 | Scrub | Click or drag on the ruler. The playhead snaps to whole frames; hold **Shift** to scrub smoothly. |
 | Step one frame | Press **Left** or **Right**. |
 | Jump to the next or previous key | Press **Up** or **Down**. |

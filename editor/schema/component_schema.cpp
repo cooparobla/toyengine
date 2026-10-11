@@ -707,6 +707,49 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             f_bool("push_dynamic_bodies", true),
             with_tip(f_float("push_strength", 80.0f, 0.5f, 0.0f, 100000.0f), "Pushing mass (kg)"),
             with_tip(f_bool("use_root_motion", false), "Move by the Animator's root motion instead of input"),
+            with_tip(f_bool("player_input", true), "Driven by the player's input; off for a body a Mount steers (a horse)"),
+        }});
+        // Defaults mirror toyengine/scene/mount.h.
+        add({"Mount", "Gameplay", {
+            with_tip(f_float("walk_speed", 1.45f, 0.01f, 0.0f, 100.0f, true), "m/s; the walk clip's own ground speed"),
+            with_tip(f_float("trot_speed", 3.2f, 0.01f, 0.0f, 100.0f, true), "m/s; input alone trots"),
+            with_tip(f_float("gallop_speed", 8.9f, 0.01f, 0.0f, 100.0f, true), "m/s; Shift gallops"),
+            f_float("acceleration", 4.0f, 0.05f, 0.0f, 1000.0f),
+            f_float("braking", 6.0f, 0.05f, 0.0f, 1000.0f),
+            with_tip(f_float("turn_rate", 150.0f, 1.0f, 0.0f, 10000.0f), "Degrees/s standing or walking"),
+            with_tip(f_float("gallop_turn_rate", 70.0f, 1.0f, 0.0f, 10000.0f), "Degrees/s at full gallop"),
+            with_tip(f_float("mount_max_speed", 0.8f, 0.01f, 0.0f, 100.0f), "A rider gets on below this speed"),
+            f_string("idle_state", "idle"),
+            f_string("walk_state", "walk"),
+            f_string("trot_state", "trot"),
+            f_string("gallop_state", "gallop"),
+            f_float("crossfade", 0.25f, 0.005f, 0.0f, 10.0f),
+            f_float("min_anim_speed", 0.5f, 0.01f, 0.0f, 10.0f),
+            f_float("max_anim_speed", 1.6f, 0.01f, 0.0f, 10.0f),
+            with_tip(f_string("saddle", "body/saddle"), "Socket the rider sits on (path from this object)"),
+            f_string("stirrup_l", "body/saddle/stirrup_l"),
+            f_string("stirrup_r", "body/saddle/stirrup_r"),
+            f_string("rein_l", "body/neck/rein_l"),
+            f_string("rein_r", "body/neck/rein_r"),
+            with_tip(f_string("mount_point_l", "mount_point_l"), "Ground-level spot beside the saddle to get on / off"),
+            f_string("mount_point_r", "mount_point_r"),
+            with_tip(f_float("camera_offset_z", 2.2f, 0.01f, -100.0f, 100.0f), "Camera target height while ridden"),
+            with_tip(f_float("camera_distance", 6.5f, 0.05f, 0.0f, 1000.0f), "Camera distance while ridden"),
+        }});
+        // Defaults mirror toyengine/scene/rider.h.
+        add({"Rider", "Gameplay", {
+            with_tip(f_float("mount_radius", 1.6f, 0.01f, 0.0f, 100.0f, true), "Reach (m) from the feet to a mount point; F gets on / off"),
+            f_float("mount_time", 0.8f, 0.01f, 0.0f, 10.0f),
+            f_float("dismount_time", 0.6f, 0.01f, 0.0f, 10.0f),
+            f_string("ride_state", "ride", true),
+            f_float("crossfade", 0.3f, 0.005f, 0.0f, 10.0f),
+            with_tip(f_vec3("seat_offset", glm::vec3(0.0f, -0.05f, -0.86f), 0.005f), "The rider's root from the saddle socket (saddle frame)"),
+            with_tip(f_float("knee_spread", 0.45f, 0.005f, 0.0f, 5.0f), "Knee poles out from the hips (m)"),
+            with_tip(f_float("lean", 0.15f, 0.005f, 0.0f, 5.0f), "Spine lean forward at full gallop (m)"),
+            f_float("leg_weight", 1.0f, 0.01f, 0.0f, 1.0f),
+            f_float("arm_weight", 1.0f, 0.01f, 0.0f, 1.0f),
+            with_tip(f_int("priority", 100, -1000, 1000), "IK driver order: after the mount's FootIK (lower first)"),
+            with_tip(f_string("mount_on_start", ""), "A Mount's object name: start the scene in its saddle"),
         }});
         // Defaults mirror toyengine/scene/scene_link.h.
         add({"SceneLink", "Gameplay", {
@@ -891,6 +934,8 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             f_float("weight", 1.0f, 0.01f, 0.0f, 1.0f, true),
             with_tip(f_enum("mode", {"auto", "solve", "targets"}),
                      "solve: FootIK bends the legs; targets: it lifts the rig's own leg IK targets; auto picks"),
+            with_tip(f_bool("body_pitch", false), "Quadruped (with `legs`): raise/drop and pitch the pelvis bone between front and hind legs"),
+            f_float("max_body_pitch", 20.0f, 0.5f, 0.0f, 89.0f),
         }});
         // A mesh deformed by a rig's bones: `bones:` (or, omitted, the mesh's vertex groups)
         // resolved under `rig:` (default: the nearest Animator up the hierarchy).

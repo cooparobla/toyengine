@@ -1,7 +1,8 @@
 /**
  * @file foot_ik_test.cpp
  * @brief FootIK on a mannequin-proportioned leg rig: a foot over a step is raised onto it, a
- *        dip drops the pelvis without accumulating, and weight 0 returns the animated pose.
+ *        dip drops the pelvis without accumulating, and weight 0 returns the animated pose; and
+ *        four legs (the horse prefab) on a slope: every hoof on the ground, the body pitched.
  */
 
 #include <coopa/testing/test.h>
@@ -16,6 +17,7 @@
 
 #include "engine/support/checks.h"
 #include "engine/support/character_rig.h"
+#include "engine/support/horse_rig.h"
 
 COOPA_TEST_SUITE("foot_ik");
 
@@ -157,4 +159,30 @@ COOPA_TEST(targets_mode_lifts_the_rigs_own_leg_targets) {
                 "targets mode: the right foot stands on the step (its target raised)");
     expect_near(world(legs, "pelvis/thigh_l/shin_l/foot_l").z, ground_z, 0.01f, "targets mode: the left foot stays on the ground");
     expect_near(world(legs, "foot_target_r").z, ground_z, 1e-5f, "targets mode: the target empty itself is untouched (an override)");
+}
+
+/** @brief Four legs (objects/animals/horse: FootIK `legs` + body_pitch, solve mode) standing
+ *         across a 10 degree slope: each hoof is planted on the slope under it (its joint at the
+ *         clip's 0.12 m above the surface), the body pitches up the slope by about the slope's
+ *         angle, and the hind and fore offsets straddle the controller's base. */
+COOPA_TEST(quadruped_hooves_meet_a_slope_and_the_body_pitches) {
+    const float slope = glm::radians(10.0f);
+    // The slab's top passes through (0, 0, 1), rising toward +Y.
+    HorseRig rig(glm::vec3(0.0f, 0.0f, 1.05f), 0.0f, false);
+    if (!rig.hooves) { expect(false, "quadruped: the horse prefab has a FootIK"); return; }
+    const glm::vec3 n(0.0f, -std::sin(slope), std::cos(slope));
+    rig.box("slope", glm::vec3(0.0f, 0.0f, 1.0f) - 0.5f * n, glm::vec3(12.0f, 12.0f, 1.0f), glm::vec3(10.0f, 0.0f, 0.0f));
+    rig.start();
+    rig.step(120);
+    expect(rig.horse_cc->is_grounded(), "quadruped: the horse stands on the slope");
+    expect(rig.hooves->legs.size() == 4, "quadruped: four legs");
+    for (const char* name : {"fore_hoof_l", "fore_hoof_r", "hind_hoof_l", "hind_hoof_r"}) {
+        const glm::vec3 h = HorseRig::world(rig.bone(rig.horse, name));
+        const float surface = 1.0f + h.y * std::tan(slope);
+        expect_near(h.z, surface + 0.12f, 0.03f, std::string("quadruped: ") + name + " planted on the slope");
+    }
+    expect(rig.hooves->body_pitch_deg() > 7.0f && rig.hooves->body_pitch_deg() < 13.0f,
+           "quadruped: the body pitches up the slope (" + std::to_string(rig.hooves->body_pitch_deg()) + " deg)");
+    expect(rig.hooves->foot_offset(0) > 0.05f && rig.hooves->foot_offset(2) < -0.05f,
+           "quadruped: the fore hooves are above the base, the hind ones below");
 }

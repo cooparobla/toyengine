@@ -15,10 +15,11 @@ Outputs (all under assets/):
     clips are BAKED from the keyframed ones (forward kinematics, every frame), so it moves like
     the plain mannequin; FootIK on it adjusts the foot targets (mode auto -> targets).
   * meshes/characters/mannequin_*.yaml -- one capsule mesh per body part (Z-up, centred).
-  * animations/mannequin/{idle,walk,run,jump}.yaml -- the clips its Animator plays. walk and run
+  * animations/mannequin/{idle,walk,run,jump,ride}.yaml -- the clips its Animator plays (ride:
+    seated in a saddle, for a Rider -- toyengine/scene/rider.h). walk and run
     carry ROOT MOTION (the pelvis's travel, `root_motion: {object: pelvis, translation: xy}`) and
     `footstep` events (string left / right) as each foot plants.
-  * animations/mannequin_ik/{idle,walk,run,jump}.yaml -- the same motion as target tracks.
+  * animations/mannequin_ik/{idle,walk,run,jump,ride}.yaml -- the same motion as target tracks.
 
 The rig, Z-up and facing local +Y (its right hand is +X, its left -X), origin at the feet,
 about 1.8 m tall -- the default CharacterController capsule (radius 0.3, height 1.8):
@@ -70,7 +71,7 @@ def num(x):
 # Capsule meshes
 # ---------------------------------------------------------------------------------------------
 
-def capsule_mesh(path, radius, length, sides=16, cap_rings=6):
+def capsule_mesh(path, radius, length, sides=16, cap_rings=6, label="mannequin part", generated=None):
     """A capsule along Z centred at the origin: `length` between the cap centres (0 = sphere).
 
     A lathe: rings from the bottom pole to the top pole, a duplicated u = 1 seam column, and
@@ -108,8 +109,8 @@ def capsule_mesh(path, radius, length, sides=16, cap_rings=6):
                 faces.append([a, b, c])          # top pole: ring `last` is a point
             else:
                 faces.append([a, b, c, d])
-    lines = [f"# mannequin part: capsule r {num(radius)}, cap-centre distance {num(length)}, along Z, centred.",
-             f"# {GENERATED}",
+    lines = [f"# {label}: capsule r {num(radius)}, cap-centre distance {num(length)}, along Z, centred.",
+             f"# {generated or GENERATED}",
              "vertices:"]
     lines += [f"  - {fmt([round(x, 5) for x in p])}" for p in verts]
     lines.append("normals:")
@@ -308,6 +309,7 @@ def write_object(path=OBJECT_PATH, extra_components=(), header_note=None, clip_d
         f"        - {{name: walk, clip: {clip_dir}/walk.yaml}}",
         f"        - {{name: run, clip: {clip_dir}/run.yaml}}",
         f"        - {{name: jump, clip: {clip_dir}/jump.yaml, wrap: once}}",
+        f"        - {{name: ride, clip: {clip_dir}/ride.yaml}}",
     ]
     lines += list(extra_components)
     lines.append("  children:")
@@ -491,6 +493,29 @@ def jump():
         tracks.append(rot_track(f"upper_arm_{side}", key([(0, sgn * 7, 0), (35 if lead else -25, sgn * 35, 0)]), "ease_out"))
         tracks.append(rot_track(f"lower_arm_{side}", key([(12, 0, 0), (45, 0, 0)]), "ease_out"))
     write_clip("jump", 0.5, tracks, wrap="once")
+
+
+def ride():
+    """Seated in a saddle (loop): thighs forward and spread round a barrel, shins hanging back,
+    hands held low in front, a slow breath. A Rider (toyengine/scene/rider.h) puts the root on
+    the saddle and IK takes the feet to the stirrups and the hands to the reins; this is the pose
+    those blend from, and all a rig without IK gets."""
+    length, n, tau = 2.4, 8, 2 * math.pi
+    breathe = lambda p: math.sin(tau * p)
+    tracks = [
+        pos_track("pelvis", "z", cycle(length, n, lambda p: 0.95 - 0.004 * (1 - breathe(p)))),
+        rot_track("spine", cycle(length, n, lambda p: (-4, 0, 0))),
+        rot_track("chest", cycle(length, n, lambda p: (-1.5 * breathe(p), 0, 0)), "ease_in_out"),
+        rot_track("head", cycle(length, n, lambda p: (4 + 1.0 * breathe(p), 0, 0)), "ease_in_out"),
+    ]
+    for side in "lr":
+        sgn = 1 if side == "l" else -1
+        tracks.append(rot_track(f"thigh_{side}", cycle(length, n, lambda p, g=sgn: (70, g * 28, 0))))
+        tracks.append(rot_track(f"shin_{side}", cycle(length, n, lambda p: (-80, 0, 0))))
+        tracks.append(rot_track(f"foot_{side}", cycle(length, n, lambda p: (12, 0, 0))))
+        tracks.append(rot_track(f"upper_arm_{side}", cycle(length, n, lambda p, g=sgn: (25 + breathe(p), g * 10, 0)), "ease_in_out"))
+        tracks.append(rot_track(f"lower_arm_{side}", cycle(length, n, lambda p: (55, 0, 0))))
+    write_clip("ride", length, tracks)
 
 
 
@@ -731,13 +756,14 @@ def main():
     gait("walk", 0.9, stride=26, knee=55, arm_swing=22, elbow=15, lean=3, bob=0.02, pelvis_z=0.94, travel=1.45)
     gait("run", 0.6, stride=44, knee=95, arm_swing=45, elbow=70, lean=12, bob=0.04, pelvis_z=0.9, travel=3.2)
     jump()
-    for clip in ("idle", "walk", "run", "jump"):
+    ride()
+    for clip in ("idle", "walk", "run", "jump", "ride"):
         bake_ik_clip(clip)
     write_object(IK_OBJECT_PATH, ik_components(),
                  "Fully IK: its clips key only the *_target / *_pole empties; IK poses every bone (see the generator).",
                  clip_dir="animations/mannequin_ik", extra_children=ik_target_children(), rig=ik_rig())
     print("wrote", OBJECT_PATH, "+", RAGDOLL_OBJECT_PATH, "+", IK_OBJECT_PATH, "+", len(PART_MESHES),
-          "meshes + 4 clips + 4 IK clips")
+          "meshes + 5 clips + 5 IK clips")
 
 
 if __name__ == "__main__":

@@ -77,6 +77,23 @@ COOPA_TEST(record_keys_scrub_events_and_play) {
     expect(std::abs(glm::degrees(2.0f * std::atan2(std::abs(q.z), q.w)) - 45.0f) < 0.5f, "...and the rotation (45 deg)");
     dump(engine, "17_timeline");
 
+    // Space plays / pauses while the Timeline is open, even with the mouse over the viewport.
+    auto& in = session.in;
+    app.set_animation_time(0.0f);
+    in.move(glm::vec2(app.viewport_box().center()));
+    tick(engine, 1);
+    in.key(coopa::input::Key::Space);
+    tick(engine, 10);
+    const float played_x = live_bone()->get_transform()->transform().position().x;
+    expect(played_x > 1e-3f, "Space over the viewport plays the clip (Bone x = " + std::to_string(played_x) + ")");
+    in.key(coopa::input::Key::Space);
+    tick(engine, 1);
+    const float paused_x = live_bone()->get_transform()->transform().position().x;
+    tick(engine, 10);
+    expect(live_bone()->get_transform()->transform().position().x == paused_x, "...and Space again pauses it");
+    app.set_animation_time(0.5f);
+    tick(engine, 2);
+
     // Ctrl+Z (recording): the last keys go -- the move's auto-key and then I's -- from the file too.
     app.undo();
     app.undo();

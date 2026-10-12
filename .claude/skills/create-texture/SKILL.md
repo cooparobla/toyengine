@@ -42,8 +42,8 @@ warning; fix it with `texture_color_space: { textures/x.png: linear }`.
 2. **Python environment**: system `python3` has no numpy/Pillow. Either write PNGs with the
    standard library (zlib + struct, as `gen_prototype_grid.py` does) or create a scratch venv:
    ```sh
-   python3 -m venv "$TMPDIR/texvenv" && "$TMPDIR/texvenv/bin/pip" install numpy pillow
-   "$TMPDIR/texvenv/bin/python" tools/gen_<name>.py
+   python3 -m venv "${TMPDIR:-/tmp}/texvenv" && "${TMPDIR:-/tmp}/texvenv/bin/pip" install numpy pillow
+   "${TMPDIR:-/tmp}/texvenv/bin/python" tools/gen_<name>.py
    ```
    Never install packages into the system python.
 3. **Make the set consistent**: derive normal and roughness from the same height/mask field as

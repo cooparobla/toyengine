@@ -173,8 +173,8 @@ chest use `match_target_rotation`. FootIK on such a rig switches to `targets` mo
 Animation needs time: render at several frame counts and compare.
 
 ```sh
-FRAMES=30  .claude/skills/create-scene/scripts/render_scene.sh <scene> "$TMPDIR/anim_a.png"
-FRAMES=75  .claude/skills/create-scene/scripts/render_scene.sh <scene> "$TMPDIR/anim_b.png"
+FRAMES=30  .claude/skills/create-scene/scripts/render_scene.sh <scene> "${TMPDIR:-/tmp}/anim_a.png"
+FRAMES=75  .claude/skills/create-scene/scripts/render_scene.sh <scene> "${TMPDIR:-/tmp}/anim_b.png"
 ./build/toyengine_tests caml_roundtrips_every_asset
 ```
 

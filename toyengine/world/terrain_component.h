@@ -20,7 +20,7 @@
  *   tiles: terrain/terrain.tiles               # the stored tiles (default terrain/<object>.tiles)
  *   kind_tile_sets: { stone: objects/terrain/tileset_rock }   # optional, per surface kind
  *   generator: { seed: 7, sea_level: 0.3 }    # mapcoopa keys; the rest is mapcoopa's standard map
- *   tiles_per_grid_unit: 4
+ *   world_tiles: 512                          # the map rasterised to 512 x 512 tiles (0: cells x tiles_per_grid_unit)
  *   height_scale: 16.0
  *   water: { clarity: 2.0, foam_amount: 0.8 } # WaterBody keys for the sea, lakes and rivers
  *   chunk_size: 32
@@ -58,6 +58,7 @@
 
 #include <toyengine/world/terrain_chunk.h>
 #include <toyengine/world/tile_map_data.h>
+#include <toyengine/world/terrain_generator.h>
 #include <toyengine/water/water_body.h>
 
 namespace toy {
@@ -152,12 +153,13 @@ public:
      * @brief The mapcoopa settings a bake generates the world with -- AUTHORED values (see
      *        coopa::maps::derived_config(), applied at bake time).
      *
-     * Starts as coopa::maps::standard_config(), the map a bare `mapcoopa` run makes, and the
+     * Starts as default_generator() -- the map a bare `mapcoopa` run makes, in mapcoopa's natural
+     * terrain model -- and the
      * scene's `generator:` block holds mapcoopa's own config keys for whatever differs
      * (map_yaml.h's names; older scenes' flat keys -- `seed`, `shape`, `sea_level`... -- still
      * load into it). Only a bake reads it: the tiles are the world from then on.
      */
-    coopa::maps::MapConfig generator = coopa::maps::standard_config();
+    coopa::maps::MapConfig generator = default_generator();
 
     // --- The tile set: the template every column is built from (see tile_topology.h) ---
 

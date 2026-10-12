@@ -100,7 +100,7 @@ heightmap, splats, layer textures and nature meshes.
 ## Verify
 
 ```sh
-FRAMES=120 .claude/skills/create-scene/scripts/render_scene.sh <scene> "$TMPDIR/t.png"
-FRAMES=120 .claude/skills/create-scene/scripts/render_scene.sh <scene> "$TMPDIR/t_snow.png" snow_cover_override=1.0
+FRAMES=120 .claude/skills/create-scene/scripts/render_scene.sh <scene> "${TMPDIR:-/tmp}/t.png"
+FRAMES=120 .claude/skills/create-scene/scripts/render_scene.sh <scene> "${TMPDIR:-/tmp}/t_snow.png" snow_cover_override=1.0
 ./build/tests/toyengine_tests --suite heightmap_terrain_render
 ```

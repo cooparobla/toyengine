@@ -28,14 +28,21 @@ inline constexpr std::array<const char*, 11> k_legacy_generator_keys = {
     "continent_count", "continent_size_m", "irregularity", "coast_detail", "temperature_offset"};
 
 /**
- * @brief The authored generator settings a TileTerrain component node describes: mapcoopa's
- *        standard map, then any legacy flat keys, then the `generator:` block.
+ * @brief A TileTerrain's starting point: mapcoopa's standard map, in its natural terrain model
+ *        (smooth ground with mountain ranges, hills and plateaus) rather than its flat-faceted
+ *        classic one -- the one difference from what a bare `mapcoopa` run makes.
+ */
+coopa::maps::MapConfig default_generator();
+
+/**
+ * @brief The authored generator settings a TileTerrain component node describes: the default
+ *        (default_generator()), then any legacy flat keys, then the `generator:` block.
  */
 coopa::maps::MapConfig generator_config_from_node(const fkyaml::node& component);
 
 /**
  * @brief The `generator:` block for `authored`: only the keys whose values differ from the
- *        standard map (nested blocks likewise), or an empty mapping when nothing does.
+ *        default (nested blocks likewise), or an empty mapping when nothing does.
  */
 fkyaml::node generator_node(const coopa::maps::MapConfig& authored);
 

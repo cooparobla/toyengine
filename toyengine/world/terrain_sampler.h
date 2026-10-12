@@ -23,7 +23,7 @@
  * is `const`, so any number of chunk-meshing jobs may sample concurrently -- which is the whole
  * point, since sampling is most of what a chunk job does.
  *
- * The class is neither copyable nor movable: `detail_` borrows a pointer into `noise_`, and
+ * The class is neither copyable nor movable: `detail_` borrows from `surface_`, and
  * `channels_` indexes `graph_`, so relocating the object would leave both dangling. Same
  * reasoning as toy::core::Engine's own deleted copy/move.
  */
@@ -73,6 +73,21 @@ struct TerrainParams {
      * displacement `MapConfig::terrain_roughness` already carries.
      */
     std::int32_t tiles_per_grid_unit = 4;
+
+    /**
+     * @brief The world's size in tiles per side -- how many tiles the map is rasterised into,
+     *        whatever its cell count. 0 derives it: `grid_size * tiles_per_grid_unit`.
+     *
+     * Set, it wins over `tiles_per_grid_unit`: the map is sampled at `world_tiles / grid_size`
+     * tiles per cell (fractional is fine), so the world's size and the map's detail are chosen
+     * separately. The world spans `world_tiles * tile_size` world units.
+     */
+    std::int32_t world_tiles = 0;
+
+    /** @brief Tiles per side for a map of `grid_size` cells. */
+    std::int32_t tiles_for_grid(std::int32_t grid_size) const {
+        return world_tiles > 0 ? world_tiles : grid_size * tiles_per_grid_unit;
+    }
 
     /** @brief Horizontal size of one tile, in world units. */
     float tile_size = 1.0f;
@@ -178,8 +193,9 @@ public:
 
         // One sampler per Noise, held by unique_ptr so the address detail_ borrows survives (a
         // Noise wraps a FastNoiseLite and is not cheap to build -- see coopa::maps::Noise).
-        noise_   = std::make_unique<coopa::maps::Noise>(config_.noise_terrain);
-        detail_  = coopa::maps::make_terrain_detail(config_, *noise_);
+        // The ground every query samples -- classic or natural terrain, as the config says.
+        surface_ = std::make_unique<coopa::maps::TerrainSurface>(graph_, config_);
+        detail_  = surface_->detail();
         // Cut last, and indexed per cell, so a river bed survives the fractal displacement
         // rather than being filled back in by it -- see MapGraph::elevation_at()'s doc.
         channels_ = coopa::maps::make_river_channels(graph_, config_, detail_);
@@ -205,7 +221,7 @@ public:
 
     /** @brief Tiles along one axis of the whole world; tile indices span `[0, tiles_per_axis())`. */
     std::int32_t tiles_per_axis() const {
-        return config_.grid_size * params_.tiles_per_grid_unit;
+        return params_.tiles_for_grid(config_.grid_size);
     }
 
     /** @brief The height of the waterline, in tile steps -- the top of every water column. */
@@ -260,7 +276,7 @@ public:
 
     /** @brief mapcoopa's water at a tile's centre -- the continuous answer the bake rounds. */
     coopa::maps::WaterSample water_at(std::int32_t tile_x, std::int32_t tile_y) const {
-        const double per_unit = static_cast<double>(params_.tiles_per_grid_unit);
+        const double per_unit = tiles_per_cell_();
         const double gx = (static_cast<double>(tile_x) + 0.5) / per_unit;
         const double gy = (static_cast<double>(tile_y) + 0.5) / per_unit;
         return water_->at(cell_at(gx, gy), gx, gy, k_river_min_half_tiles / per_unit);
@@ -283,7 +299,7 @@ public:
         TileRecord r;
         if (!built_) return r;
 
-        const double per_unit = static_cast<double>(params_.tiles_per_grid_unit);
+        const double per_unit = tiles_per_cell_();
         const double gx = (static_cast<double>(tile_x) + 0.5) / per_unit;
         const double gy = (static_cast<double>(tile_y) + 0.5) / per_unit;
         const coopa::maps::MapCenter& cell = cell_at(gx, gy);
@@ -418,6 +434,11 @@ public:
     }
 
 private:
+    /** @brief Tiles per map cell, as sampled: the world's tiles over the map's cells. */
+    double tiles_per_cell_() const {
+        return static_cast<double>(tiles_per_axis()) / static_cast<double>(std::max(1, config_.grid_size));
+    }
+
     /** @brief Half-width rivers are sampled at, at the least, in tiles: a 4-connected run of tiles. */
     static constexpr double k_river_min_half_tiles = 0.75;
 
@@ -513,8 +534,8 @@ private:
     coopa::maps::MapGraph   graph_;
     TerrainParams           params_;
 
-    std::unique_ptr<coopa::maps::Noise> noise_;    /**< Borrowed by detail_; hence the unique_ptr. */
-    coopa::maps::TerrainDetail          detail_;   /**< Fractal displacement over the control mesh. */
+    std::unique_ptr<coopa::maps::TerrainSurface> surface_; /**< Borrowed by detail_; hence the unique_ptr. */
+    coopa::maps::TerrainDetail          detail_;   /**< How the ground is shaped over the control mesh. */
     coopa::maps::RiverChannels          channels_; /**< River beds cut after the displacement. */
     std::unique_ptr<coopa::maps::WaterField> water_; /**< Borrows graph_, detail_, channels_. */
 

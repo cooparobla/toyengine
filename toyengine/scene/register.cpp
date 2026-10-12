@@ -503,6 +503,7 @@ void register_scene_components(coopa::gfx::core::Device& device,
             terrain->generator = world::generator_config_from_node(node);
 
             // --- How it is tiled ---
+            if (node.contains("world_tiles")) params.world_tiles = node.at("world_tiles").get_value<std::int32_t>();
             if (node.contains("tiles_per_grid_unit")) {
                 params.tiles_per_grid_unit = node.at("tiles_per_grid_unit").get_value<std::int32_t>();
             }

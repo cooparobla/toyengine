@@ -37,10 +37,16 @@ for t in $tests; do
     [ $ok = 1 ] && echo "$t: ok" || failed+=("$t")
 done
 
-# PNG -> JPEG (quality 85) so the repo stays small; sips ships with macOS.
+# PNG -> JPEG (quality 85) so the repo stays small; sips on macOS, ImageMagick elsewhere.
+to_jpeg() {
+    if command -v sips >/dev/null; then sips -s format jpeg -s formatOptions 85 "$1" --out "$2" >/dev/null
+    elif command -v magick >/dev/null; then magick "$1" -quality 85 "$2"
+    else convert "$1" -quality 85 "$2"
+    fi
+}
 for png in "$RAW"/*.png; do
     [ -e "$png" ] || continue
-    sips -s format jpeg -s formatOptions 85 "$png" --out "$OUT/$(basename "${png%.png}").jpg" >/dev/null
+    to_jpeg "$png" "$OUT/$(basename "${png%.png}").jpg"
 done
 
 echo "screenshots in ${OUT#$REPO/}/"

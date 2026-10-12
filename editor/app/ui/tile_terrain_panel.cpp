@@ -315,13 +315,14 @@ EditResult EditorApp::draw_tile_terrain_panel_(imm::Context& ctx, ObjectId id, N
                                              [&](const char* k) { return comp.contains(k); });
         const bool standard = toy::world::generator_node(gen).get_value<Node::mapping_type>().empty();
         std::snprintf(buf, sizeof(buf), "%s: seed %d, %s, %d map cells, sea level %.2f, %d rivers",
-                      standard ? "mapcoopa's standard map" : "Custom map", gen.seed,
+                      standard ? "Default map (natural terrain)" : "Custom map", gen.seed,
                       std::string(coopa::maps::map_shape_name(gen.shape.shape)).c_str(), gen.grid_size, gen.sea_level,
                       gen.river_count);
         ctx.label(buf, &dim);
-        const float tiles = static_cast<float>(gen.grid_size) * num_of(comp, "tiles_per_grid_unit", 4.0f);
-        std::snprintf(buf, sizeof(buf), "Makes %.0f x %.0f tiles, %.0f m from sea floor to peak", tiles, tiles,
-                      num_of(comp, "height_scale", 16.0f));
+        const float world_tiles = num_of(comp, "world_tiles", 0.0f);
+        const float tiles = world_tiles > 0.0f ? world_tiles : static_cast<float>(gen.grid_size) * num_of(comp, "tiles_per_grid_unit", 4.0f);
+        std::snprintf(buf, sizeof(buf), "Makes %.0f x %.0f tiles (%.0f m square), %.0f m from sea floor to peak", tiles, tiles,
+                      tiles * num_of(comp, "tile_size", 1.0f), num_of(comp, "height_scale", 16.0f));
         ctx.label(buf, &dim);
         if (legacy_keys) ctx.label("Uses the old flat generator keys; the World Generator moves them into its block.", &dim);
         if (ctx.button("Open World Generator...", -1, !playing(), I::World)) open_world_generator(id);
@@ -335,7 +336,7 @@ EditResult EditorApp::draw_tile_terrain_panel_(imm::Context& ctx, ObjectId id, N
         ctx.tooltip("Regenerate World\nReplace every tile with a fresh world from the current settings (edits included); "
                     "undoable");
     }
-    mark({"generator", "tiles_per_grid_unit", "height_scale", "water"});
+    mark({"generator", "height_scale", "water"});
 
     // --- Water -------------------------------------------------------------------------------
     if (section("Water", I::World,
@@ -348,6 +349,11 @@ EditResult EditorApp::draw_tile_terrain_panel_(imm::Context& ctx, ObjectId id, N
 
     // --- Size & Terraces ---------------------------------------------------------------------
     if (section("Size & Terraces", I::Scale, "How big each tile and step is in the world, and how cliffs are drawn.", true)) {
+        fields({tfield("world_tiles", "World Size (tiles)")});
+        ctx.tooltip("World Size\nTiles per side the generated map is cut into (0: Map Cells x Tiles per Cell). Applies when "
+                    "the world is generated (World Generator / Regenerate World)");
+        if (num_of(comp, "world_tiles", 0.0f) <= 0.0f) fields({tfield("tiles_per_grid_unit", "Tiles per Cell")});
+        mark({"tiles_per_grid_unit"});
         fields({tfield("tile_size", "Tile Size (m)"), tfield("height_step", "Step Height (m)")});
         if (TerrainComponent* live = live_tile_terrain_(id); live && live->tiles && !live->tiles->empty()) {
             const float metres = static_cast<float>(live->tiles->width()) * num_of(comp, "tile_size", 1.0f);

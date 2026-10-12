@@ -137,11 +137,19 @@ or archipelago with rivers and biomes, and from then on you edit it tile by tile
 **Open World Generator...** (in the panel, or Tile Mode's **Generate** section) opens a window
 with every setting of the map generator (mapcoopa), by category on the left:
 
-- **World**: **Seed** (or **New Random Seed**), **Map Cells**, and the terrain's own **Tiles per
-  Cell** and **Height Range**, with the size they make.
+- **World**: **Seed** (or **New Random Seed**), **Map Cells** (the map's detail), and the
+  terrain's own size: **World Size** (how many tiles per side the map is cut into, whatever its
+  cell count), **Tile Size** and **Height Range**, with the world's extent in metres. **World
+  Size** is also in the panel's **Size & Terraces** section; it applies when the world is
+  generated, and undo restores the old size.
 - **Shape**: rectangle, circle, triangle, one continent or many islands, their size, outline
   and coast.
 - **Elevation**: sea level, relief, roughness and smoothing.
+- **Landforms**: the **Terrain** model. **Natural** (the default) joins the map smoothly and shapes
+  it into ridged mountain ranges, rolling hills and flat-topped plateaus, bent so nothing lines up:
+  how high, how frequent, where the ranges start, how far they wind. **Classic** is mapcoopa's
+  plain map: flat facets between its cells, which turn into rows of straight terraces on a large
+  world. Near the sea and lakes the landforms only raise the ground, so the water stays put.
 - **Climate**: warmth, how height cools the air, and the frozen north and south.
 - **Water & Rivers**: rivers, their width and depth, valleys, lake depth, and how far the sea,
   lakes and rivers sit under their banks (also in the panel's **Water** section, applied at once).
@@ -151,8 +159,8 @@ with every setting of the map generator (mapcoopa), by category on the left:
 The right side previews the map those settings make, and updates as you change them (**Show**
 switches between the map, biomes, elevation and water). **Generate World** writes the settings
 to the terrain and re-generates its tiles; undo takes back the tiles, then the settings. **Reset
-to mapcoopa Defaults** returns to the standard map, the one the mapcoopa tool makes on its own,
-which is also what a new Tile Terrain starts as.
+to Defaults** returns to what a new Tile Terrain starts as: the standard map the mapcoopa tool makes
+on its own, in the natural terrain model.
 
 ### Water
 

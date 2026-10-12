@@ -192,7 +192,17 @@ git submodule update --init --recursive
 
 ### 2. Build the engine, editor and hub
 
-**Linux.** You need the Vulkan SDK (with `glslc`), GLFW, CMake and a C++20 compiler.
+**Linux.** You need the Vulkan loader and headers, `glslc`, GLFW, OpenSSL, CMake and a C++20
+compiler. On Debian/Ubuntu:
+
+```bash
+sudo apt install cmake g++ pkg-config libvulkan-dev glslc libglfw3-dev libssl-dev libzstd-dev \
+    vulkan-validationlayers   # optional, for debug builds
+```
+
+zstd is downloaded if missing. The first configure needs network access (meshoptimizer, SMAA).
+If `glslc` isn't found, configure only warns and the build has no shaders, so check for
+`GLSLC` in the configure output.
 
 **macOS (Apple Silicon).** Run `tools/setup_macos.sh` once. It installs MoltenVK, the Vulkan
 loader, validation layers, `glslc` and GLFW through Homebrew.

@@ -55,8 +55,8 @@ LightFlicker (sibling of a PointLight): `amount`, `speed`, `wobble`, `color_shif
 Particles need simulated time; compare two moments and a close camera:
 
 ```sh
-FRAMES=60  .claude/skills/create-scene/scripts/render_scene.sh <scene> "$TMPDIR/fx_a.png"
-FRAMES=150 .claude/skills/create-scene/scripts/render_scene.sh <scene> "$TMPDIR/fx_b.png"
+FRAMES=60  .claude/skills/create-scene/scripts/render_scene.sh <scene> "${TMPDIR:-/tmp}/fx_a.png"
+FRAMES=150 .claude/skills/create-scene/scripts/render_scene.sh <scene> "${TMPDIR:-/tmp}/fx_b.png"
 ./build/toyengine_tests caml_roundtrips_every_asset
 ./build/toyengine_tests --group particles
 ```

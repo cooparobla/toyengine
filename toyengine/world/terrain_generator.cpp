@@ -33,8 +33,14 @@ fkyaml::node difference(const fkyaml::node& node, const fkyaml::node& base) {
 
 } // namespace
 
-coopa::maps::MapConfig generator_config_from_node(const fkyaml::node& component) {
+coopa::maps::MapConfig default_generator() {
     coopa::maps::MapConfig config = coopa::maps::standard_config();
+    config.terrain_model = coopa::maps::TerrainModel::Natural;
+    return config;
+}
+
+coopa::maps::MapConfig generator_config_from_node(const fkyaml::node& component) {
+    coopa::maps::MapConfig config = default_generator();
     if (!component.is_mapping()) return config;
     // The flat keys of older scenes, read as mapcoopa reads its own.
     fkyaml::node legacy = fkyaml::node::mapping();
@@ -58,7 +64,7 @@ coopa::maps::MapConfig generator_config_from_node(const fkyaml::node& component)
 }
 
 fkyaml::node generator_node(const coopa::maps::MapConfig& authored) {
-    return difference(coopa::maps::config_to_node(authored), coopa::maps::config_to_node(coopa::maps::standard_config()));
+    return difference(coopa::maps::config_to_node(authored), coopa::maps::config_to_node(default_generator()));
 }
 
 } // namespace world

@@ -61,6 +61,8 @@ COOPA_TEST(world_generator_previews_generates_and_undoes) {
     const std::uint64_t previews = app.world_generator_preview_serial();
     app.world_generator_config().seed = 77;
     app.world_generator_config().sea_level = 0.35;
+    expect(app.world_generator_world_tiles() == 48, "the world size starts as the terrain's (24 cells x 2 tiles)");
+    app.world_generator_world_tiles() = 60;   // any size, whatever the cell count
     for (int i = 0; i < 600 && app.world_generator_preview_serial() == previews; ++i) tick(engine, 1);
     expect(app.world_generator_preview_serial() > previews, "editing a setting previews again");
     dump(engine, "world_generator");
@@ -81,10 +83,12 @@ COOPA_TEST(world_generator_previews_generates_and_undoes) {
     t = live();
     expect(t != nullptr && t->generator.seed == 77 && t->generator.sea_level == 0.35, "the live terrain has them");
     expect(tiles->bakes_done() > bakes && tiles->records() != before, "the tiles are re-baked from them");
+    expect(get_int(comp, "world_tiles", 0) == 60 && tiles->width() == 60 && tiles->height() == 60,
+           "...at the chosen world size: 60 x 60 tiles from 24 map cells (" + std::to_string(tiles->width()) + ")");
 
     app.undo();
     tick(engine, 3);
-    expect(tiles->records() == before, "undo restores the tiles");
+    expect(tiles->records() == before && tiles->width() == 48, "undo restores the tiles, size and all");
     app.undo();
     tick(engine, 3);
     const Node restored = component();

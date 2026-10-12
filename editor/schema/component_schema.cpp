@@ -811,7 +811,9 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                          "wall. tileset_voxel: square blocks"),
                 with_tip(f_string("tiles", ""), "The stored tiles' file (scene-relative); empty: terrain/<object>.tiles. "
                                                 "Baked from the generator settings (World Generator) when it does not exist"),
-                with_tip(f_int("tiles_per_grid_unit", 4, 1, 64), "Tiles across one map cell: finer coastlines and rivers, at a squared cost"),
+                with_tip(f_int("world_tiles", 0, 0, 16384), "The world's size in tiles per side: how many tiles the generated map is "
+                                                            "cut into. 0: Map Cells x Tiles per Cell. Applies when the world is generated"),
+                with_tip(f_int("tiles_per_grid_unit", 4, 1, 64), "Tiles across one map cell (when World Size is 0): finer coastlines and rivers, at a squared cost"),
                 with_tip(f_float("tile_size", 1.0f, 0.01f, 0.01f, 100.0f), "Width of one tile (m)"),
                 with_tip(f_float("height_step", 1.0f, 0.005f, 0.01f, 100.0f), "Height of one terrace step (m); equal to Tile Size keeps pieces cubic"),
                 with_tip(f_float("height_scale", 16.0f, 0.05f, 0.0f, 1000.0f), "Height from sea floor to the highest peak (m)"),

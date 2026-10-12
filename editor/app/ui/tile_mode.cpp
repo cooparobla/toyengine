@@ -114,7 +114,19 @@ void EditorApp::tile_frame_() {
         if (data->width() == tile_regen_w_ && data->height() == tile_regen_h_) {
             tile_push_undo_("Regenerate World", data, tile_regen_before_, IRect{0, 0, data->width(), data->height()});
         } else {
-            log_warn("Regenerate World changed the world's size: it cannot be undone");
+            // The world changed size: the step holds the whole grid either side, with its size.
+            TilePatch before;
+            before.data = data;
+            before.uid = data->uid();
+            before.width = tile_regen_w_;
+            before.height = tile_regen_h_;
+            before.rect = IRect{0, 0, tile_regen_w_, tile_regen_h_};
+            before.records = std::move(tile_regen_before_);
+            TilePatch after = capture_tile_patch(data, IRect{0, 0, data->width(), data->height()});
+            after.width = data->width();
+            after.height = data->height();
+            tile_undo_.set_budget(256u << 20, [](const TilePatch& p) { return p.bytes(); }, 4);
+            tile_undo_.push("Regenerate World", std::move(before), std::move(after));
         }
         tile_regen_before_.clear();
         log_info("World regenerated");

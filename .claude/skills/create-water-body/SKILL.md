@@ -80,7 +80,7 @@ Float height follows mass / (1000 x volume): too heavy sinks, too light bobs hig
 
 ```sh
 .claude/skills/create-scene/scripts/render_scene.sh <scene>
-FRAMES=300 .claude/skills/create-scene/scripts/render_scene.sh <scene> "$TMPDIR/water_late.png"   # floaters settled
+FRAMES=300 .claude/skills/create-scene/scripts/render_scene.sh <scene> "${TMPDIR:-/tmp}/water_late.png"   # floaters settled
 ./build/toyengine_tests caml_roundtrips_every_asset
 ./build/toyengine_tests --group water
 ```

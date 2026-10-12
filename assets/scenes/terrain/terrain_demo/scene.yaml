@@ -19,6 +19,7 @@ scene:
         - type: TileTerrain
           chunk_size: 32
           collision: true
+          height_scale: 16.0
           height_step: 1.0
           kind_tile_sets:
             ash: objects/terrain/tileset_soft
@@ -36,11 +37,14 @@ scene:
             texture_metallic_roughness: textures/terrain_atlas_mr.png
           max_chunk_jobs_per_frame: 4
           max_wall_steps: 8
+          river_inset: 0.2
           soil_depth_steps: 1
           tile_set: objects/terrain/tileset_soft
           tile_size: 1.0
           tiles_per_grid_unit: 4
-          view_radius: 2
+          view_radius: 10
+          water_inset: 0.5
+          world_tiles: 320
       children: []
     - name: focus_marker
       active: true
@@ -116,7 +120,7 @@ scene:
           material: wood
           size: { x: 1.0, y: 1.0, z: 1.0 }
         - { type: Rigidbody, mass: 4.0e+01 }
-        - type: Buoyancy
+        - { type: Buoyancy }
       children: []
     - name: camera
       active: true

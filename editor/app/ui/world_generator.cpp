@@ -27,8 +27,11 @@ double wgen_now() {
 }
 
 const char* const k_categories[] = {"World", "Shape", "Elevation", "Climate", "Water & Rivers", "Settlements",
-                                    "Advanced"};
+                                    "Advanced", "Landforms"};
 constexpr int k_category_count = static_cast<int>(sizeof(k_categories) / sizeof(k_categories[0]));
+/// The list's order: Landforms (appended, so the row table's indices stay put) after Elevation.
+constexpr int k_category_order[] = {0, 1, 2, 7, 3, 4, 5, 6};
+constexpr int k_landforms = 7;
 
 /**
  * @brief One editable mapcoopa setting: a label, a range, a help line, and how to reach it.
@@ -115,6 +118,25 @@ const std::vector<Row>& rows() {
                  10.0, 300.0, meters_per_grid_unit),
         WGEN_ROW(6, "Height Range (map m)", "Metres mapcoopa's full height range stands for (sets what depths mean).", false,
                  50.0, 3000.0, elevation_range_m),
+        // Landforms (the natural terrain model)
+        WGEN_ROW(7, "Smoothing", "How smoothly the map's heights are joined: 0 flat facets, 1 fully rounded.", false, 0.0, 1.0,
+                 natural.smoothing),
+        WGEN_ROW(7, "Mountains", "Height of the ridged mountain ranges on the high ground.", false, 0.0, 0.6, natural.mountains),
+        WGEN_ROW(7, "Mountain Start", "How high the land must be before ranges rise (0 the shore, 1 the summit).", false, 0.0,
+                 1.0, natural.mountain_start),
+        WGEN_ROW(7, "Range Frequency", "How close together the ranges and their ridges are (at 40 cells).", false, 0.03, 0.6,
+                 noise_ridge.frequency),
+        WGEN_ROW(7, "Hills", "Height of the rolling hills over the lowland.", false, 0.0, 0.15, natural.hills),
+        WGEN_ROW(7, "Hill Frequency", "How close together the hills are (at 40 cells).", false, 0.05, 1.0,
+                 noise_hills.frequency),
+        WGEN_ROW(7, "Plateaus", "How high flat-topped plateaus stand over the land around them.", false, 0.0, 0.25,
+                 natural.plateaus),
+        WGEN_ROW(7, "Plateau Coverage", "Share of the lowland raised into plateaus.", false, 0.0, 1.0,
+                 natural.plateau_coverage),
+        WGEN_ROW(7, "Plateau Frequency", "How large the plateaus are: lower is broader (at 40 cells).", false, 0.02, 0.4,
+                 noise_plateau.frequency),
+        WGEN_ROW(7, "Warp", "How far the landforms are bent, in cells: winding ridges and valleys.", false, 0.0, 4.0,
+                 natural.warp),
     };
     return table;
 }
@@ -175,7 +197,11 @@ void EditorApp::open_world_generator(ObjectId id) {
     wgen_object_ = id;
     wgen_config_ = toy::world::generator_config_from_node(comp);
     const toy::world::TerrainParams defaults;
-    wgen_tiles_per_cell_ = get_int(comp, "tiles_per_grid_unit", defaults.tiles_per_grid_unit);
+    wgen_world_tiles_ = get_int(comp, "world_tiles", 0);
+    if (wgen_world_tiles_ <= 0) {
+        wgen_world_tiles_ = wgen_config_.grid_size * get_int(comp, "tiles_per_grid_unit", defaults.tiles_per_grid_unit);
+    }
+    wgen_tile_size_ = get_float(comp, "tile_size", defaults.tile_size);
     wgen_height_scale_ = get_float(comp, "height_scale", defaults.height_scale);
     wgen_water_inset_ = get_float(comp, "water_inset", defaults.water_inset);
     wgen_river_inset_ = get_float(comp, "river_inset", defaults.river_inset);
@@ -223,7 +249,8 @@ void EditorApp::wgen_apply_() {
     const Node gen = toy::world::generator_node(wgen_config_);
     if (gen.get_value<Node::mapping_type>().empty()) erase_key(comp, "generator");
     else comp["generator"] = gen;
-    comp["tiles_per_grid_unit"] = Node(static_cast<int64_t>(wgen_tiles_per_cell_));
+    comp["world_tiles"] = Node(static_cast<int64_t>(wgen_world_tiles_));
+    comp["tile_size"] = make_float(wgen_tile_size_);
     comp["height_scale"] = make_float(wgen_height_scale_);
     comp["water_inset"] = make_float(wgen_water_inset_);
     comp["river_inset"] = make_float(wgen_river_inset_);
@@ -294,7 +321,7 @@ void EditorApp::draw_world_generator_modal_(imm::Context& ctx) {
 
     // Left: the categories.
     ctx.begin_region("wgen_categories", list, false, &ctx.style.panel_alt);
-    for (int i = 0; i < k_category_count; ++i) {
+    for (const int i : k_category_order) {
         if (ctx.selectable(k_categories[i], i == wgen_category_)) wgen_category_ = i;
         test_rects_[std::string("world_generator:") + k_categories[i]] = ctx.last_rect();
     }
@@ -345,8 +372,24 @@ void EditorApp::draw_world_generator_modal_(imm::Context& ctx) {
             if (ctx.slider_float("Rotation (deg)", &deg, 0.0f, 360.0f, "%.0f")) { c.shape.rotation = deg / 57.29577951308232; edited = true; }
         }
     }
+    const bool natural = c.terrain_model == coopa::maps::TerrainModel::Natural;
+    if (wgen_category_ == k_landforms) {
+        int model = natural ? 1 : 0;
+        if (ctx.combo("Terrain", &model, {"Classic", "Natural"})) {
+            c.terrain_model = model == 1 ? coopa::maps::TerrainModel::Natural : coopa::maps::TerrainModel::Classic;
+            edited = true;
+        }
+        ctx.tooltip("Terrain\nNatural: smooth ground shaped into mountain ranges, hills and plateaus. Classic: mapcoopa's "
+                    "flat facets between its cells -- plain, and angular on a large world");
+        ctx.paragraph(natural ? "The ground is joined smoothly between the map's cells, then shaped: ridged ranges on the "
+                                "high ground, rolling hills and flat-topped plateaus on the lowland, bent so nothing lines "
+                                "up. Near the sea and lakes it is only ever raised, so the water stays where mapcoopa put it."
+                              : "Classic terrain joins the map's cells with flat facets. Switch to Natural for landforms.",
+                      &dim);
+    }
     for (const Row& row : rows()) {
         if (row.category != wgen_category_) continue;
+        if (row.category == k_landforms && !natural) continue;
         if (row.integer) {
             int v = static_cast<int>(row.get(c));
             if (ctx.drag_int(row.label, &v, 0.1f, static_cast<int>(row.lo), static_cast<int>(row.hi))) {
@@ -366,19 +409,21 @@ void EditorApp::draw_world_generator_modal_(imm::Context& ctx) {
     if (wgen_category_ == 0) {
         ctx.spacing(6);
         ctx.label("The Terrain", &dim);
-        if (ctx.drag_int("Tiles per Cell", &wgen_tiles_per_cell_, 0.05f, 1, 16)) edited = true;
-        ctx.tooltip("Tiles per Cell\nHow many tiles wide one map cell is: the resolution the map is cut at");
+        if (ctx.drag_int("World Size (tiles)", &wgen_world_tiles_, 1.0f, 16, 8192)) edited = true;
+        ctx.tooltip("World Size\nHow many tiles per side the map is cut into -- the world's size, whatever the map's cell "
+                    "count (Map Cells sets its detail)");
+        test_rects_["world_generator:World Size (tiles)"] = ctx.last_rect();
+        ctx.drag_float("Tile Size (m)", &wgen_tile_size_, 0.01f, 0.05f, 100.0f);
+        ctx.tooltip("Tile Size\nWidth of one tile in world units; with World Size, the world's extent");
         if (ctx.drag_float("Height Range (m)", &wgen_height_scale_, 0.1f, 1.0f, 256.0f)) edited = true;
         ctx.tooltip("Height Range\nWorld height of the map's full height range, from sea floor to the highest peak");
-        const int tiles = c.grid_size * wgen_tiles_per_cell_;
+        const int tiles = wgen_world_tiles_;
         const double count = static_cast<double>(tiles) * tiles;
-        if (count >= 1.0e5) {
-            std::snprintf(buf, sizeof(buf), "Makes %d x %d tiles (%.1f million), heights up to %.0f m", tiles, tiles,
-                          count / 1.0e6, static_cast<double>(wgen_height_scale_));
-        } else {
-            std::snprintf(buf, sizeof(buf), "Makes %d x %d tiles, heights up to %.0f m", tiles, tiles,
-                          static_cast<double>(wgen_height_scale_));
-        }
+        const double metres = static_cast<double>(tiles) * wgen_tile_size_;
+        std::snprintf(buf, sizeof(buf), "World: %d x %d tiles = %.0f x %.0f m%s, heights up to %.0f m", tiles, tiles, metres,
+                      metres, count >= 1.0e6 ? " (over a million tiles)" : "", static_cast<double>(wgen_height_scale_));
+        ctx.label(buf, &dim);
+        std::snprintf(buf, sizeof(buf), "%.1f tiles per map cell", static_cast<double>(tiles) / std::max(1, c.grid_size));
         ctx.label(buf, &dim);
     }
     if (wgen_category_ == 4) {
@@ -430,17 +475,19 @@ void EditorApp::draw_world_generator_modal_(imm::Context& ctx) {
     } else {
         ctx.label(" ", &dim);
     }
-    if (ctx.button("Reset to mapcoopa Defaults", 220, true, I::Restart)) {
-        wgen_config_ = coopa::maps::standard_config();
+    if (ctx.button("Reset to Defaults", 180, true, I::Restart)) {
+        wgen_config_ = toy::world::default_generator();
         const toy::world::TerrainParams defaults;
-        wgen_tiles_per_cell_ = defaults.tiles_per_grid_unit;
+        wgen_world_tiles_ = wgen_config_.grid_size * defaults.tiles_per_grid_unit;
+        wgen_tile_size_ = defaults.tile_size;
         wgen_height_scale_ = defaults.height_scale;
         wgen_water_inset_ = defaults.water_inset;
         wgen_river_inset_ = defaults.river_inset;
         ++wgen_requested_;
         wgen_changed_at_ = 0.0;
     }
-    ctx.tooltip("Reset to mapcoopa Defaults\nThe standard map: exactly what the mapcoopa tool generates with no settings");
+    ctx.tooltip("Reset to Defaults\nThe standard map -- what the mapcoopa tool generates with no settings -- in the natural "
+                "terrain model");
     ctx.same_line();
     const bool can_generate = !playing() && !tile_regen_data_ && !(live && live->baking());
     if (ctx.button("Generate World", 170, can_generate, I::World) || (wgen_generate_ && can_generate)) {

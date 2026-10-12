@@ -17,6 +17,8 @@ public:
         wgen_changed_at_ = 0.0;
         return wgen_config_;
     }
+    /** @brief The world size being edited, in tiles per side. Test hook. */
+    int& world_generator_world_tiles() { return wgen_world_tiles_; }
     /** @brief The preview's serial: bumps each time a preview lands. Test hook. */
     std::uint64_t world_generator_preview_serial() const { return wgen_preview_landed_; }
     /** @brief Writes the settings to the terrain and re-bakes it, as the Generate World button does. */
@@ -44,7 +46,8 @@ private:
     bool wgen_close_ = false;             ///< close_world_generator(): close on the next draw.
     bool wgen_generate_ = false;          ///< world_generator_generate(): apply on the next draw.
     coopa::maps::MapConfig wgen_config_;  ///< Authored settings being edited.
-    int wgen_tiles_per_cell_ = 4;         ///< The terrain's own tiling, edited alongside.
+    int wgen_world_tiles_ = 320;          ///< The terrain's own size in tiles per side, edited alongside.
+    float wgen_tile_size_ = 1.0f;         ///< ...and its tiles' size in world units.
     float wgen_height_scale_ = 16.0f;
     float wgen_water_inset_ = 0.5f;
     float wgen_river_inset_ = 0.2f;

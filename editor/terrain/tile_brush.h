@@ -109,6 +109,9 @@ struct TilePatch {
     std::uint64_t uid = 0;           ///< The data it was taken from (skipped if the terrain was rebuilt).
     toy::world::IRect rect;
     std::vector<toy::world::TileRecord> records;
+    /// A whole-grid patch of this size (a Regenerate that changed the world's size): applying it
+    /// resizes the grid first. 0 for an ordinary rect patch.
+    int width = 0, height = 0;
     std::size_t bytes() const { return records.size() * sizeof(toy::world::TileRecord) + sizeof(TilePatch); }
 };
 

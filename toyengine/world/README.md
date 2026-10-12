@@ -131,8 +131,12 @@ A TileTerrain's tiles live in a `TileMapData` ([`tile_map_data.h`](tile_map_data
 
 **Baking.** With no `.tiles` file (or on a Regenerate) the terrain generates the mapcoopa map from
 its `generator:` settings -- mapcoopa's standard map (`coopa::maps::standard_config()`, what a bare
-`mapcoopa` run makes) with whatever the block changes, through `derived_config()` as the CLI does,
-so the seed moves the coastline -- cut at `tiles_per_grid_unit` and `height_scale`, and
+`mapcoopa` run makes) in mapcoopa's **natural terrain model** (`default_generator()`: smooth ground
+shaped into ridged mountain ranges, rolling hills and plateaus, instead of the classic model's flat
+facets between cells, which turn into rows of straight terraces on a large world) with whatever the
+block changes (`terrain_model: classic` brings the facets back), through `derived_config()` as the CLI does,
+so the seed moves the coastline -- cut into `world_tiles` tiles per side (0: `grid_size *
+tiles_per_grid_unit`; the world spans `world_tiles * tile_size` units) at `height_scale`, and
 `TerrainSampler::bake()` fills every record. After that the generator only matters to the next
 Regenerate; `tile_size`, `height_step`, `water_inset`, the tile sets, chunking and collision
 apply live. The editor's **World Generator** window edits the block with a live preview.

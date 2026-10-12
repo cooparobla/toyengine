@@ -238,6 +238,7 @@ TilePatch capture_tile_patch(const std::shared_ptr<TileMapData>& d, const IRect&
 bool apply_tile_patch(const TilePatch& patch) {
     auto d = patch.data.lock();
     if (!d || d->uid() != patch.uid || patch.rect.empty()) return false;
+    if (patch.width > 0 && (d->width() != patch.width || d->height() != patch.height)) d->resize(patch.width, patch.height);
     if (patch.rect.x1 > d->width() || patch.rect.y1 > d->height()) return false;
     d->restore(patch.rect, patch.records);
     return true;

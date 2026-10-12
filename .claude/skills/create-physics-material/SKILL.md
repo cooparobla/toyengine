@@ -61,8 +61,8 @@ Drop a dynamic object onto a surface using it in a scene and check behaviour ove
 `lane_*`/`slider_*` friction lanes) -- borrow that layout:
 
 ```sh
-FRAMES=60  .claude/skills/create-scene/scripts/render_scene.sh <scene> "$TMPDIR/phys_a.png"
-FRAMES=180 .claude/skills/create-scene/scripts/render_scene.sh <scene> "$TMPDIR/phys_b.png" debug_view=lines
+FRAMES=60  .claude/skills/create-scene/scripts/render_scene.sh <scene> "${TMPDIR:-/tmp}/phys_a.png"
+FRAMES=180 .claude/skills/create-scene/scripts/render_scene.sh <scene> "${TMPDIR:-/tmp}/phys_b.png" debug_view=lines
 ./build/toyengine_tests caml_roundtrips_every_asset
 ```
 

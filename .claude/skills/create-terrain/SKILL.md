@@ -38,12 +38,14 @@ copy from `assets/scenes/terrain/terrain_demo/scene.yaml`. Parser: `toyengine/sc
       tile_set: objects/terrain/tileset_round   # or tileset_voxel (blocks), tileset_soft, tileset_rock
       # tiles: terrain/terrain.tiles            # the stored tiles (default); baked when missing
       generator:                # mapcoopa's own config keys; omitted = its standard map
-        seed: 7                 # (what a bare `mapcoopa` run makes: 80 cells, continents)
+        seed: 7                 # (what a bare `mapcoopa` run makes: 80 cells, continents),
+                                # in the natural terrain model (terrain_model: classic for facets)
+        natural: { mountains: 0.45, hills: 0.05, plateaus: 0.07 }   # landforms, normalised height
         grid_size: 64
         sea_level: 0.28
         shape: { shape: circle, diameter_m: 0 }   # rectangle | circle | triangle | continent | archipelago
-      tiles_per_grid_unit: 4
-      tile_size: 1.0
+      world_tiles: 320          # the map rasterised to 320 x 320 tiles (0: grid_size x tiles_per_grid_unit)
+      tile_size: 1.0            # world size = world_tiles x tile_size
       height_step: 1.0          # = tile_size keeps the pieces cubic
       height_scale: 16.0
       water_inset: 0.5          # sea / lakes sit this many steps under the terrace they fill
@@ -60,7 +62,7 @@ copy from `assets/scenes/terrain/terrain_demo/scene.yaml`. Parser: `toyengine/sc
 Key groups: stored tiles (`tiles`); tile set (`tile_set`, `kind_tile_sets { <kind>: objects/terrain/tileset_x }` with
 kinds grass, dirt, stone, sand, snow, rock, ice, moss, clay, ash, salt -- unlisted kinds
 use `tile_set`); generation (`generator:` -- any mapcoopa config key, see
-`libs/mapcoopa/assets/config.yaml`; plus `tiles_per_grid_unit`, `height_scale` -- bake only; the
+`libs/mapcoopa/assets/config.yaml`; plus `world_tiles` / `tiles_per_grid_unit`, `height_scale` -- bake only; the
 old flat keys `seed`, `shape`, `sea_level`... still load); tiling (`tile_size`, `height_step`,
 `chunk_size`, `view_radius`, `max_wall_steps`, `soil_depth_steps`, `max_chunk_jobs_per_frame`);
 water (`water_inset`, `water:` WaterBody keys); collision (`collision`, `physics_material`); look

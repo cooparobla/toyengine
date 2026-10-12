@@ -209,6 +209,29 @@ COOPA_TEST(bake_stores_climate_water_and_rivers) {
     expect(temperatures.size() > 10 && biomes.size() > 3, "temperature and biome are stored per tile, and vary");
 }
 
+COOPA_TEST(world_size_is_chosen_apart_from_the_map) {
+    using namespace toy::world;
+    QuietLogger logger;
+    coopa::maps::MapConfig config;
+    config.seed = 7;
+    config.grid_size = 24;
+    coopa::maps::MapGenerator generator(config, logger);
+    generator.generate();
+    TerrainParams params = make_test_params(8);
+    params.tiles_per_grid_unit = 3;
+    params.world_tiles = 100;   // 4.17 tiles per cell: wins over tiles_per_grid_unit
+    TerrainSampler sampler;
+    sampler.build(config, std::move(generator.graph()), params);
+    TileMapData tiles;
+    sampler.bake(tiles);
+    expect(tiles.width() == 100 && tiles.height() == 100, "world_tiles sets the world's size in tiles");
+    int water = 0;
+    for (const TileRecord& r : tiles.records()) water += r.water() ? 1 : 0;
+    expect(water > 0 && water < 100 * 100, "...and the whole map is cut into it, land and sea");
+    expect(params.tiles_for_grid(24) == 100 && TerrainParams{}.tiles_for_grid(24) == 96,
+           "0 derives it from the cells: 24 x 4");
+}
+
 COOPA_TEST(a_v1_file_loads_as_ground_and_water) {
     // A v1 file: 12-byte records, a water tile standing at its surface with the bed below.
     TileMapData d;

@@ -123,7 +123,7 @@ IRect settle_water(TileMapData& tiles, const IRect& rect, const IRect& limit, st
     return changed;
 }
 
-void settle_water_rounding(TileMapData& tiles, const IRect& rect) {
+void settle_water_rounding(TileMapData& tiles, const IRect& rect, const PlanetLayout* planet) {
     const int w = tiles.width(), h = tiles.height();
     const int x0 = std::max(0, rect.x0), y0 = std::max(0, rect.y0);
     const int x1 = std::min(w, rect.x1), y1 = std::min(h, rect.y1);
@@ -143,8 +143,15 @@ void settle_water_rounding(TileMapData& tiles, const IRect& rect) {
             int bank = r.steps;
             for (int dy = -1; dy <= 1; ++dy) {
                 for (int dx = -1; dx <= 1; ++dx) {
-                    const int nx = x + dx, ny = y + dy;
-                    if ((dx == 0 && dy == 0) || nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+                    if (dx == 0 && dy == 0) continue;
+                    int nx = x + dx, ny = y + dy;
+                    if (planet != nullptr) {
+                        const glm::ivec2 t = planet->neighbour(x, y, dx, dy);   // across a face's edge too
+                        nx = t.x;
+                        ny = t.y;
+                    } else if (nx < 0 || ny < 0 || nx >= w || ny >= h) {
+                        continue;
+                    }
                     const TileRecord& o = tiles.at(nx, ny);
                     if (o.water()) bank = std::max(bank, o.water_level());
                 }

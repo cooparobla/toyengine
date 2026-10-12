@@ -13,6 +13,11 @@
 //   gfx_params        = base wave: amplitude, wavelength, direction (radians), steepness
 //   gfx_params_ext0   = foam colour rgb, foam amount           (forward pass only)
 //   gfx_params_ext1   = shore foam depth, edge fade depth, ripple strength, ripple scale
+//   (water_planet, compiled with WATER_LOCAL_FRAME: a local-frame body -- a planet's water. Its
+//    waves come from the world position through the three axis planes (triplanar) and lift the
+//    surface along its normal, so the many tilted pieces of a planet's sea meet without seams,
+//    and the per-pixel detail uses the world plane facing the surface most squarely. Without
+//    the define -- the "water" shader -- none of that code exists.)
 //   gfx_time.w        = the water clock (WaterSystem::render_time()) -- waves animate on it, NOT
 //                       gfx_time.x, so the drawn surface and buoyancy's CPU queries share a phase
 //   refraction thickness (pushed) = clarity: depth in m at which the water reads ~63% opaque.
@@ -75,6 +80,19 @@ vec3 water_noise_d(vec2 p) {
                 du * vec2(k1 + k3 * u.y, k2 + k3 * u.x));
 }
 
+#ifdef WATER_LOCAL_FRAME
+// The world plane the per-pixel detail runs in: the axis pair facing the surface normal most
+// squarely (0: yz, 1: xz, 2: xy).
+int water_frame_plane(vec3 n) {
+    vec3 a = abs(n);
+    return (a.x >= a.y && a.x >= a.z) ? 0 : (a.y >= a.z ? 1 : 2);
+}
+vec2 water_plane_coords(vec3 p, int plane) { return plane == 0 ? p.yz : (plane == 1 ? p.xz : p.xy); }
+vec3 water_plane_lift(vec2 d, int plane) {
+    return plane == 0 ? vec3(0.0, d) : (plane == 1 ? vec3(d.x, 0.0, d.y) : vec3(d, 0.0));
+}
+#endif
+
 // ---------------------------------------------------------------------------------------------
 // Vertex: waves, flow hand-off
 // ---------------------------------------------------------------------------------------------
@@ -85,6 +103,34 @@ void gfx_surface_vertex(inout GfxSurfaceVertex v) {
     float depth      = baked ? v.uv.x : 1000.0;
     float turbulence = baked ? v.uv.y : 0.0;
     vec3  flow_ws    = baked ? mat3(v.model) * v.tangent_os.xyz : vec3(0.0);
+
+#ifdef WATER_LOCAL_FRAME
+    {
+        // The waves of the world position, through the three axis planes blended by how
+        // squarely each faces the surface, lifting it along its normal only: a function of the
+        // world position alone, so every piece of a planet's sea moves a shared vertex alike.
+        vec3  n0    = normalize(v.normal_ws);
+        vec3  blend = n0 * n0;
+        blend /= max(blend.x + blend.y + blend.z, 1e-4);
+        float atten = water_depth_attenuation(depth, gfx_params.y);
+        float view  = distance(camera.camera_pos, v.position_ws);
+        float h = 0.0, crest = 0.0;
+        vec3  tilt = vec3(0.0);
+        for (int k = 0; k < 3; ++k) {
+            if (blend[k] < 0.02) continue;
+            WaterWave w = water_gerstner(gfx_params, water_plane_coords(v.position_ws, k), gfx_time.w, atten, view, gfx_tess_lod);
+            h     += blend[k] * w.displacement.z;
+            tilt  += blend[k] * water_plane_lift(w.normal.xy, k);
+            crest += blend[k] * w.crest;
+        }
+        v.position_ws += n0 * h;
+        v.normal_ws = normalize(n0 + tilt - n0 * dot(tilt, n0));
+        vec3 ref = abs(v.normal_ws.x) < 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
+        v.tangent_ws = normalize(ref - v.normal_ws * dot(ref, v.normal_ws));
+        v.custom = vec4(water_plane_coords(flow_ws, water_frame_plane(v.normal_ws)), turbulence, crest);
+        return;
+    }
+#endif
 
     // Tessellated, the waves the mesh is too coarse to hold at this distance are left out
     // (gfx_tess_lod; the fragment stage shades their slope back in) -- so the hand-over from the
@@ -165,7 +211,12 @@ void water_ripple_rings(vec2 pos, inout vec2 slope, inout float foam) {
 
 void gfx_surface_fragment(inout GfxTransparentSurface s) {
     float t     = gfx_time.w;
+#ifdef WATER_LOCAL_FRAME
+    int   plane = water_frame_plane(s.normal_ws);
+    vec2  pos   = water_plane_coords(s.position_ws, plane);
+#else
     vec2  pos   = s.position_ws.xy;
+#endif
     vec2  flow  = s.custom.xy;
     float turb  = s.custom.z;
     float crest = s.custom.w;
@@ -203,7 +254,9 @@ void gfx_surface_fragment(inout GfxTransparentSurface s) {
         }
         float strength = ripple_strength * (1.0 + turb * 1.5);
         slope *= strength * detail;
+#ifndef WATER_LOCAL_FRAME
         if (length(camera.camera_pos.xy - pos) <= ring_range) water_ripple_rings(pos, slope, ring_foam);
+#endif
     }
     // Tessellated draws (packed params in refraction_ior_flags.zw): the slope of the waves the
     // vertex stage left out of the mesh (water_wave_mesh_fade), per pixel.
@@ -211,9 +264,15 @@ void gfx_surface_fragment(inout GfxTransparentSurface s) {
     if (tess_bits.x != 0u) {
         vec2 tess_lod = vec2(max(unpackHalf2x16(tess_bits.x).x, 0.5) / max(camera.jitter_ndc.z, 1.0),
                              unpackHalf2x16(tess_bits.y).x);
+#ifndef WATER_LOCAL_FRAME
         slope += water_gerstner_residual_slope(gfx_params, pos, gfx_time.w, view_dist, tess_lod);
+#endif
     }
+#ifdef WATER_LOCAL_FRAME
+    s.normal_ws = normalize(s.normal_ws - water_plane_lift(slope, plane));
+#else
     s.normal_ws = normalize(s.normal_ws - vec3(slope, 0.0));
+#endif
     s.roughness = mix(max(s.roughness, 0.2), s.roughness, detail);
 
     // --- The underside, seen from below (water is two-sided; the backbone has already turned
@@ -225,7 +284,11 @@ void gfx_surface_fragment(inout GfxTransparentSurface s) {
     // Only from BELOW, though: seen from above, a back face is a steep crest folding over on
     // itself (tessellated water resolves those), which should read as more water, not as a dark
     // underside mirror.
+#ifdef WATER_LOCAL_FRAME
+    if (!gl_FrontFacing) {   // a planet's water has no world "below": its back faces are its underside
+#else
     if (!gl_FrontFacing && camera.camera_pos.z < s.position_ws.z) {
+#endif
         vec3  Vu     = normalize(camera.camera_pos - s.position_ws);
         float cos_v  = dot(Vu, s.normal_ws);
         float window = smoothstep(0.6, 0.72, cos_v);       // critical angle: cos = 0.66
@@ -263,7 +326,11 @@ void gfx_surface_fragment(inout GfxTransparentSurface s) {
     float ratio    = scene_z / min(view_pos.z, -1e-4);            // >= 1 when the scene is behind
     float ray_len  = length(view_pos.xyz) * max(ratio - 1.0, 0.0); // water traversed by the view ray
     vec3  V        = normalize(camera.camera_pos - s.position_ws);
+#ifdef WATER_LOCAL_FRAME
+    float depth    = ray_len * abs(dot(V, s.normal_ws));          // ~depth along the surface's up
+#else
     float depth    = ray_len * abs(V.z);                          // ~vertical water depth
+#endif
 
     // Shallow-to-deep: Beer-Lambert over the real depth, and opacity rising toward the
     // material's deep colour. `clarity` arrives in the (otherwise overwritten) thickness slot.

@@ -70,6 +70,11 @@ struct ChunkWaterData {
     std::vector<glm::vec3>     positions;
     std::vector<glm::vec2>     uvs;      /**< Flowing: `u` runs downstream (water_flow_bake.h). */
     std::vector<std::uint32_t> indices;
+    /// A planet chunk's water is given in its own frame (WaterBody::local_frame): `frame` maps it
+    /// to the chunk's space -- local Z out from the planet at the chunk's centre. Identity, and
+    /// unused, on a flat terrain.
+    glm::mat4                  frame{1.0f};
+    bool                       local_frame = false;
 
     bool empty() const { return indices.empty(); }
     void clear() { positions.clear(); uvs.clear(); indices.clear(); }

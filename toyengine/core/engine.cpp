@@ -1,4 +1,5 @@
 #include <toyengine/core/engine.h>
+#include <toyengine/world/terrain_component.h>
 
 #include <toyengine/audio/audio_system.h>
 #include <toyengine/render/toy_render_pipeline.h>
@@ -1454,6 +1455,7 @@ void Engine::sync_water_render_state_(coopa::scene::Scene& scene) {
             if ((info.underwater || near_surface) && info.body) {
                 state.underwater    = true;
                 state.surface_level = info.surface_height;
+                state.surface_up    = info.up;
                 state.fog_color     = info.body->underwater_color;
                 state.visibility    = info.body->underwater_visibility;
                 state.absorption    = info.body->underwater_absorption;
@@ -1462,6 +1464,16 @@ void Engine::sync_water_render_state_(coopa::scene::Scene& scene) {
         }
     }
     pipeline_->set_water_state(std::move(state));
+
+    // A planet terrain gives the sky and fog a planet to be evaluated on (render::PlanetFrameState).
+    std::optional<render::PlanetFrameState> planet;
+    for (const world::TerrainComponent* terrain : scene.get_components<world::TerrainComponent>()) {
+        if (!terrain->params.planet || !terrain->owner || !terrain->owner->get_transform()) continue;
+        planet = render::PlanetFrameState{glm::vec3(terrain->owner->get_transform()->get_world_matrix()[3]),
+                                          terrain->params.layout().radius()};
+        break;
+    }
+    pipeline_->set_planet(planet);
 }
 
 void Engine::update_fill_extent_() {
@@ -1683,9 +1695,13 @@ void Engine::drive_character_controllers_(coopa::scene::Scene& scene) {
     if (characters.empty() && mounts.empty() && riders.empty()) return;
 
     float yaw = 0.0f;
+    glm::vec3 basis_forward(0.0f);   // the camera's view, for characters in a gravity field
     if (auto* cam = coopa::gfx::engine::components::CameraComponent::main()) {
         const glm::mat4 world = glm::inverse(cam->get_view_matrix());
         glm::vec3 fwd = -glm::vec3(world[2]);            // cameras look down local -Z
+        // Looking (nearly) straight down a field's up, the screen's up is the way forward; the
+        // character lays this onto its own ground plane, which takes the view along otherwise.
+        basis_forward = fwd + glm::vec3(world[1]) * 0.25f;
         if (std::abs(fwd.z) > 0.99f) fwd = glm::vec3(world[1]); // looking straight down: screen-up
         if (glm::length(glm::vec2(fwd.x, fwd.y)) > 1e-4f) yaw = glm::degrees(std::atan2(-fwd.x, fwd.y));
     }
@@ -1701,6 +1717,7 @@ void Engine::drive_character_controllers_(coopa::scene::Scene& scene) {
         if (!cc->player_input || cc->is_suspended()) continue;
         cc->move_input = move;
         cc->move_basis_yaw_deg = yaw;
+        cc->move_basis_forward = basis_forward;
         cc->jump = cc->jump || jump;
         cc->sprint = sprint;
     }
@@ -2024,6 +2041,18 @@ render::ToyRenderConfig Engine::make_render_config_(const AppConfig& config,
         /* shadow_cube_frag */ "",
         /* cull */ coopa::gfx::CullMode::Back,
     });
+    // A planet TileTerrain's chunks: terrain_styled built with TERRAIN_PLANET (terrain_styled.glsl).
+    rc.surface_shaders.add({
+        /* name  */ "terrain_styled_planet",
+        /* domain */ coopa::gfx::pipeline::SurfaceShaderDomain::Opaque,
+        /* vert  */ "",
+        /* frag  */ "terrain_styled_planet.frag",
+        /* shadow_vert */ "",
+        /* shadow_frag */ "",
+        /* shadow_cube_vert */ "",
+        /* shadow_cube_frag */ "",
+        /* cull */ coopa::gfx::CullMode::Back,
+    });
     rc.surface_shaders.add({
         /* name  */ "triplanar",
         /* domain */ coopa::gfx::pipeline::SurfaceShaderDomain::Opaque,
@@ -2097,6 +2126,21 @@ render::ToyRenderConfig Engine::make_render_config_(const AppConfig& config,
                                                // see water_surface.glsl.
         /* tesc */ "water.tesc", // wider cull margin for the waves' reach
         /* tese */ "water.tese",
+    });
+    // A planet's water (WaterBody::local_frame): the same shader compiled with WATER_LOCAL_FRAME,
+    // so "water" itself carries none of the planet code -- see water_surface.glsl.
+    rc.surface_shaders.add({
+        /* name  */ "water_planet",
+        /* domain */ coopa::gfx::pipeline::SurfaceShaderDomain::Transparent,
+        /* vert  */ "water_planet.vert",
+        /* frag  */ "water_planet.frag",
+        /* shadow_vert */ "",
+        /* shadow_frag */ "",
+        /* shadow_cube_vert */ "",
+        /* shadow_cube_frag */ "",
+        /* cull */ coopa::gfx::CullMode::None,
+        /* tesc */ "water.tesc",
+        /* tese */ "water_planet.tese",
     });
 
     return rc;

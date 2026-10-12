@@ -86,6 +86,12 @@ Write `tile_set:` in new scenes.
   come from `tools/gen_tile_styles.py` and `tools/gen_terrain_atlas.py` -- extend those
   generators (a new set is a new STYLES entry) rather than hand-editing their outputs. In the
   editor, *Duplicate as New Tile Set* copies a set with its own piece meshes to reshape.
+- **Planets**: `planet: true` with `face_tiles` (tiles per cube-face edge; radius
+  `2 * face_tiles * tile_size / pi`), `chunk_size` dividing it, and `gravity` (m/s^2). Everything
+  stays loaded and the planet only starts pulling once every chunk is live, so bodies and the
+  player can be placed above the surface at any side (position = direction * (radius + a few m)).
+  Reference: `assets/scenes/terrain/planet_demo` (a mannequin player with the orbit camera
+  tracking it). Keep `face_tiles` modest (<= 128): every chunk is built at load.
 - Large terrains want shadow tuning in scene settings (terrain_demo uses `shadow_fit: focus`,
   `shadow_focus_radius`, `shadow_distance`).
 
@@ -96,6 +102,7 @@ FRAMES=240 .claude/skills/create-scene/scripts/render_scene.sh <scene>    # chun
 ./build/tests/toyengine_tests --suite terrain_chunk
 ./build/tests/toyengine_tests --suite styled_tiles
 ctest --test-dir build -L gpu -R terrain_render
+ctest --test-dir build -L gpu -R planet_world     # planets
 ```
 
 Look for holes (chunks not yet streamed -- give more frames), seams between chunks, the tile set

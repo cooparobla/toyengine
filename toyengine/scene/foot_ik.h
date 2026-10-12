@@ -161,6 +161,8 @@ private:
     std::vector<std::unique_ptr<LegState>> legs_;
     float blend_ = 0.0f;
     float pelvis_offset_ = 0.0f;
+    /// "Up" for the feet: world +Z -- or, where gravity is a field (a planet), the character's own up.
+    glm::vec3 up_{0.0f, 0.0f, 1.0f};
     float body_pitch_deg_ = 0.0f;
     coopa::anim::IkPoseGuard pelvis_rot_guard_;
     glm::vec3 pelvis_input_{0.0f};

@@ -120,6 +120,10 @@ public:
     // --- Per-frame input, pushed by Engine::drive_character_controllers_() ---
     glm::vec2 move_input{0.0f};      ///< x = right, y = forward, in the move basis; length clamped to 1.
     float move_basis_yaw_deg = 0.0f; ///< Yaw of the move basis (the camera's); 0 = world axes (x -> +X, y -> +Y).
+    /// Where gravity is a field (a planet's -- the physics world has gravity sources), a world
+    /// yaw means nothing: the move basis is this world direction (the camera's view) laid onto
+    /// the ground plane instead. Zero: `move_basis_yaw_deg`, measured in the character's frame.
+    glm::vec3 move_basis_forward{0.0f};
     bool jump = false;               ///< A press: consumed (reset) by the next advance().
     bool sprint = false;             ///< Held.
 
@@ -133,6 +137,8 @@ public:
     /** @brief Velocity of the character's own motion (world, m/s), platform carry excluded. */
     glm::vec3 velocity() const { return glm::vec3(h_velocity_, v_velocity_); }
     const glm::vec3& ground_normal() const { return ground_normal_; }
+    /** @brief The character's up: world +Z, or (gravity sources present) away from the pull. */
+    glm::vec3 up() const { return field_ ? field_up_ : glm::vec3(0.0f, 0.0f, 1.0f); }
     float yaw_deg() const { return yaw_deg_; }
     /** @brief The last move's motor result -- its collisions, step/snap flags, ground body. */
     const coopa::physx::character::MoveResult& last_move() const { return last_move_; }
@@ -201,6 +207,15 @@ private:
     /** @brief The kinematic Rigidbody + CapsuleCollider this needs, added when missing. */
     void ensure_body_();
 
+    /**
+     * @brief advance() where gravity is a field (the physics world has gravity sources -- a
+     *        planet): the same motion in the character's own frame -- up away from the pull at
+     *        its feet, carried along as it walks (parallel transport), so "forward" never spins
+     *        -- with velocity (`h_velocity_`, `v_velocity_`) and yaw held in that frame. Moving
+     *        platforms are not carried here. Without sources advance() never comes here.
+     */
+    void advance_field_(float dt, coopa::physx::system::PhysicsSystem* physics, bool jump_pressed);
+
     coopa::physx::components::RigidbodyComponent* rigidbody_ = nullptr;
     bool suspended_ = false;
     glm::vec2 h_velocity_{0.0f};
@@ -217,6 +232,9 @@ private:
     glm::vec3 root_motion_{0.0f};
     float root_yaw_ = 0.0f;
     coopa::physx::character::MoveResult last_move_;
+    bool field_ = false;                       ///< The last advance() ran in a gravity field.
+    glm::vec3 field_up_{0.0f, 0.0f, 1.0f};     ///< The frame: up...
+    glm::vec3 field_y_{0.0f, 1.0f, 0.0f};      ///< ...and its yaw-0 forward (x = forward x up).
 };
 
 /** @brief The player's controller: the first CharacterController with `player_input` on (a

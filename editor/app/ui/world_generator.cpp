@@ -149,8 +149,10 @@ const std::vector<std::string>& shape_names() {
 }
 
 /** @brief A preview of `authored`: generated at its own grid size, rendered small. Runs on a worker. */
-EditorApp::WorldPreview make_world_preview(MapConfig authored, int layer, std::uint64_t serial) {
+EditorApp::WorldPreview make_world_preview(MapConfig authored, int layer, bool planet, std::uint64_t serial) {
     static coopa::debug::Logger logger("world_preview");
+    // A planet's map is generated on a sphere (as the terrain does) and previewed unrolled.
+    if (planet) authored.topology = coopa::maps::MapTopology::Sphere;
     MapConfig config = coopa::maps::derived_config(authored);
     coopa::maps::set_image_size(config, k_preview_px);
     coopa::maps::MapGenerator generator(config, logger);
@@ -205,6 +207,9 @@ void EditorApp::open_world_generator(ObjectId id) {
     wgen_height_scale_ = get_float(comp, "height_scale", defaults.height_scale);
     wgen_water_inset_ = get_float(comp, "water_inset", defaults.water_inset);
     wgen_river_inset_ = get_float(comp, "river_inset", defaults.river_inset);
+    wgen_planet_ = get_bool(comp, "planet", false);
+    wgen_face_tiles_ = get_int(comp, "face_tiles", defaults.face_tiles);
+    wgen_gravity_ = get_float(comp, "gravity", 9.81f);
     wgen_requested_ = wgen_started_ + 1;
     wgen_changed_at_ = 0.0;   // preview at once
     pending_modal_ = "World Generator";
@@ -220,7 +225,8 @@ void EditorApp::wgen_tick_preview_() {
     if (wgen_object_ != 0 && wgen_requested_ != wgen_started_ && !wgen_job_.valid() &&
         wgen_now() - wgen_changed_at_ >= k_preview_debounce) {
         wgen_started_ = wgen_requested_;
-        wgen_job_ = std::async(std::launch::async, make_world_preview, wgen_config_, wgen_layer_, wgen_started_);
+        wgen_job_ = std::async(std::launch::async, make_world_preview, wgen_config_, wgen_layer_, wgen_planet_,
+                               wgen_started_);
     }
     // Generate World: bake once the re-parsed terrain carries the new settings.
     if (wgen_regen_object_ != 0) {
@@ -250,6 +256,16 @@ void EditorApp::wgen_apply_() {
     if (gen.get_value<Node::mapping_type>().empty()) erase_key(comp, "generator");
     else comp["generator"] = gen;
     comp["world_tiles"] = Node(static_cast<int64_t>(wgen_world_tiles_));
+    if (wgen_planet_) {
+        comp["planet"] = Node(true);
+        comp["face_tiles"] = Node(static_cast<int64_t>(wgen_face_tiles_));
+        comp["gravity"] = make_float(wgen_gravity_);
+    } else {
+        // A flat terrain is written exactly as before the planet mode existed.
+        erase_key(comp, "planet");
+        erase_key(comp, "face_tiles");
+        erase_key(comp, "gravity");
+    }
     comp["tile_size"] = make_float(wgen_tile_size_);
     comp["height_scale"] = make_float(wgen_height_scale_);
     comp["water_inset"] = make_float(wgen_water_inset_);
@@ -409,22 +425,43 @@ void EditorApp::draw_world_generator_modal_(imm::Context& ctx) {
     if (wgen_category_ == 0) {
         ctx.spacing(6);
         ctx.label("The Terrain", &dim);
-        if (ctx.drag_int("World Size (tiles)", &wgen_world_tiles_, 1.0f, 16, 8192)) edited = true;
-        ctx.tooltip("World Size\nHow many tiles per side the map is cut into -- the world's size, whatever the map's cell "
-                    "count (Map Cells sets its detail)");
+        if (ctx.checkbox("Planet", &wgen_planet_)) edited = true;
+        ctx.tooltip("Planet\nA small round world: the map is generated on a sphere and its tiles wrap a globe, with "
+                    "gravity pulling toward the centre. Off: a flat map, as always");
+        test_rects_["world_generator:Planet"] = ctx.last_rect();
+        if (wgen_planet_) {
+            ctx.drag_int("Face Size (tiles)", &wgen_face_tiles_, 0.5f, 16, 512);
+            ctx.tooltip("Face Size\nTiles along one edge of each of the six faces the globe is made of; the "
+                        "circumference is four of them");
+            ctx.drag_float("Gravity (m/s2)", &wgen_gravity_, 0.05f, 0.0f, 50.0f);
+            ctx.tooltip("Gravity\nThe planet's pull at its surface (Earth: 9.81). 0: none");
+        } else {
+            if (ctx.drag_int("World Size (tiles)", &wgen_world_tiles_, 1.0f, 16, 8192)) edited = true;
+            ctx.tooltip("World Size\nHow many tiles per side the map is cut into -- the world's size, whatever the map's "
+                        "cell count (Map Cells sets its detail)");
+        }
         test_rects_["world_generator:World Size (tiles)"] = ctx.last_rect();
         ctx.drag_float("Tile Size (m)", &wgen_tile_size_, 0.01f, 0.05f, 100.0f);
         ctx.tooltip("Tile Size\nWidth of one tile in world units; with World Size, the world's extent");
         if (ctx.drag_float("Height Range (m)", &wgen_height_scale_, 0.1f, 1.0f, 256.0f)) edited = true;
         ctx.tooltip("Height Range\nWorld height of the map's full height range, from sea floor to the highest peak");
-        const int tiles = wgen_world_tiles_;
-        const double count = static_cast<double>(tiles) * tiles;
-        const double metres = static_cast<double>(tiles) * wgen_tile_size_;
-        std::snprintf(buf, sizeof(buf), "World: %d x %d tiles = %.0f x %.0f m%s, heights up to %.0f m", tiles, tiles, metres,
-                      metres, count >= 1.0e6 ? " (over a million tiles)" : "", static_cast<double>(wgen_height_scale_));
-        ctx.label(buf, &dim);
-        std::snprintf(buf, sizeof(buf), "%.1f tiles per map cell", static_cast<double>(tiles) / std::max(1, c.grid_size));
-        ctx.label(buf, &dim);
+        if (wgen_planet_) {
+            const toy::world::PlanetLayout layout{wgen_face_tiles_, wgen_tile_size_};
+            std::snprintf(buf, sizeof(buf), "Planet: radius %.0f m, %.0f m around, 6 x %d x %d tiles, heights up to %.0f m",
+                          static_cast<double>(layout.radius()), 4.0 * wgen_face_tiles_ * wgen_tile_size_, wgen_face_tiles_,
+                          wgen_face_tiles_, static_cast<double>(wgen_height_scale_));
+            ctx.label(buf, &dim);
+        } else {
+            const int tiles = wgen_world_tiles_;
+            const double count = static_cast<double>(tiles) * tiles;
+            const double metres = static_cast<double>(tiles) * wgen_tile_size_;
+            std::snprintf(buf, sizeof(buf), "World: %d x %d tiles = %.0f x %.0f m%s, heights up to %.0f m", tiles, tiles,
+                          metres, metres, count >= 1.0e6 ? " (over a million tiles)" : "",
+                          static_cast<double>(wgen_height_scale_));
+            ctx.label(buf, &dim);
+            std::snprintf(buf, sizeof(buf), "%.1f tiles per map cell", static_cast<double>(tiles) / std::max(1, c.grid_size));
+            ctx.label(buf, &dim);
+        }
     }
     if (wgen_category_ == 4) {
         ctx.spacing(6);
@@ -449,7 +486,8 @@ void EditorApp::draw_world_generator_modal_(imm::Context& ctx) {
         wgen_changed_at_ = 0.0;
     }
     const float map_side = std::min(right.w - 8.0f, right.h - ctx.style.row_height * 4 - 16.0f);
-    const imm::Box map = ctx.next_box(map_side, map_side);
+    // A planet's preview is the globe unrolled (twice as wide as tall).
+    const imm::Box map = wgen_planet_ ? ctx.next_box(map_side, map_side * 0.5f) : ctx.next_box(map_side, map_side);
     wgen_draw_preview_(ctx, map);
     test_rects_["world_generator:preview"] = map;
     if (wgen_job_.valid() || wgen_requested_ != wgen_started_) {
@@ -459,7 +497,9 @@ void EditorApp::draw_world_generator_modal_(imm::Context& ctx) {
                       wgen_preview_.rivers, wgen_preview_.lakes, wgen_preview_.towns);
         ctx.label(buf, &dim);
     }
-    ctx.label("North is up, as the terrain lies from above.", &dim);
+    ctx.label(wgen_planet_ ? "The whole globe, unrolled: the poles along the top and bottom."
+                           : "North is up, as the terrain lies from above.",
+              &dim);
     ctx.end_region();
 
     if (edited) {
@@ -483,6 +523,8 @@ void EditorApp::draw_world_generator_modal_(imm::Context& ctx) {
         wgen_height_scale_ = defaults.height_scale;
         wgen_water_inset_ = defaults.water_inset;
         wgen_river_inset_ = defaults.river_inset;
+        wgen_face_tiles_ = defaults.face_tiles;
+        wgen_gravity_ = 9.81f;
         ++wgen_requested_;
         wgen_changed_at_ = 0.0;
     }

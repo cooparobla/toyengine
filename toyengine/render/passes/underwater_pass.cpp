@@ -16,6 +16,9 @@ void UnderwaterPass::set_source_images(coopa::gfx::TextureView scene_color, coop
     stage_.set(0).bind_image(0, scene_color, linear_sampler);
     stage_.set(0).bind_image(1, g_normal, nearest_sampler_);
     stage_.set(0).bind_image(2, g_position, nearest_sampler_);
+    planet_stage_.set(0).bind_image(0, scene_color, linear_sampler);
+    planet_stage_.set(0).bind_image(1, g_normal, nearest_sampler_);
+    planet_stage_.set(0).bind_image(2, g_position, nearest_sampler_);
 }
 
 coopa::gfx::engine::passes::FullscreenStageDesc UnderwaterPass::describe_(const std::string& vert_spv,

@@ -213,6 +213,12 @@ public:
      */
     water::WaterBody water_look = default_water_look();
 
+    /**
+     * @brief Planet only (`params.planet`): the pull at the surface, m/s^2, toward the planet's
+     *        centre -- a physics gravity source TerrainSystem keeps there. 0 adds none.
+     */
+    float gravity = 9.81f;
+
     /** @brief The terrain's stock water look: small waves for a world of one-metre tiles. */
     static water::WaterBody default_water_look();
 

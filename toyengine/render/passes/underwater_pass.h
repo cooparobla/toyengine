@@ -42,17 +42,20 @@ public:
     /// Matches underwater.frag's push-constant block byte for byte.
     struct alignas(16) Params {
         glm::mat4 inv_view_proj{1.0f};                  ///< Unjittered.
-        glm::vec4 camera_time{0.0f};                     ///< xyz = camera position, w = time (s).
-        glm::vec4 water{0.0f};                           ///< x = surface level, y = density (1/m), z = caustics, w = enabled.
+        glm::vec4 camera_time{0.0f};                     ///< xyz = camera position (or, water.w == 2, the surface's up), w = time (s).
+        glm::vec4 water{0.0f};                           ///< x = surface level, y = density (1/m), z = caustics, w = enabled (2: a planet's water -- underwater_planet.frag, level along camera_time.xyz).
         glm::vec4 fog_color{0.05f, 0.24f, 0.28f, 1.0f};  ///< rgb = in-scatter colour, w = shimmer amount.
         glm::vec4 absorption{0.35f, 0.09f, 0.06f, 1.0f}; ///< rgb = per-metre extinction, w = light intensity.
     };
     static_assert(sizeof(Params) == 128, "UnderwaterPass::Params must fill exactly the 128-byte push range");
 
+    /** @param planet_frag_spv underwater_planet.frag: drawn instead when the params say the
+     *         surface tilts (water.w == 2, a planet's water). */
     UnderwaterPass(coopa::gfx::core::Device& device, coopa::gfx::pipeline::RenderPass& target_pass,
-                   const std::string& vert_spv, const std::string& frag_spv)
+                   const std::string& vert_spv, const std::string& frag_spv, const std::string& planet_frag_spv)
         : nearest_sampler_(coopa::gfx::engine::util::Sampler::nearest(device)),
-          stage_(device, target_pass, describe_(vert_spv, frag_spv)) {}
+          stage_(device, target_pass, describe_(vert_spv, frag_spv)),
+          planet_stage_(device, target_pass, describe_(vert_spv, planet_frag_spv)) {}
 
     UnderwaterPass(const UnderwaterPass&) = delete;
     UnderwaterPass& operator=(const UnderwaterPass&) = delete;
@@ -64,7 +67,7 @@ public:
                            const coopa::gfx::engine::util::Sampler& linear_sampler);
 
     void draw(coopa::gfx::command::CommandBuffer& cmd, uint32_t width, uint32_t height, const Params& params) const {
-        stage_.draw(cmd, width, height, coopa::gfx::ShaderStage::Fragment, params);
+        (params.water.w > 1.5f ? planet_stage_ : stage_).draw(cmd, width, height, coopa::gfx::ShaderStage::Fragment, params);
     }
 
 private:
@@ -73,6 +76,7 @@ private:
 
     coopa::gfx::engine::util::Sampler           nearest_sampler_;
     coopa::gfx::engine::passes::FullscreenStage stage_;
+    coopa::gfx::engine::passes::FullscreenStage planet_stage_;   ///< underwater_planet.frag
 };
 
 } // namespace passes

@@ -68,6 +68,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <optional>
 #include <cmath>
 #include <cstdint>
 #include <memory>
@@ -209,6 +210,9 @@ public:
         float            surface_height = 0.0f; ///< Of the body above `p` (valid when `body`).
         float            depth = 0.0f;          ///< surface_height - p.z (negative above water).
         const WaterBody* body = nullptr;        ///< The body above/around `p`, or null.
+        /// A local-frame body's (a planet's water) up, in world: `surface_height` is then
+        /// measured along it, as dot(point, up), and `depth` too. Unset for ordinary water.
+        std::optional<glm::vec3> up;
     };
 
     /**
@@ -284,6 +288,8 @@ private:
 
     /** @brief Water depth below `p`: 0 when buried under a bank, max_depth over open water. */
     float probe_depth_(const glm::vec3& p, float max_depth) const;
+    /** @brief probe_depth_() along an arbitrary down (a local-frame body's -Z, in world). */
+    float probe_depth_along_(const glm::vec3& p, const glm::vec3& down, float max_depth) const;
 
     void bake_(coopa::scene::Scene& scene, WaterBody& body, const glm::mat4& world, bool with_physics);
 
@@ -379,6 +385,14 @@ private:
      *        so it settles at its floating height instead of sinking, then is put to sleep.
      */
     void frozen_substep_(BuoyantEntry& e, coopa::physx::dynamics::Body& body, const glm::vec3& gravity, float h);
+    /**
+     * @brief floater_substep_() where local-frame water is in play (a planet's): each pontoon is
+     *        measured in each water body's own frame, and gravity and up come from the physics
+     *        field where it is. Used only when such a body is active, so ordinary water keeps the
+     *        exact path above.
+     */
+    bool frame_floater_substep_(BuoyantEntry& e, coopa::physx::PhysicsWorld& world, float h,
+                                const WaveQueryOptions& opt);
 
     coopa::job::JobEngine*          jobs_      = nullptr; ///< This frame's (FrameContext::jobs); may be null.
     coopa::gfx::core::Device*       device_    = nullptr;

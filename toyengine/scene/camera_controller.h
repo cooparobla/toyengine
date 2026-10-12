@@ -96,7 +96,7 @@ public:
     // --- Orbit target ---
     std::string tracker        = "";              /**< Name of a GameObject to follow; empty uses `target`. */
     glm::vec3   target         = glm::vec3(0.0f); /**< Static target point, used when `tracker` is empty or unresolved. */
-    glm::vec3   target_offset  = glm::vec3(0.0f); /**< World-space offset added to the resolved target point. */
+    glm::vec3   target_offset  = glm::vec3(0.0f); /**< World-space offset added to the resolved target point (in a gravity field: in the target's own frame, z along its up). */
     float       follow_smoothing = 10.0f;         /**< Exponential follow rate (1/sec); <= 0 snaps instantly. */
 
     // --- Orbit geometry ---
@@ -225,6 +225,18 @@ private:
     float smoothed_distance_   = 0.0f; /**< Applied distance; chases distance at a rate set by movement_smoothing. */
     float collision_distance_  = -1.0f; /**< Orbit radius after collision; < 0 until the first collided frame. */
     mutable bool warned_missing_tracker_ = false;
+
+    /**
+     * @brief Orbit where gravity is a field (the physics world has gravity sources -- a planet):
+     *        the frame the orbit's yaw and pitch are measured in, up away from the pull at the
+     *        target and its yaw-0 forward carried along as the target moves (parallel transport,
+     *        as CharacterController does). Returns false (and the orbit stays in the world frame,
+     *        exactly as without a field) when there is no field.
+     */
+    bool field_frame_(const glm::vec3& target, glm::mat3& out);
+    bool      field_ = false;
+    glm::vec3 field_up_{0.0f, 0.0f, 1.0f};
+    glm::vec3 field_y_{0.0f, 1.0f, 0.0f};
 };
 
 } // namespace scene

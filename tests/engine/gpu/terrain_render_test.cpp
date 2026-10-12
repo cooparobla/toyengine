@@ -113,6 +113,9 @@ COOPA_TEST(chunks_stream_around_the_camera) {
         controller->distance           = 2.0f;
         controller->follow_smoothing   = 0.0f;
         controller->movement_smoothing = 0.0f;
+        // Looking straight down at the marker: the streamer centres on what the camera looks at,
+        // and the demo's own (shallow) orbit pitch would aim that chunks past the marker.
+        controller->pitch_deg          = controller->max_pitch_deg;
     }
 
     // Park the marker over chunk (4, 4), well inside the world on every side.
@@ -505,10 +508,13 @@ COOPA_TEST(water_lies_over_the_beds_and_floats_a_crate) {
             // Deep sea nearest the island's middle: where the crate goes.
             const float d = glm::length(glm::vec2(x + 0.5f, y + 0.5f) * p.tile_size - glm::vec2(centre));
             if (r.has(toy::world::TileRecord::Ocean) && r.water_depth >= 2 && d < best) {
-                bool open = true;   // with water all round, so the crate cannot ground on a bank
+                // Still water all round, so the crate cannot ground on a bank and the tile's corners
+                // are the sea's alone (a river mouth's corners blend toward the river's surface).
+                bool open = true;
                 for (int dy = -1; dy <= 1 && open; ++dy)
                     for (int dx = -1; dx <= 1 && open; ++dx)
-                        open = tiles.contains(x + dx, y + dy) && tiles.at(x + dx, y + dy).water();
+                        open = tiles.contains(x + dx, y + dy) && tiles.at(x + dx, y + dy).water() &&
+                               !tiles.at(x + dx, y + dy).has(toy::world::TileRecord::Flowing);
                 if (open) { best = d; sea = {x, y}; }
             }
         }
@@ -546,8 +552,16 @@ COOPA_TEST(water_lies_over_the_beds_and_floats_a_crate) {
             sea_body = body;
     }
     require(sea_body != nullptr, "water: the chunk carries a still WaterBody");
+    // Over the open sea (the chosen tile's own corners). Elsewhere in the chunk the still body also
+    // carries skirts under its banks, which stand at the highest water beside them -- a river's.
+    const glm::vec2 tile0 = glm::vec2(sea.x, sea.y) * p.tile_size - glm::vec2(chunk.x, chunk.y) * p.chunk_world_size();
     float lo = 1e9f, hi = -1e9f;
-    for (const glm::vec3& v : sea_body->geometry_positions) { lo = std::min(lo, v.z); hi = std::max(hi, v.z); }
+    for (const glm::vec3& v : sea_body->geometry_positions) {
+        const glm::vec2 d = glm::vec2(v) - tile0;
+        if (d.x < -0.01f || d.y < -0.01f || d.x > p.tile_size + 0.01f || d.y > p.tile_size + 0.01f) continue;
+        lo = std::min(lo, v.z);
+        hi = std::max(hi, v.z);
+    }
     expect(std::abs(lo - surface) < 0.01f && std::abs(hi - surface) < 0.01f,
            "water: the sea is one flat surface at its level (" + std::to_string(lo) + ".." + std::to_string(hi) + ")");
 

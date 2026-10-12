@@ -310,6 +310,8 @@ public:
     /** @brief Creates an object carrying one component of `type` (lights, cameras, ...), named
      *         `name` in snake_case ("Point Light" -> point_light). */
     ObjectId create_with_component(const std::string& type, const std::string& name, ObjectId parent = 0);
+    /** @brief Add > Planet: a TileTerrain in planet mode (a small globe with its own gravity). */
+    ObjectId create_planet();
 
     /** @brief The selection minus inherited children (they come from an object asset: not deleted, moved or copied here). */
     std::vector<ObjectId> own_selection_();

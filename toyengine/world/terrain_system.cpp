@@ -4,6 +4,8 @@
 
 #include <cmath>
 
+#include <glm/gtc/quaternion.hpp>
+
 #include <coopa/asset/asset_id.h>
 #include <coopa/asset/asset_manager.h>
 #include <coopa/job/engine.h>
@@ -31,6 +33,7 @@ void TerrainSystem::execute(coopa::scene::Scene& scene, const coopa::scene::Fram
     for (TerrainComponent* terrain : scene.get_components<TerrainComponent>()) {
         tick_terrain_(*terrain, scene, ctx);
     }
+    sync_planet_gravity_(scene);
     // One diff per frame however many chunk colliders came or went (PhysicsSystem::refresh()).
     if (physics_dirty_) {
         if (auto* physics = dynamic_cast<coopa::physx::system::PhysicsSystem*>(scene.find_system("Physics"))) {
@@ -52,6 +55,13 @@ void TerrainSystem::tick_terrain_(TerrainComponent& terrain, coopa::scene::Scene
     if (!terrain.is_ready() || ctx.jobs == nullptr) return;
 
     mark_edited_chunks_(terrain);
+    if (terrain.params.planet) {
+        // A planet is small and seen whole: every chunk stays loaded, nearest the camera first.
+        want_planet_chunks_(terrain);
+        upload_finished_chunks_(terrain, scene);
+        submit_queued_chunks_(terrain, ChunkCoord{0, 0}, ctx);
+        return;
+    }
     const ChunkCoord centre = terrain.params.chunk_at(stream_centre_(terrain));
     want_chunks_(terrain, centre);
     release_distant_chunks_(terrain, centre, ctx);
@@ -100,6 +110,22 @@ void TerrainSystem::mark_edited_chunks_(TerrainComponent& terrain) {
     if (terrain.applied_tile_revision == tiles.revision()) return;
     const std::int32_t size = std::max(1, terrain.params.chunk_size);
     tiles.for_each_dirty_since(terrain.applied_tile_revision, [&](const IRect& rect) {
+        if (terrain.params.planet) {
+            // A tile on a face's edge is in the next face's skirt too: mark the chunks of every
+            // tile the rect touches and of each of their neighbours, wrapped across the faces.
+            const PlanetLayout layout = terrain.params.layout();
+            const auto mark = [&](const glm::ivec2& t) {
+                const ChunkCoord c{t.x / size, t.y / size};
+                auto it = terrain.chunks().find(c);
+                if (it != terrain.chunks().end() && it->second.state != ChunkState::Retiring &&
+                    it->second.state != ChunkState::Queued) it->second.stale = true;
+            };
+            for (int y = std::max(0, rect.y0); y < std::min(tiles.height(), rect.y1); ++y)
+                for (int x = std::max(0, rect.x0); x < std::min(tiles.width(), rect.x1); ++x)
+                    for (int dy = -1; dy <= 1; ++dy)
+                        for (int dx = -1; dx <= 1; ++dx) mark(layout.neighbour(x, y, dx, dy));
+            return;
+        }
         // One tile wider: a chunk's skirt reads its neighbours' border columns.
         const std::int32_t cx0 = static_cast<std::int32_t>(std::floor((rect.x0 - 1) / static_cast<float>(size)));
         const std::int32_t cy0 = static_cast<std::int32_t>(std::floor((rect.y0 - 1) / static_cast<float>(size)));
@@ -111,6 +137,58 @@ void TerrainSystem::mark_edited_chunks_(TerrainComponent& terrain) {
         }
     });
     terrain.applied_tile_revision = tiles.revision();
+}
+
+void TerrainSystem::want_planet_chunks_(TerrainComponent& terrain) {
+    if (!terrain.tiles) return;
+    const std::int32_t size = std::max(1, terrain.params.chunk_size);
+    for (std::int32_t cy = 0; cy * size < terrain.tiles->height(); ++cy) {
+        for (std::int32_t cx = 0; cx * size < terrain.tiles->width(); ++cx) {
+            const ChunkCoord coord{cx, cy};
+            if (terrain.chunks().find(coord) != terrain.chunks().end()) continue;
+            TerrainChunk chunk;
+            chunk.coord = coord;
+            chunk.state = ChunkState::Queued;
+            terrain.chunks().emplace(coord, std::move(chunk));
+        }
+    }
+}
+
+void TerrainSystem::sync_planet_gravity_(coopa::scene::Scene& scene) {
+    auto* physics = dynamic_cast<coopa::physx::system::PhysicsSystem*>(scene.find_system("Physics"));
+    if (physics == nullptr) return;
+    coopa::physx::PhysicsWorld& world = physics->world();
+    std::unordered_map<const TerrainComponent*, std::uint32_t> registered;
+    for (TerrainComponent* terrain : scene.get_components<TerrainComponent>()) {
+        if (!terrain->params.planet || terrain->gravity <= 0.0f) continue;
+        coopa::physx::PhysicsWorld::GravitySource source;
+        source.centre = terrain->owner && terrain->owner->get_transform()
+                            ? glm::vec3(terrain->owner->get_transform()->transform().get_world_matrix()[3])
+                            : glm::vec3(0.0f);
+        source.radius = terrain->params.layout().radius();
+        // No pull until every chunk (and so all the planet's ground) is in: anything dropped on
+        // it at the start would otherwise fall through ground that is still being built.
+        const int cs = std::max(1, terrain->params.chunk_size);
+        const int per_edge = (std::max(1, terrain->params.face_tiles) + cs - 1) / cs;
+        int live = 0;
+        for (const auto& [coord, chunk] : terrain->chunks()) live += chunk.state == ChunkState::Live ? 1 : 0;
+        if (live >= 6 * per_edge * per_edge) planet_ready_.insert(terrain);
+        source.strength = planet_ready_.count(terrain) ? terrain->gravity : 0.0f;
+        source.range = source.radius * 8.0f;
+        const auto found = planet_gravity_.find(terrain);
+        if (found != planet_gravity_.end() && world.update_gravity_source(found->second, source)) {
+            registered.emplace(terrain, found->second);
+        } else {
+            registered.emplace(terrain, world.add_gravity_source(source));
+        }
+    }
+    for (const auto& [terrain, id] : planet_gravity_) {
+        if (registered.find(terrain) == registered.end()) {
+            world.remove_gravity_source(id);
+            planet_ready_.erase(terrain);
+        }
+    }
+    planet_gravity_ = std::move(registered);
 }
 
 void TerrainSystem::want_chunks_(TerrainComponent& terrain, const ChunkCoord& centre) {
@@ -278,9 +356,10 @@ void TerrainSystem::create_chunk_object_(TerrainComponent& terrain, coopa::scene
     // Chunks carry blend codes (encode_surface_blend()), not texture coordinates:
     // terrain_styled.frag picks each pixel's kind from them, takes its colour from the atlas and
     // adds world-space detail -- it needs the atlas grid and the cell size.
-    renderer->material.shader        = "terrain_styled";
-    renderer->material.shader_params = glm::vec4(static_cast<float>(k_atlas_columns),
-                                                 static_cast<float>(k_atlas_rows),
+    // A planet's chunks use the shader's planet build (terrain_styled.glsl): their "up" is the
+    // per-vertex uv.y the warp wrote, not world +Z.
+    renderer->material.shader        = terrain.params.planet ? "terrain_styled_planet" : "terrain_styled";
+    renderer->material.shader_params = glm::vec4(static_cast<float>(k_atlas_columns), static_cast<float>(k_atlas_rows),
                                                  terrain.params.height_step, terrain.params.tile_size);
     // Probe / GI bakes draw with stock shaders only and would misread those codes.
     renderer->affects_reflection_probes = false;
@@ -315,6 +394,12 @@ void TerrainSystem::add_chunk_water_(const TerrainComponent& terrain, coopa::sce
     if (auto* parent = chunk_object.get_transform()) tc->set_parent_transform(&parent->transform());
     auto* body = object->add_component<water::WaterBody>();
     water::copy_water_settings(terrain.water_look, *body);
+    if (water.local_frame) {
+        // A planet's: placed in its own frame (ChunkWaterData::frame), and worked on in it.
+        tc->transform().set_position(glm::vec3(water.frame[3]));
+        tc->transform().set_rotation_quat(glm::quat_cast(glm::mat3(water.frame)));
+        body->local_frame = true;
+    }
     body->mode = flowing ? water::WaterMode::Flowing : water::WaterMode::Planar;
     if (flowing) {
         // A river's surface is its current, not the sea's swell.

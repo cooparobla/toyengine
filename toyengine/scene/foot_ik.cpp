@@ -52,7 +52,11 @@ void FootIK::ik_pre_solve(float dt) {
 
     const glm::mat4 own_world = own_tc->get_world_matrix();
     const glm::vec3 base(own_world[3]);
-    const glm::vec3 up(0.0f, 0.0f, 1.0f);
+    // In a gravity field (a planet) the ground is "below" along the character's own up; the
+    // flat world keeps world +Z exactly.
+    const bool field = physics && physics->world().gravity_source_count() > 0;
+    up_ = field ? glm::normalize(glm::vec3(own_world[2])) : glm::vec3(0.0f, 0.0f, 1.0f);
+    const glm::vec3 up = up_;
     coopa::physx::system::PhysicsSystem::QueryFilter filter;
     filter.layer_mask = layer_mask;
     filter.include_triggers = false;
@@ -77,13 +81,14 @@ void FootIK::ik_pre_solve(float dt) {
         glm::vec3 target_normal = up;
         if (physics && leg.foot_obj && blend_ > 0.0f) {
             coopa::physx::geometry::Ray ray;
-            ray.origin = glm::vec3(leg.foot_pos.x, leg.foot_pos.y, base.z + ray_up);
+            ray.origin = field ? leg.foot_pos + up * (glm::dot(base - leg.foot_pos, up) + ray_up)
+                               : glm::vec3(leg.foot_pos.x, leg.foot_pos.y, base.z + ray_up);
             ray.direction = -up;
             ray.max_distance = ray_up + ray_down;
             coopa::physx::system::PhysicsSystem::RaycastHit hit;
             if (physics->raycast(ray, hit, filter) && !hit.started_inside) {
-                target_offset = std::clamp(hit.point.z - base.z, -ray_down, ray_up);
-                if (hit.normal.z > 0.2f) target_normal = glm::normalize(hit.normal);
+                target_offset = std::clamp(field ? glm::dot(hit.point - base, up) : hit.point.z - base.z, -ray_down, ray_up);
+                if ((field ? glm::dot(hit.normal, up) : hit.normal.z) > 0.2f) target_normal = glm::normalize(hit.normal);
             }
         }
         leg.offset += (target_offset - leg.offset) * kk;
@@ -167,7 +172,7 @@ void FootIK::ik_post_solve(float) {
         coopa::util::Transform& t = leg.foot_obj->get_transform()->transform();
         const glm::quat local_in = leg.foot_guard.begin(t);
         if (!align_feet || blend_ <= 0.0f) continue;
-        const glm::vec3 up(0.0f, 0.0f, 1.0f);
+        const glm::vec3 up = up_;
         const glm::vec3 n = coopa::anim::ik::clamp_direction(up, leg.normal, glm::radians(std::max(0.0f, max_foot_angle)));
         const glm::quat tilt = glm::slerp(glm::quat(1.0f, 0.0f, 0.0f, 0.0f), coopa::anim::ik::rotation_between(up, n), blend_);
         leg.foot_guard.end(t, coopa::anim::ik::to_local_delta(coopa::anim::ik_parent_world_rotation(leg.foot_obj), local_in, tilt));

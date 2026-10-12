@@ -47,7 +47,10 @@ void TerrainComponent::begin_generation(coopa::job::JobEngine* jobs) {
 
     // The values the CLI derives after reading a config (noise seeds from the master seed, the
     // island field scaled to the grid) -- or one seed would make the same coastline as another.
-    const coopa::maps::MapConfig config = coopa::maps::derived_config(generator);
+    // A planet's world is mapcoopa's globe: the same settings, generated on a sphere.
+    coopa::maps::MapConfig authored = generator;
+    if (params.planet) authored.topology = coopa::maps::MapTopology::Sphere;
+    const coopa::maps::MapConfig config = coopa::maps::derived_config(authored);
     map_config_ = config;
 
     generator_ = std::make_unique<coopa::maps::MapGenerator>(config, logger_);

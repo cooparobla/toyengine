@@ -103,6 +103,15 @@ public:
     std::vector<glm::vec2> geometry_uvs;
     std::vector<uint32_t>  geometry_indices;
 
+    /**
+     * @brief The body lives in its own frame: its surface is a height field over its LOCAL XY,
+     *        its waves rise along its local Z, and everything about it (query, flow, depth,
+     *        floating) is worked out in that frame. A planet's water sets it -- each piece tilted
+     *        so local Z points away from the planet. Off (the default), a body is a height field
+     *        over world XY, exactly as always.
+     */
+    bool local_frame = false;
+
     /// Set by the parser from `mesh_path`; consumed by WaterSystem's bake.
     coopa::asset::AssetHandle<coopa::gfx::engine::data::SkinnedMeshSource> source;
 

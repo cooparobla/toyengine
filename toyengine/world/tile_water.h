@@ -22,6 +22,7 @@
 
 #include <glm/glm.hpp>
 
+#include <toyengine/world/planet.h>
 #include <toyengine/world/tile_map_data.h>
 
 namespace toy {
@@ -57,7 +58,7 @@ IRect settle_water(TileMapData& tiles, const IRect& rect, const IRect& limit = I
  *        water rounds up to that water's terrace (the bank), a flooded tile's bed down to at
  *        least one step under it. Does not mark dirty -- the bake assigns the whole grid.
  */
-void settle_water_rounding(TileMapData& tiles, const IRect& rect);
+void settle_water_rounding(TileMapData& tiles, const IRect& rect, const PlanetLayout* planet = nullptr);
 
 } // namespace world
 } // namespace toy

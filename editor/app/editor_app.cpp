@@ -286,6 +286,20 @@ ObjectId EditorApp::create_with_component(const std::string& type, const std::st
     return id;
 }
 
+ObjectId EditorApp::create_planet() {
+    Node obj = doc_.make_object(doc_.unique_name("planet", 0));
+    set_object_position_(obj, spawn_point_());
+    Node comp = default_component("TileTerrain");
+    comp["planet"] = Node(true);
+    comp["face_tiles"] = Node(static_cast<int64_t>(64));
+    comp["chunk_size"] = Node(static_cast<int64_t>(16));
+    comp["gravity"] = Node(9.81);
+    obj["components"].as_seq().push_back(comp);
+    const ObjectId id = doc_.add_object(obj, 0, -1, "Create Planet");
+    after_structure_change_(id);
+    return id;
+}
+
 std::vector<ObjectId> EditorApp::own_selection_() {
     std::vector<ObjectId> out;
     for (ObjectId id : doc_.selection()) if (!doc_.is_inherited(id)) out.push_back(id);
@@ -2278,6 +2292,7 @@ void EditorApp::draw_viewport_popups_(imm::Context& ctx, bool mesh_edit) {
         if (ctx.menu_item("Reflection Probe")) create_with_component("ReflectionProbe", "Reflection Probe");
         if (ctx.menu_item("Heightmap Terrain")) create_with_component("HeightmapTerrain", "Terrain");
         if (ctx.menu_item("Tile Terrain")) create_with_component("TileTerrain", "Tile Terrain");
+        if (ctx.menu_item("Planet")) create_planet();
         ctx.end_popup();
     }
     if (ctx.begin_popup("vp_delete_confirm", 150)) {

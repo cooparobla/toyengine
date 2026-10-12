@@ -313,6 +313,7 @@ void EditorApp::draw_add_menu_items_(imm::Context& ctx) {
     if (ctx.menu_item("Reflection Probe", "", nullptr, true, I::EnvLight)) create_with_component("ReflectionProbe", "Reflection Probe");
     if (ctx.menu_item("Heightmap Terrain", "", nullptr, true, I::Terrain)) create_with_component("HeightmapTerrain", "Terrain");
     if (ctx.menu_item("Tile Terrain", "", nullptr, true, I::Terrain)) create_with_component("TileTerrain", "Tile Terrain");
+    if (ctx.menu_item("Planet", "", nullptr, true, I::World)) create_planet();
 }
 
 void EditorApp::draw_object_menu_(imm::Context& ctx) {

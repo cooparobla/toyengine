@@ -523,6 +523,15 @@ void register_scene_components(coopa::gfx::core::Device& device,
                 params.soil_depth_steps = node.at("soil_depth_steps").get_value<std::int32_t>();
             }
             if (node.contains("water_inset")) params.water_inset = node.at("water_inset").get_value<float>();
+            // A planet (toyengine/world/planet.h): six faces of tiles on a sphere.
+            if (node.contains("planet")) params.planet = node.at("planet").get_value<bool>();
+            if (node.contains("face_tiles")) params.face_tiles = node.at("face_tiles").get_value<std::int32_t>();
+            if (node.contains("gravity")) terrain->gravity = node.at("gravity").get_value<float>();
+            if (params.planet) {
+                params.max_merge = 1;   // every tile its own piece: merged quads would crack when bent
+                params.face_tiles = std::max<std::int32_t>(params.chunk_size, params.face_tiles);
+                params.face_tiles -= params.face_tiles % std::max<std::int32_t>(1, params.chunk_size);
+            }
             if (node.contains("river_inset")) params.river_inset = node.at("river_inset").get_value<float>();
             // The water's look: WaterBody's own keys, onto the terrain's stock look.
             if (node.contains("water") && node.at("water").is_mapping()) {

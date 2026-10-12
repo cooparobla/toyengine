@@ -12,6 +12,7 @@
 #define TOYENGINE_RENDER_TOY_RENDER_TYPES_H
 
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -23,6 +24,17 @@
 
 namespace toy {
 namespace render {
+
+/**
+ * @struct PlanetFrameState
+ * @brief The scene's planet (a planet TileTerrain), handed over by Engine
+ *        (ToyRenderPipeline::set_planet()): the sky and the fog are then evaluated in the
+ *        camera's own frame on it -- up away from the centre, heights as altitude above `radius`.
+ */
+struct PlanetFrameState {
+    glm::vec3 centre{0.0f};
+    float     radius = 1.0f;
+};
 
 /**
  * @struct WaterFrameState
@@ -55,6 +67,9 @@ struct WaterFrameState {
     /// waterline) draw as normal.
     bool      underwater = false;
     float     surface_level = 0.0f;
+    /// The surface's up, when it is not world +Z (a planet's water): `surface_level` is then
+    /// measured along it (dot(p, surface_up)). Unset, the level is a world Z, as always.
+    std::optional<glm::vec3> surface_up;
     glm::vec3 fog_color{0.05f, 0.24f, 0.28f};
     float     visibility = 14.0f;                    ///< Metres until ~95% fogged.
     glm::vec3 absorption{0.35f, 0.09f, 0.06f};       ///< Per-metre extinction, r/g/b.

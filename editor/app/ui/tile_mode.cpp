@@ -139,6 +139,65 @@ void EditorApp::tile_frame_() {
 // Strokes
 // =================================================================================
 
+namespace {
+
+/**
+ * @brief A ray's hit on a planet's tile columns (terrain-local space, the planet's centre at the
+ *        origin): marched from where it enters the highest column's sphere, a fraction of a tile
+ *        at a time, until it is inside a column -- then the crossing is refined by bisection.
+ *        Columns are tested by their tops only (a wall hit reads as the column in front of it).
+ */
+bool planet_raycast(const TileMapData& d, const toy::world::TerrainParams& params, const glm::vec3& origin,
+                    const glm::vec3& dir, toy::world::TileHit& hit) {
+    const toy::world::PlanetLayout layout = params.layout();
+    const double r0 = layout.radius();
+    const glm::dvec3 o(origin), v(glm::normalize(glm::dvec3(dir)));
+    const auto top = [&](const glm::dvec3& p, glm::ivec2& tile) {
+        tile = layout.tile_of(glm::normalize(p));
+        return r0 + static_cast<double>(std::max<int>(0, d.get(tile.x, tile.y).steps)) * params.height_step;
+    };
+    const double outer = r0 + 256.0 * params.height_step;
+    // Where the ray meets the outer sphere (|o + t v| = outer).
+    const double b = glm::dot(o, v), c = glm::dot(o, o) - outer * outer;
+    const double disc = b * b - c;
+    if (disc < 0.0) return false;
+    double t = std::max(0.0, -b - std::sqrt(disc));
+    const double t_end = -b + std::sqrt(disc);
+    const double step = 0.25 * params.tile_size;
+    glm::ivec2 tile;
+    double prev = t;
+    for (; t <= t_end; t += step) {
+        const glm::dvec3 p = o + v * t;
+        if (glm::length(p) <= top(p, tile)) {
+            double lo = prev, hi = t;
+            for (int i = 0; i < 20; ++i) {
+                const double mid = 0.5 * (lo + hi);
+                const glm::dvec3 q = o + v * mid;
+                glm::ivec2 tq;
+                if (glm::length(q) <= top(q, tq)) hi = mid; else lo = mid;
+            }
+            const glm::dvec3 at = o + v * hi;
+            top(at, hit.tile);
+            hit.point = glm::vec3(at);
+            hit.normal = glm::vec3(glm::normalize(at));
+            hit.t = static_cast<float>(hi);
+            return true;
+        }
+        prev = t;
+    }
+    return false;
+}
+
+} // namespace
+
+IRect EditorApp::tile_face_clip_(const IRect& r, const glm::ivec2& anchor) const {
+    const TerrainComponent* t = tile_live_();
+    if (t == nullptr || !t->params.planet) return r;
+    const int n = std::max(1, t->params.face_tiles);
+    const int face = std::clamp(anchor.x / n, 0, 5);
+    return IRect{std::max(r.x0, face * n), std::max(r.y0, 0), std::min(r.x1, (face + 1) * n), std::min(r.y1, n)};
+}
+
 bool EditorApp::tile_hit_(const ViewProj& vp, glm::vec2 px, glm::ivec2& tile, glm::vec3* world) const {
     const TerrainComponent* t = tile_live_();
     if (t == nullptr || !t->tiles || t->tiles->empty() || t->owner == nullptr) return false;
@@ -149,14 +208,26 @@ bool EditorApp::tile_hit_(const ViewProj& vp, glm::vec2 px, glm::ivec2& tile, gl
     const glm::vec3 lo = glm::vec3(inv * glm::vec4(o, 1.0f));
     const glm::vec3 ld = glm::normalize(glm::vec3(inv * glm::vec4(d, 0.0f)));
     toy::world::TileHit hit;
-    if (!t->tiles->raycast(lo, ld, t->params.tile_size, t->params.height_step, 1e5f, hit)) return false;
+    if (t->params.planet) {
+        if (!planet_raycast(*t->tiles, t->params, lo, ld, hit)) return false;
+    } else if (!t->tiles->raycast(lo, ld, t->params.tile_size, t->params.height_step, 1e5f, hit)) {
+        return false;
+    }
     tile = hit.tile;
     if (world) *world = glm::vec3(m * glm::vec4(hit.point, 1.0f));
     return true;
 }
 
-glm::vec3 EditorApp::tile_corner_(const TerrainComponent& t, int x, int y, float steps) const {
+glm::vec3 EditorApp::tile_corner_(const TerrainComponent& t, int x, int y, float steps, int face) const {
     const glm::mat4 m = t.owner && t.owner->get_transform() ? t.owner->get_transform()->transform().get_world_matrix() : glm::mat4(1.0f);
+    if (t.params.planet) {
+        const toy::world::PlanetLayout layout = t.params.layout();
+        if (face < 0) face = std::clamp(x / layout.n, 0, 5);
+        const glm::dvec3 p = layout.to_planet(face, static_cast<double>(x - face * layout.n) * t.params.tile_size,
+                                              static_cast<double>(y) * t.params.tile_size,
+                                              static_cast<double>(steps) * t.params.height_step);
+        return glm::vec3(m * glm::vec4(glm::vec3(p), 1.0f));
+    }
     return glm::vec3(m * glm::vec4(static_cast<float>(x) * t.params.tile_size, static_cast<float>(y) * t.params.tile_size,
                                    steps * t.params.height_step, 1.0f));
 }
@@ -165,7 +236,7 @@ void EditorApp::tile_dab_(const glm::ivec2& tile) {
     TileStroke& s = tile_stroke_;
     if (!s.data) return;
     TileMapData& d = *s.data;
-    const IRect brush = tile_brush_rect(tile, tile_brush_.size);
+    const IRect brush = tile_face_clip_(tile_brush_rect(tile, tile_brush_.size), tile);
     IRect changed;
     switch (s.tool) {
         case TileTool::Raise: {
@@ -254,8 +325,9 @@ void EditorApp::tile_end_stroke_() {
     if (!s.active) return;
     s.active = false;
     if (s.selecting) {
-        const IRect r{std::min(s.sel_start.x, s.last_tile.x), std::min(s.sel_start.y, s.last_tile.y),
-                      std::max(s.sel_start.x, s.last_tile.x) + 1, std::max(s.sel_start.y, s.last_tile.y) + 1};
+        const IRect r = tile_face_clip_(IRect{std::min(s.sel_start.x, s.last_tile.x), std::min(s.sel_start.y, s.last_tile.y),
+                                              std::max(s.sel_start.x, s.last_tile.x) + 1, std::max(s.sel_start.y, s.last_tile.y) + 1},
+                                        s.sel_start);
         if (!s.invert && !s.remove) tile_sel_.clear();
         tile_sel_.set_rect(r, !s.remove);
         s = TileStroke{};
@@ -379,7 +451,27 @@ void EditorApp::draw_tile_overlay_(imm::Context& ctx, const ViewProj& vp) {
     const TileMapData& d = *t->tiles;
     const float lift = 0.04f / std::max(0.01f, t->params.height_step);   // just above the top, in steps
     auto top_of = [&](int x, int y) { return static_cast<float>(std::max<int>(0, d.get(x, y).steps)) + lift; };
-    auto edge = [&](int x0, int y0, int x1, int y1, float steps, const glm::vec4& c, float w) {
+    // On a planet each edge is bent onto the globe (in a few segments), on its own tile's face.
+    const toy::world::PlanetLayout layout = t->params.layout();
+    const glm::mat4 m = t->owner && t->owner->get_transform() ? t->owner->get_transform()->transform().get_world_matrix()
+                                                               : glm::mat4(1.0f);
+    auto planet_corner = [&](glm::vec2 xy, float steps, int face) {
+        const glm::dvec3 p = layout.to_planet(face, (static_cast<double>(xy.x) - face * layout.n) * t->params.tile_size,
+                                              static_cast<double>(xy.y) * t->params.tile_size,
+                                              static_cast<double>(steps) * t->params.height_step);
+        return glm::vec3(m * glm::vec4(glm::vec3(p), 1.0f));
+    };
+    auto edge = [&](int x0, int y0, int x1, int y1, float steps, const glm::vec4& c, float w, int face) {
+        if (t->params.planet) {
+            constexpr int k_segments = 4;
+            const glm::vec2 a0(x0, y0), a1(x1, y1);
+            for (int i = 0; i < k_segments; ++i) {
+                auto a = vp.project(planet_corner(glm::mix(a0, a1, static_cast<float>(i) / k_segments), steps, face));
+                auto b = vp.project(planet_corner(glm::mix(a0, a1, static_cast<float>(i + 1) / k_segments), steps, face));
+                if (a && b) ctx.line(*a, *b, c, w);
+            }
+            return;
+        }
         auto a = vp.project(tile_corner_(*t, x0, y0, steps));
         auto b = vp.project(tile_corner_(*t, x1, y1, steps));
         if (a && b) ctx.line(*a, *b, c, w);
@@ -392,10 +484,11 @@ void EditorApp::draw_tile_overlay_(imm::Context& ctx, const ViewProj& vp) {
             for (int x = b.x0; x < b.x1; ++x) {
                 if (!in(x, y)) continue;
                 const float z = top_of(x, y);
-                if (!in(x, y - 1)) edge(x, y, x + 1, y, z, c, w);
-                if (!in(x, y + 1)) edge(x, y + 1, x + 1, y + 1, z, c, w);
-                if (!in(x - 1, y)) edge(x, y, x, y + 1, z, c, w);
-                if (!in(x + 1, y)) edge(x + 1, y, x + 1, y + 1, z, c, w);
+                const int face = t->params.planet ? std::clamp(x / layout.n, 0, 5) : 0;
+                if (!in(x, y - 1)) edge(x, y, x + 1, y, z, c, w, face);
+                if (!in(x, y + 1)) edge(x, y + 1, x + 1, y + 1, z, c, w, face);
+                if (!in(x - 1, y)) edge(x, y, x, y + 1, z, c, w, face);
+                if (!in(x + 1, y)) edge(x + 1, y, x + 1, y + 1, z, c, w, face);
             }
         }
     };
@@ -407,9 +500,11 @@ void EditorApp::draw_tile_overlay_(imm::Context& ctx, const ViewProj& vp) {
     }
     // A select drag's rectangle.
     if (tile_stroke_.active && tile_stroke_.selecting) {
-        const IRect r{std::min(tile_stroke_.sel_start.x, tile_stroke_.last_tile.x), std::min(tile_stroke_.sel_start.y, tile_stroke_.last_tile.y),
-                      std::max(tile_stroke_.sel_start.x, tile_stroke_.last_tile.x) + 1,
-                      std::max(tile_stroke_.sel_start.y, tile_stroke_.last_tile.y) + 1};
+        const IRect r = tile_face_clip_(IRect{std::min(tile_stroke_.sel_start.x, tile_stroke_.last_tile.x),
+                                              std::min(tile_stroke_.sel_start.y, tile_stroke_.last_tile.y),
+                                              std::max(tile_stroke_.sel_start.x, tile_stroke_.last_tile.x) + 1,
+                                              std::max(tile_stroke_.sel_start.y, tile_stroke_.last_tile.y) + 1},
+                                        tile_stroke_.sel_start);
         const glm::vec4 c = tile_stroke_.remove ? glm::vec4(1.0f, 0.45f, 0.4f, 0.95f) : glm::vec4(1.0f, 1.0f, 1.0f, 0.9f);
         outline(r, [&r](int x, int y) { return x >= r.x0 && x < r.x1 && y >= r.y0 && y < r.y1; }, c, 1.4f);
         return;
@@ -417,7 +512,7 @@ void EditorApp::draw_tile_overlay_(imm::Context& ctx, const ViewProj& vp) {
     if (!tile_hover_valid_) return;
     // The brush (or, selecting, the hovered tile).
     const IRect r = tile_brush_.tool == TileTool::Select ? IRect{tile_hover_.x, tile_hover_.y, tile_hover_.x + 1, tile_hover_.y + 1}
-                                                         : tile_brush_rect(tile_hover_, tile_brush_.size);
+                                                         : tile_face_clip_(tile_brush_rect(tile_hover_, tile_brush_.size), tile_hover_);
     const bool invert = tile_stroke_.active ? tile_stroke_.invert : false;
     const glm::vec4 c = invert ? glm::vec4(0.55f, 0.75f, 1.0f, 0.95f) : glm::vec4(1.0f, 1.0f, 1.0f, 0.9f);
     outline(r, [&r](int x, int y) { return x >= r.x0 && x < r.x1 && y >= r.y0 && y < r.y1; }, c, 1.5f);

@@ -48,6 +48,7 @@
 #include <coopa/maps/noise.h>
 #include <coopa/maps/water_field.h>
 
+#include <toyengine/world/planet.h>
 #include <toyengine/world/tile_map_data.h>
 #include <toyengine/world/tile_water.h>
 #include <toyengine/world/tile_types.h>
@@ -139,6 +140,22 @@ struct TerrainParams {
      *        sits higher, just under the bank tops.
      */
     float river_inset = 0.2f;
+
+    // --- Planets (planet.h) ---
+
+    /** @brief A planet: six faces of `face_tiles^2` tiles bent onto a sphere, instead of one flat grid. */
+    bool planet = false;
+    /** @brief Planet only: tiles along one face's edge (a multiple of `chunk_size`). */
+    std::int32_t face_tiles = 128;
+    /**
+     * @brief Most tiles one merged top or wall run may span; 0 is unlimited. A planet meshes every
+     *        tile on its own (1): a merged quad bent onto the sphere would cut a chord under the
+     *        tiles beside it and open cracks along its edges.
+     */
+    std::int32_t max_merge = 0;
+
+    /** @brief The planet's cube-sphere (planet.h). */
+    PlanetLayout layout() const { return PlanetLayout{face_tiles, tile_size}; }
 
     /** @brief World-space size of one chunk edge. */
     float chunk_world_size() const {
@@ -303,18 +320,30 @@ public:
         const double gx = (static_cast<double>(tile_x) + 0.5) / per_unit;
         const double gy = (static_cast<double>(tile_y) + 0.5) / per_unit;
         const coopa::maps::MapCenter& cell = cell_at(gx, gy);
+        return record_(cell, coopa::maps::MapPoint{gx, gy}, per_unit, glm::dvec3(1.0, 0.0, 0.0),
+                       glm::dvec3(0.0, 1.0, 0.0));
+    }
 
+private:
+    /**
+     * @brief A tile's record from the cell under it and its point on the map (`p`: 2D on a plane,
+     *        on the globe for a planet). `across` and `along` are the tile grid's x and y in the
+     *        map's frame, which a river's flow is measured against.
+     */
+    TileRecord record_(const coopa::maps::MapCenter& cell, const coopa::maps::MapPoint& p, double per_unit,
+                       const glm::dvec3& across, const glm::dvec3& along) const {
+        TileRecord r;
         r.biome       = static_cast<std::uint8_t>(cell.biome);
         r.temperature = TileRecord::quantise01(cell.temperature);
         r.moisture    = TileRecord::quantise01(cell.moisture);
         r.region      = cell.region >= 0 && cell.region < 0xFFFF ? static_cast<std::uint16_t>(cell.region) : TileRecord::k_no_id;
         r.country     = cell.country >= 0 && cell.country < 0xFFFF ? static_cast<std::uint16_t>(cell.country) : TileRecord::k_no_id;
         r.set(TileRecord::Coast, cell.coast);
-        r.set(TileRecord::River, graph_.channel_cut(cell, gx, gy, channels_) > 0.0);
+        r.set(TileRecord::River, graph_.channel_cut(cell, p, channels_) > 0.0);
 
         // A river narrower than a tile would land on a tile centre only here and there -- a dotted
         // line of pits. Asked at the grid's own resolution, mapcoopa widens it to a continuous run.
-        const coopa::maps::WaterSample water = water_->at(cell, gx, gy, k_river_min_half_tiles / per_unit);
+        const coopa::maps::WaterSample water = water_->at(cell, p, k_river_min_half_tiles / per_unit);
         r.steps = static_cast<std::int16_t>(std::min<std::int32_t>(steps_from_elevation_(water.ground), 32767));
         TileKind top = tile_kind_for_biome(cell.biome);
         if (water.wet()) {
@@ -331,13 +360,64 @@ public:
             // The bed rounds down: at least a step under the water, however shallow mapcoopa's.
             r.steps = static_cast<std::int16_t>(std::min<std::int32_t>(r.steps, level - 1));
             r.set_water(level, water.kind == coopa::maps::WaterKind::Sea, flowing);
-            if (flowing) r.flow = flow_octant(water.flow.x, water.flow.y);
+            if (flowing) {
+                const glm::dvec3 f(water.flow.x, water.flow.y, water.flow.z);
+                r.flow = flow_octant(glm::dot(f, across), glm::dot(f, along));
+            }
             top = TileKind::Sand;
         }
         r.set_top_kind(top);
         r.set_side_kind(side_kind_for(top));
         return r;
     }
+
+    /** @brief The cell whose site is nearest a point of a globe, walking from `hint` (a planet's bake). */
+    std::size_t nearest_on_globe_(const coopa::maps::MapPoint& p, std::size_t hint) const {
+        std::size_t best = hint < graph_.centers.size() ? hint : 0;
+        double distance = graph_.centers[best].point.distance_to(p);
+        for (int guard = 0; guard < 100000; ++guard) {
+            std::size_t next = best;
+            for (const coopa::maps::CenterId n : graph_.centers[best].neighbors) {
+                const double d = graph_.centers[static_cast<std::size_t>(n)].point.distance_to(p);
+                if (d < distance) {
+                    distance = d;
+                    next = static_cast<std::size_t>(n);
+                }
+            }
+            if (next == best) break;
+            best = next;
+        }
+        return best;
+    }
+
+    /** @brief A planet's bake: every tile of the six faces from mapcoopa's globe. */
+    void bake_planet_(TileMapData& out) const {
+        const PlanetLayout layout = params_.layout();
+        const std::int32_t n = layout.n;
+        out.resize(6 * n, n);
+        const double map_radius = graph_.sphere_radius > 0.0 ? graph_.sphere_radius : 1.0;
+        // Tiles per map grid unit along a face (a face spans a quarter of the globe's circumference).
+        const double per_unit = static_cast<double>(n) / (map_radius * PlanetLayout::k_pi * 0.5);
+        const double ts = params_.tile_size;
+        std::size_t hint = 0;
+        for (std::int32_t face = 0; face < 6; ++face) {
+            for (std::int32_t j = 0; j < n; ++j) {
+                for (std::int32_t i = 0; i < n; ++i) {
+                    const glm::dvec3 dir = layout.direction(face, (i + 0.5) * ts, (j + 0.5) * ts);
+                    const glm::dvec3 across = glm::normalize(layout.direction(face, (i + 1.0) * ts, (j + 0.5) * ts) -
+                                                             layout.direction(face, i * ts, (j + 0.5) * ts));
+                    const glm::dvec3 along = glm::normalize(layout.direction(face, (i + 0.5) * ts, (j + 1.0) * ts) -
+                                                            layout.direction(face, (i + 0.5) * ts, j * ts));
+                    const coopa::maps::MapPoint p{dir.x * map_radius, dir.y * map_radius, dir.z * map_radius};
+                    hint = nearest_on_globe_(p, hint);
+                    out.at(face * n + i, j) = record_(graph_.centers[hint], p, per_unit, across, along);
+                }
+            }
+        }
+        settle_water_rounding(out, IRect{0, 0, 6 * n, n}, &layout);   // tile_water.h
+    }
+
+public:
 
     /**
      * @brief Fills `out` (resized to the whole world) with every tile, then reconciles the
@@ -351,6 +431,10 @@ public:
      * - a flooded tile's bed rounds DOWN to at least one step under its terrace -- the bed.
      */
     void bake(TileMapData& out) const {
+        if (params_.planet) {
+            bake_planet_(out);
+            return;
+        }
         const std::int32_t n = tiles_per_axis();
         out.resize(n, n);
         for (std::int32_t y = 0; y < n; ++y)

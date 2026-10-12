@@ -152,10 +152,48 @@ float WaterSystem::render_time() const {
     return time_ - world.config().fixed_dt * (1.0f - world.interpolation_alpha());
 }
 
+namespace {
+
+/**
+ * @brief A local-frame body's surface at local XY `lp` (in its own frame), waves included -- the
+ *        way water_surface.glsl draws it: the calm surface, lifted along the body's up by the
+ *        waves of the world position there seen through the three axis planes (triplanar), so a
+ *        planet's water pieces agree where they meet. False off the body.
+ */
+bool frame_sample(const WaterBody& wb, const glm::vec2& lp, float t, const WaveQueryOptions& opt, WaterSample& out) {
+    if (!wb.baked) return false;
+    WaterBaseSample base;
+    if (!wb.query.sample_base(lp, base)) return false;
+    out.surface_height = base.height;
+    out.normal = glm::vec3(0.0f, 0.0f, 1.0f);
+    out.flow = base.flow;
+    out.depth = base.depth;
+    out.turbulence = base.turbulence;
+    const WaveSet& waves = wb.wave_set();
+    if (waves.calm) return true;
+    const glm::vec3 at = glm::vec3(wb.baked_world * glm::vec4(lp, base.height, 1.0f));
+    const glm::vec3 n0 = glm::normalize(glm::vec3(wb.baked_world[2]));
+    glm::vec3 blend = n0 * n0;
+    blend /= std::max(blend.x + blend.y + blend.z, 1e-4f);
+    const float atten = depth_attenuation(base.depth, waves.waves[0].lambda);
+    const float dist = opt.has_focus ? glm::distance(opt.focus, at) : 0.0f;
+    const glm::vec2 planes[3] = {glm::vec2(at.y, at.z), glm::vec2(at.x, at.z), glm::vec2(at.x, at.y)};
+    float h = 0.0f;
+    for (int k = 0; k < 3; ++k) {
+        if (blend[k] < 0.02f) continue;
+        h += blend[k] * evaluate(waves, planes[k], t, atten, dist).displacement.z;
+    }
+    out.surface_height = base.height + h;
+    return true;
+}
+
+} // namespace
+
 bool WaterSystem::sample(const glm::vec2& p, WaterSample& out, const WaterBody** which) const {
     bool found = false;
     const WaveQueryOptions opt = wave_options_();
     for (const WaterBody* body : bodies_) {
+        if (body->local_frame) continue;   // its query is over its own frame, not world XY
         WaterSample s;
         if (!body->sample(p, time_, s, opt)) continue;
         if (!found || s.surface_height > out.surface_height) {
@@ -177,11 +215,29 @@ WaterSystem::UnderwaterInfo WaterSystem::underwater_at(const glm::vec3& p) const
     UnderwaterInfo info;
     WaterSample s;
     const WaterBody* body = nullptr;
-    if (!sample(glm::vec2(p), s, &body)) return info;
-    info.body = body;
-    info.surface_height = s.surface_height;
-    info.depth = s.surface_height - p.z;
-    info.underwater = info.depth > 0.0f && info.depth < s.depth + 1.0f;
+    if (sample(glm::vec2(p), s, &body)) {
+        info.body = body;
+        info.surface_height = s.surface_height;
+        info.depth = s.surface_height - p.z;
+        info.underwater = info.depth > 0.0f && info.depth < s.depth + 1.0f;
+        return info;
+    }
+    // Local-frame bodies (a planet's water): measured along each body's own up.
+    const WaveQueryOptions opt = wave_options_();
+    for (const WaterBody* wb : bodies_) {
+        if (!wb->local_frame || !wb->baked) continue;
+        const glm::vec3 lp = glm::vec3(glm::inverse(wb->baked_world) * glm::vec4(p, 1.0f));
+        WaterSample sc;
+        if (!frame_sample(*wb, glm::vec2(lp), time_, opt, sc)) continue;
+        const float depth = sc.surface_height - lp.z;
+        if (info.body && depth <= info.depth) continue;
+        const glm::vec3 up = glm::normalize(glm::vec3(wb->baked_world[2]));
+        info.body = wb;
+        info.up = up;
+        info.surface_height = glm::dot(glm::vec3(wb->baked_world * glm::vec4(glm::vec2(lp), sc.surface_height, 1.0f)), up);
+        info.depth = depth;
+        info.underwater = depth > 0.0f && depth < sc.depth + 1.0f;
+    }
     return info;
 }
 
@@ -213,8 +269,11 @@ void WaterSystem::resolve_focus_(coopa::scene::Scene& scene) {
 
 float WaterSystem::distance_to_body_(const WaterBody& body) const {
     if (!has_focus_ || !body.query.valid()) return 0.0f;
-    const glm::vec3 c = glm::clamp(focus_, body.query.bounds_min(), body.query.bounds_max());
-    return glm::distance(c, focus_);
+    const glm::vec3 f = body.local_frame && body.baked
+                            ? glm::vec3(glm::inverse(body.baked_world) * glm::vec4(focus_, 1.0f))
+                            : focus_;
+    const glm::vec3 c = glm::clamp(f, body.query.bounds_min(), body.query.bounds_max());
+    return glm::distance(c, f);
 }
 
 WaveQueryOptions WaterSystem::wave_options_() const {
@@ -339,6 +398,14 @@ bool WaterSystem::static_raycast_(const glm::vec3& origin, const glm::vec3& dir,
     return true;
 }
 
+float WaterSystem::probe_depth_along_(const glm::vec3& p, const glm::vec3& down, float max_depth) const {
+    FlowRayHit up;
+    if (static_raycast_raw_(p, -down, 25.0f, up) && glm::dot(up.normal, -down) > 0.0f) return 0.0f;
+    FlowRayHit hit;
+    if (static_raycast_raw_(p - down * 0.01f, down, max_depth, hit)) return std::max(hit.distance - 0.01f, 0.0f);
+    return max_depth;
+}
+
 float WaterSystem::probe_depth_(const glm::vec3& p, float max_depth) const {
     // Hitting an UP-facing surface on the way up means `p` is beneath ground (a water mesh
     // extending under its banks). A down-facing one (a pier deck's underside) is an
@@ -379,8 +446,11 @@ void WaterSystem::bake_(coopa::scene::Scene& scene, WaterBody& body, const glm::
 
     const std::size_t n = local_pos.size();
     std::vector<glm::vec3> world_pos(n);
+    // A local-frame body (a planet's water) works in its own frame: its "world" is its local space.
+    const bool frame = body.local_frame;
     run_range(&par_verts, n, [&](std::size_t begin, std::size_t end) {
-        for (std::size_t i = begin; i < end; ++i) world_pos[i] = glm::vec3(world * glm::vec4(local_pos[i], 1.0f));
+        for (std::size_t i = begin; i < end; ++i)
+            world_pos[i] = frame ? local_pos[i] : glm::vec3(world * glm::vec4(local_pos[i], 1.0f));
     });
 
     std::vector<glm::vec3> flow(n, glm::vec3(0.0f));
@@ -406,9 +476,17 @@ void WaterSystem::bake_(coopa::scene::Scene& scene, WaterBody& body, const glm::
         // Two raycasts a vertex, independent of each other: spread over the job workers.
         // PhysicsWorld's queries are read-only and safe to run concurrently (thread_local
         // traversal stacks -- see broadphase/aabb_tree.h).
-        run_range(&par_rays, n, [&](std::size_t begin, std::size_t end) {
-            for (std::size_t i = begin; i < end; ++i) depth[i] = probe_depth_(world_pos[i], body.max_depth);
-        });
+        if (frame) {
+            const glm::vec3 down = glm::normalize(glm::vec3(world * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f)));
+            run_range(&par_rays, n, [&](std::size_t begin, std::size_t end) {
+                for (std::size_t i = begin; i < end; ++i)
+                    depth[i] = probe_depth_along_(glm::vec3(world * glm::vec4(local_pos[i], 1.0f)), down, body.max_depth);
+            });
+        } else {
+            run_range(&par_rays, n, [&](std::size_t begin, std::size_t end) {
+                for (std::size_t i = begin; i < end; ++i) depth[i] = probe_depth_(world_pos[i], body.max_depth);
+            });
+        }
     }
 
     // CPU query (world space).
@@ -473,7 +551,8 @@ void WaterSystem::publish_gpu_mesh_(coopa::scene::Scene& scene, WaterBody& body,
 
     const ParallelFor par_verts = parallel_(k_parallel_vertices);
     const ParallelFor par_tiles = parallel_(k_parallel_tiles);
-    const auto verts = make_vertices_(world, local_pos, indices, flow_ws, depth, turbulence, &par_verts, grid_res >= 1);
+    // A local-frame body's flow is already in its own frame (its bake ran there).
+    const auto verts = make_vertices_(body.local_frame ? glm::mat4(1.0f) : world, local_pos, indices, flow_ws, depth, turbulence, &par_verts, grid_res >= 1);
 
     // Bounds inflation for what the vertex shader adds: the full wave sum, vertically and
     // horizontally (local space; a scaled body is rare and the margin is generous) -- of the
@@ -659,7 +738,8 @@ void WaterSystem::apply_material_(WaterBody& body) {
     auto* renderer = body.owner->get_component<coopa::gfx::engine::components::MeshRenderer>();
     if (!renderer) return;
     auto& m = renderer->material;
-    m.shader               = "water";
+    // A local-frame body (a planet's water) draws with the water shader's planet build.
+    m.shader               = body.local_frame ? "water_planet" : "water";
     m.shader_params        = body.live_waves().pack();
     m.shader_params_ext[0] = glm::vec4(body.foam_color, body.foam_amount);
     m.shader_params_ext[1] = glm::vec4(body.shore_foam_depth, body.edge_fade_depth,
@@ -892,6 +972,9 @@ void WaterSystem::substep_(coopa::physx::PhysicsWorld& world, float h) {
 
 bool WaterSystem::floater_substep_(BuoyantEntry& e, coopa::physx::PhysicsWorld& world, const glm::vec3& gravity, float h,
                       const WaveQueryOptions& opt) {
+    for (const WaterBody* wb : active_bodies_) {
+        if (wb->local_frame) return frame_floater_substep_(e, world, h, opt);
+    }
     const float g = std::max(-gravity.z, 0.0f);
     Buoyancy& buoy = *e.buoyancy;
     auto* body = world.get_body(e.rigidbody->body_id());
@@ -993,6 +1076,99 @@ bool WaterSystem::floater_substep_(BuoyantEntry& e, coopa::physx::PhysicsWorld& 
     // almost entirely below the COM of a floating body, couples sway into roll and yaw,
     // and leaves a slow rolling drift that never damps (and never lets a calm floater
     // sleep). What carries a body downstream is exactly this term.
+    const float frac = buoy.submerged_fraction;
+    const glm::vec3 flow = flow_acc / vol_sub;
+    const float rho = density_acc / vol_sub;
+    glm::vec3 v_rel = body->linear_velocity - flow;
+    v_rel -= up * glm::dot(v_rel, up);
+    const float quad = 0.5f * rho * buoy.form_drag * area_sub * glm::length(v_rel) * h / std::max(body->mass, 1e-4f);
+    const float removed = std::min(1.0f, (1.0f - std::exp(-buoy.linear_drag * frac * h)) + quad);
+    body->linear_velocity -= v_rel * removed;
+    body->angular_velocity *= std::exp(-buoy.angular_drag * frac * h);
+    return true;
+}
+
+bool WaterSystem::frame_floater_substep_(BuoyantEntry& e, coopa::physx::PhysicsWorld& world, float h,
+                                         const WaveQueryOptions& opt) {
+    Buoyancy& buoy = *e.buoyancy;
+    auto* body = world.get_body(e.rigidbody->body_id());
+    if (!body || body->type != coopa::physx::dynamics::BodyType::Dynamic) return false;
+
+    // Each candidate body's frame: world -> local, and its up (local +Z) in world.
+    struct Candidate {
+        const WaterBody* wb;
+        glm::mat4 to_local;
+        glm::mat3 to_world;   // rotation only, local -> world
+    };
+    std::array<Candidate, 6> cand{};
+    int cand_n = 0;
+    for (const WaterBody* wb : active_bodies_) {
+        if (!wb->baked) continue;
+        const glm::mat4 to_local = wb->local_frame ? glm::inverse(wb->baked_world) : glm::mat4(1.0f);
+        const glm::vec3 lp = glm::vec3(to_local * glm::vec4(body->position, 1.0f));
+        const glm::vec2 lo = glm::vec2(lp) - e.bound_radius, hi = glm::vec2(lp) + e.bound_radius;
+        if (!wb->query.overlaps_xy(lo, hi)) continue;
+        if (lp.z - e.bound_radius > wb->query.bounds_max().z + wb->live_waves().amplitude * 2.0f) continue;
+        if (cand_n < static_cast<int>(cand.size()))
+            cand[cand_n++] = {wb, to_local, wb->local_frame ? glm::mat3(wb->baked_world) : glm::mat3(1.0f)};
+    }
+    if (cand_n == 0) {
+        buoy.in_water = false;
+        buoy.submerged_fraction = 0.0f;
+        return false;
+    }
+    if (!body->awake) body->wake();
+    buoy.in_water = false;
+
+    const glm::mat3 rot = glm::mat3_cast(body->orientation);
+    const glm::vec3 com_local = e.rigidbody->local_center_of_mass();
+    const float m_share = body->mass / static_cast<float>(buoy.resolved.size());
+    float vol_total = 0.0f, vol_sub = 0.0f, area_sub = 0.0f, density_acc = 0.0f;
+    glm::vec3 flow_acc(0.0f);
+    const glm::vec3 gravity = world.gravity_at(body->position);
+    const float g = glm::length(gravity);
+    const glm::vec3 up = g > 0.0f ? -gravity / g : glm::vec3(0.0f, 0.0f, 1.0f);
+
+    for (const Pontoon& p : buoy.resolved) {
+        const glm::vec3 wp = body->position + rot * (p.local - com_local);
+        vol_total += p.volume;
+        const float r = std::max(p.half_extents.z, 1e-3f);
+        // The deepest submersion among the candidates, each measured along its own up.
+        float best = 0.0f;
+        glm::vec3 flow(0.0f);
+        float density = 1000.0f;
+        bool hit = false;
+        for (int c = 0; c < cand_n; ++c) {
+            const glm::vec3 lp = glm::vec3(cand[c].to_local * glm::vec4(wp, 1.0f));
+            WaterSample sc;
+            const bool ok = cand[c].wb->local_frame ? frame_sample(*cand[c].wb, glm::vec2(lp), time_, opt, sc)
+                                                    : cand[c].wb->sample(glm::vec2(lp), time_, sc, opt);
+            if (!ok) continue;
+            const float f = glm::clamp((sc.surface_height - (lp.z - r)) / (2.0f * r), 0.0f, 1.0f);
+            if (!hit || f > best) {
+                best = f;
+                flow = cand[c].to_world * sc.flow;
+                density = cand[c].wb->density;
+                hit = true;
+            }
+        }
+        if (!hit || best <= 0.0f) continue;
+        const float f = best;
+        buoy.in_water = true;
+        vol_sub     += p.volume * f;
+        flow_acc    += flow * (p.volume * f);
+        density_acc += density * (p.volume * f);
+        const float area = std::cbrt(p.volume * p.volume);
+        area_sub    += area * f;
+        const float v_up = glm::dot(body->velocity_at_point(wp) - flow, up);
+        const float quad = 0.5f * density * buoy.form_drag * area * f * std::abs(v_up) * h / std::max(m_share, 1e-4f);
+        const float removed = std::min(1.0f, (1.0f - std::exp(-buoy.linear_drag * f * h)) + quad);
+        const float j = density * g * p.volume * f * buoy.buoyancy_scale * h - v_up * removed * m_share;
+        body->apply_impulse_at_position(up * j, wp, /*wake_body=*/false);
+    }
+
+    buoy.submerged_fraction = vol_total > 0.0f ? vol_sub / vol_total : 0.0f;
+    if (vol_sub <= 0.0f) return true;
     const float frac = buoy.submerged_fraction;
     const glm::vec3 flow = flow_acc / vol_sub;
     const float rho = density_acc / vol_sub;

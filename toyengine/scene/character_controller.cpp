@@ -6,6 +6,7 @@
 #include <coopa/scene/scene.h>
 #include <coopa/scene/scene_object.h>
 #include <coopa/util/transform.h>
+#include <glm/gtx/quaternion.hpp>
 #include <physxcoopa/components/capsule_collider.h>
 #include <physxcoopa/components/rigidbody.h>
 
@@ -100,6 +101,11 @@ void CharacterController::advance(float dt, coopa::physx::system::PhysicsSystem*
     ensure_body_();
     coopa::util::Transform& t = tc->transform();
     coopa::physx::PhysicsWorld& world = physics->world();
+    if (world.gravity_source_count() > 0) {
+        advance_field_(dt, physics, jump_pressed);
+        return;
+    }
+    field_ = false;
     const glm::vec3 up = ch::k_up;
     const float g = std::abs(world.gravity().z) * gravity_scale;
 
@@ -247,6 +253,179 @@ void CharacterController::advance(float dt, coopa::physx::system::PhysicsSystem*
 
     t.set_position(r.position - up * (0.5f * height));
     t.set_rotation(glm::vec3(0.0f, 0.0f, yaw_deg_));
+}
+
+void CharacterController::advance_field_(float dt, coopa::physx::system::PhysicsSystem* physics, bool jump_pressed) {
+    namespace ch = coopa::physx::character;
+    coopa::util::Transform& t = owner->get_transform()->transform();
+    coopa::physx::PhysicsWorld& world = physics->world();
+    const glm::vec3 feet0 = t.position();
+
+    // --- The frame: up from the field at the feet; yaw-0 forward carried over from last frame ---
+    const glm::vec3 pull = world.gravity_at(feet0);
+    const float g = glm::length(pull) * gravity_scale;
+    const glm::vec3 up = world.up_at(feet0);
+    if (!field_) {
+        // Entering the field: start from the transform's own orientation.
+        field_y_ = glm::vec3(t.get_world_matrix()[1]);
+        field_up_ = up;
+    }
+    glm::vec3 fy = field_y_ - up * glm::dot(field_y_, up);
+    if (glm::length(fy) < 1e-4f) {
+        fy = field_up_ - up * glm::dot(field_up_, up);   // walked over the old forward: use the old up
+        if (glm::length(fy) < 1e-4f) fy = std::abs(up.x) < 0.9f ? glm::vec3(1, 0, 0) : glm::vec3(0, 1, 0);
+        fy -= up * glm::dot(fy, up);
+    }
+    fy = glm::normalize(fy);
+    const glm::vec3 fx = glm::cross(fy, up);
+    field_ = true;
+    field_up_ = up;
+    field_y_ = fy;
+    const auto to_world = [&](const glm::vec3& v) { return fx * v.x + fy * v.y + up * v.z; };
+    const auto to_frame = [&](const glm::vec3& v) { return glm::vec3(glm::dot(v, fx), glm::dot(v, fy), glm::dot(v, up)); };
+
+    // --- Horizontal velocity toward the input target (in the frame) ---
+    glm::vec2 input = move_input;
+    const float in_len = glm::length(input);
+    if (in_len > 1.0f) input /= in_len;
+    float by = glm::radians(move_basis_yaw_deg);
+    if (glm::length(move_basis_forward) > 1e-4f) {
+        glm::vec3 f = to_frame(move_basis_forward);
+        if (glm::length(glm::vec2(f)) > 1e-4f) by = std::atan2(-f.x, f.y);
+    }
+    const glm::vec2 right(std::cos(by), std::sin(by));
+    const glm::vec2 forward(-std::sin(by), std::cos(by));
+    const glm::vec2 wish = (right * input.x + forward * input.y) * move_speed * (sprint ? sprint_multiplier : 1.0f);
+    const float accel = acceleration * (grounded_ ? 1.0f : std::clamp(air_control, 0.0f, 1.0f));
+    const glm::vec2 dv = wish - h_velocity_;
+    const float dv_len = glm::length(dv);
+    const float step = accel * dt;
+    h_velocity_ = (dv_len <= step || dv_len < 1e-6f) ? wish : h_velocity_ + dv * (step / dv_len);
+
+    // --- Jump ---
+    jump_buffer_timer_ = jump_pressed ? jump_buffer + 1e-6f : std::max(0.0f, jump_buffer_timer_ - dt);
+    const bool can_jump = !jumped_ && (grounded_ || air_time_ <= coyote_time);
+    bool jumped_now = false;
+    if (jump_buffer_timer_ > 0.0f && can_jump && jump_height > 0.0f) {
+        v_velocity_ = std::sqrt(2.0f * g * jump_height);
+        jumped_ = true;
+        jumped_now = true;
+        jump_buffer_timer_ = 0.0f;
+    }
+
+    // --- Displacement (frame) ---
+    glm::vec3 disp(0.0f);
+    if (use_root_motion && grounded_ && !jumped_now) {
+        const float fyaw = glm::radians(yaw_deg_);
+        const glm::vec2 ax(std::cos(fyaw), std::sin(fyaw)), af(-std::sin(fyaw), std::cos(fyaw));
+        const glm::vec2 rm = ax * root_motion_.x + af * root_motion_.y;
+        disp += glm::vec3(rm, 0.0f);
+        yaw_deg_ += root_yaw_;
+        h_velocity_ = rm / dt;
+    } else {
+        disp += glm::vec3(h_velocity_ * dt, 0.0f);
+    }
+    root_motion_ = glm::vec3(0.0f);
+    root_yaw_ = 0.0f;
+    if (grounded_ && !jumped_now) v_velocity_ = std::min(v_velocity_, 0.0f);
+    disp.z += v_velocity_ * dt - 0.5f * g * dt * dt;
+    const float v_before = v_velocity_ - g * dt;
+    v_velocity_ = v_before;
+
+    // --- Move ---
+    coopa::physx::query::QueryFilter filter;
+    filter.include_triggers = false;
+    if (rigidbody_) filter.ignore = rigidbody_->body_id();
+    filter.predicate = [physics, self = owner](coopa::physx::dynamics::BodyId id) {
+        const coopa::physx::components::Collider* c = physics->collider_for(id);
+        if (!c) return true;
+        for (const coopa::scene::SceneObject* o = c->owner ? c->owner->parent() : nullptr; o; o = o->parent())
+            if (o == self) return false;
+        return true;
+    };
+    const glm::vec3 centre = feet0 + up * (0.5f * height);
+    ch::MoveOptions opt;
+    opt.was_grounded = grounded_ && !jumped_now;
+    opt.jumping = jumped_now || v_velocity_ > 0.0f;
+    opt.up = up;
+    last_move_ = ch::move(world, centre, to_world(disp), filter, motor_settings(), opt);
+    const ch::MoveResult& r = last_move_;
+
+    // --- Respond to what was hit (normals taken into the frame: the flat rules then apply) ---
+    for (const ch::MotorHit& hit : r.collisions) {
+        const glm::vec3 n = to_frame(hit.normal);
+        if (!hit.walkable) {
+            glm::vec3 nh(n.x, n.y, 0.0f);
+            if (glm::length(nh) > 1e-4f) {
+                nh = glm::normalize(nh);
+                const glm::vec2 n2(nh.x, nh.y);
+                const float into = glm::dot(h_velocity_, n2);
+                if (push_dynamic_bodies && into < 0.0f) {
+                    ch::MotorHit flat = hit;
+                    flat.normal = to_world(nh);   // push_ pushes along the normal's level part
+                    push_(world, flat, -into);
+                }
+                if (into < 0.0f) h_velocity_ -= n2 * into;
+            }
+            if (n.z < -0.3f && v_velocity_ > 0.0f) v_velocity_ = 0.0f;
+            if (n.z > 0.02f && v_velocity_ < 0.0f) {
+                glm::vec3 v(h_velocity_, v_velocity_);
+                v -= n * std::min(0.0f, glm::dot(v, n));
+                h_velocity_ = glm::vec2(v.x, v.y);
+                v_velocity_ = v.z;
+            }
+        }
+        if (on_collision.slot_count() > 0) {
+            CharacterHit ch_hit;
+            ch_hit.point = hit.point;
+            ch_hit.normal = hit.normal;
+            ch_hit.move_direction = hit.direction;
+            ch_hit.collider = physics->collider_for(hit.body);
+            ch_hit.object = ch_hit.collider ? ch_hit.collider->owner : nullptr;
+            on_collision.emit(ch_hit);
+        }
+    }
+    if (r.hit_ceiling && v_velocity_ > 0.0f) v_velocity_ = 0.0f;
+
+    const bool was_grounded = grounded_;
+    grounded_ = r.grounded;
+    ground_normal_ = r.grounded ? r.ground_normal : up;
+    ground_body_ = coopa::physx::dynamics::BodyId{};
+    if (grounded_) {
+        if (!was_grounded && on_landed.slot_count() > 0) on_landed.emit(std::max(0.0f, -v_before));
+        if (v_velocity_ < 0.0f) v_velocity_ = 0.0f;
+        jumped_ = false;
+        air_time_ = 0.0f;
+    } else {
+        air_time_ += dt;
+    }
+    if (jumped_now && on_jumped.slot_count() > 0) on_jumped.emit();
+
+    // --- Facing (yaw in the frame) ---
+    if (face_movement && !facing_override_) {
+        const glm::vec2 face = in_len > 1e-3f ? wish : glm::vec2(0.0f);
+        if (glm::length(face) > 1e-3f) {
+            const float target = glm::degrees(std::atan2(-face.x, face.y));
+            float diff = std::remainder(target - yaw_deg_, 360.0f);
+            const float max_turn = turn_speed * dt;
+            if (turn_speed > 0.0f) diff = std::clamp(diff, -max_turn, max_turn);
+            yaw_deg_ += diff;
+        }
+    }
+    facing_override_ = false;
+    yaw_deg_ = std::remainder(yaw_deg_, 360.0f);
+
+    // The frame moves with the feet: carry it to where they ended up, so next frame's velocity
+    // (held in the frame) points the same way along the ground.
+    const glm::vec3 feet1 = r.position - up * (0.5f * height);
+    const glm::vec3 up1 = world.up_at(feet1);
+    const glm::quat carry = glm::rotation(up, up1);
+    field_up_ = up1;
+    field_y_ = glm::normalize(carry * fy);
+    const glm::vec3 fx1 = glm::cross(field_y_, up1);
+    const glm::quat frame = glm::quat_cast(glm::mat3(fx1, field_y_, up1));
+    t.set_position(r.position - up1 * (0.5f * height));
+    t.set_rotation_quat(frame * glm::angleAxis(glm::radians(yaw_deg_), glm::vec3(0.0f, 0.0f, 1.0f)));
 }
 
 void CharacterController::push_(coopa::physx::PhysicsWorld& world, const coopa::physx::character::MotorHit& hit, float speed) {

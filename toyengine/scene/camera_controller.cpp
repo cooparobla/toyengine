@@ -8,6 +8,8 @@
 #include <physxcoopa/system/physics_system.h>
 #include <toyengine/scene/character_controller.h>
 
+#include <glm/gtx/quaternion.hpp>
+
 namespace toy {
 namespace scene {
 
@@ -81,6 +83,11 @@ glm::vec3 CameraController::resolve_target_() const {
 
 void CameraController::update_orbit_(coopa::util::Transform& t, float dt) {
     glm::vec3 desired = resolve_target_();
+    if (field_ && target_offset != glm::vec3(0.0f)) {
+        // In a gravity field the offset is in the target's own frame (z along its up): a world
+        // offset would point sideways, or into the ground, round the planet.
+        desired += glm::mat3(glm::cross(field_y_, field_up_), field_y_, field_up_) * target_offset - target_offset;
+    }
     if (follow_smoothing <= 0.0f) {
         smoothed_target_ = desired;
     } else {
@@ -137,6 +144,11 @@ void CameraController::update_orbit_(coopa::util::Transform& t, float dt) {
         -smoothed_distance_ * std::cos(e) * std::cos(phi),
         smoothed_distance_ * std::sin(e));
 
+    // On a planet the orbit is measured in the target's own frame (up away from the planet).
+    glm::mat3 frame(1.0f);
+    const bool field = field_frame_(smoothed_target_, frame);
+    if (field) offset = frame * offset;
+
     float applied = smoothed_distance_;
     if (collide && !tracker.empty() && smoothed_distance_ > 1e-4f) {
         const float allowed = collision_limit_(smoothed_target_, offset / smoothed_distance_, smoothed_distance_);
@@ -158,7 +170,34 @@ void CameraController::update_orbit_(coopa::util::Transform& t, float dt) {
     if (smoothed_distance_ > 1e-4f) offset *= applied / smoothed_distance_;
 
     t.set_position(smoothed_target_ + offset);
+    if (field) {
+        t.set_rotation_quat(glm::quat_cast(frame) *
+                            glm::quat(glm::radians(glm::vec3(90.0f - smoothed_pitch_deg_, 0.0f, smoothed_yaw_deg_))));
+        return;
+    }
     t.set_rotation(glm::vec3(90.0f - smoothed_pitch_deg_, 0.0f, smoothed_yaw_deg_));
+}
+
+bool CameraController::field_frame_(const glm::vec3& target, glm::mat3& out) {
+    auto* physics = scene ? dynamic_cast<coopa::physx::system::PhysicsSystem*>(scene->find_system("Physics")) : nullptr;
+    if (!physics || physics->world().gravity_source_count() == 0) {
+        field_ = false;
+        return false;
+    }
+    const glm::vec3 up = physics->world().up_at(target);
+    if (!field_) {
+        field_up_ = up;
+        field_y_ = glm::vec3(0.0f, 1.0f, 0.0f);
+    }
+    glm::vec3 fy = glm::rotation(field_up_, up) * field_y_;   // carried along with the target
+    fy -= up * glm::dot(fy, up);
+    if (glm::length(fy) < 1e-4f) fy = std::abs(up.x) < 0.9f ? glm::vec3(1, 0, 0) - up * up.x : glm::vec3(0, 1, 0) - up * up.y;
+    fy = glm::normalize(fy);
+    field_ = true;
+    field_up_ = up;
+    field_y_ = fy;
+    out = glm::mat3(glm::cross(fy, up), fy, up);
+    return true;
 }
 
 float CameraController::collision_limit_(const glm::vec3& target, const glm::vec3& dir, float distance) const {
@@ -216,7 +255,12 @@ void CameraController::update_fly_(coopa::util::Transform& t, float dt) {
     glm::vec3 pos = t.position();
     pos += right * move_input.x * move_speed * dt;
     pos += forward * move_input.y * move_speed * dt;
-    pos += glm::vec3(0.0f, 0.0f, 1.0f) * move_input.z * move_speed * dt; // world-up, avoids roll
+    // World up, which avoids roll -- or, in a gravity field (a planet), the camera's own up.
+    glm::vec3 lift(0.0f, 0.0f, 1.0f);
+    if (auto* physics = scene ? dynamic_cast<coopa::physx::system::PhysicsSystem*>(scene->find_system("Physics")) : nullptr;
+        physics && physics->world().gravity_source_count() > 0)
+        lift = physics->world().up_at(pos);
+    pos += lift * move_input.z * move_speed * dt;
     t.set_position(pos);
 
     if (look_input.x != 0.0f || look_input.y != 0.0f) {

@@ -1,4 +1,5 @@
 #include <toyengine/render/toy_render_pipeline.h>
+#include <glm/gtx/quaternion.hpp>
 
 #include <coopa/job/engine.h>
 #include <coopa/job/parallel_for.h>
@@ -343,6 +344,7 @@ bool ToyRenderPipeline::render(coopa::gfx::presentation::Renderer& renderer, coo
     // to the shaders, record_clouds_() renders it).
     cloud_shadow_place_ = passes::CloudShadowPass::place(glm::vec2(cam_pos), cloud_state_.shadow_distance);
 
+    frame_cam_pos_ = cam_pos;
     // Must follow the light_frame_ assignment above: update_lights_() writes through
     // current_light_data(), which reads light_frame_. Writing first would put this frame's
     // light colours in the other slot while the shadow-matrix write below landed correctly.
@@ -1052,7 +1054,8 @@ void ToyRenderPipeline::build_post_chain_(coopa::gfx::pipeline::RenderPass& swap
     if (config_.underwater_enabled) {
         underwater_pass_ = std::make_unique<passes::UnderwaterPass>(
             device_, underwater_target_.render_pass_object(),
-            config_.shaders("fullscreen.vert"), config_.shaders("underwater.frag"));
+            config_.shaders("fullscreen.vert"), config_.shaders("underwater.frag"),
+            config_.shaders("underwater_planet.frag"));
         underwater_pass_->set_source_images(pre_volumetrics_view_typed_, gbuffer_target_.g1_view_typed(),
                                             gbuffer_target_.g2_view_typed(), linear_sampler_);
         pre_volumetrics_view_typed_ = underwater_target_.color_view_typed();
@@ -1414,7 +1417,7 @@ void ToyRenderPipeline::record_physical_sky_(coopa::gfx::command::CommandBuffer&
         sky_atmosphere_pass_->update_luts(cmd, st.media);
         passes::SkyAtmospherePass::ViewParams vp;
         vp.atmo = passes::SkyAtmospherePass::AtmosphereGpu::of(st.media);
-        vp.sun = glm::vec4(st.sun_to, st.moon_ratio);
+        vp.sun = glm::vec4(planet_ ? sky_frame_() * st.sun_to : st.sun_to, st.moon_ratio);
         vp.view = glm::vec4(st.media.bottom_radius + std::max(ctx.cam_pos.z, 0.0f) * 0.001f + 0.01f,
                             static_cast<float>(sky_quality_steps_()), 0.0f, 0.0f);
         sky_atmosphere_pass_->render_view(cmd, vp);
@@ -1756,6 +1759,8 @@ void ToyRenderPipeline::record_scene_(coopa::gfx::command::CommandBuffer& cmd, c
     // The sky is drawn by this same pass at background pixels (see toy_lighting.frag),
     // so sky and lighting share one fullscreen draw.
     lighting_pc.sky_inv_view_proj    = glm::inverse(ctx.proj * ctx.view);
+    // On a planet the sky is drawn in the camera's own frame there (sky_frame_()).
+    if (planet_) lighting_pc.sky_inv_view_proj = glm::mat4(sky_frame_()) * lighting_pc.sky_inv_view_proj;
     // gfxcoopa's DeferredLightingPass::draw() pushes this internally (the templated
     // overload), after its own bind_pipeline() -- no separate push needed.
     toy_lighting_pass_->draw(cmd, current_camera_set(), current_light_set(), *shadow_set_, lighting_pc,
@@ -3100,6 +3105,10 @@ void ToyRenderPipeline::update_underwater_params_(const glm::mat4& unjittered_pr
     p.inv_view_proj = glm::inverse(unjittered_proj * view);
     p.camera_time   = glm::vec4(cam_pos, elapsed_time_);
     p.water         = glm::vec4(w.surface_level, density, w.caustics, w.underwater ? 1.0f : 0.0f);
+    if (w.underwater && w.surface_up) {
+        p.camera_time = glm::vec4(*w.surface_up, elapsed_time_);
+        p.water.w     = 2.0f;
+    }
     p.fog_color     = glm::vec4(w.fog_color, 1.0f);
     p.absorption    = glm::vec4(w.absorption, light);
 }
@@ -3125,6 +3134,26 @@ void ToyRenderPipeline::fill_fog_block_(coopa::gfx::engine::data::LightUBO& ubo)
         ubo.fog_sun_dir = glm::vec4(0.0f, 0.0f, -1.0f, 0.0f);
     }
     ubo.fog_water = glm::vec4(water_state_.surface_level, water_state_.underwater ? 1.0f : 0.0f, 0.0f, 0.0f);
+    if (planet_) {
+        // On a planet world Z is no height: the fog is plain distance fog there (no height
+        // falloff, no blend toward the world-oriented sky gradient, no world-Z water cut). The
+        // shaders are untouched -- these are values they already handle.
+        ubo.fog_height.y = 0.0f;
+        ubo.fog_height.z = 0.0f;
+        ubo.fog_water    = glm::vec4(0.0f);
+    }
+}
+
+glm::mat3 ToyRenderPipeline::sky_frame_() const {
+    if (!planet_) return glm::mat3(1.0f);
+    const glm::vec3 d = frame_cam_pos_ - planet_->centre;
+    if (glm::length(d) < 1e-4f) return glm::mat3(1.0f);
+    const glm::vec3 up = glm::normalize(d);
+    // The shortest turn taking `up` to +Z (any turn about +Z after it would do: the sky only
+    // depends on directions relative to the up and the sun, which turn together).
+    const glm::vec3 z(0.0f, 0.0f, 1.0f);
+    if (glm::dot(up, z) < -0.9999f) return glm::mat3(glm::angleAxis(glm::pi<float>(), glm::vec3(1.0f, 0.0f, 0.0f)));
+    return glm::mat3(glm::rotation(up, z));
 }
 
 void ToyRenderPipeline::record_fog_(coopa::gfx::command::CommandBuffer& cmd, const FrameContext& ctx) {
@@ -3561,8 +3590,10 @@ void ToyRenderPipeline::update_lights_(coopa::scene::Scene& scene) {
     const float cloud_fill = volumetric_clouds_traced() ? cloud_quality_steps_().cloud_scale : 0.0f;
     if (physical_sky_active()) {
         const SkyFrameState& st = sky_state_;
-        ubo.sky_sun    = glm::vec4(st.sun_to, st.sun_disc_cos);
-        ubo.sky_moon   = glm::vec4(st.moon_to, st.moon_disc_cos);
+        // (On a planet the sky's directions are in the camera's own frame: see sky_frame_().)
+        const glm::mat3 frame = planet_ ? sky_frame_() : glm::mat3(1.0f);
+        ubo.sky_sun    = glm::vec4(planet_ ? frame * st.sun_to : st.sun_to, st.sun_disc_cos);
+        ubo.sky_moon   = glm::vec4(planet_ ? frame * st.moon_to : st.moon_to, st.moon_disc_cos);
         ubo.sky_params = glm::vec4(1.0f, cloud_fill, st.star_visibility, st.sky_illuminance);
         ubo.sky_extra  = glm::vec4(st.sun_disc_radiance, st.moon_disc_radiance, st.night_floor, st.time);
     } else {
@@ -4377,7 +4408,7 @@ void ToyRenderPipeline::record_transparent_preview_(coopa::gfx::command::Command
         pc.albedo    = glm::vec4(mr_mat.albedo, mr_mat.alpha);
         pc.metallic  = mr_mat.metallic;
         pc.roughness = mr_mat.roughness;
-        if (mr_mat.shader == "water") {
+        if (mr_mat.shader == "water" || mr_mat.shader == "water_planet") {
             // Real water is a near-mirror at low opacity: under the preview modes' studio
             // lighting it reads as a white sheet. Give it enough body and roughness that its
             // own colour shows -- these modes are for seeing what is where, not for the look.

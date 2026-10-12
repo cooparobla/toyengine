@@ -56,6 +56,8 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <coopa/scene/scene.h>
@@ -173,6 +175,11 @@ private:
      */
     void mark_edited_chunks_(TerrainComponent& terrain);
 
+    /** @brief A planet keeps every chunk: all six faces are always wanted. */
+    void want_planet_chunks_(TerrainComponent& terrain);
+    /** @brief Keeps a planet's gravity source in the physics world, at its centre (and drops gone ones). */
+    void sync_planet_gravity_(coopa::scene::Scene& scene);
+
     /** @brief Scene-tree name of a chunk object, e.g. `chunk_3_-2`. */
     static std::string chunk_object_name_(const ChunkCoord& coord) {
         return "chunk_" + std::to_string(coord.x) + "_" + std::to_string(coord.y);
@@ -190,6 +197,10 @@ private:
 
     std::uint64_t frame_ = 0;          /**< execute() calls, for retiring collision meshes. */
     bool          physics_dirty_ = false; /**< A chunk collider came or went this frame. */
+    /** @brief Each planet terrain's gravity source in the physics world (sync_planet_gravity_()). */
+    std::unordered_map<const TerrainComponent*, std::uint32_t> planet_gravity_;
+    /// Planets whose every chunk has been live: their pull is on (and stays on through edits).
+    std::unordered_set<const TerrainComponent*> planet_ready_;
 };
 
 /**

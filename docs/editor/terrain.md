@@ -203,3 +203,17 @@ The brush is a square of **Size** tiles (**[** and **]** change it). With tiles 
 Where the selected tiles differ, the field shows "mixed". **Tile Under Cursor** shows everything
 stored about the tile you hover. Every stroke and edit is one undo step (**Ctrl+Z**). **Tab**
 leaves Tile Mode.
+
+### Planets
+
+**Add > Planet** makes a Tile Terrain wrapped round a small globe, with gravity pulling toward its
+centre (its physical objects and characters fall to it from any side). Any Tile Terrain becomes
+one with **Planet** in the World Generator's **World** page:
+- **Face Size** -- tiles along each of the six faces of the cube the globe is built from; the
+  planet is four faces around.
+- **Gravity** -- its pull at the surface in m/s² (Earth: 9.81; 0 turns it off).
+- The preview shows the whole globe unrolled, the poles along its top and bottom edges.
+
+Tile Mode works on a planet as on a flat terrain: hover any tile of the globe, and every tool
+applies to it. A brush or a selection rectangle stays on the face it starts on -- drag across
+the edge of a face and it stops there; start a new stroke on the next face.

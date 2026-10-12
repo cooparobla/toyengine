@@ -146,6 +146,21 @@ mass, on velocity relative to the mean current under the body, which is what car
 downstream. Linear drag plus quadratic form drag (`0.5 rho Cd A |v|`) are both applied as a
 clamped fraction of the relative velocity, so they are unconditionally stable.
 
+### Local-frame bodies (a planet's water)
+
+`WaterBody::local_frame` (off by default; set by a planet TileTerrain, see the world README's
+Planets section) makes a body a height field over **its own** XY instead of world XY: the bake,
+query, flow and depth probes (cast along the body's own -Z) run in the body's frame, and buoyancy
+(`frame_floater_substep_()`) measures each pontoon in each nearby body's frame with gravity and
+up from the physics field. It draws with the `water_planet` shader (`water_surface.glsl` built
+with `WATER_LOCAL_FRAME`; the ordinary `water` shader carries none of this code), which lifts the
+surface along its normal by waves of the world position seen through the three axis planes
+(triplanar); the CPU query (`frame_sample()`) does the same, so the many tilted
+pieces of a planet's sea meet without seams and float things on the waves that are drawn. The
+underwater pass and the fog measure the surface along the body's up (`UnderwaterInfo::up`).
+`WaterSystem::sample(xy)` skips these bodies (a world XY means nothing to them). Ordinary bodies,
+rotated ones included, never take any of these paths.
+
 ### In the editor
 
 `WaterSystem` runs in edit mode, but only to bake, so water bodies are visible while editing:

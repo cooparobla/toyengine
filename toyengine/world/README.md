@@ -392,6 +392,58 @@ the object it writes.
 `KINDS` in the atlas generator must stay in `TileKind` order — the shader reads a kind's cell from
 the enum value alone, so a kind is appended, never inserted.
 
+## Planets
+
+`planet: true` turns a TileTerrain into a small round world: the same tiles, tile sets, water and
+editing, wrapped around a globe, with gravity pulling toward its centre. It is a mode beside the
+flat terrain, off by default — a terrain without the key is built exactly as before.
+
+```yaml
+- type: TileTerrain
+  planet: true
+  face_tiles: 96        # tiles along each cube face's edge; the circumference is 4 x that
+  chunk_size: 16
+  height_scale: 12.0
+  gravity: 9.81         # m/s^2 at the surface (0: none)
+  generator: { grid_size: 40 }
+```
+
+See `assets/scenes/terrain/planet_demo`.
+
+- **Map.** mapcoopa generates the world **on a sphere** (`topology: sphere` — cells over the whole
+  globe, no edges, climate by latitude); see its README. The terrain sets that itself.
+- **Layout** (`planet.h`, `PlanetLayout`). Six faces of a cube, each `face_tiles` square, bent
+  onto the sphere with equal-angle faces (tiles stay near-square everywhere). The radius is
+  `2 · face_tiles · tile_size / π`, so a tile in the middle of a face is `tile_size` across.
+  The six faces are stored side by side in one `6N × N` `TileMapData`, so the `.tiles` format is
+  the flat one. `wrap()` / `neighbour()` step across a face's edge onto the next face (turned).
+- **Meshing.** Each chunk is meshed in flat face space exactly as a flat chunk, with merging
+  capped at one tile (`max_merge`: a merged quad would cut a chord under the curve), then
+  `warp_chunk_to_planet()` bends every vertex onto the globe and carries its normal through the
+  map's Jacobian. Chunk objects sit at the planet's centre. A planet keeps every chunk loaded.
+- **Water.** Each chunk's sea, lakes and rivers are WaterBodies in **their own frame** (local Z
+  out from the planet at the chunk's centre, `WaterBody::local_frame`), so the water system's
+  height-field queries, depth probes, flow and buoyancy still hold over a curved surface. Their
+  waves come from the world position (triplanar), so neighbouring pieces meet without a seam.
+- **Gravity.** The terrain registers a physxcoopa gravity source at its centre — at zero strength
+  until every chunk is live, so nothing dropped at the start falls through ground still being
+  built. Rigid bodies, buoyancy, `CharacterController` (walking in its own frame, up away from
+  the planet), `FootIK` and the orbit `CameraController` follow the field.
+- **Sky** is evaluated in the camera's own frame on the planet (`render::PlanetFrameState`: the
+  sky's view rays and sun turned so the camera's up is the sky's zenith). The global **fog** is
+  plain distance fog on a planet (world Z is no height there): give a planet scene a light
+  `fog_density` (planet_demo: 0.0015). Neither changes a flat scene's shaders or values.
+- **Shader.** Planet chunks draw with `terrain_styled_planet` (`terrain_styled.glsl` built with
+  `TERRAIN_PLANET`): "up" is the per-vertex `uv.y` the warp wrote, and strata have an even grain.
+  The flat `terrain_styled` carries none of that code.
+- **Editor.** The World Generator's Planet toggle, Add > Planet, and Tile Mode (hover marches the
+  view ray through the columns; a brush or selection stays on the face it starts on).
+
+**Not on planets yet:** moving platforms under a character, Mount/Rider, ragdoll recovery,
+navigation, the first-person camera, volumetric clouds,
+and sky reflections/ambient (they still read the world-oriented sky). Large or streamed planets
+and more than one planet per scene are out of scope for now.
+
 ## Heightmap terrain
 
 `HeightmapTerrain` ([`heightmap_terrain.h`](heightmap_terrain.h)) is a plain height grid: a size and

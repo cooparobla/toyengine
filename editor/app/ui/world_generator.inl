@@ -17,6 +17,12 @@ public:
         wgen_changed_at_ = 0.0;
         return wgen_config_;
     }
+    /** @brief Whether the world being edited is a planet. Test hook. */
+    bool& world_generator_planet() {
+        ++wgen_requested_;
+        wgen_changed_at_ = 0.0;
+        return wgen_planet_;
+    }
     /** @brief The world size being edited, in tiles per side. Test hook. */
     int& world_generator_world_tiles() { return wgen_world_tiles_; }
     /** @brief The preview's serial: bumps each time a preview lands. Test hook. */
@@ -51,6 +57,9 @@ private:
     float wgen_height_scale_ = 16.0f;
     float wgen_water_inset_ = 0.5f;
     float wgen_river_inset_ = 0.2f;
+    bool wgen_planet_ = false;            ///< A planet: the map on a sphere, the tiles on a cube-sphere.
+    int wgen_face_tiles_ = 128;           ///< ...its tiles along one cube face's edge.
+    float wgen_gravity_ = 9.81f;          ///< ...and its pull at the surface, m/s^2.
     int wgen_category_ = 0;
     int wgen_layer_ = 0;                  ///< 0 composite, 1 biomes, 2 elevation, 3 water.
     std::uint64_t wgen_requested_ = 0;    ///< Bumped by every edit.

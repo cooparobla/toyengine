@@ -31,6 +31,19 @@ void sample_chunk_columns(const TileMapData& tiles, const TerrainParams& params,
     out.resize(params.chunk_size);
     const std::int32_t base_x = coord.x * params.chunk_size;
     const std::int32_t base_y = coord.y * params.chunk_size;
+    if (params.planet) {
+        // The skirt past a face's edge is the neighbouring face's tiles, turned (planet.h).
+        const PlanetLayout layout = params.layout();
+        const std::int32_t face = base_x / layout.n;
+        const std::int32_t face_x = base_x - face * layout.n;
+        for (std::int32_t ly = -1; ly <= params.chunk_size; ++ly) {
+            for (std::int32_t lx = -1; lx <= params.chunk_size; ++lx) {
+                const glm::ivec2 t = layout.wrap(face, face_x + lx, base_y + ly);
+                out.at(lx, ly) = tiles.get(t.x, t.y).column();
+            }
+        }
+        return;
+    }
     for (std::int32_t ly = -1; ly <= params.chunk_size; ++ly) {
         for (std::int32_t lx = -1; lx <= params.chunk_size; ++lx) {
             out.at(lx, ly) = tiles.get(base_x + lx, base_y + ly).column();
@@ -95,7 +108,8 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
             const std::uint8_t style    = library.style_of(col.top_kind);
             // A tile set may keep kind boundaries square (a blocky set): then no top is a blend
             // corner, and every quadrant is plain.
-            const bool round_corners    = library.rounds_kind_corners(style);
+            // (A planet keeps them square too: its shader has no tile grid in world space to round on.)
+            const bool round_corners    = library.rounds_kind_corners(style) && !params.planet;
             auto exposed = [&](const glm::ivec2& dir) { return pad.at(c + dir).steps < col.steps; };
             // A neighbour's kind as this top may blend into it: only across a level edge -- across
             // a cliff the two surfaces never touch.
@@ -245,10 +259,11 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
         for (std::int32_t ly = 0; ly < n; ++ly) {
             for (std::int32_t lx = 0; lx < n; ++lx) {
                 if (at(lx, ly) != 1) continue;
+                const std::int32_t most = params.max_merge > 0 ? params.max_merge : n;
                 std::int32_t w = 1;
-                while (lx + w < n && same(lx, ly, lx + w, ly)) ++w;
+                while (lx + w < n && w < most && same(lx, ly, lx + w, ly)) ++w;
                 std::int32_t h = 1;
-                for (; ly + h < n; ++h) {
+                for (; ly + h < n && h < most; ++h) {
                     bool row = true;
                     for (std::int32_t x = lx; x < lx + w && row; ++x) row = same(lx, ly, x, ly + h);
                     if (!row) break;
@@ -275,7 +290,9 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
     for (std::size_t i = 0; i < straights.size();) {
         const StraightHalf& first = straights[i];
         std::size_t j = i + 1;
-        while (j < straights.size()) {
+        // Half-tiles: a run of `max_merge` tiles is twice that many halves.
+        const std::size_t most = params.max_merge > 0 ? static_cast<std::size_t>(params.max_merge) * 2 : straights.size();
+        while (j < straights.size() && j - i < most) {
             const StraightHalf& h = straights[j];
             if (h.turns != first.turns || h.cell != first.cell || h.line != first.line ||
                 h.slot != first.slot + static_cast<std::int32_t>(j - i) || h.style != first.style ||
@@ -381,9 +398,76 @@ std::shared_ptr<const coopa::physx::geometry::TriangleMesh> build_chunk_collisio
     return collision;
 }
 
+namespace {
+
+/**
+ * @brief Bends a planet chunk, meshed in face space, onto its planet (planet.h): every position
+ *        through `to_planet()`, every normal through the inverse transpose of that map's
+ *        Jacobian (so a wall stays a wall and a top faces out), a fresh tangent, and in `uv.y`
+ *        how far each normal faces away from the planet -- the terrain shader's "up" there.
+ */
+void warp_chunk_to_planet(const TerrainParams& params, const ChunkCoord& coord, ChunkMeshData& mesh,
+                          ChunkWaterData& still, ChunkWaterData& flowing) {
+    const PlanetLayout layout = params.layout();
+    const std::int32_t base_x = coord.x * params.chunk_size;
+    const std::int32_t face = base_x / layout.n;
+    const double x0 = static_cast<double>(base_x - face * layout.n) * params.tile_size;
+    const double y0 = static_cast<double>(coord.y * params.chunk_size) * params.tile_size;
+    const double eps = 1e-3 * params.tile_size;
+    const auto map = [&](double x, double y, double z) { return layout.to_planet(face, x0 + x, y0 + y, z); };
+    for (auto& v : mesh.vertices) {
+        const double x = v.position.x, y = v.position.y, z = v.position.z;
+        const glm::dvec3 p = map(x, y, z);
+        const glm::dvec3 jx = (map(x + eps, y, z) - map(x - eps, y, z)) / (2.0 * eps);
+        const glm::dvec3 jy = (map(x, y + eps, z) - map(x, y - eps, z)) / (2.0 * eps);
+        const glm::dvec3 jz = (map(x, y, z + eps) - map(x, y, z - eps)) / (2.0 * eps);
+        // Normals transform by the cofactor matrix: n' ~ (jy x jz) n.x + (jz x jx) n.y + (jx x jy) n.z.
+        const glm::dvec3 n(v.normal);
+        glm::dvec3 nn = glm::cross(jy, jz) * n.x + glm::cross(jz, jx) * n.y + glm::cross(jx, jy) * n.z;
+        const double len = glm::length(nn);
+        nn = len > 0.0 ? nn / len : glm::normalize(p);
+        v.position = glm::vec3(p);
+        v.normal = glm::vec3(nn);
+        const glm::dvec3 axis = std::abs(nn.z) < 0.9 ? glm::dvec3(0.0, 0.0, 1.0) : glm::dvec3(1.0, 0.0, 0.0);
+        v.tangent = glm::vec4(glm::vec3(glm::normalize(glm::cross(axis, nn))), 1.0f);
+        v.uv.y = static_cast<float>(glm::dot(nn, glm::normalize(p)));
+    }
+    // The water goes into a frame of its own, local Z out from the planet at the chunk's centre
+    // (local X along the face's x there): over a chunk the sphere's surface is still a height
+    // field in that frame, which is what the water system works on (WaterBody::local_frame).
+    const double half = 0.5 * params.chunk_size * params.tile_size;
+    const glm::dvec3 up = glm::normalize(map(half, half, 0.0));
+    const glm::dvec3 along = map(half + eps, half, 0.0) - map(half - eps, half, 0.0);
+    const glm::dvec3 ax = glm::normalize(along - up * glm::dot(along, up));
+    const glm::dvec3 ay = glm::cross(up, ax);
+    const glm::dvec3 origin = up * static_cast<double>(layout.radius());
+    glm::mat4 frame(1.0f);
+    frame[0] = glm::vec4(glm::vec3(ax), 0.0f);
+    frame[1] = glm::vec4(glm::vec3(ay), 0.0f);
+    frame[2] = glm::vec4(glm::vec3(up), 0.0f);
+    frame[3] = glm::vec4(glm::vec3(origin), 1.0f);
+    for (ChunkWaterData* water : {&still, &flowing}) {
+        for (glm::vec3& p : water->positions) {
+            const glm::dvec3 d = map(p.x, p.y, p.z) - origin;
+            p = glm::vec3(glm::dot(d, ax), glm::dot(d, ay), glm::dot(d, up));
+        }
+        water->frame = frame;
+        water->local_frame = true;
+    }
+}
+
+} // namespace
+
 void ChunkBuildJob::run() {
     if (library == nullptr) return;
     mesh_chunk_styled(pad, *library, params, mesh);
+    if (params.planet) {
+        build_chunk_water(pad, params, water_still, water_flowing);
+        warp_chunk_to_planet(params, coord, mesh, water_still, water_flowing);
+        coopa::gfx::engine::data::Mesh::weld_and_optimize(mesh.vertices, mesh.indices);
+        if (collision) collision_mesh = build_chunk_collision(mesh);
+        return;
+    }
     // Off the main thread like the meshing itself: the mesher emits every side as its own
     // vertices, so shared corners weld back together here.
     coopa::gfx::engine::data::Mesh::weld_and_optimize(mesh.vertices, mesh.indices);
@@ -394,6 +478,7 @@ void ChunkBuildJob::run() {
 }
 
 glm::vec3 chunk_origin(const TerrainParams& params, const ChunkCoord& coord) {
+    if (params.planet) return glm::vec3(0.0f);   // planet chunks are built round the planet's centre
     const float size = params.chunk_world_size();
     return glm::vec3(static_cast<float>(coord.x) * size, static_cast<float>(coord.y) * size, 0.0f);
 }

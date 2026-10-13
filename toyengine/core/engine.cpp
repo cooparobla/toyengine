@@ -543,6 +543,12 @@ void Engine::prepare_scene_(coopa::scene::Scene& scene, bool drain_assets) {
     // reads below are never asked to resolve a still-dirty transform; then block until
     // every load issued above has finished, so frame 0 sees a fully populated scene.
     coopa::scene::install_transform_system(scene);
+    // Every transform of a freshly built scene starts dirty, and that system's first pass is a
+    // whole update away -- while the scene can be read, and drawn, before then: one pushed or
+    // loaded mid-frame (the editor's Play, a game's load_scene() from a UI callback) is drawn in
+    // that same frame. Resolve the tree now, so a prepared scene's world matrices are readable
+    // (Transform::world_matrix()) from the moment it exists.
+    coopa::scene::resolve_transforms(scene);
     // Runs at UpdatePhase::Animation (300), before TransformResolve (350) -- Scene::update()
     // orders installed systems by phase regardless of install call order, so this only needs
     // to exist before the scene starts ticking, same as install_transform_system() above.
@@ -808,6 +814,14 @@ bool Engine::tick() {
             CpuTimer t(prof, CpuScope::DynamicMeshes);
             sync_particle_render_state_(scene_mgr_.get_active_scene());
         }
+        // Last thing before the draw, because everything above may still move the scene:
+        // whatever wrote a transform after update()'s TransformResolve (350) -- a late_update()
+        // write, a deferred spawn flushed at the end of late_update(), a host's scene build,
+        // object rebuild or posed timeline frame (the editor's Play, inspector edits, animation
+        // scrubbing) -- left world matrices dirty, and render()'s gather reads the cached
+        // Transform::world_matrix() from several threads at once, which cannot resolve them.
+        // Resolved here, the frame draws this frame's poses.
+        coopa::scene::resolve_transforms(scene_mgr_.get_active_scene());
         CpuTimer t(prof, CpuScope::Render);
         pipeline_->render(ctx_.renderer(), scene_mgr_.get_active_scene(), dt);
     }

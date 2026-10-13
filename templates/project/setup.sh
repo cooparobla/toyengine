@@ -9,6 +9,8 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/.toyenv.sh"
 
+case "${1:-}" in -h|--help) usage ;; esac
+
 link="$(toy_get engine.link)"
 ref="$(toy_get engine.ref)"
 src="$(toy_get engine.source)"
@@ -25,6 +27,7 @@ if [[ -n "$link" ]]; then
     echo "[setup] .libs/toyengine -> $link (linked)"
     [[ -f "$link/libs/libcoopa/CMakeLists.txt" ]] || warn "$link/libs is empty: run 'git submodule update --init --recursive' there"
 else
+    command -v git >/dev/null 2>&1 || die "git is needed to fetch the engine (or point engine.link in $(basename "$TOY_FILE") at a local checkout)"
     if [[ -L "$ENGINE_DIR" ]]; then rm "$ENGINE_DIR"; fi
     ref="${ref:-main}"
     if [[ ! -e "$ENGINE_DIR/.git" ]]; then
@@ -47,11 +50,8 @@ else
     git submodule update --init --recursive --quiet
 fi
 
-# Toolchain check (macOS: tools/setup_macos.sh installs everything via Homebrew).
-missing=()
-for t in cmake glslc; do command -v "$t" >/dev/null 2>&1 || missing+=("$t"); done
-if (( ${#missing[@]} )); then
-    warn "missing: ${missing[*]}"
-    if [[ "$(uname -s)" == Darwin ]]; then warn "install with: $ENGINE_DIR/tools/setup_macos.sh"; fi
-fi
+# Toolchain report (cmake, a C++20 compiler, glslc) with this platform's install line. Only a
+# report: setting a project up on a machine whose tools come later is fine -- build.sh is where
+# a missing one is fatal.
+require_toolchain warn
 exit 0

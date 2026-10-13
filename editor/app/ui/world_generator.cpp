@@ -19,7 +19,6 @@ using coopa::maps::MapShape;
 
 namespace {
 
-constexpr int k_preview_px = 224;          ///< The preview map's resolution.
 constexpr double k_preview_debounce = 0.3; ///< Seconds after the last edit before a preview starts.
 
 double wgen_now() {
@@ -90,9 +89,19 @@ const std::vector<Row>& rows() {
         WGEN_ROW(4, "Rivers", "River sources to attempt; fewer appear where the land refuses them.", true, 0, 200, river_count),
         WGEN_ROW(4, "Min River Length", "Cells a watercourse must run before it counts as a river.", true, 2, 30,
                  river_min_length),
+        WGEN_ROW(4, "Source Height Lowest", "Lowest ground a river may spring from (0 the shore, 1 the summit): lower "
+                 "starts rivers in the hills and sends them further.", false, 0.0, 1.0, river_source_min_elevation),
+        WGEN_ROW(4, "Source Height Highest", "Highest ground a river may spring from. Narrow the window to gather every "
+                 "source into one band of country.", false, 0.0, 1.0, river_source_max_elevation),
+        WGEN_ROW(4, "Meander", "Passes that smooth each watercourse: more winds it, fewer leave it straight between "
+                 "cells.", true, 0, 8, river_smoothing_iterations),
         WGEN_ROW(4, "River Width (m)", "Width of a small stream; rivers widen as streams join.", false, 1.0, 40.0,
                  river_width_base_m),
+        WGEN_ROW(4, "Width per Tributary (m)", "Metres a river widens for each stream that has joined it: this is what "
+                 "makes a trunk river broad where a headwater is a brook.", false, 0.0, 20.0, river_width_per_volume_m),
         WGEN_ROW(4, "River Depth (m)", "Depth of the water in a small stream's channel.", false, 0.2, 10.0, river_depth_m),
+        WGEN_ROW(4, "Depth per Tributary (m)", "The same for depth: how much deeper a river runs per stream joined.", false,
+                 0.0, 5.0, river_depth_per_volume_m),
         WGEN_ROW(4, "Channel Depth (m)", "How deep a river cuts its bed into the ground.", false, 0.0, 60.0,
                  river_channel_depth_m),
         WGEN_ROW(4, "Valley Depth (m)", "How deep a river carves the valley it runs in.", false, 0.0, 200.0, river_incision_m),
@@ -149,12 +158,13 @@ const std::vector<std::string>& shape_names() {
 }
 
 /** @brief A preview of `authored`: generated at its own grid size, rendered small. Runs on a worker. */
-EditorApp::WorldPreview make_world_preview(MapConfig authored, int layer, bool planet, std::uint64_t serial) {
+EditorApp::WorldPreview make_world_preview(MapConfig authored, int layer, bool planet, int preview_px,
+                                           std::uint64_t serial) {
     static coopa::debug::Logger logger("world_preview");
     // A planet's map is generated on a sphere (as the terrain does) and previewed unrolled.
     if (planet) authored.topology = coopa::maps::MapTopology::Sphere;
     MapConfig config = coopa::maps::derived_config(authored);
-    coopa::maps::set_image_size(config, k_preview_px);
+    coopa::maps::set_image_size(config, preview_px);
     coopa::maps::MapGenerator generator(config, logger);
     generator.generate();
     const coopa::maps::MapGraph& graph = generator.graph();
@@ -226,7 +236,7 @@ void EditorApp::wgen_tick_preview_() {
         wgen_now() - wgen_changed_at_ >= k_preview_debounce) {
         wgen_started_ = wgen_requested_;
         wgen_job_ = std::async(std::launch::async, make_world_preview, wgen_config_, wgen_layer_, wgen_planet_,
-                               wgen_started_);
+                               wgen_preview_px_, wgen_started_);
     }
     // Generate World: bake once the re-parsed terrain carries the new settings.
     if (wgen_regen_object_ != 0) {
@@ -281,25 +291,36 @@ void EditorApp::wgen_draw_preview_(imm::Context& ctx, const imm::Box& box) {
     const WorldPreview& p = wgen_preview_;
     if (p.width <= 0 || p.height <= 0) return;
     const float side = std::min(box.w, box.h);
-    const float px = side / static_cast<float>(std::max(p.width, p.height));
-    const float ox = box.x + (box.w - px * static_cast<float>(p.width)) * 0.5f;
-    const float oy = box.y + (box.h - px * static_cast<float>(p.height)) * 0.5f;
+    // One drawn block per screen pixel at most: a 1024 px preview in a 420 px pane is sampled
+    // every third pixel rather than filling three rectangles per pixel. The resolution still
+    // tells, because the pane is square and the map keeps its own aspect.
+    const int step = std::max(1, static_cast<int>(std::ceil(static_cast<float>(std::max(p.width, p.height)) / std::max(1.0f, side))));
+    const float px = side / static_cast<float>(std::max(p.width, p.height)) * static_cast<float>(step);
+    const int cols = (p.width + step - 1) / step;
+    const int rows = (p.height + step - 1) / step;
+    const float ox = box.x + (box.w - px * static_cast<float>(cols)) * 0.5f;
+    const float oy = box.y + (box.h - px * static_cast<float>(rows)) * 0.5f;
+    const auto pixel = [&p, step](int col, int row) {
+        const std::size_t x = static_cast<std::size_t>(std::min(col * step, p.width - 1));
+        const std::size_t y = static_cast<std::size_t>(std::min(row * step, p.height - 1));
+        return &p.rgb[(y * static_cast<std::size_t>(p.width) + x) * 3];
+    };
     // North (+Y, the map's last row) at the top, as the terrain lies in a top view. Runs of one
     // colour in a row are one rectangle -- the sea is most of a row.
-    for (int row = 0; row < p.height; ++row) {
-        const float y = oy + static_cast<float>(p.height - 1 - row) * px;
+    for (int row = 0; row < rows; ++row) {
+        const float y = oy + static_cast<float>(rows - 1 - row) * px;
         int start = 0;
-        for (int x = 1; x <= p.width; ++x) {
-            const std::uint8_t* a = &p.rgb[(static_cast<std::size_t>(row) * static_cast<std::size_t>(p.width) + static_cast<std::size_t>(start)) * 3];
+        for (int col = 1; col <= cols; ++col) {
+            const std::uint8_t* a = pixel(start, row);
             bool same = false;
-            if (x < p.width) {
-                const std::uint8_t* b = &p.rgb[(static_cast<std::size_t>(row) * static_cast<std::size_t>(p.width) + static_cast<std::size_t>(x)) * 3];
+            if (col < cols) {
+                const std::uint8_t* b = pixel(col, row);
                 same = std::abs(a[0] - b[0]) + std::abs(a[1] - b[1]) + std::abs(a[2] - b[2]) <= 6;
             }
             if (same) continue;
-            ctx.fill(imm::Box{ox + static_cast<float>(start) * px, y, static_cast<float>(x - start) * px + 0.5f, px + 0.5f},
+            ctx.fill(imm::Box{ox + static_cast<float>(start) * px, y, static_cast<float>(col - start) * px + 0.5f, px + 0.5f},
                      glm::vec4(a[0] / 255.0f, a[1] / 255.0f, a[2] / 255.0f, 1.0f));
-            start = x;
+            start = col;
         }
     }
 }
@@ -485,7 +506,14 @@ void EditorApp::draw_world_generator_modal_(imm::Context& ctx) {
         ++wgen_requested_;
         wgen_changed_at_ = 0.0;
     }
-    const float map_side = std::min(right.w - 8.0f, right.h - ctx.style.row_height * 4 - 16.0f);
+    if (ctx.drag_int("Detail (px)", &wgen_preview_px_, 2.0f, 96, 1024)) {
+        ++wgen_requested_;
+        wgen_changed_at_ = wgen_now();
+    }
+    ctx.tooltip("Detail\nPixels per side the preview map is drawn at. Higher resolves rivers, coasts and biome edges "
+                "the small map merges away; it costs the preview thread time, not the editor's frame");
+    test_rects_["world_generator:Detail (px)"] = ctx.last_rect();
+    const float map_side = std::min(right.w - 8.0f, right.h - ctx.style.row_height * 5 - 16.0f);
     // A planet's preview is the globe unrolled (twice as wide as tall).
     const imm::Box map = wgen_planet_ ? ctx.next_box(map_side, map_side * 0.5f) : ctx.next_box(map_side, map_side);
     wgen_draw_preview_(ctx, map);

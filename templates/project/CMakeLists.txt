@@ -2,6 +2,11 @@
 cmake_minimum_required(VERSION 3.21)
 project(@TARGET@ CXX)
 
+# A bare `cmake -B build` (no ./build.sh) would otherwise compile unoptimised on both platforms.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
 # The engine and its coopa libraries. Its own tests/tools are skipped when it isn't top-level.
 add_subdirectory(.libs/toyengine ${CMAKE_BINARY_DIR}/toyengine)
 

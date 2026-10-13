@@ -19,7 +19,9 @@ scene:
         - type: TileTerrain
           chunk_size: 32
           collision: true
-          height_scale: 16.0
+          generator:
+            shape: { shape: archipelago }
+          height_scale: 32.0
           height_step: 1.0
           kind_tile_sets:
             ash: objects/terrain/tileset_soft
@@ -44,13 +46,13 @@ scene:
           tiles_per_grid_unit: 4
           view_radius: 10
           water_inset: 0.5
-          world_tiles: 320
+          world_tiles: 1280
       children: []
     - name: focus_marker
       active: true
       components:
         - type: Transform
-          position: { x: 106.0, y: 178.0, z: 8.0 }
+          position: { x: 456.0, y: 178.0, z: 8.0 }
           rotation: { x: 0.0, y: 0.0, z: 0.0 }
           scale: { x: 1.0, y: 1.0, z: 1.0 }
         - { type: FreeMover, move_speed: 18.0, smoothing: 12.0 }
@@ -126,7 +128,7 @@ scene:
       active: true
       components:
         - type: Transform
-          position: { x: 106.0, y: 148.0, z: 38.0 }
+          position: { x: 456.0, y: 148.0, z: 38.0 }
           rotation: { x: 48.0, y: 0.0, z: 0.0 }
           scale: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Camera

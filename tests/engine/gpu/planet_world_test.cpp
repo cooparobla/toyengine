@@ -51,8 +51,11 @@ std::string small_planet() {
                     }),
                     roots.end());
     });
+    // The whole `terrain/` directory, not one filename: a stored tile map is named after its
+    // object (a planet's is `planet.tiles`), and one left from another face_tiles would be
+    // loaded instead of this variant's map ever being baked.
     std::error_code ec;
-    std::filesystem::remove(std::filesystem::path(path).parent_path() / "terrain" / "terrain.tiles", ec);
+    std::filesystem::remove_all(std::filesystem::path(path).parent_path() / "terrain", ec);
     return path;
 }
 

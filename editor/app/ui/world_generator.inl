@@ -27,6 +27,12 @@ public:
     int& world_generator_world_tiles() { return wgen_world_tiles_; }
     /** @brief The preview's serial: bumps each time a preview lands. Test hook. */
     std::uint64_t world_generator_preview_serial() const { return wgen_preview_landed_; }
+    /** @brief The preview map's resolution in pixels per side; the next preview uses it. Test hook. */
+    int& world_generator_preview_px() {
+        ++wgen_requested_;
+        wgen_changed_at_ = 0.0;
+        return wgen_preview_px_;
+    }
     /** @brief Writes the settings to the terrain and re-bakes it, as the Generate World button does. */
     void world_generator_generate() { wgen_generate_ = true; }
 
@@ -62,6 +68,10 @@ private:
     float wgen_gravity_ = 9.81f;          ///< ...and its pull at the surface, m/s^2.
     int wgen_category_ = 0;
     int wgen_layer_ = 0;                  ///< 0 composite, 1 biomes, 2 elevation, 3 water.
+    /// Pixels per side the preview is rendered at. Costs only the preview thread's time, and the
+    /// pane draws it decimated to its own size, so a high setting is detail to zoom the window
+    /// into rather than work the editor repeats every frame.
+    int wgen_preview_px_ = 224;
     std::uint64_t wgen_requested_ = 0;    ///< Bumped by every edit.
     std::uint64_t wgen_started_ = 0;      ///< The request the preview in flight (or last) was made for.
     double wgen_changed_at_ = 0.0;        ///< When the last edit happened (the debounce).

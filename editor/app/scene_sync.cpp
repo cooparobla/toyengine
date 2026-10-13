@@ -1,5 +1,7 @@
 #include "editor/app/scene_sync.h"
 
+#include <physxcoopa/system/physics_system.h>
+
 namespace toy {
 namespace editor {
 
@@ -147,6 +149,13 @@ bool SceneSync::rebuild_object_(core::Engine& engine, const SceneDocument& doc, 
     }
     scene_->adopt(*raw);
     raw->start();
+    // This rebuild destroyed the old subtree's components, colliders included, and built new
+    // ones -- so PhysicsSystem's bindings name objects that no longer exist. It dereferences
+    // those every step (PhysicsSystem::refresh()'s doc), and a full-scene rebuild gets a fresh
+    // system while this path reuses the live one, so this is the one place that has to say so.
+    if (auto* physics = dynamic_cast<coopa::physx::system::PhysicsSystem*>(scene_->find_system("Physics"))) {
+        physics->refresh();
+    }
     return true;
 }
 

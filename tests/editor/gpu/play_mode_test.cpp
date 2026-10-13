@@ -147,4 +147,37 @@ COOPA_TEST(pause_step_nav_gizmo_property_tabs_and_outliner_eye) {
     dump(engine, "07_shading_workspace");
 }
 
+/**
+ * @brief Play builds its scene from the document inside the frame's post-late-update window --
+ *        after the update that would resolve its transforms, before that same frame's render --
+ *        so the engine resolves the tree itself ahead of the render (Engine::tick()). Without
+ *        that, the render gather read a world matrix no resolve pass had computed: every object
+ *        of the scene, on the first frame of every Play (an assert in a debug build, a stale
+ *        matrix in a release one).
+ */
+COOPA_TEST(play_resolves_the_world_matrices_of_the_scene_it_just_built) {
+    EditorSession session({.fixed_dt = "0"});
+    auto& engine = session.engine;
+    auto& app = session.app;
+
+    app.play();
+    tick(engine, 1);   // the frame that both builds the play scene and draws it
+    coopa::test::require(app.playing(), "playing");
+
+    int transforms = 0, dirty = 0;
+    for (auto& root : engine.scene().root_objects()) {
+        root->for_each_recursive([&](coopa::scene::SceneObject& o) {
+            if (auto* tc = o.get_transform()) {
+                ++transforms;
+                if (tc->transform().is_dirty()) ++dirty;
+            }
+        });
+    }
+    expect(transforms > 0, "the play scene has transforms to resolve");
+    expect(dirty == 0, "every one of them is resolved on the first drawn frame of Play (" +
+                           std::to_string(dirty) + " of " + std::to_string(transforms) + " dirty)");
+    app.stop();
+    tick(engine, 2);
+}
+
 } // namespace toy::editor::testing

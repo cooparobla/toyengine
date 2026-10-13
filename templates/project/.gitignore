@@ -3,6 +3,10 @@
 build/
 build-*/
 dist/
+output/
 .toyeditor/
 *.spv
 *.spv.d
+
+# macOS / editor droppings
+.DS_Store

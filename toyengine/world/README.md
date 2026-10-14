@@ -190,22 +190,44 @@ scene's timeline. See the editor manual's Terrain page.
 
 ## Collision
 
-With `collision: true` (the default) every live chunk carries a static `MeshCollider` built from
-the very triangles it draws: rounded lips collide round, voxel blocks collide square. The mesh is
-welded and its adjacency and BVH built on the chunk's worker (`build_chunk_collision()`), then
-handed to the collider by `shared_ptr` (`MeshCollider::set_mesh()`'s runtime overload), with no
-asset involved. `physics_material:` names a `physics_materials/<name>.yaml` for all of them.
-Bodies resting on terrain the camera streams away from lose their ground with it: keep
-`view_radius` large enough to cover where physics happens.
+With `collision: true` (the default) a chunk within `collision_radius` chunks of the camera
+carries a static `MeshCollider` built from the very triangles it draws: rounded lips collide
+round, voxel blocks collide square. The mesh is welded and its adjacency and BVH built on the
+chunk's worker (`build_chunk_collision()`), then handed to the collider by `shared_ptr`
+(`MeshCollider::set_mesh()`'s runtime overload), with no asset involved. `physics_material:`
+names a `physics_materials/<name>.yaml` for all of them.
+
+`collision_radius` (4 chunks by default, `0` for every loaded chunk) is there because a collider
+is the most expensive thing a chunk carries: a welded mesh with adjacency and a BVH, a megabyte
+or two of it, and a `PhysicsSystem::refresh()` whose re-gather is linear in every collider in
+the scene. A chunk crossing inward is re-meshed with one (its old mesh keeps drawing meanwhile);
+crossing outward it simply drops the component and retires the shape. **Ground outside the
+radius is not solid** -- raise it past wherever physics actually happens, and remember that
+bodies resting on terrain the camera streams away entirely lose their ground with it, so
+`view_radius` has to cover that too.
 
 ## Cost model
 
 The pipeline frustum-culls every chunk per view (see `ToyRenderPipeline::gather_meshes_()`): the
 camera draws only the chunks it can see, and each shadow cascade/face draws only the chunks inside
 its own frustum. `view_radius` still sets the resident set — `(2 * view_radius + 1)²` chunks meshed
-and held in memory — and chunks behind the camera can still cast shadows into view. Prefer raising
-`chunk_size` over `view_radius` to see further — it buys coverage at fewer, larger draws, at the
-cost of a coarser streaming granularity.
+and held in memory — and chunks behind the camera can still cast shadows into view, until
+`shadow_distance` (metres, `0` for no limit) drops the far ones out of the cascades. Prefer
+raising `chunk_size` over `view_radius` to see further — it buys coverage at fewer, larger draws,
+at the cost of a coarser streaming granularity.
+
+**What a chunk costs the frame it lands in.** Meshing, welding, the collider's BVH *and the
+chunk's GPU buffers* are all built on its worker (see `terrain_chunk.h` for why the Vulkan half
+is safe there), so the owner thread only publishes the result: a scene insert, an asset, the
+water children's first bake and — inside `collision_radius` — a physics re-gather.
+`upload_budget_ms` (1.5 ms) bounds that, nearest chunk first, with at least one chunk landing
+per frame whatever the budget. How much is outstanding is bounded by `max_chunks_in_flight`
+(default: twice the JobEngine's worker count) rather than by a per-frame count, and each job is
+submitted at a priority that falls off with distance, so the ground under the camera is meshed
+before the horizon. `dormant_chunks` (32) keeps that many chunks whole after they leave view, so
+turning round at a chunk boundary re-attaches ground that is already built instead of rebuilding
+it; the streaming centre is latched (`latch_stream_centre()`) so that merely *looking* around
+cannot move the loaded region at all.
 
 `tiles_per_grid_unit` is quadratic in tiles and does not add detail the map does not have; past
 the point where a map cell is a handful of blocks wide, all it resolves is
@@ -331,9 +353,12 @@ texture mipmapping. Per-kind character is a table in the shader, in `TileKind` o
 ### Cost
 
 On `terrain_demo` a rounded 32×32 chunk averages about 11k triangles and 9k vertices; the voxel set
-is far lighter, its pieces being single quads. A chunk builds in about 2 ms on a worker (0.1 ms
-sampling, 0.4 ms meshing, 1.4 ms weld and optimize), plus its collision mesh's weld, adjacency and
-BVH. Two merges keep it there:
+is far lighter, its pieces being single quads. The `terrain_chunk_cost` suite measures a worker's
+share on a deliberately busy rounded chunk (~20k triangles, about twice the demo's average): about
+1 ms meshing and 3 ms weld-and-optimize, plus about 9 ms for the collision mesh's weld, adjacency
+and BVH where the chunk is inside `collision_radius` -- the collider dominates a chunk's build.
+Re-run that suite for current numbers on any machine; the ratios are the stable part. Two merges
+keep the meshing there:
 - Straight halves, most of any cliff and most of a lip's rings, are collected and stamped as one
   stretched strip per run.
 - Tiles with no exposed edge merge into flat rectangles of equal height and kind.

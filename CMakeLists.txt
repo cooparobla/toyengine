@@ -4,6 +4,24 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# --- Build type: optimized by default, asserts kept ---
+# A dev tree configured with no CMAKE_BUILD_TYPE would otherwise compile everything at -O0,
+# which makes the CPU-heavy paths (map generation, chunk meshing, physics, the per-frame scene
+# walks) several times slower than the engine actually is. Default to RelWithDebInfo (-O2 -g)
+# and strip its -DNDEBUG so assert() stays live -- the codebase leans on asserts for contract
+# checks (e.g. coopa::job's CounterPool double-close). An explicit -DCMAKE_BUILD_TYPE (or a
+# multi-config generator) still wins.
+if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type (empty defaulted to RelWithDebInfo)" FORCE)
+    message(STATUS "toyengine: CMAKE_BUILD_TYPE was empty; defaulting to RelWithDebInfo (-O2 -g, asserts on)")
+endif()
+foreach(_toy_lang C CXX)
+    if(DEFINED CMAKE_${_toy_lang}_FLAGS_RELWITHDEBINFO)
+        string(REPLACE "-DNDEBUG" "" CMAKE_${_toy_lang}_FLAGS_RELWITHDEBINFO
+               "${CMAKE_${_toy_lang}_FLAGS_RELWITHDEBINFO}")
+    endif()
+endforeach()
+
 # This file builds toyengine standalone (the top-level project: engine, editor, tests, test
 # scenes in assets/) AND is add_subdirectory()'d by a game project from <project>/.libs/toyengine
 # (see templates/project/ and tools/toyhub). Every path that means "the engine checkout" is

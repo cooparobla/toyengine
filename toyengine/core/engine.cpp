@@ -714,6 +714,34 @@ void Engine::capture_sequence_frame_(uint32_t index) {
     save_screenshot(path, config_.output.save_low_res);
 }
 
+namespace {
+
+/** @brief The cpu.scene.* profile column for a registered scene system, by its system_name(). */
+render::CpuScope scene_system_scope_(const char* name) {
+    using render::CpuScope;
+    static const std::unordered_map<std::string_view, CpuScope> scopes = {
+        {"Behaviour", CpuScope::SceneBehaviour},
+        {"KinematicControl", CpuScope::SceneKinematic},
+        {"Terrain", CpuScope::SceneTerrain},
+        {"HeightmapTerrain", CpuScope::SceneHeightmapTerrain},
+        {"Snow", CpuScope::SceneSnow},
+        {"Physics", CpuScope::ScenePhysics},
+        {"Animation", CpuScope::SceneAnimation},
+        {"IK", CpuScope::SceneIk},
+        {"Navigation", CpuScope::SceneNavigation},
+        {"Particles", CpuScope::SceneParticles},
+        {"Water", CpuScope::SceneWater},
+        {"Weather", CpuScope::SceneWeather},
+        {"Wind", CpuScope::SceneWind},
+        {"TransformResolve", CpuScope::SceneTransformResolve},
+        {"LateBehaviour", CpuScope::SceneLateBehaviour},
+    };
+    const auto it = scopes.find(name);
+    return it != scopes.end() ? it->second : CpuScope::SceneOther;
+}
+
+} // namespace
+
 bool Engine::tick() {
     using render::CpuScope;
     using render::CpuTimer;
@@ -790,6 +818,13 @@ bool Engine::tick() {
         // for this frame are all in.
         if (debug_overlay_.full() && debug_overlay_.refresh_due()) collect_debug_stats_();
         for (const OverlayLayer& l : overlay_layers_) l.scene->late_update(dt);
+    }
+    if (prof != nullptr && scene_mgr_.has_scene()) {
+        // The active scene's per-system split of the SceneUpdate/LateUpdate phases, as its own
+        // cpu.scene.* columns (overlay scenes are not included -- their systems are the UI's).
+        for (const auto& timing : scene_mgr_.get_active_scene().system_timings()) {
+            prof->add_cpu(scene_system_scope_(timing.name), timing.ms);
+        }
     }
     update_audio_(dt);
     if (hooks_.post_late_update) hooks_.post_late_update(dt);

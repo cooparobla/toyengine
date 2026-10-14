@@ -2,6 +2,7 @@
 
 #include <toyengine/water/water_body.h>
 
+#include <chrono>
 #include <cmath>
 
 #include <glm/gtc/quaternion.hpp>
@@ -26,6 +27,24 @@
 
 namespace toy {
 namespace world {
+
+namespace {
+
+/**
+ * @brief The priority a chunk's meshing job is submitted at, by its distance from the centre.
+ *
+ * The queue is already sorted nearest-first, but submission order only decides what is handed
+ * over -- not what a worker picks up next. High for the camera's own chunk and the ring around
+ * it (the ground a player is standing on, and about to walk onto), Normal through the inner
+ * half of the view, Low for the outer rings, which may wait behind anything the frame needs.
+ */
+coopa::job::Priority chunk_priority(std::int32_t distance, std::int32_t view_radius) {
+    if (distance <= 1) return coopa::job::Priority::High;
+    if (2 * distance <= std::max<std::int32_t>(2, view_radius)) return coopa::job::Priority::Normal;
+    return coopa::job::Priority::Low;
+}
+
+} // namespace
 
 void TerrainSystem::execute(coopa::scene::Scene& scene, const coopa::scene::FrameContext& ctx) {
     ++frame_;
@@ -62,11 +81,17 @@ void TerrainSystem::tick_terrain_(TerrainComponent& terrain, coopa::scene::Scene
         submit_queued_chunks_(terrain, ChunkCoord{0, 0}, ctx);
         return;
     }
-    const ChunkCoord centre = terrain.params.chunk_at(stream_centre_(terrain));
-    want_chunks_(terrain, centre);
+    const ChunkCoord centre = latched_centre_(terrain);
+    want_chunks_(terrain, centre, scene);
     release_distant_chunks_(terrain, centre, ctx);
+    evict_dormant_chunks_(terrain);
     upload_finished_chunks_(terrain, scene);
     submit_queued_chunks_(terrain, centre, ctx);
+}
+
+ChunkCoord TerrainSystem::latched_centre_(TerrainComponent& terrain) const {
+    const ChunkCoord candidate = terrain.params.chunk_at(stream_centre_(terrain));
+    return latch_stream_centre(terrain.stream_centre, candidate, terrain.params.view_radius);
 }
 
 glm::vec3 TerrainSystem::stream_centre_(const TerrainComponent& terrain) const {
@@ -83,11 +108,20 @@ glm::vec3 TerrainSystem::stream_centre_(const TerrainComponent& terrain) const {
     // The camera looks down its own -Z.
     const glm::vec3 fwd = glm::normalize(glm::vec3(to_local * glm::vec4(-glm::vec3(cam[2]), 0.0f)));
 
-    // Stream around what the camera looks at, not where it stands: an orbit or editor camera
-    // stands well off the ground (or off the map) looking at it. Only within reach -- a camera
-    // looking at the horizon keeps streaming around itself.
+    // Where the camera STANDS, whenever that is over the terrain -- however high above it. It is
+    // the only candidate a turn of the head cannot move, and for a camera over the map it is
+    // also the right answer: what it can see is centred on itself, not on whatever its ray
+    // happens to touch. One chunk of slack at the edges, so standing just off the coast still
+    // loads the coast.
     const float reach = 4.0f * static_cast<float>(terrain.params.view_radius + 1) * terrain.params.chunk_world_size();
     if (terrain.tiles && !terrain.tiles->empty()) {
+        const float slack = terrain.params.chunk_world_size();
+        const float w = static_cast<float>(terrain.tiles->width()) * terrain.params.tile_size;
+        const float h = static_cast<float>(terrain.tiles->height()) * terrain.params.tile_size;
+        if (pos.x > -slack && pos.y > -slack && pos.x < w + slack && pos.y < h + slack) return pos;
+
+        // Off the map: stream around what it looks at instead, so an orbit or editor camera
+        // parked outside the world still loads the part of it that it is framing.
         TileHit hit;
         if (terrain.tiles->raycast(pos, fwd, terrain.params.tile_size, terrain.params.height_step, reach, hit)) return hit.point;
     }
@@ -191,20 +225,65 @@ void TerrainSystem::sync_planet_gravity_(coopa::scene::Scene& scene) {
     planet_gravity_ = std::move(registered);
 }
 
-void TerrainSystem::want_chunks_(TerrainComponent& terrain, const ChunkCoord& centre) {
+void TerrainSystem::want_chunks_(TerrainComponent& terrain, const ChunkCoord& centre,
+                                 coopa::scene::Scene& scene) {
     const std::int32_t radius = terrain.params.view_radius;
     for (std::int32_t dy = -radius; dy <= radius; ++dy) {
         for (std::int32_t dx = -radius; dx <= radius; ++dx) {
             const ChunkCoord coord{centre.x + dx, centre.y + dy};
             if (!chunk_in_world(terrain, coord)) continue;
-            if (terrain.chunks().find(coord) != terrain.chunks().end()) continue;
+
+            auto it = terrain.chunks().find(coord);
+            if (it != terrain.chunks().end()) {
+                TerrainChunk& chunk = it->second;
+                chunk.last_used_frame = frame_;   // what the Dormant set is evicted by
+                if (chunk.state == ChunkState::Dormant) revive_chunk_(terrain, scene, chunk);
+                if (chunk.state == ChunkState::Live) {
+                    sync_chunk_collision_(terrain, chunk, terrain_wants_collision(terrain, coord, centre));
+                }
+                continue;
+            }
 
             TerrainChunk chunk;
-            chunk.coord = coord;
-            chunk.state = ChunkState::Queued;
+            chunk.coord           = coord;
+            chunk.state           = ChunkState::Queued;
+            chunk.last_used_frame = frame_;
             terrain.chunks().emplace(coord, std::move(chunk));
         }
     }
+}
+
+void TerrainSystem::revive_chunk_(TerrainComponent& terrain, coopa::scene::Scene& scene,
+                                  TerrainChunk& chunk) {
+    chunk.state = ChunkState::Live;
+    // An empty chunk (open sea below the waterline draws nothing) parks as a state and no
+    // object: reviving it is just the state, and it is never re-meshed for nothing.
+    if (!chunk.parked || terrain.owner == nullptr) return;
+    const bool collides = chunk.parked->get_component<coopa::physx::components::MeshCollider>() != nullptr;
+    chunk.object = terrain.owner->add_child(std::move(chunk.parked));
+    // Stamps the Scene back-pointer onto the components again -- see Scene::adopt().
+    scene.adopt(*chunk.object);
+    if (collides) physics_dirty_ = true;
+}
+
+void TerrainSystem::sync_chunk_collision_(TerrainComponent& terrain, TerrainChunk& chunk, bool wanted) {
+    if (wanted == chunk.has_collision) return;
+    if (!wanted) {
+        // Letting go needs no geometry: drop the component and retire the shape. The chunk keeps
+        // drawing the mesh it already has.
+        if (chunk.object != nullptr) {
+            if (auto* collider = chunk.object->get_component<coopa::physx::components::MeshCollider>()) {
+                terrain.retire_collision(collider->owned_mesh(), frame_);
+                chunk.object->remove_component(collider);
+                physics_dirty_ = true;
+            }
+        }
+        chunk.has_collision = false;
+        return;
+    }
+    // Coming inward needs a collision mesh this chunk was never built with: rebuild it. The old
+    // mesh keeps drawing until the new one swaps in, so nothing blinks.
+    chunk.stale = true;
 }
 
 void TerrainSystem::release_distant_chunks_(TerrainComponent& terrain, const ChunkCoord& centre,
@@ -212,7 +291,8 @@ void TerrainSystem::release_distant_chunks_(TerrainComponent& terrain, const Chu
     const std::int32_t keep = terrain.params.view_radius + 1;
     for (auto it = terrain.chunks().begin(); it != terrain.chunks().end();) {
         TerrainChunk& chunk = it->second;
-        if (chunk.state == ChunkState::Retiring || chunk_distance(chunk.coord, centre) <= keep) {
+        if (chunk.state == ChunkState::Retiring || chunk.state == ChunkState::Dormant ||
+            chunk_distance(chunk.coord, centre) <= keep) {
             ++it;
             continue;
         }
@@ -227,8 +307,43 @@ void TerrainSystem::release_distant_chunks_(TerrainComponent& terrain, const Chu
             continue;
         }
 
+        if (chunk.state == ChunkState::Live && terrain.dormant_chunks > 0) {
+            // Kept whole, off the tree: the camera that just left this chunk behind is very
+            // often about to come back to it (see the file doc on letting go).
+            chunk.parked = detach_chunk_object_(terrain, chunk);
+            chunk.state  = ChunkState::Dormant;
+            ++it;
+            continue;
+        }
+
         destroy_chunk_object_(terrain, chunk);
+        ++chunks_released_;
         it = terrain.chunks().erase(it);
+    }
+}
+
+void TerrainSystem::evict_dormant_chunks_(TerrainComponent& terrain) {
+    const std::size_t cap = terrain.dormant_chunks > 0 ? static_cast<std::size_t>(terrain.dormant_chunks) : 0;
+    pending_.clear();
+    for (const auto& entry : terrain.chunks()) {
+        if (entry.second.state == ChunkState::Dormant) pending_.push_back(entry.first);
+    }
+    if (pending_.size() <= cap) return;
+
+    // Oldest first: the chunk the camera left longest ago is the one least likely to be wanted.
+    // The coordinate tie-break keeps a frame's eviction set deterministic.
+    std::sort(pending_.begin(), pending_.end(), [&terrain](const ChunkCoord& a, const ChunkCoord& b) {
+        const std::uint64_t fa = terrain.chunks().at(a).last_used_frame;
+        const std::uint64_t fb = terrain.chunks().at(b).last_used_frame;
+        if (fa != fb) return fa < fb;
+        if (a.y != b.y) return a.y < b.y;
+        return a.x < b.x;
+    });
+    for (std::size_t i = 0, drop = pending_.size() - cap; i < drop; ++i) {
+        TerrainChunk& chunk = terrain.chunks().at(pending_[i]);
+        destroy_chunk_object_(terrain, chunk);
+        ++chunks_released_;
+        terrain.chunks().erase(pending_[i]);
     }
 }
 
@@ -246,16 +361,35 @@ void TerrainSystem::advance_retiring_(TerrainComponent& terrain) {
         chunk.job.close();
         chunk.job = coopa::job::JobHandle{}; // same one-close rule as upload_finished_chunks_
         destroy_chunk_object_(terrain, chunk);
+        ++chunks_released_;
         it = terrain.chunks().erase(it);
     }
 }
 
 void TerrainSystem::upload_finished_chunks_(TerrainComponent& terrain, coopa::scene::Scene& scene) {
-    int budget = std::max(1, terrain.max_chunk_jobs_per_frame);
-    for (auto& entry : terrain.chunks()) {
-        if (budget <= 0) break;
-        TerrainChunk& chunk = entry.second;
-        if (chunk.state != ChunkState::Meshing || !chunk.job.is_complete()) continue;
+    last_upload_ms_ = 0.0;
+    finished_.clear();
+    for (const auto& entry : terrain.chunks()) {
+        const TerrainChunk& chunk = entry.second;
+        if (chunk.state == ChunkState::Meshing && chunk.job.is_complete()) finished_.push_back(entry.first);
+    }
+    if (finished_.empty()) return;
+
+    // Nearest the latched centre first: in hash order the chunk under the camera waits behind
+    // the horizon's whenever the budget bites.
+    const ChunkCoord centre = terrain.stream_centre.centre;
+    std::sort(finished_.begin(), finished_.end(), [&centre](const ChunkCoord& a, const ChunkCoord& b) {
+        const std::int32_t da = chunk_distance(a, centre);
+        const std::int32_t db = chunk_distance(b, centre);
+        if (da != db) return da < db;
+        if (a.y != b.y) return a.y < b.y;
+        return a.x < b.x;
+    });
+
+    const auto   start  = std::chrono::steady_clock::now();
+    const double budget = std::max(0.1f, terrain.upload_budget_ms);
+    for (std::size_t i = 0; i < finished_.size(); ++i) {
+        TerrainChunk& chunk = terrain.chunks().at(finished_[i]);
 
         chunk.job.close();
         // Cleared, not merely closed: a closed handle's pool slot is recycled, so leaving
@@ -263,31 +397,49 @@ void TerrainSystem::upload_finished_chunks_(TerrainComponent& terrain, coopa::sc
         // time -- which the CounterPool asserts on, by design.
         chunk.job = coopa::job::JobHandle{};
         chunk.state = ChunkState::Live;
-        --budget;
 
         // An empty chunk is a real outcome, not a failure: a chunk of open ocean below the
         // waterline emits no faces at all. It stays Live with no object, so it is never
         // re-queued and never draws.
         // A rebuild replaces the chunk's object in this same frame, so it never shows a hole.
         destroy_chunk_object_(terrain, chunk);
-        if (chunk.build && (!chunk.build->mesh.empty() || !chunk.build->water_still.empty() ||
+        if (chunk.build && (chunk.build->gpu_mesh || !chunk.build->water_still.empty() ||
                             !chunk.build->water_flowing.empty())) {
             create_chunk_object_(terrain, scene, chunk);
         }
+        terrain.recycle_build_job(std::move(chunk.build));
         chunk.build.reset();
+
+        last_upload_ms_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        // Checked after the first chunk, never before it: a budget too small for one chunk
+        // would otherwise stall the stream outright.
+        if (last_upload_ms_ >= budget) break;
     }
 }
 
 void TerrainSystem::submit_queued_chunks_(TerrainComponent& terrain, const ChunkCoord& centre,
                            const coopa::scene::FrameContext& ctx) {
-    const int budget = std::max(1, terrain.max_chunk_jobs_per_frame);
-
+    int in_flight = 0;
     pending_.clear();
     for (auto& entry : terrain.chunks()) {
         const TerrainChunk& c = entry.second;
-        if (c.state == ChunkState::Queued || (c.state == ChunkState::Live && c.stale)) pending_.push_back(entry.first);
+        if (c.state == ChunkState::Meshing) {
+            ++in_flight;
+        } else if (c.state == ChunkState::Queued || (c.state == ChunkState::Live && c.stale)) {
+            pending_.push_back(entry.first);
+        }
     }
     if (pending_.empty()) return;
+
+    // How much work may be outstanding, rather than how much may be started this frame: the
+    // JobEngine's business is scheduling it, and a small per-frame count simply leaves its
+    // workers idle. A chunk meshed but not yet published still counts, so a frame that cannot
+    // afford to publish also stops asking for more.
+    const int cap = terrain.max_chunks_in_flight > 0
+                        ? terrain.max_chunks_in_flight
+                        : static_cast<int>(2u * std::max(1u, ctx.jobs->worker_count()));
+    const int budget = std::min(std::max(1, terrain.max_chunk_jobs_per_frame), cap - in_flight);
+    if (budget <= 0) return;
 
     // Nearest first, so the ground under the camera appears before the horizon does. The tie
     // break on coordinates keeps the order deterministic for a given camera position, which
@@ -305,25 +457,35 @@ void TerrainSystem::submit_queued_chunks_(TerrainComponent& terrain, const Chunk
     for (int i = 0; i < submitted_count; ++i) {
         TerrainChunk& chunk = terrain.chunks().at(pending_[static_cast<std::size_t>(i)]);
 
-        auto build = std::make_shared<ChunkBuildJob>();
+        auto build = terrain.take_build_job();
         // Sampled here, on the owner thread: the job meshes its own copy, so the tiles may be
         // edited while it runs.
         sample_chunk_columns(*terrain.tiles, terrain.params, chunk.coord, build->pad);
-        build->library = &terrain.library();
-        build->params  = terrain.params;
-        build->coord   = chunk.coord;
-        build->collision = terrain.collision;
+        build->library   = &terrain.library();
+        build->params    = terrain.params;
+        build->coord     = chunk.coord;
+        build->collision = terrain_wants_collision(terrain, chunk.coord, centre);
+        // The job builds the chunk's GPU mesh as well as its geometry (see terrain_chunk.h):
+        // all that is left for the frame it lands in is publishing it.
+        build->device    = &device_;
+        build->allocator = &allocator_;
 
-        chunk.build = build;
-        chunk.job   = ctx.jobs->create_handle();
-        chunk.state = ChunkState::Meshing;
-        chunk.stale = false;
+        chunk.build         = build;
+        chunk.job           = ctx.jobs->create_handle();
+        chunk.state         = ChunkState::Meshing;
+        chunk.stale         = false;
+        chunk.has_collision = build->collision;
 
         // One job per chunk rather than one parallel_for over all of them: chunks finish and
         // appear individually, and a chunk that leaves view mid-flight can be cancelled on
-        // its own without disturbing its neighbours.
-        ctx.jobs->submit([build]() { build->run(); }, k_terrain_job_type, chunk.job, nullptr,
-                         0u, coopa::job::Priority::Normal);
+        // its own without disturbing its neighbours. The priority is what gets the ground
+        // under the camera built first whatever order this queue was in -- and what keeps the
+        // far ring from competing with the frame's own parallel work.
+        // A planet has no centre to be near: every one of its chunks is wanted at once.
+        const coopa::job::Priority priority =
+            terrain.params.planet ? coopa::job::Priority::Normal
+                                  : chunk_priority(chunk_distance(chunk.coord, centre), terrain.params.view_radius);
+        ctx.jobs->submit([build]() { build->run(); }, k_terrain_job_type, chunk.job, nullptr, 0u, priority);
     }
 }
 
@@ -331,23 +493,22 @@ void TerrainSystem::create_chunk_object_(TerrainComponent& terrain, coopa::scene
                           TerrainChunk& chunk) {
     if (terrain.owner == nullptr) return;
 
-    const ChunkMeshData& data = chunk.build->mesh;
     ++chunk.mesh_serial;
     auto object = std::make_unique<coopa::scene::SceneObject>(chunk_object_name_(chunk.coord));
     auto* transform = object->add_component<TransformComponent>();
     transform->transform().set_position(chunk_origin(terrain.params, chunk.coord));
     add_chunk_water_(terrain, *object, chunk.build->water_still, false);
     add_chunk_water_(terrain, *object, chunk.build->water_flowing, true);
-    if (data.empty()) {
+    if (!chunk.build->gpu_mesh) {
         chunk.object = terrain.owner->add_child(std::move(object));
         scene.adopt(*chunk.object);
         return;
     }
 
-    // buffer_count 1: a chunk mesh is written once and never rewritten, unlike a cloth's
-    // per-frame ring (see Mesh::from_arrays()'s doc on why that is a count, not a bool).
-    chunk.mesh = std::make_shared<Mesh>(
-        Mesh::from_arrays(device_, allocator_, data.vertices, data.indices, 1));
+    // Built on the chunk's worker, not here (see terrain_chunk.h): publishing it is all this
+    // thread does with it.
+    chunk.mesh = std::move(chunk.build->gpu_mesh);
+    ++chunks_built_;
     const std::string id = chunk_asset_id_(terrain, chunk);
     auto handle = assets_.create<Mesh>(id, chunk.mesh);
 
@@ -363,6 +524,10 @@ void TerrainSystem::create_chunk_object_(TerrainComponent& terrain, coopa::scene
                                                  terrain.params.height_step, terrain.params.tile_size);
     // Probe / GI bakes draw with stock shaders only and would misread those codes.
     renderer->affects_reflection_probes = false;
+    // Far chunks out of the cascades: a chunk's whole vertex count is drawn into every shadow
+    // view whose frustum it touches, and the resident set reaches far past where its shadow
+    // could be seen. 0 (the default) keeps every loaded chunk in, as before.
+    renderer->shadow_max_distance = terrain.shadow_distance;
     renderer->set_mesh(std::move(handle));
 
     if (chunk.build->collision_mesh) {
@@ -410,18 +575,31 @@ void TerrainSystem::add_chunk_water_(const TerrainComponent& terrain, coopa::sce
     chunk_object.add_child(std::move(object));
 }
 
-void TerrainSystem::destroy_chunk_object_(TerrainComponent& terrain, TerrainChunk& chunk) {
-    if (chunk.object != nullptr && terrain.owner != nullptr) {
-        if (auto* collider = chunk.object->get_component<coopa::physx::components::MeshCollider>()) {
+std::unique_ptr<coopa::scene::SceneObject> TerrainSystem::detach_chunk_object_(TerrainComponent& terrain,
+                                                                               TerrainChunk& chunk) {
+    std::unique_ptr<coopa::scene::SceneObject> owned;
+    if (chunk.parked) {
+        owned = std::move(chunk.parked);           // already off the tree
+    } else if (chunk.object != nullptr && terrain.owner != nullptr) {
+        owned = terrain.owner->detach_child(chunk.object);
+    }
+    chunk.object = nullptr;
+    if (owned) {
+        if (auto* collider = owned->get_component<coopa::physx::components::MeshCollider>()) {
+            // The physics world holds a raw pointer to the shape until its next refresh(), and
+            // an async navmesh bake may hold its snapshot longer -- so park the shape too.
             terrain.retire_collision(collider->owned_mesh(), frame_);
             physics_dirty_ = true;
         }
-        // The returned unique_ptr is destroyed immediately, which destroys the MeshRenderer
-        // and with it the last AssetHandle on the chunk's mesh -- the refcount unload()
-        // requires to have reached zero.
-        terrain.owner->detach_child(chunk.object);
-        chunk.object = nullptr;
     }
+    return owned;
+}
+
+void TerrainSystem::destroy_chunk_object_(TerrainComponent& terrain, TerrainChunk& chunk) {
+    // The returned unique_ptr is destroyed with this statement, which destroys the MeshRenderer
+    // and with it the last AssetHandle on the chunk's mesh -- the refcount unload() requires to
+    // have reached zero.
+    detach_chunk_object_(terrain, chunk);
     if (chunk.mesh) {
         chunk.mesh.reset();
         assets_.unload(coopa::asset::AssetId::from_path(chunk_asset_id_(terrain, chunk)));

@@ -83,6 +83,26 @@ public:
     float slope_limit = 45.0f;       ///< Degrees.
     float skin = 0.02f;
     float snap_distance = 0.3f;
+    /**
+     * @brief Seconds over which a step is eased into visually; 0 applies it at once.
+     *
+     * The motor changes level within a single frame in both directions -- climbing, it either
+     * fits over the ledge or it does not; descending, the ground snap pulls it onto the lower
+     * surface -- and on anything with a visible riser that reads as the character teleporting.
+     * This keeps the drawn position offset from the real one by the height just gained or lost
+     * and lets it catch up over this long, so the same instant change of level looks like a
+     * stride. Only the Transform lags: the motor, the ground tests and the next frame's move all
+     * work from the true pose, so nothing about the movement changes.
+     *
+     * It applies only while the character stays grounded across the move, so landing from a
+     * fall still arrives at once rather than drifting down after the impact. The time is for a
+     * full `max(step_height, snap_distance)`; shorter steps take proportionally less.
+     *
+     * The capsule is driven from the Transform, so collision lags with the drawing for that
+     * fraction of a second. At the scale of one step that is unnoticeable; it is worth knowing
+     * before setting this to something long.
+     */
+    float step_smoothing = 0.0f;
 
     // --- Movement ---
     float move_speed = 4.0f;         ///< m/s at full input.
@@ -163,6 +183,35 @@ public:
     void save(toy::save::SaveNode& out) override;
     void load(const toy::save::SaveNode& in) override;
 
+    /**
+     * @brief Drives vertical motion externally: gravity stops, and the vertical speed eases
+     *        toward `target_speed` instead.
+     *
+     * For the states that *hold* a vertical speed rather than fall -- swimming at a surface,
+     * climbing a wall, gliding at a steady sink. Steering `gravity_scale` covers those only
+     * while the character still wants to go *down*: a scale turned negative to push it up makes
+     * the jump impulse `sqrt(2 * g * jump_height)` the square root of a negative number, and the
+     * character leaves the world on a NaN. Nor can a negative scale lift a character that is
+     * already standing on something, because the ground clamp below zeroes any upward speed
+     * before the motor sees it. This mode sidesteps both: it replaces the gravity term outright
+     * and is exempt from that clamp, so a climber can step off the floor onto a wall without
+     * faking a jump to get airborne.
+     *
+     * It persists until clear_vertical_drive(); re-asserting it each frame is equally fine, and
+     * is how a controller that tracks a moving target (a water surface) would use it. Horizontal
+     * motion is untouched, still coming from `move_input` and root motion.
+     *
+     * @param target_speed Vertical speed to hold, m/s, positive up.
+     * @param response How fast it converges, 1/s; <= 0 snaps straight to the target.
+     */
+    void set_vertical_drive(float target_speed, float response);
+
+    /** @brief Returns the character to gravity. Safe when no drive is set. */
+    void clear_vertical_drive();
+
+    /** @brief Whether set_vertical_drive() is in effect. */
+    bool has_vertical_drive() const { return vertical_drive_; }
+
     /** @brief Sets the facing yaw (degrees; 0 faces +Y). Used by a FirstPerson CameraController:
      *         while this is fed each frame, face_movement does not turn the character. */
     void set_facing_yaw(float yaw_deg);
@@ -222,6 +271,10 @@ private:
     float v_velocity_ = 0.0f;
     bool grounded_ = false;
     bool jumped_ = false;
+    float step_offset_ = 0.0f;           ///< step_smoothing: how far the drawn pose still lags.
+    bool vertical_drive_ = false;        ///< set_vertical_drive(): gravity replaced by a held speed.
+    float vertical_target_ = 0.0f;       ///< ...the speed it holds (m/s, up positive)...
+    float vertical_response_ = 0.0f;     ///< ...and how fast it gets there (1/s; <= 0 snaps).
     float air_time_ = 0.0f;
     float jump_buffer_timer_ = 0.0f;
     float yaw_deg_ = 0.0f;

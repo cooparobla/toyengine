@@ -4,10 +4,29 @@
  *        into a single vertex/index buffer (and, optionally, a collision mesh), and the
  *        bookkeeping the streamer wraps around that.
  *
- * The meshing half of this file is **pure**: it reads a sampler and a baked tile library, and
- * writes a ChunkMeshData. No Vulkan, no Scene, no AssetManager, no globals. That is what lets
- * it run on a coopa::job worker (which is where it does run -- see terrain_system.h) and what
- * lets the `world` test group exercise it with no device at all.
+ * The meshing functions here are **pure**: they read a sampler and a baked tile library, and
+ * write a ChunkMeshData. No Scene, no AssetManager, no globals. That is what lets them run on a
+ * coopa::job worker (which is where they do run -- see terrain_system.h) and what lets the
+ * `world` test group exercise them with no device at all.
+ *
+ * ### Why the GPU buffers are created here too
+ *
+ * ChunkBuildJob::run() also builds the chunk's `Mesh` -- on the worker, not on the owner thread.
+ * A chunk is 20k-50k vertices, so creating and filling its buffers is two `vmaCreateBuffer`
+ * calls and a couple of megabytes of memcpy, and doing that in the frame the chunk lands is a
+ * visible hitch. It is safe off-thread by construction, not by luck:
+ *
+ *   - `coopa::gfx::memory::Allocator` does NOT pass VMA_ALLOCATOR_CREATE_EXTERNALLY_SYNCHRONIZED_BIT,
+ *     so VMA synchronises itself, and `vkCreateBuffer` / `vkBindBufferMemory` need no external
+ *     synchronisation of their own.
+ *   - `Buffer`'s constructor does nothing but `vmaCreateBuffer`, and `Buffer::upload()` is a
+ *     memcpy into that allocation's persistent mapping.
+ *   - The buffers are private to this job until the owner thread publishes them, so no other
+ *     thread -- and no in-flight GPU work -- can be looking at them. A cancelled job's mesh is
+ *     destroyed with the job, which is likewise safe: nothing ever drew it.
+ *
+ * Everything that is genuinely single-owner stays on the owner thread: the AssetManager, the
+ * Scene, and the physics world (see terrain_system.h's thread split).
  *
  * ### Exposure, and the one-tile pad
  *
@@ -39,6 +58,13 @@
 
 namespace coopa::physx::geometry {
 class TriangleMesh;
+}
+
+namespace coopa::gfx::core {
+class Device;
+}
+namespace coopa::gfx::memory {
+class Allocator;
 }
 
 namespace toy {
@@ -178,14 +204,32 @@ struct ChunkBuildJob {
     TerrainParams          params;
     ChunkCoord             coord;
     bool                   collision = false; /**< Also build `collision_mesh`. */
-    ChunkMeshData          mesh; /**< The output; valid once the job's handle reports complete. */
+    /**
+     * @brief Where `gpu_mesh`'s buffers are created. Null leaves `gpu_mesh` null and the CPU
+     *        arrays for the caller to upload (what the pure `world` unit tests do).
+     */
+    coopa::gfx::core::Device*      device    = nullptr;
+    coopa::gfx::memory::Allocator* allocator = nullptr;
+    ChunkMeshData          mesh; /**< The CPU geometry; valid once the job's handle reports complete. */
+    /** @brief The chunk's GPU mesh, built by run(); null for an empty chunk (or no `device`). */
+    std::shared_ptr<coopa::gfx::engine::data::Mesh> gpu_mesh;
     /** @brief The chunk's collider surface, when `collision`; null for an empty chunk. */
     std::shared_ptr<const coopa::physx::geometry::TriangleMesh> collision_mesh;
     ChunkWaterData         water_still;   /**< Output: the sea and lakes over this chunk. */
     ChunkWaterData         water_flowing; /**< Output: the rivers over this chunk. */
 
-    /** @brief The job body. Touches nothing but this object and the borrowed, const library. */
+    /** @brief The job body: mesh, water, collider, GPU buffers. Touches nothing but this
+     *         object, the borrowed const library and (through VMA) the device. */
     void run();
+
+    /**
+     * @brief Drops every output but keeps the buffers' CAPACITY, so a pooled job's next build
+     *        re-uses the allocation instead of malloc'ing a couple of megabytes again.
+     *
+     * Only the owner thread, and only once the job has really finished (see
+     * TerrainComponent::recycle_build_job()).
+     */
+    void reset_outputs();
 };
 
 /** @brief The world-space origin of a chunk's minimum corner -- its SceneObject's position. */

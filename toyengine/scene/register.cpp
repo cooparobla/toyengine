@@ -174,6 +174,7 @@ void register_scene_components() {
             f("slope_limit", cc->slope_limit);
             f("skin", cc->skin);
             f("snap_distance", cc->snap_distance);
+            f("step_smoothing", cc->step_smoothing);
             f("move_speed", cc->move_speed);
             f("sprint_multiplier", cc->sprint_multiplier);
             f("acceleration", cc->acceleration);
@@ -539,6 +540,21 @@ void register_scene_components(coopa::gfx::core::Device& device,
             }
             if (node.contains("max_chunk_jobs_per_frame")) {
                 terrain->max_chunk_jobs_per_frame = node.at("max_chunk_jobs_per_frame").get_value<int>();
+            }
+            if (node.contains("max_chunks_in_flight")) {
+                terrain->max_chunks_in_flight = node.at("max_chunks_in_flight").get_value<int>();
+            }
+            if (node.contains("upload_budget_ms")) {
+                terrain->upload_budget_ms = node.at("upload_budget_ms").get_value<float>();
+            }
+            if (node.contains("collision_radius")) {
+                terrain->collision_radius = node.at("collision_radius").get_value<int>();
+            }
+            if (node.contains("shadow_distance")) {
+                terrain->shadow_distance = node.at("shadow_distance").get_value<float>();
+            }
+            if (node.contains("dormant_chunks")) {
+                terrain->dormant_chunks = node.at("dormant_chunks").get_value<int>();
             }
 
             // Shared with the "MeshRenderer" parser rather than reimplemented, so a terrain's

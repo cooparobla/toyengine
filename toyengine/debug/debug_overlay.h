@@ -482,6 +482,20 @@ private:
             for (CpuScope sc : kShown) {
                 std::snprintf(buf, sizeof(buf), "%.2f", cpu(sc));
                 out.push_back({std::string("  ") + render::scope_name(sc), buf});
+                if (sc != CpuScope::SceneUpdate) continue;
+                // The heaviest scene systems (the cpu.scene.* split of SceneUpdate/LateUpdate),
+                // largest first -- same treatment as the GPU passes below.
+                std::array<size_t, render::kCpuScopeCount> order{};
+                for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+                const size_t s0 = static_cast<size_t>(CpuScope::SceneBehaviour);
+                const size_t s1 = static_cast<size_t>(CpuScope::SceneOther);
+                std::sort(order.begin() + s0, order.begin() + s1 + 1,
+                          [&](size_t a, size_t b) { return r.cpu[a] > r.cpu[b]; });
+                for (size_t k = s0; k <= s1 && k < s0 + 4; ++k) {
+                    if (r.cpu[order[k]] <= 0.05) break;
+                    std::snprintf(buf, sizeof(buf), "%.2f", r.cpu[order[k]]);
+                    out.push_back({std::string("    ") + render::scope_name(static_cast<CpuScope>(order[k])), buf});
+                }
             }
             if (r.gpu_total > 0.0) {
                 std::snprintf(buf, sizeof(buf), "%.2f ms", r.gpu_total);

@@ -5,7 +5,12 @@ namespace render {
 
 const char* scope_name(CpuScope s) {
     static const char* names[kCpuScopeCount] = {
-        "frame", "input", "assets", "scene_update", "late_update", "dynamic_meshes",
+        "frame", "input", "assets", "scene_update",
+        "scene.behaviour", "scene.kinematic", "scene.terrain", "scene.heightmap_terrain",
+        "scene.snow", "scene.physics", "scene.animation", "scene.ik", "scene.navigation",
+        "scene.particles", "scene.water", "scene.weather", "scene.wind",
+        "scene.transform_resolve", "scene.late_behaviour", "scene.other",
+        "late_update", "dynamic_meshes",
         "render", "render.wait_fence", "render.gather", "render.record", "render.submit_present"};
     return names[static_cast<size_t>(s)];
 }

@@ -22,6 +22,7 @@
 #include <coopa/scene/scene.h>
 #include <coopa/yaml/document.h>
 #include <gfxcoopa/engine/data/skinned_mesh_source.h>
+#include <toyengine/scene/camera_controller.h>
 #include <toyengine/world/terrain_chunk.h>
 #include <toyengine/world/terrain_component.h>
 #include <toyengine/world/tile_mesh_library.h>
@@ -129,6 +130,15 @@ inline glm::vec3 shrink_terrain_and_centre(toy::world::TerrainComponent& terrain
                            tiles * 0.5f * terrain.params.tile_size, 26.0f);
     if (auto* marker = scene.find_object("focus_marker")) {
         if (auto* tc = marker->get_transform()) tc->transform().set_position(centre);
+    }
+    // The camera must arrive WITH the marker, not fly there over frames from the demo's
+    // authored pose across the map: mid-flight, the streamer legitimately builds chunks around
+    // wherever the camera currently is, so a "N chunks live" wait can be satisfied by ground
+    // nowhere near `centre` -- and a collision ring that settles later re-meshes chunks a test
+    // snapshotted. Smoothing 0 snaps the orbit rig to its tracker on the next tick.
+    if (auto* controller = scene.find_first_component<toy::scene::CameraController>()) {
+        controller->follow_smoothing   = 0.0f;
+        controller->movement_smoothing = 0.0f;
     }
     return centre;
 }

@@ -38,15 +38,26 @@ void WaterSystem::execute(coopa::scene::Scene& scene, const coopa::scene::FrameC
     const bool physics_ready = physics_ != nullptr && simulating && physics_->bound_count() > 0;
 
     refresh_bodies(scene);
-    // Stage 1 for anything new, moved, or baked at another grid density: needed to be seen
-    // at all, and cheap (no raycasts).
-    for (WaterBody* body : bodies_) {
-        if (!body->owner) continue;
-        const glm::mat4& world = body->owner->get_transform()->transform().get_world_matrix();
-        const bool moved = body->baked && world != body->baked_world;
-        const bool density = body->baked && uses_grid_(*body) && body->baked_density != settings_.grid_density;
-        if (body->baked && !moved && !density) continue;
-        bake_(scene, *body, world, false);
+    // Stage 1 for anything new, moved, or baked at another grid density: needed to be seen at
+    // all, and cheap next to stage 2 (no raycasts) -- but not free, and a streamed world hands
+    // several bodies over at once, so nearest first and a few per frame, like stage 2.
+    {
+        std::vector<std::pair<float, WaterBody*>> pending;
+        for (WaterBody* body : bodies_) {
+            if (!body->owner) continue;
+            const glm::mat4& world = body->owner->get_transform()->transform().get_world_matrix();
+            const bool moved = body->baked && world != body->baked_world;
+            const bool density = body->baked && uses_grid_(*body) && body->baked_density != settings_.grid_density;
+            if (body->baked && !moved && !density) continue;
+            pending.push_back({distance_to_body_(*body), body});
+        }
+        std::sort(pending.begin(), pending.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+        const std::size_t budget = static_cast<std::size_t>(std::max(settings_.new_bakes_per_frame, 1));
+        for (std::size_t i = 0; i < pending.size() && i < budget; ++i) {
+            WaterBody& body = *pending[i].second;
+            bake_(scene, body, body.owner->get_transform()->transform().get_world_matrix(), false);
+        }
     }
     // Stage 2, nearest first, within range, a few per frame.
     if (physics_ready) {

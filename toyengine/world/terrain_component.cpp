@@ -37,6 +37,29 @@ TerrainComponent::~TerrainComponent() {
     }
 }
 
+bool terrain_wants_collision(const TerrainComponent& terrain, const ChunkCoord& coord,
+                             const ChunkCoord& centre) {
+    if (!terrain.collision) return false;
+    if (terrain.params.planet || terrain.collision_radius <= 0) return true;
+    return chunk_distance(coord, centre) <= terrain.collision_radius;
+}
+
+std::shared_ptr<ChunkBuildJob> TerrainComponent::take_build_job() {
+    if (job_pool_.empty()) return std::make_shared<ChunkBuildJob>();
+    std::shared_ptr<ChunkBuildJob> job = std::move(job_pool_.back());
+    job_pool_.pop_back();
+    return job;
+}
+
+void TerrainComponent::recycle_build_job(std::shared_ptr<ChunkBuildJob> job) {
+    // use_count 1 means this is the last reference: the job itself is gone, so its buffers are
+    // nobody else's. A cancelled job may still be running and holding the other one -- let that
+    // one be freed by whoever drops it last.
+    if (!job || job.use_count() != 1 || job_pool_.size() >= k_job_pool_max) return;
+    job->reset_outputs();
+    job_pool_.push_back(std::move(job));
+}
+
 void TerrainComponent::begin_generation(coopa::job::JobEngine* jobs) {
     // Remembered even on the early-out path: the destructor needs it to drain chunk jobs,
     // and those outlive generation by the whole life of the scene.

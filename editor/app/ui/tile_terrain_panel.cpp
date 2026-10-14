@@ -173,11 +173,13 @@ EditResult EditorApp::draw_tile_terrain_panel_(imm::Context& ctx, ObjectId id, N
                   "columns and built from a tile set's pieces in chunks around the camera.",
                   &dim);
     if (TerrainComponent* live = live_tile_terrain_(id)) {
-        int chunks = 0, building = 0, colliders = 0;
+        int chunks = 0, building = 0, colliders = 0, dormant = 0;
         for (const auto& [coord, chunk] : live->chunks()) {
             if (chunk.state == toy::world::ChunkState::Live) {
                 ++chunks;
                 if (chunk.object && chunk.object->get_component<coopa::physx::components::MeshCollider>()) ++colliders;
+            } else if (chunk.state == toy::world::ChunkState::Dormant) {
+                ++dormant;   // kept whole off the tree, ready to be re-attached
             } else if (chunk.state != toy::world::ChunkState::Retiring) {
                 ++building;
             }
@@ -187,9 +189,11 @@ EditResult EditorApp::draw_tile_terrain_panel_(imm::Context& ctx, ObjectId id, N
         } else if (!live->library().is_baked()) {
             std::snprintf(buf, sizeof(buf), "Live: loading the tile set...");
         } else if (building > 0) {
-            std::snprintf(buf, sizeof(buf), "Live: %d chunks drawn, %d building, %d with collision", chunks, building, colliders);
+            std::snprintf(buf, sizeof(buf), "Live: %d chunks drawn, %d building, %d with collision, %d dormant",
+                          chunks, building, colliders, dormant);
         } else {
-            std::snprintf(buf, sizeof(buf), "Live: %d chunks drawn, %d with collision", chunks, colliders);
+            std::snprintf(buf, sizeof(buf), "Live: %d chunks drawn, %d with collision, %d dormant", chunks,
+                          colliders, dormant);
         }
         ctx.label(buf, &dim);
         if (live->tiles && !live->tiles->empty()) {
@@ -372,16 +376,27 @@ EditResult EditorApp::draw_tile_terrain_panel_(imm::Context& ctx, ObjectId id, N
         const float metres = side * num_of(comp, "chunk_size", 16.0f) * num_of(comp, "tile_size", 1.0f);
         std::snprintf(buf, sizeof(buf), "Loaded: %.0f chunks, %.0f m square around the camera", side * side, metres);
         ctx.label(buf, &dim);
-        fields({tfield("max_chunk_jobs_per_frame", "Chunks per Frame")});
+        fields({tfield("max_chunk_jobs_per_frame", "Jobs per Frame"),
+                tfield("max_chunks_in_flight", "Chunks in Flight")});
+        fields({tfield("upload_budget_ms", "Upload Budget (ms)"), tfield("dormant_chunks", "Kept Dormant")});
+        fields({tfield("shadow_distance", "Shadow Distance (m)")});
     }
-    mark({"chunk_size", "view_radius", "max_chunk_jobs_per_frame"});
+    mark({"chunk_size", "view_radius", "max_chunk_jobs_per_frame", "max_chunks_in_flight",
+          "upload_budget_ms", "dormant_chunks", "shadow_distance"});
 
     // --- Collision ---------------------------------------------------------------------------
     if (section("Collision", I::Collider, "Each chunk collides with exactly the surface it draws, whichever tile set built it.",
                 false)) {
         fields({tfield("collision", "Collision"), tfield("physics_material", "Physics Material")});
+        fields({tfield("collision_radius", "Collision Radius (chunks)")});
+        const float radius = num_of(comp, "collision_radius", 4.0f);
+        if (radius > 0.0f) {
+            std::snprintf(buf, sizeof(buf), "Solid within %.0f m; ground past that is not",
+                          radius * num_of(comp, "chunk_size", 16.0f) * num_of(comp, "tile_size", 1.0f));
+            ctx.label(buf, &dim);
+        }
     }
-    mark({"collision", "physics_material"});
+    mark({"collision", "physics_material", "collision_radius"});
 
     // Anything the panel does not place itself (new or unusual keys) stays reachable.
     std::vector<FieldDesc> rest;

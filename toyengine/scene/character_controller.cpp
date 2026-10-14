@@ -29,7 +29,20 @@ void CharacterController::set_suspended(bool suspended) {
     h_velocity_ = glm::vec2(0.0f);
     v_velocity_ = 0.0f;
     grounded_ = false;
+    step_offset_ = 0.0f;
     ground_body_ = coopa::physx::dynamics::BodyId{};
+}
+
+void CharacterController::set_vertical_drive(float target_speed, float response) {
+    vertical_drive_ = true;
+    vertical_target_ = target_speed;
+    vertical_response_ = response;
+}
+
+void CharacterController::clear_vertical_drive() {
+    vertical_drive_ = false;
+    vertical_target_ = 0.0f;
+    vertical_response_ = 0.0f;
 }
 
 void CharacterController::teleport(const glm::vec3& p) {
@@ -37,6 +50,7 @@ void CharacterController::teleport(const glm::vec3& p) {
     h_velocity_ = glm::vec2(0.0f);
     v_velocity_ = 0.0f;
     grounded_ = false;
+    step_offset_ = 0.0f;
     ground_body_ = coopa::physx::dynamics::BodyId{};
 }
 
@@ -127,7 +141,10 @@ void CharacterController::advance(float dt, coopa::physx::system::PhysicsSystem*
     jump_buffer_timer_ = jump_pressed ? jump_buffer + 1e-6f : std::max(0.0f, jump_buffer_timer_ - dt);
     const bool can_jump = !jumped_ && (grounded_ || air_time_ <= coyote_time);
     bool jumped_now = false;
-    if (jump_buffer_timer_ > 0.0f && can_jump && jump_height > 0.0f) {
+    // `g > 0`: an effective gravity of zero has no apex to reach, and a negative one -- a
+    // gravity_scale turned upward -- would make this sqrt() of a negative number and strand the
+    // character at NaN for the rest of the scene. Neither has a jump worth firing.
+    if (jump_buffer_timer_ > 0.0f && can_jump && jump_height > 0.0f && g > 0.0f) {
         v_velocity_ = std::sqrt(2.0f * g * jump_height);
         jumped_ = true;
         jumped_now = true;
@@ -151,14 +168,28 @@ void CharacterController::advance(float dt, coopa::physx::system::PhysicsSystem*
     root_motion_ = glm::vec3(0.0f);
     root_yaw_ = 0.0f;
     // Exact for constant acceleration (velocity Verlet), so the apex is exactly jump_height.
-    if (grounded_ && !jumped_now) v_velocity_ = std::min(v_velocity_, 0.0f);
-    disp.z += v_velocity_ * dt - 0.5f * g * dt * dt;
-    const float v_before = v_velocity_ - g * dt;
-    v_velocity_ = v_before;
+    float v_before = v_velocity_;
+    if (vertical_drive_) {
+        // Gravity replaced by the held speed (set_vertical_drive). The ground clamp below is
+        // skipped on purpose: it exists to stop gravity fighting the ground snap, and applying
+        // it here would forbid the one thing a drive is for -- lifting a character that is
+        // standing on something.
+        const float blend = vertical_response_ > 0.0f ? std::min(1.0f, vertical_response_ * dt) : 1.0f;
+        v_velocity_ += (vertical_target_ - v_velocity_) * blend;
+        disp.z += v_velocity_ * dt;
+        v_before = v_velocity_;
+    } else {
+        if (grounded_ && !jumped_now) v_velocity_ = std::min(v_velocity_, 0.0f);
+        disp.z += v_velocity_ * dt - 0.5f * g * dt * dt;
+        v_before = v_velocity_ - g * dt;
+        v_velocity_ = v_before;
+    }
     // Ride what we stand on: its Transform has already moved this frame (movers run first,
     // see KinematicControlSystem), so carry the feet by exactly that delta -- position and
     // yaw -- rather than by its physics velocity, which is a step old.
-    const glm::vec3 feet0 = t.position();
+    // The Transform may be carrying a step-smoothing lag (see step_smoothing); the motor works
+    // from where the character really is, so it is added back before anything reads the pose.
+    const glm::vec3 feet0 = t.position() + up * step_offset_;
     if (grounded_ && !jumped_now) {
         glm::mat4 now;
         if (ground_matrix_(physics, ground_body_, now)) {
@@ -222,6 +253,7 @@ void CharacterController::advance(float dt, coopa::physx::system::PhysicsSystem*
     if (r.hit_ceiling && v_velocity_ > 0.0f) v_velocity_ = 0.0f;
 
     const bool was_grounded = grounded_;
+    const float air_before = air_time_;   ///< Time aloft entering this frame (step smoothing).
     grounded_ = r.grounded;
     ground_normal_ = r.grounded ? r.ground_normal : up;
     ground_body_ = coopa::physx::dynamics::BodyId{};
@@ -251,7 +283,35 @@ void CharacterController::advance(float dt, coopa::physx::system::PhysicsSystem*
     facing_override_ = false;
     yaw_deg_ = std::remainder(yaw_deg_, 360.0f);
 
-    t.set_position(r.position - up * (0.5f * height));
+    // A step up is instantaneous in the motor -- it sweeps over the ledge and lands on top of it
+    // within one frame -- which reads as the character snapping upward. Holding the drawn
+    // position below the real one and easing it up turns that into a stride without the motor
+    // ever knowing: collision, ground tests and the next frame's move all run on the real pose.
+    if (step_smoothing > 0.0f) {
+        // Both directions. Going up, the motor sweeps over the ledge; coming down, the ground
+        // snap pulls the character onto the lower surface -- each lands a whole step inside one
+        // frame, and each is the same jolt. Only while the character stayed grounded across the
+        // move, though: a landing after a fall has to arrive at once, not drift down afterwards.
+        constexpr float k_min_drop = 0.25f;  // Clear of the per-frame descent of a run down a slope.
+        // Walking off a ledge is briefly airborne -- the character leaves the lip a frame or two
+        // before the ground snap catches it below -- so "stayed grounded" alone would exclude the
+        // very case this is for. A short grace covers that while still letting a real fall land
+        // hard: by the time anything has been aloft this long, it is falling, not stepping down.
+        constexpr float k_step_grace = 0.2f;
+        const float limit = std::max(step_height, snap_distance);
+        if (grounded_ && (was_grounded || air_before < k_step_grace)) {
+            const float rise = r.position.z - centre.z;
+            if (r.stepped || rise < -k_min_drop) {
+                step_offset_ = std::clamp(step_offset_ + rise, -limit, limit);
+            }
+        }
+        const float decay = (limit / step_smoothing) * dt;
+        step_offset_ = step_offset_ > 0.0f ? std::max(0.0f, step_offset_ - decay)
+                                           : std::min(0.0f, step_offset_ + decay);
+    } else {
+        step_offset_ = 0.0f;
+    }
+    t.set_position(r.position - up * (0.5f * height + step_offset_));
     t.set_rotation(glm::vec3(0.0f, 0.0f, yaw_deg_));
 }
 
@@ -306,7 +366,10 @@ void CharacterController::advance_field_(float dt, coopa::physx::system::Physics
     jump_buffer_timer_ = jump_pressed ? jump_buffer + 1e-6f : std::max(0.0f, jump_buffer_timer_ - dt);
     const bool can_jump = !jumped_ && (grounded_ || air_time_ <= coyote_time);
     bool jumped_now = false;
-    if (jump_buffer_timer_ > 0.0f && can_jump && jump_height > 0.0f) {
+    // `g > 0`: an effective gravity of zero has no apex to reach, and a negative one -- a
+    // gravity_scale turned upward -- would make this sqrt() of a negative number and strand the
+    // character at NaN for the rest of the scene. Neither has a jump worth firing.
+    if (jump_buffer_timer_ > 0.0f && can_jump && jump_height > 0.0f && g > 0.0f) {
         v_velocity_ = std::sqrt(2.0f * g * jump_height);
         jumped_ = true;
         jumped_now = true;
@@ -327,10 +390,22 @@ void CharacterController::advance_field_(float dt, coopa::physx::system::Physics
     }
     root_motion_ = glm::vec3(0.0f);
     root_yaw_ = 0.0f;
-    if (grounded_ && !jumped_now) v_velocity_ = std::min(v_velocity_, 0.0f);
-    disp.z += v_velocity_ * dt - 0.5f * g * dt * dt;
-    const float v_before = v_velocity_ - g * dt;
-    v_velocity_ = v_before;
+    float v_before = v_velocity_;
+    if (vertical_drive_) {
+        // Gravity replaced by the held speed (set_vertical_drive). The ground clamp below is
+        // skipped on purpose: it exists to stop gravity fighting the ground snap, and applying
+        // it here would forbid the one thing a drive is for -- lifting a character that is
+        // standing on something.
+        const float blend = vertical_response_ > 0.0f ? std::min(1.0f, vertical_response_ * dt) : 1.0f;
+        v_velocity_ += (vertical_target_ - v_velocity_) * blend;
+        disp.z += v_velocity_ * dt;
+        v_before = v_velocity_;
+    } else {
+        if (grounded_ && !jumped_now) v_velocity_ = std::min(v_velocity_, 0.0f);
+        disp.z += v_velocity_ * dt - 0.5f * g * dt * dt;
+        v_before = v_velocity_ - g * dt;
+        v_velocity_ = v_before;
+    }
 
     // --- Move ---
     coopa::physx::query::QueryFilter filter;
@@ -388,6 +463,7 @@ void CharacterController::advance_field_(float dt, coopa::physx::system::Physics
     if (r.hit_ceiling && v_velocity_ > 0.0f) v_velocity_ = 0.0f;
 
     const bool was_grounded = grounded_;
+    const float air_before = air_time_;   ///< Time aloft entering this frame (step smoothing).
     grounded_ = r.grounded;
     ground_normal_ = r.grounded ? r.ground_normal : up;
     ground_body_ = coopa::physx::dynamics::BodyId{};

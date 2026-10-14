@@ -128,9 +128,17 @@ or archipelago with rivers and biomes, and from then on you edit it tile by tile
   changing a setting does nothing until you generate again. That replaces every tile, your edits
   included, and can be undone.
 - **Size & Terraces**: how big each tile and each step is in the world.
-- **Streaming**: how many chunks stay loaded around the point the camera looks at. This is the
-  main cost control.
+- **Streaming**: how many chunks stay loaded around the camera. This is the main cost control.
+  **Chunk Size** and **View Radius** set the loaded region (the panel shows how many chunks and
+  how many metres across that is). **Jobs per Frame** and **Chunks in Flight** pace how much the
+  world is building at once, **Upload Budget (ms)** how long a frame may spend putting finished
+  chunks into the scene, and **Kept Dormant** how many chunks are held on to after you leave
+  them, so turning back shows ground that is already built instead of rebuilding it.
+  **Shadow Distance** drops chunks further than that from the shadow passes (0 = no limit).
 - **Collision**: on by default. Every chunk collides with exactly the surface it draws.
+  **Collision Radius** limits that to chunks near the camera -- the panel shows how far that is
+  in metres. Ground beyond it is drawn but not solid, so raise it past wherever things actually
+  stand, fall or walk; 0 gives every loaded chunk a collider.
 
 ### World Generator
 

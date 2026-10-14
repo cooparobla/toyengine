@@ -40,6 +40,26 @@ enum class CpuScope : uint32_t {
     Input,          ///< Window poll + input.
     Assets,         ///< AssetManager::update (async load finalization).
     SceneUpdate,    ///< Controllers + SceneManager::update (scripts, physics, transforms).
+    // The active scene's registered systems, split out of SceneUpdate/LateUpdate (one column
+    // per known system_name(), via Scene::system_timings(); anything unrecognised sums into
+    // SceneOther). Fixed entries rather than free-form names, like every other scope here, so
+    // the CSV's columns never depend on which systems a scene happens to install.
+    SceneBehaviour,        ///< The recursive Component::update() walk.
+    SceneKinematic,        ///< KinematicControlSystem: movers, mounts, character controllers.
+    SceneTerrain,          ///< TileTerrain streaming: chunk publish, submit, retire.
+    SceneHeightmapTerrain, ///< HeightmapTerrainSystem: chunk objects, GPU texture patches.
+    SceneSnow,             ///< SnowSystem: deformer stamps and refill.
+    ScenePhysics,          ///< PhysicsSystem: gather, step, transform sync, events.
+    SceneAnimation,        ///< AnimationSystem.
+    SceneIk,               ///< IK pass.
+    SceneNavigation,       ///< Navigation system.
+    SceneParticles,        ///< Particle system update.
+    SceneWater,            ///< WaterSystem: bakes, buoyancy, ripples.
+    SceneWeather,          ///< Weather system.
+    SceneWind,             ///< Wind system.
+    SceneTransformResolve, ///< The world-matrix resolve pass (UpdatePhase 350).
+    SceneLateBehaviour,    ///< The recursive Component::late_update() walk.
+    SceneOther,            ///< Any registered system without its own column.
     LateUpdate,     ///< UI canvases + late_update.
     DynamicMeshes,  ///< Cloth / skinned mesh uploads, debug lines.
     Render,         ///< All of ToyRenderPipeline::render().

@@ -157,17 +157,21 @@ COOPA_TEST(chunks_stream_around_the_camera) {
         glm::vec3((static_cast<float>(moved.x) + 0.5f) * chunk_world,
                   (static_cast<float>(moved.y) + 0.5f) * chunk_world, 48.0f));
 
+    const toy::world::ChunkCoord behind{start.x - 1, start.y};
     tick_until(engine, 600, [&] {
         return chunk_is_live(*terrain, toy::world::ChunkCoord{moved.x + 1, moved.y}) &&
-               terrain->chunks().find(toy::world::ChunkCoord{start.x - 1, start.y}) ==
-                   terrain->chunks().end();
+               !chunk_is_live(*terrain, behind);
     });
 
     expect(chunk_is_live(*terrain, toy::world::ChunkCoord{moved.x + 1, moved.y}),
            "terrain: ground ahead of the marker is built as it advances");
-    expect(terrain->chunks().find(toy::world::ChunkCoord{start.x - 1, start.y}) ==
-               terrain->chunks().end(),
-           "terrain: ground left behind is released");
+    // Released means off the scene tree, not necessarily destroyed: a chunk the camera may come
+    // straight back to is parked whole instead (TerrainChunk::parked, `dormant_chunks`), so it
+    // can stay in the chunk table while drawing nothing.
+    expect(!chunk_is_live(*terrain, behind), "terrain: ground left behind stops drawing");
+    const auto left = terrain->chunks().find(behind);
+    expect(left == terrain->chunks().end() || left->second.object == nullptr,
+           "terrain: ...and is off the scene tree, parked or gone");
     // Hysteresis: the retirement threshold is view_radius + 1, so the chunk exactly two behind
     // is deliberately still loaded. Asserting it explicitly is what stops a future "tidy-up"
     // from dropping the margin and reintroducing boundary thrash.

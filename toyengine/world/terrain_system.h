@@ -18,16 +18,27 @@
  *
  * ### The thread split
  *
- * Off-thread (any worker): assembling tile-set pieces into vertex/index buffers and building the
- * chunk's collision mesh (weld, adjacency, BVH). The chunk's columns are copied out of the
- * terrain's tiles on the owner thread when the job is submitted (a plain copy), so the tiles can
- * be edited at any time; an edit marks the chunks it touches stale, and each rebuilds while its
- * old mesh keeps drawing, then swaps in. That is nearly all
- * the cost, it is pure (see terrain_chunk.h), and chunks are independent.
+ * Off-thread (any worker): assembling tile-set pieces into vertex/index buffers, creating and
+ * filling the chunk's GPU mesh, and building its collision mesh (weld, adjacency, BVH) -- see
+ * terrain_chunk.h for why the Vulkan half is safe there. The chunk's columns are copied out of
+ * the terrain's tiles on the owner thread when the job is submitted (a plain copy), so the tiles
+ * can be edited at any time; an edit marks the chunks it touches stale, and each rebuilds while
+ * its old mesh keeps drawing, then swaps in. That is nearly all the cost, and chunks are
+ * independent.
  *
- * Owner thread only: creating GPU buffers, publishing assets, and touching the scene tree.
- * `Mesh::from_arrays()` allocates Vulkan memory, `AssetManager` is single-owner, and a Scene is
- * single-owner -- none of the three may be reached from a job.
+ * Owner thread only: publishing the finished mesh as an asset and touching the scene tree.
+ * `AssetManager` is single-owner and a Scene is single-owner -- neither may be reached from a
+ * job. That is what `upload_budget_ms` bounds, and it is all that is left in the frame a chunk
+ * lands in.
+ *
+ * ### What is built, and where
+ *
+ * Chunks are submitted nearest-first and at a priority that falls off with distance, so the
+ * ground under the camera is meshed before the horizon however the queue was ordered, and the
+ * far ring never competes with frame-critical jobs. How much is outstanding is bounded by
+ * `max_chunks_in_flight` rather than by a per-frame count, so the worker pool stays fed.
+ * `collision_radius` keeps the collider -- the most expensive thing a chunk carries -- near the
+ * camera, where contacts actually happen.
  *
  * ### Letting go safely
  *
@@ -39,6 +50,10 @@
  *     retiring chunk with a job in flight is cancelled and parked in `Retiring` until
  *     `is_complete()`, then closed and erased. Scene teardown is the one case this cannot cover
  *     -- a job borrows the component's sampler -- and `~TerrainComponent()` drains the rest.
+ *   - **A chunk that may be wanted again in a moment.** Parked, not destroyed: up to
+ *     `dormant_chunks` of them are kept whole and off the scene tree (TerrainChunk::parked), so
+ *     turning round at a chunk boundary re-attaches ground that is already built instead of
+ *     re-meshing, re-uploading and re-baking it.
  *   - **A still-in-flight GPU read.** Handled by the AssetManager's own payload grace period
  *     (`k_payload_grace_frames`): destroying the chunk's SceneObject drops the last
  *     AssetHandle, `unload()` then retires the payload for three more `assets.update()` calls
@@ -98,6 +113,13 @@ public:
 
     void execute(coopa::scene::Scene& scene, const coopa::scene::FrameContext& ctx) override;
 
+    /** @brief Chunk meshes published since installation (a revived parked chunk is not one). */
+    std::uint64_t chunks_built() const { return chunks_built_; }
+    /** @brief Chunks destroyed since installation (a parked chunk is not one until evicted). */
+    std::uint64_t chunks_released() const { return chunks_released_; }
+    /** @brief Owner-thread milliseconds the last execute() spent publishing chunks. */
+    double last_upload_ms() const { return last_upload_ms_; }
+
 private:
     /**
      * @brief Follows AssetManager::k_asset_io_job_type's precedent: any value >= k_max_job_types
@@ -111,11 +133,17 @@ private:
                        const coopa::scene::FrameContext& ctx);
 
     /**
-     * @brief The point the loaded region is centred on, in the terrain's local space: where the
-     *        main camera's view ray meets the tiles (or the terrain's base plane) within a few
-     *        view radii, else the camera's own position -- so an orbit or editor camera viewing
-     *        the terrain from afar still loads what it looks at. The terrain's origin without a
-     *        camera, so a headless test still builds the chunk under it.
+     * @brief The point this frame would like the loaded region centred on, in the terrain's
+     *        local space: the camera's own position while it stands over the loaded region, and
+     *        otherwise where its view ray meets the tiles (or the terrain's base plane) -- so an
+     *        orbit or editor camera looking at the terrain from off the map still loads what it
+     *        looks at. The terrain's origin without a camera, so a headless test still builds
+     *        the chunk under it.
+     *
+     * Preferring the camera's POSITION where it is usable is the whole point: the ray's hit
+     * point sweeps across the ground as the camera turns, and it is only a better answer than
+     * the camera itself when the camera is nowhere near the ground. What survives the remaining
+     * movement is latch_stream_centre().
      *
      * get_world_matrix(), not world_matrix(): this system runs at order 60, BEFORE
      * UpdatePhase::TransformResolve (350), so on the first frame no resolve pass has run yet and
@@ -124,41 +152,77 @@ private:
      */
     glm::vec3 stream_centre_(const TerrainComponent& terrain) const;
 
+    /** @brief The chunk to stream around this frame: stream_centre_(), latched (StreamCentre). */
+    ChunkCoord latched_centre_(TerrainComponent& terrain) const;
+
     /** @brief True when any part of this chunk lies inside the generated map. */
     static bool chunk_in_world(const TerrainComponent& terrain, const ChunkCoord& coord);
 
-    /** @brief Inserts a Queued entry for every in-range chunk that does not exist yet. */
-    void want_chunks_(TerrainComponent& terrain, const ChunkCoord& centre);
+    /**
+     * @brief Brings the in-range chunks up to date: a Queued entry for every one that does not
+     *        exist yet, a re-attach for every parked one, and a collider for every one that has
+     *        come inside `collision_radius`.
+     */
+    void want_chunks_(TerrainComponent& terrain, const ChunkCoord& centre, coopa::scene::Scene& scene);
 
     /**
-     * @brief Drops chunks that have left the loaded region.
+     * @brief Parks or drops chunks that have left the loaded region.
      *
      * The threshold is `view_radius + 1`, not `view_radius`: a camera sitting exactly on a chunk
      * boundary otherwise oscillates a whole ring of chunks between built and dropped every time
-     * it drifts a few centimetres, which is the most expensive thing this system can do.
+     * it drifts a few centimetres, which is the most expensive thing this system can do. Past
+     * it, a Live chunk goes Dormant (kept whole, off the tree) rather than being destroyed.
      */
     void release_distant_chunks_(TerrainComponent& terrain, const ChunkCoord& centre,
                                  const coopa::scene::FrameContext& ctx);
+
+    /** @brief Re-attaches a Dormant chunk that has come back into range. */
+    void revive_chunk_(TerrainComponent& terrain, coopa::scene::Scene& scene, TerrainChunk& chunk);
+
+    /** @brief Destroys Dormant chunks past `dormant_chunks`, oldest first. */
+    void evict_dormant_chunks_(TerrainComponent& terrain);
+
+    /**
+     * @brief Brings a Live chunk's collider in line with `collision_radius`.
+     *
+     * Crossing inward needs geometry the chunk was not built with, so it is marked stale and
+     * rebuilt (its old mesh keeps drawing meanwhile). Crossing outward only has to let the
+     * collider go, which is a component removal and a retired shape -- no re-mesh.
+     */
+    void sync_chunk_collision_(TerrainComponent& terrain, TerrainChunk& chunk, bool wanted);
+
 
     /** @brief Closes and erases retiring chunks whose in-flight job has finally stopped. */
     void advance_retiring_(TerrainComponent& terrain);
 
     /**
-     * @brief Uploads every chunk whose meshing job has finished, up to this frame's budget.
+     * @brief Publishes chunks whose meshing jobs have finished, nearest first, within
+     *        `upload_budget_ms`.
      *
-     * The budget applies here as well as to submission because this is the half that runs on the
-     * main thread: a teleport that queues fifty chunks should spend fifty small uploads over
-     * several frames, not one long stall.
+     * Nearest first and not in hash order: the chunk under the camera must not wait behind the
+     * horizon's. A time slice rather than a count because what is left on this thread -- a
+     * scene insert, a published asset, the water children's first bake, a physics re-gather --
+     * differs by an order of magnitude between a chunk of open sea and a chunk of cliff. One
+     * chunk always lands, whatever the budget.
      */
     void upload_finished_chunks_(TerrainComponent& terrain, coopa::scene::Scene& scene);
 
-    /** @brief Submits meshing jobs for the nearest queued chunks, up to this frame's budget. */
+    /**
+     * @brief Submits meshing jobs for the nearest queued chunks, up to `max_chunks_in_flight`.
+     *
+     * Each is submitted at a priority that falls off with distance from the centre, so the
+     * JobEngine works the ground under the camera first whatever order the queue was in.
+     */
     void submit_queued_chunks_(TerrainComponent& terrain, const ChunkCoord& centre,
                                const coopa::scene::FrameContext& ctx);
 
     /** @brief Creates the GPU mesh, publishes it, and hangs a drawable (and collidable) child off the terrain. */
     void create_chunk_object_(TerrainComponent& terrain, coopa::scene::Scene& scene,
                               TerrainChunk& chunk);
+
+    /** @brief Takes a chunk's SceneObject off the tree, retiring its collider; keeps the object. */
+    std::unique_ptr<coopa::scene::SceneObject> detach_chunk_object_(TerrainComponent& terrain,
+                                                                    TerrainChunk& chunk);
 
     /** @brief Destroys a chunk's SceneObject and retires its published mesh. */
     /** @brief Gives a chunk object one water child (still or flowing) for its water surface. */
@@ -191,11 +255,19 @@ private:
 
     /// @brief Scratch list of queued coordinates, reused across frames so sorting allocates once.
     std::vector<ChunkCoord> pending_;
+    /// @brief The same, for the finished chunks waiting to be published this frame.
+    std::vector<ChunkCoord> finished_;
 
     /// Frames a retired chunk's collision mesh is kept alive (see the file doc).
     static constexpr std::uint64_t k_collision_keep_frames = 600;
 
     std::uint64_t frame_ = 0;          /**< execute() calls, for retiring collision meshes. */
+    /** @brief Chunks meshed and published since this system was installed -- for the churn a
+     *         streaming test measures, and for the debug overlay. */
+    std::uint64_t chunks_built_ = 0;
+    /** @brief Chunks destroyed outright (a parked one that is revived counts for neither). */
+    std::uint64_t chunks_released_ = 0;
+    double        last_upload_ms_ = 0.0; /**< upload_finished_chunks_()'s own cost (diagnostics). */
     bool          physics_dirty_ = false; /**< A chunk collider came or went this frame. */
     /** @brief Each planet terrain's gravity source in the physics world (sync_planet_gravity_()). */
     std::unordered_map<const TerrainComponent*, std::uint32_t> planet_gravity_;

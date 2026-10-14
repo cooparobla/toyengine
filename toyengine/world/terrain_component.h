@@ -52,6 +52,7 @@
 #include <vector>
 
 #include <coopa/maps/map_generator.h>
+#include <coopa/scene/scene_object.h>
 #include <coopa/maps/map_presets.h>
 
 #include <gfxcoopa/engine/components/mesh_renderer.h>
@@ -69,9 +70,10 @@ namespace world {
  * @brief Where a chunk is in the sample -> mesh -> upload -> draw pipeline.
  */
 enum class ChunkState : std::uint8_t {
-    Queued,   /**< @brief Wanted, not yet submitted (the per-frame job budget was spent). */
-    Meshing,  /**< @brief A job is building its geometry on a worker thread. */
-    Live,     /**< @brief Uploaded, published and drawing. */
+    Queued,   /**< @brief Wanted, not yet submitted (this frame's submissions were spent). */
+    Meshing,  /**< @brief A job is building its geometry and its GPU mesh on a worker thread. */
+    Live,     /**< @brief Published, in the scene tree and drawing. */
+    Dormant,  /**< @brief Out of range but kept whole, detached from the tree (see TerrainChunk::parked). */
     Retiring  /**< @brief Out of range; waiting for its job and the GPU to let go. */
 };
 
@@ -110,7 +112,97 @@ struct TerrainChunk {
 
     /** @brief Bumped per upload; part of the published mesh's asset id, so a rebuild's new mesh never collides with the old one still in its grace period. */
     std::uint32_t mesh_serial = 0;
+
+    /**
+     * @brief A Dormant chunk's SceneObject, held off the tree rather than destroyed.
+     *
+     * The whole chunk survives in here -- its GPU mesh, its published asset (the MeshRenderer
+     * still holds the handle, so nothing unloads), its water children and its collider -- so
+     * coming back into range is an add_child() and nothing else. Null in every other state,
+     * where `object` is owned by the terrain's SceneObject instead.
+     */
+    std::unique_ptr<coopa::scene::SceneObject> parked;
+
+    /** @brief Frame this chunk was last in range; the Dormant set is evicted oldest first. */
+    std::uint64_t last_used_frame = 0;
+
+    /**
+     * @brief Whether this chunk currently satisfies the collision request (`collision_radius`).
+     *
+     * True from the moment it is submitted with collision on -- including for an empty chunk,
+     * which satisfies the request with no collider because it has no geometry -- and false again
+     * once the collider has been taken away. Comparing it with what the radius wants is what
+     * decides between a rebuild (inward) and a component removal (outward), and reading it as
+     * "has a MeshCollider" instead would make an empty chunk rebuild itself for ever.
+     */
+    bool has_collision = false;
+
 };
+
+/**
+ * @struct StreamCentre
+ * @brief The latched chunk the loaded region is centred on.
+ *
+ * The centre must be a *step* function of where the camera is, not a continuous one. The
+ * candidate it is fed moves every frame -- a camera viewing the terrain from afar is streamed
+ * around what it LOOKS at, and that point sweeps tens of metres across the ground for a few
+ * degrees of yaw. Following it directly drops and rebuilds whole rings for a camera that never
+ * moved. See latch_stream_centre().
+ */
+struct StreamCentre {
+    ChunkCoord   centre{};          /**< What the region is centred on now. */
+    ChunkCoord   candidate{};       /**< The candidate `held` frames of agreement are counting. */
+    std::int32_t held  = 0;         /**< Consecutive frames `candidate` has been asked for. */
+    bool         valid = false;     /**< False until the first centre is adopted. */
+};
+
+/** @brief Frames a new candidate must hold before the region moves to it (see StreamCentre). */
+inline constexpr std::int32_t k_recentre_frames = 6;
+
+/**
+ * @brief Advances a latched stream centre by one frame and returns the centre to stream around.
+ *
+ * Pure, so the policy can be tested without a camera. Three cases, in order:
+ *
+ *  - **No centre yet**, or the candidate is half a view away (a teleport, a scene load, or just
+ *    a camera moving faster than the latch): adopt it at once. Past half the radius the region
+ *    no longer comfortably covers the camera, and lagging further would mean holes ahead.
+ *  - **The candidate is the current centre**: nothing to do, and the count resets -- so a
+ *    candidate that flickers between two chunks never accumulates a move.
+ *  - **Anything else**: adopt only once the same candidate has been asked for
+ *    `k_recentre_frames` consecutive frames.
+ *
+ * @param state       The latch, advanced in place.
+ * @param candidate   The chunk this frame would like to centre on.
+ * @param view_radius The loaded radius, in chunks; half of it is the jump taken at once.
+ * @return The centre to stream around this frame.
+ */
+inline ChunkCoord latch_stream_centre(StreamCentre& state, const ChunkCoord& candidate,
+                                      std::int32_t view_radius) {
+    const std::int32_t jump = std::max<std::int32_t>(1, view_radius / 2);
+    if (!state.valid || chunk_distance(candidate, state.centre) >= jump) {
+        state.centre    = candidate;
+        state.candidate = candidate;
+        state.held      = 0;
+        state.valid     = true;
+        return state.centre;
+    }
+    if (candidate == state.centre) {
+        state.candidate = candidate;
+        state.held      = 0;
+        return state.centre;
+    }
+    if (candidate == state.candidate) {
+        if (++state.held >= k_recentre_frames) {
+            state.centre = candidate;
+            state.held   = 0;
+        }
+    } else {
+        state.candidate = candidate;
+        state.held      = 1;
+    }
+    return state.centre;
+}
 
 /**
  * @class TerrainComponent
@@ -225,11 +317,61 @@ public:
     /**
      * @brief Chunk meshing jobs submitted per frame.
      *
-     * A budget, not a limit on parallelism: the jobs themselves run on every worker. It bounds
-     * the main thread's per-frame *upload* cost instead, so a camera teleport spreads its
-     * rebuild over a handful of frames rather than stalling one.
+     * A pacing knob, not a limit on parallelism: `max_chunks_in_flight` is what actually bounds
+     * how much work is outstanding, and the jobs themselves run on every worker.
      */
-    int max_chunk_jobs_per_frame = 4;
+    int max_chunk_jobs_per_frame = 16;
+
+    /**
+     * @brief Chunks allowed to be meshing at once; 0 means twice the JobEngine's worker count.
+     *
+     * This, rather than a per-frame submission count, is what keeps a teleport from queueing the
+     * whole world at once -- and what keeps the worker pool fed, which a small per-frame count
+     * cannot do: four submissions a frame leave a twenty-worker engine idle while the camera
+     * waits two seconds for its ground.
+     */
+    int max_chunks_in_flight = 0;
+
+    /**
+     * @brief Owner-thread milliseconds a frame may spend publishing finished chunks.
+     *
+     * A time slice, because the work is not per chunk: attaching a chunk costs a scene insert, a
+     * published asset, its water children's first bake and (near the camera) a physics
+     * re-gather, and those differ by an order of magnitude between a chunk of open sea and a
+     * chunk of cliff. At least one chunk always lands, so the stream can never stall.
+     *
+     * Wall clock, so how many chunks a *transient* (a teleport, a first load) spreads over how
+     * many frames is machine-dependent. The settled region is not: the same chunks end up
+     * loaded either way, so a scripted capture that waits for the world to come up is as
+     * reproducible as it ever was.
+     */
+    float upload_budget_ms = 1.5f;
+
+    /**
+     * @brief Chunks within which a chunk is given a MeshCollider; 0 means every loaded chunk.
+     *
+     * Collision is the most expensive thing a chunk carries: a welded triangle mesh with
+     * adjacency and a BVH, a megabyte or two of it, and a `PhysicsSystem::refresh()` whose
+     * re-gather is linear in every collider in the scene. Ground a few hundred metres away
+     * pays all of that for contacts that never happen. Raise it past where your physics
+     * actually is -- a body resting on a chunk outside this radius has no ground.
+     */
+    int collision_radius = 4;
+
+    /**
+     * @brief Metres past which a chunk stops casting shadows (MeshRenderer::shadow_max_distance);
+     *        0 leaves every loaded chunk in every cascade. The same knob HeightmapTerrain has.
+     */
+    float shadow_distance = 0.0f;
+
+    /**
+     * @brief Chunks kept whole after leaving view, to be re-attached if the camera comes back.
+     *
+     * Turning round at a chunk boundary, or walking back ten metres, otherwise re-meshes,
+     * re-uploads, re-bakes the water and rebuilds the collider BVH of ground that was complete
+     * a moment ago. A parked chunk costs its GPU mesh (a megabyte or two); 0 disables the tier.
+     */
+    int dormant_chunks = 32;
 
     // ------------------------------------------------------------------
     // Runtime state -- driven by TerrainSystem, not by scene YAML.
@@ -286,6 +428,23 @@ public:
 
     /** @brief The tile revision TerrainSystem has applied to the chunk table. */
     std::uint64_t applied_tile_revision = 0;
+
+    /** @brief The latched centre of the loaded region (see latch_stream_centre()). */
+    StreamCentre stream_centre;
+
+    /**
+     * @brief A build job to fill in, from the pool if one is free.
+     *
+     * Pooled for the capacity, not the object: a chunk's pad, vertex and index buffers are a
+     * couple of megabytes between them, and a streaming camera submits several chunks a frame.
+     */
+    std::shared_ptr<ChunkBuildJob> take_build_job();
+
+    /**
+     * @brief Offers a finished job back to the pool. Keeps it only if nothing else holds a
+     *        reference -- a cancelled job may still be running, and its buffers are its own.
+     */
+    void recycle_build_job(std::shared_ptr<ChunkBuildJob> job);
 
     /** @brief The baked tile sets; read concurrently by chunk jobs once is_ready(). */
     const TileMeshLibrary& library() const { return library_; }
@@ -349,9 +508,28 @@ private:
 
     std::unordered_map<ChunkCoord, TerrainChunk> chunks_;
 
+    /// Free build jobs, kept for their buffers' capacity (take_build_job()).
+    std::vector<std::shared_ptr<ChunkBuildJob>> job_pool_;
+    /// Jobs the pool holds at most; past this a returned job is simply dropped.
+    static constexpr std::size_t k_job_pool_max = 8;
+
     /// Collision meshes of retired chunks, with the frame they retired on (retire_collision()).
     std::deque<std::pair<std::uint64_t, std::shared_ptr<const coopa::physx::geometry::TriangleMesh>>> retired_collision_;
 };
+
+/**
+ * @brief Whether the chunk at `coord` should carry a MeshCollider, with the region centred on
+ *        `centre` (see TerrainComponent::collision_radius).
+ *
+ * A planet has no radius: it is small, it is walked all over, and a ring there would only mean
+ * ground that is solid in front of you and not behind.
+ *
+ * @param terrain The terrain, for `collision` and `collision_radius`.
+ * @param coord   The chunk in question.
+ * @param centre  The chunk the loaded region is centred on.
+ */
+bool terrain_wants_collision(const TerrainComponent& terrain, const ChunkCoord& coord,
+                             const ChunkCoord& centre);
 
 } // namespace world
 } // namespace toy

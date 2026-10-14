@@ -456,6 +456,20 @@ void warp_chunk_to_planet(const TerrainParams& params, const ChunkCoord& coord, 
     }
 }
 
+/**
+ * @brief Creates the job's GPU mesh from its meshed arrays, on the worker that meshed them.
+ *
+ * See the file doc for why this is safe off the owner thread. Nothing to do for an empty chunk
+ * (open sea below the waterline emits no faces) or for a job given no device (the unit tests).
+ */
+void upload_chunk_mesh(ChunkBuildJob& job) {
+    if (job.device == nullptr || job.allocator == nullptr || job.mesh.empty()) return;
+    // buffer_count 1: a chunk mesh is written once and never rewritten, unlike a cloth's
+    // per-frame ring (see Mesh::from_arrays()'s doc on why that is a count, not a bool).
+    job.gpu_mesh = std::make_shared<coopa::gfx::engine::data::Mesh>(coopa::gfx::engine::data::Mesh::from_arrays(
+        *job.device, *job.allocator, job.mesh.vertices, job.mesh.indices, 1));
+}
+
 } // namespace
 
 void ChunkBuildJob::run() {
@@ -466,6 +480,7 @@ void ChunkBuildJob::run() {
         warp_chunk_to_planet(params, coord, mesh, water_still, water_flowing);
         coopa::gfx::engine::data::Mesh::weld_and_optimize(mesh.vertices, mesh.indices);
         if (collision) collision_mesh = build_chunk_collision(mesh);
+        upload_chunk_mesh(*this);
         return;
     }
     // Off the main thread like the meshing itself: the mesher emits every side as its own
@@ -475,6 +490,17 @@ void ChunkBuildJob::run() {
     // weld, adjacency and BVH are the expensive part -- hence here, on the worker.
     if (collision) collision_mesh = build_chunk_collision(mesh);
     build_chunk_water(pad, params, water_still, water_flowing);
+    upload_chunk_mesh(*this);
+}
+
+void ChunkBuildJob::reset_outputs() {
+    mesh.clear();
+    water_still.clear();
+    water_flowing.clear();
+    gpu_mesh.reset();
+    collision_mesh.reset();
+    library   = nullptr;
+    collision = false;
 }
 
 glm::vec3 chunk_origin(const TerrainParams& params, const ChunkCoord& coord) {

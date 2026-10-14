@@ -66,7 +66,7 @@ COOPA_TEST(static_camera_converges_to_a_static_image) {
 
     // Same shrink the streaming test uses -- a 32-cell map in nine 8x8 chunks, not the demo's
     // ~10k cells, so generation and meshing finish in a second rather than most of a minute.
-    terrain->grid_size                  = 32;
+    terrain->generator.grid_size        = 32;
     terrain->params.tiles_per_grid_unit = 2;
     terrain->params.chunk_size          = 8;
     terrain->params.view_radius         = 1;

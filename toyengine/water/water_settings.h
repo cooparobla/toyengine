@@ -54,6 +54,16 @@ struct WaterSettings {
     float grid_density = 1.0f;         ///< Multiplier on a procedural WaterBody::resolution.
     float lod_bias = 1.0f;             ///< Scales tile LOD switch sizes: > 1 coarsens sooner.
     int   bakes_per_frame = 1;         ///< Stage-2 (physics-aware) bakes per frame, nearest first.
+    /**
+     * @brief Stage-1 (first, cheap) bakes started per frame, nearest first.
+     *
+     * A new body's first bake has to happen on the owner thread, and it is not free: a weld, the
+     * normals, the CPU query and a GPU mesh. A streamed world hands several bodies over at once
+     * -- every terrain chunk with sea or a river on it is one -- so these are paced like the
+     * stage-2 re-bakes rather than all run in the frame they appear. A body waits a frame or two
+     * to become visible, exactly as it already does for its stage-2 depth.
+     */
+    int   new_bakes_per_frame = 2;
 
     // --- Shader ---
     float detail_distance = 150.0f;    ///< Ripples/foam noise fade out toward this distance.

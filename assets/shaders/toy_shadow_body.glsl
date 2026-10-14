@@ -64,6 +64,22 @@ vec3 toy_csm_atlas_coords(int c, vec3 world_pos) {
     return vec3(origin + clamp(pc.xy, vec2(0.0), vec2(1.0)) * scale, pc.z);
 }
 
+/// Which cascade `world_pos` lands in, for the ShadowCascades debug view. Mirrors the selection
+/// in calc_dir_shadow() below -- containment, finest tile first -- but returns the choice and the
+/// position inside that tile instead of a shadow factor, so the viewer can colour by cascade and
+/// lay that cascade's own texel grid over the world.
+bool toy_csm_debug_select(vec3 world_pos, out int cascade, out vec2 tile_uv) {
+    int   count = int(lights.dir_cascade_info.x);
+    float inset = lights.dir_cascade_info.z;
+    cascade = -1;
+    tile_uv = vec2(0.0);
+    for (int c = 0; c < 4; ++c) {
+        if (c >= count) break;
+        if (toy_csm_contains(c, world_pos, inset, tile_uv)) { cascade = c; break; }
+    }
+    return cascade >= 0;
+}
+
 /// Shadow-map depth bias for a receiver whose normal makes N.L with the light, as a number of
 /// shadow TEXELS: a constant floor plus a slope term proportional to tan(theta), the depth the
 /// receiver's own plane climbs across one texel (Unreal's constant + slope-scaled depth bias).

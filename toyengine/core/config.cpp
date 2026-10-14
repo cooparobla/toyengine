@@ -178,6 +178,10 @@ AppConfig AppConfig::from_node(const fkyaml::node& root) {
             if (r.contains("shadow_cascade_split_lambda")) config.render.shadow_cascade_split_lambda = r.at("shadow_cascade_split_lambda").get_value<float>();
             if (r.contains("shadow_fit"))             config.render.shadow_fit             = r.at("shadow_fit").get_value<std::string>();
             if (r.contains("shadow_focus_radius"))    config.render.shadow_focus_radius    = r.at("shadow_focus_radius").get_value<float>();
+            for (int ci = 0; ci < 4; ++ci) {
+                const std::string key = "shadow_cascade_radius_" + std::to_string(ci + 1);
+                if (r.contains(key)) config.render.shadow_cascade_radius[ci] = r.at(key).get_value<float>();
+            }
             if (r.contains("shadow_focus_distance"))  config.render.shadow_focus_distance  = r.at("shadow_focus_distance").get_value<float>();
             if (r.contains("shadow_pcf_max_texels"))  config.render.shadow_pcf_max_texels  = r.at("shadow_pcf_max_texels").get_value<float>();
             if (r.contains("shadow_receiver_plane_bias")) config.render.shadow_receiver_plane_bias = r.at("shadow_receiver_plane_bias").get_value<bool>();

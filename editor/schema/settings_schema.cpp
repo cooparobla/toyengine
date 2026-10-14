@@ -216,6 +216,14 @@ const std::vector<SettingsGroup>& render_settings_groups() {
                                 "frustum: slice the camera frustum from the lens outward (close-up cameras). focus: nest the cascades "
                                 "around the camera's focus point (cameras looking at a world from far away)"), "frustum"))
             .add(F(f_float("shadow_focus_radius", 12.0f, 0.1f, 0.1f, 10000.0f), "Focus Radius", "Focus fit: the finest cascade's radius around the focus point"))
+            .add(F(f_float("shadow_cascade_radius_1", 0.0f, 0.1f, 0.0f, 10000.0f), "Cascade 1 Radius",
+                   "Focus fit: this cascade's radius in metres, overriding the automatic progression; 0 = automatic"))
+            .add(F(f_float("shadow_cascade_radius_2", 0.0f, 0.1f, 0.0f, 10000.0f), "Cascade 2 Radius",
+                   "Focus fit: this cascade's radius in metres; 0 = automatic. Ignored unless larger than cascade 1"))
+            .add(F(f_float("shadow_cascade_radius_3", 0.0f, 0.1f, 0.0f, 10000.0f), "Cascade 3 Radius",
+                   "Focus fit: this cascade's radius in metres; 0 = automatic. Ignored unless larger than cascade 2"))
+            .add(F(f_float("shadow_cascade_radius_4", 0.0f, 0.1f, 0.0f, 10000.0f), "Cascade 4 Radius",
+                   "Focus fit: this cascade's radius in metres; 0 = automatic. Ignored unless larger than cascade 3"))
             .add(F(f_float("shadow_focus_distance", 0.0f, 0.1f, 0.0f, 100000.0f), "Focus Distance",
                    "Focus fit: a fixed eye-to-focus distance; 0 = the camera's focus, else what is under the screen centre"))
             .sub("Softness")
@@ -546,7 +554,7 @@ const std::vector<SettingsGroup>& render_settings_groups() {
             .add(F(f_enum("debug_view", {"off", "albedo", "normals", "roughness", "metallic", "emissive", "material_ao",
                                          "world_pos", "depth", "direct", "indirect", "shadows", "contact_shadows", "ssao",
                                          "ssr", "ssr_confidence", "ssgi", "dof", "volumetrics", "lines", "solid", "wireframe",
-                                         "material_preview", "velocity"}),
+                                         "material_preview", "velocity", "shadow_cascades"}),
                    "View", "One intermediate channel, unprocessed (no tonemap, bloom or TAA). Effect views need their feature on"))
             .done());
         return g;

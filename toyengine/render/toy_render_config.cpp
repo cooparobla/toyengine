@@ -28,10 +28,11 @@ DebugView parse_debug_view(const std::string& value) {
     if (value == "wireframe")       return DebugView::Wireframe;
     if (value == "material_preview") return DebugView::MaterialPreview;
     if (value == "velocity")        return DebugView::Velocity;
+    if (value == "shadow_cascades") return DebugView::ShadowCascades;
     std::cerr << "[toy::render] Unknown debug_view '" << value << "', expected one of: "
                  "off | albedo | normals | roughness | metallic | emissive | material_ao | "
                  "world_pos | depth | velocity | direct | indirect | shadows | contact_shadows | ssao | "
-                 "ssr | ssr_confidence | ssgi | dof | volumetrics | lines | solid | wireframe | material_preview. Using 'off'.\n";
+                 "ssr | ssr_confidence | ssgi | dof | volumetrics | lines | solid | wireframe | material_preview | shadow_cascades. Using 'off'.\n";
     return DebugView::Off;
 }
 

@@ -92,6 +92,13 @@ enum class DebugView : int {
     /// colour offset from mid-grey (red = +x, green = +y, scaled 8x), blue where the surface
     /// was behind the eye last frame. Static geometry under a still camera is flat grey.
     Velocity,
+    /// Which directional cascade each pixel samples, and how coarse that cascade's texels are
+    /// where it stands. Tints by cascade index -- 0 red, 1 green, 2 blue, 3 yellow -- and
+    /// overlays that cascade's own shadow-map texel grid, one square per texel. One look
+    /// answers both questions a blocky shadow raises: is the pixel in the cascade it should be
+    /// in, and is that cascade fine enough there. Squares larger than a screen pixel ARE the
+    /// blockiness, measured rather than guessed at.
+    ShadowCascades,
 };
 
 /**
@@ -392,6 +399,17 @@ struct ToyRenderConfig {
      *        looking at (see `shadow_fit`).
      */
     float    shadow_focus_distance = 0.0f;
+    /**
+     * @brief `"focus"` fit only: per-cascade radii in world units, overriding the geometric
+     *        progression; 0 in a slot keeps the derived value for that cascade.
+     *
+     * The progression from `shadow_focus_radius` out to `shadow_distance` is a sensible default
+     * and a blunt one: it ties every cascade to those two endpoints, so there is no way to say
+     * "cascade 1 should reach 18 m" without moving the whole curve. These four are that say.
+     * Index 0 is the finest. A value is ignored if it is not larger than the cascade before it,
+     * since the selection walks finest-first and relies on the radii increasing.
+     */
+    float    shadow_cascade_radius[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     /**
      * @brief Ceiling on the directional PCF radius, in shadow-map texels.
      *

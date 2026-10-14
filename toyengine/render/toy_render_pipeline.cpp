@@ -534,7 +534,7 @@ void ToyRenderPipeline::build_frame_descriptors_() {
     light_sets_.reserve(kCameraFrames);
     for (uint32_t i = 0; i < kCameraFrames; ++i) {
         focus_probes_.push_back(std::make_unique<coopa::gfx::memory::Buffer>(
-            device_, allocator_, kFocusProbeSamples * 8u,
+            device_, allocator_, kFocusProbeSamples * 16u,
             coopa::gfx::BufferUsage::TransferDst, coopa::gfx::MemoryResidency::GpuToCpu));
     }
     for (uint32_t i = 0; i < kCameraFrames; ++i) {
@@ -3724,6 +3724,15 @@ void ToyRenderPipeline::update_dir_shadow_matrix_(const glm::vec3& direction,
         focus_point = glm::vec3(cam_to_world[3]) - glm::vec3(cam_to_world[2]) * d;
         focus_radii = compute_focus_cascade_radii(config_.shadow_focus_radius,
                                                   config_.shadow_distance, cascades);
+        // Per-cascade overrides (ToyRenderConfig::shadow_cascade_radius). Applied in order and
+        // only when they keep the radii increasing: selection walks finest-first and a slot that
+        // did not grow would shadow the one before it, leaving a cascade that can never be hit.
+        for (size_t ci = 0; ci < focus_radii.size() && ci < 4; ++ci) {
+            const float wanted = config_.shadow_cascade_radius[ci];
+            if (wanted <= 0.0f) continue;
+            const float floor_r = ci == 0 ? 0.01f : focus_radii[ci - 1] * 1.01f;
+            focus_radii[ci] = std::max(wanted, floor_r);
+        }
     }
     const float pcf_max = std::max(config_.shadow_pcf_max_texels, 1.0f);
 
@@ -4217,7 +4226,7 @@ void ToyRenderPipeline::record_focus_probe_(coopa::gfx::command::CommandBuffer& 
 
     VkBufferImageCopy regions[kFocusProbeSamples]{};
     for (uint32_t i = 0; i < kFocusProbeSamples; ++i) {
-        regions[i].bufferOffset     = static_cast<VkDeviceSize>(i) * 8u; // one RGBA16F texel
+        regions[i].bufferOffset     = static_cast<VkDeviceSize>(i) * 16u; // one RGBA32F texel
         regions[i].imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         regions[i].imageOffset      = {
             static_cast<int32_t>(render_extent_.width / 2),
@@ -4249,14 +4258,12 @@ void ToyRenderPipeline::record_focus_probe_(coopa::gfx::command::CommandBuffer& 
 void ToyRenderPipeline::read_focus_probe_(uint32_t slot, const glm::mat4& view, float dt) {
     if (slot >= focus_probes_.size() || !focus_probe_pending_[slot]) return;
     focus_probe_pending_[slot] = false;
-    uint16_t texels[kFocusProbeSamples * 4] = {};
+    float texels[kFocusProbeSamples * 4] = {};
     focus_probes_[slot]->download(texels, sizeof(texels));
     for (uint32_t i = 0; i < kFocusProbeSamples; ++i) {
-        const float roughness = glm::unpackHalf1x16(texels[i * 4 + 3]);
+        const float roughness = texels[i * 4 + 3];
         if (!(roughness > 0.01f)) continue;
-        const glm::vec3 hit(glm::unpackHalf1x16(texels[i * 4 + 0]),
-                            glm::unpackHalf1x16(texels[i * 4 + 1]),
-                            glm::unpackHalf1x16(texels[i * 4 + 2]));
+        const glm::vec3 hit(texels[i * 4 + 0], texels[i * 4 + 1], texels[i * 4 + 2]);
         const float depth = view_space_depth(view, hit);
         if (!(depth > 0.0f)) continue;
         probed_focus_distance_ = probed_focus_distance_ > 0.0f

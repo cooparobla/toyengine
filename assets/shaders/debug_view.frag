@@ -108,6 +108,7 @@ layout(location = 0) out vec4 out_color;
 #define DBG_WIREFRAME       21
 #define DBG_MATPREVIEW      22
 #define DBG_VELOCITY        23
+#define DBG_SHADOW_CASCADES 24
 
 // band()/shade_light() -- byte-for-byte the same as toy_lighting.frag's own (not a
 // shared body: they read `params` fields specific to each shader's own push-constant
@@ -365,6 +366,27 @@ void main() {
         case DBG_SSGI:
             result = texture(u_ssgi, in_uv).rgb;
             break;
+        case DBG_SHADOW_CASCADES: {
+            // Cascade index as a tint, that cascade's shadow-map texels as a checkerboard. The
+            // squares are the thing being judged: each is one texel of the map the shadow is
+            // sampled from, so when they are larger than a screen pixel the shadow cannot be
+            // finer than they are, whatever the resolution says.
+            int cascade; vec2 tile_uv;
+            if (lights.light_counts.x > 0 && toy_csm_debug_select(world_pos, cascade, tile_uv)) {
+                vec3 tint = vec3(1.0, 0.3, 0.3);
+                if (cascade == 1) tint = vec3(0.35, 1.0, 0.4);
+                else if (cascade == 2) tint = vec3(0.4, 0.6, 1.0);
+                else if (cascade >= 3) tint = vec3(1.0, 0.9, 0.35);
+                float grid_x   = max(lights.dir_cascade_info.y, 1.0);
+                float tile_res = max(float(textureSize(dir_shadow_map, 0).x) / grid_x, 1.0);
+                vec2  texel    = tile_uv * tile_res;
+                float checker  = mod(floor(texel.x) + floor(texel.y), 2.0);
+                result = tint * (0.55 + 0.45 * checker);
+            } else {
+                result = vec3(0.04);   // Past the last cascade: nothing shadows here at all.
+            }
+            break;
+        }
         case DBG_VELOCITY: {
             // Mid-grey = no motion; 8x gain so a few pixels of motion per frame is visible.
             // Blue marks a surface that was behind the eye last frame (no history, z = -1).

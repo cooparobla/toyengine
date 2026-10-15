@@ -7,6 +7,16 @@ void weld_by_position(const std::vector<glm::vec3>& positions, const std::vector
                              const std::vector<uint32_t>& corner_indices,
                              std::vector<glm::vec3>& out_positions, std::vector<glm::vec2>& out_uvs,
                              std::vector<uint32_t>& out_indices, float quantum) {
+    std::vector<float> no_scalars;
+    weld_by_position(positions, uvs, {}, corner_indices, out_positions, out_uvs, no_scalars, out_indices,
+                     quantum);
+}
+
+void weld_by_position(const std::vector<glm::vec3>& positions, const std::vector<glm::vec2>& uvs,
+                             const std::vector<float>& scalars, const std::vector<uint32_t>& corner_indices,
+                             std::vector<glm::vec3>& out_positions, std::vector<glm::vec2>& out_uvs,
+                             std::vector<float>& out_scalars, std::vector<uint32_t>& out_indices,
+                             float quantum) {
     struct KeyHash {
         std::size_t operator()(const glm::ivec3& k) const {
             return (static_cast<std::size_t>(k.x) * 73856093u) ^ (static_cast<std::size_t>(k.y) * 19349663u) ^
@@ -18,12 +28,14 @@ void weld_by_position(const std::vector<glm::vec3>& positions, const std::vector
     std::vector<uint32_t> remap(positions.size());
     out_positions.clear();
     out_uvs.clear();
+    out_scalars.clear();
     for (std::size_t i = 0; i < positions.size(); ++i) {
         glm::ivec3 key(glm::round(positions[i] / quantum));
         auto [it, inserted] = map.emplace(key, static_cast<uint32_t>(out_positions.size()));
         if (inserted) {
             out_positions.push_back(positions[i]);
             out_uvs.push_back(i < uvs.size() ? uvs[i] : glm::vec2(0.0f));
+            if (!scalars.empty()) out_scalars.push_back(i < scalars.size() ? scalars[i] : 0.0f);
         }
         remap[i] = it->second;
     }

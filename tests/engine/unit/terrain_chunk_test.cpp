@@ -17,6 +17,7 @@
 #include <glm/glm.hpp>
 #include <physxcoopa/geometry/triangle_mesh.h>
 #include <toyengine/world/terrain_chunk.h>
+#include <toyengine/world/tile_map_data.h>
 #include <toyengine/world/tile_mesh_library.h>
 #include <toyengine/world/tile_topology.h>
 
@@ -162,6 +163,68 @@ COOPA_TEST(meshing_is_byte_deterministic) {
         same = std::memcmp(&first.vertices[i], &second.vertices[i], sizeof(coopa::gfx::engine::data::Vertex)) == 0;
     }
     expect(same, "chunk: re-meshing the same pad gives byte-identical vertices");
+}
+
+/** @brief Two chunks sharing a water edge assign its corners identical heights AND depths: both
+ *         read the same pad columns, and the depth feeds the wave attenuation, where a border
+ *         mismatch shows as a moving seam between chunks. */
+COOPA_TEST(adjacent_chunks_agree_on_shared_water_edge) {
+    using namespace toy::world;
+    const TerrainParams params = make_test_params(4);
+    TileMapData tiles;
+    tiles.resize(8, 4);
+    for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 8; ++x) tiles.at(x, y).steps = 3;
+    // A pond across the chunk border at x = 4, over a bed that varies tile to tile, so the
+    // corner depths differ along the edge and agreement cannot pass by accident.
+    for (int y = 1; y <= 2; ++y) {
+        for (int x = 2; x <= 5; ++x) {
+            TileRecord& r = tiles.at(x, y);
+            r.steps = static_cast<std::int16_t>((x + y) % 3);
+            r.set_water(3);
+        }
+    }
+
+    ColumnPad pad_a, pad_b;
+    sample_chunk_columns(tiles, params, ChunkCoord{0, 0}, pad_a);
+    sample_chunk_columns(tiles, params, ChunkCoord{1, 0}, pad_b);
+    ChunkWaterData still_a, flowing_a, still_b, flowing_b;
+    build_chunk_water(pad_a, params, still_a, flowing_a);
+    build_chunk_water(pad_b, params, still_b, flowing_b);
+    expect(still_a.depths.size() == still_a.positions.size() && still_b.depths.size() == still_b.positions.size(),
+           "chunk water: one depth per corner");
+
+    // The shared edge is chunk A's local x = chunk_size (its far column) and chunk B's local
+    // x = 0. Collect each chunk's (height, depth) per edge corner, keyed by y.
+    const float edge_a = static_cast<float>(params.chunk_size) * params.tile_size;
+    auto collect = [](const ChunkWaterData& w, float edge_x, bool& consistent) {
+        std::map<int, glm::vec2> out; // quantised y -> (z, depth)
+        consistent = true;
+        for (std::size_t i = 0; i < w.positions.size(); ++i) {
+            if (std::fabs(w.positions[i].x - edge_x) > 1e-5f) continue;
+            const int key = static_cast<int>(std::lround(w.positions[i].y * 1024.0f));
+            const glm::vec2 zd(w.positions[i].z, w.depths[i]);
+            auto [it, inserted] = out.emplace(key, zd);
+            if (!inserted && glm::distance(it->second, zd) > 1e-5f) consistent = false;
+        }
+        return out;
+    };
+    bool ca = false, cb = false;
+    const auto edge_corners_a = collect(still_a, edge_a, ca);
+    const auto edge_corners_b = collect(still_b, 0.0f, cb);
+    expect(ca && cb, "chunk water: coincident corners within one chunk agree with themselves");
+    expect(!edge_corners_a.empty() && edge_corners_a.size() == edge_corners_b.size(),
+           "chunk water: both chunks mesh the shared edge (" + std::to_string(edge_corners_a.size()) + " corners)");
+    bool match = true, varied = false;
+    float first_depth = -1.0f;
+    for (const auto& [key, zd] : edge_corners_a) {
+        const auto it = edge_corners_b.find(key);
+        if (it == edge_corners_b.end() || glm::distance(it->second, zd) > 1e-5f) match = false;
+        if (first_depth < 0.0f) first_depth = zd.y;
+        else if (std::fabs(zd.y - first_depth) > 1e-3f) varied = true;
+    }
+    expect(match, "chunk water: the shared edge carries identical heights and depths in both chunks");
+    expect(varied, "chunk water: ...over a bed that really varies along it");
 }
 
 COOPA_TEST(collision_mesh_is_the_drawn_surface) {

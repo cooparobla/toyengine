@@ -1,5 +1,7 @@
 #include <toyengine/world/terrain_chunk.h>
 
+#include <algorithm>
+
 #include <gfxcoopa/engine/data/mesh.h>
 #include <physxcoopa/geometry/triangle_mesh.h>
 #include <toyengine/world/tile_topology.h>
@@ -325,20 +327,27 @@ void build_chunk_water(const ColumnPad& pad, const TerrainParams& params, ChunkW
     };
     auto in_pad = [&](std::int32_t x, std::int32_t y) { return x >= -1 && y >= -1 && x <= n && y <= n; };
 
-    // Mean surface height at tile corner (cx, cy), over the flooded tiles sharing it.
-    auto corner_z = [&](std::int32_t cx, std::int32_t cy, float fallback) {
-        float sum = 0.0f;
+    // Mean surface height and water depth at tile corner (cx, cy), over the flooded tiles
+    // sharing it. Both read the same tiles from the pad, so two chunks assign their shared
+    // corners identical values -- the depth feeds the wave attenuation, and a border mismatch
+    // there shows as a moving seam. A corner no flooded tile touches (a skirt's far corner,
+    // under the bank) is the shoreline: depth 0.
+    auto corner_z = [&](std::int32_t cx, std::int32_t cy, float fallback, float& depth) {
+        float z_sum = 0.0f, d_sum = 0.0f;
         int count = 0;
         for (std::int32_t ty = cy - 1; ty <= cy; ++ty) {
             for (std::int32_t tx = cx - 1; tx <= cx; ++tx) {
                 if (!in_pad(tx, ty)) continue;
                 const TileColumn& c = pad.at(tx, ty);
                 if (c.water == k_water_none) continue;
-                sum += surface_z(c);
+                const float z = surface_z(c);
+                z_sum += z;
+                d_sum += z - static_cast<float>(c.steps) * hs;
                 ++count;
             }
         }
-        return count > 0 ? sum / static_cast<float>(count) : fallback;
+        depth = count > 0 ? std::max(d_sum / static_cast<float>(count), 0.0f) : 0.0f;
+        return count > 0 ? z_sum / static_cast<float>(count) : fallback;
     };
 
     for (std::int32_t y = 0; y < n; ++y) {
@@ -375,9 +384,11 @@ void build_chunk_water(const ColumnPad& pad, const TerrainParams& params, ChunkW
             const std::int32_t cxs[4] = {x, x + 1, x + 1, x};
             const std::int32_t cys[4] = {y, y, y + 1, y + 1};
             for (int k = 0; k < 4; ++k) {
+                float depth = 0.0f;
                 const glm::vec3 p(static_cast<float>(cxs[k]) * ts, static_cast<float>(cys[k]) * ts,
-                                  corner_z(cxs[k], cys[k], level));
+                                  corner_z(cxs[k], cys[k], level, depth));
                 out.positions.push_back(p);
+                out.depths.push_back(depth);
                 const glm::vec2 xy(p.x, p.y);
                 out.uvs.push_back(kind == k_water_flowing ? glm::vec2(glm::dot(xy, down), glm::dot(xy, across)) : xy);
             }

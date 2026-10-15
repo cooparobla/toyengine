@@ -115,6 +115,54 @@ COOPA_TEST(destroyed_body_disappears_from_queries) {
     expect(!info.underwater && info.body == nullptr, "query: a destroyed body is gone after refresh_bodies()");
 }
 
+/** @brief A body whose caller supplies per-corner depths (a TileTerrain's chunk water) bakes
+ *         with them -- no physics raycasts -- and a planar one is final from its first bake:
+ *         bake_stage 2 with no re-bake pop, and the query interpolating the authored values. */
+COOPA_TEST(authored_depths_bake_final_without_physics) {
+    BuoyScene bs = make_water_scene([](toy::water::WaterBody& b) {
+        std::vector<glm::vec3> pos = {{-5.0f, -5.0f, 0.0f}, {5.0f, -5.0f, 0.0f}, {5.0f, 5.0f, 0.0f}, {-5.0f, 5.0f, 0.0f}};
+        std::vector<glm::vec2> uv = {{-5.0f, -5.0f}, {5.0f, -5.0f}, {5.0f, 5.0f}, {-5.0f, 5.0f}};
+        std::vector<uint32_t> idx = {0, 1, 2, 0, 2, 3};
+        b.set_geometry(std::move(pos), std::move(uv), std::move(idx), {1.0f, 2.0f, 3.0f, 2.0f});
+    });
+    start(bs);
+    run(bs, 1.0f / 60.0f);
+    expect(bs.body->baked, "authored depth: the body bakes on its first frame");
+    expect(bs.body->bake_stage == 2, "authored depth: a planar body is final at once -- nothing left for stage 2");
+    toy::water::WaterBaseSample s;
+    expect(bs.body->query.sample_base(glm::vec2(2.5f, 0.0f), s), "authored depth: the query covers the quad");
+    // Barycentric over the (-5,-5) d=1 / (5,-5) d=2 / (5,5) d=3 triangle: 0.25, 0.25, 0.5.
+    expect_near(s.depth, 2.25f, 1e-3f, "authored depth: the query interpolates the supplied depths");
+}
+
+/** @brief New bodies bake nearest the focus first even before any of them has baked (an unbaked
+ *         body has no query bounds; its owner's position must stand in) -- a streamed world's
+ *         water appears under the camera first, not in scene order. */
+COOPA_TEST(new_bodies_bake_nearest_first) {
+    BuoyScene bs;
+    bs.scene = std::make_unique<Scene>("water_order");
+    auto add_water = [&](const char* name, float x) {
+        auto obj = std::make_unique<SceneObject>(name);
+        obj->add_component<TransformComponent>()->transform().set_position(glm::vec3(x, 0.0f, 0.0f));
+        auto* b = obj->add_component<toy::water::WaterBody>();
+        b->size = glm::vec2(10.0f);
+        b->resolution = 4;
+        bs.scene->add_root_object(std::move(obj));
+        return b;
+    };
+    toy::water::WaterBody* far_body = add_water("far", 300.0f); // first in scene order
+    toy::water::WaterBody* near_body = add_water("near", 0.0f);
+    start(bs);
+    toy::water::WaterSettings settings = bs.water->settings();
+    settings.new_bakes_per_frame = 1;
+    bs.water->set_settings(settings);
+    bs.water->set_focus(glm::vec3(0.0f));
+    run(bs, 1.0f / 60.0f);
+    expect(near_body->baked && !far_body->baked, "bake order: the body nearest the focus bakes first, not scene order");
+    run(bs, 1.0f / 60.0f);
+    expect(far_body->baked, "bake order: ...and the rest follow on later frames");
+}
+
 /** @brief Render tiles cover the surface exactly; every LOD is a subset of LOD 0, wound +Z,
  *         with LOD switch sizes decreasing; a mesh tiling keeps every triangle once. */
 COOPA_TEST(render_tiles_cover_the_surface_with_nested_lods) {

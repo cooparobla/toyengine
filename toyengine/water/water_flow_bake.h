@@ -63,6 +63,17 @@ void weld_by_position(const std::vector<glm::vec3>& positions, const std::vector
                              std::vector<glm::vec3>& out_positions, std::vector<glm::vec2>& out_uvs,
                              std::vector<uint32_t>& out_indices, float quantum = 1e-4f);
 
+/**
+ * @brief weld_by_position() carrying one per-corner scalar (e.g. an authored water depth)
+ *        through the weld. Like the UVs, the first corner's value wins at a seam; an empty
+ *        `scalars` leaves `out_scalars` empty.
+ */
+void weld_by_position(const std::vector<glm::vec3>& positions, const std::vector<glm::vec2>& uvs,
+                             const std::vector<float>& scalars, const std::vector<uint32_t>& corner_indices,
+                             std::vector<glm::vec3>& out_positions, std::vector<glm::vec2>& out_uvs,
+                             std::vector<float>& out_scalars, std::vector<uint32_t>& out_indices,
+                             float quantum = 1e-4f);
+
 /** @brief Direction (unit, in the triangle's plane) in which UV `u` increases; zero if degenerate. */
 glm::vec3 uv_u_direction(const glm::vec3& a, const glm::vec3& b, const glm::vec3& c,
                                 float ua, float ub, float uc);

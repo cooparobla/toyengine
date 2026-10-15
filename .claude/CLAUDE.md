@@ -21,6 +21,9 @@ A targeted rebuild is cheap, a broad one is not -- keep both rare and narrow.
 | the game / editor app | `--target toyengine` / `--target toyengine_editor` |
 
 - Never `cmake --build build` with no target while iterating -- that builds every executable.
+- `.vscode/settings.json` pins `cmake.parallelJobs` to 4 -- do not delete it. The CMake Tools
+  default of `0` is one job per core (20 here), and at ~2 GB per compiler that OOM-kills the
+  whole VS Code session, not just the build.
 - Compile-check one file without linking anything:
   `make -C build toyengine/water/water_system.cpp.o`, `make -C build/tests engine/gpu/cloth_test.cpp.o`.
 - Batch your edits, then build once. Don't rebuild after each small edit, and never after a

@@ -95,6 +95,13 @@ struct ChunkMeshData {
 struct ChunkWaterData {
     std::vector<glm::vec3>     positions;
     std::vector<glm::vec2>     uvs;      /**< Flowing: `u` runs downstream (water_flow_bake.h). */
+    /**
+     * Water depth (m) under each corner, from the tiles: mean of (surface - bed) over the
+     * flooded tiles sharing the corner -- the same tile set the corner's height averages, read
+     * from the pad, so two chunks assign their shared edge identical depths. 0 at a skirt corner
+     * no flooded tile touches (the shoreline). WaterBody bakes with these instead of raycasts.
+     */
+    std::vector<float>         depths;
     std::vector<std::uint32_t> indices;
     /// A planet chunk's water is given in its own frame (WaterBody::local_frame): `frame` maps it
     /// to the chunk's space -- local Z out from the planet at the chunk's centre. Identity, and
@@ -103,7 +110,12 @@ struct ChunkWaterData {
     bool                       local_frame = false;
 
     bool empty() const { return indices.empty(); }
-    void clear() { positions.clear(); uvs.clear(); indices.clear(); }
+    void clear() {
+        positions.clear();
+        uvs.clear();
+        depths.clear();
+        indices.clear();
+    }
 };
 
 /**

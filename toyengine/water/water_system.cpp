@@ -49,7 +49,13 @@ void WaterSystem::execute(coopa::scene::Scene& scene, const coopa::scene::FrameC
             const bool moved = body->baked && world != body->baked_world;
             const bool density = body->baked && uses_grid_(*body) && body->baked_density != settings_.grid_density;
             if (body->baked && !moved && !density) continue;
-            pending.push_back({distance_to_body_(*body), body});
+            // A body that has never baked has no query bounds yet, so distance_to_body_() cannot
+            // place it: its owner's position stands in, so a streamed world's nearest new water
+            // (a terrain chunk's sits at its chunk origin) really is baked first.
+            const float d = body->query.valid() ? distance_to_body_(*body)
+                            : has_focus_        ? glm::distance(focus_, glm::vec3(world[3]))
+                                                : 0.0f;
+            pending.push_back({d, body});
         }
         std::sort(pending.begin(), pending.end(),
                   [](const auto& a, const auto& b) { return a.first < b.first; });
@@ -443,14 +449,24 @@ void WaterSystem::bake_(coopa::scene::Scene& scene, WaterBody& body, const glm::
     const ParallelFor par_rays  = parallel_(k_parallel_rays);
     if (!local_geometry_(body, settings_.grid_density, corner_pos, corner_uv, corner_idx, grid_res, &par_rows)) return;
 
+    // Authored per-corner depths (set_geometry()): exact, already consistent across the bodies
+    // that share an edge (a TileTerrain's chunks read theirs from one tile grid), and available
+    // before physics -- so they replace the stage-2 depth raycasts outright.
+    const bool authored_depth = !body.geometry_indices.empty() &&
+                                body.geometry_depths.size() == body.geometry_positions.size();
+
     std::vector<glm::vec3> local_pos;
     std::vector<glm::vec2> uvs;
     std::vector<uint32_t>  indices;
+    std::vector<float>     welded_depth;
     if (grid_res >= 1) {
         // A procedural grid is already welded (and row-major, as build_grid_tiles() expects).
         local_pos = std::move(corner_pos);
         uvs       = std::move(corner_uv);
         indices   = std::move(corner_idx);
+    } else if (authored_depth) {
+        weld_by_position(corner_pos, corner_uv, body.geometry_depths, corner_idx, local_pos, uvs,
+                         welded_depth, indices);
     } else {
         weld_by_position(corner_pos, corner_uv, corner_idx, local_pos, uvs, indices);
     }
@@ -483,7 +499,9 @@ void WaterSystem::bake_(coopa::scene::Scene& scene, WaterBody& body, const glm::
     }
 
     std::vector<float> depth(n, body.max_depth);
-    if (with_physics) {
+    if (authored_depth) {
+        depth = std::move(welded_depth);
+    } else if (with_physics) {
         // Two raycasts a vertex, independent of each other: spread over the job workers.
         // PhysicsWorld's queries are read-only and safe to run concurrently (thread_local
         // traversal stacks -- see broadphase/aabb_tree.h).
@@ -514,7 +532,11 @@ void WaterSystem::bake_(coopa::scene::Scene& scene, WaterBody& body, const glm::
     body.baked_world = world;
     body.baked_density = settings_.grid_density;
     body.baked = true;
-    body.bake_stage = with_physics ? 2 : 1;
+    // With authored depths a Planar body has nothing left to learn from physics -- its first
+    // bake is final (no re-bake, no pop, and no stage-1/2 depth mismatch against a neighbour).
+    // A Flowing one still takes its stage-2 pass for obstacle deflection and wakes.
+    const bool complete = with_physics || (authored_depth && body.mode == WaterMode::Planar);
+    body.bake_stage = complete ? 2 : 1;
 }
 
 std::vector<coopa::gfx::engine::data::Vertex> WaterSystem::make_vertices_(const glm::mat4& world, const std::vector<glm::vec3>& local_pos, const std::vector<uint32_t>& indices,

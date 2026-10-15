@@ -571,7 +571,7 @@ void TerrainSystem::add_chunk_water_(const TerrainComponent& terrain, coopa::sce
         body->waves.amplitude *= 0.25f;
         body->waves.wavelength *= 0.5f;
     }
-    body->set_geometry(water.positions, water.uvs, water.indices);
+    body->set_geometry(water.positions, water.uvs, water.indices, water.depths);
     chunk_object.add_child(std::move(object));
 }
 

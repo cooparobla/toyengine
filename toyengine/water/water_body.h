@@ -99,9 +99,20 @@ public:
      *        should increase downstream (see water_flow_bake.h). Re-bakes on the next frame.
      */
     void set_geometry(std::vector<glm::vec3> positions, std::vector<glm::vec2> uvs, std::vector<uint32_t> indices);
+
+    /**
+     * @brief set_geometry() with the water depth (m) under each corner supplied by the caller
+     *        (aligned with `positions`), for water whose source knows its depths exactly -- a
+     *        TileTerrain's chunk water reads them from its tiles. The bake uses them instead of
+     *        physics raycasts, so the surface looks final from its first bake and every chunk of
+     *        one body agrees at shared edges. An empty `depths` means "probe depth from physics".
+     */
+    void set_geometry(std::vector<glm::vec3> positions, std::vector<glm::vec2> uvs, std::vector<uint32_t> indices,
+                      std::vector<float> depths);
     std::vector<glm::vec3> geometry_positions;
     std::vector<glm::vec2> geometry_uvs;
     std::vector<uint32_t>  geometry_indices;
+    std::vector<float>     geometry_depths; ///< Per-corner authored depth (m); empty = probe.
 
     /**
      * @brief The body lives in its own frame: its surface is a height field over its LOCAL XY,

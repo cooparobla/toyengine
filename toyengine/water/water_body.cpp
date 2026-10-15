@@ -9,9 +9,15 @@ namespace toy {
 namespace water {
 
 void WaterBody::set_geometry(std::vector<glm::vec3> positions, std::vector<glm::vec2> uvs, std::vector<uint32_t> indices) {
+    set_geometry(std::move(positions), std::move(uvs), std::move(indices), {});
+}
+
+void WaterBody::set_geometry(std::vector<glm::vec3> positions, std::vector<glm::vec2> uvs,
+                             std::vector<uint32_t> indices, std::vector<float> depths) {
     geometry_positions = std::move(positions);
     geometry_uvs       = std::move(uvs);
     geometry_indices   = std::move(indices);
+    geometry_depths    = std::move(depths);
     mark_dirty();
 }
 

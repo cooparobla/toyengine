@@ -6,6 +6,7 @@ scene:
       shadow_fit: focus
       shadow_focus_radius: 16.0
       shadow_pcf_max_texels: 32.0
+      shadow_pcss_enabled: true
       shadow_receiver_plane_bias: true
       shadow_softness: 0.35
   root_objects:

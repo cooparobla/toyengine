@@ -141,6 +141,19 @@ struct TerrainParams {
      */
     float river_inset = 0.2f;
 
+    /**
+     * @brief How tall a river's waves stand next to the still water's, 0..1.
+     *
+     * A river's surface is its current, not the sea's swell -- but a river and the lake it runs
+     * into SHARE the vertices along their seam (build_chunk_water()), and the vertex stage
+     * displaces a vertex from its own body's wave params. A body-wide difference therefore pulls
+     * every shared vertex two ways until the two surfaces part and the bed shows through the gap.
+     * So the difference is carried per corner instead (ChunkWaterData::wave_scales), meaned over
+     * the tiles sharing each corner exactly as its height and depth are: both meshes read the
+     * same value at the seam, and the waves ease across it over a tile.
+     */
+    float river_wave_scale = 0.25f;
+
     // --- Planets (planet.h) ---
 
     /** @brief A planet: six faces of `face_tiles^2` tiles bent onto a sphere, instead of one flat grid. */

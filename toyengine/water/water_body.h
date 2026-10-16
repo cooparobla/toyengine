@@ -109,10 +109,20 @@ public:
      */
     void set_geometry(std::vector<glm::vec3> positions, std::vector<glm::vec2> uvs, std::vector<uint32_t> indices,
                       std::vector<float> depths);
+
+    /**
+     * @brief set_geometry() with authored depths AND a per-corner wave scale (0..1) multiplying
+     *        the wave height there, so a surface can calm part of itself without the body-wide
+     *        wave change that would pull a SHARED vertex apart from the body next to it (a river
+     *        meeting its lake -- see TerrainParams::river_wave_scale). Empty = 1 everywhere.
+     */
+    void set_geometry(std::vector<glm::vec3> positions, std::vector<glm::vec2> uvs, std::vector<uint32_t> indices,
+                      std::vector<float> depths, std::vector<float> wave_scales);
     std::vector<glm::vec3> geometry_positions;
     std::vector<glm::vec2> geometry_uvs;
     std::vector<uint32_t>  geometry_indices;
     std::vector<float>     geometry_depths; ///< Per-corner authored depth (m); empty = probe.
+    std::vector<float>     geometry_wave_scales; ///< Per-corner wave height multiplier; empty = 1.
 
     /**
      * @brief The body lives in its own frame: its surface is a height field over its LOCAL XY,

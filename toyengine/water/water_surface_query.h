@@ -36,6 +36,10 @@ struct WaterVertex {
     glm::vec3 flow{0.0f};      ///< World-space surface current (m/s).
     float     depth = 0.0f;    ///< Water depth below this vertex (m); see WaterSystem's bake.
     float     turbulence = 0.0f; ///< 0..1 whitewater hint (rapids, obstacle wakes).
+    /// How tall this vertex's waves stand, 0..1 (the shader's tangent.w - 2; see
+    /// water_surface.glsl). Multiplies the amplitude exactly as the depth attenuation does, so a
+    /// floater keeps riding the surface that is drawn.
+    float     wave_scale = 1.0f;
 };
 
 /** @brief The undisplaced surface interpolated at an XY point. */
@@ -44,6 +48,7 @@ struct WaterBaseSample {
     glm::vec3 flow{0.0f};
     float     depth = 0.0f;
     float     turbulence = 0.0f;
+    float     wave_scale = 1.0f;
 };
 
 /** @brief Full surface query result: base surface plus waves. */
@@ -153,6 +158,7 @@ public:
             out.flow       = w.x * a.flow + w.y * b.flow + w.z * d.flow;
             out.depth      = w.x * a.depth + w.y * b.depth + w.z * d.depth;
             out.turbulence = w.x * a.turbulence + w.y * b.turbulence + w.z * d.turbulence;
+            out.wave_scale = w.x * a.wave_scale + w.y * b.wave_scale + w.z * d.wave_scale;
             return true;
         }
         return false;
@@ -184,14 +190,14 @@ public:
         WaterBaseSample b0 = base;
         WaveSample s;
         for (int i = 0; i < opt.iterations; ++i) {
-            s = evaluate(waves, p0, t, depth_attenuation(b0.depth, wavelength), dist(p0, b0.height));
+            s = evaluate(waves, p0, t, depth_attenuation(b0.depth, wavelength) * b0.wave_scale, dist(p0, b0.height));
             glm::vec2 next = p - glm::vec2(s.displacement);
             WaterBaseSample bn;
             if (!sample_base(next, bn)) break; // near the mesh edge: keep the last valid p0
             p0 = next;
             b0 = bn;
         }
-        s = evaluate(waves, p0, t, depth_attenuation(b0.depth, wavelength), dist(p0, b0.height));
+        s = evaluate(waves, p0, t, depth_attenuation(b0.depth, wavelength) * b0.wave_scale, dist(p0, b0.height));
         out.surface_height = b0.height + s.displacement.z;
         out.normal         = s.normal;
         return true;

@@ -102,6 +102,13 @@ struct ChunkWaterData {
      * no flooded tile touches (the shoreline). WaterBody bakes with these instead of raycasts.
      */
     std::vector<float>         depths;
+    /**
+     * Wave height multiplier (0..1) at each corner: 1 over still water, TerrainParams::
+     * river_wave_scale over a river, the mean of the flooded tiles sharing the corner between the
+     * two -- the same tiles its height and depth average, so two meshes meeting at a corner scale
+     * their waves identically there and never pull it apart.
+     */
+    std::vector<float>         wave_scales;
     std::vector<std::uint32_t> indices;
     /// A planet chunk's water is given in its own frame (WaterBody::local_frame): `frame` maps it
     /// to the chunk's space -- local Z out from the planet at the chunk's centre. Identity, and
@@ -114,6 +121,7 @@ struct ChunkWaterData {
         positions.clear();
         uvs.clear();
         depths.clear();
+        wave_scales.clear();
         indices.clear();
     }
 };

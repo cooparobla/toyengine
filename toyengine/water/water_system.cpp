@@ -1,5 +1,7 @@
 #include <toyengine/water/water_system.h>
 
+#include <algorithm>
+
 #include <coopa/asset/asset_manager.h>
 #include <coopa/event/signal.h>
 #include <coopa/job/parallel_for.h>
@@ -459,14 +461,17 @@ void WaterSystem::bake_(coopa::scene::Scene& scene, WaterBody& body, const glm::
     std::vector<glm::vec2> uvs;
     std::vector<uint32_t>  indices;
     std::vector<float>     welded_depth;
+    std::vector<float>     welded_wave;
     if (grid_res >= 1) {
         // A procedural grid is already welded (and row-major, as build_grid_tiles() expects).
         local_pos = std::move(corner_pos);
         uvs       = std::move(corner_uv);
         indices   = std::move(corner_idx);
     } else if (authored_depth) {
-        weld_by_position(corner_pos, corner_uv, body.geometry_depths, corner_idx, local_pos, uvs,
-                         welded_depth, indices);
+        // The authored wave scale rides along with the depth: both are per corner, both must come
+        // out of the weld on the same vertex (a corner two bodies share carries one of each).
+        weld_by_position(corner_pos, corner_uv, body.geometry_depths, body.geometry_wave_scales,
+                         corner_idx, local_pos, uvs, welded_depth, welded_wave, indices);
     } else {
         weld_by_position(corner_pos, corner_uv, corner_idx, local_pos, uvs, indices);
     }
@@ -521,11 +526,14 @@ void WaterSystem::bake_(coopa::scene::Scene& scene, WaterBody& body, const glm::
     // CPU query (world space).
     std::vector<WaterVertex> wv(n);
     run_range(&par_verts, n, [&](std::size_t begin, std::size_t end) {
-        for (std::size_t i = begin; i < end; ++i) wv[i] = {world_pos[i], flow[i], depth[i], turbulence[i]};
+        for (std::size_t i = begin; i < end; ++i) {
+            wv[i] = {world_pos[i], flow[i], depth[i], turbulence[i],
+                     welded_wave.empty() ? 1.0f : std::clamp(welded_wave[i], 0.0f, 1.0f)};
+        }
     });
     body.query.build(std::move(wv), indices, &par_verts);
 
-    publish_gpu_mesh_(scene, body, world, local_pos, indices, flow, depth, turbulence, grid_res);
+    publish_gpu_mesh_(scene, body, world, local_pos, indices, flow, depth, turbulence, welded_wave, grid_res);
     body.tier_tessellates = settings_.tessellate;
     apply_material_(body);
 
@@ -541,7 +549,8 @@ void WaterSystem::bake_(coopa::scene::Scene& scene, WaterBody& body, const glm::
 
 std::vector<coopa::gfx::engine::data::Vertex> WaterSystem::make_vertices_(const glm::mat4& world, const std::vector<glm::vec3>& local_pos, const std::vector<uint32_t>& indices,
                const std::vector<glm::vec3>& flow_ws, const std::vector<float>& depth,
-               const std::vector<float>& turbulence, const ParallelFor* par, bool flat) {
+               const std::vector<float>& turbulence, const std::vector<float>& wave_scale,
+               const ParallelFor* par, bool flat) {
     using coopa::gfx::engine::data::Vertex;
     // Object-space normals, area-weighted from the welded triangles. Serial: triangles scatter
     // into shared vertices, and a fixed summation order keeps the result reproducible.
@@ -568,7 +577,10 @@ std::vector<coopa::gfx::engine::data::Vertex> WaterSystem::make_vertices_(const 
             // "flow" is invisible to water.vert and buoyancy alike.
             glm::vec3 t = to_local * flow_ws[i];
             if (glm::dot(t, t) < 1e-8f) t = glm::vec3(1e-4f, 0.0f, 0.0f);
-            verts[i].tangent  = glm::vec4(t, 2.0f);
+            // w = 2 + the wave scale (see the file doc): still 2 on water that waves fully, up to
+            // 3 never, so `w > 1.5` still reads "baked" and the shader recovers the scale as w - 2.
+            const float ws = wave_scale.empty() ? 1.0f : std::clamp(wave_scale[i], 0.0f, 1.0f);
+            verts[i].tangent  = glm::vec4(t, 2.0f + ws);
         }
     });
     return verts;
@@ -577,7 +589,8 @@ std::vector<coopa::gfx::engine::data::Vertex> WaterSystem::make_vertices_(const 
 void WaterSystem::publish_gpu_mesh_(coopa::scene::Scene& scene, WaterBody& body, const glm::mat4& world,
                        const std::vector<glm::vec3>& local_pos, const std::vector<uint32_t>& indices,
                        const std::vector<glm::vec3>& flow_ws, const std::vector<float>& depth,
-                       const std::vector<float>& turbulence, int grid_res) {
+                       const std::vector<float>& turbulence, const std::vector<float>& wave_scale,
+                       int grid_res) {
     using coopa::gfx::engine::components::MeshRenderer;
     using coopa::gfx::engine::data::Mesh;
     if (!device_ || !allocator_ || !assets_ || !body.owner) return;
@@ -585,7 +598,7 @@ void WaterSystem::publish_gpu_mesh_(coopa::scene::Scene& scene, WaterBody& body,
     const ParallelFor par_verts = parallel_(k_parallel_vertices);
     const ParallelFor par_tiles = parallel_(k_parallel_tiles);
     // A local-frame body's flow is already in its own frame (its bake ran there).
-    const auto verts = make_vertices_(body.local_frame ? glm::mat4(1.0f) : world, local_pos, indices, flow_ws, depth, turbulence, &par_verts, grid_res >= 1);
+    const auto verts = make_vertices_(body.local_frame ? glm::mat4(1.0f) : world, local_pos, indices, flow_ws, depth, turbulence, wave_scale, &par_verts, grid_res >= 1);
 
     // Bounds inflation for what the vertex shader adds: the full wave sum, vertically and
     // horizontally (local space; a scaled body is rare and the margin is generous) -- of the

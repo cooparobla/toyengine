@@ -14,10 +14,17 @@ void WaterBody::set_geometry(std::vector<glm::vec3> positions, std::vector<glm::
 
 void WaterBody::set_geometry(std::vector<glm::vec3> positions, std::vector<glm::vec2> uvs,
                              std::vector<uint32_t> indices, std::vector<float> depths) {
-    geometry_positions = std::move(positions);
-    geometry_uvs       = std::move(uvs);
-    geometry_indices   = std::move(indices);
-    geometry_depths    = std::move(depths);
+    set_geometry(std::move(positions), std::move(uvs), std::move(indices), std::move(depths), {});
+}
+
+void WaterBody::set_geometry(std::vector<glm::vec3> positions, std::vector<glm::vec2> uvs,
+                             std::vector<uint32_t> indices, std::vector<float> depths,
+                             std::vector<float> wave_scales) {
+    geometry_positions    = std::move(positions);
+    geometry_uvs          = std::move(uvs);
+    geometry_indices      = std::move(indices);
+    geometry_depths       = std::move(depths);
+    geometry_wave_scales  = std::move(wave_scales);
     mark_dirty();
 }
 

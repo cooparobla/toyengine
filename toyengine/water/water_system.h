@@ -297,7 +297,8 @@ private:
     static std::vector<coopa::gfx::engine::data::Vertex>
     make_vertices_(const glm::mat4& world, const std::vector<glm::vec3>& local_pos, const std::vector<uint32_t>& indices,
                    const std::vector<glm::vec3>& flow_ws, const std::vector<float>& depth,
-                   const std::vector<float>& turbulence, const ParallelFor* par = nullptr, bool flat = false);
+                   const std::vector<float>& turbulence, const std::vector<float>& wave_scale,
+                   const ParallelFor* par = nullptr, bool flat = false);
 
     /**
      * @brief Splits the baked surface into render tiles (water_tiles.h) and publishes them: one
@@ -307,7 +308,8 @@ private:
     void publish_gpu_mesh_(coopa::scene::Scene& scene, WaterBody& body, const glm::mat4& world,
                            const std::vector<glm::vec3>& local_pos, const std::vector<uint32_t>& indices,
                            const std::vector<glm::vec3>& flow_ws, const std::vector<float>& depth,
-                           const std::vector<float>& turbulence, int grid_res);
+                           const std::vector<float>& turbulence, const std::vector<float>& wave_scale,
+                           int grid_res);
 
     /** @brief Destroys the tile objects of `body` not carried into `keep`, and makes `keep` its tiles. */
     void retire_tiles_(WaterBody& body, std::vector<WaterBody::TileSlot> keep);

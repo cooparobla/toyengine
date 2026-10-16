@@ -7,9 +7,13 @@
 // bakes the mesh and writes the material:
 //
 //   per vertex   uv      = (water depth below the vertex in m, turbulence 0..1)
-//                tangent = (object-space surface current m/s, 2.0)   -- w == 2 marks a baked
-//                          water vertex; any other mesh (w == +-1, a plain tangent) is read as
-//                          still, deep water, so a YAML-only `shader: water` mesh still draws.
+//                tangent = (object-space surface current m/s, 2 + wave scale) -- w > 1.5 marks a
+//                          baked water vertex and w - 2 is how tall its waves stand (1 = fully,
+//                          lower where a surface must calm down without the body-wide wave change
+//                          that would pull a vertex it SHARES with the body next to it apart --
+//                          a river meeting its lake, toy::world::TerrainParams::river_wave_scale).
+//                          Any other mesh (w == +-1, a plain tangent) is read as still, deep
+//                          water waving fully, so a YAML-only `shader: water` mesh still draws.
 //   gfx_params        = base wave: amplitude, wavelength, direction (radians), steepness
 //   gfx_params_ext0   = foam colour rgb, foam amount           (forward pass only)
 //   gfx_params_ext1   = shore foam depth, edge fade depth, ripple strength, ripple scale
@@ -46,6 +50,26 @@
 // ---------------------------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------------------------
+
+/**
+ * The vertex spacing a BAKED (untessellated) water tile is drawn at, as metres per metre of
+ * distance -- the shape water_wave_mesh_fade() wants.
+ *
+ * The renderer picks a tile's LOD by its projected size, so whatever the distance a tile is
+ * drawn with edges of roughly a fixed number of render pixels (toy::water::k_pixel_lod_factor,
+ * water_tiles.h, is that rule). Neighbouring tiles sit on either side of a switch and land on
+ * DIFFERENT levels, so a wave only a few spacings long is sampled differently on each side and
+ * the water breaks into a patchwork of tiles meeting along their shared edges. Handing those
+ * waves to the fragment stage -- the vertex stage leaves them out of the mesh, the fragment adds
+ * their slope back per pixel -- is what the tessellated path already does, and it makes the
+ * drawn surface a function of distance alone, the same on both sides of every seam.
+ *
+ * The constant is the LOD rule's ~8 px, with room for the coarser tiers' lod_bias.
+ */
+const float WATER_BAKED_EDGE_PIXELS = 12.0;
+vec2 water_baked_lod(float pixel_scale) {
+    return vec2(WATER_BAKED_EDGE_PIXELS / max(pixel_scale, 1.0), 1.0e9);
+}
 
 float water_hash(vec2 p) {
     p = fract(p * vec2(123.34, 456.21));
@@ -103,6 +127,10 @@ void gfx_surface_vertex(inout GfxSurfaceVertex v) {
     float depth      = baked ? v.uv.x : 1000.0;
     float turbulence = baked ? v.uv.y : 0.0;
     vec3  flow_ws    = baked ? mat3(v.model) * v.tangent_os.xyz : vec3(0.0);
+    // How tall this vertex's waves stand (see the file doc). A function of the corner alone, so
+    // two bodies sharing it displace it identically and no gap can open between them.
+    float wave_scale = baked ? clamp(v.tangent_os.w - 2.0, 0.0, 1.0) : 1.0;
+    vec4  wave_base  = vec4(gfx_params.x * wave_scale, gfx_params.yzw);
 
 #ifdef WATER_LOCAL_FRAME
     {
@@ -118,7 +146,7 @@ void gfx_surface_vertex(inout GfxSurfaceVertex v) {
         vec3  tilt = vec3(0.0);
         for (int k = 0; k < 3; ++k) {
             if (blend[k] < 0.02) continue;
-            WaterWave w = water_gerstner(gfx_params, water_plane_coords(v.position_ws, k), gfx_time.w, atten, view, gfx_tess_lod);
+            WaterWave w = water_gerstner(wave_base, water_plane_coords(v.position_ws, k), gfx_time.w, atten, view, gfx_tess_lod);
             h     += blend[k] * w.displacement.z;
             tilt  += blend[k] * water_plane_lift(w.normal.xy, k);
             crest += blend[k] * w.crest;
@@ -127,17 +155,19 @@ void gfx_surface_vertex(inout GfxSurfaceVertex v) {
         v.normal_ws = normalize(n0 + tilt - n0 * dot(tilt, n0));
         vec3 ref = abs(v.normal_ws.x) < 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
         v.tangent_ws = normalize(ref - v.normal_ws * dot(ref, v.normal_ws));
-        v.custom = vec4(water_plane_coords(flow_ws, water_frame_plane(v.normal_ws)), turbulence, crest);
+        v.custom = vec4(water_plane_coords(flow_ws, water_frame_plane(v.normal_ws)), wave_scale, crest);
         return;
     }
 #endif
 
-    // Tessellated, the waves the mesh is too coarse to hold at this distance are left out
-    // (gfx_tess_lod; the fragment stage shades their slope back in) -- so the hand-over from the
-    // tessellated band to the baked grid is a gradient, not an aliased edge.
-    WaterWave w = water_gerstner(gfx_params, v.position_ws.xy, gfx_time.w,
+    // The waves the mesh is too coarse to hold at this distance are left out and shaded back in
+    // per pixel by the fragment stage: gfx_tess_lod while tessellating, water_baked_lod() on a
+    // baked tile. Either way what the mesh carries is a function of distance alone, so the
+    // hand-over from one LOD (or tile, or body) to the next is a gradient, not an aliased edge.
+    vec2 mesh_lod = gfx_tess_lod.y > 0.0 ? gfx_tess_lod : water_baked_lod(camera.jitter_ndc.z);
+    WaterWave w = water_gerstner(wave_base, v.position_ws.xy, gfx_time.w,
                                  water_depth_attenuation(depth, gfx_params.y),
-                                 distance(camera.camera_pos, v.position_ws), gfx_tess_lod);
+                                 distance(camera.camera_pos, v.position_ws), mesh_lod);
     v.position_ws += w.displacement;
 
     // Tilt the mesh's own normal (not +Z: a river surface slopes) by the wave slope.
@@ -148,7 +178,10 @@ void gfx_surface_vertex(inout GfxSurfaceVertex v) {
     vec3 ref = abs(v.normal_ws.x) < 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
     v.tangent_ws = normalize(ref - v.normal_ws * dot(ref, v.normal_ws));
 
-    v.custom = vec4(flow_ws.xy, turbulence, w.crest);
+    // custom.z carries the wave scale, not the turbulence: the fragment stage reads turbulence
+    // straight from its own interpolated uv.y (the same per-vertex channel), and needs the scale
+    // to shade back exactly the waves this vertex left out of the mesh.
+    v.custom = vec4(flow_ws.xy, wave_scale, w.crest);
 }
 #endif // GFX_SURFACE_VERTEX
 
@@ -218,7 +251,8 @@ void gfx_surface_fragment(inout GfxTransparentSurface s) {
     vec2  pos   = s.position_ws.xy;
 #endif
     vec2  flow  = s.custom.xy;
-    float turb  = s.custom.z;
+    float turb  = s.uv.y;        // the baked turbulence (see the file doc's vertex packing)
+    float wave_scale = s.custom.z;
     float crest = s.custom.w;
 
     vec3  foam_color      = gfx_params_ext0.rgb;
@@ -258,16 +292,21 @@ void gfx_surface_fragment(inout GfxTransparentSurface s) {
         if (length(camera.camera_pos.xy - pos) <= ring_range) water_ripple_rings(pos, slope, ring_foam);
 #endif
     }
-    // Tessellated draws (packed params in refraction_ior_flags.zw): the slope of the waves the
-    // vertex stage left out of the mesh (water_wave_mesh_fade), per pixel.
-    uvec2 tess_bits = floatBitsToUint(material.refraction_ior_flags.zw);
-    if (tess_bits.x != 0u) {
-        vec2 tess_lod = vec2(max(unpackHalf2x16(tess_bits.x).x, 0.5) / max(camera.jitter_ndc.z, 1.0),
-                             unpackHalf2x16(tess_bits.y).x);
+    // The slope of the waves the vertex stage left out of the mesh (water_wave_mesh_fade), per
+    // pixel: a tessellated draw's own params (packed in refraction_ior_flags.zw), or the baked
+    // tile LOD rule. Shading them here rather than displacing them is what keeps a tile's
+    // surface the same whichever LOD it is drawn at -- see water_baked_lod().
 #ifndef WATER_LOCAL_FRAME
-        slope += water_gerstner_residual_slope(gfx_params, pos, gfx_time.w, view_dist, tess_lod);
-#endif
+    {
+        uvec2 tess_bits = floatBitsToUint(material.refraction_ior_flags.zw);
+        vec2 mesh_lod = tess_bits.x != 0u
+                      ? vec2(max(unpackHalf2x16(tess_bits.x).x, 0.5) / max(camera.jitter_ndc.z, 1.0),
+                             unpackHalf2x16(tess_bits.y).x)
+                      : water_baked_lod(camera.jitter_ndc.z);
+        slope += water_gerstner_residual_slope(vec4(gfx_params.x * wave_scale, gfx_params.yzw), pos,
+                                               gfx_time.w, view_dist, mesh_lod);
     }
+#endif
 #ifdef WATER_LOCAL_FRAME
     s.normal_ws = normalize(s.normal_ws - water_plane_lift(slope, plane));
 #else

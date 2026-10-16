@@ -19,10 +19,15 @@ layout(location = 2) in vec2 in_uv;
 layout(location = 3) in vec4 in_tangent; // xyz = tangent, w = handedness
 layout(location = 4) in mat4 in_model;   // per-instance (locations 4-7)
 
+// The whole block, as the fragment and evaluation stages declare it: a vertex hook may need
+// the pixel scale (jitter_ndc.z) to judge how coarse the mesh it is running on will be drawn.
 layout(set = 0, binding = 0) uniform CameraUBO {
     mat4 view;
     mat4 proj;
     vec3 camera_pos;
+    mat4 prev_view;
+    mat4 prev_proj;
+    vec4 jitter_ndc;   // z: pixel scale (0.5 * render height * proj[1][1])
 } camera;
 
 // Must stay byte-identical to TransparentPass::PushConstants (see that struct's own doc).

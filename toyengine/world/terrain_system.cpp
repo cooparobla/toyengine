@@ -566,12 +566,13 @@ void TerrainSystem::add_chunk_water_(const TerrainComponent& terrain, coopa::sce
         body->local_frame = true;
     }
     body->mode = flowing ? water::WaterMode::Flowing : water::WaterMode::Planar;
-    if (flowing) {
-        // A river's surface is its current, not the sea's swell.
-        body->waves.amplitude *= 0.25f;
-        body->waves.wavelength *= 0.5f;
-    }
-    body->set_geometry(water.positions, water.uvs, water.indices, water.depths);
+    // Every body over a chunk keeps the SAME wave field, rivers included. A river and the lake
+    // it runs into share their seam's vertices (build_chunk_water()), and the vertex stage
+    // displaces a vertex from the body's own wave params -- so two bodies with different waves
+    // pull a shared vertex apart and the bed shows through the gap between them. A river's own
+    // character comes from its per-vertex flow and turbulence (the current's ripples and
+    // whitewater), which is per vertex and agrees across a seam by construction.
+    body->set_geometry(water.positions, water.uvs, water.indices, water.depths, water.wave_scales);
     chunk_object.add_child(std::move(object));
 }
 

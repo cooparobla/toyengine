@@ -74,6 +74,17 @@ void weld_by_position(const std::vector<glm::vec3>& positions, const std::vector
                              std::vector<float>& out_scalars, std::vector<uint32_t>& out_indices,
                              float quantum = 1e-4f);
 
+/**
+ * @brief weld_by_position() carrying TWO per-corner scalars (a TileTerrain's chunk water supplies
+ *        an authored depth and a wave scale). Either may be empty, leaving its output empty.
+ */
+void weld_by_position(const std::vector<glm::vec3>& positions, const std::vector<glm::vec2>& uvs,
+                             const std::vector<float>& scalars_a, const std::vector<float>& scalars_b,
+                             const std::vector<uint32_t>& corner_indices,
+                             std::vector<glm::vec3>& out_positions, std::vector<glm::vec2>& out_uvs,
+                             std::vector<float>& out_a, std::vector<float>& out_b,
+                             std::vector<uint32_t>& out_indices, float quantum = 1e-4f);
+
 /** @brief Direction (unit, in the triangle's plane) in which UV `u` increases; zero if degenerate. */
 glm::vec3 uv_u_direction(const glm::vec3& a, const glm::vec3& b, const glm::vec3& c,
                                 float ua, float ub, float uc);

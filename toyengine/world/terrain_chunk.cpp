@@ -332,8 +332,8 @@ void build_chunk_water(const ColumnPad& pad, const TerrainParams& params, ChunkW
     // corners identical values -- the depth feeds the wave attenuation, and a border mismatch
     // there shows as a moving seam. A corner no flooded tile touches (a skirt's far corner,
     // under the bank) is the shoreline: depth 0.
-    auto corner_z = [&](std::int32_t cx, std::int32_t cy, float fallback, float& depth) {
-        float z_sum = 0.0f, d_sum = 0.0f;
+    auto corner_z = [&](std::int32_t cx, std::int32_t cy, float fallback, float& depth, float& wave) {
+        float z_sum = 0.0f, d_sum = 0.0f, w_sum = 0.0f;
         int count = 0;
         for (std::int32_t ty = cy - 1; ty <= cy; ++ty) {
             for (std::int32_t tx = cx - 1; tx <= cx; ++tx) {
@@ -343,10 +343,12 @@ void build_chunk_water(const ColumnPad& pad, const TerrainParams& params, ChunkW
                 const float z = surface_z(c);
                 z_sum += z;
                 d_sum += z - static_cast<float>(c.steps) * hs;
+                w_sum += c.water == k_water_flowing ? params.river_wave_scale : 1.0f;
                 ++count;
             }
         }
         depth = count > 0 ? std::max(d_sum / static_cast<float>(count), 0.0f) : 0.0f;
+        wave = count > 0 ? w_sum / static_cast<float>(count) : 1.0f;
         return count > 0 ? z_sum / static_cast<float>(count) : fallback;
     };
 
@@ -384,11 +386,12 @@ void build_chunk_water(const ColumnPad& pad, const TerrainParams& params, ChunkW
             const std::int32_t cxs[4] = {x, x + 1, x + 1, x};
             const std::int32_t cys[4] = {y, y, y + 1, y + 1};
             for (int k = 0; k < 4; ++k) {
-                float depth = 0.0f;
+                float depth = 0.0f, wave = 1.0f;
                 const glm::vec3 p(static_cast<float>(cxs[k]) * ts, static_cast<float>(cys[k]) * ts,
-                                  corner_z(cxs[k], cys[k], level, depth));
+                                  corner_z(cxs[k], cys[k], level, depth, wave));
                 out.positions.push_back(p);
                 out.depths.push_back(depth);
+                out.wave_scales.push_back(wave);
                 const glm::vec2 xy(p.x, p.y);
                 out.uvs.push_back(kind == k_water_flowing ? glm::vec2(glm::dot(xy, down), glm::dot(xy, across)) : xy);
             }

@@ -487,7 +487,9 @@ void WeatherSystem::emit_distant_landings_(EffectInstance& inst, float dt) {
         const glm::vec3 box = ps->settings.wrap_box;
         if (box.x <= 0.0f || box.y <= 0.0f || ps->settings.rate <= 0.0f) continue;
         const float r = d.comp->radius;
-        const float area = std::max(0.0f, 3.14159265f * r * r - box.x * box.y);
+        // The whole disc: the per-point test below drops the places where real drops land, so
+        // this covers the box's own footprint whenever the drops cannot reach the ground there.
+        const float area = 3.14159265f * r * r;
         const float per_m2 = ps->settings.rate / (box.x * box.y);
         float expected = per_m2 * area * dt + d.carry;
         const int n = std::min(static_cast<int>(expected), 4000);
@@ -499,9 +501,15 @@ void WeatherSystem::emit_distant_landings_(EffectInstance& inst, float dt) {
             const float rr = r * std::sqrt(rng_.next01());
             const float a = rng_.next01() * 6.28318531f;
             const glm::vec2 p = glm::vec2(c) + glm::vec2(std::cos(a), std::sin(a)) * rr;
-            if (std::abs(p.x - c.x) < box.x * 0.5f && std::abs(p.y - c.y) < box.y * 0.5f) continue;   // real drops land there
             if (!field->splashes(p.x, p.y)) continue;
-            const glm::vec3 at(p, field->sample(p.x, p.y) + 0.02f);
+            const float surface = field->sample(p.x, p.y);
+            // Skip only where a REAL drop lands: inside the box's footprint AND with the surface
+            // inside its height. The box rides the camera, so looking down from above it the
+            // ground is below the box and no drop ever reaches it -- landings have to be shown
+            // here too, or splashes vanish under the viewer and survive only in the distance.
+            if (std::abs(p.x - c.x) < box.x * 0.5f && std::abs(p.y - c.y) < box.y * 0.5f &&
+                surface >= c.z - box.z * 0.5f && surface <= c.z + box.z * 0.5f) continue;
+            const glm::vec3 at(p, surface + 0.02f);
             const glm::vec3 n_surf = field->normal(p.x, p.y);
             for (size_t s = 0; s < ps->settings.on_death.size(); ++s) {
                 const toy::particles::SubEmitter& sub = ps->settings.on_death[s];

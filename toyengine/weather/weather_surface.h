@@ -14,10 +14,12 @@
  *          splashes: true
  *    @endcode
  *  - `WeatherDistantLandings` on a precipitation system's object (the rain prefab's drops)
- *    continues its landings past its own wrap box: the weather scatters landings on
- *    splash-taking surfaces out to `radius`, at the same rate per square metre as the real drops
- *    land, firing the listed sub emitters (splash rings) -- so splashes are seen across the whole
- *    street, not only in the ~18 m the drops are simulated in.
+ *    shows the landings its own drops do not make: the weather scatters landings on splash-taking
+ *    surfaces out to `radius`, at the same rate per square metre as the real drops land, firing
+ *    the listed sub emitters (splash rings). That covers the street past the ~18 m the drops are
+ *    simulated in, and the ground under the viewer as well whenever the camera is high enough
+ *    that the drops' box no longer reaches it -- so what splashes depends on how far a surface
+ *    is from the camera, not on where the box happens to sit.
  *    @code
  *    - type: WeatherDistantLandings
  *      radius: 45                     # m from the camera

@@ -122,3 +122,54 @@ COOPA_TEST(rain_reactors_and_atmosphere_reach_the_scene) {
     }
     expect(black < static_cast<long long>(f.width) * f.height / 200, "weather_demo: no NaN black blocks");
 }
+
+/**
+ * @brief Splashes land under a high viewer, not only in the distance. The drops' wrap box rides
+ *        the camera, so from more than half a box above the ground no drop ever reaches it;
+ *        WeatherDistantLandings has to stand in for the landings right below the camera too,
+ *        or the splashes vanish from everything near and survive only far away.
+ */
+COOPA_TEST(splashes_land_under_a_camera_above_the_drops_box) {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
+    ScopedEnv no_input("NO_INPUT", "1");
+    toy::core::AppConfig config = make_test_config("assets/scenes/effects/weather_demo/scene.yaml", 640, 360, 640, 360);
+    config.render.transparency_enabled = true;
+    toy::core::Engine engine(std::move(config));
+    // High above the meadow, looking down: the drops' box (26 m tall, centred 4 m over the
+    // camera) now sits entirely above the ground.
+    if (auto* cc = engine.scene().find_first_component<toy::scene::CameraController>()) {
+        cc->target = glm::vec3(0.0f, 0.0f, 0.0f);
+        cc->distance = 34.0f;
+        cc->pitch_deg = 65.0f;
+        cc->auto_rotate_deg_per_sec = 0.0f;
+    }
+    tick_frames(engine, 90);
+
+    glm::vec3 eye(0.0f);
+    if (auto* cam = coopa::gfx::engine::components::CameraComponent::main(); cam && cam->owner && cam->owner->get_transform())
+        eye = glm::vec3(cam->owner->get_transform()->transform().get_world_matrix()[3]);
+    expect(eye.z > 17.0f, "high camera: the viewer is above the drops' box (" + std::to_string(eye.z) + " m)");
+
+    coopa::scene::SceneObject* drops = engine.scene().find_object("weather_rain_drops");
+    auto* ps = drops ? drops->get_component<toy::particles::ParticleSystem>() : nullptr;
+    expect(ps && ps->particle_count() > 500u, "high camera: it is still raining around the viewer");
+    if (ps) {
+        bool landed = false;
+        for (const auto& p : ps->pool().pos) landed |= p.z < 1.0f;
+        expect(!landed, "high camera: no drop reaches the ground from up here");
+    }
+
+    coopa::scene::SceneObject* splash_obj = engine.scene().find_object("weather_rain_splash");
+    auto* splash = splash_obj ? splash_obj->get_component<toy::particles::ParticleSystem>() : nullptr;
+    expect(splash && splash->particle_count() > 20u, "high camera: splashes still appear (" +
+                                                         std::to_string(splash ? splash->particle_count() : 0) + ")");
+    if (splash) {
+        int near_eye = 0;
+        for (const auto& p : splash->pool().pos) {
+            if (glm::length(glm::vec2(p) - glm::vec2(eye)) < 12.0f) ++near_eye;
+        }
+        // Without the stand-in landings the whole 36 m footprint under the camera is empty.
+        expect(near_eye > 5, "high camera: ...on the ground under the viewer too (" + std::to_string(near_eye) +
+                                 " within 12 m of its xy)");
+    }
+}

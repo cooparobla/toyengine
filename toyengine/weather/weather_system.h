@@ -344,11 +344,14 @@ private:
     void update_effects_(coopa::scene::Scene& scene, float dt, bool show);
 
     /**
-     * @brief Landings past a precipitation system's own wrap box: points scattered over the disc
-     *        of WeatherDistantLandings::radius (outside the box, where real drops land), at the
-     *        rate real drops land per square metre (each drop born in the box lands about once:
-     *        rate / box area), each firing the drops' sub emitters on a splash-taking surface of
-     *        the precipitation map, lying in its normal.
+     * @brief Landings a precipitation system's own drops do not make: points scattered over the
+     *        disc of WeatherDistantLandings::radius, at the rate real drops land per square metre
+     *        (each drop born in the box lands about once: rate / box area), each firing the
+     *        drops' sub emitters on a splash-taking surface of the precipitation map, lying in
+     *        its normal. A point is skipped only where a real drop lands -- inside the wrap box's
+     *        footprint AND with the surface within its height. The box rides the camera, so from
+     *        a viewpoint more than half a box above the ground no drop reaches the ground at all
+     *        and these stand in for every landing, not just the distant ones.
      */
     void emit_distant_landings_(EffectInstance& inst, float dt);
 

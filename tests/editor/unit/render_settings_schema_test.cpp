@@ -94,6 +94,12 @@ COOPA_TEST(render_tab_lists_every_engine_key_once_with_its_default) {
         {"grading_enabled", [](const PR& r) { return EngineDefault(r.grading_enabled); }},
         {"light_bands", [](const PR& r) { return EngineDefault(r.light_bands); }},
         {"spec_threshold", [](const PR& r) { return EngineDefault(r.spec_threshold); }},
+        {"toon_strength", [](const PR& r) { return EngineDefault(r.toon_strength); }},
+        {"toon_spec_threshold", [](const PR& r) { return EngineDefault(r.toon_spec_threshold); }},
+        {"toon_spec_edge", [](const PR& r) { return EngineDefault(r.toon_spec_edge); }},
+        {"toon_rim_power", [](const PR& r) { return EngineDefault(r.toon_rim_power); }},
+        {"toon_shadow_tint", [](const PR& r) { return EngineDefault(r.toon_shadow_tint); }},
+        {"toon_band_attenuation", [](const PR& r) { return EngineDefault(r.toon_band_attenuation); }},
         {"rim_strength", [](const PR& r) { return EngineDefault(r.rim_strength); }},
         {"ambient_intensity", [](const PR& r) { return EngineDefault(r.indirect.ambient_intensity); }},
         {"sky_intensity", [](const PR& r) { return EngineDefault(r.indirect.sky_intensity); }},
@@ -167,6 +173,16 @@ COOPA_TEST(render_tab_lists_every_engine_key_once_with_its_default) {
         {"contact_shadow_steps", [](const PR& r) { return EngineDefault(r.contact_shadow_steps); }},
         {"contact_shadow_temporal_enabled", [](const PR& r) { return EngineDefault(r.contact_shadow_temporal_enabled); }},
         {"contact_shadow_temporal_frames", [](const PR& r) { return EngineDefault(r.contact_shadow_temporal_frames); }},
+        // Parsed by AppConfig::from_node() in a loop that BUILDS each key by concatenation
+        // ("shadow_cascade_radius_" + index), which is why these four were missing here while
+        // every other engine-read key was present: nothing greps up a key that never appears
+        // as a literal. Listed explicitly, since this table is what the Render tab is checked
+        // against.
+        {"shadow_cascade_radius_1", [](const PR& r) { return EngineDefault(r.shadow_cascade_radius[0]); }},
+        {"shadow_cascade_radius_2", [](const PR& r) { return EngineDefault(r.shadow_cascade_radius[1]); }},
+        {"shadow_cascade_radius_3", [](const PR& r) { return EngineDefault(r.shadow_cascade_radius[2]); }},
+        {"shadow_cascade_radius_4", [](const PR& r) { return EngineDefault(r.shadow_cascade_radius[3]); }},
+        {"outline_mode", [](const PR& r) { return EngineDefault(r.outline_mode); }},
         {"outline_thickness", [](const PR& r) { return EngineDefault(r.outline_thickness); }},
         {"outline_color", [](const PR& r) { return EngineDefault(r.outline_color); }},
         {"depth_threshold", [](const PR& r) { return EngineDefault(r.depth_threshold); }},

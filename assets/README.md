@@ -172,7 +172,10 @@ With the weather snowing below freezing, `snow_cover` builds up (and melts when 
   trenches back in. Give that renderer tessellation so the 10 cm trench cells have vertices.
   Gameplay reads the same snow through `toy::world::find_snow(scene)->depth_at(xy, ground_z)`.
 
-`scenes/effects/weather_demo`'s snow field (x = 80; Preview snow) shows both.
+`scenes/effects/snow_demo` is the bench for both: its weather cycles bare -> snowing -> thaw, a
+sled and a ping-ponging sphere plough trenches that fill back in, and the player leaves
+footprints. `scenes/effects/weather_demo`'s snow field (x = 80; Preview snow) shows them
+alongside the rest of the weather.
 
 ## Scene settings
 

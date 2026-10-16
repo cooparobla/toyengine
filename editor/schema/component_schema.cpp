@@ -160,6 +160,17 @@ const std::vector<FieldDesc>& material_fields() {
                  "renderer with tessellation"),
         with_tip(f_float("displacement_scale", 0.05f, 0.005f, -10.0f, 10.0f), "Metres a white displacement texel moves"),
         with_tip(f_bool("snow", true), "Lying snow settles on this material's open, up-facing surfaces when the weather has it"),
+        // Toon (cel) shading, layered on this material's PBR inputs -- see PBRMaterial's
+        // toon_* docs. Opaque materials only; a BLEND material ignores these.
+        with_tip(f_int("toon_bands", 0, 0, 8), "Cel-shaded diffuse: how many light steps. 0 leaves this material PBR"),
+        with_tip(f_enum("toon_specular", {"pbr", "hard", "twostep", "off"}),
+                 "Edge of the specular highlight: the PBR lobe untouched, cut to a hard step, a core plus a halo, or none"),
+        with_tip(f_float("toon_rim", 0.0f, 0.25f, 0.0f, 1.75f),
+                 "Rim accent on the lit side of each light; snaps to 0.25 steps"),
+        with_tip(f_float("toon_softness", 0.0f, 0.05f, 0.0f, 1.0f),
+                 "How soft each band's edge is, as a share of a band; snaps to 0 / 0.15 / 0.35 / 0.7"),
+        with_tip(f_bool("toon_outline", false),
+                 "Draw the outline on this material. Needs Outline on and its mode set to Toon"),
         // Drawn by draw_material_block()'s Shader section (named per-shader params), not as
         // plain fields -- listed here so they count as known material keys and overrides.
         f_enum("shader", {"", "triplanar", "foliage", "snow", "water"}),

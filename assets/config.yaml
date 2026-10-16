@@ -90,6 +90,7 @@ render:
   normal_threshold: 0.75
   outline_color: [0.05, 0.04, 0.08, 1.0]
   outline_enabled: false
+  outline_mode: all
   outline_thickness: 0.6
   ozone: 1.0
   palette: assets/palettes/duel_1x.png
@@ -204,6 +205,12 @@ render:
   tilt_shift_focus_width: 0.15
   tilt_shift_max_radius: 4.0
   tilt_shift_ramp_width: 0.22
+  toon_band_attenuation: true
+  toon_rim_power: 3.0
+  toon_shadow_tint: [1.0, 1.0, 1.0]
+  toon_spec_edge: 0.08
+  toon_spec_threshold: 0.35
+  toon_strength: 1.0
   transparency_enabled: true
   upscale_mode: fit
   volumetrics_enabled: true

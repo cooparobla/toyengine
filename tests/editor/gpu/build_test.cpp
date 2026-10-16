@@ -7,6 +7,8 @@
 
 #include <coopa/testing/test.h>
 
+#include <cstdlib>
+
 #include <chrono>
 #include <sstream>
 #include <thread>
@@ -111,7 +113,19 @@ COOPA_TEST(a_development_build_runs_relocated) {
     // Run it: a scrubbed environment, an unrelated working directory, its own HOME.
     const fs::path cwd = coopa::test::scratch_dir("build_reloc_cwd");
     const fs::path home = coopa::test::scratch_dir("build_reloc_home");
+    // The display connection is forwarded through the scrub. The engine always creates a real
+    // GLFW window -- HEADLESS only leaves it unmapped, see main.cpp -- so a process with no
+    // display server to reach dies in glfwInit() before it reads a single asset, and proves
+    // nothing about whether the package relocated. Everything that could leak a path back into
+    // this checkout (LD_LIBRARY_PATH, XDG_DATA_HOME/XDG_CONFIG_HOME, TOYENGINE_*) stays
+    // scrubbed, which is what this test is for; XDG_RUNTIME_DIR is the Wayland socket's
+    // directory under /run/user, never a content root.
+    std::string display_env;
+    for (const char* var : {"DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR"}) {
+        if (const char* v = std::getenv(var); v && *v) display_env += " " + std::string(var) + "=" + shell_quote(v);
+    }
     const CommandResult r = run.run("cd " + shell_quote(cwd.string()) + " && env -i PATH=/usr/bin:/bin HOME=" + shell_quote(home.string()) +
+                                    display_env +
                                     " HEADLESS=1 MAX_FRAMES=20 SFX_DEVICE=null " + trace + " " + shell_quote(res.executable.string()), false);
     if (r.exit_code != 0) std::cout << r.output.substr(r.output.size() > 4000 ? r.output.size() - 4000 : 0) << "\n";
     expect(r.exit_code == 0, "the packaged game runs relocated and exits cleanly");

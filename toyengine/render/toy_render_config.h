@@ -326,6 +326,40 @@ struct ToyRenderConfig {
     float light_bands       = 4.0f;   /**< Discrete shading steps per light; <= 1 disables banding. */
     float spec_threshold    = 0.55f;  /**< Hard specular highlight cutoff. */
     float rim_strength      = 0.0f;   /**< 0 disables the rim term. */
+
+    // --- Toon shading (per-material; see PBRMaterial::toon_bands) ---
+    // Unrelated to `soft_lighting`/`light_bands`/`spec_threshold` above, which switch the WHOLE
+    // frame between smooth and banded. These tune the per-material toon look instead: a material
+    // opts in with its own toon_* fields, and these are the scene-wide knobs that would not
+    // survive the per-material packing (see PBRMaterial::gpu_toon_code()). All runtime-switchable.
+    /**
+     * Master strength: 0 makes every toon material in the frame shade as plain PBR without
+     * touching a single material, which is what an A/B capture and the toon render tests need.
+     * Values between 0 and 1 cross-fade each toon term toward its PBR equivalent.
+     */
+    float toon_strength       = 1.0f;
+    /**
+     * Where the hard specular step cuts the GGX lobe, as a fraction of that lobe's OWN peak
+     * (which is `1/(pi * roughness^4)`, i.e. wildly roughness-dependent). Normalizing by the
+     * peak is what makes one threshold behave the same on a near-mirror and on a matte surface,
+     * unlike `spec_threshold` above, which is compared against the raw lobe value.
+     */
+    float toon_spec_threshold = 0.35f;
+    float toon_spec_edge      = 0.08f;  /**< Width of that step, in the same normalized units. 0 = a hard cut. */
+    float toon_rim_power      = 3.0f;   /**< Falloff exponent of the per-light rim accent; higher = a thinner edge. */
+    /**
+     * Colour the darkest bands are pulled toward, as a multiplier on the banded diffuse. White
+     * (the default) is a no-op. A cool tint here is the classic toon "shadow colour"; note the
+     * dark bands already pick up the sky's own colour through the indirect term, so this is an
+     * accent on top of that, not the only source of coloured shade.
+     */
+    glm::vec3 toon_shadow_tint = glm::vec3(1.0f);
+    /**
+     * Band each point/spot light's distance falloff too, giving the hard-edged pools of light a
+     * cel-shaded scene usually wants. Off leaves the falloff smooth, so only the N.L term and the
+     * shadow it receives are banded.
+     */
+    bool  toon_band_attenuation = true;
     // ambient_intensity/sky_intensity/ssgi_intensity/ssgi_distance/sky_zenith/sky_horizon/
     // sky_ground live in `indirect` below (shared with SsrPass::Params so the two can never
     // disagree -- see render_features.h).
@@ -613,6 +647,14 @@ struct ToyRenderConfig {
     int      contact_shadow_temporal_frames = 16;
 
     // --- Outline ---
+    /**
+     * Which surfaces the outline draws on. `all` (the default) outlines every depth/normal
+     * discontinuity in the frame. `toon` restricts it to materials that asked for one
+     * (PBRMaterial::toon_outline), so a stylized prop can carry a line while the rest of the
+     * scene stays clean. A string rather than an enum for the same reason `debug_view` is one:
+     * it is authored in config.yaml and switched at runtime. Unknown values read as `all`.
+     */
+    std::string outline_mode    = "all";
     float     outline_thickness = 1.0f;     /**< In low-resolution texels. */
     glm::vec4 outline_color     = glm::vec4(0.05f, 0.04f, 0.08f, 1.0f);
     float     depth_threshold   = 0.02f;    /**< Relative depth step (fraction of the fragment's own view-space distance) that counts as an edge; scale-invariant, so one value works at any camera distance. */

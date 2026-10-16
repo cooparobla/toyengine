@@ -43,7 +43,9 @@ layout(std430, set = 1, binding = 2) readonly buffer SdfShapeBuffer   { SdfShape
 layout(location = 0) out vec4 out_albedo_ao;          // RGB = Albedo, A = AO
 layout(location = 1) out vec4 out_normal_metallic;    // RGB = World Normal, A = Metallic
 layout(location = 2) out vec4 out_position_roughness; // RGB = World Pos, A = Roughness
-layout(location = 3) out vec4 out_emissive;           // RGB = emissive radiance (HDR), A = unused
+// A = the material's packed toon code, exactly as gfx/surface/gbuffer_fs.glsl writes it, so
+// an SdfRenderer's material gets the same per-material toon look a mesh's does.
+layout(location = 3) out vec4 out_emissive;           // RGB = emissive radiance (HDR), A = toon code
 // G4 velocity -- same channels gfx/surface/gbuffer_fs.glsl documents. SDF renderers carry no
 // previous-frame pose, so this is the CAMERA's motion over a static surface; an animated SDF
 // relies on the consumers' depth rejection instead.
@@ -80,7 +82,7 @@ void main() {
     out_albedo_ao          = vec4(r.albedo_alpha.rgb, r.mr_ao_cutoff.z);
     out_normal_metallic    = vec4(N, r.mr_ao_cutoff.x);
     out_position_roughness = vec4(hit.pos, r.mr_ao_cutoff.y);
-    out_emissive            = vec4(r.emissive.rgb, 0.0);
+    out_emissive            = vec4(r.emissive.rgb, r.emissive.w);
 
     {
         vec4  prev_clip  = camera.prev_proj * camera.prev_view * vec4(hit.pos, 1.0);

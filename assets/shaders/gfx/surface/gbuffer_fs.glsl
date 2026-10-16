@@ -41,7 +41,7 @@ layout(push_constant) uniform PushConstants {
     vec4  emissive;     // xyz = pre-multiplied emissive radiance, w reserved
     vec4  gfx_time;     // x=time, y=delta_time, z=frame_index, w=spare
     vec4  gfx_params;   // four author-defined floats; see the surface shader's own doc
-    uvec4 surface_ext; // x/y packed tessellation params, z flags (bit 0: no snow), w reserved
+    uvec4 surface_ext; // x/y packed tessellation params, z flags (bit 0: no snow), w toon code
 } material;
 
 // See gbuffer_vs.glsl's identical aliases for why these exist: a surface file's
@@ -70,7 +70,12 @@ layout(set = 1, binding = 3) uniform sampler2D u_metallic_roughness_map;
 layout(location = 0) out vec4 out_albedo_ao;          // RGB = Albedo, A = AO
 layout(location = 1) out vec4 out_normal_metallic;    // RGB = World Normal, A = Metallic
 layout(location = 2) out vec4 out_position_roughness; // RGB = World Pos, A = Roughness
-layout(location = 3) out vec4 out_emissive;           // RGB = emissive radiance (HDR), A = unused
+// A = the material's packed toon code (PBRMaterial::gpu_toon_code(), arriving in
+// surface_ext.w; 0 for a plain PBR material), which the deferred lighting pass unpacks with
+// gfx/toon.glsl. Carried here rather than in a sixth attachment because this channel was
+// already allocated and unused, and because a toon material is by definition one whose
+// shading the lighting pass decides -- the G-buffer only has to say which look it asked for.
+layout(location = 3) out vec4 out_emissive;           // RGB = emissive radiance (HDR), A = toon code
 // G4, per-object motion vectors: XY = this surface's screen motion since last frame in UV
 // units (current unjittered position minus previous), Z = its linear view depth LAST frame
 // (-1 when it was behind the eye: no history exists for it), W = its linear view depth now.
@@ -185,7 +190,7 @@ void main() {
     out_albedo_ao          = vec4(s.albedo, s.ao);
     out_normal_metallic    = vec4(s.normal_ws, s.metallic);
     out_position_roughness = vec4(s.position_ws, s.roughness);
-    out_emissive            = vec4(s.emissive, 0.0);
+    out_emissive            = vec4(s.emissive, float(material.surface_ext.w));
 
     // Velocity. Both positions are re-projected here from the perspective-correct interpolated
     // world positions (frag_world_pos is the displaced one, so cur_clip reproduces this

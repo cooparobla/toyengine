@@ -1,0 +1,1261 @@
+# shader_demo -- the render pipeline's material and lighting looks, side by side.
+#
+# Run:   ./build/toyengine shader_demo        (or SCENE=shader_demo)
+#        Drag to orbit, scroll to zoom. The camera starts looking north across the toon rows.
+#
+# The CENTRE is the subject: per-material toon (cel) shading, which is layered on top of PBR
+# rather than replacing it. Every sphere in both rows shares one albedo, one roughness and one
+# set of lights -- only its `toon_*` material keys differ, so the rows read as one comparison.
+# The slat bars overhead and the orbiting `drifter` above them put a REAL soft shadow across
+# the rows: a toon material bands the light's VISIBILITY (N.L already folded with the shadow it
+# receives), so the bands bend around that shadow instead of sitting under a smooth one.
+#
+#   BANDS row (north, y = +0.5), left to right:
+#     pbr         the reference: no toon_* keys at all, plain Cook-Torrance
+#     bands2      toon_bands: 2 -- lit and unlit, nothing between
+#     bands3      toon_bands: 3
+#     bands4      toon_bands: 4 -- the usual choice
+#     bands6      toon_bands: 6 -- approaching smooth again
+#   LOOKS row (south, y = -3.0), all toon_bands: 4:
+#     spec_hard   toon_specular: hard -- the GGX lobe cut to a hard-edged highlight
+#     spec_two    toon_specular: twostep -- a bright core plus a dimmer halo
+#     rim         toon_rim: 1.0 -- a per-light silhouette accent: it sits on the side the
+#                 light is on, takes the light colour, and goes out in shadow
+#     soft        toon_softness: 0.35 -- a deliberately soft terminator
+#     outlined    toon_outline: true -- this scene sets outline_mode: toon, so ONLY this one
+#                 gets an ink line; its nine neighbours stay clean
+#
+#   The toon rows are also raked by `pool_light` (a point light between the rows) and
+#   `pool_spot`: with toon_band_attenuation on (the default), a toon material steps each
+#   light's distance falloff too, so the pools of light on the plinths have hard rings.
+#
+# Knobs worth sweeping (assets/config.yaml render:, all runtime):
+#   toon_strength         1 -> 0 cross-fades every toon material back to PBR. The best single
+#                         A/B for the whole feature.
+#   toon_shadow_tint      colour the darkest bands are pulled toward (this scene sets it cool).
+#   toon_spec_threshold   where the hard highlight cuts the lobe; toon_spec_edge its softness.
+#   toon_band_attenuation off leaves the light pools smooth and bands only N.L + shadow.
+#   outline_mode          toon (this scene) vs all (every edge in the frame outlined).
+#   soft_lighting         the engine-WIDE banded look, unrelated to the per-material one; off
+#                         bands the whole frame, including the `pbr` reference.
+#   debug_view            direct (the toon bands with no ambient over them), ssao, ssr, ssgi.
+#
+# The RING stations cover the rest of the pipeline, clockwise from the north-west:
+#   EMISSIVE      (x -13, y +9)  emissive panels and orbs above their own glow: bloom
+#   SSAO/CONTACT  (x -7,  y +12) a creviced stack and small blocks lying on the floor --
+#                                ambient occlusion in the corners, contact shadows at the feet
+#   TESS          (x +1,  y +13) a coarse 8x8 plane tessellated and displaced by a height map,
+#                                beside the same plane untessellated (the flat reference)
+#   FOLIAGE       (x +8,  y +12) CUTOUT leaf cards on the `foliage` shader, bending in the wind
+#   SSR/SSGI      (x +14, y +8)  mirror / glossy / rough floor strips under a saturated wall:
+#                                sharp to blurred reflections, and a coloured diffuse bounce
+#   GLASS         (x +16, y 0)   BLEND glass and frosted glass refracting a striped backdrop
+#   SDF           (x +14, y -9)  two raymarched CSG blobs, one PBR and one TOON -- an
+#                                SdfRenderer writes the same G-buffer, so it gets toon too
+#   WATER         (x +4,  y -14) a walled pool: waves, refraction, shore foam
+#   TRIPLANAR     (x -5,  y -14) world-space projected maps on an unwrapped boulder and cube
+#   FOG           (x -14, y -9)  a fog pocket with a spotlight cone through it (volumetrics)
+#   METALS        (x -17, y 0)   a metal/roughness grid: chrome, gold, copper, steel
+scene:
+  scene_name: shader_demo
+  settings:
+    render:
+      # Per-material outlines: only materials with toon_outline draw one.
+      outline_enabled: true
+      outline_mode: toon
+      outline_thickness: 1.2
+      outline_color: [0.03, 0.03, 0.05, 1.0]
+      # A cool shade tint reads as toon without fighting the sky's own blue ambient.
+      toon_shadow_tint: [0.74, 0.80, 1.0]
+      # Toon shading only quantizes the DIRECT term -- the indirect ambient stays continuous
+      # on purpose, which is what keeps a banded prop sitting in its environment. The cost is
+      # that at the engine's default ambient_intensity of 1.0 the sky term is as strong as the
+      # sun's, and a smooth gradient that bright washes the bands out to almost nothing. Any
+      # cel-shaded scene wants a dominant key light; these two are that, and they are the first
+      # thing to raise again if the stations look too contrasty.
+      ambient_intensity: 0.45
+      sky_intensity: 0.70
+      # Thin fog: enough for the volumetrics station to show, not enough to wash out the bands.
+      fog_mode: 1
+      fog_density: 0.004
+      fog_height_falloff: 14.0
+      fog_color: [0.60, 0.66, 0.76]
+      volumetrics_max_distance: 65.0
+  root_objects:
+    # ============================ CENTRE: per-material toon shading =================
+    # A single 44 m plate under everything, so one sun shadow and one AO term
+    # serve every station.
+    - name: floor
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0, y: 0, z: 0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 22, y: 22, z: 1 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material: materials/concrete
+      children: []
+
+    # The bands row's plinth -- a pale slab, so each sphere's own terminator
+    # and the bars' shadow across it are both easy to read.
+    - name: bands_plinth
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.5, z: 0.02 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 8.0, y: 1.3, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material: materials/stone
+      children: []
+
+    # no toon keys: the reference
+    - name: pbr
+      active: true
+      components:
+        - type: Transform
+          position: { x: -6.0, y: 0.5, z: 1.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.95, y: 0.95, z: 0.95 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.86, g: 0.28, b: 0.22 }, metallic: 0.0, roughness: 0.35, ao: 1.0 }
+      children: []
+
+    # lit / unlit only
+    - name: bands2
+      active: true
+      components:
+        - type: Transform
+          position: { x: -3.0, y: 0.5, z: 1.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.95, y: 0.95, z: 0.95 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.86, g: 0.28, b: 0.22 }, metallic: 0.0, roughness: 0.35, ao: 1.0, toon_bands: 2 }
+      children: []
+
+    - name: bands3
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.5, z: 1.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.95, y: 0.95, z: 0.95 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.86, g: 0.28, b: 0.22 }, metallic: 0.0, roughness: 0.35, ao: 1.0, toon_bands: 3 }
+      children: []
+
+    # the usual choice
+    - name: bands4
+      active: true
+      components:
+        - type: Transform
+          position: { x: 3.0, y: 0.5, z: 1.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.95, y: 0.95, z: 0.95 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.86, g: 0.28, b: 0.22 }, metallic: 0.0, roughness: 0.35, ao: 1.0, toon_bands: 4 }
+      children: []
+
+    # nearly smooth again
+    - name: bands6
+      active: true
+      components:
+        - type: Transform
+          position: { x: 6.0, y: 0.5, z: 1.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.95, y: 0.95, z: 0.95 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.86, g: 0.28, b: 0.22 }, metallic: 0.0, roughness: 0.35, ao: 1.0, toon_bands: 6 }
+      children: []
+
+    # The looks row's plinth -- a pale slab, so each sphere's own terminator
+    # and the bars' shadow across it are both easy to read.
+    - name: looks_plinth
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -3.0, z: 0.02 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 8.0, y: 1.3, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material: materials/stone
+      children: []
+
+    # hard-edged highlight
+    - name: spec_hard
+      active: true
+      components:
+        - type: Transform
+          position: { x: -6.0, y: -3.0, z: 1.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.95, y: 0.95, z: 0.95 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.86, g: 0.28, b: 0.22 }, metallic: 0.0, roughness: 0.35, ao: 1.0, toon_bands: 4, toon_specular: hard }
+      children: []
+
+    # bright core + halo
+    - name: spec_two
+      active: true
+      components:
+        - type: Transform
+          position: { x: -3.0, y: -3.0, z: 1.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.95, y: 0.95, z: 0.95 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.86, g: 0.28, b: 0.22 }, metallic: 0.0, roughness: 0.35, ao: 1.0, toon_bands: 4, toon_specular: twostep }
+      children: []
+
+    # per-light rim accent
+    - name: rim
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -3.0, z: 1.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.95, y: 0.95, z: 0.95 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.86, g: 0.28, b: 0.22 }, metallic: 0.0, roughness: 0.35, ao: 1.0, toon_bands: 4, toon_rim: 1.0 }
+      children: []
+
+    # soft terminator
+    - name: soft
+      active: true
+      components:
+        - type: Transform
+          position: { x: 3.0, y: -3.0, z: 1.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.95, y: 0.95, z: 0.95 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.86, g: 0.28, b: 0.22 }, metallic: 0.0, roughness: 0.35, ao: 1.0, toon_bands: 4, toon_softness: 0.35 }
+      children: []
+
+    # the only outlined object in the scene
+    - name: outlined
+      active: true
+      components:
+        - type: Transform
+          position: { x: 6.0, y: -3.0, z: 1.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.95, y: 0.95, z: 0.95 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.86, g: 0.28, b: 0.22 }, metallic: 0.0, roughness: 0.35, ao: 1.0, toon_bands: 4, toon_outline: true }
+      children: []
+
+    # ---- the real shadow the bands bend around -----------------------------------
+    # A bar across both rows: its soft shadow is what the bands have to follow.
+    - name: slat_0
+      active: true
+      components:
+        - type: Transform
+          position: { x: -4.5, y: -1.2, z: 4.2 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.3, y: 5.5, z: 0.2 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.22, g: 0.21, b: 0.24 }, metallic: 0.0, roughness: 0.8, ao: 1.0 }
+      children: []
+
+    - name: slat_1
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -1.2, z: 4.2 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.3, y: 5.5, z: 0.2 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.22, g: 0.21, b: 0.24 }, metallic: 0.0, roughness: 0.8, ao: 1.0 }
+      children: []
+
+    - name: slat_2
+      active: true
+      components:
+        - type: Transform
+          position: { x: 4.5, y: -1.2, z: 4.2 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.3, y: 5.5, z: 0.2 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.22, g: 0.21, b: 0.24 }, metallic: 0.0, roughness: 0.8, ao: 1.0 }
+      children: []
+
+    # A MOVING occluder: watch a band boundary travel with its shadow. If the bands
+    # were a baked N.L ramp with a smooth shadow over them, nothing here would move.
+    - name: drifter
+      active: true
+      components:
+        - type: Transform
+          position: { x: 5.0, y: -1.2, z: 3.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.7, y: 0.7, z: 0.7 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.30, g: 0.32, b: 0.38 }, metallic: 0.2, roughness: 0.5, ao: 1.0 }
+        - type: KinematicMover
+          mode: orbit
+          orbit_center: { x: 0.0, y: -1.2, z: 3.0 }
+          orbit_radius: 5.0
+          speed: 14.0
+      children: []
+
+    # ---- lights raking the rows (banded falloff: toon_band_attenuation) ----------
+    # Warm point light between the rows: on a toon material its distance falloff is
+    # stepped too, so it lays hard rings on the plinths.
+    - name: pool_light
+      active: true
+      components:
+        - type: Transform
+          position: { x: -1.5, y: -1.3, z: 1.1 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: PointLight
+          color: { r: 1.0, g: 0.78, b: 0.45 }
+          intensity: 420.0
+          range: 7.0
+          cast_shadows: true
+          attenuation_constant: 2.5
+      children: []
+
+    # Cool spot from the east, so each sphere carries two differently-coloured band
+    # sets at once -- the rim accent picks up whichever light is on its side.
+    - name: pool_spot
+      active: true
+      components:
+        - type: Transform
+          position: { x: 7.5, y: -1.3, z: 5.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: SpotLight
+          direction: { x: -0.35, y: 0.0, z: -1.0 }
+          color: { r: 0.45, g: 0.70, b: 1.0 }
+          intensity: 900.0
+          range: 12.0
+          inner_angle: 16.0
+          outer_angle: 26.0
+          cast_shadows: true
+          attenuation_constant: 2.0
+      children: []
+
+    # ============================ EMISSIVE + BLOOM =================================
+    # A dark wall behind the panels, so the bloom halo has somewhere to show.
+    - name: emissive_backdrop
+      active: true
+      components:
+        - type: Transform
+          position: { x: -13.0, y: 11.5, z: 2.4 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 3.2, y: 0.2, z: 2.4 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.08, g: 0.08, b: 0.10 }, metallic: 0.0, roughness: 0.9, ao: 1.0 }
+      children: []
+
+    # Emissive panels: added AFTER occlusion, so they glow out of their own shade.
+    - name: emissive_panel_0
+      active: true
+      components:
+        - type: Transform
+          position: { x: -14.8, y: 10.8, z: 1.8 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.7, y: 0.12, z: 1.4 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.02, g: 0.02, b: 0.02 }, metallic: 0.0, roughness: 0.4, ao: 1.0, emissive: { r: 3.2, g: 0.6, b: 0.2 }, emissive_strength: 2.0 }
+      children: []
+
+    - name: emissive_panel_1
+      active: true
+      components:
+        - type: Transform
+          position: { x: -13.0, y: 10.8, z: 1.8 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.7, y: 0.12, z: 1.4 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.02, g: 0.02, b: 0.02 }, metallic: 0.0, roughness: 0.4, ao: 1.0, emissive: { r: 0.4, g: 2.6, b: 1.6 }, emissive_strength: 2.0 }
+      children: []
+
+    - name: emissive_panel_2
+      active: true
+      components:
+        - type: Transform
+          position: { x: -11.2, y: 10.8, z: 1.8 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.7, y: 0.12, z: 1.4 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.02, g: 0.02, b: 0.02 }, metallic: 0.0, roughness: 0.4, ao: 1.0, emissive: { r: 0.5, g: 0.9, b: 3.4 }, emissive_strength: 2.0 }
+      children: []
+
+    # A hot point for the bloom pyramid, and a bright source for the SSGI bounce.
+    - name: emissive_orb
+      active: true
+      components:
+        - type: Transform
+          position: { x: -13.0, y: 9.2, z: 0.7 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.45, y: 0.45, z: 0.45 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.02, g: 0.02, b: 0.02 }, metallic: 0.0, roughness: 0.3, ao: 1.0, emissive: { r: 4.0, g: 2.2, b: 0.7 }, emissive_strength: 1.5 }
+      children: []
+
+    # ============================ SSAO + CONTACT SHADOWS ===========================
+    # Two walls meeting at a right angle plus a lid: the crease is where screen-space
+    # AO darkens and a shadow map's normal bias cannot reach.
+    - name: ao_corner_a
+      active: true
+      components:
+        - type: Transform
+          position: { x: -8.2, y: 12.0, z: 1.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1.6, y: 0.3, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/concrete
+      children: []
+
+    - name: ao_corner_b
+      active: true
+      components:
+        - type: Transform
+          position: { x: -6.9, y: 10.9, z: 1.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.3, y: 1.4, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/concrete
+      children: []
+
+    - name: ao_lid
+      active: true
+      components:
+        - type: Transform
+          position: { x: -7.6, y: 11.4, z: 2.05 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1.6, y: 1.4, z: 0.2 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/concrete
+      children: []
+
+    # Chips lying ON the floor: too small for the shadow map's bias, so the
+    # screen-space contact-shadow march is the only thing that darkens their feet.
+    - name: contact_chip_0
+      active: true
+      components:
+        - type: Transform
+          position: { x: -8.799999999999999, y: 9.8, z: 0.18 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.432, y: 0.432, z: 0.18 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.70, g: 0.66, b: 0.58 }, metallic: 0.0, roughness: 0.7, ao: 1.0 }
+      children: []
+
+    - name: contact_chip_1
+      active: true
+      components:
+        - type: Transform
+          position: { x: -7.8999999999999995, y: 9.5, z: 0.12 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.288, y: 0.288, z: 0.12 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.70, g: 0.66, b: 0.58 }, metallic: 0.0, roughness: 0.7, ao: 1.0 }
+      children: []
+
+    - name: contact_chip_2
+      active: true
+      components:
+        - type: Transform
+          position: { x: -6.8999999999999995, y: 9.9, z: 0.22 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.528, y: 0.528, z: 0.22 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.70, g: 0.66, b: 0.58 }, metallic: 0.0, roughness: 0.7, ao: 1.0 }
+      children: []
+
+    - name: contact_chip_3
+      active: true
+      components:
+        - type: Transform
+          position: { x: -6.199999999999999, y: 9.3, z: 0.1 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.24, y: 0.24, z: 0.1 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.70, g: 0.66, b: 0.58 }, metallic: 0.0, roughness: 0.7, ao: 1.0 }
+      children: []
+
+    # ============================ TESSELLATION + DISPLACEMENT ======================
+    # A coarse 8x8 plane subdivided on the GPU and pushed along its normals by a height
+    # map, self-shadowing and casting a matching shadow.
+    - name: dunes_tess
+      active: true
+      components:
+        - type: Transform
+          position: { x: -1.5, y: 13.0, z: 0.05 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 3.2, y: 3.2, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: dunes_plane
+          material: materials/dunes
+          tessellation: true
+          tess_edge_pixels: 5
+          tess_max_factor: 32
+          tess_max_distance: 70.0
+      children: []
+
+    # The identical plane and material WITHOUT tessellation: a displacement map has no
+    # vertices to move, so it stays flat. The reference.
+    - name: dunes_flat
+      active: true
+      components:
+        - type: Transform
+          position: { x: 4.0, y: 13.0, z: 0.05 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 3.2, y: 3.2, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: dunes_plane
+          material: materials/dunes
+      children: []
+
+    # ============================ FOLIAGE (wind) ===================================
+    # CUTOUT leaf cards on the `foliage` shader: two-sided, alpha-tested, and bent by
+    # the weather's wind in the vertex stage (so their shadows bend with them).
+    - name: leaf_card_0
+      active: true
+      components:
+        - type: Transform
+          position: { x: 7.0, y: 11.4, z: 0.9 }
+          rotation: { x: 90.0, y: 0.0, z: 0.0 }
+          scale: { x: 0.9, y: 0.9, z: 0.9 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material: materials/foliage
+      children: []
+
+    - name: leaf_card_1
+      active: true
+      components:
+        - type: Transform
+          position: { x: 7.9, y: 11.4, z: 0.9 }
+          rotation: { x: 90.0, y: 0.0, z: 31.0 }
+          scale: { x: 0.9, y: 0.9, z: 0.9 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material: materials/foliage
+      children: []
+
+    - name: leaf_card_2
+      active: true
+      components:
+        - type: Transform
+          position: { x: 8.8, y: 11.4, z: 0.9 }
+          rotation: { x: 90.0, y: 0.0, z: 62.0 }
+          scale: { x: 0.9, y: 0.9, z: 0.9 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material: materials/foliage
+      children: []
+
+    - name: leaf_card_3
+      active: true
+      components:
+        - type: Transform
+          position: { x: 7.0, y: 12.4, z: 0.9 }
+          rotation: { x: 90.0, y: 0.0, z: 93.0 }
+          scale: { x: 0.9, y: 0.9, z: 0.9 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material: materials/foliage
+      children: []
+
+    - name: leaf_card_4
+      active: true
+      components:
+        - type: Transform
+          position: { x: 7.9, y: 12.4, z: 0.9 }
+          rotation: { x: 90.0, y: 0.0, z: 124.0 }
+          scale: { x: 0.9, y: 0.9, z: 0.9 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material: materials/foliage
+      children: []
+
+    - name: leaf_card_5
+      active: true
+      components:
+        - type: Transform
+          position: { x: 8.8, y: 12.4, z: 0.9 }
+          rotation: { x: 90.0, y: 0.0, z: 155.0 }
+          scale: { x: 0.9, y: 0.9, z: 0.9 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material: materials/foliage
+      children: []
+
+    # ============================ SSR + SSGI =======================================
+    # Three metal strips, mirror to rough: the same reflection at three lobe widths.
+    - name: ssr_strip_mirror
+      active: true
+      components:
+        - type: Transform
+          position: { x: 11.8, y: 8.0, z: 0.03 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1.0, y: 2.6, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material: { albedo: { r: 0.60, g: 0.62, b: 0.65 }, metallic: 1.0, roughness: 0.03, ao: 1.0 }
+      children: []
+
+    - name: ssr_strip_glossy
+      active: true
+      components:
+        - type: Transform
+          position: { x: 14.0, y: 8.0, z: 0.03 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1.0, y: 2.6, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material: { albedo: { r: 0.60, g: 0.62, b: 0.65 }, metallic: 1.0, roughness: 0.18, ao: 1.0 }
+      children: []
+
+    - name: ssr_strip_rough
+      active: true
+      components:
+        - type: Transform
+          position: { x: 16.2, y: 8.0, z: 0.03 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1.0, y: 2.6, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material: { albedo: { r: 0.60, g: 0.62, b: 0.65 }, metallic: 1.0, roughness: 0.45, ao: 1.0 }
+      children: []
+
+    # A saturated wall: the SSGI bounce tints everything in front of it red. Turn
+    # ssgi_intensity to 0 and the floor beside it goes neutral.
+    - name: ssgi_wall
+      active: true
+      components:
+        - type: Transform
+          position: { x: 14.0, y: 10.6, z: 1.8 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 3.4, y: 0.2, z: 1.8 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.95, g: 0.18, b: 0.12 }, metallic: 0.0, roughness: 0.75, ao: 1.0 }
+      children: []
+
+    # A 16 cm post: thin geometry rays pass behind -- the classic screen-space miss.
+    - name: ssr_pole
+      active: true
+      components:
+        - type: Transform
+          position: { x: 13.0, y: 7.2, z: 1.1 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.08, y: 0.08, z: 1.1 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.9, g: 0.9, b: 0.3 }, metallic: 0.0, roughness: 0.4, ao: 1.0 }
+      children: []
+
+    # ============================ GLASS + REFRACTION ===============================
+    # A gridded backdrop angled toward the camera: refraction is only legible against
+    # something with structure in it.
+    - name: glass_backdrop
+      active: true
+      components:
+        - type: Transform
+          position: { x: 16.5, y: 2.4, z: 2.0 }
+          rotation: { x: 0.0, y: 0.0, z: -70.0 }
+          scale: { x: 2.6, y: 0.2, z: 2.0 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/prototype_grid
+      children: []
+
+    # Clear BLEND glass: screen-space refraction, Fresnel reflection, Beer-Lambert tint.
+    - name: glass_sphere
+      active: true
+      components:
+        - type: Transform
+          position: { x: 16.0, y: 0.6, z: 1.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.95, y: 0.95, z: 0.95 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: materials/glass
+      children: []
+
+    # The same glass, rough: it blurs what it refracts and what it reflects.
+    - name: frosted_sphere
+      active: true
+      components:
+        - type: Transform
+          position: { x: 16.0, y: -1.4, z: 1.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.95, y: 0.95, z: 0.95 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: materials/frosted_glass
+      children: []
+
+    - name: glass_pedestal
+      active: true
+      components:
+        - type: Transform
+          position: { x: 16.0, y: -0.4, z: 0.15 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1.1, y: 2.0, z: 0.15 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/stone
+      children: []
+
+    # ============================ SDF RAYMARCHING ==================================
+    # A smooth-union CSG blob raymarched straight into the opaque G-buffer -- so it gets
+    # the deferred lighting, AO, reflections and fog an opaque mesh gets.
+    - name: sdf_pbr
+      active: true
+      components:
+        - type: Transform
+          position: { x: 13.2, y: -9.0, z: 1.1 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: SdfRenderer
+          bounds_center: { x: 0.0, y: 0.0, z: 0.0 }
+          bounds_extent: { x: 1.3, y: 1.0, z: 1.0 }
+          smoothing: 0.3
+          material: { albedo: { r: 0.80, g: 0.55, b: 0.20 }, metallic: 0.5, roughness: 0.3, ao: 1.0 }
+      children:
+        - name: blob_sphere
+          active: true
+          components:
+            - type: Transform
+              position: { x: -0.3, y: 0.0, z: 0.0 }
+              rotation: { x: 0, y: 0, z: 0 }
+              scale: { x: 1, y: 1, z: 1 }
+            - type: SdfShape
+              shape: Sphere
+              params: { x: 0.55, y: 0.55, z: 0.55 }
+              op: Union
+          children: []
+
+        - name: blob_box
+          active: true
+          components:
+            - type: Transform
+              position: { x: 0.35, y: 0.0, z: 0.0 }
+              rotation: { x: 0, y: 0, z: 0 }
+              scale: { x: 1, y: 1, z: 1 }
+            - type: SdfShape
+              shape: Box
+              params: { x: 0.4, y: 0.4, z: 0.4 }
+              rounding: 0.12
+              op: Union
+          children: []
+
+
+    # The IDENTICAL blob with toon_* keys: an SdfRenderer writes the same G-buffer
+    # channel a mesh does, so the toon look and the outline reach it unchanged.
+    - name: sdf_toon
+      active: true
+      components:
+        - type: Transform
+          position: { x: 15.6, y: -9.0, z: 1.1 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: SdfRenderer
+          bounds_center: { x: 0.0, y: 0.0, z: 0.0 }
+          bounds_extent: { x: 1.3, y: 1.0, z: 1.0 }
+          smoothing: 0.3
+          material: { albedo: { r: 0.80, g: 0.55, b: 0.20 }, metallic: 0.5, roughness: 0.3, ao: 1.0, toon_bands: 4, toon_specular: hard, toon_outline: true }
+      children:
+        - name: blob_sphere
+          active: true
+          components:
+            - type: Transform
+              position: { x: -0.3, y: 0.0, z: 0.0 }
+              rotation: { x: 0, y: 0, z: 0 }
+              scale: { x: 1, y: 1, z: 1 }
+            - type: SdfShape
+              shape: Sphere
+              params: { x: 0.55, y: 0.55, z: 0.55 }
+              op: Union
+          children: []
+
+        - name: blob_box
+          active: true
+          components:
+            - type: Transform
+              position: { x: 0.35, y: 0.0, z: 0.0 }
+              rotation: { x: 0, y: 0, z: 0 }
+              scale: { x: 1, y: 1, z: 1 }
+            - type: SdfShape
+              shape: Box
+              params: { x: 0.4, y: 0.4, z: 0.4 }
+              rounding: 0.12
+              op: Union
+          children: []
+
+
+    # ============================ WATER ============================================
+    # A sunken basin so the water has real depth under it: clarity, shore foam and the
+    # edge fade all key off how deep the bed is.
+    - name: pool_basin
+      active: true
+      components:
+        - type: Transform
+          position: { x: 4.0, y: -14.0, z: -0.3 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 4.0, y: 3.0, z: 0.3 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.16, g: 0.18, b: 0.20 }, metallic: 0.0, roughness: 0.85, ao: 1.0 }
+        # So the crate has a bed to land on if it ever out-sinks its own buoyancy.
+        - type: BoxCollider
+          size: { x: 8.0, y: 6.0, z: 0.6 }
+      children: []
+
+    - name: pool_wall_0
+      active: true
+      components:
+        - type: Transform
+          position: { x: 4.0, y: -10.9, z: 0.25 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 4.2, y: 0.2, z: 0.25 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/stone
+      children: []
+
+    - name: pool_wall_1
+      active: true
+      components:
+        - type: Transform
+          position: { x: 4.0, y: -17.1, z: 0.25 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 4.2, y: 0.2, z: 0.25 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/stone
+      children: []
+
+    - name: pool_wall_2
+      active: true
+      components:
+        - type: Transform
+          position: { x: 8.1, y: -14.0, z: 0.25 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.2, y: 3.0, z: 0.25 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/stone
+      children: []
+
+    - name: pool_wall_3
+      active: true
+      components:
+        - type: Transform
+          position: { x: -0.09999999999999964, y: -14.0, z: 0.25 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.2, y: 3.0, z: 0.25 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/stone
+      children: []
+
+    # The surface itself: Gerstner waves in the vertex stage, refraction and depth colour
+    # in the fragment stage, foam where the bed comes up to meet it. Its MeshRenderer names no
+    # mesh and no shader -- WaterSystem bakes the grid from the WaterBody below and publishes
+    # both to it, so `water_quality` stays in charge of the surface's density.
+    - name: pool_water
+      active: true
+      components:
+        - type: Transform
+          position: { x: 4.0, y: -14.0, z: 0.18 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: MeshRenderer
+          affects_reflection_probes: false
+          material: materials/water
+        - type: WaterBody
+          mode: planar
+          size: { x: 7.6, y: 5.4 }
+          resolution: 48
+          wave_amplitude: 0.05
+          wave_length: 2.2
+          wave_direction: 25.0
+          wave_steepness: 0.4
+          clarity: 1.2
+          shore_foam_depth: 0.35
+          edge_fade_depth: 0.1
+          ripple_strength: 0.35
+          ripple_scale: 1.4
+      children: []
+
+    # A crate riding the swell, so the waves are visibly moving geometry and not a
+    # normal-map trick.
+    - name: pool_float
+      active: true
+      components:
+        - type: Transform
+          position: { x: 4.6, y: -13.4, z: 0.5 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.4, y: 0.4, z: 0.4 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/wood_crate
+        - type: BoxCollider
+          size: { x: 0.8, y: 0.8, z: 0.8 }
+        - type: Rigidbody
+          mass: 12.0
+        - type: Buoyancy
+      children: []
+
+    # ============================ TRIPLANAR ========================================
+    # Brick maps projected along world X/Y/Z instead of through mesh UVs: no seams and
+    # no unwrap needed, which is what triplanar exists for.
+    - name: triplanar_boulder
+      active: true
+      components:
+        - type: Transform
+          position: { x: -5.5, y: -14.0, z: 0.9 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1.6, y: 1.6, z: 1.6 }
+        - type: MeshRenderer
+          mesh_path: boulder
+          material: materials/triplanar_test
+      children: []
+
+    # The blockout grid, world-projected: one tile per metre whatever the mesh's scale,
+    # so level geometry reads its own size.
+    - name: triplanar_cube
+      active: true
+      components:
+        - type: Transform
+          position: { x: -3.2, y: -14.6, z: 0.8 }
+          rotation: { x: 0.0, y: 0.0, z: 24.0 }
+          scale: { x: 0.8, y: 0.8, z: 0.8 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/prototype_grid
+      children: []
+
+    - name: triplanar_slab
+      active: true
+      components:
+        - type: Transform
+          position: { x: -6.8, y: -15.4, z: 0.4 }
+          rotation: { x: 0.0, y: 0.0, z: -12.0 }
+          scale: { x: 1.4, y: 0.9, z: 0.4 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/prototype_grid
+      children: []
+
+    # ============================ CUTOUT ===========================================
+    # An alpha-tested screen: the mask punches real holes, and the holes appear in its
+    # shadow too -- the shadow pass runs the same cutout test.
+    - name: cutout_screen
+      active: true
+      components:
+        - type: Transform
+          position: { x: -9.5, y: -13.0, z: 1.4 }
+          rotation: { x: 90.0, y: 0.0, z: 18.0 }
+          scale: { x: 1.6, y: 1.6, z: 1.6 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material: { albedo: { r: 0.85, g: 0.80, b: 0.62 }, metallic: 0.0, roughness: 0.6, ao: 1.0, alpha_mode: CUTOUT, alpha_cutoff: 0.5, texture_alpha_mask: textures/noise_mask.png, cull_backfaces: false }
+      children: []
+
+    # ============================ FOG + VOLUMETRICS ================================
+    # A local fog pocket with a near-black base glow and a high sun weight: what you see
+    # in it is in-scattered LIGHT, not the volume itself.
+    - name: fog_pocket
+      active: true
+      components:
+        - type: Transform
+          position: { x: -14.0, y: -9.0, z: 1.6 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: Volume
+          kind: fog
+          shape: box
+          extent: { x: 4.0, y: 3.4, z: 1.6 }
+          density: 0.26
+          falloff: 0.3
+          occlusion: 0.25
+          sun_amount: 2.6
+          color: { r: 0.03, g: 0.03, b: 0.035 }
+      children: []
+
+    # The cone through it. Needs volumetrics_enabled and volumetrics_light_scatter.
+    - name: fog_spot
+      active: true
+      components:
+        - type: Transform
+          position: { x: -14.0, y: -6.4, z: 4.6 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: SpotLight
+          direction: { x: 0.0, y: -0.45, z: -1.0 }
+          color: { r: 1.0, g: 0.86, b: 0.55 }
+          intensity: 1400.0
+          range: 12.0
+          inner_angle: 13.0
+          outer_angle: 21.0
+          cast_shadows: true
+          attenuation_constant: 2.0
+      children: []
+
+    # A plate inside the cone: it carves a shadowed notch out of the beam (god rays).
+    - name: fog_blocker
+      active: true
+      components:
+        - type: Transform
+          position: { x: -14.0, y: -8.6, z: 2.6 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.5, y: 0.5, z: 0.12 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.2, g: 0.2, b: 0.22 }, metallic: 0.0, roughness: 0.8, ao: 1.0 }
+      children: []
+
+    - name: fog_pedestal
+      active: true
+      components:
+        - type: Transform
+          position: { x: -14.0, y: -9.6, z: 0.5 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.7, y: 0.7, z: 0.5 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/stone
+      children: []
+
+    # ============================ METAL x ROUGHNESS ================================
+    # A metal/roughness grid: four shared metal materials down, three roughnesses
+    # across, each one overriding only `roughness` off its shared base.
+    - name: metal_chrome_0
+      active: true
+      components:
+        - type: Transform
+          position: { x: -17.0, y: 2.8, z: 0.75 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.6, y: 0.6, z: 0.6 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { base: materials/chrome, roughness: 0.05 }
+      children: []
+
+    - name: metal_chrome_1
+      active: true
+      components:
+        - type: Transform
+          position: { x: -15.1, y: 2.8, z: 0.75 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.6, y: 0.6, z: 0.6 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { base: materials/chrome, roughness: 0.25 }
+      children: []
+
+    - name: metal_chrome_2
+      active: true
+      components:
+        - type: Transform
+          position: { x: -13.2, y: 2.8, z: 0.75 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.6, y: 0.6, z: 0.6 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { base: materials/chrome, roughness: 0.55 }
+      children: []
+
+    - name: metal_gold_0
+      active: true
+      components:
+        - type: Transform
+          position: { x: -17.0, y: 0.8999999999999999, z: 0.75 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.6, y: 0.6, z: 0.6 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { base: materials/gold, roughness: 0.05 }
+      children: []
+
+    - name: metal_gold_1
+      active: true
+      components:
+        - type: Transform
+          position: { x: -15.1, y: 0.8999999999999999, z: 0.75 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.6, y: 0.6, z: 0.6 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { base: materials/gold, roughness: 0.25 }
+      children: []
+
+    - name: metal_gold_2
+      active: true
+      components:
+        - type: Transform
+          position: { x: -13.2, y: 0.8999999999999999, z: 0.75 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.6, y: 0.6, z: 0.6 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { base: materials/gold, roughness: 0.55 }
+      children: []
+
+    - name: metal_copper_0
+      active: true
+      components:
+        - type: Transform
+          position: { x: -17.0, y: -1.0, z: 0.75 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.6, y: 0.6, z: 0.6 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { base: materials/copper, roughness: 0.05 }
+      children: []
+
+    - name: metal_copper_1
+      active: true
+      components:
+        - type: Transform
+          position: { x: -15.1, y: -1.0, z: 0.75 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.6, y: 0.6, z: 0.6 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { base: materials/copper, roughness: 0.25 }
+      children: []
+
+    - name: metal_copper_2
+      active: true
+      components:
+        - type: Transform
+          position: { x: -13.2, y: -1.0, z: 0.75 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.6, y: 0.6, z: 0.6 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { base: materials/copper, roughness: 0.55 }
+      children: []
+
+    - name: metal_steel_0
+      active: true
+      components:
+        - type: Transform
+          position: { x: -17.0, y: -2.8999999999999995, z: 0.75 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.6, y: 0.6, z: 0.6 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { base: materials/steel, roughness: 0.05 }
+      children: []
+
+    - name: metal_steel_1
+      active: true
+      components:
+        - type: Transform
+          position: { x: -15.1, y: -2.8999999999999995, z: 0.75 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.6, y: 0.6, z: 0.6 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { base: materials/steel, roughness: 0.25 }
+      children: []
+
+    - name: metal_steel_2
+      active: true
+      components:
+        - type: Transform
+          position: { x: -13.2, y: -2.8999999999999995, z: 0.75 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.6, y: 0.6, z: 0.6 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { base: materials/steel, roughness: 0.55 }
+      children: []
+
+    - name: metal_slab
+      active: true
+      components:
+        - type: Transform
+          position: { x: -15.1, y: -0.1, z: 0.05 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 3.4, y: 4.2, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material: materials/concrete
+      children: []
+
+    # ============================ CAMERA + SUN =====================================
+    # Starts on the toon rows. Zoom out to 45+ to take the whole ring in at once.
+    - name: camera
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -21.0, z: 11.0 }
+          rotation: { x: 64.0, y: 0.0, z: 0.0 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: Camera
+          main: true
+          projection: Perspective
+          fov: 55.0
+          near_clip_plane: 0.1
+          far_clip_plane: 500.0
+        - type: CameraController
+          mode: orbit
+          target: { x: 0.0, y: -1.2, z: 1.2 }
+          follow_smoothing: 10.0
+          movement_smoothing: 0.8
+          mouse_sensitivity: 0.08
+          zoom_speed: 1.0
+          min_distance: 3.0
+          max_distance: 60.0
+          min_pitch_deg: 3.0
+          max_pitch_deg: 85.0
+      children: []
+
+    # One sun for the whole scene, low enough that the slat bars throw their shadow
+    # right across both toon rows. EnvironmentLight is what gives the dark bands their
+    # cool sky colour without any shadow tint at all.
+    - name: sun
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 30.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: DirectionalLight
+          direction: { x: -0.42, y: 0.38, z: -0.82 }
+          color: { r: 1.0, g: 0.96, b: 0.90 }
+          intensity: 1.45
+          cast_shadows: true
+          shadow_intensity: 0.85
+        - type: EnvironmentLight
+          sky_color: { r: 0.46, g: 0.60, b: 0.88 }
+          ground_color: { r: 0.20, g: 0.18, b: 0.16 }
+          sky_intensity: 1.0
+      children: []
+

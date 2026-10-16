@@ -139,13 +139,38 @@ void CharacterController::advance(float dt, coopa::physx::system::PhysicsSystem*
 
     // --- Jump: buffered press, coyote window ---
     jump_buffer_timer_ = jump_pressed ? jump_buffer + 1e-6f : std::max(0.0f, jump_buffer_timer_ - dt);
-    const bool can_jump = !jumped_ && (grounded_ || air_time_ <= coyote_time);
+    // A character held by a vertical drive -- clinging to a wall, afloat at a surface -- is
+    // neither grounded nor freshly airborne, so the two windows above would refuse it a jump
+    // for as long as whatever holds it keeps holding. It has something to push off, though,
+    // and a jump is how a player says "let go of it": the press has to be a jump here, not
+    // nothing, or a character that grabs a wall by itself can only be left by falling off.
+    //
+    // `jumped_` guards the coyote window alone, and nothing else. It is there to stop one press
+    // becoming two jumps out of the same moment of air, and it is cleared by landing -- so
+    // hanging it on the drive as well would mean a wall or a pool reached in mid-air, which is
+    // how both are normally reached, could not be left by jumping until the character had
+    // touched ground somewhere else. Being held is not being in free fall: whatever holds the
+    // character is the thing the jump pushes off, and it holds for as long as it likes.
+    const bool can_jump = grounded_ || vertical_drive_ || (!jumped_ && air_time_ <= coyote_time);
     bool jumped_now = false;
     // `g > 0`: an effective gravity of zero has no apex to reach, and a negative one -- a
     // gravity_scale turned upward -- would make this sqrt() of a negative number and strand the
     // character at NaN for the rest of the scene. Neither has a jump worth firing.
     if (jump_buffer_timer_ > 0.0f && can_jump && jump_height > 0.0f && g > 0.0f) {
         v_velocity_ = std::sqrt(2.0f * g * jump_height);
+        // The jump outranks the hold: a drive left in place would ease the impulse straight back
+        // down to the speed it holds, and the jump would read as a twitch. Whatever set the
+        // drive re-asserts it next frame if it still wants the character (it is written to be
+        // set every frame), so this gives up the hold for the jump rather than ending it.
+        clear_vertical_drive();
+        // Root motion has no say in the air, so a take-off leaves at the speed the input ASKS
+        // for rather than at whatever the clip travelled last frame. The two agree while
+        // running -- with root motion, move_speed is the clip's own ground speed or the
+        // animation does not match the character -- and they differ exactly where the clip's
+        // last frame is not the character's speed: mid-crossfade back out of a landing, where
+        // its travel is still ramping up from nothing, so a jump taken in that window would
+        // otherwise leave at a crawl or dead still while the player is at a full sprint.
+        if (use_root_motion) h_velocity_ = wish;
         jumped_ = true;
         jumped_now = true;
         jump_buffer_timer_ = 0.0f;
@@ -184,6 +209,17 @@ void CharacterController::advance(float dt, coopa::physx::system::PhysicsSystem*
         v_before = v_velocity_ - g * dt;
         v_velocity_ = v_before;
     }
+    // A jump leaves from where the character is DRAWN, not from where a step put it. Walking
+    // off a ledge, the ground snap drops the character a whole block within the frame it
+    // crosses the lip and step_smoothing then spends a fifth of a second drawing it at the
+    // height it left -- so a jump pressed at the ledge the player can see would otherwise take
+    // off from a block below it, and read as the drop having eaten the jump. Giving the unpaid
+    // lag to the jump takes off from the drawn pose instead, and because the lag is exactly the
+    // difference between the two, the drawn position does not move at all: the character simply
+    // leaves from the ledge. Downwards only -- an unpaid lag from a step UP means the character
+    // is drawn below where it really is, and paying that one to a jump would give away height
+    // it has already climbed.
+    if (jumped_now && step_offset_ < 0.0f) step_offset_ = 0.0f;
     // Ride what we stand on: its Transform has already moved this frame (movers run first,
     // see KinematicControlSystem), so carry the feet by exactly that delta -- position and
     // yaw -- rather than by its physics velocity, which is a step old.
@@ -305,7 +341,15 @@ void CharacterController::advance(float dt, coopa::physx::system::PhysicsSystem*
                 step_offset_ = std::clamp(step_offset_ + rise, -limit, limit);
             }
         }
-        const float decay = (limit / step_smoothing) * dt;
+        float decay = (limit / step_smoothing) * dt;
+        // A deliberate climb outranks the catch-up. Off the ground with a step's lag still
+        // unspent -- a jump taken a frame after walking down a block carries most of one -- the
+        // catch-up runs at the step's pace, which is faster than the take-off itself: the drawn
+        // character sinks through the first frames of a jump (lagging a step down) or clears a
+        // whole block in them (lagging a step up), and in neither case is it the jump the player
+        // asked for. Capping it at half the climb keeps the rise the larger part of what is
+        // drawn while still spending the lag well before the apex.
+        if (!grounded_ && v_velocity_ > 0.0f) decay = std::min(decay, 0.5f * v_velocity_ * dt);
         step_offset_ = step_offset_ > 0.0f ? std::max(0.0f, step_offset_ - decay)
                                            : std::min(0.0f, step_offset_ + decay);
     } else {
@@ -364,13 +408,38 @@ void CharacterController::advance_field_(float dt, coopa::physx::system::Physics
 
     // --- Jump ---
     jump_buffer_timer_ = jump_pressed ? jump_buffer + 1e-6f : std::max(0.0f, jump_buffer_timer_ - dt);
-    const bool can_jump = !jumped_ && (grounded_ || air_time_ <= coyote_time);
+    // A character held by a vertical drive -- clinging to a wall, afloat at a surface -- is
+    // neither grounded nor freshly airborne, so the two windows above would refuse it a jump
+    // for as long as whatever holds it keeps holding. It has something to push off, though,
+    // and a jump is how a player says "let go of it": the press has to be a jump here, not
+    // nothing, or a character that grabs a wall by itself can only be left by falling off.
+    //
+    // `jumped_` guards the coyote window alone, and nothing else. It is there to stop one press
+    // becoming two jumps out of the same moment of air, and it is cleared by landing -- so
+    // hanging it on the drive as well would mean a wall or a pool reached in mid-air, which is
+    // how both are normally reached, could not be left by jumping until the character had
+    // touched ground somewhere else. Being held is not being in free fall: whatever holds the
+    // character is the thing the jump pushes off, and it holds for as long as it likes.
+    const bool can_jump = grounded_ || vertical_drive_ || (!jumped_ && air_time_ <= coyote_time);
     bool jumped_now = false;
     // `g > 0`: an effective gravity of zero has no apex to reach, and a negative one -- a
     // gravity_scale turned upward -- would make this sqrt() of a negative number and strand the
     // character at NaN for the rest of the scene. Neither has a jump worth firing.
     if (jump_buffer_timer_ > 0.0f && can_jump && jump_height > 0.0f && g > 0.0f) {
         v_velocity_ = std::sqrt(2.0f * g * jump_height);
+        // The jump outranks the hold: a drive left in place would ease the impulse straight back
+        // down to the speed it holds, and the jump would read as a twitch. Whatever set the
+        // drive re-asserts it next frame if it still wants the character (it is written to be
+        // set every frame), so this gives up the hold for the jump rather than ending it.
+        clear_vertical_drive();
+        // Root motion has no say in the air, so a take-off leaves at the speed the input ASKS
+        // for rather than at whatever the clip travelled last frame. The two agree while
+        // running -- with root motion, move_speed is the clip's own ground speed or the
+        // animation does not match the character -- and they differ exactly where the clip's
+        // last frame is not the character's speed: mid-crossfade back out of a landing, where
+        // its travel is still ramping up from nothing, so a jump taken in that window would
+        // otherwise leave at a crawl or dead still while the player is at a full sprint.
+        if (use_root_motion) h_velocity_ = wish;
         jumped_ = true;
         jumped_now = true;
         jump_buffer_timer_ = 0.0f;

@@ -35,7 +35,15 @@ fs::path make_hub_project(const fs::path& dir) {
 COOPA_TEST(project_actions_through_real_input) {
     namespace hub = toy::hub;
     setenv("NO_INPUT", "1", 1);
-    use_scratch_home();   // the hub's ~/.toyengine, and ~/.Trash for Move to Trash
+    // The hub's ~/.toyengine, and the Trash that Move to Trash reaches for.
+    const fs::path home = use_scratch_home();
+#ifndef __APPLE__
+    // tools/toyhub's move_to_trash() only takes the freedesktop branch when $XDG_DATA_HOME is
+    // set or $HOME/.local/share exists, and a bare scratch home has neither -- so without this
+    // the tool quietly takes its "no Trash on this system" rm -rf fallback, and the assertion
+    // below would be checking a path nothing was ever going to write.
+    fs::create_directories(home / ".local" / "share");
+#endif
     const fs::path base = coopa::test::scratch_dir("hub_ui");
     const fs::path a = make_hub_project(base / "Alpha");
     toy::core::Engine engine(hub::HubApp::engine_config(false), hub::HubApp::engine_options());
@@ -106,8 +114,16 @@ COOPA_TEST(project_actions_through_real_input) {
     app.delete_project(alpha);
     for (int i = 0; i < 500 && app.task().running(); ++i) { std::this_thread::sleep_for(std::chrono::milliseconds(10)); tick(engine, 1); }
     tick(engine, 2);
-    const char* home = std::getenv("HOME");
-    expect(!fs::exists(a) && fs::exists(fs::path(home) / ".Trash" / "Alpha"), "Move to Trash moves the project folder to the Trash");
+    // Where tools/toyhub's move_to_trash() puts it -- ~/.Trash on macOS, the freedesktop
+    // ~/.local/share/Trash/files everywhere else. That file is the source of truth for this
+    // path; hardcoding the macOS one made this check unsatisfiable on Linux.
+#if defined(__APPLE__)
+    const fs::path trashed = home / ".Trash" / "Alpha";
+#else
+    const fs::path trashed = home / ".local" / "share" / "Trash" / "files" / "Alpha";
+#endif
+    expect(!fs::exists(a) && fs::exists(trashed),
+           "Move to Trash moves the project folder to the Trash (" + trashed.string() + ")");
     expect(app.projects().size() == 1 && app.projects()[0].name == "Existing", "...and drops it from the list");
 }
 

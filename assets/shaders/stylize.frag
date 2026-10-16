@@ -36,6 +36,13 @@ layout(set = 0, binding = 5) uniform sampler2D exposure_tex;
 // disables the lookup, and the binding then points at a 1x1 dummy.
 layout(set = 0, binding = 6) uniform sampler2D grading_lut;
 
+// Per-material outline mask (outline_mode != 0): the G-buffer's emissive attachment, whose
+// alpha carries each material's packed toon code -- bit 10 is "outline this material" (see
+// PBRMaterial::gpu_toon_code()). NEAREST, like depth/normal above: a packed integer code
+// must not be blended across a material boundary. Bound to a harmless stand-in and never
+// read when outline_mode is 0 (see StylizePass::set_source_images()).
+layout(set = 0, binding = 7) uniform sampler2D outline_mask;
+
 #include <gfx/grading.glsl>
 
 layout(push_constant) uniform StylizePushConstants {
@@ -53,6 +60,8 @@ layout(push_constant) uniform StylizePushConstants {
     float bloom_intensity;       // <= 0 disables bloom
     float auto_exposure;         // != 0 -> multiply `exposure` by exposure_tex's adapting value
     float grading_size;          // colour-grading LUT cube side; <= 1 disables the lookup
+    float outline_mode;          // 0 = outline every edge; 1 = only materials that asked (bit 10 of
+                                 //     the toon code at `outline_mask`)
 } params;
 
 layout(location = 0) out vec4 out_color;
@@ -82,6 +91,21 @@ float linear_depth(float d) {
 }
 
 bool is_background(vec3 n) { return dot(n, n) < 0.001; }
+
+// Does the surface under `uv` want an outline? True for everything in `all` mode. In `toon`
+// mode, only where the material set its outline bit.
+//
+// Tested on the CENTRE texel alone, not its neighbours: is_outline_at() below is deliberately
+// one-sided (see its inverse-depth comment -- it fires on the texel that pops TOWARD the
+// camera, not on the surface behind it), so the texel being asked about is always the nearer
+// surface's own. That makes "outline this material" mean its silhouette against the sky, its
+// silhouette against anything behind it, and its own interior creases -- and leaves a PBR
+// object in FRONT of an outlined one un-lined, which is what per-material opt-in should do.
+bool wants_outline(vec2 uv) {
+    if (params.outline_mode < 0.5) return true;
+    uint code = uint(max(texture(outline_mask, uv).a, 0.0) + 0.5);
+    return (code & (1u << 10)) != 0u;
+}
 
 // True if uv sits on the near side of a depth or normal discontinuity, at
 // n0 = the (already-normalized) normal sampled at uv.
@@ -211,7 +235,7 @@ void main() {
     color = gfx_apply_grading_lut(grading_lut, color, params.grading_size);
 
     vec3 n0 = texture(scene_normal, in_uv).rgb;
-    if (params.outline_thickness > 0.0 && !is_background(n0) &&
+    if (params.outline_thickness > 0.0 && !is_background(n0) && wants_outline(in_uv) &&
         is_outline(in_uv, normalize(n0))) {
         color = mix(color, params.outline_color.rgb, params.outline_color.a);
     }

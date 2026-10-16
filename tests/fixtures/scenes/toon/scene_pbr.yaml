@@ -1,0 +1,82 @@
+# scene_pbr -- fixture for toon_shading_test.cpp.
+#
+# A sphere row under one sun, with a bar overhead whose SOFT shadow falls across them. These
+# files are generated as one template with a single substitution, so "identical but for the
+# toon keys" is a property of the files and not of whoever edited them last:
+#   scene_pbr          the sphere material has NO toon_* key at all
+#   scene_toon         the same material plus toon_bands/toon_specular/toon_softness
+#   scene_toon_shifted scene_toon with the overhead bar MOVED -- so a frame pair proves the
+#                      bands follow the shadow the scene casts, not a shadow-free N.L ramp
+#   scene_outline      two spheres, only one with toon_outline, for outline_mode
+#
+# Deliberately plain: no fog, no volumetrics, nothing moving, so a frame pair differs only
+# where the thing under test differs.
+scene:
+  scene_name: scene_pbr
+  root_objects:
+    - name: floor
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 8.0, y: 8.0, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material: { albedo: { r: 0.70, g: 0.70, b: 0.72 }, metallic: 0.0, roughness: 0.6, ao: 1.0 }
+      children: []
+    - name: ball
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 1.2 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.1, y: 1.1, z: 1.1 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.85, g: 0.30, b: 0.22 }, metallic: 0.0, roughness: 0.35, ao: 1.0 }
+      children: []
+    - name: caster
+      active: true
+      components:
+        - type: Transform
+          position: { x: -0.9, y: 0.0, z: 3.6 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 0.5, y: 4.0, z: 0.2 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.25, g: 0.25, b: 0.28 }, metallic: 0.0, roughness: 0.8, ao: 1.0 }
+      children: []
+    - name: camera
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -6.5, z: 2.6 }
+          rotation: { x: 78.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Camera
+          main: true
+          projection: Perspective
+          fov: 50.0
+          near_clip_plane: 0.1
+          far_clip_plane: 100.0
+      children: []
+
+    - name: sun
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 10.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: DirectionalLight
+          direction: { x: -0.35, y: 0.30, z: -0.89 }
+          color: { r: 1.0, g: 0.96, b: 0.90 }
+          intensity: 1.2
+          cast_shadows: true
+          shadow_intensity: 0.9
+        - type: EnvironmentLight
+          sky_color: { r: 0.45, g: 0.58, b: 0.86 }
+          ground_color: { r: 0.20, g: 0.18, b: 0.16 }
+          sky_intensity: 1.0
+      children: []

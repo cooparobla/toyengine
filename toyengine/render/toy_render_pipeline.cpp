@@ -1202,7 +1202,11 @@ void ToyRenderPipeline::build_post_chain_(coopa::gfx::pipeline::RenderPass& swap
         // The grading LUT is always a valid texture (a 1x1 dummy when no path is
         // configured), so unlike the two above it binds unconditionally -- grading_size
         // 0 is what disables the lookup.
-        grading_lut_.view_typed(), &grading_lut_.sampler_object());
+        grading_lut_.view_typed(), &grading_lut_.sampler_object(),
+        // The per-material outline mask: the G-buffer's emissive attachment, whose alpha
+        // carries each material's toon code. Bound unconditionally (it is always a real,
+        // rendered attachment) -- outline_mode is what decides whether it is read.
+        gbuffer_target_.g3_view_typed(), &nearest_sampler_);
 
     // Debug view: replaces post_target_'s draw with a raw intermediate-buffer readout --
     // see ToyRenderConfig::debug_view / the DebugView enum for the full option list, and
@@ -2116,6 +2120,10 @@ void ToyRenderPipeline::record_post_chain_(coopa::gfx::command::CommandBuffer& c
         post_pc.auto_exposure    = (exposure_pass_ && !raw_passthrough) ? 1.0f : 0.0f;
         post_pc.grading_size     = (config_.grading_enabled && !raw_passthrough)
             ? static_cast<float>(grading_lut_.size()) : 0.0f;
+        // `toon` restricts the outline to materials that asked for one
+        // (PBRMaterial::toon_outline); anything else, including an unknown value, outlines
+        // every edge as it always has.
+        post_pc.outline_mode     = (config_.outline_mode == "toon") ? 1.0f : 0.0f;
         stylize_pass_->draw(cmd, post_pc, render_extent_.width, render_extent_.height);
     }
     // Also whenever a host filled lines itself (the editor's grid, gizmos and wireframe): Engine
@@ -2919,7 +2927,10 @@ std::vector<SdfDrawItem> ToyRenderPipeline::gather_sdf_(coopa::scene::Scene& sce
                 out.rec.albedo_alpha = glm::vec4(sr->material.albedo, sr->material.alpha);
                 out.rec.mr_ao_cutoff = glm::vec4(sr->material.metallic, sr->material.roughness,
                                              sr->material.ao, sr->material.gpu_alpha_cutoff());
+                // .w carries the toon code, which sdf_gbuffer.frag forwards into the
+                // G-buffer's emissive alpha exactly as the mesh backbone does.
                 out.rec.emissive     = sr->material.gpu_emissive();
+                out.rec.emissive.w   = static_cast<float>(sr->material.gpu_toon_code());
                 uint32_t clamped_steps = static_cast<uint32_t>(
                     std::clamp(sr->max_steps, 1, static_cast<int>(config_.sdf_max_steps)));
                 out.rec.range = glm::uvec4(0, static_cast<uint32_t>(out.shapes.size()), clamped_steps, 0);
@@ -3369,6 +3380,10 @@ glm::uvec4 ToyRenderPipeline::surface_ext_(const coopa::gfx::engine::components:
                         const coopa::gfx::engine::components::PBRMaterial& m) {
     glm::uvec4 ext(0u);
     if (!m.snow) ext.z |= 1u;
+    // Set before the tessellation early-returns below: the toon look has nothing to do with
+    // whether this draw is tessellated, and an untessellated toon material must still carry
+    // its code to the G-buffer.
+    ext.w = m.gpu_toon_code();
     const auto& t = mr.effective_tessellation();
     if (!t.enabled) return ext;
     if (!device_.supports_tessellation()) {
@@ -3614,6 +3629,14 @@ void ToyRenderPipeline::update_lights_(coopa::scene::Scene& scene) {
         ubo.cloud_shadow = glm::vec4(cloud_shadow_place_.corner, 1.0f / cloud_shadow_place_.side, cs.shadow_strength);
         ubo.cloud_shadow_layer = glm::vec4(cs.altitude, cs.thickness, k * k * (3.0f - 2.0f * k), 0.0f);
     }
+    // Per-material toon shading, scene-wide half (gfx/toon.glsl). The per-material half rides
+    // the G-buffer's emissive alpha instead -- see surface_ext_(). Written unconditionally:
+    // toon_strength 0 is itself the meaningful value (every toon material shades as plain PBR),
+    // and gfx_toon_active() tests it, so there is nothing to branch on here.
+    ubo.toon_params0 = glm::vec4(config_.toon_spec_threshold, config_.toon_spec_edge,
+                                 config_.toon_rim_power, std::clamp(config_.toon_strength, 0.0f, 1.0f));
+    ubo.toon_params1 = glm::vec4(config_.toon_shadow_tint, config_.toon_band_attenuation ? 1.0f : 0.0f);
+
     // Soft-shadow tuning shared by every calc_dir_shadow()/calc_local_shadow() call site.
     // Written UNCONDITIONALLY, not only when a directional light exists: .z (PCF taps) and
     // .w (the shared rotation offset) drive the point/spot kernels too, so a scene with only

@@ -94,6 +94,16 @@ layout(set = 1, binding = 0) uniform LightUBO {
     // The cloud layer's shadow map (render cloud_shadows) -- see cloud_shadow.glsl.
     vec4 cloud_shadow;        // xy = the map's corner (world), z = 1 / its side, w = strength (0 = off)
     vec4 cloud_shadow_layer;  // x = the layer's base height (world z), y = its thickness, z = low-light fade
+
+    // Per-material toon shading, scene-wide tuning -- see gfx/toon.glsl, which these two are
+    // handed to as-is by gfx_toon_unpack(). The PER-MATERIAL half of the settings rides the
+    // G-buffer's emissive alpha instead; these are only the continuous knobs that would not
+    // survive that packing. toon_params0.w (master strength) = 0 shades every toon material in
+    // the frame as plain PBR.
+    vec4 toon_params0;  // x = specular step threshold (share of the GGX lobe's own peak),
+                        // y = that step's edge width, z = rim falloff exponent, w = master strength
+    vec4 toon_params1;  // rgb = shadow tint for the darkest bands (white = none),
+                        // w = 1 bands point/spot distance falloff too
 } lights;
 
 #endif // TOY_LIGHT_UBO_BODY_GLSL

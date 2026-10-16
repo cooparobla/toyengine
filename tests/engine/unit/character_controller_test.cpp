@@ -239,6 +239,52 @@ COOPA_TEST(jump_peaks_at_jump_height_and_buffers_early_presses) {
 }
 
 /**
+ * @brief A vertical drive taken in mid-air gives the jump back: the character it holds -- on a
+ *        wall, at a water surface -- leaves it on the next press, however it got there.
+ *
+ * The press has to work on a character that jumped on its way in and has not touched ground
+ * since, which is the ordinary way a wall or a pool is reached.
+ */
+COOPA_TEST(a_vertical_drive_gives_the_jump_back_in_mid_air) {
+    CharacterRig rig;
+    character_ground(rig);
+    rig.spawn(glm::vec3(0.0f));
+    rig.cc->jump_height = 1.5f;
+    rig.start();
+    int jumps = 0;
+    rig.cc->on_jumped.connect([&] { ++jumps; });
+    rig.step(20);
+    rig.cc->jump = true;
+    rig.step(1);
+    expect(jumps == 1, "drive: the jump off the ground fired");
+
+    // Something catches the character at the top of that arc and holds it there.
+    for (int i = 0; i < 20; ++i) {
+        rig.cc->set_vertical_drive(0.0f, 20.0f);
+        rig.step(1);
+    }
+    expect(!rig.cc->is_grounded(), "drive: held off the ground");
+    expect_near(rig.cc->velocity().z, 0.0f, 0.05f, "drive: holding position");
+
+    rig.cc->set_vertical_drive(0.0f, 20.0f);
+    rig.cc->jump = true;
+    rig.step(1);
+    expect(jumps == 2, "drive: a press leaves the hold");
+    expect(rig.cc->velocity().z > 1.0f, "drive: and leaves it rising (v = " +
+                                            std::to_string(rig.cc->velocity().z) + ")");
+
+    // Still no second jump out of an ordinary arc: the drive is what gives the press something
+    // to push off, and nothing holds the character now.
+    rig.cc->clear_vertical_drive();
+    rig.step(12);   // 0.2 s, past the coyote window, with metres of air left below
+    expect(!rig.cc->is_grounded(), "drive: released into the air");
+    const int before = jumps;
+    rig.cc->jump = true;
+    rig.step(1);
+    expect(jumps == before, "drive: airborne past the coyote window is still not a second jump");
+}
+
+/**
  * @brief 600 frames of random walking, sprinting and jumping across stairs, a tall block, a
  *        steep slope, a walkable ramp and a wall corner: the capsule never ends a frame
  *        overlapping anything.

@@ -54,7 +54,7 @@ layout(push_constant) uniform PushConstants {
     vec4  emissive;
     vec4  gfx_time;    // x=time, y=delta_time, z=frame_index, w=spare
     vec4  gfx_params;  // four author-defined floats; see the surface shader's own doc
-    uvec4 surface_ext; // x/y packed tessellation params, z flags (bit 0: no snow), w reserved
+    uvec4 surface_ext; // x/y packed tessellation params, z flags (bit 0: no snow), w toon code
 } material;
 
 // Plain-named aliases so a surface file's gfx_surface_vertex()/gfx_surface_fragment() can

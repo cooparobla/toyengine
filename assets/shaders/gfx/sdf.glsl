@@ -43,7 +43,7 @@ struct SdfRendererGpu {
     vec4  bounds_max;     // world AABB max (xyz)
     vec4  albedo_alpha;   // rgb = albedo, a = alpha
     vec4  mr_ao_cutoff;   // x = metallic, y = roughness, z = ao, w = alpha_cutoff
-    vec4  emissive;       // xyz = pre-multiplied emissive radiance
+    vec4  emissive;       // xyz = pre-multiplied emissive radiance, w = packed toon code
     uvec4 range;          // x = first shape index, y = shape count, z = max_steps
     vec4  march;          // x = surface_epsilon, y = normal_epsilon
 };

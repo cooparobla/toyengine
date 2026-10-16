@@ -20,6 +20,7 @@
 #include <gfx/shadow_sampling.glsl>
 #include <gfx/indirect_specular.glsl>
 #include <gfx/ao_composite.glsl>
+#include <gfx/toon.glsl>
 #include <gfx/spot_light.glsl>
 #include <gfx/ssr_common.glsl>
 
@@ -110,9 +111,12 @@ layout(location = 0) out vec4 out_color;
 #define DBG_VELOCITY        23
 #define DBG_SHADOW_CASCADES 24
 
-// band()/shade_light() -- byte-for-byte the same as toy_lighting.frag's own (not a
+// band()/shade_light() -- structurally the same as toy_lighting.frag's own (not a
 // shared body: they read `params` fields specific to each shader's own push-constant
-// block, so a header would need to abstract that away for no real gain here).
+// block, so a header would need to abstract that away for no real gain here). The
+// PER-MATERIAL toon branch, on the other hand, IS shared: it reads nothing out of either
+// push block, so both shaders call the same gfx/toon.glsl, and the "direct" channel cannot
+// show a toon surface differently from the way the shipped image shades it.
 float band(float ndl) {
     if (params.soft_lighting != 0.0) return ndl;
     if (params.light_bands <= 1.0) return ndl;
@@ -120,27 +124,47 @@ float band(float ndl) {
 }
 
 vec3 shade_light(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo, float metallic,
-                 float roughness, vec3 F0, float shadow) {
+                 float roughness, vec3 F0, float shadow, GfxToon toon) {
     vec3 H = normalize(V + L);
     float ndl_raw = max(dot(N, L), 0.0);
     if (ndl_raw <= 0.0) return vec3(0.0);
-    float ndl = band(ndl_raw);
 
     float NDF = distribution_ggx(N, H, roughness);
     float G   = geometry_smith(N, V, L, roughness);
     vec3  F   = fresnel_schlick(max(dot(H, V), 0.0), F0);
+    vec3  kD  = (vec3(1.0) - F) * (1.0 - metallic);
+    float ndv = max(dot(N, V), 0.0);
 
+    // See toy_lighting.frag's identical branch for why the ramp takes N.L folded with the
+    // shadow rather than N.L alone.
+    if (gfx_toon_active(toon)) {
+        float vis = gfx_toon_ramp(ndl_raw * (1.0 - shadow), toon);
+        float denom = 4.0 * ndv * ndl_raw + 0.0001;
+        vec3  pbr_specular = (NDF * G * F) / denom;
+        vec3  specular = gfx_toon_specular(toon, NDF, F, roughness, pbr_specular);
+        vec3  diffuse  = kD * albedo * gfx_toon_shadow_tint(toon, vis) / BRDF_PI;
+        return (diffuse + specular + albedo * gfx_toon_rim(toon, ndv)) * radiance * vis;
+    }
+
+    float ndl = band(ndl_raw);
     vec3 specular;
     if (params.soft_lighting != 0.0) {
-        float denom = 4.0 * max(dot(N, V), 0.0) * ndl_raw + 0.0001;
+        float denom = 4.0 * ndv * ndl_raw + 0.0001;
         specular = (NDF * G * F) / denom;
     } else {
         float spec_mask = step(params.spec_threshold, NDF * G);
         specular = F * spec_mask;
     }
 
-    vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
     return (kD * albedo / BRDF_PI + specular) * radiance * ndl * (1.0 - shadow);
+}
+
+/// This fragment's packed toon settings -- see toy_lighting.frag's identical read for why it
+/// is a texelFetch and not a filtered sample.
+GfxToon toy_debug_toon() {
+    return gfx_toon_unpack(
+        texelFetch(g_emissive, ivec2(in_uv * vec2(textureSize(g_emissive, 0))), 0).a,
+        lights.toon_params0, lights.toon_params1);
 }
 
 // Same formula as stylize.frag's linear_depth(): true view-space distance from
@@ -160,6 +184,7 @@ float linear_depth(float d) {
 vec3 toy_debug_direct(vec3 N, vec3 V, vec3 world_pos, vec3 albedo, float metallic,
                       float roughness, vec3 F0) {
     vec3 Lo = vec3(0.0);
+    GfxToon toon = toy_debug_toon();
 
     if (lights.light_counts.x > 0) {
         vec3 L = normalize(-lights.dir_direction.xyz);
@@ -171,7 +196,7 @@ vec3 toy_debug_direct(vec3 N, vec3 V, vec3 world_pos, vec3 albedo, float metalli
             shadow = max(shadow, texture(u_contact_shadow, in_uv).r
                                 * lights.contact_params.x * lights.dir_shadow_extra.x);
         }
-        Lo += shade_light(N, V, L, radiance, albedo, metallic, roughness, F0, shadow);
+        Lo += shade_light(N, V, L, radiance, albedo, metallic, roughness, F0, shadow, toon);
     }
 
     uint num_points = min(lights.light_counts.y, 16u);
@@ -187,6 +212,8 @@ vec3 toy_debug_direct(vec3 N, vec3 V, vec3 world_pos, vec3 albedo, float metalli
         float factor = clamp(dist / range, 0.0, 1.0);
         float falloff = clamp(1.0 - pow(factor, sharpness), 0.0, 1.0);
         falloff *= falloff;
+        // Banded light pools -- see toy_lighting.frag's identical line.
+        if (toon.band_attenuation && gfx_toon_active(toon)) falloff = gfx_toon_ramp(falloff, toon);
         float attenuation = falloff / (4.0 * BRDF_PI * (factor * factor + 1.0));
         vec3 radiance = pl.color_intensity.rgb * (pl.color_intensity.w * 0.08) * attenuation;
 
@@ -195,7 +222,7 @@ vec3 toy_debug_direct(vec3 N, vec3 V, vec3 world_pos, vec3 albedo, float metalli
         float shadow = (pl.attenuation.w > 0.5 && dot(N, L) > 0.0)
             ? calc_local_shadow(pl.attenuation.w, world_pos, N, L) : 0.0;
 
-        Lo += shade_light(N, V, L, radiance, albedo, metallic, roughness, F0, shadow);
+        Lo += shade_light(N, V, L, radiance, albedo, metallic, roughness, F0, shadow, toon);
     }
 
     uint num_spots = min(lights.light_counts.z, 8u);
@@ -214,6 +241,8 @@ vec3 toy_debug_direct(vec3 N, vec3 V, vec3 world_pos, vec3 albedo, float metalli
         float factor = clamp(dist / range, 0.0, 1.0);
         float falloff = clamp(1.0 - pow(factor, sharpness), 0.0, 1.0);
         falloff *= falloff;
+        // Banded light pools -- see toy_lighting.frag's identical line.
+        if (toon.band_attenuation && gfx_toon_active(toon)) falloff = gfx_toon_ramp(falloff, toon);
         float attenuation = falloff / (4.0 * BRDF_PI * (factor * factor + 1.0));
         vec3 radiance = sl.color_intensity.rgb * (sl.color_intensity.w * 0.08) * attenuation * cone;
 
@@ -221,7 +250,7 @@ vec3 toy_debug_direct(vec3 N, vec3 V, vec3 world_pos, vec3 albedo, float metalli
         float shadow = (sl.params.z > 0.5 && dot(N, L) > 0.0)
             ? calc_local_shadow(sl.params.z, world_pos, N, L) : 0.0;
 
-        Lo += shade_light(N, V, L, radiance, albedo, metallic, roughness, F0, shadow);
+        Lo += shade_light(N, V, L, radiance, albedo, metallic, roughness, F0, shadow, toon);
     }
 
     return Lo;

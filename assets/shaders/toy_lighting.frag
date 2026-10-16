@@ -28,12 +28,20 @@
 // rim_strength stays independent of soft_lighting in both modes (0 disables
 // it either way) -- it's a common accent in both cel-shaded and painterly
 // soft-shaded styles, not exclusively a cel-shading technique.
+//
+// On top of either look, an individual MATERIAL can ask for a toon look of its own
+// (PBRMaterial::toon_bands and friends, reaching this pass as a packed code in the G-buffer's
+// emissive alpha -- see gfx/toon.glsl). That path is independent of soft_lighting: it bands
+// the light's VISIBILITY rather than a shadow-free N.L, steps the same GGX lobe the PBR path
+// evaluates rather than replacing it, and leaves every indirect term continuous, so a banded
+// prop still takes its ambient, AO and reflections from the scene like its PBR neighbour.
 
 #include <gfx/sky.glsl>
 #include <gfx/brdf.glsl>
 #include <gfx/shadow_sampling.glsl>
 #include <gfx/indirect_specular.glsl>
 #include <gfx/ao_composite.glsl>
+#include <gfx/toon.glsl>
 #include <gfx/spot_light.glsl>
 // Pure-function header (declares no uniforms or samplers), for the contact-shadow
 // march below: ssr_texel_world_size() sizes its bias to a screen texel, and
@@ -120,31 +128,51 @@ float band(float ndl) {
     return floor(ndl * params.light_bands) / params.light_bands;
 }
 
-// Direct lighting for one light, multiplied by (1 - shadow). Two looks --
-// see the file doc and band() above: ramped (default) bands the diffuse
-// N.L and hard-masks the specular into a toon highlight; soft
-// (soft_lighting != 0) uses standard continuous Cook-Torrance for both.
+// Direct lighting for one light, multiplied by (1 - shadow). Three looks -- the engine-wide
+// two (see the file doc and band() above: ramped bands the diffuse N.L and hard-masks the
+// specular; soft, soft_lighting != 0, uses continuous Cook-Torrance for both) and, when THIS
+// material asked for one, the per-material toon look (gfx/toon.glsl), which takes precedence
+// over both because it is the narrower, explicitly-authored choice.
 vec3 shade_light(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo, float metallic,
-                 float roughness, vec3 F0, float shadow) {
+                 float roughness, vec3 F0, float shadow, GfxToon toon) {
     vec3 H = normalize(V + L);
     float ndl_raw = max(dot(N, L), 0.0);
     if (ndl_raw <= 0.0) return vec3(0.0);
-    float ndl = band(ndl_raw);
 
     float NDF = distribution_ggx(N, H, roughness);
     float G   = geometry_smith(N, V, L, roughness);
     vec3  F   = fresnel_schlick(max(dot(H, V), 0.0), F0);
+    vec3  kD  = (vec3(1.0) - F) * (1.0 - metallic);
+    float ndv = max(dot(N, V), 0.0);
 
+    if (gfx_toon_active(toon)) {
+        // Band the light's VISIBILITY, not N.L on its own: `shadow` already carries the
+        // strongest of this light's cascaded shadow map (with its PCSS penumbra), the
+        // screen-space contact-shadow march and the cloud-shadow map, so folding it in BEFORE
+        // the ramp is what bends the bands around the occlusion the scene actually casts.
+        // Banding N.L and multiplying a smooth (1 - shadow) over it afterwards would instead
+        // leave a smooth gradient inside every band -- the giveaway of a cel look bolted onto
+        // a shadow it knows nothing about.
+        float vis = gfx_toon_ramp(ndl_raw * (1.0 - shadow), toon);
+        float denom = 4.0 * ndv * ndl_raw + 0.0001;
+        vec3  pbr_specular = (NDF * G * F) / denom;
+        vec3  specular = gfx_toon_specular(toon, NDF, F, roughness, pbr_specular);
+        vec3  diffuse  = kD * albedo * gfx_toon_shadow_tint(toon, vis) / BRDF_PI;
+        // The rim rides this light's radiance and banded visibility, so it lands on the lit
+        // side and goes out in shadow -- see gfx_toon_rim()'s own doc.
+        return (diffuse + specular + albedo * gfx_toon_rim(toon, ndv)) * radiance * vis;
+    }
+
+    float ndl = band(ndl_raw);
     vec3 specular;
     if (params.soft_lighting != 0.0) {
-        float denom = 4.0 * max(dot(N, V), 0.0) * ndl_raw + 0.0001;
+        float denom = 4.0 * ndv * ndl_raw + 0.0001;
         specular = (NDF * G * F) / denom;
     } else {
         float spec_mask = step(params.spec_threshold, NDF * G);
         specular = F * spec_mask;
     }
 
-    vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
     return (kD * albedo / BRDF_PI + specular) * radiance * ndl * (1.0 - shadow);
 }
 
@@ -174,6 +202,15 @@ void main() {
     // SsaoPass::neutral_view() in that case, so this read needs no separate flag.
     float ssao = mix(1.0, texture(g_ssao, in_uv).r, params.ssao_intensity);
     vec3 emissive = texture(g_emissive, in_uv).rgb;
+    // This material's toon settings, packed into the same attachment's alpha by
+    // gfx/surface/gbuffer_fs.glsl. texelFetch rather than a second texture() read: the
+    // pipeline binds this attachment through the LINEAR sampler (for the emissive radiance
+    // above, which wants filtering), and bilinearly blending a packed bitfield across the
+    // boundary between two materials decodes to settings NEITHER of them asked for. This pass
+    // runs at exactly the G-buffer's resolution, so the texel is this fragment's own.
+    GfxToon toon = gfx_toon_unpack(
+        texelFetch(g_emissive, ivec2(in_uv * vec2(textureSize(g_emissive, 0))), 0).a,
+        lights.toon_params0, lights.toon_params1);
     N = normalize(N);
 
     vec3  albedo    = g0.rgb;
@@ -218,7 +255,7 @@ void main() {
                                 * lights.contact_params.x * lights.dir_shadow_extra.x);
         }
 
-        Lo += shade_light(N, V, L, radiance, albedo, metallic, roughness, F0, shadow);
+        Lo += shade_light(N, V, L, radiance, albedo, metallic, roughness, F0, shadow, toon);
     }
 
     uint num_points = min(lights.light_counts.y, 16u);
@@ -248,6 +285,12 @@ void main() {
         float factor = clamp(dist / range, 0.0, 1.0);
         float falloff = clamp(1.0 - pow(factor, sharpness), 0.0, 1.0);
         falloff *= falloff;
+        // A toon material wants hard-edged pools of light, not a smooth gradient inside banded
+        // N.L, so the distance falloff is banded by the same ramp. Quantizing `falloff`
+        // (already normalized to the light's range, see the curve's doc above) rather than the
+        // attenuation below keeps the rings scaled to the light's range: growing the range
+        // grows the rings instead of only clipping the outermost one.
+        if (toon.band_attenuation && gfx_toon_active(toon)) falloff = gfx_toon_ramp(falloff, toon);
         float attenuation = falloff / (4.0 * BRDF_PI * (factor * factor + 1.0));
         vec3 radiance = pl.color_intensity.rgb * (pl.color_intensity.w * 0.08) * attenuation;
 
@@ -256,7 +299,7 @@ void main() {
         float shadow = (pl.attenuation.w > 0.5 && dot(N, L) > 0.0)
             ? calc_local_shadow(pl.attenuation.w, world_pos, N, L) : 0.0;
 
-        Lo += shade_light(N, V, L, radiance, albedo, metallic, roughness, F0, shadow);
+        Lo += shade_light(N, V, L, radiance, albedo, metallic, roughness, F0, shadow, toon);
     }
 
     uint num_spots = min(lights.light_counts.z, 8u);
@@ -277,6 +320,7 @@ void main() {
         float factor = clamp(dist / range, 0.0, 1.0);
         float falloff = clamp(1.0 - pow(factor, sharpness), 0.0, 1.0);
         falloff *= falloff;
+        if (toon.band_attenuation && gfx_toon_active(toon)) falloff = gfx_toon_ramp(falloff, toon);
         float attenuation = falloff / (4.0 * BRDF_PI * (factor * factor + 1.0));
         vec3 radiance = sl.color_intensity.rgb * (sl.color_intensity.w * 0.08) * attenuation * cone;
 
@@ -284,7 +328,7 @@ void main() {
         float shadow = (sl.params.z > 0.5 && dot(N, L) > 0.0)
             ? calc_local_shadow(sl.params.z, world_pos, N, L) : 0.0;
 
-        Lo += shade_light(N, V, L, radiance, albedo, metallic, roughness, F0, shadow);
+        Lo += shade_light(N, V, L, radiance, albedo, metallic, roughness, F0, shadow, toon);
     }
 
     // Rim light: brightens the silhouette edge, a common cel-shading accent.

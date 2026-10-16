@@ -106,14 +106,21 @@ COOPA_TEST(snow_pattern_rides_with_a_moving_object) {
             m.push_back(toy::world::snow_patch_mask(glm::vec2(centre) + glm::vec2(i, j) * 0.12f, 0.45f, 1.0f, size));
         return m;
     };
+    // Searched along -Y, and never along X. `crate_bare` -- the snow: false control -- sits 1.8 m
+    // away in X and only 0.5 m in Y, so an X offset anywhere near its separation slides this
+    // crate straight into it, and the centre window below then measures the CONTROL's snowless
+    // lid against this one's snowy lid: a guaranteed failure that has nothing to do with whether
+    // the pattern rode along. Moving in Y leaves the X separation untouched at 1.8 m whatever
+    // offset the search picks, so the two cannot overlap by construction rather than by luck.
+    // Negative Y also carries the crate toward the snow field's middle instead of off its edge.
     glm::vec3 delta(0.0f);
     float best = 0.0f;
-    for (float dx = 0.5f; dx <= 3.0f; dx += 0.25f) {
-        const auto a = lid_mask(start), b = lid_mask(start + glm::vec3(dx, 0.0f, 0.0f));
+    for (float dy = 0.5f; dy <= 3.0f; dy += 0.25f) {
+        const auto a = lid_mask(start), b = lid_mask(start + glm::vec3(0.0f, -dy, 0.0f));
         float d = 0.0f;
         for (size_t k = 0; k < a.size(); ++k) d += std::abs(a[k] - b[k]);
         d /= static_cast<float>(a.size());
-        if (d > best) { best = d; delta = glm::vec3(dx, 0.0f, 0.0f); }
+        if (d > best) { best = d; delta = glm::vec3(0.0f, -dy, 0.0f); }
     }
     expect(best > 0.3f, "snow ride: a world-fixed pattern would change the lid's snow (" + std::to_string(best) + ")");
 

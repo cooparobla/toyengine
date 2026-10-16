@@ -97,6 +97,18 @@ const std::vector<SettingsGroup>& render_settings_groups() {
             .add(F(f_float("spec_threshold", 0.55f, 0.005f, 0.0f, 1.0f), "Specular Threshold",
                    "Banded shading: brightness a specular highlight must reach to show (hard cutoff)"))
             .add(F(f_float("rim_strength", 0.0f, 0.005f, 0.0f, 4.0f), "Rim Light", "Strength of a rim highlight on silhouettes; 0 disables it"))
+            .sub("Toon Materials")
+            .add(F(f_float("toon_strength", 1.0f, 0.005f, 0.0f, 1.0f), "Strength",
+                   "Master dial for every material with Light Steps set; 0 renders them all as plain PBR"))
+            .add(F(f_float("toon_spec_threshold", 0.35f, 0.005f, 0.0f, 1.0f), "Highlight Cutoff",
+                   "Where the hard highlight cuts the reflection lobe, as a share of its peak -- so one value "
+                   "behaves the same on a mirror and on a matte surface"))
+            .add(F(f_float("toon_spec_edge", 0.08f, 0.005f, 0.0f, 1.0f), "Highlight Edge", "Width of that cutoff; 0 is a hard edge"))
+            .add(F(f_float("toon_rim_power", 3.0f, 0.05f, 0.1f, 16.0f), "Rim Falloff", "Higher is a thinner rim accent"))
+            .add(F(listed(f_color("toon_shadow_tint", glm::vec3(1.0f))), "Shade Tint",
+                   "Colour the darkest bands are pulled toward. White is no tint"))
+            .add(F(f_bool("toon_band_attenuation", true), "Band Light Pools",
+                   "Step point and spot lights' distance falloff too, for hard-edged pools of light"))
             .sub("Sky")
             .add(with_default(F(f_enum("sky_model", {"gradient", "physical"}), "Sky Model",
                                 "gradient: the three colours below, drawn as is (cheap, stylised). physical: a physically "
@@ -524,6 +536,8 @@ const std::vector<SettingsGroup>& render_settings_groups() {
         // =====================================================================================
         g.push_back(GroupBuilder(stylize, "Outline", "Ink lines along depth and normal edges")
             .toggle(F(f_bool("outline_enabled", true), "Outline", "Draw edge outlines"))
+            .add(F(f_enum("outline_mode", {"all", "toon"}), "Lines On",
+                   "all: every edge in the frame. toon: only materials whose Outline box is ticked"))
             .add(F(f_float("outline_thickness", 1.0f, 0.05f, 0.0f, 8.0f), "Thickness", "Line width, in render pixels"))
             .add(F(listed(f_color4("outline_color", glm::vec4(0.05f, 0.04f, 0.08f, 1.0f))), "Colour", "Line colour and opacity"))
             .add(F(f_float("depth_threshold", 0.02f, 0.001f, 0.0f, 10.0f), "Depth Threshold", "Relative depth jump that counts as an edge; lower = more lines"))

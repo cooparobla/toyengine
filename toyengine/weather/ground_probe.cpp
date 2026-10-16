@@ -1,5 +1,7 @@
 #include <toyengine/weather/ground_probe.h>
 
+#include <cmath>
+
 #include <coopa/scene/scene.h>
 #include <gfxcoopa/engine/components/mesh_renderer.h>
 #include <physxcoopa/components/rigidbody.h>
@@ -12,6 +14,37 @@
 
 namespace toy {
 namespace weather {
+
+namespace {
+
+/**
+ * @brief The lowest point of `obj`'s meshes in the world (itself and its children), or NaN when
+ *        it draws nothing. The sky ray restarts below this rather than just below the surface it
+ *        hit: a ray re-entering the body it is trying to see past makes no progress.
+ */
+float body_bottom_(const coopa::scene::SceneObject* obj) {
+    using coopa::gfx::engine::components::MeshRenderer;
+    float bottom = std::numeric_limits<float>::quiet_NaN();
+    if (!obj) return bottom;
+    auto* self = const_cast<coopa::scene::SceneObject*>(obj);
+    if (auto* mr = self->get_component<MeshRenderer>()) {
+        if (auto mesh = mr->get_mesh()) {
+            if (auto* tc = self->get_transform(); tc && mesh->bounds_min().x <= mesh->bounds_max().x) {
+                const render::WorldBounds b = render::world_aabb(tc->transform().get_world_matrix(),
+                                                                mesh->bounds_min(), mesh->bounds_max());
+                bottom = b.center.z - b.extent.z;
+            }
+        }
+    }
+    for (const auto& child : self->children()) {
+        const float c = body_bottom_(child.get());
+        if (!std::isnan(c) && (std::isnan(bottom) || c < bottom)) bottom = c;
+    }
+    return bottom;
+}
+
+} // namespace
+
 
 int GroundProbe::known_cells() const {
     int k = 0;
@@ -161,7 +194,11 @@ void GroundProbe::probe_physics_(const coopa::physx::system::PhysicsSystem& phys
             coopa::physx::system::PhysicsSystem::RaycastHit sky_hit = hit;
             for (int pass = 0; pass < 3 && sky_found && moving_(sky_hit.object); ++pass) {
                 coopa::physx::geometry::Ray below = ray;
-                below.origin.z = sky_hit.point.z - 0.02f;
+                // Below the whole body, not just below the surface hit: a ray restarted inside a
+                // box hits that same box again and the passes run out with the body still in the
+                // way -- which is what leaves a 1 m square of ground "sheltered" under a crate.
+                const float bottom = body_bottom_(sky_hit.object);
+                below.origin.z = std::min(sky_hit.point.z, std::isnan(bottom) ? sky_hit.point.z : bottom) - 0.02f;
                 below.max_distance = std::max(0.0f, ray.max_distance - (ray.origin.z - below.origin.z));
                 sky_found = physics.raycast(below, sky_hit, ~0u, /*include_triggers=*/false);
             }

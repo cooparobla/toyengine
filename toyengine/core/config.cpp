@@ -114,6 +114,19 @@ AppConfig AppConfig::from_node(const fkyaml::node& root) {
             if (r.contains("light_bands"))       config.render.light_bands       = r.at("light_bands").get_value<float>();
             if (r.contains("spec_threshold"))    config.render.spec_threshold    = r.at("spec_threshold").get_value<float>();
             if (r.contains("rim_strength"))      config.render.rim_strength      = r.at("rim_strength").get_value<float>();
+            // --- Per-material toon shading (scene-wide tuning; see PBRMaterial::toon_bands) ---
+            if (r.contains("toon_strength"))       config.render.toon_strength       = r.at("toon_strength").get_value<float>();
+            if (r.contains("toon_spec_threshold")) config.render.toon_spec_threshold = r.at("toon_spec_threshold").get_value<float>();
+            if (r.contains("toon_spec_edge"))      config.render.toon_spec_edge      = r.at("toon_spec_edge").get_value<float>();
+            if (r.contains("toon_rim_power"))      config.render.toon_rim_power      = r.at("toon_rim_power").get_value<float>();
+            if (r.contains("toon_band_attenuation")) config.render.toon_band_attenuation = r.at("toon_band_attenuation").get_value<bool>();
+            if (r.contains("toon_shadow_tint")) {
+                const auto& c = r.at("toon_shadow_tint");
+                if (c.size() >= 3) {
+                    config.render.toon_shadow_tint = glm::vec3(
+                        c.at(0).get_value<float>(), c.at(1).get_value<float>(), c.at(2).get_value<float>());
+                }
+            }
             if (r.contains("ambient_intensity")) config.render.indirect.ambient_intensity = r.at("ambient_intensity").get_value<float>();
             if (r.contains("sky_intensity"))     config.render.indirect.sky_intensity     = r.at("sky_intensity").get_value<float>();
             if (r.contains("sky_zenith")) {
@@ -217,6 +230,7 @@ AppConfig AppConfig::from_node(const fkyaml::node& root) {
             if (r.contains("contact_shadow_temporal_frames")) config.render.contact_shadow_temporal_frames = r.at("contact_shadow_temporal_frames").get_value<int>();
 
             // --- Outline ---
+            if (r.contains("outline_mode"))      config.render.outline_mode      = r.at("outline_mode").get_value<std::string>();
             if (r.contains("outline_thickness")) config.render.outline_thickness = r.at("outline_thickness").get_value<float>();
             if (r.contains("outline_color")) {
                 const auto& c = r.at("outline_color");

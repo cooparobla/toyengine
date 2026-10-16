@@ -1,0 +1,704 @@
+# snow_demo -- lying snow: the cover layer that gathers on geometry, and the deep snow that
+# objects press depressions into (toyengine/weather/ + toyengine/world/snow_system.h).
+#
+# Run: ./build/toyengine snow_demo        (or SCENE=snow_demo)
+#
+# The weather cycles three conditions with the clock stopped at noon, so the whole snow model
+# plays out in about four minutes without touching anything:
+#
+#   0:00  cold_calm   frozen, bare ground -- what the scene looks like before any snow
+#   0:05  snowfall    flakes fall: the cover builds on every up-facing surface over
+#                     snow_accumulate_time (25 s) and the field rises to snow_max_depth (0.35 m)
+#   3:05  thaw        +7 C: the cover melts off over snow_melt_time (40 s), then it cycles back
+#
+#   field         the only `shader: snow` surface (18 m, tessellated): DEEP snow, raised by the
+#                 cover and carved by the deformers. Everything else takes the cover layer only
+#   crates        three boxes resting in the snow: the cover grows on their lids, not their sides
+#
+# Props that rest IN the snow (wall, crates, boulder, bench, steps) carry a kinematic
+# Rigidbody, so the precipitation map's sky layer looks THROUGH them and the snow lies
+# level right against them rather than a 1 m-cell hole opening around them. They press
+# nothing (`SnowDeformer` with `depth: 0`): every depression here is made by something
+# that moves. What is meant to shelter the ground -- the roof, the pines -- stays static.
+#   crate_bare    the same crate with `snow: false` -- the opt-out control, stays bare all through
+#   steps         four treads at 0.45 / 0.7 / 0.95 / 1.2 m: snow on the treads, bare risers
+#   wall / bench  a stone wall and a wooden bench: broad flat tops, the clearest read on how
+#                 deep the cover has grown
+#   boulder       a sphere: the cover creeps down its sides as the cover deepens
+#   shelter       a roof on four posts: the ground under it stays BARE (the precipitation map's
+#                 sky layer), and the deep snow does not rise there either
+#   sled          a kinematic box on an orbit with a SnowDeformer: it ploughs a trench that fills
+#                 back in behind it over snow_trench_recover_time (6 s) -- a trail, not a ring
+#   roller        a ping-ponging sphere with NO SnowDeformer: the weather's snow_auto_deformers
+#                 presses every Rigidbody in, at its own bounds' radius
+#   snowball      a dynamic sphere dropped at the start: one dent where it lands, then it rolls
+#   player        the mannequin (WASD / Shift / Space): a SnowDeformer on each foot JOINT of
+#                 the rig, so every planted step leaves its own print and the swinging foot
+#                 leaves none. The camera orbits it -- drag to look, scroll to zoom
+#
+# Needs render transparency_enabled (the flakes are particles), set per-scene below. Worth
+# sweeping: the weather block's snow_patch_style (hard / soft), snow_patch_size, snow_max_depth,
+# snow_trench_recover_time and snow_accumulate_time; render.snow_cover_override (0..1, or -1 to
+# let the weather drive it) forces the amount without waiting for the cycle.
+scene:
+  scene_name: snow_demo
+  settings:
+    render:
+      transparency_enabled: true
+    weather:
+      enabled: true
+      time_of_day: 12.0
+      day_length_minutes: 0        # the clock stands still: one light for the whole cycle
+      latitude: 45
+      north_offset: -25
+      drive_sun: true
+      sun_intensity: 1.1
+      ground_height: 0.0
+      surface_collision: true      # the flakes stop on the roof and the crates
+      ground_effects: true         # settling flakes on WeatherSurface objects
+      # --- Lying snow -----------------------------------------------------------------------
+      initial_snow_cover: 0.0      # bare at startup: cold_calm does not snow, so it stays 0
+      snow_accumulate_time: 25     # s of full snowfall to full cover
+      snow_melt_time: 40           # s of +5 C to melt it all
+      snow_max_depth: 0.35         # m the field rises by at full cover
+      snow_auto_deformers: true    # every Rigidbody presses in, SnowDeformer or not
+      snow_trench_recover_time: 6  # s for a full-depth track to fill back in
+      snow_patch_style: hard       # round, crisp-edged patches (soft = noisy drifts)
+      snow_patch_size: 1.1         # m, a patch's typical diameter
+      # --- Schedule -------------------------------------------------------------------------
+      condition: cold_calm
+      schedule: cycle              # in list order, so the demo always plays the same way
+      seed: 7
+      conditions:
+        - name: cold_calm
+          duration: [0.08, 0.08]   # real minutes: ~5 s of bare, frozen ground
+          transition: 1
+          cloud_cover: 0.55
+          sun: 0.85
+          ambient: 0.95
+          sky_tint: { r: 0.95, g: 0.97, b: 1.03 }
+          fog_density: 0.004
+          fog_color: { r: 0.80, g: 0.84, b: 0.90 }
+          fog_sky_blend: 0.4
+          wind_strength: 1.5
+          wind_heading: 200
+          temperature: -9          # below freezing, but nothing falling: the cover holds
+          precipitation: 0.0
+          wetness: 0.1
+        - name: snowfall
+          duration: [3.0, 3.0]
+          transition: 6
+          cloud_cover: 0.85
+          sun: 0.55
+          ambient: 0.95
+          sky_tint: { r: 0.95, g: 0.97, b: 1.02 }
+          fog_density: 0.0095
+          fog_color: { r: 0.82, g: 0.85, b: 0.90 }
+          fog_sky_blend: 0.5
+          fog_sun_amount: 0.2
+          wind_strength: 2.5
+          wind_heading: 200
+          wind_gust: 0.3
+          temperature: -6
+          precipitation: 0.9
+          wetness: 0.2
+          effects:
+            - { prefab: objects/weather_snow, intensity: 1.2, follow: camera, offset: { x: 0, y: 0, z: 3 }, wind_influence: 0.8 }
+        - name: thaw
+          duration: [1.0, 1.0]
+          transition: 8
+          cloud_cover: 0.4
+          sun: 0.9
+          ambient: 1.0
+          sky_tint: { r: 1.0, g: 1.0, b: 1.0 }
+          fog_density: 0.003
+          fog_color: { r: 0.78, g: 0.82, b: 0.88 }
+          wind_strength: 2.0
+          wind_heading: 200
+          temperature: 7           # above freezing: the cover melts off
+          precipitation: 0.0
+          wetness: 0.5
+  root_objects:
+    # --- Ground -------------------------------------------------------------------------
+    # The snow field: the scene's only deep snow. The weather raises it and the deformers
+    # carve it, so it is tessellated to have vertices for the field's 10 cm trench cells.
+    - name: field
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 9.0, y: 9.0, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: snow_ground
+          material:
+            shader: snow
+            albedo: { r: 0.21, g: 0.19, b: 0.17 }
+            roughness: 0.95
+            metallic: 0.0
+            ao: 1.0
+          tessellation: true
+          tess_edge_pixels: 3
+          tess_max_factor: 64
+          tess_max_distance: 45
+        - type: BoxCollider
+          size: { x: 2.0, y: 2.0, z: 0.2 }
+          center: { x: 0.0, y: 0.0, z: -0.1 }
+        - type: WeatherSurface
+          splashes: true
+      children: []
+    # Frozen ground past the field's edge, 5 cm lower: it takes the cover layer (flat snow)
+    # but never the deep snow, so the field's raised lip reads against it.
+    - name: surround
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: -0.05 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 25.0, y: 25.0, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material: { base: materials/stone, albedo: { r: 0.26, g: 0.25, b: 0.24 }, roughness: 0.95 }
+        - type: BoxCollider
+          size: { x: 2.0, y: 2.0, z: 0.2 }
+          center: { x: 0.0, y: 0.0, z: -0.1 }
+        - type: WeatherSurface
+          splashes: true
+      children: []
+
+    # --- Accumulation station (west): what the cover layer settles on -------------------
+    # Everything here is a plain opaque material: the snow rides on the up-facing faces only,
+    # in round patches that close up as the cover deepens (snow_patch_style: hard).
+    - name: wall
+      active: true
+      components:
+        - type: Transform
+          position: { x: -6.6, y: 4.0, z: 0.45 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 3.6, y: 0.5, z: 0.9 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/stone
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Rigidbody
+          mass: 80.0
+          is_kinematic: true
+          use_gravity: false
+        - type: SnowDeformer
+          radius: 0.5
+          depth: 0
+          falloff: 0.5
+      children: []
+    - name: bench_top
+      active: true
+      components:
+        - type: Transform
+          position: { x: -2.6, y: 3.4, z: 0.62 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 2.2, y: 0.8, z: 0.12 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/wood
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+      children: []
+    - name: bench_leg_0
+      active: true
+      components:
+        - type: Transform
+          position: { x: -3.5, y: 3.4, z: 0.3 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.14, y: 0.6, z: 0.6 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/wood
+        - type: Rigidbody
+          mass: 80.0
+          is_kinematic: true
+          use_gravity: false
+        - type: SnowDeformer
+          radius: 0.5
+          depth: 0
+          falloff: 0.5
+      children: []
+    - name: bench_leg_1
+      active: true
+      components:
+        - type: Transform
+          position: { x: -1.7, y: 3.4, z: 0.3 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.14, y: 0.6, z: 0.6 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/wood
+        - type: Rigidbody
+          mass: 80.0
+          is_kinematic: true
+          use_gravity: false
+        - type: SnowDeformer
+          radius: 0.5
+          depth: 0
+          falloff: 0.5
+      children: []
+    - name: crate_low
+      active: true
+      components:
+        - type: Transform
+          position: { x: -5.4, y: 1.4, z: 0.5 }
+          rotation: { x: 0, y: 0, z: 15 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/wood_crate
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Rigidbody
+          mass: 80.0
+          is_kinematic: true
+          use_gravity: false
+        - type: SnowDeformer
+          radius: 0.5
+          depth: 0
+          falloff: 0.5
+      children: []
+    # Beside crate_low, NOT on top of it: the sky ray that looks through moving bodies gives
+    # up after three of them, so a column of two crates leaves its own cell reading the lower
+    # lid as the sky -- and the snow vanishes in a 1 m square around the stack.
+    - name: crate_tipped
+      active: true
+      components:
+        - type: Transform
+          position: { x: -4.3, y: 2.4, z: 0.5 }
+          rotation: { x: 0, y: 0, z: -34 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/wood_crate
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Rigidbody
+          mass: 80.0
+          is_kinematic: true
+          use_gravity: false
+        - type: SnowDeformer
+          radius: 0.5
+          depth: 0
+          falloff: 0.5
+      children: []
+    # The control, beside crate_low: `snow: false` opts this material out of the cover layer.
+    - name: crate_bare
+      active: true
+      components:
+        - type: Transform
+          position: { x: -3.6, y: 1.0, z: 0.5 }
+          rotation: { x: 0, y: 0, z: -14 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { base: materials/wood_crate, snow: false }
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Rigidbody
+          mass: 80.0
+          is_kinematic: true
+          use_gravity: false
+        - type: SnowDeformer
+          radius: 0.5
+          depth: 0
+          falloff: 0.5
+      children: []
+    - name: boulder
+      active: true
+      components:
+        - type: Transform
+          position: { x: -7.4, y: 0.6, z: 0.8 }
+          rotation: { x: 0, y: 0, z: 20 }
+          scale: { x: 1.1, y: 0.95, z: 0.8 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: materials/stone
+        - type: SphereCollider
+          radius: 1.0
+        - type: Rigidbody
+          mass: 80.0
+          is_kinematic: true
+          use_gravity: false
+        - type: SnowDeformer
+          radius: 0.5
+          depth: 0
+          falloff: 0.5
+      children: []
+    # Steps: snow on the treads, bare risers.
+    - name: step_0
+      active: true
+      components:
+        - type: Transform
+          position: { x: -6.1, y: -2.4, z: 0.225 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1.2, y: 1.8, z: 0.45 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/concrete
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Rigidbody
+          mass: 80.0
+          is_kinematic: true
+          use_gravity: false
+        - type: SnowDeformer
+          radius: 0.5
+          depth: 0
+          falloff: 0.5
+      children: []
+    - name: step_1
+      active: true
+      components:
+        - type: Transform
+          position: { x: -4.8, y: -2.4, z: 0.35 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1.2, y: 1.8, z: 0.7 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/concrete
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Rigidbody
+          mass: 80.0
+          is_kinematic: true
+          use_gravity: false
+        - type: SnowDeformer
+          radius: 0.5
+          depth: 0
+          falloff: 0.5
+      children: []
+    - name: step_2
+      active: true
+      components:
+        - type: Transform
+          position: { x: -3.5, y: -2.4, z: 0.475 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1.2, y: 1.8, z: 0.95 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/concrete
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Rigidbody
+          mass: 80.0
+          is_kinematic: true
+          use_gravity: false
+        - type: SnowDeformer
+          radius: 0.5
+          depth: 0
+          falloff: 0.5
+      children: []
+    - name: step_3
+      active: true
+      components:
+        - type: Transform
+          position: { x: -2.2, y: -2.4, z: 0.6 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1.2, y: 1.8, z: 1.2 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/concrete
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Rigidbody
+          mass: 80.0
+          is_kinematic: true
+          use_gravity: false
+        - type: SnowDeformer
+          radius: 0.5
+          depth: 0
+          falloff: 0.5
+      children: []
+    # Two blockout pines at the back. Static, like the shelter: their canopy keeps the snow
+    # off the ground under them (the precipitation map's sky layer).
+    - name: pine_west_trunk
+      active: true
+      components:
+        - type: Transform
+          position: { x: -7.6, y: 6.4, z: 1.1 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.3, y: 0.3, z: 2.2 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/wood
+      children: []
+    - name: pine_west_crown
+      active: true
+      components:
+        - type: Transform
+          position: { x: -7.6, y: 6.4, z: 3.3 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1.8, y: 1.8, z: 2.1 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.11, g: 0.22, b: 0.14 }, roughness: 0.9, metallic: 0.0 }
+        - type: SphereCollider
+          radius: 1.0
+      children: []
+    - name: pine_east_trunk
+      active: true
+      components:
+        - type: Transform
+          position: { x: 6.9, y: 6.8, z: 1.1 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.3, y: 0.3, z: 2.2 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/wood
+      children: []
+    - name: pine_east_crown
+      active: true
+      components:
+        - type: Transform
+          position: { x: 6.9, y: 6.8, z: 3.3 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1.8, y: 1.8, z: 2.1 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.11, g: 0.22, b: 0.14 }, roughness: 0.9, metallic: 0.0 }
+        - type: SphereCollider
+          radius: 1.0
+      children: []
+
+    # --- Shelter (east): a roof, so the ground under it stays bare ----------------------
+    # The precipitation map probes the colliders: nothing lands here, the cover layer skips
+    # the ground beneath, and the deep snow does not rise there either.
+    - name: shelter
+      active: true
+      components:
+        - type: Transform
+          position: { x: 4.2, y: 2.6, z: 0.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1, y: 1, z: 1 }
+      children:
+        - name: roof
+          active: true
+          components:
+            - type: Transform
+              position: { x: 0.0, y: 0.0, z: 2.4 }
+              rotation: { x: 0, y: 0, z: 0 }
+              scale: { x: 2.0, y: 1.7, z: 0.12 }
+            - type: MeshRenderer
+              mesh_path: cube
+              material: materials/wood
+            - type: BoxCollider
+              size: { x: 1.0, y: 1.0, z: 1.0 }
+          children: []
+        - name: shelter_post_0
+          active: true
+          components:
+            - type: Transform
+              position: { x: -0.9, y: -0.7, z: 1.2 }
+              rotation: { x: 0, y: 0, z: 0 }
+              scale: { x: 0.14, y: 0.14, z: 2.4 }
+            - type: MeshRenderer
+              mesh_path: cube
+              material: materials/wood
+            - type: BoxCollider
+              size: { x: 1.0, y: 1.0, z: 1.0 }
+          children: []
+        - name: shelter_post_1
+          active: true
+          components:
+            - type: Transform
+              position: { x: 0.9, y: -0.7, z: 1.2 }
+              rotation: { x: 0, y: 0, z: 0 }
+              scale: { x: 0.14, y: 0.14, z: 2.4 }
+            - type: MeshRenderer
+              mesh_path: cube
+              material: materials/wood
+            - type: BoxCollider
+              size: { x: 1.0, y: 1.0, z: 1.0 }
+          children: []
+        - name: shelter_post_2
+          active: true
+          components:
+            - type: Transform
+              position: { x: -0.9, y: 0.7, z: 1.2 }
+              rotation: { x: 0, y: 0, z: 0 }
+              scale: { x: 0.14, y: 0.14, z: 2.4 }
+            - type: MeshRenderer
+              mesh_path: cube
+              material: materials/wood
+            - type: BoxCollider
+              size: { x: 1.0, y: 1.0, z: 1.0 }
+          children: []
+        - name: shelter_post_3
+          active: true
+          components:
+            - type: Transform
+              position: { x: 0.9, y: 0.7, z: 1.2 }
+              rotation: { x: 0, y: 0, z: 0 }
+              scale: { x: 0.14, y: 0.14, z: 2.4 }
+            - type: MeshRenderer
+              mesh_path: cube
+              material: materials/wood
+            - type: BoxCollider
+              size: { x: 1.0, y: 1.0, z: 1.0 }
+          children: []
+
+    # --- Depressions (south): what presses into the deep snow --------------------------
+    # A SnowDeformer presses a disc in while its base is at or below the snow surface.
+    # depth: -1 means "down to the object's own base"; falloff shapes the edge.
+    - name: sled
+      active: true
+      components:
+        - type: Transform
+          position: { x: 4.6, y: -3.2, z: 0.26 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.55, y: 0.95, z: 0.5 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: materials/copper
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Rigidbody
+          mass: 30.0
+          is_kinematic: true
+          use_gravity: false
+        - type: KinematicMover
+          mode: orbit
+          orbit_center: { x: 2.6, y: -3.2, z: 0.26 }
+          orbit_radius: 2.0
+          speed: 45.0
+        - type: SnowDeformer
+          radius: 0.4
+          depth: -1
+          falloff: 0.45
+      children: []
+    # No SnowDeformer: the weather's snow_auto_deformers presses it in from its bounds.
+    - name: roller
+      active: true
+      components:
+        - type: Transform
+          position: { x: -3.2, y: -3.8, z: 0.45 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.45, y: 0.45, z: 0.45 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: materials/steel
+        - type: SphereCollider
+          radius: 1.0
+        - type: Rigidbody
+          mass: 20.0
+          is_kinematic: true
+          use_gravity: false
+        - type: KinematicMover
+          mode: pingpong
+          axis: { x: 1.0, y: 0.0, z: 0.0 }
+          distance: 4.0
+          speed: 0.12
+      children: []
+    # Dropped at the start: one dent where it lands (an auto deformer), then it rolls.
+    - name: snowball
+      active: true
+      components:
+        - type: Transform
+          position: { x: 5.6, y: -0.4, z: 3.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.4, y: 0.4, z: 0.4 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: materials/plastic
+        - type: SphereCollider
+          radius: 1.0
+        - type: Rigidbody
+          mass: 4.0
+          drag: 0.02
+      children: []
+    # The player: walk over the field and each planted foot leaves its own print.
+    - name: player
+      prefab: objects/mannequin
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -2.0, z: 0.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: CharacterController
+          radius: 0.3
+          height: 1.8
+          step_height: 0.35
+          slope_limit: 45.0
+          move_speed: 3.0
+          sprint_multiplier: 1.8
+          jump_height: 1.2
+        - type: CharacterAnimDriver
+          walk_speed: 0.2
+          run_speed: 4.0
+          crossfade: 0.2
+        # The body presses nothing (depth 0): the feet below do. It also keeps
+        # snow_auto_deformers off the controller's own Rigidbody, which would otherwise
+        # drag one continuous disc along instead of leaving separate prints.
+        - type: SnowDeformer
+          radius: 0.3
+          depth: 0
+          falloff: 0.3
+      children:
+        - name: pelvis
+          children:
+            - name: thigh_l
+              children:
+                - name: shin_l
+                  children:
+                    - name: foot_l
+                      components:
+                        - type: SnowDeformer
+                          radius: 0.15
+                          depth: -1
+                          falloff: 0.25
+            - name: thigh_r
+              children:
+                - name: shin_r
+                  children:
+                    - name: foot_r
+                      components:
+                        - type: SnowDeformer
+                          radius: 0.15
+                          depth: -1
+                          falloff: 0.25
+
+    # --- Camera and sun ----------------------------------------------------------------
+    # Orbits the player, so the snow field's trench window follows where it looks.
+    - name: camera
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -12.5, z: 7.6 }
+          rotation: { x: 54.0, y: 0.0, z: 0.0 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: Camera
+          main: true
+          projection: Perspective
+          fov: 55.0
+          near_clip_plane: 0.1
+          far_clip_plane: 400.0
+        - type: CameraController
+          mode: orbit
+          tracker: player
+          target_offset: { x: 0.0, y: 0.0, z: 1.2 }
+          distance: 13.0
+          yaw_deg: 0.0
+          pitch_deg: 36.0
+          min_distance: 3.0
+          max_distance: 45.0
+          auto_rotate_deg_per_sec: 0.0
+      children: []
+    # The weather aims and colours this light from its clock (drive_sun).
+    - name: sun
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 30.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: DirectionalLight
+          direction: { x: -0.35, y: 0.3, z: -0.89 }
+          color: { r: 1.0, g: 0.97, b: 0.93 }
+          intensity: 1.1
+          cast_shadows: true
+      children: []

@@ -1,7 +1,20 @@
 scene:
   scene_name: planet_demo
+  # A globe to look at, not a world to walk on: the whole planet is in frame, and the controls
+  # are a model viewer's --
+  #   left-drag    spins the planet (Turntable, on the planet itself)
+  #   right-drag   orbits the camera round it
+  #   WASD/arrows  orbit the camera too (key_orbit_speed_deg_per_sec)
+  #   wheel        zooms, 155 m (just off the peaks) to 900 m
+  # Spinning the planet and orbiting the camera are different pictures, which is why both are
+  # here: spinning turns the continents under a sun that stays put on screen, orbiting carries
+  # the viewer round to the night side.
+  #
+  # Nothing here is a physics body, so the terrain carries no colliders and registers no
+  # gravity (`collision: false`, `gravity: 0`) -- 1176 chunks of welded collision mesh is what
+  # made this scene take tens of seconds to come up, and nothing in it would have stood on them.
   settings:
-    render: { fog_density: 0.0015, shadow_distance: 3.0e+02, shadow_softness: 0.35 }
+    render: { fog_density: 0.0, shadow_distance: 7.0e+02, shadow_softness: 0.35 }
   root_objects:
     - name: planet
       active: true
@@ -11,14 +24,20 @@ scene:
           rotation: { x: 0.0, y: 0.0, z: 0.0 }
           scale: { x: 1.0, y: 1.0, z: 1.0 }
         - type: TileTerrain
+          # 16 is load-bearing, not a default: the parser trims face_tiles to a multiple of it
+          # (216 -> 208 here), and terrain/planet.tiles is baked at that width. Changing it
+          # reads the stored tiles at the wrong size -- bands of missing sea -- until the world
+          # is regenerated. With the chunk LODs in, 24 measured faster (half the draws, a third
+          # less culling work); take it together with a re-bake, not on its own.
           chunk_size: 16
-          face_tiles: 96
+          collision: false
+          face_tiles: 216
           generator:
             grid_size: 40
             image_size: 2400
             seed: 315546511
             shape: { shape: archipelago }
-          gravity: 9.81
+          gravity: 0.0
           height_scale: 12.0
           height_step: 1.0
           kind_tile_sets: { rock: objects/terrain/tileset_rock, stone: objects/terrain/tileset_rock }
@@ -30,104 +49,50 @@ scene:
           tile_size: 1.0
           water_inset: 0.5
           world_tiles: 160
-      children: []
-    - name: player
-      prefab: objects/mannequin
-      components:
-        - type: Transform
-          position: { x: 0.0, y: 13.0, z: 77.0 }
-          rotation: { x: 0.0, y: 0.0, z: 0.0 }
-          scale: { x: 1.0, y: 1.0, z: 1.0 }
-        - type: CharacterController
-          height: 1.8
-          jump_height: 1.2
-          move_speed: 3.0
-          radius: 0.3
-          slope_limit: 5.0e+01
-          sprint_multiplier: 2.0
-          step_height: 1.1
-          use_root_motion: true
-        - { type: Animator, apply_root_motion: true }
-        - { type: CharacterAnimDriver, crossfade: 0.2, run_speed: 4.0, walk_speed: 0.2 }
-        - { type: FootIK, ray_down: 0.4, ray_up: 0.45 }
-    - name: drop_ball_red
-      active: true
-      components:
-        - type: Transform
-          position: { x: 75.0, y: 0.0, z: 1.0e+01 }
-          scale: { x: 1.5, y: 1.5, z: 1.5 }
-        - type: MeshRenderer
-          material:
-            albedo: { b: 0.15, g: 0.2, r: 0.85 }
-            metallic: 0.0
-            roughness: 0.5
-          mesh_path: sphere_low
-        - { type: SphereCollider, material: rubber, radius: 1.0 }
-        - { type: Rigidbody, mass: 1.0e+01 }
-      children: []
-    - name: drop_ball_blue
-      active: true
-      components:
-        - type: Transform
-          position: { x: 1.0e+01, y: -75.0, z: 0.0 }
-          scale: { x: 1.5, y: 1.5, z: 1.5 }
-        - type: MeshRenderer
-          material:
-            albedo: { b: 0.85, g: 0.35, r: 0.15 }
-            metallic: 0.0
-            roughness: 0.5
-          mesh_path: sphere_low
-        - { type: SphereCollider, material: rubber, radius: 1.0 }
-        - { type: Rigidbody, mass: 1.0e+01 }
-      children: []
-    - name: drop_crate
-      active: true
-      components:
-        - type: Transform
-          position: { x: 0.0, y: 1.0e+01, z: 75.0 }
-          rotation: { x: 1.0e+01, y: 2.0e+01, z: 3.0e+01 }
-          scale: { x: 2.0, y: 2.0, z: 2.0 }
-        - type: MeshRenderer
-          material:
-            albedo: { b: 0.24, g: 0.42, r: 0.62 }
-            metallic: 0.0
-            roughness: 0.8
-          mesh_path: cube
-        - type: BoxCollider
-          material: wood
-          size: { x: 1.0, y: 1.0, z: 1.0 }
-        - { type: Rigidbody, mass: 4.0e+01 }
+        # Drag to spin the globe, let go and it keeps turning; it drifts slowly on its own.
+        - type: Turntable
+          damping: 1.2
+          drag_button: left
+          idle_spin_deg_per_sec: 2.0
+          max_tilt_deg: 8.0e+01
+          min_tilt_deg: -8.0e+01
+          sensitivity: 0.25
       children: []
     - name: camera
       active: true
       components:
+        # 420 m out from a planet of radius 2 * 216 / pi = 137.5 m: the globe sits inside the
+        # 50-degree frame with room around it. Elevated 18 degrees, as the orbit rig below.
         - type: Transform
-          position: { x: 0.0, y: 5.0, z: 82.0 }
-          rotation: { x: 65.0, y: 0.0, z: 0.0 }
+          position: { x: 0.0, y: -3.9944e+02, z: 1.2979e+02 }
+          rotation: { x: 72.0, y: 0.0, z: 0.0 }
           scale: { x: 1.0, y: 1.0, z: 1.0 }
         - type: Camera
-          far_clip_plane: 2.0e+03
+          far_clip_plane: 2.5e+03
           fov: 5.0e+01
           main: true
-          near_clip_plane: 0.3
+          near_clip_plane: 1.0
           projection: Perspective
+        # Orbits the planet's centre. The RIGHT button turns it, leaving the left one to the
+        # planet's own spin, and WASD / the arrow keys turn it as well. The cursor stays
+        # visible, since there is something here to drag with it.
         - type: CameraController
-          capture_cursor: true
-          collide: true
-          distance: 9.0
-          follow_smoothing: 1.0e+01
-          max_distance: 4.0e+02
+          capture_cursor: false
+          collide: false
+          distance: 4.2e+02
+          key_orbit_speed_deg_per_sec: 6.0e+01
+          look_button: right
+          max_distance: 9.0e+02
           max_pitch_deg: 85.0
-          min_distance: 2.0
-          min_pitch_deg: -2.0e+01
+          min_distance: 1.55e+02
+          min_pitch_deg: -85.0
           mode: orbit
-          mouse_sensitivity: 0.12
+          mouse_sensitivity: 0.15
           movement_smoothing: 0.25
-          pitch_deg: 25.0
-          target_offset: { x: 0.0, y: 0.0, z: 1.3 }
-          tracker: player
+          pitch_deg: 18.0
+          target: { x: 0.0, y: 0.0, z: 0.0 }
           yaw_deg: 0.0
-          zoom_speed: 2.0
+          zoom_speed: 2.0e+01
       children: []
     - name: sun
       active: true
@@ -136,10 +101,12 @@ scene:
           position: { x: 0.0, y: 0.0, z: 4.0e+01 }
           rotation: { x: 0.0, y: 0.0, z: 0.0 }
           scale: { x: 1.0, y: 1.0, z: 1.0 }
+        # Lighting the hemisphere the camera is on, from its upper left, so the terminator
+        # crosses the far right of the disc and the relief near it reads.
         - type: DirectionalLight
           cast_shadows: true
           color: { b: 0.9, g: 0.97, r: 1.0 }
-          direction: { x: -0.5, y: 0.45, z: -0.74 }
+          direction: { x: 0.35, y: 0.78, z: -0.52 }
           intensity: 1.35
           shadow_intensity: 0.75
       children: []

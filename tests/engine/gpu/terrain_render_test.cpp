@@ -595,3 +595,82 @@ COOPA_TEST(water_lies_over_the_beds_and_floats_a_crate) {
            "water: the crate floats at the surface (z " + std::to_string(z) + ", surface " + std::to_string(surface) +
                ", bed " + std::to_string(bed) + ")");
 }
+
+/**
+ * @brief A flat terrain's chunks carry LOD levels, and the frame draws a fraction of its
+ *        triangles once they are small enough on screen to take them.
+ *
+ * The LOD is a TileTerrain feature, not a planet one: a streamed world's outer rings are the
+ * same "small on screen, full density" waste a globe's far side is.
+ *
+ * Size on screen is driven through `mesh_lod_bias` rather than by flying the camera back: the
+ * bias is exactly what the selector multiplies the projected size by (see gather_meshes_()), so
+ * this exercises the real path while staying inside the demo's far clip and framing. Both
+ * measurements are of the same scene in the same pose -- what is compared is the level chosen.
+ *
+ * Chunk size matters here and is left at the demo's 32: a chunk's SEAM is held at full density
+ * through every level (chunk_seam_locks()), so a small chunk, whose tiles are mostly seam, has
+ * little left to simplify and may carry no levels at all.
+ */
+COOPA_TEST(far_chunks_draw_their_coarser_levels) {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016");
+    ScopedEnv no_input("NO_INPUT", "1");
+
+    toy::core::Engine engine(make_test_config(voxel_terrain_demo(), 320, 180, 160, 90));
+    auto* camera = coopa::gfx::engine::components::CameraComponent::main();
+    require(camera != nullptr && camera->scene != nullptr, "lod: the demo scene registers a main camera");
+    coopa::scene::Scene& scene = *camera->scene;
+    auto* terrain = scene.find_first_component<toy::world::TerrainComponent>();
+    require(terrain != nullptr, "lod: the demo scene carries a terrain");
+
+    // A small world in the demo's own 32-tile chunks: 32 cells x 2 tiles = 64 tiles, four chunks.
+    terrain->generator.grid_size        = 32;
+    terrain->generator.shape.shape      = coopa::maps::MapShape::Circle;
+    terrain->generator.shape.diameter_m = 0.0;
+    terrain->params.tiles_per_grid_unit = 2;
+    terrain->params.view_radius         = 1;
+
+    // The whole island in frame, so the saving measured below is every chunk's, not whichever
+    // ones the demo's default framing happened to include.
+    auto* cc = scene.find_first_component<toy::scene::CameraController>();
+    require(cc != nullptr, "lod: the demo camera is an orbit rig");
+    cc->max_distance = 240.0f;
+    cc->distance = 180.0f;
+    cc->movement_smoothing = 0.0f;
+
+    tick_until(engine, 900, [&] { return count_live_chunks(*terrain) >= 4; });
+    tick_frames(engine, 8);
+
+    int levelled = 0;
+    std::uint64_t saving = 0;   // triangles the coarsest level saves, over every chunk that has one
+    for (const auto& [coord, chunk] : terrain->chunks()) {
+        if (!chunk.mesh || chunk.mesh->lods().size() <= 1) continue;
+        ++levelled;
+        saving += (chunk.mesh->lods().front().index_count - chunk.mesh->lods().back().index_count) / 3;
+    }
+    expect(levelled > 0, "lod: the chunk meshes carry coarser levels (" + std::to_string(levelled) +
+                             " of " + std::to_string(count_live_chunks(*terrain)) + " chunks)");
+
+    // Pinned to LOD 0 -- every chunk reads as covering the whole screen.
+    engine.pipeline().render_config_mut().mesh_lod_bias = 1000.0f;
+    tick_frames(engine, 8);
+    const std::uint64_t full = engine.pipeline().last_frame_stats().camera_triangles;
+
+    // ...and at a fiftieth of their real size, where the coarsest level applies.
+    engine.pipeline().render_config_mut().mesh_lod_bias = 0.02f;
+    tick_frames(engine, 8);
+    const std::uint64_t coarse = engine.pipeline().last_frame_stats().camera_triangles;
+
+    expect(full > 0 && coarse > 0, "lod: both passes drew the terrain (" + std::to_string(coarse / 1000) +
+                                       "k, " + std::to_string(full / 1000) + "k triangles)");
+    // A tenth of the frame, not a fraction of `saving`: only the chunks the camera can see
+    // contribute to either figure, and how many that is belongs to the demo's framing rather
+    // than to this contract. What the check is really for is the regression where the levels
+    // stop being selected at all -- then the two frames are identical and the drop is zero.
+    // How far a single chunk's levels go is measured exactly, without a GPU, in
+    // tests/engine/unit/terrain_chunk_cost_test.cpp.
+    expect(saving > 0 && full > coarse && (full - coarse) * 10 >= full,
+           "lod: the frame drew materially fewer triangles on its coarse levels (" +
+               std::to_string(coarse / 1000) + "k vs " + std::to_string(full / 1000) +
+               "k, of a possible " + std::to_string(saving / 1000) + "k saving across every live chunk)");
+}

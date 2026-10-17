@@ -369,8 +369,9 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             f_float("angular_drag", 0.8f, 0.005f, 0.0f, 100.0f),
             f_int("layer", 0, 0, 31),
             with_tip(f_float("rest_time", 1.0f, 0.05f, 0.0f, 60.0f), "Seconds calm before a limp body is put to sleep; 0 = off"),
-            with_tip(f_float("rest_speed", 0.08f, 0.005f, 0.0f, 10.0f), "Calm: every bone slower than this (m/s)"),
-            with_tip(f_float("rest_spin", 0.2f, 0.005f, 0.0f, 10.0f), "...and spinning slower than this (rad/s)"),
+            with_tip(f_float("rest_travel", 0.02f, 0.005f, 0.0f, 10.0f), "At rest: every bone within this (m) of where it was for rest_time"),
+            with_tip(f_float("max_limp_speed", 8.0f, 0.1f, 0.0f, 1000.0f), "Cap on the speed (m/s) a bone carries in from the animation; 0 = off"),
+            with_tip(f_float("max_limp_spin", 12.0f, 0.1f, 0.0f, 1000.0f), "...and on its spin (rad/s)"),
             with_tip(f_bool("link_character", true), "Suspend this object's CharacterController while limp"),
             with_tip(f_bool("reposition_root", true), "Without a controller: stand up where the body fell"),
             with_tip(f_bool("input_toggle", false), "R goes limp / recovers"),
@@ -693,7 +694,11 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             f_float("mouse_sensitivity", 0.15f, 0.005f, 0.0f, 10.0f),
             f_float("zoom_speed", 1.0f, 0.01f, 0.0f, 100.0f),
             f_bool("capture_cursor", false, true),
+            with_tip(f_enum("look_button", {"", "left", "right", "middle"}),
+                     "Hold this mouse button to turn the camera; empty turns continuously"),
             f_float("auto_rotate_deg_per_sec", 0.0f, 0.1f),
+            with_tip(f_float("key_orbit_speed_deg_per_sec", 0.0f, 0.5f, 0.0f, 3600.0f),
+                     "Orbit: WASD / arrow keys turn the camera at this rate; 0 leaves the keys alone"),
             f_float("move_speed", 5.0f, 0.05f, 0.0f, 1000.0f),
             f_float("movement_smoothing", 0.0f, 0.005f, 0.0f, 1.0f),
             with_tip(f_bool("collide", true), "Orbit with a tracker: pull in when geometry blocks the view"),
@@ -816,6 +821,20 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             f_vec3("spin_axis", glm::vec3(0.0f, 0.0f, 1.0f), 0.01f),
             f_float("spin_speed", 90.0f, 0.5f),
         }});
+        // Defaults mirror toyengine/scene/turntable.h.
+        add({"Turntable", "Gameplay", {
+            with_tip(f_float("sensitivity", 0.25f, 0.005f, 0.0f, 10.0f), "Degrees of spin per pixel of drag"),
+            with_tip(f_enum("drag_button", {"left", "right", "middle", ""}, true),
+                     "Hold this mouse button to spin the object; empty spins on any mouse motion"),
+            with_tip(f_vec3("axis", glm::vec3(0.0f, 0.0f, 1.0f), 0.01f), "The object's pole, in its own space; horizontal drag spins about it"),
+            with_tip(f_float("idle_spin_deg_per_sec", 0.0f, 0.1f, -3600.0f, 3600.0f), "Constant drift when nothing is dragging it"),
+            with_tip(f_float("damping", 2.5f, 0.05f, 0.0f, 100.0f), "Decay of a fling's spin (1/s); 0 spins on for ever"),
+            with_tip(f_float("min_tilt_deg", -80.0f, 0.5f, -89.0f, 89.0f), "Tilt clamp; equal to max pins the tilt"),
+            with_tip(f_float("max_tilt_deg", 80.0f, 0.5f, -89.0f, 89.0f), "Tilt clamp"),
+            with_tip(f_float("max_spin_deg_per_sec", 540.0f, 1.0f, 0.0f, 36000.0f), "Fastest a fling may leave it spinning"),
+            f_bool("invert_x", false),
+            f_bool("invert_y", false),
+        }});
         add({"FreeMover", "Gameplay", {f_float("move_speed", 5.0f, 0.05f, 0.0f, 1000.0f, true),
                                        with_tip(f_float("smoothing", 12.0f, 0.1f, 0.0f, 100.0f), "Follow rate (1/s); 0 snaps")}});
         add({"KinematicController", "Gameplay", {
@@ -861,6 +880,9 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                          "Chunks given a collider, around the camera; 0 = every loaded chunk. Ground outside it is not solid"),
                 with_tip(f_float("shadow_distance", 0.0f, 1.0f, 0.0f, 10000.0f),
                          "Metres past which a chunk stops casting shadows; 0 = no limit"),
+                // `lods:` (the chunk meshes' coarser levels) is a list of mappings, which the
+                // inspector has no field kind for -- it stays YAML-only, and survives a save
+                // because the document keeps the component's own node (editor/core/scene_document.h).
                 with_tip(f_string("physics_material", ""), "physics_materials/<name>.yaml for the colliders (friction, bounce)"),
                 f_material(),
             };

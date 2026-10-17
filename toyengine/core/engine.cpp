@@ -10,6 +10,7 @@
 #include <toyengine/scene/ragdoll.h>
 #include <toyengine/scene/rider.h>
 #include <toyengine/scene/skinned_mesh_renderer.h>
+#include <toyengine/scene/turntable.h>
 #include <toyengine/world/heightmap_terrain_system.h>
 
 namespace toy {
@@ -790,6 +791,7 @@ bool Engine::tick() {
             drive_camera_controller_(scene_mgr_.get_active_scene());
             drive_kinematic_controllers_(scene_mgr_.get_active_scene());
             drive_free_movers_(scene_mgr_.get_active_scene());
+            drive_turntables_(scene_mgr_.get_active_scene());
             drive_character_controllers_(scene_mgr_.get_active_scene());
             drive_ragdolls_(scene_mgr_.get_active_scene());
         }
@@ -1704,7 +1706,17 @@ void Engine::drive_camera_controller_(coopa::scene::Scene& scene) {
     // coopa::input::Input already suppresses the spurious first-frame jump
     // GLFW's virtual cursor reports right when CursorMode::Disabled is
     // first applied -- see Input::push_cursor_position()'s doc.
-    cc->mouse_delta = ctx_.input().cursor_delta();
+    // With `look_button` set, the mouse only turns the camera while that button is held: a game
+    // that keeps its pointer visible (to click a target, to drag an item) cannot have every
+    // mouse move spin the world.
+    const bool look_held = cc->look_button.empty() || [&] {
+        using coopa::input::MouseButton;
+        const std::string& b = cc->look_button;
+        if (b == "left" || b == "Left") return ctx_.input().button_down(MouseButton::Left);
+        if (b == "middle" || b == "Middle") return ctx_.input().button_down(MouseButton::Middle);
+        return ctx_.input().button_down(MouseButton::Right);
+    }();
+    cc->mouse_delta = look_held ? ctx_.input().cursor_delta() : glm::vec2(0.0f);
     cc->scroll_input = ctx_.input().scroll_delta().y;
 
     cc->move_input = glm::vec3(
@@ -1735,6 +1747,34 @@ void Engine::drive_free_movers_(coopa::scene::Scene& scene) {
                     input_.axis("move_y", ctx_.input()),
                     input_.axis("move_z", ctx_.input()));
     for (scene::FreeMover* fm : movers) fm->move_input = move;
+}
+
+void Engine::drive_turntables_(coopa::scene::Scene& scene) {
+    std::vector<scene::Turntable*> turntables = scene.get_components<scene::Turntable>();
+    if (turntables.empty()) return;
+
+    // The camera's own right axis, so a drag "across the screen" spins the model across the
+    // screen from wherever the camera happens to have been placed; world +X (what an orbit
+    // camera at yaw 0 looks across) if the scene has no camera yet.
+    glm::vec3 right(1.0f, 0.0f, 0.0f);
+    if (auto* cam = coopa::gfx::engine::components::CameraComponent::main()) {
+        const glm::mat4 world = glm::inverse(cam->get_view_matrix());
+        if (glm::length(glm::vec3(world[0])) > 1e-4f) right = glm::normalize(glm::vec3(world[0]));
+    }
+
+    const bool blocked = input_blocked_();
+    for (scene::Turntable* tt : turntables) {
+        const bool held = !blocked && (tt->drag_button.empty() || [&] {
+            using coopa::input::MouseButton;
+            const std::string& b = tt->drag_button;
+            if (b == "left" || b == "Left") return ctx_.input().button_down(MouseButton::Left);
+            if (b == "middle" || b == "Middle") return ctx_.input().button_down(MouseButton::Middle);
+            return ctx_.input().button_down(MouseButton::Right);
+        }());
+        tt->dragging = held;
+        tt->drag_input = held ? ctx_.input().cursor_delta() : glm::vec2(0.0f);
+        tt->view_right = right;
+    }
 }
 
 void Engine::drive_character_controllers_(coopa::scene::Scene& scene) {

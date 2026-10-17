@@ -22,6 +22,7 @@
 #include <toyengine/scene/rider.h>
 #include <toyengine/scene/scene_link.h>
 #include <toyengine/scene/skinned_mesh_renderer.h>
+#include <toyengine/scene/turntable.h>
 #include <toyengine/water/buoyancy.h>
 #include <toyengine/water/water_body.h>
 #include <toyengine/world/heightmap_terrain.h>
@@ -135,12 +136,18 @@ void register_scene_components() {
             if (node.contains("invert_x")) cc->invert_x = node.at("invert_x").get_value<bool>();
             if (node.contains("invert_y")) cc->invert_y = node.at("invert_y").get_value<bool>();
             if (node.contains("zoom_speed")) cc->zoom_speed = node.at("zoom_speed").get_value<float>();
+            if (node.contains("look_button")) {
+                cc->look_button = node.at("look_button").get_value<std::string>();
+            }
             if (node.contains("capture_cursor")) {
                 cc->capture_cursor = node.at("capture_cursor").get_value<bool>();
             }
 
             if (node.contains("auto_rotate_deg_per_sec")) {
                 cc->auto_rotate_deg_per_sec = node.at("auto_rotate_deg_per_sec").get_value<float>();
+            }
+            if (node.contains("key_orbit_speed_deg_per_sec")) {
+                cc->key_orbit_speed_deg_per_sec = node.at("key_orbit_speed_deg_per_sec").get_value<float>();
             }
             if (node.contains("move_speed")) {
                 cc->move_speed = node.at("move_speed").get_value<float>();
@@ -155,6 +162,29 @@ void register_scene_components() {
             if (node.contains("eye_height")) cc->eye_height = node.at("eye_height").get_value<float>();
             if (node.contains("first_person_pitch_limit"))
                 cc->first_person_pitch_limit = node.at("first_person_pitch_limit").get_value<float>();
+        });
+
+    // A model turned in front of a fixed camera (toyengine/scene/turntable.h). Input is pushed
+    // in by Engine::drive_turntables_(); it owns the owner's rotation from start() on.
+    SceneLoader::register_component_parser("Turntable",
+        [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
+            auto* tt = obj.add_component<Turntable>();
+            auto f = [&](const char* key, float& out) {
+                if (node.contains(key)) out = node.at(key).get_value<float>();
+            };
+            auto b = [&](const char* key, bool& out) {
+                if (node.contains(key)) out = node.at(key).get_value<bool>();
+            };
+            f("sensitivity", tt->sensitivity);
+            if (node.contains("drag_button")) tt->drag_button = node.at("drag_button").get_value<std::string>();
+            if (node.contains("axis")) tt->axis = parse_vec3(node.at("axis"), tt->axis);
+            f("idle_spin_deg_per_sec", tt->idle_spin_deg_per_sec);
+            f("damping", tt->damping);
+            f("min_tilt_deg", tt->min_tilt_deg);
+            f("max_tilt_deg", tt->max_tilt_deg);
+            f("max_spin_deg_per_sec", tt->max_spin_deg_per_sec);
+            b("invert_x", tt->invert_x);
+            b("invert_y", tt->invert_y);
         });
 
     // A walking capsule character (toyengine/scene/character_controller.h). Input is pushed in by
@@ -432,9 +462,10 @@ void register_scene_components() {
             f(node, "drag", r->drag);
             f(node, "angular_drag", r->angular_drag);
             f(node, "blend_time", r->blend_time);
-            f(node, "rest_speed", r->rest_speed);
-            f(node, "rest_spin", r->rest_spin);
+            f(node, "rest_travel", r->rest_travel);
             f(node, "rest_time", r->rest_time);
+            f(node, "max_limp_speed", r->max_limp_speed);
+            f(node, "max_limp_spin", r->max_limp_spin);
             if (node.contains("layer")) r->layer = static_cast<uint32_t>(node.at("layer").get_value<int64_t>());
             if (node.contains("recover_state")) r->recover_state = node.at("recover_state").get_value<std::string>();
             if (node.contains("start_impulse")) r->start_impulse = parse_vec3(node.at("start_impulse"), r->start_impulse);
@@ -534,6 +565,23 @@ void register_scene_components(coopa::gfx::core::Device& device,
                 params.face_tiles -= params.face_tiles % std::max<std::int32_t>(1, params.chunk_size);
             }
             if (node.contains("river_inset")) params.river_inset = node.at("river_inset").get_value<float>();
+            // `lods:` -- the coarser levels every chunk mesh is built with, coarsest last. An
+            // empty list (or `lods: false`) turns the levels off and draws every chunk at full
+            // density, whatever its size on screen.
+            if (node.contains("lods")) {
+                const fkyaml::node& l = node.at("lods");
+                params.chunk_lods = {};
+                if (l.is_sequence()) {
+                    std::size_t i = 0;
+                    for (const fkyaml::node& level : l) {
+                        if (i >= world::TerrainParams::k_max_chunk_lods) break;
+                        if (!level.is_mapping()) continue;
+                        world::TerrainParams::ChunkLod& out = params.chunk_lods[i++];
+                        if (level.contains("ratio")) out.ratio = level.at("ratio").get_value<float>();
+                        if (level.contains("screen_size")) out.screen_size = level.at("screen_size").get_value<float>();
+                    }
+                }
+            }
             // The water's look: WaterBody's own keys, onto the terrain's stock look.
             if (node.contains("water") && node.at("water").is_mapping()) {
                 parse_water_settings(node.at("water"), terrain->water_look);

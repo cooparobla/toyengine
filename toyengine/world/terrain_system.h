@@ -241,6 +241,21 @@ private:
 
     /** @brief A planet keeps every chunk: all six faces are always wanted. */
     void want_planet_chunks_(TerrainComponent& terrain);
+    /**
+     * @brief Hides the chunks of a planet that the planet itself is in front of.
+     *
+     * The far side of a globe is INSIDE the camera's frustum -- the pipeline's per-view frustum
+     * test (`gather_meshes_()`) cannot reject it, and without this roughly half of every planet
+     * is drawn, shadow-mapped and water-simulated behind its own horizon. A chunk is hidden by
+     * deactivating its SceneObject, which prunes it and its water children from the render
+     * snapshot (`ToyRenderPipeline::snapshot_scene_()`) and from the scene's update walk; the
+     * chunk itself stays loaded, so coming back round the limb costs nothing.
+     *
+     * Only chunks past the horizon by a margin are hidden -- the margin covers the chunk's own
+     * angular size and the height of what stands on it -- and the threshold to hide is further
+     * out than the threshold to show again, so a chunk at the limb cannot flicker.
+     */
+    void cull_planet_horizon_(TerrainComponent& terrain);
     /** @brief Keeps a planet's gravity source in the physics world, at its centre (and drops gone ones). */
     void sync_planet_gravity_(coopa::scene::Scene& scene);
 

@@ -481,10 +481,104 @@ void upload_chunk_mesh(ChunkBuildJob& job) {
     // buffer_count 1: a chunk mesh is written once and never rewritten, unlike a cloth's
     // per-frame ring (see Mesh::from_arrays()'s doc on why that is a count, not a bool).
     job.gpu_mesh = std::make_shared<coopa::gfx::engine::data::Mesh>(coopa::gfx::engine::data::Mesh::from_arrays(
-        *job.device, *job.allocator, job.mesh.vertices, job.mesh.indices, 1));
+        *job.device, *job.allocator, job.mesh.vertices, job.mesh.indices, 1, false,
+        job.lods.empty() ? nullptr : &job.lods));
 }
 
 } // namespace
+
+/**
+ * @brief Which of a welded chunk's vertices sit on its SEAM with the neighbouring chunks.
+ *
+ * These are the vertices a level may not move. A chunk picks its level from its own size on
+ * screen, so neighbours routinely draw at different levels, and they only meet without a gap
+ * if both still have the vertices they shared at full density. meshopt's own border flag is no
+ * substitute: it holds the *topological* boundary of the welded surface, and a chunk's edge
+ * wall carries that surface over the seam and on down, so the simplifier sees no boundary
+ * there at all (measured: 25 seam vertices collapsed anyway, and the reduction stalled).
+ *
+ * The seam is the chunk's edge in TILE space: `0` and `chunk_size * tile_size` on both axes.
+ * A planet's chunk has been bent onto the globe by then, so its four edges are tested as the
+ * planes through the planet's centre that they lie in (planet.h) -- see below.
+ *
+ * @return One flag per vertex, 1 on the seam -- or empty when nothing needs locking.
+ */
+std::vector<std::uint8_t> chunk_seam_locks(const TerrainParams& params, const ChunkCoord& coord,
+                                           const ChunkMeshData& mesh) {
+    const float span = params.chunk_world_size();
+    const float eps  = 1e-3f * params.tile_size;
+    std::vector<std::uint8_t> locks(mesh.vertices.size(), 0);
+    const auto on_edge = [&](float v) { return std::abs(v) < eps || std::abs(v - span) < eps; };
+
+    if (!params.planet) {
+        // Chunk-local already (ChunkMeshData): the chunk spans [0, span] on x and y.
+        for (std::size_t i = 0; i < mesh.vertices.size(); ++i) {
+            const glm::vec3& p = mesh.vertices[i].position;
+            locks[i] = (on_edge(p.x) || on_edge(p.y)) ? 1u : 0u;
+        }
+        return locks;
+    }
+
+    // On the globe, a chunk's four edges are each a curve of constant face-space x or y -- and
+    // each of those lies in a PLANE through the planet's centre, since every direction along it
+    // is a combination of the face's outward axis and one of its own. So the seam test is four
+    // dot products, which is both cheaper than reading each vertex back into face space and
+    // immune to the thing that breaks it: a vertex sitting exactly on a cube edge resolves to
+    // either of the two faces that meet there, and read through the wrong one its face-space
+    // coordinate is a whole face away from this chunk's.
+    const PlanetLayout layout = params.layout();
+    const std::int32_t face = std::clamp(coord.x * params.chunk_size / std::max(1, params.face_tiles), 0, 5);
+    const double face_span = static_cast<double>(params.face_tiles) * params.tile_size;
+    const double x0 = static_cast<double>(coord.x * params.chunk_size - face * params.face_tiles) * params.tile_size;
+    const double y0 = static_cast<double>(coord.y * params.chunk_size) * params.tile_size;
+    glm::dvec3 out, ax, ay;
+    PlanetLayout::axes(face, out, ax, ay);
+    const auto edge_at = [&](double along, bool is_x) {
+        const double t = std::tan((2.0 * along / face_span - 1.0) * PlanetLayout::k_pi * 0.25);
+        return is_x ? glm::normalize(glm::cross(out + ax * t, ay))
+                    : glm::normalize(glm::cross(ax, out + ay * t));
+    };
+    const glm::dvec3 planes[4] = {edge_at(x0, true), edge_at(x0 + span, true),
+                                  edge_at(y0, false), edge_at(y0 + span, false)};
+    // The dot product of a unit direction with a unit plane normal is the sine of its angle off
+    // the plane, so the tolerance is an ANGLE: a thousandth of a tile, over the planet's radius.
+    const double tolerance = static_cast<double>(eps) / std::max(1.0f, layout.radius());
+    for (std::size_t i = 0; i < mesh.vertices.size(); ++i) {
+        const glm::dvec3 dir = glm::normalize(glm::dvec3(mesh.vertices[i].position));
+        for (const glm::dvec3& n : planes) {
+            if (std::abs(glm::dot(dir, n)) < tolerance) { locks[i] = 1u; break; }
+        }
+    }
+    return locks;
+}
+
+/**
+ * @brief Appends the chunk's coarser levels to its indices (TerrainParams::chunk_lods).
+ *
+ * Every level keeps the chunk's seam vertices exactly (chunk_seam_locks()), so a chunk at the
+ * coarsest level still meets a full-density neighbour on the vertices they share -- which is
+ * what lets each chunk choose its own level with no knowledge of the chunks around it.
+ *
+ * Costs only indices -- every level shares LOD 0's vertices, which are the bulk of a chunk.
+ *
+ * @param params The terrain's `chunk_lods` table.
+ * @param coord  Which chunk, for the planet's face-space seam test.
+ * @param mesh   The welded chunk geometry; its `indices` gain each level's range.
+ * @return The LOD table for Mesh::from_arrays(), [0] being the full chunk.
+ */
+std::vector<coopa::gfx::engine::data::MeshLod> build_chunk_lods(const TerrainParams& params,
+                                                                const ChunkCoord& coord,
+                                                                ChunkMeshData& mesh) {
+    std::vector<coopa::gfx::engine::data::LodRequest> levels;
+    for (const TerrainParams::ChunkLod& lod : params.chunk_lods) {
+        if (lod.ratio <= 0.0f) break;   // a zero ratio ends the table
+        levels.push_back({lod.ratio, lod.screen_size, 1.0f});
+    }
+    if (levels.empty() || mesh.empty()) return {};
+    const std::vector<std::uint8_t> locks = chunk_seam_locks(params, coord, mesh);
+    return coopa::gfx::engine::data::Mesh::simplify_levels(mesh.vertices, mesh.indices, levels,
+                                                           false, &locks);
+}
 
 void ChunkBuildJob::run() {
     if (library == nullptr) return;
@@ -493,7 +587,10 @@ void ChunkBuildJob::run() {
         build_chunk_water(pad, params, water_still, water_flowing);
         warp_chunk_to_planet(params, coord, mesh, water_still, water_flowing);
         coopa::gfx::engine::data::Mesh::weld_and_optimize(mesh.vertices, mesh.indices);
+        // Before the LOD levels: the collider is what the chunk is SHAPED like, not what it
+        // happens to be drawing this frame, so it is built from LOD 0's indices alone.
         if (collision) collision_mesh = build_chunk_collision(mesh);
+        lods = build_chunk_lods(params, coord, mesh);
         upload_chunk_mesh(*this);
         return;
     }
@@ -501,14 +598,17 @@ void ChunkBuildJob::run() {
     // vertices, so shared corners weld back together here.
     coopa::gfx::engine::data::Mesh::weld_and_optimize(mesh.vertices, mesh.indices);
     // The collider is the drawn surface itself, so it matches whatever tile set built it. Its
-    // weld, adjacency and BVH are the expensive part -- hence here, on the worker.
+    // weld, adjacency and BVH are the expensive part -- hence here, on the worker. LOD 0's
+    // indices, as on the planet path above.
     if (collision) collision_mesh = build_chunk_collision(mesh);
+    lods = build_chunk_lods(params, coord, mesh);
     build_chunk_water(pad, params, water_still, water_flowing);
     upload_chunk_mesh(*this);
 }
 
 void ChunkBuildJob::reset_outputs() {
     mesh.clear();
+    lods.clear();
     water_still.clear();
     water_flowing.clear();
     gpu_mesh.reset();

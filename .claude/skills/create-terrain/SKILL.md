@@ -90,8 +90,15 @@ Write `tile_set:` in new scenes.
   `2 * face_tiles * tile_size / pi`), `chunk_size` dividing it, and `gravity` (m/s^2). Everything
   stays loaded and the planet only starts pulling once every chunk is live, so bodies and the
   player can be placed above the surface at any side (position = direction * (radius + a few m)).
-  Reference: `assets/scenes/terrain/planet_demo` (a mannequin player with the orbit camera
-  tracking it). Keep `face_tiles` modest (<= 128): every chunk is built at load.
+  Keep `face_tiles` modest (<= 128): every chunk is built at load, and a planet gives every one
+  of them a collider -- `collision: false` (with `gravity: 0`) is most of the load time back for
+  a globe nothing stands on. Reference: `assets/scenes/terrain/planet_demo`, a globe spun by the
+  mouse (`Turntable` on the terrain object) in front of a fixed orbit camera that only zooms.
+- Every chunk mesh carries coarser LOD levels (`lods:`, a list of `{ratio, screen_size}`
+  coarsest last; `[]` turns them off). The defaults only coarsen chunks small on screen, so a
+  ground-level camera is unaffected; they pay on planets seen whole and on terrains with a
+  large `view_radius`. Seam vertices are pinned through every level, so chunks at different
+  levels never crack.
 - Large terrains want shadow tuning in scene settings (terrain_demo uses `shadow_fit: focus`,
   `shadow_focus_radius`, `shadow_distance`).
 

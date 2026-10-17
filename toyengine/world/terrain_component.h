@@ -57,6 +57,8 @@
 
 #include <gfxcoopa/engine/components/mesh_renderer.h>
 
+#include <optional>
+
 #include <toyengine/world/terrain_chunk.h>
 #include <toyengine/world/tile_map_data.h>
 #include <toyengine/world/terrain_generator.h>
@@ -425,6 +427,29 @@ public:
     const TileRecord* record_at(const glm::vec3& world) const;
     /** @brief World height of the ground under a world position (the bed, under water). */
     float height_at(const glm::vec3& world) const;
+
+    /**
+     * @brief The state of the chunk covering a world position, or nothing where no chunk
+     *        covers it (off the terrain, or a chunk the streamer has let go of).
+     *
+     * @param world A world-space position; its z is ignored.
+     * @return The chunk's ChunkState, or std::nullopt.
+     */
+    std::optional<ChunkState> chunk_state_at(const glm::vec3& world) const;
+
+    /**
+     * @brief Whether a world position is on a chunk that is streamed in.
+     *
+     * What gameplay content placed on the ground -- a corpse, a dropped item, a spawned camp --
+     * should key its lifetime to: it is exactly "this ground is loaded, drawing and collidable
+     * (or a frame from being so)". A Queued or Meshing chunk counts, since a Live chunk being
+     * rebuilt passes through Meshing while still drawing; a Dormant or Retiring one does not --
+     * it is out of range, off the scene tree, and has no ground left to stand on.
+     *
+     * @param world A world-space position; its z is ignored.
+     * @return True if that chunk is loaded.
+     */
+    bool chunk_loaded_at(const glm::vec3& world) const;
 
     /** @brief The tile revision TerrainSystem has applied to the chunk table. */
     std::uint64_t applied_tile_revision = 0;

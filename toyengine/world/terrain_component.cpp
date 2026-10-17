@@ -139,6 +139,25 @@ float TerrainComponent::height_at(const glm::vec3& world) const {
     return z;
 }
 
+std::optional<ChunkState> TerrainComponent::chunk_state_at(const glm::vec3& world) const {
+    glm::vec3 local = world;
+    if (owner != nullptr) {
+        if (auto* tc = owner->get_transform()) {
+            local = glm::vec3(glm::inverse(tc->transform().get_world_matrix()) * glm::vec4(world, 1.0f));
+        }
+    }
+    const auto found = chunks_.find(params.chunk_at(local));
+    if (found == chunks_.end()) return std::nullopt;
+    return found->second.state;
+}
+
+bool TerrainComponent::chunk_loaded_at(const glm::vec3& world) const {
+    const std::optional<ChunkState> state = chunk_state_at(world);
+    if (!state) return false;
+    return *state == ChunkState::Queued || *state == ChunkState::Meshing ||
+           *state == ChunkState::Live;
+}
+
 water::WaterBody TerrainComponent::default_water_look() {
     water::WaterBody look;
     // A world of one-metre tiles and water a few steps deep: small, short waves, and clear

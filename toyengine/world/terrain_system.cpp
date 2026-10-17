@@ -79,6 +79,7 @@ void TerrainSystem::tick_terrain_(TerrainComponent& terrain, coopa::scene::Scene
         want_planet_chunks_(terrain);
         upload_finished_chunks_(terrain, scene);
         submit_queued_chunks_(terrain, ChunkCoord{0, 0}, ctx);
+        cull_planet_horizon_(terrain);
         return;
     }
     const ChunkCoord centre = latched_centre_(terrain);
@@ -185,6 +186,56 @@ void TerrainSystem::want_planet_chunks_(TerrainComponent& terrain) {
             chunk.state = ChunkState::Queued;
             terrain.chunks().emplace(coord, std::move(chunk));
         }
+    }
+}
+
+void TerrainSystem::cull_planet_horizon_(TerrainComponent& terrain) {
+    if (!terrain.params.planet || terrain.chunks().empty()) return;
+    CameraComponent* camera = CameraComponent::main();
+    if (camera == nullptr || camera->owner == nullptr || camera->owner->get_transform() == nullptr) return;
+
+    glm::mat4 to_local(1.0f);
+    if (terrain.owner != nullptr) {
+        if (auto* tc = terrain.owner->get_transform()) to_local = glm::inverse(tc->transform().get_world_matrix());
+    }
+    const glm::vec3 eye = glm::vec3(to_local * camera->owner->get_transform()->transform().get_world_matrix()[3]);
+    const float distance = glm::length(eye);
+    const PlanetLayout layout = terrain.params.layout();
+    const float radius = layout.radius();
+    // Inside the planet, or so near the surface that the horizon is on top of the camera: draw
+    // everything and let the frustum do the work. (It also keeps a camera at the surface, where
+    // radius / distance is ~1, from hiding the ground it is standing on.)
+    if (distance <= radius * 1.02f) {
+        for (auto& [coord, chunk] : terrain.chunks()) {
+            if (chunk.object != nullptr) chunk.object->set_active(true);
+        }
+        return;
+    }
+
+    const glm::vec3 view = eye / distance;
+    // How far round the globe anything can still be seen from here, as an angle from the camera's
+    // own direction: `alpha` to the horizon itself (where the view grazes the sphere), plus
+    // `beta` for the terrain standing on it -- a peak `height_scale` tall sits on the tangent
+    // line that much further round -- plus half a chunk's angular width, since the test below
+    // asks about a chunk's CENTRE and its near edge reaches closer.
+    const float alpha = std::acos(std::clamp(radius / distance, -1.0f, 1.0f));
+    const float beta = std::acos(std::clamp(radius / (radius + std::max(0.0f, terrain.params.height_scale)), -1.0f, 1.0f));
+    const float chunk_angle = 0.75f * terrain.params.chunk_world_size() / radius;
+    const float limit = std::cos(std::min(alpha + beta + chunk_angle, 3.14159265f));
+    // Hidden a little further round than it is shown again, so a chunk sitting on the limb of a
+    // camera that is barely moving cannot toggle every frame.
+    const float hide_below = limit - 0.02f;
+    const float show_above = limit;
+
+    const std::int32_t size = std::max(1, terrain.params.chunk_size);
+    for (auto& [coord, chunk] : terrain.chunks()) {
+        if (chunk.object == nullptr) continue;
+        // The chunk's centre, as a direction out of the planet's centre.
+        const glm::vec3 centre(layout.tile_direction(coord.x * size + size / 2, coord.y * size + size / 2));
+        const float facing = glm::dot(centre, view);
+        const bool visible = chunk.object->active();
+        if (visible && facing < hide_below) chunk.object->set_active(false);
+        else if (!visible && facing > show_above) chunk.object->set_active(true);
     }
 }
 

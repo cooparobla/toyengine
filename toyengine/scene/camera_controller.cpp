@@ -101,6 +101,15 @@ void CameraController::update_orbit_(coopa::util::Transform& t, float dt) {
     yaw_deg += mouse_delta.x * mouse_sensitivity * (invert_x ? -1.0f : 1.0f);
     yaw_deg += auto_rotate_deg_per_sec * dt;
     pitch_deg += mouse_delta.y * mouse_sensitivity * (invert_y ? -1.0f : 1.0f);
+    if (key_orbit_speed_deg_per_sec != 0.0f) {
+        // WASD and the arrow keys add into the same two angles the mouse drives, so a scene can
+        // offer both and they stay one camera rather than two fighting rigs. Clamped, not scaled:
+        // pressing A and Left together is still one key's worth of turn.
+        const float keys_x = glm::clamp(move_input.x + look_input.x, -1.0f, 1.0f);
+        const float keys_y = glm::clamp(move_input.y + look_input.y, -1.0f, 1.0f);
+        yaw_deg += keys_x * key_orbit_speed_deg_per_sec * dt * (invert_x ? -1.0f : 1.0f);
+        pitch_deg += keys_y * key_orbit_speed_deg_per_sec * dt * (invert_y ? -1.0f : 1.0f);
+    }
     pitch_deg = glm::clamp(pitch_deg, min_pitch_deg, max_pitch_deg);
 
     if (scroll_input != 0.0f) {

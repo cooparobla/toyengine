@@ -167,6 +167,36 @@ struct TerrainParams {
      */
     std::int32_t max_merge = 0;
 
+    // --- Level of detail (terrain_chunk.cpp builds these into every chunk mesh) ---
+
+    /**
+     * @struct ChunkLod
+     * @brief One coarser level of a chunk's mesh: how much of it survives, and when it is drawn.
+     */
+    struct ChunkLod {
+        float ratio       = 0.0f;  /**< Triangles kept, as a fraction of the full chunk. 0 ends the table. */
+        float screen_size = 0.0f;  /**< Drawn while the chunk covers less of the screen's height than this. */
+    };
+
+    /** @brief Most levels a chunk mesh carries, past LOD 0. */
+    static constexpr std::size_t k_max_chunk_lods = 4;
+
+    /**
+     * @brief The coarser levels every chunk mesh is built with, coarsest last; a zero `ratio`
+     *        ends the table (all zero: no LOD, chunks always draw at full density).
+     *
+     * The defaults coarsen only what is genuinely small on screen: a chunk covering more than
+     * 14% of the screen's height is untouched, so a camera on the ground sees exactly the mesh
+     * it always did, while a globe held whole in frame -- where one tile is a couple of pixels
+     * and the terrain runs to four triangles a pixel -- draws a twentieth of them. A streamed
+     * flat terrain only reaches these sizes with a large `view_radius`, which is the case that
+     * wants them.
+     *
+     * Chunk boundaries are locked through every level (Mesh::simplify_levels()), so neighbours
+     * at different levels meet on the same vertices and never crack.
+     */
+    std::array<ChunkLod, k_max_chunk_lods> chunk_lods{{{0.40f, 0.14f}, {0.15f, 0.07f}, {0.07f, 0.03f}, {}}};
+
     /** @brief The planet's cube-sphere (planet.h). */
     PlanetLayout layout() const { return PlanetLayout{face_tiles, tile_size}; }
 
@@ -377,7 +407,7 @@ private:
                 const glm::dvec3 f(water.flow.x, water.flow.y, water.flow.z);
                 r.flow = flow_octant(glm::dot(f, across), glm::dot(f, along));
             }
-            top = TileKind::Sand;
+            top = bed_kind_for(water.kind, level - r.steps);
         }
         r.set_top_kind(top);
         r.set_side_kind(side_kind_for(top));
@@ -506,6 +536,34 @@ public:
     }
 
     /**
+     * @brief What the floor of a body of water is made of, by the body and how deep it stands.
+     *
+     * The biome table above answers for the *shore* of a sea or lake (both map to sand), which is
+     * the wrong answer for the floor under a hundred metres of water: taken unconditionally it
+     * surfaces a whole ocean bed in beach sand, however deep.
+     *
+     * Graded by depth instead, because a bed is sorted by what the water does to it: the surf
+     * zone keeps sand, below the wave base the fines settle out as silt, and the open floor is
+     * scoured back to rock. A lake has no surf to speak of, so it is muddy from its margin in.
+     *
+     * Depth is in tile steps, so the grading follows the world's own vertical scale rather than
+     * a height in metres that a scene's `height_scale` would make meaningless.
+     *
+     * @param kind What kind of water stands over the tile; a river keeps its gravel bed.
+     * @param depth_steps Steps from the water's terrace down to the bed, at least 1.
+     * @return The surface to texture the bed's top face with.
+     */
+    static TileKind bed_kind_for(coopa::maps::WaterKind kind, std::int32_t depth_steps) {
+        if (kind == coopa::maps::WaterKind::River) return TileKind::Sand;
+        if (kind == coopa::maps::WaterKind::Lake) {
+            return depth_steps <= 1 ? TileKind::Sand : TileKind::Clay;
+        }
+        if (depth_steps <= k_bed_surf_steps) return TileKind::Sand;
+        if (depth_steps <= k_bed_silt_steps) return TileKind::Clay;
+        return TileKind::Stone;
+    }
+
+    /**
      * @brief What sits immediately under a given top surface, on a lateral face.
      *
      * The grass-over-dirt read every block game uses: a cut through turf shows soil, a cut
@@ -538,6 +596,11 @@ private:
 
     /** @brief Half-width rivers are sampled at, at the least, in tiles: a 4-connected run of tiles. */
     static constexpr double k_river_min_half_tiles = 0.75;
+
+    /** @brief Depth, in steps, to which a sea floor is still sand -- the surf zone. */
+    static constexpr std::int32_t k_bed_surf_steps = 2;
+    /** @brief Depth, in steps, to which a sea floor is silt; past it, scoured rock. */
+    static constexpr std::int32_t k_bed_silt_steps = 5;
 
     /** @brief Bucket edge in grid units. One grid unit is the nominal site spacing. */
     static constexpr double k_bucket_size = 1.0;

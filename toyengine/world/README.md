@@ -142,8 +142,9 @@ Regenerate; `tile_size`, `height_step`, `water_inset`, the tile sets, chunking a
 apply live. The editor's **World Generator** window edits the block with a live preview.
 
 **Water.** mapcoopa decides where water is and how high (`coopa/maps/water_field.h`): the sea at
-sea level; each lake at its spill level, just under the lowest point of its shore, over a bed at
-least `lake_depth_m` deep; each river at its banked surface, under both banks and only ever
+sea level; each lake at its spill level, just under the lowest point of its shore, over a basin
+(`lake_depth_m` under the surface at the shoreline, deepening by `lake_bed_grade` the further in
+it reaches); each river at its banked surface, under both banks and only ever
 falling, with its channel cut to hold it and carried on past its mouth to where the body's water
 really starts, so every river runs into the sea or lake it feeds. The bake samples that per tile and rounds it to steps
 the ground's way, never the water's: a dry tile beside water rounds up to that water's terrace (a
@@ -154,8 +155,17 @@ nearer the bank tops), its corners averaged so a
 river stepping down a terrace slopes, with a skirt tucked under the banks. Still water (sea, lakes)
 and flowing water (rivers, `u` downstream) become two `WaterBody` children of the chunk, so waves,
 depth colour, shore foam, refraction, buoyancy and caustics are the water system's. The shoreline
-is where that surface meets the bank -- the tile set's shape, rounded or square -- and the beds are
-ordinary ground (sand), so they collide and the water does not. `water:` takes WaterBody keys.
+is where that surface meets the bank -- the tile set's shape, rounded or square -- and the beds
+are ordinary ground, so they collide and the water does not. `water:` takes WaterBody keys.
+
+**The floor under it.** The bed is terrain, and gets the whole treatment: mapcoopa shapes it with
+landforms of its own (`NaturalTerrainConfig::seabed`, `seabed_ridges`) that fade in with depth
+from the shoreline, so a sea floor has swells, banks and gullies rather than being the bare
+interpolation of the map's cell heights -- which moves a tenth of a metre per tile where the land
+moves two, and bakes a whole ocean to one terrace. The bed's *surface* is graded by depth instead
+of taking the shore's sand all the way down (`TerrainSampler::bed_kind_for()`): sand in the surf,
+silt below the wave base, scoured stone on the open floor, and mud from the margin in on a lake.
+`terrain_sampler_test` holds the baked floor to having relief and more than one surface.
 
 **Files.** `tiles:` names the file (default `terrain/<object>.tiles` beside the scene). A header,
 a chunk index, then one deflated block per 32 × 32 storage chunk, fields stored plane by plane
@@ -215,6 +225,34 @@ and held in memory — and chunks behind the camera can still cast shadows into 
 `shadow_distance` (metres, `0` for no limit) drops the far ones out of the cascades. Prefer
 raising `chunk_size` over `view_radius` to see further — it buys coverage at fewer, larger draws,
 at the cost of a coarser streaming granularity.
+
+**Levels of detail.** Every chunk mesh is built with coarser levels behind its full one
+(`lods:`, `TerrainParams::chunk_lods`), so a chunk small on screen draws a fraction of its
+triangles:
+
+```yaml
+- type: TileTerrain
+  lods:                                  # coarsest last; [] turns the levels off
+    - { ratio: 0.40, screen_size: 0.14 } # 40% of the triangles, under 14% of screen height
+    - { ratio: 0.15, screen_size: 0.07 }
+    - { ratio: 0.07, screen_size: 0.03 }
+```
+
+The levels are simplified on the chunk's own worker (`build_chunk_lods()` →
+`Mesh::simplify_levels()`) and share LOD 0's vertices, so they cost index ranges, not geometry —
+and **every vertex on the chunk's seam is pinned through every level** (`chunk_seam_locks()`),
+which is what lets neighbours sit at different levels without a crack between them. meshopt's
+own `LockBorder` is not that guarantee and was measured failing it: a chunk's edge wall carries
+the surface over the seam, so the simplifier sees no boundary there. A level that loses a
+pinned vertex anyway (its last triangle collapsing out from under it) is dropped, so the
+coarsest tier may not exist on every chunk — measured on a busy 32-tile chunk: 40%, 15%, and
+the 7% level rejected. The renderer picks one per chunk per frame from
+its projected height, with hysteresis, and the shadow views reuse that choice
+(`toy::render::select_lod()`); the collider is always LOD 0. The defaults coarsen only what is
+genuinely small, so a ground-level camera on a streamed terrain sees LOD 0 throughout; they earn
+their keep on a planet held whole in frame and on terrains with a large `view_radius`. Pin them
+off per renderer with `lods_enabled: false`, or globally with the render config's
+`mesh_lod_bias`.
 
 **What a chunk costs the frame it lands in.** Meshing, welding, the collider's BVH *and the
 chunk's GPU buffers* are all built on its worker (see `terrain_chunk.h` for why the Vulkan half
@@ -433,7 +471,8 @@ flat terrain, off by default — a terrain without the key is built exactly as b
   generator: { grid_size: 40 }
 ```
 
-See `assets/scenes/terrain/planet_demo`.
+See `assets/scenes/terrain/planet_demo` -- a globe held whole in frame, spun by the mouse
+(`Turntable` on the terrain object) under a camera that only zooms.
 
 - **Map.** mapcoopa generates the world **on a sphere** (`topology: sphere` — cells over the whole
   globe, no edges, climate by latitude); see its README. The terrain sets that itself.
@@ -442,6 +481,21 @@ See `assets/scenes/terrain/planet_demo`.
   `2 · face_tiles · tile_size / π`, so a tile in the middle of a face is `tile_size` across.
   The six faces are stored side by side in one `6N × N` `TileMapData`, so the `.tiles` format is
   the flat one. `wrap()` / `neighbour()` step across a face's edge onto the next face (turned).
+- **`chunk_size` is baked in.** The parser trims `face_tiles` to a multiple of it (the demo's
+  216 becomes 208 at `chunk_size: 16`), and the stored `.tiles` hold the world at that width.
+  Changing `chunk_size` on a planet whose tiles already exist reads them at the wrong size --
+  bands of missing sea across the globe -- until the world is regenerated. Change the two
+  together, or pick a `chunk_size` that divides `face_tiles` exactly.
+- **Horizon culling.** The far side of a globe is *inside* the camera's frustum, so the
+  pipeline's per-view frustum test cannot reject it: without help, half a planet is drawn,
+  shadow-mapped and water-simulated behind its own horizon. `TerrainSystem::
+  cull_planet_horizon_()` deactivates the SceneObject of every chunk whose centre lies past the
+  horizon by more than its own angular width and the height of what stands on it (the exact
+  tangent angles, `acos(R/D) + acos(R/(R+height_scale))`), which prunes the chunk *and its
+  water children* from the render snapshot and the update walk. The chunk stays loaded, so
+  coming back round the limb costs nothing, and the hide threshold sits a little further round
+  than the show threshold so a chunk on the limb cannot flicker. Measured on planet_demo:
+  1206 drawn meshes → 835, shadow casters 1424 → 1011.
 - **Meshing.** Each chunk is meshed in flat face space exactly as a flat chunk, with merging
   capped at one tile (`max_merge`: a merged quad would cut a chord under the curve), then
   `warp_chunk_to_planet()` bends every vertex onto the globe and carries its normal through the
@@ -450,14 +504,21 @@ See `assets/scenes/terrain/planet_demo`.
   out from the planet at the chunk's centre, `WaterBody::local_frame`), so the water system's
   height-field queries, depth probes, flow and buoyancy still hold over a curved surface. Their
   waves come from the world position (triplanar), so neighbouring pieces meet without a seam.
+- **Cost.** Every chunk of the globe is built at load -- `6 · (face_tiles / chunk_size)²` of
+  them, 1176 at the demo's 216-tile faces -- and a planet gives each one a collider (there is no
+  collision radius on a globe: ground solid in front of you and not behind is worse than none).
+  A planet nothing stands on should say `collision: false` and `gravity: 0`; that welded
+  collision mesh, its BVH and the physics re-gather per chunk are most of a slow planet's load.
 - **Gravity.** The terrain registers a physxcoopa gravity source at its centre — at zero strength
   until every chunk is live, so nothing dropped at the start falls through ground still being
   built. Rigid bodies, buoyancy, `CharacterController` (walking in its own frame, up away from
   the planet), `FootIK` and the orbit `CameraController` follow the field.
 - **Sky** is evaluated in the camera's own frame on the planet (`render::PlanetFrameState`: the
   sky's view rays and sun turned so the camera's up is the sky's zenith). The global **fog** is
-  plain distance fog on a planet (world Z is no height there): give a planet scene a light
-  `fog_density` (planet_demo: 0.0015). Neither changes a flat scene's shaders or values.
+  plain distance fog on a planet (world Z is no height there): give a planet scene walked on the
+  ground a light `fog_density` (and none at all when the whole globe is meant to be in view, as
+  in planet_demo -- fog over hundreds of metres would simply erase it). Neither changes a flat
+  scene's shaders or values.
 - **Shader.** Planet chunks draw with `terrain_styled_planet` (`terrain_styled.glsl` built with
   `TERRAIN_PLANET`): "up" is the per-vertex `uv.y` the warp wrote, and strata have an even grain.
   The flat `terrain_styled` carries none of that code.

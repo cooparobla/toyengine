@@ -6,6 +6,9 @@
  * which may be a fixed world-space point or a named GameObject followed with exponential
  * smoothing (see `tracker`).
  *
+ * Orbit input is the mouse (yaw/pitch) and the wheel (distance), plus -- where a scene opts in
+ * with `key_orbit_speed_deg_per_sec` -- WASD and the arrow keys turning the same two angles.
+ *
  * `movement_smoothing` (0..1) adds drag to the camera's own response to mouse and scroll
  * input, independent of `follow_smoothing` (which only smooths a moving *target*'s
  * position). Yaw/pitch/distance are accumulated instantly into raw targets every frame; what
@@ -80,6 +83,7 @@ enum class CameraControlMode {
  *   follow_smoothing: 8.0
  *   movement_smoothing: 0.3
  *   mouse_sensitivity: 0.15
+ *   look_button: right          # hold to turn; omit for a continuous turn
  *   zoom_speed: 1.0
  *   min_distance: 1.0
  *   max_distance: 20.0
@@ -118,7 +122,29 @@ public:
     bool  invert_y               = false; /**< Flips pitch direction. */
     float zoom_speed             = 1.0f;  /**< World units per unit of scroll input. */
     float auto_rotate_deg_per_sec = 0.0f; /**< Extra constant yaw added every frame; 0 disables it. */
+
+    /**
+     * @brief Orbit speed from the KEYS, degrees per second; 0 (the default) leaves them alone.
+     *
+     * WASD (and the arrow keys) turn the orbit the way the mouse does: A/D yaw, W/S pitch, into
+     * the same clamps. Off by default, and deliberately: the engine pushes those axes into every
+     * CameraController whatever its mode, so a scene whose WASD walks a character would otherwise
+     * swing the camera with every step. Scenes where nothing else wants the keys -- a model
+     * viewer, a map screen -- set a speed and get a keyboard orbit for free.
+     */
+    float key_orbit_speed_deg_per_sec = 0.0f;
     bool  capture_cursor         = true;  /**< Whether Engine should hide/unbound the cursor for this controller. */
+    /**
+     * @brief Mouse button that must be held for the mouse to turn the camera: "" (the default)
+     *        turns continuously, or "left" / "right" / "middle".
+     *
+     * The pair to `capture_cursor`. A game that hides the pointer wants the continuous turn --
+     * there is no cursor to lose. A game that KEEPS its pointer (to click a target, to drag an
+     * inventory) cannot: every mouse move would spin the world. Holding a button is how every
+     * such game resolves it, so this is where the choice lives rather than in each game's own
+     * component.
+     */
+    std::string look_button;
 
     /**
      * Drag on the camera's own response to mouse/scroll input, clamped to
@@ -147,8 +173,8 @@ public:
     // --- Per-frame input, set by the caller before Scene::update() ---
     glm::vec2 mouse_delta = glm::vec2(0.0f); /**< Orbit: raw mouse motion in pixels this frame. */
     float     scroll_input = 0.0f;           /**< Orbit: scroll wheel notches this frame (+ = zoom in). */
-    glm::vec3 move_input = glm::vec3(0.0f);  /**< Fly: x=strafe, y=forward, z=world-up. */
-    glm::vec2 look_input = glm::vec2(0.0f);  /**< Fly: x=yaw delta, y=pitch delta. */
+    glm::vec3 move_input = glm::vec3(0.0f);  /**< Fly: x=strafe, y=forward, z=world-up. Orbit: x/y turn it, with `key_orbit_speed_deg_per_sec`. */
+    glm::vec2 look_input = glm::vec2(0.0f);  /**< Fly: x=yaw delta, y=pitch delta. Orbit: the arrow keys' half of the turn above. */
 
     /**
      * @brief Seeds orbit geometry from the owner's initial Transform.

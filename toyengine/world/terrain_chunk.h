@@ -203,6 +203,31 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
 std::shared_ptr<const coopa::physx::geometry::TriangleMesh> build_chunk_collision(const ChunkMeshData& mesh);
 
 /**
+ * @brief Which of a welded chunk's vertices sit on its SEAM with the neighbouring chunks -- one
+ *        flag per vertex, 1 on the seam.
+ *
+ * These are the vertices a coarser level may not move. Chunks pick their level from their own
+ * size on screen, so neighbours routinely draw at different levels and only meet without a gap
+ * if both still carry the vertices they shared at full density. The seam is the chunk's edge in
+ * tile space; a planet's chunk, already bent onto the globe, is read back into face space first
+ * (planet.h).
+ */
+std::vector<std::uint8_t> chunk_seam_locks(const TerrainParams& params, const ChunkCoord& coord,
+                                           const ChunkMeshData& mesh);
+
+/**
+ * @brief Appends the chunk's coarser levels to `mesh.indices` and returns its LOD table
+ *        ([0] = the full chunk); empty when the terrain has no levels configured.
+ *
+ * What `ChunkBuildJob::run()` does between welding the chunk and uploading it. Every level
+ * shares LOD 0's vertices and holds its seam (chunk_seam_locks()), so the levels cost index
+ * ranges only and no two chunks can crack against each other whichever levels they draw.
+ */
+std::vector<coopa::gfx::engine::data::MeshLod> build_chunk_lods(const TerrainParams& params,
+                                                                const ChunkCoord& coord,
+                                                                ChunkMeshData& mesh);
+
+/**
  * @struct ChunkBuildJob
  * @brief Everything one chunk-meshing job needs, plus the buffers it writes into.
  *
@@ -231,6 +256,15 @@ struct ChunkBuildJob {
     coopa::gfx::core::Device*      device    = nullptr;
     coopa::gfx::memory::Allocator* allocator = nullptr;
     ChunkMeshData          mesh; /**< The CPU geometry; valid once the job's handle reports complete. */
+    /**
+     * @brief The chunk mesh's LOD table ([0] = the full chunk), built by run() from
+     *        TerrainParams::chunk_lods; empty when the terrain has no levels configured.
+     *
+     * The levels' indices live in `mesh.indices` behind LOD 0's, so this is a few ranges, not
+     * geometry. The renderer picks one per frame from the chunk's size on screen, and the
+     * shadow views follow that choice (toy::render::select_lod()).
+     */
+    std::vector<coopa::gfx::engine::data::MeshLod> lods;
     /** @brief The chunk's GPU mesh, built by run(); null for an empty chunk (or no `device`). */
     std::shared_ptr<coopa::gfx::engine::data::Mesh> gpu_mesh;
     /** @brief The chunk's collider surface, when `collision`; null for an empty chunk. */

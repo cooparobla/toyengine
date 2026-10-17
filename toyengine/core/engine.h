@@ -912,6 +912,18 @@ private:
     void drive_free_movers_(coopa::scene::Scene& scene);
 
     /**
+     * @brief Pushes this frame's mouse drag, and the camera's right axis, into every Turntable
+     *        in the active scene, before Scene::update() consumes them.
+     *
+     * The drag is gated here rather than in the component, the way drive_camera_controller_()
+     * gates `look_button`: the button state lives in coopa::input::Input, which a component
+     * deliberately cannot see. The camera axis comes from the main CameraComponent, so a
+     * turntable tilts about what the viewer actually calls "across the screen" whatever
+     * direction the camera was placed in.
+     */
+    void drive_turntables_(coopa::scene::Scene& scene);
+
+    /**
      * @brief Pushes this frame's move/jump/sprint input into every CharacterController in the
      *        active scene, before Scene::update() consumes it.
      *

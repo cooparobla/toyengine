@@ -6,6 +6,62 @@
 namespace toy {
 namespace scene {
 
+int CharacterAnimDriver::push_states(const std::string& moving, const std::string& still) {
+    // The first claim is what records the driver's own vocabulary; later ones must not, or a
+    // claim pushed on top of another would remember that other's clip as the resting state.
+    if (claims_.empty()) {
+        own_idle_ = idle_state;
+        own_walk_ = walk_state;
+        own_run_ = run_state;
+        own_jump_ = jump_state;
+    }
+    StateClaim claim;
+    claim.token = next_token_++;
+    claim.moving = moving;
+    claim.still = still.empty() ? moving : still;
+    claims_.push_back(claim);
+    apply_claims_();
+    return claim.token;
+}
+
+bool CharacterAnimDriver::repoint_states(int token, const std::string& moving,
+                                         const std::string& still) {
+    if (token == 0) return false;
+    for (StateClaim& claim : claims_) {
+        if (claim.token != token) continue;
+        claim.moving = moving;
+        claim.still = still.empty() ? moving : still;
+        apply_claims_();
+        return true;
+    }
+    return false;
+}
+
+void CharacterAnimDriver::release_states(int token) {
+    if (token == 0) return;
+    for (std::size_t i = 0; i < claims_.size(); ++i) {
+        if (claims_[i].token != token) continue;
+        claims_.erase(claims_.begin() + static_cast<std::ptrdiff_t>(i));
+        apply_claims_();
+        return;
+    }
+}
+
+void CharacterAnimDriver::apply_claims_() {
+    if (claims_.empty()) {
+        idle_state = own_idle_;
+        walk_state = own_walk_;
+        run_state = own_run_;
+        jump_state = own_jump_;
+        return;
+    }
+    const StateClaim& top = claims_.back();
+    idle_state = top.still;
+    walk_state = top.moving;
+    run_state = top.moving;
+    jump_state = top.moving;
+}
+
 void CharacterAnimDriver::update(float dt) {
     if (!owner) return;
     if (!controller_) controller_ = owner->get_component<CharacterController>();

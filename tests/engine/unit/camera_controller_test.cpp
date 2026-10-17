@@ -120,6 +120,54 @@ COOPA_TEST(pitch_and_zoom_saturate_at_their_limits) {
     }
 }
 
+/**
+ * @brief The keys turn the orbit only where a scene asked for it, at the rate it asked for, into
+ *        the same clamps the mouse uses.
+ *
+ * The default of 0 is the load-bearing half: WASD reaches every CameraController whatever its
+ * mode (Engine::drive_camera_controller_() pushes those axes unconditionally), so a character
+ * scene's every step would swing its camera if this were on by default.
+ */
+COOPA_TEST(keys_orbit_only_when_a_scene_asks_for_it) {
+    {
+        CameraController* cc = nullptr;
+        auto scene = make_orbit_scene(&cc, glm::vec3(0.0f, -10.0f, 0.0f));
+        scene->start();
+        const float yaw = cc->yaw_deg, pitch = cc->pitch_deg;
+
+        cc->move_input = glm::vec3(1.0f, 1.0f, 0.0f);
+        cc->look_input = glm::vec2(1.0f, 1.0f);
+        for (int i = 0; i < 60; ++i) scene->update(1.0f / 60.0f);
+        expect(cc->yaw_deg == yaw && cc->pitch_deg == pitch,
+               "camera_controller: WASD leaves the orbit alone at the default key_orbit_speed of 0");
+    }
+    {
+        CameraController* cc = nullptr;
+        auto scene = make_orbit_scene(&cc, glm::vec3(0.0f, -10.0f, 0.0f));
+        cc->key_orbit_speed_deg_per_sec = 60.0f;
+        cc->min_pitch_deg = -85.0f;
+        cc->max_pitch_deg = 85.0f;
+        scene->start();
+
+        cc->move_input = glm::vec3(1.0f, 0.0f, 0.0f);   // D
+        for (int i = 0; i < 60; ++i) scene->update(1.0f / 60.0f);
+        expect_near(cc->yaw_deg, 60.0f, 0.01f, "camera_controller: a second of D yaws by key_orbit_speed_deg_per_sec");
+        expect(camera_aims_at(*scene->root_objects()[0]->get_transform(), cc->target),
+               "camera_controller: ...still aimed at the target");
+
+        // Arrow keys are the same turn, and holding both is still one key's worth of it.
+        cc->move_input = glm::vec3(0.0f, 1.0f, 0.0f);   // W
+        cc->look_input = glm::vec2(0.0f, 1.0f);         // Up, at the same time
+        for (int i = 0; i < 30; ++i) scene->update(1.0f / 60.0f);
+        expect_near(cc->pitch_deg, 30.0f, 0.01f, "camera_controller: W and Up together turn once, not twice");
+
+        cc->move_input = glm::vec3(0.0f, 1.0f, 0.0f);
+        cc->look_input = glm::vec2(0.0f);
+        for (int i = 0; i < 600; ++i) scene->update(1.0f / 60.0f);
+        expect(cc->pitch_deg == cc->max_pitch_deg, "camera_controller: a held key saturates at max_pitch_deg");
+    }
+}
+
 COOPA_TEST(tracker_is_followed_and_an_unresolved_one_falls_back) {
     {
         auto scene = std::make_unique<Scene>("tracker_test");

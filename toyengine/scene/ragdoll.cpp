@@ -55,9 +55,20 @@ void Ragdoll::stage_pre_physics(float dt, coopa::physx::system::PhysicsSystem* p
     }
     const Request req = pending_;
     pending_ = Request::None;
-    if (req == Request::Activate && mode_ != Mode::Ragdoll) go_limp_(*physics);
-    else if (req == Request::Deactivate && mode_ == Mode::Ragdoll) begin_recovery_(*physics);
-    else if (mode_ == Mode::Ragdoll) rest_assist_(*physics, dt);
+    if (req == Request::Activate && mode_ != Mode::Ragdoll) {
+        go_limp_(*physics);
+    } else if (req == Request::Deactivate && mode_ == Mode::Ragdoll) {
+        begin_recovery_(*physics);
+    } else if (req == Request::Activate && mode_ == Mode::Ragdoll) {
+        // A blow landing on a body that is already limp -- a corpse being hit, a cart running
+        // over one. It takes the impulse like any other, waking it if it had settled.
+        apply_pending_impulse_(*physics);
+    } else if (mode_ == Mode::Ragdoll) {
+        rest_assist_(*physics, dt);
+    }
+    // Every limp frame, not only the first: a joint snapping taut or a deep contact resolving
+    // can hand a bone a speed that would carry it through the ground in one substep.
+    if (mode_ == Mode::Ragdoll) limit_limp_speed_(*physics);
 }
 
 void Ragdoll::stage_pre_animation() {
@@ -384,7 +395,6 @@ void Ragdoll::go_limp_(coopa::physx::system::PhysicsSystem& physics) {
     set_ik_suspended_(true);
     if (CharacterController* cc = character_()) cc->set_suspended(true);
 
-    float total = 0.0f;
     for (BoneRt& b : rt_) {
         b.rb->is_kinematic = false;
         const dyn::BodyId id = b.rb->body_id();
@@ -392,9 +402,37 @@ void Ragdoll::go_limp_(coopa::physx::system::PhysicsSystem& physics) {
         if (dyn::Body* body = world.get_body(id)) {
             dyn::update_world_inertia(*body);
             body->wake();
-            total += body->mass;
         }
     }
+    mode_ = Mode::Ragdoll;
+    rest_timer_ = 0.0f;
+    rest_anchor_.clear();
+    // Before anything else reads them: the velocities the bones arrive with are the animation's
+    // (see `max_limp_speed`), and the impulse below is meant to be felt on top of a sane body.
+    limit_limp_speed_(physics);
+    apply_pending_impulse_(physics);
+}
+
+void Ragdoll::limit_limp_speed_(coopa::physx::system::PhysicsSystem& physics) {
+    if (max_limp_speed <= 0.0f && max_limp_spin <= 0.0f) return;
+    coopa::physx::PhysicsWorld& world = physics.world();
+    for (BoneRt& b : rt_) {
+        coopa::physx::dynamics::Body* body = world.get_body(b.rb->body_id());
+        if (!body || body->type != coopa::physx::dynamics::BodyType::Dynamic) continue;
+        if (max_limp_speed > 0.0f) {
+            const float speed = glm::length(body->linear_velocity);
+            if (speed > max_limp_speed) body->linear_velocity *= max_limp_speed / speed;
+        }
+        if (max_limp_spin > 0.0f) {
+            const float spin = glm::length(body->angular_velocity);
+            if (spin > max_limp_spin) body->angular_velocity *= max_limp_spin / spin;
+        }
+    }
+}
+
+void Ragdoll::apply_pending_impulse_(coopa::physx::system::PhysicsSystem& physics) {
+    namespace dyn = coopa::physx::dynamics;
+    coopa::physx::PhysicsWorld& world = physics.world();
     if (glm::length(pending_impulse_) > 0.0f) {
         if (pending_point_) {
             dyn::Body* best = nullptr;
@@ -406,33 +444,63 @@ void Ragdoll::go_limp_(coopa::physx::system::PhysicsSystem& physics) {
                 if (d < best_d) { best_d = d; best = body; }
             }
             if (best) best->apply_impulse_at_position(pending_impulse_, *pending_point_);
-        } else if (total > 0.0f) {
+        } else {
+            float total = 0.0f;
             for (BoneRt& b : rt_) {
-                if (dyn::Body* body = world.get_body(b.rb->body_id())) {
-                    body->apply_impulse(pending_impulse_ * (body->mass / total));
+                if (const dyn::Body* body = world.get_body(b.rb->body_id())) total += body->mass;
+            }
+            if (total > 0.0f) {
+                for (BoneRt& b : rt_) {
+                    if (dyn::Body* body = world.get_body(b.rb->body_id())) {
+                        body->apply_impulse(pending_impulse_ * (body->mass / total));
+                    }
                 }
             }
         }
+        // The shove restarts the clock: a body that was a frame from resting must not be frozen
+        // in the pose it was in before the blow landed.
+        rest_timer_ = 0.0f;
     }
     pending_impulse_ = glm::vec3(0.0f);
     pending_point_.reset();
-    mode_ = Mode::Ragdoll;
 }
 
 void Ragdoll::rest_assist_(coopa::physx::system::PhysicsSystem& physics, float dt) {
     if (rest_time <= 0.0f) return;
     coopa::physx::PhysicsWorld& world = physics.world();
-    bool any_awake = false, calm = true;
-    for (BoneRt& b : rt_) {
-        const coopa::physx::dynamics::Body* body = world.get_body(b.rb->body_id());
-        if (!body || !body->awake) continue;
-        any_awake = true;
-        calm = calm && glm::length(body->linear_velocity) < rest_speed && glm::length(body->angular_velocity) < rest_spin;
+    if (rest_anchor_.size() != rt_.size()) {
+        rest_anchor_.assign(rt_.size(), glm::vec3(0.0f));
+        rest_timer_ = 0.0f;
+        for (size_t i = 0; i < rt_.size(); ++i) {
+            if (const coopa::physx::dynamics::Body* body = world.get_body(rt_[i].rb->body_id())) {
+                rest_anchor_[i] = body->position;
+            }
+        }
+        return;
     }
-    if (!any_awake || !calm) {
+
+    bool any_awake = false, stayed = true;
+    for (size_t i = 0; i < rt_.size(); ++i) {
+        const coopa::physx::dynamics::Body* body = world.get_body(rt_[i].rb->body_id());
+        if (!body) continue;
+        any_awake = any_awake || body->awake;
+        stayed = stayed && glm::length(body->position - rest_anchor_[i]) < rest_travel;
+    }
+    if (!any_awake) {
         rest_timer_ = 0.0f;
         return;
     }
+    if (!stayed) {
+        // Moved: this is where the body is now, and the window starts again from here.
+        for (size_t i = 0; i < rt_.size(); ++i) {
+            if (const coopa::physx::dynamics::Body* body = world.get_body(rt_[i].rb->body_id())) {
+                rest_anchor_[i] = body->position;
+            }
+        }
+        rest_timer_ = 0.0f;
+        return;
+    }
+
     rest_timer_ += std::max(dt, 0.0f);
     if (rest_timer_ < rest_time) return;
     for (BoneRt& b : rt_) {
@@ -486,6 +554,7 @@ void Ragdoll::begin_recovery_(coopa::physx::system::PhysicsSystem& physics) {
         b.rb->is_kinematic = true;
         world.set_body_type(b.rb->body_id(), dyn::BodyType::Kinematic);
     }
+    rest_anchor_.clear();
     // Hold the ragdoll pose under the moved root now, so this frame's physics step sees the
     // bones where they lay (zero kinematic velocity, nothing knocked away).
     std::vector<Pose> hold(rt_.size());

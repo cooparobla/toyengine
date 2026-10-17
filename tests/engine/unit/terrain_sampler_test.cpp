@@ -1,8 +1,9 @@
 /**
  * @file terrain_sampler_test.cpp
  * @brief TerrainSampler against a really generated map: the bucket index finds the same Voronoi
- *        cell an exhaustive scan does, and neighbouring chunks agree on their shared border (no
- *        seams between chunks meshed on different workers).
+ *        cell an exhaustive scan does, neighbouring chunks agree on their shared border (no
+ *        seams between chunks meshed on different workers), and the ground under water bakes to
+ *        a graded floor rather than one flat terrace.
  */
 
 #include <coopa/testing/test.h>
@@ -10,11 +11,14 @@
 #include <cstdint>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <random>
 #include <string>
 
 #include <coopa/debug/logger.h>
 #include <coopa/maps/map_generator.h>
+#include <coopa/maps/map_presets.h>
+#include <toyengine/world/terrain_generator.h>
 #include <toyengine/world/terrain_sampler.h>
 
 #include "engine/support/checks.h"
@@ -114,4 +118,67 @@ COOPA_TEST(neighbouring_chunks_agree_on_their_shared_border) {
     ChunkMeshData mesh;
     mesh_chunk_styled(left, voxel_library(), params, mesh);
     expect(!mesh.empty(), "sampler: a chunk of generated terrain meshes to something drawable");
+}
+
+/**
+ * @brief The baked tile world has a sea floor and lake beds with real relief, graded by depth.
+ *
+ * mapcoopa shapes the ground under water (NaturalTerrainConfig::seabed, and a basin under every
+ * lake); this is the tile grid's own view of it. What it rules out is a flooded world of
+ * terraces: a bed that is the bare interpolation of the cell heights changes by a tenth of a
+ * metre per tile where the land changes by two, so a whole ocean bakes to a single step.
+ *
+ * Measured as the share of flooded tiles standing at the same step as the tile beside them.
+ */
+COOPA_TEST(the_floor_under_water_has_relief_and_grades_by_depth) {
+    using namespace toy::world;
+
+    QuietLogger logger;
+    // The generator a TileTerrain component makes by default -- natural terrain, which is the
+    // surface the engine actually samples (see toy::world::default_generator()).
+    coopa::maps::MapConfig config = default_generator();
+    config.seed      = 31;
+    config.grid_size = 32;
+    config = coopa::maps::derived_config(config);
+    coopa::maps::MapGenerator generator(config, logger);
+    generator.generate();
+
+    // terrain_demo's vertical scale: 32 world units for the whole elevation range.
+    TerrainParams params = make_test_params(16);
+    params.height_scale = 32.0f;
+    params.world_tiles  = config.grid_size * 16;
+    TerrainSampler sampler;
+    sampler.build(config, std::move(generator.graph()), params);
+
+    TileMapData tiles;
+    sampler.bake(tiles);
+    expect(!tiles.empty(), "seabed: the world bakes");
+
+    std::size_t flooded = 0;
+    std::size_t level_with_neighbour = 0;
+    std::int32_t deepest = 0;
+    std::map<TileKind, std::size_t> bed_kinds;
+    for (std::int32_t y = 0; y + 1 < tiles.height(); ++y) {
+        for (std::int32_t x = 0; x + 1 < tiles.width(); ++x) {
+            const TileRecord& t = tiles.at(x, y);
+            if (!t.water() || t.has(TileRecord::Flowing)) continue;
+            ++flooded;
+            deepest = std::max(deepest, t.water_level() - t.steps);
+            bed_kinds[t.top_kind()] += 1;
+            const TileRecord& n = tiles.at(x + 1, y);
+            if (n.water() && n.steps == t.steps) ++level_with_neighbour;
+        }
+    }
+    expect(flooded > 1000, "seabed: the world has open water to sound");
+    // A bed is smoother than a hillside, so most neighbours do share a step -- but not nearly
+    // all of them. With no bed landforms at all it is 99.7%.
+    const double level = static_cast<double>(level_with_neighbour) / static_cast<double>(flooded);
+    expect(level < 0.96, "seabed: the floor steps rather than running flat");
+    // And it is deep: the ocean reaches several steps under its own surface.
+    expect(deepest >= 4, "seabed: the sea floor lies several steps under the waterline");
+    // Graded, not one sand plain all the way down -- see TerrainSampler::bed_kind_for().
+    expect(bed_kinds.size() >= 3, "seabed: the floor is surfaced by depth, not uniformly");
+    std::cerr << "         " << flooded << " flooded tiles, " << static_cast<int>(level * 100)
+              << "% level with their neighbour, deepest " << deepest << " steps, "
+              << bed_kinds.size() << " bed surfaces\n";
 }

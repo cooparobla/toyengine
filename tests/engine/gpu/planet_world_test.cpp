@@ -39,19 +39,37 @@ using namespace toy::test;
 
 namespace {
 
-/** @brief planet_demo, shrunk, without its dropped bodies. */
+/**
+ * @brief planet_demo, shrunk to a walkable world: a 32-tile face, and the physics the shipped
+ *        scene has no use for.
+ *
+ * The demo is a globe to look at -- it carries no colliders and registers no gravity, because
+ * nothing in it stands on the ground (see its scene.yaml). Everything these tests claim is
+ * about bodies ON that ground, so the variant turns collision and gravity back on and adds the
+ * player the walking test drives. Its falling bodies are each test's own.
+ */
 std::string small_planet() {
     toy::world::TileMapStore::instance().clear();
     std::string path = scene_variant("assets/scenes/terrain/planet_demo/scene.yaml", "small_planet", [](fkyaml::node& doc) {
         if (fkyaml::node* t = scene_component(doc, "planet", "TileTerrain")) {
             (*t)["face_tiles"] = fkyaml::node(32);
             (*t)["height_scale"] = fkyaml::node(6.0);
+            (*t)["collision"] = fkyaml::node(true);
+            (*t)["gravity"] = fkyaml::node(9.81);
         }
         auto& roots = doc["scene"]["root_objects"].as_seq();
         roots.erase(std::remove_if(roots.begin(), roots.end(), [](const fkyaml::node& o) {
                         return o.contains("name") && o.at("name").get_value<std::string>().rfind("drop_", 0) == 0;
                     }),
                     roots.end());
+        // Placed off the planet; a_character_walks_on_the_planet() teleports it onto the ground
+        // it picked, and the other tests simply leave it there.
+        roots.push_back(fkyaml::node::deserialize(std::string(
+            "name: player\n"
+            "prefab: objects/mannequin\n"
+            "components:\n"
+            "  - { type: Transform, position: { x: 0.0, y: 0.0, z: 60.0 } }\n"
+            "  - { type: CharacterController, height: 1.8, radius: 0.3, move_speed: 3.0, step_height: 1.1 }\n")));
     });
     // The whole `terrain/` directory, not one filename: a stored tile map is named after its
     // object (a planet's is `planet.tiles`), and one left from another face_tiles would be

@@ -17,7 +17,9 @@
  *     them -- a raycast hits an arm, a ball bounces off a leg -- but cannot move them.
  *   - Ragdoll: bones are dynamic, the Animator is cleared (Animator::clear(), so nothing
  *     re-applies a pose over the physics), IK under the rig is suspended, and physics writes the
- *     bone Transforms (PhysicsSystem's hierarchical write-back).
+ *     bone Transforms (PhysicsSystem's hierarchical write-back). Once the body has finished
+ *     moving it is put to sleep (`rest_travel`); a later blow, or anything touching it, takes
+ *     it up again.
  *   - Blending (after deactivate()): bones are kinematic again and the Animator plays the
  *     recovery state; each frame every bone's world pose is blended from where the ragdoll left
  *     it to the freshly animated pose over `blend_time`, then the mode returns to Animated.
@@ -142,14 +144,45 @@ public:
     float blend_time = 0.5f;           ///< Default deactivate() blend (s).
     std::string recover_state;         ///< Default deactivate() state; empty = the Animator's auto_play.
     bool link_character = true;        ///< Suspend/resume a CharacterController on this object.
-    /** @brief Rest assist: a limp body whose every bone has stayed under these speeds (m/s,
-     *         rad/s) for `rest_time` seconds is put to sleep as a whole. Contacts and joints
-     *         leave a resting ragdoll creeping at a few mm/s -- below anything visible but above
-     *         the world's per-body sleep thresholds -- so without this it never sleeps.
-     *         rest_time <= 0 turns it off. Anything touching the body wakes it again. */
-    float rest_speed = 0.08f;
-    float rest_spin = 0.2f;
+    /**
+     * @brief Rest assist: a limp body whose every bone has stayed within `rest_travel` of where
+     *        it was for `rest_time` seconds has finished moving, and is put to sleep as a whole.
+     *        rest_time <= 0 turns it off. Anything touching the body wakes it again, as does a
+     *        blow (activate() on a body already limp).
+     *
+     * Travelled, not speed: contacts and joints leave a settled ragdoll permanently twitching at
+     * a few cm/s -- below anything visible, above the world's own per-body sleep thresholds, and
+     * above any instantaneous threshold low enough to mean "stopped". Watching speed, one bone's
+     * twitch restarts the whole body's clock every few frames, so it never sleeps and never
+     * stops twitching; watching where the bones actually ARE answers the question the twitch
+     * obscures, since a body going nowhere IS at rest however busy its contacts look.
+     *
+     * 2 cm over a second: under what a lying body visibly moves, well over the jitter.
+     */
+    float rest_travel = 0.02f;
     float rest_time = 1.0f;
+    /**
+     * @brief Speed limits (m/s, rad/s) on a limp body's bones; 0 or less lifts them.
+     *
+     * Enforced on going limp and every frame after it, and both halves matter:
+     *
+     * - **Going limp**, a bone carries over the velocity it was animated with -- which is
+     *   derived from how far its Transform moved last frame, so a crossfade, a clip that cut to
+     *   a new pose, or the character having just been placed somewhere reads as metres in one
+     *   frame and hands the body a speed nothing physical could have. That is a corpse fired
+     *   off the map by its own death animation.
+     * - **While limp**, the cap is what keeps a bone from tunnelling. Contacts are generated
+     *   from where a body IS, not from the path it took, so a bone that covers more than its
+     *   own thickness in one substep can pass clean through the ground -- and the far side of a
+     *   streamed terrain surface is open space, with nothing to push it back. At 8 m/s a 1/60 s
+     *   substep is 13 cm, under the size of any bone shape worth giving a body.
+     *
+     * 8 m/s is a sprint: faster than a body falls in the half-second it takes to hit the
+     * ground from standing, and well past what any death throw needs to read as violent.
+     */
+    float max_limp_speed = 8.0f;
+    float max_limp_spin = 12.0f;
+
     bool reposition_root = true;       ///< Without a controller: move the root under the pelvis on recovery.
     /** @brief React to the engine's "ragdoll" input (R): activate() with `toggle_impulse` (world,
      *         N s, applied through the chest-height bones) when animated, deactivate() when limp. */
@@ -267,7 +300,13 @@ private:
 
     void go_limp_(coopa::physx::system::PhysicsSystem& physics);
 
-    /** @brief See `rest_speed`. */
+    /** @brief Holds every bone under `max_limp_speed` / `max_limp_spin`. */
+    void limit_limp_speed_(coopa::physx::system::PhysicsSystem& physics);
+
+    /** @brief Spends activate()'s impulse over the bones (at a point, or by mass). */
+    void apply_pending_impulse_(coopa::physx::system::PhysicsSystem& physics);
+
+    /** @brief See `rest_travel`. */
     void rest_assist_(coopa::physx::system::PhysicsSystem& physics, float dt);
 
     void begin_recovery_(coopa::physx::system::PhysicsSystem& physics);
@@ -293,6 +332,8 @@ private:
     float blend_t_ = 0.0f;
     float blend_dur_ = 0.5f;
     float rest_timer_ = 0.0f;
+    /** @brief Where each bone's body was when the rest window began; empty until limp. */
+    std::vector<glm::vec3> rest_anchor_;
 };
 
 /** @brief The three Ragdoll stages' default orders (see the file doc). */

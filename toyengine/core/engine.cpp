@@ -10,6 +10,7 @@
 #include <toyengine/scene/ragdoll.h>
 #include <toyengine/scene/rider.h>
 #include <toyengine/scene/skinned_mesh_renderer.h>
+#include <toyengine/scene/terrain_digger.h>
 #include <toyengine/scene/turntable.h>
 #include <toyengine/world/heightmap_terrain_system.h>
 
@@ -792,6 +793,7 @@ bool Engine::tick() {
             drive_kinematic_controllers_(scene_mgr_.get_active_scene());
             drive_free_movers_(scene_mgr_.get_active_scene());
             drive_turntables_(scene_mgr_.get_active_scene());
+            drive_terrain_diggers_(scene_mgr_.get_active_scene());
             drive_character_controllers_(scene_mgr_.get_active_scene());
             drive_ragdolls_(scene_mgr_.get_active_scene());
         }
@@ -836,6 +838,7 @@ bool Engine::tick() {
             CpuTimer t(prof, CpuScope::DynamicMeshes);
             upload_dynamic_meshes_(scene_mgr_.get_active_scene());
             gather_debug_lines_(scene_mgr_.get_active_scene());
+            gather_digger_hover_(scene_mgr_.get_active_scene());
         }
         if (hooks_.pre_render) hooks_.pre_render(dt);
         // Lens blur (depth of field, tilt shift) is a play-time look: an editor's edit mode
@@ -1777,6 +1780,51 @@ void Engine::drive_turntables_(coopa::scene::Scene& scene) {
     }
 }
 
+void Engine::drive_terrain_diggers_(coopa::scene::Scene& scene) {
+    std::vector<scene::TerrainDigger*> diggers = scene.get_components<scene::TerrainDigger>();
+    if (diggers.empty()) return;
+
+    using coopa::input::Key;
+    using coopa::input::MouseButton;
+    const bool blocked = input_blocked_();
+    // Where the player is pointing: the cursor, unless the camera has taken it -- a scene that
+    // hides the pointer (CameraController::capture_cursor) aims from the middle of the view,
+    // the way a crosshair does, and its virtual cursor position means nothing on screen.
+    const render::LetterboxRect box = display_rect();
+    const auto* cc = scene.find_first_component<scene::CameraController>();
+    const bool crosshair = cc != nullptr && cc->capture_cursor;
+    const glm::vec2 centre(static_cast<float>(box.x) + 0.5f * static_cast<float>(box.w),
+                           static_cast<float>(box.y) + 0.5f * static_cast<float>(box.h));
+    const glm::vec2 aim = crosshair ? centre : ctx_.input().cursor_position();
+    glm::vec3 origin(0.0f), dir(0.0f);
+    bool have_ray = !blocked && viewport_ray(aim, origin, dir);
+    // A cursor that does not land inside the viewport at all -- a window whose scaling the
+    // cursor units do not match, a pointer that has not moved since the window opened -- would
+    // otherwise leave the tool silently dead. Aim down the middle instead: the hover outline
+    // then shows which tile is targeted, which is the whole point of having it.
+    if (!blocked && !have_ray) have_ray = viewport_ray(centre, origin, dir);
+
+    for (scene::TerrainDigger* d : diggers) {
+        const bool held = have_ray && [&] {
+            const std::string& b = d->dig_button;
+            if (b == "left" || b == "Left") return ctx_.input().button_down(MouseButton::Left);
+            if (b == "right" || b == "Right") return ctx_.input().button_down(MouseButton::Right);
+            return ctx_.input().button_down(MouseButton::Middle);
+        }();
+        const bool raise_held = !blocked && !d->raise_key.empty() && [&] {
+            const std::string& k = d->raise_key;
+            if (k == "ctrl" || k == "control") return ctx_.input().key_down(Key::LeftControl) || ctx_.input().key_down(Key::RightControl);
+            if (k == "alt") return ctx_.input().key_down(Key::LeftAlt) || ctx_.input().key_down(Key::RightAlt);
+            return ctx_.input().key_down(Key::LeftShift) || ctx_.input().key_down(Key::RightShift);
+        }();
+        const bool raise = held && raise_held;
+        d->digging = held;
+        d->raising = raise || (have_ray && !d->raise_key.empty() && raise_held);
+        d->ray_origin = origin;
+        d->ray_direction = have_ray ? dir : glm::vec3(0.0f);
+    }
+}
+
 void Engine::drive_character_controllers_(coopa::scene::Scene& scene) {
     std::vector<scene::CharacterController*> characters = scene.get_components<scene::CharacterController>();
     std::vector<scene::Mount*> mounts = scene.get_components<scene::Mount>();
@@ -1863,6 +1911,40 @@ void Engine::gather_debug_lines_(coopa::scene::Scene& scene) {
     out.reserve(draw.lines.size());
     for (const auto& line : draw.lines) {
         out.push_back(render::DebugLine{line.a, line.b, render::pack_gpu_color(line.color)});
+    }
+}
+
+void Engine::gather_digger_hover_(coopa::scene::Scene& scene) {
+    for (scene::TerrainDigger* d : scene.get_components<scene::TerrainDigger>()) {
+        if (!d->show_hover || !d->hovering()) continue;
+        const glm::vec3& c = d->raising ? d->raise_color : d->hover_color;
+        const auto byte = [](float v) {
+            return static_cast<uint32_t>(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f);
+        };
+        // pack_gpu_color() takes physxcoopa's 0xRRGGBBAA packing, which is what this builds.
+        const uint32_t packed = render::pack_gpu_color((byte(c.r) << 24) | (byte(c.g) << 16) |
+                                                       (byte(c.b) << 8) | 0xFFu);
+        const auto& p = d->hover_corners();
+        const glm::vec3 centre = 0.25f * (p[0] + p[1] + p[2] + p[3]);
+        const glm::vec3 up = glm::normalize(glm::cross(p[1] - p[0], p[3] - p[0]));
+        // X-ray (occluded = false): the outline hugs the surface it marks, and depth-tested it
+        // would z-fight its way out of existence.
+        const auto line = [&](const glm::vec3& a, const glm::vec3& b) {
+            pipeline_->debug_lines().push_back(render::DebugLine{a, b, packed, false});
+        };
+        // Three rings, each a little further in: one line is a single pixel at the resolutions
+        // this engine renders at, and a single pixel over a busy terrace is not a cue anybody
+        // sees. Drawn toward the centre rather than outward so the band stays on the tiles the
+        // click will actually take.
+        for (int ring = 0; ring < 3; ++ring) {
+            const float t = 0.06f * static_cast<float>(ring);
+            glm::vec3 q[4];
+            for (int i = 0; i < 4; ++i) q[i] = glm::mix(p[static_cast<std::size_t>(i)], centre, t);
+            for (int i = 0; i < 4; ++i) line(q[i], q[(i + 1) % 4]);
+        }
+        // Corner posts: the outline read from a low angle, where the ground is nearly edge-on.
+        const float post = 0.45f * glm::length(p[1] - p[0]);
+        for (int i = 0; i < 4; ++i) line(p[static_cast<std::size_t>(i)], p[static_cast<std::size_t>(i)] + up * post);
     }
 }
 

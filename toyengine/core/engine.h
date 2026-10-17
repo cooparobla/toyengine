@@ -924,6 +924,26 @@ private:
     void drive_turntables_(coopa::scene::Scene& scene);
 
     /**
+     * @brief Pushes the cursor's pick ray and the dig/raise buttons into every TerrainDigger in
+     *        the active scene, before Scene::update() consumes them.
+     *
+     * The ray is built here, not in the component, for the same reason the camera's look button
+     * is: it needs the cursor, the display rect and the main camera's matrices -- three things
+     * a component deliberately cannot see (viewport_ray()).
+     */
+    void drive_terrain_diggers_(coopa::scene::Scene& scene);
+
+    /**
+     * @brief Appends each TerrainDigger's hover outline to the frame's debug lines, after
+     *        gather_debug_lines_() has cleared them.
+     *
+     * The overlay draws whenever that vector is non-empty, whatever `debug_view` is set to, so
+     * this is a game-facing cue rather than a debug one -- and it is drawn X-ray, since an
+     * outline lying exactly on the surface it outlines would z-fight.
+     */
+    void gather_digger_hover_(coopa::scene::Scene& scene);
+
+    /**
      * @brief Pushes this frame's move/jump/sprint input into every CharacterController in the
      *        active scene, before Scene::update() consumes it.
      *

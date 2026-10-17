@@ -73,6 +73,7 @@ void TerrainSystem::tick_terrain_(TerrainComponent& terrain, coopa::scene::Scene
     advance_retiring_(terrain);
     if (!terrain.is_ready() || ctx.jobs == nullptr) return;
 
+    advance_water_settles_(terrain);
     mark_edited_chunks_(terrain);
     if (terrain.params.planet) {
         // A planet is small and seen whole: every chunk stays loaded, nearest the camera first.
@@ -186,6 +187,22 @@ void TerrainSystem::want_planet_chunks_(TerrainComponent& terrain) {
             chunk.state = ChunkState::Queued;
             terrain.chunks().emplace(coord, std::move(chunk));
         }
+    }
+}
+
+void TerrainSystem::advance_water_settles_(TerrainComponent& terrain) {
+    if (terrain.water_settles.empty() || !terrain.tiles) return;
+    // One budget shared over however many settles are in flight, oldest first, so digging again
+    // while the last flood is still running cannot multiply the per-frame cost.
+    std::size_t budget = static_cast<std::size_t>(std::max(1, terrain.water_settle_budget));
+    while (!terrain.water_settles.empty() && budget > 0) {
+        WaterSettle& settle = terrain.water_settles.front();
+        const std::size_t before = settle.spent;
+        step_settle(*terrain.tiles, settle, budget);
+        budget -= std::min(budget, settle.spent - before);
+        // Whatever it filled is journalled, so mark_edited_chunks_() -- running straight after
+        // this -- stales exactly the chunks the water reached and they re-mesh with it.
+        if (settle.done()) terrain.water_settles.pop_front();
     }
 }
 

@@ -216,6 +216,45 @@ radius is not solid** -- raise it past wherever physics actually happens, and re
 bodies resting on terrain the camera streams away entirely lose their ground with it, so
 `view_radius` has to cover that too.
 
+## Editing it at runtime
+
+The tiles are the terrain (see [Stored tiles](#stored-tiles)), so changing the world is changing
+them: write records, `mark_dirty()`, and the chunks they touch re-mesh with their colliders and
+water. `tile_edit.h` is that as operations rather than raw writes -- `tile_raise()`,
+`tile_set_height()`, `tile_paint()`, `tile_smooth()`, `tile_water()` -- pure functions over a
+`TileMapData`, shared by the editor's brushes (`editor/terrain/tile_brush.h` forwards to them)
+and by gameplay.
+
+Gameplay goes through the component, which knows where the tiles are in the world and owns the
+water that follows:
+
+```cpp
+terrain->raise_at(world_position, /*radius_tiles=*/1, /*delta=*/-2);   // dig a 3x3 pit
+terrain->raycast_tiles(ray_origin, ray_direction, 1e4f, hit);          // what is under the cursor
+```
+
+**The water follows by itself.** Ground that rose through its surface loses it, and ground that
+dropped beside water is flooded by it, to that body's level and carrying what it is -- sea,
+lake, or a river with its flow direction (`tile_water.h`'s `settle_water()`). What gameplay must
+not do is pay for it all at once: a hole dug at the shore floods as far as the basin runs,
+which is thousands of tiles and a rebuild for every chunk they cross. So an edit through the
+component **queues** the settle (`TerrainComponent::water_settles`) and `TerrainSystem` spends
+`water_settle_budget` tiles a frame on it -- the water is seen to run in, and the chunk rebuilds
+ride the streamer's existing pacing. `settle_water()` still runs the whole thing in one call for
+the editor, and `tile_map_test` asserts the two end up identical.
+
+On a planet every one of these steps its neighbours through `PlanetLayout::neighbour()`, because
+one column along in storage is a column of the next face, nowhere near the water.
+
+`TerrainDigger` (toyengine/scene/terrain_digger.h) is a small component that does all of the
+above from the mouse: it outlines the tiles under the cursor every frame (the cue Engine draws
+into the debug-line overlay), a drag digs them, and `raise_key` held raises instead.
+`assets/scenes/terrain/dig_demo` is the scene for it -- a small coast with lakes and a river,
+close enough to aim at individual tiles. It is the only demo that carries one: it is gameplay,
+so **it runs in Play, not in the editor's edit mode**, where the editor's own Tile Mode brushes
+are the way to move ground (they go through the same tile_edit.h operations, water settling
+included).
+
 ## Cost model
 
 The pipeline frustum-culls every chunk per view (see `ToyRenderPipeline::gather_meshes_()`): the

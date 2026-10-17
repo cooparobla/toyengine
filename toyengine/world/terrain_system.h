@@ -239,6 +239,16 @@ private:
      */
     void mark_edited_chunks_(TerrainComponent& terrain);
 
+    /**
+     * @brief Spends this frame's budget on the terrain's water settles (TerrainComponent::
+     *        water_settles), so a flood started by an edit crosses the world over several
+     *        frames instead of in one.
+     *
+     * Runs before mark_edited_chunks_(), so the tiles it fills stale their chunks in the same
+     * frame and the rebuilds ride the streamer's existing pacing.
+     */
+    void advance_water_settles_(TerrainComponent& terrain);
+
     /** @brief A planet keeps every chunk: all six faces are always wanted. */
     void want_planet_chunks_(TerrainComponent& terrain);
     /**

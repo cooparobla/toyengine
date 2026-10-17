@@ -310,6 +310,112 @@ COOPA_TEST(water_floods_settles_and_drains) {
     expect(wet == 0, "drain takes the whole body");
 }
 
+/**
+ * @brief A settle taken a few tiles at a time ends exactly where the all-at-once one does.
+ *
+ * This is the contract gameplay editing rests on: TerrainSystem spends a bounded number of
+ * tiles a frame on a flood (TerrainComponent::water_settle_budget) so that digging beside the
+ * sea cannot cost one frame the whole basin -- and the budget is allowed to change WHEN the
+ * water arrives, never where it ends up.
+ */
+COOPA_TEST(a_budgeted_settle_reaches_the_same_water_as_one_call) {
+    using namespace toy::world;
+    // A long trench of ground 1 beside a lake at level 4: a flood with a lot of tiles to cross.
+    const auto build = [] {
+        TileMapData d;
+        d.resize(40, 5);
+        for (int y = 0; y < 5; ++y)
+            for (int x = 0; x < 40; ++x) d.at(x, y).steps = (y == 2) ? 1 : 6;
+        d.at(0, 2).steps = 1;
+        d.at(0, 2).set_water(4);
+        return d;
+    };
+
+    TileMapData whole = build();
+    settle_water(whole, IRect{0, 2, 1, 3});
+
+    TileMapData stepped = build();
+    WaterSettle settle = begin_settle(stepped, IRect{0, 2, 1, 3});
+    int steps = 0;
+    while (!settle.done() && steps < 1000) {
+        step_settle(stepped, settle, 3);   // three tiles a "frame"
+        ++steps;
+    }
+    expect(steps > 3, "settle: the trench took several steps to fill (" + std::to_string(steps) + ")");
+    expect(settle.done(), "settle: ...and then finished");
+
+    int same = 0, wet = 0;
+    for (int y = 0; y < 5; ++y) {
+        for (int x = 0; x < 40; ++x) {
+            same += whole.at(x, y) == stepped.at(x, y) ? 1 : 0;
+            wet += stepped.at(x, y).water() ? 1 : 0;
+        }
+    }
+    expect(wet == 40, "settle: the water ran the length of the trench (" + std::to_string(wet) + " tiles)");
+    expect(same == 200, "settle: a budgeted settle leaves exactly the tiles one call does");
+}
+
+/** @brief A tile flooded from a river is that river's: flowing, and carrying its direction. */
+COOPA_TEST(water_running_in_keeps_the_body_it_came_from) {
+    using namespace toy::world;
+    TileMapData d;
+    d.resize(6, 3);
+    for (int y = 0; y < 3; ++y)
+        for (int x = 0; x < 6; ++x) d.at(x, y).steps = 5;
+    // A river tile at level 4, and a channel dug beside it.
+    TileRecord& river = d.at(2, 1);
+    river.steps = 3;
+    river.set_water(4, false, true);
+    river.flow = 3;
+    d.at(3, 1).steps = 2;
+    d.mark_dirty(IRect{3, 1, 4, 2});
+    settle_water(d, IRect{3, 1, 4, 2});
+
+    const TileRecord& filled = d.at(3, 1);
+    expect(filled.water() && filled.water_level() == 4, "river: the dug tile fills to the river's level");
+    expect(filled.has(TileRecord::Flowing) && filled.flow == 3, "river: ...as river water, flowing the same way");
+    expect(!filled.has(TileRecord::Ocean), "river: ...and not as sea");
+}
+
+/**
+ * @brief On a planet, water spreads onto the tile that is really beside it -- which across a
+ *        cube face's edge is on ANOTHER face, turned (planet.h).
+ *
+ * Without the layout the walk steps one column in storage, which at a face edge is a column of
+ * the next face nowhere near the water: the flood both misses the tile it should fill and fills
+ * one on the far side of the globe.
+ */
+COOPA_TEST(water_settles_across_a_planets_faces) {
+    using namespace toy::world;
+    const int n = 8;
+    PlanetLayout layout{n, 1.0f};
+    TileMapData d;
+    d.resize(6 * n, n);
+    for (int y = 0; y < n; ++y)
+        for (int x = 0; x < 6 * n; ++x) d.at(x, y).steps = 5;
+
+    // A sea tile on the +X face's last column, and the tile really beside it (next face).
+    const glm::ivec2 edge{n - 1, 3};
+    const glm::ivec2 across = layout.neighbour(edge.x, edge.y, 1, 0);
+    expect(across.x / n != 0, "planet: the tile across the edge is on another face");
+    d.at(edge.x, edge.y).steps = 2;
+    d.at(edge.x, edge.y).set_water(4, true);
+    d.at(across.x, across.y).steps = 1;          // dug, lower than the water beside it
+    d.mark_dirty(IRect{across.x, across.y, across.x + 1, across.y + 1});
+
+    settle_water(d, IRect{across.x, across.y, across.x + 1, across.y + 1}, IRect{}, k_water_flood_cap, &layout);
+    const TileRecord& filled = d.at(across.x, across.y);
+    expect(filled.water() && filled.water_level() == 4 && filled.has(TileRecord::Ocean),
+           "planet: the sea runs across the face edge into the dug tile");
+
+    // ...and the storage neighbour, which is NOT beside it on the globe, stays dry.
+    const int storage_x = edge.x + 1;
+    if (storage_x < 6 * n && !(storage_x == across.x && edge.y == across.y)) {
+        expect(!d.at(storage_x, edge.y).water(),
+               "planet: the merely storage-adjacent column of the next face is untouched");
+    }
+}
+
 COOPA_TEST(generator_block_holds_only_what_differs) {
     using namespace toy::world;
     fkyaml::node comp = fkyaml::node::mapping();

@@ -821,6 +821,17 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             f_vec3("spin_axis", glm::vec3(0.0f, 0.0f, 1.0f), 0.01f),
             f_float("spin_speed", 90.0f, 0.5f),
         }});
+        // Defaults mirror toyengine/scene/terrain_digger.h.
+        add({"TerrainDigger", "Gameplay", {
+            with_tip(f_enum("dig_button", {"middle", "left", "right"}, true), "Mouse button that digs the terrain under the cursor"),
+            with_tip(f_enum("raise_key", {"ctrl", "shift", "alt", ""}, true),
+                     "Held, the dig raises instead of lowers; empty = dig only. Shift is already the "
+                     "engine's move-down / sprint binding"),
+            with_tip(f_int("radius", 1, 0, 64), "Tiles either side of the one hit: 0 digs one tile, 1 a 3x3 patch"),
+            with_tip(f_int("steps", 1, 1, 64), "Terraces moved per dig"),
+            with_tip(f_float("repeat_seconds", 0.12f, 0.01f, 0.0f, 10.0f), "Seconds between digs while the button is held"),
+            with_tip(f_float("reach", 10000.0f, 10.0f, 1.0f, 1.0e6f), "How far the pick ray reaches (m)"),
+        }});
         // Defaults mirror toyengine/scene/turntable.h.
         add({"Turntable", "Gameplay", {
             with_tip(f_float("sensitivity", 0.25f, 0.005f, 0.0f, 10.0f), "Degrees of spin per pixel of drag"),

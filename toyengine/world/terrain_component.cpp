@@ -14,12 +14,67 @@
 #include <toyengine/world/terrain_sampler.h>
 #include <toyengine/world/tile_mesh_library.h>
 #include <toyengine/world/tile_topology.h>
+#include <toyengine/world/tile_edit.h>
 #include <toyengine/world/tile_types.h>
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace toy {
 namespace world {
+
+namespace {
+
+/**
+ * @brief A ray's hit on a planet's tile columns (terrain-local space, the planet's centre at the
+ *        origin): marched from where it enters the highest column's sphere, a fraction of a tile
+ *        at a time, until it is inside a column -- then the crossing is refined by bisection.
+ *        Columns are tested by their tops only (a wall hit reads as the column in front of it).
+ */
+bool planet_raycast(const TileMapData& d, const TerrainParams& params, const glm::vec3& origin,
+                    const glm::vec3& dir, toy::world::TileHit& hit) {
+    const PlanetLayout layout = params.layout();
+    const double r0 = layout.radius();
+    const glm::dvec3 o(origin), v(glm::normalize(glm::dvec3(dir)));
+    const auto top = [&](const glm::dvec3& p, glm::ivec2& tile) {
+        tile = layout.tile_of(glm::normalize(p));
+        return r0 + static_cast<double>(std::max<int>(0, d.get(tile.x, tile.y).steps)) * params.height_step;
+    };
+    const double outer = r0 + 256.0 * params.height_step;
+    // Where the ray meets the outer sphere (|o + t v| = outer).
+    const double b = glm::dot(o, v), c = glm::dot(o, o) - outer * outer;
+    const double disc = b * b - c;
+    if (disc < 0.0) return false;
+    double t = std::max(0.0, -b - std::sqrt(disc));
+    const double t_end = -b + std::sqrt(disc);
+    const double step = 0.25 * params.tile_size;
+    glm::ivec2 tile;
+    double prev = t;
+    for (; t <= t_end; t += step) {
+        const glm::dvec3 p = o + v * t;
+        if (glm::length(p) <= top(p, tile)) {
+            double lo = prev, hi = t;
+            for (int i = 0; i < 20; ++i) {
+                const double mid = 0.5 * (lo + hi);
+                const glm::dvec3 q = o + v * mid;
+                glm::ivec2 tq;
+                if (glm::length(q) <= top(q, tq)) hi = mid; else lo = mid;
+            }
+            const glm::dvec3 at = o + v * hi;
+            top(at, hit.tile);
+            hit.point = glm::vec3(at);
+            hit.normal = glm::vec3(glm::normalize(at));
+            hit.t = static_cast<float>(hi);
+            return true;
+        }
+        prev = t;
+    }
+    return false;
+}
+
+} // namespace
+
 
 TerrainComponent::~TerrainComponent() {
     if (jobs_ == nullptr) return;
@@ -117,12 +172,123 @@ bool TerrainComponent::poll_generation() {
 
 bool TerrainComponent::tile_at(const glm::vec3& world, glm::ivec2& tile) const {
     if (!tiles || tiles->empty()) return false;
-    glm::vec3 local = world;
-    if (owner != nullptr) {
-        if (auto* tc = owner->get_transform()) local = glm::vec3(glm::inverse(tc->transform().get_world_matrix()) * glm::vec4(world, 1.0f));
+    const glm::vec3 local = to_local_(world);
+    if (params.planet) {
+        // A planet's tiles are not laid out under x and y: they are six faces on a sphere, and
+        // which one a point is over is the direction out of the centre (planet.h).
+        if (glm::length(local) < 1e-4f) return false;
+        tile = params.layout().tile_of(glm::normalize(glm::dvec3(local)));
+        return tiles->contains(tile.x, tile.y);
     }
     tile = glm::ivec2(static_cast<int>(std::floor(local.x / params.tile_size)), static_cast<int>(std::floor(local.y / params.tile_size)));
     return tiles->contains(tile.x, tile.y);
+}
+
+glm::vec3 TerrainComponent::to_local_(const glm::vec3& world) const {
+    if (owner == nullptr) return world;
+    auto* tc = owner->get_transform();
+    if (tc == nullptr) return world;
+    return glm::vec3(glm::inverse(tc->transform().get_world_matrix()) * glm::vec4(world, 1.0f));
+}
+
+IRect TerrainComponent::raise_tiles(const IRect& rect, int delta) {
+    if (!tiles || tiles->empty() || delta == 0) return IRect{};
+    const PlanetLayout layout = params.layout();
+    const PlanetLayout* planet = params.planet ? &layout : nullptr;
+    // settle = false: the ground moves now, the water is queued -- see the header.
+    const IRect changed = tile_raise(*tiles, rect, delta, false, planet);
+    queue_settle_(changed);
+    return changed;
+}
+
+IRect TerrainComponent::set_tile_height(const IRect& rect, int steps) {
+    if (!tiles || tiles->empty()) return IRect{};
+    const PlanetLayout layout = params.layout();
+    const PlanetLayout* planet = params.planet ? &layout : nullptr;
+    const IRect changed = tile_set_height(*tiles, rect, steps, false, planet);
+    queue_settle_(changed);
+    return changed;
+}
+
+IRect TerrainComponent::paint_tiles(const IRect& rect, TileKind kind, bool side) {
+    if (!tiles || tiles->empty()) return IRect{};
+    return tile_paint(*tiles, rect, kind, side);   // paint moves no ground: no water to settle
+}
+
+void TerrainComponent::queue_settle_(const IRect& changed) {
+    if (changed.empty() || !tiles) return;
+    const PlanetLayout layout = params.layout();
+    water_settles.push_back(begin_settle(*tiles, changed, IRect{}, params.planet ? &layout : nullptr));
+}
+
+bool TerrainComponent::raise_at(const glm::vec3& world, int radius_tiles, int delta) {
+    glm::ivec2 tile;
+    if (!tile_at(world, tile)) return false;
+    const int r = std::max(0, radius_tiles);
+    IRect rect{tile.x - r, tile.y - r, tile.x + r + 1, tile.y + r + 1};
+    // On a planet a brush straddling a face's edge would run off into another face's columns,
+    // which are nowhere near it in storage; clip it to the face the hit is on.
+    if (params.planet) {
+        const int n = std::max(1, params.face_tiles);
+        const int face = std::clamp(tile.x / n, 0, 5);
+        rect = IRect{std::max(rect.x0, face * n), std::max(rect.y0, 0),
+                     std::min(rect.x1, (face + 1) * n), std::min(rect.y1, n)};
+    }
+    return !raise_tiles(rect, delta).empty();
+}
+
+bool TerrainComponent::tile_outline(const IRect& rect, std::array<glm::vec3, 4>& corners, float lift) const {
+    if (!tiles || tiles->empty()) return false;
+    const IRect r = rect.clipped(tiles->width(), tiles->height());
+    if (r.empty()) return false;
+    const float top = static_cast<float>(std::max<int>(0, tiles->at((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2).steps)) *
+                          params.height_step + lift;
+    glm::mat4 to_world(1.0f);
+    if (owner != nullptr) {
+        if (auto* tc = owner->get_transform()) to_world = tc->transform().get_world_matrix();
+    }
+    if (params.planet) {
+        // Four points on the globe, in the range's own face: a flat quad would cut under the
+        // surface at every corner.
+        const PlanetLayout layout = params.layout();
+        const std::int32_t n = std::max(1, params.face_tiles);
+        const std::int32_t face = std::clamp(r.x0 / n, 0, 5);
+        const double x0 = static_cast<double>(r.x0 - face * n) * params.tile_size;
+        const double x1 = static_cast<double>(r.x1 - face * n) * params.tile_size;
+        const double y0 = static_cast<double>(r.y0) * params.tile_size;
+        const double y1 = static_cast<double>(r.y1) * params.tile_size;
+        const double px[4] = {x0, x1, x1, x0};
+        const double py[4] = {y0, y0, y1, y1};
+        for (int i = 0; i < 4; ++i) {
+            const glm::dvec3 p = layout.to_planet(face, px[i], py[i], top);
+            corners[static_cast<std::size_t>(i)] = glm::vec3(to_world * glm::vec4(glm::vec3(p), 1.0f));
+        }
+        return true;
+    }
+    const float s = params.tile_size;
+    const float x0 = static_cast<float>(r.x0) * s, x1 = static_cast<float>(r.x1) * s;
+    const float y0 = static_cast<float>(r.y0) * s, y1 = static_cast<float>(r.y1) * s;
+    const glm::vec3 flat[4] = {{x0, y0, top}, {x1, y0, top}, {x1, y1, top}, {x0, y1, top}};
+    for (int i = 0; i < 4; ++i) {
+        corners[static_cast<std::size_t>(i)] = glm::vec3(to_world * glm::vec4(flat[i], 1.0f));
+    }
+    return true;
+}
+
+bool TerrainComponent::raycast_tiles(const glm::vec3& origin, const glm::vec3& dir, float max_t,
+                                     TileHit& hit) const {
+    if (!tiles || tiles->empty()) return false;
+    const glm::vec3 o = to_local_(origin);
+    glm::vec3 d = dir;
+    if (owner != nullptr) {
+        if (auto* tc = owner->get_transform()) {
+            d = glm::vec3(glm::inverse(tc->transform().get_world_matrix()) * glm::vec4(dir, 0.0f));
+        }
+    }
+    if (glm::length(d) < 1e-6f) return false;
+    d = glm::normalize(d);
+    if (params.planet) return planet_raycast(*tiles, params, o, d, hit);
+    return tiles->raycast(o, d, params.tile_size, params.height_step, max_t, hit);
 }
 
 const TileRecord* TerrainComponent::record_at(const glm::vec3& world) const {

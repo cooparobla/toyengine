@@ -64,6 +64,7 @@ on a component or child deletes it.
 | SceneLink | `target_scene` (relative to this scene file, an asset path, or a scene name), `transition` (`fade` / `loading_screen` / `none`), `loading_screen` (UI asset, `ui/loading_screen`), `spawn_point` (object in the target scene the player moves to), `color` (fade colour, black), `fade_time` (0.35), `min_display_time` (0), `size` (2,2,2; trigger box, local). Fires when a CharacterController enters (entry only) -- see toyengine/core/README.md |
 | SaveId | `id` (string or int; unique per scene; empty = the object's name path). Marks the object for save/load: its ISaveable components write `objects/<id>/...`. The editor fills in a fresh id when added or duplicated -- see toyengine/save/README.md |
 | HealthDriver | `bar_object`, `max_health`, `start_health`, `damage_per_second`, `regen_per_second`, `turnaround_fraction` |
+| TerrainDigger | `dig_button` (`middle`; scenes mostly use `left`), `raise_key` (`ctrl`; empty = dig only -- shift is the engine's move-down/sprint binding), `radius` (1 tile either side), `steps` (1), `repeat_seconds` (0.12), `reach` (10000), `show_hover` (true), `hover_color`, `raise_color`. Outlines and digs the TileTerrain under the cursor (the screen centre when the camera captures it, or if the cursor never maps into the viewport); the water settles in behind over the next frames |
 | TileTerrain (old name Terrain) | see create-terrain |
 | HeightmapTerrain | see create-heightmap-terrain |
 | WaterBody, Buoyancy | see create-water-body |

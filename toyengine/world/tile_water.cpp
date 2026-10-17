@@ -22,38 +22,54 @@ bool inside(const IRect& r, int x, int y) { return x >= r.x0 && y >= r.y0 && x <
 void grow(IRect& r, int x, int y) { r.include(IRect{x, y, x + 1, y + 1}); }
 
 /**
+ * @brief The tile one step from `(x, y)` along `(dx, dy)`: the next column in storage on a flat
+ *        world, and the tile that is really beside it on a planet, which may be on another face
+ *        and turned (planet.h). Returns false when the step leaves the grid.
+ */
+bool step_to(const PlanetLayout* planet, const IRect& limit, int x, int y, int dx, int dy, glm::ivec2& out) {
+    out = planet != nullptr ? planet->neighbour(x, y, dx, dy) : glm::ivec2{x + dx, y + dy};
+    return inside(limit, out.x, out.y);
+}
+
+/**
  * @brief Spreads water outward from the queued tiles into dry neighbours whose ground lies under
  *        the water's level, each taking the water it came from. With `raise_water`, lower water
  *        is raised too (a flood); without, it is left alone -- a river steps down terraces, and
  *        each step is meant to be lower than the one above it.
+ *
+ * @param budget Tiles this call may fill; the queue is left where it got to, so a caller can
+ *               come back for the rest (step_settle()).
+ * @return How many tiles it filled.
  */
-void spread(TileMapData& tiles, std::deque<glm::ivec2>& queue, const IRect& limit, std::size_t cap, bool raise_water,
-            IRect& changed) {
+std::size_t spread(TileMapData& tiles, std::deque<glm::ivec2>& queue, const IRect& limit, std::size_t budget,
+                   bool raise_water, IRect& changed, const PlanetLayout* planet = nullptr) {
     std::size_t count = 0;
-    while (!queue.empty() && count < cap) {
+    while (!queue.empty() && count < budget) {
         const glm::ivec2 p = queue.front();
         queue.pop_front();
         const TileRecord from = tiles.at(p.x, p.y);
         if (!from.water()) continue;
         const int level = from.water_level();
         for (int k = 0; k < 4; ++k) {
-            const int nx = p.x + k_dx[k], ny = p.y + k_dy[k];
-            if (!inside(limit, nx, ny)) continue;
-            TileRecord& to = tiles.at(nx, ny);
+            glm::ivec2 n;
+            if (!step_to(planet, limit, p.x, p.y, k_dx[k], k_dy[k], n)) continue;
+            TileRecord& to = tiles.at(n.x, n.y);
             if (to.steps >= level || (to.water() && (!raise_water || to.water_level() >= level))) continue;
             // Water that runs on from a river is still that river's; anything else pools.
             to.set_water(level, from.has(TileRecord::Ocean), from.has(TileRecord::Flowing));
             to.flow = from.has(TileRecord::Flowing) ? from.flow : 0;
-            grow(changed, nx, ny);
-            queue.push_back({nx, ny});
+            grow(changed, n.x, n.y);
+            queue.push_back({n.x, n.y});
             ++count;
         }
     }
+    return count;
 }
 
 } // namespace
 
-IRect flood_water(TileMapData& tiles, const std::vector<glm::ivec2>& seeds, int level, bool ocean, std::size_t cap) {
+IRect flood_water(TileMapData& tiles, const std::vector<glm::ivec2>& seeds, int level, bool ocean, std::size_t cap,
+                  const PlanetLayout* planet) {
     IRect changed;
     if (tiles.empty()) return changed;
     const IRect whole = clip_limit(tiles, IRect{});
@@ -66,12 +82,13 @@ IRect flood_water(TileMapData& tiles, const std::vector<glm::ivec2>& seeds, int 
         grow(changed, s.x, s.y);
         queue.push_back(s);
     }
-    spread(tiles, queue, whole, cap, true, changed);
+    spread(tiles, queue, whole, cap, true, changed, planet);
     if (!changed.empty()) tiles.mark_dirty(changed);
     return changed;
 }
 
-IRect drain_water(TileMapData& tiles, const std::vector<glm::ivec2>& seeds, std::size_t cap) {
+IRect drain_water(TileMapData& tiles, const std::vector<glm::ivec2>& seeds, std::size_t cap,
+                  const PlanetLayout* planet) {
     IRect changed;
     if (tiles.empty()) return changed;
     const IRect whole = clip_limit(tiles, IRect{});
@@ -91,36 +108,82 @@ IRect drain_water(TileMapData& tiles, const std::vector<glm::ivec2>& seeds, std:
         const glm::ivec2 p = queue.front();
         queue.pop_front();
         for (int k = 0; k < 4; ++k) {
-            const int nx = p.x + k_dx[k], ny = p.y + k_dy[k];
-            if (inside(whole, nx, ny)) take(nx, ny);
+            glm::ivec2 n;
+            if (step_to(planet, whole, p.x, p.y, k_dx[k], k_dy[k], n)) take(n.x, n.y);
         }
     }
     if (!changed.empty()) tiles.mark_dirty(changed);
     return changed;
 }
 
-IRect settle_water(TileMapData& tiles, const IRect& rect, const IRect& limit, std::size_t cap) {
+WaterSettle begin_settle(TileMapData& tiles, const IRect& rect, const IRect& limit,
+                         const PlanetLayout* planet, std::size_t cap) {
+    WaterSettle settle;
+    if (planet != nullptr) {
+        settle.layout = *planet;
+        settle.on_planet = true;
+    }
+    settle.cap = cap;
+    if (tiles.empty()) return settle;
+    settle.limit = clip_limit(tiles, limit);
     IRect changed;
-    if (tiles.empty()) return changed;
-    const IRect bound = clip_limit(tiles, limit);
+    // The ring around the edit as well as the edit itself: water just outside it is what floods
+    // ground that dropped inside. On a planet the ring is taken through the layout, so an edit
+    // against a face's edge is seeded from the face next door rather than from across the globe.
     const IRect r = clip_limit(tiles, IRect{rect.x0 - 1, rect.y0 - 1, rect.x1 + 1, rect.y1 + 1});
-    std::deque<glm::ivec2> queue;
-    for (int y = r.y0; y < r.y1; ++y) {
-        for (int x = r.x0; x < r.x1; ++x) {
-            TileRecord& t = tiles.at(x, y);
-            if (!t.water()) continue;
-            if (inside(rect, x, y) && t.steps >= t.water_level()) {
-                t.set_water(t.steps);
-                grow(changed, x, y);
-                continue;
+    const auto consider = [&](int x, int y) {
+        TileRecord& t = tiles.at(x, y);
+        if (!t.water()) return;
+        if (inside(rect, x, y) && t.steps >= t.water_level()) {
+            t.set_water(t.steps);          // its bed rose through the surface: dry land now
+            grow(changed, x, y);
+            return;
+        }
+        settle.frontier.push_back({x, y});
+    };
+    if (planet == nullptr) {
+        for (int y = r.y0; y < r.y1; ++y)
+            for (int x = r.x0; x < r.x1; ++x) consider(x, y);
+    } else {
+        const IRect in = clip_limit(tiles, rect);
+        for (int y = in.y0; y < in.y1; ++y)
+            for (int x = in.x0; x < in.x1; ++x) consider(x, y);
+        for (int y = in.y0; y < in.y1; ++y) {
+            for (int x = in.x0; x < in.x1; ++x) {
+                for (int k = 0; k < 4; ++k) {
+                    glm::ivec2 n;
+                    if (!step_to(planet, settle.limit, x, y, k_dx[k], k_dy[k], n)) continue;
+                    if (inside(in, n.x, n.y)) continue;           // already considered above
+                    if (tiles.at(n.x, n.y).water()) settle.frontier.push_back(n);
+                }
             }
-            queue.push_back({x, y});
         }
     }
-    // Ground that dropped beside water is flooded by it -- and on, as far as the basin runs.
-    spread(tiles, queue, bound, cap, false, changed);
+    if (!changed.empty()) tiles.mark_dirty(changed);
+    return settle;
+}
+
+IRect step_settle(TileMapData& tiles, WaterSettle& settle, std::size_t budget) {
+    IRect changed;
+    if (tiles.empty() || settle.done() || budget == 0) return changed;
+    const std::size_t room = settle.cap - settle.spent;
+    settle.spent += spread(tiles, settle.frontier, settle.limit, std::min(budget, room), false, changed,
+                           settle.planet());
     if (!changed.empty()) tiles.mark_dirty(changed);
     return changed;
+}
+
+IRect settle_water(TileMapData& tiles, const IRect& rect, const IRect& limit, std::size_t cap,
+                   const PlanetLayout* planet) {
+    IRect changed;
+    if (tiles.empty()) return changed;
+    // The whole walk in one call: what an editor brush wants, and what begin/step do a frame at
+    // a time for gameplay. The two must agree -- tile_map_test asserts they end up identical.
+    const std::uint64_t before = tiles.revision();
+    WaterSettle settle = begin_settle(tiles, rect, limit, planet, cap);
+    while (!settle.done()) step_settle(tiles, settle, cap);
+    // Both halves mark what they touch, so the journal already holds this call's whole footprint.
+    return tiles.revision() == before ? changed : tiles.dirty_since(before);
 }
 
 void settle_water_rounding(TileMapData& tiles, const IRect& rect, const PlanetLayout* planet) {

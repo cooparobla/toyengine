@@ -292,6 +292,7 @@ The engine repository runs on its own, with one demo scene per area in [`assets/
 | `water_demo` | Lake, river, foam, ripples, buoyant crates, a raft and a circling boat; a deep pool for the underwater look |
 | `water_stress_demo` | Benchmark: a 1 km ocean, distant lakes and 200 buoyant crates |
 | `terrain_demo` | Streamed procedural world in styled, smooth tiles. WASD moves the focus, Tab/Shift change height |
+| `dig_demo` | Runtime terrain editing: left-drag digs the outlined tiles and the sea, a lake or a river runs into them (ctrl raises) |
 | `physics_demo` | Restitution, friction, stacking, joints, triggers, kinematic platforms |
 | `cloth_demo` | XPBD cloth draped over a moving ball |
 | `nav_demo` | Navigation: A* over two floors and a 144-mob flow-field crowd |

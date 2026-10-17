@@ -22,6 +22,7 @@
 #include <toyengine/scene/rider.h>
 #include <toyengine/scene/scene_link.h>
 #include <toyengine/scene/skinned_mesh_renderer.h>
+#include <toyengine/scene/terrain_digger.h>
 #include <toyengine/scene/turntable.h>
 #include <toyengine/water/buoyancy.h>
 #include <toyengine/water/water_body.h>
@@ -185,6 +186,22 @@ void register_scene_components() {
             f("max_spin_deg_per_sec", tt->max_spin_deg_per_sec);
             b("invert_x", tt->invert_x);
             b("invert_y", tt->invert_y);
+        });
+
+    // Digging the terrain with the mouse (toyengine/scene/terrain_digger.h). Input is pushed in
+    // by Engine::drive_terrain_diggers_(); it edits the scene's first TileTerrain.
+    SceneLoader::register_component_parser("TerrainDigger",
+        [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
+            auto* d = obj.add_component<TerrainDigger>();
+            auto str = [&](const char* key, std::string& out) {
+                if (node.contains(key)) out = node.at(key).get_value<std::string>();
+            };
+            str("dig_button", d->dig_button);
+            str("raise_key", d->raise_key);
+            if (node.contains("radius")) d->radius = node.at("radius").get_value<int>();
+            if (node.contains("steps")) d->steps = node.at("steps").get_value<int>();
+            if (node.contains("repeat_seconds")) d->repeat_seconds = node.at("repeat_seconds").get_value<float>();
+            if (node.contains("reach")) d->reach = node.at("reach").get_value<float>();
         });
 
     // A walking capsule character (toyengine/scene/character_controller.h). Input is pushed in by

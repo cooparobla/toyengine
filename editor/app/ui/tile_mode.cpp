@@ -141,53 +141,6 @@ void EditorApp::tile_frame_() {
 
 namespace {
 
-/**
- * @brief A ray's hit on a planet's tile columns (terrain-local space, the planet's centre at the
- *        origin): marched from where it enters the highest column's sphere, a fraction of a tile
- *        at a time, until it is inside a column -- then the crossing is refined by bisection.
- *        Columns are tested by their tops only (a wall hit reads as the column in front of it).
- */
-bool planet_raycast(const TileMapData& d, const toy::world::TerrainParams& params, const glm::vec3& origin,
-                    const glm::vec3& dir, toy::world::TileHit& hit) {
-    const toy::world::PlanetLayout layout = params.layout();
-    const double r0 = layout.radius();
-    const glm::dvec3 o(origin), v(glm::normalize(glm::dvec3(dir)));
-    const auto top = [&](const glm::dvec3& p, glm::ivec2& tile) {
-        tile = layout.tile_of(glm::normalize(p));
-        return r0 + static_cast<double>(std::max<int>(0, d.get(tile.x, tile.y).steps)) * params.height_step;
-    };
-    const double outer = r0 + 256.0 * params.height_step;
-    // Where the ray meets the outer sphere (|o + t v| = outer).
-    const double b = glm::dot(o, v), c = glm::dot(o, o) - outer * outer;
-    const double disc = b * b - c;
-    if (disc < 0.0) return false;
-    double t = std::max(0.0, -b - std::sqrt(disc));
-    const double t_end = -b + std::sqrt(disc);
-    const double step = 0.25 * params.tile_size;
-    glm::ivec2 tile;
-    double prev = t;
-    for (; t <= t_end; t += step) {
-        const glm::dvec3 p = o + v * t;
-        if (glm::length(p) <= top(p, tile)) {
-            double lo = prev, hi = t;
-            for (int i = 0; i < 20; ++i) {
-                const double mid = 0.5 * (lo + hi);
-                const glm::dvec3 q = o + v * mid;
-                glm::ivec2 tq;
-                if (glm::length(q) <= top(q, tq)) hi = mid; else lo = mid;
-            }
-            const glm::dvec3 at = o + v * hi;
-            top(at, hit.tile);
-            hit.point = glm::vec3(at);
-            hit.normal = glm::vec3(glm::normalize(at));
-            hit.t = static_cast<float>(hi);
-            return true;
-        }
-        prev = t;
-    }
-    return false;
-}
-
 } // namespace
 
 IRect EditorApp::tile_face_clip_(const IRect& r, const glm::ivec2& anchor) const {
@@ -204,15 +157,10 @@ bool EditorApp::tile_hit_(const ViewProj& vp, glm::vec2 px, glm::ivec2& tile, gl
     glm::vec3 o, d;
     vp.ray(px, o, d);
     const glm::mat4 m = t->owner->get_transform() ? t->owner->get_transform()->transform().get_world_matrix() : glm::mat4(1.0f);
-    const glm::mat4 inv = glm::inverse(m);
-    const glm::vec3 lo = glm::vec3(inv * glm::vec4(o, 1.0f));
-    const glm::vec3 ld = glm::normalize(glm::vec3(inv * glm::vec4(d, 0.0f)));
+    // The march itself is the engine's (TerrainComponent::raycast_tiles), flat and planet alike,
+    // so the editor and a game's digging tool pick exactly the same tile.
     toy::world::TileHit hit;
-    if (t->params.planet) {
-        if (!planet_raycast(*t->tiles, t->params, lo, ld, hit)) return false;
-    } else if (!t->tiles->raycast(lo, ld, t->params.tile_size, t->params.height_step, 1e5f, hit)) {
-        return false;
-    }
+    if (!t->raycast_tiles(o, d, 1e5f, hit)) return false;
     tile = hit.tile;
     if (world) *world = glm::vec3(m * glm::vec4(hit.point, 1.0f));
     return true;

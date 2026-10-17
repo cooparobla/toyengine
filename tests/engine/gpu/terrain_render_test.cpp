@@ -20,10 +20,12 @@
 #include <toyengine/core/engine.h>
 #include <toyengine/render/toy_render_pipeline.h>
 #include <toyengine/scene/camera_controller.h>
+#include <toyengine/scene/terrain_digger.h>
 #include <toyengine/scene/free_mover.h>
 #include <physxcoopa/components/mesh_collider.h>
 #include <physxcoopa/system/physics_system.h>
 #include <toyengine/world/terrain_component.h>
+#include <toyengine/world/tile_water.h>
 #include <toyengine/water/buoyancy.h>
 #include <toyengine/water/water_body.h>
 #include <physxcoopa/components/box_collider.h>
@@ -673,4 +675,180 @@ COOPA_TEST(far_chunks_draw_their_coarser_levels) {
            "lod: the frame drew materially fewer triangles on its coarse levels (" +
                std::to_string(coarse / 1000) + "k vs " + std::to_string(full / 1000) +
                "k, of a possible " + std::to_string(saving / 1000) + "k saving across every live chunk)");
+}
+
+/**
+ * @brief Digging the shore at runtime: the sea runs into the hole over the next frames, and the
+ *        chunk under it re-meshes with the water in it.
+ *
+ * The gameplay counterpart of editing_tiles_remeshes_only_their_chunks above, which moves
+ * ground and nothing else. What is being checked here is the whole chain: an edit through
+ * TerrainComponent::raise_at() moves the ground, queues a settle, TerrainSystem spends its
+ * per-frame budget on it, the filled tiles stale their chunks, and those chunks come back with
+ * the water drawn in them. The flood is deliberately NOT instant -- the budget is what keeps a
+ * hole dug beside an ocean from costing one frame the whole basin.
+ */
+COOPA_TEST(digging_the_shore_lets_the_sea_in) {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016");
+    ScopedEnv no_input("NO_INPUT", "1");
+
+    toy::core::Engine engine(make_test_config(voxel_terrain_demo(), 320, 180, 160, 90));
+    auto* camera = coopa::gfx::engine::components::CameraComponent::main();
+    require(camera != nullptr && camera->scene != nullptr, "dig: the scene has a main camera");
+    coopa::scene::Scene& scene = *camera->scene;
+    auto* terrain = scene.find_first_component<toy::world::TerrainComponent>();
+    require(terrain != nullptr, "dig: the scene carries a TileTerrain");
+    shrink_terrain_and_centre(*terrain, scene);
+    tick_until(engine, 900, [&] { return terrain->tiles && !terrain->tiles->empty() && !terrain->baking(); });
+    tick_until(engine, 900, [&] { return count_live_chunks(*terrain) >= 9; });
+    require(terrain->tiles != nullptr && !terrain->tiles->empty(), "dig: the world baked");
+
+    toy::world::TileMapData& tiles = *terrain->tiles;
+    const toy::world::TerrainParams& p = terrain->params;
+
+    // The pond is built here rather than hunted for: where the generator puts a coast depends on
+    // the map, and the island's is outside the chunks this fixture keeps live. A flat shelf with
+    // water standing on half of it is the same situation and is always in frame.
+    // Any live chunk with room for the shelf inside it -- which one the streamer centred on is
+    // the camera rig's business, not this test's.
+    toy::world::ChunkCoord chunk{0, 0};
+    bool found = false;
+    for (const auto& [coord, c] : terrain->chunks()) {
+        if (c.state != toy::world::ChunkState::Live) continue;
+        if ((coord.x + 1) * p.chunk_size >= tiles.width() || (coord.y + 1) * p.chunk_size >= tiles.height()) continue;
+        chunk = coord;
+        found = true;
+        break;
+    }
+    require(found, "dig: the streamer has a live chunk to work in");
+    const int x0 = chunk.x * p.chunk_size + 4, y0 = chunk.y * p.chunk_size + 4;
+    // The shelf stands ABOVE the water line and the pit below it, so the flood fills the pit
+    // only: a bank is what makes a shore, and the tile dug below in is dry until it is dug.
+    const int ground = 14, level = 12;
+    for (int y = y0; y < y0 + 4; ++y) {
+        for (int x = x0; x < x0 + 6; ++x) {
+            toy::world::TileRecord& r = tiles.at(x, y);
+            r = toy::world::TileRecord{};
+            r.steps = static_cast<std::int16_t>(ground);     // a shelf, with banks round it
+            r.set_top_kind(toy::world::TileKind::Grass);
+        }
+    }
+    for (int y = y0 + 1; y < y0 + 3; ++y)
+        for (int x = x0 + 1; x < x0 + 3; ++x) tiles.at(x, y).steps = static_cast<std::int16_t>(ground - 4);
+    tiles.mark_dirty(toy::world::IRect{x0, y0, x0 + 6, y0 + 4});
+    toy::world::flood_water(tiles, {{x0 + 1, y0 + 1}}, level);
+    tick_until(engine, 240, [&] {
+        const auto it = terrain->chunks().find(chunk);
+        return it != terrain->chunks().end() && it->second.state == toy::world::ChunkState::Live;
+    });
+    require(tiles.at(x0 + 1, y0 + 1).water(), "dig: the pond filled");
+
+    // The tile to dig: dry, on the shelf, one step from the pond.
+    const glm::ivec2 shore{x0 + 3, y0 + 1};
+    require(!tiles.at(shore.x, shore.y).water(), "dig: the tile beside the pond is dry to begin with");
+    const std::uint32_t serial = terrain->chunks().at(chunk).mesh_serial;
+    const glm::vec3 world((shore.x + 0.5f) * p.tile_size, (shore.y + 0.5f) * p.tile_size,
+                          tiles.at(shore.x, shore.y).steps * p.height_step);
+
+    // Dig it below the water beside it -- one tile, so what arrives is the pond, not the dig.
+    expect(terrain->raise_at(world, 0, -4), "dig: the shore tile is dug out");
+    expect(tiles.at(shore.x, shore.y).steps < level, "dig: ...below the water beside it");
+    expect(!terrain->water_settles.empty(), "dig: ...and the water is queued to follow, not applied at once");
+
+    tick_until(engine, 240, [&] { return tiles.at(shore.x, shore.y).water(); });
+    const toy::world::TileRecord& filled = tiles.at(shore.x, shore.y);
+    expect(filled.water() && filled.water_level() == level,
+           "dig: the pond runs into the hole, to its own level (" + std::to_string(filled.water_level()) +
+               " vs " + std::to_string(level) + ")");
+
+    tick_until(engine, 240, [&] {
+        const auto it = terrain->chunks().find(chunk);
+        return it != terrain->chunks().end() && it->second.state == toy::world::ChunkState::Live &&
+               it->second.mesh_serial != serial;
+    });
+    expect(terrain->chunks().at(chunk).mesh_serial != serial,
+           "dig: ...and its chunk re-meshed with the new water in it");
+    tick_until(engine, 600, [&] { return terrain->water_settles.empty(); });
+    expect(terrain->water_settles.empty(), "dig: the settle finishes and the queue drains");
+}
+
+/**
+ * @brief The digger, driven the way a player drives it: a middle-click at a screen position
+ *        lowers the tile that is under it.
+ *
+ * Every link in that chain is engine-side and invisible to the component tests -- the button
+ * reaching Input, Engine::drive_terrain_diggers_() turning the cursor into a world ray, the
+ * ray finding a tile, and the edit landing on the tiles. Input is injected through
+ * Engine::queue_input(), which applies it exactly where the window's own events land, so this
+ * exercises the real path rather than writing the component's inputs by hand.
+ */
+COOPA_TEST(a_middle_click_digs_the_tile_under_the_cursor) {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016");
+
+    // dig_demo itself: the scene that carries a TerrainDigger, loaded as the player loads it.
+    // The SHIPPED config, not the test one: the game renders at a quarter resolution and
+    // upscales ("fit"), so the window pixels a click arrives in and the pixels the camera
+    // projects into are not the same grid -- which is exactly the sort of thing a picking path
+    // gets wrong, and is invisible under make_test_config()'s defaults.
+    toy::core::Engine engine(make_shipped_config("assets/scenes/terrain/dig_demo/scene.yaml", 320, 180));
+    auto* camera = coopa::gfx::engine::components::CameraComponent::main();
+    require(camera != nullptr && camera->scene != nullptr, "click: the scene has a main camera");
+    coopa::scene::Scene& scene = *camera->scene;
+    auto* terrain = scene.find_first_component<toy::world::TerrainComponent>();
+    require(terrain != nullptr, "click: the scene carries a TileTerrain");
+    auto* digger = scene.find_first_component<toy::scene::TerrainDigger>();
+    require(digger != nullptr, "click: ...and a TerrainDigger");
+    digger->repeat_seconds = 0.0f;
+    tick_until(engine, 1500, [&] { return terrain->is_ready() && count_live_chunks(*terrain) >= 9; });
+
+    // Aim at the middle of the view and hold the middle button.
+    const toy::render::LetterboxRect box = engine.display_rect();
+    const glm::vec2 aim(static_cast<float>(box.x) + 0.5f * static_cast<float>(box.w),
+                        static_cast<float>(box.y) + 0.5f * static_cast<float>(box.h));
+    engine.queue_input([aim](coopa::input::Input& in) {
+        in.push_cursor_position(aim.x, aim.y);
+        in.push_mouse_button(coopa::input::MouseButton::Left, coopa::input::KeyAction::Press,
+                       coopa::input::Mods{});
+    });
+    tick_frames(engine, 2);
+    expect(digger->digging, "click: the driver sees the button held");
+    expect(glm::length(digger->ray_direction) > 0.5f, "click: ...and builds a pick ray from the cursor");
+    expect(digger->hovering(), "click: ...which lands on a tile (the hover outline's tile)");
+    expect(engine.pipeline().debug_lines().size() >= 12,
+           "click: ...and the outline is queued for drawing (" +
+               std::to_string(engine.pipeline().debug_lines().size()) + " lines)");
+    tick_frames(engine, 6);
+    expect(digger->digs() > 0, "click: the digger dug (" + std::to_string(digger->digs()) + " times)");
+
+    // The outline is not just queued: it reaches pixels. Measured with the button RELEASED and
+    // the terrain settled, so the only thing changing between the two captures is the cue.
+    engine.queue_input([](coopa::input::Input& in) {
+        in.push_mouse_button(coopa::input::MouseButton::Left, coopa::input::KeyAction::Release,
+                             coopa::input::Mods{});
+    });
+    tick_until(engine, 600, [&] { return terrain->water_settles.empty(); });
+    digger->hover_color = glm::vec3(1.0f, 0.0f, 0.0f);   // unmistakable for the pixel check below
+    tick_frames(engine, 8);
+    expect(digger->hovering(), "click: the outline still follows the cursor with no button held");
+    const Frame with_hover = engine.capture_image(/*low_res=*/false);
+    digger->show_hover = false;
+    tick_frames(engine, 8);
+    const Frame without = engine.capture_image(/*low_res=*/false);
+    dump_frame(with_hover, "hover_on");
+    dump_frame(without, "hover_off");
+    const auto outline_pixels = [](const Frame& f) {
+        long long n = 0;
+        for (std::size_t i = 0; i + 2 < static_cast<std::size_t>(f.width) * f.height * 4; i += 4) {
+            const int r = f.pixels[i], g = f.pixels[i + 1], b = f.pixels[i + 2];
+            if (r > 150 && 2 * r - g - b > 180) ++n;   // the cue's red; nothing in this scene is near it
+        }
+        return n;
+    };
+    const long long shown = outline_pixels(with_hover), hidden = outline_pixels(without);
+    expect(shown > hidden + 4, "click: the hover outline is drawn (" + std::to_string(shown) +
+                                   " outline pixels, " + std::to_string(hidden) + " with it off)");
+
+    digger->show_hover = true;
+    tick_frames(engine, 2);
+    expect(!digger->digging, "click: releasing the button stops it");
 }

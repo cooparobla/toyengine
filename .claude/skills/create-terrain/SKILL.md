@@ -99,6 +99,13 @@ Write `tile_set:` in new scenes.
   ground-level camera is unaffected; they pay on planets seen whole and on terrains with a
   large `view_radius`. Seam vertices are pinned through every level, so chunks at different
   levels never crack.
+- **Editing at runtime**: `TerrainComponent::raise_at(world, radius, delta)` /
+  `set_tile_height()` / `paint_tiles()` move the ground and queue the water, which then flows in
+  (or off) over the next frames at `water_settle_budget` tiles each -- sea, lakes and rivers
+  alike. `raycast_tiles()` picks the tile under a ray with no colliders needed. A `TerrainDigger`
+  component does it from the mouse in `dig_demo` (sea, lakes and a river at arm's length). It is
+  gameplay, so it runs in Play, not in the editor's edit mode -- in the editor, Tile Mode's
+  brushes move ground through the same operations.
 - Large terrains want shadow tuning in scene settings (terrain_demo uses `shadow_fit: focus`,
   `shadow_focus_radius`, `shadow_distance`).
 

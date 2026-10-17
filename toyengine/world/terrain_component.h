@@ -61,6 +61,7 @@
 
 #include <toyengine/world/terrain_chunk.h>
 #include <toyengine/world/tile_map_data.h>
+#include <toyengine/world/tile_water.h>
 #include <toyengine/world/terrain_generator.h>
 #include <toyengine/water/water_body.h>
 
@@ -437,6 +438,69 @@ public:
      */
     std::optional<ChunkState> chunk_state_at(const glm::vec3& world) const;
 
+    // --- Runtime editing (tile_edit.h, tile_water.h; owner thread) ---
+
+    /**
+     * @brief Raises (or lowers) the ground of `rect` by `delta` steps and lets the water follow.
+     *
+     * The ground moves at once; the water is queued (water_settles) and spreads over the next
+     * frames at `water_settle_budget` tiles each, because a hole dug beside the sea floods as
+     * far as the basin runs -- thousands of tiles, and a chunk rebuild for each chunk they
+     * touch. Spread over frames it is a bounded cost, and the water is *seen* to run in.
+     *
+     * @return The tiles changed this instant -- not counting water still to arrive.
+     */
+    IRect raise_tiles(const IRect& rect, int delta);
+
+    /** @brief Sets the ground of `rect` to `steps` (under water, the bed); water follows as above. */
+    IRect set_tile_height(const IRect& rect, int steps);
+
+    /** @brief Paints `rect`'s surface kind (and, with `side`, the matching wall kind). */
+    IRect paint_tiles(const IRect& rect, TileKind kind, bool side = true);
+
+    /**
+     * @brief raise_tiles() around a world position: the square of `radius_tiles` either side of
+     *        the tile under `world`.
+     *
+     * @return False when `world` is off the terrain.
+     */
+    bool raise_at(const glm::vec3& world, int radius_tiles, int delta);
+
+    /**
+     * @brief Casts a world-space ray at the tile columns; the hit is in the terrain's own space
+     *        (TileHit). Flat worlds march the grid, a planet marches the globe.
+     *
+     * What a digging tool picks with -- and it works with no colliders, which a planet drawn
+     * for its own sake tends not to have.
+     */
+    bool raycast_tiles(const glm::vec3& origin, const glm::vec3& dir, float max_t, TileHit& hit) const;
+
+    /**
+     * @brief The four world-space corners of a tile RANGE's top face, anticlockwise -- what a
+     *        hover outline or a placement preview is drawn from.
+     *
+     * Follows the ground: on a planet the corners are four points on the globe, not a flat quad.
+     * The height is the range's middle tile's, so an outline over a slope sits on it rather
+     * than hovering at one end.
+     *
+     * @param rect   The tiles to outline (a single tile is a 1 x 1 rect).
+     * @param lift   Metres to raise the corners off the surface, so the line is not coplanar
+     *               with the ground it outlines.
+     * @return False when the range is off the terrain.
+     */
+    bool tile_outline(const IRect& rect, std::array<glm::vec3, 4>& corners, float lift = 0.0f) const;
+
+    /**
+     * @brief Settles in flight, drained by TerrainSystem a budget at a time (see raise_tiles()).
+     *
+     * Several can be live at once -- digging again before the last flood finished simply queues
+     * another, and they share the frame's budget in order.
+     */
+    std::deque<WaterSettle> water_settles;
+
+    /** @brief Tiles of water the settles may move per frame, over all of them. */
+    int water_settle_budget = 256;
+
     /**
      * @brief Whether a world position is on a chunk that is streamed in.
      *
@@ -508,6 +572,11 @@ private:
     /// Bakes every loaded piece and maps kinds onto styles. A piece that failed to load is
     /// reported once and left to TileMeshLibrary::finish_styles()'s fallbacks.
     void bake_styles_();
+
+    /// A world position in the terrain object's own space (where the tiles live).
+    glm::vec3 to_local_(const glm::vec3& world) const;
+    /// Starts a settle over `changed` and queues it for TerrainSystem to spend the budget on.
+    void queue_settle_(const IRect& changed);
 
     coopa::debug::Logger logger_; /**< Named "terrain"; MapGenerator logs one line per stage. */
     coopa::job::JobEngine* jobs_ = nullptr; /**< Non-owning; only for draining jobs in the destructor. */

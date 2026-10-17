@@ -68,8 +68,8 @@ struct TileRecord {
         Ocean   = 1u << 1, /**< That water is the sea. */
         Coast   = 1u << 2, /**< Land next to the ocean. */
         River   = 1u << 3, /**< A river channel cuts this tile. */
-        Road    = 1u << 4, /**< Reserved for roads. */
-        Town    = 1u << 5, /**< Reserved for towns. */
+        Road    = 1u << 4, /**< A roadway runs over this tile. */
+        Town    = 1u << 5, /**< This tile is inside a settlement. */
         Flowing = 1u << 6, /**< That water is a river's, flowing toward `flow`. */
     };
     static constexpr std::uint16_t k_no_id = 0xFFFFu;

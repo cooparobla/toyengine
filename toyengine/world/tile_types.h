@@ -73,11 +73,13 @@ enum class TileKind : std::uint8_t {
     Moss,
     Clay,
     Ash,
-    Salt
+    Salt,
+    /** @brief Packed, trodden roadway -- the surface a street or a highway is laid in. */
+    Road
 };
 
 /** @brief Number of distinct `TileKind` values; the number of occupied atlas cells. */
-inline constexpr std::size_t k_tile_kind_count = 12;
+inline constexpr std::size_t k_tile_kind_count = 13;
 
 /** @brief Atlas cells per row. 4 x 4 leaves four spare cells for new kinds without a re-layout. */
 inline constexpr std::uint32_t k_atlas_columns = 4;
@@ -239,7 +241,8 @@ inline bool orientation_mirrors(std::uint8_t orientation) {
  */
 inline bool tile_kind_from_name(const char* name, TileKind& out) {
     static const char* const names[k_tile_kind_count] = {
-        "grass", "dirt", "stone", "sand", "snow", "rock", "water", "ice", "moss", "clay", "ash", "salt"};
+        "grass", "dirt", "stone", "sand", "snow", "rock", "water", "ice", "moss", "clay", "ash",
+        "salt",  "road"};
     for (std::size_t i = 0; i < k_tile_kind_count; ++i) {
         const char* a = names[i];
         const char* b = name;

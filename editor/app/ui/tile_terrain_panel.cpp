@@ -22,7 +22,8 @@ namespace {
 
 /// Surface kinds in TileKind order, as YAML spells them (tile_kind_from_name()).
 const char* const k_kind_names[toy::world::k_tile_kind_count] = {
-    "grass", "dirt", "stone", "sand", "snow", "rock", "water", "ice", "moss", "clay", "ash", "salt"};
+    "grass", "dirt", "stone", "sand", "snow", "rock", "water", "ice", "moss", "clay", "ash",
+    "salt",  "road"};
 
 /** @brief The schema's field for `key`, relabelled / re-explained for the panel. */
 FieldDesc tfield(const std::string& key, const char* label = nullptr, const char* tip = nullptr) {

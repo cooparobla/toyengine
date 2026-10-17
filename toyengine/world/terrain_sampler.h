@@ -581,6 +581,7 @@ public:
             case TileKind::Sand:  return TileKind::Sand;
             case TileKind::Clay:  return TileKind::Clay;
             case TileKind::Salt:  return TileKind::Clay;
+            case TileKind::Road:  return TileKind::Dirt;
             case TileKind::Ash:   return TileKind::Stone;
             case TileKind::Ice:   return TileKind::Ice;
             case TileKind::Water: return TileKind::Water;

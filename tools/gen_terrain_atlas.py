@@ -52,6 +52,7 @@ KINDS = [
     ("clay", (190, 138, 96), 0.92),
     ("ash", (96, 90, 88), 0.90),
     ("salt", (238, 236, 226), 0.82),
+    ("road", (150, 128, 100), 0.95),
 ]
 """One entry per toy::world::TileKind, IN ENUM ORDER. See this module's docstring."""
 

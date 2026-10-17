@@ -285,7 +285,8 @@ public:
      * @brief The style each surface kind's cells are shaped with, by style index; kinds not
      *        listed take `default_style`.
      */
-    std::array<int, k_tile_kind_count> kind_styles = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
+    std::array<int, k_tile_kind_count> kind_styles = {-1, -1, -1, -1, -1, -1, -1,
+                                                     -1, -1, -1, -1, -1, -1};
 
     /** @brief The style for kinds `kind_styles` leaves unassigned (-1 entries). */
     int default_style = 0;

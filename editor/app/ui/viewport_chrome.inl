@@ -64,7 +64,22 @@
     void draw_overlay_text_(imm::Context& ctx, const ViewProj& vp);
 
     /** @brief Blender's glyphs for a non-mesh object: camera frustum, light symbols, empty axes. */
-    void draw_object_glyph_(imm::Context& ctx, const ViewProj& vp, const Node& node, const glm::mat4& w, const glm::vec4& col);
+    /**
+     * @brief One object's viewport glyph: a camera frustum, a light symbol, or -- for anything
+     *        else -- its origin, drawn in the Origin Style at the Origin Size.
+     * @param id The object, so the Bone style can read its Transform's bone length.
+     */
+    void draw_object_glyph_(imm::Context& ctx, const ViewProj& vp, ObjectId id, const Node& node, const glm::mat4& w,
+                            const glm::vec4& col);
+    /** @brief The origin glyph itself (the `kind`-less tail of draw_object_glyph_). */
+    void draw_origin_glyph_(imm::Context& ctx, const ViewProj& vp, ObjectId id, const glm::mat4& w, const glm::vec4& col);
+    /**
+     * @brief How far `px` is from `id`'s origin glyph on screen, in pixels; 0 when inside it.
+     *
+     * The shape the style actually draws, so a bone can be clicked anywhere along its body and
+     * an axis anywhere along its line. Falls back to the origin point when no glyph is drawn.
+     */
+    float origin_glyph_pick_px_(ObjectId id, const ViewProj& vp, const glm::mat4& world, glm::vec2 px);
 
     /** @brief Object / Edit / Sculpt Mode entries (header dropdown, Ctrl+Tab, viewport RMB in Sculpt). */
     void draw_mode_menu_items_(imm::Context& ctx);

@@ -753,19 +753,23 @@ PackageReport EditorApp::package(const fs::path& out_dir, bool keep_yaml) {
     return rep;
 }
 
-ObjectId EditorApp::pick_object(glm::vec2 px) {
+std::vector<ObjectId> EditorApp::pick_candidates_(glm::vec2 px) {
     const auto vp = view_proj_();
-    if (!vp) return 0;
+    if (!vp) return {};
     glm::vec3 o, d;
     vp->ray(px, o, d);
-    ObjectId best = 0, best_marker = 0;
-    float best_t = 1e30f, best_marker_px = 1e30f, best_marker_t = 1e30f;
+    struct Hit {
+        ObjectId id;
+        float depth;        ///< Along the ray, so nearest sorts first.
+        bool loose_glyph;   ///< A glyph grazed rather than clicked on; yields to every surface.
+    };
+    std::vector<Hit> hits;
     for (const auto& [id, live] : sync_.live_objects()) {
         const Node* node = doc_.find(id);
         if (!node || !live || !live->get_transform()) continue;
         // Not drawn, not clickable: hidden (H, isolation, `active: false`) here or above.
         bool shown = true;
-        for (const auto* o = live; o && shown; o = o->parent()) shown = o->active();
+        for (const auto* a = live; a && shown; a = a->parent()) shown = a->active();
         if (!shown) continue;
         const glm::mat4 world = live->get_transform()->transform().get_world_matrix();
         if (const CachedMesh* cm = mesh_for_object_(*node)) {
@@ -773,33 +777,60 @@ ObjectId EditorApp::pick_object(glm::vec2 px) {
             const glm::vec3 lo_ = glm::vec3(inv * glm::vec4(o, 1.0f));
             const glm::vec3 ld = glm::vec3(inv * glm::vec4(d, 0.0f));
             if (!ray_aabb(lo_, ld, cm->lo - glm::vec3(1e-3f), cm->hi + glm::vec3(1e-3f))) continue;
+            float nearest = 1e30f;
             for (const auto& f : cm->mesh.faces) {
                 for (size_t k = 1; k + 1 < f.corners.size(); ++k) {
                     auto t = ray_triangle(lo_, ld, cm->mesh.positions[f.corners[0].v], cm->mesh.positions[f.corners[k].v],
                                           cm->mesh.positions[f.corners[k + 1].v]);
                     if (!t) continue;
-                    const float wt = glm::dot(glm::vec3(world * glm::vec4(lo_ + ld * *t, 1.0f)) - o, d);
-                    if (wt < best_t) { best_t = wt; best = id; }
+                    nearest = std::min(nearest, glm::dot(glm::vec3(world * glm::vec4(lo_ + ld * *t, 1.0f)) - o, d));
                 }
             }
+            if (nearest < 1e29f) hits.push_back({id, nearest, false});
         } else if (const auto* ht = live->get_component<toy::world::HeightmapTerrain>(); ht && ht->data) {
             // A heightmap terrain has no edit mesh: ray-march its grid.
             float ht_t = 0.0f;
-            if (ht->data->raycast(o - ht->origin(), d, 1e5f, ht_t) && ht_t < best_t) { best_t = ht_t; best = id; }
+            if (ht->data->raycast(o - ht->origin(), d, 1e5f, ht_t)) hits.push_back({id, ht_t, false});
         } else {
-            // No mesh: pick by its origin marker on screen.
-            const auto p = vp->project(glm::vec3(world[3]));
-            if (p && glm::distance(*p, px) < 8.0f && glm::distance(*p, px) < best_marker_px) {
-                best_marker_px = glm::distance(*p, px);
-                best_marker = id;
-                best_marker_t = glm::dot(glm::vec3(world[3]) - o, d);
-            }
+            // No mesh: pick by the glyph it draws -- the whole bone or axis line, not just a
+            // dot on its origin.
+            const float gp = origin_glyph_pick_px_(id, *vp, world, px);
+            if (gp < 8.0f) hits.push_back({id, glm::dot(glm::vec3(world[3]) - o, d), gp >= 4.0f});
         }
     }
-    // A marker clicked dead-on wins unless a surface hides it; otherwise surfaces take
-    // priority over markers.
-    if (best_marker && (best == 0 || (best_marker_px < 4.0f && best_marker_t < best_t))) return best_marker;
-    return best;
+    // Nearest first; a glyph only grazed yields to every surface, as it did before.
+    std::stable_sort(hits.begin(), hits.end(), [](const Hit& a, const Hit& b) {
+        if (a.loose_glyph != b.loose_glyph) return b.loose_glyph;
+        return a.depth < b.depth;
+    });
+    std::vector<ObjectId> out;
+    out.reserve(hits.size());
+    for (const Hit& h : hits) out.push_back(h.id);
+    return out;
+}
+
+ObjectId EditorApp::pick_object(glm::vec2 px) {
+    const std::vector<ObjectId> c = pick_candidates_(px);
+    return c.empty() ? 0 : c.front();
+}
+
+ObjectId EditorApp::click_pick_(glm::vec2 px) {
+    std::vector<ObjectId> c;
+    for (ObjectId raw : pick_candidates_(px)) {
+        const ObjectId id = click_target_(raw);   // an instance as a whole first
+        if (id && std::find(c.begin(), c.end(), id) == c.end()) c.push_back(id);
+    }
+    const bool same_spot = glm::distance(px, last_pick_px_) < 4.0f;
+    last_pick_px_ = px;
+    if (c.empty()) return 0;
+    // Clicking the same spot again carries on past whatever is already selected, so a second
+    // click reaches the bone under the mesh the first one found (Blender).
+    if (same_spot) {
+        for (size_t i = 0; i < c.size(); ++i) {
+            if (doc_.is_selected(c[i])) return c[(i + 1) % c.size()];
+        }
+    }
+    return c.front();
 }
 
 void EditorApp::push_log_(int level, const std::string& s) {
@@ -2088,7 +2119,7 @@ void EditorApp::handle_viewport_input_(imm::Context& ctx, bool mesh_edit) {
         if (box_selecting_) box_select_(mesh_edit, select_press_, m, shift, ctrl);
         else if (mesh_edit) pick_mesh_element_(m, shift);
         else {
-            const ObjectId id = click_target_(pick_object(m));   // an instance as a whole first
+            const ObjectId id = click_pick_(m);   // cycles past the selection on a repeat click
             if (id == 0) { if (!shift) doc_.clear_selection(); }
             else if (shift) {
                 // Blender: shift-click makes an unselected object active-selected, and an
@@ -3018,6 +3049,178 @@ bool EditorApp::gizmo_target_(bool mesh_edit, glm::vec3& pivot, glm::mat3& basis
     return true;
 }
 
+float EditorApp::bone_length_(ObjectId id) const {
+    const Node* obj = doc_.find(id);
+    const int ci = doc_.find_component(id, "Transform");
+    if (!obj || ci < 0) return 0.0f;
+    return std::max(0.0f, get_float(obj->at("components").as_seq()[static_cast<size_t>(ci)], "bone_length", 0.0f));
+}
+
+const Node* EditorApp::inherited_transform_key_(ObjectId id, const char* key) const {
+    // Up the parent chain, so setting a rig's root dresses every bone under it.
+    for (ObjectId at = id; at;) {
+        const Node* obj = doc_.find(at);
+        const int ci = doc_.find_component(at, "Transform");
+        if (obj && ci >= 0) {
+            const Node& t = obj->at("components").as_seq()[static_cast<size_t>(ci)];
+            if (t.contains(key)) return &t.at(key);
+        }
+        const auto parent = doc_.parent_of(at);
+        at = parent.value_or(0);
+    }
+    return nullptr;
+}
+
+OriginStyle EditorApp::origin_style_for_(ObjectId id) const {
+    const Node* n = inherited_transform_key_(id, "origin_style");
+    if (n && n->is_string()) {
+        const std::string v = n->get_value<std::string>();
+        if (v == "Bone") return OriginStyle::Bone;
+        if (v == "Orb") return OriginStyle::Orb;
+        if (v == "Axes") return OriginStyle::Axes;
+    }
+    return default_origin_style();   // Preferences > Viewport
+}
+
+float EditorApp::origin_size_for_(ObjectId id) const {
+    const Node* n = inherited_transform_key_(id, "origin_size");
+    const float v = n ? as_float(*n, 0.0f) : 0.0f;
+    return v > 1e-4f ? std::min(v, 0.5f) : origin_size_;   // Preferences > Viewport
+}
+
+void EditorApp::set_selection_transform_key_(const char* key, const Node* value, const std::string& label) {
+    const std::vector<ObjectId> targets = doc_.selection();
+    if (targets.empty()) return;
+    // One merge key across the whole selection, so setting a dozen bones is one undo step.
+    for (ObjectId id : targets) {
+        Node* obj = doc_.find(id);
+        const int ci = doc_.find_component(id, "Transform");
+        if (!obj || ci < 0) continue;
+        Node comp = obj->at("components").as_seq()[static_cast<size_t>(ci)];
+        if (value) comp[key] = *value;
+        else if (comp.contains(key)) comp.as_map().erase(key);
+        else continue;
+        apply_(doc_.set_component(id, ci, std::move(comp), label, std::string("origin_glyph_") + key));
+    }
+    doc_.end_merge();
+}
+
+void EditorApp::set_selection_origin_style(std::optional<OriginStyle> style) {
+    if (!style) { set_selection_transform_key_("origin_style", nullptr, "Origin Style"); return; }
+    static const char* kNames[] = {"Axes", "Bone", "Orb"};
+    const Node v = Node(std::string(kNames[static_cast<int>(*style)]));   // parens: braces build a sequence
+    set_selection_transform_key_("origin_style", &v, "Origin Style");
+}
+
+void EditorApp::set_selection_origin_size(float metres) {
+    if (metres <= 1e-4f) { set_selection_transform_key_("origin_size", nullptr, "Origin Size"); return; }
+    const Node v = make_float(std::min(metres, 0.5f));
+    set_selection_transform_key_("origin_size", &v, "Origin Size");
+}
+
+bool EditorApp::is_joint_object_(ObjectId id) {
+    const Node* node = doc_.find(id);
+    if (!node) return false;
+    // The same test the glyph loop uses to decide an object draws an origin at all.
+    if (!object_mesh_key_(effective_(*node)).empty() && mesh_for_object_(*node)) return false;
+    const Node& eff = effective_(*node);
+    if (!eff.contains("components") || !eff.at("components").is_sequence()) return true;
+    for (const auto& c : eff.at("components").as_seq()) {
+        const std::string t = component_type(c);
+        if (t == "Camera" || t == "DirectionalLight" || t == "PointLight" || t == "SpotLight") return false;
+    }
+    return true;
+}
+
+float EditorApp::bone_length_guess_(ObjectId id) {
+    const auto* live = sync_.live(id);
+    if (!live || !live->get_transform()) return 0.0f;
+    const coopa::util::Transform& t = live->get_transform()->transform();
+    const glm::vec3 head(t.get_world_matrix()[3]);
+    float sum_d = 0.0f;
+    int n = 0;
+    for (const auto& child : live->children()) {
+        if (!child || !child->get_transform()) continue;
+        const ObjectId cid = sync_.id_of_live(child.get());
+        if (!cid || !is_joint_object_(cid)) continue;   // a prop or a light is not a joint
+        sum_d += glm::distance(glm::vec3(child->get_transform()->transform().get_world_matrix()[3]), head);
+        ++n;
+    }
+    if (n > 0) {
+        const float d = sum_d / static_cast<float>(n);
+        if (d > 1e-4f) return d;
+    }
+    // A leaf has no child joint to reach for: half of the span it hangs off, as rigs are built.
+    if (const coopa::util::Transform* parent = t.parent()) {
+        const float d = glm::distance(glm::vec3(parent->get_world_matrix()[3]), head);
+        if (d > 1e-4f) return d * 0.5f;
+    }
+    return 0.0f;
+}
+
+std::vector<glm::vec3> EditorApp::bone_tails_(ObjectId id, float fallback_length) {
+    std::vector<glm::vec3> out;
+    const auto* live = sync_.live(id);
+    if (!live || !live->get_transform()) return out;
+    const coopa::util::Transform& t = live->get_transform()->transform();
+    const glm::mat4 w = t.get_world_matrix();
+    const glm::vec3 head(w[3]);
+
+    std::vector<glm::vec3> joints;
+    for (const auto& child : live->children()) {
+        if (!child || !child->get_transform()) continue;
+        const ObjectId cid = sync_.id_of_live(child.get());
+        if (!cid || !is_joint_object_(cid)) continue;   // a prop or a light is not a joint
+        const glm::vec3 p(child->get_transform()->transform().get_world_matrix()[3]);
+        if (glm::distance(p, head) > 1e-4f) joints.push_back(p);
+    }
+    // Which way a single bone runs: the children on average, else on from the parent, else the
+    // object's own +Y (Blender's bone axis), which is all a lone object can offer.
+    auto direction = [&]() -> glm::vec3 {
+        glm::vec3 sum(0.0f);
+        for (const glm::vec3& j : joints) sum += glm::normalize(j - head);
+        if (glm::length(sum) > 1e-5f) return glm::normalize(sum);
+        if (const coopa::util::Transform* parent = t.parent()) {
+            const glm::vec3 pp(parent->get_world_matrix()[3]);
+            if (glm::distance(pp, head) > 1e-4f) return glm::normalize(head - pp);
+        }
+        const glm::vec3 y(w[1]);
+        return glm::length(y) > 1e-6f ? glm::normalize(y) : glm::vec3(0.0f, 1.0f, 0.0f);
+    };
+
+    const float stored = bone_length_(id);
+    if (stored > 0.0f) {
+        out.push_back(head + direction() * stored);
+        return out;
+    }
+    if (!joints.empty()) return joints;   // the rig itself: one bone to every child joint
+    // A leaf: carry on the way the parent points, for half that span, so a chain ends in a
+    // bone instead of stopping short.
+    float len = fallback_length;
+    if (const coopa::util::Transform* parent = t.parent()) {
+        const float d = glm::distance(glm::vec3(parent->get_world_matrix()[3]), head);
+        if (d > 1e-4f) len = d * 0.5f;
+    }
+    out.push_back(head + direction() * len);
+    return out;
+}
+
+float EditorApp::effective_bone_length_(ObjectId id) {
+    const float stored = bone_length_(id);
+    return stored > 0.0f ? stored : bone_length_guess_(id);
+}
+
+void EditorApp::set_bone_length_(ObjectId id, float metres) {
+    Node* obj = doc_.find(id);
+    const int ci = doc_.find_component(id, "Transform");
+    if (!obj || ci < 0) return;
+    Node comp = obj->at("components").as_seq()[static_cast<size_t>(ci)];
+    if (metres > 1e-6f) comp["bone_length"] = make_float(metres);
+    else if (comp.contains("bone_length")) comp.as_map().erase("bone_length");
+    apply_(doc_.set_component(id, ci, std::move(comp), "Bone Length", "bone_length"));
+}
+
+
 float EditorApp::proportional_radius_px_(const ViewProj& vp, const glm::vec3& at) const {
     const glm::vec3 right = glm::normalize(glm::vec3(glm::inverse(vp.view)[0]));
     const auto a = vp.project(at), b = vp.project(at + right * proportional_.radius);
@@ -3207,8 +3410,9 @@ void EditorApp::draw_viewport_overlay_body_(imm::Context& ctx, bool mesh_edit, c
                 }
             }
         }
-        // Non-mesh objects: Blender's glyphs (camera frustum, light symbols, empty axes).
-        if (show_overlays_ && show_glyphs_) {
+        // Non-mesh objects: Blender's glyphs (camera frustum, light symbols) and, for the rest,
+        // the object's origin -- each under its own overlay toggle.
+        if (show_overlays_ && (show_glyphs_ || show_origins_)) {
             for (const auto& [id, live] : sync_.live_objects()) {
                 const Node* node = doc_.find(id);
                 if (!node || !live || !live->active() || !live->get_transform()) continue;
@@ -3218,7 +3422,7 @@ void EditorApp::draw_viewport_overlay_body_(imm::Context& ctx, bool mesh_edit, c
                 glm::vec4 col(0.02f, 0.02f, 0.02f, 0.9f);
                 if (shading_ == Shading::Wireframe) col = et_.viewport.wire;
                 if (doc_.is_selected(id)) col = doc_.primary() == id ? active_col : accent;
-                draw_object_glyph_(ctx, *vp, *node, live->get_transform()->transform().get_world_matrix(), col);
+                draw_object_glyph_(ctx, *vp, id, *node, live->get_transform()->transform().get_world_matrix(), col);
             }
         }
         // Selection outlines (the active object brighter, as in Blender). A selected instance

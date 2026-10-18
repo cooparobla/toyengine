@@ -441,10 +441,35 @@ COOPA_TEST(preferences_and_themes_apply_at_once_and_persist) {
     } else {
         expect(false, "Viewport lists the gizmo size");
     }
+    expect(app.test_rect("pref:origin_style").has_value() && app.test_rect("pref:origin_size").has_value(),
+           "Viewport lists the origin default's size and style");
+    // A named choice, so the file stays readable.
+    expect(app.set_preference("origin_style", Node(std::string("Bone"))), "origin_style is a preference");
+    expect(app.default_origin_style() == OriginStyle::Bone, "...naming it sets the default");
+    expect(get_string(Project::load_prefs(), "origin_style") == "Bone", "...and it is saved by name");
+    app.set_preference("origin_style", Node(std::string("Axes")));
+    expect(app.default_origin_style() == OriginStyle::Axes, "and back to axes");
     if (auto km = app.test_rect("prefs:Keymap")) in.click(km->center());
     tick(engine, 3);
     dump(engine, "prefs_keymap");
     app.ui().close_all_popups();
+    tick(engine, 2);
+
+    // The same default is within reach of the glyphs, in the viewport's Overlays popover.
+    app.ui().open_popup("overlay_opts", glm::vec2(600.0f, 120.0f));
+    app.clear_test_rects();
+    tick(engine, 3);
+    if (auto row = app.test_rect("origin_style:Orb")) {
+        in.click(row->center());
+        tick(engine, 2);
+        expect(app.default_origin_style() == OriginStyle::Orb, "the Overlays popover sets the origin default");
+        expect(get_string(Project::load_prefs(), "origin_style") == "Orb", "...and saves it straight away");
+    } else {
+        expect(false, "the Overlays popover lists the origin styles");
+    }
+    expect(app.test_rect("origin_size").has_value(), "...and the origin size");
+    app.ui().close_all_popups();
+    app.set_preference("origin_style", Node(std::string("Axes")));
     tick(engine, 2);
 
     expect(app.set_theme("blender_light"), "switch to Blender Light");

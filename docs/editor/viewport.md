@@ -143,14 +143,79 @@ next to it to pick which ones show:
 | Overlay | Shows |
 |---|---|
 | **Grid** | The floor grid |
-| **Origins** | A dot at each object's origin |
-| **Cameras / Lights** | Shapes for cameras, lights and empties |
+| **Origins** | The origin glyph on every object with no mesh of its own, and a dot on the selection |
+| **Cameras / Lights** | Camera frustums and light symbols |
 | **3D Cursor** | The 3D cursor |
 | **Statistics** | Object, vertex and face counts in the corner |
 
 The grid lies on the ground. Its spacing changes as you zoom, so the lines never get too dense
 or too sparse. In the front, back and side views it turns to face you. The red and green lines
 are the X and Y axes.
+
+### Object origins
+
+A mesh-less object -- a rig's joint, a marker, a parent you group things under -- draws a glyph
+at its origin so you can see and click it. On a character rig that is one glyph per bone, so
+how they look decides whether the rig is readable or a thicket.
+
+How an origin draws has a viewer-wide default you can play with, which any object may
+override. The default is the **Object Origins** section of the Overlays popover, and
+**Edit > Preferences > Viewport**; the override is **Properties > Object > Origin Gizmo**.
+Either way the choices are the same:
+
+| Style | Looks like |
+|---|---|
+| **Axes** | A line through the origin along each of the object's own axes. The default |
+| **Bone** | A Blender-style octahedral bone reaching each of the object's child joints |
+| **Orb** | A small ball with a short tick down each axis -- the least cluttered on a rig |
+
+**Size** is how big the glyph is in metres, up to 0.5. Turn it down on a dense rig.
+
+An object's settings apply to **every selected object**, as one undo step, and they are
+**inherited**. What an object actually draws with is, in order:
+
+1. its own **Style** / **Size**, when they are not **Inherit** / **0**;
+2. the nearest **ancestor** that sets one -- so you can dress a whole rig as bones by
+   selecting its root and setting it once, and still put a single joint back to Axes;
+3. the **viewer-wide default**, which starts at Axes and 0.5 m.
+
+The panel shows what is in use (`In use: Bone at 0.200 m`) whenever a value is inherited
+rather than the object's own.
+
+The settings are editor-only: the game ignores `origin_style`, `origin_size` and
+`bone_length` on a Transform.
+
+A glyph is **clickable where it is drawn**: click anywhere along a bone's body to select
+that joint, anywhere along an axis line, or on an orb's ball. Clicking the origin itself
+always works too. A glyph that is hidden takes no clicks.
+
+Where things overlap, **clicking the same place again steps past what is selected** to the
+next thing under the pointer, as Blender does. So a bone buried in a character's chest takes
+two clicks: the first picks the mesh in front, the second the bone inside it. Keep clicking
+to go round the rest and back to the start; click somewhere else and it begins again with
+whatever is in front.
+
+The **Origins** checkbox in the Overlays popover is what shows and hides the glyphs;
+**Cameras / Lights** only covers camera frustums and light symbols.
+
+### Bone Length
+
+The **Bone** style works the hierarchy out for itself, so a rig draws as the skeleton it is:
+
+- A joint draws **one bone to each of its child joints**, landing on that child's origin. A
+  hip with two legs draws two bones, one down each leg. A mesh, camera or light parented to a
+  joint is not itself a joint, so a prop in a hand grows no bone of its own.
+- A **leaf** carries on the way its parent points, for half that span -- so a chain ends in a
+  bone instead of stopping short.
+- An object with neither falls back to its own **+Y** (Blender's bone axis), as long as twice
+  the Origin Size.
+
+Nothing needs setting up for that. **Bone Length**, which appears under **Origin Gizmo** once
+the style is Bone, is there for when you want to override it: any value above 0 collapses the
+object to a single bone of exactly that length, pointing the way its children do.
+
+Where the hierarchy suggests a length, the field says what it is, and **Set from Hierarchy**
+under it stores that number.
 
 ### Show physics colliders
 

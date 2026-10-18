@@ -721,6 +721,63 @@ void EditorApp::draw_object_props_(imm::Context& ctx, ObjectId id) {
         }
         if (finished) doc_.end_merge();
     }
+    // How this object's origin draws in the viewport. Editor-only: the game ignores all three
+    // keys. They apply to the whole selection, so a rig is dressed in one go; an object that
+    // sets nothing takes the nearest ancestor's, and the viewer-wide default failing that.
+    if (ctx.collapsing_header("Origin Gizmo", false, nullptr, I::Orientation)) {
+        const Node* own_style = nullptr;
+        const Node* own_size = nullptr;
+        if (const int ci = doc_.find_component(id, "Transform"); ci >= 0) {
+            const Node& t = obj->at("components").as_seq()[static_cast<size_t>(ci)];
+            if (t.contains("origin_style")) own_style = &t.at("origin_style");
+            if (t.contains("origin_size")) own_size = &t.at("origin_size");
+        }
+        static const std::vector<std::string> kStyleItems = {"Inherit", "Axes", "Bone", "Orb"};
+        int si = 0;
+        if (own_style && own_style->is_string()) {
+            const std::string v = own_style->get_value<std::string>();
+            for (size_t k = 1; k < kStyleItems.size(); ++k) if (kStyleItems[k] == v) si = static_cast<int>(k);
+        }
+        if (ctx.combo("Style", &si, kStyleItems) && editable) {
+            if (si <= 0) set_selection_origin_style(std::nullopt);
+            else set_selection_origin_style(static_cast<OriginStyle>(si - 1));
+        }
+        ctx.tooltip("Origin Gizmo Style\nAxes, a Blender-style bone reaching each child joint, or a small ball.\n"
+                    "Inherit takes the nearest ancestor's, and the Preferences > Viewport default if none sets one. "
+                    "Applies to the whole selection");
+        float size = own_size ? as_float(*own_size, 0.0f) : 0.0f;
+        const bool size_changed = ctx.drag_float("Size", &size, 0.005f, 0.0f, 0.5f, "%.3f m");
+        const bool size_done = ctx.last_deactivated();
+        ctx.tooltip("Origin Gizmo Size\nHow big the glyph is drawn, in metres. 0 takes the nearest ancestor's, else the "
+                    "Preferences > Viewport default. Applies to the whole selection");
+        if (size_changed && editable) set_selection_origin_size(size);
+        if (size_done) doc_.end_merge();
+        if (!own_style || !own_size) {
+            char buf[96];
+            std::snprintf(buf, sizeof buf, "In use: %s at %.3f m",
+                          kStyleItems[static_cast<size_t>(origin_style_for_(id)) + 1].c_str(), origin_size_for_(id));
+            ctx.label_dim(buf);
+        }
+        // Bone Length: only the Bone style reads it, so it sits with the rest of this.
+        if (origin_style_for_(id) == OriginStyle::Bone) {
+            const float stored_bone = bone_length_(id);
+            float bone = stored_bone;
+            const bool bone_changed = ctx.drag_float("Bone Length", &bone, 0.01f, 0.0f, 10000.0f, "%.3f m");
+            const bool bone_done = ctx.last_deactivated();
+            ctx.tooltip("Bone Length\nForces one bone of this length instead of one reaching each child joint. "
+                        "0 works it out from the hierarchy; the game ignores it");
+            if (bone_changed && editable) set_bone_length_(id, bone);
+            if (bone_done) doc_.end_merge();
+            const float bone_guess = stored_bone > 0.0f ? 0.0f : bone_length_guess_(id);
+            if (bone_guess > 0.0f) {
+                char buf[80];
+                std::snprintf(buf, sizeof buf, "0 = auto, %.3f m from the hierarchy", bone_guess);
+                ctx.label_dim(buf);
+                if (ctx.button("Set from Hierarchy", 160, editable, I::Link)) set_bone_length_(id, bone_guess);
+                ctx.tooltip("Set from Hierarchy\nStore the guessed length, so it stops following the children around");
+            }
+        }
+    }
     if (ctx.collapsing_header("Relations", true, nullptr, I::Link)) {
         // Every object but this one and its descendants: built once per (object, revision),
         // not every frame -- it lists the whole scene.

@@ -22,10 +22,11 @@
         const char* label;
         const char* tip;
         float* f = nullptr;     ///< A number...
-        bool* b = nullptr;      ///< ...or a toggle.
+        bool* b = nullptr;      ///< ...a toggle...
+        int* i = nullptr;       ///< ...or an index into `choices`, stored in the file by its name.
         float def = 0.0f, lo = 0.0f, hi = 1.0f;
         const char* fmt = "%.2f";
-        std::vector<std::string> choices;   ///< A toggle shown as a two-way choice (false, true).
+        std::vector<std::string> choices;   ///< A toggle's two-way choice (false, true), or an index's names.
         bool drag = false;                  ///< A drag field (unbounded feel) instead of a slider.
     };
 

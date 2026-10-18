@@ -336,4 +336,43 @@ COOPA_TEST(rigs_preview_their_own_clips_and_play_when_placed) {
     tick(engine, 2);
 }
 
+/**
+ * @brief The Transform's optional bone length, which the Bone gizmo style draws: stored on the
+ *        object when it is set, guessed from the hierarchy (the child joint, half the parent's
+ *        span for a leaf) while it is 0.
+ */
+COOPA_TEST(bone_length_is_stored_or_guessed_from_the_hierarchy) {
+    EditorSession session;
+    auto& engine = session.engine;
+    auto& app = session.app;
+    auto& doc = app.document();
+    const ObjectId cube = object_named(app, "cube");
+    const ObjectId upper = doc.add_object(doc.make_object("UpperArm"), cube);
+    const ObjectId lower = doc.add_object(doc.make_object("LowerArm"), upper);
+    doc.set_transform(upper, {0, 0, 0}, {}, {1, 1, 1}, "pose");
+    doc.set_transform(lower, {0, 0, 2}, {}, {1, 1, 1}, "pose");
+    app.sync().rebuild(engine, doc);
+    tick(engine, 2);
+
+    expect(std::abs(app.bone_length_for(upper) - 2.0f) < 1e-3f,
+           "a bone with a child reaches that joint (" + std::to_string(app.bone_length_for(upper)) + " m)");
+    expect(std::abs(app.bone_length_for(lower) - 1.0f) < 1e-3f,
+           "a leaf bone takes half of its parent's span (" + std::to_string(app.bone_length_for(lower)) + " m)");
+
+    // Stored on the Transform, it wins and stops following the children.
+    const int ci = doc.find_component(upper, "Transform");
+    Node t = doc.find(upper)->at("components").as_seq()[static_cast<size_t>(ci)];
+    t["bone_length"] = make_float(0.75);
+    doc.set_component(upper, ci, t, "Bone Length");
+    expect(std::abs(app.bone_length_for(upper) - 0.75f) < 1e-4f, "a stored bone_length wins over the guess");
+    doc.set_transform(lower, {0, 0, 5}, {}, {1, 1, 1}, "pose");
+    app.sync().rebuild(engine, doc);
+    tick(engine, 2);
+    expect(std::abs(app.bone_length_for(upper) - 0.75f) < 1e-4f, "...and stays put when the child moves");
+    expect(std::abs(app.bone_length_for(lower) - 2.5f) < 1e-3f, "while the leaf's guess follows it");
+
+    // The scene file carries the key, and nothing else grew a bone length.
+    expect(std::abs(app.bone_length_for(cube)) < 1e-4f, "an object with no bone length and no offset child has none");
+}
+
 } // namespace toy::editor::testing

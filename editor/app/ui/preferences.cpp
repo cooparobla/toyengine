@@ -16,6 +16,13 @@ std::vector<EditorApp::PrefRow> EditorApp::prefs_table_() {
         r.b = b; r.def = def ? 1.0f : 0.0f; r.choices = std::move(choices);
         return r;
     };
+    auto choice = [](const char* key, const char* cat, const char* label, const char* tip, int* i, int def,
+                     std::vector<std::string> choices) {
+        PrefRow r{key, cat, label, tip};
+        r.i = i; r.def = static_cast<float>(def); r.hi = static_cast<float>(choices.size() - 1);
+        r.choices = std::move(choices);
+        return r;
+    };
     return {
         num("ui_scale", "Interface", "Interface Scale", "Size of the whole editor UI, on top of the display's own scaling", &ui_scale_pref_,
             1.0f, 0.75f, 2.0f, "%.2fx"),
@@ -25,6 +32,11 @@ std::vector<EditorApp::PrefRow> EditorApp::prefs_table_() {
             &camera_.fov, 50.0f, 20.0f, 110.0f, "%.0f deg"),
         num("gizmo_size", "Viewport", "Gizmo Size", "On-screen size of the move / rotate / scale gizmo", &gizmo_.size_px, 90.0f, 40.0f, 200.0f,
             "%.0f px"),
+        num("origin_size", "Viewport", "Origin Size", "Default size of an object's origin glyph, in metres. Any object can override "
+            "it in Properties > Object > Origin Gizmo", &origin_size_, kDefaultOriginSize, 0.01f, 0.5f, "%.3f m", true),
+        choice("origin_style", "Viewport", "Origin Style",
+               "Default look of an object's origin: axis lines, a Blender-style bone reaching each child joint, or a small ball. "
+               "Any object can override it in Properties > Object > Origin Gizmo", &origin_style_, 0, {"Axes", "Bone", "Orb"}),
         flag("show_grid", "Viewport", "Show Grid", "The floor grid in the viewport (also in the Overlays popover)", &show_grid_, true),
         num("orbit_speed", "Navigation", "Orbit Speed", "How far a mouse drag or swipe turns the view", &camera_.orbit_speed, 1.0f, 0.1f, 4.0f,
             "%.2fx"),
@@ -52,6 +64,15 @@ void EditorApp::prefs_load_(const Node& prefs) {
         const Node& n = prefs.at(r.key);
         if (r.f && (n.is_float_number() || n.is_integer())) *r.f = std::clamp(as_float(n, r.def), r.lo, r.hi);
         if (r.b && n.is_boolean()) *r.b = n.get_value<bool>();
+        if (r.i) {
+            *r.i = static_cast<int>(r.def);
+            if (n.is_string()) {
+                const std::string name = n.get_value<std::string>();
+                for (size_t k = 0; k < r.choices.size(); ++k) if (r.choices[k] == name) *r.i = static_cast<int>(k);
+            } else if (n.is_integer()) {
+                *r.i = std::clamp(static_cast<int>(as_float(n, r.def)), 0, static_cast<int>(r.choices.size()) - 1);
+            }
+        }
     }
     prefs_apply_();
 }
@@ -67,6 +88,7 @@ void EditorApp::prefs_save_() {
     for (const PrefRow& r : prefs_table_()) {
         if (r.f) prefs[r.key] = make_float(*r.f);
         if (r.b) prefs[r.key] = Node(*r.b);
+        if (r.i) prefs[r.key] = Node(r.choices[static_cast<size_t>(std::clamp(*r.i, 0, static_cast<int>(r.choices.size()) - 1))]);
     }
     Project::save_prefs(prefs);
     prefs_dirty_ = false;
@@ -82,6 +104,15 @@ bool EditorApp::set_preference(const std::string& key, const Node& value) {
         if (key != r.key) continue;
         if (r.f) *r.f = std::clamp(as_float(value, r.def), r.lo, r.hi);
         if (r.b) *r.b = value.is_boolean() ? value.get_value<bool>() : as_float(value, r.def) != 0.0f;
+        if (r.i) {
+            *r.i = static_cast<int>(r.def);
+            if (value.is_string()) {
+                const std::string name = value.get_value<std::string>();
+                for (size_t k = 0; k < r.choices.size(); ++k) if (r.choices[k] == name) *r.i = static_cast<int>(k);
+            } else {
+                *r.i = std::clamp(static_cast<int>(as_float(value, r.def)), 0, static_cast<int>(r.choices.size()) - 1);
+            }
+        }
         prefs_apply_();
         prefs_save_();
         return true;
@@ -140,6 +171,8 @@ void EditorApp::prefs_rows_(imm::Context& ctx, const std::string& category) {
         if (r.f) {
             changed = r.drag ? ctx.drag_float_box("value", wb, r.f, (r.hi - r.lo) * 0.0005f + 0.001f, r.lo, r.hi, r.fmt)
                              : prefs_slider_(ctx, wb, r.f, r.lo, r.hi, r.fmt);
+        } else if (r.i) {
+            changed = ctx.combo_box("value", wb, r.i, r.choices);
         } else if (!r.choices.empty()) {
             int i = *r.b ? 1 : 0;
             if (ctx.combo_box("value", wb, &i, r.choices)) { *r.b = i == 1; changed = true; }
@@ -152,11 +185,14 @@ void EditorApp::prefs_rows_(imm::Context& ctx, const std::string& category) {
         }
         if (ctx.is_hovered(row)) ctx.tooltip(std::string(r.label) + "\n" + r.tip);
         test_rects_[std::string("pref:") + r.key] = wb;
-        const bool is_default = r.f ? std::abs(*r.f - r.def) < 1e-4f : *r.b == (r.def != 0.0f);
+        const bool is_default = r.f ? std::abs(*r.f - r.def) < 1e-4f
+                             : r.i ? *r.i == static_cast<int>(r.def)
+                                   : *r.b == (r.def != 0.0f);
         if (!is_default &&
             ctx.icon_button("reset", imm::Icon::Restart, "Reset to Default", false, rs - 2, imm::Context::kAll,
                             imm::Box{row.right() - rs + 2, row.y + 1, rs - 2, rs - 2})) {
             if (r.f) *r.f = r.def;
+            else if (r.i) *r.i = static_cast<int>(r.def);
             else *r.b = r.def != 0.0f;
             changed = true;
         }
@@ -276,6 +312,7 @@ void EditorApp::draw_preferences_modal_(imm::Context& ctx) {
         for (PrefRow& r : prefs_table_()) {
             if (cat != r.category) continue;
             if (r.f) *r.f = r.def;
+            else if (r.i) *r.i = static_cast<int>(r.def);
             else *r.b = r.def != 0.0f;
         }
         if (cat == "Viewport") { set_viewport_ao(true); set_isolate_in_edit(false); }

@@ -631,7 +631,65 @@ void EditorApp::draw_overlay_text_(imm::Context& ctx, const ViewProj& vp) {
     if (show_overlays_ && show_stats_overlay_) shadow_text_(ctx, {x, y0 + (playing() ? 48.0f : 32.0f)}, scene_stats_(), et_.viewport.overlay_text);
 }
 
-void EditorApp::draw_object_glyph_(imm::Context& ctx, const ViewProj& vp, const Node& node, const glm::mat4& w, const glm::vec4& col) {
+namespace {
+
+/**
+ * @brief 2D point-in-triangle, for hit-testing a projected glyph face.
+ *
+ * False for a degenerate (edge-on) triangle: with no area, every point sits on all three
+ * sides at once, which would otherwise claim the whole screen for a bone seen end-on.
+ */
+bool in_triangle(glm::vec2 p, glm::vec2 a, glm::vec2 b, glm::vec2 c) {
+    const float area2 = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+    if (std::abs(area2) < 1.0f) return false;   // under a square pixel of area
+    const float d1 = (p.x - b.x) * (a.y - b.y) - (a.x - b.x) * (p.y - b.y);
+    const float d2 = (p.x - c.x) * (b.y - c.y) - (b.x - c.x) * (p.y - c.y);
+    const float d3 = (p.x - a.x) * (c.y - a.y) - (c.x - a.x) * (p.y - a.y);
+    const bool neg = (d1 < 0) || (d2 < 0) || (d3 < 0);
+    const bool pos = (d1 > 0) || (d2 > 0) || (d3 > 0);
+    return !(neg && pos);
+}
+
+/**
+ * @brief The octahedral bone from `head` to `tail`, projected to the screen.
+ *
+ * `x_hint` rolls the body so it turns with its joint instead of spinning as the direction
+ * crosses an axis; `z_hint` is the fallback when the bone runs along `x_hint`.
+ *
+ * @return False if any corner is behind the camera, or the bone has no length.
+ */
+bool project_bone(const ViewProj& vp, const glm::vec3& head, const glm::vec3& tail, const glm::vec3& x_hint,
+                  const glm::vec3& z_hint, glm::vec2& head_px, glm::vec2& tail_px, glm::vec2 ring_px[4]) {
+    const glm::vec3 along = tail - head;
+    const float len = glm::length(along);
+    if (len < 1e-5f) return false;
+    const glm::vec3 dir = along / len;
+    glm::vec3 u = x_hint - dir * glm::dot(x_hint, dir);
+    if (glm::length(u) < 1e-4f) {
+        u = z_hint - dir * glm::dot(z_hint, dir);
+        if (glm::length(u) < 1e-4f) u = glm::cross(dir, std::abs(dir.z) < 0.9f ? glm::vec3(0, 0, 1) : glm::vec3(1, 0, 0));
+    }
+    u = glm::normalize(u);
+    const glm::vec3 v = glm::cross(dir, u);
+    const float r = 0.14f * len;
+    const glm::vec3 mid = head + dir * r;
+    const glm::vec3 ring[4] = {mid + u * r, mid + v * r, mid - u * r, mid - v * r};
+    const auto h = vp.project(head), t = vp.project(tail);
+    if (!h || !t) return false;
+    for (int i = 0; i < 4; ++i) {
+        const auto p = vp.project(ring[i]);
+        if (!p) return false;
+        ring_px[i] = *p;
+    }
+    head_px = *h;
+    tail_px = *t;
+    return true;
+}
+
+} // namespace
+
+void EditorApp::draw_object_glyph_(imm::Context& ctx, const ViewProj& vp, ObjectId id, const Node& node, const glm::mat4& w,
+                                   const glm::vec4& col) {
     auto P = [&](const glm::vec3& p) { return vp.project(p); };
     auto seg = [&](const glm::vec3& a, const glm::vec3& b) {
         auto pa = P(a), pb = P(b);
@@ -646,6 +704,8 @@ void EditorApp::draw_object_glyph_(imm::Context& ctx, const ViewProj& vp, const 
         const std::string t = component_type(c);
         if (t == "Camera" || t == "DirectionalLight" || t == "PointLight" || t == "SpotLight") { kind = t; comp = &c; break; }
     }
+    // "Cameras / Lights" covers the symbols; "Origins" covers everything else's origin.
+    if (!kind.empty() ? !show_glyphs_ : !show_origins_) return;
     const float wpp = vp.world_per_pixel(pos);
     if (kind == "Camera") {
         const float fov = get_float(*comp, "fov", 50.0f);
@@ -697,12 +757,107 @@ void EditorApp::draw_object_glyph_(imm::Context& ctx, const ViewProj& vp, const 
         ctx.circle(*center, 2.5f, col);
         return;
     }
-    // Empty: plain axes, half a unit each way.
-    const float a = 0.5f;
-    seg(pos - X * a, pos + X * a);
-    seg(pos - Y * a, pos + Y * a);
-    seg(pos - Z * a, pos + Z * a);
     (void)wpp;
+    draw_origin_glyph_(ctx, vp, id, w, col);
+}
+
+void EditorApp::draw_origin_glyph_(imm::Context& ctx, const ViewProj& vp, ObjectId id, const glm::mat4& w, const glm::vec4& col) {
+    const glm::vec3 pos(w[3]);
+    const glm::vec3 X = glm::normalize(glm::vec3(w[0])), Y = glm::normalize(glm::vec3(w[1])), Z = glm::normalize(glm::vec3(w[2]));
+    const float a = std::max(0.001f, origin_size_for_(id));
+    auto P = [&](const glm::vec3& p) { return vp.project(p); };
+    auto seg = [&](const glm::vec3& p, const glm::vec3& q, float t) {
+        const auto pa = P(p), pb = P(q);
+        if (pa && pb) ctx.line(*pa, *pb, col, t);
+    };
+    switch (origin_style_for_(id)) {
+    case OriginStyle::Bone: {
+        // One Blender-style octahedral bone reaching each child joint, so a rig draws as the
+        // skeleton it is rather than as a cloud of axis crosses.
+        for (const glm::vec3& tail : bone_tails_(id, a * 2.0f)) {
+            glm::vec2 head, tip, q[4];
+            if (!project_bone(vp, pos, tail, X, Z, head, tip, q)) continue;
+            const glm::vec4 fill = imm::with_alpha(col, col.a * 0.25f);
+            for (int i = 0; i < 4; ++i) {
+                ctx.triangle(head, q[i], q[(i + 1) % 4], fill);
+                ctx.triangle(tip, q[i], q[(i + 1) % 4], fill);
+            }
+            for (int i = 0; i < 4; ++i) {
+                ctx.line(head, q[i], col, 1.3f);
+                ctx.line(q[i], tip, col, 1.3f);
+                ctx.line(q[i], q[(i + 1) % 4], col, 1.0f);
+            }
+        }
+        // The joint, so a chain of bones reads as linked.
+        if (const auto c = P(pos)) ctx.ring(*c, 3.5f, 1.3f, col);
+        break;
+    }
+    case OriginStyle::Orb: {
+        // A ball at the origin with a short tick down each axis: the least cluttered display
+        // for a dense rig, and still enough to read the object's orientation.
+        const auto c = P(pos);
+        if (!c) break;
+        const float t = a * 0.45f;
+        seg(pos, pos + X * t, 1.2f);
+        seg(pos, pos + Y * t, 1.2f);
+        seg(pos, pos + Z * t, 1.2f);
+        ctx.circle(*c, 3.0f, col);
+        ctx.ring(*c, 5.5f, 1.3f, col);
+        break;
+    }
+    case OriginStyle::Axes:
+    default:
+        seg(pos - X * a, pos + X * a, 1.3f);
+        seg(pos - Y * a, pos + Y * a, 1.3f);
+        seg(pos - Z * a, pos + Z * a, 1.3f);
+        break;
+    }
+}
+
+float EditorApp::origin_glyph_pick_px_(ObjectId id, const ViewProj& vp, const glm::mat4& world, glm::vec2 px) {
+    const glm::vec3 pos(world[3]);
+    const auto centre = vp.project(pos);
+    if (!centre) return 1e30f;
+    float best = glm::distance(*centre, px);   // the origin point is clickable whatever is drawn
+    // Only what is actually on screen is clickable by its shape; with the overlay off, or on
+    // a camera / light (which draws its own symbol), the origin point is all there is.
+    if (!show_overlays_ || !show_origins_ || !is_joint_object_(id)) return best;
+
+    const glm::vec3 X = glm::normalize(glm::vec3(world[0])), Y = glm::normalize(glm::vec3(world[1])),
+                    Z = glm::normalize(glm::vec3(world[2]));
+    const float a = std::max(0.001f, origin_size_for_(id));
+    auto segment = [&](const glm::vec3& p, const glm::vec3& q) {
+        const auto pa = vp.project(p), pb = vp.project(q);
+        if (pa && pb) best = std::min(best, point_segment_distance(px, *pa, *pb));
+    };
+    switch (origin_style_for_(id)) {
+    case OriginStyle::Bone:
+        for (const glm::vec3& tail : bone_tails_(id, a * 2.0f)) {
+            glm::vec2 head, tip, q[4];
+            if (!project_bone(vp, pos, tail, X, Z, head, tip, q)) continue;
+            for (int i = 0; i < 4; ++i) {
+                const glm::vec2 b = q[i], c = q[(i + 1) % 4];
+                // Anywhere on the body, not just its outline -- a bone is a solid to click.
+                if (in_triangle(px, head, b, c) || in_triangle(px, tip, b, c)) return 0.0f;
+                best = std::min({best, point_segment_distance(px, head, b), point_segment_distance(px, b, tip),
+                                 point_segment_distance(px, b, c)});
+            }
+        }
+        break;
+    case OriginStyle::Orb:
+        best = std::max(0.0f, best - 6.0f);   // the ball itself, then its axis ticks
+        segment(pos, pos + X * (a * 0.45f));
+        segment(pos, pos + Y * (a * 0.45f));
+        segment(pos, pos + Z * (a * 0.45f));
+        break;
+    case OriginStyle::Axes:
+    default:
+        segment(pos - X * a, pos + X * a);
+        segment(pos - Y * a, pos + Y * a);
+        segment(pos - Z * a, pos + Z * a);
+        break;
+    }
+    return best;
 }
 
 void EditorApp::draw_mode_menu_items_(imm::Context& ctx) {
@@ -803,10 +958,39 @@ void EditorApp::draw_overlays_popover_(imm::Context& ctx) {
     ctx.label_dim("Viewport Overlays");
     ctx.checkbox("Grid", &show_grid_);
     ctx.checkbox("Origins", &show_origins_);
+    ctx.tooltip("Origins\nThe origin glyph on every object that has no mesh of its own -- a rig's joints, markers, group parents");
     ctx.checkbox("Cameras / Lights", &show_glyphs_);
+    ctx.tooltip("Cameras / Lights\nCamera frustums and light symbols");
     ctx.checkbox("3D Cursor", &show_cursor3d_);
     ctx.checkbox("Statistics", &show_stats_overlay_);
     ctx.tooltip("Statistics\nObject / vertex / face counts in the viewport corner");
+    // The viewer-wide default for origin glyphs, within reach of what it changes. Any object
+    // can override it in Properties > Object > Origin Gizmo. Saved once the mouse lets go.
+    ctx.spacing(4);
+    ctx.label_dim("Object Origins (default)");
+    ctx.slider_float("Size", &origin_size_, 0.01f, 0.5f, "%.3f m");
+    const bool size_done = ctx.last_deactivated();
+    test_rects_["origin_size"] = ctx.last_rect();
+    ctx.tooltip("Size\nHow big an origin glyph is drawn by default, in metres. Turn it down for a dense rig");
+    if (size_done) prefs_save_();
+    // Rows rather than a dropdown: a combo's popup would close this one.
+    static const char* kOriginStyles[] = {"Axes", "Bone", "Orb"};
+    static const char* kOriginTips[] = {
+        "Axes\nA line through the origin along each of the object's own axes",
+        "Bone\nA Blender-style octahedral bone reaching each of the object's child joints",
+        "Orb\nA small ball with a short tick down each axis -- the least cluttered on a dense rig",
+    };
+    for (int i = 0; i < 3; ++i) {
+        ctx.push_id(i);
+        if (ctx.selectable(kOriginStyles[i], origin_style_ == i) && origin_style_ != i) {
+            origin_style_ = i;
+            prefs_apply_();
+            prefs_save_();
+        }
+        test_rects_[std::string("origin_style:") + kOriginStyles[i]] = ctx.last_rect();
+        ctx.tooltip(kOriginTips[i]);
+        ctx.pop_id();
+    }
     ctx.end_popup();
 }
 

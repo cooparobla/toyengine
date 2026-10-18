@@ -126,6 +126,19 @@ enum class AssetType { None = 0, Scene, Object, Mesh, Material, Texture, UI, The
 enum class InteractionMode { Object = 0, Edit, Sculpt, VertexPaint, WeightPaint };
 /** @brief Viewport shading, Blender's four buttons. */
 enum class Shading { Wireframe = 0, Solid = 1, MaterialPreview = 2, Full = 3 };
+
+/**
+ * @brief How an object's origin is drawn in the viewport (Blender's "empty" display).
+ *
+ * Only objects with no mesh of their own get one -- a rig's joints, markers, group parents.
+ */
+enum class OriginStyle {
+    Axes = 0,   ///< Three lines through the origin, one per local axis. The default.
+    Bone,       ///< Blender's octahedral bone, reaching each of the object's child joints.
+    Orb,        ///< A small ball at the origin, with a tick along each axis.
+};
+/** @brief The origin glyph's size in metres when neither the object nor an ancestor sets one. */
+inline constexpr float kDefaultOriginSize = 0.5f;
 /** @brief The Properties editor's tabs. */
 enum class PropTab { Tool, Render, Output, Scene, World, Object, Components, Physics, Data, Material, Canvas, Bindings, Theme };
 
@@ -176,6 +189,36 @@ public:
     Project& project() { return project_; }
     EditorCamera& camera() { return camera_; }
     Gizmo& gizmo() { return gizmo_; }
+    /**
+     * @brief The length the Bone gizmo style draws for `id`: the Transform's own `bone_length`,
+     *        or the hierarchy's guess while that is 0. 0 when neither says anything.
+     */
+    float bone_length_for(ObjectId id) { return effective_bone_length_(id); }
+    /** @brief Everything under `px`, nearest first (tests; see pick_candidates_). */
+    std::vector<ObjectId> pick_candidates_for_test(glm::vec2 px) { return pick_candidates_(px); }
+    /** @brief World-space tail of each bone the Bone origin style draws for `id`. */
+    std::vector<glm::vec3> bone_tails_for(ObjectId id, float fallback_length = 0.5f) {
+        return bone_tails_(id, fallback_length);
+    }
+    /**
+     * @brief How `id`'s origin is drawn, and how big in metres.
+     *
+     * The object's own Transform keys when it sets them, else the nearest ancestor that does
+     * -- so a rig takes its look from its root -- else the viewer-wide default below.
+     */
+    OriginStyle origin_style_for(ObjectId id) const { return origin_style_for_(id); }
+    float origin_size_for(ObjectId id) const { return origin_size_for_(id); }
+    /** @brief Writes `origin_style` / `origin_size` on every selected object; one undo step. */
+    void set_selection_origin_style(std::optional<OriginStyle> style);
+    void set_selection_origin_size(float metres);
+    /** @brief The viewer-wide default every object falls back to (Preferences > Viewport). */
+    OriginStyle default_origin_style() const { return static_cast<OriginStyle>(std::clamp(origin_style_, 0, 2)); }
+    float default_origin_size() const { return origin_size_; }
+    /** @brief The Overlays popover's two glyph toggles (origins; camera and light symbols). */
+    void set_show_origins(bool on) { show_origins_ = on; }
+    bool show_origins() const { return show_origins_; }
+    void set_show_glyphs(bool on) { show_glyphs_ = on; }
+    bool show_glyphs() const { return show_glyphs_; }
     float grid_step() const { return grid_step_(); }
     /** @brief Tests: treat scrolls as trackpad gestures (or a wheel); queue a pinch. */
     void set_trackpad_for_test(std::optional<bool> trackpad) { trackpad_override_ = trackpad; }
@@ -901,7 +944,59 @@ private:
      */
     glm::mat3 orientation_basis_(bool mesh_edit, Orientation o);
 
+    /**
+     * @brief Everything under `px`, nearest first: meshes and terrain by their hit depth,
+     *        origin glyphs by theirs, and a glyph only grazed after every surface.
+     */
+    std::vector<ObjectId> pick_candidates_(glm::vec2 px);
+    /**
+     * @brief What a click at `px` should select, as an instance where one applies.
+     *
+     * Clicking the same spot again steps past what is already selected to the next thing
+     * under the cursor, so overlapping objects can be reached in turn (Blender).
+     */
+    ObjectId click_pick_(glm::vec2 px);
+    glm::vec2 last_pick_px_{-1e9f, -1e9f};   ///< Where the last click picked, for that cycling.
+
     bool gizmo_target_(bool mesh_edit, glm::vec3& pivot, glm::mat3& basis);
+
+    // --- bone length (the Transform's optional `bone_length`, drawn by the Bone gizmo style) ---
+
+    /** @brief The Transform's stored `bone_length` in metres; 0 when the object has none. */
+    float bone_length_(ObjectId id) const;
+    /**
+     * @brief True when `id` is a joint: an object that draws an origin glyph of its own.
+     *
+     * A mesh parented to a bone, or a light on it, is not one -- bones run between joints, so
+     * a prop hanging off a hand must not sprout a bone of its own.
+     */
+    bool is_joint_object_(ObjectId id);
+    /** @brief The Transform key `key` on `id`, or on the nearest ancestor that sets it. */
+    const Node* inherited_transform_key_(ObjectId id, const char* key) const;
+    OriginStyle origin_style_for_(ObjectId id) const;
+    float origin_size_for_(ObjectId id) const;
+    /** @brief Sets a Transform key on every selected object (null clears it); one undo step. */
+    void set_selection_transform_key_(const char* key, const Node* value, const std::string& label);
+    /**
+     * @brief A bone length guessed from the hierarchy, in metres.
+     *
+     * The distance to the mean of the object's children, as a rig's bone reaches its child
+     * joint; a leaf falls back to half the distance to its parent, and a lone object to 0.
+     */
+    float bone_length_guess_(ObjectId id);
+    /** @brief bone_length_() when it is set, else bone_length_guess_(). */
+    float effective_bone_length_(ObjectId id);
+    /** @brief Writes the Transform's `bone_length` (<= 0 drops the key); one undo step. */
+    void set_bone_length_(ObjectId id, float metres);
+    /**
+     * @brief Where this object's bone(s) point, in world space -- one tail per bone.
+     *
+     * A joint with children gets one bone reaching each of them, so a rig draws as the
+     * skeleton it is. A leaf carries on the way its parent points, for half that span. An
+     * explicit `bone_length` collapses it to a single bone of exactly that length, along the
+     * mean of the children (or the parent's direction, or the object's own +Y).
+     */
+    std::vector<glm::vec3> bone_tails_(ObjectId id, float fallback_length);
 
     struct DragStart {
         glm::vec3 pos, rot, scl;
@@ -1052,6 +1147,10 @@ private:
     fs::file_time_type theme_stamp_{};
     float theme_poll_ = 0.0f;   // set by the overlay pass, drawn in pre_render_ (line pass)
     bool show_gizmo_ = true;
+    // The viewer-wide default for the origin glyph, which any object may override on its
+    // Transform. prefs "origin_size" / "origin_style" (an OriginStyle index).
+    float origin_size_ = kDefaultOriginSize;
+    int origin_style_ = 0;
 
     // Viewport interaction (Blender-style; see the viewport section).
     Tool tool_ = Tool::Select;

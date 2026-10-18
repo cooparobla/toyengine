@@ -10,6 +10,7 @@
 #include <toyengine/scene/ragdoll.h>
 #include <toyengine/scene/rider.h>
 #include <toyengine/scene/skinned_mesh_renderer.h>
+#include <toyengine/scene/destruction_system.h>
 #include <toyengine/scene/terrain_digger.h>
 #include <toyengine/scene/turntable.h>
 #include <toyengine/world/heightmap_terrain_system.h>
@@ -509,6 +510,9 @@ void Engine::prepare_scene_(coopa::scene::Scene& scene, bool drain_assets) {
     // Order 61: heightmap terrains -- their chunks, GPU grids and colliders, before Physics (100)
     // steps against them. See heightmap_terrain_system.h.
     world::install_heightmap_terrain_system(scene, ctx_.device(), ctx_.allocator(), ctx_.command_pool(), assets_);
+    // Order 70: destruction -- fractures breakable meshes on the job engine and spawns a
+    // chunk body per cell. Before Physics (100), so a chunk born this frame falls this frame.
+    scene::install_destruction_system(scene, ctx_.device(), ctx_.allocator(), assets_, &jobs_);
     // Order 90: bakes water surfaces and refreshes the buoyant-body list right before
     // Physics (100) steps, whose substep callback it drives -- see water_system.h's file doc.
     water::install_water_system(scene, &ctx_.device(), &ctx_.allocator(), &assets_)

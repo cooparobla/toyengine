@@ -21,6 +21,7 @@
 #include <toyengine/scene/ragdoll.h>
 #include <toyengine/scene/rider.h>
 #include <toyengine/scene/scene_link.h>
+#include <toyengine/scene/destructible.h>
 #include <toyengine/scene/skinned_mesh_renderer.h>
 #include <toyengine/scene/terrain_digger.h>
 #include <toyengine/scene/turntable.h>
@@ -186,6 +187,32 @@ void register_scene_components() {
             f("max_spin_deg_per_sec", tt->max_spin_deg_per_sec);
             b("invert_x", tt->invert_x);
             b("invert_y", tt->invert_y);
+        });
+
+    // A breakable mesh (toyengine/scene/destructible.h). DestructionSystem (order 70) does the
+    // fracturing and the chunk spawning; this is the settings it reads.
+    SceneLoader::register_component_parser("Destructible",
+        [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
+            auto* d = obj.add_component<Destructible>();
+            auto f = [&](const char* key, float& out) {
+                if (node.contains(key)) out = node.at(key).get_value<float>();
+            };
+            if (node.contains("pieces")) d->pieces = node.at("pieces").get_value<int>();
+            if (node.contains("seed")) d->seed = node.at("seed").get_value<std::uint32_t>();
+            if (node.contains("max_chunks")) d->max_chunks = node.at("max_chunks").get_value<int>();
+            if (node.contains("max_boxes")) d->max_boxes = node.at("max_boxes").get_value<int>();
+            if (node.contains("prefracture")) d->prefracture = node.at("prefracture").get_value<bool>();
+            if (node.contains("chunk_physics_material")) {
+                d->chunk_physics_material = node.at("chunk_physics_material").get_value<std::string>();
+            }
+            f("irregularity", d->irregularity);
+            f("impact_impulse", d->impact_impulse);
+            f("scatter", d->scatter);
+            f("impact_transfer", d->impact_transfer);
+            f("chunk_lifetime", d->chunk_lifetime);
+            f("chunk_fade", d->chunk_fade);
+            f("chunk_density", d->chunk_density);
+            f("collider_fill", d->collider_fill);
         });
 
     // Digging the terrain with the mouse (toyengine/scene/terrain_digger.h). Input is pushed in

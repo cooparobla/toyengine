@@ -821,6 +821,25 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             f_vec3("spin_axis", glm::vec3(0.0f, 0.0f, 1.0f), 0.01f),
             f_float("spin_speed", 90.0f, 0.5f),
         }});
+        // Defaults mirror toyengine/scene/destructible.h.
+        add({"Destructible", "Gameplay", {
+            with_tip(f_int("pieces", 12, 1, 512), "Voronoi cells the mesh breaks into"),
+            with_tip(f_int("seed", 1, 0, 1000000), "The same mesh, pieces and seed always break identically"),
+            with_tip(f_float("irregularity", 0.7f, 0.01f, 0.0f, 1.0f), "0: even pieces (a cast slab). 1: a rock"),
+            with_tip(f_float("impact_impulse", 800.0f, 10.0f, 0.0f, 1.0e6f),
+                     "Impact that breaks it, in N*s (mass x speed it stops); 0 = only code can"),
+            with_tip(f_float("scatter", 1.5f, 0.05f, 0.0f, 100.0f), "Outward speed given to each chunk (m/s)"),
+            with_tip(f_float("impact_transfer", 0.35f, 0.01f, 0.0f, 10.0f), "Share of the blow's speed the chunks carry on with"),
+            with_tip(f_float("chunk_lifetime", 10.0f, 0.1f, 0.0f, 600.0f), "Seconds before the debris is cleaned up; 0 keeps it"),
+            with_tip(f_float("chunk_fade", 1.0f, 0.05f, 0.0f, 60.0f), "Seconds a chunk sinks out of sight for"),
+            with_tip(f_float("chunk_density", 700.0f, 10.0f, 1.0f, 20000.0f), "kg/m^3 a chunk's mass comes from"),
+            with_tip(f_int("max_chunks", 0, 0, 512), "Cap on chunks spawned (largest kept); 0 = all"),
+            with_tip(f_float("collider_fill", 0.6f, 0.05f, 0.0f, 1.0f),
+                     "A chunk filling less of its box than this collides as several boxes instead of one"),
+            with_tip(f_int("max_boxes", 4, 1, 16), "Most collision boxes one chunk may use; 1 keeps it a single box"),
+            with_tip(f_string("chunk_physics_material", ""), "physics_materials/<name>.yaml for the debris"),
+            with_tip(f_bool("prefracture", true), "Cut the mesh up at load rather than at the moment it breaks"),
+        }});
         // Defaults mirror toyengine/scene/terrain_digger.h.
         add({"TerrainDigger", "Gameplay", {
             with_tip(f_enum("dig_button", {"middle", "left", "right"}, true), "Mouse button that digs the terrain under the cursor"),

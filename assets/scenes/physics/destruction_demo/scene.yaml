@@ -1,0 +1,310 @@
+scene:
+  scene_name: destruction_demo
+  # Five meshes of different shapes, each broken by a weight dropped on it: a flat-shaded box,
+  # a smooth sphere, a barrel (curved sides, flat caps), an irregular boulder and a mushroom
+  # (a stalk and a cap -- the awkward one). Each carries a Destructible (toyengine/scene/
+  # destructible.h); DestructionSystem cuts its mesh into Voronoi cells on a worker while the
+  # scene loads, and the impact swaps the object for one rigid body per cell.
+  #
+  # The weights fall from staggered heights, so the five break in sequence rather than in one
+  # frame -- easier to watch, and it shows the cost is paid per break and not all at once.
+  # The debris is kept (chunk_lifetime 0) so the result can be inspected; raise it and the
+  # chunks sink away a few seconds after they land.
+  settings:
+    render: { shadow_distance: 6.0e+01, shadow_softness: 0.3 }
+  root_objects:
+    - name: ground
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.4e+01, y: 8.0, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material:
+            albedo: { b: 0.36, g: 0.34, r: 0.32 }
+            ao: 1.0
+            metallic: 0.0
+            roughness: 0.85
+        # A metre thick, not the usual 20 cm slab: a chunk the size of a fist leaving a break
+        # at several m/s tunnels straight through a thin floor between two steps. The top face
+        # still sits at z = 0, where everything rests.
+        - type: BoxCollider
+          center: { x: 0.0, y: 0.0, z: -0.5 }
+          material: concrete
+          size: { x: 2.0, y: 2.0, z: 1.0 }
+      children: []
+
+    # --- The five breakables, left to right -------------------------------------------------
+    # A box: flat shading and hard edges, the shape whose cells read most clearly.
+    - name: crate
+      active: true
+      components:
+        - type: Transform
+          position: { x: -8.0, y: 0.0, z: 1.0 }
+          scale: { x: 2.0, y: 2.0, z: 2.0 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material:
+            albedo: { b: 0.26, g: 0.45, r: 0.66 }
+            metallic: 0.0
+            roughness: 0.75
+        - type: BoxCollider
+          material: wood
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Destructible
+          chunk_density: 7.0e+02
+          chunk_lifetime: 0.0
+          impact_impulse: 8.0e+02
+          irregularity: 0.55
+          pieces: 14
+          scatter: 1.2
+          seed: 11
+      children: []
+
+    # A smooth sphere: curved surfaces, so every cut face is a flat cap against round sides.
+    - name: boulder_ball
+      active: true
+      components:
+        - type: Transform
+          position: { x: -4.0, y: 0.0, z: 1.1 }
+          scale: { x: 1.1, y: 1.1, z: 1.1 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material:
+            albedo: { b: 0.52, g: 0.56, r: 0.58 }
+            metallic: 0.0
+            roughness: 0.6
+        - type: SphereCollider
+          material: concrete
+          radius: 1.0
+        - type: Destructible
+          chunk_density: 2.2e+03
+          chunk_lifetime: 0.0
+          impact_impulse: 9.0e+02
+          irregularity: 0.8
+          pieces: 18
+          scatter: 1.6
+          seed: 23
+      children: []
+
+    # A barrel: curved sides with flat caps. Its mesh is centred on its origin (z -1 .. +1), so
+    # it is lifted by its own half-height to stand ON the ground -- buried, its lower chunks
+    # would be born inside the floor collider and drop straight through it.
+    - name: barrel
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 1.3 }
+          scale: { x: 1.3, y: 1.3, z: 1.3 }
+        - type: MeshRenderer
+          mesh_path: barrel
+          material:
+            albedo: { b: 0.22, g: 0.33, r: 0.5 }
+            metallic: 0.0
+            roughness: 0.8
+        - type: BoxCollider
+          material: wood
+          size: { x: 1.6, y: 1.6, z: 2.0 }
+        - type: Destructible
+          chunk_density: 5.0e+02
+          chunk_lifetime: 0.0
+          impact_impulse: 7.0e+02
+          irregularity: 0.7
+          pieces: 16
+          scatter: 1.4
+          seed: 37
+      children: []
+
+    # An irregular rock: no symmetry, uneven triangle sizes -- what fracture is actually for.
+    - name: boulder
+      active: true
+      components:
+        - type: Transform
+          position: { x: 4.0, y: 0.0, z: 0.0 }
+          scale: { x: 2.2, y: 2.2, z: 2.2 }
+        - type: MeshRenderer
+          mesh_path: nature/boulder
+          material:
+            albedo: { b: 0.45, g: 0.47, r: 0.5 }
+            metallic: 0.0
+            roughness: 0.9
+        - type: BoxCollider
+          center: { x: 0.0, y: 0.0, z: 0.35 }
+          material: concrete
+          size: { x: 1.4, y: 1.4, z: 0.7 }
+        - type: Destructible
+          chunk_density: 2.4e+03
+          chunk_lifetime: 0.0
+          impact_impulse: 1.2e+03
+          irregularity: 0.9
+          pieces: 20
+          scatter: 1.3
+          seed: 5
+      children: []
+
+    # A mushroom: a stalk and a cap, so a cut can meet the mesh in more than one ring -- the
+    # case fracture.h's header warns about. Here to show what it looks like, not to hide it.
+    - name: mushroom
+      active: true
+      components:
+        - type: Transform
+          position: { x: 8.0, y: 0.0, z: 0.0 }
+          scale: { x: 2.6, y: 2.6, z: 2.6 }
+        - type: MeshRenderer
+          mesh_path: props/mushroom
+          material:
+            albedo: { b: 0.5, g: 0.55, r: 0.8 }
+            metallic: 0.0
+            roughness: 0.7
+        - type: BoxCollider
+          center: { x: 0.0, y: 0.0, z: 0.3 }
+          material: wood
+          size: { x: 0.8, y: 0.8, z: 0.6 }
+        - type: Destructible
+          chunk_density: 3.0e+02
+          chunk_lifetime: 0.0
+          impact_impulse: 6.0e+02
+          irregularity: 0.65
+          pieces: 12
+          scatter: 1.1
+          seed: 71
+      children: []
+
+    # --- The weights ------------------------------------------------------------------------
+    # Heavy balls on staggered heights: ~1 m per 0.45 s of fall, so these land a few tenths of
+    # a second apart and each break is seen on its own.
+    - name: weight_crate
+      active: true
+      components:
+        - type: Transform
+          position: { x: -8.0, y: 0.0, z: 7.0 }
+          scale: { x: 0.7, y: 0.7, z: 0.7 }
+        - type: MeshRenderer
+          mesh_path: sphere_low
+          material:
+            albedo: { b: 0.2, g: 0.22, r: 0.28 }
+            metallic: 0.6
+            roughness: 0.4
+        - { type: SphereCollider, material: metal, radius: 1.0 }
+        - { type: Rigidbody, mass: 1.2e+02 }
+      children: []
+
+    - name: weight_ball
+      active: true
+      components:
+        - type: Transform
+          position: { x: -4.0, y: 0.0, z: 9.0 }
+          scale: { x: 0.7, y: 0.7, z: 0.7 }
+        - type: MeshRenderer
+          mesh_path: sphere_low
+          material:
+            albedo: { b: 0.2, g: 0.22, r: 0.28 }
+            metallic: 0.6
+            roughness: 0.4
+        - { type: SphereCollider, material: metal, radius: 1.0 }
+        - { type: Rigidbody, mass: 1.2e+02 }
+      children: []
+
+    - name: weight_barrel
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 1.1e+01 }
+          scale: { x: 0.7, y: 0.7, z: 0.7 }
+        - type: MeshRenderer
+          mesh_path: sphere_low
+          material:
+            albedo: { b: 0.2, g: 0.22, r: 0.28 }
+            metallic: 0.6
+            roughness: 0.4
+        - { type: SphereCollider, material: metal, radius: 1.0 }
+        - { type: Rigidbody, mass: 1.2e+02 }
+      children: []
+
+    - name: weight_boulder
+      active: true
+      components:
+        - type: Transform
+          position: { x: 4.0, y: 0.0, z: 1.3e+01 }
+          scale: { x: 0.7, y: 0.7, z: 0.7 }
+        - type: MeshRenderer
+          mesh_path: sphere_low
+          material:
+            albedo: { b: 0.2, g: 0.22, r: 0.28 }
+            metallic: 0.6
+            roughness: 0.4
+        - { type: SphereCollider, material: metal, radius: 1.0 }
+        - { type: Rigidbody, mass: 1.5e+02 }
+      children: []
+
+    - name: weight_mushroom
+      active: true
+      components:
+        - type: Transform
+          position: { x: 8.0, y: 0.0, z: 1.5e+01 }
+          scale: { x: 0.7, y: 0.7, z: 0.7 }
+        - type: MeshRenderer
+          mesh_path: sphere_low
+          material:
+            albedo: { b: 0.2, g: 0.22, r: 0.28 }
+            metallic: 0.6
+            roughness: 0.4
+        - { type: SphereCollider, material: metal, radius: 1.0 }
+        - { type: Rigidbody, mass: 1.0e+02 }
+      children: []
+
+    - name: camera
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -1.7e+01, z: 8.0 }
+          rotation: { x: 68.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Camera
+          far_clip_plane: 3.0e+02
+          fov: 5.5e+01
+          main: true
+          near_clip_plane: 0.1
+          projection: Perspective
+        - type: CameraController
+          capture_cursor: false
+          collide: false
+          distance: 1.9e+01
+          look_button: right
+          max_distance: 6.0e+01
+          max_pitch_deg: 8.0e+01
+          min_distance: 6.0
+          min_pitch_deg: 2.0
+          mode: orbit
+          mouse_sensitivity: 0.12
+          movement_smoothing: 0.25
+          pitch_deg: 22.0
+          target: { x: 0.0, y: 0.0, z: 1.5 }
+          yaw_deg: 0.0
+          zoom_speed: 2.0
+      children: []
+
+    - name: sun
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 2.0e+01 }
+        - type: DirectionalLight
+          cast_shadows: true
+          color: { b: 0.92, g: 0.97, r: 1.0 }
+          direction: { x: -0.4, y: 0.65, z: -0.65 }
+          intensity: 1.4
+          shadow_intensity: 0.8
+      children: []
+
+    - name: sky
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.0 }
+        - type: EnvironmentLight
+          ground_color: { b: 0.2, g: 0.21, r: 0.22 }
+          sky_color: { b: 0.9, g: 0.78, r: 0.68 }
+          sky_intensity: 1.1
+      children: []

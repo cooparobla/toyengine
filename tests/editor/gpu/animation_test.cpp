@@ -375,4 +375,72 @@ COOPA_TEST(bone_length_is_stored_or_guessed_from_the_hierarchy) {
     expect(std::abs(app.bone_length_for(cube)) < 1e-4f, "an object with no bone length and no offset child has none");
 }
 
+/**
+ * @brief Pose mode: the thing that did not work before. Move a joint on a frame that already
+ *        has a key and the pose stays put instead of snapping back to the clip; the rest pose
+ *        in the document is untouched; I keys it; leaving the mode puts the rig back.
+ */
+COOPA_TEST(pose_mode_holds_a_hand_pose_and_keys_it) {
+    EditorSession session;
+    auto& engine = session.engine;
+    auto& app = session.app;
+    auto& doc = app.document();
+    const ObjectId cube = object_named(app, "cube");
+    const ObjectId bone = doc.add_object(doc.make_object("Bone"), cube);
+    doc.set_transform(bone, {0.0f, 0.0f, 1.0f}, {}, {1, 1, 1}, "rest");
+    app.sync().rebuild(engine, doc);
+    tick(engine, 2);
+    doc.select(cube);
+    app.show_timeline();
+    app.add_animator(cube);
+    app.new_animation_clip("Wave");
+    tick(engine, 2);
+
+    auto live_pos = [&] { return app.sync().live(bone)->get_transform()->transform().position(); };
+    auto rest_pos = [&] { glm::vec3 p, r, s; doc.get_transform(bone, p, r, s); return p; };
+
+    // A key at the playhead, so the clip has something to snap back to.
+    doc.select(bone);
+    app.insert_keyframes();
+    tick(engine, 2);
+    const auto* clip = app.animation_clip();
+    expect(clip && clip->find_track("Bone", "position"), "the bone has a position track");
+
+    expect(app.set_interaction_mode(InteractionMode::Pose), "Pose Mode opens on the rig");
+    expect(app.interaction_mode() == InteractionMode::Pose, "...and the editor says so");
+    tick(engine, 2);
+
+    // Pose it by hand on a frame that already has a key.
+    glm::vec3 p, r, sc;
+    app.object_transform(bone, p, r, sc);
+    app.set_object_transform(bone, p + glm::vec3(0.0f, 0.0f, 0.5f), r, sc);
+    tick(engine, 4);
+    expect(std::abs(live_pos().z - (p.z + 0.5f)) < 1e-3f,
+           "the hand pose stays put instead of snapping back to the clip (" + std::to_string(live_pos().z) + ")");
+    expect(std::abs(rest_pos().z - 1.0f) < 1e-4f, "...and the document's rest pose is untouched");
+
+    // I keys the pose into the clip at the playhead.
+    app.insert_keyframes();
+    tick(engine, 2);
+    const ClipModel* m = app.animation_clip();
+    const ClipTrack* track = m ? m->find_track("Bone", "position") : nullptr;
+    expect(track != nullptr && !track->keys.empty(), "I keys the posed joint");
+    if (track && !track->keys.empty()) {
+        expect(std::abs(track->keys.back().value.z - (p.z + 0.5f)) < 1e-3f, "...with the pose that was on screen");
+    }
+
+    // Leaving hands the rig back: the Timeline previews the clip again (which now holds the
+    // pose that was just keyed), and the rest pose is what shows with the preview off.
+    app.set_interaction_mode(InteractionMode::Object);
+    tick(engine, 3);
+    expect(app.interaction_mode() == InteractionMode::Object, "Object Mode comes back");
+    expect(std::abs(live_pos().z - (p.z + 0.5f)) < 1e-3f,
+           "...and the clip drives the rig again (" + std::to_string(live_pos().z) + ")");
+    app.set_timeline_rest_pose(true);
+    tick(engine, 3);
+    expect(std::abs(live_pos().z - 1.0f) < 1e-3f,
+           "...with the rest pose underneath it, unchanged (" + std::to_string(live_pos().z) + ")");
+    app.set_timeline_rest_pose(false);
+}
+
 } // namespace toy::editor::testing

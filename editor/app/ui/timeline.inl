@@ -100,8 +100,8 @@
     // Poses
     // =================================================================================
 
-    /** @brief Rig objects follow the live pose for transform edits (Record), not the document. */
-    bool anim_live_edit_(ObjectId id) const { return anim_record_ && anim_posed_ && in_anim_rig_(id); }
+    /** @brief Rig objects follow the live pose for transform edits (Pose mode / Record), not the document. */
+    bool anim_live_edit_(ObjectId id) const { return (in_pose_mode_() || anim_record_) && anim_posed_ && in_anim_rig_(id); }
 
     /** @brief An object's transform as edits should start from: the live pose while recording, else the document. */
     bool get_object_transform_(ObjectId id, glm::vec3& p, glm::vec3& r, glm::vec3& s) const;

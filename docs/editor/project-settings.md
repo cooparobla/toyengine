@@ -186,7 +186,11 @@ out with a lock. You can select them to look at them, but not change them. They 
 
 **Edit > Project Settings... > Output** holds:
 
-- **Window**: the game window's **Title**, **Width**, **Height** and **Vsync**.
+- **Window**: the game window's **Title**, **Width**, **Height** and **Vsync**, plus its startup
+  screen -- **Splash** shows one at all, **Splash title** is the wording under the logo,
+  **Splash image** replaces the toyengine logo with a PNG of your own, and **Splash color** sets
+  the backdrop. The game shows this while it loads, before the first frame of the scene. (The
+  editor and the hub always show toyengine's own.)
 - **Jobs**: **Worker threads** (how many CPU threads the game uses; `0` uses them all) and
   **Parallel threshold**.
 - **Output**: a screenshot the game can save when it closes. Turn on **Save on exit** and set

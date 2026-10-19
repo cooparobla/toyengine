@@ -653,6 +653,8 @@ bool in_triangle(glm::vec2 p, glm::vec2 a, glm::vec2 b, glm::vec2 c) {
 /**
  * @brief The octahedral bone from `head` to `tail`, projected to the screen.
  *
+ * Pose mode's bone display; the origin styles draw axes or an orb, never a bone.
+ *
  * `x_hint` rolls the body so it turns with its joint instead of spinning as the direction
  * crosses an axis; `z_hint` is the fallback when the bone runs along `x_hint`.
  *
@@ -704,8 +706,10 @@ void EditorApp::draw_object_glyph_(imm::Context& ctx, const ViewProj& vp, Object
         const std::string t = component_type(c);
         if (t == "Camera" || t == "DirectionalLight" || t == "PointLight" || t == "SpotLight") { kind = t; comp = &c; break; }
     }
+    // Pose mode draws the rig as bones: its own display, not an overlay the user turns off.
+    const bool pose_bone = kind.empty() && in_pose_mode_() && in_anim_rig_(id);
     // "Cameras / Lights" covers the symbols; "Origins" covers everything else's origin.
-    if (!kind.empty() ? !show_glyphs_ : !show_origins_) return;
+    if (!pose_bone && (!kind.empty() ? !show_glyphs_ : !show_origins_)) return;
     const float wpp = vp.world_per_pixel(pos);
     if (kind == "Camera") {
         const float fov = get_float(*comp, "fov", 50.0f);
@@ -758,7 +762,30 @@ void EditorApp::draw_object_glyph_(imm::Context& ctx, const ViewProj& vp, Object
         return;
     }
     (void)wpp;
-    draw_origin_glyph_(ctx, vp, id, w, col);
+    if (pose_bone) draw_pose_bones_(ctx, vp, id, w, col);
+    else draw_origin_glyph_(ctx, vp, id, w, col);
+}
+
+void EditorApp::draw_pose_bones_(imm::Context& ctx, const ViewProj& vp, ObjectId id, const glm::mat4& w, const glm::vec4& col) {
+    const glm::vec3 pos(w[3]);
+    const glm::vec3 X = glm::normalize(glm::vec3(w[0])), Z = glm::normalize(glm::vec3(w[2]));
+    // One octahedral bone reaching each child joint, so the rig reads as a skeleton.
+    for (const glm::vec3& tail : bone_tails_(id, origin_size_for_(id) * 2.0f)) {
+        glm::vec2 head, tip, q[4];
+        if (!project_bone(vp, pos, tail, X, Z, head, tip, q)) continue;
+        const glm::vec4 fill = imm::with_alpha(col, col.a * 0.25f);
+        for (int i = 0; i < 4; ++i) {
+            ctx.triangle(head, q[i], q[(i + 1) % 4], fill);
+            ctx.triangle(tip, q[i], q[(i + 1) % 4], fill);
+        }
+        for (int i = 0; i < 4; ++i) {
+            ctx.line(head, q[i], col, 1.3f);
+            ctx.line(q[i], tip, col, 1.3f);
+            ctx.line(q[i], q[(i + 1) % 4], col, 1.0f);
+        }
+    }
+    // The joint, so a chain of bones reads as linked.
+    if (const auto c = vp.project(pos)) ctx.ring(*c, 3.5f, 1.3f, col);
 }
 
 void EditorApp::draw_origin_glyph_(imm::Context& ctx, const ViewProj& vp, ObjectId id, const glm::mat4& w, const glm::vec4& col) {
@@ -771,27 +798,6 @@ void EditorApp::draw_origin_glyph_(imm::Context& ctx, const ViewProj& vp, Object
         if (pa && pb) ctx.line(*pa, *pb, col, t);
     };
     switch (origin_style_for_(id)) {
-    case OriginStyle::Bone: {
-        // One Blender-style octahedral bone reaching each child joint, so a rig draws as the
-        // skeleton it is rather than as a cloud of axis crosses.
-        for (const glm::vec3& tail : bone_tails_(id, a * 2.0f)) {
-            glm::vec2 head, tip, q[4];
-            if (!project_bone(vp, pos, tail, X, Z, head, tip, q)) continue;
-            const glm::vec4 fill = imm::with_alpha(col, col.a * 0.25f);
-            for (int i = 0; i < 4; ++i) {
-                ctx.triangle(head, q[i], q[(i + 1) % 4], fill);
-                ctx.triangle(tip, q[i], q[(i + 1) % 4], fill);
-            }
-            for (int i = 0; i < 4; ++i) {
-                ctx.line(head, q[i], col, 1.3f);
-                ctx.line(q[i], tip, col, 1.3f);
-                ctx.line(q[i], q[(i + 1) % 4], col, 1.0f);
-            }
-        }
-        // The joint, so a chain of bones reads as linked.
-        if (const auto c = P(pos)) ctx.ring(*c, 3.5f, 1.3f, col);
-        break;
-    }
     case OriginStyle::Orb: {
         // A ball at the origin with a short tick down each axis: the least cluttered display
         // for a dense rig, and still enough to read the object's orientation.
@@ -821,7 +827,8 @@ float EditorApp::origin_glyph_pick_px_(ObjectId id, const ViewProj& vp, const gl
     float best = glm::distance(*centre, px);   // the origin point is clickable whatever is drawn
     // Only what is actually on screen is clickable by its shape; with the overlay off, or on
     // a camera / light (which draws its own symbol), the origin point is all there is.
-    if (!show_overlays_ || !show_origins_ || !is_joint_object_(id)) return best;
+    const bool pose_bone = in_pose_mode_() && in_anim_rig_(id) && is_joint_object_(id);
+    if (!show_overlays_ || (!pose_bone && !show_origins_) || !is_joint_object_(id)) return best;
 
     const glm::vec3 X = glm::normalize(glm::vec3(world[0])), Y = glm::normalize(glm::vec3(world[1])),
                     Z = glm::normalize(glm::vec3(world[2]));
@@ -830,8 +837,7 @@ float EditorApp::origin_glyph_pick_px_(ObjectId id, const ViewProj& vp, const gl
         const auto pa = vp.project(p), pb = vp.project(q);
         if (pa && pb) best = std::min(best, point_segment_distance(px, *pa, *pb));
     };
-    switch (origin_style_for_(id)) {
-    case OriginStyle::Bone:
+    if (pose_bone) {
         for (const glm::vec3& tail : bone_tails_(id, a * 2.0f)) {
             glm::vec2 head, tip, q[4];
             if (!project_bone(vp, pos, tail, X, Z, head, tip, q)) continue;
@@ -843,7 +849,9 @@ float EditorApp::origin_glyph_pick_px_(ObjectId id, const ViewProj& vp, const gl
                                  point_segment_distance(px, b, c)});
             }
         }
-        break;
+        return best;
+    }
+    switch (origin_style_for_(id)) {
     case OriginStyle::Orb:
         best = std::max(0.0f, best - 6.0f);   // the ball itself, then its axis ticks
         segment(pos, pos + X * (a * 0.45f));
@@ -879,6 +887,15 @@ void EditorApp::draw_mode_menu_items_(imm::Context& ctx) {
     if (ctx.menu_item("Sculpt Mode", "", &sc, mesh_obj && !playing(), I::SculptMode)) set_interaction_mode(InteractionMode::Sculpt);
     if (ctx.menu_item("Vertex Paint", "", &vp, mesh_obj && !playing(), I::VertexPaint)) set_interaction_mode(InteractionMode::VertexPaint);
     if (ctx.menu_item("Weight Paint", "", &wp, mesh_obj && !playing(), I::WeightPaint)) set_interaction_mode(InteractionMode::WeightPaint);
+    // A rig (an Animator at or above the selection): pose its joints by hand.
+    bool pm = cur == InteractionMode::Pose;
+    const ObjectId pose_id = pose_rig_ ? pose_rig_ : rig_of_(doc_.primary());
+    if (ctx.menu_item("Pose Mode", "", &pm, !asset_view_() && pose_id && !playing(), I::ObjectMode)) {
+        if (pose_rig_) exit_pose_mode_();
+        else enter_pose_mode_(pose_id);
+    }
+    ctx.tooltip("Pose Mode\nPose the rig's joints by hand: they draw as bones, a move edits the pose instead of the "
+                "rest transform, and I keys it at the playhead (Auto-Key keys every edit)");
     // A HeightmapTerrain object: sculpt and paint the terrain itself.
     bool tm = terrain;
     const ObjectId terrain_id = terrain ? terrain_object_ : doc_.primary();
@@ -974,13 +991,12 @@ void EditorApp::draw_overlays_popover_(imm::Context& ctx) {
     ctx.tooltip("Size\nHow big an origin glyph is drawn by default, in metres. Turn it down for a dense rig");
     if (size_done) prefs_save_();
     // Rows rather than a dropdown: a combo's popup would close this one.
-    static const char* kOriginStyles[] = {"Axes", "Bone", "Orb"};
+    static const char* kOriginStyles[] = {"Axes", "Orb"};
     static const char* kOriginTips[] = {
         "Axes\nA line through the origin along each of the object's own axes",
-        "Bone\nA Blender-style octahedral bone reaching each of the object's child joints",
         "Orb\nA small ball with a short tick down each axis -- the least cluttered on a dense rig",
     };
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 2; ++i) {
         ctx.push_id(i);
         if (ctx.selectable(kOriginStyles[i], origin_style_ == i) && origin_style_ != i) {
             origin_style_ = i;

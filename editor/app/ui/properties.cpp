@@ -732,7 +732,7 @@ void EditorApp::draw_object_props_(imm::Context& ctx, ObjectId id) {
             if (t.contains("origin_style")) own_style = &t.at("origin_style");
             if (t.contains("origin_size")) own_size = &t.at("origin_size");
         }
-        static const std::vector<std::string> kStyleItems = {"Inherit", "Axes", "Bone", "Orb"};
+        static const std::vector<std::string> kStyleItems = {"Inherit", "Axes", "Orb"};
         int si = 0;
         if (own_style && own_style->is_string()) {
             const std::string v = own_style->get_value<std::string>();
@@ -742,7 +742,7 @@ void EditorApp::draw_object_props_(imm::Context& ctx, ObjectId id) {
             if (si <= 0) set_selection_origin_style(std::nullopt);
             else set_selection_origin_style(static_cast<OriginStyle>(si - 1));
         }
-        ctx.tooltip("Origin Gizmo Style\nAxes, a Blender-style bone reaching each child joint, or a small ball.\n"
+        ctx.tooltip("Origin Gizmo Style\nAxis lines or a small ball.\n"
                     "Inherit takes the nearest ancestor's, and the Preferences > Viewport default if none sets one. "
                     "Applies to the whole selection");
         float size = own_size ? as_float(*own_size, 0.0f) : 0.0f;
@@ -757,25 +757,6 @@ void EditorApp::draw_object_props_(imm::Context& ctx, ObjectId id) {
             std::snprintf(buf, sizeof buf, "In use: %s at %.3f m",
                           kStyleItems[static_cast<size_t>(origin_style_for_(id)) + 1].c_str(), origin_size_for_(id));
             ctx.label_dim(buf);
-        }
-        // Bone Length: only the Bone style reads it, so it sits with the rest of this.
-        if (origin_style_for_(id) == OriginStyle::Bone) {
-            const float stored_bone = bone_length_(id);
-            float bone = stored_bone;
-            const bool bone_changed = ctx.drag_float("Bone Length", &bone, 0.01f, 0.0f, 10000.0f, "%.3f m");
-            const bool bone_done = ctx.last_deactivated();
-            ctx.tooltip("Bone Length\nForces one bone of this length instead of one reaching each child joint. "
-                        "0 works it out from the hierarchy; the game ignores it");
-            if (bone_changed && editable) set_bone_length_(id, bone);
-            if (bone_done) doc_.end_merge();
-            const float bone_guess = stored_bone > 0.0f ? 0.0f : bone_length_guess_(id);
-            if (bone_guess > 0.0f) {
-                char buf[80];
-                std::snprintf(buf, sizeof buf, "0 = auto, %.3f m from the hierarchy", bone_guess);
-                ctx.label_dim(buf);
-                if (ctx.button("Set from Hierarchy", 160, editable, I::Link)) set_bone_length_(id, bone_guess);
-                ctx.tooltip("Set from Hierarchy\nStore the guessed length, so it stops following the children around");
-            }
         }
     }
     if (ctx.collapsing_header("Relations", true, nullptr, I::Link)) {

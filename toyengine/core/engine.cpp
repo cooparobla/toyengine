@@ -1,6 +1,8 @@
 #include <toyengine/core/engine.h>
 #include <toyengine/world/terrain_component.h>
 
+#include <toyengine/core/boot_splash.h>
+
 #include <toyengine/audio/audio_system.h>
 #include <toyengine/render/toy_render_pipeline.h>
 #include <toyengine/scene/character_controller.h>
@@ -24,6 +26,7 @@ Engine::Engine(AppConfig config, EngineOptions options)
       jobs_(config_.jobs.worker_threads ? config_.jobs.worker_threads
                                          : std::thread::hardware_concurrency()),
       ctx_(make_context_config_(config_)),
+      boot_splash_(make_boot_splash_(ctx_, config_, options_)),
       pipeline_(std::make_unique<render::ToyRenderPipeline>(
           ctx_.device(), ctx_.allocator(), ctx_.swapchain(), ctx_.render_pass(),
           ctx_.command_pool(), make_render_config_(config_, options_.project_root))),
@@ -65,7 +68,7 @@ Engine::Engine(AppConfig config, EngineOptions options)
     }
 
     edit_mode_ = options_.edit_mode;
-    if (options_.set_app_icon) apply_app_icon_();
+    boot_progress("Loading engine assets...", 0.25f);
     // The project's assets first, then the engine checkout's as the fallback layer (shared
     // meshes, materials, fonts, UI themes); the same directory when building toyengine itself.
     for (const std::string& root : asset_roots()) assets_.add_search_root(root);
@@ -124,6 +127,7 @@ Engine::Engine(AppConfig config, EngineOptions options)
     }
 
     if (options_.load_default_scene) {
+        boot_progress("Loading scene...", 0.4f);
         load_scene(scene_path_from_env_(config_.scene.default_scene));
     }
     read_cursor_pos_override_();
@@ -871,6 +875,10 @@ bool Engine::tick() {
     }
     // toy::debug::watch()/text() lines last one frame.
     debug::GameLines::instance().clear();
+
+    // The app has drawn its own frame now (or has nothing to draw and never will), so the
+    // startup screen has served its purpose.
+    dismiss_boot_splash_();
 
     return !ctx_.should_close();
 }
@@ -1638,6 +1646,79 @@ coopa::scene::SceneObject* Engine::spawn(const std::string& object_asset, const 
     }
 }
 
+namespace {
+
+/**
+ * @brief Sets the toyengine logo (rasterized from branding.h at the usual icon sizes) as the
+ *        window's taskbar icon -- or, on macOS, the Dock icon.
+ */
+void set_window_icon(coopa::gfx::presentation::Window& window) {
+    static const int kSizes[] = {16, 32, 48, 64, 128, 256, 512};
+    std::vector<std::vector<uint8_t>> pixels;
+    std::vector<coopa::gfx::presentation::Window::IconImage> images;
+    for (int s : kSizes) pixels.push_back(rasterize_logo(s));
+    for (size_t i = 0; i < pixels.size(); ++i) images.push_back({kSizes[i], kSizes[i], pixels[i].data()});
+    window.set_icon(images);
+}
+
+}  // namespace
+
+std::unique_ptr<BootSplash> Engine::make_boot_splash_(coopa::gfx::app::Context& ctx,
+                                                      const AppConfig& config,
+                                                      const EngineOptions& options) {
+    // TOY_SPLASH=1 shows it on a never-mapped window too: the only way an automated run can
+    // drive the real present path, since a test window is never visible (never in a shipping
+    // build, like every other debug_env knob).
+    const char* forced = debug_env("TOY_SPLASH");
+    const bool visible = config.window.visible || (forced && *forced && std::string(forced) != "0");
+    const bool wanted = visible && config.window.splash && options.boot_splash;
+    std::unique_ptr<BootSplash> splash;
+    if (wanted) {
+        BootSplashStyle style;
+        style.backdrop   = config.window.splash_color;
+        style.title      = config.window.splash_title;
+        style.logo_image = config.window.splash_image;
+        const std::filesystem::path root = options.project_root.empty() ? default_project_root()
+                                                                        : options.project_root;
+        std::vector<std::string> asset_roots{(root / "assets").string()};
+        const std::filesystem::path& engine_assets = RuntimeLayout::current().engine_assets;
+        std::error_code ec;
+        if (!engine_assets.empty() &&
+            !std::filesystem::equivalent(root / "assets", engine_assets, ec)) {
+            asset_roots.push_back(engine_assets.string());
+        }
+        try {
+            splash = std::make_unique<BootSplash>(
+                ctx.device(), ctx.allocator(), ctx.command_pool(), ctx.render_pass(),
+                ctx.color_format(), coopa::gfx::pipeline::ShaderLibrary(RuntimeLayout::current().shader_roots(root)),
+                asset_roots, std::move(style));
+            // The first frame goes to the surface BEFORE the window is mapped, so the compositor
+            // never samples an unpainted window -- that flash of whatever was on screen before is
+            // the whole reason this exists. The second present covers a window system that
+            // discards what was presented to an unmapped surface.
+            splash->present(ctx, "Starting renderer...", 0.1f);
+        } catch (const std::exception& e) {
+            std::cerr << "[toyengine] No boot splash: " << e.what() << "\n";
+            splash.reset();
+        }
+    }
+    if (options.set_app_icon) set_window_icon(ctx.window());
+    ctx.show_window();
+    if (splash) splash->present(ctx, "Starting renderer...", 0.1f);
+    return splash;
+}
+
+void Engine::boot_progress(const std::string& status, float progress, float min_interval) {
+    if (!boot_splash_ || !boot_splash_->due(min_interval)) return;
+    boot_splash_->present(ctx_, status, progress);
+}
+
+void Engine::dismiss_boot_splash_() {
+    if (!boot_splash_) return;
+    ctx_.wait_idle();   // the splash's geometry buffers are still in flight
+    boot_splash_.reset();
+}
+
 coopa::gfx::app::ContextConfig Engine::make_context_config_(const AppConfig& config) {
     coopa::gfx::app::ContextConfig cc;
     cc.title      = config.window.title;
@@ -1646,6 +1727,9 @@ coopa::gfx::app::ContextConfig Engine::make_context_config_(const AppConfig& con
     cc.resizable  = true;
     cc.vsync      = config.window.vsync;
     cc.visible    = config.window.visible;
+    // The window waits for the boot splash's first frame; make_boot_splash_() maps it, splash or
+    // no splash, so this never leaves a window unmapped.
+    cc.show_when_ready = config.window.splash;
 #ifdef NDEBUG
     cc.validation = false;
 #else
@@ -2058,15 +2142,6 @@ void Engine::apply_cursor_capture_() {
     }
 }
 
-void Engine::apply_app_icon_() {
-    static const int kSizes[] = {16, 32, 48, 64, 128, 256, 512};
-    std::vector<std::vector<uint8_t>> pixels;
-    std::vector<coopa::gfx::presentation::Window::IconImage> images;
-    for (int s : kSizes) pixels.push_back(rasterize_logo(s));
-    for (size_t i = 0; i < pixels.size(); ++i) images.push_back({kSizes[i], kSizes[i], pixels[i].data()});
-    ctx_.window().set_icon(images);
-}
-
 std::string Engine::resolve_scene_path_(const std::string& path) const {
     const std::string resolved = resolve_path_(path);
     if (path.empty() || coopa::yaml::document_exists(resolved)) return resolved;
@@ -2101,8 +2176,16 @@ std::string Engine::resolve_asset_file_(const std::filesystem::path& root, const
 }
 
 void Engine::drain_pending_assets_() {
+    size_t peak = assets_.pending_load_count();
     while (assets_.pending_load_count() > 0) {
         assets_.update(0.0f);
+        // The one startup stage whose progress is actually measurable. Throttled, and only alive
+        // while the splash is: a present per iteration would pace the drain to the refresh rate.
+        peak = std::max(peak, assets_.pending_load_count());
+        boot_progress("Loading assets...",
+                      0.4f + 0.55f * (1.0f - static_cast<float>(assets_.pending_load_count()) /
+                                                 static_cast<float>(std::max<size_t>(peak, 1))),
+                      1.0f / 30.0f);
         std::this_thread::yield();
     }
 

@@ -133,9 +133,19 @@ vec4 noise_d(vec3 x) {
 }
 
 /// How much of an octave of frequency `freq` survives a pixel footprint of `footprint` world
-/// units: all of it well below Nyquist, none of it at Nyquist.
+/// units: all of it well below Nyquist, none of it by the time the footprint can no longer
+/// resolve the octave.
+///
+/// The band ends at 0.3 cycles per pixel, not at Nyquist (0.5). An octave still carried at
+/// partial amplitude AT the sampling limit is an octave that aliases at partial amplitude, and
+/// value noise is not band-limited to its nominal frequency -- its quintic interpolation leaves
+/// real energy above `freq`, which reaches Nyquist while `freq * footprint` is still inside the
+/// old band. Ending below the limit is what makes the fade an actual pre-filter rather than a
+/// ramp through the aliasing region. The cost is paid only at distance, where the octave was
+/// being resolved wrongly anyway: near the camera `freq * footprint` is far below 0.1 and every
+/// octave is still at full amplitude.
 float octave_weight(float freq, float footprint) {
-    return 1.0 - smoothstep(0.2, 0.5, freq * footprint);
+    return 1.0 - smoothstep(0.1, 0.3, freq * footprint);
 }
 
 /// The kind this pixel shows -- see the file doc. Decided once per pixel and cached: the

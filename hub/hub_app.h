@@ -92,6 +92,7 @@ public:
             if (r.size() > 8) r.resize(8);
         };
 
+        engine_.boot_progress("Finding projects...", 0.96f);
         engine_head_ = command_output("git -C " + shell_quote(ROOT_DIR) + " log -1 --format='%h  %s'");
         refresh();
     }
@@ -119,6 +120,11 @@ public:
         cfg.window.height = 680;
         cfg.window.visible = visible;
         cfg.window.vsync = visible;
+        const core::WindowConfig splash_defaults;   // the hub is toyengine's own window
+        cfg.window.splash       = splash_defaults.splash;
+        cfg.window.splash_title = splash_defaults.splash_title;
+        cfg.window.splash_image = splash_defaults.splash_image;
+        cfg.window.splash_color = splash_defaults.splash_color;
         cfg.render.screen_ui_enabled = true;
         cfg.output.save_on_exit = false;
         auto& r = cfg.render;

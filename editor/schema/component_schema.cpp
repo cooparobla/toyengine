@@ -220,7 +220,7 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             with_tip(f_float("bone_length", 0.0f, 0.01f, 0.0f, 10000.0f),
                      "Optional length of this object as a bone (m), for the editor's Bone origin style. 0 lets the editor guess "
                      "it from the hierarchy; the runtime ignores it"),
-            with_tip(f_enum("origin_style", {"Inherit", "Axes", "Bone", "Orb"}),
+            with_tip(f_enum("origin_style", {"Inherit", "Axes", "Orb"}),
                      "How this object's origin is drawn in the editor. Inherit takes the nearest ancestor's, and Axes if none "
                      "sets one; the runtime ignores it"),
             with_tip(f_float("origin_size", 0.0f, 0.005f, 0.0f, 0.5f),

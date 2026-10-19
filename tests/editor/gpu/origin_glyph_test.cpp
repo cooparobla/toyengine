@@ -51,7 +51,7 @@ COOPA_TEST(origin_size_and_style_change_the_picture) {
     // Set on the root cube; every joint under it inherits, which is the point of the feature.
     auto frame = [&](const std::string& style, float size) {
         doc.select(cube);
-        static const std::vector<std::string> names = {"Axes", "Bone", "Orb"};
+        static const std::vector<std::string> names = {"Axes", "Orb"};
         for (size_t k = 0; k < names.size(); ++k) {
             if (names[k] == style) app.set_selection_origin_style(static_cast<OriginStyle>(k));
         }
@@ -69,28 +69,12 @@ COOPA_TEST(origin_size_and_style_change_the_picture) {
     expect(app.origin_size_for(hip) == 0.5f, "...and a joint under it inherits that size");
 
     const coopa::gfx::util::ImageData axes = frame("Axes", 0.5f);
-    const coopa::gfx::util::ImageData bone = frame("Bone", 0.5f);
     const coopa::gfx::util::ImageData orb = frame("Orb", 0.5f);
-    expect(changed_pixels(axes, bone) > 150, "Bone looks nothing like Axes (" +
-                                                 std::to_string(changed_pixels(axes, bone)) + " pixels moved)");
     expect(changed_pixels(axes, orb) > 150, "Orb looks nothing like Axes (" +
                                                 std::to_string(changed_pixels(axes, orb)) + " pixels moved)");
-    expect(changed_pixels(bone, orb) > 150, "...and the two are not each other");
     expect(app.origin_style_for(hip) == OriginStyle::Orb && app.origin_style_for(knee) == OriginStyle::Orb,
            "a style set on the root reaches every joint under it");
 
-    // The Bone style runs to the child joint: a bone whose child is further away is longer, and
-    // a stored bone_length overrides that.
-    expect(std::abs(app.bone_length_for(hip) - 1.0f) < 1e-3f, "hip reaches its child joint, 1 m away");
-    const int ci = doc.find_component(hip, "Transform");
-    Node t = doc.find(hip)->at("components").as_seq()[static_cast<size_t>(ci)];
-    t["bone_length"] = make_float(0.3);
-    doc.set_component(hip, ci, t, "Bone Length");
-    tick(engine, 2);
-    expect(std::abs(app.bone_length_for(hip) - 0.3f) < 1e-4f, "a stored bone_length wins over the guess");
-    const coopa::gfx::util::ImageData shortened = frame("Bone", 0.5f);
-    expect(changed_pixels(bone, shortened) > 50, "a shorter bone_length draws a shorter bone (" +
-                                                     std::to_string(changed_pixels(bone, shortened)) + " pixels moved)");
 }
 
 /**
@@ -178,7 +162,7 @@ COOPA_TEST(bones_point_at_the_child_joints) {
     app.camera().focus = hip_p;
     app.camera().distance = 3.0f;
     app.camera().apply();
-    for (int k = 0; k < 3; ++k) {
+    for (int k = 0; k < 2; ++k) {
         doc.select(hip);
         app.set_selection_origin_style(static_cast<OriginStyle>(k));
         doc.clear_selection();
@@ -215,40 +199,42 @@ COOPA_TEST(the_style_is_per_object_and_inherited) {
     expect(app.origin_style_for(knee) == OriginStyle::Orb, "...and an object with nothing set follows it");
     expect(std::abs(app.origin_size_for(knee) - 0.1f) < 1e-4f, "...size too");
     expect(get_string(Project::load_prefs(), "origin_style") == "Orb", "...saved by name");
+    app.set_preference("origin_style", Node(std::string("Axes")));
+    expect(app.origin_style_for(knee) == OriginStyle::Axes, "...and follows it back");
 
     // Set the rig's root; everything under it follows.
     doc.select(root);
-    app.set_selection_origin_style(OriginStyle::Bone);
+    app.set_selection_origin_style(OriginStyle::Orb);
     app.set_selection_origin_size(0.2f);
-    expect(app.origin_style_for(hip) == OriginStyle::Bone && app.origin_style_for(knee) == OriginStyle::Bone,
+    expect(app.origin_style_for(hip) == OriginStyle::Orb && app.origin_style_for(knee) == OriginStyle::Orb,
            "a style on the rig's root reaches every joint under it");
     expect(std::abs(app.origin_size_for(knee) - 0.2f) < 1e-4f, "...and so does the size");
-    expect(app.origin_style_for(cube) == OriginStyle::Orb, "...without touching anything above it, which keeps the default");
+    expect(app.origin_style_for(cube) == OriginStyle::Axes, "...without touching anything above it, which keeps the default");
 
     // A child's own value wins.
     doc.select(knee);
-    app.set_selection_origin_style(OriginStyle::Orb);
-    expect(app.origin_style_for(knee) == OriginStyle::Orb, "an object's own style beats what it would inherit");
-    expect(app.origin_style_for(hip) == OriginStyle::Bone, "...and leaves its siblings alone");
+    app.set_selection_origin_style(OriginStyle::Axes);
+    expect(app.origin_style_for(knee) == OriginStyle::Axes, "an object's own style beats what it would inherit");
+    expect(app.origin_style_for(hip) == OriginStyle::Orb, "...and leaves its siblings alone");
 
     // Back to Inherit, and it follows the root again.
     app.set_selection_origin_style(std::nullopt);
-    expect(app.origin_style_for(knee) == OriginStyle::Bone, "Inherit hands it back to the ancestor");
+    expect(app.origin_style_for(knee) == OriginStyle::Orb, "Inherit hands it back to the ancestor");
     // ...and with the ancestor cleared too, all the way back to the preference.
     doc.select(root);
     app.set_selection_origin_style(std::nullopt);
-    expect(app.origin_style_for(knee) == OriginStyle::Orb, "clearing the ancestor falls back to the default");
+    expect(app.origin_style_for(knee) == OriginStyle::Axes, "clearing the ancestor falls back to the default");
 
     doc.select(root);
-    app.set_selection_origin_style(OriginStyle::Bone);
+    app.set_selection_origin_style(OriginStyle::Orb);
     // One undo step per edit, across the whole selection.
     doc.select(hip);
     doc.select(knee, true);
-    app.set_selection_origin_style(OriginStyle::Orb);
-    expect(app.origin_style_for(hip) == OriginStyle::Orb && app.origin_style_for(knee) == OriginStyle::Orb,
+    app.set_selection_origin_style(OriginStyle::Axes);
+    expect(app.origin_style_for(hip) == OriginStyle::Axes && app.origin_style_for(knee) == OriginStyle::Axes,
            "the setting applies to every selected object");
     app.undo();
-    expect(app.origin_style_for(hip) == OriginStyle::Bone && app.origin_style_for(knee) == OriginStyle::Bone,
+    expect(app.origin_style_for(hip) == OriginStyle::Orb && app.origin_style_for(knee) == OriginStyle::Orb,
            "...and one undo takes the whole selection back");
     app.set_preference("origin_style", Node(std::string("Axes")));
     app.set_preference("origin_size", make_float(kDefaultOriginSize));
@@ -291,13 +277,7 @@ COOPA_TEST(every_style_is_clickable_where_it_is_drawn) {
         tick(engine, 3);
     };
 
-    // Bone: halfway along the hip's body, far from either joint's origin.
-    set_style(OriginStyle::Bone, 0.3f);
-    expect(glm::distance(*mid, *hip_px) > 20.0f,
-           "the click is well away from the origin dot (" + std::to_string(glm::distance(*mid, *hip_px)) + " px)");
-    expect(app.pick_object(*mid) == hip, "clicking the middle of a bone selects it");
-
-    // Axes: out along the Z line, again off the origin.
+    // Axes: out along the Z line, off the origin.
     set_style(OriginStyle::Axes, 0.4f);
     expect(glm::distance(*along, *hip_px) > 10.0f, "the click is off the origin dot");
     expect(app.pick_object(*along) == hip, "clicking along an axis line selects it");
@@ -307,17 +287,17 @@ COOPA_TEST(every_style_is_clickable_where_it_is_drawn) {
     expect(app.pick_object(*hip_px) == hip, "clicking an orb selects it");
     expect(app.pick_object(*hip_px + glm::vec2(40.0f, 0.0f)) != hip, "...and empty space next to it does not");
 
-    // A bone is only clickable while it is drawn.
-    set_style(OriginStyle::Bone, 0.3f);
+    // A glyph is only clickable while it is drawn.
+    set_style(OriginStyle::Axes, 0.4f);
     app.set_show_origins(false);
     tick(engine, 3);
-    expect(app.pick_object(*mid) != hip, "with Origins off, the bone takes no clicks");
+    expect(app.pick_object(*along) != hip, "with Origins off, the axes take no clicks");
     app.set_show_origins(true);
 }
 
 /**
- * @brief Clicking the same spot twice steps past what is selected, so a bone buried in a mesh
- *        is reachable: first click the chest, second click the bone inside it (Blender).
+ * @brief Clicking the same spot twice steps past what is selected, so a joint buried in a mesh
+ *        is reachable: first click the chest, second click the joint inside it (Blender).
  */
 COOPA_TEST(a_repeat_click_steps_past_the_selection) {
     EditorSession session;
@@ -333,18 +313,18 @@ COOPA_TEST(a_repeat_click_steps_past_the_selection) {
     doc.set_transform(knee, {0.0f, 0.0f, 0.6f}, {}, {1, 1, 1}, "pose");
     app.sync().rebuild(engine, doc);
     doc.select(cube);
-    app.set_selection_origin_style(OriginStyle::Bone);
-    app.set_selection_origin_size(0.2f);
+    app.set_selection_origin_style(OriginStyle::Axes);
+    app.set_selection_origin_size(0.3f);
     doc.clear_selection();
     tick(engine, 4);
 
-    // Aim at the middle of the hip's bone, which is buried in the cube.
-    const auto at = screen_of(engine, app, hip, {0.0f, 0.0f, 0.3f}, in.scale);
-    coopa::test::require(at.has_value(), "the bone's middle is on screen");
+    // Aim along the hip's Z axis line, which runs inside the cube.
+    const auto at = screen_of(engine, app, hip, {0.0f, 0.0f, 0.2f}, in.scale);
+    coopa::test::require(at.has_value(), "the hip's axis line is on screen");
     const std::vector<ObjectId> under = app.pick_candidates_for_test(*at);
     expect(std::find(under.begin(), under.end(), cube) != under.end() &&
                std::find(under.begin(), under.end(), hip) != under.end(),
-           "both the mesh and the bone are under the cursor (" + std::to_string(under.size()) + " candidates)");
+           "both the mesh and the joint are under the cursor (" + std::to_string(under.size()) + " candidates)");
     expect(under.front() == cube, "the mesh surface is in front, so it is picked first");
 
     // Click once: the mesh. Click the same spot again: the bone behind it.
@@ -353,18 +333,79 @@ COOPA_TEST(a_repeat_click_steps_past_the_selection) {
     expect(doc.primary() == cube, "the first click selects the chest mesh");
     in.click(*at);
     tick(engine, 2);
-    expect(doc.primary() == hip, "the second click in the same place reaches the bone inside it");
+    const ObjectId second = doc.primary();
+    expect(second != cube, "the second click in the same place steps past the mesh it just selected");
+    expect(std::find(under.begin(), under.end(), second) != under.end(), "...onto something else under the cursor");
+    // Keep clicking and the cycle reaches every joint buried in the mesh, the hip among them.
+    bool reached_hip = second == hip;
+    for (int i = 0; i < 4 && !reached_hip; ++i) {
+        in.click(*at);
+        tick(engine, 2);
+        reached_hip = doc.primary() == hip;
+    }
+    expect(reached_hip, "clicking on walks the cycle to the joint inside the mesh");
 
-    // Clicking somewhere else starts over rather than carrying on cycling.
-    const auto away = screen_of(engine, app, cube, {0.0f, 0.0f, 0.0f}, in.scale);
-    coopa::test::require(away.has_value(), "the cube's centre is on screen");
-    in.click(*away);
+    // Clicking somewhere else starts over rather than carrying on cycling. Well clear of the
+    // 4 px that counts as the same spot.
+    const glm::vec2 away = *at + glm::vec2(0.0f, 45.0f);
+    coopa::test::require(glm::distance(away, *at) > 10.0f, "the other click is nowhere near the first");
+    in.click(away);
     tick(engine, 2);
-    const ObjectId after_move = doc.primary();
     in.click(*at);
     tick(engine, 2);
-    expect(doc.primary() == cube || after_move == cube,
-           "a click in a new place picks the front thing again, not the next in the cycle");
+    expect(doc.primary() == cube, "a click in a new place picks the front thing again, not the next in the cycle");
+}
+
+/**
+ * @brief Pose mode draws the rig as bones on its own: no origin style offers them, they show
+ *        whatever Origins is set to, and they are clickable like any other glyph.
+ */
+COOPA_TEST(pose_mode_draws_and_picks_bones) {
+    EditorSession session;
+    auto& engine = session.engine;
+    auto& app = session.app;
+    auto& doc = app.document();
+    auto& in = session.in;
+    const ObjectId cube = object_named(app, "cube");
+    const ObjectId hip = doc.add_object(doc.make_object("hip"), cube);
+    doc.add_object(doc.make_object("knee"), hip);
+    doc.set_transform(hip, {0.0f, 0.0f, 1.2f}, {}, {1, 1, 1}, "pose");
+    doc.set_transform(object_named(app, "knee"), {0.0f, 0.0f, 1.2f}, {}, {1, 1, 1}, "pose");
+    app.sync().rebuild(engine, doc);
+    app.camera().focus = {0.0f, 0.0f, 1.8f};
+    app.camera().distance = 6.0f;
+    app.camera().apply();
+    doc.select(cube);
+    app.show_timeline();
+    app.add_animator(cube);
+    doc.clear_selection();
+    tick(engine, 4);
+    const coopa::gfx::util::ImageData before = engine.capture_image(false);
+
+    const auto mid = screen_of(engine, app, hip, {0.0f, 0.0f, 0.6f}, in.scale);
+    coopa::test::require(mid.has_value(), "the bone's middle would be on screen");
+    expect(app.pick_object(*mid) != hip, "outside Pose mode nothing is drawn there to click");
+
+    doc.select(cube);
+    expect(app.set_interaction_mode(InteractionMode::Pose), "Pose Mode opens on the rig");
+    doc.clear_selection();
+    tick(engine, 4);
+    const coopa::gfx::util::ImageData posed = engine.capture_image(false);
+    expect(changed_pixels(before, posed) > 150, "Pose Mode draws the rig's bones (" +
+                                                    std::to_string(changed_pixels(before, posed)) + " pixels moved)");
+    expect(app.pick_object(*mid) == hip, "...and the middle of a bone selects that joint");
+
+    // They are the mode's own display, not the Origins overlay.
+    app.set_show_origins(false);
+    tick(engine, 3);
+    expect(app.pick_object(*mid) == hip, "turning Origins off does not take the bones with it");
+    app.set_show_origins(true);
+
+    app.set_interaction_mode(InteractionMode::Object);
+    tick(engine, 4);
+    const coopa::gfx::util::ImageData after = engine.capture_image(false);
+    expect(changed_pixels(posed, after) > 150, "leaving Pose Mode takes the bones away again (" +
+                                                   std::to_string(changed_pixels(posed, after)) + " pixels moved)");
 }
 
 /** @brief "Origins" shows and hides them; "Cameras / Lights" is a separate toggle. */

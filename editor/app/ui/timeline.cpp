@@ -205,7 +205,8 @@ void EditorApp::set_object_transform_(ObjectId id, const glm::vec3& p, const glm
             t.set_scale(s);
             // Auto-key: the channels this edit changed, at the playhead.
             const bool dp = glm::distance(op, p) > 1e-6f, dr = glm::distance(orr, r) > 1e-4f, ds = glm::distance(os, s) > 1e-6f;
-            if ((dp || dr || ds) && anim_clip_.open()) {
+            // Auto-Key: outside Pose mode only Record reaches here, so this reads the same.
+            if ((dp || dr || ds) && anim_clip_.open() && anim_record_) {
                 const std::string path = rig_path_of_(anim_rig_, id);
                 const glm::quat q = t.rotation_quat();
                 const float time = anim_time_;
@@ -292,6 +293,9 @@ void EditorApp::timeline_frame_(float dt) {
         }
     }
     if (!anim_preview_wanted_()) {
+        // Pose mode holds the live pose even with no clip open -- posing comes first, keying
+        // only once there is somewhere to key into.
+        if (in_pose_mode_()) { anim_posed_ = true; anim_playing_ = false; return; }
         if (anim_posed_) { anim_restore_rest_pose_(); anim_posed_ = false; }
         anim_playing_ = false;
         return;
@@ -301,10 +305,11 @@ void EditorApp::timeline_frame_(float dt) {
         anim_runtime_rev_ = anim_clip_.revision;
         anim_pose_time_ = -1.0f;
     }
-    // Recording keeps hand-posed (unkeyed) changes until the playhead or the keys move;
-    // otherwise the clip drives the pose every frame (a document edit cannot unpose it).
+    // Pose mode and Record keep hand-posed (unkeyed) changes until the playhead or the keys
+    // move; otherwise the clip drives the pose every frame (a document edit cannot unpose it).
+    const bool hold = in_pose_mode_() || anim_record_;
     const bool changed = anim_pose_time_ != anim_time_ || anim_pose_rev_ != anim_runtime_rev_ || !anim_posed_;
-    if (!anim_record_ || changed) {
+    if (!hold || changed) {
         if (!anim_posed_) anim_restore_rest_pose_();   // unkeyed channels start from rest
         apply_clip_pose(*anim_runtime_, anim_time_, sync_.live(anim_rig_));
         anim_pose_time_ = anim_time_;

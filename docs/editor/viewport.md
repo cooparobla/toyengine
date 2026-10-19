@@ -166,8 +166,31 @@ Either way the choices are the same:
 | Style | Looks like |
 |---|---|
 | **Axes** | A line through the origin along each of the object's own axes. The default |
-| **Bone** | A Blender-style octahedral bone reaching each of the object's child joints |
 | **Orb** | A small ball with a short tick down each axis -- the least cluttered on a rig |
+
+Bones are not an origin style: they belong to **Pose mode**, which draws them for you while
+you are animating a rig.
+
+## Pose a rig
+
+**Pose mode** is where you animate. Select a rig -- any object with an **Animator**, or a
+joint under one -- and pick **Pose Mode** from the mode menu in the viewport header.
+
+In it:
+
+- Every joint draws as a **bone** reaching its child joints, so you can see the skeleton.
+  They show whatever the **Origins** overlay is set to: they are the mode's own display.
+- Click a bone anywhere along its body to select that joint. Clicking the same place again
+  steps past it to whatever is behind.
+- **G**, **R** and **S** (and the gizmos) move the **pose**, not the object. The pose stays
+  where you put it -- the clip no longer snaps it back the moment you let go -- and the rest
+  transform saved in the scene is left alone.
+- **I** keys the selected joints at the playhead. Turn on **Auto-Key** (the red button in the
+  Timeline) and every edit keys itself as you make it.
+- You can pose with no clip open at all. Keys need somewhere to go, so the first **I** makes
+  a clip if the rig has none.
+- Leaving Pose mode hands the rig back: the Timeline previews the clip again, and the scene's
+  rest pose is untouched underneath.
 
 **Size** is how big the glyph is in metres, up to 0.5. Turn it down on a dense rig.
 
@@ -197,135 +220,6 @@ whatever is in front.
 
 The **Origins** checkbox in the Overlays popover is what shows and hides the glyphs;
 **Cameras / Lights** only covers camera frustums and light symbols.
-
-### Bone Length
-
-The **Bone** style works the hierarchy out for itself, so a rig draws as the skeleton it is:
-
-- A joint draws **one bone to each of its child joints**, landing on that child's origin. A
-  hip with two legs draws two bones, one down each leg. A mesh, camera or light parented to a
-  joint is not itself a joint, so a prop in a hand grows no bone of its own.
-- A **leaf** carries on the way its parent points, for half that span -- so a chain ends in a
-  bone instead of stopping short.
-- An object with neither falls back to its own **+Y** (Blender's bone axis), as long as twice
-  the Origin Size.
-
-Nothing needs setting up for that. **Bone Length**, which appears under **Origin Gizmo** once
-the style is Bone, is there for when you want to override it: any value above 0 collapses the
-object to a single bone of exactly that length, pointing the way its children do.
-
-Where the hierarchy suggests a length, the field says what it is, and **Set from Hierarchy**
-under it stores that number.
-
-### Show physics colliders
-
-The **Colliders** button in the header (left of **Overlays**) draws the scene's physics
-colliders as wireframes, the way Unity shows them: solid colliders in green, triggers in yellow.
-They draw on top of everything, so you can see colliders hidden inside or behind meshes. Click the
-arrow next to the button to choose which ones show:
-
-| Choice | Shows |
-|---|---|
-| **All Colliders** | Every collider in the scene |
-| **Selected + Children** | Only the selected objects' colliders, and their children's |
-
-The wireframes come straight from the collider components and their objects' transforms, so
-they show while you edit as well as during Play, and they follow objects as they move.
-
-### Show performance stats
-
-Choose **View > Stats Overlay** in the viewport header to show the engine's stats overlay in a
-corner of the viewport: frame rate, frame times, render pass timings, draw counts, physics and
-memory use. Choose it again to hide it. With the pointer over the viewport, **F3** steps
-through off, frame rate only, and the full overlay. The overlay always starts hidden in the
-editor, whatever the project's `debug.overlay` setting says; that setting only affects the game.
-
-## Show the toolbar and sidebar
-
-- Press **T** to show or hide the toolbar on the left edge.
-- Press **N** to show or hide the sidebar on the right edge.
-
-The toolbar holds the tools for the current mode. In Object Mode:
-
-| Tool | Use |
-|---|---|
-| **Select Box** | Click or drag to select. **B** picks this tool. |
-| **Cursor** | Click to place the 3D cursor |
-| **Move**, **Rotate**, **Scale** | Show a handle (a gizmo) on the selection that you drag |
-
-Press **Shift+Space** for a menu of these tools under the pointer. Edit Mode adds modelling
-tools, and Sculpt and paint modes show brushes instead.
-
-The sidebar has two tabs:
-
-- **Item** shows the active object's **Location**, **Rotation** and **Scale**, which you can
-  type into or drag. In Edit Mode it shows the centre of the selected vertices instead.
-- **View** shows the viewport's **Field of View** and the 3D cursor's exact **Location**.
-
-## Select objects
-
-| Do this | To |
-|---|---|
-| Click an object | Select it (click empty space to deselect everything) |
-| **Shift**-click | Add an object to the selection; Shift-click it again to remove it |
-| Drag on empty space | Select everything inside the box |
-| **Shift**-drag / **Ctrl**-drag | Add to / remove from the selection with a box |
-| **A** | Select all |
-| **Alt+A** | Select none |
-| **Ctrl+I** | Invert the selection |
-
-The last object you click is the **active object**. Its name shows in the viewport corner and
-its settings show in the Properties panel. The **Select** menu in the header has the same
-commands. You can also select in the Hierarchy; see [Scenes and objects](scenes-and-objects.md#select-objects).
-
-## Move, rotate and scale
-
-![A selected cube being moved along the X axis, with a red guide line through it and the
-distance shown at the bottom of the viewport](../images/editor/gizmo_move.jpg)
-
-*Moving with **G** then **X**: the red line shows the locked axis, and the bottom-left readout
-shows the distance moved.*
-
-### With the keyboard
-
-1. Select the object.
-2. With the pointer over the viewport, press **G** to move, **R** to rotate or **S** to scale.
-3. Move the mouse.
-4. Click, or press **Enter**, to finish. Right-click or press **Esc** to cancel.
-
-While you move the mouse, you can:
-
-| Press | To |
-|---|---|
-| **X**, **Y** or **Z** | Lock to that axis. Press again to use the object's own axis, a third time to unlock. |
-| **Shift+X**, **Shift+Y** or **Shift+Z** | Keep that axis fixed and move along the other two |
-| A number, then **Enter** | Set an exact value (units, degrees or a scale factor). Type **-** to flip the sign. |
-| **Tab** | Type the next axis's value |
-| Hold **Ctrl** | Snap to steps (see [Snap to the grid](#snap-to-the-grid)) |
-| Hold **Shift** | Make fine adjustments |
-
-Each move, rotate or scale is one undo step. The same commands are in **Object > Transform**.
-
-### With the gizmo
-
-1. Pick **Move**, **Rotate** or **Scale** in the toolbar.
-2. Drag a handle:
-   - **Move**: an arrow moves along that axis; a small square moves across that plane.
-   - **Rotate**: a ring turns around that axis; the outer ring turns around your view.
-   - **Scale**: an axis handle stretches along that axis; the centre scales evenly.
-
-The **Transform Orientation** dropdown in the header sets which way the gizmo points:
-**Global** (the world's axes), **Local** (the object's own) or **Normal** (in Edit Mode only).
-
-### Reset a transform
-
-| Key | Resets (also in **Object > Clear**) |
-|---|---|
-| **Alt+G** | **Location** to 0 |
-| **Alt+R** | **Rotation** to 0 |
-| **Alt+S** | **Scale** to 1 |
-
-**Shift+D** duplicates the selection and starts moving the copy.
 
 ## Snap to the grid
 

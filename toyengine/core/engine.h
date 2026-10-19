@@ -95,6 +95,9 @@ namespace audio { class AudioSystem; }
 
 namespace core {
 
+class BootSplash;
+struct BootSplashStyle;
+
 /**
  * @struct EngineOptions
  * @brief How an Engine is embedded: by the game (the defaults) or by a tool like the editor.
@@ -111,6 +114,9 @@ struct EngineOptions {
     bool load_default_scene = true;
     /// Give the window / taskbar / Dock the toyengine logo (branding.h) at startup.
     bool set_app_icon = true;
+    /// Show the boot splash while this Engine starts up, and hold the window back until it is
+    /// painted (see boot_splash.h). Also needs a visible window and config.window.splash.
+    bool boot_splash = true;
         /// Start in edit mode: loaded scenes do not simulate (see set_edit_mode()).
     bool edit_mode = false;
     /// Escape closes the window (the game's default). An editor turns this off: Escape there
@@ -831,6 +837,24 @@ public:
         return fixed_dt_ >= 0.0f ? fixed_dt_ : ctx_.delta_time();
     }
 
+    /**
+     * @brief Draws one boot-splash frame with this status, while the splash is still up.
+     *
+     * A no-op once the splash is gone (it is dropped after the first rendered frame) or when
+     * there is none, so a host can call it freely. Engine calls it at its own startup
+     * milestones; the editor and the hub call it during their constructors, which run while
+     * the splash is still the only thing on screen.
+     *
+     * @param status       The line under the bar, e.g. "Loading scene...".
+     * @param progress     0..1 fills the bar; negative draws an indeterminate sweep.
+     * @param min_interval Seconds this must be apart from the previous frame -- the throttle for
+     *                     a call inside a tight loop, so presenting does not pace the loop.
+     */
+    void boot_progress(const std::string& status, float progress = -1.0f, float min_interval = 0.0f);
+
+    /** @brief True while the boot splash is still being shown. */
+    bool booting() const { return boot_splash_ != nullptr; }
+
     coopa::gfx::presentation::Window& window() { return ctx_.window(); }
     coopa::gfx::core::Device&         device() { return ctx_.device(); }
     coopa::gfx::memory::Allocator&    allocator() { return ctx_.allocator(); }
@@ -857,6 +881,22 @@ public:
 private:
     /** @brief Applies validation-layer-on-in-debug-builds to a base ContextConfig, plus ONESHOT/MAX_FRAMES. */
     static coopa::gfx::app::ContextConfig make_context_config_(const AppConfig& config);
+
+    /**
+     * @brief Builds the boot splash, presents its first frame and maps the window.
+     *
+     * Runs in the member initializer list, between ctx_ and pipeline_, so the window is painted
+     * and on screen before the renderer's pipelines are built. Returns null -- and maps the
+     * window immediately -- when there is no splash to show (invisible window, `window.splash`
+     * off, EngineOptions::boot_splash off, or the UI shaders/logo failing to load, which is
+     * reported but never fatal: an app must still start).
+     */
+    static std::unique_ptr<BootSplash> make_boot_splash_(coopa::gfx::app::Context& ctx,
+                                                         const AppConfig& config,
+                                                         const EngineOptions& options);
+
+    /** @brief Waits out the splash's last frame and releases it, leaving the app's frame up. */
+    void dismiss_boot_splash_();
 
     /**
      * @brief Binds the default action set: quit, fly move (as three axes),
@@ -1065,12 +1105,6 @@ private:
      */
     void apply_cursor_capture_();
 
-    /**
-     * @brief Sets the toyengine logo (rasterized from branding.h at the usual icon sizes) as the
-     *        window's taskbar icon -- or, on macOS, the Dock icon.
-     */
-    void apply_app_icon_();
-
     /** @brief Resolves a config-relative asset path against the project root, unless already absolute. */
     std::string resolve_path_(const std::string& path) const {
         return resolve_against_(options_.project_root, path);
@@ -1200,6 +1234,11 @@ private:
     // ctx_ is declared before pipeline_ (and constructed first, destroyed
     // last) since pipeline_ holds references into ctx_'s owned objects.
     coopa::gfx::app::Context    ctx_;
+    /// The startup screen, built (and first presented, which is what maps the window) between
+    /// ctx_ and pipeline_ -- declaration order is what puts it on screen BEFORE the pipeline's
+    /// shader and pipeline builds. Null when the window is invisible or the splash is off;
+    /// dropped by the first tick() that renders -- see dismiss_boot_splash_().
+    std::unique_ptr<BootSplash> boot_splash_;
     /// Owned by pointer so `resolution_mode: fill` can rebuild it at a new render size (see
     /// update_fill_extent_()); its render targets and bind-once descriptors are sized at
     /// construction.

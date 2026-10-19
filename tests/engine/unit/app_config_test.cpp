@@ -296,6 +296,10 @@ COOPA_TEST(every_render_and_window_key_round_trips) {
             "  height: 600\n"
             "  vsync: false\n"
             "  visible: false\n"
+            "  splash: false\n"
+            "  splash_title: A Game\n"
+            "  splash_image: textures/boot.png\n"
+            "  splash_color: [0.6, 0.1, 0.1]\n"
             "render:\n"
             "  ssr_enabled: false\n"
             "  ssr_max_distance: 7.5\n"
@@ -321,6 +325,11 @@ COOPA_TEST(every_render_and_window_key_round_trips) {
                "AppConfig::load: window size round-trips");
         expect(config.window.vsync == false, "AppConfig::load: window.vsync round-trips");
         expect(config.window.visible == false, "AppConfig::load: window.visible round-trips");
+        expect(config.window.splash == false, "AppConfig::load: window.splash round-trips");
+        expect(config.window.splash_title == "A Game", "AppConfig::load: window.splash_title round-trips");
+        expect(config.window.splash_image == "textures/boot.png", "AppConfig::load: window.splash_image round-trips");
+        expect(config.window.splash_color == glm::vec3(0.6f, 0.1f, 0.1f),
+               "AppConfig::load: window.splash_color round-trips");
 
         expect(config.render.ssr_enabled == false, "AppConfig::load: ssr_enabled round-trips");
         expect(config.render.ssr_max_distance == 7.5f, "AppConfig::load: ssr_max_distance round-trips");

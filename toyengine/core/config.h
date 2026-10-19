@@ -48,6 +48,19 @@ struct WindowConfig {
      * coopa::gfx::presentation::Window's constructor.
      */
     bool        visible = true;
+    /**
+     * Show the boot splash (toyengine/core/boot_splash.h) while the engine starts up, and hold
+     * the window back until it has been painted. False maps the window straight away, which
+     * leaves whatever the window system had behind it on screen until the first real frame.
+     * Never shown for an invisible window, whatever this says.
+     */
+    bool        splash = true;
+    /// Wordmark on the splash. Empty draws none; unset is "toyengine".
+    std::string splash_title = "toyengine";
+    /// A PNG to show in place of the toyengine logo -- relative to an asset root, or absolute.
+    std::string splash_image;
+    /// Splash backdrop, display-referred RGB; the gradient darkens it toward the bottom.
+    glm::vec3   splash_color{0.227f, 0.184f, 0.420f};
 };
 
 /**

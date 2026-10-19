@@ -71,6 +71,8 @@
      */
     void draw_object_glyph_(imm::Context& ctx, const ViewProj& vp, ObjectId id, const Node& node, const glm::mat4& w,
                             const glm::vec4& col);
+    /** @brief Pose mode's display for a rig joint: one octahedral bone per child joint. */
+    void draw_pose_bones_(imm::Context& ctx, const ViewProj& vp, ObjectId id, const glm::mat4& w, const glm::vec4& col);
     /** @brief The origin glyph itself (the `kind`-less tail of draw_object_glyph_). */
     void draw_origin_glyph_(imm::Context& ctx, const ViewProj& vp, ObjectId id, const glm::mat4& w, const glm::vec4& col);
     /**

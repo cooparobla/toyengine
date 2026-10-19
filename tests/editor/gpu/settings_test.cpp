@@ -444,9 +444,9 @@ COOPA_TEST(preferences_and_themes_apply_at_once_and_persist) {
     expect(app.test_rect("pref:origin_style").has_value() && app.test_rect("pref:origin_size").has_value(),
            "Viewport lists the origin default's size and style");
     // A named choice, so the file stays readable.
-    expect(app.set_preference("origin_style", Node(std::string("Bone"))), "origin_style is a preference");
-    expect(app.default_origin_style() == OriginStyle::Bone, "...naming it sets the default");
-    expect(get_string(Project::load_prefs(), "origin_style") == "Bone", "...and it is saved by name");
+    expect(app.set_preference("origin_style", Node(std::string("Orb"))), "origin_style is a preference");
+    expect(app.default_origin_style() == OriginStyle::Orb, "...naming it sets the default");
+    expect(get_string(Project::load_prefs(), "origin_style") == "Orb", "...and it is saved by name");
     app.set_preference("origin_style", Node(std::string("Axes")));
     expect(app.default_origin_style() == OriginStyle::Axes, "and back to axes");
     if (auto km = app.test_rect("prefs:Keymap")) in.click(km->center());

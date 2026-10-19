@@ -107,11 +107,33 @@ version-controlled config:
 | `CAPTURE_RING=N` | Keeps the last N frames in RAM while playing and writes them to `output/seq/` on exit. |
 | `CURSOR_POS="<x>,<y>"` | Pins the pointer to a fixed window-pixel position every frame — the only way to exercise world-space UI hit testing headlessly. |
 | `PROFILE=1\|<path>.csv` | Per-frame CPU phase and per-feature GPU timings to a CSV (`output/profile.csv` for `1`), with averages printed on exit. |
+| `TOY_SPLASH=1` | Shows the boot splash on a never-mapped window too, so a headless run exercises it. |
 | `TOY_PROJECT_DIR=<dir>` | Overrides the project root the binary was built for. |
 | `TOY_VALIDATION=0\|1` | Forces Vulkan validation layers off or on. |
 | `HEADLESS=1`, `CONFIG=<path>`, `TOY_LOG_FILE=1` | Read by `main.cpp` before the `Engine` exists: a never-mapped window with vsync off, a different config file, and the packaged-game log file from a source build. |
 
 None of these are honoured in a `TOY_SHIPPING` build.
+
+## The boot splash
+
+`boot_splash.h` paints the window before the window system ever maps it, so a launch never
+shows what was on screen behind it. `Engine`'s constructor builds one straight after the
+`Context` (before the renderer's pipelines), presents it, maps the window, and then reports its
+own startup milestones through `Engine::boot_progress()` -- which a host like the editor or the
+hub calls too, since their constructors run while the splash is still the only thing up. The
+first `tick()` that draws the app's own frame drops it.
+
+Four `window:` keys control it, and only for a visible window:
+
+| Key | Meaning |
+|---|---|
+| `splash` | `false` maps the window immediately and shows no startup screen. |
+| `splash_title` | The wordmark under the logo (`toyengine`); empty draws none. |
+| `splash_image` | A PNG shown instead of the toyengine logo -- a project's own branding. |
+| `splash_color` | `[r, g, b]` backdrop, display-referred; the gradient darkens it downward. |
+
+The editor and the hub reset those to the engine's defaults whatever the opened project sets:
+that window is toyengine, not the game inside it.
 
 **A capture is only reproducible if `output.save_low_res` is `true`.** With it `false`,
 `save_screenshot()` writes the swapchain-sized image, and the window manager does not

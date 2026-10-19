@@ -58,6 +58,7 @@ EditorApp::EditorApp(core::Engine& engine, Project project, const fs::path& scen
         }
         prefs_load_(prefs);   // ui/preferences.inl
     }
+    engine_.boot_progress("Starting the editor...", 0.96f);
     camera_.create(*ui_scene_);
     camera_.focus = state.cam_focus;
     camera_.yaw_deg = state.cam_yaw;
@@ -85,6 +86,7 @@ EditorApp::EditorApp(core::Engine& engine, Project project, const fs::path& scen
     // layers them, on the edited config.yaml rather than the one it started with.
     engine_.set_config_source(config_.node, apply_editor_render_overrides);
 
+    engine_.boot_progress("Opening " + project_.name() + "...", 0.98f);
     if (state.scene) {
         doc_ = std::move(*state.scene);
         active_type_ = doc_.is_object_asset() ? AssetType::Object : AssetType::Scene;
@@ -2928,8 +2930,32 @@ void EditorApp::set_isolate_in_edit(bool on) {
 }
 
 bool EditorApp::set_interaction_mode(InteractionMode m) {
+    if (m == InteractionMode::Pose) return enter_pose_mode_(rig_of_(doc_.primary()));
+    exit_pose_mode_();   // every other mode works on the document, not on a pose
     if (m == InteractionMode::Object) { exit_mesh_mode_(); return true; }
     return enter_mesh_mode_(m);
+}
+
+bool EditorApp::enter_pose_mode_(ObjectId rig) {
+    if (!rig || playing()) return false;
+    if (pose_rig_ == rig) return true;
+    exit_mesh_mode_();
+    pose_rig_ = rig;
+    anim_rig_ = rig;
+    // The pose starts where the clip leaves it at the playhead; with no clip, at rest.
+    anim_restore_rest_pose_();
+    anim_posed_ = true;
+    anim_pose_time_ = -1.0f;
+    log_info("Pose Mode: " + anim_name_of_(rig, "rig"));
+    return true;
+}
+
+void EditorApp::exit_pose_mode_() {
+    if (!pose_rig_) return;
+    pose_rig_ = 0;
+    anim_restore_rest_pose_();
+    anim_posed_ = false;
+    anim_pose_time_ = -1.0f;
 }
 
 void EditorApp::push_mesh_to_scene_() {
@@ -3075,7 +3101,6 @@ OriginStyle EditorApp::origin_style_for_(ObjectId id) const {
     const Node* n = inherited_transform_key_(id, "origin_style");
     if (n && n->is_string()) {
         const std::string v = n->get_value<std::string>();
-        if (v == "Bone") return OriginStyle::Bone;
         if (v == "Orb") return OriginStyle::Orb;
         if (v == "Axes") return OriginStyle::Axes;
     }
@@ -3107,7 +3132,7 @@ void EditorApp::set_selection_transform_key_(const char* key, const Node* value,
 
 void EditorApp::set_selection_origin_style(std::optional<OriginStyle> style) {
     if (!style) { set_selection_transform_key_("origin_style", nullptr, "Origin Style"); return; }
-    static const char* kNames[] = {"Axes", "Bone", "Orb"};
+    static const char* kNames[] = {"Axes", "Orb"};
     const Node v = Node(std::string(kNames[static_cast<int>(*style)]));   // parens: braces build a sequence
     set_selection_transform_key_("origin_style", &v, "Origin Style");
 }
@@ -3412,7 +3437,7 @@ void EditorApp::draw_viewport_overlay_body_(imm::Context& ctx, bool mesh_edit, c
         }
         // Non-mesh objects: Blender's glyphs (camera frustum, light symbols) and, for the rest,
         // the object's origin -- each under its own overlay toggle.
-        if (show_overlays_ && (show_glyphs_ || show_origins_)) {
+        if (show_overlays_ && (show_glyphs_ || show_origins_ || in_pose_mode_())) {
             for (const auto& [id, live] : sync_.live_objects()) {
                 const Node* node = doc_.find(id);
                 if (!node || !live || !live->active() || !live->get_transform()) continue;

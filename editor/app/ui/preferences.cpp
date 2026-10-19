@@ -35,8 +35,8 @@ std::vector<EditorApp::PrefRow> EditorApp::prefs_table_() {
         num("origin_size", "Viewport", "Origin Size", "Default size of an object's origin glyph, in metres. Any object can override "
             "it in Properties > Object > Origin Gizmo", &origin_size_, kDefaultOriginSize, 0.01f, 0.5f, "%.3f m", true),
         choice("origin_style", "Viewport", "Origin Style",
-               "Default look of an object's origin: axis lines, a Blender-style bone reaching each child joint, or a small ball. "
-               "Any object can override it in Properties > Object > Origin Gizmo", &origin_style_, 0, {"Axes", "Bone", "Orb"}),
+               "Default look of an object's origin: axis lines or a small ball. Any object can override it in "
+               "Properties > Object > Origin Gizmo", &origin_style_, 0, {"Axes", "Orb"}),
         flag("show_grid", "Viewport", "Show Grid", "The floor grid in the viewport (also in the Overlays popover)", &show_grid_, true),
         num("orbit_speed", "Navigation", "Orbit Speed", "How far a mouse drag or swipe turns the view", &camera_.orbit_speed, 1.0f, 0.1f, 4.0f,
             "%.2fx"),

@@ -47,6 +47,16 @@ AppConfig AppConfig::from_node(const fkyaml::node& root) {
             if (w.contains("height")) config.window.height = w.at("height").get_value<uint32_t>();
             if (w.contains("vsync"))  config.window.vsync  = w.at("vsync").get_value<bool>();
             if (w.contains("visible")) config.window.visible = w.at("visible").get_value<bool>();
+            if (w.contains("splash")) config.window.splash = w.at("splash").get_value<bool>();
+            if (w.contains("splash_title")) config.window.splash_title = w.at("splash_title").get_value<std::string>();
+            if (w.contains("splash_image")) config.window.splash_image = w.at("splash_image").get_value<std::string>();
+            if (w.contains("splash_color")) {
+                const auto& c = w.at("splash_color");
+                if (c.size() >= 3) {
+                    config.window.splash_color = glm::vec3(
+                        c.at(0).get_value<float>(), c.at(1).get_value<float>(), c.at(2).get_value<float>());
+                }
+            }
         }
 
         if (root.contains("render")) {

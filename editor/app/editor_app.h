@@ -123,7 +123,7 @@ using FileDialog = coopa::ui::imm::FileDialog;
  */
 enum class AssetType { None = 0, Scene, Object, Mesh, Material, Texture, UI, Theme, Audio };
 /** @brief Blender's interaction modes for a mesh object (the viewport header's mode dropdown). */
-enum class InteractionMode { Object = 0, Edit, Sculpt, VertexPaint, WeightPaint };
+enum class InteractionMode { Object = 0, Edit, Sculpt, VertexPaint, WeightPaint, Pose };
 /** @brief Viewport shading, Blender's four buttons. */
 enum class Shading { Wireframe = 0, Solid = 1, MaterialPreview = 2, Full = 3 };
 
@@ -134,7 +134,6 @@ enum class Shading { Wireframe = 0, Solid = 1, MaterialPreview = 2, Full = 3 };
  */
 enum class OriginStyle {
     Axes = 0,   ///< Three lines through the origin, one per local axis. The default.
-    Bone,       ///< Blender's octahedral bone, reaching each of the object's child joints.
     Orb,        ///< A small ball at the origin, with a tick along each axis.
 };
 /** @brief The origin glyph's size in metres when neither the object nor an ancestor sets one. */
@@ -212,7 +211,7 @@ public:
     void set_selection_origin_style(std::optional<OriginStyle> style);
     void set_selection_origin_size(float metres);
     /** @brief The viewer-wide default every object falls back to (Preferences > Viewport). */
-    OriginStyle default_origin_style() const { return static_cast<OriginStyle>(std::clamp(origin_style_, 0, 2)); }
+    OriginStyle default_origin_style() const { return static_cast<OriginStyle>(std::clamp(origin_style_, 0, 1)); }
     float default_origin_size() const { return origin_size_; }
     /** @brief The Overlays popover's two glyph toggles (origins; camera and light symbols). */
     void set_show_origins(bool on) { show_origins_ = on; }
@@ -804,6 +803,8 @@ private:
     bool mesh_mode_target_() const { return (!asset_view_() && edit_object_ != 0) || active_type_ == AssetType::Mesh; }
     bool in_edit_mode_() const { return mesh_mode_target_() && mode_ == InteractionMode::Edit; }
     bool in_sculpt_mode_() const { return mesh_mode_target_() && mode_ == InteractionMode::Sculpt; }
+    /** @brief Posing a rig by hand: its joints draw as bones and transforms edit the pose. */
+    bool in_pose_mode_() const { return pose_rig_ != 0; }
 
     /** @brief The edited mesh's object-to-world matrix (identity in the Asset tab). */
     glm::mat4 mesh_world_();
@@ -910,6 +911,21 @@ private:
     /** @brief Back to Object Mode -- the one way out (restores isolation and view). */
     void exit_mesh_mode_();
 
+    // --- Pose mode (animating a rig) ---------------------------------------------------
+
+    /**
+     * @brief Poses `rig`'s joints by hand instead of letting the open clip drive them.
+     *
+     * The rig starts from the clip's pose at the playhead (or its rest pose with no clip
+     * open), its joints draw as bones, and a transform edits the live pose rather than the
+     * document. Keys are written by I, or by every edit with Auto-Key on.
+     *
+     * @return False if `rig` is 0 -- Pose mode needs a rig to pose.
+     */
+    bool enter_pose_mode_(ObjectId rig);
+    /** @brief Leaves Pose mode, putting the document's rest pose back on the rig. */
+    void exit_pose_mode_();
+
     // --- Local-View-style isolation while editing a mesh ---
 
     /** @brief Does this object draw geometry (and is not a light / probe that lights the mesh)? */
@@ -927,6 +943,7 @@ public:
     bool isolate_in_edit() const { return isolate_in_edit_; }
     bool is_isolated(ObjectId id) const { return isolated_.count(id) > 0; }
     InteractionMode interaction_mode() const {
+        if (pose_rig_) return InteractionMode::Pose;
         return (edit_object_ || active_type_ == AssetType::Mesh) ? mode_ : InteractionMode::Object;
     }
     bool set_interaction_mode(InteractionMode m);
@@ -990,6 +1007,8 @@ private:
     void set_bone_length_(ObjectId id, float metres);
     /**
      * @brief Where this object's bone(s) point, in world space -- one tail per bone.
+     *
+     * For Pose mode's bone display; no origin style draws bones.
      *
      * A joint with children gets one bone reaching each of them, so a rig draws as the
      * skeleton it is. A leaf carries on the way its parent points, for half that span. An
@@ -1259,6 +1278,7 @@ private:
     struct CameraPose { glm::vec3 focus{0.0f}; float yaw = 35, pitch = 25, distance = 12; bool ortho = false; bool valid = false; };
     CameraPose scene_pose_, asset_pose_, pre_isolate_pose_;
     InteractionMode mode_ = InteractionMode::Object;
+    ObjectId pose_rig_ = 0;   ///< Pose mode's rig root; 0 outside the mode (see in_pose_mode_()).
     std::set<ObjectId> isolated_;        // hidden by Edit / Sculpt Mode isolation (not saved, not hidden_)
     bool isolate_in_edit_ = true;        // header toggle, prefs "isolate_edit_mode"
     Gizmo gizmo_;

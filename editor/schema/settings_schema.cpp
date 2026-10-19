@@ -585,7 +585,13 @@ std::vector<std::string> render_settings_keys() {
 const std::vector<SettingsGroup>& project_settings_groups() {
     static const std::vector<SettingsGroup> groups = {
         {"Window", {f_string("title", "toyengine"), f_int("width", 1920, 64, 16384), f_int("height", 1080, 64, 16384),
-                    f_bool("vsync", true)}},
+                    f_bool("vsync", true),
+                    // The boot splash (toyengine/core/boot_splash.h). A packaged game shows its
+                    // own branding here; the editor and the hub always show toyengine's.
+                    f_bool("splash", true),
+                    f_string("splash_title", "toyengine"),
+                    root_relative(f_asset("splash_image", "textures", ".png")),
+                    listed(f_color("splash_color", glm::vec3(0.227f, 0.184f, 0.420f)))}},
         {"Physics", {f_vec3("gravity", glm::vec3(0.0f, 0.0f, -9.81f), 0.05f), f_float("fixed_timestep", 1.0f / 60.0f, 0.0005f, 0.0001f, 1.0f)}},
         {"Jobs", {f_int("worker_threads", 0, 0, 256), f_int("parallel_threshold", 4, 1, 1 << 20)}},
         {"Output", {f_bool("save_on_exit", true), f_string("filepath", "./output/frame.png"), f_bool("save_low_res", true)}},

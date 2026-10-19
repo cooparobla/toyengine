@@ -210,12 +210,17 @@ loader, validation layers, `glslc` and GLFW through Homebrew.
 Then, on either platform:
 
 ```bash
-cmake -B build && cmake --build build -j
+./build.sh
 ```
 
 This builds the demo player (`build/toyengine`), the editor (`build/toyengine_editor`) and the
-project launcher (`build/toyengine_hub`). On macOS, `tools/toyhub app` also installs a
-**toyengine Hub** app in `~/Applications` that launches this build.
+project launcher (`build/toyengine_hub`), configuring `build/` on the first run. `./build.sh
+tests` builds the test runners, `./build.sh editor` (or any CMake target name) builds just one,
+and `./build.sh --help` lists the rest. It keeps the job count at 4, which is what a 16 GB
+machine survives; `cmake -B build && cmake --build build -j` does the same thing by hand.
+
+On macOS, `tools/toyhub app` also installs a **toyengine Hub** app in `~/Applications` that
+launches this build.
 
 ### 3. Create a project in the hub
 

@@ -12,6 +12,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <utility>
+#include <filesystem>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -306,4 +309,919 @@ COOPA_TEST(topdown_clouds_are_temporally_stable) {
         expect(flicker <= limit, "topdown stability (" + tag + "): consecutive frames agree (" + std::to_string(flicker) +
                                      " px differ, limit " + std::to_string(limit) + ")");
     }
+}
+
+/// Comma-separated pass names in `TOY_FLICKER_OFF` turn one suspect off for the measurement
+/// below, so one binary runs the whole attribution matrix: `ssgi`, `ssr`, `contact`, `ssao`,
+/// `volumetrics`. Every one of these is STARTUP-FIXED, so they are applied to the AppConfig
+/// before the Engine is constructed, not to the live pipeline.
+static std::string apply_flicker_overrides(toy::render::ToyRenderConfig& render) {
+    const char* raw = std::getenv("TOY_FLICKER_OFF");
+    if (raw == nullptr || *raw == '\0') return "none";
+    std::string list(raw);
+    // Exact token match on the comma-separated list, NOT substring: `find("ssr")` is also true
+    // of "ssrjitter", so a substring test silently disabled SSR outright in every run meant to
+    // probe one of its parameters, and four different probes came back byte-identical.
+    std::vector<std::string> tokens;
+    for (size_t b = 0, e; b <= list.size(); b = e + 1) {
+        e = list.find(',', b);
+        if (e == std::string::npos) e = list.size();
+        if (e > b) tokens.push_back(list.substr(b, e - b));
+    }
+    auto has = [&](const char* name) {
+        return std::find(tokens.begin(), tokens.end(), std::string(name)) != tokens.end();
+    };
+    if (has("ssgi"))        render.ssgi_traced           = false;
+    if (has("ssr"))         render.ssr_enabled           = false;
+    if (has("contact"))     render.contact_shadows_enabled = false;
+    if (has("ssao"))        render.ssao_enabled          = false;
+    if (has("volumetrics")) render.volumetrics_enabled   = false;
+    if (has("ssrfull"))   render.ssr_half_res      = false;  // startup-fixed: must be set here
+    return list;
+}
+
+/**
+ * @brief While the camera MOVES, the image must already be close to what it settles to.
+ *
+ * The complaint this measures: with `aa_mode` off, surfaces visibly flicker during camera
+ * motion and go quiet a moment after it stops. `image_settles_after_camera_stops` above cannot
+ * see that -- it starts measuring the frame the camera stops, so an artifact that lives only
+ * DURING motion is invisible to it, and so is any fix for one.
+ *
+ * The metric is the thing itself: sweep the camera, capture the moving frame, hold the camera
+ * dead still at that same pose until every temporal filter has converged, capture again, and
+ * take the mean per-pixel distance between the two. A renderer whose moving image already looks
+ * like its resting image scores near zero whatever its absolute look is; one that falls back to
+ * a raw stochastic sample wherever motion invalidates history scores the amplitude of that
+ * noise. Repeated over several poses so a single unlucky view cannot carry the number.
+ *
+ * `aa_mode` is forced off rather than left at whatever ships: TAA's own history blend hides
+ * exactly this artifact, which is why it only became visible when AA was turned off.
+ */
+COOPA_TEST(moving_image_matches_its_converged_image) {
+    // FIXED_DT=0, not a real step: the hold below has to converge the temporal filters WITHOUT
+    // advancing the world, or the scene's own water, foliage and sky move during it and swamp
+    // the measurement -- at 1/60 they contributed 2.24 of a 2.26 gap, i.e. essentially all of
+    // it. Frame indices still advance with time stopped, which is what the stochastic passes
+    // re-jitter on, so everything this test is about still happens.
+    ScopedEnv fixed_dt("FIXED_DT", "0");
+    ScopedEnv no_input("NO_INPUT", "1");
+
+    toy::core::AppConfig config = make_shipped_config(voxel_terrain_demo(), 1920, 1080);
+    // Same exclusion the settle test above makes, for the same reason: eye adaptation re-meters
+    // after a rotation and glides exposure for a second afterwards, which is an intended global
+    // change, not a renderer failing to track its own converged image.
+    config.render.auto_exposure_enabled = false;
+    config.render.aa_mode = "off";
+    // `TOY_FLICKER_SHADOWS=cubeworld` swaps in the shadow block the game that reported this
+    // artifact actually ships (cubeworld's assets/config.yaml), which is the ONLY part of its
+    // render config that differs from toyengine's: PCSS on, the ultra tier's tap counts, a
+    // 4096 map, and a focus fit that re-fits the cascade around a point 20 m from the camera
+    // -- i.e. a shadow map whose texel grid is re-chosen as the camera moves. Everything the
+    // screen-space toggles above cover is identical between the two configs.
+    if (const char* preset = std::getenv("TOY_FLICKER_SHADOWS");
+        preset != nullptr && std::string(preset) == "cubeworld") {
+        config.render.shadow_quality             = toy::render::RenderQuality::Ultra;
+        config.render.shadow_map_resolution      = 4096;
+        config.render.shadow_distance            = 55.0f;
+        config.render.shadow_fit                 = "focus";
+        config.render.shadow_focus_radius        = 20.0f;
+        config.render.shadow_pcf_max_texels      = 32.0f;
+        config.render.shadow_pcss_enabled        = true;
+        config.render.shadow_receiver_plane_bias = true;
+        config.render.shadow_softness            = 0.35f;
+    }
+    const std::string disabled = apply_flicker_overrides(config.render);
+    expect(config.render.debug_view == "off",
+           "motion: the shipped config is rendering the image, not a debug channel");
+
+    toy::core::Engine engine(std::move(config));
+
+    auto* camera = coopa::gfx::engine::components::CameraComponent::main();
+    expect(camera != nullptr && camera->scene != nullptr && camera->owner != nullptr,
+           "motion: the scene has a main camera");
+    if (camera == nullptr || camera->scene == nullptr || camera->owner == nullptr) return;
+
+    auto* terrain = camera->scene->find_first_component<toy::world::TerrainComponent>();
+    auto* controller = camera->owner->get_component<toy::scene::CameraController>();
+    expect(terrain != nullptr && controller != nullptr,
+           "motion: the scene has a Terrain and a CameraController");
+    if (terrain == nullptr || controller == nullptr) return;
+
+    // `TOY_FLICKER_VIEW` points the measurement at one raw intermediate buffer instead of the
+    // final image (debug_view is a runtime toggle, so it is set on the live pipeline). Measuring
+    // the same gap per channel says WHERE the moving image departs from its converged one:
+    // `albedo` is the G-buffer the surface shaders write, `ssgi`/`ssr`/`contact_shadows` are the
+    // stochastic screen-space buffers, `direct` is the lighting that depends on none of them.
+    if (const char* view = std::getenv("TOY_FLICKER_VIEW"); view != nullptr && *view != '\0') {
+        engine.render_config().debug_view = view;
+    }
+
+    shrink_terrain_and_centre(*terrain, *camera->scene);
+    controller->follow_smoothing   = 0.0f;  // the camera must stop dead, as in the settle test
+    controller->movement_smoothing = 0.0f;
+    controller->distance           = 18.0f;
+    controller->pitch_deg          = 18.0f;
+
+    tick_until(engine, 900, [&] { return count_live_chunks(*terrain) >= 25; });
+    tick_frames(engine, 90);
+
+    // Trajectory. `TOY_FLICKER_MOVE=fly` translates the orbit's target across the terrain
+    // instead of (only) swinging the camera around it: rotation at a fixed radius reveals
+    // little of what was hidden, while translation opens a fresh disocclusion behind every
+    // block edge every frame, which is the case a reprojecting temporal filter has to handle
+    // and the one a player flying over the world actually produces.
+    const char* move_env = std::getenv("TOY_FLICKER_MOVE");
+    const bool  fly      = move_env != nullptr && std::string(move_env) == "fly";
+    const float fly_step = 0.35f;   // world units per frame; ~21 u/s at 60 Hz, a brisk sprint
+
+    auto advance = [&](int frames) {
+        for (int i = 0; i < frames; ++i) {
+            if (fly) {
+                if (auto* marker = camera->scene->find_object("focus_marker")) {
+                    if (auto* tc = marker->get_transform()) {
+                        glm::vec3 p = tc->transform().position();
+                        tc->transform().set_position(p + glm::vec3(fly_step, 0.0f, 0.0f));
+                    }
+                }
+            } else {
+                controller->yaw_deg += 1.5f;
+            }
+            engine.tick();
+        }
+    };
+
+    // Walk the whole path once before measuring: terrain streams chunks in around the camera,
+    // and a chunk that arrives between the moving capture and the converged one is a difference
+    // this test must not attribute to a temporal filter. The pre-pass gets them built, and the
+    // marker is put back where it started afterwards.
+    if (fly) {
+        glm::vec3 start(0.0f);
+        if (auto* marker = camera->scene->find_object("focus_marker"))
+            if (auto* tc = marker->get_transform()) start = tc->transform().position();
+        advance(4 * (10 + 1));
+        if (auto* marker = camera->scene->find_object("focus_marker"))
+            if (auto* tc = marker->get_transform()) tc->transform().set_position(start);
+        tick_frames(engine, 60);
+    }
+
+    // Four legs. Ten frames of continuous motion before each capture puts the temporal filters
+    // in their steady MOVING state first -- the first frame or two after a standing start still
+    // carries the accumulation the camera built at rest.
+    std::vector<double> gaps, still;
+    Frame previous_pose;
+    for (int pose = 0; pose < 4; ++pose) {
+        advance(10);
+        const Frame moving = engine.capture_image(/*low_res=*/true);
+        tick_frames(engine, 60);   // the camera does not move again until the next pose
+        const Frame converged = engine.capture_image(true);
+        gaps.push_back(mean_abs_delta(moving, converged));
+
+        // Sanity: the sweep must actually change the view. A trajectory that silently fails to
+        // move the camera (a renamed follow target, a controller mode that ignores it) makes
+        // every gap below tiny for the most misleading possible reason -- the test would report
+        // a perfectly tracking renderer while measuring nothing at all.
+        if (pose > 0) {
+            const double travelled = mean_abs_delta(converged, previous_pose);
+            expect(travelled > 1.0, "motion: leg " + std::to_string(pose) + " moved the view (" +
+                                        std::to_string(travelled) + " levels/px)");
+        }
+        previous_pose = converged;
+
+        // Control: a second hold of the same length with the camera still throughout. Anything
+        // it measures is the renderer still not at rest (or the scene moving despite FIXED_DT=0)
+        // rather than an effect of camera motion, so the artifact this test is about is the
+        // first number MINUS this one. Keeping it is what makes the headline figure trustworthy
+        // -- measured without it, scene animation alone read as a 2.24 renderer failure.
+        tick_frames(engine, 60);
+        still.push_back(mean_abs_delta(converged, engine.capture_image(true)));
+    }
+
+    double sum = 0.0, still_sum = 0.0;
+    for (double g : gaps) sum += g;
+    for (double g : still) still_sum += g;
+    const double mean       = sum / double(gaps.size());
+    const double still_mean = still_sum / double(still.size());
+    const double excess     = mean - still_mean;   // the part motion is responsible for
+
+    // Printed on every run, pass or fail: this test doubles as the attribution harness for the
+    // flicker (TOY_FLICKER_OFF above), and a matrix of numbers is the whole output there.
+    const char* view_env = std::getenv("TOY_FLICKER_VIEW");
+    const char* shadow_env = std::getenv("TOY_FLICKER_SHADOWS");
+    std::cerr << "         [motion gap] move=" << (fly ? "fly" : "yaw") << " shadows="
+              << ((shadow_env != nullptr && *shadow_env != '\0') ? shadow_env : "toyengine")
+              << " disabled=" << disabled
+              << " view=" << ((view_env != nullptr && *view_env != '\0') ? view_env : "off")
+              << " motion=" << mean << " still=" << still_mean << " excess=" << excess
+              << " poses:";
+    for (double g : gaps) std::cerr << " " << g;
+    std::cerr << "\n";
+
+    expect(excess < 0.60, "motion: the moving image tracks its converged image (" +
+                              std::to_string(excess) + " levels/px above the scene's own motion)");
+}
+
+/// Pixels that sit INSIDE a flat surface: those whose 3x3 luma gradient in the supersampled
+/// reference is below `threshold` levels. The reported artifact is on the open faces of cubes
+/// and the terrain floor, not on their outlines, and a whole-frame mean is dominated by the
+/// outlines -- every silhouette legitimately moves several levels per frame under any camera
+/// motion, which buries a face-interior shimmer an order of magnitude smaller. Masking to the
+/// interiors measures the thing being complained about.
+static std::vector<uint8_t> flat_interior_mask(const Frame& f, int threshold = 6) {
+    std::vector<uint8_t> mask(size_t(f.width) * f.height, 0);
+    auto luma = [&](uint32_t x, uint32_t y) {
+        const size_t i = (size_t(y) * f.width + x) * f.channels;
+        return int(f.pixels[i]) + int(f.pixels[i + 1]) + int(f.pixels[i + 2]);
+    };
+    for (uint32_t y = 1; y + 1 < f.height; ++y) {
+        for (uint32_t x = 1; x + 1 < f.width; ++x) {
+            const int c = luma(x, y);
+            int worst = 0;
+            for (int dy = -1; dy <= 1; ++dy)
+                for (int dx = -1; dx <= 1; ++dx)
+                    worst = std::max(worst, std::abs(luma(x + dx, y + dy) - c));
+            if (worst <= threshold * 3) mask[size_t(y) * f.width + x] = 1;
+        }
+    }
+    return mask;
+}
+
+/// mean_abs_delta restricted to the masked pixels, and the fraction of the frame they cover.
+static std::pair<double, double> masked_mean_abs_delta(const Frame& a, const Frame& b,
+                                                       const std::vector<uint8_t>& mask) {
+    if (!same_extent(a, b) || mask.size() != size_t(a.width) * a.height) return {-1.0, 0.0};
+    double acc = 0.0;
+    long long n = 0;
+    for (size_t p = 0; p < mask.size(); ++p) {
+        if (mask[p] == 0) continue;
+        const size_t i = p * a.channels;
+        acc += std::abs(int(a.pixels[i]) - int(b.pixels[i]));
+        ++n;
+    }
+    return {n > 0 ? acc / double(n) : 0.0, double(n) / double(mask.size())};
+}
+
+/// SSR's per-frame parameters, applied to the LIVE pipeline config rather than to the AppConfig.
+/// `ssr_quality` is a preset that rewrites several of them when the render config is built, so a
+/// value set before construction never reaches the pipeline -- the probe then reads exactly like
+/// the baseline, which is indistinguishable from "this parameter does not matter". Verified by
+/// the [effective] line each test prints.
+static void apply_live_ssr_overrides(toy::render::ToyRenderConfig& rc) {
+    const char* raw = std::getenv("TOY_FLICKER_OFF");
+    if (raw == nullptr) return;
+    const std::string list(raw);
+    auto tok = [&](const char* name) {
+        for (size_t b = 0, e; b <= list.size(); b = e + 1) {
+            e = list.find(',', b);
+            if (e == std::string::npos) e = list.size();
+            if (e > b && list.compare(b, e - b, name) == 0) return true;
+        }
+        return false;
+    };
+    if (tok("ssrjitter")) rc.ssr_jitter          = 0.0f;  // same ray every frame
+    if (tok("ssrblur"))   rc.ssr_blur_radius     = 3.0f;  // wider spatial denoise
+    if (tok("ssrfast"))   rc.ssr_temporal_frames = 8;     // converge in 8 frames, not 32
+    if (tok("ssrslow"))   rc.ssr_temporal_frames = 128;   // converge far slower
+    if (tok("ssrnotemporal")) rc.ssr_temporal_enabled = false;  // no accumulation at all
+}
+
+/// Box-downsamples a capture by an integer factor. The supersampling reference below needs the
+/// two sequences at one size to be comparable at all, and a box filter over whole texels is the
+/// honest reconstruction: it is what the 1x render would produce if its shading were band-limited.
+static Frame box_downsample(const Frame& src, uint32_t factor) {
+    Frame out;
+    out.width    = src.width / factor;
+    out.height   = src.height / factor;
+    out.channels = src.channels;
+    out.pixels.assign(size_t(out.width) * out.height * out.channels, 0);
+    const uint32_t taps = factor * factor;
+    for (uint32_t y = 0; y < out.height; ++y) {
+        for (uint32_t x = 0; x < out.width; ++x) {
+            for (uint32_t c = 0; c < out.channels; ++c) {
+                uint32_t sum = 0;
+                for (uint32_t sy = 0; sy < factor; ++sy) {
+                    for (uint32_t sx = 0; sx < factor; ++sx) {
+                        const size_t si = ((size_t(y) * factor + sy) * src.width +
+                                           (size_t(x) * factor + sx)) * src.channels + c;
+                        sum += src.pixels[si];
+                    }
+                }
+                out.pixels[(size_t(y) * out.width + x) * out.channels + c] =
+                    uint8_t((sum + taps / 2) / taps);
+            }
+        }
+    }
+    return out;
+}
+
+/// Renders the shared trajectory and returns one capture per step, at `rw` x `rh`.
+/// `shade` is applied to the live pipeline so a caller can measure one raw channel.
+static std::vector<Frame> sweep_frames(uint32_t rw, uint32_t rh, const std::string& shade) {
+    toy::core::AppConfig config = make_shipped_config(voxel_terrain_demo(), rw, rh);
+    config.render.auto_exposure_enabled = false;
+    config.render.aa_mode = "off";          // the configuration the artifact was reported under
+    toy::core::Engine engine(std::move(config));
+    if (!shade.empty()) engine.render_config().debug_view = shade;
+
+    auto* camera = coopa::gfx::engine::components::CameraComponent::main();
+    if (camera == nullptr || camera->scene == nullptr || camera->owner == nullptr) return {};
+    auto* terrain = camera->scene->find_first_component<toy::world::TerrainComponent>();
+    auto* controller = camera->owner->get_component<toy::scene::CameraController>();
+    if (terrain == nullptr || controller == nullptr) return {};
+
+    shrink_terrain_and_centre(*terrain, *camera->scene);
+    controller->follow_smoothing   = 0.0f;
+    controller->movement_smoothing = 0.0f;
+    controller->distance           = 18.0f;
+    controller->pitch_deg          = 18.0f;
+
+    tick_until(engine, 900, [&] { return count_live_chunks(*terrain) >= 25; });
+    tick_frames(engine, 90);
+
+    // A deliberately SLOW sweep: 0.12 deg/frame is a fraction of a pixel of screen motion at
+    // this field of view, so a correctly filtered image may only change a little between
+    // frames. Crawl is precisely the failure to do that -- an aliased surface re-snaps its
+    // detail to the pixel grid on a sub-pixel move -- so a slow sweep separates the two where
+    // a fast one buries both under honest parallax.
+    std::vector<Frame> frames;
+    for (int i = 0; i < 12; ++i) {
+        controller->yaw_deg += 0.12f;
+        engine.tick();
+        frames.push_back(engine.capture_image(/*low_res=*/true));
+    }
+    return frames;
+}
+
+/**
+ * @brief Under sub-pixel camera motion the image must change no faster than the true image does.
+ *
+ * The other half of "flickers while moving, settles when stopped". A temporal filter that has
+ * not converged produces it (that is what moving_image_matches_its_converged_image measures),
+ * but so does plain spatial aliasing: an under-filtered surface is a DETERMINISTIC function of
+ * the camera pose, so it is perfectly still at rest and crawls the instant the pose moves, and
+ * no temporal measurement can see it -- at a repeated pose it reproduces exactly.
+ *
+ * What separates them is a reference image that cannot alias. The same trajectory is rendered
+ * twice, once at the test resolution and once at twice it, and the high-resolution sequence is
+ * box-downsampled back. Both sequences then show the same content; the supersampled one just
+ * resolves detail the other has to fold. If the 1x image changes much more per frame than the
+ * supersampled one does, the excess is detail crawling across the pixel grid -- shimmer -- and
+ * not anything the scene is actually doing.
+ */
+COOPA_TEST(sub_pixel_motion_does_not_crawl) {
+    ScopedEnv fixed_dt("FIXED_DT", "0");
+    ScopedEnv no_input("NO_INPUT", "1");
+
+    const char* shade_env = std::getenv("TOY_CRAWL_VIEW");
+    const std::string shade = (shade_env != nullptr) ? shade_env : "";
+
+    const std::vector<Frame> native = sweep_frames(960, 540, shade);
+    const std::vector<Frame> super  = sweep_frames(1920, 1080, shade);
+    expect(native.size() == super.size() && !native.empty(), "crawl: both sweeps rendered");
+    if (native.size() != super.size() || native.empty()) return;
+
+    double native_step = 0.0, super_step = 0.0;
+    for (size_t i = 1; i < native.size(); ++i) {
+        native_step += mean_abs_delta(native[i], native[i - 1]);
+        const Frame a = box_downsample(super[i], 2);
+        const Frame b = box_downsample(super[i - 1], 2);
+        super_step += mean_abs_delta(a, b);
+    }
+    native_step /= double(native.size() - 1);
+    super_step  /= double(native.size() - 1);
+    const double ratio = super_step > 1e-9 ? native_step / super_step : 0.0;
+
+    std::cerr << "         [crawl] view=" << (shade.empty() ? "final" : shade)
+              << " native_step=" << native_step << " supersampled_step=" << super_step
+              << " ratio=" << ratio << "\n";
+
+    expect(ratio < 1.35, "crawl: sub-pixel motion moves the image no faster than the true image (" +
+                             std::to_string(ratio) + "x)");
+}
+
+/// The game this artifact was reported from, its own config and project root (so its assets and
+/// its `assets/config.yaml` are what load). Overridable with TOY_GAME_DIR / TOY_GAME_SCENE.
+static std::filesystem::path game_dir() {
+    const char* env = std::getenv("TOY_GAME_DIR");
+    return (env != nullptr && *env != '\0') ? std::filesystem::path(env)
+                                            : std::filesystem::path("/home/coopa/git/cubeworld");
+}
+
+/// Renders the slow sub-pixel sweep on the game's own scene at `rw` x `rh`.
+static std::vector<Frame> game_sweep(uint32_t rw, uint32_t rh, const std::string& shade) {
+    const std::filesystem::path root = game_dir();
+    const char* scene_env = std::getenv("TOY_GAME_SCENE");
+    const std::string scene = (scene_env != nullptr && *scene_env != '\0')
+        ? scene_env : "assets/scenes/islands/greenhollow/scene.yaml";
+
+    toy::core::AppConfig config = toy::core::AppConfig::load((root / "assets/config.yaml").string());
+    config.window.width   = rw * 2;
+    config.window.height  = rh * 2;
+    config.window.visible = false;
+    config.window.vsync   = false;
+    config.render.render_width  = rw;
+    config.render.render_height = rh;
+    config.render.auto_exposure_enabled = false;
+    // The game's HUD and its inventory panel cover a large, permanently static part of the
+    // frame. They pass the flat-interior test and never change, so leaving them in halves the
+    // measured per-frame delta of whatever the terrain is doing underneath.
+    config.render.screen_ui_enabled = false;
+    config.render.world_ui_enabled  = false;
+    config.scene.default_scene  = scene;
+    config.output.save_on_exit  = false;
+
+    toy::core::EngineOptions options;
+    options.project_root = root;
+    options.boot_splash  = false;
+    options.set_app_icon = false;
+    toy::core::Engine engine(std::move(config), options);
+    if (!shade.empty()) engine.render_config().debug_view = shade;
+
+    auto* camera = coopa::gfx::engine::components::CameraComponent::main();
+    if (camera == nullptr || camera->scene == nullptr || camera->owner == nullptr) return {};
+    auto* controller = camera->owner->get_component<toy::scene::CameraController>();
+    if (controller == nullptr) return {};
+    controller->follow_smoothing   = 0.0f;
+    controller->movement_smoothing = 0.0f;
+
+    // The world streams terrain around the camera and this one is far larger than the test
+    // scene's, so give it a real budget before anything is measured.
+    // `TOY_CRAWL_MOVE=run` drives the orbit target across the world at a player's running
+    // speed instead of swinging the camera around a fixed point. Rotation at a fixed radius
+    // changes almost no distances, so it exercises neither terrain streaming, nor mesh LOD, nor
+    // a shadow cascade re-fitting around a moving focus point -- all of which a player running
+    // across the island does continuously, and all of which stop the moment they stand still.
+    const char* move_env = std::getenv("TOY_CRAWL_MOVE");
+    const std::string move = (move_env != nullptr) ? move_env : "";
+    const bool  run  = move == "run";
+    // `hold` keeps the camera completely still. With a live clock that isolates what the WORLD
+    // does per frame -- water, foliage, the sun, the streamer -- from what camera motion adds,
+    // which is the difference between "my scene animates" and "my renderer flickers when I move".
+    const bool  hold = move == "hold";
+    const float run_step = 0.12f;           // world units per frame; ~7 u/s at 60 Hz
+    // Move the object the orbit FOLLOWS, not the controller's static `target`: this scene tracks
+    // the player, so `target` is an unused (0,0,0) and writing it teleports the camera off the
+    // island to the world origin, where the measurement is of empty sky. Moving the tracked
+    // object is also what a player does.
+    coopa::scene::SceneObject* runner =
+        run ? camera->scene->find_object(controller->tracker) : nullptr;
+    if (run && runner == nullptr) {
+        std::cerr << "         [sweep] no tracker object '" << controller->tracker
+                  << "' to drive; refusing to measure a camera that will not move\n";
+        return {};
+    }
+    const glm::vec3 start_pos =
+        runner != nullptr ? runner->get_transform()->transform().position() : glm::vec3(0.0f);
+
+    auto advance = [&](int frames) {
+        for (int i = 0; i < frames; ++i) {
+            if (runner != nullptr) {
+                auto& t = runner->get_transform()->transform();
+                t.set_position(t.position() + glm::vec3(run_step, 0.0f, 0.0f));
+            } else if (!hold) {
+                controller->yaw_deg += 0.12f;
+            }
+            engine.tick();
+        }
+    };
+
+    if (auto* terrain = camera->scene->find_first_component<toy::world::TerrainComponent>())
+        tick_until(engine, 1800, [&] { return count_live_chunks(*terrain) >= 20; });
+    tick_frames(engine, 150);
+
+    // Walk the path once so the terrain along it is already streamed, then start over: a chunk
+    // arriving mid-measurement is a real difference that belongs to the streamer, not to
+    // anything this metric is about.
+    if (run) {
+        advance(14);
+        runner->get_transform()->transform().set_position(start_pos);
+        tick_frames(engine, 90);
+    }
+
+    std::vector<Frame> frames;
+    // How far the CAMERA itself travels per frame, printed with the result. Without it a bigger
+    // per-frame image delta cannot be told apart from a camera that simply moved further --
+    // under a live clock the tracked object is a physics body and can be falling.
+    double cam_travel = 0.0;
+    glm::vec3 prev_cam = camera->owner->get_transform()->transform().position();
+    for (int i = 0; i < 12; ++i) {
+        advance(1);
+        const glm::vec3 now = camera->owner->get_transform()->transform().position();
+        cam_travel += double(glm::length(now - prev_cam));
+        prev_cam = now;
+        frames.push_back(engine.capture_image(/*low_res=*/true));
+    }
+    std::cerr << "         [sweep] " << rw << "x" << rh << " camera travel/frame="
+              << (cam_travel / 12.0) << " wu\n";
+    // A consecutive PAIR at full resolution, for looking at rather than measuring. Every metric
+    // in this file reduces a frame to one number, and a number cannot show the SHAPE of an
+    // artifact -- which is what says whether it is texture crawl, a geometry seam, or a tile
+    // grid. Only from the larger sweep, so the two sizes do not overwrite each other.
+    if (std::getenv("TOY_CRAWL_DUMP") != nullptr && rw >= 1920) {
+        dump_frame(frames[6], "pair_a");
+        dump_frame(frames[7], "pair_b");
+    }
+    return frames;
+}
+
+/**
+ * @brief The same crawl contract as sub_pixel_motion_does_not_crawl, on the GAME's own scene.
+ *
+ * Needed because the measurement is only as good as the content it runs on. terrain_demo is a
+ * ~200-unit world of bare blocks; the reported artifact is in a 2048-unit island with water,
+ * snow and foliage, whose scene file turns AA off in its own settings. Both the world scale and
+ * the surface mix are things an aliasing or precision artifact is sensitive to, so a clean
+ * number on the small scene proves nothing about the big one.
+ */
+COOPA_TEST(game_scene_sub_pixel_motion_does_not_crawl) {
+    // The supersampled reference makes a LIVE clock safe here, unlike the converged-image
+    // metrics: both sweeps step the same FIXED_DT over the same seeded world, so the scene's own
+    // animation appears identically in both and cancels out of the ratio. TOY_CRAWL_DT=0.0166
+    // therefore measures aliasing with water, foliage, the sun and the streamer all running.
+    const char* dt_env = std::getenv("TOY_CRAWL_DT");
+    ScopedEnv fixed_dt("FIXED_DT", (dt_env != nullptr && *dt_env != '\0') ? dt_env : "0");
+    ScopedEnv no_input("NO_INPUT", "1");
+
+    if (!std::filesystem::exists(game_dir() / "assets/config.yaml")) {
+        std::cerr << "         [crawl] no game at " << game_dir() << ", skipping\n";
+        return;
+    }
+    const char* shade_env = std::getenv("TOY_CRAWL_VIEW");
+    const std::string shade = (shade_env != nullptr) ? shade_env : "";
+
+    const std::vector<Frame> native = game_sweep(960, 540, shade);
+    const std::vector<Frame> super  = game_sweep(1920, 1080, shade);
+    expect(native.size() == super.size() && !native.empty(), "game crawl: both sweeps rendered");
+    if (native.size() != super.size() || native.empty()) return;
+
+    double native_step = 0.0, super_step = 0.0, flat_native = 0.0, flat_super = 0.0, cover = 0.0;
+    for (size_t i = 1; i < native.size(); ++i) {
+        const Frame sa = box_downsample(super[i], 2);
+        const Frame sb = box_downsample(super[i - 1], 2);
+        native_step += mean_abs_delta(native[i], native[i - 1]);
+        super_step  += mean_abs_delta(sa, sb);
+        const std::vector<uint8_t> mask = flat_interior_mask(sb);
+        const auto fn = masked_mean_abs_delta(native[i], native[i - 1], mask);
+        const auto fs = masked_mean_abs_delta(sa, sb, mask);
+        flat_native += fn.first;
+        flat_super  += fs.first;
+        cover       += fn.second;
+    }
+    const double legs = double(native.size() - 1);
+    native_step /= legs; super_step /= legs; flat_native /= legs; flat_super /= legs; cover /= legs;
+    const double ratio      = super_step > 1e-9 ? native_step / super_step : 0.0;
+    const double flat_ratio = flat_super > 1e-9 ? flat_native / flat_super : 0.0;
+
+    std::cerr << "         [game crawl] view=" << (shade.empty() ? "final" : shade)
+              << " native_step=" << native_step << " supersampled_step=" << super_step
+              << " ratio=" << ratio << " | flat interiors (" << (cover * 100.0) << "% of frame)"
+              << " native=" << flat_native << " supersampled=" << flat_super
+              << " ratio=" << flat_ratio << "\n";
+
+    expect(ratio < 1.35, "game crawl: sub-pixel motion moves the image no faster than the true "
+                         "image (" + std::to_string(ratio) + "x)");
+}
+
+/// Runs the slow sweep on the game's scene with the editor's own presentation setup:
+/// `resolution_mode: fill` at `render_height`, displayed into a `win_w` x `win_h` region, and
+/// captured at DISPLAY resolution (after the render -> display resample) rather than at render
+/// resolution. render_height == win_h makes that resample 1:1 and is the control.
+static std::vector<Frame> game_display_sweep(uint32_t win_w, uint32_t win_h, uint32_t render_height) {
+    const std::filesystem::path root = game_dir();
+    const char* scene_env = std::getenv("TOY_GAME_SCENE");
+    const std::string scene = (scene_env != nullptr && *scene_env != '\0')
+        ? scene_env : "assets/scenes/islands/greenhollow/scene.yaml";
+
+    toy::core::AppConfig config = toy::core::AppConfig::load((root / "assets/config.yaml").string());
+    config.window.width   = win_w;
+    config.window.height  = win_h;
+    config.window.visible = false;
+    config.window.vsync   = false;
+    config.render.resolution_mode = "fill";       // apply_editor_render_overrides()
+    config.render.upscale_mode    = "fit";
+    config.render.render_height   = render_height;
+    // Eye adaptation re-meters the whole frame every frame and eases exposure toward it, so
+    // camera motion drives a global brightness glide that settles once the camera does. Every
+    // measurement in this file excludes it to see past it; TOY_CRAWL_EXPOSURE puts the shipped
+    // behaviour back, because "the surfaces shimmer while I move" is also what that glide looks
+    // like on a frame full of large flat faces.
+    config.render.auto_exposure_enabled = std::getenv("TOY_CRAWL_EXPOSURE") != nullptr;
+    // The game's HUD and its inventory panel cover a large, permanently static part of the
+    // frame. They pass the flat-interior test and never change, so leaving them in halves the
+    // measured per-frame delta of whatever the terrain is doing underneath.
+    config.render.screen_ui_enabled = false;
+    config.render.world_ui_enabled  = false;
+    apply_flicker_overrides(config.render);
+    config.scene.default_scene  = scene;
+    config.output.save_on_exit  = false;
+
+    toy::core::EngineOptions options;
+    options.project_root = root;
+    options.boot_splash  = false;
+    options.set_app_icon = false;
+    toy::core::Engine engine(std::move(config), options);
+
+    auto* camera = coopa::gfx::engine::components::CameraComponent::main();
+    if (camera == nullptr || camera->scene == nullptr || camera->owner == nullptr) return {};
+    auto* controller = camera->owner->get_component<toy::scene::CameraController>();
+    if (controller == nullptr) return {};
+    controller->follow_smoothing   = 0.0f;
+    controller->movement_smoothing = 0.0f;
+    // The recordings are taken from the game's own orbit distance looking down at the ground a
+    // few metres away, not from the wide establishing pose the scene happens to load at -- and
+    // ground that fills the frame is the whole subject of the measurement.
+    controller->distance  = 24.0f;
+    controller->pitch_deg = 50.0f;
+
+    if (auto* terrain = camera->scene->find_first_component<toy::world::TerrainComponent>())
+        tick_until(engine, 1800, [&] { return count_live_chunks(*terrain) >= 20; });
+    tick_frames(engine, 150);
+
+    const char* speed_env = std::getenv("TOY_CRAWL_SPEED");
+    const float speed = (speed_env != nullptr) ? float(std::atof(speed_env)) : 0.12f;
+    std::vector<Frame> frames;
+    for (int i = 0; i < 12; ++i) {
+        controller->yaw_deg += speed;
+        engine.tick();
+        frames.push_back(engine.capture_image(/*low_res=*/false));
+    }
+    std::cerr << "         [display sweep] render=" << engine.pipeline().render_width() << "x"
+              << engine.pipeline().render_height() << " capture=" << frames[0].width << "x"
+              << frames[0].height << " live_chunks="
+              << (camera->scene->find_first_component<toy::world::TerrainComponent>()
+                      ? count_live_chunks(*camera->scene->find_first_component<toy::world::TerrainComponent>()) : -1)
+              << "\n";
+    if (std::getenv("TOY_CRAWL_DUMP") != nullptr)
+        dump_frame(frames[0], "display_sweep_" + std::to_string(render_height));
+    return frames;
+}
+
+/**
+ * @brief Presenting the render target into a SMALLER display region must not make the image
+ *        crawl under camera motion.
+ *
+ * Where the reported flicker lives. Every measurement above captures the render target, which
+ * is clean -- but that is not what anyone looks at. The composite resamples the render target
+ * into the display region with a NEAREST sampler, which is right for the pixel-art upscale it
+ * was written for (window larger than the render target) and is point-sampled MINIFICATION the
+ * moment the display region is smaller. The editor makes it smaller as a matter of course:
+ * `apply_editor_render_overrides()` switches the project to `resolution_mode: fill`, which
+ * keeps the project's `render_height` -- 1080 -- while the viewport panel inside the editor
+ * window is a few hundred pixels shorter.
+ *
+ * Point-sampled minification keeps one source texel per destination pixel and discards the
+ * rest, so which detail survives is re-chosen every time the camera moves a fraction of a
+ * pixel, and stops being re-chosen the moment it holds still. That is the complaint exactly:
+ * flat, finely detailed faces sparkle while moving and settle when stopped, with AA and AO
+ * making no difference -- neither is in this path.
+ *
+ * The control renders at the display height, so the same frame reaches the screen through a
+ * 1:1 copy. Any excess the downscaled run shows over it belongs to the resample.
+ */
+COOPA_TEST(display_downscale_does_not_crawl) {
+    ScopedEnv fixed_dt("FIXED_DT", "0");
+    ScopedEnv no_input("NO_INPUT", "1");
+
+    if (!std::filesystem::exists(game_dir() / "assets/config.yaml")) {
+        std::cerr << "         [downscale] no game at " << game_dir() << ", skipping\n";
+        return;
+    }
+
+    // 998 x 730 is the editor window in the recordings this came from; 1080 is the project's
+    // render_height, which fill mode keeps.
+    const std::vector<Frame> downscaled = game_display_sweep(998, 730, 1080);
+    const std::vector<Frame> one_to_one = game_display_sweep(998, 730, 730);
+    expect(downscaled.size() == one_to_one.size() && !downscaled.empty(),
+           "downscale: both sweeps rendered");
+    if (downscaled.size() != one_to_one.size() || downscaled.empty()) return;
+
+    double down_flat = 0.0, flat_1to1 = 0.0, cover = 0.0;
+    for (size_t i = 1; i < downscaled.size(); ++i) {
+        const std::vector<uint8_t> mask = flat_interior_mask(one_to_one[i - 1]);
+        const auto d = masked_mean_abs_delta(downscaled[i], downscaled[i - 1], mask);
+        const auto o = masked_mean_abs_delta(one_to_one[i], one_to_one[i - 1], mask);
+        down_flat += d.first;
+        flat_1to1 += o.first;
+        cover     += o.second;
+    }
+    const double legs = double(downscaled.size() - 1);
+    down_flat /= legs; flat_1to1 /= legs; cover /= legs;
+    const double ratio = flat_1to1 > 1e-9 ? down_flat / flat_1to1 : 0.0;
+
+    std::cerr << "         [downscale] flat interiors (" << (cover * 100.0) << "% of frame)"
+              << " render1080->display730=" << down_flat
+              << " render730->display730=" << flat_1to1 << " ratio=" << ratio << "\n";
+
+    expect(ratio < 1.5, "downscale: presenting into a smaller region does not add crawl (" +
+                            std::to_string(ratio) + "x)");
+}
+
+/**
+ * @brief The converged-image contract, on the game's own scene with the camera TRANSLATING.
+ *
+ * moving_image_matches_its_converged_image swings the camera around a fixed point on a small
+ * test world. Orbiting at a fixed radius barely changes any distance, so it exercises almost no
+ * disocclusion, no terrain streaming, no mesh LOD switch and no shadow cascade re-fit -- the
+ * things a player running across the island drives continuously, and the things that stop the
+ * instant they stand still. This is that case: the followed object is walked across the world,
+ * on the content the artifact was reported from.
+ *
+ * FIXED_DT=0 throughout, so the still-camera control is a true zero and the headline number
+ * needs no subtraction -- see this file's other tests for what a live clock does to it.
+ */
+COOPA_TEST(game_running_image_matches_its_converged_image) {
+    ScopedEnv fixed_dt("FIXED_DT", "0");
+    ScopedEnv no_input("NO_INPUT", "1");
+
+    if (!std::filesystem::exists(game_dir() / "assets/config.yaml")) {
+        std::cerr << "         [game motion] no game at " << game_dir() << ", skipping\n";
+        return;
+    }
+
+    const std::filesystem::path root = game_dir();
+    const char* scene_env = std::getenv("TOY_GAME_SCENE");
+    const std::string scene = (scene_env != nullptr && *scene_env != '\0')
+        ? scene_env : "assets/scenes/islands/greenhollow/scene.yaml";
+
+    toy::core::AppConfig config = toy::core::AppConfig::load((root / "assets/config.yaml").string());
+    config.window.width   = 1920;
+    config.window.height  = 1080;
+    config.window.visible = false;
+    config.window.vsync   = false;
+    config.render.render_width  = 1920;
+    config.render.render_height = 1080;
+    config.render.auto_exposure_enabled = false;
+    config.render.screen_ui_enabled = false;
+    config.render.world_ui_enabled  = false;
+    const std::string disabled = apply_flicker_overrides(config.render);
+    config.scene.default_scene  = scene;
+    config.output.save_on_exit  = false;
+
+    toy::core::EngineOptions options;
+    options.project_root = root;
+    options.boot_splash  = false;
+    options.set_app_icon = false;
+    toy::core::Engine engine(std::move(config), options);
+
+    auto* camera = coopa::gfx::engine::components::CameraComponent::main();
+    expect(camera != nullptr && camera->scene != nullptr && camera->owner != nullptr,
+           "game motion: the scene has a main camera");
+    if (camera == nullptr || camera->scene == nullptr || camera->owner == nullptr) return;
+    auto* controller = camera->owner->get_component<toy::scene::CameraController>();
+    expect(controller != nullptr, "game motion: the camera has a controller");
+    if (controller == nullptr) return;
+    controller->follow_smoothing   = 0.0f;   // stop dead, so the tail measured is the renderer's
+    controller->movement_smoothing = 0.0f;
+    controller->distance  = 24.0f;
+    controller->pitch_deg = 50.0f;
+
+    apply_live_ssr_overrides(engine.render_config());
+
+    // What the pipeline ACTUALLY ended up with. `ssr_quality` is a preset that writes several
+    // of these, so a value set on the AppConfig can be silently overwritten before the pipeline
+    // sees it -- which makes a parameter probe come back reading exactly like the baseline, for
+    // the one reason that looks identical to "this parameter does not matter".
+    {
+        const auto& rc = engine.pipeline().render_config();
+        std::cerr << "         [effective] ssr=" << rc.ssr_enabled << " jitter=" << rc.ssr_jitter
+                  << " blur_radius=" << rc.ssr_blur_radius
+                  << " temporal_frames=" << rc.ssr_temporal_frames
+                  << " half_res=" << rc.ssr_half_res
+                  << " temporal_enabled=" << rc.ssr_temporal_enabled << "\n";
+    }
+
+    coopa::scene::SceneObject* runner = camera->scene->find_object(controller->tracker);
+    expect(runner != nullptr && runner->get_transform() != nullptr,
+           "game motion: the orbit's tracked object exists to drive");
+    if (runner == nullptr || runner->get_transform() == nullptr) return;
+
+    if (auto* terrain = camera->scene->find_first_component<toy::world::TerrainComponent>())
+        tick_until(engine, 1800, [&] { return count_live_chunks(*terrain) >= 20; });
+    tick_frames(engine, 150);
+
+    auto run_frames = [&](int frames) {
+        for (int i = 0; i < frames; ++i) {
+            auto& t = runner->get_transform()->transform();
+            t.set_position(t.position() + glm::vec3(0.12f, 0.0f, 0.0f));
+            engine.tick();
+        }
+    };
+
+    std::vector<double> gaps, still;
+    for (int leg = 0; leg < 4; ++leg) {
+        run_frames(10);
+        const Frame moving = engine.capture_image(/*low_res=*/true);
+        tick_frames(engine, 60);                       // stand still and let everything converge
+        const Frame converged = engine.capture_image(true);
+        gaps.push_back(mean_abs_delta(moving, converged));
+        tick_frames(engine, 60);                       // control: still standing still
+        still.push_back(mean_abs_delta(converged, engine.capture_image(true)));
+    }
+
+    double sum = 0.0, still_sum = 0.0;
+    for (double g : gaps)  sum += g;
+    for (double g : still) still_sum += g;
+    const double mean       = sum / double(gaps.size());
+    const double still_mean = still_sum / double(still.size());
+
+    std::cerr << "         [game motion] disabled=" << disabled << " motion=" << mean
+              << " still=" << still_mean << " excess=" << (mean - still_mean) << " legs:";
+    for (double g : gaps) std::cerr << " " << g;
+    std::cerr << "\n";
+
+    expect(mean - still_mean < 0.60,
+           "game motion: a running camera's image tracks its converged image (" +
+               std::to_string(mean - still_mean) + " levels/px)");
+}
+
+/**
+ * @brief No pixel of the game's scene is decided by a coplanar depth TIE.
+ *
+ * The hypothesis every other test in this file is structurally blind to: two faces occupying
+ * the same plane, with the depth test picking between them per pixel. Such a pixel is a
+ * deterministic function of the camera pose, so it is perfectly still at rest and re-decides
+ * itself the moment the pose moves -- "flickers while moving, settles when stopped" -- and it
+ * is decided in the depth test, so turning every render feature off changes nothing about it.
+ * A metric that compares two frames at the SAME pose (moving vs converged) cancels it exactly,
+ * and a supersampled reference reproduces it identically, which is why both read clean.
+ *
+ * The probe is exact rather than statistical. `VK_COMPARE_OP_LESS` and `_LESS_OR_EQUAL` give
+ * different answers for one input only: fragments at EQUAL depth, where LESS keeps the first
+ * drawn and LEQUAL the last. Everything else in the frame -- every ordering, every shaded
+ * value -- is bit-identical between the two. So the pixels that change ARE the coplanar ties,
+ * with no threshold to tune and nothing else able to contaminate the count.
+ *
+ * Rendered as raw G-buffer albedo (debug_view), so a tie shows up as the two surfaces' own
+ * colours rather than as a lighting difference, and so no temporal filter is in the path.
+ */
+COOPA_TEST(no_coplanar_depth_ties) {
+    ScopedEnv fixed_dt("FIXED_DT", "0");
+    ScopedEnv no_input("NO_INPUT", "1");
+
+    if (!std::filesystem::exists(game_dir() / "assets/config.yaml")) {
+        std::cerr << "         [ties] no game at " << game_dir() << ", skipping\n";
+        return;
+    }
+    const std::filesystem::path root = game_dir();
+    const char* scene_env = std::getenv("TOY_GAME_SCENE");
+    const std::string scene = (scene_env != nullptr && *scene_env != '\0')
+        ? scene_env : "assets/scenes/islands/greenhollow/scene.yaml";
+
+    auto capture_once = [&](bool leq) {
+        toy::core::AppConfig config = toy::core::AppConfig::load((root / "assets/config.yaml").string());
+        config.window.width   = 1920;
+        config.window.height  = 1080;
+        config.window.visible = false;
+        config.window.vsync   = false;
+        config.render.render_width  = 1920;
+        config.render.render_height = 1080;
+        config.render.auto_exposure_enabled = false;
+        config.render.screen_ui_enabled = false;
+        config.render.world_ui_enabled  = false;
+        config.scene.default_scene  = scene;
+        config.output.save_on_exit  = false;
+
+        toy::core::EngineOptions options;
+        options.project_root = root;
+        options.boot_splash  = false;
+        options.set_app_icon = false;
+
+        // Set inside the lambda: gbuffer_pipeline.h reads it while BUILDING the pipeline, which
+        // happens during Engine construction, so the variable has to be live across exactly that.
+        std::unique_ptr<ScopedEnv> leq_env;
+        if (leq) leq_env = std::make_unique<ScopedEnv>("TOY_DEPTH_LEQUAL", "1");
+
+        toy::core::Engine engine(std::move(config), options);
+        engine.render_config().debug_view = "albedo";
+
+        auto* camera = coopa::gfx::engine::components::CameraComponent::main();
+        if (camera == nullptr || camera->scene == nullptr || camera->owner == nullptr) return Frame{};
+        if (auto* controller = camera->owner->get_component<toy::scene::CameraController>()) {
+            controller->follow_smoothing   = 0.0f;
+            controller->movement_smoothing = 0.0f;
+            controller->distance  = 24.0f;
+            controller->pitch_deg = 50.0f;
+        }
+        if (auto* terrain = camera->scene->find_first_component<toy::world::TerrainComponent>())
+            tick_until(engine, 1800, [&] { return count_live_chunks(*terrain) >= 20; });
+        tick_frames(engine, 150);
+        return engine.capture_image(/*low_res=*/true);
+    };
+
+    const Frame first = capture_once(false);
+    const Frame last  = capture_once(true);
+    expect(first.width > 0 && same_extent(first, last), "ties: both captures rendered");
+    if (first.width == 0 || !same_extent(first, last)) return;
+
+    const long long tied = count_diff(first, last, /*tolerance=*/2);
+    const double pct = 100.0 * double(tied) / double(first.width * first.height);
+    std::cerr << "         [ties] pixels decided by a coplanar depth tie: " << tied
+              << " (" << pct << "% of the frame)\n";
+    if (tied > 0) {
+        dump_frame(first, "depth_tie_less");
+        dump_frame(last,  "depth_tie_lequal");
+    }
+
+    expect(pct < 0.05, "ties: no meaningful part of the frame is a coplanar depth tie (" +
+                           std::to_string(pct) + "%)");
 }

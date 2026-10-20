@@ -129,7 +129,15 @@ COOPA_TEST(a_flight_costs_no_more_per_frame_than_standing_still) {
     std::printf("  flight: median %.2f ms, p95 %.2f ms, p99 %.2f ms, max %.2f ms\n", flight_median,
                 flight_p95, flight_p99, flight_max);
 
-    expect(flight_median < 1.25 * still_median,
+    // A ratio PLUS a fixed allowance, because streaming's own cost is a per-frame constant, not
+    // a proportion of the frame: measured here it is +0.46 ms (culling more chunks in view ~0.10,
+    // the snow field ~0.10, the rest spread over the scene update). The bare 1.25x ratio was
+    // calibrated when a headless frame was vsync-paced at 16.7 ms and that 0.46 ms was 3% of it;
+    // with presentation out of the measurement (vsync off is IMMEDIATE now) the same work is 20%
+    // of a 2 ms frame. The allowance is what a frame can carry without being felt; the ratio
+    // still scales it for a slower machine, and the p95/p99 checks below are what catch a bake
+    // or an upload landing unbudgeted in one frame.
+    expect(flight_median < 1.25 * still_median + 0.75,
            "flying costs about what standing still does (" + std::to_string(flight_median) + " vs " +
                std::to_string(still_median) + " ms)");
     expect(flight_p95 < 1.75 * flight_median,

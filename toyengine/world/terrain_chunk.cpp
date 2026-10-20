@@ -2,6 +2,7 @@
 
 #include <cstdlib>
 #include <algorithm>
+#include <cmath>
 
 #include <gfxcoopa/engine/data/mesh.h>
 #include <physxcoopa/geometry/triangle_mesh.h>
@@ -325,6 +326,7 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
                               along_x ? 0 : 1, 0.5f * static_cast<float>(j - i));
         i = j;
     }
+
 }
 
 void build_chunk_water(const ColumnPad& pad, const TerrainParams& params, ChunkWaterData& still,
@@ -586,11 +588,15 @@ std::vector<coopa::gfx::engine::data::MeshLod> build_chunk_lods(const TerrainPar
         if (lod.ratio <= 0.0f) break;   // a zero ratio ends the table
         levels.push_back({lod.ratio, lod.screen_size, 1.0f});
     }
-    if (levels.empty() || mesh.empty()) return {};
+    // TOY_TERRAIN_NO_LODS: diagnostic. Every chunk then draws its base level, which is what
+    // separates "the geometry is wrong" from "the COARSE geometry is wrong".
+    static const bool no_lods = std::getenv("TOY_TERRAIN_NO_LODS") != nullptr;
+    if (levels.empty() || mesh.empty() || no_lods) return {};
     const std::vector<std::uint8_t> locks = chunk_seam_locks(params, coord, mesh);
     return coopa::gfx::engine::data::Mesh::simplify_levels(mesh.vertices, mesh.indices, levels,
                                                            false, &locks);
 }
+
 
 void ChunkBuildJob::run() {
     if (library == nullptr) return;

@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <iterator>
 
 #include <coopa/maps/biome.h>
 #include <toyengine/world/terrain_component.h>
@@ -37,8 +38,13 @@ double tile_now() {
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-const char* const k_kind_names[toy::world::k_tile_kind_count] = {
-    "Grass", "Dirt", "Stone", "Sand", "Snow", "Rock", "Water", "Ice", "Moss", "Clay", "Ash", "Salt"};
+// Unsized on purpose, with the assert below: a sized array leaves a null in the gap when a kind
+// is added to TileKind and forgotten here, and kind_options() then throws building a string from
+// it -- which is a crash in the Tile Mode panel, not a compile error.
+const char* const k_kind_names[] = {"Grass", "Dirt", "Stone", "Sand", "Snow", "Rock",
+                                    "Water", "Ice",  "Moss",  "Clay", "Ash",  "Salt", "Road"};
+static_assert(std::size(k_kind_names) == toy::world::k_tile_kind_count,
+              "every TileKind needs a name here -- see tile_types.h's k_tile_kind_count");
 
 std::vector<std::string> kind_options() {
     return std::vector<std::string>(std::begin(k_kind_names), std::end(k_kind_names));

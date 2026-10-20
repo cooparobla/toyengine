@@ -22,6 +22,9 @@
 #include <gfxcoopa/pipeline/descriptor.h>
 #include <gfxcoopa/pipeline/render_pass.h>
 #include <gfxcoopa/presentation/renderer.h>
+#include <cstdio>
+#include <cstdlib>
+#include <toyengine/core/runtime_paths.h>
 #include <toyengine/render/frame_profile.h>
 #include <toyengine/render/particle_types.h>
 #include <toyengine/render/sky_state.h>
@@ -445,6 +448,10 @@ bool ToyRenderPipeline::render(coopa::gfx::presentation::Renderer& renderer, coo
     }
     const auto submit_start = std::chrono::steady_clock::now();
     double record_ms = 0.0;
+    // Split of the frame's submit half, for TOY_PRESENT_LOG below: the recording callback runs
+    // after the swapchain image has been acquired, so the time up to it is the acquire (plus
+    // the per-image fence wait), and what is left after the callback is the submit and present.
+    double acquire_ms = 0.0;
     bool frame_presented = renderer.begin_frame(
         [&](coopa::gfx::command::CommandBuffer& cmd) {
             // 1:1 over the full extent, NOT the letterbox rect: overlay_target_ is already
@@ -460,6 +467,7 @@ bool ToyRenderPipeline::render(coopa::gfx::presentation::Renderer& renderer, coo
         nullptr,
         [&](coopa::gfx::command::CommandBuffer& cmd) {
             const auto record_start = std::chrono::steady_clock::now();
+            acquire_ms = std::chrono::duration<double, std::milli>(record_start - submit_start).count();
             if (gpu_profiler_) gpu_profiler_->begin_frame(cmd, frame_slot, profile_->current_frame());
             // GPU skinning first: every pass below (shadows, G-buffer...) draws its output.
             if (skinning_pass_) skinning_pass_->record(cmd);
@@ -476,11 +484,32 @@ bool ToyRenderPipeline::render(coopa::gfx::presentation::Renderer& renderer, coo
             gpu_mark_(cmd, GpuScope::Present);   // after the swapchain copy pass
         }
     );
+    const double submit_total_ms = std::chrono::duration<double, std::milli>(
+                                       std::chrono::steady_clock::now() - submit_start).count();
     if (profile_) {
-        const double total_ms = std::chrono::duration<double, std::milli>(
-                                    std::chrono::steady_clock::now() - submit_start).count();
         profile_->add_cpu(CpuScope::Record, record_ms);
-        profile_->add_cpu(CpuScope::SubmitPresent, std::max(0.0, total_ms - record_ms));
+        profile_->add_cpu(CpuScope::SubmitPresent, std::max(0.0, submit_total_ms - record_ms));
+    }
+    // TOY_PRESENT_LOG=<ms>: diagnostic. Reports every frame whose submit half ran longer than
+    // that, split into the acquire and the submit+present, so a stall that the profile only
+    // shows as `render.submit_present` can be told apart -- blocking in
+    // vkAcquireNextImageKHR is the presentation engine holding every image (a compositor or
+    // driver pacing the window), while blocking after the recording is the submit itself.
+    // Independent of PROFILE, so it also answers whether profiling is what provoked the stall.
+    {
+        static const double log_over_ms = [] {
+            const char* v = core::debug_env("TOY_PRESENT_LOG");
+            return v != nullptr && *v != '\0' ? std::strtod(v, nullptr) : 0.0;
+        }();
+        if (log_over_ms > 0.0 && submit_total_ms > log_over_ms) {
+            std::printf("[present] frame %llu: submit half %.2f ms = acquire %.2f + record %.2f"
+                        " + queue_submit %.2f + queue_present %.2f (rest %.2f)\n",
+                        static_cast<unsigned long long>(frame_index_), submit_total_ms, acquire_ms,
+                        record_ms, renderer.last_submit_ms(), renderer.last_present_ms(),
+                        std::max(0.0, submit_total_ms - acquire_ms - record_ms -
+                                          renderer.last_submit_ms() - renderer.last_present_ms()));
+            std::fflush(stdout);
+        }
     }
 
     // Needed by both SSAO's and SSR's temporal resolve passes -- kept unconditional (not

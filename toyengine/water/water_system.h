@@ -84,10 +84,13 @@
 
 #include <physxcoopa/system/physics_system.h>
 
+#include <coopa/job/engine.h>
+
 #include <toyengine/water/buoyancy.h>
 #include <toyengine/water/water_body.h>
 #include <toyengine/water/water_flow_bake.h>
 #include <toyengine/water/water_settings.h>
+#include <toyengine/water/water_tiles.h>
 
 namespace toy {
 namespace water {
@@ -117,7 +120,15 @@ public:
                 coopa::asset::AssetManager* assets = nullptr)
         : device_(device), allocator_(allocator), assets_(assets) {}
 
-    ~WaterSystem() override { substep_connection_.disconnect(); }
+    ~WaterSystem() override {
+        substep_connection_.disconnect();
+        // Every JobHandle has to be closed or its slot leaks (see JobEngine::create_handle()).
+        // A still-running build keeps its own shared_ptr alive, so cancelling is enough here.
+        for (PendingTiles& pending : pending_tiles_) {
+            if (jobs_ != nullptr) jobs_->cancel(pending.job);
+            pending.job.close();
+        }
+    }
 
     const char* system_name() const override { return "Water"; }
 
@@ -301,15 +312,75 @@ private:
                    const ParallelFor* par = nullptr, bool flat = false);
 
     /**
-     * @brief Splits the baked surface into render tiles (water_tiles.h) and publishes them: one
-     *        tile onto the owner's MeshRenderer, several as runtime child objects (see the file
-     *        doc). `grid_res` >= 1 marks a row-major procedural grid of that many quads a side.
+     * @struct TileBuild
+     * @brief One body's tiles, built off the owner thread: the vertex stream, the split into
+     *        render tiles with their LOD chains, and the GPU meshes.
+     *
+     * This is where a bake's time goes. Measured on terrain_demo, a streamed chunk's water is
+     * ~1.5 ms of which ~1.26 ms is the tiles' LOD simplification (meshoptimizer) and 0.03 ms the
+     * upload -- so a frame that baked two of them paid 3-5 ms against a 2.2 ms median, which is
+     * a hitch while flying over water. It holds COPIES of everything it reads and is owned by a
+     * shared_ptr the job captures, so it outlives the body that asked for it (a chunk's water is
+     * destroyed the moment the chunk streams out). Mirrors ChunkBuildJob -- GPU meshes included,
+     * which is what leaves publishing nothing but the scene objects and the asset ids.
      */
-    void publish_gpu_mesh_(coopa::scene::Scene& scene, WaterBody& body, const glm::mat4& world,
-                           const std::vector<glm::vec3>& local_pos, const std::vector<uint32_t>& indices,
-                           const std::vector<glm::vec3>& flow_ws, const std::vector<float>& depth,
-                           const std::vector<float>& turbulence, const std::vector<float>& wave_scale,
-                           int grid_res);
+    struct TileBuild {
+        // --- Inputs, taken on the owner thread ---
+        std::vector<glm::vec3> local_pos;
+        std::vector<uint32_t>  indices;
+        std::vector<glm::vec3> flow_ws;
+        std::vector<float>     depth;
+        std::vector<float>     turbulence;
+        std::vector<float>     wave_scale;
+        glm::mat4          vertex_world{1.0f};  ///< Identity for a local-frame body; see make_vertices_.
+        bool               flat = false;        ///< A procedural grid: every normal is +Z.
+        int                grid_res = -1;
+        glm::vec2          body_size{0.0f};
+        float              tile_len = 0.0f;     ///< Already divided by max_scale.
+        bool               auto_tile_len = false;
+        glm::vec3          inflate{0.0f};
+        WaterTileLodParams lod;
+        coopa::gfx::core::Device*      device = nullptr;
+        coopa::gfx::memory::Allocator* allocator = nullptr;
+
+        // --- Output ---
+        std::vector<WaterTile> tiles;
+        std::vector<std::shared_ptr<coopa::gfx::engine::data::Mesh>> meshes;  ///< One per tile.
+
+        /** @brief The whole off-thread half. Serial on purpose: it already runs on a worker. */
+        void run();
+    };
+
+    /** @brief A submitted TileBuild and the body waiting for it. */
+    struct PendingTiles {
+        WaterBody*                   body = nullptr;  ///< Compared against bodies_, never dereferenced while dead.
+        std::shared_ptr<TileBuild>   build;
+        coopa::job::JobHandle        job;
+    };
+
+    /** @brief True while `body` has a TileBuild in flight (so nothing re-bakes it meanwhile). */
+    bool tiles_pending_(const WaterBody& body) const;
+
+    /**
+     * @brief Publishes every finished TileBuild and drops those whose body has gone.
+     *
+     * Called from execute() right after refresh_bodies(), so "has the body gone" is answered by
+     * this frame's list and the pointer is never dereferenced after the component died.
+     */
+    void poll_tile_builds_(coopa::scene::Scene& scene);
+
+    /** @brief Fills a TileBuild from the body, the settings and the baked surface. */
+    std::shared_ptr<TileBuild> plan_tiles_(const WaterBody& body, const glm::mat4& world,
+                                           std::vector<glm::vec3> local_pos, std::vector<uint32_t> indices,
+                                           std::vector<glm::vec3> flow_ws, std::vector<float> depth,
+                                           std::vector<float> turbulence, std::vector<float> wave_scale,
+                                           int grid_res) const;
+
+    /**
+     * @brief Publishes a built TileBuild: one tile onto the owner's MeshRenderer, several as
+     *        runtime child objects (see the file doc). Owner thread -- scene objects and assets.
+     */
+    void publish_tiles_(coopa::scene::Scene& scene, WaterBody& body, TileBuild& built);
 
     /** @brief Destroys the tile objects of `body` not carried into `keep`, and makes `keep` its tiles. */
     void retire_tiles_(WaterBody& body, std::vector<WaterBody::TileSlot> keep);
@@ -412,6 +483,13 @@ private:
     float       time_ = 0.0f;
     bool        simulating_ = false;   ///< Last execute()'s scene.is_simulating(), for render_time().
     std::size_t active_count_ = 0;
+    /// Bake milliseconds this frame has already spent (WaterSettings::bake_budget_ms). Reset by
+    /// execute(), charged by every bake_() on every exit path.
+    float       bake_spent_ms_ = 0.0f;
+    /// TileBuilds in flight on the job engine -- see poll_tile_builds_().
+    std::vector<PendingTiles> pending_tiles_;
+    /// Job type tag for this system's work, as TerrainSystem tags its chunk meshing.
+    static constexpr coopa::job::JobType k_water_job_type = 0x7E44A200u;
 
     WaterSettings settings_;
     glm::vec3     focus_{0.0f};

@@ -226,7 +226,7 @@ OverlapReport find_overlaps(const std::vector<Tri>& tris, bool verbose) {
  * this configuration -- including across PLANES (a merged wall strip meeting per-tile tops along
  * a cliff edge), so this scan is 3D, not per-plane.
  */
-long long count_t_junctions(const std::vector<Tri>& tris) {
+long long count_t_junctions(const std::vector<Tri>& tris, float min_edge = 0.0f) {
     struct Q {
         int x, y, z;
         bool operator==(const Q& o) const { return x == o.x && y == o.y && z == o.z; }
@@ -308,7 +308,7 @@ long long count_t_junctions(const std::vector<Tri>& tris) {
         const glm::vec3 a = seg.first, b = seg.second;
         const glm::vec3 ab = b - a;
         const float len2 = glm::dot(ab, ab);
-        if (len2 < 1e-10f) continue;
+        if (len2 < 1e-10f || len2 < min_edge * min_edge) continue;
         const Cell ca = cell_of(glm::min(a, b) - dist_eps), cb = cell_of(glm::max(a, b) + dist_eps);
         for (int cz = ca.z; cz <= cb.z; ++cz)
             for (int cy = ca.y; cy <= cb.y; ++cy)

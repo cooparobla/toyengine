@@ -227,6 +227,8 @@ COOPA_TEST(the_sea_floats_a_crate) {
     coopa::scene::SceneObject* raw = spawn(*p.scene, std::move(crate), p.physics);
     tick_frames(engine, 480);
     const float at = glm::length(position_of(raw));
+    // 430 m from the camera on this planet, so the crate is outside `sim_radius` and floats on
+    // the frozen path -- which is exactly the one that used to miss a local-frame sea.
     expect(buoyancy->in_water, "sea: the crate is in the water");
     expect(at > bed + 0.6f && std::abs(at - surface) < 0.6f,
            "sea: the crate floats at the surface (r " + std::to_string(at) + ", surface " + std::to_string(surface) +

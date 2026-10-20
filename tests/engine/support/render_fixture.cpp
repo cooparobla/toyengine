@@ -1,6 +1,7 @@
 /** @file render_fixture.cpp  @brief Definitions for render_fixture.h (see its file doc). */
 #include "engine/support/render_fixture.h"
 
+#include <chrono>
 #include <cstdlib>
 #include <iostream>
 
@@ -58,11 +59,21 @@ void tick_frames(toy::core::Engine& engine, int frames) {
 }
 
 int tick_until(toy::core::Engine& engine, int max_frames, const std::function<bool()>& predicate) {
-    for (int i = 0; i < max_frames; ++i) {
-        if (predicate()) return i;
+    // The budget is in frames, but what these predicates wait on is work on the job engine --
+    // a terrain bake, an async asset load -- which takes the wall time it takes however fast
+    // the ticks go. So the frames also carry the wall time they used to imply when a headless
+    // tick was paced by the swapchain (a 60 Hz cap). Without that floor, a run whose present
+    // mode never blocks -- vsync off is IMMEDIATE, see Swapchain::choose_present_mode -- spends
+    // a 600-frame budget in under two seconds, and a bake that needs four never lands.
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::microseconds(static_cast<long long>(max_frames * 1000000.0 / 60.0));
+    int frames = 0;
+    while (true) {
+        if (predicate()) return frames;
+        if (frames >= max_frames && std::chrono::steady_clock::now() >= deadline) return frames;
         engine.tick();
+        ++frames;
     }
-    return max_frames;
 }
 
 void dump_frame(const Frame& frame, std::string_view name) {

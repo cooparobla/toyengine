@@ -1,6 +1,9 @@
 #include <toyengine/water/water_system.h>
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 
 #include <coopa/asset/asset_manager.h>
 #include <coopa/event/signal.h>
@@ -32,6 +35,7 @@ void WaterSystem::execute(coopa::scene::Scene& scene, const coopa::scene::FrameC
     // or no physics) by the frame clock so CPU queries still see moving waves.
     if (!physics_ || !simulating) time_ += ctx.delta_time;
     simulating_ = simulating;
+    bake_spent_ms_ = 0.0f;   // this frame's bake budget, spent by bake_() -- see the stages below
     resolve_focus_(scene);
 
     // Depth and obstacle raycasts need PhysicsSystem's colliders, which it only gathers once
@@ -40,6 +44,9 @@ void WaterSystem::execute(coopa::scene::Scene& scene, const coopa::scene::FrameC
     const bool physics_ready = physics_ != nullptr && simulating && physics_->bound_count() > 0;
 
     refresh_bodies(scene);
+    // Tiles built on a worker since the last frame: published here, where the scene can be
+    // touched, and dropped for any body that has gone in the meantime.
+    poll_tile_builds_(scene);
     // Stage 1 for anything new, moved, or baked at another grid density: needed to be seen at
     // all, and cheap next to stage 2 (no raycasts) -- but not free, and a streamed world hands
     // several bodies over at once, so nearest first and a few per frame, like stage 2.
@@ -51,6 +58,7 @@ void WaterSystem::execute(coopa::scene::Scene& scene, const coopa::scene::FrameC
             const bool moved = body->baked && world != body->baked_world;
             const bool density = body->baked && uses_grid_(*body) && body->baked_density != settings_.grid_density;
             if (body->baked && !moved && !density) continue;
+            if (tiles_pending_(*body)) continue;   // its tiles are being built; re-bake after
             // A body that has never baked has no query bounds yet, so distance_to_body_() cannot
             // place it: its owner's position stands in, so a streamed world's nearest new water
             // (a terrain chunk's sits at its chunk origin) really is baked first.
@@ -63,6 +71,11 @@ void WaterSystem::execute(coopa::scene::Scene& scene, const coopa::scene::FrameC
                   [](const auto& a, const auto& b) { return a.first < b.first; });
         const std::size_t budget = static_cast<std::size_t>(std::max(settings_.new_bakes_per_frame, 1));
         for (std::size_t i = 0; i < pending.size() && i < budget; ++i) {
+            // Nearest always bakes; the rest only while this frame's millisecond budget holds
+            // (see WaterSettings::bake_budget_ms). Both stages draw on the one budget: they are
+            // the same work on the same thread, and a frame that spent it on stage 1 has no more
+            // room for a stage-2 re-bake than the other way round.
+            if (i > 0 && bake_spent_ms_ >= settings_.bake_budget_ms) break;
             WaterBody& body = *pending[i].second;
             bake_(scene, body, body.owner->get_transform()->transform().get_world_matrix(), false);
         }
@@ -72,6 +85,7 @@ void WaterSystem::execute(coopa::scene::Scene& scene, const coopa::scene::FrameC
         std::vector<std::pair<float, WaterBody*>> pending;
         for (WaterBody* body : bodies_) {
             if (!body->owner || !body->baked || body->bake_stage >= 2) continue;
+            if (tiles_pending_(*body)) continue;   // stage 1's tiles are still in flight
             const float d = distance_to_body_(*body);
             if (d <= settings_.sim_radius) pending.push_back({d, body});
         }
@@ -79,6 +93,9 @@ void WaterSystem::execute(coopa::scene::Scene& scene, const coopa::scene::FrameC
                   [](const auto& a, const auto& b) { return a.first < b.first; });
         const std::size_t budget = static_cast<std::size_t>(std::max(settings_.bakes_per_frame, 1));
         for (std::size_t i = 0; i < pending.size() && i < budget; ++i) {
+            // A stage-2 re-bake waits for a frame with budget left: the body is already visible
+            // with its stage-1 depths, so nothing is missing from the frame meanwhile.
+            if (bake_spent_ms_ >= settings_.bake_budget_ms) break;
             WaterBody& body = *pending[i].second;
             bake_(scene, body, body.owner->get_transform()->transform().get_world_matrix(), true);
         }
@@ -441,6 +458,33 @@ float WaterSystem::probe_depth_(const glm::vec3& p, float max_depth) const {
 }
 
 void WaterSystem::bake_(coopa::scene::Scene& scene, WaterBody& body, const glm::mat4& world, bool with_physics) {
+    // TOY_WATER_LOG_BAKES=<ms>: diagnostic. Reports every bake that runs longer than that, with
+    // the stage and the vertex count -- what a `cpu.scene.water` spike in a profile is made of
+    // (a bake is paced per frame, see new_bakes_per_frame, but one of them is not divisible).
+    static const double log_over_ms = [] {
+        const char* v = std::getenv("TOY_WATER_LOG_BAKES");
+        return v != nullptr && *v != '\0' ? std::strtod(v, nullptr) : 0.0;
+    }();
+    const auto bake_start = std::chrono::steady_clock::now();
+    // Charged to the frame's budget on every exit path (see execute()), so a bake that returns
+    // early from local_geometry_() still counts the work it did.
+    struct BakeLog {
+        const WaterBody& body;
+        bool with_physics;
+        double over_ms;
+        std::chrono::steady_clock::time_point start;
+        float& spent_ms;
+        ~BakeLog() {
+            const double ms = std::chrono::duration<double, std::milli>(
+                                  std::chrono::steady_clock::now() - start).count();
+            spent_ms += static_cast<float>(ms);
+            if (over_ms <= 0.0 || ms < over_ms) return;
+            std::printf("[water] bake %s %.2f ms: %zu authored corners, %s\n",
+                        with_physics ? "stage2" : "stage1", ms, body.geometry_positions.size(),
+                        body.owner != nullptr ? body.owner->name().c_str() : "?");
+            std::fflush(stdout);
+        }
+    } bake_log{body, with_physics, log_over_ms, bake_start, bake_spent_ms_};
     std::vector<glm::vec3> corner_pos;
     std::vector<glm::vec2> corner_uv;
     std::vector<uint32_t>  corner_idx;
@@ -533,7 +577,29 @@ void WaterSystem::bake_(coopa::scene::Scene& scene, WaterBody& body, const glm::
     });
     body.query.build(std::move(wv), indices, &par_verts);
 
-    publish_gpu_mesh_(scene, body, world, local_pos, indices, flow, depth, turbulence, welded_wave, grid_res);
+    // The tiles and their GPU meshes -- the expensive half (see TileBuild) -- on a worker where
+    // there is one. The body counts as baked from here: its CPU query is live, so buoyancy and
+    // every sample() answer are already correct, and is_published() stays false for the frame or
+    // two until the mesh lands, exactly as it already did for a stage-2 re-upload.
+    auto build = plan_tiles_(body, world, std::move(local_pos), std::move(indices), std::move(flow),
+                             std::move(depth), std::move(turbulence), std::move(welded_wave), grid_res);
+    if (jobs_ != nullptr && jobs_->worker_count() > 1) {
+        PendingTiles pending;
+        pending.body  = &body;
+        pending.build = build;
+        pending.job   = jobs_->create_handle();
+        if (pending.job.is_valid()) {
+            jobs_->submit([build]() { build->run(); }, k_water_job_type, pending.job);
+            pending_tiles_.push_back(std::move(pending));
+        } else {
+            // Handle pool exhausted: do it here rather than drop the body's mesh.
+            build->run();
+            publish_tiles_(scene, body, *build);
+        }
+    } else {
+        build->run();
+        publish_tiles_(scene, body, *build);
+    }
     body.tier_tessellates = settings_.tessellate;
     apply_material_(body);
 
@@ -586,19 +652,43 @@ std::vector<coopa::gfx::engine::data::Vertex> WaterSystem::make_vertices_(const 
     return verts;
 }
 
-void WaterSystem::publish_gpu_mesh_(coopa::scene::Scene& scene, WaterBody& body, const glm::mat4& world,
-                       const std::vector<glm::vec3>& local_pos, const std::vector<uint32_t>& indices,
-                       const std::vector<glm::vec3>& flow_ws, const std::vector<float>& depth,
-                       const std::vector<float>& turbulence, const std::vector<float>& wave_scale,
-                       int grid_res) {
-    using coopa::gfx::engine::components::MeshRenderer;
-    using coopa::gfx::engine::data::Mesh;
-    if (!device_ || !allocator_ || !assets_ || !body.owner) return;
+bool WaterSystem::tiles_pending_(const WaterBody& body) const {
+    for (const PendingTiles& p : pending_tiles_) {
+        if (p.body == &body) return true;
+    }
+    return false;
+}
 
-    const ParallelFor par_verts = parallel_(k_parallel_vertices);
-    const ParallelFor par_tiles = parallel_(k_parallel_tiles);
-    // A local-frame body's flow is already in its own frame (its bake ran there).
-    const auto verts = make_vertices_(body.local_frame ? glm::mat4(1.0f) : world, local_pos, indices, flow_ws, depth, turbulence, wave_scale, &par_verts, grid_res >= 1);
+void WaterSystem::poll_tile_builds_(coopa::scene::Scene& scene) {
+    if (pending_tiles_.empty()) return;
+    for (std::size_t i = 0; i < pending_tiles_.size();) {
+        PendingTiles& pending = pending_tiles_[i];
+        // Gone: the body's component was destroyed (a chunk streamed out) between the submit and
+        // now. Only the POINTER is compared -- bodies_ was just refreshed from the live
+        // components -- and the job keeps the build alive through its own shared_ptr.
+        const bool live = std::find(bodies_.begin(), bodies_.end(), pending.body) != bodies_.end();
+        if (!live) {
+            if (jobs_ != nullptr) jobs_->cancel(pending.job);
+            pending.job.close();
+            pending_tiles_.erase(pending_tiles_.begin() + static_cast<std::ptrdiff_t>(i));
+            continue;
+        }
+        if (!pending.job.is_complete()) {
+            ++i;
+            continue;
+        }
+        publish_tiles_(scene, *pending.body, *pending.build);
+        pending.job.close();
+        pending_tiles_.erase(pending_tiles_.begin() + static_cast<std::ptrdiff_t>(i));
+    }
+}
+
+std::shared_ptr<WaterSystem::TileBuild> WaterSystem::plan_tiles_(
+        const WaterBody& body, const glm::mat4& world,
+        std::vector<glm::vec3> local_pos, std::vector<uint32_t> indices,
+        std::vector<glm::vec3> flow_ws, std::vector<float> depth,
+        std::vector<float> turbulence, std::vector<float> wave_scale, int grid_res) const {
+    auto build = std::make_shared<TileBuild>();
 
     // Bounds inflation for what the vertex shader adds: the full wave sum, vertically and
     // horizontally (local space; a scaled body is rare and the margin is generous) -- of the
@@ -629,30 +719,67 @@ void WaterSystem::publish_gpu_mesh_(coopa::scene::Scene& scene, WaterBody& body,
 
     // LOD distances in the body's LOCAL units, like the tile bounds they are compared with:
     // the renderer's screen-size fraction (radius / distance) is then scale-independent.
-    WaterTileLodParams lod;
-    lod.lod_bias = settings_.lod_bias;
+    build->lod.lod_bias = settings_.lod_bias;
     if (!ws.calm) {
         for (int i = 0; i < k_wave_count && i < 4; ++i) {
-            lod.wave_lambdas[i] = ws.waves[i].lambda / max_scale;
-            lod.wave_amps[i]    = ws.waves[i].amp / max_scale;
+            build->lod.wave_lambdas[i] = ws.waves[i].lambda / max_scale;
+            build->lod.wave_amps[i]    = ws.waves[i].amp / max_scale;
         }
     }
-    std::vector<WaterTile> tiles;
+
+    build->local_pos     = std::move(local_pos);
+    build->indices       = std::move(indices);
+    build->flow_ws       = std::move(flow_ws);
+    build->depth         = std::move(depth);
+    build->turbulence    = std::move(turbulence);
+    build->wave_scale    = std::move(wave_scale);
+    // A local-frame body's flow is already in its own frame (its bake ran there).
+    build->vertex_world  = body.local_frame ? glm::mat4(1.0f) : world;
+    build->flat          = grid_res >= 1;
+    build->grid_res      = grid_res;
+    build->body_size     = glm::vec2(body.size);
+    build->tile_len      = tile_len;
+    build->auto_tile_len = body.tile_size <= 0.0f;
+    build->inflate       = inflate;
+    build->device        = device_;
+    build->allocator     = allocator_;
+    return build;
+}
+
+void WaterSystem::TileBuild::run() {
+    using coopa::gfx::engine::data::Mesh;
+    const auto verts = make_vertices_(vertex_world, local_pos, indices, flow_ws, depth, turbulence,
+                                      wave_scale, nullptr, flat);
     const std::size_t grid_verts = grid_res >= 1 ? static_cast<std::size_t>(grid_res + 1) * (grid_res + 1) : 0;
     if (grid_res >= 1 && verts.size() == grid_verts) {
-        const float spacing = std::max(body.size.x, body.size.y) / static_cast<float>(grid_res);
+        const float spacing = std::max(body_size.x, body_size.y) / static_cast<float>(grid_res);
         int qpt = 1;
         while (qpt * 2 <= std::max(1.0f, tile_len / std::max(spacing, 1e-4f))) qpt *= 2;
         qpt = std::max(qpt, 2);
         // Rounding down to a power of two must not undo the auto cap on the tile count.
-        if (body.tile_size <= 0.0f) {
+        if (auto_tile_len) {
             while ((grid_res + qpt - 1) / qpt > k_max_tiles_per_side) qpt *= 2;
         }
-        tiles = build_grid_tiles(verts, grid_res, grid_res, qpt, spacing, lod, inflate, &par_tiles);
+        tiles = build_grid_tiles(verts, grid_res, grid_res, qpt, spacing, lod, inflate, nullptr);
     } else {
-        tiles = build_mesh_tiles(verts, indices, tile_len, inflate, &lod, &par_tiles);
+        tiles = build_mesh_tiles(verts, indices, tile_len, inflate, &lod, nullptr);
     }
-    if (tiles.empty()) return;
+    // The GPU meshes too, as ChunkBuildJob does: the upload is a small part of a bake, and
+    // doing it here leaves publishing nothing that touches the device.
+    if (device != nullptr && allocator != nullptr) {
+        meshes.reserve(tiles.size());
+        for (WaterTile& tile : tiles) {
+            meshes.push_back(std::make_shared<Mesh>(Mesh::from_cpu(*device, *allocator, std::move(tile.data))));
+        }
+    }
+}
+
+void WaterSystem::publish_tiles_(coopa::scene::Scene& scene, WaterBody& body, TileBuild& built) {
+    using coopa::gfx::engine::components::MeshRenderer;
+    using coopa::gfx::engine::data::Mesh;
+    if (!device_ || !allocator_ || !assets_ || !body.owner) return;
+    std::vector<WaterTile>& tiles = built.tiles;
+    if (tiles.empty() || built.meshes.size() != tiles.size()) return;
 
     auto* renderer = body.owner->get_component<MeshRenderer>();
     if (!renderer) renderer = add_default_renderer_(body);
@@ -664,7 +791,7 @@ void WaterSystem::publish_gpu_mesh_(coopa::scene::Scene& scene, WaterBody& body,
                              std::to_string(reinterpret_cast<std::uintptr_t>(&body));
 
     if (tiles.size() == 1) {
-        body.gpu_mesh = std::make_shared<Mesh>(Mesh::from_cpu(*device_, *allocator_, std::move(tiles[0].data)));
+        body.gpu_mesh = std::move(built.meshes[0]);
         body.single_asset_id = base;
         renderer->set_mesh(assets_->create<Mesh>(base, body.gpu_mesh));
         retire_tiles_(body, {});
@@ -680,9 +807,10 @@ void WaterSystem::publish_gpu_mesh_(coopa::scene::Scene& scene, WaterBody& body,
     }
     std::vector<WaterBody::TileSlot> next;
     next.reserve(tiles.size());
-    for (WaterTile& tile : tiles) {
+    for (std::size_t ti = 0; ti < tiles.size(); ++ti) {
+        WaterTile& tile = tiles[ti];
         const std::string id = base + "/t" + std::to_string(tile.coord.x) + "_" + std::to_string(tile.coord.y);
-        auto mesh = std::make_shared<Mesh>(Mesh::from_cpu(*device_, *allocator_, std::move(tile.data)));
+        auto mesh = std::move(built.meshes[ti]);
         WaterBody::TileSlot slot;
         slot.asset_id = id;
         for (auto& old : body.tiles) {
@@ -1230,21 +1358,37 @@ bool WaterSystem::frame_floater_substep_(BuoyantEntry& e, coopa::physx::PhysicsW
 void WaterSystem::frozen_substep_(BuoyantEntry& e, coopa::physx::dynamics::Body& body, const glm::vec3& gravity, float h) {
     Buoyancy& buoy = *e.buoyancy;
     if (!body.awake) return; // keeps its last in_water/submerged_fraction
-    const float g = std::max(-gravity.z, 0.0f);
-    const glm::vec3 up = g > 0.0f ? -gravity / g : glm::vec3(0.0f, 0.0f, 1.0f);
+    const float g = glm::length(gravity);
+    const glm::vec3 world_up = g > 0.0f ? -gravity / g : glm::vec3(0.0f, 0.0f, 1.0f);
 
     // The undisplaced surface under the centre of mass, any body (the frozen path is rare).
+    // Each candidate is measured in ITS OWN frame: a local-frame body (a planet's water, see
+    // WaterBody::local_frame) has its query over that frame and its up along its local +Z, so a
+    // world-XY lookup would miss it entirely -- which is how a floater more than `sim_radius`
+    // from the focus ended up reporting in_water false on a planet while sitting on the surface.
+    // For a world body the transform is the identity and this is the plain XY lookup it was.
     WaterBaseSample base;
     bool hit = false;
     float density = 1000.0f;
+    float best_depth = 0.0f;
+    glm::mat4 to_local(1.0f);
+    glm::vec3 up = world_up;
     for (const WaterBody* wb : bodies_) {
+        if (!wb->baked) continue;
+        const glm::mat4 wb_to_local = wb->local_frame ? glm::inverse(wb->baked_world) : glm::mat4(1.0f);
+        const glm::vec3 lp = glm::vec3(wb_to_local * glm::vec4(body.position, 1.0f));
         WaterBaseSample bs;
-        if (!wb->baked || !wb->query.sample_base(glm::vec2(body.position), bs)) continue;
-        if (!hit || bs.height > base.height) {
-            base = bs;
-            density = wb->density;
-            hit = true;
-        }
+        if (!wb->query.sample_base(glm::vec2(lp), bs)) continue;
+        // Deepest wins, as in the world-space path -- compared as a submersion depth rather than
+        // as a height, since two bodies in different frames measure height in different spaces.
+        const float depth = bs.height - lp.z;
+        if (hit && depth <= best_depth) continue;
+        base       = bs;
+        density    = wb->density;
+        to_local   = wb_to_local;
+        best_depth = depth;
+        up         = wb->local_frame ? glm::normalize(glm::vec3(wb->baked_world[2])) : world_up;
+        hit        = true;
     }
     if (!hit) {
         buoy.in_water = false;
@@ -1253,12 +1397,14 @@ void WaterSystem::frozen_substep_(BuoyantEntry& e, coopa::physx::dynamics::Body&
         return;
     }
 
-    // Vertical extent and volume from the pontoons, at the current orientation.
+    // Vertical extent and volume from the pontoons, at the current orientation -- measured in
+    // the chosen body's frame, which `base.height` is in (the identity for a world body).
     const glm::mat3 rot = glm::mat3_cast(body.orientation);
     const glm::vec3 com_local = e.rigidbody->local_center_of_mass();
     float z_lo = 1e30f, z_hi = -1e30f, volume = 0.0f;
     for (const Pontoon& p : buoy.resolved) {
-        const float z = body.position.z + (rot * (p.local - com_local)).z;
+        const glm::vec3 wp = body.position + rot * (p.local - com_local);
+        const float z = glm::vec3(to_local * glm::vec4(wp, 1.0f)).z;
         const float r = std::max(p.half_extents.z, 1e-3f);
         z_lo = std::min(z_lo, z - r);
         z_hi = std::max(z_hi, z + r);

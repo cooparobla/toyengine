@@ -64,6 +64,21 @@ struct WaterSettings {
      * to become visible, exactly as it already does for its stage-2 depth.
      */
     int   new_bakes_per_frame = 2;
+    /**
+     * @brief Milliseconds of bake work a frame may start, over both stages together.
+     *
+     * The count above paces how many bakes a frame begins; this bounds what they COST, which is
+     * the number a frame actually has to live within -- and the two are not proportional. Most
+     * of a bake is its tiles' LOD simplification (meshoptimizer, on the owner thread): measured
+     * on terrain_demo, one streamed chunk's water is ~1.5 ms of which ~1.26 ms is that
+     * simplification, so a frame that began two of them paid 3-5 ms against a 2.2 ms median --
+     * read as a hitch while flying, with the count budget none the wiser.
+     *
+     * Spent like TerrainComponent::upload_budget_ms: the nearest pending body always bakes
+     * whatever the budget (so a frame can never stall the water), and the next only begins if
+     * the budget is not yet gone. Raise it to catch up faster on a machine with headroom.
+     */
+    float bake_budget_ms = 1.5f;
 
     // --- Shader ---
     float detail_distance = 150.0f;    ///< Ripples/foam noise fade out toward this distance.

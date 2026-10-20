@@ -76,7 +76,15 @@ COOPA_TEST(static_camera_converges_to_a_static_image) {
     terrain->params.view_radius         = 1;
 
     tick_until(engine, 900, [&] { return count_live_chunks(*terrain) >= 9; });
-    tick_frames(engine, 80); // let every temporal filter settle; nothing moves from here on
+    // Settled, not merely warmed: TAA's accumulation is a true running average at rest (see
+    // taa_resolve), so its per-frame change decays as 1/N rather than exponentially, and what
+    // this test measures is that decay's tail. Measured here at 320x180 -- 80 ticks: 0.0038
+    // levels/px, 200: 0.0021, 400: under the 0.002 budget, 800: no better. The 80 this test was
+    // written with predates the age-weighted resolve; a shorter settle measures the tail, not
+    // the orbit the test is for. Attributed by elimination: with every stochastic pass disabled
+    // (SSAO, SSR, SSGI, contact shadows, volumetrics) the number is unchanged, and with AA off
+    // it is worse (0.0089) -- it is the resolve converging, not noise leaking through it.
+    tick_frames(engine, 480); // nothing in the scene moves from here on
 
     std::vector<Frame> frames;
     for (int i = 0; i < 18; ++i) {
@@ -1191,49 +1199,74 @@ COOPA_TEST(no_coplanar_depth_ties) {
     const std::string scene = (scene_env != nullptr && *scene_env != '\0')
         ? scene_env : "assets/scenes/islands/greenhollow/scene.yaml";
 
-    auto capture_once = [&](bool leq) {
-        toy::core::AppConfig config = toy::core::AppConfig::load((root / "assets/config.yaml").string());
-        config.window.width   = 1920;
-        config.window.height  = 1080;
-        config.window.visible = false;
-        config.window.vsync   = false;
-        config.render.render_width  = 1920;
-        config.render.render_height = 1080;
-        config.render.auto_exposure_enabled = false;
-        config.render.screen_ui_enabled = false;
-        config.render.world_ui_enabled  = false;
-        config.scene.default_scene  = scene;
-        config.output.save_on_exit  = false;
+    // ONE engine, both captures. The probe's whole claim is that the two frames differ in
+    // nothing but the depth compare -- and two separate Engines over a live island cannot give
+    // that: they stream their chunks on wall-clock time and tick a different number of frames,
+    // so each capture holds its own world. Measured that way, the same build alternated between
+    // 0 and ~4-6% of the frame "tied" from run to run, which is what sent a whole investigation
+    // after the terrain mesher. Rebuilding the pipeline in place with TOY_DEPTH_LEQUAL set flips
+    // exactly one thing (gbuffer_pipeline.h reads it while building) and leaves the scene, the
+    // streamed chunks and the frame index where they were.
+    toy::core::AppConfig config = toy::core::AppConfig::load((root / "assets/config.yaml").string());
+    config.window.width   = 1920;
+    config.window.height  = 1080;
+    config.window.visible = false;
+    config.window.vsync   = false;
+    config.render.render_width  = 1920;
+    config.render.render_height = 1080;
+    config.render.auto_exposure_enabled = false;
+    config.render.screen_ui_enabled = false;
+    config.render.world_ui_enabled  = false;
+    config.scene.default_scene  = scene;
+    config.output.save_on_exit  = false;
 
-        toy::core::EngineOptions options;
-        options.project_root = root;
-        options.boot_splash  = false;
-        options.set_app_icon = false;
+    toy::core::EngineOptions options;
+    options.project_root = root;
+    options.boot_splash  = false;
+    options.set_app_icon = false;
 
-        // Set inside the lambda: gbuffer_pipeline.h reads it while BUILDING the pipeline, which
-        // happens during Engine construction, so the variable has to be live across exactly that.
-        std::unique_ptr<ScopedEnv> leq_env;
-        if (leq) leq_env = std::make_unique<ScopedEnv>("TOY_DEPTH_LEQUAL", "1");
+    toy::core::Engine engine(std::move(config), options);
+    engine.render_config().debug_view = "albedo";
 
-        toy::core::Engine engine(std::move(config), options);
-        engine.render_config().debug_view = "albedo";
+    auto* camera = coopa::gfx::engine::components::CameraComponent::main();
+    expect(camera != nullptr && camera->scene != nullptr && camera->owner != nullptr,
+           "ties: the game scene has a camera");
+    if (camera == nullptr || camera->scene == nullptr || camera->owner == nullptr) return;
+    if (auto* controller = camera->owner->get_component<toy::scene::CameraController>()) {
+        controller->follow_smoothing   = 0.0f;
+        controller->movement_smoothing = 0.0f;
+        controller->distance  = 24.0f;
+        controller->pitch_deg = 50.0f;
+    }
+    if (auto* terrain = camera->scene->find_first_component<toy::world::TerrainComponent>()) {
+        // Settled, not merely started: a chunk still arriving would land between the two
+        // captures and read as a tie.
+        int stable = 0, last_count = -1;
+        tick_until(engine, 4000, [&] {
+            const int n = count_live_chunks(*terrain);
+            stable = (n == last_count) ? stable + 1 : 0;
+            last_count = n;
+            return stable >= 60 && terrain->is_ready();
+        });
+    }
+    tick_frames(engine, 150);
 
-        auto* camera = coopa::gfx::engine::components::CameraComponent::main();
-        if (camera == nullptr || camera->scene == nullptr || camera->owner == nullptr) return Frame{};
-        if (auto* controller = camera->owner->get_component<toy::scene::CameraController>()) {
-            controller->follow_smoothing   = 0.0f;
-            controller->movement_smoothing = 0.0f;
-            controller->distance  = 24.0f;
-            controller->pitch_deg = 50.0f;
-        }
-        if (auto* terrain = camera->scene->find_first_component<toy::world::TerrainComponent>())
-            tick_until(engine, 1800, [&] { return count_live_chunks(*terrain) >= 20; });
-        tick_frames(engine, 150);
-        return engine.capture_image(/*low_res=*/true);
-    };
+    const Frame first = engine.capture_image(/*low_res=*/true);
+    {
+        // By value: rebuild_pipeline() destroys the old pipeline before it builds the new one,
+        // so a reference into its config would dangle halfway through.
+        const toy::render::ToyRenderConfig cfg = engine.pipeline().render_config();
+        ScopedEnv leq("TOY_DEPTH_LEQUAL", "1");
+        engine.rebuild_pipeline(cfg);
+    }
+    engine.render_config().debug_view = "albedo";
+    // The rebuild restarts every temporal filter, and the debug view still travels the post
+    // chain -- so the second capture needs the same settle the first one had, or what gets
+    // counted is TAA converging rather than a depth tie (measured: 2-6% of the frame, varying
+    // run to run, with only 3 frames here).
+    tick_frames(engine, 150);
+    const Frame last = engine.capture_image(/*low_res=*/true);
 
-    const Frame first = capture_once(false);
-    const Frame last  = capture_once(true);
     expect(first.width > 0 && same_extent(first, last), "ties: both captures rendered");
     if (first.width == 0 || !same_extent(first, last)) return;
 
@@ -1246,8 +1279,22 @@ COOPA_TEST(no_coplanar_depth_ties) {
         dump_frame(last,  "depth_tie_lequal");
     }
 
-    expect(pct < 0.05, "ties: no meaningful part of the frame is a coplanar depth tie (" +
-                           std::to_string(pct) + "%)");
+    // Reported, NOT asserted, and the reason is the probe itself. The claim it was built on --
+    // "LESS and LESS_OR_EQUAL differ for coplanar fragments and for nothing else" -- holds for
+    // the draw, but not for the measurement: the compare is read while the G-buffer pipeline is
+    // BUILT, so the second frame needs a rebuilt pipeline, and a rebuild restarts every temporal
+    // filter and the jitter phase (the debug view still travels the post chain). Measured on a
+    // static engine scene, one engine, settled world and 150 frames of settle on both sides, the
+    // same build reported 9.16% and then 0.17% of the frame; on greenhollow, 2.74% twice and
+    // 5.87% once. The number is noise at the scale the contract needed (0.05%), and a red test
+    // that encodes an unmeasurable claim is worse than an honest reading: this once sent a whole
+    // investigation into the terrain mesher's merge T-junctions, which turned out to be
+    // blameless (TOY_TERRAIN_NO_MERGE "fixing" it was the same coin-flip).
+    //
+    // To make it a contract again, the two frames have to come from ONE pipeline -- e.g. a
+    // runtime depth-compare switch drawing both variants in a frame -- not from a rebuild.
+    std::cerr << "         [ties] (reported only -- see the comment: this probe cannot isolate "
+                 "the depth compare below its own noise)\n";
 }
 
 /**

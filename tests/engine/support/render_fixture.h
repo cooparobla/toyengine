@@ -109,7 +109,13 @@ toy::core::AppConfig make_shipped_config(const std::string& scene, uint32_t rw, 
 /** @brief Advances an Engine by `frames` ticks. */
 void tick_frames(toy::core::Engine& engine, int frames);
 
-/** @brief Ticks until `predicate` holds or the budget runs out; returns the ticks spent. */
+/**
+ * @brief Ticks until `predicate` holds or the budget runs out; returns the ticks spent.
+ *
+ * The budget is `max_frames` ticks AND the wall time those frames would take at 60 Hz,
+ * whichever runs out last -- the predicates here wait on asynchronous work, which takes
+ * seconds rather than frames. See the definition.
+ */
 int tick_until(toy::core::Engine& engine, int max_frames, const std::function<bool()>& predicate);
 
 /**

@@ -277,6 +277,9 @@ private:
     coopa::gfx::core::Device&      device_;
     coopa::gfx::memory::Allocator& allocator_;
     coopa::asset::AssetManager&    assets_;
+    /// The shared baked surface-detail texture (terrain_detail_texture.h); baked on the first
+    /// frame with terrain and handed to every chunk material.
+    coopa::asset::AssetHandle<coopa::gfx::engine::data::Texture> detail_texture_;
 
     /// @brief Scratch list of queued coordinates, reused across frames so sorting allocates once.
     std::vector<ChunkCoord> pending_;

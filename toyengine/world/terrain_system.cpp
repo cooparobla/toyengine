@@ -19,6 +19,7 @@
 #include <gfxcoopa/memory/allocator.h>
 #include <physxcoopa/components/mesh_collider.h>
 #include <physxcoopa/dynamics/physics_material.h>
+#include <toyengine/world/terrain_detail_texture.h>
 #include <physxcoopa/geometry/triangle_mesh.h>
 #include <physxcoopa/system/physics_system.h>
 #include <toyengine/world/terrain_chunk.h>
@@ -49,6 +50,13 @@ coopa::job::Priority chunk_priority(std::int32_t distance, std::int32_t view_rad
 void TerrainSystem::execute(coopa::scene::Scene& scene, const coopa::scene::FrameContext& ctx) {
     ++frame_;
     physics_dirty_ = false;
+    // Baked on the first frame that has terrain, not in the constructor: the bake submits a
+    // one-shot upload, and a system is constructed before the device is necessarily ready to
+    // take one. It registers itself with the asset manager, so this is one upload per run.
+    if (!detail_texture_.is_loaded() && !scene.get_components<TerrainComponent>().empty()) {
+        coopa::gfx::command::CommandPool pool(device_, device_.graphics_family(), true);
+        detail_texture_ = bake_terrain_detail_texture(device_, allocator_, pool, assets_);
+    }
     for (TerrainComponent* terrain : scene.get_components<TerrainComponent>()) {
         tick_terrain_(*terrain, scene, ctx);
     }
@@ -590,6 +598,12 @@ void TerrainSystem::create_chunk_object_(TerrainComponent& terrain, coopa::scene
     renderer->material.shader        = terrain.params.planet ? "terrain_styled_planet" : "terrain_styled";
     renderer->material.shader_params = glm::vec4(static_cast<float>(k_atlas_columns), static_cast<float>(k_atlas_rows),
                                                  terrain.params.height_step, terrain.params.tile_size);
+    // The surface detail: one baked, tiling, mipmapped texture shared by every chunk, bound in
+    // the material set's normal slot (see terrain_styled.glsl, which redefines that slot's
+    // sampling and neutralises the backbone's normal decode). Assigned as a HANDLE rather than
+    // a `texture_normal` path: the texture is baked at runtime, not loaded from a file, so it
+    // has no path to resolve -- the handle is what has_normal_map() and the texture cache key on.
+    renderer->material.normal_handle = detail_texture_;
     // Probe / GI bakes draw with stock shaders only and would misread those codes.
     renderer->affects_reflection_probes = false;
     // Far chunks out of the cascades: a chunk's whole vertex count is drawn into every shadow

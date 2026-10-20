@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <utility>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -337,6 +338,11 @@ static std::string apply_flicker_overrides(toy::render::ToyRenderConfig& render)
     if (has("ssao"))        render.ssao_enabled          = false;
     if (has("volumetrics")) render.volumetrics_enabled   = false;
     if (has("ssrfull"))   render.ssr_half_res      = false;  // startup-fixed: must be set here
+    if (has("shadows"))     render.shadows_enabled          = false;
+    if (has("pcss"))        render.shadow_pcss_enabled      = false;
+    if (has("hardshadows")) render.soft_shadows             = false;
+    if (has("frustumfit"))  render.shadow_fit               = "frustum";
+    if (has("fixedfocus"))  render.shadow_focus_distance    = 20.0f;  // pin the probed distance
     return list;
 }
 
@@ -619,7 +625,18 @@ static Frame box_downsample(const Frame& src, uint32_t factor) {
 static std::vector<Frame> sweep_frames(uint32_t rw, uint32_t rh, const std::string& shade) {
     toy::core::AppConfig config = make_shipped_config(voxel_terrain_demo(), rw, rh);
     config.render.auto_exposure_enabled = false;
-    config.render.aa_mode = "off";          // the configuration the artifact was reported under
+    // greenhollow's own scene settings ship aa_mode "off" -- the configuration the artifact was
+    // reported under, and the default here. TOY_CRAWL_AA overrides it (taa, smaa, fxaa) for the
+    // comparison that separates "this tile set shimmers" from "nothing is anti-aliasing this
+    // scene": terrain_demo, the scene that looks fine, inherits taa from config.yaml, so the two
+    // scenes never rendered with the same AA in the first place.
+    // Setting aa_mode on the AppConfig is NOT enough: the scene's own `settings.render` block
+    // (greenhollow ships `aa_mode: "off"` there) is applied when the scene loads and overrides
+    // it -- measured: taa vs off differed by 426 pixels of 2M, i.e. TAA never engaged. So the
+    // override is spliced into a VARIANT of the scene file instead, which is the one place the
+    // scene cannot stomp.
+    const char* aa_env = std::getenv("TOY_CRAWL_AA");
+    config.render.aa_mode = (aa_env != nullptr && *aa_env != '\0') ? aa_env : "off";
     toy::core::Engine engine(std::move(config));
     if (!shade.empty()) engine.render_config().debug_view = shade;
 
@@ -711,7 +728,7 @@ static std::filesystem::path game_dir() {
 static std::vector<Frame> game_sweep(uint32_t rw, uint32_t rh, const std::string& shade) {
     const std::filesystem::path root = game_dir();
     const char* scene_env = std::getenv("TOY_GAME_SCENE");
-    const std::string scene = (scene_env != nullptr && *scene_env != '\0')
+    std::string scene = (scene_env != nullptr && *scene_env != '\0')
         ? scene_env : "assets/scenes/islands/greenhollow/scene.yaml";
 
     toy::core::AppConfig config = toy::core::AppConfig::load((root / "assets/config.yaml").string());
@@ -736,6 +753,13 @@ static std::vector<Frame> game_sweep(uint32_t rw, uint32_t rh, const std::string
     options.set_app_icon = false;
     toy::core::Engine engine(std::move(config), options);
     if (!shade.empty()) engine.render_config().debug_view = shade;
+    // TOY_CRAWL_LODBIAS pins the mesh LOD selection (RUNTIME key): a large bias keeps every
+    // chunk at LOD 0, so any per-frame change that disappears under it was a chunk
+    // re-triangulating as its screen size crossed a level threshold -- a real geometry change
+    // that survives TAA, every render-feature toggle, and every still-image comparison.
+    if (const char* lb = std::getenv("TOY_CRAWL_LODBIAS"); lb != nullptr && *lb != '\0') {
+        engine.render_config().mesh_lod_bias = float(std::atof(lb));
+    }
 
     auto* camera = coopa::gfx::engine::components::CameraComponent::main();
     if (camera == nullptr || camera->scene == nullptr || camera->owner == nullptr) return {};
@@ -1223,5 +1247,113 @@ COOPA_TEST(no_coplanar_depth_ties) {
     }
 
     expect(pct < 0.05, "ties: no meaningful part of the frame is a coplanar depth tie (" +
+                           std::to_string(pct) + "%)");
+}
+
+/**
+ * @brief After the camera stops, no pixel may keep flapping between two values.
+ *
+ * The signature from Coopa's CAPTURE_RING frames (cubeworld, 2026-10-18): during the settle,
+ * pixels on camera-facing walls flip between exactly two discrete values at constant amplitude
+ * (e.g. 120 <-> 127) for dozens of frames, then lock solid once the freeze deadband engages.
+ * Constant-amplitude binary flipping is not a converging average -- a running average's
+ * per-frame change shrinks as 1/n -- it is either raw per-frame stochastic output (history
+ * rejected, count pinned at 1) or two ping-pong parities converged to different fixed points.
+ * Either way it reads as the reported "textures flicker, then lag, then settle".
+ *
+ * Metric: hold the camera after a run, capture consecutive frames, and count pixels whose
+ * value toggles by more than `kFlipLevels` AND returns to an earlier value -- a flip, not a
+ * drift. TOY_FLICKER_OFF attributes it per pass.
+ */
+COOPA_TEST(no_binary_flipping_after_camera_stops) {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016");   // real time: freeze deadbands and smoothing run
+    ScopedEnv no_input("NO_INPUT", "1");
+
+    if (!std::filesystem::exists(game_dir() / "assets/config.yaml")) {
+        std::cerr << "         [flip] no game at " << game_dir() << ", skipping\n";
+        return;
+    }
+    const std::filesystem::path root = game_dir();
+    toy::core::AppConfig config = toy::core::AppConfig::load((root / "assets/config.yaml").string());
+    config.window.width   = 1920;
+    config.window.height  = 1080;
+    config.window.visible = false;
+    config.window.vsync   = false;
+    config.render.render_width  = 1920;
+    config.render.render_height = 1080;
+    config.render.auto_exposure_enabled = false;
+    config.render.screen_ui_enabled = false;
+    config.render.world_ui_enabled  = false;
+    const std::string disabled = apply_flicker_overrides(config.render);
+    config.scene.default_scene  = "assets/scenes/islands/greenhollow/scene.yaml";
+    config.output.save_on_exit  = false;
+
+    toy::core::EngineOptions options;
+    options.project_root = root;
+    options.boot_splash  = false;
+    options.set_app_icon = false;
+    toy::core::Engine engine(std::move(config), options);
+    apply_live_ssr_overrides(engine.render_config());
+    // TOY_FLICKER_VIEW renders one raw channel instead of the lit image (runtime key). The
+    // bisection that matters: flips already present in `albedo` live in the SURFACE stage
+    // (the material/texture hypothesis); flips only in the final image live in lighting/post.
+    if (const char* view = std::getenv("TOY_FLICKER_VIEW"); view != nullptr && *view != '\0') {
+        engine.render_config().debug_view = view;
+    }
+
+    auto* camera = coopa::gfx::engine::components::CameraComponent::main();
+    expect(camera != nullptr && camera->scene != nullptr && camera->owner != nullptr,
+           "flip: the scene has a main camera");
+    if (camera == nullptr || camera->scene == nullptr || camera->owner == nullptr) return;
+    auto* controller = camera->owner->get_component<toy::scene::CameraController>();
+    coopa::scene::SceneObject* runner =
+        controller != nullptr ? camera->scene->find_object(controller->tracker) : nullptr;
+    expect(controller != nullptr && runner != nullptr && runner->get_transform() != nullptr,
+           "flip: the orbit and its tracked object exist");
+    if (controller == nullptr || runner == nullptr || runner->get_transform() == nullptr) return;
+    // The shipped smoothing stays: the settle lag it causes is part of what is being measured.
+    controller->distance  = 24.0f;
+    controller->pitch_deg = 50.0f;
+
+    if (auto* terrain = camera->scene->find_first_component<toy::world::TerrainComponent>())
+        tick_until(engine, 1800, [&] { return count_live_chunks(*terrain) >= 20; });
+    tick_frames(engine, 150);
+
+    for (int i = 0; i < 20; ++i) {   // run...
+        auto& t = runner->get_transform()->transform();
+        t.set_position(t.position() + glm::vec3(0.12f, 0.0f, 0.0f));
+        engine.tick();
+    }
+    // ...and stop. Capture the settle, frame by frame.
+    std::vector<Frame> hold;
+    for (int i = 0; i < 24; ++i) {
+        engine.tick();
+        hold.push_back(engine.capture_image(/*low_res=*/true));
+    }
+
+    // A flip: the red channel moves by > kFlipLevels in one frame AND later returns to within
+    // 1 level of a previous value. Water and other animation drifts; a two-state pixel flips.
+    const int kFlipLevels = 4;
+    const Frame& f0 = hold.front();
+    long long flip_pixels = 0;
+    for (uint32_t p = 0; p < f0.width * f0.height; ++p) {
+        const std::size_t idx = std::size_t(p) * f0.channels;
+        int lo = 256, hi = -1, jumps = 0;
+        int prev = f0.pixels[idx];
+        for (const Frame& f : hold) {
+            const int v = f.pixels[idx];
+            lo = std::min(lo, v);
+            hi = std::max(hi, v);
+            if (std::abs(v - prev) > kFlipLevels) ++jumps;
+            prev = v;
+        }
+        // Two-state: at least 3 jumps of amplitude, but total range barely above one jump --
+        // i.e. it keeps returning. A drifting pixel accumulates range; a flapping one does not.
+        if (jumps >= 3 && (hi - lo) <= 2 * kFlipLevels + 2) ++flip_pixels;
+    }
+    const double pct = 100.0 * double(flip_pixels) / double(f0.width * f0.height);
+    std::cerr << "         [flip] disabled=" << disabled << " flip_pixels=" << flip_pixels
+              << " (" << pct << "% of frame)\n";
+    expect(pct < 0.02, "flip: no pixel keeps flapping between two values after the camera stops (" +
                            std::to_string(pct) + "%)");
 }

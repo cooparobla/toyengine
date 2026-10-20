@@ -1,5 +1,6 @@
 #include <toyengine/world/terrain_chunk.h>
 
+#include <cstdlib>
 #include <algorithm>
 
 #include <gfxcoopa/engine/data/mesh.h>
@@ -57,6 +58,17 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
                               const TerrainParams& params, ChunkMeshData& out) {
     out.clear();
     if (!library.has_styles()) return;
+
+    // TOY_TERRAIN_NO_MERGE: diagnostic. Emits every top as its four quadrant pieces and every
+    // wall half as its own stamp, bypassing the greedy top-rectangle merge and the straight-run
+    // merge below. Merged geometry subdivides differently from the per-tile geometry it borders,
+    // so every merge boundary is a line of T-junctions -- edges one side splits with a vertex
+    // the other side does not share -- and those cannot rasterize watertight: sub-pixel holes
+    // open and close along the line as the camera moves. With this set, every piece lies on the
+    // uniform half-tile grid and the junctions disappear, at the cost of the triangle count the
+    // merges exist to save -- which is what makes it an A/B for whether a surface sparkle is
+    // the mesh or the shading.
+    const bool no_merge = std::getenv("TOY_TERRAIN_NO_MERGE") != nullptr;
 
     using Plane = TileMeshLibrary::SectionPlane;
     const glm::vec3 scale = params.cell_scale();
@@ -131,7 +143,7 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
                 any_corner = any_corner || (level_kind({sgn.x, 0}) != col.top_kind &&
                                             level_kind({0, sgn.y}) != col.top_kind);
             }
-            if (no_edge && !any_corner) {
+            if (!no_merge && no_edge && !any_corner) {
                 full[static_cast<std::size_t>(ly * params.chunk_size + lx)] = 1;
             } else {
                 for (std::uint8_t q = 0; q < 4; ++q) {
@@ -194,7 +206,7 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
                                                     pad.at(c + along).steps > col.steps;
                         if (taper_continue) piece = TilePiece::WallTaperContinue;
 
-                        if (end == WallEnd::Continue && !taper_continue) {
+                        if (!no_merge && end == WallEnd::Continue && !taper_continue) {
                             const bool along_x = face == TileFace::North || face == TileFace::South;
                             const std::int32_t t = along_x ? c.x : c.y;
                             const bool upper = (along_x ? along.x : along.y) > 0;

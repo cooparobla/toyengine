@@ -41,6 +41,22 @@
 // band along. Without the define none of that code exists.
 
 #define GFX_SURFACE_FRAGMENT
+// Term-level kill switches for bisecting a rendering artifact against individual detail terms
+// (TERRAIN_STYLED_FLAT above the hook kills them all). None are defined in a normal build.
+
+// The baked detail texture (world/terrain_detail_texture.h) is bound in the material set's
+// NORMAL slot: styled terrain authors no normal map, and that slot is the one free sampler in
+// the existing material layout -- taking it costs no descriptor-layout change, which would
+// renumber every set that follows (see DeferredLightingPass's set-index note). The backbone's
+// own use of that slot is neutralised by returning a flat tangent-space normal from the
+// SAMPLE_NORMAL hook, so the surface keeps its geometric normal until this shader bends it.
+#define u_terrain_detail u_normal_map
+#define GFX_SURFACE_SAMPLE_NORMAL(tex, uv) vec4(0.5, 0.5, 1.0, 1.0)
+
+/// World size of one tile of the baked detail texture, and its edge length in texels. Must
+/// match bake_terrain_detail_texture()'s `world_period` / `resolution` defaults.
+const float k_detail_period = 16.0;
+const float k_detail_texels = 512.0;
 vec4 styled_sample(sampler2D tex, vec2 uv);
 #define GFX_SURFACE_SAMPLE(tex, uv) styled_sample(tex, uv)
 #include <gfx/surface/gbuffer_fs.glsl>
@@ -133,19 +149,22 @@ vec4 noise_d(vec3 x) {
 }
 
 /// How much of an octave of frequency `freq` survives a pixel footprint of `footprint` world
-/// units: all of it well below Nyquist, none of it by the time the footprint can no longer
-/// resolve the octave.
+/// units: all of it while the octave is comfortably resolved, none of it once a wavelength
+/// nears ~8 screen pixels.
 ///
-/// The band ends at 0.3 cycles per pixel, not at Nyquist (0.5). An octave still carried at
-/// partial amplitude AT the sampling limit is an octave that aliases at partial amplitude, and
-/// value noise is not band-limited to its nominal frequency -- its quintic interpolation leaves
-/// real energy above `freq`, which reaches Nyquist while `freq * footprint` is still inside the
-/// old band. Ending below the limit is what makes the fade an actual pre-filter rather than a
-/// ramp through the aliasing region. The cost is paid only at distance, where the octave was
-/// being resolved wrongly anyway: near the camera `freq * footprint` is far below 0.1 and every
-/// octave is still at full amplitude.
+/// The band (0.08, 0.15 cycles per pixel, i.e. wavelengths ~12 px down to ~6.7 px) sits far
+/// below Nyquist on purpose, and the margin is temporal, not spatial: a still frame can
+/// represent a 3-pixel wavelength, but under camera motion every sub-pixel shift re-samples it
+/// to a visibly different pattern -- high-contrast grain at a handful of pixels per cycle reads
+/// as per-pixel flicker that stops the instant the camera does. Bisected on cubeworld
+/// (greenhollow, per-term kill switches): the fine octave carried at partial amplitude in the
+/// 4-7 px/wavelength range was the whole in-motion surface flicker. This band keeps every
+/// octave at full strength while it spans 12+ pixels and removes it before it can strobe; the
+/// half-amplitude point sits near 10 px, where a sub-pixel shift moves a pixel by under one
+/// level. Both edges are a look-vs-shimmer dial: raising them keeps grain visible further out
+/// at the cost of motion shimmer returning first in the 7-10 px range.
 float octave_weight(float freq, float footprint) {
-    return 1.0 - smoothstep(0.1, 0.3, freq * footprint);
+    return 1.0 - smoothstep(0.08, 0.15, freq * footprint);
 }
 
 /// The kind this pixel shows -- see the file doc. Decided once per pixel and cached: the
@@ -192,64 +211,73 @@ int styled_kind() {
 }
 
 void gfx_surface_fragment(inout GfxSurface s) {
+    // TERRAIN_STYLED_FLAT: diagnostic kill switch -- returns before any detail term, leaving
+    // the bare per-kind atlas colour. Bisecting a surface artifact starts here: if it survives
+    // a flat albedo it is not this hook's doing.
+#ifdef TERRAIN_STYLED_FLAT
+    if (true) return;
+#endif
     int kind = styled_kind();
     vec4 detail = k_detail[kind];
     vec4 extra  = k_extra[kind];
 
     vec3 p = s.position_ws;
-    float footprint = max(length(dFdx(p)), length(dFdy(p)));
 
-    // Each term: the noise value (for albedo) and its world-space gradient (for the bump),
-    // already scaled by amplitude and the footprint fade.
+    // The detail comes from a baked, tiling, MIPMAPPED texture (world/terrain_detail_texture.h),
+    // sampled in world space by the surface's dominant axis -- not from noise evaluated here.
+    //
+    // Analytic noise cannot be prefiltered: an `octave_weight`-style fade decides how much of an
+    // octave to keep from the pixel footprint, but still evaluates it at ONE point, so a
+    // sub-pixel drift of that point changes the value. Over a voxel world that is per-pixel
+    // flicker during any camera motion, settling only at a standstill -- bisected on cubeworld
+    // to the fine octave, and tunable only into a flicker/washout trade. A mip chain is the real
+    // thing: each level is the AVERAGE of the one above, and trilinear + anisotropic sampling
+    // blends between levels continuously, per pixel, including on oblique faces a single
+    // footprint scalar cannot describe. Same mechanism every engine uses for surface detail.
+    //
+    // Triplanar-lite: the two axes most in the surface's plane. A voxel world's faces are axis
+    // aligned, so the dominant-normal pick is exact for them and merely approximate on the
+    // rounded sets' bevels, where the detail is incidental anyway.
+    vec3 an = abs(s.normal_ws);
+    vec2 detail_uv = (an.z >= an.x && an.z >= an.y) ? p.xy
+                   : (an.x >= an.y)                 ? p.yz
+                                                    : p.xz;
+    vec4 d = texture(u_terrain_detail, detail_uv / k_detail_period);
+    // R/G/A are signed offsets around 0.5; B is already-thresholded speck coverage, baked so the
+    // mip chain averages flecks into coverage rather than leaving a hard edge to alias.
+    float blotch = d.r * 2.0 - 1.0;
+    float grain  = d.g * 2.0 - 1.0;
+    float speck  = d.b;
+    float strata = d.a * 2.0 - 1.0;
+
     float shade = 0.0;
-    vec3  grad  = vec3(0.0);
-
-    float w = octave_weight(k_freq_broad, footprint);
-    vec4 n = noise_d(p * k_freq_broad + 17.0);
-    shade += detail.x * w * n.x;
-    float warm = w * n.x;
-
-    w = octave_weight(k_freq_mid, footprint);
-    n = noise_d(p * k_freq_mid + 3.7);
-    shade += detail.y * w * n.x;
-    grad  += detail.y * w * n.yzw * k_freq_mid;
-
-    w = octave_weight(k_freq_fine, footprint);
-    n = noise_d(p * k_freq_fine - 11.0);
-    shade += detail.z * w * n.x;
-    grad  += detail.z * w * n.yzw * k_freq_fine;
-
-    // Specks: the upper tail of a noise field, softened into rounded flecks -- pebbles in dirt,
-    // blade highlights in grass, pits in stone.
-    w = octave_weight(k_freq_speck * 2.0, footprint);
-    n = noise_d(p * k_freq_speck + 41.0);
-    float speck = smoothstep(0.45, 0.75, n.x);
-    shade += detail.w * w * speck * extra.w;
-    grad  += detail.w * w * extra.w * n.yzw * k_freq_speck * (speck * (1.0 - speck) * 4.0);
-
-    // Strata: noise squashed vertically, so walls band horizontally like layered rock.
-    if (extra.x > 0.0) {
-#ifdef TERRAIN_PLANET
-        vec3 q = p;   // a planet has no one vertical: an even grain
-        w = octave_weight(3.0, footprint);
-        n = noise_d(q + 7.0);
-        shade += extra.x * w * n.x;
-        grad  += extra.x * w * n.yzw;
-#else
-        vec3 q = vec3(p.xy * 0.35, p.z * 3.0);
-        w = octave_weight(3.0, footprint);
-        n = noise_d(q + 7.0);
-        shade += extra.x * w * n.x;
-        grad  += extra.x * w * n.yzw * vec3(0.35, 0.35, 3.0);
-#endif
-    }
+    // detail.x and .y were separate octaves of the same slow variation; the bake pairs them in
+    // one channel, so their amplitudes add here.
+    shade += (detail.x + detail.y) * blotch;
+    shade += detail.z * grain;
+    shade += detail.w * speck * extra.w;
+    if (extra.x > 0.0) shade += extra.x * strata;
+    float warm = blotch;
 
     s.albedo *= clamp(1.0 + shade, 0.5, 1.5);
     s.albedo += extra.z * 0.04 * warm * vec3(1.0, 0.35, -0.6);
     s.albedo = max(s.albedo, vec3(0.0));
 
-    // Bump: tilt the normal against the detail's slope, with the gradient's normal component
-    // removed so only the in-surface part bends it.
+    // Bump from the sampled detail's own slope, read with textureGrad offsets along the two
+    // in-plane axes: the texture is prefiltered, so this slope fades with distance exactly as
+    // the detail it describes does -- an analytic gradient would keep bending normals after the
+    // features it belongs to were averaged away, which is specular aliasing by another route.
+    vec2 base_uv = detail_uv / k_detail_period;
+    float step_uv = 1.0 / k_detail_texels;
+    float du = texture(u_terrain_detail, base_uv + vec2(step_uv, 0.0)).r
+             - texture(u_terrain_detail, base_uv - vec2(step_uv, 0.0)).r;
+    float dv = texture(u_terrain_detail, base_uv + vec2(0.0, step_uv)).r
+             - texture(u_terrain_detail, base_uv - vec2(0.0, step_uv)).r;
+    vec3 axis_u = (an.z >= an.x && an.z >= an.y) ? vec3(1,0,0) : (an.x >= an.y) ? vec3(0,1,0) : vec3(1,0,0);
+    vec3 axis_v = (an.z >= an.x && an.z >= an.y) ? vec3(0,1,0) : (an.x >= an.y) ? vec3(0,0,1) : vec3(0,0,1);
+    vec3 grad = (axis_u * du + axis_v * dv) * (detail.x + detail.y + detail.z);
+
+    // Only the in-surface part of that slope bends the normal.
     vec3 N = s.normal_ws;
     vec3 g = grad - dot(grad, N) * N;
     s.normal_ws = normalize(N - extra.y * 0.08 * g);

@@ -42,6 +42,13 @@
 // past the detail distance the ripples and foam noise are skipped for a rougher surface, and
 // rings are only looped over within the ring range.
 //
+// Flashing. The foam thresholds are softened against how far the measured depth moves across
+// a pixel (fwidth), because a hard threshold on an edge-on surface is a per-pixel coin flip and
+// near-white foam makes that read as flashing. Each softening is bounded by the band it belongs
+// to, and nothing outside the foam -- not the colour, the opacity or the roughness -- is keyed
+// on it: those are the surface's material, and widening them on a viewing angle changes what
+// the water IS rather than how cleanly its edges are drawn.
+//
 // No shadow entry points: water is BLEND, and BLEND materials only cast shadows at full
 // opacity (see record_directional_shadow_'s doc) -- water never reaches the shadow pass.
 
@@ -380,14 +387,37 @@ void gfx_surface_fragment(inout GfxTransparentSurface s) {
     s.thickness   = min(depth, clarity * 2.0) * edge;
 
     // --- Shore and contact foam: a broken band hugging every intersection ---
+    // How far the measured depth moves across this pixel. `depth` is a single tap of the depth
+    // buffer, and water is a near-horizontal plane: toward the top and bottom of any view over
+    // it the surface is seen edge-on, so one pixel spans metres of depth. A hard step() on that
+    // is a coin flip that re-rolls whenever the camera moves, and the foam it gates is
+    // near-white and nearly opaque -- which is what reads as white pixels flashing along every
+    // water line. Softening each threshold by this much makes them gradients instead.
+    //
+    // Every softening below is BOUNDED by the band's own width. Spreading a threshold over more
+    // depth than its band occupies does not antialias it, it drags the band across water it has
+    // no business in -- and the same widening applied to the surface's alpha fade would make
+    // deep water transparent. So this touches the foam THRESHOLDS only: the surface's colour,
+    // its opacity and its roughness are left exactly as they are.
+    float dblur    = fwidth(depth);
+
     float band     = 1.0 - clamp(depth / shore_depth, 0.0, 1.0);
-    float contact  = step(depth, edge_depth * 1.5);
+    float contact_t = edge_depth * 1.5;
+    float contact_w = clamp(dblur, 1e-5, contact_t);
+    float contact  = 1.0 - smoothstep(max(contact_t - contact_w, 0.0), contact_t + contact_w, depth);
     // Expected coverage far away (see the whitewater note), the broken band up close.
     float shore    = max(clamp(band * band * 1.15, 0.0, 1.0), 0.75 * contact);
     if (detail > 0.0) {
         float n_shore = water_flow_noise(pos, drift * 0.5, t, 2.6);
-        float lines   = step(0.86, sin(depth / shore_depth * 12.566 - t * 2.2) * 0.5 + 0.5 + n_shore * 0.25);
-        float broken  = max(step(n_shore, band * band * 1.15), lines * band);
+        // The travelling lines run at two cycles per shore_depth of depth. Once a pixel spans
+        // more than half a cycle they are below what it can resolve and only strobe, so they
+        // ease out there rather than being sampled through.
+        float lines   = step(0.86, sin(depth / shore_depth * 12.566 - t * 2.2) * 0.5 + 0.5 + n_shore * 0.25)
+                      * (1.0 - smoothstep(0.25, 0.5, dblur * 2.0 / shore_depth));
+        // The dither threshold the same way, in the band's own units.
+        float band_w  = clamp(dblur / shore_depth, 1e-5, 0.5);
+        float wet     = clamp(band * band * 1.15, 0.0, 1.0);
+        float broken  = max(smoothstep(n_shore - band_w, n_shore + band_w, wet), lines * band);
         broken        = max(broken, contact * step(0.25, n_shore)); // contact line
         shore = mix(shore, broken, detail);
     }

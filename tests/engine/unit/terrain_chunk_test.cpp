@@ -4,7 +4,8 @@
  *        device and the scene, which is what lets it run on job workers), driven by the shipped
  *        voxel tile set: exposure against the pad (tops everywhere, walls exactly where a
  *        neighbour is lower, the wall clamp), square kind boundaries for a set that asks for
- *        them, byte-determinism, and the chunk collision mesh built from the drawn surface.
+ *        them, byte-determinism, the chunk collision mesh built from the drawn surface, and
+ *        chunk water: agreement across a shared border, and a surface that stays inside its banks.
  */
 
 #include <coopa/testing/test.h>
@@ -225,6 +226,122 @@ COOPA_TEST(adjacent_chunks_agree_on_shared_water_edge) {
     }
     expect(match, "chunk water: the shared edge carries identical heights and depths in both chunks");
     expect(varied, "chunk water: ...over a bed that really varies along it");
+}
+
+/** @brief A pond with only ONE tile of bank keeps its surface inside that bank. Every flooded
+ *         tile's water reaches a tile further out, under the bank, so the shoreline is the
+ *         bank's own wall rather than the mesh's edge -- but that apron's outer lip lands on the
+ *         far side of a one-tile bank, over ground that may be lower than the water. Left at the
+ *         water level it surfaces there and the pond reads as leaking a tile outward. */
+COOPA_TEST(water_stays_inside_a_one_tile_bank) {
+    using namespace toy::world;
+    const TerrainParams params = make_test_params(8);
+    const float ts = params.tile_size, hs = params.height_step;
+
+    constexpr std::int32_t k_lo = 3, k_hi = 4;
+    const int water_terrace = 2;
+    const float surface_z = (static_cast<float>(water_terrace) - params.water_inset) * hs;
+    ColumnPad pad = make_flat_pad(params.chunk_size, 1);
+    for (std::int32_t y = -1; y <= params.chunk_size; ++y) {
+        for (std::int32_t x = -1; x <= params.chunk_size; ++x) {
+            const bool pond = x >= k_lo && x <= k_hi && y >= k_lo && y <= k_hi;
+            const bool bank = !pond && x >= k_lo - 1 && x <= k_hi + 1 && y >= k_lo - 1 && y <= k_hi + 1;
+            TileColumn& c = pad.at(x, y);
+            if (pond) {
+                c.steps = 0;
+                c.water = k_water_still;
+                c.water_level = water_terrace;
+            } else if (bank) {
+                c.steps = water_terrace;
+            }
+        }
+    }
+
+    ChunkWaterData still, flowing;
+    build_chunk_water(pad, params, still, flowing);
+    expect(flowing.positions.empty() && !still.positions.empty(),
+           "chunk water: a still pond meshes into the still surface alone");
+
+    auto corner = [&](const glm::vec3& p, bool& touches_water) {
+        const std::int32_t cx = static_cast<std::int32_t>(std::lround(p.x / ts));
+        const std::int32_t cy = static_cast<std::int32_t>(std::lround(p.y / ts));
+        float ground = 1e9f;
+        touches_water = false;
+        for (std::int32_t ty = cy - 1; ty <= cy; ++ty) {
+            for (std::int32_t tx = cx - 1; tx <= cx; ++tx) {
+                if (tx < -1 || ty < -1 || tx > params.chunk_size || ty > params.chunk_size) continue;
+                const TileColumn& c = pad.at(tx, ty);
+                ground = std::min(ground, static_cast<float>(c.steps) * hs);
+                touches_water = touches_water || c.water != k_water_none;
+            }
+        }
+        return ground;
+    };
+
+    int lips = 0, exposed = 0, shoreline = 0, off_surface = 0, would_have_shown = 0;
+    for (const glm::vec3& p : still.positions) {
+        bool touches_water = false;
+        const float ground = corner(p, touches_water);
+        if (touches_water) {
+            ++shoreline;
+            if (std::fabs(p.z - surface_z) > 1e-4f) ++off_surface;
+            continue;
+        }
+        ++lips;
+        if (p.z > ground + 1e-4f) ++exposed;
+        if (surface_z > ground + 1e-4f) ++would_have_shown;
+    }
+
+    expect(shoreline > 0 && off_surface == 0,
+           "chunk water: every corner the water itself touches sits at the body's surface");
+    expect(lips > 0, "chunk water: the apron has outer lips to place (" + std::to_string(lips) + ")");
+    expect(would_have_shown == lips,
+           "chunk water: ...all of them over ground the water level would have stood above");
+    expect(exposed == 0,
+           "chunk water: no apron lip rises above the ground it is buried under (" +
+               std::to_string(exposed) + " of " + std::to_string(lips) + " exposed)");
+}
+
+/** @brief A bank standing at the water's own terrace keeps its apron FLAT, at the water level.
+ *
+ *  The apron dives only where the ground it lands on is lower than the water. Dropping it under
+ *  an ordinary bank instead undercuts the bank's rounded shoulder -- which dips toward the water
+ *  inside that same tile -- and uncovers the soil rim on the top step of its wall, which reads
+ *  as a line drawn along every shore. The sibling test above only builds the case where the
+ *  ground beyond IS lower, where either rule dives, so this is the one that pins it. */
+COOPA_TEST(an_ordinary_bank_keeps_its_apron_at_the_water_level) {
+    using namespace toy::world;
+    const TerrainParams params = make_test_params(8);
+    const float hs = params.height_step;
+
+    constexpr std::int32_t k_lo = 3, k_hi = 4;
+    const int water_terrace = 2;
+    const float surface_z = (static_cast<float>(water_terrace) - params.water_inset) * hs;
+    ColumnPad pad = make_flat_pad(params.chunk_size, water_terrace);
+    for (std::int32_t y = k_lo; y <= k_hi; ++y) {
+        for (std::int32_t x = k_lo; x <= k_hi; ++x) {
+            TileColumn& c = pad.at(x, y);
+            c.steps = 0;
+            c.water = k_water_still;
+            c.water_level = water_terrace;
+        }
+    }
+
+    ChunkWaterData still, flowing;
+    build_chunk_water(pad, params, still, flowing);
+
+    int below = 0, at_level = 0;
+    float lowest = 1e9f;
+    for (const glm::vec3& p : still.positions) {
+        if (std::fabs(p.z - surface_z) <= 1e-4f) { ++at_level; continue; }
+        ++below;
+        lowest = std::min(lowest, p.z);
+    }
+    expect(at_level > 0, "chunk water: the pond and its apron mesh (" + std::to_string(at_level) + " corners)");
+    expect(below == 0,
+           "chunk water: over ground at the water's terrace every corner stays at the surface (" +
+               std::to_string(below) + " dropped, lowest " + std::to_string(lowest) + " vs " +
+               std::to_string(surface_z) + ")");
 }
 
 COOPA_TEST(collision_mesh_is_the_drawn_surface) {

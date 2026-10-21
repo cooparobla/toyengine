@@ -329,6 +329,21 @@ void mesh_chunk_styled(const ColumnPad& pad, const TileMeshLibrary& library,
 
 }
 
+namespace {
+
+/// Clearance, in tile steps, between a water skirt's outer lip and the ground above it. A tile
+/// set rounds a bank's top edge, which lowers its surface near the tile's own border -- exactly
+/// where the lip sits. Half a step clears any rounding a one-step bank can have.
+constexpr float k_skirt_clearance_steps = 0.5f;
+
+/// Most steps a skirt's outer lip may drop below the water level. Without a cap the lip follows
+/// the ground wherever it goes, and a bank one tile wide standing over a sea cliff would hang a
+/// sheet of water the whole height of the drop -- hidden inside the cliff's wall, but metres of
+/// it. Two steps is under any bank and still inside that wall.
+constexpr float k_skirt_max_drop_steps = 2.0f;
+
+} // namespace
+
 void build_chunk_water(const ColumnPad& pad, const TerrainParams& params, ChunkWaterData& still,
                        ChunkWaterData& flowing) {
     still.clear();
@@ -345,25 +360,51 @@ void build_chunk_water(const ColumnPad& pad, const TerrainParams& params, ChunkW
     // sharing it. Both read the same tiles from the pad, so two chunks assign their shared
     // corners identical values -- the depth feeds the wave attenuation, and a border mismatch
     // there shows as a moving seam. A corner no flooded tile touches (a skirt's far corner,
-    // under the bank) is the shoreline: depth 0.
+    // under the bank) is the shoreline: depth 0, and a height that buries it -- see below.
     auto corner_z = [&](std::int32_t cx, std::int32_t cy, float fallback, float& depth, float& wave) {
         float z_sum = 0.0f, d_sum = 0.0f, w_sum = 0.0f;
+        float ground = 0.0f;
+        bool  have_ground = false;
         int count = 0;
         for (std::int32_t ty = cy - 1; ty <= cy; ++ty) {
             for (std::int32_t tx = cx - 1; tx <= cx; ++tx) {
                 if (!in_pad(tx, ty)) continue;
                 const TileColumn& c = pad.at(tx, ty);
+                const float top = static_cast<float>(c.steps) * hs;
+                if (!have_ground || top < ground) {
+                    ground = top;
+                    have_ground = true;
+                }
                 if (c.water == k_water_none) continue;
                 const float z = surface_z(c);
                 z_sum += z;
-                d_sum += z - static_cast<float>(c.steps) * hs;
+                d_sum += z - top;
                 w_sum += c.water == k_water_flowing ? params.river_wave_scale : 1.0f;
                 ++count;
             }
         }
         depth = count > 0 ? std::max(d_sum / static_cast<float>(count), 0.0f) : 0.0f;
         wave = count > 0 ? w_sum / static_cast<float>(count) : 1.0f;
-        return count > 0 ? z_sum / static_cast<float>(count) : fallback;
+        if (count > 0) return z_sum / static_cast<float>(count);
+
+        // A corner no flooded tile touches is a skirt's OUTER lip, a tile out from the water.
+        // The bank it hides under is solid to the water's terrace, but only the tile BESIDE the
+        // water is -- the columns this corner actually touches carry no such guarantee, and
+        // where a body has just one tile of bank the lip lands on the far side of it, over
+        // whatever the ground does next. At the water level it then surfaces again past the
+        // bank: the body appears to leak a tile outward. Rounded tiles make it worse, since
+        // they lower a bank's surface near the very border the lip sits on.
+        //
+        // So the lip goes under the GROUND it actually touches, and only as far as that takes
+        // it. A bank standing at the water's own terrace keeps its lip AT the water level --
+        // the apron stays flat and covers the bank's rounded shoulder, which dips toward the
+        // water inside that same tile. Dropping it there instead would undercut the shoulder
+        // and leave the soil rim on the top step of the wall showing along every shore. The
+        // corners a skirt SHARES with a flooded tile keep the water level regardless, so the
+        // surface the player sees is unchanged and only the buried apron slopes.
+        const float clearance = k_skirt_clearance_steps * hs;
+        const float lip = std::min(fallback, (have_ground ? ground : fallback) - clearance);
+        return std::max(lip, fallback - k_skirt_max_drop_steps * hs);
     };
 
     for (std::int32_t y = 0; y < n; ++y) {

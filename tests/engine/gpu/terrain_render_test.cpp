@@ -481,6 +481,75 @@ COOPA_TEST(editing_tiles_remeshes_only_their_chunks) {
  *        draw it as WaterBody surfaces over sand beds (not as blocks), and a buoyant crate dropped
  *        into the sea floats at the surface rather than resting on it or sinking to the bed.
  */
+/** @brief A terrain chunk's water gets the WATER material -- most of all, its shader.
+ *
+ * The look of a water body is entirely the `water` shader's: the waves, the depth colour, the
+ * foam, the ripples. The surface carries none of it on its own, so a body whose material never
+ * receives that shader draws as nothing recognisable and a lake reads as its bare bed with fog
+ * over it, while its geometry, its physics and its buoyancy all stay perfectly correct -- which
+ * is why the sibling test below can pass with the water invisible.
+ *
+ * The order is what makes this worth pinning. A chunk's water object is created with a Transform
+ * and a WaterBody alone (TerrainSystem::add_chunk_water_); its MeshRenderer does not exist until
+ * the bake publishes a mesh. WaterSystem::apply_material_() returns silently when there is no
+ * renderer, so whichever of the two runs first decides whether the water is ever told what it
+ * is -- and the failure is quiet: a valid mesh, a Blend material, correct bounds, no shader.
+ */
+COOPA_TEST(chunk_water_is_published_with_the_water_shader) {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016");
+    ScopedEnv no_input("NO_INPUT", "1");
+
+    toy::core::Engine engine(make_test_config(voxel_terrain_demo(), 320, 180, 160, 90));
+    auto* camera = coopa::gfx::engine::components::CameraComponent::main();
+    require(camera != nullptr && camera->scene != nullptr, "water material: the scene has a main camera");
+    coopa::scene::Scene& scene = *camera->scene;
+    auto* terrain = scene.find_first_component<toy::world::TerrainComponent>();
+    require(terrain != nullptr, "water material: the scene carries a TileTerrain");
+    shrink_terrain_and_centre(*terrain, scene);
+    tick_until(engine, 900, [&] { return terrain->tiles && !terrain->tiles->empty() && !terrain->baking(); });
+    require(terrain->tiles != nullptr && !terrain->tiles->empty(), "water material: the world baked");
+
+    // Let the chunks around the camera stream in and their water bake and publish.
+    tick_frames(engine, 120);
+
+    int bodies = 0, still = 0, flowing = 0, wrong_shader = 0, not_blend = 0, unpublished = 0;
+    std::string first_wrong;
+    for (const auto& [coord, chunk] : terrain->chunks()) {
+        if (chunk.object == nullptr) continue;
+        for (const auto& child : chunk.object->children()) {
+            auto* body = child->get_component<toy::water::WaterBody>();
+            if (body == nullptr || !body->baked) continue;
+            ++bodies;
+            (body->mode == toy::water::WaterMode::Planar ? still : flowing)++;
+
+            auto* mr = child->get_component<coopa::gfx::engine::components::MeshRenderer>();
+            if (mr == nullptr) { ++unpublished; continue; }
+            // A body wider than one render tile draws through child objects instead, each a copy
+            // of the owner's material (water_tiles.h) -- so the owner's is what must be right.
+            const std::string& shader = mr->material.shader;
+            const std::string want = body->local_frame ? "water_planet" : "water";
+            if (shader != want) {
+                ++wrong_shader;
+                if (first_wrong.empty()) {
+                    first_wrong = child->name() + " has shader '" + shader + "', wanted '" + want + "'";
+                }
+            }
+            if (mr->material.alpha_mode != coopa::gfx::engine::components::AlphaMode::Blend) ++not_blend;
+        }
+    }
+
+    require(bodies > 0, "water material: the streamed chunks carry water bodies to check");
+    expect(still > 0, "water material: ...including still water (" + std::to_string(still) + " still, " +
+                          std::to_string(flowing) + " flowing)");
+    expect(unpublished == 0,
+           "water material: every baked body has a renderer (" + std::to_string(unpublished) + " without)");
+    expect(wrong_shader == 0,
+           "water material: every body draws with the water shader (" + std::to_string(wrong_shader) + " of " +
+               std::to_string(bodies) + " wrong" + (first_wrong.empty() ? "" : "; " + first_wrong) + ")");
+    expect(not_blend == 0,
+           "water material: every body blends (" + std::to_string(not_blend) + " opaque)");
+}
+
 COOPA_TEST(water_lies_over_the_beds_and_floats_a_crate) {
     ScopedEnv fixed_dt("FIXED_DT", "0.016");
     ScopedEnv no_input("NO_INPUT", "1");

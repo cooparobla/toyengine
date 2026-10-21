@@ -873,6 +873,13 @@ coopa::gfx::engine::components::MeshRenderer* WaterSystem::add_default_renderer_
     r->material.refraction_tint      = glm::vec3(0.55f, 0.82f, 0.86f);
     r->affects_reflection_probes     = false;
     r->scene                         = body.scene;
+    // The body's own look, now that there is a renderer to put it on. apply_material_() gives up
+    // when the object has none, and for water the renderer is created HERE, after the bake has
+    // already tried: a terrain chunk's water object starts as a Transform and a WaterBody alone
+    // (TerrainSystem::add_chunk_water_), so without this the material keeps the defaults above
+    // and `shader` stays empty -- no water shader, so the surface never draws its waves, depth
+    // colour, foam or ripples, and a lake reads as its bare bed.
+    apply_material_(body);
     return r;
 }
 

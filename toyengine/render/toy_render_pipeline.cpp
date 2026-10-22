@@ -2428,7 +2428,10 @@ ToyRenderPipeline::MeshGather ToyRenderPipeline::gather_meshes_(uint32_t frame_s
         }
     };
     if (should_parallelize_(n)) {
-        jobs_->parallel_for_blocking(n, 0 /* auto grain */, gather_mesh);
+        // Normal help floor: the gather is the frame's critical path, so a thread waiting here
+        // must not pick up a background Low job (a terrain chunk mesh) and stall the frame.
+        jobs_->parallel_for_blocking(n, 0 /* auto grain */, gather_mesh, 0,
+                                     coopa::job::Priority::Normal, coopa::job::Priority::Normal);
     } else {
         gather_mesh(0, n);
     }
@@ -2978,7 +2981,8 @@ std::vector<SdfDrawItem> ToyRenderPipeline::gather_sdf_(coopa::scene::Scene& sce
             }
         };
         if (should_parallelize_(sdf_renderer_comps.size())) {
-            jobs_->parallel_for_blocking(sdf_renderer_comps.size(), 0 /* auto grain */, gather_sdf);
+            jobs_->parallel_for_blocking(sdf_renderer_comps.size(), 0 /* auto grain */, gather_sdf, 0,
+                                         coopa::job::Priority::Normal, coopa::job::Priority::Normal);
         } else {
             gather_sdf(0, sdf_renderer_comps.size());
         }

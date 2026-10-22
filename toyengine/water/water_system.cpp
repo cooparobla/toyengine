@@ -51,6 +51,7 @@ void WaterSystem::execute(coopa::scene::Scene& scene, const coopa::scene::FrameC
     // all, and cheap next to stage 2 (no raycasts) -- but not free, and a streamed world hands
     // several bodies over at once, so nearest first and a few per frame, like stage 2.
     {
+        stage1_pending_ = 0;
         std::vector<std::pair<float, WaterBody*>> pending;
         for (WaterBody* body : bodies_) {
             if (!body->owner) continue;
@@ -69,6 +70,7 @@ void WaterSystem::execute(coopa::scene::Scene& scene, const coopa::scene::FrameC
         }
         std::sort(pending.begin(), pending.end(),
                   [](const auto& a, const auto& b) { return a.first < b.first; });
+        stage1_pending_ = static_cast<int>(pending.size());   // see warm_up_state()
         const std::size_t budget = static_cast<std::size_t>(std::max(settings_.new_bakes_per_frame, 1));
         for (std::size_t i = 0; i < pending.size() && i < budget; ++i) {
             // Nearest always bakes; the rest only while this frame's millisecond budget holds
@@ -81,6 +83,7 @@ void WaterSystem::execute(coopa::scene::Scene& scene, const coopa::scene::FrameC
         }
     }
     // Stage 2, nearest first, within range, a few per frame.
+    stage2_pending_ = 0;
     if (physics_ready) {
         std::vector<std::pair<float, WaterBody*>> pending;
         for (WaterBody* body : bodies_) {
@@ -91,6 +94,7 @@ void WaterSystem::execute(coopa::scene::Scene& scene, const coopa::scene::FrameC
         }
         std::sort(pending.begin(), pending.end(),
                   [](const auto& a, const auto& b) { return a.first < b.first; });
+        stage2_pending_ = static_cast<int>(pending.size());   // see warm_up_state()
         const std::size_t budget = static_cast<std::size_t>(std::max(settings_.bakes_per_frame, 1));
         for (std::size_t i = 0; i < pending.size() && i < budget; ++i) {
             // A stage-2 re-bake waits for a frame with budget left: the body is already visible
@@ -328,7 +332,8 @@ ParallelFor WaterSystem::parallel_(std::size_t min_items) const {
             fn(0, n);
             return;
         }
-        jobs->parallel_for_blocking(n, 0, [&fn](std::size_t begin, std::size_t end) { fn(begin, end); });
+        jobs->parallel_for_blocking(n, 0, [&fn](std::size_t begin, std::size_t end) { fn(begin, end); },
+                                    0, coopa::job::Priority::Normal, coopa::job::Priority::Normal);
     };
 }
 

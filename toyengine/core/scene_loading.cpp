@@ -137,6 +137,7 @@ const char* scene_load_status_text(SceneLoadStage stage) {
         case SceneLoadStage::ReadingDocument: return "Reading scene...";
         case SceneLoadStage::Building:        return "Building scene...";
         case SceneLoadStage::LoadingAssets:   return "Loading assets...";
+        case SceneLoadStage::Warming:         return "Building world...";
         case SceneLoadStage::WaitingToSwap:
         case SceneLoadStage::FadingIn:
         case SceneLoadStage::Done:            return "Ready";

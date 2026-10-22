@@ -194,6 +194,24 @@ public:
      */
     SceneLoadHandle load_scene_async(const std::string& path, SceneLoadOptions options = {});
 
+    /**
+     * @brief Covers the ALREADY-loaded active scene and holds it there until its systems report
+     *        warm -- the warm-up half of a scene load, for a scene that was loaded synchronously.
+     *
+     * The startup scene loads behind the boot splash, which covers the document, the build and
+     * the asset uploads perfectly well. What it does not cover is everything after: a streamed
+     * world only starts meshing terrain, baking water and building its navmesh once the scene
+     * simulates, and those land in the first visible frames. This drops the transition straight
+     * into SceneLoadStage::Warming over the live scene, so the same loading screen and the same
+     * readiness rule (ISceneSystem::warm_up_state()) apply to the first scene as to a portal.
+     *
+     * @param options Only `transition`, `warm_up`, `warm_up_timeout` and `warm_up_budget_ms` are
+     *                read; the document/build/asset budgets no longer apply.
+     * @return A handle on the warm-up, or an empty one when there is no scene, no transition, or
+     *         `warm_up` is false.
+     */
+    SceneLoadHandle begin_scene_warmup(SceneLoadOptions options = {});
+
     /** @brief The current (or last) async load's handle; empty if there never was one. */
     SceneLoadHandle scene_load() const { return SceneLoadHandle(scene_load_); }
     /** @brief True while an async load has not yet activated its scene. */
@@ -624,6 +642,32 @@ public:
     void update_scene_load_(float dt);
 
     /**
+     * @brief Polls the warming scene's systems; true once every participating one is warm.
+     *
+     * Fills SceneLoadState::warm_progress and warm_status as a side effect. True when no system
+     * participates at all -- a scene that streams nothing has nothing to wait for.
+     */
+    bool poll_scene_warmup_(detail::SceneLoadState& st);
+
+    /**
+     * @brief Swaps the warming scene's streaming budgets for SceneLoadOptions::warm_up_budget_ms
+     *        and back again, so the scene file keeps the authored steady-state values.
+     *
+     * Idempotent: a call that matches the state already applied does nothing.
+     */
+    void apply_warmup_budgets_(detail::SceneLoadState& st, bool warming);
+
+    /// True while apply_warmup_budgets_() has a scene's budgets raised.
+    bool warm_budgets_applied_ = false;
+    /// Each warming terrain's authored upload_budget_ms, to put back at the reveal.
+    std::vector<std::pair<toy::world::TerrainComponent*, float>> warm_saved_upload_ms_;
+    /// The warming scene's authored water settings, likewise.
+    water::WaterSettings warm_saved_water_;
+    /// The warming scene's authored navmesh rebuild pacing, likewise.
+    bool  warm_saved_nav_ = false;
+    float warm_saved_nav_delay_ = 0.0f;
+
+    /**
      * @brief The swap: one GPU wait, the old scenes out (unless additive), the built scene in,
      *        started, systems installed, simulating -- then on_complete.
      */
@@ -697,6 +741,15 @@ public:
 
     /** @brief A scene settings block's `weather` mapping (null if it has none). */
     static fkyaml::node weather_node_(const fkyaml::node& settings);
+
+    /**
+     * @brief A scene's `scene.settings.loading` block as SceneLoadOptions.
+     *
+     * No block means no cover and no warm-up, so the stage is opt-in per scene and every existing
+     * scene keeps loading exactly as it did. Naming a `ui:` implies a loading screen; `transition:`
+     * overrides that with none / fade / loading_screen.
+     */
+    static SceneLoadOptions scene_loading_options_(const fkyaml::node& settings);
 
     /** @brief The render-config values the weather overwrites (weather::controlled_render_keys()). */
     struct WeatherRenderBase {

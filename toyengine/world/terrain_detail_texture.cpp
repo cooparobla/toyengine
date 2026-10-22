@@ -2,6 +2,8 @@
 
 #include <cmath>
 
+#include <coopa/job/parallel_for.h>
+
 #include <glm/glm.hpp>
 
 namespace toy {
@@ -70,7 +72,8 @@ coopa::asset::AssetHandle<coopa::gfx::engine::data::Texture> bake_terrain_detail
     coopa::gfx::command::CommandPool& cmd_pool,
     coopa::asset::AssetManager& assets,
     uint32_t resolution,
-    float world_period)
+    float world_period,
+    coopa::job::JobEngine* jobs)
 {
     // One upload for the whole world: ask first, so a second terrain (or a scene reload that
     // keeps the asset manager) rebinds the existing texture instead of re-baking it.
@@ -82,37 +85,51 @@ coopa::asset::AssetHandle<coopa::gfx::engine::data::Texture> bake_terrain_detail
     std::vector<uint8_t> pixels(static_cast<size_t>(resolution) * resolution * 4);
     const float texel = world_period / static_cast<float>(resolution);
 
-    for (uint32_t py = 0; py < resolution; ++py) {
-        for (uint32_t px = 0; px < resolution; ++px) {
-            // Texel centres, so the sample grid is symmetric and the tile's two edges carry the
-            // same value (a corner-sampled grid would double one edge and drop the other).
-            const float wx = (static_cast<float>(px) + 0.5f) * texel;
-            const float wy = (static_cast<float>(py) + 0.5f) * texel;
+    // One row of texels. A pure function of (px, py) writing only its own four bytes, so rows
+    // are independent and the parallel and serial bakes produce identical bytes.
+    const auto bake_rows = [&](size_t row_begin, size_t row_end) {
+        for (uint32_t py = static_cast<uint32_t>(row_begin); py < static_cast<uint32_t>(row_end); ++py) {
+            for (uint32_t px = 0; px < resolution; ++px) {
+                // Texel centres, so the sample grid is symmetric and the tile's two edges carry
+                // the same value (a corner-sampled grid would double one edge and drop the other).
+                const float wx = (static_cast<float>(px) + 0.5f) * texel;
+                const float wy = (static_cast<float>(py) + 0.5f) * texel;
 
-            const float broad = tiling_noise(wx, wy, k_freq_broad, world_period, 17.0f);
-            const float mid   = tiling_noise(wx, wy, k_freq_mid,   world_period, 3.7f);
-            const float fine  = tiling_noise(wx, wy, k_freq_fine,  world_period, -11.0f);
-            const float speck_field = tiling_noise(wx, wy, k_freq_speck, world_period, 41.0f);
-            const float strata = tiling_noise(wx, wy, 3.0f, world_period, 7.0f);
+                const float broad = tiling_noise(wx, wy, k_freq_broad, world_period, 17.0f);
+                const float mid   = tiling_noise(wx, wy, k_freq_mid,   world_period, 3.7f);
+                const float fine  = tiling_noise(wx, wy, k_freq_fine,  world_period, -11.0f);
+                const float speck_field = tiling_noise(wx, wy, k_freq_speck, world_period, 41.0f);
+                const float strata = tiling_noise(wx, wy, 3.0f, world_period, 7.0f);
 
-            // Specks are thresholded HERE, not in the shader: a smoothstep over noise is a hard
-            // edge of fixed world width, which no per-pixel fade can filter and which flickers
-            // whenever the sampling point drifts. Thresholded at bake time, the mip chain turns
-            // a fleck into coverage as it shrinks -- the filtering a threshold needs.
-            const float speck = glm::smoothstep(0.45f, 0.75f, speck_field);
+                // Specks are thresholded HERE, not in the shader: a smoothstep over noise is a
+                // hard edge of fixed world width, which no per-pixel fade can filter and which
+                // flickers whenever the sampling point drifts. Thresholded at bake time, the mip
+                // chain turns a fleck into coverage as it shrinks -- the filtering a threshold needs.
+                const float speck = glm::smoothstep(0.45f, 0.75f, speck_field);
 
-            auto encode = [](float signed_value) {
-                return static_cast<uint8_t>(
-                    glm::clamp(signed_value * 0.5f + 0.5f, 0.0f, 1.0f) * 255.0f + 0.5f);
-            };
-            const size_t i = (static_cast<size_t>(py) * resolution + px) * 4;
-            // R carries broad+mid together: they are never used apart, and pairing them frees a
-            // channel for the strata the walls need.
-            pixels[i + 0] = encode(0.5f * (broad + mid));
-            pixels[i + 1] = encode(fine);
-            pixels[i + 2] = static_cast<uint8_t>(glm::clamp(speck, 0.0f, 1.0f) * 255.0f + 0.5f);
-            pixels[i + 3] = encode(strata);
+                auto encode = [](float signed_value) {
+                    return static_cast<uint8_t>(
+                        glm::clamp(signed_value * 0.5f + 0.5f, 0.0f, 1.0f) * 255.0f + 0.5f);
+                };
+                const size_t i = (static_cast<size_t>(py) * resolution + px) * 4;
+                // R carries broad+mid together: they are never used apart, and pairing them frees
+                // a channel for the strata the walls need.
+                pixels[i + 0] = encode(0.5f * (broad + mid));
+                pixels[i + 1] = encode(fine);
+                pixels[i + 2] = static_cast<uint8_t>(glm::clamp(speck, 0.0f, 1.0f) * 255.0f + 0.5f);
+                pixels[i + 3] = encode(strata);
+            }
         }
+    };
+
+    if (jobs != nullptr && jobs->worker_count() > 0) {
+        // Normal, not Low, as the help floor: the caller is the owner thread on the first frame a
+        // terrain exists, and letting it descend to Low here would have it pick up far-ring chunk
+        // meshing jobs mid-wait -- trading this stall for a longer one.
+        jobs->parallel_for_blocking(resolution, 0, bake_rows, 0, coopa::job::Priority::Normal,
+                                    coopa::job::Priority::Normal);
+    } else {
+        bake_rows(0, resolution);
     }
 
     // Linear, not sRGB: these are signed offsets and a coverage mask, not colours -- gamma

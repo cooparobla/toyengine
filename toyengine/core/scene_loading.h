@@ -14,6 +14,14 @@
  *   4. **Activation** -- one GPU wait, the old scene is destroyed (unless `additive`), the new
  *      one is started, its systems installed and it begins simulating. on_complete fires here,
  *      before the new scene's first update.
+ *   5. **Warming** (SceneLoadOptions::warm_up) -- the new scene updates and renders, so its
+ *      systems build what they stream, while the transition stays at full cover with the loading
+ *      screen up. A streamed world is not finished when its scene activates: terrain is still
+ *      meshing, water still baking, the navmesh not yet built, and revealing the scene there
+ *      shows the world assembling itself a frame at a time. Readiness comes from the scene's own
+ *      systems (coopa::scene::ISceneSystem::warm_up_state()), so a scene warms on exactly what it
+ *      installs; SceneLoadOptions::warm_up_timeout caps the wait so a system that never reports
+ *      warm cannot hang the game.
  *
  * The transition covers the swap: a fade to a colour and back, a loading-screen UI asset over
  * that colour (its `progress` StatBar / ProgressBar and `status` Text are filled in
@@ -93,6 +101,17 @@ struct SceneLoadOptions {
     float build_budget_ms = 4.0f;
     /// Main-thread milliseconds per frame spent finalizing asset loads while loading.
     float finalize_budget_ms = 4.0f;
+    /// Hold the cover up after activation until the scene's systems report warm (stage 5 above).
+    bool  warm_up = true;
+    /// Reveal anyway this many seconds into warming, so a system that never warms cannot hang
+    /// the game. 0 waits indefinitely.
+    float warm_up_timeout = 20.0f;
+    /// Main-thread milliseconds per frame the warming scene may spend on streaming work.
+    ///
+    /// Raised over the authored steady-state budgets (a chunk publish slice, a water bake slice)
+    /// because nothing is visible yet, but deliberately still bounded: the loading screen is
+    /// being drawn and animated out of these same frames, and an unbounded warm-up freezes it.
+    float warm_up_budget_ms = 8.0f;
 };
 
 /** @brief Where an async load is. Advances in this order; Failed can follow any stage. */
@@ -101,6 +120,7 @@ enum class SceneLoadStage {
     Building,         ///< Building objects on the main thread, a batch per frame.
     LoadingAssets,    ///< Waiting for the asset loads the build started.
     WaitingToSwap,    ///< Ready; waiting for the fade-out / min_display_time.
+    Warming,          ///< Activated and simulating, still covered, while its systems build.
     FadingIn,         ///< Activated: the new scene runs, the transition fades away.
     Done,             ///< Activated and the transition is gone.
     Failed,           ///< The document or a parser failed (or a newer load cancelled it).
@@ -125,6 +145,10 @@ struct SceneLoadState {
     fkyaml::node     settings;            ///< The document's `scene.settings`.
     size_t           peak_pending = 0;    ///< Most asset loads seen pending since the request.
     bool             loading_screen_shown = false;
+    float            warm_elapsed = 0.0f;  ///< Seconds spent in SceneLoadStage::Warming.
+    uint64_t         warm_frames = 0;      ///< Frames spent there.
+    float            warm_progress = 0.0f; ///< 0..1 across the warming systems.
+    std::string      warm_status;          ///< "Building terrain...", from the slowest system.
 
     std::vector<std::function<void(coopa::scene::Scene&)>> on_complete;
     std::vector<std::function<void(const std::string&)>>   on_failed;
@@ -163,6 +187,8 @@ public:
     bool is_ready() const { return state_ && state_->activated(); }
     /// True once the transition has also finished (or the load failed).
     bool is_done() const { return state_ && state_->finished(); }
+    /// True while the scene is live and simulating but still covered, building what it streams.
+    bool is_warming() const { return state_ && state_->stage == SceneLoadStage::Warming; }
     bool failed() const { return state_ && state_->stage == SceneLoadStage::Failed; }
     const std::string& error() const;
     SceneLoadStage stage() const { return state_ ? state_->stage : SceneLoadStage::Failed; }

@@ -27,6 +27,7 @@
 #include <vector>
 
 #include <coopa/asset/asset_manager.h>
+#include <coopa/job/engine.h>
 #include <gfxcoopa/core/device.h>
 #include <gfxcoopa/command/command_pool.h>
 #include <gfxcoopa/engine/data/texture.h>
@@ -59,6 +60,11 @@ namespace world {
  * @param assets     Asset manager the baked texture is registered with.
  * @param resolution Edge length in texels; 512 gives ~8 texels per 10 cm at the default period.
  * @param world_period World-space size of one tile of the texture, in metres.
+ * @param jobs       Job engine the per-row noise evaluation is spread over; null bakes serially.
+ *                   The field is a pure function of the texel, so rows are independent and the
+ *                   result is identical either way. Worth passing: the serial bake is ~1.3 M
+ *                   noise evaluations on whatever thread calls this, which is a visible stall on
+ *                   the first frame a terrain exists.
  * @return A handle to the baked texture, valid for the lifetime of the asset manager.
  */
 coopa::asset::AssetHandle<coopa::gfx::engine::data::Texture> bake_terrain_detail_texture(
@@ -67,7 +73,8 @@ coopa::asset::AssetHandle<coopa::gfx::engine::data::Texture> bake_terrain_detail
     coopa::gfx::command::CommandPool& cmd_pool,
     coopa::asset::AssetManager& assets,
     uint32_t resolution = 512,
-    float world_period = 16.0f);
+    float world_period = 16.0f,
+    coopa::job::JobEngine* jobs = nullptr);
 
 /** @brief The synthetic asset id bake_terrain_detail_texture() registers its texture under. */
 const char* terrain_detail_texture_id();

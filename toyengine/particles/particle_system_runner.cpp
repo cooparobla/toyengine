@@ -214,7 +214,8 @@ ParallelFor ParticleSimulationSystem::parallel_(std::size_t min_items) const {
             fn(0, n);
             return;
         }
-        jobs->parallel_for_blocking(n, 0, [&fn](std::size_t begin, std::size_t end) { fn(begin, end); });
+        jobs->parallel_for_blocking(n, 0, [&fn](std::size_t begin, std::size_t end) { fn(begin, end); },
+                                    0, coopa::job::Priority::Normal, coopa::job::Priority::Normal);
     };
 }
 

@@ -139,6 +139,28 @@ public:
 
     void execute(coopa::scene::Scene& scene, const coopa::scene::FrameContext& ctx) override;
 
+    /**
+     * @brief Not warm until every water body in range has baked -- a streamed world's water.
+     *
+     * Both stages count. Stage 1 is what a body needs to be seen at all, and stage 2 is bounded
+     * by `sim_radius` and is the expensive half (the river flow bake), so leaving it out would
+     * simply move those bakes to the other side of the reveal, where they are a visible hitch
+     * rather than a covered one.
+     */
+    coopa::scene::WarmupState warm_up_state() const override {
+        coopa::scene::WarmupState ws;
+        ws.participates = !bodies_.empty();
+        if (!ws.participates) return ws;
+        ws.what = "water";
+        ws.remaining = stage1_pending_ + stage2_pending_;
+        ws.warm = ws.remaining == 0;
+        const int total = static_cast<int>(bodies_.size());
+        ws.progress = total > 0 ? 1.0f - static_cast<float>(std::min(ws.remaining, total)) /
+                                             static_cast<float>(total)
+                                : 1.0f;
+        return ws;
+    }
+
     // ------------------------------------------------------------------------------------
     // Quality and range
     // ------------------------------------------------------------------------------------
@@ -233,6 +255,9 @@ public:
     UnderwaterInfo underwater_at(const glm::vec3& p) const;
 
 private:
+    int stage1_pending_ = 0;  /**< Bodies awaiting a stage-1 bake, last frame. See warm_up_state(). */
+    int stage2_pending_ = 0;  /**< Bodies in sim_radius awaiting stage 2. See warm_up_state(). */
+
     // ------------------------------------------------------------------------------------
     // Physics hookup
     // ------------------------------------------------------------------------------------

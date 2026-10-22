@@ -129,6 +129,11 @@ Engine::Engine(AppConfig config, EngineOptions options)
     if (options_.load_default_scene) {
         boot_progress("Loading scene...", 0.4f);
         load_scene(scene_path_from_env_(config_.scene.default_scene));
+        // The scene is loaded but its streamed world is not built yet; if it asked to be warmed,
+        // hand the boot splash over to a cover that stays up until it is (begin_scene_warmup()).
+        if (scene_mgr_.has_scene()) {
+            begin_scene_warmup(scene_loading_options_(scene_settings_[&scene_mgr_.get_active_scene()]));
+        }
     }
     read_cursor_pos_override_();
 }
@@ -142,6 +147,39 @@ coopa::scene::Scene& Engine::load_scene(const std::string& path) {
     scene_paths_[&scene_mgr_.get_active_scene()] = resolved;
     prepare_scene_(scene_mgr_.get_active_scene());
     return scene_mgr_.get_active_scene();
+}
+
+SceneLoadHandle Engine::begin_scene_warmup(SceneLoadOptions options) {
+    if (!scene_mgr_.has_scene()) return SceneLoadHandle();
+    if (!options.warm_up || options.transition.kind == SceneTransition::Kind::None) {
+        return SceneLoadHandle();
+    }
+    if (scene_load_ && !scene_load_->finished()) return SceneLoadHandle(scene_load_);
+    // A load that already happened: the document, the build and the assets are in (a startup
+    // scene loads synchronously behind the boot splash, and that half was never the problem).
+    // What is left is the world the scene's systems stream once it starts simulating, so the
+    // state is dropped straight into Warming with the cover already full.
+    coopa::scene::Scene& active = scene_mgr_.get_active_scene();
+    auto st = std::make_shared<detail::SceneLoadState>();
+    auto path = scene_paths_.find(&active);
+    st->path = path != scene_paths_.end() ? path->second : std::string();
+    st->options = std::move(options);
+    st->stage = SceneLoadStage::Warming;
+    st->progress = 1.0f;
+    st->alpha = 1.0f;
+    st->scene = &active;
+    scene_load_ = st;
+    transition_.set_fade(st->options.transition.color, 1.0f);
+    add_overlay_layer(&transition_.scene(), 50, /*in_display_rect=*/true);
+    if (st->options.transition.kind == SceneTransition::Kind::LoadingScreen &&
+        !st->options.transition.loading_screen.empty()) {
+        st->loading_screen_shown = true;
+        if (!transition_.show_loading_screen(st->options.transition.loading_screen)) {
+            std::cerr << "[toyengine] Loading screen '" << st->options.transition.loading_screen
+                      << "' could not be shown\n";
+        }
+    }
+    return SceneLoadHandle(st);
 }
 
 SceneLoadHandle Engine::load_scene_async(const std::string& path, SceneLoadOptions options) {
@@ -883,6 +921,99 @@ bool Engine::tick() {
     return !ctx_.should_close();
 }
 
+void Engine::apply_warmup_budgets_(detail::SceneLoadState& st, bool warming) {
+    if (st.scene == nullptr || warming == warm_budgets_applied_) return;
+    // Nothing is on screen yet, so the per-frame slices that pace streaming during gameplay are
+    // far too small here -- at the authored 1.5 ms a frame, a continent's view radius takes
+    // hundreds of frames to come up. Raised on entering the warm-up and put back at the reveal,
+    // so the scene file keeps holding the steady-state values and gameplay streaming is
+    // untouched. Bounded, not lifted: the loading screen is drawn out of these same frames and
+    // stops animating if one runs long.
+    if (warming) {
+        const float budget = std::max(0.1f, st.options.warm_up_budget_ms);
+        warm_saved_upload_ms_.clear();
+        for (toy::world::TerrainComponent* terrain :
+             st.scene->get_components<toy::world::TerrainComponent>()) {
+            warm_saved_upload_ms_.emplace_back(terrain, terrain->upload_budget_ms);
+            terrain->upload_budget_ms = budget;
+        }
+        if (auto* water = dynamic_cast<water::WaterSystem*>(st.scene->find_system("Water"))) {
+            warm_saved_water_ = water->settings();
+            water::WaterSettings ws = warm_saved_water_;
+            ws.bake_budget_ms = budget;
+            ws.new_bakes_per_frame = std::max(ws.new_bakes_per_frame, 16);
+            ws.bakes_per_frame = std::max(ws.bakes_per_frame, 8);
+            water->set_settings(ws);
+        }
+        // The navmesh is paced by wall clock, not by a budget: a dirty tile waits
+        // `rebuild_delay` before it is rebuilt. That spreads the work over gameplay frames,
+        // which behind a loading screen only makes the screen last longer -- a 2 km island's
+        // tiles are dirtied in waves as its chunk colliders land, and each wave would wait out
+        // another quarter second. Rebuilt as they arrive instead.
+        //
+        // `source_scan_interval` is deliberately left alone: scanning every frame walks every
+        // physics shape in the scene and keeps finding the colliders still streaming in, so
+        // zeroing it makes the dirty set churn faster than it drains and the warm-up never ends.
+        if (auto* nav = dynamic_cast<coopa::physx::system::NavSystem*>(
+                st.scene->find_system("Navigation"))) {
+            warm_saved_nav_delay_ = nav->settings().build.rebuild_delay;
+            nav->set_rebuild_pacing(0.0f, 0);
+            warm_saved_nav_ = true;
+        }
+        warm_budgets_applied_ = true;
+        return;
+    }
+    // Restored by the pointer each value was taken from: a chunk's budget is a component field,
+    // and a terrain destroyed mid-warm-up must not be written through.
+    const auto live = st.scene->get_components<toy::world::TerrainComponent>();
+    for (const auto& [terrain, saved] : warm_saved_upload_ms_) {
+        if (std::find(live.begin(), live.end(), terrain) != live.end()) {
+            terrain->upload_budget_ms = saved;
+        }
+    }
+    warm_saved_upload_ms_.clear();
+    if (auto* water = dynamic_cast<water::WaterSystem*>(st.scene->find_system("Water"))) {
+        water->set_settings(warm_saved_water_);
+    }
+    if (warm_saved_nav_) {
+        if (auto* nav = dynamic_cast<coopa::physx::system::NavSystem*>(
+                st.scene->find_system("Navigation"))) {
+            nav->set_rebuild_pacing(warm_saved_nav_delay_, 0);
+        }
+        warm_saved_nav_ = false;
+    }
+    warm_budgets_applied_ = false;
+}
+
+bool Engine::poll_scene_warmup_(detail::SceneLoadState& st) {
+    if (st.scene == nullptr) return true;
+    // Every installed system is asked; the ones that stream something answer. Warm when all of
+    // them are, progress is their mean, and the status names whichever has the most left to do --
+    // so the line reads "Building terrain..." while that is the long pole, then moves on.
+    int participants = 0;
+    int worst_remaining = -1;
+    float total = 0.0f;
+    bool all_warm = true;
+    const char* worst_what = "";
+    for (const coopa::scene::WarmupState& ws : st.scene->warm_up_states()) {
+        if (!ws.participates) continue;
+        ++participants;
+        total += std::clamp(ws.progress, 0.0f, 1.0f);
+        if (!ws.warm) all_warm = false;
+        if (!ws.warm && ws.remaining > worst_remaining) {
+            worst_remaining = ws.remaining;
+            worst_what = ws.what;
+        }
+    }
+    if (participants == 0) return true;   // nothing streams: there is nothing to wait for
+    st.warm_progress = total / static_cast<float>(participants);
+    if (!all_warm && worst_what[0] != '\0') {
+        st.warm_status = std::string("Building ") + worst_what + "...";
+    }
+    if (all_warm) st.warm_progress = 1.0f;
+    return all_warm;
+}
+
 void Engine::update_scene_load_(float dt) {
     detail::SceneLoadState& st = *scene_load_;
     ++st.frames;
@@ -933,18 +1064,42 @@ void Engine::update_scene_load_(float dt) {
     }
     const bool covered = !covered_kind || st.alpha >= 1.0f;
 
-    if (tr.kind == SceneTransition::Kind::LoadingScreen && st.pending()) {
+    const bool warming = st.stage == SceneLoadStage::Warming;
+    if (tr.kind == SceneTransition::Kind::LoadingScreen && (st.pending() || warming)) {
         if (covered && !st.loading_screen_shown) {
             st.loading_screen_shown = true;
             if (!tr.loading_screen.empty() && !transition_.show_loading_screen(tr.loading_screen)) {
                 std::cerr << "[toyengine] Loading screen '" << tr.loading_screen << "' could not be shown\n";
             }
         }
-        transition_.update_loading_screen(st.progress, scene_load_status_text(st.stage));
+        transition_.update_loading_screen(warming ? st.warm_progress : st.progress,
+                                          warming && !st.warm_status.empty()
+                                              ? st.warm_status
+                                              : scene_load_status_text(st.stage));
     }
 
     if (st.stage == SceneLoadStage::WaitingToSwap && covered && st.elapsed >= st.options.min_display_time) {
         activate_scene_load_(st);
+    }
+
+    if (st.stage == SceneLoadStage::Warming) {
+        st.warm_elapsed += dt;
+        ++st.warm_frames;
+        apply_warmup_budgets_(st, /*warming=*/true);
+        const bool timed_out =
+            st.options.warm_up_timeout > 0.0f && st.warm_elapsed >= st.options.warm_up_timeout;
+        if (poll_scene_warmup_(st) || timed_out) {
+            if (timed_out) {
+                std::cerr << "[toyengine] '" << st.path << "' was still warming after "
+                          << st.options.warm_up_timeout << " s (" << st.warm_status
+                          << "); showing it anyway\n";
+            }
+            apply_warmup_budgets_(st, /*warming=*/false);   // back to the authored budgets
+            transition_.hide_loading_screen();
+            st.stage = SceneLoadStage::FadingIn;
+            std::cout << "[toyengine] '" << st.path << "' warmed in " << st.warm_elapsed
+                      << " s (" << st.warm_frames << " frames); revealing\n";
+        }
     }
 
     if (covered_kind) transition_.set_fade(tr.color, st.alpha);
@@ -954,7 +1109,11 @@ void Engine::update_scene_load_(float dt) {
 
 void Engine::activate_scene_load_(detail::SceneLoadState& st) {
     ctx_.wait_idle();
-    transition_.hide_loading_screen();
+    // The loading screen stays up through a warm-up; it is dropped where the cover starts to
+    // lift, in update_scene_load_(), so the two never come apart.
+    if (!st.options.warm_up || st.options.transition.kind == SceneTransition::Kind::None) {
+        transition_.hide_loading_screen();
+    }
     std::unique_ptr<coopa::scene::Scene> built = st.builder->take();   // unstarted
     st.builder.reset();
     apply_spawn_point_(*built, st.options.spawn_point);
@@ -975,7 +1134,15 @@ void Engine::activate_scene_load_(detail::SceneLoadState& st) {
         scene_mgr_.set_active_scene(previous_active);
         apply_scene_settings_(*previous_active);
     }
-    st.stage = st.options.transition.kind == SceneTransition::Kind::None ? SceneLoadStage::Done : SceneLoadStage::FadingIn;
+    if (st.options.transition.kind == SceneTransition::Kind::None) {
+        st.stage = SceneLoadStage::Done;
+    } else if (st.options.warm_up) {
+        // Still covered: the scene simulates from here, and update_scene_load_() holds the cover
+        // and the loading screen until its systems report warm (scene_loading.h, stage 5).
+        st.stage = SceneLoadStage::Warming;
+    } else {
+        st.stage = SceneLoadStage::FadingIn;
+    }
     st.complete(*raw);
 }
 
@@ -1184,6 +1351,46 @@ void Engine::sync_particle_render_state_(coopa::scene::Scene& scene) {
         }, particle_frame_);
     }
     pipeline_->set_particle_state(particle_frame_);
+}
+
+SceneLoadOptions Engine::scene_loading_options_(const fkyaml::node& settings) {
+    SceneLoadOptions opts;
+    // No `loading:` block means no cover: a scene says for itself whether it is worth warming,
+    // so adding the stage changes nothing for the scenes (and the projects) that do not ask.
+    opts.warm_up = false;
+    opts.transition = SceneTransition::none();
+    if (!settings.is_mapping() || !settings.contains("loading")) return opts;
+    const fkyaml::node& node = settings.at("loading");
+    if (!node.is_mapping()) return opts;
+
+    std::string ui;
+    if (node.contains("ui")) ui = node.at("ui").get_value<std::string>();
+    SceneTransition::Kind kind =
+        ui.empty() ? SceneTransition::Kind::Fade : SceneTransition::Kind::LoadingScreen;
+    if (node.contains("transition")) {
+        if (auto parsed = SceneTransition::parse_kind(node.at("transition").get_value<std::string>())) {
+            kind = *parsed;
+        } else {
+            std::cerr << "[toyengine] scene settings: loading.transition must be none, fade or "
+                         "loading_screen\n";
+        }
+    }
+    opts.transition.kind = kind;
+    opts.transition.loading_screen = ui;
+    opts.warm_up = kind != SceneTransition::Kind::None;
+    if (node.contains("fade_in")) opts.transition.fade_in = node.at("fade_in").get_value<float>();
+    if (node.contains("fade_out")) opts.transition.fade_out = node.at("fade_out").get_value<float>();
+    if (node.contains("warm_up")) opts.warm_up = node.at("warm_up").get_value<bool>();
+    if (node.contains("warm_up_timeout")) {
+        opts.warm_up_timeout = node.at("warm_up_timeout").get_value<float>();
+    }
+    if (node.contains("warm_up_budget_ms")) {
+        opts.warm_up_budget_ms = node.at("warm_up_budget_ms").get_value<float>();
+    }
+    if (node.contains("min_display_time")) {
+        opts.min_display_time = node.at("min_display_time").get_value<float>();
+    }
+    return opts;
 }
 
 fkyaml::node Engine::weather_node_(const fkyaml::node& settings) {

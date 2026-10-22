@@ -35,13 +35,20 @@ namespace {
  * @brief The priority a chunk's meshing job is submitted at, by its distance from the centre.
  *
  * The queue is already sorted nearest-first, but submission order only decides what is handed
- * over -- not what a worker picks up next. High for the camera's own chunk and the ring around
- * it (the ground a player is standing on, and about to walk onto), Normal through the inner
- * half of the view, Low for the outer rings, which may wait behind anything the frame needs.
+ * over -- not what a worker picks up next. Normal for the camera's own chunk and the ring around
+ * it (the ground a player is standing on, and about to walk onto), Low for everything beyond.
+ *
+ * Nothing here runs above Normal, and the bulk runs at Low, because a chunk mesh is BACKGROUND
+ * work in the job engine's sense (job/README.md, "Keeping background work out of frame-critical
+ * waits"): it is long and unsliced, so any frame thread that picks one up mid-wait bills a whole
+ * chunk -- mesh, weld, three LOD levels, a collision BVH and the water -- to whatever system
+ * happened to be waiting. The frame's own loops wait with a Normal help floor, so Low chunks are
+ * invisible to them; the near ring stays at Normal to keep beating the far ring to a worker.
+ * Near-before-far does not depend on this: submit_queued_chunks_() sorts the queue by distance.
  */
 coopa::job::Priority chunk_priority(std::int32_t distance, std::int32_t view_radius) {
-    if (distance <= 1) return coopa::job::Priority::High;
-    if (2 * distance <= std::max<std::int32_t>(2, view_radius)) return coopa::job::Priority::Normal;
+    (void)view_radius;
+    if (distance <= 1) return coopa::job::Priority::Normal;
     return coopa::job::Priority::Low;
 }
 
@@ -50,14 +57,21 @@ coopa::job::Priority chunk_priority(std::int32_t distance, std::int32_t view_rad
 void TerrainSystem::execute(coopa::scene::Scene& scene, const coopa::scene::FrameContext& ctx) {
     ++frame_;
     physics_dirty_ = false;
+    wanted_chunks_ = 0;
+    unfinished_chunks_ = 0;
+    terrain_baking_ = false;
     // Baked on the first frame that has terrain, not in the constructor: the bake submits a
     // one-shot upload, and a system is constructed before the device is necessarily ready to
     // take one. It registers itself with the asset manager, so this is one upload per run.
     if (!detail_texture_.is_loaded() && !scene.get_components<TerrainComponent>().empty()) {
         coopa::gfx::command::CommandPool pool(device_, device_.graphics_family(), true);
-        detail_texture_ = bake_terrain_detail_texture(device_, allocator_, pool, assets_);
+        detail_texture_ = bake_terrain_detail_texture(device_, allocator_, pool, assets_, 512,
+                                                      16.0f, ctx.jobs);
     }
     for (TerrainComponent* terrain : scene.get_components<TerrainComponent>()) {
+        // Not ready yet means the world bake or the tile-set bake is still running, and no chunk
+        // has been asked for -- a zero wanted count that must not read as "nothing left to do".
+        if (!terrain->is_ready()) terrain_baking_ = true;
         tick_terrain_(*terrain, scene, ctx);
     }
     sync_planet_gravity_(scene);
@@ -304,10 +318,15 @@ void TerrainSystem::sync_planet_gravity_(coopa::scene::Scene& scene) {
 void TerrainSystem::want_chunks_(TerrainComponent& terrain, const ChunkCoord& centre,
                                  coopa::scene::Scene& scene) {
     const std::int32_t radius = terrain.params.view_radius;
+    // Counted here rather than in a second walk: this scan already visits exactly the wanted set
+    // once a frame, and warm_up_state() needs nothing more than its size and how much of it is
+    // not Live yet. Accumulated, not assigned -- execute() zeroes the pair and a scene may hold
+    // more than one terrain.
     for (std::int32_t dy = -radius; dy <= radius; ++dy) {
         for (std::int32_t dx = -radius; dx <= radius; ++dx) {
             const ChunkCoord coord{centre.x + dx, centre.y + dy};
             if (!chunk_in_world(terrain, coord)) continue;
+            ++wanted_chunks_;
 
             auto it = terrain.chunks().find(coord);
             if (it != terrain.chunks().end()) {
@@ -316,9 +335,13 @@ void TerrainSystem::want_chunks_(TerrainComponent& terrain, const ChunkCoord& ce
                 if (chunk.state == ChunkState::Dormant) revive_chunk_(terrain, scene, chunk);
                 if (chunk.state == ChunkState::Live) {
                     sync_chunk_collision_(terrain, chunk, terrain_wants_collision(terrain, coord, centre));
+                } else {
+                    ++unfinished_chunks_;
                 }
+                if (chunk.state == ChunkState::Live && chunk.stale) ++unfinished_chunks_;
                 continue;
             }
+            ++unfinished_chunks_;
 
             TerrainChunk chunk;
             chunk.coord           = coord;

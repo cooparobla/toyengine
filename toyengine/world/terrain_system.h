@@ -120,6 +120,36 @@ public:
     /** @brief Owner-thread milliseconds the last execute() spent publishing chunks. */
     double last_upload_ms() const { return last_upload_ms_; }
 
+    /**
+     * @brief Chunks wanted at the current stream centre, and how many are not drawing yet.
+     *
+     * Both are the previous execute()'s figures, counted by want_chunks_() as it walks the
+     * wanted square. `unfinished` counts a chunk that is queued, meshing or retiring, and a
+     * published one whose tiles have been edited since (stale, so due to re-mesh).
+     */
+    std::int32_t wanted_chunks() const { return wanted_chunks_; }
+    std::int32_t unfinished_chunks() const { return unfinished_chunks_; }
+
+    /**
+     * @brief Not warm until every wanted chunk is drawing -- a streamed world's ground.
+     *
+     * Reports unwarm while a terrain is still baking its world or its tile set too: nothing has
+     * been asked for at that point, and a zero outstanding count would otherwise read as done.
+     */
+    coopa::scene::WarmupState warm_up_state() const override {
+        coopa::scene::WarmupState ws;
+        ws.participates = terrain_baking_ || wanted_chunks_ > 0;
+        if (!ws.participates) return ws;
+        ws.what = "terrain";
+        ws.warm = !terrain_baking_ && unfinished_chunks_ == 0;
+        ws.remaining = unfinished_chunks_;
+        ws.progress = wanted_chunks_ > 0
+                          ? static_cast<float>(wanted_chunks_ - unfinished_chunks_) /
+                                static_cast<float>(wanted_chunks_)
+                          : 0.0f;
+        return ws;
+    }
+
 private:
     /**
      * @brief Follows AssetManager::k_asset_io_job_type's precedent: any value >= k_max_job_types
@@ -127,6 +157,10 @@ private:
      *        of independent, dependency-free jobs wants.
      */
     static constexpr coopa::job::JobType k_terrain_job_type = 0x7E44A100u;
+
+    std::int32_t wanted_chunks_ = 0;      /**< See wanted_chunks(). */
+    std::int32_t unfinished_chunks_ = 0;  /**< See unfinished_chunks(). */
+    bool terrain_baking_ = false;         /**< Any terrain still baking its world or tile set. */
 
     /** @brief One terrain's whole frame: generate, then stream. */
     void tick_terrain_(TerrainComponent& terrain, coopa::scene::Scene& scene,

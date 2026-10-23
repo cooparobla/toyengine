@@ -267,6 +267,37 @@ To undo an override:
 To make an override part of the object asset, choose **Apply to Object Asset** from the same
 menus. The value moves into the object asset and every instance gets it.
 
+### Build one object asset on another
+
+An object asset can start from another one, so a family of variants shares a body, a rig and its
+animation clips instead of copying them. The editor has no button for this: write the base
+reference into the variant's file yourself, as its root object's first key.
+
+```yaml
+object:
+  name: soft_orc
+  inherit_from: objects/characters/soft_hero
+  components:
+    - type: Transform
+      scale: {x: 1.12, y: 1.12, z: 1.12}
+```
+
+The variant then merges onto the base the same way an instance merges onto its object asset:
+components by type, children by name, mappings key by key, and an `Animator`'s `states` by state
+name. A child or component carrying `remove: true` drops one the base declares. The editor opens
+such a variant as an instance of its base, with the same override marks and Revert / Apply
+commands as a placed instance.
+
+Two keys do this, and they differ in one way:
+
+| Key | Use it for |
+| --- | --- |
+| `inherit_from: objects/<base>` | A variant that sets only *part* of its root Transform. The Transform merges key by key, so setting `scale` leaves the base's position alone. |
+| `prefab: objects/<base>` | A copy that places itself. Its own root Transform **replaces** the base's, so a prefab's root offset never shifts every copy. |
+
+Chains are allowed (a variant of a variant), up to 32 deep, and a cycle is reported rather than
+followed.
+
 If you rename a child inside an object asset and save it, scenes that override that child are
 updated to the new name.
 

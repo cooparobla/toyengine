@@ -212,7 +212,112 @@ const std::vector<std::string>& Project::list(const std::string& dir, const std:
     return cache_[key] = scan_(assets(), dir, ext);
 }
 
-void Project::refresh() { cache_.clear(); coopa::asset::AssetIndex::invalidate(); }
+void Project::refresh() {
+    cache_.clear();
+    clip_referrers_.clear();
+    clip_referrers_built_ = false;
+    coopa::asset::AssetIndex::invalidate();
+}
+
+fs::path Project::resolve_clip_ref(const fs::path& declaring_doc, const std::string& ref) const {
+    // The same two-step AssetSource::resolve() does: the declaring document's own folder first
+    // (so a scene can keep a private copy of a clip the project otherwise shares), then the
+    // project's assets/. resolve_variant() collapses the spellings that name one file —
+    // `animations/x/y.yaml`, `.caml`, and the extension-stripped `animations/x/y` — onto it.
+    std::error_code ec;
+    const fs::path local = declaring_doc.parent_path() / ref;
+    if (coopa::yaml::document_exists(local)) return fs::weakly_canonical(coopa::yaml::resolve_variant(local), ec);
+    const fs::path shared = assets() / ref;
+    if (coopa::yaml::document_exists(shared)) return fs::weakly_canonical(coopa::yaml::resolve_variant(shared), ec);
+    // Last, as AssetSource does: by name under the asset root, which is what makes an
+    // extension-less `animations/hero/walk` (or one whose folder has since been re-tagged)
+    // name the same file as the path spelt in full. Under-reporting a referrer is the one
+    // failure this index must not have.
+    if (auto found = coopa::asset::AssetIndex::find_in({assets().string()}, ref)) {
+        return fs::weakly_canonical(*found, ec);
+    }
+    return fs::weakly_canonical(shared, ec);
+}
+
+namespace {
+
+/** @brief Every `states[].clip` of every Animator anywhere in `n`. */
+void collect_animator_clips(const Node& n, std::vector<std::string>& out) {
+    if (n.is_mapping()) {
+        if (component_type(n) == "Animator" && n.contains("states") && n.at("states").is_sequence()) {
+            for (const Node& st : n.at("states").as_seq()) {
+                if (!st.is_mapping() || !st.contains("clip") || !st.at("clip").is_string()) continue;
+                out.push_back(st.at("clip").get_value<std::string>());
+            }
+        }
+        for (const auto& kv : n.as_map()) collect_animator_clips(kv.second, out);
+    } else if (n.is_sequence()) {
+        for (const Node& item : n.as_seq()) collect_animator_clips(item, out);
+    }
+}
+
+} // namespace
+
+void Project::build_clip_referrers_() {
+    clip_referrers_.clear();
+    clip_referrers_built_ = true;
+    std::error_code ec;
+    for (auto e = fs::recursive_directory_iterator(assets(), ec); e != fs::recursive_directory_iterator(); e.increment(ec)) {
+        if (ec) break;
+        if (!e->is_regular_file() || e->path().extension() != ".yaml") continue;   // .caml is a packaged copy
+        std::string text;
+        {
+            std::ifstream in(e->path(), std::ios::binary);
+            text.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        }
+        // Only a document mentioning an Animator can name a clip; this skips the asset tree—s
+        // bulk (meshes above all) without parsing it.
+        if (text.find("Animator") == std::string::npos) continue;
+        std::vector<std::string> refs;
+        try {
+            collect_animator_clips(coopa::yaml::load_document(e->path()), refs);
+        } catch (...) {
+            continue;   // An unparsable file is left alone; the engine can't load it either.
+        }
+        const std::string who = relative(e->path());
+        for (const std::string& ref : refs) {
+            std::vector<std::string>& list = clip_referrers_[resolve_clip_ref(e->path(), ref).string()];
+            if (std::find(list.begin(), list.end(), who) == list.end()) list.push_back(who);
+        }
+    }
+    for (auto& [key, list] : clip_referrers_) {
+        (void)key;
+        std::sort(list.begin(), list.end());
+    }
+}
+
+std::vector<std::string> Project::repoint_clip_refs(const std::vector<std::string>& docs,
+                                                    const std::string& from, const std::string& to) {
+    std::vector<std::string> changed;
+    const RefRename rename = RefRename::between(from, to);
+    if (rename.empty()) return changed;
+    for (const std::string& rel : docs) {
+        const fs::path path = assets() / rel;
+        try {
+            Node doc = coopa::yaml::load_document(path);
+            if (rename.apply(doc) == 0) continue;
+            coopa::yaml::save_document(path, doc);
+            changed.push_back(rel);
+        } catch (...) {
+            // An unparsable file is left alone; the engine can't load it either.
+        }
+    }
+    refresh();
+    return changed;
+}
+
+const std::vector<std::string>& Project::clip_referrers(const fs::path& clip_path) {
+    if (!clip_referrers_built_) build_clip_referrers_();
+    static const std::vector<std::string> none;
+    std::error_code ec;
+    auto it = clip_referrers_.find(fs::weakly_canonical(coopa::yaml::resolve_variant(clip_path), ec).string());
+    return it == clip_referrers_.end() ? none : it->second;
+}
 
 std::vector<std::string> Project::rename_asset(const std::string& from, const std::string& to) {
     const fs::path src = absolute(from), dst = assets() / to;

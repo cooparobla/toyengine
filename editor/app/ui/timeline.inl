@@ -72,8 +72,36 @@
     /** @brief The object asset (objects/x) a placed instance at or above `id` comes from, or "". */
     std::string anim_instance_asset_(ObjectId id) const;
 
-    /** @brief The rig's Animator states: (state name, clip path as written). */
-    std::vector<std::pair<std::string, std::string>> anim_states_() const;
+    /** @brief Where a listed state's entry is declared, for a rig that inherits its Animator. */
+    enum class AnimStateOrigin { Own, Inherited, Overridden };
+
+    /** @brief One state on the rig: its name, its clip path as written, and where it is declared. */
+    struct AnimStateRef {
+        std::string name;
+        std::string clip;
+        AnimStateOrigin origin = AnimStateOrigin::Own;
+    };
+
+    /** @brief The rig's Animator states, as the editor shows them (the object asset's merged in). */
+    std::vector<AnimStateRef> anim_states_() const;
+
+    /** @brief `id`'s node as the editor shows it: merged with its object asset inside an instance. */
+    const Node* anim_effective_node_(ObjectId id) const;
+
+    /** @brief The Animator component on `id` as the editor shows it, or null if it has none. */
+    const Node* anim_animator_of_(ObjectId id) const;
+
+    /** @brief The rig's OWN Animator `states` (what this document declares), as a sequence. */
+    Node anim_own_states_() const;
+
+    /** @brief The object asset's Animator `states` for the rig, as a sequence (empty if it owns one). */
+    Node anim_asset_states_() const;
+
+    /** @brief True when the rig plays a state its object asset declares rather than this document. */
+    bool anim_state_is_inherited_(const std::string& name) const;
+
+    /** @brief Edits the rig's OWN Animator node, adding it as an override when the rig inherits one. */
+    void anim_edit_animator_(const std::function<void(Node&)>& fn, const std::string& label);
 
     /** @brief Opens state `name`'s clip file (creating an empty clip if the file is missing). */
     void anim_open_clip_(const std::string& name);
@@ -94,7 +122,38 @@
     void anim_new_clip_(std::string name = "clip");
 
     /** @brief Removes the open clip's state from the Animator and deletes its file. */
-    void anim_delete_clip_();
+    /** @brief Drops the open clip from the rig. `keep_file` leaves the clip file for its other users. */
+    void anim_delete_clip_(bool keep_file = false);
+
+    /** @brief The folder this rig's clips live in ("animations/<shared set>"), for a new clip. */
+    std::string anim_clip_dir_() const;
+
+    // --- sharing: one clip file is routinely played by many rigs ---------------------------
+
+    /** @brief Documents OTHER than the open one whose Animator plays the open clip. */
+    std::vector<std::string> anim_clip_sharers_();
+
+    /** @brief The "Shared by N" pill and its list of the other rigs; advances `x`. */
+    void draw_clip_sharing_(imm::Context& ctx, const imm::Box& hb, float& x);
+
+    /** @brief The confirm shown before a delete or rename that would reach another rig's clip. */
+    void draw_clip_share_modal_(imm::Context& ctx);
+
+    /** @brief Delete the open clip, asking first when other rigs play its file. */
+    void anim_request_delete_clip_();
+
+    /** @brief Rename the open clip, asking first when other rigs play its file. */
+    void anim_request_rename_clip_(const std::string& to);
+
+    /** @brief What a pending clip-share confirm is about. */
+    enum class ClipShareAction { None, Delete, Rename };
+    struct ClipSharePrompt {
+        ClipShareAction action = ClipShareAction::None;
+        std::string state;                  ///< The state the action was invoked on.
+        std::string rename_to;              ///< Rename only.
+        std::vector<std::string> others;    ///< The documents that also play this clip.
+    };
+    ClipSharePrompt clip_share_prompt_;
 
     // =================================================================================
     // Poses
@@ -137,7 +196,8 @@
     bool anim_keyed_now_(ObjectId id, const std::string& property) const;
 
     /** @brief Renames the open clip: its state, the auto_play reference, its name and its file. */
-    void anim_rename_clip_(const std::string& to);
+    /** @brief Renames the open clip's state and file. `repoint_others` rewrites the other rigs that play it. */
+    void anim_rename_clip_(const std::string& to, bool repoint_others = false);
 
     // =================================================================================
     // UI
@@ -221,6 +281,18 @@ public:
     void set_timeline_rest_pose(bool on) { anim_show_rest_ = on; }
     /** @brief The object asset a placed instance at or above `id` comes from ("" if none). */
     std::string animation_instance_asset(ObjectId id) const { return anim_instance_asset_(id); }
+    /** @brief Documents other than the open one that play the open clip (the "Shared by N" list). */
+    std::vector<std::string> animation_clip_sharers() { return anim_clip_sharers_(); }
+    /** @brief The rig's state names in order, as the Timeline lists them. */
+    std::vector<std::string> animation_state_names() const {
+        std::vector<std::string> out;
+        for (const AnimStateRef& st : anim_states_()) out.push_back(st.name);
+        return out;
+    }
+    /** @brief True when the open rig plays this state from its object asset rather than itself. */
+    bool animation_state_inherited(const std::string& name) const { return anim_state_is_inherited_(name); }
+    void delete_animation_clip(bool keep_file) { anim_delete_clip_(keep_file); }
+    void open_animation_clip(const std::string& state) { anim_open_clip_(state); }
     /** @brief The project's assets of a type, as the browser lists them. */
     std::vector<std::string> list_assets(AssetType t) { return list_assets_(t); }
     void key_channel(ObjectId id, const std::string& property) { anim_key_channel_(id, property); }

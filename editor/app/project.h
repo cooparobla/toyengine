@@ -191,6 +191,39 @@ public:
      */
     std::vector<std::string> rename_asset(const std::string& from, const std::string& to);
 
+    /**
+     * @brief The documents whose Animator plays the clip file at `clip_path`, assets-relative
+     *        and sorted.
+     *
+     * An animation clip is referenced by path from an Animator—s `states[].clip`, and one
+     * clip file is routinely played by a whole family of rigs (every `soft_<race>` object asset
+     * naming `animations/soft_hero/walk.yaml` shares that one file). Editing a clip therefore
+     * changes every rig in this list, which is what the Timeline reports before it does.
+     *
+     * Keyed by RESOLVED path, not by the spelling in the YAML: the same clip can be written
+     * `animations/x/y.yaml`, `assets/animations/x/y.yaml` or without its extension, and a
+     * document-local clip shadows a shared one of the same relative path. Matching only
+     * `Animator.states[].clip` values is also what keeps `AudioSource.clip` and a clip
+     * document—s own `clip:` key out of the result.
+     *
+     * Built in one pass over the whole asset tree and cached, so the first call pays for every
+     * clip at once and later ones are a map lookup. refresh() drops it.
+     */
+    const std::vector<std::string>& clip_referrers(const fs::path& clip_path);
+
+    /** @brief Where a `states[].clip` written in `declaring_doc` points: next to it, else assets/. */
+    fs::path resolve_clip_ref(const fs::path& declaring_doc, const std::string& ref) const;
+
+    /**
+     * @brief Repoints references to the clip `from` at `to` in each of `docs`, on disk.
+     *
+     * For renaming a clip that other rigs play: `docs` are the assets-relative documents to
+     * rewrite (clip_referrers() minus the one open in the editor, whose in-memory copy would
+     * overwrite a disk edit on its next save). Returns the files actually changed.
+     */
+    std::vector<std::string> repoint_clip_refs(const std::vector<std::string>& docs,
+                                               const std::string& from, const std::string& to);
+
     /** @brief All scene files (assets/scenes/<name>/scene.yaml and any other .yaml in scenes/). */
     std::vector<std::string> scenes() { return scene_files_(list("scenes", ".yaml")); }
 
@@ -232,8 +265,14 @@ private:
     static std::vector<std::string> scene_files_(const std::vector<std::string>& files);
     static bool exists_(const fs::path& p);
 
+    /** @brief Fills clip_referrers_ from one pass over the asset tree. */
+    void build_clip_referrers_();
+
     fs::path root_;
     std::map<std::string, std::vector<std::string>> cache_;
+    /** @brief Resolved clip path -> the documents playing it. Empty until built. */
+    std::map<std::string, std::vector<std::string>> clip_referrers_;
+    bool clip_referrers_built_ = false;
 };
 
 } // namespace toy::editor

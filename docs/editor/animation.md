@@ -12,10 +12,11 @@ key.*
 
 What you see in the Timeline, from top to bottom:
 
-- **The header.** From left to right: the clip list (here `wave`), **Jump to Start** (the
-  circular arrow), **Play / Pause**, the **Frame** number, **Record** (the red dot),
-  **Insert Keyframe** (**+**), **Rest Pose**, **All Objects**, **Length** and the repeat mode
-  (here **loop**). Hover any of them for a tooltip.
+- **The header.** From left to right: the clip list (here `wave`), a **Shared by N** badge when
+  other rigs play the same clip file, **Jump to Start** (the circular arrow), **Play / Pause**,
+  the **Frame** number, **Record** (the red dot), **Insert Keyframe** (**+**), **Rest Pose**,
+  **All Objects**, **Length** and the repeat mode (here **loop**). Hover any of them for a
+  tooltip.
 - **The ruler.** Frame numbers. The Timeline runs at 30 frames a second.
 - **The dope sheet.** A **Summary** row, an **Events** lane, then one row per object, with a
   diamond for every key.
@@ -58,9 +59,13 @@ You can also add the **Animator** component from **Add Component** in the Proper
 
 | Setting | Meaning |
 |---|---|
+| **States** | The rig's clips, one row each: the **Name** gameplay asks for, the **Clip** file played, and a **Wrap** and **Speed** that override what the clip itself says. Add, remove and reorder them here, or author a clip in the Timeline. |
 | **Auto play** | The clip the game plays when it starts. Your first clip is filled in for you. |
 | **Speed** | How fast clips play (1 is normal speed). |
 | **Default crossfade** | How long, in seconds, the game blends when it switches from one clip to another. |
+
+Setting a state's **Wrap** to **(none)** leaves the clip's own repeat mode alone, which is
+usually what you want: a clip that plays once says so in its own file.
 
 > [!WARNING]
 > Keys remember objects by their name and place in the rig. If you rename an object inside a
@@ -72,10 +77,31 @@ You can also add the **Animator** component from **Add Component** in the Proper
    none.
 2. Choose **New Clip**.
 
-The new clip is named **Clip** (then **Clip.1**, **Clip.2** and so on) and opens straight away.
-To switch to another clip, open the list and click its name.
+The new clip is named **clip** (then **clip_001**, **clip_002** and so on) and opens straight
+away. To switch to another clip, open the list and click its name.
+
+Its file lands beside the rig's other clips, in whatever folder they already use. A rig with no
+clips yet starts a folder named after the rig.
 
 Pressing **I** on a rig with no clips also creates a clip, and keys the pose into it.
+
+## Clips are shared
+
+A state points at a clip **file**, and more than one rig can point at the same one. That is
+normal and usually the point: a family of characters built on one rig plays one set of clips, so
+a better walk is a better walk for all of them.
+
+It also means a clip edit is never local. When the open clip is played by anything else, the
+Timeline header shows a **Shared by N** badge next to the clip list. Click it to see exactly
+which objects and scenes play it, and click one to open it. Every key you move, every event you
+add and every length you change reaches all of them, as soon as you make it.
+
+To give one rig its own version of a clip instead, point that rig's **Clip** at a new file in
+the **States** list (Properties > Components > Animator). Its other states stay shared.
+
+> [!NOTE]
+> A clip kept next to a scene shadows a clip of the same relative path in `assets/`, so a scene
+> can hold a private copy of a shared clip.
 
 ## Rename or delete a clip
 
@@ -85,9 +111,40 @@ Pressing **I** on a rig with no clips also creates a clip, and keys the pose int
    - Type a new name in the **Rename** field.
    - Choose **Delete Clip**.
 
+If anything else plays the clip, the editor asks first:
+
+- **Deleting** offers **Remove State**, which takes the clip off this rig and leaves the file for
+  the rigs still playing it, or **Delete File**, which removes it for everyone.
+- **Renaming** offers **Rename for All**, which renames the file and repoints every other rig at
+  the new name. Anything it could not repoint is named in the Console.
+
 Your keys are saved as you make them, so a clip never needs saving on its own. Creating,
 renaming and deleting clips does change the scene, though: save the scene afterwards with
 **Ctrl+S**.
+
+## Share one rig's clips with others
+
+An object asset can inherit another one, which is how a family of characters shares a rig and
+its clips without copying them. Give the base asset the rig and its **Animator**, then start
+each variant with `inherit_from: objects/<base>` and change only what differs.
+
+States are merged **by name**, so a variant can:
+
+- **retarget one clip** -- a state with the same `name` and a different `clip` replaces just that
+  entry, and every other state keeps coming from the base;
+- **add a clip of its own** -- a state with a new `name` is appended;
+- **drop one** -- `{name: glide, remove: true}` removes a state the base declares.
+
+Selecting such a variant opens its whole clip list in the Timeline, inherited states included.
+Editing one writes only that state onto the variant, so later changes to the base still reach it.
+
+Renaming an inherited state is refused: it would rename the clip for this variant alone while
+the base kept the old name. Rename it on the base instead, and every variant follows.
+
+> [!NOTE]
+> Use `inherit_from:` rather than `prefab:` for a variant that sets only part of its root
+> Transform. A `prefab:` instance places itself, so its own Transform *replaces* the base's,
+> while `inherit_from:` merges it key by key.
 
 ## Record a pose
 

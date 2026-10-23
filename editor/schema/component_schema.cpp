@@ -974,13 +974,26 @@ std::map<std::string, ComponentSchema>& schema_table_() {
         }
         add({"TileTerrain", "World", tile_terrain_fields()});
         add({"Terrain", "World", tile_terrain_fields()});   // TileTerrain's old name, still loaded
-        // A rig root: its clips are `states` (managed in the Timeline -- one file each under
-        // animations/<object>/), `auto_play` names the state played on start.
-        add({"Animator", "Animation", {f_string("auto_play", "", true), f_float("speed", 1.0f, 0.01f, 0.0f, 100.0f),
-                                       f_float("default_crossfade", 0.0f, 0.005f, 0.0f, 10.0f),
-                                       with_tip(f_bool("apply_root_motion", false),
-                                                "Move this object by the clips' root motion (a CharacterController with "
-                                                "Use Root Motion takes it instead)")}});
+        // A rig root: `states` names its clips, `auto_play` the one played on start. A clip
+        // path is arbitrary and routinely SHARED — a whole family of rigs can play one set
+        // (every soft_<race> object asset names animations/soft_hero/*), so editing a clip
+        // changes every rig that lists it. The Timeline is the place to author a clip; this
+        // list is the place to see and re-point them.
+        add({"Animator", "Animation", {
+            with_tip(f_items("states", {
+                f_string("name"),
+                f_asset("clip", "animations", ".yaml"),
+                f_enum("wrap", {"loop", "once", "pingpong", ""}),
+                f_float("speed", 1.0f, 0.01f, 0.0f, 100.0f),
+            }), "The rig's clips, by the state name gameplay crossfades to.\n"
+                "Clip: the file played — shared with every other rig naming the same path.\n"
+                "Wrap and Speed override the clip's own; (none) keeps what the clip says"),
+            f_string("auto_play", "", true),
+            f_float("speed", 1.0f, 0.01f, 0.0f, 100.0f),
+            f_float("default_crossfade", 0.0f, 0.005f, 0.0f, 10.0f),
+            with_tip(f_bool("apply_root_motion", false),
+                     "Move this object by the clips' root motion (a CharacterController with "
+                     "Use Root Motion takes it instead)")}});
         // IK over the animated pose (coopa/animation/ik_components.h, toyengine/scene/foot_ik.h).
         // Bone and target fields are paths from this object, like an animation track's object.
         add({"TwoBoneIK", "Animation", {

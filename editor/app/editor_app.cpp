@@ -3562,6 +3562,7 @@ void EditorApp::draw_modals_(imm::Context& ctx) {
     file_dialog_.draw(ctx);
     draw_build_modal_(ctx);
     draw_build_settings_modal_(ctx);
+    draw_clip_share_modal_(ctx);
 
     if (ctx.begin_modal("Unsaved Changes", {370, 0})) {   // height fits the content
         ctx.paragraph("There are unsaved changes. Save them first?");

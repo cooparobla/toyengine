@@ -4,8 +4,10 @@ namespace toy {
 namespace editor {
 
 ObjectId EditorApp::rig_of_(ObjectId id) const {
+    // The EFFECTIVE node, not the document's own: an object asset whose root inherits another
+    // asset's Animator is a rig too, and its clips are the ones it should open.
     for (std::optional<ObjectId> cur = id; cur && *cur != 0; cur = doc_.parent_of(*cur)) {
-        if (doc_.find_component(*cur, "Animator") >= 0) return *cur;
+        if (anim_animator_of_(*cur)) return *cur;
     }
     return 0;
 }
@@ -58,27 +60,107 @@ std::string EditorApp::anim_instance_asset_(ObjectId id) const {
     return {};
 }
 
-std::vector<std::pair<std::string, std::string>> EditorApp::anim_states_() const {
-    std::vector<std::pair<std::string, std::string>> out;
+const Node* EditorApp::anim_effective_node_(ObjectId id) const {
+    // Resolving an inherited Animator applies to the object asset BEING EDITED — an asset whose
+    // root starts from another asset still owns its clip list and must open a dope sheet. A
+    // placed copy in a scene is the opposite case: its rig and clips belong to the asset, and
+    // draw_timeline_() sends the user there instead, so it must keep reading its own node.
+    if (doc_.is_object_asset() && doc_.object_root() != 0 &&
+        doc_.outermost_instance_of(id) == doc_.object_root()) {
+        if (const Node* r = resolved_of_(id)) return r;
+    }
+    return doc_.find(id);
+}
+
+const Node* EditorApp::anim_animator_of_(ObjectId id) const {
+    const Node* n = anim_effective_node_(id);
+    if (!n || !n->contains("components") || !n->at("components").is_sequence()) return nullptr;
+    for (const Node& c : n->at("components").as_seq()) {
+        if (component_type(c) == "Animator") return &c;
+    }
+    return nullptr;
+}
+
+/** @brief The `states` sequence of the Animator in a components list, or an empty sequence. */
+static Node states_in_components(const Node* obj) {
+    if (!obj || !obj->contains("components") || !obj->at("components").is_sequence()) return Node::sequence();
+    for (const Node& c : obj->at("components").as_seq()) {
+        if (component_type(c) != "Animator") continue;
+        if (c.contains("states") && c.at("states").is_sequence()) return c.at("states");
+        return Node::sequence();
+    }
+    return Node::sequence();
+}
+
+static bool states_contain(const Node& states, const std::string& name) {
+    if (!states.is_sequence()) return false;
+    for (const Node& s : states.as_seq()) if (get_string(s, "name") == name) return true;
+    return false;
+}
+
+Node EditorApp::anim_own_states_() const {
+    return anim_rig_ ? states_in_components(doc_.find(anim_rig_)) : Node::sequence();
+}
+
+Node EditorApp::anim_asset_states_() const {
+    return anim_rig_ ? states_in_components(base_of_(anim_rig_)) : Node::sequence();
+}
+
+bool EditorApp::anim_state_is_inherited_(const std::string& name) const {
+    if (!anim_rig_ || !in_instance_(anim_rig_)) return false;
+    return states_contain(anim_asset_states_(), name) && !states_contain(anim_own_states_(), name);
+}
+
+std::vector<EditorApp::AnimStateRef> EditorApp::anim_states_() const {
+    std::vector<AnimStateRef> out;
     if (!anim_rig_) return out;
-    const int ci = doc_.find_component(anim_rig_, "Animator");
-    if (ci < 0) return out;
-    const Node& comp = doc_.find(anim_rig_)->at("components").as_seq()[static_cast<size_t>(ci)];
-    if (!comp.contains("states") || !comp.at("states").is_sequence()) return out;
-    for (const auto& s : comp.at("states").as_seq()) out.push_back({get_string(s, "name"), get_string(s, "clip")});
+    const Node* anim = anim_animator_of_(anim_rig_);
+    if (!anim || !anim->contains("states") || !anim->at("states").is_sequence()) return out;
+
+    // Classifying costs two sequence scans per state, so only do it for a rig that inherits.
+    const bool inheriting = in_instance_(anim_rig_);
+    const Node own = inheriting ? anim_own_states_() : Node::sequence();
+    const Node from_asset = inheriting ? anim_asset_states_() : Node::sequence();
+
+    for (const Node& s : anim->at("states").as_seq()) {
+        AnimStateRef r{get_string(s, "name"), get_string(s, "clip"), AnimStateOrigin::Own};
+        if (inheriting && states_contain(from_asset, r.name)) {
+            r.origin = states_contain(own, r.name) ? AnimStateOrigin::Overridden : AnimStateOrigin::Inherited;
+        }
+        out.push_back(std::move(r));
+    }
     return out;
 }
 
+void EditorApp::anim_edit_animator_(const std::function<void(Node&)>& fn, const std::string& label) {
+    if (!anim_rig_) return;
+    const int ci = doc_.find_component(anim_rig_, "Animator");
+    if (ci >= 0) {
+        Node comp = doc_.find(anim_rig_)->at("components").as_seq()[static_cast<size_t>(ci)];
+        fn(comp);
+        apply_(doc_.set_component(anim_rig_, ci, comp, label));
+        return;
+    }
+    // The rig inherits its Animator: carry the change as an override component holding only the
+    // states this variant restates. SceneInheritance merges `states` by name, so the asset—s
+    // other clips keep arriving on their own.
+    Node comp = Node::mapping();
+    comp["type"] = Node(std::string("Animator"));
+    comp["states"] = Node::sequence();
+    fn(comp);
+    apply_(doc_.add_component(anim_rig_, comp));
+}
+
 void EditorApp::anim_open_clip_(const std::string& name) {
-    for (const auto& [state, clip] : anim_states_()) {
-        if (state != name) continue;
-        const fs::path p = anim_resolve_clip_(clip);
+    for (const AnimStateRef& s : anim_states_()) {
+        if (s.name != name) continue;
+        const fs::path p = anim_resolve_clip_(s.clip);
         anim_clip_ = ClipDocument{};
-        anim_clip_.state = state;
+        anim_clip_.state = s.name;
         anim_clip_.path = p;
         try {
             if (coopa::yaml::document_exists(p)) anim_clip_.model = ClipModel::from_node(coopa::yaml::load_document(p));
-            else anim_clip_.model.name = state;
+            else anim_clip_.model.name = s.name;
         } catch (const std::exception& e) {
             log_error("Timeline: " + std::string(e.what()));
         }
@@ -120,11 +202,27 @@ void EditorApp::anim_add_animator_(ObjectId id) {
     anim_rig_ = id;
 }
 
+std::string EditorApp::anim_clip_dir_() const {
+    // Where this rig already keeps its clips, so a new one joins them instead of starting a
+    // second folder. Object names and clip folders are unrelated: a whole family of rigs can
+    // share one clip set (every soft_<race> plays animations/soft_hero/*), and a new clip
+    // belongs beside the rest of them.
+    std::string dir;
+    for (const AnimStateRef& st : anim_states_()) {
+        if (st.clip.empty()) continue;
+        const std::string d = fs::path(st.clip).parent_path().generic_string();
+        if (d.empty()) continue;
+        if (dir.empty()) dir = d;
+        else if (dir != d) return "animations/" + anim_name_of_(anim_rig_, "Rig");   // already split
+    }
+    return dir.empty() ? "animations/" + anim_name_of_(anim_rig_, "Rig") : dir;
+}
+
 void EditorApp::anim_new_clip_(std::string name) {
     if (!anim_rig_) return;
     const auto states = anim_states_();
     auto taken = [&](const std::string& n) {
-        for (const auto& s : states) if (s.first == n) return true;
+        for (const auto& s : states) if (s.name == n) return true;
         return false;
     };
     const std::string base = name;
@@ -133,8 +231,7 @@ void EditorApp::anim_new_clip_(std::string name) {
         std::snprintf(buf, sizeof(buf), "_%03d", i);
         name = base + buf;
     }
-    const std::string rig_name = anim_name_of_(anim_rig_, "Rig");
-    const std::string rel = "animations/" + rig_name + "/" + name + ".yaml";
+    const std::string rel = anim_clip_dir_() + "/" + name + ".yaml";
     ClipModel m;
     m.name = name;
     try {
@@ -144,37 +241,60 @@ void EditorApp::anim_new_clip_(std::string name) {
         log_error("Timeline: " + std::string(e.what()));
         return;
     }
-    const int ci = doc_.find_component(anim_rig_, "Animator");
-    Node comp = doc_.find(anim_rig_)->at("components").as_seq()[static_cast<size_t>(ci)];
-    if (!comp.contains("states") || !comp.at("states").is_sequence()) comp["states"] = Node::sequence();
-    Node st = Node::mapping();
-    st["name"] = Node(name);
-    st["clip"] = Node(rel);
-    comp["states"].as_seq().push_back(st);
-    if (get_string(comp, "auto_play").empty()) comp["auto_play"] = Node(name);
-    apply_(doc_.set_component(anim_rig_, ci, comp, "New Clip"));
+    const bool first = states.empty();
+    anim_edit_animator_([&](Node& comp) {
+        if (!comp.contains("states") || !comp.at("states").is_sequence()) comp["states"] = Node::sequence();
+        Node st = Node::mapping();
+        st["name"] = Node(name);
+        st["clip"] = Node(rel);
+        comp["states"].as_seq().push_back(st);
+        if (first && get_string(comp, "auto_play").empty()) comp["auto_play"] = Node(name);
+    }, "New Clip");
     anim_open_clip_(name);
     anim_time_ = 0.0f;
     log_info("Timeline: new clip " + rel);
 }
 
-void EditorApp::anim_delete_clip_() {
+void EditorApp::anim_delete_clip_(bool keep_file) {
     if (!anim_rig_ || !anim_clip_.open()) return;
-    const int ci = doc_.find_component(anim_rig_, "Animator");
-    if (ci < 0) return;
-    Node comp = doc_.find(anim_rig_)->at("components").as_seq()[static_cast<size_t>(ci)];
-    Node kept = Node::sequence();
-    if (comp.contains("states")) {
-        for (const auto& s : comp.at("states").as_seq()) if (get_string(s, "name") != anim_clip_.state) kept.as_seq().push_back(s);
+    const std::string state = anim_clip_.state;
+    const fs::path path = anim_clip_.path;
+    const bool inherited = anim_state_is_inherited_(state);
+
+    // The state that takes over `auto_play`: the first one left after this is gone.
+    std::string next_auto;
+    for (const AnimStateRef& st : anim_states_()) {
+        if (st.name != state) { next_auto = st.name; break; }
     }
-    comp["states"] = kept;
-    if (get_string(comp, "auto_play") == anim_clip_.state) {
-        comp["auto_play"] = Node(kept.as_seq().empty() ? std::string("") : get_string(kept.as_seq().front(), "name"));
+
+    anim_edit_animator_([&](Node& comp) {
+        Node kept = Node::sequence();
+        if (comp.contains("states") && comp.at("states").is_sequence()) {
+            for (const Node& st : comp.at("states").as_seq()) {
+                if (get_string(st, "name") != state) kept.as_seq().push_back(st);
+            }
+        }
+        if (inherited) {
+            // The object asset declares it, so dropping it here is an override, not a deletion.
+            Node gone = Node::mapping();
+            gone["name"] = Node(state);
+            gone["remove"] = Node(true);
+            kept.as_seq().push_back(gone);
+        }
+        comp["states"] = kept;
+        if (get_string(comp, "auto_play") == state) comp["auto_play"] = Node(next_auto);
+    }, "Delete Clip");
+
+    // An inherited state—s clip file still belongs to the object asset that declares it.
+    if (inherited) {
+        log_info("Timeline: " + state + " removed from this rig (its clip stays with the object asset)");
+    } else if (keep_file) {
+        log_info("Timeline: removed the state " + state + " (its clip file is still used elsewhere)");
+    } else {
+        std::error_code ec;
+        fs::remove(path, ec);
+        log_info("Timeline: deleted clip " + state);
     }
-    std::error_code ec;
-    fs::remove(anim_clip_.path, ec);
-    log_info("Timeline: deleted clip " + anim_clip_.state);
-    apply_(doc_.set_component(anim_rig_, ci, comp, "Delete Clip"));
     anim_clip_ = ClipDocument{};
     anim_sel_keys_.clear();
 }
@@ -270,19 +390,19 @@ void EditorApp::timeline_frame_(float dt) {
             anim_record_ = false;
         }
     }
-    if (anim_rig_ && doc_.find_component(anim_rig_, "Animator") < 0) {
+    if (anim_rig_ && !anim_animator_of_(anim_rig_)) {
         if (anim_posed_) { anim_restore_rest_pose_(); anim_posed_ = false; }
         anim_clip_ = ClipDocument{};
     }
     // The open clip must still be one of the rig's states.
     if (anim_clip_.open()) {
         bool still = false;
-        for (const auto& s : anim_states_()) still |= s.first == anim_clip_.state;
+        for (const auto& s : anim_states_()) still |= s.name == anim_clip_.state;
         if (!still) anim_clip_ = ClipDocument{};
     }
     if (!anim_clip_.open() && anim_rig_) {
         const auto states = anim_states_();
-        if (!states.empty()) anim_open_clip_(states.front().first);
+        if (!states.empty()) anim_open_clip_(states.front().name);
     }
     if (anim_playing_ && anim_clip_.open()) {
         anim_time_ += dt;
@@ -322,7 +442,7 @@ void EditorApp::anim_insert_keys_() {
     if (!anim_rig_) return;
     if (!anim_clip_.open()) {
         if (anim_states_().empty()) anim_new_clip_();
-        else anim_open_clip_(anim_states_().front().first);
+        else anim_open_clip_(anim_states_().front().name);
     }
     if (!anim_clip_.open()) return;
     std::vector<ObjectId> targets;
@@ -381,32 +501,154 @@ bool EditorApp::anim_keyed_now_(ObjectId id, const std::string& property) const 
     return false;
 }
 
-void EditorApp::anim_rename_clip_(const std::string& to) {
+void EditorApp::anim_request_delete_clip_() {
+    if (!anim_rig_ || !anim_clip_.open()) return;
+    // An inherited state's clip file belongs to the object asset that declares it; dropping the
+    // state here is an override and never touches the file, so there is nothing to warn about.
+    if (anim_state_is_inherited_(anim_clip_.state)) { anim_delete_clip_(true); return; }
+    const std::vector<std::string> others = anim_clip_sharers_();
+    if (others.empty()) { anim_delete_clip_(false); return; }
+    clip_share_prompt_ = ClipSharePrompt{ClipShareAction::Delete, anim_clip_.state, {}, others};
+    pending_modal_ = "Shared Clip";
+}
+
+void EditorApp::anim_request_rename_clip_(const std::string& to) {
     if (!anim_rig_ || !anim_clip_.open() || to.empty() || to == anim_clip_.state) return;
-    for (const auto& s : anim_states_()) if (s.first == to) { log_warn("Timeline: a clip named " + to + " exists"); return; }
-    const int ci = doc_.find_component(anim_rig_, "Animator");
-    if (ci < 0) return;
-    Node comp = doc_.find(anim_rig_)->at("components").as_seq()[static_cast<size_t>(ci)];
+    const std::vector<std::string> others = anim_clip_sharers_();
+    if (others.empty()) { anim_rename_clip_(to, false); return; }
+    clip_share_prompt_ = ClipSharePrompt{ClipShareAction::Rename, anim_clip_.state, to, others};
+    pending_modal_ = "Shared Clip";
+}
+
+void EditorApp::anim_rename_clip_(const std::string& to, bool repoint_others) {
+    if (!anim_rig_ || !anim_clip_.open() || to.empty() || to == anim_clip_.state) return;
+    for (const auto& s : anim_states_()) if (s.name == to) { log_warn("Timeline: a clip named " + to + " exists"); return; }
+    // Renaming a state the object asset declares would rename it for this rig alone and leave
+    // the asset playing the old name. Send the user to the asset instead of forking the set.
+    if (anim_state_is_inherited_(anim_clip_.state)) {
+        log_warn("Timeline: " + anim_clip_.state + " comes from " + anim_instance_asset_(anim_rig_) +
+                 "; rename it there so every rig that inherits it follows");
+        return;
+    }
     const fs::path old_path = anim_clip_.path;
     const fs::path new_path = old_path.parent_path() / (to + ".yaml");
-    std::string new_rel;
-    for (auto& st : comp["states"].as_seq()) {
-        if (get_string(st, "name") != anim_clip_.state) continue;
-        st["name"] = Node(to);
-        const std::string rel = get_string(st, "clip");
-        new_rel = rel.substr(0, rel.find_last_of('/') + 1) + to + ".yaml";
-        st["clip"] = Node(new_rel);
-    }
-    if (get_string(comp, "auto_play") == anim_clip_.state) comp["auto_play"] = Node(to);
+    // Both resolved before the file moves: the referrer index is keyed by resolved path.
+    const std::vector<std::string> others = repoint_others ? anim_clip_sharers_() : std::vector<std::string>{};
+    const std::string old_rel = project_.relative(old_path), new_rel = project_.relative(new_path);
     std::error_code ec;
     fs::rename(old_path, new_path, ec);
     if (ec) { log_error("Timeline: could not rename the clip file: " + ec.message()); return; }
-    apply_(doc_.set_component(anim_rig_, ci, comp, "Rename Clip"));
+    if (!others.empty() && !old_rel.empty() && !new_rel.empty()) {
+        const std::vector<std::string> done = project_.repoint_clip_refs(others, old_rel, new_rel);
+        log_info("Timeline: repointed " + std::to_string(done.size()) + " other object(s) at " + new_rel);
+        // A safety net: anything that could not be rewritten (an unparsable file, a spelling
+        // RefRename does not cover) is still pointing at a file that has moved, so name it.
+        std::string left;
+        for (const std::string& who : others) {
+            if (std::find(done.begin(), done.end(), who) == done.end()) left += (left.empty() ? "" : ", ") + who;
+        }
+        if (!left.empty()) {
+            log_warn("Timeline: " + std::to_string(others.size() - done.size()) +
+                     " object(s) name this clip some other way and still point at " + old_rel + ": " + left);
+        }
+    }
+    const std::string from = anim_clip_.state;
+    anim_edit_animator_([&](Node& comp) {
+        if (!comp.contains("states") || !comp.at("states").is_sequence()) return;
+        for (auto& st : comp["states"].as_seq()) {
+            if (get_string(st, "name") != from) continue;
+            st["name"] = Node(to);
+            const std::string rel = get_string(st, "clip");
+            st["clip"] = Node(rel.substr(0, rel.find_last_of('/') + 1) + to + ".yaml");
+        }
+        if (get_string(comp, "auto_play") == from) comp["auto_play"] = Node(to);
+    }, "Rename Clip");
     anim_clip_.state = to;
     anim_clip_.path = new_path;
     anim_clip_.model.name = to;
     anim_save_clip_();
     log_info("Timeline: renamed clip to " + to);
+}
+
+std::vector<std::string> EditorApp::anim_clip_sharers_() {
+    if (!anim_clip_.open()) return {};
+    std::vector<std::string> others = project_.clip_referrers(anim_clip_.path);
+    // The open document plays it too, of course; what matters is who ELSE an edit reaches.
+    const std::string self = doc_.path().empty() ? std::string() : project_.relative(doc_.path());
+    others.erase(std::remove(others.begin(), others.end(), self), others.end());
+    return others;
+}
+
+void EditorApp::draw_clip_sharing_(imm::Context& ctx, const imm::Box& hb, float& x) {
+    using I = imm::Icon;
+    const std::vector<std::string> others = anim_clip_sharers_();
+    if (others.empty()) return;
+
+    const float bh = hb.h - 6;
+    const std::string label = "Shared by " + std::to_string(others.size());
+    const float w = ctx.text_width(label) + bh + 16;
+    const imm::Box b{x, hb.y + 3, w, bh};
+    bool hov = false, held = false;
+    if (ctx.invisible_button("clip_shared", b, &hov, &held)) {
+        ctx.open_popup("clip_sharers", glm::vec2(b.x, b.bottom() + 2));
+    }
+    ctx.fill_rounded(b, imm::with_alpha(ctx.style.warning, hov ? 0.34f : 0.20f));
+    ctx.icon(I::Link, {b.x + 3, b.y + 2, bh - 4, bh - 4}, ctx.style.warning);
+    ctx.text_in({b.x + bh + 2, b.y, w - bh - 6, bh}, label, ctx.style.text, 0.0f);
+    ctx.tooltip("Shared Clip\n" + project_.relative(anim_clip_.path) + " is played by " +
+                std::to_string(others.size()) + " other object" + (others.size() == 1 ? "" : "s") +
+                ".\nEvery key you move here moves for all of them. Click to list them");
+    test_rects_["clip_shared"] = b;
+
+    if (ctx.begin_popup("clip_sharers", 360)) {
+        ctx.label_dim(project_.relative(anim_clip_.path));
+        ctx.menu_separator();
+        for (const std::string& who : others) {
+            const bool is_object = fs::path(who).generic_string().rfind("objects/", 0) == 0;
+            if (ctx.menu_item(strip_yaml_ext(who), "", nullptr, is_object, I::Object) && is_object) {
+                open_object_asset(project_.assets() / who);
+            }
+        }
+        ctx.end_popup();
+    }
+    x += w + 6;
+}
+
+void EditorApp::draw_clip_share_modal_(imm::Context& ctx) {
+    if (ctx.begin_modal("Shared Clip", {430, 0})) {   // height fits the content
+        const ClipSharePrompt p = clip_share_prompt_;
+        const std::string n = std::to_string(p.others.size());
+        const std::string objs = n + " other object" + (p.others.size() == 1 ? "" : "s");
+        if (p.action == ClipShareAction::Rename) {
+            ctx.paragraph("This clip's file is also played by " + objs +
+                          ". Renaming the file leaves them pointing at a name that no longer exists.");
+            ctx.spacing(4);
+            if (ctx.button("Rename for All", 150)) {
+                ctx.close_modal();
+                anim_rename_clip_(p.rename_to, true);
+            }
+            ctx.same_line();
+            if (ctx.button("Cancel", 110)) { ctx.close_modal(); clip_share_prompt_ = {}; }
+        } else {
+            ctx.paragraph("This clip's file is also played by " + objs +
+                          ". Removing the state leaves their clips untouched; deleting the file breaks them.");
+            ctx.spacing(4);
+            if (ctx.button("Remove State", 130)) {
+                ctx.close_modal();
+                anim_delete_clip_(true);
+                clip_share_prompt_ = {};
+            }
+            ctx.same_line();
+            if (ctx.button("Delete File", 120)) {
+                ctx.close_modal();
+                anim_delete_clip_(false);
+                clip_share_prompt_ = {};
+            }
+            ctx.same_line();
+            if (ctx.button("Cancel", 100)) { ctx.close_modal(); clip_share_prompt_ = {}; }
+        }
+        ctx.end_modal();
+    }
 }
 
 void EditorApp::draw_timeline_(imm::Context& ctx, const imm::Box& hb, const imm::Box& body, float x) {
@@ -457,23 +699,25 @@ void EditorApp::draw_timeline_(imm::Context& ctx, const imm::Box& hb, const imm:
         ctx.icon(I::Play, {b.x + 3, b.y + 2, bh - 4, bh - 4}, ctx.style.text_dim);
         ctx.text_in({b.x + bh + 2, b.y, cw - bh - 16, bh}, clip_label, ctx.style.text, 0.0f);
         ctx.arrow({b.right() - 14, b.y + 4, 10, bh - 8}, true, ctx.style.text_dim);
-        ctx.tooltip("Clip\n" + rig_name + "'s clips (its Animator's states). Each is a file under animations/" + rig_name + "/");
+        ctx.tooltip("Clip\n" + rig_name + "'s clips (its Animator's states)." +
+                    (anim_clip_.open() ? "\nOpen: " + project_.relative(anim_clip_.path) : std::string()));
         if (ctx.begin_popup("clip_menu", 200)) {
-            for (const auto& [state, path] : anim_states_()) {
-                bool on = state == anim_clip_.state;
-                if (ctx.menu_item(state, "", &on)) { anim_open_clip_(state); anim_time_ = 0.0f; }
+            for (const AnimStateRef& st : anim_states_()) {
+                bool on = st.name == anim_clip_.state;
+                if (ctx.menu_item(st.name, "", &on)) { anim_open_clip_(st.name); anim_time_ = 0.0f; }
             }
             ctx.menu_separator();
             if (ctx.menu_item("New Clip", "", nullptr, true, I::Plus)) anim_new_clip_();
             if (anim_clip_.open()) {
                 if (anim_rename_buf_.empty()) anim_rename_buf_ = anim_clip_.state;
-                if (ctx.input_text("Rename", &anim_rename_buf_)) anim_rename_clip_(anim_rename_buf_);
+                if (ctx.input_text("Rename", &anim_rename_buf_)) anim_request_rename_clip_(anim_rename_buf_);
             }
-            if (ctx.menu_item("Delete Clip", "", nullptr, anim_clip_.open(), I::Trash)) anim_delete_clip_();
+            if (ctx.menu_item("Delete Clip", "", nullptr, anim_clip_.open(), I::Trash)) anim_request_delete_clip_();
             ctx.end_popup();
         }
         x += cw + 6;
     }
+    draw_clip_sharing_(ctx, hb, x);
     if (!anim_clip_.open()) {
         ctx.text_in({x, hb.y, 260, hb.h}, "Rig " + rig_name + ": add a clip to start animating", ctx.style.text_dim, 0.0f);
         return;

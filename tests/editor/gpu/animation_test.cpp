@@ -8,6 +8,8 @@
 
 #include <coopa/testing/test.h>
 
+#include <set>
+
 #include <coopa/animation/animation_clip_loader.h>
 
 #include "editor/anim/clip_model.h"
@@ -341,6 +343,99 @@ COOPA_TEST(rigs_preview_their_own_clips_and_play_when_placed) {
  *        object when it is set, guessed from the hierarchy (the child joint, half the parent's
  *        span for a leaf) while it is 0.
  */
+COOPA_TEST(shared_clips_are_reported_and_a_variant_inherits_its_base_states) {
+    // Two rigs playing one clip file, plus a variant built on one of them. This is the shape a
+    // character family has: a base owning the clip set, variants retargeting a state or two.
+    EditorSession session({.prepare = [](Project& project) {
+        copy_rig_assets(project.assets());
+        const fs::path o = project.assets() / "objects";
+        fs::create_directories(o);
+        auto rig = [&](const char* name, const std::string& body) {
+            std::ofstream out(o / (std::string(name) + ".yaml"));
+            out << "object:\n  name: " << name << "\n" << body;
+        };
+        // `solo` is the base's alone; `wave` is a clip the engine's own robot_arm also plays,
+        // so it is shared no matter what this fixture adds.
+        write_text(project.assets() / "animations/hero/solo.yaml",
+                   "clip:\n  name: solo\n  wrap: loop\n  length: 1\n  tracks: []\n");
+        rig("hero_base",
+            "  components:\n"
+            "    - type: Animator\n      auto_play: wave\n      states:\n"
+            "        - {name: wave, clip: animations/robot_arm/wave.yaml}\n"
+            "        - {name: idle, clip: animations/robot_arm/idle.yaml}\n"
+            "        - {name: solo, clip: animations/hero/solo.yaml}\n"
+            "  children:\n    - name: joint\n      components:\n        - type: Transform\n");
+        // A second, unrelated rig naming the same clip file: that is what makes it shared.
+        rig("hero_twin",
+            "  components:\n"
+            "    - type: Animator\n      states:\n"
+            "        - {name: wave, clip: animations/robot_arm/wave.yaml}\n"
+            "  children:\n    - name: joint\n      components:\n        - type: Transform\n");
+        // The variant: inherits the base and retargets ONE state.
+        rig("hero_variant",
+            "  inherit_from: objects/hero_base\n"
+            "  components:\n"
+            "    - type: Animator\n      states:\n"
+            "        - {name: idle, clip: animations/bouncing_ball/bounce.yaml}\n");
+    }});
+    auto& engine = session.engine;
+    auto& app = session.app;
+    auto& project = session.project;
+
+    // --- the base: its clip is shared, and the Timeline says by whom -------------------------
+    expect(app.open_object_asset(project.assets() / "objects" / "hero_base.yaml"), "the base object asset opens");
+    tick(engine, 3);
+    app.show_timeline();
+    tick(engine, 2);
+    expect(app.animation_rig() != 0 && app.animation_clip_state() == "wave", "the base opens its own first clip");
+    const std::vector<std::string> sharers = app.animation_clip_sharers();
+    auto joined = [](const std::vector<std::string>& v) {
+        std::string out;
+        for (const std::string& s : v) out += (out.empty() ? "" : ", ") + s;
+        return out;
+    };
+    auto has = [&](const std::vector<std::string>& v, const std::string& who) {
+        return std::find(v.begin(), v.end(), who) != v.end();
+    };
+    expect(has(sharers, "objects/hero_twin.yaml"), "the other rig playing wave.yaml is reported: " + joined(sharers));
+    expect(!has(sharers, "objects/hero_base.yaml"), "the open document is not its own sharer: " + joined(sharers));
+    expect(std::set<std::string>(sharers.begin(), sharers.end()).size() == sharers.size(),
+           "each sharer appears once: " + joined(sharers));
+
+    // A clip only this rig plays is not shared — the badge must stay off for it.
+    app.open_animation_clip("solo");
+    tick(engine, 2);
+    expect(app.animation_clip_state() == "solo" && app.animation_clip_sharers().empty(),
+           "a clip no other rig names reports nothing: " + joined(app.animation_clip_sharers()));
+
+    // --- the variant: inherited states open a real dope sheet --------------------------------
+    app.show_document_view();
+    expect(app.open_object_asset(project.assets() / "objects" / "hero_variant.yaml"), "the variant opens");
+    tick(engine, 3);
+    app.show_timeline();
+    tick(engine, 2);
+    expect(app.animation_rig() != 0, "a rig that INHERITS its Animator is still a rig");
+    expect(app.animation_state_names() == std::vector<std::string>{"wave", "idle", "solo"},
+           "it lists the base's states, in the base's order, with its own merged in by name");
+    expect(app.animation_state_inherited("wave"), "wave comes from the base");
+    expect(!app.animation_state_inherited("idle"), "...and idle is the variant's own override");
+
+    // --- the guard: removing a shared state leaves the file for the rigs still playing it ----
+    app.show_document_view();
+    expect(app.open_object_asset(project.assets() / "objects" / "hero_base.yaml"), "the base opens again");
+    tick(engine, 3);
+    app.show_timeline();
+    app.open_animation_clip("wave");
+    tick(engine, 2);
+    expect(app.animation_clip_state() == "wave", "wave is open");
+    app.delete_animation_clip(/*keep_file=*/true);
+    tick(engine, 2);
+    expect(coopa::yaml::document_exists(project.assets() / "animations/robot_arm/wave.yaml"),
+           "Remove State leaves the clip file on disk for the rig that still plays it");
+    expect(app.animation_state_names() == std::vector<std::string>{"idle", "solo"},
+           "...and drops only this rig's state for it");
+}
+
 COOPA_TEST(bone_length_is_stored_or_guessed_from_the_hierarchy) {
     EditorSession session;
     auto& engine = session.engine;

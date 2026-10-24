@@ -1314,6 +1314,9 @@ void Engine::collect_debug_stats_() {
     st.instances         = draws.camera_instances;
     st.triangles         = draws.camera_triangles;
     st.shadow_draws      = draws.shadow_draws;
+    st.dir_levels_rendered = draws.dir_levels_rendered;
+    st.dir_list_cache_hits = draws.dir_list_cache_hits;
+    st.cull_items_tested   = draws.cull_items_tested;
     st.shadow_triangles  = draws.shadow_triangles;
     st.renderers         = draws.renderers;
     st.renderers_visible = draws.camera_visible;

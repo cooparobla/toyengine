@@ -98,6 +98,8 @@
 
 #include <toyengine/render/toy_render_types.h>
 #include <toyengine/render/passes/ui_composite_pass.h>
+#include <toyengine/render/caster_grid.h>
+#include <toyengine/render/dir_shadow_cache.h>
 #include <toyengine/render/instance_stream.h>
 #include <toyengine/render/local_shadow_atlas.h>
 #include <unordered_set>
@@ -544,7 +546,16 @@ private:
         bool                     has_blend_mesh = false;
 
         std::vector<MeshBatch>                gbuffer;   ///< Camera; opaque + mask.
-        std::array<std::vector<MeshBatch>, 4> cascade;   ///< Directional shadow, per cascade.
+        /// Directional shadow, per LEVEL (cascade or clipmap ring). Sized to
+        /// data::MAX_DIR_SHADOW_LEVELS; only the first dir_level_info.x are filled.
+        std::array<std::vector<MeshBatch>,
+                   coopa::gfx::engine::data::MAX_DIR_SHADOW_LEVELS> cascade;
+        /// Per directional LEVEL: the static casters drawn into the cache atlas -- filled only
+        /// for levels whose depth is re-rendered this frame (see DirShadowCache). Empty
+        /// throughout when the directional cache is off, in which case `cascade` holds every
+        /// caster, static and dynamic alike, exactly as it did before the cache existed.
+        std::array<std::vector<MeshBatch>,
+                   coopa::gfx::engine::data::MAX_DIR_SHADOW_LEVELS> dir_static;
         /// Per local-shadow VIEW (LocalShadowSlot::first_view + v): the static casters drawn into
         /// the cache atlas -- filled only for views whose light re-renders its cache this frame.
         std::vector<std::vector<MeshBatch>>   local_static;
@@ -564,6 +575,10 @@ private:
         uint64_t tess_draws = 0;   ///< Camera draws (G-buffer + transparent) that ran tessellated.
         uint64_t streamed_instances = 0;   ///< InstanceData entries written to the frame's stream (all views).
         uint64_t static_instances = 0;     ///< Instances drawn from persistent buffers (all views).
+        uint64_t cull_items_tested = 0;    ///< Per-item frustum tests run across every view's cull.
+        uint64_t cull_cells_visited = 0;   ///< CasterGrid cells box-tested across every view's cull.
+        uint64_t dir_list_cache_hits = 0;  ///< Directional cascades whose static caster list was reused.
+        uint64_t dir_levels_rendered = 0;  ///< Directional levels that redrew their cached static depth.
     };
 
 public:
@@ -1835,6 +1850,71 @@ private:
     std::unordered_set<std::string> animated_shadow_shaders_;
     /** Still frames before a caster's depth may be cached as static. */
     static constexpr uint32_t kStaticCasterFrames = 8;
+    /** XY grid over this frame's items; every view's cull queries it instead of the flat list. */
+    CasterGrid caster_grid_;
+    /**
+     * @brief One directional cascade's culled STATIC caster list, carried across frames.
+     *
+     * `key` hashes everything the list's membership depends on: the cascade matrix, the
+     * static-scene generation hash, the resolution-dependent small-caster cull, and the eye
+     * position when any static caster is distance-limited. Items are stable identities
+     * (renderer, part) -- MeshGather indices reshuffle whenever scene composition changes.
+     */
+    struct DirCasterListCache {
+        bool     filled = false;
+        uint64_t key    = 0;
+        std::vector<std::pair<const coopa::gfx::engine::components::MeshRenderer*, uint32_t>> items;
+    };
+    std::array<DirCasterListCache,
+               coopa::gfx::engine::data::MAX_DIR_SHADOW_LEVELS> dir_caster_cache_;
+
+    /**
+     * @struct DirLevelState
+     * @brief One directional level's cached depth: the fit its tile actually HOLDS, the fit it
+     *        wants this frame, and what the content hashes to.
+     *
+     * The invariant the whole cache rests on: `published` is what the UBO, the per-level
+     * culling and the dynamic draws all use, because tile content and sampling matrix must
+     * agree. A level that wants a new fit but has not been granted a re-render this frame
+     * keeps publishing the old one -- containment selection simply falls through to the next
+     * ring for the sliver the stale level no longer covers. `published` becomes `wanted` only
+     * on the frame the level is actually redrawn.
+     */
+    struct DirLevelState {
+        DirShadowFit published{};        ///< The fit whose depth is in the tile.
+        DirShadowFit wanted{};           ///< This frame's fit.
+        uint64_t content_hash = 0;       ///< Static casters + matrix; a change forces a redraw.
+        bool     valid = false;          ///< False until the level has been rendered once.
+        bool     dirty = false;          ///< wanted != published, or the content changed.
+        bool     render_static = false;  ///< Granted a re-render this frame.
+        uint32_t age = 0;                ///< Frames since last re-render (debug tint).
+        /// Movers were drawn into this tile last frame, so its live depth no longer matches
+        /// the cache and it must be copied back even if nothing about it is dirty.
+        bool     had_dynamic = false;
+    };
+    std::array<DirLevelState,
+               coopa::gfx::engine::data::MAX_DIR_SHADOW_LEVELS> dir_levels_;
+    /// Round-robin cursor, so deferred levels are not starved by a nearer one dirtying first.
+    uint32_t dir_level_cursor_ = 0;
+    /// The static scene's generation hash as of the last frame the levels were planned. A
+    /// change means a static caster appeared, vanished, moved or changed material, which no
+    /// level's cached depth can still be right about -- see gather_meshes_().
+    uint64_t dir_static_gen_ = 0;
+    /// Set by gather_meshes_() when the static scene changed, so the next plan re-renders
+    /// every live level rather than waiting for the round-robin budget.
+    bool dir_static_scene_changed_ = false;
+    /// The sun's static-depth cache. Created LAZILY, on the first frame the clipmap fit and
+    /// `shadow_cache_enabled` are both on -- `shadow_fit` is a per-scene setting (see
+    /// ToyRenderConfig::shadow_fit), so a project that never selects the clipmap must never
+    /// pay for the second atlas image, and one that selects it in a single scene must not
+    /// need a pipeline rebuild to get it. Null = draw every caster live, the pre-cache path.
+    std::unique_ptr<DirShadowCache> dir_shadow_cache_;
+    /** @brief Whether this config wants cached static depth at all. */
+    bool dir_cache_wanted_() const {
+        return config_.shadow_cache_enabled && config_.shadow_fit == "clipmap";
+    }
+    /** @brief True when the cache exists and this frame composites it into the atlas. */
+    bool dir_cache_active_() const { return dir_shadow_cache_ != nullptr && dir_cache_wanted_(); }
     bool warned_local_atlas_full_ = false;
     bool           warned_perspective_snap_ = false;
 

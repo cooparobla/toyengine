@@ -73,9 +73,23 @@ three groups below.
 
 **Scene** (`record_scene_()`):
 
-1. Directional shadow cascades, then the local-light shadow atlas: every `cast_shadows` point
+1. Directional shadow levels, then the local-light shadow atlas: every `cast_shadows` point
    and spot light competing for a slot by screen importance (point lights as six guard-banded
    tiles), with static casters cached per light (`record_local_shadows_()`).
+
+   The sun's levels (up to 8, one atlas tile each) are fit one of three ways, by
+   `shadow_fit`: `frustum` slices the camera frustum, `focus` nests spheres around the gaze
+   point, and `clipmap` nests them around the CAMERA with each ring's centre and depth origin
+   snapped to a coarse multiple of its own texel size. That snap is what makes the clipmap's
+   matrices piecewise constant, which in turn is what lets `DirShadowCache` keep each level's
+   static depth and composite it in (cache -> live -> movers drawn on top) instead of
+   redrawing the world once per level per frame -- the difference between a zoomed-out frame
+   costing eight passes over the terrain and costing eight tile copies. A level re-renders
+   when its matrix steps (budget-limited and round-robined, see `shadow_clip_static_budget`)
+   or when the static scene changes (immediately, since a stale level there means a missing
+   or ghost shadow rather than an uncovered sliver). Per-level culling queries a world-XY
+   grid (`caster_grid.h`) and reuses culled static lists while nothing they depend on has
+   changed.
 2. G-buffer geometry, meshes and opaque/masked SDFs.
 3. Hi-Z pyramid, when SSR, transparency or SSAO is on. This also
    performs the G-buffer depth transition `stylize.frag`'s outline sampler needs; when

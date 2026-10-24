@@ -370,20 +370,24 @@ struct ToyRenderConfig {
      * @brief Edge length, in texels, of ONE directional cascade's tile -- not of the whole
      *        directional shadow image.
      *
-     * The directional map is an atlas of `shadow_cascades` tiles this size (1x1, 2x1 or 2x2
-     * -- see ShadowMapTarget), so the image is up to 2x this on each axis and up to 4x this
-     * many texels. At the default 4 cascades: low 512 -> 1024^2 (4 MB), medium 1024 ->
-     * 2048^2 (16 MB), high 2048 -> 4096^2 (64 MB), ultra 3072 -> 6144^2 (144 MB).
+     * The directional map is an atlas of `shadow_cascades` tiles this size (1x1, 2x1, 2x2,
+     * 3x2 or 4x2 -- see ShadowMapTarget), so the image is up to 4x this wide and 2x this
+     * tall. At the default 4 cascades: low 512 -> 1024^2 (4 MB), medium 1024 -> 2048^2
+     * (16 MB), high 2048 -> 4096^2 (64 MB), ultra 3072 -> 6144^2 (144 MB). At 8 levels the
+     * grid is 4x2, so 2048 -> 8192x4096 (128 MB) -- and `shadow_cache_enabled` with the
+     * clipmap fit allocates a second image the same size for the cached static depth.
      */
     uint32_t shadow_map_resolution  = 2048;
     /**
-     * @brief How many cascades the directional shadow splits into, 1..4.
+     * @brief How many levels the directional shadow splits into, 1..8.
      *
-     * Each cascade is an independent ortho fit to one slice of the camera's depth range, so
-     * the near cascade's texels land on a box a few metres across instead of one spanning
-     * the whole `shadow_distance` -- that is what makes close-up shadows sharp while distant
-     * ones stay coarse. Every cascade re-draws the shadow casters, so this multiplies the
-     * (depth-only) directional shadow pass cost directly.
+     * Each level is an independent ortho fit -- to one slice of the camera's depth range
+     * under the frustum fit, or to one concentric ring under the focus and clipmap fits --
+     * so the near level's texels land on a box a few metres across instead of one spanning
+     * the whole range. That is what makes close-up shadows sharp while distant ones stay
+     * coarse. Every level re-draws the shadow casters, so this multiplies the (depth-only)
+     * directional shadow pass cost directly -- UNLESS its static depth is cached, which is
+     * what makes counts past 4 affordable (see `shadow_cache_enabled` and `shadow_fit`).
      *
      * 1 is the single-map behaviour: one box over the whole range, no atlas, no per-pixel
      * cascade selection. Deliberately NOT covered by `shadow_quality` -- the tier moves
@@ -420,6 +424,21 @@ struct ToyRenderConfig {
      * front of the lens; focus cascades put them where the player is looking, so the shadows
      * there get the texel density a close-up camera gets. The box sizes are constant, so the
      * shadows do not swim as the camera turns; only the texel-snapped centre moves.
+     *
+     * `"clipmap"` nests the levels around the CAMERA POSITION instead, radii growing
+     * geometrically by `shadow_clip_ratio` from `shadow_clip_radius`
+     * (compute_clipmap_level_radii()). Two things follow from anchoring on the camera rather
+     * than on its frustum or its gaze, and both are the point:
+     *   - The shadowed range is an OUTPUT, not a clamp: the outermost ring reaches
+     *     `shadow_clip_radius * shadow_clip_ratio^(shadow_cascades - 1)`, kilometres at the
+     *     defaults, so `shadow_distance` does not bound the fit at all. That is what lets a
+     *     camera zoomed out over a whole world still see shadows on the far terrain.
+     *   - Every matrix is invariant to where the camera LOOKS and how far it is zoomed, and
+     *     `shadow_clip_snap_texels` quantizes what is left, so a level's matrix holds still
+     *     between snap steps. `shadow_cache_enabled` turns that into kept depth: the static
+     *     world is drawn once per level and copied in, and only movers redraw each frame.
+     * A per-scene setting like the other two fits; the cache image it enables is allocated
+     * lazily the first frame it is actually selected, so no project pays for it unasked.
      */
     std::string shadow_fit = "frustum";
     /**
@@ -495,6 +514,78 @@ struct ToyRenderConfig {
      *        second atlas image. Startup-fixed.
      */
     bool     shadow_cache_enabled = true;
+    /**
+     * @brief Reuse each directional cascade's culled static caster list across frames while the
+     *        cascade matrix and the static scene are unchanged, skipping that cascade's cull
+     *        entirely. Membership-exact (the reuse key covers everything the list depends on),
+     *        so disabling it changes performance, never the image. Runtime.
+     */
+    bool     shadow_cull_cache_enabled = true;
+    /**
+     * @brief Radius in world units of the finest `shadow_fit: clipmap` level.
+     *
+     * Every level is a sphere `shadow_clip_ratio` times the radius of the one inside it, so
+     * this and the level count set the whole shadowed range: the outermost ring reaches
+     * `shadow_clip_radius * shadow_clip_ratio^(shadow_cascades - 1)`. Unused by the frustum
+     * and focus fits.
+     */
+    float    shadow_clip_radius = 12.0f;
+    /** @brief Radius growth per clipmap level; clamped to [1.3, 4]. 2 doubles each ring. */
+    float    shadow_clip_ratio = 2.0f;
+    /**
+     * @brief Snap each clipmap level's centre to a grid this many of its own texels coarse.
+     *
+     * The reason the fit is cacheable: between steps the level's matrix is bit-identical
+     * frame to frame, so its rendered depth stays valid (see shadow_cache_enabled). Costs a
+     * little texel density -- the box grows by one step to keep covering its radius while the
+     * snapped centre lags -- so 16 on a 2048 tile spends under 1% of the tile edge. Clamped
+     * to [1, 128]; 1 is the plain per-texel snap and re-renders on almost every frame.
+     */
+    uint32_t shadow_clip_snap_texels = 16u;
+    /**
+     * @brief Clipmap levels, counting from the finest, whose static depth is never deferred.
+     *
+     * These re-render the frame their matrix steps. The near rings step often and are what
+     * the player is looking at, so a frame of lag there is visible; the outer rings step
+     * rarely and a frame of lag costs only a sliver at their edge, which the next ring covers.
+     */
+    uint32_t shadow_clip_fresh_levels = 1u;
+    /**
+     * @brief Extra clipmap levels past `shadow_clip_fresh_levels` whose static depth may
+     *        re-render in one frame, round-robined so none is starved.
+     *
+     * Caps the worst-case cost of a frame in which several levels want new depth at once
+     * (a fast pan). A level that changed its static CONTENT ignores this budget -- see
+     * update_dir_shadow_matrix_() on why the two kinds of dirt are treated differently.
+     */
+    uint32_t shadow_clip_static_budget = 1u;
+    /**
+     * @brief Quantize the sun direction the clipmap FIT uses, in degrees. 0 disables it.
+     *
+     * Essential for any scene whose sun moves (a `day_length_minutes` cycle): a continuously
+     * rotating light changes every level's light-space basis every frame, so every cached
+     * level is dirty every frame and the cache never pays for itself. Snapping the fit's
+     * direction holds it still between steps. Only the FIT is snapped -- shading, specular
+     * and the sky all keep the true continuous direction -- so the visible effect is that
+     * shadows rotate in increments. At the default quarter degree on a 20-minute day that is
+     * a step about once a second, well under what the penumbra hides.
+     */
+    float    shadow_clip_sun_snap_degrees = 0.25f;
+    /**
+     * @brief How far past a clipmap level, toward the light, casters are still gathered (m).
+     *
+     * A level's ortho box is pulled back along the light by this much so a caster standing
+     * outside the ring but between it and the sun still shadows into it. The effective reach
+     * is `max(2 * level_radius, this)`, so the near rings get a shallow box and the far ones
+     * scale with their own size.
+     *
+     * It is NOT the whole clipmap's reach, and that distinction is the difference between a
+     * usable frame and an unusable one: sized off the outermost ring, the finest 9 m ring
+     * would gather every caster in a kilometre-long column toward the sun -- hundreds of
+     * terrain chunks, tens of millions of triangles -- to shadow a 9 m circle. Size it off
+     * the tallest thing that can plausibly overhang a level instead (a cliff, a tower).
+     */
+    float    shadow_clip_caster_reach = 48.0f;
     /**
      * @brief A constant depth bias in the directional map's [0,1] light depth, written to
      *        LightUBO::dir_shadow_params.x.

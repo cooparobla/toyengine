@@ -50,6 +50,21 @@ else
     git submodule update --init --recursive --quiet
 fi
 
+# Agent notes: link the engine's .claude (its CLAUDE.md build/test rules and skills) in here
+# too. Almost every change made while working in a project is an ENGINE change, reached through
+# .libs/toyengine, so the engine's rules are the ones that apply -- and an agent whose working
+# directory is the project never sees them otherwise, which is exactly how a 20-job build got
+# run on a box whose rules say 4. Linked, not copied, so it tracks the engine checkout; the
+# path is relative so it resolves the same on any machine. A project that needs rules of its
+# own puts a CLAUDE.md at its root, which is read as well and is never touched by this.
+if [[ -d "$ENGINE_DIR/.claude" ]]; then
+    if [[ -L "$PROJECT_DIR/.claude" || ! -e "$PROJECT_DIR/.claude" ]]; then
+        ln -sfn .libs/toyengine/.claude "$PROJECT_DIR/.claude"
+    else
+        warn ".claude exists and is not a symlink; leaving it alone (engine rules: $ENGINE_DIR/.claude)"
+    fi
+fi
+
 # Toolchain report (cmake, a C++20 compiler, glslc) with this platform's install line. Only a
 # report: setting a project up on a machine whose tools come later is fine -- build.sh is where
 # a missing one is fatal.

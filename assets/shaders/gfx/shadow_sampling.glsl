@@ -115,6 +115,11 @@ vec3 gfx_rotate_around_axis(vec3 v, vec3 axis, float angle) {
 // no tap can reach across a tile border into a neighbouring cascade's depths, and the
 // kernels need no clamping.
 
+/// Levels the array-taking CSM helpers below are declared over. Matches
+/// data::MAX_DIR_SHADOW_LEVELS (light_data.h) -- a caller passing the UBO's dir_level_matrix
+/// must declare the same length, since GLSL array parameters are sized, not decayed.
+#define GFX_CSM_MAX 8
+
 /// True when `world_pos` lands inside cascade `c`'s inset tile region.
 bool gfx_csm_contains(mat4 cascade_matrix, float inset, vec3 world_pos) {
     vec4 lsp = cascade_matrix * vec4(world_pos, 1.0);
@@ -135,12 +140,12 @@ bool gfx_csm_contains(mat4 cascade_matrix, float inset, vec3 world_pos) {
 /// seam once TAA averages neighbouring frames. Pass 0.0 to disable it -- a consumer
 /// with no temporal filter behind it (the volumetrics march) would see the dither as
 /// grain instead.
-int gfx_csm_select(mat4 cascade_matrix[4], vec4 cascade_info, vec3 world_pos, float dither) {
+int gfx_csm_select(mat4 cascade_matrix[GFX_CSM_MAX], vec4 cascade_info, vec3 world_pos, float dither) {
     int   count = int(cascade_info.x);
     float inset = cascade_info.z;
     float band  = cascade_info.w;
 
-    for (int c = 0; c < 4; ++c) {
+    for (int c = 0; c < GFX_CSM_MAX; ++c) {
         if (c >= count) break;
         if (!gfx_csm_contains(cascade_matrix[c], inset, world_pos)) continue;
 
@@ -168,7 +173,7 @@ int gfx_csm_select(mat4 cascade_matrix[4], vec4 cascade_info, vec3 world_pos, fl
 /// Separate from gfx_csm_select() because the caller picks its cascade from the RAW
 /// shading point but samples with the normal-offset applied, and the offset it applies
 /// is itself per-cascade -- so the two projections are of different points.
-vec3 gfx_csm_atlas_coords(mat4 cascade_matrix[4], vec4 cascade_info, vec3 world_pos, int cascade) {
+vec3 gfx_csm_atlas_coords(mat4 cascade_matrix[GFX_CSM_MAX], vec4 cascade_info, vec3 world_pos, int cascade) {
     float grid_x = max(cascade_info.y, 1.0);
     float grid_y = ceil(max(cascade_info.x, 1.0) / grid_x);
     vec2  scale  = vec2(1.0 / grid_x, 1.0 / grid_y);

@@ -104,6 +104,20 @@ layout(set = 1, binding = 0) uniform LightUBO {
                         // y = that step's edge width, z = rim falloff exponent, w = master strength
     vec4 toon_params1;  // rgb = shadow tint for the darkest bands (white = none),
                         // w = 1 bands point/spot distance falloff too
+
+    // Extended directional shadow levels -- the FULL set (up to 8), appended per
+    // light_data.h's append-only rule. calc_dir_shadow() reads these; dir_cascade_* above
+    // keeps the first four levels' copy for consumers on the shorter std140 prefix.
+    // Per-level scalars pack four to a vec4: level L is [L >> 2][L & 3] (toy_level_scalar()).
+    mat4 dir_level_matrix[8];
+    vec4 dir_level_pcf_texels[2];   // per-level PCF radius in atlas texels (0 = hard)
+    vec4 dir_level_normal_bias[2];  // per-level normal offset, world units
+    vec4 dir_level_pcss_scale[2];   // per-level PCSS texels per unit [0,1] depth gap
+    vec4 dir_level_depth_bias[2];   // per-level [0,1] light depth of one texel
+    vec4 dir_level_info;            // x=count, y=tiles per atlas row, z=selection inset
+                                    // (tile uv), w=transition band (tile uv)
+    vec4 dir_level_age[2];          // per-level frames since its tile was re-rendered
+                                    // (debug view only; shading ignores it)
 } lights;
 
 #endif // TOY_LIGHT_UBO_BODY_GLSL

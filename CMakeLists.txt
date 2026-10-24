@@ -199,7 +199,17 @@ target_link_libraries(toyengine_engine PUBLIC coopa::gfx coopa::physx coopa::sfx
 target_link_libraries(toyengine_engine PUBLIC coopa::caml)
 # The compiled shaders' root (see TOY_SHADER_BUILD_DIR above): <dir>/toyengine_shaders,
 # /shaders (gfxcoopa's), /uicoopa_shaders and /project_shaders.
-target_compile_definitions(toyengine_engine PUBLIC TOY_SHADER_BUILD_DIR="${TOY_SHADER_BUILD_DIR}")
+#
+# Scoped to the ONE source file that reads it (runtime_paths.cpp's shader_roots()), not PUBLIC
+# on the target, and that is a build-time decision worth understanding. The value embeds the
+# binary directory, so it DIFFERS for every build tree -- the engine's own, and each game
+# project's, since a project does add_subdirectory(.libs/toyengine) and compiles its own copy
+# of these ~101 objects. As a PUBLIC definition it landed on the command line of every engine,
+# editor and test TU, which made all of them unique per tree and defeated ccache across them
+# entirely. Scoped here, the other ~100 objects compile to byte-identical commands everywhere,
+# so the second tree to build them gets cache hits instead of recompiling.
+set_source_files_properties(${TOYENGINE_DIR}/toyengine/core/runtime_paths.cpp PROPERTIES
+    COMPILE_DEFINITIONS TOY_SHADER_BUILD_DIR="${TOY_SHADER_BUILD_DIR}")
 
 # --- toyengine::editor: the editor (editor/), compiled once ---
 # Every project's editor executable links it, as do the editor tests and the docs tool; only

@@ -215,6 +215,14 @@ AppConfig AppConfig::from_node(const fkyaml::node& root) {
             if (r.contains("max_shadowed_point_lights")) config.render.max_shadowed_point_lights = r.at("max_shadowed_point_lights").get_value<uint32_t>();
             if (r.contains("max_shadowed_spot_lights"))  config.render.max_shadowed_spot_lights  = r.at("max_shadowed_spot_lights").get_value<uint32_t>();
             if (r.contains("shadow_cache_enabled"))      config.render.shadow_cache_enabled      = r.at("shadow_cache_enabled").get_value<bool>();
+            if (r.contains("shadow_cull_cache_enabled")) config.render.shadow_cull_cache_enabled = r.at("shadow_cull_cache_enabled").get_value<bool>();
+            if (r.contains("shadow_clip_radius"))       config.render.shadow_clip_radius       = r.at("shadow_clip_radius").get_value<float>();
+            if (r.contains("shadow_clip_ratio"))        config.render.shadow_clip_ratio        = r.at("shadow_clip_ratio").get_value<float>();
+            if (r.contains("shadow_clip_snap_texels"))  config.render.shadow_clip_snap_texels  = r.at("shadow_clip_snap_texels").get_value<uint32_t>();
+            if (r.contains("shadow_clip_fresh_levels")) config.render.shadow_clip_fresh_levels = r.at("shadow_clip_fresh_levels").get_value<uint32_t>();
+            if (r.contains("shadow_clip_static_budget")) config.render.shadow_clip_static_budget = r.at("shadow_clip_static_budget").get_value<uint32_t>();
+            if (r.contains("shadow_clip_sun_snap_degrees")) config.render.shadow_clip_sun_snap_degrees = r.at("shadow_clip_sun_snap_degrees").get_value<float>();
+            if (r.contains("shadow_clip_caster_reach")) config.render.shadow_clip_caster_reach = r.at("shadow_clip_caster_reach").get_value<float>();
             if (r.contains("shadow_bias"))            config.render.shadow_bias            = r.at("shadow_bias").get_value<float>();
             if (r.contains("shadow_depth_bias_texels")) config.render.shadow_depth_bias_texels = r.at("shadow_depth_bias_texels").get_value<float>();
             if (r.contains("shadow_slope_bias_texels")) config.render.shadow_slope_bias_texels = r.at("shadow_slope_bias_texels").get_value<float>();

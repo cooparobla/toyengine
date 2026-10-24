@@ -1,5 +1,7 @@
 # Engine checkout (./setup.sh recreates it from the .toy file's engine: block)
 .libs/
+# The engine's agent rules, linked in by ./setup.sh
+.claude
 build/
 build-*/
 dist/

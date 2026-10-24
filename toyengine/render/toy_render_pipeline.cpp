@@ -193,6 +193,14 @@ std::string ToyRenderPipeline::mesh_draw_stats_summary() const {
         std::snprintf(buf, sizeof(buf), " | tessellated: %.0f draws", stats_total_.tess_draws / f);
         out += buf;
     }
+    if (stats_total_.cull_items_tested > 0) {
+        std::snprintf(buf, sizeof(buf),
+                      " | cull: %.1fk tests, %.0f cells, %.1f list hits, %.2f sun levels redrawn",
+                      stats_total_.cull_items_tested / f / 1000.0,
+                      stats_total_.cull_cells_visited / f, stats_total_.dir_list_cache_hits / f,
+                      stats_total_.dir_levels_rendered / f);
+        out += buf;
+    }
     return out;
 }
 
@@ -2532,24 +2540,107 @@ ToyRenderPipeline::MeshGather ToyRenderPipeline::gather_meshes_(uint32_t frame_s
     }
     lod_state_.swap(next_lod_state);
 
+    // A BLEND material only casts a shadow at full opacity -- the shadow passes have no
+    // per-fragment alpha discard beyond the CUTOUT mask (gfx/surface/shadow_fs.glsl), so a
+    // translucent object is binary: caster or not.
+    const glm::vec3 eye = glm::vec3(glm::inverse(view)[3]);
+    auto casts = [&](size_t i) {
+        const auto& m = out.material(i);
+        if (m.is_blended() && m.alpha < 1.0f) return false;
+        const MeshRenderer* mr = out.renderers[i];
+        if (!mr->cast_shadows) return false;
+        if (mr->shadow_max_distance > 0.0f) {
+            // Distance from the eye to the item's box.
+            const WorldBounds& b = out.bounds[i];
+            const glm::vec3 d = glm::max(glm::abs(eye - b.center) - b.extent, glm::vec3(0.0f));
+            if (glm::dot(d, d) > mr->shadow_max_distance * mr->shadow_max_distance) return false;
+        }
+        return true;
+    };
+    auto opaque = [&](size_t i) { return !out.material(i).is_blended(); };
+    auto blended = [&](size_t i) { return out.material(i).is_blended(); };
+
+    // --- Static-caster eligibility and the static-scene generation hash, shared by the
+    // directional cascade list cache here and the local-shadow static cache below. ---
+    // Eligible: still for kStaticCasterFrames, not a dynamic mesh or a particle batch, not
+    // tessellated (edge factors follow the CAMERA, so its shadow is never the same twice),
+    // and not drawn with a shadow shader that may animate.
+    auto static_ok = [&](size_t i) {
+        if (out.multi[i]) return false;
+        MeshRenderer* mr = out.renderers[i];
+        if (mr->get_mesh()->is_dynamic()) return false;
+        const auto it = still_frames_.find(mr);
+        if (it == still_frames_.end() || it->second < kStaticCasterFrames) return false;
+        if (out.ext[i].x != 0u) return false;
+        return animated_shadow_shaders_.count(out.material(i).shader) == 0;
+    };
+    // FNV-1a over raw bytes, for the static-content hashes.
+    auto mix = [](uint64_t h, const void* data, size_t len) {
+        const auto* b = static_cast<const unsigned char*>(data);
+        for (size_t k = 0; k < len; ++k) { h ^= b[k]; h *= 1099511628211ull; }
+        return h;
+    };
+    std::vector<uint8_t> is_static(n, 0);
+    // First item index of each renderer: cached caster lists name items by the stable identity
+    // (renderer, part) -- MeshGather indices reshuffle whenever the scene's composition
+    // changes -- and parts are pushed contiguously, so an identity maps back as first + part.
+    std::unordered_map<const MeshRenderer*, uint32_t> first_item;
+    first_item.reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+        if (!out.multi[i]) first_item.emplace(out.renderers[i], static_cast<uint32_t>(i));
+    }
+    // Everything a static caster contributes to a culled list: identity, pose, LOD, the
+    // mesh/material batch keys, and the shadow-relevant renderer flags. Any change in the set
+    // or in a member changes the hash and with it every list keyed on it.
+    uint64_t static_gen = 1469598103934665603ull;
+    bool static_distance_limited = false;
+    for (size_t i = 0; i < n; ++i) {
+        if (!out.valid[i] || !static_ok(i)) continue;
+        is_static[i] = 1;
+        const MeshRenderer* mr = out.renderers[i];
+        const MeshBatchKey& k = keys[i];
+        static_gen = mix(static_gen, &mr, sizeof(mr));
+        static_gen = mix(static_gen, &out.part[i], sizeof(out.part[i]));
+        static_gen = mix(static_gen, &out.world_matrices[i], sizeof(glm::mat4));
+        static_gen = mix(static_gen, &out.lod[i], sizeof(out.lod[i]));
+        static_gen = mix(static_gen, &k.shader_hash, sizeof(k.shader_hash));
+        static_gen = mix(static_gen, &k.mesh, sizeof(k.mesh));
+        static_gen = mix(static_gen, &k.shadow, sizeof(k.shadow));
+        const uint8_t cast_flags = (mr->cast_shadows ? 1u : 0u) |
+            ((out.material(i).is_blended() && out.material(i).alpha < 1.0f) ? 2u : 0u);
+        static_gen = mix(static_gen, &cast_flags, sizeof(cast_flags));
+        static_gen = mix(static_gen, &mr->shadow_max_distance, sizeof(mr->shadow_max_distance));
+        if (mr->cast_shadows && mr->shadow_max_distance > 0.0f) static_distance_limited = true;
+    }
+
     // --- Per-view culling + batching ---
+    // The grid holds every valid item by its bounds; a view's cull queries the cells its
+    // frustum touches (plus the always-tested large items) instead of walking the flat list.
+    caster_grid_.rebuild(out.bounds, out.valid);
+    uint64_t cull_items_tested = 0, cull_cells_visited = 0, dir_list_cache_hits = 0;
+    uint64_t dir_levels_rendered = 0;
     std::vector<uint32_t> visible;
     visible.reserve(n);
-    auto build = [&](const glm::mat4& view_proj, bool shadow, float shadow_res,
-                     const std::function<bool(size_t)>& accept, std::vector<MeshBatch>& list) {
-        list.clear();
+    // Exact per-item test over the grid's candidate superset: membership -- and with it the
+    // batched output -- is identical to a flat loop over every item.
+    auto cull_view = [&](const glm::mat4& view_proj, bool shadow, float shadow_res,
+                         const std::function<bool(size_t)>& accept) {
         visible.clear();
         const Frustum f = Frustum::from_matrix(view_proj);
         const float min_texels = shadow ? config_.shadow_min_caster_texels : 0.0f;
-        for (size_t i = 0; i < n; ++i) {
-            if (!out.valid[i] || !accept(i)) continue;
-            if (!f.intersects(out.bounds[i])) continue;
+        cull_cells_visited += caster_grid_.for_candidates(f, view_proj_xy_rect(view_proj), [&](uint32_t i) {
+            ++cull_items_tested;
+            if (!out.valid[i] || !accept(i)) return;
+            if (!f.intersects(out.bounds[i])) return;
             if (min_texels > 0.0f &&
                 projected_texels(view_proj, out.bounds[i].center, out.bounds[i].radius(), shadow_res) < min_texels) {
-                continue;
+                return;
             }
-            visible.push_back(static_cast<uint32_t>(i));
-        }
+            visible.push_back(i);
+        });
+    };
+    auto emit_batches = [&](bool shadow, std::vector<MeshBatch>& list) {
+        list.clear();
         auto key_less = [&](uint32_t a, uint32_t b) {
             const MeshBatchKey& ka = keys[a];
             const MeshBatchKey& kb = keys[b];
@@ -2606,26 +2697,11 @@ ToyRenderPipeline::MeshGather ToyRenderPipeline::gather_meshes_(uint32_t frame_s
             r = e;
         }
     };
-
-    // A BLEND material only casts a shadow at full opacity -- the shadow passes have no
-    // per-fragment alpha discard beyond the CUTOUT mask (gfx/surface/shadow_fs.glsl), so a
-    // translucent object is binary: caster or not.
-    const glm::vec3 eye = glm::vec3(glm::inverse(view)[3]);
-    auto casts = [&](size_t i) {
-        const auto& m = out.material(i);
-        if (m.is_blended() && m.alpha < 1.0f) return false;
-        const MeshRenderer* mr = out.renderers[i];
-        if (!mr->cast_shadows) return false;
-        if (mr->shadow_max_distance > 0.0f) {
-            // Distance from the eye to the item's box.
-            const WorldBounds& b = out.bounds[i];
-            const glm::vec3 d = glm::max(glm::abs(eye - b.center) - b.extent, glm::vec3(0.0f));
-            if (glm::dot(d, d) > mr->shadow_max_distance * mr->shadow_max_distance) return false;
-        }
-        return true;
+    auto build = [&](const glm::mat4& view_proj, bool shadow, float shadow_res,
+                     const std::function<bool(size_t)>& accept, std::vector<MeshBatch>& list) {
+        cull_view(view_proj, shadow, shadow_res, accept);
+        emit_batches(shadow, list);
     };
-    auto opaque = [&](size_t i) { return !out.material(i).is_blended(); };
-    auto blended = [&](size_t i) { return out.material(i).is_blended(); };
 
     const glm::mat4 camera_vp = unjittered_proj * view;
     build(camera_vp, false, 0.0f, opaque, out.gbuffer);
@@ -2634,19 +2710,105 @@ ToyRenderPipeline::MeshGather ToyRenderPipeline::gather_meshes_(uint32_t frame_s
     // transforms are added singly.
     {
         const Frustum f = Frustum::from_matrix(camera_vp);
-        for (size_t i = 0; i < n; ++i) {
-            if (out.valid[i] && blended(i) && f.intersects(out.bounds[i])) {
-                out.instance_idx[i] = instance_stream_.add(out.world_matrices[i], out.prev_world_matrices[i], out.snow_anchors[i]);
-                out.has_blend_mesh  = true;
-            }
+        visible.clear();
+        cull_cells_visited += caster_grid_.for_candidates(f, view_proj_xy_rect(camera_vp), [&](uint32_t i) {
+            ++cull_items_tested;
+            if (out.valid[i] && blended(i) && f.intersects(out.bounds[i])) visible.push_back(i);
+        });
+        std::sort(visible.begin(), visible.end());   // ascending: keeps the stream's order stable
+        for (const uint32_t i : visible) {
+            out.instance_idx[i] = instance_stream_.add(out.world_matrices[i], out.prev_world_matrices[i], out.snow_anchors[i]);
+            out.has_blend_mesh  = true;
         }
     }
 
+    // A static caster appearing, vanishing, moving or changing material invalidates every
+    // level's cached depth at once -- caught here, where the whole static set is hashed in
+    // one O(n) pass, rather than per level. The plan next frame re-renders every live level
+    // instead of waiting for the round-robin budget: a stale level here would show a missing
+    // or a ghost shadow, not merely an uncovered sliver at its edge.
+    dir_static_scene_changed_ = dir_cache_active_() && static_gen != dir_static_gen_;
+    dir_static_gen_ = static_gen;
+
     if (cast_dir_shadow) {
-        const uint32_t cascades = std::min<uint32_t>(shadow_target_.dir_cascade_count(), 4u);
+        const uint32_t cascades = std::min<uint32_t>(
+            shadow_target_.dir_cascade_count(), coopa::gfx::engine::data::MAX_DIR_SHADOW_LEVELS);
         const float tile_res = static_cast<float>(shadow_target_.dir_tile_resolution());
+        const bool caching = dir_cache_active_();
         for (uint32_t c = 0; c < cascades; ++c) {
-            build(current_light_data().dir_cascade_matrix[c], true, tile_res, casts, out.cascade[c]);
+            // The PUBLISHED matrix, never the wanted one: this level's tile holds depth drawn
+            // with it, and culling, drawing and sampling must all agree with that content.
+            const glm::mat4 vp = current_light_data().dir_level_matrix[c];
+            DirLevelState& lvl = dir_levels_[c];
+            // A content change marks the level dirty even if its matrix held still, but it
+            // does NOT jump the budget. Forcing every level the instant any static item
+            // changes sounds safer and is in fact ruinous: a camera that moves at all flips
+            // some chunk's LOD every frame, so every level would redraw every frame and the
+            // cache would never once pay for itself (measured: 6.2 of 8 levels per frame on
+            // habitat's game scene). The budget clears the backlog within a few frames, and
+            // what shows during those frames is one chunk at its previous LOD.
+            if (caching && dir_static_scene_changed_) lvl.dirty = true;
+
+            if (caching) {
+                // Static casters only on the frames this level actually re-renders them...
+                if (lvl.render_static) {
+                    cull_view(vp, true, tile_res, [&](size_t i) { return casts(i) && is_static[i]; });
+                    emit_batches(true, out.dir_static[c]);
+                    ++dir_levels_rendered;
+                } else {
+                    out.dir_static[c].clear();
+                }
+                // ...and movers every frame, drawn over the copied static depth.
+                cull_view(vp, true, tile_res, [&](size_t i) { return casts(i) && !is_static[i]; });
+                emit_batches(true, out.cascade[c]);
+                continue;
+            }
+
+            // No cache: one list with every caster in it, exactly as before the cache existed.
+            DirCasterListCache& cache = dir_caster_cache_[c];
+            if (!config_.shadow_cull_cache_enabled) {
+                cache.filled = false;
+                build(vp, true, tile_res, casts, out.cascade[c]);
+                continue;
+            }
+            // Everything the STATIC part of this level's list depends on. The eye enters only
+            // while some static caster is distance-limited (MeshRenderer::shadow_max_distance
+            // measures from the eye), so the common case survives camera translation.
+            uint64_t key = static_gen;
+            key = mix(key, &vp, sizeof(vp));
+            key = mix(key, &tile_res, sizeof(tile_res));
+            key = mix(key, &config_.shadow_min_caster_texels, sizeof(config_.shadow_min_caster_texels));
+            if (static_distance_limited) key = mix(key, &eye, sizeof(eye));
+            const Frustum f = Frustum::from_matrix(vp);
+            if (cache.filled && cache.key == key) {
+                // Static membership is reused wholesale; movers are re-culled on top of it.
+                ++dir_list_cache_hits;
+                visible.clear();
+                for (const auto& [mr, part] : cache.items) {
+                    const auto it = first_item.find(mr);
+                    if (it != first_item.end()) visible.push_back(it->second + part);
+                }
+                cull_cells_visited += caster_grid_.for_candidates(f, view_proj_xy_rect(vp), [&](uint32_t i) {
+                    ++cull_items_tested;
+                    if (!out.valid[i] || is_static[i] || !casts(i)) return;
+                    if (!f.intersects(out.bounds[i])) return;
+                    if (config_.shadow_min_caster_texels > 0.0f &&
+                        projected_texels(vp, out.bounds[i].center, out.bounds[i].radius(), tile_res) <
+                            config_.shadow_min_caster_texels) {
+                        return;
+                    }
+                    visible.push_back(i);
+                });
+            } else {
+                cull_view(vp, true, tile_res, casts);
+                cache.filled = true;
+                cache.key = key;
+                cache.items.clear();
+                for (const uint32_t i : visible) {
+                    if (is_static[i]) cache.items.emplace_back(out.renderers[i], out.part[i]);
+                }
+            }
+            emit_batches(true, out.cascade[c]);
         }
     }
     // Point/spot shadows: every view of every local light update_local_shadows_() chose.
@@ -2659,26 +2821,6 @@ ToyRenderPipeline::MeshGather ToyRenderPipeline::gather_meshes_(uint32_t frame_s
         out.local_dynamic.assign(total_views, {});
         const bool caching = local_shadow_atlas_->caching();
         const auto& blk = current_light_data().local_shadows;
-
-        // Static-cache eligibility: still for kStaticCasterFrames, not a dynamic mesh or a
-        // particle batch, and not drawn with a shadow shader that may animate.
-        auto static_ok = [&](size_t i) {
-            if (out.multi[i]) return false;
-            MeshRenderer* mr = out.renderers[i];
-            if (mr->get_mesh()->is_dynamic()) return false;
-            const auto it = still_frames_.find(mr);
-            if (it == still_frames_.end() || it->second < kStaticCasterFrames) return false;
-            // A tessellated caster's shape follows the CAMERA (its edge factors), so it is
-            // never the same twice: never cached.
-            if (out.ext[i].x != 0u) return false;
-            return animated_shadow_shaders_.count(out.material(i).shader) == 0;
-        };
-        // FNV-1a over raw bytes, for the static-content hash.
-        auto mix = [](uint64_t h, const void* data, size_t len) {
-            const auto* b = static_cast<const unsigned char*>(data);
-            for (size_t k = 0; k < len; ++k) { h ^= b[k]; h *= 1099511628211ull; }
-            return h;
-        };
 
         for (LocalShadowSlot& slot : local_slots_) {
             const glm::vec3 c = slot.pos;
@@ -2704,13 +2846,20 @@ ToyRenderPipeline::MeshGather ToyRenderPipeline::gather_meshes_(uint32_t frame_s
             // change re-renders the light's cache once; otherwise the copy is enough.
             uint64_t h = 1469598103934665603ull;
             h = mix(h, &slot.block, sizeof(slot.block));
+            const XyRect light_rect{glm::vec2(c.x - r, c.y - r), glm::vec2(c.x + r, c.y + r)};
+            std::vector<uint32_t> in_view;
             for (uint32_t v = 0; v < slot.view_count; ++v) {
                 const glm::mat4& vp = blk.view_proj[slot.first_view + v];
                 h = mix(h, &vp, sizeof(vp));
                 const Frustum f = Frustum::from_matrix(vp);
-                for (size_t i = 0; i < n; ++i) {
-                    if (!out.valid[i] || !casts(i) || !static_ok(i) || !in_light(i)) continue;
-                    if (!f.intersects(out.bounds[i])) continue;
+                in_view.clear();
+                cull_cells_visited += caster_grid_.for_candidates(f, light_rect, [&](uint32_t i) {
+                    ++cull_items_tested;
+                    if (!is_static[i] || !casts(i) || !in_light(i)) return;
+                    if (f.intersects(out.bounds[i])) in_view.push_back(i);
+                });
+                std::sort(in_view.begin(), in_view.end());   // the hash must not depend on grid order
+                for (const uint32_t i : in_view) {
                     const MeshBatchKey& k = keys[i];
                     const void* id = out.renderers[i];
                     h = mix(h, &id, sizeof(id));
@@ -2730,10 +2879,10 @@ ToyRenderPipeline::MeshGather ToyRenderPipeline::gather_meshes_(uint32_t frame_s
             for (uint32_t v = 0; v < slot.view_count; ++v) {
                 const glm::mat4& vp = blk.view_proj[slot.first_view + v];
                 if (slot.rerender_static) {
-                    build(vp, true, res, [&](size_t i) { return casts(i) && in_light(i) && static_ok(i); },
+                    build(vp, true, res, [&](size_t i) { return casts(i) && in_light(i) && is_static[i]; },
                           out.local_static[slot.first_view + v]);
                 }
-                build(vp, true, res, [&](size_t i) { return casts(i) && in_light(i) && !static_ok(i); },
+                build(vp, true, res, [&](size_t i) { return casts(i) && in_light(i) && !is_static[i]; },
                       out.local_dynamic[slot.first_view + v]);
             }
         }
@@ -2752,11 +2901,19 @@ ToyRenderPipeline::MeshGather ToyRenderPipeline::gather_meshes_(uint32_t frame_s
         stats_total_.renderers        += frame_stats_.renderers;
         stats_total_.camera_visible   += frame_stats_.camera_visible;
         stats_total_.tess_draws       += frame_stats_.tess_draws;
+        stats_total_.cull_items_tested   += frame_stats_.cull_items_tested;
+        stats_total_.cull_cells_visited  += frame_stats_.cull_cells_visited;
+        stats_total_.dir_list_cache_hits += frame_stats_.dir_list_cache_hits;
+        stats_total_.dir_levels_rendered  += frame_stats_.dir_levels_rendered;
         ++stats_frames_;
     }
     frame_stats_ = MeshDrawStats{};
     frame_stats_.renderers = n;
     frame_stats_.streamed_instances = instance_stream_.size();
+    frame_stats_.cull_items_tested   = cull_items_tested;
+    frame_stats_.cull_cells_visited  = cull_cells_visited;
+    frame_stats_.dir_list_cache_hits = dir_list_cache_hits;
+    frame_stats_.dir_levels_rendered = dir_levels_rendered;
     for (const MeshBatch& b : out.gbuffer) frame_stats_.camera_visible += b.instance_count;
     return out;
 }
@@ -3302,14 +3459,22 @@ void ToyRenderPipeline::update_volumetrics_data_(coopa::scene::Scene& scene, con
     const auto& lubo = current_light_data();
     vol.dir_light_space_matrix  = lubo.dir_light_space_matrix;
     vol.spot_light_space_matrix = lubo.spot_light_space_matrix;
-    // The cascade set too, not just cascade 0's matrix: a sun shaft marches the whole
-    // volumetrics_max_distance, so a march point past the near cascade must find its own
-    // tile of the atlas or it would come back unshadowed. volumetrics_march.frag runs the same
+    // Shadow levels too, not just the near matrix: a sun shaft marches the whole
+    // volumetrics_max_distance, so a march point past the near level must find its own tile
+    // of the atlas or it would come back unshadowed. volumetrics_march.frag runs the same
     // containment select calc_dir_shadow() does -- see vol_shadow_vis_cascaded().
+    //
+    // Only the NEAREST MAX_DIR_CASCADES levels are forwarded, even when more are live. The
+    // march hoists two vec4s per level per pixel (volumetrics_march.frag's cso/csd), so
+    // carrying all eight would double that register pressure for shaft shadows that are a
+    // near-camera effect; its loop already clamps to min(dir_cascade_info.x, VOL_MAX_CASCADES).
+    // dir_cascade_info is forwarded VERBATIM rather than with a reduced count, because the
+    // tile-uv remap derives grid_y from count / grid_x -- a reduced count there would compute
+    // the wrong tile height and sample the wrong half of the atlas.
     for (uint32_t c = 0; c < coopa::gfx::engine::data::MAX_DIR_CASCADES; ++c) {
-        vol.dir_cascade_matrix[c] = lubo.dir_cascade_matrix[c];
+        vol.dir_cascade_matrix[c] = lubo.dir_level_matrix[c];
     }
-    vol.dir_cascade_info = lubo.dir_cascade_info;
+    vol.dir_cascade_info = lubo.dir_level_info;
     // The clouds' shadow on the sun's in-scatter: light shafts through gaps in the clouds.
     vol.cloud_shadow = lubo.cloud_shadow;
     vol.cloud_shadow_layer = lubo.cloud_shadow_layer;
@@ -3770,7 +3935,29 @@ void ToyRenderPipeline::update_dir_shadow_matrix_(const glm::vec3& direction,
     // instead of slices of its frustum (see ToyRenderConfig::shadow_fit). The point is
     // shadow_focus_distance along the view direction, else the DOF focal distance this
     // frame resolved, else the finest cascade's own radius as a last resort.
-    const bool focus_fit = cam && config_.shadow_fit == "focus";
+    // shadow_fit "clipmap": concentric rings CENTRED ON THE CAMERA, radius growing
+    // geometrically, each snapped to a coarse multiple of its own texel size. Camera-position
+    // anchoring (not the frustum, not the gaze point) is what makes every matrix invariant to
+    // where the camera LOOKS and how far it is zoomed out, and the coarse snap is what holds
+    // each matrix still between steps -- together those are what let a level's depth be reused
+    // across frames (DirShadowCache, phase 3). The reach is an output here: the outermost ring
+    // is shadow_clip_radius * ratio^(count-1), so shadow_distance does not bound the fit.
+    const bool clipmap_fit = cam && config_.shadow_fit == "clipmap";
+    std::vector<float> clip_radii;
+    glm::vec3 clip_centre(0.0f);
+    glm::vec3 clip_direction = direction;
+    if (clipmap_fit) {
+        clip_radii  = compute_clipmap_level_radii(config_.shadow_clip_radius,
+                                                  config_.shadow_clip_ratio, cascades);
+        clip_centre = glm::vec3(glm::inverse(fit_cam.view)[3]);
+        // A sun that moves (a day/night cycle) otherwise re-bases every level every frame,
+        // which dirties every cached level every frame -- see shadow_clip_sun_snap_degrees.
+        // ONLY the fit is snapped; ubo.dir_direction below keeps the true direction, so
+        // shading, specular and the sky are all still continuous.
+        clip_direction = snap_light_direction(direction, config_.shadow_clip_sun_snap_degrees);
+    }
+
+    const bool focus_fit = cam && !clipmap_fit && config_.shadow_fit == "focus";
     glm::vec3 focus_point(0.0f);
     std::vector<float> focus_radii;
     if (focus_fit) {
@@ -3798,14 +3985,44 @@ void ToyRenderPipeline::update_dir_shadow_matrix_(const glm::vec3& direction,
     auto& ubo = current_light_data();
 
     bool any_soft = false;
-    for (uint32_t c = 0; c < coopa::gfx::engine::data::MAX_DIR_CASCADES; ++c) {
+    const uint32_t clip_snap = std::clamp(config_.shadow_clip_snap_texels, 1u, 128u);
+
+    // --- Which levels re-render their static depth this frame (see DirLevelState) ---
+    //
+    // Two kinds of dirt, handled differently because they fail differently:
+    //
+    //  * The MATRIX moved (the camera crossed a snap cell). Frequent on the near rings, and
+    //    a level left stale merely stops covering a sliver at its edge, which containment
+    //    selection hands to the next ring out. Budget-limited and round-robined.
+    //  * The static CONTENT changed (a terrain chunk streamed in or out, an LOD flipped, a
+    //    material was edited). Rare, but a stale level there means a missing or a ghost
+    //    shadow rather than a coverage sliver -- so every affected level re-renders at once.
+    //
+    // The decision is made HERE, before gather_meshes_, because gather culls and batches
+    // against the matrix each level will actually publish. gather may still promote a level
+    // (it recomputes the content hash while culling), which is safe: it runs before recording.
+    const bool caching = dir_cache_active_();
+    const uint32_t fresh_levels = std::min(config_.shadow_clip_fresh_levels, cascades);
+    uint32_t static_budget = config_.shadow_clip_static_budget;
+    for (uint32_t c = 0; c < coopa::gfx::engine::data::MAX_DIR_SHADOW_LEVELS; ++c) {
         // Slots past the live count repeat the last cascade rather than holding an
         // identity matrix: the shader's containment loop stops at the count, but a stale
         // identity here would project every world position into the same degenerate tile
         // if that bound were ever read wrong.
         const uint32_t i = std::min(c, cascades - 1u);
         const float slice_near = (i == 0) ? near_clip : splits.distance[i - 1];
-        const DirShadowFit fit = focus_fit
+        // For the slice and focus fits, caster_reach is the whole shadowed range: those
+        // ranges are tens of metres, so the long box costs little. A clipmap's outermost ring
+        // is kilometres, and sizing every level off THAT would have the finest 9 m ring
+        // gather every caster in a kilometre-long column toward the sun. Each clipmap level
+        // instead reaches past itself by its own size, floored by shadow_clip_caster_reach.
+        const float level_reach = clipmap_fit
+            ? std::max(2.0f * clip_radii[i], std::max(config_.shadow_clip_caster_reach, 0.0f))
+            : config_.shadow_distance;
+        const DirShadowFit fit = clipmap_fit
+            ? compute_dir_shadow_fit_sphere(clip_direction, clip_centre, clip_radii[i],
+                                            level_reach, tile_res, clip_snap)
+            : focus_fit
             ? compute_dir_shadow_fit_sphere(direction, focus_point, focus_radii[i],
                                             config_.shadow_distance, tile_res)
             : compute_dir_shadow_fit_slice(direction, fit_cam_ptr, slice_near,
@@ -3818,12 +4035,52 @@ void ToyRenderPipeline::update_dir_shadow_matrix_(const glm::vec3& direction,
         // default): the radius is unbounded above (a fine cascade asks for tens) while the
         // Vogel disk is tuned for single-digit radii. 0 (soft_shadows off) selects the
         // single hard compare.
+        // Publish the fit whose depth the tile actually holds. Without caching that is
+        // always this frame's fit; with caching a level that is dirty but not granted a
+        // re-render keeps the fit it was last drawn with, so the matrix the shader samples
+        // with and the content in the tile can never disagree.
+        DirLevelState& lvl = dir_levels_[c];
+        lvl.wanted = fit;
+        bool grant = !caching || !lvl.valid;
+        if (caching && lvl.valid) {
+            // Sticky: a level dirtied by a matrix step or by a content change stays dirty
+            // until it is actually granted a redraw, so the budget works through a backlog
+            // instead of forgetting it the moment the matrix stops moving.
+            lvl.dirty = lvl.dirty || lvl.published.light_space_matrix != fit.light_space_matrix;
+            if (c < fresh_levels) {
+                grant = lvl.dirty;        // the nearest levels are never deferred
+            } else if (lvl.dirty && static_budget > 0) {
+                // Round-robin from a rotating cursor so a near level dirtying every frame
+                // cannot starve an outer one that has been waiting.
+                const uint32_t turn = (dir_level_cursor_ + c) % std::max(cascades, 1u);
+                grant = turn < static_budget || c == dir_level_cursor_;
+                if (grant) --static_budget;
+            }
+        }
+        if (grant) {
+            lvl.published = fit;
+            lvl.valid = true;
+            lvl.dirty = false;
+            lvl.age = 0;
+        } else if (c < cascades) {
+            lvl.age = std::min(lvl.age + 1u, 1u << 20);
+        }
+        lvl.render_static = grant && caching;
+        const DirShadowFit& pub = lvl.published;
+
         const float pcf_texels = config_.soft_shadows
-            ? std::min(config_.shadow_softness / std::max(fit.texel_world, 1e-6f), pcf_max)
+            ? std::min(config_.shadow_softness / std::max(pub.texel_world, 1e-6f), pcf_max)
             : 0.0f;
 
-        ubo.dir_cascade_matrix[c]      = fit.light_space_matrix;
-        ubo.dir_cascade_pcf_texels[c]  = pcf_texels;
+        // The extended block is what every toyengine shader reads; the legacy
+        // dir_cascade_* block below keeps the first four levels for consumers compiled
+        // against the shorter std140 prefix (see light_data.h).
+        ubo.dir_level_matrix[c] = pub.light_space_matrix;
+        ubo.dir_level_pcf_texels[c >> 2][c & 3] = pcf_texels;
+        if (c < coopa::gfx::engine::data::MAX_DIR_CASCADES) {
+            ubo.dir_cascade_matrix[c]     = pub.light_space_matrix;
+            ubo.dir_cascade_pcf_texels[c] = pcf_texels;
+        }
         // The normal-offset bias, in world units, derived from THIS cascade's texel size --
         // the same conversion the PCF radius just did, and for the same reason: a
         // world-space constant means a different number of texels in every cascade. See
@@ -3831,20 +4088,32 @@ void ToyRenderPipeline::update_dir_shadow_matrix_(const glm::vec3& direction,
         // With the receiver-plane bias on, the taps already follow the receiver, so the
         // offset does not have to clear the PCF disk -- only shadow_normal_bias texels.
         const bool plane_bias = config_.shadow_receiver_plane_bias && !pcss_on_config;
-        ubo.dir_cascade_normal_bias[c] = compute_shadow_normal_bias(
-            plane_bias ? 0.0f : pcf_texels, config_.shadow_normal_bias, fit.texel_world);
+        const float normal_bias = compute_shadow_normal_bias(
+            plane_bias ? 0.0f : pcf_texels, config_.shadow_normal_bias, pub.texel_world);
+        ubo.dir_level_normal_bias[c >> 2][c & 3] = normal_bias;
+        if (c < coopa::gfx::engine::data::MAX_DIR_CASCADES) {
+            ubo.dir_cascade_normal_bias[c] = normal_bias;
+        }
         // PCSS contact hardening (gfx_shadow_dir_pcss): the whole penumbra conversion
         // folded into one factor. A stored-vs-receiver gap of `g` in [0,1] light-space
         // depth spans g * depth_range_world metres, and a sun of angular size
         // shadow_pcss_light_size grows the penumbra by that many metres * size --
         // divided by texel_world to land in the texels gfx_shadow_dir_pcf_vogel wants.
-        ubo.dir_cascade_pcss_scale[c]  = fit.depth_range_world *
-            config_.shadow_pcss_light_size / std::max(fit.texel_world, 1e-6f);
+        const float pcss_scale = pub.depth_range_world *
+            config_.shadow_pcss_light_size / std::max(pub.texel_world, 1e-6f);
+        ubo.dir_level_pcss_scale[c >> 2][c & 3] = pcss_scale;
+        if (c < coopa::gfx::engine::data::MAX_DIR_CASCADES) {
+            ubo.dir_cascade_pcss_scale[c] = pcss_scale;
+        }
         // One texel of THIS cascade in its [0,1] light depth: the shader multiplies its
         // constant + slope bias (counted in texels) by this, so the bias tracks each
         // cascade's resolution instead of being a fixed fraction of a depth range that
         // always spans the whole shadow distance toward the sun.
-        ubo.dir_cascade_depth_bias[c]  = fit.texel_world / std::max(fit.depth_range_world, 1e-6f);
+        const float depth_bias = pub.texel_world / std::max(pub.depth_range_world, 1e-6f);
+        ubo.dir_level_depth_bias[c >> 2][c & 3] = depth_bias;
+        if (c < coopa::gfx::engine::data::MAX_DIR_CASCADES) {
+            ubo.dir_cascade_depth_bias[c] = depth_bias;
+        }
 
         if (c < cascades && pcf_texels > 0.0f) any_soft = true;
 
@@ -3852,18 +4121,21 @@ void ToyRenderPipeline::update_dir_shadow_matrix_(const glm::vec3& direction,
             // Cascade 0 mirrored into the pre-cascade fields of the LightUBO prefix
             // (dir_shadow_params.z gates the directional shadow in toy_shadow_body.glsl)
             // -- see light_data.h's cascade doc.
-            ubo.dir_light_space_matrix = fit.light_space_matrix;
+            ubo.dir_light_space_matrix = pub.light_space_matrix;
             ubo.dir_shadow_params = glm::vec4(
-                config_.shadow_bias, pcf_texels, cast_dir_shadow ? 1.0f : 0.0f,
-                ubo.dir_cascade_normal_bias[0]);
+                config_.shadow_bias, pcf_texels, cast_dir_shadow ? 1.0f : 0.0f, normal_bias);
             ubo.pcss_params = glm::vec4(
-                0.0f, ubo.dir_cascade_pcss_scale[0], pcss_search,
+                0.0f, pcss_scale, pcss_search,
                 static_cast<float>(std::clamp<uint32_t>(config_.shadow_pcss_taps, 1u, 16u)));
         }
     }
     // PCSS requires the soft path (radius > 0) in at least one live cascade: the constant
     // radius above becomes PCSS's maximum, so shadow_softness keeps its role as the
     // artist's width dial.
+    if (caching && cascades > 0) dir_level_cursor_ = (dir_level_cursor_ + 1u) % cascades;
+    for (uint32_t c = 0; c < coopa::gfx::engine::data::MAX_DIR_SHADOW_LEVELS; ++c) {
+        ubo.dir_level_age[c >> 2][c & 3] = static_cast<float>(dir_levels_[c].age);
+    }
     ubo.pcss_params.x = (pcss_on_config && any_soft) ? 1.0f : 0.0f;
     ubo.dir_shadow_receiver = glm::vec4(
         (config_.shadow_receiver_plane_bias && !pcss_on_config) ? 1.0f : 0.0f,
@@ -3882,27 +4154,37 @@ void ToyRenderPipeline::update_dir_shadow_matrix_(const glm::vec3& direction,
     const float inset_texels = (config_.soft_shadows ? pcf_max : 1.0f) +
                                (ubo.pcss_params.x > 0.5f ? pcss_search : 0.0f) + 1.0f;
     const float inset = inset_texels / static_cast<float>(std::max(tile_res, 1u));
-    ubo.dir_cascade_info = glm::vec4(
-        static_cast<float>(cascades),
-        static_cast<float>(coopa::gfx::engine::targets::ShadowMapTarget::grid_for(cascades).first),
-        inset, 0.06f);
+    const float grid_columns =
+        static_cast<float>(coopa::gfx::engine::targets::ShadowMapTarget::grid_for(cascades).first);
+    ubo.dir_level_info = glm::vec4(static_cast<float>(cascades), grid_columns, inset, 0.06f);
+    // The legacy copy keeps the REAL grid and count: its consumers remap tile uv with
+    // grid_y = ceil(count / grid_x), so a truncated count there would compute the wrong
+    // tile height and sample the wrong band of the atlas.
+    ubo.dir_cascade_info = ubo.dir_level_info;
 
     // Depth bias (texels; see toy_shadow_bias_texels in toy_shadow_body.glsl) -- shared
     // with the local-light maps, which convert it per pixel.
     ubo.dir_shadow_bias_texels = glm::vec4(std::max(config_.shadow_depth_bias_texels, 0.0f),
                                            std::max(config_.shadow_slope_bias_texels, 0.0f),
                                            std::max(config_.shadow_slope_bias_max, 0.0f), 0.0f);
-    // Far fade. Measured from the point the cascades are centred on: the camera for the
-    // frustum fit (whose last slice ends at shadow_distance), the focus point for the focus
-    // fit (whose last sphere has radius shadow_distance around it -- the camera itself may
-    // sit further away than that).
+    // Far fade. Measured from the point the levels are centred on: the camera for the frustum
+    // and clipmap fits, the focus point for the focus fit (whose last sphere has radius
+    // shadow_distance around it -- the camera itself may sit further away than that).
+    //
+    // The fade distance is the range the levels ACTUALLY cover, which for the clipmap is the
+    // outermost ring's radius, NOT shadow_distance -- that field does not bound the clipmap
+    // fit and is typically far shorter (55 m against rings reaching 288 m on habitat). Keying
+    // the fade to it would render every outer ring and then fade its shadows away to nothing
+    // before they were ever sampled, silently throwing away the whole point of the fit.
     const float fade = std::clamp(config_.shadow_fade_fraction, 0.0f, 1.0f);
+    const float fade_range = (clipmap_fit && !clip_radii.empty()) ? clip_radii.back()
+                                                                  : config_.shadow_distance;
     const glm::vec3 fade_origin = focus_fit ? focus_point
                                 : (cam ? glm::vec3(glm::inverse(fit_cam.view)[3]) : glm::vec3(0.0f));
-    ubo.dir_shadow_fade = glm::vec4(fade_origin, (cam && fade > 0.0f) ? config_.shadow_distance : 0.0f);
-    // Without TAA nothing averages a dithered cascade switch, so blend the two cascades
-    // across the band instead (two evaluations there, one everywhere else).
-    ubo.dir_shadow_fade_params = glm::vec4(config_.shadow_distance * (1.0f - fade), fade,
+    ubo.dir_shadow_fade = glm::vec4(fade_origin, (cam && fade > 0.0f) ? fade_range : 0.0f);
+    // Without TAA nothing averages a dithered level switch, so blend the two levels across
+    // the band instead (two evaluations there, one everywhere else).
+    ubo.dir_shadow_fade_params = glm::vec4(fade_range * (1.0f - fade), fade,
                                            config_.aa_mode == "taa" ? 0.0f : 1.0f, 0.0f);
 }
 
@@ -3968,46 +4250,118 @@ void ToyRenderPipeline::record_directional_shadow_(coopa::gfx::command::CommandB
                                 const MeshGather& meshes,
                                 const std::vector<SdfDrawItem>& sdf_draws,
                                 bool cast_dir_shadow) {
+    const uint32_t cascades = shadow_target_.dir_cascade_count();
+    const uint32_t tile     = shadow_target_.dir_tile_resolution();
+    const uint32_t grid     = std::max(1u, shadow_target_.dir_grid_columns());
+
+    // The cache is built the first time the clipmap fit asks for it -- only the frustum and
+    // focus fits refit every level every frame, so only the clipmap can ever reuse depth, and
+    // `shadow_fit` is a per-scene setting rather than a startup-fixed one. Deliberately NOT on
+    // the frame it is first wanted: creating it is safe at any time (nothing samples the cache
+    // image, and the live image's view is unchanged, so no descriptor moves), but its first
+    // composite has to start from a live atlas already in SHADER_READ, which is exactly what
+    // the uncached path below leaves behind. So frame N allocates and draws uncached, and
+    // caching begins on N+1.
+    if (!dir_shadow_cache_ && dir_cache_wanted_() && frame_index_ > 0) {
+        dir_shadow_cache_ = std::make_unique<DirShadowCache>(
+            device_, allocator_, shadow_target_.dir_shadow_image(), shadow_target_.dir_shadow_view(),
+            shadow_target_.dir_atlas_width(), shadow_target_.dir_atlas_height());
+    }
+
+    // The casters of one level, into whichever pass is currently open. Shared by the cached
+    // and uncached paths so a caster's shadow is drawn the same way either way -- including
+    // the per-material shader variant, which must match its G-buffer draw or a displaced
+    // surface would cast the silhouette of its undisplaced self (gfx/surface/shadow_vs.glsl).
+    auto draw_level = [&](uint32_t c, const std::vector<MeshBatch>& batches, bool with_sdf) {
+        shadow_pipeline_->bind_directional(cmd);
+        coopa::gfx::engine::passes::DirectionalShadowPushConstants pc{};
+        pc.light_space_matrix = current_light_data().dir_level_matrix[c];
+        pc.gfx_time = surface_gfx_time_();
+        draw_shadow_batches_(cmd, meshes, batches, pc,
+            [&](const std::string& shader, bool cull, bool tess) { shadow_pipeline_->bind_directional(cmd, shader, cull, tess); },
+            [&](const auto& p) { shadow_pipeline_->push_directional(cmd, p); });
+
+        if (with_sdf && !sdf_draws.empty()) {
+            sdf_shadow_pass_->bind_directional(cmd);
+            cmd.bind_descriptor_set(sdf_data_.current_set(), 0);
+            coopa::gfx::engine::passes::SdfDirectionalShadowPushConstants sdf_pc{};
+            sdf_pc.light_space_matrix = current_light_data().dir_level_matrix[c];
+            sdf_pc.shadow_max_steps   = config_.sdf_shadow_max_steps;
+            draw_sdf_shadow_casters_(cmd, sdf_draws, sdf_pc.light_space_matrix,
+                                     (c % grid) * tile, (c / grid) * tile, tile,
+                                     [&](uint32_t gpu_index) {
+                                         sdf_pc.renderer_index = gpu_index;
+                                         sdf_shadow_pass_->push_directional(cmd, sdf_pc);
+                                     });
+        }
+    };
+
+    if (dir_cache_active_()) {
+        // --- Cached path: static depth rendered rarely, copied in, movers drawn on top ---
+        dir_shadow_cache_->initialize(cmd);
+        dir_shadow_cache_->begin_frame(cmd);   // live atlas shader-read -> transfer-dst
+
+        bool any_static = false;
+        for (uint32_t c = 0; c < cascades; ++c) any_static = any_static || dir_levels_[c].render_static;
+        if (cast_dir_shadow && any_static) {
+            dir_shadow_cache_->begin_static_pass(cmd);
+            cmd.bind_vertex_buffer(instance_stream_.buffer(), 0, 1);
+            for (uint32_t c = 0; c < cascades; ++c) {
+                if (!dir_levels_[c].render_static) continue;
+                const uint32_t x = (c % grid) * tile, y = (c / grid) * tile;
+                dir_shadow_cache_->set_tile(cmd, x, y, tile, tile);
+                // The tile must not keep the depth it held under its previous matrix.
+                dir_shadow_cache_->clear_tile(cmd, x, y, tile, tile);
+                // SDF casters are raymarched against live shape data, never cacheable, so
+                // they are drawn in the dynamic pass instead.
+                draw_level(c, meshes.dir_static[c], false);
+            }
+            dir_shadow_cache_->end_static_pass(cmd);
+        }
+
+        // Only the tiles whose live depth can differ from the cache. A tile needs the copy
+        // when it was just re-rendered, when movers are about to be drawn into it, or when
+        // movers were drawn into it LAST frame (their silhouettes are still burned in and
+        // must be reset). A tile that is none of those -- a quiet outer ring with nothing
+        // moving in it -- already holds exactly its static depth, and copying it back is
+        // pure bandwidth: measured at ~0.97 ms a frame for six 2048 tiles, which was 80% of
+        // the whole shadow budget.
+        std::vector<VkImageCopy> regions;
+        regions.reserve(cascades);
+        for (uint32_t c = 0; c < cascades; ++c) {
+            const bool has_dynamic = cast_dir_shadow && !meshes.cascade[c].empty();
+            DirLevelState& lvl = dir_levels_[c];
+            if (lvl.render_static || has_dynamic || lvl.had_dynamic) {
+                regions.push_back(DirShadowCache::tile_region((c % grid) * tile, (c / grid) * tile, tile, tile));
+            }
+            lvl.had_dynamic = has_dynamic;
+        }
+        dir_shadow_cache_->copy_levels(cmd, regions);
+        gpu_mark_(cmd, GpuScope::ShadowDirCache);
+
+        dir_shadow_cache_->begin_dynamic_pass(cmd);   // LOAD: keeps the copied static depth
+        if (cast_dir_shadow) {
+            cmd.bind_vertex_buffer(instance_stream_.buffer(), 0, 1);
+            for (uint32_t c = 0; c < cascades; ++c) {
+                const uint32_t x = (c % grid) * tile, y = (c / grid) * tile;
+                dir_shadow_cache_->set_tile(cmd, x, y, tile, tile);
+                draw_level(c, meshes.cascade[c], true);
+            }
+        }
+        dir_shadow_cache_->end_dynamic_pass(cmd);   // ends SHADER_READ for the lighting pass
+        return;
+    }
+
+    // --- Uncached path: one pass over every caster per level, exactly as before ---
+    //
+    // The atlas is cleared once by begin_directional_pass() and transitioned once after the
+    // loop, so a level costs exactly its draws -- no extra render pass, barrier or variant.
     shadow_target_.begin_directional_pass(cmd);
     if (cast_dir_shadow) {
         cmd.bind_vertex_buffer(instance_stream_.buffer(), 0, 1);
-
-        // One pass over the casters per cascade, each scissored to its own atlas tile and
-        // pushed that cascade's matrix. The atlas is cleared once by
-        // begin_directional_pass() and transitioned once after the loop, so a cascade
-        // costs exactly its draws -- no extra render pass, barrier or pipeline variant.
-        const uint32_t cascades = shadow_target_.dir_cascade_count();
         for (uint32_t c = 0; c < cascades; ++c) {
             shadow_target_.set_cascade_viewport(cmd, c);
-            shadow_pipeline_->bind_directional(cmd);
-
-            coopa::gfx::engine::passes::DirectionalShadowPushConstants pc{};
-            pc.light_space_matrix = current_light_data().dir_cascade_matrix[c];
-            pc.gfx_time = surface_gfx_time_();
-
-            // Same per-material shader-variant binding as record_gbuffer_() -- a caster's
-            // shadow must displace identically to its G-buffer draw (see
-            // gfx/surface/shadow_vs.glsl's doc), so it binds the SAME named variant.
-            draw_shadow_batches_(cmd, meshes, meshes.cascade[std::min(c, 3u)], pc,
-                [&](const std::string& shader, bool cull, bool tess) { shadow_pipeline_->bind_directional(cmd, shader, cull, tess); },
-                [&](const auto& p) { shadow_pipeline_->push_directional(cmd, p); });
-
-            if (!sdf_draws.empty()) {
-                sdf_shadow_pass_->bind_directional(cmd);
-                cmd.bind_descriptor_set(sdf_data_.current_set(), 0);
-
-                coopa::gfx::engine::passes::SdfDirectionalShadowPushConstants sdf_pc{};
-                sdf_pc.light_space_matrix = current_light_data().dir_cascade_matrix[c];
-                sdf_pc.shadow_max_steps   = config_.sdf_shadow_max_steps;
-                const uint32_t tile = shadow_target_.dir_tile_resolution();
-                const uint32_t grid = std::max(1u, shadow_target_.dir_grid_columns());
-                draw_sdf_shadow_casters_(cmd, sdf_draws, sdf_pc.light_space_matrix,
-                                         (c % grid) * tile, (c / grid) * tile, tile,
-                                         [&](uint32_t gpu_index) {
-                                             sdf_pc.renderer_index = gpu_index;
-                                             sdf_shadow_pass_->push_directional(cmd, sdf_pc);
-                                         });
-            }
+            draw_level(c, meshes.cascade[c], true);
         }
     }
     shadow_target_.end_directional_pass(cmd);

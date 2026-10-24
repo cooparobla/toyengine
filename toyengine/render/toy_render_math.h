@@ -256,7 +256,7 @@ inline float compute_shadow_normal_bias(float pcf_radius_texels, float extra_tex
  * last boundary, so a caller that always reads four of them never sees an uninitialised one.
  */
 struct CascadeSplits {
-    float distance[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float distance[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
 };
 
 /**
@@ -273,13 +273,13 @@ struct CascadeSplits {
  * @param near_clip       Camera near plane, in world units; floored at 0.01 so the log term
  *                        stays finite.
  * @param shadow_distance Far edge of the last cascade -- the whole shadowed range.
- * @param count           Live cascade count; clamped to [1, 4].
+ * @param count           Live cascade count; clamped to [1, 8].
  * @param lambda          Log/uniform blend in [0, 1].
  * @return The four boundaries, the last of which is always `shadow_distance`.
  */
 inline CascadeSplits compute_cascade_splits(float near_clip, float shadow_distance,
                                             uint32_t count, float lambda) {
-    const int   n    = static_cast<int>(std::clamp<uint32_t>(count, 1u, 4u));
+    const int   n    = static_cast<int>(std::clamp<uint32_t>(count, 1u, 8u));
     const float near_d = std::max(near_clip, 0.01f);
     const float far_d  = std::max(shadow_distance, near_d + 0.01f);
     const float ratio  = far_d / near_d;
@@ -296,7 +296,7 @@ inline CascadeSplits compute_cascade_splits(float near_clip, float shadow_distan
     // analytically, but only up to float error, and this is the boundary past which
     // calc_dir_shadow() stops shadowing at all.
     splits.distance[n - 1] = far_d;
-    for (int i = n; i < 4; ++i) splits.distance[i] = far_d;
+    for (int i = n; i < 8; ++i) splits.distance[i] = far_d;
     return splits;
 }
 
@@ -328,6 +328,59 @@ inline std::vector<float> compute_focus_cascade_radii(float inner, float outer, 
 }
 
 /**
+ * @brief Quantizes a light direction to a grid `step_degrees` coarse, in azimuth and elevation.
+ *
+ * A moving sun (a day/night cycle) changes every level's light-space basis every frame, which
+ * dirties every cached level every frame and makes static-depth caching worthless however well
+ * the level centres are snapped. Snapping the direction the SHADOW FIT uses -- never the
+ * direction the lighting shades with, which stays continuous -- turns that back into a step
+ * every few seconds. The cost is that shadows rotate in visible increments; at a quarter of a
+ * degree, on a 20-minute day, that is a step roughly every second and a shift far smaller than
+ * the penumbra hides.
+ *
+ * `step_degrees <= 0` returns the direction unchanged (no snapping).
+ */
+inline glm::vec3 snap_light_direction(const glm::vec3& direction, float step_degrees) {
+    const glm::vec3 d = glm::normalize(direction);
+    if (!(step_degrees > 0.0f)) return d;
+    const float step = glm::radians(step_degrees);
+    // Z-up, matching the fit's own `up` choice: elevation off the XY plane, azimuth within it.
+    float azimuth   = std::atan2(d.y, d.x);
+    float elevation = std::asin(std::clamp(d.z, -1.0f, 1.0f));
+    azimuth   = std::round(azimuth / step) * step;
+    elevation = std::round(elevation / step) * step;
+    const float ce = std::cos(elevation);
+    return glm::vec3(ce * std::cos(azimuth), ce * std::sin(azimuth), std::sin(elevation));
+}
+
+/**
+ * @brief Radii of the `"clipmap"` fit's concentric levels: geometric from `inner` outward.
+ *
+ * Unlike compute_focus_cascade_radii(), which spreads `count` radii between a fixed inner and
+ * outer, a clipmap's reach is an OUTPUT: level `i` has radius `inner * ratio^i`, so the set
+ * covers `inner * ratio^(count-1)` whatever that works out to. That is the point of the fit --
+ * the shadowed range follows from the level budget rather than being clamped to a configured
+ * distance, which is what lets it reach kilometres without starving the near levels.
+ *
+ * @param inner Radius of the finest level (ToyRenderConfig::shadow_clip_radius); floored at 0.01.
+ * @param ratio Growth per level (ToyRenderConfig::shadow_clip_ratio); clamped to [1.3, 4].
+ * @param count Levels, 1..MAX_DIR_SHADOW_LEVELS.
+ * @return One radius per level, finest first.
+ */
+inline std::vector<float> compute_clipmap_level_radii(float inner, float ratio, uint32_t count) {
+    const float r0 = std::max(inner, 0.01f);
+    const float k  = std::clamp(ratio, 1.3f, 4.0f);
+    std::vector<float> radii;
+    radii.reserve(count);
+    float r = r0;
+    for (uint32_t i = 0; i < count; ++i) {
+        radii.push_back(r);
+        r *= k;
+    }
+    return radii;
+}
+
+/**
  * @brief Fits a texel-snapped orthographic light-space box around a world-space sphere.
  *
  * The shared core of every directional cascade fit. compute_dir_shadow_fit_slice() calls it
@@ -343,11 +396,21 @@ inline std::vector<float> compute_focus_cascade_radii(float inner, float outer, 
  * @param caster_reach    Extra depth pulled in on the towards-light side, so a caster
  *                        outside the sphere but between it and the light still shadows into it.
  * @param tile_resolution Edge length of the cascade's atlas TILE in texels; drives the snap.
+ * @param snap_step_texels Snap the centre to a grid this many texels coarse, and pad the extent
+ *                         by the same amount so the box still covers `radius` while its snapped
+ *                         centre lags. 1 (the default) is the finest snap and the tightest box,
+ *                         and keeps every existing caller bit-identical. Larger steps make the
+ *                         matrix PIECEWISE CONSTANT in the centre -- it changes only when the
+ *                         centre crosses a step boundary -- which is what lets a level's
+ *                         rendered depth be cached across frames (see DirShadowCache). The cost
+ *                         is texel density: the box grows by one step, so a step of 16 on a
+ *                         2048 tile spends ~0.8% of the edge.
  * @return The light-space matrix and this cascade's world-per-texel size.
  */
 inline DirShadowFit compute_dir_shadow_fit_sphere(const glm::vec3& light_direction,
                                                   const glm::vec3& centre, float radius,
-                                                  float caster_reach, uint32_t tile_resolution) {
+                                                  float caster_reach, uint32_t tile_resolution,
+                                                  uint32_t snap_step_texels = 1u) {
     const glm::vec3 light_dir = glm::normalize(light_direction);
     const glm::vec3 up = (std::abs(light_dir.z) < 0.99f) ? glm::vec3(0.0f, 0.0f, 1.0f)
                                                          : glm::vec3(0.0f, 1.0f, 0.0f);
@@ -361,20 +424,45 @@ inline DirShadowFit compute_dir_shadow_fit_sphere(const glm::vec3& light_directi
 
     // Quantize the extent too, so a slowly changing radius doesn't rescale the box (and
     // with it the texel grid the centre snaps to) on every single frame.
+    //
+    // A snap step past 1 also pads the extent: the snapped centre trails the true one by up
+    // to a step on each axis, so without the pad the box would stop covering the far side of
+    // its own radius. texel_world depends on the extent which depends on the pad, so the pad
+    // is sized from the UNPADDED texel size -- a half-step of it -- which is exact enough
+    // that the final box still contains the sphere with room to spare.
+    const uint32_t snap = std::max(snap_step_texels, 1u);
     const float pad = 1.0f;
     const float extent_step = 0.5f;
-    const float extent = std::ceil((radius + pad) / extent_step) * extent_step;
+    float extent = std::ceil((radius + pad) / extent_step) * extent_step;
+    if (snap > 1u) {
+        const float unpadded_texel = (2.0f * extent) / resolution;
+        extent = std::ceil((radius + pad + 0.5f * static_cast<float>(snap) * unpadded_texel) /
+                           extent_step) * extent_step;
+    }
 
     fit.texel_world = (2.0f * extent) / resolution;
+    // Snap to whole SNAP STEPS, not whole texels: a step of 1 is the historical texel snap
+    // (which removes sub-texel crawl), and a larger step is what holds the matrix still
+    // across frames so the level's depth can be reused.
+    const float snap_world = fit.texel_world * static_cast<float>(snap);
     glm::vec2 center(center_ls.x, center_ls.y);
-    center.x = std::floor(center.x / fit.texel_world) * fit.texel_world;
-    center.y = std::floor(center.y / fit.texel_world) * fit.texel_world;
+    center.x = std::floor(center.x / snap_world) * snap_world;
+    center.y = std::floor(center.y / snap_world) * snap_world;
 
     // `caster_reach`, not the slice's own depth: a cascade covering the nearest 5 metres
     // must still catch a caster 30 metres up between the sun and that ground, so the
     // towards-light pull stays sized off the whole shadowed range for every cascade.
-    const float far_plane  = -center_ls.z + radius + pad;
-    float near_plane = -center_ls.z - radius - pad - std::max(caster_reach, 0.0f);
+    //
+    // The DEPTH origin is snapped on the same grid as the centre whenever a coarse step is
+    // asked for. Without it the matrix would still change every frame that the camera moves
+    // along the light direction -- orthoRH_ZO's z row is built from near_plane -- so a
+    // level's depth could never be reused however well its xy was snapped. Both planes gain
+    // a step of slack so the sphere stays covered while the snapped origin lags.
+    const float pad_z = (snap > 1u) ? snap_world : 0.0f;
+    float center_z = center_ls.z;
+    if (snap > 1u) center_z = std::floor(center_z / snap_world) * snap_world;
+    const float far_plane  = -center_z + radius + pad + pad_z;
+    float near_plane = -center_z - radius - pad - pad_z - std::max(caster_reach, 0.0f);
     const float depth = std::max(far_plane - near_plane, 0.01f);
     fit.depth_range_world = depth;
 
@@ -526,8 +614,12 @@ struct CascadeTile {
  * a wasted row is wasted VRAM.
  */
 inline glm::uvec2 cascade_atlas_grid(uint32_t cascade_count) {
-    const uint32_t n = std::clamp<uint32_t>(cascade_count, 1u, 4u);
-    return glm::uvec2(std::min(n, 2u), (n + 1u) / 2u);
+    const uint32_t n = std::clamp<uint32_t>(cascade_count, 1u, 8u);
+    // Widest-first, never a row that sits empty: the image is allocated at tile_res * grid,
+    // so a wasted row is wasted VRAM. 1..4 are exactly what this returned before the level
+    // count grew past 4 (1x1, 2x1, 2x2, 2x2); 6 packs as 3x2 and 8 as 4x2 with no waste.
+    const uint32_t columns = n <= 2u ? n : n <= 4u ? 2u : n <= 6u ? 3u : 4u;
+    return glm::uvec2(columns, (n + columns - 1u) / columns);
 }
 
 /** @brief Cascade `index`'s tile rect in atlas uv, for the grid `cascade_count` implies. */

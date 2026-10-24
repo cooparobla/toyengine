@@ -76,6 +76,7 @@ enum class CpuScope : uint32_t {
 enum class GpuScope : uint32_t {
     Skinning,            ///< Compute pre-pass: GPU skinning dispatches (before any pass reads vertices).
     ParticlesSim,        ///< Compute pre-pass: GPU particle emit / simulate / compact / sort.
+    ShadowDirCache,      ///< The sun's static-caster cache: re-rendered levels + the tile copies.
     ShadowDirectional,
     ShadowLocal,         ///< Every point and spot shadow (the local-light atlas, cache copy included).
     GBuffer,

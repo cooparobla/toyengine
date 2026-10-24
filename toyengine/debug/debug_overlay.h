@@ -215,6 +215,10 @@ struct OverlayStats {
     uint32_t render_width = 0, render_height = 0;
     uint64_t draws = 0, instances = 0, triangles = 0;
     uint64_t shadow_draws = 0, shadow_triangles = 0;
+    /// Sun shadow caching and culling: levels that redrew their cached static depth this
+    /// frame, levels that reused a culled caster list, and the per-item frustum tests the
+    /// culling actually ran. At rest with the clipmap fit the first should settle at 0.
+    uint64_t dir_levels_rendered = 0, dir_list_cache_hits = 0, cull_items_tested = 0;
     uint64_t renderers = 0, renderers_visible = 0;
 
     size_t objects = 0, components = 0, particles = 0, pending_assets = 0;
@@ -517,6 +521,8 @@ private:
         out.push_back({"draws / inst", count_(s.draws) + " / " + count_(s.instances)});
         out.push_back({"triangles", count_(s.triangles)});
         out.push_back({"shadow draws / tri", count_(s.shadow_draws) + " / " + count_(s.shadow_triangles)});
+        out.push_back({"sun levels redrawn", count_(s.dir_levels_rendered)});
+        out.push_back({"cull tests / reused", count_(s.cull_items_tested) + " / " + count_(s.dir_list_cache_hits)});
         out.push_back({"renderers vis / all", count_(s.renderers_visible) + " / " + count_(s.renderers)});
 
         out.push_back({"Scene", "", true});

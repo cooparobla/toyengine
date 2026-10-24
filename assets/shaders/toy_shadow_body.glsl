@@ -32,17 +32,24 @@ float calc_cloud_visibility(vec3 world_pos) {
 
 // --- Cascade helpers that read the UBO IN PLACE ---------------------------------------------
 //
-// gfx/shadow_sampling.glsl's gfx_csm_select()/gfx_csm_atlas_coords() take the cascade matrices as
-// a `mat4[4]` PARAMETER. GLSL passes arrays by value, so every call copies all four matrices into
+// gfx/shadow_sampling.glsl's gfx_csm_select()/gfx_csm_atlas_coords() take the level matrices as a
+// `mat4[]` PARAMETER. GLSL passes arrays by value, so every call copies the whole set into
 // registers, and the lighting shader's occupancy collapses: measured on terrain_demo at 1080p the
 // lighting pass cost 3.7 ms through those helpers and 1.5 ms through these, with pixel-identical
-// output. The volumetrics march keeps the gfx_ versions (its loop is not register-bound); every
-// toyengine shading path goes through calc_dir_shadow() below and so through these.
+// output -- and the array is twice the size now. The volumetrics march keeps the gfx_ versions
+// (its loop is not register-bound); every toyengine shading path goes through calc_dir_shadow()
+// below and so through these.
 
-/// True when `world_pos` lies inside cascade `c`'s tile, at least `inset` (tile uv) from its edge.
+/// One per-level scalar out of a vec4-packed array: level L lives at [L >> 2][L & 3], which is
+/// how the UBO avoids std140 giving a float[] a 16-byte stride (see light_data.h).
+float toy_level_scalar(vec4 packed[2], int level) {
+    return packed[level >> 2][level & 3];
+}
+
+/// True when `world_pos` lies inside level `c`'s tile, at least `inset` (tile uv) from its edge.
 /// `uv` returns the point's position in that tile (0..1) for the edge-distance math.
 bool toy_csm_contains(int c, vec3 world_pos, float inset, out vec2 uv) {
-    vec4 lsp = lights.dir_cascade_matrix[c] * vec4(world_pos, 1.0);
+    vec4 lsp = lights.dir_level_matrix[c] * vec4(world_pos, 1.0);
     uv = vec2(0.0);
     if (lsp.w <= 0.0) return false;
     vec3 pc = lsp.xyz / lsp.w;
@@ -54,10 +61,10 @@ bool toy_csm_contains(int c, vec3 world_pos, float inset, out vec2 uv) {
 /// `world_pos` in cascade `c`'s ATLAS coordinates: xy = atlas uv inside that tile, z = the [0,1]
 /// light depth to compare.
 vec3 toy_csm_atlas_coords(int c, vec3 world_pos) {
-    float grid_x = max(lights.dir_cascade_info.y, 1.0);
-    float grid_y = ceil(max(lights.dir_cascade_info.x, 1.0) / grid_x);
+    float grid_x = max(lights.dir_level_info.y, 1.0);
+    float grid_y = ceil(max(lights.dir_level_info.x, 1.0) / grid_x);
     vec2  scale  = vec2(1.0 / grid_x, 1.0 / grid_y);
-    vec4 lsp = lights.dir_cascade_matrix[c] * vec4(world_pos, 1.0);
+    vec4 lsp = lights.dir_level_matrix[c] * vec4(world_pos, 1.0);
     vec3 pc  = lsp.xyz / lsp.w;
     pc.xy    = pc.xy * 0.5 + 0.5;
     vec2 origin = vec2(mod(float(c), grid_x), floor(float(c) / grid_x)) * scale;
@@ -69,11 +76,11 @@ vec3 toy_csm_atlas_coords(int c, vec3 world_pos) {
 /// position inside that tile instead of a shadow factor, so the viewer can colour by cascade and
 /// lay that cascade's own texel grid over the world.
 bool toy_csm_debug_select(vec3 world_pos, out int cascade, out vec2 tile_uv) {
-    int   count = int(lights.dir_cascade_info.x);
-    float inset = lights.dir_cascade_info.z;
+    int   count = int(lights.dir_level_info.x);
+    float inset = lights.dir_level_info.z;
     cascade = -1;
     tile_uv = vec2(0.0);
-    for (int c = 0; c < 4; ++c) {
+    for (int c = 0; c < 8; ++c) {
         if (c >= count) break;
         if (toy_csm_contains(c, world_pos, inset, tile_uv)) { cascade = c; break; }
     }
@@ -106,15 +113,16 @@ float toy_dir_shadow_cascade(int cascade, vec3 world_pos, vec3 N, vec3 L, float 
     float ndl = max(dot(N, L), 0.0);
     float normal_bias_scale = clamp(1.0 - ndl, 0.0, 1.0);
     vec3  biased_pos = world_pos +
-        N * (lights.dir_cascade_normal_bias[cascade] * (0.5 + 0.5 * normal_bias_scale));
+        N * (toy_level_scalar(lights.dir_level_normal_bias, cascade) * (0.5 + 0.5 * normal_bias_scale));
     vec3 proj_coords = toy_csm_atlas_coords(cascade, biased_pos);
 
     // Depth bias in THIS cascade's texels (see toy_shadow_bias_texels), converted to its [0,1]
     // light depth. The old constant was a fraction of the whole depth range, which every cascade
     // stretches over the full shadow distance toward the sun -- ~0.35 m at grazing angles on the
     // finest cascade, which detached contact shadows from their casters.
-    float radius_texels = lights.dir_cascade_pcf_texels[cascade];
-    float bias = toy_shadow_bias_texels(ndl, radius_texels) * lights.dir_cascade_depth_bias[cascade];
+    float radius_texels = toy_level_scalar(lights.dir_level_pcf_texels, cascade);
+    float bias = toy_shadow_bias_texels(ndl, radius_texels) *
+                 toy_level_scalar(lights.dir_level_depth_bias, cascade);
 
     if (radius_texels <= 0.0) {
         return gfx_shadow_dir_hard(dir_shadow_map, proj_coords, bias);
@@ -124,7 +132,7 @@ float toy_dir_shadow_cascade(int cascade, vec3 world_pos, vec3 N, vec3 L, float 
         // MAX; the blocker search shrinks it toward the contact point. See
         // gfx_shadow_dir_pcss's doc for the directional (linear-in-gap) penumbra model.
         return gfx_shadow_dir_pcss(dir_shadow_map, dir_shadow_map_raw, proj_coords, bias,
-                                   lights.dir_cascade_pcss_scale[cascade], lights.pcss_params.z,
+                                   toy_level_scalar(lights.dir_level_pcss_scale, cascade), lights.pcss_params.z,
                                    radius_texels, angle, int(lights.dir_shadow_extra.z),
                                    int(lights.pcss_params.w));
     }
@@ -135,9 +143,9 @@ float toy_dir_shadow_cascade(int cascade, vec3 world_pos, vec3 N, vec3 L, float 
         // Receiver-plane depth bias: the taps follow this surface's own plane, so the normal
         // offset only covers rasterisation error -- see gfx_shadow_dir_pcf_vogel_rpdb. The
         // cascade transform is affine, so the plane's gradient needs only its linear part.
-        mat3 J = mat3(lights.dir_cascade_matrix[cascade]);
-        float grid_x = max(lights.dir_cascade_info.y, 1.0);
-        float grid_y = ceil(max(lights.dir_cascade_info.x, 1.0) / grid_x);
+        mat3 J = mat3(lights.dir_level_matrix[cascade]);
+        float grid_x = max(lights.dir_level_info.y, 1.0);
+        float grid_y = ceil(max(lights.dir_level_info.x, 1.0) / grid_x);
         vec2 uv_scale = 0.5 / vec2(grid_x, grid_y);
         vec3 t1 = normalize(abs(N.z) < 0.9 ? cross(N, vec3(0.0, 0.0, 1.0)) : cross(N, vec3(1.0, 0.0, 0.0)));
         vec3 t2 = cross(N, t1);
@@ -182,13 +190,13 @@ float calc_dir_shadow_map(vec3 world_pos, vec3 N, vec3 L) {
     // different sample set to average over time.
     float angle = gfx_ign_angle(gl_FragCoord.xy) + lights.dir_shadow_extra.w * 2.39996323;
 
-    int   count = int(lights.dir_cascade_info.x);
-    float inset = lights.dir_cascade_info.z;
-    float band  = lights.dir_cascade_info.w;
+    int   count = int(lights.dir_level_info.x);
+    float inset = lights.dir_level_info.z;
+    float band  = lights.dir_level_info.w;
 
     int  cascade = -1;
     vec2 uv = vec2(0.0);
-    for (int c = 0; c < 4; ++c) {
+    for (int c = 0; c < 8; ++c) {
         if (c >= count) break;
         if (toy_csm_contains(c, world_pos, inset, uv)) { cascade = c; break; }
     }

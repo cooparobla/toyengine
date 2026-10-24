@@ -218,16 +218,31 @@ const std::vector<SettingsGroup>& render_settings_groups() {
             .add(F(f_float("shadow_fade_fraction", 0.1f, 0.005f, 0.0f, 1.0f), "Fade Out",
                    "Fraction of the shadow distance over which the sun's shadows fade out at the far end"))
             .sub("Sun Cascades")
-            .add(startup(F(f_int("shadow_cascades", 4, 1, 4), "Cascades",
-                           "Shadow maps the sun's range is split into (1-4): near shadows sharp, far ones coarse. Each costs a pass over the casters")))
+            .add(startup(F(f_int("shadow_cascades", 4, 1, 8), "Cascades",
+                           "Shadow maps the sun's range is split into (1-8): near shadows sharp, far ones coarse. Each costs a pass over the casters, unless its depth is cached")))
             .add(F(f_float("shadow_cascade_split_lambda", 0.75f, 0.01f, 0.0f, 1.0f), "Split Distribution",
                    "Where cascade boundaries fall: 1 = logarithmic (even detail per distance), 0 = uniform"))
             .add(startup(tier(F(f_int("shadow_map_resolution", 2048, 128, 8192), "Map Resolution",
                                 "Texels per cascade tile (the atlas is up to 2x this on each axis)"), "Shadow")))
-            .add(with_default(F(f_enum("shadow_fit", {"frustum", "focus"}), "Fit",
+            .add(with_default(F(f_enum("shadow_fit", {"frustum", "focus", "clipmap"}), "Fit",
                                 "frustum: slice the camera frustum from the lens outward (close-up cameras). focus: nest the cascades "
-                                "around the camera's focus point (cameras looking at a world from far away)"), "frustum"))
+                                "around the camera's focus point (cameras looking at a world from far away). clipmap: concentric rings "
+                                "around the camera, each double the last -- reaches kilometres and holds still enough to cache"), "frustum"))
             .add(F(f_float("shadow_focus_radius", 12.0f, 0.1f, 0.1f, 10000.0f), "Focus Radius", "Focus fit: the finest cascade's radius around the focus point"))
+            .add(F(f_float("shadow_clip_radius", 12.0f, 0.1f, 0.1f, 10000.0f), "Clipmap Radius",
+                   "Clipmap fit: the finest ring's radius. The outermost reaches this times the growth ratio to the power of cascades-1"))
+            .add(F(f_float("shadow_clip_ratio", 2.0f, 0.05f, 1.3f, 4.0f), "Clipmap Growth",
+                   "Clipmap fit: how much larger each ring is than the one inside it"))
+            .add(F(f_int("shadow_clip_snap_texels", 16, 1, 128), "Clipmap Snap",
+                   "Clipmap fit: snap each ring's centre to this many of its own texels. Larger holds the ring still longer, so its depth can be reused, at a little texel density"))
+            .add(F(f_int("shadow_clip_fresh_levels", 1, 1, 8), "Clipmap Fresh Rings",
+                   "Clipmap fit: rings from the finest outward that always redraw the frame they move, instead of waiting for the budget"))
+            .add(F(f_int("shadow_clip_static_budget", 1, 0, 8), "Clipmap Redraw Budget",
+                   "Clipmap fit: how many further rings may redraw their cached depth in one frame"))
+            .add(F(f_float("shadow_clip_sun_snap_degrees", 0.25f, 0.05f, 0.0f, 10.0f), "Clipmap Sun Snap",
+                   "Clipmap fit: quantize the sun direction the fit uses, in degrees, so a moving sun does not dirty every cached ring every frame. 0 = off"))
+            .add(F(f_float("shadow_clip_caster_reach", 48.0f, 1.0f, 0.0f, 10000.0f), "Clipmap Caster Reach",
+                   "Clipmap fit: how far past a ring, toward the sun, casters are still gathered. Larger catches taller overhangs and costs more draws"))
             .add(F(f_float("shadow_cascade_radius_1", 0.0f, 0.1f, 0.0f, 10000.0f), "Cascade 1 Radius",
                    "Focus fit: this cascade's radius in metres, overriding the automatic progression; 0 = automatic"))
             .add(F(f_float("shadow_cascade_radius_2", 0.0f, 0.1f, 0.0f, 10000.0f), "Cascade 2 Radius",
@@ -280,6 +295,8 @@ const std::vector<SettingsGroup>& render_settings_groups() {
                            "Keep each light's shadow of non-moving objects; only moving ones are redrawn each frame")))
             .add(F(f_float("shadow_min_caster_texels", 1.0f, 0.05f, 0.0f, 64.0f), "Min Caster Size",
                    "Skip casters smaller than this many shadow texels; 0 = draw every caster"))
+            .add(F(f_bool("shadow_cull_cache_enabled", true), "Cache Culling Lists",
+                   "Reuse each sun cascade's culled caster list while the cascade and the static scene are unchanged"))
             .done());
 
         g.push_back(GroupBuilder(features, "Contact Shadows", "A short screen-space ray toward the sun that fills the small gap "

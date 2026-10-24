@@ -402,15 +402,23 @@ void main() {
             // finer than they are, whatever the resolution says.
             int cascade; vec2 tile_uv;
             if (lights.light_counts.x > 0 && toy_csm_debug_select(world_pos, cascade, tile_uv)) {
-                vec3 tint = vec3(1.0, 0.3, 0.3);
-                if (cascade == 1) tint = vec3(0.35, 1.0, 0.4);
-                else if (cascade == 2) tint = vec3(0.4, 0.6, 1.0);
-                else if (cascade >= 3) tint = vec3(1.0, 0.9, 0.35);
-                float grid_x   = max(lights.dir_cascade_info.y, 1.0);
+                // One distinguishable hue per level, finest first.
+                const vec3 TINTS[8] = vec3[8](
+                    vec3(1.0, 0.3, 0.3), vec3(0.35, 1.0, 0.4), vec3(0.4, 0.6, 1.0),
+                    vec3(1.0, 0.9, 0.35), vec3(1.0, 0.5, 1.0), vec3(0.4, 1.0, 1.0),
+                    vec3(1.0, 0.65, 0.25), vec3(0.7, 0.7, 0.75));
+                vec3 tint = TINTS[clamp(cascade, 0, 7)];
+                float grid_x   = max(lights.dir_level_info.y, 1.0);
                 float tile_res = max(float(textureSize(dir_shadow_map, 0).x) / grid_x, 1.0);
                 vec2  texel    = tile_uv * tile_res;
                 float checker  = mod(floor(texel.x) + floor(texel.y), 2.0);
                 result = tint * (0.55 + 0.45 * checker);
+                // Staleness: a level whose cached static depth has not been redrawn for a
+                // while is desaturated toward grey, so a level starved by the redraw budget
+                // is visible as a washed-out ring rather than having to be inferred.
+                float age = lights.dir_level_age[cascade >> 2][cascade & 3];
+                result = mix(result, vec3(dot(result, vec3(0.299, 0.587, 0.114))),
+                             clamp(age / 120.0, 0.0, 0.7));
             } else {
                 result = vec3(0.04);   // Past the last cascade: nothing shadows here at all.
             }

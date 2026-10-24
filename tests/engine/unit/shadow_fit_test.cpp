@@ -8,7 +8,10 @@
 
 #include <coopa/testing/test.h>
 
+#include <algorithm>
 #include <cmath>
+#include <string>
+#include <vector>
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <toyengine/render/toy_render_math.h>
@@ -209,4 +212,212 @@ COOPA_TEST(focus_cascade_contains_its_sphere_with_stable_texels) {
     expect_near(moved.texel_world, fit.texel_world, 1e-6f, "focus_fit: moving the focus keeps the texel size");
     expect_near(fit.texel_world, 2.0f * 13.0f / 2048.0f, 1e-6f,
                 "focus_fit: texels are (radius + 1 m pad) * 2 / resolution across");
+}
+
+// --- Clipmap fit (shadow_fit: "clipmap") ----------------------------------------------------
+//
+// The cacheability contract: a clipmap level's matrix is PIECEWISE CONSTANT in the camera
+// position -- bit-identical while the camera stays inside one snap cell, stepping exactly
+// once when it leaves. Everything the static-caster cache does rests on that, so it is
+// checked directly rather than through a tolerance.
+
+using toy::render::compute_dir_shadow_fit_sphere;
+
+COOPA_TEST(clipmap_radii_grow_geometrically_from_the_finest) {
+    const auto radii = toy::render::compute_clipmap_level_radii(12.0f, 2.0f, 8);
+    expect(radii.size() == 8, "clipmap: one radius per level");
+    expect_near(radii.front(), 12.0f, 1e-4f, "clipmap: level 0 takes the configured radius");
+    expect_near(radii.back(), 12.0f * 128.0f, 1e-2f, "clipmap: the outermost ring reaches r0 * ratio^7");
+    for (size_t i = 1; i < radii.size(); ++i) {
+        expect_near(radii[i] / radii[i - 1], 2.0f, 1e-4f, "clipmap: every ring doubles the last");
+    }
+    // The ratio is clamped, so a degenerate config cannot collapse the progression.
+    const auto flat = toy::render::compute_clipmap_level_radii(10.0f, 1.0f, 3);
+    expect(flat[1] > flat[0] && flat[2] > flat[1], "clipmap: a ratio below the clamp still grows");
+}
+
+COOPA_TEST(clipmap_matrix_holds_still_within_a_snap_cell) {
+    // The cacheability contract, stated as quantization: sweeping the camera continuously
+    // must make the matrix take FAR fewer distinct values than there are sample positions,
+    // and each value must hold over a contiguous run. (Checking one hand-picked nudge is not
+    // enough -- the snap grid lives in LIGHT space, so a small WORLD step can still cross a
+    // boundary depending on where the sweep starts.)
+    const glm::vec3 dir(0.3f, 0.4f, -1.0f);
+    const uint32_t res = 2048, snap = 16;
+    const float radius = 12.0f;
+    const glm::vec3 base(100.0f, -40.0f, 6.0f);
+
+    const auto probe = toy::render::compute_dir_shadow_fit_sphere(dir, base, radius, 1536.0f, res, snap);
+    const float cell = probe.texel_world * static_cast<float>(snap);
+
+    auto same = [](const glm::mat4& a, const glm::mat4& b) {
+        for (int c = 0; c < 4; ++c) {
+            for (int r = 0; r < 4; ++r) {
+                if (a[c][r] != b[c][r]) return false;   // bit-exact: the cache key compares matrices
+            }
+        }
+        return true;
+    };
+
+    // 160 steps spanning 4 cells along a diagonal that moves all three light-space axes.
+    const int steps = 160;
+    const float span = cell * 4.0f;
+    std::vector<glm::mat4> seq;
+    seq.reserve(steps);
+    for (int i = 0; i < steps; ++i) {
+        const float t = span * static_cast<float>(i) / static_cast<float>(steps - 1);
+        seq.push_back(compute_dir_shadow_fit_sphere(
+            dir, base + glm::vec3(t, t * 0.7f, t * 0.3f), radius, 1536.0f, res, snap).light_space_matrix);
+    }
+    int changes = 0;
+    for (size_t i = 1; i < seq.size(); ++i) {
+        if (!same(seq[i - 1], seq[i])) ++changes;
+    }
+    // A continuous (unsnapped) fit would change on essentially every step. Snapped, the
+    // matrix may only step as the sweep crosses cell boundaries on each axis.
+    expect(changes > 0, "clipmap: the matrix does step as the camera crosses cells");
+    expect(changes <= steps / 8,
+           "clipmap: the matrix is quantized, not continuous (" + std::to_string(changes) +
+               " changes over " + std::to_string(steps) + " steps)");
+
+    // And the run containing a given position is genuinely stable: the longest identical run
+    // must cover several consecutive samples, which is what a frame-to-frame cache hit is.
+    int longest = 1, run = 1;
+    for (size_t i = 1; i < seq.size(); ++i) {
+        run = same(seq[i - 1], seq[i]) ? run + 1 : 1;
+        longest = std::max(longest, run);
+    }
+    expect(longest >= 4, "clipmap: a snapped matrix holds over consecutive camera positions (" +
+                             std::to_string(longest) + ")");
+}
+
+COOPA_TEST(clipmap_depth_origin_is_snapped_with_the_centre) {
+    // Moving the camera ALONG the light direction must not disturb a snapped matrix either:
+    // orthoRH_ZO builds its z row from near_plane, so an unsnapped depth origin would change
+    // the matrix every frame however well xy was snapped, and no level would ever cache.
+    const glm::vec3 dir = glm::normalize(glm::vec3(0.0f, 0.0f, -1.0f));
+    const uint32_t res = 2048, snap = 16;
+    const float radius = 12.0f;
+    const glm::vec3 base(0.0f, 0.0f, 50.0f);
+    const auto probe = compute_dir_shadow_fit_sphere(dir, base, radius, 1536.0f, res, snap);
+    const float cell = probe.texel_world * static_cast<float>(snap);
+
+    int changes = 0;
+    glm::mat4 prev = probe.light_space_matrix;
+    for (int i = 1; i <= 40; ++i) {
+        // Straight down the light: this axis is pure light-space Z.
+        const glm::vec3 p = base + glm::vec3(0.0f, 0.0f, -cell * 2.0f * static_cast<float>(i) / 40.0f);
+        const glm::mat4 m = compute_dir_shadow_fit_sphere(dir, p, radius, 1536.0f, res, snap).light_space_matrix;
+        bool differs = false;
+        for (int c = 0; c < 4; ++c) {
+            for (int r = 0; r < 4; ++r) differs = differs || m[c][r] != prev[c][r];
+        }
+        if (differs) ++changes;
+        prev = m;
+    }
+    expect(changes <= 6, "clipmap: depth-only camera motion leaves the matrix quantized (" +
+                             std::to_string(changes) + " changes over 40 steps)");
+}
+
+COOPA_TEST(clipmap_level_still_covers_its_radius_despite_the_snap) {
+    // The snapped centre lags the true one, so the extent is padded to compensate. Sample the
+    // sphere's own surface: every point of it must project inside the level's tile, or a
+    // caster at the ring's edge would fall out of the map it is supposed to live in.
+    const glm::vec3 dir(0.2f, 0.5f, -1.0f);
+    const uint32_t res = 2048, snap = 32;
+    const float radius = 24.0f;
+    // An awkward centre, so the snap lag is near worst case on both axes.
+    const glm::vec3 centre(37.137f, -11.913f, 3.5f);
+    const auto fit = toy::render::compute_dir_shadow_fit_sphere(dir, centre, radius, 1536.0f, res, snap);
+
+    bool all_inside = true;
+    for (int i = 0; i < 64; ++i) {
+        const float a = static_cast<float>(i) * 0.0982f;          // ~2pi/64
+        const float z = -1.0f + 2.0f * (static_cast<float>(i) + 0.5f) / 64.0f;
+        const float rxy = std::sqrt(std::max(0.0f, 1.0f - z * z));
+        const glm::vec3 p = centre + radius * glm::vec3(rxy * std::cos(a), rxy * std::sin(a), z);
+        const glm::vec4 lsp = fit.light_space_matrix * glm::vec4(p, 1.0f);
+        const glm::vec3 ndc = glm::vec3(lsp) / lsp.w;
+        all_inside = all_inside && ndc.x >= -1.0f && ndc.x <= 1.0f &&
+                                   ndc.y >= -1.0f && ndc.y <= 1.0f && ndc.z >= 0.0f && ndc.z <= 1.0f;
+    }
+    expect(all_inside, "clipmap: the padded box still contains the whole sphere after snapping");
+}
+
+COOPA_TEST(clipmap_levels_nest_so_selection_never_gaps) {
+    // Containment selection walks finest-first, so level i+1 must contain level i's box --
+    // a point leaving a ring has to be caught by the next one or it goes unshadowed.
+    const glm::vec3 dir(0.3f, 0.4f, -1.0f);
+    const uint32_t res = 2048, snap = 16;
+    const glm::vec3 centre(81.3f, 22.7f, 5.0f);
+    const auto radii = toy::render::compute_clipmap_level_radii(12.0f, 2.0f, 8);
+
+    bool nested = true;
+    for (size_t i = 0; i + 1 < radii.size(); ++i) {
+        const auto inner = toy::render::compute_dir_shadow_fit_sphere(dir, centre, radii[i], 1536.0f, res, snap);
+        const auto outer = toy::render::compute_dir_shadow_fit_sphere(dir, centre, radii[i + 1], 1536.0f, res, snap);
+        // The inner level's own sphere, projected into the OUTER level, must stay in bounds.
+        for (int k = 0; k < 32; ++k) {
+            const float a = static_cast<float>(k) * 0.19635f;
+            const glm::vec3 p = centre + radii[i] * glm::vec3(std::cos(a), std::sin(a), 0.0f);
+            const glm::vec4 lsp = outer.light_space_matrix * glm::vec4(p, 1.0f);
+            const glm::vec3 ndc = glm::vec3(lsp) / lsp.w;
+            nested = nested && ndc.x >= -1.0f && ndc.x <= 1.0f && ndc.y >= -1.0f && ndc.y <= 1.0f;
+        }
+    }
+    expect(nested, "clipmap: each level's sphere lies inside the next level's box");
+}
+
+COOPA_TEST(atlas_grid_packs_five_to_eight_levels_without_waste) {
+    using toy::render::cascade_atlas_grid;
+    // 1..4 must be exactly what they were before the level count grew.
+    expect(cascade_atlas_grid(1) == glm::uvec2(1, 1), "atlas grid: 1 -> 1x1");
+    expect(cascade_atlas_grid(2) == glm::uvec2(2, 1), "atlas grid: 2 -> 2x1");
+    expect(cascade_atlas_grid(3) == glm::uvec2(2, 2), "atlas grid: 3 -> 2x2");
+    expect(cascade_atlas_grid(4) == glm::uvec2(2, 2), "atlas grid: 4 -> 2x2");
+    expect(cascade_atlas_grid(6) == glm::uvec2(3, 2), "atlas grid: 6 -> 3x2, no waste");
+    expect(cascade_atlas_grid(8) == glm::uvec2(4, 2), "atlas grid: 8 -> 4x2, no waste");
+    // Every level must get a tile, and no grid may hold a row that sits entirely empty.
+    for (uint32_t n = 1; n <= 8; ++n) {
+        const glm::uvec2 g = cascade_atlas_grid(n);
+        expect(g.x * g.y >= n, "atlas grid: every level has a tile");
+        expect(g.x * (g.y - 1u) < n, "atlas grid: no fully empty row");
+    }
+}
+
+COOPA_TEST(eight_level_atlas_tiles_are_disjoint_and_in_bounds) {
+    using toy::render::cascade_atlas_tile;
+    for (uint32_t n = 5; n <= 8; ++n) {
+        for (uint32_t i = 0; i < n; ++i) {
+            const auto a = cascade_atlas_tile(i, n);
+            expect(a.origin.x >= 0.0f && a.origin.y >= 0.0f &&
+                   a.origin.x + a.scale.x <= 1.0f + 1e-5f &&
+                   a.origin.y + a.scale.y <= 1.0f + 1e-5f,
+                   "atlas tile: in bounds for 5..8 levels");
+            for (uint32_t j = i + 1; j < n; ++j) {
+                const auto b = cascade_atlas_tile(j, n);
+                const bool disjoint = a.origin.x + a.scale.x <= b.origin.x + 1e-6f ||
+                                      b.origin.x + b.scale.x <= a.origin.x + 1e-6f ||
+                                      a.origin.y + a.scale.y <= b.origin.y + 1e-6f ||
+                                      b.origin.y + b.scale.y <= a.origin.y + 1e-6f;
+                expect(disjoint, "atlas tile: tiles never overlap for 5..8 levels");
+            }
+        }
+    }
+}
+
+COOPA_TEST(snap_step_one_matches_the_historical_texel_snap) {
+    // The default argument must keep every pre-existing caller bit-identical.
+    const glm::vec3 dir(0.3f, 0.4f, -1.0f);
+    const glm::vec3 centre(12.345f, -6.789f, 2.0f);
+    const auto legacy = toy::render::compute_dir_shadow_fit_sphere(dir, centre, 20.0f, 60.0f, 2048);
+    const auto explicit_one = toy::render::compute_dir_shadow_fit_sphere(dir, centre, 20.0f, 60.0f, 2048, 1u);
+    bool identical = true;
+    for (int c = 0; c < 4; ++c) {
+        for (int r = 0; r < 4; ++r) {
+            identical = identical && legacy.light_space_matrix[c][r] == explicit_one.light_space_matrix[c][r];
+        }
+    }
+    expect(identical, "snap step 1 is the historical texel snap, bit for bit");
+    expect_near(legacy.texel_world, explicit_one.texel_world, 0.0f, "snap step 1 keeps texel_world");
 }

@@ -338,7 +338,9 @@ void TerrainSystem::want_chunks_(TerrainComponent& terrain, const ChunkCoord& ce
                 } else {
                     ++unfinished_chunks_;
                 }
-                if (chunk.state == ChunkState::Live && chunk.stale) ++unfinished_chunks_;
+                if (chunk.state == ChunkState::Live && (chunk.stale || chunk.wants_collision)) {
+                    ++unfinished_chunks_;
+                }
                 continue;
             }
             ++unfinished_chunks_;
@@ -366,6 +368,11 @@ void TerrainSystem::revive_chunk_(TerrainComponent& terrain, coopa::scene::Scene
 }
 
 void TerrainSystem::sync_chunk_collision_(TerrainComponent& terrain, TerrainChunk& chunk, bool wanted) {
+    // Raised the moment the chunk is inside the radius without a collider, and dropped again the
+    // moment it is not -- which is what a camera drifting along the boundary does every few
+    // frames, and it must not leave a job's worth of work behind each time. Cleared at the
+    // submit, where `has_collision` takes over as the record.
+    chunk.wants_collision = wanted && !chunk.has_collision;
     if (wanted == chunk.has_collision) return;
     if (!wanted) {
         // Letting go needs no geometry: drop the component and retire the shape. The chunk keeps
@@ -380,9 +387,9 @@ void TerrainSystem::sync_chunk_collision_(TerrainComponent& terrain, TerrainChun
         chunk.has_collision = false;
         return;
     }
-    // Coming inward needs a collision mesh this chunk was never built with: rebuild it. The old
-    // mesh keeps drawing until the new one swaps in, so nothing blinks.
-    chunk.stale = true;
+    // Coming inward needs a collision mesh this chunk was never built with. `wants_collision`
+    // above is the whole request: nothing the chunk draws changes, so nothing it draws is
+    // rebuilt (see TerrainChunk::wants_collision).
 }
 
 void TerrainSystem::release_distant_chunks_(TerrainComponent& terrain, const ChunkCoord& centre,
@@ -497,14 +504,35 @@ void TerrainSystem::upload_finished_chunks_(TerrainComponent& terrain, coopa::sc
         chunk.job = coopa::job::JobHandle{};
         chunk.state = ChunkState::Live;
 
+        // A collider-only pass changes nothing that is drawn, so it touches nothing that is:
+        // the shape goes onto the object the chunk is already on the tree with.
+        if (chunk.build && chunk.build->collision_only) {
+            attach_chunk_collision_(terrain, scene, chunk);
+            terrain.recycle_build_job(std::move(chunk.build));
+            chunk.build.reset();
+            last_upload_ms_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+            if (last_upload_ms_ >= budget) break;
+            continue;
+        }
+
         // An empty chunk is a real outcome, not a failure: a chunk of open ocean below the
         // waterline emits no faces at all. It stays Live with no object, so it is never
         // re-queued and never draws.
-        // A rebuild replaces the chunk's object in this same frame, so it never shows a hole.
+        // A rebuild replaces the chunk's object in this same frame, so it never shows a hole --
+        // in the ground. Its water children are bare WaterBodies that WaterSystem bakes over a
+        // frame or two, so rebuilding them WOULD show one, and the commonest rebuild of all (a
+        // chunk crossing `collision_radius`, sync_chunk_collision_()) does not change the water
+        // at all. Unchanged water is therefore carried across, already baked and drawing.
+        const std::uint64_t water_hash = chunk.build ? chunk.build->water_hash : 0;
+        std::vector<std::unique_ptr<coopa::scene::SceneObject>> kept_water;
+        if (chunk.object != nullptr && water_hash != 0 && water_hash == chunk.water_hash) {
+            kept_water = take_chunk_water_(chunk);
+        }
+        chunk.water_hash = water_hash;
         destroy_chunk_object_(terrain, chunk);
         if (chunk.build && (chunk.build->gpu_mesh || !chunk.build->water_still.empty() ||
                             !chunk.build->water_flowing.empty())) {
-            create_chunk_object_(terrain, scene, chunk);
+            create_chunk_object_(terrain, scene, chunk, std::move(kept_water));
         }
         terrain.recycle_build_job(std::move(chunk.build));
         chunk.build.reset();
@@ -524,7 +552,8 @@ void TerrainSystem::submit_queued_chunks_(TerrainComponent& terrain, const Chunk
         const TerrainChunk& c = entry.second;
         if (c.state == ChunkState::Meshing) {
             ++in_flight;
-        } else if (c.state == ChunkState::Queued || (c.state == ChunkState::Live && c.stale)) {
+        } else if (c.state == ChunkState::Queued ||
+                   (c.state == ChunkState::Live && (c.stale || c.wants_collision))) {
             pending_.push_back(entry.first);
         }
     }
@@ -564,16 +593,23 @@ void TerrainSystem::submit_queued_chunks_(TerrainComponent& terrain, const Chunk
         build->params    = terrain.params;
         build->coord     = chunk.coord;
         build->collision = terrain_wants_collision(terrain, chunk.coord, centre);
+        // A Live chunk that is only short of a collider keeps everything it is drawing: the job
+        // stops once the collision mesh is built, and upload_finished_chunks_() hangs that on
+        // the object already on the tree. Edited tiles (`stale`) invalidate the surface itself
+        // and take the full rebuild instead.
+        build->collision_only = chunk.state == ChunkState::Live && chunk.wants_collision &&
+                                !chunk.stale && build->collision;
         // The job builds the chunk's GPU mesh as well as its geometry (see terrain_chunk.h):
         // all that is left for the frame it lands in is publishing it.
         build->device    = &device_;
         build->allocator = &allocator_;
 
-        chunk.build         = build;
-        chunk.job           = ctx.jobs->create_handle();
-        chunk.state         = ChunkState::Meshing;
-        chunk.stale         = false;
-        chunk.has_collision = build->collision;
+        chunk.build           = build;
+        chunk.job             = ctx.jobs->create_handle();
+        chunk.state           = ChunkState::Meshing;
+        chunk.stale           = false;
+        chunk.wants_collision = false;
+        chunk.has_collision   = build->collision;
 
         // One job per chunk rather than one parallel_for over all of them: chunks finish and
         // appear individually, and a chunk that leaves view mid-flight can be cancelled on
@@ -589,15 +625,27 @@ void TerrainSystem::submit_queued_chunks_(TerrainComponent& terrain, const Chunk
 }
 
 void TerrainSystem::create_chunk_object_(TerrainComponent& terrain, coopa::scene::Scene& scene,
-                          TerrainChunk& chunk) {
+                          TerrainChunk& chunk,
+                          std::vector<std::unique_ptr<coopa::scene::SceneObject>> kept_water) {
     if (terrain.owner == nullptr) return;
 
     ++chunk.mesh_serial;
     auto object = std::make_unique<coopa::scene::SceneObject>(chunk_object_name_(chunk.coord));
     auto* transform = object->add_component<TransformComponent>();
     transform->transform().set_position(chunk_origin(terrain.params, chunk.coord));
-    add_chunk_water_(terrain, *object, chunk.build->water_still, false);
-    add_chunk_water_(terrain, *object, chunk.build->water_flowing, true);
+    if (kept_water.empty()) {
+        add_chunk_water_(terrain, *object, chunk.build->water_still, false);
+        add_chunk_water_(terrain, *object, chunk.build->water_flowing, true);
+    } else {
+        // Re-parented, not re-built: each keeps its WaterBody, its baked query and its
+        // published tile meshes, so it draws in this frame exactly as it did in the last. The
+        // new chunk transform holds the same chunk_origin(), so the body's world matrix is
+        // unchanged and WaterSystem does not count it as moved.
+        for (auto& water : kept_water) {
+            if (auto* tc = water->get_transform()) tc->set_parent_transform(&transform->transform());
+            object->add_child(std::move(water));
+        }
+    }
     if (!chunk.build->gpu_mesh) {
         chunk.object = terrain.owner->add_child(std::move(object));
         scene.adopt(*chunk.object);
@@ -651,6 +699,40 @@ void TerrainSystem::create_chunk_object_(TerrainComponent& terrain, coopa::scene
     // Stamps the Scene back-pointer onto the new components, exactly as
     // Scene::flush_commands() does for a deferred add -- see Scene::adopt().
     scene.adopt(*chunk.object);
+}
+
+void TerrainSystem::attach_chunk_collision_(TerrainComponent& terrain, coopa::scene::Scene& scene,
+                                            TerrainChunk& chunk) {
+    // has_collision went false again: the chunk left the radius while its job ran, and the shape
+    // is simply dropped. An empty chunk (no object, no geometry) satisfies the request with no
+    // collider at all, which is what has_collision already records.
+    if (!chunk.has_collision || chunk.object == nullptr || !chunk.build->collision_mesh) return;
+    if (chunk.object->get_component<coopa::physx::components::MeshCollider>() != nullptr) return;
+    auto* collider = chunk.object->add_component<coopa::physx::components::MeshCollider>();
+    collider->set_mesh(chunk.build->collision_mesh);
+    if (!terrain.physics_material.empty()) {
+        collider->set_material_asset(assets_.load<coopa::physx::dynamics::PhysicsMaterial>(
+            "physics_materials/" + terrain.physics_material + ".yaml"));
+    }
+    // add_component() does not hand the component the Scene; adopt() is what create_chunk_object_()
+    // relies on for the same reason.
+    scene.adopt(*chunk.object);
+    physics_dirty_ = true;
+}
+
+std::vector<std::unique_ptr<coopa::scene::SceneObject>> TerrainSystem::take_chunk_water_(TerrainChunk& chunk) {
+    std::vector<std::unique_ptr<coopa::scene::SceneObject>> taken;
+    if (chunk.object == nullptr) return taken;
+    // Two passes: detaching edits the child list being walked.
+    std::vector<coopa::scene::SceneObject*> water;
+    for (const auto& child : chunk.object->children()) {
+        if (child->get_component<toy::water::WaterBody>() != nullptr) water.push_back(child.get());
+    }
+    taken.reserve(water.size());
+    for (coopa::scene::SceneObject* child : water) {
+        if (auto owned = chunk.object->detach_child(child)) taken.push_back(std::move(owned));
+    }
+    return taken;
 }
 
 void TerrainSystem::add_chunk_water_(const TerrainComponent& terrain, coopa::scene::SceneObject& chunk_object,

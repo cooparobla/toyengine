@@ -33,36 +33,70 @@ float mirror_tolerance(const EditMesh& m) {
     return std::max(1e-5f, glm::length(hi - lo) * 1e-4f);
 }
 
-MirrorMap build_mirror_map(const EditMesh& m, const std::set<uint32_t>& moved, const MirrorSettings& s,
-                                  const glm::mat4& world) {
-    MirrorMap out;
-    if (!s.any() || moved.empty()) return out;
-    const float tol = mirror_tolerance(m);
-    const float cell = tol * 4.0f;
-    auto key = [&](const glm::ivec3& c) {
-        return (static_cast<uint64_t>(static_cast<uint32_t>(c.x) & 0x1FFFFF) << 42) |
-               (static_cast<uint64_t>(static_cast<uint32_t>(c.y) & 0x1FFFFF) << 21) |
-               (static_cast<uint64_t>(static_cast<uint32_t>(c.z) & 0x1FFFFF));
-    };
-    auto cell_of = [&](const glm::vec3& p) { return glm::ivec3(glm::floor(p / cell)); };
-    std::unordered_map<uint64_t, std::vector<uint32_t>> grid;
-    for (uint32_t v = 0; v < m.positions.size(); ++v) grid[key(cell_of(m.positions[v]))].push_back(v);
-    auto nearest = [&](const glm::vec3& q) -> int64_t {
-        const glm::ivec3 c = cell_of(q);
+namespace {
+
+/**
+ * @class PositionLookup
+ * @brief "Which vertex is at this point?", over a hash grid sized by the mesh's own tolerance.
+ */
+class PositionLookup {
+public:
+    explicit PositionLookup(const EditMesh& m) : mesh_(m), tol_(mirror_tolerance(m)), cell_(tol_ * 4.0f) {
+        for (uint32_t v = 0; v < m.positions.size(); ++v) grid_[key_(cell_of_(m.positions[v]))].push_back(v);
+    }
+
+    /** @brief The nearest vertex within the tolerance, or -1. */
+    int64_t nearest(const glm::vec3& q) const {
+        const glm::ivec3 c = cell_of_(q);
         int64_t best = -1;
-        float best_d = tol;
+        float best_d = tol_;
         for (int dx = -1; dx <= 1; ++dx)
             for (int dy = -1; dy <= 1; ++dy)
                 for (int dz = -1; dz <= 1; ++dz) {
-                    auto it = grid.find(key(c + glm::ivec3(dx, dy, dz)));
-                    if (it == grid.end()) continue;
+                    auto it = grid_.find(key_(c + glm::ivec3(dx, dy, dz)));
+                    if (it == grid_.end()) continue;
                     for (uint32_t u : it->second) {
-                        const float d = glm::length(m.positions[u] - q);
+                        const float d = glm::length(mesh_.positions[u] - q);
                         if (d <= best_d) { best_d = d; best = u; }
                     }
                 }
         return best;
-    };
+    }
+
+private:
+    static uint64_t key_(const glm::ivec3& c) {
+        return (static_cast<uint64_t>(static_cast<uint32_t>(c.x) & 0x1FFFFF) << 42) |
+               (static_cast<uint64_t>(static_cast<uint32_t>(c.y) & 0x1FFFFF) << 21) |
+               (static_cast<uint64_t>(static_cast<uint32_t>(c.z) & 0x1FFFFF));
+    }
+    glm::ivec3 cell_of_(const glm::vec3& p) const { return glm::ivec3(glm::floor(p / cell_)); }
+
+    const EditMesh& mesh_;
+    float tol_, cell_;
+    std::unordered_map<uint64_t, std::vector<uint32_t>> grid_;
+};
+
+}  // namespace
+
+std::vector<int32_t> mirror_partners(const EditMesh& m, int axis) {
+    std::vector<int32_t> out(m.positions.size(), -1);
+    if (axis < 0 || axis > 2) return out;
+    const PositionLookup lookup(m);
+    for (uint32_t v = 0; v < m.positions.size(); ++v) {
+        glm::vec3 q = m.positions[v];
+        q[axis] = -q[axis];
+        const int64_t u = lookup.nearest(q);
+        if (u >= 0) out[v] = static_cast<int32_t>(u);
+    }
+    return out;
+}
+
+MirrorMap build_mirror_map(const EditMesh& m, const std::set<uint32_t>& moved, const MirrorSettings& s,
+                                  const glm::mat4& world) {
+    MirrorMap out;
+    if (!s.any() || moved.empty()) return out;
+    const PositionLookup lookup(m);
+    auto nearest = [&](const glm::vec3& q) { return lookup.nearest(q); };
     std::set<uint32_t> claimed;
     for (const MirrorImage& img : mirror_images(s, world)) {
         const bool single = img.mask == 1 || img.mask == 2 || img.mask == 4;

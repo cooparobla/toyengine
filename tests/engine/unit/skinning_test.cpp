@@ -8,6 +8,7 @@
 
 #include <coopa/testing/test.h>
 
+#include <cmath>
 #include <limits>
 #include <string>
 #include <vector>
@@ -112,4 +113,90 @@ COOPA_TEST(palette_is_identity_at_rest_and_bounds_contain_the_skin) {
     for (const auto& v : out)
         inside = inside && glm::all(glm::greaterThanEqual(v.position, lo - 1e-4f)) && glm::all(glm::lessThanEqual(v.position, hi + 1e-4f));
     expect(inside, "palette: culling bounds grown from the bone boxes contain every skinned vertex");
+}
+
+/**
+ * @brief Preserve Volume (dual-quaternion skinning): the candy wrapper, and what fixes it.
+ *
+ * Skin half way between a still bone and one twisted 180 degrees about the limb's own axis.
+ * Averaging the two matrices averages the two positions, which for a half turn is the axis
+ * itself -- the limb pinches shut. Blending the rotations instead gives the quarter turn
+ * between them, which keeps every vertex exactly as far from the axis as it started.
+ */
+COOPA_TEST(preserve_volume_holds_a_twisted_limb_open) {
+    using SMR = toy::scene::SkinnedMeshRenderer;
+    const fkyaml::node mesh = fkyaml::node::deserialize(std::string(
+        "vertices: [[1, 0, 0.5], [0, 1, 0.5], [-1, 0, 0.5]]\n"
+        "normals: [[1, 0, 0], [0, 1, 0], [-1, 0, 0]]\n"
+        "uvs: [[0, 0], [1, 0], [0, 1]]\n"
+        "faces: [[0, 1, 2]]\n"
+        "weights:\n  - {Root: 0.5, Twist: 0.5}\n  - {Root: 0.5, Twist: 0.5}\n  - {Root: 0.5, Twist: 0.5}\n"));
+    const auto src = coopa::gfx::engine::data::SkinnedMeshSource::from_node(mesh);
+    const std::vector<glm::mat4> twist = {glm::mat4(1.0f),
+                                          glm::rotate(glm::mat4(1.0f), 3.14159265f, glm::vec3(0, 0, 1))};
+
+    std::vector<coopa::gfx::engine::data::Vertex> lbs, dqs;
+    SMR::skin(src, twist, lbs, /*preserve_volume=*/false);
+    SMR::skin(src, twist, dqs, /*preserve_volume=*/true);
+    require(lbs.size() == dqs.size() && !lbs.empty(), "preserve volume: both paths skin the same vertices");
+
+    float lbs_radius = 0.0f, dqs_radius = 1e9f;
+    for (size_t i = 0; i < lbs.size(); ++i) {
+        lbs_radius = std::max(lbs_radius, glm::length(glm::vec2(lbs[i].position)));
+        dqs_radius = std::min(dqs_radius, glm::length(glm::vec2(dqs[i].position)));
+    }
+    expect(lbs_radius < 1e-4f, "preserve volume off: a half twist collapses the limb onto its axis");
+    expect_near(dqs_radius, 1.0f, 1e-4f, "preserve volume on: every vertex keeps its distance from the axis");
+    bool unit_normals = true;
+    for (const auto& v : dqs) unit_normals &= std::fabs(glm::length(v.normal) - 1.0f) < 1e-4f;
+    expect(unit_normals, "preserve volume: normals come out rotated and unit length");
+
+    // The culling box has to hold the bulge the arc makes outside the matrix blend's straight line.
+    const glm::vec3 lo0(std::numeric_limits<float>::max()), hi0(std::numeric_limits<float>::lowest());
+    std::vector<glm::vec3> bmin(2, lo0), bmax(2, hi0);
+    for (const auto& v : src.vertices) {
+        for (int b = 0; b < 2; ++b) { bmin[b] = glm::min(bmin[b], v.position); bmax[b] = glm::max(bmax[b], v.position); }
+    }
+    glm::vec3 lo, hi;
+    SMR::palette_bounds(bmin, bmax, lo0, hi0, twist, lo, hi, /*preserve_volume=*/true);
+    bool inside = true;
+    for (const auto& v : dqs) {
+        inside &= glm::all(glm::greaterThanEqual(v.position, lo)) && glm::all(glm::lessThanEqual(v.position, hi));
+    }
+    expect(inside, "preserve volume: the grown culling bounds contain every dual-quaternion vertex");
+    glm::vec3 tight_lo, tight_hi;
+    SMR::palette_bounds(bmin, bmax, lo0, hi0, twist, tight_lo, tight_hi, /*preserve_volume=*/false);
+    expect(glm::length(hi - lo) > glm::length(tight_hi - tight_lo),
+           "preserve volume: ...which the matrix path's box is not grown to");
+}
+
+/**
+ * @brief The two blends agree wherever they must: bones that only translate have no rotation to
+ *        blend differently, so Preserve Volume costs nothing and changes nothing there.
+ */
+COOPA_TEST(preserve_volume_matches_the_matrix_blend_without_rotation) {
+    using SMR = toy::scene::SkinnedMeshRenderer;
+    const fkyaml::node mesh = fkyaml::node::deserialize(std::string(
+        "vertices: [[0, 0, 0], [1, 0, 0], [0.5, 1, 0.25]]\n"
+        "normals: [[0, 0, 1], [0, 0, 1], [0, 0, 1]]\n"
+        "uvs: [[0, 0], [1, 0], [0, 1]]\n"
+        "faces: [[0, 1, 2]]\n"
+        "weights:\n  - {A: 1.0}\n  - {A: 0.25, B: 0.75}\n  - {A: 0.5, B: 0.5}\n"));
+    const auto src = coopa::gfx::engine::data::SkinnedMeshSource::from_node(mesh);
+    const std::vector<glm::mat4> shift = {glm::translate(glm::mat4(1.0f), glm::vec3(0.3f, -0.2f, 0.0f)),
+                                          glm::translate(glm::mat4(1.0f), glm::vec3(-1.0f, 0.0f, 2.0f))};
+    std::vector<coopa::gfx::engine::data::Vertex> lbs, dqs;
+    SMR::skin(src, shift, lbs, false);
+    SMR::skin(src, shift, dqs, true);
+    float err = 0.0f;
+    for (size_t i = 0; i < lbs.size(); ++i) err = std::max(err, glm::length(lbs[i].position - dqs[i].position));
+    expect(err < 1e-5f, "preserve volume: identical to the matrix blend when the bones only translate");
+
+    // And the packing round trips: one bone's dual quaternion transforms like its matrix.
+    std::vector<glm::mat4> dq;
+    SMR::compute_dq_palette({glm::translate(glm::mat4(1.0f), glm::vec3(1, 2, 3)) *
+                             glm::rotate(glm::mat4(1.0f), 0.7f, glm::vec3(0.3f, 0.8f, 0.5f))}, dq);
+    require(dq.size() == 1, "preserve volume: one palette entry per bone");
+    expect_near(glm::length(glm::vec4(dq[0][0])), 1.0f, 1e-5f, "preserve volume: the packed rotation is a unit quaternion");
+    expect_near(glm::length(glm::vec3(dq[0][2])), std::sqrt(3.0f), 1e-5f, "preserve volume: ...with unit scale pulled out of it");
 }

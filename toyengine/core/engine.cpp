@@ -17,6 +17,10 @@
 #include <toyengine/scene/turntable.h>
 #include <toyengine/world/heightmap_terrain_system.h>
 
+#include <uicoopa/input/modal_context.h>
+#include <uicoopa/render/icon_library.h>
+#include <uicoopa/layout/canvas.h>
+
 namespace toy {
 namespace core {
 
@@ -113,11 +117,17 @@ Engine::Engine(AppConfig config, EngineOptions options)
     // every other parser registration above. Its captured device/allocator references
     // are released by the SceneLoader::clear_component_parsers() already in ~Engine().
     coopa::ui::register_ui_components(ctx_.device(), ctx_.allocator(), ctx_.command_pool());
+    // Where a theme's font paths are looked up when they are not beside the theme file: the
+    // same roots every other asset ref resolves against, so a project's own theme can say
+    // `fonts/inter_regular.ttf` and get the engine's shared face. See FontDefaults::search_dirs.
+    coopa::ui::FontDefaults::search_dirs = asset_roots();
+    init_ui_icons_();
     // Registers the AnimationClip asset loader and the "Animator" component parser --
     // blendy exports skeletal/object animation as baked Transform keyframe tracks (there is
     // no vertex skinning in this engine), referenced from a scene's `Animator` component.
     // Must precede load_scene(), like every other parser registration above.
     coopa::anim::register_animation_components(assets_);
+    init_user_settings_();
     init_audio_();
     init_saves_();
     // Project modules (TOY_MODULE in a project's src/, see module.h) last, so they can
@@ -166,6 +176,7 @@ SceneLoadHandle Engine::begin_scene_warmup(SceneLoadOptions options) {
     st->options = std::move(options);
     st->stage = SceneLoadStage::Warming;
     st->progress = 1.0f;
+    st->warm_only = true;
     st->alpha = 1.0f;
     st->scene = &active;
     scene_load_ = st;
@@ -384,6 +395,35 @@ EngineOptions Engine::normalize_options_(EngineOptions o) {
     return o;
 }
 
+void Engine::init_ui_icons_() {
+    // The themed widgets draw real icons where they can -- a Toggle's checkmark, a ComboBox's
+    // arrow, a Scrollbar's step buttons, a SpinBox's +/- -- and fall back to a text glyph or to
+    // nothing per icon when IconLibrary is empty (see UITheme::IconStyle). Publishing the
+    // shipped sheet once here is what turns every one of those fallbacks into the real thing.
+    coopa::ui::IconLibrary::instance().configure(assets_, ctx_.device(), ctx_.allocator(),
+                                                 ctx_.command_pool());
+    // The sheet ships with uicoopa rather than with a game, so it is reached the same way its
+    // sounds are: a project's own assets/icons first (a game may replace the set), then the
+    // library's own copy beside the source. A packaged build carries it in assets/ already.
+    for (const std::string& root : asset_roots()) {
+        if (coopa::yaml::document_exists(std::filesystem::path(root) / "icons" / "icons.yaml")) {
+            if (coopa::ui::IconLibrary::instance().add_sheet(assets_, "icons/icons.yaml")) return;
+            break;
+        }
+    }
+    if (RuntimeLayout::current().packaged()) return;
+    assets_.add_search_root(std::string(PROJ_DIR) + "/uicoopa/assets");
+    coopa::ui::IconLibrary::instance().add_sheet(assets_, "icons/icons.yaml");
+}
+
+void Engine::init_user_settings_() {
+    UserSettings& us = UserSettings::instance();
+    us.load();
+    // Everything else this file layers over config.yaml defaults -- bus volumes, and whatever a
+    // game's own settings screen stores -- reads the same document; this only has to run first.
+    set_ui_scale(us.get_float(k_ui_scale_setting, 1.0f));
+}
+
 void Engine::init_audio_() {
     audio::AudioSystemOptions ao;
     ao.sample_rate = config_.audio.sample_rate;
@@ -415,9 +455,9 @@ void Engine::init_audio_() {
         coopa::ui::SoundLibrary::instance().load_manifest("sounds.yaml");
     }
 #endif
-    // Bus volumes: config.yaml's defaults, then whatever this player chose last time.
+    // Bus volumes: config.yaml's defaults, then whatever this player chose last time
+    // (init_user_settings_() has already loaded the file).
     UserSettings& us = UserSettings::instance();
-    us.load();
     const std::pair<const char*, float> buses[] = {
         {audio::k_bus_master, config_.audio.master}, {audio::k_bus_music, config_.audio.music},
         {audio::k_bus_sfx, config_.audio.sfx}, {audio::k_bus_ui, config_.audio.ui}};
@@ -658,6 +698,10 @@ Engine::~Engine() {
     // in this process (every editor test) hands it to its first unthemed Text as the
     // fallback font -- a use-after-free AddressSanitizer caught in mark_text_atlases().
     coopa::ui::FontDefaults::font = nullptr;
+    // Same contract as UIResourceCache above: IconLibrary is a process-wide static holding
+    // GPU-resident sheets through its AssetHandles, so it has to let go before assets_ and
+    // ctx_ do.
+    coopa::ui::IconLibrary::instance().clear();
     assets_.shutdown();
 }
 
@@ -987,31 +1031,7 @@ void Engine::apply_warmup_budgets_(detail::SceneLoadState& st, bool warming) {
 
 bool Engine::poll_scene_warmup_(detail::SceneLoadState& st) {
     if (st.scene == nullptr) return true;
-    // Every installed system is asked; the ones that stream something answer. Warm when all of
-    // them are, progress is their mean, and the status names whichever has the most left to do --
-    // so the line reads "Building terrain..." while that is the long pole, then moves on.
-    int participants = 0;
-    int worst_remaining = -1;
-    float total = 0.0f;
-    bool all_warm = true;
-    const char* worst_what = "";
-    for (const coopa::scene::WarmupState& ws : st.scene->warm_up_states()) {
-        if (!ws.participates) continue;
-        ++participants;
-        total += std::clamp(ws.progress, 0.0f, 1.0f);
-        if (!ws.warm) all_warm = false;
-        if (!ws.warm && ws.remaining > worst_remaining) {
-            worst_remaining = ws.remaining;
-            worst_what = ws.what;
-        }
-    }
-    if (participants == 0) return true;   // nothing streams: there is nothing to wait for
-    st.warm_progress = total / static_cast<float>(participants);
-    if (!all_warm && worst_what[0] != '\0') {
-        st.warm_status = std::string("Building ") + worst_what + "...";
-    }
-    if (all_warm) st.warm_progress = 1.0f;
-    return all_warm;
+    return fold_warmup_states(st, st.scene->warm_up_states());
 }
 
 void Engine::update_scene_load_(float dt) {
@@ -1065,6 +1085,9 @@ void Engine::update_scene_load_(float dt) {
     const bool covered = !covered_kind || st.alpha >= 1.0f;
 
     const bool warming = st.stage == SceneLoadStage::Warming;
+    // Advanced every frame, shown or not: a screen that appears once the cover is full then
+    // finds the bar already where it belongs, rather than catching up from zero.
+    st.display_progress = advance_load_bar(st.display_progress, load_bar_target(st), dt);
     if (tr.kind == SceneTransition::Kind::LoadingScreen && (st.pending() || warming)) {
         if (covered && !st.loading_screen_shown) {
             st.loading_screen_shown = true;
@@ -1072,7 +1095,7 @@ void Engine::update_scene_load_(float dt) {
                 std::cerr << "[toyengine] Loading screen '" << tr.loading_screen << "' could not be shown\n";
             }
         }
-        transition_.update_loading_screen(warming ? st.warm_progress : st.progress,
+        transition_.update_loading_screen(st.display_progress,
                                           warming && !st.warm_status.empty()
                                               ? st.warm_status
                                               : scene_load_status_text(st.stage));
@@ -2243,6 +2266,23 @@ void Engine::gather_digger_hover_(coopa::scene::Scene& scene) {
     }
 }
 
+bool Engine::ui_wants_pointer() {
+    // A modal owns the pointer wherever it happens to be -- that is what modal means, and it
+    // is true even on the frame the pointer sits over the scrim rather than over a widget.
+    if (coopa::ui::ModalContext::instance().top() != nullptr) return true;
+    if (!scene_mgr_.has_scene()) return false;
+    for (coopa::ui::CanvasComponent* canvas : coopa::ui::collect_canvases(scene_mgr_.get_active_scene())) {
+        if (canvas->is_world_space()) continue;   // Nameplates and damage numbers are not clickable.
+        coopa::ui::EventSystem& events = canvas->event_system();
+        // The RAW raycast winner, not hovered_object(): a window's frame, a modal's scrim and
+        // a panel background all exist to stop a click reaching what is behind them, and none
+        // of them is an IPointerHandler -- so hovered_object() is null over every one of them.
+        // See EventSystem::hit_object().
+        if (events.hit_object() || events.pressed_object()) return true;
+    }
+    return false;
+}
+
 void Engine::drive_ui_canvases_(coopa::scene::Scene& scene, const std::optional<ScreenUiPlacement>& placement) {
     std::vector<coopa::ui::CanvasComponent*> canvases = coopa::ui::collect_canvases(scene);
     if (canvases.empty()) return;
@@ -2288,6 +2328,11 @@ void Engine::drive_ui_canvases_(coopa::scene::Scene& scene, const std::optional<
                 canvas->set_display_zoom(1.0f);
                 canvas->set_input_enabled(true);
             }
+            // The player's interface scale (set_ui_scale()). Applied here rather than written
+            // into the asset so one slider moves every screen at once, and only to canvases
+            // the window owns: a PLACED canvas is a preview, and a designer sizing a HUD must
+            // see the size they authored, not the size this machine's player prefers.
+            canvas->set_ui_scale(canvas->ignore_ui_scale || placement ? 1.0f : ui_scale_);
             // Cursor positions arrive in screen points; the canvas is sized in framebuffer
             // pixels. They differ on HiDPI displays.
             canvas->set_input(ctx_.input(), cursor_scale());

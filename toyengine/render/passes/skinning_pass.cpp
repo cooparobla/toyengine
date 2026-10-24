@@ -16,7 +16,7 @@ uint32_t SkinningPass::record(coopa::gfx::command::CommandBuffer& cmd) {
         if (j.palette && j.matrices && j.bone_count) {
             j.palette->upload(j.frame_slot, j.matrices, sizeof(glm::mat4) * j.bone_count);
         }
-        const uint32_t push[2] = {j.vertex_count, j.bone_count};
+        const uint32_t push[3] = {j.vertex_count, j.bone_count, j.preserve_volume ? 1u : 0u};
         cmd.bind_descriptor_set(*j.set);
         cmd.push_constants(coopa::gfx::ShaderStage::Compute, 0, sizeof(push), push);
         cmd.dispatch(coopa::gfx::pipeline::ComputePipeline::groups_for(j.vertex_count, 64));

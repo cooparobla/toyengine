@@ -51,6 +51,10 @@ public:
         uint32_t                                   bone_count = 0;
         uint32_t                                   vertex_count = 0;
         uint32_t                                   frame_slot = 0;
+        /// How skin.comp reads `palette`: matrices (false) or packed dual quaternions (true).
+        /// See SkinnedMeshRenderer's `preserve_volume`; both forms are one mat4 per bone, so
+        /// nothing else about the dispatch changes.
+        bool                                       preserve_volume = false;
     };
 
     SkinningPass(coopa::gfx::core::Device& device, const std::string& comp_spv)
@@ -61,7 +65,7 @@ public:
                       .storage_buffer(2, coopa::gfx::ShaderStage::Compute)
                       .build(device)),
           pipeline_(device, comp_spv, {&layout_},
-                    {{coopa::gfx::ShaderStage::Compute, 0, 2 * sizeof(uint32_t)}}) {}
+                    {{coopa::gfx::ShaderStage::Compute, 0, 3 * sizeof(uint32_t)}}) {}
 
     coopa::gfx::core::Device& device() { return device_; }
     /// The set layout every SkinnedMeshRenderer allocates its per-slot sets against.

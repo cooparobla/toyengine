@@ -1047,7 +1047,8 @@ std::map<std::string, ComponentSchema>& schema_table_() {
         }});
         // A mesh deformed by a rig's bones: `bones:` (or, omitted, the mesh's vertex groups)
         // resolved under `rig:` (default: the nearest Animator up the hierarchy).
-        add({"SkinnedMeshRenderer", "Rendering", {f_asset("mesh_path", "meshes", ".yaml", true, true, "", true), f_string("rig", "")}});
+        add({"SkinnedMeshRenderer", "Rendering", {f_asset("mesh_path", "meshes", ".yaml", true, true, "", true), f_string("rig", ""),
+                                                   f_bool("preserve_volume", false)}});
         add_ui_schemas(add);
         return t;
     }();

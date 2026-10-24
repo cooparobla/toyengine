@@ -42,7 +42,7 @@ on a component or child deletes it.
 | Component | Keys (default) |
 |---|---|
 | MeshRenderer | `mesh_path` (key -> `meshes/<key>.yaml`), `material` (path, `{ base: ..., overrides }`, or inline -- see create-material), `materials` (per slot: list or `{ slot_name: material }`), `lod_bias` (1), `lods_enabled` (true), `affects_reflection_probes` |
-| SkinnedMeshRenderer | `mesh_path`, `bones` (object paths; default = the mesh's vertex-group names), `rig`. Sibling MeshRenderer has no `mesh_path` (material only) |
+| SkinnedMeshRenderer | `mesh_path`, `bones` (object paths; default = the mesh's vertex-group names), `rig`, `preserve_volume` (false; dual-quaternion skinning, Blender's option of the same name -- a twisted joint keeps its cross section instead of pinching). Sibling MeshRenderer has no `mesh_path` (material only) |
 | DirectionalLight | `direction` (-1,-1,-1; the way light travels), `color`, `intensity` (1), `cast_shadows` (true), `shadow_intensity` (1). Only the first active one is used |
 | PointLight | `color`, `intensity` (1), `range` (10), `cast_shadows` (true), `attenuation_constant` (1; here a falloff SHARPNESS, ~2-8 = crisper edge), `attenuation_linear`, `attenuation_quadratic` |
 | SpotLight | PointLight keys + `direction` (0,0,-1, local), `inner_angle` (20), `outer_angle` (30; half-angles, degrees) |

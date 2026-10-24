@@ -70,6 +70,16 @@ struct MirrorMap {
 };
 
 /**
+ * @brief For every vertex, the vertex sitting at its position reflected across local axis
+ *        `axis` -- or -1 where the topology is asymmetric and nothing is there. A vertex on
+ *        the mirror plane is its own partner.
+ *
+ * The whole-mesh counterpart to build_mirror_map(), for operations that mirror per-vertex
+ * DATA rather than positions (Weights > Mirror).
+ */
+std::vector<int32_t> mirror_partners(const EditMesh& m, int axis);
+
+/**
  * @brief Pairs every vertex in `moved` with its mirror partner (the vertex at its mirrored
  *        position, within a tolerance) for each mirror image. Partners that are themselves
  *        moved are left alone (they're transformed directly); unmatched vertices just don't

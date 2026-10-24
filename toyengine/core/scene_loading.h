@@ -44,12 +44,14 @@
 #include <cctype>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
 #include <coopa/scene/scene_loader.h>
+#include <coopa/scene/scene_system.h>
 #include <uicoopa/binding/ui_handle.h>
 #include <uicoopa/immediate/imm_canvas.h>
 
@@ -128,6 +130,20 @@ enum class SceneLoadStage {
 
 namespace detail {
 
+/**
+ * @brief One warming system as the load follows it across frames.
+ *
+ * A system's own coopa::scene::WarmupState is a snapshot, and two of its fields move in ways a
+ * bar cannot be driven by directly: `progress` falls back when the system finds more to do (a
+ * water body enters range, a navmesh tile goes dirty), and `remaining` is not known at all until
+ * the system has walked its work once. Keeping the high-water mark of both per system is what
+ * turns those snapshots into something monotonic -- see fold_warmup_states().
+ */
+struct WarmParticipant {
+    int   peak_remaining = 0;   ///< Most items this system has had outstanding: its weight.
+    float progress = 0.0f;      ///< Its furthest reported progress, 0..1.
+};
+
 /** @brief Shared between the Engine and every SceneLoadHandle for one load. */
 struct SceneLoadState {
     std::string      path;     ///< The resolved scene file.
@@ -149,6 +165,15 @@ struct SceneLoadState {
     uint64_t         warm_frames = 0;      ///< Frames spent there.
     float            warm_progress = 0.0f; ///< 0..1 across the warming systems.
     std::string      warm_status;          ///< "Building terrain...", from the slowest system.
+    /// Every system that has participated in the warm-up, by WarmupState::name. Systems join it
+    /// as they find work and stay in it once warm, so the set never shrinks under the mean.
+    std::map<std::string, WarmParticipant> warm_participants;
+    /// The figure the loading screen's bar is actually showing: travels toward the stage's
+    /// progress at a bounded speed and never falls back. See advance_load_bar().
+    float            display_progress = 0.0f;
+    /// No load stages ran: the scene was already built and is only being warmed
+    /// (Engine::begin_scene_warmup()), so the warm-up owns the whole bar rather than its tail.
+    bool             warm_only = false;
 
     std::vector<std::function<void(coopa::scene::Scene&)>> on_complete;
     std::vector<std::function<void(const std::string&)>>   on_failed;
@@ -246,6 +271,43 @@ private:
     glm::vec3 color_{0.0f};
     float     alpha_ = 0.0f;
 };
+
+/**
+ * @brief Folds one frame of system reports into `st`'s warm-up progress and status line.
+ *
+ * Separated from the Engine (and from Scene::warm_up_states(), which it takes the reports from)
+ * because what it does is arithmetic over the reports and the running state in `st` -- nothing
+ * about it needs a device, a window or a scene to test.
+ *
+ * @param st     The load whose warm_progress, warm_status and warm_participants it advances.
+ * @param states This frame's coopa::scene::ISceneSystem::warm_up_state() reports.
+ * @return True when every participating system is warm -- the scene is worth showing.
+ */
+bool fold_warmup_states(detail::SceneLoadState& st,
+                        const std::vector<coopa::scene::WarmupState>& states);
+
+/**
+ * @brief Where the loading screen's bar belongs for a load in its current stage: 0..1.
+ *
+ * One run across both halves of a load. The stages that build the scene fill the bar to
+ * SceneLoadOptions::warm_up's share of it and the warm-up fills the rest, so a bar does not
+ * arrive full with the seconds of world-building still ahead of it. A scene that was already
+ * built and is only being warmed (Engine::begin_scene_warmup()) owns the whole bar.
+ */
+float load_bar_target(const detail::SceneLoadState& st);
+
+/**
+ * @brief Moves the bar from `current` toward `target` at a bounded speed: the value to draw.
+ *
+ * The figures behind a loading bar arrive in steps -- a batch of chunks publishes, an asset
+ * finalizes, a system that was warm finds more to do -- and drawing each step as it lands reads
+ * as snapping rather than loading. A speed limit turns them into travel: a target rising slower
+ * than the limit is tracked exactly, and anything faster is closed at it. The limit is per
+ * second, not per frame, so the motion is the same whatever the frame took -- which on a loading
+ * screen is anything from a millisecond to a long meshing frame. Never returns less than
+ * `current`: nothing can walk the bar backwards.
+ */
+float advance_load_bar(float current, float target, float dt);
 
 /** @brief Loading-screen status text for a stage. */
 const char* scene_load_status_text(SceneLoadStage stage);

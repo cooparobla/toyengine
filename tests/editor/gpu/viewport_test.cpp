@@ -234,7 +234,8 @@ COOPA_TEST(grid_follows_zoom_and_view_and_f_frames_the_selection) {
 }
 
 /** @brief The nav gizmo's axis balls go orthographic along that axis (orbiting returns to
- *         perspective), and trackpad swipes orbit both ways while pinch zooms. */
+ *         perspective), trackpad swipes orbit both ways while pinch zooms, and the wheel still
+ *         zooms rather than pans once a modifier has been let go. */
 COOPA_TEST(nav_axes_go_orthographic_and_trackpad_gestures_navigate) {
     EditorSession session({.settle_frames = toy::core::Engine::kFillDebounceFrames + 4});
     auto& engine = session.engine;
@@ -275,6 +276,29 @@ COOPA_TEST(nav_axes_go_orthographic_and_trackpad_gestures_navigate) {
     const float pitch1 = cam.pitch_deg, dist1 = cam.distance;
     scroll({0.0f, 1.0f});
     expect(cam.distance < dist1 && std::abs(cam.pitch_deg - pitch1) < 1e-4f, "a mouse wheel zooms, as before");
+
+    // ...and it still zooms once Ctrl has been let go, with no click in between. X11 (and so
+    // GLFW) stamps a key event with the modifier state from *before* it, so Ctrl's own release
+    // still reports Ctrl held -- replayed verbatim here, as any Ctrl shortcut leaves it. Read as
+    // a held Ctrl, the notch is the Ctrl+wheel chord and pans the view sideways instead.
+    {
+        using coopa::input::KeyAction;
+        using coopa::input::Mods;
+        engine.queue_input([](coopa::input::Input& i) {
+            i.push_key(coopa::input::Key::LeftControl, 0, KeyAction::Press, Mods::None);   // no Control bit yet
+        });
+        tick(engine, 1);
+        engine.queue_input([](coopa::input::Input& i) {
+            i.push_key(coopa::input::Key::LeftControl, 0, KeyAction::Release, Mods::Control);   // still carries one
+        });
+        tick(engine, 1);
+        const float dist2 = cam.distance;
+        const glm::vec3 focus2 = cam.focus;
+        scroll({0.0f, 1.0f});
+        expect(cam.distance < dist2, "a wheel notch after Ctrl is released zooms (" +
+               std::to_string(dist2) + " -> " + std::to_string(cam.distance) + ")");
+        expect(glm::length(cam.focus - focus2) < 1e-4f, "and does not pan the view sideways");
+    }
 
     // An explicit numpad 5 ortho stays ortho through orbits.
     cam.set_ortho(true);

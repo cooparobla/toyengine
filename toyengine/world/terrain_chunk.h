@@ -228,6 +228,19 @@ std::vector<coopa::gfx::engine::data::MeshLod> build_chunk_lods(const TerrainPar
                                                                 ChunkMeshData& mesh);
 
 /**
+ * @brief A fingerprint of the two water surfaces a chunk was built with.
+ *
+ * What a rebuild compares to decide whether it may keep the chunk's existing water children
+ * rather than hand back fresh ones -- see TerrainChunk::water_hash. Covers every field
+ * WaterBody::set_geometry() is given, plus the planet frame.
+ *
+ * @param still   The chunk's sea and lakes.
+ * @param flowing The chunk's rivers.
+ * @return 0 when the chunk has no water at all, and otherwise a hash of both surfaces.
+ */
+std::uint64_t chunk_water_hash(const ChunkWaterData& still, const ChunkWaterData& flowing);
+
+/**
  * @struct ChunkBuildJob
  * @brief Everything one chunk-meshing job needs, plus the buffers it writes into.
  *
@@ -250,6 +263,13 @@ struct ChunkBuildJob {
     ChunkCoord             coord;
     bool                   collision = false; /**< Also build `collision_mesh`. */
     /**
+     * @brief Build `collision_mesh` and stop: no LOD levels, no water, no GPU buffers.
+     *
+     * What a chunk that is already drawing needs when it comes inside `collision_radius` --
+     * see TerrainChunk::wants_collision. Meaningless without `collision`.
+     */
+    bool                   collision_only = false;
+    /**
      * @brief Where `gpu_mesh`'s buffers are created. Null leaves `gpu_mesh` null and the CPU
      *        arrays for the caller to upload (what the pure `world` unit tests do).
      */
@@ -267,6 +287,14 @@ struct ChunkBuildJob {
     std::vector<coopa::gfx::engine::data::MeshLod> lods;
     /** @brief The chunk's GPU mesh, built by run(); null for an empty chunk (or no `device`). */
     std::shared_ptr<coopa::gfx::engine::data::Mesh> gpu_mesh;
+    /**
+     * @brief chunk_water_hash() of the two surfaces below, taken by run().
+     *
+     * Here rather than at the publish, because it walks every water vertex and the frame a
+     * chunk lands in is reserved for the scene touches alone (see terrain_system.h). What
+     * reads it is TerrainChunk::water_hash.
+     */
+    std::uint64_t water_hash = 0;
     /** @brief The chunk's collider surface, when `collision`; null for an empty chunk. */
     std::shared_ptr<const coopa::physx::geometry::TriangleMesh> collision_mesh;
     ChunkWaterData         water_still;   /**< Output: the sea and lakes over this chunk. */

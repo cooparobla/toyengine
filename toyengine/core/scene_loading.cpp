@@ -4,6 +4,8 @@
 #include <toyengine/ui/ui_assets.h>
 #include <uicoopa/immediate/imm.h>
 
+#include <algorithm>
+
 namespace toy {
 namespace core {
 
@@ -130,6 +132,91 @@ void SceneTransitionLayer::release() {
     canvas_ = nullptr;
     scene_.reset();
     alpha_ = 0.0f;
+}
+
+namespace {
+
+/// How much of the bar the stages that build a scene fill before the warm-up takes the rest.
+/// The two halves split it because neither is a knowable fraction of the other, and a bar that
+/// filled completely before warming began would have nothing left to show for the seconds a
+/// streamed world spends assembling itself.
+constexpr float k_warm_bar_start = 0.5f;
+
+/// How fast the bar is allowed to travel, in fractions of its width per second -- so it takes
+/// at least 1/k_bar_max_rate seconds to cross. Fast enough to keep up with any load that is
+/// worth covering, slow enough that a step in the figure behind it becomes travel.
+constexpr float k_bar_max_rate = 0.8f;
+
+}  // namespace
+
+bool fold_warmup_states(detail::SceneLoadState& st,
+                        const std::vector<coopa::scene::WarmupState>& states) {
+    // Every installed system is asked; the ones that stream something answer. Warm when all of
+    // them are, and the status names whichever has the most left to do -- so the line reads
+    // "Building terrain..." while that is the long pole, then moves on.
+    //
+    // Progress is a work-weighted mean over every system that has participated so far
+    // (SceneLoadState::warm_participants), not a flat mean over the ones participating this
+    // frame. All three of those differences are what keeps the bar from lurching:
+    //
+    //   * A flat mean rescales itself as systems join. Water does not participate until a body
+    //     exists to bake, so the denominator climbs over the opening frames and a share of the
+    //     bar's width comes off it at every step.
+    //   * A system's own progress falls back when it finds more to do -- water's pending count
+    //     climbs as bodies come into sim_radius, the navmesh baker halves whenever a tile goes
+    //     dirty. Each system's high-water mark is monotonic where its reading is not.
+    //   * Weighting by work (the most items it has ever had outstanding) stops a system with
+    //     four dirty navmesh tiles from moving the bar as far as one with four hundred chunks
+    //     left to mesh. An equal share per system is what let small, late work swing it.
+    int worst_remaining = -1;
+    bool all_warm = true;
+    const char* worst_what = "";
+    for (const coopa::scene::WarmupState& ws : states) {
+        if (!ws.participates) continue;
+        detail::WarmParticipant& p = st.warm_participants[ws.name];
+        p.peak_remaining = std::max(p.peak_remaining, ws.remaining);
+        p.progress = std::max(p.progress, ws.warm ? 1.0f : std::clamp(ws.progress, 0.0f, 1.0f));
+        if (!ws.warm) all_warm = false;
+        if (!ws.warm && ws.remaining > worst_remaining) {
+            worst_remaining = ws.remaining;
+            worst_what = ws.what;
+        }
+    }
+    // Nothing streams: there is nothing to wait for. Asked of the participants seen so far
+    // rather than this frame's, so the opening frames -- before any system has walked its work
+    // -- do not read as done.
+    if (st.warm_participants.empty()) return true;
+    float weighted = 0.0f;
+    float weight = 0.0f;
+    for (const auto& [name, p] : st.warm_participants) {
+        // A system that has not counted its work yet still carries a share, so one that is
+        // merely slow to look does not pin the bar at zero.
+        const float w = static_cast<float>(std::max(p.peak_remaining, 1));
+        weighted += p.progress * w;
+        weight += w;
+    }
+    st.warm_progress = weighted / weight;
+    if (!all_warm && worst_what[0] != '\0') {
+        st.warm_status = std::string("Building ") + worst_what + "...";
+    }
+    if (all_warm) st.warm_progress = 1.0f;
+    return all_warm;
+}
+
+float load_bar_target(const detail::SceneLoadState& st) {
+    if (st.stage == SceneLoadStage::Warming) {
+        const float start = st.warm_only ? 0.0f : k_warm_bar_start;
+        return start + (1.0f - start) * std::clamp(st.warm_progress, 0.0f, 1.0f);
+    }
+    if (st.activated()) return 1.0f;   // warmed, or never warming: there is nothing left to load
+    const bool warms = st.options.warm_up &&
+                       st.options.transition.kind != SceneTransition::Kind::None;
+    return warms ? st.progress * k_warm_bar_start : st.progress;
+}
+
+float advance_load_bar(float current, float target, float dt) {
+    if (target <= current) return current;
+    return std::min(target, current + k_bar_max_rate * std::max(dt, 0.0f));
 }
 
 const char* scene_load_status_text(SceneLoadStage stage) {

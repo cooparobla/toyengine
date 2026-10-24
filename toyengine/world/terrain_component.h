@@ -113,8 +113,38 @@ struct TerrainChunk {
      */
     bool stale = false;
 
+    /**
+     * @brief It has come inside `collision_radius` with no collider: build one, and only one.
+     *
+     * Kept apart from `stale` because the two want different work. Edited tiles invalidate
+     * everything the chunk is -- its surface, its LOD levels, its water -- so `stale` re-meshes
+     * and republishes the lot. Crossing the collision threshold invalidates nothing: the chunk
+     * goes on drawing exactly what it is drawing, and all that is missing is a collision mesh.
+     * The job raised for this one therefore builds that alone (ChunkBuildJob::collision_only)
+     * and the collider is added to the object already on the tree -- no GPU upload, no
+     * published asset, no new SceneObject, and nothing for the renderer's per-renderer state
+     * (motion vectors, LOD hysteresis) to lose.
+     *
+     * Re-meshed rather than remembered: holding every loaded chunk's welded CPU geometry
+     * against the chance of a later collider costs hundreds of megabytes across a view radius,
+     * and the mesher is a worker's business either way.
+     */
+    bool wants_collision = false;
+
     /** @brief Bumped per upload; part of the published mesh's asset id, so a rebuild's new mesh never collides with the old one still in its grace period. */
     std::uint32_t mesh_serial = 0;
+
+    /**
+     * @brief chunk_water_hash() of the surfaces this chunk's water children were built from.
+     *
+     * A rebuild swaps the terrain mesh in the frame it lands, so the ground never blinks -- but
+     * a water child is a bare WaterBody that toy::water::WaterSystem bakes and publishes over
+     * the following frame or two, so re-creating one WOULD blink, and a chunk crossing
+     * `collision_radius` rebuilds for a collider while its lakes and rivers are untouched.
+     * Matching this against the new build's hash is what lets such a rebuild carry the baked
+     * water children over instead (TerrainSystem::take_chunk_water_()). 0 = no water.
+     */
+    std::uint64_t water_hash = 0;
 
     /**
      * @brief A Dormant chunk's SceneObject, held off the tree rather than destroyed.

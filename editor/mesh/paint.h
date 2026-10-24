@@ -27,6 +27,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <optional>
+#include <string>
 #include <vector>
 
 namespace toy::editor {
@@ -109,6 +111,58 @@ void assign_weight(EditMesh& m, uint32_t group, float w, const std::vector<uint3
 
 /** @brief Normalizes every vertex's weights across all groups to sum to 1 (Normalize All). */
 void normalize_all_weights(EditMesh& m);
+
+/**
+ * @brief Keeps each vertex's `max_influences` strongest weights and renormalizes what is left
+ *        (Blender's Limit Total).
+ *
+ * The engine skins four influences per vertex and silently ignores the rest, so running this
+ * with four is how the editor's weights become what the renderer actually applies.
+ */
+void limit_total_weights(EditMesh& m, uint32_t max_influences);
+
+/** @brief Drops weights at or under `threshold`, from `group` alone or from every group (Clean). */
+void clean_weights(EditMesh& m, float threshold, std::optional<uint32_t> group = std::nullopt);
+
+/**
+ * @brief Blurs weights toward each vertex's edge neighbours (Smooth Weights) -- the usual fix
+ *        for a hard seam left by an automatic bind.
+ *
+ * @param m          Mesh to smooth in place.
+ * @param cache      Topology for the neighbourhoods (SculptCache::nb).
+ * @param group      The group to smooth, or nothing for all of them.
+ * @param factor     0..1: how far each pass moves a vertex toward its neighbours' mean.
+ * @param iterations Number of passes.
+ * @param only       Vertices to smooth; empty means the whole mesh.
+ */
+void smooth_weights(EditMesh& m, const SculptCache& cache, std::optional<uint32_t> group, float factor,
+                    int iterations, const std::vector<uint32_t>& only = {});
+
+/**
+ * @brief Mirrors every vertex's weights across local `axis` onto the vertex opposite it
+ *        (Mirror Vertex Groups).
+ *
+ * With `flip_group_names`, a weight in a side-named group lands in its opposite number --
+ * "Arm_L" into "Arm_R" -- creating that group if the mesh has no such group yet; without it,
+ * each group is mirrored onto itself. A vertex with no opposite number (asymmetric topology)
+ * keeps its own weights, as in Blender.
+ */
+void mirror_weights(EditMesh& m, int axis, bool flip_group_names = true);
+
+/**
+ * @brief The opposite-side name of a vertex group, or an empty string when it has no side.
+ *
+ * Recognises a leading or trailing l/r/left/right in either case, separated by `.`, `_`, `-`
+ * or a space, keeping the separator and the capitalisation: "Arm.L" -> "Arm.R",
+ * "left_leg" -> "right_leg".
+ */
+std::string flipped_group_name(const std::string& name);
+
+/** @brief Replaces every vertex's weight in `group` with 1 - w (Invert), dropping the zeroes. */
+void invert_group_weights(EditMesh& m, uint32_t group);
+
+/** @brief w -> clamp(w * gain + offset, 0, 1) in `group`, for the vertices in it (Levels). */
+void levels_group_weights(EditMesh& m, uint32_t group, float gain, float offset);
 
 /**
  * @brief The weight heatmap Weight Paint shows (Blender's): blue at 0 through green and

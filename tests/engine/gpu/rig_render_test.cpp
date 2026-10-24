@@ -197,3 +197,48 @@ COOPA_TEST(gpu_skinning_matches_cpu) {
     expect(diff <= budget, "gpu skinning: GPU and CPU captures of the same frame agree (" + std::to_string(diff) + " px differ)");
     if (diff > budget) { dump_frame(g.frame, "skinning_gpu"); dump_frame(c.frame, "skinning_cpu"); }
 }
+
+/** @brief Preserve Volume on the GPU: skin.comp's dual-quaternion branch writes what
+ *         SkinnedMeshRenderer::skin() computes for the same palette, and that is not simply the
+ *         matrix blend's answer -- the two paths agree with each other, and only with each other. */
+COOPA_TEST(gpu_preserve_volume_matches_cpu) {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
+    ScopedEnv no_input("NO_INPUT", "1");
+    // Two runs of the same fixed-step frames, so the rig is in the same pose in both and only
+    // the blend differs.
+    struct Run { std::vector<coopa::gfx::engine::data::Vertex> gpu, cpu; float err = -1.0f; };
+    auto run = [](bool preserve_volume) {
+        Run r;
+        toy::core::AppConfig cfg = make_test_config("assets/scenes/animation/animation_demo/scene.yaml", 640, 360, 320, 180);
+        cfg.render.skinning = "gpu";
+        toy::core::Engine engine(std::move(cfg));
+        tick_frames(engine, 2);
+        auto* skin = engine.scene().find_object("tentacle_skin");
+        auto* smr = skin ? skin->get_component<toy::scene::SkinnedMeshRenderer>() : nullptr;
+        if (!smr || !smr->is_ready() || !smr->gpu_skinned()) return r;
+        smr->set_preserve_volume(preserve_volume);
+        tick_frames(engine, 20);
+        engine.device().wait_idle();
+        r.cpu = smr->skinned_vertices();
+        r.gpu.resize(r.cpu.size());
+        const auto& mesh = smr->mesh();
+        mesh->vertex_buffer(mesh->active_slot()).download(r.gpu.data(), sizeof(r.gpu[0]) * r.gpu.size());
+        r.err = 0.0f;
+        for (size_t i = 0; i < r.cpu.size(); ++i) {
+            r.err = std::max(r.err, glm::length(r.gpu[i].position - r.cpu[i].position));
+            r.err = std::max(r.err, glm::length(r.gpu[i].normal - r.cpu[i].normal));
+        }
+        return r;
+    };
+    const Run dq = run(true);
+    const Run lbs = run(false);
+    require(!dq.cpu.empty() && dq.cpu.size() == lbs.cpu.size(), "preserve volume: the demo's skinned tentacle is up on the compute path");
+    expect(dq.err >= 0.0f && dq.err < 1e-4f,
+           "preserve volume: skin.comp's dual-quaternion blend matches the CPU's (max err " + std::to_string(dq.err) + ")");
+    expect(lbs.err >= 0.0f && lbs.err < 1e-4f,
+           "preserve volume off: the matrix blend still matches too (max err " + std::to_string(lbs.err) + ")");
+    float spread = 0.0f;
+    for (size_t i = 0; i < dq.gpu.size(); ++i) spread = std::max(spread, glm::length(dq.gpu[i].position - lbs.gpu[i].position));
+    expect(spread > 1e-5f,
+           "preserve volume: ...and the two blends are different answers, as they must be (" + std::to_string(spread) + " m apart)");
+}

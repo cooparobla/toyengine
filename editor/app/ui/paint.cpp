@@ -348,8 +348,54 @@ void EditorApp::draw_paint_menu_(imm::Context& ctx) {
     }
     if (!ctx.begin_menu("Weights")) return;
     const bool any = !mesh_.mesh.groups.empty();
+    const bool group = active_group_ < mesh_.mesh.groups.size();
     if (ctx.menu_item("Set Weight", "Shift K", nullptr, true, I::WeightPaint)) paint_fill_all_();
+    ctx.menu_separator();
+    if (ctx.menu_item("Automatic Weights from Rig", "", nullptr, edit_object_ != 0, I::WeightPaint)) {
+        regenerate_weights_from_rig_(BindWeights::Automatic);
+    }
+    ctx.tooltip("Automatic Weights from Rig\nReplace the bone vertex groups with weights generated from the rig\n"
+                "under this mesh (settings in Properties > Tool > Auto Weights)");
+    if (ctx.menu_item("Envelope Weights from Rig", "", nullptr, edit_object_ != 0)) {
+        regenerate_weights_from_rig_(BindWeights::Envelope);
+    }
+    if (ctx.menu_item("Vertex Groups from Rig", "", nullptr, edit_object_ != 0)) {
+        regenerate_weights_from_rig_(BindWeights::EmptyGroups);
+    }
+    ctx.tooltip("Vertex Groups from Rig\nOne empty group per bone, leaving the weights to the brush");
+    ctx.menu_separator();
     if (ctx.menu_item("Normalize All", "", nullptr, any)) mesh_.edit("Normalize All", [](EditMesh& m, MeshSelection&) { normalize_all_weights(m); });
+    if (ctx.menu_item("Limit Total", "", nullptr, any)) {
+        mesh_.edit("Limit Total", [](EditMesh& m, MeshSelection&) { limit_total_weights(m, 4); });
+    }
+    ctx.tooltip("Limit Total\nKeep each vertex's four strongest influences -- what the engine actually skins");
+    if (ctx.menu_item("Clean", "", nullptr, any)) {
+        mesh_.edit("Clean Weights", [](EditMesh& m, MeshSelection&) { clean_weights(m, 0.01f); });
+    }
+    ctx.tooltip("Clean\nDrop weights under 0.01, which move a vertex too little to see");
+    if (ctx.menu_item("Smooth", "", nullptr, any)) {
+        mesh_.edit("Smooth Weights", [this](EditMesh& m, MeshSelection&) { smooth_weights(m, sculpt_cache_, std::nullopt, 0.5f, 1); });
+    }
+    ctx.tooltip("Smooth\nBlur every group toward each vertex's neighbours, softening a hard seam");
+    if (ctx.begin_menu("Mirror", any)) {
+        static const char* kAxes[] = {"X", "Y", "Z"};
+        for (int a = 0; a < 3; ++a) {
+            if (ctx.menu_item(kAxes[a])) {
+                mesh_.edit(std::string("Mirror Weights ") + kAxes[a],
+                           [a](EditMesh& m, MeshSelection&) { mirror_weights(m, a); });
+            }
+            ctx.tooltip(std::string("Mirror ") + kAxes[a] +
+                        "\nSwap each vertex's weights with the vertex opposite it across the mesh's " + kAxes[a] +
+                        " axis,\nand side-named groups (Arm_L / Arm_R) with each other");
+        }
+        ctx.end_menu();
+    }
+    ctx.menu_separator();
+    if (ctx.menu_item("Invert Active Group", "", nullptr, group)) {
+        const uint32_t g = active_group_;
+        mesh_.edit("Invert Group Weights", [g](EditMesh& m, MeshSelection&) { invert_group_weights(m, g); });
+    }
+    ctx.tooltip("Invert Active Group\nEvery vertex's weight becomes 1 minus what it was");
     if (ctx.menu_item("Clear Group", "", nullptr, any, I::Trash)) {
         const uint32_t g = active_group_;
         mesh_.edit("Clear Group Weights", [g](EditMesh& m, MeshSelection&) { assign_weight(m, g, 0.0f); });
@@ -436,6 +482,7 @@ void EditorApp::draw_paint_tool_panel_(imm::Context& ctx) {
     }
     if (weights) {
         draw_vertex_groups_panel_(ctx);
+        draw_auto_weights_panel_(ctx);
     } else if (ctx.collapsing_header("Color Attribute", true, nullptr, I::VertexPaint)) {
         ctx.label_dim(mesh_.mesh.has_colors ? "The mesh has vertex colours (saved as `colors`)." : "No colours yet: the first stroke adds them (white).");
         if (ctx.button("Fill with Color", -1, true, I::VertexPaint)) paint_fill_all_();

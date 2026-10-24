@@ -36,6 +36,7 @@
 #include "../core/naming.h"
 #include "../core/process.h"
 #include "../core/scene_document.h"
+#include "../mesh/auto_weights.h"
 #include "../mesh/mesh_bvh.h"
 #include "../mesh/mesh_loops.h"
 #include "../mesh/mesh_mirror.h"
@@ -684,6 +685,7 @@ private:
 #include "ui/mesh_tools.inl"
 #include "ui/sculpt.inl"
 #include "ui/paint.inl"
+#include "ui/weights.inl"
 #include "ui/timeline.inl"
 #include "ui/assets.inl"
 #include "ui/instances.inl"
@@ -1208,6 +1210,7 @@ private:
     SculptResize paint_resize_;
     uint32_t active_group_ = 0;
     float edit_assign_weight_ = 1.0f;
+    AutoWeightSettings auto_weights_;   ///< Bind to Rig / Auto Weights settings (ui/weights.inl).
     std::map<ObjectId, std::string> paint_saved_shader_;   ///< Surface shaders swapped for editor_paint
     // Animation Timeline (ui/timeline.inl).
     ObjectId anim_rig_ = 0;

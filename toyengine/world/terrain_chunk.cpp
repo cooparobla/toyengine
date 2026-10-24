@@ -639,17 +639,47 @@ std::vector<coopa::gfx::engine::data::MeshLod> build_chunk_lods(const TerrainPar
 }
 
 
+std::uint64_t chunk_water_hash(const ChunkWaterData& still, const ChunkWaterData& flowing) {
+    if (still.empty() && flowing.empty()) return 0;
+    // FNV-1a over the raw vertex data, as the render pipeline's static-caster cache hashes its
+    // draws. Collisions would keep a water surface that should have been rebuilt; at 64 bits
+    // over data this size that is not a risk worth a byte-wise compare.
+    std::uint64_t h = 1469598103934665603ull;
+    const auto mix = [&h](const void* data, std::size_t bytes) {
+        const auto* b = static_cast<const unsigned char*>(data);
+        for (std::size_t i = 0; i < bytes; ++i) { h ^= b[i]; h *= 1099511628211ull; }
+    };
+    const auto mix_surface = [&mix](const ChunkWaterData& w) {
+        const auto span = [&mix](const auto& v) { mix(v.data(), v.size() * sizeof(v[0])); };
+        span(w.positions);
+        span(w.uvs);
+        span(w.depths);
+        span(w.wave_scales);
+        span(w.indices);
+        mix(&w.frame, sizeof(w.frame));
+        mix(&w.local_frame, sizeof(w.local_frame));
+    };
+    mix_surface(still);
+    mix_surface(flowing);
+    // A zero hash means "no water": never return it for a chunk that has some.
+    return h != 0 ? h : 1ull;
+}
+
 void ChunkBuildJob::run() {
     if (library == nullptr) return;
     mesh_chunk_styled(pad, *library, params, mesh);
     if (params.planet) {
-        build_chunk_water(pad, params, water_still, water_flowing);
+        // A collider-only pass warps empty water along with the mesh: the chunk's surfaces are
+        // already built and drawing, and only the ground's shape is wanted here.
+        if (!collision_only) build_chunk_water(pad, params, water_still, water_flowing);
         warp_chunk_to_planet(params, coord, mesh, water_still, water_flowing);
         coopa::gfx::engine::data::Mesh::weld_and_optimize(mesh.vertices, mesh.indices);
         // Before the LOD levels: the collider is what the chunk is SHAPED like, not what it
         // happens to be drawing this frame, so it is built from LOD 0's indices alone.
         if (collision) collision_mesh = build_chunk_collision(mesh);
+        if (collision_only) return;
         lods = build_chunk_lods(params, coord, mesh);
+        water_hash = chunk_water_hash(water_still, water_flowing);
         upload_chunk_mesh(*this);
         return;
     }
@@ -660,8 +690,10 @@ void ChunkBuildJob::run() {
     // weld, adjacency and BVH are the expensive part -- hence here, on the worker. LOD 0's
     // indices, as on the planet path above.
     if (collision) collision_mesh = build_chunk_collision(mesh);
+    if (collision_only) return;
     lods = build_chunk_lods(params, coord, mesh);
     build_chunk_water(pad, params, water_still, water_flowing);
+    water_hash = chunk_water_hash(water_still, water_flowing);
     upload_chunk_mesh(*this);
 }
 
@@ -671,9 +703,11 @@ void ChunkBuildJob::reset_outputs() {
     water_still.clear();
     water_flowing.clear();
     gpu_mesh.reset();
+    water_hash = 0;
     collision_mesh.reset();
-    library   = nullptr;
-    collision = false;
+    library        = nullptr;
+    collision      = false;
+    collision_only = false;
 }
 
 glm::vec3 chunk_origin(const TerrainParams& params, const ChunkCoord& coord) {

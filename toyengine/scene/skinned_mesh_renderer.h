@@ -31,6 +31,16 @@
  * Inverse bind matrices come from the file when it has them; otherwise from the REST pose --
  * every rig object's world matrix as authored, snapshotted in start() before any animation
  * has moved it -- so a mesh painted in the editor needs no export step at all.
+ *
+ * `preserve_volume` picks how the bones are blended, Blender's option of the same name. Off
+ * (the default), the skin matrices are averaged directly -- linear blend skinning: one matrix
+ * multiply per influence, but a joint twisted far enough pinches the skin to nothing, the
+ * "candy wrapper". On, each matrix is split into a dual quaternion and a scale
+ * and the ROTATIONS are blended on the unit sphere instead, which keeps a limb's cross section
+ * through a twist. Both paths exist on the CPU and in skin.comp and must agree; the
+ * dual-quaternion palette is packed into the same mat4 slot the matrix palette uses (see
+ * compute_dq_palette()), so the buffers, the descriptor layout and the upload are untouched
+ * and a push constant is all that selects the path.
  */
 
 #ifndef TOYENGINE_SCENE_SKINNED_MESH_RENDERER_H
@@ -101,6 +111,9 @@ public:
     void set_bones(std::vector<std::string> bones) { bone_paths_ = std::move(bones); }
     /** @brief Names the rig root explicitly (a scene path); empty = the nearest Animator ancestor. */
     void set_rig(std::string rig) { rig_path_ = std::move(rig); }
+    /** @brief Blends the bones as dual quaternions instead of matrices -- see this file's doc. */
+    void set_preserve_volume(bool on) { preserve_volume_ = on; }
+    bool preserve_volume() const { return preserve_volume_; }
 
     /**
      * @brief Finds the sibling MeshRenderer and the rig root, and snapshots the REST pose:
@@ -120,8 +133,23 @@ public:
      * @brief Skins `src`'s bind-pose vertices with one matrix per palette entry into `out`
      *        (object space of the mesh's owner). A vertex with no usable influence keeps its
      *        bind pose. Pure; the per-frame upload's whole CPU cost.
+     *
+     * @param preserve_volume Blends dual quaternions derived from `skin_matrices` rather than
+     *                        the matrices themselves. Matches skin.comp's mode 1 exactly.
      */
-    static void skin(const SkinnedMeshSource& src, const std::vector<glm::mat4>& skin_matrices, std::vector<Vertex>& out);
+    static void skin(const SkinnedMeshSource& src, const std::vector<glm::mat4>& skin_matrices,
+                     std::vector<Vertex>& out, bool preserve_volume = false);
+
+    /**
+     * @brief Each skin matrix as a dual quaternion plus a scale, packed into a mat4 so it rides
+     *        in the matrix palette's own slot.
+     *
+     * Column 0 is the rigid rotation as a quaternion (x, y, z, w), column 1 the dual part
+     * (0.5 * translation * rotation, same order), column 2 the per-axis scale the rotation was
+     * divided out of, column 3 unused. A mirrored bone (negative determinant) keeps its
+     * reflection in the scale, where it cannot corrupt the quaternion. Pure (tests, skin.comp).
+     */
+    static void compute_dq_palette(const std::vector<glm::mat4>& skin_matrices, std::vector<glm::mat4>& out);
 
     /**
      * @brief Per bone: inverse(owner_world) * bone_world * inverse_bind -- the skin matrix that
@@ -140,7 +168,22 @@ public:
      */
     static void palette_bounds(const std::vector<glm::vec3>& bone_min, const std::vector<glm::vec3>& bone_max,
                                const glm::vec3& static_min, const glm::vec3& static_max,
-                               const std::vector<glm::mat4>& skin_matrices, glm::vec3& out_min, glm::vec3& out_max);
+                               const std::vector<glm::mat4>& skin_matrices, glm::vec3& out_min, glm::vec3& out_max,
+                               bool preserve_volume = false);
+
+    /**
+     * @brief How much palette_bounds() grows its box under `preserve_volume`, as a fraction of
+     *        the box's own diagonal.
+     *
+     * A dual-quaternion blend is not a convex combination of the bones' transforms of a vertex:
+     * between two bones it follows the shorter arc around their screw axis, which bows outside
+     * the straight line a matrix blend takes, so the union of the bones' boxes does not contain
+     * it. Both ends of that arc ARE in the union, so its chord is at most the union's diagonal,
+     * and an arc's sagitta is at most half its chord -- half the diagonal therefore covers any
+     * two-bone blend. A loose culling box only costs a draw; a tight one that clips pops a
+     * character off the screen.
+     */
+    static constexpr float k_dq_bounds_margin = 0.5f;
 
     /**
      * @brief Builds the mesh if needed and skins this frame's vertices: with `gpu`, enqueues a
@@ -250,7 +293,10 @@ private:
     std::unique_ptr<GpuSkin>  gpu_;           // declared after mesh_: destroyed first
     mutable std::vector<Vertex> vertices_;
     mutable bool              cpu_vertices_dirty_ = false;
+    bool                      preserve_volume_ = false;
     std::vector<glm::mat4>    skin_matrices_;
+    std::vector<glm::mat4>    dq_palette_;   // preserve_volume: what the GPU palette carries instead
+
     std::vector<glm::mat4>    bone_worlds_;
     std::vector<uint8_t>      bone_valid_;
     std::vector<glm::vec3>    bone_min_, bone_max_;   // bind-pose box per bone (palette_bounds)

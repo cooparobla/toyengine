@@ -138,8 +138,48 @@ paints the weights of the active group.
 
 The tools are the same **Draw**, **Blur** and **Average**, and **Front Faces Only** works the
 same way. **Blend** offers **Mix**, **Add** and **Subtract**. Tick **Auto Normalize** to keep
-each vertex's weights across all groups adding up to 1. The header's **Weights** menu has
-**Normalize All** and **Clear Group**, which sets the active group's weights to 0.
+each vertex's weights across all groups adding up to 1.
+
+## Generate weights from a rig
+
+You rarely have to paint a character's weights from scratch. If the mesh hangs under a rig,
+the editor can work them out for you.
+
+In **Object Mode**, select the mesh and choose **Object > Parent > Bind to Rig with Automatic
+Weights**. The editor makes one vertex group per joint of the rig, weights every vertex by how
+far each bone's influence spreads over the surface, and turns the object into a skinned one so
+it follows the rig from then on. **With Envelope Weights** measures plain distance to each bone
+instead -- rougher, but it works on a mesh that is not a closed surface. **With Empty Groups**
+makes the groups and leaves the weights to you.
+
+In Weight Paint, the header's **Weights** menu runs the same thing again on the open mesh --
+**Automatic Weights from Rig** -- which is how you try different settings. They live in
+**Properties > Tool > Auto Weights**:
+
+| Setting | What it does |
+|---|---|
+| **Falloff** | **Bone Heat** spreads each bone's hold over the surface, so a weight cannot leak across a gap. **Envelope** uses straight-line distance |
+| **Ignore Hidden Bones** | A bone only weights skin it can be seen from, so a bone passing close behind a surface does not claim it |
+| **Max Influences** | Bones kept per vertex. The engine moves a vertex with four, and ignores the rest |
+| **Weight Limit** | Weights fainter than this are faded out and dropped |
+| **Smooth** | Blur passes over the result, for a softer handover at each joint |
+
+A bind is made at the rig's **rest pose**, so leave Pose Mode first; the editor refuses the
+bind while a pose is held.
+
+## Tidy up weights
+
+The **Weights** menu also holds, for the whole mesh:
+
+| Item | What it does |
+|---|---|
+| **Normalize All** | Scales each vertex's weights so they add up to 1 |
+| **Limit Total** | Keeps each vertex's four strongest influences -- what the engine actually uses |
+| **Clean** | Drops weights under 0.01, which move a vertex too little to see |
+| **Smooth** | Blurs every group toward each vertex's neighbours, softening a hard seam |
+| **Mirror > X / Y / Z** | Swaps each vertex's weights with the vertex opposite it, and side-named groups (**Arm_L** / **Arm_R**) with each other |
+| **Invert Active Group** | Every vertex's weight becomes 1 minus what it was |
+| **Clear Group** | Sets the active group's weights to 0 |
 
 ## Manage vertex groups
 
@@ -168,6 +208,6 @@ panel is saved with **Save Mesh** or **Ctrl+S**. See
 [Save your work and undo](modeling.md#save-your-work-and-undo).
 
 ---
-Sources: `editor/mesh/sculpt.h`, `editor/mesh/paint.h`, `editor/mesh/mesh_mirror.h`, `editor/app/ui/sculpt.inl`, `editor/app/ui/paint.inl`, `editor/app/ui/viewport_chrome.inl`, `editor/app/editor_app.h`, `editor/app/asset_documents.h`
+Sources: `editor/mesh/sculpt.h`, `editor/mesh/paint.h`, `editor/mesh/mesh_mirror.h`, `editor/mesh/auto_weights.h`, `editor/app/ui/sculpt.inl`, `editor/app/ui/paint.inl`, `editor/app/ui/weights.inl`, `editor/app/ui/viewport_chrome.inl`, `editor/app/editor_app.h`, `editor/app/asset_documents.h`
 
 Previous: [Modeling](modeling.md) | Next: [Materials and textures](materials-and-textures.md)

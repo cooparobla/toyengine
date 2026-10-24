@@ -10,6 +10,12 @@
  *    where its view ray happens to land. An orbit camera spun through a full turn at a shallow
  *    pitch sweeps that ray across hundreds of metres; a region centred on the ray drops and
  *    rebuilds whole rings for a camera that never moved.
+ *  - `a_rebuilt_chunk_keeps_its_water`: a chunk re-meshed for an edit must not take its lakes
+ *    and rivers away while it does. A chunk's water is a WaterBody the water system bakes over
+ *    a frame or two, so re-creating one leaves the bed showing through for those frames.
+ *  - `crossing_the_collision_radius_only_costs_a_collider`: the other half of the same contract.
+ *    A chunk coming inside `collision_radius` needs a collision mesh and nothing else, so it
+ *    must not be republished to get one.
  *  - `a_flight_keeps_its_work_off_the_frame`: a chunk arriving must not cost the frame it lands
  *    in. Everything about a chunk -- meshing, welding, the collider's BVH, the GPU buffers -- is
  *    built on a worker, so what is asserted is the owner thread's share of it. The frame
@@ -27,12 +33,19 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <iterator>
+#include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 #include <glm/glm.hpp>
 #include <toyengine/core/engine.h>
 #include <toyengine/scene/camera_controller.h>
+#include <physxcoopa/components/mesh_collider.h>
+
+#include <toyengine/water/water_body.h>
+#include <toyengine/water/water_system.h>
 #include <toyengine/world/terrain_component.h>
 #include <toyengine/world/terrain_system.h>
 
@@ -136,6 +149,236 @@ COOPA_TEST(looking_around_keeps_its_chunks) {
     // the region is following the view ray.
     expect(dropped.size() <= 8, "looking around drops almost nothing (" + std::to_string(dropped.size()) + ")");
     expect(added <= 8, "looking around builds almost nothing new (" + std::to_string(added) + ")");
+}
+
+namespace {
+
+/** @brief Per chunk, what a streaming test watches change: its published serial and its water. */
+struct ChunkWatch {
+    std::uint32_t serial    = 0;
+    bool          water     = false;   ///< It carries at least one WaterBody.
+    bool          published = false;   ///< Every one of them has a mesh on screen.
+    bool          collider  = false;
+};
+
+/**
+ * @brief Folds this frame's chunks into `seen`, which REMEMBERS one through its rebuild.
+ *
+ * A chunk being re-meshed is Meshing, not Live, so it drops out of a frame's snapshot for as
+ * long as its job runs -- and a straight snapshot-to-snapshot comparison would never see across
+ * the gap, which is exactly where a rebuild's before and after are. Only a chunk the terrain has
+ * stopped tracking altogether is forgotten.
+ */
+void merge_watch(std::unordered_map<toy::world::ChunkCoord, ChunkWatch>& seen,
+                 const std::unordered_map<toy::world::ChunkCoord, ChunkWatch>& now,
+                 const toy::world::TerrainComponent& terrain) {
+    for (auto it = seen.begin(); it != seen.end();) {
+        it = terrain.chunks().find(it->first) == terrain.chunks().end() ? seen.erase(it) : std::next(it);
+    }
+    for (const auto& [coord, state] : now) seen[coord] = state;
+}
+
+/** @brief Every chunk that is Live with an object, as ChunkWatch sees it. */
+std::unordered_map<toy::world::ChunkCoord, ChunkWatch> watch_chunks(const toy::world::TerrainComponent& terrain) {
+    std::unordered_map<toy::world::ChunkCoord, ChunkWatch> out;
+    for (const auto& [coord, chunk] : terrain.chunks()) {
+        if (chunk.state != toy::world::ChunkState::Live || chunk.object == nullptr) continue;
+        ChunkWatch w;
+        w.serial    = chunk.mesh_serial;
+        w.published = true;
+        w.collider  = chunk.object->get_component<coopa::physx::components::MeshCollider>() != nullptr;
+        for (const auto& child : chunk.object->children()) {
+            auto* body = child->get_component<toy::water::WaterBody>();
+            if (body == nullptr) continue;
+            w.water = true;
+            if (!toy::water::WaterSystem::is_published(*body)) w.published = false;
+        }
+        out.emplace(coord, w);
+    }
+    return out;
+}
+
+} // namespace
+
+/**
+ * @brief A chunk re-meshed for an edit must keep its water drawing the whole way through.
+ *
+ * Painting a surface kind changes what a chunk draws and nothing else -- it moves no ground, so
+ * it moves no water -- but it marks the chunk stale, and a stale chunk is rebuilt by replacing
+ * its SceneObject. Its terrain mesh is swapped in the frame the rebuild lands and never blinks;
+ * its water children are bare WaterBodies, and toy::water::WaterSystem bakes and publishes those
+ * over the following frame or two -- so re-creating them blinks: a lake or a river vanishes for
+ * a frame and the bed under it shows through, which at a distance reads as chunks flashing.
+ *
+ * Water the rebuild has not changed is therefore carried across instead. What is asserted is the
+ * invariant that makes the blink impossible: while a chunk keeps an object on the tree, water it
+ * has already published stays published. `rebuilt` is checked too -- without rebuilds the edits
+ * would prove nothing.
+ */
+COOPA_TEST(a_rebuilt_chunk_keeps_its_water) {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016");
+    ScopedEnv no_input("NO_INPUT", "1");
+
+    toy::core::AppConfig config = make_test_config(voxel_terrain_demo(), 320, 180, 160, 90);
+    toy::core::Engine engine(std::move(config));
+
+    auto* camera = coopa::gfx::engine::components::CameraComponent::main();
+    coopa::test::require(camera != nullptr && camera->scene != nullptr && camera->owner != nullptr,
+                         "the demo registers a main camera");
+    coopa::scene::Scene& scene = *camera->scene;
+    toy::world::TerrainComponent& terrain = prepare(scene);
+
+    const float chunk_world = terrain.params.chunk_world_size();
+    coopa::scene::SceneObject* marker = scene.find_object_by_path(camera->focus_object);
+    coopa::test::require(marker != nullptr && marker->get_transform() != nullptr, "the focus marker is there");
+    marker->get_transform()->transform().set_position(glm::vec3(5.5f * chunk_world, 5.5f * chunk_world, 48.0f));
+    if (auto* controller = camera->owner->get_component<toy::scene::CameraController>()) {
+        controller->distance           = 2.0f;
+        controller->follow_smoothing   = 0.0f;
+        controller->movement_smoothing = 0.0f;
+        controller->pitch_deg          = 20.0f;
+    }
+    tick_until(engine, 2400, [&] { return count_live_chunks(terrain) >= 70; });
+    coopa::test::require(terrain.is_ready(), "the world comes up");
+    for (int i = 0; i < 120; ++i) engine.tick();   // every first bake settles
+
+    // The chunks worth editing are the ones with water on them. An archipelago has plenty.
+    std::vector<toy::world::ChunkCoord> watery;
+    for (const auto& [coord, w] : watch_chunks(terrain)) {
+        if (w.water) watery.push_back(coord);
+    }
+    std::sort(watery.begin(), watery.end(), [](const auto& a, const auto& b) {
+        return a.y != b.y ? a.y < b.y : a.x < b.x;   // deterministic, whatever the map order was
+    });
+    coopa::test::require(watery.size() >= 4, "the loaded region has water on it (" +
+                         std::to_string(watery.size()) + " chunks)");
+
+    std::unordered_map<toy::world::ChunkCoord, ChunkWatch> seen = watch_chunks(terrain);
+    int holes = 0, rebuilt = 0, watched = 0;
+    const auto sample = [&] {
+        auto now = watch_chunks(terrain);
+        for (const auto& [coord, state] : now) {
+            const auto was = seen.find(coord);
+            if (was == seen.end() || !was->second.water || !state.water) continue;
+            if (state.serial > was->second.serial) ++rebuilt;
+            if (!was->second.published) continue;
+            ++watched;
+            if (!state.published) ++holes;
+        }
+        merge_watch(seen, now, terrain);
+    };
+
+    // Paint the middle of each watery chunk, one per pass, alternating kinds so every pass is a
+    // real edit; then let the rebuild land and watch what the chunk does with its water.
+    const std::int32_t size = terrain.params.chunk_size;
+    for (int pass = 0; pass < 4; ++pass) {
+        for (const toy::world::ChunkCoord& coord : watery) {
+            const std::int32_t x0 = coord.x * size + size / 4;
+            const std::int32_t y0 = coord.y * size + size / 4;
+            terrain.paint_tiles(toy::world::IRect{x0, y0, x0 + size / 2, y0 + size / 2},
+                                pass % 2 == 0 ? toy::world::TileKind::Stone : toy::world::TileKind::Dirt,
+                                /*side=*/false);
+        }
+        for (int i = 0; i < 40; ++i) {
+            engine.tick();
+            sample();
+        }
+    }
+
+    std::printf("  %d chunk rebuilds over %d watched chunk-frames, %d lost their water\n",
+                rebuilt, watched, holes);
+    expect(rebuilt > 0, "the edits rebuilt chunks (" + std::to_string(rebuilt) + ")");
+    expect(watched > 1000, "the passes watched water (" + std::to_string(watched) + " chunk-frames)");
+    expect(holes == 0, "no chunk ever gives its water back unpublished (" + std::to_string(holes) + ")");
+}
+
+/**
+ * @brief Coming inside `collision_radius` costs a chunk a collider and nothing else.
+ *
+ * A chunk crossing the threshold needs a collision mesh it was not built with, and nothing
+ * whatever besides: its surface, its LOD levels and its water are all still right. Rebuilding
+ * the chunk to get one re-meshes it, re-uploads its vertex and index buffers, republishes its
+ * asset and swaps its SceneObject -- which also throws away everything the renderer keys on that
+ * object's MeshRenderer, its motion vectors and its LOD hysteresis among them. The collider-only
+ * pass (ChunkBuildJob::collision_only) builds the shape on a worker and hangs it on the object
+ * the chunk is already drawing from.
+ *
+ * `mesh_serial` is bumped once per publish, so it is exactly the thing that must NOT move.
+ */
+COOPA_TEST(crossing_the_collision_radius_only_costs_a_collider) {
+    ScopedEnv fixed_dt("FIXED_DT", "0.016");
+    ScopedEnv no_input("NO_INPUT", "1");
+
+    toy::core::AppConfig config = make_test_config(voxel_terrain_demo(), 320, 180, 160, 90);
+    toy::core::Engine engine(std::move(config));
+
+    auto* camera = coopa::gfx::engine::components::CameraComponent::main();
+    coopa::test::require(camera != nullptr && camera->scene != nullptr && camera->owner != nullptr,
+                         "the demo registers a main camera");
+    coopa::scene::Scene& scene = *camera->scene;
+    toy::world::TerrainComponent& terrain = prepare(scene);
+    // Well inside the view radius, so chunks cross it in the middle of the loaded region rather
+    // than at its edge, where they would be arriving (and publishing) anyway.
+    terrain.collision_radius = 2;
+
+    const float chunk_world = terrain.params.chunk_world_size();
+    coopa::scene::SceneObject* marker = scene.find_object_by_path(camera->focus_object);
+    coopa::test::require(marker != nullptr && marker->get_transform() != nullptr, "the focus marker is there");
+    auto* marker_transform = marker->get_transform();
+    if (auto* controller = camera->owner->get_component<toy::scene::CameraController>()) {
+        controller->distance           = 2.0f;
+        controller->follow_smoothing   = 0.0f;
+        controller->movement_smoothing = 0.0f;
+        controller->pitch_deg          = 20.0f;
+    }
+    const auto park = [&](float cx, float cy) {
+        marker_transform->transform().set_position(glm::vec3(cx * chunk_world, cy * chunk_world, 48.0f));
+    };
+    park(5.5f, 5.5f);
+    tick_until(engine, 2400, [&] { return count_live_chunks(terrain) >= 70; });
+    coopa::test::require(terrain.is_ready(), "the world comes up");
+    for (int i = 0; i < 120; ++i) engine.tick();
+
+    std::unordered_map<toy::world::ChunkCoord, ChunkWatch> seen = watch_chunks(terrain);
+    int gained = 0, republished = 0, lost_water = 0;
+    const auto sample = [&] {
+        auto now = watch_chunks(terrain);
+        for (const auto& [coord, state] : now) {
+            const auto was = seen.find(coord);
+            if (was == seen.end()) continue;
+            if (state.serial > was->second.serial) ++republished;
+            if (state.collider && !was->second.collider) ++gained;
+            if (was->second.water && was->second.published && state.water && !state.published) ++lost_water;
+        }
+        merge_watch(seen, now, terrain);
+    };
+
+    // The churn circuit: chunks cross the collision threshold in both directions the whole way.
+    float angle = 0.0f;
+    for (int step = 0; step < 480; ++step) {
+        angle += 0.026f;
+        park(5.0f + 3.2f * std::cos(angle), 5.0f + 3.2f * std::sin(angle));
+        engine.tick();
+        sample();
+    }
+
+    // What the flight ended on: inside the radius is collidable, outside is not.
+    const toy::world::ChunkCoord centre = terrain.params.chunk_at(
+        marker_transform->transform().get_world_matrix()[3]);
+    int inside = 0, inside_collidable = 0;
+    for (const auto& [coord, state] : watch_chunks(terrain)) {
+        if (!terrain_wants_collision(terrain, coord, centre)) continue;
+        ++inside;
+        inside_collidable += state.collider ? 1 : 0;
+    }
+
+    std::printf("  %d colliders gained, %d chunks republished, %d of %d inside the radius collide\n",
+                gained, republished, inside_collidable, inside);
+    expect(gained > 0, "chunks crossed into the radius (" + std::to_string(gained) + " colliders gained)");
+    expect(republished == 0, "crossing the radius republishes nothing (" + std::to_string(republished) + ")");
+    expect(lost_water == 0, "and takes no chunk's water away (" + std::to_string(lost_water) + ")");
+    expect(inside > 4 && inside_collidable == inside, "every chunk inside the radius collides (" +
+           std::to_string(inside_collidable) + " of " + std::to_string(inside) + ")");
 }
 
 COOPA_TEST(a_flight_keeps_its_work_off_the_frame) {

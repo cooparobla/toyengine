@@ -66,6 +66,10 @@ three groups below.
    bone's bind-pose box of its influenced vertices, transformed and unioned. Motion vectors stay
    per object (a skinned mesh's surface motion counts as scene motion, but limbs get no
    per-vertex velocity). `skinning: cpu` (or no compute) keeps the CPU loop + `update_vertices()`.
+   With `preserve_volume` on the component, the same palette slot carries a dual quaternion and a
+   scale instead of a matrix (`compute_dq_palette()`) and a push constant switches `skin.comp` to
+   blending the rotations on the unit sphere, so a twisted joint keeps its cross section; the
+   culling box is grown by `k_dq_bounds_margin` because that blend bows outside the bones' union.
 
 **Scene** (`record_scene_()`):
 

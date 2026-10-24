@@ -157,7 +157,15 @@ chest use `match_target_rotation`. FootIK on such a rig switches to `targets` mo
 - **Skinned mesh**: bones are child objects; the mesh's `weights:` vertex groups are named after
   them (create-mesh). The skin object gets a MeshRenderer (material only, no `mesh_path`) and
   `SkinnedMeshRenderer { mesh_path: <mesh> }` (optional `bones:` list, `rig:`). Bind pose = the
-  rest pose at start.
+  rest pose at start. `preserve_volume: true` blends the bones as dual quaternions, so a twisted
+  joint keeps its cross section instead of pinching shut (Blender's option of the same name).
+- **The weights need not be authored.** In the editor, select the skin mesh and
+  `Object > Parent > Bind to Rig with Automatic Weights` generates them from the rig's joints
+  (bone heat, as Blender's automatic weights do) and makes the object a skinned one in one step;
+  Weight Paint's `Weights > Automatic Weights from Rig` re-runs it with different settings
+  (Properties > Tool > Auto Weights), alongside Limit Total / Clean / Smooth / Mirror. Headless,
+  the same generator is `toy::scene::compute_auto_weights()`
+  (`toyengine/scene/auto_skin_weights.h`) over welded positions, triangles and bone segments.
 
 ## Procedure
 

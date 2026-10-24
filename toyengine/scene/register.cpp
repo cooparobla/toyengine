@@ -863,6 +863,7 @@ void register_scene_components(coopa::gfx::core::Device& device,
                 smr->set_bones(std::move(bones));
             }
             if (node.contains("rig")) smr->set_rig(node.at("rig").get_value<std::string>());
+            if (node.contains("preserve_volume")) smr->set_preserve_volume(node.at("preserve_volume").get_value<bool>());
         });
 }
 

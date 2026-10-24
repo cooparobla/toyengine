@@ -219,11 +219,21 @@ private:
     /**
      * @brief Brings a Live chunk's collider in line with `collision_radius`.
      *
-     * Crossing inward needs geometry the chunk was not built with, so it is marked stale and
-     * rebuilt (its old mesh keeps drawing meanwhile). Crossing outward only has to let the
-     * collider go, which is a component removal and a retired shape -- no re-mesh.
+     * Crossing inward needs geometry the chunk was not built with, so it raises
+     * TerrainChunk::wants_collision and a collider-only job supplies it -- the chunk goes on
+     * drawing what it already has throughout. Crossing outward only has to let the collider go,
+     * which is a component removal and a retired shape.
      */
     void sync_chunk_collision_(TerrainComponent& terrain, TerrainChunk& chunk, bool wanted);
+
+    /**
+     * @brief Hangs a finished collider-only build on the object the chunk is already drawing.
+     *
+     * Everything else about the chunk is left alone -- that is the point of the pass. Drops the
+     * shape instead when the chunk left `collision_radius` again while the job ran.
+     */
+    void attach_chunk_collision_(TerrainComponent& terrain, coopa::scene::Scene& scene,
+                                 TerrainChunk& chunk);
 
 
     /** @brief Closes and erases retiring chunks whose in-flight job has finally stopped. */
@@ -250,9 +260,25 @@ private:
     void submit_queued_chunks_(TerrainComponent& terrain, const ChunkCoord& centre,
                                const coopa::scene::FrameContext& ctx);
 
-    /** @brief Creates the GPU mesh, publishes it, and hangs a drawable (and collidable) child off the terrain. */
+    /**
+     * @brief Creates the GPU mesh, publishes it, and hangs a drawable (and collidable) child off
+     *        the terrain.
+     *
+     * `kept_water`, when not empty, is this chunk's existing water children, taken off the old
+     * object by take_chunk_water_(): they are re-parented onto the new one instead of fresh
+     * WaterBodies being built, so a rebuild keeps surfaces that are already baked and drawing.
+     */
     void create_chunk_object_(TerrainComponent& terrain, coopa::scene::Scene& scene,
-                              TerrainChunk& chunk);
+                              TerrainChunk& chunk,
+                              std::vector<std::unique_ptr<coopa::scene::SceneObject>> kept_water = {});
+
+    /**
+     * @brief Takes a chunk's water children off its object, still baked, for the rebuild
+     *        replacing it; empty when the chunk has no object or no water.
+     *
+     * Only sound when the new build's water is identical -- see TerrainChunk::water_hash.
+     */
+    std::vector<std::unique_ptr<coopa::scene::SceneObject>> take_chunk_water_(TerrainChunk& chunk);
 
     /** @brief Takes a chunk's SceneObject off the tree, retiring its collider; keeps the object. */
     std::unique_ptr<coopa::scene::SceneObject> detach_chunk_object_(TerrainComponent& terrain,

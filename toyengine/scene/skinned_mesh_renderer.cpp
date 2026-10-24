@@ -12,8 +12,23 @@
 #include <gfxcoopa/memory/storage_buffer.h>
 #include <gfxcoopa/pipeline/descriptor.h>
 
+#include <glm/gtc/quaternion.hpp>
+
 namespace toy {
 namespace scene {
+
+namespace {
+
+/** @brief The quaternion packing compute_dq_palette() documents: (x, y, z, w) in a vec4. */
+glm::vec4 pack_quat(const glm::quat& q) { return glm::vec4(q.x, q.y, q.z, q.w); }
+
+/** @brief Rotates `v` by the unit quaternion `q` in (x, y, z, w) order -- skin.comp's `rotate_by`. */
+glm::vec3 rotate_by(const glm::vec4& q, const glm::vec3& v) {
+    const glm::vec3 r(q);
+    return v + 2.0f * glm::cross(r, glm::cross(r, v) + q.w * v);
+}
+
+} // namespace
 
 void SkinnedMeshRenderer::start() {
     if (!owner) return;
@@ -24,11 +39,69 @@ void SkinnedMeshRenderer::start() {
     if (rig_) snapshot_rest_(rig_);
 }
 
-void SkinnedMeshRenderer::skin(const SkinnedMeshSource& src, const std::vector<glm::mat4>& skin_matrices, std::vector<Vertex>& out) {
+void SkinnedMeshRenderer::compute_dq_palette(const std::vector<glm::mat4>& skin_matrices, std::vector<glm::mat4>& out) {
+    out.assign(skin_matrices.size(), glm::mat4(0.0f));
+    for (size_t i = 0; i < skin_matrices.size(); ++i) {
+        const glm::mat4& m = skin_matrices[i];
+        glm::vec3 scale(glm::length(glm::vec3(m[0])), glm::length(glm::vec3(m[1])), glm::length(glm::vec3(m[2])));
+        glm::mat3 rot(glm::vec3(m[0]) / (scale.x > 1e-8f ? scale.x : 1.0f),
+                      glm::vec3(m[1]) / (scale.y > 1e-8f ? scale.y : 1.0f),
+                      glm::vec3(m[2]) / (scale.z > 1e-8f ? scale.z : 1.0f));
+        // A mirrored bone: keep the reflection in the scale, where it cannot turn into a
+        // 180-degree rotation the blend would then interpolate THROUGH.
+        if (glm::determinant(rot) < 0.0f) { rot[0] = -rot[0]; scale.x = -scale.x; }
+        const glm::quat q = glm::normalize(glm::quat_cast(rot));
+        const glm::vec3 t(m[3]);
+        const glm::quat dual = 0.5f * (glm::quat(0.0f, t.x, t.y, t.z) * q);
+        out[i][0] = pack_quat(q);
+        out[i][1] = pack_quat(dual);
+        out[i][2] = glm::vec4(scale, 0.0f);
+        out[i][3] = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+    }
+}
+
+void SkinnedMeshRenderer::skin(const SkinnedMeshSource& src, const std::vector<glm::mat4>& skin_matrices,
+                               std::vector<Vertex>& out, bool preserve_volume) {
+    std::vector<glm::mat4> dq;
+    if (preserve_volume) compute_dq_palette(skin_matrices, dq);
     out.resize(src.vertices.size());
     for (size_t i = 0; i < src.vertices.size(); ++i) {
         const glm::ivec4& j = (i < src.joints.size())  ? src.joints[i]  : glm::ivec4(-1);
         const glm::vec4&  w = (i < src.weights.size()) ? src.weights[i] : glm::vec4(0.0f);
+        if (preserve_volume) {
+            // The dual-quaternion blend skin.comp's mode 1 runs, step for step: the real parts
+            // are brought into one hemisphere against the first influence (a quaternion and its
+            // negation are the same rotation, but averaging them cancels), summed, and the
+            // normalisation of the real part divides the dual part too.
+            glm::vec4 qr(0.0f), qd(0.0f), pivot(0.0f);
+            glm::vec3 scale(0.0f);
+            float weight_sum = 0.0f;
+            for (int c = 0; c < 4; ++c) {
+                if (j[c] < 0 || w[c] <= 0.0f || static_cast<size_t>(j[c]) >= dq.size()) continue;
+                const glm::mat4& p = dq[static_cast<size_t>(j[c])];
+                if (weight_sum == 0.0f) pivot = p[0];
+                const float sign = (glm::dot(glm::vec4(p[0]), pivot) < 0.0f) ? -1.0f : 1.0f;
+                qr += w[c] * sign * glm::vec4(p[0]);
+                qd += w[c] * sign * glm::vec4(p[1]);
+                scale += w[c] * glm::vec3(p[2]);
+                weight_sum += w[c];
+            }
+            out[i] = src.vertices[i];
+            const float qr_len = glm::length(qr);
+            if (weight_sum > 1e-6f && qr_len > 1e-8f) {
+                qr /= qr_len;
+                qd /= qr_len;
+                const glm::vec3 p = src.vertices[i].position * (scale / weight_sum);
+                out[i].position = rotate_by(qr, p) +
+                                  2.0f * (qr.w * glm::vec3(qd) - qd.w * glm::vec3(qr) +
+                                          glm::cross(glm::vec3(qr), glm::vec3(qd)));
+                // Rigid/uniformly-scaled bones only, exactly as the matrix path assumes.
+                out[i].normal = glm::normalize(rotate_by(qr, src.vertices[i].normal));
+                const glm::vec3 t = glm::normalize(rotate_by(qr, glm::vec3(src.vertices[i].tangent)));
+                out[i].tangent = glm::vec4(t, src.vertices[i].tangent.w);
+            }
+            continue;
+        }
         glm::vec3 pos(0.0f), nrm(0.0f), tan(0.0f);
         float weight_sum = 0.0f;
         for (int c = 0; c < 4; ++c) {
@@ -71,7 +144,8 @@ void SkinnedMeshRenderer::compute_palette(const glm::mat4& owner_world, const st
 
 void SkinnedMeshRenderer::palette_bounds(const std::vector<glm::vec3>& bone_min, const std::vector<glm::vec3>& bone_max,
                            const glm::vec3& static_min, const glm::vec3& static_max,
-                           const std::vector<glm::mat4>& skin_matrices, glm::vec3& out_min, glm::vec3& out_max) {
+                           const std::vector<glm::mat4>& skin_matrices, glm::vec3& out_min, glm::vec3& out_max,
+                           bool preserve_volume) {
     out_min = static_min;
     out_max = static_max;
     for (size_t b = 0; b < bone_min.size() && b < skin_matrices.size(); ++b) {
@@ -85,6 +159,12 @@ void SkinnedMeshRenderer::palette_bounds(const std::vector<glm::vec3>& bone_min,
             out_max = glm::max(out_max, p);
         }
     }
+    // A dual-quaternion blend bows outside the union -- see k_dq_bounds_margin.
+    if (preserve_volume && out_min.x <= out_max.x) {
+        const float margin = glm::length(out_max - out_min) * k_dq_bounds_margin;
+        out_min -= glm::vec3(margin);
+        out_max += glm::vec3(margin);
+    }
 }
 
 void SkinnedMeshRenderer::upload(uint32_t frame_slot, toy::render::passes::SkinningPass* gpu) {
@@ -92,19 +172,24 @@ void SkinnedMeshRenderer::upload(uint32_t frame_slot, toy::render::passes::Skinn
     update_palette_();
     if (gpu_) {
         glm::vec3 lo, hi;
-        palette_bounds(bone_min_, bone_max_, static_min_, static_max_, skin_matrices_, lo, hi);
+        palette_bounds(bone_min_, bone_max_, static_min_, static_max_, skin_matrices_, lo, hi, preserve_volume_);
+        if (preserve_volume_) compute_dq_palette(skin_matrices_, dq_palette_);
+        // Either palette is one mat4 per bone, so the buffer and the descriptor set are the
+        // same either way; the push constant tells skin.comp how to read it.
+        const std::vector<glm::mat4>& palette = preserve_volume_ ? dq_palette_ : skin_matrices_;
         toy::render::passes::SkinningPass::Job job;
         job.set          = &gpu_->sets[frame_slot % gpu_->sets.size()];
         job.palette      = &gpu_->palette;
-        job.matrices     = skin_matrices_.empty() ? nullptr : skin_matrices_.data();
-        job.bone_count   = static_cast<uint32_t>(skin_matrices_.size());
+        job.matrices     = palette.empty() ? nullptr : palette.data();
+        job.bone_count   = static_cast<uint32_t>(palette.size());
         job.vertex_count = static_cast<uint32_t>(source_->vertices.size());
         job.frame_slot   = frame_slot;
+        job.preserve_volume = preserve_volume_;
         gpu->enqueue(job);
         mesh_->mark_gpu_written(frame_slot, lo, hi);
         cpu_vertices_dirty_ = true;
     } else {
-        skin(*source_, skin_matrices_, vertices_);
+        skin(*source_, skin_matrices_, vertices_, preserve_volume_);
         cpu_vertices_dirty_ = false;
         mesh_->update_vertices(vertices_.data(), vertices_.size(), frame_slot);
     }
@@ -119,7 +204,7 @@ void SkinnedMeshRenderer::rebuild() {
 
 const std::vector<SkinnedMeshRenderer::Vertex>& SkinnedMeshRenderer::skinned_vertices() const {
     if (cpu_vertices_dirty_ && source_.is_loaded()) {
-        skin(*source_, skin_matrices_, vertices_);
+        skin(*source_, skin_matrices_, vertices_, preserve_volume_);
         cpu_vertices_dirty_ = false;
     }
     return vertices_;

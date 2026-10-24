@@ -378,6 +378,41 @@ public:
     void set_scene_ui_placement(std::optional<ScreenUiPlacement> placement) { scene_ui_placement_ = placement; }
     const std::optional<ScreenUiPlacement>& scene_ui_placement() const { return scene_ui_placement_; }
 
+    /**
+     * @brief The player's interface scale, applied every frame to every screen-space canvas in
+     *        the active scene that does not set `ignore_ui_scale`.
+     *
+     * 1 is the authored size. Larger makes the whole HUD bigger (and text re-bakes rather than
+     * blurring -- see CanvasComponent::set_ui_scale(), which this drives). Loaded at startup
+     * from the per-player settings key `ui.hud_scale`; a settings screen writes it back there.
+     * Placed canvases (the editor's preview) are left alone, so a designer sees authored size.
+     */
+    void set_ui_scale(float scale) { ui_scale_ = scale > 0.0f ? scale : 1.0f; }
+    float ui_scale() const { return ui_scale_; }
+
+    /** @brief The settings key set_ui_scale()'s value is loaded from and saved to. */
+    static constexpr const char* k_ui_scale_setting = "ui.hud_scale";
+
+    /**
+     * @brief Whether the pointer is currently over, or dragging, an interactive UI widget in
+     *        the active scene -- or whether a blocking modal is up at all.
+     *
+     * Game code that reads the mouse directly must consult this before acting on a click, or a
+     * press on a HUD button also fires whatever that button sits in front of. The UI's own
+     * dispatch (EventSystem) cannot do this for it: a canvas consumes an event only within its
+     * own tree, and gameplay input is read from coopa::input::Input, which knows nothing of
+     * either.
+     *
+     * True when any screen-space canvas reports a hovered or pressed object, which is "the
+     * nearest ancestor carrying a pointer handler" -- so decorative panels and labels do not
+     * count, but a button, slider, slot, drag handle or anything else that reacts does.
+     *
+     * @code
+     * if (!engine.ui_wants_pointer() && actions->is_pressed(pick, *input)) pick_under_cursor();
+     * @endcode
+     */
+    bool ui_wants_pointer();
+
     /** @brief The window-pixel rect the low-res scene image currently lands in. */
     render::LetterboxRect display_rect() const;
 
@@ -434,6 +469,15 @@ public:
     /// Blocks until the GPU is idle (before destroying a resource a frame may reference).
     void wait_idle() { ctx_.wait_idle(); }
 
+    /**
+     * @brief Asks the main loop to stop: run() returns after the frame in flight finishes.
+     *
+     * What a pause menu's "Quit" needs, and the only route to it from game code -- the window
+     * lives behind a private context. Deliberately a REQUEST: the frame carries on to its end,
+     * so a click handler can call this without the scene being torn down under it.
+     */
+    void request_quit() { ctx_.window().set_should_close(true); }
+
 private:
     /**
      * @brief Fills in EngineOptions defaults (project_root -> default_project_root()). Runs first
@@ -460,6 +504,8 @@ private:
      *        the same engine, the UI sound library, and the player's saved bus volumes.
      */
     void init_audio_();
+    void init_user_settings_();
+    void init_ui_icons_();
 
     /**
      * @brief The save system: config.yaml's `save:` keys, and the host hooks it takes the
@@ -1114,6 +1160,7 @@ private:
      * compared against never disagree.
      */
     void drive_ui_canvases_(coopa::scene::Scene& scene, const std::optional<ScreenUiPlacement>& placement);
+    float ui_scale_ = 1.0f;   ///< See set_ui_scale().
 
     /**
      * @brief Builds a world-space ray through the cursor, for world-space UI picking.

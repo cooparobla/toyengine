@@ -6,6 +6,13 @@
 //
 // Matches SkinnedMeshRenderer::skin() exactly: a weighted blend normalised by the weight sum,
 // normal/tangent renormalised, and a vertex with no usable influence keeping its bind pose.
+//
+// Two modes, the one the push constant names. Mode 0 blends the palette's skin MATRICES
+// (linear blend skinning). Mode 1 is `preserve_volume`: the same palette slots then hold a
+// dual quaternion and a scale instead (SkinnedMeshRenderer::compute_dq_palette() -- column 0
+// the rotation quaternion xyzw, column 1 the dual part, column 2 the per-axis scale), and the
+// rotations are blended on the unit sphere, which holds a twisted limb's cross section open
+// where averaging matrices collapses it.
 layout(local_size_x = 64) in;
 
 struct BindVertex {
@@ -24,33 +31,68 @@ layout(std430, set = 0, binding = 2) writeonly buffer Out     { float out_v[]; }
 layout(push_constant) uniform Push {
     uint vertex_count;
     uint bone_count;
+    uint preserve_volume;   // 0: blend matrices; 1: blend dual quaternions
 } pc;
+
+/// Rotates `v` by the unit quaternion `q`, packed (x, y, z, w).
+vec3 rotate_by(vec4 q, vec3 v) {
+    return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v);
+}
 
 void main() {
     uint i = gl_GlobalInvocationID.x;
     if (i >= pc.vertex_count) return;
     BindVertex b = bind_pose[i];
 
-    vec3 pos = vec3(0.0), nrm = vec3(0.0), tan = vec3(0.0);
-    float wsum = 0.0;
-    for (int c = 0; c < 4; ++c) {
-        int j = b.joints[c];
-        float w = b.weights[c];
-        if (j < 0 || w <= 0.0 || uint(j) >= pc.bone_count) continue;
-        mat4 m = palette[j];
-        pos += w * (m * vec4(b.pos_u.xyz, 1.0)).xyz;
-        nrm += w * (m * vec4(b.nrm_v.xyz, 0.0)).xyz;
-        tan += w * (m * vec4(b.tangent.xyz, 0.0)).xyz;
-        wsum += w;
-    }
-
     vec3 p = b.pos_u.xyz, n = b.nrm_v.xyz, t = b.tangent.xyz;
-    if (wsum > 1e-6) {
-        p = pos / wsum;
-        float nl = length(nrm);
-        if (nl > 1e-6) n = nrm / nl;
-        float tl = length(tan);
-        if (tl > 1e-6) t = tan / tl;
+
+    if (pc.preserve_volume != 0u) {
+        // The real parts are brought into one hemisphere against the first influence: a
+        // quaternion and its negation are the same rotation, but averaging them cancels.
+        vec4 qr = vec4(0.0), qd = vec4(0.0), pivot = vec4(0.0);
+        vec3 scale = vec3(0.0);
+        float wsum = 0.0;
+        for (int c = 0; c < 4; ++c) {
+            int j = b.joints[c];
+            float w = b.weights[c];
+            if (j < 0 || w <= 0.0 || uint(j) >= pc.bone_count) continue;
+            mat4 dq = palette[j];
+            if (wsum == 0.0) pivot = dq[0];
+            float sgn = (dot(dq[0], pivot) < 0.0) ? -1.0 : 1.0;
+            qr += w * sgn * dq[0];
+            qd += w * sgn * dq[1];
+            scale += w * dq[2].xyz;
+            wsum += w;
+        }
+        float qr_len = length(qr);
+        if (wsum > 1e-6 && qr_len > 1e-8) {
+            qr /= qr_len;              // normalising the real part divides the dual part too
+            qd /= qr_len;
+            vec3 sp = b.pos_u.xyz * (scale / wsum);
+            p = rotate_by(qr, sp) + 2.0 * (qr.w * qd.xyz - qd.w * qr.xyz + cross(qr.xyz, qd.xyz));
+            n = normalize(rotate_by(qr, b.nrm_v.xyz));
+            t = normalize(rotate_by(qr, b.tangent.xyz));
+        }
+    } else {
+        vec3 pos = vec3(0.0), nrm = vec3(0.0), tan = vec3(0.0);
+        float wsum = 0.0;
+        for (int c = 0; c < 4; ++c) {
+            int j = b.joints[c];
+            float w = b.weights[c];
+            if (j < 0 || w <= 0.0 || uint(j) >= pc.bone_count) continue;
+            mat4 m = palette[j];
+            pos += w * (m * vec4(b.pos_u.xyz, 1.0)).xyz;
+            nrm += w * (m * vec4(b.nrm_v.xyz, 0.0)).xyz;
+            tan += w * (m * vec4(b.tangent.xyz, 0.0)).xyz;
+            wsum += w;
+        }
+        if (wsum > 1e-6) {
+            p = pos / wsum;
+            float nl = length(nrm);
+            if (nl > 1e-6) n = nrm / nl;
+            float tl = length(tan);
+            if (tl > 1e-6) t = tan / tl;
+        }
     }
 
     uint o = i * 12u;

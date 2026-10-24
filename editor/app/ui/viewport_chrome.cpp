@@ -344,6 +344,24 @@ void EditorApp::draw_object_menu_(imm::Context& ctx) {
     }
     if (ctx.begin_menu("Parent", any, I::Link)) {
         if (ctx.menu_item("Object (keep transform)", "Ctrl P", nullptr, doc_.selection().size() > 1)) parent_selection_to_active_();
+        ctx.menu_separator();
+        ObjectId bind_skin = 0, bind_rig = 0;
+        const bool bindable = bind_targets_(bind_skin, bind_rig);
+        if (ctx.menu_item("Bind to Rig with Automatic Weights", "", nullptr, bindable, I::WeightPaint)) {
+            bind_to_rig_(bind_skin, bind_rig, BindWeights::Automatic);
+        }
+        ctx.tooltip("Bind to Rig with Automatic Weights\nMake the mesh follow the rig under it: a vertex group per bone,\n"
+                    "weighted by how the bone's heat spreads over the surface (Blender's automatic weights)");
+        if (ctx.menu_item("Bind to Rig with Envelope Weights", "", nullptr, bindable, I::WeightPaint)) {
+            bind_to_rig_(bind_skin, bind_rig, BindWeights::Envelope);
+        }
+        ctx.tooltip("Bind to Rig with Envelope Weights\nWeights from plain distance to each bone -- rougher than automatic\n"
+                    "weights, but it needs no closed surface");
+        if (ctx.menu_item("Bind to Rig with Empty Groups", "", nullptr, bindable)) {
+            bind_to_rig_(bind_skin, bind_rig, BindWeights::EmptyGroups);
+        }
+        ctx.tooltip("Bind to Rig with Empty Groups\nOne vertex group per bone and no weights at all, to paint by hand");
+        ctx.menu_separator();
         if (ctx.menu_item("Clear Parent (keep transform)", "Alt P")) clear_parent_keep_transform_();
         ctx.end_menu();
     }

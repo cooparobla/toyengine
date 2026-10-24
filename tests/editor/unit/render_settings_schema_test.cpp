@@ -84,6 +84,7 @@ COOPA_TEST(render_tab_lists_every_engine_key_once_with_its_default) {
         {"render_height", [](const PR& r) { return EngineDefault(r.render_height); }},
         {"scale_divisor", [](const PR& r) { return EngineDefault(r.scale_divisor); }},
         {"upscale_mode", [](const PR& r) { return EngineDefault(r.upscale_mode); }},
+        {"upscale_filter", [](const PR& r) { return EngineDefault(r.upscale_filter); }},
         {"exposure", [](const PR& r) { return EngineDefault(r.exposure); }},
         {"auto_exposure_enabled", [](const PR& r) { return EngineDefault(r.auto_exposure_enabled); }},
         {"auto_exposure_compensation", [](const PR& r) { return EngineDefault(r.auto_exposure_compensation); }},

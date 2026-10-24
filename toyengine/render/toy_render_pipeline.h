@@ -155,6 +155,7 @@
     X(world_ui_enabled) \
     X(screen_ui_enabled) \
     X(resolution_mode) \
+    X(upscale_filter) \
     X(render_width) \
     X(render_height) \
     X(fill_aspect) \
@@ -1909,6 +1910,22 @@ private:
     /// pay for the second atlas image, and one that selects it in a single scene must not
     /// need a pipeline rebuild to get it. Null = draw every caster live, the pre-cache path.
     std::unique_ptr<DirShadowCache> dir_shadow_cache_;
+    /**
+     * @brief The sampler the final scene-to-display resample uses, per
+     *        ToyRenderConfig::upscale_filter and the current letterbox scale.
+     *
+     * Called only where a display-layer pass is (re)built -- never per frame -- so it obeys
+     * the bind-once rule: those passes are recreated whenever the letterbox changes, which
+     * is exactly when the answer can change.
+     */
+    const coopa::gfx::engine::util::Sampler& display_sampler_() const {
+        if (config_.upscale_filter == "nearest") return nearest_sampler_;
+        if (config_.upscale_filter == "linear")  return linear_sampler_;
+        // "auto": crisp blocks when magnifying, filtered when minifying (where nearest is a
+        // point decimation -- see ToyRenderConfig::upscale_filter).
+        return (upscaled_extent_.scale >= 1.0f) ? nearest_sampler_ : linear_sampler_;
+    }
+
     /** @brief Whether this config wants cached static depth at all. */
     bool dir_cache_wanted_() const {
         return config_.shadow_cache_enabled && config_.shadow_fit == "clipmap";

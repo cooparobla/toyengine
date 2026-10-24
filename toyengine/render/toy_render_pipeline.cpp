@@ -1374,7 +1374,7 @@ void ToyRenderPipeline::build_post_chain_(coopa::gfx::pipeline::RenderPass& swap
     // ui_composite_pass_ samples its result 1:1 when it is enabled.
     tilt_shift_pass_ = std::make_unique<coopa::gfx::engine::passes::TiltShiftPass>(
         device_, allocator_, upscaled_extent_.w, upscaled_extent_.h,
-        display_source_view, nearest_sampler_,
+        display_source_view, display_sampler_(),
         config_.shaders("fullscreen.vert"),
         config_.shaders("tilt_shift.frag"));
 
@@ -3246,7 +3246,7 @@ LetterboxRect ToyRenderPipeline::handle_resize_() {
             // how a resize would silently revert to the un-AA'd image.
             tilt_shift_pass_ = std::make_unique<coopa::gfx::engine::passes::TiltShiftPass>(
                 device_, allocator_, upscaled_extent_.w, upscaled_extent_.h,
-                display_source_view_, nearest_sampler_,
+                display_source_view_, display_sampler_(),
                 config_.shaders("fullscreen.vert"), config_.shaders("tilt_shift.frag"));
         }
         // Last, and it binds the composite's base image itself -- which is why the tilt-shift
@@ -3742,10 +3742,14 @@ void ToyRenderPipeline::bind_composite_inputs_() {
     // Startup-fixed source selection, the same caveat post_source_view/pre_volumetrics_view_typed_
     // carry: flipping config_.tilt_shift_enabled without a pipeline rebuild would leave
     // this reading a target tilt_shift_pass_ never wrote this frame.
+    // With tilt shift on, its result is ALREADY at upscaled_extent_ and this fetch is 1:1,
+    // so NEAREST is an exact texel read. With it off, THIS pass is the scene-to-display
+    // resample, and the filter has to follow the direction of that scale -- see
+    // ToyRenderConfig::upscale_filter.
     ui_composite_pass_->set_base_image(
         config_.tilt_shift_enabled ? tilt_shift_pass_->result_view_typed()
                                    : display_source_view_,
-        nearest_sampler_);
+        config_.tilt_shift_enabled ? nearest_sampler_ : display_sampler_());
     // NEAREST is an EXACT texel fetch here, not a filter choice: the layer is built at
     // upscaled_extent_ and the composite draws over a viewport of exactly that size, so
     // fullscreen.vert's in_uv.x = (x + 0.5)/w gives floor(uv * w) == x. Bilinear would be

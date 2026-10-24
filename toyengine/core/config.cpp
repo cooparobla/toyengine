@@ -111,6 +111,7 @@ AppConfig AppConfig::from_node(const fkyaml::node& root) {
             if (r.contains("render_height"))           config.render.render_height   = r.at("render_height").get_value<uint32_t>();
             if (r.contains("scale_divisor"))           config.render.scale_divisor   = r.at("scale_divisor").get_value<uint32_t>();
             if (r.contains("upscale_mode"))            config.render.upscale_mode    = r.at("upscale_mode").get_value<std::string>();
+            if (r.contains("upscale_filter"))        config.render.upscale_filter        = r.at("upscale_filter").get_value<std::string>();
 
             // --- Lighting ---
             if (r.contains("exposure"))          config.render.exposure          = r.at("exposure").get_value<float>();

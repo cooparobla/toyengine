@@ -291,6 +291,27 @@ struct ToyRenderConfig {
                                                    letterboxed only on the mismatched axis) or
                                                    "integer" (whole-number scale, more letterboxing
                                                    but every texel is an exact NxN block). */
+    /**
+     * @brief Texture filter for the final scene-to-display resample: `"auto"`, `"nearest"`
+     *        or `"linear"`. Startup-fixed.
+     *
+     * The display rect is rarely the render extent, and the two directions need opposite
+     * filters. MAGNIFYING (`scale >= 1`, a window larger than the render target) wants
+     * NEAREST: every texel becomes a crisp block, which is the look a project choosing a low
+     * render resolution is after. MINIFYING (`scale < 1`, a window SMALLER than the render
+     * target -- always true of an editor viewport panel) wants LINEAR: nearest there is a
+     * point decimation that simply discards pixels, and because TAA re-jitters the projection
+     * every frame, *which* pixels survive changes frame to frame. That reads as flashing,
+     * worst wherever spatial frequency is highest, and the tilt-shift blur masks it only
+     * where its circle of confusion is large enough -- so it appears to start exactly at the
+     * blur boundary.
+     *
+     * `"auto"` (the default) picks per direction as above. `"nearest"` forces the blocky
+     * filter at any scale, for a project that genuinely wants it downscaled too. `"linear"`
+     * forces filtering even when magnifying, for a soft upscale.
+     */
+    std::string upscale_filter = "auto";
+
 
     // --- Lighting ---
     float exposure          = 1.0f;

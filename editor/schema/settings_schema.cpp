@@ -83,6 +83,10 @@ const std::vector<SettingsGroup>& render_settings_groups() {
             .add(startup(F(f_int("scale_divisor", 4, 1, 16), "Scale Divisor", "divisor mode: render at the window size divided by this")))
             .add(F(f_enum("upscale_mode", {"fit", "integer"}), "Upscale",
                    "How the render reaches the window. fit: scale to fill (letterboxed); integer: whole-number scale only (crisp pixels)"))
+            .add(startup(with_default(F(f_enum("upscale_filter", {"auto", "nearest", "linear"}), "Display Filter",
+                   "How the finished image is resampled to the window. auto: crisp blocks when the window is larger than the "
+                   "render size, filtered when it is smaller (which is where nearest flickers). nearest: always blocky. "
+                   "linear: always filtered"), "auto")))
             .add(F(f_float("mesh_lod_bias", 1.0f, 0.01f, 0.01f, 16.0f), "Mesh LOD Bias",
                    "Above 1 keeps mesh LOD detail longer, below 1 drops it sooner. Only meshes with `lods` are affected"))
             .done());

@@ -142,6 +142,7 @@
 #include <toyengine/render/passes/upscale_pass.h>
 #include <toyengine/render/passes/debug_line_pass.h>
 #include <toyengine/render/passes/transparent_preview_pass.h>
+#include <toyengine/render/passes/xray_pass.h>
 #include <toyengine/render/passes/underwater_pass.h>
 #include <toyengine/render/passes/particle_pass.h>
 #include <toyengine/render/passes/sky_atmosphere_pass.h>
@@ -170,6 +171,7 @@
     X(ssgi_traced) \
     X(ssao_enabled) \
     X(transparency_enabled) \
+    X(xray_enabled) \
     X(refraction_enabled) \
     X(aa_mode) \
     X(skinning) \
@@ -572,6 +574,17 @@ private:
         /// Per item: the surface push extension -- x/y packed tessellation params (0: drawn
         /// untessellated), z flags (bit 0: no snow cover). See GBufferPipeline::PushConstants.
         std::vector<glm::uvec4>  ext;
+        /// Per item: the alpha cutoff the SHADOW views push, which is NOT always the material's
+        /// own. A ViewBlockerFade wall with keep_shadow (the default) erodes for the camera
+        /// while still casting its solid shadow, so its shadow draws pass 0 here -- the wall is
+        /// hidden for the camera's benefit, not removed from the world.
+        std::vector<float>       shadow_cutoff;
+        /// Per item: what it contributes to the x-ray mask (toy::scene::XrayRole, 0 = nothing).
+        /// Resolved from the marker components' subtrees; all zero unless config_.xray_enabled.
+        std::vector<uint8_t>     xray_role;
+        /// Any camera-visible XraySubject item this frame -- the x-ray pass skips the mask
+        /// entirely without one, since permission alone draws nothing.
+        bool                     has_xray_subject = false;
         /// Single-instance index for each camera-visible BLEND renderer -- the forward pass
         /// draws those one at a time, back to front, so they are never batched. Otherwise
         /// InstanceStream::kInvalidIndex.
@@ -1244,8 +1257,10 @@ private:
             pc.tess_a = meshes.ext[b.item].x;
             pc.tess_b = meshes.ext[b.item].y;
             // CUTOUT (AlphaMode::Mask): the mask texture punches through the shadow too, via
-            // the same set/cutoff shadow_depth.frag tests against.
-            pc.alpha_cutoff = m.gpu_alpha_cutoff();
+            // the same set/cutoff shadow_depth.frag tests against. Read from the gather rather
+            // than the material, because the two can disagree on purpose -- see
+            // MeshGather::shadow_cutoff.
+            pc.alpha_cutoff = meshes.shadow_cutoff[b.item];
             pc.gfx_params   = m.shader_params;
             const auto& set = material_cache_->set_for(m);
             if (&set != last_set) {
@@ -1364,6 +1379,20 @@ private:
      */
     void record_transparent_preview_(coopa::gfx::command::CommandBuffer& cmd, const MeshGather& meshes,
                                      DebugView view, const glm::vec3& camera_pos);
+
+    /**
+     * @brief Fills the x-ray coverage mask: the flagged subjects, then whichever flagged
+     *        occluders could be in front of one.
+     *
+     * @param cmd     Command buffer, outside any render pass bracket.
+     * @param meshes  This frame's gather.
+     * @param ctx     The frame's camera matrices and pose.
+     */
+    void record_xray_mask_(coopa::gfx::command::CommandBuffer& cmd, const MeshGather& meshes,
+                           const FrameContext& ctx);
+
+    /** @brief Draws the x-ray look over the finished frame, as a guest in post_target_. */
+    void record_xray_composite_(coopa::gfx::command::CommandBuffer& cmd);
 
     /// Fills the forward MESH pass's per-frame globals (lighting/indirect/SSR/refraction)
     /// from config_ -- the exact same fields sdf_data_'s own globals() fill (in render()'s
@@ -1776,6 +1805,17 @@ private:
     std::unique_ptr<passes::DebugLinePass>                       debug_line_pass_;
     /// BLEND meshes in the editor shading modes (see transparent_preview_pass.h).
     std::unique_ptr<passes::TransparentPreviewPass>              transparent_preview_pass_;
+    /// See-through silhouettes (see xray_pass.h). Null unless config_.xray_enabled, which is
+    /// startup-fixed: with it off nothing here is allocated and record_xray_*() return early.
+    std::unique_ptr<passes::XrayPass>                            xray_pass_;
+    /// Whether record_xray_mask_() actually filled the mask THIS frame.
+    ///
+    /// Load-bearing, not an optimization: the mask stage early-outs before its clear whenever
+    /// there is no subject on screen or nothing permitting in front of one, so on those frames
+    /// the target still holds the last frame's coverage. Without this the composite would paint
+    /// a silhouette of where the player used to be, frozen, until something flagged came back
+    /// into view.
+    bool                                                         xray_drew_mask_ = false;
     /// This frame's gather, for record_post_chain_()'s transparent preview (valid during recording).
     const MeshGather*                                            frame_meshes_ = nullptr;
 

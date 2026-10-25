@@ -8,6 +8,7 @@ namespace toy {
 namespace core {
 
 using yaml::read;
+using yaml::num;
 
 render::RenderQuality parse_render_quality(const std::string& value) {
     if (value == "low")                        return render::RenderQuality::Low;
@@ -89,6 +90,7 @@ AppConfig AppConfig::from_node(const fkyaml::node& root) {
             read(r, "ssao_enabled", config.render.ssao_enabled);
             read(r, "ssr_enabled", config.render.ssr_enabled);
             read(r, "transparency_enabled", config.render.transparency_enabled);
+            read(r, "xray_enabled", config.render.xray_enabled);
             if (r.contains("ssr_reflect_transparent")) std::cerr << "[toy::core::AppConfig] Warning: ssr_reflect_transparent is deprecated and ignored -- SSR now reflects transparent geometry through the previous frame's colour.\n";
             read(r, "refraction_enabled", config.render.refraction_enabled);
             read(r, "fog_enabled", config.render.fog_enabled);
@@ -264,6 +266,19 @@ AppConfig AppConfig::from_node(const fkyaml::node& root) {
             }
             read(r, "depth_threshold", config.render.depth_threshold);
             read(r, "normal_threshold", config.render.normal_threshold);
+
+            // --- X-ray (see-through silhouette) ---
+            read(r, "xray_mode", config.render.xray_mode);
+            read(r, "xray_thickness", config.render.xray_thickness);
+            read(r, "xray_depth_fade", config.render.xray_depth_fade);
+            if (r.contains("xray_color")) {
+                const auto& c = r.at("xray_color");
+                if (c.size() >= 3) {   // [r, g, b] or [r, g, b, a]; alpha defaults to opaque
+                    config.render.xray_color = glm::vec4(
+                        num(c.at(0)), num(c.at(1)), num(c.at(2)),
+                        c.size() >= 4 ? num(c.at(3)) : 1.0f);
+                }
+            }
 
             // --- Palette ---
             read(r, "palette", config.render.palette_path);

@@ -98,6 +98,7 @@ enum class GpuScope : uint32_t {
     SsrComposite,        ///< composite + history copies
     RefractionMips,
     Transparent,
+    XrayMask,            ///< The x-ray coverage mask (subject + permitted-occluder draws).
     Underwater,          ///< UnderwaterPass (a copy when the camera is above water).
     Fog,
     VolumetricsInject,     ///< froxel mode only: density + lighting into the grid

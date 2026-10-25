@@ -1082,6 +1082,32 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             f_bool("invert_x", false),
             f_bool("invert_y", false),
         }});
+        // Defaults mirror toyengine/scene/xray_markers.h. Both are plain markers that cover
+        // their own subtree, so there is nothing to tune beyond switching one back off.
+        add({"XraySubject", "Rendering", {
+            with_tip(f_bool("enabled", true),
+                     "Show this object's silhouette when it is hidden behind an X-Ray Occluder. "
+                     "Covers every child too; untick on a child to leave just that part out"),
+        }});
+        add({"XrayOccluder", "Rendering", {
+            with_tip(f_bool("enabled", true),
+                     "Let an X-Ray Subject be seen through this object. Covers every child too; "
+                     "untick on a child to keep just that part solid"),
+        }});
+        // Defaults mirror toyengine/scene/view_blocker.h.
+        add({"ViewBlockerFade", "Rendering", {
+            with_tip(f_float("fade_target", 1.0f, 0.01f, 0.0f, 1.0f, true),
+                     "How far it dissolves while in the way; 1 removes it completely"),
+            with_tip(f_float("fade_in_time", 0.18f, 0.01f, 0.0f, 10.0f), "Seconds to dissolve; 0 is instant"),
+            with_tip(f_float("fade_out_time", 0.35f, 0.01f, 0.0f, 10.0f), "Seconds to come back; 0 is instant"),
+            with_tip(f_int("cutoff_steps", 32, 0, 256),
+                     "Dissolve levels to snap to. Keeps the shadow cache from rebuilding every "
+                     "frame of the fade; 0 is a continuous value at that cost"),
+            with_tip(f_bool("keep_shadow", true),
+                     "Keep casting the solid shadow while hidden. The wall is still there, so "
+                     "losing its shadow pops the whole scene's lighting; untick to have it "
+                     "vanish completely"),
+        }});
         add({"FreeMover", "Gameplay", {f_float("move_speed", 5.0f, 0.05f, 0.0f, 1000.0f, true),
                                        with_tip(f_float("smoothing", 12.0f, 0.1f, 0.0f, 100.0f), "Follow rate (1/s); 0 snaps")}});
         add({"KinematicController", "Gameplay", {

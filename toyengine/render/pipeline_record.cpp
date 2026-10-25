@@ -9,6 +9,10 @@
  */
 
 #include <toyengine/render/toy_render_pipeline.h>
+
+#include <limits>
+
+#include <toyengine/scene/xray_markers.h>
 #include <glm/gtx/quaternion.hpp>
 
 #include <coopa/job/engine.h>
@@ -431,6 +435,15 @@ void ToyRenderPipeline::record_post_chain_(coopa::gfx::command::CommandBuffer& c
     // so every branch below that reads it must see the SAME frame's value.
     const DebugView active_view = parse_debug_view(config_.debug_view);
 
+    // See-through silhouettes: the coverage mask, into its own target. First in the post chain
+    // because it needs the G-buffer depth readable (which it is by now -- see the
+    // HiZ/transition pairing at the top of record_scene_()) and no bracket open. Its COMPOSITE
+    // is far below, inside post_target_, after stylize.
+    if (xray_pass_ && frame_meshes_) {
+        record_xray_mask_(cmd, *frame_meshes_, ctx);
+        gpu_mark_(cmd, GpuScope::XrayMask);
+    }
+
     // Global fog already ran in record_scene_() (record_fog_(), before translucency).
     // Underwater -- every frame once built (see UnderwaterPass's file doc); a copy unless the
     // camera is below a water surface.
@@ -621,6 +634,16 @@ void ToyRenderPipeline::record_post_chain_(coopa::gfx::command::CommandBuffer& c
         post_pc.outline_mode     = (config_.outline_mode == "toon") ? 1.0f : 0.0f;
         stylize_pass_->draw(cmd, post_pc, render_extent_.width, render_extent_.height);
     }
+    // See-through silhouettes, over the tonemapped image. AFTER stylize deliberately: an
+    // authored overlay colour should land as authored rather than be pushed through ACES, the
+    // grading LUT and the palette quantizer, and the silhouette must not feed the stylize
+    // outline's own edge detector -- which would ink a line around it. Still before AA, so its
+    // edges are antialiased with everything else.
+    //
+    // Skipped under a debug_view channel for the same reason the raw passthrough zeroes the
+    // stylize stages: those views are reads of a specific buffer, and an overlay painted on top
+    // makes the one thing they exist to show unreadable.
+    if (active_view == DebugView::Off) record_xray_composite_(cmd);
     // Also whenever a host filled lines itself (the editor's grid, gizmos and wireframe): Engine
     // clears debug_lines_ every frame unless debug_view is "lines", so a game frame with no host
     // lines draws exactly as before.
@@ -951,6 +974,137 @@ void ToyRenderPipeline::record_transparent_preview_(coopa::gfx::command::Command
         mr->get_mesh()->bind(cmd);
         mr->get_mesh()->draw_lod_part(cmd, meshes.lod[i], meshes.part[i], 1, meshes.instance_idx[i]);
     }
+}
+
+namespace {
+
+/// The NDC xy box a world AABB projects to, as (min_x, min_y, max_x, max_y).
+///
+/// Returns the whole of NDC for a box that straddles the eye plane rather than trying to clip
+/// it: that is the conservative answer (it can only cost a draw, never drop one), and the
+/// alternative -- dividing by a w that passes through zero -- produces a rect that wraps
+/// around infinity and silently rejects everything.
+glm::vec4 ndc_xy_rect(const WorldBounds& b, const glm::mat4& view_proj) {
+    const glm::vec3 lo = b.center - b.extent;
+    const glm::vec3 hi = b.center + b.extent;
+    glm::vec2 mn(std::numeric_limits<float>::max());
+    glm::vec2 mx(std::numeric_limits<float>::lowest());
+    for (int c = 0; c < 8; ++c) {
+        const glm::vec4 p = view_proj * glm::vec4((c & 1) ? hi.x : lo.x,
+                                                  (c & 2) ? hi.y : lo.y,
+                                                  (c & 4) ? hi.z : lo.z, 1.0f);
+        if (p.w <= 1e-5f) return glm::vec4(-1.0f, -1.0f, 1.0f, 1.0f);
+        const glm::vec2 ndc = glm::vec2(p) / p.w;
+        mn = glm::min(mn, ndc);
+        mx = glm::max(mx, ndc);
+    }
+    return glm::vec4(mn, mx);
+}
+
+/// Do two NDC xy boxes overlap at all?
+bool rects_overlap(const glm::vec4& a, const glm::vec4& b) {
+    return a.x <= b.z && b.x <= a.z && a.y <= b.w && b.y <= a.w;
+}
+
+/// Metres of gap, behind the surface covering it, over which a silhouette fades to nothing
+/// when xray_depth_fade is 1. Not a config key: the knob authors want is "how much does depth
+/// matter" (xray_depth_fade, 0..1), and a second one in metres would mostly be a way to make
+/// the first one do nothing. 8 m is about one wall's thickness plus a room in a top-down game.
+constexpr float k_xray_gap_metres = 8.0f;
+
+} // namespace
+
+void ToyRenderPipeline::record_xray_mask_(coopa::gfx::command::CommandBuffer& cmd, const MeshGather& meshes,
+                                          const FrameContext& ctx) {
+    using Role = passes::XrayPass::Role;
+    xray_drew_mask_ = false;
+    if (!xray_pass_ || !meshes.has_xray_subject) return;
+
+    const uint8_t subject_role  = static_cast<uint8_t>(toy::scene::XrayRole::Subject);
+    const uint8_t occluder_role = static_cast<uint8_t>(toy::scene::XrayRole::Occluder);
+
+    auto drawable = [&](size_t i, uint8_t role) {
+        return meshes.xray_role[i] == role && meshes.valid[i] &&
+               meshes.instance_idx[i] != InstanceStream::kInvalidIndex &&
+               meshes.renderers[i]->is_ready();
+    };
+
+    // Pass 1: the subjects, and the screen box they occupy.
+    std::vector<size_t> subjects;
+    glm::vec4 subject_rect(std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
+                           std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest());
+    float subject_far = 0.0f;   // view-space distance to the far side of the furthest subject
+    const glm::mat4 view_proj = ctx.unjittered_proj * ctx.view;
+    for (size_t i = 0; i < meshes.renderers.size(); ++i) {
+        if (!drawable(i, subject_role)) continue;
+        subjects.push_back(i);
+        const glm::vec4 r = ndc_xy_rect(meshes.bounds[i], view_proj);
+        subject_rect = glm::vec4(glm::min(glm::vec2(subject_rect), glm::vec2(r)),
+                                 glm::max(glm::vec2(subject_rect.z, subject_rect.w), glm::vec2(r.z, r.w)));
+        const float depth = -(ctx.view * glm::vec4(meshes.bounds[i].center, 1.0f)).z;
+        subject_far = std::max(subject_far, depth + meshes.bounds[i].radius());
+    }
+    if (subjects.empty()) return;
+
+    // Pass 2: the occluders worth drawing. This filter is what keeps the feature affordable on
+    // the case it exists for -- a flagged terrain is hundreds of chunks, and drawing all of
+    // them into the mask would be a second full geometry pass over the world. An occluder can
+    // only matter if it overlaps the subject's screen box AND has something in front of the
+    // subject's far side, which in a top-down scene leaves a handful.
+    std::vector<size_t> occluders;
+    for (size_t i = 0; i < meshes.renderers.size(); ++i) {
+        if (!drawable(i, occluder_role)) continue;
+        const float near_side = -(ctx.view * glm::vec4(meshes.bounds[i].center, 1.0f)).z - meshes.bounds[i].radius();
+        if (near_side > subject_far) continue;                                  // entirely behind the subject
+        if (!rects_overlap(subject_rect, ndc_xy_rect(meshes.bounds[i], view_proj))) continue;
+        occluders.push_back(i);
+    }
+    if (occluders.empty()) return;   // nothing permits being seen through where the subject is
+
+    const LetterboxRect rect{0, 0, render_extent_.width, render_extent_.height};
+
+    passes::XrayPass::MaskPushConstants pc;
+    pc.params.w = 1.0f / k_xray_gap_metres;
+    pc.depth    = glm::vec4(ctx.cam ? ctx.cam->clip_start : 0.1f,
+                            ctx.cam ? ctx.cam->clip_end : 1000.0f,
+                            (!ctx.cam || ctx.cam->type == coopa::gfx::engine::components::CameraType::Perspective) ? 1.0f : 0.0f,
+                            0.0f);
+
+    xray_pass_->begin_mask(cmd, current_camera_set(), rect);
+    cmd.bind_vertex_buffer(instance_stream_.buffer(), 0, 1);
+
+    // One push per role, not one per draw: nothing in the block varies per object.
+    auto draw_list = [&](const std::vector<size_t>& list, Role role) {
+        pc.params.x = static_cast<float>(static_cast<uint32_t>(role));
+        xray_pass_->push_mask(cmd, pc);
+        for (const size_t i : list) {
+            auto* mr = meshes.renderers[i];
+            mr->get_mesh()->bind(cmd);
+            mr->get_mesh()->draw_lod_part(cmd, meshes.lod[i], meshes.part[i], 1, meshes.instance_idx[i]);
+        }
+    };
+    // Order carries no meaning -- the roles write disjoint channels and the blend is Max, so
+    // the result is the same either way. Grouped only to keep it one push per role.
+    draw_list(occluders, Role::Occluder);
+    draw_list(subjects, Role::Subject);
+
+    xray_pass_->end_mask(cmd);
+    xray_drew_mask_ = true;
+}
+
+void ToyRenderPipeline::record_xray_composite_(coopa::gfx::command::CommandBuffer& cmd) {
+    if (!xray_pass_ || !xray_drew_mask_) return;
+    // Unknown values read as `silhouette`, the same way outline_mode's do.
+    const bool outline = config_.xray_mode == "outline" || config_.xray_mode == "both";
+    const bool fill    = !outline || config_.xray_mode == "both";
+
+    passes::XrayPass::CompositePushConstants pc;
+    pc.color      = config_.xray_color;
+    pc.thickness  = std::max(config_.xray_thickness, 0.0f);
+    pc.depth_fade = std::clamp(config_.xray_depth_fade, 0.0f, 1.0f);
+    pc.fill       = fill ? 1.0f : 0.0f;
+    pc.outline    = outline ? 1.0f : 0.0f;
+    xray_pass_->draw_composite(cmd, pc, render_extent_.width, render_extent_.height);
 }
 
 void ToyRenderPipeline::record_reactive_mask_(coopa::gfx::command::CommandBuffer& cmd) {

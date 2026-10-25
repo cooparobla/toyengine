@@ -229,5 +229,10 @@ render:
   volumetrics_sun_anisotropy: 0.6
   water_quality: high
   world_ui_enabled: true
+  xray_color: [0.25, 0.8, 1.0, 0.65]
+  xray_depth_fade: 0.0
+  xray_enabled: false
+  xray_mode: silhouette
+  xray_thickness: 2.0
 save: { encode: auto, quick_slot: quicksave }
 window: { height: 1080, title: toyengine, visible: true, vsync: false, width: 1920 }

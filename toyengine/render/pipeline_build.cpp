@@ -924,6 +924,23 @@ void ToyRenderPipeline::build_post_chain_(coopa::gfx::pipeline::RenderPass& swap
         config_.shaders("transparent.vert"), config_.shaders("transparent_preview.frag"));
     transparent_preview_pass_->set_scene_depth(gbuffer_target_.depth_view_typed(), nearest_sampler_,
                                                render_extent_.width, render_extent_.height);
+
+    // See-through silhouettes. Built only when asked, unlike the two guests above: it owns a
+    // full-resolution mask target, and the whole point of the feature's design is that a scene
+    // that does not want it pays nothing -- no image, no clear, no draw. The COMPOSITE is
+    // another post_target_ guest, drawn after stylize so the authored colour is not pushed
+    // through ACES, the grading LUT and the palette quantizer; the MASK has its own target and
+    // is recorded earlier, at the top of the post chain.
+    if (config_.xray_enabled) {
+        xray_pass_ = std::make_unique<passes::XrayPass>(
+            device_, allocator_, post_target_.render_pass_object(), *camera_layout_,
+            render_extent_.width, render_extent_.height,
+            config_.shaders("transparent.vert"),
+            config_.shaders("xray_mask.frag"),
+            config_.shaders("fullscreen.vert"),
+            config_.shaders("xray_composite.frag"));
+        xray_pass_->set_scene_depth(gbuffer_target_.depth_view_typed(), nearest_sampler_);
+    }
 }
 
 void ToyRenderPipeline::build_world_ui_descriptor_() {

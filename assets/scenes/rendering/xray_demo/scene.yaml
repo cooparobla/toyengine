@@ -1,0 +1,388 @@
+scene:
+  scene_name: xray_demo
+  settings:
+    physics:
+      gravity: { x: 0, y: 0, z: -9.81 }
+    render:
+      ambient_intensity: 0.45
+      outline_enabled: false
+      xray_color: [0.25, 0.85, 1.0, 0.6]
+      xray_depth_fade: 0.0
+      xray_enabled: true
+      xray_mode: silhouette
+      xray_thickness: 2.0
+  root_objects:
+    - name: ground
+      components:
+        - type: Transform
+          position: { x: 0, y: 0, z: -0.25 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 60, y: 60, z: 0.5 }
+        - type: MeshRenderer
+          material:
+            base: materials/prototype_grid
+            albedo: { b: 0.6, g: 0.57, r: 0.55 }
+          mesh_path: cube
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+      children: []
+    - name: player
+      components:
+        - type: Transform
+          position: { x: 0, y: 0, z: 0.9 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.7, y: 0.7, z: 1.8 }
+        - type: MeshRenderer
+          material:
+            base: materials/prototype_grid
+            albedo: { b: 0.24, g: 0.32, r: 0.85 }
+          mesh_path: cube
+        - type: CharacterController
+          height: 1.8
+          jump_height: 1.0
+          move_speed: 4.0
+          radius: 0.35
+          slope_limit: 45.0
+          sprint_multiplier: 1.8
+          step_height: 0.35
+        - { type: XraySubject }
+      children:
+        - name: player_head
+          components:
+            - type: Transform
+              position: { x: 0, y: 0, z: 0.62 }
+              rotation: { x: 0, y: 0, z: 0 }
+              scale: { x: 0.63, y: 0.63, z: 0.34 }
+            - type: MeshRenderer
+              material:
+                base: materials/prototype_grid
+                albedo: { b: 0.62, g: 0.78, r: 0.92 }
+              mesh_path: sphere
+          children: []
+        - name: player_pack
+          components:
+            - type: Transform
+              position: { x: 0, y: 0.5, z: 0.15 }
+              rotation: { x: 0, y: 0, z: 0 }
+              scale: { x: 0.8, y: 0.5, z: 0.5 }
+            - type: MeshRenderer
+              material:
+                base: materials/prototype_grid
+                albedo: { b: 0.35, g: 0.45, r: 0.3 }
+              mesh_path: cube
+          children: []
+    - name: pavilion_roof
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 3.35 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 9.0, y: 9.0, z: 0.3 }
+        - type: MeshRenderer
+          material:
+            base: materials/prototype_grid
+            albedo: { b: 0.58, g: 0.5, r: 0.52 }
+          mesh_path: cube
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+        - { type: XrayOccluder }
+      children: []
+    - name: pavilion_leg_0
+      components:
+        - type: Transform
+          position: { x: -4.0, y: -4.0, z: 1.6 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.5, y: 0.5, z: 3.2 }
+        - type: MeshRenderer
+          material:
+            base: materials/prototype_grid
+            albedo: { b: 0.48, g: 0.44, r: 0.45 }
+          mesh_path: cube
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+      children: []
+    - name: pavilion_leg_1
+      components:
+        - type: Transform
+          position: { x: 4.0, y: -4.0, z: 1.6 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.5, y: 0.5, z: 3.2 }
+        - type: MeshRenderer
+          material:
+            base: materials/prototype_grid
+            albedo: { b: 0.48, g: 0.44, r: 0.45 }
+          mesh_path: cube
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+      children: []
+    - name: pavilion_leg_2
+      components:
+        - type: Transform
+          position: { x: -4.0, y: 4.0, z: 1.6 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.5, y: 0.5, z: 3.2 }
+        - type: MeshRenderer
+          material:
+            base: materials/prototype_grid
+            albedo: { b: 0.48, g: 0.44, r: 0.45 }
+          mesh_path: cube
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+      children: []
+    - name: pavilion_leg_3
+      components:
+        - type: Transform
+          position: { x: 4.0, y: 4.0, z: 1.6 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.5, y: 0.5, z: 3.2 }
+        - type: MeshRenderer
+          material:
+            base: materials/prototype_grid
+            albedo: { b: 0.48, g: 0.44, r: 0.45 }
+          mesh_path: cube
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+      children: []
+    - name: fade_post_c
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -2.0, z: 2.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.7, y: 0.7, z: 4.0 }
+        - type: MeshRenderer
+          material:
+            base: materials/prototype_grid
+            albedo: { b: 0.55, g: 0.7, r: 0.78 }
+            alpha_cutoff: 0.0
+            alpha_mode: CUTOUT
+            texture_alpha_mask: textures/masks/dissolve_noise.png
+          mesh_path: cube
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: ViewBlockerFade
+          fade_in_time: 0.18
+          fade_out_time: 0.35
+          fade_target: 1.0
+          keep_shadow: true
+      children: []
+    - name: fade_post_l
+      components:
+        - type: Transform
+          position: { x: -3.0, y: -2.0, z: 2.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.7, y: 0.7, z: 4.0 }
+        - type: MeshRenderer
+          material:
+            base: materials/prototype_grid
+            albedo: { b: 0.55, g: 0.7, r: 0.78 }
+            alpha_cutoff: 0.0
+            alpha_mode: CUTOUT
+            texture_alpha_mask: textures/masks/dissolve_noise.png
+          mesh_path: cube
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: ViewBlockerFade
+          fade_in_time: 0.18
+          fade_out_time: 0.35
+          fade_target: 1.0
+          keep_shadow: true
+      children: []
+    - name: fade_post_r
+      components:
+        - type: Transform
+          position: { x: 3.0, y: -2.0, z: 2.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.7, y: 0.7, z: 4.0 }
+        - type: MeshRenderer
+          material:
+            base: materials/prototype_grid
+            albedo: { b: 0.55, g: 0.7, r: 0.78 }
+            alpha_cutoff: 0.0
+            alpha_mode: CUTOUT
+            texture_alpha_mask: textures/masks/dissolve_noise.png
+          mesh_path: cube
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: ViewBlockerFade
+          fade_in_time: 0.18
+          fade_out_time: 0.35
+          fade_target: 1.0
+          keep_shadow: true
+      children: []
+    - name: solid_pavilion_roof
+      components:
+        - type: Transform
+          position: { x: -1.0e+01, y: 0.0, z: 3.35 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 9.0, y: 9.0, z: 0.3 }
+        - type: MeshRenderer
+          material:
+            base: materials/prototype_grid
+            albedo: { b: 0.4, g: 0.42, r: 0.6 }
+            alpha: 1.0
+            alpha_cutoff: 0.0
+            alpha_mode: CUTOUT
+            texture_alpha_mask: textures/dissolve_noise.png
+          mesh_path: cube
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+        - { type: ViewBlockerFade, fade_target: 1.0 }
+      children: []
+    - name: solid_pavilion_leg_0
+      components:
+        - type: Transform
+          position: { x: -14.0, y: -4.0, z: 1.6 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.5, y: 0.5, z: 3.2 }
+        - type: MeshRenderer
+          material:
+            base: materials/prototype_grid
+            albedo: { b: 0.48, g: 0.44, r: 0.45 }
+          mesh_path: cube
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+      children: []
+    - name: solid_pavilion_leg_1
+      components:
+        - type: Transform
+          position: { x: -6.0, y: -4.0, z: 1.6 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.5, y: 0.5, z: 3.2 }
+        - type: MeshRenderer
+          material:
+            base: materials/prototype_grid
+            albedo: { b: 0.48, g: 0.44, r: 0.45 }
+          mesh_path: cube
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+      children: []
+    - name: solid_pavilion_leg_2
+      components:
+        - type: Transform
+          position: { x: -14.0, y: 4.0, z: 1.6 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.5, y: 0.5, z: 3.2 }
+        - type: MeshRenderer
+          material:
+            base: materials/prototype_grid
+            albedo: { b: 0.48, g: 0.44, r: 0.45 }
+          mesh_path: cube
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+      children: []
+    - name: solid_pavilion_leg_3
+      components:
+        - type: Transform
+          position: { x: -6.0, y: 4.0, z: 1.6 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.5, y: 0.5, z: 3.2 }
+        - type: MeshRenderer
+          material:
+            base: materials/prototype_grid
+            albedo: { b: 0.48, g: 0.44, r: 0.45 }
+          mesh_path: cube
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+      children: []
+    - name: fixed_post_c
+      components:
+        - type: Transform
+          position: { x: 1.0e+01, y: -2.0, z: 2.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 0.7, y: 0.7, z: 4.0 }
+        - type: MeshRenderer
+          material:
+            base: materials/prototype_grid
+            albedo: { b: 0.55, g: 0.7, r: 0.78 }
+            alpha_cutoff: 0.0
+            alpha_mode: CUTOUT
+            texture_alpha_mask: textures/masks/dissolve_noise.png
+          mesh_path: cube
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+      children: []
+    - name: ridge_0
+      components:
+        - type: Transform
+          position: { x: -6.0, y: 14.0, z: 3.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 6.0, y: 2.5, z: 6.0 }
+        - type: MeshRenderer
+          material:
+            base: materials/prototype_grid
+            albedo: { b: 0.52, g: 0.55, r: 0.5 }
+          mesh_path: cube
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+        - { type: XrayOccluder }
+      children: []
+    - name: ridge_1
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 14.0, z: 3.75 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 6.0, y: 2.5, z: 7.5 }
+        - type: MeshRenderer
+          material:
+            base: materials/prototype_grid
+            albedo: { b: 0.52, g: 0.55, r: 0.5 }
+          mesh_path: cube
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+        - { type: XrayOccluder }
+      children: []
+    - name: ridge_2
+      components:
+        - type: Transform
+          position: { x: 6.0, y: 14.0, z: 3.0 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 6.0, y: 2.5, z: 6.0 }
+        - type: MeshRenderer
+          material:
+            base: materials/prototype_grid
+            albedo: { b: 0.52, g: 0.55, r: 0.5 }
+          mesh_path: cube
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+        - { type: XrayOccluder }
+      children: []
+    - name: camera
+      components:
+        - type: Transform
+          position: { x: 0, y: -10.3, z: 13.3 }
+          rotation: { x: 5.0e+01, y: 0, z: 0 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: Camera
+          far_clip_plane: 4.0e+02
+          fov: 55.0
+          main: true
+          near_clip_plane: 0.1
+          projection: Perspective
+        - type: CameraController
+          collide: false
+          distance: 16.0
+          follow_smoothing: 12.0
+          look_button: right
+          max_distance: 32.0
+          max_pitch_deg: 8.0e+01
+          min_distance: 6.0
+          min_pitch_deg: 2.0e+01
+          mode: orbit
+          mouse_sensitivity: 0.12
+          movement_smoothing: 0.2
+          pitch_deg: 5.0e+01
+          target_offset: { x: 0, y: 0, z: 1.0 }
+          tracker: player
+          yaw_deg: 0.0
+      children: []
+    - name: sun
+      components:
+        - type: Transform
+          position: { x: 0, y: 0, z: 20 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: DirectionalLight
+          cast_shadows: true
+          color: { b: 0.9, g: 0.96, r: 1.0 }
+          direction: { x: -0.45, y: 0.55, z: -0.7 }
+          intensity: 1.0
+      children: []

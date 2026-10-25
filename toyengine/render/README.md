@@ -37,7 +37,7 @@ changes push-constant contents is free to flip every frame.
 
 | Startup-fixed | Runtime |
 |---|---|
-| `ssr_enabled`, `ssgi_traced`, `ssao_enabled`, `transparency_enabled`, `refraction_enabled`, `fog_enabled`, `volumetrics_enabled`, `bloom_enabled`, `dof_enabled`, `tilt_shift_enabled`, `auto_exposure_enabled`, `grading_lut_path`, `aa_mode`, `skinning`, `world_ui_enabled`, `screen_ui_enabled`, and every resolution/capacity field | `sdf_enabled`, `shadows_enabled`, `sdf_shadows_enabled`, `shadow_pcss_enabled`, `contact_shadows_enabled`, `volumetrics_shadows_enabled`, `grading_enabled`, `ssr_reflect_transparent`, `debug_view`, and every numeric tunable |
+| `ssr_enabled`, `ssgi_traced`, `ssao_enabled`, `transparency_enabled`, `xray_enabled`, `refraction_enabled`, `fog_enabled`, `volumetrics_enabled`, `bloom_enabled`, `dof_enabled`, `tilt_shift_enabled`, `auto_exposure_enabled`, `grading_lut_path`, `aa_mode`, `skinning`, `world_ui_enabled`, `screen_ui_enabled`, and every resolution/capacity field | `sdf_enabled`, `shadows_enabled`, `sdf_shadows_enabled`, `shadow_pcss_enabled`, `contact_shadows_enabled`, `volumetrics_shadows_enabled`, `grading_enabled`, `ssr_reflect_transparent`, `debug_view`, and every numeric tunable |
 
 The list lives in one place, the `TOY_STARTUP_FIXED_FIELDS` X-macro at the top of
 `toy_render_pipeline.h`. `apply_live_config()` enforces the split: it restores any
@@ -160,6 +160,14 @@ three groups below.
 
 **Post** (`record_post_chain_()`):
 
+12b. The x-ray coverage mask (`passes/xray_pass.h`, GPU scope `xray_mask`), when
+    `xray_enabled` and a flagged `XraySubject` is on screen. Re-draws the flagged geometry into
+    its own RGBA8 target: subjects where they are hidden (compared per fragment against the
+    sampled G-buffer depth), and the `XrayOccluder`s that could be in front of one where they
+    are the visible surface. A hidden object is not in the G-buffer at all, so this re-draw is
+    the only way the effect can exist; the occluder list is filtered to the subject's screen
+    box, which is what stops a flagged terrain from becoming a second pass over the world. Its
+    composite is step 16b.
 13. The underwater look (`UnderwaterPass` → `underwater_target_`, a copy unless the camera is
     below a water surface), then volumetrics (raymarched local `VolumeComponent`s) →
     `volumetrics_target_`. The march
@@ -174,6 +182,11 @@ three groups below.
     or, when `debug_view` names a channel, that raw intermediate buffer instead, with every
     other step in this line reduced to its no-op value. `debug_view: lines` draws the normal
     image here and adds physics collider/contact wireframes as a guest in the same bracket.
+16b. The x-ray silhouette/outline, as a guest in the same bracket: `xray_composite.frag` reads
+    step 12b's mask and blends the look over the tonemapped image. After stylize deliberately --
+    an authored overlay colour should land as authored rather than go through ACES, the grading
+    LUT and the palette quantizer, and it must not feed the stylize outline's own edge detector.
+    Skipped under any `debug_view` channel, which exist to show one buffer unobstructed.
 17. World-space UI → `ui_world_target_`, at the display rect.
 18. FXAA / SMAA / TAA → `aa_target_`, when `aa_mode != "off"`.
 19. Tilt shift, at display resolution.

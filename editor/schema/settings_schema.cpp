@@ -565,6 +565,19 @@ const std::vector<SettingsGroup>& render_settings_groups() {
             .add(F(f_float("normal_threshold", 0.75f, 0.005f, 0.0f, 2.0f), "Normal Threshold", "Change in surface direction that counts as an edge; lower = more lines"))
             .done());
 
+        g.push_back(GroupBuilder(stylize, "X-Ray", "Shows a flagged object's silhouette through geometry that allows it")
+            .toggle(startup(F(f_bool("xray_enabled", false), "X-Ray",
+                              "Draw X-Ray Subjects through X-Ray Occluders. Costs nothing while off")))
+            .add(F(f_enum("xray_mode", {"silhouette", "outline", "both"}), "Draw As",
+                   "silhouette: fill the hidden area. outline: just a line round its shape. both"))
+            .add(F(listed(f_color4("xray_color", glm::vec4(0.25f, 0.80f, 1.0f, 0.65f))), "Colour",
+                   "Silhouette colour and how far it blends over the scene"))
+            .add(F(f_float("xray_thickness", 2.0f, 0.05f, 0.0f, 8.0f), "Thickness",
+                   "Outline width in render pixels; outline and both modes only"))
+            .add(F(f_float("xray_depth_fade", 0.0f, 0.01f, 0.0f, 1.0f), "Depth Fade",
+                   "How much the silhouette dims the deeper behind the covering surface it is; 0 is flat"))
+            .done());
+
         g.push_back(GroupBuilder(stylize, "Palette", "Quantizes the image to a limited colour palette")
             .toggle(F(f_bool("palette_enabled", true), "Palette", "Snap colours to the palette"))
             .add(startup(F(root_relative(f_asset("palette", "palettes", ".png")), "Palette Image", "A strip of colours the image is snapped to")))

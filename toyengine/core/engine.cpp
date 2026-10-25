@@ -68,6 +68,7 @@
 #include <toyengine/scene/destruction_system.h>
 #include <toyengine/scene/terrain_digger.h>
 #include <toyengine/scene/turntable.h>
+#include <toyengine/scene/view_blocker_system.h>
 #include <toyengine/world/heightmap_terrain_system.h>
 
 #include <uicoopa/input/modal_context.h>
@@ -522,6 +523,10 @@ void Engine::prepare_scene_(coopa::scene::Scene& scene, bool drain_assets) {
     // Order 370: after TransformResolve, so deformers stamp where they are drawn; reads the
     // weather (40) for the cover and the precipitation map -- see world/snow_system.h.
     world::install_snow_system(scene);
+    // Order 365: after TransformResolve (350), so the segment it probes is the camera-to-subject
+    // line actually being rendered this frame rather than last frame's -- see
+    // scene/view_blocker_system.h. A scene with no ViewBlockerFade pays one component sweep.
+    scene::install_view_blocker_system(scene);
 
     // Activate TransformSystem before the first drain or render, so the world_matrix()
     // reads below are never asked to resolve a still-dirty transform; then block until

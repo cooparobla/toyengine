@@ -20,7 +20,7 @@ const char* scope_name(GpuScope s) {
         "skinning", "particles.sim", "shadow.dir_cache", "shadow.directional", "shadow.local", "gbuffer", "hiz",
         "temporal_history", "contact_shadows", "ssao", "sky", "clouds", "cloud_shadow", "lighting+sky", "scene_color_mips",
         "ssr.trace", "ssr.resolve", "ssr.blur", "ssgi.trace", "ssgi.resolve", "ssgi.blur", "ssr.composite",
-        "refraction_mips", "transparent", "underwater", "fog", "volumetrics.inject", "volumetrics.integrate", "volumetrics", "scene_color_history", "motion_blur", "dof", "bloom", "exposure",
+        "refraction_mips", "transparent", "xray_mask", "underwater", "fog", "volumetrics.inject", "volumetrics.integrate", "volumetrics", "scene_color_history", "motion_blur", "dof", "bloom", "exposure",
         "stylize", "world_ui", "aa", "tilt_shift", "overlay", "present"};
     return names[static_cast<size_t>(s)];
 }

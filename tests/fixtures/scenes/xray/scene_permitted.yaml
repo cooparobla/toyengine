@@ -1,0 +1,84 @@
+# scene_permitted -- fixture for xray_test.cpp.
+#
+# A ball behind a slab, looked at head-on, so the ball is EXACTLY hidden. These files are one
+# template with a single substitution, so "identical but for the markers" is a property of the
+# files and not of whoever edited them last:
+#   scene_clear      no markers at all -- the baseline, and the proof the feature is inert
+#   scene_permitted  the slab is an XrayOccluder: the silhouette must appear
+#   scene_denied     the slab has NO marker: the silhouette must NOT appear
+#   scene_two_balls  two OVERLAPPING subject balls behind a permitting slab, for the union
+#
+# Deliberately plain: no fog, no volumetrics, nothing moving, so a frame pair differs only
+# where the thing under test differs.
+scene:
+  scene_name: scene_permitted
+  root_objects:
+    - name: floor
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 12.0, y: 12.0, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material: { albedo: { r: 0.70, g: 0.70, b: 0.72 }, metallic: 0.0, roughness: 0.6, ao: 1.0 }
+      children: []
+    - name: ball
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 1.6 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.4, y: 1.4, z: 1.4 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.85, g: 0.30, b: 0.22 }, metallic: 0.0, roughness: 0.35, ao: 1.0 }
+        - type: XraySubject
+      children: []
+    # The slab, between the camera and the ball. Wide and tall enough that the ball is fully
+    # behind it: a partly-visible ball would make "silhouette pixels" ambiguous.
+    - name: slab
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -2.0, z: 1.6 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 6.0, y: 0.4, z: 4.0 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material: { albedo: { r: 0.30, g: 0.32, b: 0.35 }, metallic: 0.0, roughness: 0.8, ao: 1.0 }
+        - type: XrayOccluder
+      children: []
+    - name: camera
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -9.0, z: 1.8 }
+          rotation: { x: 90.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Camera
+          main: true
+          projection: Perspective
+          fov: 50.0
+          near_clip_plane: 0.1
+          far_clip_plane: 100.0
+      children: []
+    - name: sun
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 10.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: DirectionalLight
+          direction: { x: -0.35, y: 0.30, z: -0.89 }
+          color: { r: 1.0, g: 0.96, b: 0.90 }
+          intensity: 1.2
+          cast_shadows: true
+          shadow_intensity: 0.9
+        - type: EnvironmentLight
+          sky_color: { r: 0.45, g: 0.58, b: 0.86 }
+          ground_color: { r: 0.20, g: 0.18, b: 0.16 }
+          sky_intensity: 1.0
+      children: []

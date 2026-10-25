@@ -27,6 +27,8 @@
 #include <toyengine/scene/skinned_mesh_renderer.h>
 #include <toyengine/scene/terrain_digger.h>
 #include <toyengine/scene/turntable.h>
+#include <toyengine/scene/view_blocker.h>
+#include <toyengine/scene/xray_markers.h>
 #include <toyengine/water/buoyancy.h>
 #include <toyengine/water/water_body.h>
 #include <toyengine/world/heightmap_terrain.h>
@@ -512,6 +514,31 @@ void register_scene_components() {
                 f(bn, "limit_max", bone.hinge_max_deg);
                 r->bones.push_back(bone);
             }
+        });
+
+    // The two x-ray markers (toyengine/scene/xray_markers.h). Plain opt-in flags: the pass
+    // only exists when the `xray_enabled` render setting built it, and reads nothing else.
+    SceneLoader::register_component_parser("XraySubject",
+        [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
+            auto* s = obj.add_component<XraySubject>();
+            read(node, "enabled", s->enabled);
+        });
+    SceneLoader::register_component_parser("XrayOccluder",
+        [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
+            auto* o = obj.add_component<XrayOccluder>();
+            read(node, "enabled", o->enabled);
+        });
+
+    // A wall that erodes out of the way of the view (toyengine/scene/view_blocker.h).
+    // Driven by install_view_blocker_system(); without that system it stays solid.
+    SceneLoader::register_component_parser("ViewBlockerFade",
+        [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
+            auto* f = obj.add_component<ViewBlockerFade>();
+            read(node, "fade_target", f->fade_target);
+            read(node, "fade_in_time", f->fade_in_time);
+            read(node, "fade_out_time", f->fade_out_time);
+            read(node, "cutoff_steps", f->cutoff_steps);
+            read(node, "keep_shadow", f->keep_shadow);
         });
 }
 

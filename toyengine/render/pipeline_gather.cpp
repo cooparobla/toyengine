@@ -41,6 +41,8 @@
 #include <toyengine/render/toy_render_config.h>
 #include <toyengine/render/toy_render_math.h>
 #include <toyengine/scene/camera_controller.h>
+#include <toyengine/scene/view_blocker.h>
+#include <toyengine/scene/xray_markers.h>
 #include <uicoopa/layout/canvas.h>
 #include <uicoopa/render/ui_pass.h>
 #include <volk/volk.h>
@@ -94,6 +96,8 @@ ToyRenderPipeline::MeshGather ToyRenderPipeline::gather_meshes_(uint32_t frame_s
     out.lod.assign(n, 0);
     out.ext.assign(n, glm::uvec4(0u));
     out.instance_idx.assign(n, InstanceStream::kInvalidIndex);
+    out.xray_role.assign(n, static_cast<uint8_t>(toy::scene::XrayRole::None));
+    out.shadow_cutoff.assign(n, 0.0f);
     instance_stream_.begin(frame_slot);
 
     // A world matrix counts as changed past any float churn a transform resolve can
@@ -244,11 +248,31 @@ ToyRenderPipeline::MeshGather ToyRenderPipeline::gather_meshes_(uint32_t frame_s
         k.camera.emissive     = m.gpu_emissive();
         k.camera.params       = m.shader_params;
         k.shadow.params       = m.shader_params;
-        k.shadow.alpha_cutoff = m.gpu_alpha_cutoff();
+        // The shadow views' cutoff, which is the material's own unless this is a view-blocker
+        // wall that keeps its shadow while it erodes. Pre-filtered on the cutoff being non-zero
+        // at all: only a CUTOUT material can be dissolving, so no other object in the scene
+        // pays for the component lookup. It stays part of the shadow batch key, so two walls
+        // that disagree correctly split -- and a wall that keeps its shadow holds a CONSTANT 0
+        // here through the whole fade, which is what stops it invalidating the static shadow
+        // caches on every step of the dissolve.
+        float shadow_cut = m.gpu_alpha_cutoff();
+        if (shadow_cut > 0.0f && mr->owner) {
+            if (auto* vb = mr->owner->get_component<toy::scene::ViewBlockerFade>()) {
+                if (vb->keep_shadow) shadow_cut = 0.0f;
+            }
+        }
+        out.shadow_cutoff[i]  = shadow_cut;
+        k.shadow.alpha_cutoff = shadow_cut;
         out.ext[i]            = surface_ext_(*mr, m);
         k.camera.ext          = out.ext[i];
         k.shadow.tess_a       = out.ext[i].x;
         k.shadow.tess_b       = out.ext[i].y;
+        // The x-ray role is NOT part of the batch key: the mask pass draws its own filtered
+        // list one object at a time, so two objects differing only in role still batch
+        // together for the G-buffer, which is where it would have cost something.
+        if (config_.xray_enabled) {
+            out.xray_role[i] = static_cast<uint8_t>(toy::scene::xray_role(mr->owner));
+        }
     }
     lod_state_.swap(next_lod_state);
 
@@ -432,6 +456,36 @@ ToyRenderPipeline::MeshGather ToyRenderPipeline::gather_meshes_(uint32_t frame_s
             out.instance_idx[i] = instance_stream_.add(out.world_matrices[i], out.prev_world_matrices[i], out.snow_anchors[i]);
             out.has_blend_mesh  = true;
         }
+    }
+
+    // X-ray: the mask pass draws flagged objects one at a time too, so they need the same
+    // single-instance treatment the BLEND block above gives its meshes. Gated on the
+    // startup-fixed toggle, so a scene without the feature does not even test the predicate.
+    //
+    // Subjects first, and only then occluders, and only if a subject is actually on screen:
+    // permission without a subject draws nothing, and skipping the occluder sweep is what
+    // keeps the common case -- a flagged terrain whose player is off-camera -- free.
+    if (config_.xray_enabled) {
+        const Frustum f = Frustum::from_matrix(camera_vp);
+        auto collect = [&](uint8_t role) {
+            visible.clear();
+            cull_cells_visited += caster_grid_.for_candidates(f, view_proj_xy_rect(camera_vp), [&](uint32_t i) {
+                ++cull_items_tested;
+                if (out.valid[i] && out.xray_role[i] == role && f.intersects(out.bounds[i])) visible.push_back(i);
+            });
+            std::sort(visible.begin(), visible.end());   // ascending: keeps the stream's order stable
+            for (const uint32_t i : visible) {
+                // A BLEND subject already has one from the block above; adding a second would
+                // waste a slot and leave the two draws reading different stream entries.
+                if (out.instance_idx[i] == InstanceStream::kInvalidIndex) {
+                    out.instance_idx[i] = instance_stream_.add(out.world_matrices[i], out.prev_world_matrices[i],
+                                                               out.snow_anchors[i]);
+                }
+            }
+            return !visible.empty();
+        };
+        out.has_xray_subject = collect(static_cast<uint8_t>(toy::scene::XrayRole::Subject));
+        if (out.has_xray_subject) collect(static_cast<uint8_t>(toy::scene::XrayRole::Occluder));
     }
 
     // A static caster appearing, vanishing, moving or changing material invalidates every

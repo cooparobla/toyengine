@@ -1,0 +1,85 @@
+# scene_fixed -- fixture for view_blocker_fade_test.cpp.
+#
+# A wall squarely between a fixed camera and the player, so "this wall blocks the view" is a
+# property of the layout rather than of where a camera drifted to. One template, one
+# substitution:
+#   scene_fading  the wall carries ViewBlockerFade -- it must erode away
+#   scene_fixed   the same wall WITHOUT it -- it must stay solid (the control)
+#
+# The wall is authored CUTOUT with the dissolve mask and alpha_cutoff 0, which is the state a
+# scene ships in; the component owns the cutoff from the first frame on. The player needs a
+# collider of its own only so the system's subtree-exclusion predicate has something to
+# exclude -- without that the capsule would hit the player and nothing else.
+scene:
+  scene_name: scene_fixed
+  settings:
+    physics:
+      gravity: { x: 0, y: 0, z: 0 }
+  root_objects:
+    - name: player
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 1.5 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: sphere
+          material: { albedo: { r: 0.85, g: 0.30, b: 0.22 }, metallic: 0.0, roughness: 0.4, ao: 1.0 }
+        - type: SphereCollider
+          radius: 0.5
+        - type: XraySubject
+      children: []
+    # The wall. Big enough to fill the middle of the frame, so its own pixels are what the test
+    # counts; 4 m from the camera and 4 m from the player, squarely in between.
+    - name: wall
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -4.0, z: 1.5 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 6.0, y: 0.4, z: 4.0 }
+        - type: MeshRenderer
+          mesh_path: cube
+          material:
+            albedo: { r: 0.90, g: 0.85, b: 0.30 }
+            metallic: 0.0
+            roughness: 0.7
+            ao: 1.0
+            alpha_mode: CUTOUT
+            alpha_cutoff: 0.0
+            texture_alpha_mask: textures/masks/dissolve_noise.png
+        - type: BoxCollider
+          size: { x: 1.0, y: 1.0, z: 1.0 }
+      children: []
+    - name: camera
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -8.0, z: 1.5 }
+          rotation: { x: 90.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: Camera
+          main: true
+          projection: Perspective
+          fov: 50.0
+          near_clip_plane: 0.1
+          far_clip_plane: 100.0
+      children: []
+    - name: sun
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 10.0 }
+          rotation: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 1.0, y: 1.0, z: 1.0 }
+        - type: DirectionalLight
+          direction: { x: -0.35, y: 0.30, z: -0.89 }
+          color: { r: 1.0, g: 0.96, b: 0.90 }
+          intensity: 1.2
+          cast_shadows: true
+        - type: EnvironmentLight
+          sky_color: { r: 0.45, g: 0.58, b: 0.86 }
+          ground_color: { r: 0.20, g: 0.18, b: 0.16 }
+          sky_intensity: 1.0
+      children: []

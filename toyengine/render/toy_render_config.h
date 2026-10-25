@@ -135,6 +135,16 @@ bool debug_view_is_editor_shading(DebugView view);
 struct ToyRenderConfig {
     // --- Feature toggles ---
     bool outline_enabled   = true;
+    /**
+     * X-ray: draw an `XraySubject` (the player) as a silhouette or outline wherever it is
+     * hidden behind an `XrayOccluder` (terrain, walls). See the xray_* tunables below.
+     *
+     * STARTUP-FIXED, and that is what makes the feature free rather than merely cheap: with
+     * this false the coverage mask is never allocated and the pass is never built, so a scene
+     * that does not want it pays nothing at all -- not a clear, not a draw, not a byte. The
+     * look keys below are ordinary push-constant content and flip every frame.
+     */
+    bool xray_enabled      = false;
     bool palette_enabled   = true;  /**< Independent of palette_path, so toggling off keeps the configured path. */
     bool dither_enabled    = true;  /**< Independent of dither_strength, so toggling off keeps the configured strength. */
     bool camera_pixel_snap = true;  /**< Orthographic cameras only. */
@@ -771,6 +781,30 @@ struct ToyRenderConfig {
     glm::vec4 outline_color     = glm::vec4(0.05f, 0.04f, 0.08f, 1.0f);
     float     depth_threshold   = 0.02f;    /**< Relative depth step (fraction of the fragment's own view-space distance) that counts as an edge; scale-invariant, so one value works at any camera distance. */
     float     normal_threshold  = 0.75f;
+
+    // --- X-ray (see-through silhouette) ---
+    /**
+     * What an occluded `XraySubject` is drawn as. `silhouette` (the default) fills its hidden
+     * area flat; `outline` draws only a line around its whole shape, so the geometry behind
+     * stays readable; `both` fills and lines it. A string rather than an enum for the same
+     * reason `outline_mode` is one: it is authored in a scene's settings and switched at
+     * runtime. Unknown values read as `silhouette`.
+     *
+     * Whichever it is, every subject mesh in the scene merges into ONE shape -- they all draw
+     * into the same coverage mask, so a player plus the armour and effects parented to them
+     * read as a single silhouette with a single outline, never as stacked cut-outs.
+     */
+    std::string xray_mode      = "silhouette";
+    /** The silhouette/outline colour; `a` is how far it is blended over the scene. */
+    glm::vec4 xray_color       = glm::vec4(0.25f, 0.80f, 1.0f, 0.65f);
+    float     xray_thickness   = 2.0f;      /**< Outline width in low-resolution texels. */
+    /**
+     * How much deeper-hidden parts of the subject fade out, 0..1. 0 draws the whole hidden
+     * area at one strength. Higher values dim it with the distance between the subject and
+     * the surface covering it, so a player just behind a wall reads stronger than one far
+     * behind a hill -- the cue that tells a player how far in they have walked.
+     */
+    float     xray_depth_fade  = 0.0f;
 
     // --- Palette ---
     std::string palette_path;                 /**< Empty disables palette quantization. */

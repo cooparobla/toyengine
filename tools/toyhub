@@ -391,8 +391,20 @@ cmd_vendor() {
         echo "[toyhub] kept existing $sub"
     else
         if [[ ! -e "$dir/$sub/.git" ]]; then
+            # An interrupted or undone vendor leaves the clone behind in .git/modules/$sub with
+            # no worktree, and `submodule add` then refuses outright instead of reusing it.
+            # Reuse it when it is a clone of the same remote -- that saves re-cloning the whole
+            # engine and its libs/ -- and refuse only when it points somewhere else, where
+            # reusing would quietly vendor a different repository under the engine's name.
+            local gitdir="$dir/.git/modules/$sub" force=""
+            if [[ -d "$gitdir" ]]; then
+                local have; have="$(git --git-dir="$gitdir" config --get remote.origin.url 2>/dev/null || true)"
+                [[ "$have" == "$src" ]] || die "$dir/.git/modules/$sub is a clone of ${have:-an unknown remote}, not $src -- delete it (rm -rf '$gitdir') or vendor with --path <dir>"
+                echo "[toyhub] reusing the engine clone left in .git/modules/$sub"
+                force="--force"
+            fi
             echo "[toyhub] adding $sub to $(basename "$dir") as a submodule of $src"
-            git -C "$dir" submodule add "$src" "$sub"
+            git -C "$dir" submodule add ${force:+"$force"} "$src" "$sub"
         fi
         # Two calls, not one: `submodule add` leaves $sub already checked out, so an outer
         # `submodule update` has nothing to do for it and never descends into its own

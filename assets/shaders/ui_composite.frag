@@ -10,7 +10,7 @@
 //
 // `base` is whatever that chain produced, still at render resolution when tilt
 // shift is off, so sampling it NEAREST at destination UVs is where the scene's
-// pixel-art upscale happens. `ui` is built at the destination rect itself, so the
+// upscale happens. `ui` is built at the destination rect itself, so the
 // same sampler and UVs give an exact texel-for-texel fetch -- the UI is never
 // resampled; building it at render resolution would force a non-integer upscale
 // that makes world-canvas text look stepped.

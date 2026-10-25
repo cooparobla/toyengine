@@ -7,6 +7,7 @@
  */
 
 #include <coopa/testing/test.h>
+#include <physxcoopa/components/mesh_collider.h>
 
 #include <gfxcoopa/util/image_readback.h>
 

@@ -28,8 +28,8 @@ There is no AO / ORM channel (AO is the material's `ao` scalar).
 **Sampling**: clamp-to-edge, no mipmaps; LINEAR with `render.texel_aa` on (default), else
 NEAREST. UVs outside 0..1 do not repeat, so a texture covers its mesh once -- for tiling use
 `shader: triplanar` with a `tiling` param. The shipped textures are small (32-128 px) and
-pixel-art scaled; there's no need for large maps, and large maps without mipmaps shimmer at a
-distance.
+point-sampled up close; there's no need for large maps, and large maps without mipmaps shimmer
+at a distance.
 
 If two materials declare the same file with different colour spaces, the first wins with a
 warning; fix it with `texture_color_space: { textures/x.png: linear }`.

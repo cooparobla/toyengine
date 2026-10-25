@@ -185,6 +185,38 @@ COOPA_TEST(orientation_transforms_are_rigid) {
     expect(handed, "styled tiles: mirrored orientations flip handedness, mirror applied before rotation");
 }
 
+COOPA_TEST(wall_ends_classify_by_neighbourhood) {
+    using namespace toy::world;
+    // Column (1,1) at 3 with a north wall facing the low cell (1,2) at 1. Its right end reaches
+    // +X: along-wall neighbour a = (2,1), diagonal d = (2,2).
+    auto classify = [](std::int32_t a, std::int32_t d, std::int32_t cell) {
+        ColumnPad pad = make_styled_pad(4, 0);
+        pad.at(1, 1).steps = 3;
+        pad.at(1, 2).steps = 1;
+        pad.at(2, 1).steps = a;
+        pad.at(2, 2).steps = d;
+        return classify_wall_end(pad, {1, 1}, TileFace::North, wall_end_direction(TileFace::North, true), cell);
+    };
+    expect(classify(1, 0, 2) == WallEnd::Convex, "wall end: a lower along-wall neighbour wraps a convex corner");
+    expect(classify(3, 1, 2) == WallEnd::Continue, "wall end: a tall neighbour over a low diagonal continues");
+    expect(classify(3, 3, 2) == WallEnd::Concave, "wall end: a tall neighbour and tall diagonal turn concave");
+    expect(classify(2, 1, 2) == WallEnd::Convex && classify(2, 1, 1) == WallEnd::Continue,
+           "wall end: classified per cell -- a short neighbour is convex above its top, straight below");
+
+    bool placed = true;
+    for (const TileFace face : k_lateral_faces) {
+        for (const bool right : {true, false}) {
+            const glm::mat3 r(variant_transform(wall_orientation(face, right)));
+            const glm::vec3 n = r * glm::vec3(0, 1, 0);
+            const glm::vec3 e = r * glm::vec3(1, 0, 0);
+            const glm::ivec2 along = wall_end_direction(face, right);
+            placed = placed && glm::length(n - face_normal(face)) < 1e-5f &&
+                     std::abs(e.x - along.x) < 1e-5f && std::abs(e.y - along.y) < 1e-5f;
+        }
+    }
+    expect(placed, "wall end: each half is placed on its face, reaching toward its own end");
+}
+
 COOPA_TEST(plateau_interior_merges_flat) {
     using namespace toy::world;
     const TileMeshLibrary& library = styled_library();

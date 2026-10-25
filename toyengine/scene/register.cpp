@@ -1,5 +1,7 @@
 #include <toyengine/scene/register.h>
 
+#include <toyengine/core/yaml_read.h>
+
 #include <filesystem>
 
 #include <coopa/asset/asset_manager.h>
@@ -35,6 +37,11 @@
 namespace toy {
 namespace scene {
 
+// The present-if-set key reads every parser below uses (toyengine/core/yaml_read.h).
+using core::yaml::read;
+using core::yaml::read_rgb;
+using core::yaml::num;
+
 glm::vec3 parse_vec3(const fkyaml::node& n, const glm::vec3& fallback) {
     glm::vec3 v = fallback;
     if (n.contains("x")) v.x = n.at("x").get_value<float>();
@@ -56,40 +63,37 @@ glm::vec3 parse_rgb(const fkyaml::node& n, const glm::vec3& fallback) {
  *        physics) -- shared by the "WaterBody" parser and a TileTerrain's `water:` block.
  */
 void parse_water_settings(const fkyaml::node& node, toy::water::WaterBody& w) {
-    auto f = [&node](const char* key, float& out) {
-        if (node.contains(key)) out = node.at(key).get_value<float>();
-    };
-    f("wave_amplitude", w.waves.amplitude);
-    f("wave_length", w.waves.wavelength);
-    f("wave_steepness", w.waves.steepness);
-    f("wind_response", w.wind_response);
+    read(node, "wave_amplitude", w.waves.amplitude);
+    read(node, "wave_length", w.waves.wavelength);
+    read(node, "wave_steepness", w.waves.steepness);
+    read(node, "wind_response", w.wind_response);
     if (node.contains("wave_direction")) {
         w.waves.direction = glm::radians(node.at("wave_direction").get_value<float>());
     }
 
-    f("flow_speed", w.flow_speed);
-    f("flow_min_speed", w.flow_min_speed);
-    f("flow_slope_gain", w.flow_slope_gain);
-    f("obstacle_radius", w.obstacle_radius);
-    f("wake_length", w.wake_length);
+    read(node, "flow_speed", w.flow_speed);
+    read(node, "flow_min_speed", w.flow_min_speed);
+    read(node, "flow_slope_gain", w.flow_slope_gain);
+    read(node, "obstacle_radius", w.obstacle_radius);
+    read(node, "wake_length", w.wake_length);
 
     if (node.contains("foam_color")) w.foam_color = parse_rgb(node.at("foam_color"), w.foam_color);
-    f("foam_amount", w.foam_amount);
-    f("shore_foam_depth", w.shore_foam_depth);
-    f("edge_fade_depth", w.edge_fade_depth);
-    f("ripple_strength", w.ripple_strength);
-    f("ripple_scale", w.ripple_scale);
-    f("clarity", w.clarity);
+    read(node, "foam_amount", w.foam_amount);
+    read(node, "shore_foam_depth", w.shore_foam_depth);
+    read(node, "edge_fade_depth", w.edge_fade_depth);
+    read(node, "ripple_strength", w.ripple_strength);
+    read(node, "ripple_scale", w.ripple_scale);
+    read(node, "clarity", w.clarity);
 
     if (node.contains("underwater_color")) w.underwater_color = parse_rgb(node.at("underwater_color"), w.underwater_color);
-    f("underwater_visibility", w.underwater_visibility);
+    read(node, "underwater_visibility", w.underwater_visibility);
     if (node.contains("underwater_absorption")) {
         w.underwater_absorption = parse_rgb(node.at("underwater_absorption"), w.underwater_absorption);
     }
-    f("caustics", w.caustics);
+    read(node, "caustics", w.caustics);
 
-    f("density", w.density);
-    f("max_depth", w.max_depth);
+    read(node, "density", w.density);
+    read(node, "max_depth", w.max_depth);
 }
 
 void register_scene_components() {
@@ -123,21 +127,21 @@ void register_scene_components() {
                 cc->movement_smoothing = node.at("movement_smoothing").get_value<float>();
             }
 
-            if (node.contains("distance")) cc->distance = node.at("distance").get_value<float>();
-            if (node.contains("yaw_deg"))   cc->yaw_deg   = node.at("yaw_deg").get_value<float>();
-            if (node.contains("pitch_deg")) cc->pitch_deg = node.at("pitch_deg").get_value<float>();
+            read(node, "distance", cc->distance);
+            read(node, "yaw_deg", cc->yaw_deg);
+            read(node, "pitch_deg", cc->pitch_deg);
 
-            if (node.contains("min_pitch_deg")) cc->min_pitch_deg = node.at("min_pitch_deg").get_value<float>();
-            if (node.contains("max_pitch_deg")) cc->max_pitch_deg = node.at("max_pitch_deg").get_value<float>();
-            if (node.contains("min_distance"))  cc->min_distance  = node.at("min_distance").get_value<float>();
-            if (node.contains("max_distance"))  cc->max_distance  = node.at("max_distance").get_value<float>();
+            read(node, "min_pitch_deg", cc->min_pitch_deg);
+            read(node, "max_pitch_deg", cc->max_pitch_deg);
+            read(node, "min_distance", cc->min_distance);
+            read(node, "max_distance", cc->max_distance);
 
             if (node.contains("mouse_sensitivity")) {
                 cc->mouse_sensitivity = node.at("mouse_sensitivity").get_value<float>();
             }
-            if (node.contains("invert_x")) cc->invert_x = node.at("invert_x").get_value<bool>();
-            if (node.contains("invert_y")) cc->invert_y = node.at("invert_y").get_value<bool>();
-            if (node.contains("zoom_speed")) cc->zoom_speed = node.at("zoom_speed").get_value<float>();
+            read(node, "invert_x", cc->invert_x);
+            read(node, "invert_y", cc->invert_y);
+            read(node, "zoom_speed", cc->zoom_speed);
             if (node.contains("look_button")) {
                 cc->look_button = node.at("look_button").get_value<std::string>();
             }
@@ -157,13 +161,12 @@ void register_scene_components() {
             if (node.contains("look_speed_deg_per_sec")) {
                 cc->look_speed_deg_per_sec = node.at("look_speed_deg_per_sec").get_value<float>();
             }
-            if (node.contains("collide")) cc->collide = node.at("collide").get_value<bool>();
-            if (node.contains("collision_radius")) cc->collision_radius = node.at("collision_radius").get_value<float>();
-            if (node.contains("collision_in_speed")) cc->collision_in_speed = node.at("collision_in_speed").get_value<float>();
-            if (node.contains("collision_out_speed")) cc->collision_out_speed = node.at("collision_out_speed").get_value<float>();
-            if (node.contains("eye_height")) cc->eye_height = node.at("eye_height").get_value<float>();
-            if (node.contains("first_person_pitch_limit"))
-                cc->first_person_pitch_limit = node.at("first_person_pitch_limit").get_value<float>();
+            read(node, "collide", cc->collide);
+            read(node, "collision_radius", cc->collision_radius);
+            read(node, "collision_in_speed", cc->collision_in_speed);
+            read(node, "collision_out_speed", cc->collision_out_speed);
+            read(node, "eye_height", cc->eye_height);
+            read(node, "first_person_pitch_limit", cc->first_person_pitch_limit);
         });
 
     // A model turned in front of a fixed camera (toyengine/scene/turntable.h). Input is pushed
@@ -171,22 +174,16 @@ void register_scene_components() {
     SceneLoader::register_component_parser("Turntable",
         [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
             auto* tt = obj.add_component<Turntable>();
-            auto f = [&](const char* key, float& out) {
-                if (node.contains(key)) out = node.at(key).get_value<float>();
-            };
-            auto b = [&](const char* key, bool& out) {
-                if (node.contains(key)) out = node.at(key).get_value<bool>();
-            };
-            f("sensitivity", tt->sensitivity);
-            if (node.contains("drag_button")) tt->drag_button = node.at("drag_button").get_value<std::string>();
+            read(node, "sensitivity", tt->sensitivity);
+            read(node, "drag_button", tt->drag_button);
             if (node.contains("axis")) tt->axis = parse_vec3(node.at("axis"), tt->axis);
-            f("idle_spin_deg_per_sec", tt->idle_spin_deg_per_sec);
-            f("damping", tt->damping);
-            f("min_tilt_deg", tt->min_tilt_deg);
-            f("max_tilt_deg", tt->max_tilt_deg);
-            f("max_spin_deg_per_sec", tt->max_spin_deg_per_sec);
-            b("invert_x", tt->invert_x);
-            b("invert_y", tt->invert_y);
+            read(node, "idle_spin_deg_per_sec", tt->idle_spin_deg_per_sec);
+            read(node, "damping", tt->damping);
+            read(node, "min_tilt_deg", tt->min_tilt_deg);
+            read(node, "max_tilt_deg", tt->max_tilt_deg);
+            read(node, "max_spin_deg_per_sec", tt->max_spin_deg_per_sec);
+            read(node, "invert_x", tt->invert_x);
+            read(node, "invert_y", tt->invert_y);
         });
 
     // A breakable mesh (toyengine/scene/destructible.h). DestructionSystem (order 70) does the
@@ -194,25 +191,22 @@ void register_scene_components() {
     SceneLoader::register_component_parser("Destructible",
         [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
             auto* d = obj.add_component<Destructible>();
-            auto f = [&](const char* key, float& out) {
-                if (node.contains(key)) out = node.at(key).get_value<float>();
-            };
-            if (node.contains("pieces")) d->pieces = node.at("pieces").get_value<int>();
-            if (node.contains("seed")) d->seed = node.at("seed").get_value<std::uint32_t>();
-            if (node.contains("max_chunks")) d->max_chunks = node.at("max_chunks").get_value<int>();
-            if (node.contains("max_boxes")) d->max_boxes = node.at("max_boxes").get_value<int>();
-            if (node.contains("prefracture")) d->prefracture = node.at("prefracture").get_value<bool>();
+            read(node, "pieces", d->pieces);
+            read(node, "seed", d->seed);
+            read(node, "max_chunks", d->max_chunks);
+            read(node, "max_boxes", d->max_boxes);
+            read(node, "prefracture", d->prefracture);
             if (node.contains("chunk_physics_material")) {
                 d->chunk_physics_material = node.at("chunk_physics_material").get_value<std::string>();
             }
-            f("irregularity", d->irregularity);
-            f("impact_impulse", d->impact_impulse);
-            f("scatter", d->scatter);
-            f("impact_transfer", d->impact_transfer);
-            f("chunk_lifetime", d->chunk_lifetime);
-            f("chunk_fade", d->chunk_fade);
-            f("chunk_density", d->chunk_density);
-            f("collider_fill", d->collider_fill);
+            read(node, "irregularity", d->irregularity);
+            read(node, "impact_impulse", d->impact_impulse);
+            read(node, "scatter", d->scatter);
+            read(node, "impact_transfer", d->impact_transfer);
+            read(node, "chunk_lifetime", d->chunk_lifetime);
+            read(node, "chunk_fade", d->chunk_fade);
+            read(node, "chunk_density", d->chunk_density);
+            read(node, "collider_fill", d->collider_fill);
         });
 
     // Digging the terrain with the mouse (toyengine/scene/terrain_digger.h). Input is pushed in
@@ -220,15 +214,12 @@ void register_scene_components() {
     SceneLoader::register_component_parser("TerrainDigger",
         [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
             auto* d = obj.add_component<TerrainDigger>();
-            auto str = [&](const char* key, std::string& out) {
-                if (node.contains(key)) out = node.at(key).get_value<std::string>();
-            };
-            str("dig_button", d->dig_button);
-            str("raise_key", d->raise_key);
-            if (node.contains("radius")) d->radius = node.at("radius").get_value<int>();
-            if (node.contains("steps")) d->steps = node.at("steps").get_value<int>();
-            if (node.contains("repeat_seconds")) d->repeat_seconds = node.at("repeat_seconds").get_value<float>();
-            if (node.contains("reach")) d->reach = node.at("reach").get_value<float>();
+            read(node, "dig_button", d->dig_button);
+            read(node, "raise_key", d->raise_key);
+            read(node, "radius", d->radius);
+            read(node, "steps", d->steps);
+            read(node, "repeat_seconds", d->repeat_seconds);
+            read(node, "reach", d->reach);
         });
 
     // A walking capsule character (toyengine/scene/character_controller.h). Input is pushed in by
@@ -236,33 +227,27 @@ void register_scene_components() {
     SceneLoader::register_component_parser("CharacterController",
         [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
             auto* cc = obj.add_component<CharacterController>();
-            auto f = [&](const char* key, float& out) {
-                if (node.contains(key)) out = node.at(key).get_value<float>();
-            };
-            auto b = [&](const char* key, bool& out) {
-                if (node.contains(key)) out = node.at(key).get_value<bool>();
-            };
-            f("radius", cc->radius);
-            f("height", cc->height);
-            f("step_height", cc->step_height);
-            f("slope_limit", cc->slope_limit);
-            f("skin", cc->skin);
-            f("snap_distance", cc->snap_distance);
-            f("step_smoothing", cc->step_smoothing);
-            f("move_speed", cc->move_speed);
-            f("sprint_multiplier", cc->sprint_multiplier);
-            f("acceleration", cc->acceleration);
-            f("air_control", cc->air_control);
-            f("gravity_scale", cc->gravity_scale);
-            f("jump_height", cc->jump_height);
-            f("coyote_time", cc->coyote_time);
-            f("jump_buffer", cc->jump_buffer);
-            b("face_movement", cc->face_movement);
-            f("turn_speed", cc->turn_speed);
-            b("push_dynamic_bodies", cc->push_dynamic_bodies);
-            f("push_strength", cc->push_strength);
-            b("use_root_motion", cc->use_root_motion);
-            b("player_input", cc->player_input);
+            read(node, "radius", cc->radius);
+            read(node, "height", cc->height);
+            read(node, "step_height", cc->step_height);
+            read(node, "slope_limit", cc->slope_limit);
+            read(node, "skin", cc->skin);
+            read(node, "snap_distance", cc->snap_distance);
+            read(node, "step_smoothing", cc->step_smoothing);
+            read(node, "move_speed", cc->move_speed);
+            read(node, "sprint_multiplier", cc->sprint_multiplier);
+            read(node, "acceleration", cc->acceleration);
+            read(node, "air_control", cc->air_control);
+            read(node, "gravity_scale", cc->gravity_scale);
+            read(node, "jump_height", cc->jump_height);
+            read(node, "coyote_time", cc->coyote_time);
+            read(node, "jump_buffer", cc->jump_buffer);
+            read(node, "face_movement", cc->face_movement);
+            read(node, "turn_speed", cc->turn_speed);
+            read(node, "push_dynamic_bodies", cc->push_dynamic_bodies);
+            read(node, "push_strength", cc->push_strength);
+            read(node, "use_root_motion", cc->use_root_motion);
+            read(node, "player_input", cc->player_input);
         });
 
     // A rideable animal (toyengine/scene/mount.h): steers its own CharacterController from the
@@ -270,36 +255,30 @@ void register_scene_components() {
     SceneLoader::register_component_parser("Mount",
         [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
             auto* m = obj.add_component<Mount>();
-            auto f = [&](const char* key, float& out) {
-                if (node.contains(key)) out = node.at(key).get_value<float>();
-            };
-            auto str = [&](const char* key, std::string& out) {
-                if (node.contains(key)) out = node.at(key).get_value<std::string>();
-            };
-            f("walk_speed", m->walk_speed);
-            f("trot_speed", m->trot_speed);
-            f("gallop_speed", m->gallop_speed);
-            f("acceleration", m->acceleration);
-            f("braking", m->braking);
-            f("turn_rate", m->turn_rate);
-            f("gallop_turn_rate", m->gallop_turn_rate);
-            f("mount_max_speed", m->mount_max_speed);
-            str("idle_state", m->idle_state);
-            str("walk_state", m->walk_state);
-            str("trot_state", m->trot_state);
-            str("gallop_state", m->gallop_state);
-            f("crossfade", m->crossfade);
-            f("min_anim_speed", m->min_anim_speed);
-            f("max_anim_speed", m->max_anim_speed);
-            str("saddle", m->saddle);
-            str("stirrup_l", m->stirrup_l);
-            str("stirrup_r", m->stirrup_r);
-            str("rein_l", m->rein_l);
-            str("rein_r", m->rein_r);
-            str("mount_point_l", m->mount_point_l);
-            str("mount_point_r", m->mount_point_r);
-            f("camera_offset_z", m->camera_offset_z);
-            f("camera_distance", m->camera_distance);
+            read(node, "walk_speed", m->walk_speed);
+            read(node, "trot_speed", m->trot_speed);
+            read(node, "gallop_speed", m->gallop_speed);
+            read(node, "acceleration", m->acceleration);
+            read(node, "braking", m->braking);
+            read(node, "turn_rate", m->turn_rate);
+            read(node, "gallop_turn_rate", m->gallop_turn_rate);
+            read(node, "mount_max_speed", m->mount_max_speed);
+            read(node, "idle_state", m->idle_state);
+            read(node, "walk_state", m->walk_state);
+            read(node, "trot_state", m->trot_state);
+            read(node, "gallop_state", m->gallop_state);
+            read(node, "crossfade", m->crossfade);
+            read(node, "min_anim_speed", m->min_anim_speed);
+            read(node, "max_anim_speed", m->max_anim_speed);
+            read(node, "saddle", m->saddle);
+            read(node, "stirrup_l", m->stirrup_l);
+            read(node, "stirrup_r", m->stirrup_r);
+            read(node, "rein_l", m->rein_l);
+            read(node, "rein_r", m->rein_r);
+            read(node, "mount_point_l", m->mount_point_l);
+            read(node, "mount_point_r", m->mount_point_r);
+            read(node, "camera_offset_z", m->camera_offset_z);
+            read(node, "camera_distance", m->camera_distance);
         });
 
     // Gets the player on / off a Mount (toyengine/scene/rider.h); `interact` (F) is pushed by
@@ -307,21 +286,18 @@ void register_scene_components() {
     SceneLoader::register_component_parser("Rider",
         [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
             auto* r = obj.add_component<Rider>();
-            auto f = [&](const char* key, float& out) {
-                if (node.contains(key)) out = node.at(key).get_value<float>();
-            };
-            f("mount_radius", r->mount_radius);
-            f("mount_time", r->mount_time);
-            f("dismount_time", r->dismount_time);
-            if (node.contains("ride_state")) r->ride_state = node.at("ride_state").get_value<std::string>();
-            f("crossfade", r->crossfade);
+            read(node, "mount_radius", r->mount_radius);
+            read(node, "mount_time", r->mount_time);
+            read(node, "dismount_time", r->dismount_time);
+            read(node, "ride_state", r->ride_state);
+            read(node, "crossfade", r->crossfade);
             if (node.contains("seat_offset")) r->seat_offset = parse_vec3(node.at("seat_offset"), r->seat_offset);
-            f("knee_spread", r->knee_spread);
-            f("lean", r->lean);
-            f("leg_weight", r->leg_weight);
-            f("arm_weight", r->arm_weight);
-            if (node.contains("priority")) r->priority = node.at("priority").get_value<int>();
-            if (node.contains("mount_on_start")) r->mount_on_start = node.at("mount_on_start").get_value<std::string>();
+            read(node, "knee_spread", r->knee_spread);
+            read(node, "lean", r->lean);
+            read(node, "leg_weight", r->leg_weight);
+            read(node, "arm_weight", r->arm_weight);
+            read(node, "priority", r->priority);
+            read(node, "mount_on_start", r->mount_on_start);
         });
 
     // A trigger box that loads another scene when the player walks in (toyengine/scene/scene_link.h).
@@ -330,17 +306,14 @@ void register_scene_components() {
     SceneLoader::register_component_parser("SceneLink",
         [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext& ctx) {
             auto* link = obj.add_component<SceneLink>();
-            auto str = [&](const char* key, std::string& out) {
-                if (node.contains(key)) out = node.at(key).get_value<std::string>();
-            };
-            str("target_scene", link->target_scene);
+            read(node, "target_scene", link->target_scene);
             if (!link->target_scene.empty()) link->target_scene = ctx.resolve(link->target_scene);
-            str("transition", link->transition);
-            str("loading_screen", link->loading_screen);
-            str("spawn_point", link->spawn_point);
+            read(node, "transition", link->transition);
+            read(node, "loading_screen", link->loading_screen);
+            read(node, "spawn_point", link->spawn_point);
             if (node.contains("color")) link->color = parse_rgb(node.at("color"), link->color);
-            if (node.contains("fade_time")) link->fade_time = node.at("fade_time").get_value<float>();
-            if (node.contains("min_display_time")) link->min_display_time = node.at("min_display_time").get_value<float>();
+            read(node, "fade_time", link->fade_time);
+            read(node, "min_display_time", link->min_display_time);
             if (node.contains("size")) link->size = parse_vec3(node.at("size"), link->size);
         });
 
@@ -348,23 +321,20 @@ void register_scene_components() {
     SceneLoader::register_component_parser("CharacterAnimDriver",
         [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
             auto* d = obj.add_component<CharacterAnimDriver>();
-            if (node.contains("idle_state")) d->idle_state = node.at("idle_state").get_value<std::string>();
-            if (node.contains("walk_state")) d->walk_state = node.at("walk_state").get_value<std::string>();
-            if (node.contains("run_state")) d->run_state = node.at("run_state").get_value<std::string>();
-            if (node.contains("jump_state")) d->jump_state = node.at("jump_state").get_value<std::string>();
-            if (node.contains("walk_speed")) d->walk_speed = node.at("walk_speed").get_value<float>();
-            if (node.contains("run_speed")) d->run_speed = node.at("run_speed").get_value<float>();
-            if (node.contains("crossfade")) d->crossfade = node.at("crossfade").get_value<float>();
-            if (node.contains("air_delay")) d->air_delay = node.at("air_delay").get_value<float>();
+            read(node, "idle_state", d->idle_state);
+            read(node, "walk_state", d->walk_state);
+            read(node, "run_state", d->run_state);
+            read(node, "jump_state", d->jump_state);
+            read(node, "walk_speed", d->walk_speed);
+            read(node, "run_speed", d->run_speed);
+            read(node, "crossfade", d->crossfade);
+            read(node, "air_delay", d->air_delay);
         });
 
     // Ground-adapting legs (toyengine/scene/foot_ik.h), solved by coopa::anim::IkSystem.
     SceneLoader::register_component_parser("FootIK",
         [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
             auto* ik = obj.add_component<FootIK>();
-            auto f = [&](const char* key, float& out) {
-                if (node.contains(key)) out = node.at(key).get_value<float>();
-            };
             // A leg: [thigh, shin, foot] or {thigh, shin, foot, pole, front}.
             auto parse_leg = [&](const fkyaml::node& n, FootIK::Leg& out) {
                 if (n.is_sequence()) {
@@ -382,7 +352,7 @@ void register_scene_components() {
             auto leg = [&](const char* key, FootIK::Leg& out) {
                 if (node.contains(key)) parse_leg(node.at(key), out);
             };
-            if (node.contains("pelvis")) ik->pelvis = node.at("pelvis").get_value<std::string>();
+            read(node, "pelvis", ik->pelvis);
             leg("left", ik->left);
             leg("right", ik->right);
             if (node.contains("legs") && node.at("legs").is_sequence()) {
@@ -392,17 +362,17 @@ void register_scene_components() {
                     ik->legs.push_back(l);
                 }
             }
-            if (node.contains("body_pitch")) ik->body_pitch = node.at("body_pitch").get_value<bool>();
-            f("max_body_pitch", ik->max_body_pitch);
-            f("ray_up", ik->ray_up);
-            f("ray_down", ik->ray_down);
-            f("max_pelvis_drop", ik->max_pelvis_drop);
-            if (node.contains("align_feet")) ik->align_feet = node.at("align_feet").get_value<bool>();
-            f("max_foot_angle", ik->max_foot_angle);
-            f("blend_speed", ik->blend_speed);
-            f("weight", ik->weight);
+            read(node, "body_pitch", ik->body_pitch);
+            read(node, "max_body_pitch", ik->max_body_pitch);
+            read(node, "ray_up", ik->ray_up);
+            read(node, "ray_down", ik->ray_down);
+            read(node, "max_pelvis_drop", ik->max_pelvis_drop);
+            read(node, "align_feet", ik->align_feet);
+            read(node, "max_foot_angle", ik->max_foot_angle);
+            read(node, "blend_speed", ik->blend_speed);
+            read(node, "weight", ik->weight);
             if (node.contains("layer_mask")) ik->layer_mask = static_cast<uint32_t>(node.at("layer_mask").get_value<int64_t>());
-            if (node.contains("mode")) ik->mode = node.at("mode").get_value<std::string>();
+            read(node, "mode", ik->mode);
         });
 
     SceneLoader::register_component_parser("KinematicMover",
@@ -416,12 +386,12 @@ void register_scene_components() {
                 else km->mode = KinematicMoverMode::PingPong;
             }
             if (node.contains("axis")) km->axis = parse_vec3(node.at("axis"), km->axis);
-            if (node.contains("distance")) km->distance = node.at("distance").get_value<float>();
-            if (node.contains("speed")) km->speed = node.at("speed").get_value<float>();
+            read(node, "distance", km->distance);
+            read(node, "speed", km->speed);
             if (node.contains("orbit_center")) km->orbit_center = parse_vec3(node.at("orbit_center"), km->orbit_center);
-            if (node.contains("orbit_radius")) km->orbit_radius = node.at("orbit_radius").get_value<float>();
+            read(node, "orbit_radius", km->orbit_radius);
             if (node.contains("spin_axis")) km->spin_axis = parse_vec3(node.at("spin_axis"), km->spin_axis);
-            if (node.contains("spin_speed")) km->spin_speed = node.at("spin_speed").get_value<float>();
+            read(node, "spin_speed", km->spin_speed);
         });
 
     // Demo driver for the world-space UI canvas: owns a coopa::stat::Resource and binds it to
@@ -430,12 +400,12 @@ void register_scene_components() {
         [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
             auto* hd = obj.add_component<HealthDriver>();
 
-            if (node.contains("bar_object")) hd->bar_object = node.at("bar_object").get_value<std::string>();
-            if (node.contains("max_health")) hd->max_health = node.at("max_health").get_value<float>();
-            if (node.contains("start_health")) hd->start_health = node.at("start_health").get_value<float>();
-            if (node.contains("damage_per_second")) hd->damage_per_second = node.at("damage_per_second").get_value<float>();
-            if (node.contains("regen_per_second")) hd->regen_per_second = node.at("regen_per_second").get_value<float>();
-            if (node.contains("turnaround_fraction")) hd->turnaround_fraction = node.at("turnaround_fraction").get_value<float>();
+            read(node, "bar_object", hd->bar_object);
+            read(node, "max_health", hd->max_health);
+            read(node, "start_health", hd->start_health);
+            read(node, "damage_per_second", hd->damage_per_second);
+            read(node, "regen_per_second", hd->regen_per_second);
+            read(node, "turnaround_fraction", hd->turnaround_fraction);
         });
 
     // Free 3D movement for an object that is not a physics body -- typically an invisible
@@ -444,8 +414,8 @@ void register_scene_components() {
     SceneLoader::register_component_parser("FreeMover",
         [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
             auto* fm = obj.add_component<FreeMover>();
-            if (node.contains("move_speed")) fm->move_speed = node.at("move_speed").get_value<float>();
-            if (node.contains("smoothing"))  fm->smoothing  = node.at("smoothing").get_value<float>();
+            read(node, "move_speed", fm->move_speed);
+            read(node, "smoothing", fm->smoothing);
         });
 
     // Input-driven horizontal motion for a kinematic Rigidbody. The input itself is pushed in by
@@ -453,9 +423,9 @@ void register_scene_components() {
     SceneLoader::register_component_parser("KinematicController",
         [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
             auto* kc = obj.add_component<KinematicController>();
-            if (node.contains("move_speed")) kc->move_speed = node.at("move_speed").get_value<float>();
-            if (node.contains("smoothing")) kc->smoothing = node.at("smoothing").get_value<float>();
-            if (node.contains("lock_height")) kc->lock_height = node.at("lock_height").get_value<bool>();
+            read(node, "move_speed", kc->move_speed);
+            read(node, "smoothing", kc->smoothing);
+            read(node, "lock_height", kc->lock_height);
         });
 
     // Makes a sibling Rigidbody float -- see toyengine/water/buoyancy.h. Everything per-substep
@@ -463,12 +433,12 @@ void register_scene_components() {
     SceneLoader::register_component_parser("Buoyancy",
         [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
             auto* b = obj.add_component<water::Buoyancy>();
-            if (node.contains("subdivisions"))   b->subdivisions   = node.at("subdivisions").get_value<int>();
-            if (node.contains("volume"))         b->volume         = node.at("volume").get_value<float>();
-            if (node.contains("linear_drag"))    b->linear_drag    = node.at("linear_drag").get_value<float>();
-            if (node.contains("angular_drag"))   b->angular_drag   = node.at("angular_drag").get_value<float>();
-            if (node.contains("form_drag"))      b->form_drag      = node.at("form_drag").get_value<float>();
-            if (node.contains("buoyancy_scale")) b->buoyancy_scale = node.at("buoyancy_scale").get_value<float>();
+            read(node, "subdivisions", b->subdivisions);
+            read(node, "volume", b->volume);
+            read(node, "linear_drag", b->linear_drag);
+            read(node, "angular_drag", b->angular_drag);
+            read(node, "form_drag", b->form_drag);
+            read(node, "buoyancy_scale", b->buoyancy_scale);
             if (node.contains("pontoons")) {
                 // [{x, y, z, radius}] in the owner's unscaled local frame.
                 for (const auto& p : node.at("pontoons")) {
@@ -490,18 +460,15 @@ void register_scene_components() {
             auto f = [&](const fkyaml::node& n, const char* key, float& out) {
                 if (n.contains(key)) out = n.at(key).get_value<float>();
             };
-            auto b = [&](const char* key, bool& out) {
-                if (node.contains(key)) out = node.at(key).get_value<bool>();
-            };
             auto axis_index = [](const std::string& s) {
                 return (s == "x" || s == "X") ? 0 : (s == "y" || s == "Y") ? 1 : 2;
             };
             if (node.contains("mode")) r->start_ragdoll = node.at("mode").get_value<std::string>() == "ragdoll";
-            b("auto_generate", r->auto_generate);
-            b("collide_connected", r->collide_connected);
-            b("link_character", r->link_character);
-            b("reposition_root", r->reposition_root);
-            b("input_toggle", r->input_toggle);
+            read(node, "auto_generate", r->auto_generate);
+            read(node, "collide_connected", r->collide_connected);
+            read(node, "link_character", r->link_character);
+            read(node, "reposition_root", r->reposition_root);
+            read(node, "input_toggle", r->input_toggle);
             f(node, "mass", r->mass);
             f(node, "drag", r->drag);
             f(node, "angular_drag", r->angular_drag);
@@ -511,7 +478,7 @@ void register_scene_components() {
             f(node, "max_limp_speed", r->max_limp_speed);
             f(node, "max_limp_spin", r->max_limp_spin);
             if (node.contains("layer")) r->layer = static_cast<uint32_t>(node.at("layer").get_value<int64_t>());
-            if (node.contains("recover_state")) r->recover_state = node.at("recover_state").get_value<std::string>();
+            read(node, "recover_state", r->recover_state);
             if (node.contains("start_impulse")) r->start_impulse = parse_vec3(node.at("start_impulse"), r->start_impulse);
             if (node.contains("toggle_impulse")) r->toggle_impulse = parse_vec3(node.at("toggle_impulse"), r->toggle_impulse);
             if (!node.contains("bones") || !node.at("bones").is_sequence()) return;
@@ -579,13 +546,13 @@ void register_scene_components(coopa::gfx::core::Device& device,
             terrain->generator = world::generator_config_from_node(node);
 
             // --- How it is tiled ---
-            if (node.contains("world_tiles")) params.world_tiles = node.at("world_tiles").get_value<std::int32_t>();
+            read(node, "world_tiles", params.world_tiles);
             if (node.contains("tiles_per_grid_unit")) {
                 params.tiles_per_grid_unit = node.at("tiles_per_grid_unit").get_value<std::int32_t>();
             }
-            if (node.contains("tile_size"))    params.tile_size    = node.at("tile_size").get_value<float>();
-            if (node.contains("height_step"))  params.height_step  = node.at("height_step").get_value<float>();
-            if (node.contains("height_scale")) params.height_scale = node.at("height_scale").get_value<float>();
+            read(node, "tile_size", params.tile_size);
+            read(node, "height_step", params.height_step);
+            read(node, "height_scale", params.height_scale);
             if (node.contains("chunk_size")) {
                 params.chunk_size = node.at("chunk_size").get_value<std::int32_t>();
             }
@@ -598,17 +565,17 @@ void register_scene_components(coopa::gfx::core::Device& device,
             if (node.contains("soil_depth_steps")) {
                 params.soil_depth_steps = node.at("soil_depth_steps").get_value<std::int32_t>();
             }
-            if (node.contains("water_inset")) params.water_inset = node.at("water_inset").get_value<float>();
+            read(node, "water_inset", params.water_inset);
             // A planet (toyengine/world/planet.h): six faces of tiles on a sphere.
-            if (node.contains("planet")) params.planet = node.at("planet").get_value<bool>();
-            if (node.contains("face_tiles")) params.face_tiles = node.at("face_tiles").get_value<std::int32_t>();
-            if (node.contains("gravity")) terrain->gravity = node.at("gravity").get_value<float>();
+            read(node, "planet", params.planet);
+            read(node, "face_tiles", params.face_tiles);
+            read(node, "gravity", terrain->gravity);
             if (params.planet) {
                 params.max_merge = 1;   // every tile its own piece: merged quads would crack when bent
                 params.face_tiles = std::max<std::int32_t>(params.chunk_size, params.face_tiles);
                 params.face_tiles -= params.face_tiles % std::max<std::int32_t>(1, params.chunk_size);
             }
-            if (node.contains("river_inset")) params.river_inset = node.at("river_inset").get_value<float>();
+            read(node, "river_inset", params.river_inset);
             // `lods:` -- the coarser levels every chunk mesh is built with, coarsest last. An
             // empty list (or `lods: false`) turns the levels off and draws every chunk at full
             // density, whatever its size on screen.
@@ -683,7 +650,7 @@ void register_scene_components(coopa::gfx::core::Device& device,
                 terrain->tiles = world::TileMapStore::instance().acquire(path);
             }
 
-            if (node.contains("collision")) terrain->collision = node.at("collision").get_value<bool>();
+            read(node, "collision", terrain->collision);
             if (node.contains("physics_material")) {
                 terrain->physics_material = node.at("physics_material").get_value<std::string>();
             }
@@ -811,9 +778,6 @@ void register_scene_components(coopa::gfx::core::Device& device,
     SceneLoader::register_component_parser("WaterBody",
         [&assets](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext& ctx) {
             auto* w = obj.add_component<water::WaterBody>();
-            auto f = [&node](const char* key, float& out) {
-                if (node.contains(key)) out = node.at(key).get_value<float>();
-            };
             if (node.contains("mode")) {
                 std::string mode = node.at("mode").get_value<std::string>();
                 for (char& c : mode) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -821,14 +785,14 @@ void register_scene_components(coopa::gfx::core::Device& device,
                 else if (mode == "planar" || mode == "static" || mode == "lake") w->mode = water::WaterMode::Planar;
                 else throw std::runtime_error("[WaterBody] unknown mode '" + mode + "' (planar | flowing)");
             }
-            if (node.contains("mesh_path")) w->mesh_path = node.at("mesh_path").get_value<std::string>();
+            read(node, "mesh_path", w->mesh_path);
             if (node.contains("size")) {
                 const auto& sz = node.at("size");
                 if (sz.contains("x")) w->size.x = sz.at("x").get_value<float>();
                 if (sz.contains("y")) w->size.y = sz.at("y").get_value<float>();
             }
-            if (node.contains("resolution")) w->resolution = node.at("resolution").get_value<int>();
-            f("tile_size", w->tile_size);
+            read(node, "resolution", w->resolution);
+            read(node, "tile_size", w->tile_size);
 
             parse_water_settings(node, *w);
 

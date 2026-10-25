@@ -1,9 +1,27 @@
 /**
  * @file toy_render_pipeline.h
- * @brief Orchestrates the low-resolution deferred pixel-art frame graph.
+ * @brief Orchestrates the deferred frame graph.
  *
  * Owns every target, UBO, descriptor set and pass, and records the whole frame into a single
  * command buffer through Renderer::begin_frame()'s pre_pass_fn seam.
+ *
+ * ## Where each member's body lives
+ *
+ * The implementation is split across sibling translation units -- one class, one header,
+ * grouped by concern so none of them has to be read as a 5,000-line file. Method prefixes
+ * say which:
+ *
+ * | File | Methods |
+ * |---|---|
+ * | toy_render_pipeline.cpp | the ctor, `render()` (the frame's spine), live config, accessors |
+ * | pipeline_build.cpp      | `build_*`, `rebuild_*`, `handle_resize_`, `bind_composite_inputs_` |
+ * | pipeline_gather.cpp     | `gather_*`, `snapshot_scene_`, the static-instance cache |
+ * | pipeline_shadows.cpp    | `update_lights_`, `*_dir_shadow_*`, `*_local_shadows_` |
+ * | pipeline_sky_fog.cpp    | sky, clouds, fog, volumetrics |
+ * | pipeline_record.cpp     | `record_*` and the per-frame parameter fills they read |
+ *
+ * Member *declaration order* below is load-bearing in places (see the data block's own
+ * comments) and is deliberately left as it is.
  *
  * ## Two rules govern almost every design choice in this file
  *
@@ -97,6 +115,9 @@
 #include <uicoopa/render/ui_world_pass.h>
 
 #include <toyengine/render/toy_render_types.h>
+// This header uses nearly every part (RenderExtent, DirShadowFit and the cascade fits,
+// SdfClipRect/PixelRect), so it takes the umbrella rather than four narrow includes.
+#include <toyengine/render/toy_render_math.h>
 #include <toyengine/render/passes/ui_composite_pass.h>
 #include <toyengine/render/caster_grid.h>
 #include <toyengine/render/dir_shadow_cache.h>
@@ -184,8 +205,8 @@ namespace render {
 
 /**
  * @class ToyRenderPipeline
- * @brief Renders a scene through the low-resolution deferred pixel-art frame graph and
- *        upscales it into the swapchain.
+ * @brief Renders a scene through the deferred frame graph at the configured internal
+ *        resolution and presents it into the swapchain.
  *
  * Not copyable or movable: passes hold references to sibling members, and the ExtraSets
  * callbacks capture `this`.

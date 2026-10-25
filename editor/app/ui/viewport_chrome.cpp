@@ -1,38 +1,64 @@
+#include "editor/app/ui/viewport_chrome.h"
+#include "editor/app/ui/timeline.h"
+#include "editor/app/ui/tile_mode.h"
+#include "editor/app/ui/terrain.h"
+#include "editor/app/ui/sculpt.h"
+#include "editor/app/ui/properties.h"
+#include "editor/app/ui/paint.h"
+#include "editor/app/ui/mesh_tools.h"
+#include "editor/app/ui/instances.h"
+#include "editor/app/ui/assets.h"
+
 #include "editor/app/editor_app.h"
+#include "editor/app/ui/preferences.h"
+#include "editor/app/ui/weights.h"
+#include "editor/app/ui/statusbar.h"
 
 namespace toy {
 namespace editor {
 
-imm::Box EditorApp::toolbar_rect_(bool mesh_edit) const {
-    const int n = in_sculpt_mode_() ? 5 : in_paint_mode_() ? 3 : mesh_edit ? 9 : 5;
-    return {viewport_box_.x + 6, viewport_box_.y + 6, kToolSize + 6, n * (kToolSize + 2) + 14};
+float ViewportChromePanel::sidebar_w_() const {
+    return app_.show_sidebar_ ? 230.0f : 0.0f;
 }
 
-bool EditorApp::preview_only_view_() const {
-    return active_type_ == AssetType::Material || active_type_ == AssetType::Texture || active_type_ == AssetType::Audio;
+imm::Box ViewportChromePanel::sidebar_rect_() const {
+    return {app_.viewport_box_.right() - sidebar_w_(), app_.viewport_box_.y, sidebar_w_(), app_.viewport_box_.h};
 }
 
-bool EditorApp::over_viewport_chrome_(glm::vec2 p, bool mesh_edit) const {
-    if (show_toolbar_ && !preview_only_view_() && toolbar_rect_(mesh_edit).contains(p)) return true;
+imm::Box ViewportChromePanel::nav_gizmo_rect_() const {
+    return {app_.viewport_box_.right() - sidebar_w_() - 118, app_.viewport_box_.y + 8, 110, 110 + 4 * 30};
+}
+
+imm::Box ViewportChromePanel::toolbar_rect_(bool mesh_edit) const {
+    const int n = app_.in_sculpt_mode_() ? 5 : app_.paint_panel_->in_paint_mode_() ? 3 : mesh_edit ? 9 : 5;
+    return {app_.viewport_box_.x + 6, app_.viewport_box_.y + 6, kToolSize + 6, n * (kToolSize + 2) + 14};
+}
+
+bool ViewportChromePanel::preview_only_view_() const {
+    return app_.active_type_ == AssetType::Material || app_.active_type_ == AssetType::Texture || app_.active_type_ == AssetType::Audio;
+}
+
+bool ViewportChromePanel::over_viewport_chrome_(glm::vec2 p, bool mesh_edit) const {
+    if (app_.show_toolbar_ && !preview_only_view_() && toolbar_rect_(mesh_edit).contains(p)) return true;
     const imm::Box g = nav_gizmo_rect_();
     if (glm::distance(p, glm::vec2(g.x + 55, g.y + 55)) < 52.0f) return true;
     if (imm::Box{g.x + 40, g.y + 112, 30, 4 * 30}.contains(p)) return true;
-    if (show_sidebar_ && sidebar_rect_().contains(p)) return true;
-    if (last_op_rect_.contains(p)) return true;
+    if (app_.show_sidebar_ && sidebar_rect_().contains(p)) return true;
+    if (app_.last_op_rect_.contains(p)) return true;
     return false;
 }
 
-void EditorApp::draw_viewport_header_(imm::Context& ctx, const imm::Box& hb, bool mesh_edit) {
+void ViewportChromePanel::draw_viewport_header_(imm::Context& ctx, const imm::Box& hb, bool mesh_edit) {
     using I = imm::Icon;
     float x = hb.x + 6;
     const float bh = hb.h - 6;
-    if (playing()) ctx.fill_rounded(hb, et_.chrome.play_tint, 6, imm::Context::kTop);   // Unity's play tint
+    if (app_.playing()) ctx.fill_rounded(hb, app_.et_.chrome.play_tint, 6, imm::Context::kTop);   // Unity's play tint
     // Mode dropdown.
-    if (active_type_ == AssetType::Scene || active_type_ == AssetType::Object || active_type_ == AssetType::Mesh) {
-        const bool sculpting = in_sculpt_mode_();
-        const bool terrain = in_terrain_mode_();
-        const bool tiles = in_tile_mode_();
-        const bool vpaint = in_paint_mode_() && !in_weight_paint_(), wpaint = in_weight_paint_();
+    if (app_.active_type_ == AssetType::Scene || app_.active_type_ == AssetType::Object || app_.active_type_ == AssetType::Mesh) {
+        const bool sculpting = app_.in_sculpt_mode_();
+        const bool terrain = app_.terrain_panel_->in_terrain_mode_();
+        const bool tiles = app_.tile_mode_panel_->in_tile_mode_();
+        const bool vpaint = app_.paint_panel_->in_paint_mode_() && !app_.paint_panel_->in_weight_paint_(), wpaint = app_.paint_panel_->in_weight_paint_();
         const std::string mode = terrain ? "Terrain Mode" : tiles ? "Tile Mode" : sculpting ? "Sculpt Mode" : vpaint ? "Vertex Paint" : wpaint ? "Weight Paint"
                                : mesh_edit ? "Edit Mode" : "Object Mode";
         const float w = ctx.text_width(mode) + bh + 26;
@@ -51,24 +77,24 @@ void EditorApp::draw_viewport_header_(imm::Context& ctx, const imm::Box& hb, boo
             ctx.end_popup();
         }
         // Edit / Sculpt Mode isolation (Blender's Local View, entered automatically).
-        if (edit_object_ && !asset_view_()) {
+        if (app_.edit_object_ && !app_.asset_view_()) {
             if (ctx.icon_button("isolate", I::LocalView, "Isolate in Edit Mode\nEdit and Sculpt Mode hide the other objects and frame "
-                                "this one (lights stay). Saved as a preference.", isolate_in_edit_, bh, imm::Context::kAll,
+                                "this one (lights stay). Saved as a preference.", app_.isolate_in_edit_, bh, imm::Context::kAll,
                                 imm::Box{x, hb.y + 3, bh, bh}, true)) {
-                set_isolate_in_edit(!isolate_in_edit_);
+                app_.set_isolate_in_edit(!app_.isolate_in_edit_);
             }
             x += bh + 8;
         }
-        if (terrain) x = draw_terrain_header_(ctx, x, hb);
-        else if (tiles) x = draw_tile_header_(ctx, x, hb);
-        else if (sculpting) x = draw_sculpt_header_(ctx, x, hb);
-        else if (vpaint || wpaint) x = draw_paint_header_(ctx, x, hb);
+        if (terrain) x = app_.terrain_panel_->draw_terrain_header_(ctx, x, hb);
+        else if (tiles) x = app_.tile_mode_panel_->draw_tile_header_(ctx, x, hb);
+        else if (sculpting) x = app_.sculpt_panel_->draw_sculpt_header_(ctx, x, hb);
+        else if (vpaint || wpaint) x = app_.paint_panel_->draw_paint_header_(ctx, x, hb);
     }
     if (mesh_edit) {
-        int sm = static_cast<int>(mesh_.selection.mode);
+        int sm = static_cast<int>(app_.mesh_.selection.mode);
         if (ctx.icon_group("selmode", {{I::Vertex, "Vertex Select\n1"}, {I::Edge, "Edge Select\n2"}, {I::Face, "Face Select\n3"}}, &sm,
                            imm::Box{x, hb.y + 3, bh * 3, bh}, bh)) {
-            if (static_cast<SelectMode>(sm) != mesh_.selection.mode) convert_selection(mesh_.mesh, mesh_.selection, static_cast<SelectMode>(sm));
+            if (static_cast<SelectMode>(sm) != app_.mesh_.selection.mode) convert_selection(app_.mesh_.mesh, app_.mesh_.selection, static_cast<SelectMode>(sm));
         }
         x += bh * 3 + 8;
     }
@@ -76,8 +102,8 @@ void EditorApp::draw_viewport_header_(imm::Context& ctx, const imm::Box& hb, boo
     const float menus_w = 220;
     ctx.begin_menubar({x, hb.y, menus_w, hb.h}, false);
     draw_view_menu_(ctx);
-    if (in_paint_mode_()) draw_paint_menu_(ctx);
-    if (!in_brush_mode_() && !preview_only_view_()) {
+    if (app_.paint_panel_->in_paint_mode_()) app_.paint_panel_->draw_paint_menu_(ctx);
+    if (!app_.paint_panel_->in_brush_mode_() && !preview_only_view_()) {
         draw_select_menu_(ctx, mesh_edit);
         if (!mesh_edit && ctx.begin_menu("Add")) { draw_add_menu_items_(ctx); ctx.end_menu(); }
         if (mesh_edit) draw_mesh_menu_(ctx);
@@ -98,18 +124,18 @@ void EditorApp::draw_viewport_header_(imm::Context& ctx, const imm::Box& hb, boo
     if (ctx.begin_popup("shading_opts", 250)) draw_shading_popover_(ctx);
     rx -= s * 0.7f + 2;
     rx -= s * 4;
-    int sh = static_cast<int>(shading_);
+    int sh = static_cast<int>(app_.shading_);
     if (ctx.icon_group("shading", {{I::ShadeWire, "Wireframe\nShift Z toggles, Z for the menu"},
                                    {I::ShadeSolid, "Solid\nLighting-independent shading for modelling"},
                                    {I::ShadeMaterial, "Material Preview\nUnlit material colours and textures"},
                                    {I::ShadeRendered, "Rendered\nThe game's full renderer"}},
                        &sh, imm::Box{rx, hb.y + 3, s * 4, s}, s)) {
-        set_shading(static_cast<Shading>(sh));
+        app_.set_shading(static_cast<Shading>(sh));
     }
     rx -= s + 10;
-    if (ctx.icon_button("xray", I::XRay, "Toggle X-Ray (Alt Z)\nMake surfaces translucent to see -- and select -- what is behind them", xray_, s, imm::Context::kAll,
+    if (ctx.icon_button("xray", I::XRay, "Toggle X-Ray (Alt Z)\nMake surfaces translucent to see -- and select -- what is behind them", app_.xray_, s, imm::Context::kAll,
                         imm::Box{rx, hb.y + 3, s, s}, true)) {
-        xray_ = !xray_;
+        app_.xray_ = !app_.xray_;
     }
     // Overlays: the toggle plus its popover (caret).
     rx -= s * 0.7f + 4;
@@ -119,9 +145,9 @@ void EditorApp::draw_viewport_header_(imm::Context& ctx, const imm::Box& hb, boo
     }
     if (ctx.begin_popup("overlay_opts", 220)) draw_overlays_popover_(ctx);
     rx -= s;
-    if (ctx.icon_button("overlays", I::Overlays, "Overlays\nGrid, origins, light and camera glyphs (caret: choose which)", show_overlays_, s,
+    if (ctx.icon_button("overlays", I::Overlays, "Overlays\nGrid, origins, light and camera glyphs (caret: choose which)", app_.show_overlays_, s,
                         imm::Context::kLeft, imm::Box{rx, hb.y + 3, s, s}, true)) {
-        show_overlays_ = !show_overlays_;
+        app_.show_overlays_ = !app_.show_overlays_;
     }
     // Physics colliders: the toggle plus its popover (caret) -- all of them, or the selection's.
     rx -= s * 0.7f + 10;
@@ -131,22 +157,22 @@ void EditorApp::draw_viewport_header_(imm::Context& ctx, const imm::Box& hb, boo
         ctx.open_popup("collider_opts", glm::vec2(cdd.right() - 220, cdd.bottom() + 2));
     }
     if (ctx.begin_popup("collider_opts", 220)) draw_colliders_popover_(ctx);
-    test_rects_["collider_opts_btn"] = cdd;
+    app_.test_rects_["collider_opts_btn"] = cdd;
     rx -= s;
-    test_rects_["colliders"] = imm::Box{rx, hb.y + 3, s, s};
+    app_.test_rects_["colliders"] = imm::Box{rx, hb.y + 3, s, s};
     if (ctx.icon_button("colliders", I::Collider,
-                        collider_view_ == ColliderView::All
+                        app_.collider_view_ == EditorApp::ColliderView::All
                             ? "Physics Colliders\nDraw every collider in the scene (caret: only the selection's)"
                             : "Physics Colliders\nDraw the selected objects' colliders and their children's (caret: all)",
-                        show_colliders_, s, imm::Context::kLeft, imm::Box{rx, hb.y + 3, s, s}, true)) {
-        show_colliders_ = !show_colliders_;
+                        app_.show_colliders_, s, imm::Context::kLeft, imm::Box{rx, hb.y + 3, s, s}, true)) {
+        app_.show_colliders_ = !app_.show_colliders_;
     }
     // Snap and orientation only steer transforms: the brush modes have none, so they make room there.
-    if (!in_brush_mode_()) {
+    if (!app_.paint_panel_->in_brush_mode_()) {
         rx -= s + 10;
-        if (ctx.icon_button("snap", I::Snap, "Snap\nSnap transforms to increments (Ctrl inverts while dragging)", snap_on_, s, imm::Context::kAll,
+        if (ctx.icon_button("snap", I::Snap, "Snap\nSnap transforms to increments (Ctrl inverts while dragging)", app_.snap_on_, s, imm::Context::kAll,
                             imm::Box{rx, hb.y + 3, s, s}, true)) {
-            snap_on_ = !snap_on_;
+            app_.snap_on_ = !app_.snap_on_;
         }
         // Proportional editing (Edit Mode): the toggle, and its options under the caret.
         if (mesh_edit) {
@@ -156,7 +182,7 @@ void EditorApp::draw_viewport_header_(imm::Context& ctx, const imm::Box& hb, boo
                                 false, s * 0.7f, imm::Context::kRight, pdd)) {
                 ctx.open_popup("prop_opts", glm::vec2(pdd.right() - 230, pdd.bottom() + 2));
             }
-            test_rects_["prop_opts_btn"] = pdd;
+            app_.test_rects_["prop_opts_btn"] = pdd;
             if (ctx.begin_popup("prop_opts", 230)) draw_proportional_popover_(ctx);
             rx -= s;
             const imm::Box pb{rx, hb.y + 3, s, s};
@@ -164,10 +190,10 @@ void EditorApp::draw_viewport_header_(imm::Context& ctx, const imm::Box& hb, boo
                                 "Proportional Editing (O)\nMoves, rotations and scales also drag the unselected vertices "
                                 "inside a radius, fading out toward its edge. While transforming, the mouse wheel "
                                 "(or Page Up / Page Down) resizes the circle. Shift O cycles the falloff.",
-                                proportional_.enabled, s, imm::Context::kLeft, pb, true)) {
-                toggle_proportional();
+                                app_.proportional_.enabled, s, imm::Context::kLeft, pb, true)) {
+                app_.toggle_proportional();
             }
-            test_rects_["proportional"] = pb;
+            app_.test_rects_["proportional"] = pb;
         }
         rx -= 92;
         const imm::Box ob{rx, hb.y + 3, 88, s};
@@ -176,14 +202,14 @@ void EditorApp::draw_viewport_header_(imm::Context& ctx, const imm::Box& hb, boo
         ctx.fill_rounded(ob, oh ? ctx.style.button_hover : ctx.style.button);
         ctx.icon(I::Orientation, {ob.x + 3, ob.y + 2, s - 4, s - 4}, ctx.style.text);
         static const char* kOrientNames[] = {"Global", "Local", "Normal"};
-        ctx.text_in({ob.x + s, ob.y, ob.w - s - 12, s}, kOrientNames[static_cast<int>(orient_)], ctx.style.text, 0.0f);
+        ctx.text_in({ob.x + s, ob.y, ob.w - s - 12, s}, kOrientNames[static_cast<int>(app_.orient_)], ctx.style.text, 0.0f);
         ctx.icon(I::ArrowDown, {ob.right() - 13, ob.y + 5, 9, s - 10}, ctx.style.text_dim);
         ctx.tooltip("Transform Orientation\nAxes the gizmo and a second X / Y / Z press use: Global, the object's Local axes, "
                     "or the selection's Normal (edit mode)");
         if (ctx.begin_popup("orient_menu", 150)) {
             for (int i = 0; i < 3; ++i) {
-                bool on = static_cast<int>(orient_) == i;
-                if (ctx.menu_item(kOrientNames[i], "", &on, i != 2 || mesh_edit)) orient_ = static_cast<Orientation>(i);
+                bool on = static_cast<int>(app_.orient_) == i;
+                if (ctx.menu_item(kOrientNames[i], "", &on, i != 2 || mesh_edit)) app_.orient_ = static_cast<EditorApp::Orientation>(i);
             }
             ctx.end_popup();
         }
@@ -191,25 +217,25 @@ void EditorApp::draw_viewport_header_(imm::Context& ctx, const imm::Box& hb, boo
     // Edit Mode symmetry (Blender's X / Y / Z mirror toggles + Local / Global), between the
     // menus and the right-hand cluster when it fits; Properties > Tool > Symmetry always has it.
     // Sculpt Mode's stroke symmetry goes in the same place (Properties > Tool > Brush has it too).
-    const bool sculpting = in_sculpt_mode_(), painting = in_paint_mode_();
-    MirrorSettings& header_sym = sculpting ? sculpt_.symmetry : painting ? paint_settings_().symmetry : edit_symmetry_;
-    if ((mesh_edit || sculpting || painting) && after_menus + symmetry_buttons_width_(ctx, hb, header_sym) <= rx - 8) {
-        if (sculpting || painting) draw_symmetry_buttons_(ctx, after_menus, hb, header_sym, sculpting ? "sc_sym" : "pt_sym", "strokes");
-        else draw_symmetry_buttons_(ctx, after_menus, hb, edit_symmetry_, "ed_sym", "moves, rotations and scales");
+    const bool sculpting = app_.in_sculpt_mode_(), painting = app_.paint_panel_->in_paint_mode_();
+    MirrorSettings& header_sym = sculpting ? app_.sculpt_.symmetry : painting ? app_.paint_panel_->paint_settings_().symmetry : app_.edit_symmetry_;
+    if ((mesh_edit || sculpting || painting) && after_menus + app_.sculpt_panel_->symmetry_buttons_width_(ctx, hb, header_sym) <= rx - 8) {
+        if (sculpting || painting) app_.sculpt_panel_->draw_symmetry_buttons_(ctx, after_menus, hb, header_sym, sculpting ? "sc_sym" : "pt_sym", "strokes");
+        else app_.sculpt_panel_->draw_symmetry_buttons_(ctx, after_menus, hb, app_.edit_symmetry_, "ed_sym", "moves, rotations and scales");
     }
 }
 
-void EditorApp::draw_proportional_popover_(imm::Context& ctx) {
+void ViewportChromePanel::draw_proportional_popover_(imm::Context& ctx) {
     ctx.label_dim("Proportional Editing");
-    bool on = proportional_.enabled;
-    if (ctx.checkbox("Enabled  (O)", &on)) proportional_.enabled = on;
+    bool on = app_.proportional_.enabled;
+    if (ctx.checkbox("Enabled  (O)", &on)) app_.proportional_.enabled = on;
     ctx.spacing(2);
     ctx.label_dim("Falloff  (Shift O cycles)");
     for (int i = 0; i < kFalloffCount; ++i) {
         const Falloff f = static_cast<Falloff>(i);
         ctx.push_id(i);
-        if (ctx.selectable(falloff_name(f), proportional_.falloff == f)) proportional_.falloff = f;
-        test_rects_[std::string("prop_falloff:") + falloff_name(f)] = ctx.last_rect();
+        if (ctx.selectable(falloff_name(f), app_.proportional_.falloff == f)) app_.proportional_.falloff = f;
+        app_.test_rects_[std::string("prop_falloff:") + falloff_name(f)] = ctx.last_rect();
         // A small plot of the curve at the row's right.
         const imm::Box r = ctx.last_rect();
         const imm::Box plot{r.right() - 46, r.y + 4, 40, r.h - 8};
@@ -223,168 +249,168 @@ void EditorApp::draw_proportional_popover_(imm::Context& ctx) {
         ctx.pop_id();
     }
     ctx.spacing(2);
-    bool connected = proportional_.connected, projected = proportional_.projected;
-    if (ctx.checkbox("Connected Only", &connected)) proportional_.connected = connected;
+    bool connected = app_.proportional_.connected, projected = app_.proportional_.projected;
+    if (ctx.checkbox("Connected Only", &connected)) app_.proportional_.connected = connected;
     ctx.tooltip("Connected Only\nMeasure along the mesh's edges: vertices on separate pieces never move together");
-    if (ctx.checkbox("Projected from View", &projected)) proportional_.projected = projected;
+    if (ctx.checkbox("Projected from View", &projected)) app_.proportional_.projected = projected;
     ctx.tooltip("Projected from View\nMeasure on screen: what sits inside the circle moves, however far behind. "
                 "Off: straight-line distance in 3D. (Connected Only overrides it.)");
-    float r = proportional_.radius;
+    float r = app_.proportional_.radius;
     if (ctx.drag_float("Radius", &r, 0.01f, ProportionalSettings::kMinRadius, ProportionalSettings::kMaxRadius)) {
-        proportional_.set_radius(r);
+        app_.proportional_.set_radius(r);
     }
     ctx.tooltip("Radius\nIn world units; the mouse wheel resizes it while transforming");
     ctx.end_popup();
 }
 
-void EditorApp::draw_view_menu_(imm::Context& ctx) {
+void ViewportChromePanel::draw_view_menu_(imm::Context& ctx) {
     using I = imm::Icon;
     if (!ctx.begin_menu("View")) return;
-    bool t = show_toolbar_, n = show_sidebar_;
-    if (ctx.menu_item("Toolbar", "T", &t)) show_toolbar_ = !show_toolbar_;
-    if (ctx.menu_item("Sidebar", "N", &n)) show_sidebar_ = !show_sidebar_;
+    bool t = app_.show_toolbar_, n = app_.show_sidebar_;
+    if (ctx.menu_item("Toolbar", "T", &t)) app_.show_toolbar_ = !app_.show_toolbar_;
+    if (ctx.menu_item("Sidebar", "N", &n)) app_.show_sidebar_ = !app_.show_sidebar_;
     ctx.menu_separator();
-    if (ctx.menu_item("Frame Selected", "F / .", nullptr, true, I::Zoom)) frame_selected();
-    if (ctx.menu_item("Frame All", "Home", nullptr, true, I::Zoom)) frame_all();
-    if (ctx.menu_item(camera_.ortho ? "Perspective" : "Orthographic", "Num 5", nullptr, true, camera_.ortho ? I::Persp : I::Ortho)) {
-        camera_.set_ortho(!camera_.ortho);
+    if (ctx.menu_item("Frame Selected", "F / .", nullptr, true, I::Zoom)) app_.frame_selected();
+    if (ctx.menu_item("Frame All", "Home", nullptr, true, I::Zoom)) app_.frame_all();
+    if (ctx.menu_item(app_.camera_.ortho ? "Perspective" : "Orthographic", "Num 5", nullptr, true, app_.camera_.ortho ? I::Persp : I::Ortho)) {
+        app_.camera_.set_ortho(!app_.camera_.ortho);
     }
     if (ctx.begin_menu("Viewpoint", true, I::ViewCamera)) {
-        if (ctx.menu_item("Camera", "Num 0", nullptr, true, I::Camera)) view_through_scene_camera_();
-        if (ctx.menu_item("Top", "Num 7")) camera_.axis_view('t', false);
-        if (ctx.menu_item("Bottom", "Ctrl Num 7")) camera_.axis_view('t', true);
-        if (ctx.menu_item("Front", "Num 1")) camera_.axis_view('f', false);
-        if (ctx.menu_item("Back", "Ctrl Num 1")) camera_.axis_view('f', true);
-        if (ctx.menu_item("Right", "Num 3")) camera_.axis_view('r', false);
-        if (ctx.menu_item("Left", "Ctrl Num 3")) camera_.axis_view('r', true);
+        if (ctx.menu_item("Camera", "Num 0", nullptr, true, I::Camera)) app_.view_through_scene_camera_();
+        if (ctx.menu_item("Top", "Num 7")) app_.camera_.axis_view('t', false);
+        if (ctx.menu_item("Bottom", "Ctrl Num 7")) app_.camera_.axis_view('t', true);
+        if (ctx.menu_item("Front", "Num 1")) app_.camera_.axis_view('f', false);
+        if (ctx.menu_item("Back", "Ctrl Num 1")) app_.camera_.axis_view('f', true);
+        if (ctx.menu_item("Right", "Num 3")) app_.camera_.axis_view('r', false);
+        if (ctx.menu_item("Left", "Ctrl Num 3")) app_.camera_.axis_view('r', true);
         ctx.end_menu();
     }
-    if (ctx.menu_item("Align Active Camera to View", "Ctrl Alt Num 0", nullptr, !asset_view_(), I::Camera)) align_scene_camera_to_view_();
+    if (ctx.menu_item("Align Active Camera to View", "Ctrl Alt Num 0", nullptr, !app_.asset_view_(), I::Camera)) app_.align_scene_camera_to_view_();
     ctx.menu_separator();
-    if (ctx.menu_item("Toggle Maximize Area", "Ctrl Space")) maximized_ = !maximized_;
+    if (ctx.menu_item("Toggle Maximize Area", "Ctrl Space")) app_.maximized_ = !app_.maximized_;
     ctx.menu_separator();
     // The engine's debug HUD, drawn inside the viewport (F3 there cycles off / fps / full).
-    bool stats = engine_.debug_overlay().visible();
-    if (ctx.menu_item("Stats Overlay", "F3", &stats)) toggle_stats_overlay();
+    bool stats = app_.engine_.debug_overlay().visible();
+    if (ctx.menu_item("Stats Overlay", "F3", &stats)) app_.toggle_stats_overlay();
     ctx.end_menu();
 }
 
-void EditorApp::draw_select_menu_(imm::Context& ctx, bool mesh_edit) {
+void ViewportChromePanel::draw_select_menu_(imm::Context& ctx, bool mesh_edit) {
     using I = imm::Icon;
     if (!ctx.begin_menu("Select")) return;
     if (ctx.menu_item("All", "A")) {
-        if (mesh_edit) mesh_.selection.select_all(mesh_.mesh);
-        else { doc_.clear_selection(); for (ObjectId i : visible_ids_()) doc_.select(i, true); }
+        if (mesh_edit) app_.mesh_.selection.select_all(app_.mesh_.mesh);
+        else { app_.doc_.clear_selection(); for (ObjectId i : app_.visible_ids_()) app_.doc_.select(i, true); }
     }
-    if (ctx.menu_item("None", "Alt A")) { if (mesh_edit) mesh_.selection.clear(); else doc_.clear_selection(); }
+    if (ctx.menu_item("None", "Alt A")) { if (mesh_edit) app_.mesh_.selection.clear(); else app_.doc_.clear_selection(); }
     if (ctx.menu_item("Invert", "Ctrl I")) {
-        if (mesh_edit) invert_mesh_selection_();
+        if (mesh_edit) app_.invert_mesh_selection_();
         else {
             std::vector<ObjectId> inv;
-            for (ObjectId i : visible_ids_()) if (!doc_.is_selected(i)) inv.push_back(i);
-            doc_.clear_selection();
-            for (ObjectId i : inv) doc_.select(i, true);
+            for (ObjectId i : app_.visible_ids_()) if (!app_.doc_.is_selected(i)) inv.push_back(i);
+            app_.doc_.clear_selection();
+            for (ObjectId i : inv) app_.doc_.select(i, true);
         }
     }
     ctx.menu_separator();
-    if (ctx.menu_item("Box Select", "B", nullptr, true, I::SelectBox)) tool_ = Tool::Select;
-    if (mesh_edit && ctx.menu_item("Select Linked", "Ctrl L", nullptr, true, I::Link)) select_linked(mesh_.mesh, mesh_.selection);
+    if (ctx.menu_item("Box Select", "B", nullptr, true, I::SelectBox)) app_.tool_ = EditorApp::Tool::Select;
+    if (mesh_edit && ctx.menu_item("Select Linked", "Ctrl L", nullptr, true, I::Link)) select_linked(app_.mesh_.mesh, app_.mesh_.selection);
     ctx.end_menu();
 }
 
-void EditorApp::draw_add_menu_items_(imm::Context& ctx) {
+void ViewportChromePanel::draw_add_menu_items_(imm::Context& ctx) {
     using I = imm::Icon;
     static const I prim_icons[] = {I::Cube, I::Plane, I::Cylinder, I::Sphere, I::Plane};
     if (ctx.begin_menu("Mesh", true, I::Mesh)) {
         const auto& names = primitive_names();
-        for (size_t i = 0; i < names.size(); ++i) if (ctx.menu_item(names[i], "", nullptr, true, prim_icons[i % 5])) create_primitive(names[i]);
+        for (size_t i = 0; i < names.size(); ++i) if (ctx.menu_item(names[i], "", nullptr, true, prim_icons[i % 5])) app_.create_primitive(names[i]);
         ctx.end_menu();
     }
     if (ctx.begin_menu("Light", true, I::PointLight)) {
-        if (ctx.menu_item("Sun", "", nullptr, true, I::Sun)) create_with_component("DirectionalLight", "Sun");
-        if (ctx.menu_item("Point", "", nullptr, true, I::PointLight)) create_with_component("PointLight", "Point Light");
-        if (ctx.menu_item("Spot", "", nullptr, true, I::SpotLight)) create_with_component("SpotLight", "Spot Light");
-        if (ctx.menu_item("Environment", "", nullptr, true, I::EnvLight)) create_with_component("EnvironmentLight", "Environment");
+        if (ctx.menu_item("Sun", "", nullptr, true, I::Sun)) app_.create_with_component("DirectionalLight", "Sun");
+        if (ctx.menu_item("Point", "", nullptr, true, I::PointLight)) app_.create_with_component("PointLight", "Point Light");
+        if (ctx.menu_item("Spot", "", nullptr, true, I::SpotLight)) app_.create_with_component("SpotLight", "Spot Light");
+        if (ctx.menu_item("Environment", "", nullptr, true, I::EnvLight)) app_.create_with_component("EnvironmentLight", "Environment");
         ctx.end_menu();
     }
-    if (ctx.menu_item("Camera", "", nullptr, true, I::Camera)) create_with_component("Camera", "Camera");
-    if (ctx.menu_item("Empty", "", nullptr, true, I::Empty)) create_empty();
+    if (ctx.menu_item("Camera", "", nullptr, true, I::Camera)) app_.create_with_component("Camera", "Camera");
+    if (ctx.menu_item("Empty", "", nullptr, true, I::Empty)) app_.create_empty();
     ctx.menu_separator();
-    if (ctx.menu_item("Reflection Probe", "", nullptr, true, I::EnvLight)) create_with_component("ReflectionProbe", "Reflection Probe");
-    if (ctx.menu_item("Heightmap Terrain", "", nullptr, true, I::Terrain)) create_with_component("HeightmapTerrain", "Terrain");
-    if (ctx.menu_item("Tile Terrain", "", nullptr, true, I::Terrain)) create_with_component("TileTerrain", "Tile Terrain");
-    if (ctx.menu_item("Planet", "", nullptr, true, I::World)) create_planet();
+    if (ctx.menu_item("Reflection Probe", "", nullptr, true, I::EnvLight)) app_.create_with_component("ReflectionProbe", "Reflection Probe");
+    if (ctx.menu_item("Heightmap Terrain", "", nullptr, true, I::Terrain)) app_.create_with_component("HeightmapTerrain", "Terrain");
+    if (ctx.menu_item("Tile Terrain", "", nullptr, true, I::Terrain)) app_.create_with_component("TileTerrain", "Tile Terrain");
+    if (ctx.menu_item("Planet", "", nullptr, true, I::World)) app_.create_planet();
 }
 
-void EditorApp::draw_object_menu_(imm::Context& ctx) {
+void ViewportChromePanel::draw_object_menu_(imm::Context& ctx) {
     using I = imm::Icon;
     if (!ctx.begin_menu("Object")) return;
-    const bool any = !doc_.selection().empty() && !playing() && !asset_view_();
+    const bool any = !app_.doc_.selection().empty() && !app_.playing() && !app_.asset_view_();
     if (ctx.begin_menu("Transform", any, I::Move)) {
-        if (ctx.menu_item("Move", "G", nullptr, true, I::Move)) pending_modal_kind_ = ModalKind::Grab;
-        if (ctx.menu_item("Rotate", "R", nullptr, true, I::Rotate)) pending_modal_kind_ = ModalKind::Rotate;
-        if (ctx.menu_item("Scale", "S", nullptr, true, I::Scale)) pending_modal_kind_ = ModalKind::Scale;
+        if (ctx.menu_item("Move", "G", nullptr, true, I::Move)) app_.pending_modal_kind_ = ModalKind::Grab;
+        if (ctx.menu_item("Rotate", "R", nullptr, true, I::Rotate)) app_.pending_modal_kind_ = ModalKind::Rotate;
+        if (ctx.menu_item("Scale", "S", nullptr, true, I::Scale)) app_.pending_modal_kind_ = ModalKind::Scale;
         ctx.end_menu();
     }
     if (ctx.begin_menu("Clear", any)) {
-        if (ctx.menu_item("Location", "Alt G")) clear_transform_(0);
-        if (ctx.menu_item("Rotation", "Alt R")) clear_transform_(1);
-        if (ctx.menu_item("Scale", "Alt S")) clear_transform_(2);
+        if (ctx.menu_item("Location", "Alt G")) app_.clear_transform_(0);
+        if (ctx.menu_item("Rotation", "Alt R")) app_.clear_transform_(1);
+        if (ctx.menu_item("Scale", "Alt S")) app_.clear_transform_(2);
         ctx.end_menu();
     }
     if (ctx.begin_menu("Snap", true, I::Snap)) {
-        if (ctx.menu_item("Cursor to Selected")) { glm::vec3 p; glm::mat3 b; if (gizmo_target_(false, p, b)) cursor3d_ = p; }
-        if (ctx.menu_item("Cursor to World Origin")) cursor3d_ = glm::vec3(0.0f);
-        if (ctx.menu_item("Selection to Cursor", "", nullptr, any)) selection_to_cursor_();
+        if (ctx.menu_item("Cursor to Selected")) { glm::vec3 p; glm::mat3 b; if (app_.gizmo_target_(false, p, b)) app_.cursor3d_ = p; }
+        if (ctx.menu_item("Cursor to World Origin")) app_.cursor3d_ = glm::vec3(0.0f);
+        if (ctx.menu_item("Selection to Cursor", "", nullptr, any)) app_.selection_to_cursor_();
         ctx.end_menu();
     }
-    if (ctx.begin_menu("Instance", any && in_instance_(doc_.primary()), I::Link)) {
-        draw_instance_menu_items_(ctx, doc_.primary());
+    if (ctx.begin_menu("Instance", any && app_.instances_panel_->in_instance_(app_.doc_.primary()), I::Link)) {
+        app_.instances_panel_->draw_instance_menu_items_(ctx, app_.doc_.primary());
         ctx.end_menu();
     }
     if (ctx.begin_menu("Parent", any, I::Link)) {
-        if (ctx.menu_item("Object (keep transform)", "Ctrl P", nullptr, doc_.selection().size() > 1)) parent_selection_to_active_();
+        if (ctx.menu_item("Object (keep transform)", "Ctrl P", nullptr, app_.doc_.selection().size() > 1)) app_.parent_selection_to_active_();
         ctx.menu_separator();
         ObjectId bind_skin = 0, bind_rig = 0;
-        const bool bindable = bind_targets_(bind_skin, bind_rig);
+        const bool bindable = app_.weights_panel_->bind_targets_(bind_skin, bind_rig);
         if (ctx.menu_item("Bind to Rig with Automatic Weights", "", nullptr, bindable, I::WeightPaint)) {
-            bind_to_rig_(bind_skin, bind_rig, BindWeights::Automatic);
+            app_.weights_panel_->bind_to_rig_(bind_skin, bind_rig, BindWeights::Automatic);
         }
         ctx.tooltip("Bind to Rig with Automatic Weights\nMake the mesh follow the rig under it: a vertex group per bone,\n"
                     "weighted by how the bone's heat spreads over the surface (Blender's automatic weights)");
         if (ctx.menu_item("Bind to Rig with Envelope Weights", "", nullptr, bindable, I::WeightPaint)) {
-            bind_to_rig_(bind_skin, bind_rig, BindWeights::Envelope);
+            app_.weights_panel_->bind_to_rig_(bind_skin, bind_rig, BindWeights::Envelope);
         }
         ctx.tooltip("Bind to Rig with Envelope Weights\nWeights from plain distance to each bone -- rougher than automatic\n"
                     "weights, but it needs no closed surface");
         if (ctx.menu_item("Bind to Rig with Empty Groups", "", nullptr, bindable)) {
-            bind_to_rig_(bind_skin, bind_rig, BindWeights::EmptyGroups);
+            app_.weights_panel_->bind_to_rig_(bind_skin, bind_rig, BindWeights::EmptyGroups);
         }
         ctx.tooltip("Bind to Rig with Empty Groups\nOne vertex group per bone and no weights at all, to paint by hand");
         ctx.menu_separator();
-        if (ctx.menu_item("Clear Parent (keep transform)", "Alt P")) clear_parent_keep_transform_();
+        if (ctx.menu_item("Clear Parent (keep transform)", "Alt P")) app_.clear_parent_keep_transform_();
         ctx.end_menu();
     }
     ctx.menu_separator();
-    if (ctx.menu_item("Duplicate Objects", "Shift D", nullptr, any, I::Duplicate)) { duplicate_selected(); pending_modal_kind_ = ModalKind::Grab; }
-    if (ctx.menu_item("Delete", "X", nullptr, any, I::Trash)) delete_selected();
+    if (ctx.menu_item("Duplicate Objects", "Shift D", nullptr, any, I::Duplicate)) { app_.duplicate_selected(); app_.pending_modal_kind_ = ModalKind::Grab; }
+    if (ctx.menu_item("Delete", "X", nullptr, any, I::Trash)) app_.delete_selected();
     ctx.menu_separator();
-    if (ctx.menu_item("Shade Smooth", "", nullptr, any)) shade_selected_(true);
+    if (ctx.menu_item("Shade Smooth", "", nullptr, any)) app_.shade_selected_(true);
     ctx.tooltip("Shade Smooth\nInterpolate normals across every face of the selected objects' meshes");
-    if (ctx.menu_item("Shade Flat", "", nullptr, any)) shade_selected_(false);
+    if (ctx.menu_item("Shade Flat", "", nullptr, any)) app_.shade_selected_(false);
     ctx.tooltip("Shade Flat\nOne normal per face: the faces' edges show");
     ctx.menu_separator();
-    if (ctx.menu_item("Hide Selected", "H", nullptr, any, I::EyeClosed)) hide_(doc_.selection());
-    if (ctx.menu_item("Show Hidden", "Alt H", nullptr, true, I::Eye)) unhide_all_();
+    if (ctx.menu_item("Hide Selected", "H", nullptr, any, I::EyeClosed)) app_.hide_(app_.doc_.selection());
+    if (ctx.menu_item("Show Hidden", "Alt H", nullptr, true, I::Eye)) app_.unhide_all_();
     ctx.end_menu();
 }
 
-void EditorApp::draw_mirror_menu_items_(imm::Context& ctx) {
+void ViewportChromePanel::draw_mirror_menu_items_(imm::Context& ctx) {
     static const char* kAxes[] = {"X", "Y", "Z"};
     for (int global = 1; global >= 0; --global) {
         for (int a = 0; a < 3; ++a) {
             const std::string label = std::string(kAxes[a]) + (global ? " Global" : " Local");
-            if (ctx.menu_item(label)) mirror_mesh_selection_(a, global != 0);
+            if (ctx.menu_item(label)) app_.mesh_tools_panel_->mirror_mesh_selection_(a, global != 0);
             ctx.tooltip(std::string("Mirror ") + label + "\nFlip the selection along the " + (global ? "world's " : "mesh's ") +
                         kAxes[a] + " axis, through the selection's centre");
         }
@@ -392,14 +418,14 @@ void EditorApp::draw_mirror_menu_items_(imm::Context& ctx) {
     }
 }
 
-void EditorApp::draw_mesh_menu_(imm::Context& ctx) {
+void ViewportChromePanel::draw_mesh_menu_(imm::Context& ctx) {
     using I = imm::Icon;
     if (!ctx.begin_menu("Mesh")) return;
-    auto op = [&](const char* label, auto&& fn) { mesh_.edit(label, fn); };
+    auto op = [&](const char* label, auto&& fn) { app_.mesh_.edit(label, fn); };
     if (ctx.begin_menu("Transform", true, I::Move)) {
-        if (ctx.menu_item("Move", "G", nullptr, true, I::Move)) pending_modal_kind_ = ModalKind::Grab;
-        if (ctx.menu_item("Rotate", "R", nullptr, true, I::Rotate)) pending_modal_kind_ = ModalKind::Rotate;
-        if (ctx.menu_item("Scale", "S", nullptr, true, I::Scale)) pending_modal_kind_ = ModalKind::Scale;
+        if (ctx.menu_item("Move", "G", nullptr, true, I::Move)) app_.pending_modal_kind_ = ModalKind::Grab;
+        if (ctx.menu_item("Rotate", "R", nullptr, true, I::Rotate)) app_.pending_modal_kind_ = ModalKind::Rotate;
+        if (ctx.menu_item("Scale", "S", nullptr, true, I::Scale)) app_.pending_modal_kind_ = ModalKind::Scale;
         ctx.end_menu();
     }
     if (ctx.begin_menu("Mirror", true)) {
@@ -407,18 +433,18 @@ void EditorApp::draw_mesh_menu_(imm::Context& ctx) {
         ctx.end_menu();
     }
     ctx.menu_separator();
-    if (ctx.menu_item("Extrude", "E", nullptr, true, I::Extrude)) pending_extrude_ = true;
-    if (ctx.menu_item("Inset Faces", "I", nullptr, true, I::Inset)) pending_modal_kind_ = ModalKind::Inset;
-    if (ctx.menu_item("Bevel Edges", "Ctrl B", nullptr, true, I::Bevel)) pending_modal_kind_ = ModalKind::Bevel;
+    if (ctx.menu_item("Extrude", "E", nullptr, true, I::Extrude)) app_.pending_extrude_ = true;
+    if (ctx.menu_item("Inset Faces", "I", nullptr, true, I::Inset)) app_.pending_modal_kind_ = ModalKind::Inset;
+    if (ctx.menu_item("Bevel Edges", "Ctrl B", nullptr, true, I::Bevel)) app_.pending_modal_kind_ = ModalKind::Bevel;
     if (ctx.menu_item("Make Face", "F", nullptr, true, I::Face)) op("Make Face", [](EditMesh& m, MeshSelection& s) { fill_face(m, s); });
     if (ctx.menu_item("Duplicate", "Shift D", nullptr, true, I::Duplicate)) {
         op("Duplicate", [](EditMesh& m, MeshSelection& s) { duplicate_faces(m, s); });
-        pending_modal_kind_ = ModalKind::Grab;
+        app_.pending_modal_kind_ = ModalKind::Grab;
     }
     ctx.menu_separator();
     if (ctx.begin_menu("Merge", true)) {
         if (ctx.menu_item("At Center", "M")) op("Merge", [](EditMesh& m, MeshSelection& s) { merge_at_center(m, s); });
-        if (ctx.menu_item("By Distance")) op("Merge by Distance", [this](EditMesh& m, MeshSelection& s) { merge_by_distance(m, s, merge_dist_); });
+        if (ctx.menu_item("By Distance")) op("Merge by Distance", [this](EditMesh& m, MeshSelection& s) { merge_by_distance(m, s, app_.merge_dist_); });
         ctx.end_menu();
     }
     if (ctx.begin_menu("Delete", true, I::Trash)) {
@@ -435,7 +461,7 @@ void EditorApp::draw_mesh_menu_(imm::Context& ctx) {
         ctx.end_menu();
     }
     if (ctx.begin_menu("UV Unwrap", true, I::Texture)) {
-        if (ctx.menu_item("Cube Projection", "U")) op("Box UV", [this](EditMesh& m, MeshSelection& s) { uv_box_project(m, s, uv_scale_); });
+        if (ctx.menu_item("Cube Projection", "U")) op("Box UV", [this](EditMesh& m, MeshSelection& s) { uv_box_project(m, s, app_.uv_scale_); });
         if (ctx.menu_item("Project X")) op("Planar UV", [](EditMesh& m, MeshSelection& s) { uv_planar_project(m, s, 0); });
         if (ctx.menu_item("Project Y")) op("Planar UV", [](EditMesh& m, MeshSelection& s) { uv_planar_project(m, s, 1); });
         if (ctx.menu_item("Project Z")) op("Planar UV", [](EditMesh& m, MeshSelection& s) { uv_planar_project(m, s, 2); });
@@ -444,49 +470,49 @@ void EditorApp::draw_mesh_menu_(imm::Context& ctx) {
     ctx.end_menu();
 }
 
-void EditorApp::draw_toolbar_(imm::Context& ctx, bool mesh_edit) {
+void ViewportChromePanel::draw_toolbar_(imm::Context& ctx, bool mesh_edit) {
     using I = imm::Icon;
     const imm::Box r = toolbar_rect_(mesh_edit);
-    ctx.fill_rounded(r, et_.viewport.toolbar_bg, 6);
+    ctx.fill_rounded(r, app_.et_.viewport.toolbar_bg, 6);
     float y = r.y + 4;
     auto tool_btn = [&](const char* id, I ic, const char* tip, bool on) {
         const imm::Box b{r.x + 3, y, kToolSize, kToolSize};
         y += kToolSize + 2;
         return ctx.icon_button(id, ic, tip, on, kToolSize, imm::Context::kAll, b);
     };
-    if (in_terrain_mode_()) { draw_terrain_toolbar_(ctx, r); return; }
-    if (in_tile_mode_()) { draw_tile_toolbar_(ctx, r); return; }
-    if (in_sculpt_mode_()) { draw_sculpt_toolbar_(ctx, r); return; }
-    if (in_paint_mode_()) { draw_paint_toolbar_(ctx, r); return; }
-    if (tool_btn("t_select", I::SelectBox, "Select Box\nClick or drag to select (Shift adds, Ctrl removes)", tool_ == Tool::Select)) tool_ = Tool::Select;
-    if (tool_btn("t_cursor", I::Cursor, "Cursor\nClick to place the 3D cursor (Shift RMB anywhere)", tool_ == Tool::Cursor)) tool_ = Tool::Cursor;
+    if (app_.terrain_panel_->in_terrain_mode_()) { app_.terrain_panel_->draw_terrain_toolbar_(ctx, r); return; }
+    if (app_.tile_mode_panel_->in_tile_mode_()) { app_.tile_mode_panel_->draw_tile_toolbar_(ctx, r); return; }
+    if (app_.in_sculpt_mode_()) { app_.sculpt_panel_->draw_sculpt_toolbar_(ctx, r); return; }
+    if (app_.paint_panel_->in_paint_mode_()) { app_.paint_panel_->draw_paint_toolbar_(ctx, r); return; }
+    if (tool_btn("t_select", I::SelectBox, "Select Box\nClick or drag to select (Shift adds, Ctrl removes)", app_.tool_ == EditorApp::Tool::Select)) app_.tool_ = EditorApp::Tool::Select;
+    if (tool_btn("t_cursor", I::Cursor, "Cursor\nClick to place the 3D cursor (Shift RMB anywhere)", app_.tool_ == EditorApp::Tool::Cursor)) app_.tool_ = EditorApp::Tool::Cursor;
     y += 6;
-    if (tool_btn("t_move", I::Move, "Move\nGizmo for moving (G for the modal move)", tool_ == Tool::Move)) tool_ = Tool::Move;
-    if (tool_btn("t_rotate", I::Rotate, "Rotate\nGizmo for rotating (R for the modal rotate)", tool_ == Tool::Rotate)) tool_ = Tool::Rotate;
-    if (tool_btn("t_scale", I::Scale, "Scale\nGizmo for scaling (S for the modal scale)", tool_ == Tool::Scale)) tool_ = Tool::Scale;
+    if (tool_btn("t_move", I::Move, "Move\nGizmo for moving (G for the modal move)", app_.tool_ == EditorApp::Tool::Move)) app_.tool_ = EditorApp::Tool::Move;
+    if (tool_btn("t_rotate", I::Rotate, "Rotate\nGizmo for rotating (R for the modal rotate)", app_.tool_ == EditorApp::Tool::Rotate)) app_.tool_ = EditorApp::Tool::Rotate;
+    if (tool_btn("t_scale", I::Scale, "Scale\nGizmo for scaling (S for the modal scale)", app_.tool_ == EditorApp::Tool::Scale)) app_.tool_ = EditorApp::Tool::Scale;
     if (mesh_edit) {
         y += 6;
-        if (tool_btn("t_extrude", I::Extrude, "Extrude Region\nExtrude the selection, then move it (E)", false)) pending_extrude_ = true;
-        if (tool_btn("t_inset", I::Inset, "Inset Faces\nInset the selected faces; move the mouse to size (I)", false)) pending_modal_kind_ = ModalKind::Inset;
-        if (tool_btn("t_bevel", I::Bevel, "Bevel\nBevel the selected edges; move the mouse to size (Ctrl B)", false)) pending_modal_kind_ = ModalKind::Bevel;
+        if (tool_btn("t_extrude", I::Extrude, "Extrude Region\nExtrude the selection, then move it (E)", false)) app_.pending_extrude_ = true;
+        if (tool_btn("t_inset", I::Inset, "Inset Faces\nInset the selected faces; move the mouse to size (I)", false)) app_.pending_modal_kind_ = ModalKind::Inset;
+        if (tool_btn("t_bevel", I::Bevel, "Bevel\nBevel the selected edges; move the mouse to size (Ctrl B)", false)) app_.pending_modal_kind_ = ModalKind::Bevel;
         if (tool_btn("t_loopcut", I::LoopCut, "Loop Cut and Slide\nHover an edge ring, wheel for more cuts, click to cut and slide (Ctrl R)",
-                     loopcut_.active)) {
-            begin_loop_cut();
+                     app_.loopcut_.active)) {
+            app_.mesh_tools_panel_->begin_loop_cut();
         }
     }
 }
 
-void EditorApp::draw_nav_gizmo_(imm::Context& ctx) {
+void ViewportChromePanel::draw_nav_gizmo_(imm::Context& ctx) {
     using I = imm::Icon;
     const imm::Box g = nav_gizmo_rect_();
     const glm::vec2 c{g.x + 55, g.y + 55};
     const float R = 40.0f;
-    const glm::mat3 vr = glm::mat3(view_proj_() ? view_proj_()->view : glm::mat4(1.0f));
+    const glm::mat3 vr = glm::mat3(app_.view_proj_() ? app_.view_proj_()->view : glm::mat4(1.0f));
     // Orbit by dragging the ball's background.
     bool hov = false, held = false;
     ctx.invisible_button("navball", {c.x - 50, c.y - 50, 100, 100}, &hov, &held);
-    if (held && ctx.input().mouse_delta != glm::vec2(0.0f)) camera_.orbit(ctx.input().mouse_delta);
-    if (hov || held) ctx.circle(c, 50, et_.viewport.nav_hover);
+    if (held && ctx.input().mouse_delta != glm::vec2(0.0f)) app_.camera_.orbit(ctx.input().mouse_delta);
+    if (hov || held) ctx.circle(c, 50, app_.et_.viewport.nav_hover);
     struct Ball { glm::vec3 axis; int idx; bool pos; float depth; glm::vec2 p; };
     std::vector<Ball> balls;
     for (int i = 0; i < 3; ++i) {
@@ -508,83 +534,83 @@ void EditorApp::draw_nav_gizmo_(imm::Context& ctx) {
         if (b.pos) {
             ctx.line(c, b.p, imm::with_alpha(col, 0.9f), 2.0f);
             ctx.circle(b.p, over ? 10.5f : 9.0f, col);
-            ctx.text_in({b.p.x - 8, b.p.y - 8, 16, 16}, names[b.idx], et_.viewport.nav_label, 0, true);
+            ctx.text_in({b.p.x - 8, b.p.y - 8, 16, 16}, names[b.idx], app_.et_.viewport.nav_label, 0, true);
         } else {
             ctx.circle(b.p, over ? 9.0f : 7.5f, imm::with_alpha(col, over ? 0.7f : 0.35f));
             ctx.ring(b.p, 7.5f, 1.2f, imm::with_alpha(col, 0.8f));
         }
-        if (over && ctx.input().released[0] && !nav_ball_dragged_) { clicked = b.idx; clicked_pos = b.pos; }
+        if (over && ctx.input().released[0] && !app_.nav_ball_dragged_) { clicked = b.idx; clicked_pos = b.pos; }
     }
-    if (held && glm::length(ctx.input().mouse_delta) > 0.0f) nav_ball_dragged_ = true;
-    if (!ctx.input().down[0]) nav_ball_dragged_ = false;
+    if (held && glm::length(ctx.input().mouse_delta) > 0.0f) app_.nav_ball_dragged_ = true;
+    if (!ctx.input().down[0]) app_.nav_ball_dragged_ = false;
     if (clicked >= 0) {
         // A ball looks FROM that axis, as in Blender.
-        if (clicked == 0) camera_.axis_view('r', !clicked_pos);
-        else if (clicked == 1) camera_.axis_view('f', clicked_pos);
-        else camera_.axis_view('t', !clicked_pos);
+        if (clicked == 0) app_.camera_.axis_view('r', !clicked_pos);
+        else if (clicked == 1) app_.camera_.axis_view('f', clicked_pos);
+        else app_.camera_.axis_view('t', !clicked_pos);
     }
     // Zoom / pan drag buttons, camera and projection toggles.
     float y = g.y + 114;
     const float s = 26;
     const imm::Box zb{g.x + 42, y, s, s}, pb{g.x + 42, y + 30, s, s}, cb{g.x + 42, y + 60, s, s}, ob{g.x + 42, y + 90, s, s};
-    ctx.fill_rounded({zb.x - 2, zb.y - 2, s + 4, s * 4 + 4 * 3 + 4}, et_.viewport.nav_backdrop, (s + 4) * 0.5f);
+    ctx.fill_rounded({zb.x - 2, zb.y - 2, s + 4, s * 4 + 4 * 3 + 4}, app_.et_.viewport.nav_backdrop, (s + 4) * 0.5f);
     bool zh = false, zheld = false, ph = false, pheld = false;
     ctx.invisible_button("nav_zoom", zb, &zh, &zheld);
-    if (zh || zheld) ctx.circle(zb.center(), s * 0.5f, et_.viewport.nav_hover);
+    if (zh || zheld) ctx.circle(zb.center(), s * 0.5f, app_.et_.viewport.nav_hover);
     ctx.icon(I::Zoom, zb.shrink(5), ctx.style.text);
     ctx.tooltip("Zoom\nDrag up and down to zoom the view");
-    if (zheld) camera_.dolly(-ctx.input().mouse_delta.y * 0.04f);
+    if (zheld) app_.camera_.dolly(-ctx.input().mouse_delta.y * 0.04f);
     ctx.invisible_button("nav_pan", pb, &ph, &pheld);
-    if (ph || pheld) ctx.circle(pb.center(), s * 0.5f, et_.viewport.nav_hover);
+    if (ph || pheld) ctx.circle(pb.center(), s * 0.5f, app_.et_.viewport.nav_hover);
     ctx.icon(I::Hand, pb.shrink(5), ctx.style.text);
     ctx.tooltip("Move\nDrag to pan the view");
-    if (pheld) camera_.pan(ctx.input().mouse_delta, viewport_box_.h);
+    if (pheld) app_.camera_.pan(ctx.input().mouse_delta, app_.viewport_box_.h);
     if (ctx.icon_button("nav_cam", I::Camera, "Toggle Camera View\nLook through the scene camera (Numpad 0)", false, s, imm::Context::kAll, cb)) {
-        view_through_scene_camera_();
+        app_.view_through_scene_camera_();
     }
-    if (ctx.icon_button("nav_ortho", camera_.ortho ? I::Ortho : I::Persp, "Switch Projection\nPerspective / orthographic (Numpad 5)", false, s,
+    if (ctx.icon_button("nav_ortho", app_.camera_.ortho ? I::Ortho : I::Persp, "Switch Projection\nPerspective / orthographic (Numpad 5)", false, s,
                         imm::Context::kAll, ob)) {
-        camera_.set_ortho(!camera_.ortho);
+        app_.camera_.set_ortho(!app_.camera_.ortho);
     }
 }
 
-void EditorApp::draw_sidebar_(imm::Context& ctx, bool mesh_edit) {
+void ViewportChromePanel::draw_sidebar_(imm::Context& ctx, bool mesh_edit) {
     using I = imm::Icon;
     const imm::Box r = sidebar_rect_();
-    ctx.fill_rounded(r, et_.viewport.sidebar_bg, 6, imm::Context::kLeft);
+    ctx.fill_rounded(r, app_.et_.viewport.sidebar_bg, 6, imm::Context::kLeft);
     static const std::vector<std::string> tabs = {"Item", "View"};
-    ctx.tab_bar("sidebar_tabs", {r.x, r.y, r.w, 26}, tabs, &sidebar_tab_, nullptr, false);
+    ctx.tab_bar("sidebar_tabs", {r.x, r.y, r.w, 26}, tabs, &app_.sidebar_tab_, nullptr, false);
     ctx.begin_region("sidebar", {r.x, r.y + 26, r.w, r.h - 26}, true);
     const float saved_ratio = ctx.style.label_ratio;
     ctx.style.label_ratio = 0.34f;
-    if (sidebar_tab_ == 0) {
+    if (app_.sidebar_tab_ == 0) {
         if (mesh_edit) {
             if (ctx.collapsing_header("Transform", true, nullptr, I::Orientation)) {
-                const auto vs = mesh_.selection.affected_vertices(mesh_.mesh);
+                const auto vs = app_.mesh_.selection.affected_vertices(app_.mesh_.mesh);
                 if (vs.empty()) ctx.label_dim("Nothing selected");
                 else {
-                    glm::vec3 c = selection_center(mesh_.mesh, mesh_.selection);
+                    glm::vec3 c = selection_center(app_.mesh_.mesh, app_.mesh_.selection);
                     glm::vec3 nc = c;
                     if (ctx.drag_float_stacked("Median", &nc.x, 3, 0.01f, "%.3f m")) {
                         const glm::vec3 d = nc - c;
-                        mesh_.edit("Move Vertices", [&](EditMesh& m, MeshSelection& s) { translate_selection(m, s, d); }, "sidebar_median");
+                        app_.mesh_.edit("Move Vertices", [&](EditMesh& m, MeshSelection& s) { translate_selection(m, s, d); }, "sidebar_median");
                     }
-                    if (ctx.last_deactivated()) mesh_.undo.end_merge();
+                    if (ctx.last_deactivated()) app_.mesh_.undo.end_merge();
                 }
             }
-        } else if (const ObjectId id = doc_.primary(); id && doc_.find(id)) {
+        } else if (const ObjectId id = app_.doc_.primary(); id && app_.doc_.find(id)) {
             if (ctx.collapsing_header("Transform", true, nullptr, I::Orientation)) {
                 glm::vec3 p, rr, s;
-                get_object_transform_(id, p, rr, s);
+                app_.timeline_panel_->get_object_transform_(id, p, rr, s);
                 glm::vec3 np = p, nr = rr, ns = s;
                 bool act = false, fin = false;
                 const bool a = ctx.drag_float_stacked("Location", &np.x, 3, 0.02f, "%.3f m"); act |= ctx.last_group_active(); fin |= ctx.last_deactivated();
                 const bool b = ctx.drag_float_stacked("Rotation", &nr.x, 3, 0.5f, "%.1f"); act |= ctx.last_group_active(); fin |= ctx.last_deactivated();
                 const bool cc = ctx.drag_float_stacked("Scale", &ns.x, 3, 0.01f, "%.3f"); act |= ctx.last_group_active(); fin |= ctx.last_deactivated();
-                if ((a || b || cc) && !playing()) set_object_transform_(id, np, nr, ns, "Transform", act ? "sidebar_transform" : std::string());
-                if (fin) doc_.end_merge();
+                if ((a || b || cc) && !app_.playing()) app_.timeline_panel_->set_object_transform_(id, np, nr, ns, "Transform", act ? "sidebar_transform" : std::string());
+                if (fin) app_.doc_.end_merge();
                 glm::vec3 lo(1e30f), hi(-1e30f);
-                if (object_bounds_(id, lo, hi, true)) {
+                if (app_.object_bounds_(id, lo, hi, true)) {
                     char buf[96];
                     const glm::vec3 d = hi - lo;
                     std::snprintf(buf, sizeof(buf), "%.3f m   %.3f m   %.3f m", d.x, d.y, d.z);
@@ -597,23 +623,23 @@ void EditorApp::draw_sidebar_(imm::Context& ctx, bool mesh_edit) {
         }
     } else {
         if (ctx.collapsing_header("View", true, nullptr, I::ViewCamera)) {
-            if (ctx.drag_float("Field of View", &camera_.fov, 0.2f, 5.0f, 150.0f, "%.1f")) camera_.apply();
-            if (ctx.drag_float("Distance", &camera_.distance, 0.05f, 0.05f, 5000.0f, "%.2f m")) camera_.apply();
-            bool ortho = camera_.ortho;
-            if (ctx.property_bool("Orthographic", &ortho)) camera_.set_ortho(ortho);
+            if (ctx.drag_float("Field of View", &app_.camera_.fov, 0.2f, 5.0f, 150.0f, "%.1f")) app_.camera_.apply();
+            if (ctx.drag_float("Distance", &app_.camera_.distance, 0.05f, 0.05f, 5000.0f, "%.2f m")) app_.camera_.apply();
+            bool ortho = app_.camera_.ortho;
+            if (ctx.property_bool("Orthographic", &ortho)) app_.camera_.set_ortho(ortho);
         }
         if (ctx.collapsing_header("3D Cursor", true, nullptr, I::Cursor)) {
-            ctx.drag_float_stacked("Location", &cursor3d_.x, 3, 0.02f, "%.3f m");
+            ctx.drag_float_stacked("Location", &app_.cursor3d_.x, 3, 0.02f, "%.3f m");
         }
     }
     ctx.style.label_ratio = saved_ratio;
     ctx.end_region();
 }
 
-std::string EditorApp::view_name_() const {
-    const bool o = camera_.ortho;
-    const float p = camera_.pitch_deg;
-    const float y = std::fmod(std::fmod(camera_.yaw_deg, 360.0f) + 360.0f, 360.0f);
+std::string ViewportChromePanel::view_name_() const {
+    const bool o = app_.camera_.ortho;
+    const float p = app_.camera_.pitch_deg;
+    const float y = std::fmod(std::fmod(app_.camera_.yaw_deg, 360.0f) + 360.0f, 360.0f);
     auto near = [](float a, float b) { return std::abs(a - b) < 0.6f; };
     std::string name = "User";
     if (near(p, 89.5f)) name = "Top";
@@ -627,26 +653,26 @@ std::string EditorApp::view_name_() const {
     return name + (o ? " Orthographic" : " Perspective");
 }
 
-void EditorApp::shadow_text_(imm::Context& ctx, glm::vec2 p, const std::string& s, const glm::vec4& c) const {
-    ctx.draw_text(p + glm::vec2(1, 1), s, imm::with_alpha(et_.viewport.text_shadow, et_.viewport.text_shadow.a * c.a));
+void ViewportChromePanel::shadow_text_(imm::Context& ctx, glm::vec2 p, const std::string& s, const glm::vec4& c) const {
+    ctx.draw_text(p + glm::vec2(1, 1), s, imm::with_alpha(app_.et_.viewport.text_shadow, app_.et_.viewport.text_shadow.a * c.a));
     ctx.draw_text(p, s, c);
 }
 
-void EditorApp::draw_overlay_text_(imm::Context& ctx, const ViewProj& vp) {
-    const float x = viewport_box_.x + (show_toolbar_ ? kToolSize + 22 : 10);
-    const float y0 = viewport_box_.y + 8;
-    shadow_text_(ctx, {x, y0}, view_name_(), et_.viewport.overlay_text);
+void ViewportChromePanel::draw_overlay_text_(imm::Context& ctx, const ViewProj& vp) {
+    const float x = app_.viewport_box_.x + (app_.show_toolbar_ ? kToolSize + 22 : 10);
+    const float y0 = app_.viewport_box_.y + 8;
+    shadow_text_(ctx, {x, y0}, view_name_(), app_.et_.viewport.overlay_text);
     (void)vp;
-    std::string ctxline = "(1) " + doc_.scene_name();
-    if (asset_view_() || active_type_ == AssetType::Object) {
-        ctxline = "(" + std::string(asset_type_info_(active_type_).singular) + ") " + active_asset_label_();
-        if (active_type_ == AssetType::Object && doc_.primary() && doc_.find(doc_.primary())) ctxline += " | " + get_string(*doc_.find(doc_.primary()), "name");
+    std::string ctxline = "(1) " + app_.doc_.scene_name();
+    if (app_.asset_view_() || app_.active_type_ == AssetType::Object) {
+        ctxline = "(" + std::string(app_.assets_panel_->asset_type_info_(app_.active_type_).singular) + ") " + app_.properties_panel_->active_asset_label_();
+        if (app_.active_type_ == AssetType::Object && app_.doc_.primary() && app_.doc_.find(app_.doc_.primary())) ctxline += " | " + get_string(*app_.doc_.find(app_.doc_.primary()), "name");
     }
-    else if (doc_.primary() && doc_.find(doc_.primary())) ctxline += " | " + get_string(*doc_.find(doc_.primary()), "name");
-    shadow_text_(ctx, {x, y0 + 16}, ctxline, imm::with_alpha(et_.viewport.overlay_text, et_.viewport.overlay_text.a * 0.9f));
-    if (playing()) shadow_text_(ctx, {x, y0 + 32}, play_scene_ && !play_scene_->is_simulating() ? "PAUSED" : "PLAYING",
+    else if (app_.doc_.primary() && app_.doc_.find(app_.doc_.primary())) ctxline += " | " + get_string(*app_.doc_.find(app_.doc_.primary()), "name");
+    shadow_text_(ctx, {x, y0 + 16}, ctxline, imm::with_alpha(app_.et_.viewport.overlay_text, app_.et_.viewport.overlay_text.a * 0.9f));
+    if (app_.playing()) shadow_text_(ctx, {x, y0 + 32}, app_.play_scene_ && !app_.play_scene_->is_simulating() ? "PAUSED" : "PLAYING",
                                 ctx.style.object_active);
-    if (show_overlays_ && show_stats_overlay_) shadow_text_(ctx, {x, y0 + (playing() ? 48.0f : 32.0f)}, scene_stats_(), et_.viewport.overlay_text);
+    if (app_.show_overlays_ && app_.show_stats_overlay_) shadow_text_(ctx, {x, y0 + (app_.playing() ? 48.0f : 32.0f)}, app_.statusbar_panel_->scene_stats_(), app_.et_.viewport.overlay_text);
 }
 
 namespace {
@@ -708,7 +734,7 @@ bool project_bone(const ViewProj& vp, const glm::vec3& head, const glm::vec3& ta
 
 } // namespace
 
-void EditorApp::draw_object_glyph_(imm::Context& ctx, const ViewProj& vp, ObjectId id, const Node& node, const glm::mat4& w,
+void ViewportChromePanel::draw_object_glyph_(imm::Context& ctx, const ViewProj& vp, ObjectId id, const Node& node, const glm::mat4& w,
                                    const glm::vec4& col) {
     auto P = [&](const glm::vec3& p) { return vp.project(p); };
     auto seg = [&](const glm::vec3& a, const glm::vec3& b) {
@@ -725,9 +751,9 @@ void EditorApp::draw_object_glyph_(imm::Context& ctx, const ViewProj& vp, Object
         if (t == "Camera" || t == "DirectionalLight" || t == "PointLight" || t == "SpotLight") { kind = t; comp = &c; break; }
     }
     // Pose mode draws the rig as bones: its own display, not an overlay the user turns off.
-    const bool pose_bone = kind.empty() && in_pose_mode_() && in_anim_rig_(id);
+    const bool pose_bone = kind.empty() && app_.in_pose_mode_() && app_.timeline_panel_->in_anim_rig_(id);
     // "Cameras / Lights" covers the symbols; "Origins" covers everything else's origin.
-    if (!pose_bone && (!kind.empty() ? !show_glyphs_ : !show_origins_)) return;
+    if (!pose_bone && (!kind.empty() ? !app_.show_glyphs_ : !app_.show_origins_)) return;
     const float wpp = vp.world_per_pixel(pos);
     if (kind == "Camera") {
         const float fov = get_float(*comp, "fov", 50.0f);
@@ -784,11 +810,11 @@ void EditorApp::draw_object_glyph_(imm::Context& ctx, const ViewProj& vp, Object
     else draw_origin_glyph_(ctx, vp, id, w, col);
 }
 
-void EditorApp::draw_pose_bones_(imm::Context& ctx, const ViewProj& vp, ObjectId id, const glm::mat4& w, const glm::vec4& col) {
+void ViewportChromePanel::draw_pose_bones_(imm::Context& ctx, const ViewProj& vp, ObjectId id, const glm::mat4& w, const glm::vec4& col) {
     const glm::vec3 pos(w[3]);
     const glm::vec3 X = glm::normalize(glm::vec3(w[0])), Z = glm::normalize(glm::vec3(w[2]));
     // One octahedral bone reaching each child joint, so the rig reads as a skeleton.
-    for (const glm::vec3& tail : bone_tails_(id, origin_size_for_(id) * 2.0f)) {
+    for (const glm::vec3& tail : app_.bone_tails_(id, app_.origin_size_for_(id) * 2.0f)) {
         glm::vec2 head, tip, q[4];
         if (!project_bone(vp, pos, tail, X, Z, head, tip, q)) continue;
         const glm::vec4 fill = imm::with_alpha(col, col.a * 0.25f);
@@ -806,16 +832,16 @@ void EditorApp::draw_pose_bones_(imm::Context& ctx, const ViewProj& vp, ObjectId
     if (const auto c = vp.project(pos)) ctx.ring(*c, 3.5f, 1.3f, col);
 }
 
-void EditorApp::draw_origin_glyph_(imm::Context& ctx, const ViewProj& vp, ObjectId id, const glm::mat4& w, const glm::vec4& col) {
+void ViewportChromePanel::draw_origin_glyph_(imm::Context& ctx, const ViewProj& vp, ObjectId id, const glm::mat4& w, const glm::vec4& col) {
     const glm::vec3 pos(w[3]);
     const glm::vec3 X = glm::normalize(glm::vec3(w[0])), Y = glm::normalize(glm::vec3(w[1])), Z = glm::normalize(glm::vec3(w[2]));
-    const float a = std::max(0.001f, origin_size_for_(id));
+    const float a = std::max(0.001f, app_.origin_size_for_(id));
     auto P = [&](const glm::vec3& p) { return vp.project(p); };
     auto seg = [&](const glm::vec3& p, const glm::vec3& q, float t) {
         const auto pa = P(p), pb = P(q);
         if (pa && pb) ctx.line(*pa, *pb, col, t);
     };
-    switch (origin_style_for_(id)) {
+    switch (app_.origin_style_for_(id)) {
     case OriginStyle::Orb: {
         // A ball at the origin with a short tick down each axis: the least cluttered display
         // for a dense rig, and still enough to read the object's orientation.
@@ -838,25 +864,25 @@ void EditorApp::draw_origin_glyph_(imm::Context& ctx, const ViewProj& vp, Object
     }
 }
 
-float EditorApp::origin_glyph_pick_px_(ObjectId id, const ViewProj& vp, const glm::mat4& world, glm::vec2 px) {
+float ViewportChromePanel::origin_glyph_pick_px_(ObjectId id, const ViewProj& vp, const glm::mat4& world, glm::vec2 px) {
     const glm::vec3 pos(world[3]);
     const auto centre = vp.project(pos);
     if (!centre) return 1e30f;
     float best = glm::distance(*centre, px);   // the origin point is clickable whatever is drawn
     // Only what is actually on screen is clickable by its shape; with the overlay off, or on
     // a camera / light (which draws its own symbol), the origin point is all there is.
-    const bool pose_bone = in_pose_mode_() && in_anim_rig_(id) && is_joint_object_(id);
-    if (!show_overlays_ || (!pose_bone && !show_origins_) || !is_joint_object_(id)) return best;
+    const bool pose_bone = app_.in_pose_mode_() && app_.timeline_panel_->in_anim_rig_(id) && app_.is_joint_object_(id);
+    if (!app_.show_overlays_ || (!pose_bone && !app_.show_origins_) || !app_.is_joint_object_(id)) return best;
 
     const glm::vec3 X = glm::normalize(glm::vec3(world[0])), Y = glm::normalize(glm::vec3(world[1])),
                     Z = glm::normalize(glm::vec3(world[2]));
-    const float a = std::max(0.001f, origin_size_for_(id));
+    const float a = std::max(0.001f, app_.origin_size_for_(id));
     auto segment = [&](const glm::vec3& p, const glm::vec3& q) {
         const auto pa = vp.project(p), pb = vp.project(q);
         if (pa && pb) best = std::min(best, point_segment_distance(px, *pa, *pb));
     };
     if (pose_bone) {
-        for (const glm::vec3& tail : bone_tails_(id, a * 2.0f)) {
+        for (const glm::vec3& tail : app_.bone_tails_(id, a * 2.0f)) {
             glm::vec2 head, tip, q[4];
             if (!project_bone(vp, pos, tail, X, Z, head, tip, q)) continue;
             for (int i = 0; i < 4; ++i) {
@@ -869,7 +895,7 @@ float EditorApp::origin_glyph_pick_px_(ObjectId id, const ViewProj& vp, const gl
         }
         return best;
     }
-    switch (origin_style_for_(id)) {
+    switch (app_.origin_style_for_(id)) {
     case OriginStyle::Orb:
         best = std::max(0.0f, best - 6.0f);   // the ball itself, then its axis ticks
         segment(pos, pos + X * (a * 0.45f));
@@ -886,69 +912,69 @@ float EditorApp::origin_glyph_pick_px_(ObjectId id, const ViewProj& vp, const gl
     return best;
 }
 
-void EditorApp::draw_mode_menu_items_(imm::Context& ctx) {
+void ViewportChromePanel::draw_mode_menu_items_(imm::Context& ctx) {
     using I = imm::Icon;
-    const bool mesh_obj = active_type_ == AssetType::Mesh ||
-                          (!asset_view_() && (edit_object_ || (doc_.primary() && doc_.find_component(doc_.primary(), "MeshRenderer") >= 0)));
-    const InteractionMode cur = interaction_mode();
+    const bool mesh_obj = app_.active_type_ == AssetType::Mesh ||
+                          (!app_.asset_view_() && (app_.edit_object_ || (app_.doc_.primary() && app_.doc_.find_component(app_.doc_.primary(), "MeshRenderer") >= 0)));
+    const InteractionMode cur = app_.interaction_mode();
     bool o = cur == InteractionMode::Object, e = cur == InteractionMode::Edit, sc = cur == InteractionMode::Sculpt;
     bool vp = cur == InteractionMode::VertexPaint, wp = cur == InteractionMode::WeightPaint;
-    const bool terrain = in_terrain_mode_();
-    const bool tiles = in_tile_mode_();
+    const bool terrain = app_.terrain_panel_->in_terrain_mode_();
+    const bool tiles = app_.tile_mode_panel_->in_tile_mode_();
     o = o && !terrain && !tiles;
     if (ctx.menu_item("Object Mode", "Tab", &o, true, I::ObjectMode)) {
-        if (terrain) exit_terrain_mode_();
-        if (tiles) exit_tile_mode_();
-        set_interaction_mode(InteractionMode::Object);
+        if (terrain) app_.terrain_panel_->exit_terrain_mode_();
+        if (tiles) app_.tile_mode_panel_->exit_tile_mode_();
+        app_.set_interaction_mode(InteractionMode::Object);
     }
-    if (ctx.menu_item("Edit Mode", "Tab", &e, mesh_obj && !playing(), I::EditMode)) set_interaction_mode(InteractionMode::Edit);
-    if (ctx.menu_item("Sculpt Mode", "", &sc, mesh_obj && !playing(), I::SculptMode)) set_interaction_mode(InteractionMode::Sculpt);
-    if (ctx.menu_item("Vertex Paint", "", &vp, mesh_obj && !playing(), I::VertexPaint)) set_interaction_mode(InteractionMode::VertexPaint);
-    if (ctx.menu_item("Weight Paint", "", &wp, mesh_obj && !playing(), I::WeightPaint)) set_interaction_mode(InteractionMode::WeightPaint);
+    if (ctx.menu_item("Edit Mode", "Tab", &e, mesh_obj && !app_.playing(), I::EditMode)) app_.set_interaction_mode(InteractionMode::Edit);
+    if (ctx.menu_item("Sculpt Mode", "", &sc, mesh_obj && !app_.playing(), I::SculptMode)) app_.set_interaction_mode(InteractionMode::Sculpt);
+    if (ctx.menu_item("Vertex Paint", "", &vp, mesh_obj && !app_.playing(), I::VertexPaint)) app_.set_interaction_mode(InteractionMode::VertexPaint);
+    if (ctx.menu_item("Weight Paint", "", &wp, mesh_obj && !app_.playing(), I::WeightPaint)) app_.set_interaction_mode(InteractionMode::WeightPaint);
     // A rig (an Animator at or above the selection): pose its joints by hand.
     bool pm = cur == InteractionMode::Pose;
-    const ObjectId pose_id = pose_rig_ ? pose_rig_ : rig_of_(doc_.primary());
-    if (ctx.menu_item("Pose Mode", "", &pm, !asset_view_() && pose_id && !playing(), I::ObjectMode)) {
-        if (pose_rig_) exit_pose_mode_();
-        else enter_pose_mode_(pose_id);
+    const ObjectId pose_id = app_.pose_rig_ ? app_.pose_rig_ : app_.timeline_panel_->rig_of_(app_.doc_.primary());
+    if (ctx.menu_item("Pose Mode", "", &pm, !app_.asset_view_() && pose_id && !app_.playing(), I::ObjectMode)) {
+        if (app_.pose_rig_) app_.exit_pose_mode_();
+        else app_.enter_pose_mode_(pose_id);
     }
     ctx.tooltip("Pose Mode\nPose the rig's joints by hand: they draw as bones, a move edits the pose instead of the "
                 "rest transform, and I keys it at the playhead (Auto-Key keys every edit)");
     // A HeightmapTerrain object: sculpt and paint the terrain itself.
     bool tm = terrain;
-    const ObjectId terrain_id = terrain ? terrain_object_ : doc_.primary();
-    if (ctx.menu_item("Terrain Mode", "", &tm, !asset_view_() && is_terrain_object_(terrain_id) && !playing(), I::Terrain)) {
-        if (terrain) exit_terrain_mode_();
-        else enter_terrain_mode_(terrain_id);
+    const ObjectId terrain_id = terrain ? app_.terrain_panel_->terrain_object_ : app_.doc_.primary();
+    if (ctx.menu_item("Terrain Mode", "", &tm, !app_.asset_view_() && app_.terrain_panel_->is_terrain_object_(terrain_id) && !app_.playing(), I::Terrain)) {
+        if (terrain) app_.terrain_panel_->exit_terrain_mode_();
+        else app_.terrain_panel_->enter_terrain_mode_(terrain_id);
     }
     // A TileTerrain object: edit its tiles.
     bool tl = tiles;
-    const ObjectId tiles_id = tiles ? tile_object_ : doc_.primary();
-    if (ctx.menu_item("Tile Mode", "", &tl, !asset_view_() && is_tile_terrain_object_(tiles_id) && !playing(), I::Terrain)) {
-        if (tiles) exit_tile_mode_();
-        else enter_tile_mode_(tiles_id);
+    const ObjectId tiles_id = tiles ? app_.tile_mode_panel_->tile_object_ : app_.doc_.primary();
+    if (ctx.menu_item("Tile Mode", "", &tl, !app_.asset_view_() && app_.tile_mode_panel_->is_tile_terrain_object_(tiles_id) && !app_.playing(), I::Terrain)) {
+        if (tiles) app_.tile_mode_panel_->exit_tile_mode_();
+        else app_.tile_mode_panel_->enter_tile_mode_(tiles_id);
     }
 }
 
-void EditorApp::draw_shading_popover_(imm::Context& ctx) {
-    auto& rc = engine_.render_config();
-    ctx.label_dim(shading_ == Shading::Full ? "Rendered" : shading_ == Shading::MaterialPreview ? "Material Preview"
-                 : shading_ == Shading::Solid ? "Solid" : "Wireframe");
-    if (shading_ == Shading::Solid || shading_ == Shading::MaterialPreview) {
+void ViewportChromePanel::draw_shading_popover_(imm::Context& ctx) {
+    auto& rc = app_.engine_.render_config();
+    ctx.label_dim(app_.shading_ == Shading::Full ? "Rendered" : app_.shading_ == Shading::MaterialPreview ? "Material Preview"
+                 : app_.shading_ == Shading::Solid ? "Solid" : "Wireframe");
+    if (app_.shading_ == Shading::Solid || app_.shading_ == Shading::MaterialPreview) {
         const bool has_ssao = rc.ssao_enabled;
-        bool ao = viewport_ao_ && has_ssao;
-        if (ctx.checkbox("Ambient Occlusion", &ao) && has_ssao) set_viewport_ao(ao);
+        bool ao = app_.viewport_ao_ && has_ssao;
+        if (ctx.checkbox("Ambient Occlusion", &ao) && has_ssao) app_.set_viewport_ao(ao);
         ctx.tooltip(has_ssao ? "Ambient Occlusion\nThe renderer's SSAO, applied exactly as the full render applies it"
                              : "Ambient Occlusion\nUnavailable: the project's render config has ssao_enabled: false");
     }
-    bool xr = xray_;
-    if (ctx.checkbox("X-Ray", &xr)) xray_ = xr;
+    bool xr = app_.xray_;
+    if (ctx.checkbox("X-Ray", &xr)) app_.xray_ = xr;
     ctx.tooltip("X-Ray\nSee and select through surfaces (Alt Z)");
-    if (xray_ && (shading_ == Shading::Solid || shading_ == Shading::MaterialPreview)) {
-        ctx.slider_float("X-Ray Alpha", &xray_alpha_, 0.0f, 1.0f);
+    if (app_.xray_ && (app_.shading_ == Shading::Solid || app_.shading_ == Shading::MaterialPreview)) {
+        ctx.slider_float("X-Ray Alpha", &app_.xray_alpha_, 0.0f, 1.0f);
         ctx.tooltip("X-Ray Alpha\nHow opaque surfaces stay in X-Ray (Blender's default 0.5)");
     }
-    if (shading_ != Shading::Full) { ctx.end_popup(); return; }
+    if (app_.shading_ != Shading::Full) { ctx.end_popup(); return; }
     ctx.separator();
     ctx.label_dim("Renderer (live, this session)");
     auto live = [&](const char* label, bool& v, const char* tip) {
@@ -957,8 +983,8 @@ void EditorApp::draw_shading_popover_(imm::Context& ctx) {
     };
     live("Shadows", rc.shadows_enabled, "Shadows\nShadow maps for every light");
     live("Contact Shadows", rc.contact_shadows_enabled, "Contact Shadows\nScreen-space short shadows");
-    live("Soft Lighting", rc.soft_lighting, "Soft Lighting\nSmooth lighting instead of the banded pixel-art look");
-    live("Outline", rc.outline_enabled, "Outline\nThe pixel-art edge outline");
+    live("Soft Lighting", rc.soft_lighting, "Soft Lighting\nSmooth lighting instead of the banded stylised look");
+    live("Outline", rc.outline_enabled, "Outline\nThe stylised edge outline");
     live("Palette", rc.palette_enabled, "Palette\nPalette quantization");
     live("Dither", rc.dither_enabled, "Dither\nOrdered dithering");
     ctx.separator();
@@ -978,36 +1004,36 @@ void EditorApp::draw_shading_popover_(imm::Context& ctx) {
     ctx.end_popup();
 }
 
-void EditorApp::draw_colliders_popover_(imm::Context& ctx) {
+void ViewportChromePanel::draw_colliders_popover_(imm::Context& ctx) {
     ctx.label_dim("Physics Colliders");
-    ctx.checkbox("Show Colliders", &show_colliders_);
+    ctx.checkbox("Show Colliders", &app_.show_colliders_);
     ctx.tooltip("Show Colliders\nWireframes of the physics colliders: green solid, yellow triggers");
-    if (ctx.selectable("All Colliders", collider_view_ == ColliderView::All)) collider_view_ = ColliderView::All;
+    if (ctx.selectable("All Colliders", app_.collider_view_ == EditorApp::ColliderView::All)) app_.collider_view_ = EditorApp::ColliderView::All;
     ctx.tooltip("All Colliders\nEvery collider in the scene");
-    if (ctx.selectable("Selected + Children", collider_view_ == ColliderView::Selected)) collider_view_ = ColliderView::Selected;
+    if (ctx.selectable("Selected + Children", app_.collider_view_ == EditorApp::ColliderView::Selected)) app_.collider_view_ = EditorApp::ColliderView::Selected;
     ctx.tooltip("Selected + Children\nOnly the selected objects' colliders, and their children's");
     ctx.end_popup();
 }
 
-void EditorApp::draw_overlays_popover_(imm::Context& ctx) {
+void ViewportChromePanel::draw_overlays_popover_(imm::Context& ctx) {
     ctx.label_dim("Viewport Overlays");
-    ctx.checkbox("Grid", &show_grid_);
-    ctx.checkbox("Origins", &show_origins_);
+    ctx.checkbox("Grid", &app_.show_grid_);
+    ctx.checkbox("Origins", &app_.show_origins_);
     ctx.tooltip("Origins\nThe origin glyph on every object that has no mesh of its own -- a rig's joints, markers, group parents");
-    ctx.checkbox("Cameras / Lights", &show_glyphs_);
+    ctx.checkbox("Cameras / Lights", &app_.show_glyphs_);
     ctx.tooltip("Cameras / Lights\nCamera frustums and light symbols");
-    ctx.checkbox("3D Cursor", &show_cursor3d_);
-    ctx.checkbox("Statistics", &show_stats_overlay_);
+    ctx.checkbox("3D Cursor", &app_.show_cursor3d_);
+    ctx.checkbox("Statistics", &app_.show_stats_overlay_);
     ctx.tooltip("Statistics\nObject / vertex / face counts in the viewport corner");
     // The viewer-wide default for origin glyphs, within reach of what it changes. Any object
     // can override it in Properties > Object > Origin Gizmo. Saved once the mouse lets go.
     ctx.spacing(4);
     ctx.label_dim("Object Origins (default)");
-    ctx.slider_float("Size", &origin_size_, 0.01f, 0.5f, "%.3f m");
+    ctx.slider_float("Size", &app_.origin_size_, 0.01f, 0.5f, "%.3f m");
     const bool size_done = ctx.last_deactivated();
-    test_rects_["origin_size"] = ctx.last_rect();
+    app_.test_rects_["origin_size"] = ctx.last_rect();
     ctx.tooltip("Size\nHow big an origin glyph is drawn by default, in metres. Turn it down for a dense rig");
-    if (size_done) prefs_save_();
+    if (size_done) app_.preferences_panel_->prefs_save_();
     // Rows rather than a dropdown: a combo's popup would close this one.
     static const char* kOriginStyles[] = {"Axes", "Orb"};
     static const char* kOriginTips[] = {
@@ -1016,12 +1042,12 @@ void EditorApp::draw_overlays_popover_(imm::Context& ctx) {
     };
     for (int i = 0; i < 2; ++i) {
         ctx.push_id(i);
-        if (ctx.selectable(kOriginStyles[i], origin_style_ == i) && origin_style_ != i) {
-            origin_style_ = i;
-            prefs_apply_();
-            prefs_save_();
+        if (ctx.selectable(kOriginStyles[i], app_.origin_style_ == i) && app_.origin_style_ != i) {
+            app_.origin_style_ = i;
+            app_.preferences_panel_->prefs_apply_();
+            app_.preferences_panel_->prefs_save_();
         }
-        test_rects_[std::string("origin_style:") + kOriginStyles[i]] = ctx.last_rect();
+        app_.test_rects_[std::string("origin_style:") + kOriginStyles[i]] = ctx.last_rect();
         ctx.tooltip(kOriginTips[i]);
         ctx.pop_id();
     }

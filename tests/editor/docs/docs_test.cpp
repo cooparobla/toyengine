@@ -38,7 +38,7 @@ const char* docs_shot_dir() {
 /** @brief A shot needs somewhere to go: DOCS_SHOT_DIR, or the test fails at once. */
 void require_shot_dir() { coopa::test::require(docs_shot_dir() != nullptr, "DOCS_SHOT_DIR names the output folder"); }
 
-/** @brief The editor as a user sees it: 1600 x 900, full resolution, no pixel-art post effects. */
+/** @brief The editor as a user sees it: 1600 x 900, full resolution, no stylisation post effects. */
 toy::core::AppConfig docs_config(const Project& p) {
     install_codecs_once();
     toy::core::AppConfig cfg = toy::core::AppConfig::load(p.config_path().string());

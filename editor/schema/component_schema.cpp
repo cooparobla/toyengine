@@ -882,7 +882,7 @@ std::map<std::string, ComponentSchema>& schema_table_() {
         // Defaults mirror the runtime's (toyengine/world/terrain_component.h, terrain_sampler.h):
         // an absent key shows the value the terrain actually uses.
         // The streamed tile world (toyengine/world/terrain_component.h). Laid out, labelled and
-        // filtered by the TileTerrain panel (editor/app/ui/tile_terrain_panel.inl); the tooltips
+        // filtered by the TileTerrain panel (editor/app/ui/tile_terrain_panel.h); the tooltips
         // here are what it shows. `kind_tile_sets:` is a map only the panel edits.
         auto tile_terrain_fields = [] {
             return std::vector<FieldDesc>{

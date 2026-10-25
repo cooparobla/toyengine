@@ -19,12 +19,38 @@ mkdir -p "$PROJECT_DIR/.libs"
 
 if [[ -n "$link" ]]; then
     [[ "$link" = /* ]] || link="$PROJECT_DIR/$link"
-    [[ -f "$link/CMakeLists.txt" && -d "$link/toyengine" ]] || die "engine.link $link is not a toyengine checkout"
+    # A vendored engine -- engine.link pointing at a git submodule inside this project -- is an
+    # empty directory until that submodule is initialised, so a fresh clone of the project has
+    # nothing to build. Populate it here, and only here: an initialised checkout may hold engine
+    # work, and `git submodule update` on one would reset it to the recorded commit.
+    if [[ ! -f "$link/CMakeLists.txt" && "$link" == "$PROJECT_DIR"/* ]] \
+       && [[ -f "$PROJECT_DIR/.gitmodules" ]] && command -v git >/dev/null 2>&1 \
+       && grep -q "path *= *${link#"$PROJECT_DIR"/}\$" "$PROJECT_DIR/.gitmodules"; then
+        echo "[setup] initialising the engine submodule ${link#"$PROJECT_DIR"/}"
+        git -C "$PROJECT_DIR" submodule update --init --recursive -- "$link" \
+            || warn "could not initialise ${link#"$PROJECT_DIR"/}"
+    fi
+    if [[ ! -f "$link/CMakeLists.txt" || ! -d "$link/toyengine" ]]; then
+        if [[ "$link" == "$PROJECT_DIR"/* ]]; then
+            die "engine.link points at ${link#"$PROJECT_DIR"/}, which holds no toyengine checkout -- add one with 'toyhub vendor $PROJECT_DIR'"
+        fi
+        die "engine.link $link is not a toyengine checkout"
+    fi
     if [[ -e "$ENGINE_DIR" && ! -L "$ENGINE_DIR" ]]; then
         die ".libs/toyengine is a clone; run ./clean.sh --all first to switch this project to link mode"
     fi
     ln -sfn "$link" "$ENGINE_DIR"
-    echo "[setup] .libs/toyengine -> $link (linked)"
+    if [[ "$link" == "$PROJECT_DIR"/* ]]; then
+        echo "[setup] .libs/toyengine -> ${link#"$PROJECT_DIR"/} (vendored)"
+    else
+        echo "[setup] .libs/toyengine -> $link (linked)"
+    fi
+    # The coopa libraries are submodules of the engine. Same rule: init them only when they are
+    # not there at all, never on a populated libs/.
+    if [[ ! -f "$link/libs/libcoopa/CMakeLists.txt" && -e "$link/.git" ]] && command -v git >/dev/null 2>&1; then
+        echo "[setup] initialising the engine's libs/ submodules"
+        git -C "$link" submodule update --init --recursive || true
+    fi
     [[ -f "$link/libs/libcoopa/CMakeLists.txt" ]] || warn "$link/libs is empty: run 'git submodule update --init --recursive' there"
 else
     command -v git >/dev/null 2>&1 || die "git is needed to fetch the engine (or point engine.link in $(basename "$TOY_FILE") at a local checkout)"

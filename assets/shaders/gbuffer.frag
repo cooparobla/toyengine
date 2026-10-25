@@ -1,7 +1,7 @@
 #version 450
 
 // Opaque/mask G-Buffer fragment shader. This app's material textures are
-// pixel art (16-texel atlas cells, see toy::world::tile_types.h) bound with
+// hard-edged atlases (16-texel cells, see toy::world::tile_types.h) bound with
 // SamplerDesc::pixel_art_smooth()'s LINEAR sampler, and every material-map
 // fetch is routed through gfx_texel_aa_uv(): texel interiors stay flat and
 // hard-edged like point sampling, but a texel boundary blends across exactly

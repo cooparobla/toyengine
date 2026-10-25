@@ -78,8 +78,8 @@ const std::vector<SettingsGroup>& render_settings_groups() {
             .add(startup(F(f_enum("resolution_mode", {"fixed", "divisor", "fill"}), "Resolution Mode",
                            "fixed: render at Render Width x Height. divisor: the window size / Scale Divisor. "
                            "fill: Render Height rows, width following the window's aspect")))
-            .add(startup(F(f_int("render_width", 480, 16, 7680), "Render Width", "Internal render width in pixels (fixed mode)")))
-            .add(startup(F(f_int("render_height", 270, 16, 4320), "Render Height", "Internal render height in pixels (fixed and fill modes)")))
+            .add(startup(F(f_int("render_width", 1920, 16, 7680), "Render Width", "Internal render width in pixels (fixed mode)")))
+            .add(startup(F(f_int("render_height", 1080, 16, 4320), "Render Height", "Internal render height in pixels (fixed and fill modes)")))
             .add(startup(F(f_int("scale_divisor", 4, 1, 16), "Scale Divisor", "divisor mode: render at the window size divided by this")))
             .add(F(f_enum("upscale_mode", {"fit", "integer"}), "Upscale",
                    "How the render reaches the window. fit: scale to fill (letterboxed); integer: whole-number scale only (crisp pixels)"))

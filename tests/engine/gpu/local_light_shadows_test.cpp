@@ -15,6 +15,8 @@
 
 #include <glm/glm.hpp>
 #include <toyengine/core/engine.h>
+#include <gfxcoopa/engine/components/point_light.h>
+#include <gfxcoopa/engine/components/spot_light.h>
 #include <coopa/scene/scene_object.h>
 
 #include "engine/support/checks.h"

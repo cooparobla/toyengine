@@ -1,7 +1,7 @@
 #ifndef GFX_TEXEL_AA_GLSL
 #define GFX_TEXEL_AA_GLSL
 
-// Texel-AA ("anti-aliased point sampling") for pixel-art textures under a free 3D
+// Texel-AA ("anti-aliased point sampling") for hard-edged textures under a free 3D
 // camera. Requires the texture to be bound with a LINEAR sampler
 // (SamplerDesc::pixel_art_smooth()); with a NEAREST sampler the sharpened UV still
 // snaps and this is a no-op in look.

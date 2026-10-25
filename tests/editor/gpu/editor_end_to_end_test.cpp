@@ -7,6 +7,7 @@
  */
 
 #include <coopa/testing/test.h>
+#include <coopa/animation/animator.h>
 
 #include <gfxcoopa/util/image_readback.h>
 

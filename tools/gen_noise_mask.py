@@ -18,9 +18,9 @@ from PIL import Image
 
 SIZE = 64
 """Output texture width/height in pixels. Small and NEAREST-sampled (see
-toy::loaders::PixelTextureLoader) on purpose -- this is a pixel-art engine, and a handful of
-chunky noise texels reads as a clean silhouette test; a smoothly filtered high-res mask would
-blur the cutout edge, defeating the point of AlphaMode::Mask's hard discard.
+toy::loaders::PixelTextureLoader) on purpose: a handful of coarse noise texels reads as a clean
+silhouette test, whereas a smoothly filtered high-res mask would blur the cutout edge, defeating
+the point of AlphaMode::Mask's hard discard.
 """
 
 OUTPUT_PATH = pathlib.Path(__file__).resolve().parent.parent / "assets" / "textures" / "masks" / "noise_mask.png"

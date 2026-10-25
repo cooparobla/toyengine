@@ -1,3 +1,5 @@
+#include "editor/app/ui/terrain.h"
+
 #include "editor/app/editor_app.h"
 
 #include <chrono>
@@ -11,6 +13,14 @@
 
 namespace toy {
 namespace editor {
+
+bool TerrainPanel::is_terrain_object_(ObjectId id) const {
+    return id != 0 && app_.doc_.find_component(id, "HeightmapTerrain") >= 0;
+}
+
+void TerrainPanel::set_terrain_mode(bool on) {
+    if (on) enter_terrain_mode_(app_.doc_.primary()); else exit_terrain_mode_();
+}
 
 using toy::world::HeightmapData;
 using toy::world::HeightmapTerrain;
@@ -49,44 +59,44 @@ const ToolButton k_tools[] = {
 // Lifecycle
 // =================================================================================
 
-HeightmapTerrain* EditorApp::terrain_live_() const {
+HeightmapTerrain* TerrainPanel::terrain_live_() const {
     if (terrain_object_ == 0) return nullptr;
-    coopa::scene::SceneObject* live = sync_.live(terrain_object_);
+    coopa::scene::SceneObject* live = app_.sync_.live(terrain_object_);
     return live ? live->get_component<HeightmapTerrain>() : nullptr;
 }
 
-void EditorApp::enter_terrain_mode_(ObjectId id) {
-    if (!is_terrain_object_(id) || playing()) {
-        log_warn("Terrain Mode: select an object with a HeightmapTerrain component first");
+void TerrainPanel::enter_terrain_mode_(ObjectId id) {
+    if (!is_terrain_object_(id) || app_.playing()) {
+        app_.log_warn("Terrain Mode: select an object with a HeightmapTerrain component first");
         return;
     }
-    if (interaction_mode() != InteractionMode::Object) set_interaction_mode(InteractionMode::Object);
+    if (app_.interaction_mode() != InteractionMode::Object) app_.set_interaction_mode(InteractionMode::Object);
     terrain_mode_ = true;
     terrain_object_ = id;
     terrain_staged_ = TerrainStaged{};
-    tool_ = Tool::Select;
-    prop_tab_ = PropTab::Tool;
-    doc_.clear_selection();
-    doc_.select(id, true);
+    app_.tool_ = EditorApp::Tool::Select;
+    app_.prop_tab_ = PropTab::Tool;
+    app_.doc_.clear_selection();
+    app_.doc_.select(id, true);
 }
 
-void EditorApp::exit_terrain_mode_() {
+void TerrainPanel::exit_terrain_mode_() {
     if (terrain_stroke_.active) terrain_end_stroke_();
     terrain_resize_.active = false;
     terrain_mode_ = false;
     terrain_object_ = 0;
 }
 
-void EditorApp::terrain_frame_() {
+void TerrainPanel::terrain_frame_() {
     if (!terrain_mode_) return;
-    if (playing() || !doc_.find(terrain_object_) || !is_terrain_object_(terrain_object_)) exit_terrain_mode_();
+    if (app_.playing() || !app_.doc_.find(terrain_object_) || !is_terrain_object_(terrain_object_)) exit_terrain_mode_();
 }
 
 // =================================================================================
 // Strokes
 // =================================================================================
 
-bool EditorApp::terrain_hit_(const ViewProj& vp, glm::vec2 px, glm::vec3& world_hit) const {
+bool TerrainPanel::terrain_hit_(const ViewProj& vp, glm::vec2 px, glm::vec3& world_hit) const {
     const HeightmapTerrain* t = terrain_live_();
     if (t == nullptr || t->data == nullptr) return false;
     glm::vec3 o, d;
@@ -98,7 +108,7 @@ bool EditorApp::terrain_hit_(const ViewProj& vp, glm::vec2 px, glm::vec3& world_
     return true;
 }
 
-void EditorApp::terrain_dab_at_(const ViewProj& vp, glm::vec2 px) {
+void TerrainPanel::terrain_dab_at_(const ViewProj& vp, glm::vec2 px) {
     glm::vec3 hit;
     if (!terrain_hit_(vp, px, hit) || !terrain_stroke_.data) return;
     const HeightmapTerrain* t = terrain_live_();
@@ -114,14 +124,14 @@ void EditorApp::terrain_dab_at_(const ViewProj& vp, glm::vec2 px) {
     g_last_dab_world = hit;
 }
 
-void EditorApp::terrain_begin_stroke_(const ViewProj& vp, glm::vec2 px, bool shift, bool ctrl) {
+void TerrainPanel::terrain_begin_stroke_(const ViewProj& vp, glm::vec2 px, bool shift, bool ctrl) {
     HeightmapTerrain* t = terrain_live_();
     glm::vec3 hit;
     if (t == nullptr || !terrain_hit_(vp, px, hit)) return;
     // Set Height: Ctrl-click samples the terrain instead of painting.
     if (terrain_brush_.tool == TerrainTool::SetHeight && ctrl) {
         terrain_brush_.target_height = t->data->sample_height(glm::vec2(hit) - glm::vec2(t->origin()));
-        log_info("Target Height set to " + std::to_string(static_cast<int>(std::lround(terrain_brush_.target_height))) + " m");
+        app_.log_info("Target Height set to " + std::to_string(static_cast<int>(std::lround(terrain_brush_.target_height))) + " m");
         return;
     }
     TerrainStroke& s = terrain_stroke_;
@@ -142,7 +152,7 @@ void EditorApp::terrain_begin_stroke_(const ViewProj& vp, glm::vec2 px, bool shi
     terrain_dab_at_(vp, px);
 }
 
-void EditorApp::terrain_continue_stroke_(const ViewProj& vp, glm::vec2 px) {
+void TerrainPanel::terrain_continue_stroke_(const ViewProj& vp, glm::vec2 px) {
     TerrainStroke& s = terrain_stroke_;
     // Dabs along the cursor's path, spaced by a fraction of the brush (in metres on the ground).
     const glm::vec2 from = s.last_px;
@@ -158,7 +168,7 @@ void EditorApp::terrain_continue_stroke_(const ViewProj& vp, glm::vec2 px) {
     s.last_px = px;
 }
 
-void EditorApp::terrain_end_stroke_() {
+void TerrainPanel::terrain_end_stroke_() {
     TerrainStroke& s = terrain_stroke_;
     if (!s.active) return;
     s.active = false;
@@ -176,7 +186,7 @@ void EditorApp::terrain_end_stroke_() {
     s = TerrainStroke{};
 }
 
-void EditorApp::terrain_push_whole_(const std::string& label, const std::shared_ptr<HeightmapData>& data,
+void TerrainPanel::terrain_push_whole_(const std::string& label, const std::shared_ptr<HeightmapData>& data,
                                     const std::vector<float>& heights, const std::vector<std::uint8_t>& s0,
                                     const std::vector<std::uint8_t>& s1) {
     const IRect all_h{0, 0, data->nx(), data->ny()}, all_s{0, 0, data->splat_w(), data->splat_h()};
@@ -186,16 +196,16 @@ void EditorApp::terrain_push_whole_(const std::string& label, const std::shared_
     terrain_undo_.push(label, std::move(before), std::move(after));
 }
 
-void EditorApp::terrain_apply_undo_(bool redo) {
+void TerrainPanel::terrain_apply_undo_(bool redo) {
     const TerrainPatch* p = redo ? terrain_undo_.redo() : terrain_undo_.undo();
-    if (p != nullptr && !apply_patch(*p)) log_warn("Terrain undo skipped: the terrain was resized or removed since");
+    if (p != nullptr && !apply_patch(*p)) app_.log_warn("Terrain undo skipped: the terrain was resized or removed since");
 }
 
 // =================================================================================
 // Input / overlay
 // =================================================================================
 
-void EditorApp::handle_terrain_input_(imm::Context& ctx, const ViewProj& vp, bool hovered) {
+void TerrainPanel::handle_terrain_input_(imm::Context& ctx, const ViewProj& vp, bool hovered) {
     const auto& in = ctx.input();
     const glm::vec2 m = ctx.mouse();
     const bool shift = has(in.mods, Mods::Shift);
@@ -229,7 +239,7 @@ void EditorApp::handle_terrain_input_(imm::Context& ctx, const ViewProj& vp, boo
     }
     if (hovered && in.pressed[0] && !has(in.mods, Mods::Alt)) terrain_begin_stroke_(vp, m, shift, ctrl);
     if (!hovered || ctx.wants_keyboard() || ctx.any_popup_open()) return;
-    viewport_keymap_(ctx, vp, false, false);
+    app_.viewport_keymap_(ctx, vp, false, false);
     if (ctx.shortcut(Key::F)) terrain_resize_ = {true, false, m, terrain_brush_.radius};
     if (ctx.shortcut(Key::F, Mods::Shift)) terrain_resize_ = {true, true, m - glm::vec2(terrain_brush_.strength * 300.0f, 0.0f), terrain_brush_.strength};
     if (ctx.shortcut(Key::LeftBracket)) terrain_brush_.radius = std::max(0.5f, terrain_brush_.radius / 1.15f);
@@ -241,7 +251,7 @@ void EditorApp::handle_terrain_input_(imm::Context& ctx, const ViewProj& vp, boo
     if (ctx.shortcut(Key::Tab) || ctx.shortcut(Key::Escape)) exit_terrain_mode_();
 }
 
-void EditorApp::draw_terrain_overlay_(imm::Context& ctx, const ViewProj& vp) {
+void TerrainPanel::draw_terrain_overlay_(imm::Context& ctx, const ViewProj& vp) {
     const HeightmapTerrain* t = terrain_live_();
     if (t == nullptr || t->data == nullptr) return;
     const glm::vec4 col = terrain_stroke_.invert ? glm::vec4(0.55f, 0.75f, 1.0f, 0.95f) : glm::vec4(1.0f, 1.0f, 1.0f, 0.9f);
@@ -249,7 +259,7 @@ void EditorApp::draw_terrain_overlay_(imm::Context& ctx, const ViewProj& vp) {
     const glm::vec2 m = ctx.mouse();
     if (terrain_resize_.active) {
         if (!terrain_hit_(vp, terrain_resize_.start, centre)) return;
-    } else if (!(viewport_hovered_ || terrain_stroke_.active) || !terrain_hit_(vp, m, centre)) {
+    } else if (!(app_.viewport_hovered_ || terrain_stroke_.active) || !terrain_hit_(vp, m, centre)) {
         return;
     }
     const glm::vec3 origin = t->origin();
@@ -274,7 +284,7 @@ void EditorApp::draw_terrain_overlay_(imm::Context& ctx, const ViewProj& vp) {
         char buf[64];
         if (terrain_resize_.strength) std::snprintf(buf, sizeof(buf), "Strength %.2f", terrain_brush_.strength);
         else std::snprintf(buf, sizeof(buf), "Radius %.1f m", terrain_brush_.radius);
-        if (auto q = vp.project(centre)) shadow_text_(ctx, *q + glm::vec2(-30, -8), buf, et_.viewport.overlay_text);
+        if (auto q = vp.project(centre)) app_.viewport_chrome_panel_->shadow_text_(ctx, *q + glm::vec2(-30, -8), buf, app_.et_.viewport.overlay_text);
     }
 }
 
@@ -282,7 +292,7 @@ void EditorApp::draw_terrain_overlay_(imm::Context& ctx, const ViewProj& vp) {
 // UI
 // =================================================================================
 
-float EditorApp::draw_terrain_header_(imm::Context& ctx, float x, const imm::Box& hb) {
+float TerrainPanel::draw_terrain_header_(imm::Context& ctx, float x, const imm::Box& hb) {
     const float bh = hb.h - 6;
     auto label = [&](const char* t) {
         const float w = ctx.text_width(t) + 6;
@@ -302,29 +312,29 @@ float EditorApp::draw_terrain_header_(imm::Context& ctx, float x, const imm::Box
     return x + 8;
 }
 
-void EditorApp::draw_terrain_toolbar_(imm::Context& ctx, const imm::Box& r) {
+void TerrainPanel::draw_terrain_toolbar_(imm::Context& ctx, const imm::Box& r) {
     float y = r.y + 4;
     for (const auto& b : k_tools) {
-        const imm::Box bb{r.x + 3, y, kToolSize, kToolSize};
-        y += kToolSize + 2;
+        const imm::Box bb{r.x + 3, y, app_.viewport_chrome_panel_->kToolSize, app_.viewport_chrome_panel_->kToolSize};
+        y += app_.viewport_chrome_panel_->kToolSize + 2;
         if (ctx.icon_button(std::string("terrain_") + terrain_tool_name(b.tool), b.icon, b.tip, terrain_brush_.tool == b.tool,
-                            kToolSize, imm::Context::kAll, bb)) {
+                            app_.viewport_chrome_panel_->kToolSize, imm::Context::kAll, bb)) {
             terrain_brush_.tool = b.tool;
         }
     }
 }
 
-void EditorApp::terrain_edit_component_(const std::string& label, const std::function<void(Node&)>& fn, const std::string& merge) {
+void TerrainPanel::terrain_edit_component_(const std::string& label, const std::function<void(Node&)>& fn, const std::string& merge) {
     Node comp;
-    if (!shown_component_(terrain_object_, "HeightmapTerrain", comp)) return;
+    if (!app_.instances_panel_->shown_component_(terrain_object_, "HeightmapTerrain", comp)) return;
     fn(comp);
-    edit_component_(terrain_object_, comp, label, merge);
+    app_.instances_panel_->edit_component_(terrain_object_, comp, label, merge);
 }
 
-void EditorApp::draw_terrain_tool_panel_(imm::Context& ctx) {
+void TerrainPanel::draw_terrain_tool_panel_(imm::Context& ctx) {
     using I = imm::Icon;
     HeightmapTerrain* t = terrain_live_();
-    const Node* obj = doc_.find(terrain_object_);
+    const Node* obj = app_.doc_.find(terrain_object_);
     ctx.label(std::string("Terrain: ") + (obj ? get_string(*obj, "name", "?") : "?"));
     if (ctx.button("Exit Terrain Mode", -1, true, I::ObjectMode)) { exit_terrain_mode_(); return; }
     ctx.tooltip("Exit Terrain Mode (Tab)");
@@ -371,16 +381,16 @@ void EditorApp::draw_terrain_tool_panel_(imm::Context& ctx) {
     draw_terrain_details_(ctx);
 }
 
-void EditorApp::draw_terrain_layers_(imm::Context& ctx, HeightmapTerrain& t) {
+void TerrainPanel::draw_terrain_layers_(imm::Context& ctx, HeightmapTerrain& t) {
     using I = imm::Icon;
     if (!ctx.collapsing_header("Layers", true, nullptr, I::Palette)) return;
     Node comp;
-    if (!shown_component_(terrain_object_, "HeightmapTerrain", comp)) return;
+    if (!app_.instances_panel_->shown_component_(terrain_object_, "HeightmapTerrain", comp)) return;
     const bool has_layers = comp.contains("layers") && comp.at("layers").is_sequence();
     const int count = has_layers ? static_cast<int>(comp.at("layers").as_seq().size()) : 0;
 
     std::vector<std::string> textures{""};
-    for (const auto& p : inspector_env_().list_assets("textures", ".png")) textures.push_back(p);
+    for (const auto& p : app_.inspector_env_().list_assets("textures", ".png")) textures.push_back(p);
     std::vector<std::string> shown = textures;
     shown[0] = "(none)";
 
@@ -469,7 +479,7 @@ void EditorApp::draw_terrain_layers_(imm::Context& ctx, HeightmapTerrain& t) {
     (void)t;
 }
 
-void EditorApp::draw_terrain_settings_(imm::Context& ctx, HeightmapTerrain& t) {
+void TerrainPanel::draw_terrain_settings_(imm::Context& ctx, HeightmapTerrain& t) {
     using I = imm::Icon;
     if (!ctx.collapsing_header("Size & Performance", false, nullptr, I::Scale)) return;
     const toy::world::HeightmapGeometry& g = t.data->geometry();
@@ -516,7 +526,7 @@ void EditorApp::draw_terrain_settings_(imm::Context& ctx, HeightmapTerrain& t) {
     ctx.spacing(4);
     ctx.label("Performance");
     Node comp;
-    if (!shown_component_(terrain_object_, "HeightmapTerrain", comp)) return;
+    if (!app_.instances_panel_->shown_component_(terrain_object_, "HeightmapTerrain", comp)) return;
     auto num = [&](const char* key) {
         if (!comp.contains(key)) return 0.0f;
         const Node& v = comp.at(key);
@@ -551,38 +561,38 @@ void EditorApp::draw_terrain_settings_(imm::Context& ctx, HeightmapTerrain& t) {
     }
 }
 
-void EditorApp::draw_terrain_heightmap_(imm::Context& ctx, HeightmapTerrain& t) {
+void TerrainPanel::draw_terrain_heightmap_(imm::Context& ctx, HeightmapTerrain& t) {
     using I = imm::Icon;
     if (!ctx.collapsing_header("Heightmap", false, nullptr, I::Image)) return;
     const std::shared_ptr<HeightmapData> data = t.data;
-    const std::string file = project_.relative(t.files.height);
+    const std::string file = app_.project_.relative(t.files.height);
     ctx.label_dim(file.empty() ? t.files.height : file);
     if (data->dirty_on_disk()) ctx.label_dim("Unsaved edits: written with the scene (Ctrl S).");
     if (ctx.button("Import Heightmap...", -1, true, I::Folder)) {
         const char* home = std::getenv("HOME");
-        file_dialog_.open(ui(), FileDialog::Mode::OpenFile, "Import Heightmap", home ? fs::path(home) : project_.root(), {".png"},
+        app_.file_dialog_.open(app_.ui(), FileDialog::Mode::OpenFile, "Import Heightmap", home ? fs::path(home) : app_.project_.root(), {".png"},
                           [this, data](const fs::path& p) {
-                              deferred_.push_back([this, data, p] {
+                              app_.deferred_.push_back([this, data, p] {
                                   const std::vector<float> h = data->heights();
                                   const auto s0 = data->splat(0), s1 = data->splat(1);
                                   if (!toy::world::load_heightmap_image(*data, p.string())) {
-                                      log_error("Could not read " + p.string());
+                                      app_.log_error("Could not read " + p.string());
                                       return;
                                   }
                                   terrain_push_whole_("Import Heightmap", data, h, s0, s1);
-                                  log_info("Imported " + p.filename().string() + " (resampled to the terrain's resolution)");
+                                  app_.log_info("Imported " + p.filename().string() + " (resampled to the terrain's resolution)");
                               });
                           });
     }
     ctx.tooltip("Import Heightmap\nReplace the terrain's shape with a greyscale PNG (16-bit for smooth slopes; 8-bit works). "
                 "White is the terrain's full Height. Undoable.");
     if (ctx.button("Export Heightmap...", -1, true, I::Save)) {
-        file_dialog_.open(ui(), FileDialog::Mode::SaveFile, "Export Heightmap", project_.assets(), {".png"},
+        app_.file_dialog_.open(app_.ui(), FileDialog::Mode::SaveFile, "Export Heightmap", app_.project_.assets(), {".png"},
                           [this, data](const fs::path& p) {
                               fs::path out = p;
                               if (out.extension() != ".png") out += ".png";
-                              if (toy::world::save_heightmap_image(*data, out.string())) log_info("Exported " + out.filename().string());
-                              else log_error("Could not write " + out.string());
+                              if (toy::world::save_heightmap_image(*data, out.string())) app_.log_info("Exported " + out.filename().string());
+                              else app_.log_error("Could not write " + out.string());
                           });
     }
     ctx.tooltip("Export Heightmap\nSave the current shape as a 16-bit greyscale PNG");
@@ -613,25 +623,25 @@ void EditorApp::draw_terrain_heightmap_(imm::Context& ctx, HeightmapTerrain& t) 
     ctx.tooltip("Fill to Target Height\nFlatten the whole terrain to the Brush's Target Height -- a blank start. Undoable.");
 }
 
-void EditorApp::draw_terrain_details_(imm::Context& ctx) {
+void TerrainPanel::draw_terrain_details_(imm::Context& ctx) {
     using I = imm::Icon;
     if (!ctx.collapsing_header("Details (Foliage)", false, nullptr, I::Sphere)) return;
     ctx.label_dim("Grass, trees and rocks scattered over the terrain (ParticleSystem, shape: terrain).");
-    const Node* obj = doc_.find(terrain_object_);
+    const Node* obj = app_.doc_.find(terrain_object_);
     int n = 0;
     std::vector<ObjectId> kids;
     if (obj != nullptr && obj->contains("children") && obj->at("children").is_sequence()) {
         for (const auto& k : obj->at("children").as_seq()) kids.push_back(SceneDocument::id_of(k));
     }
     for (ObjectId child : kids) {
-        const Node* c = doc_.find(child);
-        if (c == nullptr || doc_.find_component(child, "ParticleSystem") < 0) continue;
+        const Node* c = app_.doc_.find(child);
+        if (c == nullptr || app_.doc_.find_component(child, "ParticleSystem") < 0) continue;
         ++n;
         if (ctx.selectable(get_string(*c, "name", "?"), false, 0.0f, I::Object)) {
             exit_terrain_mode_();
-            doc_.clear_selection();
-            doc_.select(child, true);
-            prop_tab_ = PropTab::Components;
+            app_.doc_.clear_selection();
+            app_.doc_.select(child, true);
+            app_.prop_tab_ = PropTab::Components;
             return;
         }
         ctx.tooltip("Select it to edit its density, layer, slope limits and mesh (Components tab)");
@@ -642,10 +652,10 @@ void EditorApp::draw_terrain_details_(imm::Context& ctx) {
     if (ctx.button("Add Rocks", -1, true, I::Plus)) terrain_add_scatter_("rock");
 }
 
-void EditorApp::terrain_add_scatter_(const std::string& kind) {
+void TerrainPanel::terrain_add_scatter_(const std::string& kind) {
     const HeightmapTerrain* t = terrain_live_();
     const std::string first_layer = t && !t->layers.empty() ? t->layers.front().name : std::string();
-    Node obj = doc_.make_object(doc_.unique_name(kind == "tree" ? "trees" : kind == "rock" ? "rocks" : "grass", terrain_object_));
+    Node obj = app_.doc_.make_object(app_.doc_.unique_name(kind == "tree" ? "trees" : kind == "rock" ? "rocks" : "grass", terrain_object_));
     std::string yaml;
     if (kind == "grass") {
         yaml = "type: ParticleSystem\nmode: scatter\nshape: terrain\nterrain: { layer: " + first_layer +
@@ -664,16 +674,16 @@ void EditorApp::terrain_add_scatter_(const std::string& kind) {
                "render_mesh: nature/boulder\nmaterial: { albedo: { r: 0.48, g: 0.46, b: 0.43 }, roughness: 0.8 }\n";
     }
     obj["components"].as_seq().push_back(Node::deserialize(yaml));
-    const ObjectId id = doc_.add_object(obj, terrain_object_, -1, "Add Terrain " + kind);
-    after_structure_change_(id);
+    const ObjectId id = app_.doc_.add_object(obj, terrain_object_, -1, "Add Terrain " + kind);
+    app_.after_structure_change_(id);
     // Stay in Terrain Mode with the terrain selected.
-    doc_.clear_selection();
-    doc_.select(terrain_object_, true);
+    app_.doc_.clear_selection();
+    app_.doc_.select(terrain_object_, true);
 }
 
-void EditorApp::save_terrains_() {
+void TerrainPanel::save_terrains_() {
     const int n = toy::world::HeightmapStore::instance().save_dirty();
-    if (n > 0) log_info("Saved " + std::to_string(n) + (n == 1 ? " terrain" : " terrains"));
+    if (n > 0) app_.log_info("Saved " + std::to_string(n) + (n == 1 ? " terrain" : " terrains"));
 }
 
 } // namespace editor

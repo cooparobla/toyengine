@@ -3,7 +3,7 @@
  * @brief The editor's model of one animation clip file (coopa::anim's YAML schema), and the
  *        dope-sheet operations on it: key, delete and move keys per object and time.
  *
- * Pure (no GPU, no UI): the Timeline panel (app/ui/timeline.inl) edits a ClipModel and
+ * Pure (no GPU, no UI): the Timeline panel (app/ui/timeline.h) edits a ClipModel and
  * writes it back with to_node(); the runtime reads the same file through
  * coopa::anim::parse_clip(). Procedural tracks are carried through verbatim (the editor shows
  * them but does not key them).

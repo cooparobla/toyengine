@@ -1,9 +1,14 @@
+#include "editor/app/ui/preferences.h"
+#include "editor/app/ui/weather.h"
+#include "editor/app/ui/properties.h"
+#include "editor/app/ui/assets.h"
+
 #include "editor/app/editor_app.h"
 
 namespace toy {
 namespace editor {
 
-std::vector<EditorApp::PrefRow> EditorApp::prefs_table_() {
+std::vector<PreferencesPanel::PrefRow> PreferencesPanel::prefs_table_() {
     auto num = [](const char* key, const char* cat, const char* label, const char* tip, float* f, float def, float lo, float hi,
                   const char* fmt, bool drag = false) {
         PrefRow r{key, cat, label, tip};
@@ -24,41 +29,41 @@ std::vector<EditorApp::PrefRow> EditorApp::prefs_table_() {
         return r;
     };
     return {
-        num("ui_scale", "Interface", "Interface Scale", "Size of the whole editor UI, on top of the display's own scaling", &ui_scale_pref_,
+        num("ui_scale", "Interface", "Interface Scale", "Size of the whole editor UI, on top of the display's own scaling", &app_.ui_scale_pref_,
             1.0f, 0.75f, 2.0f, "%.2fx"),
         num("tooltip_delay", "Interface", "Tooltip Delay", "Seconds the mouse rests on something before its tooltip shows",
-            &tooltip_delay_pref_, 0.6f, 0.0f, 3.0f, "%.2f s"),
+            &app_.tooltip_delay_pref_, 0.6f, 0.0f, 3.0f, "%.2f s"),
         num("camera_fov", "Viewport", "Field of View", "The viewport camera's vertical field of view (the game's cameras have their own)",
-            &camera_.fov, 50.0f, 20.0f, 110.0f, "%.0f deg"),
-        num("gizmo_size", "Viewport", "Gizmo Size", "On-screen size of the move / rotate / scale gizmo", &gizmo_.size_px, 90.0f, 40.0f, 200.0f,
+            &app_.camera_.fov, 50.0f, 20.0f, 110.0f, "%.0f deg"),
+        num("gizmo_size", "Viewport", "Gizmo Size", "On-screen size of the move / rotate / scale gizmo", &app_.gizmo_.size_px, 90.0f, 40.0f, 200.0f,
             "%.0f px"),
         num("origin_size", "Viewport", "Origin Size", "Default size of an object's origin glyph, in metres. Any object can override "
-            "it in Properties > Object > Origin Gizmo", &origin_size_, kDefaultOriginSize, 0.01f, 0.5f, "%.3f m", true),
+            "it in Properties > Object > Origin Gizmo", &app_.origin_size_, kDefaultOriginSize, 0.01f, 0.5f, "%.3f m", true),
         choice("origin_style", "Viewport", "Origin Style",
                "Default look of an object's origin: axis lines or a small ball. Any object can override it in "
-               "Properties > Object > Origin Gizmo", &origin_style_, 0, {"Axes", "Orb"}),
-        flag("show_grid", "Viewport", "Show Grid", "The floor grid in the viewport (also in the Overlays popover)", &show_grid_, true),
-        num("orbit_speed", "Navigation", "Orbit Speed", "How far a mouse drag or swipe turns the view", &camera_.orbit_speed, 1.0f, 0.1f, 4.0f,
+               "Properties > Object > Origin Gizmo", &app_.origin_style_, 0, {"Axes", "Orb"}),
+        flag("show_grid", "Viewport", "Show Grid", "The floor grid in the viewport (also in the Overlays popover)", &app_.show_grid_, true),
+        num("orbit_speed", "Navigation", "Orbit Speed", "How far a mouse drag or swipe turns the view", &app_.camera_.orbit_speed, 1.0f, 0.1f, 4.0f,
             "%.2fx"),
-        num("zoom_speed", "Navigation", "Zoom Speed", "How far one wheel notch, pinch or Ctrl+drag zooms", &camera_.zoom_speed, 1.0f, 0.1f, 4.0f,
+        num("zoom_speed", "Navigation", "Zoom Speed", "How far one wheel notch, pinch or Ctrl+drag zooms", &app_.camera_.zoom_speed, 1.0f, 0.1f, 4.0f,
             "%.2fx"),
-        num("fly_speed", "Navigation", "Fly Speed", "Speed of fly navigation (hold the right button + W A S D Q E)", &camera_.fly_speed, 1.0f,
+        num("fly_speed", "Navigation", "Fly Speed", "Speed of fly navigation (hold the right button + W A S D Q E)", &app_.camera_.fly_speed, 1.0f,
             0.1f, 10.0f, "%.2fx"),
-        flag("invert_zoom", "Navigation", "Invert Wheel Zoom", "Scroll up zooms out instead of in", &invert_zoom_, false),
+        flag("invert_zoom", "Navigation", "Invert Wheel Zoom", "Scroll up zooms out instead of in", &app_.invert_zoom_, false),
         flag("trackpad_swipe_pans", "Navigation", "Trackpad Swipe", "What a two-finger swipe does; Shift+swipe does the other",
-             &trackpad_swipe_pans_, false, {"Orbit (Blender)", "Pan"}),
+             &app_.trackpad_swipe_pans_, false, {"Orbit (Blender)", "Pan"}),
         num("snap_move", "Snapping", "Move Increment", "Ctrl while moving snaps to this many metres (when Adaptive Grid is off)",
-            &gizmo_.translate_snap, 0.25f, 0.001f, 100.0f, "%.3f m", true),
-        num("snap_rotate", "Snapping", "Rotate Increment", "Ctrl while rotating snaps to this many degrees", &gizmo_.rotate_snap, 15.0f, 0.1f,
+            &app_.gizmo_.translate_snap, 0.25f, 0.001f, 100.0f, "%.3f m", true),
+        num("snap_rotate", "Snapping", "Rotate Increment", "Ctrl while rotating snaps to this many degrees", &app_.gizmo_.rotate_snap, 15.0f, 0.1f,
             180.0f, "%.1f deg", true),
-        num("snap_scale", "Snapping", "Scale Increment", "Ctrl while scaling snaps to this step", &gizmo_.scale_snap, 0.1f, 0.001f, 10.0f, "%.3f",
+        num("snap_scale", "Snapping", "Scale Increment", "Ctrl while scaling snaps to this step", &app_.gizmo_.scale_snap, 0.1f, 0.001f, 10.0f, "%.3f",
             true),
         flag("snap_adaptive", "Snapping", "Adaptive Grid", "Move snapping follows the grid's spacing at the current zoom (Blender) instead of "
-                                                           "Move Increment", &snap_adaptive_, true),
+                                                           "Move Increment", &app_.snap_adaptive_, true),
     };
 }
 
-void EditorApp::prefs_load_(const Node& prefs) {
+void PreferencesPanel::prefs_load_(const Node& prefs) {
     for (PrefRow& r : prefs_table_()) {
         if (!prefs.contains(r.key)) continue;
         const Node& n = prefs.at(r.key);
@@ -77,13 +82,13 @@ void EditorApp::prefs_load_(const Node& prefs) {
     prefs_apply_();
 }
 
-void EditorApp::prefs_apply_() {
-    canvas_->context().style.tooltip_delay = tooltip_delay_pref_;
-    camera_.apply();
-    sync_ui_scale_();
+void PreferencesPanel::prefs_apply_() {
+    app_.canvas_->context().style.tooltip_delay = app_.tooltip_delay_pref_;
+    app_.camera_.apply();
+    app_.sync_ui_scale_();
 }
 
-void EditorApp::prefs_save_() {
+void PreferencesPanel::prefs_save_() {
     Node prefs = Project::load_prefs();
     for (const PrefRow& r : prefs_table_()) {
         if (r.f) prefs[r.key] = make_float(*r.f);
@@ -94,12 +99,12 @@ void EditorApp::prefs_save_() {
     prefs_dirty_ = false;
 }
 
-void EditorApp::open_preferences(const std::string& category) {
+void PreferencesPanel::open_preferences(const std::string& category) {
     prefs_category_ = category;
-    pending_modal_ = "Preferences";
+    app_.pending_modal_ = "Preferences";
 }
 
-bool EditorApp::set_preference(const std::string& key, const Node& value) {
+bool PreferencesPanel::set_preference(const std::string& key, const Node& value) {
     for (PrefRow& r : prefs_table_()) {
         if (key != r.key) continue;
         if (r.f) *r.f = std::clamp(as_float(value, r.def), r.lo, r.hi);
@@ -120,7 +125,7 @@ bool EditorApp::set_preference(const std::string& key, const Node& value) {
     return false;
 }
 
-const std::vector<EditorApp::ThemeSwatch>& EditorApp::prefs_theme_swatches_() {
+const std::vector<PreferencesPanel::ThemeSwatch>& PreferencesPanel::prefs_theme_swatches_() {
     if (!prefs_themes_.empty()) return prefs_themes_;
     for (const auto& t : imm::list_themes(editor_themes_dir())) {
         try {
@@ -132,7 +137,7 @@ const std::vector<EditorApp::ThemeSwatch>& EditorApp::prefs_theme_swatches_() {
     return prefs_themes_;
 }
 
-void EditorApp::prefs_section_(imm::Context& ctx, const std::string& title, const std::string& what) {
+void PreferencesPanel::prefs_section_(imm::Context& ctx, const std::string& title, const std::string& what) {
     ctx.spacing(6);
     ctx.heading(title);
     if (!what.empty()) ctx.label_dim(what);
@@ -141,7 +146,7 @@ void EditorApp::prefs_section_(imm::Context& ctx, const std::string& title, cons
     ctx.spacing(4);
 }
 
-bool EditorApp::prefs_slider_(imm::Context& ctx, const imm::Box& b, float* v, float lo, float hi, const char* fmt) {
+bool PreferencesPanel::prefs_slider_(imm::Context& ctx, const imm::Box& b, float* v, float lo, float hi, const char* fmt) {
     bool hov = false, held = false;
     ctx.invisible_button("slider", b, &hov, &held);
     bool changed = false;
@@ -159,7 +164,7 @@ bool EditorApp::prefs_slider_(imm::Context& ctx, const imm::Box& b, float* v, fl
     return changed;
 }
 
-void EditorApp::prefs_rows_(imm::Context& ctx, const std::string& category) {
+void PreferencesPanel::prefs_rows_(imm::Context& ctx, const std::string& category) {
     for (PrefRow& r : prefs_table_()) {
         if (category != r.category) continue;
         ctx.push_id(r.key);
@@ -184,7 +189,7 @@ void EditorApp::prefs_rows_(imm::Context& ctx, const std::string& category) {
             if (*r.b) ctx.icon(imm::Icon::Check, cb.shrink(1), ctx.style.check_mark);
         }
         if (ctx.is_hovered(row)) ctx.tooltip(std::string(r.label) + "\n" + r.tip);
-        test_rects_[std::string("pref:") + r.key] = wb;
+        app_.test_rects_[std::string("pref:") + r.key] = wb;
         const bool is_default = r.f ? std::abs(*r.f - r.def) < 1e-4f
                              : r.i ? *r.i == static_cast<int>(r.def)
                                    : *r.b == (r.def != 0.0f);
@@ -201,7 +206,7 @@ void EditorApp::prefs_rows_(imm::Context& ctx, const std::string& category) {
     }
 }
 
-void EditorApp::draw_preferences_modal_(imm::Context& ctx) {
+void PreferencesPanel::draw_preferences_modal_(imm::Context& ctx) {
     using I = imm::Icon;
     const glm::vec2 canvas = ctx.canvas_size();
     const glm::vec2 size{std::min(860.0f, canvas.x - 40.0f), std::min(620.0f, canvas.y - 40.0f)};
@@ -223,7 +228,7 @@ void EditorApp::draw_preferences_modal_(imm::Context& ctx) {
     ctx.spacing(4);
     for (const auto& [icon, c] : cats) {
         if (ctx.selectable(c, c == prefs_category_, 0.0f, icon)) prefs_category_ = c;
-        test_rects_["prefs:" + c] = ctx.last_rect();
+        app_.test_rects_["prefs:" + c] = ctx.last_rect();
     }
     ctx.end_region();
 
@@ -243,9 +248,9 @@ void EditorApp::draw_preferences_modal_(imm::Context& ctx) {
                 const imm::Box tile{row.x + k * (tw + gap), row.y, tw, tile_h};
                 bool hov = false;
                 ctx.push_id(t.id);
-                if (ctx.invisible_button("theme_tile", {tile.x, tile.y, tile.w, row.h}, &hov)) set_theme(t.id);
+                if (ctx.invisible_button("theme_tile", {tile.x, tile.y, tile.w, row.h}, &hov)) app_.set_theme(t.id);
                 ctx.pop_id();
-                test_rects_["pref_theme:" + t.id] = tile;
+                app_.test_rects_["pref_theme:" + t.id] = tile;
                 // A tiny editor: top bar, a side panel, rows of text, an accent button.
                 ctx.fill_rounded(tile, t.bg, 5);
                 ctx.fill_rounded({tile.x + 4, tile.y + 4, tile.w - 8, 12}, t.header, 3);
@@ -257,7 +262,7 @@ void EditorApp::draw_preferences_modal_(imm::Context& ctx) {
                 }
                 ctx.fill_rounded({tile.x + tile.w * 0.38f + 14, tile.y + 27, tile.w * 0.3f, 10}, t.button, 3);
                 ctx.fill_rounded({tile.x + tile.w * 0.38f + 14, tile.y + 42, tile.w * 0.45f, 10}, t.accent, 3);
-                const bool on = t.id == theme_id_;
+                const bool on = t.id == app_.theme_id_;
                 if (on) ctx.outline_rounded(tile.shrink(-2), ctx.style.accent, 6, 2.0f);
                 else if (hov) ctx.outline_rounded(tile.shrink(-1), ctx.style.text_dim, 6, 1.0f);
                 ctx.text_in({tile.x, tile.bottom() + 1, tile.w, ctx.style.row_height}, t.name + (on ? "  (active)" : ""),
@@ -265,40 +270,41 @@ void EditorApp::draw_preferences_modal_(imm::Context& ctx) {
             }
         }
         ctx.spacing(4);
-        if (ctx.button("Reload Theme", 130, true, I::Restart)) load_theme_(theme_id_);
+        if (ctx.button("Reload Theme", 130, true, I::Restart)) app_.load_theme_(app_.theme_id_);
         ctx.tooltip("Reload Theme\nRe-read the active theme's file");
         prefs_section_(ctx, "Display", "");
         prefs_rows_(ctx, cat);
     } else if (cat == "Viewport") {
         prefs_section_(ctx, "Viewport", "How the 3D view looks while editing. The game's own cameras are set per scene.");
         prefs_rows_(ctx, cat);
-        bool ao = viewport_ao_;
-        if (ctx.property_bool("Ambient Occlusion", &ao)) set_viewport_ao(ao);
+        bool ao = app_.viewport_ao_;
+        if (ctx.property_bool("Ambient Occlusion", &ao)) app_.set_viewport_ao(ao);
         ctx.tooltip("Ambient Occlusion\nContact shadows in the Solid and Material Preview shading (also in the Shading popover)");
-        bool iso = isolate_in_edit_;
-        if (ctx.property_bool("Isolate in Edit Mode", &iso)) set_isolate_in_edit(iso);
+        bool iso = app_.isolate_in_edit_;
+        if (ctx.property_bool("Isolate in Edit Mode", &iso)) app_.set_isolate_in_edit(iso);
         ctx.tooltip("Isolate in Edit Mode\nHide everything else while editing a mesh (also in the viewport header)");
     } else if (cat == "Navigation") {
         prefs_section_(ctx, "Mouse & Trackpad", "How the view moves. Middle-drag (or Alt+left-drag) orbits, Shift pans, Ctrl zooms.");
         prefs_rows_(ctx, cat);
         ctx.spacing(6);
-        ctx.label_dim(trackpad_swipe_pans_ ? "Trackpad: swipe pans, Shift+swipe orbits, pinch or Ctrl+swipe zooms."
+        ctx.label_dim(app_.trackpad_swipe_pans_ ? "Trackpad: swipe pans, Shift+swipe orbits, pinch or Ctrl+swipe zooms."
                                            : "Trackpad: swipe orbits, Shift+swipe pans, pinch or Ctrl+swipe zooms.");
     } else if (cat == "Snapping") {
         prefs_section_(ctx, "Snapping", "Hold Ctrl while moving, rotating or scaling to snap (or turn the magnet on in the header).");
         prefs_rows_(ctx, cat);
     } else if (cat == "Assets") {
         prefs_section_(ctx, "Asset Panel", "What the Asset panel and asset pickers list, and in what order.");
-        bool eng = show_engine_assets_;
-        if (ctx.property_bool("Show Engine Assets", &eng)) set_show_engine_assets(eng);
+        bool eng = app_.show_engine_assets_;
+        if (ctx.property_bool("Show Engine Assets", &eng)) app_.assets_panel_->set_show_engine_assets(eng);
         ctx.tooltip("Show Engine Assets\nList toyengine's built-in (read-only) assets next to the project's");
         static const std::vector<std::string> sorts = {"Name", "Last Modified", "Tags", "Size"};
-        static const AssetSort sort_of[] = {AssetSort::Name, AssetSort::Modified, AssetSort::Tags, AssetSort::Size};
+        static const AssetSort sort_of[] = {AssetSort::Name, AssetSort::Modified,
+                                                      AssetSort::Tags, AssetSort::Size};
         int si = 0;
-        for (int i = 0; i < 4; ++i) if (sort_of[i] == asset_sort_) si = i;
-        if (ctx.combo("Sort By", &si, sorts) && si >= 0 && si < 4) set_asset_sort_(sort_of[si], asset_sort_reverse_);
-        bool rev = asset_sort_reverse_;
-        if (ctx.property_bool("Reverse Order", &rev)) set_asset_sort_(asset_sort_, rev);
+        for (int i = 0; i < 4; ++i) if (sort_of[i] == app_.asset_sort_) si = i;
+        if (ctx.combo("Sort By", &si, sorts) && si >= 0 && si < 4) app_.assets_panel_->set_asset_sort_(sort_of[si], app_.asset_sort_reverse_);
+        bool rev = app_.asset_sort_reverse_;
+        if (ctx.property_bool("Reverse Order", &rev)) app_.assets_panel_->set_asset_sort_(app_.asset_sort_, rev);
     } else if (cat == "Keymap") {
         prefs_section_(ctx, "Keymap", "Every shortcut. On macOS, Cmd works wherever Ctrl is listed.");
         draw_keymap_table_(ctx, prefs_keymap_filter_);
@@ -315,7 +321,7 @@ void EditorApp::draw_preferences_modal_(imm::Context& ctx) {
             else if (r.i) *r.i = static_cast<int>(r.def);
             else *r.b = r.def != 0.0f;
         }
-        if (cat == "Viewport") { set_viewport_ao(true); set_isolate_in_edit(false); }
+        if (cat == "Viewport") { app_.set_viewport_ao(true); app_.set_isolate_in_edit(false); }
         prefs_apply_();
         prefs_dirty_ = true;
     }
@@ -333,7 +339,7 @@ void EditorApp::draw_preferences_modal_(imm::Context& ctx) {
     ctx.end_modal();
 }
 
-const std::vector<EditorApp::KeyGroup>& EditorApp::keymap_() {
+const std::vector<PreferencesPanel::KeyGroup>& PreferencesPanel::keymap_() {
     static const std::vector<KeyGroup> k = {
         {"View Navigation", {
             {"Orbit", "MMB drag | Alt+LMB drag"}, {"Pan", "Shift+MMB drag | Shift+Alt+LMB drag"},
@@ -377,8 +383,8 @@ const std::vector<EditorApp::KeyGroup>& EditorApp::keymap_() {
     return k;
 }
 
-void EditorApp::draw_keymap_table_(imm::Context& ctx, std::string& filter) {
-    const std::string needle = settings_search_box_(ctx, "keymap_filter", filter);
+void PreferencesPanel::draw_keymap_table_(imm::Context& ctx, std::string& filter) {
+    const std::string needle = app_.properties_panel_->settings_search_box_(ctx, "keymap_filter", filter);
     ctx.spacing(4);
     auto lower = [](std::string s) { std::transform(s.begin(), s.end(), s.begin(), ::tolower); return s; };
     bool any = false;
@@ -390,7 +396,7 @@ void EditorApp::draw_keymap_table_(imm::Context& ctx, std::string& filter) {
         }
         if (rows.empty()) continue;
         any = true;
-        weather_subhead_(ctx, g.title);
+        app_.weather_panel_->weather_subhead_(ctx, g.title);
         for (const KeyBinding* kb : rows) {
             const imm::Box row = ctx.next_box(ctx.style.row_height + 2);
             const float split = std::floor(row.w * 0.45f);

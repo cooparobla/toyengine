@@ -33,11 +33,12 @@ A missing tool is reported with that line by `./setup.sh` and `./build.sh`.
 
 | Path | What |
 |---|---|
-| `@TARGET@.toy` | Project file: build target and the engine pin (`engine.source` + `engine.ref`, or `engine.link` to build against a local toyengine checkout). |
+| `@TARGET@.toy` | Project file: build target and the engine pin -- `engine.source` + `engine.ref` for a pinned clone, or `engine.link` for a checkout to build instead (an absolute path for a shared one, a project-relative path for a vendored submodule). |
 | `assets/` | Scenes, meshes, materials, textures, UI, `config.yaml`. Shadows the engine's own `assets/`, which stays the fallback (shaders, fonts, shared meshes/materials). `assets/shaders/*.vert/.frag` compile with the engine's and gfxcoopa's shader headers on the include path. |
 | `src/` | C++ compiled into the game and the editor. Register components with `TOY_MODULE` (see `src/game_module.cpp`). `src/main.cpp` replaces the engine's game `main`. To change engine code, edit (or fork) `.libs/toyengine`. |
 | `build/` | Release tree (`build-debug/` for `./build.sh debug`, which turns Vulkan validation on). |
-| `.libs/toyengine` | The engine + its libraries (git-ignored; `./setup.sh` recreates it). |
+| `.libs/toyengine` | Where the build finds the engine: a clone, or a symlink to `engine.link` (git-ignored; `./setup.sh` recreates it, `./clean.sh --all` deletes it). |
+| `engine/` | Only when the engine is **vendored**: this project's own toyengine as a git submodule, committed here and symlinked from `.libs/toyengine`. `./setup.sh` initialises it on a fresh clone. |
 
 ## Environment variables
 
@@ -54,5 +55,19 @@ Read by the game and the editor, on both platforms:
 | `BUILD_DIR=<dir>` | Which build tree `run.sh` / `editor.sh` / `package.sh` use. |
 | `NO_BUILD=1` | Never auto-build: a missing binary is an error instead. |
 
-Change the engine pin with `toyhub upgrade . [--ref <ref>]`, or switch to a local checkout with
-`toyhub link . <engine dir>` (and back with `toyhub unlink .`).
+## The engine
+
+Three modes, all of them the `.toy` file's `engine:` block:
+
+- **linked** (`engine.link` absolute) -- build a shared toyengine checkout directly,
+  uncommitted edits included. Engine changes are shared with every other linked project on the
+  machine. `toyhub link . <engine dir>`.
+- **pinned** (`engine.ref`) -- `./setup.sh` clones the engine at a pushed commit, so the project
+  builds the same on any machine. `toyhub unlink .`; re-pin with `toyhub upgrade . [--ref R]`.
+- **vendored** (`engine.link` project-relative) -- the project carries its own toyengine as a
+  git submodule in `engine/`, committed and pinned in its own history, affecting no other
+  project. `toyhub vendor . [--ref R]`.
+
+Each of those wipes `build/` first: the CMake cache remembers the old engine path. After cloning
+a vendored project, `./setup.sh` (or just `./build.sh`) initialises the submodule for you;
+`git clone --recurse-submodules` does it up front.

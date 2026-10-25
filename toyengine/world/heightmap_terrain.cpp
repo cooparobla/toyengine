@@ -1,4 +1,5 @@
 #include <toyengine/world/heightmap_terrain.h>
+#include <toyengine/core/yaml_read.h>
 
 #include <filesystem>
 #include <iostream>
@@ -25,11 +26,13 @@ glm::vec3 HeightmapTerrain::origin() const {
 
 namespace {
 
+// Value-returning reads (fallback when the key is absent) -- the counterpart to
+// yaml_read.h's present-if-set read(), built on its int-tolerant num() so `x: 0` parses.
 float get_f(const fkyaml::node& n, const char* key, float fallback) {
-    return n.contains(key) ? n.at(key).get_value<float>() : fallback;
+    return n.contains(key) ? core::yaml::num(n.at(key), fallback) : fallback;
 }
 int get_i(const fkyaml::node& n, const char* key, int fallback) {
-    return n.contains(key) ? n.at(key).get_value<int>() : fallback;
+    int v = fallback; core::yaml::read(n, key, v); return v;
 }
 bool get_b(const fkyaml::node& n, const char* key, bool fallback) {
     return n.contains(key) ? n.at(key).get_value<bool>() : fallback;

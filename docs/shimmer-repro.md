@@ -136,14 +136,16 @@ motion. The fix is texel-AA ("anti-aliased point sampling"): material textures
 bind with `SamplerDesc::pixel_art_smooth()` (LINEAR) and `gbuffer.frag` routes
 every material fetch through `gfx_texel_aa_uv()` (`gfx/texel_aa.glsl`), which
 confines the bilinear blend to a one-screen-pixel band at each texel boundary.
-Texel interiors stay flat and hard (the pixel-art look is preserved at rest);
+Texel interiors stay flat and hard (crisp at rest);
 boundaries glide sub-pixel in motion instead of snapping. Toggle:
 `texel_aa: true|false` in config.yaml (startup-fixed; false = raw NEAREST for
 A/B). Evidence, on THIS document's reproduction (the former `texel_aa_ring_repro` probe
 scripted the reference gesture: same framing -- close blocks, camera pitched
 steeply down -- five quick-flick-then-hold cycles over five seconds, 300 frames,
 ending at rest; it was a temporary diagnostic and was removed in the 2026-10 test
-restructure -- recover it from git history (test.cpp, before that change) to regenerate):
+restructure. It lived in the retired root-level `test.cpp`, itself deleted in the 2026-10-24
+cleanup, so recovering it means going back through git history to before that restructure.
+The live temporal suites are `tests/engine/extended/`):
 - `output/ring_repro_texelaa_off_lossless.mp4` -- the fix off (the reference look)
 - `output/ring_repro_texelaa_on_lossless.mp4`  -- the fix on
 - `output/ring_repro_texelaa_sbs_lossless.mp4` -- centre crops side by side (left off,

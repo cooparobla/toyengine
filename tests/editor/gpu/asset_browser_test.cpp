@@ -106,11 +106,11 @@ COOPA_TEST(tag_filter_unique_names_and_set_tags) {
         for (const auto& c : o.at("components").as_seq()) short_kept |= get_string(c, "material") == "materials/default";
     }
     expect(short_kept, "the starter scene's materials/default still names it (found by name)");
-    app.set_asset_sort(EditorApp::AssetSort::Tags);
+    app.set_asset_sort(AssetSort::Tags);
     const auto by_tags = app.assets_listed();
     expect(!by_tags.empty() && by_tags.front().rfind("materials/material", 0) == 0 && by_tags.back() == "materials/metal/material.yaml",
            "sort by tags: untagged first, then by tag");
-    app.set_asset_sort(EditorApp::AssetSort::Name);
+    app.set_asset_sort(AssetSort::Name);
 }
 
 /**

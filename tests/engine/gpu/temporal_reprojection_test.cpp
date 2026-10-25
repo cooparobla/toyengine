@@ -16,6 +16,7 @@
 
 #include <glm/glm.hpp>
 #include <toyengine/core/engine.h>
+#include <gfxcoopa/engine/components/camera_component.h>
 #include <toyengine/scene/camera_controller.h>
 
 #include "engine/support/checks.h"

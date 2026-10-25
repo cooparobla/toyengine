@@ -1,4 +1,55 @@
+/**
+ * @file engine.cpp
+ * @brief Engine's construction, the frame loop (tick/run) and scene management.
+ *
+ * Split across sibling translation units, all against toyengine/core/engine.h:
+ *
+ * | File | Holds |
+ * |---|---|
+ * | engine.cpp             | construction, run()/tick(), scenes, input, capture, config rebuilds |
+ * | engine_render_sync.cpp | the sync_*_render_state_ family: scene state -> render config |
+ * | engine_scene_load.cpp  | the async scene-load state machine and its transition layer |
+ * | engine_services.cpp    | audio, saves and the debug overlay |
+ *
+ * Member declaration order in the header's private data block is destruction-order-critical
+ * and is deliberately untouched by the split.
+ */
+
 #include <toyengine/core/engine.h>
+
+// Includes engine.h no longer carries: these are implementation needs of this file
+// (and of the other engine TUs that previously got them transitively).
+#include <gfxcoopa/engine/loaders/mesh_loader.h>
+#include <gfxcoopa/engine/loaders/skinned_mesh_source_loader.h>
+#include <gfxcoopa/engine/loaders/texture_loader.h>
+#include <gfxcoopa/engine/components/register.h>
+#include <gfxcoopa/engine/components/camera_component.h>
+#include <coopa/animation/animation_system.h>
+#include <coopa/animation/animation_yaml.h>
+#include <coopa/animation/ik_system.h>
+#include <coopa/scene/systems/transform_system.h>
+#include <physxcoopa/physx_yaml.h>
+#include <physxcoopa/debug/debug_draw.h>
+#include <toyengine/core/branding.h>
+#include <toyengine/core/user_settings.h>
+#include <toyengine/audio/audio_components.h>
+#include <sfxcoopa/sfx_yaml.h>
+#include <uicoopa/audio/audio_yaml.h>
+#include <uicoopa/audio/sound_library.h>
+#include <uicoopa/ui_yaml.h>
+#include <toyengine/scene/camera_controller.h>
+#include <toyengine/scene/free_mover.h>
+#include <toyengine/scene/kinematic_control_system.h>
+#include <toyengine/scene/register.h>
+#include <toyengine/scene/scene_link.h>
+#include <toyengine/world/snow_system.h>
+#include <toyengine/world/terrain_system.h>
+#include <toyengine/water/water_system.h>
+#include <toyengine/particles/particle_system_runner.h>
+#include <toyengine/particles/particle_yaml.h>
+#include <toyengine/weather/weather_reactor.h>
+#include <toyengine/render/visibility.h>
+#include <toyengine/save/register.h>
 #include <toyengine/world/terrain_component.h>
 
 #include <toyengine/core/boot_splash.h>
@@ -85,7 +136,7 @@ Engine::Engine(AppConfig config, EngineOptions options)
     // instead of uploading bone matrices to a shader.
     assets_.register_loader<coopa::gfx::engine::data::SkinnedMeshSource>(
         std::make_unique<coopa::gfx::engine::loaders::SkinnedMeshSourceLoader>());
-    // Pixel-art texture sampling. texel_aa (the default): LINEAR + clamp-to-edge
+    // Hard-edged texture sampling. texel_aa (the default): LINEAR + clamp-to-edge
     // (SamplerDesc::pixel_art_smooth()), paired with gfx_texel_aa_uv() in gbuffer.frag --
     // texel interiors render flat and hard-edged exactly like point sampling, but texel
     // boundaries blend over one screen pixel, so a moving camera glides them sub-pixel
@@ -157,61 +208,6 @@ coopa::scene::Scene& Engine::load_scene(const std::string& path) {
     scene_paths_[&scene_mgr_.get_active_scene()] = resolved;
     prepare_scene_(scene_mgr_.get_active_scene());
     return scene_mgr_.get_active_scene();
-}
-
-SceneLoadHandle Engine::begin_scene_warmup(SceneLoadOptions options) {
-    if (!scene_mgr_.has_scene()) return SceneLoadHandle();
-    if (!options.warm_up || options.transition.kind == SceneTransition::Kind::None) {
-        return SceneLoadHandle();
-    }
-    if (scene_load_ && !scene_load_->finished()) return SceneLoadHandle(scene_load_);
-    // A load that already happened: the document, the build and the assets are in (a startup
-    // scene loads synchronously behind the boot splash, and that half was never the problem).
-    // What is left is the world the scene's systems stream once it starts simulating, so the
-    // state is dropped straight into Warming with the cover already full.
-    coopa::scene::Scene& active = scene_mgr_.get_active_scene();
-    auto st = std::make_shared<detail::SceneLoadState>();
-    auto path = scene_paths_.find(&active);
-    st->path = path != scene_paths_.end() ? path->second : std::string();
-    st->options = std::move(options);
-    st->stage = SceneLoadStage::Warming;
-    st->progress = 1.0f;
-    st->warm_only = true;
-    st->alpha = 1.0f;
-    st->scene = &active;
-    scene_load_ = st;
-    transition_.set_fade(st->options.transition.color, 1.0f);
-    add_overlay_layer(&transition_.scene(), 50, /*in_display_rect=*/true);
-    if (st->options.transition.kind == SceneTransition::Kind::LoadingScreen &&
-        !st->options.transition.loading_screen.empty()) {
-        st->loading_screen_shown = true;
-        if (!transition_.show_loading_screen(st->options.transition.loading_screen)) {
-            std::cerr << "[toyengine] Loading screen '" << st->options.transition.loading_screen
-                      << "' could not be shown\n";
-        }
-    }
-    return SceneLoadHandle(st);
-}
-
-SceneLoadHandle Engine::load_scene_async(const std::string& path, SceneLoadOptions options) {
-    if (scene_load_ && scene_load_->pending()) {
-        std::cerr << "[toyengine] load_scene_async('" << path << "'): '" << scene_load_->path
-                  << "' is still loading; ignoring the new request\n";
-        return SceneLoadHandle(scene_load_);
-    }
-    if (scene_load_ && !scene_load_->finished()) finish_transition_();   // a previous fade-in still running
-    auto st = std::make_shared<detail::SceneLoadState>();
-    st->path = resolve_scene_path_(path);
-    st->options = std::move(options);
-    st->peak_pending = assets_.pending_load_count();
-    st->read = coopa::scene::SceneLoader::read_document_async(st->path, &jobs_);
-    scene_load_ = st;
-    if (st->options.transition.kind != SceneTransition::Kind::None) {
-        transition_.set_fade(st->options.transition.color, 0.0f);
-        // Over the game and the host's UI inside the display rect; under the stats HUD (100).
-        add_overlay_layer(&transition_.scene(), 50, /*in_display_rect=*/true);
-    }
-    return SceneLoadHandle(st);
 }
 
 coopa::scene::Scene& Engine::set_scene(coopa::scene::Scene&& scene, const fkyaml::node& settings) {
@@ -422,112 +418,6 @@ void Engine::init_user_settings_() {
     // Everything else this file layers over config.yaml defaults -- bus volumes, and whatever a
     // game's own settings screen stores -- reads the same document; this only has to run first.
     set_ui_scale(us.get_float(k_ui_scale_setting, 1.0f));
-}
-
-void Engine::init_audio_() {
-    audio::AudioSystemOptions ao;
-    ao.sample_rate = config_.audio.sample_rate;
-    ao.open_device = config_.audio.enabled;
-    // A run with no visible window (tests, headless captures, the editor's offscreen
-    // engines) never takes over the sound card.
-    ao.null_backend = config_.audio.device == "null" || !config_.window.visible;
-    audio_ = std::make_unique<audio::AudioSystem>(ao);
-    audio::AudioSystem::set_active(audio_.get());
-
-    auto& sfx = coopa::sfx::SfxResources::instance();
-    sfx.set_engine(&audio_->engine());
-    sfx.set_search_roots(asset_roots());
-    coopa::sfx::register_sfx_components();
-    audio::register_audio_components();
-#ifdef UICOOPA_HAS_AUDIO
-    coopa::ui::UiAudio::set_active(audio_->ui());
-    coopa::ui::register_ui_audio_components();
-    // UI sounds: the first asset root with a sounds/ manifest (a packaged build carries
-    // uicoopa's defaults there), else uicoopa's own from source.
-    std::string sounds_dir;
-    std::error_code ec;
-    for (const std::string& r : asset_roots()) {
-        if (coopa::yaml::document_exists(std::filesystem::path(r) / "sounds" / "sounds.yaml")) { sounds_dir = r + "/sounds"; break; }
-    }
-    if (sounds_dir.empty() && !RuntimeLayout::current().packaged()) sounds_dir = std::string(PROJ_DIR) + "/uicoopa/assets/sounds";
-    if (!sounds_dir.empty() && coopa::yaml::document_exists(std::filesystem::path(sounds_dir) / "sounds.yaml")) {
-        coopa::ui::SoundLibrary::instance().set_search_dir(sounds_dir);
-        coopa::ui::SoundLibrary::instance().load_manifest("sounds.yaml");
-    }
-#endif
-    // Bus volumes: config.yaml's defaults, then whatever this player chose last time
-    // (init_user_settings_() has already loaded the file).
-    UserSettings& us = UserSettings::instance();
-    const std::pair<const char*, float> buses[] = {
-        {audio::k_bus_master, config_.audio.master}, {audio::k_bus_music, config_.audio.music},
-        {audio::k_bus_sfx, config_.audio.sfx}, {audio::k_bus_ui, config_.audio.ui}};
-    for (const auto& [bus, def] : buses) audio_->set_bus_volume(bus, us.get_float(audio::volume_setting_key(bus), def));
-}
-
-void Engine::init_saves_() {
-    if (const auto enc = save::parse_save_encoding(config_.save.encode)) {
-        saves_.set_encoding(*enc);
-    } else {
-        std::cerr << "[toyengine] Unknown save.encode '" << config_.save.encode << "' (expected auto, yaml or caml)\n";
-    }
-    save::SaveSystem::Host host;
-    host.scene = [this]() -> coopa::scene::Scene* { return scene_mgr_.has_scene() ? &scene_mgr_.get_active_scene() : nullptr; };
-    host.scene_path = [this]() { return scene_mgr_.has_scene() ? save_scene_ref_(scene_path(scene_mgr_.get_active_scene())) : std::string(); };
-    host.load_scene = [this](const std::string& scene, std::function<void(coopa::scene::Scene&)> ready,
-                             std::function<void(const std::string&)> failed) {
-        if (options_.edit_mode || scene_loading()) return false;
-        SceneLoadHandle h = load_scene_async(scene);
-        h.on_complete(std::move(ready));
-        h.on_failed(std::move(failed));
-        return true;
-    };
-    saves_.set_host(std::move(host));
-    save::SaveSystem::set_active(&saves_);
-}
-
-std::string Engine::save_scene_ref_(const std::string& path) const {
-    if (path.empty()) return path;
-    std::error_code ec;
-    const std::filesystem::path rel = std::filesystem::relative(path, options_.project_root, ec);
-    if (ec || rel.empty() || *rel.begin() == "..") return path;
-    return rel.generic_string();
-}
-
-void Engine::update_saves_(float dt) {
-    if (edit_mode_ || !scene_mgr_.has_scene()) return;
-    saves_.tick(dt);
-    const std::string& slot = config_.save.quick_slot;
-    if (slot.empty() || options_.edit_mode || input_blocked_() || scene_loading()) return;
-    if (input_.is_pressed("quick_save", ctx_.input())) {
-        if (saves_.save(slot)) std::cout << "[toyengine] Saved '" << slot << "' (" << saves_.slot_path(slot).string() << ")\n";
-    } else if (input_.is_pressed("quick_load", ctx_.input()) && saves_.has_slot(slot)) {
-        if (saves_.load(slot)) std::cout << "[toyengine] Loading '" << slot << "'\n";
-    }
-}
-
-void Engine::shutdown_audio_() {
-    if (!audio_) return;
-    UserSettings::instance().flush();
-    audio_->stop_all();
-    if (audio::AudioSystem::active() == audio_.get()) audio::AudioSystem::set_active(nullptr);
-    auto& sfx = coopa::sfx::SfxResources::instance();
-    if (sfx.engine() == &audio_->engine()) sfx.set_engine(nullptr);
-#ifdef UICOOPA_HAS_AUDIO
-    if (coopa::ui::UiAudio::active() == audio_->ui()) coopa::ui::UiAudio::set_active(nullptr);
-#endif
-}
-
-void Engine::update_audio_(float dt) {
-    if (!audio_) return;
-    glm::mat4 cam_world;
-    const glm::mat4* cam_ptr = nullptr;
-    if (auto* cam = coopa::gfx::engine::components::CameraComponent::main()) {
-        cam_world = glm::inverse(cam->get_view_matrix());
-        cam_ptr = &cam_world;
-    }
-    audio_->update(dt, cam_ptr);
-    // Persist a changed volume promptly (a player who quits by killing the app keeps it).
-    if (UserSettings::instance().dirty() && (++settings_flush_frames_ % 120) == 0) UserSettings::instance().flush();
 }
 
 void Engine::clear_scenes_() {
@@ -786,16 +676,6 @@ coopa::gfx::util::ImageData Engine::capture_image(bool low_res) {
     return coopa::gfx::util::read_image(ctx_.device(), ctx_.allocator(), ctx_.command_pool(), src);
 }
 
-void Engine::save_screenshot(const std::string& path, bool low_res) {
-    coopa::gfx::util::save_image_png(capture_image(low_res), path);
-    if (low_res) {
-        std::cout << "[toyengine] Saved " << path << " (" << pipeline_->render_width()
-                  << "x" << pipeline_->render_height() << ")\n";
-    } else {
-        std::cout << "[toyengine] Saved " << path << " (display resolution)\n";
-    }
-}
-
 void Engine::capture_sequence_frame_(uint32_t index) {
     ctx_.wait_idle();
     // Relative, like config_.output.filepath -- resolves against the process CWD, not
@@ -965,814 +845,12 @@ bool Engine::tick() {
     return !ctx_.should_close();
 }
 
-void Engine::apply_warmup_budgets_(detail::SceneLoadState& st, bool warming) {
-    if (st.scene == nullptr || warming == warm_budgets_applied_) return;
-    // Nothing is on screen yet, so the per-frame slices that pace streaming during gameplay are
-    // far too small here -- at the authored 1.5 ms a frame, a continent's view radius takes
-    // hundreds of frames to come up. Raised on entering the warm-up and put back at the reveal,
-    // so the scene file keeps holding the steady-state values and gameplay streaming is
-    // untouched. Bounded, not lifted: the loading screen is drawn out of these same frames and
-    // stops animating if one runs long.
-    if (warming) {
-        const float budget = std::max(0.1f, st.options.warm_up_budget_ms);
-        warm_saved_upload_ms_.clear();
-        for (toy::world::TerrainComponent* terrain :
-             st.scene->get_components<toy::world::TerrainComponent>()) {
-            warm_saved_upload_ms_.emplace_back(terrain, terrain->upload_budget_ms);
-            terrain->upload_budget_ms = budget;
-        }
-        if (auto* water = dynamic_cast<water::WaterSystem*>(st.scene->find_system("Water"))) {
-            warm_saved_water_ = water->settings();
-            water::WaterSettings ws = warm_saved_water_;
-            ws.bake_budget_ms = budget;
-            ws.new_bakes_per_frame = std::max(ws.new_bakes_per_frame, 16);
-            ws.bakes_per_frame = std::max(ws.bakes_per_frame, 8);
-            water->set_settings(ws);
-        }
-        // The navmesh is paced by wall clock, not by a budget: a dirty tile waits
-        // `rebuild_delay` before it is rebuilt. That spreads the work over gameplay frames,
-        // which behind a loading screen only makes the screen last longer -- a 2 km island's
-        // tiles are dirtied in waves as its chunk colliders land, and each wave would wait out
-        // another quarter second. Rebuilt as they arrive instead.
-        //
-        // `source_scan_interval` is deliberately left alone: scanning every frame walks every
-        // physics shape in the scene and keeps finding the colliders still streaming in, so
-        // zeroing it makes the dirty set churn faster than it drains and the warm-up never ends.
-        if (auto* nav = dynamic_cast<coopa::physx::system::NavSystem*>(
-                st.scene->find_system("Navigation"))) {
-            warm_saved_nav_delay_ = nav->settings().build.rebuild_delay;
-            nav->set_rebuild_pacing(0.0f, 0);
-            warm_saved_nav_ = true;
-        }
-        warm_budgets_applied_ = true;
-        return;
-    }
-    // Restored by the pointer each value was taken from: a chunk's budget is a component field,
-    // and a terrain destroyed mid-warm-up must not be written through.
-    const auto live = st.scene->get_components<toy::world::TerrainComponent>();
-    for (const auto& [terrain, saved] : warm_saved_upload_ms_) {
-        if (std::find(live.begin(), live.end(), terrain) != live.end()) {
-            terrain->upload_budget_ms = saved;
-        }
-    }
-    warm_saved_upload_ms_.clear();
-    if (auto* water = dynamic_cast<water::WaterSystem*>(st.scene->find_system("Water"))) {
-        water->set_settings(warm_saved_water_);
-    }
-    if (warm_saved_nav_) {
-        if (auto* nav = dynamic_cast<coopa::physx::system::NavSystem*>(
-                st.scene->find_system("Navigation"))) {
-            nav->set_rebuild_pacing(warm_saved_nav_delay_, 0);
-        }
-        warm_saved_nav_ = false;
-    }
-    warm_budgets_applied_ = false;
-}
-
-bool Engine::poll_scene_warmup_(detail::SceneLoadState& st) {
-    if (st.scene == nullptr) return true;
-    return fold_warmup_states(st, st.scene->warm_up_states());
-}
-
-void Engine::update_scene_load_(float dt) {
-    detail::SceneLoadState& st = *scene_load_;
-    ++st.frames;
-    st.elapsed += dt;
-    const SceneTransition& tr = st.options.transition;
-    const bool covered_kind = tr.kind != SceneTransition::Kind::None;
-    st.peak_pending = std::max(st.peak_pending, assets_.pending_load_count());
-
-    try {
-        if (st.stage == SceneLoadStage::ReadingDocument && st.read && st.read->ready()) {
-            if (st.read->failed()) throw std::runtime_error(st.read->error());
-            const fkyaml::node& doc = st.read->document();
-            if (doc.contains("scene") && doc.at("scene").contains("settings")) st.settings = doc.at("scene").at("settings");
-            st.builder = std::make_unique<coopa::scene::SceneLoader::Builder>(doc, st.path, coopa::scene::SceneLoader::LoadOptions{.start = false});
-            st.read.reset();
-            st.stage = SceneLoadStage::Building;
-        } else if (st.stage == SceneLoadStage::Building) {
-            if (st.builder->step(st.options.build_budget_ms)) st.stage = SceneLoadStage::LoadingAssets;
-        }
-    } catch (const std::exception& e) {
-        std::cerr << "[toyengine] Async load of '" << st.path << "' failed: " << e.what() << "\n";
-        st.fail(e.what());
-        transition_.hide_loading_screen();   // fade back in over the old scene
-    }
-    if (st.stage == SceneLoadStage::LoadingAssets && assets_.pending_load_count() == 0) {
-        st.stage = SceneLoadStage::WaitingToSwap;
-    }
-
-    // Progress: the document 5%, the build 65%, the assets 30%.
-    switch (st.stage) {
-        case SceneLoadStage::ReadingDocument: break;
-        case SceneLoadStage::Building:
-            st.raise_progress(0.05f + 0.65f * st.builder->progress());
-            break;
-        case SceneLoadStage::LoadingAssets: {
-            const float peak = static_cast<float>(std::max<size_t>(st.peak_pending, 1));
-            st.raise_progress(0.70f + 0.30f * (1.0f - static_cast<float>(assets_.pending_load_count()) / peak));
-            break;
-        }
-        default: st.raise_progress(st.stage == SceneLoadStage::Failed ? st.progress : 1.0f); break;
-    }
-
-    // The cover: up over fade_out before activation, down over fade_in after (or after a failure).
-    if (st.stage == SceneLoadStage::FadingIn || st.stage == SceneLoadStage::Failed) {
-        st.alpha = tr.fade_in > 0.0f ? std::max(0.0f, st.alpha - dt / tr.fade_in) : 0.0f;
-    } else if (covered_kind) {
-        st.alpha = tr.fade_out > 0.0f ? std::min(1.0f, st.elapsed / tr.fade_out) : 1.0f;
-    }
-    const bool covered = !covered_kind || st.alpha >= 1.0f;
-
-    const bool warming = st.stage == SceneLoadStage::Warming;
-    // Advanced every frame, shown or not: a screen that appears once the cover is full then
-    // finds the bar already where it belongs, rather than catching up from zero.
-    st.display_progress = advance_load_bar(st.display_progress, load_bar_target(st), dt);
-    if (tr.kind == SceneTransition::Kind::LoadingScreen && (st.pending() || warming)) {
-        if (covered && !st.loading_screen_shown) {
-            st.loading_screen_shown = true;
-            if (!tr.loading_screen.empty() && !transition_.show_loading_screen(tr.loading_screen)) {
-                std::cerr << "[toyengine] Loading screen '" << tr.loading_screen << "' could not be shown\n";
-            }
-        }
-        transition_.update_loading_screen(st.display_progress,
-                                          warming && !st.warm_status.empty()
-                                              ? st.warm_status
-                                              : scene_load_status_text(st.stage));
-    }
-
-    if (st.stage == SceneLoadStage::WaitingToSwap && covered && st.elapsed >= st.options.min_display_time) {
-        activate_scene_load_(st);
-    }
-
-    if (st.stage == SceneLoadStage::Warming) {
-        st.warm_elapsed += dt;
-        ++st.warm_frames;
-        apply_warmup_budgets_(st, /*warming=*/true);
-        const bool timed_out =
-            st.options.warm_up_timeout > 0.0f && st.warm_elapsed >= st.options.warm_up_timeout;
-        if (poll_scene_warmup_(st) || timed_out) {
-            if (timed_out) {
-                std::cerr << "[toyengine] '" << st.path << "' was still warming after "
-                          << st.options.warm_up_timeout << " s (" << st.warm_status
-                          << "); showing it anyway\n";
-            }
-            apply_warmup_budgets_(st, /*warming=*/false);   // back to the authored budgets
-            transition_.hide_loading_screen();
-            st.stage = SceneLoadStage::FadingIn;
-            std::cout << "[toyengine] '" << st.path << "' warmed in " << st.warm_elapsed
-                      << " s (" << st.warm_frames << " frames); revealing\n";
-        }
-    }
-
-    if (covered_kind) transition_.set_fade(tr.color, st.alpha);
-    if (st.stage == SceneLoadStage::FadingIn && st.alpha <= 0.0f) st.stage = SceneLoadStage::Done;
-    if (st.finished() && st.alpha <= 0.0f) finish_transition_();
-}
-
-void Engine::activate_scene_load_(detail::SceneLoadState& st) {
-    ctx_.wait_idle();
-    // The loading screen stays up through a warm-up; it is dropped where the cover starts to
-    // lift, in update_scene_load_(), so the two never come apart.
-    if (!st.options.warm_up || st.options.transition.kind == SceneTransition::Kind::None) {
-        transition_.hide_loading_screen();
-    }
-    std::unique_ptr<coopa::scene::Scene> built = st.builder->take();   // unstarted
-    st.builder.reset();
-    apply_spawn_point_(*built, st.options.spawn_point);
-    coopa::scene::Scene* previous_active = scene_mgr_.has_scene() ? &scene_mgr_.get_active_scene() : nullptr;
-    if (!st.options.additive) {
-        clear_scenes_();
-        previous_active = nullptr;
-    }
-    coopa::scene::Scene* raw = scene_mgr_.add_scene(std::move(built));
-    scene_settings_[raw] = st.settings;
-    scene_paths_[raw] = st.path;
-    // The same order as load_scene(): start (SceneLoader::load() starts while building),
-    // then the per-scene systems, so components that add bodies in start() are seen by them.
-    raw->start();
-    prepare_scene_(*raw, /*drain_assets=*/false);
-    // Additive: the previously active scene stays the active one, with its own settings.
-    if (previous_active) {
-        scene_mgr_.set_active_scene(previous_active);
-        apply_scene_settings_(*previous_active);
-    }
-    if (st.options.transition.kind == SceneTransition::Kind::None) {
-        st.stage = SceneLoadStage::Done;
-    } else if (st.options.warm_up) {
-        // Still covered: the scene simulates from here, and update_scene_load_() holds the cover
-        // and the loading screen until its systems report warm (scene_loading.h, stage 5).
-        st.stage = SceneLoadStage::Warming;
-    } else {
-        st.stage = SceneLoadStage::FadingIn;
-    }
-    st.complete(*raw);
-}
-
-void Engine::apply_spawn_point_(coopa::scene::Scene& scene, const std::string& spawn_point) {
-    if (spawn_point.empty()) return;
-    coopa::scene::SceneObject* spawn = scene.find_object(spawn_point);
-    auto* player = scene::find_player_controller(scene);
-    if (!spawn || !player || !player->owner) {
-        std::cerr << "[toyengine] spawn_point '" << spawn_point << "': "
-                  << (spawn ? "no CharacterController in the scene" : "no such object") << "\n";
-        return;
-    }
-    auto* stc = spawn->get_transform();
-    auto* ptc = player->owner->get_transform();
-    if (!stc || !ptc) return;
-    const glm::mat4 world = stc->get_world_matrix();
-    coopa::util::Transform& t = ptc->transform();
-    glm::mat4 parent_inv(1.0f);
-    if (player->owner->parent() && player->owner->parent()->get_transform()) {
-        parent_inv = glm::inverse(player->owner->parent()->get_transform()->get_world_matrix());
-    }
-    t.set_position(glm::vec3(parent_inv * world[3]));
-    // Facing: the spawn point's yaw (the controller turns about +Z).
-    const glm::vec3 fwd = glm::vec3(world[1]);
-    if (glm::length(glm::vec2(fwd)) > 1e-4f) {
-        glm::vec3 euler = t.rotation_degrees();
-        euler.z = glm::degrees(std::atan2(-fwd.x, fwd.y));
-        t.set_rotation(euler);
-    }
-}
-
-void Engine::cancel_scene_load_(const std::string& why) {
-    if (!scene_load_ || !scene_load_->pending()) return;
-    scene_load_->fail("cancelled: " + why);
-    finish_transition_();
-}
-
-void Engine::finish_transition_() {
-    if (scene_load_ && !scene_load_->finished()) scene_load_->stage = SceneLoadStage::Done;
-    if (transition_.has_scene()) {
-        transition_.hide_loading_screen();
-        transition_.set_fade(glm::vec3(0.0f), 0.0f);
-        remove_overlay_layer(&transition_.scene());
-    }
-    if (scene_load_) scene_load_->alpha = 0.0f;
-}
-
-void Engine::consume_scene_link_requests_() {
-    std::vector<scene::SceneLinkRequest> requests = scene::SceneLinkRequests::instance().take();
-    for (const scene::SceneLinkRequest& r : requests) {
-        const auto managed = scene_mgr_.scenes();
-        if (std::find(managed.begin(), managed.end(), r.origin) == managed.end()) continue;
-        if (options_.edit_mode) {
-            std::cout << "[toyengine] SceneLink to '" << r.target_scene << "' ignored in an embedded engine (editor play mode)\n";
-            continue;
-        }
-        SceneLoadOptions o;
-        const auto kind = SceneTransition::parse_kind(r.transition);
-        if (!kind) std::cerr << "[toyengine] SceneLink: unknown transition '" << r.transition << "' (fade, loading_screen, none); fading\n";
-        switch (kind.value_or(SceneTransition::Kind::Fade)) {
-            case SceneTransition::Kind::None: o.transition = SceneTransition::none(); break;
-            case SceneTransition::Kind::Fade: o.transition = SceneTransition::fade(r.fade_time, r.color); break;
-            case SceneTransition::Kind::LoadingScreen:
-                o.transition = SceneTransition::loading_screen_ui(r.loading_screen, r.fade_time, r.color);
-                break;
-        }
-        o.min_display_time = r.min_display_time;
-        o.spawn_point = r.spawn_point;
-        load_scene_async(r.target_scene, std::move(o));
-    }
-}
-
-void Engine::sync_overlay_layers_() {
-    std::vector<coopa::scene::Scene*> scenes;
-    scenes.reserve(overlay_layers_.size());
-    for (const OverlayLayer& l : overlay_layers_) scenes.push_back(l.scene);
-    pipeline_->set_overlay_layers(std::move(scenes));
-}
-
 std::optional<Engine::ScreenUiPlacement> Engine::overlay_layer_placement_(const OverlayLayer& layer) {
     if (!layer.in_display_rect) return std::nullopt;
     const render::LetterboxRect rect = display_rect();
     if (rect.w == 0 || rect.h == 0) return std::nullopt;
     // At the display's scale, so the HUD keeps a physical size (and crisp text) on HiDPI.
     return ScreenUiPlacement{rect, /*input=*/false, std::max(1.0f, display_scale())};
-}
-
-void Engine::sync_live_profile_() {
-    const bool want = debug_overlay_.full() && !profile_;
-    if (want == (live_profile_ != nullptr)) return;
-    if (want) {
-        live_profile_ = std::make_unique<render::FrameProfile>();
-        pipeline_->set_profiler(live_profile_.get());
-    } else {
-        pipeline_->set_profiler(nullptr);   // waits for the GPU, then drops its queries
-        live_profile_.reset();
-    }
-}
-
-void Engine::update_debug_overlay_() {
-    if constexpr (!debug::k_overlay_compiled) return;
-    if (!edit_mode_ && !input_blocked_() && input_.is_pressed("debug_overlay", ctx_.input())) {
-        debug_overlay_.cycle();
-    }
-    if (!debug_overlay_.visible()) {
-        if (debug_overlay_.has_scene() && !overlay_layers_.empty()) remove_overlay_layer(&debug_overlay_.scene());
-        return;
-    }
-    coopa::scene::Scene& layer = debug_overlay_.scene(debug_overlay_font_());
-    const bool registered = std::any_of(overlay_layers_.begin(), overlay_layers_.end(),
-                                        [&layer](const OverlayLayer& l) { return l.scene == &layer; });
-    // Order 100: over any later engine layer of lower order (a scene transition fades
-    // beneath the stats).
-    if (!registered) add_overlay_layer(&layer, 100, /*in_display_rect=*/true);
-    // Wall-clock, not FIXED_DT: the HUD reports how fast frames really are.
-    debug_overlay_.record_frame(ctx_.delta_time() * 1000.0f);
-}
-
-coopa::ui::Font* Engine::debug_overlay_font_() {
-    if (debug_overlay_font_path_.empty()) {
-        const std::string mono = std::string(PROJ_DIR) + "/uicoopa/assets/fonts/JetBrainsMono-Regular.ttf";
-        if (std::filesystem::exists(mono)) debug_overlay_font_path_ = mono;
-        for (const std::string& root : asset_roots()) {
-            if (!debug_overlay_font_path_.empty()) break;
-            const std::filesystem::path p = std::filesystem::path(root) / "fonts" / "inter_regular.ttf";
-            if (std::filesystem::exists(p)) debug_overlay_font_path_ = p.string();
-        }
-        if (debug_overlay_font_path_.empty()) return nullptr;
-    }
-    coopa::ui::Font* const before = coopa::ui::FontDefaults::font;
-    coopa::ui::Font* font = coopa::ui::UIResourceCache::instance().font_for_path(debug_overlay_font_path_);
-    if (!before && coopa::ui::FontDefaults::font == font) coopa::ui::FontDefaults::font = nullptr;
-    return font;
-}
-
-void Engine::collect_debug_stats_() {
-    debug::OverlayStats& st = debug_overlay_.stats();
-    st = debug::OverlayStats{};
-    if (const render::FrameProfile* prof = active_profile_()) {
-        if (const render::FrameProfile::Row* row = prof->latest()) st.profile = *row;
-    }
-    st.render_width  = pipeline_->render_width();
-    st.render_height = pipeline_->render_height();
-    const auto& draws = pipeline_->last_frame_stats();
-    st.draws             = draws.camera_draws;
-    st.instances         = draws.camera_instances;
-    st.triangles         = draws.camera_triangles;
-    st.shadow_draws      = draws.shadow_draws;
-    st.dir_levels_rendered = draws.dir_levels_rendered;
-    st.dir_list_cache_hits = draws.dir_list_cache_hits;
-    st.cull_items_tested   = draws.cull_items_tested;
-    st.shadow_triangles  = draws.shadow_triangles;
-    st.renderers         = draws.renderers;
-    st.renderers_visible = draws.camera_visible;
-    st.pending_assets    = assets_.pending_load_count();
-    for (const auto& heap : ctx_.allocator().heap_budgets()) {
-        st.heaps.push_back(debug::OverlayStats::Heap{heap.usage, heap.budget, heap.device_local});
-    }
-    if (!scene_mgr_.has_scene()) return;
-    coopa::scene::Scene& scene = scene_mgr_.get_active_scene();
-
-    std::function<void(const coopa::scene::SceneObject&)> count = [&](const coopa::scene::SceneObject& o) {
-        ++st.objects;
-        st.components += o.components().size();
-        for (const auto& c : o.children()) count(*c);
-    };
-    for (const auto& root : scene.root_objects()) count(*root);
-    if (auto* ps = dynamic_cast<particles::ParticleSimulationSystem*>(scene.find_system("Particles"))) {
-        st.particles = ps->total_particles();
-    }
-    if (auto* phys = dynamic_cast<coopa::physx::system::PhysicsSystem*>(scene.find_system("Physics"))) {
-        st.has_physics = true;
-        const auto& world = phys->world();
-        world.for_each_body([&](coopa::physx::dynamics::BodyId, const coopa::physx::dynamics::Body& b) {
-            ++st.bodies;
-            if (b.awake && b.type == coopa::physx::dynamics::BodyType::Dynamic) ++st.bodies_awake;
-        });
-        st.contacts   = world.manifolds().size();
-        st.physics_ms = phys->last_step_ms();
-    }
-    if (auto* nav = coopa::physx::system::find_nav_system(scene)) {
-        st.has_nav    = true;
-        st.nav_agents = nav->agent_count();
-        st.nav_ms     = nav->stats().total_ms;
-        st.nav_paths  = nav->stats().paths_planned;
-    }
-}
-
-void Engine::sync_particle_render_state_(coopa::scene::Scene& scene) {
-    particle_frame_.quads.clear();
-    particle_frame_.meshes.clear();
-    if (auto* sys = dynamic_cast<particles::ParticleSimulationSystem*>(scene.find_system("Particles"))) {
-        using coopa::gfx::engine::components::CameraComponent;
-        const CameraComponent* cam = CameraComponent::main();
-        particles::ParticleView view;
-        render::Frustum frustum{};
-        if (cam) {
-            view.camera_pos = cam->get_world_position();
-            const float aspect = static_cast<float>(pipeline_->render_width()) /
-                                 static_cast<float>(std::max(1u, pipeline_->render_height()));
-            frustum = render::Frustum::from_matrix(cam->get_projection_matrix(aspect) * cam->get_view_matrix());
-        }
-        sys->collect_render(scene, view, [&](const glm::vec3& lo, const glm::vec3& hi) {
-            if (!cam) return true;
-            render::WorldBounds b;
-            b.center = 0.5f * (lo + hi);
-            b.extent = 0.5f * (hi - lo);
-            return frustum.intersects(b);
-        }, particle_frame_);
-    }
-    pipeline_->set_particle_state(particle_frame_);
-}
-
-SceneLoadOptions Engine::scene_loading_options_(const fkyaml::node& settings) {
-    SceneLoadOptions opts;
-    // No `loading:` block means no cover: a scene says for itself whether it is worth warming,
-    // so adding the stage changes nothing for the scenes (and the projects) that do not ask.
-    opts.warm_up = false;
-    opts.transition = SceneTransition::none();
-    if (!settings.is_mapping() || !settings.contains("loading")) return opts;
-    const fkyaml::node& node = settings.at("loading");
-    if (!node.is_mapping()) return opts;
-
-    std::string ui;
-    if (node.contains("ui")) ui = node.at("ui").get_value<std::string>();
-    SceneTransition::Kind kind =
-        ui.empty() ? SceneTransition::Kind::Fade : SceneTransition::Kind::LoadingScreen;
-    if (node.contains("transition")) {
-        if (auto parsed = SceneTransition::parse_kind(node.at("transition").get_value<std::string>())) {
-            kind = *parsed;
-        } else {
-            std::cerr << "[toyengine] scene settings: loading.transition must be none, fade or "
-                         "loading_screen\n";
-        }
-    }
-    opts.transition.kind = kind;
-    opts.transition.loading_screen = ui;
-    opts.warm_up = kind != SceneTransition::Kind::None;
-    if (node.contains("fade_in")) opts.transition.fade_in = node.at("fade_in").get_value<float>();
-    if (node.contains("fade_out")) opts.transition.fade_out = node.at("fade_out").get_value<float>();
-    if (node.contains("warm_up")) opts.warm_up = node.at("warm_up").get_value<bool>();
-    if (node.contains("warm_up_timeout")) {
-        opts.warm_up_timeout = node.at("warm_up_timeout").get_value<float>();
-    }
-    if (node.contains("warm_up_budget_ms")) {
-        opts.warm_up_budget_ms = node.at("warm_up_budget_ms").get_value<float>();
-    }
-    if (node.contains("min_display_time")) {
-        opts.min_display_time = node.at("min_display_time").get_value<float>();
-    }
-    return opts;
-}
-
-fkyaml::node Engine::weather_node_(const fkyaml::node& settings) {
-    if (settings.is_mapping() && settings.contains("weather")) return settings.at("weather");
-    return fkyaml::node();
-}
-
-void Engine::WeatherRenderBase::capture(const render::ToyRenderConfig& c) {
-    cloud_coverage = c.cloud_coverage;
-    zenith = c.indirect.sky_zenith; horizon = c.indirect.sky_horizon; ground = c.indirect.sky_ground;
-    ambient = c.indirect.ambient_intensity; sky = c.indirect.sky_intensity; exposure = c.exposure;
-    fog_mode = c.fog_mode; fog_density = c.fog_density; fog_linear_start = c.fog_linear_start;
-    fog_linear_end = c.fog_linear_end; fog_color = c.fog_color; fog_sky_blend = c.fog_sky_blend;
-    fog_max_opacity = c.fog_max_opacity; fog_height_falloff = c.fog_height_falloff; fog_sun_amount = c.fog_sun_amount;
-}
-
-void Engine::WeatherRenderBase::restore(render::ToyRenderConfig& c) const {
-    c.cloud_coverage = cloud_coverage;
-    c.indirect.sky_zenith = zenith; c.indirect.sky_horizon = horizon; c.indirect.sky_ground = ground;
-    c.indirect.ambient_intensity = ambient; c.indirect.sky_intensity = sky; c.exposure = exposure;
-    c.fog_mode = fog_mode; c.fog_density = fog_density; c.fog_linear_start = fog_linear_start;
-    c.fog_linear_end = fog_linear_end; c.fog_color = fog_color; c.fog_sky_blend = fog_sky_blend;
-    c.fog_max_opacity = fog_max_opacity; c.fog_height_falloff = fog_height_falloff; c.fog_sun_amount = fog_sun_amount;
-}
-
-void Engine::sync_weather_render_state_(coopa::scene::Scene& scene) {
-    weather::WeatherSystem* w = weather::find(scene);
-    if (!w || !w->enabled() || !w->state().enabled) { restore_weather_atmosphere_(); return; }
-    render::ToyRenderConfig& c = pipeline_->render_config_mut();
-    if (!weather_applied_) { weather_base_.capture(c); weather_applied_ = true; }
-    const weather::Atmosphere& a = w->atmosphere();
-    c.indirect.sky_zenith = a.sky_zenith;
-    c.indirect.sky_horizon = a.sky_horizon;
-    c.indirect.sky_ground = a.sky_ground;
-    c.indirect.ambient_intensity = a.ambient_intensity;
-    c.indirect.sky_intensity = a.sky_intensity;
-    c.fog_mode = 1;   // exponential height fog (the condition's falloff thins it upward)
-    c.fog_density = a.fog_density;
-    c.fog_color = a.fog_color;
-    c.fog_sky_blend = a.fog_sky_blend;
-    c.fog_max_opacity = a.fog_max_opacity;
-    c.fog_height_falloff = a.fog_height_falloff;
-    c.fog_sun_amount = a.fog_sun_amount;
-    c.exposure = weather_base_.exposure * a.exposure_scale;   // scaled, not owned: the row stays editable
-    c.cloud_coverage = std::clamp(w->state().cloud_cover, 0.0f, 1.0f);
-}
-
-void Engine::sync_sky_render_state_(coopa::scene::Scene& scene, float dt) {
-    using coopa::gfx::engine::components::DirectionalLightComponent;
-    render::ToyRenderConfig& c = pipeline_->render_config_mut();
-    weather::WeatherSystem* w = weather::find(scene);
-    const bool physical = c.sky_model == "physical";
-    if (w) w->set_physical_sky(physical);
-    const bool weather_live = w && w->enabled() && w->state().enabled;
-
-    // Cloud drift and evolution (either sky model). With a live weather the clouds go the
-    // wind's way, and cloud_wind_speed is their speed in a 5 m/s ground wind: a calm day
-    // barely moves them (a quarter), a gale races them (up to 4x -- winds aloft are stronger).
-    glm::vec2 wind_dir(1.0f, 0.0f);
-    float cloud_speed = c.cloud_wind_speed;
-    if (weather_live) {
-        const glm::vec2 wind(w->state().wind);
-        const float ws = glm::length(wind);
-        if (ws > 0.05f) wind_dir = wind / ws;
-        cloud_speed *= std::clamp(ws / 5.0f, 0.25f, 4.0f);
-    }
-    cloud_offset_ += glm::dvec2(wind_dir) * static_cast<double>(cloud_speed * std::max(dt, 0.0f));
-    // The flat clouds' morph: a phase through the shape volume's (repeating) depth, at the
-    // layer's evolve rate -- accumulated, so changing the rate never jumps the shapes.
-    cloud_flat_phase_ = std::fmod(cloud_flat_phase_ + 0.0015 * std::max(c.flat_cloud_evolve, 0.0f) * std::max(dt, 0.0f), 1.0);
-    sky_time_ += std::max(dt, 0.0f);
-
-    render::SkyFrameState st;
-    if (!physical) {
-        restore_sky_colours_();
-        pipeline_->set_sky_state(st);
-        sync_cloud_state_(scene, nullptr);
-        return;
-    }
-    if (weather_live && sky_applied_) {
-        // The weather started over our colours and captured them as "the config's": hand it
-        // the real ones, and let its base own them from here on.
-        weather_base_.zenith = sky_base_[0]; weather_base_.horizon = sky_base_[1]; weather_base_.ground = sky_base_[2];
-        sky_applied_ = false;
-    } else if (!weather_live && !sky_applied_) {
-        sky_base_ = {c.indirect.sky_zenith, c.indirect.sky_horizon, c.indirect.sky_ground};
-        sky_applied_ = true;
-    }
-
-    // The scene's sun: the same light the renderer picks (the first active one).
-    DirectionalLightComponent* light = nullptr;
-    for (DirectionalLightComponent* l : scene.get_components<DirectionalLightComponent>()) {
-        if (l->owner && l->owner->active()) { light = l; break; }
-    }
-    glm::vec3 sun_to = glm::normalize(glm::vec3(0.4f, 0.3f, 0.85f));
-    if (weather_live) sun_to = w->state().sun_direction;
-    else if (light && glm::length(light->direction) > 1e-6f) sun_to = -glm::normalize(light->direction);
-    const float coverage = std::clamp(c.cloud_coverage, 0.0f, 1.0f);
-    // Sun illuminance the sky is scaled by: the clear-sky sun (the weather's, else the light's own).
-    const float sun_ref = weather_live ? w->settings().sun_intensity : (light ? std::max(light->intensity, 0.0f) : 1.2f);
-
-    sky_atmosphere_.set_media(render::SkyAtmosphereMedia::earth(c.atmosphere_density, c.ozone));
-    glm::vec3 cam_pos(0.0f);
-    if (auto* cam = coopa::gfx::engine::components::CameraComponent::main()) cam_pos = cam->get_world_position();
-    const float view_r = sky_atmosphere_.view_radius(cam_pos.z);
-    const float K = k_sky_gain * sun_ref;
-    const weather::SkyGradient g = sky_atmosphere_.gradient(sun_to, k_moon_ratio, view_r);
-    const glm::vec3 floor_col = glm::vec3(0.55f, 0.75f, 1.3f) * 1e-3f * K * 0.3f;
-    glm::vec3 zenith = g.zenith * K + floor_col, horizon = g.horizon * K + floor_col, ground = g.ground * K + floor_col * 0.5f;
-    if (c.clouds && coverage > 0.0f) {
-        // Cloud cover greys the dome toward the overcast's flat light, a little darker.
-        auto overcast = [&](glm::vec3 col) {
-            const float lum = glm::dot(col, glm::vec3(0.2126f, 0.7152f, 0.0722f));
-            return glm::mix(col, glm::vec3(lum * (1.0f - 0.45f * coverage)), coverage * 0.85f);
-        };
-        const glm::vec3 mean = (zenith + horizon) * 0.5f;
-        zenith = overcast(glm::mix(zenith, mean, coverage * 0.6f));
-        horizon = overcast(glm::mix(horizon, mean, coverage * 0.6f));
-        ground = overcast(ground);
-    }
-    c.indirect.sky_zenith = zenith;
-    c.indirect.sky_horizon = horizon;
-    c.indirect.sky_ground = ground;
-
-    // The light's colour through the air: transmittance toward it, relative to straight up
-    // (so a high sun stays as authored and a low one reddens and fades).
-    const glm::vec3 light_to = light && glm::length(light->direction) > 1e-6f ? -glm::normalize(light->direction) : sun_to;
-    const glm::vec3 t_up = glm::max(sky_atmosphere_.transmittance(view_r, 1.0f), glm::vec3(1e-4f));
-    glm::vec3 tint = sky_atmosphere_.transmittance_toward(view_r, light_to) / t_up;
-    // Without shadows, the cover dims the sun uniformly (the weather's condition dims its own).
-    if (c.clouds && !c.cloud_shadows && !weather_live) tint *= glm::mix(1.0f, 0.3f, coverage * coverage);
-    st.light_tint = glm::min(tint, glm::vec3(1.0f));
-
-    st.active = true;
-    st.media = sky_atmosphere_.media();
-    st.sun_to = sun_to;
-    st.moon_to = -sun_to;
-    st.sky_illuminance = K;
-    st.moon_ratio = k_moon_ratio;
-    st.sun_disc_radiance = c.sun_disc_size > 0.0f ? K * 40.0f : 0.0f;
-    st.moon_disc_radiance = c.moon_disc_size > 0.0f ? K * k_moon_ratio * 60.0f : 0.0f;
-    st.sun_disc_cos = std::cos(glm::radians(std::max(c.sun_disc_size, 0.0f) * 0.5f));
-    st.moon_disc_cos = std::cos(glm::radians(std::max(c.moon_disc_size, 0.0f) * 0.5f));
-    const float dark = std::clamp((-0.02f - sun_to.z) / 0.16f, 0.0f, 1.0f);
-    st.star_visibility = c.sky_stars ? dark * dark * (3.0f - 2.0f * dark) * (c.clouds ? 1.0f - 0.5f * coverage : 1.0f) : 0.0f;
-    st.night_floor = K * 0.3f;
-
-    st.time = std::fmod(sky_time_, 3600.0f);
-    pipeline_->set_sky_state(st);
-    sync_cloud_state_(scene, &st);
-}
-
-void Engine::sync_cloud_state_(coopa::scene::Scene& scene, const render::SkyFrameState* sky) {
-    using coopa::gfx::engine::components::DirectionalLightComponent;
-    const render::ToyRenderConfig& c = pipeline_->render_config();
-    render::CloudFrameState cs;
-    cs.active = c.clouds;
-    cs.type = c.cloud_type == "flat" ? render::CloudType::Flat : render::CloudType::Volumetric;
-    cs.coverage = std::clamp(c.cloud_coverage, 0.0f, 1.0f);
-    cs.altitude = c.cloud_altitude;
-    cs.thickness = std::max(c.cloud_thickness, 0.1f);
-    cs.density = std::max(c.cloud_density, 0.0f);
-    cs.scale = std::clamp(c.cloud_scale, 1e-4f, 100.0f);
-    cs.offset = cloud_offset_;
-    cs.time = std::fmod(sky_time_, 3600.0f);
-    cs.shadows = c.cloud_shadows;
-    cs.shadow_strength = std::clamp(c.cloud_shadow_strength, 0.0f, 1.0f);
-    cs.shadow_distance = std::max(c.cloud_shadow_distance, 1.0f);
-    cs.flat_size = std::max(c.flat_cloud_size, 0.5f);
-    cs.flat_opacity = std::clamp(c.flat_cloud_opacity, 0.0f, 1.0f);
-    cs.flat_light_bands = std::max(c.flat_cloud_light_bands, 0.0f);
-    cs.flat_outline = std::clamp(c.flat_cloud_outline, 0.0f, 1.0f);
-    cs.flat_turbulence = std::clamp(c.flat_cloud_turbulence, 0.0f, 4.0f);
-    cs.flat_evolve = std::max(c.flat_cloud_evolve, 0.0f);
-    cs.flat_phase = static_cast<float>(cloud_flat_phase_);
-
-    glm::vec3 cam_pos(0.0f);
-    if (auto* cam = coopa::gfx::engine::components::CameraComponent::main()) cam_pos = cam->get_world_position();
-    if (c.cloud_camera_fade) {
-        const float above = cam_pos.z - (cs.altitude + cs.thickness);
-        const float end = std::max(c.cloud_fade_end, c.cloud_fade_start + 0.01f);
-        const float f = std::clamp((above - c.cloud_fade_start) / (end - c.cloud_fade_start), 0.0f, 1.0f);
-        cs.fade = f * f * (3.0f - 2.0f * f);
-    }
-
-    if (sky) {
-        // Clouds are lit by the sun until it is well below the horizon, then by the moon.
-        const float K = sky->sky_illuminance;
-        const glm::vec3 sun_to = sky->sun_to;
-        cs.atmosphere_lut = true;
-        if (sun_to.z > -0.12f) {
-            cs.light_to = sun_to;
-            // A little softer while the sun is low, so a sunset's lit cloud deck does not drive
-            // the exposure meter so hard that the ground (lit at a grazing angle) goes black.
-            const float low = std::clamp(sun_to.z / 0.3f, 0.0f, 1.0f);
-            cs.light_color = glm::vec3(K * (0.6f + 0.4f * low));
-        } else {
-            cs.light_to = -sun_to;
-            cs.light_color = glm::vec3(0.75f, 0.85f, 1.0f) * K * k_moon_ratio * 0.5f;
-        }
-    } else {
-        // The gradient sky: the scene's light (the one the renderer picks -- the first active)
-        // as it lights every surface, with no sky gain: the clouds then sit against the
-        // gradient's own colours about as a white surface would, instead of the physical
-        // sky's brighter-than-life dome.
-        DirectionalLightComponent* light = nullptr;
-        for (DirectionalLightComponent* l : scene.get_components<DirectionalLightComponent>()) {
-            if (l->owner && l->owner->active()) { light = l; break; }
-        }
-        if (light && glm::length(light->direction) > 1e-6f) {
-            cs.light_to = -glm::normalize(light->direction);
-            cs.light_color = light->color * std::max(light->intensity, 0.0f);
-        } else {
-            cs.light_to = glm::normalize(glm::vec3(0.4f, 0.3f, 0.85f));
-            cs.light_color = glm::vec3(0.0f);
-        }
-    }
-    pipeline_->set_cloud_state(cs);
-}
-
-void Engine::sync_surface_state_(coopa::scene::Scene& scene) {
-    render::SurfaceFrameState st;
-    const render::ToyRenderConfig& c = pipeline_->render_config();
-    weather::WeatherSystem* w = weather::find(scene);
-    const bool live = w && w->enabled() && w->state().enabled;
-    if (live) {
-        const weather::WeatherState& ws = w->state();
-        st.snow_cover = ws.snow_cover;
-        st.snow_depth = w->settings().snow_max_depth;
-        st.snow_patch_hard = w->settings().snow_patch_hard;
-        st.snow_patch_size = w->settings().snow_patch_size;
-        st.wetness = ws.wetness;
-        st.wind = ws.wind;
-        st.wind_gust = ws.wind_gust;
-        st.wind_time = ws.wind_time;
-        if (const auto& field = w->ground_probe().field()) {
-            // Aliasing pointer: the heights live as long as the field the renderer holds.
-            // The sky layer (moving bodies looked through) where the probe made one.
-            st.occl_heights = std::shared_ptr<const std::vector<float>>(
-                field, field->sky_heights.size() == field->heights.size() ? &field->sky_heights : &field->heights);
-            st.occl_origin = field->origin;
-            st.occl_cell = field->cell;
-            st.occl_nx = field->nx;
-            st.occl_ny = field->ny;
-            st.occl_fallback = field->fallback;
-        }
-    }
-    if (c.snow_cover_override >= 0.0f) st.snow_cover = std::min(c.snow_cover_override, 1.0f);
-    if (const world::SnowSystem* snow = world::find_snow(scene); snow && st.snow_cover > 0.0f) {
-        const world::SnowField& f = snow->field();
-        if (f.focused()) {
-            st.trench_words = f.words().data();
-            st.trench_n = f.n();
-            st.trench_cell = f.cell();
-            st.trench_window = f.window();
-            st.trench_scale = f.scale();
-            st.trench_version = f.version();
-        }
-    }
-    // Heightmap terrains: their slots' numbers and textures (G-buffer set 3).
-    if (const world::HeightmapTerrainSystem* hts = world::find_heightmap_terrain_system(scene)) {
-        st.terrains = hts->frame_bindings();
-    }
-    pipeline_->set_surface_state(std::move(st));
-}
-
-void Engine::restore_sky_colours_() {
-    if (!sky_applied_) return;
-    render::ToyRenderConfig& c = pipeline_->render_config_mut();
-    c.indirect.sky_zenith = sky_base_[0]; c.indirect.sky_horizon = sky_base_[1]; c.indirect.sky_ground = sky_base_[2];
-    sky_applied_ = false;
-}
-
-void Engine::restore_weather_atmosphere_() {
-    if (!weather_applied_) return;
-    weather_base_.restore(pipeline_->render_config_mut());
-    weather_applied_ = false;
-}
-
-water::WaterSettings Engine::water_settings_for_(render::RenderQuality q) {
-    switch (q) {
-        case render::RenderQuality::Low:    return water::WaterSettings::from_quality(water::WaterQuality::Low);
-        case render::RenderQuality::Medium: return water::WaterSettings::from_quality(water::WaterQuality::Medium);
-        case render::RenderQuality::Ultra:  return water::WaterSettings::from_quality(water::WaterQuality::Ultra);
-        case render::RenderQuality::High:   break;
-    }
-    return water::WaterSettings::from_quality(water::WaterQuality::High);
-}
-
-void Engine::sync_water_render_state_(coopa::scene::Scene& scene) {
-    render::WaterFrameState state;
-    auto* water = dynamic_cast<water::WaterSystem*>(scene.find_system("Water"));
-    if (water) {
-        // water_quality is live: a changed tier reaches the system for its next update.
-        const render::RenderQuality q = pipeline_->render_config().water_quality;
-        if (water->settings().quality != water_settings_for_(q).quality) water->set_settings(water_settings_for_(q));
-        const water::WaterSettings& ws = water->settings();
-        state.ripple_layers   = ws.ripple_layers;
-        state.detail_distance = ws.detail_distance;
-        state.ripple_range    = ws.ripple_range;
-
-        // Hooks between Scene::update() and here (the editor applying its edits) may have
-        // destroyed or rebuilt water objects since the system cached its list.
-        water->refresh_bodies(scene);
-        const float now = water->time();
-        state.time = water->render_time();
-        auto* cam = coopa::gfx::engine::components::CameraComponent::main();
-        const bool has_eye = cam && cam->owner;
-        const glm::vec3 eye = has_eye ? glm::vec3(cam->owner->get_transform()->transform().get_world_matrix()[3])
-                                      : glm::vec3(0.0f);
-        // Rings within the draw range, nearest first, at most the tier's cap -- then handed
-        // over oldest first, the order the pipeline expects.
-        std::vector<std::pair<float, std::size_t>> near;
-        near.reserve(water->ripples().size());
-        for (std::size_t i = 0; i < water->ripples().size(); ++i) {
-            const float d = has_eye ? glm::distance(glm::vec2(eye), water->ripples()[i].position) : 0.0f;
-            if (d <= ws.ripple_range) near.push_back({d, i});
-        }
-        if (near.size() > ws.max_ripples) {
-            std::partial_sort(near.begin(), near.begin() + static_cast<std::ptrdiff_t>(ws.max_ripples), near.end());
-            near.resize(ws.max_ripples);
-        }
-        std::sort(near.begin(), near.end(), [](const auto& a, const auto& b) { return a.second < b.second; });
-        state.ripples.reserve(near.size());
-        for (const auto& [d, i] : near) {
-            const auto& r = water->ripples()[i];
-            state.ripples.push_back({r.position, now - r.birth, r.strength, r.radius});
-        }
-        if (has_eye) {
-            const water::WaterSystem::UnderwaterInfo info = water->underwater_at(eye);
-            // Also just ABOVE the surface (within half a metre): the bottom of the near plane
-            // can already be under water, and the pass decides per pixel which side it is on
-            // -- that is what splits the image at the waterline.
-            const bool near_surface = info.body && info.depth > -0.5f && info.depth <= 0.0f;
-            if ((info.underwater || near_surface) && info.body) {
-                state.underwater    = true;
-                state.surface_level = info.surface_height;
-                state.surface_up    = info.up;
-                state.fog_color     = info.body->underwater_color;
-                state.visibility    = info.body->underwater_visibility;
-                state.absorption    = info.body->underwater_absorption;
-                state.caustics      = info.body->caustics;
-            }
-        }
-    }
-    pipeline_->set_water_state(std::move(state));
-
-    // A planet terrain gives the sky and fog a planet to be evaluated on (render::PlanetFrameState).
-    std::optional<render::PlanetFrameState> planet;
-    for (const world::TerrainComponent* terrain : scene.get_components<world::TerrainComponent>()) {
-        if (!terrain->params.planet || !terrain->owner || !terrain->owner->get_transform()) continue;
-        planet = render::PlanetFrameState{glm::vec3(terrain->owner->get_transform()->get_world_matrix()[3]),
-                                          terrain->params.layout().radius()};
-        break;
-    }
-    pipeline_->set_planet(planet);
 }
 
 void Engine::update_fill_extent_() {
@@ -2214,27 +1292,6 @@ void Engine::upload_dynamic_meshes_(coopa::scene::Scene& scene) {
     }
 }
 
-void Engine::gather_debug_lines_(coopa::scene::Scene& scene) {
-    std::vector<render::DebugLine>& out = pipeline_->debug_lines();
-    out.clear();
-    // An embedding host (the editor's grid, gizmos, wireframe) appends after this, from
-    // FrameHooks::pre_render -- which runs after this clear, so it always wins the frame.
-    coopa::physx::debug::DebugDraw draw;
-    // Navigation's overlay is opt-in per scene (`navigation.debug_draw`) and shows in every
-    // debug_view: it is how a nav scene is read at all (walkable outline, paths, flow arrows).
-    if (auto* nav = coopa::physx::system::find_nav_system(scene)) {
-        nav->debug_draw(draw, nav->settings().debug_draw);
-    }
-    auto* sys = dynamic_cast<coopa::physx::system::PhysicsSystem*>(scene.find_system("Physics"));
-    if (sys && render::parse_debug_view(config_.render.debug_view) == render::DebugView::Lines) {
-        sys->world().debug_draw(draw, config_.physics.debug_draw);
-    }
-    out.reserve(draw.lines.size());
-    for (const auto& line : draw.lines) {
-        out.push_back(render::DebugLine{line.a, line.b, render::pack_gpu_color(line.color)});
-    }
-}
-
 void Engine::gather_digger_hover_(coopa::scene::Scene& scene) {
     for (scene::TerrainDigger* d : scene.get_components<scene::TerrainDigger>()) {
         if (!d->show_hover || !d->hovering()) continue;
@@ -2491,14 +1548,6 @@ std::string Engine::scene_path_from_env_(const std::string& configured) {
     std::string scene(v);
     if (coopa::yaml::is_document_ext(scene)) return scene;
     return "assets/scenes/" + scene + "/scene.yaml";
-}
-
-std::string Engine::profile_path_from_env_() {
-    const char* v = debug_env("PROFILE");
-    if (!v || !*v || std::string(v) == "0") return {};
-    const std::string s(v);
-    if (s.size() > 4 && s.compare(s.size() - 4, 4, ".csv") == 0) return s;
-    return "output/profile.csv";
 }
 
 bool Engine::no_input_from_env_() {

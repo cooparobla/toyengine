@@ -119,7 +119,7 @@ void gfx_surface_fragment(inout GfxSurface s) {}
 // Material-texture sample hook: an including shader may define
 // GFX_SURFACE_SAMPLE(tex, uv) BEFORE including this backbone to wrap every
 // material-map fetch -- e.g. toyengine's gbuffer.frag routes it through
-// gfx_texel_aa_uv() (gfx/texel_aa.glsl) so its pixel-art atlas keeps hard
+// gfx_texel_aa_uv() (gfx/texel_aa.glsl) so its hard-edged atlas keeps crisp
 // texels at rest but stops snapping them under camera motion. Default is a
 // plain fetch, so no other consumer changes.
 #ifndef GFX_SURFACE_SAMPLE

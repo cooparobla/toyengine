@@ -1,8 +1,7 @@
 /**
  * @file upscale_pass.h
- * @brief Blits the low-resolution LDR buffer into a centred sub-rect of the
- *        swapchain -- the nearest-neighbour upscale that gives the engine
- *        its pixel-art look.
+ * @brief Blits the internal-resolution LDR buffer into a centred sub-rect of the
+ *        swapchain, scaling it to the display rect.
  *
  * The destination rect (toy_render_math::LetterboxRect, from compute_display_rect())
  * is either integer-scaled (config.upscale_mode == "integer": crisp NxN texel
@@ -26,7 +25,7 @@
 
 #include <gfxcoopa/command/command_buffer.h>
 
-#include <toyengine/render/toy_render_math.h>
+#include <toyengine/render/render_extent.h>
 
 namespace toy {
 namespace render {

@@ -15,6 +15,7 @@
 #   toyhub rebuild <dir>               clean rebuild: remove build output, then build.sh
 #   toyhub upgrade <dir> [--ref R]     re-pin the engine (default: this checkout's HEAD)
 #   toyhub link <dir> [ENGINE_DIR]     build against a local engine checkout (default: this one)
+#   toyhub vendor <dir> [--ref R]      give the project its OWN engine: a git submodule in it
 #   toyhub unlink <dir>                back to the pinned clone
 #   toyhub install                     symlink toyhub into ~/.local/bin
 #   toyhub app [DEST]                  macOS: write "toyengine Hub.app" (default ~/Applications)
@@ -22,6 +23,12 @@
 # The engine this script belongs to is the checkout it lives in (tools/..). Projects pin
 # git@github.com:cooparobla/toyengine.git (public) at a commit; a pinned clone can only use a
 # commit that is pushed, so `new` refuses an unpushed HEAD unless --link or --ref is given.
+# Three engine modes, all driven by the .toy file's engine: block:
+#   pinned    engine.ref            setup.sh clones the engine into .libs/toyengine
+#   linked    engine.link <abs>     .libs/toyengine symlinks a shared checkout (the default;
+#                                   every project on the box builds the same working tree)
+#   vendored  engine.link <rel>     the project commits its own engine as a git submodule and
+#                                   .libs/toyengine symlinks that (toyhub vendor)
 # A project's name is always its folder's name. The project list is ~/.toyengine/projects.yaml
 # (shared with the hub, build/toyengine_hub); only `new` and `add` put a project there --
 # nothing is auto-detected -- and the engine checkout itself is never a project.
@@ -49,7 +56,16 @@ die()  { echo "toyhub: $*" >&2; exit 1; }
 warn() { echo "toyhub: warning: $*" >&2; }
 abspath() { (cd "$1" && pwd); }
 
-usage() { sed -n '2,20p' "$ENGINE_DIR/tools/toyhub" | sed 's/^# \{0,1\}//'; }
+# engine_link <project dir> <engine dir> -- how a .toy should spell engine.link. An engine
+# inside the project (a vendored submodule) is written project-relative so the .toy is
+# committable and resolves the same on every machine; a shared checkout stays absolute.
+engine_link() {
+    local proj eng
+    proj="$(abspath "$1")"; eng="$(abspath "$2")"
+    if [[ "$eng" == "$proj"/* ]]; then echo "${eng#"$proj"/}"; else echo "$eng"; fi
+}
+
+usage() { sed -n '2,21p' "$ENGINE_DIR/tools/toyhub" | sed 's/^# \{0,1\}//'; }
 
 # --- .toy access (same flat-YAML reader as a project's .toyenv.sh) ---------------------------
 
@@ -83,7 +99,8 @@ toy_set_engine() {   # toy_set_engine <file> <source> <ref> <link>
             print "engine:"
             print "  source: " src
             print "  ref: " ref "                    # commit, tag or branch .libs/toyengine is checked out at"
-            if (link != "") print "  link: " link "   # local checkout: .libs/toyengine is a symlink to it, ref unused"
+            if (link ~ /^\//) print "  link: " link "   # local checkout: .libs/toyengine is a symlink to it, ref unused"
+            else if (link != "") print "  link: " link "                    # vendored submodule: .libs/toyengine is a symlink to it"
             done = 1
         }
         /^engine:/ { block(); skip = 1; next }
@@ -139,7 +156,10 @@ engine_desc() {   # one-line engine description of a project dir
     [[ -n "$f" ]] || { echo "(no .toy)"; return; }
     local link ref
     link="$(toy_get "$f" engine.link)"; ref="$(toy_get "$f" engine.ref)"
-    if [[ -n "$link" ]]; then echo "linked: $link"; elif [[ -n "$ref" ]]; then echo "${ref:0:12}"; else echo "(no engine pin)"; fi
+    if [[ -n "$link" && "$link" != /* ]]; then echo "vendored: $link"
+    elif [[ -n "$link" ]]; then echo "linked: $link"
+    elif [[ -n "$ref" ]]; then echo "${ref:0:12}"
+    else echo "(no engine pin)"; fi
 }
 
 # --- commands ---------------------------------------------------------------------------------
@@ -171,8 +191,8 @@ scaffold() {
     if [[ "$target" == "toyengine" || "$target" == toyengine_* ]]; then target="game_$target"; fi
 
     if [[ -n "$link" ]]; then
-        link="$(abspath "$link")"
         [[ -n "$ref" ]] || ref="$(git -C "$link" rev-parse HEAD 2>/dev/null || echo main)"
+        link="$(engine_link "$dir" "$link")"
     elif [[ -z "$ref" ]]; then
         ref="$(git -C "$ENGINE_DIR" rev-parse HEAD)"
         if [[ -z "$(git -C "$ENGINE_DIR" branch -r --contains "$ref" 2>/dev/null)" ]]; then
@@ -327,7 +347,7 @@ cmd_upgrade() {
 
 cmd_link() {
     local dir; dir="$(project_dir "${1:-.}")"
-    local eng="${2:-$ENGINE_DIR}"; eng="$(abspath "$eng")"
+    local eng="${2:-$ENGINE_DIR}"; eng="$(engine_link "$dir" "$eng")"
     local f; f="$(toy_file "$dir")"
     local src ref; src="$(toy_get "$f" engine.source)"; ref="$(toy_get "$f" engine.ref)"
     if [[ -e "$dir/.libs/toyengine" && ! -L "$dir/.libs/toyengine" ]]; then
@@ -338,6 +358,51 @@ cmd_link() {
     toy_set_engine "$f" "${src:-$TOY_ENGINE_SOURCE}" "${ref:-main}" "$eng"
     rm -rf "$dir/build" "$dir"/build-*   # the CMake cache remembers the old engine path
     "$dir/setup.sh"
+}
+
+# Gives a project its own engine: a git submodule of engine.source at <dir>/<path> (engine/ by
+# default), with engine.link pointing at it relative. .libs/toyengine then symlinks the
+# submodule, so the project builds the copy it commits -- and because that is link mode, neither
+# ./setup.sh (which only re-runs ln) nor ./clean.sh --all (which removes just .libs/) can touch
+# it. The submodule is a clone, so the ref has to be pushed. Idempotent: an engine already there
+# is kept and only the .toy is re-pointed.
+cmd_vendor() {
+    local dir="" ref="" sub="engine"
+    while (( $# )); do
+        case "$1" in
+            --ref)  ref="${2:-}"; [[ -n "$ref" ]] || die "--ref needs a commit, tag or branch"; shift 2 ;;
+            --path) sub="${2:-}"; [[ -n "$sub" ]] || die "--path needs a directory"; shift 2 ;;
+            -*)     die "unknown option $1" ;;
+            *)      dir="$1"; shift ;;
+        esac
+    done
+    dir="$(project_dir "${dir:-.}")"
+    local f; f="$(toy_file "$dir")"
+    case "$sub" in
+        /*|.libs|.libs/*) die "--path must be a project-relative directory outside .libs/ (./clean.sh --all removes that tree)" ;;
+    esac
+    [[ -e "$dir/.git" ]] || die "$(basename "$dir") is not a git repository -- a vendored engine is a submodule of the project (git init first)"
+    local src; src="$(toy_get "$f" engine.source)"; src="${src:-$TOY_ENGINE_SOURCE}"
+    [[ -n "$ref" ]] || ref="$(toy_get "$f" engine.ref)"
+    [[ -n "$ref" ]] || ref="$(git -C "$ENGINE_DIR" rev-parse HEAD)"
+
+    if [[ -f "$dir/$sub/CMakeLists.txt" ]]; then
+        echo "[toyhub] kept existing $sub"
+    else
+        echo "[toyhub] adding $sub to $(basename "$dir") as a submodule ($src @ $ref)"
+        if git -C "$dir" ls-remote --exit-code --heads "$src" "$ref" >/dev/null 2>&1; then
+            git -C "$dir" submodule add -b "$ref" "$src" "$sub"      # a branch: track it
+        else
+            git -C "$dir" submodule add "$src" "$sub"
+            git -C "$dir/$sub" checkout --detach "$ref" \
+                || die "engine ref '$ref' not found in $src (pushed?)"
+        fi
+        git -C "$dir" submodule update --init --recursive -- "$sub"
+    fi
+    toy_set_engine "$f" "$src" "$ref" "$(engine_link "$dir" "$dir/$sub")"
+    rm -rf "$dir/build" "$dir"/build-*   # the CMake cache remembers the old engine path
+    "$dir/setup.sh"
+    echo "[toyhub] $(basename "$dir") now builds its own engine in $sub -- commit .gitmodules and $sub"
 }
 
 cmd_unlink() {
@@ -403,6 +468,7 @@ case "$cmd" in
     rebuild)  cmd_rebuild "$@" ;;
     upgrade)  cmd_upgrade "$@" ;;
     link)     cmd_link "$@" ;;
+    vendor)   cmd_vendor "$@" ;;
     unlink)   cmd_unlink "$@" ;;
     install)  cmd_install ;;
     app)      cmd_app "$@" ;;

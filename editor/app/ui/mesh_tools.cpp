@@ -1,51 +1,65 @@
+#include "editor/app/ui/mesh_tools.h"
+
 #include "editor/app/editor_app.h"
 
 namespace toy {
 namespace editor {
 
-const TriangleBVH& EditorApp::mesh_bvh_() {
-    if (bvh_revision_ != mesh_.geometry_revision || !bvh_.built()) {
-        bvh_.build(mesh_.mesh);
-        bvh_revision_ = mesh_.geometry_revision;
-    }
-    return bvh_;
+bool MeshToolsPanel::see_through_() const {
+    return app_.xray_ || app_.shading_ == Shading::Wireframe;
 }
 
-void EditorApp::mesh_local_ray_(const ViewProj& vp, glm::vec2 px, glm::vec3& o, glm::vec3& d) {
+bool MeshToolsPanel::loop_cut_active() const {
+    return app_.loopcut_.active;
+}
+
+int MeshToolsPanel::loop_cut_cuts() const {
+    return app_.loopcut_.cuts;
+}
+
+const TriangleBVH& MeshToolsPanel::mesh_bvh_() {
+    if (app_.bvh_revision_ != app_.mesh_.geometry_revision || !app_.bvh_.built()) {
+        app_.bvh_.build(app_.mesh_.mesh);
+        app_.bvh_revision_ = app_.mesh_.geometry_revision;
+    }
+    return app_.bvh_;
+}
+
+void MeshToolsPanel::mesh_local_ray_(const ViewProj& vp, glm::vec2 px, glm::vec3& o, glm::vec3& d) {
     glm::vec3 ow, dw;
     vp.ray(px, ow, dw);
-    const glm::mat4 inv = glm::inverse(mesh_world_());
+    const glm::mat4 inv = glm::inverse(app_.mesh_world_());
     o = glm::vec3(inv * glm::vec4(ow, 1.0f));
     d = glm::normalize(glm::vec3(inv * glm::vec4(dw, 0.0f)));
 }
 
-bool EditorApp::mesh_point_visible_(const ViewProj& vp, const glm::vec3& local_p) {
-    if (xray_ || shading_ == Shading::Wireframe) return true;
+bool MeshToolsPanel::mesh_point_visible_(const ViewProj& vp, const glm::vec3& local_p) {
+    if (app_.xray_ || app_.shading_ == Shading::Wireframe) return true;
     return mesh_point_unoccluded_(vp, local_p);
 }
 
-bool EditorApp::mesh_point_unoccluded_(const ViewProj& vp, const glm::vec3& local_p) {
-    const glm::mat4 w = mesh_world_();
+bool MeshToolsPanel::mesh_point_unoccluded_(const ViewProj& vp, const glm::vec3& local_p) {
+    const glm::mat4 w = app_.mesh_world_();
     const glm::vec3 pw = glm::vec3(w * glm::vec4(local_p, 1.0f));
     glm::vec3 eye_w;
     if (vp.ortho) eye_w = pw - vp.camera_forward() * 1e4f;
     else eye_w = glm::vec3(glm::inverse(vp.view)[3]);
     const glm::vec3 eye = glm::vec3(glm::inverse(w) * glm::vec4(eye_w, 1.0f));
-    return !mesh_bvh_().occluded(mesh_.mesh, eye, local_p, 2e-3f);
+    return !mesh_bvh_().occluded(app_.mesh_.mesh, eye, local_p, 2e-3f);
 }
 
-const EditorApp::EditVisibility& EditorApp::edit_visibility_(const ViewProj& vp) {
-    const bool big = mesh_.mesh.positions.size() > 60000;
-    const bool see_all = shading_ == Shading::Wireframe || big;
-    const bool xray = xray_ && !see_all;   // test occlusion, but only to dim what is behind
-    EditVisibility& v = edit_vis_;
+const EditVisibility& MeshToolsPanel::edit_visibility_(const ViewProj& vp) {
+    const bool big = app_.mesh_.mesh.positions.size() > 60000;
+    const bool see_all = app_.shading_ == Shading::Wireframe || big;
+    const bool xray = app_.xray_ && !see_all;   // test occlusion, but only to dim what is behind
+    EditVisibility& v = app_.edit_vis_;
     const int key = see_all ? 1 : xray ? 2 : 0;
-    if (v.revision == mesh_.geometry_revision && v.view == vp.view && v.proj == vp.proj && v.xray == key) return v;
-    v.revision = mesh_.geometry_revision;
+    if (v.revision == app_.mesh_.geometry_revision && v.view == vp.view && v.proj == vp.proj && v.xray == key) return v;
+    v.revision = app_.mesh_.geometry_revision;
     v.view = vp.view;
     v.proj = vp.proj;
     v.xray = key;
-    const auto& mm = mesh_.mesh;
+    const auto& mm = app_.mesh_.mesh;
     v.verts.assign(mm.positions.size(), EditVisibility::kFront);
     v.faces.assign(mm.faces.size(), EditVisibility::kFront);
     v.edges.clear();
@@ -64,10 +78,10 @@ const EditorApp::EditVisibility& EditorApp::edit_visibility_(const ViewProj& vp)
     return v;
 }
 
-std::optional<Edge> EditorApp::pick_edge_(const ViewProj& vp, glm::vec2 px) {
-    const auto& mm = mesh_.mesh;
+std::optional<Edge> MeshToolsPanel::pick_edge_(const ViewProj& vp, glm::vec2 px) {
+    const auto& mm = app_.mesh_.mesh;
     if (mm.faces.empty()) return std::nullopt;
-    const glm::mat4 w = mesh_world_();
+    const glm::mat4 w = app_.mesh_world_();
     auto scr = [&](uint32_t v) { return vp.project(glm::vec3(w * glm::vec4(mm.positions[v], 1.0f))); };
     glm::vec3 o, d;
     mesh_local_ray_(vp, px, o, d);
@@ -96,12 +110,12 @@ std::optional<Edge> EditorApp::pick_edge_(const ViewProj& vp, glm::vec2 px) {
     return best;
 }
 
-void EditorApp::pick_mesh_element_(glm::vec2 px, bool additive) {
-    auto vp = view_proj_();
+void MeshToolsPanel::pick_mesh_element_(glm::vec2 px, bool additive) {
+    auto vp = app_.view_proj_();
     if (!vp) return;
-    auto& mm = mesh_.mesh;
-    auto& sel = mesh_.selection;
-    const glm::mat4 w = mesh_world_();
+    auto& mm = app_.mesh_.mesh;
+    auto& sel = app_.mesh_.selection;
+    const glm::mat4 w = app_.mesh_world_();
     auto wp = [&](uint32_t v) { return glm::vec3(w * glm::vec4(mm.positions[v], 1.0f)); };
     if (!additive) { sel.verts.clear(); sel.edges.clear(); sel.faces.clear(); }
     auto toggle = [&](auto& set, const auto& v) { if (!set.insert(v).second && additive) set.erase(v); };
@@ -138,9 +152,9 @@ void EditorApp::pick_mesh_element_(glm::vec2 px, bool additive) {
     }
 }
 
-std::optional<uint32_t> EditorApp::pick_face_screen_(const ViewProj& vp, glm::vec2 px) {
-    const auto& mm = mesh_.mesh;
-    const glm::mat4 w = mesh_world_();
+std::optional<uint32_t> MeshToolsPanel::pick_face_screen_(const ViewProj& vp, glm::vec2 px) {
+    const auto& mm = app_.mesh_.mesh;
+    const glm::mat4 w = app_.mesh_world_();
     const glm::vec3 eye = glm::vec3(glm::inverse(vp.view)[3]);
     auto scr = [&](const glm::vec3& p) { return vp.project(glm::vec3(w * glm::vec4(p, 1.0f))); };
     auto contains = [&](uint32_t f) {
@@ -171,72 +185,72 @@ std::optional<uint32_t> EditorApp::pick_face_screen_(const ViewProj& vp, glm::ve
     return best;
 }
 
-void EditorApp::loop_select_at_(glm::vec2 px, bool ring, bool additive) {
-    auto vp = view_proj_();
+void MeshToolsPanel::loop_select_at_(glm::vec2 px, bool ring, bool additive) {
+    auto vp = app_.view_proj_();
     if (!vp) return;
     const auto e = pick_edge_(*vp, px);
     if (!e) return;
-    if (ring) select_edge_ring(mesh_.mesh, mesh_.selection, *e, additive);
-    else select_edge_loop(mesh_.mesh, mesh_.selection, *e, additive);
+    if (ring) select_edge_ring(app_.mesh_.mesh, app_.mesh_.selection, *e, additive);
+    else select_edge_loop(app_.mesh_.mesh, app_.mesh_.selection, *e, additive);
 }
 
-void EditorApp::begin_loop_cut() {
-    if (!mesh_edit_view_() || playing()) return;
-    loopcut_ = LoopCutTool{};
-    loopcut_.active = true;
+void MeshToolsPanel::begin_loop_cut() {
+    if (!app_.mesh_edit_view_() || app_.playing()) return;
+    app_.loopcut_ = LoopCutTool{};
+    app_.loopcut_.active = true;
 }
 
-void EditorApp::run_loop_cut_(imm::Context& ctx, const ViewProj& vp, bool hovered) {
+void MeshToolsPanel::run_loop_cut_(imm::Context& ctx, const ViewProj& vp, bool hovered) {
     using coopa::input::KeyAction;
     const auto& in = ctx.input();
     const glm::vec2 m = ctx.mouse();
     for (const auto& e : in.keys) {
         if (e.action == KeyAction::Release) continue;
         const int k = static_cast<int>(e.key);
-        if (e.key == Key::Escape) { loopcut_.active = false; ctx.consume_keyboard(); return; }
-        if (k >= static_cast<int>(Key::Num1) && k <= static_cast<int>(Key::Num9)) loopcut_.cuts = k - static_cast<int>(Key::Num0);
-        if (k >= static_cast<int>(Key::Kp1) && k <= static_cast<int>(Key::Kp9)) loopcut_.cuts = k - static_cast<int>(Key::Kp0);
-        if (e.key == Key::Equal || e.key == Key::KpAdd || e.key == Key::PageUp) ++loopcut_.cuts;
-        if (e.key == Key::Minus || e.key == Key::KpSubtract || e.key == Key::PageDown) --loopcut_.cuts;
+        if (e.key == Key::Escape) { app_.loopcut_.active = false; ctx.consume_keyboard(); return; }
+        if (k >= static_cast<int>(Key::Num1) && k <= static_cast<int>(Key::Num9)) app_.loopcut_.cuts = k - static_cast<int>(Key::Num0);
+        if (k >= static_cast<int>(Key::Kp1) && k <= static_cast<int>(Key::Kp9)) app_.loopcut_.cuts = k - static_cast<int>(Key::Kp0);
+        if (e.key == Key::Equal || e.key == Key::KpAdd || e.key == Key::PageUp) ++app_.loopcut_.cuts;
+        if (e.key == Key::Minus || e.key == Key::KpSubtract || e.key == Key::PageDown) --app_.loopcut_.cuts;
     }
     ctx.consume_keyboard();
-    select_pending_ = box_selecting_ = false;
-    if (in.pressed[1]) { loopcut_.active = false; return; }
-    if (hovered && in.scroll.y != 0.0f) loopcut_.cuts += in.scroll.y > 0 ? 1 : -1;
-    loopcut_.cuts = std::clamp(loopcut_.cuts, 1, 100);
-    if (hovered) loopcut_.seed = pick_edge_(vp, m);
-    if (loopcut_.seed && (loopcut_.revision != mesh_.geometry_revision || loopcut_.preview_cuts != loopcut_.cuts ||
-                          loopcut_.lines.empty() || preview_seed_ != *loopcut_.seed)) {
-        const MeshTopology t(mesh_.mesh);
-        loopcut_.lines = loop_cut_preview(mesh_.mesh, t, t.find_edge(*loopcut_.seed), loopcut_.cuts);
-        loopcut_.revision = mesh_.geometry_revision;
-        loopcut_.preview_cuts = loopcut_.cuts;
-        preview_seed_ = *loopcut_.seed;
+    app_.select_pending_ = app_.box_selecting_ = false;
+    if (in.pressed[1]) { app_.loopcut_.active = false; return; }
+    if (hovered && in.scroll.y != 0.0f) app_.loopcut_.cuts += in.scroll.y > 0 ? 1 : -1;
+    app_.loopcut_.cuts = std::clamp(app_.loopcut_.cuts, 1, 100);
+    if (hovered) app_.loopcut_.seed = pick_edge_(vp, m);
+    if (app_.loopcut_.seed && (app_.loopcut_.revision != app_.mesh_.geometry_revision || app_.loopcut_.preview_cuts != app_.loopcut_.cuts ||
+                          app_.loopcut_.lines.empty() || app_.preview_seed_ != *app_.loopcut_.seed)) {
+        const MeshTopology t(app_.mesh_.mesh);
+        app_.loopcut_.lines = loop_cut_preview(app_.mesh_.mesh, t, t.find_edge(*app_.loopcut_.seed), app_.loopcut_.cuts);
+        app_.loopcut_.revision = app_.mesh_.geometry_revision;
+        app_.loopcut_.preview_cuts = app_.loopcut_.cuts;
+        app_.preview_seed_ = *app_.loopcut_.seed;
     }
-    if (!loopcut_.seed) loopcut_.lines.clear();
-    if (hovered && in.pressed[0] && loopcut_.seed && !loopcut_.lines.empty()) {
-        EditMesh trial = mesh_.mesh;
-        MeshSelection trial_sel = mesh_.selection;
-        const LoopCutResult res = loop_cut(trial, trial_sel, *loopcut_.seed, loopcut_.cuts);
-        loopcut_.active = false;
-        if (!res.ok) { log_warn("Loop Cut: " + res.error); return; }
+    if (!app_.loopcut_.seed) app_.loopcut_.lines.clear();
+    if (hovered && in.pressed[0] && app_.loopcut_.seed && !app_.loopcut_.lines.empty()) {
+        EditMesh trial = app_.mesh_.mesh;
+        MeshSelection trial_sel = app_.mesh_.selection;
+        const LoopCutResult res = loop_cut(trial, trial_sel, *app_.loopcut_.seed, app_.loopcut_.cuts);
+        app_.loopcut_.active = false;
+        if (!res.ok) { app_.log_warn("Loop Cut: " + res.error); return; }
         LastOp op;
         op.kind = LastOp::Kind::LoopCut;
-        op.base = mesh_.mesh;
-        op.base_sel = mesh_.selection;
-        op.seed = *loopcut_.seed;
-        op.cuts = loopcut_.cuts;
-        mesh_.edit("Loop Cut and Slide", [&](EditMesh& mm, MeshSelection& s) { mm = std::move(trial); s = trial_sel; }, "loopcut");
-        op.revision_after = mesh_.geometry_revision;
-        last_op_ = op;
-        if (loopcut_.cuts == 1 && !res.rails.empty()) start_edge_slide_(vp, m, res.rails, "loopcut");
-        else mesh_.undo.end_merge();
+        op.base = app_.mesh_.mesh;
+        op.base_sel = app_.mesh_.selection;
+        op.seed = *app_.loopcut_.seed;
+        op.cuts = app_.loopcut_.cuts;
+        app_.mesh_.edit("Loop Cut and Slide", [&](EditMesh& mm, MeshSelection& s) { mm = std::move(trial); s = trial_sel; }, "loopcut");
+        op.revision_after = app_.mesh_.geometry_revision;
+        app_.last_op_ = op;
+        if (app_.loopcut_.cuts == 1 && !res.rails.empty()) start_edge_slide_(vp, m, res.rails, "loopcut");
+        else app_.mesh_.undo.end_merge();
     }
 }
 
-void EditorApp::start_edge_slide_(const ViewProj& vp, glm::vec2 m, const std::vector<SlideRail>& rails, const std::string& merge_key) {
+void MeshToolsPanel::start_edge_slide_(const ViewProj& vp, glm::vec2 m, const std::vector<SlideRail>& rails, const std::string& merge_key) {
     if (rails.empty()) return;
-    const glm::mat4 w = mesh_world_();
+    const glm::mat4 w = app_.mesh_world_();
     auto W = [&](const glm::vec3& p) { return glm::vec3(w * glm::vec4(p, 1.0f)); };
     // The rail nearest the mouse (that can move both ways) defines the slide direction.
     size_t best = 0;
@@ -251,113 +265,113 @@ void EditorApp::start_edge_slide_(const ViewProj& vp, glm::vec2 m, const std::ve
     const SlideRail& r = rails[best];
     glm::vec3 dir = W(r.a) - W(r.b);
     if (glm::length(dir) < 1e-7f) dir = glm::vec3(1, 0, 0);
-    begin_transform_(true);
-    modal_mesh_ = true;
-    modal_base_sel_ = mesh_.selection;
-    slide_rails_ = rails;
-    slide_merge_key_ = merge_key;
-    modal_.begin(ModalKind::EdgeSlide, vp, W(r.origin), glm::mat3(1.0f), m, dir);
+    app_.begin_transform_(true);
+    app_.modal_mesh_ = true;
+    app_.modal_base_sel_ = app_.mesh_.selection;
+    app_.slide_rails_ = rails;
+    app_.slide_merge_key_ = merge_key;
+    app_.modal_.begin(ModalKind::EdgeSlide, vp, W(r.origin), glm::mat3(1.0f), m, dir);
 }
 
-void EditorApp::begin_edge_slide_from_selection_(const ViewProj& vp, glm::vec2 m) {
-    std::set<Edge> es = mesh_.selection.edges;
-    if (mesh_.selection.mode != SelectMode::Edge) {
+void MeshToolsPanel::begin_edge_slide_from_selection_(const ViewProj& vp, glm::vec2 m) {
+    std::set<Edge> es = app_.mesh_.selection.edges;
+    if (app_.mesh_.selection.mode != SelectMode::Edge) {
         es.clear();
-        const auto vs = mesh_.selection.affected_vertices(mesh_.mesh);
-        for (const auto& e : mesh_.mesh.edges()) if (vs.count(e.first) && vs.count(e.second)) es.insert(e);
+        const auto vs = app_.mesh_.selection.affected_vertices(app_.mesh_.mesh);
+        for (const auto& e : app_.mesh_.mesh.edges()) if (vs.count(e.first) && vs.count(e.second)) es.insert(e);
     }
     std::string err;
-    const auto rails = edge_slide_rails(mesh_.mesh, es, &err);
-    if (!rails) { log_warn("Edge Slide: " + err); return; }
+    const auto rails = edge_slide_rails(app_.mesh_.mesh, es, &err);
+    if (!rails) { app_.log_warn("Edge Slide: " + err); return; }
     start_edge_slide_(vp, m, *rails, "modal");
 }
 
-void EditorApp::draw_mesh_tool_overlay_(imm::Context& ctx, const ViewProj& vp) {
-    if (!loopcut_.active) return;
-    const glm::mat4 w = mesh_world_();
+void MeshToolsPanel::draw_mesh_tool_overlay_(imm::Context& ctx, const ViewProj& vp) {
+    if (!app_.loopcut_.active) return;
+    const glm::mat4 w = app_.mesh_world_();
     const glm::vec4 col(1.0f, 0.83f, 0.0f, 1.0f);
-    for (const auto& line : loopcut_.lines) {
+    for (const auto& line : app_.loopcut_.lines) {
         for (size_t i = 0; i + 1 < line.size(); ++i) {
             auto a = vp.project(glm::vec3(w * glm::vec4(line[i], 1.0f)));
             auto b = vp.project(glm::vec3(w * glm::vec4(line[i + 1], 1.0f)));
             if (a && b) ctx.line(*a, *b, col, 2.0f);
         }
     }
-    const float x = viewport_box_.x + (show_toolbar_ ? kToolSize + 22 : 10);
-    shadow_text_(ctx, {x, viewport_box_.y + 56}, "Loop Cut and Slide  -  " + std::to_string(loopcut_.cuts) +
-                                                   (loopcut_.cuts == 1 ? " cut" : " cuts"), ctx.style.object_active);
+    const float x = app_.viewport_box_.x + (app_.show_toolbar_ ? app_.viewport_chrome_panel_->kToolSize + 22 : 10);
+    app_.viewport_chrome_panel_->shadow_text_(ctx, {x, app_.viewport_box_.y + 56}, "Loop Cut and Slide  -  " + std::to_string(app_.loopcut_.cuts) +
+                                                   (app_.loopcut_.cuts == 1 ? " cut" : " cuts"), ctx.style.object_active);
 }
 
-void EditorApp::record_mesh_op_(LastOp op) {
-    op.revision_after = mesh_.geometry_revision;
-    last_op_ = std::move(op);
+void MeshToolsPanel::record_mesh_op_(LastOp op) {
+    op.revision_after = app_.mesh_.geometry_revision;
+    app_.last_op_ = std::move(op);
 }
 
-bool EditorApp::last_op_valid_() const {
-    switch (last_op_.kind) {
+bool MeshToolsPanel::last_op_valid_() const {
+    switch (app_.last_op_.kind) {
         case LastOp::Kind::None: return false;
         case LastOp::Kind::AddObjectPrimitive:
-            return !mesh_edit_view_() && doc_.find(last_op_.object) && doc_.undo_revision() == last_op_.doc_revision_after;
-        default: return mesh_edit_view_() && mesh_.geometry_revision == last_op_.revision_after;
+            return !app_.mesh_edit_view_() && app_.doc_.find(app_.last_op_.object) && app_.doc_.undo_revision() == app_.last_op_.doc_revision_after;
+        default: return app_.mesh_edit_view_() && app_.mesh_.geometry_revision == app_.last_op_.revision_after;
     }
 }
 
-void EditorApp::run_subdivide_(int cuts) {
+void MeshToolsPanel::run_subdivide_(int cuts) {
     LastOp op;
     op.kind = LastOp::Kind::Subdivide;
-    op.base = mesh_.mesh;
-    op.base_sel = mesh_.selection;
+    op.base = app_.mesh_.mesh;
+    op.base_sel = app_.mesh_.selection;
     op.cuts = cuts;
-    if (mesh_.selection.affected_faces(mesh_.mesh).empty()) { log_warn("Subdivide: select faces (or all edges of faces)"); return; }
-    mesh_.edit("Subdivide", [&](EditMesh& mm, MeshSelection& s) { subdivide(mm, s, cuts); });
+    if (app_.mesh_.selection.affected_faces(app_.mesh_.mesh).empty()) { app_.log_warn("Subdivide: select faces (or all edges of faces)"); return; }
+    app_.mesh_.edit("Subdivide", [&](EditMesh& mm, MeshSelection& s) { subdivide(mm, s, cuts); });
     record_mesh_op_(op);
 }
 
-void EditorApp::run_catmull_clark_(int levels) {
+void MeshToolsPanel::run_catmull_clark_(int levels) {
     LastOp op;
     op.kind = LastOp::Kind::CatmullClark;
-    op.base = mesh_.mesh;
-    op.base_sel = mesh_.selection;
+    op.base = app_.mesh_.mesh;
+    op.base_sel = app_.mesh_.selection;
     op.levels = levels;
-    mesh_.edit("Subdivide Smooth", [&](EditMesh& mm, MeshSelection& s) { catmull_clark(mm, s, levels); });
+    app_.mesh_.edit("Subdivide Smooth", [&](EditMesh& mm, MeshSelection& s) { catmull_clark(mm, s, levels); });
     record_mesh_op_(op);
 }
 
-void EditorApp::add_mesh_primitive_(const std::string& kind) {
+void MeshToolsPanel::add_mesh_primitive_(const std::string& kind) {
     LastOp op;
     op.kind = LastOp::Kind::AddMeshPrimitive;
-    op.base = mesh_.mesh;
-    op.base_sel = mesh_.selection;
+    op.base = app_.mesh_.mesh;
+    op.base_sel = app_.mesh_.selection;
     op.prim = PrimitiveParams::defaults(kind);
-    op.prim_xf = glm::inverse(mesh_world_()) * glm::translate(glm::mat4(1.0f), cursor3d_);
-    mesh_.edit("Add " + kind, [&](EditMesh& mm, MeshSelection& s) {
+    op.prim_xf = glm::inverse(app_.mesh_world_()) * glm::translate(glm::mat4(1.0f), app_.cursor3d_);
+    app_.mesh_.edit("Add " + kind, [&](EditMesh& mm, MeshSelection& s) {
         s.mode = SelectMode::Face;
         append_mesh(mm, make_primitive(op.prim), op.prim_xf, s);
     });
     record_mesh_op_(op);
 }
 
-void EditorApp::rerun_last_op_() {
-    LastOp& op = last_op_;
+void MeshToolsPanel::rerun_last_op_() {
+    LastOp& op = app_.last_op_;
     if (op.kind == LastOp::Kind::AddObjectPrimitive) { rerun_object_primitive_(); return; }
-    mesh_.do_undo();   // back to op.base (the op was one undo step)
-    mesh_.mesh = op.base;
+    app_.mesh_.do_undo();   // back to op.base (the op was one undo step)
+    app_.mesh_.mesh = op.base;
     const MeshSelection base_sel = op.base_sel;
     switch (op.kind) {
         case LastOp::Kind::LoopCut:
-            mesh_.edit("Loop Cut and Slide", [&](EditMesh& mm, MeshSelection& s) {
+            app_.mesh_.edit("Loop Cut and Slide", [&](EditMesh& mm, MeshSelection& s) {
                 s = base_sel;
                 loop_cut(mm, s, op.seed, op.cuts, op.cuts == 1 ? -op.factor : 0.0f);
             });
             break;
         case LastOp::Kind::Subdivide:
-            mesh_.edit("Subdivide", [&](EditMesh& mm, MeshSelection& s) { s = base_sel; subdivide(mm, s, op.cuts); });
+            app_.mesh_.edit("Subdivide", [&](EditMesh& mm, MeshSelection& s) { s = base_sel; subdivide(mm, s, op.cuts); });
             break;
         case LastOp::Kind::CatmullClark:
-            mesh_.edit("Subdivide Smooth", [&](EditMesh& mm, MeshSelection& s) { s = base_sel; catmull_clark(mm, s, op.levels); });
+            app_.mesh_.edit("Subdivide Smooth", [&](EditMesh& mm, MeshSelection& s) { s = base_sel; catmull_clark(mm, s, op.levels); });
             break;
         case LastOp::Kind::AddMeshPrimitive:
-            mesh_.edit("Add " + op.prim.kind, [&](EditMesh& mm, MeshSelection& s) {
+            app_.mesh_.edit("Add " + op.prim.kind, [&](EditMesh& mm, MeshSelection& s) {
                 s = base_sel;
                 s.mode = SelectMode::Face;
                 append_mesh(mm, make_primitive(op.prim), op.prim_xf, s);
@@ -365,11 +379,11 @@ void EditorApp::rerun_last_op_() {
             break;
         default: break;
     }
-    op.revision_after = mesh_.geometry_revision;
+    op.revision_after = app_.mesh_.geometry_revision;
 }
 
-void EditorApp::rerun_object_primitive_() {
-    LastOp& op = last_op_;
+void MeshToolsPanel::rerun_object_primitive_() {
+    LastOp& op = app_.last_op_;
     const PrimitiveParams& p = op.prim;
     std::string key = p.kind;
     std::transform(key.begin(), key.end(), key.begin(), ::tolower);
@@ -379,34 +393,34 @@ void EditorApp::rerun_object_primitive_() {
                   p.y_subdivisions, p.segments, p.rings, p.caps ? "" : "_open");
     if (!(p == PrimitiveParams::defaults(p.kind))) key += buf;
     for (char& c : key) if (c == '.') c = 'p';
-    const fs::path mesh_path = project_.assets() / "meshes" / (key + ".yaml");
+    const fs::path mesh_path = app_.project_.assets() / "meshes" / (key + ".yaml");
     try {
         if (!coopa::yaml::document_exists(mesh_path)) {
             coopa::yaml::save_document(mesh_path, mesh_to_node(make_primitive(p)));
-            project_.refresh();
+            app_.project_.refresh();
         }
     } catch (const std::exception& e) {
-        log_error(std::string("Could not write mesh: ") + e.what());
+        app_.log_error(std::string("Could not write mesh: ") + e.what());
         return;
     }
-    const int mr = doc_.find_component(op.object, "MeshRenderer");
+    const int mr = app_.doc_.find_component(op.object, "MeshRenderer");
     if (mr < 0) return;
-    Node comp = doc_.find(op.object)->at("components").as_seq()[static_cast<size_t>(mr)];
+    Node comp = app_.doc_.find(op.object)->at("components").as_seq()[static_cast<size_t>(mr)];
     comp["mesh_path"] = Node(key);
-    apply_(doc_.set_component(op.object, mr, comp, "Adjust " + p.kind, "lastop"));
-    mesh_cache_.clear();
-    op.doc_revision_after = doc_.undo_revision();
+    app_.apply_(app_.doc_.set_component(op.object, mr, comp, "Adjust " + p.kind, "lastop"));
+    app_.mesh_cache_.clear();
+    op.doc_revision_after = app_.doc_.undo_revision();
 }
 
-void EditorApp::draw_last_op_panel_(imm::Context& ctx, const imm::Box& view) {
-    last_op_rect_ = {};
+void MeshToolsPanel::draw_last_op_panel_(imm::Context& ctx, const imm::Box& view) {
+    app_.last_op_rect_ = {};
     if (!last_op_valid_()) return;
-    LastOp& op = last_op_;
+    LastOp& op = app_.last_op_;
     const char* title = op.kind == LastOp::Kind::LoopCut ? "Loop Cut and Slide"
                       : op.kind == LastOp::Kind::Subdivide ? "Subdivide"
                       : op.kind == LastOp::Kind::CatmullClark ? "Subdivide Smooth" : "Add Mesh";
     int rows = 1;
-    if (last_op_open_) {
+    if (app_.last_op_open_) {
         switch (op.kind) {
             case LastOp::Kind::LoopCut: rows += op.cuts == 1 ? 2 : 1; break;
             case LastOp::Kind::Subdivide: case LastOp::Kind::CatmullClark: rows += 1; break;
@@ -419,12 +433,12 @@ void EditorApp::draw_last_op_panel_(imm::Context& ctx, const imm::Box& view) {
     const float rh = ctx.style.row_height + ctx.style.spacing;
     const float h = rows * rh + ctx.style.padding * 2 + 4;
     const imm::Box r{view.x + 10, view.bottom() - h - 10, 250, h};
-    last_op_rect_ = r;
+    app_.last_op_rect_ = r;
     ctx.shadow(r, 6);
     ctx.fill_rounded(r, imm::with_alpha(ctx.style.panel_bg, 0.96f), 6);
     ctx.begin_region("last_op_panel", r, false);
     const bool open = ctx.collapsing_header(title, true);
-    last_op_open_ = open;
+    app_.last_op_open_ = open;
     bool changed = false;
     if (open) {
         auto drag_i = [&](const char* label, int* v, int lo, int hi) {
@@ -466,53 +480,53 @@ void EditorApp::draw_last_op_panel_(imm::Context& ctx, const imm::Box& view) {
     if (changed) rerun_last_op_();
 }
 
-void EditorApp::note_slide_finished_(ModalKind kind, float factor) {
-    if (kind != ModalKind::EdgeSlide || slide_merge_key_ != "loopcut" || last_op_.kind != LastOp::Kind::LoopCut) return;
-    last_op_.factor = factor;
-    last_op_.revision_after = mesh_.geometry_revision;
+void MeshToolsPanel::note_slide_finished_(ModalKind kind, float factor) {
+    if (kind != ModalKind::EdgeSlide || app_.slide_merge_key_ != "loopcut" || app_.last_op_.kind != LastOp::Kind::LoopCut) return;
+    app_.last_op_.factor = factor;
+    app_.last_op_.revision_after = app_.mesh_.geometry_revision;
 }
 
-void EditorApp::mirror_mesh_selection_(int a, bool global) {
-    auto& md = mesh_;
-    if (md.selection.affected_vertices(md.mesh).empty()) { log_warn("Mirror: nothing selected"); return; }
+void MeshToolsPanel::mirror_mesh_selection_(int a, bool global) {
+    auto& md = app_.mesh_;
+    if (md.selection.affected_vertices(md.mesh).empty()) { app_.log_warn("Mirror: nothing selected"); return; }
     const glm::vec3 pivot = selection_center(md.mesh, md.selection);
-    const glm::mat4 reflect = mirror_plane_matrix(a, global, pivot, mesh_world_());
+    const glm::mat4 reflect = mirror_plane_matrix(a, global, pivot, app_.mesh_world_());
     static const char* kAxes[] = {"X", "Y", "Z"};
     md.edit(std::string("Mirror ") + kAxes[a], [&](EditMesh& mm, MeshSelection& s) { mirror_selection(mm, s, reflect); });
 }
 
-void EditorApp::bridge_selected_() {
+void MeshToolsPanel::bridge_selected_() {
     std::string err;
     bool ok = false;
-    EditMesh trial = mesh_.mesh;
-    MeshSelection s = mesh_.selection;
+    EditMesh trial = app_.mesh_.mesh;
+    MeshSelection s = app_.mesh_.selection;
     ok = bridge_edge_loops(trial, s, &err);
-    if (!ok) { log_warn("Bridge Edge Loops: " + err); return; }
-    mesh_.edit("Bridge Edge Loops", [&](EditMesh& mm, MeshSelection& sel) { mm = std::move(trial); sel = s; });
+    if (!ok) { app_.log_warn("Bridge Edge Loops: " + err); return; }
+    app_.mesh_.edit("Bridge Edge Loops", [&](EditMesh& mm, MeshSelection& sel) { mm = std::move(trial); sel = s; });
 }
 
-void EditorApp::dissolve_selected_edges_() {
-    std::set<Edge> es = mesh_.selection.edges;
-    if (mesh_.selection.mode != SelectMode::Edge) {
-        const auto vs = mesh_.selection.affected_vertices(mesh_.mesh);
-        for (const auto& e : mesh_.mesh.edges()) if (vs.count(e.first) && vs.count(e.second)) es.insert(e);
+void MeshToolsPanel::dissolve_selected_edges_() {
+    std::set<Edge> es = app_.mesh_.selection.edges;
+    if (app_.mesh_.selection.mode != SelectMode::Edge) {
+        const auto vs = app_.mesh_.selection.affected_vertices(app_.mesh_.mesh);
+        for (const auto& e : app_.mesh_.mesh.edges()) if (vs.count(e.first) && vs.count(e.second)) es.insert(e);
     }
     size_t skipped = 0;
-    mesh_.edit("Dissolve Edges", [&](EditMesh& mm, MeshSelection& s) { dissolve_edges(mm, s, es, true, &skipped); });
-    if (skipped) log_warn("Dissolve: skipped " + std::to_string(skipped) + " region(s) that would leave a hole");
+    app_.mesh_.edit("Dissolve Edges", [&](EditMesh& mm, MeshSelection& s) { dissolve_edges(mm, s, es, true, &skipped); });
+    if (skipped) app_.log_warn("Dissolve: skipped " + std::to_string(skipped) + " region(s) that would leave a hole");
 }
 
-void EditorApp::dissolve_selected_faces_() {
-    const auto fs = mesh_.selection.affected_faces(mesh_.mesh);
-    const MeshTopology t(mesh_.mesh);
+void MeshToolsPanel::dissolve_selected_faces_() {
+    const auto fs = app_.mesh_.selection.affected_faces(app_.mesh_.mesh);
+    const MeshTopology t(app_.mesh_.mesh);
     std::set<Edge> interior;
     for (uint32_t e = 0; e < t.edges.size(); ++e) {
         const auto adj = t.faces_of(e);
         if (adj.size() == 2 && fs.count(adj[0]) && fs.count(adj[1])) interior.insert(t.edges[e]);
     }
     size_t skipped = 0;
-    mesh_.edit("Dissolve Faces", [&](EditMesh& mm, MeshSelection& s) { dissolve_edges(mm, s, interior, true, &skipped); });
-    if (skipped) log_warn("Dissolve: skipped " + std::to_string(skipped) + " region(s) that would leave a hole");
+    app_.mesh_.edit("Dissolve Faces", [&](EditMesh& mm, MeshSelection& s) { dissolve_edges(mm, s, interior, true, &skipped); });
+    if (skipped) app_.log_warn("Dissolve: skipped " + std::to_string(skipped) + " region(s) that would leave a hole");
 }
 
 } // namespace editor

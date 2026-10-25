@@ -3,7 +3,8 @@
  * @brief Viewport math (projection, rays, picking) and the translate/rotate/scale gizmo.
  *
  * The gizmo is drawn in the immediate-mode UI layer, at full window resolution on top of
- * the (low-resolution, pixel-art) scene image, and hit-tested in window pixels -- the space
+ * the scene image (which renders at its own internal resolution), and hit-tested in window
+ * pixels -- the space
  * the user actually aims in. It reports CUMULATIVE deltas since the drag began, so the
  * caller applies them to the values captured at drag start and never accumulates rounding.
  */

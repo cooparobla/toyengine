@@ -1,4 +1,8 @@
+#include "editor/app/ui/world_generator.h"
+#include "editor/app/ui/tile_mode.h"
+
 #include "editor/app/editor_app.h"
+#include "editor/app/ui/tile_terrain_panel.h"
 
 #include <cmath>
 #include <cstdio>
@@ -158,7 +162,7 @@ const std::vector<std::string>& shape_names() {
 }
 
 /** @brief A preview of `authored`: generated at its own grid size, rendered small. Runs on a worker. */
-EditorApp::WorldPreview make_world_preview(MapConfig authored, int layer, bool planet, int preview_px,
+WorldGeneratorPanel::WorldPreview make_world_preview(MapConfig authored, int layer, bool planet, int preview_px,
                                            std::uint64_t serial) {
     static coopa::debug::Logger logger("world_preview");
     // A planet's map is generated on a sphere (as the terrain does) and previewed unrolled.
@@ -175,7 +179,7 @@ EditorApp::WorldPreview make_world_preview(MapConfig authored, int layer, bool p
         case 3: image = coopa::maps::MapLayers::water(graph, config); break;
         default: image = coopa::maps::MapLayers::composite(graph, config); break;
     }
-    EditorApp::WorldPreview out;
+    WorldGeneratorPanel::WorldPreview out;
     out.serial = serial;
     out.width = image.width;
     out.height = image.height;
@@ -198,14 +202,14 @@ EditorApp::WorldPreview make_world_preview(MapConfig authored, int layer, bool p
 }
 } // namespace
 
-void EditorApp::open_world_generator(ObjectId id) {
-    if (id == 0) id = doc_.primary();
-    const int ci = doc_.find_component(id, "TileTerrain");
+void WorldGeneratorPanel::open_world_generator(ObjectId id) {
+    if (id == 0) id = app_.doc_.primary();
+    const int ci = app_.doc_.find_component(id, "TileTerrain");
     if (ci < 0) {
-        log_warn("World Generator: select a TileTerrain first");
+        app_.log_warn("World Generator: select a TileTerrain first");
         return;
     }
-    const Node comp = doc_.find(id)->at("components").as_seq()[static_cast<std::size_t>(ci)];
+    const Node comp = app_.doc_.find(id)->at("components").as_seq()[static_cast<std::size_t>(ci)];
     wgen_object_ = id;
     wgen_config_ = toy::world::generator_config_from_node(comp);
     const toy::world::TerrainParams defaults;
@@ -222,10 +226,10 @@ void EditorApp::open_world_generator(ObjectId id) {
     wgen_gravity_ = get_float(comp, "gravity", 9.81f);
     wgen_requested_ = wgen_started_ + 1;
     wgen_changed_at_ = 0.0;   // preview at once
-    pending_modal_ = "World Generator";
+    app_.pending_modal_ = "World Generator";
 }
 
-void EditorApp::wgen_tick_preview_() {
+void WorldGeneratorPanel::wgen_tick_preview_() {
     // A finished preview lands.
     if (wgen_job_.valid() && wgen_job_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
         wgen_preview_ = wgen_job_.get();
@@ -240,26 +244,26 @@ void EditorApp::wgen_tick_preview_() {
     }
     // Generate World: bake once the re-parsed terrain carries the new settings.
     if (wgen_regen_object_ != 0) {
-        coopa::scene::SceneObject* live = sync_.live(wgen_regen_object_);
+        coopa::scene::SceneObject* live = app_.sync_.live(wgen_regen_object_);
         auto* t = live ? live->get_component<toy::world::TerrainComponent>() : nullptr;
         const bool ready = t != nullptr &&
                            fkyaml::node::serialize(toy::world::generator_node(t->generator)) == wgen_regen_expect_ &&
-                           !t->baking() && !tile_regen_data_;
+                           !t->baking() && !app_.tile_mode_panel_->tile_regen_data_;
         if (ready) {
-            tile_regenerate_(wgen_regen_object_);
+            app_.tile_mode_panel_->tile_regenerate_(wgen_regen_object_);
             wgen_regen_object_ = 0;
         } else if (++wgen_regen_frames_ > 600) {
-            log_warn("World Generator: the terrain did not pick up the new settings; use Regenerate World");
+            app_.log_warn("World Generator: the terrain did not pick up the new settings; use Regenerate World");
             wgen_regen_object_ = 0;
         }
     }
 }
 
-void EditorApp::wgen_apply_() {
+void WorldGeneratorPanel::wgen_apply_() {
     const ObjectId id = wgen_object_;
-    const int ci = doc_.find_component(id, "TileTerrain");
+    const int ci = app_.doc_.find_component(id, "TileTerrain");
     if (ci < 0) return;
-    Node comp = doc_.find(id)->at("components").as_seq()[static_cast<std::size_t>(ci)];
+    Node comp = app_.doc_.find(id)->at("components").as_seq()[static_cast<std::size_t>(ci)];
     for (const char* key : toy::world::k_legacy_generator_keys) erase_key(comp, key);
     wgen_config_.image_size = coopa::maps::derive_image_size(wgen_config_);
     const Node gen = toy::world::generator_node(wgen_config_);
@@ -280,13 +284,13 @@ void EditorApp::wgen_apply_() {
     comp["height_scale"] = make_float(wgen_height_scale_);
     comp["water_inset"] = make_float(wgen_water_inset_);
     comp["river_inset"] = make_float(wgen_river_inset_);
-    apply_(doc_.set_component(id, ci, comp, "World Generator"));
+    app_.apply_(app_.doc_.set_component(id, ci, comp, "World Generator"));
     wgen_regen_object_ = id;
     wgen_regen_expect_ = fkyaml::node::serialize(gen);
     wgen_regen_frames_ = 0;
 }
 
-void EditorApp::wgen_draw_preview_(imm::Context& ctx, const imm::Box& box) {
+void WorldGeneratorPanel::wgen_draw_preview_(imm::Context& ctx, const imm::Box& box) {
     ctx.fill(box, ctx.style.panel_alt);
     const WorldPreview& p = wgen_preview_;
     if (p.width <= 0 || p.height <= 0) return;
@@ -325,20 +329,20 @@ void EditorApp::wgen_draw_preview_(imm::Context& ctx, const imm::Box& box) {
     }
 }
 
-void EditorApp::draw_world_generator_modal_(imm::Context& ctx) {
+void WorldGeneratorPanel::draw_world_generator_modal_(imm::Context& ctx) {
     using I = imm::Icon;
     wgen_tick_preview_();
     const glm::vec2 canvas = ctx.canvas_size();
     const glm::vec2 size{std::min(1060.0f, canvas.x - 40.0f), std::min(700.0f, canvas.y - 40.0f)};
     if (!ctx.begin_modal("World Generator", size)) {
-        if (wgen_object_ != 0 && pending_modal_ != "World Generator") wgen_object_ = 0;   // closed (Esc)
+        if (wgen_object_ != 0 && app_.pending_modal_ != "World Generator") wgen_object_ = 0;   // closed (Esc)
         return;
     }
     const auto close = [&] {
         wgen_object_ = 0;
         ctx.close_modal();
     };
-    if (wgen_close_ || wgen_object_ == 0 || doc_.find_component(wgen_object_, "TileTerrain") < 0) {
+    if (wgen_close_ || wgen_object_ == 0 || app_.doc_.find_component(wgen_object_, "TileTerrain") < 0) {
         wgen_close_ = false;
         close();
         ctx.end_modal();
@@ -360,7 +364,7 @@ void EditorApp::draw_world_generator_modal_(imm::Context& ctx) {
     ctx.begin_region("wgen_categories", list, false, &ctx.style.panel_alt);
     for (const int i : k_category_order) {
         if (ctx.selectable(k_categories[i], i == wgen_category_)) wgen_category_ = i;
-        test_rects_[std::string("world_generator:") + k_categories[i]] = ctx.last_rect();
+        app_.test_rects_[std::string("world_generator:") + k_categories[i]] = ctx.last_rect();
     }
     ctx.end_region();
 
@@ -375,7 +379,7 @@ void EditorApp::draw_world_generator_modal_(imm::Context& ctx) {
         int seed = c.seed;
         if (ctx.drag_int("Seed", &seed, 0.2f, 0, 2000000000)) { c.seed = seed; edited = true; }
         ctx.tooltip("Seed\nThe same seed and settings always make the same world");
-        test_rects_["world_generator:seed"] = ctx.last_rect();
+        app_.test_rects_["world_generator:seed"] = ctx.last_rect();
         if (ctx.button("New Random Seed", -1, true, I::Restart)) {
             std::random_device rd;
             c.seed = static_cast<int>(rd() % 1000000000u);
@@ -440,7 +444,7 @@ void EditorApp::draw_world_generator_modal_(imm::Context& ctx) {
                 edited = true;
             }
         }
-        test_rects_[std::string("world_generator:") + row.label] = ctx.last_rect();
+        app_.test_rects_[std::string("world_generator:") + row.label] = ctx.last_rect();
         ctx.tooltip(std::string(row.label) + "\n" + row.help);
     }
     if (wgen_category_ == 0) {
@@ -449,7 +453,7 @@ void EditorApp::draw_world_generator_modal_(imm::Context& ctx) {
         if (ctx.checkbox("Planet", &wgen_planet_)) edited = true;
         ctx.tooltip("Planet\nA small round world: the map is generated on a sphere and its tiles wrap a globe, with "
                     "gravity pulling toward the centre. Off: a flat map, as always");
-        test_rects_["world_generator:Planet"] = ctx.last_rect();
+        app_.test_rects_["world_generator:Planet"] = ctx.last_rect();
         if (wgen_planet_) {
             ctx.drag_int("Face Size (tiles)", &wgen_face_tiles_, 0.5f, 16, 512);
             ctx.tooltip("Face Size\nTiles along one edge of each of the six faces the globe is made of; the "
@@ -461,7 +465,7 @@ void EditorApp::draw_world_generator_modal_(imm::Context& ctx) {
             ctx.tooltip("World Size\nHow many tiles per side the map is cut into -- the world's size, whatever the map's "
                         "cell count (Map Cells sets its detail)");
         }
-        test_rects_["world_generator:World Size (tiles)"] = ctx.last_rect();
+        app_.test_rects_["world_generator:World Size (tiles)"] = ctx.last_rect();
         ctx.drag_float("Tile Size (m)", &wgen_tile_size_, 0.01f, 0.05f, 100.0f);
         ctx.tooltip("Tile Size\nWidth of one tile in world units; with World Size, the world's extent");
         if (ctx.drag_float("Height Range (m)", &wgen_height_scale_, 0.1f, 1.0f, 256.0f)) edited = true;
@@ -512,12 +516,12 @@ void EditorApp::draw_world_generator_modal_(imm::Context& ctx) {
     }
     ctx.tooltip("Detail\nPixels per side the preview map is drawn at. Higher resolves rivers, coasts and biome edges "
                 "the small map merges away; it costs the preview thread time, not the editor's frame");
-    test_rects_["world_generator:Detail (px)"] = ctx.last_rect();
+    app_.test_rects_["world_generator:Detail (px)"] = ctx.last_rect();
     const float map_side = std::min(right.w - 8.0f, right.h - ctx.style.row_height * 5 - 16.0f);
     // A planet's preview is the globe unrolled (twice as wide as tall).
     const imm::Box map = wgen_planet_ ? ctx.next_box(map_side, map_side * 0.5f) : ctx.next_box(map_side, map_side);
     wgen_draw_preview_(ctx, map);
-    test_rects_["world_generator:preview"] = map;
+    app_.test_rects_["world_generator:preview"] = map;
     if (wgen_job_.valid() || wgen_requested_ != wgen_started_) {
         ctx.label("Generating the preview...", &dim);
     } else if (wgen_preview_.width > 0) {
@@ -537,7 +541,7 @@ void EditorApp::draw_world_generator_modal_(imm::Context& ctx) {
 
     // Footer.
     ctx.set_cursor_y(top.y + body_h + 6);
-    const toy::world::TerrainComponent* live = live_tile_terrain_(wgen_object_);
+    const toy::world::TerrainComponent* live = app_.tile_terrain_panel_->live_tile_terrain_(wgen_object_);
     if (live && live->tiles && !live->tiles->empty()) {
         ctx.label("Generate World replaces the terrain's tiles -- your tile edits included. It can be undone.", &dim);
     } else {
@@ -559,7 +563,7 @@ void EditorApp::draw_world_generator_modal_(imm::Context& ctx) {
     ctx.tooltip("Reset to Defaults\nThe standard map -- what the mapcoopa tool generates with no settings -- in the natural "
                 "terrain model");
     ctx.same_line();
-    const bool can_generate = !playing() && !tile_regen_data_ && !(live && live->baking());
+    const bool can_generate = !app_.playing() && !app_.tile_mode_panel_->tile_regen_data_ && !(live && live->baking());
     if (ctx.button("Generate World", 170, can_generate, I::World) || (wgen_generate_ && can_generate)) {
         wgen_generate_ = false;
         wgen_apply_();
@@ -567,7 +571,7 @@ void EditorApp::draw_world_generator_modal_(imm::Context& ctx) {
         ctx.end_modal();
         return;
     }
-    test_rects_["world_generator:generate"] = ctx.last_rect();
+    app_.test_rects_["world_generator:generate"] = ctx.last_rect();
     ctx.same_line();
     if (ctx.button("Cancel", 100)) close();
     ctx.end_modal();

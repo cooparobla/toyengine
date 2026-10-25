@@ -66,6 +66,9 @@
 #include <gfxcoopa/engine/components/directional_light.h>
 #include <gfxcoopa/engine/components/volume.h>
 
+#include <coopa/scene/scene_system.h>   // ISceneSystem (was reaching here via ground_probe.h)
+#include <coopa/scene/scene.h>          // Scene, dereferenced inline below
+#include <coopa/event/signal.h>         // Signal
 #include <toyengine/weather/ground_probe.h>
 #include <toyengine/weather/sky_model.h>
 #include <toyengine/weather/weather_surface.h>

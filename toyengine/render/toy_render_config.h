@@ -128,7 +128,7 @@ bool debug_view_is_editor_shading(DebugView view);
 /**
  * @struct ToyRenderConfig
  * @brief Configuration for ToyRenderPipeline: internal resolution, upscaling,
- *        banded lighting, hard shadows, and the pixel-art post-process stack
+ *        banded lighting, hard shadows, and the stylisation post-process stack
  *        (outline, palette quantization, ordered dithering), plus the
  *        independently-toggleable SSAO / SSR add-ons.
  */
@@ -281,8 +281,8 @@ struct ToyRenderConfig {
      * aspect so the image fills it (the Engine rebuilds the pipeline when that aspect changes).
      */
     std::string resolution_mode = "fixed";
-    uint32_t    render_width    = 480;       /**< Used when resolution_mode == "fixed". */
-    uint32_t    render_height   = 270;       /**< Used when resolution_mode == "fixed" or "fill". */
+    uint32_t    render_width    = 1920;      /**< Used when resolution_mode == "fixed". */
+    uint32_t    render_height   = 1080;      /**< Used when resolution_mode == "fixed" or "fill". */
     /// fill mode: the display region's aspect (width / height). Set by the Engine, not YAML;
     /// 0 = use the swapchain's.
     float       fill_aspect     = 0.0f;
@@ -779,7 +779,7 @@ struct ToyRenderConfig {
     float dither_strength = 0.0f;             /**< 0 disables ordered dithering. */
 
     /**
-     * Texel-AA sampling for the pixel-art material textures (STARTUP-FIXED: chooses the
+     * Texel-AA sampling for hard-edged material textures (STARTUP-FIXED: chooses the
      * TextureLoader's sampler at construction). True binds them LINEAR
      * (SamplerDesc::pixel_art_smooth()) and gbuffer.frag sharpens UVs with
      * gfx_texel_aa_uv(), which keeps texel interiors as flat and hard-edged as point
@@ -1117,8 +1117,8 @@ struct ToyRenderConfig {
     /**
      * Diorama-style tilt-shift blur (Zelda: Link's Awakening [Switch] reference) -- see
      * gfxcoopa's TiltShiftPass. Unlike every other post effect here, it runs at DISPLAY
-     * resolution, after the pixel-art upscale: it's a lens effect layered on the final
-     * image, not a pixel-grid effect, so running it at the low internal resolution would
+     * resolution, after the upscale: it's a lens effect layered on the final
+     * image, not a pixel-grid effect, so running it at a low internal resolution would
      * quantize the blur kernel and the focus ramp to a handful of steps (see
      * TiltShiftPass's own file doc). The circle of confusion is a function of screen
      * position only (no depth sampling), so it stays exact under a separable
@@ -1289,7 +1289,7 @@ struct ToyRenderConfig {
      * The companion to world_ui_enabled, and STARTUP-FIXED for the same reason: it decides
      * whether the pass and its descriptor pool are built at all.
      *
-     * Unlike the world-space layer, this one is not part of the pixel-art image: it draws
+     * Unlike the world-space layer, this one is not part of the upscaled scene image: it draws
      * last, straight into the swapchain-sized overlay target, at full window resolution, so
      * an HUD stays crisp instead of being quantised to the internal render grid. Both UI
      * layers land after every post effect -- see ToyRenderPipeline's ui_composite_pass_.

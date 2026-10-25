@@ -24,6 +24,7 @@
 
 #include <glm/glm.hpp>
 #include <toyengine/core/engine.h>
+#include <gfxcoopa/engine/components/camera_component.h>
 #include <toyengine/scene/camera_controller.h>
 #include <toyengine/scene/free_mover.h>
 #include <toyengine/world/terrain_component.h>

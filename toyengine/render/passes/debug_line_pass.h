@@ -40,7 +40,7 @@
 
 #include <gfxcoopa/presentation/renderer.h>
 
-#include <toyengine/render/toy_render_math.h>
+#include <toyengine/render/render_types.h>
 
 namespace toy {
 namespace render {

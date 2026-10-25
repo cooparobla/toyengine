@@ -1,9 +1,11 @@
+#include "editor/app/ui/build.h"
+
 #include "editor/app/editor_app.h"
 
 namespace toy {
 namespace editor {
 
-std::string EditorApp::default_build_command() {
+std::string BuildPanel::default_build_command() {
     const fs::path exe = current_executable();
     const fs::path dir = exe.parent_path();
     std::string targets = " --target " + shell_quote(exe.filename().string());
@@ -13,9 +15,9 @@ std::string EditorApp::default_build_command() {
     return tool_path_prefix() + "cmake --build " + shell_quote(dir.string()) + targets + " --parallel " + std::to_string(jobs);
 }
 
-void EditorApp::build_refresh(const std::string& command) {
+void BuildPanel::build_refresh(const std::string& command) {
     if (build_task_.running()) return;
-    stop();   // the running game holds the old code
+    app_.stop();   // the running game holds the old code
     build_kind_ = BuildKind::Refresh;
     build_diags_.clear();
     build_relaunch_offered_ = false;
@@ -23,29 +25,29 @@ void EditorApp::build_refresh(const std::string& command) {
     std::error_code ec;
     build_binary_stamp_ = fs::last_write_time(exe, ec);
     if (command.empty() && !fs::exists(exe.parent_path() / "CMakeCache.txt", ec)) {
-        log_error("Build: " + exe.parent_path().string() + " is not a CMake build directory");
+        app_.log_error("Build: " + exe.parent_path().string() + " is not a CMake build directory");
         return;
     }
-    build_task_.start("Refresh " + project_.name(), command.empty() ? default_build_command() : command);
+    build_task_.start("Refresh " + app_.project_.name(), command.empty() ? default_build_command() : command);
     build_log_.follow();
     build_gen_ = build_task_.generation();
-    pending_modal_ = "Build Project";
-    log_info("Build > Refresh: building " + project_.name() + "...");
+    app_.pending_modal_ = "Build Project";
+    app_.log_info("Build > Refresh: building " + app_.project_.name() + "...");
 }
 
-void EditorApp::build_game(BuildProfile profile, bool run_after, BuildRequest req) {
+void BuildPanel::build_game(BuildProfile profile, bool run_after, BuildRequest req) {
     if (build_task_.running()) return;
-    stop();
+    app_.stop();
     build_diags_.clear();
     build_relaunch_offered_ = false;
     build_kind_ = BuildKind::Game;
     build_run_after_ = run_after;
     req.profile = profile;
-    const BuildSettings settings = BuildSettings::load(project_);
+    const BuildSettings settings = BuildSettings::load(app_.project_);
     build_settings_snapshot_ = settings;
     auto result = std::make_shared<BuildResult>();
     build_game_result_ = result;
-    const Project project = project_;
+    const Project project = app_.project_;
     build_task_.start(std::string("Build ") + settings.product_name + " (" + profile_name(profile) + ")",
                       [project, settings, req, result](Task::JobContext& job) {
                           CommandRunner run(job);
@@ -54,21 +56,21 @@ void EditorApp::build_game(BuildProfile profile, bool run_after, BuildRequest re
                       });
     build_log_.follow();
     build_gen_ = build_task_.generation();
-    pending_modal_ = "Build Project";
-    log_info(std::string("Build: building ") + settings.product_name + " (" + profile_name(profile) + ")...");
+    app_.pending_modal_ = "Build Project";
+    app_.log_info(std::string("Build: building ") + settings.product_name + " (" + profile_name(profile) + ")...");
 }
 
-std::optional<BuildResult> EditorApp::last_build_result() const {
+std::optional<BuildResult> BuildPanel::last_build_result() const {
     if (build_task_.running() || !build_game_result_) return std::nullopt;
     return *build_game_result_;
 }
 
-void EditorApp::relaunch_after_build() {
-    if (!has_unsaved()) { relaunch_ = true; return; }
-    confirm_unsaved_([this] { force_quit_ = true; relaunch_ = true; });
+void BuildPanel::relaunch_after_build() {
+    if (!app_.has_unsaved()) { relaunch_ = true; return; }
+    app_.confirm_unsaved_([this] { app_.force_quit_ = true; relaunch_ = true; });
 }
 
-void EditorApp::draw_build_menu_(imm::Context& ctx) {
+void BuildPanel::draw_build_menu_(imm::Context& ctx) {
     using I = imm::Icon;
     if (ctx.begin_menu("Build")) {
         const bool idle = !build_task_.running();
@@ -83,13 +85,13 @@ void EditorApp::draw_build_menu_(imm::Context& ctx) {
         ctx.menu_separator();
         if (ctx.menu_item("Refresh", "Shift Ctrl B", nullptr, idle, I::Restart)) build_refresh();
         ctx.tooltip("Rebuild this project's game and editor so src/ changes made outside the editor take effect");
-        if (ctx.menu_item("Package Assets (.caml)...", "", nullptr, true, I::Package)) open_package_dialog_();
+        if (ctx.menu_item("Package Assets (.caml)...", "", nullptr, true, I::Package)) app_.open_package_dialog_();
         ctx.tooltip("Only the encoded assets/ folder, no executable");
         ctx.end_menu();
     }
 }
 
-void EditorApp::poll_build_() {
+void BuildPanel::poll_build_() {
     if (build_gen_ == 0 || build_task_.running() || build_task_.generation() != build_gen_) return;
     build_gen_ = 0;
     const auto lines = build_task_.lines();
@@ -103,34 +105,34 @@ void EditorApp::poll_build_() {
     int errors = 0, warnings = 0;
     for (const auto& d : build_diags_) {
         const std::string where = d.file + (d.line > 0 ? ":" + std::to_string(d.line) : "");
-        if (d.error) { ++errors; log_error("Build: " + where + ": " + d.message); }
-        else { ++warnings; log_warn("Build: " + where + ": " + d.message); }
+        if (d.error) { ++errors; app_.log_error("Build: " + where + ": " + d.message); }
+        else { ++warnings; app_.log_warn("Build: " + where + ": " + d.message); }
     }
     if (build_kind_ == BuildKind::Game) {
-        if (build_task_.cancelled()) { log_warn("Build cancelled"); return; }
+        if (build_task_.cancelled()) { app_.log_warn("Build cancelled"); return; }
         const BuildResult r = build_game_result_ ? *build_game_result_ : BuildResult{};
-        for (const auto& w : r.warnings) log_warn("Build: " + w);
-        if (!r.ok) { log_error("Build failed: " + r.error); return; }
-        log_info("Build succeeded: " + r.artifact.string() + (r.archive.empty() ? std::string() : " (" + r.archive.filename().string() + ")"));
+        for (const auto& w : r.warnings) app_.log_warn("Build: " + w);
+        if (!r.ok) { app_.log_error("Build failed: " + r.error); return; }
+        app_.log_info("Build succeeded: " + r.artifact.string() + (r.archive.empty() ? std::string() : " (" + r.archive.filename().string() + ")"));
         if (build_run_after_) run_built_game_(r);
         return;
     }
     if (build_task_.cancelled()) {
-        log_warn("Build cancelled");
+        app_.log_warn("Build cancelled");
     } else if (build_task_.succeeded()) {
         std::error_code ec;
         const bool changed = fs::last_write_time(current_executable(), ec) != build_binary_stamp_;
         build_relaunch_offered_ = changed;
-        log_info(changed ? "Build succeeded -- relaunch the editor to load the new code"
+        app_.log_info(changed ? "Build succeeded -- relaunch the editor to load the new code"
                          : "Build succeeded -- already up to date");
     } else {
-        if (errors == 0) log_error("Build failed (exit " + std::to_string(build_task_.exit_code()) + ") -- see the build log");
-        else log_error("Build failed: " + std::to_string(errors) + " error" + (errors == 1 ? "" : "s") +
+        if (errors == 0) app_.log_error("Build failed (exit " + std::to_string(build_task_.exit_code()) + ") -- see the build log");
+        else app_.log_error("Build failed: " + std::to_string(errors) + " error" + (errors == 1 ? "" : "s") +
                        (warnings ? ", " + std::to_string(warnings) + " warning" + (warnings == 1 ? "" : "s") : ""));
     }
 }
 
-void EditorApp::draw_build_modal_(imm::Context& ctx) {
+void BuildPanel::draw_build_modal_(imm::Context& ctx) {
     const glm::vec2 cs = ctx.canvas_size();
     // Not "Build": that id is the top bar's Build menu, which would then draw inside the modal.
     if (!ctx.begin_modal("Build Project", {std::min(900.0f, cs.x - 60), std::min(600.0f, cs.y - 60)})) return;
@@ -146,7 +148,7 @@ void EditorApp::draw_build_modal_(imm::Context& ctx) {
     const BuildResult game_res = game && build_game_result_ && !running ? *build_game_result_ : BuildResult{};
     if (running) {
         static const char* spin[] = {"|", "/", "-", "\\"};
-        head = std::string(spin[(engine_.frame_count() / 8) % 4]) + "  " + build_task_.title() + " ...";
+        head = std::string(spin[(app_.engine_.frame_count() / 8) % 4]) + "  " + build_task_.title() + " ...";
     } else if (build_task_.cancelled()) {
         head = "Build cancelled";
         col = st.warning;
@@ -215,7 +217,7 @@ void EditorApp::draw_build_modal_(imm::Context& ctx) {
             std::string all;
             for (const auto& l : build_task_.lines()) all += l + "\n";
             if (ctx.input().set_clipboard) ctx.input().set_clipboard(all);
-            log_info("Build log copied to the clipboard");
+            app_.log_info("Build log copied to the clipboard");
         }
     } else {
         if (build_relaunch_offered_) {
@@ -234,13 +236,13 @@ void EditorApp::draw_build_modal_(imm::Context& ctx) {
             std::string all;
             for (const auto& l : build_task_.lines()) all += l + "\n";
             if (ctx.input().set_clipboard) ctx.input().set_clipboard(all);
-            log_info("Build log copied to the clipboard");
+            app_.log_info("Build log copied to the clipboard");
         }
     }
     ctx.end_modal();
 }
 
-bool EditorApp::build_button_(imm::Context& ctx, const char* label, const imm::Box& b, bool primary) {
+bool BuildPanel::build_button_(imm::Context& ctx, const char* label, const imm::Box& b, bool primary) {
     bool hov = false, held = false;
     const bool clicked = ctx.invisible_button(label, b, &hov, &held);
     const imm::Style& st = ctx.style;
@@ -252,14 +254,14 @@ bool EditorApp::build_button_(imm::Context& ctx, const char* label, const imm::B
     return clicked;
 }
 
-void EditorApp::run_built_game_(const BuildResult& r) {
+void BuildPanel::run_built_game_(const BuildResult& r) {
     if (!r.ok) return;
     const std::string name = build_settings_snapshot_ ? build_settings_snapshot_->file_name() : r.executable.filename().string();
-    launch_detached(artifact_launch_command(r.artifact, name), project_.root() / ".toyeditor" / "game_run.log");
-    log_info("Running " + r.artifact.filename().string());
+    launch_detached(artifact_launch_command(r.artifact, name), app_.project_.root() / ".toyeditor" / "game_run.log");
+    app_.log_info("Running " + r.artifact.filename().string());
 }
 
-void EditorApp::reveal_in_file_browser_(const fs::path& p) {
+void BuildPanel::reveal_in_file_browser_(const fs::path& p) {
 #if defined(__APPLE__)
     [[maybe_unused]] const int rc = std::system(("open -R " + shell_quote(p.string())).c_str());
 #else
@@ -267,13 +269,13 @@ void EditorApp::reveal_in_file_browser_(const fs::path& p) {
 #endif
 }
 
-void EditorApp::open_build_settings_() {
-    build_settings_edit_ = BuildSettings::load(project_);
+void BuildPanel::open_build_settings_() {
+    build_settings_edit_ = BuildSettings::load(app_.project_);
     sign_identities_.clear();
-    pending_modal_ = "Build Settings";
+    app_.pending_modal_ = "Build Settings";
 }
 
-void EditorApp::draw_build_settings_modal_(imm::Context& ctx) {
+void BuildPanel::draw_build_settings_modal_(imm::Context& ctx) {
     if (!ctx.begin_modal("Build Settings", {640, 0})) return;
     BuildSettings& s = build_settings_edit_;
     ctx.label(std::string("Platform: ") + host_platform_name() + " (" + host_arch_name() + ") -- builds target this machine");
@@ -314,11 +316,11 @@ void EditorApp::draw_build_settings_modal_(imm::Context& ctx) {
     ctx.separator();
     if (ctx.button("Save", 110)) {
         try {
-            s.save(project_);
-            log_info("Saved " + std::string(BuildSettings::k_file_name));
+            s.save(app_.project_);
+            app_.log_info("Saved " + std::string(BuildSettings::k_file_name));
             ctx.close_modal();
         } catch (const std::exception& e) {
-            log_error(std::string("Save build settings failed: ") + e.what());
+            app_.log_error(std::string("Save build settings failed: ") + e.what());
         }
     }
     ctx.same_line();

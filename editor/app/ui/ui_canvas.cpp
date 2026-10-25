@@ -1,9 +1,21 @@
+#include "editor/app/ui/ui_canvas.h"
+#include "editor/app/ui/assets.h"
+
 #include "editor/app/editor_app.h"
+#include "editor/app/ui/theme_editor.h"
 
 namespace toy {
 namespace editor {
 
-const std::vector<EditorApp::UiResolution>& EditorApp::ui_resolutions_() {
+bool UiCanvasPanel::ui_mode() const {
+    return app_.active_type_ == AssetType::UI;
+}
+
+coopa::scene::SceneObject* UiCanvasPanel::ui_root_live_() {
+    return app_.sync_.live(app_.doc_.object_root());
+}
+
+const std::vector<UiCanvasPanel::UiResolution>& UiCanvasPanel::ui_resolutions_() {
     static const std::vector<UiResolution> r = {
         {"1920 x 1080  (16:9)", 1920, 1080}, {"1280 x 720  (16:9)", 1280, 720}, {"2560 x 1440  (16:9)", 2560, 1440},
         {"3840 x 2160  (4K)", 3840, 2160}, {"2560 x 1080  (21:9)", 2560, 1080}, {"1280 x 800  (16:10 handheld)", 1280, 800},
@@ -12,39 +24,39 @@ const std::vector<EditorApp::UiResolution>& EditorApp::ui_resolutions_() {
     return r;
 }
 
-void EditorApp::set_ui_resolution(glm::vec2 r) { ui_res_ = r; ui_fit_ = true; }
+void UiCanvasPanel::set_ui_resolution(glm::vec2 r) { ui_res_ = r; ui_fit_ = true; }
 
-std::optional<ui::Rect> EditorApp::ui_live_rect(ObjectId id) {
-    auto* live = sync_.live(id);
+std::optional<ui::Rect> UiCanvasPanel::ui_live_rect(ObjectId id) {
+    auto* live = app_.sync_.live(id);
     auto* rt = live ? live->get_component<coopa::ui::RectTransform>() : nullptr;
     if (!rt) return std::nullopt;
     if (auto* c = live->get_component<coopa::ui::CanvasComponent>()) return c->root_rect();
     return rt->rect();
 }
 
-bool EditorApp::open_ui_asset(const fs::path& path) {
-    stop();
+bool UiCanvasPanel::open_ui_asset(const fs::path& path) {
+    app_.stop();
     try {
-        doc_.load(path);
+        app_.doc_.load(path);
     } catch (const std::exception& e) {
-        log_error(std::string("Open UI failed: ") + e.what());
+        app_.log_error(std::string("Open UI failed: ") + e.what());
         return false;
     }
-    if (!doc_.is_object_asset()) { log_error(project_.relative(path) + " is not a UI asset (no `object:`)"); return false; }
+    if (!app_.doc_.is_object_asset()) { app_.log_error(app_.project_.relative(path) + " is not a UI asset (no `object:`)"); return false; }
     ui_set_interact_(false);
-    set_view_(AssetType::UI);
-    asset_tab_ = AssetType::UI;
-    active_path_ = path;
-    sync_.fallback_path = path;
+    app_.set_view_(AssetType::UI);
+    app_.asset_tab_ = AssetType::UI;
+    app_.active_path_ = path;
+    app_.sync_.fallback_path = path;
     ui_load_editor_extras_();
-    rebuild_scene_();
-    if (ObjectId root = doc_.object_root()) doc_.select(root);
+    app_.rebuild_scene_();
+    if (ObjectId root = app_.doc_.object_root()) app_.doc_.select(root);
     ui_fit_ = true;
-    log_info("Opened UI " + project_.relative(path) + "  (Shift A adds widgets; Tab: Interact)");
+    app_.log_info("Opened UI " + app_.project_.relative(path) + "  (Shift A adds widgets; Tab: Interact)");
     return true;
 }
 
-std::vector<std::string> EditorApp::ui_templates() {
+std::vector<std::string> UiCanvasPanel::ui_templates() {
     std::vector<std::string> out;
     std::error_code ec;
     for (const auto& e : fs::directory_iterator(ui_templates_dir(), ec)) {
@@ -54,12 +66,12 @@ std::vector<std::string> EditorApp::ui_templates() {
     return out;
 }
 
-bool EditorApp::new_ui_asset(const std::string& name, const std::string& template_id) {
+bool UiCanvasPanel::new_ui_asset(const std::string& name, const std::string& template_id) {
     std::string base = name.empty() ? std::string("new_ui") : name;
     for (char& c : base) if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_') c = '_';
-    const std::string dir = new_asset_dir_("ui");
-    const std::string n = unique_asset_name_(dir, base);
-    const fs::path path = project_.assets() / dir / (n + ".yaml");
+    const std::string dir = app_.assets_panel_->new_asset_dir_("ui");
+    const std::string n = app_.unique_asset_name_(dir, base);
+    const fs::path path = app_.project_.assets() / dir / (n + ".yaml");
     Node doc;
     if (template_id == "blank" || template_id == "widget") {
         Node obj = Node::mapping();
@@ -84,7 +96,7 @@ bool EditorApp::new_ui_asset(const std::string& name, const std::string& templat
         try {
             doc = coopa::yaml::load_document(ui_templates_dir() / (template_id + ".yaml"));
         } catch (const std::exception& e) {
-            log_error("UI template '" + template_id + "': " + e.what());
+            app_.log_error("UI template '" + template_id + "': " + e.what());
             return false;
         }
         if (doc.contains("object") && doc["object"].is_mapping()) doc["object"]["name"] = Node(n);
@@ -93,37 +105,37 @@ bool EditorApp::new_ui_asset(const std::string& name, const std::string& templat
     try {
         fs::create_directories(path.parent_path());
         coopa::yaml::save_document(path, doc);
-        project_.refresh();
+        app_.project_.refresh();
     } catch (const std::exception& e) {
-        log_error(std::string("Create UI failed: ") + e.what());
+        app_.log_error(std::string("Create UI failed: ") + e.what());
         return false;
     }
     return open_ui_asset(path);
 }
 
-ObjectId EditorApp::place_ui_asset(const std::string& ui_rel, ObjectId parent) {
-    if (playing() || asset_view_()) return 0;
+ObjectId UiCanvasPanel::place_ui_asset(const std::string& ui_rel, ObjectId parent) {
+    if (app_.playing() || app_.asset_view_()) return 0;
     const std::string stem = fs::path(ui_rel).stem().string();
-    if (doc_.is_object_asset() && active_path_.stem().string() == stem) { log_warn("A UI asset can't contain itself"); return 0; }
+    if (app_.doc_.is_object_asset() && app_.active_path_.stem().string() == stem) { app_.log_warn("A UI asset can't contain itself"); return 0; }
     std::string ref = strip_yaml_ext(short_ref(fs::path(ui_rel).generic_string()));
     Node obj = Node::mapping();
-    obj["name"] = Node(doc_.unique_name(stem, parent));
+    obj["name"] = Node(app_.doc_.unique_name(stem, parent));
     obj["prefab"] = Node(ref);
     obj["components"] = Node::sequence();
-    const ObjectId id = doc_.add_object(obj, parent, -1, "Place " + stem);
-    after_structure_change_(id);
+    const ObjectId id = app_.doc_.add_object(obj, parent, -1, "Place " + stem);
+    app_.after_structure_change_(id);
     return id;
 }
 
-void EditorApp::ui_load_editor_extras_() {
-    const Node& ex = doc_.object_extras();
+void UiCanvasPanel::ui_load_editor_extras_() {
+    const Node& ex = app_.doc_.object_extras();
     if (ex.is_mapping() && ex.contains("ui_editor")) {
         const Node& u = ex.at("ui_editor");
         ui_res_.x = std::max(64.0f, get_float(u, "preview_width", ui_res_.x));
         ui_res_.y = std::max(64.0f, get_float(u, "preview_height", ui_res_.y));
-    } else if (const Node* root = doc_.find(doc_.object_root())) {
+    } else if (const Node* root = app_.doc_.find(app_.doc_.object_root())) {
         // No preview chosen yet: the canvas's own reference resolution.
-        const int ci = doc_.find_component(doc_.object_root(), "Canvas");
+        const int ci = app_.doc_.find_component(app_.doc_.object_root(), "Canvas");
         if (ci >= 0) {
             const Node& c = root->at("components").as_seq()[static_cast<size_t>(ci)];
             const glm::vec2 rr = ui::read_vec2(c, "reference_resolution", glm::vec2(1920, 1080));
@@ -132,14 +144,14 @@ void EditorApp::ui_load_editor_extras_() {
     }
 }
 
-void EditorApp::ui_store_editor_extras_() {
+void UiCanvasPanel::ui_store_editor_extras_() {
     Node u = Node::mapping();
     u["preview_width"] = Node(static_cast<int64_t>(ui_res_.x));
     u["preview_height"] = Node(static_cast<int64_t>(ui_res_.y));
-    doc_.set_object_extra("ui_editor", u);
+    app_.doc_.set_object_extra("ui_editor", u);
 }
 
-void EditorApp::ui_install_template_themes_() {
+void UiCanvasPanel::ui_install_template_themes_() {
     std::error_code ec;
     auto copy_dir = [&](const fs::path& src, const fs::path& dst) {
         if (!fs::is_directory(src, ec)) return;
@@ -150,35 +162,35 @@ void EditorApp::ui_install_template_themes_() {
             if (!fs::exists(to, ec)) fs::copy_file(e.path(), to, ec);
         }
     };
-    copy_dir(ui_templates_dir() / "themes", project_.assets() / "ui" / "themes");
-    copy_dir(ui_templates_dir() / "fonts", project_.assets() / "fonts");
-    project_.refresh();
+    copy_dir(ui_templates_dir() / "themes", app_.project_.assets() / "ui" / "themes");
+    copy_dir(ui_templates_dir() / "fonts", app_.project_.assets() / "fonts");
+    app_.project_.refresh();
 }
 
-coopa::ui::CanvasComponent* EditorApp::ui_canvas_() {
+coopa::ui::CanvasComponent* UiCanvasPanel::ui_canvas_() {
     if (auto* root = ui_root_live_()) {
         if (auto* c = root->get_component<coopa::ui::CanvasComponent>()) return c;
     }
     return ui_wrapper_ ? ui_wrapper_->get_component<coopa::ui::CanvasComponent>() : nullptr;
 }
 
-const Node* EditorApp::ui_comp_(ObjectId id, const std::string& type) const {
-    const int ci = doc_.find_component(id, type);
-    return ci < 0 ? nullptr : &doc_.find(id)->at("components").as_seq()[static_cast<size_t>(ci)];
+const Node* UiCanvasPanel::ui_comp_(ObjectId id, const std::string& type) const {
+    const int ci = app_.doc_.find_component(id, type);
+    return ci < 0 ? nullptr : &app_.doc_.find(id)->at("components").as_seq()[static_cast<size_t>(ci)];
 }
 
-bool EditorApp::ui_is_leaf_(ObjectId id) const {
+bool UiCanvasPanel::ui_is_leaf_(ObjectId id) const {
     static const char* leaves[] = {"Text", "ThemedText", "ThemedButton", "Button", "Slider", "ProgressBar", "Toggle",
                                    "StatBar", "Hotbar", "ItemGrid", "MessageLog", "PromptBar", "SettingRow",
                                    "InventoryGrid", "ComboBox", "NumberField", "SpinBox", "Image"};
-    for (const char* t : leaves) if (doc_.find_component(id, t) >= 0) return true;
+    for (const char* t : leaves) if (app_.doc_.find_component(id, t) >= 0) return true;
     return false;
 }
 
-void EditorApp::ui_after_rebuild_() {
+void UiCanvasPanel::ui_after_rebuild_() {
     ui_wrapper_ = nullptr;
-    coopa::scene::Scene* scene = sync_.scene();
-    if (!scene || active_type_ != AssetType::UI) return;
+    coopa::scene::Scene* scene = app_.sync_.scene();
+    if (!scene || app_.active_type_ != AssetType::UI) return;
     // Every UI file restyles from its own Theme (or the default): what the previous file
     // made active must not leak into this one.
     auto make = [&](const std::string& name, int sort, bool image) {
@@ -226,8 +238,8 @@ void EditorApp::ui_after_rebuild_() {
     ui_update_backdrop_();
 }
 
-void EditorApp::ui_update_backdrop_() {
-    coopa::scene::Scene* scene = sync_.scene();
+void UiCanvasPanel::ui_update_backdrop_() {
+    coopa::scene::Scene* scene = app_.sync_.scene();
     if (!scene) return;
     auto* bd = scene->find_object("__ui_backdrop");
     if (!bd) return;
@@ -239,9 +251,9 @@ void EditorApp::ui_update_backdrop_() {
     }
 }
 
-void EditorApp::ui_layout_frame_() {
-    const imm::Box vp = viewport_box_;
-    const float s = std::max(1.0f, ui_scale_);
+void UiCanvasPanel::ui_layout_frame_() {
+    const imm::Box vp = app_.viewport_box_;
+    const float s = std::max(1.0f, app_.ui_scale_);
     if (ui_fit_ || ui_zoom_ <= 0.0f) {
         const float margin = 28.0f;
         ui_zoom_ = std::max(0.02f, std::min((vp.w - 2 * margin) * s / ui_res_.x, (vp.h - 2 * margin) * s / ui_res_.y));
@@ -253,9 +265,9 @@ void EditorApp::ui_layout_frame_() {
     ui_frame_ = imm::Box{std::round(c.x - size.x * 0.5f), std::round(c.y - size.y * 0.5f), std::round(size.x), std::round(size.y)};
 }
 
-std::optional<core::Engine::ScreenUiPlacement> EditorApp::ui_preview_placement_() {
+std::optional<core::Engine::ScreenUiPlacement> UiCanvasPanel::ui_preview_placement_() {
     if (ui_frame_.empty()) return std::nullopt;
-    const float s = std::max(1.0f, ui_scale_);
+    const float s = std::max(1.0f, app_.ui_scale_);
     core::Engine::ScreenUiPlacement p;
     p.rect.x = static_cast<int32_t>(std::lround(ui_frame_.x * s));
     p.rect.y = static_cast<int32_t>(std::lround(ui_frame_.y * s));
@@ -266,7 +278,7 @@ std::optional<core::Engine::ScreenUiPlacement> EditorApp::ui_preview_placement_(
     return p;
 }
 
-ui::UiView EditorApp::ui_view_() {
+ui::UiView UiCanvasPanel::ui_view_() {
     ui::UiView v;
     v.origin = {ui_frame_.x, ui_frame_.y};
     glm::vec2 canvas = ui_res_;
@@ -276,29 +288,29 @@ ui::UiView EditorApp::ui_view_() {
     return v;
 }
 
-void EditorApp::ui_zoom_at_(glm::vec2 m, float factor) {
-    const float s = std::max(1.0f, ui_scale_);
+void UiCanvasPanel::ui_zoom_at_(glm::vec2 m, float factor) {
+    const float s = std::max(1.0f, app_.ui_scale_);
     const float old_zoom = ui_zoom_;
     ui_zoom_ = std::clamp(ui_zoom_ * factor, 0.02f, 16.0f);
     const glm::vec2 old_size = ui_res_ * old_zoom / s, new_size = ui_res_ * ui_zoom_ / s;
-    const glm::vec2 centre = viewport_box_.center() + ui_pan_;
+    const glm::vec2 centre = app_.viewport_box_.center() + ui_pan_;
     const glm::vec2 rel = (m - centre) / old_size;
-    ui_pan_ = (m - rel * new_size) - viewport_box_.center();
+    ui_pan_ = (m - rel * new_size) - app_.viewport_box_.center();
 }
 
-void EditorApp::ui_frame_selection_() {
+void UiCanvasPanel::ui_frame_selection_() {
     const ui::UiView v = ui_view_();
     bool any = false;
     ui::Rect bb{glm::vec2(1e30f), glm::vec2(-1e30f)};
-    for (ObjectId id : doc_.selection()) {
-        if (id == doc_.object_root()) continue;
+    for (ObjectId id : app_.doc_.selection()) {
+        if (id == app_.doc_.object_root()) continue;
         if (auto r = ui_live_rect(id)) { bb.min = glm::min(bb.min, r->min); bb.max = glm::max(bb.max, r->max); any = true; }
     }
     if (!any) { ui_fit_ = true; return; }
-    const float s = std::max(1.0f, ui_scale_);
+    const float s = std::max(1.0f, app_.ui_scale_);
     const glm::vec2 sz = glm::max(bb.size(), glm::vec2(8.0f));
     // Editor pixels the selection should span, and the zoom that gives it.
-    const float want = std::min((viewport_box_.w * 0.6f) / sz.x, (viewport_box_.h * 0.6f) / sz.y);   // editor px per canvas px
+    const float want = std::min((app_.viewport_box_.w * 0.6f) / sz.x, (app_.viewport_box_.h * 0.6f) / sz.y);   // editor px per canvas px
     const float canvas_per_res = v.canvas_size.x / std::max(1.0f, ui_res_.x);
     ui_zoom_ = std::clamp(want * canvas_per_res * s, 0.02f, 16.0f);
     const glm::vec2 frame_size = ui_res_ * ui_zoom_ / s;
@@ -309,14 +321,14 @@ void EditorApp::ui_frame_selection_() {
     ui_pan_ = frame_size * 0.5f - c_in_frame;
 }
 
-std::vector<ObjectId> EditorApp::ui_hits_(glm::vec2 p) {
+std::vector<ObjectId> UiCanvasPanel::ui_hits_(glm::vec2 p) {
     std::vector<ObjectId> out;
     coopa::scene::SceneObject* root = ui_root_live_();
     if (!root || !ui_frame_.contains(p)) return out;
     const ui::UiView v = ui_view_();
     const glm::vec2 cp = v.to_canvas(p);
     std::unordered_map<const coopa::scene::SceneObject*, ObjectId> ids;
-    for (const auto& [id, obj] : sync_.live_objects()) ids[obj] = id;
+    for (const auto& [id, obj] : app_.sync_.live_objects()) ids[obj] = id;
     struct Hit { const coopa::scene::SceneObject* obj; int z; int order; };
     std::vector<Hit> hits;
     int order = 0;
@@ -338,25 +350,25 @@ std::vector<ObjectId> EditorApp::ui_hits_(glm::vec2 p) {
             auto it = ids.find(o);
             if (it != ids.end()) id = it->second;
         }
-        if (id && id != doc_.object_root() && std::find(out.begin(), out.end(), id) == out.end()) out.push_back(id);
+        if (id && id != app_.doc_.object_root() && std::find(out.begin(), out.end(), id) == out.end()) out.push_back(id);
     }
     return out;
 }
 
-ObjectId EditorApp::ui_container_at_(glm::vec2 p) {
+ObjectId UiCanvasPanel::ui_container_at_(glm::vec2 p) {
     for (ObjectId id : ui_hits_(p)) {
         if (!ui_is_leaf_(id)) return id;
-        if (auto parent = doc_.parent_of(id)) return *parent ? *parent : doc_.object_root();
+        if (auto parent = app_.doc_.parent_of(id)) return *parent ? *parent : app_.doc_.object_root();
     }
-    return doc_.object_root();
+    return app_.doc_.object_root();
 }
 
-void EditorApp::ui_write_rect_(ObjectId id, const ui::RectParams& p, std::optional<float> rotation, const std::string& label,
+void UiCanvasPanel::ui_write_rect_(ObjectId id, const ui::RectParams& p, std::optional<float> rotation, const std::string& label,
                     const std::string& merge) {
-    apply_(doc_.edit(label, [&](Node&) -> Change {
-        Node* list = doc_.components(id);
+    app_.apply_(app_.doc_.edit(label, [&](Node&) -> Change {
+        Node* list = app_.doc_.components(id);
         if (!list) return {};
-        int ci = doc_.find_component(id, "RectTransform");
+        int ci = app_.doc_.find_component(id, "RectTransform");
         if (ci < 0) {
             Node rt = Node::mapping();
             rt["type"] = Node(std::string("RectTransform"));
@@ -373,11 +385,11 @@ void EditorApp::ui_write_rect_(ObjectId id, const ui::RectParams& p, std::option
     }, merge));
 }
 
-void EditorApp::ui_write_preferred_size_(ObjectId id, glm::vec2 size, const std::string& merge) {
-    apply_(doc_.edit("Resize UI", [&](Node&) -> Change {
-        Node* list = doc_.components(id);
+void UiCanvasPanel::ui_write_preferred_size_(ObjectId id, glm::vec2 size, const std::string& merge) {
+    app_.apply_(app_.doc_.edit("Resize UI", [&](Node&) -> Change {
+        Node* list = app_.doc_.components(id);
         if (!list) return {};
-        int ci = doc_.find_component(id, "LayoutElement");
+        int ci = app_.doc_.find_component(id, "LayoutElement");
         if (ci < 0) {
             Node le = Node::mapping();
             le["type"] = Node(std::string("LayoutElement"));
@@ -390,27 +402,27 @@ void EditorApp::ui_write_preferred_size_(ObjectId id, glm::vec2 size, const std:
     }, merge));
 }
 
-ui::RectParams EditorApp::ui_doc_params_(ObjectId id) {
+ui::RectParams UiCanvasPanel::ui_doc_params_(ObjectId id) {
     if (const Node* rt = ui_comp_(id, "RectTransform")) return ui::parse_rect_block(*rt).params();
     return ui::RectParams{};
 }
 
-ObjectId EditorApp::ui_add_widget_(const std::string& entry_id, ObjectId parent, std::optional<glm::vec2> at) {
+ObjectId UiCanvasPanel::ui_add_widget_(const std::string& entry_id, ObjectId parent, std::optional<glm::vec2> at) {
     const ui::PaletteEntry* e = ui::find_palette_entry(entry_id);
-    if (!e || playing()) return 0;
+    if (!e || app_.playing()) return 0;
     if (e->component) {   // a reactor: onto the selection
-        const ObjectId target = doc_.primary();
-        if (!target) { log_warn("Select an element first: " + e->label + " is added to it"); return 0; }
-        apply_(doc_.add_component(target, e->make()));
+        const ObjectId target = app_.doc_.primary();
+        if (!target) { app_.log_warn("Select an element first: " + e->label + " is added to it"); return 0; }
+        app_.apply_(app_.doc_.add_component(target, e->make()));
         return target;
     }
-    if (parent == 0) parent = at ? ui_container_at_(*at) : (doc_.primary() && !ui_is_leaf_(doc_.primary()) ? doc_.primary() : doc_.object_root());
-    if (ui_is_leaf_(parent)) parent = doc_.parent_of(parent).value_or(doc_.object_root());
-    if (parent == 0) parent = doc_.object_root();
+    if (parent == 0) parent = at ? ui_container_at_(*at) : (app_.doc_.primary() && !ui_is_leaf_(app_.doc_.primary()) ? app_.doc_.primary() : app_.doc_.object_root());
+    if (ui_is_leaf_(parent)) parent = app_.doc_.parent_of(parent).value_or(app_.doc_.object_root());
+    if (parent == 0) parent = app_.doc_.object_root();
     Node obj = e->make();
-    obj["name"] = Node(doc_.unique_name(get_string(obj, "name", "Element"), parent));
+    obj["name"] = Node(app_.doc_.unique_name(get_string(obj, "name", "Element"), parent));
     // Dropped at a point: place it there (unless a layout group will place it).
-    auto* parent_live = sync_.live(parent);
+    auto* parent_live = app_.sync_.live(parent);
     const bool laid_out = parent_live && (parent_live->get_component<coopa::ui::LayoutGroupBase>() != nullptr);
     if (at && !laid_out && parent_live) {
         const auto* prt = parent_live->get_component<coopa::ui::RectTransform>();
@@ -428,39 +440,39 @@ ObjectId EditorApp::ui_add_widget_(const std::string& entry_id, ObjectId parent,
             ui::write_rect_params(c, p);
         }
     }
-    const ObjectId id = doc_.add_object(obj, parent, -1, "Add " + e->label);
-    after_structure_change_(id);
+    const ObjectId id = app_.doc_.add_object(obj, parent, -1, "Add " + e->label);
+    app_.after_structure_change_(id);
     return id;
 }
 
-void EditorApp::ui_nudge_(glm::vec2 d) {
-    for (ObjectId id : doc_.selection()) {
-        if (id == doc_.object_root()) continue;
+void UiCanvasPanel::ui_nudge_(glm::vec2 d) {
+    for (ObjectId id : app_.doc_.selection()) {
+        if (id == app_.doc_.object_root()) continue;
         ui::RectParams p = ui_doc_params_(id);
         p.anchored_position += d;
         ui_write_rect_(id, p, std::nullopt, "Nudge", "ui_nudge");
     }
-    doc_.end_merge();
+    app_.doc_.end_merge();
 }
 
-void EditorApp::ui_restack_(ObjectId id, int dir) {
-    const auto parent = doc_.parent_of(id);
+void UiCanvasPanel::ui_restack_(ObjectId id, int dir) {
+    const auto parent = app_.doc_.parent_of(id);
     if (!parent) return;
-    const Node* list = *parent ? (doc_.find(*parent) ? &doc_.find(*parent)->at("children") : nullptr) : &doc_.root_objects();
+    const Node* list = *parent ? (app_.doc_.find(*parent) ? &app_.doc_.find(*parent)->at("children") : nullptr) : &app_.doc_.root_objects();
     if (!list || !list->is_sequence()) return;
     int idx = -1;
     for (size_t i = 0; i < list->size(); ++i) if (SceneDocument::id_of(list->as_seq()[i]) == id) idx = static_cast<int>(i);
     const int to = idx + dir;
     if (idx < 0 || to < 0 || to >= static_cast<int>(list->size())) return;
-    apply_(doc_.reparent(id, *parent, dir > 0 ? to + 1 : to));
+    app_.apply_(app_.doc_.reparent(id, *parent, dir > 0 ? to + 1 : to));
 }
 
-void EditorApp::ui_set_interact_(bool on) {
+void UiCanvasPanel::ui_set_interact_(bool on) {
     if (on == ui_interact_) return;
     ui_interact_ = on;
     ui_gizmo_.cancel();
     ui_signal_log_.clear();
-    if (auto* scene = sync_.scene()) {
+    if (auto* scene = app_.sync_.scene()) {
         if (on) {
             scene->set_simulating(true);
             // Echo every named signal to the Console, so it's clear what game code will hear.
@@ -472,24 +484,24 @@ void EditorApp::ui_set_interact_(bool on) {
                         if (a.contains("value")) extra = "  value " + a.to_string("value");
                         if (a.contains("index")) extra += "  index " + a.to_string("index");
                         if (a.contains("slot")) extra += "  slot " + a.to_string("slot");
-                        log_info("[UI] " + name + "  " + signal + extra);
+                        app_.log_info("[UI] " + name + "  " + signal + extra);
                     }));
                 }
             }
-            log_info("Interact: the UI runs -- signals are echoed here. Esc / Tab returns to Design.");
+            app_.log_info("Interact: the UI runs -- signals are echoed here. Esc / Tab returns to Design.");
         } else {
             scene->set_simulating(false);
-            queue_rebuild_();   // back to exactly what the document says
+            app_.queue_rebuild_();   // back to exactly what the document says
         }
     }
 }
 
-std::vector<EditorApp::UiBinding> EditorApp::ui_bindings_() {
+std::vector<UiCanvasPanel::UiBinding> UiCanvasPanel::ui_bindings_() {
     std::vector<UiBinding> out;
     auto add = [&](std::string name, std::string kind, std::vector<std::string> sigs, std::string api, ObjectId id) {
         out.push_back({std::move(name), std::move(kind), std::move(sigs), std::move(api), id});
     };
-    doc_.for_each_object([&](const Node& o, int) {
+    app_.doc_.for_each_object([&](const Node& o, int) {
         const ObjectId id = SceneDocument::id_of(o);
         const std::string name = get_string(o, "name");
         if (!o.contains("components")) return;
@@ -537,16 +549,16 @@ std::vector<EditorApp::UiBinding> EditorApp::ui_bindings_() {
     return out;
 }
 
-void EditorApp::draw_ui_view_(imm::Context& ctx, const imm::Box& area) {
-    const imm::Box hb = area_header_(ctx, area);
+void UiCanvasPanel::draw_ui_view_(imm::Context& ctx, const imm::Box& area) {
+    const imm::Box hb = app_.area_header_(ctx, area);
     draw_ui_header_(ctx, hb);
-    viewport_box_ = imm::Box{area.x, hb.bottom(), area.w, std::max(1.0f, area.h - hb.h)};
+    app_.viewport_box_ = imm::Box{area.x, hb.bottom(), area.w, std::max(1.0f, area.h - hb.h)};
     ui_layout_frame_();
     ui_update_backdrop_();
-    ctx.push_clip(viewport_box_);
+    ctx.push_clip(app_.viewport_box_);
     // Around the frame: the editor's own backdrop (inside it the game's canvas draws).
     const glm::vec4 around = ui_backdrop_ == 1 ? glm::vec4(0.55f, 0.56f, 0.58f, 1.0f) : glm::vec4(0.10f, 0.10f, 0.11f, 1.0f);
-    if (ui_backdrop_ != 2) fill_around_(ctx, viewport_box_, ui_frame_.intersect(viewport_box_), around);
+    if (ui_backdrop_ != 2) app_.fill_around_(ctx, app_.viewport_box_, ui_frame_.intersect(app_.viewport_box_), around);
     handle_ui_input_(ctx);
     draw_ui_overlays_(ctx);
     ctx.pop_clip();
@@ -554,18 +566,18 @@ void EditorApp::draw_ui_view_(imm::Context& ctx, const imm::Box& area) {
     // Drops: palette widgets onto the frame, UI assets as nested prefabs.
     if (!ui_interact_) {
         if (auto w = ctx.drop_target("ui_widget", ui_frame_)) ui_add_widget_(*w, 0, ctx.mouse());
-        if (auto a = ctx.drop_target("asset", ui_frame_); a && asset_type_of_(*a) == AssetType::UI) {
+        if (auto a = ctx.drop_target("asset", ui_frame_); a && app_.assets_panel_->asset_type_of_(*a) == AssetType::UI) {
             const ObjectId parent = ui_container_at_(ctx.mouse());
             place_ui_asset(*a, parent);
         }
     }
 }
 
-void EditorApp::draw_ui_header_(imm::Context& ctx, const imm::Box& hb) {
+void UiCanvasPanel::draw_ui_header_(imm::Context& ctx, const imm::Box& hb) {
     using I = imm::Icon;
     const float bh = hb.h - 6;
     float x = hb.x + 6;
-    if (ui_interact_) ctx.fill_rounded(hb, et_.chrome.play_tint, 6, imm::Context::kTop);
+    if (ui_interact_) ctx.fill_rounded(hb, app_.et_.chrome.play_tint, 6, imm::Context::kTop);
     // Design / Interact.
     int mode = ui_interact_ ? 1 : 0;
     if (ctx.icon_group("ui_mode", {{I::SelectBox, "Design\nSelect, move and resize elements (Tab toggles)"},
@@ -588,7 +600,7 @@ void EditorApp::draw_ui_header_(imm::Context& ctx, const imm::Box& hb) {
         ui_res_ = {static_cast<float>(ui_resolutions_()[static_cast<size_t>(res_idx)].w), static_cast<float>(ui_resolutions_()[static_cast<size_t>(res_idx)].h)};
         ui_fit_ = true;
         ui_store_editor_extras_();
-        if (ui_wrapper_) queue_rebuild_();
+        if (ui_wrapper_) app_.queue_rebuild_();
     }
     ctx.tooltip("Preview Resolution\nThe game window size the canvas is laid out for -- check a HUD at every size you ship");
     x += rw + 8;
@@ -634,22 +646,22 @@ void EditorApp::draw_ui_header_(imm::Context& ctx, const imm::Box& hb) {
     }
 }
 
-void EditorApp::handle_ui_input_(imm::Context& ctx) {
+void UiCanvasPanel::handle_ui_input_(imm::Context& ctx) {
     const auto& in = ctx.input();
     const glm::vec2 m = ctx.mouse();
     const bool shift = has(in.mods, Mods::Shift);
     const bool alt = has(in.mods, Mods::Alt);
     const bool ctrl = has(in.mods, Mods::Control) || has(in.mods, Mods::Super);
-    const bool hovered = ctx.is_hovered(viewport_box_) && !ctx.popup_hovered();
-    viewport_hovered_ = hovered;
-    const double pinch = trackpad::take_magnify() + std::exchange(pinch_override_, 0.0);
+    const bool hovered = ctx.is_hovered(app_.viewport_box_) && !ctx.popup_hovered();
+    app_.viewport_hovered_ = hovered;
+    const double pinch = trackpad::take_magnify() + std::exchange(app_.pinch_override_, 0.0);
 
     // --- navigation: wheel / pinch zoom, middle or Space drag pan ---
     if (hovered) {
         if (pinch != 0.0) ui_zoom_at_(m, static_cast<float>(1.0 + pinch));
         if (in.scroll.y != 0.0f) {
             const auto& tp = trackpad::state();
-            const bool trackpad = trackpad_override_ ? *trackpad_override_ : tp.scroll_is_trackpad;
+            const bool trackpad = app_.trackpad_override_ ? *app_.trackpad_override_ : tp.scroll_is_trackpad;
             if (trackpad && !ctrl) ui_pan_ += in.scroll * 12.0f;   // two-finger swipe pans, pinch zooms
             else ui_zoom_at_(m, std::pow(1.12f, in.scroll.y));
         }
@@ -669,9 +681,9 @@ void EditorApp::handle_ui_input_(imm::Context& ctx) {
     // --- the gizmo on the active element ---
     ui_guides_.clear();
     bool gizmo_took = false;
-    const ObjectId sel = doc_.primary();
+    const ObjectId sel = app_.doc_.primary();
     RectGizmoTarget target;
-    const bool has_target = sel && sel != doc_.object_root() && ui_gizmo_target_(sel, target);
+    const bool has_target = sel && sel != app_.doc_.object_root() && ui_gizmo_target_(sel, target);
     const ui::UiView view = ui_view_();
     auto run_gizmo = [&](const RectGizmoTarget& t, bool pressed) {
         RectGizmoInput gi;
@@ -689,7 +701,7 @@ void EditorApp::handle_ui_input_(imm::Context& ctx) {
         const RectGizmoResult r = ui_gizmo_.update(view, t, gi, gs);
         if (r.started && starting) {
             ui_drag_others_.clear();
-            for (ObjectId o : doc_.selection()) if (o != sel && o != doc_.object_root()) ui_drag_others_[o] = ui_doc_params_(o);
+            for (ObjectId o : app_.doc_.selection()) if (o != sel && o != app_.doc_.object_root()) ui_drag_others_[o] = ui_doc_params_(o);
         }
         ui_guides_ = r.guides;
         if (r.reorder) ui_update_reorder_(sel, m);
@@ -711,10 +723,10 @@ void EditorApp::handle_ui_input_(imm::Context& ctx) {
         }
         if (r.finished) {
             if (ui_reorder_index_ >= 0) {
-                apply_(doc_.reparent(sel, ui_reorder_parent_, ui_reorder_index_));
+                app_.apply_(app_.doc_.reparent(sel, ui_reorder_parent_, ui_reorder_index_));
                 ui_reorder_index_ = -1;
             }
-            doc_.end_merge();
+            app_.doc_.end_merge();
         }
         return r;
     };
@@ -737,7 +749,7 @@ void EditorApp::handle_ui_input_(imm::Context& ctx) {
         else {
             // Press on an element and drag: select it and move it in one gesture.
             ui_select_pending_ = false;
-            if (!doc_.is_selected(hits.front()) || shift) doc_.select(hits.front(), shift);
+            if (!app_.doc_.is_selected(hits.front()) || shift) app_.doc_.select(hits.front(), shift);
             RectGizmoTarget t;
             if (ui_gizmo_target_(hits.front(), t)) {
                 RectGizmoInput gi;
@@ -746,24 +758,24 @@ void EditorApp::handle_ui_input_(imm::Context& ctx) {
                 gs.snap = false;
                 ui_gizmo_.update(view, t, gi, gs);   // starts the body drag at the press point
                 ui_drag_others_.clear();
-                for (ObjectId o : doc_.selection()) if (o != hits.front() && o != doc_.object_root()) ui_drag_others_[o] = ui_doc_params_(o);
+                for (ObjectId o : app_.doc_.selection()) if (o != hits.front() && o != app_.doc_.object_root()) ui_drag_others_[o] = ui_doc_params_(o);
             }
         }
     }
     if (ui_select_pending_ && in.released[0]) {
         if (ui_marquee_) {
             const glm::vec2 a = glm::min(ui_press_, m), b = glm::max(ui_press_, m);
-            if (!shift) doc_.clear_selection();
-            for (ObjectId id : doc_.all_ids()) {
-                if (id == doc_.object_root()) continue;
+            if (!shift) app_.doc_.clear_selection();
+            for (ObjectId id : app_.doc_.all_ids()) {
+                if (id == app_.doc_.object_root()) continue;
                 auto r = ui_live_rect(id);
                 if (!r) continue;
                 const auto box = view.box_of(*r);
-                if (box[0] >= a.x && box[1] >= a.y && box[0] + box[2] <= b.x && box[1] + box[3] <= b.y) doc_.select(id, true);
+                if (box[0] >= a.x && box[1] >= a.y && box[0] + box[2] <= b.x && box[1] + box[3] <= b.y) app_.doc_.select(id, true);
             }
         } else {
             const auto hits = ui_hits_(m);
-            if (hits.empty()) { if (!shift) doc_.select(doc_.object_root()); }
+            if (hits.empty()) { if (!shift) app_.doc_.select(app_.doc_.object_root()); }
             else {
                 ObjectId pick = hits.front();
                 if (alt) {
@@ -774,8 +786,8 @@ void EditorApp::handle_ui_input_(imm::Context& ctx) {
                     ui_cycle_at_ = m;
                     pick = hits[ui_cycle_i_];
                 }
-                if (shift) doc_.select(pick, true);
-                else doc_.select(pick);
+                if (shift) app_.doc_.select(pick, true);
+                else app_.doc_.select(pick);
             }
         }
         ui_select_pending_ = ui_marquee_ = false;
@@ -783,8 +795,8 @@ void EditorApp::handle_ui_input_(imm::Context& ctx) {
     if (!in.down[0] && !in.released[0]) ui_select_pending_ = ui_marquee_ = false;
     if (ui_marquee_) {
         const imm::Box r{std::min(ui_press_.x, m.x), std::min(ui_press_.y, m.y), std::abs(m.x - ui_press_.x), std::abs(m.y - ui_press_.y)};
-        ctx.fill(r, et_.viewport.box_select_fill);
-        ctx.outline(r, et_.viewport.box_select_outline);
+        ctx.fill(r, app_.et_.viewport.box_select_fill);
+        ctx.outline(r, app_.et_.viewport.box_select_outline);
     }
     const auto hover_hits = hovered ? ui_hits_(m) : std::vector<ObjectId>{};
     ui_hover_ = hover_hits.empty() ? 0 : hover_hits.front();
@@ -792,25 +804,25 @@ void EditorApp::handle_ui_input_(imm::Context& ctx) {
     // --- context menu, keys ---
     if (hovered && in.pressed[1]) {
         const auto hits = ui_hits_(m);
-        if (!hits.empty() && !doc_.is_selected(hits.front())) doc_.select(hits.front());
+        if (!hits.empty() && !app_.doc_.is_selected(hits.front())) app_.doc_.select(hits.front());
         ui_menu_at_ = m;
         ctx.open_popup("ui_ctx", m);
     }
     if (hovered && !ctx.wants_keyboard() && !ctx.any_popup_open()) ui_keymap_(ctx);
 }
 
-void EditorApp::ui_keymap_(imm::Context& ctx) {
+void UiCanvasPanel::ui_keymap_(imm::Context& ctx) {
     const glm::vec2 m = ctx.mouse();
     if (ctx.shortcut(Key::A, Mods::Shift)) { ui_menu_at_ = m; ctx.open_popup("ui_add_menu", m); }
     if (ctx.shortcut(Key::Tab)) ui_set_interact_(true);
     if (ctx.shortcut(Key::Home)) ui_fit_ = true;
     if (ctx.shortcut(Key::F) || ctx.shortcut(Key::Period) || ctx.shortcut(Key::KpDecimal)) ui_frame_selection_();
-    if (ctx.shortcut(Key::X) || ctx.shortcut(Key::Delete) || ctx.shortcut(Key::Backspace)) delete_selected();
+    if (ctx.shortcut(Key::X) || ctx.shortcut(Key::Delete) || ctx.shortcut(Key::Backspace)) app_.delete_selected();
     if (ctx.shortcut(Key::D, Mods::Shift) || ctx.shortcut(Key::D, imm::Context::command_mod())) ui_duplicate_();
-    if (ctx.shortcut(Key::A)) { doc_.clear_selection(); for (ObjectId id : doc_.all_ids()) if (id != doc_.object_root()) doc_.select(id, true); }
-    if (ctx.shortcut(Key::A, Mods::Alt)) doc_.clear_selection();
-    if (ctx.shortcut(Key::H)) hide_(doc_.selection());
-    if (ctx.shortcut(Key::H, Mods::Alt)) unhide_all_();
+    if (ctx.shortcut(Key::A)) { app_.doc_.clear_selection(); for (ObjectId id : app_.doc_.all_ids()) if (id != app_.doc_.object_root()) app_.doc_.select(id, true); }
+    if (ctx.shortcut(Key::A, Mods::Alt)) app_.doc_.clear_selection();
+    if (ctx.shortcut(Key::H)) app_.hide_(app_.doc_.selection());
+    if (ctx.shortcut(Key::H, Mods::Alt)) app_.unhide_all_();
     const float step = 1.0f, big = 10.0f;
     if (ctx.shortcut(Key::Left)) ui_nudge_({-step, 0});
     if (ctx.shortcut(Key::Right)) ui_nudge_({step, 0});
@@ -820,31 +832,31 @@ void EditorApp::ui_keymap_(imm::Context& ctx) {
     if (ctx.shortcut(Key::Right, Mods::Shift)) ui_nudge_({big, 0});
     if (ctx.shortcut(Key::Up, Mods::Shift)) ui_nudge_({0, big});
     if (ctx.shortcut(Key::Down, Mods::Shift)) ui_nudge_({0, -big});
-    if (ctx.shortcut(Key::RightBracket) && doc_.primary()) ui_restack_(doc_.primary(), +1);
-    if (ctx.shortcut(Key::LeftBracket) && doc_.primary()) ui_restack_(doc_.primary(), -1);
-    if (ctx.shortcut(Key::F2) && doc_.primary()) { rename_id_ = doc_.primary(); rename_frames_ = 0; }
+    if (ctx.shortcut(Key::RightBracket) && app_.doc_.primary()) ui_restack_(app_.doc_.primary(), +1);
+    if (ctx.shortcut(Key::LeftBracket) && app_.doc_.primary()) ui_restack_(app_.doc_.primary(), -1);
+    if (ctx.shortcut(Key::F2) && app_.doc_.primary()) { app_.rename_id_ = app_.doc_.primary(); app_.rename_frames_ = 0; }
 }
 
-void EditorApp::ui_duplicate_() {
+void UiCanvasPanel::ui_duplicate_() {
     std::vector<ObjectId> ids;
-    for (ObjectId id : doc_.selection()) if (id != doc_.object_root()) ids.push_back(id);
+    for (ObjectId id : app_.doc_.selection()) if (id != app_.doc_.object_root()) ids.push_back(id);
     if (ids.empty()) return;
-    auto copies = doc_.duplicate_objects(ids);
-    doc_.clear_selection();
+    auto copies = app_.doc_.duplicate_objects(ids);
+    app_.doc_.clear_selection();
     for (ObjectId c : copies) {
         ui::RectParams p = ui_doc_params_(c);
         p.anchored_position += glm::vec2(16.0f, -16.0f);
-        if (Node* o = doc_.find(c)) {
+        if (Node* o = app_.doc_.find(c)) {
             Node* list = &ensure_seq(*o, "components");
             for (auto& comp : list->as_seq()) if (component_type(comp) == "RectTransform") ui::write_rect_params(comp, p);
         }
-        doc_.select(c, true);
+        app_.doc_.select(c, true);
     }
-    queue_rebuild_();
+    app_.queue_rebuild_();
 }
 
-bool EditorApp::ui_gizmo_target_(ObjectId id, RectGizmoTarget& t) {
-    auto* live = sync_.live(id);
+bool UiCanvasPanel::ui_gizmo_target_(ObjectId id, RectGizmoTarget& t) {
+    auto* live = app_.sync_.live(id);
     auto* rt = live ? live->get_component<coopa::ui::RectTransform>() : nullptr;
     if (!rt || live->get_component<coopa::ui::CanvasComponent>() || !live->active()) return false;
     t.rect = rt->rect();
@@ -859,10 +871,10 @@ bool EditorApp::ui_gizmo_target_(ObjectId id, RectGizmoTarget& t) {
     return true;
 }
 
-std::vector<ui::SnapLine> EditorApp::ui_snap_lines_(ObjectId self, const ui::Rect& parent) {
+std::vector<ui::SnapLine> UiCanvasPanel::ui_snap_lines_(ObjectId self, const ui::Rect& parent) {
     std::vector<ui::SnapLine> lines;
     ui::add_rect_lines(lines, parent);
-    auto* live = sync_.live(self);
+    auto* live = app_.sync_.live(self);
     if (!live || !live->parent()) return lines;
     for (const auto& sib : live->parent()->children()) {
         if (sib.get() == live || !sib->active()) continue;
@@ -871,12 +883,12 @@ std::vector<ui::SnapLine> EditorApp::ui_snap_lines_(ObjectId self, const ui::Rec
     return lines;
 }
 
-void EditorApp::ui_update_reorder_(ObjectId id, glm::vec2 m) {
+void UiCanvasPanel::ui_update_reorder_(ObjectId id, glm::vec2 m) {
     ui_reorder_index_ = -1;
-    auto* live = sync_.live(id);
-    const auto parent_id = doc_.parent_of(id);
+    auto* live = app_.sync_.live(id);
+    const auto parent_id = app_.doc_.parent_of(id);
     if (!live || !live->parent() || !parent_id) return;
-    const Node* list = *parent_id ? &doc_.find(*parent_id)->at("children") : &doc_.root_objects();
+    const Node* list = *parent_id ? &app_.doc_.find(*parent_id)->at("children") : &app_.doc_.root_objects();
     if (!list->is_sequence()) return;
     const bool horizontal = live->parent()->get_component<coopa::ui::HorizontalLayoutGroup>() != nullptr;
     const glm::vec2 cp = ui_view_().to_canvas(m);
@@ -892,7 +904,7 @@ void EditorApp::ui_update_reorder_(ObjectId id, glm::vec2 m) {
     ui_reorder_parent_ = *parent_id;
 }
 
-void EditorApp::draw_ui_overlays_(imm::Context& ctx) {
+void UiCanvasPanel::draw_ui_overlays_(imm::Context& ctx) {
     const ui::UiView v = ui_view_();
     // The canvas frame.
     ctx.outline(ui_frame_, imm::with_alpha(ctx.style.text, 0.35f));
@@ -905,9 +917,9 @@ void EditorApp::draw_ui_overlays_(imm::Context& ctx) {
     if (ui_interact_) return;
     // Faint outlines on every element.
     if (ui_outlines_) {
-        for (ObjectId id : doc_.all_ids()) {
-            if (id == doc_.object_root() || hidden_.count(id)) continue;
-            auto* live = sync_.live(id);
+        for (ObjectId id : app_.doc_.all_ids()) {
+            if (id == app_.doc_.object_root() || app_.hidden_.count(id)) continue;
+            auto* live = app_.sync_.live(id);
             if (!live || !live->active()) continue;
             auto r = ui_live_rect(id);
             if (!r) continue;
@@ -916,23 +928,23 @@ void EditorApp::draw_ui_overlays_(imm::Context& ctx) {
         }
     }
     // Hover.
-    if (ui_hover_ && !doc_.is_selected(ui_hover_)) {
+    if (ui_hover_ && !app_.doc_.is_selected(ui_hover_)) {
         if (auto r = ui_live_rect(ui_hover_)) {
             const auto b = v.box_of(*r);
             ctx.outline({b[0], b[1], b[2], b[3]}, imm::with_alpha(ctx.style.accent, 0.55f));
         }
     }
     // Selection: outlines, the parent's rect, the gizmo on the active element.
-    for (ObjectId id : doc_.selection()) {
-        if (id == doc_.object_root() || id == doc_.primary()) continue;
+    for (ObjectId id : app_.doc_.selection()) {
+        if (id == app_.doc_.object_root() || id == app_.doc_.primary()) continue;
         if (auto r = ui_live_rect(id)) {
             const auto b = v.box_of(*r);
             ctx.outline({b[0], b[1], b[2], b[3]}, ctx.style.accent, 1.5f);
         }
     }
     RectGizmoTarget t;
-    const ObjectId sel = doc_.primary();
-    if (sel && sel != doc_.object_root() && ui_gizmo_target_(sel, t)) {
+    const ObjectId sel = app_.doc_.primary();
+    if (sel && sel != app_.doc_.object_root() && ui_gizmo_target_(sel, t)) {
         const auto pb = v.box_of(t.parent);
         ctx.outline({pb[0], pb[1], pb[2], pb[3]}, imm::with_alpha(ctx.style.text, 0.3f));
         ui_gizmo_.draw(ctx, v, t, ctx.style.accent);
@@ -942,7 +954,7 @@ void EditorApp::draw_ui_overlays_(imm::Context& ctx) {
         const auto b = v.box_of(t.rect);
         const float tw = ctx.text_width(buf) + 10;
         const imm::Box lb{b[0] + b[2] * 0.5f - tw * 0.5f, b[1] + b[3] + 6, tw, 18};
-        ctx.fill_rounded(lb, et_.viewport.modal_backdrop);
+        ctx.fill_rounded(lb, app_.et_.viewport.modal_backdrop);
         ctx.text_in(lb, buf, ctx.style.text, 0.0f, true);
         if (t.in_layout) {
             const imm::Box lk{b[0] + 2, b[1] - 18, 16, 16};
@@ -963,7 +975,7 @@ void EditorApp::draw_ui_overlays_(imm::Context& ctx) {
     }
     // Reorder insertion line.
     if (ui_reorder_index_ >= 0 && sel) {
-        if (auto* live = sync_.live(sel); live && live->parent()) {
+        if (auto* live = app_.sync_.live(sel); live && live->parent()) {
             if (auto* prt = live->parent()->get_component<coopa::ui::RectTransform>()) {
                 const bool horizontal = live->parent()->get_component<coopa::ui::HorizontalLayoutGroup>() != nullptr;
                 const glm::vec2 cp = v.to_canvas(ctx.mouse());
@@ -975,21 +987,21 @@ void EditorApp::draw_ui_overlays_(imm::Context& ctx) {
         }
     }
     // Empty canvas hint.
-    if (doc_.all_ids().size() <= 1) {
+    if (app_.doc_.all_ids().size() <= 1) {
         const std::string h = "Empty canvas -- Shift A adds widgets, or drag them in from the Widgets palette";
         const float w = ctx.text_width(h) + 20;
         const imm::Box b{ui_frame_.center().x - w * 0.5f, ui_frame_.center().y - 14, w, 28};
-        ctx.fill_rounded(b, et_.viewport.modal_backdrop);
+        ctx.fill_rounded(b, app_.et_.viewport.modal_backdrop);
         ctx.text_in(b, h, ctx.style.text, 0.0f, true);
     }
 }
 
-void EditorApp::draw_ui_add_menu_items_(imm::Context& ctx, glm::vec2 at) {
+void UiCanvasPanel::draw_ui_add_menu_items_(imm::Context& ctx, glm::vec2 at) {
     for (const auto& cat : ui::palette_categories()) {
         if (!ctx.begin_menu(cat)) continue;
         for (const auto& e : ui::palette()) {
             if (e.category != cat) continue;
-            if (ctx.menu_item(e.label, "", nullptr, !e.component || doc_.primary() != 0, e.icon)) {
+            if (ctx.menu_item(e.label, "", nullptr, !e.component || app_.doc_.primary() != 0, e.icon)) {
                 ui_add_widget_(e.id, 0, ui_frame_.contains(at) ? std::optional<glm::vec2>(at) : std::nullopt);
             }
             ctx.tooltip(e.label + "\n" + e.tip);
@@ -997,10 +1009,10 @@ void EditorApp::draw_ui_add_menu_items_(imm::Context& ctx, glm::vec2 at) {
         ctx.end_menu();
     }
     if (ctx.begin_menu("UI Asset")) {
-        const auto assets = list_assets_(AssetType::UI);
+        const auto assets = app_.assets_panel_->list_assets_(AssetType::UI);
         for (const auto& rel : assets) {
             if (ctx.menu_item(fs::path(rel).stem().string(), "", nullptr, true, imm::Icon::Link)) {
-                place_ui_asset(rel, ui_frame_.contains(at) ? ui_container_at_(at) : doc_.object_root());
+                place_ui_asset(rel, ui_frame_.contains(at) ? ui_container_at_(at) : app_.doc_.object_root());
             }
         }
         if (assets.empty()) ctx.label_dim("No UI assets yet");
@@ -1008,7 +1020,7 @@ void EditorApp::draw_ui_add_menu_items_(imm::Context& ctx, glm::vec2 at) {
     }
 }
 
-void EditorApp::draw_ui_popups_(imm::Context& ctx) {
+void UiCanvasPanel::draw_ui_popups_(imm::Context& ctx) {
     using I = imm::Icon;
     if (ctx.begin_popup("ui_add_menu", 190)) {
         ctx.label_dim("Add Widget");
@@ -1016,17 +1028,17 @@ void EditorApp::draw_ui_popups_(imm::Context& ctx) {
         ctx.end_popup();
     }
     if (ctx.begin_popup("ui_ctx", 220)) {
-        const ObjectId id = doc_.primary();
-        const bool any = id && id != doc_.object_root();
+        const ObjectId id = app_.doc_.primary();
+        const bool any = id && id != app_.doc_.object_root();
         if (ctx.begin_menu("Add Widget", true, I::Plus)) { draw_ui_add_menu_items_(ctx, ui_menu_at_); ctx.end_menu(); }
         ctx.menu_separator();
         if (ctx.menu_item("Duplicate", "Shift D", nullptr, any, I::Duplicate)) ui_duplicate_();
-        if (ctx.menu_item("Delete", "X", nullptr, any, I::Trash)) delete_selected();
-        if (ctx.menu_item("Rename", "F2", nullptr, any)) { rename_id_ = id; rename_frames_ = 0; }
+        if (ctx.menu_item("Delete", "X", nullptr, any, I::Trash)) app_.delete_selected();
+        if (ctx.menu_item("Rename", "F2", nullptr, any)) { app_.rename_id_ = id; app_.rename_frames_ = 0; }
         ctx.menu_separator();
         if (ctx.menu_item("Bring Forward", "]", nullptr, any)) ui_restack_(id, +1);
         if (ctx.menu_item("Send Backward", "[", nullptr, any)) ui_restack_(id, -1);
-        if (ctx.menu_item("Select Parent", "", nullptr, any)) { if (auto p = doc_.parent_of(id)) doc_.select(*p ? *p : doc_.object_root()); }
+        if (ctx.menu_item("Select Parent", "", nullptr, any)) { if (auto p = app_.doc_.parent_of(id)) app_.doc_.select(*p ? *p : app_.doc_.object_root()); }
         ctx.menu_separator();
         if (ctx.menu_item("Frame Selected", "F", nullptr, any, I::Zoom)) ui_frame_selection_();
         if (ctx.menu_item("Fit Canvas", "Home")) ui_fit_ = true;
@@ -1034,7 +1046,7 @@ void EditorApp::draw_ui_popups_(imm::Context& ctx) {
     }
 }
 
-void EditorApp::draw_ui_palette_(imm::Context& ctx, const imm::Box& area) {
+void UiCanvasPanel::draw_ui_palette_(imm::Context& ctx, const imm::Box& area) {
     using I = imm::Icon;
     const imm::Box title{area.x + 8, area.y + 2, area.w - 16, 20};
     ctx.text_in(title, "Widgets", ctx.style.text, 0.0f);
@@ -1064,10 +1076,10 @@ void EditorApp::draw_ui_palette_(imm::Context& ctx, const imm::Box& area) {
     ctx.end_region();
 }
 
-void EditorApp::draw_ui_canvas_props_(imm::Context& ctx) {
+void UiCanvasPanel::draw_ui_canvas_props_(imm::Context& ctx) {
     using I = imm::Icon;
-    InspectorEnv env = inspector_env_();
-    const ObjectId root = doc_.object_root();
+    InspectorEnv env = app_.inspector_env_();
+    const ObjectId root = app_.doc_.object_root();
     if (ctx.collapsing_header("Preview", true, nullptr, I::Monitor)) {
         int w = static_cast<int>(ui_res_.x), h = static_cast<int>(ui_res_.y);
         bool ch = ctx.drag_int("Width", &w, 1.0f, 64, 16384);
@@ -1079,22 +1091,22 @@ void EditorApp::draw_ui_canvas_props_(imm::Context& ctx) {
         ctx.property_bool("Snapping", &ui_snap_);
     }
     if (!root) return;
-    const int ci = doc_.find_component(root, "Canvas");
+    const int ci = app_.doc_.find_component(root, "Canvas");
     if (ci < 0) {
         ctx.label_dim("This is a widget: it has no Canvas of its own, and is placed inside other UI");
         ctx.label_dim("(Shift A > UI Asset in another UI, or drag it onto one).");
     } else if (ctx.collapsing_header("Canvas", true, nullptr, I::UiCanvas)) {
-        Node comp = doc_.find(root)->at("components").as_seq()[static_cast<size_t>(ci)];
+        Node comp = app_.doc_.find(root)->at("components").as_seq()[static_cast<size_t>(ci)];
         const Node before = comp;
         ctx.indent(6);
         EditResult r = draw_component(ctx, comp, env);
         ctx.unindent(6);
-        if (r.changed && !(comp == before)) apply_(doc_.set_component(root, ci, comp, "Edit Canvas", r.active ? "ui_canvas" : std::string()));
-        if (r.finished) doc_.end_merge();
+        if (r.changed && !(comp == before)) app_.apply_(app_.doc_.set_component(root, ci, comp, "Edit Canvas", r.active ? "ui_canvas" : std::string()));
+        if (r.finished) app_.doc_.end_merge();
     }
     if (ctx.collapsing_header("Theme", true, nullptr, I::Palette)) {
-        const int ti = doc_.find_component(root, "Theme");
-        Node comp = ti >= 0 ? doc_.find(root)->at("components").as_seq()[static_cast<size_t>(ti)] : Node::mapping();
+        const int ti = app_.doc_.find_component(root, "Theme");
+        Node comp = ti >= 0 ? app_.doc_.find(root)->at("components").as_seq()[static_cast<size_t>(ti)] : Node::mapping();
         if (ti < 0) comp["type"] = Node(std::string("Theme"));
         FieldDesc f = f_asset("source", "ui/themes", ".yaml");
         f.label = "Theme";
@@ -1102,72 +1114,72 @@ void EditorApp::draw_ui_canvas_props_(imm::Context& ctx) {
         EditResult r = draw_field(ctx, f, comp, env);
         ctx.tooltip("Theme\nColours, fonts and sizes of every themed widget (Window, MenuList, StatBar...) in this UI");
         if (r.changed && !(comp == before)) {
-            if (ti >= 0 && !comp.contains("source")) apply_(doc_.remove_component(root, ti));
-            else if (ti >= 0) apply_(doc_.set_component(root, ti, comp, "Change Theme"));
-            else if (comp.contains("source")) apply_(doc_.add_component(root, comp));
-            queue_rebuild_();
+            if (ti >= 0 && !comp.contains("source")) app_.apply_(app_.doc_.remove_component(root, ti));
+            else if (ti >= 0) app_.apply_(app_.doc_.set_component(root, ti, comp, "Change Theme"));
+            else if (comp.contains("source")) app_.apply_(app_.doc_.add_component(root, comp));
+            app_.queue_rebuild_();
         }
         if (ctx.button("New Theme", -1, true, I::Plus)) ui_new_theme_();
         ctx.tooltip("New Theme\nCopies the current theme (or the default one) to ui/themes/ and uses it");
         const std::string src = ti >= 0 ? get_string(comp, "source") : std::string();
-        if (!src.empty() && ctx.button("Edit Theme", -1, true, I::Palette)) open_asset(AssetType::Theme, src);
+        if (!src.empty() && ctx.button("Edit Theme", -1, true, I::Palette)) app_.assets_panel_->open_asset(AssetType::Theme, src);
         ctx.tooltip("Edit Theme\nOpens the theme in the Theme tab: every colour, font and size, previewed here");
     }
 }
 
-void EditorApp::ui_new_theme_() {
+void UiCanvasPanel::ui_new_theme_() {
     ui_install_template_themes_();
-    const ObjectId root = doc_.object_root();
-    const int ti = doc_.find_component(root, "Theme");
-    std::string from = ti >= 0 ? get_string(doc_.find(root)->at("components").as_seq()[static_cast<size_t>(ti)], "source") : std::string();
+    const ObjectId root = app_.doc_.object_root();
+    const int ti = app_.doc_.find_component(root, "Theme");
+    std::string from = ti >= 0 ? get_string(app_.doc_.find(root)->at("components").as_seq()[static_cast<size_t>(ti)], "source") : std::string();
     if (from.empty()) from = "ui/themes/default.yaml";
-    const std::string n = unique_asset_name_("ui/themes", fs::path(doc_.scene_name()).stem().string() + "_theme");
-    const fs::path dst = project_.assets() / "ui" / "themes" / (n + ".yaml");
+    const std::string n = app_.unique_asset_name_("ui/themes", fs::path(app_.doc_.scene_name()).stem().string() + "_theme");
+    const fs::path dst = app_.project_.assets() / "ui" / "themes" / (n + ".yaml");
     std::error_code ec;
     fs::create_directories(dst.parent_path(), ec);
-    if (fs::exists(project_.absolute(from), ec)) fs::copy_file(project_.absolute(from), dst, ec);
+    if (fs::exists(app_.project_.absolute(from), ec)) fs::copy_file(app_.project_.absolute(from), dst, ec);
     else coopa::yaml::save_document(dst, Node::mapping());
-    project_.refresh();
+    app_.project_.refresh();
     Node comp = Node::mapping();
     comp["type"] = Node(std::string("Theme"));
     comp["source"] = Node("ui/themes/" + n + ".yaml");
-    if (ti >= 0) apply_(doc_.set_component(root, ti, comp, "New Theme"));
-    else apply_(doc_.add_component(root, comp));
-    log_info("Theme ui/themes/" + n + ".yaml created");
-    open_theme(dst);
+    if (ti >= 0) app_.apply_(app_.doc_.set_component(root, ti, comp, "New Theme"));
+    else app_.apply_(app_.doc_.add_component(root, comp));
+    app_.log_info("Theme ui/themes/" + n + ".yaml created");
+    app_.theme_editor_panel_->open_theme(dst);
 }
 
-void EditorApp::draw_ui_object_props_(imm::Context& ctx, ObjectId id) {
+void UiCanvasPanel::draw_ui_object_props_(imm::Context& ctx, ObjectId id) {
     using I = imm::Icon;
-    const Node* obj = doc_.find(id);
+    const Node* obj = app_.doc_.find(id);
     if (!obj) return;
     {
         imm::Box row = ctx.next_box(ctx.style.row_height + 2);
-        auto [icon, tint] = object_icon_(*obj, ctx.style);
+        auto [icon, tint] = app_.object_icon_(*obj, ctx.style);
         ctx.icon(icon, {row.x + 2, row.y + 3, row.h - 6, row.h - 6}, tint);
         std::string name = get_string(*obj, "name", "Element");
         if (ctx.input_text_box("objname", {row.x + row.h + 2, row.y, row.w - row.h - 2, row.h}, &name) && !name.empty()) {
-            apply_(doc_.set_object_key(id, "name", Node(name), "Rename"));
+            app_.apply_(app_.doc_.set_object_key(id, "name", Node(name), "Rename"));
         }
         ctx.tooltip("Name\nGame code finds this element by its name (Bindings tab)");
     }
-    const bool is_canvas = doc_.find_component(id, "Canvas") >= 0;
+    const bool is_canvas = app_.doc_.find_component(id, "Canvas") >= 0;
     if (is_canvas) {
         ctx.label_dim("The canvas fills the game window; its look is set in the Canvas tab.");
     } else if (ctx.collapsing_header("Rect Transform", true, nullptr, I::UiAnchor)) {
         draw_ui_rect_section_(ctx, id);
     }
     if (ctx.collapsing_header("Visibility", true, nullptr, I::Eye)) {
-        bool shown = !hidden_.count(id);
-        if (ctx.property_bool("Show in Editor", &shown)) { if (shown) { hidden_.erase(id); if (auto* l = sync_.live(id)) l->set_active(get_bool(*doc_.find(id), "active", true)); } else hide_({id}); }
-        bool enabled = get_bool(*doc_.find(id), "active", true);
-        if (ctx.property_bool("Visible in Game", &enabled)) apply_(doc_.set_object_key(id, "active", Node(enabled), "Toggle Active"));
+        bool shown = !app_.hidden_.count(id);
+        if (ctx.property_bool("Show in Editor", &shown)) { if (shown) { app_.hidden_.erase(id); if (auto* l = app_.sync_.live(id)) l->set_active(get_bool(*app_.doc_.find(id), "active", true)); } else app_.hide_({id}); }
+        bool enabled = get_bool(*app_.doc_.find(id), "active", true);
+        if (ctx.property_bool("Visible in Game", &enabled)) app_.apply_(app_.doc_.set_object_key(id, "active", Node(enabled), "Toggle Active"));
         ctx.tooltip("Visible in Game\nStarts hidden when off -- show it from game code (UiHandle::show) or a Show On Signal reactor");
     }
     if (obj->contains("prefab")) ctx.label_dim("Instance of " + get_string(*obj, "prefab") + " (edits here override it)");
 }
 
-void EditorApp::draw_ui_rect_section_(imm::Context& ctx, ObjectId id) {
+void UiCanvasPanel::draw_ui_rect_section_(imm::Context& ctx, ObjectId id) {
     const Node* blk = ui_comp_(id, "RectTransform");
     coopa::ui::RectTransform rtp = blk ? ui::parse_rect_block(*blk) : coopa::ui::RectTransform{};
     ui::RectParams p = rtp.params();
@@ -1254,21 +1266,21 @@ void EditorApp::draw_ui_rect_section_(imm::Context& ctx, ObjectId id) {
     if (changed) {
         ui_write_rect_(id, p, rot, "Edit Rect Transform", active ? "ui_rect_props:" + std::to_string(id) : std::string());
         if (cs) {
-            apply_(doc_.edit("Scale UI", [&](Node&) -> Change {
-                const int ci = doc_.find_component(id, "RectTransform");
+            app_.apply_(app_.doc_.edit("Scale UI", [&](Node&) -> Change {
+                const int ci = app_.doc_.find_component(id, "RectTransform");
                 if (ci < 0) return {};
-                Node& rt = doc_.components(id)->as_seq()[static_cast<size_t>(ci)];
+                Node& rt = app_.doc_.components(id)->as_seq()[static_cast<size_t>(ci)];
                 rt["scale"] = ui::palette_detail::v2(sc[0], sc[1]);
                 return {ChangeScope::Rect, id};
             }, active ? "ui_rect_props:" + std::to_string(id) : std::string()));
         }
     }
-    if (finished) doc_.end_merge();
+    if (finished) app_.doc_.end_merge();
     if (ctx.drag_int("Z Order", &z, 0.1f, -10000, 10000) || ctx.property_bool("Hittable", &hittable)) {
-        apply_(doc_.edit("Edit Rect Transform", [&](Node&) -> Change {
-            const int ci = doc_.find_component(id, "RectTransform");
+        app_.apply_(app_.doc_.edit("Edit Rect Transform", [&](Node&) -> Change {
+            const int ci = app_.doc_.find_component(id, "RectTransform");
             if (ci < 0) return {};
-            Node& rt = doc_.components(id)->as_seq()[static_cast<size_t>(ci)];
+            Node& rt = app_.doc_.components(id)->as_seq()[static_cast<size_t>(ci)];
             if (z == 0) erase_key(rt, "z_order"); else rt["z_order"] = Node(static_cast<int64_t>(z));
             if (hittable) erase_key(rt, "hittable"); else rt["hittable"] = Node(false);
             return {ChangeScope::Rect, id};
@@ -1277,7 +1289,7 @@ void EditorApp::draw_ui_rect_section_(imm::Context& ctx, ObjectId id) {
     ctx.tooltip("Z Order draws above (or below) later siblings; Hittable off lets clicks through");
 }
 
-void EditorApp::draw_anchor_glyph_(imm::Context& ctx, const imm::Box& b, glm::vec2 amin, glm::vec2 amax, bool hot) {
+void UiCanvasPanel::draw_anchor_glyph_(imm::Context& ctx, const imm::Box& b, glm::vec2 amin, glm::vec2 amax, bool hot) {
     ctx.fill_rounded(b, hot ? ctx.style.button_hover : ctx.style.button);
     const imm::Box in{b.x + 8, b.y + 8, b.w - 16, b.h - 16};
     ctx.outline(in, imm::with_alpha(ctx.style.text, 0.5f));
@@ -1289,7 +1301,7 @@ void EditorApp::draw_anchor_glyph_(imm::Context& ctx, const imm::Box& b, glm::ve
     for (glm::vec2 c : {p0, p1, glm::vec2(p0.x, p1.y), glm::vec2(p1.x, p0.y)}) ctx.circle(c, 2.5f, glm::vec4(1.0f, 0.4f, 0.4f, 1.0f));
 }
 
-void EditorApp::draw_ui_bindings_(imm::Context& ctx) {
+void UiCanvasPanel::draw_ui_bindings_(imm::Context& ctx) {
     using I = imm::Icon;
     const auto bindings = ui_bindings_();
     std::map<std::string, int> counts;
@@ -1302,7 +1314,7 @@ void EditorApp::draw_ui_bindings_(imm::Context& ctx) {
             imm::Box row = ctx.next_box(ctx.style.row_height);
             const bool dup = counts[b.name] > 1 && b.name != "Close";
             bool hov = false, held = false;
-            if (ctx.invisible_button("bind_row", row, &hov, &held)) doc_.select(b.object);
+            if (ctx.invisible_button("bind_row", row, &hov, &held)) app_.doc_.select(b.object);
             if (hov) ctx.fill_rounded(row, ctx.style.row_hover);
             ctx.icon(dup ? I::Warning : I::Link, {row.x + 2, row.y + 2, row.h - 4, row.h - 4}, dup ? glm::vec4(1, 0.8f, 0.3f, 1) : ctx.style.text_dim);
             ctx.text_in({row.x + row.h + 2, row.y, row.w * 0.45f, row.h}, b.name, ctx.style.text, 0.0f);
@@ -1315,10 +1327,10 @@ void EditorApp::draw_ui_bindings_(imm::Context& ctx) {
         }
     }
     if (!bindings.empty() && ctx.button("Copy C++ Binding Stub", -1, true, I::Duplicate)) {
-        std::string s = "// coopa::ui::UiHandle ui(scene.find_object(\"" + doc_.scene_name() + "\"));\n";
+        std::string s = "// coopa::ui::UiHandle ui(scene.find_object(\"" + app_.doc_.scene_name() + "\"));\n";
         for (const auto& b : bindings) s += "ui." + b.api + ";   // " + b.kind + "\n";
         if (ctx.input().set_clipboard) ctx.input().set_clipboard(s);
-        log_info("Copied " + std::to_string(bindings.size()) + " bindings to the clipboard");
+        app_.log_info("Copied " + std::to_string(bindings.size()) + " bindings to the clipboard");
     }
     ctx.tooltip("Copy C++ Binding Stub\nOne UiHandle call per named widget -- paste into a UiController's bind()");
     if (ctx.collapsing_header("No-Code Wiring", false, nullptr, I::Link)) {

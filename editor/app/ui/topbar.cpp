@@ -1,11 +1,23 @@
+#include "editor/app/ui/topbar.h"
+#include "editor/ui/logo.h"
+#include "editor/app/ui/properties.h"
+#include "editor/app/ui/assets.h"
+
 #include "editor/app/editor_app.h"
+#include "editor/app/ui/preferences.h"
+#include "editor/app/ui/build.h"
+#include "editor/app/ui/project_settings.h"
 
 namespace toy {
 namespace editor {
 
-void EditorApp::draw_topbar_(imm::Context& ctx, const imm::Box& b) {
+void TopbarPanel::draw_logo_(imm::Context& ctx, const imm::Box& box) {
+    toy::editor::draw_logo(ctx, box);
+}
+
+void TopbarPanel::draw_topbar_(imm::Context& ctx, const imm::Box& b) {
     using I = imm::Icon;
-    ctx.fill(b, et_.chrome.topbar_bg);
+    ctx.fill(b, app_.et_.chrome.topbar_bg);
     const char* menus[] = {"File", "Edit", "Render", "Build", "Window", "Help"};
     float menus_w = 8;
     for (const char* m : menus) menus_w += ctx.text_width(m) + ctx.style.padding * 3;
@@ -18,10 +30,10 @@ void EditorApp::draw_topbar_(imm::Context& ctx, const imm::Box& b) {
         draw_logo_(ctx, lb.shrink(2));
         ctx.tooltip(std::string(core::kEngineName) + " " + core::kVersionString + "\nAbout, controls and quit");
         if (ctx.begin_popup("app_menu", 210)) {
-            if (ctx.menu_item("About toyengine...", "", nullptr, true, I::Info)) pending_modal_ = "About";
-            if (ctx.menu_item("Controls...", "", nullptr, true, I::Keyboard)) pending_modal_ = "Controls";
+            if (ctx.menu_item("About toyengine...", "", nullptr, true, I::Info)) app_.pending_modal_ = "About";
+            if (ctx.menu_item("Controls...", "", nullptr, true, I::Keyboard)) app_.pending_modal_ = "Controls";
             ctx.menu_separator();
-            if (ctx.menu_item("Quit", "Cmd Q")) { if (request_close()) quit_ = true; }
+            if (ctx.menu_item("Quit", "Cmd Q")) { if (app_.request_close()) app_.quit_ = true; }
             ctx.end_popup();
         }
     }
@@ -30,40 +42,40 @@ void EditorApp::draw_topbar_(imm::Context& ctx, const imm::Box& b) {
     draw_file_menu_(ctx);
     draw_edit_menu_(ctx);
     draw_render_menu_(ctx);
-    draw_build_menu_(ctx);
+    app_.build_panel_->draw_build_menu_(ctx);
     draw_window_menu_(ctx);
     if (ctx.begin_menu("Help")) {
-        if (ctx.menu_item("Controls...", "", nullptr, true, I::Keyboard)) pending_modal_ = "Controls";
-        if (ctx.menu_item("About toyengine...", "", nullptr, true, I::Info)) pending_modal_ = "About";
+        if (ctx.menu_item("Controls...", "", nullptr, true, I::Keyboard)) app_.pending_modal_ = "Controls";
+        if (ctx.menu_item("About toyengine...", "", nullptr, true, I::Info)) app_.pending_modal_ = "About";
         ctx.end_menu();
     }
     ctx.end_menubar();
 
     // The open asset: type, name, unsaved marker, and the mesh being edited from a scene.
     {
-        const auto& info = asset_type_info_(active_type_);
-        std::string label = std::string(info.singular) + "  " + active_asset_label_() + (open_asset_dirty_() ? "  *" : "");
-        if (edit_object_ && mesh_.open()) label += "   \u25b8   editing " + project_.relative(mesh_.path) + (mesh_.dirty() ? " *" : "");
+        const auto& info = app_.assets_panel_->asset_type_info_(app_.active_type_);
+        std::string label = std::string(info.singular) + "  " + app_.properties_panel_->active_asset_label_() + (app_.assets_panel_->open_asset_dirty_() ? "  *" : "");
+        if (app_.edit_object_ && app_.mesh_.open()) label += "   \u25b8   editing " + app_.project_.relative(app_.mesh_.path) + (app_.mesh_.dirty() ? " *" : "");
         const float w = ctx.text_width(label) + b.h + 18;
         const imm::Box ab{mb.right() + 12, b.y + 4, w, b.h - 8};
         ctx.fill_rounded(ab, ctx.style.field);
         ctx.icon(info.icon, {ab.x + 5, ab.y + 2, ab.h - 4, ab.h - 4}, ctx.style.object_active);
         ctx.text_in({ab.x + ab.h + 6, ab.y, ab.w - ab.h - 6, ab.h}, label, ctx.style.text, 0.0f);
-        ctx.tooltip(std::string("Open asset\n") + (active_path_.empty() ? std::string("not saved yet") : project_.relative(active_path_)) +
+        ctx.tooltip(std::string("Open asset\n") + (app_.active_path_.empty() ? std::string("not saved yet") : app_.project_.relative(app_.active_path_)) +
                     " -- pick another in the Asset panel");
     }
 
     // Unity play controls, centred -- scenes only (play runs the open scene).
     const float s = b.h - 6;
-    if (active_type_ != AssetType::Scene) return draw_topbar_project_(ctx, b);
+    if (app_.active_type_ != AssetType::Scene) return draw_topbar_project_(ctx, b);
     const float cx = b.x + b.w * 0.5f - s * 1.5f;
-    const bool paused = playing() && play_scene_ && !play_scene_->is_simulating() && step_countdown_ == 0;
-    ctx.fill_rounded({cx - 2, b.y + 2, s * 3 + 4, s + 2}, et_.chrome.play_group_bg);
-    if (ctx.icon_button("tb_play", playing() ? I::Stop : I::Play, playing() ? "Stop\nLeave play mode (F5 / Esc)" : "Play\nRun the scene in the game simulation (F5)",
-                        playing(), s, imm::Context::kLeft, imm::Box{cx, b.y + 3, s, s})) {
-        playing() ? stop() : play();
+    const bool is_paused = app_.playing() && app_.play_scene_ && !app_.play_scene_->is_simulating() && app_.step_countdown_ == 0;
+    ctx.fill_rounded({cx - 2, b.y + 2, s * 3 + 4, s + 2}, app_.et_.chrome.play_group_bg);
+    if (ctx.icon_button("tb_play", app_.playing() ? I::Stop : I::Play, app_.playing() ? "Stop\nLeave play mode (F5 / Esc)" : "Play\nRun the scene in the game simulation (F5)",
+                        app_.playing(), s, imm::Context::kLeft, imm::Box{cx, b.y + 3, s, s})) {
+        app_.playing() ? app_.stop() : app_.play();
     }
-    if (ctx.icon_button("tb_pause", I::Pause, "Pause\nFreeze the running simulation", paused, s, 0, imm::Box{cx + s, b.y + 3, s, s})) toggle_pause_();
+    if (ctx.icon_button("tb_pause", I::Pause, "Pause\nFreeze the running simulation", is_paused, s, 0, imm::Box{cx + s, b.y + 3, s, s})) toggle_pause_();
     if (ctx.icon_button("tb_step", I::Step, "Step\nAdvance the paused simulation by one frame", false, s, imm::Context::kRight,
                         imm::Box{cx + s * 2, b.y + 3, s, s})) {
         step_simulation_();
@@ -72,154 +84,154 @@ void EditorApp::draw_topbar_(imm::Context& ctx, const imm::Box& b) {
     draw_topbar_project_(ctx, b);
 }
 
-void EditorApp::draw_topbar_project_(imm::Context& ctx, const imm::Box& b) {
+void TopbarPanel::draw_topbar_project_(imm::Context& ctx, const imm::Box& b) {
     using I = imm::Icon;
     // Project name at the right.
-    const std::string proj = project_.name();
+    const std::string proj = app_.project_.name();
     const float sw = ctx.text_width(proj) + 40;
     const imm::Box sb{b.right() - sw - 8, b.y + 4, sw, b.h - 8};
     ctx.icon(I::Folder, {sb.x + 5, sb.y + 2, sb.h - 4, sb.h - 4}, ctx.style.text_dim);
     ctx.text_in({sb.x + sb.h + 4, sb.y, sb.w - sb.h - 4, sb.h}, proj, ctx.style.text_dim, 0.0f);
-    ctx.tooltip("Project\n" + project_.root().string());
+    ctx.tooltip("Project\n" + app_.project_.root().string());
 }
 
-void EditorApp::draw_file_menu_(imm::Context& ctx) {
+void TopbarPanel::draw_file_menu_(imm::Context& ctx) {
     using I = imm::Icon;
     if (!ctx.begin_menu("File")) return;
-    if (ctx.menu_item("New Scene", "Ctrl N", nullptr, true, I::File)) guarded_([this] { new_scene(); });
-    if (ctx.menu_item("Open Scene...", "Ctrl O", nullptr, true, I::Folder)) guarded_([this] { open_scene_dialog_(); });
+    if (ctx.menu_item("New Scene", "Ctrl N", nullptr, true, I::File)) app_.guarded_([this] { app_.new_scene(); });
+    if (ctx.menu_item("Open Scene...", "Ctrl O", nullptr, true, I::Folder)) app_.guarded_([this] { app_.open_scene_dialog_(); });
     if (ctx.begin_menu("Open Recent", true, I::Scene)) {
-        for (const auto& sc : project_.scenes()) {
-            if (ctx.menu_item(sc, "", nullptr, true, I::Scene)) { const fs::path p = project_.absolute(sc); guarded_([this, p] { open_scene(p); }); }
+        for (const auto& sc : app_.project_.scenes()) {
+            if (ctx.menu_item(sc, "", nullptr, true, I::Scene)) { const fs::path p = app_.project_.absolute(sc); app_.guarded_([this, p] { app_.open_scene(p); }); }
         }
         ctx.end_menu();
     }
     ctx.menu_separator();
-    if (ctx.menu_item("Save", "Ctrl S", nullptr, true, I::Save)) save_all_();
-    if (ctx.menu_item("Save Scene As...", "Shift Ctrl S", nullptr, true, I::Save)) save_scene_as_dialog_();
+    if (ctx.menu_item("Save", "Ctrl S", nullptr, true, I::Save)) app_.save_all_();
+    if (ctx.menu_item("Save Scene As...", "Shift Ctrl S", nullptr, true, I::Save)) app_.save_scene_as_dialog_();
     ctx.menu_separator();
-    if (ctx.menu_item("New Project...", "", nullptr, true, I::Plus)) new_project_dialog_();
-    if (ctx.menu_item("Open Project...", "", nullptr, true, I::Folder)) open_project_dialog_();
+    if (ctx.menu_item("New Project...", "", nullptr, true, I::Plus)) app_.new_project_dialog_();
+    if (ctx.menu_item("Open Project...", "", nullptr, true, I::Folder)) app_.open_project_dialog_();
     if (ctx.begin_menu("Recent Projects", true, I::Folder)) {
         for (const auto& r : Project::recent_projects()) {
-            if (ctx.menu_item(r, "", nullptr, true, I::Folder)) { const fs::path p = r; guarded_([this, p] { switch_project_ = p; }); }
+            if (ctx.menu_item(r, "", nullptr, true, I::Folder)) { const fs::path p = r; app_.guarded_([this, p] { app_.switch_project_ = p; }); }
         }
         ctx.end_menu();
     }
     ctx.menu_separator();
-    if (ctx.menu_item("Package Project (.caml)...", "", nullptr, true, I::Package)) open_package_dialog_();
+    if (ctx.menu_item("Package Project (.caml)...", "", nullptr, true, I::Package)) app_.open_package_dialog_();
     ctx.menu_separator();
-    if (ctx.menu_item("Quit", "Ctrl Q", nullptr, true, I::X)) { if (request_close()) quit_ = true; }
+    if (ctx.menu_item("Quit", "Ctrl Q", nullptr, true, I::X)) { if (app_.request_close()) app_.quit_ = true; }
     ctx.end_menu();
 }
 
-void EditorApp::draw_edit_menu_(imm::Context& ctx) {
+void TopbarPanel::draw_edit_menu_(imm::Context& ctx) {
     using I = imm::Icon;
     if (!ctx.begin_menu("Edit")) return;
-    if (ctx.menu_item("Undo " + current_undo_label_(true), "Ctrl Z", nullptr, true, I::Undo)) undo();
-    if (ctx.menu_item("Redo " + current_undo_label_(false), "Shift Ctrl Z", nullptr, true, I::Redo)) redo();
+    if (ctx.menu_item("Undo " + app_.current_undo_label_(true), "Ctrl Z", nullptr, true, I::Undo)) app_.undo();
+    if (ctx.menu_item("Redo " + app_.current_undo_label_(false), "Shift Ctrl Z", nullptr, true, I::Redo)) app_.redo();
     ctx.menu_separator();
-    const bool ok = !asset_view_() && !playing();
-    if (ctx.menu_item("Duplicate", "Shift D", nullptr, ok, I::Duplicate)) { duplicate_selected(); pending_modal_kind_ = ModalKind::Grab; }
-    if (ctx.menu_item("Delete", "X", nullptr, ok, I::Trash)) delete_selected();
+    const bool ok = !app_.asset_view_() && !app_.playing();
+    if (ctx.menu_item("Duplicate", "Shift D", nullptr, ok, I::Duplicate)) { app_.duplicate_selected(); app_.pending_modal_kind_ = ModalKind::Grab; }
+    if (ctx.menu_item("Delete", "X", nullptr, ok, I::Trash)) app_.delete_selected();
     ctx.menu_separator();
-    if (ctx.menu_item("Rename Active Item", "F2", nullptr, ok && doc_.primary() != 0)) { rename_id_ = doc_.primary(); rename_frames_ = 0; }
+    if (ctx.menu_item("Rename Active Item", "F2", nullptr, ok && app_.doc_.primary() != 0)) { app_.rename_id_ = app_.doc_.primary(); app_.rename_frames_ = 0; }
     draw_theme_menu_(ctx);
-    if (ctx.menu_item("Project Settings...", "", nullptr, true, I::Gear)) open_project_settings_("General");
+    if (ctx.menu_item("Project Settings...", "", nullptr, true, I::Gear)) app_.project_settings_panel_->open_project_settings_("General");
     ctx.tooltip("Project Settings\nThe project's default render, output and physics settings (assets/config.yaml)");
-    if (ctx.menu_item("Preferences...", "", nullptr, true, I::Gear)) open_preferences();
+    if (ctx.menu_item("Preferences...", "", nullptr, true, I::Gear)) app_.preferences_panel_->open_preferences();
     ctx.tooltip("Preferences\nYour editor settings: theme, interface scale, navigation, snapping, keymap");
     ctx.end_menu();
 }
 
-void EditorApp::draw_theme_menu_(imm::Context& ctx) {
+void TopbarPanel::draw_theme_menu_(imm::Context& ctx) {
     using I = imm::Icon;
     if (!ctx.begin_menu("Theme", true, I::Palette)) return;
     for (const auto& t : imm::list_themes(editor_themes_dir())) {
-        bool on = t.id == theme_id_;
-        if (ctx.menu_item(t.name, "", &on)) set_theme(t.id);
+        bool on = t.id == app_.theme_id_;
+        if (ctx.menu_item(t.name, "", &on)) app_.set_theme(t.id);
         ctx.tooltip(t.name + "\n" + t.path.filename().string() + " -- edits to the file apply live");
     }
     ctx.menu_separator();
-    if (ctx.menu_item("Reload Theme", "", nullptr, true, I::Restart)) load_theme_(theme_id_);
-    ctx.tooltip("Reload Theme\nRe-read " + (editor_themes_dir() / (theme_id_ + ".yaml")).string());
+    if (ctx.menu_item("Reload Theme", "", nullptr, true, I::Restart)) app_.load_theme_(app_.theme_id_);
+    ctx.tooltip("Reload Theme\nRe-read " + (editor_themes_dir() / (app_.theme_id_ + ".yaml")).string());
     if (ctx.menu_item("Export Full Theme", "", nullptr, true, I::File)) export_theme_();
-    ctx.tooltip("Export Full Theme\nWrites every role of the current theme to editor/themes/" + theme_id_ + "_full.yaml, a starting point for a new theme");
+    ctx.tooltip("Export Full Theme\nWrites every role of the current theme to editor/themes/" + app_.theme_id_ + "_full.yaml, a starting point for a new theme");
     ctx.end_menu();
 }
 
-void EditorApp::export_theme_() {
-    imm::Theme t = theme_;
+void TopbarPanel::export_theme_() {
+    imm::Theme t = app_.theme_;
     // Spell out the editor roles too, so the file lists everything that can be themed.
-    visit_editor_theme(et_, [&](const char* section, const char* role, const glm::vec4& c) { t.sections[section][role] = c; });
-    const fs::path out = editor_themes_dir() / (theme_id_ + "_full.yaml");
+    visit_editor_theme(app_.et_, [&](const char* section, const char* role, const glm::vec4& c) { t.sections[section][role] = c; });
+    const fs::path out = editor_themes_dir() / (app_.theme_id_ + "_full.yaml");
     t.name += " (full)";
     std::ofstream f(out);
-    f << "# Exported from \"" << theme_.name << "\" -- every themable role. Rename `name:` and edit.\n" << imm::theme_to_yaml(t);
-    if (f) log_info("Theme exported: " + out.string());
-    else log_error("Could not write " + out.string());
+    f << "# Exported from \"" << app_.theme_.name << "\" -- every themable role. Rename `name:` and edit.\n" << imm::theme_to_yaml(t);
+    if (f) app_.log_info("Theme exported: " + out.string());
+    else app_.log_error("Could not write " + out.string());
 }
 
-void EditorApp::draw_render_menu_(imm::Context& ctx) {
+void TopbarPanel::draw_render_menu_(imm::Context& ctx) {
     using I = imm::Icon;
     if (!ctx.begin_menu("Render")) return;
     if (ctx.menu_item("Render Image", "F12", nullptr, true, I::Render)) render_image_();
-    if (ctx.menu_item("Rebuild Renderer", "", nullptr, true, I::Restart)) rebuild_renderer_();
+    if (ctx.menu_item("Rebuild Renderer", "", nullptr, true, I::Restart)) app_.project_settings_panel_->rebuild_renderer_();
     ctx.tooltip("Rebuild Renderer\nRecreates the render pipeline in place from the current settings; the window stays open");
-    if (ctx.menu_item("Restart Editor Engine...", "", nullptr, true, I::Restart)) restart_ = true;
+    if (ctx.menu_item("Restart Editor Engine...", "", nullptr, true, I::Restart)) app_.restart_ = true;
     ctx.tooltip("Restart Editor Engine\nRecreates the whole engine and window (open documents are kept). "
                 "Only needed for settings baked in at start-up, such as Texel AA");
     ctx.menu_separator();
-    if (ctx.menu_item("Project Settings...", "", nullptr, true, I::Gear)) open_project_settings_("General");
-    if (ctx.menu_item("Scene Render Settings", "", nullptr, true, I::Render)) prop_tab_ = PropTab::Render;
-    if (ctx.menu_item("World Settings", "", nullptr, true, I::World)) prop_tab_ = PropTab::World;
+    if (ctx.menu_item("Project Settings...", "", nullptr, true, I::Gear)) app_.project_settings_panel_->open_project_settings_("General");
+    if (ctx.menu_item("Scene Render Settings", "", nullptr, true, I::Render)) app_.prop_tab_ = PropTab::Render;
+    if (ctx.menu_item("World Settings", "", nullptr, true, I::World)) app_.prop_tab_ = PropTab::World;
     ctx.end_menu();
 }
 
-void EditorApp::draw_window_menu_(imm::Context& ctx) {
+void TopbarPanel::draw_window_menu_(imm::Context& ctx) {
     using I = imm::Icon;
     if (!ctx.begin_menu("Window")) return;
-    bool t = show_toolbar_, n = show_sidebar_, bt = show_bottom_;
-    if (ctx.menu_item("Toolbar", "T", &t)) show_toolbar_ = !show_toolbar_;
-    if (ctx.menu_item("Sidebar", "N", &n)) show_sidebar_ = !show_sidebar_;
-    if (ctx.menu_item("Console", "", &bt)) show_bottom_ = !show_bottom_;
-    if (ctx.menu_item("Toggle Maximize Area", "Ctrl Space", nullptr, true, I::Zoom)) maximized_ = !maximized_;
+    bool t = app_.show_toolbar_, n = app_.show_sidebar_, bt = app_.show_bottom_;
+    if (ctx.menu_item("Toolbar", "T", &t)) app_.show_toolbar_ = !app_.show_toolbar_;
+    if (ctx.menu_item("Sidebar", "N", &n)) app_.show_sidebar_ = !app_.show_sidebar_;
+    if (ctx.menu_item("Console", "", &bt)) app_.show_bottom_ = !app_.show_bottom_;
+    if (ctx.menu_item("Toggle Maximize Area", "Ctrl Space", nullptr, true, I::Zoom)) app_.maximized_ = !app_.maximized_;
     ctx.menu_separator();
 
     if (ctx.menu_item("Reset Layout", "", nullptr, true, I::Restart)) {
-        left_w_ = 260; right_w_ = 330; bottom_h_ = 130; outliner_h_ = 260; show_toolbar_ = show_bottom_ = true; show_sidebar_ = false; maximized_ = false;
+        app_.left_w_ = 260; app_.right_w_ = 330; app_.bottom_h_ = 130; app_.outliner_h_ = 260; app_.show_toolbar_ = app_.show_bottom_ = true; app_.show_sidebar_ = false; app_.maximized_ = false;
     }
     ctx.end_menu();
 }
 
-void EditorApp::toggle_pause_() {
-    if (!play_scene_) return;
-    play_scene_->set_simulating(!play_scene_->is_simulating());
-    if (play_scene_->is_simulating()) engine_.audio().resume_all();
-    else engine_.audio().pause_all();
-    step_countdown_ = 0;
+void TopbarPanel::toggle_pause_() {
+    if (!app_.play_scene_) return;
+    app_.play_scene_->set_simulating(!app_.play_scene_->is_simulating());
+    if (app_.play_scene_->is_simulating()) app_.engine_.audio().resume_all();
+    else app_.engine_.audio().pause_all();
+    app_.step_countdown_ = 0;
 }
 
-void EditorApp::step_simulation_() {
-    if (!play_scene_) { play(); pause_after_start_ = true; return; }
-    play_scene_->set_simulating(true);
-    step_countdown_ = 2;   // simulate the next tick, then pause again (see post_late_update_)
+void TopbarPanel::step_simulation_() {
+    if (!app_.play_scene_) { app_.play(); app_.pause_after_start_ = true; return; }
+    app_.play_scene_->set_simulating(true);
+    app_.step_countdown_ = 2;   // simulate the next tick, then pause again (see post_late_update_)
 }
 
-void EditorApp::render_image_() {
+void TopbarPanel::render_image_() {
     try {
-        const fs::path dir = project_.root() / "renders";
+        const fs::path dir = app_.project_.root() / "renders";
         fs::create_directories(dir);
         const auto stamp = std::chrono::system_clock::now().time_since_epoch().count();
         const fs::path p = dir / ("render_" + std::to_string(stamp / 1000000) + ".png");
-        engine_.save_screenshot(p.string(), true);
-        log_info("Rendered " + p.filename().string() + " (renders/)");
+        app_.engine_.save_screenshot(p.string(), true);
+        app_.log_info("Rendered " + p.filename().string() + " (renders/)");
     } catch (const std::exception& e) {
-        log_error(std::string("Render failed: ") + e.what());
+        app_.log_error(std::string("Render failed: ") + e.what());
     }
 }
 
-std::vector<std::pair<std::string, std::string>> EditorApp::about_rows_() {
+std::vector<std::pair<std::string, std::string>> TopbarPanel::about_rows_() {
 #if defined(__APPLE__)
     std::string platform = "macOS";
 #elif defined(_WIN32)
@@ -250,13 +262,13 @@ std::vector<std::pair<std::string, std::string>> EditorApp::about_rows_() {
         {"Build", std::string(__DATE__) + " " + __TIME__ + " (" + build + ")"},
         {"Compiler", compiler},
         {"Platform", platform},
-        {"Graphics", "Vulkan " + engine_.device().api_version_string() + " on " + engine_.device().gpu_name()},
+        {"Graphics", "Vulkan " + app_.engine_.device().api_version_string() + " on " + app_.engine_.device().gpu_name()},
         {"Libraries", "libcoopa, gfxcoopa, uicoopa, physxcoopa, sfxcoopa, mapcoopa"},
-        {"Project", project_.root().string()},
+        {"Project", app_.project_.root().string()},
     };
 }
 
-void EditorApp::draw_about_modal_(imm::Context& ctx) {
+void TopbarPanel::draw_about_modal_(imm::Context& ctx) {
     if (!ctx.begin_modal("About", {520, 318})) return;
     const imm::Box logo = ctx.next_box(84, 84);
     draw_logo_(ctx, logo);

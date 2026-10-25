@@ -90,7 +90,7 @@ COOPA_TEST(bind_to_rig_with_automatic_weights_deforms_the_mesh) {
     require(skinned(app, skin) == nullptr, "a plain mesh object is not skinned to start with");
 
     doc.select(skin);
-    require(app.bind_selection_to_rig(EditorApp::BindWeights::Automatic), "the selection binds to the rig above it");
+    require(app.bind_selection_to_rig(BindWeights::Automatic), "the selection binds to the rig above it");
     app.sync().rebuild(engine, doc);
     tick(engine, 8);   // the new SkinnedMeshRenderer loads its bind pose asynchronously
 
@@ -165,7 +165,7 @@ COOPA_TEST(a_bind_refuses_a_mesh_with_no_rig_and_a_posed_rig) {
     doc.select(cube);
     ObjectId skin = 0, rig = 0;
     expect(!app.bind_targets(skin, rig), "bind: a mesh with no rig above it offers no bind");
-    expect(!app.bind_selection_to_rig(EditorApp::BindWeights::Automatic), "bind: ...so the command does nothing");
+    expect(!app.bind_selection_to_rig(BindWeights::Automatic), "bind: ...so the command does nothing");
 
     const ObjectId rig_root = doc.add_object(doc.make_object("Rig"));
     const ObjectId bone = doc.add_object(doc.make_object("Bone"), rig_root);
@@ -187,10 +187,10 @@ COOPA_TEST(a_bind_refuses_a_mesh_with_no_rig_and_a_posed_rig) {
     tick(engine, 2);
     require(app.set_interaction_mode(InteractionMode::Pose), "Pose Mode opens on the rig");
     doc.select(limb);
-    expect(!app.bind_selection_to_rig(EditorApp::BindWeights::Automatic), "bind: refused while Pose Mode holds a pose");
+    expect(!app.bind_selection_to_rig(BindWeights::Automatic), "bind: refused while Pose Mode holds a pose");
     app.set_interaction_mode(InteractionMode::Object);
     tick(engine, 2);
-    expect(app.bind_selection_to_rig(EditorApp::BindWeights::Automatic), "bind: and allowed again once it is left");
+    expect(app.bind_selection_to_rig(BindWeights::Automatic), "bind: and allowed again once it is left");
 }
 
 } // namespace toy::editor::testing

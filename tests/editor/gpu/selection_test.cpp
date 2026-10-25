@@ -6,6 +6,7 @@
  */
 
 #include <coopa/testing/test.h>
+#include <toyengine/water/water_system.h>
 
 #include <gfxcoopa/util/image_readback.h>
 

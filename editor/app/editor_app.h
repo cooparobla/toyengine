@@ -21,6 +21,12 @@
 #ifndef TOYEDITOR_APP_EDITOR_APP_H
 #define TOYEDITOR_APP_EDITOR_APP_H
 
+#include "editor_types.h"
+#include "editor/app/ui/viewport_chrome.h"
+#include "editor/app/ui/topbar.h"
+#include "editor/app/ui/timeline.h"
+#include "editor/app/ui/mesh_tools.h"
+#include "editor/app/ui/instances.h"
 #include "asset_documents.h"
 #include "editor_theme.h"
 #include "sculpt_preview.h"
@@ -65,6 +71,11 @@
 #include <toyengine/core/config.h>
 #include <toyengine/core/branding.h>
 #include <toyengine/core/engine.h>
+// engine.h declares AudioSystem only; the Audio asset tab holds sfxcoopa values by value
+// and calls into the system, so this header needs both definitions.
+#include <toyengine/audio/audio_system.h>
+#include <sfxcoopa/data/import_settings.h>
+#include <sfxcoopa/mixer/voice.h>
 #include <toyengine/render/passes/debug_line_pass.h>
 #include <physxcoopa/components/collider.h>
 #include <physxcoopa/debug/shape_draw.h>
@@ -105,6 +116,34 @@
 
 namespace toy::editor {
 
+/// Extracted panels, held behind forward declarations so their headers never reach this
+/// one -- editing a panel recompiles that panel and editor_app.cpp, not all of them.
+class EditorContext;
+class ConsolePanel;
+class WeatherPanel;
+class ViewportChromePanel;
+class UiCanvasPanel;
+class TopbarPanel;
+class TimelinePanel;
+class TileModePanel;
+class TerrainPanel;
+class SculptPanel;
+class PropertiesPanel;
+class PaintPanel;
+class MeshToolsPanel;
+class InstancesPanel;
+class AssetsPanel;
+class WeightsPanel;
+class WorldGeneratorPanel;
+class PreferencesPanel;
+class BuildPanel;
+class TileTerrainPanel;
+class ParticlePanel;
+class ThemeEditorPanel;
+class ProjectSettingsPanel;
+class StatusBarPanel;
+class OutlinerPanel;
+
 namespace fs = std::filesystem;
 
 /**
@@ -118,30 +157,6 @@ using coopa::input::Mods;
 /// uicoopa's Finder-style picker (Open / Save / folders), shared with the hub.
 using FileDialog = coopa::ui::imm::FileDialog;
 
-/**
- * @brief The kind of asset the editor has open. Exactly one asset is open at a time, and its
- *        type decides what the viewer shows and what the Properties editor offers.
- */
-enum class AssetType { None = 0, Scene, Object, Mesh, Material, Texture, UI, Theme, Audio };
-/** @brief Blender's interaction modes for a mesh object (the viewport header's mode dropdown). */
-enum class InteractionMode { Object = 0, Edit, Sculpt, VertexPaint, WeightPaint, Pose };
-/** @brief Viewport shading, Blender's four buttons. */
-enum class Shading { Wireframe = 0, Solid = 1, MaterialPreview = 2, Full = 3 };
-
-/**
- * @brief How an object's origin is drawn in the viewport (Blender's "empty" display).
- *
- * Only objects with no mesh of their own get one -- a rig's joints, markers, group parents.
- */
-enum class OriginStyle {
-    Axes = 0,   ///< Three lines through the origin, one per local axis. The default.
-    Orb,        ///< A small ball at the origin, with a tick along each axis.
-};
-/** @brief The origin glyph's size in metres when neither the object nor an ancestor sets one. */
-inline constexpr float kDefaultOriginSize = 0.5f;
-/** @brief The Properties editor's tabs. */
-enum class PropTab { Tool, Render, Output, Scene, World, Object, Components, Physics, Data, Material, Canvas, Bindings, Theme };
-
 /** @brief State carried across a renderer restart (the Engine is rebuilt underneath). */
 struct EditorState {
     std::optional<SceneDocument> scene;   ///< The open scene or object asset
@@ -152,11 +167,32 @@ struct EditorState {
 };
 
 class EditorApp {
+    friend class WeatherPanel;
+    friend class ViewportChromePanel;
+    friend class UiCanvasPanel;
+    friend class TopbarPanel;
+    friend class TimelinePanel;
+    friend class TileModePanel;
+    friend class TerrainPanel;
+    friend class SculptPanel;
+    friend class PropertiesPanel;
+    friend class PaintPanel;
+    friend class MeshToolsPanel;
+    friend class InstancesPanel;
+    friend class AssetsPanel;
+    friend class WeightsPanel;
+    friend class WorldGeneratorPanel;
+    friend class PreferencesPanel;
+    friend class BuildPanel;
+    friend class TileTerrainPanel;
+    friend class ParticlePanel;
+    friend class ThemeEditorPanel;
+    friend class ProjectSettingsPanel;
+    friend class StatusBarPanel;
+    friend class OutlinerPanel;
 public:
-    /** @brief Asset panel orderings (ui/assets.inl). */
-    enum class AssetSort { Name, Modified, Tags, Size };
+    /** @brief Asset panel orderings (ui/assets.h). */
     /** @brief An asset file's sort keys: last-modified (seconds) and size (bytes). */
-    struct AssetStat { int64_t modified = 0; uintmax_t size = 0; };
 
     // =================================================================================
     // Construction
@@ -250,7 +286,7 @@ public:
     PropTab prop_tab() const { return prop_tab_; }
     void set_prop_tab(PropTab t) { prop_tab_ = t; }
     /** @brief The navigation gizmo's on-screen rect (canvas pixels), for tests. */
-    imm::Box nav_gizmo_rect() const { return nav_gizmo_rect_(); }
+    imm::Box nav_gizmo_rect() const { return viewport_chrome_panel_->nav_gizmo_rect_(); }
 
     // --- themes (Edit > Theme) ---
     /** @brief Switches to the theme `editor/themes/<id>.yaml` and remembers it; false if it failed to load. */
@@ -259,8 +295,8 @@ public:
     const imm::Theme& theme() const { return theme_; }
     const EditorTheme& editor_theme() const { return et_; }
     /** @brief Unity's Pause toggle / single Step for the running game. */
-    void pause() { toggle_pause_(); }
-    void step() { step_simulation_(); }
+    void pause() { topbar_panel_->toggle_pause_(); }
+    void step() { topbar_panel_->step_simulation_(); }
     /** @brief Where a named widget was last drawn ("asset_row:<rel>", "asset_delete", "asset_add",
      *         "asset_new:<item>"), for tests driving the UI with real input. */
     /** @brief Tests: forget every recorded rect, so the next frame's are the only ones. */
@@ -280,37 +316,157 @@ public:
     /** @brief Shift O: the next falloff curve. */
     void cycle_proportional_falloff();
     /** @brief Mesh > Mirror on the current Edit Mode selection (axis 0-2; world or mesh axes). */
-    void mirror_mesh_selection(int axis, bool global) { mirror_mesh_selection_(axis, global); }
+    void mirror_mesh_selection(int axis, bool global) { mesh_tools_panel_->mirror_mesh_selection_(axis, global); }
     /** @brief H on these objects (editor-only hide). */
     void hide_objects(const std::vector<ObjectId>& ids) { hide_(ids); }
-    // Prefab instances (ui/instances.inl).
+    // Prefab instances (ui/instances.h).
     /** @brief What a viewport click on `hit` selects: the whole instance first, then its part. */
-    ObjectId click_target(ObjectId hit) const { return click_target_(hit); }
+    ObjectId click_target(ObjectId hit) const { return instances_panel_->click_target_(hit); }
     /** @brief `id`'s `type` component as the Components tab shows it (resolved in an instance). */
     Node shown_component(ObjectId id, const std::string& type) const;
     /** @brief A Components tab edit: saved in place, or in an instance as its smallest override. */
-    void edit_component(ObjectId id, const Node& edited) { edit_component_(id, edited, "Edit " + component_type(edited)); }
+    void edit_component(ObjectId id, const Node& edited) { instances_panel_->edit_component_(id, edited, "Edit " + component_type(edited)); }
     void revert_override_field(ObjectId id, const std::string& type, const std::string& key);
     void apply_component_to_asset(ObjectId id, const std::string& type);
-    void apply_all_to_asset(ObjectId id) { apply_all_to_asset_(id); }
-    void revert_all_overrides(ObjectId id) { revert_all_overrides_(id); }
-    bool has_overrides(ObjectId id) const { return has_overrides_(id); }
-    bool object_transform(ObjectId id, glm::vec3& p, glm::vec3& r, glm::vec3& s) const { return get_object_transform_(id, p, r, s); }
+    void apply_all_to_asset(ObjectId id) { instances_panel_->apply_all_to_asset_(id); }
+    void revert_all_overrides(ObjectId id) { instances_panel_->revert_all_overrides_(id); }
+    bool has_overrides(ObjectId id) const { return instances_panel_->has_overrides_(id); }
+    bool object_transform(ObjectId id, glm::vec3& p, glm::vec3& r, glm::vec3& s) const { return timeline_panel_->get_object_transform_(id, p, r, s); }
     /** @brief Object Mode's Shade Smooth / Shade Flat on the selected objects' meshes. */
     void shade_selected(bool smooth) { shade_selected_(smooth); }
     /** @brief Sculpt / Edit Mode: Catmull-Clark the whole edited mesh `levels` times (one undo step). */
-    void subdivide_smooth(int levels) { if (edit_object_ || mesh_edit_view_()) run_catmull_clark_(levels); }
+    void subdivide_smooth(int levels) { if (edit_object_ || mesh_edit_view_()) mesh_tools_panel_->run_catmull_clark_(levels); }
     bool quit_requested() const { return quit_; }
     bool restart_requested() const { return restart_; }
-    /** @brief Render > Rebuild Renderer: settings fixed at pipeline construction apply in place (ui/project_settings.inl). */
-    void rebuild_renderer() { rebuild_renderer_(); }
-    /** @brief Edit > Project Settings, on `category` (ui/project_settings.inl). */
-    void open_project_settings(const std::string& category) { open_project_settings_(category); }
+    /** @brief Render > Rebuild Renderer: settings fixed at pipeline construction apply in place
+     *         (ui/project_settings.h). Out-of-line: the panel is only forward-declared here. */
+    void rebuild_renderer();
+    /** @brief Edit > Project Settings, on `category` (ui/project_settings.h). */
+    void open_project_settings(const std::string& category);
+
+    // --- Build (ui/build.h) ---
+    // Thin forwarders, defined out-of-line because the panel is only forward-declared here.
+    // They keep EditorApp's public surface unchanged by the panel extraction, so the editor's
+    // callers and tests are unaffected by where the implementation now lives.
+    static std::string default_build_command();
+    void build_refresh(const std::string& command = {});
+    const Task& build_task() const;
+    const std::vector<Diagnostic>& build_diagnostics() const;
+    bool relaunch_requested() const;
+    bool build_relaunch_offered() const;
+
+    // --- Preferences (ui/preferences.h) ---
+    /** @brief Sets one preference by key, as the Preferences window does. */
+    bool set_preference(const std::string& key, const Node& value);
+
+    bool animation_record() const;
+    /** @brief One undoable edit to the open theme document (ui/theme_editor.h). */
+    void edit_theme(const std::string& label, const std::function<void(Node&)>& fn,
+                    const std::string& merge_key = {});
+
+    coopa::maps::MapConfig& world_generator_config();
+    void world_generator_generate();
+    bool world_generator_open() const;
+    int& world_generator_world_tiles();
+
+    bool new_ui_asset(const std::string& name, const std::string& template_id = "blank");
+    ObjectId place_ui_asset(const std::string& ui_rel, ObjectId parent = 0);
+    bool save_theme();
+    void set_ui_interact(bool on);
+    ThemeDocument& theme_document();
+    ObjectId ui_add_widget(const std::string& id, ObjectId parent = 0, std::optional<glm::vec2> at = std::nullopt);
+    imm::Box ui_frame() const;
+    bool ui_interacting() const;
+    std::optional<ui::Rect> ui_live_rect(ObjectId id);
+    bool ui_mode() const;
+    std::vector<ObjectId> ui_pick(glm::vec2 editor_px);
+    static std::vector<std::string> ui_templates();
+    ui::UiView ui_view();
+
+    static bool convert_legacy_tile_terrain(Node& comp);
+    void set_terrain_mode(bool on);
+    TerrainBrushSettings& terrain_brush();
+    const UndoStack<TerrainPatch>& terrain_history() const;
+    bool terrain_mode() const;
+    void tile_edit_selection(const std::string& label, const std::function<void(toy::world::TileRecord&)>& edit);
+    TileSelection& tile_selection();
+    const std::vector<std::string>& tile_set_assets();
+
+    SculptSettings& sculpt_settings();
+    PaintSettings& vertex_paint_settings();
+    PaintSettings& weight_paint_settings();
+
+    void set_tile_mode(bool on);
+    TileBrushSettings& tile_brush();
+    const UndoStack<TilePatch>& tile_history() const;
+    bool tile_mode() const;
+
+    bool create_object_asset_from_selection();
+    std::string duplicate_tile_set(const std::string& rel);
+    MirrorSettings& edit_symmetry();
+    std::string edited_mesh_shader();
+    bool loop_cut_active() const;
+    int loop_cut_cuts() const;
+
+    void add_animation_event(float time, const std::string& name);
+    void add_animator(ObjectId id);
+    const ClipModel* animation_clip() const;
+    std::vector<std::string> animation_clip_sharers();
+    std::string animation_clip_state() const;
+    std::string animation_instance_asset(ObjectId id) const;
+    ObjectId animation_rig() const;
+    bool animation_state_inherited(const std::string& name) const;
+    std::vector<std::string> animation_state_names() const;
+    std::vector<std::string> assets_listed();
+    bool copy_engine_asset_to_project(AssetType t, const std::string& rel);
+    void delete_animation_clip(bool keep_file);
+    void delete_selected_animation_event();
+    std::vector<std::string> engine_assets_listed(AssetType t);
+    void insert_keyframes();
+    void key_channel(ObjectId id, const std::string& property);
+    bool keyed_now(ObjectId id, const std::string& property) const;
+    std::vector<std::string> list_assets(AssetType t);
+    void move_selected_animation_event(float to_time);
+    void new_animation_clip(const std::string& name = "clip");
+    void open_animation_clip(const std::string& state);
+    void open_asset(AssetType t, const std::string& item);
+    bool open_object_asset(const fs::path& path);
+    ObjectId place_object_asset(const std::string& object_rel, std::optional<glm::vec3> at = std::nullopt);
+    void rename_animation_clip(const std::string& to);
+    void rename_selected_animation_event(const std::string& name);
+    void select_all_keys();
+    void select_animation_event(int index);
+    int selected_animation_event() const;
+    void set_animation_record(bool on);
+    void set_animation_time(float t);
+    void set_asset_sort(AssetSort s, bool reverse = false);
+    void set_asset_tag_filter(const std::vector<std::string>& tags, bool match_all = false);
+    void set_asset_tags(AssetType t, const std::string& rel, const std::vector<std::string>& tags);
+    void set_object_transform(ObjectId id, const glm::vec3& p, const glm::vec3& r, const glm::vec3& s);
+    void set_selected_key_interpolation(const std::string& ease);
+    void set_show_engine_assets(bool on);
+    void set_timeline_rest_pose(bool on);
+    bool show_engine_assets() const;
+    void show_timeline();
+
+    void open_preferences(const std::string& category = "Interface");
+
+    bool bind_selection_to_rig(BindWeights kind);
+    bool bind_targets(ObjectId& skin, ObjectId& rig);
+    void close_world_generator();
+    void open_world_generator(ObjectId id = 0);
+    bool& world_generator_planet();
+    std::uint64_t world_generator_preview_serial() const;
+
     /** @brief Closes the Project Settings modal on its next draw (as its Close button does). */
     void close_project_settings() { close_project_settings_ = true; }
     /** @brief A project switch was requested: the main loop rebuilds everything for it. */
     const std::optional<fs::path>& switch_project_requested() const { return switch_project_; }
     const std::deque<std::pair<int, std::string>>& log() const { return log_; }
+    /// @brief The embedded engine. Panels reach it through EditorContext, not directly.
+    core::Engine& engine() { return engine_; }
+    /// @brief Empties the console (the Console panel's Clear button).
+    void clear_log() { log_.clear(); }
     imm::Box viewport_box() const { return viewport_box_; }
     coopa::ui::imm::Context& ui() { return canvas_->context(); }
     /** @brief The editor UI's own canvas (its DrawList, scale), for tests. */
@@ -575,7 +731,7 @@ private:
      * @brief Keeps the open scene's screen-space UI (a HUD) inside the viewer rather than
      *        across the whole editor window: in the scene view it covers the rendered image
      *        (and reacts only while the running game has focus); the UI designer places it in
-     *        its preview frame (see ui_canvas.inl).
+     *        its preview frame (see ui_canvas.h).
      */
     void update_scene_ui_placement_();
 
@@ -672,34 +828,11 @@ private:
     bool object_bounds_(ObjectId id, glm::vec3& lo, glm::vec3& hi, bool meshes_only = false);
 
     // =================================================================================
-    // UI (Blender layout) -- see editor/app/ui/*.inl
+    // The window layout and the chrome helpers panels share (ui/layout.inl). The panels
+    // themselves are classes -- see editor/app/README.md and ui/*.h.
     // =================================================================================
 
 #include "ui/layout.inl"
-#include "ui/topbar.inl"
-#include "ui/outliner.inl"
-#include "ui/properties.inl"
-#include "ui/browser.inl"
-#include "ui/statusbar.inl"
-#include "ui/viewport_chrome.inl"
-#include "ui/mesh_tools.inl"
-#include "ui/sculpt.inl"
-#include "ui/paint.inl"
-#include "ui/weights.inl"
-#include "ui/timeline.inl"
-#include "ui/assets.inl"
-#include "ui/instances.inl"
-#include "ui/ui_canvas.inl"
-#include "ui/theme_editor.inl"
-#include "ui/build.inl"
-#include "ui/weather.inl"
-#include "ui/terrain.inl"
-#include "ui/particle_panel.inl"
-#include "ui/tile_terrain_panel.inl"
-#include "ui/tile_mode.inl"
-#include "ui/world_generator.inl"
-#include "ui/project_settings.inl"
-#include "ui/preferences.inl"
 
     // --- helpers shared by the panels ---
 
@@ -718,7 +851,7 @@ private:
     /**
      * @brief True while the settings UI edits the open scene's overrides (the Properties
      *        Render / World / Scene tabs with a scene open) rather than config.yaml (the
-     *        Project Settings modal, ui/project_settings.inl, sets project_settings_mode_).
+     *        Project Settings modal, ui/project_settings.h, sets project_settings_mode_).
      */
     bool scene_settings_layer_() const {
         return !project_settings_mode_ && active_type_ == AssetType::Scene && !doc_.is_object_asset();
@@ -1095,6 +1228,31 @@ private:
     // =================================================================================
 
     core::Engine& engine_;
+    std::unique_ptr<EditorContext> ed_ctx_;     ///< A panel's view of this app.
+    std::unique_ptr<ConsolePanel>  console_;    ///< The Console (ui/console_panel.h).
+    std::unique_ptr<WeatherPanel> weather_panel_;
+    std::unique_ptr<ViewportChromePanel> viewport_chrome_panel_;
+    std::unique_ptr<UiCanvasPanel> ui_canvas_panel_;
+    std::unique_ptr<TopbarPanel> topbar_panel_;
+    std::unique_ptr<TimelinePanel> timeline_panel_;
+    std::unique_ptr<TileModePanel> tile_mode_panel_;
+    std::unique_ptr<TerrainPanel> terrain_panel_;
+    std::unique_ptr<SculptPanel> sculpt_panel_;
+    std::unique_ptr<PropertiesPanel> properties_panel_;
+    std::unique_ptr<PaintPanel> paint_panel_;
+    std::unique_ptr<MeshToolsPanel> mesh_tools_panel_;
+    std::unique_ptr<InstancesPanel> instances_panel_;
+    std::unique_ptr<AssetsPanel> assets_panel_;
+    std::unique_ptr<WeightsPanel> weights_panel_;
+    std::unique_ptr<WorldGeneratorPanel> world_generator_panel_;
+    std::unique_ptr<PreferencesPanel> preferences_panel_;
+    std::unique_ptr<BuildPanel> build_panel_;
+    std::unique_ptr<TileTerrainPanel> tile_terrain_panel_;
+    std::unique_ptr<ParticlePanel> particle_panel_;
+    std::unique_ptr<ThemeEditorPanel> theme_editor_panel_;
+    std::unique_ptr<ProjectSettingsPanel> project_settings_panel_;
+    std::unique_ptr<StatusBarPanel> statusbar_panel_;
+    std::unique_ptr<OutlinerPanel> outliner_panel_;
     Project project_;
     std::unique_ptr<coopa::scene::Scene> ui_scene_;
     coopa::ui::ImmediateCanvas* canvas_ = nullptr;
@@ -1105,7 +1263,7 @@ private:
     SceneSync sync_;
     MeshDocument mesh_;
     MaterialDocument material_;
-    ThemeDocument game_theme_;   ///< The game UI theme open in the Theme tab (ui/theme_editor.inl).
+    ThemeDocument game_theme_;   ///< The game UI theme open in the Theme tab (ui/theme_editor.h).
     ConfigDocument config_;
 
     AssetType active_type_ = AssetType::Scene;   // what's open (see AssetType)
@@ -1131,10 +1289,10 @@ private:
 
     // Layout.
     float left_w_ = 260, right_w_ = 330, bottom_h_ = 130, asset_left_w_ = 220, settings_w_ = 460;
-    // Asset panel (ui/assets.inl).
+    // Asset panel (ui/assets.h).
     AssetType asset_tab_ = AssetType::Scene;
     std::string asset_context_, asset_rename_, asset_rename_to_, asset_delete_;
-    // Asset panel ordering and tags (ui/assets.inl). Tags are the folders between an asset's
+    // Asset panel ordering and tags (ui/assets.h). Tags are the folders between an asset's
     // type folder and the asset (project.h asset_tags()).
     AssetSort asset_sort_ = AssetSort::Name;
     bool asset_sort_reverse_ = false;
@@ -1190,7 +1348,7 @@ private:
     imm::Box last_op_rect_{};
     bool alt_click_ = false, alt_shift_ = false, alt_ctrl_ = false;   // Alt+click loop select, pending
     glm::vec2 alt_press_{0.0f};
-    // Sculpt Mode (ui/sculpt.inl).
+    // Sculpt Mode (ui/sculpt.h).
     SculptSettings sculpt_;
     SculptCache sculpt_cache_;
     VertexGrid sculpt_grid_;
@@ -1199,7 +1357,7 @@ private:
     uint64_t sculpt_cache_geom_ = 0, sculpt_preview_pos_ = 0;
     Stroke stroke_;
     SculptResize sculpt_resize_;
-    // Vertex / Weight Paint (ui/paint.inl); the cache and grid above are shared (exclusive modes).
+    // Vertex / Weight Paint (ui/paint.h); the cache and grid above are shared (exclusive modes).
     PaintSettings vpaint_;
     PaintSettings wpaint_;
     PaintPreview paint_preview_;
@@ -1210,9 +1368,9 @@ private:
     SculptResize paint_resize_;
     uint32_t active_group_ = 0;
     float edit_assign_weight_ = 1.0f;
-    AutoWeightSettings auto_weights_;   ///< Bind to Rig / Auto Weights settings (ui/weights.inl).
+    AutoWeightSettings auto_weights_;   ///< Bind to Rig / Auto Weights settings (ui/weights.h).
     std::map<ObjectId, std::string> paint_saved_shader_;   ///< Surface shaders swapped for editor_paint
-    // Animation Timeline (ui/timeline.inl).
+    // Animation Timeline (ui/timeline.h).
     ObjectId anim_rig_ = 0;
     bool close_project_settings_ = false;   ///< close_project_settings(): the modal closes on its next draw
     ClipDocument anim_clip_;
@@ -1276,7 +1434,6 @@ private:
     int selection_outlines_drawn_ = 0;
     std::string outliner_filter_, add_component_filter_, browser_dir_;
     std::vector<std::string> asset_dirs_cache_;
-    bool console_show_[3] = {true, true, true};
     bool viewport_hovered_ = false, hierarchy_hovered_ = false;
     struct CameraPose { glm::vec3 focus{0.0f}; float yaw = 35, pitch = 25, distance = 12; bool ortho = false; bool valid = false; };
     CameraPose scene_pose_, asset_pose_, pre_isolate_pose_;
@@ -1295,7 +1452,7 @@ private:
     std::map<ObjectId, DragStart> drag_starts_;
     EditMesh mesh_drag_base_;
     std::map<std::string, CachedMesh> mesh_cache_;
-    std::pair<ObjectId, uint64_t> parent_choices_key_{0, ~0ull};         // Relations > Parent list cache (properties.inl)
+    std::pair<ObjectId, uint64_t> parent_choices_key_{0, ~0ull};         // Relations > Parent list cache (properties.h)
     std::vector<std::string> parent_choice_names_;
     std::vector<ObjectId> parent_choice_ids_;
     std::unordered_map<std::string, std::string> mesh_resolve_cache_;   // (dir, mesh key) -> resolved path; see mesh_for_object_()
@@ -1310,16 +1467,12 @@ private:
     bool weather_preview_effects_ = false;   ///< World > Weather > Preview: show effects in edit mode.
     int weather_preview_speed_ = 0;    ///< World > Weather > Preview: transition fast-forward (0 = 1x .. 3 = instant).
     int weather_palette_ = 0;          ///< World > Weather > Sky Colours: the palette being edited (0 day, 1 twilight, 2 night).
-    // Edit > Preferences (ui/preferences.inl); saved in ~/.toyengine_editor.yaml.
+    // Edit > Preferences (ui/preferences.h); saved in ~/.toyengine_editor.yaml.
     float ui_scale_pref_ = 1.0f;          ///< Interface Scale, on top of the display's scale.
     float tooltip_delay_pref_ = 0.6f;
     bool invert_zoom_ = false;            ///< Wheel up zooms out.
     bool trackpad_swipe_pans_ = false;    ///< A two-finger swipe pans (Shift+swipe orbits).
-    bool prefs_dirty_ = false;            ///< A preference changed; written when the mouse lets go.
-    std::string prefs_category_ = "Interface";
-    std::string prefs_keymap_filter_;
-    std::vector<ThemeSwatch> prefs_themes_;   ///< Theme tiles, read while the window is open.
-    std::string runtime_sel_;          ///< The selected runtime object's ':' path (ui/weather.inl); empty = none.
+    std::string runtime_sel_;          ///< The selected runtime object's ':' path (ui/weather.h); empty = none.
     int asset_cat_ = 1;
     std::string asset_filter_;
     std::string render_settings_filter_;   ///< Render tab: settings search

@@ -1,8 +1,8 @@
 #version 450
 
-// Blits the low-resolution LDR buffer to the swapchain. Derived from
-// blendy/assets/shaders/blit.frag -- all the pixel-art work happens in the
-// sampler (NEAREST) and the viewport (UpscalePass's letterbox rect), not in
+// Blits the internal-resolution LDR buffer to the swapchain. Derived from
+// blendy/assets/shaders/blit.frag -- all the resampling happens in the
+// sampler and the viewport (UpscalePass's letterbox rect), not in
 // this shader.
 //
 // One addition beyond blit.frag: the swapchain's color attachment is

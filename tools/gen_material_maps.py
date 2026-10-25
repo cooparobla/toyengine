@@ -16,8 +16,8 @@ than something that could pass for noise or a lighting bug. Three files, glTF-co
   brick_mr.png -- metallic-roughness (metallic in B, roughness in G, R/A unused), linear.
 
 All three are NEAREST-sampled (see toy::loaders::PixelTextureLoader / SamplerDesc::pixel_art())
-and small on purpose -- this is a pixel-art engine, and a chunky, blocky brick texture is more in
-keeping with it than a smoothly filtered high-res one.
+and small on purpose: these are prototype maps, and a blocky brick reads clearly as placeholder
+art. A production texture would be higher-resolution and mipmapped.
 """
 
 import pathlib

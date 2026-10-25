@@ -32,59 +32,29 @@
 
 #include <gfxcoopa/app/context.h>
 #include <gfxcoopa/util/image_readback.h>
-#include <gfxcoopa/engine/loaders/mesh_loader.h>
-#include <gfxcoopa/engine/loaders/skinned_mesh_source_loader.h>
-#include <gfxcoopa/engine/loaders/texture_loader.h>
-#include <gfxcoopa/engine/components/register.h>
-#include <gfxcoopa/engine/components/camera_component.h>
 
-#include <coopa/animation/animation_system.h>
-#include <coopa/animation/animation_yaml.h>
-#include <coopa/animation/ik_system.h>
 #include <coopa/asset/asset_manager.h>
 #include <coopa/input/input_map.h>
 #include <coopa/job/engine.h>
 #include <coopa/scene/scene_loader.h>
 #include <coopa/scene/scene_manager.h>
-#include <coopa/scene/systems/transform_system.h>
 
-#include <physxcoopa/physx_yaml.h>
 #include <physxcoopa/system/nav_system.h>
-#include <physxcoopa/debug/debug_draw.h>
 
-#include <toyengine/core/branding.h>
 #include <toyengine/core/config.h>
 #include <toyengine/core/runtime_paths.h>
 #include <toyengine/core/scene_loading.h>
-#include <toyengine/core/user_settings.h>
-#include <toyengine/audio/audio_components.h>
-#include <sfxcoopa/sfx_yaml.h>
-#include <uicoopa/audio/audio_yaml.h>
-#include <uicoopa/audio/sound_library.h>
 #include <toyengine/render/toy_render_config.h>
 #include <toyengine/render/frame_profile.h>
 #include <toyengine/render/particle_types.h>
-#include <toyengine/render/toy_render_math.h>
+#include <toyengine/render/render_types.h>   // LetterboxRect, RenderExtent
 #include <uicoopa/layout/canvas.h>
-#include <uicoopa/ui_yaml.h>
 
-#include <toyengine/scene/camera_controller.h>
-#include <toyengine/scene/free_mover.h>
-#include <toyengine/scene/kinematic_control_system.h>
-#include <toyengine/scene/register.h>
-#include <toyengine/scene/scene_link.h>
-#include <toyengine/world/snow_system.h>
-#include <toyengine/world/terrain_system.h>
-#include <toyengine/water/water_system.h>
-#include <toyengine/particles/particle_system_runner.h>
-#include <toyengine/particles/particle_yaml.h>
-#include <toyengine/weather/weather_reactor.h>
 #include <toyengine/weather/weather_system.h>
+#include <toyengine/water/water_settings.h>
 #include <toyengine/weather/atmosphere_model.h>
-#include <toyengine/render/visibility.h>
 #include <toyengine/core/module.h>
 #include <toyengine/debug/debug_overlay.h>
-#include <toyengine/save/register.h>
 #include <toyengine/save/save_system.h>
 
 #include <root_directory.h>
@@ -92,6 +62,9 @@
 namespace toy {
 namespace render { class ToyRenderPipeline; }
 namespace audio { class AudioSystem; }
+/// Pointer-only here (warm_saved_upload_ms_); defined in toyengine/world/terrain_component.h,
+/// included by the .cpp files that dereference it.
+namespace world { class TerrainComponent; }
 
 namespace core {
 

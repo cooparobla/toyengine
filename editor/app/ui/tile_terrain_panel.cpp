@@ -1,3 +1,8 @@
+#include "editor/app/ui/tile_terrain_panel.h"
+#include "editor/app/ui/tile_mode.h"
+#include "editor/app/ui/assets.h"
+#include "editor/app/ui/world_generator.h"
+
 #include "editor/app/editor_app.h"
 
 #include <coopa/maps/map_config.h>
@@ -77,23 +82,23 @@ int find_tile_set(const std::vector<std::string>& sets, const std::string& ref) 
 
 } // namespace
 
-TerrainComponent* EditorApp::live_tile_terrain_(ObjectId id) const {
-    coopa::scene::SceneObject* live = sync_.live(id);
+TerrainComponent* TileTerrainPanel::live_tile_terrain_(ObjectId id) const {
+    coopa::scene::SceneObject* live = app_.sync_.live(id);
     return live ? live->get_component<TerrainComponent>() : nullptr;
 }
 
-const std::vector<std::string>& EditorApp::tile_set_assets_() {
+const std::vector<std::string>& TileTerrainPanel::tile_set_assets_() {
     // The project's own objects, plus toyengine's (the stock sets) in a game project -- offered
     // whether or not the browser is showing engine assets: they are what a terrain starts from.
-    std::vector<std::string> objects = project_.list("objects", ".yaml");
-    if (!project_.is_engine()) {
-        for (auto& rel : project_.list_engine("objects", ".yaml")) objects.push_back(std::move(rel));
+    std::vector<std::string> objects = app_.project_.list("objects", ".yaml");
+    if (!app_.project_.is_engine()) {
+        for (auto& rel : app_.project_.list_engine("objects", ".yaml")) objects.push_back(std::move(rel));
     }
     if (objects != tile_set_cache_keys_) {
         tile_set_cache_.clear();
         std::set<std::string> seen;
         for (const std::string& rel : objects) {
-            if (!is_tile_set_(rel)) continue;
+            if (!app_.assets_panel_->is_tile_set_(rel)) continue;
             const std::string ref = tile_set_ref(rel);
             if (seen.insert(ref).second) tile_set_cache_.push_back(ref);
         }
@@ -103,7 +108,7 @@ const std::vector<std::string>& EditorApp::tile_set_assets_() {
     return tile_set_cache_;
 }
 
-bool EditorApp::convert_legacy_tile_terrain(Node& comp) {
+bool TileTerrainPanel::convert_legacy_tile_terrain(Node& comp) {
     bool changed = false;
     if (comp.contains("styles") && comp.at("styles").is_mapping()) {
         const Node styles = comp.at("styles");
@@ -145,7 +150,7 @@ bool EditorApp::convert_legacy_tile_terrain(Node& comp) {
     return changed;
 }
 
-EditResult EditorApp::draw_tile_terrain_panel_(imm::Context& ctx, ObjectId id, Node& comp, const InspectorEnv& env) {
+EditResult TileTerrainPanel::draw_tile_terrain_panel_(imm::Context& ctx, ObjectId id, Node& comp, const InspectorEnv& env) {
     using I = imm::Icon;
     EditResult r;
     std::set<std::string> placed{"type", "id"};
@@ -203,8 +208,8 @@ EditResult EditorApp::draw_tile_terrain_panel_(imm::Context& ctx, ObjectId id, N
             ctx.label(buf, &dim);
         }
     }
-    if (!playing()) {
-        if (ctx.button("Edit Tiles", -1, true, I::Terrain)) enter_tile_mode_(id);
+    if (!app_.playing()) {
+        if (ctx.button("Edit Tiles", -1, true, I::Terrain)) app_.tile_mode_panel_->enter_tile_mode_(id);
         ctx.tooltip("Tile Mode\nRaise, flatten, paint and flood tiles with square brushes; select tiles and edit their "
                     "height, surface, biome and climate");
     }
@@ -250,11 +255,11 @@ EditResult EditorApp::draw_tile_terrain_panel_(imm::Context& ctx, ObjectId id, N
 
         const bool known = before < static_cast<int>(sets.size());
         const std::string shown = known ? sets[static_cast<std::size_t>(before)] : cur;
-        if (ctx.button("Open", 90, known, I::Object)) open_asset(AssetType::Object, shown + ".yaml");
+        if (ctx.button("Open", 90, known, I::Object)) app_.assets_panel_->open_asset(AssetType::Object, shown + ".yaml");
         ctx.tooltip("Open\nShows every piece laid out; Tab into one to reshape its mesh");
         ctx.same_line();
         if (ctx.button("Duplicate as New Tile Set", -1, known, I::Duplicate)) {
-            const std::string copy = duplicate_tile_set(shown + ".yaml");
+            const std::string copy = app_.assets_panel_->duplicate_tile_set(shown + ".yaml");
             if (!copy.empty()) {
                 comp["tile_set"] = Node(tile_set_ref(copy));
                 changed_key("tile_set");
@@ -306,7 +311,7 @@ EditResult EditorApp::draw_tile_terrain_panel_(imm::Context& ctx, ObjectId id, N
                 "Colours the surfaces: the atlas holds one colour per surface kind (grass, sand, stone...); detail is "
                 "added by the terrain shader. Without a texture the stock textures/terrain_atlas.png is used.",
                 false)) {
-        r.absorb(draw_material_field(ctx, comp, env, [this](const std::string& rel) { open_asset(AssetType::Material, rel); }));
+        r.absorb(draw_material_field(ctx, comp, env, [this](const std::string& rel) { app_.assets_panel_->open_asset(AssetType::Material, rel); }));
     }
     mark({"material"});
 
@@ -330,13 +335,13 @@ EditResult EditorApp::draw_tile_terrain_panel_(imm::Context& ctx, ObjectId id, N
                       tiles * num_of(comp, "tile_size", 1.0f), num_of(comp, "height_scale", 16.0f));
         ctx.label(buf, &dim);
         if (legacy_keys) ctx.label("Uses the old flat generator keys; the World Generator moves them into its block.", &dim);
-        if (ctx.button("Open World Generator...", -1, !playing(), I::World)) open_world_generator(id);
+        if (ctx.button("Open World Generator...", -1, !app_.playing(), I::World)) app_.world_generator_panel_->open_world_generator(id);
         ctx.tooltip("World Generator\nEvery mapcoopa setting -- shape, elevation, climate, rivers, settlements -- with a live "
                     "preview; Generate World re-bakes the tiles from them");
         TerrainComponent* live = live_tile_terrain_(id);
-        const bool busy = live == nullptr || live->baking() || tile_regen_data_ != nullptr;
-        if (ctx.button(live && live->baking() ? "Regenerating..." : "Regenerate World", -1, !busy && !playing(), I::Restart)) {
-            tile_regenerate_(id);
+        const bool busy = live == nullptr || live->baking() || app_.tile_mode_panel_->tile_regen_data_ != nullptr;
+        if (ctx.button(live && live->baking() ? "Regenerating..." : "Regenerate World", -1, !busy && !app_.playing(), I::Restart)) {
+            app_.tile_mode_panel_->tile_regenerate_(id);
         }
         ctx.tooltip("Regenerate World\nReplace every tile with a fresh world from the current settings (edits included); "
                     "undoable");

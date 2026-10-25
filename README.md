@@ -379,20 +379,32 @@ A project contains:
 
 | Path | What |
 |---|---|
-| `<target>.toy` | The project file (YAML): `target` (the executable name) and `engine:`, which holds `source` (`git@github.com:cooparobla/toyengine.git`), `ref` (the pinned commit) and optionally `link` (a local engine checkout). |
+| `<target>.toy` | The project file (YAML): `target` (the executable name) and `engine:`, which holds `source` (`git@github.com:cooparobla/toyengine.git`), `ref` (the pinned commit) and optionally `link` (an engine checkout to build instead: absolute for a shared one, project-relative for a vendored submodule). |
 | `assets/` | The project's content. It sits over this repo's `assets/`, which is the fallback for shaders, fonts, shared meshes and materials. `assets/shaders/*` compile with the engine and gfxcoopa shader headers on the include path. |
 | `src/` | C++ compiled into both the game and the editor, so the editor's Play runs it. Register components with `TOY_MODULE` ([`toyengine/core/module.h`](toyengine/core/module.h)). Describe them to the inspector with `register_component_schema()` under `#if TOY_EDITOR`. `src/main.cpp` replaces the game's `main`. Engine code is a compiled library, so changing it means editing (or forking) the engine checkout. |
-| `.libs/toyengine` | The engine and its submodules. `setup.sh` clones it at `engine.ref`, or symlinks it to `engine.link`. Git-ignored. |
+| `.libs/toyengine` | Where the build finds the engine. `setup.sh` clones it at `engine.ref`, or symlinks it to `engine.link`. Git-ignored -- never put a checkout you care about here: `clean.sh --all` removes this whole tree. |
+| `engine/` | A **vendored** engine only: the project's own toyengine as a git submodule, committed and tracked. `.libs/toyengine` symlinks it. |
 | `setup.sh build.sh run.sh editor.sh package.sh clean.sh` | The project's scripts (from [`templates/project/`](templates/project/)). |
 | `build_settings.yaml` | Build Settings: product name, version, bundle id, signing. Written by the editor; never shipped. |
 
-A **linked** project builds against this working tree directly, uncommitted edits in the engine
-and `libs/` included. This is how to work on the engine and a game together. Everything it
-builds goes into the project's own `build/`, compiled shaders included (`build/shaders/`), so
-building a linked project never writes into the engine checkout or its `build/`. A **pinned**
-project clones the engine at a pushed commit, which makes it reproducible on any machine.
-`toyhub link|unlink <dir>` switches between the two, and `toyhub upgrade <dir> [--ref R]`
-re-pins. When a project's build is broken and it won't open, `toyhub rebuild <dir>` (the hub's
+There are three ways a project can get its engine, all of them the `engine:` block in its
+`.toy` and all materialised by its `setup.sh`:
+
+| Mode | `.toy` | `.libs/toyengine` | Use it when |
+|---|---|---|---|
+| **linked** | `link:` an absolute path | symlink to that checkout | working on the engine and a game together -- the default. Builds this working tree directly, uncommitted edits in the engine and `libs/` included. Every linked project on the machine shares it, so an engine edit for one game is an edit for all of them. |
+| **pinned** | `ref:` a pushed commit | a clone at that commit | the project must be reproducible on any machine and does not change engine code. |
+| **vendored** | `link:` a project-relative path | symlink to a submodule in the project | the game needs engine changes of its own. `toyhub vendor <dir>` adds the engine as a git submodule (`engine/`), so the project commits and pins the exact engine it builds and no other project is affected. |
+
+Everything a project builds goes into its own `build/`, compiled shaders included
+(`build/shaders/`), so building one never writes into the engine checkout or its `build/`.
+
+`toyhub link|unlink|vendor <dir>` switches between the modes and `toyhub upgrade <dir> [--ref R]`
+re-pins; each wipes the project's `build/` first, because the CMake cache remembers the old
+engine path. A vendored engine is deliberately *not* placed at `.libs/toyengine`: that path is
+`clean.sh --all`'s to delete and `setup.sh`'s to `git checkout`, either of which would eat
+uncommitted engine work. The symlink keeps it in link mode, where `setup.sh` only ever re-runs
+`ln`. When a project's build is broken and it won't open, `toyhub rebuild <dir>` (the hub's
 **...** > **Rebuild (clean)**) removes its build output and builds it again. The CMake side is [`cmake/ToyProject.cmake`](cmake/ToyProject.cmake)
 (`toyengine_add_project()`). When `.libs/toyengine` is not the top-level build, it adds only the
 engine; its own tests and tools are skipped.
@@ -484,20 +496,28 @@ the docs on `Engine::run()` in [toyengine/core/engine.h](toyengine/core/engine.h
 
 ```
 toyengine/
-├── core/       Engine, AppConfig, caml codec, branding
+├── core/       Engine, AppConfig, scene loading, caml codec, branding, runtime paths
 ├── render/     the render pipeline, its config, profiler, and passes/
 ├── scene/      gameplay components: camera controller, movers, cloth & skinned renderers
+├── world/      streamed procedural tile terrain and heightmap terrain, snow
+├── water/      WaterBody, Buoyancy, WaterSystem
+├── weather/    weather conditions, the atmosphere model, the sky
 ├── particles/  ParticleSystem, LightFlicker, the particle simulation
-├── audio/      AudioSource / AudioListener components and the audio system
-├── ui/         UI asset helpers: open/close a screen, UiController widget bindings
-├── world/      streamed procedural tile terrain
-└── water/      WaterBody, Buoyancy, WaterSystem
-editor/         toyengine_editor: app, documents & undo, schemas, mesh modelling, viewport, packager
+├── audio/      the audio system, buses, music; the components that need them
+├── destruct/   Voronoi mesh fracture (pure CPU, no scene or GPU)
+├── save/       save slots, ISaveable, the save/load system
+├── debug/      the F3 stats overlay and the game-facing watch/text API
+└── ui/         UI asset helpers: open/close a screen, UiController widget bindings
+editor/         toyengine_editor: app & panels, documents & undo, schemas, mesh modelling,
+                viewport tools, terrain brushes, build & packaging
 hub/            toyengine_hub: the project launcher (a GUI over tools/toyhub)
+tests/          the test suites: engine/ and editor/, each unit / gpu / extended
+tools/          asset generators (gen_*.py), toyhub, the icon exporter, profiling helpers
 templates/      project/: the files `toyhub new` / `toyhub add` create a project from
 cmake/          ToyProject.cmake: toyengine_add_project() (game + editor for a project dir)
 assets/         config.yaml, scenes, meshes, materials, textures, shaders (every one the engine loads), fonts
 docs/           hand-written guides (e.g. ambient lighting); docs/images holds these screenshots
+plans/          design records for larger pieces of work
 libs/           pinned submodules: libcoopa (scene graph, assets, jobs), gfxcoopa (Vulkan),
                 physxcoopa (physics), sfxcoopa, uicoopa (UI), mapcoopa (world gen), caml
 ```
@@ -505,11 +525,22 @@ libs/           pinned submodules: libcoopa (scene graph, assets, jobs), gfxcoop
 Each module has its own README with the details.
 
 `toyengine/` and `editor/` are compiled once, as the static libraries `toyengine::engine` and
-`toyengine::editor`. Each header declares, and its `.cpp` beside it holds the function bodies and
-the includes only those bodies need. Templates, constexpr code and the small hot math headers
-(`toy_render_math.h`, `particle_math.h`, `water_waves.h`, `tile_topology.h`, ...) stay inline. A
-game, editor or test source then compiles only its own code, so editing an engine `.cpp`
-rebuilds that one file and relinks. The `libs/` submodules are still header-only.
+`toyengine::editor`. The rule is that **a header declares and its `.cpp` beside it holds the
+bodies**, along with the includes only those bodies need — so a game, editor or test source
+compiles only its own code, and editing an engine `.cpp` rebuilds that one file and relinks.
+The `libs/` submodules are header-only.
+
+Three deliberate exceptions:
+
+- **Hot math headers** stay fully inline — `toy_render_math.h`, `particle_math.h`,
+  `water_waves.h`, `tile_topology.h` and friends are pure functions over plain data, with no
+  Vulkan and no scene, and they are unit-tested directly.
+- **Templates and `constexpr`** have to be, as everywhere.
+- **`hub/`** is header-only, because it has exactly one translation unit (`hub.cpp`).
+
+`editor/app/ui/*.inl` is a fourth case and a known wart rather than a convention: panel
+declarations are `#include`d inside `EditorApp`'s class body. See
+[`editor/app/README.md`](editor/app/README.md).
 
 ## Platform notes
 

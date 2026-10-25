@@ -1,3 +1,6 @@
+#include "editor/app/ui/weather.h"
+#include "editor/app/ui/properties.h"
+
 #include "editor/app/editor_app.h"
 
 #include <toyengine/scene/runtime_object.h>
@@ -5,21 +8,29 @@
 namespace toy {
 namespace editor {
 
-Node EditorApp::weather_block_() const {
-    const Node st = doc_.scene_settings();
+bool WeatherPanel::weather_scene_() const {
+    return app_.active_type_ == AssetType::Scene && !app_.doc_.is_object_asset();
+}
+
+coopa::scene::Scene* WeatherPanel::viewed_live_scene_() const {
+    return app_.play_scene_ ? app_.play_scene_ : app_.sync_.scene();
+}
+
+Node WeatherPanel::weather_block_() const {
+    const Node st = app_.doc_.scene_settings();
     if (st.is_mapping() && st.contains("weather") && st.at("weather").is_mapping()) return st.at("weather");
     return Node::mapping();
 }
 
-toy::weather::WeatherSystem* EditorApp::live_weather_() const {
+toy::weather::WeatherSystem* WeatherPanel::live_weather_() const {
     coopa::scene::Scene* s = viewed_live_scene_();
     return s ? toy::weather::find(*s) : nullptr;
 }
 
-void EditorApp::set_weather_block_(const Node* block, const std::string& label, const std::string& merge) {
+void WeatherPanel::set_weather_block_(const Node* block, const std::string& label, const std::string& merge) {
     if (!weather_scene_()) return;
-    settings_edit_was_scene_ = true;
-    apply_(doc_.edit(label, [&](Node& d) -> Change {
+    app_.settings_edit_was_scene_ = true;
+    app_.apply_(app_.doc_.edit(label, [&](Node& d) -> Change {
         Node& sc = d["scene"];
         Node settings = sc.contains("settings") && sc.at("settings").is_mapping() ? sc.at("settings") : Node::mapping();
         if (block) settings["weather"] = *block;
@@ -30,24 +41,24 @@ void EditorApp::set_weather_block_(const Node* block, const std::string& label, 
     }, merge));
 }
 
-void EditorApp::enable_weather_() {
+void WeatherPanel::enable_weather_() {
     Node block = weather_block_();
     if (!block.contains("conditions")) {
         toy::weather::Settings st = toy::weather::parse_settings(block);
-        Node& rs = config_.section("render");
+        Node& rs = app_.config_.section("render");
         auto render_vec = [&](const char* key, glm::vec3 def) {
-            const FieldDesc* f = render_field_(key);
-            const Node* n = f ? setting_value_(rs, "render", *f) : nullptr;
+            const FieldDesc* f = app_.properties_panel_->render_field_(key);
+            const Node* n = f ? app_.properties_panel_->setting_value_(rs, "render", *f) : nullptr;
             return n ? as_vec3(*n, def) : def;
         };
         st.day_zenith = render_vec("sky_zenith", st.day_zenith);
         st.day_horizon = render_vec("sky_horizon", st.day_horizon);
         st.day_ground = render_vec("sky_ground", st.day_ground);
-        if (const FieldDesc* f = render_field_("ambient_intensity")) {
-            if (const Node* n = setting_value_(rs, "render", *f)) st.ambient_day = as_float(*n, st.ambient_day);
+        if (const FieldDesc* f = app_.properties_panel_->render_field_("ambient_intensity")) {
+            if (const Node* n = app_.properties_panel_->setting_value_(rs, "render", *f)) st.ambient_day = as_float(*n, st.ambient_day);
         }
         bool found = false;
-        doc_.for_each_object([&](const Node& o, int) {
+        app_.doc_.for_each_object([&](const Node& o, int) {
             if (found || !o.contains("components")) return;
             for (const auto& c : o.at("components").as_seq()) {
                 if (component_type(c) == "DirectionalLight") { st.sun_intensity = get_float(c, "intensity", st.sun_intensity); found = true; break; }
@@ -59,7 +70,7 @@ void EditorApp::enable_weather_() {
     set_weather_block_(&block, "Enable Weather");
 }
 
-void EditorApp::weather_subhead_(imm::Context& ctx, const std::string& title) {
+void WeatherPanel::weather_subhead_(imm::Context& ctx, const std::string& title) {
     ctx.spacing(3);
     const imm::Box hb = ctx.next_box(ctx.style.row_height - 4);
     ctx.text_in(hb, title, ctx.style.text_dim, 0.0f);
@@ -67,15 +78,15 @@ void EditorApp::weather_subhead_(imm::Context& ctx, const std::string& title) {
     ctx.fill({hb.x + tw, hb.y + hb.h * 0.5f, std::max(0.0f, hb.w - tw), 1.0f}, ctx.style.separator);
 }
 
-bool EditorApp::weather_group_(imm::Context& ctx, const std::string& title, imm::Icon icon, bool default_open, const std::string& tip) {
+bool WeatherPanel::weather_group_(imm::Context& ctx, const std::string& title, imm::Icon icon, bool default_open, const std::string& tip) {
     ctx.spacing(2);
     const bool open = ctx.collapsing_header(title, default_open, nullptr, icon);
     ctx.tooltip(title + "\n" + tip);
-    test_rects_["weather_group:" + title] = ctx.last_rect();
+    app_.test_rects_["weather_group:" + title] = ctx.last_rect();
     return open;
 }
 
-void EditorApp::draw_weather_fields_(imm::Context& ctx, const std::vector<FieldDesc>& fields, const InspectorEnv& env) {
+void WeatherPanel::draw_weather_fields_(imm::Context& ctx, const std::vector<FieldDesc>& fields, const InspectorEnv& env) {
     Node block = weather_block_();
     for (const auto& f : fields) {
         ctx.push_id(f.key);
@@ -85,16 +96,16 @@ void EditorApp::draw_weather_fields_(imm::Context& ctx, const std::vector<FieldD
             set_weather_block_(&block, "Edit weather." + f.key, r.active ? "weather:" + f.key : std::string());
             block = weather_block_();
         }
-        if (r.finished) doc_.end_merge();
+        if (r.finished) app_.doc_.end_merge();
     }
 }
 
-glm::vec4 EditorApp::weather_display_(glm::vec3 c) {
+glm::vec4 WeatherPanel::weather_display_(glm::vec3 c) {
     c = glm::clamp(c, glm::vec3(0.0f), glm::vec3(1.0f));
     return {std::pow(c.r, 1.0f / 2.2f), std::pow(c.g, 1.0f / 2.2f), std::pow(c.b, 1.0f / 2.2f), 1.0f};
 }
 
-std::string EditorApp::weather_hhmm_(float hour) {
+std::string WeatherPanel::weather_hhmm_(float hour) {
     hour = toy::weather::wrap_hour(hour);
     int hh = static_cast<int>(hour), mm = static_cast<int>(std::round((hour - hh) * 60.0f));
     if (mm == 60) { mm = 0; hh = (hh + 1) % 24; }
@@ -103,7 +114,7 @@ std::string EditorApp::weather_hhmm_(float hour) {
     return b;
 }
 
-toy::weather::SkyFrame EditorApp::weather_condition_sky_(const toy::weather::Settings& st, const toy::weather::Condition& c, float hour) {
+toy::weather::SkyFrame WeatherPanel::weather_condition_sky_(const toy::weather::Settings& st, const toy::weather::Condition& c, float hour) {
     toy::weather::SkyFrame f = toy::weather::evaluate_sky(st, hour);
     auto cloudy = [&](glm::vec3 col) {
         const float lum = glm::dot(col, glm::vec3(0.2126f, 0.7152f, 0.0722f));
@@ -116,7 +127,7 @@ toy::weather::SkyFrame EditorApp::weather_condition_sky_(const toy::weather::Set
     return f;
 }
 
-void EditorApp::draw_weather_dome_(imm::Context& ctx, const imm::Box& b, glm::vec3 zenith, glm::vec3 horizon, glm::vec3 ground,
+void WeatherPanel::draw_weather_dome_(imm::Context& ctx, const imm::Box& b, glm::vec3 zenith, glm::vec3 horizon, glm::vec3 ground,
                         float sun_height, glm::vec3 disc) {
     const float mid = std::floor(b.y + b.h * 0.62f);
     const glm::vec4 z = weather_display_(zenith), h = weather_display_(horizon), g = weather_display_(ground);
@@ -130,7 +141,7 @@ void EditorApp::draw_weather_dome_(imm::Context& ctx, const imm::Box& b, glm::ve
     ctx.outline(b, ctx.style.border);
 }
 
-void EditorApp::draw_weather_day_strip_(imm::Context& ctx, const toy::weather::Settings& st, toy::weather::WeatherSystem* w) {
+void WeatherPanel::draw_weather_day_strip_(imm::Context& ctx, const toy::weather::Settings& st, toy::weather::WeatherSystem* w) {
     const float lab_h = ctx.style.font_size + 4;
     const imm::Box b = ctx.next_box(40 + lab_h);
     const imm::Box sky{b.x, b.y, b.w, 40};
@@ -184,7 +195,7 @@ void EditorApp::draw_weather_day_strip_(imm::Context& ctx, const toy::weather::S
     }
     bool hov = false, held = false;
     ctx.invisible_button("weather_day_strip", sky, &hov, &held);
-    test_rects_["weather_day_strip"] = sky;
+    app_.test_rects_["weather_day_strip"] = sky;
     const float mouse_hour = std::clamp((ctx.mouse().x - sky.x) / std::max(1.0f, sky.w) * 24.0f, 0.0f, 23.999f);
     if (held && w && w->enabled()) w->set_time(mouse_hour);
     if (hov && !held) {
@@ -198,7 +209,7 @@ void EditorApp::draw_weather_day_strip_(imm::Context& ctx, const toy::weather::S
     }
 }
 
-void EditorApp::draw_weather_sun_path_(imm::Context& ctx, const toy::weather::Settings& st, const toy::weather::WeatherSystem* w) {
+void WeatherPanel::draw_weather_sun_path_(imm::Context& ctx, const toy::weather::Settings& st, const toy::weather::WeatherSystem* w) {
     const float size = 116;
     const imm::Box b = ctx.next_box(size);
     const glm::vec2 c{b.x + size * 0.5f + 4, b.y + size * 0.5f};
@@ -272,10 +283,10 @@ void EditorApp::draw_weather_sun_path_(imm::Context& ctx, const toy::weather::Se
                     "(or the moon at night).\nLatitude pulls the track toward the edge (lower sun, longer shadows); Sun Path "
                     "Heading turns it.");
     }
-    test_rects_["weather_sun_path"] = b;
+    app_.test_rects_["weather_sun_path"] = b;
 }
 
-const char* EditorApp::weather_wind_name_(float ms) {
+const char* WeatherPanel::weather_wind_name_(float ms) {
     if (ms < 0.5f) return "calm";
     if (ms < 3.4f) return "light breeze";
     if (ms < 8.0f) return "breeze";
@@ -284,7 +295,7 @@ const char* EditorApp::weather_wind_name_(float ms) {
     return "storm";
 }
 
-void EditorApp::draw_weather_wind_dial_(imm::Context& ctx, Node& item, EditResult& total) {
+void WeatherPanel::draw_weather_wind_dial_(imm::Context& ctx, Node& item, EditResult& total) {
     const float size = 76;
     const imm::Box b = ctx.next_box(size);
     const glm::vec2 c{b.x + size * 0.5f + 4, b.y + size * 0.5f};
@@ -293,7 +304,7 @@ void EditorApp::draw_weather_wind_dial_(imm::Context& ctx, Node& item, EditResul
     bool hov = false, held = false;
     ctx.invisible_button("wind_dial", hit, &hov, &held);
     const bool released = ctx.last_deactivated();
-    test_rects_["weather_wind_dial"] = hit;
+    app_.test_rects_["weather_wind_dial"] = hit;
     float heading = get_float(item, "wind_heading", 30.0f);
     const float strength = get_float(item, "wind_strength", 1.5f);
     if (held) {
@@ -340,7 +351,7 @@ void EditorApp::draw_weather_wind_dial_(imm::Context& ctx, Node& item, EditResul
                                   "its length grows with the strength. Drag to aim it.");
 }
 
-const std::vector<FieldDesc>& EditorApp::weather_time_fields_() {
+const std::vector<FieldDesc>& WeatherPanel::weather_time_fields_() {
     static const std::vector<FieldDesc> f = {
         with_label(with_tip(f_float("time_of_day", 10.0f, 0.02f, 0.0f, 24.0f), "Hour the clock starts at when the scene loads (0-24): the "
                                                                                  "triangle under the strip. Changing it jumps the live clock there"), "Start Time"),
@@ -349,7 +360,7 @@ const std::vector<FieldDesc>& EditorApp::weather_time_fields_() {
     return f;
 }
 
-const std::vector<FieldDesc>& EditorApp::weather_sun_fields_() {
+const std::vector<FieldDesc>& WeatherPanel::weather_sun_fields_() {
     static const std::vector<FieldDesc> f = {
         with_label(with_tip(f_bool("drive_sun", true), "Aim and colour the scene's directional light: the sun by day, the moon by night. "
                                                        "A scene without one gets a runtime Sun"), "Drive Sun"),
@@ -360,7 +371,7 @@ const std::vector<FieldDesc>& EditorApp::weather_sun_fields_() {
     return f;
 }
 
-const std::vector<FieldDesc>& EditorApp::weather_moon_fields_() {
+const std::vector<FieldDesc>& WeatherPanel::weather_moon_fields_() {
     static const std::vector<FieldDesc> f = {
         with_label(with_tip(f_float("moon_intensity", 0.12f, 0.005f, 0.0f, 100.0f), "The moon's intensity at its highest"), "Moon Intensity"),
         with_label(with_tip(f_color("moon_color", glm::vec3(0.55f, 0.65f, 0.9f)), "The moonlight's colour"), "Moon Colour"),
@@ -368,7 +379,7 @@ const std::vector<FieldDesc>& EditorApp::weather_moon_fields_() {
     return f;
 }
 
-const std::vector<FieldDesc>& EditorApp::weather_palette_fields_(int which) {
+const std::vector<FieldDesc>& WeatherPanel::weather_palette_fields_(int which) {
     static const std::vector<FieldDesc> day = {
         with_label(with_tip(f_color("day_zenith", glm::vec3(0.05f, 0.18f, 0.55f)), "Straight up, by day"), "Zenith (top)"),
         with_label(with_tip(f_color("day_horizon", glm::vec3(0.25f, 0.35f, 0.45f)), "Along the horizon, by day; also tints distant haze"), "Horizon"),
@@ -386,7 +397,7 @@ const std::vector<FieldDesc>& EditorApp::weather_palette_fields_(int which) {
     return which == 0 ? day : which == 1 ? twilight : night;
 }
 
-const std::vector<FieldDesc>& EditorApp::weather_brightness_fields_() {
+const std::vector<FieldDesc>& WeatherPanel::weather_brightness_fields_() {
     static const std::vector<FieldDesc> f = {
         with_label(with_tip(f_float("ambient_day", 1.0f, 0.01f, 0.0f, 16.0f), "Ambient and sky-reflection intensity at noon (render ambient_intensity / sky_intensity)"), "Ambient (Day)"),
         with_label(with_tip(f_float("ambient_night", 0.25f, 0.01f, 0.0f, 16.0f), "...at midnight"), "Ambient (Night)"),
@@ -396,7 +407,7 @@ const std::vector<FieldDesc>& EditorApp::weather_brightness_fields_() {
     return f;
 }
 
-std::vector<FieldDesc> EditorApp::weather_schedule_fields_(const std::vector<std::string>& names) const {
+std::vector<FieldDesc> WeatherPanel::weather_schedule_fields_(const std::vector<std::string>& names) const {
     return {
         with_label(with_tip(f_enum("condition", names), "The condition the scene starts in. Changing it switches the live weather at once"), "Start Condition"),
         with_label(with_tip(f_enum("schedule", {"fixed", "random", "cycle"}),
@@ -406,7 +417,7 @@ std::vector<FieldDesc> EditorApp::weather_schedule_fields_(const std::vector<std
     };
 }
 
-const std::vector<FieldDesc>& EditorApp::weather_ground_fields_() {
+const std::vector<FieldDesc>& WeatherPanel::weather_ground_fields_() {
     static const std::vector<FieldDesc> f = {
         with_label(with_tip(f_float("ground_height", 0.0f, 0.05f), "World Z effects treat as the ground: mist sits on it, rain and snow land on it "
                                                                 "where nothing else is below"), "Ground Height"),
@@ -421,7 +432,7 @@ const std::vector<FieldDesc>& EditorApp::weather_ground_fields_() {
     return f;
 }
 
-const std::vector<FieldDesc>& EditorApp::weather_snow_fields_() {
+const std::vector<FieldDesc>& WeatherPanel::weather_snow_fields_() {
     static const std::vector<FieldDesc> f = {
         with_label(with_tip(f_float("initial_snow_cover", 0.0f, 0.01f, 0.0f, 1.0f), "Lying snow the scene starts with (0..1). A snowy "
                                                                                     "Start Condition starts fully covered anyway"), "Starting Snow"),
@@ -443,7 +454,7 @@ const std::vector<FieldDesc>& EditorApp::weather_snow_fields_() {
     return f;
 }
 
-const std::vector<FieldDesc>& EditorApp::weather_condition_fields_(int part) {
+const std::vector<FieldDesc>& WeatherPanel::weather_condition_fields_(int part) {
     static const std::vector<FieldDesc> timing = {
         with_tip(f_string("name", "condition"), "What code and the Start Condition call it (unique)"),
         with_tip(f_float("weight", 1.0f, 0.01f, 0.0f, 1000.0f), "Random schedule: how likely it is picked. 0 = only on request"),
@@ -497,7 +508,7 @@ const std::vector<FieldDesc>& EditorApp::weather_condition_fields_(int part) {
     }
 }
 
-void EditorApp::draw_weather_section_(imm::Context& ctx) {
+void WeatherPanel::draw_weather_section_(imm::Context& ctx) {
     using I = imm::Icon;
     if (!weather_scene_()) return;
     Node block = weather_block_();
@@ -507,8 +518,8 @@ void EditorApp::draw_weather_section_(imm::Context& ctx) {
     ctx.tooltip("Weather & Time of Day\nA clock (sun, moon, sky) and weather conditions that blend into each other, "
                 "driving the sky, ambient light, fog, the sun and runtime effects (rain, snow, mist).\n"
                 "Saved in this scene (scene.settings.weather). The checkbox switches it " + std::string(was ? "off" : "on"));
-    test_rects_["weather_header"] = ctx.last_rect();
-    if (on != was && !playing()) {
+    app_.test_rects_["weather_header"] = ctx.last_rect();
+    if (on != was && !app_.playing()) {
         if (on) enable_weather_();
         else { block["enabled"] = Node(false); set_weather_block_(&block, "Disable Weather"); }
     }
@@ -521,7 +532,7 @@ void EditorApp::draw_weather_section_(imm::Context& ctx) {
         ctx.spacing(4);
         return;
     }
-    const InspectorEnv env = inspector_env_();
+    const InspectorEnv env = app_.inspector_env_();
     const toy::weather::Settings parsed = toy::weather::parse_settings(block);
     std::vector<std::string> names;
     for (const auto& c : parsed.conditions) names.push_back(c.name);
@@ -579,7 +590,7 @@ void EditorApp::draw_weather_section_(imm::Context& ctx) {
     ctx.spacing(4);
 }
 
-void EditorApp::draw_weather_status_(imm::Context& ctx, const toy::weather::Settings& st, toy::weather::WeatherSystem* w) {
+void WeatherPanel::draw_weather_status_(imm::Context& ctx, const toy::weather::Settings& st, toy::weather::WeatherSystem* w) {
     ctx.spacing(2);
     if (!w || !w->enabled()) {
         ctx.label_dim("Starting...");
@@ -621,7 +632,7 @@ void EditorApp::draw_weather_status_(imm::Context& ctx, const toy::weather::Sett
     draw_weather_day_strip_(ctx, st, w);
 }
 
-void EditorApp::draw_weather_preview_(imm::Context& ctx, const std::vector<std::string>& names, toy::weather::WeatherSystem* w) {
+void WeatherPanel::draw_weather_preview_(imm::Context& ctx, const std::vector<std::string>& names, toy::weather::WeatherSystem* w) {
     using I = imm::Icon;
     if (!w || !w->enabled()) { ctx.label_dim("Starting..."); return; }
     const toy::weather::WeatherState& s = w->state();
@@ -636,20 +647,20 @@ void EditorApp::draw_weather_preview_(imm::Context& ctx, const std::vector<std::
     ctx.tooltip("Condition\nBlend the live weather into this condition over its transition (not saved)");
     static const std::vector<std::string> speeds = {"1x (as authored)", "4x", "16x", "Instant"};
     static const float speed_values[] = {1.0f, 4.0f, 16.0f, 0.0f};
-    int speed = std::clamp(weather_preview_speed_, 0, 3);
-    if (ctx.combo("Blend Speed##wpreview", &speed, speeds) && speed >= 0 && speed < 4) weather_preview_speed_ = speed;
+    int speed = std::clamp(app_.weather_preview_speed_, 0, 3);
+    if (ctx.combo("Blend Speed##wpreview", &speed, speeds) && speed >= 0 && speed < 4) app_.weather_preview_speed_ = speed;
     // Re-applied every frame: a scene rebuild makes a fresh system at 1x.
-    w->set_transition_speed(speed_values[std::clamp(weather_preview_speed_, 0, 3)]);
+    w->set_transition_speed(speed_values[std::clamp(app_.weather_preview_speed_, 0, 3)]);
     ctx.tooltip("Blend Speed\nFast-forwards blends between conditions in the editor (not saved; the game uses each "
                 "condition's own Transition)");
-    test_rects_["weather_transition_speed"] = ctx.last_rect();
+    app_.test_rects_["weather_transition_speed"] = ctx.last_rect();
     float cover = s.snow_cover;
     if (ctx.slider_float("Lying Snow##wpreview", &cover, 0.0f, 1.0f, "%.2f")) w->set_snow_cover(cover);
     ctx.tooltip("Lying Snow\nSet the snow on the ground now; the weather builds or melts it from here (not saved)");
     bool run = w->editor_preview();
     if (ctx.property_bool("Run Clock & Schedule##wpreview", &run)) w->set_editor_preview(run);
     ctx.tooltip("Run Clock & Schedule\nIn edit mode the clock and the schedule stand still; this runs them as Play would");
-    if (ctx.property_bool("Show Effects##wpreview", &weather_preview_effects_)) w->set_preview_effects(weather_preview_effects_);
+    if (ctx.property_bool("Show Effects##wpreview", &app_.weather_preview_effects_)) w->set_preview_effects(app_.weather_preview_effects_);
     ctx.tooltip("Show Effects\nRain, snow, mist and the rest in the editor. Off, they wait for Play "
                 "(the sky, sun, fog and lying snow still show)");
     ctx.spacing(2);
@@ -665,12 +676,12 @@ void EditorApp::draw_weather_preview_(imm::Context& ctx, const std::vector<std::
     ctx.tooltip("Reset to Start\nBack to the scene's Start Time and Start Condition");
 }
 
-void EditorApp::draw_weather_palettes_(imm::Context& ctx, const toy::weather::Settings& st, const InspectorEnv& env) {
+void WeatherPanel::draw_weather_palettes_(imm::Context& ctx, const toy::weather::Settings& st, const InspectorEnv& env) {
     static const char* titles[] = {"Day", "Twilight", "Night"};
     const float gap = 6, lab = ctx.style.row_height - 2;
     const imm::Box row = ctx.next_box(58 + lab);
     const float cw = std::floor((row.w - gap * 2) / 3.0f);
-    weather_palette_ = std::clamp(weather_palette_, 0, 2);
+    app_.weather_palette_ = std::clamp(app_.weather_palette_, 0, 2);
     for (int i = 0; i < 3; ++i) {
         const imm::Box cell{row.x + i * (cw + gap), row.y, cw, row.h};
         const imm::Box dome{cell.x + 3, cell.y + 3, cell.w - 6, 52};
@@ -690,25 +701,25 @@ void EditorApp::draw_weather_palettes_(imm::Context& ctx, const toy::weather::Se
         ctx.push_id(static_cast<int64_t>(i));
         const bool click = ctx.invisible_button("palette", cell, &hov);
         ctx.pop_id();
-        if (click) weather_palette_ = i;
-        const bool sel = weather_palette_ == i;
+        if (click) app_.weather_palette_ = i;
+        const bool sel = app_.weather_palette_ == i;
         ctx.fill_rounded(cell, sel ? ctx.style.selection : hov ? ctx.style.row_hover : ctx.style.panel_alt, 4);
         draw_weather_dome_(ctx, dome, z, h, g, sun, i == 1 ? glm::vec3(1.0f, 0.55f, 0.25f) : glm::vec3(1.0f, 0.95f, 0.8f));
         ctx.text_in({cell.x, dome.bottom() + 1, cell.w, lab}, titles[i], sel ? ctx.style.text : ctx.style.text_dim, 0.0f, true);
-        test_rects_[std::string("weather_palette:") + titles[i]] = cell;
+        app_.test_rects_[std::string("weather_palette:") + titles[i]] = cell;
         if (hov) ctx.tooltip(std::string(titles[i]) + " sky\nClick to edit its colours.\n" +
                              (i == 0 ? "Shown with the sun more than ~15 deg up."
                               : i == 1 ? "Mixed in while the sun is near the horizon: sunrise and sunset."
                                        : "Shown with the sun more than ~15 deg below the horizon."));
     }
     ctx.spacing(2);
-    draw_weather_fields_(ctx, weather_palette_fields_(weather_palette_), env);
-    if (weather_palette_ == 1) ctx.label_dim("The ground uses the day / night mix at twilight.");
+    draw_weather_fields_(ctx, weather_palette_fields_(app_.weather_palette_), env);
+    if (app_.weather_palette_ == 1) ctx.label_dim("The ground uses the day / night mix at twilight.");
     weather_subhead_(ctx, "Brightness");
     draw_weather_fields_(ctx, weather_brightness_fields_(), env);
 }
 
-std::string EditorApp::weather_condition_tags_(const toy::weather::Condition& c) {
+std::string WeatherPanel::weather_condition_tags_(const toy::weather::Condition& c) {
     std::string t;
     auto add = [&](const char* s) { t += (t.empty() ? "" : ", ") + std::string(s); };
     if (c.precipitation > 0.01f) add(c.temperature <= 0.0f ? "snow" : "rain");
@@ -719,12 +730,12 @@ std::string EditorApp::weather_condition_tags_(const toy::weather::Condition& c)
     return t;
 }
 
-void EditorApp::draw_weather_conditions_(imm::Context& ctx, const InspectorEnv& env, const toy::weather::Settings& st) {
+void WeatherPanel::draw_weather_conditions_(imm::Context& ctx, const InspectorEnv& env, const toy::weather::Settings& st) {
     using I = imm::Icon;
     Node block = weather_block_();
     if (!block.contains("conditions") || !block.at("conditions").is_sequence()) {
         ctx.label_dim("Using the engine's stock conditions.");
-        if (ctx.button("Customize Conditions", -1, !playing(), I::Plus)) {
+        if (ctx.button("Customize Conditions", -1, !app_.playing(), I::Plus)) {
             Node list = Node::sequence();
             for (const auto& c : toy::weather::default_conditions()) list.as_seq().push_back(toy::weather::to_node(c));
             block["conditions"] = list;
@@ -734,7 +745,7 @@ void EditorApp::draw_weather_conditions_(imm::Context& ctx, const InspectorEnv& 
     }
     Node list = block.at("conditions");
     const int count = static_cast<int>(list.size());
-    weather_sel_ = std::clamp(weather_sel_, 0, std::max(0, count - 1));
+    app_.weather_sel_ = std::clamp(app_.weather_sel_, 0, std::max(0, count - 1));
     const std::string start = get_string(block, "condition");
     const toy::weather::WeatherSystem* live = live_weather_();
     ctx.spacing(4);
@@ -746,8 +757,8 @@ void EditorApp::draw_weather_conditions_(imm::Context& ctx, const InspectorEnv& 
         ctx.push_id(static_cast<int64_t>(i));
         const imm::Box row = ctx.next_box(rh);
         bool hov = false;
-        if (ctx.invisible_button("cond_row", row, &hov)) weather_sel_ = i;
-        const bool sel = i == weather_sel_;
+        if (ctx.invisible_button("cond_row", row, &hov)) app_.weather_sel_ = i;
+        const bool sel = i == app_.weather_sel_;
         if (sel) ctx.fill_rounded(row, ctx.style.selection, 3);
         else if (hov) ctx.fill_rounded(row, ctx.style.row_hover, 3);
         const toy::weather::SkyFrame f = weather_condition_sky_(st, c, 12.0f);   // at noon: the clearest difference
@@ -766,7 +777,7 @@ void EditorApp::draw_weather_conditions_(imm::Context& ctx, const InspectorEnv& 
             ctx.fill_rounded(bb, badge.rfind("live", 0) == 0 ? glm::vec4(0.25f, 0.55f, 0.3f, 1.0f) : ctx.style.button, 3);
             ctx.text_in(bb, badge, ctx.style.text, 0.0f, true);
         }
-        test_rects_["weather_condition:" + c.name] = row;
+        app_.test_rects_["weather_condition:" + c.name] = row;
         if (hov) {
             char wt[32];
             std::snprintf(wt, sizeof(wt), "%.2g", c.weight);
@@ -775,7 +786,7 @@ void EditorApp::draw_weather_conditions_(imm::Context& ctx, const InspectorEnv& 
         }
         ctx.pop_id();
     }
-    const bool ok = !playing();
+    const bool ok = !app_.playing();
     auto rewrite = [&](Node new_list, const std::string& label) {
         Node b = weather_block_();
         b["conditions"] = std::move(new_list);
@@ -800,38 +811,38 @@ void EditorApp::draw_weather_conditions_(imm::Context& ctx, const InspectorEnv& 
         c.weight = 0.0f;
         Node nl = list;
         nl.as_seq().push_back(toy::weather::to_node(c));
-        weather_sel_ = count;
+        app_.weather_sel_ = count;
         rewrite(nl, "Add Weather Condition");
     } else if (tool("wc_dup", I::Duplicate, "Duplicate Condition", 1, ok && count > 0)) {
         Node nl = list;
-        Node copy = list.as_seq()[static_cast<size_t>(weather_sel_)];
+        Node copy = list.as_seq()[static_cast<size_t>(app_.weather_sel_)];
         copy["name"] = Node(unique_name(get_string(copy, "name", "condition")));
-        nl.as_seq().insert(nl.as_seq().begin() + weather_sel_ + 1, copy);
-        ++weather_sel_;
+        nl.as_seq().insert(nl.as_seq().begin() + app_.weather_sel_ + 1, copy);
+        ++app_.weather_sel_;
         rewrite(nl, "Duplicate Weather Condition");
     } else if (tool("wc_del", I::Trash, "Remove Condition\nThe last one can't be removed", 2, ok && count > 1)) {
         Node nl = list;
-        nl.as_seq().erase(nl.as_seq().begin() + weather_sel_);
-        weather_sel_ = std::max(0, weather_sel_ - 1);
+        nl.as_seq().erase(nl.as_seq().begin() + app_.weather_sel_);
+        app_.weather_sel_ = std::max(0, app_.weather_sel_ - 1);
         rewrite(nl, "Remove Weather Condition");
-    } else if (tool("wc_up", I::Undo, "Move Up", 3, ok && weather_sel_ > 0)) {
+    } else if (tool("wc_up", I::Undo, "Move Up", 3, ok && app_.weather_sel_ > 0)) {
         Node nl = list;
-        std::swap(nl.as_seq()[static_cast<size_t>(weather_sel_)], nl.as_seq()[static_cast<size_t>(weather_sel_ - 1)]);
-        --weather_sel_;
+        std::swap(nl.as_seq()[static_cast<size_t>(app_.weather_sel_)], nl.as_seq()[static_cast<size_t>(app_.weather_sel_ - 1)]);
+        --app_.weather_sel_;
         rewrite(nl, "Move Weather Condition");
-    } else if (tool("wc_down", I::Redo, "Move Down", 4, ok && weather_sel_ + 1 < count)) {
+    } else if (tool("wc_down", I::Redo, "Move Down", 4, ok && app_.weather_sel_ + 1 < count)) {
         Node nl = list;
-        std::swap(nl.as_seq()[static_cast<size_t>(weather_sel_)], nl.as_seq()[static_cast<size_t>(weather_sel_ + 1)]);
-        ++weather_sel_;
+        std::swap(nl.as_seq()[static_cast<size_t>(app_.weather_sel_)], nl.as_seq()[static_cast<size_t>(app_.weather_sel_ + 1)]);
+        ++app_.weather_sel_;
         rewrite(nl, "Move Weather Condition");
     } else if (tool("wc_reset", I::Restart, "Reset to Stock Conditions\nReplaces the list with the engine's defaults", 5, ok)) {
         Node nl = Node::sequence();
         for (const auto& c : toy::weather::default_conditions()) nl.as_seq().push_back(toy::weather::to_node(c));
-        weather_sel_ = 0;
+        app_.weather_sel_ = 0;
         rewrite(nl, "Reset Weather Conditions");
     }
     if (live && count > 0 && ok) {
-        const std::string sel_name = get_string(list.as_seq()[static_cast<size_t>(weather_sel_)], "name");
+        const std::string sel_name = get_string(list.as_seq()[static_cast<size_t>(app_.weather_sel_)], "name");
         const float pw = std::min(110.0f, std::max(0.0f, bar.w - 6 * bw - 4));
         if (pw > 40 && ctx.icon_button("wc_preview", I::Play, "Preview It\nBlend the live weather into the selected condition (not saved)",
                                        live->condition() == sel_name, bw - 2, imm::Context::kAll,
@@ -840,12 +851,12 @@ void EditorApp::draw_weather_conditions_(imm::Context& ctx, const InspectorEnv& 
         }
     }
     if (count == 0) return;
-    test_rects_["weather_condition_bar"] = bar;
+    app_.test_rects_["weather_condition_bar"] = bar;
 
     // The selected condition's profile. `duration: [min, max]` edits as two rows.
     list = weather_block_().at("conditions");
-    if (weather_sel_ >= static_cast<int>(list.size())) return;
-    Node item = list.as_seq()[static_cast<size_t>(weather_sel_)];
+    if (app_.weather_sel_ >= static_cast<int>(list.size())) return;
+    Node item = list.as_seq()[static_cast<size_t>(app_.weather_sel_)];
     const std::string old_name = get_string(item, "name");
     if (item.contains("duration") && item.at("duration").is_sequence() && item.at("duration").size() >= 2) {
         item["duration_min"] = item.at("duration").as_seq()[0];
@@ -853,7 +864,7 @@ void EditorApp::draw_weather_conditions_(imm::Context& ctx, const InspectorEnv& 
     } else if (item.contains("duration")) {
         item["duration_min"] = item["duration_max"] = item.at("duration");
     }
-    const toy::weather::Condition cond = toy::weather::parse_condition(list.as_seq()[static_cast<size_t>(weather_sel_)]);
+    const toy::weather::Condition cond = toy::weather::parse_condition(list.as_seq()[static_cast<size_t>(app_.weather_sel_)]);
     ctx.spacing(4);
     {   // A banner naming what's being edited.
         const imm::Box hb = ctx.next_box(ctx.style.row_height + 2);
@@ -928,10 +939,10 @@ void EditorApp::draw_weather_conditions_(imm::Context& ctx, const InspectorEnv& 
         // A rename must stay unique; references to the old name (start, next lists) follow it.
         bool clash = false;
         for (int i = 0; i < static_cast<int>(nl.size()); ++i) {
-            if (i != weather_sel_ && get_string(nl.as_seq()[static_cast<size_t>(i)], "name") == name) clash = true;
+            if (i != app_.weather_sel_ && get_string(nl.as_seq()[static_cast<size_t>(i)], "name") == name) clash = true;
         }
         if (name.empty() || clash) item["name"] = Node(name = old_name);
-        nl.as_seq()[static_cast<size_t>(weather_sel_)] = item;
+        nl.as_seq()[static_cast<size_t>(app_.weather_sel_)] = item;
         if (name != old_name) {
             if (get_string(b, "condition") == old_name) b["condition"] = Node(name);
             for (auto& c : nl.as_seq()) {
@@ -941,10 +952,10 @@ void EditorApp::draw_weather_conditions_(imm::Context& ctx, const InspectorEnv& 
         }
         set_weather_block_(&b, "Edit weather condition " + name, total.active ? "weather_cond:" + total.key : std::string());
     }
-    if (total.finished) doc_.end_merge();
+    if (total.finished) app_.doc_.end_merge();
 }
 
-void EditorApp::draw_weather_locked_row_(imm::Context& ctx, const FieldDesc& f, const std::string& section_name) {
+void WeatherPanel::draw_weather_locked_row_(imm::Context& ctx, const FieldDesc& f, const std::string& section_name) {
     using I = imm::Icon;
     const imm::Box row = ctx.property_row(f.display() + "##locked_" + f.key);
     ctx.fill_rounded(row, ctx.style.panel_alt);
@@ -955,10 +966,10 @@ void EditorApp::draw_weather_locked_row_(imm::Context& ctx, const FieldDesc& f, 
         ctx.tooltip(f.display() + "\nLocked: the scene's weather drives it every frame (World > Weather & Time of Day).\n"
                     "Its own value comes back when the weather is switched off.\nconfig key: " + section_name + "." + f.key);
     }
-    test_rects_["locked:" + f.key] = row;
+    app_.test_rects_["locked:" + f.key] = row;
 }
 
-std::vector<coopa::scene::SceneObject*> EditorApp::runtime_roots_() const {
+std::vector<coopa::scene::SceneObject*> WeatherPanel::runtime_roots_() const {
     std::vector<coopa::scene::SceneObject*> out;
     coopa::scene::Scene* s = viewed_live_scene_();
     if (!s) return out;
@@ -966,20 +977,20 @@ std::vector<coopa::scene::SceneObject*> EditorApp::runtime_roots_() const {
     return out;
 }
 
-std::string EditorApp::runtime_path_(const coopa::scene::SceneObject& o) {
+std::string WeatherPanel::runtime_path_(const coopa::scene::SceneObject& o) {
     std::string p = o.name();
     for (const coopa::scene::SceneObject* a = o.parent(); a; a = a->parent()) p = a->name() + ":" + p;
     return p;
 }
 
-coopa::scene::SceneObject* EditorApp::runtime_selected_() const {
-    if (runtime_sel_.empty()) return nullptr;
+coopa::scene::SceneObject* WeatherPanel::runtime_selected_() const {
+    if (app_.runtime_sel_.empty()) return nullptr;
     coopa::scene::Scene* s = viewed_live_scene_();
-    coopa::scene::SceneObject* o = s ? s->find_object_by_path(runtime_sel_) : nullptr;
+    coopa::scene::SceneObject* o = s ? s->find_object_by_path(app_.runtime_sel_) : nullptr;
     return o && toy::scene::is_runtime_object(*o) ? o : nullptr;
 }
 
-void EditorApp::draw_outliner_runtime_(imm::Context& ctx) {
+void WeatherPanel::draw_outliner_runtime_(imm::Context& ctx) {
     using I = imm::Icon;
     const auto roots = runtime_roots_();
     if (roots.empty()) return;
@@ -987,35 +998,35 @@ void EditorApp::draw_outliner_runtime_(imm::Context& ctx) {
     auto head = ctx.tree_node(ctx.get_id("runtime_root"), "Runtime", false, false, true, &dim, I::Lock);
     ctx.tooltip("Runtime\nObjects systems create while the scene runs (weather effects, its sun). "
                 "Locked: they are not part of the scene file and can't be edited -- change the system that makes them");
-    test_rects_["outliner_runtime"] = head.rect;
+    app_.test_rects_["outliner_runtime"] = head.rect;
     if (!head.open) return;
     for (coopa::scene::SceneObject* r : roots) draw_outliner_runtime_row_(ctx, *r);
     ctx.tree_pop();
 }
 
-void EditorApp::draw_outliner_runtime_row_(imm::Context& ctx, coopa::scene::SceneObject& o) {
+void WeatherPanel::draw_outliner_runtime_row_(imm::Context& ctx, coopa::scene::SceneObject& o) {
     using I = imm::Icon;
     const std::string path = runtime_path_(o);
     ctx.push_id(path);
     const bool leaf = o.children().empty();
     const glm::vec4 col = ctx.style.text_dim;
     const glm::vec4 tint = ctx.style.text_disabled;
-    const bool sel = runtime_sel_ == path;
+    const bool sel = app_.runtime_sel_ == path;
     I icon = I::Empty;
     if (o.get_component<toy::particles::ParticleSystem>()) icon = I::Component;
     else if (o.get_component<coopa::gfx::engine::components::VolumeComponent>()) icon = I::World;
     else if (o.get_component<coopa::gfx::engine::components::DirectionalLightComponent>()) icon = I::Sun;
     auto r = ctx.tree_node(ctx.get_id("rt"), o.name(), leaf, sel, false, &col, icon, 24.0f, false, &tint);
-    test_rects_["runtime:" + path] = r.rect;
+    app_.test_rects_["runtime:" + path] = r.rect;
     const float s = ctx.style.row_height - 2;
     ctx.icon(I::Lock, {r.rect.right() - s - 4, r.rect.y + 2, s - 2, s - 2}, ctx.style.text_disabled);
     const toy::scene::RuntimeObject* m = toy::scene::runtime_marker(o);
     ctx.tooltip(o.name() + "\nLocked -- created at runtime by " + (m ? m->owner_system : std::string("a system")) +
                 (m && !m->note.empty() ? "\n" + m->note : std::string()));
     if (r.clicked) {
-        doc_.clear_selection();
-        runtime_sel_ = path;
-        prop_tab_ = PropTab::Object;
+        app_.doc_.clear_selection();
+        app_.runtime_sel_ = path;
+        app_.prop_tab_ = PropTab::Object;
     }
     if (r.open) {
         for (const auto& c : o.children()) draw_outliner_runtime_row_(ctx, *c);
@@ -1024,7 +1035,7 @@ void EditorApp::draw_outliner_runtime_row_(imm::Context& ctx, coopa::scene::Scen
     ctx.pop_id();
 }
 
-void EditorApp::draw_runtime_object_props_(imm::Context& ctx, coopa::scene::SceneObject& o) {
+void WeatherPanel::draw_runtime_object_props_(imm::Context& ctx, coopa::scene::SceneObject& o) {
     using I = imm::Icon;
     const toy::scene::RuntimeObject* m = toy::scene::runtime_marker(o);
     {
@@ -1032,7 +1043,7 @@ void EditorApp::draw_runtime_object_props_(imm::Context& ctx, coopa::scene::Scen
         ctx.icon(I::Lock, {row.x + 2, row.y + 3, row.h - 6, row.h - 6}, ctx.style.text_dim);
         ctx.text_in({row.x + row.h + 2, row.y, row.w - row.h - 2, row.h}, o.name(), ctx.style.text, 0.0f);
     }
-    test_rects_["runtime_props"] = ctx.last_rect();
+    app_.test_rects_["runtime_props"] = ctx.last_rect();
     ctx.label_dim("Runtime object -- locked (created by " + (m ? m->owner_system : std::string("a system")) + ", never saved)");
     if (m && !m->note.empty()) ctx.paragraph(m->note, &ctx.style.text_dim);
     auto value = [&](const std::string& k, const std::string& v) {

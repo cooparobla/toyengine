@@ -66,7 +66,7 @@ known flaky MoltenVK segfault), and writes `docs/images/editor/<shot>.jpg`.
 - **New shot needed** (a new feature, a page without one): add a `COOPA_TEST(<shot>)` to
   `tests/editor/docs/docs_test.cpp` modelled on its neighbours, add it to the Screenshots column
   above, capture it.
-- Never show the pixel-art post effects (outline / palette / dither); the engine is presented
+- Never show the stylisation post effects (outline / palette / dither); the engine is presented
   at full resolution.
 - Never open a visible window, and never attach a debugger.
 

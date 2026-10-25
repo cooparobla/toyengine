@@ -1,9 +1,20 @@
+#include "editor/app/ui/instances.h"
+#include "editor/app/ui/assets.h"
+
 #include "editor/app/editor_app.h"
 
 namespace toy {
 namespace editor {
 
-coopa::scene::SceneInheritance::DocumentLoader EditorApp::inherit_loader_() const {
+std::string InstancesPanel::inherit_anchor_() const {
+    return (app_.doc_.path().empty() ? app_.sync_.fallback_path : app_.doc_.path()).string();
+}
+
+bool InstancesPanel::in_instance_(ObjectId id) const {
+    return app_.doc_.instance_root_of(id) != 0;
+}
+
+coopa::scene::SceneInheritance::DocumentLoader InstancesPanel::inherit_loader_() const {
     return [this](const std::string& p) -> Node {
         const fs::path file = coopa::yaml::resolve_variant(p);
         std::error_code ec;
@@ -16,7 +27,7 @@ coopa::scene::SceneInheritance::DocumentLoader EditorApp::inherit_loader_() cons
     };
 }
 
-std::optional<Node> EditorApp::resolve_keep_ids_(const Node& obj) const {
+std::optional<Node> InstancesPanel::resolve_keep_ids_(const Node& obj) const {
     try {
         return coopa::scene::SceneInheritance::resolve_object(obj, inherit_anchor_(), inherit_loader_());
     } catch (const std::exception&) {
@@ -24,18 +35,18 @@ std::optional<Node> EditorApp::resolve_keep_ids_(const Node& obj) const {
     }
 }
 
-std::optional<Node> EditorApp::bare_asset_of_(const Node& inst) const {
+std::optional<Node> InstancesPanel::bare_asset_of_(const Node& inst) const {
     Node bare = Node::mapping();
     bare["name"] = inst.contains("name") ? inst.at("name") : Node(std::string("x"));
     for (const char* k : {"prefab", "inherit_from"}) if (inst.contains(k)) bare[k] = inst.at(k);
     return resolve_keep_ids_(bare);
 }
 
-void EditorApp::sync_instance_placeholders_() {
-    doc_.sync_placeholders([this](const Node& inst) { return bare_asset_of_(inst); });
+void InstancesPanel::sync_instance_placeholders_() {
+    app_.doc_.sync_placeholders([this](const Node& inst) { return bare_asset_of_(inst); });
 }
 
-EditorApp::InstanceEntry EditorApp::resolve_instance_entry_(const Node& inst) const {
+InstancesPanel::InstanceEntry InstancesPanel::resolve_instance_entry_(const Node& inst) const {
     InstanceEntry e;
     e.src = inst;
     std::function<void(const Node&)> collect = [&](const Node& n) {
@@ -63,13 +74,13 @@ EditorApp::InstanceEntry EditorApp::resolve_instance_entry_(const Node& inst) co
     return e;
 }
 
-const EditorApp::InstanceView& EditorApp::instance_view_() const {
-    if (inst_view_.rev == doc_.undo_revision() && inst_view_.gen == scene_gen_) return inst_view_;
+const InstancesPanel::InstanceView& InstancesPanel::instance_view_() const {
+    if (inst_view_.rev == app_.doc_.undo_revision() && inst_view_.gen == scene_gen_) return inst_view_;
     // A slider drag on one instance changes the document every frame: only that instance's
     // node differs, so every other instance keeps its resolution (no asset reads).
     const bool same_files = inst_view_.gen == scene_gen_;
     InstanceView v;
-    v.rev = doc_.undo_revision();
+    v.rev = app_.doc_.undo_revision();
     v.gen = scene_gen_;
     std::function<void(const Node&)> walk = [&](const Node& list) {
         if (!list.is_sequence()) return;
@@ -84,7 +95,7 @@ const EditorApp::InstanceView& EditorApp::instance_view_() const {
             if (o.contains("children")) walk(o.at("children"));
         }
     };
-    walk(doc_.root_objects());
+    walk(app_.doc_.root_objects());
     for (const auto& [rid, e] : v.roots) {
         for (const auto& [id, n] : e.resolved) v.resolved[id] = &n;
         for (const auto& [id, n] : e.base) v.base[id] = &n;
@@ -93,26 +104,26 @@ const EditorApp::InstanceView& EditorApp::instance_view_() const {
     return inst_view_;
 }
 
-const Node* EditorApp::resolved_of_(ObjectId id) const {
+const Node* InstancesPanel::resolved_of_(ObjectId id) const {
     const auto& v = instance_view_();
     auto it = v.resolved.find(id);
     return it == v.resolved.end() ? nullptr : it->second;
 }
 
-const Node* EditorApp::base_of_(ObjectId id) const {
+const Node* InstancesPanel::base_of_(ObjectId id) const {
     const auto& v = instance_view_();
     auto it = v.base.find(id);
     return it == v.base.end() ? nullptr : it->second;
 }
 
-const Node& EditorApp::effective_(const Node& obj) const {
+const Node& InstancesPanel::effective_(const Node& obj) const {
     // A map lookup, not a walk up the document: this runs for every object, every frame.
     // Only objects inside an instance are in the resolved view.
     if (const ObjectId id = SceneDocument::id_of(obj)) if (const Node* r = resolved_of_(id)) return *r;
     return obj;
 }
 
-int EditorApp::match_component_(const Node& list, const Node& comp) {
+int InstancesPanel::match_component_(const Node& list, const Node& comp) {
     if (!list.is_sequence()) return -1;
     const std::string t = component_type(comp);
     const std::string cid = comp.contains("id") ? comp.at("id").get_value<std::string>() : "";
@@ -125,27 +136,27 @@ int EditorApp::match_component_(const Node& list, const Node& comp) {
     return -1;
 }
 
-const Node* EditorApp::own_override_(ObjectId id, const Node& comp) const {
-    const Node* o = doc_.find(id);
+const Node* InstancesPanel::own_override_(ObjectId id, const Node& comp) const {
+    const Node* o = app_.doc_.find(id);
     if (!o || !o->contains("components")) return nullptr;
     const int k = match_component_(o->at("components"), comp);
     return k < 0 ? nullptr : &o->at("components").as_seq()[static_cast<size_t>(k)];
 }
 
-const Node* EditorApp::base_component_(ObjectId id, const Node& comp) const {
+const Node* InstancesPanel::base_component_(ObjectId id, const Node& comp) const {
     const Node* b = base_of_(id);
     if (!b || !b->contains("components")) return nullptr;
     const int k = match_component_(b->at("components"), comp);
     return k < 0 ? nullptr : &b->at("components").as_seq()[static_cast<size_t>(k)];
 }
 
-bool EditorApp::leafy_(const Node& n) {
+bool InstancesPanel::leafy_(const Node& n) {
     if (!n.is_mapping()) return true;
     for (const auto& kv : n.as_map()) if (kv.second.is_mapping() || kv.second.is_sequence()) return false;
     return true;
 }
 
-Node EditorApp::diff_map_(const Node& base, const Node& edited) {
+Node InstancesPanel::diff_map_(const Node& base, const Node& edited) {
     Node out = Node::mapping();
     for (const auto& [k, v] : edited.as_map()) {
         const std::string key = k.get_value<std::string>();
@@ -163,7 +174,7 @@ Node EditorApp::diff_map_(const Node& base, const Node& edited) {
     return out;
 }
 
-Node EditorApp::minimal_override_(ObjectId id, const Node& edited) const {
+Node InstancesPanel::minimal_override_(ObjectId id, const Node& edited) const {
     Node ov = Node::mapping();
     ov["type"] = Node(component_type(edited));
     if (edited.contains("id")) ov["id"] = edited.at("id");
@@ -176,9 +187,9 @@ Node EditorApp::minimal_override_(ObjectId id, const Node& edited) const {
     return ov;
 }
 
-void EditorApp::write_override_(ObjectId id, const Node& match, const Node& ov, const std::string& merge) {
-    apply_(doc_.edit("Override " + component_type(match), [&](Node&) -> Change {
-        Node* o = doc_.find(id);
+void InstancesPanel::write_override_(ObjectId id, const Node& match, const Node& ov, const std::string& merge) {
+    app_.apply_(app_.doc_.edit("Override " + component_type(match), [&](Node&) -> Change {
+        Node* o = app_.doc_.find(id);
         if (!o) return {};
         if (!o->contains("components")) (*o)["components"] = Node::sequence();
         auto& seq = (*o)["components"].as_seq();
@@ -190,7 +201,7 @@ void EditorApp::write_override_(ObjectId id, const Node& match, const Node& ov, 
     }, merge));
 }
 
-void EditorApp::revert_override_field_(ObjectId id, const Node& comp, const std::string& key) {
+void InstancesPanel::revert_override_field_(ObjectId id, const Node& comp, const std::string& key) {
     const Node* own = own_override_(id, comp);
     if (!own || !own->contains(key)) return;
     Node ov = *own;
@@ -198,7 +209,7 @@ void EditorApp::revert_override_field_(ObjectId id, const Node& comp, const std:
     write_override_(id, comp, ov);
 }
 
-bool EditorApp::instance_transform_(ObjectId id, glm::vec3& p, glm::vec3& r, glm::vec3& s) const {
+bool InstancesPanel::instance_transform_(ObjectId id, glm::vec3& p, glm::vec3& r, glm::vec3& s) const {
     const Node* res = resolved_of_(id);
     p = glm::vec3(0); r = glm::vec3(0); s = glm::vec3(1);
     if (!res || !res->contains("components")) return false;
@@ -212,7 +223,7 @@ bool EditorApp::instance_transform_(ObjectId id, glm::vec3& p, glm::vec3& r, glm
     return false;
 }
 
-void EditorApp::set_inherited_transform_(ObjectId id, const glm::vec3& p, const glm::vec3& r, const glm::vec3& s,
+void InstancesPanel::set_inherited_transform_(ObjectId id, const glm::vec3& p, const glm::vec3& r, const glm::vec3& s,
                               const std::string& label, const std::string& merge_key) {
     Node match = Node::mapping();
     match["type"] = Node(std::string("Transform"));
@@ -225,8 +236,8 @@ void EditorApp::set_inherited_transform_(ObjectId id, const glm::vec3& p, const 
     if (differs("position", p, glm::vec3(0.0f))) ov["position"] = make_vec3(p);
     if (differs("rotation", r, glm::vec3(0.0f))) ov["rotation"] = make_vec3(r);
     if (differs("scale", s, glm::vec3(1.0f))) ov["scale"] = make_vec3(s);
-    doc_.edit(label, [&](Node&) -> Change {
-        Node* o = doc_.find(id);
+    app_.doc_.edit(label, [&](Node&) -> Change {
+        Node* o = app_.doc_.find(id);
         if (!o) return {};
         if (!o->contains("components")) (*o)["components"] = Node::sequence();
         auto& seq = (*o)["components"].as_seq();
@@ -236,7 +247,7 @@ void EditorApp::set_inherited_transform_(ObjectId id, const glm::vec3& p, const 
         else seq.insert(seq.begin(), ov);
         return {ChangeScope::Transform, id};
     }, merge_key);
-    if (auto* live = sync_.live(id); live && live->get_transform()) {
+    if (auto* live = app_.sync_.live(id); live && live->get_transform()) {
         auto& t = live->get_transform()->transform();
         t.set_position(p);
         t.set_rotation(r);
@@ -244,10 +255,10 @@ void EditorApp::set_inherited_transform_(ObjectId id, const glm::vec3& p, const 
     }
 }
 
-bool EditorApp::has_overrides_(ObjectId id) const {
-    const Node* o = doc_.find(id);
+bool InstancesPanel::has_overrides_(ObjectId id) const {
+    const Node* o = app_.doc_.find(id);
     if (!o) return false;
-    if (doc_.is_instance(id)) {
+    if (app_.doc_.is_instance(id)) {
         // The root's own Transform is its placement, not an override.
         if (o->contains("components")) for (const auto& c : o->at("components").as_seq()) if (component_type(c) != "Transform") return true;
         return false;
@@ -257,10 +268,10 @@ bool EditorApp::has_overrides_(ObjectId id) const {
     return !is_empty_placeholder(shallow);
 }
 
-void EditorApp::revert_all_overrides_(ObjectId id) {
+void InstancesPanel::revert_all_overrides_(ObjectId id) {
     if (!in_instance_(id)) return;
-    apply_(doc_.edit("Revert Overrides", [&](Node&) -> Change {
-        Node* o = doc_.find(id);
+    app_.apply_(app_.doc_.edit("Revert Overrides", [&](Node&) -> Change {
+        Node* o = app_.doc_.find(id);
         if (!o) return {};
         std::function<void(Node&, bool)> clear = [&](Node& n, bool root) {
             if (n.contains("components") && n.at("components").is_sequence()) {
@@ -276,14 +287,14 @@ void EditorApp::revert_all_overrides_(ObjectId id) {
                 for (auto& c : kids) clear(c, false);
             }
         };
-        clear(*o, doc_.is_instance(id));
+        clear(*o, app_.doc_.is_instance(id));
         return {ChangeScope::Object, id};
     }));
-    doc_.prune_selection();   // the children it added are gone
+    app_.doc_.prune_selection();   // the children it added are gone
 }
 
-bool EditorApp::shown_component_(ObjectId id, const std::string& type, Node& out) const {
-    const Node* o = doc_.find(id);
+bool InstancesPanel::shown_component_(ObjectId id, const std::string& type, Node& out) const {
+    const Node* o = app_.doc_.find(id);
     if (!o) return false;
     const Node& e = effective_(*o);
     if (!e.contains("components") || !e.at("components").is_sequence()) return false;
@@ -291,31 +302,31 @@ bool EditorApp::shown_component_(ObjectId id, const std::string& type, Node& out
     return false;
 }
 
-void EditorApp::edit_component_(ObjectId id, const Node& edited, const std::string& label, const std::string& merge) {
+void InstancesPanel::edit_component_(ObjectId id, const Node& edited, const std::string& label, const std::string& merge) {
     if (in_instance_(id)) { write_override_(id, edited, minimal_override_(id, edited), merge); return; }
-    const Node* o = doc_.find(id);
+    const Node* o = app_.doc_.find(id);
     const int k = o && o->contains("components") ? match_component_(o->at("components"), edited) : -1;
-    if (k >= 0) apply_(doc_.set_component(id, k, edited, label, merge));
+    if (k >= 0) app_.apply_(app_.doc_.set_component(id, k, edited, label, merge));
 }
 
-fs::path EditorApp::instance_asset_file_(ObjectId root) const {
-    const Node* o = doc_.find(root);
+fs::path InstancesPanel::instance_asset_file_(ObjectId root) const {
+    const Node* o = app_.doc_.find(root);
     if (!o) return {};
     const std::string ref = get_string(*o, "prefab", get_string(*o, "inherit_from"));
     if (ref.empty()) return {};
     const std::string item = ref + (fs::path(ref).has_extension() ? "" : ".yaml");
-    fs::path abs = project_.absolute(item);
-    if (!coopa::yaml::document_exists(abs) && !doc_.path().empty()) abs = doc_.path().parent_path() / item;
+    fs::path abs = app_.project_.absolute(item);
+    if (!coopa::yaml::document_exists(abs) && !app_.doc_.path().empty()) abs = app_.doc_.path().parent_path() / item;
     return coopa::yaml::document_exists(abs) ? abs : fs::path{};
 }
 
-std::string EditorApp::instance_asset_item_(ObjectId root) const {
-    const Node* o = doc_.find(root);
+std::string InstancesPanel::instance_asset_item_(ObjectId root) const {
+    const Node* o = app_.doc_.find(root);
     const std::string ref = o ? get_string(*o, "prefab", get_string(*o, "inherit_from")) : std::string();
     return ref.empty() ? ref : ref + (fs::path(ref).has_extension() ? "" : ".yaml");
 }
 
-void EditorApp::merge_into_(Node& base, const Node& over) {
+void InstancesPanel::merge_into_(Node& base, const Node& over) {
     for (const auto& [k, v] : over.as_map()) {
         const std::string key = k.get_value<std::string>();
         if (base.contains(key) && base.at(key).is_mapping() && v.is_mapping()) merge_into_(base[key], v);
@@ -323,14 +334,14 @@ void EditorApp::merge_into_(Node& base, const Node& over) {
     }
 }
 
-bool EditorApp::write_to_asset_(ObjectId root, const std::vector<std::string>& path, const std::vector<Node>& comps,
+bool InstancesPanel::write_to_asset_(ObjectId root, const std::vector<std::string>& path, const std::vector<Node>& comps,
                      const Node& extra, const std::vector<Node>& added) {
     const fs::path file = instance_asset_file_(root);
-    if (file.empty()) { log_error("Object asset not found"); return false; }
-    if (refuse_engine_asset_(file)) return false;
+    if (file.empty()) { app_.log_error("Object asset not found"); return false; }
+    if (app_.assets_panel_->refuse_engine_asset_(file)) return false;
     try {
         Node doc = coopa::yaml::load_document(coopa::yaml::resolve_variant(file));
-        if (!doc.is_mapping() || !doc.contains("object")) { log_error("Not an object asset: " + file.string()); return false; }
+        if (!doc.is_mapping() || !doc.contains("object")) { app_.log_error("Not an object asset: " + file.string()); return false; }
         Node* cur = &doc["object"];
         for (const auto& n : path) {
             Node& kids = ensure_seq(*cur, "children");
@@ -359,43 +370,43 @@ bool EditorApp::write_to_asset_(ObjectId root, const std::vector<std::string>& p
         }
         coopa::yaml::save_document(file, doc);
         inherit_docs_.clear();
-        project_.refresh();
-        log_info("Applied to " + project_.relative(file));
+        app_.project_.refresh();
+        app_.log_info("Applied to " + app_.project_.relative(file));
         return true;
     } catch (const std::exception& e) {
-        log_error(std::string("Apply to Object Asset failed: ") + e.what());
+        app_.log_error(std::string("Apply to Object Asset failed: ") + e.what());
         return false;
     }
 }
 
-void EditorApp::apply_field_to_asset_(ObjectId id, const Node& comp, const std::string& key) {
+void InstancesPanel::apply_field_to_asset_(ObjectId id, const Node& comp, const std::string& key) {
     const Node* own = own_override_(id, comp);
-    const ObjectId root = doc_.instance_root_of(id);
+    const ObjectId root = app_.doc_.instance_root_of(id);
     if (!own || !own->contains(key) || !root) return;
     Node part = Node::mapping();
     part["type"] = Node(component_type(comp));
     if (comp.contains("id")) part["id"] = comp.at("id");
     part[key] = own->at(key);
-    if (!write_to_asset_(root, doc_.path_in_instance(root, id), {part}, Node::mapping(), {})) return;
+    if (!write_to_asset_(root, app_.doc_.path_in_instance(root, id), {part}, Node::mapping(), {})) return;
     revert_override_field_(id, comp, key);
-    queue_rebuild_();
+    app_.queue_rebuild_();
 }
 
-void EditorApp::apply_component_to_asset_(ObjectId id, const Node& comp) {
+void InstancesPanel::apply_component_to_asset_(ObjectId id, const Node& comp) {
     const Node* own = own_override_(id, comp);
-    const ObjectId root = doc_.instance_root_of(id);
+    const ObjectId root = app_.doc_.instance_root_of(id);
     if (!own || !root) return;
-    if (!write_to_asset_(root, doc_.path_in_instance(root, id), {*own}, Node::mapping(), {})) return;
+    if (!write_to_asset_(root, app_.doc_.path_in_instance(root, id), {*own}, Node::mapping(), {})) return;
     Node empty = Node::mapping();
     empty["type"] = Node(component_type(comp));
     if (comp.contains("id")) empty["id"] = comp.at("id");
     write_override_(id, comp, empty);
-    queue_rebuild_();
+    app_.queue_rebuild_();
 }
 
-void EditorApp::apply_all_to_asset_(ObjectId id) {
-    const ObjectId root = doc_.instance_root_of(id);
-    const Node* start = doc_.find(id);
+void InstancesPanel::apply_all_to_asset_(ObjectId id) {
+    const ObjectId root = app_.doc_.instance_root_of(id);
+    const Node* start = app_.doc_.find(id);
     if (!root || !start) return;
     // Gather first (the asset is written once per object), then clear the instance.
     bool ok = true;
@@ -407,39 +418,39 @@ void EditorApp::apply_all_to_asset_(ObjectId id) {
         if (!is_root) for (const auto& k : keys_of(n)) if (k != "name" && k != "components" && k != "children" && k.rfind("__", 0) != 0) extra[k] = n.at(k);
         std::vector<Node> added;
         if (n.contains("children")) for (const auto& c : n.at("children").as_seq()) if (!c.contains(kInheritedKey)) added.push_back(c);
-        if (!comps.empty() || extra.size() > 0 || !added.empty()) ok &= write_to_asset_(root, doc_.path_in_instance(root, nid), comps, extra, added);
+        if (!comps.empty() || extra.size() > 0 || !added.empty()) ok &= write_to_asset_(root, app_.doc_.path_in_instance(root, nid), comps, extra, added);
         if (n.contains("children")) {
             for (const auto& c : n.at("children").as_seq()) if (c.contains(kInheritedKey)) gather(c, SceneDocument::id_of(c));
         }
     };
     gather(*start, id);
     if (ok) revert_all_overrides_(id);
-    queue_rebuild_();
+    app_.queue_rebuild_();
 }
 
-ObjectId EditorApp::click_target_(ObjectId hit) const {
-    const ObjectId root = doc_.outermost_instance_of(hit);
+ObjectId InstancesPanel::click_target_(ObjectId hit) const {
+    const ObjectId root = app_.doc_.outermost_instance_of(hit);
     if (!root || root == hit) return hit;
-    for (ObjectId s : doc_.selection()) if (doc_.outermost_instance_of(s) == root) return hit;
+    for (ObjectId s : app_.doc_.selection()) if (app_.doc_.outermost_instance_of(s) == root) return hit;
     return root;
 }
 
-ObjectId EditorApp::box_target_(ObjectId id) const {
-    const ObjectId root = doc_.outermost_instance_of(id);
+ObjectId InstancesPanel::box_target_(ObjectId id) const {
+    const ObjectId root = app_.doc_.outermost_instance_of(id);
     return root ? root : id;
 }
 
-void EditorApp::draw_instance_menu_items_(imm::Context& ctx, ObjectId id) {
+void InstancesPanel::draw_instance_menu_items_(imm::Context& ctx, ObjectId id) {
     using I = imm::Icon;
-    const ObjectId root = id ? doc_.instance_root_of(id) : 0;
+    const ObjectId root = id ? app_.doc_.instance_root_of(id) : 0;
     if (!root) return;
-    const bool ok = !playing();
-    if (ctx.menu_item("Open Object Asset", "", nullptr, true, I::Object)) open_asset(AssetType::Object, instance_asset_item_(root));
+    const bool ok = !app_.playing();
+    if (ctx.menu_item("Open Object Asset", "", nullptr, true, I::Object)) app_.assets_panel_->open_asset(AssetType::Object, instance_asset_item_(root));
     ctx.tooltip("Open Object Asset\nEdit " + instance_asset_item_(root) + " itself (every instance follows)");
-    if (ctx.menu_item("Select Instance Root", "", nullptr, root != id, I::Link)) doc_.select(root);
+    if (ctx.menu_item("Select Instance Root", "", nullptr, root != id, I::Link)) app_.doc_.select(root);
     const bool any = has_overrides_(id) || [&] {
         bool a = false;
-        if (const Node* n = doc_.find(id)) {
+        if (const Node* n = app_.doc_.find(id)) {
             std::function<void(const Node&)> walk = [&](const Node& x) {
                 if (!x.contains("children")) return;
                 for (const auto& c : x.at("children").as_seq()) { a |= !c.contains(kInheritedKey) || has_overrides_(SceneDocument::id_of(c)); walk(c); }
@@ -455,18 +466,18 @@ void EditorApp::draw_instance_menu_items_(imm::Context& ctx, ObjectId id) {
     ctx.menu_separator();
 }
 
-std::map<ObjectId, std::vector<std::string>> EditorApp::asset_name_paths_now_() const {
+std::map<ObjectId, std::vector<std::string>> InstancesPanel::asset_name_paths_now_() const {
     std::map<ObjectId, std::vector<std::string>> out;
-    const ObjectId root = doc_.object_root();
+    const ObjectId root = app_.doc_.object_root();
     if (!root) return out;
-    for (ObjectId id : doc_.all_ids()) {
-        if (id == root || doc_.is_inherited(id)) continue;
-        out[id] = doc_.path_in_instance(root, id);
+    for (ObjectId id : app_.doc_.all_ids()) {
+        if (id == root || app_.doc_.is_inherited(id)) continue;
+        out[id] = app_.doc_.path_in_instance(root, id);
     }
     return out;
 }
 
-std::vector<fs::path> EditorApp::follow_asset_renames_(const fs::path& asset_file) {
+std::vector<fs::path> InstancesPanel::follow_asset_renames_(const fs::path& asset_file) {
     struct Rename { std::vector<std::string> parent; std::string from, to; };
     std::vector<Rename> renames;
     for (const auto& [id, now] : asset_name_paths_now_()) {
@@ -480,7 +491,7 @@ std::vector<fs::path> EditorApp::follow_asset_renames_(const fs::path& asset_fil
     // Shallow first: a deeper rename's parent path already uses the new names.
     std::sort(renames.begin(), renames.end(), [](const Rename& a, const Rename& b) { return a.parent.size() < b.parent.size(); });
     // Instances may name it by its full path or its short one (short_ref()).
-    const std::string ref = strip_yaml_ext(short_ref(project_.relative(asset_file)));
+    const std::string ref = strip_yaml_ext(short_ref(app_.project_.relative(asset_file)));
     auto rename_in = [&](Node& inst) {
         bool changed = false;
         for (const auto& r : renames) {
@@ -513,7 +524,7 @@ std::vector<fs::path> EditorApp::follow_asset_renames_(const fs::path& asset_fil
         return changed;
     };
     std::error_code ec;
-    for (auto e = fs::recursive_directory_iterator(project_.assets(), ec); e != fs::recursive_directory_iterator(); e.increment(ec)) {
+    for (auto e = fs::recursive_directory_iterator(app_.project_.assets(), ec); e != fs::recursive_directory_iterator(); e.increment(ec)) {
         if (ec) break;
         if (!e->is_regular_file() || e->path().extension() != ".yaml" || fs::equivalent(e->path(), asset_file, ec)) continue;
         try {
@@ -525,7 +536,7 @@ std::vector<fs::path> EditorApp::follow_asset_renames_(const fs::path& asset_fil
             continue;   // not YAML this can read (or write): nothing of ours in it
         }
     }
-    for (const auto& f : rewritten) log_info("Renamed overrides in " + project_.relative(f));
+    for (const auto& f : rewritten) app_.log_info("Renamed overrides in " + app_.project_.relative(f));
     return rewritten;
 }
 

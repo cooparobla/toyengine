@@ -1,18 +1,25 @@
 # toyengine/render
 
 The deferred frame graph. One pipeline, not a choice between tracks: everything is an
-independent toggle on top of the same G-buffer/deferred base. The frame renders at an
-internal resolution (`resolution_mode` / `render_width` / `render_height` /
-`scale_divisor`; this repo's `assets/config.yaml` uses 1920×1080, the struct defaults
-480×270 for a pixel-art look) and is nearest-neighbour upscaled to the window
-(`upscale_mode`: `fit`, the default, or `integer`).
+independent toggle on top of the same G-buffer/deferred base. The frame renders at a
+configurable internal resolution (`resolution_mode` / `render_width` / `render_height` /
+`scale_divisor`; both the struct defaults and this repo's `assets/config.yaml` are
+1920×1080) and is resampled to the window (`upscale_mode`: `fit`, the default, or
+`integer`). Setting a low internal resolution with `integer` upscaling and a `nearest`
+display filter is what a game wanting a blocky, low-resolution look would do; it is one
+configuration among many, not the pipeline's purpose.
 
 | File | Purpose |
 |---|---|
 | [`toy_render_pipeline.h`](toy_render_pipeline.h) | `ToyRenderPipeline` — owns every target, UBO, descriptor set and pass; `render()` records the whole frame into one `Renderer::begin_frame()` call. **Read its file doc first**: two rules (descriptors bound once at construction; per-frame-in-flight data needs per-slot buffers) explain most of the design. |
 | [`toy_render_config.h`](toy_render_config.h) | `ToyRenderConfig` — feature toggles first, then resolution, lighting, shadow, outline, palette, dither, SSAO, SSR/SSGI, refraction, fog, volumetrics, SDF, bloom, DOF, tilt-shift and AA tunables, grouped the same way as `assets/config.yaml`. |
 | [`toy_render_types.h`](toy_render_types.h) | The three push-constant blocks this engine appends to gfxcoopa's passes, and `SdfDrawItem`. |
-| [`toy_render_math.h`](toy_render_math.h) | Pure-CPU, Vulkan-free math: render extent, letterbox/fit rects, pixel-snap density, SDF clip rects, view-space depth, exponential smoothing, and the directional-shadow frustum fit. Exercised directly by `toyengine_tests` with no device needed. |
+| [`toy_render_math.h`](toy_render_math.h) | Umbrella over the four headers below, so an existing include keeps working. Prefer including the part you need. |
+| [`render_types.h`](render_types.h) | `LetterboxRect`, `RenderExtent` — the two plain rects, with no config dependency. This is all `core/engine.h` needs. |
+| [`render_extent.h`](render_extent.h) | Internal resolution, letterbox / fit / display rect, pixel-snap density. |
+| [`shadow_fit.h`](shadow_fit.h) | Directional-shadow fitting: cascade splits, clipmap radii, the sphere and slice fits, atlas tiling. |
+| [`sdf_clip.h`](sdf_clip.h) | SDF screen-space clip and scissor rects. |
+| [`view_math.h`](view_math.h) | View-space depth, world bounds, exponential smoothing. |
 | [`instance_stream.h`](instance_stream.h) | `InstanceStream` — per-frame-in-flight instance transform buffer. |
 | [`forward_globals.h`](forward_globals.h) | `ForwardGlobalsData` — per-frame-in-flight UBO for the forward transparent pass's lighting/indirect/SSR/refraction tuning. |
 | [`particle_types.h`](particle_types.h) | The plain-data contract with `toyengine/particles/`: `ParticleInstance` (the 80-byte GPU instance), `ParticleLook`, and the per-frame quad and mesh batches handed over by `set_particle_state()`. |
@@ -190,7 +197,7 @@ TAA ghosts a canvas moving under an orbiting camera, and tilt shift smears the w
 with the scene.
 
 There are two layers. **Neither is rasterized at the internal render resolution** — UI is not part
-of the pixel-art image, it is drawn on top of the finished one:
+of the upscaled scene image, it is drawn on top of the finished one:
 
 | Layer | Pass | Resolution | Purpose |
 | --- | --- | --- | --- |
@@ -223,7 +230,7 @@ and makes world-canvas text read as visibly stepped next to the HUD.
 
 `ui_composite_pass_` draws the post-processed scene into the letterbox rect of `overlay_target_`
 with that layer composited over it (a premultiplied "over"). The *base* is still nearest-sampled at
-destination UVs, so when tilt shift is off this is where the scene's pixel-art upscale happens; the
+destination UVs, so when tilt shift is off this is where the scene's upscale happens; the
 *UI* is a straight texel-for-texel fetch. `overlay_target_` is sized to the whole swapchain, not the
 letterbox rect, so the bars belong to it and a screen-space HUD can draw over them; `upscale_pass_`
 is left as a 1:1 blit whose only remaining job is `upscale.frag`'s `srgb_decode()`.

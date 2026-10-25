@@ -1,4 +1,9 @@
+#include "editor/app/ui/tile_mode.h"
+#include "editor/app/ui/viewport_chrome.h"
+#include "editor/app/ui/terrain.h"
+
 #include "editor/app/editor_app.h"
+#include "editor/app/ui/world_generator.h"
 
 #include <algorithm>
 #include <chrono>
@@ -13,6 +18,14 @@
 
 namespace toy {
 namespace editor {
+
+bool TileModePanel::is_tile_terrain_object_(ObjectId id) const {
+    return id != 0 && (app_.doc_.find_component(id, "TileTerrain") >= 0 || app_.doc_.find_component(id, "Terrain") >= 0);
+}
+
+void TileModePanel::set_tile_mode(bool on) {
+    if (on) enter_tile_mode_(app_.doc_.primary()); else exit_tile_mode_();
+}
 
 using toy::world::IRect;
 using toy::world::TerrainComponent;
@@ -82,29 +95,29 @@ const ToolButton k_tile_tools[] = {
 // Lifecycle
 // =================================================================================
 
-TerrainComponent* EditorApp::tile_live_() const {
+TerrainComponent* TileModePanel::tile_live_() const {
     if (tile_object_ == 0) return nullptr;
-    coopa::scene::SceneObject* live = sync_.live(tile_object_);
+    coopa::scene::SceneObject* live = app_.sync_.live(tile_object_);
     return live ? live->get_component<TerrainComponent>() : nullptr;
 }
 
-void EditorApp::enter_tile_mode_(ObjectId id) {
-    if (!is_tile_terrain_object_(id) || playing()) {
-        log_warn("Tile Mode: select an object with a TileTerrain component first");
+void TileModePanel::enter_tile_mode_(ObjectId id) {
+    if (!is_tile_terrain_object_(id) || app_.playing()) {
+        app_.log_warn("Tile Mode: select an object with a TileTerrain component first");
         return;
     }
-    if (in_terrain_mode_()) exit_terrain_mode_();
-    if (interaction_mode() != InteractionMode::Object) set_interaction_mode(InteractionMode::Object);
+    if (app_.terrain_panel_->in_terrain_mode_()) app_.terrain_panel_->exit_terrain_mode_();
+    if (app_.interaction_mode() != InteractionMode::Object) app_.set_interaction_mode(InteractionMode::Object);
     tile_mode_ = true;
     tile_object_ = id;
-    tool_ = Tool::Select;
-    prop_tab_ = PropTab::Tool;
+    app_.tool_ = EditorApp::Tool::Select;
+    app_.prop_tab_ = PropTab::Tool;
     tile_sel_.reset(0, 0);
-    doc_.clear_selection();
-    doc_.select(id, true);
+    app_.doc_.clear_selection();
+    app_.doc_.select(id, true);
 }
 
-void EditorApp::exit_tile_mode_() {
+void TileModePanel::exit_tile_mode_() {
     if (tile_stroke_.active) tile_end_stroke_();
     tile_stroke_ = TileStroke{};
     tile_mode_ = false;
@@ -112,7 +125,7 @@ void EditorApp::exit_tile_mode_() {
     tile_hover_valid_ = false;
 }
 
-void EditorApp::tile_frame_() {
+void TileModePanel::tile_frame_() {
     // A Regenerate lands a few frames after it was asked for: record its undo step then.
     if (tile_regen_data_ && tile_regen_data_->bakes_done() > tile_regen_wait_) {
         auto data = tile_regen_data_;
@@ -135,10 +148,10 @@ void EditorApp::tile_frame_() {
             tile_undo_.push("Regenerate World", std::move(before), std::move(after));
         }
         tile_regen_before_.clear();
-        log_info("World regenerated");
+        app_.log_info("World regenerated");
     }
     if (!tile_mode_) return;
-    if (playing() || !doc_.find(tile_object_) || !is_tile_terrain_object_(tile_object_)) exit_tile_mode_();
+    if (app_.playing() || !app_.doc_.find(tile_object_) || !is_tile_terrain_object_(tile_object_)) exit_tile_mode_();
 }
 
 // =================================================================================
@@ -149,7 +162,7 @@ namespace {
 
 } // namespace
 
-IRect EditorApp::tile_face_clip_(const IRect& r, const glm::ivec2& anchor) const {
+IRect TileModePanel::tile_face_clip_(const IRect& r, const glm::ivec2& anchor) const {
     const TerrainComponent* t = tile_live_();
     if (t == nullptr || !t->params.planet) return r;
     const int n = std::max(1, t->params.face_tiles);
@@ -157,7 +170,7 @@ IRect EditorApp::tile_face_clip_(const IRect& r, const glm::ivec2& anchor) const
     return IRect{std::max(r.x0, face * n), std::max(r.y0, 0), std::min(r.x1, (face + 1) * n), std::min(r.y1, n)};
 }
 
-bool EditorApp::tile_hit_(const ViewProj& vp, glm::vec2 px, glm::ivec2& tile, glm::vec3* world) const {
+bool TileModePanel::tile_hit_(const ViewProj& vp, glm::vec2 px, glm::ivec2& tile, glm::vec3* world) const {
     const TerrainComponent* t = tile_live_();
     if (t == nullptr || !t->tiles || t->tiles->empty() || t->owner == nullptr) return false;
     glm::vec3 o, d;
@@ -172,7 +185,7 @@ bool EditorApp::tile_hit_(const ViewProj& vp, glm::vec2 px, glm::ivec2& tile, gl
     return true;
 }
 
-glm::vec3 EditorApp::tile_corner_(const TerrainComponent& t, int x, int y, float steps, int face) const {
+glm::vec3 TileModePanel::tile_corner_(const TerrainComponent& t, int x, int y, float steps, int face) const {
     const glm::mat4 m = t.owner && t.owner->get_transform() ? t.owner->get_transform()->transform().get_world_matrix() : glm::mat4(1.0f);
     if (t.params.planet) {
         const toy::world::PlanetLayout layout = t.params.layout();
@@ -186,7 +199,7 @@ glm::vec3 EditorApp::tile_corner_(const TerrainComponent& t, int x, int y, float
                                    steps * t.params.height_step, 1.0f));
 }
 
-void EditorApp::tile_dab_(const glm::ivec2& tile) {
+void TileModePanel::tile_dab_(const glm::ivec2& tile) {
     TileStroke& s = tile_stroke_;
     if (!s.data) return;
     TileMapData& d = *s.data;
@@ -217,7 +230,7 @@ void EditorApp::tile_dab_(const glm::ivec2& tile) {
     s.rect.include(changed);
 }
 
-void EditorApp::tile_begin_stroke_(const ViewProj& vp, glm::vec2 px, bool shift, bool ctrl, bool, bool double_click) {
+void TileModePanel::tile_begin_stroke_(const ViewProj& vp, glm::vec2 px, bool shift, bool ctrl, bool, bool double_click) {
     TerrainComponent* t = tile_live_();
     glm::ivec2 tile;
     if (t == nullptr || !tile_hit_(vp, px, tile)) return;
@@ -243,7 +256,7 @@ void EditorApp::tile_begin_stroke_(const ViewProj& vp, glm::vec2 px, bool shift,
     // Set Height: Ctrl-click samples a tile instead of editing.
     if (tile_brush_.tool == TileTool::SetHeight && ctrl) {
         tile_brush_.target_height = data->at(tile.x, tile.y).steps;
-        log_info("Target Height set to " + std::to_string(tile_brush_.target_height) + " steps");
+        app_.log_info("Target Height set to " + std::to_string(tile_brush_.target_height) + " steps");
         return;
     }
     s.active = true;
@@ -257,7 +270,7 @@ void EditorApp::tile_begin_stroke_(const ViewProj& vp, glm::vec2 px, bool shift,
     tile_dab_(tile);
 }
 
-void EditorApp::tile_continue_stroke_(const ViewProj& vp, glm::vec2 px) {
+void TileModePanel::tile_continue_stroke_(const ViewProj& vp, glm::vec2 px) {
     TileStroke& s = tile_stroke_;
     glm::ivec2 tile;
     if (!tile_hit_(vp, px, tile) || tile == s.last_tile) return;
@@ -274,7 +287,7 @@ void EditorApp::tile_continue_stroke_(const ViewProj& vp, glm::vec2 px) {
     s.last_tile = tile;
 }
 
-void EditorApp::tile_end_stroke_() {
+void TileModePanel::tile_end_stroke_() {
     TileStroke& s = tile_stroke_;
     if (!s.active) return;
     s.active = false;
@@ -291,7 +304,7 @@ void EditorApp::tile_end_stroke_() {
     s = TileStroke{};
 }
 
-void EditorApp::tile_push_undo_(const std::string& label, const std::shared_ptr<TileMapData>& data,
+void TileModePanel::tile_push_undo_(const std::string& label, const std::shared_ptr<TileMapData>& data,
                                 const std::vector<TileRecord>& whole_before, const IRect& rect) {
     const IRect r = rect.clipped(data->width(), data->height());
     if (r.empty() || whole_before.size() != data->records().size()) return;
@@ -306,12 +319,12 @@ void EditorApp::tile_push_undo_(const std::string& label, const std::shared_ptr<
     tile_undo_.push(label, std::move(before), std::move(after));
 }
 
-void EditorApp::tile_apply_undo_(bool redo) {
+void TileModePanel::tile_apply_undo_(bool redo) {
     const TilePatch* p = redo ? tile_undo_.redo() : tile_undo_.undo();
-    if (p != nullptr && !apply_tile_patch(*p)) log_warn("Tile undo skipped: the terrain was rebuilt or removed since");
+    if (p != nullptr && !apply_tile_patch(*p)) app_.log_warn("Tile undo skipped: the terrain was rebuilt or removed since");
 }
 
-void EditorApp::tile_edit_selection_(const std::string& label, const std::function<void(TileRecord&)>& edit,
+void TileModePanel::tile_edit_selection_(const std::string& label, const std::function<void(TileRecord&)>& edit,
                                      const std::string& merge, bool settle) {
     TerrainComponent* t = tile_live_();
     if (t == nullptr || !t->tiles || tile_sel_.empty()) return;
@@ -329,9 +342,9 @@ void EditorApp::tile_edit_selection_(const std::string& label, const std::functi
     tile_undo_.push(label, std::move(before), std::move(after), merge);
 }
 
-void EditorApp::tile_regenerate_(ObjectId id) {
+void TileModePanel::tile_regenerate_(ObjectId id) {
     if (id == 0) id = tile_object_;
-    coopa::scene::SceneObject* live = sync_.live(id);
+    coopa::scene::SceneObject* live = app_.sync_.live(id);
     TerrainComponent* t = live ? live->get_component<TerrainComponent>() : nullptr;
     if (t == nullptr || !t->tiles) return;
     tile_regen_data_ = t->tiles;
@@ -341,19 +354,19 @@ void EditorApp::tile_regenerate_(ObjectId id) {
     tile_regen_wait_ = t->tiles->bakes_done();
     t->tiles->request_bake();
     tile_sel_.clear();
-    log_info("Regenerating the world from the generator settings...");
+    app_.log_info("Regenerating the world from the generator settings...");
 }
 
-void EditorApp::save_tile_maps_() {
+void TileModePanel::save_tile_maps_() {
     const int n = toy::world::TileMapStore::instance().save_dirty();
-    if (n > 0) log_info("Saved " + std::to_string(n) + " tile terrain" + (n == 1 ? "" : "s"));
+    if (n > 0) app_.log_info("Saved " + std::to_string(n) + " tile terrain" + (n == 1 ? "" : "s"));
 }
 
 // =================================================================================
 // Input / overlay
 // =================================================================================
 
-void EditorApp::handle_tile_input_(imm::Context& ctx, const ViewProj& vp, bool hovered) {
+void TileModePanel::handle_tile_input_(imm::Context& ctx, const ViewProj& vp, bool hovered) {
     const auto& in = ctx.input();
     const glm::vec2 m = ctx.mouse();
     const bool shift = has(in.mods, Mods::Shift);
@@ -378,7 +391,7 @@ void EditorApp::handle_tile_input_(imm::Context& ctx, const ViewProj& vp, bool h
         tile_begin_stroke_(vp, m, shift, ctrl, alt, dbl);
     }
     if (!hovered || ctx.wants_keyboard() || ctx.any_popup_open()) return;
-    viewport_keymap_(ctx, vp, false, false);
+    app_.viewport_keymap_(ctx, vp, false, false);
     if (ctx.shortcut(Key::LeftBracket)) tile_brush_.size = std::max(1, tile_brush_.size - 1);
     if (ctx.shortcut(Key::RightBracket)) tile_brush_.size = std::min(64, tile_brush_.size + 1);
     const Key digits[] = {Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7};
@@ -399,7 +412,7 @@ void EditorApp::handle_tile_input_(imm::Context& ctx, const ViewProj& vp, bool h
     if (ctx.shortcut(Key::Tab)) exit_tile_mode_();
 }
 
-void EditorApp::draw_tile_overlay_(imm::Context& ctx, const ViewProj& vp) {
+void TileModePanel::draw_tile_overlay_(imm::Context& ctx, const ViewProj& vp) {
     const TerrainComponent* t = tile_live_();
     if (t == nullptr || !t->tiles || t->tiles->empty()) return;
     const TileMapData& d = *t->tiles;
@@ -476,7 +489,7 @@ void EditorApp::draw_tile_overlay_(imm::Context& ctx, const ViewProj& vp) {
 // UI
 // =================================================================================
 
-float EditorApp::draw_tile_header_(imm::Context& ctx, float x, const imm::Box& hb) {
+float TileModePanel::draw_tile_header_(imm::Context& ctx, float x, const imm::Box& hb) {
     const float bh = hb.h - 6;
     auto label = [&](const char* text) {
         const float w = ctx.text_width(text) + 6;
@@ -506,23 +519,23 @@ float EditorApp::draw_tile_header_(imm::Context& ctx, float x, const imm::Box& h
     return x + 8;
 }
 
-void EditorApp::draw_tile_toolbar_(imm::Context& ctx, const imm::Box& r) {
+void TileModePanel::draw_tile_toolbar_(imm::Context& ctx, const imm::Box& r) {
     float y = r.y + 4;
     for (const auto& b : k_tile_tools) {
-        const imm::Box bb{r.x + 3, y, kToolSize, kToolSize};
-        y += kToolSize + 2;
-        if (ctx.icon_button(std::string("tile_") + tile_tool_name(b.tool), b.icon, b.tip, tile_brush_.tool == b.tool, kToolSize,
+        const imm::Box bb{r.x + 3, y, app_.viewport_chrome_panel_->kToolSize, app_.viewport_chrome_panel_->kToolSize};
+        y += app_.viewport_chrome_panel_->kToolSize + 2;
+        if (ctx.icon_button(std::string("tile_") + tile_tool_name(b.tool), b.icon, b.tip, tile_brush_.tool == b.tool, app_.viewport_chrome_panel_->kToolSize,
                             imm::Context::kAll, bb)) {
             tile_brush_.tool = b.tool;
         }
     }
 }
 
-void EditorApp::draw_tile_tool_panel_(imm::Context& ctx) {
+void TileModePanel::draw_tile_tool_panel_(imm::Context& ctx) {
     using I = imm::Icon;
     const glm::vec4 dim = ctx.style.text_dim;
     TerrainComponent* t = tile_live_();
-    const Node* obj = doc_.find(tile_object_);
+    const Node* obj = app_.doc_.find(tile_object_);
     ctx.label(std::string("Tile Terrain: ") + (obj ? get_string(*obj, "name", "?") : "?"));
     if (ctx.button("Exit Tile Mode", -1, true, I::ObjectMode)) { exit_tile_mode_(); return; }
     ctx.tooltip("Exit Tile Mode (Tab)");
@@ -630,7 +643,7 @@ void EditorApp::draw_tile_tool_panel_(imm::Context& ctx) {
                       "edited. Regenerate replaces every tile with a fresh world from the current settings -- your edits "
                       "included. It can be undone.",
                       &dim);
-        if (ctx.button("Open World Generator...", -1, !playing(), I::World)) open_world_generator(tile_object_);
+        if (ctx.button("Open World Generator...", -1, !app_.playing(), I::World)) app_.world_generator_panel_->open_world_generator(tile_object_);
         if (ctx.button(t->baking() ? "Regenerating..." : "Regenerate World", -1, !t->baking() && !tile_regen_data_, I::Restart)) {
             tile_regenerate_();
         }
@@ -640,7 +653,7 @@ void EditorApp::draw_tile_tool_panel_(imm::Context& ctx) {
     ctx.label(buf, &dim);
 }
 
-void EditorApp::draw_tile_selection_section_(imm::Context& ctx, TerrainComponent& t) {
+void TileModePanel::draw_tile_selection_section_(imm::Context& ctx, TerrainComponent& t) {
     using I = imm::Icon;
     const glm::vec4 dim = ctx.style.text_dim;
     if (tile_sel_.empty() || !t.tiles) return;

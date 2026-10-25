@@ -1,4 +1,29 @@
 #include "editor/app/editor_app.h"
+#include "editor/app/ui/console_panel.h"
+#include "editor/app/ui/weather.h"
+#include "editor/app/ui/viewport_chrome.h"
+#include "editor/app/ui/ui_canvas.h"
+#include "editor/app/ui/topbar.h"
+#include "editor/app/ui/timeline.h"
+#include "editor/app/ui/tile_mode.h"
+#include "editor/app/ui/terrain.h"
+#include "editor/app/ui/sculpt.h"
+#include "editor/app/ui/properties.h"
+#include "editor/app/ui/paint.h"
+#include "editor/app/ui/mesh_tools.h"
+#include "editor/app/ui/instances.h"
+#include "editor/app/ui/assets.h"
+#include "editor/app/ui/weights.h"
+#include "editor/app/ui/world_generator.h"
+#include "editor/app/ui/preferences.h"
+#include "editor/app/ui/build.h"
+#include "editor/app/ui/tile_terrain_panel.h"
+#include "editor/app/ui/particle_panel.h"
+#include "editor/app/ui/theme_editor.h"
+#include "editor/app/ui/project_settings.h"
+#include "editor/app/ui/statusbar.h"
+#include "editor/app/ui/outliner.h"
+#include "editor/app/editor_context.h"
 
 #include <toyengine/world/heightmap_store.h>
 #include <toyengine/world/tile_map_data.h>
@@ -17,6 +42,32 @@ void apply_editor_render_overrides(core::AppConfig& cfg) {
 
 EditorApp::EditorApp(core::Engine& engine, Project project, const fs::path& scene, EditorState state)
     : engine_(engine), project_(std::move(project)) {
+    // A panel's view of this app, and the panels that have been extracted onto it.
+    ed_ctx_ = std::make_unique<EditorContext>(*this);
+    console_ = std::make_unique<ConsolePanel>(*ed_ctx_);
+    weather_panel_ = std::make_unique<WeatherPanel>(*this);
+    viewport_chrome_panel_ = std::make_unique<ViewportChromePanel>(*this);
+    ui_canvas_panel_ = std::make_unique<UiCanvasPanel>(*this);
+    topbar_panel_ = std::make_unique<TopbarPanel>(*this);
+    timeline_panel_ = std::make_unique<TimelinePanel>(*this);
+    tile_mode_panel_ = std::make_unique<TileModePanel>(*this);
+    terrain_panel_ = std::make_unique<TerrainPanel>(*this);
+    sculpt_panel_ = std::make_unique<SculptPanel>(*this);
+    properties_panel_ = std::make_unique<PropertiesPanel>(*this);
+    paint_panel_ = std::make_unique<PaintPanel>(*this);
+    mesh_tools_panel_ = std::make_unique<MeshToolsPanel>(*this);
+    instances_panel_ = std::make_unique<InstancesPanel>(*this);
+    assets_panel_ = std::make_unique<AssetsPanel>(*this);
+    weights_panel_ = std::make_unique<WeightsPanel>(*this);
+    world_generator_panel_ = std::make_unique<WorldGeneratorPanel>(*this);
+    preferences_panel_ = std::make_unique<PreferencesPanel>(*this);
+    build_panel_ = std::make_unique<BuildPanel>(*this);
+    tile_terrain_panel_ = std::make_unique<TileTerrainPanel>(*this);
+    particle_panel_ = std::make_unique<ParticlePanel>(*this);
+    theme_editor_panel_ = std::make_unique<ThemeEditorPanel>(*this);
+    project_settings_panel_ = std::make_unique<ProjectSettingsPanel>(*this);
+    statusbar_panel_ = std::make_unique<StatusBarPanel>(*this);
+    outliner_panel_ = std::make_unique<OutlinerPanel>(*this);
     ui_scene_ = std::make_unique<coopa::scene::Scene>("EditorUI");
     canvas_ = coopa::ui::build_immediate_canvas(*ui_scene_, "EditorUI", 100000);
     canvas_->on_draw = [this](coopa::ui::imm::Context& ctx) { draw_(ctx); };
@@ -48,7 +99,7 @@ EditorApp::EditorApp(core::Engine& engine, Project project, const fs::path& scen
             show_engine_assets_ = prefs.at("show_engine_assets").get_value<bool>();
         }
         if (prefs.contains("asset_sort") && prefs.at("asset_sort").is_string()) {
-            asset_sort_ = asset_sort_from_name_(prefs.at("asset_sort").get_value<std::string>());
+            asset_sort_ = assets_panel_->asset_sort_from_name_(prefs.at("asset_sort").get_value<std::string>());
         }
         if (prefs.contains("asset_sort_reverse") && prefs.at("asset_sort_reverse").is_boolean()) {
             asset_sort_reverse_ = prefs.at("asset_sort_reverse").get_value<bool>();
@@ -56,7 +107,7 @@ EditorApp::EditorApp(core::Engine& engine, Project project, const fs::path& scen
         if (prefs.contains("isolate_edit_mode") && prefs.at("isolate_edit_mode").is_boolean()) {
             isolate_in_edit_ = prefs.at("isolate_edit_mode").get_value<bool>();
         }
-        prefs_load_(prefs);   // ui/preferences.inl
+        preferences_panel_->prefs_load_(prefs);   // ui/preferences.h
     }
     engine_.boot_progress("Starting the editor...", 0.96f);
     camera_.create(*ui_scene_);
@@ -112,6 +163,125 @@ EditorApp::~EditorApp() {
     engine_.wait_idle();
 }
 
+// Out-of-line because editor_app.h only forward-declares the panel (ui/project_settings.h).
+void EditorApp::rebuild_renderer() { project_settings_panel_->rebuild_renderer_(); }
+
+void EditorApp::open_project_settings(const std::string& category) {
+    project_settings_panel_->open_project_settings_(category);
+}
+
+// Build forwarders (see the declarations in editor_app.h).
+std::string EditorApp::default_build_command() { return BuildPanel::default_build_command(); }
+void EditorApp::build_refresh(const std::string& command) { build_panel_->build_refresh(command); }
+const Task& EditorApp::build_task() const { return build_panel_->build_task(); }
+const std::vector<Diagnostic>& EditorApp::build_diagnostics() const { return build_panel_->build_diagnostics(); }
+bool EditorApp::relaunch_requested() const { return build_panel_->relaunch_requested(); }
+bool EditorApp::build_relaunch_offered() const { return build_panel_->build_relaunch_offered(); }
+bool EditorApp::set_preference(const std::string& key, const Node& value) {
+    return preferences_panel_->set_preference(key, value);
+}
+
+bool EditorApp::animation_record() const { return timeline_panel_->animation_record(); }
+void EditorApp::edit_theme(const std::string& label, const std::function<void(Node&)>& fn,
+                           const std::string& merge_key) {
+    theme_editor_panel_->edit_theme(label, fn, merge_key);
+}
+
+coopa::maps::MapConfig& EditorApp::world_generator_config() { return world_generator_panel_->world_generator_config(); }
+void EditorApp::world_generator_generate() { world_generator_panel_->world_generator_generate(); }
+bool EditorApp::world_generator_open() const { return world_generator_panel_->world_generator_open(); }
+int& EditorApp::world_generator_world_tiles() { return world_generator_panel_->world_generator_world_tiles(); }
+
+bool EditorApp::new_ui_asset(const std::string& name, const std::string& template_id) { return ui_canvas_panel_->new_ui_asset(name, template_id); }
+ObjectId EditorApp::place_ui_asset(const std::string& ui_rel, ObjectId parent) { return ui_canvas_panel_->place_ui_asset(ui_rel, parent); }
+bool EditorApp::save_theme() { return theme_editor_panel_->save_theme(); }
+void EditorApp::set_ui_interact(bool on) { ui_canvas_panel_->set_ui_interact(on); }
+ThemeDocument& EditorApp::theme_document() { return theme_editor_panel_->theme_document(); }
+ObjectId EditorApp::ui_add_widget(const std::string& id, ObjectId parent, std::optional<glm::vec2> at) { return ui_canvas_panel_->ui_add_widget(id, parent, at); }
+imm::Box EditorApp::ui_frame() const { return ui_canvas_panel_->ui_frame(); }
+bool EditorApp::ui_interacting() const { return ui_canvas_panel_->ui_interacting(); }
+std::optional<ui::Rect> EditorApp::ui_live_rect(ObjectId id) { return ui_canvas_panel_->ui_live_rect(id); }
+bool EditorApp::ui_mode() const { return ui_canvas_panel_->ui_mode(); }
+std::vector<ObjectId> EditorApp::ui_pick(glm::vec2 editor_px) { return ui_canvas_panel_->ui_pick(editor_px); }
+std::vector<std::string> EditorApp::ui_templates() { return UiCanvasPanel::ui_templates(); }
+ui::UiView EditorApp::ui_view() { return ui_canvas_panel_->ui_view(); }
+
+bool EditorApp::convert_legacy_tile_terrain(Node& comp) { return TileTerrainPanel::convert_legacy_tile_terrain(comp); }
+void EditorApp::set_terrain_mode(bool on) { terrain_panel_->set_terrain_mode(on); }
+TerrainBrushSettings& EditorApp::terrain_brush() { return terrain_panel_->terrain_brush(); }
+const UndoStack<TerrainPatch>& EditorApp::terrain_history() const { return terrain_panel_->terrain_history(); }
+bool EditorApp::terrain_mode() const { return terrain_panel_->terrain_mode(); }
+void EditorApp::tile_edit_selection(const std::string& label, const std::function<void(toy::world::TileRecord&)>& edit) { tile_mode_panel_->tile_edit_selection(label, edit); }
+TileSelection& EditorApp::tile_selection() { return tile_mode_panel_->tile_selection(); }
+const std::vector<std::string>& EditorApp::tile_set_assets() { return tile_terrain_panel_->tile_set_assets(); }
+
+SculptSettings& EditorApp::sculpt_settings() { return sculpt_panel_->sculpt_settings(); }
+PaintSettings& EditorApp::vertex_paint_settings() { return paint_panel_->vertex_paint_settings(); }
+PaintSettings& EditorApp::weight_paint_settings() { return paint_panel_->weight_paint_settings(); }
+
+void EditorApp::set_tile_mode(bool on) { tile_mode_panel_->set_tile_mode(on); }
+TileBrushSettings& EditorApp::tile_brush() { return tile_mode_panel_->tile_brush(); }
+const UndoStack<TilePatch>& EditorApp::tile_history() const { return tile_mode_panel_->tile_history(); }
+bool EditorApp::tile_mode() const { return tile_mode_panel_->tile_mode(); }
+
+bool EditorApp::create_object_asset_from_selection() { return assets_panel_->create_object_asset_from_selection(); }
+std::string EditorApp::duplicate_tile_set(const std::string& rel) { return assets_panel_->duplicate_tile_set(rel); }
+MirrorSettings& EditorApp::edit_symmetry() { return sculpt_panel_->edit_symmetry(); }
+std::string EditorApp::edited_mesh_shader() { return paint_panel_->edited_mesh_shader(); }
+bool EditorApp::loop_cut_active() const { return mesh_tools_panel_->loop_cut_active(); }
+int EditorApp::loop_cut_cuts() const { return mesh_tools_panel_->loop_cut_cuts(); }
+
+void EditorApp::add_animation_event(float time, const std::string& name) { timeline_panel_->add_animation_event(time, name); }
+void EditorApp::add_animator(ObjectId id) { timeline_panel_->add_animator(id); }
+const ClipModel* EditorApp::animation_clip() const { return timeline_panel_->animation_clip(); }
+std::vector<std::string> EditorApp::animation_clip_sharers() { return timeline_panel_->animation_clip_sharers(); }
+std::string EditorApp::animation_clip_state() const { return timeline_panel_->animation_clip_state(); }
+std::string EditorApp::animation_instance_asset(ObjectId id) const { return timeline_panel_->animation_instance_asset(id); }
+ObjectId EditorApp::animation_rig() const { return timeline_panel_->animation_rig(); }
+bool EditorApp::animation_state_inherited(const std::string& name) const { return timeline_panel_->animation_state_inherited(name); }
+std::vector<std::string> EditorApp::animation_state_names() const { return timeline_panel_->animation_state_names(); }
+std::vector<std::string> EditorApp::assets_listed() { return assets_panel_->assets_listed(); }
+bool EditorApp::copy_engine_asset_to_project(AssetType t, const std::string& rel) { return assets_panel_->copy_engine_asset_to_project(t, rel); }
+void EditorApp::delete_animation_clip(bool keep_file) { timeline_panel_->delete_animation_clip(keep_file); }
+void EditorApp::delete_selected_animation_event() { timeline_panel_->delete_selected_animation_event(); }
+std::vector<std::string> EditorApp::engine_assets_listed(AssetType t) { return assets_panel_->engine_assets_listed(t); }
+void EditorApp::insert_keyframes() { timeline_panel_->insert_keyframes(); }
+void EditorApp::key_channel(ObjectId id, const std::string& property) { timeline_panel_->key_channel(id, property); }
+bool EditorApp::keyed_now(ObjectId id, const std::string& property) const { return timeline_panel_->keyed_now(id, property); }
+std::vector<std::string> EditorApp::list_assets(AssetType t) { return timeline_panel_->list_assets(t); }
+void EditorApp::move_selected_animation_event(float to_time) { timeline_panel_->move_selected_animation_event(to_time); }
+void EditorApp::new_animation_clip(const std::string& name) { timeline_panel_->new_animation_clip(name); }
+void EditorApp::open_animation_clip(const std::string& state) { timeline_panel_->open_animation_clip(state); }
+void EditorApp::open_asset(AssetType t, const std::string& item) { assets_panel_->open_asset(t, item); }
+bool EditorApp::open_object_asset(const fs::path& path) { return assets_panel_->open_object_asset(path); }
+ObjectId EditorApp::place_object_asset(const std::string& object_rel, std::optional<glm::vec3> at) { return assets_panel_->place_object_asset(object_rel, at); }
+void EditorApp::rename_animation_clip(const std::string& to) { timeline_panel_->rename_animation_clip(to); }
+void EditorApp::rename_selected_animation_event(const std::string& name) { timeline_panel_->rename_selected_animation_event(name); }
+void EditorApp::select_all_keys() { timeline_panel_->select_all_keys(); }
+void EditorApp::select_animation_event(int index) { timeline_panel_->select_animation_event(index); }
+int EditorApp::selected_animation_event() const { return timeline_panel_->selected_animation_event(); }
+void EditorApp::set_animation_record(bool on) { timeline_panel_->set_animation_record(on); }
+void EditorApp::set_animation_time(float t) { timeline_panel_->set_animation_time(t); }
+void EditorApp::set_asset_sort(AssetSort s, bool reverse) { assets_panel_->set_asset_sort(s, reverse); }
+void EditorApp::set_asset_tag_filter(const std::vector<std::string>& tags, bool match_all) { assets_panel_->set_asset_tag_filter(tags, match_all); }
+void EditorApp::set_asset_tags(AssetType t, const std::string& rel, const std::vector<std::string>& tags) { assets_panel_->set_asset_tags(t, rel, tags); }
+void EditorApp::set_object_transform(ObjectId id, const glm::vec3& p, const glm::vec3& r, const glm::vec3& s) { timeline_panel_->set_object_transform(id, p, r, s); }
+void EditorApp::set_selected_key_interpolation(const std::string& ease) { timeline_panel_->set_selected_key_interpolation(ease); }
+void EditorApp::set_show_engine_assets(bool on) { assets_panel_->set_show_engine_assets(on); }
+void EditorApp::set_timeline_rest_pose(bool on) { timeline_panel_->set_timeline_rest_pose(on); }
+bool EditorApp::show_engine_assets() const { return assets_panel_->show_engine_assets(); }
+void EditorApp::show_timeline() { timeline_panel_->show_timeline(); }
+
+void EditorApp::open_preferences(const std::string& category) { preferences_panel_->open_preferences(category); }
+
+bool EditorApp::bind_selection_to_rig(BindWeights kind) { return weights_panel_->bind_selection_to_rig(kind); }
+bool EditorApp::bind_targets(ObjectId& skin, ObjectId& rig) { return weights_panel_->bind_targets(skin, rig); }
+void EditorApp::close_world_generator() { world_generator_panel_->close_world_generator(); }
+void EditorApp::open_world_generator(ObjectId id) { world_generator_panel_->open_world_generator(id); }
+bool& EditorApp::world_generator_planet() { return world_generator_panel_->world_generator_planet(); }
+std::uint64_t EditorApp::world_generator_preview_serial() const { return world_generator_panel_->world_generator_preview_serial(); }
+
+
 EditorState EditorApp::take_state() {
     EditorState s;
     s.scene = std::move(doc_);
@@ -156,14 +326,14 @@ void EditorApp::cycle_proportional_falloff() {
     log_info(std::string("Proportional Falloff: ") + falloff_name(proportional_.falloff));
 }
 
-Node EditorApp::shown_component(ObjectId id, const std::string& type) const { Node c; shown_component_(id, type, c); return c; }
+Node EditorApp::shown_component(ObjectId id, const std::string& type) const { Node c; instances_panel_->shown_component_(id, type, c); return c; }
 
 void EditorApp::revert_override_field(ObjectId id, const std::string& type, const std::string& key) {
-    Node m = Node::mapping(); m["type"] = Node(type); revert_override_field_(id, m, key);
+    Node m = Node::mapping(); m["type"] = Node(type); instances_panel_->revert_override_field_(id, m, key);
 }
 
 void EditorApp::apply_component_to_asset(ObjectId id, const std::string& type) {
-    Node m = Node::mapping(); m["type"] = Node(type); apply_component_to_asset_(id, m);
+    Node m = Node::mapping(); m["type"] = Node(type); instances_panel_->apply_component_to_asset_(id, m);
 }
 
 bool EditorApp::has_unsaved() const {
@@ -191,7 +361,7 @@ void EditorApp::new_scene() {
 }
 
 bool EditorApp::open_scene(const fs::path& path) {
-    if (refuse_engine_asset_(path)) return false;   // toyengine's scenes are read-only here
+    if (assets_panel_->refuse_engine_asset_(path)) return false;   // toyengine's scenes are read-only here
     stop();
     try {
         doc_.load(path);
@@ -199,15 +369,15 @@ bool EditorApp::open_scene(const fs::path& path) {
         log_error(std::string("Open failed: ") + e.what());
         return false;
     }
-    if (doc_.is_object_asset()) { return open_object_asset(path); }
+    if (doc_.is_object_asset()) { return assets_panel_->open_object_asset(path); }
     // A scene opened fresh reads its terrains from disk (dropping any unsaved strokes of a
     // previous visit), and their history goes with them.
-    exit_terrain_mode_();
-    terrain_undo_.clear();
+    terrain_panel_->exit_terrain_mode_();
+    terrain_panel_->terrain_undo_.clear();
     toy::world::HeightmapStore::instance().clear();
-    exit_tile_mode_();
-    tile_undo_.clear();
-    tile_regen_data_.reset();
+    tile_mode_panel_->exit_tile_mode_();
+    tile_mode_panel_->tile_undo_.clear();
+    tile_mode_panel_->tile_regen_data_.reset();
     toy::world::TileMapStore::instance().clear();
     set_view_(AssetType::Scene);
     active_path_ = path;
@@ -224,14 +394,14 @@ bool EditorApp::save_scene() {
 }
 
 bool EditorApp::save_scene_as(const fs::path& path) {
-    if (active_type_ == AssetType::UI) ui_store_editor_extras_();
+    if (active_type_ == AssetType::UI) ui_canvas_panel_->ui_store_editor_extras_();
     try {
         doc_.save(path);
-        save_terrains_();   // heightmaps and paint layers live in their own files
-        save_tile_maps_();  // ...and tile terrains' tiles in theirs
+        terrain_panel_->save_terrains_();   // heightmaps and paint layers live in their own files
+        tile_mode_panel_->save_tile_maps_();  // ...and tile terrains' tiles in theirs
         sync_.fallback_path = path;
         // Instances elsewhere override this asset's parts by name: follow any renames.
-        if (doc_.is_object_asset() && active_type_ == AssetType::Object) follow_asset_renames_(path);
+        if (doc_.is_object_asset() && active_type_ == AssetType::Object) instances_panel_->follow_asset_renames_(path);
         project_.refresh();
         log_info("Saved " + project_.relative(path));
         return true;
@@ -325,7 +495,7 @@ void EditorApp::duplicate_selected() {
 }
 
 EditorApp::UndoTarget EditorApp::undo_target_() const {
-    if ((mesh_edit_view_() || in_brush_mode_()) && mesh_.open()) return UndoTarget::Mesh;
+    if ((mesh_edit_view_() || paint_panel_->in_brush_mode_()) && mesh_.open()) return UndoTarget::Mesh;
     // The Timeline's clip: while the panel is under the mouse, or while recording keys.
     if (anim_clip_.open() && show_bottom_ && bottom_view_ == 1 && (timeline_hovered_ || anim_record_)) return UndoTarget::Clip;
     if (active_type_ == AssetType::Material && material_.open()) return UndoTarget::Material;
@@ -340,11 +510,11 @@ void EditorApp::undo() {
     switch (undo_target_()) {
         case UndoTarget::Mesh: mesh_.do_undo(); break;
         case UndoTarget::Material: material_.do_undo(); refresh_material_preview_(); break;
-        case UndoTarget::Theme: game_theme_.do_undo(); theme_changed_(); break;
+        case UndoTarget::Theme: game_theme_.do_undo(); theme_editor_panel_->theme_changed_(); break;
         case UndoTarget::Config: config_.do_undo(); apply_config_live(); break;
         case UndoTarget::Scene: scene_undo_(); break;
         case UndoTarget::Clip:
-            if (const ClipModel* m = anim_clip_.undo.undo()) { anim_clip_.model = *m; anim_save_clip_(); anim_sel_keys_.clear(); anim_sel_event_ = -1; }
+            if (const ClipModel* m = anim_clip_.undo.undo()) { anim_clip_.model = *m; timeline_panel_->anim_save_clip_(); anim_sel_keys_.clear(); anim_sel_event_ = -1; }
             break;
     }
 }
@@ -353,11 +523,11 @@ void EditorApp::redo() {
     switch (undo_target_()) {
         case UndoTarget::Mesh: mesh_.do_redo(); break;
         case UndoTarget::Material: material_.do_redo(); refresh_material_preview_(); break;
-        case UndoTarget::Theme: game_theme_.do_redo(); theme_changed_(); break;
+        case UndoTarget::Theme: game_theme_.do_redo(); theme_editor_panel_->theme_changed_(); break;
         case UndoTarget::Config: config_.do_redo(); apply_config_live(); break;
         case UndoTarget::Scene: scene_redo_(); break;
         case UndoTarget::Clip:
-            if (const ClipModel* m = anim_clip_.undo.redo()) { anim_clip_.model = *m; anim_save_clip_(); anim_sel_keys_.clear(); anim_sel_event_ = -1; }
+            if (const ClipModel* m = anim_clip_.undo.redo()) { anim_clip_.model = *m; timeline_panel_->anim_save_clip_(); anim_sel_keys_.clear(); anim_sel_event_ = -1; }
             break;
     }
 }
@@ -372,9 +542,9 @@ void EditorApp::scene_undo_() {
     }
     // Terrain strokes (Terrain Mode) are in the same timeline: undo theirs when it is the newest.
     // ...and so are tile edits (Tile Mode): whichever of the three is newest goes first.
-    const uint64_t terrain_seq = terrain_undo_.top_undo_seq(), tile_seq = tile_undo_.top_undo_seq();
-    if (tile_seq > best && tile_seq > terrain_seq) { tile_apply_undo_(false); return; }
-    if (terrain_seq > best) { terrain_apply_undo_(false); return; }
+    const uint64_t terrain_seq = terrain_panel_->terrain_undo_.top_undo_seq(), tile_seq = tile_mode_panel_->tile_undo_.top_undo_seq();
+    if (tile_seq > best && tile_seq > terrain_seq) { tile_mode_panel_->tile_apply_undo_(false); return; }
+    if (terrain_seq > best) { terrain_panel_->terrain_apply_undo_(false); return; }
     if (best == 0) return;
     if (mesh_path.empty()) { doc_.undo(); queue_rebuild_(); return; }
     if (!activate_scene_mesh_(mesh_path)) return;
@@ -396,10 +566,10 @@ void EditorApp::scene_redo_() {
         if (d.scene_owned && d.undo.redo_fresh()) consider(d.undo.top_redo_seq(), false, p);
     }
     // Terrain strokes redo in the same order: theirs when it is the oldest undone step.
-    const bool tile_first = tile_undo_.redo_fresh() &&
-                            (!terrain_undo_.redo_fresh() || tile_undo_.top_redo_seq() < terrain_undo_.top_redo_seq());
-    if (tile_first && (best == 0 || tile_undo_.top_redo_seq() < best)) { tile_apply_undo_(true); return; }
-    if (terrain_undo_.redo_fresh() && (best == 0 || terrain_undo_.top_redo_seq() < best)) { terrain_apply_undo_(true); return; }
+    const bool tile_first = tile_mode_panel_->tile_undo_.redo_fresh() &&
+                            (!terrain_panel_->terrain_undo_.redo_fresh() || tile_mode_panel_->tile_undo_.top_redo_seq() < terrain_panel_->terrain_undo_.top_redo_seq());
+    if (tile_first && (best == 0 || tile_mode_panel_->tile_undo_.top_redo_seq() < best)) { tile_mode_panel_->tile_apply_undo_(true); return; }
+    if (terrain_panel_->terrain_undo_.redo_fresh() && (best == 0 || terrain_panel_->terrain_undo_.top_redo_seq() < best)) { terrain_panel_->terrain_apply_undo_(true); return; }
     if (best == 0) return;
     if (scene) { doc_.redo(); queue_rebuild_(); return; }
     if (!activate_scene_mesh_(mesh_path)) return;
@@ -419,10 +589,10 @@ void EditorApp::shade_selected_(bool smooth) {
     std::set<fs::path> done;
     for (ObjectId id : doc_.selection()) {
         const Node* obj = doc_.find(id);
-        const std::string key = obj ? object_mesh_key_(effective_(*obj)) : std::string();
+        const std::string key = obj ? object_mesh_key_(instances_panel_->effective_(*obj)) : std::string();
         if (key.empty()) continue;
         const fs::path path = resolve_mesh_key_(key);
-        if (!done.insert(path).second || !coopa::yaml::document_exists(path) || refuse_engine_asset_(path)) continue;
+        if (!done.insert(path).second || !coopa::yaml::document_exists(path) || assets_panel_->refuse_engine_asset_(path)) continue;
         if (!activate_scene_mesh_(path)) continue;
         mesh_.edit(smooth ? "Shade Smooth" : "Shade Flat", [smooth](EditMesh& m, MeshSelection&) {
             set_smooth(m, MeshSelection{}, smooth);   // the whole mesh, whatever Edit Mode had selected
@@ -474,7 +644,7 @@ void EditorApp::switch_mesh_doc_(const fs::path& path) {
 }
 
 void EditorApp::frame_selected() {
-    if (active_type_ == AssetType::UI) { ui_frame_selection_(); return; }
+    if (active_type_ == AssetType::UI) { ui_canvas_panel_->ui_frame_selection_(); return; }
     glm::vec3 lo(1e30f), hi(-1e30f);
     bool any = false;
     if (mesh_edit_view_() && mesh_.open()) {
@@ -492,7 +662,7 @@ void EditorApp::frame_selected() {
 }
 
 void EditorApp::frame_all() {
-    if (active_type_ == AssetType::UI) { ui_fit_ = true; return; }
+    if (active_type_ == AssetType::UI) { ui_canvas_panel_->ui_fit_ = true; return; }
     glm::vec3 lo(1e30f), hi(-1e30f);
     bool any = false;
     if (asset_view_()) {
@@ -558,7 +728,7 @@ void EditorApp::set_view_(AssetType t) {
     const bool was_asset = asset_view_();
     shading_by_type_[static_cast<int>(active_type_)] = shading_;
     if (edit_object_ || mode_ != InteractionMode::Object) exit_mesh_mode_();
-    if (t != AssetType::UI && ui_interact_) ui_set_interact_(false);
+    if (t != AssetType::UI && ui_canvas_panel_->ui_interact_) ui_canvas_panel_->ui_set_interact_(false);
     active_type_ = t;
     set_shading(shading_by_type_[static_cast<int>(t)]);
     prop_tab_ = t == AssetType::Material ? PropTab::Material : t == AssetType::Mesh ? PropTab::Data
@@ -590,7 +760,7 @@ bool EditorApp::open_mesh(const fs::path& path) {
     set_view_(AssetType::Mesh);
     active_path_ = path;
     uploaded_revision_ = 0;
-    deferred_.push_back([this] { ensure_preview_(); frame_all(); });
+    deferred_.push_back([this] { assets_panel_->ensure_preview_(); frame_all(); });
     log_info("Opened mesh " + project_.relative(path) + " (Tab: Edit Mode)");
     return true;
 }
@@ -601,17 +771,17 @@ void EditorApp::new_mesh(const std::string& primitive) {
     for (char& c : key) if (c == ' ') c = '_';
     exit_mesh_mode_();
     park_mesh_doc_();
-    mesh_.reset(make_primitive(primitive), unique_asset_name_(new_asset_dir_("meshes"), key));
-    if (!creating_tags_.empty()) mesh_.path = project_.assets() / new_asset_dir_("meshes") / (mesh_.name + ".yaml");
+    mesh_.reset(make_primitive(primitive), unique_asset_name_(assets_panel_->new_asset_dir_("meshes"), key));
+    if (!creating_tags_.empty()) mesh_.path = project_.assets() / assets_panel_->new_asset_dir_("meshes") / (mesh_.name + ".yaml");
     set_view_(AssetType::Mesh);
     active_path_.clear();
     uploaded_revision_ = 0;
-    deferred_.push_back([this] { ensure_preview_(); frame_all(); });
+    deferred_.push_back([this] { assets_panel_->ensure_preview_(); frame_all(); });
 }
 
 bool EditorApp::save_mesh() {
     if (!mesh_.open()) return false;
-    if (mesh_.path.empty()) mesh_.path = project_.assets() / new_asset_dir_("meshes") / (mesh_.name + ".yaml");
+    if (mesh_.path.empty()) mesh_.path = project_.assets() / assets_panel_->new_asset_dir_("meshes") / (mesh_.name + ".yaml");
     try {
         fs::create_directories(mesh_.path.parent_path());
         mesh_.save();
@@ -647,13 +817,13 @@ bool EditorApp::open_material(const fs::path& path) {
     set_view_(AssetType::Material);
     active_path_ = path;
     uploaded_revision_ = 0;
-    deferred_.push_back([this] { ensure_preview_(); refresh_material_preview_(); frame_all(); });
+    deferred_.push_back([this] { assets_panel_->ensure_preview_(); refresh_material_preview_(); frame_all(); });
     log_info("Opened material " + ref);
     return true;
 }
 
 bool EditorApp::create_material(const std::string& name, const Node& from) {
-    const std::string dir = new_asset_dir_("materials");
+    const std::string dir = assets_panel_->new_asset_dir_("materials");
     const std::string n = unique_asset_name_(dir, name);
     const fs::path path = project_.assets() / dir / (n + ".yaml");
     Node m = from.is_mapping() ? from : Node::mapping();
@@ -796,7 +966,7 @@ std::vector<ObjectId> EditorApp::pick_candidates_(glm::vec2 px) {
         } else {
             // No mesh: pick by the glyph it draws -- the whole bone or axis line, not just a
             // dot on its origin.
-            const float gp = origin_glyph_pick_px_(id, *vp, world, px);
+            const float gp = viewport_chrome_panel_->origin_glyph_pick_px_(id, *vp, world, px);
             if (gp < 8.0f) hits.push_back({id, glm::dot(glm::vec3(world[3]) - o, d), gp >= 4.0f});
         }
     }
@@ -819,7 +989,7 @@ ObjectId EditorApp::pick_object(glm::vec2 px) {
 ObjectId EditorApp::click_pick_(glm::vec2 px) {
     std::vector<ObjectId> c;
     for (ObjectId raw : pick_candidates_(px)) {
-        const ObjectId id = click_target_(raw);   // an instance as a whole first
+        const ObjectId id = instances_panel_->click_target_(raw);   // an instance as a whole first
         if (id && std::find(c.begin(), c.end(), id) == c.end()) c.push_back(id);
     }
     const bool same_spot = glm::distance(px, last_pick_px_) < 4.0f;
@@ -849,7 +1019,7 @@ std::string EditorApp::unique_asset_name_(const std::string& dir, const std::str
     if (base.empty()) base = "untitled";
     const std::string type = asset_type_dir(dir + "/x");
     auto exists = [&](const std::string& n) {
-        return coopa::yaml::document_exists(project_.assets() / dir / (n + ".yaml")) || asset_name_taken_(type, n);
+        return coopa::yaml::document_exists(project_.assets() / dir / (n + ".yaml")) || assets_panel_->asset_name_taken_(type, n);
     };
     if (!exists(base)) return base;
     for (int i = 1; i < 1000; ++i) {
@@ -916,15 +1086,15 @@ void EditorApp::rebuild_scene_() {
     // Composites fall back to the library's active theme when no Theme component is above
     // them; reset it so one file's theme never leaks into the next.
     coopa::ui::ThemeLibrary::instance().set_active(coopa::ui::UITheme::builtin_dark());
-    apply_theme_preview_();   // an open theme's unsaved edits shadow its file (ui/theme_editor.inl)
-    // Instances' inherited children get their nodes first (ui/instances.inl): the ids the
+    theme_editor_panel_->apply_theme_preview_();   // an open theme's unsaved edits shadow its file (ui/theme_editor.h)
+    // Instances' inherited children get their nodes first (ui/instances.h): the ids the
     // live objects map to. Asset files may have changed, so the resolved view is stale too.
-    sync_instance_placeholders_();
-    ++scene_gen_;
+    instances_panel_->sync_instance_placeholders_();
+    ++instances_panel_->scene_gen_;
     sync_.rebuild(engine_, doc_);
     if (!sync_.last_error.empty()) { log_error("Scene: " + sync_.last_error); sync_.last_error.clear(); }
-    add_object_view_lights_();
-    ui_after_rebuild_();
+    assets_panel_->add_object_view_lights_();
+    ui_canvas_panel_->ui_after_rebuild_();
     preview_scene_ = nullptr;   // set_scene() replaced every engine scene
     preview_object_ = nullptr;
     preview_ground_ = nullptr;
@@ -978,7 +1148,7 @@ void EditorApp::after_structure_change_(ObjectId select) {
 void EditorApp::ensure_active_scene_() {
     coopa::scene::Scene* want = nullptr;
     if (asset_view_()) {
-        ensure_preview_();
+        assets_panel_->ensure_preview_();
         want = preview_scene_;
     } else {
         want = play_scene_ ? play_scene_ : sync_.scene();
@@ -1029,7 +1199,7 @@ void EditorApp::refresh_material_preview_() {
 
 void EditorApp::post_late_update_(float dt) {
     poll_theme_(dt);
-    poll_build_();
+    build_panel_->poll_build_();
     // The cursor the UI asked for this frame (resize arrows on panel borders, I-beam in text).
     const coopa::input::CursorShape want = canvas_->context().mouse_cursor();
     if (want != applied_cursor_) { engine_.input_state().set_cursor_shape(want); applied_cursor_ = want; }
@@ -1044,7 +1214,7 @@ void EditorApp::post_late_update_(float dt) {
     if (step_countdown_ > 0 && --step_countdown_ == 0 && play_scene_) play_scene_->set_simulating(false);
     if (pause_after_start_ && play_scene_) { pause_after_start_ = false; play_scene_->set_simulating(true); step_countdown_ = 2; }
     // Keep the asset preview's mesh current.
-    if (asset_view_() && preview_scene_) update_preview_();
+    if (asset_view_() && preview_scene_) assets_panel_->update_preview_();
 }
 
 void EditorApp::sync_ui_scale_() {
@@ -1067,11 +1237,11 @@ void EditorApp::pre_render_(float dt) {
     sync_display_region_();
     update_scene_ui_placement_();
     if (!playing() || asset_view_()) camera_.make_main();
-    sculpt_frame_();
-    terrain_frame_();
-    tile_frame_();
-    paint_frame_();
-    timeline_frame_(dt);
+    sculpt_panel_->sculpt_frame_();
+    terrain_panel_->terrain_frame_();
+    tile_mode_panel_->tile_frame_();
+    paint_panel_->paint_frame_();
+    timeline_panel_->timeline_frame_(dt);
     // X-Ray: surfaces turn translucent over the backdrop (Solid / Material Preview; paint
     // modes look through the surface they paint on, so they stay opaque).
     engine_.render_config().editor_xray_alpha = xray_surfaces_() ? xray_alpha_ : 1.0f;
@@ -1081,12 +1251,12 @@ void EditorApp::pre_render_(float dt) {
     else collider_lines_drawn_ = 0;
     // Weather effects wait for Play unless the World tab's Preview shows them -- held here,
     // not on the system, because a scene rebuild makes a fresh WeatherSystem.
-    if (toy::weather::WeatherSystem* w = live_weather_()) w->set_preview_effects(weather_preview_effects_);
+    if (toy::weather::WeatherSystem* w = weather_panel_->live_weather_()) w->set_preview_effects(weather_preview_effects_);
 }
 
 void EditorApp::push_collider_lines_() {
     using coopa::physx::components::Collider;
-    coopa::scene::Scene* scene = viewed_live_scene_();
+    coopa::scene::Scene* scene = weather_panel_->viewed_live_scene_();
     if (!scene) return;
     coopa::physx::debug::DebugDraw draw;
     constexpr uint32_t kSolid   = 0x66FF88FFu;   // RRGGBBAA: Unity-ish collider green
@@ -1230,7 +1400,7 @@ void EditorApp::push_particle_gizmos_() {
 }
 
 void EditorApp::update_scene_ui_placement_() {
-    if (active_type_ == AssetType::UI) { engine_.set_scene_ui_placement(ui_preview_placement_()); return; }
+    if (active_type_ == AssetType::UI) { engine_.set_scene_ui_placement(ui_canvas_panel_->ui_preview_placement_()); return; }
     if (asset_view_() || viewport_box_.empty()) { engine_.set_scene_ui_placement(std::nullopt); return; }
     core::Engine::ScreenUiPlacement p;
     p.rect = engine_.display_rect();
@@ -1323,7 +1493,7 @@ void EditorApp::scroll_navigate_(const imm::FrameInput& in, double pinch, bool s
 }
 
 bool EditorApp::xray_surfaces_() const {
-    return xray_ && !playing() && !in_brush_mode_() &&
+    return xray_ && !playing() && !paint_panel_->in_brush_mode_() &&
            (shading_ == Shading::Solid || shading_ == Shading::MaterialPreview);
 }
 
@@ -1441,7 +1611,7 @@ std::optional<ViewProj> EditorApp::view_proj_() {
 const EditorApp::CachedMesh* EditorApp::mesh_for_object_(const Node& obj) {
     if (!obj.contains("components")) return nullptr;
     {
-        const std::string key = object_mesh_key_(effective_(obj));   // MeshRenderer's, else a WaterBody's (an instance's: its asset's)
+        const std::string key = object_mesh_key_(instances_panel_->effective_(obj));   // MeshRenderer's, else a WaterBody's (an instance's: its asset's)
         if (key.empty()) return nullptr;
         const fs::path dir = (doc_.path().empty() ? sync_.fallback_path : doc_.path()).parent_path();
         // Resolving walks the asset roots with several stat() calls; this runs per object per
@@ -1542,7 +1712,7 @@ void EditorApp::extract_material_(ObjectId id, const Node& comp) {
     }
     Node c = comp;
     c["material"] = Node("materials/" + n);
-    edit_component_(id, c, "Extract Material");
+    instances_panel_->edit_component_(id, c, "Extract Material");
     log_info("Extracted material to materials/" + n + ".yaml");
 }
 
@@ -1581,7 +1751,7 @@ void EditorApp::draw_mesh_tools_(imm::Context& ctx) {
     ctx.same_line();
     if (ctx.button("Make Object Asset", 150)) {
         if (md.path.empty() || md.dirty()) save_mesh();
-        if (!md.path.empty()) create_object_asset_from_mesh_(project_.relative(md.path));
+        if (!md.path.empty()) assets_panel_->create_object_asset_from_mesh_(project_.relative(md.path));
     }
     ctx.tooltip("Make Object Asset\nWrites objects/<mesh>.yaml: an object with a MeshRenderer using this mesh, ready to place in scenes");
     ctx.spacing();
@@ -1755,9 +1925,9 @@ int EditorApp::group_override_count_(const SettingsGroup& g, const std::string& 
 
 void EditorApp::draw_setting_row_(imm::Context& ctx, const FieldDesc& f, Node& section, const InspectorEnv& env, const std::string& section_name) {
     using I = imm::Icon;
-    if (weather_locks_(section_name, f.key)) {   // the scene's weather drives it (ui/weather.inl)
+    if (weather_panel_->weather_locks_(section_name, f.key)) {   // the scene's weather drives it (ui/weather.h)
         ctx.push_id(f.key);
-        draw_weather_locked_row_(ctx, f, section_name);
+        weather_panel_->draw_weather_locked_row_(ctx, f, section_name);
         ctx.pop_id();
         return;
     }
@@ -1862,9 +2032,9 @@ glm::mat4 EditorApp::mesh_world_() {
 }
 
 void EditorApp::draw_viewport_(imm::Context& ctx, const imm::Box& area, bool mesh_edit) {
-    if (active_type_ == AssetType::UI) { draw_ui_view_(ctx, area); return; }   // the UI designer (ui/ui_canvas.inl)
+    if (active_type_ == AssetType::UI) { ui_canvas_panel_->draw_ui_view_(ctx, area); return; }   // the UI designer (ui/ui_canvas.h)
     const imm::Box hb = area_header_(ctx, area);
-    draw_viewport_header_(ctx, hb, mesh_edit);
+    viewport_chrome_panel_->draw_viewport_header_(ctx, hb, mesh_edit);
     viewport_box_ = imm::Box{area.x, hb.bottom(), area.w, std::max(1.0f, area.h - hb.h)};
     // Now, not only in pre_render_: the bars below (and picking) read the display rect, and
     // one from last frame's box leaves a sliver of the black overlay clear uncovered.
@@ -1893,7 +2063,7 @@ void EditorApp::draw_viewport_(imm::Context& ctx, const imm::Box& area, bool mes
                           falloff_name(proportional_.falloff));
             h += buf;
         }
-        const imm::Box b{viewport_box_.x + (show_toolbar_ ? kToolSize + 20 : 10), viewport_box_.bottom() - 34, ctx.text_width(h) + 18, 24};
+        const imm::Box b{viewport_box_.x + (show_toolbar_ ? viewport_chrome_panel_->kToolSize + 20 : 10), viewport_box_.bottom() - 34, ctx.text_width(h) + 18, 24};
         ctx.fill_rounded(b, et_.viewport.modal_backdrop);
         ctx.text_in(b, h, ctx.style.text);
     }
@@ -1905,41 +2075,41 @@ void EditorApp::draw_viewport_(imm::Context& ctx, const imm::Box& area, bool mes
         ctx.text_in(b, h, ctx.style.text);
     }
     // Furniture last, so it draws over the overlays (its rects were excluded from input).
-    draw_last_op_panel_(ctx, viewport_box_);
-    if (show_toolbar_ && !preview_only_view_()) draw_toolbar_(ctx, mesh_edit);
-    if (show_overlays_ || true) draw_nav_gizmo_(ctx);
-    if (show_sidebar_) draw_sidebar_(ctx, mesh_edit);
+    mesh_tools_panel_->draw_last_op_panel_(ctx, viewport_box_);
+    if (show_toolbar_ && !viewport_chrome_panel_->preview_only_view_()) viewport_chrome_panel_->draw_toolbar_(ctx, mesh_edit);
+    if (show_overlays_ || true) viewport_chrome_panel_->draw_nav_gizmo_(ctx);
+    if (show_sidebar_) viewport_chrome_panel_->draw_sidebar_(ctx, mesh_edit);
     ctx.pop_clip();
     draw_viewport_popups_(ctx, mesh_edit);
     // Asset drops into the viewport.
     if (!mesh_edit && !asset_view_()) {
         if (auto dropped = ctx.drop_target("asset", viewport_box_)) {
             const std::string& item = *dropped;
-            switch (asset_type_of_(item)) {
-                case AssetType::Object: place_object_asset(item, ground_point_(ctx.mouse())); break;
-                case AssetType::UI: place_ui_asset(item); break;   // a HUD / menu the scene starts with
+            switch (assets_panel_->asset_type_of_(item)) {
+                case AssetType::Object: assets_panel_->place_object_asset(item, ground_point_(ctx.mouse())); break;
+                case AssetType::UI: ui_canvas_panel_->place_ui_asset(item); break;   // a HUD / menu the scene starts with
                 case AssetType::Mesh: add_mesh_to_scene_(item, ground_point_(ctx.mouse())); break;
                 case AssetType::Material: {
                     const ObjectId hit = pick_object(ctx.mouse());
                     if (hit) assign_material_(item, hit);
                     break;
                 }
-                default: open_asset(asset_type_of_(item), item); break;
+                default: assets_panel_->open_asset(assets_panel_->asset_type_of_(item), item); break;
             }
         }
     } else if (active_type_ == AssetType::Mesh) {
         // A material dropped on the mesh previews on the slot under the cursor.
-        if (auto dropped = ctx.drop_target("asset", viewport_box_); dropped && asset_type_of_(*dropped) == AssetType::Material) {
+        if (auto dropped = ctx.drop_target("asset", viewport_box_); dropped && assets_panel_->asset_type_of_(*dropped) == AssetType::Material) {
             const std::string ref = dropped->substr(0, dropped->size() - fs::path(*dropped).extension().string().size());
             uint32_t slot = 0;
             if (auto vp2 = view_proj_()) {
                 glm::vec3 o, d;
-                mesh_local_ray_(*vp2, ctx.mouse(), o, d);
-                if (auto hit = mesh_bvh_().raycast(mesh_.mesh, o, d)) slot = mesh_.mesh.faces[hit->face].slot;
+                mesh_tools_panel_->mesh_local_ray_(*vp2, ctx.mouse(), o, d);
+                if (auto hit = mesh_tools_panel_->mesh_bvh_().raycast(mesh_.mesh, o, d)) slot = mesh_.mesh.faces[hit->face].slot;
             }
             if (slot_preview_materials_.size() <= slot) slot_preview_materials_.resize(slot + 1);
             slot_preview_materials_[slot] = ref;
-            apply_slot_preview_materials_();
+            assets_panel_->apply_slot_preview_materials_();
         }
     }
 }
@@ -1990,7 +2160,7 @@ void EditorApp::handle_viewport_input_(imm::Context& ctx, bool mesh_edit) {
     const bool ctrl = has(in.mods, Mods::Control) || has(in.mods, Mods::Super);
     // The toolbar, navigation gizmo and sidebar are drawn after this (on top); clicks on
     // them must not select or navigate.
-    const bool hovered = ctx.is_hovered(viewport_box_) && !over_viewport_chrome_(m, mesh_edit);
+    const bool hovered = ctx.is_hovered(viewport_box_) && !viewport_chrome_panel_->over_viewport_chrome_(m, mesh_edit);
     viewport_hovered_ = hovered;
     // Pinches are taken every frame, so one made over another panel never lands here later.
     const double pinch = trackpad::take_magnify() + std::exchange(pinch_override_, 0.0);
@@ -2030,7 +2200,7 @@ void EditorApp::handle_viewport_input_(imm::Context& ctx, bool mesh_edit) {
     if (alt_click_) {
         if (in.released[0]) {
             alt_click_ = false;
-            if (glm::distance(m, alt_press_) <= 4.0f) loop_select_at_(alt_press_, alt_ctrl_, alt_shift_);
+            if (glm::distance(m, alt_press_) <= 4.0f) mesh_tools_panel_->loop_select_at_(alt_press_, alt_ctrl_, alt_shift_);
             return;
         }
         if (!in.down[0]) { alt_click_ = false; }
@@ -2061,18 +2231,18 @@ void EditorApp::handle_viewport_input_(imm::Context& ctx, bool mesh_edit) {
         return;
     }
     if (loopcut_.active) {
-        if (mesh_edit) run_loop_cut_(ctx, *vp, hovered);
+        if (mesh_edit) mesh_tools_panel_->run_loop_cut_(ctx, *vp, hovered);
         else loopcut_.active = false;
         return;
     }
-    if (in_brush_mode_()) {
+    if (paint_panel_->in_brush_mode_()) {
         // Scroll navigation stays (below is skipped), so handle it here first.
-        if (hovered && !ctx.popup_hovered() && !stroke_.active && !paint_stroke_.active && !terrain_stroke_.active && !tile_stroke_.active) scroll_navigate_(in, pinch, shift, ctrl);
+        if (hovered && !ctx.popup_hovered() && !stroke_.active && !paint_stroke_.active && !terrain_panel_->terrain_stroke_.active && !tile_mode_panel_->tile_stroke_.active) scroll_navigate_(in, pinch, shift, ctrl);
         if (hovered && in.pressed[1]) ctx.open_popup("mode_menu_vp", m);
-        if (in_terrain_mode_()) handle_terrain_input_(ctx, *vp, hovered);
-        else if (in_tile_mode_()) handle_tile_input_(ctx, *vp, hovered);
-        else if (in_sculpt_mode_()) handle_sculpt_input_(ctx, *vp, hovered);
-        else handle_paint_input_(ctx, *vp, hovered);
+        if (terrain_panel_->in_terrain_mode_()) terrain_panel_->handle_terrain_input_(ctx, *vp, hovered);
+        else if (tile_mode_panel_->in_tile_mode_()) tile_mode_panel_->handle_tile_input_(ctx, *vp, hovered);
+        else if (in_sculpt_mode_()) sculpt_panel_->handle_sculpt_input_(ctx, *vp, hovered);
+        else paint_panel_->handle_paint_input_(ctx, *vp, hovered);
         return;
     }
     if (hovered && !ctx.popup_hovered()) scroll_navigate_(in, pinch, shift, ctrl);
@@ -2119,7 +2289,7 @@ void EditorApp::handle_viewport_input_(imm::Context& ctx, bool mesh_edit) {
     if (select_pending_ && in.down[0] && glm::distance(m, select_press_) > 5.0f) box_selecting_ = true;
     if (select_pending_ && in.released[0]) {
         if (box_selecting_) box_select_(mesh_edit, select_press_, m, shift, ctrl);
-        else if (mesh_edit) pick_mesh_element_(m, shift);
+        else if (mesh_edit) mesh_tools_panel_->pick_mesh_element_(m, shift);
         else {
             const ObjectId id = click_pick_(m);   // cycles past the selection on a repeat click
             if (id == 0) { if (!shift) doc_.clear_selection(); }
@@ -2146,7 +2316,7 @@ void EditorApp::handle_viewport_input_(imm::Context& ctx, bool mesh_edit) {
 void EditorApp::viewport_keymap_(imm::Context& ctx, const ViewProj& vp, bool mesh_edit, bool can_edit) {
     const glm::vec2 m = ctx.mouse();
     // Blender's I in Object Mode: key the selected rig objects on the Timeline's clip.
-    if (!mesh_edit && can_edit && !in_brush_mode_() && anim_rig_ && ctx.shortcut(Key::I)) anim_insert_keys_();
+    if (!mesh_edit && can_edit && !paint_panel_->in_brush_mode_() && anim_rig_ && ctx.shortcut(Key::I)) timeline_panel_->anim_insert_keys_();
     // --- views (any mode) ---
     if (ctx.shortcut(Key::Kp1)) camera_.axis_view('f', false);
     if (ctx.shortcut(Key::Kp1, Mods::Control)) camera_.axis_view('f', true);
@@ -2166,7 +2336,7 @@ void EditorApp::viewport_keymap_(imm::Context& ctx, const ViewProj& vp, bool mes
     // Frame Selected: numpad . (Blender), . on the main keyboard (no numpad needed) in every
     // mode, and F where F is free -- Edit Mode's F is Make Face, the brush modes' F is radius.
     if (ctx.shortcut(Key::KpDecimal) || ctx.shortcut(Key::Period)) frame_selected();
-    if (!mesh_edit && !in_brush_mode_() && ctx.shortcut(Key::F)) frame_selected();
+    if (!mesh_edit && !paint_panel_->in_brush_mode_() && ctx.shortcut(Key::F)) frame_selected();
     if (ctx.shortcut(Key::Home)) frame_all();
     if (ctx.shortcut(Key::GraveAccent)) ctx.open_popup("vp_view_menu", m);
     if (ctx.shortcut(Key::Z)) ctx.open_popup("vp_shading_menu", m);
@@ -2197,7 +2367,7 @@ void EditorApp::viewport_keymap_(imm::Context& ctx, const ViewProj& vp, bool mes
         if (ctx.shortcut(Key::A, Mods::Alt)) md.selection.clear();
         if (ctx.shortcut(Key::I, Mods::Control)) invert_mesh_selection_();
         if (ctx.shortcut(Key::L, Mods::Control)) select_linked(md.mesh, md.selection);
-        if (ctx.shortcut(Key::L)) { pick_mesh_element_(m, true); select_linked(md.mesh, md.selection); }
+        if (ctx.shortcut(Key::L)) { mesh_tools_panel_->pick_mesh_element_(m, true); select_linked(md.mesh, md.selection); }
         if (ctx.shortcut(Key::G)) start_modal_(ModalKind::Grab, vp, m, true);
         if (ctx.shortcut(Key::R)) start_modal_(ModalKind::Rotate, vp, m, true);
         if (ctx.shortcut(Key::S)) start_modal_(ModalKind::Scale, vp, m, true);
@@ -2211,10 +2381,10 @@ void EditorApp::viewport_keymap_(imm::Context& ctx, const ViewProj& vp, bool mes
             md.edit("Duplicate", [](EditMesh& mm, MeshSelection& s) { duplicate_faces(mm, s); });
             start_modal_(ModalKind::Grab, vp, m, true);
         }
-        if (ctx.shortcut(Key::R, Mods::Control)) begin_loop_cut();
+        if (ctx.shortcut(Key::R, Mods::Control)) mesh_tools_panel_->begin_loop_cut();
         if (ctx.shortcut(Key::T, Mods::Control)) md.edit("Triangulate", [](EditMesh& mm, MeshSelection& s) { triangulate(mm, s); });
         if (ctx.shortcut(Key::J, Mods::Alt)) md.edit("Tris to Quads", [](EditMesh& mm, MeshSelection& s) { tris_to_quads(mm, s); });
-        if (ctx.shortcut(Key::E, Mods::Control)) bridge_selected_();
+        if (ctx.shortcut(Key::E, Mods::Control)) mesh_tools_panel_->bridge_selected_();
         if (ctx.shortcut(Key::A, Mods::Shift)) ctx.open_popup("vp_mesh_add", m);
         if (ctx.shortcut(Key::W)) ctx.open_popup("vp_mesh_ctx", m);
         if (ctx.shortcut(Key::X) || ctx.shortcut(Key::Delete)) ctx.open_popup("vp_mesh_delete", m);
@@ -2265,7 +2435,7 @@ void EditorApp::draw_viewport_popups_(imm::Context& ctx, bool mesh_edit) {
     const glm::vec2 m = ctx.mouse();
     if (open_add_menu_) { open_add_menu_ = false; ctx.open_popup("vp_add_menu", m); }
     if (ctx.begin_popup("mode_menu_vp", 170)) {
-        draw_mode_menu_items_(ctx);
+        viewport_chrome_panel_->draw_mode_menu_items_(ctx);
         ctx.end_popup();
     }
     if (ctx.begin_popup("vp_view_menu", 170)) {
@@ -2339,7 +2509,7 @@ void EditorApp::draw_viewport_popups_(imm::Context& ctx, bool mesh_edit) {
     }
     if (ctx.begin_popup("vp_obj_ctx", 230)) {
         const bool any = !doc_.selection().empty();
-        draw_instance_menu_items_(ctx, doc_.primary());   // Open Object Asset, Revert / Apply overrides
+        instances_panel_->draw_instance_menu_items_(ctx, doc_.primary());   // Open Object Asset, Revert / Apply overrides
         if (ctx.menu_item("Edit Mode", "Tab", nullptr, any)) toggle_edit_mode_();
         ctx.menu_separator();
         if (ctx.menu_item("Duplicate", "Shift D", nullptr, any)) { duplicate_selected(); pending_modal_kind_ = ModalKind::Grab; }
@@ -2360,10 +2530,10 @@ void EditorApp::draw_viewport_popups_(imm::Context& ctx, bool mesh_edit) {
     }
     auto mesh_op = [&](const char* label, auto&& fn) { mesh_.edit(label, fn); };
     if (ctx.begin_popup("vp_mesh_ctx", 220)) {
-        if (ctx.menu_item("Subdivide")) run_subdivide_(1);
-        if (ctx.menu_item("Subdivide Smooth")) run_catmull_clark_(1);
-        if (ctx.menu_item("Loop Cut and Slide", "Ctrl R")) begin_loop_cut();
-        if (ctx.menu_item("Edge Slide", "G G") && vp) begin_edge_slide_from_selection_(*vp, m);
+        if (ctx.menu_item("Subdivide")) mesh_tools_panel_->run_subdivide_(1);
+        if (ctx.menu_item("Subdivide Smooth")) mesh_tools_panel_->run_catmull_clark_(1);
+        if (ctx.menu_item("Loop Cut and Slide", "Ctrl R")) mesh_tools_panel_->begin_loop_cut();
+        if (ctx.menu_item("Edge Slide", "G G") && vp) mesh_tools_panel_->begin_edge_slide_from_selection_(*vp, m);
         ctx.menu_separator();
         if (ctx.menu_item("Extrude", "E") && vp) extrude_interactive_(*vp, m);
         if (ctx.menu_item("Inset", "I")) pending_modal_kind_ = ModalKind::Inset;
@@ -2376,15 +2546,15 @@ void EditorApp::draw_viewport_popups_(imm::Context& ctx, bool mesh_edit) {
         ctx.menu_separator();
         if (ctx.menu_item("Triangulate Faces", "Ctrl T")) mesh_op("Triangulate", [](EditMesh& mm, MeshSelection& s) { triangulate(mm, s); });
         if (ctx.menu_item("Tris to Quads", "Alt J")) mesh_op("Tris to Quads", [](EditMesh& mm, MeshSelection& s) { tris_to_quads(mm, s); });
-        if (ctx.menu_item("Bridge Edge Loops", "Ctrl E")) bridge_selected_();
+        if (ctx.menu_item("Bridge Edge Loops", "Ctrl E")) mesh_tools_panel_->bridge_selected_();
         ctx.menu_separator();
-        if (ctx.menu_item("Dissolve Edges")) dissolve_selected_edges_();
+        if (ctx.menu_item("Dissolve Edges")) mesh_tools_panel_->dissolve_selected_edges_();
         if (ctx.menu_item("Delete Faces", "X")) mesh_op("Delete", [](EditMesh& mm, MeshSelection& s) { delete_selection(mm, s); });
         ctx.end_popup();
     }
     if (ctx.begin_popup("vp_mesh_add", 180)) {
         ctx.label_dim("Add Mesh");
-        for (const auto& p : primitive_names()) if (ctx.menu_item(p)) add_mesh_primitive_(p);
+        for (const auto& p : primitive_names()) if (ctx.menu_item(p)) mesh_tools_panel_->add_mesh_primitive_(p);
         ctx.end_popup();
     }
     if (ctx.begin_popup("vp_mesh_delete", 170)) {
@@ -2396,12 +2566,12 @@ void EditorApp::draw_viewport_popups_(imm::Context& ctx, bool mesh_edit) {
         if (ctx.menu_item("Faces")) del(SelectMode::Face);
         ctx.menu_separator();
         if (ctx.menu_item("Dissolve Vertices")) mesh_op("Dissolve Vertices", [](EditMesh& mm, MeshSelection& s) { dissolve_verts(mm, s); });
-        if (ctx.menu_item("Dissolve Edges")) dissolve_selected_edges_();
-        if (ctx.menu_item("Dissolve Faces")) dissolve_selected_faces_();
+        if (ctx.menu_item("Dissolve Edges")) mesh_tools_panel_->dissolve_selected_edges_();
+        if (ctx.menu_item("Dissolve Faces")) mesh_tools_panel_->dissolve_selected_faces_();
         ctx.end_popup();
     }
     if (ctx.begin_popup("vp_mesh_mirror", 170)) {
-        draw_mirror_menu_items_(ctx);
+        viewport_chrome_panel_->draw_mirror_menu_items_(ctx);
         ctx.end_popup();
     }
     if (ctx.begin_popup("vp_mesh_merge", 170)) {
@@ -2485,20 +2655,20 @@ void EditorApp::run_modal_(imm::Context& ctx, const ViewProj& vp, bool ctrl, boo
         // G G: put the grab back and slide the selected edges instead.
         apply_modal_(kind, ModalTransform::Result{});
         mesh_.undo.end_merge();
-        begin_edge_slide_from_selection_(vp, ctx.mouse());
+        mesh_tools_panel_->begin_edge_slide_from_selection_(vp, ctx.mouse());
         return;
     }
     if (outcome == ModalTransform::Outcome::Cancelled) {
         ModalTransform::Result zero;
         apply_modal_(kind, zero);
         if (modal_mesh_) mesh_.undo.end_merge(); else doc_.end_merge();
-        note_slide_finished_(kind, 0.0f);
+        mesh_tools_panel_->note_slide_finished_(kind, 0.0f);
         return;
     }
     apply_modal_(kind, modal_.result());
     if (outcome == ModalTransform::Outcome::Confirmed) {
         if (modal_mesh_) mesh_.undo.end_merge(); else doc_.end_merge();
-        note_slide_finished_(kind, modal_.result().amount);
+        mesh_tools_panel_->note_slide_finished_(kind, modal_.result().amount);
     }
     if (outcome == ModalTransform::Outcome::Running && proportional_live_()) {
         draw_proportional_circle_(ctx, vp, prop_pivot_ + (kind == ModalKind::Grab ? modal_.result().translate : glm::vec3(0.0f)));
@@ -2648,11 +2818,11 @@ void EditorApp::clear_parent_keep_transform_() {
 void EditorApp::clear_transform_(int what) {
     for (ObjectId id : doc_.selection()) {
         glm::vec3 p, r, s;
-        get_object_transform_(id, p, r, s);
+        timeline_panel_->get_object_transform_(id, p, r, s);
         if (what == 0) p = glm::vec3(0.0f);
         if (what == 1) r = glm::vec3(0.0f);
         if (what == 2) s = glm::vec3(1.0f);
-        set_object_transform_(id, p, r, s, what == 0 ? "Clear Location" : what == 1 ? "Clear Rotation" : "Clear Scale");
+        timeline_panel_->set_object_transform_(id, p, r, s, what == 0 ? "Clear Location" : what == 1 ? "Clear Rotation" : "Clear Scale");
     }
 }
 
@@ -2786,7 +2956,7 @@ std::string EditorApp::water_grid_to_mesh_(ObjectId id, int water_ci) {
 
 fs::path EditorApp::active_mesh_path_(ObjectId id) {
     const Node* obj = doc_.find(id);
-    std::string key = obj ? object_mesh_key_(effective_(*obj)) : std::string();
+    std::string key = obj ? object_mesh_key_(instances_panel_->effective_(*obj)) : std::string();
     if (key.empty()) {
         const int water_ci = doc_.find_component(id, "WaterBody");
         if (water_ci >= 0) {
@@ -2798,7 +2968,7 @@ fs::path EditorApp::active_mesh_path_(ObjectId id) {
     }
     const fs::path path = resolve_mesh_key_(key);
     if (!coopa::yaml::document_exists(path)) { log_error("Mesh file not found for '" + key + "'"); return {}; }
-    if (refuse_engine_asset_(path)) return {};   // toyengine's mesh: Copy to Project to edit it
+    if (assets_panel_->refuse_engine_asset_(path)) return {};   // toyengine's mesh: Copy to Project to edit it
     return path;
 }
 
@@ -2807,9 +2977,9 @@ bool EditorApp::enter_mesh_mode_(InteractionMode mode) {
     if (active_type_ == AssetType::Mesh) {
         // The mesh asset is already the document: just switch mode.
         if (mode_ == mode) return true;
-        mode_end_(mode_);
+        paint_panel_->mode_end_(mode_);
         mode_ = mode;
-        mode_begin_(mode_);
+        paint_panel_->mode_begin_(mode_);
         return true;
     }
     if (asset_view_()) return false;
@@ -2817,9 +2987,9 @@ bool EditorApp::enter_mesh_mode_(InteractionMode mode) {
     if (!id) return false;
     if (edit_object_ == id) {
         if (mode_ == mode) return true;
-        mode_end_(mode_);
+        paint_panel_->mode_end_(mode_);
         mode_ = mode;
-        mode_begin_(mode_);
+        paint_panel_->mode_begin_(mode_);
         return true;
     }
     if (edit_object_) exit_mesh_mode_();
@@ -2833,7 +3003,7 @@ bool EditorApp::enter_mesh_mode_(InteractionMode mode) {
     mode_ = mode;
     scene_uploaded_revision_ = 0;
     if (isolate_in_edit_) isolate_(id);
-    mode_begin_(mode_);
+    paint_panel_->mode_begin_(mode_);
     static const char* kModeNames[] = {"Object", "Edit", "Sculpt", "Vertex Paint", "Weight Paint"};
     log_info(std::string(kModeNames[static_cast<int>(mode)]) + " mode: " + project_.relative(path) +
              " (Tab to leave, Ctrl+S saves it)");
@@ -2843,14 +3013,14 @@ bool EditorApp::enter_mesh_mode_(InteractionMode mode) {
 void EditorApp::exit_mesh_mode_() {
     if (active_type_ == AssetType::Mesh && !edit_object_) {
         if (modal_.active()) { apply_modal_(modal_.kind(), ModalTransform::Result{}); modal_.cancel(); mesh_.undo.end_merge(); }
-        mode_end_(mode_);
+        paint_panel_->mode_end_(mode_);
         loopcut_.active = false;
         mode_ = InteractionMode::Object;
         return;
     }
     if (!edit_object_) return;
     if (modal_.active()) { apply_modal_(modal_.kind(), ModalTransform::Result{}); modal_.cancel(); mesh_.undo.end_merge(); }
-    mode_end_(mode_);
+    paint_panel_->mode_end_(mode_);
     loopcut_.active = false;
     unisolate_();
     edit_object_ = 0;
@@ -2930,7 +3100,7 @@ void EditorApp::set_isolate_in_edit(bool on) {
 }
 
 bool EditorApp::set_interaction_mode(InteractionMode m) {
-    if (m == InteractionMode::Pose) return enter_pose_mode_(rig_of_(doc_.primary()));
+    if (m == InteractionMode::Pose) return enter_pose_mode_(timeline_panel_->rig_of_(doc_.primary()));
     exit_pose_mode_();   // every other mode works on the document, not on a pose
     if (m == InteractionMode::Object) { exit_mesh_mode_(); return true; }
     return enter_mesh_mode_(m);
@@ -2943,17 +3113,17 @@ bool EditorApp::enter_pose_mode_(ObjectId rig) {
     pose_rig_ = rig;
     anim_rig_ = rig;
     // The pose starts where the clip leaves it at the playhead; with no clip, at rest.
-    anim_restore_rest_pose_();
+    timeline_panel_->anim_restore_rest_pose_();
     anim_posed_ = true;
     anim_pose_time_ = -1.0f;
-    log_info("Pose Mode: " + anim_name_of_(rig, "rig"));
+    log_info("Pose Mode: " + timeline_panel_->anim_name_of_(rig, "rig"));
     return true;
 }
 
 void EditorApp::exit_pose_mode_() {
     if (!pose_rig_) return;
     pose_rig_ = 0;
-    anim_restore_rest_pose_();
+    timeline_panel_->anim_restore_rest_pose_();
     anim_posed_ = false;
     anim_pose_time_ = -1.0f;
 }
@@ -2981,10 +3151,10 @@ void EditorApp::push_mesh_to_scene_() {
     for (const auto& [id, live] : sync_.live_objects()) {
         const Node* obj = doc_.find(id);
         if (!obj || !live) continue;
-        const std::string key = object_mesh_key_(effective_(*obj));
+        const std::string key = object_mesh_key_(instances_panel_->effective_(*obj));
         if (key.empty() || resolve_mesh_key_(key) != mesh_.path) continue;
         bool via_renderer = false;
-        const Node& eff = effective_(*obj);
+        const Node& eff = instances_panel_->effective_(*obj);
         if (eff.contains("components")) {
             for (const auto& c : eff.at("components").as_seq()) {
                 if (component_type(c) == "MeshRenderer" && !get_string(c, "mesh_path").empty()) via_renderer = true;
@@ -3147,8 +3317,8 @@ bool EditorApp::is_joint_object_(ObjectId id) {
     const Node* node = doc_.find(id);
     if (!node) return false;
     // The same test the glyph loop uses to decide an object draws an origin at all.
-    if (!object_mesh_key_(effective_(*node)).empty() && mesh_for_object_(*node)) return false;
-    const Node& eff = effective_(*node);
+    if (!object_mesh_key_(instances_panel_->effective_(*node)).empty() && mesh_for_object_(*node)) return false;
+    const Node& eff = instances_panel_->effective_(*node);
     if (!eff.contains("components") || !eff.at("components").is_sequence()) return true;
     for (const auto& c : eff.at("components").as_seq()) {
         const std::string t = component_type(c);
@@ -3282,7 +3452,7 @@ void EditorApp::begin_transform_(bool mesh_edit) {
     drag_starts_.clear();
     for (ObjectId id : doc_.selection()) {
         DragStart s;
-        get_object_transform_(id, s.pos, s.rot, s.scl);
+        timeline_panel_->get_object_transform_(id, s.pos, s.rot, s.scl);
         auto* live = sync_.live(id);
         if (live && live->parent() && live->parent()->get_transform()) {
             s.parent_world = live->parent()->get_transform()->transform().get_world_matrix();
@@ -3336,7 +3506,7 @@ void EditorApp::apply_transform_(bool mesh_edit, int kind, const glm::vec3& tran
             scl = s.scl * scale;
             if (multi) pos = glm::vec3(inv_parent * glm::vec4(pivot + (s.world_pos - pivot) * scale, 1.0f));
         }
-        set_object_transform_(id, pos, rot, scl, kind == 0 ? "Move" : kind == 1 ? "Rotate" : "Scale", "transform");
+        timeline_panel_->set_object_transform_(id, pos, rot, scl, kind == 0 ? "Move" : kind == 1 ? "Rotate" : "Scale", "transform");
     }
 }
 
@@ -3353,7 +3523,7 @@ void EditorApp::box_select_(bool mesh_edit, glm::vec2 a, glm::vec2 b, bool addit
         if (!additive && !subtract) { sel.verts.clear(); sel.edges.clear(); sel.faces.clear(); }
         auto apply = [&](auto& set, const auto& v) { if (subtract) set.erase(v); else set.insert(v); };
         // As in Blender: only what is in view, unless X-Ray (or Wireframe) sees through.
-        const EditVisibility& vis = edit_visibility_(*vp);
+        const EditVisibility& vis = mesh_tools_panel_->edit_visibility_(*vp);
         if (sel.mode == SelectMode::Vertex) {
             for (uint32_t v = 0; v < mm.positions.size(); ++v) if (vis.verts[v] && inside(wp(mm.positions[v]))) apply(sel.verts, v);
         } else if (sel.mode == SelectMode::Edge) {
@@ -3371,7 +3541,7 @@ void EditorApp::box_select_(bool mesh_edit, glm::vec2 a, glm::vec2 b, bool addit
     for (const auto& [lid, live] : sync_.live_objects()) {
         if (!live || !live->get_transform() || hidden_.count(lid)) continue;
         if (!inside(glm::vec3(live->get_transform()->transform().get_world_matrix()[3]))) continue;
-        hits.insert(box_target_(lid));   // a part of an instance selects the instance
+        hits.insert(instances_panel_->box_target_(lid));   // a part of an instance selects the instance
     }
     for (ObjectId id : hits) {
         if (subtract) { if (doc_.is_selected(id)) doc_.select(id, true); }
@@ -3388,8 +3558,8 @@ void EditorApp::draw_viewport_overlay_(imm::Context& ctx, bool mesh_edit) {
         // Recording (the Timeline's red dot): Blender's red frame -- moves become keys.
         const imm::Box r = vp->rect;
         ctx.outline({r.x + 1, r.y + 1, r.w - 2, r.h - 2}, glm::vec4(0.9f, 0.18f, 0.18f, 0.9f), 3.0f);
-        shadow_text_(ctx, glm::vec2(r.x + 10, r.bottom() - 24), "Recording: moves become keys at frame " +
-                     std::to_string(static_cast<int>(std::round(anim_time_ * kAnimFps))), glm::vec4(1.0f, 0.45f, 0.45f, 1));
+        viewport_chrome_panel_->shadow_text_(ctx, glm::vec2(r.x + 10, r.bottom() - 24), "Recording: moves become keys at frame " +
+                     std::to_string(static_cast<int>(std::round(anim_time_ * timeline_panel_->kAnimFps))), glm::vec4(1.0f, 0.45f, 0.45f, 1));
     }
     ctx.pop_clip();
 }
@@ -3410,12 +3580,12 @@ void EditorApp::draw_viewport_overlay_body_(imm::Context& ctx, bool mesh_edit, c
             if (a && b) ctx.line(*a, *b, col, t);
         }
     };
-    if (in_brush_mode_()) {
+    if (paint_panel_->in_brush_mode_()) {
         // No selection outline or wire while sculpting or painting, as in Blender.
-        if (in_terrain_mode_()) draw_terrain_overlay_(ctx, *vp);
-        else if (in_tile_mode_()) draw_tile_overlay_(ctx, *vp);
-        else if (in_sculpt_mode_()) draw_sculpt_overlay_(ctx, *vp);
-        else draw_paint_overlay_(ctx, *vp);
+        if (terrain_panel_->in_terrain_mode_()) terrain_panel_->draw_terrain_overlay_(ctx, *vp);
+        else if (tile_mode_panel_->in_tile_mode_()) tile_mode_panel_->draw_tile_overlay_(ctx, *vp);
+        else if (in_sculpt_mode_()) sculpt_panel_->draw_sculpt_overlay_(ctx, *vp);
+        else paint_panel_->draw_paint_overlay_(ctx, *vp);
     } else if (asset_view_() && !mesh_edit) {
         // Asset previews (mesh in Object Mode, material lookdev, texture): no scene overlays.
     } else if (playing() && !mesh_edit) {
@@ -3443,11 +3613,11 @@ void EditorApp::draw_viewport_overlay_body_(imm::Context& ctx, bool mesh_edit, c
                 if (!node || !live || !live->active() || !live->get_transform()) continue;
                 // Mesh objects draw no glyph: tell by their mesh key (pure YAML) before
                 // paying for the mesh lookup, which only a key-bearing object needs.
-                if (!object_mesh_key_(effective_(*node)).empty() && mesh_for_object_(*node)) continue;
+                if (!object_mesh_key_(instances_panel_->effective_(*node)).empty() && mesh_for_object_(*node)) continue;
                 glm::vec4 col(0.02f, 0.02f, 0.02f, 0.9f);
                 if (shading_ == Shading::Wireframe) col = et_.viewport.wire;
                 if (doc_.is_selected(id)) col = doc_.primary() == id ? active_col : accent;
-                draw_object_glyph_(ctx, *vp, id, *node, live->get_transform()->transform().get_world_matrix(), col);
+                viewport_chrome_panel_->draw_object_glyph_(ctx, *vp, id, *node, live->get_transform()->transform().get_world_matrix(), col);
             }
         }
         // Selection outlines (the active object brighter, as in Blender). A selected instance
@@ -3481,7 +3651,7 @@ void EditorApp::draw_viewport_overlay_body_(imm::Context& ctx, bool mesh_edit, c
         auto wp = [&](const glm::vec3& p) { return glm::vec3(w * glm::vec4(p, 1.0f)); };
         // Only what the camera can see (Solid shading), as in Blender; X-ray shows all, what
         // is behind the surface dimmed (EditVisibility::kBehind) so the depth still reads.
-        const EditVisibility& vis = edit_visibility_(*vp);
+        const EditVisibility& vis = mesh_tools_panel_->edit_visibility_(*vp);
         auto dim = [&](char state, glm::vec4 c) { return state == EditVisibility::kBehind ? imm::with_alpha(c, c.a * 0.4f) : c; };
         std::vector<Edge> front, behind;
         front.reserve(vis.edges.size());
@@ -3527,7 +3697,7 @@ void EditorApp::draw_viewport_overlay_body_(imm::Context& ctx, bool mesh_edit, c
                 ctx.fill({p->x - 3, p->y - 3, 6, 6}, dim(vis.verts[v], sel.verts.count(v) ? accent : et_.viewport.vertex));
             }
         }
-        draw_mesh_tool_overlay_(ctx, *vp);
+        mesh_tools_panel_->draw_mesh_tool_overlay_(ctx, *vp);
     }
     // 3D cursor (scene).
     if (!asset_view_() && show_overlays_ && show_cursor3d_) {
@@ -3550,7 +3720,7 @@ void EditorApp::draw_viewport_overlay_body_(imm::Context& ctx, bool mesh_edit, c
         gizmo_.free_color = et_.viewport.gizmo_free;
         if (gizmo_target_(mesh_edit, pivot, basis)) gizmo_.draw(ctx, *vp, pivot, basis);
     }
-    draw_overlay_text_(ctx, *vp);
+    viewport_chrome_panel_->draw_overlay_text_(ctx, *vp);
     // Mode banner.
     if (mesh_edit && !asset_view_()) {
         const std::string t = "Edit Mode  -  " + mesh_.name + (mesh_.dirty() ? " *" : "");
@@ -3560,9 +3730,9 @@ void EditorApp::draw_viewport_overlay_body_(imm::Context& ctx, bool mesh_edit, c
 
 void EditorApp::draw_modals_(imm::Context& ctx) {
     file_dialog_.draw(ctx);
-    draw_build_modal_(ctx);
-    draw_build_settings_modal_(ctx);
-    draw_clip_share_modal_(ctx);
+    build_panel_->draw_build_modal_(ctx);
+    build_panel_->draw_build_settings_modal_(ctx);
+    timeline_panel_->draw_clip_share_modal_(ctx);
 
     if (ctx.begin_modal("Unsaved Changes", {370, 0})) {   // height fits the content
         ctx.paragraph("There are unsaved changes. Save them first?");
@@ -3627,19 +3797,19 @@ void EditorApp::draw_modals_(imm::Context& ctx) {
         const float box_bottom = std::floor((ctx.canvas_size().y - controls_size.y) * 0.5f) + controls_size.y;   // begin_modal() centres the box
         const float body_h = std::max(100.0f, box_bottom - ctx.style.padding - ctx.style.row_height - 8 - top.y);
         ctx.begin_region("controls_body", {top.x, top.y, ctx.available_width(), body_h}, true);
-        draw_keymap_table_(ctx, prefs_keymap_filter_);   // ui/preferences.inl
+        preferences_panel_->draw_keymap_table_(ctx, preferences_panel_->prefs_keymap_filter_);   // ui/preferences.h
         ctx.end_region();
         ctx.set_cursor_y(top.y + body_h + 6);
-        if (ctx.button("Preferences...", 130, true, imm::Icon::Gear)) { ctx.close_modal(); open_preferences("Navigation"); }
+        if (ctx.button("Preferences...", 130, true, imm::Icon::Gear)) { ctx.close_modal(); preferences_panel_->open_preferences("Navigation"); }
         ctx.tooltip("Preferences\nOrbit / zoom speeds, trackpad and snapping");
         ctx.same_line();
         if (ctx.button("Close", 100)) ctx.close_modal();
         ctx.end_modal();
     }
-    draw_preferences_modal_(ctx);
-    draw_about_modal_(ctx);
-    draw_project_settings_modal_(ctx);
-    draw_world_generator_modal_(ctx);
+    preferences_panel_->draw_preferences_modal_(ctx);
+    topbar_panel_->draw_about_modal_(ctx);
+    project_settings_panel_->draw_project_settings_modal_(ctx);
+    world_generator_panel_->draw_world_generator_modal_(ctx);
     if (!pending_modal_.empty()) { ctx.open_modal(pending_modal_); pending_modal_.clear(); }
 }
 
@@ -3666,12 +3836,12 @@ void EditorApp::discard_all_changes_() {
 void EditorApp::save_all_() {
     if (doc_.dirty()) save_scene();
     else {
-        save_terrains_();
-        save_tile_maps_();
+        terrain_panel_->save_terrains_();
+        tile_mode_panel_->save_tile_maps_();
     }
     if (mesh_.open() && mesh_.dirty()) save_mesh();
     if (material_.open() && material_.dirty()) save_material();
-    if (game_theme_.open() && game_theme_.dirty()) save_theme();
+    if (game_theme_.open() && game_theme_.dirty()) theme_editor_panel_->save_theme();
     if (config_.dirty()) save_config();
 }
 
@@ -3682,8 +3852,8 @@ void EditorApp::import_audio_dialog_(std::vector<std::string> tags) {
                           deferred_.push_back([this, p, tags] {
                               fs::path dir;
                               int n = 0;
-                              with_tags_(tags, [&] { dir = project_.assets() / new_asset_dir_("audio"); n = import_audio({p}); });
-                              if (n > 0) open_asset(AssetType::Audio, project_.relative(dir / p.filename()));
+                              assets_panel_->with_tags_(tags, [&] { dir = project_.assets() / assets_panel_->new_asset_dir_("audio"); n = assets_panel_->import_audio({p}); });
+                              if (n > 0) assets_panel_->open_asset(AssetType::Audio, project_.relative(dir / p.filename()));
                           });
                       });
 }
@@ -3741,10 +3911,10 @@ void EditorApp::handle_shortcuts_(imm::Context& ctx) {
     if (ctx.shortcut(Key::Z, cmd | Mods::Shift) || ctx.shortcut(Key::Y, cmd)) redo();
     if (ctx.shortcut(Key::N, cmd)) guarded_([this] { new_scene(); });
     if (ctx.shortcut(Key::O, cmd)) guarded_([this] { open_scene_dialog_(); });
-    if (ctx.shortcut(Key::B, cmd | Mods::Shift)) build_refresh();
+    if (ctx.shortcut(Key::B, cmd | Mods::Shift)) build_panel_->build_refresh();
     if (ctx.shortcut(Key::Q, cmd)) { if (request_close()) quit_ = true; }
     if (ctx.shortcut(Key::F5)) {
-        if (active_type_ == AssetType::UI) ui_set_interact_(!ui_interact_);
+        if (active_type_ == AssetType::UI) ui_canvas_panel_->ui_set_interact_(!ui_canvas_panel_->ui_interact_);
         else playing() ? stop() : play();
     }
     // Esc gives the mouse back to the editor; the game keeps running (F5 / Stop ends it).

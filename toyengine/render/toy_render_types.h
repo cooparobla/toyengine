@@ -1,6 +1,6 @@
 /**
  * @file toy_render_types.h
- * @brief GPU-layout structs shared across the pixel-art frame graph: the three
+ * @brief GPU-layout structs shared across the frame graph: the three
  *        push-constant blocks this engine appends to gfxcoopa's passes, and the
  *        per-frame SDF draw record.
  *
@@ -20,7 +20,7 @@
 #include <gfxcoopa/engine/components/sdf_renderer.h>
 #include <gfxcoopa/engine/passes/transparent_pass.h>
 
-#include <toyengine/render/toy_render_math.h>
+#include <toyengine/render/sdf_clip.h>
 
 namespace toy {
 namespace render {

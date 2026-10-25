@@ -10,7 +10,7 @@ colour: grading first, then palette quantization. Both paths are **startup-fixed
 (`render.palette`, `render.grading_lut`), so set them in `assets/config.yaml` (or a scene's
 settings for a scene loaded at startup) and restart; the enable flags `palette_enabled` and
 `grading_enabled` are runtime toggles. The engine positions itself as a full-resolution engine:
-the pixel-art palette look is legacy -- don't make it a scene's default without being asked.
+the palette-quantisation look is legacy -- don't make it a scene's default without being asked.
 
 ## Palette
 

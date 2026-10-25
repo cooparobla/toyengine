@@ -1,4 +1,10 @@
 #include "editor/app/editor_app.h"
+#include "editor/app/ui/topbar.h"
+#include "editor/app/ui/ui_canvas.h"
+#include "editor/app/ui/properties.h"
+#include "editor/app/ui/assets.h"
+#include "editor/app/ui/statusbar.h"
+#include "editor/app/ui/outliner.h"
 
 namespace toy {
 namespace editor {
@@ -8,10 +14,10 @@ void EditorApp::draw_(imm::Context& ctx) {
     // No full-window background fill: the 3D render shows through the viewport's rect,
     // so backgrounds are painted per area (and around the viewport) instead.
     const float top_h = 28, status_h = 24;
-    draw_topbar_(ctx, {0, 0, sz.x, top_h});
+    topbar_panel_->draw_topbar_(ctx, {0, 0, sz.x, top_h});
     const imm::Box content{0, top_h, sz.x, std::max(0.0f, sz.y - top_h - status_h)};
     draw_workspace_(ctx, content);
-    draw_statusbar_(ctx, {0, sz.y - status_h, sz.x, status_h});
+    statusbar_panel_->draw_statusbar_(ctx, {0, sz.y - status_h, sz.x, status_h});
     draw_modals_(ctx);
     handle_shortcuts_(ctx);
 }
@@ -94,15 +100,15 @@ void EditorApp::draw_workspace_(imm::Context& ctx, const imm::Box& c) {
         // The UI designer: the asset list above the Widgets palette.
         const imm::Box a = area_(ctx, left);
         const float split = std::max(140.0f, a.h * 0.4f);
-        draw_asset_panel_(ctx, {a.x, a.y, a.w, split});
+        assets_panel_->draw_asset_panel_(ctx, {a.x, a.y, a.w, split});
         ctx.fill({a.x + 6, a.y + split, a.w - 12, 1}, ctx.style.border);
-        draw_ui_palette_(ctx, {a.x, a.y + split + 2, a.w, a.h - split - 2});
+        ui_canvas_panel_->draw_ui_palette_(ctx, {a.x, a.y + split + 2, a.w, a.h - split - 2});
     } else {
-        draw_asset_panel_(ctx, area_(ctx, left));
+        assets_panel_->draw_asset_panel_(ctx, area_(ctx, left));
     }
-    if (show_bottom_) draw_console_area_(ctx, area_(ctx, console));
-    if (hierarchy) draw_outliner_(ctx, area_(ctx, outliner));
-    draw_properties_(ctx, area_(ctx, props));
+    if (show_bottom_) assets_panel_->draw_console_area_(ctx, area_(ctx, console));
+    if (hierarchy) outliner_panel_->draw_outliner_(ctx, area_(ctx, outliner));
+    properties_panel_->draw_properties_(ctx, area_(ctx, props));
 }
 
 bool EditorApp::asset_view_() const {

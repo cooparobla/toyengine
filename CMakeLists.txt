@@ -213,10 +213,9 @@ set_source_files_properties(${TOYENGINE_DIR}/toyengine/core/runtime_paths.cpp PR
 
 # --- toyengine::editor: the editor (editor/), compiled once ---
 # Every project's editor executable links it, as do the editor tests and the docs tool; only
-# editor/editor.cpp (main) compiles into the executable itself. editor/editor_test.cpp is the
-# retired monolithic test file and is not built.
+# editor/editor.cpp (main) compiles into the executable itself.
 file(GLOB_RECURSE _toyengine_editor_sources CONFIGURE_DEPENDS ${TOYENGINE_DIR}/editor/*.cpp)
-list(FILTER _toyengine_editor_sources EXCLUDE REGEX "/editor/(editor|editor_test)\\.cpp$")
+list(FILTER _toyengine_editor_sources EXCLUDE REGEX "/editor/editor\\.cpp$")
 add_library(toyengine_editor_lib STATIC ${_toyengine_editor_sources})
 add_library(toyengine::editor ALIAS toyengine_editor_lib)
 target_link_libraries(toyengine_editor_lib PUBLIC toyengine::engine)

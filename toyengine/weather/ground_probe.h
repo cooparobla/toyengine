@@ -37,10 +37,18 @@
 
 
 #include <toyengine/particles/particle_system.h>
-#include <toyengine/water/water_system.h>
 #include <toyengine/world/heightmap_data.h>
 
+/// Reference-only below (probe_physics_); defined in physxcoopa/system/physics_system.h,
+/// included by ground_probe.cpp.
+namespace coopa { namespace physx { namespace system { class PhysicsSystem; } } }
+
 namespace toy {
+
+/// Reference-only below (sample_water_); the definition is toyengine/water/water_system.h,
+/// included by ground_probe.cpp. Keeping it out of this header keeps water_system.h --
+/// and everything it pulls -- off ~100 translation units that reach here via engine.h.
+namespace water { class WaterSystem; }
 namespace weather {
 
 class GroundProbe {

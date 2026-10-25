@@ -1,3 +1,6 @@
+#include "editor/app/ui/particle_panel.h"
+#include "editor/app/ui/assets.h"
+
 #include "editor/app/editor_app.h"
 
 #include <cmath>
@@ -42,12 +45,12 @@ float num_of(const Node& n, const char* key, float def) {
 
 } // namespace
 
-ParticleSystem* EditorApp::live_particle_system_(ObjectId id) const {
-    coopa::scene::SceneObject* live = sync_.live(id);
+ParticleSystem* ParticlePanel::live_particle_system_(ObjectId id) const {
+    coopa::scene::SceneObject* live = app_.sync_.live(id);
     return live ? live->get_component<ParticleSystem>() : nullptr;
 }
 
-EditResult EditorApp::draw_particle_panel_(imm::Context& ctx, ObjectId id, Node& comp, const InspectorEnv& env) {
+EditResult ParticlePanel::draw_particle_panel_(imm::Context& ctx, ObjectId id, Node& comp, const InspectorEnv& env) {
     using I = imm::Icon;
     EditResult r;
     std::set<std::string> placed{"type", "id"};
@@ -267,7 +270,7 @@ EditResult EditorApp::draw_particle_panel_(imm::Context& ctx, ObjectId id, Node&
         if (render_mode == "mesh") {
             fields({pfield("render_mesh", "Mesh", "The mesh every particle / instance draws"),
                     pfield("cast_shadows", "Cast Shadows", "Off for grass and small clutter: their shadows cost a lot and show little")});
-            r.absorb(draw_material_field(ctx, comp, env, [this](const std::string& rel) { open_asset(AssetType::Material, rel); }));
+            r.absorb(draw_material_field(ctx, comp, env, [this](const std::string& rel) { app_.assets_panel_->open_asset(AssetType::Material, rel); }));
             placed.insert("material");
         } else if (render_mode != "none") {
             fields({pfield("sprite", "Sprite"), pfield("opacity", "Opacity"),
@@ -322,7 +325,7 @@ EditResult EditorApp::draw_particle_panel_(imm::Context& ctx, ObjectId id, Node&
     return r;
 }
 
-EditResult EditorApp::draw_particle_terrain_section_(imm::Context& ctx, ObjectId id, Node& comp, const InspectorEnv& env) {
+EditResult ParticlePanel::draw_particle_terrain_section_(imm::Context& ctx, ObjectId id, Node& comp, const InspectorEnv& env) {
     using I = imm::Icon;
     EditResult r;
     const glm::vec4 dim = ctx.style.text_dim;
@@ -332,14 +335,14 @@ EditResult EditorApp::draw_particle_terrain_section_(imm::Context& ctx, ObjectId
     // The terrain it scatters over (live), for the pickers and read-outs.
     const toy::world::HeightmapTerrain* terrain = nullptr;
     std::vector<std::string> terrain_names{"(nearest above this object)"};
-    for (ObjectId oid : doc_.all_ids()) {
-        if (doc_.find_component(oid, "HeightmapTerrain") < 0) continue;
-        if (const Node* o = doc_.find(oid)) terrain_names.push_back(get_string(*o, "name", "?"));
+    for (ObjectId oid : app_.doc_.all_ids()) {
+        if (app_.doc_.find_component(oid, "HeightmapTerrain") < 0) continue;
+        if (const Node* o = app_.doc_.find(oid)) terrain_names.push_back(get_string(*o, "name", "?"));
     }
     const std::string named = str_of(tb, "object", "");
-    if (coopa::scene::SceneObject* live = sync_.live(id)) {
+    if (coopa::scene::SceneObject* live = app_.sync_.live(id)) {
         if (!named.empty()) {
-            if (coopa::scene::Scene* sc = engine_.has_scene() ? &engine_.scene() : nullptr) {
+            if (coopa::scene::Scene* sc = app_.engine_.has_scene() ? &app_.engine_.scene() : nullptr) {
                 if (coopa::scene::SceneObject* o = sc->find_object(named)) terrain = o->get_component<toy::world::HeightmapTerrain>();
             }
         } else {

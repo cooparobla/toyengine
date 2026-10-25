@@ -994,7 +994,7 @@ static std::vector<Frame> game_display_sweep(uint32_t win_w, uint32_t win_h, uin
  *
  * Where the reported flicker lives. Every measurement above captures the render target, which
  * is clean -- but that is not what anyone looks at. The composite resamples the render target
- * into the display region with a NEAREST sampler, which is right for the pixel-art upscale it
+ * into the display region with a NEAREST sampler, which is right for the magnifying upscale it
  * was written for (window larger than the render target) and is point-sampled MINIFICATION the
  * moment the display region is smaller. The editor makes it smaller as a matter of course:
  * `apply_editor_render_overrides()` switches the project to `resolution_mode: fill`, which

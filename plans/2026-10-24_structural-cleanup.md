@@ -1,9 +1,38 @@
 # Structural cleanup — engine, editor, hub, docs
 
-> **Status: planned.** Nothing here is implemented yet. Behaviour-preserving with **one
-> deliberate exception**: the default internal render resolution changes from 480×270 to
-> 1920×1080 (Stage 2d, category D). Everything else leaves the render, editor and gameplay
-> behaviour untouched, with `ctest` green after every stage.
+> **Status: Stages 0-4 implemented (2026-10-24); Stages 5-7 outstanding.**
+> Behaviour-preserving with **one deliberate exception**: the default internal render
+> resolution changed from 480×270 to 1920×1080 (Stage 2d, category D).
+>
+> | Stage | State |
+> |---|---|
+> | 0 Baseline | done — 160/160 green, 19m30s; blast radius recorded |
+> | 1 Tree hygiene | done — ~20k dead lines removed; one uncovered test ported, not lost |
+> | 2 Docs + `.claude` map | done — 15 new READMEs, root README fixed, change map added |
+> | 2d Pixel-art framing | done — 29 mentions resolved; resolution default changed |
+> | 3 Header diet | done — see "Measured result" below |
+> | 4 YAML read helper | mostly done — `core/yaml_read.h` added; `scene/register.cpp` and `core/config.cpp` converted (`contains()` 153→62 and 312→62, 14 duplicate lambdas gone). Six small parsers still use their own value-returning helpers, which is a different idiom. |
+> | 5 Render pipeline split | done — 5,171-line `.cpp` → 6 TUs (553 / 1138 / 982 / 1473 / 801 / 496). Header member order deliberately NOT reordered (destruction-order-critical). |
+> | 6 Thin `Engine` | done differently — split into sibling TUs (engine.cpp 2,697 → 1,712, plus `engine_render_sync` / `engine_scene_load` / `engine_services`) rather than extracting a `SceneRenderBridge` class. The plan's rationale for the class was that ~15 of `engine.h`'s includes would follow it out; Stage 3 already removed those, so the remaining gain was file organisation — achieved here with no state plumbing and no behaviour risk. |
+> | 7 `EditorApp` panels | **all 24 panels migrated.** Every `ui/*.inl` is gone except `layout.inl`, which is EditorApp's own `draw_()` dispatch and chrome helpers, not a panel. **Measured: a panel-header edit rebuilds 8-15 TUs (3 for a panel nothing else calls) vs 26 before.** New supporting headers: `editor_panel.h` (the base), `editor_types.h` (declaration-level types), `editor_context.h`. EditorApp keeps out-of-line forwarders so its public API is unchanged. **Caveat: EditorApp is still a large class** (~660 declarations / ~290 members) — the shared state stayed; only the `.inl`-declared state moved. See editor/app/README.md. |
+>
+> ### Measured result (Stage 3)
+>
+> TUs that must recompile when the header changes, from the build's own depfiles:
+>
+> | Header | Before | After |
+> |---|---|---|
+> | `water/water_system.h` | 108 | 11 |
+> | `scene/register.h` | 102 | 9 |
+> | `world/snow_system.h` | 96 | 4 |
+> | `world/terrain_system.h` | 95 | 3 |
+> | `core/engine.h` project includes | 52 | 22 |
+>
+> `toy_render_math.h` (831 lines) split into `render_types.h` / `render_extent.h` /
+> `shadow_fit.h` / `sdf_clip.h` / `view_math.h`; `engine.h` now parses only the 42-line
+> `render_types.h`. The chain that kept `water_system.h` wide was
+> `engine.h -> weather_system.h -> ground_probe.h -> water_system.h`, cut with a
+> forward declaration since `GroundProbe` only takes it by reference.
 
 ## Introduction
 

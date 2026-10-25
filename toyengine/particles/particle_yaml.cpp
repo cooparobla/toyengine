@@ -1,6 +1,9 @@
 #include <toyengine/particles/particle_yaml.h>
+#include <toyengine/core/yaml_read.h>
 
 namespace toy {
+
+using toy::core::yaml::read;
 namespace particles {
 namespace yaml_detail {
 
@@ -302,7 +305,7 @@ void parse_particle_settings(const fkyaml::node& node, ParticleSettings& s) {
                                                  {"youngest", SortMode::YoungestFirst}, {"youngest_first", SortMode::YoungestFirst}}, "sort");
     }
     f("max_draw_distance", s.max_draw_distance);
-    if (node.contains("cast_shadows")) s.cast_shadows = node.at("cast_shadows").get_value<bool>();
+    read(node, "cast_shadows", s.cast_shadows);
 }
 
 std::shared_ptr<const MeshSurface> load_mesh_surface(coopa::asset::AssetManager& assets, const std::string& key,

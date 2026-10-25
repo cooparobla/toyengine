@@ -28,6 +28,7 @@
 
 #include <toyengine/core/branding.h>
 #include <toyengine/core/engine.h>
+#include <uicoopa/ui_yaml.h>   // UIResourceCache
 
 #include <uicoopa/immediate/imm_canvas.h>
 #include <uicoopa/immediate/imm_file_dialog.h>
@@ -109,8 +110,7 @@ public:
 
     /**
      * @brief The hub's window and renderer: the engine's own assets/config.yaml (the defaults
-     *        everything else runs with -- the bare AppConfig{} code defaults carry the
-     *        pixel-art toggles), with the hub's window and the 3D work it never shows
+     *        everything else runs with), with the hub's window and the 3D work it never shows
      *        switched off.
      */
     static core::AppConfig engine_config(bool visible) {

@@ -86,6 +86,39 @@ FieldDesc f_items(std::string k, std::vector<FieldDesc> item, Node def, bool in_
 
 FieldDesc with_tip(FieldDesc f, std::string tip) { f.tooltip = std::move(tip); return f; }
 
+FieldDesc f_texture(std::string k, std::string label, bool in_default) {
+    FieldDesc f = f_asset(std::move(k), "textures", ".png", false, false, "", in_default);
+    f.kind = FieldKind::Texture;
+    f.label = std::move(label);
+    return f;
+}
+
+FieldDesc f_curve(std::string k, std::vector<glm::vec2> def, bool in_default) {
+    FieldDesc f;
+    f.key = std::move(k);
+    f.kind = FieldKind::Curve;
+    f.in_default = in_default;
+    f.def_node = Node::sequence();
+    for (const glm::vec2& p : def) {
+        const float v[2] = {p.x, p.y};
+        f.def_node.as_seq().push_back(make_float_seq(v, 2));
+    }
+    return f;
+}
+
+FieldDesc f_gradient(std::string k, std::vector<std::pair<float, glm::vec3>> def, bool in_default) {
+    FieldDesc f;
+    f.key = std::move(k);
+    f.kind = FieldKind::Gradient;
+    f.in_default = in_default;
+    f.def_node = Node::sequence();
+    for (const auto& [t, c] : def) {
+        const float v[4] = {t, c.r, c.g, c.b};
+        f.def_node.as_seq().push_back(make_float_seq(v, 4));
+    }
+    return f;
+}
+
 Node field_default_node(const FieldDesc& f) {
     switch (f.kind) {
         case FieldKind::Bool:  return Node(f.def.x != 0.0f);
@@ -107,10 +140,13 @@ Node field_default_node(const FieldDesc& f) {
             return n;
         }
         case FieldKind::StringList:
-        case FieldKind::ItemList: return f.def_node.is_sequence() ? f.def_node : Node::sequence();
+        case FieldKind::ItemList:
+        case FieldKind::Curve:
+        case FieldKind::Gradient: return f.def_node.is_sequence() ? f.def_node : Node::sequence();
         case FieldKind::Enum:
         case FieldKind::String:
         case FieldKind::AssetRef:
+        case FieldKind::Texture:
         case FieldKind::ChildRef: return Node(f.default_string);
         case FieldKind::Material: {
             Node m = Node::mapping();
@@ -135,39 +171,108 @@ FieldDesc project_only(FieldDesc f) { f.project_only = true; return f; }
 
 FieldDesc with_default(FieldDesc f, std::string def) { f.default_string = std::move(def); return f; }
 
+FieldDesc shown_when(FieldDesc f, std::string key, std::vector<std::string> values) {
+    f.show.key = std::move(key);
+    f.show.equals = std::move(values);
+    f.show.negate = false;
+    return f;
+}
+
+FieldDesc hidden_when(FieldDesc f, std::string key, std::vector<std::string> values) {
+    f.show.key = std::move(key);
+    f.show.equals = std::move(values);
+    f.show.negate = true;
+    return f;
+}
+
+FieldDesc as_slider(FieldDesc f) { f.slider = true; return f; }
+
+FieldDesc with_unit(FieldDesc f, std::string unit) { f.suffix = std::move(unit); return f; }
+
+const FieldDesc* ComponentSchema::field(const std::string& key) const {
+    for (const auto& f : fields) if (f.key == key) return &f;
+    return nullptr;
+}
+
+SectionBuilder::SectionBuilder(std::string title, std::string icon) {
+    s_.title = std::move(title);
+    s_.icon = std::move(icon);
+}
+
+SectionBuilder& SectionBuilder::says(std::string blurb) { s_.blurb = std::move(blurb); return *this; }
+
+SectionBuilder& SectionBuilder::keys(std::vector<std::string> ks) {
+    for (auto& k : ks) s_.keys.push_back(std::move(k));
+    return *this;
+}
+
+SectionBuilder& SectionBuilder::sub(std::string title, std::string show_key, std::vector<std::string> values) {
+    InspectorSubhead h;
+    h.index = s_.keys.size();
+    h.title = std::move(title);
+    h.show.key = std::move(show_key);
+    h.show.equals = std::move(values);
+    s_.subheads.push_back(std::move(h));
+    return *this;
+}
+
+SectionBuilder& SectionBuilder::toggle(std::string key) { s_.toggle = std::move(key); return *this; }
+
+SectionBuilder& SectionBuilder::when(std::string key, std::vector<std::string> values) {
+    s_.show.key = std::move(key);
+    s_.show.equals = std::move(values);
+    return *this;
+}
+
+SectionBuilder& SectionBuilder::custom(std::string id) { s_.custom = std::move(id); return *this; }
+
+SectionBuilder& SectionBuilder::closed() { s_.open = false; return *this; }
+
+InspectorSection SectionBuilder::done() { return std::move(s_); }
+
+SectionBuilder sec(std::string title, std::string icon) { return SectionBuilder(std::move(title), std::move(icon)); }
+
 const std::vector<FieldDesc>& material_fields() {
     static const std::vector<FieldDesc> fields = {
         f_color("albedo", glm::vec3(0.8f), true),
-        f_float("metallic", 0.0f, 0.005f, 0.0f, 1.0f, true),
-        f_float("roughness", 0.5f, 0.005f, 0.0f, 1.0f, true),
-        f_float("ao", 1.0f, 0.005f, 0.0f, 1.0f),
+        as_slider(f_float("metallic", 0.0f, 0.005f, 0.0f, 1.0f, true)),
+        as_slider(f_float("roughness", 0.5f, 0.005f, 0.0f, 1.0f, true)),
+        with_tip(as_slider(f_float("ao", 1.0f, 0.005f, 0.0f, 1.0f)),
+                 "Baked ambient occlusion over the whole surface; the renderer's own SSAO is on top of it"),
         f_color("emissive", glm::vec3(0.0f)),
         f_float("emissive_strength", 1.0f, 0.02f, 0.0f, 1000.0f),
         f_enum("alpha_mode", {"OPAQUE", "MASK", "CUTOUT", "BLEND"}),
-        f_float("alpha", 1.0f, 0.005f, 0.0f, 1.0f),
-        f_float("alpha_cutoff", 0.5f, 0.005f, 0.0f, 1.0f),
-        f_bool("cull_backfaces", true),
+        // Opacity does nothing to an OPAQUE material, and the cutoff only means something to
+        // the alpha test MASK / CUTOUT run.
+        hidden_when(as_slider(f_float("alpha", 1.0f, 0.005f, 0.0f, 1.0f)), "alpha_mode", {"OPAQUE"}),
+        shown_when(as_slider(f_float("alpha_cutoff", 0.5f, 0.005f, 0.0f, 1.0f)), "alpha_mode", {"MASK", "CUTOUT"}),
+        with_tip(hidden_when(f_bool("cull_backfaces", true), "alpha_mode", {"BLEND"}),
+                 "Draw only the front of each face. Ignored when this material picks a surface shader (the "
+                 "shader's own setting wins) and by transparent materials, which always cull the back"),
         f_bool("refraction", false),
         with_tip(f_float("ior", -1.0f, 0.005f, -1.0f, 3.0f), "-1: the render settings' refraction_ior (glass ~1.45, water ~1.33)"),
-        with_tip(f_float("refraction_thickness", -1.0f, 0.005f, -1.0f, 10.0f), "-1: the render settings' refraction_thickness"),
+        with_tip(with_unit(f_float("refraction_thickness", -1.0f, 0.005f, -1.0f, 10.0f), "m"),
+                 "-1: the render settings' refraction_thickness"),
         f_color("refraction_tint", glm::vec3(1.0f)),
-        with_label(f_asset("texture_albedo", "textures", ".png"), "Albedo map"),
-        with_label(f_asset("texture_normal", "textures", ".png"), "Normal map"),
-        with_label(f_asset("texture_metallic_roughness", "textures", ".png"), "Metal/rough map"),
-        with_label(f_asset("texture_alpha_mask", "textures", ".png"), "Alpha mask"),
-        with_tip(with_label(f_asset("texture_displacement", "textures", ".png"), "Displacement map"),
+        with_label(f_texture("texture_albedo"), "Albedo map"),
+        with_label(f_texture("texture_normal"), "Normal map"),
+        with_label(f_texture("texture_metallic_roughness"), "Metal/rough map"),
+        with_label(f_texture("texture_alpha_mask"), "Alpha mask"),
+        with_tip(with_label(f_texture("texture_displacement"), "Displacement map"),
                  "Height map (red channel) the tessellator moves vertices along their normal by; only on a "
                  "renderer with tessellation"),
-        with_tip(f_float("displacement_scale", 0.05f, 0.005f, -10.0f, 10.0f), "Metres a white displacement texel moves"),
+        with_tip(with_unit(f_float("displacement_scale", 0.05f, 0.005f, -10.0f, 10.0f), "m"),
+                 "Metres a white displacement texel moves"),
         with_tip(f_bool("snow", true), "Lying snow settles on this material's open, up-facing surfaces when the weather has it"),
         // Toon (cel) shading, layered on this material's PBR inputs -- see PBRMaterial's
         // toon_* docs. Opaque materials only; a BLEND material ignores these.
         with_tip(f_int("toon_bands", 0, 0, 8), "Cel-shaded diffuse: how many light steps. 0 leaves this material PBR"),
-        with_tip(f_enum("toon_specular", {"pbr", "hard", "twostep", "off"}),
+        // 0 and 1 both mean "not cel-shaded", and then none of the three below does anything.
+        with_tip(hidden_when(f_enum("toon_specular", {"pbr", "hard", "twostep", "off"}), "toon_bands", {"0", "1"}),
                  "Edge of the specular highlight: the PBR lobe untouched, cut to a hard step, a core plus a halo, or none"),
-        with_tip(f_float("toon_rim", 0.0f, 0.25f, 0.0f, 1.75f),
+        with_tip(hidden_when(f_float("toon_rim", 0.0f, 0.25f, 0.0f, 1.75f), "toon_bands", {"0", "1"}),
                  "Rim accent on the lit side of each light; snaps to 0.25 steps"),
-        with_tip(f_float("toon_softness", 0.0f, 0.05f, 0.0f, 1.0f),
+        with_tip(hidden_when(as_slider(f_float("toon_softness", 0.0f, 0.05f, 0.0f, 1.0f)), "toon_bands", {"0", "1"}),
                  "How soft each band's edge is, as a share of a band; snaps to 0 / 0.15 / 0.35 / 0.7"),
         with_tip(f_bool("toon_outline", false),
                  "Draw the outline on this material. Needs Outline on and its mode set to Toon"),
@@ -175,8 +280,49 @@ const std::vector<FieldDesc>& material_fields() {
         // plain fields -- listed here so they count as known material keys and overrides.
         f_enum("shader", {"", "triplanar", "foliage", "snow", "water"}),
         [] { FieldDesc f; f.key = "shader_params"; f.kind = FieldKind::Vec4; f.speed = 0.01f; return f; }(),
+        [] { FieldDesc f; f.key = "shader_params_ext"; f.kind = FieldKind::Vec4; f.speed = 0.01f; return f; }(),
     };
     return fields;
+}
+
+const std::vector<InspectorSection>& material_sections() {
+    static const std::vector<InspectorSection> sections = {
+        sec("Surface", "Material")
+            .says("The look of the material itself, before any map is applied.")
+            .keys({"albedo", "metallic", "roughness", "ao"}).done(),
+        sec("Maps", "Image")
+            .says("Textures sampled at the mesh's UVs. Drop a file from the Textures tab onto a slot.")
+            .keys({"texture_albedo", "texture_normal", "texture_metallic_roughness"})
+            .sub("Displacement").keys({"texture_displacement", "displacement_scale"})
+            .done(),
+        sec("Emission", "Sun")
+            .says("Light the surface appears to give off. It glows, but it does not light anything else.")
+            .keys({"emissive", "emissive_strength"}).closed().done(),
+        sec("Transparency", "ShadeWire")
+            .says("Whether the surface is solid, cut out by a mask, or see-through.")
+            .keys({"alpha_mode", "alpha", "alpha_cutoff", "texture_alpha_mask", "cull_backfaces"}).done(),
+        sec("Refraction", "Sphere").toggle("refraction").when("alpha_mode", {"BLEND"})
+            .says("Bend the background through the surface -- glass, water, ice. Each value falls back to the "
+                  "render settings' when it is negative.")
+            .keys({"ior", "refraction_thickness", "refraction_tint"}).done(),
+        sec("Stylize", "Palette")
+            .says("Cel shading, layered on the PBR result above. Opaque materials only.")
+            .keys({"toon_bands", "toon_specular", "toon_rim", "toon_softness", "toon_outline"}).closed().done(),
+        sec("Weather", "World").keys({"snow"}).closed().done(),
+    };
+    return sections;
+}
+
+const ComponentSchema& material_schema() {
+    static const ComponentSchema schema = [] {
+        ComponentSchema s;
+        s.type = "Material";
+        s.category = "Rendering";
+        s.fields = material_fields();
+        s.sections = material_sections();
+        return s;
+    }();
+    return schema;
 }
 
 const std::vector<SurfaceShaderInfo>& surface_shaders() {
@@ -333,9 +479,73 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             with_tip(f_float("wind_influence", 0.0f, 0.01f, 0.0f, 100.0f),
                      "How hard the weather's wind pushes this body: about 0.6 x the area it shows the wind (sq m). "
                      "0 ignores the wind; light bodies blow about, heavy ones barely move"),
+            with_tip(f_vec3("center_of_mass", glm::vec3(0.0f), 0.01f),
+                     "Where the mass sits, as an offset from the collider's centre. Lowering it is what "
+                     "stops a tall body tipping: it rolls when lateral acceleration passes "
+                     "half-track / centre-of-mass height"),
             f_bool("use_gravity", true, true),
             f_bool("is_kinematic", false, true),
             f_enum("interpolation", {"Interpolate", "None"}),   // physx_yaml.h reads a string: "None" or anything else
+        }});
+        // physxcoopa vehicles (components/vehicle.h): `preset` picks a tuning from
+        // vehicle/vehicle_presets.h and every other field overrides one of its values, so the
+        // DEFAULTS BELOW ARE pickup_4x4's -- the preset VehicleComponent::config starts as. A row
+        // whose default disagreed with the preset would write that key into the YAML the first
+        // time the inspector touched the component, silently pinning it against the preset.
+        add({"Vehicle", "Physics", {
+            with_tip(f_enum("preset", {"pickup_4x4", "sports_car", "hauler_6x6", "buggy", "dozer", "trailer"}, true),
+                     "Which tuning to start from; the fields below override it"),
+            with_tip(f_enum("steer_mode", {"ackermann", "differential"}),
+                     "ackermann turns the steered wheels; differential drives the two sides against "
+                     "each other instead (a tracked machine, which can pivot on the spot)"),
+            with_tip(f_float("max_steer_deg", 36.0f, 0.5f, 0.0f, 80.0f, true), "Steering lock at a standstill"),
+            with_tip(f_float("min_steer_deg", 11.0f, 0.5f, 0.0f, 80.0f),
+                     "Steering lock at steer_falloff_speed and above -- the gap to max_steer_deg is what "
+                     "keeps a vehicle stable at speed without making it a bus at parking pace"),
+            f_float("steer_falloff_speed", 28.0f, 0.5f, 0.0f, 200.0f),
+            f_float("steer_rate_deg", 240.0f, 5.0f, 1.0f, 2000.0f),
+            f_float("steer_return_rate_deg", 340.0f, 5.0f, 1.0f, 2000.0f),
+            with_tip(f_float("brake_torque", 5200.0f, 50.0f, 0.0f, 1e6f), "Nm at full pedal, split by each wheel's brake_share"),
+            with_tip(f_float("handbrake_torque", 7000.0f, 50.0f, 0.0f, 1e6f), "Nm, split by each wheel's handbrake_share"),
+            with_tip(f_float("anti_roll", 8000.0f, 100.0f, 0.0f, 1e6f),
+                     "N/m of compression difference transferred across an axle. Resists body roll without "
+                     "stiffening the springs; keep it well under the wheel rate"),
+            with_tip(f_float("drag", 0.9f, 0.01f, 0.0f, 100.0f), "Aerodynamic drag, N per (m/s)^2"),
+            with_tip(f_float("downforce", 0.0f, 0.01f, 0.0f, 100.0f), "N per (m/s)^2, pressing the chassis down"),
+            with_tip(f_float("air_righting", 2.5f, 0.1f, 0.0f, 50.0f),
+                     "How hard an airborne chassis is torqued back level; 0 leaves it tumbling honestly"),
+            f_float("air_damping", 1.5f, 0.1f, 0.0f, 50.0f),
+            with_tip(f_float("nominal_wheel_load", 0.0f, 10.0f, 0.0f, 1e6f),
+                     "Load the tyre gives its full grip at, N. 0 derives it from the chassis mass"),
+            with_tip(f_float("recover_time", 1.4f, 0.05f, 0.1f, 10.0f),
+                     "Seconds the righting takes when a flipped vehicle is recovered: it floats clear, "
+                     "turns smoothly back upright about the heading it had, and lands on its suspension"),
+            with_tip(f_float("recover_lift", 0.8f, 0.05f, 0.0f, 10.0f),
+                     "How far above its ride height it floats while turning over"),
+            with_tip(f_float("auto_recover_time", 0.0f, 0.1f, 0.0f, 60.0f),
+                     "Seconds upside down and still before it rights itself unasked; 0 never does"),
+            f_bool("player_input", true),
+            with_tip(f_bool("active", true), "The vehicle the player's input reaches; V cycles it"),
+            with_tip(f_items("wheels", {
+                f_string("object", ""),
+                f_vec3("anchor", glm::vec3(0.0f), 0.01f),
+                f_float("radius", 0.40f, 0.005f, 0.01f, 5.0f),
+                f_float("width", 0.28f, 0.005f, 0.01f, 5.0f),
+                f_float("mass", 30.0f, 0.5f, 0.1f, 2000.0f),
+                f_float("rest_length", 0.42f, 0.005f, 0.0f, 3.0f),
+                f_float("travel", 0.26f, 0.005f, 0.0f, 3.0f),
+                f_float("stiffness", 0.0f, 100.0f, 0.0f, 1e7f),
+                f_float("natural_frequency", 1.45f, 0.01f, 0.05f, 10.0f),
+                f_float("damping_ratio", 0.45f, 0.01f, 0.0f, 5.0f),
+                f_float("rebound_ratio", 0.65f, 0.01f, 0.0f, 5.0f),
+                f_bool("steered", false),
+                f_float("drive_share", 0.0f, 0.05f, 0.0f, 10.0f),
+                f_float("brake_share", 1.0f, 0.05f, 0.0f, 10.0f),
+                f_float("handbrake_share", 0.0f, 0.05f, 0.0f, 10.0f),
+                f_int("anti_roll_group", -1, -1, 15),
+                f_enum("side", {"left", "right"}),
+            }), "One entry per wheel, in the preset's own order (front axle first, left then right). "
+                "`object` names the child drawn there; `stiffness` 0 derives the rate from natural_frequency"),
         }});
         // physxcoopa joints (components/hinge_joint.h, ball_joint.h, cone_twist_joint.h): anchor and
         // axis in THIS object's local frame; the other side is `connected_object`, and both need a
@@ -729,7 +939,6 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                      "drawn pose, never the motion"),
             with_tip(f_float("slope_limit", 45.0f, 0.5f, 0.0f, 89.0f), "Degrees; steeper slopes are walls"),
             f_float("skin", 0.02f, 0.001f, 0.001f, 0.5f),
-            with_tip(f_float("snap_distance", 0.3f, 0.005f, 0.0f, 5.0f), "Keeps the character on the ground walking down ramps and steps"),
             f_float("move_speed", 4.0f, 0.05f, 0.0f, 1000.0f, true),
             f_float("sprint_multiplier", 1.8f, 0.01f, 0.0f, 100.0f),
             with_tip(f_float("acceleration", 30.0f, 0.1f, 0.0f, 10000.0f), "m/s^2 toward the target speed"),
@@ -1050,6 +1259,7 @@ std::map<std::string, ComponentSchema>& schema_table_() {
         add({"SkinnedMeshRenderer", "Rendering", {f_asset("mesh_path", "meshes", ".yaml", true, true, "", true), f_string("rig", ""),
                                                    f_bool("preserve_volume", false)}});
         add_ui_schemas(add);
+        apply_component_sections(t);
         return t;
     }();
     return table;

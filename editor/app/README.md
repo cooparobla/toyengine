@@ -12,7 +12,16 @@ embedded `Engine`.
 | [`editor_theme.h`](editor_theme.h) | **Editor chrome colours and metrics** — where to change how the editor looks. |
 | [`sculpt_preview.h`](sculpt_preview.h), [`paint_preview.h`](paint_preview.h) | Live previews for the mesh modes. |
 | [`trackpad.h`](trackpad.h) | Trackpad gesture interpretation. |
+| [`thumbnail_cache.h`](thumbnail_cache.h) | Small GPU copies of image assets, so the UI can show a texture instead of its file name. Read its file doc before touching eviction. |
 | [`ui/`](ui/) | One file per panel. |
+
+**A component's inspector is not a panel.** Which rows a component shows, in which collapsible
+section and under what conditions, is data in
+[`editor/schema/component_sections.cpp`](../schema/component_sections.cpp); a component that
+needs more than rows registers a drawer with `register_inspector_section()` and puts it in
+[`editor/schema/sections/`](../schema/sections/), where it is unit-testable with `ImmHarness`.
+`ParticlePanel` and `TileTerrainPanel` still live here because they reach into the running
+editor, but they are reached through that registry, not by name from `properties.cpp`.
 
 ## Frame flow
 

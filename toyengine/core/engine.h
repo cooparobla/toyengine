@@ -1072,6 +1072,21 @@ private:
     void drive_ragdolls_(coopa::scene::Scene& scene);
 
     /**
+     * @brief Pushes driving input into the ACTIVE Vehicle, and cycles which one that is on V.
+     *
+     * Unlike drive_character_controllers_(), the move vector is NOT made camera-relative: W/S
+     * are throttle and brake and A/D steer, both in the vehicle's own frame. A top-down camera
+     * the player can swing freely (the demo's) would otherwise invert the steering halfway
+     * round, and no driving game has ever worked that way.
+     *
+     * V moves `active` to the next `player_input` vehicle and repoints the main camera's orbit
+     * `tracker` at it, so cycling the lineup keeps the view's yaw, pitch and distance. R rights
+     * a vehicle that has ended up on its roof.
+     * Same push model and NO_INPUT=1 contract as the drivers above.
+     */
+    void drive_vehicles_(coopa::scene::Scene& scene);
+
+    /**
      * @brief Refreshes and uploads every CPU-simulated mesh in the scene (today: cloth).
      *
      * Called between Scene::late_update() and ToyRenderPipeline::render(), which is the only

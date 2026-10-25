@@ -1,4 +1,6 @@
 #include "editor/app/editor_app.h"
+#include "editor/app/thumbnail_cache.h"
+#include "editor/schema/inspector_sections.h"
 #include "editor/app/ui/console_panel.h"
 #include "editor/app/ui/weather.h"
 #include "editor/app/ui/viewport_chrome.h"
@@ -68,6 +70,24 @@ EditorApp::EditorApp(core::Engine& engine, Project project, const fs::path& scen
     project_settings_panel_ = std::make_unique<ProjectSettingsPanel>(*this);
     statusbar_panel_ = std::make_unique<StatusBarPanel>(*this);
     outliner_panel_ = std::make_unique<OutlinerPanel>(*this);
+    // Thumbnails live on the GPU, so they need the device the engine already owns. Eviction
+    // goes through the pipeline so the UI pass drops its descriptor first -- see
+    // ThumbnailCache's file doc for what happens when it does not.
+    thumbnails_ = std::make_unique<ThumbnailCache>(
+        engine_.device(), engine_.allocator(), engine_.command_pool(),
+        [this](coopa::gfx::TextureView view) { engine_.pipeline().unregister_screen_ui_texture(view); });
+    register_builtin_sections();
+    // The two hand-written component inspectors. They still live with the panels because they
+    // reach into the running editor (live particle counts, the tile-set browser); the registry
+    // is how draw_component() finds them, so nothing has to know their names.
+    register_inspector_section("ParticleSystem", [this](imm::Context& ctx, SectionContext& sc) {
+        return particle_panel_->draw_particle_panel_(ctx, sc.object_id, sc.comp, sc.env);
+    });
+    for (const char* tile_terrain : {"TileTerrain", "Terrain"}) {   // Terrain is TileTerrain's old name
+        register_inspector_section(tile_terrain, [this](imm::Context& ctx, SectionContext& sc) {
+            return tile_terrain_panel_->draw_tile_terrain_panel_(ctx, sc.object_id, sc.comp, sc.env);
+        });
+    }
     ui_scene_ = std::make_unique<coopa::scene::Scene>("EditorUI");
     canvas_ = coopa::ui::build_immediate_canvas(*ui_scene_, "EditorUI", 100000);
     canvas_->on_draw = [this](coopa::ui::imm::Context& ctx) { draw_(ctx); };
@@ -160,7 +180,11 @@ EditorApp::EditorApp(core::Engine& engine, Project project, const fs::path& scen
 EditorApp::~EditorApp() {
     engine_.set_frame_hooks({});
     engine_.set_overlay_scene(nullptr);
+    // The drawers below close over this app; the registry outlives it (one editor is built
+    // and torn down per test), so they go with it.
+    for (const char* id : {"ParticleSystem", "TileTerrain", "Terrain"}) unregister_inspector_section(id);
     engine_.wait_idle();
+    thumbnails_.reset();   // while the device is still alive: it unregisters its views
 }
 
 // Out-of-line because editor_app.h only forward-declares the panel (ui/project_settings.h).
@@ -1075,6 +1099,23 @@ InspectorEnv EditorApp::inspector_env_() {
         });
         return out;
     };
+    env.object_id = doc_.primary();
+    env.playing = playing();
+    // The live object behind the selection, for a custom section that shows runtime state.
+    env.live_object = [this]() -> coopa::scene::SceneObject* {
+        const ObjectId id = doc_.primary();
+        return id ? sync_.live(id) : nullptr;
+    };
+    env.open_asset = [this](const std::string& rel) {
+        assets_panel_->open_asset(AssetsPanel::asset_type_of_(rel), rel);
+    };
+    env.texture_preview = [this](const std::string& rel) -> coopa::gfx::TextureView {
+        if (!thumbnails_) return {};
+        const fs::path abs = project_.absolute(rel);
+        std::error_code ec;
+        if (!fs::is_regular_file(abs, ec)) return {};
+        return thumbnails_->view(abs);
+    };
     return env;
 }
 
@@ -1700,20 +1741,26 @@ void EditorApp::extract_material_(ObjectId id, const Node& comp) {
     std::transform(name.begin(), name.end(), name.begin(), ::tolower);
     for (char& ch : name) if (!std::isalnum(static_cast<unsigned char>(ch))) ch = '_';
     const std::string n = unique_asset_name_("materials", name);
-    const fs::path path = project_.assets() / "materials" / (n + ".yaml");
+    // Into whatever tag folder the asset browser is filtered to, like every other New Asset.
+    const std::string dir = assets_panel_->new_asset_dir_("materials");
+    const fs::path path = project_.assets() / dir / (n + ".yaml");
     Node m = comp.at("material");
     erase_key(m, "base");
     try {
+        fs::create_directories(path.parent_path());
         coopa::yaml::save_document(path, m);
         project_.refresh();
     } catch (const std::exception& e) {
         log_error(std::string("Extract failed: ") + e.what());
         return;
     }
+    // A reference carries no tag folder: assets resolve by type and name, so re-tagging the
+    // material later does not break the objects using it.
     Node c = comp;
     c["material"] = Node("materials/" + n);
     instances_panel_->edit_component_(id, c, "Extract Material");
-    log_info("Extracted material to materials/" + n + ".yaml");
+    log_info("Extracted material to " + dir + "/" + n + ".yaml");
+    assets_panel_->open_asset(AssetType::Material, dir + "/" + n + ".yaml");
 }
 
 void EditorApp::add_mesh_to_scene_(const std::string& item, std::optional<glm::vec3> at) {
@@ -1818,10 +1865,32 @@ void EditorApp::extrude_() {
 
 void EditorApp::draw_material_editor_(imm::Context& ctx) {
     auto& md = material_;
+    // Name first: renaming here goes through Project::rename_asset(), which rewrites every
+    // scene, object and material that refers to it, so the rename cannot orphan anything.
+    {
+        std::string name = fs::path(md.ref).stem().string();
+        if (ctx.input_text("Name", &name) && !name.empty() && name != fs::path(md.ref).stem().string()) {
+            const std::string from = md.ref + ".yaml";
+            const std::string parent = fs::path(md.ref).parent_path().string();
+            const std::string to = (parent.empty() ? std::string("materials") : parent) + "/" + name + ".yaml";
+            if (md.dirty()) save_material();
+            const std::vector<std::string> touched = project_.rename_asset(from, to);
+            project_.refresh();
+            assets_panel_->open_asset(AssetType::Material, to);
+            log_info("Renamed to " + to + (touched.empty() ? "" : "  (" + std::to_string(touched.size()) + " file(s) updated)"));
+        }
+    }
     ctx.label_dim(md.ref + (md.dirty() ? "  (modified)" : ""));
-    if (ctx.button("Save Material", 130)) save_material();
+    if (ctx.button("Save Material", 130, true, imm::Icon::Save)) save_material();
     ctx.same_line();
     if (ctx.button("Assign to Selected", 150, true, imm::Icon::Material)) assign_material_(md.ref + ".yaml");
+    if (ctx.button("Revert", 130, md.dirty(), imm::Icon::Restart) && !md.path.empty()) {
+        const fs::path path = md.path;
+        const std::string ref = md.ref;
+        open_material(path);
+        log_info("Reverted " + ref + " to the file on disk");
+    }
+    ctx.tooltip("Revert\nThrow away the unsaved edits and read the file back from disk");
     ctx.spacing();
     Node before = md.node;
     InspectorEnv env = inspector_env_();

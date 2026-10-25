@@ -1,0 +1,7 @@
+# Packed snow: between gravel and mud on grip, and draggy enough to matter on a climb.
+dynamic_friction: 0.35
+static_friction: 0.40
+restitution: 0.0
+rolling_resistance: 0.090
+friction_combine: Average
+restitution_combine: Average

@@ -965,6 +965,53 @@ void AssetsPanel::draw_asset_context_menu_(imm::Context& ctx, AssetType t, const
     if (ctx.menu_item("Copy Path", "", nullptr, true) && ctx.input().set_clipboard) ctx.input().set_clipboard(rel);
 }
 
+namespace {
+
+/**
+ * @brief The starting points the New Material menu offers.
+ *
+ * Only the keys that make the look are written; everything else stays at the material
+ * defaults, so a preset reads as "a material, started from here" rather than a wall of values.
+ */
+const std::vector<std::pair<std::string, Node>>& material_presets() {
+    static const std::vector<std::pair<std::string, Node>> presets = [] {
+        std::vector<std::pair<std::string, Node>> out;
+        auto add = [&out](const char* label, glm::vec3 albedo, float metallic, float roughness,
+                          const std::function<void(Node&)>& extra = {}) {
+            Node m = Node::mapping();
+            m["albedo"] = make_color(albedo);
+            m["metallic"] = make_float(metallic);
+            m["roughness"] = make_float(roughness);
+            if (extra) extra(m);
+            out.push_back({label, m});
+        };
+        add("Plain", glm::vec3(0.8f), 0.0f, 0.5f);
+        add("Metal", glm::vec3(0.56f, 0.57f, 0.58f), 1.0f, 0.25f);
+        add("Plastic", glm::vec3(0.2f, 0.45f, 0.8f), 0.0f, 0.35f);
+        add("Rough Stone", glm::vec3(0.42f, 0.41f, 0.38f), 0.0f, 0.95f);
+        add("Glass", glm::vec3(0.9f, 0.95f, 1.0f), 0.0f, 0.05f, [](Node& m) {
+            m["alpha_mode"] = Node(std::string("BLEND"));
+            m["alpha"] = make_float(0.25);
+            m["refraction"] = Node(true);
+            m["ior"] = make_float(1.45);
+        });
+        add("Emissive", glm::vec3(0.05f), 0.0f, 0.6f, [](Node& m) {
+            m["emissive"] = make_color(glm::vec3(1.0f, 0.75f, 0.35f));
+            m["emissive_strength"] = make_float(4.0);
+        });
+        add("Foliage", glm::vec3(0.25f, 0.45f, 0.18f), 0.0f, 0.8f, [](Node& m) {
+            m["shader"] = Node(std::string("foliage"));
+            m["alpha_mode"] = Node(std::string("CUTOUT"));
+            const float params[4] = {0.12f, 1.6f, 1.0f, 0.0f};
+            m["shader_params"] = make_float_seq(params, 4);
+        });
+        return out;
+    }();
+    return presets;
+}
+
+} // namespace
+
 void AssetsPanel::draw_new_asset_items_(imm::Context& ctx, AssetType t) {
     using I = imm::Icon;
     if (t == AssetType::Mesh) {
@@ -991,6 +1038,17 @@ void AssetsPanel::draw_new_asset_items_(imm::Context& ctx, AssetType t) {
             if (!label.empty()) label[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(label[0])));
             if (ctx.menu_item(label, "", nullptr, true, I::UiWidget)) app_.guarded_([this, tpl, tags] { with_tags_(tags, [&] { app_.ui_canvas_panel_->new_ui_asset(tpl, tpl); }); });
             ctx.tooltip(label + "\nStart from the " + label + " template (editor/templates/ui/" + tpl + ".yaml)");
+        }
+        return;
+    }
+    if (t == AssetType::Material) {
+        const auto tags = app_.new_asset_tags_;
+        for (const auto& [label, body] : material_presets()) {
+            if (ctx.menu_item(label, "", nullptr, true, I::Material)) {
+                const std::string name = snake_case(label);
+                app_.guarded_([this, tags, name, body] { with_tags_(tags, [&] { app_.create_material(name, body); }); });
+            }
+            app_.test_rects_["asset_new:" + label] = ctx.last_rect();
         }
         return;
     }

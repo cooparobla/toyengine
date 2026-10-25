@@ -333,6 +333,20 @@ public:
     }
 
     /**
+     * @brief Drops `view` from the screen UI pass's descriptor cache, before the texture
+     *        behind it is destroyed.
+     *
+     * The pass caches one descriptor set per texture, keyed by the raw image view handle, and
+     * never evicts on its own. A texture destroyed without this call leaves that entry behind;
+     * the driver is then free to hand the same handle to the next view created, which the pass
+     * sees as already registered and draws through a descriptor pointing at freed memory. Wait
+     * for the device to be idle first -- the set may still be in flight.
+     */
+    void unregister_screen_ui_texture(coopa::gfx::TextureView view) {
+        if (screen_ui_pass_) screen_ui_pass_->unregister_texture(view);
+    }
+
+    /**
      * @brief Hands over this frame's water state -- ripple rings for the water shader and the
      *        underwater parameters for UnderwaterPass. Engine calls it every frame before
      *        render() from toy::water::WaterSystem; keeping it a plain struct means render/ never

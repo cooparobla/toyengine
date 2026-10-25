@@ -400,10 +400,17 @@ Everything a project builds goes into its own `build/`, compiled shaders include
 (`build/shaders/`), so building one never writes into the engine checkout or its `build/`.
 
 `toyhub link|unlink|vendor <dir>` switches between the modes and `toyhub upgrade <dir> [--ref R]`
-re-pins; each wipes the project's `build/` first, because the CMake cache remembers the old
-engine path. A vendored engine is deliberately *not* placed at `.libs/toyengine`: that path is
-`clean.sh --all`'s to delete and `setup.sh`'s to `git checkout`, either of which would eat
-uncommitted engine work. The symlink keeps it in link mode, where `setup.sh` only ever re-runs
+re-pins a pinned one. Switching is one step: the mode the project is in now is dismantled first
+-- a pinned clone in `.libs/`, a vendored submodule (its worktree, `.gitmodules` stanza, index
+entry and `.git/config` section) and a stale `.libs/toyengine` symlink all go, as do `build/` and
+`build-*/`, whose CMake cache remembers the old engine path. Uncommitted work in the engine being
+removed stops the switch and is named; `--force` throws it away. A removed submodule's objects
+stay in `.git/modules/<name>`, so unpushed engine commits survive and vendoring again reuses the
+clone instead of re-fetching the engine; `--purge` drops those too.
+
+A vendored engine is deliberately *not* placed at `.libs/toyengine`: that path is `clean.sh
+--all`'s to delete and `setup.sh`'s to `git checkout`, either of which would eat uncommitted
+engine work. The symlink keeps it in link mode, where `setup.sh` only ever re-runs
 `ln`. When a project's build is broken and it won't open, `toyhub rebuild <dir>` (the hub's
 **...** > **Rebuild (clean)**) removes its build output and builds it again. The CMake side is [`cmake/ToyProject.cmake`](cmake/ToyProject.cmake)
 (`toyengine_add_project()`). When `.libs/toyengine` is not the top-level build, it adds only the

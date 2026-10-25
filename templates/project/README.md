@@ -68,6 +68,11 @@ Three modes, all of them the `.toy` file's `engine:` block:
   git submodule in `engine/`, committed and pinned in its own history, affecting no other
   project. `toyhub vendor . [--ref R]`.
 
-Each of those wipes `build/` first: the CMake cache remembers the old engine path. After cloning
-a vendored project, `./setup.sh` (or just `./build.sh`) initialises the submodule for you;
-`git clone --recurse-submodules` does it up front.
+Each of those is one step: it takes the mode the project is in now apart -- a clone in `.libs/`,
+the engine submodule and its `.gitmodules`/index/config entries, a stale symlink -- and wipes
+`build/`, whose CMake cache remembers the old engine path. Uncommitted engine work stops the
+switch; `--force` throws it away, `--purge` also drops the submodule's clone in
+`.git/modules/`.
+
+After cloning a vendored project, `./setup.sh` (or just `./build.sh`) initialises the submodule
+for you; `git clone --recurse-submodules` does it up front.

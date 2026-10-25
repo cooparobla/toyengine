@@ -1,0 +1,10 @@
+# Deep mud: slippery AND draggy, which is the pairing that separates the vehicles. Low friction
+# spins a road car's wheels before it can use its power; the high rolling resistance then taxes
+# every metre, so only the long-geared, locked-differential machines keep moving. The two numbers
+# are independent on purpose -- ice is slippery and not draggy at all.
+dynamic_friction: 0.45
+static_friction: 0.50
+restitution: 0.0
+rolling_resistance: 0.150
+friction_combine: Average
+restitution_combine: Average

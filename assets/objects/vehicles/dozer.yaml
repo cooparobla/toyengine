@@ -1,0 +1,126 @@
+# Tracked: eight rollers, no steered wheels, differential (skid) steering, so full steer with no
+# drive spins it on the spot. Holds slopes the wheeled vehicles slide off. Spawn at z = 1.17.
+#
+# W/S drive both tracks forward/backward -- there is no reverse gear to select -- and A/D drive the
+# two sides against each other. See physxcoopa/vehicle/vehicle_sim.h on why a skid-steer machine is
+# modelled with a hydrostatic drive rather than a gearbox.
+object:
+  name: dozer
+  components:
+    - type: Transform
+      position: { x: 0.0, y: 0.0, z: 0.0 }
+    - type: MeshRenderer
+      mesh_path: vehicles/dozer_body
+      material: materials/vehicles/paint_yellow
+    - type: BoxCollider
+      # Sized by GROUND CLEARANCE (0.30 m here), not by the body mesh: the wheels are
+      # downward rays, so they find ground above their own hub and will climb any step shorter
+      # than rest_length + radius. What actually stops this vehicle at a kerb is its chassis
+      # collider reaching down to z = 0.30 m above the ground.
+      size: { x: 2.400, y: 4.200, z: 1.471 }
+      center: { x: 0.0, y: 0.0, z: -0.136 }
+      material: metal
+    - type: Rigidbody
+      mass: 12000.0
+      drag: 0.0
+      angular_drag: 0.05
+      # The mass sits 0.60 m above the ground, not at the collider's centre. That ratio
+      # against the 1.15 m half-track is what decides when it tips: this one rolls at about
+      # 1.92 g of cornering, which no tyre on this course can deliver. Left at the geometric
+      # centre it rolled over on a flat skidpad at 12 m/s.
+      center_of_mass: { x: 0.0, y: 0.0, z: -0.435 }
+    - type: Vehicle
+      preset: dozer
+      wheels:
+        - object: wheel_0l
+        - object: wheel_0r
+        - object: wheel_1l
+        - object: wheel_1r
+        - object: wheel_2l
+        - object: wheel_2r
+        - object: wheel_3l
+        - object: wheel_3r
+  children:
+    - name: wheel_0l
+      components:
+        - type: Transform
+          position: { x: -1.15, y: 1.7, z: -0.721 }
+          scale: { x: 0.5, y: 0.45, z: 0.45 }
+        - type: MeshRenderer
+          mesh_path: vehicles/track_roller
+          material: materials/vehicles/tyre
+      children: []
+    - name: wheel_0r
+      components:
+        - type: Transform
+          position: { x: 1.15, y: 1.7, z: -0.721 }
+          scale: { x: 0.5, y: 0.45, z: 0.45 }
+        - type: MeshRenderer
+          mesh_path: vehicles/track_roller
+          material: materials/vehicles/tyre
+      children: []
+    - name: wheel_1l
+      components:
+        - type: Transform
+          position: { x: -1.15, y: 0.55, z: -0.721 }
+          scale: { x: 0.5, y: 0.45, z: 0.45 }
+        - type: MeshRenderer
+          mesh_path: vehicles/track_roller
+          material: materials/vehicles/tyre
+      children: []
+    - name: wheel_1r
+      components:
+        - type: Transform
+          position: { x: 1.15, y: 0.55, z: -0.721 }
+          scale: { x: 0.5, y: 0.45, z: 0.45 }
+        - type: MeshRenderer
+          mesh_path: vehicles/track_roller
+          material: materials/vehicles/tyre
+      children: []
+    - name: wheel_2l
+      components:
+        - type: Transform
+          position: { x: -1.15, y: -0.6, z: -0.721 }
+          scale: { x: 0.5, y: 0.45, z: 0.45 }
+        - type: MeshRenderer
+          mesh_path: vehicles/track_roller
+          material: materials/vehicles/tyre
+      children: []
+    - name: wheel_2r
+      components:
+        - type: Transform
+          position: { x: 1.15, y: -0.6, z: -0.721 }
+          scale: { x: 0.5, y: 0.45, z: 0.45 }
+        - type: MeshRenderer
+          mesh_path: vehicles/track_roller
+          material: materials/vehicles/tyre
+      children: []
+    - name: wheel_3l
+      components:
+        - type: Transform
+          position: { x: -1.15, y: -1.75, z: -0.721 }
+          scale: { x: 0.5, y: 0.45, z: 0.45 }
+        - type: MeshRenderer
+          mesh_path: vehicles/track_roller
+          material: materials/vehicles/tyre
+      children: []
+    - name: wheel_3r
+      components:
+        - type: Transform
+          position: { x: 1.15, y: -1.75, z: -0.721 }
+          scale: { x: 0.5, y: 0.45, z: 0.45 }
+        - type: MeshRenderer
+          mesh_path: vehicles/track_roller
+          material: materials/vehicles/tyre
+      children: []
+    - name: blade
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 2.55, z: -0.30 }
+        - type: MeshRenderer
+          mesh_path: vehicles/dozer_blade
+          material: materials/vehicles/dirty_steel
+        - type: BoxCollider
+          size: { x: 3.10, y: 0.50, z: 1.10 }
+          material: metal
+      children: []

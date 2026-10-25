@@ -1,0 +1,8 @@
+# Loose gravel: noticeably less grip than tarmac and three times the rolling drag, so a car
+# scrabbles for traction and a heavy truck simply pays for it in speed.
+dynamic_friction: 0.60
+static_friction: 0.65
+restitution: 0.0
+rolling_resistance: 0.050
+friction_combine: Average
+restitution_combine: Average

@@ -1,0 +1,108 @@
+# Six driven wheels on locked differentials with 0.40 m of travel: the machine that crosses the
+# deep mud and steps over the 0.4 m ledge. Geared for torque, not speed (~30 m/s flat out).
+# Spawn at z = 1.58.
+#
+# Cab and dump body are separate child meshes over one chassis collider -- the collider is a single
+# box because the sim only ever uses it for the chassis' own collisions, never for the wheels.
+object:
+  name: hauler_6x6
+  components:
+    - type: Transform
+      position: { x: 0.0, y: 0.0, z: 0.0 }
+    - type: BoxCollider
+      # Sized by GROUND CLEARANCE (0.50 m here), not by the body mesh: the wheels are
+      # downward rays, so they find ground above their own hub and will climb any step shorter
+      # than rest_length + radius. What actually stops this vehicle at a kerb is its chassis
+      # collider reaching down to z = 0.50 m above the ground.
+      size: { x: 2.440, y: 6.800, z: 2.282 }
+      center: { x: 0.0, y: 0.0, z: 0.059 }
+      material: metal
+    - type: Rigidbody
+      mass: 9000.0
+      drag: 0.0
+      angular_drag: 0.05
+      # The mass sits 0.95 m above the ground, not at the collider's centre. That ratio
+      # against the 1.05 m half-track is what decides when it tips: this one rolls at about
+      # 1.11 g of cornering, which no tyre on this course can deliver. Left at the geometric
+      # centre it rolled over on a flat skidpad at 12 m/s.
+      center_of_mass: { x: 0.0, y: 0.0, z: -0.691 }
+    - type: Vehicle
+      preset: hauler_6x6
+      wheels:
+        - object: wheel_fl
+        - object: wheel_fr
+        - object: wheel_ml
+        - object: wheel_mr
+        - object: wheel_rl
+        - object: wheel_rr
+  children:
+    - name: wheel_fl
+      components:
+        - type: Transform
+          position: { x: -1.05, y: 2.6, z: -0.94 }
+          scale: { x: 0.4, y: 0.62, z: 0.62 }
+        - type: MeshRenderer
+          mesh_path: vehicles/wheel_heavy
+          material: materials/vehicles/tyre
+      children: []
+    - name: wheel_fr
+      components:
+        - type: Transform
+          position: { x: 1.05, y: 2.6, z: -0.94 }
+          scale: { x: 0.4, y: 0.62, z: 0.62 }
+        - type: MeshRenderer
+          mesh_path: vehicles/wheel_heavy
+          material: materials/vehicles/tyre
+      children: []
+    - name: wheel_ml
+      components:
+        - type: Transform
+          position: { x: -1.05, y: -0.6, z: -0.94 }
+          scale: { x: 0.4, y: 0.62, z: 0.62 }
+        - type: MeshRenderer
+          mesh_path: vehicles/wheel_heavy
+          material: materials/vehicles/tyre
+      children: []
+    - name: wheel_mr
+      components:
+        - type: Transform
+          position: { x: 1.05, y: -0.6, z: -0.94 }
+          scale: { x: 0.4, y: 0.62, z: 0.62 }
+        - type: MeshRenderer
+          mesh_path: vehicles/wheel_heavy
+          material: materials/vehicles/tyre
+      children: []
+    - name: wheel_rl
+      components:
+        - type: Transform
+          position: { x: -1.05, y: -2.0, z: -0.94 }
+          scale: { x: 0.4, y: 0.62, z: 0.62 }
+        - type: MeshRenderer
+          mesh_path: vehicles/wheel_heavy
+          material: materials/vehicles/tyre
+      children: []
+    - name: wheel_rr
+      components:
+        - type: Transform
+          position: { x: 1.05, y: -2.0, z: -0.94 }
+          scale: { x: 0.4, y: 0.62, z: 0.62 }
+        - type: MeshRenderer
+          mesh_path: vehicles/wheel_heavy
+          material: materials/vehicles/tyre
+      children: []
+    - name: cab
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 2.05, z: 0.30 }
+        - type: MeshRenderer
+          mesh_path: vehicles/hauler_cab
+          material: materials/vehicles/paint_yellow
+      children: []
+    - name: bed
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -0.75, z: 0.10 }
+        - type: MeshRenderer
+          mesh_path: vehicles/hauler_bed
+          material: materials/vehicles/dirty_steel
+      children: []

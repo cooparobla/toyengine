@@ -273,7 +273,9 @@ void PropertiesPanel::draw_material_slots_(imm::Context& ctx) {
 void PropertiesPanel::draw_material_asset_props_(imm::Context& ctx) {
     using I = imm::Icon;
     if (!app_.material_.open()) { ctx.label_dim("Open a material from the Materials tab."); return; }
-    if (ctx.collapsing_header("Surface", true, nullptr, I::Material)) app_.draw_material_editor_(ctx);
+    // The material's own sections carry the structure now, so this outer panel just names the
+    // asset rather than adding a second "Surface" above the real one.
+    if (ctx.collapsing_header("Material", true, nullptr, I::Material)) app_.draw_material_editor_(ctx);
     if (ctx.collapsing_header("Preview", true, nullptr, I::ShadeMaterial)) {
         int shape = app_.lookdev_.shape;
         if (ctx.combo("Shape", &shape, {"Shader Ball", "Sphere", "Rounded Cube", "Plane", "Cylinder"}) && shape != app_.lookdev_.shape) {
@@ -934,18 +936,13 @@ void PropertiesPanel::draw_component_list_(imm::Context& ctx, ObjectId id, bool 
                 };
             }
             EditResult r;
+            // A component whose inspector is hand-written (ParticleSystem, TileTerrain) is
+            // reached through the drawer registry inside draw_component(), not from here.
             if (type == "MeshRenderer") {
                 // The material lives on its own tab, as in Blender.
-                std::vector<FieldDesc> fields;
-                for (const auto& f : schema->fields) if (f.kind != FieldKind::Material) fields.push_back(f);
-                r = draw_fields(ctx, fields, comp, env, true, {"type", "id", "material"});
+                static const std::set<std::string> material_on_its_own_tab{"material"};
+                r = draw_component(ctx, comp, env, {}, &material_on_its_own_tab);
                 if (ctx.button("Material...", -1, true, I::Material)) app_.prop_tab_ = PropTab::Material;
-            } else if (type == "ParticleSystem") {
-                // Grouped, explained and filtered to what applies -- see particle_panel.h.
-                r = app_.particle_panel_->draw_particle_panel_(ctx, id, comp, env);
-            } else if (type == "TileTerrain" || type == "Terrain") {
-                // Tile set first, then grouped sections -- see tile_terrain_panel.h.
-                r = app_.tile_terrain_panel_->draw_tile_terrain_panel_(ctx, id, comp, env);
             } else {
                 r = draw_component(ctx, comp, env, [this](const std::string& rel) { app_.assets_panel_->open_asset(AssetType::Material, rel); });
             }

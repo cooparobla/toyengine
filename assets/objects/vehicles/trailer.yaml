@@ -1,0 +1,82 @@
+# An unpowered two-axle tipper, towed on a HingeJoint. Its wheels suspend, grip and roll, which
+# is what makes a loaded trailer push a truck wide in a corner -- and jack-knife it if the tow
+# vehicle gets sideways. Spawn at z = 1.00.
+#
+# `player_input: false` keeps a host's driver away from it: it has no engine (the preset clears the
+# gearbox's forward ratios, so no throttle reaches the ground) and nothing to steer.
+#
+# The towing scene adds the hitch, since only it knows what the trailer is coupled to:
+#   - type: HingeJoint
+#     connected_object: <tow vehicle>
+#     anchor: { x: 0.0, y: 2.50, z: -0.30 }
+#     axis:   { x: 0.0, y: 0.0, z: 1.0 }
+object:
+  name: trailer
+  components:
+    - type: Transform
+      position: { x: 0.0, y: 0.0, z: 0.0 }
+    - type: MeshRenderer
+      mesh_path: vehicles/trailer_body
+      material: materials/vehicles/dirty_steel
+    - type: BoxCollider
+      # Sized by GROUND CLEARANCE (0.30 m here), not by the body mesh: the wheels are
+      # downward rays, so they find ground above their own hub and will climb any step shorter
+      # than rest_length + radius. What actually stops this vehicle at a kerb is its chassis
+      # collider reaching down to z = 0.30 m above the ground.
+      size: { x: 2.100, y: 3.300, z: 1.298 }
+      center: { x: 0.0, y: 0.0, z: -0.049 }
+      material: metal
+    - type: Rigidbody
+      mass: 1500.0
+      drag: 0.0
+      angular_drag: 0.05
+      # The mass sits 0.60 m above the ground, not at the collider's centre. That ratio
+      # against the 0.95 m half-track is what decides when it tips: this one rolls at about
+      # 1.58 g of cornering, which no tyre on this course can deliver. Left at the geometric
+      # centre it rolled over on a flat skidpad at 12 m/s.
+      center_of_mass: { x: 0.0, y: 0.0, z: -0.349 }
+    - type: Vehicle
+      preset: trailer
+      player_input: false
+      wheels:
+        - object: wheel_fl
+        - object: wheel_fr
+        - object: wheel_rl
+        - object: wheel_rr
+  children:
+    - name: wheel_fl
+      components:
+        - type: Transform
+          position: { x: -0.95, y: 0.4, z: -0.683 }
+          scale: { x: 0.26, y: 0.38, z: 0.38 }
+        - type: MeshRenderer
+          mesh_path: vehicles/wheel
+          material: materials/vehicles/tyre
+      children: []
+    - name: wheel_fr
+      components:
+        - type: Transform
+          position: { x: 0.95, y: 0.4, z: -0.683 }
+          scale: { x: 0.26, y: 0.38, z: 0.38 }
+        - type: MeshRenderer
+          mesh_path: vehicles/wheel
+          material: materials/vehicles/tyre
+      children: []
+    - name: wheel_rl
+      components:
+        - type: Transform
+          position: { x: -0.95, y: -0.4, z: -0.683 }
+          scale: { x: 0.26, y: 0.38, z: 0.38 }
+        - type: MeshRenderer
+          mesh_path: vehicles/wheel
+          material: materials/vehicles/tyre
+      children: []
+    - name: wheel_rr
+      components:
+        - type: Transform
+          position: { x: 0.95, y: -0.4, z: -0.683 }
+          scale: { x: 0.26, y: 0.38, z: 0.38 }
+        - type: MeshRenderer
+          mesh_path: vehicles/wheel
+          material: materials/vehicles/tyre
+      children: []

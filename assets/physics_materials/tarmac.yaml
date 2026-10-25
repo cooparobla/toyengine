@@ -1,0 +1,9 @@
+# Hard, dry road: the grip and the rolling resistance a vehicle is tuned against.
+# `rolling_resistance` is read only by the vehicle sim (physxcoopa/vehicle/) -- contacts and
+# casts ignore it.
+dynamic_friction: 0.95
+static_friction: 1.00
+restitution: 0.0
+rolling_resistance: 0.015
+friction_combine: Average
+restitution_combine: Average

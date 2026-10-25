@@ -1,0 +1,6 @@
+# Tyre rubber: dark, rough, and never metallic. Deliberately not pure black -- a wheel at
+# albedo 0 goes invisible in shadow, and the wheels rolling is what sells the driving.
+albedo: { r: 0.08, g: 0.08, b: 0.09 }
+metallic: 0.0
+roughness: 0.85
+ao: 1.0

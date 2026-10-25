@@ -1,0 +1,72 @@
+# 700 kg on 0.42 m of soft travel, with strong air righting so it lands jumps the right way up.
+# The worst of the lineup at putting power down and the best at being thrown around. Light enough
+# that it skates over mud the heavier vehicles sink into. Spawn at z = 1.09.
+object:
+  name: buggy
+  components:
+    - type: Transform
+      position: { x: 0.0, y: 0.0, z: 0.0 }
+    - type: MeshRenderer
+      mesh_path: vehicles/buggy_frame
+      material: materials/vehicles/paint_lime
+    - type: BoxCollider
+      # Sized by GROUND CLEARANCE (0.35 m here), not by the body mesh: the wheels are
+      # downward rays, so they find ground above their own hub and will climb any step shorter
+      # than rest_length + radius. What actually stops this vehicle at a kerb is its chassis
+      # collider reaching down to z = 0.35 m above the ground.
+      size: { x: 1.760, y: 3.200, z: 1.330 }
+      center: { x: 0.0, y: 0.0, z: -0.065 }
+      material: metal
+    - type: Rigidbody
+      mass: 700.0
+      drag: 0.0
+      angular_drag: 0.05
+      # The mass sits 0.60 m above the ground, not at the collider's centre. That ratio
+      # against the 0.85 m half-track is what decides when it tips: this one rolls at about
+      # 1.42 g of cornering, which no tyre on this course can deliver. Left at the geometric
+      # centre it rolled over on a flat skidpad at 12 m/s.
+      center_of_mass: { x: 0.0, y: 0.0, z: -0.415 }
+    - type: Vehicle
+      preset: buggy
+      wheels:
+        - object: wheel_fl
+        - object: wheel_fr
+        - object: wheel_rl
+        - object: wheel_rr
+  children:
+    - name: wheel_fl
+      components:
+        - type: Transform
+          position: { x: -0.85, y: 1.2, z: -0.69 }
+          scale: { x: 0.3, y: 0.38, z: 0.38 }
+        - type: MeshRenderer
+          mesh_path: vehicles/wheel
+          material: materials/vehicles/tyre
+      children: []
+    - name: wheel_fr
+      components:
+        - type: Transform
+          position: { x: 0.85, y: 1.2, z: -0.69 }
+          scale: { x: 0.3, y: 0.38, z: 0.38 }
+        - type: MeshRenderer
+          mesh_path: vehicles/wheel
+          material: materials/vehicles/tyre
+      children: []
+    - name: wheel_rl
+      components:
+        - type: Transform
+          position: { x: -0.85, y: -1.25, z: -0.69 }
+          scale: { x: 0.3, y: 0.38, z: 0.38 }
+        - type: MeshRenderer
+          mesh_path: vehicles/wheel
+          material: materials/vehicles/tyre
+      children: []
+    - name: wheel_rr
+      components:
+        - type: Transform
+          position: { x: 0.85, y: -1.25, z: -0.69 }
+          scale: { x: 0.3, y: 0.38, z: 0.38 }
+        - type: MeshRenderer
+          mesh_path: vehicles/wheel
+          material: materials/vehicles/tyre
+      children: []

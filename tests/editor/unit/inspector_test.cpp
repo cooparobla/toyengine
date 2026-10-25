@@ -50,8 +50,13 @@ COOPA_TEST(int_enums_show_labels_but_store_ints) {
     expect(get_string(block, "fog_mode") != "Linear", "the file still stores an int, not the label");
 }
 
-/** @brief The material panel draws its Shader dropdown once, at the top: draw_fields() leaves
- *         a skipped schema field to its caller instead of drawing it again further down. */
+/**
+ * @brief The material panel draws its Shader dropdown once, at the top.
+ *
+ * Two things could draw it twice: draw_fields() ignoring the caller's skip list, and a
+ * material section listing `shader` among its own keys. Both are checked, because a second
+ * row would not just be untidy -- it would write over what the first one wrote.
+ */
 COOPA_TEST(the_material_block_draws_its_shader_dropdown_once) {
     ImmHarness h;
     InspectorEnv env;
@@ -60,33 +65,122 @@ COOPA_TEST(the_material_block_draws_its_shader_dropdown_once) {
     const float params[4] = {1.0f, 4.0f, 0.0f, 1.0f};
     m["shader_params"] = make_float_seq(params, 4);
     m["albedo"] = make_color(glm::vec3(0.8f));
-    auto height_of = [&](const std::function<void(coopa::ui::imm::Context&)>& draw) {
+
+    std::vector<FieldDesc> shader_fields;
+    for (const auto& f : material_fields()) if (f.key == "shader" || f.key == "shader_params") shader_fields.push_back(f);
+    expect(shader_fields.size() == 2, "the material schema lists shader and shader_params");
+
+    float moved = 0.0f;
+    h.frame([&](coopa::ui::imm::Context& c) {
+        c.begin_region("r", {0, 0, 400, 2000}, false);
+        const float y0 = c.cursor().y;
+        draw_fields(c, shader_fields, m, env, false, {"shader", "shader_params"});
+        moved = c.cursor().y - y0;
+        c.end_region();
+    });
+    expect(moved == 0.0f, "draw_fields() draws no row for a skipped schema field (" + std::to_string(moved) + ")");
+
+    for (const auto& s : material_sections()) {
+        for (const auto& k : s.keys) {
+            expect(k != "shader" && k != "shader_params" && k != "shader_params_ext",
+                   "no material section claims a shader key (" + s.title + "." + k + ")");
+        }
+    }
+}
+
+/** @brief Every material key is placed, once, so none ends up in "More" by accident. */
+COOPA_TEST(the_material_sections_place_every_key_but_the_shader_ones) {
+    std::set<std::string> placed;
+    for (const auto& s : material_sections()) {
+        for (const auto& k : s.keys) {
+            expect(placed.insert(k).second, "material." + k + " is in exactly one section");
+        }
+        if (!s.toggle.empty()) placed.insert(s.toggle);
+    }
+    // The three the Shader section owns, and the colour-space map drawn under Maps.
+    const std::set<std::string> drawn_elsewhere{"shader", "shader_params", "shader_params_ext"};
+    for (const auto& f : material_fields()) {
+        if (drawn_elsewhere.count(f.key)) continue;
+        expect(placed.count(f.key) == 1, "material." + f.key + " has a section");
+    }
+    expect(material_schema().field("albedo") != nullptr, "the material schema finds its fields");
+}
+
+/**
+ * @brief A sectioned component draws its sections, hides a row whose condition fails, and
+ *        shows it the moment the condition holds -- writing the same key either way.
+ */
+COOPA_TEST(a_conditional_row_appears_only_when_its_condition_holds) {
+    register_component_schema({"TestConditionalRows", "Gameplay",
+        {
+            f_enum("mode", {"planar", "flowing"}, true),
+            f_float("wave_amplitude", 0.15f, 0.005f, 0.0f, 20.0f),
+            shown_when(f_float("flow_speed", 1.0f, 0.01f, 0.0f, 50.0f), "mode", {"flowing"}),
+        },
+        true, true,
+        {sec("Shape", "Mesh").says("What kind of water this is.").keys({"mode"}).done(),
+         sec("Motion", "Play").keys({"wave_amplitude", "flow_speed"}).done()}});
+    const ComponentSchema* schema = find_schema("TestConditionalRows");
+    expect(schema && schema->sections.size() == 2, "the test schema has its layout");
+
+    ImmHarness h;
+    InspectorEnv env;
+    Node comp = default_component("TestConditionalRows");
+    auto height = [&] {
         float y0 = 0.0f, y1 = 0.0f;
         h.frame([&](coopa::ui::imm::Context& c) {
             c.begin_region("r", {0, 0, 400, 2000}, false);
             y0 = c.cursor().y;
-            draw(c);
+            draw_component(c, comp, env);
             y1 = c.cursor().y;
             c.end_region();
         });
         return y1 - y0;
     };
-    const float empty = height_of([](auto&) {});   // the region's own offset, not a row
-    auto rows = [&](const std::function<void(coopa::ui::imm::Context&)>& draw) { return height_of(draw) - empty; };
-    std::vector<FieldDesc> shader_fields, rest;
-    for (const auto& f : material_fields()) (f.key == "shader" || f.key == "shader_params" ? shader_fields : rest).push_back(f);
-    expect(shader_fields.size() == 2, "the material schema lists shader and shader_params");
+    const float planar = height();
+    expect(planar > 0.0f, "a sectioned component draws something");
 
-    const float skipped = rows([&](auto& c) { draw_fields(c, shader_fields, m, env, false, {"shader", "shader_params"}); });
-    expect(skipped == 0.0f, "draw_fields() draws no row for a skipped schema field (" + std::to_string(skipped) + ")");
+    comp["mode"] = Node(std::string("flowing"));
+    const float flowing = height();
+    expect(flowing > planar, "switching mode reveals the flow row (" + std::to_string(planar) + " -> " +
+                             std::to_string(flowing) + ")");
 
-    const float section = rows([&](auto& c) { draw_shader_section(c, m); });
-    const float space = rows([&](auto& c) { c.spacing(); });
-    const float fields = rows([&](auto& c) { draw_fields(c, rest, m, env, false, {"base"}); });
-    const float block = rows([&](auto& c) { draw_material_block(c, m, env); });
-    expect(section > 0.0f && block == section + space + fields,
-           "the material block is the Shader section plus the other fields, nothing more (" +
-           std::to_string(block) + " vs " + std::to_string(section + space + fields) + ")");
+    comp["mode"] = Node(std::string("planar"));
+    expect(height() == planar, "and switching back hides it again");
+    expect(comp.contains("mode"), "the component still holds every key it was given");
+}
+
+/**
+ * @brief A key no section lists is still shown: the trailing More block carries it, so adding
+ *        a key to a schema and forgetting the layout cannot make it vanish.
+ */
+COOPA_TEST(a_key_no_section_lists_still_shows_under_more) {
+    const std::vector<FieldDesc> fields = {f_float("placed", 1.0f, 0.01f, 0.0f, 10.0f, true),
+                                           f_float("forgotten", 2.0f, 0.01f, 0.0f, 10.0f, true)};
+    register_component_schema({"TestAllKeysPlaced", "Gameplay", fields, true, true,
+                               {sec("Main").keys({"placed", "forgotten"}).done()}});
+    register_component_schema({"TestUnplacedKey", "Gameplay", fields, true, true,
+                               {sec("Main").keys({"placed"}).done()}});
+
+    ImmHarness h;
+    InspectorEnv env;
+    auto height_of = [&](const char* type) {
+        Node comp = default_component(type);
+        float y0 = 0.0f, y1 = 0.0f;
+        h.frame([&](coopa::ui::imm::Context& c) {
+            c.begin_region("r", {0, 0, 400, 2000}, false);
+            y0 = c.cursor().y;
+            draw_component(c, comp, env);
+            y1 = c.cursor().y;
+            c.end_region();
+        });
+        return y1 - y0;
+    };
+    const float all_placed = height_of("TestAllKeysPlaced");
+    const float one_loose = height_of("TestUnplacedKey");
+    expect(all_placed > 0.0f, "a sectioned component draws its section");
+    expect(one_loose > all_placed, "the unplaced key adds a More header (" + std::to_string(all_placed) + " -> " +
+                                   std::to_string(one_loose) + ")");
 }
 
 } // namespace toy::editor::testing

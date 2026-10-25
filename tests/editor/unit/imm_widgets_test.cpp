@@ -216,4 +216,65 @@ COOPA_TEST(tooltips_wait_their_delay_every_time) {
     expect(h.ctx.tooltip_text().empty(), "and it does not come straight back");
 }
 
+/** @brief A segmented picker: clicking a cell selects it, clicking the one already on does nothing. */
+COOPA_TEST(a_segmented_picker_selects_the_cell_clicked) {
+    ImmHarness h;
+    int index = 0;
+    int changes = 0;
+    const std::vector<std::string> items = {"Inline", "Asset", "Asset +"};
+    auto ui = [&](coopa::ui::imm::Context& c) {
+        c.begin_region("r", {0, 0, 400, 100}, false);
+        if (c.segmented("Material", &index, items)) ++changes;
+        c.end_region();
+    };
+    h.frame(ui);
+    // The widget column starts at label_ratio of the row; three cells share what is left.
+    const float x0 = 400.0f * h.ctx.style.label_ratio;
+    const float cell = (400.0f - x0) / 3.0f;
+    h.click({x0 + cell * 2.5f, 10}, ui);
+    expect(index == 2 && changes == 1, "the third cell is picked (index " + std::to_string(index) + ")");
+    h.click({x0 + cell * 2.5f, 10}, ui);
+    expect(index == 2 && changes == 1, "clicking the cell already on reports no change");
+    h.click({x0 + cell * 0.5f, 10}, ui);
+    expect(index == 0 && changes == 2, "and the first cell picks again");
+}
+
+/** @brief A range slider: each handle drags, and neither can cross the other. */
+COOPA_TEST(a_range_slider_keeps_its_low_below_its_high) {
+    ImmHarness h;
+    float lo = 2.0f, hi = 8.0f;
+    auto ui = [&](coopa::ui::imm::Context& c) {
+        c.begin_region("r", {0, 0, 400, 100}, false);
+        c.range_slider("Lifetime", &lo, &hi, 0.0f, 10.0f);
+        c.end_region();
+    };
+    h.frame(ui);
+    const float x0 = 400.0f * h.ctx.style.label_ratio;
+    const float w = 400.0f - x0;
+    auto at = [&](float v) { return x0 + w * (v / 10.0f); };
+
+    // Grab the low handle where it is, drag it right past the high one.
+    h.mouse = {at(2.0f), 10};
+    h.frame(ui);
+    h.down = true;
+    h.frame(ui);
+    h.mouse = {at(9.5f), 10};
+    h.frame(ui);
+    expect(lo <= hi + 1e-4f, "the low handle stops at the high one (" + std::to_string(lo) + " vs " + std::to_string(hi) + ")");
+    expect(lo > 2.0f, "...having moved toward it");
+    h.down = false;
+    h.frame(ui);
+
+    const float was_lo = lo;
+    h.mouse = {at(hi), 10};
+    h.frame(ui);
+    h.down = true;
+    h.frame(ui);
+    h.mouse = {at(0.5f), 10};
+    h.frame(ui);
+    expect(hi >= was_lo - 1e-4f, "and the high handle stops at the low one");
+    h.down = false;
+    h.frame(ui);
+}
+
 } // namespace toy::editor::testing

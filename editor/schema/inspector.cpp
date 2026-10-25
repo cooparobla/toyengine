@@ -1,5 +1,10 @@
 #include "editor/schema/inspector.h"
 
+#include "editor/schema/inspector_sections.h"
+#include "editor/ui/curve_widget.h"
+
+#include <cstdio>
+
 namespace toy {
 namespace editor {
 
@@ -67,6 +72,135 @@ void finish(imm::Context& ctx, EditResult& r, const std::string& key, bool chang
 namespace toy {
 namespace editor {
 
+namespace {
+
+/** @brief `a` and `b` the same, ignoring case -- enums are written in several spellings. */
+bool same_ci(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (std::tolower(static_cast<unsigned char>(a[i])) != std::tolower(static_cast<unsigned char>(b[i]))) return false;
+    }
+    return true;
+}
+
+std::string number_text(double v) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%g", v);
+    return buf;
+}
+
+/**
+ * @brief The choices an AssetRef-ish field offers: "" first, then every matching asset as the
+ *        value the field would store. `idx` comes back as the current value's place in it.
+ */
+std::vector<std::string> asset_choices(const FieldDesc& f, const std::string& current, const InspectorEnv& env, int& idx) {
+    std::vector<std::string> values{""};
+    if (env.list_assets) {
+        for (const auto& p : env.list_assets(f.asset_dir, f.asset_ext)) values.push_back(detail::path_to_ref(f, p));
+    }
+    idx = -1;
+    for (size_t i = 0; i < values.size(); ++i) if (values[i] == current) idx = static_cast<int>(i);
+    if (idx < 0) { values.push_back(current); idx = static_cast<int>(values.size()) - 1; }
+    return values;
+}
+
+/** @brief Whether `path` is one this field would accept from a drag-and-drop. */
+bool asset_matches(const FieldDesc& f, const std::string& p) {
+    if (!f.asset_dir.empty() && p.rfind(f.asset_dir + "/", 0) != 0) return false;
+    if (f.asset_ext.empty()) return true;
+    return p.size() >= f.asset_ext.size() &&
+           p.compare(p.size() - f.asset_ext.size(), f.asset_ext.size(), f.asset_ext) == 0;
+}
+
+/**
+ * @brief A texture map as a picture: the image itself, its name, and the ways to change it.
+ *
+ * Falls back to the plain dropdown when the host offers no previews (tests, headless), so the
+ * field works everywhere and only looks better where there is a GPU.
+ */
+EditResult draw_texture_slot(imm::Context& ctx, const FieldDesc& f, Node& block, const InspectorEnv& env) {
+    EditResult r;
+    r.key = f.key;
+    const std::string cur = block.contains(f.key) ? get_string(block, f.key) : std::string();
+    const float h = 42.0f;
+    const imm::Box row = ctx.property_row(f.display() + "##" + f.key, h);
+    const imm::Box thumb{row.x, row.y + 2.0f, h - 6.0f, h - 6.0f};
+
+    ctx.fill_rounded(thumb, ctx.style.field);
+    coopa::gfx::TextureView view;
+    if (!cur.empty() && env.texture_preview) view = env.texture_preview(detail::ref_to_path(f, cur));
+    if (view.valid()) ctx.image(view, thumb.shrink(1.0f));
+    else ctx.icon(imm::Icon::Image, thumb.shrink(7.0f), ctx.style.text_disabled);
+    ctx.outline_rounded(thumb, ctx.style.border);
+
+    int idx = -1;
+    std::vector<std::string> values = asset_choices(f, cur, env, idx);
+    std::vector<std::string> shown = values;
+    shown[0] = "(none)";
+    for (auto& v : shown) {
+        const size_t slash = v.find_last_of('/');   // the file's name is what identifies it here
+        if (slash != std::string::npos) v = v.substr(slash + 1);
+    }
+    const float left = thumb.right() + 6.0f;
+    const float clear_w = cur.empty() ? 0.0f : 22.0f;
+    const imm::Box picker{left, row.y + 3.0f, std::max(40.0f, row.right() - left - clear_w), ctx.style.row_height};
+    bool changed = ctx.combo_box(f.key, picker, &idx, shown);
+    if (auto dropped = ctx.drop_target("asset", row)) {
+        if (asset_matches(f, *dropped)) {
+            values.push_back(detail::path_to_ref(f, *dropped));
+            idx = static_cast<int>(values.size()) - 1;
+            changed = true;
+        }
+    }
+    if (!cur.empty()) {
+        const imm::Box clear{row.right() - 20.0f, row.y + 3.0f, 18.0f, ctx.style.row_height};
+        if (ctx.icon_button("clear_" + f.key, imm::Icon::X, "Clear\nUse no " + f.display(), false, 0.0f, imm::Context::kAll, clear)) {
+            idx = 0;
+            changed = true;
+        }
+        // The resolution and the path, where there is room for them.
+        ctx.text_in({left, thumb.bottom() - 13.0f, row.w - (left - row.x), 13.0f}, cur, ctx.style.text_dim, 0.0f);
+    }
+    if (changed) {
+        const std::string& v = values[static_cast<size_t>(idx)];
+        if (v.empty()) erase_key(block, f.key);
+        else block[f.key] = Node(v);
+        r.changed = r.finished = true;
+    }
+    return r;
+}
+
+} // namespace
+
+std::string condition_value(const Node& block, const std::string& key, const std::vector<FieldDesc>& fields) {
+    if (block.is_mapping() && block.contains(key)) {
+        const Node& n = block.at(key);
+        if (n.is_boolean()) return n.get_value<bool>() ? "true" : "false";
+        if (n.is_integer()) return std::to_string(n.get_value<int64_t>());
+        if (n.is_float_number()) return number_text(n.get_value<double>());
+        if (n.is_string()) return n.get_value<std::string>();
+        return {};
+    }
+    for (const auto& f : fields) {
+        if (f.key != key) continue;
+        switch (f.kind) {
+            case FieldKind::Bool:  return f.def.x != 0.0f ? "true" : "false";
+            case FieldKind::Int:   return std::to_string(static_cast<int64_t>(std::lround(f.def.x)));
+            case FieldKind::Float: return number_text(f.def.x);
+            default:               return f.default_string;
+        }
+    }
+    return {};
+}
+
+bool show_when_holds(const Node& block, const ShowWhen& w, const std::vector<FieldDesc>& fields) {
+    if (w.always()) return true;
+    const std::string v = condition_value(block, w.key, fields);
+    bool found = false;
+    for (const auto& want : w.equals) if (same_ci(v, want)) found = true;
+    return w.negate ? !found : found;
+}
+
 EditResult draw_field(imm::Context& ctx, const FieldDesc& f, Node& block, const InspectorEnv& env) {
     EditResult r;
     const std::string label = f.display() + "##" + f.key;
@@ -103,7 +237,11 @@ EditResult draw_field(imm::Context& ctx, const FieldDesc& f, Node& block, const 
         }
         case FieldKind::Float: {
             float v = present ? get_float(block, f.key) : f.def.x;
-            const bool ch = ctx.drag_float(label, &v, f.speed, f.min, f.max);
+            // "%.3f m" -- the unit rides in the number's format, so it shows while dragging too.
+            const std::string fmt = f.suffix.empty() ? std::string("%.3f") : "%.3f " + f.suffix;
+            const bool bounded = f.min > -1e29f && f.max < 1e29f;
+            const bool ch = f.slider && bounded ? ctx.slider_float(label, &v, f.min, f.max, fmt.c_str())
+                                                : ctx.drag_float(label, &v, f.speed, f.min, f.max, fmt.c_str());
             if (ch) block[f.key] = make_float(v);
             detail::finish(ctx, r, f.key, ch);
             break;
@@ -167,23 +305,16 @@ EditResult draw_field(imm::Context& ctx, const FieldDesc& f, Node& block, const 
         }
         case FieldKind::AssetRef: {
             const std::string cur = present ? get_string(block, f.key) : std::string();
-            std::vector<std::string> paths = env.list_assets ? env.list_assets(f.asset_dir, f.asset_ext) : std::vector<std::string>{};
-            std::vector<std::string> values{""};
-            for (const auto& p : paths) values.push_back(detail::path_to_ref(f, p));
             int idx = -1;
-            for (size_t i = 0; i < values.size(); ++i) if (values[i] == cur) idx = static_cast<int>(i);
-            if (idx < 0) { values.push_back(cur); idx = static_cast<int>(values.size()) - 1; }
+            std::vector<std::string> values = asset_choices(f, cur, env, idx);
             std::vector<std::string> shown = values;
             shown[0] = "(none)";
             imm::Box row = ctx.property_row(label);
             bool ch = ctx.combo_box(f.key, row, &idx, shown);
             // Drag an asset from the browser onto the field.
             if (auto dropped = ctx.drop_target("asset", row)) {
-                const std::string& p = *dropped;
-                if ((f.asset_dir.empty() || p.rfind(f.asset_dir + "/", 0) == 0) &&
-                    (f.asset_ext.empty() || (p.size() >= f.asset_ext.size() &&
-                     p.compare(p.size() - f.asset_ext.size(), f.asset_ext.size(), f.asset_ext) == 0))) {
-                    values.push_back(detail::path_to_ref(f, p));
+                if (asset_matches(f, *dropped)) {
+                    values.push_back(detail::path_to_ref(f, *dropped));
                     idx = static_cast<int>(values.size()) - 1;
                     ch = true;
                 }
@@ -196,6 +327,9 @@ EditResult draw_field(imm::Context& ctx, const FieldDesc& f, Node& block, const 
             r.key = f.key; r.changed = ch; r.finished = ch;
             break;
         }
+        case FieldKind::Texture:
+            r = draw_texture_slot(ctx, f, block, env);
+            break;
         case FieldKind::Material:
             break;  // drawn by draw_material_field()
         case FieldKind::Vec2: {
@@ -294,6 +428,40 @@ EditResult draw_field(imm::Context& ctx, const FieldDesc& f, Node& block, const 
                 else block[f.key] = Node(v);
             }
             r.key = f.key; r.changed = ch; r.finished = ch;
+            break;
+        }
+        case FieldKind::Curve: {
+            std::vector<glm::vec2> pts = ui::curve_from_node(present ? block.at(f.key) : f.def_node);
+            ctx.label_dim(f.display());
+            const ui::ShapeEdit se = ui::curve_edit(ctx, f.key, pts);
+            if (se.changed) block[f.key] = ui::curve_to_node(pts);
+            r.key = f.key;
+            r.changed = se.changed;
+            r.active = se.dragging;
+            r.finished = se.finished;
+            break;
+        }
+        case FieldKind::Gradient: {
+            std::vector<ui::ColorStop> stops = ui::gradient_from_node(present ? block.at(f.key) : f.def_node);
+            ctx.label_dim(f.display());
+            ui::ShapeEdit se = ui::gradient_edit(ctx, f.key, stops);
+            // The selected stop's colour is an ordinary colour row, so its picker and its undo
+            // step behave like every other colour in the inspector.
+            if (se.selected >= 0 && se.selected < static_cast<int>(stops.size())) {
+                glm::vec3& c = stops[static_cast<size_t>(se.selected)].color;
+                float rgba[4] = {c.r, c.g, c.b, 1.0f};
+                if (ctx.color_edit("Stop Colour##" + f.key, rgba)) {
+                    c = {rgba[0], rgba[1], rgba[2]};
+                    se.changed = true;
+                    se.dragging = ctx.last_group_active();
+                    se.finished = se.finished || ctx.last_deactivated();
+                }
+            }
+            if (se.changed) block[f.key] = ui::gradient_to_node(stops);
+            r.key = f.key;
+            r.changed = se.changed;
+            r.active = se.dragging;
+            r.finished = se.finished;
             break;
         }
         case FieldKind::ItemList: {
@@ -408,6 +576,7 @@ EditResult draw_fields(imm::Context& ctx, const std::vector<FieldDesc>& fields, 
     for (const auto& f : fields) {
         known.insert(f.key);
         if (f.kind == FieldKind::Material || skip.count(f.key)) continue;   // skipped keys are drawn by the caller
+        if (!show_when_holds(block, f.show, fields)) continue;   // this row does nothing in the current mode
         ctx.push_id(f.key);
         total.absorb(draw_field(ctx, f, block, env));
         ctx.pop_id();
@@ -442,10 +611,12 @@ EditResult draw_shader_section(imm::Context& ctx, Node& m) {
         if (s.name.empty()) erase_key(m, "shader");
         else m["shader"] = Node(s.name);
         erase_key(m, "shader_params");
+        erase_key(m, "shader_params_ext");
         if (!s.params.empty()) {
-            float d[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-            for (size_t i = 0; i < s.params.size() && i < 4; ++i) d[i] = s.params[i].def;
+            float d[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+            for (size_t i = 0; i < s.params.size() && i < 8; ++i) d[i] = s.params[i].def;
             m["shader_params"] = make_float_seq(d, 4);
+            if (s.params.size() > 4) m["shader_params_ext"] = make_float_seq(d + 4, 4);
         }
         const bool blend = m.contains("alpha_mode") && get_string(m, "alpha_mode") == "BLEND";
         if (s.transparent && !blend) m["alpha_mode"] = Node(std::string("BLEND"));
@@ -454,20 +625,25 @@ EditResult draw_shader_section(imm::Context& ctx, Node& m) {
     }
     const SurfaceShaderInfo* info = find_surface_shader(m.contains("shader") ? get_string(m, "shader") : std::string());
     if (!info) return r;
-    if (!info->note.empty()) ctx.label_dim(info->note);
+    if (!info->note.empty()) ctx.paragraph(info->note, &ctx.style.text_dim);   // wraps: these are sentences
     if (info->driven) {
-        ctx.label_dim("Parameters are set by the object's WaterBody.");
+        ctx.paragraph("Parameters are set by the object's WaterBody.", &ctx.style.text_dim);
         return r;
     }
     if (info->params.empty()) return r;
 
-    float v[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    for (size_t i = 0; i < info->params.size() && i < 4; ++i) v[i] = info->params[i].def;
-    if (m.contains("shader_params") && m.at("shader_params").is_sequence()) {
-        const auto& seq = m.at("shader_params").as_seq();
-        for (size_t i = 0; i < std::min<size_t>(4, seq.size()); ++i) v[i] = as_float(seq[i]);
-    }
-    for (size_t i = 0; i < info->params.size() && i < 4; ++i) {
+    // Slots 0-3 ride in shader_params; 4-7 in shader_params_ext, which only the forward
+    // transparent backbone reads (PBRMaterial::shader_params_ext).
+    float v[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    for (size_t i = 0; i < info->params.size() && i < 8; ++i) v[i] = info->params[i].def;
+    auto read = [&](const char* key, int base) {
+        if (!m.contains(key) || !m.at(key).is_sequence()) return;
+        const auto& seq = m.at(key).as_seq();
+        for (size_t i = 0; i < std::min<size_t>(4, seq.size()); ++i) v[base + static_cast<int>(i)] = as_float(seq[i]);
+    };
+    read("shader_params", 0);
+    read("shader_params_ext", 4);
+    for (size_t i = 0; i < info->params.size() && i < 8; ++i) {
         const ShaderParamDesc& p = info->params[i];
         const std::string label = p.label + "##shader_param" + std::to_string(i);
         bool ch = false;
@@ -476,21 +652,96 @@ EditResult draw_shader_section(imm::Context& ctx, Node& m) {
             int sel = std::clamp(static_cast<int>(std::lround(v[i])), 0, static_cast<int>(p.options.size()) - 1);
             ch = ctx.combo(label, &sel, p.options);
             if (ch) v[i] = static_cast<float>(sel);
-            pr.key = "shader_params"; pr.changed = ch; pr.finished = ch;
+            pr.key = i < 4 ? "shader_params" : "shader_params_ext"; pr.changed = ch; pr.finished = ch;
         } else {
             ch = ctx.drag_float(label, &v[i], p.speed, p.min, p.max);
-            detail::finish(ctx, pr, "shader_params", ch);
+            detail::finish(ctx, pr, i < 4 ? "shader_params" : "shader_params_ext", ch);
         }
-        if (ch) m["shader_params"] = make_float_seq(v, 4);
+        if (ch) {
+            m["shader_params"] = make_float_seq(v, 4);
+            if (info->params.size() > 4) m["shader_params_ext"] = make_float_seq(v + 4, 4);
+        }
         r.absorb(pr);
     }
     return r;
 }
 
+namespace {
+
+/**
+ * @brief The colour space each of this material's maps is read in.
+ *
+ * The engine takes it as a map from texture path to "srgb" / "linear" (PBRMaterial's
+ * texture_color_space), and gets it right on its own for the usual cases -- so this only
+ * appears for maps that are actually set, and only writes a key when the author overrides it.
+ * Reading a normal map as sRGB, or an albedo map as linear, is a classic silent mistake; this
+ * is where it gets fixed.
+ */
+EditResult draw_color_space_rows(imm::Context& ctx, Node& m, const std::vector<FieldDesc>& fields) {
+    EditResult r;
+    std::vector<std::pair<std::string, std::string>> maps;   // label, path
+    for (const auto& f : fields) {
+        if (f.kind != FieldKind::Texture || !m.contains(f.key)) continue;
+        const std::string path = get_string(m, f.key);
+        if (!path.empty()) maps.push_back({f.display(), path});
+    }
+    if (maps.empty()) return r;
+    ctx.spacing(3);
+    ctx.label_dim("Colour space");
+    Node spaces = m.contains("texture_color_space") && m.at("texture_color_space").is_mapping() ? m.at("texture_color_space")
+                                                                                                : Node::mapping();
+    bool changed = false;
+    for (const auto& [label, path] : maps) {
+        // Auto first: the engine's own choice (colour data sRGB, data maps linear) stays the
+        // default, and nothing is written to the file until someone picks otherwise.
+        static const std::vector<std::string> kChoices = {"Auto", "sRGB", "Linear"};
+        const std::string cur = spaces.contains(path) ? get_string(spaces, path) : std::string();
+        int pick = cur == "srgb" ? 1 : cur == "linear" ? 2 : 0;
+        ctx.push_id(path);
+        if (ctx.segmented(label, &pick, kChoices)) {
+            if (pick == 0) erase_key(spaces, path);
+            else spaces[path] = Node(std::string(pick == 1 ? "srgb" : "linear"));
+            changed = true;
+        }
+        ctx.tooltip(label + " colour space\n" + path +
+                    "\nAuto: albedo and emissive maps are read as sRGB, everything else linear");
+        ctx.pop_id();
+    }
+    if (changed) {
+        if (spaces.size() == 0) erase_key(m, "texture_color_space");
+        else m["texture_color_space"] = spaces;
+        r.key = "texture_color_space";
+        r.changed = r.finished = true;
+    }
+    return r;
+}
+
+} // namespace
+
 EditResult draw_material_block(imm::Context& ctx, Node& m, const InspectorEnv& env, bool show_unknown) {
+    const ComponentSchema& schema = material_schema();
     EditResult r = draw_shader_section(ctx, m);
     ctx.spacing();
-    r.absorb(draw_fields(ctx, material_fields(), m, env, show_unknown, {"base", "shader", "shader_params"}));
+    // The shader keys are the Shader section's; `base` belongs to the reference, not the material.
+    std::set<std::string> drawn{"base", "shader", "shader_params", "shader_params_ext", "texture_color_space"};
+    for (const auto& s : schema.sections) {
+        r.absorb(draw_section(ctx, s, schema, m, env, drawn));
+        if (s.title == "Maps") r.absorb(draw_color_space_rows(ctx, m, schema.fields));
+    }
+    if (!show_unknown) return r;
+    std::vector<FieldDesc> rest;
+    for (const auto& f : schema.fields) if (!drawn.count(f.key)) rest.push_back(f);
+    bool unknown = false;
+    if (m.is_mapping()) {
+        for (const std::string& k : keys_of(m)) {
+            if (drawn.count(k) || k.rfind("__", 0) == 0 || schema.field(k)) continue;
+            unknown = true;
+        }
+    }
+    if ((rest.empty() && !unknown) || !ctx.collapsing_header("More", false, nullptr, imm::Icon::Dots)) return r;
+    ctx.indent(6);
+    r.absorb(draw_fields(ctx, rest, m, env, true, drawn));
+    ctx.unindent(6);
     return r;
 }
 
@@ -507,7 +758,11 @@ EditResult draw_material_field(imm::Context& ctx, Node& comp, const InspectorEnv
         mode = 2; ref = get_string(comp.at("material"), "base");
     }
     int new_mode = mode;
-    if (ctx.combo("Material##mode", &new_mode, {"Inline", "Asset", "Asset + overrides"}) && new_mode != mode) {
+    const bool mode_changed = ctx.segmented("Material##mode", &new_mode, {"Inline", "Asset", "Asset +"});
+    ctx.tooltip("Material\nInline: this object's own material, stored on the object.\n"
+                "Asset: a shared materials/*.yaml -- editing it changes every object using it.\n"
+                "Asset +: that shared material with a few values changed here only.");
+    if (mode_changed && new_mode != mode) {
         Node old = present ? comp.at("material") : Node::mapping();
         if (new_mode == 0) {
             Node m = old.is_mapping() ? old : Node::mapping();
@@ -539,7 +794,9 @@ EditResult draw_material_field(imm::Context& ctx, Node& comp, const InspectorEnv
             ref = nv;
             r.changed = r.finished = true;
         }
-        if (open_material && !ref.empty() && ctx.button("Edit Material Asset")) open_material(ref + ".yaml");
+        // Either the caller's "open this material" or, failing that, the editor-wide one.
+        const auto open = open_material ? open_material : env.open_asset;
+        if (open && !ref.empty() && ctx.button("Edit Material Asset", -1, true, imm::Icon::Material)) open(ref + ".yaml");
     }
     if (mode == 0 || mode == 2) {
         if (!comp.contains("material") || !comp.at("material").is_mapping()) comp["material"] = Node::mapping();
@@ -580,22 +837,143 @@ EditResult draw_material_field(imm::Context& ctx, Node& comp, const InspectorEnv
     return r;
 }
 
+EditResult draw_section(imm::Context& ctx, const InspectorSection& s, const ComponentSchema& schema, Node& comp,
+                        const InspectorEnv& env, std::set<std::string>& drawn,
+                        const std::function<void(const std::string&)>& open_material) {
+    EditResult r;
+    // A section whose mode is not the current one is not just closed, it does not apply: its
+    // keys count as drawn so they are not repeated down in "More".
+    auto claim_keys = [&] { for (const auto& k : s.keys) drawn.insert(k); };
+    if (!show_when_holds(comp, s.show, schema.fields)) { claim_keys(); return r; }
+    // Nothing left to put in it: every row is hidden by its own condition, or the caller drew
+    // them itself (a MeshRenderer's material, which has its own tab). An empty header with a
+    // sentence under it and no rows reads as broken, so the section does not appear at all.
+    const bool has_rows = std::any_of(s.keys.begin(), s.keys.end(), [&](const std::string& k) {
+        const FieldDesc* f = schema.field(k);
+        return !drawn.count(k) && f && show_when_holds(comp, f->show, schema.fields);
+    });
+    if (!has_rows && s.custom.empty() && s.toggle.empty()) { claim_keys(); return r; }
+
+    ctx.push_id(s.title.empty() ? std::string("section") : s.title);
+    const imm::Icon icon = imm::icon_from_name(s.icon);
+    bool open = false;
+    if (!s.toggle.empty()) {
+        bool on = condition_value(comp, s.toggle, schema.fields) == "true";
+        const bool was = on;
+        open = ctx.collapsing_header(s.title, s.open, nullptr, icon, &on);
+        if (on != was) {
+            comp[s.toggle] = Node(on);
+            r.key = s.toggle;
+            r.changed = r.finished = true;
+        }
+        if (env.after_field) env.after_field(ctx, s.toggle, ctx.last_rect());
+        drawn.insert(s.toggle);
+    } else {
+        open = ctx.collapsing_header(s.title, s.open, nullptr, icon);
+    }
+    if (!open) { claim_keys(); ctx.pop_id(); return r; }
+
+    ctx.indent(6);
+    if (!s.blurb.empty()) ctx.paragraph(s.blurb, &ctx.style.text_dim);
+    if (const SectionDrawFn* fn = find_inspector_section(s.custom)) {
+        SectionContext sc{comp, env, env.object_id, &drawn};
+        r.absorb((*fn)(ctx, sc));
+    }
+
+    size_t next_sub = 0;
+    for (size_t i = 0; i < s.keys.size(); ++i) {
+        while (next_sub < s.subheads.size() && s.subheads[next_sub].index == i) {
+            const InspectorSubhead& h = s.subheads[next_sub++];
+            if (!show_when_holds(comp, h.show, schema.fields)) continue;
+            ctx.spacing(3);
+            const imm::Box hb = ctx.next_box(ctx.style.row_height - 4);
+            ctx.text_in(hb, h.title, ctx.style.text_dim, 0.0f);
+            const float tw = ctx.text_width(h.title) + 8;
+            ctx.fill({hb.x + tw, hb.y + hb.h * 0.5f, std::max(0.0f, hb.w - tw), 1.0f}, ctx.style.separator);
+        }
+        const std::string& key = s.keys[i];
+        if (!drawn.insert(key).second) continue;            // a custom drawer already did it
+        const FieldDesc* f = schema.field(key);
+        if (!f) continue;                                   // a key no schema field describes: the tests catch it
+        if (!show_when_holds(comp, f->show, schema.fields)) continue;
+        if (f->kind == FieldKind::Material) {
+            const float y = ctx.cursor().y;
+            r.absorb(draw_material_field(ctx, comp, env, open_material));
+            // The whole material block is one override value: its first row stands for it.
+            if (env.after_field) env.after_field(ctx, key, imm::Box{ctx.cursor().x, y, 120.0f, ctx.style.row_height});
+            continue;
+        }
+        ctx.push_id(key);
+        r.absorb(draw_field(ctx, *f, comp, env));
+        ctx.pop_id();
+        if (env.after_field && f->kind != FieldKind::Padding) env.after_field(ctx, key, ctx.last_label_box());
+    }
+    ctx.unindent(6);
+    ctx.spacing(4);
+    ctx.pop_id();
+    return r;
+}
+
+namespace {
+
+/** @brief A sectioned component: each section, then everything no section claimed. */
+EditResult draw_sectioned_(imm::Context& ctx, const ComponentSchema& schema, Node& comp, const InspectorEnv& env,
+                           const std::function<void(const std::string&)>& open_material,
+                           const std::set<std::string>* hide_keys) {
+    EditResult r;
+    std::set<std::string> drawn{"type", "id"};
+    if (hide_keys) drawn.insert(hide_keys->begin(), hide_keys->end());
+    for (const auto& s : schema.sections) r.absorb(draw_section(ctx, s, schema, comp, env, drawn, open_material));
+
+    // Everything the layout did not place. A key added to the schema without being put in a
+    // section still shows up here rather than disappearing.
+    std::vector<FieldDesc> rest;
+    for (const auto& f : schema.fields) if (!drawn.count(f.key)) rest.push_back(f);
+    bool unknown = false;
+    if (comp.is_mapping()) {
+        for (const std::string& k : keys_of(comp)) {
+            if (drawn.count(k) || k.rfind("__", 0) == 0) continue;
+            if (schema.field(k)) continue;
+            unknown = true;
+        }
+    }
+    if (rest.empty() && !unknown) return r;
+    if (ctx.collapsing_header("More", false, nullptr, imm::Icon::Dots)) {
+        ctx.indent(6);
+        std::set<std::string> skip = drawn;
+        r.absorb(draw_fields(ctx, rest, comp, env, true, skip));
+        ctx.unindent(6);
+    }
+    return r;
+}
+
+} // namespace
+
 EditResult draw_component(imm::Context& ctx, Node& comp, const InspectorEnv& env,
-                                 const std::function<void(const std::string&)>& open_material) {
+                                 const std::function<void(const std::string&)>& open_material,
+                                 const std::set<std::string>* hide_keys) {
     const std::string type = component_type(comp);
     const ComponentSchema* schema = find_schema(type);
     EditResult r;
+    // A component may take its whole inspector over (ParticleSystem, TileTerrain).
+    if (const SectionDrawFn* fn = find_inspector_section(type)) {
+        SectionContext sc{comp, env, env.object_id, nullptr};
+        return (*fn)(ctx, sc);
+    }
+    if (schema && !schema->sections.empty()) return draw_sectioned_(ctx, *schema, comp, env, open_material, hide_keys);
+    std::set<std::string> skip{"type", "id"};
+    if (hide_keys) skip.insert(hide_keys->begin(), hide_keys->end());
     if (schema) {
-        r.absorb(draw_fields(ctx, schema->fields, comp, env, true));
+        r.absorb(draw_fields(ctx, schema->fields, comp, env, true, skip));
         for (const auto& f : schema->fields) {
-            if (f.kind != FieldKind::Material) continue;
+            if (f.kind != FieldKind::Material || skip.count(f.key)) continue;
             const float y = ctx.cursor().y;
             r.absorb(draw_material_field(ctx, comp, env, open_material));
             // The whole material block is one override value: its first row stands for it.
             if (env.after_field) env.after_field(ctx, f.key, imm::Box{ctx.cursor().x, y, 120.0f, ctx.style.row_height});
         }
     } else {
-        r.absorb(draw_fields(ctx, {}, comp, env, true));
+        r.absorb(draw_fields(ctx, {}, comp, env, true, skip));
         if (comp.is_mapping() && comp.size() <= 1) ctx.label_dim("(no properties)");
     }
     return r;

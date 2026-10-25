@@ -142,7 +142,7 @@ There is no reflection. Each step is manual, and skipping one fails silently in 
 | 1 | the component itself in `toyengine/<area>/` (header declares, `.cpp` has bodies) | — |
 | 2 | a parser in `toyengine/scene/register.cpp`, or the area's own `*_yaml.cpp` | the key in scene YAML is silently ignored |
 | 3 | the system that updates it, at the right `UpdatePhase` order | it parses but never runs |
-| 4 | a `ComponentSchema` in `editor/schema/component_schema.cpp` | the inspector shows raw generic widgets |
+| 4 | a `ComponentSchema` in `editor/schema/component_schema.cpp`, and -- over ~10 keys -- a layout in `component_sections.cpp` | the inspector shows raw generic widgets, or one flat wall of them |
 | 5 | the key table in the `create-scene` skill's `reference/components.md` | the next agent can't find it |
 | 6 | a unit test in `tests/engine/unit/` | — |
 
@@ -169,6 +169,7 @@ binary silently drops the new component.
 | the F3 overlay, `toy::debug::watch()` | `toyengine/debug/` | [debug](../toyengine/debug/README.md) |
 | mesh fracture | `toyengine/destruct/` | [destruct](../toyengine/destruct/README.md) |
 | engine lifecycle, scene loading, config | `toyengine/core/` | [core](../toyengine/core/README.md) |
+| vehicles -- suspension, tyres, drivetrain, steering | `libs/physxcoopa/physxcoopa/vehicle/` (header-only; the `Vehicle` component and `install_vehicle_system()` live in that library too, not in `toyengine/`) | [vehicle](../libs/physxcoopa/physxcoopa/vehicle/README.md) |
 
 ## 3. Render changes
 
@@ -229,7 +230,7 @@ Start at [`editor/README.md`](../editor/README.md) (the developer tour) and
 | **a modelling / sculpt / paint operation** | [`editor/mesh/`](../editor/mesh/README.md) — pure functions over `EditMesh`, unit-tested |
 | **a terrain brush** | [`editor/terrain/`](../editor/terrain/README.md) — pure functions over the terrain data |
 | **visual presentation** — editor colours, metrics, chrome | `editor/app/editor_theme.h`, `editor/themes/`, [`editor/ui/`](../editor/ui/README.md) |
-| **a component inspector** — rows, widgets, ranges, defaults | [`editor/schema/`](../editor/schema/README.md) ← *this is the one people mean by "upgrade the inspector"* |
+| **a component inspector** — rows, widgets, ranges, defaults, sections | [`editor/schema/`](../editor/schema/README.md) ← *this is the one people mean by "upgrade the inspector"*. Keys in `component_schema.cpp`, their grouping in `component_sections.cpp`, hand-written blocks in `sections/` via `register_inspector_section()` |
 | **a settings screen** (Render / Project Settings) | `editor/schema/settings_schema.cpp` |
 | **a panel's contents** | `editor/app/ui/<panel>.cpp` (+ its `.h` for new members) -- one class per panel |
 | **the UI designer** | `editor/app/ui/ui_canvas.cpp`, `editor/ui/ui_canvas_math.h`, `editor/viewport/rect_gizmo.h` |

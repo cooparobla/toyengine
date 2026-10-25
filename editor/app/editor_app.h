@@ -128,6 +128,7 @@ class TimelinePanel;
 class TileModePanel;
 class TerrainPanel;
 class SculptPanel;
+class ThumbnailCache;
 class PropertiesPanel;
 class PaintPanel;
 class MeshToolsPanel;
@@ -1253,6 +1254,9 @@ private:
     std::unique_ptr<ProjectSettingsPanel> project_settings_panel_;
     std::unique_ptr<StatusBarPanel> statusbar_panel_;
     std::unique_ptr<OutlinerPanel> outliner_panel_;
+    /// Small GPU copies of image assets, for the inspector's texture slots and the asset
+    /// browser. Built once the device is up; null in a headless run with no renderer.
+    std::unique_ptr<ThumbnailCache> thumbnails_;
     Project project_;
     std::unique_ptr<coopa::scene::Scene> ui_scene_;
     coopa::ui::ImmediateCanvas* canvas_ = nullptr;

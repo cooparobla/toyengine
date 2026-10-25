@@ -20,6 +20,7 @@
 
 #include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace toy::editor {
@@ -35,6 +36,26 @@ enum class FieldKind {
     StringList, ///< A sequence of strings (ComboBox items, TabView tabs).
     ChildRef,   ///< The NAME of another object (usually a descendant): a dropdown of names.
     ItemList,   ///< A sequence of small maps described by `item_fields` (MenuList buttons).
+    Texture,    ///< An AssetRef into textures/, shown as a thumbnail you can drop a file onto.
+    Curve,      ///< `[[x, y], ...]` in the unit square: a value over time, distance or life.
+    Gradient,   ///< `[[t, r, g, b], ...]`: a colour over time, depth or life.
+};
+
+/**
+ * @brief A condition on another key of the same block: the row, sub-heading or section it
+ *        guards is drawn only while the condition holds.
+ *
+ * Values are compared as the inspector spells them: `true` / `false` for a Bool, the digits
+ * for an Int (including an int-coded enum's index), the string for an Enum. A key the block
+ * does not have is compared as its schema default, so a condition means the same thing before
+ * and after the key is written.
+ */
+struct ShowWhen {
+    std::string key;                   ///< Empty: always shown.
+    std::vector<std::string> equals;   ///< Holds when the value is any of these.
+    bool negate = false;               ///< Holds when it is none of them instead.
+
+    bool always() const { return key.empty(); }
 };
 
 struct FieldDesc {
@@ -58,10 +79,41 @@ struct FieldDesc {
     bool        project_only = false;  ///< Render settings: baked in at engine start-up, so config.yaml only (no scene override).
     std::string default_string;
     std::string tooltip;
+    std::string suffix;                ///< Unit appended to the number ("m", "Nm", "deg", "1/s").
+    bool        slider = false;        ///< Bounded float drawn as a filled slider, not a drag.
+    ShowWhen    show;                  ///< When this row is drawn at all.
     Node def_node;                     ///< Default for list kinds (StringList / ItemList); null: empty.
     std::vector<FieldDesc> item_fields;        ///< ItemList: the keys of one item.
 
     std::string display() const;
+};
+
+/** @brief A sub-heading inside a section, drawn before the section's `index`-th key. */
+struct InspectorSubhead {
+    size_t index = 0;
+    std::string title;
+    ShowWhen show;
+};
+
+/**
+ * @brief One collapsible block of a component's inspector: which of its keys appear, in what
+ *        order, under what heading, and when.
+ *
+ * A component with no sections is drawn as the flat list of all its fields, which is what
+ * every component looked like before sections existed. Sections only decide what is SHOWN --
+ * a key no section lists still appears (in a trailing "More" block) and is still saved, so a
+ * wrong layout can hide a row but can never lose a value.
+ */
+struct InspectorSection {
+    std::string title;
+    std::string icon;                  ///< imm icon name (imm::icon_from_name); empty: none.
+    std::string blurb;                 ///< One sentence under the header: what this controls.
+    std::vector<std::string> keys;     ///< The schema fields drawn here, in this order.
+    std::string toggle;                ///< A bool key drawn as the header's checkbox.
+    ShowWhen show;                     ///< When the whole section is drawn.
+    std::vector<InspectorSubhead> subheads;
+    std::string custom;                ///< A registered custom drawer (inspector_sections.h), drawn first.
+    bool open = true;                  ///< Open the first time it is shown.
 };
 
 struct ComponentSchema {
@@ -70,6 +122,10 @@ struct ComponentSchema {
     std::vector<FieldDesc> fields;
     bool unique = true;                ///< At most one per object (Transform, Rigidbody...).
     bool removable = true;
+    std::vector<InspectorSection> sections;   ///< Empty: the fields are drawn as one flat list.
+
+    /** @brief The field named `key`, or null. */
+    const FieldDesc* field(const std::string& key) const;
 };
 
 // --- field builders (keep the tables below readable) ---
@@ -97,6 +153,12 @@ FieldDesc f_child(std::string k, std::string def = "", bool in_default = false);
 /** @brief A list of items, each a map of `item` fields; `def` is the starting list. */
 FieldDesc f_items(std::string k, std::vector<FieldDesc> item, Node def = Node::sequence(), bool in_default = false);
 FieldDesc with_tip(FieldDesc f, std::string tip);
+/** @brief A texture map: an AssetRef into textures/, drawn as a thumbnail slot. */
+FieldDesc f_texture(std::string k, std::string label = {}, bool in_default = false);
+/** @brief A curve over the unit square; `def` is the shape a fresh component gets. */
+FieldDesc f_curve(std::string k, std::vector<glm::vec2> def = {{0.0f, 0.0f}, {1.0f, 1.0f}}, bool in_default = false);
+/** @brief A colour ramp; `def` is the ramp a fresh component gets. */
+FieldDesc f_gradient(std::string k, std::vector<std::pair<float, glm::vec3>> def = {}, bool in_default = false);
 
 /** @brief The value a field is written with when it is added at its default. */
 Node field_default_node(const FieldDesc& f);
@@ -107,9 +169,63 @@ FieldDesc startup(FieldDesc f);
 FieldDesc project_only(FieldDesc f);
 /** @brief An enum whose engine default is not its first option. */
 FieldDesc with_default(FieldDesc f, std::string def);
+/** @brief A row shown only while `key` holds one of `values` (see ShowWhen). */
+FieldDesc shown_when(FieldDesc f, std::string key, std::vector<std::string> values);
+/** @brief A row shown only while `key` holds NONE of `values`. */
+FieldDesc hidden_when(FieldDesc f, std::string key, std::vector<std::string> values);
+/** @brief A bounded float drawn as a filled slider instead of a drag. */
+FieldDesc as_slider(FieldDesc f);
+/** @brief The unit shown after the number ("m", "Nm", "deg"). */
+FieldDesc with_unit(FieldDesc f, std::string unit);
+
+/**
+ * @brief Builds one InspectorSection, so a layout table reads as prose.
+ * @code
+ * sec("Steering", "Tool").says("How far and how fast the wheels turn.")
+ *     .keys({"steer_mode", "max_steer_deg", "min_steer_deg"})
+ *     .sub("At speed", 2).when("steer_mode", {"ackermann"}).done()
+ * @endcode
+ */
+class SectionBuilder {
+public:
+    SectionBuilder(std::string title, std::string icon = {});
+    /** @brief The one-sentence explanation under the header. */
+    SectionBuilder& says(std::string blurb);
+    /** @brief Adds keys, in order; call it more than once to interleave with sub(). */
+    SectionBuilder& keys(std::vector<std::string> ks);
+    /** @brief A sub-heading before the keys added next, optionally conditional. */
+    SectionBuilder& sub(std::string title, std::string show_key = {}, std::vector<std::string> values = {});
+    /** @brief A bool key drawn as the header's checkbox. */
+    SectionBuilder& toggle(std::string key);
+    /** @brief Draws the whole section only while `key` holds one of `values`. */
+    SectionBuilder& when(std::string key, std::vector<std::string> values);
+    /** @brief A registered custom drawer (inspector_sections.h) drawn above the rows. */
+    SectionBuilder& custom(std::string id);
+    /** @brief Starts collapsed. */
+    SectionBuilder& closed();
+    InspectorSection done();
+
+private:
+    InspectorSection s_;
+};
+
+/** @brief Shorthand for SectionBuilder{title, icon}. */
+SectionBuilder sec(std::string title, std::string icon = {});
+
+/** @brief Gives each built-in schema its inspector layout; called once, from schema_table_(). */
+void apply_component_sections(std::map<std::string, ComponentSchema>& table);
 
 /** @brief The keys of a PBRMaterial block (inline, or a materials/*.yaml asset). */
 const std::vector<FieldDesc>& material_fields();
+
+/** @brief How those keys are grouped in the inspector: Surface, Maps, Transparency... */
+const std::vector<InspectorSection>& material_sections();
+
+/**
+ * @brief A material as a schema, so the inspector draws it with exactly the same section code
+ *        as a component -- conditions, sub-headings and all.
+ */
+const ComponentSchema& material_schema();
 
 /** @brief One slot of a surface shader's `shader_params`, as the material editor labels it. */
 struct ShaderParamDesc {

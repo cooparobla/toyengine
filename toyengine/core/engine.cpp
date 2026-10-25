@@ -30,6 +30,8 @@
 #include <coopa/scene/systems/transform_system.h>
 #include <physxcoopa/physx_yaml.h>
 #include <physxcoopa/debug/debug_draw.h>
+#include <physxcoopa/components/vehicle.h>
+#include <physxcoopa/system/vehicle_system.h>
 #include <toyengine/core/branding.h>
 #include <toyengine/core/user_settings.h>
 #include <toyengine/audio/audio_components.h>
@@ -490,6 +492,10 @@ void Engine::prepare_scene_(coopa::scene::Scene& scene, bool drain_assets) {
     water::install_water_system(scene, &ctx_.device(), &ctx_.allocator(), &assets_)
         ->set_settings(water_settings_for_(pipeline_->render_config().water_quality));
     coopa::physx::system::install_physics_system(scene, scene_cfg.physics);
+    // Orders 96 and 150: binds each Vehicle to its chassis body and drives the wheels inside
+    // Physics' substep (96), then places the wheel visuals and fires its signals once the step
+    // is done (150) -- see physxcoopa/system/vehicle_system.h.
+    coopa::physx::system::install_vehicle_system(scene);
     // Order 95: the weather's wind (40) on cloth and wind-influenced rigidbodies, right before
     // Physics (100) steps -- see weather/wind_system.h.
     weather::install_wind_system(scene);
@@ -765,6 +771,7 @@ bool Engine::tick() {
             drive_turntables_(scene_mgr_.get_active_scene());
             drive_terrain_diggers_(scene_mgr_.get_active_scene());
             drive_character_controllers_(scene_mgr_.get_active_scene());
+            drive_vehicles_(scene_mgr_.get_active_scene());
             drive_ragdolls_(scene_mgr_.get_active_scene());
         }
         scene_mgr_.update(dt);
@@ -1091,6 +1098,18 @@ void Engine::bind_default_input_() {
     // LeftControl holds the horse to a walk (Shift gallops, as `sprint`).
     input_.bind("interact", Key::F);
     input_.bind("walk", Key::LeftControl);
+    // Vehicle (physxcoopa's Vehicle component): W/S throttle and brake and A/D steer come from
+    // the same `move` vector the characters use, read in the vehicle's own frame rather than the
+    // camera's. The three below share keys with `jump`/`sprint`/`walk` deliberately -- an action
+    // is an independent lookup, and a scene is either being walked or driven, never both.
+    input_.bind("handbrake", Key::Space);
+    input_.bind("gear_up", Key::LeftShift);
+    input_.bind("gear_down", Key::LeftControl);
+    input_.bind("next_vehicle", Key::V);
+    // R rights a vehicle that has ended up on its roof. Shares its key with `ragdoll` on the
+    // same deliberate basis as the three above: an action is an independent lookup, and a scene
+    // is either being driven or being walked around in, never both.
+    input_.bind("recover", Key::R);
 }
 
 void Engine::drive_camera_controller_(coopa::scene::Scene& scene) {
@@ -1266,6 +1285,56 @@ void Engine::drive_character_controllers_(coopa::scene::Scene& scene) {
         m->jump = m->jump || (ridden && jump);
     }
     for (scene::Rider* r : riders) r->interact = r->interact || interact;
+}
+
+void Engine::drive_vehicles_(coopa::scene::Scene& scene) {
+    using coopa::physx::components::VehicleComponent;
+    std::vector<VehicleComponent*> vehicles = scene.get_components<VehicleComponent>();
+    if (vehicles.empty()) return;
+
+    // The ones the player may drive, in scene order -- what V cycles through.
+    std::vector<VehicleComponent*> driveable;
+    for (VehicleComponent* v : vehicles) {
+        if (v->player_input) driveable.push_back(v);
+    }
+    if (driveable.empty()) return;
+
+    const bool blocked = input_blocked_();
+    if (!blocked && input_.is_pressed("next_vehicle", ctx_.input())) {
+        std::size_t current = 0;
+        for (std::size_t i = 0; i < driveable.size(); ++i) {
+            if (driveable[i]->active) current = i;
+        }
+        const std::size_t next = (current + 1) % driveable.size();
+        for (VehicleComponent* v : driveable) v->active = false;
+        driveable[next]->active = true;
+        // Follow the new vehicle without disturbing where the camera is looking from: `tracker`
+        // is resolved by name every frame, so moving it keeps yaw, pitch and distance.
+        if (auto* cam = scene.find_first_component<scene::CameraController>()) {
+            if (!cam->tracker.empty() && driveable[next]->owner) {
+                cam->tracker = driveable[next]->owner->name();
+            }
+        }
+    }
+
+    const glm::vec2 move = blocked ? glm::vec2(0.0f) : input_.vector("move", ctx_.input());
+    const float handbrake = (!blocked && input_.is_down("handbrake", ctx_.input())) ? 1.0f : 0.0f;
+    int gear_request = 0;
+    if (!blocked && input_.is_pressed("gear_up", ctx_.input())) gear_request = 1;
+    if (!blocked && input_.is_pressed("gear_down", ctx_.input())) gear_request = -1;
+    const bool recover = !blocked && input_.is_pressed("recover", ctx_.input());
+
+    for (VehicleComponent* v : driveable) {
+        if (!v->active) continue;  // VehicleSystem zeroes the controls of the rest
+        v->controls.throttle = std::max(move.y, 0.0f);
+        v->controls.brake = std::max(-move.y, 0.0f);
+        v->controls.steer = move.x;
+        v->controls.handbrake = handbrake;
+        // OR-ed in, not overwritten: VehicleSystem clears these after the step that used them,
+        // so a press is never lost to a frame whose physics did not run.
+        if (gear_request != 0) v->controls.gear_request = gear_request;
+        v->controls.recover = v->controls.recover || recover;
+    }
 }
 
 void Engine::drive_ragdolls_(coopa::scene::Scene& scene) {

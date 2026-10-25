@@ -1,0 +1,5 @@
+# Glossy car paint -- a clear coat over a saturated base, so SSR and the sun both read on it.
+albedo: { r: 0.72, g: 0.09, b: 0.08 }
+metallic: 0.25
+roughness: 0.22
+ao: 1.0

@@ -1,0 +1,78 @@
+# A light, stiff, rear-driven road car -- fast on tarmac and hopeless off it. Its 0.13 m of
+# suspension travel is what makes the demo course's kerbs and logs impassable for it.
+#
+# The object's ORIGIN is the chassis centre, which is the frame physxcoopa's preset measures its
+# wheel anchors in (see physxcoopa/vehicle/wheel.h). Place an instance at z = 0.81 and it settles
+# exactly on ground at z = 0. The BoxCollider stops short of the tyres by this vehicle's ground
+# clearance: the wheels are raycasts, so a collider reaching the ground would ride on the floor
+# instead of on its suspension -- and one that stopped too high would let the car drive straight
+# over a kerb, since a downward ray finds ground above its own hub quite happily.
+object:
+  name: sports_car
+  components:
+    - type: Transform
+      position: { x: 0.0, y: 0.0, z: 0.0 }
+    - type: MeshRenderer
+      mesh_path: vehicles/sports_car_body
+      material: materials/vehicles/paint_red
+    - type: BoxCollider
+      # Sized by GROUND CLEARANCE (0.14 m here), not by the body mesh: the wheels are
+      # downward rays, so they find ground above their own hub and will climb any step shorter
+      # than rest_length + radius. What actually stops this vehicle at a kerb is its chassis
+      # collider reaching down to z = 0.14 m above the ground.
+      size: { x: 1.760, y: 4.100, z: 1.263 }
+      center: { x: 0.0, y: 0.0, z: -0.032 }
+      material: metal
+    - type: Rigidbody
+      mass: 1300.0
+      drag: 0.0
+      angular_drag: 0.05
+      # The mass sits 0.55 m above the ground, not at the collider's centre. That ratio
+      # against the 0.78 m half-track is what decides when it tips: this one rolls at about
+      # 1.42 g of cornering, which no tyre on this course can deliver. Left at the geometric
+      # centre it rolled over on a flat skidpad at 12 m/s.
+      center_of_mass: { x: 0.0, y: 0.0, z: -0.221 }
+    - type: Vehicle
+      preset: sports_car
+      wheels:
+        - object: wheel_fl
+        - object: wheel_fr
+        - object: wheel_rl
+        - object: wheel_rr
+  children:
+    - name: wheel_fl
+      components:
+        - type: Transform
+          position: { x: -0.78, y: 1.25, z: -0.473 }
+          scale: { x: 0.22, y: 0.33, z: 0.33 }
+        - type: MeshRenderer
+          mesh_path: vehicles/wheel
+          material: materials/vehicles/tyre
+      children: []
+    - name: wheel_fr
+      components:
+        - type: Transform
+          position: { x: 0.78, y: 1.25, z: -0.473 }
+          scale: { x: 0.22, y: 0.33, z: 0.33 }
+        - type: MeshRenderer
+          mesh_path: vehicles/wheel
+          material: materials/vehicles/tyre
+      children: []
+    - name: wheel_rl
+      components:
+        - type: Transform
+          position: { x: -0.78, y: -1.3, z: -0.473 }
+          scale: { x: 0.22, y: 0.33, z: 0.33 }
+        - type: MeshRenderer
+          mesh_path: vehicles/wheel
+          material: materials/vehicles/tyre
+      children: []
+    - name: wheel_rr
+      components:
+        - type: Transform
+          position: { x: 0.78, y: -1.3, z: -0.473 }
+          scale: { x: 0.22, y: 0.33, z: 0.33 }
+        - type: MeshRenderer
+          mesh_path: vehicles/wheel
+          material: materials/vehicles/tyre
+      children: []

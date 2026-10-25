@@ -17,14 +17,20 @@
 #include <uicoopa/immediate/imm.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <functional>
 #include <set>
 #include <string>
 #include <vector>
 
+namespace coopa::scene { class SceneObject; }
+
 namespace toy::editor {
 
 namespace imm = coopa::ui::imm;
+
+/// As editor/core/scene_document.h spells it; repeated so this header stays off that one.
+using ObjectId = int64_t;
 
 /** @brief What the inspector needs from the editor around it. */
 struct InspectorEnv {
@@ -35,6 +41,19 @@ struct InspectorEnv {
     /// Called after each field is drawn, with its key and its label's box: the Components tab
     /// marks a prefab instance's overridden fields there and gives them a right-click menu.
     std::function<void(imm::Context&, const std::string& key, const imm::Box& label)> after_field;
+    /// The live object the inspected block belongs to, or null: a custom section reads runtime
+    /// state through it (particle counts, a vehicle's speed) and drives previews.
+    std::function<coopa::scene::SceneObject*()> live_object;
+    /// Opens a project-relative asset ("materials/brick.yaml") in the editor.
+    std::function<void(const std::string& path)> open_asset;
+    /// A thumbnail of the image at a project-relative path ("textures/brick.png"), or a null
+    /// view while it is not loaded. Unset (tests, headless): texture slots fall back to a
+    /// plain file dropdown.
+    std::function<coopa::gfx::TextureView(const std::string& path)> texture_preview;
+    /// The object being inspected, for a custom section that needs to name it. 0 outside a scene.
+    ObjectId object_id = 0;
+    /// The game is running: a custom section must not offer edits that only make sense stopped.
+    bool playing = false;
 };
 
 struct EditResult {
@@ -61,6 +80,16 @@ std::string path_to_ref(const FieldDesc& f, const std::string& path);
 void finish(imm::Context& ctx, EditResult& r, const std::string& key, bool changed, bool group = false);
 
 } // namespace detail
+
+/**
+ * @brief The value of `key` as a ShowWhen compares it: "true"/"false" for a bool, the digits
+ *        for an int, the text for a string or enum. A key the block lacks reads as its schema
+ *        default, so a condition means the same before and after the key is written.
+ */
+std::string condition_value(const Node& block, const std::string& key, const std::vector<FieldDesc>& fields);
+
+/** @brief Whether the row, sub-heading or section `w` guards should be drawn. */
+bool show_when_holds(const Node& block, const ShowWhen& w, const std::vector<FieldDesc>& fields);
 
 /** @brief One field of `block` (the key may be absent: the schema default is shown). */
 EditResult draw_field(imm::Context& ctx, const FieldDesc& f, Node& block, const InspectorEnv& env);
@@ -96,11 +125,25 @@ EditResult draw_material_field(imm::Context& ctx, Node& comp, const InspectorEnv
                                       const std::function<void(const std::string&)>& open_material = {});
 
 /**
+ * @brief One collapsible section of a component: its header (with icon, blurb and optional
+ *        toggle), its custom drawer if it names one, then its rows.
+ * @param drawn Keys already drawn, added to as this section draws its own -- including the
+ *              keys of a section that is closed or whose condition fails, so they are not
+ *              repeated in the trailing "More" block.
+ */
+EditResult draw_section(imm::Context& ctx, const InspectorSection& s, const ComponentSchema& schema, Node& comp,
+                        const InspectorEnv& env, std::set<std::string>& drawn,
+                        const std::function<void(const std::string&)>& open_material = {});
+
+/**
  * @brief The full inspector body for one component node.
+ * @param hide_keys Keys the caller draws itself (the Components tab keeps a MeshRenderer's
+ *                  material on its own tab); they are skipped, not pushed down into "More".
  * @return The edit result; `comp` is modified in place.
  */
 EditResult draw_component(imm::Context& ctx, Node& comp, const InspectorEnv& env,
-                                 const std::function<void(const std::string&)>& open_material = {});
+                                 const std::function<void(const std::string&)>& open_material = {},
+                                 const std::set<std::string>* hide_keys = nullptr);
 
 } // namespace toy::editor
 

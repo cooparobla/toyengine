@@ -1,0 +1,5 @@
+# Unpainted, weathered steel for blades, decks and bumpers.
+albedo: { r: 0.42, g: 0.42, b: 0.44 }
+metallic: 0.65
+roughness: 0.55
+ao: 1.0

@@ -5,11 +5,13 @@
 #include "editor/app/ui/assets.h"
 #include "editor/app/ui/statusbar.h"
 #include "editor/app/ui/outliner.h"
+#include "editor/app/thumbnail_cache.h"
 
 namespace toy {
 namespace editor {
 
 void EditorApp::draw_(imm::Context& ctx) {
+    if (thumbnails_) thumbnails_->begin_frame();   // a fresh per-frame load budget
     const glm::vec2 sz = ctx.canvas_size();
     // No full-window background fill: the 3D render shows through the viewport's rect,
     // so backgrounds are painted per area (and around the viewport) instead.

@@ -1,0 +1,5 @@
+# Plant yellow, for the hauler and the dozer. Matte: site machines are never polished.
+albedo: { r: 0.84, g: 0.62, b: 0.07 }
+metallic: 0.15
+roughness: 0.48
+ao: 1.0

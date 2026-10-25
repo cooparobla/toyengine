@@ -1,0 +1,72 @@
+# The all-rounder: limited-slip all-wheel drive, 0.26 m of travel, rear-biased torque so it
+# still rotates on the throttle. Crosses gravel and the shallow end of the mud; bogs in the deep
+# end, which is what the hauler is for. Spawn at z = 1.04.
+object:
+  name: pickup_4x4
+  components:
+    - type: Transform
+      position: { x: 0.0, y: 0.0, z: 0.0 }
+    - type: MeshRenderer
+      mesh_path: vehicles/pickup_body
+      material: materials/vehicles/paint_blue
+    - type: BoxCollider
+      # Sized by GROUND CLEARANCE (0.28 m here), not by the body mesh: the wheels are
+      # downward rays, so they find ground above their own hub and will climb any step shorter
+      # than rest_length + radius. What actually stops this vehicle at a kerb is its chassis
+      # collider reaching down to z = 0.28 m above the ground.
+      size: { x: 1.900, y: 4.800, z: 1.710 }
+      center: { x: 0.0, y: 0.0, z: 0.095 }
+      material: metal
+    - type: Rigidbody
+      mass: 2100.0
+      drag: 0.0
+      angular_drag: 0.05
+      # The mass sits 0.70 m above the ground, not at the collider's centre. That ratio
+      # against the 0.85 m half-track is what decides when it tips: this one rolls at about
+      # 1.21 g of cornering, which no tyre on this course can deliver. Left at the geometric
+      # centre it rolled over on a flat skidpad at 12 m/s.
+      center_of_mass: { x: 0.0, y: 0.0, z: -0.435 }
+    - type: Vehicle
+      preset: pickup_4x4
+      wheels:
+        - object: wheel_fl
+        - object: wheel_fr
+        - object: wheel_rl
+        - object: wheel_rr
+  children:
+    - name: wheel_fl
+      components:
+        - type: Transform
+          position: { x: -0.85, y: 1.45, z: -0.622 }
+          scale: { x: 0.28, y: 0.4, z: 0.4 }
+        - type: MeshRenderer
+          mesh_path: vehicles/wheel
+          material: materials/vehicles/tyre
+      children: []
+    - name: wheel_fr
+      components:
+        - type: Transform
+          position: { x: 0.85, y: 1.45, z: -0.622 }
+          scale: { x: 0.28, y: 0.4, z: 0.4 }
+        - type: MeshRenderer
+          mesh_path: vehicles/wheel
+          material: materials/vehicles/tyre
+      children: []
+    - name: wheel_rl
+      components:
+        - type: Transform
+          position: { x: -0.85, y: -1.4, z: -0.622 }
+          scale: { x: 0.28, y: 0.4, z: 0.4 }
+        - type: MeshRenderer
+          mesh_path: vehicles/wheel
+          material: materials/vehicles/tyre
+      children: []
+    - name: wheel_rr
+      components:
+        - type: Transform
+          position: { x: 0.85, y: -1.4, z: -0.622 }
+          scale: { x: 0.28, y: 0.4, z: 0.4 }
+        - type: MeshRenderer
+          mesh_path: vehicles/wheel
+          material: materials/vehicles/tyre
+      children: []

@@ -1,0 +1,5 @@
+# The buggy's raw lime frame -- flat and bright, so it reads against the mud and gravel.
+albedo: { r: 0.52, g: 0.76, b: 0.13 }
+metallic: 0.1
+roughness: 0.52
+ao: 1.0

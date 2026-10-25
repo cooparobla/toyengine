@@ -14,9 +14,11 @@
 #   toyhub open <dir>                  build if needed, then launch the editor detached
 #   toyhub rebuild <dir>               clean rebuild: remove build output, then build.sh
 #   toyhub upgrade <dir> [--ref R]     re-pin the engine (default: this checkout's HEAD)
-#   toyhub link <dir> [ENGINE_DIR]     build against a local engine checkout (default: this one)
-#   toyhub vendor <dir> [--ref R]      give the project its OWN engine: a git submodule in it
-#   toyhub unlink <dir>                back to the pinned clone
+#   toyhub link <dir> [ENGINE_DIR] [--force]
+#                                      build against a local engine checkout (default: this one)
+#   toyhub vendor <dir> [--ref R] [--path P] [--force] [--purge]
+#                                      give the project its OWN engine: a git submodule in it
+#   toyhub unlink <dir> [--force]      back to the pinned clone
 #   toyhub install                     symlink toyhub into ~/.local/bin
 #   toyhub app [DEST]                  macOS: write "toyengine Hub.app" (default ~/Applications)
 #
@@ -29,6 +31,15 @@
 #                                   every project on the box builds the same working tree)
 #   vendored  engine.link <rel>     the project commits its own engine as a git submodule and
 #                                   .libs/toyengine symlinks that (toyhub vendor)
+#
+# Switching between them is ONE step. link, vendor and unlink each dismantle the mode the
+# project is in now before setting up the new one: a pinned clone in .libs/, a vendored
+# submodule (its worktree, .gitmodules stanza, index entry and .git/config section), a stale
+# .libs/toyengine symlink and the build trees whose CMake cache remembers the old engine path.
+# Uncommitted engine work stops the switch; --force throws it away. A removed submodule's
+# objects stay in .git/modules/<name>, which vendoring again reuses instead of re-cloning the
+# engine; --purge drops those too.
+#
 # A project's name is always its folder's name. The project list is ~/.toyengine/projects.yaml
 # (shared with the hub, build/toyengine_hub); only `new` and `add` put a project there --
 # nothing is auto-detected -- and the engine checkout itself is never a project.
@@ -65,7 +76,8 @@ engine_link() {
     if [[ "$eng" == "$proj"/* ]]; then echo "${eng#"$proj"/}"; else echo "$eng"; fi
 }
 
-usage() { sed -n '2,21p' "$ENGINE_DIR/tools/toyhub" | sed 's/^# \{0,1\}//'; }
+# The leading comment block of this file, up to the first line of code, is the help text.
+usage() { awk 'NR > 1 { if (!/^#/) exit; sub(/^#[[:space:]]?/, ""); print }' "$ENGINE_DIR/tools/toyhub"; }
 
 # --- .toy access (same flat-YAML reader as a project's .toyenv.sh) ---------------------------
 
@@ -160,6 +172,165 @@ engine_desc() {   # one-line engine description of a project dir
     elif [[ -n "$link" ]]; then echo "linked: $link"
     elif [[ -n "$ref" ]]; then echo "${ref:0:12}"
     else echo "(no engine pin)"; fi
+}
+
+# --- engine mode transitions ------------------------------------------------------------------
+#
+# A project is in exactly one engine mode (pinned / linked / vendored, see the header), and each
+# mode leaves different things behind. engine_prepare() takes the project down to nothing but
+# what the mode it is switching TO needs, so none of link / vendor / unlink can leave a project
+# half in its old mode -- a .gitmodules stanza for an engine that is gone, a gitlink in the
+# index, a dangling .libs/toyengine, or a build tree configured against another engine path.
+
+# engine_dirty <checkout> -- uncommitted work in a git checkout, one path per line (empty when
+# clean or not a repository). Untracked files count: they are engine work that nothing else
+# holds a copy of.
+engine_dirty() { git -C "$1" status --porcelain --ignore-submodules=dirty 2>/dev/null || true; }
+
+# engine_unpushed <checkout> -- up to five commits in it that no remote-tracking ref holds.
+engine_unpushed() { git -C "$1" log --oneline --max-count=5 HEAD --branches --not --remotes 2>/dev/null || true; }
+
+# submodule_entries <dir> -- "name<TAB>path<TAB>url" for every stanza in <dir>/.gitmodules.
+submodule_entries() {
+    local gm="$1/.gitmodules"
+    [[ -f "$gm" ]] || return 0
+    awk '
+        function flush() { if (name != "" && path != "") print name "\t" path "\t" url; name = ""; path = ""; url = "" }
+        /^[[:space:]]*\[submodule[[:space:]]/ {
+            flush()
+            if (match($0, /"[^"]*"/)) name = substr($0, RSTART + 1, RLENGTH - 2)
+            next
+        }
+        /^[[:space:]]*path[[:space:]]*=/ { v = $0; sub(/^[^=]*=[[:space:]]*/, "", v); sub(/[[:space:]]+$/, "", v); path = v; next }
+        /^[[:space:]]*url[[:space:]]*=/  { v = $0; sub(/^[^=]*=[[:space:]]*/, "", v); sub(/[[:space:]]+$/, "", v); url = v; next }
+        END { flush() }
+    ' "$gm"
+}
+
+# engine_submodules <dir> <engine.link> -- "name<TAB>path" for each submodule of <dir> that is a
+# vendored engine: one cloned from a toyengine remote, one holding a toyengine checkout, or the
+# one the .toy points at (which may be listed with any url, or be only half added).
+engine_submodules() {
+    local dir="$1" link="${2%/}" name path url base
+    while IFS=$'\t' read -r name path url; do
+        [[ -n "$path" ]] || continue
+        base="$(basename "${url%.git}")"
+        if [[ "$base" == "toyengine" || "$path" == "$link" || ( -f "$dir/$path/CMakeLists.txt" && -d "$dir/$path/toyengine" ) ]]; then
+            printf '%s\t%s\n' "$name" "$path"
+        fi
+    done < <(submodule_entries "$dir")
+}
+
+# engine_unvendor <dir> <name> <path> <force> <purge> -- undo one `toyhub vendor`: the
+# submodule's worktree, its index entry, its .gitmodules stanza and its .git/config section all
+# go. The clone in .git/modules/<name> is KEPT unless <purge>, because vendoring again reuses it
+# (see cmd_vendor) and because it is where commits the project never pushed survive.
+engine_unvendor() {
+    local dir="$1" name="$2" sub="$3" force="$4" purge="$5"
+    [[ -n "$sub" && "$sub" != /* && "$sub" != *..* ]] || die "refusing to remove submodule path '$sub'"
+    local gitdir="$dir/.git/modules/$name"
+
+    if [[ -e "$dir/$sub/.git" ]]; then
+        local dirty; dirty="$(engine_dirty "$dir/$sub")"
+        if [[ -n "$dirty" ]]; then
+            if (( ! force )); then
+                echo "$dirty" | head -n 20 >&2
+                die "$sub has uncommitted engine work (above); commit or discard it there, or re-run with --force to throw it away"
+            fi
+            warn "discarding uncommitted engine work in $sub (--force)"
+        fi
+        local ahead; ahead="$(engine_unpushed "$dir/$sub")"
+        if [[ -n "$ahead" ]]; then
+            if (( purge )); then
+                if (( ! force )); then
+                    echo "$ahead" >&2
+                    die "$sub has commits that are not pushed (above); push them, or re-run with --force to lose them with --purge"
+                fi
+                warn "losing unpushed commits in $sub (--force --purge)"
+            else
+                warn "$sub has commits that are not pushed; they stay in .git/modules/$name"
+            fi
+        fi
+    fi
+
+    echo "[toyhub] removing the vendored engine submodule $sub"
+    # deinit first: it empties the worktree, which is what makes `git rm` on a submodule work
+    # instead of refusing. Both are no-ops on a submodule that was only half added.
+    git -C "$dir" submodule deinit --force -- "$sub" >/dev/null 2>&1 || true
+    if git -C "$dir" ls-files --error-unmatch -- "$sub" >/dev/null 2>&1; then
+        git -C "$dir" rm --force --quiet -- "$sub" >/dev/null 2>&1 \
+            || git -C "$dir" rm --cached --force --quiet -- "$sub" >/dev/null 2>&1 \
+            || warn "could not drop $sub from the index; remove it by hand (git rm --cached '$sub')"
+    fi
+    rm -rf "$dir/$sub"
+    git -C "$dir" config --remove-section "submodule.$name" >/dev/null 2>&1 || true
+    if [[ -f "$dir/.gitmodules" ]]; then
+        git -C "$dir" config --file .gitmodules --remove-section "submodule.$name" >/dev/null 2>&1 || true
+        if grep -q '^[[:space:]]*\[submodule' "$dir/.gitmodules"; then
+            git -C "$dir" add -- .gitmodules >/dev/null 2>&1 || true
+        else
+            # Nothing left in it: an empty .gitmodules is just noise in the next commit.
+            rm -f "$dir/.gitmodules"
+            git -C "$dir" rm --cached --quiet --ignore-unmatch -- .gitmodules >/dev/null 2>&1 || true
+        fi
+    fi
+    if [[ -d "$gitdir" ]]; then
+        if (( purge )); then
+            rm -rf "$gitdir"
+            echo "[toyhub] removed the engine clone in .git/modules/$name"
+        else
+            echo "[toyhub] kept the engine clone in .git/modules/$name (toyhub vendor reuses it; --purge removes it)"
+        fi
+    fi
+    echo "[toyhub] commit the removal of $sub (and .gitmodules) when you are happy with it"
+}
+
+# engine_declone <dir> <force> -- remove a pinned clone sitting in .libs/toyengine. Only link and
+# vendor mode get here; pinned mode's own setup.sh updates the clone in place.
+engine_declone() {
+    local dir="$1" force="$2" eng="$1/.libs/toyengine"
+    [[ -e "$eng" && ! -L "$eng" ]] || return 0
+    local dirty; dirty="$(engine_dirty "$eng")"
+    if [[ -n "$dirty" ]]; then
+        if (( ! force )); then
+            echo "$dirty" | head -n 20 >&2
+            die ".libs/toyengine is a pinned clone with local changes (above); commit or discard them, or re-run with --force to throw them away"
+        fi
+        warn "discarding local changes in the pinned clone .libs/toyengine (--force)"
+    fi
+    echo "[toyhub] removing the pinned engine clone in .libs/toyengine"
+    rm -rf "$eng"
+}
+
+# engine_prepare <dir> <mode> <keep> <force> <purge> -- clean the project down to what <mode>
+# needs. <keep> is a project-relative engine directory to spare (the submodule being vendored,
+# or a link target inside the project); "" spares none.
+engine_prepare() {
+    local dir="$1" mode="$2" keep="${3%/}" force="$4" purge="$5"
+    local f; f="$(toy_file "$dir")"
+    local link; link="$(toy_get "$f" engine.link)"; link="${link%/}"
+
+    # Every vendored engine this project has: the ones .gitmodules lists, plus the one the .toy
+    # points at if a half-undone vendor left it out of .gitmodules.
+    local todo=""; todo="$(engine_submodules "$dir" "$link")"
+    if [[ -n "$link" && "$link" != /* && -e "$dir/$link" ]] && ! grep -q "	$link\$" <<< "$todo"; then
+        todo="$(printf '%s\n%s\t%s' "$todo" "$link" "$link")"   # a leading blank line is skipped below
+    fi
+    local name sub
+    while IFS=$'\t' read -r name sub; do
+        [[ -n "$sub" ]] || continue
+        [[ "$sub" != "$keep" ]] || continue
+        engine_unvendor "$dir" "$name" "$sub" "$force" "$purge"
+    done <<< "$todo"
+
+    if [[ "$mode" != pinned ]]; then engine_declone "$dir" "$force"; fi
+    # setup.sh re-points the symlink, but one left dangling by a failed setup reads as a broken
+    # project, so it goes now.
+    if [[ -L "$dir/.libs/toyengine" && ! -e "$dir/.libs/toyengine" ]]; then rm -f "$dir/.libs/toyengine"; fi
+    if [[ -d "$dir/build" || -n "$(ls -d "$dir"/build-* 2>/dev/null)" ]]; then
+        echo "[toyhub] removing the build trees (their CMake cache remembers the old engine path)"
+    fi
+    rm -rf "$dir/build" "$dir"/build-*
 }
 
 # --- commands ---------------------------------------------------------------------------------
@@ -338,6 +509,12 @@ cmd_upgrade() {
     done
     dir="$(project_dir "${dir:-.}")"
     local f; f="$(toy_file "$dir")"
+    # A vendored engine is moved by checking the submodule out, which is cmd_vendor's job --
+    # re-pinning engine.ref alone would change nothing, because setup.sh only re-links it.
+    local link; link="$(toy_get "$f" engine.link)"
+    if [[ -n "$link" && "$link" != /* ]]; then
+        die "$(basename "$dir") vendors its engine in $link; move it with 'toyhub vendor $dir --ref <ref>'"
+    fi
     [[ -n "$ref" ]] || ref="$(git -C "$ENGINE_DIR" rev-parse HEAD)"
     local src; src="$(toy_get "$f" engine.source)"
     toy_set_engine "$f" "${src:-$TOY_ENGINE_SOURCE}" "$ref" "$(toy_get "$f" engine.link)"
@@ -345,18 +522,30 @@ cmd_upgrade() {
     "$dir/setup.sh"
 }
 
+# Points the project at a toyengine checkout it shares with every other project on the box
+# (the default, and the default checkout is this one). Whatever mode the project was in is taken
+# apart first, so vendored -> linked is this one command.
 cmd_link() {
-    local dir; dir="$(project_dir "${1:-.}")"
-    local eng="${2:-$ENGINE_DIR}"; eng="$(engine_link "$dir" "$eng")"
+    local dir="" eng="" force=0 purge=0
+    while (( $# )); do
+        case "$1" in
+            --force|-f) force=1; shift ;;
+            --purge)    purge=1; shift ;;
+            -*)         die "link: unknown option $1" ;;
+            *)          if [[ -z "$dir" ]]; then dir="$1"; else eng="$1"; fi; shift ;;
+        esac
+    done
+    dir="$(project_dir "${dir:-.}")"
+    eng="${eng:-$ENGINE_DIR}"
+    [[ -d "$eng" ]] || die "no such engine checkout: $eng"
+    [[ -f "$eng/CMakeLists.txt" && -d "$eng/toyengine" ]] || die "$eng is not a toyengine checkout"
+    eng="$(engine_link "$dir" "$eng")"
     local f; f="$(toy_file "$dir")"
     local src ref; src="$(toy_get "$f" engine.source)"; ref="$(toy_get "$f" engine.ref)"
-    if [[ -e "$dir/.libs/toyengine" && ! -L "$dir/.libs/toyengine" ]]; then
-        local dirty; dirty="$(git -C "$dir/.libs/toyengine" status --porcelain --untracked-files=no 2>/dev/null || true)"
-        [[ -z "$dirty" ]] || die "$dir/.libs/toyengine has local changes; commit or discard them before linking"
-        rm -rf "$dir/.libs/toyengine"
-    fi
+    # A link target inside the project is the one engine engine_prepare must not remove.
+    local keep=""; if [[ "$eng" != /* ]]; then keep="$eng"; fi
+    engine_prepare "$dir" linked "$keep" "$force" "$purge"
     toy_set_engine "$f" "${src:-$TOY_ENGINE_SOURCE}" "${ref:-main}" "$eng"
-    rm -rf "$dir/build" "$dir"/build-*   # the CMake cache remembers the old engine path
     "$dir/setup.sh"
 }
 
@@ -369,22 +558,30 @@ cmd_link() {
 # the only thing that ever does -- vendoring never switches a checkout on its own. Idempotent:
 # an engine already in place is kept, and only the .toy is re-pointed.
 cmd_vendor() {
-    local dir="" ref="" sub="engine" ref_given=0
+    local dir="" ref="" sub="engine" ref_given=0 force=0 purge=0
     while (( $# )); do
         case "$1" in
             --ref)  ref="${2:-}"; [[ -n "$ref" ]] || die "--ref needs a commit, tag or branch"; ref_given=1; shift 2 ;;
             --path) sub="${2:-}"; [[ -n "$sub" ]] || die "--path needs a directory"; shift 2 ;;
+            --force|-f) force=1; shift ;;
+            --purge) purge=1; shift ;;
             -*)     die "unknown option $1" ;;
             *)      dir="$1"; shift ;;
         esac
     done
     dir="$(project_dir "${dir:-.}")"
     local f; f="$(toy_file "$dir")"
+    sub="${sub%/}"
     case "$sub" in
         /*|.libs|.libs/*) die "--path must be a project-relative directory outside .libs/ (./clean.sh --all removes that tree)" ;;
+        *..*) die "--path must not leave the project" ;;
     esac
     [[ -e "$dir/.git" ]] || die "$(basename "$dir") is not a git repository -- a vendored engine is a submodule of the project (git init first)"
     local src; src="$(toy_get "$f" engine.source)"; src="${src:-$TOY_ENGINE_SOURCE}"
+
+    # Take the previous mode apart (a pinned clone, a vendored engine at another --path, a link
+    # elsewhere) but keep $sub, which is either already the engine or about to be.
+    engine_prepare "$dir" vendored "$sub" "$force" "$purge"
 
     # Add it, or finish an interrupted add (a clone with no libs/ yet).
     if [[ -f "$dir/$sub/CMakeLists.txt" && -f "$dir/$sub/libs/libcoopa/CMakeLists.txt" ]]; then
@@ -434,19 +631,29 @@ cmd_vendor() {
     local at
     at="$(git -C "$dir/$sub" symbolic-ref --short -q HEAD || git -C "$dir/$sub" rev-parse HEAD)"
     toy_set_engine "$f" "$src" "$at" "$(engine_link "$dir" "$dir/$sub")"
-    rm -rf "$dir/build" "$dir"/build-*   # the CMake cache remembers the old engine path
     "$dir/setup.sh"
     echo "[toyhub] $(basename "$dir") builds its own engine in $sub, at $at"
     echo "[toyhub] commit .gitmodules and the $sub pointer; engine work goes in $sub and is committed there"
 }
 
+# Back to the pinned clone: setup.sh fetches engine.ref into .libs/toyengine. A linked engine is
+# only a symlink, but a vendored one is a submodule of the project, and that comes apart here.
 cmd_unlink() {
-    local dir; dir="$(project_dir "${1:-.}")"
+    local dir="" force=0 purge=0
+    while (( $# )); do
+        case "$1" in
+            --force|-f) force=1; shift ;;
+            --purge)    purge=1; shift ;;
+            -*)         die "unlink: unknown option $1" ;;
+            *)          dir="$1"; shift ;;
+        esac
+    done
+    dir="$(project_dir "${dir:-.}")"
     local f; f="$(toy_file "$dir")"
     local src ref; src="$(toy_get "$f" engine.source)"; ref="$(toy_get "$f" engine.ref)"
+    engine_prepare "$dir" pinned "" "$force" "$purge"
     toy_set_engine "$f" "${src:-$TOY_ENGINE_SOURCE}" "${ref:-main}" ""
     if [[ -L "$dir/.libs/toyengine" ]]; then rm "$dir/.libs/toyengine"; fi
-    rm -rf "$dir/build" "$dir"/build-*
     "$dir/setup.sh"
 }
 

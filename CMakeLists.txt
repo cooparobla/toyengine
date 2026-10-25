@@ -269,20 +269,35 @@ target_include_directories(toyengine_icon PRIVATE ${TOYENGINE_DIR})
 target_link_libraries(toyengine_icon PRIVATE coopa::gfx)
 
 # --- Vulkan/GLFW leak gate ---
-# OFF by default here, unlike uicoopa/pixengine which are clean:
-# render/toy_render_pipeline.h still names raw Vulkan symbols, forced by the
-# gfxcoopa internals that have no sealed equivalent yet -- GBufferPipeline's
-# MRT render-pass construction, Renderer::begin_frame()'s
-# raw VkClearColorValue, and SsaoPass's raw view accessors. Run
-# `${GFXCOOPA_DIR}/tools/check_no_vulkan.sh ${TOYENGINE_DIR}` for the current
-# count; flip ON once those gain wrappers.
+# gfxcoopa owns every Vulkan/GLFW symbol; toyengine, the editor and the hub must speak only
+# its sealed API (TextureView instead of VkImageView, TextureUsage instead of VkImageLayout,
+# ClearColor instead of VkClearColorValue, and so on). check_no_vulkan.sh enforces that.
+#
+# SCOPE: the script must be pointed at FIRST-PARTY directories only. Pointing it at
+# TOYENGINE_DIR scans libs/ as well, and gfxcoopa's own sources name these symbols by
+# definition -- that reported ~2,400 false positives and is why the number was never
+# believable. One invocation per first-party root instead.
+#
+# OFF by default until the remaining leaks are gone. Current inventory, and the gfxcoopa
+# abstractions each one still needs, are tracked in plans/2026-10-24_vulkan-seal.md. Run
+# `cmake --build build --target toyengine_leak_check` (or the lines below by hand) for the
+# live count; flip this ON once it reaches zero so it can never regress.
 option(GFX_LEAK_CHECK "Fail the build if consumer source names raw Vulkan/GLFW symbols" OFF)
+set(_toy_leak_roots "${TOYENGINE_DIR}/toyengine" "${TOYENGINE_DIR}/editor" "${TOYENGINE_DIR}/hub")
+add_custom_target(toyengine_leak_check
+    COMMAND ${GFXCOOPA_DIR}/tools/check_no_vulkan.sh ${TOYENGINE_DIR}/toyengine
+    COMMAND ${GFXCOOPA_DIR}/tools/check_no_vulkan.sh ${TOYENGINE_DIR}/editor
+    COMMAND ${GFXCOOPA_DIR}/tools/check_no_vulkan.sh ${TOYENGINE_DIR}/hub
+    COMMENT "Checking that no first-party source names raw Vulkan/GLFW symbols")
 if(GFX_LEAK_CHECK)
-    add_custom_target(toyengine_leak_check ALL
-        COMMAND ${GFXCOOPA_DIR}/tools/check_no_vulkan.sh ${TOYENGINE_DIR})
+    set_target_properties(toyengine_leak_check PROPERTIES EXCLUDE_FROM_ALL FALSE)
     add_dependencies(toyengine toyengine_leak_check)
     if(TARGET toyengine_tests)
         add_dependencies(toyengine_tests toyengine_leak_check)
     endif()
-    add_test(NAME toyengine_no_vulkan COMMAND ${GFXCOOPA_DIR}/tools/check_no_vulkan.sh ${TOYENGINE_DIR})
+    foreach(_root IN LISTS _toy_leak_roots)
+        get_filename_component(_name "${_root}" NAME)
+        add_test(NAME toyengine_no_vulkan_${_name}
+                 COMMAND ${GFXCOOPA_DIR}/tools/check_no_vulkan.sh ${_root})
+    endforeach()
 endif()

@@ -660,7 +660,7 @@ void ToyRenderPipeline::record_post_chain_(coopa::gfx::command::CommandBuffer& c
     const bool world_ui_empty = world_canvases_.empty() || !world_ui_pass_;
     if (ui_world_target_ && !(world_ui_empty && ui_world_layer_clear_)) {
         ui_world_layer_clear_ = world_ui_empty;
-        ui_world_target_->begin(cmd, VkClearColorValue{{0.0f, 0.0f, 0.0f, 0.0f}});
+        ui_world_target_->begin(cmd, coopa::gfx::ClearColor{0.0f, 0.0f, 0.0f, 0.0f});
         if (world_ui_pass_) {
             for (coopa::ui::CanvasComponent* canvas : world_canvases_) {
                 world_ui_pass_->draw(cmd, ctx.frame_slot,
@@ -772,7 +772,7 @@ void ToyRenderPipeline::record_overlay_(coopa::gfx::command::CommandBuffer& cmd,
     // Screen UI draws second, as a guest in the same bracket, at FULL window resolution -- it is
     // an overlay, not part of the upscaled scene image, so it is not quantised to the render grid. It
     // sets its own viewport and per-batch scissor.
-    overlay_target_->begin(cmd, VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+    overlay_target_->begin(cmd, coopa::gfx::ClearColor{0.0f, 0.0f, 0.0f, 1.0f});
     ui_composite_pass_->draw(cmd, ctx.letterbox);
     if (screen_ui_pass_) {
         for (coopa::ui::CanvasComponent* canvas : screen_canvases_) {
@@ -955,7 +955,7 @@ void ToyRenderPipeline::record_transparent_preview_(coopa::gfx::command::Command
 
 void ToyRenderPipeline::record_reactive_mask_(coopa::gfx::command::CommandBuffer& cmd) {
     if (!reactive_target_) return;
-    reactive_target_->begin(cmd, VkClearColorValue{{0.0f, 0.0f, 0.0f, 0.0f}});
+    reactive_target_->begin(cmd, coopa::gfx::ClearColor{0.0f, 0.0f, 0.0f, 0.0f});
     if (particle_pass_ && particle_pass_->has_reactive() && particle_pass_->total_instances() > 0) {
         bool bound = false;
         for (size_t i = 0; i < particle_state_.quads.size(); ++i) {

@@ -202,8 +202,9 @@ void prepare_runtime_environment() {
     const std::filesystem::path icd = layout.resources_root / "vulkan" / "icd.d" / "MoltenVK_icd.json";
     std::error_code ec;
     if (std::filesystem::is_regular_file(icd, ec)) {
-        ::setenv("VK_DRIVER_FILES", icd.c_str(), 0);
-        ::setenv("VK_ICD_FILENAMES", icd.c_str(), 0);
+        // Loader environment variable NAMES, not Vulkan API use -- nothing to wrap.
+        ::setenv("VK_DRIVER_FILES", icd.c_str(), 0);    // gfx-allow-vulkan
+        ::setenv("VK_ICD_FILENAMES", icd.c_str(), 0);   // gfx-allow-vulkan
     }
 #endif
 }

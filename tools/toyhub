@@ -364,13 +364,15 @@ cmd_link() {
 # default), with engine.link pointing at it relative. .libs/toyengine then symlinks the
 # submodule, so the project builds the copy it commits -- and because that is link mode, neither
 # ./setup.sh (which only re-runs ln) nor ./clean.sh --all (which removes just .libs/) can touch
-# it. The submodule is a clone, so the ref has to be pushed. Idempotent: an engine already there
-# is kept and only the .toy is re-pointed.
+# it. A submodule records a COMMIT, not a branch, so no branch has to exist or be pushed for
+# this: the clone lands on the engine's default branch and is left there. --ref moves it, and is
+# the only thing that ever does -- vendoring never switches a checkout on its own. Idempotent:
+# an engine already in place is kept, and only the .toy is re-pointed.
 cmd_vendor() {
-    local dir="" ref="" sub="engine"
+    local dir="" ref="" sub="engine" ref_given=0
     while (( $# )); do
         case "$1" in
-            --ref)  ref="${2:-}"; [[ -n "$ref" ]] || die "--ref needs a commit, tag or branch"; shift 2 ;;
+            --ref)  ref="${2:-}"; [[ -n "$ref" ]] || die "--ref needs a commit, tag or branch"; ref_given=1; shift 2 ;;
             --path) sub="${2:-}"; [[ -n "$sub" ]] || die "--path needs a directory"; shift 2 ;;
             -*)     die "unknown option $1" ;;
             *)      dir="$1"; shift ;;
@@ -383,26 +385,47 @@ cmd_vendor() {
     esac
     [[ -e "$dir/.git" ]] || die "$(basename "$dir") is not a git repository -- a vendored engine is a submodule of the project (git init first)"
     local src; src="$(toy_get "$f" engine.source)"; src="${src:-$TOY_ENGINE_SOURCE}"
-    [[ -n "$ref" ]] || ref="$(toy_get "$f" engine.ref)"
-    [[ -n "$ref" ]] || ref="$(git -C "$ENGINE_DIR" rev-parse HEAD)"
 
-    if [[ -f "$dir/$sub/CMakeLists.txt" ]]; then
+    # Add it, or finish an interrupted add (a clone with no libs/ yet).
+    if [[ -f "$dir/$sub/CMakeLists.txt" && -f "$dir/$sub/libs/libcoopa/CMakeLists.txt" ]]; then
         echo "[toyhub] kept existing $sub"
     else
-        echo "[toyhub] adding $sub to $(basename "$dir") as a submodule ($src @ $ref)"
-        if git -C "$dir" ls-remote --exit-code --heads "$src" "$ref" >/dev/null 2>&1; then
-            git -C "$dir" submodule add -b "$ref" "$src" "$sub"      # a branch: track it
-        else
+        if [[ ! -e "$dir/$sub/.git" ]]; then
+            echo "[toyhub] adding $sub to $(basename "$dir") as a submodule of $src"
             git -C "$dir" submodule add "$src" "$sub"
-            git -C "$dir/$sub" checkout --detach "$ref" \
-                || die "engine ref '$ref' not found in $src (pushed?)"
         fi
-        git -C "$dir" submodule update --init --recursive -- "$sub"
+        # Two calls, not one: `submodule add` leaves $sub already checked out, so an outer
+        # `submodule update` has nothing to do for it and never descends into its own
+        # submodules -- which is the whole of the engine's libs/ tree, without which configure
+        # fails outright. Running it again from inside $sub populates them. Both are no-ops
+        # when already done.
+        echo "[toyhub] initialising $sub and its libs/ submodules"
+        git -C "$dir" submodule update --init -- "$sub"
+        git -C "$dir/$sub" submodule update --init --recursive
     fi
-    toy_set_engine "$f" "$src" "$ref" "$(engine_link "$dir" "$dir/$sub")"
+
+    # Only an explicit --ref moves the engine. Verify it first: `git checkout` on an unknown
+    # name reports it as a bad pathspec, which reads like a git bug rather than a missing ref.
+    if (( ref_given )); then
+        git -C "$dir/$sub" fetch --quiet --tags origin || warn "fetch failed (offline?); using what is cloned"
+        if git -C "$dir/$sub" show-ref --verify --quiet "refs/remotes/origin/$ref"; then
+            git -C "$dir/$sub" checkout -B "$ref" "origin/$ref"          # a branch: track it
+        elif git -C "$dir/$sub" rev-parse --verify --quiet "$ref^{commit}" >/dev/null; then
+            git -C "$dir/$sub" checkout --detach "$ref"
+        else
+            die "engine ref '$ref' is not a branch, tag or commit in $src (pushed?)"
+        fi
+        git -C "$dir/$sub" submodule update --init --recursive
+    fi
+
+    # Record what is actually checked out: the branch if HEAD is on one, else the commit.
+    local at
+    at="$(git -C "$dir/$sub" symbolic-ref --short -q HEAD || git -C "$dir/$sub" rev-parse HEAD)"
+    toy_set_engine "$f" "$src" "$at" "$(engine_link "$dir" "$dir/$sub")"
     rm -rf "$dir/build" "$dir"/build-*   # the CMake cache remembers the old engine path
     "$dir/setup.sh"
-    echo "[toyhub] $(basename "$dir") now builds its own engine in $sub -- commit .gitmodules and $sub"
+    echo "[toyhub] $(basename "$dir") builds its own engine in $sub, at $at"
+    echo "[toyhub] commit .gitmodules and the $sub pointer; engine work goes in $sub and is committed there"
 }
 
 cmd_unlink() {

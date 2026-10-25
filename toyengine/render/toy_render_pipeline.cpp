@@ -482,7 +482,7 @@ bool ToyRenderPipeline::render(coopa::gfx::presentation::Renderer& renderer, coo
                                                    overlay_extent_.width,
                                                    overlay_extent_.height});
         },
-        VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}},
+        coopa::gfx::ClearColor{0.0f, 0.0f, 0.0f, 1.0f},
         nullptr,
         [&](coopa::gfx::command::CommandBuffer& cmd) {
             const auto record_start = std::chrono::steady_clock::now();

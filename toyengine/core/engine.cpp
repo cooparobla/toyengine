@@ -856,7 +856,7 @@ std::optional<Engine::ScreenUiPlacement> Engine::overlay_layer_placement_(const 
 void Engine::update_fill_extent_() {
     const render::ToyRenderConfig& cfg = pipeline_->render_config();
     if (cfg.resolution_mode != "fill") return;
-    const VkExtent2D sc = ctx_.swapchain().extent();
+    const coopa::gfx::Extent2D sc = ctx_.swapchain().extent_typed();
     if (sc.width == 0 || sc.height == 0) return;
     const auto& region = pipeline_->display_region();
     const float rw = region ? static_cast<float>(region->w) : static_cast<float>(sc.width);

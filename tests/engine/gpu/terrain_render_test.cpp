@@ -25,6 +25,7 @@
 #include <physxcoopa/components/mesh_collider.h>
 #include <physxcoopa/system/physics_system.h>
 #include <toyengine/world/terrain_component.h>
+#include <toyengine/world/terrain_field.h>
 #include <toyengine/world/tile_water.h>
 #include <toyengine/water/buoyancy.h>
 #include <toyengine/water/water_body.h>
@@ -805,7 +806,8 @@ COOPA_TEST(digging_the_shore_lets_the_sea_in) {
     for (int y = y0 + 1; y < y0 + 3; ++y)
         for (int x = x0 + 1; x < x0 + 3; ++x) tiles.at(x, y).steps = static_cast<std::int16_t>(ground - 4);
     tiles.mark_dirty(toy::world::IRect{x0, y0, x0 + 6, y0 + 4});
-    toy::world::flood_water(tiles, {{x0 + 1, y0 + 1}}, level);
+    toy::world::TerrainField water_field = toy::world::borrow_tiles(tiles);
+    toy::world::flood_water(water_field, {{x0 + 1, y0 + 1}}, static_cast<float>(level), toy::world::WaterKind::Lake);
     tick_until(engine, 240, [&] {
         const auto it = terrain->chunks().find(chunk);
         return it != terrain->chunks().end() && it->second.state == toy::world::ChunkState::Live;

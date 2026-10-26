@@ -1,5 +1,9 @@
 #include <toyengine/world/terrain_system.h>
 
+#include <algorithm>
+
+#include <toyengine/scene/runtime_object.h>
+
 #include <toyengine/water/water_body.h>
 
 #include <chrono>
@@ -63,15 +67,22 @@ void TerrainSystem::execute(coopa::scene::Scene& scene, const coopa::scene::Fram
     // Baked on the first frame that has terrain, not in the constructor: the bake submits a
     // one-shot upload, and a system is constructed before the device is necessarily ready to
     // take one. It registers itself with the asset manager, so this is one upload per run.
-    if (!detail_texture_.is_loaded() && !scene.get_components<TerrainComponent>().empty()) {
+    const auto all_terrains = scene.get_components<TerrainComponent>();
+    const bool any_tiles = std::any_of(all_terrains.begin(), all_terrains.end(), [](const TerrainComponent* t) {
+        return t->mode == TerrainMode::Tiles;
+    });
+    if (!detail_texture_.is_loaded() && any_tiles) {
         coopa::gfx::command::CommandPool pool(device_, device_.graphics_family(), true);
         detail_texture_ = bake_terrain_detail_texture(device_, allocator_, pool, assets_, 512,
                                                       16.0f, ctx.jobs);
     }
+    // The lookup returns every terrain in the scene (one component type, two modes); the
+    // heightmap ones are HeightmapTerrainSystem's, at order 61.
     for (TerrainComponent* terrain : scene.get_components<TerrainComponent>()) {
+        if (terrain->mode != TerrainMode::Tiles) continue;
         // Not ready yet means the world bake or the tile-set bake is still running, and no chunk
         // has been asked for -- a zero wanted count that must not read as "nothing left to do".
-        if (!terrain->is_ready()) terrain_baking_ = true;
+        if (!terrain->is_ready() || terrain->baking_) terrain_baking_ = true;
         tick_terrain_(*terrain, scene, ctx);
     }
     sync_planet_gravity_(scene);
@@ -85,9 +96,11 @@ void TerrainSystem::execute(coopa::scene::Scene& scene, const coopa::scene::Fram
 
 void TerrainSystem::tick_terrain_(TerrainComponent& terrain, coopa::scene::Scene& scene,
                    const coopa::scene::FrameContext& ctx) {
-    terrain.begin_generation(ctx.jobs);
-    terrain.poll_generation();
+    terrain.set_jobs(ctx.jobs);
     terrain.poll_tile_sets();
+    // After the map generator system (order 59) has had its turn, because an apply landing this
+    // frame resizes the grid the field is a view over.
+    terrain.sync_field();
     terrain.release_retired_collision(frame_, k_collision_keep_frames);
 
     // Retiring chunks are advanced even before the terrain is ready: a scene torn down
@@ -220,7 +233,7 @@ void TerrainSystem::advance_water_settles_(TerrainComponent& terrain) {
     while (!terrain.water_settles.empty() && budget > 0) {
         WaterSettle& settle = terrain.water_settles.front();
         const std::size_t before = settle.spent;
-        step_settle(*terrain.tiles, settle, budget);
+        step_settle(terrain.field, settle, budget);
         budget -= std::min(budget, settle.spent - before);
         // Whatever it filled is journalled, so mark_edited_chunks_() -- running straight after
         // this -- stales exactly the chunks the water reached and they re-mesh with it.
@@ -284,6 +297,8 @@ void TerrainSystem::sync_planet_gravity_(coopa::scene::Scene& scene) {
     coopa::physx::PhysicsWorld& world = physics->world();
     std::unordered_map<const TerrainComponent*, std::uint32_t> registered;
     for (TerrainComponent* terrain : scene.get_components<TerrainComponent>()) {
+        // `params` is the Tiles half, and a planet is a Tiles-only shape.
+        if (terrain->mode != TerrainMode::Tiles) continue;
         if (!terrain->params.planet || terrain->gravity <= 0.0f) continue;
         coopa::physx::PhysicsWorld::GravitySource source;
         source.centre = terrain->owner && terrain->owner->get_transform()
@@ -631,6 +646,11 @@ void TerrainSystem::create_chunk_object_(TerrainComponent& terrain, coopa::scene
 
     ++chunk.mesh_serial;
     auto object = std::make_unique<coopa::scene::SceneObject>(chunk_object_name_(chunk.coord));
+    // System-created and never saved: the tiles are the terrain, and this is only their current
+    // geometry. The marker is inherited by the water children, puts the chunk under the
+    // Hierarchy's "Runtime" group, and is how consumers that read the terrain through its field
+    // (GroundProbe) know to skip its mesh -- a chunk's box top is not its surface.
+    object->add_component<toy::scene::RuntimeObject>("TileTerrain", "terrain chunk -- edit the terrain's tiles");
     auto* transform = object->add_component<TransformComponent>();
     transform->transform().set_position(chunk_origin(terrain.params, chunk.coord));
     if (kept_water.empty()) {

@@ -31,9 +31,12 @@
 #include <toyengine/scene/xray_markers.h>
 #include <toyengine/water/buoyancy.h>
 #include <toyengine/water/water_body.h>
+#include <toyengine/water/water_yaml.h>
 #include <toyengine/world/heightmap_terrain.h>
+#include <toyengine/world/terrain_yaml.h>
 #include <toyengine/world/terrain_component.h>
-#include <toyengine/world/terrain_generator.h>
+#include <toyengine/mapgen/map_generator_component.h>
+#include <toyengine/mapgen/terrain_generator.h>
 #include <toyengine/world/tile_map_data.h>
 
 namespace toy {
@@ -60,43 +63,6 @@ glm::vec3 parse_rgb(const fkyaml::node& n, const glm::vec3& fallback) {
     return v;
 }
 
-/**
- * @brief Reads a WaterBody's look and behaviour keys (waves, flow, foam, clarity, underwater,
- *        physics) -- shared by the "WaterBody" parser and a TileTerrain's `water:` block.
- */
-void parse_water_settings(const fkyaml::node& node, toy::water::WaterBody& w) {
-    read(node, "wave_amplitude", w.waves.amplitude);
-    read(node, "wave_length", w.waves.wavelength);
-    read(node, "wave_steepness", w.waves.steepness);
-    read(node, "wind_response", w.wind_response);
-    if (node.contains("wave_direction")) {
-        w.waves.direction = glm::radians(node.at("wave_direction").get_value<float>());
-    }
-
-    read(node, "flow_speed", w.flow_speed);
-    read(node, "flow_min_speed", w.flow_min_speed);
-    read(node, "flow_slope_gain", w.flow_slope_gain);
-    read(node, "obstacle_radius", w.obstacle_radius);
-    read(node, "wake_length", w.wake_length);
-
-    if (node.contains("foam_color")) w.foam_color = parse_rgb(node.at("foam_color"), w.foam_color);
-    read(node, "foam_amount", w.foam_amount);
-    read(node, "shore_foam_depth", w.shore_foam_depth);
-    read(node, "edge_fade_depth", w.edge_fade_depth);
-    read(node, "ripple_strength", w.ripple_strength);
-    read(node, "ripple_scale", w.ripple_scale);
-    read(node, "clarity", w.clarity);
-
-    if (node.contains("underwater_color")) w.underwater_color = parse_rgb(node.at("underwater_color"), w.underwater_color);
-    read(node, "underwater_visibility", w.underwater_visibility);
-    if (node.contains("underwater_absorption")) {
-        w.underwater_absorption = parse_rgb(node.at("underwater_absorption"), w.underwater_absorption);
-    }
-    read(node, "caustics", w.caustics);
-
-    read(node, "density", w.density);
-    read(node, "max_depth", w.max_depth);
-}
 
 void register_scene_components() {
     using coopa::scene::SceneLoader;
@@ -566,11 +532,22 @@ void register_scene_components(coopa::gfx::core::Device& device,
     auto parse_tile_terrain =
         [&assets](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext& ctx) {
             auto* terrain = obj.add_component<world::TerrainComponent>();
+            // One component type, two modes: this parser authors the tile one.
+            terrain->mode = world::TerrainMode::Tiles;
             world::TerrainParams& params = terrain->params;
 
-            // --- The world to generate: mapcoopa's standard map, plus the `generator:` block
-            //     (and older scenes' flat keys) -- see terrain_generator.h. ---
-            terrain->generator = world::generator_config_from_node(node);
+            // The surfaces it can wear. Left empty -- which is the usual case -- a tile world
+            // uses the built-in set (builtin_tile_layers()), so an unlisted terrain is unchanged.
+            world::parse_terrain_layers(node, ctx.base_dir(), assets, *terrain);
+
+            // --- The world to generate. Generation is not the terrain's any more: a
+            //     toy::mapgen::MapGeneratorComponent owns it and APPLIES it (toyengine/mapgen).
+            //     A scene that writes `generator:` on its terrain -- which is every tile scene
+            //     written so far, and a bare `TileTerrain` with no block at all -- gets one
+            //     synthesised here, targeting this same object, so it keeps generating exactly
+            //     as it did. `terrain->generator` stays as the copy the editor's World Generator
+            //     reads back; the component beside it is what actually generates. ---
+            terrain->generator = mapgen::generator_config_from_node(node);
 
             // --- How it is tiled ---
             read(node, "world_tiles", params.world_tiles);
@@ -622,7 +599,7 @@ void register_scene_components(coopa::gfx::core::Device& device,
             }
             // The water's look: WaterBody's own keys, onto the terrain's stock look.
             if (node.contains("water") && node.at("water").is_mapping()) {
-                parse_water_settings(node.at("water"), terrain->water_look);
+                water::parse_water_settings(node.at("water"), terrain->water_look);
             }
             if (node.contains("max_chunk_jobs_per_frame")) {
                 terrain->max_chunk_jobs_per_frame = node.at("max_chunk_jobs_per_frame").get_value<int>();
@@ -790,13 +767,26 @@ void register_scene_components(coopa::gfx::core::Device& device,
                 }
             }
         };
-    SceneLoader::register_component_parser("TileTerrain", parse_tile_terrain);
-    SceneLoader::register_component_parser("Terrain", parse_tile_terrain);
+    // One entry point under all three names. `Terrain` is the unified spelling; `TileTerrain`
+    // and `HeightmapTerrain` are what existing scenes say, and each still loads exactly as it
+    // did -- the mode comes from `mode:` when a scene gives one and from the keys otherwise
+    // (world::infer_terrain_mode, terrain_yaml.h). A scene can therefore switch a terrain's mode
+    // without renaming its component, and nothing has to be migrated to keep working.
+    auto parse_terrain =
+        [&assets, parse_tile_terrain](const fkyaml::node& node, SceneObject& obj,
+                                      const SceneLoader::ParseContext& ctx) {
+            if (world::infer_terrain_mode(node) == world::TerrainMode::Heightmap) {
+                world::parse_heightmap_terrain(node, obj, ctx, assets);
+            } else {
+                parse_tile_terrain(node, obj, ctx);
+            }
+        };
+    SceneLoader::register_component_parser("Terrain", parse_terrain);
+    SceneLoader::register_component_parser("TileTerrain", parse_terrain);
+    SceneLoader::register_component_parser("HeightmapTerrain", parse_terrain);
 
-
-    // The sculptable heightmap terrain -- see toyengine/world/heightmap_terrain.h. Drawn, collided
-    // and streamed by toy::world::HeightmapTerrainSystem, which Engine installs.
-    world::register_heightmap_terrain_component(assets);
+    // The map a terrain is generated from -- its own component, applied on demand.
+    mapgen::register_map_generator_component();
 
     // A lake, ocean or river -- see toyengine/water/water_body.h. Baked and published (mesh +
     // material params on the sibling MeshRenderer) by toy::water::WaterSystem, which Engine
@@ -821,7 +811,7 @@ void register_scene_components(coopa::gfx::core::Device& device,
             read(node, "resolution", w->resolution);
             read(node, "tile_size", w->tile_size);
 
-            parse_water_settings(node, *w);
+            water::parse_water_settings(node, *w);
 
             if (!w->mesh_path.empty()) {
                 w->source = assets.load_async<coopa::gfx::engine::data::SkinnedMeshSource>(

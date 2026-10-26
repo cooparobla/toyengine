@@ -60,7 +60,13 @@ const float k_detail_texels = 512.0;
 vec4 styled_sample(sampler2D tex, vec2 uv);
 #define GFX_SURFACE_SAMPLE(tex, uv) styled_sample(tex, uv)
 #include <gfx/surface/gbuffer_fs.glsl>
+#include <gfx/surface/wetness.glsl>
 
+// Twelve, though TileKind has THIRTEEN (cubeworld appended Road). The clamp below is doing real
+// work: planet chunks decode surface nibbles above the table's range, and raising this to 13
+// moved 1.2% of planet_demo's pixels -- 27x the capture noise -- by routing them to a new entry
+// instead of salt. Whatever those nibbles are, they are not roads: the engine's own bake never
+// produces TileKind::Road. Extending this table means fixing that decode first.
 const int k_kind_count = 12;
 
 // x = broad blotches, y = mid grain, z = fine grain, w = specks (amplitudes, as albedo fractions)
@@ -93,6 +99,22 @@ const vec4 k_extra[k_kind_count] = vec4[](
     vec4(0.04, 0.40, 0.3,  1.0),   // clay
     vec4(0.03, 0.40, 0.1, -1.0),   // ash
     vec4(0.00, 0.10, 0.0,  1.0));  // salt
+
+// How readily a surface holds standing water, 0..1 -- what rain pools on and what it drains
+// through. Sand and ash take it away; stone, clay and trodden ground keep it.
+const float k_holds_water[k_kind_count] = float[](
+    0.75,  // grass
+    0.85,  // dirt
+    1.00,  // stone
+    0.10,  // sand
+    0.00,  // snow -- the snow layer is what shows there, not a puddle
+    0.90,  // rock
+    0.00,  // water
+    0.00,  // ice
+    0.80,  // moss
+    1.00,  // clay
+    0.25,  // ash
+    0.30); // salt
 
 // Octave frequencies, cycles per world unit (one tile is one unit in the stock scenes).
 const float k_freq_broad = 0.22;
@@ -281,4 +303,25 @@ void gfx_surface_fragment(inout GfxSurface s) {
     vec3 N = s.normal_ws;
     vec3 g = grad - dot(grad, N) * N;
     s.normal_ws = normalize(N - extra.y * 0.08 * g);
+
+    // Rain: wet darkening wherever the sky reaches, and puddles gathering on flat ground that
+    // holds water (gfx/surface/wetness.glsl). Snow needs nothing here -- the G-buffer backbone
+    // lays its cover over any surface already.
+    //
+    // A heightmap terrain measures a hollow from its own grid. A tile world has no grid to read
+    // and every top face is dead flat, so the puddle measure is this surface's OWN prefiltered
+    // blotch standing in for one: broad patches that sit still under a moving camera, for the
+    // same reason the detail above does. Analytic noise here would reintroduce exactly the
+    // per-pixel flicker the mip chain was brought in to kill.
+#ifdef TERRAIN_PLANET
+    float up = frag_uv.y;              // "up" is away from the planet, as styled_kind() reads it
+    vec3 geo_n = normalize(s.normal_ws);
+#else
+    vec3 geo_n = normalize(frag_world_normal);
+    float up = geo_n.z;
+#endif
+    // `patch` is a GLSL keyword (tessellation), hence the name.
+    float hollow = clamp(blotch * 0.5 + 0.5, 0.0, 1.0);
+    float puddle = k_holds_water[kind] * smoothstep(0.90, 0.99, up) * smoothstep(0.40, 0.85, hollow);
+    gfx_wet_apply(s, geo_n, puddle);
 }

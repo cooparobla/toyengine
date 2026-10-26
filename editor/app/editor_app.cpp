@@ -83,6 +83,9 @@ EditorApp::EditorApp(core::Engine& engine, Project project, const fs::path& scen
     register_inspector_section("ParticleSystem", [this](imm::Context& ctx, SectionContext& sc) {
         return particle_panel_->draw_particle_panel_(ctx, sc.object_id, sc.comp, sc.env);
     });
+    register_inspector_section("HeightmapTerrain.edit", [this](imm::Context& ctx, SectionContext& sc) {
+        return terrain_panel_->draw_terrain_inspector_header_(ctx, sc.object_id);
+    });
     for (const char* tile_terrain : {"TileTerrain", "Terrain"}) {   // Terrain is TileTerrain's old name
         register_inspector_section(tile_terrain, [this](imm::Context& ctx, SectionContext& sc) {
             return tile_terrain_panel_->draw_tile_terrain_panel_(ctx, sc.object_id, sc.comp, sc.env);
@@ -182,7 +185,9 @@ EditorApp::~EditorApp() {
     engine_.set_overlay_scene(nullptr);
     // The drawers below close over this app; the registry outlives it (one editor is built
     // and torn down per test), so they go with it.
-    for (const char* id : {"ParticleSystem", "TileTerrain", "Terrain"}) unregister_inspector_section(id);
+    for (const char* id : {"ParticleSystem", "TileTerrain", "Terrain", "HeightmapTerrain.edit"}) {
+        unregister_inspector_section(id);
+    }
     engine_.wait_idle();
     thumbnails_.reset();   // while the device is still alive: it unregisters its views
 }

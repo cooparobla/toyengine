@@ -43,8 +43,18 @@ namespace render {
 
 /** @brief Heightmap terrains a frame can draw at once (world.glsl's gfx_world.terrain[]). */
 inline constexpr int kMaxSurfaceTerrains = 4;
-/** @brief Paint layers per heightmap terrain (two RGBA8 splat maps). */
-inline constexpr int kSurfaceTerrainLayers = 8;
+/**
+ * @brief Surface layers a terrain's params carry (world.glsl's GfxTerrain arrays).
+ *
+ * Sixteen because a tiles-mode terrain names its surface in a 4-bit nibble against a 4 x 4
+ * palette atlas (toyengine/world/tile_types.h), and the built-in tile layers already fill
+ * thirteen of them. Painting by WEIGHT still reaches only the first kSurfaceTerrainSplatLayers,
+ * which is what two RGBA8 splat maps hold.
+ */
+inline constexpr int kSurfaceTerrainLayers = 16;
+
+/** @brief Layers the two RGBA8 splat maps carry a weight for, one channel each. */
+inline constexpr int kSurfaceTerrainSplatLayers = 8;
 
 /**
  * @brief std140 mirror of world.glsl's GfxTerrain: one heightmap terrain's numbers -- where its
@@ -61,7 +71,8 @@ struct alignas(16) TerrainGpuParams {
     glm::vec4  layer_tri[kSurfaceTerrainLayers]{};  ///< x 1 = triplanar, y sharpness, z 1 = has normal map
     glm::vec4  tint[kSurfaceTerrainLayers]{};       ///< rgb albedo multiplier
 };
-static_assert(sizeof(TerrainGpuParams) == 28 * 16, "TerrainGpuParams must match world.glsl's GfxTerrain");
+static_assert(sizeof(TerrainGpuParams) == (4 + 3 * kSurfaceTerrainLayers) * 16,
+              "TerrainGpuParams must match world.glsl's GfxTerrain");
 
 /** @brief TerrainGpuParams::dims.w bits. */
 enum TerrainGpuFlag : int {

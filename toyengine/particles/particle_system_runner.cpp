@@ -121,19 +121,30 @@ void ParticleSimulationSystem::collect_terrain_scatter_(coopa::scene::Scene& sce
     ps.mesh_proxy().cast_shadows = s.cast_shadows;
 
     // The terrain: named, else the nearest one above this object, else the scene's first.
-    const world::HeightmapTerrain* terrain = nullptr;
+    // EITHER mode -- the scatter reads the unified field (toyengine/world/terrain_field.h), so a
+    // tile world grows grass and trees exactly as a smooth one does.
+    const auto any_terrain = [](coopa::scene::SceneObject* o) -> world::TerrainComponent* {
+        return o != nullptr ? o->get_component<world::TerrainComponent>() : nullptr;
+    };
+    world::TerrainComponent* terrain = nullptr;
     if (!s.shape.terrain.terrain.empty()) {
-        if (coopa::scene::SceneObject* o = scene.find_object(s.shape.terrain.terrain)) terrain = o->get_component<world::HeightmapTerrain>();
+        terrain = any_terrain(scene.find_object(s.shape.terrain.terrain));
     } else {
         for (coopa::scene::SceneObject* o = ps.owner; o != nullptr && terrain == nullptr; o = o->parent()) {
-            terrain = o->get_component<world::HeightmapTerrain>();
+            terrain = any_terrain(o);
         }
         if (terrain == nullptr) {
-            const auto all = scene.get_components<world::HeightmapTerrain>();
+            const auto all = scene.get_components<world::TerrainComponent>();
             if (!all.empty()) terrain = all.front();
         }
     }
-    if (terrain == nullptr || terrain->data == nullptr) {
+    if (terrain == nullptr) {
+        ps.terrain_scatter().clear();
+        return;
+    }
+    terrain->sync_field();
+    if (terrain->field.empty()) {
+        // Still loading: a tile world mid-bake, or a grid not read yet.
         ps.terrain_scatter().clear();
         return;
     }
@@ -141,9 +152,9 @@ void ParticleSimulationSystem::collect_terrain_scatter_(coopa::scene::Scene& sce
     TerrainScatterParams p;
     p.shape = s.shape.terrain;
     if (!p.shape.layer.empty()) {
-        for (std::size_t i = 0; i < terrain->layers.size(); ++i) {
-            if (terrain->layers[i].name == p.shape.layer) p.layer = static_cast<int>(i);
-        }
+        // Through the terrain, so a tile world that never wrote `layers:` still resolves the
+        // built-in names ("grass", "stone", ...) rather than looking like it has none.
+        p.layer = terrain->layer_index(p.shape.layer);
         if (p.layer < 0) return;   // a layer the terrain does not have grows nothing
     }
     p.seed = s.seed != 0 ? s.seed : static_cast<uint32_t>(std::hash<std::string>{}(ps.owner ? ps.owner->name() : std::string()));
@@ -163,7 +174,7 @@ void ParticleSimulationSystem::collect_terrain_scatter_(coopa::scene::Scene& sce
     }
 
     TerrainScatterCache& cache = ps.terrain_scatter();
-    cache.update(terrain->view(), p, view.camera_pos, draw_distance, 2);
+    cache.update(terrain->field_view(), p, view.camera_pos, draw_distance, 2);
     const uint64_t system_key = reinterpret_cast<std::uintptr_t>(&ps) * 0x9E3779B97F4A7C15ull;
     for (const auto& [key, c] : cache.chunks()) {
         if (c.matrices.empty()) continue;

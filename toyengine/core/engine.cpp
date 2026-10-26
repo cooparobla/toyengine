@@ -45,6 +45,7 @@
 #include <toyengine/scene/register.h>
 #include <toyengine/scene/scene_link.h>
 #include <toyengine/world/snow_system.h>
+#include <toyengine/mapgen/map_generator_component.h>
 #include <toyengine/world/terrain_system.h>
 #include <toyengine/water/water_system.h>
 #include <toyengine/particles/particle_system_runner.h>
@@ -485,6 +486,9 @@ void Engine::prepare_scene_(coopa::scene::Scene& scene, bool drain_assets) {
     // Behaviour walk (200) and TransformResolve (350), so a terrain chunk that appears this
     // frame already has its world matrix resolved when the render gather reads it. A scene
     // with no Terrain component pays one empty get_components<>() sweep per frame.
+    // Order 59: a map that lands this frame is applied before the streamer decides what to
+    // mesh, so the first chunks are never built from an empty grid. See toyengine/mapgen.
+    mapgen::install_map_generator_system(scene);
     world::install_terrain_system(scene, ctx_.device(), ctx_.allocator(), assets_);
     // Order 61: heightmap terrains -- their chunks, GPU grids and colliders, before Physics (100)
     // steps against them. See heightmap_terrain_system.h.

@@ -5,8 +5,13 @@ description: Add procedural tile terrain to a toyengine scene -- the TileTerrain
 
 # Add tile terrain
 
-`TileTerrain` (written `Terrain` in older scenes -- both load) generates its world from mapcoopa's
-map data and builds every tile from a **tile set**: an object asset whose children are the pieces
+One terrain component, two modes. This is `mode: tiles` -- written `TileTerrain`, or `Terrain`
+with `mode: tiles`; a block with neither reads as tiles anyway. For the smooth half see
+create-heightmap-terrain, and for the world it is generated from see **MapGenerator**
+(`toyengine/mapgen/README.md`): generation is its own component now, applied to a terrain, and a
+scene that writes `generator:` on its terrain gets one made for it, so nothing had to change.
+
+A tile terrain builds every tile from a **tile set**: an object asset whose children are the pieces
 (top quadrants, wall caps, walls, corners). The tile set is the whole form -- change `tile_set`
 to change the terrain from rounded cliffs to square blocks. For a heightmap you sculpt, paint or
 import, see the create-heightmap-terrain skill.

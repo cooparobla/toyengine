@@ -7,7 +7,7 @@
 #include <array>
 #include <deque>
 
-#include <toyengine/world/terrain_sampler.h>
+#include <toyengine/world/terrain_params.h>
 
 namespace toy::editor {
 

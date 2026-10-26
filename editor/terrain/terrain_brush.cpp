@@ -1,10 +1,15 @@
 #include <editor/terrain/terrain_brush.h>
 
+#include <toyengine/world/terrain_water.h>
+
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 namespace toy::editor {
 
+using toy::world::TerrainField;
+using toy::world::WaterCell;
 using toy::world::HeightmapData;
 using toy::world::IRect;
 
@@ -17,6 +22,7 @@ const char* terrain_tool_name(TerrainTool t) {
         case TerrainTool::Noise:     return "Noise";
         case TerrainTool::Erode:     return "Erode";
         case TerrainTool::Paint:     return "Paint";
+        case TerrainTool::Water:     return "Water";
     }
     return "?";
 }
@@ -56,6 +62,33 @@ void for_each_weighted(const HeightmapData& d, const IRect& r, glm::vec2 c, floa
 }
 
 } // namespace
+
+toy::world::IRect terrain_water_dab(toy::world::TerrainField& field, const TerrainBrushSettings& s,
+                                    glm::vec2 centre, bool invert) {
+    using namespace toy::world;
+    if (field.empty()) return IRect{};
+    const glm::vec2 extent = field.geometry().tile_extent();
+    const float r = std::max(0.01f, s.radius);
+    const IRect rect = IRect{static_cast<int>(std::floor((centre.x - r) / extent.x)),
+                             static_cast<int>(std::floor((centre.y - r) / extent.y)),
+                             static_cast<int>(std::ceil((centre.x + r) / extent.x)) + 1,
+                             static_cast<int>(std::ceil((centre.y + r) / extent.y)) + 1}
+                            .clipped(field.geometry().tiles_x, field.geometry().tiles_y);
+    if (rect.empty()) return IRect{};
+
+    // Only the tiles whose centre is inside the circle seed it; a square brush would flood
+    // corners the user never painted over.
+    std::vector<glm::ivec2> seeds;
+    for (int y = rect.y0; y < rect.y1; ++y) {
+        for (int x = rect.x0; x < rect.x1; ++x) {
+            const glm::vec2 c = (glm::vec2(x, y) + 0.5f) * extent;
+            if (glm::length(c - centre) <= r) seeds.push_back(glm::ivec2(x, y));
+        }
+    }
+    if (seeds.empty()) return IRect{};
+    if (invert || s.water_kind == WaterKind::None) return drain_water(field, seeds);
+    return flood_water(field, seeds, s.water_level, s.water_kind);
+}
 
 IRect terrain_dab(HeightmapData& d, const TerrainBrushSettings& s, glm::vec2 centre, bool invert, float flatten_to,
                   std::uint32_t seed) {
@@ -220,7 +253,17 @@ TerrainPatch capture_patch_from(const std::shared_ptr<HeightmapData>& data, cons
     return p;
 }
 
-bool apply_patch(const TerrainPatch& p) {
+std::vector<toy::world::WaterCell> capture_water(const TerrainField& field, const IRect& rect) {
+    std::vector<toy::world::WaterCell> out;
+    if (rect.empty()) return out;
+    out.reserve(static_cast<std::size_t>(rect.width()) * rect.height());
+    for (int y = rect.y0; y < rect.y1; ++y) {
+        for (int x = rect.x0; x < rect.x1; ++x) out.push_back(field.water_at(glm::ivec2(x, y)));
+    }
+    return out;
+}
+
+bool apply_patch(const TerrainPatch& p, TerrainField* field) {
     std::shared_ptr<HeightmapData> data = p.data.lock();
     if (!data || data->nx() != p.nx || data->ny() != p.ny || data->splat_w() != p.splat_size) return false;
     const IRect& hr = p.height_rect;
@@ -238,6 +281,18 @@ bool apply_patch(const TerrainPatch& p) {
         row += static_cast<std::size_t>(sr.width()) * 4;
     }
     if (!sr.empty()) data->mark_splat_dirty(sr);
+
+    // Water, when the caller has the field to put it back into. Restored last, because
+    // set_water() reads the ground under each tile and the heights above may just have moved.
+    const IRect& wr = p.water_rect;
+    if (field != nullptr && !wr.empty() &&
+        p.water.size() == static_cast<std::size_t>(wr.width()) * wr.height()) {
+        std::size_t w = 0;
+        for (int y = wr.y0; y < wr.y1; ++y) {
+            for (int x = wr.x0; x < wr.x1; ++x) field->set_water(glm::ivec2(x, y), p.water[w++]);
+        }
+        field->mark_tiles_dirty(wr);
+    }
     return true;
 }
 

@@ -182,7 +182,29 @@ void apply_component_sections(std::map<std::string, ComponentSchema>& table) {
 
     // --- World ---------------------------------------------------------------------------
 
+    // The map a terrain is generated from (toyengine/mapgen). Target first, because what this
+    // component does is APPLY -- the settings are secondary to which terrain they land on.
+    layout("MapGenerator", {
+        sec("Apply", "World")
+            .says("A generated world is written into a terrain on demand, the same way a heightmap "
+                  "image is. Once applied the terrain owns its data, and this keeps the map behind "
+                  "it for biomes, regions and rivers.")
+            .keys({"target", "auto_apply"}).done(),
+        sec("Detail", "Zoom")
+            .says("How finely the map is written when it is applied to a tiled terrain. A smooth "
+                  "terrain uses its own resolution instead.")
+            .keys({"world_tiles", "tiles_per_grid_unit", "height_scale"}).done(),
+        sec("Water", "World")
+            .says("How far the sea, lakes and rivers sit under the terrace they fill. Tiled terrain "
+                  "only -- a smooth shoreline is wherever the ground crosses the water's level.")
+            .keys({"water_inset", "river_inset"}).closed().done(),
+        sec("Planet", "World").keys({"sphere"}).closed().done(),
+    });
+
     layout("HeightmapTerrain", {
+        // A live status line and the way into Terrain Mode, drawn by the terrain panel: the
+        // inspector is where a user looks first, and sculpting is the thing they came to do.
+        sec("Terrain", "Terrain").custom("HeightmapTerrain.edit").done(),
         sec("Size", "Terrain")
             .says("How big the landscape is and how finely it is sampled. Resolution is 2^n + 1.")
             .keys({"size", "height", "chunk_size", "resolution"}).done(),
@@ -192,7 +214,11 @@ void apply_component_sections(std::map<std::string, ComponentSchema>& table) {
         sec("Layers", "Palette")
             .says("Up to eight painted surfaces. Each has its own textures, tiling and roughness.")
             .keys({"layers"}).done(),
-        sec("Weather", "World").keys({"deep_snow", "puddles"}).closed().done(),
+        sec("Weather", "World")
+            .says("Water is a surface over this ground too: each tile carries a kind and a level, and "
+                  "the shoreline is wherever the ground crosses it. Paint it in Terrain Mode, or apply "
+                  "a generated world that brings its own sea, lakes and rivers.")
+            .keys({"deep_snow", "puddles"}).closed().done(),
         sec("Collision", "Collider").toggle("collision").keys({"physics_material"}).closed().done(),
         sec("Streaming", "Zoom")
             .says("How much terrain exists around the camera, and how much of it casts shadows.")

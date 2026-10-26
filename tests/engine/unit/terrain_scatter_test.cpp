@@ -11,6 +11,7 @@
 
 #include <glm/glm.hpp>
 #include <toyengine/particles/terrain_scatter.h>
+#include <toyengine/world/terrain_field.h>
 #include <toyengine/world/heightmap_data.h>
 
 #include "engine/support/checks.h"
@@ -24,25 +25,55 @@ namespace {
 
 /** @brief 128 m square, 32 m chunks; flat west half, a 45-degree ramp in the east half; layer 1
  *         painted on the north half. */
-HeightmapData field() {
-    HeightmapGeometry g;
+toy::world::TerrainField field() {
+    toy::world::TerrainFieldGeometry g;
+    g.mode = toy::world::TerrainMode::Heightmap;
+    g.tiles_x = g.tiles_y = 128;
     g.size = glm::vec2(128.0f);
     g.height = 100.0f;
-    g.chunk_size = 32.0f;
-    g.resolution = 129;
-    g.splat_resolution = 64;
-    HeightmapData d(g);
+    g.chunk_tiles = 32;
+    g.layer_sub = 1;        // 128 splat texels a side; the paint below is in halves anyway
+    toy::world::TerrainField f;
+    f.reset(g);
+    HeightmapData& d = *f.heights();
     for (int j = 0; j < d.ny(); ++j) {
         for (int i = 0; i < d.nx(); ++i) d.at(i, j) = i < 64 ? 0.0f : static_cast<float>(i - 64);
     }
-    for (int j = 32; j < 64; ++j) {
-        for (int i = 0; i < 64; ++i) {
+    for (int j = d.splat_h() / 2; j < d.splat_h(); ++j) {
+        for (int i = 0; i < d.splat_w() / 2; ++i) {
             d.splat_at(0, i, j) = 0;
             d.splat_at(1, i, j) = 255;
         }
     }
-    d.mark_all_dirty();
-    return d;
+    f.mark_all_dirty();
+    return f;
+}
+
+/**
+ * @brief The same shape as a TILE world: 128 one-metre tiles, flat west, stepped ramp east.
+ *
+ * Scatter over a tile terrain is new -- it reads the unified field, so the same code places
+ * instances on terraced ground. Its surface is the built-in layer set, which is what an empty
+ * `layers:` means, so a name like "stone" resolves without the scene authoring anything.
+ */
+toy::world::TerrainField tiled_field() {
+    toy::world::TerrainFieldGeometry g;
+    g.mode = toy::world::TerrainMode::Tiles;
+    g.tiles_x = g.tiles_y = 128;
+    g.size = glm::vec2(128.0f);
+    g.height_step = 1.0f;
+    g.chunk_tiles = 32;
+    toy::world::TerrainField f;
+    f.reset(g);
+    for (int y = 0; y < 128; ++y) {
+        for (int x = 0; x < 128; ++x) {
+            toy::world::TileRecord& r = f.tiles()->at(x, y);
+            r.steps = x < 64 ? 0 : static_cast<std::int16_t>(x - 64);
+            r.set_top_kind(y >= 64 ? toy::world::TileKind::Stone : toy::world::TileKind::Grass);
+        }
+    }
+    f.mark_all_dirty();
+    return f;
 }
 
 TerrainScatterParams params() {
@@ -57,8 +88,8 @@ TerrainScatterParams params() {
 
 /** @brief The same chunk grows the same instances, built alone or after its neighbours. */
 COOPA_TEST(placement_is_deterministic) {
-    const HeightmapData d = field();
-    const HeightmapView v{&d, glm::vec3(10.0f, 20.0f, 5.0f)};
+    const toy::world::TerrainField d = field();
+    const toy::world::TerrainFieldView v{&d, glm::vec3(10.0f, 20.0f, 5.0f)};
     const auto a = TerrainScatterCache::build_chunk(v, params(), 1, 0);
     (void)TerrainScatterCache::build_chunk(v, params(), 0, 0);
     const auto b = TerrainScatterCache::build_chunk(v, params(), 1, 0);
@@ -75,8 +106,8 @@ COOPA_TEST(placement_is_deterministic) {
 
 /** @brief Layer, slope and height masks cut where they should. */
 COOPA_TEST(masks) {
-    const HeightmapData d = field();
-    const HeightmapView v{&d, glm::vec3(0.0f)};
+    const toy::world::TerrainField d = field();
+    const toy::world::TerrainFieldView v{&d, glm::vec3(0.0f)};
     auto p = params();
     p.layer = 1;
     p.shape.min_weight = 0.5f;
@@ -102,8 +133,8 @@ COOPA_TEST(masks) {
 
 /** @brief Only chunks near the camera are held; an edit rebuilds only the chunk it touched. */
 COOPA_TEST(streaming_and_rebuilds) {
-    HeightmapData d = field();
-    const HeightmapView v{&d, glm::vec3(0.0f)};
+    toy::world::TerrainField d = field();
+    const toy::world::TerrainFieldView v{&d, glm::vec3(0.0f)};
     TerrainScatterCache cache;
     const glm::vec3 cam(16.0f, 16.0f, 2.0f);
     for (int k = 0; k < 20; ++k) cache.update(v, params(), cam, 40.0f, 2);
@@ -113,8 +144,8 @@ COOPA_TEST(streaming_and_rebuilds) {
     expect(cache.chunks().count({0, 0}) == 1 && cache.chunks().count({3, 3}) == 0, "scatter: near built, far not");
     const auto before01 = cache.chunks().at({0, 1}).matrices;
     const auto rev00 = cache.chunks().at({0, 0}).revision;
-    d.at(5, 5) = 3.0f;
-    d.mark_height_dirty(IRect{5, 5, 6, 6});
+    d.heights()->at(5, 5) = 3.0f;
+    d.heights()->mark_height_dirty(IRect{5, 5, 6, 6});
     cache.update(v, params(), cam, 40.0f, 1);
     expect(cache.chunks().at({0, 0}).revision != rev00, "scatter: the edited chunk rebuilt");
     expect(cache.chunks().at({0, 1}).matrices == before01, "scatter: an untouched chunk kept");
@@ -136,8 +167,8 @@ COOPA_TEST(thinning_by_distance) {
 
 /** @brief A chunk's instances are a stable shuffle: rebuilds give new build ids, same order. */
 COOPA_TEST(shuffled_chunks_are_stable) {
-    const HeightmapData d = field();
-    const HeightmapView v{&d, glm::vec3(0.0f)};
+    const toy::world::TerrainField d = field();
+    const toy::world::TerrainFieldView v{&d, glm::vec3(0.0f)};
     const auto a = TerrainScatterCache::build_chunk(v, params(), 0, 0);
     const auto b = TerrainScatterCache::build_chunk(v, params(), 0, 0);
     expect(a.matrices == b.matrices, "scatter: the shuffle is deterministic");
@@ -147,4 +178,42 @@ COOPA_TEST(shuffled_chunks_are_stable) {
     float lo = 1e9f, hi = -1e9f;
     for (std::size_t k = 0; k < half; ++k) { lo = std::min(lo, a.matrices[k][3].y); hi = std::max(hi, a.matrices[k][3].y); }
     expect(hi - lo > 24.0f, "scatter: the first quarter covers the chunk (" + std::to_string(hi - lo) + " m of 32)");
+}
+
+/**
+ * @brief The same scatter over a TILE world -- which it could not do at all before.
+ *
+ * Nothing here is heightmap-specific: the placement reads the unified field, so terraced ground
+ * grows grass and trees the same way smooth ground does. The one thing worth holding is that a
+ * tile terrain's surfaces resolve WITHOUT the scene authoring `layers:` -- an empty list means
+ * the built-in set, so "stone" is a layer whether or not anybody wrote one down.
+ */
+COOPA_TEST(a_tile_world_scatters_too) {
+    const toy::world::TerrainField d = tiled_field();
+    const toy::world::TerrainFieldView v{&d, glm::vec3(0.0f)};
+
+    const auto flat = TerrainScatterCache::build_chunk(v, params(), 0, 0);
+    expect(!flat.matrices.empty(), "tiles: instances are placed on the flat half");
+
+    // Every instance sits on the ground the tiles describe, which is flat at 0 over this chunk.
+    for (const glm::mat4& m : flat.matrices) {
+        const glm::vec3 pos(m[3]);
+        expect_near(pos.z, 0.0f, 1e-3f, "tiles: ...standing on the terraced ground, not through it");
+    }
+
+    // The stepped half is higher, and the instances follow it up.
+    const auto ramp = TerrainScatterCache::build_chunk(v, params(), 3, 0);
+    require(!ramp.matrices.empty(), "tiles: the stepped half grows some too");
+    float highest = -1e9f;
+    for (const glm::mat4& m : ramp.matrices) highest = std::max(highest, glm::vec3(m[3]).z);
+    expect(highest > 20.0f, "tiles: ...and they climb the steps (" + std::to_string(highest) + " m)");
+
+    // A layer the built-in set has, which this scene never authored: the north half is stone.
+    auto p = params();
+    p.layer = static_cast<int>(toy::world::TileKind::Stone);
+    p.shape.min_weight = 0.5f;
+    const auto north = TerrainScatterCache::build_chunk(v, p, 0, 3);
+    const auto south = TerrainScatterCache::build_chunk(v, p, 0, 0);
+    expect(!north.matrices.empty(), "tiles: the stone half grows the stone-masked scatter");
+    expect(south.matrices.empty(), "tiles: ...and the grass half grows none of it");
 }

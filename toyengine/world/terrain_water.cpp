@@ -1,6 +1,7 @@
-#include <toyengine/world/tile_water.h>
+#include <toyengine/world/terrain_water.h>
 
 #include <algorithm>
+#include <cmath>
 #include <deque>
 
 namespace toy {
@@ -11,10 +12,23 @@ namespace {
 constexpr int k_dx[4] = {1, -1, 0, 0};
 constexpr int k_dy[4] = {0, 0, 1, -1};
 
-IRect clip_limit(const TileMapData& tiles, const IRect& limit) {
-    const IRect whole{0, 0, tiles.width(), tiles.height()};
+/**
+ * @brief Slack on a level comparison, as a fraction of a `Tiles` field's step.
+ *
+ * A terrace arrives as `n * height_step` and comes back through a division, so an exact test
+ * would occasionally read a tile as a hair above its own terrace. A smooth field needs no slack
+ * at all, and gets a value far under anything it can resolve.
+ */
+float level_epsilon(const TerrainField& field) {
+    return field.mode() == TerrainMode::Tiles ? field.geometry().height_step * 1e-3f : 1e-4f;
+}
+
+IRect clip_limit(const TerrainField& field, const IRect& limit) {
+    const TileMapData* tiles = field.tiles();
+    const IRect whole{0, 0, tiles ? tiles->width() : 0, tiles ? tiles->height() : 0};
     if (limit.empty()) return whole;
-    return IRect{std::max(0, limit.x0), std::max(0, limit.y0), std::min(whole.x1, limit.x1), std::min(whole.y1, limit.y1)};
+    return IRect{std::max(0, limit.x0), std::max(0, limit.y0), std::min(whole.x1, limit.x1),
+                 std::min(whole.y1, limit.y1)};
 }
 
 bool inside(const IRect& r, int x, int y) { return x >= r.x0 && y >= r.y0 && x < r.x1 && y < r.y1; }
@@ -41,25 +55,25 @@ bool step_to(const PlanetLayout* planet, const IRect& limit, int x, int y, int d
  *               come back for the rest (step_settle()).
  * @return How many tiles it filled.
  */
-std::size_t spread(TileMapData& tiles, std::deque<glm::ivec2>& queue, const IRect& limit, std::size_t budget,
-                   bool raise_water, IRect& changed, const PlanetLayout* planet = nullptr) {
+std::size_t spread(TerrainField& field, std::deque<glm::ivec2>& queue, const IRect& limit, std::size_t budget,
+                   bool raise_water, IRect& changed, const PlanetLayout* planet) {
+    const float eps = level_epsilon(field);
     std::size_t count = 0;
     while (!queue.empty() && count < budget) {
         const glm::ivec2 p = queue.front();
         queue.pop_front();
-        const TileRecord from = tiles.at(p.x, p.y);
-        if (!from.water()) continue;
-        const int level = from.water_level();
+        const WaterCell from = field.water_at(p);
+        if (!from.wet()) continue;
         for (int k = 0; k < 4; ++k) {
             glm::ivec2 n;
             if (!step_to(planet, limit, p.x, p.y, k_dx[k], k_dy[k], n)) continue;
-            TileRecord& to = tiles.at(n.x, n.y);
-            if (to.steps >= level || (to.water() && (!raise_water || to.water_level() >= level))) continue;
+            if (field.ground_at_tile(n) >= from.level - eps) continue;
+            const WaterCell to = field.water_at(n);
+            if (to.wet() && (!raise_water || to.level >= from.level - eps)) continue;
             // Water that runs on from a river is still that river's; anything else pools.
-            to.set_water(level, from.has(TileRecord::Ocean), from.has(TileRecord::Flowing));
-            to.flow = from.has(TileRecord::Flowing) ? from.flow : 0;
+            field.set_water(n, from);
             grow(changed, n.x, n.y);
-            queue.push_back({n.x, n.y});
+            queue.push_back(n);
             ++count;
         }
     }
@@ -68,42 +82,44 @@ std::size_t spread(TileMapData& tiles, std::deque<glm::ivec2>& queue, const IRec
 
 } // namespace
 
-IRect flood_water(TileMapData& tiles, const std::vector<glm::ivec2>& seeds, int level, bool ocean, std::size_t cap,
-                  const PlanetLayout* planet) {
+IRect flood_water(TerrainField& field, const std::vector<glm::ivec2>& seeds, float level, WaterKind kind,
+                  std::size_t cap, const PlanetLayout* planet) {
     IRect changed;
-    if (tiles.empty()) return changed;
-    const IRect whole = clip_limit(tiles, IRect{});
+    if (field.empty() || kind == WaterKind::None) return changed;
+    const float eps = level_epsilon(field);
+    const IRect whole = clip_limit(field, IRect{});
     std::deque<glm::ivec2> queue;
     for (const glm::ivec2& s : seeds) {
         if (!inside(whole, s.x, s.y)) continue;
-        TileRecord& r = tiles.at(s.x, s.y);
-        if (r.steps >= level || (r.water() && r.water_level() >= level)) continue;
-        r.set_water(level, ocean, false);
+        if (field.ground_at_tile(s) >= level - eps) continue;
+        const WaterCell had = field.water_at(s);
+        if (had.wet() && had.level >= level - eps) continue;
+        field.set_water(s, WaterCell{kind, level, 0});
         grow(changed, s.x, s.y);
         queue.push_back(s);
     }
-    spread(tiles, queue, whole, cap, true, changed, planet);
-    if (!changed.empty()) tiles.mark_dirty(changed);
+    spread(field, queue, whole, cap, true, changed, planet);
+    if (!changed.empty()) field.mark_tiles_dirty(changed);
     return changed;
 }
 
-IRect drain_water(TileMapData& tiles, const std::vector<glm::ivec2>& seeds, std::size_t cap,
+IRect drain_water(TerrainField& field, const std::vector<glm::ivec2>& seeds, std::size_t cap,
                   const PlanetLayout* planet) {
     IRect changed;
-    if (tiles.empty()) return changed;
-    const IRect whole = clip_limit(tiles, IRect{});
+    if (field.empty()) return changed;
+    const IRect whole = clip_limit(field, IRect{});
     std::deque<glm::ivec2> queue;
     std::size_t count = 0;
     auto take = [&](int x, int y) {
-        TileRecord& r = tiles.at(x, y);
-        if (!r.water()) return;
-        r.set_water(r.steps);
+        if (!field.water_at(glm::ivec2(x, y)).wet()) return;
+        field.clear_water(glm::ivec2(x, y));
         grow(changed, x, y);
         queue.push_back({x, y});
         ++count;
     };
-    for (const glm::ivec2& s : seeds)
+    for (const glm::ivec2& s : seeds) {
         if (inside(whole, s.x, s.y)) take(s.x, s.y);
+    }
     while (!queue.empty() && count < cap) {
         const glm::ivec2 p = queue.front();
         queue.pop_front();
@@ -112,78 +128,82 @@ IRect drain_water(TileMapData& tiles, const std::vector<glm::ivec2>& seeds, std:
             if (step_to(planet, whole, p.x, p.y, k_dx[k], k_dy[k], n)) take(n.x, n.y);
         }
     }
-    if (!changed.empty()) tiles.mark_dirty(changed);
+    if (!changed.empty()) field.mark_tiles_dirty(changed);
     return changed;
 }
 
-WaterSettle begin_settle(TileMapData& tiles, const IRect& rect, const IRect& limit,
-                         const PlanetLayout* planet, std::size_t cap) {
+WaterSettle begin_settle(TerrainField& field, const IRect& rect, const IRect& limit, const PlanetLayout* planet,
+                         std::size_t cap) {
     WaterSettle settle;
     if (planet != nullptr) {
         settle.layout = *planet;
         settle.on_planet = true;
     }
     settle.cap = cap;
-    if (tiles.empty()) return settle;
-    settle.limit = clip_limit(tiles, limit);
+    if (field.empty()) return settle;
+    settle.limit = clip_limit(field, limit);
+    const float eps = level_epsilon(field);
     IRect changed;
     // The ring around the edit as well as the edit itself: water just outside it is what floods
     // ground that dropped inside. On a planet the ring is taken through the layout, so an edit
     // against a face's edge is seeded from the face next door rather than from across the globe.
-    const IRect r = clip_limit(tiles, IRect{rect.x0 - 1, rect.y0 - 1, rect.x1 + 1, rect.y1 + 1});
+    const IRect r = clip_limit(field, IRect{rect.x0 - 1, rect.y0 - 1, rect.x1 + 1, rect.y1 + 1});
     const auto consider = [&](int x, int y) {
-        TileRecord& t = tiles.at(x, y);
-        if (!t.water()) return;
-        if (inside(rect, x, y) && t.steps >= t.water_level()) {
-            t.set_water(t.steps);          // its bed rose through the surface: dry land now
+        const glm::ivec2 t(x, y);
+        const WaterCell w = field.water_at(t);
+        if (!w.wet()) return;
+        if (inside(rect, x, y) && field.ground_at_tile(t) >= w.level - eps) {
+            field.clear_water(t);          // its bed rose through the surface: dry land now
             grow(changed, x, y);
             return;
         }
-        settle.frontier.push_back({x, y});
+        settle.frontier.push_back(t);
     };
     if (planet == nullptr) {
-        for (int y = r.y0; y < r.y1; ++y)
+        for (int y = r.y0; y < r.y1; ++y) {
             for (int x = r.x0; x < r.x1; ++x) consider(x, y);
+        }
     } else {
-        const IRect in = clip_limit(tiles, rect);
-        for (int y = in.y0; y < in.y1; ++y)
+        const IRect in = clip_limit(field, rect);
+        for (int y = in.y0; y < in.y1; ++y) {
             for (int x = in.x0; x < in.x1; ++x) consider(x, y);
+        }
         for (int y = in.y0; y < in.y1; ++y) {
             for (int x = in.x0; x < in.x1; ++x) {
                 for (int k = 0; k < 4; ++k) {
                     glm::ivec2 n;
                     if (!step_to(planet, settle.limit, x, y, k_dx[k], k_dy[k], n)) continue;
                     if (inside(in, n.x, n.y)) continue;           // already considered above
-                    if (tiles.at(n.x, n.y).water()) settle.frontier.push_back(n);
+                    if (field.water_at(n).wet()) settle.frontier.push_back(n);
                 }
             }
         }
     }
-    if (!changed.empty()) tiles.mark_dirty(changed);
+    if (!changed.empty()) field.mark_tiles_dirty(changed);
     return settle;
 }
 
-IRect step_settle(TileMapData& tiles, WaterSettle& settle, std::size_t budget) {
+IRect step_settle(TerrainField& field, WaterSettle& settle, std::size_t budget) {
     IRect changed;
-    if (tiles.empty() || settle.done() || budget == 0) return changed;
+    if (field.empty() || settle.done() || budget == 0) return changed;
     const std::size_t room = settle.cap - settle.spent;
-    settle.spent += spread(tiles, settle.frontier, settle.limit, std::min(budget, room), false, changed,
-                           settle.planet());
-    if (!changed.empty()) tiles.mark_dirty(changed);
+    settle.spent +=
+        spread(field, settle.frontier, settle.limit, std::min(budget, room), false, changed, settle.planet());
+    if (!changed.empty()) field.mark_tiles_dirty(changed);
     return changed;
 }
 
-IRect settle_water(TileMapData& tiles, const IRect& rect, const IRect& limit, std::size_t cap,
+IRect settle_water(TerrainField& field, const IRect& rect, const IRect& limit, std::size_t cap,
                    const PlanetLayout* planet) {
     IRect changed;
-    if (tiles.empty()) return changed;
+    if (field.empty()) return changed;
     // The whole walk in one call: what an editor brush wants, and what begin/step do a frame at
-    // a time for gameplay. The two must agree -- tile_map_test asserts they end up identical.
-    const std::uint64_t before = tiles.revision();
-    WaterSettle settle = begin_settle(tiles, rect, limit, planet, cap);
-    while (!settle.done()) step_settle(tiles, settle, cap);
+    // a time for gameplay. The two must agree -- terrain_water_test asserts they end up identical.
+    const TerrainFieldCursor before = field.cursor();
+    WaterSettle settle = begin_settle(field, rect, limit, planet, cap);
+    while (!settle.done()) step_settle(field, settle, cap);
     // Both halves mark what they touch, so the journal already holds this call's whole footprint.
-    return tiles.revision() == before ? changed : tiles.dirty_since(before);
+    return field.cursor() == before ? changed : field.dirty_since(before);
 }
 
 void settle_water_rounding(TileMapData& tiles, const IRect& rect, const PlanetLayout* planet) {

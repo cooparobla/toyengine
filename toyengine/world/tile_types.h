@@ -23,6 +23,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <utility>
+#include <vector>
+
+#include <toyengine/world/terrain_types.h>
 
 namespace toy {
 namespace world {
@@ -233,6 +237,46 @@ inline bool orientation_mirrors(std::uint8_t orientation) {
 }
 
 /**
+ * @brief What sits immediately under a given top surface, on a lateral face.
+ *
+ * The grass-over-dirt read every block game uses: a cut through turf shows soil, a cut through
+ * sand shows sand. Below `TerrainParams::soil_depth_steps` the mesher overrides this with bare
+ * stone regardless -- see mesh_chunk_styled().
+ *
+ * @param top The column's top surface.
+ * @return The surface its upper lateral faces are textured with.
+ */
+inline TileKind side_kind_for(TileKind top) {
+    switch (top) {
+        case TileKind::Grass:
+        case TileKind::Moss:  return TileKind::Dirt;
+        case TileKind::Snow:  return TileKind::Stone;
+        case TileKind::Sand:  return TileKind::Sand;
+        case TileKind::Clay:  return TileKind::Clay;
+        case TileKind::Salt:  return TileKind::Clay;
+        case TileKind::Road:  return TileKind::Dirt;
+        case TileKind::Ash:   return TileKind::Stone;
+        case TileKind::Ice:   return TileKind::Ice;
+        case TileKind::Water: return TileKind::Water;
+        default:              return TileKind::Stone;
+    }
+}
+
+/** @brief Every kind's lower-case name, in TileKind order -- also the built-in layer names. */
+inline const char* const* tile_kind_names() {
+    static const char* const names[k_tile_kind_count] = {
+        "grass", "dirt", "stone", "sand", "snow", "rock", "water", "ice", "moss", "clay", "ash",
+        "salt",  "road"};
+    return names;
+}
+
+/** @brief The lower-case name of one kind, as scene YAML spells it. */
+inline const char* tile_kind_name(TileKind kind) {
+    const std::size_t i = static_cast<std::size_t>(kind);
+    return i < k_tile_kind_count ? tile_kind_names()[i] : "grass";
+}
+
+/**
  * @brief Resolves a lower-case kind name (`"grass"`, `"stone"`, ...) to its TileKind.
  *
  * @param name  The name, as scene YAML spells it.
@@ -240,9 +284,7 @@ inline bool orientation_mirrors(std::uint8_t orientation) {
  * @return False for an unknown name; `out` is left untouched.
  */
 inline bool tile_kind_from_name(const char* name, TileKind& out) {
-    static const char* const names[k_tile_kind_count] = {
-        "grass", "dirt", "stone", "sand", "snow", "rock", "water", "ice", "moss", "clay", "ash",
-        "salt",  "road"};
+    const char* const* names = tile_kind_names();
     for (std::size_t i = 0; i < k_tile_kind_count; ++i) {
         const char* a = names[i];
         const char* b = name;
@@ -253,6 +295,29 @@ inline bool tile_kind_from_name(const char* name, TileKind& out) {
         }
     }
     return false;
+}
+
+/**
+ * @brief The layer list a tiles-mode terrain wears when its scene authors none: one layer per
+ *        TileKind, in TileKind order, each taking its colour and roughness from its atlas cell
+ *        and drawing its detail procedurally.
+ *
+ * A terrain's surface nibble is an index into its layer list (TerrainLayer), so these entries are
+ * what make an unlisted tile world look the way it always has: index 0 is grass, 2 is stone, and
+ * so on. A scene that writes its own `layers:` replaces the list wholesale.
+ */
+inline std::vector<TerrainLayer> builtin_tile_layers() {
+    std::vector<TerrainLayer> out;
+    out.reserve(k_tile_kind_count);
+    for (std::size_t i = 0; i < k_tile_kind_count; ++i) {
+        TerrainLayer l;
+        l.name = tile_kind_names()[i];
+        l.atlas_cell = static_cast<int>(i);
+        l.procedural = true;
+        l.tiling = 1.0f;   // Metres per repeat of the procedural detail, which is world-space.
+        out.push_back(std::move(l));
+    }
+    return out;
 }
 
 } // namespace world

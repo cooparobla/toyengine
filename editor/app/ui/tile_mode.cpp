@@ -98,7 +98,9 @@ const ToolButton k_tile_tools[] = {
 TerrainComponent* TileModePanel::tile_live_() const {
     if (tile_object_ == 0) return nullptr;
     coopa::scene::SceneObject* live = app_.sync_.live(tile_object_);
-    return live ? live->get_component<TerrainComponent>() : nullptr;
+    TerrainComponent* t = live ? live->get_component<TerrainComponent>() : nullptr;
+    // One component type, two modes: this panel edits the tile one.
+    return t != nullptr && t->mode == toy::world::TerrainMode::Tiles ? t : nullptr;
 }
 
 void TileModePanel::enter_tile_mode_(ObjectId id) {
@@ -336,7 +338,10 @@ void TileModePanel::tile_edit_selection_(const std::string& label, const std::fu
                                : bounds;
     TilePatch before = capture_tile_patch(t->tiles, reach);
     if (::toy::editor::tile_edit_selection(*t->tiles, tile_sel_, edit).empty()) return;
-    if (settle) toy::world::settle_water(*t->tiles, bounds, reach);
+    if (settle) {
+        t->sync_field();
+        toy::world::settle_water(t->field, bounds, reach);
+    }
     TilePatch after = capture_tile_patch(t->tiles, reach);
     tile_undo_.set_budget(256u << 20, [](const TilePatch& p) { return p.bytes(); }, 4);
     tile_undo_.push(label, std::move(before), std::move(after), merge);
@@ -346,6 +351,7 @@ void TileModePanel::tile_regenerate_(ObjectId id) {
     if (id == 0) id = tile_object_;
     coopa::scene::SceneObject* live = app_.sync_.live(id);
     TerrainComponent* t = live ? live->get_component<TerrainComponent>() : nullptr;
+    if (t != nullptr && t->mode != toy::world::TerrainMode::Tiles) t = nullptr;
     if (t == nullptr || !t->tiles) return;
     tile_regen_data_ = t->tiles;
     tile_regen_before_ = t->tiles->records();

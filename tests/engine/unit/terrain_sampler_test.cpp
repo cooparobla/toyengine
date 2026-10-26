@@ -18,8 +18,8 @@
 #include <coopa/debug/logger.h>
 #include <coopa/maps/map_generator.h>
 #include <coopa/maps/map_presets.h>
-#include <toyengine/world/terrain_generator.h>
-#include <toyengine/world/terrain_sampler.h>
+#include <toyengine/mapgen/terrain_generator.h>
+#include <toyengine/mapgen/terrain_sampler.h>
 
 #include "engine/support/checks.h"
 #include "engine/support/terrain_fixtures.h"
@@ -135,8 +135,8 @@ COOPA_TEST(the_floor_under_water_has_relief_and_grades_by_depth) {
 
     QuietLogger logger;
     // The generator a TileTerrain component makes by default -- natural terrain, which is the
-    // surface the engine actually samples (see toy::world::default_generator()).
-    coopa::maps::MapConfig config = default_generator();
+    // surface the engine actually samples (see toy::mapgen::default_generator()).
+    coopa::maps::MapConfig config = toy::mapgen::default_generator();
     config.seed      = 31;
     config.grid_size = 32;
     config = coopa::maps::derived_config(config);

@@ -1,5 +1,7 @@
 #include <toyengine/world/terrain_chunk.h>
 
+#include <toyengine/mapgen/terrain_sampler.h>
+
 #include <cstdlib>
 #include <algorithm>
 #include <cmath>

@@ -12,16 +12,21 @@
 #define GFX_WORLD_SET 2
 #endif
 
-// One heightmap terrain (toyengine/render/surface_world.h TerrainGpuParams; see
+// Surface layers a terrain carries, and how many of them two RGBA8 splat maps weight.
+// Must equal toyengine/render/surface_world.h's kSurfaceTerrainLayers / ...SplatLayers.
+#define GFX_TERRAIN_LAYERS 16
+#define GFX_TERRAIN_SPLAT_LAYERS 8
+
+// One terrain (toyengine/render/surface_world.h TerrainGpuParams; see
 // heightmap_terrain_common.glsl for how the terrain shader reads it).
 struct GfxTerrain {
-    vec4  origin;        // xyz grid corner at height 0, w chunk size (m)
-    vec4  cell;          // xy metres per height texel, zw terrain size (m)
-    ivec4 dims;          // x nx, y ny, z layer count, w flags (1 deep snow, 2 puddles)
-    vec4  misc;          // x height (m), y splat texels per side
-    vec4  layer[8];      // x 1/tiling, y roughness, z metallic, w normal strength
-    vec4  layer_tri[8];  // x triplanar, y sharpness, z has normal map
-    vec4  tint[8];       // rgb albedo multiplier
+    vec4  origin;                        // xyz grid corner at height 0, w chunk size (m)
+    vec4  cell;                          // xy metres per height texel, zw terrain size (m)
+    ivec4 dims;                          // x nx, y ny, z layer count, w flags (1 deep snow, 2 puddles)
+    vec4  misc;                          // x height (m), y splat texels per side
+    vec4  layer[GFX_TERRAIN_LAYERS];     // x 1/tiling, y roughness, z metallic, w normal strength
+    vec4  layer_tri[GFX_TERRAIN_LAYERS]; // x triplanar, y sharpness, z has normal map
+    vec4  tint[GFX_TERRAIN_LAYERS];      // rgb albedo multiplier
 };
 
 // One local environmental influence (toyengine/render/surface_world.h EnvSourceGpu, from

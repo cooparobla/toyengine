@@ -1,0 +1,136 @@
+# unified_terrain_demo -- a generated mapcoopa world applied to a SMOOTH terrain.
+#
+# The thing this scene exists to show: a map and a heightmap are the same kind of thing to apply.
+# `MapGenerator` holds a world; applying it writes this terrain's height plane, paints its layers
+# from the map's own biomes, and brings the sea, lakes and rivers with it -- water a heightmap
+# terrain could not carry at all before. The shoreline is nowhere in particular: the water is a
+# flat surface at its level and the ground is what ends it, so the terrain's own slope is the
+# beach.
+#
+# The tile world built from the same kind of map is terrain_demo; the hand-sculpted heightmap is
+# heightmap_terrain_demo. This is the two halves meeting.
+#
+#   ./build/toyengine unified_terrain_demo
+#
+# `auto_apply: always` because a smooth terrain's PNG is written by its own store and so is never
+# "missing" -- `when_missing` is for a tile world with no stored .tiles.
+scene:
+  scene_name: unified_terrain_demo
+  settings:
+    weather:
+      condition: clear
+      day_length_minutes: 20
+      drive_sun: true
+      enabled: true
+      ground_height: 0.0
+      latitude: 45
+      schedule: fixed
+      sun_intensity: 1.2
+      time_of_day: 9.5
+    render:
+      shadow_distance: 600
+      shadow_fit: focus
+      shadow_focus_radius: 120
+  root_objects:
+    - name: world
+      components:
+        - type: Transform
+          position: { x: 0, y: 0, z: 0 }
+        - type: MapGenerator
+          target: terrain
+          auto_apply: always
+          height_scale: 90
+          generator:
+            # A SMALL map, because the whole of it is written across this terrain's 512 m: a
+            # 48-cell world is nearly 3 km of mapcoopa's ground, which would squeeze the whole
+            # continent into the frame and leave the coast hard against the terrain's edge.
+            seed: 7
+            grid_size: 18
+            sea_level: 0.42
+            natural:
+              hills: 0.08
+              mountains: 0.40
+              plateaus: 0.05
+            river_count: 24
+
+    - name: terrain
+      components:
+        - type: Transform
+          position: { x: -256, y: -256, z: 0 }
+        - type: Terrain
+          mode: heightmap
+          size: { x: 512, y: 512 }
+          height: 90
+          chunk_size: 32
+          resolution: 513
+          splat_resolution: 512
+          heightmap: terrain/height.png
+          layer_texture_size: 512
+          collision: true
+          layers:
+            - name: grass
+              albedo: textures/terrain/layers/grass_albedo.png
+              normal: textures/terrain/layers/grass_normal.png
+              roughness: 0.9
+              tiling: 4
+            - name: dirt
+              albedo: textures/terrain/layers/dirt_albedo.png
+              normal: textures/terrain/layers/dirt_normal.png
+              roughness: 0.85
+              tiling: 5
+            - name: rock
+              albedo: textures/terrain/layers/rock_albedo.png
+              normal: textures/terrain/layers/rock_normal.png
+              roughness: 0.8
+              tiling: 9
+              triplanar: true
+              triplanar_sharpness: 4
+            - name: sand
+              albedo: textures/terrain/layers/sand_albedo.png
+              roughness: 0.9
+              tiling: 4
+            - name: stone
+              albedo: textures/terrain/layers/rock_albedo.png
+              normal: textures/terrain/layers/rock_normal.png
+              roughness: 0.8
+              tiling: 11
+              triplanar: true
+            - name: snow
+              tint: { r: 0.92, g: 0.94, b: 0.97 }
+              roughness: 0.6
+              tiling: 6
+          water:
+            clarity: 2.5
+            wave_amplitude: 0.12
+            wave_length: 6
+            wave_steepness: 0.28
+            shore_foam: 0.6
+        - type: WeatherSurface
+          splashes: true
+
+    - name: sun
+      components:
+        - type: Transform
+          position: { x: 0, y: 0, z: 200 }
+          rotation: { x: 0, y: 0, z: 0 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: DirectionalLight
+          cast_shadows: true
+          color: { r: 1.0, g: 0.96, b: 0.9 }
+          direction: { x: -0.45, y: 0.55, z: -0.6 }
+          intensity: 1.0
+
+    - name: camera
+      components:
+        - type: Transform
+          position: { x: 0, y: -250, z: 110 }
+          rotation: { x: 66, y: 0, z: 0 }
+          scale: { x: 1, y: 1, z: 1 }
+        - type: Camera
+          far_clip_plane: 1.2e+03
+          fov: 6.0e+01
+          main: true
+          near_clip_plane: 0.3
+          projection: Perspective
+        - type: FreeMover
+          speed: 40

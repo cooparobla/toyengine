@@ -10,8 +10,8 @@
  * `shape`, `sea_level`...) still load; the editor's World Generator moves them into the block.
  */
 
-#ifndef TOYENGINE_WORLD_TERRAIN_GENERATOR_H
-#define TOYENGINE_WORLD_TERRAIN_GENERATOR_H
+#ifndef TOYENGINE_MAPGEN_TERRAIN_GENERATOR_H
+#define TOYENGINE_MAPGEN_TERRAIN_GENERATOR_H
 
 #include <array>
 
@@ -20,7 +20,7 @@
 #include <coopa/maps/map_config.h>
 
 namespace toy {
-namespace world {
+namespace mapgen {
 
 /** @brief The flat generator keys TileTerrain had before the `generator:` block. */
 inline constexpr std::array<const char*, 11> k_legacy_generator_keys = {
@@ -46,7 +46,7 @@ coopa::maps::MapConfig generator_config_from_node(const fkyaml::node& component)
  */
 fkyaml::node generator_node(const coopa::maps::MapConfig& authored);
 
-} // namespace world
+} // namespace mapgen
 } // namespace toy
 
-#endif // TOYENGINE_WORLD_TERRAIN_GENERATOR_H
+#endif // TOYENGINE_MAPGEN_TERRAIN_GENERATOR_H

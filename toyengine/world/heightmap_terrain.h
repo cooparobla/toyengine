@@ -59,8 +59,12 @@
 
 #include <coopa/scene/component.h>
 
+#include <fkYAML/node.hpp>
+
+#include <coopa/scene/scene_loader.h>
+
 #include <toyengine/world/heightmap_data.h>
-#include <toyengine/world/heightmap_store.h>
+#include <toyengine/world/terrain_component.h>
 
 namespace coopa {
 namespace asset {
@@ -71,75 +75,26 @@ class AssetManager;
 namespace toy {
 namespace world {
 
-struct HeightmapTerrainRuntime;
+/**
+ * @brief The `HeightmapTerrain` component.
+ *
+ * One C++ type serves both terrain modes (toyengine/world/terrain_component.h); this is the name
+ * the heightmap half is authored and inspected under. A component whose `mode` is
+ * `TerrainMode::Heightmap` reads `geometry`, `layers` and `data`, and reports
+ * `type_name() == "HeightmapTerrain"`.
+ */
+using HeightmapTerrain = TerrainComponent;
 
 /**
- * @class HeightmapTerrain
- * @brief See the file comment. Configuration plus a handle on the shared data; the per-frame
- *        work (chunks, GPU uploads, collider) is HeightmapTerrainSystem's.
+ * @brief Authors the heightmap half of a terrain from a scene block.
+ *
+ * The entry point is in toy::scene::register_scene_components(), which registers one parser under
+ * all three names and dispatches on infer_terrain_mode() (terrain_yaml.h); this is the body it
+ * calls for `TerrainMode::Heightmap`.
  */
-class HeightmapTerrain : public coopa::scene::Component {
-public:
-    HeightmapTerrain();
-    ~HeightmapTerrain() override;
-
-    std::string type_name() const override { return "HeightmapTerrain"; }
-
-    // --- Authored ---
-    HeightmapGeometry geometry;
-    HeightmapGenerate generate;
-    std::string heightmap;   ///< As written in the scene (relative to it).
-    std::string splat0;
-    std::string splat1;
-    std::vector<HeightmapLayer> layers;
-
-    struct Tessellation {
-        bool  enabled = true;
-        float edge_pixels = 8.0f;     ///< Target triangle edge on screen: detail falls off with distance by itself.
-        float max_factor = 64.0f;     ///< Cap on splits per patch edge (clamped to the device's limit).
-        float max_distance = 0.0f;    ///< "Detail distance": beyond, the base patch only. 0 = the view distance.
-    } tessellation;
-
-    /// Quads per chunk side before tessellation (the far-away shape). 0 = automatic: 4 with
-    /// tessellation (it adds the near detail), 32 on a device without.
-    int  patch_resolution = 0;
-
-    /// Chunks are kept only within this many metres of the camera. < 0 (`auto`, the default):
-    /// the main camera's far clip -- everything it could draw; frustum culling does the rest.
-    /// A number is a hard cap: a top-down or close-camera game where only nearby ground is ever
-    /// seen, or a very large terrain, never pays for far chunks (draws, shadows, gather).
-    float view_distance = -1.0f;
-    /// Chunks beyond this from the camera cast no shadows. 0 = the view distance.
-    float shadow_distance = 0.0f;
-    int  layer_texture_size = 1024; ///< Texels per side every layer texture is resized to.
-    bool collision = true;
-    std::string physics_material;   ///< physics_materials/<name>.yaml for the collider (optional).
-    bool deep_snow = false;
-    bool puddles = true;
-    bool cast_shadows = true;
-
-    // --- Resolved by the parser ---
-    HeightmapFiles files;                     ///< Where the data is read from / saved to.
-    std::vector<std::string> layer_albedo_paths; ///< Resolved per layer (empty = none).
-    std::vector<std::string> layer_normal_paths;
-
-    /** @brief The live data (shared, see heightmap_store.h). Never null after parsing. */
-    std::shared_ptr<HeightmapData> data;
-
-    /** @brief World position of the grid's (0, 0) corner at height 0 (the owner's position). */
-    glm::vec3 origin() const;
-    /** @brief World-space query handle (heights, normals, layer weights). */
-    HeightmapView view() const { return HeightmapView{data.get(), origin()}; }
-
-    /** @brief Runtime state the system attaches; opaque here. */
-    std::unique_ptr<HeightmapTerrainRuntime> runtime;
-};
-
-/**
- * @brief Registers the "HeightmapTerrain" scene-file parser. Called from
- *        toy::scene::register_scene_components().
- */
-void register_heightmap_terrain_component(coopa::asset::AssetManager& assets);
+void parse_heightmap_terrain(const fkyaml::node& node, coopa::scene::SceneObject& obj,
+                             const coopa::scene::SceneLoader::ParseContext& ctx,
+                             coopa::asset::AssetManager& assets);
 
 } // namespace world
 } // namespace toy

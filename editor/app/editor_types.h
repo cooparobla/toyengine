@@ -35,7 +35,10 @@
 // declarations only: a panel header must not pull the engine in, or it stops being cheap.
 namespace toy {
 namespace particles { class ParticleSystem; }
-namespace world { class TerrainComponent; class HeightmapTerrain; }
+// One component type serves both terrain modes (toyengine/world/terrain_component.h), so
+// HeightmapTerrain is an ALIAS for it, not a class of its own -- aliasing the incomplete type
+// keeps the panel headers that name it by pointer as cheap as a forward declaration.
+namespace world { class TerrainComponent; using HeightmapTerrain = TerrainComponent; }
 namespace weather { class WeatherSystem; }
 namespace water { class WaterSystem; }
 }  // namespace toy

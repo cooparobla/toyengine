@@ -1,12 +1,13 @@
 #include <toyengine/world/tile_edit.h>
 
+#include <toyengine/world/terrain_field.h>
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <functional>
 #include <vector>
 
-#include <toyengine/world/terrain_sampler.h>
 #include <toyengine/world/tile_water.h>
 
 namespace toy {
@@ -52,7 +53,10 @@ IRect tile_raise(TileMapData& d, const IRect& rect, int delta, bool settle, cons
     IRect changed = for_tiles(d, rect, [delta](TileRecord& r, int, int) {
         return move_ground(r, clamp_steps(r.steps + delta));
     });
-    if (settle && !changed.empty()) changed.include(settle_water(d, changed, IRect{}, k_water_flood_cap, planet));
+    if (settle && !changed.empty()) {
+        TerrainField field = borrow_tiles(d);
+        changed.include(settle_water(field, changed, IRect{}, k_water_flood_cap, planet));
+    }
     return changed;
 }
 
@@ -60,12 +64,15 @@ IRect tile_set_height(TileMapData& d, const IRect& rect, int steps, bool settle,
     IRect changed = for_tiles(d, rect, [steps](TileRecord& r, int, int) {
         return move_ground(r, clamp_steps(steps));
     });
-    if (settle && !changed.empty()) changed.include(settle_water(d, changed, IRect{}, k_water_flood_cap, planet));
+    if (settle && !changed.empty()) {
+        TerrainField field = borrow_tiles(d);
+        changed.include(settle_water(field, changed, IRect{}, k_water_flood_cap, planet));
+    }
     return changed;
 }
 
 IRect tile_paint(TileMapData& d, const IRect& rect, TileKind kind, bool side) {
-    const TileKind side_kind = TerrainSampler::side_kind_for(kind);
+    const TileKind side_kind = side_kind_for(kind);
     // Under water too: a bed is ground like any other.
     return for_tiles(d, rect, [kind, side, side_kind](TileRecord& r, int, int) {
         const TileRecord before = r;
@@ -94,7 +101,10 @@ IRect tile_smooth(TileMapData& d, const IRect& rect, bool settle, const PlanetLa
     }
     std::size_t i = 0;
     IRect changed = for_tiles(d, r, [&](TileRecord& t, int, int) { return move_ground(t, target[i++]); });
-    if (settle && !changed.empty()) changed.include(settle_water(d, changed, IRect{}, k_water_flood_cap, planet));
+    if (settle && !changed.empty()) {
+        TerrainField field = borrow_tiles(d);
+        changed.include(settle_water(field, changed, IRect{}, k_water_flood_cap, planet));
+    }
     return changed;
 }
 
@@ -105,8 +115,10 @@ IRect tile_water(TileMapData& d, const IRect& rect, int level, bool fill, const 
         for (int x = r.x0; x < r.x1; ++x) seeds.push_back({x, y});
     // Fill floods the basin the brush is in, to `level`, as far as the ground holds it; drain
     // takes away the whole body the brush touches.
-    return fill ? flood_water(d, seeds, level, false, k_water_flood_cap, planet)
-                : drain_water(d, seeds, k_water_flood_cap, planet);
+    TerrainField field = borrow_tiles(d);
+    // A terrace in steps and a level in metres are the same number over a borrowed grid.
+    return fill ? flood_water(field, seeds, static_cast<float>(level), WaterKind::Lake, k_water_flood_cap, planet)
+                : drain_water(field, seeds, k_water_flood_cap, planet);
 }
 
 } // namespace world

@@ -14,7 +14,7 @@
 #include <coopa/maps/map_generator.h>
 #include <coopa/maps/map_presets.h>
 #include <toyengine/world/planet.h>
-#include <toyengine/world/terrain_sampler.h>
+#include <toyengine/mapgen/terrain_sampler.h>
 
 #include "engine/support/checks.h"
 #include "engine/support/terrain_fixtures.h"

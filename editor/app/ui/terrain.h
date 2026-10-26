@@ -75,7 +75,18 @@ public:
         // The state before the stroke, to cut the undo patch from.
         std::vector<float> start_heights;
         std::vector<std::uint8_t> start_splat0, start_splat1;
+        /**
+         * @brief Water: every tile's cell as the stroke began, row-major over the whole grid.
+         *
+         * The whole grid, not the brush: a flood runs as far as its basin does, so which tiles a
+         * stroke changed is only known once it ends -- by which time their old values are gone.
+         * One grid-sized snapshot per stroke (not per dab) is the cheap way to still have them.
+         */
+        std::vector<toy::world::WaterCell> start_water;
         toy::world::IRect height_rect, splat_rect;
+        /// Water: the tiles a stroke flooded or drained. Its own rect because water is per TILE,
+        /// and because a flood reaches well past the brush that seeded it.
+        toy::world::IRect water_rect;
     };
 
     /** @brief Where the ray through `px` meets the terrain (world space). */
@@ -111,6 +122,15 @@ public:
 
     /** @brief Properties > Tool in Terrain Mode. */
     void draw_terrain_tool_panel_(imm::Context& ctx);
+
+    /**
+     * @brief The component inspector's own header: what this terrain is doing, and Edit Terrain.
+     *
+     * Registered as the "HeightmapTerrain.edit" inspector section (editor/schema/
+     * inspector_sections.h) rather than drawn from the panel, so the schema's rows keep their
+     * own layout, their prefab-override marks and their trailing "More" block.
+     */
+    EditResult draw_terrain_inspector_header_(imm::Context& ctx, ObjectId id);
 
     void draw_terrain_layers_(imm::Context& ctx, toy::world::HeightmapTerrain& t);
     void draw_terrain_settings_(imm::Context& ctx, toy::world::HeightmapTerrain& t);

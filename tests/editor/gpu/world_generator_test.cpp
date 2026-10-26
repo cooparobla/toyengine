@@ -8,6 +8,7 @@
 
 #include <coopa/testing/test.h>
 
+#include <toyengine/mapgen/map_generator_component.h>
 #include <toyengine/world/terrain_component.h>
 #include <toyengine/world/tile_map_data.h>
 
@@ -37,10 +38,22 @@ COOPA_TEST(world_generator_previews_generates_and_undoes) {
         app.document().set_component(id, app.document().find_component(id, "TileTerrain"), comp, "Small world");
         app.sync().rebuild(engine, app.document());
     }
+    // The world's settings live on a MapGenerator component beside the terrain (toyengine/mapgen):
+    // generation is not the terrain's, so applying writes them there. A scene authored the old
+    // way has them on the terrain, and applying migrates them across -- which is what the
+    // assertions below check, since that migration is the behaviour users rely on.
+    auto generator_component = [&] {
+        const int gi = app.document().find_component(id, "MapGenerator");
+        return gi < 0 ? Node() : Node(app.document().find(id)->at("components").as_seq()[static_cast<std::size_t>(gi)]);
+    };
     toy::world::TerrainComponent* t = nullptr;
     auto live = [&] {
         coopa::scene::SceneObject* o = app.sync().live(id);
         return o ? o->get_component<toy::world::TerrainComponent>() : nullptr;
+    };
+    auto live_generator = [&] {
+        coopa::scene::SceneObject* o = app.sync().live(id);
+        return o ? o->get_component<toy::mapgen::MapGeneratorComponent>() : nullptr;
     };
     for (int i = 0; i < 900; ++i) {
         tick(engine, 1);
@@ -76,14 +89,18 @@ COOPA_TEST(world_generator_previews_generates_and_undoes) {
     }
     expect(!app.world_generator_open(), "Generate World closes the window");
     const Node comp = component();
-    expect(comp.contains("generator") && get_int(comp["generator"], "seed", 0) == 77,
-           "the settings are written as the generator block");
-    expect(!comp.contains("seed") && !comp.contains("grid_size") && get_int(comp["generator"], "grid_size", 0) == 24,
+    const Node gen = generator_component();
+    expect(gen.contains("generator") && get_int(gen["generator"], "seed", 0) == 77,
+           "the settings are written as the MapGenerator's generator block");
+    expect(!gen.contains("seed") && get_int(gen["generator"], "grid_size", 0) == 24,
            "...and the old flat keys move into it");
-    t = live();
-    expect(t != nullptr && t->generator.seed == 77 && t->generator.sea_level == 0.35, "the live terrain has them");
+    expect(!comp.contains("generator") && !comp.contains("seed") && !comp.contains("grid_size"),
+           "...and off the terrain, which no longer generates anything");
+    toy::mapgen::MapGeneratorComponent* g = live_generator();
+    expect(g != nullptr && g->config.seed == 77 && g->config.sea_level == 0.35,
+           "the live generator has them");
     expect(tiles->bakes_done() > bakes && tiles->records() != before, "the tiles are re-baked from them");
-    expect(get_int(comp, "world_tiles", 0) == 60 && tiles->width() == 60 && tiles->height() == 60,
+    expect(get_int(gen, "world_tiles", 0) == 60 && tiles->width() == 60 && tiles->height() == 60,
            "...at the chosen world size: 60 x 60 tiles from 24 map cells (" + std::to_string(tiles->width()) + ")");
 
     app.undo();
@@ -92,7 +109,11 @@ COOPA_TEST(world_generator_previews_generates_and_undoes) {
     app.undo();
     tick(engine, 3);
     const Node restored = component();
-    expect(!restored.contains("generator") && get_int(restored, "grid_size", 0) == 24, "a second undo restores the settings");
+    expect(!restored.contains("generator") && get_int(restored, "grid_size", 0) == 24,
+           "a second undo restores the settings to the terrain, where this scene authored them");
+    expect(app.document().find_component(id, "MapGenerator") < 0,
+           "...and takes the generator component with them: the apply is ONE undo step, so Ctrl Z "
+           "cannot leave the scene half-migrated");
     toy::world::TileMapStore::instance().clear();
 }
 

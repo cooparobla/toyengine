@@ -6,7 +6,7 @@
 #include "editor/app/editor_app.h"
 
 #include <coopa/maps/map_config.h>
-#include <toyengine/world/terrain_generator.h>
+#include <toyengine/mapgen/terrain_generator.h>
 
 #include <algorithm>
 #include <cctype>
@@ -84,7 +84,9 @@ int find_tile_set(const std::vector<std::string>& sets, const std::string& ref) 
 
 TerrainComponent* TileTerrainPanel::live_tile_terrain_(ObjectId id) const {
     coopa::scene::SceneObject* live = app_.sync_.live(id);
-    return live ? live->get_component<TerrainComponent>() : nullptr;
+    TerrainComponent* t = live ? live->get_component<TerrainComponent>() : nullptr;
+    // One component type, two modes: this panel inspects the tile one.
+    return t != nullptr && t->mode == toy::world::TerrainMode::Tiles ? t : nullptr;
 }
 
 const std::vector<std::string>& TileTerrainPanel::tile_set_assets_() {
@@ -320,10 +322,10 @@ EditResult TileTerrainPanel::draw_tile_terrain_panel_(imm::Context& ctx, ObjectI
                 "The world is generated once by mapcoopa and stored as tiles; from then on you edit the tiles (Edit "
                 "Tiles). The World Generator holds every mapcoopa setting, with a live preview of the map they make.",
                 true)) {
-        const coopa::maps::MapConfig gen = toy::world::generator_config_from_node(comp);
-        const bool legacy_keys = std::any_of(toy::world::k_legacy_generator_keys.begin(), toy::world::k_legacy_generator_keys.end(),
+        const coopa::maps::MapConfig gen = toy::mapgen::generator_config_from_node(comp);
+        const bool legacy_keys = std::any_of(toy::mapgen::k_legacy_generator_keys.begin(), toy::mapgen::k_legacy_generator_keys.end(),
                                              [&](const char* k) { return comp.contains(k); });
-        const bool standard = toy::world::generator_node(gen).get_value<Node::mapping_type>().empty();
+        const bool standard = toy::mapgen::generator_node(gen).get_value<Node::mapping_type>().empty();
         std::snprintf(buf, sizeof(buf), "%s: seed %d, %s, %d map cells, sea level %.2f, %d rivers",
                       standard ? "Default map (natural terrain)" : "Custom map", gen.seed,
                       std::string(coopa::maps::map_shape_name(gen.shape.shape)).c_str(), gen.grid_size, gen.sea_level,
@@ -355,7 +357,7 @@ EditResult TileTerrainPanel::draw_tile_terrain_panel_(imm::Context& ctx, ObjectI
         fields({tfield("water_inset", "Sea & Lake Inset (steps)"), tfield("river_inset", "River Inset (steps)")});
     }
     mark({"water_inset", "river_inset"});
-    for (const char* k : toy::world::k_legacy_generator_keys) placed.insert(k);
+    for (const char* k : toy::mapgen::k_legacy_generator_keys) placed.insert(k);
 
     // --- Size & Terraces ---------------------------------------------------------------------
     if (section("Size & Terraces", I::Scale, "How big each tile and step is in the world, and how cliffs are drawn.", true)) {

@@ -88,6 +88,9 @@ struct HeightmapTerrainRuntime {
     /// What the chunk materials were last written with; any change rewrites them.
     std::string material_signature;
 
+    /// The tile revision the chunks' water was built from; moving it rebuilds their surfaces.
+    std::uint64_t water_revision = 0;
+
     coopa::scene::SceneObject* collision = nullptr;
     std::uint64_t collider_revision = 0;       ///< data height_revision() the collider was built from
     std::uint64_t collider_seen_revision = 0;  ///< the latest revision seen while waiting to rebuild
@@ -152,6 +155,20 @@ private:
                         const ChunkSettings& s, const glm::vec3& camera);
     void spawn_chunk_(HeightmapTerrain& terrain, HeightmapTerrainRuntime& rt, coopa::scene::Scene& scene, const ChunkSettings& s,
                       int cx, int cy);
+
+    /**
+     * @brief Builds (or rebuilds) one chunk's water surfaces as WaterBody children.
+     *
+     * A smooth terrain's water is a surface over its ground exactly as a tile world's is -- what
+     * differs is only where the mesh comes from (terrain_water_mesh.h). Both kinds take the SAME
+     * wave field from `water_look`: a river and the lake it runs into share their seam's
+     * vertices, and the vertex stage displaces each from its own body's wave params, so two
+     * different wave fields would pull a shared vertex apart and show the bed through the gap.
+     */
+    void refresh_chunk_water_(HeightmapTerrain& terrain, coopa::scene::SceneObject& chunk_object, int cx, int cy);
+
+    /** @brief Rebuilds every live chunk's water when the terrain's water has changed. */
+    void refresh_water_(HeightmapTerrain& terrain, HeightmapTerrainRuntime& rt);
     void apply_material_(const HeightmapTerrain& terrain, const HeightmapTerrainRuntime& rt, const ChunkSettings& s,
                          coopa::gfx::engine::components::MeshRenderer& mr) const;
     glm::vec3 camera_position_(const HeightmapTerrain& terrain) const;

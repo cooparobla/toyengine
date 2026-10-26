@@ -16,7 +16,11 @@ void TerrainDigger::update(float delta_time) {
     hovering_ = false;
     if (scene == nullptr || glm::length(ray_direction) < 1e-6f) return;
 
-    auto* terrain = scene->find_first_component<world::TerrainComponent>();
+    // Digging moves tiles, so the target is a tile world -- not whichever terrain is first.
+    world::TerrainComponent* terrain = nullptr;
+    for (world::TerrainComponent* t : scene->get_components<world::TerrainComponent>()) {
+        if (t->mode == world::TerrainMode::Tiles) { terrain = t; break; }
+    }
     if (terrain == nullptr || !terrain->is_ready()) return;
 
     // Hover first, dig second: what the outline shows is exactly what a click would take.

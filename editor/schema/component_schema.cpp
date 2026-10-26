@@ -1281,7 +1281,37 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             }});
         }
         add({"TileTerrain", "World", tile_terrain_fields()});
-        add({"Terrain", "World", tile_terrain_fields()});   // TileTerrain's old name, still loaded
+        add({"Terrain", "World", tile_terrain_fields()});   // the unified name; `mode:` picks the half
+
+        // The map a terrain is generated from (toyengine/mapgen). Generation is not part of a
+        // terrain: this holds the world and APPLIES it, which is why `target` and `auto_apply`
+        // come first. The mapcoopa settings themselves are a `config:` map the World Generator
+        // window edits with a live preview, so they are deliberately not fields here -- there
+        // are about fifty of them and a flat list would be unusable.
+        add({"MapGenerator", "World", {
+            with_tip(with_label(f_child("target"), "Apply To"),
+                     "The terrain this world is written into. Empty: a terrain on this same object"),
+            with_tip(f_enum("auto_apply", {"when_missing", "never", "always"}, true),
+                     "When this applies itself without being asked.\n"
+                     "When Missing: the target has no data yet -- a world with no stored .tiles is generated "
+                     "on load, and once the file exists the stored world wins. This is what a scene wants.\n"
+                     "Never: only the Generate button, or a call from game code.\n"
+                     "Always: every load, discarding whatever the target had"),
+            with_tip(f_bool("sphere", false), "Generate on a globe rather than a plane (a planet terrain sets it)"),
+            with_tip(with_label(f_int("world_tiles", 0, 0, 16384), "World Tiles"),
+                     "Tiles per side the map is rasterised into when it is applied to a TILED terrain. "
+                     "0 derives it from the grid size"),
+            with_tip(f_int("tiles_per_grid_unit", 4, 1, 64),
+                     "Tiles per map cell, when World Tiles is 0. Raising it resolves coastlines and river "
+                     "channels more finely, at a quadratic cost in tiles -- it does not add detail the map "
+                     "does not have"),
+            with_tip(with_unit(f_float("height_scale", 16.0f, 0.05f, 0.0f, 1000.0f), "m"),
+                     "Height from the sea floor to the highest peak"),
+            with_tip(f_float("water_inset", 0.5f, 0.01f, 0.0f, 0.95f),
+                     "Steps the sea and lakes sit under the terrace they fill (tiled terrain only)"),
+            with_tip(f_float("river_inset", 0.2f, 0.01f, 0.0f, 0.95f),
+                     "The same for rivers, nearer their bank tops (tiled terrain only)"),
+        }});
         // A rig root: `states` names its clips, `auto_play` the one played on start. A clip
         // path is arbitrary and routinely SHARED — a whole family of rigs can play one set
         // (every soft_<race> object asset names animations/soft_hero/*), so editing a clip

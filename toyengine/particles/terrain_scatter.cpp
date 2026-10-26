@@ -31,15 +31,16 @@ std::size_t TerrainScatterCache::instance_count() const {
     return n;
 }
 
-TerrainScatterCache::Chunk TerrainScatterCache::build_chunk(const world::HeightmapView& terrain, const TerrainScatterParams& p,
+TerrainScatterCache::Chunk TerrainScatterCache::build_chunk(const world::TerrainFieldView& terrain, const TerrainScatterParams& p,
                                                             int cx, int cy) {
     Chunk out;
     out.bounds_min = glm::vec3(std::numeric_limits<float>::max());
     out.bounds_max = glm::vec3(std::numeric_limits<float>::lowest());
-    const world::HeightmapData& data = *terrain.data;
-    out.revision = data.chunk_revision(cx, cy);
-    const world::HeightmapGeometry& g = data.geometry();
-    const float cs = g.chunk_size;
+    const world::TerrainField& field = *terrain.field;
+    out.revision = field.chunk_revision(cx, cy);
+    const world::TerrainFieldGeometry& g = field.geometry();
+    // Chunk size in metres, whichever mode: the field counts chunks in TILES.
+    const float cs = static_cast<float>(g.chunk_tiles) * g.tile_extent().x;
     const float spacing = 1.0f / std::sqrt(std::max(p.shape.density, 1e-4f));
     const glm::vec2 lo(static_cast<float>(cx) * cs, static_cast<float>(cy) * cs);
     const glm::vec2 hi = glm::min(lo + glm::vec2(cs), g.size);
@@ -64,12 +65,12 @@ TerrainScatterCache::Chunk TerrainScatterCache::build_chunk(const world::Heightm
             const glm::vec2 local = lo + glm::vec2((static_cast<float>(i) + ox) * spacing, (static_cast<float>(j) + oy) * spacing);
             if (local.x >= hi.x || local.y >= hi.y) continue;
 
-            const glm::vec3 n = data.normal(local);
+            const glm::vec3 n = field.normal_at(local);
             if (n.z < cos_min - 1e-5f || n.z > cos_max + 1e-5f) continue;
-            const float h = terrain.origin.z + data.sample_height(local);
+            const float h = terrain.origin.z + field.ground_at(local);
             if (h < p.shape.height.x || h > p.shape.height.y) continue;
             if (p.layer >= 0) {
-                const float w = data.layer_weight(p.layer, local);
+                const float w = field.layer_weight_at(p.layer, local);
                 // Thin paint: sparse; full paint: every candidate.
                 const float threshold = p.shape.min_weight + (1.0f - p.shape.min_weight) * gate;
                 if (w < threshold || w <= 0.0f) continue;
@@ -113,23 +114,24 @@ TerrainScatterCache::Chunk TerrainScatterCache::build_chunk(const world::Heightm
     return out;
 }
 
-void TerrainScatterCache::update(const world::HeightmapView& terrain, const TerrainScatterParams& params,
+void TerrainScatterCache::update(const world::TerrainFieldView& terrain, const TerrainScatterParams& params,
                                  const glm::vec3& camera, float max_distance, int budget) {
     if (!terrain) {
         chunks_.clear();
         return;
     }
-    const world::HeightmapData& data = *terrain.data;
-    if (params != params_ || data.uid() != data_uid_ || data.geometry() != geometry_ || terrain.origin != origin_) {
+    const world::TerrainField& field = *terrain.field;
+    if (params != params_ || field.uid() != data_uid_ || field.geometry() != geometry_ ||
+        terrain.origin != origin_) {
         chunks_.clear();
         params_ = params;
-        data_uid_ = data.uid();
-        geometry_ = data.geometry();
+        data_uid_ = field.uid();
+        geometry_ = field.geometry();
         origin_ = terrain.origin;
     }
 
     const glm::ivec2 count = geometry_.chunk_count();
-    const float cs = geometry_.chunk_size;
+    const float cs = static_cast<float>(geometry_.chunk_tiles) * geometry_.tile_extent().x;
     const glm::vec2 cam = glm::vec2(camera) - glm::vec2(terrain.origin);
     auto chunk_distance = [&](int cx, int cy) {
         const glm::vec2 lo(static_cast<float>(cx) * cs, static_cast<float>(cy) * cs);
@@ -151,7 +153,7 @@ void TerrainScatterCache::update(const world::HeightmapView& terrain, const Terr
             const float d = chunk_distance(cx, cy);
             if (d > want) continue;
             auto it = chunks_.find({cx, cy});
-            if (it != chunks_.end() && it->second.revision == data.chunk_revision(cx, cy)) continue;
+            if (it != chunks_.end() && it->second.revision == field.chunk_revision(cx, cy)) continue;
             todo.push_back({d, {cx, cy}});
         }
     }

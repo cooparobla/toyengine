@@ -23,6 +23,7 @@ void TerrainPanel::set_terrain_mode(bool on) {
 }
 
 using toy::world::HeightmapData;
+using toy::world::HeightmapGeometry;
 using toy::world::HeightmapTerrain;
 using toy::world::IRect;
 
@@ -51,6 +52,9 @@ const ToolButton k_tools[] = {
     {TerrainTool::Noise, imm::Icon::Dots, "Noise\nAdd natural, bumpy variation; Ctrl carves it in (5)"},
     {TerrainTool::Erode, imm::Icon::BrushGrab, "Erode\nWear steep slopes down into gentler ones, as weather would (6)"},
     {TerrainTool::Paint, imm::Icon::VertexPaint, "Paint\nPaint the chosen layer onto the ground; Ctrl erases it (7)"},
+    {TerrainTool::Water, imm::Icon::World,
+     "Water\nFlood the ground under the brush to the Water Level; Ctrl drains the body it touches (8).\n"
+     "Water fills as far as the basin runs, so a stroke can wet far more than the brush covers"},
 };
 
 } // namespace
@@ -62,7 +66,9 @@ const ToolButton k_tools[] = {
 HeightmapTerrain* TerrainPanel::terrain_live_() const {
     if (terrain_object_ == 0) return nullptr;
     coopa::scene::SceneObject* live = app_.sync_.live(terrain_object_);
-    return live ? live->get_component<HeightmapTerrain>() : nullptr;
+    HeightmapTerrain* t = live ? live->get_component<HeightmapTerrain>() : nullptr;
+    // One component type, two modes: this panel edits the heightmap one.
+    return t != nullptr && t->mode == toy::world::TerrainMode::Heightmap ? t : nullptr;
 }
 
 void TerrainPanel::enter_terrain_mode_(ObjectId id) {
@@ -116,6 +122,18 @@ void TerrainPanel::terrain_dab_at_(const ViewProj& vp, glm::vec2 px) {
     TerrainBrushSettings s = terrain_brush_;
     s.tool = terrain_stroke_.tool;
     const glm::vec2 local = glm::vec2(hit) - glm::vec2(t->origin());
+    if (s.tool == TerrainTool::Water) {
+        // Water lives on the field, per tile, not in a texel plane -- and a flood runs as far as
+        // the basin does, so what this returns is usually wider than the brush.
+        HeightmapTerrain* live = terrain_live_();
+        if (live == nullptr) return;
+        live->sync_field();
+        const IRect r = terrain_water_dab(live->field, s, local, terrain_stroke_.invert);
+        terrain_stroke_.water_rect.include(r);
+        g_last_dab_time = now_seconds();
+        g_last_dab_world = hit;
+        return;
+    }
     const IRect r = terrain_dab(*terrain_stroke_.data, s, local, terrain_stroke_.invert, terrain_stroke_.flatten_to,
                                 terrain_stroke_.seed);
     if (s.tool == TerrainTool::Paint) terrain_stroke_.splat_rect.include(r);
@@ -149,6 +167,17 @@ void TerrainPanel::terrain_begin_stroke_(const ViewProj& vp, glm::vec2 px, bool 
     } else {
         s.start_heights = s.data->heights();
     }
+    if (terrain_stroke_.tool == TerrainTool::Water) {
+        t->sync_field();
+        const auto& g = t->field.geometry();
+        terrain_stroke_.start_water.clear();
+        terrain_stroke_.start_water.reserve(static_cast<std::size_t>(g.tiles_x) * g.tiles_y);
+        for (int ty = 0; ty < g.tiles_y; ++ty) {
+            for (int tx = 0; tx < g.tiles_x; ++tx) {
+                terrain_stroke_.start_water.push_back(t->field.water_at(glm::ivec2(tx, ty)));
+            }
+        }
+    }
     terrain_dab_at_(vp, px);
 }
 
@@ -172,9 +201,30 @@ void TerrainPanel::terrain_end_stroke_() {
     TerrainStroke& s = terrain_stroke_;
     if (!s.active) return;
     s.active = false;
-    if (!s.data || (s.height_rect.empty() && s.splat_rect.empty())) return;
+    if (!s.data || (s.height_rect.empty() && s.splat_rect.empty() && s.water_rect.empty())) return;
     TerrainPatch before, after;
-    if (s.tool == TerrainTool::Paint) {
+    if (s.tool == TerrainTool::Water) {
+        // Water is per tile and lives on the field, so the patch carries it instead of texels.
+        // `start_water` was taken over the same rect when the stroke began -- a flood reaches
+        // past the brush, so the rect is only known once the stroke is over.
+        HeightmapTerrain* live = terrain_live_();
+        if (live == nullptr) { s = TerrainStroke{}; return; }
+        before.data = s.data;
+        before.nx = s.data->nx();
+        before.ny = s.data->ny();
+        before.splat_size = s.data->splat_w();
+        before.water_rect = s.water_rect;
+        const int grid_x = live->field.geometry().tiles_x;
+        for (int y = s.water_rect.y0; y < s.water_rect.y1; ++y) {
+            for (int x = s.water_rect.x0; x < s.water_rect.x1; ++x) {
+                const std::size_t k = static_cast<std::size_t>(y) * grid_x + x;
+                before.water.push_back(k < s.start_water.size() ? s.start_water[k]
+                                                                : toy::world::WaterCell{});
+            }
+        }
+        after = before;
+        after.water = capture_water(live->field, s.water_rect);
+    } else if (s.tool == TerrainTool::Paint) {
         before = capture_patch_from(s.data, s.data->heights(), s.start_splat0, s.start_splat1, IRect{}, s.splat_rect);
         after = capture_patch(s.data, IRect{}, s.splat_rect);
     } else {
@@ -198,7 +248,17 @@ void TerrainPanel::terrain_push_whole_(const std::string& label, const std::shar
 
 void TerrainPanel::terrain_apply_undo_(bool redo) {
     const TerrainPatch* p = redo ? terrain_undo_.redo() : terrain_undo_.undo();
-    if (p != nullptr && !apply_patch(*p)) app_.log_warn("Terrain undo skipped: the terrain was resized or removed since");
+    // The field goes in too, so a water stroke undoes with the rest. A terrain removed since
+    // leaves it null, and apply_patch() then restores only the texels it can.
+    HeightmapTerrain* live = terrain_live_();
+    toy::world::TerrainField* field = nullptr;
+    if (live != nullptr) {
+        live->sync_field();
+        field = &live->field;
+    }
+    if (p != nullptr && !apply_patch(*p, field)) {
+        app_.log_warn("Terrain undo skipped: the terrain was resized or removed since");
+    }
 }
 
 // =================================================================================
@@ -331,6 +391,42 @@ void TerrainPanel::terrain_edit_component_(const std::string& label, const std::
     app_.instances_panel_->edit_component_(terrain_object_, comp, label, merge);
 }
 
+EditResult TerrainPanel::draw_terrain_inspector_header_(imm::Context& ctx, ObjectId id) {
+    using I = imm::Icon;
+    EditResult r;
+    const glm::vec4 dim = ctx.style.text_dim;
+
+    ctx.paragraph("A height grid you sculpt and paint. Its shape and paint live in PNGs beside the "
+                  "scene, not in the scene file -- Ctrl S writes them.", &dim);
+
+    coopa::scene::SceneObject* live = app_.sync_.live(id);
+    auto* t = live ? live->get_component<HeightmapTerrain>() : nullptr;
+    if (t != nullptr && t->mode == toy::world::TerrainMode::Heightmap && t->data != nullptr) {
+        const HeightmapGeometry& g = t->data->geometry();
+        char buf[192];
+        std::snprintf(buf, sizeof(buf), "%.0f x %.0f m, %d samples a side (%.2f m apart)", g.size.x, g.size.y,
+                      g.resolution, t->data->cell().x);
+        ctx.label_dim(buf);
+        int wet = 0;
+        for (int ty = 0; ty < t->field.geometry().tiles_y; ++ty) {
+            for (int tx = 0; tx < t->field.geometry().tiles_x; ++tx) {
+                if (t->field.water_at(glm::ivec2(tx, ty)).wet()) ++wet;
+            }
+        }
+        if (wet > 0) {
+            std::snprintf(buf, sizeof(buf), "%d tiles under water", wet);
+            ctx.label_dim(buf);
+        }
+        if (t->data->dirty_on_disk()) ctx.label_dim("Unsaved changes (Ctrl S)");
+    }
+
+    const bool can_edit = !app_.playing() && !app_.asset_view_() && is_terrain_object_(id);
+    if (ctx.button("Edit Terrain", -1, can_edit, I::Terrain)) enter_terrain_mode_(id);
+    ctx.tooltip("Edit Terrain\nRaise, smooth, flatten, paint layers and flood water, with brushes "
+                "sized in metres");
+    return r;
+}
+
 void TerrainPanel::draw_terrain_tool_panel_(imm::Context& ctx) {
     using I = imm::Icon;
     HeightmapTerrain* t = terrain_live_();
@@ -361,6 +457,23 @@ void TerrainPanel::draw_terrain_tool_panel_(imm::Context& ctx) {
         if (terrain_brush_.tool == TerrainTool::SetHeight) {
             ctx.drag_float("Target Height (m)", &terrain_brush_.target_height, 0.1f, 0.0f, t->data->geometry().height);
             ctx.label_dim("Ctrl-click the terrain to pick a height.");
+        }
+        if (terrain_brush_.tool == TerrainTool::Water) {
+            const std::vector<std::string> k_kinds = {"Lake", "Ocean", "River"};
+            int kind = terrain_brush_.water_kind == toy::world::WaterKind::Ocean   ? 1
+                       : terrain_brush_.water_kind == toy::world::WaterKind::River ? 2
+                                                                                   : 0;
+            if (ctx.combo("Kind", &kind, k_kinds)) {
+                terrain_brush_.water_kind = kind == 1 ? toy::world::WaterKind::Ocean
+                                            : kind == 2 ? toy::world::WaterKind::River
+                                                        : toy::world::WaterKind::Lake;
+            }
+            ctx.tooltip("Kind\nLake: still water at the level you set.\n"
+                        "Ocean: the sea -- still, and marked as the sea for gameplay.\n"
+                        "River: flowing water, drawn with its own current and lighter waves");
+            ctx.drag_float("Water Level (m)", &terrain_brush_.water_level, 0.1f, 0.0f,
+                           t->data->geometry().height);
+            ctx.label_dim("The surface height, not a depth. Ctrl drains instead of flooding.");
         }
         if (terrain_brush_.tool == TerrainTool::Noise) {
             ctx.drag_float("Noise Scale (m)", &terrain_brush_.noise_scale, 0.1f, 1.0f, 500.0f);

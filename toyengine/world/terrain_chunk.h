@@ -52,7 +52,7 @@
 #include <vector>
 
 
-#include <toyengine/world/terrain_sampler.h>
+#include <toyengine/world/terrain_params.h>
 #include <toyengine/world/tile_map_data.h>
 #include <toyengine/world/tile_mesh_library.h>
 
@@ -69,6 +69,10 @@ class Allocator;
 
 namespace toy {
 namespace world {
+
+/// Sampling a chunk straight from a generated map is the map's side of the bridge
+/// (toyengine/mapgen/terrain_sampler.h); only the overload below names it, by reference.
+class TerrainSampler;
 
 /**
  * @struct ChunkMeshData

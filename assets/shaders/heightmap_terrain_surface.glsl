@@ -87,7 +87,7 @@ void gfx_surface_fragment(inout GfxSurface s) {
     vec4 w0 = texture(u_splat0, suv);
     vec4 w1 = texture(u_splat1, suv);
     float w[8] = float[](w0.r, w0.g, w0.b, w0.a, w1.r, w1.g, w1.b, w1.a);
-    int count = clamp(gfx_world.terrain[slot].dims.z, 1, 8);
+    int count = clamp(gfx_world.terrain[slot].dims.z, 1, GFX_TERRAIN_SPLAT_LAYERS);
     float total = 0.0;
     for (int i = 0; i < count; ++i) total += w[i];
     if (total < 1e-4) { w[0] = 1.0; total = 1.0; }

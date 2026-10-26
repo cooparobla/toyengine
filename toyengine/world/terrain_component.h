@@ -51,22 +51,32 @@
 #include <unordered_map>
 #include <vector>
 
-#include <coopa/maps/map_generator.h>
 #include <coopa/scene/scene_object.h>
-#include <coopa/maps/map_presets.h>
 
 #include <gfxcoopa/engine/components/mesh_renderer.h>
 
 #include <optional>
 
+#include <coopa/debug/logger.h>
+#include <coopa/job/engine.h>
+#include <coopa/job/handle.h>
+#include <coopa/maps/map_config.h>   // MapConfig, for the authored `generator:` block above
+
 #include <toyengine/world/terrain_chunk.h>
+#include <toyengine/world/heightmap_store.h>
+#include <toyengine/world/terrain_field.h>
 #include <toyengine/world/tile_map_data.h>
 #include <toyengine/world/tile_water.h>
-#include <toyengine/world/terrain_generator.h>
 #include <toyengine/water/water_body.h>
 
 namespace toy {
 namespace world {
+
+struct HeightmapTerrainRuntime;
+
+/// The per-tile view of an applied map (toyengine/mapgen/terrain_sampler.h). Only named here by
+/// shared_ptr, so a terrain's header stays clear of mapcoopa.
+class TerrainSampler;
 
 /**
  * @enum ChunkState
@@ -245,7 +255,15 @@ class TerrainComponent : public coopa::scene::Component {
 public:
     using SkinnedMeshSource = coopa::gfx::engine::data::SkinnedMeshSource;
 
-    TerrainComponent() : logger_("terrain") {}
+    /**
+     * @brief Out of line, not inline, on purpose.
+     *
+     * `runtime` is a unique_ptr to a type this header only forward-declares, and an inline
+     * constructor has to be able to destroy already-built members if a later one throws -- which
+     * needs that type complete. Defining both here would put the system's header on every
+     * translation unit that merely constructs a terrain.
+     */
+    TerrainComponent();
 
     /**
      * @brief Cancels and WAITS FOR every in-flight chunk job before letting anything go.
@@ -265,7 +283,23 @@ public:
      */
     ~TerrainComponent() override;
 
-    std::string type_name() const override { return "TileTerrain"; }
+    /**
+     * @brief The component's name in scene YAML, which follows `mode`.
+     *
+     * One C++ type serves both modes; the two names are what scenes, the editor's schemas and
+     * the save path already speak, so they keep working untouched.
+     */
+    std::string type_name() const override {
+        return mode == TerrainMode::Heightmap ? "HeightmapTerrain" : "TileTerrain";
+    }
+
+    /**
+     * @brief Which model this terrain carries its shape in -- the one switch the rest reads.
+     *
+     * `Tiles` uses `params`, `tile_set` and the stored `.tiles`; `Heightmap` uses `geometry`,
+     * `layers` and the PNG sidecars. The fields of the other mode are inert, not invalid.
+     */
+    TerrainMode mode = TerrainMode::Tiles;
 
     // ------------------------------------------------------------------
     // Authored configuration -- everything a scene YAML sets.
@@ -284,7 +318,15 @@ public:
      * (map_yaml.h's names; older scenes' flat keys -- `seed`, `shape`, `sea_level`... -- still
      * load into it). Only a bake reads it: the tiles are the world from then on.
      */
-    coopa::maps::MapConfig generator = default_generator();
+    /**
+     * @brief The `generator:` block this terrain was authored with, as parsed.
+     *
+     * Not what generates: a toy::mapgen::MapGeneratorComponent owns generation and is
+     * synthesised beside the terrain from this block (toyengine/scene/register.cpp). The field
+     * is kept because the editor's World Generator reads it back to tell when a re-parse has
+     * landed, and it is written to the scene file as the terrain's own key.
+     */
+    coopa::maps::MapConfig generator;
 
     // --- The tile set: the template every column is built from (see tile_topology.h) ---
 
@@ -333,6 +375,33 @@ public:
     coopa::gfx::engine::components::PBRMaterial material;
 
     /**
+     * @brief The surfaces this terrain can wear, and the vocabulary both modes name them in.
+     *
+     * A heightmap tile blends them by the splat weights painted over it; a tiles-mode tile names
+     * one per face through its 4-bit surface nibble. So a brush, a scatter mask and a gameplay
+     * query all mean one index, whichever mode they are looking at. Empty in Tiles mode means
+     * the built-in set (`builtin_tile_layers()` in tile_types.h), which is what makes a tile
+     * world with no `layers:` look as it always has.
+     *
+     * At most `k_terrain_layer_count`; only the first `k_heightmap_layer_count` can be painted
+     * by weight, which is what two RGBA8 splat maps hold.
+     */
+    std::vector<TerrainLayer> layers;
+
+    /**
+     * @brief The layers this terrain actually wears.
+     *
+     * `layers` when a scene authored any, and the built-in tile set otherwise -- which is what an
+     * empty list MEANS on a tile world, not an absence. Anything resolving a layer must go
+     * through here rather than reading `layers` directly, or a tile terrain that never wrote the
+     * key looks like it has no surfaces at all.
+     */
+    const std::vector<TerrainLayer>& effective_layers() const;
+
+    /** @brief The index of the layer called `name`, or -1 if this terrain has no such layer. */
+    int layer_index(const std::string& name) const;
+
+    /**
      * @brief How the terrain's water looks and behaves -- the `water:` block, the same keys as a
      *        WaterBody (waves, foam, clarity, flow...). Every chunk's water surfaces copy it
      *        (water::copy_water_settings()); rivers take it with calmer waves.
@@ -347,6 +416,62 @@ public:
 
     /** @brief The terrain's stock water look: small waves for a world of one-metre tiles. */
     static water::WaterBody default_water_look();
+
+    // ------------------------------------------------------------------
+    // Heightmap mode's authored half (`mode: heightmap`). Inert in Tiles mode.
+    // ------------------------------------------------------------------
+
+    /** @brief Size, height, chunk size and sample resolution, in metres and texels. */
+    HeightmapGeometry geometry;
+
+    /** @brief The procedural start used when the heightmap file is missing. */
+    HeightmapGenerate generate;
+
+    std::string heightmap;   ///< The height PNG, as written in the scene (relative to it).
+    std::string splat0;      ///< Layers 0-3 in RGBA.
+    std::string splat1;      ///< Layers 4-7.
+
+    /**
+     * @brief Screen-space tessellation of the shared chunk patch: detail near the camera.
+     */
+    struct Tessellation {
+        bool  enabled = true;
+        float edge_pixels = 8.0f;     ///< Target triangle edge on screen: detail falls off with distance by itself.
+        float max_factor = 64.0f;     ///< Cap on splits per patch edge (clamped to the device's limit).
+        float max_distance = 0.0f;    ///< "Detail distance": beyond, the base patch only. 0 = the view distance.
+    } tessellation;
+
+    /// Quads per chunk side before tessellation (the far-away shape). 0 = automatic: 4 with
+    /// tessellation (it adds the near detail), 32 on a device without.
+    int patch_resolution = 0;
+
+    /// Chunks are kept only within this many metres of the camera. < 0 (`auto`, the default):
+    /// the main camera's far clip -- everything it could draw; frustum culling does the rest.
+    /// A number is a hard cap: a top-down or close-camera game where only nearby ground is ever
+    /// seen, or a very large terrain, never pays for far chunks (draws, shadows, gather).
+    float view_distance = -1.0f;
+
+    int  layer_texture_size = 1024; ///< Texels per side every layer texture is resized to.
+    bool deep_snow = false;         ///< Deep snow (and its trenches) piles on flat ground when it snows.
+    bool puddles = true;            ///< Rain gathers in hollows.
+    bool cast_shadows = true;
+
+    /** @brief Where the height and splat PNGs are read from and saved to; the parser resolves it. */
+    HeightmapFiles files;
+    std::vector<std::string> layer_albedo_paths; ///< Resolved per layer (empty = none).
+    std::vector<std::string> layer_normal_paths;
+
+    /** @brief The live height plane (shared, see heightmap_store.h). Null in Tiles mode. */
+    std::shared_ptr<HeightmapData> data;
+
+    /** @brief World position of the grid's (0, 0) corner at height 0 (the owner's position). */
+    glm::vec3 origin() const;
+
+    /** @brief World-space query handle over the height plane; falsy in Tiles mode. */
+    HeightmapView view() const { return HeightmapView{data.get(), origin()}; }
+
+    /** @brief Runtime state HeightmapTerrainSystem attaches; opaque here. */
+    std::unique_ptr<HeightmapTerrainRuntime> runtime;
 
     /**
      * @brief Chunk meshing jobs submitted per frame.
@@ -426,13 +551,38 @@ public:
     std::shared_ptr<TileMapData> tiles;
 
     /**
+     * @brief The tiles as the unified field (terrain_field.h): shape, layers and water in the
+     *        vocabulary both terrain modes share.
+     *
+     * A view over `tiles`, not a second copy -- the records are the same memory. sync_field()
+     * brings it in step with `params` and `tiles`; TerrainSystem and the scene parser call it.
+     */
+    TerrainField field;
+
+    /**
+     * @brief Brings `field` in step with this terrain's authored shape, in whichever mode it is.
+     *
+     * Idempotent, and cheap when nothing moved.
+     */
+    void sync_field();
+
+    /** @brief The field plus this terrain's world origin -- what GroundProbe and scatter read. */
+    TerrainFieldView field_view() const;
+
+    /**
      * @brief Bakes the world when the tiles need it (first use with no file, or a Regenerate):
      *        generates the mapcoopa map off the calling thread, then fills the tiles from it.
      *        Idempotent; a terrain whose tiles loaded from a file never generates anything.
      *
      * @param jobs The shared JobEngine, or null to run inline on the calling thread.
      */
-    void begin_generation(coopa::job::JobEngine* jobs);
+    /**
+     * @brief Remembers the job engine, for draining chunk jobs in the destructor.
+     *
+     * Generating a world is toy::mapgen::MapGeneratorComponent's; this is only the handle the
+     * chunk pipeline needs, and it outlives any bake by the whole life of the scene.
+     */
+    void set_jobs(coopa::job::JobEngine* jobs) { jobs_ = jobs; }
 
     /**
      * @brief Advances a bake: builds the sampler from a finished map, runs the bake job, and
@@ -440,16 +590,32 @@ public:
      *
      * @return True on the frame the baked tiles land.
      */
-    bool poll_generation();
+
 
     /** @brief True while a bake (map generation + fill) is in flight. */
-    bool baking() const { return generator_ != nullptr || bake_job_ != nullptr; }
+    /**
+     * @brief True while a map is being generated for this terrain, or applied to it.
+     *
+     * Set by toy::mapgen::MapGeneratorSystem. The terrain reports its own state without knowing
+     * what produces it, which is what lets the editor show "Regenerating..." unchanged.
+     */
+    bool baking() const { return baking_; }
+
+    /** @brief Set by the map generator system while it works on this terrain. */
+    bool baking_ = false;
 
     /** @brief True once there are tiles and the tile sets are baked -- i.e. chunks can build. */
     bool is_ready() const { return tiles && !tiles->empty() && library_.is_baked(); }
 
     /** @brief The map sampler from the last bake (built once a bake has run this session). */
-    const TerrainSampler& sampler() const { return sampler_; }
+    /**
+     * @brief The map last applied to this terrain, or null if none ever was.
+     *
+     * Shared with the toy::mapgen::MapGeneratorComponent that applied it, so gameplay can read
+     * the world behind the ground -- biomes, regions, countries, rivers, settlements -- long
+     * after the bake. A terrain sculpted or imported rather than generated simply has none.
+     */
+    std::shared_ptr<const TerrainSampler> applied_map;
 
     // --- Gameplay queries (world space; owner thread) ---
 
@@ -600,6 +766,10 @@ public:
     void release_retired_collision(std::uint64_t frame, std::uint64_t keep_frames);
 
 private:
+    /// sync_field()'s Heightmap half: the field over `data` plus a record plane for the water,
+    /// biome and climate a smooth terrain now also carries.
+    void sync_heightmap_field_();
+
     /// Bakes every loaded piece and maps kinds onto styles. A piece that failed to load is
     /// reported once and left to TileMeshLibrary::finish_styles()'s fallbacks.
     void bake_styles_();
@@ -609,24 +779,10 @@ private:
     /// Starts a settle over `changed` and queues it for TerrainSystem to spend the budget on.
     void queue_settle_(const IRect& changed);
 
-    coopa::debug::Logger logger_; /**< Named "terrain"; MapGenerator logs one line per stage. */
+    coopa::debug::Logger logger_; /**< Named "terrain": the tile sets and the chunk pipeline log through it. */
     coopa::job::JobEngine* jobs_ = nullptr; /**< Non-owning; only for draining jobs in the destructor. */
     bool warned_no_tile_set_ = false; /**< Latches the "tile set failed" message to one line. */
 
-    coopa::maps::MapConfig                        map_config_;
-    std::unique_ptr<coopa::maps::MapGenerator>    generator_; /**< Released once its graph is moved out. */
-    coopa::maps::MapTask                          task_;      /**< Declared AFTER generator_ -- see begin_generation(). */
-
-    /// The bake request (TileMapData::bake_requests()) last started, so each is baked once.
-    std::uint64_t started_bake_request_ = ~std::uint64_t{0};
-    /// The in-flight fill: the job writes `baked`, poll_generation() hands it to `tiles`.
-    struct BakeJob {
-        TileMapData baked;
-    };
-    std::shared_ptr<BakeJob>  bake_job_;
-    coopa::job::JobHandle     bake_handle_;
-
-    TerrainSampler  sampler_;
     TileMeshLibrary library_;
 
     std::vector<std::array<coopa::asset::AssetHandle<SkinnedMeshSource>, k_tile_piece_count>> style_sources_;

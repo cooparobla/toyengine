@@ -28,57 +28,17 @@
 
 #include <glm/glm.hpp>
 
+#include <toyengine/world/terrain_types.h>
+
 namespace toy {
 namespace world {
 
-/** @brief Paint layers a terrain carries: two RGBA8 splat maps, one channel each. */
-inline constexpr int k_heightmap_layer_count = 8;
-
 /**
- * @struct IRect
- * @brief A half-open texel rectangle [x0, x1) x [y0, y1); empty when either extent is <= 0.
+ * @brief The spelling the HeightmapTerrain component and its parser use for a surface layer.
+ *
+ * One authored layer, shared by both terrain modes -- see toyengine/world/terrain_types.h.
  */
-struct IRect {
-    int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
-
-    bool empty() const { return x1 <= x0 || y1 <= y0; }
-    int width() const { return std::max(0, x1 - x0); }
-    int height() const { return std::max(0, y1 - y0); }
-
-    /** @brief Grows this rectangle to cover `o` too (an empty side is ignored). */
-    void include(const IRect& o) {
-        if (o.empty()) return;
-        if (empty()) { *this = o; return; }
-        x0 = std::min(x0, o.x0); y0 = std::min(y0, o.y0);
-        x1 = std::max(x1, o.x1); y1 = std::max(y1, o.y1);
-    }
-
-    /** @brief This rectangle clipped to [0, w) x [0, h). */
-    IRect clipped(int w, int h) const {
-        IRect r{std::max(0, x0), std::max(0, y0), std::min(w, x1), std::min(h, y1)};
-        if (r.empty()) return IRect{};
-        return r;
-    }
-
-    bool operator==(const IRect& o) const { return x0 == o.x0 && y0 == o.y0 && x1 == o.x1 && y1 == o.y1; }
-};
-
-/**
- * @struct HeightmapLayer
- * @brief One paint layer's look: its textures, how they tile, and how the surface responds.
- */
-struct HeightmapLayer {
-    std::string name;
-    std::string albedo;            ///< Texture path (sRGB); empty paints the flat `tint`.
-    std::string normal;            ///< Tangent-space normal map path; empty = flat.
-    glm::vec3   tint{1.0f};        ///< Multiplies the albedo texture (or is the colour without one).
-    float       tiling = 8.0f;     ///< Metres one texture repeat covers.
-    float       roughness = 0.85f;
-    float       metallic = 0.0f;
-    float       normal_strength = 1.0f;
-    bool        triplanar = false; ///< Project on three axes on steep slopes (cliffs) instead of top-down.
-    float       triplanar_sharpness = 4.0f;
-};
+using HeightmapLayer = TerrainLayer;
 
 /**
  * @struct HeightmapGeometry

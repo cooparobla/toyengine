@@ -1,4 +1,6 @@
 #include <toyengine/world/heightmap_terrain_system.h>
+#include <toyengine/world/terrain_water_mesh.h>
+#include <toyengine/water/water_body.h>
 
 #include <algorithm>
 #include <cmath>
@@ -158,8 +160,12 @@ void HeightmapTerrainSystem::execute(coopa::scene::Scene& scene, const coopa::sc
     ++frame_;
     time_ += static_cast<double>(ctx.delta_time);
     bindings_.clear();
+    // One component type serves both modes, so the lookup returns every terrain in the scene:
+    // this system owns the heightmap ones, TerrainSystem (order 60) owns the tile ones.
     for (HeightmapTerrain* terrain : scene.get_components<HeightmapTerrain>()) {
+        if (terrain->mode != TerrainMode::Heightmap) continue;
         if (terrain->data == nullptr || terrain->owner == nullptr) continue;
+        terrain->sync_field();
         tick_(*terrain, scene, ctx);
     }
     evict_();
@@ -208,6 +214,9 @@ void HeightmapTerrainSystem::tick_(HeightmapTerrain& terrain, coopa::scene::Scen
     write_materials_(terrain, rt, cs);
     stream_chunks_(terrain, rt, scene, cs, camera_position_(terrain));
     fit_chunk_boxes_(terrain, rt);
+    // After streaming, so a chunk that arrived this frame already has its water and is not
+    // rebuilt twice.
+    refresh_water_(terrain, rt);
 
     // 5. Collider.
     update_collider_(terrain, rt, scene, ctx);
@@ -386,6 +395,53 @@ void HeightmapTerrainSystem::stream_chunks_(HeightmapTerrain& terrain, Heightmap
     }
 }
 
+void HeightmapTerrainSystem::refresh_chunk_water_(HeightmapTerrain& terrain,
+                                                  coopa::scene::SceneObject& chunk_object, int cx, int cy) {
+    ChunkWaterData still, flowing;
+    build_smooth_chunk_water(terrain.field, glm::ivec2(cx, cy), terrain.field.geometry().chunk_tiles,
+                             terrain.params.river_wave_scale, still, flowing);
+
+    for (int pass = 0; pass < 2; ++pass) {
+        const bool river = pass == 1;
+        const ChunkWaterData& data = river ? flowing : still;
+        const char* name = river ? "river" : "water";
+        coopa::scene::SceneObject* existing = chunk_object.find_child(name);
+
+        if (data.empty()) {
+            // Water that has drained takes its body with it, rather than lingering as a sheet.
+            if (existing != nullptr) chunk_object.detach_child(existing);
+            continue;
+        }
+        if (existing == nullptr) {
+            auto object = std::make_unique<SceneObject>(name);
+            auto* tc = object->add_component<TransformComponent>();
+            // add_child() does not link transforms; the water is placed in the chunk's space.
+            if (auto* parent = chunk_object.get_transform()) tc->set_parent_transform(&parent->transform());
+            auto* body = object->add_component<water::WaterBody>();
+            water::copy_water_settings(terrain.water_look, *body);
+            body->mode = river ? water::WaterMode::Flowing : water::WaterMode::Planar;
+            existing = chunk_object.add_child(std::move(object));
+        }
+        if (auto* body = existing->get_component<water::WaterBody>()) {
+            body->set_geometry(data.positions, data.uvs, data.indices, data.depths, data.wave_scales);
+        }
+    }
+}
+
+void HeightmapTerrainSystem::refresh_water_(HeightmapTerrain& terrain, HeightmapTerrainRuntime& rt) {
+    // The records carry the water's kind and flow, so their revision is what moves when water
+    // is painted, flooded, drained or applied from a map.
+    const std::uint64_t revision = terrain.field.cursor().tiles;
+    if (revision == rt.water_revision) return;
+    rt.water_revision = revision;
+    for (int cy = 0; cy < rt.chunk_count.y; ++cy) {
+        for (int cx = 0; cx < rt.chunk_count.x; ++cx) {
+            SceneObject* chunk = rt.chunks[static_cast<std::size_t>(cy) * rt.chunk_count.x + cx];
+            if (chunk != nullptr) refresh_chunk_water_(terrain, *chunk, cx, cy);
+        }
+    }
+}
+
 void HeightmapTerrainSystem::spawn_chunk_(HeightmapTerrain& terrain, HeightmapTerrainRuntime& rt, coopa::scene::Scene& scene,
                                           const ChunkSettings& s, int cx, int cy) {
     const HeightmapData& data = *terrain.data;
@@ -409,6 +465,8 @@ void HeightmapTerrainSystem::spawn_chunk_(HeightmapTerrain& terrain, HeightmapTe
     scene.adopt(*raw);
     rt.chunks[static_cast<std::size_t>(cy) * rt.chunk_count.x + cx] = raw;
     ++rt.live_chunks;
+    // The water over it comes with it: a chunk streaming in beside a lake should arrive wet.
+    refresh_chunk_water_(terrain, *raw, cx, cy);
 }
 
 void HeightmapTerrainSystem::destroy_chunks_(HeightmapTerrain& terrain, HeightmapTerrainRuntime& rt) {
@@ -560,6 +618,7 @@ HeightmapTerrainSystem* install_heightmap_terrain_system(coopa::scene::Scene& sc
 std::vector<HeightmapView> heightmap_views(const coopa::scene::Scene& scene) {
     std::vector<HeightmapView> out;
     for (const HeightmapTerrain* t : scene.get_components<HeightmapTerrain>()) {
+        if (t->mode != TerrainMode::Heightmap) continue;
         if (t->data != nullptr && t->owner != nullptr && t->owner->active()) out.push_back(t->view());
     }
     return out;

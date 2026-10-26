@@ -20,10 +20,11 @@
 #include <glm/glm.hpp>
 
 #include <toyengine/world/heightmap_data.h>
+#include <toyengine/world/terrain_field.h>
 
 namespace toy::editor {
 
-enum class TerrainTool { Raise = 0, Smooth, Flatten, SetHeight, Noise, Erode, Paint };
+enum class TerrainTool { Raise = 0, Smooth, Flatten, SetHeight, Noise, Erode, Paint, Water };
 
 /** @brief Display name ("Raise / Lower", ...). */
 const char* terrain_tool_name(TerrainTool t);
@@ -37,7 +38,30 @@ struct TerrainBrushSettings {
     float target_height = 10.0f;  ///< Set Height (m above the terrain's base); Flatten picks its own per stroke.
     float noise_scale = 16.0f;    ///< Noise: metres per feature.
     int   layer = 0;              ///< Paint: the layer painted.
+
+    /// Water: what the brush puts down. None drains instead of flooding.
+    toy::world::WaterKind water_kind = toy::world::WaterKind::Lake;
+    /// Water: the surface height it floods to, in metres above the terrain's base.
+    float water_level = 4.0f;
 };
+
+/**
+ * @brief Floods the tiles under the brush to `water_level` as `water_kind` -- or drains the body
+ *        they touch, inverted.
+ *
+ * Separate from terrain_dab() because water is not a texel field: it is a kind and a level per
+ * TILE (toyengine/world/terrain_field.h), and flooding runs as far as the basin does rather than
+ * stopping at the brush. So the brush only chooses the SEEDS, and the flood decides the extent --
+ * which is why the rect this returns is routinely much larger than the circle that started it.
+ *
+ * @param invert Drain the body under the brush instead of flooding.
+ * @return The tiles changed, for undo and for the chunks to rebuild their surfaces from.
+ */
+toy::world::IRect terrain_water_dab(toy::world::TerrainField& field, const TerrainBrushSettings& s,
+                                    glm::vec2 centre, bool invert);
+
+/** @brief The water over `rect`, row-major, for a patch. */
+std::vector<toy::world::WaterCell> capture_water(const toy::world::TerrainField& field, const toy::world::IRect& rect);
 
 /** @brief The dab weight profile: 1 at the centre, 0 at the rim; `falloff` softens the edge. */
 float terrain_falloff(float d01, float falloff);
@@ -61,6 +85,15 @@ struct TerrainPatch {
     std::vector<float> heights;
     toy::world::IRect splat_rect;    ///< Empty: no splat texels.
     std::vector<std::uint8_t> splat0, splat1;
+    /**
+     * @brief The water over a rectangle of TILES, row-major; empty rect means no water in it.
+     *
+     * Its own rect because water is per tile rather than per texel, and because a flood reaches
+     * well past the brush that seeded it -- the patch has to cover wherever the water actually
+     * went, not where the stroke was. Restored through the field (see apply_patch()).
+     */
+    toy::world::IRect water_rect;
+    std::vector<toy::world::WaterCell> water;
     /// Whole-terrain patches (import, generate): the grid dimensions they were taken at. A patch
     /// whose dimensions no longer match the data (the terrain was resized since) is not applied.
     int nx = 0, ny = 0, splat_size = 0;
@@ -78,7 +111,7 @@ TerrainPatch capture_patch_from(const std::shared_ptr<toy::world::HeightmapData>
                                 const toy::world::IRect& height_rect, const toy::world::IRect& splat_rect);
 
 /** @brief Writes a patch back (marking its texels dirty). False when the data is gone or resized. */
-bool apply_patch(const TerrainPatch& patch);
+bool apply_patch(const TerrainPatch& patch, toy::world::TerrainField* field = nullptr);
 
 } // namespace toy::editor
 

@@ -13,7 +13,8 @@
 #include <coopa/maps/map_renderer.h>
 #include <coopa/maps/map_yaml.h>
 #include <toyengine/world/terrain_component.h>
-#include <toyengine/world/terrain_generator.h>
+#include <toyengine/mapgen/map_generator_component.h>
+#include <toyengine/mapgen/terrain_generator.h>
 
 namespace toy {
 namespace editor {
@@ -211,16 +212,23 @@ void WorldGeneratorPanel::open_world_generator(ObjectId id) {
     }
     const Node comp = app_.doc_.find(id)->at("components").as_seq()[static_cast<std::size_t>(ci)];
     wgen_object_ = id;
-    wgen_config_ = toy::world::generator_config_from_node(comp);
+
+    // The settings live on the terrain's MapGenerator component (toyengine/mapgen) when it has
+    // one, and on the terrain itself in a scene written before generation moved out. Reading
+    // whichever exists is what lets this window open on either without a migration step.
+    const int gi = app_.doc_.find_component(id, "MapGenerator");
+    const Node source = gi >= 0 ? app_.doc_.find(id)->at("components").as_seq()[static_cast<std::size_t>(gi)] : comp;
+    wgen_config_ = toy::mapgen::generator_config_from_node(source);
     const toy::world::TerrainParams defaults;
-    wgen_world_tiles_ = get_int(comp, "world_tiles", 0);
+    wgen_world_tiles_ = get_int(source, "world_tiles", 0);
     if (wgen_world_tiles_ <= 0) {
-        wgen_world_tiles_ = wgen_config_.grid_size * get_int(comp, "tiles_per_grid_unit", defaults.tiles_per_grid_unit);
+        wgen_world_tiles_ = wgen_config_.grid_size * get_int(source, "tiles_per_grid_unit", defaults.tiles_per_grid_unit);
     }
+    wgen_height_scale_ = get_float(source, "height_scale", defaults.height_scale);
+    wgen_water_inset_ = get_float(source, "water_inset", defaults.water_inset);
+    wgen_river_inset_ = get_float(source, "river_inset", defaults.river_inset);
+    // Tiling stays the terrain's: it is what the tiles ARE, not how the world was made.
     wgen_tile_size_ = get_float(comp, "tile_size", defaults.tile_size);
-    wgen_height_scale_ = get_float(comp, "height_scale", defaults.height_scale);
-    wgen_water_inset_ = get_float(comp, "water_inset", defaults.water_inset);
-    wgen_river_inset_ = get_float(comp, "river_inset", defaults.river_inset);
     wgen_planet_ = get_bool(comp, "planet", false);
     wgen_face_tiles_ = get_int(comp, "face_tiles", defaults.face_tiles);
     wgen_gravity_ = get_float(comp, "gravity", 9.81f);
@@ -246,8 +254,9 @@ void WorldGeneratorPanel::wgen_tick_preview_() {
     if (wgen_regen_object_ != 0) {
         coopa::scene::SceneObject* live = app_.sync_.live(wgen_regen_object_);
         auto* t = live ? live->get_component<toy::world::TerrainComponent>() : nullptr;
-        const bool ready = t != nullptr &&
-                           fkyaml::node::serialize(toy::world::generator_node(t->generator)) == wgen_regen_expect_ &&
+        auto* g = live ? live->get_component<toy::mapgen::MapGeneratorComponent>() : nullptr;
+        const bool ready = t != nullptr && g != nullptr &&
+                           fkyaml::node::serialize(toy::mapgen::generator_node(g->config)) == wgen_regen_expect_ &&
                            !t->baking() && !app_.tile_mode_panel_->tile_regen_data_;
         if (ready) {
             app_.tile_mode_panel_->tile_regenerate_(wgen_regen_object_);
@@ -261,30 +270,63 @@ void WorldGeneratorPanel::wgen_tick_preview_() {
 
 void WorldGeneratorPanel::wgen_apply_() {
     const ObjectId id = wgen_object_;
-    const int ci = app_.doc_.find_component(id, "TileTerrain");
-    if (ci < 0) return;
-    Node comp = app_.doc_.find(id)->at("components").as_seq()[static_cast<std::size_t>(ci)];
-    for (const char* key : toy::world::k_legacy_generator_keys) erase_key(comp, key);
+    if (app_.doc_.find_component(id, "TileTerrain") < 0) return;
     wgen_config_.image_size = coopa::maps::derive_image_size(wgen_config_);
-    const Node gen = toy::world::generator_node(wgen_config_);
-    if (gen.get_value<Node::mapping_type>().empty()) erase_key(comp, "generator");
-    else comp["generator"] = gen;
-    comp["world_tiles"] = Node(static_cast<int64_t>(wgen_world_tiles_));
-    if (wgen_planet_) {
-        comp["planet"] = Node(true);
-        comp["face_tiles"] = Node(static_cast<int64_t>(wgen_face_tiles_));
-        comp["gravity"] = make_float(wgen_gravity_);
-    } else {
-        // A flat terrain is written exactly as before the planet mode existed.
-        erase_key(comp, "planet");
-        erase_key(comp, "face_tiles");
-        erase_key(comp, "gravity");
-    }
-    comp["tile_size"] = make_float(wgen_tile_size_);
-    comp["height_scale"] = make_float(wgen_height_scale_);
-    comp["water_inset"] = make_float(wgen_water_inset_);
-    comp["river_inset"] = make_float(wgen_river_inset_);
-    app_.apply_(app_.doc_.set_component(id, ci, comp, "World Generator"));
+    const Node gen = toy::mapgen::generator_node(wgen_config_);
+
+    // ONE undoable edit across BOTH components. The world goes on the MapGenerator component --
+    // which is what generates it -- and the terrain keeps only its tiling. A scene written
+    // before generation moved out has the block on its terrain, so applying once also migrates
+    // it; the engine would have synthesised the same component at load anyway.
+    //
+    // One edit() rather than two set_component() calls, because two would be two undo steps:
+    // Ctrl Z would strip the world off the generator and leave the terrain mid-migration.
+    app_.apply_(app_.doc_.edit("World Generator", [&](Node&) -> Change {
+        Node* obj = app_.doc_.find(id);
+        if (obj == nullptr) return {};
+        if (!obj->contains("components")) (*obj)["components"] = Node::sequence();
+        auto& seq = (*obj)["components"].as_seq();
+
+        const int ci = app_.doc_.find_component(id, "TileTerrain");
+        if (ci < 0) return {};
+        Node comp = seq[static_cast<std::size_t>(ci)];
+        for (const char* key : toy::mapgen::k_legacy_generator_keys) erase_key(comp, key);
+        erase_key(comp, "generator");
+        erase_key(comp, "world_tiles");
+        erase_key(comp, "height_scale");
+        erase_key(comp, "water_inset");
+        erase_key(comp, "river_inset");
+        comp["tile_size"] = make_float(wgen_tile_size_);
+        if (wgen_planet_) {
+            comp["planet"] = Node(true);
+            comp["face_tiles"] = Node(static_cast<int64_t>(wgen_face_tiles_));
+            comp["gravity"] = make_float(wgen_gravity_);
+        } else {
+            // A flat terrain is written exactly as before the planet mode existed.
+            erase_key(comp, "planet");
+            erase_key(comp, "face_tiles");
+            erase_key(comp, "gravity");
+        }
+        seq[static_cast<std::size_t>(ci)] = comp;
+
+        const int gi = app_.doc_.find_component(id, "MapGenerator");
+        Node generator = gi >= 0 ? seq[static_cast<std::size_t>(gi)] : Node::mapping();
+        generator["type"] = Node("MapGenerator");
+        for (const char* key : toy::mapgen::k_legacy_generator_keys) erase_key(generator, key);
+        if (gen.get_value<Node::mapping_type>().empty()) erase_key(generator, "generator");
+        else generator["generator"] = gen;
+        generator["world_tiles"] = Node(static_cast<int64_t>(wgen_world_tiles_));
+        generator["height_scale"] = make_float(wgen_height_scale_);
+        generator["water_inset"] = make_float(wgen_water_inset_);
+        generator["river_inset"] = make_float(wgen_river_inset_);
+        if (wgen_planet_) generator["sphere"] = Node(true);
+        else erase_key(generator, "sphere");
+        if (gi >= 0) seq[static_cast<std::size_t>(gi)] = generator;
+        else seq.push_back(generator);
+
+        return {ChangeScope::Object, id};
+    }));
+
     wgen_regen_object_ = id;
     wgen_regen_expect_ = fkyaml::node::serialize(gen);
     wgen_regen_frames_ = 0;
@@ -548,7 +590,7 @@ void WorldGeneratorPanel::draw_world_generator_modal_(imm::Context& ctx) {
         ctx.label(" ", &dim);
     }
     if (ctx.button("Reset to Defaults", 180, true, I::Restart)) {
-        wgen_config_ = toy::world::default_generator();
+        wgen_config_ = toy::mapgen::default_generator();
         const toy::world::TerrainParams defaults;
         wgen_world_tiles_ = wgen_config_.grid_size * defaults.tiles_per_grid_unit;
         wgen_tile_size_ = defaults.tile_size;

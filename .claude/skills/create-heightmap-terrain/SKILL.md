@@ -5,6 +5,11 @@ description: Add a sculptable, paintable heightmap terrain to a toyengine scene 
 
 # Add a heightmap terrain
 
+One terrain component, two modes. This is `mode: heightmap` -- written `HeightmapTerrain`, or
+`Terrain` with `mode: heightmap`. It can also carry **water** now (a kind and a level per tile,
+painted in Terrain Mode) and have a generated **MapGenerator** world applied to it, which writes
+its heights, layers and water in one go -- see `assets/scenes/terrain/unified_terrain_demo`.
+
 Copy from `assets/scenes/terrain/heightmap_terrain_demo/scene.yaml` (a 1 km valley: seven layers,
 grass / pines / bushes / boulders, a lake, a player). Component and keys:
 `toyengine/world/heightmap_terrain.h`; how it draws, collides and streams:

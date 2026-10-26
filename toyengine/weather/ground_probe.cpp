@@ -10,8 +10,7 @@
 #include <toyengine/render/visibility.h>
 #include <toyengine/scene/runtime_object.h>
 #include <toyengine/weather/weather_surface.h>
-#include <toyengine/world/heightmap_terrain.h>
-#include <toyengine/world/heightmap_terrain_system.h>
+#include <toyengine/world/terrain_views.h>
 
 namespace toy {
 namespace weather {
@@ -88,22 +87,22 @@ void GroundProbe::update(coopa::scene::Scene& scene, const glm::vec3& eye, float
         bounds_timer_ -= dt;
         if (bounds_timer_ <= 0.0f) {
             probe_bounds_(scene, n);
-            // Heightmap terrains: no physics in edit mode, and their chunk boxes are no surface
-            // (they are runtime objects, skipped above) -- read their grids directly instead.
-            const std::vector<world::HeightmapView> terrains = world::heightmap_views(scene);
-            for (const world::HeightmapView& t : terrains) {
-                const coopa::scene::SceneObject* owner = terrain_owner_(scene, t);
-                const bool splashes = owner != nullptr && takes_splashes(owner);
+            // Terrains are read from their data, not from their geometry: there is no physics in
+            // edit mode, and a chunk's bounding box top is not its surface (probe_bounds_ skips
+            // terrain geometry for that reason). This is the one place the ground under a tile
+            // world and under a heightmap is sampled the same way.
+            for (const world::TerrainSceneView& t : world::terrain_views(scene)) {
+                const bool splashes = t.owner != nullptr && takes_splashes(t.owner);
                 for (int j = 0; j < n; ++j) {
                     for (int i = 0; i < n; ++i) {
                         const glm::vec3 p((static_cast<float>(origin_.x + i) + 0.5f) * cell_size,
                                           (static_cast<float>(origin_.y + j) + 0.5f) * cell_size, 0.0f);
-                        if (!t.contains(p)) continue;
+                        if (!t.view.contains(p)) continue;
                         const size_t k = static_cast<size_t>(j) * n + i;
-                        const float h = t.height(p);
+                        const float h = t.view.height(p);
                         if (std::isnan(heights_[k]) || h > heights_[k]) {
                             heights_[k] = h;
-                            normals_[k] = t.normal(p);
+                            normals_[k] = t.view.normal(p);
                             splash_[k] = splashes ? 1 : 0;
                         }
                         if (std::isnan(sky_[k]) || h > sky_[k]) sky_[k] = h;
@@ -238,6 +237,9 @@ void GroundProbe::probe_bounds_(coopa::scene::Scene& scene, int n) {
     const float size = static_cast<float>(n) * cell_size;
     const glm::vec2 lo(glm::vec2(origin_) * cell_size);
     for (MeshRenderer* mr : scene.get_components<MeshRenderer>()) {
+        // Runtime objects are skipped, which is what keeps both terrains' chunks out: their
+        // geometry is read from the field instead (see the caller), because a chunk's bounding
+        // box top stands metres above the ground it covers and would win the max() below.
         if (!mr->owner || !mr->owner->active() || toy::scene::is_runtime_object(*mr->owner)) continue;
         const auto* mesh = mr->get_mesh().get();
         auto* tc = mr->owner->get_transform();
@@ -278,13 +280,6 @@ void GroundProbe::sample_water_(const water::WaterSystem& water, const glm::vec2
             water_splash_[static_cast<size_t>(j) * n + i] = body && takes_splashes(body->owner) ? 1 : 0;
         }
     }
-}
-
-const coopa::scene::SceneObject* GroundProbe::terrain_owner_(coopa::scene::Scene& scene, const world::HeightmapView& view) {
-    for (const world::HeightmapTerrain* t : scene.get_components<world::HeightmapTerrain>()) {
-        if (t->data.get() == view.data) return t->owner;
-    }
-    return nullptr;
 }
 
 bool GroundProbe::moving_(const coopa::scene::SceneObject* obj) {

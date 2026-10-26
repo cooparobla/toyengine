@@ -1,7 +1,8 @@
 /**
  * @file terrain_scatter.h
  * @brief Foliage, trees and rocks over a HeightmapTerrain: a ParticleSystem in `scatter` mode with
- *        `shape: terrain` places mesh instances over the terrain's surface, by paint layer, slope
+ *        `shape: terrain` places mesh instances over a terrain's surface -- either mode, since it
+ *        reads the unified field, by paint layer, slope
  *        and height -- streamed in chunks around the camera so an open world never holds them all.
  *
  * ### Placement
@@ -35,7 +36,7 @@
 
 #include <toyengine/particles/particle_math.h>
 #include <toyengine/particles/particle_shape.h>
-#include <toyengine/world/heightmap_data.h>
+#include <toyengine/world/terrain_field.h>
 
 namespace toy {
 namespace particles {
@@ -81,11 +82,11 @@ public:
      *        changed or went out of range, then builds up to `budget` missing / stale chunks.
      * @param max_distance Draw distance (m); 0 = the whole terrain.
      */
-    void update(const world::HeightmapView& terrain, const TerrainScatterParams& params, const glm::vec3& camera,
+    void update(const world::TerrainFieldView& terrain, const TerrainScatterParams& params, const glm::vec3& camera,
                 float max_distance, int budget = 2);
 
     /** @brief Builds one chunk's instances (world space). Deterministic; exposed for tests. */
-    static Chunk build_chunk(const world::HeightmapView& terrain, const TerrainScatterParams& params, int cx, int cy);
+    static Chunk build_chunk(const world::TerrainFieldView& terrain, const TerrainScatterParams& params, int cx, int cy);
 
     const std::map<std::pair<int, int>, Chunk>& chunks() const { return chunks_; }
     std::size_t instance_count() const;
@@ -95,7 +96,7 @@ private:
     std::map<std::pair<int, int>, Chunk> chunks_;
     TerrainScatterParams params_;
     std::uint64_t data_uid_ = 0;
-    world::HeightmapGeometry geometry_;
+    world::TerrainFieldGeometry geometry_;
     glm::vec3 origin_{0.0f};
 };
 

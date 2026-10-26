@@ -1,11 +1,41 @@
 # toyengine/world
 
-World-scale ground. Two kinds of terrain live here, each its own component:
+World-scale ground. **One terrain component, two modes** -- `toy::world::TerrainComponent`, with
+`mode:` choosing which model it carries its shape in:
 
-- **`TileTerrain`** (formerly `Terrain`; both names load) -- a streamed 3D tile world built from a
-  [mapcoopa](../../libs/mapcoopa) `MapGraph`. Most of this file.
-- **`HeightmapTerrain`** -- a sculptable, paintable heightmap for open worlds, drawn as
-  GPU-displaced tessellated chunks. See [Heightmap terrain](#heightmap-terrain).
+| `mode:` | What it is | Drawn as |
+|---|---|---|
+| `tiles` (default) | a streamed 3D tile world of integer-height columns | a welded mesh of a tile set's pieces, per chunk. Most of this file |
+| `heightmap` | a sculptable, paintable height grid for open worlds | one shared patch per chunk, GPU-displaced and tessellated. See [Heightmap terrain](#heightmap-terrain) |
+
+Three names load, all the same component: **`Terrain`** is the unified spelling, and
+**`TileTerrain`** / **`HeightmapTerrain`** are what scenes say and what the editor shows for each
+mode. A block with no `mode:` is read from its keys (`tile_set` / `tiles` / `generator` mean
+tiles; `heightmap` / `resolution` / `size` mean heightmap), and silence means tiles -- which is
+what a bare `Terrain` has always meant. So no scene ever had to be migrated.
+
+### What the two modes share
+
+- **The data** -- [`terrain_field.h`](terrain_field.h)'s `TerrainField`: a grid of tiles where
+  each tile owns a sub-grid of heights and of layer weights. The **sub-resolution** is what
+  determines detail: one height sample per tile is the terraced world, several is the smooth one.
+  One API answers `ground_at`, `normal_at`, `layer_weight_at`, `record_at` and `water_at` in
+  either mode, which is why GroundProbe, the foliage scatter and gameplay no longer care which
+  they are standing on.
+- **The layers** -- one authored `layers:` list (up to `k_terrain_layer_count`), named the same
+  way in both modes. A heightmap tile blends them by painted splat weights; a tiles-mode tile
+  names one per face through its 4-bit surface nibble. Left empty, a tile world uses the built-in
+  set (`builtin_tile_layers()` in [`tile_types.h`](tile_types.h)) and looks exactly as it always
+  has.
+- **The water** -- a kind (None / Ocean / Lake / River), a surface **level** and a river's flow,
+  per tile. Depth is never stored; it is `level - ground`. See [Water](#water).
+
+### What generates a world is not here
+
+Map generation lives in [`toyengine/mapgen`](../mapgen/README.md). A `MapGenerator` component
+holds a [mapcoopa](../../libs/mapcoopa) world and **applies** it to a terrain -- in either mode --
+which is the same gesture as importing a heightmap PNG. A terrain keeps the applied map in
+`applied_map` so gameplay can still read the biomes, regions and rivers behind the ground.
 
 ## TileTerrain
 
@@ -55,12 +85,18 @@ rounded, with dynamic bodies dropped onto it. Its header says how to switch it t
 | [`tile_types.h`](tile_types.h) | The vocabulary: `TileFace` (the six sides), `TileKind` (the twelve atlas surfaces), `TileColumn`, `ChunkCoord`, and `variant_transform()` — the eight D4 orientations a piece is baked into. |
 | [`tile_topology.h`](tile_topology.h) | The tile classifier: `TilePiece` (the eleven pieces a tile set is made of), `WallEnd`, `classify_quadrant()`, `classify_wall_end()`, `ColumnPad` (a chunk's columns plus a one-tile neighbour skirt), and the surface blend codes. Pure functions from a column's neighbourhood to a piece and one of eight orientations. |
 | [`tile_mesh_library.h`](tile_mesh_library.h) | `TileMeshLibrary` — bakes each tile set's pieces into all eight orientations once, **derives** their section caps, and `append_styled()`s one into a chunk's buffers with a scale, a translate and an index rebase. Geometry is **copied** out of its asset handles, so a baked library is immutable and safe for concurrent readers. |
-| [`terrain_sampler.h`](terrain_sampler.h) | `TerrainParams` (the whole tiling: tile size, height step, chunk size, view radius) and `TerrainSampler` — owns the generated `MapGraph` and answers `sample(tile_x, tile_y) -> TileColumn`. Adds the point-to-cell lookup mapcoopa has no need for: a nearest-site query over a uniform bucket index. Const after `build()`, hence concurrently readable. |
+| [`terrain_field.h`](terrain_field.h) | `TerrainField` -- the unified data layer both modes answer through: the tile grid, each tile's height and layer sub-grids, the water cells, the per-plane edit cursor, and `TerrainFieldView` for world-space queries. |
+| [`terrain_types.h`](terrain_types.h) | The vocabulary both modes share: `IRect`, `TerrainMode`, `WaterKind`, and `TerrainLayer` -- one authored surface, named the same way in either mode. |
+| [`terrain_params.h`](terrain_params.h) | `TerrainParams` -- how a tile world is cut into tiles and chunks. Passed by value, so a meshing job holds its own copy. |
+| [`terrain_water.h`](terrain_water.h) | The water operations over a field: flood, drain, settle, and the resumable `WaterSettle` a frame's budget is spent on. Shared by both modes, the editor's brush and gameplay. |
+| [`terrain_water_mesh.h`](terrain_water_mesh.h) | The water surface over a **smooth** chunk: flat at the water's level, one tile past the waterline so the ground ends it, with every corner averaged by global tile coordinate so two chunks cannot crack their shared edge. |
+| [`terrain_views.h`](terrain_views.h) | Every terrain in a scene as one world-space query surface, whichever mode each is in -- what GroundProbe walks. |
+| [`terrain_sampler.h`](../mapgen/terrain_sampler.h) | `TerrainParams` (the whole tiling: tile size, height step, chunk size, view radius) and `TerrainSampler` — owns the generated `MapGraph` and answers `sample(tile_x, tile_y) -> TileColumn`. Adds the point-to-cell lookup mapcoopa has no need for: a nearest-site query over a uniform bucket index. Const after `build()`, hence concurrently readable. |
 | [`terrain_chunk.h`](terrain_chunk.h) | The mesher. `sample_chunk_columns()` reads a chunk plus a one-tile neighbour skirt; `mesh_chunk_styled()` assembles its columns into a `ChunkMeshData`; `build_chunk_collision()` turns that into a static collision mesh. Pure — no Vulkan, no Scene, no AssetManager — which is what lets it run on a worker and be tested with no device. `ChunkBuildJob` bundles one job's inputs and outputs into a single shared object. |
 | [`terrain_component.h`](terrain_component.h) | `TerrainComponent` — the scene-authored `TileTerrain` component (old name `Terrain`) (tile set, stored tiles, generator keys, tiling, collision, material) plus the long-lived state: the bake, the baked library and the chunk table, and gameplay queries (`tile_at`, `record_at`, `height_at`). Carries no per-frame logic. |
 | [`tile_map_data.h`](tile_map_data.h) | `TileRecord` (16 bytes per tile: ground height, surfaces, flags, biome, climate, water depth and flow, region / country), `TileMapData` (the stored grid: edit journal, column raycast, `.tiles` files) and `TileMapStore` (every terrain's tiles, keyed by file, surviving re-parses). |
 | [`tile_water.h`](tile_water.h) | Editing the water over the tiles: `flood_water`, `drain_water`, `settle_water` (after ground moves) and the bake's rounding rule -- all keeping water from standing over dry ground. |
-| [`terrain_generator.h`](terrain_generator.h) | The `generator:` block: mapcoopa's own config keys over its standard map (`coopa::maps::standard_config()`), only the differences written; older scenes' flat keys still load. |
+| [`terrain_generator.h`](../mapgen/terrain_generator.h) | The `generator:` block: mapcoopa's own config keys over its standard map (`coopa::maps::standard_config()`), only the differences written; older scenes' flat keys still load. |
 | [`snow_field.h`](snow_field.h) | `SnowField` — the snow trench field: a toroidal 512² grid of trench depths (unorm16, 10 cm cells) following the camera, with `stamp()` (max-combine), `refill()` and `trench_at()`. Also the CPU mirrors of the shaders' open-sky test and deep-snow height (`snow_open_sky()`, `deep_snow_depth()`). Not part of the tile world; it lives here as world-space ground state. |
 | [`snow_system.h`](snow_system.h) | The `SnowDeformer` component and `SnowSystem` (order **370**): stamps every deformer (and every Rigidbody with the weather's `snow_auto_deformers`) that stands in deep snow, refills trenches while it snows, and answers `depth_at()`. See [toyengine/weather](../weather/README.md#snow). |
 | [`terrain_system.h`](terrain_system.h) | `TerrainSystem` + `install_terrain_system()` — the streaming policy, at order **60**. Decides which chunks exist, submits their meshing jobs, uploads finished ones (with their colliders), and releases the ones the camera has left behind. |
@@ -141,7 +177,31 @@ tiles_per_grid_unit`; the world spans `world_tiles * tile_size` units) at `heigh
 Regenerate; `tile_size`, `height_step`, `water_inset`, the tile sets, chunking and collision
 apply live. The editor's **World Generator** window edits the block with a live preview.
 
-**Water.** mapcoopa decides where water is and how high (`coopa/maps/water_field.h`): the sea at
+### Water
+
+Water is a **surface over the ground**, never geometry in it. Each tile carries a `WaterCell`
+(`terrain_field.h`): a kind, the height its surface stands at, and a river's downstream octant.
+Depth is derived, `level - ground`, which is the one rule that makes the same field work over
+terraced steps and over a smooth slope.
+
+[`terrain_water.h`](terrain_water.h) is that as operations -- `flood_water`, `drain_water`,
+`settle_water` and the resumable `WaterSettle` -- shared by both modes, by the editor's water
+brush and by gameplay. Both modes build their surfaces per chunk and hand them to the water
+system as still (sea, lake) and flowing (river) `WaterBody` children, so waves, depth colour,
+shore foam, refraction, caustics and buoyancy are the water system's either way:
+
+| | tiles | heightmap |
+|---|---|---|
+| mesh | one quad per flooded tile at its terrace, `water_inset` under the top | a grid at `level`, corners averaged per tile ([`terrain_water_mesh.h`](terrain_water_mesh.h)) |
+| shoreline | where the surface meets the bank's wall -- the tile set's shape | where the surface meets the smooth ground: the terrain's own slope is the beach |
+
+**Both kinds of body over a chunk keep the same wave field.** A river and the lake it runs into
+share their seam's vertices, and the vertex stage displaces each from its own body's wave
+params -- so two different wave fields pull a shared vertex apart and the bed shows through.
+A river's own character comes from its per-vertex flow and turbulence, which agrees across a
+seam by construction.
+
+**Where the map's water comes from.** mapcoopa decides where water is and how high (`coopa/maps/water_field.h`): the sea at
 sea level; each lake at its spill level, just under the lowest point of its shore, over a basin
 (`lake_depth_m` under the surface at the shoreline, deepening by `lake_bed_grade` the further in
 it reaches); each river at its banked surface, under both banks and only ever

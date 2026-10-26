@@ -1,5 +1,8 @@
 #include <toyengine/world/terrain_component.h>
 
+// For a complete HeightmapTerrainRuntime: the constructor and destructor below destroy one.
+#include <toyengine/world/heightmap_terrain_system.h>
+
 #include <coopa/asset/asset_handle.h>
 #include <coopa/debug/logger.h>
 #include <coopa/job/engine.h>
@@ -11,7 +14,6 @@
 #include <gfxcoopa/engine/data/mesh.h>
 #include <gfxcoopa/engine/data/skinned_mesh_source.h>
 #include <physxcoopa/geometry/triangle_mesh.h>
-#include <toyengine/world/terrain_sampler.h>
 #include <toyengine/world/tile_mesh_library.h>
 #include <toyengine/world/tile_topology.h>
 #include <toyengine/world/tile_edit.h>
@@ -76,6 +78,8 @@ bool planet_raycast(const TileMapData& d, const TerrainParams& params, const glm
 } // namespace
 
 
+TerrainComponent::TerrainComponent() : logger_("terrain") {}
+
 TerrainComponent::~TerrainComponent() {
     if (jobs_ == nullptr) return;
     for (auto& entry : chunks_) {
@@ -85,11 +89,78 @@ TerrainComponent::~TerrainComponent() {
         jobs_->wait_for(handle); // ...and blocks on whatever has
         handle.close();
     }
-    if (bake_handle_.is_valid()) {
-        // The bake job reads sampler_: it must finish before the sampler goes.
-        jobs_->wait_for(bake_handle_);
-        bake_handle_.close();
+}
+
+const std::vector<TerrainLayer>& TerrainComponent::effective_layers() const {
+    if (!layers.empty()) return layers;
+    // Built once: the list is constant, and a scatter resolves a name every frame.
+    static const std::vector<TerrainLayer> k_builtin = builtin_tile_layers();
+    return k_builtin;
+}
+
+int TerrainComponent::layer_index(const std::string& name) const {
+    const std::vector<TerrainLayer>& list = effective_layers();
+    for (std::size_t i = 0; i < list.size(); ++i) {
+        if (list[i].name == name) return static_cast<int>(i);
     }
+    return -1;
+}
+
+glm::vec3 TerrainComponent::origin() const {
+    if (owner != nullptr) {
+        if (auto* tc = owner->get_transform()) return glm::vec3(tc->transform().get_world_matrix()[3]);
+    }
+    return glm::vec3(0.0f);
+}
+
+void TerrainComponent::sync_field() {
+    if (mode == TerrainMode::Heightmap) {
+        sync_heightmap_field_();
+        return;
+    }
+    if (!tiles) return;
+    TerrainFieldGeometry g;
+    g.mode = TerrainMode::Tiles;
+    g.tiles_x = tiles->width();
+    g.tiles_y = tiles->height();
+    g.size = glm::vec2(static_cast<float>(g.tiles_x), static_cast<float>(g.tiles_y)) * params.tile_size;
+    g.height_step = params.height_step;
+    g.height = params.height_scale;
+    g.chunk_tiles = params.chunk_size;
+    g = g.sanitized();
+    if (field.tiles() == tiles.get() && field.geometry() == g) return;
+    field.adopt(tiles, nullptr, g);
+}
+
+void TerrainComponent::sync_heightmap_field_() {
+    if (!data) return;
+    const HeightmapGeometry& h = data->geometry();
+    TerrainFieldGeometry g;
+    g.mode = TerrainMode::Heightmap;
+    // A height sample sits on a tile corner, so `resolution` samples span `resolution - 1` tiles.
+    g.tiles_x = g.tiles_y = std::max(1, h.resolution - 1);
+    g.size = h.size;
+    g.height = h.height;
+    g.height_sub = 1;
+    g.layer_sub = std::max(1, h.splat_resolution / g.tiles_x);
+    g.chunk_tiles = std::max(1, static_cast<int>(std::lround(h.chunk_size / g.tile_size())));
+    g = g.sanitized();
+    if (field.heights() == data.get() && field.geometry() == g) return;
+    // The records carry this terrain's water, biome and climate; the height plane is `data`.
+    std::shared_ptr<TileMapData> records = field.tiles_shared();
+    if (!records) records = std::make_shared<TileMapData>();
+    if (records->width() != g.tiles_x || records->height() != g.tiles_y) {
+        records->resize(g.tiles_x, g.tiles_y);
+    }
+    field.adopt(std::move(records), data, g);
+}
+
+TerrainFieldView TerrainComponent::field_view() const {
+    glm::vec3 o(0.0f);
+    if (owner != nullptr) {
+        if (auto* tc = owner->get_transform()) o = glm::vec3(tc->transform().get_world_matrix()[3]);
+    }
+    return TerrainFieldView{&field, o};
 }
 
 bool terrain_wants_collision(const TerrainComponent& terrain, const ChunkCoord& coord,
@@ -113,61 +184,6 @@ void TerrainComponent::recycle_build_job(std::shared_ptr<ChunkBuildJob> job) {
     if (!job || job.use_count() != 1 || job_pool_.size() >= k_job_pool_max) return;
     job->reset_outputs();
     job_pool_.push_back(std::move(job));
-}
-
-void TerrainComponent::begin_generation(coopa::job::JobEngine* jobs) {
-    // Remembered even on the early-out path: the destructor needs it to drain chunk jobs,
-    // and those outlive generation by the whole life of the scene.
-    jobs_ = jobs;
-    if (!tiles || !tiles->needs_bake() || baking()) return;
-    if (started_bake_request_ == tiles->bake_requests()) return;   // this request is done (or failed)
-    started_bake_request_ = tiles->bake_requests();
-
-    // The values the CLI derives after reading a config (noise seeds from the master seed, the
-    // island field scaled to the grid) -- or one seed would make the same coastline as another.
-    // A planet's world is mapcoopa's globe: the same settings, generated on a sphere.
-    coopa::maps::MapConfig authored = generator;
-    if (params.planet) authored.topology = coopa::maps::MapTopology::Sphere;
-    const coopa::maps::MapConfig config = coopa::maps::derived_config(authored);
-    map_config_ = config;
-
-    generator_ = std::make_unique<coopa::maps::MapGenerator>(config, logger_);
-    generator_->set_job_engine(jobs);
-    // The generator must outlive the task -- the job writes into its graph -- and it does:
-    // both are members, and task_ is declared after generator_ so it destructs first.
-    task_ = generator_->generate_async();
-}
-
-bool TerrainComponent::poll_generation() {
-    // 1. The map is done: index it, then fill the tiles from it -- on a worker, since a large
-    //    world is a million samples.
-    if (generator_ && !bake_job_ && task_.done()) {
-        sampler_.build(map_config_, std::move(generator_->graph()), params);
-        task_ = coopa::maps::MapTask{};
-        generator_.reset();
-        if (!sampler_.is_built()) return false;
-        bake_job_ = std::make_shared<BakeJob>();
-        auto job = bake_job_;
-        const TerrainSampler* sampler = &sampler_;
-        if (jobs_ != nullptr) {
-            bake_handle_ = jobs_->create_handle();
-            jobs_->submit([job, sampler]() { sampler->bake(job->baked); }, 0x7E44A101u, bake_handle_, nullptr, 0u,
-                          coopa::job::Priority::Normal);
-        } else {
-            sampler->bake(job->baked);
-        }
-    }
-    // 2. The fill is done: the tiles take it (and every chunk re-meshes from it).
-    if (bake_job_ && (!bake_handle_.is_valid() || bake_handle_.is_complete())) {
-        if (bake_handle_.is_valid()) {
-            bake_handle_.close();
-            bake_handle_ = coopa::job::JobHandle{};
-        }
-        if (tiles) tiles->assign_baked(std::move(bake_job_->baked));
-        bake_job_.reset();
-        return true;
-    }
-    return false;
 }
 
 bool TerrainComponent::tile_at(const glm::vec3& world, glm::ivec2& tile) const {
@@ -218,7 +234,8 @@ IRect TerrainComponent::paint_tiles(const IRect& rect, TileKind kind, bool side)
 void TerrainComponent::queue_settle_(const IRect& changed) {
     if (changed.empty() || !tiles) return;
     const PlanetLayout layout = params.layout();
-    water_settles.push_back(begin_settle(*tiles, changed, IRect{}, params.planet ? &layout : nullptr));
+    sync_field();
+    water_settles.push_back(begin_settle(field, changed, IRect{}, params.planet ? &layout : nullptr));
 }
 
 bool TerrainComponent::raise_at(const glm::vec3& world, int radius_tiles, int delta) {

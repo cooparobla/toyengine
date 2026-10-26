@@ -1,4 +1,4 @@
-#include <toyengine/world/terrain_generator.h>
+#include <toyengine/mapgen/terrain_generator.h>
 
 #include <string>
 
@@ -6,7 +6,7 @@
 #include <coopa/maps/map_yaml.h>
 
 namespace toy {
-namespace world {
+namespace mapgen {
 
 namespace {
 
@@ -67,5 +67,5 @@ fkyaml::node generator_node(const coopa::maps::MapConfig& authored) {
     return difference(coopa::maps::config_to_node(authored), coopa::maps::config_to_node(default_generator()));
 }
 
-} // namespace world
+} // namespace mapgen
 } // namespace toy

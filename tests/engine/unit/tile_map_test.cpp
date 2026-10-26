@@ -18,10 +18,11 @@
 
 #include <coopa/debug/logger.h>
 #include <coopa/maps/map_generator.h>
-#include <toyengine/world/terrain_sampler.h>
+#include <toyengine/mapgen/terrain_sampler.h>
+#include <toyengine/world/terrain_field.h>
 #include <toyengine/world/tile_map_data.h>
 #include <toyengine/world/tile_water.h>
-#include <toyengine/world/terrain_generator.h>
+#include <toyengine/mapgen/terrain_generator.h>
 #include <coopa/maps/map_presets.h>
 #include <coopa/maps/map_yaml.h>
 #include <cstdlib>
@@ -284,7 +285,8 @@ COOPA_TEST(water_floods_settles_and_drains) {
     for (int y = 0; y < 9; ++y)
         for (int x = 0; x < 9; ++x) d.at(x, y).steps = (x >= 3 && x <= 5 && y >= 3 && y <= 5) ? 2 : 5;
     d.at(6, 4).steps = 3;
-    const IRect flooded = flood_water(d, {{4, 4}}, 4);
+    TerrainField field = borrow_tiles(d);
+    const IRect flooded = flood_water(field, {{4, 4}}, 4.0f, WaterKind::Lake);
     int wet = 0;
     for (const TileRecord& r : d.records()) wet += r.water() ? 1 : 0;
     expect(wet == 10 && d.at(6, 4).water() && d.at(6, 4).water_level() == 4, "a flood fills the basin and its notch, no further");
@@ -292,7 +294,7 @@ COOPA_TEST(water_floods_settles_and_drains) {
     // Lower a bank under the water: the water runs into it.
     d.at(7, 4).steps = 1;
     d.mark_dirty(IRect{7, 4, 8, 5});
-    settle_water(d, IRect{7, 4, 8, 5});
+    settle_water(field, IRect{7, 4, 8, 5});
     expect(d.at(7, 4).water() && d.at(7, 4).water_level() == 4, "ground dug beside water floods");
     // Raise a bed through its surface (as the brushes move ground: the water keeps its level).
     {
@@ -301,10 +303,10 @@ COOPA_TEST(water_floods_settles_and_drains) {
         bed.steps = 6;
         bed.set_water(level);
     }
-    settle_water(d, IRect{4, 4, 5, 5});
+    settle_water(field, IRect{4, 4, 5, 5});
     expect(!d.at(4, 4).water(), "a bed raised through the water is dry land");
     expect(d.at(3, 4).water() && d.at(5, 4).water(), "...and the water around it stays");
-    drain_water(d, {{3, 3}});
+    drain_water(field, {{3, 3}});
     wet = 0;
     for (const TileRecord& r : d.records()) wet += r.water() ? 1 : 0;
     expect(wet == 0, "drain takes the whole body");
@@ -332,13 +334,15 @@ COOPA_TEST(a_budgeted_settle_reaches_the_same_water_as_one_call) {
     };
 
     TileMapData whole = build();
-    settle_water(whole, IRect{0, 2, 1, 3});
+    TerrainField whole_field = borrow_tiles(whole);
+    settle_water(whole_field, IRect{0, 2, 1, 3});
 
     TileMapData stepped = build();
-    WaterSettle settle = begin_settle(stepped, IRect{0, 2, 1, 3});
+    TerrainField stepped_field = borrow_tiles(stepped);
+    WaterSettle settle = begin_settle(stepped_field, IRect{0, 2, 1, 3});
     int steps = 0;
     while (!settle.done() && steps < 1000) {
-        step_settle(stepped, settle, 3);   // three tiles a "frame"
+        step_settle(stepped_field, settle, 3);   // three tiles a "frame"
         ++steps;
     }
     expect(steps > 3, "settle: the trench took several steps to fill (" + std::to_string(steps) + ")");
@@ -369,7 +373,8 @@ COOPA_TEST(water_running_in_keeps_the_body_it_came_from) {
     river.flow = 3;
     d.at(3, 1).steps = 2;
     d.mark_dirty(IRect{3, 1, 4, 2});
-    settle_water(d, IRect{3, 1, 4, 2});
+    TerrainField field = borrow_tiles(d);
+    settle_water(field, IRect{3, 1, 4, 2});
 
     const TileRecord& filled = d.at(3, 1);
     expect(filled.water() && filled.water_level() == 4, "river: the dug tile fills to the river's level");
@@ -403,7 +408,8 @@ COOPA_TEST(water_settles_across_a_planets_faces) {
     d.at(across.x, across.y).steps = 1;          // dug, lower than the water beside it
     d.mark_dirty(IRect{across.x, across.y, across.x + 1, across.y + 1});
 
-    settle_water(d, IRect{across.x, across.y, across.x + 1, across.y + 1}, IRect{}, k_water_flood_cap, &layout);
+    TerrainField field = borrow_tiles(d);
+    settle_water(field, IRect{across.x, across.y, across.x + 1, across.y + 1}, IRect{}, k_water_flood_cap, &layout);
     const TileRecord& filled = d.at(across.x, across.y);
     expect(filled.water() && filled.water_level() == 4 && filled.has(TileRecord::Ocean),
            "planet: the sea runs across the face edge into the dug tile");
@@ -419,29 +425,29 @@ COOPA_TEST(water_settles_across_a_planets_faces) {
 COOPA_TEST(generator_block_holds_only_what_differs) {
     using namespace toy::world;
     fkyaml::node comp = fkyaml::node::mapping();
-    expect(generator_node(generator_config_from_node(comp)).get_value<fkyaml::node::mapping_type>().empty(),
+    expect(toy::mapgen::generator_node(toy::mapgen::generator_config_from_node(comp)).get_value<fkyaml::node::mapping_type>().empty(),
            "no keys: mapcoopa's standard map, and nothing to write");
     const coopa::maps::MapConfig standard = coopa::maps::standard_config();
-    expect(generator_config_from_node(comp).seed == standard.seed && generator_config_from_node(comp).grid_size == 80,
+    expect(toy::mapgen::generator_config_from_node(comp).seed == standard.seed && toy::mapgen::generator_config_from_node(comp).grid_size == 80,
            "...which is the mapcoopa tool's own default world");
 
     comp["seed"] = fkyaml::node(9);
     comp["shape"] = fkyaml::node(std::string("circle"));
     comp["sea_level"] = fkyaml::node(0.3);
     comp["irregularity"] = fkyaml::node(0.4);
-    coopa::maps::MapConfig legacy = generator_config_from_node(comp);
+    coopa::maps::MapConfig legacy = toy::mapgen::generator_config_from_node(comp);
     expect(legacy.seed == 9 && legacy.shape.shape == coopa::maps::MapShape::Circle && legacy.sea_level == 0.3 &&
                legacy.shape.irregularity == 0.4,
            "older scenes' flat keys still load");
 
-    const fkyaml::node block = generator_node(legacy);
+    const fkyaml::node block = toy::mapgen::generator_node(legacy);
     expect(block.contains("seed") && block.contains("sea_level") && block.contains("shape") && !block.contains("grid_size"),
            "the block holds the changed keys only");
     expect(block.at("shape").contains("shape") && !block.at("shape").contains("coast_detail"),
            "...nested blocks too");
     fkyaml::node again = fkyaml::node::mapping();
     again["generator"] = block;
-    const coopa::maps::MapConfig back = generator_config_from_node(again);
+    const coopa::maps::MapConfig back = toy::mapgen::generator_config_from_node(again);
     expect(fkyaml::node::serialize(coopa::maps::config_to_node(back)) == fkyaml::node::serialize(coopa::maps::config_to_node(legacy)),
            "the block round-trips to the same settings");
 }

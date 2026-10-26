@@ -1,0 +1,165 @@
+scene:
+  scene_name: instance_paint_demo
+  settings:
+    weather:
+      condition: clear
+      drive_sun: true
+      enabled: true
+      ground_height: 0.0
+      latitude: 45
+      schedule: fixed
+      sun_intensity: 1.2
+      time_of_day: 9.0
+  root_objects:
+    - name: terrain
+      components:
+        - type: Transform
+          position: { x: -128, y: -128, z: 0 }
+        - type: HeightmapTerrain
+          cast_shadows: true
+          chunk_size: 32
+          collision: true
+          height: 40
+          heightmap: terrain/height.png
+          layers:
+            - name: grass
+              albedo: textures/terrain/layers/grass_albedo.png
+              normal: textures/terrain/layers/grass_normal.png
+              roughness: 0.9
+              tiling: 4
+          resolution: 257
+          size: { x: 256, y: 256 }
+        - { type: WeatherSurface }
+      children: []
+    - name: scattered
+      components:
+        - type: Transform
+          position: { x: 0, y: 0, z: 0 }
+        - type: InstancePainter
+          cast_shadows: true
+          chunk_size: 32
+          collision_radius: 80
+          data: instances/scattered.instances
+          prototypes:
+            - name: pine
+              align_to_normal: 0.15
+              collision: capsule
+              collision_radius: 0.45
+              object: objects/nature/pine
+              scale_range: [0.85, 1.45]
+              sink: 0.25
+              yaw_range: [0, 360]
+            - name: boulder
+              align_to_normal: 0.75
+              collision: box
+              material:
+                albedo: { b: 0.43, g: 0.46, r: 0.48 }
+                roughness: 0.8
+              mesh: nature/boulder
+              scale_range: [0.7, 2.4]
+              sink: 0.3
+            - name: grass
+              align_to_normal: 0.6
+              cast_shadows: false
+              collision: none
+              draw_distance: 70
+              fade_start: 0.5
+              material:
+                albedo: { b: 0.75, g: 1.0, r: 0.85 }
+                alpha_cutoff: 0.4
+                alpha_mode: CUTOUT
+                roughness: 0.8
+                texture_albedo: textures/terrain/layers/grass_blades.png
+                texture_alpha_mask: textures/terrain/layers/grass_blades.png
+              mesh: nature/grass_tuft
+              scale_range: [0.6, 1.2]
+              sink: 0.05
+            - name: slab
+              align_to_normal: 0
+              collision: box
+              material:
+                albedo: { b: 0.52, g: 0.58, r: 0.62 }
+                roughness: 0.9
+              mesh: primitives/cube
+              scale_range: [1.0, 1.0]
+              sink: 0.45
+              yaw_range: [0, 0]
+      children: []
+    - name: plinth
+      components:
+        - type: Transform
+          position: { x: 30, y: -60, z: 7 }
+          scale: { x: 12, y: 12, z: 1.5 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.5, g: 0.52, r: 0.55 }
+            roughness: 0.7
+          mesh_path: primitives/cube
+        - type: BoxCollider
+          size: { x: 1, y: 1, z: 1 }
+      children: []
+    - name: ramp
+      components:
+        - type: Transform
+          position: { x: 10, y: -60, z: 5 }
+          rotation: { x: 0, y: -22, z: 0 }
+          scale: { x: 14, y: 10, z: 0.6 }
+        - type: MeshRenderer
+          material:
+            albedo: { b: 0.45, g: 0.47, r: 0.5 }
+            roughness: 0.75
+          mesh_path: primitives/cube
+        - type: BoxCollider
+          size: { x: 1, y: 1, z: 1 }
+      children: []
+    - name: player
+      prefab: objects/characters/mannequin
+      components:
+        - type: Transform
+          position: { x: 40, y: 0, z: 20 }
+          rotation: { x: 0, y: 0, z: 180 }
+        - type: CharacterController
+          height: 1.8
+          jump_height: 1.2
+          move_speed: 3.0
+          radius: 0.3
+          slope_limit: 45.0
+          sprint_multiplier: 3.0
+          step_height: 0.35
+          use_root_motion: true
+        - { type: Animator, apply_root_motion: true }
+        - { type: CharacterAnimDriver, crossfade: 0.2, run_speed: 4.0, walk_speed: 0.2 }
+    - name: camera
+      components:
+        - type: Transform
+          position: { x: 40, y: -14, z: 26 }
+          rotation: { x: 68, y: 0, z: 0 }
+        - type: Camera
+          far_clip_plane: 1200
+          fov: 60
+          main: true
+          near_clip_plane: 0.1
+          projection: Perspective
+        - type: CameraController
+          collide: true
+          collision_radius: 0.25
+          distance: 14
+          follow_smoothing: 12.0
+          max_distance: 60
+          min_distance: 2
+          mode: orbit
+          pitch_deg: 20
+          target_offset: { x: 0, y: 0, z: 1.4 }
+          tracker: player
+          yaw_deg: 180
+      children: []
+    - name: sun
+      components:
+        - type: Transform
+          position: { x: 0, y: 0, z: 200 }
+        - type: DirectionalLight
+          cast_shadows: true
+          color: { b: 0.9, g: 0.96, r: 1.0 }
+          direction: { x: -0.45, y: 0.55, z: -0.6 }
+          intensity: 1.0
+      children: []

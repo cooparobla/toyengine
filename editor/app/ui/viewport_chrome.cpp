@@ -2,6 +2,7 @@
 #include "editor/app/ui/timeline.h"
 #include "editor/app/ui/tile_mode.h"
 #include "editor/app/ui/terrain.h"
+#include "editor/app/ui/instance_paint.h"
 #include "editor/app/ui/sculpt.h"
 #include "editor/app/ui/properties.h"
 #include "editor/app/ui/paint.h"
@@ -58,15 +59,19 @@ void ViewportChromePanel::draw_viewport_header_(imm::Context& ctx, const imm::Bo
         const bool sculpting = app_.in_sculpt_mode_();
         const bool terrain = app_.terrain_panel_->in_terrain_mode_();
         const bool tiles = app_.tile_mode_panel_->in_tile_mode_();
+        const bool painting_instances = app_.instance_paint_panel_->in_instance_mode_();
         const bool vpaint = app_.paint_panel_->in_paint_mode_() && !app_.paint_panel_->in_weight_paint_(), wpaint = app_.paint_panel_->in_weight_paint_();
-        const std::string mode = terrain ? "Terrain Mode" : tiles ? "Tile Mode" : sculpting ? "Sculpt Mode" : vpaint ? "Vertex Paint" : wpaint ? "Weight Paint"
+        const std::string mode = terrain ? "Terrain Mode" : tiles ? "Tile Mode" : painting_instances ? "Instance Paint"
+                               : sculpting ? "Sculpt Mode" : vpaint ? "Vertex Paint" : wpaint ? "Weight Paint"
                                : mesh_edit ? "Edit Mode" : "Object Mode";
         const float w = ctx.text_width(mode) + bh + 26;
         const imm::Box mb{x, hb.y + 3, w, bh};
         bool hov = false, held = false;
         if (ctx.invisible_button("mode_dd", mb, &hov, &held)) ctx.open_popup("mode_menu", glm::vec2(mb.x, mb.bottom() + 2));
         ctx.fill_rounded(mb, hov ? ctx.style.button_hover : ctx.style.button);
-        ctx.icon(terrain || tiles ? I::Terrain : sculpting ? I::SculptMode : vpaint ? I::VertexPaint : wpaint ? I::WeightPaint : mesh_edit ? I::EditMode : I::ObjectMode,
+        ctx.icon(terrain || tiles ? I::Terrain : painting_instances ? I::BrushDraw
+                 : sculpting ? I::SculptMode : vpaint ? I::VertexPaint : wpaint ? I::WeightPaint
+                 : mesh_edit ? I::EditMode : I::ObjectMode,
                  {mb.x + 4, mb.y + 2, bh - 4, bh - 4}, ctx.style.text);
         ctx.text_in({mb.x + bh + 2, mb.y, w - bh - 16, bh}, mode, ctx.style.text, 0.0f);
         ctx.arrow({mb.right() - 14, mb.y + 4, 10, bh - 8}, true, ctx.style.text_dim);
@@ -86,6 +91,7 @@ void ViewportChromePanel::draw_viewport_header_(imm::Context& ctx, const imm::Bo
             x += bh + 8;
         }
         if (terrain) x = app_.terrain_panel_->draw_terrain_header_(ctx, x, hb);
+        else if (painting_instances) x = app_.instance_paint_panel_->draw_instance_header_(ctx, x, hb);
         else if (tiles) x = app_.tile_mode_panel_->draw_tile_header_(ctx, x, hb);
         else if (sculpting) x = app_.sculpt_panel_->draw_sculpt_header_(ctx, x, hb);
         else if (vpaint || wpaint) x = app_.paint_panel_->draw_paint_header_(ctx, x, hb);
@@ -340,6 +346,11 @@ void ViewportChromePanel::draw_add_menu_items_(imm::Context& ctx) {
     if (ctx.menu_item("Heightmap Terrain", "", nullptr, true, I::Terrain)) app_.create_with_component("HeightmapTerrain", "Terrain");
     if (ctx.menu_item("Tile Terrain", "", nullptr, true, I::Terrain)) app_.create_with_component("TileTerrain", "Tile Terrain");
     if (ctx.menu_item("Planet", "", nullptr, true, I::World)) app_.create_planet();
+    if (ctx.menu_item("Instance Painter", "", nullptr, true, I::BrushDraw)) {
+        app_.create_with_component("InstancePainter", "Painted Instances");
+    }
+    ctx.tooltip("Instance Painter\nA bag of brush-placed copies of your object assets -- trees, "
+                "rocks, clutter. Paint them onto any surface in the scene in Instance Paint Mode.");
 }
 
 void ViewportChromePanel::draw_object_menu_(imm::Context& ctx) {
@@ -481,6 +492,7 @@ void ViewportChromePanel::draw_toolbar_(imm::Context& ctx, bool mesh_edit) {
         return ctx.icon_button(id, ic, tip, on, kToolSize, imm::Context::kAll, b);
     };
     if (app_.terrain_panel_->in_terrain_mode_()) { app_.terrain_panel_->draw_terrain_toolbar_(ctx, r); return; }
+    if (app_.instance_paint_panel_->in_instance_mode_()) { app_.instance_paint_panel_->draw_instance_toolbar_(ctx, r); return; }
     if (app_.tile_mode_panel_->in_tile_mode_()) { app_.tile_mode_panel_->draw_tile_toolbar_(ctx, r); return; }
     if (app_.in_sculpt_mode_()) { app_.sculpt_panel_->draw_sculpt_toolbar_(ctx, r); return; }
     if (app_.paint_panel_->in_paint_mode_()) { app_.paint_panel_->draw_paint_toolbar_(ctx, r); return; }
@@ -921,10 +933,12 @@ void ViewportChromePanel::draw_mode_menu_items_(imm::Context& ctx) {
     bool vp = cur == InteractionMode::VertexPaint, wp = cur == InteractionMode::WeightPaint;
     const bool terrain = app_.terrain_panel_->in_terrain_mode_();
     const bool tiles = app_.tile_mode_panel_->in_tile_mode_();
-    o = o && !terrain && !tiles;
+    const bool painting_instances = app_.instance_paint_panel_->in_instance_mode_();
+    o = o && !terrain && !tiles && !painting_instances;
     if (ctx.menu_item("Object Mode", "Tab", &o, true, I::ObjectMode)) {
         if (terrain) app_.terrain_panel_->exit_terrain_mode_();
         if (tiles) app_.tile_mode_panel_->exit_tile_mode_();
+        if (painting_instances) app_.instance_paint_panel_->exit_instance_mode_();
         app_.set_interaction_mode(InteractionMode::Object);
     }
     if (ctx.menu_item("Edit Mode", "Tab", &e, mesh_obj && !app_.playing(), I::EditMode)) app_.set_interaction_mode(InteractionMode::Edit);
@@ -954,6 +968,17 @@ void ViewportChromePanel::draw_mode_menu_items_(imm::Context& ctx) {
         if (tiles) app_.tile_mode_panel_->exit_tile_mode_();
         else app_.tile_mode_panel_->enter_tile_mode_(tiles_id);
     }
+    // An InstancePainter object: brush instances of its prototypes onto any surface in the scene.
+    bool ip = painting_instances;
+    const ObjectId painter_id = painting_instances ? app_.instance_paint_panel_->instance_object_ : app_.doc_.primary();
+    if (ctx.menu_item("Instance Paint", "", &ip,
+                      !app_.asset_view_() && app_.instance_paint_panel_->is_painter_object_(painter_id) && !app_.playing(),
+                      I::BrushDraw)) {
+        if (painting_instances) app_.instance_paint_panel_->exit_instance_mode_();
+        else app_.instance_paint_panel_->enter_instance_mode_(painter_id);
+    }
+    ctx.tooltip("Instance Paint\nBrush instances of object assets onto the terrain and onto anything "
+                "else in the scene. They are records, not objects: a world of them costs no scene file.");
 }
 
 void ViewportChromePanel::draw_shading_popover_(imm::Context& ctx) {

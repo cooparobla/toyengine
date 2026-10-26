@@ -51,6 +51,8 @@
 #include <toyengine/particles/particle_system_runner.h>
 #include <toyengine/particles/particle_yaml.h>
 #include <toyengine/env/env_system.h>
+#include <toyengine/instance/instance_painter.h>
+#include <toyengine/instance/instance_painter_system.h>
 #include <toyengine/weather/weather_reactor.h>
 #include <toyengine/render/visibility.h>
 #include <toyengine/save/register.h>
@@ -167,6 +169,9 @@ Engine::Engine(AppConfig config, EngineOptions options)
     // "EnvInfluence" / "EnvPulseEmitter" (toyengine/env/): local environmental influences that
     // add to -- or override -- the global weather: a rotor's downwash, a vent, a sword swing.
     env::register_env_components();
+    // "InstancePainter" (toyengine/instance/): brush-placed instances of object assets, drawn
+    // as instanced meshes. Its records live in a `.instances` file beside the scene, not here.
+    instance::register_instance_components(assets_);
     // "SnowDeformer" (toyengine/world/snow_system.h): objects pressing trails into deep snow.
     world::register_snow_components();
     // "SaveId" (a stable identity in saves) and the demo "SaveDemo" (toyengine/save/).
@@ -493,6 +498,9 @@ void Engine::prepare_scene_(coopa::scene::Scene& scene, bool drain_assets) {
     // Order 61: heightmap terrains -- their chunks, GPU grids and colliders, before Physics (100)
     // steps against them. See heightmap_terrain_system.h.
     world::install_heightmap_terrain_system(scene, ctx_.device(), ctx_.allocator(), ctx_.command_pool(), assets_);
+    // Order 62: painted instances -- builds their chunks against ground the two terrain systems
+    // above have just finished, and streams their colliders before Physics (100) reconciles.
+    instance::install_instance_painter_system(scene, &assets_);
     // Order 70: destruction -- fractures breakable meshes on the job engine and spawns a
     // chunk body per cell. Before Physics (100), so a chunk born this frame falls this frame.
     scene::install_destruction_system(scene, ctx_.device(), ctx_.allocator(), assets_, &jobs_);

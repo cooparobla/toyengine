@@ -10,6 +10,7 @@ image (which renders at its own internal resolution).
 | [`gizmo.h`](gizmo.h) | Viewport math — projection, rays, picking — and the translate / rotate / scale gizmo. Reports **cumulative** deltas since the drag began, so the caller applies them to the drag-start values and never accumulates rounding. |
 | [`modal_transform.h`](modal_transform.h) | Blender's modal operators: G / R / S with axis constraints and numeric entry, plus interactive inset and bevel. |
 | [`rect_gizmo.h`](rect_gizmo.h) | The UI designer's 2D counterpart: move, resize, anchor, pivot and rotate one UI element, in canvas space. |
+| [`surface_raycast.h`](surface_raycast.h) | Nearest surface under a ray, **with its normal**, over whatever a caller offers it — terrain in either mode, mesh objects through a BVH. What the instance brush aims with; `pick_object()` answers *which object*, this answers *where and which way up*. |
 
 ## Conventions
 

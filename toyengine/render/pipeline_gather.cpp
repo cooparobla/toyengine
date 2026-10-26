@@ -81,11 +81,18 @@ ToyRenderPipeline::MeshGather ToyRenderPipeline::gather_meshes_(uint32_t frame_s
     out.multi.assign(n, nullptr);
     out.multi_count.assign(n, 0u);
     out.own_instances.assign(n, nullptr);
+    // Per multi item: its instances are the same ones as last frame. Only a STATIC batch can
+    // say so, and only by its buffer being reused -- see the moved[] assignment in gather_mesh.
+    std::vector<uint8_t> multi_still(particle_items.size(), 0);
     for (size_t k = 0; k < particle_items.size(); ++k) {
         out.multi[first_particle_item + k]       = particle_items[k]->matrices;
         out.multi_count[first_particle_item + k] = particle_items[k]->count;
-        // Static batches (terrain scatter chunks): a persistent buffer, uploaded once.
-        if (particle_items[k]->static_key != 0) out.own_instances[first_particle_item + k] = static_instances_for_(*particle_items[k]);
+        // Static batches (scatter chunks, painted instances): a persistent buffer, uploaded once.
+        if (particle_items[k]->static_key != 0) {
+            bool reused = false;
+            out.own_instances[first_particle_item + k] = static_instances_for_(*particle_items[k], &reused);
+            multi_still[k] = reused ? 1u : 0u;
+        }
     }
     out.world_matrices.assign(n, glm::mat4(1.0f));
     out.prev_world_matrices.assign(n, glm::mat4(1.0f));
@@ -123,11 +130,16 @@ ToyRenderPipeline::MeshGather ToyRenderPipeline::gather_meshes_(uint32_t frame_s
                 // A particle batch: world-space matrices already, bounds from the system.
                 // No previous poses exist for its instances, so each streams prev == cur;
                 // its presence alone counts as scene motion.
-                const ParticleMeshBatch& pb = *particle_items[i - first_particle_item];
+                const size_t k = i - first_particle_item;
+                const ParticleMeshBatch& pb = *particle_items[k];
                 out.bounds[i].center = 0.5f * (pb.bounds_min + pb.bounds_max);
                 out.bounds[i].extent = 0.5f * (pb.bounds_max - pb.bounds_min);
                 out.valid[i] = 1;
-                out.moved[i] = 1;
+                // A simulated batch re-places its instances every frame, so its presence alone
+                // counts as scene motion. A static one whose buffer was reused did NOT move:
+                // calling it moved would hold the temporal freeze open for every frame a
+                // painted world is on screen, which is to say always.
+                out.moved[i] = multi_still[k] ? 0u : 1u;
                 continue;
             }
             if (!mr->is_ready() || !mr->owner) continue;
@@ -990,11 +1002,15 @@ void ToyRenderPipeline::snapshot_scene_(coopa::scene::Scene& scene) {
     for (const auto& root : scene.root_objects()) visit(*root);
 }
 
-const coopa::gfx::memory::Buffer* ToyRenderPipeline::static_instances_for_(const ParticleMeshBatch& pb) {
+const coopa::gfx::memory::Buffer* ToyRenderPipeline::static_instances_for_(const ParticleMeshBatch& pb,
+                                                                          bool* unchanged) {
     StaticInstances& e = static_instances_[pb.static_key];
     e.last_frame = static_frame_;
     const uint32_t total = std::max(pb.static_total, pb.count);
-    if (e.buffer && e.version == pb.static_version && e.count == total) return e.buffer.get();
+    if (e.buffer && e.version == pb.static_version && e.count == total) {
+        if (unchanged != nullptr) *unchanged = true;
+        return e.buffer.get();
+    }
     if (total == 0 || pb.matrices == nullptr) return nullptr;
     // A changed batch gets a NEW buffer: the old one may still be read by frames in flight.
     if (e.buffer) static_graveyard_.push_back({static_frame_, std::move(e.buffer)});

@@ -3,6 +3,7 @@
 #include "editor/app/ui/ui_canvas.h"
 #include "editor/app/ui/tile_mode.h"
 #include "editor/app/ui/terrain.h"
+#include "editor/app/ui/instance_paint.h"
 #include "editor/app/ui/sculpt.h"
 #include "editor/app/ui/paint.h"
 #include "editor/app/ui/assets.h"
@@ -348,6 +349,7 @@ void PropertiesPanel::draw_tool_tab_(imm::Context& ctx) {
     using I = imm::Icon;
     if (app_.terrain_panel_->in_terrain_mode_()) { app_.terrain_panel_->draw_terrain_tool_panel_(ctx); return; }
     if (app_.tile_mode_panel_->in_tile_mode_()) { app_.tile_mode_panel_->draw_tile_tool_panel_(ctx); return; }
+    if (app_.instance_paint_panel_->in_instance_mode_()) { app_.instance_paint_panel_->draw_instance_tool_panel_(ctx); return; }
     if (app_.in_sculpt_mode_()) { app_.sculpt_panel_->draw_sculpt_tool_panel_(ctx); return; }
     if (app_.paint_panel_->in_paint_mode_()) { app_.paint_panel_->draw_paint_tool_panel_(ctx); return; }
     // A terrain object selected: the way into Terrain Mode, up front.
@@ -355,6 +357,17 @@ void PropertiesPanel::draw_tool_tab_(imm::Context& ctx) {
         if (ctx.collapsing_header("Terrain", true, nullptr, I::Terrain)) {
             if (ctx.button("Edit Terrain", -1, true, I::Terrain)) app_.terrain_panel_->enter_terrain_mode_(app_.doc_.primary());
             ctx.tooltip("Terrain Mode\nSculpt the terrain's shape and paint its layers with brushes");
+        }
+    }
+    // An instance painter selected: the way into Instance Paint Mode.
+    if (!app_.asset_view_() && !app_.playing() && app_.instance_paint_panel_->is_painter_object_(app_.doc_.primary()) &&
+        app_.interaction_mode() == InteractionMode::Object) {
+        if (ctx.collapsing_header("Instance Painter", true, nullptr, I::BrushDraw)) {
+            if (ctx.button("Paint Instances", -1, true, I::BrushDraw)) {
+                app_.instance_paint_panel_->enter_instance_mode_(app_.doc_.primary());
+            }
+            ctx.tooltip("Instance Paint Mode\nBrush instances of object assets onto the terrain and "
+                        "onto anything else in the scene");
         }
     }
     // A tile terrain selected: the way into Tile Mode.

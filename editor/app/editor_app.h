@@ -54,6 +54,7 @@
 #include "../mesh/shader_ball.h"
 #include "../mesh/primitives.h"
 #include "../schema/component_schema.h"
+#include "../instance/instance_brush.h"
 #include "../terrain/terrain_brush.h"
 #include "../terrain/tile_brush.h"
 #include "../schema/inspector.h"
@@ -127,6 +128,7 @@ class TopbarPanel;
 class TimelinePanel;
 class TileModePanel;
 class TerrainPanel;
+class InstancePaintPanel;
 class SculptPanel;
 class ThumbnailCache;
 class PropertiesPanel;
@@ -175,6 +177,7 @@ class EditorApp {
     friend class TimelinePanel;
     friend class TileModePanel;
     friend class TerrainPanel;
+    friend class InstancePaintPanel;
     friend class SculptPanel;
     friend class PropertiesPanel;
     friend class PaintPanel;
@@ -389,6 +392,27 @@ public:
     TerrainBrushSettings& terrain_brush();
     const UndoStack<TerrainPatch>& terrain_history() const;
     bool terrain_mode() const;
+    void set_instance_paint_mode(bool on);
+    InstanceBrushSettings& instance_brush();
+    const UndoStack<InstancePatch>& instance_history() const;
+    bool instance_paint_mode() const;
+    /** @brief Writes every painter's records to its own `.instances` file. */
+    void save_instances();
+    /**
+     * @brief Edits the painted painter's component node the way its inspector does.
+     *
+     * The same one-undo-step, override-aware, DEFERRED path the palette's widgets take -- which
+     * matters because the rebuild it queues lands mid-frame, between the scene update and the
+     * renderer's hand-off.
+     */
+    void edit_instance_component(const std::string& label, const std::function<void(Node&)>& fn,
+                                 const std::string& merge = {});
+    /** @brief How many painted instances the Select tool currently has. */
+    std::size_t instance_selection_size() const;
+    /** @brief Turns the selection about its own centre, as the Selection panel's Turn does. */
+    void turn_instance_selection(float radians);
+    /** @brief Deletes the selected instances (one undo step). */
+    void delete_instance_selection();
     void tile_edit_selection(const std::string& label, const std::function<void(toy::world::TileRecord&)>& edit);
     TileSelection& tile_selection();
     const std::vector<std::string>& tile_set_assets();
@@ -1238,6 +1262,7 @@ private:
     std::unique_ptr<TimelinePanel> timeline_panel_;
     std::unique_ptr<TileModePanel> tile_mode_panel_;
     std::unique_ptr<TerrainPanel> terrain_panel_;
+    std::unique_ptr<InstancePaintPanel> instance_paint_panel_;
     std::unique_ptr<SculptPanel> sculpt_panel_;
     std::unique_ptr<PropertiesPanel> properties_panel_;
     std::unique_ptr<PaintPanel> paint_panel_;
@@ -1456,6 +1481,19 @@ private:
     std::map<ObjectId, DragStart> drag_starts_;
     EditMesh mesh_drag_base_;
     std::map<std::string, CachedMesh> mesh_cache_;
+    /**
+     * @brief Bumped every time `mesh_cache_` is emptied -- a mesh edit, a scene rebuild.
+     *
+     * What a panel holding anything DERIVED from a cached mesh compares against to know its
+     * copy went stale. The instance painter's per-mesh ray BVHs are the one user.
+     */
+    std::uint64_t mesh_cache_epoch_ = 1;
+
+public:
+    /** @brief See `mesh_cache_epoch_`. */
+    std::uint64_t mesh_cache_epoch() const { return mesh_cache_epoch_; }
+
+private:
     std::pair<ObjectId, uint64_t> parent_choices_key_{0, ~0ull};         // Relations > Parent list cache (properties.h)
     std::vector<std::string> parent_choice_names_;
     std::vector<ObjectId> parent_choice_ids_;

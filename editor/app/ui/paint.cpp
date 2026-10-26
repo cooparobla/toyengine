@@ -5,6 +5,7 @@
 #include "editor/app/ui/terrain.h"
 
 #include "editor/app/editor_app.h"
+#include "editor/app/ui/instance_paint.h"
 #include "editor/app/ui/weights.h"
 
 namespace toy {
@@ -19,7 +20,8 @@ bool PaintPanel::in_weight_paint_() const {
 }
 
 bool PaintPanel::in_brush_mode_() const {
-    return app_.in_sculpt_mode_() || in_paint_mode_() || app_.terrain_panel_->in_terrain_mode_() || app_.tile_mode_panel_->in_tile_mode_();
+    return app_.in_sculpt_mode_() || in_paint_mode_() || app_.terrain_panel_->in_terrain_mode_() ||
+           app_.tile_mode_panel_->in_tile_mode_() || app_.instance_paint_panel_->in_instance_mode_();
 }
 
 PaintSettings& PaintPanel::paint_settings_() {

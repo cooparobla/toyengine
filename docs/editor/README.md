@@ -60,11 +60,13 @@ Click an asset to open it. One asset is open at a time.
 5. [Sculpt and paint](sculpt-and-paint.md): sculpting with brushes and painting colours and
    weights.
 6. [Terrain](terrain.md): sculpting and painting landscapes, and scattering grass and trees.
-7. [Materials and textures](materials-and-textures.md): making surfaces look right.
-8. [Animation](animation.md): recording movement on the Timeline.
-9. [UI designer](ui-designer.md): building menus and HUDs.
-10. [Project settings](project-settings.md): rendering, lighting and packaging the game.
-11. [Keyboard shortcuts](shortcuts.md): every shortcut in one place.
+7. [Painting instances](instance-painting.md): filling a world with trees, rocks and props by
+   brushing copies of objects you made.
+8. [Materials and textures](materials-and-textures.md): making surfaces look right.
+9. [Animation](animation.md): recording movement on the Timeline.
+10. [UI designer](ui-designer.md): building menus and HUDs.
+11. [Project settings](project-settings.md): rendering, lighting and packaging the game.
+12. [Keyboard shortcuts](shortcuts.md): every shortcut in one place.
 
 ## Your first steps
 

@@ -219,6 +219,27 @@ See [Terrain](terrain.md).
 | **[** / **]** | Smaller / larger brush |
 | **Tab** or **Esc** | Back to Object Mode |
 
+## Instance Paint Mode
+
+See [Painting instances](instance-painting.md).
+
+| Shortcut | Action |
+|---|---|
+| Left-drag | Paint (Place and Cluster drop one per click) |
+| **Ctrl**+left-drag | Erase |
+| **1** to **5** | Paint, Erase, Place, Cluster, Select |
+| **S** | Snap to grid on / off |
+| **F** | Resize the brush |
+| **Shift+F** | Change the density |
+| **[** / **]** | Smaller / larger brush |
+| **Ctrl+C** | Turn the instance under the cursor into a real object |
+| Click / box-drag | **Select tool**: pick one, or everything inside the box |
+| **Shift**+click or box | Add to the selection |
+| **Ctrl**+click or box | Remove from the selection |
+| **X** / **Delete** | Delete the selected instances |
+| **Alt+A** | Clear the selection |
+| **Tab** / **Esc** | Back to Object Mode |
+
 ## Vertex Paint and Weight Paint
 
 Pointer over the viewport. Moving the view and the display keys still work. See

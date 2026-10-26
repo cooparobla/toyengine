@@ -9,6 +9,7 @@
 #include "editor/app/ui/timeline.h"
 #include "editor/app/ui/tile_mode.h"
 #include "editor/app/ui/terrain.h"
+#include "editor/app/ui/instance_paint.h"
 #include "editor/app/ui/sculpt.h"
 #include "editor/app/ui/properties.h"
 #include "editor/app/ui/paint.h"
@@ -28,6 +29,7 @@
 #include "editor/app/editor_context.h"
 
 #include <toyengine/world/heightmap_store.h>
+#include <toyengine/instance/instance_set.h>
 #include <toyengine/world/tile_map_data.h>
 #include <toyengine/render/toy_render_pipeline.h>
 #include <toyengine/scene/skinned_mesh_renderer.h>
@@ -54,6 +56,7 @@ EditorApp::EditorApp(core::Engine& engine, Project project, const fs::path& scen
     timeline_panel_ = std::make_unique<TimelinePanel>(*this);
     tile_mode_panel_ = std::make_unique<TileModePanel>(*this);
     terrain_panel_ = std::make_unique<TerrainPanel>(*this);
+    instance_paint_panel_ = std::make_unique<InstancePaintPanel>(*this);
     sculpt_panel_ = std::make_unique<SculptPanel>(*this);
     properties_panel_ = std::make_unique<PropertiesPanel>(*this);
     paint_panel_ = std::make_unique<PaintPanel>(*this);
@@ -85,6 +88,9 @@ EditorApp::EditorApp(core::Engine& engine, Project project, const fs::path& scen
     });
     register_inspector_section("HeightmapTerrain.edit", [this](imm::Context& ctx, SectionContext& sc) {
         return terrain_panel_->draw_terrain_inspector_header_(ctx, sc.object_id);
+    });
+    register_inspector_section("InstancePainter.edit", [this](imm::Context& ctx, SectionContext& sc) {
+        return instance_paint_panel_->draw_instance_inspector_header_(ctx, sc.object_id);
     });
     for (const char* tile_terrain : {"TileTerrain", "Terrain"}) {   // Terrain is TileTerrain's old name
         register_inspector_section(tile_terrain, [this](imm::Context& ctx, SectionContext& sc) {
@@ -185,7 +191,8 @@ EditorApp::~EditorApp() {
     engine_.set_overlay_scene(nullptr);
     // The drawers below close over this app; the registry outlives it (one editor is built
     // and torn down per test), so they go with it.
-    for (const char* id : {"ParticleSystem", "TileTerrain", "Terrain", "HeightmapTerrain.edit"}) {
+    for (const char* id : {"ParticleSystem", "TileTerrain", "Terrain", "HeightmapTerrain.edit",
+                           "InstancePainter.edit"}) {
         unregister_inspector_section(id);
     }
     engine_.wait_idle();
@@ -240,6 +247,18 @@ void EditorApp::set_terrain_mode(bool on) { terrain_panel_->set_terrain_mode(on)
 TerrainBrushSettings& EditorApp::terrain_brush() { return terrain_panel_->terrain_brush(); }
 const UndoStack<TerrainPatch>& EditorApp::terrain_history() const { return terrain_panel_->terrain_history(); }
 bool EditorApp::terrain_mode() const { return terrain_panel_->terrain_mode(); }
+void EditorApp::set_instance_paint_mode(bool on) { instance_paint_panel_->set_instance_mode(on); }
+InstanceBrushSettings& EditorApp::instance_brush() { return instance_paint_panel_->brush(); }
+const UndoStack<InstancePatch>& EditorApp::instance_history() const { return instance_paint_panel_->instance_history(); }
+bool EditorApp::instance_paint_mode() const { return instance_paint_panel_->instance_mode(); }
+void EditorApp::save_instances() { instance_paint_panel_->save_instances_(); }
+void EditorApp::edit_instance_component(const std::string& label, const std::function<void(Node&)>& fn,
+                                        const std::string& merge) {
+    instance_paint_panel_->instance_edit_component_(label, fn, merge);
+}
+std::size_t EditorApp::instance_selection_size() const { return instance_paint_panel_->selection_.size(); }
+void EditorApp::turn_instance_selection(float radians) { instance_paint_panel_->turn_selection_(radians); }
+void EditorApp::delete_instance_selection() { instance_paint_panel_->delete_selection_(); }
 void EditorApp::tile_edit_selection(const std::string& label, const std::function<void(toy::world::TileRecord&)>& edit) { tile_mode_panel_->tile_edit_selection(label, edit); }
 TileSelection& EditorApp::tile_selection() { return tile_mode_panel_->tile_selection(); }
 const std::vector<std::string>& EditorApp::tile_set_assets() { return tile_terrain_panel_->tile_set_assets(); }
@@ -406,8 +425,12 @@ bool EditorApp::open_scene(const fs::path& path) {
     toy::world::HeightmapStore::instance().clear();
     tile_mode_panel_->exit_tile_mode_();
     tile_mode_panel_->tile_undo_.clear();
+    instance_paint_panel_->instance_undo_.clear();
     tile_mode_panel_->tile_regen_data_.reset();
     toy::world::TileMapStore::instance().clear();
+    // Painted instances are shared through their own store, keyed by file, for the same reason
+    // the two above are: the editor re-parses components constantly and must not lose records.
+    toy::instance::InstanceSetStore::instance().clear();
     set_view_(AssetType::Scene);
     active_path_ = path;
     sync_.fallback_path = path;
@@ -428,6 +451,7 @@ bool EditorApp::save_scene_as(const fs::path& path) {
         doc_.save(path);
         terrain_panel_->save_terrains_();   // heightmaps and paint layers live in their own files
         tile_mode_panel_->save_tile_maps_();  // ...and tile terrains' tiles in theirs
+        instance_paint_panel_->save_instances_();  // ...and painted instances in theirs
         sync_.fallback_path = path;
         // Instances elsewhere override this asset's parts by name: follow any renames.
         if (doc_.is_object_asset() && active_type_ == AssetType::Object) instances_panel_->follow_asset_renames_(path);
@@ -569,9 +593,16 @@ void EditorApp::scene_undo_() {
     for (const auto& [p, d] : parked_meshes_) {
         if (d.scene_owned && d.undo.top_undo_seq() > best) { best = d.undo.top_undo_seq(); mesh_path = p; }
     }
-    // Terrain strokes (Terrain Mode) are in the same timeline: undo theirs when it is the newest.
-    // ...and so are tile edits (Tile Mode): whichever of the three is newest goes first.
-    const uint64_t terrain_seq = terrain_panel_->terrain_undo_.top_undo_seq(), tile_seq = tile_mode_panel_->tile_undo_.top_undo_seq();
+    // Terrain strokes (Terrain Mode), tile edits (Tile Mode) and painted instances (Instance
+    // Paint Mode) share this one timeline: whichever stack's newest step is the newest overall
+    // goes first, so Ctrl Z walks back through the work in the order it was done.
+    const uint64_t terrain_seq = terrain_panel_->terrain_undo_.top_undo_seq();
+    const uint64_t tile_seq = tile_mode_panel_->tile_undo_.top_undo_seq();
+    const uint64_t inst_seq = instance_paint_panel_->instance_undo_.top_undo_seq();
+    if (inst_seq > best && inst_seq > terrain_seq && inst_seq > tile_seq) {
+        instance_paint_panel_->instance_apply_undo_(false);
+        return;
+    }
     if (tile_seq > best && tile_seq > terrain_seq) { tile_mode_panel_->tile_apply_undo_(false); return; }
     if (terrain_seq > best) { terrain_panel_->terrain_apply_undo_(false); return; }
     if (best == 0) return;
@@ -594,11 +625,34 @@ void EditorApp::scene_redo_() {
     for (const auto& [p, d] : parked_meshes_) {
         if (d.scene_owned && d.undo.redo_fresh()) consider(d.undo.top_redo_seq(), false, p);
     }
-    // Terrain strokes redo in the same order: theirs when it is the oldest undone step.
-    const bool tile_first = tile_mode_panel_->tile_undo_.redo_fresh() &&
-                            (!terrain_panel_->terrain_undo_.redo_fresh() || tile_mode_panel_->tile_undo_.top_redo_seq() < terrain_panel_->terrain_undo_.top_redo_seq());
-    if (tile_first && (best == 0 || tile_mode_panel_->tile_undo_.top_redo_seq() < best)) { tile_mode_panel_->tile_apply_undo_(true); return; }
-    if (terrain_panel_->terrain_undo_.redo_fresh() && (best == 0 || terrain_panel_->terrain_undo_.top_redo_seq() < best)) { terrain_panel_->terrain_apply_undo_(true); return; }
+    // The three brush-mode stacks redo in the same order: the OLDEST undone step first, so redo
+    // retraces exactly the path undo took. `consider` already holds the oldest of the document
+    // and mesh stacks, so each of these only has to beat that and each other.
+    struct SideStack {
+        uint64_t seq;
+        std::function<void()> apply;
+    };
+    std::vector<SideStack> sides;
+    if (terrain_panel_->terrain_undo_.redo_fresh()) {
+        sides.push_back({terrain_panel_->terrain_undo_.top_redo_seq(),
+                         [this]() { terrain_panel_->terrain_apply_undo_(true); }});
+    }
+    if (tile_mode_panel_->tile_undo_.redo_fresh()) {
+        sides.push_back({tile_mode_panel_->tile_undo_.top_redo_seq(),
+                         [this]() { tile_mode_panel_->tile_apply_undo_(true); }});
+    }
+    if (instance_paint_panel_->instance_undo_.redo_fresh()) {
+        sides.push_back({instance_paint_panel_->instance_undo_.top_redo_seq(),
+                         [this]() { instance_paint_panel_->instance_apply_undo_(true); }});
+    }
+    const SideStack* oldest = nullptr;
+    for (const SideStack& side : sides) {
+        if (side.seq != 0 && (oldest == nullptr || side.seq < oldest->seq)) oldest = &side;
+    }
+    if (oldest != nullptr && (best == 0 || oldest->seq < best)) {
+        oldest->apply();
+        return;
+    }
     if (best == 0) return;
     if (scene) { doc_.redo(); queue_rebuild_(); return; }
     if (!activate_scene_mesh_(mesh_path)) return;
@@ -634,6 +688,7 @@ void EditorApp::commit_scene_mesh_() {
     if (!edit_object_) save_mesh();
     force_scene_push_ = true;
     mesh_cache_.clear();
+    ++mesh_cache_epoch_;
     mesh_resolve_cache_.clear();
     stats_cache_.clear();   // mesh totals may have changed
 }
@@ -825,6 +880,7 @@ bool EditorApp::save_mesh() {
                      "but hand-authored LOD meshes may be stale.");
         }
         mesh_cache_.clear();
+        ++mesh_cache_epoch_;
     mesh_resolve_cache_.clear();
     stats_cache_.clear();   // mesh totals may have changed
         return true;
@@ -1127,6 +1183,7 @@ InspectorEnv EditorApp::inspector_env_() {
 void EditorApp::rebuild_scene_() {
     stop();   // set_scene() below replaces every engine scene, a playing one included
     mesh_cache_.clear();
+    ++mesh_cache_epoch_;
     mesh_resolve_cache_.clear();
     stats_cache_.clear();   // mesh totals may have changed
     // Composites fall back to the library's active theme when no Theme component is above
@@ -1285,6 +1342,7 @@ void EditorApp::pre_render_(float dt) {
     if (!playing() || asset_view_()) camera_.make_main();
     sculpt_panel_->sculpt_frame_();
     terrain_panel_->terrain_frame_();
+    instance_paint_panel_->instance_frame_();
     tile_mode_panel_->tile_frame_();
     paint_panel_->paint_frame_();
     timeline_panel_->timeline_frame_(dt);
@@ -2314,6 +2372,7 @@ void EditorApp::handle_viewport_input_(imm::Context& ctx, bool mesh_edit) {
         if (hovered && !ctx.popup_hovered() && !stroke_.active && !paint_stroke_.active && !terrain_panel_->terrain_stroke_.active && !tile_mode_panel_->tile_stroke_.active) scroll_navigate_(in, pinch, shift, ctrl);
         if (hovered && in.pressed[1]) ctx.open_popup("mode_menu_vp", m);
         if (terrain_panel_->in_terrain_mode_()) terrain_panel_->handle_terrain_input_(ctx, *vp, hovered);
+        else if (instance_paint_panel_->in_instance_mode_()) instance_paint_panel_->handle_instance_input_(ctx, *vp, hovered);
         else if (tile_mode_panel_->in_tile_mode_()) tile_mode_panel_->handle_tile_input_(ctx, *vp, hovered);
         else if (in_sculpt_mode_()) sculpt_panel_->handle_sculpt_input_(ctx, *vp, hovered);
         else paint_panel_->handle_paint_input_(ctx, *vp, hovered);
@@ -3022,6 +3081,7 @@ std::string EditorApp::water_grid_to_mesh_(ObjectId id, int water_ci) {
     comp["mesh_path"] = Node(key);
     apply_(doc_.set_component(id, water_ci, comp, "Water grid to mesh", "water_mesh"));
     mesh_cache_.clear();
+    ++mesh_cache_epoch_;
     mesh_resolve_cache_.clear();
     stats_cache_.clear();   // mesh totals may have changed
     log_info("Water grid written to meshes/" + key + ".yaml -- the WaterBody now uses it");
@@ -3271,6 +3331,7 @@ void EditorApp::push_mesh_to_scene_() {
         if (!water_idx.empty()) water->set_geometry(water_pos, water_uv, water_idx);
     }
     mesh_cache_.clear();
+    ++mesh_cache_epoch_;
     mesh_resolve_cache_.clear();
     stats_cache_.clear();   // mesh totals may have changed
 }
@@ -3657,6 +3718,7 @@ void EditorApp::draw_viewport_overlay_body_(imm::Context& ctx, bool mesh_edit, c
     if (paint_panel_->in_brush_mode_()) {
         // No selection outline or wire while sculpting or painting, as in Blender.
         if (terrain_panel_->in_terrain_mode_()) terrain_panel_->draw_terrain_overlay_(ctx, *vp);
+        else if (instance_paint_panel_->in_instance_mode_()) instance_paint_panel_->draw_instance_overlay_(ctx, *vp);
         else if (tile_mode_panel_->in_tile_mode_()) tile_mode_panel_->draw_tile_overlay_(ctx, *vp);
         else if (in_sculpt_mode_()) sculpt_panel_->draw_sculpt_overlay_(ctx, *vp);
         else paint_panel_->draw_paint_overlay_(ctx, *vp);
@@ -3912,6 +3974,7 @@ void EditorApp::save_all_() {
     else {
         terrain_panel_->save_terrains_();
         tile_mode_panel_->save_tile_maps_();
+        instance_paint_panel_->save_instances_();
     }
     if (mesh_.open() && mesh_.dirty()) save_mesh();
     if (material_.open() && material_.dirty()) save_material();

@@ -120,9 +120,15 @@ struct ParticleDrawBatch {
 
 /**
  * @struct ParticleMeshBatch
- * @brief One mesh-mode system: `count` world matrices for one mesh + material, drawn through the
- *        opaque G-buffer and shadow passes as a single instanced batch. `proxy` is a MeshRenderer
- *        the system owns (never attached to the scene) carrying the mesh handle and material.
+ * @brief `count` world matrices for one mesh + material, drawn through the opaque G-buffer and
+ *        shadow passes as a single instanced batch. `proxy` is a MeshRenderer its producer owns
+ *        (never attached to the scene) carrying the mesh handle and material.
+ *
+ * Named for its first producer, mesh-mode particle systems, but it is the engine's general
+ * "many instances of one mesh" contract: the foliage scatter
+ * (toyengine/particles/terrain_scatter.h) and painted instances
+ * (toyengine/instance/instance_painter_system.h) both hand the renderer these. Prefer the
+ * `MeshInstanceBatch` spelling below in new code.
  */
 struct ParticleMeshBatch {
     coopa::gfx::engine::components::MeshRenderer* proxy = nullptr;
@@ -139,6 +145,9 @@ struct ParticleMeshBatch {
     glm::vec3 bounds_min{0.0f};
     glm::vec3 bounds_max{0.0f};
 };
+
+/** @brief What ParticleMeshBatch actually is: one instanced draw of N transforms of one mesh. */
+using MeshInstanceBatch = ParticleMeshBatch;
 
 /**
  * @struct GpuParticleParams

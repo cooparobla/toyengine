@@ -14,6 +14,7 @@
 #include <toyengine/core/engine.h>
 
 #include <toyengine/env/env_system.h>
+#include <toyengine/instance/instance_painter_system.h>
 
 // Includes engine.h no longer carries: these are implementation needs of this file
 // (and of the other engine TUs that previously got them transitively).
@@ -108,6 +109,28 @@ void Engine::sync_particle_render_state_(coopa::scene::Scene& scene) {
         }
         sys->collect_render(scene, view, [&](const glm::vec3& lo, const glm::vec3& hi) {
             if (!cam) return true;
+            render::WorldBounds b;
+            b.center = 0.5f * (lo + hi);
+            b.extent = 0.5f * (hi - lo);
+            return frustum.intersects(b);
+        }, particle_frame_);
+    }
+    // Painted instances join the same mesh-batch list: one instanced, persistently-buffered
+    // draw per (chunk, prototype, part). Same frustum test, so a chunk off screen is never
+    // handed over -- see toyengine/instance/instance_painter_system.h.
+    if (auto* painter = instance::find_instance_painter_system(scene)) {
+        using coopa::gfx::engine::components::CameraComponent;
+        const CameraComponent* cam = CameraComponent::main();
+        glm::vec3 camera_pos(0.0f);
+        render::Frustum frustum{};
+        if (cam != nullptr) {
+            camera_pos = cam->get_world_position();
+            const float aspect = static_cast<float>(pipeline_->render_width()) /
+                                 static_cast<float>(std::max(1u, pipeline_->render_height()));
+            frustum = render::Frustum::from_matrix(cam->get_projection_matrix(aspect) * cam->get_view_matrix());
+        }
+        painter->collect_render(scene, camera_pos, [&](const glm::vec3& lo, const glm::vec3& hi) {
+            if (cam == nullptr) return true;
             render::WorldBounds b;
             b.center = 0.5f * (lo + hi);
             b.extent = 0.5f * (hi - lo);

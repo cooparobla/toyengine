@@ -89,9 +89,10 @@ Each subdirectory has its own README with the details; this is the one-line orie
 | [`app/`](app/README.md) | `EditorApp`, the project/document plumbing, and `ui/` — one file per panel | a panel's contents, app-level commands |
 | [`app/ui/`](app/README.md) | the panels: outliner, properties, assets, timeline, viewport chrome, terrain, weather... | — |
 | [`schema/`](schema/README.md) | component / config / UI / theme **inspector schemas** | **a component's inspector rows** |
-| [`viewport/`](viewport/README.md) | camera, picking, gizmos, modal G/R/S, the UI rect gizmo | a viewport tool |
+| [`viewport/`](viewport/README.md) | camera, picking, surface raycasts, gizmos, modal G/R/S, the UI rect gizmo | a viewport tool |
 | [`mesh/`](mesh/README.md) | `EditMesh` and every modelling, sculpt, paint and weighting operation | a modelling operation |
 | [`terrain/`](terrain/README.md) | heightmap and tile brushes, as pure functions | a terrain brush |
+| [`instance/`](instance/README.md) | the instance painter's brush, as pure functions | an instance-painting brush |
 | [`anim/`](anim/README.md) | the clip model and rig posing behind the Timeline | clip editing |
 | [`core/`](core/README.md) | documents, undo, YAML access, child processes, naming | the data layer |
 | [`build/`](build/README.md) | compile, stage, bundle, sign, package | build or packaging |

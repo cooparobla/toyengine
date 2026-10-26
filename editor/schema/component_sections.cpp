@@ -225,6 +225,30 @@ void apply_component_sections(std::map<std::string, ComponentSchema>& table) {
             .keys({"cast_shadows", "view_distance", "shadow_distance", "patch_resolution"}).closed().done(),
     });
 
+    layout("InstancePainter", {
+        // A live count and the way into Instance Paint Mode, drawn by the painter panel: as with
+        // the terrain, painting is the thing a user opened this inspector to do.
+        sec("Painter", "BrushDraw").custom("InstancePainter.edit").done(),
+        sec("Prototypes", "Object")
+            .says("What the brush can place. An `object` asset brings its own meshes, materials and "
+                  "LODs; a bare `mesh` is the shortcut for a single-mesh rock or tuft. Each entry "
+                  "also carries how its instances vary -- scale, yaw, tilt onto the surface -- and "
+                  "whether they collide.")
+            .keys({"prototypes"}).done(),
+        sec("Data", "Save")
+            .says("The painted records live in their own file beside the scene, not in the scene "
+                  "itself: a world of instances costs nothing here. Ctrl S writes it.")
+            .keys({"data", "chunk_size"}).done(),
+        sec("Collision", "Collider")
+            .says("Colliders are streamed: only instances this far from the camera have one, and "
+                  "only for prototypes that asked. 0 turns the whole thing off.")
+            .keys({"collision_radius"}).closed().done(),
+        sec("Rendering", "Zoom")
+            .says("Instances draw as one instanced batch per chunk, so each culls on its own and "
+                  "thins with distance by the prototype's own draw distance.")
+            .keys({"cast_shadows", "enabled"}).closed().done(),
+    });
+
     // --- Gameplay ------------------------------------------------------------------------
 
     layout("CameraController", {

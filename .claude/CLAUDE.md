@@ -81,12 +81,15 @@ macros (none here).
 
 1. One suite: `./build/tests/toyengine_tests --suite water_waves` (or
    `ctest --test-dir build -R water_waves`).
-2. Unit tier when the suite passes: `ctest --test-dir build -L unit -j4` (~4 s).
-3. GPU suites only for systems you touched: `ctest --test-dir build -L gpu -R <system> -j4`.
-4. The full suite (`ctest --test-dir build -j4`) once, when the work is finished.
+2. Unit tier when the suite passes: `ctest --test-dir build -L unit -j2` (~4 s).
+3. GPU suites only for systems you touched: `ctest --test-dir build -L gpu -R <system> -j2`.
+4. The full suite (`ctest --test-dir build -j2`) once, when the work is finished.
+
+   `-j2`, not more: each GPU test constructs a whole Vulkan device, so `ctest -j2` is already
+   two of them at once. See **Never wedge the machine**.
 
 - Run long builds and GPU runs in the background and wait for the completion notice -- don't
-  poll. Never run two heavy builds or test runs at once.
+  poll. See **Never wedge the machine** below for how, and for the one way that is not allowed.
 - **Never edit a header while a build is in flight.** Growing a struct mid-build leaves some
   TUs compiled against the old layout and some against the new, and the ODR mismatch surfaces
   as a segfault in an *unrelated* test (e.g. `toyengine_app_config` crashing inside
@@ -101,6 +104,52 @@ macros (none here).
   `pkill -f "cmake --build"` takes out every sibling waiter too. Match `cc1plus` / `-x cmake`,
   or poll for a sentinel line the build appends to its log.
 - Headless only, never a visible window: `HEADLESS=1 MAX_FRAMES=120 ./build/toyengine <scene>`.
+
+## Never wedge the machine
+
+**This box has hard-locked three times.** Not an OOM kill -- a frozen desktop and a power
+cycle, losing whatever was unsaved. The arithmetic is why: 31 GB of RAM behind a **2 GB**
+swapfile, one compiler TU peaking at 2.4 GB, and one GPU test constructing a full Vulkan device
+plus a 20-thread JobEngine. Overcommit here does not degrade, it stops.
+
+Four rules. A `PreToolUse` hook (`tools/claude_build_guard.py`, wired in `.claude/settings.json`)
+enforces the first three, because this section existed in prose before and prose was not enough.
+
+1. **Never detach a process.** No `nohup`, no `disown`, no `setsid`, no trailing `&`. A detached
+   job outlives the session, so neither you nor the harness can stop it -- four orphaned `ctest`
+   sweeps stacked up exactly this way and took the machine down. Use the Bash tool's own
+   **`run_in_background: true`**: the harness tracks it, notifies you when it exits, and tears it
+   down with the session.
+
+2. **One heavy job at a time.** A build, a test run, or an app run -- never two, and never a
+   manual `./build/toyengine*` run while `ctest` is going. Before starting one, if you are not
+   certain the machine is idle:
+
+   ```bash
+   pgrep -x 'cc1plus|ctest|toyengine_tests|toyengine_edito|toyengine'   # anything = wait
+   ```
+
+   `pgrep -x` matches the process NAME. **Never `pgrep -f`** for these -- it matches the command
+   line of the shell about to run your own command, so it always "finds" a false positive. Same
+   self-match trap the wait-loop bullet above warns about.
+
+3. **`-j4` for builds, `-j2` for ctest, and never a bare `-j`.** A bare `-j` is one job per core
+   (20 here). Measured 2026-10-24: `-j20` demanded ~48 GB and hard-rebooted the box twice; `-j6`
+   worst-cases at ~14 GB. If another session might be building too, drop to `-j2`.
+
+4. **Clean up before you walk away.** A sweep you started is yours to finish or stop. If a turn
+   ends with one running, say so. If you find an orphan from an earlier session, kill it before
+   starting anything.
+
+**Why GPU tests are the expensive ones.** Each constructs an `Engine`: a Vulkan device, render
+targets, and a 20-worker JobEngine. `ctest -j2` is therefore *two* of those at once, which is
+already the ceiling -- adding a build or a manual engine run on top is what crosses it. The
+editor UI suites are also slow (50-110 s each), so the full sweep is ~20 minutes; start it once,
+at the end, and let it run alone.
+
+**If the guard blocks you**, it is telling you the machine is busy or the command would outlive
+the session. Do not work around it with a different spelling -- wait, or use `run_in_background`.
+To disable it deliberately, the human edits `.claude/settings.json` or uses `/hooks`.
 
 ---
 
@@ -164,6 +213,7 @@ binary silently drops the new component.
 | water, waves, buoyancy | `toyengine/water/` | [water](../toyengine/water/README.md) |
 | weather, sky, atmosphere (the GLOBAL environment) | `toyengine/weather/` | [weather](../toyengine/weather/README.md) |
 | LOCAL environmental influences -- a rotor's downwash, a vent, a sword swing gusting foliage; the `EnvField` every wind reactor samples | `toyengine/env/` | [env](../toyengine/env/README.md) |
+| painted object instances -- brush-placed props, instanced rendering, streamed collision | `toyengine/instance/` | [instance](../toyengine/instance/README.md) |
 | particles | `toyengine/particles/` | [particles](../toyengine/particles/README.md) |
 | save slots, `ISaveable` | `toyengine/save/` | [save](../toyengine/save/README.md) |
 | audio, music, buses | `toyengine/audio/` | [audio](../toyengine/audio/README.md) |
@@ -230,6 +280,7 @@ Start at [`editor/README.md`](../editor/README.md) (the developer tour) and
 | **a viewport tool** — gizmos, modal G/R/S, camera, picking | [`editor/viewport/`](../editor/viewport/README.md) |
 | **a modelling / sculpt / paint operation** | [`editor/mesh/`](../editor/mesh/README.md) — pure functions over `EditMesh`, unit-tested |
 | **a terrain brush** | [`editor/terrain/`](../editor/terrain/README.md) — pure functions over the terrain data |
+| **an instance-painting brush** | [`editor/instance/`](../editor/instance/instance_brush.h) — pure functions; the mode itself is `editor/app/ui/instance_paint.h` |
 | **visual presentation** — editor colours, metrics, chrome | `editor/app/editor_theme.h`, `editor/themes/`, [`editor/ui/`](../editor/ui/README.md) |
 | **a component inspector** — rows, widgets, ranges, defaults, sections | [`editor/schema/`](../editor/schema/README.md) ← *this is the one people mean by "upgrade the inspector"*. Keys in `component_schema.cpp`, their grouping in `component_sections.cpp`, hand-written blocks in `sections/` via `register_inspector_section()` |
 | **a settings screen** (Render / Project Settings) | `editor/schema/settings_schema.cpp` |

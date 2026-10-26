@@ -1280,6 +1280,47 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                 f_int("layer_texture_size", 1024, 4, 4096),
             }});
         }
+        // Painted instances (toyengine/instance/). The records are NOT fields: they live in a
+        // `.instances` file beside the scene, and `data:` is the only trace of them here.
+        {
+            // The palette starts EMPTY on purpose: a prototype has to name an object asset or a
+            // mesh, and a placeholder entry naming neither is a component the engine refuses to
+            // load. Add Component then Prototypes > Add is the path.
+            const Node prototypes_default = Node::sequence();
+            add({"InstancePainter", "World", {
+                with_tip(f_string("data", ""),
+                         "The `.instances` file holding the painted records (scene-relative); "
+                         "default instances/<object>.instances"),
+                with_tip(f_float("chunk_size", 32.0f, 0.5f, 4.0f, 512.0f, true),
+                         "Metres per chunk -- the draw, cull, collide and file unit. Match the terrain's chunks"),
+                f_items("prototypes", {
+                    with_tip(f_asset("object", "objects", ".yaml", true, false), "An object asset to paint; or use `mesh`"),
+                    with_tip(f_asset("mesh", "meshes", ".yaml", true, true), "A bare mesh to paint, instead of an object asset"),
+                    f_string("name", ""),
+                    with_tip(f_enum("collision", {"none", "auto", "box", "sphere", "capsule", "mesh"}, true),
+                             "What its instances collide as, within the painter's Collision Radius. "
+                             "`auto` fits a capsule to anything taller than it is wide, else a box"),
+                    with_tip(f_vec3("collision_size", glm::vec3(0.0f), 0.05f), "Explicit collider extents; 0 fits them to the bounds"),
+                    with_tip(f_float("collision_radius", 0.0f, 0.01f, 0.0f, 100.0f), "Explicit collider radius; 0 fits it to the bounds"),
+                    with_tip(f_asset("collision_mesh", "meshes", ".yaml", true, true),
+                             "`collision: mesh` only: a simplified mesh to collide against. Empty uses the render mesh"),
+                    f_string("physics_material", ""),
+                    with_tip(f_vec2("scale_range", glm::vec2(1.0f), 0.01f, true), "Each instance takes a uniform scale in this range"),
+                    with_tip(f_vec2("yaw_range", glm::vec2(0.0f, 360.0f), 1.0f), "Yaw about the surface normal, degrees"),
+                    with_tip(f_float("align_to_normal", 0.0f, 0.01f, 0.0f, 1.0f),
+                             "0 stands every instance up; 1 lies it flat on the surface. Trees want a little, rocks a lot"),
+                    with_tip(f_float("sink", 0.0f, 0.005f, 0.0f, 5.0f), "Metres pushed into the surface, so nothing is perched on a slope"),
+                    with_tip(f_float("draw_distance", 0.0f, 1.0f, 0.0f, 20000.0f), "Metres past which it is not drawn; 0 derives one from its height"),
+                    with_tip(f_float("fade_start", 0.6f, 0.01f, 0.0f, 1.0f), "Thinning begins at this fraction of the draw distance"),
+                    f_bool("cast_shadows", true),
+                }, prototypes_default, true),
+                with_tip(f_float("collision_radius", 64.0f, 1.0f, 0.0f, 4000.0f, true),
+                         "Metres from the camera within which collidable instances have colliders. "
+                         "0 turns collision off entirely, whatever the prototypes ask for"),
+                f_bool("cast_shadows", true),
+                with_tip(f_bool("enabled", true), "Off leaves the records untouched but draws and collides nothing"),
+            }});
+        }
         add({"TileTerrain", "World", tile_terrain_fields()});
         add({"Terrain", "World", tile_terrain_fields()});   // the unified name; `mode:` picks the half
 

@@ -103,6 +103,11 @@ Grass**, **Add Trees**, **Add Rocks**. Each is a scatter particle system: select
 which layer it grows on, how dense it is, the slopes and heights it allows, its mesh and how far
 away it still draws. Painting and sculpting re-scatter the plants as you go.
 
+This is scattering by *rules*, which is what you want for ground cover over a whole landscape.
+To place things by hand -- a copse of trees here, rocks along that ridge, a fence on a grid --
+use an Instance Painter instead: see [Painting instances](instance-painting.md). Most worlds use
+both, a scatter for the grass and a painter for everything you chose the position of.
+
 ## Undo and saving
 
 Every stroke is one step of the scene's undo history (**Ctrl+Z**). The terrain's shape and paint

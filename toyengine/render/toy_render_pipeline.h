@@ -1519,8 +1519,13 @@ private:
     /// Replaced / dropped buffers, kept until command buffers in flight are done with them.
     std::vector<std::pair<uint64_t, std::unique_ptr<coopa::gfx::memory::Buffer>>> static_graveyard_;
     uint64_t static_frame_ = 0;
-    /** @brief The persistent buffer for `pb` (uploading it if new or changed). */
-    const coopa::gfx::memory::Buffer* static_instances_for_(const ParticleMeshBatch& pb);
+    /**
+     * @brief The persistent buffer for `pb` (uploading it if new or changed).
+     * @param unchanged Set to true when the existing buffer was reused -- i.e. the batch's
+     *        instances did not move this frame, which is what keeps a world of painted static
+     *        props from holding the temporal freeze open forever (see `scene_moved_`).
+     */
+    const coopa::gfx::memory::Buffer* static_instances_for_(const ParticleMeshBatch& pb, bool* unchanged = nullptr);
     /** @brief Ages the graveyard and drops buffers unused for a while; once per frame. */
     void tick_static_instances_();
     bool tess_warned_unsupported_ = false;

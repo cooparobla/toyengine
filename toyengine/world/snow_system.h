@@ -41,6 +41,7 @@
 #include <coopa/scene/scene.h>
 #include <fkYAML/node.hpp>
 
+#include <toyengine/env/env_field.h>
 #include <toyengine/world/snow_field.h>
 
 namespace toy {
@@ -99,6 +100,13 @@ private:
     void press_(coopa::scene::SceneObject& obj, float radius, float depth, float falloff);
 
     SnowField field_;
+    /// Deep-snow depth (m) a purely LOCAL pile gets in a scene whose weather sets none. The
+    /// weather's own `snow_max_depth` wins whenever it has one.
+    static constexpr float kLocalSnowDepth = 0.3f;
+
+    /// This frame's environment, latched so the const depth_at() query can fold the local snow
+    /// channel exactly as the shader does.
+    env::EnvField env_;
     float cover_ = 0.0f;
     float max_depth_ = 0.0f;
     float fallback_ground_ = 0.0f;

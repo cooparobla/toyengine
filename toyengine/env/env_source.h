@@ -77,7 +77,8 @@ struct EnvSource {
     // --- Surface and ground ---
     float wetness = 0.0f;      ///< 0..1 added surface wetness.
     float temperature = 0.0f;  ///< Degrees C offset (CPU only -- nothing on the GPU reads it).
-    float snow_clear = 0.0f;   ///< 0..1 how hard it scours lying snow.
+    float snow = 0.0f;         ///< 0..1 lying-snow cover added here, whatever the weather is doing.
+    float snow_clear = 0.0f;   ///< 0..1 how hard it scours lying snow (the subtractive twin).
     float water_disturb = 0.0f;  ///< 0..1 ripple rings on water beneath it.
 };
 

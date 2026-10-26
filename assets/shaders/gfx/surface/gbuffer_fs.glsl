@@ -41,7 +41,7 @@ layout(push_constant) uniform PushConstants {
     vec4  emissive;     // xyz = pre-multiplied emissive radiance, w reserved
     vec4  gfx_time;     // x=time, y=delta_time, z=frame_index, w=spare
     vec4  gfx_params;   // four author-defined floats; see the surface shader's own doc
-    uvec4 surface_ext; // x/y packed tessellation params, z flags (bit 0: no snow), w toon code
+    uvec4 surface_ext; // x/y packed tessellation params, z flags (bit 0: no snow, bit 1: wet), w toon code
 } material;
 
 // See gbuffer_vs.glsl's identical aliases for why these exist: a surface file's
@@ -50,7 +50,7 @@ layout(push_constant) uniform PushConstants {
 vec4 gfx_time   = material.gfx_time;
 vec4 gfx_params = material.gfx_params;
 
-// Set 2: the surface world -- see gfx/surface/world.glsl. The snow cover layer below reads it.
+// Set 2: the surface world -- see gfx/surface/world.glsl. The snow and wet layers below read it.
 #define GFX_WORLD_SET 2
 #include <gfx/surface/world.glsl>
 #include <gfx/surface/snow.glsl>
@@ -110,6 +110,12 @@ void gfx_surface_fragment(inout GfxSurface s);
 #else
 void gfx_surface_fragment(inout GfxSurface s) {}
 #endif
+
+// The wet layer, included HERE rather than beside snow.glsl above: gfx_snow_apply is a macro and
+// so survives being defined before GfxSurface exists, but gfx_wet_apply is a real function
+// taking `inout GfxSurface` and needs the struct. Its include guard makes the terrain shaders'
+// own includes no-ops.
+#include <gfx/surface/wetness.glsl>
 
 // GFX_SURFACE_KEEP_BACKFACE_NORMAL (define before including): a two-sided surface keeps its
 // authored normal on BOTH sides instead of flipping it on the back face. For vegetation, whose
@@ -174,15 +180,37 @@ void main() {
 
     gfx_surface_fragment(s);
 
-    // Lying snow on the open, up-facing parts (gfx/surface/snow.glsl), over whatever the hook
-    // made -- unless the material (surface_ext.z bit 0) or the shader opts out.
-#ifndef GFX_SURFACE_NO_SNOW
-    if ((material.surface_ext.z & 1u) == 0u && gfx_world.snow.x > 0.0) {
+    // The GEOMETRIC normal, shared by both surface layers below. Guarded so a shader that
+    // compiles both of them out (snow.frag, editor_paint.frag) does not carry a dead normalize.
+#if !defined(GFX_SURFACE_NO_SNOW) || !defined(GFX_SURFACE_NO_WET)
 #ifdef GFX_SURFACE_KEEP_BACKFACE_NORMAL
-        vec3 geo_n = normalize(frag_world_normal);
+    vec3 geo_n = normalize(frag_world_normal);
 #else
-        vec3 geo_n = normalize(gl_FrontFacing ? frag_world_normal : -frag_world_normal);
+    vec3 geo_n = normalize(gl_FrontFacing ? frag_world_normal : -frag_world_normal);
 #endif
+#endif
+
+    // Rain and local wet patches (gfx/surface/wetness.glsl). Opt IN per material
+    // (surface_ext.z bit 1) -- see PBRMaterial::wet for why this one is not opt-out.
+    //
+    // The gate cannot copy the snow one below: `gfx_world.snow.z > 0.0` is the WEATHER's
+    // wetness, which is zero in clear weather, and a local EnvInfluence puddle in clear weather
+    // is exactly the case this exists for. `terrain_count.y` is the live local-source count.
+#ifndef GFX_SURFACE_NO_WET
+    if ((material.surface_ext.z & 2u) != 0u &&
+        (gfx_world.snow.z > 0.0 || gfx_world.terrain_count.y > 0)) {
+        // Puddles flatten the normal toward world +Z, which is only true of up-facing ground;
+        // both terrain callers gate it on flatness and so must this one, or walls turn to glass.
+        gfx_wet_apply(s, geo_n, smoothstep(0.96, 0.995, geo_n.z));
+    }
+#endif
+
+    // Lying snow on the open, up-facing parts (gfx/surface/snow.glsl), over whatever the hook
+    // made -- unless the material (surface_ext.z bit 0) or the shader opts out. After the wet
+    // layer, matching the order the terrain shaders already use.
+#ifndef GFX_SURFACE_NO_SNOW
+    if ((material.surface_ext.z & 1u) == 0u &&
+        (gfx_world.snow.x > 0.0 || gfx_world.terrain_count.y > 0)) {
         gfx_snow_apply(s, geo_n, gfx_snow_pattern_xy(frag_snow_pos, frag_snow_up));
     }
 #endif

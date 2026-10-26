@@ -2,15 +2,15 @@
 #
 # Run: ./build/toyengine environment_demo      (or SCENE=environment_demo)
 #
-# A grass clearing ringed with pines. One environment plays at its centre; the bar along the
-# bottom switches between six of them, and the camera orbits the clearing so you can look at
-# the effect from any side.
+# A grass clearing ringed with pines. One environment plays at its centre; the panel at the
+# top left switches between eight of them, and the camera orbits the clearing so you can look
+# at the effect from any side. Click the panel's header to fold it away.
 #
 #   RIGHT-DRAG   turn the camera around the clearing
 #   WHEEL        zoom
-#   the bar      pick an environment
+#   the panel    pick an environment (click its header to fold it away)
 #
-# The six presets are ordered so each answers a question the last one raised:
+# The eight presets are ordered so each answers a question the last one raised:
 #
 #   Calm            nothing. The baseline -- this is the still clearing.
 #   Rotor Downwash  a radial source pressing DOWN: the grass fans outward from under the rotor
@@ -19,6 +19,10 @@
 #                   `swing` event: a one-shot gust that the ferns snap to and recover from
 #   Steam Vent      the same radial source with `vertical` POSITIVE: an updraft. The steam
 #                   climbs its column instead of blowing downwind, and the grass stands up
+#   Puddle          surface wetness and nothing else: no wind at all. Only materials that opt in
+#                   with `wet: true` darken, which is why the ground does and the rocks do not
+#   Snow Pile       snow lying in one spot with the weather set to `still` and no snowfall --
+#                   the shaders take max(weather cover, local), so a pile needs nothing from the sky
 #   Gale            no local source at all -- the GLOBAL weather wind, for contrast
 #   Gale + Shelter  the gale still blowing, plus an `override` source inside the stone ring:
 #                   the meadow outside streams while the grass inside stands still
@@ -27,9 +31,10 @@
 # clip event fires the swing's pulse, and EnvPresetSwitcher (toyengine/env/env_preset.h)
 # activates one preset subtree at a time and blends the weather with it. No game code.
 #
-# The bar is a scene-local UI asset (ui/presets.yaml next to this file). Its buttons publish
-# their clicks under their own object names on the scene event bus; the switcher listens on
-# those six names and knows nothing about the UI.
+# The panel is a scene-local UI asset (ui/presets.yaml next to this file), themed with
+# ui/themes/blender.yaml -- the editor's own palette. Its buttons publish their clicks under
+# their own object names on the scene event bus; the switcher listens on those eight names and
+# knows nothing about the UI.
 #
 # Needs render transparency_enabled (dust, steam) and volumetrics_enabled (the vent's column),
 # both on in assets/config.yaml. Worth sweeping: the rotor's `vertical` from -4 to -24, and the
@@ -102,6 +107,7 @@ scene:
             albedo: { r: 0.26, g: 0.32, b: 0.15 }
             roughness: 0.95
             metallic: 0.0
+            wet: true          # opts in to the wet layer, so a local puddle darkens and pools
         - type: BoxCollider
         - { type: WeatherSurface, splashes: true }
 
@@ -420,6 +426,82 @@ scene:
               falloff: 0.7
               wind_influence: 1.0        # the local updraft carries it, not the gale
 
+    - name: preset_puddle
+      active: false
+      components:
+        - type: Transform
+          position: { x: 0, y: 0, z: 0.05 }
+        # Pure surface wetness -- no wind at all. The ground reads it because its material
+        # opts in with `wet: true`; a material that does not is left dry.
+        - type: EnvInfluence
+          shape: sphere
+          radius: 4.5
+          falloff: 0.7
+          mode: directional
+          wetness: 1.0
+          temperature: -3
+          blend: add
+      children:
+        - name: standpipe
+          components:
+            - type: Transform
+              position: { x: 0.9, y: 0.6, z: 0.85 }
+              scale: { x: 0.2, y: 0.2, z: 1.7 }
+            - type: MeshRenderer
+              mesh_path: primitives/cube
+              material: { albedo: { r: 0.30, g: 0.33, b: 0.35 }, roughness: 0.5, metallic: 0.7 }
+        - name: drip
+          components:
+            - type: Transform
+              position: { x: 0.9, y: 0.6, z: 1.6 }
+            - type: ParticleSystem
+              rate: 26
+              start_lifetime: [0.6, 0.9]
+              start_size: [0.04, 0.09]
+              start_speed: [0.3, 1.0]
+              gravity: 9.0
+              shape: cone
+              radius: 0.08
+              angle: 30
+              color_over_life: [[0, {r: 0.70, g: 0.82, b: 0.88, a: 0.85}], [1, {r: 0.70, g: 0.82, b: 0.88, a: 0.2}]]
+
+    - name: preset_snowpile
+      active: false
+      components:
+        - type: Transform
+          position: { x: 0, y: 0, z: 0 }
+        # Lies snow in one spot with the weather set to `still` and no snowfall anywhere. The
+        # shaders take max(weather cover, this), so the pile needs nothing from the sky.
+        - type: EnvInfluence
+          shape: sphere
+          radius: 4.0
+          falloff: 0.6
+          mode: directional
+          snow: 0.95
+          temperature: -12
+          blend: add
+      children:
+        # A few boulders for the cover to catch on, so the pile reads as depth rather than
+        # as a white circle painted on flat ground.
+        - name: pile_rocks
+          components:
+            - type: Transform
+              position: { x: 0, y: 0, z: -0.1 }
+            - type: ParticleSystem
+              mode: scatter
+              shape: circle
+              radius: 2.6
+              count: 7
+              seed: 19
+              random_spin: true
+              start_size: [0.5, 0.9]
+              render_mode: mesh
+              render_mesh: nature/boulder
+              material:
+                albedo: { r: 0.22, g: 0.21, b: 0.19 }
+                roughness: 0.95
+                metallic: 0.0
+
     - name: preset_shelter
       active: false
       components:
@@ -541,7 +623,7 @@ scene:
     # ---------------------------------------------------------------------------------------
     # The panel, and the switcher that listens to it.
     # ---------------------------------------------------------------------------------------
-    - name: preset_bar
+    - name: preset_panel
       prefab: ui/presets
       components:
         - type: EnvPresetSwitcher
@@ -568,6 +650,16 @@ scene:
               object: preset_vent
               condition: still
               blurb: "Steam vent: the same radial source with `vertical` POSITIVE. The plume climbs its column instead of blowing downwind."
+            - name: puddle
+              button: BtnPuddle
+              object: preset_puddle
+              condition: still
+              blurb: "A local wet patch: surface wetness, no wind. Only materials with `wet: true` darken -- the ground here does."
+            - name: snowpile
+              button: BtnSnowPile
+              object: preset_snowpile
+              condition: still
+              blurb: "Snow lying in one spot with no snowfall at all: the shaders take max(weather cover, local)."
             - name: gale
               button: BtnGale
               object: ""

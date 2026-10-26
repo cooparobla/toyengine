@@ -29,14 +29,22 @@ void gfx_surface_vertex(inout GfxSurfaceVertex v) {
 /// Deep snow's look over whatever `s` holds: snow where it lies deep, the surface showing through
 /// trenches and thin edges, normals from the snow height field.
 void gfx_deep_snow_fragment(inout GfxSurface s) {
-    if (gfx_world.snow.x <= 0.0 || gfx_world.snow.y <= 0.0) return;
+    // Local sources can lay snow where the weather has none, so the global cover alone no
+    // longer decides whether there is anything to draw.
+    if (gfx_world.snow.y <= 0.0) return;
+    if (gfx_world.snow.x <= 0.0 && gfx_world.terrain_count.y <= 0) return;
     // The height field at this fragment's xy (the displacement is +Z only). Its z enters only
     // through the soft open-sky test, which a few centimetres either way does not move.
     vec3 base = s.position_ws;
     const float e = 0.05;   // finite-difference step for the cheap terms (5 cm)
     float h, lying, edge = 1.0;
     vec2 grad;
-    if (gfx_world.snow_style.x > 0.5) {
+    // Hard patches hoist `cover` out of their analytic gradient as a CONSTANT. A local pile
+    // makes cover vary with position, which would need a d(cover)/dxy term here and in the
+    // patch-mask slope. Rather than carry that, fall back to the soft branch -- whose finite
+    // differences are correct for any height field -- whenever local sources are live. Hard
+    // patches and a local pile therefore do not combine; everything else does.
+    if (gfx_world.snow_style.x > 0.5 && gfx_world.terrain_count.y <= 0) {
         // Hard patches: h = A * M - T, with A = depth * cover * open (cheap), M the patch mask
         // (the expensive pattern) and T the trench (cheap). The pattern is evaluated ONCE, with
         // its analytic gradient, for the mask, the normal and the crisp colour edge -- not once

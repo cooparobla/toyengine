@@ -18,7 +18,9 @@
 
 /// The settled snow surface above p before anything pressed in (m).
 float gfx_snow_lying_height(vec3 p) {
-    float cover = gfx_world.snow.x;
+    // max(), not sum: the weather's cover and a local pile are two independent statements about
+    // the same ground, and a pile must work in a snowless scene (see gfx_env_snow_at).
+    float cover = max(gfx_world.snow.x, gfx_env_snow_at(p));
     float depth = gfx_world.snow.y;
     if (cover <= 0.0 || depth <= 0.0) return 0.0;
     float open = gfx_world_open_sky(p + vec3(0.0, 0.0, 0.35 + 0.35 * gfx_world.occl.z), 0.5);

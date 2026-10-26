@@ -1,12 +1,14 @@
 # environment_demo: editor-style collapsible panel, a puddle and a snow pile
 
-> **Status: designed, nothing landed.** Parked in favour of
-> [`2026-10-26_fire.md`](2026-10-26_fire.md), which needs the wetness plumbing below anyway
-> (rain suppresses fire), so the puddle largely falls out of that work.
+> **Status: LANDED 2026-10-26.** Full suite 182/182, unchanged from the baseline taken before
+> the work, so nothing regressed. Eleven new assertions across `env_field` and `env_render`.
 >
-> **Difficulty: moderate.** Three independent pieces: a UI rewrite plus a one-line uicoopa fix,
-> an opt-in material key through the opaque G-buffer backbone, and a new local snow channel
-> through the env field. No new system, no new area.
+> [`2026-10-26_fire.md`](2026-10-26_fire.md) is next, and inherits the wetness plumbing below
+> (rain suppresses fire) plus the `ext.z` bit layout.
+>
+> **Difficulty: moderate** — as estimated. Three independent pieces: a UI rewrite plus a
+> one-line uicoopa fix, an opt-in material key through the opaque G-buffer backbone, and a new
+> local snow channel through the env field. No new system, no new area.
 
 ## Why
 
@@ -191,7 +193,24 @@ ctest --test-dir build -j2
 ```
 
 Per the project build rules: `-j4` for builds, `-j2` for ctest, one heavy job at a time, and
-`run_in_background` rather than detaching.
+`run_in_background` rather than detaching. Note the guard picks its cap by scanning the WHOLE
+command for `\bctest\b`, so chaining a build and a test run on one line applies the test cap of
+2 to the build as well -- keep them in separate invocations.
+
+## What the implementation changed about this plan
+
+- **`ext.z` bit 2 is now the next free one** (0 = `snow: false`, 1 = `wet: true`). Fire's
+  `burns: false` takes 4u, as its plan already assumes.
+- **`SnowSystem` needed more than the plan said.** `depth_at()` is a *const* query callable
+  between frames, so the env field had to be latched per frame into the system rather than
+  sampled on demand; and a purely local pile in a scene whose weather sets no `snow_max_depth`
+  had nothing to scale, so there is now a `kLocalSnowDepth` fallback.
+- **The `geo_n` hoist needs a guard.** `snow.frag` and `editor_paint.frag` compile both surface
+  layers out, so an unguarded hoist leaves them a dead `normalize`.
+- **Two test traps worth remembering**, both of which look like product bugs at first: a
+  full-width `band_mean` includes the panel, whose highlighted button moves between captures;
+  and a tolerance tighter than the renderer's frame-to-frame dither (SSAO rotation, SSR jitter)
+  fails on noise. The fixture documents the dither; trust it over a tight number.
 
 ## Verification
 

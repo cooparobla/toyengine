@@ -435,7 +435,7 @@ void apply_component_sections(std::map<std::string, ComponentSchema>& table) {
             .keys({"wetness", "temperature"}).closed().done(),
         sec("Ground Effects", "Terrain")
             .says("What it does to lying snow, and to water beneath it.")
-            .keys({"snow_clear", "water_disturb"}).closed().done(),
+            .keys({"snow", "snow_clear", "water_disturb"}).closed().done(),
         sec("Blending", "Proportional")
             .says("How it combines with the global weather and with other influences.")
             .keys({"blend", "strength", "enabled"}).done(),

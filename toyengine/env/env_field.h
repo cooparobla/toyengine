@@ -176,6 +176,21 @@ inline float wetness_at(const EnvField& f, glm::vec3 p) {
 }
 
 /**
+ * @brief Lying-snow cover at `p`, 0..1, from local sources alone.
+ *
+ * The weather's own cover is NOT folded in here: it is a separate global the snow shaders
+ * already have, and they combine the two with max() rather than summing. A pile in a snowless
+ * scene is this channel on its own.
+ *
+ * @param f The field.
+ * @param p The world point.
+ * @return float Clamped to 0..1.
+ */
+inline float snow_at(const EnvField& f, glm::vec3 p) {
+    return std::clamp(env_fold_scalar_(f, p, 0.0f, &EnvSource::snow), 0.0f, 1.0f);
+}
+
+/**
  * @brief Temperature at `p` in degrees C: the weather's, offset by local sources.
  *
  * @param f The field.

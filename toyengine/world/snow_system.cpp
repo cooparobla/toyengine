@@ -40,6 +40,11 @@ void SnowSystem::execute(coopa::scene::Scene& scene, const coopa::scene::FrameCo
     occlusion_ = live ? w->ground_probe().field() : nullptr;
     fallback_ground_ = live ? w->settings().ground_height : 0.0f;
     style_ = live ? SnowStyle{w->settings().snow_patch_hard, w->settings().snow_patch_size} : SnowStyle{};
+    // Latched for depth_at(), which is a const query callable between frames.
+    if (const env::EnvSystem* es = env::find_env(scene)) env_ = es->field();
+    else env_ = env::EnvField{};
+    // A local pile needs a depth to scale even in a scene whose weather never snows.
+    if (max_depth_ <= 0.0f && env::has_sources(env_)) max_depth_ = kLocalSnowDepth;
 
     auto* cam = coopa::gfx::engine::components::CameraComponent::main();
     if (cam && cam->owner && cam->owner->get_transform()) {
@@ -47,8 +52,8 @@ void SnowSystem::execute(coopa::scene::Scene& scene, const coopa::scene::FrameCo
         field_.set_focus(focus_point(glm::vec3(m[3]), -glm::normalize(glm::vec3(m[2])), ground_at_(glm::vec2(m[3])),
                                      0.5f * static_cast<float>(field_.n()) * field_.cell() - 4.0f));
     }
-    if (!live || cover_ <= 0.0f) {
-        // No snow lying: nothing to keep.
+    if (cover_ <= 0.0f && !env::has_sources(env_)) {
+        // No snow lying anywhere -- neither the weather's nor a local pile's.
         if (had_trenches_) { field_.clear(); had_trenches_ = false; }
         return;
     }
@@ -112,7 +117,15 @@ glm::vec2 SnowSystem::focus_point(const glm::vec3& cam_pos, const glm::vec3& for
 }
 
 float SnowSystem::depth_at(const glm::vec2& xy, float ground_z) const {
-    return deep_snow_depth(glm::vec3(xy, ground_z), max_depth_, cover_, occlusion_.get(), &field_, style_);
+    const glm::vec3 p(xy, ground_z);
+    // Mirror gfx_snow_lying_height(): cover is max(weather, local), and the hard-patch style is
+    // dropped while local sources are live, because the shader falls back to its soft branch
+    // there (snow_surface.glsl explains why). Keeping the two in step is what lets gameplay
+    // trust this against what is drawn.
+    const float local = env::snow_at(env_, p);
+    const float cover = std::max(cover_, local);
+    const SnowStyle style = env::has_sources(env_) ? SnowStyle{} : style_;
+    return deep_snow_depth(p, max_depth_, cover, occlusion_.get(), &field_, style);
 }
 
 float SnowSystem::ground_at_(const glm::vec2& xy) const {

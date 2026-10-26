@@ -264,6 +264,7 @@ const std::vector<FieldDesc>& material_fields() {
         with_tip(with_unit(f_float("displacement_scale", 0.05f, 0.005f, -10.0f, 10.0f), "m"),
                  "Metres a white displacement texel moves"),
         with_tip(f_bool("snow", true), "Lying snow settles on this material's open, up-facing surfaces when the weather has it"),
+        with_tip(f_bool("wet", false), "Rain and local wet patches darken this material and pool on its up-facing parts. Off by default: the stock rain / storm conditions carry wetness, so switching this on everywhere would restyle every wet scene"),
         // Toon (cel) shading, layered on this material's PBR inputs -- see PBRMaterial's
         // toon_* docs. Opaque materials only; a BLEND material ignores these.
         with_tip(f_int("toon_bands", 0, 0, 8), "Cel-shaded diffuse: how many light steps. 0 leaves this material PBR"),
@@ -308,7 +309,7 @@ const std::vector<InspectorSection>& material_sections() {
         sec("Stylize", "Palette")
             .says("Cel shading, layered on the PBR result above. Opaque materials only.")
             .keys({"toon_bands", "toon_specular", "toon_rim", "toon_softness", "toon_outline"}).closed().done(),
-        sec("Weather", "World").keys({"snow"}).closed().done(),
+        sec("Weather", "World").keys({"snow", "wet"}).closed().done(),
     };
     return sections;
 }
@@ -850,9 +851,13 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                      "Extra foliage flutter and particle noise inside the shape"),
             with_tip(as_slider(f_float("wetness", 0.0f, 0.01f, -1.0f, 1.0f)),
                      "Surface wetness added here -- a burst pipe, a spray zone. Negative is a local dry "
-                     "zone. Shows on heightmap terrain"),
+                     "zone. Shows on terrain, and on any material with `wet: true`"),
             with_unit(with_tip(f_float("temperature", 0.0f, 0.1f, -200.0f, 200.0f),
                                "Offset on the ambient temperature. Gameplay only -- nothing is drawn from it"), "C"),
+            with_tip(as_slider(f_float("snow", 0.0f, 0.01f, 0.0f, 1.0f)),
+                     "Lies snow here whatever the weather is doing -- a drift against a wall, a patch "
+                     "the sun never reaches. Combined with the weather's own cover by max(), so it "
+                     "works in a scene that never snows"),
             with_tip(as_slider(f_float("snow_clear", 0.0f, 0.01f, 0.0f, 1.0f)),
                      "How hard it scours lying snow, as a fraction of the full depth. Tracks drift back "
                      "in like a SnowDeformer's"),

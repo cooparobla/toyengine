@@ -97,7 +97,8 @@ float gfx_snow_amount(vec3 p, vec2 pattern_xy, vec3 geo_n, float cover) {
 /// Lays the snow on a finished surface. geo_n: the geometric world normal (front-facing).
 #define gfx_snow_apply(s, geo_n, pattern_xy)                                                      \
     {                                                                                              \
-        float gfx_snow_a_ = gfx_snow_amount((s).position_ws, (pattern_xy), (geo_n), gfx_world.snow.x); \
+        float gfx_snow_cover_ = max(gfx_world.snow.x, gfx_env_snow_at((s).position_ws));           \
+        float gfx_snow_a_ = gfx_snow_amount((s).position_ws, (pattern_xy), (geo_n), gfx_snow_cover_); \
         if (gfx_snow_a_ > 0.0) {                                                                   \
             float gfx_snow_sparkle_ = gfx_snow_hash_(floor((pattern_xy) * 40.0)) * 0.06;             \
             (s).albedo    = mix((s).albedo, GFX_SNOW_ALBEDO + gfx_snow_sparkle_, gfx_snow_a_);      \

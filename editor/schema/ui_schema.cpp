@@ -199,7 +199,11 @@ void add_ui_schemas(const std::function<void(ComponentSchema)>& add) {
     add({"TabView", "UI Composites", {with_tip(f_strings("tabs", {"General", "Advanced"}, true), "One tab per entry; the object's children fill them in order"),
                                       with_tip(f_float("tab_height", 32.0f, 0.5f, 8.0f, 200.0f), "Unset: the theme's value"),
                                       with_tip(f_float("tab_spacing", 4.0f, 0.5f, 0.0f, 100.0f), "Unset: the theme's value")}});
-    add({"Collapsible", "UI Composites", {f_string("title", "Section", true), f_bool("start_expanded", true), f_bool("boxed", true)}});
+    add({"Collapsible", "UI Composites", {f_string("title", "Section", true), f_bool("start_expanded", true), f_bool("boxed", true),
+                                          with_tip(f_float("expanded_extent", -1.0f, 1.0f, -1.0f, 4000.0f),
+                                                   "Open height to restore when expanding. Needed inside a layout group: "
+                                                   "a collapse shrinks the object to its header, and nothing can work out "
+                                                   "what to grow back to. -1: never resize")}});
     auto menu = [&](const char* dir, const char* align) {
         return std::vector<FieldDesc>{
             f_items("items", button_item_fields, button_items({{"Play", "Play"}, {"Options", "Options"}, {"Quit", "Quit"}}), true),

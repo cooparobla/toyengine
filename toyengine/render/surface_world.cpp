@@ -95,6 +95,7 @@ void SurfaceWorldData::upload(uint32_t frame_slot, const SurfaceFrameState& s, c
         if (e.blend == env::EnvBlend::Override) flags |= kEnvBlendOverride;
         g.params = glm::vec4(std::clamp(e.falloff, 0.0f, 1.0f), std::max(e.height, 0.0f),
                              static_cast<float>(flags), e.wetness);
+        g.surface = glm::vec4(std::clamp(e.snow, 0.0f, 1.0f), 0.0f, 0.0f, 0.0f);
     }
     u.terrain_count = glm::ivec4(terrains, sources, 0, 0);
     ubo_[k].upload(&u, sizeof(u));

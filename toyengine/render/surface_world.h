@@ -84,15 +84,18 @@ enum TerrainGpuFlag : int {
  * @brief std140 mirror of world.glsl's GfxEnvSource: one local environmental influence
  *        (toyengine/env/env_source.h) as the surface stages read it.
  *
- * Temperature is deliberately absent: nothing on the GPU reads it, and the CPU field
- * (toy::env::EnvField) remains the authority for gameplay and snow melt.
+ * Temperature is deliberately absent even though `surface.yzw` is free: nothing on the GPU
+ * reads it, and the CPU field (toy::env::EnvField) remains the authority for gameplay and snow
+ * melt. `wetness` stays in `params.w` rather than moving here, so the existing CPU/GPU parity
+ * test keeps testing the same bytes.
  */
 struct alignas(16) EnvSourceGpu {
     glm::vec4 pos_radius{0.0f};  ///< xyz world centre, w radius (m); w <= 0 = an unused slot
     glm::vec4 wind{0.0f};        ///< Directional: xyz m/s. Radial: x outward, y vertical. w turbulence
     glm::vec4 params{0.0f};      ///< x falloff, y disc half-height (0 = unbounded), z flags, w wetness
+    glm::vec4 surface{0.0f};     ///< x snow cover added here, yzw spare
 };
-static_assert(sizeof(EnvSourceGpu) == 3 * 16, "EnvSourceGpu must match world.glsl's GfxEnvSource");
+static_assert(sizeof(EnvSourceGpu) == 4 * 16, "EnvSourceGpu must match world.glsl's GfxEnvSource");
 
 /** @brief EnvSourceGpu::params.z bits. */
 enum EnvSourceGpuFlag : int {

@@ -35,6 +35,7 @@ struct GfxEnvSource {
     vec4 pos_radius;  // xyz world centre, w radius (m); w <= 0 = unused
     vec4 wind;        // directional: xyz m/s. radial: x outward, y vertical. w turbulence
     vec4 params;      // x falloff, y disc half-height (0 = unbounded), z flags, w wetness
+    vec4 surface;     // x snow cover added here, yzw spare
 };
 
 layout(set = GFX_WORLD_SET, binding = 0) uniform SurfaceWorldUBO {
@@ -169,6 +170,34 @@ float gfx_env_wetness_at(vec3 p) {
         }
     }
     float combined = base + added + strongest;
+    return clamp(mix(combined, over, over_w), 0.0, 1.0);
+}
+
+/// Lying-snow cover added by local sources at p, 0..1. The SAME fold as
+/// toyengine/env/env_field.h snow_at() -- keep the two in step.
+///
+/// The weather's own cover (gfx_world.snow.x) is deliberately NOT folded in: the snow shaders
+/// combine the two with max(), so that a pile works in a snowless scene and a scoured patch in
+/// a snowy one, without either term having to know about the other.
+float gfx_env_snow_at(vec3 p) {
+    int n = gfx_world.terrain_count.y;
+    if (n <= 0) return 0.0;
+    float added = 0.0, strongest = 0.0, over = 0.0;
+    float over_w = 0.0;
+    for (int i = 0; i < n; ++i) {
+        float w = gfx_env_falloff(i, p);
+        if (w <= 0.0) continue;
+        int flags = int(gfx_world.env[i].params.z);
+        float v = gfx_world.env[i].surface.x;
+        if ((flags & 8) != 0) {
+            if (w > over_w) { over_w = w; over = v; }
+        } else if ((flags & 4) != 0) {
+            if (abs(v * w) > abs(strongest)) strongest = v * w;
+        } else {
+            added += v * w;
+        }
+    }
+    float combined = added + strongest;
     return clamp(mix(combined, over, over_w), 0.0, 1.0);
 }
 

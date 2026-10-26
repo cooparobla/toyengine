@@ -249,6 +249,35 @@ COOPA_TEST(scalar_channels_fall_off_like_the_wind) {
            "env: a local dry zone bottoms out at 0, never negative");
 }
 
+COOPA_TEST(the_snow_channel_lies_snow_without_any_weather) {
+    // The additive twin of snow_clear. It is NOT folded with the weather's own cover here --
+    // the shaders combine the two with max() -- so this reads 0 outside a source whatever the
+    // sky is doing, which is what lets a pile exist in a snowless scene.
+    EnvField f;
+    EnvSource pile;
+    pile.position = glm::vec3(0.0f);
+    pile.radius = 5.0f;
+    pile.falloff = 0.5f;
+    pile.snow = 0.9f;
+    f.source[f.count++] = pile;
+
+    expect_near(toy::env::snow_at(f, glm::vec3(0.0f)), 0.9f, 1e-4f, "snow: full cover at the centre");
+    expect_near(toy::env::snow_at(f, glm::vec3(5.0f, 0.0f, 0.0f)), 0.0f, 1e-4f,
+                "snow: nothing at the rim -- a pile has an edge");
+    expect(toy::env::snow_at(f, glm::vec3(40.0f, 0.0f, 0.0f)) == 0.0f, "snow: nothing far away");
+    const float mid = toy::env::snow_at(f, glm::vec3(4.0f, 0.0f, 0.0f));
+    expect(mid > 0.0f && mid < 0.9f, "snow: it eases out rather than stepping");
+
+    // snow and snow_clear are independent channels, not two ends of one.
+    EnvField both;
+    EnvSource scour = pile;
+    scour.snow = 0.0f;
+    scour.snow_clear = 1.0f;
+    both.source[both.count++] = scour;
+    expect(toy::env::snow_at(both, glm::vec3(0.0f)) == 0.0f,
+           "snow: a scouring source lays none -- the two channels do not alias");
+}
+
 COOPA_TEST(a_pulse_rises_holds_and_expires) {
     EnvPulse p;
     p.source = downwash(glm::vec3(0.0f));

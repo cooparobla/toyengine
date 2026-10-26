@@ -90,6 +90,7 @@ void EnvSystem::execute(coopa::scene::Scene& scene, const coopa::scene::FrameCon
                 s.turbulence *= strength;
                 s.wetness *= strength;
                 s.temperature *= strength;
+                s.snow *= strength;
                 s.snow_clear *= strength;
                 s.water_disturb *= strength;
                 gathered_.push_back(s);

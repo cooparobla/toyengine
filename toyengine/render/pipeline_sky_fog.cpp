@@ -456,6 +456,9 @@ glm::uvec4 ToyRenderPipeline::surface_ext_(const coopa::gfx::engine::components:
                         const coopa::gfx::engine::components::PBRMaterial& m) {
     glm::uvec4 ext(0u);
     if (!m.snow) ext.z |= 1u;
+    // Bit 1 is opt-IN, the opposite sense to bit 0: wetness restyles anything that sees rain,
+    // so a material asks for it rather than opting out (PBRMaterial::wet).
+    if (m.wet) ext.z |= 2u;
     // Set before the tessellation early-returns below: the toon look has nothing to do with
     // whether this draw is tessellated, and an untessellated toon material must still carry
     // its code to the G-buffer.

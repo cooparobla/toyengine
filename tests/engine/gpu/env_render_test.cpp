@@ -17,6 +17,10 @@
 #include <toyengine/core/engine.h>
 #include <uicoopa/binding/ui_handle.h>
 #include <uicoopa/widgets/button.h>
+#include <uicoopa/widgets/collapsible_panel.h>
+#include <uicoopa/layout/layout_element.h>
+#include <toyengine/weather/weather_system.h>
+#include <toyengine/world/snow_system.h>
 #include <uicoopa/builder/theme_scope.h>
 #include <coopa/animation/animator.h>
 
@@ -318,6 +322,135 @@ COOPA_TEST(a_button_click_switches_the_preset_and_replays_it) {
     expect(animator->time() < before_reclick,
            "buttons: clicking the LIVE preset replays it (" + std::to_string(animator->time()) +
            " vs " + std::to_string(before_reclick) + ")");
+}
+
+COOPA_TEST(wetness_reaches_opaque_materials_but_only_opt_in_ones) {
+    // The puddle contract, and the regression guard for every pre-existing scene: a local
+    // wetness source darkens ground that asked for it with `wet: true`, and changes nothing
+    // on a material that did not. Without the opt-in this would restyle every scene that sees
+    // rain, since the stock rain/storm conditions carry wetness 0.8/1.0.
+    ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
+    ScopedEnv no_input("NO_INPUT", "1");
+    toy::core::AppConfig config = make_test_config(k_env_demo, 640, 360, 640, 360);
+    config.render.transparency_enabled = true;
+    toy::core::Engine engine(std::move(config));
+    tick_frames(engine, 40);
+
+    auto* sw = engine.scene().find_first_component<toy::env::EnvPresetSwitcher>();
+    require(sw != nullptr, "wet: the switcher is in the scene");
+
+    require(sw->select_by_name("calm"), "wet: 'calm' exists");
+    tick_frames(engine, 30);
+    const Frame dry = engine.capture_image(false);
+
+    require(sw->select_by_name("puddle"), "wet: 'puddle' exists");
+    tick_frames(engine, 30);
+    const Frame wet = engine.capture_image(false);
+
+    // The puddle sits at the clearing's centre, which the orbit camera frames mid-screen.
+    const glm::vec3 dry_mid = band_mean(dry, 0.45f, 0.75f, 0.30f, 0.70f);
+    const glm::vec3 wet_mid = band_mean(wet, 0.45f, 0.75f, 0.30f, 0.70f);
+    const float dry_l = dry_mid.x + dry_mid.y + dry_mid.z;
+    const float wet_l = wet_mid.x + wet_mid.y + wet_mid.z;
+    expect(wet_l < dry_l * 0.97f,
+           "wet: a local wetness source darkens the ground that opted in (" + std::to_string(dry_l) +
+           " -> " + std::to_string(wet_l) + ")");
+
+    // The treeline sits at the top of the frame, well outside the 4.5 m source, and its
+    // materials never opted in. It must be untouched. x starts at 0.35 to clear the panel on
+    // the left, whose highlighted button moves between the two captures.
+    const glm::vec3 dry_top = band_mean(dry, 0.10f, 0.30f, 0.35f, 1.0f);
+    const glm::vec3 wet_top = band_mean(wet, 0.10f, 0.30f, 0.35f, 1.0f);
+    // Tolerance is the renderer's own frame-to-frame dither (SSAO rotation, SSR jitter), which
+    // the fixture documents as a couple of pixels between captures. 1.0 on a ~425 sum is 0.24%,
+    // an order of magnitude below the >3% the opted-in ground moves by -- so this still fails
+    // loudly if a material starts picking up wetness it never asked for.
+    expect_near(dry_top.x + dry_top.y + dry_top.z, wet_top.x + wet_top.y + wet_top.z, 1.0f,
+                "wet: a material that did not opt in, and everything outside the source, is "
+                "unchanged");
+}
+
+COOPA_TEST(a_local_source_lays_snow_with_no_snowfall) {
+    // Global cover is 0 in this scene and the weather never snows. The cover layer, the deep
+    // snow height and the trench upload all used to short-circuit on exactly that, so this is
+    // the assertion that the widened gates actually work.
+    ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
+    ScopedEnv no_input("NO_INPUT", "1");
+    toy::core::AppConfig config = make_test_config(k_env_demo, 640, 360, 640, 360);
+    config.render.transparency_enabled = true;
+    toy::core::Engine engine(std::move(config));
+    tick_frames(engine, 40);
+
+    auto* sw = engine.scene().find_first_component<toy::env::EnvPresetSwitcher>();
+    require(sw != nullptr, "snow: the switcher is in the scene");
+    require(sw->select_by_name("snowpile"), "snow: 'snowpile' exists");
+    tick_frames(engine, 40);
+
+    const toy::weather::WeatherSystem* w = engine.weather();
+    expect(!w || w->state().snow_cover <= 0.0f,
+           "snow: the weather really is laying none -- the pile is purely local");
+
+    const toy::env::EnvSystem* es = toy::env::find_env(engine.scene());
+    require(es != nullptr, "snow: the env system is installed");
+    expect(toy::env::snow_at(es->field(), glm::vec3(0.0f, 0.0f, 0.2f)) > 0.5f,
+           "snow: the field carries the pile at the clearing's centre");
+    expect(toy::env::snow_at(es->field(), glm::vec3(20.0f, 0.0f, 0.2f)) == 0.0f,
+           "snow: and nothing out at the treeline");
+
+    // The CPU mirror must agree with what the shader draws, or gameplay queries lie.
+    const toy::world::SnowSystem* snow = toy::world::find_snow(engine.scene());
+    require(snow != nullptr, "snow: the snow system is installed");
+    expect(snow->depth_at(glm::vec2(0.0f, 0.0f), 0.0f) > 0.05f,
+           "snow: depth_at() sees the pile too (" +
+           std::to_string(snow->depth_at(glm::vec2(0.0f, 0.0f), 0.0f)) + " m) -- the CPU mirror "
+           "folds the local channel exactly as gfx_snow_lying_height does");
+    expect(snow->depth_at(glm::vec2(20.0f, 0.0f), 0.0f) <= 0.0f,
+           "snow: ...and bare ground beyond it");
+}
+
+COOPA_TEST(the_panel_folds_and_unfolds_without_losing_itself) {
+    // The Collapsible composite had never been used from YAML. It leaves expanded_extent at -1,
+    // and CollapsiblePanel never writes a negative extent -- so without the new key the first
+    // fold would shrink the panel to its header and the unfold would have nothing to restore.
+    ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
+    ScopedEnv no_input("NO_INPUT", "1");
+    toy::core::AppConfig config = make_test_config(k_env_demo, 640, 360, 640, 360);
+    config.render.transparency_enabled = true;
+    toy::core::Engine engine(std::move(config));
+    tick_frames(engine, 40);
+
+    coopa::scene::SceneObject* dock = engine.scene().find_object("Environment");
+    require(dock != nullptr, "panel: the Collapsible's authored object is in the scene");
+    auto* panel = coopa::ui::UiHandle(dock).find<coopa::ui::CollapsiblePanel>("Environment");
+    require(panel != nullptr, "panel: it built a CollapsiblePanel");
+    expect(panel->is_expanded(), "panel: it starts open");
+
+    auto* le = dock->get_component<coopa::ui::LayoutElement>();
+    require(le != nullptr, "panel: the composite put a LayoutElement on the authored object");
+    const float open_h = le->preferred_size.y;
+    expect(open_h > 100.0f, "panel: open, it is a panel rather than a strip (" +
+           std::to_string(open_h) + ")");
+
+    panel->collapse();
+    tick_frames(engine, 4);
+    expect(!panel->is_expanded(), "panel: it folds");
+    expect(le->preferred_size.y < open_h * 0.5f, "panel: folding shrinks it to its header");
+
+    panel->expand();
+    tick_frames(engine, 4);
+    expect(panel->is_expanded(), "panel: it unfolds");
+    expect_near(le->preferred_size.y, open_h, 1.0f,
+                "panel: unfolding restores its full height (" + std::to_string(le->preferred_size.y) +
+                " vs " + std::to_string(open_h) + ") -- this is the expanded_extent fix");
+
+    // Every preset is still reachable afterwards: a fold must not orphan the buttons.
+    auto* sw = engine.scene().find_first_component<toy::env::EnvPresetSwitcher>();
+    require(sw != nullptr, "panel: the switcher is there");
+    for (const auto& preset : sw->presets) {
+        if (preset.button.empty()) continue;
+        expect(engine.scene().find_object(preset.button) != nullptr,
+               "panel: '" + preset.button + "' survived the fold");
+    }
 }
 
 COOPA_TEST(a_scene_with_no_influences_packs_none) {

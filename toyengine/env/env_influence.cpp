@@ -29,6 +29,7 @@ void scale_channels_(EnvSource& s, float k) {
     s.turbulence *= k;
     s.wetness *= k;
     s.temperature *= k;
+    s.snow *= k;
     s.snow_clear *= k;
     s.water_disturb *= k;
 }
@@ -95,6 +96,7 @@ void parse_source_(const fkyaml::node& node, EnvSource& s) {
     num_(node, "turbulence", s.turbulence);
     num_(node, "wetness", s.wetness);
     num_(node, "temperature", s.temperature);
+    num_(node, "snow", s.snow);
     num_(node, "snow_clear", s.snow_clear);
     num_(node, "water_disturb", s.water_disturb);
 }
@@ -116,7 +118,7 @@ bool EnvInfluence::contributes() const {
     if (s.blend == EnvBlend::Override) return true;
     return glm::dot(s.wind, s.wind) > 0.0f || s.outward != 0.0f || s.vertical != 0.0f ||
            s.turbulence != 0.0f || s.wetness != 0.0f || s.temperature != 0.0f ||
-           s.snow_clear != 0.0f || s.water_disturb != 0.0f;
+           s.snow != 0.0f || s.snow_clear != 0.0f || s.water_disturb != 0.0f;
 }
 
 void EnvPulseEmitter::start() {

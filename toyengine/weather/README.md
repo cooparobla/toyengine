@@ -1,5 +1,10 @@
 # toyengine/weather
 
+The **global** element of the environment: scene-wide weather and time of day. Local
+influences -- a rotor's downwash, a vent, a sword swing -- live in
+[`toyengine/env/`](../env/README.md), which folds this and those into the one field every
+reactor samples. Everything below is the global half.
+
 Scene-global weather and time of day. A clock moves the sun and moon across the sky. A catalogue of
 weather **conditions** (clear, rain, storm, snow...) blends from one to the next, and together they
 drive the sky gradient, ambient light, global fog, the scene's directional light and runtime
@@ -201,9 +206,13 @@ runtime `Sun`.
 
 `WeatherState::wind` is the mean wind (m/s, horizontal); `wind_gust` and `wind_time` add gusts.
 The wind at a point is one field, `wind_at(p)` (wind.h; the same formula on the GPU as
-`gfx_world_wind_at()` in gfx/surface/world.glsl): wave fronts that roll downwind at the wind's
-speed, plus a slow pulse, so one gust crosses the grass, the smoke and a flag in turn. Over space
-and time it averages to the mean.
+`gfx_world_global_wind_at()` in gfx/surface/world.glsl): wave fronts that roll downwind at the
+wind's speed, plus a slow pulse, so one gust crosses the grass, the smoke and a flag in turn.
+Over space and time it averages to the mean.
+
+**This is the global term only.** What the consumers in the table below actually read is
+`toy::env::wind_at()` -- this plus every local influence ([`toyengine/env/`](../env/README.md)).
+A scene that authors no `EnvInfluence` gets exactly the field described here.
 
 | What | How it reads the wind | Key |
 |---|---|---|
@@ -215,8 +224,10 @@ and time it averages to the mean.
 | Clouds | drift along the wind; `cloud_wind_speed` is their speed in a 5 m/s wind (x0.25 .. x4) | render `cloud_wind_speed` |
 | Cloth | the live cloth wind = its own `wind` + the field x `weather_wind` (WindSystem, wind_system.h) | Cloth `weather_wind` (1 default) |
 | Rigidbodies | a drag force `influence * |rel| * rel` each substep (rel = wind minus the body's horizontal velocity); sleeping bodies wake only for a real push | Rigidbody `wind_influence` (0 default; ~0.6 x area) |
+| **Local influences** | every row above samples them too: a rotor's downwash, a vent, a swing. A DOWNWARD local wind also presses foliage flat, which this global wind (always horizontal) never does | `EnvInfluence` / `EnvPulseEmitter` ([env](../env/README.md)) |
 
-Gameplay: `toy::weather::current().wind_at(position)`.
+Gameplay: `toy::env::current_field()` and `toy::env::wind_at(field, position)` for the full
+answer; `toy::weather::current().wind_at(position)` for the weather's own contribution alone.
 
 ## Runtime objects
 
@@ -350,8 +361,10 @@ and drags merge into one.
   layer is one slab type (cumulus-like); there are no separate cirrus or anvil shapes, clouds
   cast no shadows on the ground, and water reflects the sky's gradient colours rather than the
   clouds.
-- **Wet surfaces.** Rain does not darken or wet materials. `WeatherState::wetness` (and the
-  surface world UBO's `snow.z`) is there for a surface shader to use.
+- **Wet surfaces, except terrain.** The heightmap terrain surface darkens and pools when wet
+  (`gfx/surface/wetness.glsl`, which also picks up a local `EnvInfluence`'s `wetness`). No other
+  material does: `WeatherState::wetness` (and the surface world UBO's `snow.z`) is there for a
+  surface shader to use.
 - **Rain on water.** Rain splashes on a lake's surface, but makes no water ripples (the water's
   ripple rings are few and kept for gameplay wakes).
 - **Precipitation in the distance.** Beyond the wrap box (about 18 m) rain and snow are suggested

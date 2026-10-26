@@ -22,7 +22,7 @@ float gfx_wet_noise_(vec2 p) {
 }
 
 void gfx_wet_apply(inout GfxSurface s, vec3 geo_n, float puddle) {
-    float wet = clamp(gfx_world.snow.z, 0.0, 1.0);
+    float wet = gfx_env_wetness_at(s.position_ws);   // the weather's, plus any local wet patch
     if (wet <= 0.0) return;
     float open = gfx_world_open_sky(s.position_ws + geo_n * 0.05 + vec3(0.0, 0.0, 0.3), 0.5);
     float w = wet * open;

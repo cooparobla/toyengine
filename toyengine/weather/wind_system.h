@@ -23,6 +23,8 @@
 
 #include <coopa/event/signal.h>
 #include <coopa/scene/scene_system.h>
+
+#include <toyengine/env/env_field.h>
 #include <physxcoopa/dynamics/body.h>
 
 namespace coopa::physx {
@@ -57,8 +59,9 @@ private:
 
     struct Entry { coopa::physx::dynamics::BodyId id; float influence = 0.0f; };
     std::vector<Entry> bodies_;
-    glm::vec3 wind_{0.0f};
-    float gust_ = 0.0f, time_ = 0.0f;
+    /// This frame's environment, cached in execute() and read in substep_() (which runs on
+    /// the physics stack at order 100, strictly after this system's 95, so it is never stale).
+    env::EnvField env_;
     coopa::physx::system::PhysicsSystem* physics_ = nullptr;
     coopa::event::Connection connection_;
 };

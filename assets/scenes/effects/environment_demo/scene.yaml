@@ -1,0 +1,617 @@
+# environment_demo -- LOCAL environmental influences, one at a time (toyengine/env/).
+#
+# Run: ./build/toyengine environment_demo      (or SCENE=environment_demo)
+#
+# A grass clearing ringed with pines. One environment plays at its centre; the bar along the
+# bottom switches between six of them, and the camera orbits the clearing so you can look at
+# the effect from any side.
+#
+#   RIGHT-DRAG   turn the camera around the clearing
+#   WHEEL        zoom
+#   the bar      pick an environment
+#
+# The six presets are ordered so each answers a question the last one raised:
+#
+#   Calm            nothing. The baseline -- this is the still clearing.
+#   Rotor Downwash  a radial source pressing DOWN: the grass fans outward from under the rotor
+#                   and lies flat, dust is thrown out along the ground
+#   Sword Swing     a blade sweeping through the ferns, with an EnvPulseEmitter on the clip's
+#                   `swing` event: a one-shot gust that the ferns snap to and recover from
+#   Steam Vent      the same radial source with `vertical` POSITIVE: an updraft. The steam
+#                   climbs its column instead of blowing downwind, and the grass stands up
+#   Gale            no local source at all -- the GLOBAL weather wind, for contrast
+#   Gale + Shelter  the gale still blowing, plus an `override` source inside the stone ring:
+#                   the meadow outside streams while the grass inside stands still
+#
+# Everything is declarative: KinematicMover drives the helicopter and its rotor, an Animator
+# clip event fires the swing's pulse, and EnvPresetSwitcher (toyengine/env/env_preset.h)
+# activates one preset subtree at a time and blends the weather with it. No game code.
+#
+# The bar is a scene-local UI asset (ui/presets.yaml next to this file). Its buttons publish
+# their clicks under their own object names on the scene event bus; the switcher listens on
+# those six names and knows nothing about the UI.
+#
+# Needs render transparency_enabled (dust, steam) and volumetrics_enabled (the vent's column),
+# both on in assets/config.yaml. Worth sweeping: the rotor's `vertical` from -4 to -24, and the
+# shelter's `blend` from override to add (it stops sheltering and just adds calm air).
+scene:
+  scene_name: environment_demo
+  settings:
+    render: { shadow_distance: 80.0, shadow_softness: 0.3 }
+    weather:
+      enabled: true
+      time_of_day: 15.0            # afternoon: long enough shadows to read wind by, sun still strong
+      day_length_minutes: 0        # the clock stands still -- the presets are the variable
+      latitude: 30
+      north_offset: 30
+      drive_sun: true
+      # The sun does the work and the sky fills in. At the default ambient_day (1.0) the blue
+      # sky dominates every albedo and the whole clearing reads as washed-out teal.
+      sun_intensity: 2.6
+      ambient_day: 0.42
+      condition: still
+      schedule: fixed
+      ground_height: 0.0
+      conditions:
+        # Two conditions only. The presets blend between them, so the global layer is a
+        # variable the panel controls rather than a schedule running on its own.
+        - name: still
+          weight: 1.0
+          duration: [9999, 9999]
+          transition: 2.5
+          cloud_cover: 0.08
+          sun: 1.0
+          ambient: 1.0
+          fog_density: 0.0026
+          fog_color: {r: 0.70, g: 0.78, b: 0.88}
+          fog_sky_blend: 0.7
+          fog_sun_amount: 0.5
+          wind_strength: 0.3       # not quite zero: a dead-still field looks frozen
+          wind_gust: 0.1
+          temperature: 19
+        - name: gale
+          weight: 0
+          duration: [9999, 9999]
+          transition: 2.5
+          cloud_cover: 0.55
+          sun: 0.75
+          ambient: 0.95
+          sky_tint: {r: 0.95, g: 0.96, b: 0.98}
+          fog_density: 0.006
+          fog_color: {r: 0.66, g: 0.71, b: 0.78}
+          fog_sky_blend: 0.5
+          fog_sun_amount: 0.4
+          wind_strength: 14
+          wind_heading: 20
+          wind_gust: 0.55
+          temperature: 13
+
+  root_objects:
+
+    # ---------------------------------------------------------------------------------------
+    # The clearing: a grass floor, a ring of pines, boulders breaking the rim.
+    # ---------------------------------------------------------------------------------------
+    - name: ground
+      components:
+        - type: Transform
+          position: { x: 0, y: 0, z: 0 }
+          scale: { x: 60, y: 60, z: 1 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material:
+            albedo: { r: 0.26, g: 0.32, b: 0.15 }
+            roughness: 0.95
+            metallic: 0.0
+        - type: BoxCollider
+        - { type: WeatherSurface, splashes: true }
+
+    # Grass over the clearing floor. Scattered on a disc mesh so it fills the clearing and
+    # stops at the treeline, rather than running to the horizon.
+    - name: grass
+      components:
+        - type: Transform
+          position: { x: 0, y: 0, z: 0.02 }
+        - type: ParticleSystem
+          mode: scatter
+          shape: circle
+          radius: 16.0
+          count: 7000
+          seed: 11
+          random_spin: true
+          align_to_normal: true
+          start_size: [0.55, 1.0]
+          max_draw_distance: 90
+          cast_shadows: false
+          render_mode: mesh
+          render_mesh: nature/grass_tuft
+          material:
+            albedo: { r: 0.80, g: 1.0, b: 0.70 }
+            alpha_mode: CUTOUT
+            alpha_cutoff: 0.4
+            roughness: 0.85
+            texture_albedo: textures/terrain/layers/grass_blades.png
+            texture_alpha_mask: textures/terrain/layers/grass_blades.png
+            shader: foliage
+            shader_params: [0.35, 2.5, 0.6, 0]   # flexibility, frequency, height (m), Z up
+
+    # The treeline. Trunk and canopy are separate meshes; only the canopy sways.
+    - name: treeline
+      components:
+        - type: Transform
+      children:
+        - name: trunks
+          components:
+            - type: Transform
+              position: { x: 0, y: 0, z: 0 }
+            - type: ParticleSystem
+              mode: scatter
+              shape: circle
+              radius: 25.0
+              radius_thickness: 0.25      # a ring, not a disc: trees only around the rim
+              count: 46
+              seed: 5
+              random_spin: true
+              start_size: [0.85, 1.35]
+              render_mode: mesh
+              render_mesh: nature/pine_trunk
+              material:
+                albedo: { r: 0.26, g: 0.19, b: 0.13 }
+                roughness: 0.92
+        - name: canopies
+          components:
+            - type: Transform
+              position: { x: 0, y: 0, z: 0 }
+            - type: ParticleSystem
+              mode: scatter
+              shape: circle
+              radius: 25.0
+              radius_thickness: 0.25
+              count: 46
+              seed: 5                      # SAME seed as the trunks: canopies land on them
+              random_spin: true
+              start_size: [0.85, 1.35]
+              render_mode: mesh
+              render_mesh: nature/pine_canopy
+              material:
+                albedo: { r: 0.07, g: 0.13, b: 0.08 }
+                roughness: 0.9
+                shader: foliage
+                shader_params: [0.05, 0.9, 8.0, 0]   # a canopy barely bends, and slowly
+
+    - name: boulders
+      components:
+        - type: Transform
+          position: { x: 0, y: 0, z: -0.15 }
+        - type: ParticleSystem
+          mode: scatter
+          shape: circle
+          radius: 19.0
+          radius_thickness: 0.35
+          count: 14
+          seed: 23
+          random_spin: true
+          start_size: [0.7, 1.5]
+          render_mode: mesh
+          render_mesh: nature/boulder
+          material:
+            albedo: { r: 0.22, g: 0.21, b: 0.19 }
+            roughness: 0.95
+            metallic: 0.0
+
+    # ---------------------------------------------------------------------------------------
+    # The presets. EnvPresetSwitcher activates exactly one of these subtrees at a time; the
+    # gather skips an EnvInfluence whose object (or any ancestor) is inactive.
+    # ---------------------------------------------------------------------------------------
+
+    # Calm and Gale name no object at all: the weather does their work, and two presets
+    # sharing one object would fight over its active flag.
+
+    - name: preset_rotor
+      active: false
+      components:
+        - type: Transform
+          position: { x: 0, y: 0, z: 6.5 }
+        - type: KinematicMover
+          mode: pingpong
+          axis: { x: 0, y: 0, z: 1 }
+          distance: 5.0            # z sweeps 4.0 .. 9.0: the wash reaches the grass and lifts off it
+          speed: 0.09
+        - type: Rigidbody
+          is_kinematic: true
+        # A disc, so the influence is a column under the rotor: the grass reacts to how close
+        # the column's floor is, which is what makes the descent read.
+        - type: EnvInfluence
+          shape: disc
+          radius: 6.5
+          height: 11
+          falloff: 0.45
+          mode: radial
+          outward: 10
+          vertical: -17            # negative: presses the grass flat as well as fanning it
+          turbulence: 0.7
+          blend: add
+      children:
+        - name: rotor_body
+          components:
+            - type: Transform
+              scale: { x: 2.2, y: 1.0, z: 0.9 }
+            - type: MeshRenderer
+              mesh_path: primitives/cube
+              material: { albedo: { r: 0.62, g: 0.18, b: 0.14 }, roughness: 0.4, metallic: 0.3 }
+        - name: rotor_tail
+          components:
+            - type: Transform
+              position: { x: 2.4, y: 0, z: 0.15 }
+              scale: { x: 1.5, y: 0.18, z: 0.18 }
+            - type: MeshRenderer
+              mesh_path: primitives/cube
+              material: { albedo: { r: 0.62, g: 0.18, b: 0.14 }, roughness: 0.4, metallic: 0.3 }
+        - name: rotor_blades
+          components:
+            - type: Transform
+              position: { x: 0, y: 0, z: 0.7 }
+              scale: { x: 6.4, y: 0.26, z: 0.04 }
+            - type: KinematicMover
+              mode: spin
+              spin_axis: { x: 0, y: 0, z: 1 }
+              spin_speed: 1000
+            - type: MeshRenderer
+              mesh_path: primitives/cube
+              material: { albedo: { r: 0.09, g: 0.09, b: 0.11 }, roughness: 0.5 }
+        # Dust rides the field (wind_influence 1), so it shows the wash's shape rather than
+        # being authored to fly outward.
+        - name: rotor_dust
+          components:
+            - type: Transform
+              position: { x: 0, y: 0, z: -5.5 }
+            - type: ParticleSystem
+              rate: 80
+              start_lifetime: [0.9, 1.7]
+              start_size: [0.16, 0.38]
+              start_speed: [0.1, 0.5]
+              gravity: -0.3
+              wind_influence: 1.0
+              shape: sphere
+              radius: 2.2
+              color_over_life: [[0, {r: 0.66, g: 0.60, b: 0.49, a: 0.0}], [0.25, {r: 0.66, g: 0.60, b: 0.49, a: 0.34}], [1, {r: 0.70, g: 0.65, b: 0.56, a: 0.0}]]
+              size_over_life: [[0, 0.5], [1, 1.7]]
+
+    - name: preset_swing
+      active: false
+      components:
+        - type: Transform
+          position: { x: 0, y: 0, z: 0 }
+        # The clip sweeps `arm` and fires a `swing` event mid-sweep; the emitter turns that
+        # event into a one-shot gust. The whole one-shot path, with no game code.
+        - type: Animator
+          auto_play: swing
+          states:
+            - { name: swing, clip: animations/duellist/swing.yaml }
+        - type: EnvPulseEmitter
+          event: swing
+          offset: { x: 0, y: 1.1, z: 1.3 }   # where the blade is as the event fires
+          radius: 3.2
+          falloff: 0.6
+          mode: radial
+          outward: 12
+          vertical: -4
+          turbulence: 0.9
+          attack: 0.04
+          hold: 0.05
+          decay: 0.35
+      children:
+        - name: post
+          components:
+            - type: Transform
+              position: { x: 0, y: 0, z: 0.9 }
+              scale: { x: 0.26, y: 0.26, z: 1.8 }
+            - type: MeshRenderer
+              mesh_path: primitives/cube
+              material: { albedo: { r: 0.38, g: 0.28, b: 0.2 }, roughness: 0.85 }
+        - name: arm
+          components:
+            - type: Transform
+              position: { x: 0, y: 0, z: 1.3 }
+          children:
+            - name: guard
+              components:
+                - type: Transform
+                  position: { x: 0, y: 0.18, z: 0 }
+                  scale: { x: 0.52, y: 0.1, z: 0.1 }
+                - type: MeshRenderer
+                  mesh_path: primitives/cube
+                  material: { albedo: { r: 0.45, g: 0.34, b: 0.14 }, roughness: 0.5, metallic: 0.6 }
+            - name: blade
+              components:
+                - type: Transform
+                  position: { x: 0, y: 1.25, z: 0 }
+                  scale: { x: 0.11, y: 2.1, z: 0.26 }
+                - type: MeshRenderer
+                  mesh_path: primitives/cube
+                  material: { albedo: { r: 0.88, g: 0.90, b: 0.95 }, roughness: 0.18, metallic: 0.95 }
+                # Rides the blade, so it sweeps an arc as the clip turns the arm. This is the
+                # air the blade pushes on its way through; the pulse is the snap it leaves.
+                - type: EnvInfluence
+                  shape: sphere
+                  radius: 2.4
+                  falloff: 0.8
+                  mode: radial
+                  outward: 8
+                  vertical: -3
+                  turbulence: 0.9
+                  blend: max
+        # Ferns for the swing to whip -- lower flexibility than grass: a bush bends less.
+        - name: ferns
+          components:
+            - type: Transform
+              position: { x: 0, y: 0, z: 0 }
+            - type: ParticleSystem
+              mode: scatter
+              shape: circle
+              radius: 4.2
+              count: 420
+              seed: 31
+              random_spin: true
+              align_to_normal: true
+              start_size: [1.1, 1.9]      # taller than the clearing's grass: undergrowth
+              render_mode: mesh
+              render_mesh: nature/grass_tuft
+              cast_shadows: false
+              material:
+                albedo: { r: 0.55, g: 0.78, b: 0.42 }
+                alpha_mode: CUTOUT
+                alpha_cutoff: 0.4
+                roughness: 0.85
+                texture_albedo: textures/terrain/layers/grass_blades.png
+                texture_alpha_mask: textures/terrain/layers/grass_blades.png
+                shader: foliage
+                shader_params: [0.22, 1.7, 1.1, 0]
+
+    - name: preset_vent
+      active: false
+      components:
+        - type: Transform
+          position: { x: 0, y: 0, z: 0.05 }
+        # The SAME radial source as the rotor, with `vertical` positive: one component
+        # expresses both a downwash and an updraft.
+        - type: EnvInfluence
+          shape: disc
+          radius: 3.6
+          height: 15
+          falloff: 0.7
+          mode: radial
+          outward: 1.5
+          vertical: 10
+          turbulence: 0.6
+          temperature: 18
+          blend: add
+      children:
+        - name: grate
+          components:
+            - type: Transform
+              scale: { x: 1.9, y: 1.9, z: 0.1 }
+            - type: MeshRenderer
+              mesh_path: primitives/cube
+              material: { albedo: { r: 0.2, g: 0.2, b: 0.22 }, roughness: 0.6, metallic: 0.5 }
+        - name: steam
+          components:
+            - type: Transform
+              position: { x: 0, y: 0, z: 0.3 }
+            - type: ParticleSystem
+              rate: 30
+              start_lifetime: [2.0, 3.4]
+              start_size: [0.28, 0.55]
+              start_speed: [0.3, 0.9]
+              gravity: -0.05
+              wind_influence: 1.0        # rides the column rather than blowing downwind
+              shape: circle
+              radius: 0.8
+              color_over_life: [[0, {r: 0.90, g: 0.92, b: 0.94, a: 0.0}], [0.25, {r: 0.90, g: 0.92, b: 0.94, a: 0.30}], [1, {r: 0.95, g: 0.96, b: 0.97, a: 0.0}]]
+              size_over_life: [[0, 0.6], [1, 2.2]]
+        - name: vent_haze
+          components:
+            - type: Transform
+              position: { x: 0, y: 0, z: 5 }
+            - type: Volume
+              shape: Box
+              extent: { x: 2.6, y: 2.6, z: 5.0 }
+              density: 0.05
+              color: { r: 0.85, g: 0.88, b: 0.90 }
+              falloff: 0.7
+              wind_influence: 1.0        # the local updraft carries it, not the gale
+
+    - name: preset_shelter
+      active: false
+      components:
+        - type: Transform
+          position: { x: 0, y: 0, z: 1.1 }
+        # `override` replaces the weather AND every other source inside the shape. With the
+        # gale blowing, the grass in here stands still.
+        - type: EnvInfluence
+          shape: sphere
+          radius: 6.0
+          falloff: 0.3
+          mode: directional
+          wind: { x: 0, y: 0, z: 0 }
+          blend: override
+      children:
+        # A ring of standing stones, so the still air has a visible reason. Authored one by
+        # one rather than scattered: a scatter scales instances uniformly, and a standing
+        # stone has to be tall and thin.
+        - name: stone_0
+          components:
+            - type: Transform
+              position: { x: 5.20, y: 0.00, z: 0.00 }
+              rotation: { x: 0, y: 0, z: 90.0 }
+              scale: { x: 0.55, y: 0.34, z: 2.20 }
+            - type: MeshRenderer
+              mesh_path: primitives/cube
+              material: { albedo: { r: 0.30, g: 0.29, b: 0.27 }, roughness: 0.95, metallic: 0.0 }
+            - type: BoxCollider
+        - name: stone_1
+          components:
+            - type: Transform
+              position: { x: 4.21, y: 3.06, z: 0.12 }
+              rotation: { x: 0, y: 0, z: 126.0 }
+              scale: { x: 0.55, y: 0.34, z: 2.45 }
+            - type: MeshRenderer
+              mesh_path: primitives/cube
+              material: { albedo: { r: 0.30, g: 0.29, b: 0.27 }, roughness: 0.95, metallic: 0.0 }
+            - type: BoxCollider
+        - name: stone_2
+          components:
+            - type: Transform
+              position: { x: 1.61, y: 4.95, z: 0.25 }
+              rotation: { x: 0, y: 0, z: 162.0 }
+              scale: { x: 0.55, y: 0.34, z: 2.70 }
+            - type: MeshRenderer
+              mesh_path: primitives/cube
+              material: { albedo: { r: 0.30, g: 0.29, b: 0.27 }, roughness: 0.95, metallic: 0.0 }
+            - type: BoxCollider
+        - name: stone_3
+          components:
+            - type: Transform
+              position: { x: -1.61, y: 4.95, z: 0.06 }
+              rotation: { x: 0, y: 0, z: 198.0 }
+              scale: { x: 0.55, y: 0.34, z: 2.33 }
+            - type: MeshRenderer
+              mesh_path: primitives/cube
+              material: { albedo: { r: 0.30, g: 0.29, b: 0.27 }, roughness: 0.95, metallic: 0.0 }
+            - type: BoxCollider
+        - name: stone_4
+          components:
+            - type: Transform
+              position: { x: -4.21, y: 3.06, z: 0.19 }
+              rotation: { x: 0, y: 0, z: 234.0 }
+              scale: { x: 0.55, y: 0.34, z: 2.58 }
+            - type: MeshRenderer
+              mesh_path: primitives/cube
+              material: { albedo: { r: 0.30, g: 0.29, b: 0.27 }, roughness: 0.95, metallic: 0.0 }
+            - type: BoxCollider
+        - name: stone_5
+          components:
+            - type: Transform
+              position: { x: -5.20, y: 0.00, z: 0.00 }
+              rotation: { x: 0, y: 0, z: 270.0 }
+              scale: { x: 0.55, y: 0.34, z: 2.20 }
+            - type: MeshRenderer
+              mesh_path: primitives/cube
+              material: { albedo: { r: 0.30, g: 0.29, b: 0.27 }, roughness: 0.95, metallic: 0.0 }
+            - type: BoxCollider
+        - name: stone_6
+          components:
+            - type: Transform
+              position: { x: -4.21, y: -3.06, z: 0.12 }
+              rotation: { x: 0, y: 0, z: 306.0 }
+              scale: { x: 0.55, y: 0.34, z: 2.45 }
+            - type: MeshRenderer
+              mesh_path: primitives/cube
+              material: { albedo: { r: 0.30, g: 0.29, b: 0.27 }, roughness: 0.95, metallic: 0.0 }
+            - type: BoxCollider
+        - name: stone_7
+          components:
+            - type: Transform
+              position: { x: -1.61, y: -4.95, z: 0.25 }
+              rotation: { x: 0, y: 0, z: 342.0 }
+              scale: { x: 0.55, y: 0.34, z: 2.70 }
+            - type: MeshRenderer
+              mesh_path: primitives/cube
+              material: { albedo: { r: 0.30, g: 0.29, b: 0.27 }, roughness: 0.95, metallic: 0.0 }
+            - type: BoxCollider
+        - name: stone_8
+          components:
+            - type: Transform
+              position: { x: 1.61, y: -4.95, z: 0.06 }
+              rotation: { x: 0, y: 0, z: 18.0 }
+              scale: { x: 0.55, y: 0.34, z: 2.33 }
+            - type: MeshRenderer
+              mesh_path: primitives/cube
+              material: { albedo: { r: 0.30, g: 0.29, b: 0.27 }, roughness: 0.95, metallic: 0.0 }
+            - type: BoxCollider
+        - name: stone_9
+          components:
+            - type: Transform
+              position: { x: 4.21, y: -3.06, z: 0.19 }
+              rotation: { x: 0, y: 0, z: 54.0 }
+              scale: { x: 0.55, y: 0.34, z: 2.58 }
+            - type: MeshRenderer
+              mesh_path: primitives/cube
+              material: { albedo: { r: 0.30, g: 0.29, b: 0.27 }, roughness: 0.95, metallic: 0.0 }
+            - type: BoxCollider
+    # ---------------------------------------------------------------------------------------
+    # The panel, and the switcher that listens to it.
+    # ---------------------------------------------------------------------------------------
+    - name: preset_bar
+      prefab: ui/presets
+      components:
+        - type: EnvPresetSwitcher
+          start: calm
+          label_object: PresetLabel
+          presets:
+            - name: calm
+              button: BtnCalm
+              object: ""
+              condition: still
+              blurb: "Still air. The baseline -- everything else is measured against this."
+            - name: rotor
+              button: BtnRotor
+              object: preset_rotor
+              condition: still
+              blurb: "Rotor downwash: a radial source pressing DOWN. The grass fans outward and lies flat as it descends."
+            - name: swing
+              button: BtnSwing
+              object: preset_swing
+              condition: still
+              blurb: "Sword swing: the clip's `swing` event fires a one-shot gust. The ferns snap outward, then recover."
+            - name: vent
+              button: BtnVent
+              object: preset_vent
+              condition: still
+              blurb: "Steam vent: the same radial source with `vertical` POSITIVE. The plume climbs its column instead of blowing downwind."
+            - name: gale
+              button: BtnGale
+              object: ""
+              condition: gale
+              blurb: "No local source at all -- this is the GLOBAL weather wind, for contrast."
+            - name: shelter
+              button: BtnShelter
+              object: preset_shelter
+              condition: gale
+              blurb: "The same gale, plus an `override` source inside the stones: the meadow streams, the grass inside stands still."
+
+    # ---------------------------------------------------------------------------------------
+    # The rig. Right-drag orbits the clearing; the cursor stays free for the bar.
+    # ---------------------------------------------------------------------------------------
+    - name: camera
+      components:
+        - type: Transform
+          position: { x: 0, y: -15, z: 6.5 }
+        - type: Camera
+          main: true
+          projection: Perspective
+          fov: 55.0
+          near_clip_plane: 0.1
+          far_clip_plane: 400.0
+        - type: CameraController
+          mode: orbit
+          look_button: right
+          capture_cursor: false
+          collide: false
+          target: { x: 0, y: 0, z: 1.6 }
+          distance: 17.0
+          min_distance: 6.0
+          max_distance: 48.0
+          yaw_deg: 0.0
+          pitch_deg: 20.0
+          min_pitch_deg: 3.0
+          max_pitch_deg: 82.0
+          mouse_sensitivity: 0.12
+          movement_smoothing: 0.25
+          zoom_speed: 2.0
+    - name: sun
+      components:
+        - type: Transform
+          position: { x: 0, y: 0, z: 40 }
+        - type: DirectionalLight
+          intensity: 2.6
+          color: { r: 1.0, g: 0.96, b: 0.90 }

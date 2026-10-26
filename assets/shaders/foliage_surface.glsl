@@ -5,8 +5,10 @@
 // gfx/surface/shadow_vs.glsl's file doc for why that consistency is load-bearing).
 //
 // The wind is the WORLD's: gfx_world_wind_at() at the plant's root (m/s; the weather's mean wind
-// plus gust fronts rolling downwind -- the World tab / conditions drive it; see
-// toyengine/weather/wind.h). No wind, no sway: a calm day is still. The material only says how
+// plus gust fronts rolling downwind, plus any local environmental influence reaching the plant --
+// a rotor's downwash, a sword swing; see toyengine/weather/wind.h and toyengine/env/README.md).
+// No wind, no sway: a calm day is still. A local wind with a DOWNWARD component also presses the
+// plant flat, which the weather's always-horizontal wind never does. The material only says how
 // the plant responds -- shader_params (gfx_params):
 //
 //   x = flexibility  -- tip sway, as a fraction of the plant's height, in a 10 m/s wind (about
@@ -25,10 +27,15 @@
 
 void gfx_surface_vertex(inout GfxSurfaceVertex v) {
     vec2 base = v.model[3].xy;   // the plant's root: every vertex of one plant shares the wind
-    vec2 wind = gfx_world_wind_at(v.model[3].xyz).xy;
+    vec3 wind3 = gfx_world_wind_at(v.model[3].xyz);
+    vec2 wind = wind3.xy;
     float speed = length(wind);
-    if (speed < 1e-3) return;
-    vec2 dir = wind / speed;
+    // A downward local wind presses the plant flat even where it barely leans (straight under a
+    // rotor, where the outward fan cancels). The weather's wind is always horizontal, so this
+    // is exactly zero in a scene with no local source.
+    float press = clamp(-wind3.z / 12.0, 0.0, 1.0);
+    if (speed < 1e-3 && press <= 0.0) return;
+    vec2 dir = speed > 1e-3 ? wind / speed : vec2(0.0);
 
     // Height fraction along the mesh's up axis, and the plant's height in world metres (the
     // instance's own scale along that axis -- a big tree sways further than a small one).
@@ -50,7 +57,7 @@ void gfx_surface_vertex(inout GfxSurfaceVertex v) {
     // The flutter: a travelling wave (phase moves downwind) at a rate that rises with the wind,
     // plus a slower swell, so a field ripples instead of swaying in unison (the gust fronts in
     // the wind itself add the big, slow waves).
-    float rate = gfx_params.y * (0.6 + 0.4 * min(s, 2.0));
+    float rate = gfx_params.y * (0.6 + 0.4 * min(s, 2.0)) * (1.0 + gfx_env_turbulence_at(v.model[3].xyz));
     float along = dot(base, dir);
     float phase = gfx_time.x * rate - along * 0.35;
     float swell = 0.5 + 0.5 * sin(gfx_time.x * 0.6 - along * 0.05);
@@ -64,4 +71,13 @@ void gfx_surface_vertex(inout GfxSurfaceVertex v) {
     v.position_ws.xy += offset;
     // Keep the stem roughly its length: a leaning tip also drops a little.
     v.position_ws.z -= dot(offset, offset) / max(2.0 * height_ws, 1e-3) * t;
+
+    // Pressed flat: pull the tip down toward the root and fold it outward by what it loses in
+    // height, so the blade bends over rather than shrinking. The horizontal wind's own lean
+    // above already aims it; `press` only decides how far down it goes.
+    if (press > 0.0) {
+        float drop = press * bend * height_ws * 0.75;
+        v.position_ws.z -= drop;
+        if (speed > 1e-3) v.position_ws.xy += dir * (drop * 0.6);
+    }
 }

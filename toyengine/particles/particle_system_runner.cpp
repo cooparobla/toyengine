@@ -5,6 +5,7 @@
 #include <functional>
 
 #include <toyengine/particles/terrain_scatter.h>
+#include <toyengine/env/env_system.h>
 #include <toyengine/weather/weather_system.h>
 #include <toyengine/world/heightmap_terrain.h>
 
@@ -24,20 +25,17 @@ void ParticleSimulationSystem::execute(coopa::scene::Scene& scene, const coopa::
 void ParticleSimulationSystem::step(coopa::scene::Scene& scene, float dt) {
     gather_(scene);
 
-    // The weather's wind (wind_influence): calm without a live weather.
-    glm::vec3 wind(0.0f);
-    float gust = 0.0f, gust_time = 0.0f;
-    if (const weather::WeatherSystem* w = weather::find(scene); w && w->enabled() && w->state().enabled) {
-        wind = w->state().wind;
-        gust = w->state().wind_gust;
-        gust_time = w->state().wind_time;
-    }
+    // The environment (wind_influence): the weather's wind and gusts plus every local
+    // influence. Without an EnvSystem, fall back to the weather alone, so a scene (or a test)
+    // that installs particles in isolation still blows.
+    const env::EnvSystem* es = env::find_env(scene);
+    const env::EnvField field = es ? es->field() : env::weather_only_field(scene);
 
     // Serial: init (seed, mesh source, sub-emitter targets) and world matrices.
     worlds_.resize(systems_.size());
     for (std::size_t i = 0; i < systems_.size(); ++i) {
         ParticleSystem* ps = systems_[i];
-        ps->set_wind(wind, gust, gust_time);
+        ps->set_env_field(field);
         if (!ps->initialized()) ps->init();
         resolve_sub_targets_(scene, *ps);
         auto* tc = ps->owner ? ps->owner->get_transform() : nullptr;

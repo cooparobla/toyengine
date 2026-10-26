@@ -49,6 +49,7 @@
 #include <toyengine/water/water_system.h>
 #include <toyengine/particles/particle_system_runner.h>
 #include <toyengine/particles/particle_yaml.h>
+#include <toyengine/env/env_system.h>
 #include <toyengine/weather/weather_reactor.h>
 #include <toyengine/render/visibility.h>
 #include <toyengine/save/register.h>
@@ -162,6 +163,9 @@ Engine::Engine(AppConfig config, EngineOptions options)
     particles::register_particle_components(assets_);
     // "WeatherReactor" (toyengine/weather/): objects switching with the time of day / weather.
     weather::register_weather_components();
+    // "EnvInfluence" / "EnvPulseEmitter" (toyengine/env/): local environmental influences that
+    // add to -- or override -- the global weather: a rotor's downwash, a vent, a sword swing.
+    env::register_env_components();
     // "SnowDeformer" (toyengine/world/snow_system.h): objects pressing trails into deep snow.
     world::register_snow_components();
     // "SaveId" (a stable identity in saves) and the demo "SaveDemo" (toyengine/save/).
@@ -520,6 +524,11 @@ void Engine::prepare_scene_(coopa::scene::Scene& scene, bool drain_assets) {
         auto it = scene_settings_.find(&scene);
         weather::install_weather_system(scene, weather_node_(it != scene_settings_.end() ? it->second : fkyaml::node()));
     }
+    // Order 45: folds the weather (40) and every EnvInfluence into the one EnvField snapshot
+    // that water (90), wind (95), physics (100), gameplay (200), particles (360), snow (370)
+    // and the renderer's surface-world upload all read -- see env/env_system.h for why the
+    // gather is here rather than after TransformResolve.
+    env::install_env_system(scene);
     // Order 370: after TransformResolve, so deformers stamp where they are drawn; reads the
     // weather (40) for the cover and the precipitation map -- see world/snow_system.h.
     world::install_snow_system(scene);

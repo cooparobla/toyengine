@@ -1,5 +1,7 @@
 #include <toyengine/water/water_system.h>
 
+#include <toyengine/env/env_system.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -1006,6 +1008,57 @@ void WaterSystem::emit_ripples_(coopa::scene::Scene& scene) {
     for (auto it = emitters_.begin(); it != emitters_.end();) {
         it = it->second.seen ? std::next(it) : emitters_.erase(it);
     }
+    emit_env_ripples_(scene);
+}
+
+void WaterSystem::emit_env_ripples_(coopa::scene::Scene& scene) {
+    // A local influence over water rings it: a rotor's downwash churns the pond under it.
+    // Rings only -- the per-body wave response (apply_wind_) rewrites the body's MATERIAL when
+    // it changes, which is far too expensive to drive from something that moves every frame.
+    const env::EnvSystem* es = env::find_env(scene);
+    if (!es) return;
+    const env::EnvField& f = es->field();
+    const float range2 = settings_.ripple_range * settings_.ripple_range;
+    for (int i = 0; i < f.count; ++i) {
+        const env::EnvSource& src = f.source[i];
+        if (src.water_disturb <= 0.0f || src.radius <= 0.0f) continue;
+        if (has_focus_) {
+            const glm::vec3 d = src.position - focus_;
+            if (glm::dot(d, d) > range2) continue;
+        }
+        // Probe the centre first, then a ring inside the footprint: a rotor hovering BESIDE a
+        // pond still has to churn the part of it the wash reaches. Without this a source whose
+        // centre is over dry ground rings nothing, however much of the water it covers.
+        WaterSample s;
+        glm::vec2 at(src.position);
+        bool over = sample(at, s);
+        if (!over) {
+            const float probe_r = src.radius * 0.65f;
+            for (int k = 0; k < 8 && !over; ++k) {
+                const float a = 0.7853981634f * static_cast<float>(k);   // 8 compass points
+                const glm::vec2 q(src.position.x + std::cos(a) * probe_r,
+                                  src.position.y + std::sin(a) * probe_r);
+                if (sample(q, s)) { at = q; over = true; }
+            }
+        }
+        if (!over) continue;
+
+        EnvRippleEmitter& e = env_emitters_[i];
+        e.seen = true;
+        // Paced so the rings read as a train expanding from under the source rather than a
+        // solid disc of churn, and so the ring budget is not spent in one frame.
+        const float interval = 0.12f;
+        if (time_ - e.last_time < interval) continue;
+        e.last_time = time_;
+        // Alternating birth radii give the concentric look a single radius cannot.
+        e.phase = (e.phase + 1) % 3;
+        const float r = src.radius * (0.25f + 0.2f * static_cast<float>(e.phase));
+        emit_ripple(at, std::clamp(src.water_disturb * 0.6f, 0.02f, 1.0f), r);
+    }
+    for (auto it = env_emitters_.begin(); it != env_emitters_.end();) {
+        it = it->second.seen ? std::next(it) : env_emitters_.erase(it);
+    }
+    for (auto& [idx, e] : env_emitters_) e.seen = false;
 }
 
 float WaterSystem::shape_volume_(const coopa::physx::collision::Shape& s) {

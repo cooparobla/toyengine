@@ -77,8 +77,26 @@ void SurfaceWorldData::upload(uint32_t frame_slot, const SurfaceFrameState& s, c
         u.field_dims = glm::ivec4(s.trench_n, s.trench_window.x, s.trench_window.y, 0);
     }
     const int terrains = std::min<int>(static_cast<int>(s.terrains.size()), kMaxSurfaceTerrains);
-    u.terrain_count = glm::ivec4(terrains, 0, 0, 0);
     for (int i = 0; i < terrains; ++i) u.terrain[i] = s.terrains[static_cast<size_t>(i)].params;
+
+    // Local environmental influences. Mirrors world.glsl's gfx_env_* fold -- keep the two in
+    // step, as toyengine/env/env_field.h and wind.h already are with each other.
+    const int sources = std::min(s.env.count, env::kMaxEnvSources);
+    for (int i = 0; i < sources; ++i) {
+        const env::EnvSource& e = s.env.source[static_cast<size_t>(i)];
+        EnvSourceGpu& g = u.env[i];
+        g.pos_radius = glm::vec4(e.position, std::max(e.radius, 0.0f));
+        g.wind = e.mode == env::EnvMode::Radial ? glm::vec4(e.outward, e.vertical, 0.0f, e.turbulence)
+                                                : glm::vec4(e.wind, e.turbulence);
+        int flags = 0;
+        if (e.shape == env::EnvShape::Disc) flags |= kEnvShapeDisc;
+        if (e.mode == env::EnvMode::Radial) flags |= kEnvModeRadial;
+        if (e.blend == env::EnvBlend::Max) flags |= kEnvBlendMax;
+        if (e.blend == env::EnvBlend::Override) flags |= kEnvBlendOverride;
+        g.params = glm::vec4(std::clamp(e.falloff, 0.0f, 1.0f), std::max(e.height, 0.0f),
+                             static_cast<float>(flags), e.wetness);
+    }
+    u.terrain_count = glm::ivec4(terrains, sources, 0, 0);
     ubo_[k].upload(&u, sizeof(u));
     last_ = u;
 }

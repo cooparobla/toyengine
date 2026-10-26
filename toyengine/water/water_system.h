@@ -73,6 +73,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <map>
 #include <unordered_map>
 #include <vector>
 
@@ -424,6 +425,14 @@ private:
     // ------------------------------------------------------------------------------------
 
     /** @brief Per-Rigidbody ripple bookkeeping, keyed by component, pruned every frame. */
+    /** @brief Ring pacing for one env field slot (see emit_env_ripples_()). */
+    struct EnvRippleEmitter {
+        float last_time = -1e9f;
+        int   phase = 0;
+        bool  seen = false;
+    };
+    std::map<int, EnvRippleEmitter> env_emitters_;
+
     struct RippleEmitter {
         float     radius = -1.0f;      ///< Bounding radius about the COM; < 0 = not computed yet.
         bool      touching = false;    ///< Crossed the surface last frame.
@@ -445,6 +454,8 @@ private:
      * nothing, so a calm lake goes quiet.
      */
     void emit_ripples_(coopa::scene::Scene& scene);
+    /** @brief Rings under local environmental influences with water_disturb > 0. */
+    void emit_env_ripples_(coopa::scene::Scene& scene);
 
     struct BuoyantEntry {
         Buoyancy* buoyancy = nullptr;

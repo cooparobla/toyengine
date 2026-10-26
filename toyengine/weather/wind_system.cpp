@@ -1,5 +1,7 @@
 #include <toyengine/weather/wind_system.h>
 
+#include <toyengine/env/env_system.h>
+
 #include <algorithm>
 #include <memory>
 
@@ -40,15 +42,11 @@ void WindSystem::execute(coopa::scene::Scene& scene, const coopa::scene::FrameCo
     using coopa::physx::components::RigidbodyComponent;
     connect_(scene);
     bodies_.clear();
-    wind_ = glm::vec3(0.0f);
-    gust_ = time_ = 0.0f;
-    const WeatherSystem* w = find(scene);
-    const bool live = w && w->enabled() && w->state().enabled;
-    if (live) {
-        wind_ = w->state().wind;
-        gust_ = w->state().wind_gust;
-        time_ = w->state().wind_time;
-    }
+    // The weather's wind AND every local influence: a rotor near a flag must move it in a
+    // scene with no weather at all.
+    const env::EnvSystem* es = env::find_env(scene);
+    env_ = es ? es->field() : env::weather_only_field(scene);
+    const bool live = env::is_windy(env_);
 
     // Cloth: authored wind + the weather's at the cloth (the authored wind alone without one).
     for (ClothComponent* cc : scene.get_components<ClothComponent>()) {
@@ -58,12 +56,12 @@ void WindSystem::execute(coopa::scene::Scene& scene, const coopa::scene::FrameCo
         if (live && cc->weather_wind != 0.0f && cc->owner) {
             const glm::vec3 at = cc->owner->get_transform() ? glm::vec3(cc->owner->get_transform()->transform().get_world_matrix()[3])
                                                             : glm::vec3(0.0f);
-            wind += weather::wind_at(wind_, gust_, time_, at) * cc->weather_wind;
+            wind += env::wind_at(env_, at) * cc->weather_wind;
         }
         cloth->params.wind = wind;
     }
 
-    if (!live || glm::dot(wind_, wind_) < 1e-6f) return;
+    if (!live) return;
     for (RigidbodyComponent* rb : scene.get_components<RigidbodyComponent>()) {
         if (rb->wind_influence <= 0.0f || rb->is_kinematic) continue;
         bodies_.push_back({rb->body_id(), rb->wind_influence});
@@ -75,7 +73,7 @@ void WindSystem::substep_(coopa::physx::PhysicsWorld& world, float) {
     for (const Entry& e : bodies_) {
         coopa::physx::dynamics::Body* b = world.get_body(e.id);
         if (!b || b->type != BodyType::Dynamic) continue;
-        const glm::vec3 w = weather::wind_at(wind_, gust_, time_, b->position);
+        const glm::vec3 w = env::wind_at(env_, b->position);
         const glm::vec3 f = wind_drag_force(e.influence, w, b->linear_velocity);
         if (!b->awake) {
             // add_force() wakes it: only for a push that could plausibly move it (a tenth of

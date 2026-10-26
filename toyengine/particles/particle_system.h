@@ -58,6 +58,7 @@
 
 #include <gfxcoopa/engine/components/mesh_renderer.h>
 
+#include <toyengine/env/env_field.h>
 #include <toyengine/particles/particle_shape.h>
 #include <toyengine/render/particle_types.h>
 
@@ -320,11 +321,18 @@ public:
     void step(float dt, const glm::mat4& world, const ParallelFor* par = nullptr);
 
     /**
-     * @brief The weather's wind for the next step()s (the runner sets it every frame from the
-     *        scene's WeatherSystem): mean wind (m/s), gust strength and gust clock -- see
-     *        toyengine/weather/wind.h. Zero wind = calm.
+     * @brief The environment for the next step()s -- the weather's wind and gusts plus every
+     *        local influence (the runner sets it every frame from the scene's EnvSystem).
+     *
+     * Held by value: step() runs on job threads, which read this snapshot with no lock. A
+     * calm, source-less field is a still day. See toyengine/env/env_field.h.
+     *
+     * @param field This frame's field.
      */
-    void set_wind(const glm::vec3& mean, float gust, float time) { wind_ = mean; wind_gust_ = gust; wind_time_ = time; }
+    void set_env_field(const env::EnvField& field) { env_ = field; }
+
+    /** @brief The field the next step() will use. */
+    const env::EnvField& env_field() const { return env_; }
 
     /** @brief World-space AABB of the live particles after the last step (sizes included). */
     glm::vec3 bounds_min() const { return bounds_min_; }
@@ -481,8 +489,7 @@ private:
 
     float time_ = 0.0f;          ///< Since play() (drives duration, delay, bursts).
     float sim_clock_ = 0.0f;     ///< Monotonic (drives the noise field).
-    glm::vec3 wind_{0.0f};       ///< set_wind(): mean wind, gust strength, gust clock.
-    float wind_gust_ = 0.0f, wind_time_ = 0.0f;
+    env::EnvField env_;          ///< set_env_field(): the weather's wind plus local influences.
     glm::vec3 gpu_wind_vel_{0.0f}; ///< GPU path: the wind velocity folded into P.velocity (bounds use it).
     float emit_accum_ = 0.0f;
     uint32_t pending_emit_ = 0;

@@ -24,6 +24,14 @@ struct GfxTerrain {
     vec4  tint[8];       // rgb albedo multiplier
 };
 
+// One local environmental influence (toyengine/render/surface_world.h EnvSourceGpu, from
+// toyengine/env/env_source.h). params.z is a flag word: 1 disc, 2 radial, 4 max, 8 override.
+struct GfxEnvSource {
+    vec4 pos_radius;  // xyz world centre, w radius (m); w <= 0 = unused
+    vec4 wind;        // directional: xyz m/s. radial: x outward, y vertical. w turbulence
+    vec4 params;      // x falloff, y disc half-height (0 = unbounded), z flags, w wetness
+};
+
 layout(set = GFX_WORLD_SET, binding = 0) uniform SurfaceWorldUBO {
     vec4  tess_view;      // xyz main camera position, w pixel scale (0.5 * render height * proj[1][1])
     vec4  snow;           // x cover 0..1, y deep-snow depth (m), z wetness, w time (s)
@@ -35,16 +43,134 @@ layout(set = GFX_WORLD_SET, binding = 0) uniform SurfaceWorldUBO {
     ivec4 field_dims;     // x n, yz window min cell index
     vec4  snow_style;     // x 1 = hard-edged patches, y patch size (m)
     vec4  wind_gust;      // x gust strength, y gust clock (s) -- gfx_world_wind_at()
-    ivec4 terrain_count;  // x heightmap terrains in use
+    ivec4 terrain_count;  // x heightmap terrains in use, y local env sources in use
     GfxTerrain terrain[4];
+    // Appended AFTER terrain[] to match SurfaceWorldUBO: inserting ahead of it would shift
+    // every terrain offset.
+    GfxEnvSource env[8];
 } gfx_world;
 
 layout(std430, set = GFX_WORLD_SET, binding = 1) readonly buffer GfxOcclusionHeights { float gfx_occl_heights[]; };
 layout(std430, set = GFX_WORLD_SET, binding = 2) readonly buffer GfxSnowTrench { uint gfx_snow_trench[]; };
 
-/// The wind (m/s, horizontal) at world point p: the mean wind plus gust fronts rolling
-/// downwind. The SAME formula as toyengine/weather/wind.h wind_at() -- keep the two in step.
-vec3 gfx_world_wind_at(vec3 p) {
+// ---------------------------------------------------------------------------------------
+// Local environmental influences -- the SAME fold as toyengine/env/env_field.h's
+// local_wind_at() / wind_at() / wetness_at(). Keep the two in step, exactly as this file and
+// toyengine/weather/wind.h already are for the global wind.
+//
+// Every one of these early-outs on `gfx_world.terrain_count.y == 0`, so a scene with no local
+// sources -- which is every scene that does not author one -- pays nothing. That matters:
+// these run per vertex in the foliage G-buffer stages AND in their shadow and shadow-cube
+// twins, over tens of thousands of grass instances.
+// ---------------------------------------------------------------------------------------
+
+/// How strongly source `i` reaches p, 0..1. Mirrors env_source.h env_falloff().
+float gfx_env_falloff(int i, vec3 p) {
+    vec4 pr = gfx_world.env[i].pos_radius;
+    float radius = pr.w;
+    if (radius <= 0.0) return 0.0;
+    vec3 d = p - pr.xyz;
+    int flags = int(gfx_world.env[i].params.z);
+    float r;
+    if ((flags & 1) != 0) {              // disc: a cylinder about +Z, optionally capped
+        float height = gfx_world.env[i].params.y;
+        if (height > 0.0 && abs(d.z) > height) return 0.0;
+        r = length(d.xy);
+    } else {
+        r = length(d);
+    }
+    if (r >= radius) return 0.0;
+    float inner = radius * (1.0 - clamp(gfx_world.env[i].params.x, 0.0, 1.0));
+    if (r <= inner) return 1.0;
+    float t = (radius - r) / max(radius - inner, 1e-6);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+/// Source `i`'s wind at p at full strength, no falloff. Mirrors env_wind_full().
+vec3 gfx_env_wind_full(int i, vec3 p) {
+    vec4 w = gfx_world.env[i].wind;
+    int flags = int(gfx_world.env[i].params.z);
+    if ((flags & 2) == 0) return w.xyz;            // directional
+    vec2 radial = p.xy - gfx_world.env[i].pos_radius.xy;
+    float len = length(radial);
+    vec2 dir = len > 1e-4 ? radial / len : vec2(0.0);
+    return vec3(dir * w.x, w.y);                   // x outward, y vertical
+}
+
+/// The local sources' wind (m/s) at p; no weather, no gusts. Add sources sum, and of the Max
+/// sources only the strongest contributes. Override is applied by gfx_world_wind_at().
+vec3 gfx_env_local_wind_at(vec3 p) {
+    int n = gfx_world.terrain_count.y;
+    if (n <= 0) return vec3(0.0);
+    vec3 added = vec3(0.0), strongest = vec3(0.0);
+    float strongest_len2 = 0.0;
+    for (int i = 0; i < n; ++i) {
+        int flags = int(gfx_world.env[i].params.z);
+        if ((flags & 8) != 0) continue;            // override: not part of the combine
+        float w = gfx_env_falloff(i, p);
+        if (w <= 0.0) continue;
+        vec3 v = gfx_env_wind_full(i, p) * w;
+        if ((flags & 4) != 0) {
+            float len2 = dot(v, v);
+            if (len2 > strongest_len2) { strongest_len2 = len2; strongest = v; }
+        } else {
+            added += v;
+        }
+    }
+    return added + strongest;
+}
+
+/// Extra flutter at p, 0..1 -- local sources only (the weather's gusts are in the wind).
+float gfx_env_turbulence_at(vec3 p) {
+    int n = gfx_world.terrain_count.y;
+    if (n <= 0) return 0.0;
+    float added = 0.0, strongest = 0.0, over = 0.0;
+    float over_w = 0.0;
+    for (int i = 0; i < n; ++i) {
+        float w = gfx_env_falloff(i, p);
+        if (w <= 0.0) continue;
+        int flags = int(gfx_world.env[i].params.z);
+        float v = gfx_world.env[i].wind.w;
+        if ((flags & 8) != 0) {
+            if (w > over_w) { over_w = w; over = v; }
+        } else if ((flags & 4) != 0) {
+            if (abs(v * w) > abs(strongest)) strongest = v * w;
+        } else {
+            added += v * w;
+        }
+    }
+    float combined = added + strongest;
+    return clamp(mix(combined, over, over_w), 0.0, 1.0);
+}
+
+/// Surface wetness at p, 0..1: the weather's (gfx_world.snow.z) plus every local source's.
+float gfx_env_wetness_at(vec3 p) {
+    float base = gfx_world.snow.z;
+    int n = gfx_world.terrain_count.y;
+    if (n <= 0) return clamp(base, 0.0, 1.0);
+    float added = 0.0, strongest = 0.0, over = 0.0;
+    float over_w = 0.0;
+    for (int i = 0; i < n; ++i) {
+        float w = gfx_env_falloff(i, p);
+        if (w <= 0.0) continue;
+        int flags = int(gfx_world.env[i].params.z);
+        float v = gfx_world.env[i].params.w;
+        if ((flags & 8) != 0) {
+            if (w > over_w) { over_w = w; over = v; }
+        } else if ((flags & 4) != 0) {
+            if (abs(v * w) > abs(strongest)) strongest = v * w;
+        } else {
+            added += v * w;
+        }
+    }
+    float combined = base + added + strongest;
+    return clamp(mix(combined, over, over_w), 0.0, 1.0);
+}
+
+/// The weather's wind (m/s, horizontal) at world point p: the mean wind plus gust fronts
+/// rolling downwind. The SAME formula as toyengine/weather/wind.h wind_at() -- keep the two in
+/// step. No local influences; gfx_world_wind_at() is the full answer.
+vec3 gfx_world_global_wind_at(vec3 p) {
     vec3 wind = gfx_world.wind.xyz;
     float speed = length(wind.xy);
     float gust = gfx_world.wind_gust.x;
@@ -58,6 +184,28 @@ vec3 gfx_world_wind_at(vec3 p) {
             + 0.25 * sin(0.13 * a + 0.09 * cross_ + 2.1)
             + 0.30 * (0.6 * sin(0.7 * t) + 0.4 * sin(1.9 * t + 1.3));
     return wind * max(0.0, 1.0 + gust * g);
+}
+
+/// The wind (m/s) at world point p: the weather's mean plus gust fronts rolling downwind, plus
+/// every local influence. The global term is the SAME formula as toyengine/weather/wind.h
+/// wind_at(), and the local fold the same as toyengine/env/env_field.h wind_at() -- keep all
+/// three in step.
+vec3 gfx_world_wind_at(vec3 p) {
+    vec3 global = gfx_world_global_wind_at(p);
+    int n = gfx_world.terrain_count.y;
+    if (n <= 0) return global;
+    vec3 base = global + gfx_env_local_wind_at(p);
+    // Override last: of several overlapping ones the one reaching p most strongly wins, so the
+    // answer never depends on the order they were packed in.
+    int best = -1;
+    float over_w = 0.0;
+    for (int i = 0; i < n; ++i) {
+        if ((int(gfx_world.env[i].params.z) & 8) == 0) continue;
+        float w = gfx_env_falloff(i, p);
+        if (w > over_w) { over_w = w; best = i; }
+    }
+    if (best < 0) return base;
+    return mix(base, gfx_env_wind_full(best, p), over_w);
 }
 
 /// The precipitation map's surface height at world xy (bilinear; outside the map: the fallback

@@ -33,6 +33,8 @@
 
 #include <glm/glm.hpp>
 
+#include <toyengine/env/env_field.h>
+
 #include <gfxcoopa/engine/data/texture.h>
 #include <gfxcoopa/presentation/renderer.h>
 
@@ -65,6 +67,28 @@ static_assert(sizeof(TerrainGpuParams) == 28 * 16, "TerrainGpuParams must match 
 enum TerrainGpuFlag : int {
     kTerrainDeepSnow = 1,  ///< Raise and carve deep snow (snow_height.glsl) on open, flat ground.
     kTerrainPuddles  = 2,  ///< Rain gathers in hollows.
+};
+
+/**
+ * @brief std140 mirror of world.glsl's GfxEnvSource: one local environmental influence
+ *        (toyengine/env/env_source.h) as the surface stages read it.
+ *
+ * Temperature is deliberately absent: nothing on the GPU reads it, and the CPU field
+ * (toy::env::EnvField) remains the authority for gameplay and snow melt.
+ */
+struct alignas(16) EnvSourceGpu {
+    glm::vec4 pos_radius{0.0f};  ///< xyz world centre, w radius (m); w <= 0 = an unused slot
+    glm::vec4 wind{0.0f};        ///< Directional: xyz m/s. Radial: x outward, y vertical. w turbulence
+    glm::vec4 params{0.0f};      ///< x falloff, y disc half-height (0 = unbounded), z flags, w wetness
+};
+static_assert(sizeof(EnvSourceGpu) == 3 * 16, "EnvSourceGpu must match world.glsl's GfxEnvSource");
+
+/** @brief EnvSourceGpu::params.z bits. */
+enum EnvSourceGpuFlag : int {
+    kEnvShapeDisc    = 1,  ///< A cylinder about +Z rather than a sphere.
+    kEnvModeRadial   = 2,  ///< Wind aims away from the +Z axis rather than along one vector.
+    kEnvBlendMax     = 4,  ///< Only the strongest such source contributes.
+    kEnvBlendOverride = 8, ///< Replaces the combined result inside the shape.
 };
 
 class TextureArray;
@@ -109,6 +133,11 @@ struct SurfaceFrameState {
     float trench_scale = 1.0f;                 ///< Metres a full unorm16 (65535) trench is deep.
     uint64_t trench_version = 0;               ///< Bumped whenever the words change.
 
+    // --- Local environmental influences (toy::env::EnvSystem) ---
+    /// The frame's environment field. Its global wind/gust/wetness terms duplicate the fields
+    /// above (the weather fills both); its `source[]` is what only the GPU fold can use.
+    env::EnvField env;
+
     // --- Heightmap terrains (toy::world::HeightmapTerrainSystem); index = the chunks' slot ---
     std::vector<TerrainFrameBinding> terrains;
 };
@@ -125,10 +154,15 @@ struct alignas(16) SurfaceWorldUBO {
     glm::ivec4 field_dims{0};         ///< x n, yz window min cell index
     glm::vec4  snow_style{0.0f};      ///< x 1 = hard-edged patches, y patch size (m)
     glm::vec4  wind_gust{0.0f};       ///< x gust strength, y gust clock (s) -- see toyengine/weather/wind.h
-    glm::ivec4 terrain_count{0};      ///< x terrains in use
+    glm::ivec4 terrain_count{0};      ///< x terrains in use, y local env sources in use
     TerrainGpuParams terrain[kMaxSurfaceTerrains]{};
+    /// Appended AFTER terrain[] on purpose: inserting ahead of it would shift every terrain
+    /// offset, so a CPU/GLSL mismatch would silently corrupt the terrain params instead of
+    /// only the new data.
+    EnvSourceGpu env[env::kMaxEnvSources]{};
 };
-static_assert(sizeof(SurfaceWorldUBO) == 176 + kMaxSurfaceTerrains * sizeof(TerrainGpuParams),
+static_assert(sizeof(SurfaceWorldUBO) == 176 + kMaxSurfaceTerrains * sizeof(TerrainGpuParams) +
+                                         env::kMaxEnvSources * sizeof(EnvSourceGpu),
               "SurfaceWorldUBO must match world.glsl's std140 block");
 
 class SurfaceWorldData {

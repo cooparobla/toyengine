@@ -308,7 +308,11 @@ void ToyRenderPipeline::update_volumetrics_data_(coopa::scene::Scene& scene, con
         float speed = vc->speed;
         // The weather's wind joins the authored drift (VolumeComponent::wind_influence).
         if (vc->wind_influence != 0.0f) {
-            const glm::vec3 drift = dir * speed + surface_state_.wind * vc->wind_influence;
+            // The MEAN weather wind (deliberately ungusted: gusts would make every existing
+            // volume's drift wobble) plus local influences, so a rotor stirs a smoke pocket.
+            const glm::vec3 drift = dir * speed +
+                (surface_state_.wind + env::local_wind_at(surface_state_.env, glm::vec3(world[3]))) *
+                vc->wind_influence;
             const float dl = glm::length(drift);
             if (dl > 1e-4f) { dir = drift / dl; speed = dl; }
             else speed = 0.0f;

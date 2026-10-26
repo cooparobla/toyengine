@@ -315,7 +315,7 @@ bool ParticleSystem::make_gpu_job(const ParticleView& view, render::GpuParticleJ
     P.accel = glm::vec4(inv_rot * (glm::vec3(0.0f, 0.0f, -9.81f * s.gravity) + s.force), s.drag);
     // The weather's wind (at the emitter): a carried velocity, like Velocity over Lifetime --
     // the CPU path's push toward the air, without per-particle state.
-    gpu_wind_vel_ = s.wind_influence > 0.0f ? s.wind_influence * weather::wind_at(wind_, wind_gust_, wind_time_, glm::vec3(world_[3]))
+    gpu_wind_vel_ = s.wind_influence > 0.0f ? s.wind_influence * env::wind_at(env_, glm::vec3(world_[3]))
                                             : glm::vec3(0.0f);
     P.velocity = glm::vec4(s.velocity + inv_rot * gpu_wind_vel_, s.orbital);
     P.center = glm::vec4(local ? glm::vec3(0.0f) : glm::vec3(world_[3]), s.radial);
@@ -742,7 +742,7 @@ void ParticleSystem::update_(float dt, const ParallelFor* par) {
     // reaches wind_influence x the local wind. One-sided, so calm air changes nothing.
     constexpr float kWindGrip = 1.5f;
     const float wind_k = settings.wind_influence;
-    const bool windy = wind_k > 0.0f && glm::dot(wind_, wind_) > 1e-6f;
+    const bool windy = wind_k > 0.0f && env::is_windy(env_);
     const glm::mat3 to_world_rot = local ? glm::mat3(world_) : glm::mat3(1.0f);
 
     run_range(par, n, [&](size_t b, size_t e) {
@@ -753,7 +753,7 @@ void ParticleSystem::update_(float dt, const ParallelFor* par) {
             if (noise) a += turbulence_.sample(local ? glm::vec3(world_ * glm::vec4(p, 1.0f)) : p, noise_t) * settings.noise_strength;
             if (windy) {
                 const glm::vec3 pw = local ? glm::vec3(world_ * glm::vec4(p, 1.0f)) : p;
-                const glm::vec3 w = weather::wind_at(wind_, wind_gust_, wind_time_, pw);
+                const glm::vec3 w = env::wind_at(env_, pw);
                 const float ws = glm::length(w);
                 if (ws > 1e-4f) {
                     const glm::vec3 dir = w / ws;

@@ -1,0 +1,20 @@
+# A sword swing for environment_demo's duellist: a fast sweep through the ferns and a slow
+# recovery, carrying the `swing` event that fires the scene's EnvPulseEmitter.
+#
+# The event sits at the middle of the FAST half, where the blade is moving quickest -- that is
+# the moment the gust should leave, not the moment the arm starts or stops.
+clip:
+  name: swing
+  wrap: loop
+  length: 2.4
+  events:
+    - {time: 0.25, name: swing}
+  tracks:
+    - object: arm
+      property: rotation_quat
+      keys:
+        # -70 deg about Z, through +70, and slowly back.
+        - {time: 0,    value: [0, 0, -0.573576, 0.819152], easing: ease_in}
+        - {time: 0.5,  value: [0, 0,  0.573576, 0.819152], easing: ease_out}
+        - {time: 0.9,  value: [0, 0,  0.573576, 0.819152], easing: ease_in_out}
+        - {time: 2.4,  value: [0, 0, -0.573576, 0.819152], easing: ease_in_out}

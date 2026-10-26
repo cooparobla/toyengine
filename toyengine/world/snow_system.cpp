@@ -1,5 +1,7 @@
 #include <toyengine/world/snow_system.h>
 
+#include <algorithm>
+
 #include <coopa/scene/component.h>
 #include <coopa/scene/scene_loader.h>
 #include <coopa/scene/scene_object.h>
@@ -7,6 +9,7 @@
 #include <gfxcoopa/engine/components/camera_component.h>
 #include <gfxcoopa/engine/components/mesh_renderer.h>
 #include <physxcoopa/components/rigidbody.h>
+#include <toyengine/env/env_system.h>
 #include <toyengine/weather/weather_system.h>
 
 namespace toy {
@@ -79,6 +82,21 @@ void SnowSystem::execute(coopa::scene::Scene& scene, const coopa::scene::FrameCo
         for (auto* rb : scene.get_components<coopa::physx::components::RigidbodyComponent>()) {
             if (!rb->owner || !rb->owner->active() || rb->owner->get_component<SnowDeformer>()) continue;
             press_(*rb->owner, -1.0f, -1.0f, 0.4f);
+        }
+    }
+
+    // Local environmental influences scour lying snow: a rotor's downwash blasts its landing
+    // pad bare. The same trench field a SnowDeformer presses into, so refill() drifts it back
+    // in over snow_trench_recover_time with no extra machinery.
+    if (const env::EnvSystem* es = env::find_env(scene)) {
+        const env::EnvField& f = es->field();
+        for (int i = 0; i < f.count; ++i) {
+            const env::EnvSource& src = f.source[i];
+            if (src.snow_clear <= 0.0f || src.radius <= 0.0f) continue;
+            const float depth = max_depth_ * std::clamp(src.snow_clear, 0.0f, 1.0f);
+            if (depth <= 0.0f) continue;
+            // At least a half-soft edge: a scoured patch has no business having a crisp rim.
+            field_.stamp(glm::vec2(src.position), src.radius, depth, std::max(src.falloff, 0.5f));
         }
     }
 }

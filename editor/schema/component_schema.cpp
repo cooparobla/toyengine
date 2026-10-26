@@ -822,6 +822,79 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                                                                         "past the drops' own wrap box"),
             with_tip(f_strings("targets"), "Which of the sibling ParticleSystem's on_death targets fire far off; empty = all"),
         }});
+        // toyengine/env/: a local environmental influence -- a rotor's downwash, a vent, a wet
+        // patch -- added to (or overriding) the global weather. See toyengine/env/README.md.
+        add({"EnvInfluence", "Effects", {
+            with_tip(f_bool("enabled", true), "Off contributes nothing at all (a switchable rotor)"),
+            with_tip(f_enum("shape", {"sphere", "disc"}, true),
+                     "sphere: a ball about the object. disc: a cylinder about its +Z axis -- a rotor's "
+                     "column, a vent's plume"),
+            with_unit(with_tip(f_float("radius", 6.0f, 0.05f, 0.0f, 200.0f, true),
+                               "How far it reaches. The influence is exactly zero at and beyond this"), "m"),
+            with_unit(with_tip(shown_when(f_float("height", 0.0f, 0.05f, 0.0f, 200.0f), "shape", {"disc"}),
+                               "Disc only: how far the column extends either side of the object. 0 = unbounded"), "m"),
+            with_tip(as_slider(f_float("falloff", 0.5f, 0.01f, 0.0f, 1.0f, true)),
+                     "0 a hard edge .. 1 a soft bowl. Full strength inside radius x (1 - falloff)"),
+            with_tip(f_enum("mode", {"directional", "radial"}, true),
+                     "directional: one wind vector everywhere inside. radial: aimed away from the +Z "
+                     "axis, so one source is both a downwash and an updraft"),
+            with_tip(shown_when(f_vec3("wind", glm::vec3(0.0f), 0.05f), "mode", {"directional"}),
+                     "The wind inside the shape (m/s). A sheltered pocket is this at zero with blend "
+                     "set to override"),
+            with_unit(with_tip(shown_when(f_float("outward", 0.0f, 0.05f, -200.0f, 200.0f, true), "mode", {"radial"}),
+                               "How hard it blows away from the axis, at the rim"), "m/s"),
+            with_unit(with_tip(shown_when(f_float("vertical", 0.0f, 0.05f, -200.0f, 200.0f, true), "mode", {"radial"}),
+                               "Along +Z. NEGATIVE is a downwash (a rotor presses foliage flat); positive "
+                               "lifts (a vent)"), "m/s"),
+            with_tip(as_slider(f_float("turbulence", 0.0f, 0.01f, 0.0f, 1.0f)),
+                     "Extra foliage flutter and particle noise inside the shape"),
+            with_tip(as_slider(f_float("wetness", 0.0f, 0.01f, -1.0f, 1.0f)),
+                     "Surface wetness added here -- a burst pipe, a spray zone. Negative is a local dry "
+                     "zone. Shows on heightmap terrain"),
+            with_unit(with_tip(f_float("temperature", 0.0f, 0.1f, -200.0f, 200.0f),
+                               "Offset on the ambient temperature. Gameplay only -- nothing is drawn from it"), "C"),
+            with_tip(as_slider(f_float("snow_clear", 0.0f, 0.01f, 0.0f, 1.0f)),
+                     "How hard it scours lying snow, as a fraction of the full depth. Tracks drift back "
+                     "in like a SnowDeformer's"),
+            with_tip(as_slider(f_float("water_disturb", 0.0f, 0.01f, 0.0f, 1.0f)),
+                     "Ripple rings on water beneath it -- a rotor churning a pond"),
+            with_tip(f_enum("blend", {"add", "max", "override"}),
+                     "add: on top of the weather and other sources. max: only the strongest overlapping "
+                     "one counts. override: replaces everything inside the shape"),
+            with_tip(as_slider(f_float("strength", 1.0f, 0.01f, 0.0f, 1.0f)),
+                     "Master scale on every channel above. 0 costs nothing"),
+        }});
+        // toyengine/env/: a one-shot influence fired by an animation event -- a sword swing.
+        add({"EnvPulseEmitter", "Effects", {
+            with_tip(f_string("event", "", true),
+                     "The Animator clip event name that fires it. Empty: code only (call fire())"),
+            with_tip(f_vec3("offset", glm::vec3(0.0f), 0.01f),
+                     "Where the pulse is born, in the object's own space -- a blade's tip"),
+            with_unit(with_tip(f_float("radius", 2.5f, 0.05f, 0.0f, 200.0f, true), "How far the gust reaches"), "m"),
+            with_tip(as_slider(f_float("falloff", 0.6f, 0.01f, 0.0f, 1.0f)), "0 a hard edge .. 1 a soft bowl"),
+            with_tip(f_enum("mode", {"radial", "directional"}, true),
+                     "radial: a gust blown outward from the point. directional: one vector"),
+            with_unit(with_tip(shown_when(f_float("outward", 9.0f, 0.05f, -200.0f, 200.0f, true), "mode", {"radial"}),
+                               "How hard it blows outward at the rim"), "m/s"),
+            with_unit(with_tip(shown_when(f_float("vertical", 0.0f, 0.05f, -200.0f, 200.0f), "mode", {"radial"}),
+                               "Along +Z. Negative presses down"), "m/s"),
+            with_tip(shown_when(f_vec3("wind", glm::vec3(0.0f), 0.05f), "mode", {"directional"}), "The gust (m/s)"),
+            with_tip(as_slider(f_float("turbulence", 0.8f, 0.01f, 0.0f, 1.0f)), "Extra flutter while it lasts"),
+            with_unit(with_tip(f_float("attack", 0.05f, 0.01f, 0.0f, 10.0f), "Seconds from nothing to full"), "s"),
+            with_unit(with_tip(f_float("hold", 0.05f, 0.01f, 0.0f, 10.0f), "Seconds at full strength"), "s"),
+            with_unit(with_tip(f_float("decay", 0.35f, 0.01f, 0.0f, 10.0f),
+                               "Seconds back to nothing -- what makes foliage snap and then recover"), "s"),
+            with_tip(as_slider(f_float("strength", 1.0f, 0.01f, 0.0f, 1.0f)), "Master scale on every channel"),
+        }});
+        // toyengine/env/: a panel of UI buttons switching between authored environment presets.
+        // `presets` is a list of maps, which no generic widget can edit -- the inspector shows
+        // the scalars and the YAML carries the list.
+        add({"EnvPresetSwitcher", "Effects", {
+            with_tip(f_string("start", "", true),
+                     "Name of the preset live on load. Empty: the first one in the list"),
+            with_tip(f_string("label_object", ""),
+                     "Optional Text widget shown the active preset's one-line blurb"),
+        }});
         // toyengine/weather/: switches lights, effects or children with the time of day / weather.
         add({"WeatherReactor", "Effects", {
             with_tip(f_vec2("hours", glm::vec2(18.0f, 6.0f), 0.05f), "On between these hours (x from, y to; wraps past midnight). "

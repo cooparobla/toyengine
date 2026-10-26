@@ -162,7 +162,8 @@ binary silently drops the new component.
 |---|---|---|
 | terrain (tile or heightmap), snow | `toyengine/world/` | [world](../toyengine/world/README.md) |
 | water, waves, buoyancy | `toyengine/water/` | [water](../toyengine/water/README.md) |
-| weather, sky, atmosphere | `toyengine/weather/` | [weather](../toyengine/weather/README.md) |
+| weather, sky, atmosphere (the GLOBAL environment) | `toyengine/weather/` | [weather](../toyengine/weather/README.md) |
+| LOCAL environmental influences -- a rotor's downwash, a vent, a sword swing gusting foliage; the `EnvField` every wind reactor samples | `toyengine/env/` | [env](../toyengine/env/README.md) |
 | particles | `toyengine/particles/` | [particles](../toyengine/particles/README.md) |
 | save slots, `ISaveable` | `toyengine/save/` | [save](../toyengine/save/README.md) |
 | audio, music, buses | `toyengine/audio/` | [audio](../toyengine/audio/README.md) |

@@ -369,6 +369,39 @@ void apply_component_sections(std::map<std::string, ComponentSchema>& table) {
             .keys({"max_body_pitch"}).closed().done(),
         sec("Blending", "Proportional").keys({"weight", "blend_speed"}).done(),
     });
+
+    // --- Environment -----------------------------------------------------------------------
+
+    layout("EnvInfluence", {
+        sec("Shape", "Sphere")
+            .says("Where the influence reaches. It sits on the object, so moving the object moves it.")
+            .keys({"shape", "radius", "height", "falloff"}).done(),
+        sec("Wind", "World")
+            .says("What the air does inside. A negative Vertical is a downwash: it presses foliage "
+                  "flat as well as fanning it outward.")
+            .keys({"mode", "wind", "outward", "vertical", "turbulence"}).done(),
+        sec("Surface", "Material")
+            .says("Ground and air state, independent of the wind.")
+            .keys({"wetness", "temperature"}).closed().done(),
+        sec("Ground Effects", "Terrain")
+            .says("What it does to lying snow, and to water beneath it.")
+            .keys({"snow_clear", "water_disturb"}).closed().done(),
+        sec("Blending", "Proportional")
+            .says("How it combines with the global weather and with other influences.")
+            .keys({"blend", "strength", "enabled"}).done(),
+    });
+
+    layout("EnvPulseEmitter", {
+        sec("Trigger", "Play")
+            .says("What fires the gust, and where it is born.")
+            .keys({"event", "offset", "strength"}).done(),
+        sec("Gust", "World")
+            .says("The shape and strength of the one-shot influence.")
+            .keys({"radius", "falloff", "mode", "wind", "outward", "vertical", "turbulence"}).done(),
+        sec("Envelope", "Step")
+            .says("How it rises and fades. The decay is what makes foliage snap and then recover.")
+            .keys({"attack", "hold", "decay"}).done(),
+    });
 }
 
 } // namespace editor

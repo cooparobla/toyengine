@@ -13,6 +13,8 @@
 
 #include <toyengine/core/engine.h>
 
+#include <toyengine/env/env_system.h>
+
 // Includes engine.h no longer carries: these are implementation needs of this file
 // (and of the other engine TUs that previously got them transitively).
 #include <gfxcoopa/engine/loaders/mesh_loader.h>
@@ -376,6 +378,8 @@ void Engine::sync_surface_state_(coopa::scene::Scene& scene) {
     if (const world::HeightmapTerrainSystem* hts = world::find_heightmap_terrain_system(scene)) {
         st.terrains = hts->frame_bindings();
     }
+    // Local environmental influences -- the only part of the field the GPU fold can use.
+    if (const env::EnvSystem* e = env::find_env(scene)) st.env = e->field();
     pipeline_->set_surface_state(std::move(st));
 }
 

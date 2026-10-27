@@ -141,6 +141,9 @@ struct InstancePrototype {
     /** @brief A short label for the editor's palette; the asset name when empty. */
     std::string name;
 
+
+
+
     // --- resolved (instance_prototype.cpp) ---
 
     /** @brief One drawable piece of the prototype: a mesh + material, and where it sits in it. */

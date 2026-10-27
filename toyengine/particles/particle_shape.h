@@ -173,6 +173,18 @@ struct ShapeSettings {
     MeshDistribution distribution = MeshDistribution::Random;
     float            normal_offset = 0.0f;   ///< Push the spawn point off the surface (m).
 
+    // --- band: emit only from a shell of the shape, not all of it ---
+    //
+    // Mesh shapes only. Keeps samples whose distance from `band_center` (EMITTER space, same
+    // space the mesh is sampled in) falls within `band_width` of `band_radius`, so a surface
+    // emits from a travelling RING across itself rather than from everywhere at once. That is
+    // what puts smoke and flame on the burn line of a burning object and nowhere else.
+    //
+    // Implemented by rejection, so a band that misses the mesh entirely simply emits nothing.
+    glm::vec3 band_center{0.0f};
+    float band_radius = 0.0f;   ///< 0 disables the band and the whole shape emits.
+    float band_width = 0.15f;   ///< Full thickness of the shell, in emitter-space units.
+
     // --- terrain (HeightmapTerrain scatter) ---
     TerrainScatterShape terrain;
 };

@@ -214,6 +214,7 @@ binary silently drops the new component.
 | weather, sky, atmosphere (the GLOBAL environment) | `toyengine/weather/` | [weather](../toyengine/weather/README.md) |
 | LOCAL environmental influences -- a rotor's downwash, a vent, a sword swing gusting foliage; the `EnvField` every wind reactor samples | `toyengine/env/` | [env](../toyengine/env/README.md) |
 | painted object instances -- brush-placed props, instanced rendering, streamed collision | `toyengine/instance/` | [instance](../toyengine/instance/README.md) |
+| fire -- authored flames (candles, campfires) and fire that SPREADS through vegetation; the first system that permanently consumes world state, hence `reset()` | `toyengine/fire/` | [fire](../toyengine/fire/README.md) |
 | particles | `toyengine/particles/` | [particles](../toyengine/particles/README.md) |
 | save slots, `ISaveable` | `toyengine/save/` | [save](../toyengine/save/README.md) |
 | audio, music, buses | `toyengine/audio/` | [audio](../toyengine/audio/README.md) |

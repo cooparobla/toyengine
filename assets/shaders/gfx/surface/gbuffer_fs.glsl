@@ -41,7 +41,7 @@ layout(push_constant) uniform PushConstants {
     vec4  emissive;     // xyz = pre-multiplied emissive radiance, w reserved
     vec4  gfx_time;     // x=time, y=delta_time, z=frame_index, w=spare
     vec4  gfx_params;   // four author-defined floats; see the surface shader's own doc
-    uvec4 surface_ext; // x/y packed tessellation params, z flags (bit 0: no snow, bit 1: wet), w toon code
+    uvec4 surface_ext; // x/y packed tess params, z flags (0: no snow, 1: wet, 2: burning), w toon code
 } material;
 
 // See gbuffer_vs.glsl's identical aliases for why these exist: a surface file's
@@ -116,6 +116,8 @@ void gfx_surface_fragment(inout GfxSurface s) {}
 // taking `inout GfxSurface` and needs the struct. Its include guard makes the terrain shaders'
 // own includes no-ops.
 #include <gfx/surface/wetness.glsl>
+// Same reason as wetness: gfx_burn_apply takes `inout GfxSurface`, so it needs the struct.
+#include <gfx/surface/burn.glsl>
 
 // GFX_SURFACE_KEEP_BACKFACE_NORMAL (define before including): a two-sided surface keeps its
 // authored normal on BOTH sides instead of flipping it on the back face. For vegetation, whose
@@ -180,14 +182,13 @@ void main() {
 
     gfx_surface_fragment(s);
 
-    // The GEOMETRIC normal, shared by both surface layers below. Guarded so a shader that
-    // compiles both of them out (snow.frag, editor_paint.frag) does not carry a dead normalize.
-#if !defined(GFX_SURFACE_NO_SNOW) || !defined(GFX_SURFACE_NO_WET)
+    // The GEOMETRIC normal, shared by the surface layers below. No longer guarded: the burn
+    // layer is compiled into every surface (it is gated at RUNTIME on a material flag, not at
+    // compile time), so this is always live.
 #ifdef GFX_SURFACE_KEEP_BACKFACE_NORMAL
     vec3 geo_n = normalize(frag_world_normal);
 #else
     vec3 geo_n = normalize(gl_FrontFacing ? frag_world_normal : -frag_world_normal);
-#endif
 #endif
 
     // Rain and local wet patches (gfx/surface/wetness.glsl). Opt IN per material
@@ -204,6 +205,13 @@ void main() {
         gfx_wet_apply(s, geo_n, smoothstep(0.96, 0.995, geo_n.z));
     }
 #endif
+
+    // Burning: an object alight burns across its own surface (gfx/surface/burn.glsl). Bit 2 is
+    // opt-IN and runtime-set -- FireSystem raises it on the materials of whatever is on fire --
+    // so a scene with nothing burning in it never runs this.
+    if ((material.surface_ext.z & 4u) != 0u) {
+        gfx_burn_apply(s, geo_n, gfx_params);
+    }
 
     // Lying snow on the open, up-facing parts (gfx/surface/snow.glsl), over whatever the hook
     // made -- unless the material (surface_ext.z bit 0) or the shader opts out. After the wet

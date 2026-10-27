@@ -1,0 +1,59 @@
+# chair: a seat, a back and four legs, built from primitives.
+#
+# SIX MeshRenderers under one root on purpose. Burnable works on the whole object: it takes the
+# bounds of every part to size its pick box and its burn front, and raises the burn flag on
+# every part's material. A single-box prop would not prove any of that.
+object:
+  name: chair
+  components:
+    - type: Transform
+      position: {x: 0, y: 0, z: 0}
+  children:
+    - name: seat
+      components:
+        - type: Transform
+          position: {x: 0, y: 0, z: 0.45}
+          scale: {x: 0.46, y: 0.46, z: 0.06}
+        - type: MeshRenderer
+          mesh_path: primitives/cube
+          material: {albedo: {r: 0.46, g: 0.31, b: 0.18}, roughness: 0.85}
+    - name: back
+      components:
+        - type: Transform
+          position: {x: -0.20, y: 0, z: 0.76}
+          scale: {x: 0.06, y: 0.46, z: 0.56}
+        - type: MeshRenderer
+          mesh_path: primitives/cube
+          material: {albedo: {r: 0.44, g: 0.29, b: 0.17}, roughness: 0.85}
+    - name: leg_a
+      components:
+        - type: Transform
+          position: {x: -0.18, y: -0.18, z: 0.21}
+          scale: {x: 0.05, y: 0.05, z: 0.42}
+        - type: MeshRenderer
+          mesh_path: primitives/cube
+          material: {albedo: {r: 0.40, g: 0.26, b: 0.15}, roughness: 0.9}
+    - name: leg_b
+      components:
+        - type: Transform
+          position: {x: 0.18, y: -0.18, z: 0.21}
+          scale: {x: 0.05, y: 0.05, z: 0.42}
+        - type: MeshRenderer
+          mesh_path: primitives/cube
+          material: {albedo: {r: 0.40, g: 0.26, b: 0.15}, roughness: 0.9}
+    - name: leg_c
+      components:
+        - type: Transform
+          position: {x: -0.18, y: 0.18, z: 0.21}
+          scale: {x: 0.05, y: 0.05, z: 0.42}
+        - type: MeshRenderer
+          mesh_path: primitives/cube
+          material: {albedo: {r: 0.40, g: 0.26, b: 0.15}, roughness: 0.9}
+    - name: leg_d
+      components:
+        - type: Transform
+          position: {x: 0.18, y: 0.18, z: 0.21}
+          scale: {x: 0.05, y: 0.05, z: 0.42}
+        - type: MeshRenderer
+          mesh_path: primitives/cube
+          material: {albedo: {r: 0.40, g: 0.26, b: 0.15}, roughness: 0.9}

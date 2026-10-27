@@ -74,6 +74,8 @@ void EnvSystem::execute(coopa::scene::Scene& scene, const coopa::scene::FrameCon
         }
     }
 
+    // --- Sources another system computed for this frame (fire's heat and updraft) ---
+
     // --- One-shot pulses: age, fold at their envelope strength, drop the spent ones ---
     const float dt = std::max(ctx.delta_time, 0.0f);
     for (auto it = pulses_.begin(); it != pulses_.end();) {

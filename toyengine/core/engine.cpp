@@ -49,8 +49,9 @@
 #include <toyengine/world/terrain_system.h>
 #include <toyengine/water/water_system.h>
 #include <toyengine/particles/particle_system_runner.h>
-#include <toyengine/particles/particle_yaml.h>
 #include <toyengine/env/env_system.h>
+#include <toyengine/fire/fire_system.h>
+#include <toyengine/particles/particle_yaml.h>
 #include <toyengine/instance/instance_painter.h>
 #include <toyengine/instance/instance_painter_system.h>
 #include <toyengine/weather/weather_reactor.h>
@@ -169,6 +170,10 @@ Engine::Engine(AppConfig config, EngineOptions options)
     // "EnvInfluence" / "EnvPulseEmitter" (toyengine/env/): local environmental influences that
     // add to -- or override -- the global weather: a rotor's downwash, a vent, a sword swing.
     env::register_env_components();
+    // "Burnable" / "FireIgniter" (toyengine/fire/): an object that catches fire at a point and
+    // burns across its own surface, and the click that lights it. A purely visual fire is a
+    // particle prefab (objects/props/campfire), not a component.
+    fire::register_fire_components();
     // "InstancePainter" (toyengine/instance/): brush-placed instances of object assets, drawn
     // as instanced meshes. Its records live in a `.instances` file beside the scene, not here.
     instance::register_instance_components(assets_);
@@ -541,6 +546,21 @@ void Engine::prepare_scene_(coopa::scene::Scene& scene, bool drain_assets) {
     // and the renderer's surface-world upload all read -- see env/env_system.h for why the
     // gather is here rather than after TransformResolve.
     env::install_env_system(scene);
+    // Order 44: fire. Per-object burning only -- it neither reads nor writes the environment
+    // field, and there is no world fire state of any kind (see toyengine/fire/README.md).
+    {
+        fire::FireSystem* fs = fire::install_fire_system(scene);
+        // Smoke and flame on a burn line are emitted from the burning object's own triangles,
+        // which needs its mesh surfaces loaded. ParticleSystem only gets a loader from the YAML
+        // parser, and these emitters are built at runtime, so the system is handed one here.
+        if (fs) {
+            coopa::asset::AssetManager& assets = assets_;
+            fs->set_surface_loader([&assets](const std::string& key) {
+                return particles::load_mesh_surface(assets, key, std::string());
+            });
+        }
+    }
+
     // Order 370: after TransformResolve, so deformers stamp where they are drawn; reads the
     // weather (40) for the cover and the precipitation map -- see world/snow_system.h.
     world::install_snow_system(scene);
@@ -794,6 +814,7 @@ bool Engine::tick() {
             drive_camera_controller_(scene_mgr_.get_active_scene());
             drive_kinematic_controllers_(scene_mgr_.get_active_scene());
             drive_free_movers_(scene_mgr_.get_active_scene());
+            drive_fire_igniters_(scene_mgr_.get_active_scene());
             drive_turntables_(scene_mgr_.get_active_scene());
             drive_terrain_diggers_(scene_mgr_.get_active_scene());
             drive_character_controllers_(scene_mgr_.get_active_scene());
@@ -1194,6 +1215,39 @@ void Engine::drive_free_movers_(coopa::scene::Scene& scene) {
                     input_.axis("move_y", ctx_.input()),
                     input_.axis("move_z", ctx_.input()));
     for (scene::FreeMover* fm : movers) fm->move_input = move;
+}
+
+void Engine::drive_fire_igniters_(coopa::scene::Scene& scene) {
+    std::vector<fire::FireIgniter*> igniters = scene.get_components<fire::FireIgniter>();
+    if (igniters.empty()) return;
+
+    using coopa::input::MouseButton;
+    const bool blocked = input_blocked_();
+    glm::vec3 origin(0.0f), dir(0.0f, 1.0f, 0.0f);
+    const bool have_ray = viewport_ray(ctx_.input().cursor_position(), origin, dir);
+
+    for (fire::FireIgniter* g : igniters) {
+        MouseButton button = MouseButton::Left;
+        if (g->button == "right") button = MouseButton::Right;
+        else if (g->button == "middle") button = MouseButton::Middle;
+
+        g->ignite_requested = !blocked && have_ray && ctx_.input().button_pressed(button);
+        // keys.h has a Key -> name table but no name -> Key, so the component's `reset_key`
+        // is matched against it rather than a second table being invented here.
+        bool reset = false;
+        if (!blocked && !g->reset_key.empty()) {
+            for (int k = 0; k < static_cast<int>(coopa::input::Key::Count); ++k) {
+                const auto key = static_cast<coopa::input::Key>(k);
+                if (g->reset_key == coopa::input::key_name(key)) {
+                    reset = ctx_.input().key_pressed(key);
+                    break;
+                }
+            }
+        }
+        g->reset_requested = reset;
+        g->ray_origin = origin;
+        g->ray_direction = dir;
+    }
 }
 
 void Engine::drive_turntables_(coopa::scene::Scene& scene) {

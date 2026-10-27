@@ -422,6 +422,18 @@ void apply_component_sections(std::map<std::string, ComponentSchema>& table) {
 
     // --- Environment -----------------------------------------------------------------------
 
+    layout("Burnable", {
+        sec("Fire", "Play")
+            .says("How fast the burn front travels out from where it caught.")
+            .keys({"spread_rate"}).done(),
+        sec("Burning", "Step")
+            .says("How long it lasts, and what is left afterwards.")
+            .keys({"burn_time", "on_burnt", "overshoot"}).done(),
+        sec("Start", "Material")
+            .says("Lit the moment the scene loads, at its own origin.")
+            .keys({"ignited"}).closed().done(),
+    });
+
     layout("EnvInfluence", {
         sec("Shape", "Sphere")
             .says("Where the influence reaches. It sits on the object, so moving the object moves it.")

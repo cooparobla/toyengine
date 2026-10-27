@@ -459,6 +459,10 @@ glm::uvec4 ToyRenderPipeline::surface_ext_(const coopa::gfx::engine::components:
     // Bit 1 is opt-IN, the opposite sense to bit 0: wetness restyles anything that sees rain,
     // so a material asks for it rather than opting out (PBRMaterial::wet).
     if (m.wet) ext.z |= 2u;
+    // Bit 2 is opt-IN and runtime-set: FireSystem raises it on the material of an object that
+    // is currently alight, which is what switches on the burn-front layer. Nothing authored
+    // turns it on, so a scene with no fire in it costs nothing.
+    if (m.burning) ext.z |= 4u;
     // Set before the tessellation early-returns below: the toon look has nothing to do with
     // whether this draw is tessellated, and an untessellated toon material must still carry
     // its code to the G-buffer.

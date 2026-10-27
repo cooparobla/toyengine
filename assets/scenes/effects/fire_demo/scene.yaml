@@ -1,0 +1,128 @@
+# fire_demo: click a chair, watch it burn.
+#
+# Deliberately small. Fire here is a property of an OBJECT, not of the world -- there is no
+# fire field, no spreading between objects, no scene-level fire block, and nothing fire touches
+# in the weather or the environment. A Burnable catches at the point a click landed on and a
+# front travels outward across that object alone.
+#
+# Three chairs so the point lands differently each time: light the first on its back, the
+# second on a leg, the third on the seat, and the front starts where you clicked.
+scene:
+  settings:
+    scene_name: fire_demo
+    render: { shadow_distance: 40.0, shadow_softness: 0.3 }
+    weather:
+      enabled: true
+      time_of_day: 16.5
+      day_length_minutes: 0
+      latitude: 32
+      drive_sun: true
+      cloudiness: 0.15
+      wind_strength: 1.6
+      wind_heading: 40
+      ambient_day: 0.5
+      sun_intensity: 2.0
+      fog_enabled: true
+      fog_density: 0.0015
+      fog_sky_blend: 0.2
+  root_objects:
+    - name: ground
+      components:
+        - type: Transform
+          position: { x: 0, y: 0, z: 0 }
+          scale: { x: 24, y: 24, z: 1 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material:
+            albedo: { r: 0.29, g: 0.30, b: 0.27 }
+            roughness: 0.95
+            metallic: 0.0
+        - type: BoxCollider
+
+    # The chairs. Each burns on its own, from wherever it was clicked -- nothing is shared
+    # between them and nothing spreads from one to the next.
+    - name: chair_a
+      prefab: objects/props/chair
+      components:
+        - type: Transform
+          position: { x: -1.4, y: 0, z: 0 }
+          rotation: { x: 0, y: 0, z: 18 }
+        - type: Burnable
+          spread_rate: 0.14
+          burn_time: 18
+          on_burnt: char
+    - name: chair_b
+      prefab: objects/props/chair
+      components:
+        - type: Transform
+          position: { x: 0.1, y: 0.3, z: 0 }
+          rotation: { x: 0, y: 0, z: -40 }
+        - type: Burnable
+          spread_rate: 0.14
+          burn_time: 18
+          on_burnt: char
+    - name: chair_c
+      prefab: objects/props/chair
+      components:
+        - type: Transform
+          position: { x: 1.5, y: -0.2, z: 0 }
+          rotation: { x: 0, y: 0, z: 125 }
+        - type: Burnable
+          spread_rate: 0.14
+          burn_time: 18
+          on_burnt: char
+
+    # A campfire beside them, for comparison: a purely VISUAL fire is a particle prefab, not
+    # a component. Nothing in toyengine/fire/ builds it -- it is authored emitters, editable
+    # like any other object, and it never spreads.
+    - name: campfire
+      prefab: objects/props/campfire
+      components:
+        - type: Transform
+          position: { x: 0.2, y: -2.2, z: 0 }
+
+    # Click-to-ignite. The ray is pushed in by the engine; this just says the scene wants it.
+    - name: igniter
+      components:
+        - type: Transform
+          position: { x: 0, y: 0, z: 0 }
+        - type: FireIgniter
+          button: left
+          reset_key: R
+
+    - name: ui
+      prefab: ui/hint
+
+    - name: camera
+      components:
+        - type: Transform
+          position: { x: 0, y: -4.5, z: 2.4 }
+        - type: Camera
+          main: true
+          projection: Perspective
+          fov: 52.0
+          near_clip_plane: 0.05
+          far_clip_plane: 200.0
+        - type: CameraController
+          mode: orbit
+          look_button: right
+          capture_cursor: false
+          collide: false
+          target: { x: 0, y: 0, z: 0.55 }
+          distance: 5.0
+          min_distance: 1.2
+          max_distance: 20.0
+          yaw_deg: 0.0
+          pitch_deg: 18.0
+          min_pitch_deg: 2.0
+          max_pitch_deg: 84.0
+          mouse_sensitivity: 0.12
+          movement_smoothing: 0.25
+          zoom_speed: 2.0
+    - name: sun
+      components:
+        - type: Transform
+          position: { x: 0, y: 0, z: 10 }
+        - type: DirectionalLight
+          intensity: 2.0
+          color: { r: 1.0, g: 0.94, b: 0.86 }

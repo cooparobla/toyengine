@@ -190,6 +190,7 @@ public:
     /** @brief Edited since the last save or load. */
     bool unsaved() const { return unsaved_; }
 
+
     /** @brief Writes a `.instances` file; recompresses only the chunks edited since. */
     bool save(const std::string& path);
     /** @brief Reads a `.instances` file, replacing everything held. */

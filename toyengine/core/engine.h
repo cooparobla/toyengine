@@ -1033,6 +1033,8 @@ private:
      * turntable tilts about what the viewer actually calls "across the screen" whatever
      * direction the camera was placed in.
      */
+    /// Pushes this frame's pick ray and button state onto every FireIgniter.
+    void drive_fire_igniters_(coopa::scene::Scene& scene);
     void drive_turntables_(coopa::scene::Scene& scene);
 
     /**

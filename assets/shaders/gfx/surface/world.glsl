@@ -272,6 +272,7 @@ float gfx_world_open_sky(vec3 p, float soft) {
     return smoothstep(h - soft, h - soft * 0.25, p.z);
 }
 
+
 /// The snow trench depth (m) pressed in at world xy -- the SnowField, toroidal in world cells.
 float gfx_world_trench_cell_(ivec2 c) {
     int n = gfx_world.field_dims.x;

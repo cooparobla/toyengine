@@ -16,12 +16,7 @@
  *                      weather's GroundProbe); NaN-free (the fallback is written in)
  *   binding 2  SSBO    uint snow_trench[] -- the trench field, two unorm16 cells per word,
  *                      toroidally addressed (cell (ix, iy) lives at (ix mod n, iy mod n))
- *
- * Plain readonly storage buffers rather than images: host-visible, rewritten by memcpy, no
- * staging copies or layout transitions, readable in every stage -- what a few thousand floats
- * the CPU produces anyway need.
  */
-
 #ifndef TOYENGINE_RENDER_SURFACE_WORLD_H
 #define TOYENGINE_RENDER_SURFACE_WORLD_H
 
@@ -147,6 +142,7 @@ struct SurfaceFrameState {
     float trench_scale = 1.0f;                 ///< Metres a full unorm16 (65535) trench is deep.
     uint64_t trench_version = 0;               ///< Bumped whenever the words change.
 
+
     // --- Local environmental influences (toy::env::EnvSystem) ---
     /// The frame's environment field. Its global wind/gust/wetness terms duplicate the fields
     /// above (the weather fills both); its `source[]` is what only the GPU fold can use.
@@ -174,6 +170,8 @@ struct alignas(16) SurfaceWorldUBO {
     /// offset, so a CPU/GLSL mismatch would silently corrupt the terrain params instead of
     /// only the new data.
     EnvSourceGpu env[env::kMaxEnvSources]{};
+    /// Also appended after env[], for the same reason: inserting ahead of terrain[] or env[]
+    /// would shift every one of their offsets.
 };
 static_assert(sizeof(SurfaceWorldUBO) == 176 + kMaxSurfaceTerrains * sizeof(TerrainGpuParams) +
                                          env::kMaxEnvSources * sizeof(EnvSourceGpu),

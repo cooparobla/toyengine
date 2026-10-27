@@ -145,6 +145,7 @@ fkyaml::node Engine::weather_node_(const fkyaml::node& settings) {
     return fkyaml::node();
 }
 
+
 void Engine::WeatherRenderBase::capture(const render::ToyRenderConfig& c) {
     cloud_coverage = c.cloud_coverage;
     zenith = c.indirect.sky_zenith; horizon = c.indirect.sky_horizon; ground = c.indirect.sky_ground;
@@ -403,6 +404,7 @@ void Engine::sync_surface_state_(coopa::scene::Scene& scene) {
     }
     // Local environmental influences -- the only part of the field the GPU fold can use.
     if (const env::EnvSystem* e = env::find_env(scene)) st.env = e->field();
+
     pipeline_->set_surface_state(std::move(st));
 }
 

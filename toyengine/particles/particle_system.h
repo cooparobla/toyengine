@@ -441,7 +441,9 @@ private:
     static glm::mat3 orthonormal_(const glm::mat3& m);
 
     /** @brief One shape sample in emitter-local space. `u` drives the mesh CDF (stratified for even). */
-    EmitSample sample_shape_(float u);
+    /// Samples the emit shape. False when nothing valid came back (no surface, or the band
+    /// rejected every try) -- the caller must then not spawn.
+    bool sample_shape_(float u, EmitSample& out);
 
     bool can_spawn_() const {
         return settings.shape.type != EmitShape::Mesh || surface_ready_;

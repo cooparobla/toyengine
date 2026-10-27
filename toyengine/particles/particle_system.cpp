@@ -418,17 +418,30 @@ glm::mat3 ParticleSystem::orthonormal_(const glm::mat3& m) {
     return glm::mat3(x, y, z);
 }
 
-EmitSample ParticleSystem::sample_shape_(float u) {
+bool ParticleSystem::sample_shape_(float u, EmitSample& out) {
     const ShapeSettings& s = settings.shape;
     EmitSample e;
     if (s.type == EmitShape::Mesh) {
-        if (!surface_ready_) return e;   // no surface yet: nothing to spawn from (callers check)
+        if (!surface_ready_) return false;   // no surface yet: nothing to spawn from
         e = surface_->sample(s.emit_from, u, rng_);
+        if (s.band_radius > 0.0f) {
+            // Rejection sampling: keep only points on the band. A handful of tries is plenty
+            // when the band crosses the mesh, and when it does not we WANT to emit nothing --
+            // which is exactly how an emitter on a burning object goes quiet as the front
+            // leaves it, with no bookkeeping anywhere.
+            const float half = std::max(1e-4f, s.band_width * 0.5f);
+            int tries = 0;
+            while (std::fabs(glm::length(e.position - s.band_center) - s.band_radius) > half) {
+                if (++tries >= 12) return false;
+                e = surface_->sample(s.emit_from, rng_.next01(), rng_);
+            }
+        }
     } else {
         e = sample_analytic_shape(s, rng_);
     }
     finish_shape_sample(s, e, rng_);
-    return e;
+    out = e;
+    return true;
 }
 
 void ParticleSystem::spawn_(float dt, float frac, const EmitSample* forced, const glm::vec3* forced_vel,
@@ -437,7 +450,7 @@ void ParticleSystem::spawn_(float dt, float frac, const EmitSample* forced, cons
     const bool local = simulates_locally_();
     EmitSample e;
     if (forced) e = *forced;
-    else e = sample_shape_(u >= 0.0f ? u : rng_.next01());
+    else if (!sample_shape_(u >= 0.0f ? u : rng_.next01(), e)) return;
 
     const float speed = settings.start_speed.sample(rng_);
     glm::vec3 pos = e.position;

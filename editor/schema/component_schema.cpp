@@ -891,6 +891,24 @@ std::map<std::string, ComponentSchema>& schema_table_() {
                                "Seconds back to nothing -- what makes foliage snap and then recover"), "s"),
             with_tip(as_slider(f_float("strength", 1.0f, 0.01f, 0.0f, 1.0f)), "Master scale on every channel"),
         }});
+        // toyengine/fire/: an object that catches fire at a point and burns across itself.
+        add({"Burnable", "Effects", {
+            with_unit(with_tip(f_float("spread_rate", 0.25f, 0.01f, 0.0f, 20.0f, true),
+                               "How fast the burn front travels out over the surface"), "m/s"),
+            with_unit(with_tip(f_float("burn_time", 14.0f, 0.5f, 0.1f, 3600.0f, true),
+                               "Seconds from ignition until it is consumed"), "s"),
+            with_tip(f_enum("on_burnt", {"char", "remove"}),
+                     "char: it stays, blackened. remove: it is switched off once consumed"),
+            with_unit(with_tip(f_float("overshoot", 0.3f, 0.05f, 0.0f, 10.0f),
+                               "How far past its own extent the front runs, so the last corner burns"), "m"),
+            with_tip(f_bool("ignited", false), "Already alight when the scene loads"),
+        }});
+        // toyengine/fire/: opts a scene into click-to-ignite.
+        add({"FireIgniter", "Effects", {
+            with_tip(f_enum("button", {"left", "right", "middle"}), "Mouse button that lights what it hits"),
+            with_tip(f_string("reset_key", "R", true), "Key that puts every Burnable back; empty disables it"),
+            with_unit(with_tip(f_float("max_distance", 1000.0f, 1.0f, 0.1f, 10000.0f), "How far the pick ray reaches"), "m"),
+        }});
         // toyengine/env/: a panel of UI buttons switching between authored environment presets.
         // `presets` is a list of maps, which no generic widget can edit -- the inspector shows
         // the scalars and the YAML carries the list.

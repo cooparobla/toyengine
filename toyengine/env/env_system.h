@@ -99,6 +99,7 @@ public:
      */
     void emit(const EnvPulse& pulse);
 
+
     /** @brief Live one-shot pulses (diagnostics / tests). */
     std::size_t live_pulse_count() const { return pulses_.size(); }
 

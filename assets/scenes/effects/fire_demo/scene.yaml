@@ -91,7 +91,12 @@ scene:
           reset_key: R
 
     - name: ui
-      prefab: ui/hint
+      components:
+        - type: ScreenHint
+          anchor: BottomLeft
+          theme_ref: ui/themes/game_dark
+          lines:
+            - Left-click a chair to set it alight. R resets. Right-drag to orbit.
 
     - name: camera
       components:

@@ -51,13 +51,11 @@ void PropertiesPanel::draw_properties_(imm::Context& ctx, const imm::Box& area) 
     } else if (app_.active_type_ == AssetType::Audio) {
         tabs = {{PropTab::Data, I::Play, "Sound\nThe sound's import settings and a preview"}};
     } else if (app_.active_type_ == AssetType::UI) {
-        tabs = {{PropTab::Canvas, I::UiCanvas, "Canvas\nPreview resolution, the canvas's scaling, the theme"},
-                {PropTab::Bindings, I::Link, "Bindings\nThe named widgets game code reaches (UiHandle), and their signals"}};
-        if (obj) {
-            object_start = static_cast<int>(tabs.size());
-            tabs.push_back({PropTab::Object, I::UiAnchor, "Element\nName, Rect Transform (anchors, position, size), visibility"});
-            tabs.push_back({PropTab::Components, I::Component, "Components\nThe element's widgets and composites, Add Component"});
-        }
+        // A panel is the whole document and a row is the selection, so there are exactly two
+        // tabs -- no object tree to walk, and nothing to add components to.
+        object_start = 1;
+        tabs = {{PropTab::Canvas, I::UiCanvas, "Panel\nTitle, size, anchor and theme of the whole panel"},
+                {PropTab::Object, I::UiAnchor, "Row\nThe selected row: its label, value key and range"}};
     }
     if (runtime_obj) {
         object_start = static_cast<int>(tabs.size());
@@ -132,8 +130,7 @@ void PropertiesPanel::draw_properties_(imm::Context& ctx, const imm::Box& area) 
     else if (app_.active_type_ == AssetType::UI) {
         switch (app_.prop_tab_) {
             case PropTab::Canvas:     app_.ui_canvas_panel_->draw_ui_canvas_props_(ctx); break;
-            case PropTab::Bindings:   app_.ui_canvas_panel_->draw_ui_bindings_(ctx); break;
-            case PropTab::Object:     app_.ui_canvas_panel_->draw_ui_object_props_(ctx, id); break;
+            case PropTab::Object:     app_.ui_canvas_panel_->draw_ui_object_props_(ctx); break;
             default:                  draw_component_list_(ctx, id, false); break;
         }
     }

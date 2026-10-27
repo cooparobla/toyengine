@@ -6,7 +6,7 @@
 #
 #   * MUSIC (object `music`, a MusicPlaylist): meadow -> expedition, 4 s crossfades, repeating.
 #     Each track hands off to the next on its own a few seconds before it ends -- the "natural"
-#     transition. The panel's Music tab drives it from code paths (MusicOnSignal): previous /
+#     transition. The panel's Music tab drives it directly: previous /
 #     next, pause (fades), stop, play a track directly (a 2.5 s crossfade), push a "boss" track
 #     over it and pop back, restart the playlist. The status line (MusicStatusText) shows the
 #     track, its clock and when a crossfade is running.
@@ -22,8 +22,8 @@
 #   * MUSIC BOX (far north, 28 m): too far to hear from the start; walk up to it.
 #   * PINGS: five one-shot sources parented to the camera (left / right / front / behind /
 #     above), fired from the Spatial tab -- they always come from that side of your head.
-#   * UI: every widget plays the canvas' UiSoundPlayer cues (hover tick, press click, slider
-#     ticks, tab switch); the UI Sounds tab's buttons each add a PlaySoundOnSignal sound on
+#   * UI: the panel plays a hover tick and a press click through the UI bus; the UI Sounds
+#     tab's buttons each play one of the library's named sounds on
 #     release. The Mixer tab's sliders are VolumeBindings on the Master / Music / SFX / UI buses.
 #
 # Clips: tools/gen_audio_demo_assets.py. This file: tools/gen_audio_demo_scene.py.
@@ -195,23 +195,14 @@ scene:
               position: { x: 0.0, y: 0.0, z: 3.2 }
               rotation: { x: 0.0, y: 0.0, z: 0.0 }
               scale: { x: 1.0, y: 1.0, z: 1.0 }
-            - type: RectTransform
-              anchor_preset: StretchAll
-            - type: Canvas
-              render_mode: WorldSpace
-              billboard: CameraFacing
+            - type: WorldLabel
+              title: "Music zone: nocturne"
+              backdrop: false
+              theme_ref: ui/themes/game_dark
               world_size: { x: 520, y: 60 }
               pixels_per_unit: 70
-              text_supersample: 2
-              occlude: true
-            - type: Theme
-              source: ui/themes/default.yaml
-          children:
-            - name: text
-              components:
-                - type: RectTransform
-                  anchor_preset: StretchAll
-                - {type: ThemedText, text: "Music zone: nocturne", font_role: Heading, align: Center}
+              world_text_supersample: 2
+              world_occlude: true
 
     # ==========================================================================================
     # COMPASS BEACONS (toggled from the panel's Spatial tab; start off)
@@ -275,23 +266,14 @@ scene:
               position: { x: 0.0, y: 0.0, z: 2.6 }
               rotation: { x: 0.0, y: 0.0, z: 0.0 }
               scale: { x: 1.0, y: 1.0, z: 1.0 }
-            - type: RectTransform
-              anchor_preset: StretchAll
-            - type: Canvas
-              render_mode: WorldSpace
-              billboard: CameraFacing
+            - type: WorldLabel
+              title: "North beacon (x1.0)"
+              backdrop: false
+              theme_ref: ui/themes/game_dark
               world_size: { x: 420, y: 60 }
               pixels_per_unit: 70
-              text_supersample: 2
-              occlude: true
-            - type: Theme
-              source: ui/themes/default.yaml
-          children:
-            - name: text
-              components:
-                - type: RectTransform
-                  anchor_preset: StretchAll
-                - {type: ThemedText, text: "North beacon (x1.0)", font_role: Heading, align: Center}
+              world_text_supersample: 2
+              world_occlude: true
 
     - name: beacon_east
       active: true
@@ -352,23 +334,14 @@ scene:
               position: { x: 0.0, y: 0.0, z: 2.6 }
               rotation: { x: 0.0, y: 0.0, z: 0.0 }
               scale: { x: 1.0, y: 1.0, z: 1.0 }
-            - type: RectTransform
-              anchor_preset: StretchAll
-            - type: Canvas
-              render_mode: WorldSpace
-              billboard: CameraFacing
+            - type: WorldLabel
+              title: "East beacon (x1.26)"
+              backdrop: false
+              theme_ref: ui/themes/game_dark
               world_size: { x: 420, y: 60 }
               pixels_per_unit: 70
-              text_supersample: 2
-              occlude: true
-            - type: Theme
-              source: ui/themes/default.yaml
-          children:
-            - name: text
-              components:
-                - type: RectTransform
-                  anchor_preset: StretchAll
-                - {type: ThemedText, text: "East beacon (x1.26)", font_role: Heading, align: Center}
+              world_text_supersample: 2
+              world_occlude: true
 
     - name: beacon_south
       active: true
@@ -429,23 +402,14 @@ scene:
               position: { x: 0.0, y: 0.0, z: 2.6 }
               rotation: { x: 0.0, y: 0.0, z: 0.0 }
               scale: { x: 1.0, y: 1.0, z: 1.0 }
-            - type: RectTransform
-              anchor_preset: StretchAll
-            - type: Canvas
-              render_mode: WorldSpace
-              billboard: CameraFacing
+            - type: WorldLabel
+              title: "South beacon (x0.75)"
+              backdrop: false
+              theme_ref: ui/themes/game_dark
               world_size: { x: 420, y: 60 }
               pixels_per_unit: 70
-              text_supersample: 2
-              occlude: true
-            - type: Theme
-              source: ui/themes/default.yaml
-          children:
-            - name: text
-              components:
-                - type: RectTransform
-                  anchor_preset: StretchAll
-                - {type: ThemedText, text: "South beacon (x0.75)", font_role: Heading, align: Center}
+              world_text_supersample: 2
+              world_occlude: true
 
     - name: beacon_west
       active: true
@@ -506,23 +470,14 @@ scene:
               position: { x: 0.0, y: 0.0, z: 2.6 }
               rotation: { x: 0.0, y: 0.0, z: 0.0 }
               scale: { x: 1.0, y: 1.0, z: 1.0 }
-            - type: RectTransform
-              anchor_preset: StretchAll
-            - type: Canvas
-              render_mode: WorldSpace
-              billboard: CameraFacing
+            - type: WorldLabel
+              title: "West beacon (x1.5)"
+              backdrop: false
+              theme_ref: ui/themes/game_dark
               world_size: { x: 420, y: 60 }
               pixels_per_unit: 70
-              text_supersample: 2
-              occlude: true
-            - type: Theme
-              source: ui/themes/default.yaml
-          children:
-            - name: text
-              components:
-                - type: RectTransform
-                  anchor_preset: StretchAll
-                - {type: ThemedText, text: "West beacon (x1.5)", font_role: Heading, align: Center}
+              world_text_supersample: 2
+              world_occlude: true
 
     # ==========================================================================================
     # DRONE: orbits the listener -- direction sweeps, doppler bends the pitch
@@ -632,23 +587,14 @@ scene:
               position: { x: 0.0, y: 0.0, z: 2.4 }
               rotation: { x: 0.0, y: 0.0, z: 0.0 }
               scale: { x: 1.0, y: 1.0, z: 1.0 }
-            - type: RectTransform
-              anchor_preset: StretchAll
-            - type: Canvas
-              render_mode: WorldSpace
-              billboard: CameraFacing
+            - type: WorldLabel
+              title: "Crickets"
+              backdrop: false
+              theme_ref: ui/themes/game_dark
               world_size: { x: 420, y: 60 }
               pixels_per_unit: 70
-              text_supersample: 2
-              occlude: true
-            - type: Theme
-              source: ui/themes/default.yaml
-          children:
-            - name: text
-              components:
-                - type: RectTransform
-                  anchor_preset: StretchAll
-                - {type: ThemedText, text: "Crickets", font_role: Heading, align: Center}
+              world_text_supersample: 2
+              world_occlude: true
 
     - name: chimes
       active: true
@@ -730,23 +676,14 @@ scene:
               position: { x: 0.0, y: 0.0, z: 3.6 }
               rotation: { x: 0.0, y: 0.0, z: 0.0 }
               scale: { x: 1.0, y: 1.0, z: 1.0 }
-            - type: RectTransform
-              anchor_preset: StretchAll
-            - type: Canvas
-              render_mode: WorldSpace
-              billboard: CameraFacing
+            - type: WorldLabel
+              title: "Wind chimes"
+              backdrop: false
+              theme_ref: ui/themes/game_dark
               world_size: { x: 420, y: 60 }
               pixels_per_unit: 70
-              text_supersample: 2
-              occlude: true
-            - type: Theme
-              source: ui/themes/default.yaml
-          children:
-            - name: text
-              components:
-                - type: RectTransform
-                  anchor_preset: StretchAll
-                - {type: ThemedText, text: "Wind chimes", font_role: Heading, align: Center}
+              world_text_supersample: 2
+              world_occlude: true
 
     - name: campfire
       prefab: objects/campfire
@@ -782,23 +719,14 @@ scene:
               position: { x: 0.0, y: 0.0, z: 2.6 }
               rotation: { x: 0.0, y: 0.0, z: 0.0 }
               scale: { x: 1.0, y: 1.0, z: 1.0 }
-            - type: RectTransform
-              anchor_preset: StretchAll
-            - type: Canvas
-              render_mode: WorldSpace
-              billboard: CameraFacing
+            - type: WorldLabel
+              title: "Campfire (linear rolloff, 16 m)"
+              backdrop: false
+              theme_ref: ui/themes/game_dark
               world_size: { x: 560, y: 60 }
               pixels_per_unit: 70
-              text_supersample: 2
-              occlude: true
-            - type: Theme
-              source: ui/themes/default.yaml
-          children:
-            - name: text
-              components:
-                - type: RectTransform
-                  anchor_preset: StretchAll
-                - {type: ThemedText, text: "Campfire (linear rolloff, 16 m)", font_role: Heading, align: Center}
+              world_text_supersample: 2
+              world_occlude: true
 
     # ==========================================================================================
     # MUSIC BOX: 28 m north, out of earshot until you walk to it
@@ -849,23 +777,14 @@ scene:
               position: { x: 0.0, y: 0.0, z: 1.8 }
               rotation: { x: 0.0, y: 0.0, z: 0.0 }
               scale: { x: 1.0, y: 1.0, z: 1.0 }
-            - type: RectTransform
-              anchor_preset: StretchAll
-            - type: Canvas
-              render_mode: WorldSpace
-              billboard: CameraFacing
+            - type: WorldLabel
+              title: "Music box"
+              backdrop: false
+              theme_ref: ui/themes/game_dark
               world_size: { x: 420, y: 60 }
               pixels_per_unit: 70
-              text_supersample: 2
-              occlude: true
-            - type: Theme
-              source: ui/themes/default.yaml
-          children:
-            - name: text
-              components:
-                - type: RectTransform
-                  anchor_preset: StretchAll
-                - {type: ThemedText, text: "Music box", font_role: Heading, align: Center}
+              world_text_supersample: 2
+              world_occlude: true
 
     - name: sun
       active: true
@@ -993,7 +912,11 @@ scene:
               curve: Inverse
               doppler: 0.0
 
-    # The panel (ui/audio_panel, in this folder): music transport, spatial toggles, UI sounds, mixer.
+    # The panel: music transport, spatial toggles, UI sounds, mixer. Declared per frame in
+    # immediate mode (toyengine/audio/audio_demo_panel.h), so it is a component on an object
+    # rather than a tree of widgets authored into the scene.
     - name: audio_panel
-      prefab: ui/audio_panel
-      components: []
+      components:
+        - type: AudioDemoPanel
+          playlist_object: music
+          theme_ref: ui/themes/game_dark

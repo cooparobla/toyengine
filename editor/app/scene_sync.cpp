@@ -27,7 +27,6 @@ void SceneSync::apply(core::Engine& engine, const SceneDocument& doc, const Chan
     if (!scene_ || c.scope == ChangeScope::None) return;
     if (c.scope == ChangeScope::Structure || c.object == 0) { rebuild(engine, doc); return; }
     if (c.scope == ChangeScope::Transform && patch_transform_(doc, c.object)) return;
-    if (c.scope == ChangeScope::Rect && patch_rect(doc, c.object)) return;
     if (!rebuild_object_(engine, doc, c.object)) rebuild(engine, doc);
 }
 
@@ -45,20 +44,6 @@ ObjectId SceneSync::id_of_live(const coopa::scene::SceneObject* obj) const {
     return 0;
 }
 
-bool SceneSync::patch_rect(const SceneDocument& doc, ObjectId id) {
-    coopa::scene::SceneObject* obj = live(id);
-    auto* rt = obj ? obj->get_component<coopa::ui::RectTransform>() : nullptr;
-    const int ci = doc.find_component(id, "RectTransform");
-    if (!rt || ci < 0 || inherits_(doc, id)) return false;
-    coopa::ui::RectTransform fresh;
-    coopa::ui::detail::parse_rect_transform(doc.find(id)->at("components").as_seq()[static_cast<size_t>(ci)], fresh);
-    rt->params() = fresh.params();
-    rt->set_local_rotation_degrees(fresh.local_rotation_degrees());
-    rt->set_local_scale(fresh.local_scale());
-    rt->hittable = fresh.hittable;
-    rt->z_order = fresh.z_order;
-    return true;
-}
 
 void SceneSync::install_observer_() {
     coopa::scene::SceneLoader::set_object_observer([this](const fkyaml::node& node, coopa::scene::SceneObject& obj) {

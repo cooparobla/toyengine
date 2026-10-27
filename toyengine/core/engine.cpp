@@ -34,11 +34,13 @@
 #include <physxcoopa/system/vehicle_system.h>
 #include <toyengine/core/branding.h>
 #include <toyengine/core/user_settings.h>
+#include <toyengine/ui/ui_panel.h>
 #include <toyengine/audio/audio_components.h>
 #include <sfxcoopa/sfx_yaml.h>
-#include <uicoopa/audio/audio_yaml.h>
+#include <uicoopa/immediate/imm_canvas.h>
+#include <uicoopa/text/font_defaults.h>
+#include <uicoopa/ui_resources.h>
 #include <uicoopa/audio/sound_library.h>
-#include <uicoopa/ui_yaml.h>
 #include <toyengine/scene/camera_controller.h>
 #include <toyengine/scene/free_mover.h>
 #include <toyengine/scene/kinematic_control_system.h>
@@ -76,7 +78,6 @@
 #include <toyengine/scene/view_blocker_system.h>
 #include <toyengine/world/heightmap_terrain_system.h>
 
-#include <uicoopa/input/modal_context.h>
 #include <uicoopa/render/icon_library.h>
 #include <uicoopa/layout/canvas.h>
 
@@ -155,6 +156,11 @@ Engine::Engine(AppConfig config, EngineOptions options)
             ctx_.device(), ctx_.allocator(), ctx_.command_pool(),
             config_.render.texel_aa ? coopa::gfx::SamplerDesc::pixel_art_smooth()
                                     : coopa::gfx::SamplerDesc::pixel_art()));
+    // Authored UI panels (toyengine/ui/ui_panel.h), so a PanelScreen gets the asset system's
+    // caching -- N screens on one file parse it once -- and hot reload while the editor is
+    // previewing it.
+    toy::ui::register_panel_loader(assets_);
+    toy::ui::set_panel_assets(&assets_);
     coopa::gfx::engine::components::register_render_components(ctx_.device(), ctx_.allocator(), ctx_.command_pool(), assets_);
     // The GPU-aware overload (a strict superset of the argument-free one): ClothRenderer
     // allocates its own dynamic vertex buffers and publishes the result as a runtime asset,
@@ -185,7 +191,12 @@ Engine::Engine(AppConfig config, EngineOptions options)
     // FontDefaults::resolve_font is wired for themes. Must precede load_scene(), like
     // every other parser registration above. Its captured device/allocator references
     // are released by the SceneLoader::clear_component_parsers() already in ~Engine().
-    coopa::ui::register_ui_components(ctx_.device(), ctx_.allocator(), ctx_.command_pool());
+    // The font cache every UI loads through, and the hook a theme's `font:` resolves by.
+    coopa::ui::UIResourceCache::instance().configure(ctx_.device(), ctx_.allocator(),
+                                                     ctx_.command_pool());
+    coopa::ui::FontDefaults::resolve_font = [](const std::string& path) {
+        return coopa::ui::UIResourceCache::instance().font_for_path(path);
+    };
     // Where a theme's font paths are looked up when they are not beside the theme file: the
     // same roots every other asset ref resolves against, so a project's own theme can say
     // `fonts/inter_regular.ttf` and get the engine's shared face. See FontDefaults::search_dirs.
@@ -325,12 +336,12 @@ void Engine::set_overlay_scene(coopa::scene::Scene* scene) {
     pipeline_->set_overlay_scene(scene);
 }
 
-void Engine::add_overlay_layer(coopa::scene::Scene* scene, int order, bool in_display_rect) {
+void Engine::add_overlay_layer(coopa::scene::Scene* scene, int order, bool in_display_rect, bool input) {
     if (!scene) return;
     std::erase_if(overlay_layers_, [scene](const OverlayLayer& l) { return l.scene == scene; });
     auto at = std::find_if(overlay_layers_.begin(), overlay_layers_.end(),
                            [order](const OverlayLayer& l) { return l.order > order; });
-    overlay_layers_.insert(at, OverlayLayer{scene, order, in_display_rect});
+    overlay_layers_.insert(at, OverlayLayer{scene, order, in_display_rect, input});
     sync_overlay_layers_();
 }
 
@@ -436,6 +447,29 @@ void Engine::init_user_settings_() {
     // Everything else this file layers over config.yaml defaults -- bus volumes, and whatever a
     // game's own settings screen stores -- reads the same document; this only has to run first.
     set_ui_scale(us.get_float(k_ui_scale_setting, 1.0f));
+    // Startup-only: the present mode is chosen when the swapchain is built, so this one takes
+    // effect on the next launch. It is read here so the key a settings panel writes is not
+    // simply ignored (engine_setting_keys() says which keys have a consumer at all).
+    config_.window.vsync = us.get_bool("display.vsync", config_.window.vsync);
+
+    // Applied the moment any writer changes one, so a settings slider is audible straight
+    // away rather than next launch. Scoped to this Engine: the test suite builds and destroys
+    // many against the one process-wide UserSettings.
+    settings_conn_ = us.on_changed.connect_scoped([this](const std::string& key) {
+        UserSettings& cur = UserSettings::instance();
+        if (key == k_ui_scale_setting) {
+            set_ui_scale(cur.get_float(key, 1.0f));
+            return;
+        }
+        if (!audio_) return;
+        for (const char* bus : {audio::k_bus_master, audio::k_bus_music, audio::k_bus_sfx,
+                                audio::k_bus_ui}) {
+            if (key == audio::volume_setting_key(bus)) {
+                audio_->set_bus_volume(bus, cur.get_float(key, 1.0f));
+                return;
+            }
+        }
+    });
 }
 
 void Engine::clear_scenes_() {
@@ -604,6 +638,10 @@ void Engine::prepare_scene_(coopa::scene::Scene& scene, bool drain_assets) {
 
 Engine::~Engine() {
     ctx_.wait_idle();
+    // Before anything else: the panel seam is a non-owning process-wide pointer at assets_,
+    // and the test suite builds many Engines in one process, so a stale one would outlive its
+    // manager. Only clear it if it is still ours.
+    if (ui::panel_assets() == &assets_) ui::set_panel_assets(nullptr);
     shutdown_audio_();
     if (save::SaveSystem::active() == &saves_) save::SaveSystem::set_active(nullptr);
     // Scenes before assets_.shutdown() below: every MeshRenderer (and texture, font, clip...)
@@ -827,15 +865,18 @@ bool Engine::tick() {
     }
     {
         CpuTimer t(prof, CpuScope::LateUpdate);
-        if (scene_mgr_.has_scene()) {
-            // Between update() and late_update(), and that window is the only correct slot:
-            // world matrices are current only after UpdatePhase::TransformResolve (350) has
-            // run inside update(), and a canvas needs its pointer position before
-            // EventSystem::process() is dispatched from inside late_update() (400).
-            drive_ui_canvases_(scene_mgr_.get_active_scene(), scene_ui_placement_);
+        {
+            CpuTimer ui(prof, CpuScope::SceneUi);
+            if (scene_mgr_.has_scene()) {
+                // Between update() and late_update(), and that window is the only correct slot:
+                // world matrices are current only after UpdatePhase::TransformResolve (350) has
+                // run inside update(), and a canvas needs its pointer position before
+                // EventSystem::process() is dispatched from inside late_update() (400).
+                drive_ui_canvases_(scene_mgr_.get_active_scene(), scene_ui_placement_);
+            }
+            if (overlay_scene_) drive_ui_canvases_(*overlay_scene_, std::nullopt);
+            for (const OverlayLayer& l : overlay_layers_) drive_ui_canvases_(*l.scene, overlay_layer_placement_(l));
         }
-        if (overlay_scene_) drive_ui_canvases_(*overlay_scene_, std::nullopt);
-        for (const OverlayLayer& l : overlay_layers_) drive_ui_canvases_(*l.scene, overlay_layer_placement_(l));
         // late_update() runs LateBehaviourSystem, flushes each worker's deferred
         // SceneCommandBuffer and advances Scene::frame_index(). Must precede render() so a
         // same-frame deferred spawn or destroy is reflected in what is drawn, matching
@@ -904,7 +945,7 @@ std::optional<Engine::ScreenUiPlacement> Engine::overlay_layer_placement_(const 
     const render::LetterboxRect rect = display_rect();
     if (rect.w == 0 || rect.h == 0) return std::nullopt;
     // At the display's scale, so the HUD keeps a physical size (and crisp text) on HiDPI.
-    return ScreenUiPlacement{rect, /*input=*/false, std::max(1.0f, display_scale())};
+    return ScreenUiPlacement{rect, layer.input, std::max(1.0f, display_scale())};
 }
 
 void Engine::update_fill_extent_() {
@@ -1476,18 +1517,14 @@ void Engine::gather_digger_hover_(coopa::scene::Scene& scene) {
 }
 
 bool Engine::ui_wants_pointer() {
-    // A modal owns the pointer wherever it happens to be -- that is what modal means, and it
-    // is true even on the frame the pointer sits over the scrim rather than over a widget.
-    if (coopa::ui::ModalContext::instance().top() != nullptr) return true;
+    // Asked before a click is allowed to reach the world: a panel's background exists to stop
+    // one, and so does an open popup. An immediate pass answers from the layout it drew last
+    // frame -- the same one the widgets acted on, so the click cannot be claimed by one and
+    // used by the other.
     if (!scene_mgr_.has_scene()) return false;
-    for (coopa::ui::CanvasComponent* canvas : coopa::ui::collect_canvases(scene_mgr_.get_active_scene())) {
-        if (canvas->is_world_space()) continue;   // Nameplates and damage numbers are not clickable.
-        coopa::ui::EventSystem& events = canvas->event_system();
-        // The RAW raycast winner, not hovered_object(): a window's frame, a modal's scrim and
-        // a panel background all exist to stop a click reaching what is behind them, and none
-        // of them is an IPointerHandler -- so hovered_object() is null over every one of them.
-        // See EventSystem::hit_object().
-        if (events.hit_object() || events.pressed_object()) return true;
+    for (coopa::ui::ImmediateCanvas* ui :
+         scene_mgr_.get_active_scene().get_components<coopa::ui::ImmediateCanvas>()) {
+        if (ui->wants_pointer()) return true;
     }
     return false;
 }
@@ -1496,8 +1533,10 @@ void Engine::drive_ui_canvases_(coopa::scene::Scene& scene, const std::optional<
     std::vector<coopa::ui::CanvasComponent*> canvases = coopa::ui::collect_canvases(scene);
     if (canvases.empty()) return;
     // A scene that is drawn but not simulating (the editor's edit mode) never runs a
-    // canvas's late_update(), which is where layout and emit happen -- so without this
-    // every HUD and nameplate would be invisible while editing.
+    // canvas's late_update(), which is where layout and emit happen. Whether it is previewed
+    // anyway is the host's call (set_ui_preview()): an editor that designs interfaces in their
+    // own workspace keeps them out of the scene view, and clears the DrawList rather than
+    // leaving a frozen copy of the last frame in it.
     const bool preview = !scene.is_simulating();
 
     const uint32_t rw = pipeline_->render_width();
@@ -1545,7 +1584,10 @@ void Engine::drive_ui_canvases_(coopa::scene::Scene& scene, const std::optional<
             // Cursor positions arrive in screen points; the canvas is sized in framebuffer
             // pixels. They differ on HiDPI displays.
             canvas->set_input(ctx_.input(), cursor_scale());
-            if (preview) canvas->preview_refresh();
+            if (preview) {
+                if (ui_preview_) canvas->preview_refresh();
+                else canvas->clear_emitted();
+            }
             continue;
         }
         // Seed the DrawList's default texture BEFORE late_update() emits against it:
@@ -1563,7 +1605,10 @@ void Engine::drive_ui_canvases_(coopa::scene::Scene& scene, const std::optional<
         // bottom-left corner, which would leave whatever widget sits there permanently
         // hovered whenever the pointer is anywhere else.
         canvas->set_world_input(ctx_.input(), hit ? *hit : glm::vec2(-1.0e6f));
-        if (preview) canvas->preview_refresh();
+        if (preview) {
+            if (ui_preview_) canvas->preview_refresh();
+            else canvas->clear_emitted();
+        }
     }
 }
 

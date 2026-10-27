@@ -61,3 +61,40 @@ COOPA_TEST(every_value_type_round_trips_and_types_do_not_cross) {
     expect(!again.has("ui.hud_scale"), "an erased key is gone");
     expect_near(again.get_float("ui.hud_scale", 1.0f), 1.0f, 1e-6f, "and reads as the fallback");
 }
+
+/**
+ * @brief on_changed fires with the key every setter writes, and not when a write is a no-op.
+ *
+ * This is the hook a host applies a setting through: Engine subscribes once and re-applies the
+ * audio bus levels and the interface scale, so a settings slider is audible immediately rather
+ * than on the next launch. It has to fire for every type (a toggle writes a bool, a combo a
+ * string) and it has to stay quiet when nothing actually changed, or applying a setting would
+ * run every frame a panel redraws.
+ */
+COOPA_TEST(on_changed_reports_every_write_and_stays_quiet_otherwise) {
+    toy::core::UserSettings us;
+    std::vector<std::string> seen;
+    auto conn = us.on_changed.connect_scoped([&](const std::string& k) { seen.push_back(k); });
+
+    us.set_float("audio.master", 0.5f);
+    us.set_bool("display.vsync", true);
+    us.set_int("ui.hotbar_slots", 8);
+    us.set_string("render.quality", "High");
+    expect(seen.size() == 4, "one event per write (" + std::to_string(seen.size()) + ")");
+    expect(seen[0] == "audio.master" && seen[3] == "render.quality", "each event names its key");
+
+    // Writing the same value is not a change: the setters return early, so a panel redrawing
+    // every frame does not re-apply the setting every frame.
+    us.set_float("audio.master", 0.5f);
+    us.set_bool("display.vsync", true);
+    expect(seen.size() == 4, "an unchanged write is silent");
+
+    us.set_float("audio.master", 0.25f);
+    expect(seen.size() == 5 && seen.back() == "audio.master", "a real change fires again");
+
+    // erase() is a change too -- "reset to defaults" has to be applied like any other edit.
+    us.erase("audio.master");
+    expect(seen.size() == 6 && seen.back() == "audio.master", "erase fires");
+    us.erase("audio.master");
+    expect(seen.size() == 6, "erasing a missing key is silent");
+}

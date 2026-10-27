@@ -15,7 +15,9 @@
 
 #include <glm/glm.hpp>
 #include <toyengine/core/engine.h>
-#include <uicoopa/ui_yaml.h>
+#include <toyengine/scene/health_driver.h>
+#include <toyengine/ui/panel_screen.h>
+#include <toyengine/ui/demo_hud.h>
 #include <toyengine/render/toy_render_math.h>
 
 #include "engine/support/checks.h"
@@ -60,112 +62,66 @@ using namespace toy::test;
  * TAA's non-reprojecting history clamp would ghost a canvas moving under an orbiting camera
  * and make the comparison depend on frame count.
  */
-COOPA_TEST(world_canvas_button_lights_up_under_the_pointer) {
+COOPA_TEST(world_space_ui_renders_through_the_world_pass) {
     ScopedEnv fixed_dt("FIXED_DT", "0.0005");
     ScopedEnv no_input("NO_INPUT", "1");
 
-    // ui_demo's world canvases alone: the HUD prefab and the hero (whose nameplate can orbit into
-    // view) are removed, so nothing but the Heal button can match its highlight colour.
+    // ui_demo's world plates alone: the screen-space HUD and the settings panel are removed,
+    // so anything the health colour matches had to come through UiWorldPass.
     const std::string scene = scene_variant("assets/scenes/ui/ui_demo/scene.yaml", "world_canvas", [](fkyaml::node& doc) {
         auto& roots = doc["scene"]["root_objects"].as_seq();
         std::erase_if(roots, [](const fkyaml::node& o) {
             if (!o.contains("name")) return false;
             const std::string name = o["name"].get_value<std::string>();
-            return name == "hud" || name == "Hero";
+            return name == "hud" || name == "settings";
         });
     });
     toy::core::AppConfig config = make_test_config(scene, 1920, 1080, 1440, 960);
-
     toy::core::Engine engine(std::move(config));
+    tick_frames(engine, 20);
 
-    // Scene colours: normal (0.20, 0.42, 0.30), highlighted (0.45, 0.92, 0.60). World UI is
-    // composited AFTER tonemapping, so these reach the framebuffer very nearly 1:1. Counting
-    // near-matches beats sampling one hardcoded coordinate: the saved image's size depends on
-    // config, and the camera orbits, so a fixed pixel index is exactly the assertion that rots.
-    auto count_highlight = [](const Frame& f) { return count_near_color(f, 115, 235, 153, 26); };
-
-    // Three ticks after each pointer move: Button's colour chase runs in update(), a phase
-    // EARLIER than the late_update() that detects the hover, so the tint can only land from the
-    // second frame onward however short fade_duration is.
-    // The two pointer positions below are authored against a 1920x1080 framebuffer. A window
-    // can come up with a different one -- Retina doubles it, and a window larger than the
-    // screen is clamped -- so re-express each point through the same letterbox maths the
-    // engine's own pointer ray uses (render::compute_display_rect). macOS only: elsewhere the
-    // points are used exactly as authored.
-#ifdef __APPLE__
-    const Frame probe = engine.capture_image(/*low_res=*/false);  // only its extent is used
-    auto to_window = [&](float x, float y) {
-        const uint32_t rw = 1440, rh = 960;
-        const auto ref = toy::render::compute_display_rect(engine.render_config(), 1920, 1080, rw, rh);
-        const auto act = toy::render::compute_display_rect(engine.render_config(), probe.width, probe.height, rw, rh);
-        const float u = (x - static_cast<float>(ref.x)) / static_cast<float>(ref.w);
-        const float v = (y - static_cast<float>(ref.y)) / static_cast<float>(ref.h);
-        return glm::vec2(static_cast<float>(act.x) + u * static_cast<float>(act.w),
-                         static_cast<float>(act.y) + v * static_cast<float>(act.h));
-    };
-#else
-    auto to_window = [](float x, float y) { return glm::vec2(x, y); };
-#endif
-
-    engine.set_cursor_override(to_window(1097.0f, 407.0f)); // the Heal button, in window pixels
-    tick_frames(engine, 3);
-    const Frame hovered = engine.capture_image(/*low_res=*/false);
-
-    engine.set_cursor_override(to_window(850.0f, 760.0f));  // empty floor below it
-    tick_frames(engine, 3);
-    const Frame idle = engine.capture_image(false);
-
-    expect(same_extent(hovered, idle), "world canvas hover: both captures share one extent");
-    if (!same_extent(hovered, idle)) return;
-
-    const long long on_count  = count_highlight(hovered);
-    const long long off_count = count_highlight(idle);
-
-    // The button is 34x13 canvas pixels on a 150x38 canvas; at this render extent that is a few
-    // hundred framebuffer pixels, comfortably clear of any stray match in the scene.
-    bool ok = expect_at_least(on_count, 200,
-                              "hovered world-space button lights up (canvas -> ray -> EventSystem works)");
-    ok &= expect(off_count < 50, "un-hovered world-space button stays its normal colour");
-    ok &= expect(on_count > off_count * 4 + 100, "hover is a large, unambiguous change, not noise");
-
-    // The change must also be LOCAL. Nothing but the pointer differs between these two frames,
-    // so a diff spanning the whole image would mean the camera (or time) moved instead -- which
-    // would make the colour counts above coincidental rather than causal.
-    const long long changed = count_diff(hovered, idle, /*tolerance=*/8);
-    const long long pixels  = static_cast<long long>(hovered.width) * hovered.height;
-    ok &= expect_at_least(changed, 200, "the hover changes a button-sized region of the frame");
-    ok &= expect(changed < pixels / 20,
-                 "the hover changes only a small part of the frame (the camera and clock held still)");
-
-    if (!ok) {
-        dump_frame(hovered, "world_canvas_hovered");
-        dump_frame(idle, "world_canvas_idle");
-    }
+    // The plates are declared per frame by HealthDriver and WorldLabel, drawn onto world-space
+    // canvases those components build themselves. Their bars use the theme's health colour.
+    // Whether a world widget RESPONDS to the pointer is pinned down headlessly in the
+    // imm_game suite, which can aim a ray exactly; here the question is only whether the
+    // immediate pass reaches the screen at all through the world pass.
+    const Frame f = engine.capture_image(/*low_res=*/false);
+    const long long health_px = count_near_color(f, 209, 80, 75, 40);
+    const bool ok = expect_at_least(health_px, 100,
+                                    "a world-space plate's health bar is on screen (" +
+                                        std::to_string(health_px) + " px)");
+    if (!ok) dump_frame(f, "world_canvas_plates");
 }
 
 /**
- * @brief The UI showcase in the game engine: the HUD is a UI asset placed as `prefab: ui/hud`,
- *        its composites (StatBar, Hotbar...) expand from YAML with the theme, HealthDriver binds
- *        the authored Health bar BY NAME and drains it, and the canvas draws over the frame.
+ * @brief The UI showcase in the game engine: a C++ HUD, a YAML-authored panel and world
+ *        plates, all declared per frame, drawn over the finished image.
  */
-COOPA_TEST(ui_showcase_hud_binds_by_name_and_draws) {
+COOPA_TEST(ui_showcase_draws_its_screens_and_the_health_drains) {
     ScopedEnv fixed_dt("FIXED_DT", "0.05");
     ScopedEnv no_input("NO_INPUT", "1");
     toy::core::AppConfig config = make_test_config("assets/scenes/ui/ui_demo/scene.yaml", 1280, 720, 1280, 720);
     toy::core::Engine engine(std::move(config));
     for (int i = 0; i < 3; ++i) engine.tick();
-    coopa::ui::UiHandle hud(engine.scene().find_object("hud"));
-    expect(hud && hud.find<coopa::ui::CanvasComponent>("") != nullptr, "ui_demo: the HUD prefab is in the scene with its canvas");
-    expect(hud.find<coopa::ui::ProgressBar>("Health") && hud.find<coopa::ui::InventoryGrid>("Hotbar") && hud.has("QuestTitle"),
-           "ui_demo: its composites expanded (Health bar, Hotbar, quest text)");
-    const float before = hud.get<float>("Health", -1.0f);
+
+    // Three kinds of screen in one scene: a C++ HUD, a YAML-authored panel, and world plates.
+    // None of them is a widget tree, so what the scene holds is three components.
+    auto* hud = engine.scene().find_first_component<toy::ui::DemoHud>();
+    auto* panel = engine.scene().find_first_component<toy::ui::PanelScreen>();
+    auto* driver = engine.scene().find_first_component<toy::scene::HealthDriver>();
+    expect(hud != nullptr, "ui_demo: the HUD component is in the scene");
+    expect(panel != nullptr, "ui_demo: the authored panel component is in the scene");
+    require(driver != nullptr, "ui_demo: the health driver is in the scene");
+    expect(panel && panel->asset() != nullptr, "ui_demo: the panel asset loaded");
+
+    // The driver owns its Resource and draws it, so the value IS the state -- no bar to bind
+    // and nothing to fall out of step.
+    const float before = driver->health().current;
     for (int i = 0; i < 40; ++i) engine.tick();
-    const float after = hud.get<float>("Health", -1.0f);
-    expect(before > 0.0f && after < before, "ui_demo: HealthDriver drives the authored bar by name (" +
-           std::to_string(before) + " -> " + std::to_string(after) + ")");
-    auto* plate = engine.scene().find_object("Nameplate");
-    expect(plate && plate->get_component<coopa::ui::CanvasComponent>() && plate->get_component<coopa::ui::CanvasComponent>()->is_world_space(),
-           "ui_demo: the hero carries a world-space nameplate");
+    const float after = driver->health().current;
+    expect(before > 0.0f && after < before,
+           "ui_demo: the health drains (" + std::to_string(before) + " -> " + std::to_string(after) + ")");
+
     const Frame f = engine.capture_image(false);
-    expect(count_near_color(f, 209, 51, 56, 30) > 50, "ui_demo: the health bar's red is on screen");
+    expect(count_near_color(f, 209, 80, 75, 40) > 50, "ui_demo: the health bar's red is on screen");
 }

@@ -202,36 +202,70 @@ ambient and fog render keys, which the editor then shows locked.
 
 ## UI assets
 
-`ui/<name>.yaml` is an object asset whose root carries a `Canvas` (authored at 1920 x 1080,
-`ScaleWithScreenSize`) and a `Theme { source: ui/themes/default.yaml }`. Place one in a scene as
-`prefab: ui/hud`, or open it from game code with `toy::ui::open(scene, "ui/pause_menu")`
-(`toyengine/ui/ui_assets.h`). Widgets are mostly uicoopa composites -- `Window`, `MenuList`,
-`StatBar`, `Hotbar`, `SettingRow`... (see `libs/uicoopa/uicoopa/builder/ui_composites_yaml.h`) --
-so a file stays short and restyles with its theme.
+Game UI is drawn in immediate mode (`libs/uicoopa/uicoopa/immediate/`): a screen declares
+itself from the game's state once per frame, so there is no widget tree in a scene and nothing
+to bind by name. Two kinds of file support it.
 
-Game code reaches widgets **by name** through `coopa::ui::UiHandle` (`on_click("Resume", ...)`,
-`get<float>("MasterVolume")`, `bind_bar("Health", &hp)`); the editor's Bindings tab lists every
-name in a file.
+### Panel assets -- `ui/<name>.yaml`
 
-| UI | What it is | Names to bind |
-|---|---|---|
-| `hud` | vitals, quest tracker, message log, hotbar, prompts | `Health`, `Stamina`, `Mana`, `QuestTitle`, `QuestStep`, `MessageLog`, `Hotbar` |
-| `main_menu` | title screen | `NewGame`, `Continue`, `Settings`, `Quit` |
-| `pause_menu` | pause over a dimmer | `Resume`, `Settings`, `SaveGame`, `QuitToMenu` |
-| `dialog_box` | NPC dialogue | `Portrait`, `Speaker`, `Line`, `Accept`, `AskMore`, `Leave` |
-| `inventory` | bag and equipment grids, details | `Bag`, `Equipment`, `ItemName`, `ItemDescription`, `Use`, `Gold`, `Close` |
-| `settings` | Audio / Video / Gameplay tabs | `MasterVolume`, `MusicVolume`, `EffectsVolume`, `Fullscreen`, `VSync`, `Quality`, `Resolution`, `Difficulty`, `Subtitles`, `CameraShake`, `Back`, `Apply` |
+A form: tabs of labelled rows, plus an optional button strip. `toy::ui::PanelScreen` draws it,
+so a settings screen or a pause menu needs no C++ at all:
 
-### UI themes
+```yaml
+title: Settings
+anchor: Center
+size: [720, 520]
+closable: true
+tabs:
+  - name: Audio
+    rows:
+      - { kind: slider, label: Master volume, bind: audio.master, min: 0, max: 1 }
+      - { kind: toggle, label: Subtitles,     bind: ui.subtitles }
+buttons:
+  - { label: Close, action: close }
+```
 
-`ui/themes/` holds the game UI themes -- the colours, fonts and sizes of every themed widget.
-Three ship: `default` (full-resolution, dark slate with a gold accent), `blender` (Blender's
-dark UI: neutral greys, `#4772b3` blue, compact rows) and `unity` (Unity's dark Pro skin,
-`#3a79bb` blue). A UI picks one with its root `Theme { source: ui/themes/<name>.yaml }`.
-Edit them in the editor's **Themes** tab: a theme opens in the Properties editor's Theme tab,
-previewed live on a UI asset (with its unsaved edits, in place of that UI's own theme) until
-Save Theme. These are game assets; the editor's own chrome themes live in `editor/themes/`.
+Place one in a scene as a component, not a prefab:
 
-`scenes/ui/ui_demo` places the HUD over a small scene with a world-space nameplate; its
-`HealthDriver` drives the HUD's `Health` bar by name. `tools/gen_ui_templates.py` regenerates
-these files (and the editor's New UI templates, `editor/templates/ui/`).
+```yaml
+- type: PanelScreen
+  panel: ui/settings
+```
+
+Row kinds are `label`, `slider`, `toggle`, `int`, `combo`, `button`, `separator` and `spacer`.
+A row's `bind` key reads and writes `toy::core::UserSettings`, which persists between sessions;
+a game that wants a row to drive something of its own registers a provider for that key
+(`PanelScreen::bindings().provide()`) and the row goes through it instead. A `button` row
+reports its `action` through `bindings().on_action()`.
+
+Anything a row list cannot express -- a HUD, a hotbar, an inventory, a nameplate -- is a C++
+`toy::ui::ImmScreen` subclass instead (`toyengine/ui/README.md`), which is a single `draw()`
+override. The engine ships `DemoHud`, `WorldLabel`, `ScreenHint` and `PanelScreen`.
+
+### Placement overrides -- `ui/<Screen>.tune.yaml`
+
+A C++ screen states a default box for each panel it draws. An entry here overrides that
+default by name, so a HUD can be moved and resized without touching the `.cpp`:
+
+```yaml
+vitals:
+  anchor: TopLeft     # TopLeft TopCenter TopRight MiddleLeft Center
+  pos:  [24, 24]      # MiddleRight BottomLeft BottomCenter BottomRight
+  size: [300, 76]
+```
+
+`pos` is in UI space (+Y **down**) and moves the box, not the anchor, so a right- or
+bottom-pinned panel insets with a negative component. `ui/DemoHud.tune.yaml` is the worked
+example. Every key is optional; a missing file just means the code defaults are used.
+
+### UI themes -- `ui/themes/<name>.yaml`
+
+The look of every panel, button, slider and field (the widget `Style`: metrics and colours),
+plus the roles only a game knows -- which colour health is, what an empty inventory slot looks
+like (the `bars`, `slots`, `feedback` and `world` sections). `game_dark` ships. A screen picks
+one with `theme_ref: ui/themes/game_dark`; `.yaml` is optional and `ui/themes/` is implied, so
+`game_dark` names the same file. Edit them in the editor's **Themes** tab. These are game
+assets; the editor's own chrome themes live in `editor/themes/`.
+
+`scenes/ui/ui_demo` is the showcase: a C++ HUD, an authored panel and world-space plates over a
+small scene, with `HealthDriver` owning and drawing its own health value.

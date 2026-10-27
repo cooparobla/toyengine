@@ -5,7 +5,6 @@
  *
  *   ChangeScope::Transform -> the live object's Transform is patched in place (gizmo drags
  *                             stay at full frame rate);
- *   ChangeScope::Rect      -> likewise its RectTransform (the UI designer's rect gizmo);
  *   ChangeScope::Object    -> that object's subtree is rebuilt from its node;
  *   ChangeScope::Structure -> the whole scene is rebuilt (SceneLoader::load_from_node()).
  *
@@ -22,7 +21,6 @@
 
 #include <coopa/scene/scene_loader.h>
 
-#include <uicoopa/ui_yaml.h>
 
 #include <filesystem>
 #include <functional>
@@ -59,7 +57,6 @@ public:
      *        plain object: a prefab instance's rect is merged with its asset's, which only a
      *        rebuild resolves.
      */
-    bool patch_rect(const SceneDocument& doc, ObjectId id);
 
     std::string last_error;
 

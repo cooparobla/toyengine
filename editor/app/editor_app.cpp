@@ -1,3 +1,4 @@
+#include <uicoopa/ui_resources.h>
 #include "editor/app/editor_app.h"
 #include "editor/app/thumbnail_cache.h"
 #include "editor/schema/inspector_sections.h"
@@ -188,6 +189,7 @@ EditorApp::EditorApp(core::Engine& engine, Project project, const fs::path& scen
 
 EditorApp::~EditorApp() {
     engine_.set_frame_hooks({});
+    ui_canvas_panel_->release();
     engine_.set_overlay_scene(nullptr);
     // The drawers below close over this app; the registry outlives it (one editor is built
     // and torn down per test), so they go with it.
@@ -230,17 +232,14 @@ int& EditorApp::world_generator_world_tiles() { return world_generator_panel_->w
 
 bool EditorApp::new_ui_asset(const std::string& name, const std::string& template_id) { return ui_canvas_panel_->new_ui_asset(name, template_id); }
 ObjectId EditorApp::place_ui_asset(const std::string& ui_rel, ObjectId parent) { return ui_canvas_panel_->place_ui_asset(ui_rel, parent); }
+UiCanvasPanel& EditorApp::ui_workspace() { return *ui_canvas_panel_; }
 bool EditorApp::save_theme() { return theme_editor_panel_->save_theme(); }
 void EditorApp::set_ui_interact(bool on) { ui_canvas_panel_->set_ui_interact(on); }
 ThemeDocument& EditorApp::theme_document() { return theme_editor_panel_->theme_document(); }
-ObjectId EditorApp::ui_add_widget(const std::string& id, ObjectId parent, std::optional<glm::vec2> at) { return ui_canvas_panel_->ui_add_widget(id, parent, at); }
 imm::Box EditorApp::ui_frame() const { return ui_canvas_panel_->ui_frame(); }
 bool EditorApp::ui_interacting() const { return ui_canvas_panel_->ui_interacting(); }
-std::optional<ui::Rect> EditorApp::ui_live_rect(ObjectId id) { return ui_canvas_panel_->ui_live_rect(id); }
 bool EditorApp::ui_mode() const { return ui_canvas_panel_->ui_mode(); }
-std::vector<ObjectId> EditorApp::ui_pick(glm::vec2 editor_px) { return ui_canvas_panel_->ui_pick(editor_px); }
 std::vector<std::string> EditorApp::ui_templates() { return UiCanvasPanel::ui_templates(); }
-ui::UiView EditorApp::ui_view() { return ui_canvas_panel_->ui_view(); }
 
 bool EditorApp::convert_legacy_tile_terrain(Node& comp) { return TileTerrainPanel::convert_legacy_tile_terrain(comp); }
 void EditorApp::set_terrain_mode(bool on) { terrain_panel_->set_terrain_mode(on); }
@@ -1186,9 +1185,8 @@ void EditorApp::rebuild_scene_() {
     ++mesh_cache_epoch_;
     mesh_resolve_cache_.clear();
     stats_cache_.clear();   // mesh totals may have changed
-    // Composites fall back to the library's active theme when no Theme component is above
-    // them; reset it so one file's theme never leaks into the next.
-    coopa::ui::ThemeLibrary::instance().set_active(coopa::ui::UITheme::builtin_dark());
+    // No theme library to reset: a screen names its own theme file and loads it in start(),
+    // so one asset's look cannot leak into the next.
     theme_editor_panel_->apply_theme_preview_();   // an open theme's unsaved edits shadow its file (ui/theme_editor.h)
     // Instances' inherited children get their nodes first (ui/instances.h): the ids the
     // live objects map to. Asset files may have changed, so the resolved view is stale too.
@@ -1197,7 +1195,6 @@ void EditorApp::rebuild_scene_() {
     sync_.rebuild(engine_, doc_);
     if (!sync_.last_error.empty()) { log_error("Scene: " + sync_.last_error); sync_.last_error.clear(); }
     assets_panel_->add_object_view_lights_();
-    ui_canvas_panel_->ui_after_rebuild_();
     preview_scene_ = nullptr;   // set_scene() replaced every engine scene
     preview_object_ = nullptr;
     preview_ground_ = nullptr;
@@ -1230,7 +1227,6 @@ void EditorApp::apply_(Change c) {
         return;
     }
     if (c.scope == ChangeScope::Structure) { queue_rebuild_(); return; }
-    if (c.scope == ChangeScope::Rect && sync_.patch_rect(doc_, c.object)) return;   // likewise
     if (c.scope == ChangeScope::Transform) {   // cheap and safe immediately
         sync_.apply(engine_, doc_, c);
         return;
@@ -1504,7 +1500,15 @@ void EditorApp::push_particle_gizmos_() {
 }
 
 void EditorApp::update_scene_ui_placement_() {
-    if (active_type_ == AssetType::UI) { engine_.set_scene_ui_placement(ui_canvas_panel_->ui_preview_placement_()); return; }
+    // The UI designer is the one place an interface is previewed on purpose, so it is the one
+    // place that asks for it. Everywhere else an authored HUD stays out of the way until the
+    // scene actually runs: a level is built by looking at the level.
+    if (active_type_ == AssetType::UI) {
+        engine_.set_ui_preview(true);
+        engine_.set_scene_ui_placement(ui_canvas_panel_->ui_preview_placement_());
+        return;
+    }
+    engine_.set_ui_preview(false);
     if (asset_view_() || viewport_box_.empty()) { engine_.set_scene_ui_placement(std::nullopt); return; }
     core::Engine::ScreenUiPlacement p;
     p.rect = engine_.display_rect();

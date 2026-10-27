@@ -63,11 +63,8 @@
 #include "../viewport/editor_camera.h"
 #include "../viewport/gizmo.h"
 #include "../viewport/modal_transform.h"
-#include "../viewport/rect_gizmo.h"
-#include "../ui/ui_canvas_math.h"
 #include "../ui/log_view.h"
 #include "../ui/logo.h"
-#include "../ui/ui_palette.h"
 
 #include <toyengine/core/config.h>
 #include <toyengine/core/branding.h>
@@ -91,7 +88,6 @@
 
 #include <uicoopa/immediate/imm_canvas.h>
 #include <uicoopa/immediate/imm_file_dialog.h>
-#include <uicoopa/ui_yaml.h>
 
 #include <coopa/scene/scene_loader.h>
 
@@ -375,17 +371,15 @@ public:
 
     bool new_ui_asset(const std::string& name, const std::string& template_id = "blank");
     ObjectId place_ui_asset(const std::string& ui_rel, ObjectId parent = 0);
+    /** @brief The UI workspace: the panel and placement editors (see `app/ui/ui_canvas.h`). */
+    UiCanvasPanel& ui_workspace();
     bool save_theme();
     void set_ui_interact(bool on);
     ThemeDocument& theme_document();
-    ObjectId ui_add_widget(const std::string& id, ObjectId parent = 0, std::optional<glm::vec2> at = std::nullopt);
     imm::Box ui_frame() const;
     bool ui_interacting() const;
-    std::optional<ui::Rect> ui_live_rect(ObjectId id);
     bool ui_mode() const;
-    std::vector<ObjectId> ui_pick(glm::vec2 editor_px);
     static std::vector<std::string> ui_templates();
-    ui::UiView ui_view();
 
     static bool convert_legacy_tile_terrain(Node& comp);
     void set_terrain_mode(bool on);

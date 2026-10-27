@@ -59,6 +59,14 @@ enum class CpuScope : uint32_t {
     SceneWind,             ///< Wind system.
     SceneTransformResolve, ///< The world-matrix resolve pass (UpdatePhase 350).
     SceneLateBehaviour,    ///< The recursive Component::late_update() walk.
+    /// The per-frame UI canvas drive: viewport sizing, HiDPI cursor scaling, interface scale,
+    /// placement, world-canvas transforms and pointer rays -- plus layout and emit for a scene
+    /// that is drawn but not simulating (an editor previewing). A SIMULATING scene does its
+    /// canvas layout and emit inside CanvasComponent::late_update(), which lands in
+    /// SceneLateBehaviour, so this is the engine's UI cost and not the whole UI cost.
+    /// Inside the SceneBehaviour..SceneOther block so the F3 overlay ranks it with the
+    /// heaviest scene systems.
+    SceneUi,
     SceneOther,            ///< Any registered system without its own column.
     LateUpdate,     ///< UI canvases + late_update.
     DynamicMeshes,  ///< Cloth / skinned mesh uploads, debug lines.

@@ -334,7 +334,7 @@ Change SceneDocument::set_component(ObjectId id, int index, Node comp, const std
         if (!list || index < 0 || index >= static_cast<int>(list->size())) return {};
         const std::string type = component_type(list->as_seq()[static_cast<size_t>(index)]);
         list->as_seq()[static_cast<size_t>(index)] = comp;
-        return {type == "Transform" ? ChangeScope::Transform : type == "RectTransform" ? ChangeScope::Rect : ChangeScope::Object, id};
+        return {type == "Transform" ? ChangeScope::Transform : ChangeScope::Object, id};
     }, merge_key);
 }
 

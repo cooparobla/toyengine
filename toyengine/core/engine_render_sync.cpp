@@ -33,9 +33,7 @@
 #include <toyengine/core/user_settings.h>
 #include <toyengine/audio/audio_components.h>
 #include <sfxcoopa/sfx_yaml.h>
-#include <uicoopa/audio/audio_yaml.h>
 #include <uicoopa/audio/sound_library.h>
-#include <uicoopa/ui_yaml.h>
 #include <toyengine/scene/camera_controller.h>
 #include <toyengine/scene/free_mover.h>
 #include <toyengine/scene/kinematic_control_system.h>
@@ -67,7 +65,6 @@
 #include <toyengine/scene/turntable.h>
 #include <toyengine/world/heightmap_terrain_system.h>
 
-#include <uicoopa/input/modal_context.h>
 #include <uicoopa/render/icon_library.h>
 #include <uicoopa/layout/canvas.h>
 

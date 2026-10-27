@@ -27,9 +27,8 @@
 #include <toyengine/core/user_settings.h>
 #include <toyengine/audio/audio_components.h>
 #include <sfxcoopa/sfx_yaml.h>
-#include <uicoopa/audio/audio_yaml.h>
+#include <uicoopa/ui_resources.h>
 #include <uicoopa/audio/sound_library.h>
-#include <uicoopa/ui_yaml.h>
 #include <toyengine/scene/camera_controller.h>
 #include <toyengine/scene/free_mover.h>
 #include <toyengine/scene/kinematic_control_system.h>
@@ -61,7 +60,6 @@
 #include <toyengine/scene/turntable.h>
 #include <toyengine/world/heightmap_terrain_system.h>
 
-#include <uicoopa/input/modal_context.h>
 #include <uicoopa/render/icon_library.h>
 #include <uicoopa/layout/canvas.h>
 
@@ -84,8 +82,9 @@ void Engine::init_audio_() {
     coopa::sfx::register_sfx_components();
     audio::register_audio_components();
 #ifdef UICOOPA_HAS_AUDIO
+    // No component parsers to register: an immediate screen plays its cues through the
+    // Context's on_sound hook (toy::ui::ImmScreen), not through per-widget reactors.
     coopa::ui::UiAudio::set_active(audio_->ui());
-    coopa::ui::register_ui_audio_components();
     // UI sounds: the first asset root with a sounds/ manifest (a packaged build carries
     // uicoopa's defaults there), else uicoopa's own from source.
     std::string sounds_dir;

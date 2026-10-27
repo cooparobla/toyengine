@@ -28,8 +28,8 @@
 
 #include <toyengine/core/branding.h>
 #include <toyengine/core/engine.h>
-#include <uicoopa/ui_yaml.h>   // UIResourceCache
 
+#include <uicoopa/ui_resources.h>
 #include <uicoopa/immediate/imm_canvas.h>
 #include <uicoopa/immediate/imm_file_dialog.h>
 #include <uicoopa/immediate/imm_theme.h>

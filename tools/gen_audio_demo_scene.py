@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Generates the audio_demo scene and its UI panel.
+"""Generates the audio_demo scene.
 
 Run from the repo root:  python3 tools/gen_audio_demo_scene.py
 
 Writes:
   assets/scenes/audio/audio_demo/scene.yaml
-  assets/scenes/audio/audio_demo/ui/audio_panel.yaml
+
+The control panel is not authored here: it is toy::audio::AudioDemoPanel, a component that
+declares itself in immediate mode, so the scene carries one object with one component.
 
 The clips it plays come from tools/gen_audio_demo_assets.py (assets/audio/).
 """
@@ -54,17 +56,22 @@ def source(clip, ind=8, volume=1.0, pitch=1.0, play=True, loop=True, min_d=1.0, 
 
 
 def label(text, z, width=420, ind=8):
-    """A camera-facing world-space caption as a child object."""
+    """A camera-facing world-space caption, as one WorldLabel component.
+
+    WorldLabel (toyengine/ui/world_label.h) builds its own world-space canvas and declares the
+    caption per frame, so the caption is a component rather than a canvas plus a text child.
+    """
     p = " " * ind
     return (f"{p}- name: label\n{p}  components:\n"
             + transform((0.0, 0.0, z), ind=ind + 4) +
-            f"{p}    - type: RectTransform\n{p}      anchor_preset: StretchAll\n"
-            f"{p}    - type: Canvas\n{p}      render_mode: WorldSpace\n{p}      billboard: CameraFacing\n"
-            f"{p}      world_size: {{ x: {width}, y: 60 }}\n{p}      pixels_per_unit: 70\n{p}      text_supersample: 2\n"
-            f"{p}      occlude: true\n{p}    - type: Theme\n{p}      source: ui/themes/default.yaml\n"
-            f"{p}  children:\n{p}    - name: text\n{p}      components:\n"
-            f"{p}        - type: RectTransform\n{p}          anchor_preset: StretchAll\n"
-            f"{p}        - {{type: ThemedText, text: \"{text}\", font_role: Heading, align: Center}}\n")
+            f"{p}    - type: WorldLabel\n"
+            f"{p}      title: \"{text}\"\n"
+            f"{p}      backdrop: false\n"
+            f"{p}      theme_ref: ui/themes/game_dark\n"
+            f"{p}      world_size: {{ x: {width}, y: 60 }}\n"
+            f"{p}      pixels_per_unit: 70\n"
+            f"{p}      world_text_supersample: 2\n"
+            f"{p}      world_occlude: true\n")
 
 
 # --- scene ------------------------------------------------------------------------------------
@@ -93,7 +100,7 @@ HEADER = """\
 #
 #   * MUSIC (object `music`, a MusicPlaylist): meadow -> expedition, 4 s crossfades, repeating.
 #     Each track hands off to the next on its own a few seconds before it ends -- the "natural"
-#     transition. The panel's Music tab drives it from code paths (MusicOnSignal): previous /
+#     transition. The panel's Music tab drives it directly: previous /
 #     next, pause (fades), stop, play a track directly (a 2.5 s crossfade), push a "boss" track
 #     over it and pop back, restart the playlist. The status line (MusicStatusText) shows the
 #     track, its clock and when a crossfade is running.
@@ -109,8 +116,8 @@ HEADER = """\
 #   * MUSIC BOX (far north, 28 m): too far to hear from the start; walk up to it.
 #   * PINGS: five one-shot sources parented to the camera (left / right / front / behind /
 #     above), fired from the Spatial tab -- they always come from that side of your head.
-#   * UI: every widget plays the canvas' UiSoundPlayer cues (hover tick, press click, slider
-#     ticks, tab switch); the UI Sounds tab's buttons each add a PlaySoundOnSignal sound on
+#   * UI: the panel plays a hover tick and a press click through the UI bus; the UI Sounds
+#     tab's buttons each play one of the library's named sounds on
 #     release. The Mixer tab's sliders are VolumeBindings on the Master / Music / SFX / UI buses.
 #
 # Clips: tools/gen_audio_demo_assets.py. This file: tools/gen_audio_demo_scene.py.
@@ -313,189 +320,21 @@ scene:
         s += source("audio/sfx/ping.wav", ind=12, volume=0.6, pitch=pitch, play=False, loop=False, min_d=4.0,
                     max_d=40.0, doppler=0.0)
     s += """
-    # The panel (ui/audio_panel, in this folder): music transport, spatial toggles, UI sounds, mixer.
+    # The panel: music transport, spatial toggles, UI sounds, mixer. Declared per frame in
+    # immediate mode (toyengine/audio/audio_demo_panel.h), so it is a component on an object
+    # rather than a tree of widgets authored into the scene.
     - name: audio_panel
-      prefab: ui/audio_panel
-      components: []
-"""
-    return s
-
-
-# --- UI panel ---------------------------------------------------------------------------------
-
-def rect(w, h, ind):
-    p = " " * ind
-    return (f"{p}- type: RectTransform\n{p}  anchor_min: {{x: 0.5, y: 0.5}}\n{p}  anchor_max: {{x: 0.5, y: 0.5}}\n"
-            f"{p}  pivot: {{x: 0.5, y: 0.5}}\n{p}  anchored_position: {{x: 0, y: 0}}\n{p}  size_delta: {{x: {w}, y: {h}}}\n")
-
-
-def ui_obj(name, comp, w, h, ind):
-    p = " " * ind
-    return f"{p}- name: {name}\n{p}  components:\n" + rect(w, h, ind + 4) + f"{p}    - {comp}\n"
-
-
-def text_row(name, text, ind, h=40, role="Body", wrap=False, extra=""):
-    w = ", wrap: true" if wrap else ""
-    s = ui_obj(name, f"{{type: ThemedText, text: \"{text}\", font_role: {role}{w}}}", 520, h, ind)
-    if extra:
-        s += " " * (ind + 4) + f"- {extra}\n"
-    return s
-
-
-def button_row(name, items, ind, h=52):
-    its = ", ".join(f"{{name: {n}, label: \"{l}\"{', role: Primary' if r else ''}}}" for n, l, r in items)
-    return ui_obj(name, f"{{type: ActionBar, align: MiddleLeft, button_height: {h - 4}, items: [{its}]}}", 520, h, ind)
-
-
-def toggle_row(name, label_, on, ind):
-    return ui_obj(name, f"{{type: SettingRow, kind: toggle, label: \"{label_}\", is_on: {str(on).lower()}, label_width: 300}}",
-                  520, 36, ind)
-
-
-def page(name, rows, ind=12):
-    p = " " * ind
-    return (f"{p}- name: {name}\n{p}  components:\n" + rect(540, 700, ind + 4) +
-            f"{p}    - {{type: VerticalLayoutGroup, spacing: 8, child_force_expand_height: false}}\n"
-            f"{p}  children:\n" + "".join(rows))
-
-
-SPATIAL_TOGGLES = [  # toggle name, label, target, starts on
-    ("BeaconNorth", "North beacon (front)", "beacon_north", False),
-    ("BeaconEast", "East beacon (right)", "beacon_east", False),
-    ("BeaconSouth", "South beacon (behind)", "beacon_south", False),
-    ("BeaconWest", "West beacon (left)", "beacon_west", False),
-    ("Drone", "Orbiting drone (doppler)", "drone", False),
-    ("Crickets", "Crickets", "crickets", True),
-    ("Chimes", "Wind chimes", "chimes", True),
-    ("Campfire", "Campfire", "campfire", True),
-    ("MusicBox", "Music box (far)", "music_box", True),
-]
-
-UI_SOUND_BUTTONS = [  # button name, label, library sound
-    [("SoundConfirm", "Confirm", "confirm"), ("SoundDenied", "Denied", "denied"), ("SoundCoin", "Coin", "coin")],
-    [("SoundLevelUp", "Level up", "level_up"), ("SoundError", "Error", "error"), ("SoundNotify", "Notify", "notify")],
-    [("SoundPageTurn", "Page turn", "page_turn"), ("SoundPowerup", "Power-up", "powerup"), ("SoundWhoosh", "Whoosh", "whoosh_short")],
-]
-
-
-def panel_yaml(first_page=None):
-    ind = 24
-    music_rows = [
-        text_row("NowPlaying", "", ind, h=44, role="Heading", extra="{type: MusicStatusText, prefix: \"Now playing: \"}"),
-        text_row("PlaylistCaption", "Playlist (crossfades on its own as a track ends)", ind, role="Label"),
-        button_row("Transport", [("MusicPrevious", "Prev", False), ("MusicPause", "Pause", False),
-                                 ("MusicNext", "Next", False), ("MusicStop", "Stop", False)], ind),
-        button_row("PlaylistRow", [("MusicPlaylist", "Restart playlist", True)], ind),
-        text_row("DirectCaption", "Play a track from code (2.5 s crossfade)", ind, role="Label"),
-        button_row("DirectRow", [("PlayMeadow", "Meadow", False), ("PlayExpedition", "Expedition", False),
-                                 ("PlayNocturne", "Nocturne", False)], ind),
-        text_row("StackCaption", "Push a track over the music, then pop back", ind, role="Label"),
-        button_row("StackRow", [("MusicPush", "Push boss (0.4 s)", False), ("MusicPop", "Pop", False)], ind),
-        text_row("MusicHint", "The violet zone (south-west) pushes the night track while you stand in it; "
-                 "the paused playlist resumes where it stopped when you leave.", ind, h=96, role="Caption", wrap=True),
-    ]
-    spatial_rows = [text_row("SpatialHint", "WASD move, Q/E down/up, arrow keys turn. Use headphones.", ind,
-                             role="Caption")]
-    spatial_rows += [toggle_row(n, l, on, ind) for n, l, _, on in SPATIAL_TOGGLES]
-    spatial_rows += [
-        text_row("PingCaption", "One-shot pings locked to your head", ind, role="Label"),
-        button_row("PingRow1", [("PingLeft", "Left", False), ("PingFront", "Front", False), ("PingRight", "Right", False)], ind),
-        button_row("PingRow2", [("PingBehind", "Behind", False), ("PingAbove", "Above", False)], ind),
-    ]
-    ui_rows = [text_row("UiHint", "Every widget plays the canvas' cues: hover tick, press click, slider ticks, "
-                        "tab switch. These buttons add their own sound on release.", ind, h=96, role="Caption", wrap=True)]
-    ui_rows += [button_row(f"SoundRow{i}", [(n, l, False) for n, l, _ in row], ind) for i, row in enumerate(UI_SOUND_BUTTONS)]
-    ui_rows += [
-        ui_obj("UiToggleTest", "{type: SettingRow, kind: toggle, label: \"Toggle\", is_on: true, label_width: 200}", 520, 40, ind),
-        ui_obj("UiSliderTest", "{type: SettingRow, kind: slider, label: \"Slider\", min: 0, max: 1, value: 0.5, label_width: 200}",
-               520, 40, ind),
-        ui_obj("UiDropdownTest", "{type: SettingRow, kind: dropdown, label: \"Dropdown\", items: [One, Two, Three], "
-               "selected_index: 0, label_width: 200}", 520, 40, ind),
-    ]
-    mixer_rows = [text_row("MixerHint", "Bus volumes (remembered per player)", ind, role="Label")]
-    for name, label_, bus in (("MasterVolume", "Master", "Master"), ("MusicVolume", "Music", "Music"),
-                              ("SfxVolume", "Effects", "SFX"), ("UiVolume", "UI", "UI")):
-        mixer_rows.append(ui_obj(name, f"{{type: SettingRow, kind: slider, label: {label_}, min: 0, max: 1, value: 0.8, "
-                                       f"label_width: 160}}", 520, 44, ind) + " " * (ind + 4) + f"- {{type: VolumeBinding, bus: {bus}}}\n")
-
-    reactors = []
-    music_actions = [("MusicPrevious", "previous", ""), ("MusicPause", "toggle_pause", ""), ("MusicNext", "next", ""),
-                     ("MusicStop", "stop", ""), ("PlayMeadow", "play", "meadow"), ("PlayExpedition", "play", "expedition"),
-                     ("PlayNocturne", "play", "nocturne"), ("MusicPop", "pop", "")]
-    for obj, action, track in music_actions:
-        t = f", track: {track}, fade: 2.5" if track else ""
-        reactors.append(f"{{type: MusicOnSignal, listen_object: {obj}, listen_signal: click, action: {action}{t}}}")
-    reactors.append("{type: MusicOnSignal, listen_object: MusicPush, listen_signal: click, action: push, track: expedition, fade: 0.4}")
-    reactors.append("{type: MusicOnSignal, listen_object: MusicPlaylist, listen_signal: click, action: playlist, target: music}")
-    for n, _, target, _ in SPATIAL_TOGGLES:
-        reactors.append(f"{{type: AudioSourceOnSignal, listen_object: {n}, listen_signal: value_changed, action: follow, target: {target}}}")
-    for name, _, _ in PINGS:
-        btn = "Ping" + name.split("_")[1].capitalize()
-        reactors.append(f"{{type: AudioSourceOnSignal, listen_object: {btn}, listen_signal: click, action: play, target: {name}}}")
-    for row in UI_SOUND_BUTTONS:
-        for n, _, sound in row:
-            reactors.append(f"{{type: PlaySoundOnSignal, listen_object: {n}, listen_signal: click, sound: {sound}}}")
-
-    s = """\
-# audio_panel -- the audio_demo control panel: Music / Spatial / UI Sounds / Mixer tabs.
-#
-# Everything is wired in YAML with reactors on the root (MusicOnSignal, AudioSourceOnSignal,
-# PlaySoundOnSignal) listening to the buttons and toggles by name, and a UiSoundPlayer giving
-# every widget hover / press / value / tab sounds. Generated by tools/gen_audio_demo_scene.py.
-object:
-  name: audio_panel
-  components:
-    - type: RectTransform
-      anchor_min: {x: 0, y: 0}
-      anchor_max: {x: 1, y: 1}
-      pivot: {x: 0.5, y: 0.5}
-      anchored_position: {x: 0, y: 0}
-      size_delta: {x: 0, y: 0}
-    - type: Canvas
-      mode: ScaleWithScreenSize
-      reference_resolution: {x: 1920, y: 1080}
-      match_width_or_height: 0.5
-      sort_order: 10
-    - {type: Theme, source: ui/themes/default.yaml}
-    - type: UiSoundPlayer
-      cues:
-        - {signal: hover_enter, sound: ui_hover_tick, min_interval: 0.04}
-        - {signal: press, sound: ui_click_soft}
-        - {signal: value_changed, sound: ui_slider_tick, min_interval: 0.03}
-        - {signal: selection_changed, sound: ui_tab_switch}
-"""
-    s += "".join(f"    - {r}\n" for r in reactors)
-    s += """  children:
-    - name: Panel
       components:
-        - type: RectTransform
-          anchor_min: {x: 0, y: 0.5}
-          anchor_max: {x: 0, y: 0.5}
-          pivot: {x: 0, y: 0.5}
-          anchored_position: {x: 32, y: 0}
-          size_delta: {x: 620, y: 960}
-        - {type: Window, title: Audio, padding: 24}
-      children:
-        - name: Tabs
-          components:
-""" + rect(572, 860, 12) + """            - type: TabView
-              tabs: [Music, Spatial, UI Sounds, Mixer]
-          children:
+        - type: AudioDemoPanel
+          playlist_object: music
+          theme_ref: ui/themes/game_dark
 """
-    pages = [("Music", page("MusicPage", music_rows)), ("Spatial", page("SpatialPage", spatial_rows)),
-             ("UI Sounds", page("UiPage", ui_rows)), ("Mixer", page("MixerPage", mixer_rows))]
-    if first_page:   # verification renders only: the TabView shows its first page
-        pages.sort(key=lambda p: p[0] != first_page)
-        s = s.replace("tabs: [Music, Spatial, UI Sounds, Mixer]", "tabs: [" + ", ".join(p[0] for p in pages) + "]")
-    s += "".join(p[1] for p in pages)
     return s
 
 
 def main():
-    (SCENE_DIR / "ui").mkdir(parents=True, exist_ok=True)
     (SCENE_DIR / "scene.yaml").write_text(scene_yaml())
-    (SCENE_DIR / "ui" / "audio_panel.yaml").write_text(panel_yaml())
-    print("wrote", (SCENE_DIR / "scene.yaml").relative_to(ROOT), "and ui/audio_panel.yaml")
+    print("wrote", (SCENE_DIR / "scene.yaml").relative_to(ROOT))
 
 
 if __name__ == "__main__":

@@ -150,7 +150,6 @@ void OutlinerPanel::draw_outliner_row_(imm::Context& ctx, ObjectId id, bool flat
         }
         if (app_.active_type_ == AssetType::UI) {
             // The UI designer's palette and UI assets drop onto a row: added as its child.
-            if (auto w = ctx.drop_target("ui_widget", r.rect)) app_.ui_canvas_panel_->ui_add_widget_(*w, id, std::nullopt);
             if (auto a = ctx.drop_target("asset", r.rect); a && app_.assets_panel_->asset_type_of_(*a) == AssetType::UI) app_.ui_canvas_panel_->place_ui_asset(*a, id);
         }
     }

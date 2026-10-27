@@ -1,16 +1,22 @@
 /**
  * @file health_driver.h
- * @brief Demo component that owns a coopa::stat::Resource and binds it to a uicoopa
- *        ProgressBar in its own subtree -- the gameplay half of the world-space canvas demo.
+ * @brief Demo component that owns a health Resource and draws it as a plate in the world.
  *
- * The point of this file is the *seam*: uicoopa's widgets are pure visualizations of a model
- * they do not own, so a health bar needs someone to own the health. That is exactly one call
- * -- ProgressBar::bind(&health_) -- after which the bar tracks the Resource's on_changed
- * signal and drives its own chip-damage trail with no further help. The Resource is a MEMBER,
- * so it necessarily outlives the binding it hands out.
+ * The gameplay half of the world-space UI demo, and the shape a game's own nameplate takes:
+ * one component owns the model and declares the plate that shows it. There is nothing to
+ * bind and nothing to look up -- draw() reads `health_` directly, every frame, so the two can
+ * never disagree and a bar cannot be left pointing at a Resource that has gone away.
  *
  * The damage/regen cycle exists so a screenshot or headless capture shows a partially drained
- * bar: a full ProgressBar is indistinguishable from a plain panel.
+ * bar: a full bar is indistinguishable from a plain panel.
+ *
+ * @code{.yaml}
+ * - type: HealthDriver
+ *   label: Aldric
+ *   max_health: 100.0
+ *   damage_per_second: 22.0
+ *   world_size: {x: 260, y: 60}
+ * @endcode
  */
 
 #ifndef TOYENGINE_SCENE_HEALTH_DRIVER_H
@@ -19,31 +25,23 @@
 #include <algorithm>
 #include <string>
 
+#include <coopa/stat/resource.h>
 
-#include <uicoopa/binding/ui_handle.h>
+#include <toyengine/ui/imm_screen.h>
 
 namespace toy {
 namespace scene {
 
 /**
  * @class HealthDriver
- * @brief Drives a descendant ProgressBar from a Resource this component owns.
- *
- * Example YAML, on the same object as (or an ancestor of) the bar:
- * @code
- * - type: HealthDriver
- *   bar_object: HealthBar        # descendant name; empty searches the whole subtree
- *   max_health: 100.0
- *   damage_per_second: 22.0
- *   regen_per_second: 14.0
- *   start_health: 100.0
- * @endcode
+ * @brief Owns a Resource and shows it on a world-space plate above its object.
  */
-class HealthDriver : public coopa::scene::Component {
+class HealthDriver : public toy::ui::ImmScreen {
 public:
-    /** @brief Name of the descendant SceneObject carrying the ProgressBar. Empty means
-     *         "the first ProgressBar anywhere in this object's subtree". */
-    std::string bar_object;
+    std::string type_name() const override { return "HealthDriver"; }
+
+    /** @brief Name drawn above the bar. Empty draws the bar alone. */
+    std::string label;
 
     float max_health        = 100.0f;
     float start_health      = 100.0f;
@@ -51,33 +49,21 @@ public:
     float regen_per_second  = 14.0f;  /**< Refill rate once depleted. */
     /** @brief Health below which the cycle turns around and starts refilling, as a fraction
      *         of max. Not 0: bottoming out fully makes the bar read as "broken", and the
-     *         chip-damage trail has nothing left to trail behind. */
+     *         damage trail has nothing left to trail behind. */
     float turnaround_fraction = 0.15f;
 
-    std::string type_name() const override { return "HealthDriver"; }
+    /** @brief Draw a Heal button on the plate -- the demo's clickable world-space widget. */
+    bool show_heal_button = false;
 
-    /** @brief The Resource this component owns, for code that wants to damage/heal directly
-     *         (e.g. a world-space "Heal" Button wired up by the host). */
+    /** @brief The Resource this component owns, for code that wants to damage or heal it. */
     coopa::stat::Resource& health() { return health_; }
 
     void start() override;
-
-    void update(float delta_time) override;
+    void on_update(float delta_time) override;
+    void draw(coopa::ui::imm::Context& ctx) override;
 
 private:
-    /** @brief Resolves bar_object (or the first ProgressBar in the subtree) at start() time --
-     *         never in a YAML parser, which runs before this object's children exist. */
-    /**
-     * @brief The bar this drives, by name through the same lookup game code binds authored UI
-     *        with (UiHandle): `bar_object` names it -- or an object, a StatBar say, carrying
-     *        one below it -- and empty means this object or the first bar in its subtree.
-     */
-    coopa::ui::ProgressBar* find_bar_() const {
-        return coopa::ui::UiHandle(owner).find<coopa::ui::ProgressBar>(bar_object);
-    }
-
-    coopa::stat::Resource   health_{100.0f};
-    coopa::ui::ProgressBar* bar_ = nullptr;
+    coopa::stat::Resource health_{100.0f};
     bool draining_ = true;
 };
 

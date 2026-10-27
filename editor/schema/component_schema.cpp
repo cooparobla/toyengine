@@ -948,11 +948,112 @@ std::map<std::string, ComponentSchema>& schema_table_() {
         add({"AudioListener", "Audio", {
             f_bool("track_velocity", true),
         }});
-        add({"VolumeBinding", "Audio", {
-            with_tip(f_enum("bus", {"Master", "Music", "SFX", "UI"}, true),
-                     "The mixer bus a Slider on this element (e.g. a SettingRow's) controls; remembered per player"),
-        }});
         // toyengine/audio/music_player.h: background music through AudioSystem::music().
+        add({"PanelScreen", "UI", {
+            with_tip(f_asset("panel", "ui", ".yaml", false, false, "", true),
+                     "The authored panel asset -- tabs, rows and buttons (toyengine/ui/ui_panel.h)"),
+            with_tip(f_string("theme_ref", "ui/themes/game_dark", true), "Theme styling the panel"),
+            with_tip(f_string("font_ref", ""), "Font, relative to an asset root; empty uses the stock face"),
+            with_tip(f_int("sort_order", 0, -10000, 10000), "Canvas draw order; higher draws on top"),
+            with_tip(f_string("tunables_ref", ""),
+                     "Placement overrides (.tune.yaml); empty derives one from the panel asset"),
+            with_tip(f_bool("ui_sounds", true), "Play the hover/click cues"),
+            with_tip(f_bool("hidden", false), "Start hidden, for a screen something else opens"),
+        }});
+
+        // The stock screen-space HUD. Values are editable so a capture can be posed, and
+        // `animate` drives them instead when it is on.
+        add({"DemoHud", "UI", {
+            f_float("health", 72.0f, 1.0f, 0.0f, 100000.0f, true),
+            f_float("health_max", 100.0f, 1.0f, 1.0f, 100000.0f, true),
+            f_float("stamina", 48.0f, 1.0f, 0.0f, 100000.0f),
+            f_float("stamina_max", 100.0f, 1.0f, 1.0f, 100000.0f),
+            f_float("mana", 30.0f, 1.0f, 0.0f, 100000.0f),
+            f_float("mana_max", 100.0f, 1.0f, 1.0f, 100000.0f),
+            with_tip(f_string("quest_title", ""), "Quest line, top right; empty draws nothing"),
+            f_string("quest_step", ""),
+            with_tip(f_int("hotbar_slots", 6, 1, 12), "Cells along the bottom"),
+            with_tip(f_bool("animate", true), "Drift the vitals, so a still frame shows partly-empty bars"),
+            with_tip(f_string("theme_ref", "ui/themes/game_dark", true), "Theme styling the HUD"),
+            with_tip(f_string("font_ref", ""), "Font, relative to an asset root; empty uses the stock face"),
+            with_tip(f_int("sort_order", 0, -10000, 10000), "Canvas draw order; higher draws on top"),
+            with_tip(f_string("tunables_ref", ""), "Placement overrides (.tune.yaml); empty derives one from the type name"),
+            with_tip(f_bool("ui_sounds", true), "Play the hover/click cues"),
+            f_bool("hidden", false),
+        }});
+
+        // A plate in the 3D world: a nameplate, a sign, a label on a machine. Parent the
+        // object to the thing it labels and the plate follows it.
+        add({"WorldLabel", "UI", {
+            with_tip(f_string("title", "", true), "The line drawn on the plate"),
+            f_string("subtitle", ""),
+            with_tip(f_float("bar_value", 0.0f, 1.0f, 0.0f, 100000.0f), "Bar under the text; a max of 0 draws no bar"),
+            f_float("bar_max", 0.0f, 1.0f, 0.0f, 100000.0f),
+            with_tip(f_string("bar_role", "health"), "Which themed colour the bar takes (bars: section)"),
+            with_tip(f_bool("backdrop", true), "Paint the plate behind the text"),
+            with_tip(f_string("theme_ref", "ui/themes/game_dark", true), "Theme styling the plate"),
+            with_tip(f_string("font_ref", ""), "Font, relative to an asset root; empty uses the stock face"),
+            with_tip(f_vec2("world_size", glm::vec2(420.0f, 60.0f), 1.0f), "Plate size in canvas pixels"),
+            with_tip(f_float("pixels_per_unit", 70.0f, 1.0f, 1.0f, 1000.0f), "Canvas pixels per world unit"),
+            with_tip(f_float("world_text_supersample", 2.0f, 0.1f, 1.0f, 4.0f),
+                     "Extra glyph-atlas density; a world plate's on-screen size is not known in advance"),
+            with_tip(f_bool("world_occlude", true), "Hide the plate behind geometry in front of it"),
+            with_tip(f_enum("billboard", {"CameraFacing", "Transform"}),
+                     "CameraFacing turns to the camera; Transform keeps the object's rotation"),
+            f_bool("hidden", false),
+        }});
+
+        // A line or two pinned to a corner: controls, a reminder.
+        add({"ScreenHint", "UI", {
+            with_tip(f_string("title", "", true), "Heading, in the accent colour"),
+            with_tip(f_strings("lines"), "One line each, under the title"),
+            with_tip(f_enum("anchor", {"TopLeft", "TopCenter", "TopRight", "MiddleLeft", "Center",
+                                       "MiddleRight", "BottomLeft", "BottomCenter", "BottomRight"}),
+                     "Which corner it sits in"),
+            with_tip(f_vec2("offset", glm::vec2(0.0f), 1.0f),
+                     "Moves the box from that corner, in UI space (+Y down), so a right or bottom "
+                     "anchor insets with a negative value"),
+            with_tip(f_bool("backdrop", true), "Paint a panel behind the text"),
+            with_tip(f_string("theme_ref", "ui/themes/game_dark", true), "Theme styling the hint"),
+            with_tip(f_string("font_ref", ""), "Font, relative to an asset root; empty uses the stock face"),
+            with_tip(f_int("sort_order", 0, -10000, 10000), "Canvas draw order; higher draws on top"),
+            with_tip(f_string("tunables_ref", ""), "Placement overrides (.tune.yaml); empty derives one from the type name"),
+            f_bool("hidden", false),
+        }});
+
+        add({"HealthDriver", "Gameplay", {
+            with_tip(f_string("label", "", true), "Name drawn above the bar; empty draws the bar alone"),
+            f_float("max_health", 100.0f, 1.0f, 0.0f, 100000.0f, true),
+            f_float("start_health", 100.0f, 1.0f, 0.0f, 100000.0f, true),
+            with_tip(f_float("damage_per_second", 22.0f, 0.5f, 0.0f, 10000.0f, true),
+                     "Drain rate while draining; 0 freezes the demo cycle"),
+            f_float("regen_per_second", 14.0f, 0.5f, 0.0f, 10000.0f, true),
+            with_tip(as_slider(f_float("turnaround_fraction", 0.15f, 0.01f, 0.0f, 1.0f)),
+                     "Fraction of max the cycle turns around at, so the bar never bottoms out"),
+            f_bool("show_heal_button", false),
+            with_tip(f_string("theme_ref", "ui/themes/game_dark"), "Theme styling the plate"),
+            with_tip(f_vec2("world_size", glm::vec2(150.0f, 48.0f), 1.0f),
+                     "The plate's design size in CANVAS PIXELS, not world units"),
+            with_tip(f_float("pixels_per_unit", 110.0f, 1.0f, 1.0f, 2000.0f),
+                     "world_size / this = the plate's extent in metres"),
+            with_tip(f_float("world_text_supersample", 2.1f, 0.05f, 0.5f, 4.0f),
+                     "Glyph density; a world plate has no fixed screen scale"),
+            with_tip(f_bool("world_occlude", false), "Let scene geometry hide the plate"),
+            f_bool("hidden", false),
+        }});
+
+        add({"AudioDemoPanel", "Audio", {
+            with_tip(f_string("playlist_object", "", true),
+                     "Object carrying the MusicPlaylist the Restart button drives"),
+            with_tip(f_string("theme_ref", "ui/themes/game_dark", true),
+                     "Theme styling the panel; empty uses the built-in look"),
+            with_tip(f_string("font_ref", ""), "Font, relative to an asset root; empty uses the stock face"),
+            f_int_enum("start_page", {"Music", "Spatial", "UI Sounds", "Mixer"}, 0),
+            f_float("fade_seconds", 2.5f, 0.05f, 0.0f, 10.0f),
+            with_tip(f_int("sort_order", 0, -10000, 10000), "Canvas draw order; higher draws on top"),
+            f_bool("hidden", false),
+        }});
+
         add({"MusicPlaylist", "Audio", {
             with_tip(f_items("tracks", {
                 f_string("name"),
@@ -971,24 +1072,6 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             with_tip(f_vec3("size", glm::vec3(10.0f, 10.0f, 6.0f), 0.05f, true), "Box extents, centred on the object (times its scale)"),
             with_tip(f_float("radius", 0.0f, 0.05f, 0.0f, 100000.0f), "> 0: a sphere instead of the box"),
             f_float("fade", 2.0f, 0.05f, 0.0f, 60.0f, true),
-        }});
-        add({"MusicStatusText", "Audio", {
-            with_tip(f_string("prefix"), "Written before the status in this object's Text"),
-        }});
-        add({"MusicOnSignal", "Audio", {
-            f_string("listen_object", "", true),
-            f_string("listen_signal", "click", true),
-            f_enum("action", {"play", "push", "pop", "next", "previous", "stop", "pause", "resume", "toggle_pause", "playlist"}, true),
-            with_tip(f_string("track"), "For play / push: a track name or clip path"),
-            with_tip(f_string("target"), "For playlist: the object whose MusicPlaylist restarts"),
-            with_tip(f_float("fade", -1.0f, 0.05f, -1.0f, 60.0f), "Seconds; -1: the default"),
-        }});
-        add({"AudioSourceOnSignal", "Audio", {
-            f_string("listen_object", "", true),
-            f_string("listen_signal", "click", true),
-            with_tip(f_enum("action", {"play", "stop", "toggle", "pause", "resume", "follow"}, true),
-                     "follow: play while a Toggle's value is on"),
-            with_tip(f_string("target"), "Object with the AudioSource; empty: this one"),
         }});
         add({"CameraController", "Gameplay", {
             f_enum("mode", {"Orbit", "Fly", "FirstPerson"}, true),
@@ -1451,7 +1534,6 @@ std::map<std::string, ComponentSchema>& schema_table_() {
         // resolved under `rig:` (default: the nearest Animator up the hierarchy).
         add({"SkinnedMeshRenderer", "Rendering", {f_asset("mesh_path", "meshes", ".yaml", true, true, "", true), f_string("rig", ""),
                                                    f_bool("preserve_volume", false)}});
-        add_ui_schemas(add);
         apply_component_sections(t);
         return t;
     }();

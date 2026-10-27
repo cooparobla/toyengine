@@ -1,0 +1,41 @@
+# DemoHud placement -- the worked example of a .tune.yaml.
+#
+# A C++ screen states its own default for every box it draws:
+#
+#   tune().box(ctx, "vitals", Anchor::TopLeft, {24, 24}, {300, 76})
+#
+# An entry here overrides that default by name, so a HUD can be moved and resized without
+# touching the .cpp. The editor's UI workspace (Placement tab) lists the boxes a screen
+# declares and writes this file; it is plain YAML and hand-editing is equally fine.
+#
+# Keys per entry, all optional: anchor (one of TopLeft TopCenter TopRight MiddleLeft Center
+# MiddleRight BottomLeft BottomCenter BottomRight), pos [x, y], size [w, h].
+#
+# `pos` is in imm space (+Y DOWN) and moves the BOX, not the anchor -- so a right- or
+# bottom-pinned panel insets with a negative component. The values below are DemoHud's own
+# code defaults, so this file changes nothing until you edit it.
+
+vitals:
+  anchor: TopLeft
+  pos:  [24, 24]
+  size: [300, 76]
+
+quest:
+  anchor: TopRight
+  pos:  [-24, 24]
+  size: [360, 54]
+
+log:
+  anchor: BottomLeft
+  pos:  [24, -132]
+  size: [440, 110]
+
+hotbar:
+  anchor: BottomCenter
+  pos:  [0, -56]
+  size: [372, 58]
+
+prompts:
+  anchor: BottomCenter
+  pos:  [0, -12]
+  size: [640, 34]

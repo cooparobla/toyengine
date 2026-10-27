@@ -1,306 +1,230 @@
 /**
  * @file ui_canvas.h
- * @brief The UI designer: what the viewer becomes when a UI asset (assets/ui/*.yaml) is open.
+ * @brief The UI workspace: author a panel asset, and watch it run.
  *
- * Preview     the asset's real canvas, drawn by the game's own UI pass inside a frame the
- * size of a chosen game resolution (Engine::set_scene_ui_placement), laid out
- * exactly as the game lays it out there. Wheel zooms about the cursor, middle /
- * Space drag pans, Home fits, F frames the selection.
- * Design      click to select (Alt-click cycles through what's under the cursor, drag on
- * empty space box-selects); the rect gizmo moves / resizes / anchors / pivots /
- * rotates (rect_gizmo.h) with snapping guides; arrows nudge (Shift: 10 px);
- * Shift+A or the Widgets palette adds widgets (or drag them onto the frame);
- * inside a layout group a drag reorders instead.
- * Interact    the canvas runs: hover, press, sliders, tabs, dialogs -- with every named
- * signal echoed to the Console. Leaving it rebuilds from the document.
+ * A screen is data now (toyengine/ui/ui_panel.h) -- a title, a size, tabs of labelled rows --
+ * so this edits that file and shows the result live, at whatever resolution a player might
+ * have. It is deliberately its own workspace rather than part of the scene view: an interface
+ * is built against a blank frame, not on top of the level, and a scene links to the finished
+ * asset by reference the way a MeshRenderer links to a mesh.
  *
- * Document edits all go through SceneDocument (undo, save); rect edits use ChangeScope::Rect,
- * which patches the live RectTransform in place so a drag stays at full frame rate.
+ *   Design   the rows, in a list beside a live preview
+ *   Interact the preview takes the pointer, so a slider really slides
  *
- * One class per panel, owning its own state (see editor/app/README.md). EditorApp holds it
- * behind a forward declaration, so editing this header recompiles this panel and
- * editor_app.cpp -- not every panel.
+ * The preview is the real runtime: a PanelScreen drawing the panel being edited, placed into
+ * the frame by the engine at the chosen resolution. What you see is what the game draws.
  */
 
-#ifndef TOYEDITOR_APP_UI_UI_CANVAS_H
-#define TOYEDITOR_APP_UI_UI_CANVAS_H
+#ifndef TOYENGINE_EDITOR_APP_UI_UI_CANVAS_H
+#define TOYENGINE_EDITOR_APP_UI_UI_CANVAS_H
 
-#include "editor/app/editor_panel.h"
+#include <filesystem>
+#include <memory>
+#include <optional>
+#include <string>
+#include <vector>
 
-// Types this panel's declarations name (pre-seeded from the repo's type index;
-// prune anything the declarations do not actually need).
-#include "editor/app/trackpad.h"
-#include "editor/ui/ui_canvas_math.h"
-#include "editor/viewport/rect_gizmo.h"
-#include <coopa/event/event_bus.h>
-#include <coopa/event/signal.h>
-#include <coopa/scene/component.h>
-#include <coopa/util/transform.h>
-#include <toyengine/core/engine.h>
-#include <uicoopa/binding/ui_handle.h>
-#include <uicoopa/builder/detail/hud.h>
-#include <uicoopa/layout/canvas.h>
-#include <uicoopa/layout/layout_element.h>
-#include <uicoopa/layout/rect.h>
-#include <uicoopa/layout/rect_transform.h>
-#include <uicoopa/widgets/button.h>
-#include <uicoopa/widgets/slider.h>
+#include <fkYAML/node.hpp>
+#include <glm/glm.hpp>
 
-namespace toy::editor {
+#include <uicoopa/immediate/imm.h>
 
-/** @brief See the file doc. */
-class UiCanvasPanel : public EditorPanel {
+#include "editor/app/editor_types.h"
+#include "toyengine/core/engine.h"
+#include "toyengine/ui/ui_panel.h"
+
+namespace coopa::scene { class Scene; }
+namespace toy::ui { class PanelScreen; class ImmScreen; }
+
+namespace toy {
+namespace editor {
+
+class EditorApp;
+
+/**
+ * @class UiCanvasPanel
+ * @brief Edits a UI panel asset and previews it.
+ */
+class UiCanvasPanel {
 public:
-    using EditorPanel::EditorPanel;
+    explicit UiCanvasPanel(EditorApp& app) : app_(app) {}
+    ~UiCanvasPanel();
 
-    /// EditorApp owns this panel and drives it; the declarations below keep the access level
-    /// they had inside EditorApp's body.
-    friend class EditorApp;
+    /** @brief One entry of the preview resolution list. */
+    struct UiResolution {
+        const char* label;
+        int w, h;
+    };
 
-    // Called by sibling panels, so part of this panel's interface.
-    void ui_install_template_themes_();
+    /**
+     * @brief Which editor the workspace is showing. The FILE decides, not a toggle.
+     *
+     * `ui/settings.yaml` is a panel asset and opens the row editor; `ui/DemoHud.tune.yaml` is
+     * a placement file for the `DemoHud` screen and opens the box editor. Both are forms over
+     * YAML beside a live preview -- there is no canvas to click, and nothing to link.
+     */
+    enum class Mode {
+        Panel,      ///< A panel asset: tabs, labelled rows, buttons.
+        Placement,  ///< A screen's .tune.yaml: where each box the screen declares sits.
+    };
 
-    // Called by sibling panels, so part of this panel's interface.
-    void draw_ui_canvas_props_(imm::Context& ctx);
-    void draw_ui_object_props_(imm::Context& ctx, ObjectId id);
-    void draw_ui_bindings_(imm::Context& ctx);
+    /** @brief Which editor is showing. */
+    Mode mode() const { return mode_; }
 
-    // Called by sibling panels, so part of this panel's interface.
-    ObjectId ui_add_widget_(const std::string& entry_id, ObjectId parent, std::optional<glm::vec2> at);
+    /** @brief The suffix that marks a placement file. */
+    static constexpr const char* k_tune_suffix = ".tune.yaml";
 
-    // =================================================================================
-    // State
-    // =================================================================================
+    /** @brief Whether `path` is a placement file rather than a panel asset. */
+    static bool is_placement_file(const std::filesystem::path& path);
 
-    struct UiResolution { const char* label; int w, h; };
-    static const std::vector<UiResolution>& ui_resolutions_();
+    /** @brief The ImmScreen component keys the Placement editor can open, from the schemas. */
+    static std::vector<std::string> screen_types();
 
-    glm::vec2 ui_res_{1920.0f, 1080.0f};   ///< Preview resolution (game framebuffer pixels).
-    float ui_zoom_ = 0.0f;                  ///< Framebuffer pixels per game pixel; 0 = fit (recomputed).
-    bool ui_fit_ = true;
-    glm::vec2 ui_pan_{0.0f};
-    bool ui_interact_ = false;
-    bool ui_outlines_ = false, ui_safe_area_ = false, ui_snap_ = true;   // outlines: opt-in guides (they square off a rounded theme)
-    float ui_grid_ = 1.0f;
-    int ui_backdrop_ = 0;                   ///< 0 dark, 1 light, 2 the 3D view (transparent)
-    imm::Box ui_frame_{};                   ///< The preview frame, editor pixels.
-    RectGizmo ui_gizmo_;
-    bool ui_panning_ = false;
-    std::vector<ui::SnapLine> ui_guides_;
-    std::string ui_palette_filter_;
-    int ui_reorder_index_ = -1;
-    ObjectId ui_reorder_parent_ = 0;
-    std::vector<coopa::event::ScopedConnection> ui_signal_log_;
-    ObjectId ui_hover_ = 0;
-    std::vector<ObjectId> ui_cycle_;
-    size_t ui_cycle_i_ = 0;
-    glm::vec2 ui_cycle_at_{-1e6f};
-    bool ui_select_pending_ = false, ui_marquee_ = false;
-    glm::vec2 ui_press_{0.0f};
-    std::map<ObjectId, ui::RectParams> ui_drag_others_;   ///< Other selected objects' params when a move began.
-    glm::vec2 ui_menu_at_{0.0f};
-    std::string ui_new_name_ = "new_ui";
-    coopa::scene::SceneObject* ui_wrapper_ = nullptr;   ///< Preview canvas around a canvas-less widget asset.
+    /** @brief Creates `<Screen>.tune.yaml` for a screen type and opens it. */
+    bool new_placement_asset(const std::string& screen_type);
 
-public:
-    // --- queries for tests ---
+    /** @brief True while a panel asset is open. */
     bool ui_mode() const;
-    imm::Box ui_frame() const { return ui_frame_; }
-    bool ui_interacting() const { return ui_interact_; }
-    void set_ui_interact(bool on) { ui_set_interact_(on); }
-    glm::vec2 ui_resolution() const { return ui_res_; }
-    void set_ui_resolution(glm::vec2 r);
-    ui::UiView ui_view() { return ui_view_(); }
-    RectGizmo& ui_gizmo() { return ui_gizmo_; }
-    /** @brief The document objects under an editor-pixel point, topmost first. */
-    std::vector<ObjectId> ui_pick(glm::vec2 editor_px) { return ui_hits_(editor_px); }
-    /** @brief Adds palette entry `id` under `parent` (0: the container at `at`, else the root). */
-    ObjectId ui_add_widget(const std::string& id, ObjectId parent = 0, std::optional<glm::vec2> at = std::nullopt) {
-        return ui_add_widget_(id, parent, at);
-    }
-    /** @brief The live rect of a document object (canvas space). */
-    std::optional<ui::Rect> ui_live_rect(ObjectId id);
 
-    /** @brief Opens a UI asset (ui/*.yaml): the object document in the UI designer. */
-    bool open_ui_asset(const fs::path& path);
+    /** @brief Opens a panel asset. False (and logged) if it will not parse. */
+    bool open_ui_asset(const std::filesystem::path& path);
 
-    /** @brief The folder UI templates ship in (editor/templates/ui). */
-    static fs::path ui_templates_dir() { return fs::path(ROOT_DIR) / "editor" / "templates" / "ui"; }
+    /** @brief Creates `name` from a template and opens it. */
+    bool new_ui_asset(const std::string& name, const std::string& template_id);
 
-    /** @brief Template ids ("hud", "pause_menu", ...) available to New UI. */
-    static std::vector<std::string> ui_templates();
-
-    /**
-     * @brief Creates assets/ui/<name>.yaml -- from a template ("blank" = an empty canvas,
-     *        "widget" = a canvas-less reusable piece) -- and opens it. Templates bring their
-     *        themes along (into ui/themes/) when the project lacks them.
-     */
-    bool new_ui_asset(const std::string& name, const std::string& template_id = "blank");
-
-    /**
-     * @brief Places a UI asset in the open scene as `prefab: ui/<name>` -- a HUD or menu that is
-     *        part of the scene from the start. In a UI asset it nests (a reusable widget).
-     */
+    /** @brief Adds an object to the open SCENE carrying a PanelScreen for `ui_rel`. */
     ObjectId place_ui_asset(const std::string& ui_rel, ObjectId parent = 0);
 
-private:
-    // =================================================================================
-    // Document helpers
-    // =================================================================================
+    /** @brief The template names the "New UI" menu offers. */
+    static std::vector<std::string> ui_templates();
 
-    /** @brief Preview settings kept in the asset's `ui_editor:` block (ignored by the game). */
-    void ui_load_editor_extras_();
-    void ui_store_editor_extras_();
+    /** @brief The preview frame, in editor pixels. */
+    imm::Box ui_frame() const { return ui_frame_; }
 
-    /** @brief Copies the templates' themes (ui/themes/) and the fonts they name (fonts/) into
-     *         the project, each only when missing. */
+    /** @brief Whether the preview is taking the pointer. */
+    bool ui_interacting() const { return ui_interact_; }
+    void set_ui_interact(bool on) { ui_set_interact_(on); }
 
-    coopa::scene::SceneObject* ui_root_live_();
-
-    /** @brief The canvas the preview shows: the asset root's, or the wrapper around a widget. */
-    coopa::ui::CanvasComponent* ui_canvas_();
-
-    /** @brief A component node of `id` by type (null if absent). */
-    const Node* ui_comp_(ObjectId id, const std::string& type) const;
-
-    /** @brief Leaf widgets: dropping onto one adds next to it, not inside. */
-    bool ui_is_leaf_(ObjectId id) const;
-
-    // =================================================================================
-    // Live scene: backdrop and the preview wrapper
-    // =================================================================================
-
-    /**
-     * @brief After a rebuild in the UI designer: a backdrop canvas (behind everything, inside
-     *        the frame) and -- for a widget asset with no Canvas of its own -- a preview canvas
-     *        the widget is moved under. Both are live-only, never saved.
-     */
-    void ui_after_rebuild_();
-
-    void ui_update_backdrop_();
-
-    // =================================================================================
-    // View: frame placement, mapping, zoom / pan
-    // =================================================================================
-
-    /** @brief The frame for the current zoom / pan inside the viewport (editor pixels). */
-    void ui_layout_frame_();
-
-    /** @brief Where the engine draws the previewed canvas (framebuffer pixels). */
+    /** @brief Where the engine should draw the previewed panel. */
     std::optional<core::Engine::ScreenUiPlacement> ui_preview_placement_();
 
-    /** @brief The frame <-> canvas mapping (canvas space from the live canvas's root rect). */
-    ui::UiView ui_view_();
+    /** @brief The workspace's viewport: header, backdrop, preview frame. */
+    void draw_ui_view_(imm::Context& ctx, const imm::Box& area);
 
-    void ui_zoom_at_(glm::vec2 m, float factor);
+    /** @brief The left column: the rows of the panel (or the screen's boxes), and what adds one. */
+    void draw_ui_palette_(imm::Context& ctx, const imm::Box& area);
 
-    /** @brief Zooms so the selection (else the whole canvas) fills the viewport. */
-    void ui_frame_selection_();
+    /** @brief Properties of the panel itself -- title, size, anchor, theme. */
+    void draw_ui_canvas_props_(imm::Context& ctx);
 
-    // =================================================================================
-    // Picking
-    // =================================================================================
+    /** @brief Properties of the selected row. */
+    void draw_ui_object_props_(imm::Context& ctx);
 
-    /** @brief Document objects under `p` (editor px), topmost first (draw order + z_order). */
-    std::vector<ObjectId> ui_hits_(glm::vec2 p);
+    /** @brief Re-reads the document into the preview. Call after any edit. */
+    void ui_refresh_preview_();
 
-    /** @brief The object a drop at `p` goes into: the deepest non-leaf object hit, else the root. */
-    ObjectId ui_container_at_(glm::vec2 p);
+    /** @brief Saves the open panel back to its file. */
+    void save();
 
-    // =================================================================================
-    // Edits
-    // =================================================================================
+    /** @brief True if there are unsaved edits. */
+    bool dirty() const { return dirty_; }
 
-    /** @brief Writes rect params (+ rotation) into `id`'s RectTransform (adding one if missing). */
-    void ui_write_rect_(ObjectId id, const ui::RectParams& p, std::optional<float> rotation, const std::string& label,
-                        const std::string& merge);
+    /** @brief The open panel's path, or empty. */
+    const std::filesystem::path& path() const { return path_; }
 
-    /** @brief In a layout group: the element's preferred size (LayoutElement), which the group honours. */
-    void ui_write_preferred_size_(ObjectId id, glm::vec2 size, const std::string& merge);
+    /** @brief Undo / redo one edit. */
+    void undo();
+    void redo();
 
-    /** @brief The parsed RectTransform params of a document object. */
-    ui::RectParams ui_doc_params_(ObjectId id);
+    /** @brief Frames the preview on the next draw. */
+    bool ui_fit_ = true;
 
-    /** @brief Adds a palette entry; see ui_add_widget(). */
-
-    /** @brief Arrow-key nudge of every selected element. */
-    void ui_nudge_(glm::vec2 d);
-
-    /** @brief Moves `id` one step up (-1) or down (+1) among its siblings: draw order. */
-    void ui_restack_(ObjectId id, int dir);
+    /** @brief The preview is taking input. */
+    bool ui_interact_ = false;
 
     void ui_set_interact_(bool on);
 
-    // =================================================================================
-    // Bindings: what game code can reach by name
-    // =================================================================================
+    /** @brief Fits the preview to the viewport. */
+    void ui_frame_selection_() { ui_fit_ = true; }
 
-    struct UiBinding {
-        std::string name;
-        std::string kind;                    ///< "Button", "Slider", "StatBar"...
-        std::vector<std::string> signals;    ///< What it publishes on the EventBus.
-        std::string api;                     ///< The UiHandle call that drives it.
-        ObjectId object = 0;                 ///< The document object it lives on.
-    };
+    /** @brief Saves the workspace's view preferences. */
+    void ui_store_editor_extras_();
 
-    std::vector<UiBinding> ui_bindings_();
+    /** @brief Releases the preview scene, before the device goes away. */
+    void release();
 
-    // =================================================================================
-    // The view
-    // =================================================================================
+    /** @brief Moves the selected row by `delta`, duplicates it, or removes it. */
+    void move_row_(int delta);
+    void duplicate_row_();
+    void remove_row_();
 
-    void draw_ui_view_(imm::Context& ctx, const imm::Box& area);
+    /** @brief The screen whose boxes Placement mode is editing, or null. */
+    toy::ui::ImmScreen* placed_screen() const { return placed_; }
 
-    void draw_ui_header_(imm::Context& ctx, const imm::Box& hb);
+    /** @brief Which row the Panel editor has selected, or -1. */
+    int selected_row_index() const { return row_; }
+    void select_row(int i) { row_ = i; }
 
+    /** @brief Records that the open file has edits the user has not saved. */
+    void mark_dirty() { dirty_ = true; }
+
+private:
+    using Node = fkyaml::node;
+
+    void ui_layout_frame_();
+    void ui_zoom_at_(glm::vec2 m, float factor);
+    void draw_ui_header_(imm::Context& ctx, const imm::Box& b);
     void handle_ui_input_(imm::Context& ctx);
-
-    void ui_keymap_(imm::Context& ctx);
-
-    /** @brief Shift+D: duplicates the selection, offset so the copies are visible. */
-    void ui_duplicate_();
-
-    /** @brief The gizmo's view of a document object (false if it has no live rect). */
-    bool ui_gizmo_target_(ObjectId id, RectGizmoTarget& t);
-
-    /** @brief Snap targets: the parent's edges/centre and every sibling's (not `self`). */
-    std::vector<ui::SnapLine> ui_snap_lines_(ObjectId self, const ui::Rect& parent);
-
-    /** @brief While dragging inside a layout group: the index the element would drop at. */
-    void ui_update_reorder_(ObjectId id, glm::vec2 m);
-
     void draw_ui_overlays_(imm::Context& ctx);
+    static const std::vector<UiResolution>& ui_resolutions_();
 
-    void draw_ui_add_menu_items_(imm::Context& ctx, glm::vec2 at);
+    /** @brief The rows of the selected tab, for the list and the inspector. */
+    Node* rows_();
+    Node* selected_row_();
+    void push_undo_();
+    void ensure_preview_();
+    /** @brief Tears the preview down and builds the one the current mode needs. */
+    void rebuild_preview_();
 
-    void draw_ui_popups_(imm::Context& ctx);
+    /** @brief The left column in Placement mode: the boxes the live screen declared. */
+    void draw_placement_list_(imm::Context& ctx);
+    /** @brief The inspector in Placement mode: anchor, pos and size of the selected box. */
+    void draw_placement_props_(imm::Context& ctx);
 
-    // =================================================================================
-    // The Widgets palette (left panel, under the asset list)
-    // =================================================================================
+    EditorApp& app_;
 
-    void draw_ui_palette_(imm::Context& ctx, const imm::Box& area);
+    // --- the document ---
+    Node doc_;
+    std::filesystem::path path_;
+    bool open_ = false;
+    bool dirty_ = false;
+    std::vector<Node> undo_, redo_;
 
-    // =================================================================================
-    // Properties: Canvas, the element's Rect Transform, Bindings
-    // =================================================================================
+    int tab_ = 0;        ///< Tab being edited.
+    int row_ = -1;       ///< Selected row within that tab, or -1.
 
+    Mode mode_ = Mode::Panel;
+    /// Placement mode: which screen's boxes are being placed ("DemoHud").
+    std::string screen_type_;
+    /// Placement mode: index into the live screen's declared() list, or -1.
+    int box_ = -1;
 
-    /** @brief Copies the in-use theme (or the template default) into ui/themes/ and selects it. */
-    void ui_new_theme_();
+    // --- the preview ---
+    std::unique_ptr<coopa::scene::Scene> preview_;
+    toy::ui::PanelScreen* screen_ = nullptr;
+    /// Placement mode: the screen component whose tune() is being edited.
+    toy::ui::ImmScreen* placed_ = nullptr;
 
-    /**
-     * @brief The Object tab for a UI element: name, the Rect Transform (anchor presets, then
-     *        position / size or the four edges for a stretched axis), visibility.
-     */
-
-    void draw_ui_rect_section_(imm::Context& ctx, ObjectId id);
-
-    /** @brief A small picture of an anchor setup: the parent box, the anchor rect, its corners. */
-    void draw_anchor_glyph_(imm::Context& ctx, const imm::Box& b, glm::vec2 amin, glm::vec2 amax, bool hot);
-
+    // --- the view ---
+    imm::Box ui_frame_{};
+    glm::vec2 ui_res_{1920.0f, 1080.0f};
+    glm::vec2 ui_pan_{0.0f};
+    float ui_zoom_ = 0.0f;
+    bool ui_panning_ = false;
+    int ui_backdrop_ = 0;   ///< 0 dark, 1 light, 2 the scene behind.
 };
 
-} // namespace toy::editor
+}  // namespace editor
+}  // namespace toy
 
-#endif // TOYEDITOR_APP_UI_UI_CANVAS_H
+#endif  // TOYENGINE_EDITOR_APP_UI_UI_CANVAS_H

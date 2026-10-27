@@ -1,0 +1,46 @@
+# settings -- an authored screen. No C++: PanelScreen draws it, and every row's `bind` key
+# reads and writes toy::core::UserSettings, which persists between sessions.
+#
+#   - type: PanelScreen
+#     panel: ui/settings
+#
+# Only keys the engine actually consumes are bound here (toy::core::engine_setting_keys()).
+# The audio levels and the interface scale apply the moment you move them -- Engine watches
+# UserSettings::on_changed -- and VSync is read when the swapchain is built, so it takes
+# effect on the next launch.
+#
+# A row for something only a game knows (difficulty, subtitles, look sensitivity) needs a
+# provider, or it would write a key nothing ever reads:
+#
+#   screen->bindings().provide_bool("game.subtitles",
+#                                   [&] { return opts.subtitles; },
+#                                   [&](bool on) { opts.subtitles = on; });
+#
+# then add `- { kind: toggle, label: Subtitles, bind: game.subtitles }`. The editor's Panel
+# tab flags any bound key with no consumer (toy::ui::unbound_keys), so a typo shows up there
+# rather than silently writing to the player's settings file forever.
+title: Settings
+anchor: Center
+size: [720, 520]
+closable: true
+
+tabs:
+  - name: Audio
+    rows:
+      - { kind: slider, label: Master volume, bind: audio.master, min: 0, max: 1, default: 1.0,
+          tooltip: "Everything, after the per-bus levels below" }
+      - { kind: slider, label: Music,         bind: audio.music,  min: 0, max: 1, default: 1.0 }
+      - { kind: slider, label: Effects,       bind: audio.sfx,    min: 0, max: 1, default: 1.0 }
+      - { kind: slider, label: Interface,     bind: audio.ui,     min: 0, max: 1, default: 1.0 }
+
+  - name: Display
+    rows:
+      - { kind: slider, label: Interface scale, bind: ui.hud_scale, min: 0.5, max: 2.0,
+          step: 0.05, default: 1.0,
+          tooltip: "Size of the game's own HUD and menus" }
+      - { kind: separator }
+      - { kind: toggle, label: VSync, bind: display.vsync, default: true,
+          tooltip: "Off gives the lowest latency; on removes tearing. Applies on restart." }
+
+buttons:
+  - { label: Close, action: close }

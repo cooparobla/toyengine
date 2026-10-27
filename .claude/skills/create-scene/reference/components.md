@@ -152,9 +152,23 @@ Clips live in `assets/audio/` (`music/`, `sfx/`) and resolve against the scene f
 
 ## UI
 
-RectTransform, Canvas, Theme, Image, Text, Button, layout groups and the themed composites:
-see create-ui.
+A screen is a component, and the scene links to its asset by reference the way a MeshRenderer
+links to a mesh. Two kinds -- see the `create-ui` skill.
 
+| Component | Keys |
+|---|---|
+| PanelScreen | `panel` (the authored asset, `ui/settings`), `theme_ref`, `font_ref`, `sort_order`, `tunables_ref`, `ui_sounds`, `hidden` (start hidden, for a screen something else opens). Draws a YAML panel: tabs, labelled rows, buttons. **No C++ per screen**. The panel asset owns its own anchor/offset/size |
+| DemoHud | `health`/`health_max`, `stamina`, `mana`, `quest_title`, `quest_step`, `hotbar_slots`, `animate`, `theme_ref`, `sort_order`, `tunables_ref`, `ui_sounds`, `hidden`. The stock HUD, and the example to copy for a game's own. Its boxes are placed from `ui/DemoHud.tune.yaml` |
+| ScreenHint | `title`, `lines` (a sequence), `anchor`, `offset`, `backdrop`, `theme_ref`, `tunables_ref`. A line or two pinned to a corner. `offset` moves the BOX, so a right/bottom anchor insets with a negative value |
+| WorldLabel | `title`, `subtitle`, `bar_value`, `bar_max`, `bar_role` (health/mana/stamina/shield/experience), `backdrop`, `billboard` (`Transform` holds its own rotation), `world_size` (CANVAS PIXELS), `pixels_per_unit`, `world_text_supersample`, `world_occlude`, `tunables_ref`. A plate in the 3D world; parent the object to the thing it labels |
+| HealthDriver | `label`, `max_health`, `start_health`, `damage_per_second`, `regen_per_second`, `turnaround_fraction`, `show_heal_button`, plus the world keys above. Owns a Resource and draws it -- see assets/scenes/ui/ui_demo |
+| AudioDemoPanel | `playlist_object`, `start_page`, `fade_seconds`, `theme_ref`. The audio demo's tabbed control panel |
+
+Every screen also takes `theme_ref` (`ui/themes/game_dark`), `font_ref`, `sort_order` and
+`hidden`. Where each panel sits is a sidecar `assets/ui/<Screen>.tune.yaml`; colours come from
+the theme's `bars`/`slots`/`feedback`/`world` sections (`create-ui-theme`).
+
+A game's own screen derives from `toy::ui::ImmScreen` and registers like any component.
 ## Limits
 
 16 point lights, 8 spot lights, 1 directional; ~4 point + 4 spot shadowed at High; 8 Volumes,

@@ -41,7 +41,6 @@ bool ThemeEditorPanel::open_theme(const fs::path& path) {
 }
 
 bool ThemeEditorPanel::create_theme(const std::string& name) {
-    app_.ui_canvas_panel_->ui_install_template_themes_();
     const std::string dir = app_.assets_panel_->new_asset_dir_("ui/themes");
     const std::string n = app_.unique_asset_name_(dir, name);
     const fs::path dst = app_.project_.assets() / dir / (n + ".yaml");

@@ -16,11 +16,11 @@
 // Declarations only -- STB_IMAGE_IMPLEMENTATION is compiled once elsewhere in the link.
 #include <stb/stb_image.h>
 
+#include <uicoopa/ui_resources.h>
 #include <uicoopa/immediate/imm.h>
 #include <uicoopa/render/ui_pass.h>
 #include <uicoopa/text/font_defaults.h>
 #include <uicoopa/text/text_atlas_registry.h>
-#include <uicoopa/ui_yaml.h>
 
 #include <toyengine/core/branding.h>
 

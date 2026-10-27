@@ -43,6 +43,7 @@
 #include <toyengine/scene/camera_controller.h>
 #include <toyengine/scene/view_blocker.h>
 #include <toyengine/scene/xray_markers.h>
+#include <uicoopa/ui_resources.h>
 #include <uicoopa/layout/canvas.h>
 #include <uicoopa/render/ui_pass.h>
 #include <volk/volk.h>

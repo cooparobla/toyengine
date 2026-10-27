@@ -27,6 +27,9 @@
 #include <optional>
 #include <string>
 #include <system_error>
+#include <vector>
+
+#include <coopa/event/signal.h>
 
 namespace toy::core {
 
@@ -76,11 +79,39 @@ public:
     /** @brief Writes the file if anything changed since load / the last flush. */
     bool flush();
 
+    /**
+     * @brief Fires with the key just written by any setter (or erase()).
+     *
+     * The one place every writer passes through, which is what makes it the place to apply a
+     * setting live: a settings panel, the console and game code all end up here, so a host
+     * subscribes once rather than each writer having to know what its key affects. Engine
+     * uses it for the keys it owns -- the audio bus levels and the interface scale -- so
+     * dragging a slider is audible immediately instead of only after a restart.
+     *
+     * Not fired by load(): that is the startup read, and a host applies those itself.
+     */
+    coopa::event::Signal<const std::string&> on_changed;
+
 private:
     fkyaml::node doc_ = fkyaml::node::mapping();
     std::filesystem::path path_;
     bool dirty_ = false;
 };
+
+/**
+ * @brief The settings keys the engine itself reads and applies.
+ *
+ * What distinguishes a live binding from a typo: an authored panel's `bind` key reaches
+ * UserSettings whether or not anything consumes it, so a misspelling is indistinguishable from
+ * a working row -- and it still gets written to the player's file forever. A key here, or one a
+ * game registers with PanelBindings::provide(), has a consumer; anything else does not.
+ * toy::ui::unbound_keys() is what reports the difference.
+ *
+ * The audio bus levels and `ui.hud_scale` are applied the moment they change (Engine
+ * subscribes to UserSettings::on_changed); `display.vsync` is read at startup, so it takes
+ * effect on the next launch.
+ */
+const std::vector<std::string>& engine_setting_keys();
 
 } // namespace toy::core
 

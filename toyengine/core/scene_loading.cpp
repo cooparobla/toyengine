@@ -1,8 +1,12 @@
 #include <toyengine/core/scene_loading.h>
 
 #include <coopa/scene/scene.h>
-#include <toyengine/ui/ui_assets.h>
 #include <uicoopa/immediate/imm.h>
+#include <uicoopa/immediate/imm_theme.h>
+#include <uicoopa/text/font_defaults.h>
+
+#include <exception>
+#include <filesystem>
 
 #include <algorithm>
 
@@ -93,15 +97,77 @@ void SceneLoadHandle::on_failed(std::function<void(const std::string&)> fn) cons
 coopa::scene::Scene& SceneTransitionLayer::scene() {
     if (!scene_) {
         scene_ = std::make_unique<coopa::scene::Scene>("SceneTransition");
-        // Far below a loading screen's own canvas (sort_order 0 by default).
-        canvas_ = coopa::ui::build_immediate_canvas(*scene_, "SceneTransitionFade", -1000);
+        canvas_ = coopa::ui::build_immediate_canvas(*scene_, "SceneTransition", -1000);
+        // One canvas draws both, in this order: the fade is what the screen sits on, and
+        // declaration order within a layer is draw order.
         canvas_->on_draw = [this](coopa::ui::imm::Context& ctx) {
-            if (alpha_ <= 0.0f) return;
-            const glm::vec2 size = ctx.canvas_size();
-            ctx.fill(coopa::ui::imm::Box{0.0f, 0.0f, size.x, size.y}, glm::vec4(color_, alpha_));
+            draw_fade_(ctx);
+            if (loading_visible_) draw_loading_screen_(ctx);
         };
+        // A font: the fade never needed one, the status line does. Whatever the host already
+        // published, else the stock face from an asset root. Without one the bar still draws
+        // and the status line simply does not, which is a reasonable way to degrade.
+        coopa::ui::Font* font = coopa::ui::FontDefaults::font;
+        if (!font && coopa::ui::FontDefaults::resolve_font) {
+            for (const std::string& root : coopa::ui::FontDefaults::search_dirs) {
+                const std::filesystem::path f =
+                    std::filesystem::path(root) / "fonts" / "inter_regular.ttf";
+                std::error_code ec;
+                if (!std::filesystem::exists(f, ec)) continue;
+                font = coopa::ui::FontDefaults::resolve_font(f.string());
+                break;
+            }
+        }
+        if (font) canvas_->context().text.set_font(font);
     }
     return *scene_;
+}
+
+void SceneTransitionLayer::draw_fade_(coopa::ui::imm::Context& ctx) {
+    if (alpha_ <= 0.0f) return;
+    ctx.fill(ctx.stretch(), glm::vec4(color_, alpha_));
+}
+
+void SceneTransitionLayer::draw_loading_screen_(coopa::ui::imm::Context& ctx) {
+    using coopa::ui::imm::Anchor;
+    using coopa::ui::imm::Box;
+
+    // The screen's own Style, not the Context's: a transition layer is shared, and the game's
+    // theme should not leak into it or out of it.
+    const coopa::ui::imm::Style saved = ctx.style;
+    ctx.style = loading_style_;
+
+    // The FADE's colour at full opacity, not the theme's window background: the screen has to
+    // cover whatever is mid-teardown behind it, and it has to agree with the fade it appears
+    // out of. A theme background would be a second, lighter colour arriving on top of the
+    // fade -- visible as a flash, and brighter than the transition ever asked for.
+    ctx.fill(ctx.stretch(), glm::vec4(color_, 1.0f));
+
+    const float bar_w = std::min(560.0f, ctx.canvas_size().x * 0.5f);
+    const Box bar = ctx.anchor(Anchor::Center, {0.0f, 0.0f}, {bar_w, 6.0f});
+
+    // A title above the bar: at the moment a screen appears the bar is still empty, and an
+    // empty bar alone reads as a frozen frame rather than as work in progress.
+    if (!title.empty()) {
+        const float size = ctx.style.font_size * 1.6f;
+        const float w = ctx.text.width(title, size);
+        ctx.draw_text({bar.x + (bar.w - w) * 0.5f, bar.y - size - 18.0f}, title, ctx.style.text,
+                      size);
+    }
+
+    coopa::ui::imm::BarStyle bs;
+    bs.show_value = false;   // a byte count means nothing to a player
+    bs.rounding = 3.0f;
+    ctx.value_bar(bar, progress_, bs);
+
+    if (!status_.empty()) {
+        // Under the bar, centred: the bar says how far, this says what it is doing.
+        const float w = ctx.text.width(status_, ctx.style.font_size);
+        ctx.draw_text({bar.x + (bar.w - w) * 0.5f, bar.bottom() + 14.0f}, status_,
+                      ctx.style.text_dim);
+    }
+
+    ctx.style = saved;
 }
 
 void SceneTransitionLayer::set_fade(const glm::vec3& color, float alpha) {
@@ -110,25 +176,45 @@ void SceneTransitionLayer::set_fade(const glm::vec3& color, float alpha) {
 }
 
 bool SceneTransitionLayer::show_loading_screen(const std::string& ref) {
-    hide_loading_screen();
-    ui_root_ = toy::ui::spawn(scene(), ref);
-    return ui_root_ != nullptr;
+    scene();   // the canvas has to exist before anything can be drawn in it
+    progress_ = 0.0f;
+    status_.clear();
+    loading_style_ = coopa::ui::imm::Style{};
+
+    // `ref` names a theme. A screen that cannot find it still draws, in the built-in style:
+    // the one thing a loading screen must never do is fail to appear.
+    if (!ref.empty()) {
+        const bool has_ext = ref.size() > 5 && ref.rfind(".yaml") == ref.size() - 5;
+        const std::string rel = has_ext ? ref : ref + ".yaml";
+        for (const std::string& root : coopa::ui::FontDefaults::search_dirs) {
+            const std::filesystem::path p = std::filesystem::path(root) / rel;
+            std::error_code ec;
+            if (!std::filesystem::exists(p, ec)) continue;
+            try {
+                loading_style_ = coopa::ui::imm::load_theme(p).style;
+            } catch (const std::exception&) {
+                // Keep the built-in style; a malformed theme is not worth failing a load for.
+            }
+            break;
+        }
+    }
+    loading_visible_ = true;
+    return true;
 }
 
 void SceneTransitionLayer::hide_loading_screen() {
-    if (ui_root_ && scene_) toy::ui::close(*scene_, ui_root_);
-    ui_root_ = nullptr;
+    loading_visible_ = false;
+    progress_ = 0.0f;
+    status_.clear();
 }
 
 void SceneTransitionLayer::update_loading_screen(float progress, const std::string& status) {
-    if (!ui_root_) return;
-    coopa::ui::UiHandle ui(ui_root_);
-    if (ui.has("progress")) ui.set("progress", progress);
-    if (ui.has("status")) ui.set_text("status", status);
+    progress_ = std::clamp(progress, 0.0f, 1.0f);
+    status_ = status;
 }
 
 void SceneTransitionLayer::release() {
-    ui_root_ = nullptr;
+    loading_visible_ = false;
     canvas_ = nullptr;
     scene_.reset();
     alpha_ = 0.0f;

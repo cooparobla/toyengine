@@ -326,17 +326,20 @@ COOPA_TEST(audio_demo_and_bare_prefab_instances_open) {
     tick(session.engine, 4);
     expect(object_named(app, "audio_panel") != 0 && object_named(app, "drone") != 0, "with its panel and stations");
 
+    // A prefab instance with NO `components:` key at all. The viewport draws an origin glyph
+    // for every object, and an instance that overrides nothing used to throw there -- so the
+    // case is worth keeping even though nothing in the shipped scenes is written that way.
     std::ifstream in(dir / "scene.yaml");
     std::string yaml((std::istreambuf_iterator<char>(in)), {});
-    const std::string line = "      prefab: ui/audio_panel\n      components: []\n";
-    const size_t at = yaml.find(line);
-    expect(at != std::string::npos, "the panel instance is in the scene");
+    const std::string anchor = "    - name: campfire\n";
+    const size_t at = yaml.find(anchor);
+    expect(at != std::string::npos, "the scene has a prefab instance to copy");
     if (at == std::string::npos) return;
-    yaml.replace(at, line.size(), "      prefab: ui/audio_panel\n");
+    yaml.insert(at, "    - name: bare_instance\n      prefab: objects/campfire\n");
     std::ofstream(dir / "bare_prefab.yaml") << yaml;
     expect(app.open_scene(dir / "bare_prefab.yaml"), "a scene with a bare prefab instance opens");
     tick(session.engine, 4);
-    expect(object_named(app, "audio_panel") != 0, "and draws (no throw from the viewport glyphs)");
+    expect(object_named(app, "bare_instance") != 0, "and draws (no throw from the viewport glyphs)");
 }
 
 } // namespace toy::editor::testing

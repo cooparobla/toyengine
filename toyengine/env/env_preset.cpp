@@ -1,13 +1,13 @@
 #include <toyengine/env/env_preset.h>
 
+#include <string>
+#include <vector>
+
 #include <iostream>
 
 #include <coopa/scene/scene.h>
 #include <coopa/scene/scene_loader.h>
 #include <coopa/scene/scene_object.h>
-#include <uicoopa/binding/ui_handle.h>
-#include <uicoopa/widgets/button.h>
-#include <uicoopa/builder/theme_scope.h>
 
 #include <coopa/animation/animation_system.h>
 #include <coopa/animation/animator.h>
@@ -19,34 +19,12 @@ namespace toy {
 namespace env {
 
 void EnvPresetSwitcher::start() {
-    if (!scene || presets.empty()) return;
-
-    // Buttons are addressed by their UI object's name on the scene event bus, so the panel can
-    // be its own asset loaded anywhere in the scene.
-    clicks_.clear();
-    for (int i = 0; i < static_cast<int>(presets.size()); ++i) {
-        const std::string& button = presets[static_cast<std::size_t>(i)].button;
-        if (button.empty()) continue;
-        clicks_.emplace_back(scene->events().on(button, "click",
-            [this, i](const coopa::event::EventArgs&) { select(i); }));
-    }
-
-    initial_ = 0;
-    if (!start_preset.empty()) {
-        for (std::size_t i = 0; i < presets.size(); ++i) {
-            if (presets[i].name == start_preset) { initial_ = static_cast<int>(i); break; }
-        }
-    }
-    // Deactivate every preset subtree now so none of them is live on frame 0; the chosen one
-    // is applied from update(), once the panel's buttons exist.
-    for (const EnvPreset& p : presets) {
-        if (p.object.empty()) continue;
-        if (coopa::scene::SceneObject* o = scene->find_object(p.object)) o->set_active(false);
-    }
-    pending_initial_ = true;
+    // The panel is this component's own, drawn per frame, so there is nothing to subscribe to
+    // and no widget to find: draw() reads `selected_` and reports a click straight back.
+    ImmScreen::start();
 }
 
-void EnvPresetSwitcher::update(float) {
+void EnvPresetSwitcher::on_update(float) {
     if (!pending_initial_) return;
     pending_initial_ = false;
     apply_(initial_);
@@ -110,33 +88,7 @@ void EnvPresetSwitcher::apply_(int index) {
         }
     }
 
-    // "You are here". uicoopa has no radio / ToggleGroup widget, so the live button is tinted
-    // with its own theme `pressed` shade and the rest are restored to their authored colour --
-    // no palette is hardcoded here. Every button stays INTERACTABLE on purpose: clicking the
-    // live one replays its effect, which is the whole point of a replayable preset.
-    for (std::size_t i = 0; i < presets.size(); ++i) {
-        const std::string& b = presets[i].button;
-        if (b.empty()) continue;
-        coopa::scene::SceneObject* o = scene->find_object(b);
-        if (!o) continue;
-        auto* btn = coopa::ui::UiHandle(o).find<coopa::ui::Button>(b);
-        if (!btn) continue;
-        auto base = button_base_.find(b);
-        if (base == button_base_.end()) base = button_base_.emplace(b, btn->colors.normal).first;
-        // The theme's PRIMARY role is the "this is the one" colour. `pressed` would be the
-        // obvious guess and is wrong: in the stock theme it is DARKER than normal, so the live
-        // button is indistinguishable from the rest.
-        const coopa::ui::UITheme& theme = coopa::ui::theme_for(o);
-        btn->colors.normal = (static_cast<int>(i) == index) ? theme.button_primary.normal : base->second;
-        btn->colors.highlighted = (static_cast<int>(i) == index) ? theme.button_primary.hover
-                                                                 : theme.button.hover;
-    }
 
-    if (!label_object.empty()) {
-        if (coopa::scene::SceneObject* o = scene->find_object(label_object)) {
-            coopa::ui::UiHandle(o).set_text(label_object, chosen.blurb);
-        }
-    }
     on_selected.emit(index, chosen.name);
 }
 
@@ -171,12 +123,13 @@ void register_env_preset_component() {
                 if (n.contains(k) && n.at(k).is_string()) out = n.at(k).get_value<std::string>();
             };
             str(node, "start", s->start_preset);
-            str(node, "label_object", s->label_object);
+            str(node, "title", s->title);
+            str(node, "theme_ref", s->theme_ref);
             if (!node.contains("presets") || !node.at("presets").is_sequence()) return;
             for (const auto& pn : node.at("presets")) {
                 EnvPreset p;
                 str(pn, "name", p.name);
-                str(pn, "button", p.button);
+                str(pn, "label", p.label);
                 str(pn, "object", p.object);
                 str(pn, "condition", p.condition);
                 str(pn, "blurb", p.blurb);
@@ -188,6 +141,46 @@ void register_env_preset_component() {
                 s->presets.push_back(std::move(p));
             }
         });
+}
+
+void EnvPresetSwitcher::draw(coopa::ui::imm::Context& ctx) {
+    using coopa::ui::imm::Anchor;
+    using coopa::ui::imm::Box;
+    if (presets.empty()) return;
+
+    const float row = ctx.style.row_height + 10.0f;
+    const float gap = ctx.style.spacing;
+    const float list_h = row * static_cast<float>(presets.size()) +
+                         gap * static_cast<float>(presets.size() - 1);
+    // The blurb is a sentence or two under the list, and it wraps -- so the panel reserves
+    // several lines for it rather than a fixed strip that cuts the last one off.
+    const float blurb_h = ctx.text.line_height(ctx.style.font_size) * 4.0f;
+    const Box frame = tune().box(ctx, "panel", Anchor::MiddleLeft, {24.0f, 0.0f},
+                                 {320.0f, list_h + blurb_h + 72.0f});
+    const Box inner = title.empty() ? frame : ctx.panel_frame("presets", frame, title);
+
+    std::vector<std::string> labels;
+    labels.reserve(presets.size());
+    for (const EnvPreset& p : presets) labels.push_back(p.label.empty() ? p.name : p.label);
+
+    const int hit = ctx.menu_list("presets", {inner.x, inner.y, inner.w, list_h}, labels);
+    if (hit >= 0) apply_(hit);
+
+    // "You are here": the live preset gets the accent outline. A tint on one button in a list
+    // of identical ones is the whole reason this is drawn rather than left to a theme.
+    if (selected_ >= 0 && static_cast<std::size_t>(selected_) < presets.size()) {
+        const Box live{inner.x, inner.y + static_cast<float>(selected_) * (row + gap), inner.w, row};
+        ctx.outline_rounded(live, ctx.style.accent, -1.0f, 2.0f);
+
+        const std::string& blurb = presets[static_cast<std::size_t>(selected_)].blurb;
+        if (!blurb.empty()) {
+            ctx.begin_region("blurb", {inner.x, inner.y + list_h + 12.0f, inner.w,
+                                       std::max(0.0f, inner.bottom() - (inner.y + list_h + 12.0f))},
+                             false);
+            ctx.paragraph(blurb);
+            ctx.end_region();
+        }
+    }
 }
 
 } // namespace env

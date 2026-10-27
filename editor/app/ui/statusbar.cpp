@@ -35,7 +35,6 @@ void StatusBarPanel::draw_statusbar_(imm::Context& ctx, const imm::Box& b) {
         }
     } else if (app_.active_type_ == AssetType::UI) {
         if (app_.ui_canvas_panel_->ui_interact_) hints = {{I::MouseLeft, "Use the UI"}, {I::Keyboard, "Esc / Tab  Design"}, {I::MouseMiddle, "Pan"}};
-        else if (app_.ui_canvas_panel_->ui_gizmo_.dragging()) hints = {{I::Keyboard, "Shift  Keep Aspect / 15 deg"}, {I::Keyboard, "Alt  From Centre"}, {I::Keyboard, "Ctrl  Snap Off"}};
         else hints = {{I::MouseLeft, "Select / Move"}, {I::Keyboard, "Alt  Cycle"}, {I::Keyboard, "Shift A  Add"},
                       {I::Keyboard, "Arrows  Nudge"}, {I::Keyboard, "Tab  Interact"}, {I::Keyboard, "F / Home  Frame"}, {I::MouseMiddle, "Pan"}};
     } else if (app_.loopcut_.active) {

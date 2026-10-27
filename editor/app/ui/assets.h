@@ -29,7 +29,6 @@
 #include <coopa/util/transform.h>
 #include <gfxcoopa/engine/data/mesh.h>
 #include <toyengine/render/particle_types.h>
-#include <uicoopa/widgets/console.h>
 
 namespace toy::editor {
 

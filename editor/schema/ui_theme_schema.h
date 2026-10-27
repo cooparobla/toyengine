@@ -2,12 +2,14 @@
  * @file ui_theme_schema.h
  * @brief The fields of a game UI theme (ui/themes/*.yaml), for the editor's Theme editor.
  *
- * One section per top-level key of uicoopa's builder theme (see
- * libs/uicoopa/uicoopa/builder/ui_theme_yaml.h's parse_theme() for the format). Every key is
- * optional in a file; an absent one shows -- and the game uses -- uicoopa's built-in dark value,
- * which is what each field's default is taken from here. Fonts (`text.font_path`,
- * `text.fonts.<role>`) are paths relative to the theme file and get their own editor, so they
- * are not listed as fields.
+ * Generated from the two field lists the format itself is defined by -- imm::visit_style()
+ * for the widget metrics and colours, and toy::ui::visit_game_theme() for a game's own roles
+ * (bars, slots, feedback, world). Driving the editor from the same lists the loader walks is
+ * what stops a theme gaining a key the editor cannot show, or showing one the format dropped.
+ *
+ * Every key is optional in a file; an absent one keeps the built-in value, which is what each
+ * field's default is taken from here. The theme's single `font:` is a path relative to the
+ * file and gets its own editor, so it is not listed as a field.
  */
 
 #ifndef TOYEDITOR_SCHEMA_UI_THEME_SCHEMA_H
@@ -15,7 +17,6 @@
 
 #include "component_schema.h"
 
-#include <uicoopa/builder/ui_theme.h>
 
 #include <string>
 #include <vector>

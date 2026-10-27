@@ -29,6 +29,7 @@
 #include <gfxcoopa/pipeline/shader_library.h>
 #include <gfxcoopa/types/format.h>
 #include <gfxcoopa/types/texture_view.h>
+#include <uicoopa/ui_resources.h>
 #include <uicoopa/render/draw_list.h>
 
 namespace coopa::gfx {

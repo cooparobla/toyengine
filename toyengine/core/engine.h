@@ -33,6 +33,7 @@
 #include <gfxcoopa/app/context.h>
 #include <gfxcoopa/util/image_readback.h>
 
+#include <coopa/event/signal.h>
 #include <coopa/asset/asset_manager.h>
 #include <coopa/input/input_map.h>
 #include <coopa/job/engine.h>
@@ -292,23 +293,45 @@ public:
      * @brief Adds an engine overlay layer: a scene ticked like the overlay scene and drawn
      *        over everything else -- the game, its HUD and the overlay scene (the editor UI).
      *
-     * For the engine's own screens (the debug stats HUD, scene transitions). Layers draw in
-     * ascending `order`, equal orders in the order they were added. `in_display_rect` places
-     * the layer's screen canvases inside the scene's display rect (display_rect(): the
-     * letterboxed game image, or the editor's viewport) at the display's scale, without input;
-     * otherwise they cover the window like the overlay scene's. Re-adding a scene updates it.
-     * Non-owning: remove_overlay_layer() before destroying the scene.
+     * For the engine's own screens (the debug stats HUD, scene transitions) and for a game's
+     * own interface. Layers draw in ascending `order`, equal orders in the order they were
+     * added. `in_display_rect` places the layer's screen canvases inside the scene's display
+     * rect (display_rect(): the letterboxed game image, or the editor's viewport) at the
+     * display's scale; otherwise they cover the window like the overlay scene's. Re-adding a
+     * scene updates it. Non-owning: remove_overlay_layer() before destroying the scene.
+     *
+     * `input` decides whether the layer's canvases receive the pointer and keyboard. The
+     * engine's own layers are readouts and want it off, so that is the default; a game's
+     * interface wants it on. It only applies to an `in_display_rect` layer -- a layer covering
+     * the whole window is driven like the overlay scene, which is always interactive.
      */
     /// One add_overlay_layer() entry.
     struct OverlayLayer {
         coopa::scene::Scene* scene = nullptr;
         int  order = 0;
         bool in_display_rect = false;
+        bool input = false;
     };
-    void add_overlay_layer(coopa::scene::Scene* scene, int order = 0, bool in_display_rect = false);
+    void add_overlay_layer(coopa::scene::Scene* scene, int order = 0, bool in_display_rect = false,
+                           bool input = false);
     void remove_overlay_layer(coopa::scene::Scene* scene);
     /** @brief The current overlay layers' scenes, in draw order. */
     std::vector<coopa::scene::Scene*> overlay_layers() const;
+
+    /**
+     * @brief Whether a scene that is DRAWN BUT NOT SIMULATING still shows its interface.
+     *
+     * A canvas only lays out and emits from its own late_update(), which a paused scene never
+     * runs -- so without a preview pass an editor's stopped scene shows no HUD at all. That is
+     * the right default for any host that just wants to look at a scene.
+     *
+     * An editor that treats interfaces as their own workflow turns this OFF for the scene
+     * view, so a HUD authored into a level stops covering the thing being built, and back ON
+     * for the screen where that interface is actually being designed. It has no effect while
+     * the scene simulates (in play, or in a running game): then the canvas drives itself.
+     */
+    void set_ui_preview(bool enabled) { ui_preview_ = enabled; }
+    bool ui_preview() const { return ui_preview_; }
 
     /**
      * @brief The on-screen stats HUD (toyengine/debug/debug_overlay.h): set_mode() / cycle()
@@ -1153,6 +1176,15 @@ private:
     float ui_scale_ = 1.0f;   ///< See set_ui_scale().
 
     /**
+     * @brief Applies the player-settings keys this Engine owns as soon as any writer changes one.
+     *
+     * Scoped to the Engine deliberately: the connection must die with it, because the handler
+     * touches this instance and the test suite builds and destroys many Engines against the one
+     * process-wide UserSettings.
+     */
+    coopa::event::ScopedConnection settings_conn_;
+
+    /**
      * @brief Builds a world-space ray through the cursor, for world-space UI picking.
      *
      * Three coordinate hops, each of which has a way to be subtly wrong:
@@ -1378,6 +1410,8 @@ private:
     std::optional<ScreenUiPlacement> scene_ui_placement_;   ///< See set_scene_ui_placement().
     FrameHooks            hooks_;
     std::vector<std::function<void(coopa::input::Input&)>> input_queue_;
+    /// See set_ui_preview(). On by default: a host that only draws a scene wants its HUD.
+    bool ui_preview_ = true;
     coopa::scene::Scene*  overlay_scene_ = nullptr;
     /// The current (or last) load_scene_async() request; see update_scene_load_().
     std::shared_ptr<detail::SceneLoadState> scene_load_;

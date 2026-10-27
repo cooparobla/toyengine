@@ -111,7 +111,7 @@
 #include <gfxcoopa/engine/passes/sdf_shadow_pass.h>
 
 
-#include <uicoopa/ui_yaml.h>
+#include <uicoopa/render/ui_pass.h>
 #include <uicoopa/render/ui_world_pass.h>
 
 #include <toyengine/render/toy_render_types.h>

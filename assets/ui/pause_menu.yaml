@@ -1,0 +1,16 @@
+# pause_menu -- an authored screen. The buttons report their `action` to whatever opened it:
+#
+#   auto* s = object->get_component<toy::ui::PanelScreen>();
+#   s->bindings().on_action("resume",   [&]{ s->hidden = true; engine.set_paused(false); });
+#   s->bindings().on_action("settings", [&]{ settings->hidden = false; });
+#
+# "close" needs no handler -- PanelScreen hides itself when nothing else claims it.
+title: Paused
+anchor: Center
+size: [360, 320]
+
+rows:
+  - { kind: button, label: Resume,   action: resume }
+  - { kind: button, label: Settings, action: settings }
+  - { kind: spacer }
+  - { kind: button, label: Quit to menu, action: quit }

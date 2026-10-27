@@ -54,13 +54,15 @@
 #include <coopa/event/signal.h>
 #include <coopa/scene/component.h>
 
+#include <toyengine/ui/imm_screen.h>
+
 namespace toy {
 namespace env {
 
 /** @brief One switchable environment. */
 struct EnvPreset {
     std::string name;        ///< Identifies it (`start`, select_by_name(), the signal payload).
-    std::string button;      ///< UI object whose "click" selects it; empty = no button.
+    std::string label;       ///< Shown on its button in the panel; empty uses `name`.
     std::string object;      ///< Scene subtree to activate; empty = nothing to activate.
     std::string condition;   ///< Weather condition to blend to; empty = leave the weather alone.
     float transition = -1.0f;///< Seconds for that blend; < 0 = the condition's own.
@@ -71,11 +73,12 @@ struct EnvPreset {
  * @class EnvPresetSwitcher
  * @brief See the file doc.
  */
-class EnvPresetSwitcher : public coopa::scene::Component {
+class EnvPresetSwitcher : public toy::ui::ImmScreen {
 public:
     std::vector<EnvPreset> presets;
     std::string start_preset;  ///< Preset live on load; empty = the first.
-    std::string label_object;  ///< Optional Text/ThemedText widget showing the active blurb.
+    /// Panel title. Empty draws no frame, for a switcher driven only from code.
+    std::string title = "Presets";
 
     std::string type_name() const override { return "EnvPresetSwitcher"; }
 
@@ -84,7 +87,8 @@ public:
     /// Applies the initial preset on the first frame rather than in start(): the panel's
     /// buttons are built by a UI composite's own start(), which runs after this component's,
     /// so in start() there is nothing yet to highlight or write a blurb into.
-    void update(float delta_time) override;
+    void on_update(float delta_time) override;
+    void draw(coopa::ui::imm::Context& ctx) override;
 
     /**
      * @brief Activates preset `index`, deactivating every other preset's subtree.
@@ -117,11 +121,7 @@ private:
     int selected_ = -1;
     int initial_ = 0;
     bool pending_initial_ = true;
-    std::vector<coopa::event::ScopedConnection> clicks_;
     std::set<const coopa::scene::SceneObject*> started_;
-    /// Each button's authored `normal` colour, so the live one can be tinted and the rest
-    /// restored without hardcoding a palette the theme owns.
-    std::map<std::string, glm::vec4> button_base_;
 };
 
 } // namespace env

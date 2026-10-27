@@ -31,10 +31,9 @@
 # clip event fires the swing's pulse, and EnvPresetSwitcher (toyengine/env/env_preset.h)
 # activates one preset subtree at a time and blends the weather with it. No game code.
 #
-# The panel is a scene-local UI asset (ui/presets.yaml next to this file), themed with
-# ui/themes/blender.yaml -- the editor's own palette. Its buttons publish their clicks under
-# their own object names on the scene event bus; the switcher listens on those eight names and
-# knows nothing about the UI.
+# The switcher draws its own panel, per frame (toyengine/env/env_preset.h): one list of
+# presets with the live one outlined, and the active preset's blurb under it. There is no UI
+# asset and no event-bus wiring -- a click is a return value.
 #
 # Needs render transparency_enabled (dust, steam) and volumetrics_enabled (the vent's column),
 # both on in assets/config.yaml. Worth sweeping: the rotor's `vertical` from -4 to -24, and the
@@ -624,49 +623,49 @@ scene:
     # The panel, and the switcher that listens to it.
     # ---------------------------------------------------------------------------------------
     - name: preset_panel
-      prefab: ui/presets
       components:
         - type: EnvPresetSwitcher
           start: calm
-          label_object: PresetLabel
+          title: Presets
+          theme_ref: ui/themes/game_dark
           presets:
             - name: calm
-              button: BtnCalm
+              label: Calm
               object: ""
               condition: still
               blurb: "Still air. The baseline -- everything else is measured against this."
             - name: rotor
-              button: BtnRotor
+              label: Rotor
               object: preset_rotor
               condition: still
               blurb: "Rotor downwash: a radial source pressing DOWN. The grass fans outward and lies flat as it descends."
             - name: swing
-              button: BtnSwing
+              label: Swing
               object: preset_swing
               condition: still
               blurb: "Sword swing: the clip's `swing` event fires a one-shot gust. The ferns snap outward, then recover."
             - name: vent
-              button: BtnVent
+              label: Vent
               object: preset_vent
               condition: still
               blurb: "Steam vent: the same radial source with `vertical` POSITIVE. The plume climbs its column instead of blowing downwind."
             - name: puddle
-              button: BtnPuddle
+              label: Puddle
               object: preset_puddle
               condition: still
               blurb: "A local wet patch: surface wetness, no wind. Only materials with `wet: true` darken -- the ground here does."
             - name: snowpile
-              button: BtnSnowPile
+              label: Snow Pile
               object: preset_snowpile
               condition: still
               blurb: "Snow lying in one spot with no snowfall at all: the shaders take max(weather cover, local)."
             - name: gale
-              button: BtnGale
+              label: Gale
               object: ""
               condition: gale
               blurb: "No local source at all -- this is the GLOBAL weather wind, for contrast."
             - name: shelter
-              button: BtnShelter
+              label: Shelter
               object: preset_shelter
               condition: gale
               blurb: "The same gale, plus an `override` source inside the stones: the meadow streams, the grass inside stands still."

@@ -2,19 +2,12 @@
  * @file audio_components.h
  * @brief Game-side audio components that need the engine's AudioSystem (not just sfxcoopa).
  *
- *   VolumeBinding   ties a UI Slider (on this object or a descendant -- e.g. a SettingRow's)
- *                   to a mixer bus: the slider starts at the bus's current volume, moving it
- *                   sets the bus and remembers the value in the player's settings
- *                   (UserSettings "audio.<bus>"), so it is restored next launch.
  *
  *   MusicPlaylist   hands the scene's background music to the AudioSystem's MusicPlayer: a
  *                   list of tracks that plays through with crossfades. A track already playing
  *                   (carried over from the previous scene) keeps playing.
  *   MusicZone       a box (or sphere) region: while the listener is inside, its track is pushed
  *                   over the current music, which pauses and resumes when the listener leaves.
- *   MusicOnSignal   a UI reactor driving the music (play / push / pop / next / previous / stop /
- *                   pause / resume / toggle_pause / playlist) when a signal fires -- a button's "click".
- *   AudioSourceOnSignal  a UI reactor playing / stopping an AudioSource on `target`.
  *   MusicStatusText writes "track  0:12 / 0:31" (and the transition state) into a Text here.
  *
  * @code
@@ -27,7 +20,6 @@
  *   track: nocturne
  *   size: {x: 8, y: 8, z: 6}
  *   fade: 2.0
- * - {type: MusicOnSignal, listen_object: NextButton, listen_signal: click, action: next}
  * @endcode
  *
  * @code
@@ -36,19 +28,18 @@
  *   label: Music
  *   min: 0
  *   max: 1
- * - {type: VolumeBinding, bus: Music}
  * @endcode
  */
 
 #ifndef TOYENGINE_AUDIO_AUDIO_COMPONENTS_H
 #define TOYENGINE_AUDIO_AUDIO_COMPONENTS_H
 
+#include <coopa/scene/component.h>
+#include <coopa/scene/scene_object.h>
 #include <toyengine/audio/audio_system.h>
 #include <toyengine/audio/music_player.h>
 
-#include <uicoopa/reactors/signal_reactor.h>
 
-#include <uicoopa/widgets/slider.h>
 
 #include <cctype>
 #include <cmath>
@@ -60,20 +51,23 @@ namespace toy::audio {
 /** @brief The UserSettings key a bus's volume is stored under ("audio.music"). */
 std::string volume_setting_key(const std::string& bus);
 
-class VolumeBinding : public coopa::scene::Component {
-public:
-    std::string bus = k_bus_master;
+/**
+ * @brief Sets a bus's volume AND remembers it for the player.
+ *
+ * What a volume control is actually for: the mixer change is this session, the UserSettings
+ * write is every session after it. A UI that only called AudioSystem::set_bus_volume() would
+ * forget the setting the moment the game closed.
+ *
+ * @return False if there is no audio system or no such bus.
+ */
+bool set_bus_volume_persisted(const std::string& bus, float linear);
 
-    std::string type_name() const override { return "VolumeBinding"; }
-
-    void update(float) override;
-
-    coopa::ui::Slider* slider() const { return slider_; }
-
-private:
-    coopa::ui::Slider* slider_ = nullptr;
-    float last_ = -1.0f;
-};
+/**
+ * @brief A bus's remembered volume, or its current one when the player has never set it.
+ *
+ * The value a volume slider should start at.
+ */
+float bus_volume_persisted(const std::string& bus);
 
 /** @brief Scene background music: plays its playlist through AudioSystem::music() once the scene simulates. */
 class MusicPlaylistComponent : public coopa::scene::Component {
@@ -92,7 +86,7 @@ public:
 
     void update(float) override;
 
-    /** @brief Registers the tracks (by name, for MusicZone / MusicOnSignal) and decodes them. */
+    /** @brief Registers the tracks (by name, for MusicZone) and decodes them. */
     void register_tracks();
 
     /** @brief Registers the tracks and starts the playlist now. */
@@ -127,46 +121,16 @@ private:
 };
 
 /** @brief Drives the music when a signal fires. */
-class MusicOnSignal : public coopa::ui::SignalReactor {
-public:
-    /// play, push, pop, next, previous, stop, pause, resume, toggle_pause, or playlist (restarts
-    /// the MusicPlaylist on `target`)
-    std::string action = "play";
-    std::string track;           ///< For play / push.
-    float fade = -1.0f;          ///< Seconds; < 0 = the player's (or playlist's) default.
-
-    std::string type_name() const override { return "MusicOnSignal"; }
-
-protected:
-    void on_signal(const coopa::event::EventArgs& args) override;
-};
 
 /** @brief Plays / stops an AudioSource on `target` (or self) when a signal fires. */
-class AudioSourceOnSignal : public coopa::ui::SignalReactor {
-public:
-    /// play (restart), stop, toggle, pause, resume, follow (play while a Toggle's value is on)
-    std::string action = "play";
-
-    std::string type_name() const override { return "AudioSourceOnSignal"; }
-
-protected:
-    void on_signal(const coopa::event::EventArgs& args) override;
-};
 
 /** @brief Shows the music state in the Text on this object. */
-class MusicStatusText : public coopa::scene::Component {
-public:
-    std::string prefix;          ///< Put before the status ("Now playing: ").
-
-    std::string type_name() const override { return "MusicStatusText"; }
-
-    void update(float) override;
-
+struct MusicStatusText {
     /** @brief The status line for `music` ("meadow  0:12 / 0:31  [crossfading]"). */
     static std::string describe(const MusicPlayer& music);
 };
 
-/** @brief Registers VolumeBinding's and the music components' scene parsers. */
+/** @brief Registers the music components' scene parsers. */
 void register_audio_components();
 
 } // namespace toy::audio

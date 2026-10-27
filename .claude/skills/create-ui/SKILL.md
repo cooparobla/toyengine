@@ -1,130 +1,145 @@
 ---
 name: create-ui
-description: Create a toyengine UI asset -- a screen-space HUD, menu, dialog, inventory or settings screen in assets/ui/<name>.yaml, or a world-space canvas (nameplate, sign, health bar over an object) -- built from themed composites (Window, MenuList, StatBar, Hotbar, SettingRow...) with named widgets for game-code bindings. Use when asked to make, lay out or fix a UI, HUD, menu, screen, panel, button, health bar, dialog or in-world label.
+description: Create a toyengine UI -- a screen authored as YAML (assets/ui/<name>.yaml -- tabs, labelled rows, buttons, bound to settings or game values) drawn by a PanelScreen component, or a C++ ImmScreen for shapes a row list cannot express (HUDs, hotbars, world nameplates). Use when asked to make, lay out or fix a UI, HUD, menu, screen, panel, settings screen, button, health bar, or in-world label.
 ---
 
-# Create a UI
+# Creating a UI
 
-A UI asset is an object asset (a top-level `object:`) whose root carries a `Canvas` and a
-`Theme`; its children are widgets. Parsers: `libs/uicoopa/uicoopa/ui_yaml.h` (core components)
-and `libs/uicoopa/uicoopa/builder/ui_composites_yaml.h` (themed composites, list near the
-bottom). Read `assets/README.md` "UI assets" and the shipped screens in `assets/ui/` (hud,
-main_menu, pause_menu, dialog_box, inventory, settings) before writing a new one.
+Two ways, and the choice is about **shape**, not size.
 
-**Those shipped files are generated** by `tools/gen_ui_templates.py`, which overwrites them (and
-`assets/ui/themes/*`, `editor/templates/ui/*`, `scenes/ui/ui_demo`). Give a new UI a new name,
-or add it to that script's `SCREENS` list if it should be a template.
+| The screen is... | Make it | Compile? |
+|---|---|---|
+| a stack of labelled rows -- settings, a pause menu, a debug panel | a **panel asset** (YAML) + `PanelScreen` | no |
+| anything else -- a HUD, a hotbar, a transport deck, a world nameplate | a **C++ `ImmScreen`** | yes |
 
-## Skeleton (screen space)
+Most screens are the first. Reach for C++ only when a row list genuinely cannot say it.
+
+## 1. A panel asset (no C++)
+
+`assets/ui/settings.yaml`:
 
 ```yaml
-# <name> -- <what the screen is>. Bindings: <the widget names game code uses>.
-object:
-  name: <name>
+title: Settings            # omit for a frameless panel
+anchor: Center             # TopLeft .. BottomRight (toy::ui::anchor_names())
+size: [720, 520]
+offset: [0, 0]             # moves it away from the anchored edge
+closable: true             # corner X, reports the "close" action
+tabs:
+  - name: Audio
+    rows:
+      - { kind: slider, label: Master volume, bind: audio.master, min: 0, max: 1,
+          tooltip: "Everything, after the per-bus levels" }
+      - { kind: toggle, label: Subtitles, bind: ui.subtitles }
+      - { kind: separator }
+      - { kind: combo,  label: Quality, bind: render.quality, options: [Low, High] }
+  - name: Controls
+    rows:
+      - { kind: int, label: Hotbar slots, bind: ui.slots, min: 1, max: 10 }
+buttons:
+  - { label: Close, action: close }
+```
+
+Row kinds: `slider`, `toggle`, `int`, `combo`, `button`, `label`, `separator`, `spacer`.
+A panel with no `tabs:` takes `rows:` at the top level.
+
+Every value row also takes **`default:`** -- what it shows before anything has written its key.
+Give one: without it a slider starts at `min` (so an unwritten `audio.master` reads 0.00 against
+a real volume of 1.0, and the first nudge persists silence) and a toggle can only default to
+off. `step:` quantizes the value. A `combo` stores the chosen option **by name**, so inserting
+an option does not silently change what an existing setting means.
+
+Put it in a scene:
+
+```yaml
+- name: settings
   components:
-    - type: RectTransform
-      anchor_min: { x: 0.0, y: 0.0 }
-      anchor_max: { x: 1.0, y: 1.0 }
-      pivot: { x: 0.5, y: 0.5 }
-      anchored_position: { x: 0.0, y: 0.0 }
-      size_delta: { x: 0.0, y: 0.0 }
-    - type: Canvas
-      mode: ScaleWithScreenSize
-      reference_resolution: { x: 1920, y: 1080 }   # author every size at 1920x1080
-      match_width_or_height: 0.5
-      sort_order: 15            # stock: hud 0, main_menu 10, dialog 20, inventory 30, settings 40, pause 50
-    - type: Theme
-      source: ui/themes/default.yaml               # or blender / unity, or your own (create-ui-theme)
-  children:
-    - name: panel
-      components:
-        - type: RectTransform
-          anchor_preset: MiddleCenter
-          size_delta: { x: 640, y: 420 }
-        - type: Window
-          title: Options
-          close_button: true
-          layout: vertical
-          spacing: 12
-      children:
-        - name: menu
-          components:
-            - type: RectTransform
-              anchor_preset: StretchAll
-            - type: MenuList
-              items:
-                - { name: Resume, label: Resume, role: Primary }
-                - { name: Quit, label: Quit }
+    - type: PanelScreen
+      panel: ui/settings
+      theme_ref: ui/themes/game_dark
+      hidden: true              # for a screen something else opens
 ```
 
-Layout essentials: `anchor_preset` (TopLeft ... BottomRight, MiddleCenter, StretchAll,
-StretchTop/Bottom/Left/Right/Horizontal/Vertical) is applied first, then raw `anchor_min/max`,
-`pivot` override it. **Y is up**: a top-anchored element uses a negative y `anchored_position`.
+### `bind:` is a key, not a pointer
 
-## Building blocks
+That indirection is what lets a file hold a screen at all. By default a bound row reads and
+writes `toy::core::UserSettings`, which already persists -- so a settings screen works before
+any game code exists. To drive something else, register a provider where you have the object:
 
-Prefer **composites** -- they read the theme, so the file stays short and restyles with it:
-ThemedPanel, ThemedText (`font_role` Title/Heading/Body/Label/Caption/Numeric, `text_role`),
-ThemedButton (`label`, `role` Neutral/Primary/Success), Window (`title`, `close_button`,
-`layout`, `padding`, `spacing`), Dialog (+ `buttons`, `modal`, `starts_open`), ScrollView,
-TabView (`tabs`, child i = page i), Collapsible, MenuList / ActionBar (`items`), SettingRow
-(`kind` slider/toggle/dropdown/spinbox/text/value + its value keys), HudCorner, StatBar (`role`
-health/stamina/mana, `min`, `max`, `value`), Hotbar, ItemGrid, MessageLog, PromptBar. Composite
-enum values are case-insensitive; unknown keys fall back silently.
+```cpp
+auto* s = object->get_component<toy::ui::PanelScreen>();
+s->bindings().provide("player.fov", [&]{ return cam.fov; }, [&](float v){ cam.fov = v; });
+s->bindings().on_action("resume", [&]{ engine.set_paused(false); s->hidden = true; });
+```
 
-Core components when a composite doesn't fit: Image (`sprite`, `color {r,g,b,a}`,
-`corner_radius`, `border_width`...), Text (`text`, `font_size`, `horizontal_align`
-Left/Center/Right, `vertical_align`, `overflow` -- case-sensitive enums), Button, layout groups
-(Horizontal/Vertical/GridLayoutGroup), LayoutElement, ContentSizeFitter, ScrollRect, Slider,
-ProgressBar, Toggle, ComboBox, SpinBox, and the signal reactors (SetActiveOnSignal...).
-Note `type: Image` makes the Image's own `type: Sliced` key unreachable in the `type:` form.
+`close` needs no handler -- `PanelScreen` hides itself when nothing else claims it. A host
+that would rather poll than register calls `take_action()`, which reports the action once and
+clears it.
 
-## Bindings: names are the contract
+**A `bind` key with no consumer does nothing, and looks identical to one that works** -- the row
+still reads and writes `UserSettings`, and the key joins the player's settings file forever. The
+editor's Panel tab lists any such key; `toy::ui::unbound_keys()` is the same check in code, and
+`toy::core::engine_setting_keys()` is what the engine itself consumes.
 
-The YAML holds no callbacks. Game code reaches widgets by **name** with `coopa::ui::UiHandle`
-(`on_click("Resume", fn)`, `get<float>("MusicVolume")`, `bind_bar("Health", &hp)`, `set_text`).
-MenuList/ActionBar/Dialog buttons are named by each item's `name`; SettingRow, StatBar, Hotbar,
-ItemGrid and MessageLog widgets take the composite object's name. Use clear PascalCase action
-names for those (as the shipped screens do) and list them in the file header and in
-`assets/README.md`'s UI table. Open from code with `toy::ui::open(scene, "ui/<name>")`
-(`toyengine/ui/ui_assets.h`) or place in a scene with `prefab: ui/<name>`.
+Handlers run from inside `draw()`, mid-scene-walk, so anything structural (load a scene, destroy
+an object) must be queued on the scene's command buffer rather than done there.
 
-## World-space canvas
+## 2. A C++ screen
 
-On an object (or a child of the object it labels), Z-up:
+Derive from `toy::ui::ImmScreen` (`toyengine/ui/imm_screen.h`) and override `draw()`. It is
+called once per frame, so it reads live state directly -- nothing to bind, nothing to keep in
+step:
+
+```cpp
+class CombatHud : public toy::ui::ImmScreen {
+public:
+    std::string type_name() const override { return "CombatHud"; }
+    void draw(coopa::ui::imm::Context& ctx) override {
+        using coopa::ui::imm::Anchor;
+        const auto b = tune().box(ctx, "health", Anchor::TopLeft, {24, 24}, {300, 28});
+        ctx.stat_bar("hp", b, "Health", player_->health, player_->max_health,
+                     bar_style(theme(), theme().bars.health));
+    }
+};
+```
+
+Then register it like any component (parser in `register.cpp` or a game's `TOY_MODULE()`, plus
+a `ComponentSchema`) -- see `CLAUDE.md`'s component chain. Worked examples:
+`toyengine/ui/demo_hud.h`, `toyengine/audio/audio_demo_panel.h`.
+
+**Ask for boxes through `tune()`**, not inline: it costs the same, and it is what lets
+`assets/ui/<Screen>.tune.yaml` move or resize the panel without a rebuild. It also declares the
+box by name, which is what the editor's **Placement** tab lists -- open that file and each box
+is an anchor, a position and a size beside a live preview. The code default is the real layout;
+the file holds only what someone changed.
+
+### The composite vocabulary
+
+On `imm::Context`: `stat_bar` (with a damage trail), `slot_grid`, `hotbar`, `cooldown`,
+`message_log`, `prompt_bar`, `panel_frame`, `menu_list`, `drag_handle`, `floating_text`,
+`nameplate`, `value_bar`, plus the tool widgets (`button`, `slider_float`, `checkbox`, `combo`,
+`tab_bar`, `input_text`, `tree_node`...). Place with `ctx.anchor(...)` / `ctx.stretch()`.
+
+## World-space plates
+
+Set `space = ImmSpace::World` (or use `WorldLabel` / `HealthDriver` as examples). The plate is a
+quad in the scene, parented to what it labels:
 
 ```yaml
-- type: Transform
-  position: { x: 0.0, y: 0.0, z: 2.2 }
-  rotation: { x: 0.0, y: 0.0, z: 0.0 }
-  scale: { x: 1.0, y: 1.0, z: 1.0 }
-- type: RectTransform
-  anchor_preset: StretchAll
-- type: Canvas
-  render_mode: WorldSpace
-  billboard: CameraFacing      # or Transform (a fixed sign)
-  world_size: { x: 260, y: 60 }  # canvas pixels
-  pixels_per_unit: 160          # 260 px / 160 = 1.6 m wide
-  text_supersample: 2
-  occlude: false
-- type: Theme
-  source: ui/themes/default.yaml
+- type: WorldLabel
+  title: Aldric
+  bar_value: 72
+  bar_max: 100
+  world_size: { x: 260, y: 60 }     # CANVAS PIXELS, not metres
+  pixels_per_unit: 160              # world_size / this = its extent in metres
+  world_occlude: false              # a nameplate stays readable through a hill
+  billboard: Transform              # or omit: face the camera
 ```
 
-Examples: `assets/scenes/ui/ui_demo` -- its health/wall canvases (CameraFacing vs Transform
-billboards, a clickable Heal button) and the hero's themed nameplate. World UI needs `render.world_ui_enabled`.
+Keep world plates to bars and labels. A dropdown on a small plate is clamped to the plate and
+clipped rather than relocated -- there is no escape to screen space.
 
-## Verify
+## Checks
 
-Place it in a scene (`prefab: ui/<name>` on a root object) and render the display-resolution
-frame (screen UI is not in the low-res buffer):
-
-```sh
-.claude/skills/create-scene/scripts/render_scene.sh <scene>          # save_low_res stays false
-./build/toyengine_tests caml_roundtrips_every_asset
-./build/toyengine_tests --group render_ui
-```
-
-Look at the image: nothing clipped or overlapping at 1920x1080, text readable, the theme
-applied. The editor's UI tab (Bindings tab) lists every bindable name -- a quick check that names
-came out as intended.
+- `ctest --test-dir build -L unit -R "ui_panel|imm_game|game_theme|ui_tunables" -j2`
+- `HEADLESS=1 MAX_FRAMES=90 ./build/toyengine ui_demo` -- three kinds of screen in one scene
+- Rebuild `toyengine_editor` before looking in the editor; a stale binary drops new components.

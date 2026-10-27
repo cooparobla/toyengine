@@ -16,6 +16,12 @@
 #include <toyengine/scene/character_controller.h>
 #include <toyengine/scene/foot_ik.h>
 #include <toyengine/scene/free_mover.h>
+#include <toyengine/audio/audio_demo_panel.h>
+#include <toyengine/ui/demo_hud.h>
+#include <toyengine/ui/panel_screen.h>
+#include <toyengine/ui/screen_hint.h>
+#include <toyengine/ui/ui_tunables.h>
+#include <toyengine/ui/world_label.h>
 #include <toyengine/scene/health_driver.h>
 #include <toyengine/scene/kinematic_controller.h>
 #include <toyengine/scene/kinematic_mover.h>
@@ -364,16 +370,121 @@ void register_scene_components() {
 
     // Demo driver for the world-space UI canvas: owns a coopa::stat::Resource and binds it to
     // a ProgressBar in its own subtree at start(). See toyengine/scene/health_driver.h.
+    // A plate in the world: a nameplate, a sign, a label on a machine.
+    SceneLoader::register_component_parser("WorldLabel",
+        [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
+            auto* w = obj.add_component<toy::ui::WorldLabel>();
+            read(node, "title", w->title);
+            read(node, "subtitle", w->subtitle);
+            read(node, "bar_value", w->bar_value);
+            read(node, "bar_max", w->bar_max);
+            read(node, "bar_role", w->bar_role);
+            read(node, "backdrop", w->backdrop);
+            read(node, "theme_ref", w->theme_ref);
+            read(node, "font_ref", w->font_ref);
+            read(node, "world_size", w->world_size);
+            read(node, "pixels_per_unit", w->pixels_per_unit);
+            read(node, "world_text_supersample", w->world_text_supersample);
+            read(node, "world_occlude", w->world_occlude);
+            read(node, "tunables_ref", w->tunables_ref);
+            read(node, "hidden", w->hidden);
+            std::string billboard;
+            if (read(node, "billboard", billboard) && billboard == "Transform") {
+                w->world_billboard = coopa::ui::CanvasBillboard::Transform;
+            }
+        });
+
+    // A screen authored as YAML (toyengine/ui/ui_panel.h): tabs, rows and buttons, bound to
+    // UserSettings by default. No C++ per screen.
+    SceneLoader::register_component_parser("PanelScreen",
+        [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
+            auto* p = obj.add_component<toy::ui::PanelScreen>();
+            read(node, "panel", p->panel);
+            read(node, "theme_ref", p->theme_ref);
+            read(node, "font_ref", p->font_ref);
+            read(node, "sort_order", p->sort_order);
+            read(node, "tunables_ref", p->tunables_ref);
+            read(node, "ui_sounds", p->ui_sounds);
+            read(node, "hidden", p->hidden);
+        });
+
+    // A line or two pinned to a corner: controls, a reminder.
+    SceneLoader::register_component_parser("ScreenHint",
+        [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
+            auto* h = obj.add_component<toy::ui::ScreenHint>();
+            read(node, "title", h->title);
+            if (node.contains("lines") && node.at("lines").is_sequence()) {
+                for (const auto& l : node.at("lines")) h->lines.push_back(l.get_value<std::string>());
+            }
+            read(node, "offset", h->offset);
+            read(node, "backdrop", h->backdrop);
+            read(node, "theme_ref", h->theme_ref);
+            read(node, "font_ref", h->font_ref);
+            read(node, "sort_order", h->sort_order);
+            read(node, "tunables_ref", h->tunables_ref);
+            read(node, "hidden", h->hidden);
+            std::string a;
+            if (read(node, "anchor", a)) {
+                coopa::ui::imm::Anchor parsed = h->anchor;
+                if (toy::ui::parse_anchor(a, parsed)) h->anchor = parsed;
+            }
+        });
+
+    // The stock screen-space HUD -- vitals, quest, log, hotbar, key hints.
+    SceneLoader::register_component_parser("DemoHud",
+        [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
+            auto* h = obj.add_component<toy::ui::DemoHud>();
+            read(node, "health", h->health);
+            read(node, "health_max", h->health_max);
+            read(node, "stamina", h->stamina);
+            read(node, "stamina_max", h->stamina_max);
+            read(node, "mana", h->mana);
+            read(node, "mana_max", h->mana_max);
+            read(node, "quest_title", h->quest_title);
+            read(node, "quest_step", h->quest_step);
+            read(node, "hotbar_slots", h->hotbar_slots);
+            read(node, "animate", h->animate);
+            read(node, "theme_ref", h->theme_ref);
+            read(node, "font_ref", h->font_ref);
+            read(node, "sort_order", h->sort_order);
+            read(node, "tunables_ref", h->tunables_ref);
+            read(node, "ui_sounds", h->ui_sounds);
+            read(node, "hidden", h->hidden);
+        });
+
+    // The audio demo's control panel: an immediate-mode screen, so the scene names the
+    // component and the panel declares its own widgets per frame.
+    SceneLoader::register_component_parser("AudioDemoPanel",
+        [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
+            auto* p = obj.add_component<toy::audio::AudioDemoPanel>();
+            read(node, "playlist_object", p->playlist_object);
+            read(node, "fade_seconds", p->fade_seconds);
+            read(node, "start_page", p->start_page);
+            read(node, "theme_ref", p->theme_ref);
+            read(node, "font_ref", p->font_ref);
+            read(node, "sort_order", p->sort_order);
+            read(node, "hidden", p->hidden);
+        });
+
     SceneLoader::register_component_parser("HealthDriver",
         [](const fkyaml::node& node, SceneObject& obj, const SceneLoader::ParseContext&) {
             auto* hd = obj.add_component<HealthDriver>();
 
-            read(node, "bar_object", hd->bar_object);
+            read(node, "label", hd->label);
             read(node, "max_health", hd->max_health);
             read(node, "start_health", hd->start_health);
             read(node, "damage_per_second", hd->damage_per_second);
             read(node, "regen_per_second", hd->regen_per_second);
             read(node, "turnaround_fraction", hd->turnaround_fraction);
+            read(node, "show_heal_button", hd->show_heal_button);
+            // The plate it draws itself on.
+            read(node, "theme_ref", hd->theme_ref);
+            read(node, "font_ref", hd->font_ref);
+            read(node, "world_size", hd->world_size);
+            read(node, "pixels_per_unit", hd->pixels_per_unit);
+            read(node, "world_text_supersample", hd->world_text_supersample);
+            read(node, "world_occlude", hd->world_occlude);
+            read(node, "hidden", hd->hidden);
         });
 
     // Free 3D movement for an object that is not a physics body -- typically an invisible

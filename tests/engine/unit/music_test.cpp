@@ -3,11 +3,13 @@
  * @brief MusicPlayer and the music components, rendered offline (no sound card): equal-power
  *        crossfades, playlists handing off on their own near a track's end, push/pop resuming
  *        where the music paused, pause/stop fades, a paused game freezing the music clock, the
- *        scene components (MusicPlaylist carrying a track across scenes, MusicZone, MusicOnSignal,
- *        AudioSourceOnSignal), and the audio_demo's clips and scene.
+ *        scene components (MusicPlaylist carrying a track across scenes, MusicZone), the calls
+ *        the audio panel makes, and the audio_demo's clips and scene.
  */
 
 #include <coopa/testing/test.h>
+
+#include <toyengine/audio/audio_demo_panel.h>
 
 #include <cmath>
 #include <cstdint>
@@ -26,7 +28,6 @@
 #include <toyengine/audio/audio_components.h>
 #include <toyengine/audio/audio_system.h>
 #include <toyengine/audio/music_player.h>
-#include <uicoopa/ui_yaml.h>
 
 #include "engine/support/checks.h"
 
@@ -75,7 +76,6 @@ struct Rig {
         coopa::sfx::SfxResources::instance().set_engine(&audio.engine());
         coopa::sfx::register_sfx_components();
         toy::audio::register_audio_components();
-        coopa::ui::register_ui_components();
         toy::audio::AudioSystem::set_active(&audio);
     }
     ~Rig() {
@@ -272,37 +272,41 @@ COOPA_TEST(music_zone_pushes_while_the_listener_is_inside) {
     expect(rig.music().current() == "base" && rig.music().stack_depth() == 0, "walking out pops back to the scene music");
 }
 
-COOPA_TEST(signal_reactors_drive_music_and_sources) {
+COOPA_TEST(a_panel_drives_music_and_sources_directly) {
+    // What the audio panel's buttons do, exercised as the calls they make. The reactors this
+    // replaced routed the same actions through the event bus by widget name; a panel declared
+    // in code calls the API, so the thing worth testing is the API's end behaviour.
     using namespace music_test;
     Rig rig;
     const std::string a = sine_wav("ra", 420.0f, 8.0f), b = sine_wav("rb", 660.0f, 8.0f);
     coopa::scene::Scene scene = load(
         "scene:\n  root_objects:\n    - name: music\n      components:\n        - type: MusicPlaylist\n"
         "          tracks: [\"" + a + "\", \"" + b + "\"]\n"
-        "    - name: speaker\n      components:\n        - type: AudioSource\n          clip: \"" + a + "\"\n          loop: true\n"
-        "    - name: panel\n      components:\n"
-        "        - {type: MusicOnSignal, listen_object: NextButton, listen_signal: click, action: next, fade: 0.0}\n"
-        "        - {type: MusicOnSignal, listen_object: StopButton, listen_signal: click, action: stop}\n"
-        "        - {type: MusicOnSignal, listen_object: AgainButton, listen_signal: click, action: playlist, target: music}\n"
-        "        - {type: AudioSourceOnSignal, listen_object: SpeakerToggle, listen_signal: value_changed, action: follow, target: speaker}\n");
+        "    - name: speaker\n      components:\n        - type: AudioSource\n          clip: \"" + a + "\"\n          loop: true\n");
     rig.run(0.1f, &scene);
     expect(rig.music().current() == a, "the playlist runs");
-    scene.events().emit("NextButton", "click", {});
-    expect(rig.music().current() == b, "MusicOnSignal next");
-    scene.events().emit("StopButton", "click", {});
-    expect(rig.music().current().empty(), "MusicOnSignal stop");
-    scene.events().emit("AgainButton", "click", {});
-    expect(rig.music().current() == a, "MusicOnSignal playlist restarts the target's MusicPlaylist");
 
+    // Transport, as the Music page's buttons call it.
+    rig.music().next(0.0f);
+    expect(rig.music().current() == b, "Next advances the playlist");
+    rig.music().stop(0.0f);
+    expect(rig.music().current().empty(), "Stop clears it");
+
+    // "Restart playlist" reaches the MusicPlaylist on the named object -- the one lookup the
+    // panel still does, and the one the test should pin down.
+    auto* list = scene.find_object("music")->get_component<toy::audio::MusicPlaylistComponent>();
+    require(list != nullptr, "the playlist component is on the named object");
+    list->play();
+    rig.run(0.1f, &scene);
+    expect(rig.music().current() == a, "Restart playlist starts it over");
+
+    // The Spatial page's toggles read and drive an AudioSource's own state, with no mirror.
     auto* src = scene.find_object("speaker")->get_component<coopa::sfx::components::AudioSource>();
-    coopa::event::EventArgs on;
-    on.set("value", true);
-    scene.events().emit("SpeakerToggle", "value_changed", on);
-    expect(src->is_playing(), "AudioSourceOnSignal follow: a toggle switched on plays the source");
-    coopa::event::EventArgs off;
-    off.set("value", false);
-    scene.events().emit("SpeakerToggle", "value_changed", off);
-    expect(!src->is_playing(), "and switched off stops it");
+    require(src != nullptr, "the speaker has a source");
+    src->play();
+    expect(src->is_playing(), "switching a source on plays it");
+    src->stop();
+    expect(!src->is_playing(), "and off stops it");
 }
 
 COOPA_TEST(music_status_text_describes_the_state) {
@@ -348,7 +352,7 @@ COOPA_TEST(audio_demo_scene_wires_up) {
         std::ifstream f(p);
         return std::string(std::istreambuf_iterator<char>(f), {});
     };
-    const std::string scene = read(dir / "scene.yaml"), panel = read(dir / "ui" / "audio_panel.yaml");
+    const std::string scene = read(dir / "scene.yaml");
     expect(scene.find("type: MusicPlaylist") != std::string::npos && scene.find("type: MusicZone") != std::string::npos,
            "the scene has its playlist and music zone");
     auto values = [](const std::string& text, const std::string& key) {
@@ -365,12 +369,24 @@ COOPA_TEST(audio_demo_scene_wires_up) {
         expect(std::filesystem::exists(assets / c), "clip exists: " + c);
     }
     expect(clips >= 17, "music tracks, beacons, drone, ambience, fire, music box and pings (" + std::to_string(clips) + ")");
-    for (const std::string& n : values(panel, "listen_object: ")) {
-        expect(panel.find("name: " + n + "\n") != std::string::npos || panel.find("{name: " + n + ",") != std::string::npos,
-               "the panel has the widget a reactor listens to: " + n);
+    // The panel is declared in code, so there are no widget names to match up. What still
+    // has to hold is that every object it drives exists: a typo in one of its tables leaves a
+    // button that does nothing, which is the same failure the authored panel could have had.
+    expect(scene.find("type: AudioDemoPanel") != std::string::npos, "the scene carries the panel");
+    for (const toy::audio::AudioDemoPanel::Entry& e : toy::audio::AudioDemoPanel::sources()) {
+        expect(scene.find("- name: " + std::string(e.name) + "\n") != std::string::npos,
+               "the scene has the source the panel toggles: " + std::string(e.name));
     }
-    for (const std::string& t : values(panel, "target: ")) {
-        expect(scene.find("- name: " + t + "\n") != std::string::npos, "the scene has the object a reactor targets: " + t);
+    for (const toy::audio::AudioDemoPanel::Entry& e : toy::audio::AudioDemoPanel::pings()) {
+        expect(scene.find("- name: " + std::string(e.name) + "\n") != std::string::npos,
+               "the scene has the ping the panel plays: " + std::string(e.name));
+    }
+    // And the playlist object the Restart button reaches for.
+    const std::vector<std::string> playlist = values(scene, "playlist_object: ");
+    expect(!playlist.empty(), "the panel names a playlist object");
+    for (const std::string& n : playlist) {
+        expect(scene.find("- name: " + n + "\n") != std::string::npos,
+               "the scene has the playlist object: " + n);
     }
 }
 

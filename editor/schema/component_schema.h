@@ -255,8 +255,6 @@ const SurfaceShaderInfo* find_surface_shader(const std::string& name);
 
 } // namespace toy::editor
 
-#include "ui_schema.h"   // the UI components' schemas (add_ui_schemas()); needs the builders above
-
 namespace toy::editor {
 
 /** @brief The schema table: every built-in schema, plus any register_component_schema() added. */

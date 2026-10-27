@@ -12,6 +12,7 @@
  * paused on to look at.
  */
 
+#include <uicoopa/ui_resources.h>
 #include <coopa/testing/test.h>
 
 #include <algorithm>
@@ -30,7 +31,6 @@
 #include <toyengine/core/engine.h>
 #include <toyengine/core/runtime_paths.h>
 
-#include <uicoopa/ui_yaml.h>
 
 #include "engine/support/checks.h"
 #include "engine/support/render_fixture.h"

@@ -23,45 +23,48 @@ depend on the asset type). World > Weather & Time of Day edits the scene's weath
 | Mesh | mesh viewer: Object / Edit / Sculpt / Vertex Paint / Weight Paint modes | Tool, Mesh (stats, material slots: name, assign faces, preview materials) |
 | Material | lookdev scene (a shader ball by default -- curves, a cutaway with flat hard-edged walls, a square chamfered plinth -- or sphere / rounded cube / plane / cylinder; ground, key / fill / rim + environment, turntable) | the material editor |
 | Texture | the image on a plane (a texture editor is a TODO) | info |
-| UI | the UI designer: the asset's canvas, drawn by the game's own UI pass in a frame the size of a game resolution (Design / Interact) | Canvas (preview, scaling, theme + colour editor), Bindings, the element's Element / Components tabs |
+| UI | the UI workspace: a form over the YAML beside a live preview, drawn by the game's own UI pass at a game resolution (Design / Interact) | the panel's or the screen's properties, and the selected row's or box's |
 
-**The UI designer** (UI tab; `app/ui/ui_canvas.h`). A UI asset is an object asset whose root
-carries a `Canvas` (or, for a reusable widget, none) -- place one in a scene with `prefab: ui/x`
-(drag it into the viewer), or open it at runtime with `toy::ui::open(scene, "ui/x")`.
-- **New UI** (UI tab, +): Blank Canvas, Blank Widget, or a template -- HUD, Main Menu, Pause
-  Menu, Dialog Box, Inventory, Settings (`templates/ui/`, written by `tools/gen_ui_templates.py`).
-  Templates bring `ui/themes/default.yaml` and its fonts along.
+**The UI workspace** (UI tab; `app/ui/ui_canvas.h`). Game UI is drawn in immediate mode, so
+there is no widget tree to click and nothing to link: a screen declares itself from the game's
+state once per frame. What is left to author is data, and this edits that data as labelled
+fields next to the running result. Which editor opens is decided by the **file**:
+
+| File | Editor | What it holds |
+|---|---|---|
+| `ui/<name>.yaml` | **Panel** | A form: tabs of labelled rows, plus a bottom button strip. `toy::ui::PanelScreen` draws it, so a settings screen or pause menu needs no C++. |
+| `ui/<Screen>.tune.yaml` | **Placement** | Where each box a C++ `ImmScreen` declares sits. The filename names the screen, which is how that screen finds the file. |
+
+- **New UI** (UI tab, +): Blank / Settings / Menu **Panel**, or a **Placement** file for any
+  registered screen component (`DemoHud`, `WorldLabel`, `ScreenHint`...).
+- **Panel editor.** The left column lists the current tab's rows; `+` appends one of the eight
+  kinds (label, slider, toggle, int, combo, button, separator, spacer) and the selected row can
+  be moved up/down, duplicated or deleted. The row inspector edits its label, `bind` key,
+  `action`, tooltip, range, `step` and `default`. The panel inspector edits title, theme,
+  anchor, size, offset and `closable` -- and flags any `bind` key that **nothing reads**, which
+  is the one authoring mistake that is invisible at runtime (the row still writes
+  `UserSettings`, so it looks like it works).
+- **Placement editor.** The preview runs the real screen component, which is the only way to
+  learn which boxes it declares -- they appear in the list as it draws them. Each box is edited
+  as numbers: anchor, position and size, applied live through `Tunables::set()`. "Reset to code
+  default" drops the entry so the screen's own values apply again. Save writes the whole set;
+  a box the code has stopped declaring drops out, which is how a rename cleans up.
 - **Preview.** The header picks the game resolution (1080p, 1440p, 4K, ultrawide, handheld,
-  4:3, portrait); the canvas is laid out for it exactly as the game will, then drawn scaled into
-  the frame (`Engine::set_scene_ui_placement`, `CanvasComponent::set_display_zoom`). Wheel /
-  pinch zooms about the cursor, middle or Space drag pans, Home fits, F frames the selection.
-  Safe-area guides, element outlines, Dark / Light / 3D backdrops.
-- **Design.** Click selects (Alt-click cycles through what's under the cursor; Shift adds; drag
-  on empty space box-selects); press-and-drag moves in one gesture. The rect gizmo
-  (`viewport/rect_gizmo.h`): 8 resize handles (Alt from the centre, Shift keeps aspect), four
-  anchor triangles (drag one alone to split them into a stretch), the pivot ring, rotation just
-  outside a corner (Shift: 15 degrees). Snapping (header magnet; Ctrl inverts) to the parent's
-  and siblings' edges and centres with magenta guides, and to a 1-16 px grid. Arrows nudge
-  (Shift: 10 px), [ / ] restack, Shift+D duplicates. Inside a layout group a drag reorders
-  (an insertion line shows where) and resizing sets the element's LayoutElement size. Every
-  edit is one undo step; rect edits patch the live RectTransform (`ChangeScope::Rect`).
-- **Widgets palette** (left, under the asset list) and **Shift+A**: themed composites (Panel,
-  Text, Button, Window, Dialog, Menu List, Tab View, Setting rows, Health / Stamina / Mana bars,
-  Hotbar, Item Grid, Message Log, Button Prompts...), pre-wired primitives (Slider, Progress
-  Bar), layout containers, and reactors. Click adds to the selection (or the canvas); drag onto
-  the frame or an outliner row to place it there. UI assets nest the same way (widget prefabs).
-- **Element tab.** Unity's anchor-preset picker (Shift also sets the pivot, Alt snaps the
-  position), then Position / Size -- or Left / Right / Top / Bottom on a stretched axis --
-  anchors, pivot, rotation, scale, Z order, hittable.
-- **Bindings tab.** Every name game code reaches (`coopa::ui::UiHandle`): buttons and their
-  `click`, sliders' `value_changed`, bars for `bind_bar`, grids for `bind_inventory`...,
-  duplicate names flagged; "Copy C++ Binding Stub" writes the calls to the clipboard.
-- **Interact** (header play button, Tab or F5; Esc returns): the canvas runs -- hover, press,
-  sliders, tabs, dialogs -- and every named signal is echoed to the Console. Back in Design the
-  canvas is rebuilt from the document.
+  4:3, portrait) and the panel is placed into the frame by the engine exactly as the game draws
+  it (`Engine::set_scene_ui_placement`). Wheel zooms about the cursor, middle or Space drag
+  pans, Home fits. Dark / light / scene backdrops.
+- **Interact** (header pointer button, or Tab): the preview takes the pointer, so a slider
+  really slides and a button really fires its action.
 
-In the scene view a scene's screen-space UI is drawn on the rendered image (not over the editor),
-and is laid out and drawn while editing, not only in Play.
+There is deliberately **no canvas gizmo, no picking and no snapping**: a design surface plus
+the object/component linking it implies is the part of a conventional UI designer that earns its
+complexity only when the UI is a retained tree. Anything a row list cannot express is a C++
+`ImmScreen` (`toyengine/ui/README.md`), placed from this tab.
+
+In a scene view an authored interface stays **out of the way until the scene runs** --
+`EditorApp::update_scene_ui_placement_()` turns the preview off everywhere except this
+workspace, and a non-simulating scene never ticks a screen's `update()`. A level is built by
+looking at the level.
 
 Edit / Sculpt Mode on a scene object edits the **mesh asset itself**: its MeshRenderer's mesh,
 or, for a water object, its WaterBody's.

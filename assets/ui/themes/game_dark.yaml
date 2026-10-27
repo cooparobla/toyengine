@@ -1,0 +1,91 @@
+# game_dark -- the default look for a game's own interface, on the immediate-mode layer.
+#
+# The widget Style below (metrics + colors) is what every panel, button, slider and field
+# reads; the sections after it (bars, slots, feedback, world) are the roles only a game knows
+# the meaning of -- see toyengine/ui/game_theme.h.
+#
+# Sized for a game rather than a tool: a HUD is read at a glance from across a desk, so the
+# font and rows are larger than the editor's and the corners softer. Edit freely, or start a
+# variant from this one with `inherits: game_dark`.
+#
+# (assets/ui/themes/{default,blender,unity}.yaml are the OLDER retained-widget themes, a
+# different schema entirely. They go when the retained layer does.)
+name: Game Dark
+author: toyengine
+description: Default game interface theme -- dark slate with a warm accent
+
+font: ../../fonts/inter_regular.ttf
+
+metrics:
+  font_size: 17
+  row_height: 30
+  padding: 10
+  spacing: 6
+  indent: 18
+  label_ratio: 0.52
+  scrollbar: 9
+  rounding: 6
+  tooltip_delay: 0.5
+
+colors:
+  window_bg:     "#0a0c10"      # behind everything
+  panel_bg:      "#141821ee"    # a panel's body; slightly translucent so the world reads through
+  panel_alt:     "#0f1218ee"    # alternating rows, disabled fills
+  header:        "#1e2531"      # title bars
+  header_hover:  "#27303f"
+  subpanel:      "#191e28"
+  border:        "#2c3444"
+  text:          "#e8e9ec"
+  text_dim:      "#9aa1ad"
+  text_disabled: "#5c636f"
+  accent:        "#f0b35c"      # the warm highlight a HUD picks out with
+  button:        "#232b38"
+  button_hover:  "#2d3747"
+  button_active: "#39465a"
+  field:         "#0f131a"      # bar tracks, input backgrounds
+  field_hover:   "#161b24"
+  number:        "#0f131a"
+  number_hover:  "#161b24"
+  selection:     "#f0b35c"
+  selection_dim: "#f0b35c66"
+  row_hover:     "#ffffff0d"
+  popup_bg:      "#161b24f7"
+  scroll_grab:   "#39465a"
+  separator:     "#2c3444"
+  shadow:        "#00000080"
+  modal_dim:     "#00000099"
+  check_mark:    "#f0b35c"
+  warning:       "#e8b14c"
+  error:         "#d9534f"
+
+# --- game roles (toy::ui::GameTheme) ------------------------------------------------------
+
+bars:
+  health:       "#d1504b"
+  mana:         "#4f7fd4"
+  stamina:      "#6ac46a"
+  shield:       "#93aec4"
+  experience:   "#d8b44f"
+  damage_trail: "#d1504b8c"   # held where the value just dropped from
+
+slots:
+  empty:     "#0f131aee"
+  filled:    "#1a202b"
+  hover:     "#2d3747"
+  selected:  "#f0b35c"
+  key_label: "#9aa1ad"
+  cooldown:  "#0000008c"
+
+feedback:
+  damage:   "#ef5b5b"
+  healing:  "#70d17f"
+  critical: "#f8b33b"
+  miss:     "#aab0bb"
+  notice:   "#8cbbf5"
+
+world:
+  plate_bg:   "#0a0d12c7"
+  plate_text: "#f0f0ed"
+  hostile:    "#e0554b"
+  friendly:   "#70c77a"
+  neutral:    "#d6c775"

@@ -29,7 +29,7 @@
  *
  * @code
  * toy::core::SceneLoadOptions opts;
- * opts.transition = toy::core::SceneTransition::loading_screen_ui("ui/loading_screen");
+ * opts.transition = toy::core::SceneTransition::loading_screen_ui("ui/themes/game_dark");
  * auto load = engine.load_scene_async("scenes/level_2", opts);
  * load.on_complete([](coopa::scene::Scene& s) { ... });   // runs once the new scene is live
  * @endcode
@@ -52,7 +52,6 @@
 
 #include <coopa/scene/scene_loader.h>
 #include <coopa/scene/scene_system.h>
-#include <uicoopa/binding/ui_handle.h>
 #include <uicoopa/immediate/imm_canvas.h>
 
 
@@ -67,13 +66,20 @@ struct SceneTransition {
     enum class Kind {
         None,           ///< The new scene simply replaces the old one when it is ready.
         Fade,           ///< Fade to `color`, swap, fade back in.
-        LoadingScreen,  ///< Fade to `color`, show the `loading_screen` UI until ready, fade in.
+        LoadingScreen,  ///< Fade to `color`, show a loading screen until ready, fade in.
     };
     Kind        kind = Kind::Fade;
     glm::vec3   color{0.0f};
     float       fade_out = 0.35f;   ///< Seconds to cover the old scene.
     float       fade_in = 0.35f;    ///< Seconds to uncover the new one.
-    std::string loading_screen;     ///< UI asset ("ui/loading_screen") for Kind::LoadingScreen.
+    /**
+     * @brief Theme the Kind::LoadingScreen screen is styled with ("ui/themes/game_dark").
+     *
+     * The screen itself is drawn in code (SceneTransitionLayer), so this only picks its look.
+     * Non-empty is what asks for a screen at all; one that names no readable theme still
+     * draws, in the built-in style.
+     */
+    std::string loading_screen;
 
     static SceneTransition none();
     static SceneTransition fade(float seconds = 0.35f, glm::vec3 color = glm::vec3(0.0f));
@@ -239,8 +245,8 @@ private:
 
 /**
  * @class SceneTransitionLayer
- * @brief The engine overlay scene a transition draws in: a full-rect colour fill (an
- *        immediate canvas) under an optional loading-screen UI asset.
+ * @brief The engine overlay scene a transition draws in: a colour fill and, over it, an
+ *        optional loading screen -- both declared per frame in one immediate canvas.
  */
 class SceneTransitionLayer {
 public:
@@ -251,23 +257,42 @@ public:
     void set_fade(const glm::vec3& color, float alpha);
     float alpha() const { return alpha_; }
 
-    /** @brief Spawns the loading-screen UI asset `ref` into the layer. False if it failed. */
+    /**
+     * @brief Starts drawing the loading screen, styled by the theme `ref` names.
+     *
+     * Always succeeds: a theme that cannot be read leaves the built-in style, because
+     * the one thing a loading screen must never do is fail to appear. The bool is kept
+     * for callers that still branch on it.
+     */
     bool show_loading_screen(const std::string& ref);
-    /** @brief Destroys the loading screen at the end of the layer's next late_update(). */
+    /** @brief Stops drawing the loading screen from the next frame. */
     void hide_loading_screen();
-    bool loading_screen_visible() const { return ui_root_ != nullptr; }
-    coopa::ui::UiHandle loading_screen() const { return coopa::ui::UiHandle(ui_root_); }
+    bool loading_screen_visible() const { return loading_visible_; }
 
-    /** @brief Fills the loading screen's `progress` bar (0..1) and `status` text, if it has them. */
+    /** @brief Sets the bar (0..1) and the line of text under it. */
     void update_loading_screen(float progress, const std::string& status);
+
+    /** @brief Heading above the bar. Empty draws none. */
+    std::string title = "Loading";
 
     /** @brief Destroys the scene (before the fonts and the device it draws with go away). */
     void release();
 
 private:
+    void draw_fade_(coopa::ui::imm::Context& ctx);
+    void draw_loading_screen_(coopa::ui::imm::Context& ctx);
+
     std::unique_ptr<coopa::scene::Scene> scene_;
     coopa::ui::ImmediateCanvas* canvas_ = nullptr;
-    coopa::scene::SceneObject*  ui_root_ = nullptr;
+    /// Drawn by the canvas's own callback, so there is nothing to spawn and nothing to
+    /// destroy -- which is why hide_loading_screen() takes effect on the next frame rather
+    /// than at the end of a late_update().
+    bool        loading_visible_ = false;
+    float       progress_ = 0.0f;
+    std::string status_;
+    /// The look, from the theme show_loading_screen() was given. Default-constructed if it
+    /// named none, which is a legible screen rather than an invisible one.
+    coopa::ui::imm::Style loading_style_;
     glm::vec3 color_{0.0f};
     float     alpha_ = 0.0f;
 };

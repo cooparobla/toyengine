@@ -15,13 +15,9 @@
 #include <glm/glm.hpp>
 
 #include <toyengine/core/engine.h>
-#include <uicoopa/binding/ui_handle.h>
-#include <uicoopa/widgets/button.h>
-#include <uicoopa/widgets/collapsible_panel.h>
 #include <uicoopa/layout/layout_element.h>
 #include <toyengine/weather/weather_system.h>
 #include <toyengine/world/snow_system.h>
-#include <uicoopa/builder/theme_scope.h>
 #include <coopa/animation/animator.h>
 
 #include <toyengine/env/env_preset.h>
@@ -231,7 +227,7 @@ COOPA_TEST(each_preset_puts_its_own_environment_in_the_field) {
            "gather skips an EnvInfluence whose object is inactive");
 }
 
-COOPA_TEST(a_button_click_switches_the_preset_and_replays_it) {
+COOPA_TEST(selecting_a_preset_switches_and_replays_it) {
     // What the panel actually promises, and what no test covered before: the bar's buttons
     // exist under the names the switcher listens for, a click on one switches, and switching
     // REPLAYS the preset rather than resuming it mid-cycle.
@@ -243,25 +239,25 @@ COOPA_TEST(a_button_click_switches_the_preset_and_replays_it) {
     tick_frames(engine, 30);
 
     auto* sw = engine.scene().find_first_component<toy::env::EnvPresetSwitcher>();
-    require(sw != nullptr, "buttons: the switcher is in the scene");
+    require(sw != nullptr, "presets: the switcher is in the scene");
 
-    // 1. Every button the switcher listens for was actually built by the panel, under that
-    //    exact name -- the name IS the event-bus channel, so a typo silently does nothing.
+    // 1. Every preset is addressable and selectable. The switcher draws its own list now, so
+    //    there is no widget name to typo -- what can still go wrong is a preset that cannot be
+    //    reached, or one whose row would be blank.
+    expect(!sw->presets.empty(), "presets: the switcher has some");
     for (const auto& preset : sw->presets) {
-        if (preset.button.empty()) continue;
-        coopa::scene::SceneObject* o = engine.scene().find_object(preset.button);
-        expect(o != nullptr, "buttons: the panel built '" + preset.button + "'");
-        if (o) {
-            expect(coopa::ui::UiHandle(o).find<coopa::ui::Button>(preset.button) != nullptr,
-                   "buttons: '" + preset.button + "' carries a Button");
-        }
+        expect(!preset.name.empty(), "presets: every preset is named");
+        expect(!(preset.label.empty() && preset.name.empty()),
+               "presets: every preset has something to draw on its row");
+        expect(sw->select_by_name(preset.name), "presets: '" + preset.name + "' can be selected");
     }
 
-    // 2. A click switches. This is exactly what Button::on_pointer_click publishes.
-    engine.scene().events().emit("BtnVent", "click");
+    // 2. Selecting switches. The panel's list reports the row it was given and the switcher
+    //    applies it -- the same call a click makes, with no widget name in between.
+    sw->select_by_name("vent");
     tick_frames(engine, 2);
     expect(sw->selected() >= 0 && sw->presets[static_cast<std::size_t>(sw->selected())].name == "vent",
-           "buttons: clicking BtnVent selects the vent preset");
+           "presets: clicking BtnVent selects the vent preset");
 
     // 3. Exactly one preset subtree is live at a time.
     int live = 0;
@@ -271,56 +267,47 @@ COOPA_TEST(a_button_click_switches_the_preset_and_replays_it) {
             if (o->active()) ++live;
         }
     }
-    expect(live == 1, "buttons: exactly one preset subtree is active (" + std::to_string(live) + ")");
+    expect(live == 1, "presets: exactly one preset subtree is active (" + std::to_string(live) + ")");
 
-    // No button may LOOK selected except the live one. The panel shipped with two buttons
-    // stuck in the theme's Primary role, which reads as two active presets at once.
-    int tinted = 0;
-    for (const auto& preset : sw->presets) {
-        if (preset.button.empty()) continue;
-        coopa::scene::SceneObject* o = engine.scene().find_object(preset.button);
-        if (!o) continue;
-        if (auto* b = coopa::ui::UiHandle(o).find<coopa::ui::Button>(preset.button)) {
-            if (b->colors.normal == coopa::ui::theme_for(o).button_primary.normal) ++tinted;
-        }
-    }
-    expect(tinted == 1,
-           "buttons: exactly one button is highlighted (" + std::to_string(tinted) + ") -- a "
-           "button's authored style must never imply selection");
+    // Exactly one preset is live, and the switcher knows which. The panel draws the outline
+    // from this index, so "two look selected at once" -- the bug the authored version had,
+    // where two buttons were stuck in the theme's Primary role -- is no longer expressible.
+    expect(sw->selected() >= 0 && sw->selected() < static_cast<int>(sw->presets.size()),
+           "presets: the live index is in range (" + std::to_string(sw->selected()) + ")");
 
     // 4. A preset authored `active: false` has never had its components started -- an inactive
     //    object is skipped by SceneObject::start() and set_active() does not run it later. The
     //    switcher must start it on first activation, or the preset is inert.
-    engine.scene().events().emit("BtnSwing", "click");
+    sw->select_by_name("swing");
     tick_frames(engine, 20);
     coopa::scene::SceneObject* swing = engine.scene().find_object("preset_swing");
-    require(swing != nullptr, "buttons: the swing preset exists");
+    require(swing != nullptr, "presets: the swing preset exists");
     auto* animator = swing->get_component<coopa::anim::Animator>();
-    require(animator != nullptr, "buttons: it has an Animator");
+    require(animator != nullptr, "presets: it has an Animator");
     expect(animator->is_playing(),
-           "buttons: activating a preset STARTS it -- an authored-off subtree is never started "
+           "presets: activating a preset STARTS it -- an authored-off subtree is never started "
            "by the scene, so without this its animation never runs");
     const float advanced = animator->time();
-    expect(advanced > 0.0f, "buttons: and the clip is advancing");
+    expect(advanced > 0.0f, "presets: and the clip is advancing");
 
     // 5. Switching away and back REPLAYS from the beginning.
-    engine.scene().events().emit("BtnCalm", "click");
+    sw->select_by_name("calm");
     tick_frames(engine, 10);
-    engine.scene().events().emit("BtnSwing", "click");
+    sw->select_by_name("swing");
     tick_frames(engine, 1);
     expect(animator->time() < advanced,
-           "buttons: re-selecting a preset replays it from the start rather than resuming where "
+           "presets: re-selecting a preset replays it from the start rather than resuming where "
            "it was left (" + std::to_string(animator->time()) + " vs " + std::to_string(advanced) + ")");
 
-    // Clicking the preset that is ALREADY live replays it too -- the button is a "play again"
-    // control, not a dead one, so it must not be disabled or early-outed.
+    // Selecting the preset that is ALREADY live replays it too -- the row is a "play again"
+    // control, not a dead one, so it must not early-out on "already selected".
     tick_frames(engine, 20);
     const float before_reclick = animator->time();
-    expect(before_reclick > 0.0f, "buttons: the clip advanced before the re-click");
-    engine.scene().events().emit("BtnSwing", "click");
+    expect(before_reclick > 0.0f, "presets: the clip advanced before the re-click");
+    sw->select_by_name("swing");
     tick_frames(engine, 1);
     expect(animator->time() < before_reclick,
-           "buttons: clicking the LIVE preset replays it (" + std::to_string(animator->time()) +
+           "presets: clicking the LIVE preset replays it (" + std::to_string(animator->time()) +
            " vs " + std::to_string(before_reclick) + ")");
 }
 
@@ -408,50 +395,6 @@ COOPA_TEST(a_local_source_lays_snow_with_no_snowfall) {
            "snow: ...and bare ground beyond it");
 }
 
-COOPA_TEST(the_panel_folds_and_unfolds_without_losing_itself) {
-    // The Collapsible composite had never been used from YAML. It leaves expanded_extent at -1,
-    // and CollapsiblePanel never writes a negative extent -- so without the new key the first
-    // fold would shrink the panel to its header and the unfold would have nothing to restore.
-    ScopedEnv fixed_dt("FIXED_DT", "0.016666667");
-    ScopedEnv no_input("NO_INPUT", "1");
-    toy::core::AppConfig config = make_test_config(k_env_demo, 640, 360, 640, 360);
-    config.render.transparency_enabled = true;
-    toy::core::Engine engine(std::move(config));
-    tick_frames(engine, 40);
-
-    coopa::scene::SceneObject* dock = engine.scene().find_object("Environment");
-    require(dock != nullptr, "panel: the Collapsible's authored object is in the scene");
-    auto* panel = coopa::ui::UiHandle(dock).find<coopa::ui::CollapsiblePanel>("Environment");
-    require(panel != nullptr, "panel: it built a CollapsiblePanel");
-    expect(panel->is_expanded(), "panel: it starts open");
-
-    auto* le = dock->get_component<coopa::ui::LayoutElement>();
-    require(le != nullptr, "panel: the composite put a LayoutElement on the authored object");
-    const float open_h = le->preferred_size.y;
-    expect(open_h > 100.0f, "panel: open, it is a panel rather than a strip (" +
-           std::to_string(open_h) + ")");
-
-    panel->collapse();
-    tick_frames(engine, 4);
-    expect(!panel->is_expanded(), "panel: it folds");
-    expect(le->preferred_size.y < open_h * 0.5f, "panel: folding shrinks it to its header");
-
-    panel->expand();
-    tick_frames(engine, 4);
-    expect(panel->is_expanded(), "panel: it unfolds");
-    expect_near(le->preferred_size.y, open_h, 1.0f,
-                "panel: unfolding restores its full height (" + std::to_string(le->preferred_size.y) +
-                " vs " + std::to_string(open_h) + ") -- this is the expanded_extent fix");
-
-    // Every preset is still reachable afterwards: a fold must not orphan the buttons.
-    auto* sw = engine.scene().find_first_component<toy::env::EnvPresetSwitcher>();
-    require(sw != nullptr, "panel: the switcher is there");
-    for (const auto& preset : sw->presets) {
-        if (preset.button.empty()) continue;
-        expect(engine.scene().find_object(preset.button) != nullptr,
-               "panel: '" + preset.button + "' survived the fold");
-    }
-}
 
 COOPA_TEST(a_scene_with_no_influences_packs_none) {
     // The no-regression guard: every scene that predates this feature must pack zero sources,

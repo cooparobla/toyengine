@@ -9,7 +9,6 @@
 #include <coopa/scene/scene.h>
 #include <sfxcoopa/components/audio_listener.h>
 #include <sfxcoopa/components/audio_source.h>
-#include <uicoopa/widgets/text.h>
 
 #include <cstdio>
 
@@ -22,23 +21,18 @@ std::string volume_setting_key(const std::string& bus) {
     return k;
 }
 
-void VolumeBinding::update(float) {
+bool set_bus_volume_persisted(const std::string& bus, float linear) {
     AudioSystem* audio = AudioSystem::active();
-    if (!audio || !owner) return;
-    if (!slider_) {
-        // A SettingRow builds its Slider when it starts, so look until one exists.
-        auto sliders = owner->get_components_in_children<coopa::ui::Slider>();
-        if (sliders.empty()) return;
-        slider_ = sliders.front();
-        last_ = audio->bus_volume(bus);
-        slider_->set_value(last_, false);
-        return;
-    }
-    const float v = slider_->value();
-    if (std::fabs(v - last_) < 1e-4f) return;
-    last_ = v;
-    audio->set_bus_volume(bus, v);
-    core::UserSettings::instance().set_float(volume_setting_key(bus), v);
+    if (!audio || !audio->set_bus_volume(bus, linear)) return false;
+    core::UserSettings::instance().set_float(volume_setting_key(bus), linear);
+    return true;
+}
+
+float bus_volume_persisted(const std::string& bus) {
+    AudioSystem* audio = AudioSystem::active();
+    const float live = audio ? audio->bus_volume(bus) : 1.0f;
+    // A player who has never touched it gets what the mix ships with, not a zero.
+    return core::UserSettings::instance().get_float(volume_setting_key(bus), live);
 }
 
 // --- MusicPlaylist ---------------------------------------------------------------------------
@@ -121,47 +115,6 @@ void MusicZone::update(float) {
     }
 }
 
-// --- MusicOnSignal / AudioSourceOnSignal -----------------------------------------------------
-
-void MusicOnSignal::on_signal(const coopa::event::EventArgs&) {
-    AudioSystem* audio = AudioSystem::active();
-    if (!audio) return;
-    MusicPlayer& m = audio->music();
-    if (action == "play") m.play(track, fade);
-    else if (action == "playlist") {
-        coopa::scene::SceneObject* obj = resolve_target();
-        if (auto* list = obj ? obj->get_component<MusicPlaylistComponent>() : nullptr) list->play();
-    } else if (action == "push") m.push(track, fade);
-    else if (action == "pop") m.pop(fade);
-    else if (action == "next") m.next(fade);
-    else if (action == "previous") m.previous(fade);
-    else if (action == "stop") m.stop(fade);
-    else if (action == "pause") m.pause(fade < 0.0f ? 0.5f : fade);
-    else if (action == "resume") m.resume(fade < 0.0f ? 0.5f : fade);
-    else if (action == "toggle_pause") {
-        if (m.paused()) m.resume(fade < 0.0f ? 0.5f : fade);
-        else m.pause(fade < 0.0f ? 0.5f : fade);
-    }
-}
-
-void AudioSourceOnSignal::on_signal(const coopa::event::EventArgs& args) {
-    coopa::scene::SceneObject* obj = resolve_target();
-    auto* src = obj ? obj->get_component<coopa::sfx::components::AudioSource>() : nullptr;
-    if (!src) return;
-    if (action == "play") src->play();
-    else if (action == "stop") src->stop();
-    else if (action == "pause") src->pause();
-    else if (action == "resume") src->resume();
-    else if (action == "toggle") {
-        if (src->is_playing()) src->stop();
-        else src->play();
-    } else if (action == "follow") {
-        const bool on = args.get<bool>("value", !src->is_playing());
-        if (on && !src->is_playing()) src->play();
-        else if (!on) src->stop();
-    }
-}
-
 // --- MusicStatusText -------------------------------------------------------------------------
 
 namespace {
@@ -183,14 +136,6 @@ std::string MusicStatusText::describe(const MusicPlayer& music) {
     return s;
 }
 
-void MusicStatusText::update(float) {
-    AudioSystem* audio = AudioSystem::active();
-    auto* txt = owner ? owner->get_component<coopa::ui::Text>() : nullptr;
-    if (!audio || !txt) return;
-    const std::string s = prefix + describe(audio->music());
-    if (txt->text != s) txt->text = s;
-}
-
 namespace {
 std::string str_or(const fkyaml::node& n, const char* key, const std::string& fallback) {
     return n.contains(key) && n.at(key).is_string() ? n.at(key).get_value<std::string>() : fallback;
@@ -205,20 +150,9 @@ float float_or(const fkyaml::node& n, const char* key, float fallback) {
 bool bool_or(const fkyaml::node& n, const char* key, bool fallback) {
     return n.contains(key) && n.at(key).is_boolean() ? n.at(key).get_value<bool>() : fallback;
 }
-void parse_reactor(const fkyaml::node& n, coopa::ui::SignalReactor& r) {
-    r.listen_object = str_or(n, "listen_object", r.listen_object);
-    r.listen_signal = str_or(n, "listen_signal", r.listen_signal);
-    r.once = bool_or(n, "once", r.once);
-    r.target = str_or(n, "target", r.target);
-}
 }
 
 void register_audio_components() {
-    coopa::scene::SceneLoader::register_component_parser(
-        "VolumeBinding", [](const fkyaml::node& node, coopa::scene::SceneObject& obj, const coopa::scene::SceneLoader::ParseContext&) {
-            auto* vb = obj.add_component<VolumeBinding>();
-            if (node.contains("bus") && node.at("bus").is_string()) vb->bus = node.at("bus").get_value<std::string>();
-        });
     coopa::scene::SceneLoader::register_component_parser(
         "MusicPlaylist", [](const fkyaml::node& node, coopa::scene::SceneObject& obj, const coopa::scene::SceneLoader::ParseContext&) {
             auto* mp = obj.add_component<MusicPlaylistComponent>();
@@ -251,25 +185,6 @@ void register_audio_components() {
             if (node.contains("size")) z->size = scene::parse_vec3(node.at("size"), z->size);
             z->radius = float_or(node, "radius", z->radius);
             z->fade = float_or(node, "fade", z->fade);
-        });
-    coopa::scene::SceneLoader::register_component_parser(
-        "MusicOnSignal", [](const fkyaml::node& node, coopa::scene::SceneObject& obj, const coopa::scene::SceneLoader::ParseContext&) {
-            auto* r = obj.add_component<MusicOnSignal>();
-            parse_reactor(node, *r);
-            r->action = str_or(node, "action", r->action);
-            r->track = str_or(node, "track", r->track);
-            r->fade = float_or(node, "fade", r->fade);
-        });
-    coopa::scene::SceneLoader::register_component_parser(
-        "AudioSourceOnSignal", [](const fkyaml::node& node, coopa::scene::SceneObject& obj, const coopa::scene::SceneLoader::ParseContext&) {
-            auto* r = obj.add_component<AudioSourceOnSignal>();
-            parse_reactor(node, *r);
-            r->action = str_or(node, "action", r->action);
-        });
-    coopa::scene::SceneLoader::register_component_parser(
-        "MusicStatusText", [](const fkyaml::node& node, coopa::scene::SceneObject& obj, const coopa::scene::SceneLoader::ParseContext&) {
-            auto* m = obj.add_component<MusicStatusText>();
-            m->prefix = str_or(node, "prefix", m->prefix);
         });
 }
 

@@ -2,7 +2,7 @@
  * @file audio_test.cpp
  * @brief The engine's AudioSystem over sfxcoopa, rendered offline (no sound card): AudioSources
  *        play through the SFX bus, play_on_start waits for simulation, one-shots and stop_all,
- *        the camera is the listener, and VolumeBinding ties a slider to a bus and the player's
+ *        the camera is the listener, and a bus volume is remembered for the player's
  *        settings.
  */
 
@@ -21,7 +21,6 @@
 #include <toyengine/audio/audio_components.h>
 #include <toyengine/audio/audio_system.h>
 #include <toyengine/core/user_settings.h>
-#include <uicoopa/ui_yaml.h>
 
 #include "engine/support/checks.h"
 
@@ -147,15 +146,18 @@ COOPA_TEST(volume_binding_drives_bus_and_settings) {
     const std::filesystem::path file = coopa::test::scratch_dir("volume_binding") / "settings.yaml";
     toy::core::UserSettings::instance().load(file);
     rig.audio.set_bus_volume(toy::audio::k_bus_music, 0.7f);
-    coopa::scene::SceneObject obj("MusicRow");
-    auto* slider = obj.add_component<coopa::ui::Slider>();
-    auto* vb = obj.add_component<toy::audio::VolumeBinding>();
-    vb->bus = toy::audio::k_bus_music;
-    vb->update(0.016f);
-    expect(vb->slider() == slider && std::fabs(slider->value() - 0.7f) < 1e-4f, "the slider starts at the bus's volume");
-    slider->set_value(0.25f, false);
-    vb->update(0.016f);
-    expect_near(rig.audio.bus_volume(toy::audio::k_bus_music), 0.25f, 1e-4f, "moving the slider sets the bus");
-    expect_near(toy::core::UserSettings::instance().get_float("audio.music", -1.0f), 0.25f, 1e-4f, "and remembers it for the player");
+
+    // A control reads the remembered value, which falls back to the mix's own when the player
+    // has never touched it -- not to zero, which would start every game silent.
+    expect_near(toy::audio::bus_volume_persisted(toy::audio::k_bus_music), 0.7f, 1e-4f,
+                "an untouched bus reads its shipped volume");
+
+    expect(toy::audio::set_bus_volume_persisted(toy::audio::k_bus_music, 0.25f), "the bus accepts it");
+    expect_near(rig.audio.bus_volume(toy::audio::k_bus_music), 0.25f, 1e-4f, "setting it moves the bus");
+    expect_near(toy::core::UserSettings::instance().get_float("audio.music", -1.0f), 0.25f, 1e-4f,
+                "and remembers it for the player");
+    expect_near(toy::audio::bus_volume_persisted(toy::audio::k_bus_music), 0.25f, 1e-4f,
+                "which is what the control reads next time");
+
     toy::core::UserSettings::instance().load(coopa::test::scratch_dir() / "no_such_settings.yaml");   // leave nothing dirty behind
 }

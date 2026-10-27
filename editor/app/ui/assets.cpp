@@ -1025,19 +1025,29 @@ void AssetsPanel::draw_new_asset_items_(imm::Context& ctx, AssetType t) {
     }
     if (t == AssetType::UI) {
         const auto tags = app_.new_asset_tags_;
-        if (ctx.menu_item("Blank Canvas", "", nullptr, true, I::UiCanvas)) app_.guarded_([this, tags] { with_tags_(tags, [&] { app_.ui_canvas_panel_->new_ui_asset("new_ui", "blank"); }); });
-        ctx.tooltip("Blank Canvas\nA screen-space canvas (HUD, menu, screen) scaled from 1920 x 1080");
-        app_.test_rects_["asset_new:Blank Canvas"] = ctx.last_rect();
-        if (ctx.menu_item("Blank Widget", "", nullptr, true, I::UiWidget)) app_.guarded_([this, tags] { with_tags_(tags, [&] { app_.ui_canvas_panel_->new_ui_asset("new_widget", "widget"); }); });
-        ctx.tooltip("Blank Widget\nA reusable piece (an item slot, a quest entry) placed inside other UI");
+        // Two kinds of UI file. A PANEL is a form -- tabs of labelled rows -- that
+        // PanelScreen draws with no C++. A PLACEMENT file says where a C++ screen's boxes sit.
+        if (ctx.menu_item("Blank Panel", "", nullptr, true, I::UiCanvas)) app_.guarded_([this, tags] { with_tags_(tags, [&] { app_.ui_canvas_panel_->new_ui_asset("new_panel", "blank"); }); });
+        ctx.tooltip("Blank Panel\nA screen of labelled rows, drawn by PanelScreen -- no C++ needed");
+        app_.test_rects_["asset_new:Blank Panel"] = ctx.last_rect();
         const auto templates = app_.ui_canvas_panel_->ui_templates();
-        if (!templates.empty()) ctx.menu_separator();
         for (const auto& tpl : templates) {
+            if (tpl == "blank") continue;
             std::string label = tpl;
             for (char& c : label) if (c == '_') c = ' ';
             if (!label.empty()) label[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(label[0])));
-            if (ctx.menu_item(label, "", nullptr, true, I::UiWidget)) app_.guarded_([this, tpl, tags] { with_tags_(tags, [&] { app_.ui_canvas_panel_->new_ui_asset(tpl, tpl); }); });
-            ctx.tooltip(label + "\nStart from the " + label + " template (editor/templates/ui/" + tpl + ".yaml)");
+            if (ctx.menu_item(label + " Panel", "", nullptr, true, I::UiCanvas)) app_.guarded_([this, tpl, tags] { with_tags_(tags, [&] { app_.ui_canvas_panel_->new_ui_asset(tpl, tpl); }); });
+            ctx.tooltip(label + " Panel\nA panel pre-filled with the usual " + tpl + " rows");
+        }
+
+        // One entry per ImmScreen component the engine registers: the file is named after the
+        // screen, which is how that screen finds it.
+        const auto screens = toy::editor::UiCanvasPanel::screen_types();
+        if (!screens.empty()) ctx.menu_separator();
+        for (const auto& type : screens) {
+            if (ctx.menu_item(type + " Placement", "", nullptr, true, I::Move)) app_.guarded_([this, type, tags] { with_tags_(tags, [&] { app_.ui_canvas_panel_->new_placement_asset(type); }); });
+            ctx.tooltip(type + " Placement\nWhere " + type +
+                        "'s panels sit (" + type + ".tune.yaml), edited as numbers beside a live preview");
         }
         return;
     }

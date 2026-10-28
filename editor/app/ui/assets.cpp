@@ -448,7 +448,12 @@ void AssetsPanel::open_asset_now_(AssetType t, const fs::path& abs) {
         case AssetType::Mesh: app_.open_mesh(abs); break;
         case AssetType::Material: app_.open_material(abs); break;
         case AssetType::Texture: open_texture(abs); break;
-        case AssetType::UI: app_.ui_canvas_panel_->open_ui_asset(abs); break;
+        // Switching the view is what every other asset type's open_* does for itself; a panel
+        // asset has to do it here, or the workspace never opens and the preview paints over
+        // whichever workspace the editor was actually in.
+        case AssetType::UI:
+            if (app_.ui_canvas_panel_->open_ui_asset(abs)) app_.set_view_(AssetType::UI);
+            break;
         case AssetType::Theme: app_.theme_editor_panel_->open_theme(abs); break;
         case AssetType::Audio: open_audio(abs); break;
         default: app_.log_info(abs.string()); break;

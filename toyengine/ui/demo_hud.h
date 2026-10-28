@@ -5,7 +5,7 @@
  * The shape a game's own HUD takes, and the one to copy when writing one. Every panel comes
  * from the composite vocabulary (`ctx.stat_bar`, `ctx.hotbar`, `ctx.message_log`,
  * `ctx.prompt_bar`) and is positioned through `tune()`, so where each sits is a sidecar
- * `assets/ui/DemoHud.tune.yaml` a designer can drag rather than a number recompiled.
+ * `assets/ui/demo_hud.tune.yaml` someone can edit rather than a number recompiled.
  *
  * It owns its own numbers, because it is a demo. A real HUD reads the player's model instead:
  * replace the fields below with pointers to it and delete nothing else.

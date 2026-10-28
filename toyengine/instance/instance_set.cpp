@@ -402,7 +402,7 @@ std::shared_ptr<InstanceSetData> InstanceSetStore::acquire(const std::string& pa
 
 bool InstanceSetStore::save(InstanceSetData& data) {
     for (auto& [key, entry] : entries_) {
-        if (entry.data.get() != &data || key.empty()) continue;
+        if (entry.data.get() != &data || key.empty() || !entry.persistent) continue;
         if (!data.save(key)) return false;
         entry.mtime = mtime_of(key);
         return true;
@@ -413,7 +413,7 @@ bool InstanceSetStore::save(InstanceSetData& data) {
 int InstanceSetStore::save_dirty() {
     int n = 0;
     for (auto& [key, entry] : entries_) {
-        if (!entry.data->unsaved() || key.empty()) continue;
+        if (!entry.data->unsaved() || key.empty() || !entry.persistent) continue;
         if (entry.data->save(key)) {
             entry.mtime = mtime_of(key);
             ++n;
@@ -424,7 +424,39 @@ int InstanceSetStore::save_dirty() {
 
 bool InstanceSetStore::any_dirty() const {
     for (const auto& [key, entry] : entries_) {
-        if (!key.empty() && entry.data->unsaved()) return true;
+        if (!key.empty() && entry.persistent && entry.data->unsaved()) return true;
+    }
+    return false;
+}
+
+std::shared_ptr<InstanceSetData> InstanceSetStore::adopt_transient(const std::string& key) {
+    for (auto& [existing, entry] : entries_) {
+        if (existing != key) continue;
+        // An existing persistent entry is NOT silently downgraded: that would be a painted set
+        // quietly losing its ability to save because a graph picked a colliding name.
+        if (!entry.persistent) return entry.data;
+        return nullptr;
+    }
+    auto data = std::make_shared<InstanceSetData>();
+    Entry entry;
+    entry.data       = data;
+    entry.persistent = false;   // Never loaded from, never written to, disk.
+    entries_.emplace_back(key, std::move(entry));
+    return data;
+}
+
+bool InstanceSetStore::forget(const std::string& key) {
+    for (auto it = entries_.begin(); it != entries_.end(); ++it) {
+        if (it->first != key) continue;
+        entries_.erase(it);
+        return true;
+    }
+    return false;
+}
+
+bool InstanceSetStore::is_transient(const std::string& key) const {
+    for (const auto& [existing, entry] : entries_) {
+        if (existing == key) return !entry.persistent;
     }
     return false;
 }

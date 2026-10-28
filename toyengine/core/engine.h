@@ -783,6 +783,8 @@ public:
 
     /** @brief A scene settings block's `weather` mapping (null if it has none). */
     static fkyaml::node weather_node_(const fkyaml::node& settings);
+    /// @brief The `procgraph` block of a scene's settings, or an empty node.
+    static fkyaml::node procgraph_node_(const fkyaml::node& settings);
 
     /**
      * @brief A scene's `scene.settings.loading` block as SceneLoadOptions.

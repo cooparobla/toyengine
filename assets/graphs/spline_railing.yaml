@@ -1,0 +1,71 @@
+# A railing built along an authored object: posts at even intervals between two scene markers,
+# with a rail spanning them. Moving either marker re-bakes the railing, which is the scene-input
+# claim made visible.
+name: spline_railing
+inputs:
+  - id: start
+    type: Object
+    label: Start marker
+  - id: end
+    type: Object
+    label: End marker
+  - id: posts
+    type: Int
+    label: Posts
+    default: 6
+    min: 2
+    max: 40
+  - id: height
+    type: Float
+    label: Height
+    default: 1.0
+    min: 0.2
+    max: 3.0
+outputs:
+  - id: object
+    type: ObjectSpec
+nodes:
+  - id: 1
+    type: GroupInput
+    pos: [-640, 0]
+  - id: 10
+    type: ObjectInfo
+    pos: [-460, -120]
+  - id: 11
+    type: ObjectInfo
+    pos: [-460, 120]
+
+  - id: 20
+    type: LinePoints
+    pos: [-260, 0]
+  - id: 30
+    type: InstanceOnPoints
+    pos: [-80, 0]
+    props: { kind: mesh }
+  - id: 31
+    type: String
+    pos: [-260, -160]
+    props: { value: props/procgraph_post }
+
+  - id: 40
+    type: MakeInstancer
+    pos: [120, 80]
+  - id: 50
+    type: ObjectOutput
+    pos: [320, 0]
+    props: { name: Railing }
+  - id: 99
+    type: GroupOutput
+    pos: [500, 0]
+links:
+  - [1, start, 10, object]
+  - [1, end, 11, object]
+  - [10, position, 20, start]
+  - [11, position, 20, end]
+  - [1, posts, 20, count]
+  - [20, points, 30, points]
+  - [31, value, 30, prototype]
+  - [30, instances, 40, instances]
+  - [30, instances, 50, geometry]
+  - [40, component, 50, components, 0]
+  - [50, object, 99, object]

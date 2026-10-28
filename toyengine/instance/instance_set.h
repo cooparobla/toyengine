@@ -247,10 +247,37 @@ public:
     /** @brief Forgets everything (a scene change). */
     void clear();
 
+    /**
+     * @brief A live, **non-persistent** set under `key`, created empty if it does not exist.
+     *
+     * For a set a system generates rather than a person paints -- `toyengine/procgraph/` bakes
+     * one per graph. The entry is marked non-persistent, which is what keeps `save_dirty()` and
+     * `any_dirty()` from writing a generated set out as a real `.instances` file: they skip only
+     * empty keys otherwise, and a generated set needs a non-empty key for its painter component
+     * to find it.
+     *
+     * Calling it again with the same key returns the same set, so a re-bake refills the set the
+     * painter already points at rather than orphaning it.
+     */
+    std::shared_ptr<InstanceSetData> adopt_transient(const std::string& key);
+
+    /** @brief Drops one entry, by key. Returns whether there was one. */
+    bool forget(const std::string& key);
+
+    /** @brief Whether `key` names a non-persistent (system-generated) set. */
+    bool is_transient(const std::string& key) const;
+
 private:
     struct Entry {
         std::shared_ptr<InstanceSetData> data;
         std::int64_t mtime = 0;
+        /**
+         * @brief False for a generated set: never read from or written to disk.
+         *
+         * The save paths test this rather than the key, because a generated set must still HAVE a
+         * key (its painter component references one) while never becoming a file.
+         */
+        bool persistent = true;
     };
     std::vector<std::pair<std::string, Entry>> entries_;
 };

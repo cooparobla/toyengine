@@ -8,7 +8,7 @@
 #    rotation instead of turning to face the camera. Compare the two as the camera orbits.
 #  * Hero           -- a retained nameplate canvas of THEMED widgets (ThemedText, StatBar).
 #  * hud            -- DemoHud: the screen-space HUD, drawn over the finished frame at full
-#    window resolution. Its panels are positioned through assets/ui/DemoHud.tune.yaml.
+#    window resolution. Its panels are positioned through assets/ui/demo_hud.tune.yaml.
 #  * camera         -- auto-orbits (`auto_rotate_deg_per_sec`), which makes the two billboard
 #    modes visible without touching the mouse. Mouse look is off (`mouse_sensitivity: 0.0`) and
 #    the cursor is NOT captured, so the pointer is free to hover and click the world-space UI

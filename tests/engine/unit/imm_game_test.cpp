@@ -509,6 +509,8 @@ COOPA_TEST(world_immediate_canvas_hosts_an_imm_pass_and_hit_tests_through_the_ra
  */
 COOPA_TEST(tab_moves_focus_in_declaration_order_and_wraps) {
     Harness h;
+    // Opt-in: a Context with a keymap of its own (the editor) leaves this off.
+    h.ctx.keyboard_focus = true;
     auto three = [](Context& c) {
         c.button("one", Box{10.0f, 10.0f, 80.0f, 24.0f});
         c.button("two", Box{10.0f, 40.0f, 80.0f, 24.0f});
@@ -550,6 +552,8 @@ COOPA_TEST(tab_moves_focus_in_declaration_order_and_wraps) {
 /** @brief Enter and Space activate the focused widget, so a form needs no mouse. */
 COOPA_TEST(enter_and_space_activate_the_focused_widget) {
     Harness h;
+    // Opt-in: a Context with a keymap of its own (the editor) leaves this off.
+    h.ctx.keyboard_focus = true;
     int one_hits = 0, two_hits = 0;
     auto two = [&](Context& c) {
         if (c.button("one", Box{10.0f, 10.0f, 80.0f, 24.0f})) ++one_hits;
@@ -576,6 +580,8 @@ COOPA_TEST(enter_and_space_activate_the_focused_widget) {
 /** @brief Clicking moves focus, so Tab continues from wherever the pointer left off. */
 COOPA_TEST(clicking_a_widget_moves_focus_to_it) {
     Harness h;
+    // Opt-in: a Context with a keymap of its own (the editor) leaves this off.
+    h.ctx.keyboard_focus = true;
     auto two = [](Context& c) {
         c.button("one", Box{10.0f, 10.0f, 80.0f, 24.0f});
         c.button("two", Box{10.0f, 40.0f, 80.0f, 24.0f});

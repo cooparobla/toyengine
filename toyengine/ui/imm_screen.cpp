@@ -134,6 +134,11 @@ void ImmScreen::ensure_canvas_() {
 
     // `hidden` is checked here rather than by the caller so toggling it takes effect on the
     // next frame with no rebuild: the callback stays installed and simply declares nothing.
+    // Game UI is reachable without a mouse: Tab walks the widgets, Enter/Space activates.
+    // Opt-in per Context, because a host with its own keymap (the editor binds Tab and Enter)
+    // must not have those keys taken from it.
+    canvas_->context().keyboard_focus = true;
+
     canvas_->on_draw = [tok = alive_](coopa::ui::imm::Context& ctx) {
         ImmScreen* self = *tok;
         if (self && !self->hidden) self->draw(ctx);
@@ -169,7 +174,7 @@ void ImmScreen::ensure_canvas_() {
                      type_name().c_str(), font_want.empty() ? k_default_font : font_want.c_str());
     }
 
-    tunables_.load(tunables_ref.empty() ? "ui/" + type_name() : tunables_ref);
+    tunables_.load(tunables_ref.empty() ? "ui/" + tune_file_stem(type_name()) : tunables_ref);
 
 #ifdef UICOOPA_HAS_AUDIO
     // UI cues, wired once for the whole screen: the layer reports what a widget just did and

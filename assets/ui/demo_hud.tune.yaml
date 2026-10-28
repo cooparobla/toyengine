@@ -1,5 +1,8 @@
 # DemoHud placement -- the worked example of a .tune.yaml.
 #
+# The file name is the screen type in snake_case, like every other asset in the tree
+# (compare meshes/nature/boulder.lod.yaml): DemoHud -> demo_hud.tune.yaml.
+#
 # A C++ screen states its own default for every box it draws:
 #
 #   tune().box(ctx, "vitals", Anchor::TopLeft, {24, 24}, {300, 76})

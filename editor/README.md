@@ -33,7 +33,7 @@ fields next to the running result. Which editor opens is decided by the **file**
 | File | Editor | What it holds |
 |---|---|---|
 | `ui/<name>.yaml` | **Panel** | A form: tabs of labelled rows, plus a bottom button strip. `toy::ui::PanelScreen` draws it, so a settings screen or pause menu needs no C++. |
-| `ui/<Screen>.tune.yaml` | **Placement** | Where each box a C++ `ImmScreen` declares sits. The filename names the screen, which is how that screen finds the file. |
+| `ui/<screen_name>.tune.yaml` | **Placement** | Where each box a C++ `ImmScreen` declares sits. The filename is the screen's type name in snake_case (`DemoHud` -> `demo_hud.tune.yaml`), which is how that screen finds the file. |
 
 - **New UI** (UI tab, +): Blank / Settings / Menu **Panel**, or a **Placement** file for any
   registered screen component (`DemoHud`, `WorldLabel`, `ScreenHint`...).

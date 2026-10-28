@@ -24,7 +24,8 @@ panel asset and needs no C++. Anything else — a HUD, a hotbar, a transport dec
 ## Conventions
 
 - **Ask for boxes through `tune()`.** `tune().box(ctx, "health", Anchor::TopLeft, {24,24}, {300,28})`
-  costs the same as computing one inline, and it is what lets a `ui/<Screen>.tune.yaml` move or
+  costs the same as computing one inline, and it is what lets a `ui/<screen_name>.tune.yaml`
+  (the type name in snake_case) move or
   resize the panel without a rebuild — the file holds only what someone changed. It also
   declares the box by name, which is what the editor's Placement tab lists.
 - **Colours come from `theme()`**, not literals. A role earns a place in `GameTheme` when more

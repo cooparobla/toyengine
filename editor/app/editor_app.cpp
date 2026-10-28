@@ -1500,6 +1500,12 @@ void EditorApp::push_particle_gizmos_() {
 }
 
 void EditorApp::update_scene_ui_placement_() {
+    // The workspace's preview is an engine overlay layer, and the engine draws those every
+    // frame until something removes them. Driving it from here -- the one place that already
+    // runs every frame and already knows which workspace is showing -- means "is the panel on
+    // screen" has a single owner, and no open/close path can leave one painted over the scene.
+    ui_canvas_panel_->set_preview_visible(active_type_ == AssetType::UI);
+
     // The UI designer is the one place an interface is previewed on purpose, so it is the one
     // place that asks for it. Everywhere else an authored HUD stays out of the way until the
     // scene actually runs: a level is built by looking at the level.

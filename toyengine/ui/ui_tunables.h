@@ -61,6 +61,16 @@ struct Tunable {
     glm::vec2 size{100.0f, 24.0f};
 };
 
+/**
+ * @brief The file-name spelling of a screen's type name: "DemoHud" -> "demo_hud".
+ *
+ * Every other asset in the tree is snake_case (`pause_menu.yaml`, `boulder.lod.yaml`), so a
+ * placement file is too. Shared rather than duplicated because both sides have to agree: the
+ * screen derives the file it looks for from its own type name, and the editor derives the
+ * screen from the file's name.
+ */
+std::string tune_file_stem(std::string_view type_name);
+
 /** @brief Spelling of an Anchor in a tunables file ("TopLeft"); empty for an unknown value. */
 const char* anchor_name(coopa::ui::imm::Anchor a);
 

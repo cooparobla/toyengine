@@ -107,7 +107,8 @@ a `ComponentSchema`) -- see `CLAUDE.md`'s component chain. Worked examples:
 `toyengine/ui/demo_hud.h`, `toyengine/audio/audio_demo_panel.h`.
 
 **Ask for boxes through `tune()`**, not inline: it costs the same, and it is what lets
-`assets/ui/<Screen>.tune.yaml` move or resize the panel without a rebuild. It also declares the
+`assets/ui/<screen_name>.tune.yaml` (the type name in snake_case, like every other asset) move
+or resize the panel without a rebuild. It also declares the
 box by name, which is what the editor's **Placement** tab lists -- open that file and each box
 is an anchor, a position and a size beside a live preview. The code default is the real layout;
 the file holds only what someone changed.

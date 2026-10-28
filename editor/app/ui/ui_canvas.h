@@ -59,7 +59,7 @@ public:
     /**
      * @brief Which editor the workspace is showing. The FILE decides, not a toggle.
      *
-     * `ui/settings.yaml` is a panel asset and opens the row editor; `ui/DemoHud.tune.yaml` is
+     * `ui/settings.yaml` is a panel asset and opens the row editor; `ui/demo_hud.tune.yaml` is
      * a placement file for the `DemoHud` screen and opens the box editor. Both are forms over
      * YAML beside a live preview -- there is no canvas to click, and nothing to link.
      */
@@ -80,7 +80,7 @@ public:
     /** @brief The ImmScreen component keys the Placement editor can open, from the schemas. */
     static std::vector<std::string> screen_types();
 
-    /** @brief Creates `<Screen>.tune.yaml` for a screen type and opens it. */
+    /** @brief Creates `<screen_name>.tune.yaml` (snake_case) for a screen type and opens it. */
     bool new_placement_asset(const std::string& screen_type);
 
     /** @brief True while a panel asset is open. */
@@ -153,6 +153,17 @@ public:
     /** @brief Releases the preview scene, before the device goes away. */
     void release();
 
+    /**
+     * @brief Attaches or detaches the preview's overlay layer.
+     *
+     * Driven every frame from `EditorApp::update_scene_ui_placement_()` with "is the UI
+     * workspace showing", so whether the panel is drawn is a pure function of where the editor
+     * is -- not of whether a file was once opened. The engine holds overlay layers NON-OWNING
+     * and draws them every frame until something removes them, so attaching on open and
+     * detaching only on teardown leaves the panel painted over every later workspace.
+     */
+    void set_preview_visible(bool on);
+
     /** @brief Moves the selected row by `delta`, duplicates it, or removes it. */
     void move_row_(int delta);
     void duplicate_row_();
@@ -160,6 +171,12 @@ public:
 
     /** @brief The screen whose boxes Placement mode is editing, or null. */
     toy::ui::ImmScreen* placed_screen() const { return placed_; }
+
+    /** @brief The PanelScreen drawing the open panel asset, or null. */
+    toy::ui::PanelScreen* panel_screen() const { return screen_; }
+
+    /** @brief Whether the attached preview layer is taking the pointer. */
+    bool preview_takes_input() const { return preview_attached_ && preview_input_; }
 
     /** @brief Which row the Panel editor has selected, or -1. */
     int selected_row_index() const { return row_; }
@@ -211,6 +228,11 @@ private:
 
     // --- the preview ---
     std::unique_ptr<coopa::scene::Scene> preview_;
+    /// Whether `preview_` is currently registered as an engine overlay layer.
+    bool preview_attached_ = false;
+    /// Whether the attached layer was added as interactive. The engine reads the LAYER's own
+    /// input flag (Engine::overlay_layer_placement_), so changing Interact has to re-add it.
+    bool preview_input_ = false;
     toy::ui::PanelScreen* screen_ = nullptr;
     /// Placement mode: the screen component whose tune() is being edited.
     toy::ui::ImmScreen* placed_ = nullptr;

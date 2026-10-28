@@ -85,8 +85,31 @@ void UiCanvasPanel::release() {
     placed_ = nullptr;
     // The engine holds overlay layers NON-OWNING and updates them every frame
     // (Engine::add_overlay_layer's contract), so the layer has to go before the Scene does.
-    if (preview_) app_.engine_.remove_overlay_layer(preview_.get());
+    if (preview_ && preview_attached_) app_.engine_.remove_overlay_layer(preview_.get());
+    preview_attached_ = false;
     preview_.reset();
+}
+
+void UiCanvasPanel::set_preview_visible(bool on) {
+    if (!preview_) {
+        // Nothing built yet. Staying false means the next call once it exists will attach it.
+        preview_attached_ = false;
+        return;
+    }
+    // The INPUT flag is the layer's own: Engine::overlay_layer_placement_() reads it, not the
+    // placement handed to set_scene_ui_placement(). Added unconditionally true, a full-screen
+    // preview (DemoHud spans the display rect) claimed the pointer whether or not Interact was
+    // on, and swallowed every click meant for the editor. Re-adding a scene updates its entry,
+    // so tracking what was last applied is enough to keep it in step with the toggle.
+    if (on == preview_attached_ && (!on || ui_interact_ == preview_input_)) return;
+    if (on) {
+        app_.engine_.add_overlay_layer(preview_.get(), 90, /*in_display_rect=*/true,
+                                       /*input=*/ui_interact_);
+        preview_input_ = ui_interact_;
+    } else {
+        app_.engine_.remove_overlay_layer(preview_.get());
+    }
+    preview_attached_ = on;
 }
 
 bool UiCanvasPanel::ui_mode() const { return open_ && app_.active_type_ == AssetType::UI; }
@@ -139,12 +162,18 @@ bool UiCanvasPanel::open_ui_asset(const std::filesystem::path& path) {
     if (is_placement_file(path)) {
         std::string stem = path.filename().string();
         stem.resize(stem.size() - std::string(k_tune_suffix).size());
-        const std::vector<std::string> types = screen_types();
-        if (std::find(types.begin(), types.end(), stem) == types.end()) {
-            app_.log_error(app_.project_.relative(path) + ": no UI screen component named '" +
+        // The file is snake_case like every other asset; the component key it names is not.
+        // Both sides go through tune_file_stem(), so they cannot disagree about the spelling.
+        std::string screen;
+        for (const std::string& type : screen_types()) {
+            if (toy::ui::tune_file_stem(type) == stem) { screen = type; break; }
+        }
+        if (screen.empty()) {
+            app_.log_error(app_.project_.relative(path) + ": no UI screen component matches '" +
                            stem + "'");
             return false;
         }
+        stem = screen;
         try {
             doc_ = ss.str().empty() ? Node::mapping() : Node::deserialize(ss.str());
         } catch (const std::exception& e) {
@@ -209,9 +238,9 @@ bool UiCanvasPanel::new_placement_asset(const std::string& screen_type) {
     const std::filesystem::path dir = app_.project_.assets() / "ui";
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
-    // The name IS the binding: <Screen>.tune.yaml is what that screen looks for, so there is
+    // The name IS the binding: <screen_name>.tune.yaml is what that screen looks for, so there is
     // no "which screen is this for" field to get wrong.
-    const std::filesystem::path path = dir / (screen_type + k_tune_suffix);
+    const std::filesystem::path path = dir / (toy::ui::tune_file_stem(screen_type) + k_tune_suffix);
     if (!std::filesystem::exists(path, ec)) {
         std::ofstream(path) << "# Where " << screen_type
                             << "'s panels sit. Empty means every box keeps the placement its\n"
@@ -316,7 +345,14 @@ UiCanvasPanel::Node* UiCanvasPanel::selected_row_() {
 // =====================================================================================
 
 void UiCanvasPanel::ensure_preview_() {
-    if (preview_) return;
+    // A preview built for the OTHER editor cannot be reused. A Placement preview runs the real
+    // screen component and has no PanelScreen to push a document into, so reusing it left that
+    // screen drawing while the panel never appeared -- "the DemoHud one remains". Checking the
+    // component the current mode needs is what makes every open path safe, rather than relying
+    // on each one to remember to rebuild.
+    const bool usable = preview_ && (mode_ == Mode::Placement ? placed_ != nullptr
+                                                              : screen_ != nullptr);
+    if (usable) return;
     rebuild_preview_();
 }
 
@@ -356,7 +392,9 @@ void UiCanvasPanel::rebuild_preview_() {
         preview_->adopt(*raw);
         preview_->start();
     }
-    app_.engine_.add_overlay_layer(preview_.get(), 90, /*in_display_rect=*/true, /*input=*/true);
+    // Deliberately NOT attached here. Attachment is owned by one per-frame call --
+    // set_preview_visible(), from EditorApp::update_scene_ui_placement_() -- so there is exactly
+    // one answer to "should this be on screen", and no open/close path can leak a layer.
 }
 
 void UiCanvasPanel::ui_refresh_preview_() {
@@ -428,9 +466,11 @@ void UiCanvasPanel::draw_ui_header_(imm::Context& ctx, const Box& b) {
     const bool placement = mode_ == Mode::Placement;
     ctx.icon(placement ? I::Move : I::UiCanvas, {b.x + 6, b.y + 5, b.h - 10, b.h - 10},
              ctx.style.text_dim);
-    // A placement file's stem is "<Screen>.tune", which reads better as the screen's name.
-    std::string stem = path_.empty() ? std::string("UI") : path_.stem().string();
-    if (placement && stem.size() > 5 && stem.rfind(".tune") == stem.size() - 5) stem.resize(stem.size() - 5);
+    // A placement file's stem is "demo_hud.tune"; the screen's own type name reads better.
+    // `path_.stem()` of "demo_hud.tune.yaml" is "demo_hud.tune"; show the screen it places.
+    std::string stem = path_.empty() ? std::string("UI")
+                                     : (placement && !screen_type_.empty() ? screen_type_
+                                                                           : path_.stem().string());
     const std::string name = stem + (dirty_ ? " *" : "");
     ctx.text_in({b.x + b.h + 2, b.y, 220, b.h}, name, ctx.style.text, 0.0f);
     if (placement) {

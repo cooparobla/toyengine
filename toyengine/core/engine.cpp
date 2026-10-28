@@ -54,6 +54,9 @@
 #include <toyengine/env/env_system.h>
 #include <toyengine/fire/fire_system.h>
 #include <toyengine/particles/particle_yaml.h>
+#include <toyengine/procgraph/procedural_graph.h>
+#include <toyengine/procgraph/procedural_graph_system.h>
+#include <toyengine/procgraph/nodes.h>
 #include <toyengine/instance/instance_painter.h>
 #include <toyengine/instance/instance_painter_system.h>
 #include <toyengine/weather/weather_reactor.h>
@@ -180,6 +183,12 @@ Engine::Engine(AppConfig config, EngineOptions options)
     // burns across its own surface, and the click that lights it. A purely visual fire is a
     // particle prefab (objects/props/campfire), not a component.
     fire::register_fire_components();
+    // "ProceduralGraph" (toyengine/procgraph/): a node graph baked into an object subtree. Its
+    // socket types, node library and scene-input resolvers register alongside the parser, because
+    // a graph cannot be compiled -- let alone parsed meaningfully -- before any of them exist.
+    procgraph::register_procgraph_components();
+    procgraph::register_procgraph_nodes();
+    procgraph::register_builtin_input_resolvers();
     // "InstancePainter" (toyengine/instance/): brush-placed instances of object assets, drawn
     // as instanced meshes. Its records live in a `.instances` file beside the scene, not here.
     instance::register_instance_components(assets_);
@@ -540,6 +549,20 @@ void Engine::prepare_scene_(coopa::scene::Scene& scene, bool drain_assets) {
     // Order 62: painted instances -- builds their chunks against ground the two terrain systems
     // above have just finished, and streams their colliders before Physics (100) reconciles.
     instance::install_instance_painter_system(scene, &assets_);
+    // Order 63: procedural graphs -- bakes a node graph into an object subtree. After the terrain
+    // systems (60/61) so a graph can sample ground, and before Physics (100) so a collider it
+    // emits is stepped the same frame. Its `bake: on_load` graphs hold the loading screen via
+    // warm_up_state(), which is why being after the painter (62) costs nothing.
+    {
+        auto it = scene_settings_.find(&scene);
+        const fkyaml::node settings = it != scene_settings_.end() ? it->second : fkyaml::node();
+        procgraph::ProceduralGraphSystem* pgs = procgraph::install_procgraph_system(
+            scene, &assets_, &ctx_.device(), &ctx_.allocator(), procgraph_node_(settings));
+        if (pgs != nullptr) {
+            pgs->set_asset_roots(asset_roots());
+            pgs->set_scene_path(scene_path(scene));
+        }
+    }
     // Order 70: destruction -- fractures breakable meshes on the job engine and spawns a
     // chunk body per cell. Before Physics (100), so a chunk born this frame falls this frame.
     scene::install_destruction_system(scene, ctx_.device(), ctx_.allocator(), assets_, &jobs_);

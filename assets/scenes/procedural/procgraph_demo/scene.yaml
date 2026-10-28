@@ -1,0 +1,175 @@
+# procgraph_demo -- toyengine/procgraph/ end to end. Every element makes one claim checkable.
+#
+#   * STAIR_A/B/C: ONE graph (graphs/parametric_stair) at three input sets, so a graph is a
+#     parameterized asset rather than a baked file.
+#   * MARKER_LIGHTS: a graph that emits NO geometry at all -- only components, at authored
+#     markers. This is why the system is a node-graph -> SCENE-graph converter and not
+#     "geometry nodes".
+#   * RAILING: built between two authored marker objects. Move RailStart or RailEnd and it
+#     re-bakes, which is the scene-input contract made visible.
+#
+# Meshes and the lamp prefab: tools/gen_procgraph_demo.py.  Run: ./build/toyengine procgraph_demo
+# World: Z up, metres.
+scene:
+  scene_name: procgraph_demo
+  settings:
+    procgraph:
+      variables:
+        demo.scale: 1.0
+    render:
+      ambient_intensity: 0.9
+  root_objects:
+    - name: camera
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -16.0, z: 10.0 }
+          rotation: { x: 62.0, y: 0.0, z: 0.0 }
+        - type: Camera
+          main: true
+          projection: Perspective
+          fov: 60.0
+      children: []
+
+    - name: sun
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.0 }
+        - type: DirectionalLight
+          direction: { x: -0.45, y: 0.6, z: -0.65 }
+          color: { r: 1.0, g: 0.96, b: 0.9 }
+          intensity: 2.0
+          cast_shadows: true
+      children: []
+
+    - name: ground
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.0 }
+          scale: { x: 40.0, y: 40.0, z: 1.0 }
+        - type: MeshRenderer
+          mesh_path: plane
+          material: { albedo: { r: 0.28, g: 0.30, b: 0.27 }, roughness: 0.9 }
+        - type: BoxCollider
+          size: { x: 40.0, y: 40.0, z: 0.2 }
+      children: []
+
+    # --- One graph, three input sets ------------------------------------------------------
+    - name: Stair_A
+      active: true
+      components:
+        - type: Transform
+          position: { x: -6.0, y: 0.0, z: 0.0 }
+        - type: ProceduralGraph
+          graph: graphs/parametric_stair
+          seed: 1
+          bake: on_load
+          inputs:
+            steps: 5
+            rise: 0.18
+            run: 0.30
+            width: 1.4
+      children: []
+
+    - name: Stair_B
+      active: true
+      components:
+        - type: Transform
+          position: { x: -2.0, y: 0.0, z: 0.0 }
+        - type: ProceduralGraph
+          graph: graphs/parametric_stair
+          seed: 1
+          bake: on_load
+          inputs:
+            steps: 9
+            rise: 0.14
+            run: 0.26
+            width: 1.4
+      children: []
+
+    - name: Stair_C
+      active: true
+      components:
+        - type: Transform
+          position: { x: 2.0, y: 0.0, z: 0.0 }
+        - type: ProceduralGraph
+          graph: graphs/parametric_stair
+          seed: 1
+          bake: on_load
+          inputs:
+            steps: 14
+            rise: 0.10
+            run: 0.22
+            width: 1.4
+      children: []
+
+    # --- A graph that emits no geometry ---------------------------------------------------
+    - name: Markers
+      active: true
+      components:
+        - type: Transform
+          position: { x: 8.0, y: 0.0, z: 0.0 }
+      children:
+        - name: Marker_0
+          active: true
+          components:
+            - type: Transform
+              position: { x: 0.0, y: 0.0, z: 0.0 }
+          children: []
+        - name: Marker_1
+          active: true
+          components:
+            - type: Transform
+              position: { x: 2.0, y: 2.0, z: 0.0 }
+          children: []
+        - name: Marker_2
+          active: true
+          components:
+            - type: Transform
+              position: { x: 4.0, y: -1.0, z: 0.0 }
+          children: []
+
+    - name: MarkerLights
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.0 }
+        - type: ProceduralGraph
+          graph: graphs/marker_lights
+          bake: on_change
+          inputs:
+            markers: { children_of: Markers }
+            intensity: 6.0
+      children: []
+
+    # --- A graph driven by authored markers -----------------------------------------------
+    - name: RailStart
+      active: true
+      components:
+        - type: Transform
+          position: { x: -6.0, y: 7.0, z: 0.0 }
+      children: []
+
+    - name: RailEnd
+      active: true
+      components:
+        - type: Transform
+          position: { x: 4.0, y: 7.0, z: 0.0 }
+      children: []
+
+    - name: Railing
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.0 }
+        - type: ProceduralGraph
+          graph: graphs/spline_railing
+          bake: on_change
+          inputs:
+            start: { object: RailStart }
+            end: { object: RailEnd }
+            posts: 8
+            height: 1.0
+      children: []

@@ -142,6 +142,11 @@ fkyaml::node Engine::weather_node_(const fkyaml::node& settings) {
     return fkyaml::node();
 }
 
+fkyaml::node Engine::procgraph_node_(const fkyaml::node& settings) {
+    if (settings.is_mapping() && settings.contains("procgraph")) return settings.at("procgraph");
+    return fkyaml::node();
+}
+
 
 void Engine::WeatherRenderBase::capture(const render::ToyRenderConfig& c) {
     cloud_coverage = c.cloud_coverage;

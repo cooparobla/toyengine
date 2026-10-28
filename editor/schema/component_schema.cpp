@@ -1393,6 +1393,25 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             // mesh, and a placeholder entry naming neither is a component the engine refuses to
             // load. Add Component then Prototypes > Add is the path.
             const Node prototypes_default = Node::sequence();
+            // toyengine/procgraph/: a node graph baked into an object subtree. There is
+            // deliberately no `collider`/`output` row -- what a graph produces is decided by the
+            // nodes in it, so those keys do not exist on the component. `inputs` is free-form and
+            // validated against the graph's own interface, which is why it is a raw node here
+            // rather than a typed row list.
+            add({"ProceduralGraph", "World", {
+                with_tip(f_asset("graph", "graphs", ".yaml", true, false),
+                         "The graph asset to bake. Its own inputs appear under `inputs`"),
+                with_tip(f_int("seed", 0, 0, 1000000, true),
+                         "Seeds every random node, so a bake is repeatable. Change it for a "
+                         "different arrangement of the same graph"),
+                with_tip(f_enum("bake", {"on_load", "on_change", "manual"}, true),
+                         "on_load bakes once during warm-up; on_change re-bakes whenever a bound "
+                         "input moves (a few transform reads a frame); manual only on request"),
+                with_tip(f_bool("refresh_on_asset_change", false),
+                         "Re-bake when the graph file changes on disk. Useful while authoring; "
+                         "a shipped game leaves it off"),
+            }});
+
             add({"InstancePainter", "World", {
                 with_tip(f_string("data", ""),
                          "The `.instances` file holding the painted records (scene-relative); "

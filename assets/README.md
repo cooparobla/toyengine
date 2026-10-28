@@ -242,7 +242,7 @@ Anything a row list cannot express -- a HUD, a hotbar, an inventory, a nameplate
 `toy::ui::ImmScreen` subclass instead (`toyengine/ui/README.md`), which is a single `draw()`
 override. The engine ships `DemoHud`, `WorldLabel`, `ScreenHint` and `PanelScreen`.
 
-### Placement overrides -- `ui/<Screen>.tune.yaml`
+### Placement overrides -- `ui/<screen_name>.tune.yaml`
 
 A C++ screen states a default box for each panel it draws. An entry here overrides that
 default by name, so a HUD can be moved and resized without touching the `.cpp`:
@@ -255,7 +255,7 @@ vitals:
 ```
 
 `pos` is in UI space (+Y **down**) and moves the box, not the anchor, so a right- or
-bottom-pinned panel insets with a negative component. `ui/DemoHud.tune.yaml` is the worked
+bottom-pinned panel insets with a negative component. `ui/demo_hud.tune.yaml` is the worked
 example. Every key is optional; a missing file just means the code defaults are used.
 
 ### UI themes -- `ui/themes/<name>.yaml`

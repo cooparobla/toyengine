@@ -70,6 +70,24 @@ std::string resolve_path(const std::string& ref) {
 
 }  // namespace
 
+std::string tune_file_stem(std::string_view type_name) {
+    std::string out;
+    out.reserve(type_name.size() + 4);
+    for (size_t i = 0; i < type_name.size(); ++i) {
+        const char c = type_name[i];
+        if (c >= 'A' && c <= 'Z') {
+            // A boundary is a capital that follows a lower-case letter or digit ("DemoHud" ->
+            // "demo_hud"), so a run of capitals stays together ("HUDPanel" -> "hud_panel").
+            const bool prev_lower = i > 0 && !(type_name[i - 1] >= 'A' && type_name[i - 1] <= 'Z');
+            if (prev_lower) out += '_';
+            out += static_cast<char>(c - 'A' + 'a');
+        } else {
+            out += c;
+        }
+    }
+    return out;
+}
+
 const char* anchor_name(Anchor a) {
     for (const AnchorName& e : k_anchors) {
         if (e.a == a) return e.name;

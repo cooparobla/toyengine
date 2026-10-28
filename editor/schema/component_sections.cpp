@@ -225,6 +225,18 @@ void apply_component_sections(std::map<std::string, ComponentSchema>& table) {
             .keys({"cast_shadows", "view_distance", "shadow_distance", "patch_resolution"}).closed().done(),
     });
 
+    layout("ProceduralGraph", {
+        sec("Graph", "World")
+            .says("A node graph baked into this object's children. What it PRODUCES -- geometry, "
+                  "lights, colliders, instances -- is decided by the nodes in the graph, not by "
+                  "settings here.")
+            .keys({"graph", "seed"}).done(),
+        sec("Baking", "Play")
+            .says("When it re-runs. A bake happens off the frame on a worker thread, so a "
+                  "re-bake never hitches.")
+            .keys({"bake", "refresh_on_asset_change"}).done(),
+    });
+
     layout("InstancePainter", {
         // A live count and the way into Instance Paint Mode, drawn by the painter panel: as with
         // the terrain, painting is the thing a user opened this inspector to do.

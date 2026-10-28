@@ -1,0 +1,49 @@
+# A graph that emits NO geometry at all: a Light and an AudioSource at every authored marker.
+# This is the clearest demonstration that `ProceduralGraph` is a node-graph -> scene-graph
+# converter rather than a mesh generator -- there is not one primitive node in it.
+name: marker_lights
+inputs:
+  - id: markers
+    type: ObjectSet
+    label: Markers
+  - id: intensity
+    type: Float
+    label: Intensity
+    default: 3.0
+    min: 0.0
+    max: 20.0
+outputs:
+  - id: object
+    type: ObjectSpec
+nodes:
+  - id: 1
+    type: GroupInput
+    pos: [-400, 0]
+  - id: 10
+    type: ObjectSetToPoints
+    pos: [-200, 0]
+  - id: 20
+    type: InstanceOnPoints
+    pos: [-20, 0]
+  - id: 21
+    type: String
+    pos: [-200, -120]
+    props: { value: objects/props/procgraph_lamp }
+  - id: 30
+    type: MakeInstancer
+    pos: [160, 60]
+  - id: 40
+    type: ObjectOutput
+    pos: [340, 0]
+    props: { name: MarkerLights }
+  - id: 99
+    type: GroupOutput
+    pos: [520, 0]
+links:
+  - [1, markers, 10, objects]
+  - [10, points, 20, points]
+  - [21, value, 20, prototype]
+  - [20, instances, 30, instances]
+  - [20, instances, 40, geometry]
+  - [30, component, 40, components, 0]
+  - [40, object, 99, object]

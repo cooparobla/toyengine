@@ -1,0 +1,117 @@
+name: parametric_stair
+inputs:
+  - id: steps
+    type: Int
+    label: Steps
+    default: 6
+    min: 1
+    max: 40
+  - id: rise
+    type: Float
+    label: Rise
+    default: 0.18
+    min: 0.05
+    max: 0.6
+  - id: run
+    type: Float
+    label: Run
+    default: 0.3
+    min: 0.1
+    max: 1.0
+  - id: width
+    type: Float
+    label: Width
+    default: 1.4
+    min: 0.4
+    max: 6.0
+outputs:
+  - id: object
+    type: ObjectSpec
+nodes:
+  - id: 1
+    type: GroupInput
+    pos: [-520, 0]
+
+  # One step, built as a box of the authored size. A Repeat zone would place N of these in one
+  # chain; until the library's zones land, the stair is a Line of points with a box instanced on
+  # each, which gets the same result through the instancing path.
+  - id: 10
+    type: CombineXYZ
+    pos: [-320, -120]
+  - id: 11
+    type: Cube
+    pos: [-160, -120]
+
+  # The run/rise diagonal: the last step's corner, so the points land one tread apart.
+  - id: 20
+    type: Math
+    pos: [-320, 60]
+    props: { operation: subtract }
+  - id: 21
+    type: Integer
+    pos: [-460, 120]
+    props: { value: 1 }
+  - id: 22
+    type: Math
+    pos: [-180, 40]
+    props: { operation: multiply }
+  - id: 23
+    type: Math
+    pos: [-180, 140]
+    props: { operation: multiply }
+  - id: 24
+    type: CombineXYZ
+    pos: [-20, 90]
+  - id: 25
+    type: Vector
+    pos: [-20, 200]
+    props: { value: [0.0, 0.0, 0.0] }
+  - id: 26
+    type: LinePoints
+    pos: [140, 120]
+
+  - id: 30
+    type: InstanceOnPoints
+    pos: [320, 0]
+    props: { kind: mesh }
+  - id: 31
+    type: String
+    pos: [140, -80]
+    props: { value: props/procgraph_step }
+
+  - id: 40
+    type: MakeInstancer
+    pos: [480, 80]
+  - id: 50
+    type: ObjectOutput
+    pos: [660, 0]
+    props: { name: Stair }
+  - id: 99
+    type: GroupOutput
+    pos: [820, 0]
+links:
+  # The step box: width x run x rise.
+  - [1, width, 10, x]
+  - [1, run, 10, y]
+  - [1, rise, 10, z]
+  - [10, vector, 11, size]
+
+  # steps - 1, so the line's last point is the top step.
+  - [1, steps, 20, a]
+  - [21, value, 20, b]
+  - [20, result, 22, a]
+  - [1, run, 22, b]
+  - [20, result, 23, a]
+  - [1, rise, 23, b]
+  - [22, result, 24, y]
+  - [23, result, 24, z]
+  - [25, value, 26, start]
+  - [24, vector, 26, end]
+  - [1, steps, 26, count]
+
+  - [26, points, 30, points]
+  - [31, value, 30, prototype]
+  - [30, instances, 40, instances]
+  - [30, instances, 50, geometry]
+  - [40, component, 50, components, 0]
+  - [50, object, 99, object]

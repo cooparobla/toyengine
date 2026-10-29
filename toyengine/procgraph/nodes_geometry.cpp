@@ -332,6 +332,47 @@ void register_geometry_nodes() {
         }});
 
     register_node_type(NodeType{
+        "CurveToPoints", "Curve", "Curve to Points",
+        "Spreads `count` points evenly along a curve BY ARC LENGTH, each facing the way the "
+        "curve runs -- what a railing, a fence or a row of lamps follows",
+        NodeCost::Cheap,
+        [](DeclarationBuilder& b, const PropertyBag&) {
+            b.input("curve", types().curve_t);
+            b.input_default("count", types().int_t, int32_t(8));
+            b.input_default("align_to_curve", types().bool_t, true);
+            b.output("points", types().geometry_t);
+            b.output("count", types().int_t);
+            b.output("length", types().float_t);
+        },
+        [](EvalContext& ctx) {
+            const toy::curve::CurveData c = ctx.get<toy::curve::CurveData>("curve", empty_curve());
+            const int want = std::max(0, ctx.get<int32_t>("count", 8));
+            const bool align = ctx.get<bool>("align_to_curve", true);
+
+            std::vector<glm::vec3> tangents;
+            PointCloud points;
+            points.positions = toy::curve::points_along(c, want, align ? &tangents : nullptr);
+            if (align && tangents.size() == points.positions.size()) {
+                points.rotations.reserve(tangents.size());
+                for (std::size_t i = 0; i < tangents.size(); ++i) {
+                    // The tilt of the nearest control point, so a banked curve banks what it
+                    // carries. Even spacing means point i is not control point i, so this is an
+                    // approximation by index -- exact enough for a lean, and far cheaper than
+                    // tracking which segment each sample came from.
+                    const float tilt = c.points.empty()
+                        ? 0.0f
+                        : c.points[std::min(i * c.points.size() / std::max<std::size_t>(1, tangents.size()),
+                                            c.points.size() - 1)].tilt;
+                    points.rotations.push_back(toy::curve::frame_from_tangent(tangents[i], tilt));
+                }
+            }
+            const auto count = static_cast<int32_t>(points.positions.size());
+            ctx.set_output("points", make_geometry(GeometrySet::from_points(std::move(points))));
+            ctx.set_output("count", make_int(count));
+            ctx.set_output("length", make_float(toy::curve::length(c)));
+        }});
+
+    register_node_type(NodeType{
         "PointsToVertices", "Geometry", "Points to Vertices",
         "Treats a point cloud as loose vertices, for a graph that wants bounds or a count",
         NodeCost::Cheap,

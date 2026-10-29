@@ -37,6 +37,8 @@
 #include <coopa/nodegraph/value.h>
 #include <toyengine/procgraph/geometry_set.h>
 
+#include <toyengine/curve/curve_data.h>
+
 namespace toy {
 namespace procgraph {
 
@@ -162,6 +164,7 @@ struct ProcTypeIds {
     TypeId object_set_t = 0;
     TypeId component_t = 0;
     TypeId object_spec_t = 0;
+    TypeId curve_t = 0;      ///< toy::curve::CurveData -- an authored path read off an object.
 };
 
 /// @brief Registers every socket type and conversion. Idempotent; safe to call more than once.
@@ -184,6 +187,13 @@ inline Value make_object(ObjectRef v) { return Value::make(types().object_t, std
 inline Value make_object_set(ObjectSet v) { return Value::make(types().object_set_t, std::move(v)); }
 inline Value make_component(ComponentSpec v) { return Value::make(types().component_t, std::move(v)); }
 inline Value make_object_spec(ObjectSpec v) { return Value::make(types().object_spec_t, std::move(v)); }
+inline Value make_curve(toy::curve::CurveData v) { return Value::make(types().curve_t, std::move(v)); }
+
+/// @brief An empty curve, for an `as<T>(fallback)` call site.
+inline const toy::curve::CurveData& empty_curve() {
+    static const toy::curve::CurveData none;
+    return none;
+}
 
 /// @brief An empty GeometrySet, for an `as<T>(fallback)` call site.
 inline const GeometrySet& empty_geometry() {

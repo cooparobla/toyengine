@@ -54,6 +54,7 @@
 #include <toyengine/env/env_system.h>
 #include <toyengine/fire/fire_system.h>
 #include <toyengine/particles/particle_yaml.h>
+#include <toyengine/curve/curve.h>
 #include <toyengine/procgraph/procedural_graph.h>
 #include <toyengine/procgraph/procedural_graph_system.h>
 #include <toyengine/procgraph/nodes.h>
@@ -183,6 +184,10 @@ Engine::Engine(AppConfig config, EngineOptions options)
     // burns across its own surface, and the click that lights it. A purely visual fire is a
     // particle prefab (objects/props/campfire), not a component.
     fire::register_fire_components();
+    // "Curve" (toyengine/curve/): an authored Bezier path on an object. Pure data with no
+    // system -- the editor's pen tool edits it and a ProceduralGraph reads it, so it must
+    // register BEFORE procgraph, whose `curve` binding resolves this component off an object.
+    curve::register_curve_components();
     // "ProceduralGraph" (toyengine/procgraph/): a node graph baked into an object subtree. Its
     // socket types, node library and scene-input resolvers register alongside the parser, because
     // a graph cannot be compiled -- let alone parsed meaningfully -- before any of them exist.

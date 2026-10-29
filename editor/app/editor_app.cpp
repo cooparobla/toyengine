@@ -28,6 +28,7 @@
 #include "editor/app/ui/statusbar.h"
 #include "editor/app/ui/node_graph.h"
 #include "editor/app/ui/outliner.h"
+#include "editor/app/ui/curve_pen.h"
 #include "editor/app/editor_context.h"
 
 #include <toyengine/world/heightmap_store.h>
@@ -79,6 +80,7 @@ EditorApp::EditorApp(core::Engine& engine, Project project, const fs::path& scen
     project_settings_panel_ = std::make_unique<ProjectSettingsPanel>(*this);
     statusbar_panel_ = std::make_unique<StatusBarPanel>(*this);
     outliner_panel_ = std::make_unique<OutlinerPanel>(*this);
+    curve_pen_panel_ = std::make_unique<CurvePenPanel>(*this);
     // Thumbnails live on the GPU, so they need the device the engine already owns. Eviction
     // goes through the pipeline so the UI pass drops its descriptor first -- see
     // ThumbnailCache's file doc for what happens when it does not.
@@ -2509,6 +2511,13 @@ void EditorApp::handle_viewport_input_(imm::Context& ctx, bool mesh_edit) {
         else loopcut_.active = false;
         return;
     }
+    if (curve_pen_panel_->in_pen_mode_()) {
+        // The Pen owns clicks in the viewport, as a brush mode does: a click places a point
+        // rather than re-selecting, so object picking must not also run.
+        if (hovered && !ctx.popup_hovered()) scroll_navigate_(in, pinch, shift, ctrl);
+        curve_pen_panel_->handle_pen_input_(ctx, *vp, hovered);
+        return;
+    }
     if (paint_panel_->in_brush_mode_()) {
         // Scroll navigation stays (below is skipped), so handle it here first.
         if (hovered && !ctx.popup_hovered() && !stroke_.active && !paint_stroke_.active && !terrain_panel_->terrain_stroke_.active && !tile_mode_panel_->tile_stroke_.active) scroll_navigate_(in, pinch, shift, ctrl);
@@ -3858,7 +3867,10 @@ void EditorApp::draw_viewport_overlay_body_(imm::Context& ctx, bool mesh_edit, c
             if (a && b) ctx.line(*a, *b, col, t);
         }
     };
-    if (paint_panel_->in_brush_mode_()) {
+    if (curve_pen_panel_->in_pen_mode_()) {
+        curve_pen_panel_->draw_scene_curves_(ctx, *vp);
+        curve_pen_panel_->draw_pen_overlay_(ctx, *vp);
+    } else if (paint_panel_->in_brush_mode_()) {
         // No selection outline or wire while sculpting or painting, as in Blender.
         if (terrain_panel_->in_terrain_mode_()) terrain_panel_->draw_terrain_overlay_(ctx, *vp);
         else if (instance_paint_panel_->in_instance_mode_()) instance_paint_panel_->draw_instance_overlay_(ctx, *vp);
@@ -3899,6 +3911,9 @@ void EditorApp::draw_viewport_overlay_body_(imm::Context& ctx, bool mesh_edit, c
                 viewport_chrome_panel_->draw_object_glyph_(ctx, *vp, id, *node, live->get_transform()->transform().get_world_matrix(), col);
             }
         }
+        // Any Curve that is selected or asks to always show, so a path is visible without
+        // entering the Pen tool to see it.
+        curve_pen_panel_->draw_scene_curves_(ctx, *vp);
         // Selection outlines (the active object brighter, as in Blender). A selected instance
         // is one thing: its inherited parts are outlined with it.
         for (ObjectId id : doc_.selection()) {

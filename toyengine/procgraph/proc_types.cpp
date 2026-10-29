@@ -205,6 +205,10 @@ const ProcTypeIds& register_proc_types() {
         t.object_set_t  = reg.add<ObjectSet>("ObjectSet");
         t.component_t   = reg.add<ComponentSpec>("Component");
         t.object_spec_t = reg.add<ObjectSpec>("ObjectSpec");
+        // A path authored on an object (toyengine/curve/). Snapshotted by the `curve` binding
+        // on the main thread, like every other scene input, so the bake never touches a Curve
+        // component while the editor may be rebuilding it.
+        t.curve_t = reg.add<toy::curve::CurveData>("Curve");
 
         reg.set_yaml_hooks(t.float_t, float_from_yaml, float_to_yaml);
         reg.set_yaml_hooks(t.int_t, int_from_yaml, int_to_yaml);

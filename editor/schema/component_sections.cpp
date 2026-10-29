@@ -225,6 +225,14 @@ void apply_component_sections(std::map<std::string, ComponentSchema>& table) {
             .keys({"cast_shadows", "view_distance", "shadow_distance", "patch_resolution"}).closed().done(),
     });
 
+    layout("Curve", {
+        sec("Path", "World")
+            .says("A Bezier path in this object's local space. Draw and reshape it with the Pen "
+                  "tool in the viewport; a Procedural Graph reads it through a `curve` input "
+                  "binding, on this object or on another one.")
+            .keys({"closed", "resolution", "always_show"}).done(),
+    });
+
     layout("ProceduralGraph", {
         sec("Graph", "World")
             .says("A node graph baked into this object's children. What it PRODUCES -- geometry, "

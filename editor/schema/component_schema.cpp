@@ -1398,6 +1398,16 @@ std::map<std::string, ComponentSchema>& schema_table_() {
             // nodes in it, so those keys do not exist on the component. `inputs` is free-form and
             // validated against the graph's own interface, which is why it is a raw node here
             // rather than a typed row list.
+            add({"Curve", "World", {
+                with_tip(f_bool("closed", false),
+                         "Join the last point back to the first, so the path is a loop"),
+                with_tip(f_int("resolution", 12, 1, 64, true),
+                         "Samples per SEGMENT when the curve is drawn or walked. Per segment, so "
+                         "adding a point does not coarsen the rest"),
+                with_tip(f_bool("always_show", false),
+                         "Draw it in the viewport even when the object is not selected"),
+            }});
+
             add({"ProceduralGraph", "World", {
                 with_tip(f_asset("graph", "graphs", ".yaml", true, false),
                          "The graph asset to bake. Its own inputs appear under `inputs`"),

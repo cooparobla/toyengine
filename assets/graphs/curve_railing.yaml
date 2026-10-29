@@ -1,0 +1,70 @@
+# A railing that follows an authored Curve instead of two end markers.
+#
+# The point of this graph next to spline_railing: the path comes from a `{curve: ...}` binding,
+# so it is DRAWN in the viewport with the Pen tool rather than implied by two objects. Everything
+# downstream is the same -- points, an instancer, an object output.
+name: curve_railing
+inputs:
+  - id: path
+    type: Curve
+    label: Path
+  - id: posts
+    type: Int
+    label: Posts
+    default: 8
+    min: 2
+    max: 80
+  - id: height
+    type: Float
+    label: Height
+    default: 1.0
+    min: 0.2
+    max: 3.0
+outputs:
+  - id: object
+    type: ObjectSpec
+nodes:
+  - id: 1
+    type: GroupInput
+    pos: [-640, 0]
+  - id: 10
+    type: CurveToPoints
+    pos: [-400, 0]
+  - id: 20
+    type: InstanceOnPoints
+    pos: [-140, 0]
+    props: { kind: mesh }
+  - id: 21
+    type: String
+    pos: [-400, -200]
+    props: { value: props/procgraph_post }
+  - id: 30
+    type: Float
+    pos: [-400, -300]
+    props: { value: 1.0 }
+  - id: 31
+    type: CombineXYZ
+    pos: [-240, -300]
+  - id: 40
+    type: MakeInstancer
+    pos: [100, 80]
+  - id: 50
+    type: ObjectOutput
+    pos: [320, 0]
+    props: { name: CurveRailing }
+  - id: 99
+    type: GroupOutput
+    pos: [520, 0]
+links:
+  - [1, path, 10, curve]
+  - [1, posts, 10, count]
+  - [10, points, 20, points]
+  - [21, value, 20, prototype]
+  - [30, value, 31, x]
+  - [30, value, 31, y]
+  - [1, height, 31, z]
+  - [31, vector, 20, scale]
+  - [20, instances, 40, instances]
+  - [20, instances, 50, geometry]
+  - [40, component, 50, components, 0]
+  - [50, object, 99, object]

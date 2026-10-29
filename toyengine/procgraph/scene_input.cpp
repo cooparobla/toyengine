@@ -5,6 +5,8 @@
 
 #include <toyengine/procgraph/scene_input.h>
 
+#include <toyengine/curve/curve.h>
+
 #include <algorithm>
 #include <mutex>
 #include <shared_mutex>
@@ -333,6 +335,50 @@ void VariableTable::load_from_node(const fkyaml::node& node) {
     }
 }
 
+/**
+ * @brief `{curve: Path}` -- the Curve component on the named object, in WORLD space.
+ *
+ * Snapshotted here, on the main thread, like every other scene input: the bake runs on a worker
+ * and must never read a component the editor could be rebuilding underneath it.
+ *
+ * World space, not the curve's own: a graph instancing along it places world transforms, and the
+ * owner of the curve is usually not the owner of the graph.
+ */
+Value resolve_curve_(const fkyaml::node& args, const ResolveContext& ctx) {
+    if (ctx.scene == nullptr) return Value();
+    std::string name;
+    if (args.is_string()) {
+        name = args.get_value<std::string>();
+    } else if (args.is_mapping()) {
+        core::yaml::read(args, "curve", name);
+    }
+    if (name.empty()) {
+        ctx.warn("a `curve:` binding has no object chosen yet; using the input's default");
+        return Value();
+    }
+    SceneObject* obj = ctx.scene->find_object(name);
+    if (obj == nullptr) {
+        ctx.warn("no object named '" + name + "' to read a curve from");
+        return Value();
+    }
+    const auto* component = obj->get_component<toy::curve::Curve>();
+    if (component == nullptr) {
+        ctx.warn("'" + name + "' has no Curve component");
+        return Value();
+    }
+
+    toy::curve::CurveData out = component->data;
+    if (const auto* tc = obj->get_transform()) {
+        const glm::mat4 to_world = tc->transform().get_world_matrix();
+        for (auto& p : out.points) {
+            p.position   = glm::vec3(to_world * glm::vec4(p.position, 1.0f));
+            p.in_handle  = glm::vec3(to_world * glm::vec4(p.in_handle, 1.0f));
+            p.out_handle = glm::vec3(to_world * glm::vec4(p.out_handle, 1.0f));
+        }
+    }
+    return make_curve(std::move(out));
+}
+
 void register_input_resolver(std::string kind, InputResolver fn) {
     std::unique_lock<std::shared_mutex> lock(resolver_mutex_());
     resolvers_()[std::move(kind)] = std::move(fn);
@@ -359,6 +405,7 @@ void register_builtin_input_resolvers() {
         register_input_resolver("name_like", resolve_name_like_);
         register_input_resolver("component", resolve_component_);
         register_input_resolver("var", resolve_var_);
+        register_input_resolver("curve", resolve_curve_);
         return true;
     }();
     (void)done;

@@ -57,7 +57,7 @@ enum class BindWeights { Automatic = 0, Envelope, EmptyGroups };
  */
 enum class AssetType { None = 0, Scene, Object, Mesh, Material, Texture, UI, Theme, Audio, NodeGraph };
 /** @brief Blender's interaction modes for a mesh object (the viewport header's mode dropdown). */
-enum class InteractionMode { Object = 0, Edit, Sculpt, VertexPaint, WeightPaint, Pose };
+enum class InteractionMode { Object = 0, Edit, Sculpt, VertexPaint, WeightPaint, Pose, Pen };
 /** @brief Viewport shading, Blender's four buttons. */
 enum class Shading { Wireframe = 0, Solid = 1, MaterialPreview = 2, Full = 3 };
 

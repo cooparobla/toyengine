@@ -121,6 +121,7 @@ class WeatherPanel;
 class ViewportChromePanel;
 class UiCanvasPanel;
 class NodeGraphPanel;
+class CurvePenPanel;
 class TopbarPanel;
 class TimelinePanel;
 class TileModePanel;
@@ -192,6 +193,7 @@ class EditorApp {
     friend class ProjectSettingsPanel;
     friend class StatusBarPanel;
     friend class OutlinerPanel;
+    friend class CurvePenPanel;
 public:
     /** @brief Asset panel orderings (ui/assets.h). */
     /** @brief An asset file's sort keys: last-modified (seconds) and size (bytes). */
@@ -278,6 +280,8 @@ public:
     /// @brief Boxes drawn last frame around a selected ProceduralGraph's baked output. 0 when
     ///        nothing baked is selected -- the signal that the highlight reached the geometry.
     int baked_outlines_drawn() const { return baked_outlines_drawn_; }
+    /// @brief The Pen tool, for the viewport mode and its tests.
+    CurvePenPanel& curve_pen() { return *curve_pen_panel_; }
     /** @brief Collider wireframe lines drawn last frame (0 with the Colliders toggle off). */
     size_t collider_lines_drawn() const { return collider_lines_drawn_; }
     bool show_colliders() const { return show_colliders_; }
@@ -1302,6 +1306,7 @@ private:
     std::unique_ptr<ProjectSettingsPanel> project_settings_panel_;
     std::unique_ptr<StatusBarPanel> statusbar_panel_;
     std::unique_ptr<OutlinerPanel> outliner_panel_;
+    std::unique_ptr<CurvePenPanel> curve_pen_panel_;
     /// Small GPU copies of image assets, for the inspector's texture slots and the asset
     /// browser. Built once the device is up; null in a headless run with no renderer.
     std::unique_ptr<ThumbnailCache> thumbnails_;

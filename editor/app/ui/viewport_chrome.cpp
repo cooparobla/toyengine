@@ -11,6 +11,7 @@
 #include "editor/app/ui/assets.h"
 
 #include "editor/app/editor_app.h"
+#include "editor/app/ui/curve_pen.h"
 #include "editor/app/ui/preferences.h"
 #include "editor/app/ui/weights.h"
 #include "editor/app/ui/statusbar.h"
@@ -945,6 +946,17 @@ void ViewportChromePanel::draw_mode_menu_items_(imm::Context& ctx) {
     if (ctx.menu_item("Sculpt Mode", "", &sc, mesh_obj && !app_.playing(), I::SculptMode)) app_.set_interaction_mode(InteractionMode::Sculpt);
     if (ctx.menu_item("Vertex Paint", "", &vp, mesh_obj && !app_.playing(), I::VertexPaint)) app_.set_interaction_mode(InteractionMode::VertexPaint);
     if (ctx.menu_item("Weight Paint", "", &wp, mesh_obj && !app_.playing(), I::WeightPaint)) app_.set_interaction_mode(InteractionMode::WeightPaint);
+    // Any object: draw a Bezier path on it. Unlike the mesh modes this needs nothing of the
+    // object first -- entering adds the Curve component when it has none, which is what "draw a
+    // path here" means.
+    bool pen = cur == InteractionMode::Pen;
+    if (ctx.menu_item("Pen Mode", "", &pen, !app_.asset_view_() && app_.doc_.primary() && !app_.playing(),
+                      I::Edge)) {
+        if (pen) app_.curve_pen_panel_->end_pen_();
+        else app_.curve_pen_panel_->begin_pen_(app_.doc_.primary());
+    }
+    ctx.tooltip("Pen Mode\nDraw and reshape a curve on this object. Click to add a point, click "
+                "the line to insert one, drag a point or its handles, X deletes, C closes the loop.");
     // A rig (an Animator at or above the selection): pose its joints by hand.
     bool pm = cur == InteractionMode::Pose;
     const ObjectId pose_id = app_.pose_rig_ ? app_.pose_rig_ : app_.timeline_panel_->rig_of_(app_.doc_.primary());

@@ -282,6 +282,11 @@ public:
     int baked_outlines_drawn() const { return baked_outlines_drawn_; }
     /// @brief The Pen tool, for the viewport mode and its tests.
     CurvePenPanel& curve_pen() { return *curve_pen_panel_; }
+    /// @brief Applies a component edit the way the inspector does (through apply_(), so the
+    ///        object rebuilds). For tests, which cannot reach the private path.
+    void apply_scene_change_for_test(ObjectId id, int index, Node comp) {
+        apply_(doc_.set_component(id, index, std::move(comp), "Test Edit"));
+    }
     /** @brief Collider wireframe lines drawn last frame (0 with the Colliders toggle off). */
     size_t collider_lines_drawn() const { return collider_lines_drawn_; }
     bool show_colliders() const { return show_colliders_; }
@@ -1130,6 +1135,9 @@ public:
     bool is_isolated(ObjectId id) const { return isolated_.count(id) > 0; }
     InteractionMode interaction_mode() const {
         if (pose_rig_) return InteractionMode::Pose;
+        // Pen is reported whatever the object is: unlike the mesh modes it needs no mesh, so
+        // gating it behind `edit_object_` would leave it permanently reading as Object Mode.
+        if (mode_ == InteractionMode::Pen) return InteractionMode::Pen;
         return (edit_object_ || active_type_ == AssetType::Mesh) ? mode_ : InteractionMode::Object;
     }
     bool set_interaction_mode(InteractionMode m);

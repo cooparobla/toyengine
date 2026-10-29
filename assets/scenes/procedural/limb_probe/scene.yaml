@@ -1,0 +1,84 @@
+# Bisect: the limb mesh alone, NOT instanced, at four elongations.
+#
+# The trunk showed dark segments that got worse the more elongated the instance was. If the same
+# elongations shade correctly here, the mesh and material are fine and the fault is in how the
+# instanced path transforms them.
+scene:
+  scene_name: limb_probe
+  settings:
+    render:
+      ambient_intensity: 0.8
+  root_objects:
+    - name: camera
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: -6.0, z: 1.2 }
+          rotation: { x: 88.0, y: 0.0, z: 0.0 }
+        - type: Camera
+          main: true
+          projection: Perspective
+          fov: 55.0
+      children: []
+    - name: sun
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.0, y: 0.0, z: 0.0 }
+        - type: DirectionalLight
+          direction: { x: -0.45, y: 0.6, z: -0.65 }
+          intensity: 2.2
+          cast_shadows: true
+      children: []
+    - name: Limb0
+      active: true
+      components:
+        - type: Transform
+          position: { x: -2.40, y: 0.0, z: 1.0 }
+          rotation: { x: 0.0, y: -90.0, z: 0.0 }
+          scale: { x: 0.5, y: 0.18, z: 0.18 }
+        - type: MeshRenderer
+          mesh_path: props/procgraph_limb
+          material:
+            albedo: { r: 0.62, g: 0.48, b: 0.34 }
+            roughness: 0.9
+      children: []
+    - name: Limb1
+      active: true
+      components:
+        - type: Transform
+          position: { x: -0.80, y: 0.0, z: 1.0 }
+          rotation: { x: 0.0, y: -90.0, z: 0.0 }
+          scale: { x: 1.0, y: 0.18, z: 0.18 }
+        - type: MeshRenderer
+          mesh_path: props/procgraph_limb
+          material:
+            albedo: { r: 0.62, g: 0.48, b: 0.34 }
+            roughness: 0.9
+      children: []
+    - name: Limb2
+      active: true
+      components:
+        - type: Transform
+          position: { x: 0.80, y: 0.0, z: 1.0 }
+          rotation: { x: 0.0, y: -90.0, z: 0.0 }
+          scale: { x: 1.5, y: 0.18, z: 0.18 }
+        - type: MeshRenderer
+          mesh_path: props/procgraph_limb
+          material:
+            albedo: { r: 0.62, g: 0.48, b: 0.34 }
+            roughness: 0.9
+      children: []
+    - name: Limb3
+      active: true
+      components:
+        - type: Transform
+          position: { x: 2.40, y: 0.0, z: 1.0 }
+          rotation: { x: 0.0, y: -90.0, z: 0.0 }
+          scale: { x: 0.5, y: 0.05, z: 0.05 }
+        - type: MeshRenderer
+          mesh_path: props/procgraph_limb
+          material:
+            albedo: { r: 0.62, g: 0.48, b: 0.34 }
+            roughness: 0.9
+      children: []

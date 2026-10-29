@@ -35,6 +35,23 @@ space on the main thread (the bake runs on a worker and must never read a live c
 **Curve to Points** node then spreads `count` points evenly along it, each rotated to the
 tangent, which is what a railing, a fence or a row of lamps follows.
 
+It also **trims** (`trim_start` / `trim_end`, fractions of length) and **tapers**
+(`scale_start` / `scale_end`). `graphs/curve_tree` is built on both: the trunk is the whole
+curve tapering to its tip, the branches are its middle, the foliage its top third — one drawn
+path, three runs over it. The taper narrows the CROSS SECTION only, emitting a per-point scale of
+`(1, s, s)`: `frame_from_tangent` puts local +X along the tangent, so tapering that axis too
+would shorten each segment and open gaps in a limb that should be continuous. `spacing` reports
+what one segment must span for consecutive instances to meet end to end.
+
+## Turning a path into a volume
+
+A curve's points are, by definition, a LINE. Instancing straight onto them gives a column --
+fine for a fence, wrong for a canopy. **Scatter Points** (`toyengine/procgraph/`) spreads each
+point into `copies` of itself inside an ellipsoid of `radius`, which is what makes
+`graphs/curve_tree`'s crown a crown. Its jitter is keyed on (bake seed, point, copy) and nothing
+else, so the same seed scatters identically on every run and thread -- the determinism the rest
+of the node library keeps.
+
 ## Editing one
 
 Pen Mode in the viewport (`editor/app/ui/curve_pen.h`). Every decision it makes —

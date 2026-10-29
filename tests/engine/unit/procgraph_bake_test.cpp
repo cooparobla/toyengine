@@ -534,3 +534,164 @@ COOPA_TEST(no_shipped_graph_declares_an_interface_socket_nothing_uses) {
     expect(checked >= 3, "procgraph: the shipped graphs were actually found and checked (" +
                              std::to_string(checked) + ")");
 }
+
+/**
+ * @brief Trimming takes a sub-run of the curve, and taper narrows only the cross section.
+ *
+ * Both are what `graphs/curve_tree` is built on: the trunk is the whole curve tapering to its
+ * tip, the branches are its middle, the foliage its top. Tapering the ALONG-curve axis too
+ * would shorten each trunk segment and open gaps in what should be a continuous limb, which is
+ * why the per-point scale is (1, s, s) rather than (s, s, s).
+ */
+COOPA_TEST(curve_points_can_be_trimmed_to_a_sub_run_of_the_curve) {
+    setup();
+    toy::curve::CurveData c;
+    for (float x : {0.0f, 3.0f, 6.0f}) {
+        toy::curve::CurvePoint p;
+        p.position = glm::vec3(x, 0.0f, 0.0f);
+        p.mode = toy::curve::HandleMode::Vector;
+        c.points.push_back(p);
+    }
+    toy::curve::refresh_handles(c);
+
+    const std::vector<glm::vec3> whole = toy::curve::points_along(c, 5);
+    expect(whole.size() == 5, "procgraph: five points over the whole curve");
+    expect_near(whole.front().x, 0.0f, 1e-3f, "procgraph: starting at the start");
+    expect_near(whole.back().x, 6.0f, 1e-2f, "procgraph: and ending at the end");
+
+    const std::vector<glm::vec3> top = toy::curve::points_along(c, 4, nullptr, 0.5f, 1.0f);
+    expect(top.size() == 4, "procgraph: four points over the upper half");
+    expect_near(top.front().x, 3.0f, 2e-2f,
+                "procgraph: the trim starts halfway along, by LENGTH");
+    expect_near(top.back().x, 6.0f, 2e-2f, "procgraph: and still reaches the end");
+
+    expect(toy::curve::points_along(c, 4, nullptr, 0.8f, 0.2f).empty(),
+           "procgraph: a backwards trim yields nothing rather than a reversed run");
+}
+
+
+/**
+ * @brief Every registered socket type hashes its CONTENTS, so a changed input re-bakes.
+ *
+ * `Value::hash_into()` folds a constant for a type with no registered hash. A `bake: on_change`
+ * graph compares input hashes, so such a type reports "unchanged" forever and editing it never
+ * re-bakes -- silently, with a correct-looking first bake. `Curve` shipped exactly that way.
+ */
+COOPA_TEST(every_socket_type_hashes_its_contents) {
+    setup();
+    const auto& reg = coopa::nodegraph::TypeRegistry::instance();
+    const auto& t = types();
+    const std::vector<std::pair<const char*, coopa::nodegraph::TypeId>> every = {
+        {"Float", t.float_t},       {"Int", t.int_t},
+        {"Bool", t.bool_t},         {"Vector", t.vector_t},
+        {"Color", t.color_t},       {"Rotation", t.rotation_t},
+        {"String", t.string_t},     {"Geometry", t.geometry_t},
+        {"Object", t.object_t},     {"ObjectSet", t.object_set_t},
+        {"Component", t.component_t}, {"ObjectSpec", t.object_spec_t},
+        {"Curve", t.curve_t},
+    };
+    for (const auto& [name, id] : every) {
+        expect(id != coopa::nodegraph::k_invalid_type,
+               std::string("procgraph: ") + name + " is registered");
+        expect(reg.info(id).hash != nullptr,
+               std::string("procgraph: ") + name + " has a content hash -- without one a graph "
+               "bound to it can never notice that it changed");
+    }
+}
+
+/** @brief Two curves that differ by one control point hash differently. */
+COOPA_TEST(editing_a_curve_changes_its_hash_so_a_bound_graph_rebakes) {
+    setup();
+    toy::curve::CurveData a;
+    for (float x : {0.0f, 1.0f, 2.0f}) {
+        toy::curve::CurvePoint p;
+        p.position = glm::vec3(x, 0.0f, 0.0f);
+        a.points.push_back(p);
+    }
+    toy::curve::refresh_handles(a);
+
+    const uint64_t before = make_curve(a).hash();
+    expect(make_curve(a).hash() == before, "procgraph: the same curve hashes the same twice");
+
+    toy::curve::CurveData moved = a;
+    moved.points[1].position.y += 0.5f;        // what dragging an anchor does
+    expect(make_curve(moved).hash() != before,
+           "procgraph: moving a control point changes the hash");
+
+    toy::curve::CurveData tilted = a;
+    tilted.points[1].tilt = 15.0f;
+    expect(make_curve(tilted).hash() != before, "procgraph: so does a tilt");
+
+    toy::curve::CurveData closed = a;
+    closed.closed = true;
+    expect(make_curve(closed).hash() != before, "procgraph: and closing the loop");
+
+    toy::curve::CurveData added = a;
+    toy::curve::append_point(added, glm::vec3(3.0f, 0.0f, 0.0f));
+    expect(make_curve(added).hash() != before, "procgraph: and adding a point");
+}
+
+
+/**
+ * @brief Scatter Points turns a LINE of points into a VOLUME, repeatably.
+ *
+ * The node the tree graph's crown is built on: points read off a curve are collinear, and a
+ * line of leaf cards is a column rather than a canopy. Determinism matters as much as the
+ * spread -- a scatter that moved between runs would make every bake non-reproducible, which is
+ * the contract the rest of the node library keeps.
+ */
+COOPA_TEST(scatter_points_spreads_a_line_into_a_volume_and_repeats_exactly) {
+    setup();
+    Graph g("scatter");
+    NodeId line = g.add_node("LinePoints");
+    NodeId scatter = g.add_node("ScatterPoints");
+    NodeId inst = g.add_node("InstanceOnPoints");
+    NodeId proto = g.add_node("String");
+    g.node(proto)->props.set("value", std::string("objects/leaf"));
+
+    // `count` and `copies` are input SOCKETS with defaults, not props -- setting them as props
+    // is silently ignored and the node runs on its default.
+    NodeId five = g.add_node("Integer");
+    g.node(five)->props.set("value", int64_t(5));
+    NodeId four = g.add_node("Integer");
+    g.node(four)->props.set("value", int64_t(4));
+    g.add_link(SocketRef{five, "value"}, SocketRef{line, "count"});
+    g.add_link(SocketRef{four, "value"}, SocketRef{scatter, "copies"});
+
+    g.add_link(SocketRef{line, "points"}, SocketRef{scatter, "points"});
+    g.add_link(SocketRef{scatter, "points"}, SocketRef{inst, "points"});
+    g.add_link(SocketRef{proto, "value"}, SocketRef{inst, "prototype"});
+    wire_output(g, "geometry", types().geometry_t, inst, "instances");
+
+    const BakeResult a = run(g, nullptr, 7);
+    const BakeResult b = run(g, nullptr, 7);
+    const BakeResult c = run(g, nullptr, 8);
+    expect(a.ok() && b.ok() && c.ok(), "procgraph: all three bakes succeeded: " + a.messages());
+    expect(a.root.instances != nullptr && !a.root.instances->empty(),
+           "procgraph: instances were produced");
+
+    const auto& ta = a.root.instances->front().transforms;
+    const auto& tb = b.root.instances->front().transforms;
+    const auto& tc = c.root.instances->front().transforms;
+    expect(ta.size() == 20,
+           "procgraph: five points times four copies (" + std::to_string(ta.size()) + ")");
+
+    bool same = true;
+    for (size_t i = 0; i < ta.size(); ++i) same = same && ta[i] == tb[i];
+    expect(same, "procgraph: the same seed scatters identically -- otherwise no bake is "
+                 "reproducible");
+
+    bool differs = false;
+    for (size_t i = 0; i < ta.size(); ++i) differs = differs || ta[i] != tc[i];
+    expect(differs, "procgraph: and a different seed scatters differently");
+
+    // LinePoints runs along +Z by default, so thickness means spread in X and Y -- measuring
+    // the line's OWN axis would pass on a perfectly collinear result.
+    float off_axis = 0.0f;
+    for (const auto& m : ta) {
+        off_axis = std::max(off_axis, std::max(std::abs(m[3].x), std::abs(m[3].y)));
+    }
+    expect(off_axis > 0.05f,
+           "procgraph: the copies spread OFF the line (max |xy| = " + std::to_string(off_axis) +
+               ") -- that is the difference between a canopy and a column");
+}

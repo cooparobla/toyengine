@@ -1,0 +1,16 @@
+# One trunk/branch segment, instanced along a Curve by graphs/curve_tree.
+#
+# An OBJECT asset rather than a bare mesh so it can carry bark colour: Set Material only applies
+# to mesh geometry, and these are instances -- a prototype's look has to come from the prototype.
+object:
+  name: TreeLimb
+  active: true
+  components:
+    - type: Transform
+      position: { x: 0.0, y: 0.0, z: 0.0 }
+    - type: MeshRenderer
+      mesh_path: props/procgraph_limb
+      material:
+        albedo: { r: 0.30, g: 0.22, b: 0.15 }
+        roughness: 0.95
+  children: []

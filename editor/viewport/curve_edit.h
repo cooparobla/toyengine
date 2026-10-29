@@ -15,6 +15,7 @@
 
 #include <cstddef>
 #include <optional>
+#include <vector>
 
 #include <glm/glm.hpp>
 
@@ -79,6 +80,15 @@ glm::vec3 point_on_camera_plane(const ViewProj& vp, glm::vec2 mouse, const glm::
  * level plane rather than on a plane that tilts with the camera.
  */
 std::optional<glm::vec3> point_on_ground(const ViewProj& vp, glm::vec2 mouse, float height);
+
+/**
+ * @brief Every anchor whose screen position falls inside the rectangle `a`-`b`.
+ *
+ * Corners in either order, so a band dragged up-left works like one dragged down-right.
+ * Anchors behind the camera do not project and are never picked.
+ */
+std::vector<std::size_t> anchors_in_box(const cv::CurveData& c, const ViewProj& vp,
+                                        const glm::mat4& to_world, glm::vec2 a, glm::vec2 b);
 
 /// @brief Which end of the curve `index` is, for deciding whether a click extends or inserts.
 bool is_endpoint(const cv::CurveData& c, std::size_t index);

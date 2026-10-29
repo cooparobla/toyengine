@@ -1,0 +1,6 @@
+# Bark, for the wood a curve_tree sweeps. One material for trunk, branches and twigs -- which is
+# the point of joining them into a single mesh before naming a slot.
+albedo: { r: 0.33, g: 0.25, b: 0.18 }
+metallic: 0.0
+roughness: 0.95
+ao: 1.0

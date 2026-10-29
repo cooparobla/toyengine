@@ -1,0 +1,14 @@
+# One foliage clump, instanced along the top of a Curve by graphs/curve_tree. See tree_limb.yaml
+# for why this is an object asset rather than a bare mesh.
+object:
+  name: TreeLeaf
+  active: true
+  components:
+    - type: Transform
+      position: { x: 0.0, y: 0.0, z: 0.0 }
+    - type: MeshRenderer
+      mesh_path: primitives/sphere_low
+      material:
+        albedo: { r: 0.21, g: 0.40, b: 0.16 }
+        roughness: 1.0
+  children: []

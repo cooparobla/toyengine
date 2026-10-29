@@ -257,6 +257,27 @@ fkyaml::node object_to_node(const BakedObject& obj) {
         node["components"] = std::move(components);
     }
 
+    // A baked mesh's material comes from its FIRST slot name, emitted as an ordinary
+    // MeshRenderer spec so SceneLoader parses it the way it parses every other material
+    // reference. Without this a Set Material node renames a slot and nothing else: publish
+    // attaches the mesh handle to a default renderer and the geometry comes out white, with
+    // nothing anywhere reporting that the material went missing.
+    if (obj.mesh != nullptr && !obj.mesh->slot_names.empty() && !obj.mesh->slot_names[0].empty()) {
+        if (!node.contains("components")) node["components"] = fkyaml::node::sequence();
+        bool has_renderer = false;
+        for (const auto& c : node.at("components").as_seq()) {
+            if (c.contains("type") && c.at("type").get_value<std::string>() == "MeshRenderer") {
+                has_renderer = true;
+            }
+        }
+        if (!has_renderer) {
+            fkyaml::node renderer = fkyaml::node::mapping();
+            renderer["type"] = fkyaml::node(std::string("MeshRenderer"));
+            renderer["material"] = fkyaml::node(obj.mesh->slot_names[0]);
+            node["components"].as_seq().push_back(std::move(renderer));
+        }
+    }
+
     if (!obj.children.empty()) {
         fkyaml::node children = fkyaml::node::sequence();
         for (const auto& child : obj.children) children.as_seq().push_back(object_to_node(child));

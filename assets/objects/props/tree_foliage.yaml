@@ -1,0 +1,26 @@
+# One foliage card: crossed quads carrying an alpha-tested leaf cluster.
+#
+# CUTOUT, not BLEND, deliberately. A blended card needs back-to-front sorting against every other
+# card, which hundreds of them in a canopy cannot have; an alpha TEST is order-independent, writes
+# depth, and casts a correctly-shaped shadow. It is how foliage is done.
+#
+# `cull_backfaces: false` because a card is a sheet -- culling its back makes half the canopy
+# vanish depending on where you stand.
+object:
+  name: TreeFoliage
+  active: true
+  components:
+    - type: Transform
+      position: { x: 0.0, y: 0.0, z: 0.0 }
+    - type: MeshRenderer
+      mesh_path: props/procgraph_leaf_card
+      material:
+        albedo: { r: 1.0, g: 1.0, b: 1.0 }
+        texture_albedo: textures/foliage/leaf_card.png
+        texture_alpha_mask: textures/foliage/leaf_card_mask.png
+        alpha_mode: CUTOUT
+        alpha_cutoff: 0.45
+        cull_backfaces: false
+        roughness: 0.85
+        metallic: 0.0
+  children: []

@@ -154,6 +154,24 @@ void hash_object_set(const void* p, uint64_t& s) {
     hash_bytes(&n, sizeof(n), s);
     for (size_t i = 0; i < n; ++i) hash_object(&set->at(i), s);
 }
+void hash_curve(const void* p, uint64_t& s) {
+    // Every control point, not the vector's identity: the `curve` binding snapshots a FRESH
+    // CurveData each resolve, so identity would differ every frame and an `on_change` graph
+    // would re-bake forever. Conversely a type with NO hash folds a constant, and then editing
+    // the curve never re-bakes at all -- which is what this function exists to fix.
+    const auto* c = static_cast<const toy::curve::CurveData*>(p);
+    const size_t n = c->points.size();
+    hash_bytes(&n, sizeof(n), s);
+    hash_bytes(&c->closed, sizeof(bool), s);
+    hash_bytes(&c->resolution, sizeof(int), s);
+    for (const auto& pt : c->points) {
+        hash_bytes(&pt.position, sizeof(glm::vec3), s);
+        hash_bytes(&pt.in_handle, sizeof(glm::vec3), s);
+        hash_bytes(&pt.out_handle, sizeof(glm::vec3), s);
+        hash_bytes(&pt.tilt, sizeof(float), s);
+        hash_bytes(&pt.mode, sizeof(pt.mode), s);
+    }
+}
 void hash_component(const void* p, uint64_t& s) {
     const auto* c = static_cast<const ComponentSpec*>(p);
     hash_bytes(c->type.data(), c->type.size(), s);
@@ -230,6 +248,7 @@ const ProcTypeIds& register_proc_types() {
         reg.set_hash(t.component_t, hash_component);
         reg.set_hash(t.geometry_t, hash_geometry);
         reg.set_hash(t.object_spec_t, hash_shared_identity<ObjectSpec>);
+        reg.set_hash(t.curve_t, hash_curve);
 
         // glm's vector operator== returns a bool but its quat comparison needs an explicit one,
         // and the aggregates compare by shared identity.

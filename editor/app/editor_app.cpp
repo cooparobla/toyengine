@@ -3385,6 +3385,10 @@ void EditorApp::set_isolate_in_edit(bool on) {
 }
 
 bool EditorApp::set_interaction_mode(InteractionMode m) {
+    // The Pen owns viewport clicks while it runs, so EVERY route out of it has to close it --
+    // the mode menu, Tab, and anything else that switches mode. Leaving it open behind another
+    // mode means clicks keep drawing curve points with nothing on screen saying why.
+    if (m != InteractionMode::Pen && curve_pen_panel_->in_pen_mode_()) curve_pen_panel_->end_pen_();
     if (m == InteractionMode::Pose) return enter_pose_mode_(timeline_panel_->rig_of_(doc_.primary()));
     exit_pose_mode_();   // every other mode works on the document, not on a pose
     if (m == InteractionMode::Object) { exit_mesh_mode_(); return true; }

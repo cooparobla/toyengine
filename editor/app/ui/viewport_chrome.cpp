@@ -32,7 +32,11 @@ imm::Box ViewportChromePanel::nav_gizmo_rect_() const {
 }
 
 imm::Box ViewportChromePanel::toolbar_rect_(bool mesh_edit) const {
-    const int n = app_.in_sculpt_mode_() ? 5 : app_.paint_panel_->in_paint_mode_() ? 3 : mesh_edit ? 9 : 5;
+    // `n` SIZES the panel, so it has to match what draw_toolbar_() actually puts in it. A button
+    // added without bumping this draws below the rect and is clipped away -- present, wired, and
+    // invisible. Object mode: select, cursor, pen, move, rotate, scale.
+    const int n = app_.curve_pen_panel_->in_pen_mode_() ? 3
+                : app_.in_sculpt_mode_() ? 5 : app_.paint_panel_->in_paint_mode_() ? 3 : mesh_edit ? 9 : 6;
     return {app_.viewport_box_.x + 6, app_.viewport_box_.y + 6, kToolSize + 6, n * (kToolSize + 2) + 14};
 }
 
@@ -64,7 +68,8 @@ void ViewportChromePanel::draw_viewport_header_(imm::Context& ctx, const imm::Bo
         const bool vpaint = app_.paint_panel_->in_paint_mode_() && !app_.paint_panel_->in_weight_paint_(), wpaint = app_.paint_panel_->in_weight_paint_();
         const std::string mode = terrain ? "Terrain Mode" : tiles ? "Tile Mode" : painting_instances ? "Instance Paint"
                                : sculpting ? "Sculpt Mode" : vpaint ? "Vertex Paint" : wpaint ? "Weight Paint"
-                               : mesh_edit ? "Edit Mode" : "Object Mode";
+                               : mesh_edit ? "Edit Mode"
+                               : app_.curve_pen_panel_->in_pen_mode_() ? "Pen Mode" : "Object Mode";
         const float w = ctx.text_width(mode) + bh + 26;
         const imm::Box mb{x, hb.y + 3, w, bh};
         bool hov = false, held = false;
@@ -497,8 +502,25 @@ void ViewportChromePanel::draw_toolbar_(imm::Context& ctx, bool mesh_edit) {
     if (app_.tile_mode_panel_->in_tile_mode_()) { app_.tile_mode_panel_->draw_tile_toolbar_(ctx, r); return; }
     if (app_.in_sculpt_mode_()) { app_.sculpt_panel_->draw_sculpt_toolbar_(ctx, r); return; }
     if (app_.paint_panel_->in_paint_mode_()) { app_.paint_panel_->draw_paint_toolbar_(ctx, r); return; }
+    if (app_.curve_pen_panel_->in_pen_mode_()) { app_.curve_pen_panel_->draw_pen_toolbar_(ctx, r); return; }
     if (tool_btn("t_select", I::SelectBox, "Select Box\nClick or drag to select (Shift adds, Ctrl removes)", app_.tool_ == EditorApp::Tool::Select)) app_.tool_ = EditorApp::Tool::Select;
     if (tool_btn("t_cursor", I::Cursor, "Cursor\nClick to place the 3D cursor (Shift RMB anywhere)", app_.tool_ == EditorApp::Tool::Cursor)) app_.tool_ = EditorApp::Tool::Cursor;
+    // The Pen lives here rather than only in the mode menu: it is a TOOL, and this is where a
+    // tool is looked for. It needs nothing of the object -- entering adds a Curve when there is
+    // none, which is what "draw a path on this" means.
+    if (!mesh_edit) {
+        const bool pen_on = app_.curve_pen_panel_->in_pen_mode_();
+        if (tool_btn("t_pen", I::Pen,
+                     "Pen\nDraw a curve on this object. Click to add a point, click the line to "
+                     "insert one, drag a point or its handles. X deletes, C closes the loop.",
+                     pen_on)) {
+            if (pen_on) app_.curve_pen_panel_->end_pen_();
+            else if (app_.doc_.primary()) {
+                app_.curve_pen_panel_->begin_pen_(app_.doc_.primary());
+                app_.curve_pen_panel_->set_tool(CurvePenPanel::PenTool::Draw);
+            }
+        }
+    }
     y += 6;
     if (tool_btn("t_move", I::Move, "Move\nGizmo for moving (G for the modal move)", app_.tool_ == EditorApp::Tool::Move)) app_.tool_ = EditorApp::Tool::Move;
     if (tool_btn("t_rotate", I::Rotate, "Rotate\nGizmo for rotating (R for the modal rotate)", app_.tool_ == EditorApp::Tool::Rotate)) app_.tool_ = EditorApp::Tool::Rotate;

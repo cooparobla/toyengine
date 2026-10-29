@@ -97,10 +97,13 @@ float length(const CurveData& c) {
 }
 
 std::vector<glm::vec3> points_along(const CurveData& c, int count,
-                                    std::vector<glm::vec3>* out_tangents) {
+                                    std::vector<glm::vec3>* out_tangents, float from, float to) {
     std::vector<glm::vec3> out;
     if (out_tangents) out_tangents->clear();
     if (count < 2 || c.empty()) return out;
+    from = std::clamp(from, 0.0f, 1.0f);
+    to   = std::clamp(to, 0.0f, 1.0f);
+    if (to <= from) return out;
 
     const std::vector<glm::vec3> line = polyline(c);
     if (line.size() < 2) return out;
@@ -115,11 +118,16 @@ std::vector<glm::vec3> points_along(const CurveData& c, int count,
 
     out.reserve(static_cast<std::size_t>(count));
     if (out_tangents) out_tangents->reserve(static_cast<std::size_t>(count));
-    // A closed curve's last point would land on its first, so the step spans the whole loop.
-    const float step = total / static_cast<float>(c.closed ? count : count - 1);
+
+    const bool whole = from <= 0.0f && to >= 1.0f;
+    const float span_start = total * from;
+    const float span = total * (to - from);
+    // An untrimmed closed curve's last point would land on its first, so its step spans the
+    // whole loop. A trim has two distinct ends, so it spreads across them like an open curve.
+    const float step = span / static_cast<float>((c.closed && whole) ? count : count - 1);
     std::size_t seg = 1;
     for (int i = 0; i < count; ++i) {
-        const float want = std::min(step * static_cast<float>(i), total);
+        const float want = std::min(span_start + step * static_cast<float>(i), total);
         while (seg + 1 < line.size() && run[seg] < want) ++seg;
         const float span = run[seg] - run[seg - 1];
         const float f = span > 1e-8f ? (want - run[seg - 1]) / span : 0.0f;
@@ -145,6 +153,41 @@ glm::quat frame_from_tangent(const glm::vec3& tangent, float tilt_degrees) {
     const glm::quat base = glm::quat_cast(glm::mat3(fwd, right, real_up));
     if (std::abs(tilt_degrees) < 1e-6f) return base;
     return base * glm::angleAxis(glm::radians(tilt_degrees), glm::vec3(1.0f, 0.0f, 0.0f));
+}
+
+std::vector<glm::quat> parallel_frames(const std::vector<glm::vec3>& tangents,
+                                       float tilt_degrees) {
+    std::vector<glm::quat> out;
+    out.reserve(tangents.size());
+    if (tangents.empty()) return out;
+
+    const glm::quat roll = std::abs(tilt_degrees) < 1e-6f
+        ? glm::quat(1.0f, 0.0f, 0.0f, 0.0f)
+        : glm::angleAxis(glm::radians(tilt_degrees), glm::vec3(1.0f, 0.0f, 0.0f));
+
+    // The first frame has nothing to carry from, so it picks a roll the usual way.
+    glm::quat frame = frame_from_tangent(tangents.front(), 0.0f);
+    out.push_back(frame * roll);
+
+    for (std::size_t i = 1; i < tangents.size(); ++i) {
+        const glm::vec3 prev = glm::length(tangents[i - 1]) > 1e-8f
+            ? glm::normalize(tangents[i - 1]) : glm::vec3(1.0f, 0.0f, 0.0f);
+        const glm::vec3 now = glm::length(tangents[i]) > 1e-8f
+            ? glm::normalize(tangents[i]) : prev;
+
+        const float cosine = glm::clamp(glm::dot(prev, now), -1.0f, 1.0f);
+        if (cosine < 0.9999f) {
+            glm::vec3 axis = glm::cross(prev, now);
+            const float len = glm::length(axis);
+            if (len > 1e-8f) {
+                // The minimal rotation prev -> now. A reversal (cosine ~ -1) has no unique axis,
+                // which is why it is taken from the cross product rather than assumed.
+                frame = glm::angleAxis(std::acos(cosine), axis / len) * frame;
+            }
+        }
+        out.push_back(frame * roll);
+    }
+    return out;
 }
 
 void refresh_handles(CurveData& c) {

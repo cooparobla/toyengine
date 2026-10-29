@@ -90,11 +90,37 @@ float length(const CurveData& c);
  * Even spacing is what a railing or a fence wants, and it is not what even `t` gives: a long
  * segment and a short one carry the same number of samples in parameter space.
  *
+ * `from`/`to` trim the run to a fraction of the curve's LENGTH, so a graph can take the top
+ * third of a trunk for its foliage without a second curve. A trimmed run always spreads its
+ * points across the whole trim, closed or not -- the wrap-without-doubling rule only applies to
+ * an untrimmed closed curve, where the first and last point would otherwise coincide.
+ *
  * @param count       Points wanted; fewer than 2 yields an empty result.
  * @param out_tangents Filled with the unit tangent at each point when non-null.
+ * @param from        Where to start, as a fraction of total length (0..1).
+ * @param to          Where to stop, same units. `to <= from` yields an empty result.
  */
 std::vector<glm::vec3> points_along(const CurveData& c, int count,
-                                    std::vector<glm::vec3>* out_tangents = nullptr);
+                                    std::vector<glm::vec3>* out_tangents = nullptr,
+                                    float from = 0.0f, float to = 1.0f);
+
+/**
+ * @brief Rotation-minimising frames along a run of tangents (parallel transport).
+ *
+ * `frame_from_tangent()` derives each frame independently from world up, so the ROLL about the
+ * tangent jumps as the tangent turns -- and consecutive segments instanced on those frames come
+ * out rolled differently. On a faceted mesh that shows as mismatched facets and segments that
+ * alternate light and dark for no visible reason.
+ *
+ * This carries the first frame along the curve instead: each is the previous one turned by the
+ * smallest rotation that takes the old tangent to the new. Roll then changes only as much as
+ * the curve forces it to.
+ *
+ * @param tangents    Unit tangents, in order.
+ * @param tilt_degrees Roll applied to every frame after transport.
+ */
+std::vector<glm::quat> parallel_frames(const std::vector<glm::vec3>& tangents,
+                                       float tilt_degrees = 0.0f);
 
 /// @brief A rotation whose +X is `tangent`, rolled by `tilt_degrees` about it. +Z stays up-ish.
 glm::quat frame_from_tangent(const glm::vec3& tangent, float tilt_degrees);

@@ -1,0 +1,16 @@
+# A branch or twig: one conical limb from its parent to a point.
+#
+# Separate from tree_limb because a branch is NOT chained -- it is a single span ending in a tip,
+# so it tapers to nothing. The trunk's segments abut each other and must not.
+object:
+  name: TreeBranch
+  active: true
+  components:
+    - type: Transform
+      position: { x: 0.0, y: 0.0, z: 0.0 }
+    - type: MeshRenderer
+      mesh_path: props/procgraph_branch
+      material:
+        albedo: { r: 0.32, g: 0.23, b: 0.16 }
+        roughness: 0.95
+  children: []

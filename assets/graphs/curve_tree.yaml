@@ -1,0 +1,220 @@
+name: curve_tree
+inputs:
+  - { type: Curve, id: path, label: Trunk path }
+  - { type: Int, id: trunk_segments, default: 16, label: Trunk segments, max: 80, min: 2 }
+  - type: Float
+    id: trunk_radius
+    default: 0.30000001192092896
+    label: Trunk radius
+    max: 2.0
+    min: 0.019999999552965164
+  - type: Float
+    id: tip_taper
+    default: 0.3499999940395355
+    label: Tip taper
+    max: 1.0
+    min: 0.05000000074505806
+  - { type: Int, id: branch_count, default: 14, label: Branches, max: 60, min: 0 }
+  - type: Float
+    id: branch_length
+    default: 1.2999999523162842
+    label: Branch length
+    max: 6.0
+    min: 0.10000000149011612
+  - { type: Float, id: branch_spread, default: 0.5, label: Branch spread, max: 3.200000047683716, min: 0.0 }
+  - { type: Float, id: lean_low, default: 72.0, label: Lean at base (deg), max: 9.0e+01, min: 0.0 }
+  - { type: Float, id: lean_high, default: 28.0, label: Lean at top (deg), max: 9.0e+01, min: 0.0 }
+  - { type: Float, id: length_low, default: 1.5, label: Length at base, max: 4.0, min: 0.10000000149011612 }
+  - type: Float
+    id: length_high
+    default: 0.44999998807907104
+    label: Length at top
+    max: 4.0
+    min: 0.10000000149011612
+  - { type: Int, id: twigs_per_branch, default: 3, label: Twigs per branch, max: 12, min: 0 }
+  - type: Float
+    id: twig_length
+    default: 0.6000000238418579
+    label: Twig length
+    max: 3.0
+    min: 0.05000000074505806
+  - { type: Int, id: leaves_per_twig, default: 4, label: Leaves per twig, max: 20, min: 0 }
+  - type: Float
+    id: leaf_size
+    default: 0.6000000238418579
+    label: Leaf size
+    max: 3.0
+    min: 0.05000000074505806
+links:
+  - [1, path, 10, curve]
+  - [1, trunk_segments, 10, sections]
+  - [1, trunk_radius, 10, radius_start]
+  - [1, trunk_radius, 11, a]
+  - [1, tip_taper, 11, b]
+  - [11, result, 10, radius_end]
+  - [1, path, 20, curve]
+  - [1, branch_count, 20, count]
+  - [21, value, 20, trim_start]
+  - [22, value, 20, trim_end]
+  - [1, lean_low, 20, lean_start]
+  - [1, lean_high, 20, lean_end]
+  - [1, length_low, 20, length_start]
+  - [1, length_high, 20, length_end]
+  - [20, points, 23, points]
+  - [1, branch_length, 23, length]
+  - [24, value, 23, radius_start]
+  - [25, value, 23, radius_end]
+  - [1, branch_spread, 23, droop]
+  - [12, value, 23, sink]
+  - [23, geometry, 30, geometry]
+  - [1, branch_count, 31, a]
+  - [1, twigs_per_branch, 31, b]
+  - [31, result, 30, count]
+  - [30, points, 33, points]
+  - [32, value, 33, sink]
+  - [1, twig_length, 33, length]
+  - [34, value, 33, radius_start]
+  - [35, value, 33, radius_end]
+  - [36, value, 33, length_jitter]
+  - [13, value, 33, spread]
+  - [14, value, 33, droop]
+  - [33, geometry, 40, geometry]
+  - [31, result, 46, a]
+  - [1, leaves_per_twig, 46, b]
+  - [46, result, 40, count]
+  - [40, points, 42, points]
+  - [3, value, 42, prototype]
+  - [1, leaf_size, 45, x]
+  - [1, leaf_size, 45, y]
+  - [1, leaf_size, 45, z]
+  - [45, vector, 42, scale]
+  - [44, value, 42, random_rotation]
+  - [10, geometry, 50, geometry]
+  - [23, geometry, 50, geometry, 1]
+  - [33, geometry, 50, geometry, 2]
+  - [42, instances, 50, geometry, 3]
+  - [50, geometry, 52, geometry]
+  - [53, value, 52, material]
+  - [52, geometry, 60, geometry]
+  - [52, geometry, 51, instances]
+  - [51, component, 60, components]
+  - [60, object, 99, object]
+nodes:
+  - type: GroupInput
+    id: 1
+    pos: [-1171.8243408203125, -14.083969116210938]
+  - type: String
+    id: 3
+    pos: [-1.0e+03, 5.2e+02]
+    props: { value: objects/props/tree_foliage }
+  - type: SweepCurve
+    id: 10
+    pos: [-7.4e+02, -2.6e+02]
+  - type: Math
+    id: 11
+    pos: [-9.0e+02, -2.0e+02]
+    props: { operation: multiply }
+  - type: Float
+    id: 12
+    pos: [-7.4e+02, 2.3e+02]
+    props: { value: 0.0 }
+  - type: Float
+    id: 13
+    pos: [-5.0e+02, 4.0e+02]
+    props: { value: 1.1 }
+  - type: Float
+    id: 14
+    pos: [-5.0e+02, 4.7e+02]
+    props: { value: 1.3 }
+  - type: CurveToPoints
+    id: 20
+    pos: [-743.7557373046875, -126.38163757324219]
+  - type: Float
+    id: 21
+    pos: [-9.4e+02, 6.0e+01]
+    props: { value: 0.32 }
+  - type: Float
+    id: 22
+    pos: [-9.4e+02, 1.2e+02]
+    props: { value: 1.0 }
+  - type: TubesOnPoints
+    id: 23
+    pos: [-5.0e+02, -4.0e+01]
+  - type: Float
+    id: 24
+    pos: [-7.4e+02, 1.1e+02]
+    props: { value: 0.09 }
+  - type: Float
+    id: 25
+    pos: [-7.4e+02, 1.7e+02]
+    props: { value: 0.025 }
+  - type: PointsOnFaces
+    id: 30
+    pos: [-2.6e+02, 1.2e+02]
+  - type: Math
+    id: 31
+    pos: [-4.2e+02, 2.0e+02]
+    props: { operation: multiply }
+  - type: Float
+    id: 32
+    pos: [-2.6e+02, 4.5e+02]
+    props: { value: 0.025 }
+  - type: TubesOnPoints
+    id: 33
+    pos: [-6.0e+01, 1.2e+02]
+  - type: Float
+    id: 34
+    pos: [-2.6e+02, 2.6e+02]
+    props: { value: 0.03 }
+  - type: Float
+    id: 35
+    pos: [-2.6e+02, 3.2e+02]
+    props: { value: 0.006 }
+  - type: Float
+    id: 36
+    pos: [-2.6e+02, 3.8e+02]
+    props: { value: 0.35 }
+  - type: PointsOnFaces
+    id: 40
+    pos: [1.8e+02, 3.2e+02]
+  - type: Math
+    id: 46
+    pos: [2.0e+01, 2.5e+02]
+    props: { operation: multiply }
+  - type: InstanceOnPoints
+    id: 42
+    pos: [3.8e+02, 3.2e+02]
+    props: { kind: object }
+  - type: Float
+    id: 43
+    pos: [0.0, 4.7e+02]
+    props: { value: 0.45 }
+  - type: Float
+    id: 44
+    pos: [0.0, 5.3e+02]
+    props: { value: 3.1 }
+  - type: CombineXYZ
+    id: 45
+    pos: [1.8e+02, 4.6e+02]
+  - type: JoinGeometry
+    id: 50
+    pos: [405.725830078125, 36.14176940917969]
+  - type: MakeInstancer
+    id: 51
+    pos: [7.8e+02, 2.0e+02]
+  - type: SetMaterial
+    id: 52
+    pos: [659.0775146484375, -173.183349609375]
+  - type: String
+    id: 53
+    pos: [4.2e+02, -1.8e+02]
+    props: { value: materials/natural/bark }
+  - type: ObjectOutput
+    id: 60
+    pos: [969.0888671875, -5.894157409667969]
+    props: { name: CurveTree }
+  - type: GroupOutput
+    id: 99
+    pos: [1.14e+03, 6.0e+01]
+outputs:
+  - { type: ObjectSpec, id: object }

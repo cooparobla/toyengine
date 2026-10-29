@@ -188,4 +188,33 @@ COOPA_TEST(endpoints_are_recognised_on_an_open_curve_only) {
            "curve_edit: a closed curve has no ends to extend from");
 }
 
+
+/** @brief A rubber band picks the anchors inside it, from either corner. */
+COOPA_TEST(a_band_picks_the_anchors_inside_it_dragged_either_way) {
+    const ViewProj vp = top_down();
+    const cv::CurveData c = flat_line();   // anchors at x = -2, 0, +2 on the XY plane
+    const glm::mat4 id(1.0f);
+
+    const auto left = vp.project(glm::vec3(-2.0f, 0.0f, 0.0f));
+    const auto mid = vp.project(glm::vec3(0.0f, 0.0f, 0.0f));
+    const auto right = vp.project(glm::vec3(2.0f, 0.0f, 0.0f));
+    expect(left && mid && right, "curve_edit: all three anchors are on screen");
+
+    // A box around the left two only, with a margin that cannot reach the third.
+    const float cut = (mid->x + right->x) * 0.5f;
+    const auto picked = anchors_in_box(c, vp, id, {left->x - 20.0f, left->y - 40.0f},
+                                       {cut, left->y + 40.0f});
+    expect(picked.size() == 2, "curve_edit: two anchors in the band (" +
+                                   std::to_string(picked.size()) + ")");
+    expect(picked[0] == 0 && picked[1] == 1, "curve_edit: and they are the left two");
+
+    // The same rectangle dragged from the opposite corner must pick the same anchors.
+    const auto flipped = anchors_in_box(c, vp, id, {cut, left->y + 40.0f},
+                                        {left->x - 20.0f, left->y - 40.0f});
+    expect(flipped == picked, "curve_edit: corners in either order give the same result");
+
+    expect(anchors_in_box(c, vp, id, {5.0f, 5.0f}, {25.0f, 25.0f}).empty(),
+           "curve_edit: a band over nothing picks nothing");
+}
+
 }  // namespace toy::editor::testing

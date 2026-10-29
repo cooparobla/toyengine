@@ -103,6 +103,19 @@ std::optional<glm::vec3> point_on_ground(const ViewProj& vp, glm::vec2 mouse, fl
     return o + d * t;
 }
 
+std::vector<std::size_t> anchors_in_box(const cv::CurveData& c, const ViewProj& vp,
+                                        const glm::mat4& to_world, glm::vec2 a, glm::vec2 b) {
+    const glm::vec2 lo(std::min(a.x, b.x), std::min(a.y, b.y));
+    const glm::vec2 hi(std::max(a.x, b.x), std::max(a.y, b.y));
+    std::vector<std::size_t> out;
+    for (std::size_t i = 0; i < c.points.size(); ++i) {
+        const auto p = to_px_(vp, to_world, c.points[i].position);
+        if (!p) continue;   // behind the camera
+        if (p->x >= lo.x && p->x <= hi.x && p->y >= lo.y && p->y <= hi.y) out.push_back(i);
+    }
+    return out;
+}
+
 bool is_endpoint(const cv::CurveData& c, std::size_t index) {
     if (c.closed || c.points.empty()) return false;
     return index == 0 || index + 1 == c.points.size();

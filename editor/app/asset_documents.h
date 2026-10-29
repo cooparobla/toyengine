@@ -101,6 +101,16 @@ struct MaterialDocument {
 using ThemeDocument = MaterialDocument;
 
 /**
+ * @brief A node graph open in the Graph workspace (editor/app/ui/node_graph.h).
+ *
+ * The same shape as a material: one YAML document, an UndoStack over it, and a saved revision.
+ * Deliberately NOT the hand-rolled `vector<Node> undo_` the UI designer uses -- that model has no
+ * labels, no merge keys and no place in `g_undo_sequence`, which is why Ctrl+S and Ctrl+Z
+ * currently pass the UI workspace by entirely.
+ */
+using NodeGraphDocument = MaterialDocument;
+
+/**
  * @brief config.yaml, edited as its raw document.
  *
  * Only keys the user touches are written (plus the ones already in the file): config

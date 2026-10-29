@@ -1,4 +1,5 @@
 #include "editor/app/ui/assets.h"
+#include "editor/app/ui/node_graph.h"
 #include "editor/app/ui/ui_canvas.h"
 
 #include "editor/app/editor_app.h"
@@ -29,6 +30,7 @@ const std::vector<AssetsPanel::AssetTypeInfo>& AssetsPanel::asset_types_() {
         {AssetType::UI, "UI", "UI", I::UiCanvas, "ui"},
         {AssetType::Theme, "Themes", "Theme", I::Palette, "ui/themes"},
         {AssetType::Audio, "Audio", "Sound", I::Play, "audio"},
+        {AssetType::NodeGraph, "Graphs", "Graph", I::Component, "graphs"},
     };
     return t;
 }
@@ -51,6 +53,7 @@ std::vector<std::string> AssetsPanel::list_assets_(AssetType t) {
             return out;
         }
         case AssetType::Theme: return app_.project_.list("ui/themes", ".yaml");
+        case AssetType::NodeGraph: return app_.project_.list("graphs", ".yaml");
         case AssetType::Audio: {
             std::vector<std::string> out;
             for (const char* dir : {"audio", "sounds"}) {
@@ -83,6 +86,7 @@ std::vector<std::string> AssetsPanel::list_engine_assets_(AssetType t) {
             return out;
         }
         case AssetType::Theme: return app_.project_.list_engine("ui/themes", ".yaml");
+        case AssetType::NodeGraph: return app_.project_.list_engine("graphs", ".yaml");
         case AssetType::Audio: {
             std::vector<std::string> out;
             for (const char* dir : {"audio", "sounds"}) {
@@ -161,6 +165,7 @@ AssetType AssetsPanel::asset_type_of_(const std::string& rel) {
     if (g.rfind("objects/", 0) == 0) return AssetType::Object;
     if (g.rfind("ui/themes/", 0) == 0) return AssetType::Theme;
     if (g.rfind("ui/", 0) == 0) return AssetType::UI;
+    if (g.rfind("graphs/", 0) == 0) return AssetType::NodeGraph;
     if (g.rfind("materials/", 0) == 0) return AssetType::Material;
     if (g.find("meshes/") != std::string::npos) return AssetType::Mesh;
     if (g.rfind("scenes/", 0) == 0) return AssetType::Scene;
@@ -424,6 +429,7 @@ bool AssetsPanel::asset_is_open_(AssetType t, const std::string& rel) const {
 bool AssetsPanel::open_asset_dirty_() const {
     switch (app_.active_type_) {
         case AssetType::Scene: case AssetType::Object: case AssetType::UI: return app_.doc_.dirty();
+        case AssetType::NodeGraph: return app_.graph_doc_.open() && app_.graph_doc_.dirty();
         case AssetType::Mesh: return app_.mesh_.open() && app_.mesh_.dirty();
         case AssetType::Material: return app_.material_.open() && app_.material_.dirty();
         default: return false;
@@ -454,6 +460,9 @@ void AssetsPanel::open_asset_now_(AssetType t, const fs::path& abs) {
         case AssetType::UI:
             if (app_.ui_canvas_panel_->open_ui_asset(abs)) app_.set_view_(AssetType::UI);
             break;
+        case AssetType::NodeGraph:
+            if (app_.node_graph_panel_->open_graph(abs)) app_.set_view_(AssetType::NodeGraph);
+            break;
         case AssetType::Theme: app_.theme_editor_panel_->open_theme(abs); break;
         case AssetType::Audio: open_audio(abs); break;
         default: app_.log_info(abs.string()); break;
@@ -467,6 +476,7 @@ void AssetsPanel::open_asset_(const std::string& kind, const std::string& item) 
     else if (kind == "material") open_asset(AssetType::Material, item);
     else if (kind == "texture") open_asset(AssetType::Texture, item);
     else if (kind == "ui") open_asset(AssetType::UI, item);
+    else if (kind == "graph") open_asset(AssetType::NodeGraph, item);
     else if (kind == "theme") open_asset(AssetType::Theme, item);
     else if (kind == "audio") open_asset(AssetType::Audio, item);
     else app_.log_info(item);
@@ -1079,6 +1089,7 @@ void AssetsPanel::new_asset_(AssetType t) {
         case AssetType::Object: app_.guarded_([this, tags] { with_tags_(tags, [&] { new_object_asset("object"); }); }); break;
         case AssetType::Material: app_.guarded_([this, tags] { with_tags_(tags, [&] { app_.create_material("material"); }); }); break;
         case AssetType::UI: app_.guarded_([this, tags] { with_tags_(tags, [&] { app_.ui_canvas_panel_->new_ui_asset("new_ui", "blank"); }); }); break;
+        case AssetType::NodeGraph: app_.guarded_([this, tags] { with_tags_(tags, [&] { app_.node_graph_panel_->new_graph("new_graph"); }); }); break;
         case AssetType::Theme: app_.guarded_([this, tags] { with_tags_(tags, [&] { app_.theme_editor_panel_->create_theme("theme"); }); }); break;
         default: break;
     }
@@ -1204,7 +1215,8 @@ void AssetsPanel::rename_asset_(const std::string& from, const std::string& to) 
     auto touched = [&](const fs::path& p) {
         return !p.empty() && std::find(rewritten.begin(), rewritten.end(), app_.project_.relative(p)) != rewritten.end();
     };
-    if ((app_.active_type_ == AssetType::Scene || app_.active_type_ == AssetType::Object || app_.active_type_ == AssetType::UI) && touched(app_.active_path_)) {
+    if ((app_.active_type_ == AssetType::Scene || app_.active_type_ == AssetType::Object ||
+         app_.active_type_ == AssetType::UI || app_.active_type_ == AssetType::NodeGraph) && touched(app_.active_path_)) {
         open_asset_now_(app_.active_type_, app_.active_path_);
     }
     if (app_.active_type_ == AssetType::Material && touched(app_.material_.path)) app_.open_material(app_.material_.path);

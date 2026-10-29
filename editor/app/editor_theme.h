@@ -58,6 +58,40 @@ struct EditorTheme {
         glm::vec4 camera{0.55f, 0.85f, 0.55f, 1.0f};
         glm::vec4 terrain{0.55f, 0.75f, 0.45f, 1.0f};
     } outliner;
+
+    /**
+     * @brief The node-graph canvas (editor/node/, editor/app/ui/node_graph.h).
+     *
+     * Socket colours are per socket TYPE and are looked up by name at startup, because
+     * `coopa::nodegraph::TypeInfo` carries no colour and should not -- the library is
+     * deliberately domain-free, so the mapping lives here with every other editor colour.
+     * A type with no entry falls back to `socket_default`.
+     */
+    struct NodeGraph {
+        glm::vec4 grid{0.0f, 0.0f, 0.0f, 0.10f};
+        glm::vec4 grid_major{0.0f, 0.0f, 0.0f, 0.18f};
+        glm::vec4 node_bg{0.16f, 0.16f, 0.18f, 0.96f};
+        glm::vec4 node_header{0.24f, 0.26f, 0.30f, 1.0f};
+        glm::vec4 node_outline{0.0f, 0.0f, 0.0f, 0.55f};
+        glm::vec4 node_selected{1.0f, 0.65f, 0.15f, 1.0f};
+        glm::vec4 node_error{0.95f, 0.35f, 0.30f, 1.0f};
+        glm::vec4 node_text{0.90f, 0.90f, 0.92f, 1.0f};
+        glm::vec4 wire{0.75f, 0.78f, 0.82f, 0.95f};
+        glm::vec4 wire_selected{1.0f, 0.65f, 0.15f, 1.0f};
+        glm::vec4 wire_dragging{0.95f, 0.95f, 0.60f, 0.95f};
+        glm::vec4 wire_invalid{0.95f, 0.35f, 0.30f, 0.95f};
+        glm::vec4 socket_default{0.70f, 0.70f, 0.74f, 1.0f};
+        glm::vec4 socket_float{0.64f, 0.64f, 0.64f, 1.0f};
+        glm::vec4 socket_int{0.45f, 0.70f, 0.45f, 1.0f};
+        glm::vec4 socket_bool{0.80f, 0.52f, 0.72f, 1.0f};
+        glm::vec4 socket_vector{0.42f, 0.45f, 0.86f, 1.0f};
+        glm::vec4 socket_color{0.86f, 0.80f, 0.35f, 1.0f};
+        glm::vec4 socket_string{0.40f, 0.72f, 0.78f, 1.0f};
+        glm::vec4 socket_geometry{0.30f, 0.78f, 0.52f, 1.0f};
+        glm::vec4 socket_object{0.90f, 0.58f, 0.28f, 1.0f};
+        glm::vec4 band_fill{0.35f, 0.55f, 0.95f, 0.18f};
+        glm::vec4 band_outline{0.55f, 0.72f, 1.0f, 0.85f};
+    } nodegraph;
 };
 
 /** @brief Calls `v(section, role, colour&)` for every editor role -- the single list. */
@@ -96,6 +130,29 @@ void visit_editor_theme(T& t, V&& v) {
     v("outliner", "light", t.outliner.light);
     v("outliner", "camera", t.outliner.camera);
     v("outliner", "terrain", t.outliner.terrain);
+    v("nodegraph", "grid", t.nodegraph.grid);
+    v("nodegraph", "grid_major", t.nodegraph.grid_major);
+    v("nodegraph", "node_bg", t.nodegraph.node_bg);
+    v("nodegraph", "node_header", t.nodegraph.node_header);
+    v("nodegraph", "node_outline", t.nodegraph.node_outline);
+    v("nodegraph", "node_selected", t.nodegraph.node_selected);
+    v("nodegraph", "node_error", t.nodegraph.node_error);
+    v("nodegraph", "node_text", t.nodegraph.node_text);
+    v("nodegraph", "wire", t.nodegraph.wire);
+    v("nodegraph", "wire_selected", t.nodegraph.wire_selected);
+    v("nodegraph", "wire_dragging", t.nodegraph.wire_dragging);
+    v("nodegraph", "wire_invalid", t.nodegraph.wire_invalid);
+    v("nodegraph", "socket_default", t.nodegraph.socket_default);
+    v("nodegraph", "socket_float", t.nodegraph.socket_float);
+    v("nodegraph", "socket_int", t.nodegraph.socket_int);
+    v("nodegraph", "socket_bool", t.nodegraph.socket_bool);
+    v("nodegraph", "socket_vector", t.nodegraph.socket_vector);
+    v("nodegraph", "socket_color", t.nodegraph.socket_color);
+    v("nodegraph", "socket_string", t.nodegraph.socket_string);
+    v("nodegraph", "socket_geometry", t.nodegraph.socket_geometry);
+    v("nodegraph", "socket_object", t.nodegraph.socket_object);
+    v("nodegraph", "band_fill", t.nodegraph.band_fill);
+    v("nodegraph", "band_outline", t.nodegraph.band_outline);
 }
 
 /** @brief The editor roles a theme defines (others keep EditorTheme's values). */

@@ -46,6 +46,15 @@ nodes:
     type: String
     pos: [-260, -160]
     props: { value: props/procgraph_post }
+  # The post mesh is authored one unit tall, so Height scales it on Z. Without this the
+  # `height` input would be declared and never consumed -- changing it would do nothing.
+  - id: 32
+    type: Float
+    pos: [-460, -260]
+    props: { value: 1.0 }
+  - id: 33
+    type: CombineXYZ
+    pos: [-260, -260]
 
   - id: 40
     type: MakeInstancer
@@ -65,6 +74,10 @@ links:
   - [1, posts, 20, count]
   - [20, points, 30, points]
   - [31, value, 30, prototype]
+  - [32, value, 33, x]
+  - [32, value, 33, y]
+  - [1, height, 33, z]
+  - [33, vector, 30, scale]
   - [30, instances, 40, instances]
   - [30, instances, 50, geometry]
   - [40, component, 50, components, 0]

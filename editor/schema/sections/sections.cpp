@@ -12,10 +12,13 @@
 namespace toy {
 namespace editor {
 
+void register_procgraph_section();
+
 void register_builtin_sections() {
     static bool done = false;
     if (done) return;
     done = true;
+    register_procgraph_section();
 }
 
 } // namespace editor

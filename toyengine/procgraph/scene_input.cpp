@@ -132,7 +132,7 @@ Value resolve_object_(const fkyaml::node& args, const ResolveContext& ctx) {
         core::yaml::read(args, "geometry", want_geometry);
     }
     if (name.empty()) {
-        ctx.error("an `object:` binding needs an object name");
+        ctx.warn("an `object:` binding has no object chosen yet; using the input's default");
         return Value();
     }
     SceneObject* obj = ctx.scene->find_object(name);
@@ -156,7 +156,7 @@ Value resolve_children_of_(const fkyaml::node& args, const ResolveContext& ctx) 
         core::yaml::read(args, "geometry", want_geometry);
     }
     if (name.empty()) {
-        ctx.error("a `children_of:` binding needs an object name");
+        ctx.warn("a `children_of:` binding has no object chosen yet; using the input's default");
         return Value();
     }
     SceneObject* parent = ctx.scene->find_object(name);
@@ -192,7 +192,7 @@ Value resolve_name_like_(const fkyaml::node& args, const ResolveContext& ctx) {
         core::yaml::read(args, "geometry", want_geometry);
     }
     if (pattern.empty()) {
-        ctx.error("a `name_like:` binding needs a pattern");
+        ctx.warn("a `name_like:` binding has no pattern yet; using the input's default");
         return Value();
     }
     std::vector<ObjectRef> refs;
@@ -271,7 +271,7 @@ Value resolve_var_(const fkyaml::node& args, const ResolveContext& ctx) {
         core::yaml::read(args, "var", name);
     }
     if (name.empty()) {
-        ctx.error("a `var:` binding needs a variable name");
+        ctx.warn("a `var:` binding names no variable yet; using the input's default");
         return Value();
     }
     if (ctx.variables == nullptr || !ctx.variables->contains(name)) {

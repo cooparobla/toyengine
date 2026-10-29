@@ -36,6 +36,9 @@ using ObjectId = int64_t;
 struct InspectorEnv {
     /// Project-relative asset paths ("meshes/cube.yaml") under `dir` with extension `ext`.
     std::function<std::vector<std::string>(const std::string& dir, const std::string& ext)> list_assets;
+    /// The name of the object with this id, or empty. Lets a ChildRef field accept an object
+    /// dragged out of the outliner, whose drag payload is an id rather than a name.
+    std::function<std::string(ObjectId)> object_name;
     /// Names a ChildRef field may pick (the edited object's descendants, then other objects).
     std::function<std::vector<std::string>()> object_names;
     /// Called after each field is drawn, with its key and its label's box: the Components tab
@@ -44,6 +47,11 @@ struct InspectorEnv {
     /// The live object the inspected block belongs to, or null: a custom section reads runtime
     /// state through it (particle counts, a vehicle's speed) and drives previews.
     std::function<coopa::scene::SceneObject*()> live_object;
+    /// Project-relative asset path ("graphs/stair.yaml") -> the absolute file that resolves,
+    /// searching the project's assets, then toyengine's, then by name. Empty when unset (tests)
+    /// or when nothing matches. A custom section that must READ an asset to know what rows to
+    /// draw -- a node graph's interface decides the ProceduralGraph inspector -- needs this.
+    std::function<std::string(const std::string& rel)> asset_path;
     /// Opens a project-relative asset ("materials/brick.yaml") in the editor.
     std::function<void(const std::string& path)> open_asset;
     /// A thumbnail of the image at a project-relative path ("textures/brick.png"), or a null

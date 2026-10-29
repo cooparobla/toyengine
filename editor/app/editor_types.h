@@ -55,7 +55,7 @@ enum class BindWeights { Automatic = 0, Envelope, EmptyGroups };
  * @brief The kind of asset the editor has open. Exactly one asset is open at a time, and its
  *        type decides what the viewer shows and what the Properties editor offers.
  */
-enum class AssetType { None = 0, Scene, Object, Mesh, Material, Texture, UI, Theme, Audio };
+enum class AssetType { None = 0, Scene, Object, Mesh, Material, Texture, UI, Theme, Audio, NodeGraph };
 /** @brief Blender's interaction modes for a mesh object (the viewport header's mode dropdown). */
 enum class InteractionMode { Object = 0, Edit, Sculpt, VertexPaint, WeightPaint, Pose };
 /** @brief Viewport shading, Blender's four buttons. */
@@ -73,7 +73,7 @@ enum class OriginStyle {
 /** @brief The origin glyph's size in metres when neither the object nor an ancestor sets one. */
 inline constexpr float kDefaultOriginSize = 0.5f;
 /** @brief The Properties editor's tabs. */
-enum class PropTab { Tool, Render, Output, Scene, World, Object, Components, Physics, Data, Material, Canvas, Bindings, Theme };
+enum class PropTab { Tool, Render, Output, Scene, World, Object, Components, Physics, Data, Material, Canvas, Bindings, Theme, Graph, GraphNode };
 
 
 

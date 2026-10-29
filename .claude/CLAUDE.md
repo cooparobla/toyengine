@@ -18,17 +18,35 @@ objects), and the widely-included headers -- `toy_render_config.h`, `light_data.
 `toy_render_pipeline.h` -- invalidate nearly every TU when touched. ccache turns the second
 compile of an unchanged TU into a copy, which is most of what these rebuilds are.
 
+**Setup is already done -- do not redo it.** `max_size = 150G` lives in
+`~/.config/ccache/ccache.conf`, which is global and therefore covers every tree, and both live
+build trees (`toyengine/build`, `habitat/build`) already carry the launcher. Verify rather than
+assume, per tree, in one command:
+
 ```bash
-sudo apt install -y ccache                      # once
-ccache -M 20G                                   # once; the engine churns a lot of objects
-cmake -B build -DCMAKE_CXX_COMPILER_LAUNCHER=ccache   # per build dir, including a game's
-ccache -s                                       # hit rate; -z to zero the counters
+grep -m1 CMAKE_CXX_COMPILER_LAUNCHER build/CMakeCache.txt   # want: =ccache
 ```
 
-Already-configured build dirs need the launcher added to their cache, not a wipe:
-`cmake -B build -DCMAKE_CXX_COMPILER_LAUNCHER=ccache` reconfigures in place and keeps every
-existing object. A reverted edit, a branch switch, or the same header touched twice then all
-come back from the cache instead of recompiling.
+If it prints nothing, add the launcher **in place** -- never by wiping the tree:
+`cmake -B build -DCMAKE_CXX_COMPILER_LAUNCHER=ccache` reconfigures and keeps every existing
+object. A reverted edit, a branch switch, or the same header touched twice then come back from
+the cache instead of recompiling. A brand-new tree (a fresh game project) needs the flag on its
+very first `cmake -B`, or its ~101 engine objects compile from scratch for nothing.
+
+**Do not read the hit rate as a score.** A long run of misses is the *correct* result while you
+edit a widely-included header -- every one of those TUs genuinely changed. Two numbers do mean
+something:
+
+```bash
+ccache -s                       # after a build: Cache size, Hits/Misses
+ccache -s -v | grep -i cleanup  # evictions; -z zeroes the counters
+```
+
+| Read | Means |
+|---|---|
+| `Cache size` approaching `max_size` | about to start evicting -- raise the cap |
+| nonzero cleanups | it already evicted objects you will need again. This is what the old 20 GB cap did against ~11 MB objects: 276 cleanups, 5.7% hits. At 150 GB it sits around 25 GB with no cleanups. |
+| hit % | nothing on its own -- compare it only between two runs of the *same* work |
 
 **Do NOT try to share one build directory between the engine and a game project.** Each tree
 needs its own: `TOY_SHADER_BUILD_DIR` and `GFX_SHADER_OUTPUT_ROOT` point at that tree's
@@ -39,13 +57,16 @@ why `TOY_SHADER_BUILD_DIR` is scoped to `runtime_paths.cpp` instead of being PUB
 `toyengine_engine` (see the comment at its definition): PUBLIC put a per-tree `-D` on every
 TU's command line and made them all cache-unique, which defeated sharing entirely.
 
-**Iterate in ONE tree.** `toyengine/build` has the whole test suite, so engine work belongs
-there; build a game project only when you actually need to run or profile that game. Building
-both for the same change costs two full engine compiles (~101 objects each) for nothing.
+**Pick ONE tree at the start of the session and iterate there.** `toyengine/build` has the
+whole test suite, so engine and editor work belongs there; build a game project's tree
+(`habitat/build`) only when you actually need to run or profile that game, and then go back.
+Building both for the same change costs two full engine compiles (~101 objects each) for
+nothing -- ccache makes the second one a file copy, not free. Switching trees mid-session for
+no reason is the single easiest way to turn a 5 s edit-build loop into a 2 min one.
 
-Two things that defeat it, both avoidable: `touch`ing headers to force a rebuild (the content
-is unchanged, so prefer fixing the real dependency problem), and `__DATE__`/`__TIME__`-style
-macros (none here).
+Two things defeat the cache, both avoidable: `touch`ing headers to force a rebuild (the
+content is unchanged, so fix the real dependency problem instead), and
+`__DATE__`/`__TIME__`-style macros (none here).
 
 **Build only what you will run, always `-j4`** (more jobs has panicked this box):
 
@@ -69,12 +90,46 @@ macros (none here).
   (`MemorySwapMax=0` is deliberate: fail fast rather than freeze on the tiny swapfile).
 - Compile-check one file without linking anything:
   `make -C build toyengine/water/water_system.cpp.o`, `make -C build/tests engine/gpu/cloth_test.cpp.o`.
-- Batch your edits, then build once. Don't rebuild after each small edit, and never after a
-  comment- or doc-only change.
+  For a **newly added** file this reports success without compiling anything (CMake has not
+  globbed it yet) -- confirm the `.o` actually exists before believing it.
+- Batch your edits and build once per stage -- see **Stage the work** below for what a stage is.
 - Prefer changes in `.cpp` files. Finish all header edits before building -- a header the
   `Engine`/`EditorApp` headers include rebuilds most test files.
 - Never `--target clean`, delete `build/`, or reconfigure "to be safe". A new `.cpp` is picked up
   automatically (GLOB_RECURSE CONFIGURE_DEPENDS).
+
+**Stage the work; test at stage boundaries, not after every edit.** A *stage* is a group of
+edits that compiles and is worth verifying as a unit -- one component plus its parser and
+system, one pass plus its config keys, one editor panel plus its schema rows. Per stage:
+
+1. Make **every** edit in the stage. Headers first, and finish all of them. No builds between.
+2. Build once, narrowest target (table above).
+3. Test narrowest-first (next section).
+4. Only then start the next stage.
+
+Builds and GPU runs are the expensive thing here -- 5 s to 2 min per build, 50-90 s per editor
+UI suite -- and a test run tells you nothing durable about code you are about to edit again.
+Never build or test after a comment-only, doc-only or README-only change. Never have two stages
+in flight: finish and verify stage N before editing for N+1, because a failure spanning two
+stages' worth of edits is the hard kind to backtrace.
+
+**Backtracing a failure.** The suite is expected green, so when a stage goes red start from the
+assumption that the cause is in *your* edits, and narrow before you change anything:
+
+1. **Read the FIRST error, not the last.** One bad header cascades into hundreds of lines;
+   `2>&1 | head -40` is usually the whole story.
+2. **Reproduce at the narrowest scope** -- one suite (`--suite <name>`), or one TU
+   (`make -C build toyengine/<area>/<file>.cpp.o`). If the narrow scope passes, the fault is in
+   an interaction, not in that file.
+3. **Rule out a stale or mismatched binary before reading any code.** `ctest` never builds, and
+   `toyengine_tests` does not build `toyengine_editor_tests`, so a suite can pass or fail from
+   an hours-old runner; a header edited mid-build gives an ODR segfault in an *unrelated* test.
+   Compare `stat -c %y` on the header, the `.o` and the runner.
+4. **Bisect your own stage, not the repo.** Copy the file aside into the scratchpad and revert
+   your edits in halves there. Never use git to get back to a baseline -- see rule 0 of the
+   global rules.
+5. **Name the cause before you fix it.** If you cannot say which edit caused the failure you
+   are guessing, and a guess that makes the symptom disappear leaves the bug in place.
 
 **Test the narrowest thing first.** The runners are `build/tests/toyengine_tests` and
 `build/tests/toyengine_editor_tests`; a suite is the name in a file's `COOPA_TEST_SUITE("...")`.

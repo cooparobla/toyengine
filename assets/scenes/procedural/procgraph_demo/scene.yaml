@@ -141,7 +141,6 @@ scene:
           bake: on_change
           inputs:
             markers: { children_of: Markers }
-            intensity: 6.0
       children: []
 
     # --- A graph driven by authored markers -----------------------------------------------

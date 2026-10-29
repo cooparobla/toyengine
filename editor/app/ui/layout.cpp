@@ -1,5 +1,6 @@
 #include "editor/app/editor_app.h"
 #include "editor/app/ui/topbar.h"
+#include "editor/app/ui/node_graph.h"
 #include "editor/app/ui/ui_canvas.h"
 #include "editor/app/ui/properties.h"
 #include "editor/app/ui/assets.h"
@@ -98,7 +99,14 @@ void EditorApp::draw_workspace_(imm::Context& ctx, const imm::Box& c) {
     if (hierarchy) ctx.fill(outliner, ctx.style.window_bg);
     ctx.fill(props, ctx.style.window_bg);
     draw_viewport_(ctx, viewport_area_(ctx, viewport), mesh_edit);
-    if (active_type_ == AssetType::UI) {
+    if (active_type_ == AssetType::NodeGraph) {
+        // The asset list above the graph's own node list, mirroring the UI designer's split.
+        const imm::Box a = area_(ctx, left);
+        const float split = std::max(140.0f, a.h * 0.4f);
+        assets_panel_->draw_asset_panel_(ctx, {a.x, a.y, a.w, split});
+        ctx.fill({a.x + 6, a.y + split, a.w - 12, 1}, ctx.style.border);
+        node_graph_panel_->draw_graph_palette_(ctx, {a.x, a.y + split + 2, a.w, a.h - split - 2});
+    } else if (active_type_ == AssetType::UI) {
         // The UI designer: the asset list above the Widgets palette.
         const imm::Box a = area_(ctx, left);
         const float split = std::max(140.0f, a.h * 0.4f);

@@ -26,6 +26,7 @@
 #include "editor/app/ui/theme_editor.h"
 #include "editor/app/ui/project_settings.h"
 #include "editor/app/ui/statusbar.h"
+#include "editor/app/ui/node_graph.h"
 #include "editor/app/ui/outliner.h"
 #include "editor/app/editor_context.h"
 
@@ -34,6 +35,9 @@
 #include <toyengine/world/tile_map_data.h>
 #include <toyengine/render/toy_render_pipeline.h>
 #include <toyengine/scene/skinned_mesh_renderer.h>
+#include <toyengine/scene/runtime_object.h>
+#include <toyengine/instance/instance_painter.h>
+#include <toyengine/procgraph/procedural_graph.h>
 
 namespace toy {
 namespace editor {
@@ -53,6 +57,7 @@ EditorApp::EditorApp(core::Engine& engine, Project project, const fs::path& scen
     weather_panel_ = std::make_unique<WeatherPanel>(*this);
     viewport_chrome_panel_ = std::make_unique<ViewportChromePanel>(*this);
     ui_canvas_panel_ = std::make_unique<UiCanvasPanel>(*this);
+    node_graph_panel_ = std::make_unique<NodeGraphPanel>(*this);
     topbar_panel_ = std::make_unique<TopbarPanel>(*this);
     timeline_panel_ = std::make_unique<TimelinePanel>(*this);
     tile_mode_panel_ = std::make_unique<TileModePanel>(*this);
@@ -233,6 +238,7 @@ int& EditorApp::world_generator_world_tiles() { return world_generator_panel_->w
 bool EditorApp::new_ui_asset(const std::string& name, const std::string& template_id) { return ui_canvas_panel_->new_ui_asset(name, template_id); }
 ObjectId EditorApp::place_ui_asset(const std::string& ui_rel, ObjectId parent) { return ui_canvas_panel_->place_ui_asset(ui_rel, parent); }
 UiCanvasPanel& EditorApp::ui_workspace() { return *ui_canvas_panel_; }
+NodeGraphPanel& EditorApp::graph_workspace() { return *node_graph_panel_; }
 bool EditorApp::save_theme() { return theme_editor_panel_->save_theme(); }
 void EditorApp::set_ui_interact(bool on) { ui_canvas_panel_->set_ui_interact(on); }
 ThemeDocument& EditorApp::theme_document() { return theme_editor_panel_->theme_document(); }
@@ -385,7 +391,8 @@ void EditorApp::apply_component_to_asset(ObjectId id, const std::string& type) {
 
 bool EditorApp::has_unsaved() const {
     return doc_.dirty() || (mesh_.open() && mesh_.dirty()) || (material_.open() && material_.dirty()) ||
-           (game_theme_.open() && game_theme_.dirty()) || config_.dirty();
+           (game_theme_.open() && game_theme_.dirty()) || (graph_doc_.open() && graph_doc_.dirty()) ||
+           config_.dirty();
 }
 
 bool EditorApp::request_close() {
@@ -551,6 +558,8 @@ EditorApp::UndoTarget EditorApp::undo_target_() const {
     // The Timeline's clip: while the panel is under the mouse, or while recording keys.
     if (anim_clip_.open() && show_bottom_ && bottom_view_ == 1 && (timeline_hovered_ || anim_record_)) return UndoTarget::Clip;
     if (active_type_ == AssetType::Material && material_.open()) return UndoTarget::Material;
+    // Without this a Ctrl+Z in the graph workspace undoes the open SCENE instead.
+    if (active_type_ == AssetType::NodeGraph && graph_doc_.open()) return UndoTarget::NodeGraph;
     if (prop_tab_ == PropTab::Theme && game_theme_.open() && properties_hovered_) return UndoTarget::Theme;
     const bool config_tab = prop_tab_ == PropTab::Render || prop_tab_ == PropTab::Output || prop_tab_ == PropTab::World;
     // Settings rows edit config.yaml or the scene's overrides: undo whichever changed last.
@@ -562,6 +571,7 @@ void EditorApp::undo() {
     switch (undo_target_()) {
         case UndoTarget::Mesh: mesh_.do_undo(); break;
         case UndoTarget::Material: material_.do_undo(); refresh_material_preview_(); break;
+        case UndoTarget::NodeGraph: graph_doc_.do_undo(); node_graph_panel_->refresh_from_document(); break;
         case UndoTarget::Theme: game_theme_.do_undo(); theme_editor_panel_->theme_changed_(); break;
         case UndoTarget::Config: config_.do_undo(); apply_config_live(); break;
         case UndoTarget::Scene: scene_undo_(); break;
@@ -575,6 +585,7 @@ void EditorApp::redo() {
     switch (undo_target_()) {
         case UndoTarget::Mesh: mesh_.do_redo(); break;
         case UndoTarget::Material: material_.do_redo(); refresh_material_preview_(); break;
+        case UndoTarget::NodeGraph: graph_doc_.do_redo(); node_graph_panel_->refresh_from_document(); break;
         case UndoTarget::Theme: game_theme_.do_redo(); theme_editor_panel_->theme_changed_(); break;
         case UndoTarget::Config: config_.do_redo(); apply_config_live(); break;
         case UndoTarget::Scene: scene_redo_(); break;
@@ -728,6 +739,7 @@ void EditorApp::switch_mesh_doc_(const fs::path& path) {
 
 void EditorApp::frame_selected() {
     if (active_type_ == AssetType::UI) { ui_canvas_panel_->ui_frame_selection_(); return; }
+    if (active_type_ == AssetType::NodeGraph) { node_graph_panel_->frame_selection(); return; }
     glm::vec3 lo(1e30f), hi(-1e30f);
     bool any = false;
     if (mesh_edit_view_() && mesh_.open()) {
@@ -746,6 +758,7 @@ void EditorApp::frame_selected() {
 
 void EditorApp::frame_all() {
     if (active_type_ == AssetType::UI) { ui_canvas_panel_->ui_fit_ = true; return; }
+    if (active_type_ == AssetType::NodeGraph) { node_graph_panel_->frame_all(); return; }
     glm::vec3 lo(1e30f), hi(-1e30f);
     bool any = false;
     if (asset_view_()) {
@@ -815,7 +828,8 @@ void EditorApp::set_view_(AssetType t) {
     active_type_ = t;
     set_shading(shading_by_type_[static_cast<int>(t)]);
     prop_tab_ = t == AssetType::Material ? PropTab::Material : t == AssetType::Mesh ? PropTab::Data
-              : t == AssetType::UI ? PropTab::Object : PropTab::Tool;
+              : t == AssetType::UI ? PropTab::Object
+              : t == AssetType::NodeGraph ? PropTab::Graph : PropTab::Tool;
     const bool now_asset = asset_view_();
     if (was_asset != now_asset) {
         // The asset preview and the scene each keep their own view.
@@ -1009,6 +1023,89 @@ PackageReport EditorApp::package(const fs::path& out_dir, bool keep_yaml) {
     return rep;
 }
 
+
+void EditorApp::baked_subtree_hit_(const coopa::scene::SceneObject& obj, const glm::vec3& o,
+                                   const glm::vec3& d, float& nearest) const {
+    const auto* tc = obj.get_transform();
+    const glm::mat4 world = tc ? tc->transform().get_world_matrix() : glm::mat4(1.0f);
+
+    // A box test, not a triangle test: baked output is usually hundreds of instances, and the
+    // click only has to decide WHICH OBJECT was meant -- the owner -- never which triangle.
+    auto box_hit = [&](const glm::mat4& m, const glm::vec3& lo, const glm::vec3& hi) {
+        if (lo.x > hi.x || lo.y > hi.y || lo.z > hi.z) return;
+        const glm::mat4 inv = glm::inverse(m);
+        const glm::vec3 ro = glm::vec3(inv * glm::vec4(o, 1.0f));
+        const glm::vec3 rd = glm::vec3(inv * glm::vec4(d, 0.0f));
+        if (!ray_aabb(ro, rd, lo, hi)) return;
+        const glm::vec3 centre = glm::vec3(m * glm::vec4((lo + hi) * 0.5f, 1.0f));
+        nearest = std::min(nearest, glm::dot(centre - o, d));
+    };
+
+    if (const auto* mr = obj.get_component<coopa::gfx::engine::components::MeshRenderer>()) {
+        if (const auto* mesh = mr->get_mesh().get()) box_hit(world, mesh->bounds_min(), mesh->bounds_max());
+    }
+    if (const auto* painter = obj.get_component<toy::instance::InstancePainter>();
+        painter && painter->data) {
+        for (const auto& c : painter->data->chunks()) {
+            const auto* records = painter->data->records(c);
+            if (records == nullptr) continue;
+            for (const auto& r : *records) {
+                if (r.prototype >= painter->prototypes.size()) continue;
+                const auto& proto = painter->prototypes[r.prototype];
+                if (!proto.resolved) continue;
+                box_hit(r.matrix(), proto.bounds_min, proto.bounds_max);
+            }
+        }
+    }
+    for (const auto& child : obj.children()) baked_subtree_hit_(*child, o, d, nearest);
+}
+
+
+void EditorApp::draw_baked_outline_(imm::Context& ctx, const ViewProj& vp,
+                                    const coopa::scene::SceneObject& obj, const glm::vec4& col,
+                                    std::size_t& budget) const {
+    if (budget == 0 || !obj.active()) return;
+    const auto* tc = obj.get_transform();
+    const glm::mat4 world = tc ? tc->transform().get_world_matrix() : glm::mat4(1.0f);
+
+    // A box per renderable, not its edges: baked output has no CPU mesh to walk (it is a
+    // synthesized asset, not a file, so mesh_for_object_() cannot reach it) and is often
+    // hundreds of instances. The box reads as "this is what the graph made", which is the
+    // question the highlight answers.
+    auto box = [&](const glm::mat4& m, const glm::vec3& lo, const glm::vec3& hi) {
+        if (budget == 0 || lo.x > hi.x || lo.y > hi.y || lo.z > hi.z) return;
+        --budget;
+        ++baked_outlines_drawn_;
+        const glm::vec3 c[8] = {{lo.x, lo.y, lo.z}, {hi.x, lo.y, lo.z}, {hi.x, hi.y, lo.z}, {lo.x, hi.y, lo.z},
+                                {lo.x, lo.y, hi.z}, {hi.x, lo.y, hi.z}, {hi.x, hi.y, hi.z}, {lo.x, hi.y, hi.z}};
+        std::optional<glm::vec2> p[8];
+        for (int i = 0; i < 8; ++i) p[i] = vp.project(glm::vec3(m * glm::vec4(c[i], 1.0f)));
+        static constexpr int kEdges[12][2] = {{0,1},{1,2},{2,3},{3,0}, {4,5},{5,6},{6,7},{7,4}, {0,4},{1,5},{2,6},{3,7}};
+        for (const auto& e : kEdges) {
+            if (p[e[0]] && p[e[1]]) ctx.line(*p[e[0]], *p[e[1]], col, 1.5f);
+        }
+    };
+
+    if (const auto* mr = obj.get_component<coopa::gfx::engine::components::MeshRenderer>()) {
+        if (const auto* mesh = mr->get_mesh().get()) box(world, mesh->bounds_min(), mesh->bounds_max());
+    }
+    if (const auto* painter = obj.get_component<toy::instance::InstancePainter>();
+        painter && painter->data) {
+        for (const auto& c : painter->data->chunks()) {
+            const auto* records = painter->data->records(c);
+            if (records == nullptr) continue;
+            for (const auto& r : *records) {
+                if (budget == 0) return;
+                if (r.prototype >= painter->prototypes.size()) continue;
+                const auto& proto = painter->prototypes[r.prototype];
+                if (!proto.resolved) continue;
+                box(r.matrix(), proto.bounds_min, proto.bounds_max);
+            }
+        }
+    }
+    for (const auto& child : obj.children()) draw_baked_outline_(ctx, vp, *child, col, budget);
+}
+
 std::vector<ObjectId> EditorApp::pick_candidates_(glm::vec2 px) {
     const auto vp = view_proj_();
     if (!vp) return {};
@@ -1054,6 +1151,25 @@ std::vector<ObjectId> EditorApp::pick_candidates_(glm::vec2 px) {
             if (gp < 8.0f) hits.push_back({id, glm::dot(glm::vec3(world[3]) - o, d), gp >= 4.0f});
         }
     }
+    // Geometry a ProceduralGraph baked is NOT in the document -- it is a runtime subtree under
+    // the owner -- so the loop above skips it and clicking a baked post used to hit nothing.
+    // Raycast those subtrees here and report the OWNER, which is what the user means by
+    // "select the railing": the object carrying the component, the only thing they can edit.
+    for (const auto& [id, live] : sync_.live_objects()) {
+        if (!doc_.find(id) || !live) continue;
+        if (live->get_component<toy::procgraph::ProceduralGraph>() == nullptr) continue;
+        bool shown = true;
+        for (const auto* a = live; a && shown; a = a->parent()) shown = a->active();
+        if (!shown) continue;
+        float nearest = 1e30f;
+        for (const auto& child : live->children()) {
+            const auto* marker = child->get_component<toy::scene::RuntimeObject>();
+            if (marker == nullptr || marker->owner_system != "ProceduralGraph") continue;
+            baked_subtree_hit_(*child, o, d, nearest);
+        }
+        if (nearest < 1e29f) hits.push_back({id, nearest, false});
+    }
+
     // Nearest first; a glyph only grazed yields to every surface, as it did before.
     std::stable_sort(hits.begin(), hits.end(), [](const Hit& a, const Hit& b) {
         if (a.loose_glyph != b.loose_glyph) return b.loose_glyph;
@@ -1158,6 +1274,16 @@ InspectorEnv EditorApp::inspector_env_() {
             if (std::find(out.begin(), out.end(), n) == out.end()) out.push_back(n);
         });
         return out;
+    };
+    env.object_name = [this](ObjectId id) -> std::string {
+        const Node* o = id ? doc_.find(id) : nullptr;
+        return o ? get_string(*o, "name") : std::string();
+    };
+    env.asset_path = [this](const std::string& rel) -> std::string {
+        if (rel.empty()) return {};
+        const fs::path abs = project_.absolute(rel);
+        std::error_code ec;
+        return fs::is_regular_file(abs, ec) ? abs.string() : std::string{};
     };
     env.object_id = doc_.primary();
     env.playing = playing();
@@ -1515,7 +1641,12 @@ void EditorApp::update_scene_ui_placement_() {
         return;
     }
     engine_.set_ui_preview(false);
-    if (asset_view_() || viewport_box_.empty()) { engine_.set_scene_ui_placement(std::nullopt); return; }
+    // NodeGraph is not asset_view_(), so without naming it here the open scene's HUD would be
+    // placed over display_rect() and paint on top of the graph canvas.
+    if (asset_view_() || active_type_ == AssetType::NodeGraph || viewport_box_.empty()) {
+        engine_.set_scene_ui_placement(std::nullopt);
+        return;
+    }
     core::Engine::ScreenUiPlacement p;
     p.rect = engine_.display_rect();
     p.input = playing() && game_focused_;
@@ -2175,6 +2306,7 @@ glm::mat4 EditorApp::mesh_world_() {
 
 void EditorApp::draw_viewport_(imm::Context& ctx, const imm::Box& area, bool mesh_edit) {
     if (active_type_ == AssetType::UI) { ui_canvas_panel_->draw_ui_view_(ctx, area); return; }   // the UI designer (ui/ui_canvas.h)
+    if (active_type_ == AssetType::NodeGraph) { node_graph_panel_->draw_graph_view_(ctx, area); return; }   // the node canvas (ui/node_graph.h)
     const imm::Box hb = area_header_(ctx, area);
     viewport_chrome_panel_->draw_viewport_header_(ctx, hb, mesh_edit);
     viewport_box_ = imm::Box{area.x, hb.bottom(), area.w, std::max(1.0f, area.h - hb.h)};
@@ -3712,6 +3844,7 @@ void EditorApp::draw_viewport_overlay_(imm::Context& ctx, bool mesh_edit) {
 void EditorApp::draw_viewport_overlay_body_(imm::Context& ctx, bool mesh_edit, const ViewProj& vp_ref) {
     const ViewProj* vp = &vp_ref;
     selection_outlines_drawn_ = 0;
+    baked_outlines_drawn_ = 0;
     grid_wanted_ = show_overlays_ && show_grid_ && !(playing() && !mesh_edit) &&
                    active_type_ != AssetType::Material && active_type_ != AssetType::Texture;
     const glm::vec4 accent = ctx.style.object_selected;
@@ -3781,6 +3914,17 @@ void EditorApp::draw_viewport_overlay_body_(imm::Context& ctx, bool mesh_edit, c
                 for (const auto& c : n.at("children").as_seq()) if (c.contains(kInheritedKey)) outline(SceneDocument::id_of(c), c);
             };
             outline(id, *node);
+            // Geometry a ProceduralGraph baked is a RUNTIME subtree with no document node, so
+            // the recursion above never reaches it and a selected graph used to highlight
+            // nothing at all. Selecting the component means selecting everything it made.
+            if (live->get_component<toy::procgraph::ProceduralGraph>() != nullptr) {
+                std::size_t budget = 4000;
+                for (const auto& child : live->children()) {
+                    const auto* marker = child->get_component<toy::scene::RuntimeObject>();
+                    if (marker == nullptr || marker->owner_system != "ProceduralGraph") continue;
+                    draw_baked_outline_(ctx, *vp, *child, col, budget);
+                }
+            }
             ++selection_outlines_drawn_;
             // Origin dot.
             if (show_overlays_ && show_origins_) {
@@ -3975,6 +4119,7 @@ void EditorApp::discard_all_changes_() {
     mesh_.saved_revision = mesh_.undo.revision();
     material_.saved_revision = material_.undo.revision();
     game_theme_.saved_revision = game_theme_.undo.revision();
+    graph_doc_.saved_revision = graph_doc_.undo.revision();
     config_.saved_revision = config_.undo.revision();
     force_quit_ = true;
 }
@@ -3989,6 +4134,7 @@ void EditorApp::save_all_() {
     if (mesh_.open() && mesh_.dirty()) save_mesh();
     if (material_.open() && material_.dirty()) save_material();
     if (game_theme_.open() && game_theme_.dirty()) theme_editor_panel_->save_theme();
+    if (graph_doc_.open() && graph_doc_.dirty()) node_graph_panel_->save();
     if (config_.dirty()) save_config();
 }
 
@@ -4046,6 +4192,7 @@ std::string EditorApp::current_undo_label_(bool undo) {
         case UndoTarget::Material: return pick(material_.undo.undo_label(), material_.undo.redo_label());
         case UndoTarget::Theme: return pick(game_theme_.undo.undo_label(), game_theme_.undo.redo_label());
         case UndoTarget::Config: return pick(config_.undo.undo_label(), config_.undo.redo_label());
+        case UndoTarget::NodeGraph: return pick(graph_doc_.undo.undo_label(), graph_doc_.undo.redo_label());
     }
     return {};
 }
@@ -4068,7 +4215,7 @@ void EditorApp::handle_shortcuts_(imm::Context& ctx) {
     if (game_focused_ && ctx.shortcut(Key::Escape)) set_game_focus_(false);
     if (ctx.any_popup_open()) return;
     // Outliner keymap (mouse over the outliner).
-    if (hierarchy_hovered_ && !asset_view_() && !playing()) {
+    if (hierarchy_hovered_ && !asset_view_() && active_type_ != AssetType::NodeGraph && !playing()) {
         if (ctx.shortcut(Key::X) || ctx.shortcut(Key::Delete)) delete_selected();
         if (ctx.shortcut(Key::F2) && doc_.primary() && !doc_.is_inherited(doc_.primary())) { rename_id_ = doc_.primary(); rename_frames_ = 0; }
         if (ctx.shortcut(Key::A)) { doc_.clear_selection(); for (ObjectId id : visible_ids_()) doc_.select(id, true); }
@@ -4077,7 +4224,7 @@ void EditorApp::handle_shortcuts_(imm::Context& ctx) {
         if (ctx.shortcut(Key::H, Mods::Alt)) unhide_all_();
         if (ctx.shortcut(Key::KpDecimal) || ctx.shortcut(Key::Period) || ctx.shortcut(Key::F)) frame_selected();
     }
-    if (ctx.shortcut(Key::F2) && !asset_view_() && doc_.primary() && !playing() && !doc_.is_inherited(doc_.primary())) { rename_id_ = doc_.primary(); rename_frames_ = 0; }
+    if (ctx.shortcut(Key::F2) && !asset_view_() && active_type_ != AssetType::NodeGraph && doc_.primary() && !playing() && !doc_.is_inherited(doc_.primary())) { rename_id_ = doc_.primary(); rename_frames_ = 0; }
 }
 
 void EditorApp::set_game_focus_(bool focused) {

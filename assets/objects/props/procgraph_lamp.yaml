@@ -1,20 +1,21 @@
 # A lamp the marker_lights graph instances: a small emissive post plus the light itself.
 # Instanced rather than built by the graph, because what that graph demonstrates is that it can
 # place COMPONENTS -- the geometry is incidental.
-name: ProcgraphLamp
-active: true
-components:
-  - type: Transform
-    position: { x: 0.0, y: 0.0, z: 0.0 }
-  - type: MeshRenderer
-    mesh_path: procgraph_post
-    material:
-      albedo: { r: 0.9, g: 0.85, b: 0.7 }
-      emissive: { r: 1.0, g: 0.8, b: 0.4 }
-      emissive_strength: 2.0
-      roughness: 0.4
-  - type: PointLight
-    color: { r: 1.0, g: 0.82, b: 0.55 }
-    intensity: 6.0
-    range: 7.0
-children: []
+object:
+  name: ProcgraphLamp
+  active: true
+  components:
+    - type: Transform
+      position: { x: 0.0, y: 0.0, z: 0.0 }
+    - type: MeshRenderer
+      mesh_path: procgraph_post
+      material:
+        albedo: { r: 0.9, g: 0.85, b: 0.7 }
+        emissive: { r: 1.0, g: 0.8, b: 0.4 }
+        emissive_strength: 2.0
+        roughness: 0.4
+    - type: PointLight
+      color: { r: 1.0, g: 0.82, b: 0.55 }
+      intensity: 6.0
+      range: 7.0
+  children: []

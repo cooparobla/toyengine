@@ -9,6 +9,7 @@
 #include <coopa/testing/test.h>
 
 #include <atomic>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -500,4 +501,36 @@ COOPA_TEST(every_registered_node_declares_without_crashing_on_empty_props) {
                    "' has a registered type");
         }
     }
+}
+
+/**
+ * @brief Every shipped graph is free of dead interface sockets.
+ *
+ * A declared input nothing reads is the worst kind of broken: the bake succeeds, the component
+ * inspector shows the knob, and turning it does nothing at all. Both `spline_railing.height` and
+ * `marker_lights.intensity` shipped that way. `Graph::validate()` warns about it now, and this
+ * holds the assets to it.
+ */
+COOPA_TEST(no_shipped_graph_declares_an_interface_socket_nothing_uses) {
+    setup();
+    const std::filesystem::path dir = std::filesystem::path(ROOT_DIR) / "assets" / "graphs";
+    int checked = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+        if (entry.path().extension() != ".yaml") continue;
+        Diagnostics load_diag;
+        const Graph g = coopa::nodegraph::load_graph(entry.path().string(), load_diag);
+        expect(load_diag.ok(),
+               "procgraph: " + entry.path().filename().string() + " loads: " + load_diag.to_string());
+
+        Diagnostics diag;
+        g.validate(diag);
+        const std::string text = diag.to_string();
+        expect(text.find("is declared but no node reads it") == std::string::npos,
+               "procgraph: " + entry.path().filename().string() + " has no dead input: " + text);
+        expect(text.find("is declared but nothing is wired to it") == std::string::npos,
+               "procgraph: " + entry.path().filename().string() + " has no dead output: " + text);
+        ++checked;
+    }
+    expect(checked >= 3, "procgraph: the shipped graphs were actually found and checked (" +
+                             std::to_string(checked) + ")");
 }

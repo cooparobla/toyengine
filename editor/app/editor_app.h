@@ -120,6 +120,7 @@ class ConsolePanel;
 class WeatherPanel;
 class ViewportChromePanel;
 class UiCanvasPanel;
+class NodeGraphPanel;
 class TopbarPanel;
 class TimelinePanel;
 class TileModePanel;
@@ -169,6 +170,7 @@ class EditorApp {
     friend class WeatherPanel;
     friend class ViewportChromePanel;
     friend class UiCanvasPanel;
+    friend class NodeGraphPanel;
     friend class TopbarPanel;
     friend class TimelinePanel;
     friend class TileModePanel;
@@ -273,6 +275,9 @@ public:
     bool playing() const { return play_scene_ != nullptr; }
     /** @brief Selection outlines the viewport overlay drew last frame (tests / diagnostics). */
     int selection_outlines_drawn() const { return selection_outlines_drawn_; }
+    /// @brief Boxes drawn last frame around a selected ProceduralGraph's baked output. 0 when
+    ///        nothing baked is selected -- the signal that the highlight reached the geometry.
+    int baked_outlines_drawn() const { return baked_outlines_drawn_; }
     /** @brief Collider wireframe lines drawn last frame (0 with the Colliders toggle off). */
     size_t collider_lines_drawn() const { return collider_lines_drawn_; }
     bool show_colliders() const { return show_colliders_; }
@@ -373,6 +378,8 @@ public:
     ObjectId place_ui_asset(const std::string& ui_rel, ObjectId parent = 0);
     /** @brief The UI workspace: the panel and placement editors (see `app/ui/ui_canvas.h`). */
     UiCanvasPanel& ui_workspace();
+    /** @brief The node-graph workspace (ui/node_graph.h). */
+    NodeGraphPanel& graph_workspace();
     bool save_theme();
     void set_ui_interact(bool on);
     ThemeDocument& theme_document();
@@ -539,7 +546,7 @@ public:
     void duplicate_selected();
 
     /** @brief Which document Ctrl+Z acts on: what the user is looking at / pointing at. */
-    enum class UndoTarget { Scene, Mesh, Material, Theme, Config, Clip };
+    enum class UndoTarget { Scene, Mesh, Material, Theme, Config, Clip, NodeGraph };
     UndoTarget undo_target_() const;
 
     void undo();
@@ -654,6 +661,27 @@ public:
 
     /** @brief Picks the document object under a canvas-pixel position (0 = nothing). */
     ObjectId pick_object(glm::vec2 px);
+
+    /**
+     * @brief Outlines a ProceduralGraph's baked subtree, so selecting the component highlights
+     *        everything the graph made.
+     *
+     * Boxes, not mesh edges: the bake's output is a synthesized asset rather than a file, so
+     * there is no CPU mesh to walk. `budget` caps the lines a graph with thousands of instances
+     * can cost in one frame.
+     */
+    void draw_baked_outline_(imm::Context& ctx, const ViewProj& vp,
+                             const coopa::scene::SceneObject& obj, const glm::vec4& col,
+                             std::size_t& budget) const;
+
+    /**
+     * @brief Ray vs a ProceduralGraph's baked subtree, narrowing `nearest`.
+     *
+     * Boxes rather than triangles: the output is typically hundreds of instances, and the click
+     * only has to decide which OBJECT was meant.
+     */
+    void baked_subtree_hit_(const coopa::scene::SceneObject& obj, const glm::vec3& o,
+                            const glm::vec3& d, float& nearest) const;
 
 private:
     // =================================================================================
@@ -1252,6 +1280,7 @@ private:
     std::unique_ptr<WeatherPanel> weather_panel_;
     std::unique_ptr<ViewportChromePanel> viewport_chrome_panel_;
     std::unique_ptr<UiCanvasPanel> ui_canvas_panel_;
+    std::unique_ptr<NodeGraphPanel> node_graph_panel_;
     std::unique_ptr<TopbarPanel> topbar_panel_;
     std::unique_ptr<TimelinePanel> timeline_panel_;
     std::unique_ptr<TileModePanel> tile_mode_panel_;
@@ -1287,6 +1316,7 @@ private:
     MeshDocument mesh_;
     MaterialDocument material_;
     ThemeDocument game_theme_;   ///< The game UI theme open in the Theme tab (ui/theme_editor.h).
+    NodeGraphDocument graph_doc_;   ///< The node graph open in the Graph workspace (ui/node_graph.h).
     ConfigDocument config_;
 
     AssetType active_type_ = AssetType::Scene;   // what's open (see AssetType)
@@ -1297,8 +1327,8 @@ private:
     coopa::sfx::data::ClipImportSettings audio_import_;   ///< The open sound's .import sidecar.
     bool audio_import_dirty_ = false;
     coopa::sfx::mixer::VoiceHandle audio_preview_;
-    Shading shading_by_type_[9] = {Shading::Solid, Shading::Solid, Shading::Solid, Shading::Solid, Shading::Full, Shading::MaterialPreview,
-                                   Shading::Full, Shading::Full, Shading::MaterialPreview};
+    Shading shading_by_type_[10] = {Shading::Solid, Shading::Solid, Shading::Solid, Shading::Solid, Shading::Full, Shading::MaterialPreview,
+                                   Shading::Full, Shading::Full, Shading::MaterialPreview, Shading::Solid};
     std::string full_debug_view_;
     std::string config_base_debug_view_;
 
@@ -1455,6 +1485,7 @@ private:
     bool open_add_menu_ = false;
     float outliner_h_ = 260;
     int selection_outlines_drawn_ = 0;
+    mutable int baked_outlines_drawn_ = 0;
     std::string outliner_filter_, add_component_filter_, browser_dir_;
     std::vector<std::string> asset_dirs_cache_;
     bool viewport_hovered_ = false, hierarchy_hovered_ = false;

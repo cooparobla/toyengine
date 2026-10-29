@@ -421,7 +421,21 @@ EditResult draw_field(imm::Context& ctx, const FieldDesc& f, Node& block, const 
             if (idx < 0) { values.push_back(cur); idx = static_cast<int>(values.size()) - 1; }
             std::vector<std::string> shown = values;
             shown[0] = "(none)";
-            const bool ch = ctx.combo(label, &idx, shown);
+            bool ch = ctx.combo(label, &idx, shown);
+            // Drop an object straight out of the outliner, Unity-style. Its payload is an id, so
+            // the name has to be looked up; an id with no name is ignored rather than written.
+            if (auto dropped = ctx.drop_target("object", ctx.last_rect())) {
+                std::string name;
+                if (env.object_name) {
+                    try { name = env.object_name(static_cast<ObjectId>(std::stoull(*dropped))); }
+                    catch (const std::exception&) { name.clear(); }
+                }
+                if (!name.empty()) {
+                    values.push_back(name);
+                    idx = static_cast<int>(values.size()) - 1;
+                    ch = true;
+                }
+            }
             if (ch) {
                 const std::string& v = values[static_cast<size_t>(idx)];
                 if (v.empty()) erase_key(block, f.key);

@@ -6,15 +6,13 @@ inputs:
   - id: markers
     type: ObjectSet
     label: Markers
-  - id: intensity
-    type: Float
-    label: Intensity
-    default: 3.0
-    min: 0.0
-    max: 20.0
 outputs:
   - id: object
     type: ObjectSpec
+# No `intensity` input: the lamps are instances of an object asset, and the node set has no way
+# to drive a component property PER INSTANCE (AddComponent takes its keys from `props:`, not from
+# a socket). A declared input nothing can consume is worse than none -- it reads as a knob and
+# does nothing, which is what Graph::validate() now warns about.
 nodes:
   - id: 1
     type: GroupInput

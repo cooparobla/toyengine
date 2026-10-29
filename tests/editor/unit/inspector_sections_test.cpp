@@ -151,4 +151,43 @@ COOPA_TEST(the_registry_hands_back_the_drawer_registered_for_an_id) {
     expect(find_inspector_section("TestSection.rows") != nullptr, "re-registering an id replaces its drawer");
 }
 
+
+/**
+ * @brief The ProceduralGraph Inputs section finds its drawer, and the drawer claims `inputs`.
+ *
+ * Two mistakes this catches, both of which leave an Inputs section that is simply EMPTY with no
+ * error anywhere: registering the drawer under an id the section does not name, and a section
+ * whose `custom` id does not match the registration -- `draw_section()` looks up `s.custom`
+ * verbatim, so the id in `component_sections.cpp` has to be the full "Type.section" spelling.
+ * When the drawer does not run, `inputs` also stays unclaimed and reappears under *More*.
+ */
+COOPA_TEST(the_procedural_graph_inputs_section_is_wired_to_its_drawer) {
+    register_builtin_sections();
+
+    const SectionDrawFn* fn = find_inspector_section("ProceduralGraph.inputs");
+    expect(fn != nullptr,
+           "the ProceduralGraph inputs drawer is registered under the id its section names");
+
+    const ComponentSchema* schema = find_schema("ProceduralGraph");
+    expect(schema != nullptr, "ProceduralGraph has a schema");
+    bool named = false;
+    for (const auto& sec : schema->sections) {
+        if (sec.custom == "ProceduralGraph.inputs") named = true;
+    }
+    expect(named,
+           "and a section names that exact id -- draw_section() looks it up verbatim, so a bare "
+           "\"inputs\" would find nothing and draw an empty section");
+
+    // With no graph chosen there are no rows to draw, but the key must still be claimed, or the
+    // raw `inputs` mapping shows up again under the generic More block.
+    Node comp = Node::mapping();
+    std::set<std::string> drawn;
+    InspectorEnv env;
+    SectionContext sc{comp, env, 0, &drawn};
+    ImmHarness h;
+    h.frame([&](coopa::ui::imm::Context& c) { (*fn)(c, sc); });
+    expect(drawn.count("inputs") == 1,
+           "the drawer claims `inputs`, so it is not listed twice");
+}
+
 } // namespace toy::editor::testing

@@ -231,6 +231,11 @@ void apply_component_sections(std::map<std::string, ComponentSchema>& table) {
                   "lights, colliders, instances -- is decided by the nodes in the graph, not by "
                   "settings here.")
             .keys({"graph", "seed"}).done(),
+        sec("Inputs", "Component")
+            .says("The parameters THIS graph declares. Each is either a value typed here, or a "
+                  "binding that fetches something from the scene -- an object, its children, a "
+                  "component's property.")
+            .custom("ProceduralGraph.inputs").done(),
         sec("Baking", "Play")
             .says("When it re-runs. A bake happens off the frame on a worker thread, so a "
                   "re-bake never hitches.")

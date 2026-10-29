@@ -181,8 +181,15 @@ void ProceduralGraphSystem::process_(coopa::scene::Scene& scene,
 
     // A graph bound to an object inside its own output would dirty itself every bake and never
     // settle, so it is refused as a diagnostic rather than looped on.
-    if (component.owner != nullptr && entry.published.root != nullptr &&
-        bindings_reference_subtree(component.inputs, scene, *entry.published.root)) {
+    //
+    // `live_root()`, never `published.root`: the editor destroys and recreates the component's
+    // object on every inspector edit, which takes the published subtree with it, while THIS
+    // entry survives (it is keyed to outlive the component by design). Dereferencing the stored
+    // pointer then reads freed memory -- a segfault one frame after dragging a value.
+    coopa::scene::SceneObject* published_root = entry.published.live_root(component.owner);
+    if (published_root == nullptr) entry.published.root = nullptr;
+    if (component.owner != nullptr && published_root != nullptr &&
+        bindings_reference_subtree(component.inputs, scene, *published_root)) {
         pending.errors.push_back(
             "a binding resolves to an object inside this graph's own output; that would re-dirty "
             "the bake every frame and never settle");

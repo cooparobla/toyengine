@@ -1,5 +1,6 @@
 #include "editor/app/ui/properties.h"
 #include "editor/app/ui/weather.h"
+#include "editor/app/ui/node_graph.h"
 #include "editor/app/ui/ui_canvas.h"
 #include "editor/app/ui/tile_mode.h"
 #include "editor/app/ui/terrain.h"
@@ -56,6 +57,12 @@ void PropertiesPanel::draw_properties_(imm::Context& ctx, const imm::Box& area) 
         object_start = 1;
         tabs = {{PropTab::Canvas, I::UiCanvas, "Panel\nTitle, size, anchor and theme of the whole panel"},
                 {PropTab::Object, I::UiAnchor, "Row\nThe selected row: its label, value key and range"}};
+    } else if (app_.active_type_ == AssetType::NodeGraph) {
+        // The graph is the document and a node is the selection, so two tabs -- the same shape
+        // the UI designer uses, and for the same reason: there is no object tree to walk.
+        object_start = 1;
+        tabs = {{PropTab::Graph, I::Component, "Graph\nIts name, its inputs and outputs"},
+                {PropTab::GraphNode, I::Gear, "Node\nThe selected node's settings"}};
     }
     if (runtime_obj) {
         object_start = static_cast<int>(tabs.size());
@@ -134,6 +141,13 @@ void PropertiesPanel::draw_properties_(imm::Context& ctx, const imm::Box& area) 
             default:                  draw_component_list_(ctx, id, false); break;
         }
     }
+    else if (app_.active_type_ == AssetType::NodeGraph) {
+        switch (app_.prop_tab_) {
+            case PropTab::Graph:     app_.node_graph_panel_->draw_graph_props_(ctx); break;
+            case PropTab::GraphNode: app_.node_graph_panel_->draw_node_props_(ctx); break;
+            default:                 app_.node_graph_panel_->draw_graph_props_(ctx); break;
+        }
+    }
     else if (app_.active_type_ == AssetType::Material) draw_material_asset_props_(ctx);
     else if (app_.active_type_ == AssetType::Texture) draw_texture_properties_(ctx);
     else if (app_.active_type_ == AssetType::Audio) draw_audio_properties_(ctx);
@@ -161,6 +175,8 @@ std::string PropertiesPanel::active_asset_label_() const {
         case AssetType::Material: return app_.material_.open() ? fs::path(app_.material_.ref).filename().string() : std::string("material");
         case AssetType::Texture: return app_.active_path_.filename().string();
         case AssetType::Audio: return app_.active_path_.filename().string();
+        case AssetType::NodeGraph:
+            return app_.graph_doc_.open() ? fs::path(app_.graph_doc_.ref).filename().string() : std::string();
         case AssetType::UI: return app_.doc_.scene_name();
         default: return "";
     }

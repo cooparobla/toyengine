@@ -78,7 +78,15 @@ struct PublishContext {
  * @brief What one publish produced, so a re-bake can retire it.
  */
 struct PublishedGraph {
-    /// @brief The spawned root, owned by the scene. Null when nothing was published.
+    /**
+     * @brief The spawned root, owned by the scene. Null when nothing was published.
+     *
+     * **Never dereference this without `live_root()`.** The derived state holding it is keyed by
+     * `ProceduralGraph::state_key()` precisely so it survives the editor destroying and
+     * recreating the component -- but that rebuild destroys the published subtree too, and
+     * nothing tells this struct. The pointer is then dangling, and only address COMPARISON
+     * (which `live_root()` and `SceneObject::detach_child()` do) is still defined on it.
+     */
     coopa::scene::SceneObject* root = nullptr;
     /// @brief Every synthetic asset id published, for unloading on teardown.
     std::vector<std::string>   asset_ids;
@@ -87,6 +95,16 @@ struct PublishedGraph {
     std::vector<std::string>   errors;
 
     bool ok() const { return errors.empty(); }
+
+    /**
+     * @brief `root`, but only when it is still one of `owner`'s children. Null otherwise.
+     *
+     * Compares addresses against the owner's live child list and never reads through `root`, so
+     * it is safe on a pointer whose object is gone. The `RuntimeObject` marker every publish
+     * adds is checked too, so a fresh child that happens to reuse the freed address is not
+     * mistaken for the retired subtree.
+     */
+    coopa::scene::SceneObject* live_root(const coopa::scene::SceneObject* owner) const;
 };
 
 /**

@@ -310,11 +310,26 @@ PublishedGraph publish(const BakeResult& result, const PublishContext& ctx,
     return out;
 }
 
+coopa::scene::SceneObject* PublishedGraph::live_root(const coopa::scene::SceneObject* owner) const {
+    if (root == nullptr || owner == nullptr) return nullptr;
+    for (const auto& child : owner->children()) {
+        // Address comparison only: `root` may already be freed, and reading through it is what
+        // this function exists to prevent.
+        if (child.get() != root) continue;
+        const auto* marker = child->get_component<toy::scene::RuntimeObject>();
+        if (marker == nullptr || marker->owner_system != "ProceduralGraph") return nullptr;
+        return child.get();
+    }
+    return nullptr;
+}
+
 void unpublish(const PublishedGraph& published, const PublishContext& ctx) {
-    if (published.root != nullptr && ctx.owner != nullptr) {
+    if (SceneObject* live = published.live_root(ctx.owner)) {
         // detach_child hands back ownership; letting it fall out of scope destroys the subtree,
-        // which is what retiring a previous bake means.
-        std::unique_ptr<SceneObject> retired = ctx.owner->detach_child(published.root);
+        // which is what retiring a previous bake means. Going through live_root() means a
+        // subtree the editor already destroyed in a scene rebuild is simply not there to retire,
+        // rather than a stale pointer handed to detach_child.
+        std::unique_ptr<SceneObject> retired = ctx.owner->detach_child(live);
         (void)retired;
     }
     if (ctx.assets != nullptr) {
